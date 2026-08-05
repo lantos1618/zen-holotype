@@ -1297,6 +1297,54 @@ class Sema:
                     return td
         return cands[0]
 
+    def _follow_import(self, mi, name, want, seen=None):
+        """Walk the re-export chain to the DECLARING module and take the whole
+        candidate set at every hop.
+
+        A folder root is a file of nothing but starred re-exports (`STYLE.md`),
+        so it declares none of the names it publishes: stopping after one hop,
+        or taking one declaration per hop, silently drops every overload but
+        the first — and the prelude is two hops deep, so that would hit every
+        exported overloaded name in the language."""
+        seen = seen if seen is not None else set()
+        if mi is None or mi.dotted in seen:
+            return ()
+        seen.add(mi.dotted)
+        out, ids = [], set()
+
+        def add_all(group):
+            for d in group:
+                if id(d) not in ids:
+                    ids.add(id(d))
+                    out.append(d)
+
+        add_all(mi.fns.get(name, ()) if want is FnDef else mi.type_all.get(name, ()))
+        imp = mi.imports.get(name)
+        if imp:
+            tgt = self.by_dotted.get(imp[0])
+            if tgt is not None and tgt is not mi:
+                add_all(d for d in self._follow_import(tgt, imp[1], want, seen)
+                        if d.exported or not ENFORCE_IMPORT_VISIBILITY_AT_USE)
+        return tuple(out)
+
+    def defs_visible(self, mi, name, want):
+        """Every declaration of `name` this module can see, merged: its own,
+        the re-export chain's, and whatever `modules.py`'s scope resolved.
+
+        Memoized: this is on the hot path of every call site, and the chain it
+        walks is the same one the LSP will ask about per keystroke."""
+        key = ("visible", id(mi), name, want is FnDef)
+        hit = self._memo.get(key, _MISS)
+        if hit is not _MISS:
+            return hit
+        out, ids = [], set()
+        for d in self._follow_import(mi, name, want) + self._from_scope(mi, name, want):
+            if id(d) not in ids:
+                ids.add(id(d))
+                out.append(d)
+        self._memo[key] = tuple(out)
+        return self._memo[key]
+
     def lookup_type(self, mi, name, nargs=None):
         if mi is None:
             return None
@@ -1305,32 +1353,14 @@ class Sema:
             if td is not None:
                 return td
         td = mi.types.get(name)
-        if td is not None:
+        if td is not None and (nargs is None or len(td.tparams) == nargs):
             return td
-        imp = mi.imports.get(name)
-        if imp:
-            tgt = self.by_dotted.get(imp[0])
-            if tgt is not None and tgt is not mi:
-                td = self._pick_arity(tgt.type_all.get(imp[1], ()), nargs)
-                if td is not None and (td.exported or not ENFORCE_IMPORT_VISIBILITY_AT_USE):
-                    return td
-        return self._pick_arity(self._from_scope(mi, name, TypeDef), nargs)
+        return self._pick_arity(self.defs_visible(mi, name, TypeDef), nargs) or td
 
     def lookup_fns(self, mi, name):
         if mi is None:
             return ()
-        got = tuple(mi.fns.get(name, ()))
-        if got:
-            return got
-        imp = mi.imports.get(name)
-        if imp:
-            tgt = self.by_dotted.get(imp[0])
-            if tgt is not None and tgt is not mi:
-                found = tuple(f for f in tgt.fns.get(imp[1], ())
-                              if f.exported or not ENFORCE_IMPORT_VISIBILITY_AT_USE)
-                if found:
-                    return found
-        return self._from_scope(mi, name, FnDef)
+        return self.defs_visible(mi, name, FnDef)
 
     def builtin_named(self, name, args=()):
         # A name the program itself declares beats the floor, always: the floor
@@ -2127,11 +2157,11 @@ class Sema:
             self.coerce(ty, declared, _span(val) or _span(s), val)
             ty = declared
         else:
+            # An unannotated integer binding keeps the literal's own type:
+            # `n ::= 0` counting into a `usize` is not a type error, and
+            # DESIGN.md gives no widening rule that would make it one. Pinning
+            # it to i32 here invents a conversion the language does not have.
             ty = settle(ty) if ty.kind in ("ok", "err", "none") else ty
-            if ty.kind == "intlit":
-                ty = prim("i32")
-            elif ty.kind == "floatlit":
-                ty = prim("f64")
         if nm:
             ctx.scope.put(nm, Sym("value", ty,
                                   mutable=bool(_g(s, "mutable", default=False))))
@@ -2189,6 +2219,10 @@ class Sema:
             if len(got.args) == 1 and len(expect.args) == 2:
                 self.error(span, "%s is not %s: a None never becomes an Err"
                            % (show(got), show(expect)))
+            elif not assignable(got.args[0], expect.args[0]):
+                # blame what actually mismatched: the payload, not the set
+                self.error(span, "expected %s, found %s"
+                           % (show(expect.args[0]), show(got.args[0])))
             elif len(got.args) == 2 and len(expect.args) == 2:
                 self.error(span, "no implicit error conversion: %s is not %s"
                            % (show(got.args[1]), show(expect.args[1])))

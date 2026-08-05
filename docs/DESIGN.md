@@ -445,8 +445,11 @@ Display* = {
     // sealed overload (=): the allocating form, derived from
     // the buffer form, so the two can never diverge. overload
     // resolution picks by what you pass: buffer or allocator
-    toString* = (self: @Self, a: Alloc) Res<String, IoError> {
-        sb ::= a.String().try();
+    // WriteError, not IoError: the buffer forms only fail on the sink,
+    // but this one must also OBTAIN the buffer, and that fails with
+    // AllocError. no From exists, so the union is the honest type
+    toString* = (self: @Self, a: Alloc) Res<String, WriteError> {
+        sb ::= a.String("").try();
         self.toString(sb).try();
         Ok(sb);
     }

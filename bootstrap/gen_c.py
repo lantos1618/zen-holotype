@@ -563,13 +563,30 @@ class Decl:
     def key(self):
         return (self.module, self.owner or "", self.name)
 
+    @property
+    def scope_parts(self):
+        """Where this declaration's body is written, for name lookup and for
+        `@Self`.  For an impl entry that is the TARGET type, not the trait:
+        `Arena.impl(Alloc, { raw = (self: @Self, ..) })` has `@Self` = Arena,
+        and reading `self.state` off the trait would find nothing."""
+        base = tuple(self.module.split(".")) if self.module else ()
+        return base + ((self.owner,) if self.owner else ())
+
 
 def _tparam_names(node):
     return tuple(str(f(tp, "name", "T")) for tp in (f(node, "tparams", ()) or ()))
 
 
 def _is_fn_field(node):
-    """A struct member whose value is a function: DESIGN.md's method form."""
+    """A struct member whose value is a function: DESIGN.md's method form.
+
+    There is one declaration form, so a method arrives three ways: as a
+    `Function` in the struct's `fields`, as a `Field` whose type is a
+    `FnType` (the bodyless `= sig` / `::= sig` forms), or as a `Field` whose
+    default is a `Lambda`.  All three are the same thing.
+    """
+    if kind(node) in ("Function", "Lambda"):
+        return True
     ty = f(node, "ty")
     if ty is not None and kind(ty) == "FnType":
         return True
@@ -616,7 +633,7 @@ class Emitter:
     # -- collection --------------------------------------------------------
 
     def _add_decl(self, decl):
-        self.decls.setdefault((decl.parts[:-1], decl.name), []).append(decl)
+        self.decls.setdefault((decl.scope_parts, decl.name), []).append(decl)
         self.by_key.setdefault(decl.key, []).append(decl)
         self.by_name.setdefault(decl.name, []).append(decl)
 
@@ -632,6 +649,16 @@ class Emitter:
         if k in ("Struct", "Enum", "Alias") and name:
             self._add_decl(Decl(base + (str(name),), node, "type", str(name),
                                 _tparam_names(node), module=dotted))
+            if k == "Enum":
+                # A variant is an exported name of its own: `Res*, Ok*, None*
+                # = std.core.result` imports three names, and `Ok(0)` is
+                # written without qualification everywhere in the stdlib.
+                for v in f(node, "variants", ()) or ():
+                    vname = str(f(v, "name", ""))
+                    self._add_decl(
+                        Decl(base + (str(name), vname), v, "variant", vname,
+                             owner=str(name), module=dotted)
+                    )
             if k == "Struct":
                 for member in f(node, "fields", ()) or ():
                     mname = str(f(member, "name", ""))
@@ -717,9 +744,26 @@ class Emitter:
                     out.append(d)
         return out
 
-    def type_decl(self, name, parts=()):
+    def type_decl(self, name, parts=(), arity=None):
+        """A type declaration, selected by the NUMBER OF TYPE ARGUMENTS.
+
+        `Res<T>` and `Res<T, E>` are both declared in the prelude, so one
+        name legitimately has two declarations differing only in
+        type-parameter count -- and the use site picks between them by how
+        many arguments it wrote, exactly as a call picks an overload by how
+        many it passed.  sema keys on `(name, arity)`; so does this.
+        """
         got = self.lookup(name, parts, "type")
-        return got[0] if got else None
+        if not got:
+            return None
+        if arity is not None:
+            exact = [d for d in got if len(d.tparams) == arity]
+            if exact:
+                return exact[0]
+            alias = [d for d in got if kind(d.node) == "Alias"]
+            if alias:
+                return alias[0]
+        return got[0]
 
     # -- types -------------------------------------------------------------
 
@@ -740,7 +784,7 @@ class Emitter:
                 return ("ptr", args[0] if args else prim("u8"))
             if name == "...":
                 return ("variadic",)
-            decl = self.type_decl(name, parts)
+            decl = self.type_decl(name, parts, len(args))
             if decl is None:
                 if name in PRIMS:
                     return prim(name)
@@ -750,7 +794,7 @@ class Emitter:
                     self.error(node, "unknown type `%s`" % name)
                 return UNKNOWN
             if kind(decl.node) == "Alias":
-                return self.resolve_type(f(decl.node, "target"), subst, decl.parts[:-1])
+                return self.resolve_type(f(decl.node, "target"), subst, decl.scope_parts)
             return ("named", decl.parts, args)
         if k == "Union":
             return union_of(
@@ -792,7 +836,7 @@ class Emitter:
         if k == "Path":
             got = self.lookup(str(f(expr, "name", "")), parts, "value")
             if got:
-                return self.const_int(f(got[0].node, "value"), got[0].parts[:-1])
+                return self.const_int(f(got[0].node, "value"), got[0].scope_parts)
         return None
 
     def builtin_type_const(self, tyname, member):
@@ -861,17 +905,23 @@ class Emitter:
     def _request_named(self, cname, t):
         parts, args = t[1], t[2]
         decl = None
-        for d in self.by_name.get(parts[-1], []):
-            if d.dkind == "type" and d.parts == parts:
+        cands = [
+            d for d in self.by_name.get(parts[-1], [])
+            if d.dkind == "type" and d.parts == parts
+        ]
+        for d in cands:  # arity first: Res<T> and Res<T, E> share a name
+            if len(d.tparams) == len(args):
                 decl = d
                 break
+        if decl is None and cands:
+            decl = cands[0]
         if decl is None:
             self.types[cname] = ("opaque", t)
             self.type_order[cname] = ()
             return
         node = decl.node
         subst = dict(zip(decl.tparams, args))
-        base = decl.parts[:-1]
+        base = decl.scope_parts
         if len(args) != len(decl.tparams):
             self.error(node, "wrong number of type arguments for %s" % parts[-1])
         self.instances += 1
@@ -1032,14 +1082,14 @@ class Emitter:
         A pure function of the program: the count comes from the declaration
         table, never from the order calls were seen in.
         """
-        siblings = [d for d in self.decls.get((decl.parts[:-1], decl.name), [])]
+        siblings = [d for d in self.decls.get((decl.scope_parts, decl.name), [])]
         if len(siblings) < 2:
             return ()
         fnode = self.fn_node(decl.node)
         if fnode is None:
             return ()
         return tuple(
-            self.resolve_type(f(p, "ty"), subst, decl.parts[:-1])
+            self.resolve_type(f(p, "ty"), subst, decl.scope_parts)
             for p in self.params_of(fnode)
         )
 
@@ -1048,7 +1098,7 @@ class Emitter:
     def emit_fn(self, cname, decl, targs):
         fnode = self.fn_node(decl.node)
         subst = dict(zip(decl.tparams, targs))
-        base = decl.parts[:-1]
+        base = decl.scope_parts
         params = list(self.params_of(fnode))
         ret = self.resolve_type(self.ret_of(fnode), subst, base)
         ctx = FnCtx(self, decl, subst, ret)
@@ -1231,11 +1281,11 @@ class Emitter:
         if fnode is None:
             return ""
         cname = sym_fn(decl.parts, self.overload_sig(decl, {}), ())
-        ret = self.resolve_type(self.ret_of(fnode), {}, decl.parts[:-1])
+        ret = self.resolve_type(self.ret_of(fnode), {}, decl.scope_parts)
         nparams = len(self.params_of(fnode))
         args = []
         for p in self.params_of(fnode):
-            pty = self.resolve_type(f(p, "ty"), {}, decl.parts[:-1])
+            pty = self.resolve_type(f(p, "ty"), {}, decl.scope_parts)
             args.append("(%s){0}" % self.ctype(pty) if pty[0] != "prim" else "0")
         body = ["int main(int argc, char **argv) {\n"]
         body.append("    %sargc = argc;\n    %sargv = argv;\n" % (GEN, GEN))
@@ -1279,7 +1329,7 @@ class FnCtx:
     def __init__(self, emitter, decl, subst, ret):
         self.e = emitter
         self.decl = decl
-        self.parts = decl.parts[:-1]
+        self.parts = decl.scope_parts
         self.subst = subst
         self.ret = ret
         self.lines = []
@@ -1341,9 +1391,20 @@ class FnCtx:
             return None
         if kind(block) != "Block":
             return self.expr(block)[0]
-        for stmt in f(block, "stmts", ()) or ():
-            self.stmt(stmt)
+        stmts = list(f(block, "stmts", ()) or ())
         value = f(block, "value")
+        if value is None and want not in (None, UNIT, UNKNOWN) and stmts:
+            # "`0;` closes a `Res<i32, E>` function exactly as `Ok(0);` does"
+            # -- a trailing expression statement IS the block's value when one
+            # is wanted, and is left alone when it evaluates to nothing.
+            last = stmts[-1]
+            if kind(last) == "ExprStmt":
+                _code, ty = self.peek(f(last, "expr"))
+                if ty not in (UNIT, None):
+                    value = f(last, "expr")
+                    stmts = stmts[:-1]
+        for stmt in stmts:
+            self.stmt(stmt)
         if value is None:
             return None
         code, ty = self.expr(value, want)
@@ -1506,6 +1567,9 @@ class FnCtx:
         local = self.find(name)
         if local:
             return local
+        variants = self.e.lookup(name, self.parts, "variant")
+        if variants:
+            return self.build_variant(variants, None, want, node)
         vals = self.e.lookup(name, self.parts, "value")
         if vals:
             d = vals[0]
@@ -1516,7 +1580,7 @@ class FnCtx:
             d = fns[0]
             cn = self.e.request_fn(d, ())
             fnode = self.e.fn_node(d.node)
-            ret = self.e.resolve_type(self.e.ret_of(fnode), {}, d.parts[:-1])
+            ret = self.e.resolve_type(self.e.ret_of(fnode), {}, d.scope_parts)
             return (cn, ("fn", ret, ()))
         tys = self.e.lookup(name, self.parts, "type")
         if tys:
@@ -1767,6 +1831,11 @@ class FnCtx:
             built = self.try_construct(name, node, args, targs, want)
             if built is not None:
                 return built
+            variants = self.e.lookup(name, self.parts, "variant")
+            if variants:
+                payload = self.arg_nodes(args)
+                return self.build_variant(variants, payload[0] if payload else None,
+                                          want, node)
             got = self.call_named(name, node, args, targs, want)
             if got is not None:
                 return got
@@ -1960,6 +2029,56 @@ class FnCtx:
                 by_arity.append(d)
         return (by_arity or cands)[0]
 
+    def build_variant(self, decls, payload_node, want, node):
+        """`Ok(v)` / `None` / `Err(e)` written without their enum.
+
+        The instance comes from what is expected -- a return type, a
+        parameter, a field -- and otherwise from the payload, which is the
+        only other thing that can fix a type parameter.  Nothing here guesses
+        an error type: a `None` never becomes an `Err`.
+        """
+        decl = decls[0]
+        enum_parts = decl.scope_parts
+        vname = decl.name
+        for cand in decls:  # prefer the arity the expected type asks for
+            if want is not None and want[0] == "named" and want[1] == cand.parts[:-1]:
+                decl = cand
+                enum_parts = cand.parts[:-1]
+                break
+        ty = None
+        if want is not None and want[0] == "named" and want[1] == enum_parts:
+            ty = want
+        edecl = None
+        for d in self.e.by_name.get(enum_parts[-1], []):
+            if d.dkind == "type" and d.parts == enum_parts:
+                if ty is not None and len(d.tparams) != len(ty[2]):
+                    continue
+                edecl = d
+                break
+        if edecl is None:
+            self.e.error(node, "unresolved variant `%s`" % vname)
+            return ("0", UNKNOWN)
+        payload_ty = None
+        if ty is not None:
+            info = self.e.enum_info(ty)
+            payload_ty = dict(info[2]).get(vname) if info else None
+        code = None
+        if payload_node is not None:
+            code, aty = self.expr(payload_node, payload_ty)
+            if ty is None:
+                # infer the enum's arguments from the payload we were given
+                found = {}
+                for v in f(edecl.node, "variants", ()) or ():
+                    if str(f(v, "name", "")) == vname:
+                        self.unify(f(v, "payload"), aty, found)
+                ty = ("named", enum_parts,
+                      tuple(found.get(tp, UNKNOWN) for tp in edecl.tparams))
+        if ty is None:
+            ty = ("named", enum_parts, tuple(UNKNOWN for _ in edecl.tparams))
+        if any(a == UNKNOWN for a in ty[2]):
+            self.e.error(node, "cannot infer the type of `%s` here" % vname)
+        return (self.make_variant(ty, vname, code), ty)
+
     def construct_variant(self, tdecl, vname, node, args, targs, want):
         targ_tys = tuple(self.e.resolve_type(t, self.subst, self.parts) for t in targs)
         if not targ_tys and tdecl.tparams and want is not None and want[0] == "named":
@@ -2010,13 +2129,13 @@ class FnCtx:
         for i, value in enumerate(values):
             idx = i + (1 if receiver is not None else 0)
             pty = (
-                self.e.resolve_type(f(params[idx], "ty"), subst, decl.parts[:-1])
+                self.e.resolve_type(f(params[idx], "ty"), subst, decl.scope_parts)
                 if idx < len(params)
                 else None
             )
             codes.append(self.expr(value, pty)[0])
         cname = self.e.request_fn(decl, targ_tys)
-        ret = self.e.resolve_type(self.e.ret_of(fnode), subst, decl.parts[:-1])
+        ret = self.e.resolve_type(self.e.ret_of(fnode), subst, decl.scope_parts)
         return ("%s(%s)" % (cname, ", ".join(codes)), ret)
 
     def infer_fn_targs(self, decl, fnode, values, receiver):

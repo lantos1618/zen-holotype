@@ -306,14 +306,19 @@ class Toolchain:
 
     std_root: Path | None = None  # every program is compiled WITH the prelude
 
-    def command(self, source: Path, out_c: Path) -> list[str]:
+    def command(self, source: Path, out_c: Path, root: Path) -> list[str]:
         # A test is a program, and a program stands on std: `Res`, `Ok`, `Env`
         # and `println` are prelude names. Compiling a corpus file alone would
         # fail on every one of them and say nothing about the test.
-        extra = [str(self.std_root)] if self.std_root and self.std_root.is_dir() else []
+        #
+        # `--root` is not optional. The compilation root defaults to the
+        # inputs' common ancestor, so a test under /tmp plus a std under
+        # /home/... makes the root `/` and the compiler walks the filesystem.
         if self.style == "bootstrap":
-            return [*self.emit_argv, str(source), *extra, "--emit-c", "-o", str(out_c)]
-        return [*self.emit_argv, "build", "--emit-c", "-o", str(out_c), str(source), *extra]
+            return [*self.emit_argv, str(source), "--root", str(root),
+                    "--emit-c", "-o", str(out_c)]
+        return [*self.emit_argv, "build", "--root", str(root),
+                "--emit-c", "-o", str(out_c), str(source)]
 
 
 def make_toolchain(args: argparse.Namespace) -> Toolchain:
@@ -471,12 +476,39 @@ def clip(text: str, lines: int = 30) -> str:
     return "\n".join(parts[:lines] + [f"... {len(parts) - lines} more line(s)"])
 
 
+def stage(test: Test, tool: Toolchain, work: Path) -> Path:
+    """Build a self-contained source tree for one test, and return its root.
+
+    A test is a program, and a program stands on std — `Res`, `Ok`, `Env` and
+    `println` are prelude names. So the prelude is staged beside the test and
+    the pair is compiled as one tree.
+
+    Staging rather than passing two paths is not a convenience: the compilation
+    root defaults to the inputs' common ancestor, so a test under /tmp plus a
+    std under /home/... roots at `/` and the compiler walks the filesystem.
+    """
+    root = work / "src"
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    if test.source.is_dir():
+        shutil.copytree(test.source, root, dirs_exist_ok=True)
+    else:
+        shutil.copy2(test.source, root / test.source.name)
+
+    if tool.std_root and tool.std_root.is_dir():
+        shutil.copytree(tool.std_root, root / "std", dirs_exist_ok=True)
+    return root
+
+
 def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace) -> Result:
     reasons: list[str] = []
     detail: list[str] = []
 
     out_c = work / "out.c"
-    emit = run_process(tool.command(test.source, out_c), args.timeout)
+    root = stage(test, tool, work)
+    emit = run_process(tool.command(root, out_c, root), args.timeout)
     if emit.timed_out:
         return Result(test, False, [f"the compiler timed out after {args.timeout}s"])
     if emit.code != 0 or not out_c.is_file():
@@ -523,7 +555,8 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
 
 def run_must_fail(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace) -> Result:
     out_c = work / "out.c"
-    emit = run_process(tool.command(test.source, out_c), args.timeout)
+    root = stage(test, tool, work)
+    emit = run_process(tool.command(root, out_c, root), args.timeout)
     text = diagnostics(emit)
 
     if emit.timed_out:

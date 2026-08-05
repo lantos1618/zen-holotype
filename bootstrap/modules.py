@@ -261,13 +261,36 @@ class Entity:
         return "%s::%s" % (self.module, self.name)
 
     @property
+    def identity(self) -> tuple:
+        """*Which declaration* this is — not which name it declares.
+
+        A name does not identify a declaration: `std.core.loop` declares seven
+        `loop`s and `std.core.result` declares `Res<T>` and `Res<T, E>`, and
+        overloading resolves those on parameter types and arity, later. The
+        place it is written does identify it, so the span is the identity —
+        and two paths to the *same* declaration (`diamond_reexport`) still
+        collapse to one, which is the only collapsing anything here may do.
+        """
+        span = self.span
+        where = ()
+        if span is not None:
+            where = (getattr(span, "file", ""), getattr(span, "start", ()),
+                     getattr(span, "end", ()))
+        return (self.module, self.owner or "", self.kind, self.name, where)
+
+    @property
     def sort_key(self) -> tuple:
-        return (self.module, self.owner or "", self.kind, self.name)
+        return self.identity
 
 
 @dataclass(frozen=True)
 class Binding:
-    """A name as seen from inside one module."""
+    """A name as seen from inside one module, bound to ONE declaration.
+
+    An overload set is a *tuple of bindings* under one name: `lookup` and
+    `scope` hand back every candidate, and picking among them is overload
+    resolution's job, never the graph's.
+    """
 
     name: str
     entity: Entity
@@ -278,8 +301,7 @@ class Binding:
 
     @property
     def key(self) -> tuple:
-        return (self.entity.module, self.entity.owner or "", self.entity.kind,
-                self.entity.name)
+        return self.entity.identity
 
 
 @dataclass(frozen=True)
@@ -710,77 +732,92 @@ def _import_edge(info: ModuleInfo, node: Any, index: dict) -> ImportEdge:
 # --------------------------------------------------------------------------
 
 class _Resolver:
+    """Export tables, solved to a fixpoint rather than by recursion.
+
+    A re-export chain is usually a DAG and one pass down it would do. But
+    `std.core.display` needs `String` from `std.text`, and `std.text` wants
+    `Display` for `str` — a real cycle in the standard library, and recursion
+    through it can only guess an answer and then cache the guess. Re-export
+    only ever *adds* names, so iterating to a fixpoint is monotone, terminates
+    in the length of the longest chain, and needs no guess.
+    """
+
     def __init__(self, graph: Graph) -> None:
         self.graph = graph
-        self._exports: dict = {}
-        self._in_progress: list = []
+        self._exports: dict = {d: {} for d in graph.order}
 
-    # -- exports ----------------------------------------------------------
+    def solve(self) -> None:
+        while True:
+            changed = False
+            for dotted in self.graph.order:
+                table = self._compute(dotted)
+                if _signature(table) != _signature(self._exports[dotted]):
+                    self._exports[dotted] = table
+                    changed = True
+            if not changed:
+                return
 
     def exports(self, dotted: str) -> dict:
         """`name -> tuple[Binding]` that cross this module's boundary."""
-        cached = self._exports.get(dotted)
-        if cached is not None:
-            return cached
-        if dotted in self._in_progress:
-            return {}  # a cycle: reported separately, and broken here
+        return self._exports.get(dotted, {})
+
+    def _compute(self, dotted: str) -> dict:
         info = self.graph.modules.get(dotted)
         if info is None:
             return {}
+        table: dict = {}
 
-        self._in_progress.append(dotted)
-        try:
-            table: dict = {}
+        for name in sorted(info.decls):
+            for entity in info.decls[name]:
+                if not entity.exported:
+                    continue
+                self._bind(table, Binding(
+                    name=name,
+                    entity=entity,
+                    origin=dotted,
+                    exported=True,
+                    span=entity.span,
+                    source="local",
+                ))
 
-            for name in sorted(info.decls):
-                for entity in info.decls[name]:
-                    if not entity.exported:
-                        continue
+        for edge in info.imports:
+            if edge.target is None or edge.target == dotted:
+                continue
+            upstream = self._exports.get(edge.target, {})
+            for imported in edge.names:
+                if not imported.exported:
+                    continue  # no star: local to this module, never re-exported
+                for binding in upstream.get(imported.name, ()):
                     self._bind(table, Binding(
-                        name=name,
-                        entity=entity,
-                        origin=dotted,
+                        name=imported.name,
+                        entity=binding.entity,
+                        origin=edge.target,
                         exported=True,
-                        span=entity.span,
-                        source="local",
+                        span=imported.span,
+                        source="import",
                     ))
 
-            for edge in info.imports:
-                if edge.target is None or edge.target == dotted:
-                    continue
-                upstream = self.exports(edge.target)
-                for imported in edge.names:
-                    if not imported.exported:
-                        continue  # no star: local to this module, never re-exported
-                    for binding in upstream.get(imported.name, ()):
-                        self._bind(table, Binding(
-                            name=imported.name,
-                            entity=binding.entity,
-                            origin=edge.target,
-                            exported=True,
-                            span=imported.span,
-                            source="import",
-                        ))
-
-            result = {k: tuple(v) for k, v in sorted(table.items())}
-            self._exports[dotted] = result
-            return result
-        finally:
-            self._in_progress.pop()
+        return {k: tuple(v) for k, v in sorted(table.items())}
 
     @staticmethod
     def _bind(table: dict, binding: Binding) -> None:
-        """Add a binding, collapsing the diamond.
+        """Add a binding, collapsing the diamond and nothing else.
 
-        `alpha` and `beta` both re-export `token`'s `Token`; one declaration
+        `alpha` and `beta` both re-export `token`'s `Token`: one declaration
         arrived twice and must stay one name. Two *different* declarations with
-        the same name coexist — that is the overload set.
+        the same name are an overload set and both survive — every hop merges,
+        none of them picks.
         """
         bucket = table.setdefault(binding.name, [])
         for existing in bucket:
             if existing.key == binding.key:
                 return
         bucket.append(binding)
+
+
+def _signature(table: dict) -> tuple:
+    """Which declarations a table holds — cheap to compare, no AST equality."""
+    return tuple((name, tuple(b.key for b in table[name])) for name in sorted(table))
 
 
 def _module_scope(graph: Graph, resolver: _Resolver, info: ModuleInfo,
@@ -873,6 +910,46 @@ def _not_exported(imported: ImportedName, target: ModuleInfo) -> Any:
 # import cycles
 # --------------------------------------------------------------------------
 
+def _init_edges(graph: Graph) -> dict:
+    """`module -> modules whose top-level constants it needs, to initialise`.
+
+    An *import* cycle is not a problem a whole-program compiler has: one merged
+    graph, and a type or a function has no initialisation order to get wrong.
+    `std.core.display` needing `String` from `std.text` while `std.text` wants
+    `Display` for `str` is a real cycle in the standard library and a legal
+    one.
+
+    A cycle in top-level *constants* is a different thing and stays an error:
+    `seed_even = seed_odd + 1` beside `seed_odd = seed_even + 1` has no order
+    that computes both, whatever the compiler does with the modules.
+    """
+    edges: dict = {}
+    for dotted in graph.order:
+        info = graph.modules[dotted]
+        out: list = []
+        for name in sorted(info.decls):
+            for entity in info.decls[name]:
+                if entity.kind != CONST:
+                    continue
+                value = getattr(entity.node, "value", None)
+                if not _is_node(value):
+                    continue
+                for ref in _walk(value):
+                    if _kind(ref) != "Path":
+                        continue
+                    rname = getattr(ref, "name", None)
+                    if not isinstance(rname, str):
+                        continue
+                    for binding in info.scope.get(rname, ()):
+                        other = binding.entity
+                        if other.kind != CONST or other.module == dotted:
+                            continue
+                        if other.module not in out:
+                            out.append(other.module)
+        edges[dotted] = tuple(sorted(out))
+    return edges
+
+
 def _cycles(graph: Graph, diags: list) -> None:
     """Report each cyclic component once, from its smallest member.
 
@@ -880,7 +957,7 @@ def _cycles(graph: Graph, diags: list) -> None:
     the same cycle reads `even -> odd -> even` whichever module the walk
     happened to enter it from.
     """
-    adjacency = {d: graph.modules[d].deps for d in graph.order}
+    adjacency = _init_edges(graph)
 
     index: dict = {}
     low: dict = {}
@@ -977,22 +1054,28 @@ def _shortest_cycle(adjacency: dict, start: str, members: list) -> Optional[list
 
 
 def _cycle_positions(graph: Graph, path: list) -> tuple:
-    """The span of the first edge, and every other edge as a note."""
+    """The span of the first edge, and every other edge as a note.
+
+    The edge is a value dependency, but it is *written* as the import that
+    brought the name in, so that is where the reader is sent.
+    """
     spans = []
     for i in range(len(path) - 1):
         info = graph.modules.get(path[i])
-        if info is None:
+        nxt = graph.modules.get(path[i + 1])
+        if info is None or nxt is None:
             continue
+        where = None
         for edge in info.imports:
             if edge.target == path[i + 1]:
-                spans.append((
-                    edge.path_span or edge.span,
-                    "%s imports %s here" % (info.name, graph.modules[path[i + 1]].name),
-                ))
+                where = edge.path_span or edge.span
                 break
-    if not spans:
+        if where is None:
+            where = getattr(info.node, "span", None)
+        spans.append((where, "%s needs %s here" % (info.name, nxt.name)))
+    if not spans or spans[0][0] is None:
         return (None, ())
-    return (spans[0][0], tuple(spans[1:]))
+    return (spans[0][0], tuple(s for s in spans[1:] if s[0] is not None))
 
 
 # --------------------------------------------------------------------------
@@ -1116,24 +1199,33 @@ def _merge(graph: Graph) -> None:
     members: dict = {}
     functions: dict = {}
 
+    def keep(table: dict, key: str, entity: Entity) -> None:
+        bucket = table.setdefault(key, [])
+        if not any(e.identity == entity.identity for e in bucket):
+            bucket.append(entity)
+
     for dotted in graph.order:
         info = graph.modules[dotted]
         for name in sorted(info.decls):
             for entity in info.decls[name]:
-                entities[entity.qualified] = entity
+                keep(entities, entity.qualified, entity)
                 if entity.kind == FN:
-                    functions.setdefault(name, []).append(entity)
+                    keep(functions, name, entity)
                 if entity.kind == VARIANT:
-                    members.setdefault(name, []).append(entity)
+                    keep(members, name, entity)
         for type_name in sorted(info.types):
             for member_name in sorted(info.types[type_name]):
                 for entity in info.types[type_name][member_name]:
-                    entities[entity.qualified] = entity
+                    keep(entities, entity.qualified, entity)
                     if entity.kind == VARIANT:
                         continue  # already added above, from decls
-                    members.setdefault(member_name, []).append(entity)
+                    keep(members, member_name, entity)
 
-    graph.entities = {k: entities[k] for k in sorted(entities)}
+    # A qualified name is a *set* too: `std.core.result::Res` is `Res<T>` and
+    # `Res<T, E>`, and arity is what tells them apart.
+    graph.entities = {
+        k: tuple(sorted(entities[k], key=lambda e: e.sort_key)) for k in sorted(entities)
+    }
     graph.members = {
         k: tuple(sorted(v, key=lambda e: e.sort_key)) for k, v in sorted(members.items())
     }
@@ -1258,12 +1350,13 @@ def build(
     _merge(graph)
 
     resolver = _Resolver(graph)
+    resolver.solve()
     for dotted in graph.order:
         graph.modules[dotted].exports = resolver.exports(dotted)
     for dotted in graph.order:
         _module_scope(graph, resolver, graph.modules[dotted], diags)
 
-    _cycles(graph, diags)
+    _cycles(graph, diags)  # after scopes: an init edge is a resolved name
 
     for dotted in graph.order:
         _check_accesses(graph, graph.modules[dotted], diags)
