@@ -29,12 +29,13 @@ from typing import Sequence
 
 TESTS_DIR = Path(__file__).resolve().parent
 
-KNOWN_SUFFIXES = {".zen", ".expected", ".exit", ".stderr"}
+KNOWN_SUFFIXES = {".zen", ".expected", ".exit", ".stderr", ".count"}
 POSITION = re.compile(r"^(?:(?P<path>[^\s:]+):)?(?P<line>\d+):(?P<col>\d+)$")
 MERGED = re.compile(r"^(?P<path>[^\s:]+):(?P<line>\d+):(?P<col>\d+):\s*\S")
 
 ERROR = "ERROR"
 WARN = "WARN"
+INFO = "INFO"
 
 # rule id -> (severity, one-line statement of the rule)
 RULES: dict[str, tuple[str, str]] = {
@@ -54,7 +55,7 @@ RULES: dict[str, tuple[str, str]] = {
     "mf-zero-position": (ERROR, "a position with a 0 line or column; both are 1-based"),
     "mf-blank-line": (WARN, "a blank line inside .expected"),
     "mf-aux-file": (ERROR, "a must-fail test carries .exit/.stderr, which the format does not define"),
-    "mf-bare-position": (WARN, "position omits the path; TESTING.md writes path:line:col"),
+    "mf-bare-position": (INFO, "bare line:col, resolved against the entry file; TESTING.md allows this for single-file tests"),
     "corpus-exit-zero": (WARN, ".exit holds 0; TESTING.md says omit the file when it is 0"),
     "corpus-exit-bad": (ERROR, ".exit is not a single integer in 0..255"),
     "corpus-expected-crlf": (ERROR, ".expected contains a CR; stdout is compared byte for byte"),
@@ -258,11 +259,11 @@ class Linter:
                 f"rename {entry.name} to main.zen "
                 "(TESTING.md: \"the entry point is main.zen\")",
             )
-        if expected.name != ".expected":
+        if expected.name not in ("main.expected", ".expected"):
             self.flag(
                 "dir-expected-name", expected, suite,
                 f"expectation is {expected.name}",
-                "rename to .expected at the directory root",
+                "rename to main.expected, matching the main.zen it sits beside",
             )
 
         for sub in sorted(p for p in d.iterdir() if p.is_dir()):
@@ -275,7 +276,7 @@ class Linter:
 
         for aux in d.iterdir():
             if aux.is_file() and aux.suffix not in KNOWN_SUFFIXES and aux.name not in (
-                ".expected", ".exit", ".stderr"
+                ".expected", ".exit", ".stderr", ".count"
             ):
                 self.flag("foreign-file", aux, suite, f"{aux.name} at a test root",
                           "remove it or have TESTING.md name it")

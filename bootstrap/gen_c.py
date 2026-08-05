@@ -2362,6 +2362,10 @@ PRELUDE_TYPES = """\
 
 typedef struct zg_str { const unsigned char *data; size_t len; } zg_str;
 
+/* A trait value is a fat value (DESIGN.md): a receiver plus function
+ * pointers, copied by value, never boxed and never allocated. */
+typedef struct zg_closure { void *fn; void *env; } zg_closure;
+
 static int zg_argc;
 static char **zg_argv;
 
@@ -2447,12 +2451,12 @@ def _checked_helpers():
             add_slow = (
                 "    if ((b > 0 && a > %s - b) || (b < 0 && a < %s - b))\n"
                 "        zg_trap(file, line, col, \"integer overflow\");\n"
-                "    return %s((u%s)a + (u%s)b);\n" % (cmax, cmin, cast, ct[:-2] + "_t", ct[:-2] + "_t")
+                "    return %s((%s)a + (%s)b);\n" % (cmax, cmin, cast, uct, uct)
             )
             sub_slow = (
                 "    if ((b < 0 && a > %s + b) || (b > 0 && a < %s + b))\n"
                 "        zg_trap(file, line, col, \"integer overflow\");\n"
-                "    return %s((u%s)a - (u%s)b);\n" % (cmax, cmin, cast, ct[:-2] + "_t", ct[:-2] + "_t")
+                "    return %s((%s)a - (%s)b);\n" % (cmax, cmin, cast, uct, uct)
             )
             mul_slow = (
                 "    if (a > 0) {\n"
@@ -2462,8 +2466,8 @@ def _checked_helpers():
                 "        if (b > 0) { if (a < %s / b) zg_trap(file, line, col, \"integer overflow\"); }\n"
                 "        else { if (b < %s / a) zg_trap(file, line, col, \"integer overflow\"); }\n"
                 "    }\n"
-                "    return %s((u%s)a * (u%s)b);\n"
-                % (cmax, cmin, cmin, cmax, cast, ct[:-2] + "_t", ct[:-2] + "_t")
+                "    return %s((%s)a * (%s)b);\n"
+                % (cmax, cmin, cmin, cmax, cast, uct, uct)
             )
         else:
             add_slow = (
@@ -2512,11 +2516,10 @@ def _checked_helpers():
 
         wsig = "static %s zg_%%s_%s(%s a, %s b)" % (ct, name, ct, ct)
         if signed:
-            u = "u" + ct
             for op, sym in (("wadd", "+"), ("wsub", "-"), ("wmul", "*")):
                 out["%s_%s" % (op, name)] = (
                     (wsig % op)
-                    + " {\n    return %s((%s)a %s (%s)b);\n}\n\n" % (cast, u, sym, u)
+                    + " {\n    return %s((%s)a %s (%s)b);\n}\n\n" % (cast, uct, sym, uct)
                 )
         else:
             for op, sym in (("wadd", "+"), ("wsub", "-"), ("wmul", "*")):
