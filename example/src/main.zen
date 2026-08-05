@@ -1,0 +1,140 @@
+// example/src/main.zen
+//
+// the whole language in one program. every construct here is
+// specified in docs/DESIGN.md; nothing is a preview
+
+json = pkg.json
+sodium = pkg.libsodium
+
+Circle = {
+    radius: f64,
+}
+
+// ufcs: a free function whose first parameter is Circle, so it
+// travels with Circle when imported and calls like a method
+area* = (c: Circle) f64 {
+    c.radius * c.radius * 3.14159
+}
+
+Rect = {
+    width: f64,
+    height: f64,
+}
+
+// sum types use `|`. payload variants carry a type
+Shape = Circle(Circle) | Rect(Rect) | Unit
+
+Shape.impl(Display, {
+    // the outlined toString: pretty output for {}. dump stays
+    // available for free alongside it
+    toString ::= (self: @Self, sb :: String) Res<(), IoError> {
+        self.match({
+            Circle(circle) => sb.add("circle: {}", circle.radius),
+            Rect(rect) => sb.add("rect: {} {}", rect.width, rect.height),
+            Unit => sb.add("unit"),
+        });
+    }
+})
+
+// what this program expects: a schema, not string fishing. a
+// field with a default is optional; no default and no Res means
+// required, and a missing one errors by name before main runs
+Opts = {
+    name: Res<str>,
+    verbose :: bool = false,
+}
+
+Error = AllocError | IoError | ArgError
+
+// main receives the capability root. it is NOT named self: main
+// is not a method on Env. println finds the Env by type
+main = (env: Env) Res<i32, Error> {
+    opts = env.args<Opts>().try();
+
+    name = opts.name.match({
+        Ok(n) => n,
+        None  => "world",
+    });
+
+    opts.verbose.then(() { println("hello, {}", name) });
+
+    // arena: page authority comes from Env, nothing ambient. the
+    // Arena is Drop, so everything it handed out frees at once
+    // when it leaves scope. the Alloc handle it gives is copied
+    // freely, because a handle is not a Drop value
+    alloc ::= env.mem.alloc();
+
+    // ad-hoc cleanup: registered on THIS block, LIFO, before drops
+    @scope.defer(() { println("goodbye") });
+
+    shapes ::= alloc.Vec<Shape>();
+    shapes.add(Shape.Circle(Circle(radius: 1.0))).try();
+    shapes.add(Shape.Rect(Rect(width: 2.0, height: 3.0))).try();
+    shapes.add(Shape.Unit).try();
+
+    // {} routes through toString
+    shapes.loop((h, s) {
+        alloc.String("{}", s).match({
+            Ok(text)  => println(text),
+            Err(e)    => println("error: {}", e),
+        });
+    });
+
+    // fold: 0 seeds acc, the loop evaluates to the final acc.
+    // stack array, by-value acc, capture-free body — this
+    // compiles to a plain for-loop and allocates nothing
+    sum = [0, 1, 2].loop(0, (h, i, v, acc: i32) {
+        acc + v
+    });
+    println("sum {}", sum);
+
+    // arithmetic traps on overflow. want wrapping? say so
+    wrapped = i32.MAX +% 1;
+    println("wrapped {}", wrapped);
+
+    // actors: foo IS the address, calling a behavior IS sending.
+    // each call returns immediately; the prints happen later, on
+    // foo's turn, in send order
+    foo = env.spawn(Printer());
+    Range(0, 3).loop((h, v) {
+        foo.say("hello world!");
+    });
+    println("sent all three");
+
+    // request/response without promises: send the collector's
+    // address, the reply lands in its mailbox as a message
+    bar = env.spawn(Collector());
+    foo.compute(41, bar);
+
+    foo.stop();
+
+    Ok(0);
+    // scope ends: defers run, then drops in reverse order, the
+    // arena last, freeing every String it handed out
+}
+
+Printer = {}
+
+Printer.impl(Actor, {
+    started ::= (self :: @Self, ctx: Context) () { println("printer started") }
+    stopped ::= (self :: @Self, ctx: Context) () { println("printer stopped") }
+
+    // a behavior. its parameters are sendable by definition, so
+    // nothing marks them: the constraint is on the argument, and
+    // it is checked at the send
+    say = (self :: @Self, ctx: Context, data: str) () {
+        println("printer got {}", data)
+    }
+
+    compute = (self :: @Self, ctx: Context, n: i32, reply: Ref<Collector>) () {
+        reply.result(n + 1);
+    }
+})
+
+Collector = {}
+
+Collector.impl(Actor, {
+    result = (self :: @Self, ctx: Context, v: i32) () {
+        println("collector got {}", v)
+    }
+})

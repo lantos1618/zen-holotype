@@ -425,7 +425,7 @@ Display* = {
         sb.add("{} {", @meta(self: @Self).name);
         @meta(self: @Self).fields.loop((h, field) {
             sb.add(" {}: {},", field.name, field.value);
-        })
+        });
         sb.add(" }");
         Ok(());
     }
@@ -628,14 +628,14 @@ Vec*<T> = {
         (i < self.len).match({
             true => Ok(self.data.read(i)),
             false => None,
-        })
+        });
     }
 
     grow = (self :: @Self) Res<(), AllocError> {
         cap = (self.capacity == 0).match({
             true => 8,
             false => self.capacity * 2,
-        })
+        });
         self.data = self.alloc.realloc(self.data, cap).try();
         self.capacity = cap;
         Ok(());
@@ -665,8 +665,8 @@ Map*<K: Eq + Hash, V> = {
     get* = (self: @Self, key: K) Res<V> {
         h = key.hash(Hasher());
         self.entries.loop((hd, e) {
-            ((e.hash == h) && e.key.eq(key)).then(() { hd.break(e.value) })
-        })
+            ((e.hash == h) && e.key.eq(key)).then(() { hd.break(e.value) });
+        });
     }
 }
 
@@ -953,7 +953,7 @@ build = (b :: Builder) Res<(), BuildError> {
         Macos => ["/opt/homebrew/lib"],
         Linux => ["/usr/local/lib"],
         Windows => ["C:/sodium/lib"],
-    })
+    });
 
     json = b.add("json", json_pkg);
 
@@ -961,19 +961,19 @@ build = (b :: Builder) Res<(), BuildError> {
         src: Path("src/extern.c"),
         libs: ["sodium"],
         paths: lib_paths,
-    })
+    });
 
     extern_add = b.extern("extern_add", {
         src: Path("src/extern_add.c"),
         libs: ["add"],
         paths: lib_paths,
-    })
+    });
 
     // per-os executable suffix
     ext = b.os.match({
         Windows => ".exe",
         _ => "",
-    })
+    });
 
     // deps are wired per target, swift-style: main.zen may only
     // import from pkg what this list declares. out defaults to
@@ -982,7 +982,7 @@ build = (b :: Builder) Res<(), BuildError> {
         src: Path("src/main.zen"),
         deps: [json, libsodium, extern_add],
         out: Path("build/{}-{}/example_zen{}", b.os, b.arch, ext),
-    })
+    });
 
     // test discovery is just code, not compiler magic: walk the
     // PARSED module tree, keep every function whose single
@@ -991,21 +991,21 @@ build = (b :: Builder) Res<(), BuildError> {
     tests ::= b.alloc.Vec<Function>();
     b.module(Path("src")).functions.loop((h, f) {
         (f.params.len == 1 && f.params.get(0).try().type == Tester)
-            .then(() { tests.add(f).try() })
-    })
+            .then(() { tests.add(f).try() });
+    });
 
     b.test("example_zen_tests", {
         tests: tests,
         deps: [json, libsodium, extern_add],
-    })
+    });
 
     // benches: same walk, different filter. this is the "change
     // the filter, change what a test is" promise, kept
     benches ::= b.alloc.Vec<Function>();
     b.module(Path("src")).functions.loop((h, f) {
         (f.params.len == 1 && f.params.get(0).try().type == Bencher)
-            .then(() { benches.add(f).try() })
-    })
+            .then(() { benches.add(f).try() });
+    });
 
     // budgets live HERE, in code, reviewed like code. allocs_op
     // and bytes_op are deterministic, so over budget FAILS the
@@ -1015,7 +1015,7 @@ build = (b :: Builder) Res<(), BuildError> {
         budgets: [
             Budget(name: "vec_add", ns_op: 40, allocs_op: 1, bytes_op: 64),
         ],
-    })
+    });
 
     // and the build budgets itself: per-target compile times are
     // tracked, so a build never quietly grows to 20 minutes
@@ -1050,7 +1050,7 @@ vec_add* = (bn: Bencher) Res<(), TestError> {
     bn.iter(() {
         v ::= bn.alloc.Vec<i32>();
         v.add(1);
-    })
+    });
     Ok(());
 }
 ```
@@ -1099,7 +1099,7 @@ Shape.impl(Display, {
             Circle(circle) => sb.add("circle: {}", circle.radius),
             Rect(rect) => sb.add("rect: {} {}", rect.width, rect.height),
             Unit => sb.add("unit"),
-        })
+        });
     }
 })
 
@@ -1107,21 +1107,21 @@ DumpAst = (sb :: String, n: Enum) Res<(), IoError> {
     sb.add("Enum {}", n.name);
     n.fields.loop((h, field) {
         sb.add("{}: {}", field.name, field.value);
-    })
+    });
 }
 
 DumpAst = (sb :: String, n: Struct) Res<(), IoError> {
     sb.add("Struct {}", n.name);
     n.fields.loop((h, field) {
         sb.add("{}: {}", field.name, field.value);
-    })
+    });
 }
 
 DumpAst = (sb :: String, n: Function) Res<(), IoError> {
     sb.add("Function {}", n.name);
     n.params.loop((h, param) {
         sb.add("{}: {}", param.name, param.value);
-    })
+    });
 }
 
 DumpAst = (sb :: String, n: Other) Res<(), IoError> {
@@ -1139,7 +1139,7 @@ DumpAst<T> = (sb :: String, n: T) Res<(), IoError> {
         Struct(s) => DumpAst(sb, s),
         Function(f) => DumpAst(sb, f),
         Other(o) => DumpAst(sb, o),
-    })
+    });
 }
 
 // @meta BUILDS as well as reads: this returns a new ast node.
@@ -1211,7 +1211,7 @@ main = (env: Env) Res<i32, Error> {
     name = opts.name.match({
         Ok(n) => n,
         None  => "world",
-    })
+    });
 
     opts.verbose.then(() { println("hello, {}", name) });
 
@@ -1247,7 +1247,7 @@ main = (env: Env) Res<i32, Error> {
     foo = env.spawn(Foo());
     Range(0, 5).loop((h, v) {
         foo.receive_msg("hello world!");
-    })
+    });
     println("sent all five");   // may print BEFORE any receive
 
     // request/response without promises: send our collector's
@@ -1271,7 +1271,7 @@ main = (env: Env) Res<i32, Error> {
     t.join().match({
         Ok(v)  => println("thread says {}", v),
         Err(e) => println("thread failed: {}", e),
-    })
+    });
 
     // fixed arrays: [type, count], comptime size, stack, no alloc.
     // indexing is bounds-checked and traps — no Res here
@@ -1294,14 +1294,14 @@ main = (env: Env) Res<i32, Error> {
     // compiles to a plain for-loop, zero allocations
     sum = [0, 1, 2].loop(0, (h, i, v, acc: i32) {
         acc + v
-    })
+    });
 
     // {} routes through toString, or dump if a type has none;
     // sum.toString(alloc) is the same thing via the sealed overload
     alloc.String("{}", sum).match({
         Ok(s)  => println(s),
         Err(e) => println("error: {}", e),
-    })
+    });
 
 
     const_val_implicit = 1;
@@ -1319,7 +1319,7 @@ main = (env: Env) Res<i32, Error> {
     label = (const_val_implicit == 0).match({
         true => "zero",
         false => "nonzero",
-    })
+    });
 
     // want one side only? say it. .then cannot be mistaken for a
     // forgotten arm, because it is a different word

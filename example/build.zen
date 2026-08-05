@@ -1,0 +1,87 @@
+// example/build.zen
+// build files are zen programs; b is the Builder from std.build.
+// b is `::` because b.add / b.exe / b.test mutate the graph
+
+// packages are declared here as plain data — build files are
+// programs, so there is no separate manifest format. hash-locked,
+// and the cli edits these lines for you: `zen add json`
+json_pkg = Package(
+    url: "https://github.com/zen-pkgs/json",
+    version: "0.3.1",
+    hash: "sha256:9f2a...",
+)
+
+build = (b :: Builder) Res<(), BuildError> {
+
+    // build programs branch on the target by matching b.os right
+    // here. no cfg annotations, no ifdef
+    lib_paths = b.os.match({
+        Macos   => ["/opt/homebrew/lib"],
+        Linux   => ["/usr/local/lib"],
+        Windows => ["C:/sodium/lib"],
+    });
+
+    json = b.add("json", json_pkg);
+
+    libsodium = b.lib("libsodium", {
+        src: Path("src/extern.c"),
+        libs: ["sodium"],
+        paths: lib_paths,
+    });
+
+    extern_add = b.extern("extern_add", {
+        src: Path("src/extern_add.c"),
+        libs: ["add"],
+        paths: lib_paths,
+    });
+
+    ext = b.os.match({
+        Windows => ".exe",
+        _       => "",
+    });
+
+    // deps are wired per target: main.zen may import from pkg only
+    // what this list declares. out defaults to
+    // build/{os}-{arch}/{name}; .gitignore covers build/
+    b.exe("example", {
+        src: Path("src/main.zen"),
+        deps: [json, libsodium, extern_add],
+        out: Path("build/{}-{}/example{}", b.os, b.arch, ext),
+    });
+
+    // test discovery is code, not compiler magic: walk the parsed
+    // module tree and keep every function whose single parameter
+    // is a Tester. change the filter, change what a test is
+    tests ::= b.alloc.Vec<Function>();
+    b.module(Path("src")).functions.loop((h, f) {
+        (f.params.len == 1 && f.params.get(0).try().type == Tester)
+            .then(() { tests.add(f).try() });
+    });
+
+    b.test("example_tests", {
+        tests: tests,
+        deps: [json, libsodium, extern_add],
+    });
+
+    // benches: same walk, different filter
+    benches ::= b.alloc.Vec<Function>();
+    b.module(Path("src")).functions.loop((h, f) {
+        (f.params.len == 1 && f.params.get(0).try().type == Bencher)
+            .then(() { benches.add(f).try() });
+    });
+
+    // budgets live here, in code, reviewed like code. allocs_op
+    // and bytes_op are deterministic, so over budget FAILS the
+    // build; ns_op is wall clock and rides a rolling median
+    b.bench("example_bench", {
+        benches: benches,
+        budgets: [
+            Budget(name: "shape_format", ns_op: 400, allocs_op: 1, bytes_op: 64),
+        ],
+    });
+
+    // and the build budgets itself, so it never quietly grows
+    b.budget(Duration.seconds(60));
+
+    Ok(());
+}

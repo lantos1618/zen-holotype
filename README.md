@@ -1,0 +1,71 @@
+# Zen
+
+A systems language: Pony's actors and capabilities, Zig's explicitness, and one rule for everything else.
+
+```groovy
+Shape = Circle(Circle) | Rect(Rect) | Unit
+
+Shape.impl(Display, {
+    toString ::= (self: @Self, sb :: String) Res<(), IoError> {
+        self.match({
+            Circle(c) => sb.add("circle: {}", c.radius),
+            Rect(r)   => sb.add("rect: {} {}", r.width, r.height),
+            Unit      => sb.add("unit"),
+        })
+    }
+})
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();          // page authority comes from Env
+    shapes ::= alloc.Vec<Shape>();      // allocation is in the signature
+    shapes.add(Shape.Unit).try();       // failure is a value
+    Ok(0);                              // the arena frees everything here
+}
+```
+
+## What is unusual about it
+
+- **Control flow is `.match`, a method.** No `if`, no ternary, no `?`. Match is always exhaustive, in every position, so a missing case is never ambiguous between deliberate and forgotten. `bool.then` covers the one-sided case out loud.
+- **There are no traits, only structs.** A struct whose fields happen to be functions, used as a bound, is what other languages call a trait. `A.impl(B, {..})` supplies a value for every field `B` declares. One rule, no second mechanism.
+- **The signature answers the question.** Does it allocate, does it mutate, can it fail, does it escape — read the first line. No `Alloc` parameter means no allocation, anywhere, including the standard library.
+- **All authority flows from one `Env`.** No ambient io, net, threads, or page allocation.
+- **`Res` is for failure a caller can act on; a trap is for a bug.** Overflow and out-of-bounds abort with a position rather than becoming values nobody checks.
+- **Data races are compile errors**, not deep copies. Only deeply-immutable or uniquely-owned values cross an actor boundary, and the handoff is spelled `consume`.
+
+## Building
+
+```sh
+make build      # needs only a C compiler: the seed is checked-in C
+make test       # the corpus and must-fail suites
+make fixpoint   # zen compiles itself to byte-identical C
+```
+
+`make help` lists the rest.
+
+## The documents
+
+Read them in this order. They are the specification, not commentary on it.
+
+| | |
+|---|---|
+| [docs/DESIGN.md](docs/DESIGN.md) | what the language is, and the law forcing each decision |
+| [docs/PLAN.md](docs/PLAN.md) | stages 0–5, each ending at a gate that can go red |
+| [docs/STYLE.md](docs/STYLE.md) | naming, code shape, and where a helper belongs |
+| [docs/TESTING.md](docs/TESTING.md) | the bug classes each phase reliably has, written first |
+
+`DESIGN.md` is binding. Where the others disagree with it, they are the bug — and where it is silent, its "Still open" section says so rather than leaving you to guess.
+
+## Layout
+
+```
+grammar/     tree-sitter grammar. written before any other code.
+bootstrap/   throwaway Python compiler. deleted once Zen self-hosts.
+seed/        the checked-in generated C. regenerate, THEN commit.
+src/         the real compiler and the standard library, in Zen
+example/     a project that uses the language
+tests/       ~800 files, written before the compiler that must pass them
+```
+
+## Status
+
+Stage 0. The grammar, the test suite, the module resolver, and the C backend exist; the standard library and self-hosting do not. `docs/PLAN.md` is the map, and every stage in it ends at a command that exits non-zero when the stage is wrong.

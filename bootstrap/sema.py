@@ -1063,6 +1063,7 @@ class Sema:
                          fields=_tup(_g(d, "fields")), consts=_tup(_g(d, "consts")))
             mi.types[nm] = td
             self.types[td.qname] = td
+            self.by_node[id(d)] = td
         elif k == "Enum":
             nm = _name_of(_g(d, "name"))
             if not nm:
@@ -1072,6 +1073,7 @@ class Sema:
                          variants=_tup(_g(d, "variants")))
             mi.types[nm] = td
             self.types[td.qname] = td
+            self.by_node[id(d)] = td
         elif k == "Alias":
             nm = _name_of(_g(d, "name"))
             if not nm:
@@ -1081,10 +1083,12 @@ class Sema:
                          target=_g(d, "target", "ty", "type"))
             mi.types[nm] = td
             self.types[td.qname] = td
+            self.by_node[id(d)] = td
         elif k == "Function":
             fd = self._fn_from_function(mi, d)
             if fd:
                 mi.fns.setdefault(fd.name, []).append(fd)
+                self.by_node[id(d)] = fd
         elif k == "Impl":
             im = self._impl_from(mi, d)
             if im:
@@ -1102,6 +1106,8 @@ class Sema:
                 fd = self._fn_from_lambda(mi, d, nm, val)
                 if fd:
                     mi.fns.setdefault(fd.name, []).append(fd)
+                    self.by_node[id(d)] = fd
+                    self.by_node[id(val)] = fd
             elif nm and _k(val) == "Call" and self._impl_call_parts(val):
                 im = self._impl_from_call(mi, val)
                 if im:
@@ -1175,6 +1181,8 @@ class Sema:
     # -- diagnostics --------------------------------------------------------
 
     def error(self, span, message, notes=()):
+        if self._muted:
+            return      # an external query (the LSP, gen_c) reports nothing
         self.diags.append(Diag(span=span, message=message, notes=tuple(notes)))
 
     def _once(self, tag):
@@ -1209,6 +1217,23 @@ class Sema:
     def impls_of(self, qname):
         return tuple(self.impls_by_target.get(qname, ()))
 
+    def _from_scope(self, mi, name, want):
+        """What `modules.py` says this name means here. Its scope already has
+        the `*` gate and every re-export chain applied, so this is the module
+        graph enforcing visibility rather than sema guessing at it."""
+        info = mi.info if mi is not None else None
+        scope = getattr(info, "scope", None) if info is not None else None
+        if not scope:
+            return ()
+        out = []
+        for b in scope.get(name, ()) or ():
+            ent = getattr(b, "entity", None)
+            node = getattr(ent, "node", None) if ent is not None else None
+            d = self.by_node.get(id(node)) if node is not None else None
+            if isinstance(d, want) and d not in out:
+                out.append(d)
+        return tuple(out)
+
     def lookup_type(self, mi, name):
         if mi is None:
             return None
@@ -1222,7 +1247,8 @@ class Sema:
                 td = tgt.types.get(imp[1])
                 if td is not None and (td.exported or not ENFORCE_IMPORT_VISIBILITY_AT_USE):
                     return td
-        return None
+        got = self._from_scope(mi, name, TypeDef)
+        return got[0] if got else None
 
     def lookup_fns(self, mi, name):
         if mi is None:
@@ -1234,9 +1260,11 @@ class Sema:
         if imp:
             tgt = self.by_dotted.get(imp[0])
             if tgt is not None and tgt is not mi:
-                return tuple(f for f in tgt.fns.get(imp[1], ())
-                             if f.exported or not ENFORCE_IMPORT_VISIBILITY_AT_USE)
-        return ()
+                found = tuple(f for f in tgt.fns.get(imp[1], ())
+                              if f.exported or not ENFORCE_IMPORT_VISIBILITY_AT_USE)
+                if found:
+                    return found
+        return self._from_scope(mi, name, FnDef)
 
     def builtin_named(self, name, args=()):
         if name in _PRIMS:
@@ -1580,8 +1608,16 @@ class Sema:
         for mi in self.mods:
             for name in sorted(mi.fns):
                 for fd in mi.fns[name]:
-                    if not fd.tparams:
+                    if fd.tparams:
+                        continue    # checked at each instantiation
+                    try:
                         self.check_function(fd, {}, None)
+                    except RecursionError:
+                        # the bar is that the compiler never crashes and never
+                        # hangs, on any input (TESTING.md, Fuzzing)
+                        self.error(fd.span,
+                                   "expression nests too deeply for sema to check "
+                                   "`%s`" % fd.name)
         return self.results()
 
     def results(self):
@@ -1606,6 +1642,7 @@ class Sema:
                 continue
             if td.kind == "struct" and not td.tparams:
                 self.require_type(named(td.qname, ()), None, None)
+                self._check_methods(td)
 
         for name in sorted(mi.fns):
             fns = mi.fns[name]
@@ -1615,6 +1652,19 @@ class Sema:
 
         for im in mi.impls:
             self._check_impl(im, base)
+
+    def _check_methods(self, td, self_ty=None):
+        """A method is a `Function` in the struct's own field tuple — one
+        declaration form, so it is checked exactly like a free function, with
+        `@Self` bound."""
+        self_ty = self_ty or named(td.qname, ())
+        for f in td.fields:
+            if _k(f) != "Function" or _g(f, "body") is None or _tup(_g(f, "tparams")):
+                continue
+            fd = self._fn_from_function(td.mod, f)
+            if fd is None:
+                continue
+            self.check_function(fd, {"@Self": self_ty}, None)
 
     def _check_signature(self, fd, base):
         ctx = self._fn_ctx(fd, {}, None)
@@ -1726,6 +1776,12 @@ class Sema:
                   subst=(("@Self", self_ty),) if self_ty is not ANY else ())
         ctx.scope.put("self", Sym("value", self_ty))
         for e in im.entries:
+            if _k(e) == "Function":
+                if _g(e, "body") is not None and not _tup(_g(e, "tparams")):
+                    fd = self._fn_from_function(im.mod, e)
+                    if fd is not None:
+                        self.check_function(fd, {"@Self": self_ty}, None)
+                continue
             val = _g(e, "value", "default")
             if val is not None:
                 self.type_of(val, ctx)
@@ -1878,13 +1934,15 @@ class Sema:
             return UNIT
         stmts = list(_tup(_g(blk, "stmts", "statements")))
         tail = _g(blk, "value")
+        promoted = False
         if tail is None and stmts:
             # `Ok(0);` closes a function: a trailing expression statement is
-            # the block's value.
+            # the block's value, semicolon or not.
             last = stmts[-1]
             if _k(last) == "ExprStmt":
                 tail = _g(last, "expr")
                 stmts = stmts[:-1]
+                promoted = True
         inner = ctx.with_scope(ctx.scope.child())
         for s in stmts:
             self.check_stmt(s, inner)
@@ -1895,6 +1953,8 @@ class Sema:
             return UNIT
         ty = self.type_of(tail, inner, expect=expect)
         if expect is not None:
+            if promoted and ty is not None and ty.kind == "unit":
+                return ty   # a last statement that yields nothing is not a value
             self.coerce(ty, expect, _span(tail), tail)
         return ty
 
@@ -2113,11 +2173,17 @@ class Sema:
     # ======================================================================
 
     def type_of(self, node, ctx=None, expect=None):
+        """The query. With no `ctx` it is an outside caller — the LSP asking
+        for a hover, gen_c asking what an expression is — so it answers
+        quietly: no diagnostic escapes a question."""
         if node is None:
             return ANY
         if ctx is None:
-            ctx = Ctx(self.mods[0] if self.mods else ModInfo("", "", None, (), ""),
-                      Scope())
+            self._muted += 1
+            try:
+                return self.type_of(node, self._quiet_ctx(node), expect)
+            finally:
+                self._muted -= 1
         key = (id(node), ctx.key, expect)
         hit = self._memo.get(key, _MISS)
         if hit is not _MISS:
@@ -2133,6 +2199,90 @@ class Sema:
             ty = ERR
         self._memo[key] = ty
         return ty
+
+    def _quiet_ctx(self, node):
+        """A best-effort context for an outside query: the module the node was
+        written in, if its span says which."""
+        mi = None
+        sp = _span(node)
+        f = getattr(sp, "file", None) if sp is not None else None
+        if f:
+            for m in self.mods:
+                if m.path == f or m.path.endswith("/" + str(f)):
+                    mi = m
+                    break
+        if mi is None:
+            mi = self.mods[0] if self.mods else ModInfo("", "", None, (), "")
+        return Ctx(mi, Scope(), quiet=True)
+
+    def ast_type_of(self, node):
+        """`type_of` as an ast Type node, for gen_c — which wants the AST's own
+        vocabulary rather than sema's."""
+        return self.as_ast_type(self.type_of(node))
+
+    def as_ast_type(self, ty, span=None):
+        if ty is None or A is None:
+            return None
+        mk = lambda cls, *a: cls(*a, span=span or Span("", (1, 1), (1, 1)))
+        if ty.kind == "unit":
+            return mk(getattr(A, "Unit"))
+        if ty.kind in ("any", "error", "never"):
+            return None
+        if ty.kind in ("prim", "var"):
+            return mk(getattr(A, "Named"), ty.name, ())
+        if ty.kind == "intlit":
+            return mk(getattr(A, "Named"), "i32", ())
+        if ty.kind == "floatlit":
+            return mk(getattr(A, "Named"), "f64", ())
+        if ty.kind == "named":
+            return mk(getattr(A, "Named"), base_name(ty.name),
+                      tuple(x for x in (self.as_ast_type(a, span) for a in ty.args)
+                            if x is not None))
+        if ty.kind in ("res", "ok", "err", "none"):
+            t = settle(ty)
+            return mk(getattr(A, "Named"), "Res",
+                      tuple(x for x in (self.as_ast_type(a, span) for a in t.args)
+                            if x is not None))
+        if ty.kind == "union":
+            return mk(getattr(A, "Union"),
+                      tuple(x for x in (self.as_ast_type(a, span) for a in ty.args)
+                            if x is not None))
+        if ty.kind == "array":
+            elem = self.as_ast_type(ty.args[0], span)
+            cnt = mk(getattr(A, "Literal"), "int", ty.name or "0")
+            return mk(getattr(A, "ArrayType"), elem, cnt) if elem is not None else None
+        if ty.kind == "fn":
+            names = ty.pnames or tuple("p%d" % i for i in range(len(ty.args)))
+            ps = []
+            for nm, a in zip(names, ty.args):
+                ps.append(mk(getattr(A, "Param"), nm, self.as_ast_type(a, span), False))
+            return mk(getattr(A, "FnType"), tuple(ps), self.as_ast_type(ty.ret, span))
+        return None
+
+    def resolve(self, node, module=None):
+        """The declaration a Path or Member names — go-to-definition."""
+        if node is None:
+            return None
+        k = _k(node)
+        mi = module or self._quiet_ctx(node).mod
+        if k in ("Path", "Identifier"):
+            name = _g(node, "name")
+            td = self.lookup_type(mi, name)
+            if td is not None:
+                return td.node
+            fns = self.lookup_fns(mi, name)
+            if fns:
+                return fns[0].node
+            return None
+        if k == "Member":
+            self._muted += 1
+            try:
+                bty = self.type_of(_g(node, "base"), self._quiet_ctx(node))
+            finally:
+                self._muted -= 1
+            m = self.members_of(bty).get(_g(node, "name"))
+            return getattr(m, "owner", None).node if (m and m.owner) else None
+        return None
 
     def _type_of(self, node, ctx, expect):
         k = _k(node)
@@ -2797,10 +2947,22 @@ class Sema:
             viable.append((score, fd, ptys, sub))
 
         if not viable:
-            self.error(span,
-                       "no overload matches `%s`: resolution is on declared parameter "
-                       "types and arity" % name)
-            return ERR
+            same_arity = [fd for fd in cands if fd.arity == len(arg_types)]
+            if len(same_arity) == 1:
+                # one candidate, wrong argument: say which argument, not "no
+                # overload matches". The re-check below reports it precisely.
+                fd = same_arity[0]
+                fctx = self._fn_ctx(fd, {}, ctx.frame)
+                ptys = [self.resolve_type(_g(p, "ty", "type"), fctx) for p in fd.params]
+                sub = {}
+                for want, got, n in zip(ptys, arg_types, arg_nodes):
+                    self._unify(want, got, sub, n, ctx)
+                viable = [(0, fd, ptys, sub)]
+            else:
+                self.error(span,
+                           "no overload matches `%s`: resolution is on declared "
+                           "parameter types and arity" % name)
+                return ERR
         viable.sort(key=lambda v: (-v[0], _start(v[1].span)))
         _score, fd, ptys, sub = viable[0]
 

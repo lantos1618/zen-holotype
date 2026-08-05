@@ -399,19 +399,28 @@ class _TriviaStore:
 
     # -- claiming --
 
+    def _advance(self) -> None:
+        while self._cursor < len(self.items) and self.used[self._cursor]:
+            self._cursor += 1
+
     def leading(self, start_byte: int) -> tuple:
         out = []
-        for i, (start, end, trivia) in enumerate(self.items):
+        self._advance()
+        for i in range(self._cursor, len(self.items)):
+            start, end, trivia = self.items[i]
             if start >= start_byte:
                 break
             if self.used[i] or end > start_byte:
                 continue
             self.used[i] = True
             out.append(trivia)
+        self._advance()
         return tuple(out)
 
     def trailing(self, end_byte: int, end_line: int) -> tuple:
-        for i, (start, _end, trivia) in enumerate(self.items):
+        self._advance()
+        for i in range(self._cursor, len(self.items)):
+            start, _end, trivia = self.items[i]
             if start < end_byte or self.used[i]:
                 continue
             if trivia.kind == "blank":
@@ -753,7 +762,7 @@ class Converter:
 
     def parameters(self, node, required: bool) -> tuple:
         out = []
-        for child in self.kids(node or None):
+        for child in self.kids(node):
             if child.type != PARAMETER:
                 continue
             name = self.text(self.field(child, F_NAME))
@@ -782,7 +791,7 @@ class Converter:
 
     def type_parameters(self, node) -> tuple:
         out = []
-        for child in self.kids(node or None):
+        for child in self.kids(node):
             if child.type != TYPE_PARAMETER:
                 continue
             bound_node = self.field(child, F_BOUND)
@@ -1194,10 +1203,9 @@ class Converter:
         if kind == PATH_PATTERN:
             return A.PatVariant(self.text(node), None, span=span)
         if kind == DESTRUCTURE_PATTERN:
-            binder = self.field(node, F_BINDER)
             return A.PatVariant(
                 self.text(self.field(node, F_NAME)),
-                self.text(binder) if binder is not None else None,
+                self.binder(self.field(node, F_BINDER)),
                 span=span,
             )
         if kind == NUMBER_LITERAL:
@@ -1211,6 +1219,21 @@ class Converter:
             return A.PatLit("bool", self.text(node), span=span)
         self.error(node, f"{kind} is not a pattern")
         return A.PatWild(span=span)
+
+    def binder(self, node):
+        """`PatVariant.binder` is a NAME whenever one is written — `Ok(n)`,
+        `Ok(_)`, and `Left(Blank)`, which is a name until sema knows whether
+        `Blank` is a variant. A nested pattern (`Left(Full(n))`) has no name to
+        give, so the binder is the inner Pattern NODE. CONTRACT.md types this
+        field `str | None`; carrying a node here widens it, and that is
+        announced rather than smuggled."""
+        if node is None:
+            return None
+        if node.type == WILDCARD_PATTERN:
+            return "_"
+        if node.type == PATH_PATTERN and "." not in self.text(node):
+            return self.text(node)
+        return self.pattern(node)
 
 
 # ===========================================================================
