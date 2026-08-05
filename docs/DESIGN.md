@@ -46,7 +46,7 @@ LSP, formatter, and race checker are the visible goals, and **two of those three
 
 So four decisions, all made in week one, all brutal to retrofit:
 
-1. **Every AST node carries `file:line:col`,** from the lexer up.
+1. **Every AST node carries a `file` plus a half-open `start..end` span,** each end a `line:col` with a 1-based byte column, from the lexer up. A point is not enough: without an end, the formatter cannot reprint a node and the LSP cannot select one.
 2. **Trivia — comments and whitespace — is attached to nodes, not discarded.** Then the formatter is `parse |> print` and can never disagree with the compiler about what the language is.
 3. **Sema is memoized queries, not monolithic passes.** `type_of(node)`, `defs_of(name)`. This is the *same machinery* as comptime memoization — build it once.
 4. **The compiler is a library; the `zen` CLI is a thin `main`.** `zen build` / `zen fmt` / `zen lsp` are entry points into one artifact, so they cannot drift.
@@ -208,7 +208,9 @@ row = table.get("ada").ok_or(Error.NotFound).try();  // required form
 - `+ - *` **trap** on overflow. `+% -% *%` wrap, for when wrapping is the intent.
 - `/ %` **trap** on a zero divisor, and on `i32.MIN / -1` — which is an overflow wearing division's clothes, and faults identically on x86.
 - `buf[i]` on a fixed array is **bounds-checked and traps**. `Vec.get` still returns `Res<T>` — a lookup that can legitimately miss is not a bug.
-- A trap **aborts the process** and prints the location.
+- A trap **aborts the process**: it prints `file:line:col: trap: <what>` to stderr and exits `134`. The three whats are `integer overflow`, `divide by zero`, `index out of bounds`, and the position is the **operator** token. Column is a 1-based byte offset.
+- Overflow traps for **unsigned** types too. "A trap is for a bug" does not have a signedness exception, and a `u8` reaching 256 is the same bug a `i8` reaching 128 is.
+- A trap the compiler can **prove** will fire — `i32.MAX + 1`, a constant zero divisor, a literal index past a known length — is a **compile error**, not a runtime trap. It is a bug, and it is a bug that was visible without running the program.
 
 One constraint this puts on the backend, stated here because it is a correctness requirement and not an implementation detail: **signed overflow is undefined behaviour in C**, so `gen_c` may not emit `a + b` and inspect the result afterwards — the optimizer is entitled to delete that check, and will. The test happens before the operation, or through `__builtin_add_overflow` and friends.
 
@@ -220,11 +222,15 @@ Killing only the offending actor is the Pony-shaped alternative, and it needs a 
 
 Three questions, one checker: *what is this binding allowed to do?*
 
-**There is no implicit receiver.** A method is a UFCS function whose first parameter happens to be named `self`, and that parameter is written out like every other one — a name and a type, never bare. `@Self` is the type being declared, supplied by the compiler inside a struct or impl body. The `@` says exactly that: like `@meta`, it is not a name you could have written yourself.
+**There is no implicit receiver.** A method is a UFCS function whose first parameter happens to be named `self`, and that parameter is written out like every other one — a name and a type, never bare.
+
+This is a rule about **declarations**, not about every parameter list. A closure passed to a function whose signature is already known infers its parameter types from that signature, so `items.loop((h, v) { .. })` needs no annotations — `h` and `v` each have exactly one possible type. Annotate a closure parameter only to disambiguate, as the fold body does with `acc: i32`. A declaration states types because someone reads it without context; a closure does not, because the context is the call.
+
+`@Self` is the type being declared, supplied by the compiler inside a struct or impl body. The `@` says exactly that: like `@meta`, it is not a name you could have written yourself.
 
 ```groovy
 add* = (self :: @Self, value: T) Res<(), AllocError> { ... }   // mutates
-len* = (self: @Self) usize { self.len }                        // does not
+get* = (self: @Self, i: usize) Res<T> { ... }                  // does not
 
 v = alloc.Vec<i32>();    v.add(1);   // ERROR: add needs a mutable receiver
 w ::= alloc.Vec<i32>();  w.add(1);   // ok
@@ -248,6 +254,12 @@ The test, when a signature is unclear: **would a bitwise copy of the receiver se
 It is not inferred from the body. An inferred receiver requirement changes when the body changes, so adding one `self.x = ..` would silently break callers in other modules. Explicit keeps it a promise instead of a consequence.
 
 **`consume` moves.** The compiler calls `drop` exactly once, so `g = f` on a `Drop` type cannot copy — both would drop. There is no `Clone` trait: want a second one, construct a second one.
+
+Three consequences worth stating, because each one is a place the rule looks like it bites and does not:
+
+- **A handle is not a `Drop` value.** `Alloc` is an interface, so an `Alloc` value is a fat value pointing at an arena. The *arena* is `Drop`; the handle is two words and copies freely. That is why `Vec` can store `alloc: Alloc` by value and why `fill(alloc, v)` is not an illegal copy.
+- **Passing a `Drop` value to a parameter is a borrow, not a move.** `v.add(1)` does not consume `v`, and a receiver is just the first parameter — so nothing else could be true. A move is spelled `consume` at the call site, and only there.
+- **The compiler-inserted `drop` is exempt from the receiver rule.** `drop` is declared `(self :: @Self)`, but scope exit runs it on `:` bindings too. Destroying a value is not mutating it through a binding.
 
 ```groovy
 f = alloc.File("x.txt").try();
@@ -290,7 +302,7 @@ Names are qualified by path, imports bind locally, and two modules may define th
 // src/std/core/core.zen
 Res, Ok, None = std.core.result     // imported, local to this module
 Res*, Ok*, None* = std.core.result  // imported AND re-exported
-len*, view* = std.text.string
+str*, String* = std.text.string     // types travel with their methods and impls
 ```
 
 A folder root is then just a file of starred bindings, which is why re-export is what makes folders work — and why the prelude can span several files instead of being one enormous one.
@@ -344,7 +356,7 @@ One consequence worth stating: a generic parameter swallows a concrete one, so `
 // s.validate_utf8() — paid for only where the guarantee is wanted
 str* = {
     data: Ptr<u8>,
-    len: usize,
+    len*: usize,      // * so a byte count is readable outside std.text
 }
 
 // owned, growable text. Vec already carries len, capacity, and
@@ -512,13 +524,29 @@ Alloc* = {
 
     // typed conveniences, defaults built on raw:
     create* ::= <T>(self: @Self) Res<Ptr<T>, AllocError>
+    // Vec and Map return a bare value: an empty one owns no pages yet, so
+    // construction cannot fail. the first add allocates, and THAT returns Res.
+    // String takes a format and must hold the result, so it allocates at once
     Vec* ::= <T>(self: @Self) Vec<T>
     Map* ::= <K, V>(self: @Self) Map<K, V>
     String* ::= (self: @Self, fmt: str, args: ...) Res<String, AllocError>
 }
 
-Alloc.impl(Drop, {
-    drop = (self :: @Self) () { /* arena: release every page at once */ }
+// Alloc is an INTERFACE, so an Alloc value is a fat value: a receiver
+// pointer plus function pointers. It is a handle, it is freely copied,
+// and it is NOT Drop. Copying it copies two words, never ownership.
+//
+// the concrete allocator behind it owns the memory and is what Drop
+// applies to. env.mem.alloc() hands back an Arena; the Arena impls
+// both, and passing it where an Alloc is wanted builds the handle
+Arena* = {
+    // pages, free lists, whatever the arena needs. owns them.
+}
+
+Arena.impl(Alloc, { ... })
+
+Arena.impl(Drop, {
+    drop = (self :: @Self) () { /* release every page at once */ }
 })
 
 
@@ -535,7 +563,7 @@ Alloc.impl(Drop, {
 
 Vec*<T> = {
     data :: Ptr<T>,
-    len :: usize,
+    len* :: usize,      // * is readable outside; mutation still only via methods
     capacity :: usize,
     alloc: Alloc,       // : set once at construction
 
@@ -549,6 +577,10 @@ Vec*<T> = {
         self.len = self.len + 1;
         Ok(());
     }
+
+    // moves an element OUT, leaving the vec one shorter. without this a
+    // Vec<T> of Drop values can be filled and never emptied
+    take* = (self :: @Self, i: usize) Res<T>
 
     get* = (self: @Self, i: usize) Res<T> {
         (i < self.len).match({
@@ -839,8 +871,8 @@ Threads* = {
 
 # Example Zen Code
 
-```groovy
-// ~/example_zen/.gitignore
+```gitignore
+# ~/example_zen/.gitignore
 
 *.exe
 *.dll
@@ -1100,20 +1132,20 @@ Foo = {}
 Foo.impl(Actor, {
     // optional lifecycle hooks. println resolves through
     // ctx.env — a Context carries an Env, so one is in scope
-    started ::= (self :: @Self, ctx: Context) { println("actor started") }
-    stopped ::= (self :: @Self, ctx: Context) { println("actor stopped") }
+    started ::= (self :: @Self, ctx: Context) () { println("actor started") }
+    stopped ::= (self :: @Self, ctx: Context) () { println("actor stopped") }
 
     // behaviors: calling one on a Ref<Foo> enqueues a message
     // and returns immediately. params must be sendable (val or
     // iso). the message enum is derived at comptime via @meta
-    receive_msg = (self :: @Self, ctx: Context, data: str) {
+    receive_msg = (self :: @Self, ctx: Context, data: str) () {
         println("actor has received {}", data)
     }
 
     // request/response the pony way: the request carries the
     // reply ADDRESS, and the response is just another behavior
     // call. no promise, no await, no second concept
-    compute = (self :: @Self, ctx: Context, n: i32, reply: Ref<Collector>) {
+    compute = (self :: @Self, ctx: Context, n: i32, reply: Ref<Collector>) () {
         reply.result(n + 1);
     }
 })
@@ -1121,7 +1153,7 @@ Foo.impl(Actor, {
 Collector = {}
 
 Collector.impl(Actor, {
-    result = (self :: @Self, ctx: Context, v: i32) {
+    result = (self :: @Self, ctx: Context, v: i32) () {
         println("got {}", v)
     }
 })

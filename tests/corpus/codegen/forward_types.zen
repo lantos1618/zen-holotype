@@ -1,0 +1,87 @@
+// forward-declaration ordering for types.
+//
+// C has two different requirements here and gen_c needs both:
+//
+//   - a struct containing another struct BY VALUE needs the contained
+//     type COMPLETE first. That is a topological sort of definitions, and
+//     source order is not it — `Outer` is declared before `Inner` below,
+//     which is legal Zen and illegal C if emitted verbatim.
+//
+//   - a CYCLE cannot be sorted. `Even` and `Odd` point at each other, so
+//     one of them must be emitted as `struct Odd;` before the other's
+//     definition. A sort alone deadlocks here; forward declarations alone
+//     do not satisfy the by-value case. The correct shape is: forward-
+//     declare every struct tag, then emit definitions in dependency order.
+//
+// enums get the same problem in different clothing, because an enum with
+// payloads is a tag plus a union of structs in C, and `Expr` and `Stmt`
+// reference each other through pointers.
+//
+// not tested here, because it belongs to sema and not to codegen:
+// `Node = { next: Node }` — by-value self-containment — must be REJECTED
+// rather than looping (TESTING.md § Sema). The `Ptr<Node>` form below is
+// the one that must WORK.
+
+Outer = {
+    inner: Inner,
+    tag: i32
+}
+
+Inner = {
+    n: i32
+}
+
+Even = {
+    n: i32,
+    next: Ptr<Odd>
+}
+
+Odd = {
+    n: i32,
+    next: Ptr<Even>
+}
+
+Node = {
+    n: i32,
+    next: Ptr<Node>
+}
+
+Expr =
+    Lit(i32),
+    Held(Ptr<Stmt>)
+
+Stmt =
+    Done,
+    Eval(Ptr<Expr>)
+
+main = (env: Env) Res<i32, AllocError> {
+    o = Outer(inner: Inner(n: 5), tag: 2);
+    println("value {}", o.inner.n + o.tag);
+
+    alloc ::= env.mem.alloc();
+
+    e = alloc.create<Even>().try();
+    d = alloc.create<Odd>().try();
+    e.write(0, Even(n: 1, next: d));
+    d.write(0, Odd(n: 2, next: e));
+    println("cycle {}", e.read(0).n + d.read(0).n);
+
+    tail = alloc.create<Node>().try();
+    tail.write(0, Node(n: 9, next: tail));
+    println("self {}", tail.read(0).next.read(0).n);
+
+    x = Expr.Lit(41);
+    ex = x.match({
+        Lit(v) => v,
+        Held(p) => 0,
+    })
+
+    s = Stmt.Done;
+    st = s.match({
+        Done => 1,
+        Eval(p) => 0,
+    })
+
+    println("enums {} {}", ex, st);
+    Ok(0);
+}

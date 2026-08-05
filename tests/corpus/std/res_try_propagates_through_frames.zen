@@ -1,0 +1,38 @@
+// tests/corpus/std/res_try_propagates_through_frames.zen
+// .try() is the non-local exit: it unwraps Ok, or returns the Err
+// from the ENCLOSING function. three frames deep, so a .try() that
+// only unwraps one level answers 3 where it should answer err
+
+DepthError =
+    TooDeep
+
+third = (n: i32) Res<i32, DepthError> {
+    (n > 2).match({
+        true  => Err(DepthError.TooDeep),
+        false => Ok(n),
+    })
+}
+
+second = (n: i32) Res<i32, DepthError> {
+    v = third(n).try();
+    Ok(v + 1);
+}
+
+first = (n: i32) Res<i32, DepthError> {
+    v = second(n).try();
+    Ok(v + 1);
+}
+
+main = (env: Env) Res<i32, DepthError> {
+    // the Ok path: unwrapped at every level, so the +1s both ran
+    v = first(1).try();
+    println("ok {}", v);
+
+    // the Err path: raised in third, seen by main, and neither of
+    // the two frames between them ran their +1
+    first(5).match({
+        Ok(n)  => println("ok {}", n),
+        Err(_) => println("err"),
+    })
+    Ok(0);
+}

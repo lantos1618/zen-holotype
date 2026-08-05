@@ -1,0 +1,95 @@
+// forward-declaration ordering for functions.
+//
+// Zen module-level bindings are not sequential — `is_even` calls `is_odd`
+// which is declared below it — so gen_c must emit a prototype for every
+// function before any body. Emitting bodies in source order and hoping is
+// the bug this file exists for, and it is invisible until the first mutual
+// recursion, which in a compiler is roughly the parser's first day.
+//
+// four shapes, because each one is a different site in gen_c:
+//
+//   1. a plain two-cycle between free functions
+//   2. a three-cycle — a two-cycle can be passed by an emitter that only
+//      declares "the next function", which is a real thing people write
+//   3. a method calling a free function that constructs the receiver's
+//      type and calls back into the method. Methods and free functions are
+//      the same thing in Zen (a method is a ufcs function whose first
+//      parameter is `self`), so if these end up in two different emission
+//      lists the prototypes come out in two different places
+//   4. a recursive GENERIC. The prototype needed is for the monomorphised
+//      instance, whose name does not exist until instantiation — so the
+//      prototype pass has to run over the monomorphised program, not over
+//      the source program
+
+is_even = (n: i32) bool {
+    (n == 0).match({
+        true => true,
+        false => is_odd(n - 1),
+    })
+}
+
+is_odd = (n: i32) bool {
+    (n == 0).match({
+        true => false,
+        false => is_even(n - 1),
+    })
+}
+
+ping = (n: i32) i32 {
+    (n == 0).match({
+        true => 0,
+        false => pong(n - 1) + 1,
+    })
+}
+
+pong = (n: i32) i32 {
+    (n == 0).match({
+        true => 0,
+        false => pang(n - 1) + 1,
+    })
+}
+
+pang = (n: i32) i32 {
+    (n == 0).match({
+        true => 0,
+        false => ping(n - 1) + 1,
+    })
+}
+
+Counter = {
+    n: i32,
+
+    down = (self: @Self) i32 { step(self.n) }
+}
+
+step = (n: i32) i32 {
+    (n == 0).match({
+        true => 0,
+        false => Counter(n: n - 1).down() + 1,
+    })
+}
+
+depth = <T>(x: T, n: i32) i32 {
+    (n == 0).match({
+        true => 0,
+        false => depth(x, n - 1) + 1,
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    even10 = is_even(10).match({
+        true => 1,
+        false => 0,
+    })
+
+    odd10 = is_odd(10).match({
+        true => 1,
+        false => 0,
+    })
+
+    println("parity {} {}", even10, odd10);
+    println("cycle {}", ping(9));
+    println("step {}", step(4));
+    println("depth {} {}", depth(7, 5), depth("x", 3));
+    Ok(0);
+}

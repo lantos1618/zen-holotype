@@ -1,0 +1,52 @@
+// a struct with no fields.
+//
+// `Empty = {}` is ordinary Zen — a unit type, a phantom marker, an actor
+// with no state (`Foo = {}` in DESIGN.md's own actor example). It has no
+// direct C translation:
+//
+//   - ISO C requires a struct-declaration-list (C11 §6.7.2.1p1), so
+//     `struct Empty {};` is a CONSTRAINT VIOLATION, not merely unusual.
+//   - gcc and clang accept it as an extension and give it `sizeof == 0`.
+//     C++ and MSVC give it size 1. So the same header compiled two ways
+//     disagrees about the layout of every struct that contains one.
+//   - a zero-size return value has no ABI class: nothing is returned in
+//     no registers, and a hidden return pointer to a zero-size object is
+//     a pointer to nothing.
+//
+// gen_c has to pick a representation — a `char` padding member is the
+// usual answer — and pick it in ONE place, so that a bare `Empty`, an
+// `Empty` field, an `Empty` in a `Res`, and an array of `Empty` all agree.
+// This test cannot observe `sizeof` (Zen has no sizeof), so what it
+// asserts is narrower and still worth having: the program compiles as C,
+// zero-field values round-trip through calls, fields, `Res` and arrays,
+// and the neighbouring fields still hold their values afterwards.
+
+Empty = {}
+
+make = () Empty { Empty() }
+
+pass = (e: Empty) Empty { e }
+
+fallible = () Res<Empty, AllocError> { Ok(Empty()) }
+
+Marker = {
+    head: Empty,
+    n: i32,
+    tail: Empty
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    e = make();
+    m = Marker(head: e, n: 3, tail: pass(e));
+    println("zero {}", m.n);
+
+    f = fallible().try();
+    g = Marker(head: f, n: 4, tail: e);
+    println("res {}", g.n);
+
+    trio = [Empty, 3](Empty(), Empty(), Empty());
+    h = Marker(head: trio[1], n: 5, tail: trio[2]);
+    println("array {}", h.n);
+
+    Ok(0);
+}

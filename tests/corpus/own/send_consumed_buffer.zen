@@ -1,0 +1,29 @@
+// the accept side of send_ref.zen: `consume` at the call site hands
+// the buffer over and kills the name here, so exactly one actor can
+// reach those bytes. an iso is sendable because you lose it.
+//
+// only the actor prints. main printing too would make the output
+// order a race — the behavior runs on foo's turn, not here — and a
+// corpus test with a racy expected file is worse than no test.
+
+Worker = {}
+
+Worker.impl(Actor, {
+    process = (self :: @Self, ctx: Context, data: Vec<u8>) {
+        data.get(0).match({
+            Ok(b) => ctx.env.out.println("got {}", b),
+            None  => ctx.env.out.println("got an empty buffer"),
+        })
+    }
+})
+
+Error = AllocError | IoError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    buf ::= alloc.Vec<u8>();
+    buf.add(7).try();
+    worker = env.spawn(Worker());
+    worker.process(consume buf);
+    Ok(0);
+}

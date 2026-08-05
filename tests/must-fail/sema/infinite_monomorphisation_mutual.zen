@@ -1,0 +1,23 @@
+// the same divergence split across two functions, which is what defeats
+// a depth check that only looks at the function it is already inside:
+// ping<T> -> pong<Vec<T>> -> ping<Vec<T>> -> pong<Vec<Vec<T>>> -> ...
+//
+// position: the call that widens T.
+
+ping = <T>(alloc: Alloc, x: T) Res<(), AllocError> {
+    v ::= alloc.Vec<T>();
+    v.add(x).try();
+    pong<Vec<T>>(alloc, v).try();
+    Ok(());
+}
+
+pong = <T>(alloc: Alloc, x: T) Res<(), AllocError> {
+    ping<T>(alloc, x).try();
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    ping<i32>(alloc, 1).try();
+    Ok(0);
+}

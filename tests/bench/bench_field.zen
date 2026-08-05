@@ -1,0 +1,47 @@
+// tests/bench/bench_field.zen
+// the two budgets DESIGN.md calls load-bearing. a computed field
+// is re-evaluated on read, so reading one in a loop can hide real
+// work behind a dot. these two benches are the proof that the
+// simple case does not:
+//
+//   Budget(name: "stored_field_read",   ns_op: 2, allocs_op: 0)
+//   Budget(name: "computed_field_read", ns_op: 2, allocs_op: 0)
+//
+// IF THEY EVER DIVERGE, UNIFORM ACCESS IS NOT FREE. that is the
+// whole claim, and it is checked here rather than believed
+
+Rect* = {
+    width: f64,
+    height: f64,
+
+    area* ::= (self: @Self) f64 { self.width * self.height }
+}
+
+Circle* = { radius: f64 }
+
+// width and height are f64, so the impl supplies f64 EXPRESSIONS.
+// Circle stays one f64 wide; these are computed on read
+Circle.impl(Rect, {
+    width: self.radius * 2.0,
+    height: self.radius * 2.0,
+})
+
+// storage: the field is bytes in the struct
+stored_field_read* = (bn: Bencher) Res<(), TestError> {
+    r = Rect(width: 3.0, height: 4.0);
+    total ::= 0.0;
+    bn.iter(() {
+        total = total + r.width;
+    })
+    Ok(());
+}
+
+// computed: the same dot, supplied by an impl. same budget
+computed_field_read* = (bn: Bencher) Res<(), TestError> {
+    c = Circle(radius: 1.5);
+    total ::= 0.0;
+    bn.iter(() {
+        total = total + c.width;
+    })
+    Ok(());
+}

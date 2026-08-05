@@ -1,0 +1,32 @@
+// a handle passed inward as a `:` parameter still allocates. `a` is
+// immutable here and `a.Vec<i32>()` mutates the arena behind it —
+// which is not `a`'s own bytes, so `Alloc`'s methods are `:` and this
+// is legal.
+//
+// the whole std signature convention depends on it: every allocating
+// function in the tree takes `alloc: Alloc`, never `alloc :: Alloc`.
+//
+// and `v` is passed, not moved: a parameter is the same thing a
+// method receiver is (`add* = (v :: Vec<T>, value: T)` IS Vec.add
+// written outside the body), so only `consume` moves.
+
+fill = (a: Alloc, v :: Vec<i32>) Res<(), AllocError> {
+    v.add(1).try();
+    w ::= a.Vec<i32>();
+    w.add(2).try();
+    v.add(3).try();
+    Ok(());
+}
+
+Error = AllocError | IoError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    v ::= alloc.Vec<i32>();
+    fill(alloc, v).try();
+    v.get(1).match({
+        Ok(n) => println("{}", n),
+        None  => println("empty"),
+    })
+    Ok(0);
+}

@@ -1,0 +1,24 @@
+// the third way out: captured by an escaping closure. the thread body
+// escapes — that is why it takes an Alloc — and it may outlive main's
+// block entirely.
+//
+// note the closure has a `@scope` of its OWN, and using that is fine.
+// what is rejected is the captured `s`, which names the enclosing
+// block. this is the same escaping/non-escaping distinction that
+// bans non-local exit from an escaping closure.
+
+Error = AllocError | IoError | ThreadError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    s = @scope;
+    t = env.threads.spawn(alloc, () Res<i32, ThreadError> {
+        s.defer(() { println("goodbye") });
+        Ok(1);
+    }).try();
+    t.join().match({
+        Ok(v)  => println("{}", v),
+        Err(e) => println("thread failed: {}", e),
+    })
+    Ok(0);
+}

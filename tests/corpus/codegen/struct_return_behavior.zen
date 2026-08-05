@@ -1,0 +1,75 @@
+// a struct crossing a BEHAVIOR boundary.
+//
+// STAGE 5. Actors are not in the seed subset (PLAN.md §0.5), so the
+// bootstrapper never compiles this file and the corpus runner must not
+// expect it to pass before the runtime lands. It is written now because
+// TESTING.md asks for the struct-return ABI at a behavior, and because
+// writing it is what surfaces the following:
+//
+// A BEHAVIOR CANNOT RETURN A VALUE. "calling a behavior on a Ref enqueues
+// a message and returns immediately" — there is no caller frame left to
+// return into, which is the whole point of the model. So the nearest thing
+// to a struct return is DESIGN.md's request/response shape: the request
+// carries the reply address, and the response is another behavior call
+// carrying a struct.
+//
+// which makes this a strictly harder ABI question than a plain return, not
+// an easier one. The struct is:
+//   1. copied into a message (the message enum is derived from the
+//      behavior signatures at comptime, so its layout is generated, not
+//      written)
+//   2. stored in a mailbox, in the runtime's memory, outliving the sender's
+//      frame
+//   3. copied out into the behavior's parameters on the receiver's turn
+//
+// Three copies of a 64-byte aggregate through generated types. A large
+// struct returned from a function is one ABI decision; this is three, and
+// the middle one has no C-level function boundary to hide behind.
+//
+// output is deterministic despite the concurrency, and only because of the
+// two guarantees DESIGN.md names: messages from one actor to another
+// arrive in send order (causal), and an actor handles one at a time. main
+// prints NOTHING — interleaving main's output with an actor's would be the
+// nondeterminism, not the actors themselves.
+
+Big = {
+    a: i64,
+    b: i64,
+    c: i64,
+    d: i64,
+    e: i64,
+    f: i64,
+    g: i64,
+    h: i64
+}
+
+Report = {
+    total: i64,
+    count: i64
+}
+
+Sink = {}
+
+Sink.impl(Actor, {
+    done = (self :: @Self, ctx: Context, r: Report) {
+        println("report {} {}", r.total, r.count)
+    }
+})
+
+Worker = {}
+
+Worker.impl(Actor, {
+    tally = (self :: @Self, ctx: Context, v: Big, reply: Ref<Sink>) {
+        reply.done(Report(total: v.a + v.b + v.c + v.d + v.e + v.f + v.g + v.h, count: 8))
+    }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    sink = env.spawn(Sink());
+    worker = env.spawn(Worker());
+
+    worker.tally(Big(a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8), sink);
+    worker.tally(Big(a: 2, b: 2, c: 2, d: 2, e: 2, f: 2, g: 2, h: 2), sink);
+
+    Ok(0);
+}

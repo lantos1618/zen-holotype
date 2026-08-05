@@ -20,6 +20,37 @@ Companion to `PLAN.md`, which says which stage each gate arrives at.
 
 ---
 
+## The test file format
+
+One format, so ten authors produce one suite. The runner reads only this.
+
+```
+tests/corpus/<area>/<name>.zen         the program
+tests/corpus/<area>/<name>.expected    exact stdout, compared byte for byte
+tests/corpus/<area>/<name>.exit        expected exit code; omit the file when it is 0
+tests/corpus/<area>/<name>.stderr      expected stderr substring; omit when none
+
+tests/must-fail/<area>/<name>.zen      must be rejected
+tests/must-fail/<area>/<name>.expected the diagnostic, see below
+```
+
+A test needing several source files is a **directory** of the same name, holding its module tree plus `.expected` / `.exit` / `.stderr` at the directory root. Module trees inside it follow `<folder>/<folder>.zen`, and the entry point is `main.zen`.
+
+**`.expected` in `must-fail` is line one, then one position per line after it:**
+
+```
+is not exported by module
+main.zen:5:7
+```
+
+Line 1 is a **substring** of the message — loose enough to survive rewording, tight enough to catch the wrong error being reported. Every line after it is a position that must appear in the diagnostic, as `path:line:col` with the path relative to the test root. Several lines means the diagnostic must name several places, which `DESIGN.md` requires in at least two cases: an impl collision names both impls, and a duplicate signature names both declarations.
+
+Positions are 1-based line, 1-based **byte** column, and point at the first byte of the smallest offending node.
+
+**Assumptions the whole corpus rests on**, stated here so no test has to restate them: `Ok(0)` from `main` exits 0; `println` appends exactly one `\n`; `{}` on an integer prints decimal with no separators; stdout is compared byte-exactly including the trailing newline.
+
+---
+
 ## Bug classes, by phase
 
 Each of these has produced real bugs in real compilers. Write the test when you write the phase.

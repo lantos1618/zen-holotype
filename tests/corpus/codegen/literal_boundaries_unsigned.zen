@@ -1,0 +1,62 @@
+// u64 literals that do not fit a C `long`.
+//
+// C decides an unsuffixed decimal constant's type by walking `int`, `long
+// int`, `long long int` — SIGNED types only, never unsigned (C11
+// §6.4.4.1p5). So a decimal constant above LLONG_MAX has no type it fits:
+// the program is ill-formed, and a compiler is required to diagnose it. In
+// practice gcc and clang warn and give it `unsigned long long` anyway,
+// which is the worst outcome, because the build stays green and the value
+// is right on this compiler and this target only.
+//
+// the fix is a `ULL` suffix on anything that does not fit a signed 64-bit
+// type — or, better, on every unsigned constant regardless of magnitude,
+// so the rule has no boundary to get wrong. Note that suffixing by
+// magnitude is exactly the bug: `u64 x = 1;` emitted as `1` is `int`, and
+// promotes as `int` in every expression it appears in.
+//
+// the values below straddle the line on purpose:
+//   9223372036854775807  LLONG_MAX      — fits a signed long long
+//   9223372036854775808  2^63           — the first one that does not
+//   9223372036854775809  2^63 + 1       — one past it, so an off-by-one
+//                                          in the "does it fit" test shows
+//   18446744073709551615 UINT64_MAX     — no signed type holds it at all
+//
+// `usize` is deliberately absent: its width is the target's, so any
+// expected output containing it would differ between a 32-bit and a
+// 64-bit run and the corpus would stop being a fixed file.
+
+main = (env: Env) Res<i32, AllocError> {
+    u8_max: u8 = 255;
+    println("u8 {}", u8_max);
+
+    u16_max: u16 = 65535;
+    println("u16 {}", u16_max);
+
+    u32_max: u32 = 4294967295;
+    println("u32 {}", u32_max);
+
+    llong_max: u64 = 9223372036854775807;
+    two_63: u64 = 9223372036854775808;
+    past_63: u64 = 9223372036854775809;
+    println("u64 {} {} {}", llong_max, two_63, past_63);
+
+    u64_max: u64 = 18446744073709551615;
+    println("u64max {}", u64_max);
+
+    // the same value by both spellings must agree. If the literal path
+    // suffixes correctly and the type-constant path does not (or the
+    // reverse), this line is the one that says so.
+    agree = (u64_max == u64.MAX).match({
+        true => 1,
+        false => 0,
+    })
+    println("agree {}", agree);
+
+    // a small unsigned literal is the other half of the rule: emitted
+    // bare it is a signed `int`, and every expression it takes part in
+    // promotes accordingly
+    small: u64 = 1;
+    println("small {}", small);
+
+    Ok(0);
+}

@@ -1,0 +1,60 @@
+// mangling collisions between GENERATED names and names a user wrote.
+//
+// whole-program compilation emits each generic instantiation exactly once
+// (DESIGN.md), which means gen_c synthesises a C symbol for `Pair<i32,
+// i32>` out of the generic's name and its type arguments. Whatever that
+// scheme is, it produces C identifiers — and a user is entitled to have
+// already written one of them.
+//
+// this is the collision class that survives review, because both halves
+// look innocent in isolation: nobody reviewing `Pair_i32_i32 = { .. }`
+// thinks about the generic three files away, and nobody instantiating
+// `Pair<i32, i32>` thinks about a type they have never read.
+//
+// the nested case (`Pair<Pair<i32, i32>, i32>`) is the one that rules out
+// "join the parts with an underscore": a separator that can appear inside
+// a part cannot delimit parts. Length-prefixing, an escape for the
+// separator, or a reserved prefix no user name can start with — pick one
+// and the whole class is closed. Pick none and this file is the bug report.
+
+Pair<A, B> = {
+    first: A,
+    second: B
+}
+
+// exactly what an underscore-joining mangler emits for Pair<i32, i32>
+Pair_i32_i32 = { tag: i32 }
+
+// and for Pair<Pair<i32, i32>, i32> — same string, different parse
+Pair_Pair_i32_i32_i32 = { tag: i32 }
+
+// exactly what it emits for Vec<i32>, which is the instantiation every
+// real program has
+Vec_i32 = { tag: i32 }
+
+id = <T>(x: T) T { x }
+
+// exactly what it emits for id<i32>. same arity, same C signature, so C
+// will accept the redefinition-by-accident in more cases than it rejects it
+id_i32 = (x: i32) i32 { x + 100 }
+
+main = (env: Env) Res<i32, AllocError> {
+    p = Pair(first: 1, second: 2);
+    q = Pair_i32_i32(tag: 4);
+    nested = Pair(first: p, second: 8);
+    r = Pair_Pair_i32_i32_i32(tag: 16);
+    println("generic types {} {} {} {}", p.first + p.second, q.tag, nested.first.first + nested.second, r.tag);
+
+    alloc ::= env.mem.alloc();
+    v ::= alloc.Vec<i32>();
+    v.add(32).try();
+    head = v.get(0).match({
+        Ok(x) => x,
+        None => 0,
+    })
+    w = Vec_i32(tag: 64);
+    println("generic vec {} {}", head, w.tag);
+
+    println("generic fns {} {}", id(7), id_i32(7));
+    Ok(0);
+}

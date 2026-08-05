@@ -1,0 +1,123 @@
+// struct return ABI, at the sizes where the rules change.
+//
+// C hides this: `return s;` compiles whatever the struct is. It is here as
+// a test because gen_c does NOT have to emit `return s;` — the moment it
+// starts returning through an out-parameter for "big" structs, or lowering
+// a two-word struct to a pair, it has taken over a job the C compiler was
+// doing correctly, and it now has to get every size class right.
+//
+// the classes below are the SysV x86-64 ones, and they are the reason to
+// test sizes rather than "a struct":
+//
+//   One    8 bytes             one INTEGER register
+//   Two    16 bytes            two INTEGER registers
+//   Three  17 bytes            past 16, so MEMORY: a hidden sret pointer
+//   Mixed  16 bytes, i64+f64   INTEGER + SSE — one of each, not two of one
+//   Floats 16 bytes, f64+f64   two SSE registers
+//   Big    64 bytes            MEMORY
+//   Nest   80 bytes            MEMORY, and a struct field inside it
+//
+// other targets draw the lines elsewhere (aarch64 hands back up to 16
+// bytes and uses x8 beyond it; Windows x64 returns anything that is not
+// 1/2/4/8 bytes through memory) — which is the argument for emitting plain
+// `return s;` and letting the C compiler own the ABI. This test's job is
+// to make it EXPENSIVE to quietly stop doing that.
+//
+// three emission sites, all of them the same rule:
+//   - a free function returning by value
+//   - a METHOD returning by value: the receiver already occupies the first
+//     argument slot, and an sret pointer takes the slot before it
+//   - a `Res<Big, E>` return: the struct is now inside a tagged union, so
+//     the payload's alignment and the tag's placement both matter
+
+One = { a: i64 }
+
+Two = { a: i64, b: i64 }
+
+Three = { a: i64, b: i64, c: u8 }
+
+Mixed = { a: i64, b: f64 }
+
+Floats = { a: f64, b: f64 }
+
+Big = {
+    a: i64,
+    b: i64,
+    c: i64,
+    d: i64,
+    e: i64,
+    f: i64,
+    g: i64,
+    h: i64
+}
+
+Nest = {
+    big: Big,
+    two: Two
+}
+
+one = () One { One(a: 1) }
+
+two = () Two { Two(a: 2, b: 3) }
+
+three = () Three { Three(a: 4, b: 5, c: 6) }
+
+mixed = () Mixed { Mixed(a: 7, b: 2.5) }
+
+floats = () Floats { Floats(a: 0.5, b: 0.25) }
+
+big = () Big { Big(a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8) }
+
+nest = () Nest { Nest(big: big(), two: two()) }
+
+fallible_big = () Res<Big, AllocError> { Ok(big()) }
+
+// a large struct as an ARGUMENT is the other half of the same rule: the
+// caller builds the copy, the callee reads it
+total = (v: Big) i64 { v.a + v.b + v.c + v.d + v.e + v.f + v.g + v.h }
+
+Source = {
+    seed: i64,
+
+    take = (self: @Self) Big {
+        Big(a: self.seed, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0, h: 0)
+    }
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("one {}", one().a);
+
+    t = two();
+    println("two {} {}", t.a + t.b, two().b);
+
+    th = three();
+    println("three {} {}", th.a + th.b, th.c);
+
+    mx = mixed();
+    mx_b = (mx.b == 2.5).match({
+        true => 1,
+        false => 0,
+    })
+    println("mixed {} {}", mx.a, mx_b);
+
+    fl = floats();
+    fl_a = (fl.a == 0.5).match({
+        true => 1,
+        false => 0,
+    })
+    fl_b = (fl.b == 0.25).match({
+        true => 1,
+        false => 0,
+    })
+    println("floats {} {}", fl_a, fl_b);
+
+    println("big {}", total(big()));
+
+    n = nest();
+    println("nest {} {}", total(n.big), n.two.a + n.two.b);
+
+    println("res {}", total(fallible_big().try()));
+    println("method {}", total(Source(seed: 42).take()));
+
+    Ok(0);
+}

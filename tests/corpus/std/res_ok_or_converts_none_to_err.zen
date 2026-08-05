@@ -1,0 +1,34 @@
+// tests/corpus/std/res_ok_or_converts_none_to_err.zen
+// a None never becomes an Err on its own: you name the reason.
+// ok_or is where the reason is named, and it is the only way a
+// Res<T> reaches a .try() in a Res<T, E> function
+
+LookupError =
+    NotFound
+
+Error = AllocError | LookupError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    v ::= alloc.Vec<i32>();
+    v.add(7).try();
+
+    // Ok passes straight through ok_or, carrying its value, and
+    // the .try() unwraps it: no reason is invented on the way
+    n = v.get(0).ok_or(LookupError.NotFound).try();
+    println("{}", n);
+
+    // the miss becomes the named Err, and it is an Err now - not
+    // a None wearing one
+    v.get(1).ok_or(LookupError.NotFound).match({
+        Ok(m)  => println("{}", m),
+        Err(_) => println("not found"),
+    })
+
+    // absent stays absent when nobody names a reason
+    v.get(1).match({
+        Ok(m) => println("{}", m),
+        None  => println("still none"),
+    })
+    Ok(0);
+}

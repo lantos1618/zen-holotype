@@ -1,0 +1,27 @@
+// EVERY arm consumes, and nothing uses the binding after the match.
+// this must keep compiling, and it is the test a naive checker fails:
+// walk the arms as if they were sequential statements and the second
+// `consume f` looks like a double move.
+//
+// arms are alternative paths. exactly one runs, the state at the join
+// is "consumed" from both, and the value is alive exactly once —
+// under `kept`, which is what drops at the end of main.
+
+Buf = {
+    id: i32,
+}
+
+Buf.impl(Drop, {
+    drop = (self :: @Self) () { /* nothing to release: id is bytes */ }
+})
+
+main = (env: Env) Res<i32, IoError> {
+    f = Buf(id: 1);
+    n = 1;
+    kept = (n == 1).match({
+        true  => consume f,
+        false => consume f,
+    })
+    println("{}", kept.id);
+    Ok(0);
+}

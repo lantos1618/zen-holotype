@@ -1,0 +1,43 @@
+// THE shallow-rule test, named in DESIGN.md and in PLAN.md's stage
+// 0.6 traps: `alloc` is a `:` field and `grow` calls `realloc`
+// through it. it compiles precisely because `realloc` writes the
+// arena, not the two words of the handle — the bitwise-copy test says
+// a copy of this Buf would see the arena change too, so `realloc` is
+// `:`, so the `:` field is enough.
+//
+// if this ever stops compiling, the shallowness bought nothing: every
+// collection in std would need a `::` allocator field.
+
+Buf = {
+    data :: Ptr<u8>,
+    len :: usize,
+    capacity :: usize,
+    alloc: Alloc,
+
+    grow = (self :: @Self) Res<(), AllocError> {
+        cap = (self.capacity == 0).match({
+            true  => 8,
+            false => self.capacity * 2,
+        })
+        self.data = self.alloc.realloc(self.data, cap).try();
+        self.capacity = cap;
+        Ok(());
+    }
+}
+
+Error = AllocError | IoError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    b ::= Buf(
+        data: alloc.raw(8, 1).try(),
+        len: 0,
+        capacity: 0,
+        alloc: alloc,
+    );
+    b.grow().try();
+    println("{}", b.capacity);
+    b.grow().try();
+    println("{}", b.capacity);
+    Ok(0);
+}

@@ -1,0 +1,27 @@
+// a `ref` reaching a behavior parameter. `buf` is writable and this
+// actor keeps holding it, so two actors would be able to touch the
+// same bytes: exactly the race the capabilities exist to make
+// unrepresentable. only `val` and `iso` cross actors.
+//
+// the fix is one word — `worker.process(consume buf)`, which hands
+// the buffer over and kills the name here. that program is
+// corpus/own/send_consumed_buffer.zen.
+
+Worker = {}
+
+Worker.impl(Actor, {
+    process = (self :: @Self, ctx: Context, data: Vec<u8>) {
+        ctx.env.out.println("got the buffer")
+    }
+})
+
+Error = AllocError | IoError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    buf ::= alloc.Vec<u8>();
+    buf.add(1).try();
+    worker = env.spawn(Worker());
+    worker.process(buf);
+    Ok(0);
+}

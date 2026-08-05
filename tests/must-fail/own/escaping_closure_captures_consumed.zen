@@ -1,0 +1,32 @@
+// an ESCAPING closure — the thread body, which is why it takes an
+// Alloc — capturing a binding that was already consumed.
+//
+// the capture is what makes this different from the other use-after-
+// consume files: the use is not on any path main will walk, it is in
+// a body that runs later, on another thread. the checker sees the
+// capture list, so the capture IS the use.
+
+Buf = {
+    id: i32,
+}
+
+Buf.impl(Drop, {
+    drop = (self :: @Self) () { /* nothing to release: id is bytes */ }
+})
+
+Error = AllocError | IoError | ThreadError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    f = Buf(id: 1);
+    g = consume f;
+    t = env.threads.spawn(alloc, () Res<i32, ThreadError> {
+        Ok(f.id);
+    }).try();
+    t.join().match({
+        Ok(v)  => println("{}", v),
+        Err(e) => println("thread failed: {}", e),
+    })
+    println("{}", g.id);
+    Ok(0);
+}

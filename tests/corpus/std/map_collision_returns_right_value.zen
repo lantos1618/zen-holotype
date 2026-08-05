@@ -1,0 +1,42 @@
+// tests/corpus/std/map_collision_returns_right_value.zen
+// every key hashes to the same bucket, on purpose. DESIGN.md: the
+// hash finds the bucket fast, eq confirms the key, because
+// comparing hashes alone returns wrong values on collision. a Map
+// that has never seen a collision has never been tested
+
+Key = {
+    id: i32,
+}
+
+// the collision is the point: a constant hash makes every entry a
+// hash match, so only eq can tell them apart
+Key.impl(Hash, {
+    hash ::= (self: @Self, hasher :: Hasher) u64 { 7 }
+})
+
+Key.impl(Eq, {
+    eq ::= (self: @Self, other: @Self) bool { self.id == other.id }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    m ::= alloc.Map<Key, i32>();
+
+    m.set(Key(id: 1), 100).try();
+    m.set(Key(id: 2), 200).try();
+    m.set(Key(id: 3), 300).try();
+
+    m.get(Key(id: 1)).match({
+        Ok(v) => println("one {}", v),
+        None  => println("one missing"),
+    })
+    m.get(Key(id: 2)).match({
+        Ok(v) => println("two {}", v),
+        None  => println("two missing"),
+    })
+    m.get(Key(id: 3)).match({
+        Ok(v) => println("three {}", v),
+        None  => println("three missing"),
+    })
+    Ok(0);
+}

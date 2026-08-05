@@ -1,0 +1,45 @@
+// two modules, one C symbol.
+//
+// DESIGN.md § Modules: "names are qualified by path, imports bind locally,
+// and two modules may define the same top-level name without colliding."
+// C has one flat namespace for external identifiers, so gen_c has to
+// qualify. The obvious scheme — join the module path components and the
+// symbol name with underscores — is ambiguous the moment a module name or
+// a symbol name contains an underscore, and Zen's own file naming rule
+// (STYLE.md: "siblings repeat the folder as a prefix", `parse/parse_expr`)
+// guarantees they do. So this is not an adversarial edge case; it is the
+// compiler's own source tree.
+//
+//   module `alpha`       + symbol `beta_gamma`  ->  alpha_beta_gamma
+//   module `alpha_beta`  + symbol `gamma`       ->  alpha_beta_gamma
+//
+//   module `alpha`       + type   `beta_Gamma`  ->  alpha_beta_Gamma
+//   module `alpha_beta`  + type   `Gamma`       ->  alpha_beta_Gamma
+//
+// If C accepts the collision (two objects of the same type) the program
+// prints the wrong numbers. If it rejects it, the C compiler names the
+// line. Both are red; only one is easy to read, which is the argument for
+// making the scheme unambiguous instead of unlikely.
+//
+// The second half of the file is the case TESTING.md § Modules names
+// directly: two modules defining the SAME top-level name (`value`), both
+// imported, both used. That one must NOT collide — a mangler that fixes
+// the first problem by hashing everything into one bucket breaks this.
+//
+// SOURCE ROOT: this test's own directory. `alpha/alpha.zen` is module
+// `alpha` by DESIGN.md's `<folder>/<folder>.zen` rule. DESIGN.md does not
+// say what the root of a compilation is, so the corpus fixes it here.
+
+a = alpha
+ab = alpha_beta
+
+main = (env: Env) Res<i32, AllocError> {
+    println("collide {} {}", a.beta_gamma(), ab.gamma());
+    println("samename {} {}", a.value(), ab.value());
+
+    x = a.beta_Gamma(tag: 3);
+    y = ab.Gamma(tag: 4);
+    println("types {} {}", x.tag, y.tag);
+
+    Ok(0);
+}

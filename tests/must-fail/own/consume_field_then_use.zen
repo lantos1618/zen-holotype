@@ -1,0 +1,33 @@
+// `consume` of a FIELD. the move leaves a hole in `p`, and reading
+// the field back is a use of a dead place.
+//
+// the place, not the binding, is what is tracked: `p.right` below is
+// untouched and must stay readable. tracking whole bindings only is
+// too coarse; tracking arbitrary expressions is too much.
+//
+// note this program also leaves `p` partially moved at the end of
+// main, which is the SEPARATE diagnostic in
+// must-fail/own/partial_move_at_scope_exit.zen. the position asserted
+// here is the read of the moved field.
+
+Buf = {
+    id: i32,
+}
+
+Buf.impl(Drop, {
+    drop = (self :: @Self) () { /* nothing to release: id is bytes */ }
+})
+
+Pair = {
+    left :: Buf,
+    right :: Buf,
+}
+
+main = (env: Env) Res<i32, IoError> {
+    p ::= Pair(left: Buf(id: 1), right: Buf(id: 2));
+    l = consume p.left;
+    println("{}", p.left.id);
+    println("{}", p.right.id);
+    println("{}", l.id);
+    Ok(0);
+}

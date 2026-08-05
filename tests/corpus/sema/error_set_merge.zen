@@ -1,0 +1,46 @@
+// propagation merges sets: two callees with different error types, both
+// propagated with .try(), land in the union the caller declares. no
+// conversion happens -- the errors keep their identity, the SET widens.
+
+AError =
+    Zero,
+    Negative
+
+BError =
+    TooBig,
+    Odd
+
+Both = AError | BError
+
+checked = (n: i32) Res<i32, AError> {
+    (n == 0).match({
+        true  => Err(AError.Zero),
+        false => Ok(n),
+    })
+}
+
+bounded = (n: i32) Res<i32, BError> {
+    (n > 100).match({
+        true  => Err(BError.TooBig),
+        false => Ok(n),
+    })
+}
+
+both = (n: i32) Res<i32, Both> {
+    a = checked(n).try();
+    b = bounded(a).try();
+    Ok(b);
+}
+
+main = (env: Env) Res<i32, Both> {
+    println("{}", both(5).try());
+    both(0).match({
+        Ok(_)  => println("zero ok"),
+        Err(_) => println("zero rejected"),
+    })
+    both(200).match({
+        Ok(_)  => println("big ok"),
+        Err(_) => println("big rejected"),
+    })
+    Ok(0);
+}

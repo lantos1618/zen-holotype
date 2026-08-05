@@ -1,0 +1,31 @@
+// tests/corpus/std/res_try_error_sets_merge.zen
+// propagation merges error sets. build_label's set is inferred
+// (internal, so `_`) and is the union of what its .try() calls can
+// raise; main writes the union out, because main is a boundary
+
+ParseError =
+    NotANumber
+
+// AllocError from String(), IoError from add, ParseError from
+// ok_or - three sets merged by three .try()s
+build_label = (alloc: Alloc, ok: bool) Res<String, _> {
+    sb ::= alloc.String("").try();
+    ok.then(() { 1 }).ok_or(ParseError.NotANumber).try();
+    sb.add("label {}", 1).try();
+    Ok(sb);
+}
+
+Error = AllocError | IoError | ParseError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+
+    s = build_label(alloc, true).try();
+    println("{}", s.view());
+
+    build_label(alloc, false).match({
+        Ok(_)  => println("built"),
+        Err(_) => println("err"),
+    })
+    Ok(0);
+}

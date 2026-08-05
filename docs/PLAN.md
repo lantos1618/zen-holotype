@@ -145,7 +145,7 @@ Constructs the grammar must cover, all present in `DESIGN.md`:
 - `consume e`, `e.try()`, `+% -% *%`
 - module bindings and re-export: `Res*, Ok* = std.core.result`
 
-**Gate:** `tree-sitter test` green on a corpus containing every code block in `DESIGN.md`, plus a `parse-errors/` directory of things that must *fail* to parse. Both directions matter — a grammar that accepts everything is not a grammar.
+**Gate:** `tree-sitter test` green on a corpus containing every **Zen** code block in `DESIGN.md` (the tree listing, the `.gitignore`, and the C source are not Zen), plus an `errors/` directory of things that must *fail* to parse. Both directions matter — a grammar that accepts everything is not a grammar.
 
 ### 0.2 Frontend
 
@@ -173,6 +173,14 @@ Checks required at stage 0:
 **Deterministic: same input, byte-identical output.** Everything downstream depends on this — the fixpoint test in stage 1 is worthless without it. Sort every map iteration, never emit a pointer value, never emit a timestamp.
 
 Emit traps for the failure model: overflow on `+ - *`, zero divisor on `/ %`, out-of-range fixed-array index. `+% -% *%` compile to wrapping. A trap prints `file:line:col` and aborts.
+
+**Name mangling is unspecified and has to be decided here.** C has one flat namespace; Zen lets two modules define the same top-level name. Joining path components with `_` is *provably* ambiguous, and `STYLE.md`'s own sibling-prefix convention (`parse/parse_expr`) triggers it in the compiler's own tree. Decide, in this order:
+
+1. **The scheme** — length-prefixed (Itanium-style), a separator no Zen identifier can contain, or escaping (`_` doubles). Not naive joining.
+2. **A reserved prefix** for compiler-generated names (temporaries, trap helpers, monomorphised instances, closure records, the comptime-derived actor message enums), unreachable by any mangled user name. The trap: `__zen_` and `_Zen_` are themselves reserved to the C implementation by C11 §7.1.3, and bare `zen_` collides with a user writing `zen_trap`.
+3. **Which sites mangle** — locals, parameters, **struct members**, enum constants, function names, struct tags, labels, instantiation names. Members are the one always missed, and the one standard-header macros break (`x.errno`).
+4. **Which reserved list** — handle the reserved *identifier class* (`_Uppercase`, leading `__`) rather than a hand-maintained keyword list, which subsumes every future `_Atomic` for free. State which C standard `gen_c` targets.
+5. **How type arguments render** in an instantiation name, including nesting, as a pure function of the type rather than of instantiation order — otherwise determinism dies here.
 
 **Gate:** a corpus of Zen programs with expected stdout, each compiled and run. Include one program per trap, asserting non-zero exit and the right message.
 

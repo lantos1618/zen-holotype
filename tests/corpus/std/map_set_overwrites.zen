@@ -1,0 +1,35 @@
+// tests/corpus/std/map_set_overwrites.zen
+// set probes and overwrites where the hash matches AND the key is
+// eq. with a colliding hash the probe finds a match on every entry,
+// so a set that overwrites on hash alone clobbers the wrong row
+
+Key = {
+    id: i32,
+}
+
+Key.impl(Hash, {
+    hash ::= (self: @Self, hasher :: Hasher) u64 { 7 }
+})
+
+Key.impl(Eq, {
+    eq ::= (self: @Self, other: @Self) bool { self.id == other.id }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    m ::= alloc.Map<Key, i32>();
+
+    m.set(Key(id: 1), 100).try();
+    m.set(Key(id: 2), 200).try();
+    m.set(Key(id: 1), 111).try();
+
+    m.get(Key(id: 1)).match({
+        Ok(v) => println("one {}", v),
+        None  => println("one missing"),
+    })
+    m.get(Key(id: 2)).match({
+        Ok(v) => println("two {}", v),
+        None  => println("two missing"),
+    })
+    Ok(0);
+}

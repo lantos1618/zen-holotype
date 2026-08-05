@@ -1,0 +1,37 @@
+// tests/corpus/std/display_allocating_overload_picked_by_argument.zen
+// two toStrings, one name: resolution is on the declared parameter
+// type, so a String argument picks the outlined form and an Alloc
+// picks the sealed allocating one. the second is DERIVED from the
+// first, so they can never disagree - and this test is what says
+// so out loud
+
+Error = AllocError | IoError
+
+Point = {
+    x: i32,
+    y: i32,
+}
+
+Point.impl(Display, {
+    toString ::= (self: @Self, sb :: String) Res<(), IoError> {
+        sb.add("{}:{}", self.x, self.y)
+    }
+})
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    p = Point(x: 5, y: 6);
+
+    sb ::= alloc.String("").try();
+    p.toString(sb).try();
+    println("buffer {}", sb.view());
+
+    owned = p.toString(alloc).try();
+    println("owned {}", owned.view());
+
+    (sb.view() == owned.view()).match({
+        true  => println("agree"),
+        false => println("diverged"),
+    })
+    Ok(0);
+}

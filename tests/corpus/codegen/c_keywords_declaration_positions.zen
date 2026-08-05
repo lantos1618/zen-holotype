@@ -1,0 +1,62 @@
+// the same C keywords, in every DECLARATION POSITION rather than as local
+// bindings.
+//
+// a mangler bolted onto the local-variable printer passes
+// c_keywords_c89.zen and still emits an illegal C struct tag, member name,
+// function name, parameter name, enum constant, generic type parameter, or
+// file-scope object. Each of those is a separate site in gen_c, and each
+// one is a separate chance to forget. This file makes every site red at
+// once.
+//
+// enum variants are the sharpest of them: a Zen variant becomes a C enum
+// constant (or a union member, or both), and C enum constants live in the
+// ORDINARY identifier namespace — `case` as an enum constant is a syntax
+// error at the point of USE, in a switch the user never wrote.
+//
+// Zen has no capitalisation rule for type names (`str` and `bool` are
+// lowercase types in DESIGN.md), so `static = { .. }` is an ordinary type
+// declaration and not a stylistic provocation.
+//
+// assumed, and unspecified in DESIGN.md: a payload variant is constructed
+// `Type.Variant(payload)`, matching `Shape.Unit` for the payload-free form.
+
+// file scope in C, which is a third identifier space again
+inline = 11;
+
+// a struct type named after a keyword, with keyword-named fields and a
+// keyword-named method
+static = {
+    volatile: i32,
+    const: i32,
+
+    default = (self: @Self) i32 { self.volatile + self.const }
+}
+
+// an enum type named after a keyword, with keyword-named variants
+union =
+    case(i32),
+    goto(i32),
+    extern
+
+// a top-level function named after a keyword, with keyword-named parameters
+sizeof = (register: i32, restrict: i32) i32 { register + restrict }
+
+// a generic whose TYPE PARAMETER is named after a keyword: the mangled
+// instantiation name is built out of the parameter, so the mangler has to
+// hold at the point where names are synthesised, not only where they are
+// copied
+signed = <unsigned>(typedef: unsigned) unsigned { typedef }
+
+main = (env: Env) Res<i32, AllocError> {
+    s = static(volatile: 3, const: 4);
+
+    u = union.case(5);
+    n = u.match({
+        case(v) => v,
+        goto(v) => v,
+        extern => 0,
+    })
+
+    println("positions {} {} {} {} {}", s.default(), n, sizeof(6, 7), signed(8), inline);
+    Ok(0);
+}

@@ -1,0 +1,44 @@
+// tests/corpus/std/display_nesting_reuses_the_buffer.zen
+// nesting never allocates: Line's toString hands its own buffer
+// down to Point's, so the whole tree is written into the single
+// String main made. an inner toString that allocated would still
+// print this, which is why the bench next door counts allocs
+
+Error = AllocError | IoError
+
+Point = {
+    x: i32,
+    y: i32,
+}
+
+Point.impl(Display, {
+    toString ::= (self: @Self, sb :: String) Res<(), IoError> {
+        sb.add("{}:{}", self.x, self.y)
+    }
+})
+
+Line = {
+    a: Point,
+    b: Point,
+}
+
+Line.impl(Display, {
+    toString ::= (self: @Self, sb :: String) Res<(), IoError> {
+        sb.add("line ").try();
+        self.a.toString(sb).try();
+        sb.add(" -> ").try();
+        self.b.toString(sb).try();
+        Ok(());
+    }
+})
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String("").try();
+
+    line = Line(a: Point(x: 1, y: 2), b: Point(x: 3, y: 4));
+    line.toString(sb).try();
+
+    println("{}", sb.view());
+    Ok(0);
+}

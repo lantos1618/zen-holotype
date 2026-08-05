@@ -1,0 +1,29 @@
+// DESIGN.md, verbatim:
+//
+//   buf ::= alloc.Vec<u8>();
+//   worker.process(consume buf);
+//   buf.add(2).try();              // ERROR: buf was consumed
+//
+// sending IS consuming — an iso is handed over, and you lose it. same
+// checker, same diagnostic as a local move; the only new thing is
+// that the new owner runs on another scheduler thread.
+
+Worker = {}
+
+Worker.impl(Actor, {
+    process = (self :: @Self, ctx: Context, data: Vec<u8>) {
+        ctx.env.out.println("got the buffer")
+    }
+})
+
+Error = AllocError | IoError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    buf ::= alloc.Vec<u8>();
+    buf.add(1).try();
+    worker = env.spawn(Worker());
+    worker.process(consume buf);
+    buf.add(2).try();
+    Ok(0);
+}

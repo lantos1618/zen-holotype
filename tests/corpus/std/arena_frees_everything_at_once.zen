@@ -1,0 +1,50 @@
+// tests/corpus/std/arena_frees_everything_at_once.zen
+// the arena is the flagship Drop user: everything ever allocated
+// from it goes back in one shot when it leaves scope. hundreds of
+// allocations, no frees written anywhere, and the values declared
+// after it drop BEFORE it - so their drops still see live memory
+
+Error = AllocError | IoError
+
+Noisy = {
+    id: i32,
+    env: Env,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () {
+        env = self.env;
+        println("drop {}", self.id);
+    }
+})
+
+main = (env: Env) Res<i32, Error> {
+    println("start");
+    {
+        alloc ::= env.mem.alloc();
+        marker = Noisy(id: 1, env: env);
+
+        v ::= alloc.Vec<i32>();
+        Range(0, 100).loop((h, n) {
+            v.add(n).try();
+        })
+
+        m ::= alloc.Map<str, i32>();
+        m.set("count", 100).try();
+
+        sb ::= alloc.String("").try();
+        Range(0, 50).loop((h, n) {
+            sb.add("{}", n).try();
+        })
+
+        println("built {} {}", v.len, sb.view().len);
+    }
+    // one drop line, then every page of that arena is gone
+
+    // and the world still works: a second arena, same program
+    alloc2 ::= env.mem.alloc();
+    again ::= alloc2.Vec<i32>();
+    again.add(7).try();
+    println("after {}", again.len);
+    Ok(0);
+}

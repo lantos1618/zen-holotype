@@ -1,0 +1,56 @@
+// signed literals at the exact type boundary.
+//
+// the C hazard, and it is a real one at every width:
+//
+//   int32_t x = -2147483648;
+//
+// there is no negative literal in C. That is unary minus applied to the
+// constant `2147483648`, which does not fit in `int`, so the constant has
+// type `long` (or `long long`), the negation happens in the wider type,
+// and the result is then converted. On LP64 it lands on the right value by
+// luck; with `-Wall` it warns; in a `#if` or an enum initialiser it can
+// change meaning. The idiom that is always correct is `(-2147483647 - 1)`,
+// which is exactly how <stdint.h> spells INT32_MIN — so the safe emission
+// is either the macro or that form, never the bare token.
+//
+// this file writes the negative extremes as `iN.MIN` rather than as
+// literals ON PURPOSE. TESTING.md § Lexer records `-2147483648` as an open
+// question (a too-large positive under a unary minus), and a codegen test
+// that must PASS is the wrong place to settle a lexer question. Whichever
+// way that lands, `i32.MIN` still has to reach the C output as a value
+// that is exactly INT32_MIN.
+//
+// `iN.MIN` / `iN.MAX` are used by TESTING.md § Traps but are not defined
+// anywhere in DESIGN.md; the corpus assumes they exist.
+//
+// no arithmetic here, deliberately. `i32.MAX + 1` belongs to
+// tests/corpus/traps/ — and DESIGN.md's failure model means gen_c checks
+// BEFORE the operation or through __builtin_*_overflow, so a boundary
+// VALUE and a boundary OPERATION are two different tests with two
+// different owners.
+
+main = (env: Env) Res<i32, AllocError> {
+    i8_min: i8 = i8.MIN;
+    i8_max: i8 = 127;
+    println("i8 {} {}", i8_min, i8_max);
+
+    i16_min: i16 = i16.MIN;
+    i16_max: i16 = 32767;
+    println("i16 {} {}", i16_min, i16_max);
+
+    i32_min: i32 = i32.MIN;
+    i32_max: i32 = 2147483647;
+    println("i32 {} {}", i32_min, i32_max);
+
+    i64_min: i64 = i64.MIN;
+    i64_max: i64 = 9223372036854775807;
+    println("i64 {} {}", i64_min, i64_max);
+
+    // 2^31 exactly: fits i64 comfortably, and is the point where the C
+    // constant's own type changes from `int` to `long`. A missing suffix
+    // is invisible on LP64 and wrong on ILP32 and on Windows x64.
+    two_31: i64 = 2147483648;
+    println("wide {}", two_31);
+
+    Ok(0);
+}
