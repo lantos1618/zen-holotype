@@ -1,0 +1,198 @@
+// std.mem.mem_arena
+//
+// The arena, and the page authority it draws from.
+//
+// An arena owns pages, hands out bumps of them, and releases every
+// one at once when it drops. It is the allocator the whole language
+// defaults to — `alloc ::= env.mem.alloc()` in main, one arena per
+// test, one per actor — and the trade it makes is stated plainly:
+// nothing is ever reused, so allocation is a compare and an add,
+// and everything is reclaimed in a single shot at the end.
+//
+// THE SPLIT THIS FILE EXISTS TO DRAW. The Arena owns the memory and
+// is what Drop applies to. The Alloc handle pointing at it owns
+// nothing: it is two words, it copies freely, and it is not Drop.
+// `alloc.Vec<i32>()` copies those two words into the Vec; dropping
+// the arena releases everything they ever handed out.
+//
+// WHY Arena IS ONE POINTER. Every Alloc method takes `self: @Self`,
+// so an allocation may not write the receiver's own bytes — and a
+// bump allocator obviously changes when it allocates. Both are true
+// at once because what changes lives BEHIND a pointer: the Arena is
+// a fixed handle onto an ArenaState. A bitwise copy of the Arena
+// sees every bump, which is exactly DESIGN.md's test answering `:`.
+// The receiver rule is not worked around here, it is satisfied.
+
+Alloc, AllocError = std.mem.mem_alloc
+Ptr, null_ptr = std.mem.mem_ptr
+
+// how much an arena asks the page authority for when it needs more.
+// Large enough that chaining is rare, small enough that a program
+// making one arena per test does not reserve the machine
+PAGE_BYTES: usize = 65536
+
+// the bookkeeping ahead of every run raw hands out: its own length
+// in bytes, one usize wide.
+//
+// realloc needs the OLD length and DESIGN.md's signature does not
+// carry one — `realloc(p, count)` names only the new count — so the
+// allocation carries it instead. This is the one place std pays a
+// word per allocation, and it is the price of that signature
+HEADER_BYTES: usize = usize.BITS / 8
+
+// the strictest alignment any Zen value needs. An arena aligns
+// every run it re-requests to this instead of tracking T's own
+// alignment, which is what keeps realloc from having to ask Ptr a
+// second layout question
+ALIGN_MAX: usize = 16
+
+// round an offset up to the next multiple of `align`. Alignments
+// are powers of two and never zero, so `%` can neither trap nor
+// surprise
+align_up = (offset: usize, align: usize) usize {
+    raised = offset + align - 1;
+    raised - (raised % align)
+}
+
+// one region acquired from the page authority. Its header lives in
+// its own first bytes, so describing a page costs no second
+// allocation, and `prev` is the chain drop walks back along
+Page* = {
+    prev: Ptr<Page>,
+    base: Ptr<u8>,    // first byte this page hands out
+    size: usize,      // bytes available from base
+}
+
+// everything about an arena that CHANGES, behind one pointer.
+//
+// Not exported: what an arena is made of is not part of what an
+// arena is. The star gate is the whole visibility story, and this
+// name has no star for the same reason Entry has none in std.
+ArenaState = {
+    mem: Mem,           // page authority; an arena never has ambient access
+    head :: Ptr<Page>,  // the page currently being handed out of
+    next :: usize,      // bytes used in that page
+}
+
+Arena* = {
+    state: Ptr<ArenaState>,
+
+    // hand `size` bytes out of the current page, or chain a new one
+    // when they will not fit. Private: bumping is how an arena
+    // works, not what it offers
+    bump = (self: @Self, s: ArenaState, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        page = s.head.read(0);
+        slot = align_up(s.next, HEADER_BYTES);
+        start = align_up(slot + HEADER_BYTES, align);
+        (start + size <= page.size).match({
+            true => {
+                self.state.write(0, ArenaState(mem: s.mem, head: s.head, next: start + size));
+                run = page.base.offset(start);
+                run.back(HEADER_BYTES).to<usize>().write(0, size);
+                Ok(run)
+            },
+            false => self.chain(size, align),
+        });
+    }
+
+    // acquire a fresh page and hand the request out of that. The
+    // page is asked for large enough to satisfy the request outright
+    // — header, alignment and all — so the retry below runs exactly
+    // once and can never chain again
+    chain = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        s = self.state.read(0);
+        want = HEADER_BYTES + align + size;
+        bytes = (want > PAGE_BYTES).match({
+            true => want,
+            false => PAGE_BYTES,
+        });
+        page = s.mem.page(bytes, s.head).try();
+        self.state.write(0, ArenaState(mem: s.mem, head: page, next: 0));
+        self.raw(size, align)
+    }
+}
+
+// `self: @Self` on every one of these, and it is deliberate.
+// Allocating changes the pages behind the handle, never the
+// handle's own bytes, so a bitwise copy of the Arena sees the
+// change — which is what lets Vec hold `alloc: Alloc` immutably and
+// still grow through it.
+Arena.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        s = self.state.read(0);
+        s.head.is_null().match({
+            true => self.chain(size, align),
+            false => self.bump(s, size, align),
+        });
+    }
+
+    // an arena never shrinks and never reuses: it hands out a fresh
+    // run and copies the old one in. The old run stays until the
+    // whole arena drops, which is the trade an arena exists to make.
+    // A null p is a fresh allocation with nothing to copy, so an
+    // empty Vec grows through exactly this call
+    realloc = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        src = p.to<u8>();
+        want = p.bytes(count);
+        old = src.is_null().match({
+            true => 0,
+            false => src.back(HEADER_BYTES).to<usize>().read(0),
+        });
+        keep = (old > want).match({
+            true => want,
+            false => old,
+        });
+        dst = self.raw(want, ALIGN_MAX).try();
+        dst.copy_from(src, keep);
+        Ok(dst.to<T>())
+    }
+
+    // an arena frees nothing per allocation. Every page goes back at
+    // once when the arena drops, so this is the design and not a stub
+    free = <T>(self: @Self, p: Ptr<T>) () {}
+})
+
+// The one `::` receiver in std.mem. Drop really does destroy the
+// receiver's own bytes, and the compiler runs it exactly once —
+// which is why `consume` exists at all, and why an Arena cannot be
+// copied while the Alloc handle onto it can.
+Arena.impl(Drop, {
+    drop = (self :: @Self) () {
+        s = self.state.read(0);
+        page ::= s.head;
+        loop(() { !page.is_null() }, (h) {
+            // read the link BEFORE releasing: the header lives in
+            // the region that is about to go away
+            prev = page.read(0).prev;
+            s.mem.release(page);
+            page = prev;
+        });
+    }
+})
+
+// The page authority. It is the only thing in the language that can
+// obtain memory from the operating system, and main receives it on
+// Env — law 2, no ambient authority, not even for pages. Everything
+// above this struct is ordinary Zen.
+//
+// Like Alloc it is a handle, so its methods are `:` too: asking for
+// a page changes the operating system's idea of this process, not
+// the two words naming the authority.
+Mem* = {
+    // a fresh arena, rooted in this authority. It owns no pages
+    // yet — the first raw() chains one — so there is nothing here
+    // that can fail, and `alloc ::= env.mem.alloc()` needs no
+    // .try(). The ArenaState comes out of the authority's own
+    // reserve, which is why an Arena is a bare value and not a Res
+    alloc* = (self: @Self) Arena
+
+    // one region of at least `size` bytes, page-aligned, with its
+    // Page header written into its own first bytes and linked onto
+    // `prev`. The arena is the only caller: this is where pages
+    // come from, and there is no second door
+    page* = (self: @Self, size: usize, prev: Ptr<Page>) Res<Ptr<Page>, AllocError>
+
+    // hand a region back. Arena.drop calls this once per page and
+    // nothing else calls it at all
+    release* = (self: @Self, page: Ptr<Page>) ()
+}

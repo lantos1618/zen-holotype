@@ -1,0 +1,146 @@
+// std.core.num
+//
+// The extremes and the width of every primitive numeric type.
+//
+// A struct body may bind a name to a VALUE rather than to a field,
+// and it is read as `Type.NAME` — the access form `Shape.Unit`
+// already uses. The difference from a field: a field declares
+// storage per value, a constant declares one value per type, which
+// is the only kind i32 could have — it has no instances to give a
+// field storage in.
+//
+// Every constant here is starred. Law 6 has no exemption: `*` means
+// the name crosses a module boundary, and therefore its type is
+// written and not inferred. `i32.MAX` is read from outside std by
+// ordinary user code, so the star is not decoration.
+//
+// BITS is a usize so it is usable wherever a comptime value is:
+//
+//   buf: [u8, i32.BITS]
+//
+// The arithmetic these bound TRAPS rather than wrapping — `i32.MAX
+// + 1` aborts, and a trap the compiler can prove will fire is a
+// compile error. `+% -% *%` are the wrapping forms, for when
+// wrapping is the intent. That holds for unsigned types too: a u8
+// reaching 256 is the same bug an i8 reaching 128 is.
+
+// The negative extremes are written as plain literals, which makes
+// each of them a unary minus applied to a positive that does not
+// fit the type on its own — the classic. It must be accepted, and
+// tests/corpus/lex/number_i32_min_literal.zen is where that is
+// pinned. In C the same token sequence is a real hazard, so gen_c
+// emits the `(-2147483647 - 1)` form; that is a backend concern and
+// not a reason to write the value here in two pieces.
+
+i8* = {
+    MIN*: i8 = -128,
+    MAX*: i8 = 127,
+    BITS*: usize = 8,
+}
+
+i16* = {
+    MIN*: i16 = -32768,
+    MAX*: i16 = 32767,
+    BITS*: usize = 16,
+}
+
+i32* = {
+    MIN*: i32 = -2147483648,
+    MAX*: i32 = 2147483647,
+    BITS*: usize = 32,
+}
+
+i64* = {
+    MIN*: i64 = -9223372036854775808,
+    MAX*: i64 = 9223372036854775807,
+    BITS*: usize = 64,
+}
+
+u8* = {
+    MIN*: u8 = 0,
+    MAX*: u8 = 255,
+    BITS*: usize = 8,
+}
+
+u16* = {
+    MIN*: u16 = 0,
+    MAX*: u16 = 65535,
+    BITS*: usize = 16,
+}
+
+u32* = {
+    MIN*: u32 = 0,
+    MAX*: u32 = 4294967295,
+    BITS*: usize = 32,
+}
+
+// u64.MAX fits no signed C type, so gen_c suffixes it. That is
+// tests/corpus/codegen/literal_boundaries_unsigned.zen's subject,
+// and the constant path and the literal path must agree.
+u64* = {
+    MIN*: u64 = 0,
+    MAX*: u64 = 18446744073709551615,
+    BITS*: usize = 64,
+}
+
+// usize is the target's pointer width, so these three are the one
+// place in this file that is not a property of the language. Both
+// architectures DESIGN.md names — Builder.arch is X86_64 or Arm64 —
+// are 64-bit; a 32-bit target changes this declaration and nothing
+// else. No corpus test may print a usize extreme for the same
+// reason.
+usize* = {
+    MIN*: usize = 0,
+    MAX*: usize = 18446744073709551615,
+    BITS*: usize = 64,
+}
+
+// MIN on a float is the type's minimum: the most negative FINITE
+// value, exactly as MIN on i32 is. It is deliberately NOT C's
+// FLT_MIN, which names the smallest positive normal — a different
+// quantity wearing the same name, and one of the older footguns in
+// systems programming. One name, one concept.
+//
+// The digits are written out because Zen's numeric literals are
+// decimal `d.d` only: there is no exponent form to write
+// 3.4028235e38 with, and inventing one to shorten a comment is not
+// on offer. Both values happen to be integers, so the expansion is
+// exact rather than rounded.
+
+f32* = {
+    MIN*: f32 = -340282346638528859811704183484516925440.0,
+    MAX*: f32 = 340282346638528859811704183484516925440.0,
+    BITS*: usize = 32,
+}
+
+f64* = {
+    MIN*: f64 = -179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.0,
+    MAX*: f64 = 179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.0,
+    BITS*: usize = 64,
+}
+
+// conversions are methods, never a cast keyword. only LOSSLESS
+// widening lives here: a narrowing conversion can fail, so it
+// belongs in a Res-returning function someone writes on purpose
+to_u16* = (self: u8) u16
+to_u32* = (self: u8) u32
+to_u64* = (self: u8) u64
+to_u32* = (self: u16) u32
+to_u64* = (self: u16) u64
+to_u64* = (self: u32) u64
+to_usize* = (self: u32) usize
+
+to_i16* = (self: i8) i16
+to_i32* = (self: i8) i32
+to_i64* = (self: i8) i64
+to_i32* = (self: i16) i32
+to_i64* = (self: i16) i64
+to_i64* = (self: i32) i64
+
+to_i32* = (self: u8) i32
+to_i64* = (self: u8) i64
+to_i64* = (self: u16) i64
+to_i64* = (self: u32) i64
+
+to_f64* = (self: i32) f64
+to_f64* = (self: f32) f64

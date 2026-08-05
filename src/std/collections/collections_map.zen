@@ -1,0 +1,63 @@
+// src/std/collections/collections_map.zen
+// Map<K, V>. the hash finds the row fast, eq confirms the key:
+// comparing hashes alone returns wrong values on collision, and a Map
+// that has never seen a collision has never been tested
+
+Alloc, AllocError = std.mem
+Range = std.core.range
+Vec = std.collections.collections_vec
+
+// internal: no *, not visible outside std.collections
+Entry<K, V> = {
+    hash: u64,
+    key: K,
+    value: V,
+}
+
+// bounds: K must be Eq + Hash. neither half is optional — the hash
+// without the eq is a wrong answer, and the eq without the hash is a
+// bare scan
+Map*<K: Eq + Hash, V> = {
+    entries :: Vec<Entry<K, V>>,
+
+    set* = (self :: @Self, key: K, value: V) Res<(), AllocError> {
+        h = key.hash(Hasher());
+        entry = Entry(hash: h, key: key, value: value);
+        self.index_of(h, key).match({
+            // a key already here is overwritten where it already sits
+            Ok(i) => { self.entries.set(i, entry); Ok(()) },
+            // a new key is appended, and only the append can allocate
+            None  => self.entries.add(entry),
+        }).try();
+        Ok(());
+    }
+
+    get* = (self: @Self, key: K) Res<V> {
+        h = key.hash(Hasher());
+        i = self.index_of(h, key).try();
+        e = self.entries.get(i).try();
+        Ok(e.value);
+    }
+
+    // the hash is only a cheap pre-filter; eq is what answers. an
+    // absent key landing among occupied rows is None, and never
+    // somebody else's value
+    index_of = (self: @Self, h: u64, key: K) Res<usize> {
+        Range(0, self.entries.len).find((i) {
+            self.entries.get(i).match({
+                Ok(e) => (e.hash == h) && e.key.eq(key),
+                None  => false,
+            })
+        })
+    }
+}
+
+// `alloc.Map<str, i32>()`: a ufcs function whose first parameter is an
+// Alloc, beside Map for the same reason Vec's is beside Vec — entries
+// is not exported, so only this module can build an empty one.
+//
+// the bound travels with the return type: a Map<K, V> whose K is not
+// Eq + Hash is not a Map, so this cannot be written `<K, V>`
+Map* = <K: Eq + Hash, V>(a: Alloc) Map<K, V> {
+    Map(entries: Vec<Entry<K, V>>(a))
+}

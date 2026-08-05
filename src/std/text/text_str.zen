@@ -1,0 +1,87 @@
+// src/std/text/text_str.zen
+// str — a borrowed view of text: a pointer and a byte count. No alloc, no
+// growth, no allocator, no ownership. String literals are str, and they live
+// in static memory.
+//
+// str is BYTES, and it never pretends otherwise. `len` is a byte count,
+// `s[i]` yields a u8, `==` is bytewise: "héllo".len is 6, not 5, and
+// "héllo"[1] is the first byte of a two-byte sequence rather than 'e'.
+// UTF-8 is a set of FUNCTIONS over these bytes — text_utf8.zen — paid for
+// only where the guarantee is wanted.
+
+Ptr = std.mem.mem
+Eq, Hash, Hasher = std.core.core
+
+str* = {
+    data: Ptr<u8>,
+    len*: usize,      // * so a byte count is readable outside this module
+
+    is_empty* = (self: @Self) bool { self.len == 0 }
+
+    // the form for a lookup that can legitimately miss — Vec.get's shape.
+    // text_utf8 reads through this, because a sequence running off the end
+    // of the string is bad input and not a bug
+    get* = (self: @Self, i: usize) Res<u8> {
+        (i < self.len).match({
+            true  => Ok(self.data.read(i)),
+            false => None,
+        });
+    }
+
+    // what `s[i]` means. An index out of range is a BUG, not a miss, so it
+    // TRAPS — the fixed-array rule of DESIGN.md's failure model, applied to
+    // bytes. `self.len - i - 1` underflows for every i >= len, and unsigned
+    // underflow is the trap: no branch, and nothing to forget to check
+    index* = (self: @Self, i: usize) u8 {
+        self.len - i - 1;
+        self.data.read(i);
+    }
+
+    // a view into a view: the same bytes, no copy, no alloc. Out of range
+    // traps for the same reason `index` does, and by the same means — the
+    // two subtractions ARE the bounds check
+    slice* = (self: @Self, from: usize, to: usize) str {
+        tail = self.len - to;
+        str(data: self.data.offset(from), len: self.len - from - tail);
+    }
+}
+
+// the only way to build a str outside this module: `data` carries no star,
+// so a raw pointer never reaches the surface. String.view borrows through it
+str_at* = (data: Ptr<u8>, len: usize) str { str(data: data, len: len) }
+
+// FNV's basis and prime. Zen has no bitwise operators, so this is FNV-1a's
+// shape with a wrapping add where the xor would be
+STR_HASH_SEED*: u64 = 14695981039346656037
+STR_HASH_MULT*: u64 = 1099511628211
+
+str.impl(Eq, {
+    // bytewise, and the LENGTH is part of it: a prefix is not the whole.
+    // Comparing over the shorter length is the classic bug, so the lengths
+    // decide first
+    eq ::= (self: @Self, other: @Self) bool {
+        (self.len == other.len).match({
+            false => false,
+            true  => Range(0, self.len)
+                .find((i) { self.data.read(i) != other.data.read(i) })
+                .match({
+                    Ok(_) => false,
+                    None  => true,
+                }),
+        });
+    }
+})
+
+str.impl(Hash, {
+    // over the BYTES, never the pointer: equal bytes are one key, which is
+    // exactly what `==` says. A field-wise default would hash `data` — an
+    // address — and Map<str, V> would miss on every lookup.
+    // `*%` and `+%` wrap: a hash running past u64 is the intent, not a bug
+    hash ::= (self: @Self, hasher :: Hasher) u64 {
+        acc ::= STR_HASH_SEED;
+        Range(0, self.len).loop((h, i) {
+            acc = acc *% STR_HASH_MULT +% self.data.read(i).to_u64();
+        });
+        acc;
+    }
+})

@@ -32,7 +32,7 @@ import importlib.util
 import os
 import re
 import sys
-from dataclasses import dataclass, field as dcfield
+from dataclasses import dataclass, field as dcfield, replace as dataclasses_replace
 
 # ---------------------------------------------------------------------------
 # knobs
@@ -580,6 +580,7 @@ class Member:
     span: object = None
     ambiguous: tuple = ()   # ((span, note), ..) when two impls supply the name
     alts: tuple = ()        # ((ImplDef, Member), ..) — what a bound may select
+    overloads: tuple = ()   # every method of this name: `toString` is two
 
 
 @dataclass
@@ -589,7 +590,9 @@ class ModInfo:
     node: object
     decls: tuple
     dotted: str
-    types: dict = dcfield(default_factory=dict)
+    types: dict = dcfield(default_factory=dict)      # name -> the FIRST decl
+    type_all: dict = dcfield(default_factory=dict)   # name -> [TypeDef, ..]
+    type_arity: dict = dcfield(default_factory=dict) # (name, n tparams) -> TypeDef
     fns: dict = dcfield(default_factory=dict)
     consts: dict = dcfield(default_factory=dict)
     impls: list = dcfield(default_factory=list)
@@ -972,6 +975,8 @@ class Sema:
         self.by_name = {}
         self.by_node = {}        # id(decl node) -> TypeDef | FnDef
         self.types = {}          # qname -> TypeDef
+        self.prim_decls = {}     # "i32" -> the prelude's declaration of it
+        self.global_by_name = {} # (name, arity|None) -> TypeDef, tree-wide
         self.impls_by_target = {}
         self.fn_instances = {}   # (id(fn), targs) -> (FnDef, targs)  [gen_c]
         self.type_instances = {} # (qname, args)   -> TypeDef         [gen_c]
@@ -984,6 +989,7 @@ class Sema:
         self._errset_state = {}
         self._members_memo = {}
         self._muted = 0
+        self._resolving = set()
 
         # accepts an ast.Module, a modules.ModuleInfo, or the whole Graph —
         # `bootstrap.py` hands sema whatever `modules.py` built.
@@ -1044,6 +1050,23 @@ class Sema:
                         mi.imports[nm] = (dotted, nm)
             for d in mi.decls:
                 self._index_decl(mi, d)
+        for mi in self.mods:
+            for name, cands in mi.type_all.items():
+                if name in _PRIMS:
+                    for td in cands:
+                        if td.kind == "struct":
+                            self.prim_decls.setdefault(name, td)
+                # The prelude declares the names the builtin floor below also
+                # knows — Res, Alloc, Vec, AllocError, LoopHandle. Whole-program
+                # compilation means there is one of each, so a signature the
+                # floor supplies and a signature the source declares must be
+                # the SAME type: two nominal `AllocError`s produce the
+                # unimprovable diagnostic "AllocError is not AllocError".
+                for td in cands:
+                    prev = self.global_by_name.get((name, len(td.tparams)))
+                    if prev is None or (td.exported and not prev.exported):
+                        self.global_by_name[(name, len(td.tparams))] = td
+                    self.global_by_name.setdefault((name, None), td)
         # impls are whole-program: a bound declared in one module may be
         # satisfied by an impl in another (tests/corpus/sema/bound_third_module).
         for mi in self.mods:
@@ -1061,9 +1084,7 @@ class Sema:
             td = TypeDef(nm, mi.dotted + "::" + nm, bool(_g(d, "exported", default=False)),
                          "struct", _tup(_g(d, "tparams")), d, _span(d), mi,
                          fields=_tup(_g(d, "fields")), consts=_tup(_g(d, "consts")))
-            mi.types[nm] = td
-            self.types[td.qname] = td
-            self.by_node[id(d)] = td
+            self._register_type(mi, td, d)
         elif k == "Enum":
             nm = _name_of(_g(d, "name"))
             if not nm:
@@ -1071,9 +1092,7 @@ class Sema:
             td = TypeDef(nm, mi.dotted + "::" + nm, bool(_g(d, "exported", default=False)),
                          "enum", _tup(_g(d, "tparams")), d, _span(d), mi,
                          variants=_tup(_g(d, "variants")))
-            mi.types[nm] = td
-            self.types[td.qname] = td
-            self.by_node[id(d)] = td
+            self._register_type(mi, td, d)
         elif k == "Alias":
             nm = _name_of(_g(d, "name"))
             if not nm:
@@ -1081,9 +1100,7 @@ class Sema:
             td = TypeDef(nm, mi.dotted + "::" + nm, bool(_g(d, "exported", default=False)),
                          "alias", _tup(_g(d, "tparams")), d, _span(d), mi,
                          target=_g(d, "target", "ty", "type"))
-            mi.types[nm] = td
-            self.types[td.qname] = td
-            self.by_node[id(d)] = td
+            self._register_type(mi, td, d)
         elif k == "Function":
             fd = self._fn_from_function(mi, d)
             if fd:
@@ -1120,6 +1137,22 @@ class Sema:
                 im = self._impl_from_call(mi, e)
                 if im:
                     mi.impls.append(im)
+
+    def _register_type(self, mi, td, node):
+        """A type name may be declared at several ARITIES — the prelude does
+        it (`Res<T>` and `Res<T, E>`), and DESIGN.md's overloading rule is
+        silent about types only because it never occurred to it that they
+        differ. One name, several declarations, selected by the count of type
+        arguments at the use site, exactly as a function is selected by its
+        argument count."""
+        n = len(td.tparams)
+        if td.qname in self.types:
+            td = dataclasses_replace(td, qname="%s#%d" % (td.qname, n))
+        mi.type_all.setdefault(td.name, []).append(td)
+        mi.type_arity.setdefault((td.name, n), td)
+        mi.types.setdefault(td.name, td)     # first declared wins a bare use
+        self.types[td.qname] = td
+        self.by_node[id(node)] = td
 
     def _fn_from_function(self, mi, d):
         nm = _name_of(_g(d, "name"))
@@ -1204,8 +1237,8 @@ class Sema:
                 continue
             if name in mi.fns:
                 out.extend(f.node for f in mi.fns[name])
-            if name in mi.types:
-                out.append(mi.types[name].node)
+            for td in mi.type_all.get(name, ()):
+                out.append(td.node)
             if name in mi.consts:
                 out.append(mi.consts[name])
             if name in mi.imports:
@@ -1225,18 +1258,52 @@ class Sema:
         scope = getattr(info, "scope", None) if info is not None else None
         if not scope:
             return ()
-        out = []
+        out, seen = [], set()
+
+        def add(d):
+            if isinstance(d, want) and id(d) not in seen:
+                seen.add(id(d))
+                out.append(d)
+
         for b in scope.get(name, ()) or ():
             ent = getattr(b, "entity", None)
             node = getattr(ent, "node", None) if ent is not None else None
             d = self.by_node.get(id(node)) if node is not None else None
-            if isinstance(d, want) and d not in out:
-                out.append(d)
+            if d is None:
+                continue
+            # An overload set and an arity-overloaded type are ONE name with
+            # several declarations; a scope that binds a name to a single
+            # entity necessarily loses the rest. The declaring module is the
+            # authority on how many there are, the binding on whether they are
+            # visible — so take the set, gated by the `*` the binding crossed.
+            owner = self.by_dotted.get(getattr(ent, "module", "") or "")
+            if owner is not None and owner is not mi:
+                group = (owner.fns.get(d.name, ()) if isinstance(d, FnDef)
+                         else owner.type_all.get(d.name, ()))
+                for sibling in group:
+                    if sibling is d or sibling.exported:
+                        add(sibling)
+            add(d)
         return tuple(out)
 
-    def lookup_type(self, mi, name):
+    @staticmethod
+    def _pick_arity(cands, nargs):
+        """The declaration whose type-parameter count matches the use site."""
+        if not cands:
+            return None
+        if nargs is not None:
+            for td in cands:
+                if len(td.tparams) == nargs:
+                    return td
+        return cands[0]
+
+    def lookup_type(self, mi, name, nargs=None):
         if mi is None:
             return None
+        if nargs is not None:
+            td = mi.type_arity.get((name, nargs))
+            if td is not None:
+                return td
         td = mi.types.get(name)
         if td is not None:
             return td
@@ -1244,11 +1311,10 @@ class Sema:
         if imp:
             tgt = self.by_dotted.get(imp[0])
             if tgt is not None and tgt is not mi:
-                td = tgt.types.get(imp[1])
+                td = self._pick_arity(tgt.type_all.get(imp[1], ()), nargs)
                 if td is not None and (td.exported or not ENFORCE_IMPORT_VISIBILITY_AT_USE):
                     return td
-        got = self._from_scope(mi, name, TypeDef)
-        return got[0] if got else None
+        return self._pick_arity(self._from_scope(mi, name, TypeDef), nargs)
 
     def lookup_fns(self, mi, name):
         if mi is None:
@@ -1267,6 +1333,18 @@ class Sema:
         return self._from_scope(mi, name, FnDef)
 
     def builtin_named(self, name, args=()):
+        # A name the program itself declares beats the floor, always: the floor
+        # exists only because `src/std/` is stage 0.6 and the sema corpus is
+        # written against `Env` and `Vec` today.
+        td = self.global_by_name.get((name, len(args)))
+        if td is None:
+            td = self.global_by_name.get((name, None))
+        if td is not None and name not in self._resolving:
+            self._resolving.add(name)
+            try:
+                return self.type_from_def(td, args, Ctx(td.mod, Scope()))
+            finally:
+                self._resolving.discard(name)
         if name in _PRIMS:
             return prim(name)
         if name == "Res":
@@ -1331,7 +1409,7 @@ class Sema:
         for tp, _b in ctx.bounds:
             if tp == name:
                 return var_ty(name)
-        td = self.lookup_type(ctx.mod, name)
+        td = self.lookup_type(ctx.mod, name, len(args))
         if td is not None:
             return self.type_from_def(td, args, ctx)
         if self.is_builtin_type(name):
@@ -1341,6 +1419,17 @@ class Sema:
         return ANY
 
     def type_from_def(self, td, args, ctx):
+        # The prelude DECLARES the builtins: `i32` is a struct in
+        # std/core/num.zen because it has to carry MIN/MAX/BITS, `str` is a
+        # struct in std/text, and `Res` is two enum declarations. Those
+        # declarations ARE the builtin — a nominal `i32` beside the primitive
+        # `i32` makes every literal, every trap check and every `.try()`
+        # disagree with the standard library.
+        if td.kind == "struct" and td.name in _PRIMS:
+            return prim(td.name)
+        if td.kind == "enum" and td.name == "Res":
+            args = tuple(args)[:2]
+            return Ty("res", "", args or (ANY,))
         if td.kind == "alias":
             inner = Ctx(td.mod, Scope(), subst=ctx.subst, bounds=ctx.bounds)
             return self.resolve_type(td.target, inner)
@@ -1471,10 +1560,19 @@ class Sema:
                 "method")
             return out
 
-        if ty.kind != "named":
+        if ty.kind == "prim":
+            # `str` and `i32` are declared structs in the prelude; the members
+            # they declare belong to the primitive they are.
+            td = self.prim_decls.get(ty.name)
+            if td is None:
+                return out
+            impl_key = td.qname
+        elif ty.kind == "named":
+            td = self.types.get(ty.name)
+            impl_key = ty.name
+        else:
             return out
 
-        td = self.types.get(ty.name)
         if td is None:
             return out
         sub = {}
@@ -1490,15 +1588,22 @@ class Sema:
                 nm = _name_of(_g(f, "name"))
                 if not nm:
                     continue
-                out[nm] = Member(nm, self._field_type(f, inner),
-                                 "method" if self._is_method_field(f) else "field",
-                                 bool(_g(f, "mutable", default=False)),
-                                 owner=td, span=_span(f))
+                m = Member(nm, self._field_type(f, inner),
+                           "method" if self._is_method_field(f) else "field",
+                           bool(_g(f, "mutable", default=False)),
+                           owner=td, span=_span(f))
+                prev = out.get(nm)
+                if prev is not None and prev.kind == "method" and m.kind == "method":
+                    # a method declared twice is an overload set, not a
+                    # redefinition: `toString(sb: String)` and
+                    # `toString(a: Alloc)` are DESIGN.md's own example
+                    m.overloads = (prev.overloads or (prev,)) + (m,)
+                out[nm] = m
 
         # impl-supplied members. Two impls supplying one name is ambiguous
         # unless a bound selects — never file order (DESIGN.md, Declarations).
         supplied = {}
-        for im in self.impls_of(ty.name):
+        for im in self.impls_of(impl_key):
             trait = self.types.get(im.trait)
             tnames = set()
             for e in im.entries:
@@ -1636,13 +1741,13 @@ class Sema:
     def _check_module_decls(self, mi):
         base = Ctx(mi, Scope())
 
-        for name in sorted(mi.types):
-            td = mi.types[name]
-            if td.mod is not mi:
-                continue
-            if td.kind == "struct" and not td.tparams:
-                self.require_type(named(td.qname, ()), None, None)
-                self._check_methods(td)
+        for name in sorted(mi.type_all):
+            for td in mi.type_all[name]:
+                if td.mod is not mi:
+                    continue
+                if td.kind == "struct" and not td.tparams:
+                    self.require_type(named(td.qname, ()), None, None)
+                    self._check_methods(td)
 
         for name in sorted(mi.fns):
             fns = mi.fns[name]
@@ -1714,13 +1819,16 @@ class Sema:
                 b, pb, gb = sigs[j]
                 if len(pa) != len(pb):
                     continue
+                ta = {_name_of(_g(t, "name")) for t in a.tparams}
+                tb = {_name_of(_g(t, "name")) for t in b.tparams}
                 if self._same_signature(pa, pb):
                     if self._once(("dupsig", _start(a.span), _start(b.span))):
                         self.error(a.span,
                                    "duplicate signature for `%s`: parameter names are "
                                    "documentation, not identity" % name,
                                    ((b.span, "the other declaration is here"),))
-                elif (ga or gb) and self._swallows(pa, pb, ga, gb):
+                elif (ga or gb) and self._swallows(pa, pb, ta if ga else (),
+                                                   tb if gb else ()):
                     if self._once(("swallow", _start(a.span), _start(b.span))):
                         self.error(a.span,
                                    "ambiguous overload for `%s`: a generic parameter "
@@ -1738,18 +1846,32 @@ class Sema:
         return True
 
     @staticmethod
-    def _swallows(pa, pb, ga, gb):
-        def eats(g, c):
-            # per-parameter: does the generic side accept the concrete side?
-            for x, y in zip(g, c):
-                if x.kind == "var":
-                    continue
-                if x.kind == "fn" and y.kind == "fn" and len(x.args) == len(y.args):
-                    continue
-                if x != y:
+    def _swallows(pa, pb, ta, tb):
+        """"A generic parameter swallows a concrete one, so these two can never
+        be told apart at a call site."
+
+        Only a type parameter belonging to the CANDIDATE BEING TESTED is a
+        wildcard. Without that, `loop<R, T>(range: R, body: (h, index, value) ())`
+        and `loop<K, V>(map: Map<K,V>, body: (h, key, value) ())` look
+        interchangeable because each has a three-parameter closure — and the
+        prelude declares both."""
+
+        def eats(x, y, names):
+            if x.kind == "var" and x.name in names:
+                return True
+            if x.kind == "fn" and y.kind == "fn":
+                if len(x.args) != len(y.args):
                     return False
-            return True
-        return (ga and eats(pa, pb)) or (gb and eats(pb, pa))
+                return (all(eats(i, j, names) for i, j in zip(x.args, y.args))
+                        and eats(x.ret or UNIT, y.ret or UNIT, names))
+            if x.kind == y.kind and x.name == y.name and len(x.args) == len(y.args):
+                return all(eats(i, j, names) for i, j in zip(x.args, y.args))
+            return x == y
+
+        def all_eat(g, c, names):
+            return names and all(eats(x, y, names) for x, y in zip(g, c))
+
+        return all_eat(pa, pb, ta) or all_eat(pb, pa, tb)
 
     def _check_impl(self, im, base):
         trait = self.types.get(im.trait)
@@ -2886,7 +3008,7 @@ class Sema:
                 self.error(_after_dot(base, _span(callee), len(name)),
                            "method `%s` is ambiguous: two impls supply it and no bound "
                            "in scope selects one" % name, m.ambiguous)
-            mty = m.ty
+            mty = self._pick_method(m, vals, ctx)
             if mty is not None and mty.kind == "fn":
                 mty = self._apply_call_targs(mty, targs)
                 # the receiver is the first parameter; the rest line up
@@ -2909,6 +3031,32 @@ class Sema:
         for v in vals:
             self.type_of(v, ctx)
         return ANY
+
+    def _pick_method(self, m, vals, ctx):
+        """Overload resolution over a method set — same rule as a free
+        function: declared parameter types and arity, closures included."""
+        cands = m.overloads or ((m,) if m.ty is not None else ())
+        if len(cands) < 2:
+            return m.ty
+        best = None
+        for cand in cands:
+            t = cand.ty
+            if t is None or t.kind != "fn":
+                continue
+            ps = t.args[1:]
+            if len(ps) != len(vals):
+                continue
+            self._muted += 1
+            try:
+                ok = all(assignable(self.type_of(v, ctx, expect=p), p)
+                         for v, p in zip(vals, ps))
+            finally:
+                self._muted -= 1
+            if ok:
+                return t
+            if best is None:
+                best = t
+        return best if best is not None else m.ty
 
     @staticmethod
     def _apply_call_targs(mty, targs):
@@ -2958,10 +3106,20 @@ class Sema:
                 for want, got, n in zip(ptys, arg_types, arg_nodes):
                     self._unify(want, got, sub, n, ctx)
                 viable = [(0, fd, ptys, sub)]
+            elif not cands:
+                # "no overload matches" with nothing to match against is a
+                # misleading diagnostic: say the honest thing.
+                self.error(span, "unknown function `%s`" % name)
+                return ERR
             else:
+                arities = sorted({fd.arity for fd in cands})
                 self.error(span,
                            "no overload matches `%s`: resolution is on declared "
-                           "parameter types and arity" % name)
+                           "parameter types and arity — %d argument%s given, "
+                           "%d declaration%s taking %s"
+                           % (name, len(arg_types), "" if len(arg_types) == 1 else "s",
+                              len(cands), "" if len(cands) == 1 else "s",
+                              " or ".join(str(a) for a in arities)))
                 return ERR
         viable.sort(key=lambda v: (-v[0], _start(v[1].span)))
         _score, fd, ptys, sub = viable[0]

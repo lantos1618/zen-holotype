@@ -1,0 +1,38 @@
+// std.core.drop
+//
+// RAII. The compiler calls `drop` when a binding leaves scope, in
+// reverse declaration order, exactly once — and after the block's
+// defers have run, because a defer is registered on the block and a
+// drop belongs to the value.
+//
+// Exactly-once is why `consume` exists: a Drop value cannot be
+// copied, since both copies would drop. Want a second one?
+// Construct a second one — there is no Clone.
+//
+// Two consequences that look like they bite and do not:
+//
+//   - a handle is not a Drop value. An Alloc is a fat value
+//     pointing at an arena, so it copies freely; the ARENA is Drop.
+//     That is why Vec can store `alloc: Alloc` by value.
+//   - passing a Drop value to a parameter is a borrow, not a move.
+//     A receiver is just the first parameter, so nothing else could
+//     be true. A move is spelled `consume`, at the call site, and
+//     only there.
+//
+// The allocator is the flagship user: env.mem.alloc() hands back an
+// arena, and dropping the arena releases every page it ever handed
+// out, in one shot.
+//
+// Until stage 3 nothing checks any of this, and the stdlib honours
+// exactly-once by hand. That is precisely why the `consume` syntax
+// ships at stage 0 unchecked: code written without it has to be
+// revised, code written with it loses nothing.
+Drop* = {
+    // required (`= sig`, no body): an impl must provide it.
+    //
+    // `::` because drop writes the receiver's own bytes. The
+    // compiler-inserted call is exempt from the receiver rule —
+    // scope exit runs drop on `:` bindings too, because destroying
+    // a value is not mutating it through a binding.
+    drop* = (self :: @Self) ()
+}

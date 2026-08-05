@@ -1,0 +1,87 @@
+// src/std/collections/collections_vec.zen
+// Vec<T>: the growable buffer everything else is built on. everything
+// here is sealed (=) — collections are not extension points, and
+// sealed methods compile to direct, inlinable calls
+
+Alloc, AllocError, Ptr, null_ptr = std.mem
+Range = std.core.range
+
+Vec*<T> = {
+    // an empty Vec owns no pages: a null data and a zero capacity ARE
+    // the empty state, and realloc takes a null p as a fresh
+    // allocation — so the first grow runs the same call every later
+    // one does
+    data :: Ptr<T> = null_ptr<T>(),
+    len* :: usize = 0,      // * is readable outside; mutation still only via methods
+    capacity :: usize = 0,
+
+    // `:` set once at construction. an Alloc is a handle — two words
+    // pointing at the arena — so grow can realloc THROUGH it while the
+    // field itself stays immutable. `::` is shallow, and this is why
+    alloc: Alloc,
+
+    // grow lands in THIS frame, never inside a closure: the match is a
+    // value and the .try() on it belongs to add. so a failed grow
+    // returns Err from add and provably cannot fall through to the
+    // write below
+    add* = (self :: @Self, value: T) Res<(), AllocError> {
+        (self.len == self.capacity).match({
+            true  => self.grow(),
+            false => Ok(()),
+        }).try();
+        self.data.write(self.len, value);
+        self.len = self.len + 1;
+        Ok(());
+    }
+
+    get* = (self: @Self, i: usize) Res<T> {
+        (i < self.len).match({
+            true  => Ok(self.data.read(i)),
+            false => None,
+        });
+    }
+
+    // the dual of get, and what a Map overwrites a row through. past
+    // len is None exactly as get is: a write that can legitimately
+    // miss is not a bug either
+    set* = (self :: @Self, i: usize, value: T) Res<()> {
+        (i < self.len).match({
+            true  => { self.data.write(i, value); Ok(()) },
+            false => None,
+        });
+    }
+
+    // moves an element OUT, leaving the vec one shorter. without this a
+    // Vec<T> of Drop values can be filled and never emptied
+    take* = (self :: @Self, i: usize) Res<T> {
+        value = self.get(i).try();
+        Range(i + 1, self.len).loop((h, j) {
+            self.data.write(j - 1, self.data.read(j));
+        });
+        self.len = self.len - 1;
+        Ok(value);
+    }
+
+    grow = (self :: @Self) Res<(), AllocError> {
+        cap = (self.capacity == 0).match({
+            true  => 8,
+            false => self.capacity * 2,
+        });
+        self.data = self.alloc.realloc(self.data, cap).try();
+        self.capacity = cap;
+        Ok(());
+    }
+}
+
+// `alloc.Vec<i32>()`: a ufcs function whose first parameter is an
+// Alloc, so it calls as a method on one. it lives beside Vec rather
+// than on Alloc because only this module can see data and capacity,
+// and a Vec-shaped default inside std.mem would point the dependency
+// the wrong way.
+//
+// a bare value and not a Res: an empty Vec owns no pages, so
+// construction cannot fail. the first add allocates and THAT is what
+// returns Res
+Vec* = <T>(a: Alloc) Vec<T> {
+    Vec(alloc: a)
+}

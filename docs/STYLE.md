@@ -25,6 +25,8 @@ Three tests, in order of how often you will need them:
 
 **3. The direction test.** `parse` may depend on `std.text`. `std.text` may never depend on `parse`. If moving a helper down a layer would create an upward dependency, you have misjudged what the helper actually is — it is still carrying something specific to the caller. Split it: the general part goes down, the specific part stays.
 
+**An impl goes with the type.** `A.impl(B, {..})` lives in `A`'s module, which imports `B`. This is the direction test applied to impls, and getting it backwards inverts the whole module graph — a trait sits *below* the types that satisfy it, so `std.core.eq` importing `str` is the layering already broken.
+
 **The smell that catches all three:** a file with a `// helpers` section at the bottom. That section is a list of things that belong somewhere else, sorted by the order you needed them.
 
 **Flat namespaces are what makes this cheap.** Modules are `<folder>/<folder>.zen`, names are qualified by path, and two modules may define the same top-level name without colliding. So moving a function between modules costs an import line, and nothing else. There is no reason to hoard.
@@ -53,7 +55,43 @@ src/gen/gen.zen            // backend-shared plumbing
 src/gen/gen_c.zen          // the c backend
 ```
 
-Not `src/parse/expr.zen`. The prefix is doing three jobs: the filename is unique across the whole tree so `grep -r parse_expr` finds exactly one thing; the editor tab says `parse_expr.zen` and not a twentieth `mod.rs`; and a file that cannot be given a meaningful `parse_*` name is a file that does not belong in `parse/`.
+**The prefix is for names that would otherwise collide — it is not a tax on every file.** `expr`, `decl`, `iter`, `state`, `entry`, `node`, `util` are names three folders will all want, so they take the prefix and `grep -r parse_expr` finds exactly one thing. A name that is already unique and already says what it is does not need it:
+
+```
+src/std/core/loop/loop.zen          the root
+src/std/core/loop/loop_iter.zen     `iter` alone would collide. prefixed.
+src/std/core/loop/cursor.zen        `cursor` is specific. left alone.
+src/std/core/loop/range.zen         so is `range`.
+```
+
+The question to ask is not "does this repeat the folder?" but **"if I grep this name, do I get one file or three?"** One file, leave it. Three, prefix it. That is the entire purpose: the rule exists so the same subject is never implemented twice under two names, and a prefix applied where nothing would collide buys nothing and costs a longer name.
+
+**A prefix must name the file's own folder. If it names something else, that something is a folder waiting to happen.**
+
+(Files with no prefix are untouched by this — see the naming rule below for when a prefix is wanted at all.)
+
+This is the trigger the prefix rule needs, and it is mechanical:
+
+```
+src/std/mem/mem_alloc.zen           prefix mem, folder mem       -> right
+src/std/text/text_str.zen           prefix text, folder text     -> right
+src/std/collections/collections_vec.zen                          -> right
+
+src/std/core/loop_find.zen          prefix loop, folder core     -> WRONG
+src/std/core/loop_iter.zen          three files calling themselves `loop_`
+src/std/core/loop_handle.zen        inside a folder called `core`
+
+src/std/core/loop/loop.zen          -> the fix. the family was always a
+src/std/core/loop/loop_find.zen        folder; only the folder was missing
+src/std/core/loop/loop_iter.zen
+src/std/core/loop/loop_handle.zen
+```
+
+A prefix family is a subject with a name. The moment it has **two or more** files, it has earned the folder — and once it has one, the module path (`std.core.loop`) says what the code is about instead of where it happened to be dropped. A lone `core/scope.zen` needs no folder; it is one file about one thing, and its name already says so.
+
+Once the folder exists, the folder carries the subject and its files need not all repeat it — see the naming rule below.
+
+The reason this matters beyond tidiness: a folder root is a file of starred re-exports, so a folder is the unit at which a subject controls its own surface. Files sharing a prefix in someone else's folder have no root, which means every consumer imports the individual files and every internal move breaks them.
 
 **Each of those is an ordinary module**, not a nested one — per-module namespacing means `parse_expr` is a sibling of `parse`, and `parse.zen` pulls it into the module's surface with starred bindings:
 

@@ -304,10 +304,16 @@ class Toolchain:
     emit_argv: list[str]  # command prefix; source and -o are appended
     style: str  # "bootstrap" (source first) | "zen" (source last)
 
+    std_root: Path | None = None  # every program is compiled WITH the prelude
+
     def command(self, source: Path, out_c: Path) -> list[str]:
+        # A test is a program, and a program stands on std: `Res`, `Ok`, `Env`
+        # and `println` are prelude names. Compiling a corpus file alone would
+        # fail on every one of them and say nothing about the test.
+        extra = [str(self.std_root)] if self.std_root and self.std_root.is_dir() else []
         if self.style == "bootstrap":
-            return [*self.emit_argv, str(source), "--emit-c", "-o", str(out_c)]
-        return [*self.emit_argv, "build", "--emit-c", "-o", str(out_c), str(source)]
+            return [*self.emit_argv, str(source), *extra, "--emit-c", "-o", str(out_c)]
+        return [*self.emit_argv, "build", "--emit-c", "-o", str(out_c), str(source), *extra]
 
 
 def make_toolchain(args: argparse.Namespace) -> Toolchain:
@@ -320,14 +326,22 @@ def make_toolchain(args: argparse.Namespace) -> Toolchain:
                 f"no bootstrapper at {script}. It is written at stage 0 "
                 f"(PLAN.md §0); pass --bootstrap PATH or --toolchain zen."
             )
-        return Toolchain("bootstrap", [args.python, str(script)], "bootstrap")
+        # `-m`, never the script path: bootstrap/ast.py shadows the stdlib `ast`
+        # that dataclasses imports, and the script form puts bootstrap/ on
+        # sys.path[0], so the interpreter dies before the first line of ours.
+        return Toolchain(
+            "bootstrap",
+            [args.python, "-m", "bootstrap.bootstrap"],
+            "bootstrap",
+            std_root=REPO_ROOT / "src" / "std",
+        )
 
     binary = Path(args.zen)
     if not binary.is_absolute():
         binary = REPO_ROOT / binary
     if not (binary.is_file() and os.access(binary, os.X_OK)):
         raise HarnessError(f"no executable zen compiler at {binary}. Build one (`make build`).")
-    return Toolchain("zen", [str(binary)], "zen")
+    return Toolchain("zen", [str(binary)], "zen", std_root=REPO_ROOT / "src" / "std")
 
 
 # ------------------------------------------------------------------- running

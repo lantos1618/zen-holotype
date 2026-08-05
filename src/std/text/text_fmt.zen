@@ -1,0 +1,108 @@
+// src/std/text/text_fmt.zen
+// the {} format machinery: the parser that reads a format string, and the
+// writers for the primitives a {} can land on.
+//
+// THE FORMAT LANGUAGE, in full. There is no width, no precision, no index,
+// no name — DESIGN.md writes exactly one placeholder and this is it:
+//
+//   {}    a hole. The next argument, written through its toString.
+//   {     NOT followed by `}` is a LITERAL brace. DESIGN.md never escapes a
+//         brace, and Display.dump writes `sb.add("{} {", ..)` expecting that
+//         trailing `{` to print — so this is the rule, not a fallback.
+//   }     always a literal byte.
+//
+// The cost, stated rather than hidden: THERE IS NO WAY TO WRITE A LITERAL
+// `{}`. `"{}"` is always a hole, and no escape exists to say otherwise.
+// Adding one (`{{}}`, or `\{`) is a design change and belongs in DESIGN.md,
+// not in this parser — see the report's AMBIGUITIES.
+//
+// WHERE THE PARSE HAPPENS. `{}` routes through the argument's toString,
+// which is type-directed, so `add` is expanded where it is WRITTEN: the
+// compiler steps `fmt_next` over the format string and emits
+// `sb.add_bytes(<literal run>)` for each step and `arg.toString(sb)` for
+// each hole. That keeps one implementation of the rules above — this one —
+// and leaves no format state at runtime. A format string that runs out of
+// holes, or of arguments, is therefore a compile error and not a `?`.
+
+String = std.text.text_string
+str = std.text.text_str
+
+// one step of a format string: the literal run before the next hole, and
+// where to resume. `literal` is a SLICE of the format string — no copy
+FmtStep* = {
+    literal*: str,     // bytes to write verbatim. May be empty
+    hole*: bool,       // does a {} follow the run?
+    next*: usize,      // where the next step starts. == f.len when spent
+}
+
+// the first `{` at or after `from` that OPENS a hole. A `{` with anything
+// else behind it is an ordinary byte and the scan walks straight past it,
+// which is what keeps it inside the literal run
+hole_at = (f: str, from: usize) Res<usize> {
+    Range(from, f.len).find((i) { f[i] == '{' && (i + 1) < f.len && f[i + 1] == '}' })
+}
+
+// step the parser once: fmt_next(f, 0), then fmt_next(f, step.next), and so
+// on. A step with `hole` false is always the last one — the run it carries
+// is the rest of the string
+fmt_next* = (f: str, from: usize) FmtStep {
+    f.hole_at(from).match({
+        Ok(i) => FmtStep(literal: f.slice(from, i), hole: true, next: i + 2),
+        None  => FmtStep(literal: f.slice(from, f.len), hole: false, next: f.len),
+    });
+}
+
+// ---------------------------------------------------------------------------
+// the primitive writers — what a {} lands on when the argument is a
+// primitive rather than a Display. They write into an existing String and
+// allocate nothing of their own, so nesting is free.
+//
+// The writer for a `str` is String.add_bytes: bytes, verbatim. It is not
+// repeated here, because two copies of "write these bytes" is one copy too
+// many.
+// ---------------------------------------------------------------------------
+
+// decimal, no separators — TESTING.md's corpus-wide assumption
+add_u64* = (sb :: String, v: u64) Res<(), AllocError> {
+    (v >= 10).then(() { sb.add_u64(v / 10).try() });
+    sb.add_byte(digit(v % 10));
+}
+
+add_i64* = (sb :: String, v: i64) Res<(), AllocError> {
+    (v < 0).then(() { sb.add_byte('-').try() });
+    // hand the digits a NON-POSITIVE value: i64.MIN has no positive
+    // counterpart, so negating first traps on exactly one input, which is
+    // the classic bug in every integer printer ever written
+    sb.add_digits((v < 0).match({ true => v, false => 0 - v }));
+}
+
+// digits of a non-positive value, most significant first
+add_digits = (sb :: String, v: i64) Res<(), AllocError> {
+    (v <= -10).then(() { sb.add_digits(v / 10).try() });
+    sb.add_byte(digit(0 - (v % 10)));
+}
+
+add_bool* = (sb :: String, v: bool) Res<(), AllocError> {
+    v.match({
+        true  => sb.add_bytes("true"),
+        false => sb.add_bytes("false"),
+    });
+}
+
+// the digit table, twice over — once per integer domain, because a u64 past
+// i64.MAX cannot be widened into one. `'0' + d` would be shorter, but
+// DESIGN.md specifies no conversion between u64 and u8 and this file will
+// not invent one. `_` is the tenth arm: callers pass `v % 10`, so it is 9
+digit = (d: u64) u8 {
+    d.match({
+        0 => '0', 1 => '1', 2 => '2', 3 => '3', 4 => '4',
+        5 => '5', 6 => '6', 7 => '7', 8 => '8', _ => '9',
+    });
+}
+
+digit = (d: i64) u8 {
+    d.match({
+        0 => '0', 1 => '1', 2 => '2', 3 => '3', 4 => '4',
+        5 => '5', 6 => '6', 7 => '7', 8 => '8', _ => '9',
+    });
+}

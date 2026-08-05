@@ -1,0 +1,162 @@
+// src/std/text/text_utf8.zen
+// UTF-8 as FUNCTIONS OVER BYTES. `str` is bytes and never pretends
+// otherwise, so this file is where the character guarantee is paid for —
+// and only here. Nothing above it becomes slower because this exists.
+//
+// Two things this file needs that DESIGN.md does not give, both flagged in
+// the report rather than smuggled in:
+//   - `b.to_u32()`, the LOSSLESS widening of a byte into the accumulator a
+//     codepoint is built in. Only widening is assumed; nothing here narrows.
+//   - Zen has no bitwise operators, so a 6-bit shift is written as
+//     multiplication by UTF8_CONT_SCALE. That is exact, not an approximation.
+
+str = std.text.text_str
+
+// the offset of the byte where the sequence stops making sense
+Utf8Error* = | Invalid(usize)
+
+// one decoded codepoint and the width of the sequence it came from
+Codepoint* = {
+    value*: u32,
+    len*: usize,
+}
+
+// a walk over the codepoints of a str: a position, and the bytes it walks.
+// No Alloc, so it can never be a collection — it is a cursor, and the caller
+// keeps whatever it wants to keep
+Codepoints* = {
+    bytes: str,
+    at* :: usize,
+
+    is_done* = (self: @Self) bool { self.at == self.bytes.len }
+
+    // decodes the sequence at the cursor and steps past it. Call it while
+    // `is_done` is false: at the end there is no sequence, and Invalid(len)
+    // says exactly that rather than inventing a friendlier reason
+    next* = (self :: @Self) Res<u32, Utf8Error> {
+        c = codepoint_at(self.bytes, self.at).try();
+        self.at = self.at + c.len;
+        Ok(c.value);
+    }
+}
+
+codepoints* = (s: str) Codepoints { Codepoints(bytes: s, at: 0) }
+
+// THE primitive: every other function here is a walk over it
+codepoint_at* = (s: str, at: usize) Res<Codepoint, Utf8Error> {
+    lead = s.get(at).ok_or(Utf8Error.Invalid(at)).try();
+    sequence_len(lead).match({
+        1 => Ok(Codepoint(value: lead.to_u32(), len: 1)),
+        2 => two_byte(s, at, lead),
+        3 => three_byte(s, at, lead),
+        4 => four_byte(s, at, lead),
+        _ => Err(Utf8Error.Invalid(at)),
+    });
+}
+
+// walks every sequence and keeps none of them
+validate_utf8* = (s: str) Res<(), Utf8Error> {
+    walk ::= s.codepoints();
+    loop(() { !walk.is_done() }, (h) { walk.next().try(); });
+    Ok(());
+}
+
+// the count that `len` deliberately is not. Characters cost a walk, and the
+// walk is written out here so the price is visible at the call
+count_codepoints* = (s: str) Res<usize, Utf8Error> {
+    walk ::= s.codepoints();
+    n ::= 0;
+    loop(() { !walk.is_done() }, (h) {
+        walk.next().try();
+        n = n + 1;
+    });
+    Ok(n);
+}
+
+// ---------------------------------------------------------------------------
+// the table. Every boundary below is UTF-8's own, and each one is a fact a
+// caller may want, so each one is starred
+// ---------------------------------------------------------------------------
+
+UTF8_ASCII_MAX*: u8 = 128       // first byte that is not a codepoint by itself
+UTF8_CONT_MIN*: u8 = 128        // continuation bytes are 128..191
+UTF8_LEAD_MIN*: u8 = 192        // 192 and 193 lead only OVERLONG sequences
+UTF8_LEAD_2_MIN*: u8 = 194      // first lead of a well-formed 2-byte sequence
+UTF8_LEAD_3_MIN*: u8 = 224
+UTF8_LEAD_4_MIN*: u8 = 240
+UTF8_LEAD_MAX*: u8 = 245        // 245 and up cannot reach U+10FFFF
+
+UTF8_CONT_SCALE*: u32 = 64      // the 6 payload bits of a continuation byte
+UTF8_MIN_3*: u32 = 2048         // below this, 3 bytes is overlong
+UTF8_MIN_4*: u32 = 65536        // below this, 4 bytes is overlong
+UTF8_SURROGATE_MIN*: u32 = 55296
+UTF8_SURROGATE_MAX*: u32 = 57343
+UTF8_MAX_CODEPOINT*: u32 = 1114111
+UTF8_MAX_LEN*: usize = 4        // no sequence is longer
+
+// how wide the sequence starting with `lead` is, or 0 when `lead` cannot
+// start one at all: a continuation byte, an overlong lead, or a lead past
+// the last one that can reach U+10FFFF
+sequence_len = (lead: u8) usize {
+    (lead < UTF8_ASCII_MAX).match({
+        true  => 1,
+        false => (lead < UTF8_LEAD_2_MIN).match({
+            true  => 0,
+            false => (lead < UTF8_LEAD_3_MIN).match({
+                true  => 2,
+                false => (lead < UTF8_LEAD_4_MIN).match({
+                    true  => 3,
+                    false => (lead < UTF8_LEAD_MAX).match({ true => 4, false => 0 }),
+                }),
+            }),
+        }),
+    });
+}
+
+// the 6 payload bits of the continuation byte at `at`, or the offset that
+// is not one
+continuation = (s: str, at: usize) Res<u32, Utf8Error> {
+    b = s.get(at).ok_or(Utf8Error.Invalid(at)).try();
+    ((b >= UTF8_CONT_MIN) && (b < UTF8_LEAD_MIN)).match({
+        true  => Ok((b - UTF8_CONT_MIN).to_u32()),
+        false => Err(Utf8Error.Invalid(at)),
+    });
+}
+
+// no value check: UTF8_LEAD_2_MIN already excludes the only two overlong
+// leads a 2-byte sequence has
+two_byte = (s: str, at: usize, lead: u8) Res<Codepoint, Utf8Error> {
+    c1 = continuation(s, at + 1).try();
+    value = (lead - UTF8_LEAD_MIN).to_u32() * UTF8_CONT_SCALE + c1;
+    Ok(Codepoint(value: value, len: 2));
+}
+
+three_byte = (s: str, at: usize, lead: u8) Res<Codepoint, Utf8Error> {
+    c1 = continuation(s, at + 1).try();
+    c2 = continuation(s, at + 2).try();
+    value = (lead - UTF8_LEAD_3_MIN).to_u32() * UTF8_CONT_SCALE * UTF8_CONT_SCALE
+        + c1 * UTF8_CONT_SCALE
+        + c2;
+    // overlong and surrogate are both visible in the VALUE, so one test does
+    // the work of two lead-byte special cases and cannot disagree with itself
+    ((value >= UTF8_MIN_3)
+        && ((value < UTF8_SURROGATE_MIN) || (value > UTF8_SURROGATE_MAX))).match({
+        true  => Ok(Codepoint(value: value, len: 3)),
+        false => Err(Utf8Error.Invalid(at)),
+    });
+}
+
+four_byte = (s: str, at: usize, lead: u8) Res<Codepoint, Utf8Error> {
+    c1 = continuation(s, at + 1).try();
+    c2 = continuation(s, at + 2).try();
+    c3 = continuation(s, at + 3).try();
+    value = (lead - UTF8_LEAD_4_MIN).to_u32()
+            * UTF8_CONT_SCALE * UTF8_CONT_SCALE * UTF8_CONT_SCALE
+        + c1 * UTF8_CONT_SCALE * UTF8_CONT_SCALE
+        + c2 * UTF8_CONT_SCALE
+        + c3;
+    ((value >= UTF8_MIN_4) && (value <= UTF8_MAX_CODEPOINT)).match({
+        true  => Ok(Codepoint(value: value, len: 4)),
+        false => Err(Utf8Error.Invalid(at)),
+    });
+}

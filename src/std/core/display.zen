@@ -1,0 +1,61 @@
+// src/std/core/display.zen
+//
+// The display protocol. One method an impl defines — write yourself
+// into a caller's buffer — and two sealed forms built on top of it,
+// so a type can never print two different ways.
+//
+// The shape is deliberate: `toString` takes a String the CALLER
+// owns, so a nested value writes into the buffer that is already
+// open and nesting never allocates. The allocating form is derived
+// from that one rather than declared beside it, which is what makes
+// "they can never diverge" a property of the code and not a promise
+// in a comment.
+
+Alloc = std.mem
+String = std.text
+
+// IoError is written in every signature below and is DESIGN.md's,
+// not this file's, to declare — it is the io failure the prelude
+// carries. See the report: no module owns it yet.
+
+Display* = {
+    // SEALED (=): the mechanical debug dump. Always there, for
+    // every type, never overridden — which is what lets `{}` fall
+    // back to it for a type that never defined a toString.
+    //
+    // STAGE 5. Its body is an @meta field-wise walk, and @meta is
+    // outside the seed subset (PLAN.md 0.5), so the body arrives
+    // with src/meta/meta.zen. DESIGN.md writes it, and it is kept
+    // here verbatim so the gap is a body and not a design question:
+    //
+    //     sb.add("{} {", @meta(self: @Self).name);
+    //     @meta(self: @Self).fields.loop((h, field) {
+    //         sb.add(" {}: {},", field.name, field.value);
+    //     });
+    //     sb.add(" }");
+    //     Ok(());
+    //
+    // Until that body lands this reads as REQUIRED (`= sig`) rather
+    // than sealed (`= sig {..}`) — the missing body is the entire
+    // difference between the two, and it is the one staged
+    // declaration in this file.
+    dump* = (self: @Self, sb :: String) Res<(), IoError>
+
+    // OUTLINED (::=, no body): the pretty representation. Impls
+    // define THIS one and nothing else, and the format machinery
+    // routes `{}` through it, falling back to dump when a type has
+    // none. It writes into an existing String, so a value nested
+    // three deep still costs one buffer.
+    toString* ::= (self: @Self, sb :: String) Res<(), IoError>
+
+    // SEALED (=): the allocating form. It is DERIVED — it makes a
+    // buffer and calls the outlined form — so an impl that defines
+    // toString gets this one right for free, and no impl can make
+    // the two disagree. Overload resolution picks between them on
+    // the declared parameter type: a buffer or an allocator.
+    toString* = (self: @Self, a: Alloc) Res<String, IoError> {
+        sb ::= a.String("").try();
+        self.toString(sb).try();
+        Ok(sb);
+    }
+}

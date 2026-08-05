@@ -1,0 +1,61 @@
+// src/std/text/text_string.zen
+// String — owned, growable text. Vec already carries len, capacity and the
+// Alloc it grows with, so String adds nothing on top: it IS the buffer.
+// There is no separate StringBuffer type, and there is no second growth
+// policy — a String grows exactly when and how a Vec<u8> does.
+//
+// THE BORROW RULE, stated once because everything else follows from it:
+// `view` BORROWS the buffer, so the str it hands back is valid until the
+// next call that can grow the String — `add`, `add_bytes`, `add_byte`. A
+// realloc moves the bytes and every str taken before it is dangling. Take
+// the view after the last write, or take it again.
+//
+// Two error sets meet here, and the seam is deliberate: the buffer floor
+// (`add_byte` / `add_bytes`) can only fail to ALLOCATE and says so, while
+// `add` is the door DESIGN.md declares and it speaks IoError. See the
+// report's AMBIGUITIES — there is no conversion between them in the
+// language, and one of the two has to give.
+
+Vec = std.collections.collections
+Alloc, AllocError = std.mem.mem
+str, str_at = std.text.text_str
+
+String* = {
+    data :: Vec<u8>,
+
+    // the format door. `{}` routes through each argument's toString, which
+    // is TYPE-directed, so the call is expanded where it is written: the
+    // compiler steps text_fmt.fmt_next over `fmt` and emits an `add_bytes`
+    // for each literal run and a `toString` for each hole. No runtime format
+    // state, no varargs walk, and one implementation of the format rules.
+    // Those rules — including that a `{` not followed by `}` is a literal —
+    // live in text_fmt.zen
+    add* = (self :: @Self, fmt: str, args: ...) Res<(), IoError>
+
+    // borrows the buffer; see THE BORROW RULE above
+    view* = (self: @Self) str { str_at(self.data.ptr(), self.data.len) }
+
+    len* = (self: @Self) usize { self.data.len }
+
+    is_empty* = (self: @Self) bool { self.data.len == 0 }
+
+    // the floor `add` is expanded into, and the writer for a `{}` that lands
+    // on a str: bytes, verbatim, no format meaning read into them
+    add_bytes* = (self :: @Self, s: str) Res<(), AllocError> {
+        Range(0, s.len).loop((h, i) { self.data.add(s[i]).try() });
+        Ok(());
+    }
+
+    add_byte* = (self :: @Self, b: u8) Res<(), AllocError> { self.data.add(b) }
+}
+
+// the empty buffer. A ufcs function whose first parameter is an Alloc, so it
+// calls as `alloc.String()` — the surface DESIGN.md writes — while the
+// dependency points DOWN: text knows mem, mem never has to know text
+String* = (a: Alloc) Res<String, AllocError> { Ok(String(data: a.Vec<u8>())) }
+
+// the allocating format form, `alloc.String("{}", x)`. Declared, not
+// defined, for the same reason `add` is: the arguments are type-directed and
+// the call is expanded where it is written, into this module's empty form
+// followed by the same expansion `add` gets
+String* = (a: Alloc, fmt: str, args: ...) Res<String, AllocError>

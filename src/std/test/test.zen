@@ -1,0 +1,80 @@
+// src/std/test/test.zen
+//
+// There is no test keyword and no discovery baked into the
+// compiler. A test is a function whose single parameter is a
+// Tester, a bench is a function whose single parameter is a
+// Bencher, and build.zen finds them by walking the parsed module
+// tree itself (b.module) and filtering on that parameter. `zen
+// test` merely runs the target that walk registered.
+//
+// The consequence worth stating: change the filter in build.zen and
+// you change what a test IS. That is only true because the rule
+// lives in a build program instead of in the compiler.
+//
+// The function name is the test name. Name them as sentences —
+// `vec_grows`, `map_handles_collision` — because that name is what
+// a failure prints.
+
+Alloc = std.mem
+Env = std.env
+str = std.text
+
+// One variant, so the bar leads. The str is what failed, in words:
+// a Tester that reported `Failed` with no reason would be a reason
+// invented, which is law 4 read backwards.
+TestError* = | Failed(str)
+
+Tester* = {
+    // Starred because a test reads them: `t.alloc.Vec<i32>()` is
+    // the first line of half the corpus, and it is user code in
+    // another module. An unstarred field would be invisible there
+    // (law 6) and the Tester would be unusable.
+    env*: Env,
+
+    // A per-test arena, dropped after each test — so a leak is
+    // contained to the test that leaked and can be reported against
+    // it by name.
+    alloc*: Alloc,
+
+    // The plain assertion. Res, not a trap: a failing expectation
+    // is something the harness acts on (it records the failure and
+    // runs the next test), and a trap is for a bug.
+    expect* = (self: @Self, cond: bool) Res<(), TestError>
+
+    // STAGE 5 for its BODY, not its signature. On failure it dumps
+    // both sides through Display.dump, and dump is an @meta
+    // field-wise walk that arrives with src/meta/meta.zen. Written
+    // any earlier it could only report "not equal", which is the
+    // half of the message nobody needs.
+    //
+    // The T: Eq bound is what makes the comparison the type's own
+    // equality rather than a bytewise guess.
+    expect_eq* = <T: Eq>(self: @Self, a: T, b: T) Res<(), TestError>
+}
+
+// Benchmarking is the same discovery shape with a different
+// parameter: a bench takes a Bencher exactly as a test takes a
+// Tester, and lives in the same file as the code it measures.
+//
+// Because ALL allocation goes through Alloc — the law — a Bencher
+// counts allocations and bytes per op for free, with no
+// instrumentation anywhere. That is why allocs_op and bytes_op are
+// a hard gate and ns_op is not: the two counts are identical on
+// every machine, and wall clock is not.
+Bencher* = {
+    env*: Env,
+    alloc*: Alloc,
+
+    // Runs f until the timing stabilizes and reports what it cost.
+    // `:` and not `::` — a bitwise copy of the Bencher would see
+    // the same counters, because they live behind the handle.
+    iter* = (self: @Self, f: () ()) BenchStats
+}
+
+// What one op cost. Starred fields: build.zen compares these
+// against a Budget, and that is another module.
+BenchStats* = {
+    ns_op*: u64,
+    allocs_op*: u64,
+    bytes_op*: u64,
+}

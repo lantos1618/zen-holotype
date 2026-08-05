@@ -5,7 +5,7 @@ CFLAGS  ?= -O2 -std=c99
 PY      ?= python3
 ROOT    ?= src
 
-.PHONY: all build seed test lint fixpoint determinism grammar fmt clean help
+.PHONY: all build seed test test-zen lint fixpoint determinism grammar grammar-test fmt clean help
 
 all: test
 
@@ -22,7 +22,7 @@ seed: zen
 	git add seed/zen.c
 
 ## test: the corpus and must-fail suites, against the bootstrapper
-test:
+test: grammar
 	$(PY) tests/run.py
 
 ## test-zen: the same suites, against a built zen binary
@@ -35,23 +35,32 @@ lint:
 
 ## fixpoint: the strongest oracle. zen-1 and zen-2 must emit
 ## byte-identical C. worthless unless gen_c is deterministic.
-fixpoint: build
+fixpoint: grammar build
 	./scripts/fixpoint.sh
 
 ## determinism: five checks that gen_c is a pure function of input
 determinism: build
 	ZEN=./zen tests/determinism/check.sh
 
-## grammar: regenerate the tree-sitter parser and run its corpus
-grammar:
-	cd grammar && npx tree-sitter generate && npx tree-sitter test
+## grammar: regenerate the parser and build the shared object cst.py loads.
+## --abi 14 is not optional: the CLI defaults to 15, and py-tree-sitter
+## rejects anything above 14 with "Incompatible Language version".
+grammar: grammar/zen.so
+
+grammar/zen.so: grammar/grammar.js grammar/tree-sitter.json
+	cd grammar && npx tree-sitter generate --abi 14
+	$(CC) -shared -fPIC -o grammar/zen.so grammar/src/parser.c -I grammar/src
+
+## grammar-test: the tree-sitter corpus
+grammar-test: grammar
+	cd grammar && npx tree-sitter test
 
 ## fmt: the whole tree must already be formatted
 fmt: build
 	./zen fmt --check $(ROOT) example tests
 
 clean:
-	rm -f zen zen-new
+	rm -f zen zen-new grammar/zen.so
 	rm -rf build/
 
 help:

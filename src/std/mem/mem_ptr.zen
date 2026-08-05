@@ -1,0 +1,72 @@
+// std.mem.mem_ptr
+//
+// The raw floor. A Ptr<T> is one machine word — the address of a run
+// of T — and the members below are the only way memory is ever
+// touched. Everything else in the library is written in terms of
+// them.
+//
+// `*` is the export marker, so Zen has no pointer sigil and a raw
+// pointer is spelled Ptr<T>. That is the whole reason this type has
+// a name rather than a piece of punctuation.
+//
+// A Ptr IS A HANDLE, so every method here takes `self: @Self`.
+// Writing through a pointer changes the pointee, never the
+// pointer's own word, and a bitwise copy of the Ptr sees the write
+// — DESIGN.md's test for `:` versus `::`, asked one level below
+// where Alloc answers it. Nothing in this file is `::`.
+//
+// The bodies belong to the backend: gen_c lowers a Ptr<T> to a `T*`
+// and these members to dereference, indexed store, pointer
+// arithmetic and memcpy. They are written as signatures because
+// there is nothing underneath to write them in — this is the one
+// module in std that cannot implement itself.
+
+Ptr*<T> = {
+    // the address, one machine word. NOT exported: nothing outside
+    // std.mem reads a raw address, and every legal use of one goes
+    // through a method below
+    addr: usize,
+
+    // element access, INDEXED, so `p.read(i)` is C's `p[i]` and the
+    // scaling by T is the backend's. Vec.get and Vec.add call
+    // exactly these two, with a length for the index
+    read* = (self: @Self, index: usize) T
+    write* = (self: @Self, index: usize, value: T) ()
+
+    // a new Ptr, `count` ELEMENTS along, forward and back. Scaling
+    // by the element type is the entire reason this is a Ptr<T> and
+    // not an address. `back` exists because an allocator writes a
+    // run's length into the word ahead of it, and a usize has no
+    // negative to offset by
+    offset* = (self: @Self, count: usize) Ptr<T>
+    back* = (self: @Self, count: usize) Ptr<T>
+
+    // the byte size of `count` elements. Ptr already scales offset
+    // by T, so this is the same knowledge spelled out — and it is
+    // the only way anything in std can ask how big a T is. There is
+    // no size_of in the language, and @meta is stage 5
+    bytes* = (self: @Self, count: usize) usize
+
+    // copy `count` elements from src into self. The runs may not
+    // overlap: an allocator growing a run always has a fresh
+    // destination, and that is the only caller in std
+    copy_from* = (self: @Self, src: Ptr<T>, count: usize) ()
+
+    // reinterpret the run as U. Alloc.raw hands back bytes, and
+    // every typed allocation begins by naming what they are. There
+    // is no `as` in Zen — a conversion is a method, the way
+    // .to_i64() is — and this one is unchecked, which is what "raw
+    // floor" means
+    to* = <U>(self: @Self) Ptr<U>
+
+    // the address is zero, so nothing is there. An empty collection
+    // owns no pages, so its data field holds a null Ptr until the
+    // first grow, and realloc asks this before it reads a length
+    is_null* = (self: @Self) bool
+}
+
+// the null Ptr, for a collection that owns no memory yet. A
+// function rather than a constant because a constant on Ptr<T>
+// would still need a T to be read through, and the call site always
+// has one: `null_ptr<i32>()`
+null_ptr* = <T>() Ptr<T>

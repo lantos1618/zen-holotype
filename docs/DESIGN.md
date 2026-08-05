@@ -151,6 +151,12 @@ Circle.impl(Rect, {
 scale* = <T: Rect>(shape: T, k: f64) f64 { shape.area() * k }
 ```
 
+**An impl lives with the type, not with the trait.** `A.impl(B, {..})` belongs in the module that declares `A`, which imports `B`. `str.impl(Eq, ..)` is in `std.text`, not `std.core.eq`; `Vec.impl(Display, ..)` is in `std.collections`, not `std.core.display`.
+
+This is not a taste rule, it is what keeps dependencies pointing down. A trait sits below the types that satisfy it — `Eq` cannot know about `str` — so putting the impl with the trait forces the lower layer to import the upper one, and the module graph inverts. The reading test is the one in `STYLE.md`: write the impl's one-line summary, and whichever type it names is the module it belongs to.
+
+The consequence worth stating: **there are no orphan impls.** A module may not impl a trait it does not own for a type it does not own, because there is no third module for that impl to live in.
+
 **A trait value is a fat value.** Since a "trait" is an ordinary struct, a trait *value* is an ordinary record: a receiver pointer plus one function pointer per method, copied by value. `shape.as(Display)` builds that record on the stack; storing it in a `Vec<Display>` copies it inline. No `dyn`, no vtable concept, no boxing, **no allocation** — so the Alloc law is satisfied rather than side-stepped. This is the same shape as `Alloc` itself. The one thing it costs: the record points at the receiver, so the receiver must outlive it — the ordinary rule for any pointer stored in a collection.
 
 ```groovy
@@ -564,15 +570,28 @@ Alloc* = {
     realloc* = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError>
     free* ::= <T>(self: @Self, p: Ptr<T>) ()    // arenas no-op this
 
-    // typed conveniences, defaults built on raw:
+    // one typed convenience, a default built on raw:
     create* ::= <T>(self: @Self) Res<Ptr<T>, AllocError>
-    // Vec and Map return a bare value: an empty one owns no pages yet, so
-    // construction cannot fail. the first add allocates, and THAT returns Res.
-    // String takes a format and must hold the result, so it allocates at once
-    Vec* ::= <T>(self: @Self) Vec<T>
-    Map* ::= <K, V>(self: @Self) Map<K, V>
-    String* ::= (self: @Self, fmt: str, args: ...) Res<String, AllocError>
 }
+
+// Vec, Map and String are NOT members of Alloc. each is a ufcs
+// function declared beside its OWN type, taking an Alloc first:
+//
+//     Vec*    = <T>(a: Alloc) Vec<T>                 // std.collections
+//     Map*    = <K, V>(a: Alloc) Map<K, V>           // std.collections
+//     String* = (a: Alloc, fmt: str, args: ...) Res<String, AllocError>
+//
+// the call surface is identical — `alloc.Vec<i32>()` either way,
+// because a free function whose first parameter is the type is
+// callable as a method. what changes is the direction of the
+// dependency. as members they would put Vec-shaped defaults inside
+// std.mem, which cannot see Vec's unexported fields, and mem and
+// collections would have to import each other.
+//
+// Vec and Map return a bare value: an empty one owns no pages yet, so
+// construction cannot fail. the first add allocates, and THAT returns
+// Res. String takes a format and must hold the result, so it allocates
+// at once and says so.
 
 // Alloc is an INTERFACE, so an Alloc value is a fat value: a receiver
 // pointer plus function pointers. It is a handle, it is freely copied,
