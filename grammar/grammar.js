@@ -123,8 +123,10 @@ module.exports = grammar({
     // `self.len` — a binding target, or an expression statement? decided at
     // the `=` that may or may not follow.
     [$.binding, $.expression_statement],
-    // `Foo*` — export marker, or `Foo * ...`? decided at the token after `*`.
-    [$.declaration_name, $.binary_expression],
+    // `Foo*` — export marker, or `Foo * ...`? and `Foo<T> =` — type
+    // parameters of a declaration, or `Foo < T > ..`? Both are decided by
+    // the token after the marker, one GLR fork later.
+    [$.declaration_name, $.binary_expression, $.call_expression],
     // `(x)` / `(x, y)` — parameter list of a lambda, or a parenthesized
     // expression? decided at the `{` or return type that may follow.
     [$.parameters, $.parenthesized_expression],
@@ -344,7 +346,6 @@ module.exports = grammar({
     _type: ($) =>
       choice(
         $.identifier,
-        $.qualified_type,
         $.generic_type,
         $.array_type,
         $.function,
@@ -355,11 +356,9 @@ module.exports = grammar({
         $.variadic_type,
       ),
 
-    // no example in DESIGN.md qualifies a type across a module (imports bind
-    // locally, so `Res` is already local). Supported anyway because module
-    // paths are values: `pkg.json`.
-    qualified_type: ($) =>
-      prec.left(PREC.member, seq($._type, '.', $.identifier)),
+    // NOTE: there is no qualified type (`std.core.Res`) in this grammar,
+    // because there is none in DESIGN.md — imports bind locally, so a type is
+    // always reachable by a bare name. Adding one is a design change.
 
     // `Vec<T>`, `Map<K, V>`, `Res<(), AllocError>`, `Vec<Entry<K, V>>`.
     // Zen has no `>>` operator, so nested generics close without a lexer
@@ -383,7 +382,10 @@ module.exports = grammar({
     // `A | B` — "an anonymous enum of two variants — a structural enum, not
     // a new kind of type". D3: left-associative.
     union_type: ($) =>
-      prec.left(PREC.union, seq($._type, repeat1(seq('|', $._type)))),
+      prec.left(
+        PREC.union,
+        seq(field('left', $._type), '|', field('right', $._type)),
+      ),
 
     // `Res<Cfg, _>` — inferred inside a module, written at the boundary.
     inferred_type: (_) => '_',
@@ -661,11 +663,19 @@ module.exports = grammar({
     // machinery routes `{}` through toString at the call, so the lexer sees
     // an ordinary string.
     string_literal: ($) =>
-      seq('"', repeat(choice($.escape_sequence, token.immediate(/[^"\\]+/))), '"'),
+      seq(
+        '"',
+        repeat(choice($.escape_sequence, token.immediate(/[^"\\]+/))),
+        token.immediate('"'),
+      ),
 
     // "zen has `'a'` char literals; write `b == ':'` not `b == 58`"
     char_literal: ($) =>
-      seq("'", choice($.escape_sequence, token.immediate(/[^'\\]/)), "'"),
+      seq(
+        "'",
+        choice($.escape_sequence, token.immediate(/[^'\\]/)),
+        token.immediate("'"),
+      ),
 
     // the escape set is not enumerated in DESIGN.md; `\'` and `\\` are named
     // in TESTING.md. Anything after a backslash lexes, and sema decides.

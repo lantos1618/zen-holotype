@@ -22,7 +22,10 @@ zen/
 │   ├── STYLE.md                     # how to write zen, and how to write about it
 │   └── TESTING.md                   # bug classes, oracles, and gates. written FIRST.
 │
-├── grammar.js                       # (0.1) tree-sitter grammar. written FIRST.
+├── grammar/                         # (0.1) written FIRST. its own dir because
+│   ├── grammar.js                   #       `tree-sitter generate` writes to ./src/,
+│   ├── package.json                 #       which here is the Zen compiler.
+│   └── src/parser.c                 #       generated; second generated file in the tree
 │
 ├── bootstrap/                       # (0) python. throwaway. never shipped.
 │   ├── bootstrap.py                 #     cli: bootstrap.py src/ -o out.c
@@ -99,7 +102,7 @@ Three things about this tree that are decisions, not layout:
 
 - **`src/std/` is written before `src/lex/`.** The compiler is a Zen program; it needs `Vec`, `Map`, `String`, `Res`, and `Alloc` to exist before its first line. This is stage 0.6 below, and it is the piece most likely to be underestimated.
 - **`bootstrap/` and `src/` never share code.** Two implementations of the same language, deliberately, with the fixpoint test as the referee. Any "shared helper" between them is the beginning of the drift this plan exists to prevent.
-- **`seed/zen.c` is the only generated file in the tree.** Everything else is source. If a second generated artifact ever appears, ask what gate proves it fresh.
+- **Two generated files, both with a gate.** `seed/zen.c` is proven fresh by the fixpoint; `grammar/src/parser.c` by `tree-sitter test`. If a third ever appears, ask what proves it fresh — an ungated generated file is a fork nobody is reading.
 
 File naming and the 500/800-line split rule are in `STYLE.md`. The short version, visible above: a folder's root file is its public surface and is nothing but starred re-exports; siblings repeat the folder as a prefix (`parse/parse_expr.zen`), so every filename is unique tree-wide and every editor tab says something.
 
@@ -119,7 +122,7 @@ File naming and the 500/800-line split rule are in `STYLE.md`. The short version
 
 ### 0.1 The grammar
 
-`grammar.js`, tree-sitter. **This is written before any other code.** It is the artifact that turns `DESIGN.md`'s examples into things a machine can disagree with, and it outlives the bootstrapper as the editor/LSP grammar.
+`grammar/grammar.js`, tree-sitter. **This is written before any other code.** It lives in its own directory because `tree-sitter generate` emits to `./src/`, and in this tree `src/` is the compiler. It is the artifact that turns `DESIGN.md`'s examples into things a machine can disagree with, and it outlives the bootstrapper as the editor/LSP grammar.
 
 Every example in `DESIGN.md` becomes a parse test. Expect the grammar to surface ambiguities the prose hides — one is already known:
 

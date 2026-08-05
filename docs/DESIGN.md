@@ -111,8 +111,10 @@ c.width = 5.0;    // ERROR: nothing to assign to
 The residue worth knowing: an impl may supply something expensive, and reading it in a loop hides real work behind a dot. The *simple* case is provable with machinery already here — if these two budgets ever stop matching, uniform access is not free and we want to know:
 
 ```groovy
-Budget(name: "stored_field_read",   ns_op: 2, allocs_op: 0),
-Budget(name: "computed_field_read", ns_op: 2, allocs_op: 0),
+budgets: [
+    Budget(name: "stored_field_read",   ns_op: 2, allocs_op: 0, bytes_op: 0),
+    Budget(name: "computed_field_read", ns_op: 2, allocs_op: 0, bytes_op: 0),
+]
 ```
 
 ```groovy
