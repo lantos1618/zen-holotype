@@ -635,6 +635,7 @@ class Emitter:
         self.worklist = []
         self.done = set()
         self.instances = 0
+        self.expanding = []  # constants being inlined, to catch a self-reference
         self.graph = program if getattr(program, "modules", None) and hasattr(
             program, "lookup"
         ) else None
@@ -863,7 +864,13 @@ class Emitter:
         if k == "Path":
             got = self.lookup(str(f(expr, "name", "")), parts, "value")
             if got:
-                return self.const_int(f(got[0].node, "value"), got[0].scope_parts)
+                if got[0].key in self.expanding:
+                    return None
+                self.expanding.append(got[0].key)
+                try:
+                    return self.const_int(f(got[0].node, "value"), got[0].scope_parts)
+                finally:
+                    self.expanding.pop()
         return None
 
     def builtin_type_const(self, tyname, member):
@@ -1616,7 +1623,21 @@ class FnCtx:
         vals = self.e.lookup(name, self.parts, "value")
         if vals:
             d = vals[0]
-            code, ty = self.expr(f(d.node, "value"), want)
+            # A constant is inlined at its use, so a constant whose value
+            # names itself would inline forever.  `seed_even = seed_odd + 1`
+            # beside `seed_odd = seed_even + 1` has no order that computes
+            # both -- modules.py says so across modules, and this says so
+            # within one.  A crash is not a diagnostic.
+            if d.key in self.e.expanding:
+                ring = self.e.expanding[self.e.expanding.index(d.key):] + [d.key]
+                self.e.error(node, "constant cycle: %s"
+                                   % " -> ".join(k[2] for k in ring))
+                return ("0", UNKNOWN)
+            self.e.expanding.append(d.key)
+            try:
+                code, ty = self.expr(f(d.node, "value"), want)
+            finally:
+                self.e.expanding.pop()
             return (code, ty)
         fns = self.e.lookup(name, self.parts, "fn")
         if fns:
@@ -2240,6 +2261,23 @@ class FnCtx:
         params = list(self.e.params_of(fnode))
         if f(fnode, "body") is None and is_loop_shape(self.e, fnode):
             return self.lower_loop(decl, fnode, node, argnodes, want, receiver)
+        if f(fnode, "body") is None and decl.owner:
+            # "A trait value is a fat value: a receiver pointer plus one
+            # function pointer per method."  Which function a bodyless member
+            # runs is decided by the impl behind that receiver, and gen_c has
+            # no dispatch through the record yet -- so it says so rather than
+            # emitting a call to a function nobody defines.
+            self.e.error(node, "`%s.%s` is supplied by an impl; gen_c has no "
+                               "trait dispatch yet" % (decl.owner, decl.name))
+            subst0 = dict(zip(decl.tparams, tuple(UNKNOWN for _ in decl.tparams)))
+            ret0 = self.e.resolve_type(self.e.ret_of(fnode), subst0, decl.scope_parts,
+                                       self.e.self_type(decl, subst0))
+            ret0 = refine(ret0, want)
+            if ret0 in (None, UNIT, UNKNOWN):
+                return ("0", UNIT)
+            tmp = self.new_tmp(ret0)
+            self.line("memset(&%s, 0, sizeof %s);" % (tmp, tmp))
+            return (tmp, ret0)
         if any(kind(v) == "Lambda" for v in argnodes) and f(fnode, "body") is not None:
             return self.inline_call(decl, fnode, node, argnodes, targs, want, receiver)
         targ_tys = tuple(self.e.resolve_type(t, self.subst, self.parts, self.self_ty)

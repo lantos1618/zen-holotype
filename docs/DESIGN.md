@@ -449,7 +449,7 @@ Display* = {
     // but this one must also OBTAIN the buffer, and that fails with
     // AllocError. no From exists, so the union is the honest type
     toString* = (self: @Self, a: Alloc) Res<String, WriteError> {
-        sb ::= a.String("").try();
+        sb ::= a.String().try();
         self.toString(sb).try();
         Ok(sb);
     }

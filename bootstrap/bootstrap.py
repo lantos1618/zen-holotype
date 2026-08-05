@@ -255,14 +255,23 @@ def prune(graph, keep):
 
 
 def compile_once(root, files, whole_tree):
-    """One full run: parse, resolve, check, emit.  Holds no state afterwards."""
+    """One full run: parse, resolve, check, emit.  Holds no state afterwards.
+
+    A program that failed to resolve does not reach codegen.  gen_c lowers a
+    program sema has agreed is a program; handing it one with unresolved names
+    turns a diagnostic into a second, worse diagnostic -- and a `must-fail`
+    test wants the FIRST error, at its own position, not gen_c's opinion of
+    the wreckage.
+    """
     graph = zmodules.build(root, parse=parser())
     if not whole_tree and files:
         graph = prune(graph, set(files))
     sema, sema_diags = analyse(graph)
+    diags = list(getattr(graph, "diags", ()) or ()) + list(sema_diags)
+    if diags:
+        return "", diags
     text, gen_diags = gen_c.generate(graph, sema=sema, root=root)
-    diags = list(getattr(graph, "diags", ()) or ()) + list(sema_diags) + list(gen_diags)
-    return text, diags
+    return text, list(gen_diags)
 
 
 def render(diag):
