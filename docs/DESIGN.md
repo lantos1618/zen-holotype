@@ -196,6 +196,12 @@ printers ::= alloc.Vec<Display>();
 printers.add(circle.as(Display)).try();   // 2 words copied in, no alloc
 ```
 
+**`Display.toString` writes into a `Sink`, not into a `String`.** This is forced, and it was found by trying to implement the obvious thing. `println("{}", shape)` has to route through `toString`; if `toString` writes into a `String`, then printing needs a `String`, a `String` needs an `Alloc` to grow, and `println` has no `Alloc` parameter — so printing a value would either allocate behind the caller's back, breaking law 1, or `println` would grow an allocator parameter and hello-world would need an arena.
+
+A `Sink` dissolves it. A console is a sink, a `String` is a sink, and `println` hands `toString` the console it already holds — so **printing does not allocate at all**, and nesting still writes into the one buffer that is already open. It is the same move as `Alloc`: name the capability, pass it as a fat value, and let the caller decide what is behind it.
+
+`Sink.write` returns `WriteError`, the union, and that is the part worth arguing about. Writing to a console fails with `IoError` and writing to a growable `String` fails with `AllocError`; there is no `From`, so a single sink type cannot pretend those are one error. The union is the honest type — which is exactly the reason `WriteError` was introduced. **Cost to accept knowingly:** a caller writing into a `String` must handle an `IoError` that a `String` can never produce, and a caller writing to a console must handle an `AllocError` it can never produce. `.try()` merges either into the caller's set for free, so the cost is paid only where someone actually matches on the error.
+
 ---
 
 # Control flow
@@ -451,35 +457,42 @@ str* = {
 String* = {
     data :: Vec<u8>,
 
-    add* = (self :: @Self, fmt: str, args: ...) Res<(), IoError>
+    add* = (self :: @Self, fmt: str, args: ...) Res<(), WriteError>
     view* = (self: @Self) str
 }
+
+// anything bytes can be written to. a String is one and a console
+// is one, which is what lets `{}` format into either without the
+// format machinery knowing which it has
+Sink* = {
+    write* = (self :: @Self, bytes: str) Res<(), WriteError>
+}
+
+String.impl(Sink, { write = (self :: @Self, bytes: str) Res<(), WriteError> { .. } })
 
 Display* = {
     // sealed (=): the mechanical debug dump. @meta walk over
     // the fields, "Name { field: value, .. }". always there,
     // for every type, never overridden
-    dump* = (self: @Self, sb :: String) Res<(), IoError> {
-        sb.add("{} {", @meta(self: @Self).name);
+    dump* = (self: @Self, out :: Sink) Res<(), WriteError> {
+        out.add("{} {", @meta(self: @Self).name);
         @meta(self: @Self).fields.loop((h, field) {
-            sb.add(" {}: {},", field.name, field.value);
+            out.add(" {}: {},", field.name, field.value);
         });
-        sb.add(" }");
+        out.add(" }");
         Ok(());
     }
 
     // outlined only (::=, no body): the pretty representation,
     // impls define THIS one. format machinery routes {} through
     // it, falling back to dump when a type hasn't defined one.
-    // writes into an existing String, so nesting never allocates
-    toString* ::= (self: @Self, sb :: String) Res<(), IoError>
+    // writes into a sink the CALLER owns, so nesting never
+    // allocates and printing never allocates at all
+    toString* ::= (self: @Self, out :: Sink) Res<(), WriteError>
 
     // sealed overload (=): the allocating form, derived from
-    // the buffer form, so the two can never diverge. overload
-    // resolution picks by what you pass: buffer or allocator
-    // WriteError, not IoError: the buffer forms only fail on the sink,
-    // but this one must also OBTAIN the buffer, and that fails with
-    // AllocError. no From exists, so the union is the honest type
+    // the sink form, so the two can never diverge. overload
+    // resolution picks by what you pass: a sink or an allocator
     toString* = (self: @Self, a: Alloc) Res<String, WriteError> {
         sb ::= a.String().try();
         self.toString(sb).try();
@@ -1148,11 +1161,11 @@ Shape = Circle(Circle) | Rect(Rect) | Unit
 Shape.impl(Display, {
     // defining the outlined toString: pretty output for {}.
     // dump stays available for free alongside it
-    toString ::= (self: @Self, sb :: String) Res<(), IoError> {
+    toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
         self.match({
-            Circle(circle) => sb.add("circle: {}", circle.radius),
-            Rect(rect) => sb.add("rect: {} {}", rect.width, rect.height),
-            Unit => sb.add("unit"),
+            Circle(circle) => out.add("circle: {}", circle.radius),
+            Rect(rect) => out.add("rect: {} {}", rect.width, rect.height),
+            Unit => out.add("unit"),
         });
     }
 })
