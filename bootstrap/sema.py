@@ -424,6 +424,16 @@ def is_res(t):
 # ---------------------------------------------------------------------------
 
 
+#: Set by the live `Sema`. Assignability is otherwise a pure function of two
+#: types, but "a concrete type is assignable to a trait it impls" needs the
+#: impl table, and that lives on the graph.
+_TRAIT_COERCION = None
+
+
+def _impls_trait(a, b):
+    return bool(_TRAIT_COERCION) and _TRAIT_COERCION(a, b)
+
+
 def assignable(a, b):
     """Is a value of type `a` acceptable where `b` is wanted?"""
     if a is None or b is None:
@@ -440,12 +450,18 @@ def assignable(a, b):
         return any(assignable(a, m) for m in b.args)
     if a.kind == "union":
         return all(assignable(m, b) for m in a.args)
-    if a.kind == "intlit":
-        return b.kind in ("intlit", "floatlit") or (
-            b.kind == "prim" and (b.name in _INT_PRIMS or b.name in _FLOAT_PRIMS)
-        )
-    if a.kind == "floatlit":
-        return b.kind == "floatlit" or (b.kind == "prim" and b.name in _FLOAT_PRIMS)
+    # An unannotated literal has no width yet, so it fits any numeric type —
+    # and the rule is SYMMETRIC: a checked `i32` reaching a position sema only
+    # knows as "an integer literal" is the same non-event.
+    if a.kind == "intlit" or b.kind == "intlit":
+        other = b if a.kind == "intlit" else a
+        return other.kind in ("intlit", "floatlit") or (
+            other.kind == "prim" and (other.name in _INT_PRIMS
+                                      or other.name in _FLOAT_PRIMS))
+    if a.kind == "floatlit" or b.kind == "floatlit":
+        other = b if a.kind == "floatlit" else a
+        return other.kind == "floatlit" or (other.kind == "prim"
+                                            and other.name in _FLOAT_PRIMS)
     if a.kind in ("ok", "err", "none"):
         if b.kind not in ("res",):
             return False
@@ -462,17 +478,14 @@ def assignable(a, b):
     if b.kind in ("ok", "err", "none"):
         return assignable(a, settle(b))
     if a.kind != b.kind:
-        return False
+        return b.kind == "named" and _impls_trait(a, b)
     if a.kind == "prim":
-        if a.name == b.name:
-            return True
-        # ints of the same signedness widen; anything else is written out.
-        return False
+        return a.name == b.name
     if a.kind == "unit":
         return True
     if a.kind == "named":
         if a.name != b.name or len(a.args) != len(b.args):
-            return False
+            return _impls_trait(a, b)
         return all(assignable(x, y) for x, y in zip(a.args, b.args))
     if a.kind == "res":
         if len(a.args) != len(b.args):
@@ -1006,6 +1019,7 @@ class Sema:
         for m in modules or ():
             self._add_module(m)
         self._index()
+        self.activate()
 
     # -- construction -------------------------------------------------------
 
@@ -1254,6 +1268,44 @@ class Sema:
 
     def impls_of(self, qname):
         return tuple(self.impls_by_target.get(qname, ()))
+
+    def _decl_qname(self, ty):
+        """The declaration a value's type belongs to, for impl lookup. A
+        primitive's impls (`str.impl(Eq, ..)`) hang off the prelude's
+        declaration of it."""
+        if ty is None:
+            return None
+        if ty.kind == "named":
+            return ty.name
+        if ty.kind == "prim":
+            td = self.prim_decls.get(ty.name)
+            return td.qname if td is not None else None
+        return None
+
+    def coerces_to_trait(self, a, b):
+        """DESIGN.md, "A trait value is a fat value": a concrete type is
+        acceptable where a trait it impls is expected, and the record — a
+        receiver plus one function pointer per method — is built AT that
+        coercion site, by value, with no allocation.
+
+        This is not the bound case. `<A: Alloc>(a: A)` monomorphises and no
+        record exists; `(a: Alloc)` builds one. Keeping the two apart is what
+        the no-allocation claim rests on, so they are two code paths here:
+        `satisfies` for the bound, this for the coercion."""
+        if a is None or b is None or a == b:
+            return False
+        if b.kind != "named":
+            return False
+        trait = self.types.get(b.name)
+        if trait is None or trait.kind != "struct":
+            return False
+        target = self._decl_qname(a)
+        if target is None:
+            return False
+        for im in self.impls_of(target):
+            if im.trait == b.name:
+                return True
+        return False
 
     def _from_scope(self, mi, name, want):
         """What `modules.py` says this name means here. Its scope already has
@@ -1744,7 +1796,16 @@ class Sema:
     # the check
     # ======================================================================
 
+    def activate(self):
+        """Make this graph the one `assignable` asks about impls. One program
+        per process in the bootstrapper; the hook is re-pointed on every
+        construction and before every check so the answer can never come from
+        a stale graph."""
+        global _TRAIT_COERCION
+        _TRAIT_COERCION = self.coerces_to_trait
+
     def check(self):
+        self.activate()
         for mi in self.mods:
             self._check_module_decls(mi)
         for mi in self.mods:

@@ -2417,15 +2417,10 @@ class FnCtx:
                 got = self.dispatch(rcode, rty, name, argnodes, targs, want, node)
                 if got is not None:
                     return got
-            parts = tuple(rty[1]) + (name,)
-            cands = [d for d in self.e.by_name.get(name, []) if d.dkind == "fn" and d.parts == parts]
-            if not cands:
-                cands = [
-                    d
-                    for d in self.e.by_name.get(name, [])
-                    if d.dkind == "fn" and len(d.parts) >= 2 and d.parts[-2] == rty[1][-1]
-                ]
-            cands = [d for d in cands if self.e.fn_node(d.node) is not None]
+            # The type's own members AND its impls' -- `Key.impl(Eq, {eq = ..})`
+            # is not a second mechanism, it is where Key's `eq` is written.
+            cands = [d for d in self.owned_decls(rty, name, "fn")
+                     if self.e.fn_node(d.node) is not None]
             with_body = [d for d in cands if f(self.e.fn_node(d.node), "body") is not None]
             if with_body:
                 decl = self.pick_overload(with_body, argnodes, receiver=(rcode, rty))

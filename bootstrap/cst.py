@@ -105,7 +105,25 @@ def _load_ast():
     return module
 
 
+def _load_lex():
+    """`bootstrap/lex.py`, reached however this process was started — same
+    three-way dance as `_load_ast`, and for the same reason."""
+    try:
+        from . import lex as module  # type: ignore[attr-defined]
+
+        return module
+    except (ImportError, ValueError):
+        pass
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lex.py")
+    spec = importlib.util.spec_from_file_location("zen_bootstrap_lex", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("zen_bootstrap_lex", module)
+    spec.loader.exec_module(module)
+    return module
+
+
 A = _load_ast()
+L = _load_lex()
 
 Span = A.Span
 Trivia = A.Trivia
@@ -239,6 +257,45 @@ MUTABLE_MARKER = "::"
 # this is a diagnostic, never a crash. The deepest thing the corpus builds on
 # purpose is ~560 levels; the `must-fail` fixture is 10,000.
 MAX_NEST = 2000
+
+# Nothing below nests: a declaration, a statement and a function each hold
+# their nesting rather than being it, so the run of nested constructs a depth
+# diagnostic names STARTS after one of these. That is what makes the arrow
+# point at the outermost `(` of `v = ((((..` and at the outermost `{` of the
+# statement, rather than at the function body that happens to enclose both.
+NOT_NESTING = frozenset(
+    (
+        SOURCE_FILE,
+        DECLARATION,
+        DECLARATION_STATEMENT,
+        LET_STATEMENT,
+        EXPRESSION_STATEMENT,
+        IMPL_DECLARATION,
+        FUNCTION,
+        FUNCTION_SIGNATURE,
+        LINE_COMMENT,
+        BLOCK_COMMENT,
+    )
+)
+
+# where a MISSING node means "an expression belongs here"
+EXPRESSION_HOLES = frozenset(
+    (
+        BINARY_EXPRESSION,
+        UNARY_EXPRESSION,
+        CONSUME_EXPRESSION,
+        PARENTHESIZED_EXPRESSION,
+        INDEX_EXPRESSION,
+        MEMBER_EXPRESSION,
+        ARGUMENTS,
+        NAMED_ARGUMENT,
+        ARRAY_LITERAL,
+        LET_STATEMENT,
+        EXPRESSION_STATEMENT,
+        MATCH_ARM,
+        RECORD_FIELD,
+    )
+)
 
 
 # ===========================================================================
@@ -461,7 +518,7 @@ class Converter:
             return False
         if not self._too_deep:
             self._too_deep = True
-            self.error(node, f"nests deeper than {MAX_NEST}")
+            self.error(node, f"nesting too deep: nests deeper than {MAX_NEST}")
         return True
 
     # -- primitives --
@@ -709,7 +766,7 @@ class Converter:
                 "type parameters on both sides of the `=`; write them once",
             )
         tparams = name_tparams + value_tparams
-        params = self.parameters(self.field(value, F_PARAMETERS), required=True)
+        params = self.parameters(self.field(value, F_PARAMETERS), "declaration")
         ret_node = self.field(value, F_RETURN_TYPE)
         ret = self.type(ret_node) if ret_node is not None else A.Unit(span=span)
         body_node = self.field(value, F_BODY)
@@ -760,7 +817,16 @@ class Converter:
     # parameters and type parameters
     # ===================================================================
 
-    def parameters(self, node, required: bool) -> tuple:
+    def parameters(self, node, form: str) -> tuple:
+        """`form` is "declaration", "type" or "closure".
+
+        A parameter with no `:` is a hole, but WHICH hole depends on where the
+        list is. `(a, b) i32` on a declaration is missing its types; `(i32,
+        i32) i32` in type position is missing its NAMES — DESIGN.md's
+        overloading section: "Function types must name their parameters." The
+        two read identically to the grammar and must not read identically to
+        the user. Only a closure infers either (grammar.js D13).
+        """
         out = []
         for child in self.kids(node):
             if child.type != PARAMETER:
@@ -768,9 +834,13 @@ class Converter:
             name = self.text(self.field(child, F_NAME))
             mutability = self.field(child, F_MUTABILITY)
             type_node = self.field(child, F_TYPE)
-            if type_node is None and required:
-                # DESIGN.md:223 / 329 — a declaration and a function type both
-                # write every type; only a closure infers them (grammar.js D13)
+            if type_node is None and form == "type":
+                self.error(
+                    child,
+                    f"expected a parameter name: a function type must name its "
+                    f"parameters, and `{name}` is a type where the name belongs",
+                )
+            elif type_node is None and form == "declaration":
                 self.error(
                     child,
                     f"parameter `{name}` needs a type: "
@@ -858,7 +928,7 @@ class Converter:
         if kind == FUNCTION_SIGNATURE:
             ret_node = self.field(node, F_RETURN_TYPE)
             return A.FnType(
-                self.parameters(self.field(node, F_PARAMETERS), required=True),
+                self.parameters(self.field(node, F_PARAMETERS), "type"),
                 self.type(ret_node) if ret_node is not None else A.Unit(span=span),
                 span=span,
             )
@@ -1017,7 +1087,7 @@ class Converter:
             if self.field(node, F_TYPE_PARAMETERS) is not None:
                 self.error(node, "a closure takes no type parameters")
             return A.Lambda(
-                self.parameters(self.field(node, F_PARAMETERS), required=False),
+                self.parameters(self.field(node, F_PARAMETERS), "closure"),
                 self.type(ret_node) if ret_node is not None else None,
                 self.block(self.field(node, F_BODY)),
                 span=span,
@@ -1092,6 +1162,16 @@ class Converter:
         if callee_node is not None and callee_node.type == MEMBER_EXPRESSION:
             method = self.text(self.field(callee_node, F_PROPERTY))
             base_node = self.field(callee_node, F_OBJECT)
+            # `A.impl(B, {..})` is a call that DECLARES, and DESIGN.md writes it
+            # only at module level. In statement position it would have to say
+            # what its scope is, and nothing does.
+            if method == IMPL_METHOD:
+                self.error(
+                    node,
+                    "`.impl` declares an impl, so it is legal only at module "
+                    "level, never inside a body",
+                )
+                return None
             # `.try()` is the non-local-exit intrinsic, not a method call
             if method == TRY_METHOD and not raw_args and targs_node is None:
                 return A.Try(self.expr(base_node), span=span)

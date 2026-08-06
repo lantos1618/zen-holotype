@@ -128,6 +128,8 @@ class _Checker:
         self.root = root
         self.diags = []
         self.quiet = 0
+        self._ctors = None
+        self._declared = []      # per-block, for the partial-move check
 
         # per-function state, saved and restored around every nested lambda
         self.binds = {}
@@ -402,7 +404,6 @@ class _Checker:
                        "internal error in the ownership checker: %s" % (exc,))
             return
 
-        self.scope_exit(fn.body, state)
         # `@scope` is the enclosing BLOCK as a value, so handing it back to a
         # caller hands back a frame that is already gone.
         self.check_no_scope_escapes(fn.body.value)
@@ -473,7 +474,6 @@ class _Checker:
         if new_scope:
             self.ctx = self.ctx.with_scope(self.ctx.scope.child())
         declared = []
-        self._declared = getattr(self, "_declared", [])
         self._declared.append(declared)
         try:
             state = self.visit_all(node.stmts, state)
@@ -484,11 +484,6 @@ class _Checker:
             if new_scope:
                 self.binds = saved_binds
                 self.ctx = saved_ctx
-        return state
-
-    def scope_exit(self, body, state):
-        """A function body's own block, whose bindings the caller never
-        sees."""
         return state
 
     def partial_moves(self, declared, state):
@@ -535,7 +530,7 @@ class _Checker:
         bind = _Bind(name, node.span, bool(node.mutable), False, is_scope,
                      self.lambda_depth)
         self.binds[name] = bind
-        if getattr(self, "_declared", None):
+        if self._declared:
             self._declared[-1].append(bind)
 
     def check_copy(self, value, state):
@@ -652,13 +647,47 @@ class _Checker:
         return out
 
     def bind_pattern(self, pattern):
+        """An arm's payload binder is a FRESH name: `Ok(f)` shadows an outer
+        `f`, consumed or not, and reporting the outer one's death inside the
+        arm would be a false positive.
+
+        `cst.py` hands back a nested pattern as a node but a NULLARY
+        CONSTRUCTOR as a bare string -- `Left(Blank)` arrives with
+        `binder="Blank"`, and `Blank` there is a case of the payload type, not
+        a name being bound.  Binding it would shadow a real binding of the
+        same name and silently drop the case, so the constructor index is
+        consulted first.
+        """
         import bootstrap.sema as S
 
         binder = getattr(pattern, "binder", None)
-        if isinstance(binder, str) and binder != "_":
-            self.ctx.scope.put(binder, S.Sym("value", S.ANY, mutable=False))
-            self.binds[binder] = _Bind(binder, pattern.span, True, False, False,
-                                       self.lambda_depth)
+        if not isinstance(binder, str) or binder == "_":
+            return
+        if binder in self.constructors():
+            return
+        self.ctx.scope.put(binder, S.Sym("value", S.ANY, mutable=False))
+        self.binds[binder] = _Bind(binder, pattern.span, True, False, False,
+                                   self.lambda_depth)
+
+    def constructors(self):
+        """Every enum case and every type name in the program, tree-wide.
+
+        Tree-wide and not scope-aware on purpose: the question is only "could
+        this string be a constructor rather than a binder", and answering it
+        too widely costs a shadowed binder its freshness -- which is what the
+        outer binding already gives it.
+        """
+        if self._ctors is not None:
+            return self._ctors
+        names = set()
+        for td in list(getattr(self.sema, "types", {}).values()):
+            names.add(td.name)
+            for v in getattr(td, "variants", ()) or ():
+                vname = getattr(v, "name", None)
+                if isinstance(vname, str):
+                    names.add(vname)
+        self._ctors = names
+        return names
 
     def v_call(self, node, state):
         callee = node.callee
