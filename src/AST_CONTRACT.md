@@ -134,11 +134,13 @@ a node:
 |---|---|---|
 | `Binary.op_span`, `Unary.op_span` | the operator | a trap prints `file:line:col` and `DESIGN.md` fixes that position as the operator token |
 | `Arm.arrow_span` | `=>` | the formatter aligns arms on it |
-| `Match.name_span` | `match` | "is not exhaustive" points there |
+| `Match.name_span` | `match` | kept for `fmt` and the LSP; **not** where "is not exhaustive" points — see below |
 | `Function.params_span`, `FnType.params_span`, `Lambda.params_span` | `( .. )` | wrap-or-not is a decision about the whole list |
 | `Match.arms_span`, `Call.args_span`, `FixedArray.args_span` | `{ .. }` / `( .. )` | same |
 | `Struct.body_span`, `Impl.body_span` | `{ .. }` | a struct body holds members, not statements, so it is not a `Block` and has no span of its own otherwise |
 | `Enum.leading_bar` | `\|` of the one-variant form | `Res<Span>`: present or not, and where |
+
+**"is not exhaustive" points at the whole match expression, not at the `match` token.** An earlier version of this table said the opposite and it was wrong: every `tests/must-fail/sema/match_*` test asserts the receiver's position, and `TESTING.md` requires "the first byte of the smallest offending node". The offending node is the match expression, whose first byte is the receiver's — `s.match({` at column 5 is asserted as `9:5`, and `(n == 0).match({` as `8:5`, the `(`. `name_span` still exists because `fmt` and the LSP want the keyword; no diagnostic uses it.
 
 Every **name** is an `Ident { text, span }` rather than a bare `str`, because
 rename, go-to-definition and "no such field" all point at the name and not at
