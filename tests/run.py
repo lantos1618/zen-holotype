@@ -53,6 +53,7 @@ DIR_EXPECTED_NAMES = (".expected", "{name}.expected", "main.expected")
 DIR_EXIT_NAMES = (".exit", "{name}.exit", "main.exit")
 DIR_STDERR_NAMES = (".stderr", "{name}.stderr", "main.stderr")
 DIR_COUNT_NAMES = (".count", "{name}.count", "main.count")
+DIR_STAGE_NAMES = (".stage", "{name}.stage", "main.stage")
 
 # What the compiler prints once it is done: `bootstrap: 3 diagnostic(s)`.
 # `.count` is the only assertion that needs it, and it is the only one that
@@ -79,6 +80,19 @@ class HarnessError(Exception):
     """The harness cannot do its job. Never a test result."""
 
 
+def _current_stage() -> int:
+    """The PLAN.md stage the tree is being graded against, from `STAGE` at the
+    repo root. One fact, one place: the Makefile reads the same file, and a
+    stage duplicated in two places is one stale stage waiting to happen."""
+    path = REPO_ROOT / "STAGE"
+    try:
+        return int(path.read_text(encoding="utf-8").split("#", 1)[0].strip())
+    except (OSError, ValueError) as exc:
+        raise HarnessError(
+            f"{path}: expected one stage number (see docs/PLAN.md)"
+        ) from exc
+
+
 # --------------------------------------------------------------- test model
 
 
@@ -97,6 +111,8 @@ class Test:
     stderr_path: Path | None = None
     count_max: int | None = None
     count_path: Path | None = None
+    stage_at: int | None = None
+    stage_path: Path | None = None
     is_dir: bool = False
 
     @property
@@ -161,6 +177,26 @@ def _read_exit(path: Path) -> int:
     return value
 
 
+def _read_stage(path: Path) -> int:
+    """`.stage` names the PLAN.md stage a test's feature arrives at. A test
+    ahead of the current stage cannot pass yet, and a permanently-red test is
+    not free: people learn to read past red, which is the same damage a gate
+    that cannot fail does from the other direction.
+
+    It is not a skip. The test still runs -- see `stage_verdict`."""
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise HarnessError(f"{path}: unreadable ({exc})") from exc
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise HarnessError(f"{path}: {raw!r} is not a stage number") from exc
+    if value < 0:
+        raise HarnessError(f"{path}: stage {value} does not exist")
+    return value
+
+
 def _read_count(path: Path) -> int:
     """`.count` bounds the number of diagnostics; TESTING.md says only write
     one where the count is the property under test. Zero would assert the
@@ -202,6 +238,7 @@ def _make_test(
     exit_path: Path | None,
     stderr_path: Path | None,
     count_path: Path | None,
+    stage_path: Path | None,
     is_dir: bool,
 ) -> Test:
     return Test(
@@ -218,6 +255,8 @@ def _make_test(
         stderr_path=stderr_path,
         count_max=_read_count(count_path) if count_path else None,
         count_path=count_path,
+        stage_at=_read_stage(stage_path) if stage_path else None,
+        stage_path=stage_path,
         is_dir=is_dir,
     )
 
@@ -256,6 +295,7 @@ def collect(tests_dir: Path, into: Collection, kind: str) -> None:
                             _first_existing(child, DIR_EXIT_NAMES, child.name),
                             _first_existing(child, DIR_STDERR_NAMES, child.name),
                             _first_existing(child, DIR_COUNT_NAMES, child.name),
+                            _first_existing(child, DIR_STAGE_NAMES, child.name),
                             is_dir=True,
                         )
                     )
@@ -276,6 +316,7 @@ def collect(tests_dir: Path, into: Collection, kind: str) -> None:
                     exit_path = child.with_suffix(".exit")
                     stderr_path = child.with_suffix(".stderr")
                     count_path = child.with_suffix(".count")
+                    stage_path = child.with_suffix(".stage")
                     into.tests.append(
                         _make_test(
                             f"{kind}/{rel}",
@@ -287,6 +328,7 @@ def collect(tests_dir: Path, into: Collection, kind: str) -> None:
                             exit_path if exit_path.is_file() else None,
                             stderr_path if stderr_path.is_file() else None,
                             count_path if count_path.is_file() else None,
+                            stage_path if stage_path.is_file() else None,
                             is_dir=False,
                         )
                     )
@@ -657,6 +699,30 @@ def run_must_fail(test: Test, tool: Toolchain, work: Path, args: argparse.Namesp
     return Result(test, not reasons, reasons, clip(text) if reasons else "")
 
 
+def stage_verdict(result: Result, current: int) -> tuple[Result, bool]:
+    """Apply a test's `.stage` to the result it already earned.
+
+    A deferred test is RUN, never skipped. Skipping would make the sidecar a
+    second gate that cannot fail: the day the feature lands, nothing would
+    notice, and the file would sit there asserting a stage the project left
+    behind. So the two outcomes are both useful --
+
+        it failed  -> deferred, not a failure. The reason is on record.
+        it PASSED  -> a failure, and the fix is to delete the .stage file.
+    """
+    stage_at = result.test.stage_at
+    if stage_at is None or stage_at <= current:
+        return result, False
+    if result.ok:
+        name = result.test.stage_path.name
+        return Result(
+            result.test, False,
+            [f"deferred to stage {stage_at}, but it passes at stage {current}: "
+             f"delete {name} -- the stage arrived"],
+        ), False
+    return result, True
+
+
 def run_one(test: Test, tool: Toolchain, workroot: Path, args: argparse.Namespace) -> Result:
     work = workroot / re.sub(r"[^A-Za-z0-9_.-]", "_", test.tid)
     work.mkdir(parents=True, exist_ok=True)
@@ -687,6 +753,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                    help="select tests whose id matches (repeatable)")
     p.add_argument("--list", action="store_true", help="print selected test ids and exit")
     p.add_argument("--jobs", "-j", type=int, default=os.cpu_count() or 1)
+    p.add_argument("--stage", type=int, default=_current_stage(),
+                   help="PLAN.md stage to grade against; a test whose .stage is "
+                        "ahead of it is deferred rather than failed")
     p.add_argument("--timeout", type=float, default=120.0, help="seconds for one compile")
     p.add_argument("--run-timeout", type=float, default=20.0, help="seconds for one program")
     p.add_argument("--keep", action="store_true", help="keep the work directory")
@@ -743,6 +812,7 @@ def main(argv: Sequence[str]) -> int:
 
     workroot = Path(tempfile.mkdtemp(prefix="zen-tests."))
     results: list[Result] = []
+    deferred: list[Result] = []
     harness_errors: list[str] = []
 
     def task(test: Test) -> Result:
@@ -761,9 +831,15 @@ def main(argv: Sequence[str]) -> int:
             f"[{shlex.join(tool.emit_argv)}], {args.jobs} job(s)"
         )
         with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-            for result in pool.map(task, selected):
+            for raw in pool.map(task, selected):
+                result, is_deferred = stage_verdict(raw, args.stage)
                 results.append(result)
-                if result.ok:
+                if is_deferred:
+                    deferred.append(result)
+                    if args.verbose:
+                        print(f"defer {result.test.tid} "
+                              f"(stage {result.test.stage_at})")
+                elif result.ok:
                     if args.verbose:
                         print(f"ok   {result.test.tid}")
                 else:
@@ -774,7 +850,7 @@ def main(argv: Sequence[str]) -> int:
         else:
             shutil.rmtree(workroot, ignore_errors=True)
 
-    failures = [r for r in results if not r.ok]
+    failures = [r for r in results if not r.ok and r not in deferred]
     if failures:
         print("\n" + "=" * 72)
         print(f"{len(failures)} failure(s)")
@@ -792,8 +868,15 @@ def main(argv: Sequence[str]) -> int:
         for name in found.uncollected:
             print(f"    {name}")
 
-    passed = len(results) - len(failures)
+    if deferred:
+        print(f"\ndeferred -- ahead of stage {args.stage}, so red is expected "
+              "and is not counted:")
+        for result in deferred:
+            print(f"    stage {result.test.stage_at}  {result.test.tid}")
+
+    passed = len(results) - len(failures) - len(deferred)
     print(f"\nrun.py: {passed} passed, {len(failures)} failed, "
+          f"{len(deferred)} deferred, "
           f"{len(found.uncollected)} uncollected, {len(found.tests) - len(selected)} deselected")
 
     if harness_errors:
