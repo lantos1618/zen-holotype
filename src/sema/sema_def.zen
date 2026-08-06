@@ -24,6 +24,13 @@
 // buy the same complexity for a nested generic and a second allocation
 // per name. The memo tables that DO key on an id use `Map`, because
 // there the key is a `u32` and the point is identity, not lookup speed.
+//
+// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
+// is "what a name means", and every query below is that one question
+// asked of a different scope — a module's own table, the imports it
+// follows, the prelude it never wrote, and which module a dotted path
+// even denotes. They all read `tables`, and a split would put the store
+// in one file and half its readers in another.
 
 Ast, Module, Decl, DeclKind, Ident, Span, QualifiedName = ast
 Import, Impl = ast
@@ -111,15 +118,41 @@ World* = {
 
     table_at* = (self: @Self, i: usize) Res<ModuleTable> { self.tables.get(i) }
 
-    // Which module is spelled `std.core.result`? Modules are addressable
-    // by their full dotted path only: "names are qualified by path", and
+    // Which module is spelled `std.core.result`? A module's identity is
+    // its full dotted path — "names are qualified by path", and
     // accepting a suffix would make two modules answer to one spelling.
+    //
+    // A FOLDER ROOT HAS A SECOND SPELLING, and only one. `std/core/
+    // core.zen` is `std.core.core` by the path rule and `std.core` by
+    // the folder rule, and both are written in this tree. They are one
+    // FILE, so they are one module, so the shorthand is a way of
+    // WRITING the identity rather than a second identity — which is
+    // exactly the line `bootstrap/modules.py` draws between a file's
+    // `dotted` and its `_module_index` aliases. Tried second, so an
+    // `a.b` that is a module of its own always wins over `a.b.b`.
     index_of* = (self: @Self, name: str) Res<usize> {
+        self.exact_index(name).match({
+            Ok(i) => Ok(i),
+            None  => self.folder_index(name),
+        })
+    }
+
+    exact_index = (self: @Self, name: str) Res<usize> {
         Range(0, self.tables.len).find((i) {
             self.tables.get(i).match({
                 Ok(t) => t.name.eq(name),
                 None  => false,
             })
+        })
+    }
+
+    // `std.core` -> `std.core.core`: the folder's name with its own
+    // last segment repeated, which is the file a folder keeps its root
+    // in and the one path `<folder>/<folder>.zen` builds.
+    folder_index = (self: @Self, name: str) Res<usize> {
+        self.alloc.String("{}.{}", name, last_segment(name)).match({
+            Err(_) => None,
+            Ok(s)  => self.exact_index(s.view()),
         })
     }
 
@@ -429,6 +462,16 @@ dotted* = (a: Alloc, q: QualifiedName) Res<str, AllocError> {
         out.add_bytes(seg.text).try();
     });
     Ok(out.view());
+}
+
+// The last segment of a dotted name — `core` of `std.core`, and `main`
+// of a name with no dot at all, which is why the cut starts at 0.
+last_segment* = (name: str) str {
+    cut ::= 0;
+    Range(0, name.len).loop((h, i) {
+        (name.index(i) == '.').then(() { cut = i + 1; });
+    });
+    name.slice(cut, name.len)
 }
 
 // The coordinate of a declaration. Both indices are positions in a

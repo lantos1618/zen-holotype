@@ -31,6 +31,15 @@
 // WHAT STOPS THIS FILE SHORT OF A COMPILER is written down at `deliver`
 // rather than hidden: emitting needs a way to write a file that `Fs`
 // does not have. That is one declaration, and it is not in this folder.
+//
+// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
+// is one build, and its parts are the five phases of one — they share
+// the `Build` that holds the tree, the tally and the authority, and
+// splitting the walk from the check would put the `Ast` in one file and
+// the only thing that finishes it in another. The one part that is NOT
+// about a build has already left: what a module NAME is (`module_name`
+// and its helpers, below) is a fact about a path, and it is written as
+// free functions so a second driver reads the same rule.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -39,7 +48,7 @@ Range = std.core
 FsError = std.env
 
 Ast = ast.ast_arena
-Module = ast.ast_node
+Module, Alias, Named = ast.ast_node
 QualifiedName = ast.ast_span
 
 // THE `Diag` COLLISION. `lex`, `parse` and `sema` each export a type
@@ -62,15 +71,20 @@ message = lex.lex
 
 scan, Source, Lexed = lex.lex
 Parser, module = parse.parse
-Checker, check_all, dotted = sema.sema
+Checker, check_all = sema.sema
 Emit, CBackend, emit_program = gen.gen
 
 Job = zen.zen_cli
 
 // A module of the program: what it is called, and where its bytes are.
-// Two fields and not one because neither derives from the other cheaply
-// — the name is what the parser labels the tree with and what dedupes
-// the walk, and the path took two stats to find.
+//
+// THE PATH IS THE IDENTITY AND THE NAME IS DERIVED FROM IT. Two
+// spellings reach one file — `std/core/core.zen` is `std.core` to a
+// module that writes the folder and `std.core.core` to one that writes
+// the file — so a `Unit` keyed on the import that found it makes one
+// file two modules with one set of declarations, and a program that
+// never writes the short spelling then has no prelude at all.
+// `docs/SEMA_BOOTSTRAP_FIXES.md` §13 is that bug with its reproducer.
 Unit* = {
     name*: str,     // the dotted module name: `std.core.result`
     path*: str,     // where the bytes are, relative to nothing: as given
@@ -147,9 +161,17 @@ Build* = {
         take_flat = self.env.fs.exists(flat.view())
                  || !self.env.fs.exists(nest.view());
         take_flat.match({
-            true  => Ok(Unit(name: name, path: flat.view())),
-            false => Ok(Unit(name: name, path: nest.view())),
+            true  => self.unit_at(flat.view()),
+            false => self.unit_at(nest.view()),
         })
+    }
+
+    // The module a FILE is. The name is a pure function of the path and
+    // never of the spelling that found it, so `std.core` and
+    // `std.core.core` are one module read once — see `Unit`.
+    unit_at = (self: @Self, path: str) Res<Unit, AllocError> {
+        name = module_name(self.alloc, self.root, path).try();
+        Ok(Unit(name: name, path: path));
     }
 
     // The whole program, breadth first from the entry. `seen` is both
@@ -272,13 +294,14 @@ Build* = {
     }
 
     // Every module this one names, queued. An import is the only
-    // declaration that reaches outside the file, so this match is the
-    // whole of module discovery.
+    // declaration that reaches outside the file — except for the one
+    // below it, which is why this match has two arms and not one.
     imports_of = (self :: @Self, m: Module, seen :: Vec<Unit>)
                  Res<(), AllocError> {
         m.decls.loop((h, d) {
             d.kind.match({
                 Import(im) => self.enqueue(im.module, seen),
+                Alias(al)  => self.alias_of(al, seen),
                 _          => Ok(()),
             }).try();
         });
@@ -287,11 +310,58 @@ Build* = {
 
     enqueue = (self :: @Self, q: QualifiedName, seen :: Vec<Unit>)
               Res<(), AllocError> {
-        name = dotted(self.alloc, q).try();
-        path = self.file_of(q).try();
-        seen.find((u) { u.name.eq(name) }).match({
+        self.queue(self.file_of(q).try(), seen)
+    }
+
+    // Queued on the PATH, because the path is the module and a spelling
+    // is only a way of writing it: `std.core` and `std.core.core` reach
+    // one file and must reach one `Unit`.
+    queue = (self :: @Self, path: str, seen :: Vec<Unit>)
+            Res<(), AllocError> {
+        seen.find((u) { u.path.eq(path) }).match({
             Ok(_) => Ok(()),
-            None  => seen.add(Unit(name: name, path: path)),
+            None  => self.queue_fresh(path, seen),
+        })
+    }
+
+    queue_fresh = (self :: @Self, path: str, seen :: Vec<Unit>)
+                  Res<(), AllocError> {
+        seen.add(self.unit_at(path).try())
+    }
+
+    // A MODULE ALIAS IS AN `Alias`, NOT AN `Import`. `sh = shape` and
+    // `Alias = Shape` are the same three tokens, and only name
+    // resolution can say which — so a syntactic walk, which this is by
+    // necessity because it runs before sema, cannot know.
+    //
+    // So a bare single-segment target is a CANDIDATE: probed, and
+    // queued only when a file is actually there. The probe cannot live
+    // in `enqueue`, because a missing file behind a real import is a
+    // fault and has to stay one — a `Shape` that is a type would
+    // otherwise report a module nobody asked for.
+    alias_of = (self :: @Self, al: Alias, seen :: Vec<Unit>)
+               Res<(), AllocError> {
+        self.tree.type_at(al.target).kind.match({
+            Named(n) => self.alias_named(n, seen),
+            _        => Ok(()),
+        })
+    }
+
+    // `Vec<u8>` names no module: a module path takes no type arguments.
+    alias_named = (self :: @Self, n: Named, seen :: Vec<Unit>)
+                  Res<(), AllocError> {
+        (n.args.len == 0).match({
+            false => Ok(()),
+            true  => self.probe(n.name.text, seen),
+        })
+    }
+
+    probe = (self :: @Self, name: str, seen :: Vec<Unit>)
+            Res<(), AllocError> {
+        u = self.candidate(name).try();
+        self.env.fs.exists(u.path).match({
+            false => Ok(()),
+            true  => self.queue(u.path, seen),
         })
     }
 
@@ -438,11 +508,47 @@ build* = (env: Env, a: Alloc, job: Job) Res<i32, AllocError> {
 // — which is what a folder repeats to name its root file. A root with no
 // `/` in it is already its own basename, which is why `cut` starts at 0.
 base_of = (root: str) str {
+    root.slice(after_last_slash(root), root.len);
+}
+
+// One past the last `/`, and 0 when there is none — which is what makes
+// a path with a single component its own last component.
+after_last_slash = (path: str) usize {
     cut ::= 0;
-    Range(0, root.len).loop((h, i) {
-        (root.index(i) == '/').then(() { cut = i + 1; });
+    Range(0, path.len).loop((h, i) {
+        (path.index(i) == '/').then(() { cut = i + 1; });
     });
-    root.slice(cut, root.len);
+    cut
+}
+
+// THE MODULE A PATH IS, and the name a `Unit` carries.
+//
+// The path relative to the root, with the separators as dots and the
+// extension off: `<root>/a/b/c.zen` is `a.b.c`. That is the file's
+// IDENTITY and it is one name, which is the point — a folder root has
+// a second, shorter spelling (`std.core` for `std/core/core.zen`) and
+// naming the module after whichever spelling arrived first is what made
+// one file two modules with one set of declarations.
+//
+// The short spelling is not lost: it is a way of WRITING the identity
+// rather than a second identity, and `World.index_of` is where the two
+// meet — the same split `bootstrap/modules.py` draws between a file's
+// `dotted` and the aliases its `_module_index` maps onto it.
+module_name* = (a: Alloc, root: str, path: str) Res<str, AllocError> {
+    inner = path.slice(root.len + 1, path.len - EXT_BYTES);
+    out ::= a.String().try();
+    Range(0, inner.len).loop((h, i) {
+        out.add_byte(dot_for(inner.index(i))).try();
+    });
+    Ok(out.view());
+}
+
+// `.zen`, and it is written here because `module_name` is the one place
+// that has to take it back off.
+EXT_BYTES : usize = 4
+
+dot_for = (b: u8) u8 {
+    (b == '/').match({ true  => '.', false => b })
 }
 
 // The last segment of a dotted name — `mem` of `std.mem` — which is what
