@@ -2373,8 +2373,18 @@ class Sema:
         if v is None:
             return
         if not self._fits(v, expect.name):
+            lo, hi = self._limits(expect.name)
             self.error(_span(node) or span,
-                       "literal %d does not fit %s" % (v, expect.name))
+                       "literal %d does not fit %s: %s holds %d..%d, so the "
+                       "value is out of range" % (v, expect.name, expect.name, lo, hi))
+
+    @staticmethod
+    def _limits(primname):
+        """What the type holds, named in the diagnostic. A reader who has to
+        go look up the range of `u8` to understand the error is being told
+        the value is wrong without being told what right would have been."""
+        bits, signed = _INT_PRIMS[primname]
+        return (-(1 << (bits - 1)), (1 << (bits - 1)) - 1) if signed else (0, (1 << bits) - 1)
 
     @staticmethod
     def _fits(v, primname):
