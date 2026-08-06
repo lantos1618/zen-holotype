@@ -1,0 +1,504 @@
+// src/sema/sema_type.zen
+// The two questions a node is asked, and the answers cached against it.
+//
+// `type_from_ast(id)` is what a WRITTEN type denotes; `type_of(id)` is
+// what an EXPRESSION is. Both memoize on the node's id — which is what
+// `ast_id.zen` made ids `Eq + Hash` for, and what `sema_check.zen` holds
+// the two `Map`s for.
+//
+// EVERY FUNCTION HERE IS A FREE FUNCTION ON `Checker`, and that is what
+// makes this a file rather than four hundred more lines of the engine.
+// DESIGN.md settles that the two are the same thing: "`@Self` is spelled
+// `Vec<T>` when you write the same function outside the body — the two
+// forms are the same function, and the second is what the first means."
+// So `c.type_of(id, ctx)` still reads as a method, resolution is ufcs,
+// and nothing at a call site changed.
+//
+// THE DEPENDENCY POINTS ONE WAY. This module imports `Checker`;
+// `sema_check.zen` imports nothing from here. Module cycles are a
+// compile error, so a split that did not point one way would not
+// compile — the constraint `ast_node.zen` records when it explains why
+// it is one file. What made this split possible where that one was
+// impossible: the engine holds STATE and these hold BEHAVIOUR, and only
+// the behaviour needed to know about the other.
+
+Ast, Expr, ExprId, Type, TypeId, Span, Ident, Literal, LiteralKind = ast
+BinOp, UnOp, Block, BlockId, Stmt, StmtKind = ast
+Param, Binary, Unary, Bind, ExprStmt = ast
+Alloc, AllocError = std.mem
+Vec, Map = std.collections
+str, String = std.text
+Range = std.core
+DeclId = sema.sema_id
+TyId, Ty, Types, ResForm, TyRes = sema.sema_ty
+World, Def, DefKind = sema.sema_def
+Diag, SemaFault, NameFault, TypeFault = sema.sema_diag
+Checker, Ctx = sema.sema_check
+ARRAY_DECL, UNRESOLVED, is_prim, is_predicate = sema.sema_check
+absence_into_failure, both_failures = sema.sema_check
+
+// -----------------------------------------------------------------
+// QUERY: the type a written type node denotes
+//
+// `ast.Type` is what the author wrote; this is what it means. The
+// memo makes the two-way trip once per node, which matters because
+// a signature's parameter types are read at every call site.
+// -----------------------------------------------------------------
+
+type_from_ast* = (c :: Checker, id: TypeId, ctx: Ctx)
+                 Res<TyId, AllocError> {
+    c.type_memo.get(id).match({
+        None    => c.compute_type(id, ctx),
+        Ok(hit) => Ok(hit),
+    })
+}
+
+compute_type* = (c :: Checker, id: TypeId, ctx: Ctx)
+               Res<TyId, AllocError> {
+    // seed the memo with poison before recursing, so a type that
+    // mentions itself bottoms out instead of looping. A recursive
+    // type is a real thing — `Node = { next: Ptr<Node> }` — and the
+    // layout question is answered elsewhere.
+    poison = c.types.unknown().try();
+    c.type_memo.set(id, poison).try();
+    node = c.tree.type_at(id);
+    got = c.type_kind(node, ctx).try();
+    c.type_memo.set(id, got).try();
+    Ok(got);
+}
+
+type_kind* = (c :: Checker, node: Type, ctx: Ctx) Res<TyId, AllocError> {
+    node.kind.match({
+        Unit      => c.types.prim("()"),
+        SelfType  => c.self_type(ctx),
+        Infer     => c.types.infer(),
+        Variadic  => c.types.prim("..."),
+        Named(n)  => c.named_type(node, n.name, n.args, ctx),
+        Union(u)  => c.union_type(u.members, ctx),
+        Fn(f)     => c.fn_type(f.params, f.ret, ctx),
+        Array(t)  => c.array_type(t.elem, ctx),
+    })
+}
+
+self_type* = (c :: Checker, ctx: Ctx) Res<TyId, AllocError> {
+    ctx.has_self.match({
+        false => c.types.unknown(),
+        true  => Ok(ctx.self_ty),
+    })
+}
+
+union_type* = (c :: Checker, members: Vec<TypeId>, ctx: Ctx)
+             Res<TyId, AllocError> {
+    parts ::= c.alloc.Vec<TyId>();
+    members.loop((h, m) {
+        parts.add(c.type_from_ast(m, ctx).try()).try();
+    });
+    c.types.union_ty(parts)
+}
+
+fn_type* = (c :: Checker, params: Vec<Param>, ret: TypeId, ctx: Ctx)
+          Res<TyId, AllocError> {
+    ptys ::= c.alloc.Vec<TyId>();
+    params.loop((h, p) {
+        ptys.add(c.param_type(p, ctx).try()).try();
+    });
+    rty = c.type_from_ast(ret, ctx).try();
+    c.types.fn_ty(ptys, rty)
+}
+
+param_type* = (c :: Checker, p: Param, ctx: Ctx) Res<TyId, AllocError> {
+    p.type.match({
+        None    => c.types.infer(),
+        Ok(t)   => c.type_from_ast(t, ctx),
+    })
+}
+
+// `[u8, 64]`. The element type is what an assignment has to agree
+// about; the COUNT is a comptime expression and is not carried here
+// yet, so a provable out-of-range index is out of reach. That is a
+// gap and it is named in the report rather than papered over.
+array_type* = (c :: Checker, elem: TypeId, ctx: Ctx)
+             Res<TyId, AllocError> {
+    e = c.type_from_ast(elem, ctx).try();
+    args ::= c.alloc.Vec<TyId>();
+    args.add(e).try();
+    c.types.named(ARRAY_DECL, "[]", "[]", args)
+}
+
+// A written name, applied to its arguments.
+//
+// `Res` is recognised structurally rather than resolved, and that is
+// not a special case for a favourite type: `Res<T>` and `Res<T, E>`
+// are two arities of one name, sema asks "which form is this" at
+// every `.try()`, and a nominal answer would make every one of those
+// questions a field read through a declaration.
+named_type* = (c :: Checker, node: Type, name: Ident, args: Vec<TypeId>,
+              ctx: Ctx) Res<TyId, AllocError> {
+    tys ::= c.alloc.Vec<TyId>();
+    args.loop((h, a) {
+        tys.add(c.type_from_ast(a, ctx).try()).try();
+    });
+    name.text.eq("Res").match({
+        true  => c.res_type(tys),
+        false => c.declared_type(node, name, tys, ctx),
+    })
+}
+
+res_type* = (c :: Checker, args: Vec<TyId>) Res<TyId, AllocError> {
+    value = args.get(0).match({ Ok(v) => v, None => UNRESOLVED });
+    args.len.match({
+        1 => c.types.res_absence(value),
+        2 => c.res_failure_of(args, value),
+        _ => c.types.unknown(),
+    })
+}
+
+res_failure_of* = (c :: Checker, args: Vec<TyId>, value: TyId)
+                 Res<TyId, AllocError> {
+    args.get(1).match({
+        None    => c.types.unknown(),
+        Ok(e)   => c.types.res_failure(value, e),
+    })
+}
+
+// A primitive, or a declaration the module can see.
+//
+// The primitive check comes first because no module declares `i32`
+// in a way this layer can reach, and a name that is both would be a
+// language change rather than a lookup order.
+declared_type* = (c :: Checker, node: Type, name: Ident, args: Vec<TyId>,
+                 ctx: Ctx) Res<TyId, AllocError> {
+    is_prim(name.text).match({
+        true  => c.types.prim(name.text),
+        false => c.lookup_named(node, name, args, ctx),
+    })
+}
+
+lookup_named* = (c :: Checker, node: Type, name: Ident, args: Vec<TyId>,
+                ctx: Ctx) Res<TyId, AllocError> {
+    found ::= c.alloc.Vec<Def>();
+    c.world.defs_of(ctx.module, name.text, found).try();
+    found.get(0).match({
+        None    => c.unresolved_type(node, name),
+        Ok(d)   => c.types.named(d.id, d.qname, d.name, args),
+    })
+}
+
+unresolved_type* = (c :: Checker, node: Type, name: Ident)
+                  Res<TyId, AllocError> {
+    c.report(node.span.file, name.span,
+                SemaFault.UndefinedName(NameFault(name: name.text))).try();
+    c.types.unknown()
+}
+
+// -----------------------------------------------------------------
+// QUERY: the type of an expression
+//
+// The one DESIGN.md names first. Memoized on the node id, so a
+// second ask is a lookup and an LSP hover is not a recompile.
+// -----------------------------------------------------------------
+
+type_of* = (c :: Checker, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
+    c.expr_memo.get(id).match({
+        None    => c.compute_expr(id, ctx),
+        Ok(hit) => Ok(hit),
+    })
+}
+
+compute_expr* = (c :: Checker, id: ExprId, ctx: Ctx)
+               Res<TyId, AllocError> {
+    poison = c.types.unknown().try();
+    c.expr_memo.set(id, poison).try();
+    node = c.tree.expr_at(id);
+    got = c.expr_kind(node, ctx).try();
+    c.expr_memo.set(id, got).try();
+    Ok(got);
+}
+
+expr_kind* = (c :: Checker, node: Expr, ctx: Ctx) Res<TyId, AllocError> {
+    node.kind.match({
+        Literal(l)  => c.literal_type(l),
+        Unit        => c.types.prim("()"),
+        SelfType    => c.self_type(ctx),
+        Name(n)     => c.name_type(node, n.text, ctx),
+        Paren(p)    => c.type_of(p.inner, ctx),
+        Binary(b)   => c.binary_type(node, b, ctx),
+        Unary(u)    => c.unary_type(u, ctx),
+        Try(t)      => c.try_type(node, t.operand, ctx),
+        Consume(x)  => c.type_of(x.operand, ctx),
+        Block(b)    => c.block_type(b, ctx),
+        _           => c.types.unknown(),
+    })
+}
+
+// An integer literal is its own type until a context settles it —
+// "a literal's type comes from its context". `int` and `float` are
+// assignable to every width, and to nothing else.
+literal_type* = (c :: Checker, l: Literal) Res<TyId, AllocError> {
+    l.kind.match({
+        Int   => c.types.prim("int"),
+        Float => c.types.prim("float"),
+        Str   => c.types.prim("str"),
+        Char  => c.types.prim("u8"),
+        Bool  => c.types.prim("bool"),
+    })
+}
+
+// A bare identifier. A local shadows everything, then the module's
+// own declarations, then what it imported — and the `*` gate is
+// inside `defs_of`, not repeated here.
+name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
+            Res<TyId, AllocError> {
+    c.lookup(text).match({
+        None    => c.global_name_type(node, text, ctx),
+        Ok(b)   => Ok(b.ty),
+    })
+}
+
+global_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
+                   Res<TyId, AllocError> {
+    found ::= c.alloc.Vec<Def>();
+    c.world.defs_of(ctx.module, text, found).try();
+    found.get(0).match({
+        None    => c.unresolved_name(node, text),
+        Ok(d)   => c.def_type(d),
+    })
+}
+
+unresolved_name* = (c :: Checker, node: Expr, text: str)
+                  Res<TyId, AllocError> {
+    c.report(node.span.file, node.span,
+                SemaFault.UndefinedName(NameFault(name: text))).try();
+    c.types.unknown()
+}
+
+// A name that denotes a DECLARATION rather than a value. A type used
+// as a value is the type itself — `Shape.Unit` reads through it —
+// and a function's own type is what overload resolution narrows.
+def_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
+    empty ::= c.alloc.Vec<TyId>();
+    c.types.named(d.id, d.qname, d.name, empty)
+}
+
+// `a == b` is `bool` whatever the operands are; `a + b` is the
+// operands' type. Both sides are typed either way, because a
+// diagnostic inside an unused operand is still a diagnostic.
+binary_type* = (c :: Checker, node: Expr, b: Binary, ctx: Ctx)
+              Res<TyId, AllocError> {
+    lhs = c.type_of(b.lhs, ctx).try();
+    rhs = c.type_of(b.rhs, ctx).try();
+    is_predicate(b.op).match({
+        true  => c.types.bool_ty(),
+        false => c.arith_type(lhs, rhs),
+    })
+}
+
+// The wider of the two: a literal takes the other side's type, which
+// is "a literal's type comes from its context" one level in.
+arith_type* = (c :: Checker, lhs: TyId, rhs: TyId) Res<TyId, AllocError> {
+    // the match yields a bare TyId and the `Ok` is outside it: two
+    // arms that are both `Ok(..)` give the match no written type to
+    // take from its first arm.
+    Ok(c.is_literal_ty(lhs).match({
+        true  => rhs,
+        false => lhs,
+    }));
+}
+
+unary_type* = (c :: Checker, u: Unary, ctx: Ctx) Res<TyId, AllocError> {
+    inner = c.type_of(u.operand, ctx).try();
+    u.op.match({
+        Not  => c.types.bool_ty(),
+        Neg  => Ok(inner),
+        Addr => Ok(inner),
+    })
+}
+
+
+// -----------------------------------------------------------------
+// `.try()`
+//
+// "It unwraps Ok, or returns the Err — or the None — from the
+// ENCLOSING function." Three rules go with it and all three are law
+// 4: the enclosing function must return a compatible Res, a `Res<T>`
+// may not try into a `Res<T, E>` function, and nothing is converted.
+// -----------------------------------------------------------------
+
+try_type* = (c :: Checker, node: Expr, operand: ExprId, ctx: Ctx)
+           Res<TyId, AllocError> {
+    got = c.type_of(operand, ctx).try();
+    c.types.at(got).match({
+        Res(r) => c.try_res(node, r, got, ctx),
+        _      => c.try_not_res(node, got, ctx),
+    })
+}
+
+try_not_res* = (c :: Checker, node: Expr, got: TyId, ctx: Ctx)
+              Res<TyId, AllocError> {
+    // poison never produces a second diagnostic
+    c.is_unknown(got).match({
+        false => c.try_needs_res(node, got),
+        true  => Ok(got),
+    })
+}
+
+try_needs_res* = (c :: Checker, node: Expr, got: TyId)
+                Res<TyId, AllocError> {
+    want = c.types.unknown().try();
+    c.report(node.span.file, node.span,
+                SemaFault.TryNeedsRes(TypeFault(
+                    name: "", expected: want, found: got))).try();
+    c.types.unknown()
+}
+
+try_res* = (c :: Checker, node: Expr, r: TyRes, got: TyId, ctx: Ctx)
+          Res<TyId, AllocError> {
+    ctx.has_ret.match({
+        false => c.try_outside_res(node, got),
+        true  => c.try_into(node, r, got, ctx),
+    })
+}
+
+try_outside_res* = (c :: Checker, node: Expr, got: TyId)
+                  Res<TyId, AllocError> {
+    want = c.types.unknown().try();
+    c.report(node.span.file, node.span,
+                SemaFault.TryOutsideRes(TypeFault(
+                    name: "", expected: want, found: got))).try();
+    Ok(got)
+}
+
+// The enclosing function returns a Res. Which one decides whether
+// this propagation is legal at all.
+try_into* = (c :: Checker, node: Expr, r: TyRes, got: TyId, ctx: Ctx)
+           Res<TyId, AllocError> {
+    c.types.at(ctx.ret).match({
+        Res(want) => c.try_merge(node, r, want, got),
+        _         => c.try_outside_res(node, got),
+    })
+}
+
+try_merge* = (c :: Checker, node: Expr, r: TyRes, want: TyRes, got: TyId)
+            Res<TyId, AllocError> {
+    // an absence propagating into a failure is the one shape law 4
+    // names outright: "a None never becomes an Err. You name the
+    // reason" — and `.ok_or(..)` is where that is written.
+    absence_into_failure(r.form, want.form).match({
+        true  => c.try_absence(node, got, r.value),
+        false => c.try_set(node, r, want),
+    })
+}
+
+try_absence* = (c :: Checker, node: Expr, got: TyId, value: TyId)
+              Res<TyId, AllocError> {
+    want = c.types.res_failure(value, got).try();
+    c.report(node.span.file, node.span,
+                SemaFault.TryAbsenceIntoFailure(TypeFault(
+                    name: "", expected: want, found: got))).try();
+    Ok(value)
+}
+
+// "propagation merges sets" — and merging is containment, not
+// conversion. The callee's set must already be part of the
+// caller's; there is no From to bridge them.
+try_set* = (c :: Checker, node: Expr, r: TyRes, want: TyRes)
+          Res<TyId, AllocError> {
+    both_failures(r.form, want.form).match({
+        true  => c.try_contained(node, r, want),
+        false => Ok(r.value),
+    })
+}
+
+try_contained* = (c :: Checker, node: Expr, r: TyRes, want: TyRes)
+                Res<TyId, AllocError> {
+    c.types.set_within(r.error, want.error).match({
+        false => c.try_no_conversion(node, r, want),
+        true  => Ok(r.value),
+    })
+}
+
+try_no_conversion* = (c :: Checker, node: Expr, r: TyRes, want: TyRes)
+                    Res<TyId, AllocError> {
+    c.report(node.span.file, node.span,
+                SemaFault.NoErrorConversion(TypeFault(
+                    name: "",
+                    expected: want.error,
+                    found: r.error))).try();
+    Ok(r.value)
+}
+
+// -----------------------------------------------------------------
+// blocks
+//
+// "A block is a value too." Its value is the trailing expression
+// written without a `;`; DESIGN.md also lets a `;`-terminated tail
+// be the value, and the AST records only what was written, so this
+// is where that is decided.
+// -----------------------------------------------------------------
+
+block_type* = (c :: Checker, id: BlockId, ctx: Ctx)
+              Res<TyId, AllocError> {
+    mark = c.mark();
+    blk = c.tree.block_at(id);
+    tail = c.walk_stmts(blk, ctx).try();
+    got = blk.value.match({
+        Ok(e)   => c.type_of(e, ctx),
+        None    => Ok(tail),
+    }).try();
+    c.release(mark).try();
+    Ok(got);
+}
+
+// Every statement, in order, so a binding is in scope for the ones
+// after it. The last statement's type is carried out because a
+// `;`-terminated tail closes a function: "`0;` closes a Res<i32, E>
+// function like `Ok(0);` does".
+walk_stmts* = (c :: Checker, blk: Block, ctx: Ctx)
+             Res<TyId, AllocError> {
+    last ::= c.types.prim("()").try();
+    blk.stmts.loop((h, s) {
+        last = c.stmt_type(s, ctx).try();
+    });
+    Ok(last);
+}
+
+stmt_type* = (c :: Checker, s: Stmt, ctx: Ctx) Res<TyId, AllocError> {
+    s.kind.match({
+        Expr(e)  => c.type_of(e.expr, ctx),
+        Bind(b)  => c.bind_stmt(b, ctx),
+        Block(b) => c.block_type(b, ctx),
+        Decl(_)  => c.types.prim("()"),
+    })
+}
+
+// `x = e;`, `x: T ::= e;`. A written type wins and the value is
+// checked against it; with none, the value's type is the binding's.
+bind_stmt* = (c :: Checker, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
+    got = c.type_of(b.value, ctx).try();
+    want = b.type.match({
+        Ok(t)   => c.type_from_ast(t, ctx),
+        None    => Ok(got),
+    }).try();
+    c.check_assign(b, got, want, ctx).try();
+    c.bind_target(b, want).try();
+    c.types.prim("()")
+}
+
+check_assign* = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
+               Res<(), AllocError> {
+    node = c.tree.expr_at(b.value);
+    c.coerce(node.span.file, node.span, got, want, "").try();
+    Ok(());
+}
+
+// Only a bare name introduces a binding. `c.len = ..` and
+// `buf[i] = ..` are assignments to something that already exists,
+// which is why `Bind.target` is an expression and not an `Ident`.
+bind_target* = (c :: Checker, b: Bind, ty: TyId) Res<(), AllocError> {
+    target = c.tree.expr_at(b.target);
+    target.kind.match({
+        Name(n) => c.bind(n.text, ty, b.mutable),
+        _       => Ok(()),
+    }).try();
+    Ok(());
+}

@@ -76,7 +76,7 @@ module* = (p :: Parser, name: str) Res<Module, AllocError> {
     Ok(Module(
         name: name,
         decls: decls,
-        span: Span(file: p.file, start: start, end: p.here_span().end),
+        span: Span(file: p.source.file, start: start, end: p.here_span().end),
         leading: no_trivia(),
         trailing: trailing,
     ));
@@ -95,7 +95,7 @@ recover* = (p :: Parser) Res<(), AllocError> {
         kind = p.peek().kind;
         depth = kind.delim_step(depth);
         (depth == 0 && kind.same(TokenKind.Ident)).match({
-            true  => { running = false; Ok(()) },
+            true  => { running = false; p.nothing() },
             false => p.skip(),
         }).try();
         running = running && !p.at_eof();
@@ -136,7 +136,7 @@ impl_decl = (p :: Parser, m: Mark) Res<Decl, AllocError> {
     p.record_body(members).try();
     body_span = p.span_from(body_start);
     p.eat(TokenKind.Comma).try();
-    p.expect_close(TokenKind.RParen, "unclosed `(`: this impl is never closed", open).try();
+    p.expect_close(TokenKind.ParenClose, "unclosed `(`: this impl is never closed", open).try();
     p.add_decl(DeclKind.Impl(Impl(
         target: target,
         bound: bound,
@@ -150,8 +150,8 @@ impl_decl = (p :: Parser, m: Mark) Res<Decl, AllocError> {
 impl_ahead* = (p :: Parser) bool {
     p.at_kind(TokenKind.Ident)
         && p.peek_n(1).kind.same(TokenKind.Dot)
-        && p.peek_n(2).text == "impl"
-        && p.peek_n(3).kind.same(TokenKind.LParen)
+        && p.text(p.peek_n(2)) == "impl"
+        && p.peek_n(3).kind.same(TokenKind.ParenOpen)
 }
 
 named_decl = (p :: Parser, m: Mark, module_level: bool) Res<Decl, AllocError> {
@@ -292,7 +292,7 @@ bar_span = (p :: Parser) Res<Res<Span>, AllocError> {
 one_variant = (p :: Parser) Res<Variant, AllocError> {
     m = p.open();
     name = p.ident("expected a variant name").try();
-    payload = p.at_kind(TokenKind.LParen).match({
+    payload = p.at_kind(TokenKind.ParenOpen).match({
         true  => p.variant_payload(),
         false => Ok(None),
     }).try();
@@ -310,7 +310,7 @@ variant_payload = (p :: Parser) Res<Res<TypeId>, AllocError> {
     open = p.here_span();
     p.bump().try();
     t = p.type().try();
-    p.expect_close(TokenKind.RParen, "unclosed `(`: this variant's payload is never closed", open).try();
+    p.expect_close(TokenKind.ParenClose, "unclosed `(`: this variant's payload is never closed", open).try();
     Ok(Ok(t));
 }
 
@@ -334,7 +334,7 @@ fn_decl = (p :: Parser, m: Mark, head: ImportName, tparams: Vec<TParam>, mutable
         true  => p.fn_ret(),
         false => Ok(None),
     }).try();
-    body = p.at_kind(TokenKind.LBrace).match({
+    body = p.at_kind(TokenKind.BraceOpen).match({
         true  => p.fn_body(),
         false => Ok(None),
     }).try();

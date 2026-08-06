@@ -60,7 +60,7 @@ ValueShape* = StructValue | EnumValue | FnValue | PathValue | AliasValue | ExprV
 lambda_ahead* = (p :: Parser) bool {
     j = p.group_end_at(p.at);
     after = p.token_kind_at(j);
-    after.same(TokenKind.LBrace) || (after.starts_type_kind() && !after.same(TokenKind.LParen))
+    after.same(TokenKind.BraceOpen) || (after.starts_type_kind() && !after.same(TokenKind.ParenOpen))
 }
 
 // A `[` here opens a fixed array type applied to arguments if it holds
@@ -68,7 +68,7 @@ lambda_ahead* = (p :: Parser) bool {
 // follows. Anything else is an array literal.
 fixed_array_ahead* = (p :: Parser) bool {
     j = p.group_end_at(p.at);
-    p.token_kind_at(j).same(TokenKind.LParen) && p.group_items_at(p.at, j) == 2
+    p.token_kind_at(j).same(TokenKind.ParenOpen) && p.group_items_at(p.at, j) == 2
 }
 
 // A `<` here opens type arguments if its matching `>` is followed by
@@ -76,7 +76,7 @@ fixed_array_ahead* = (p :: Parser) bool {
 // the one a wrong guess breaks silently.
 targs_ahead* = (p :: Parser) bool {
     j = p.angles_end_at(p.at);
-    (j > p.at) && p.token_kind_at(j).same(TokenKind.LParen)
+    (j > p.at) && p.token_kind_at(j).same(TokenKind.ParenOpen)
 }
 
 // The index one past the delimiter group the cursor is sitting on.
@@ -141,13 +141,13 @@ group_items_at = (p :: Parser, from: usize, to: usize) usize {
 // the compilation.
 delim_step* = (kind: TokenKind, depth: usize) usize {
     kind.match({
-        LParen   => depth + 1,
-        LBracket => depth + 1,
-        LBrace   => depth + 1,
-        RParen   => depth.down(),
-        RBracket => depth.down(),
-        RBrace   => depth.down(),
-        _        => depth,
+        ParenOpen    => depth + 1,
+        BracketOpen  => depth + 1,
+        BraceOpen    => depth + 1,
+        ParenClose   => depth.down(),
+        BracketClose => depth.down(),
+        BraceClose   => depth.down(),
+        _            => depth,
     });
 }
 
@@ -163,11 +163,11 @@ angle_step = (kind: TokenKind, depth: usize) usize {
 // never contains a statement terminator or a body.
 angle_stop = (kind: TokenKind) bool {
     kind.match({
-        Semi   => true,
-        LBrace => true,
-        RBrace => true,
-        Eof    => true,
-        _      => false,
+        Semicolon  => true,
+        BraceOpen  => true,
+        BraceClose => true,
+        Eof        => true,
+        _          => false,
     });
 }
 
@@ -188,12 +188,12 @@ down = (d: usize) usize {
 
 value_shape* = (p :: Parser, module_level: bool) ValueShape {
     p.peek().kind.match({
-        LBrace => ValueShape.StructValue,
-        Bar    => ValueShape.EnumValue,
-        LParen => p.paren_shape(),
-        Lt     => p.angle_shape(),
-        Ident  => p.ident_shape(module_level),
-        _      => ValueShape.ExprValue,
+        BraceOpen => ValueShape.StructValue,
+        Bar       => ValueShape.EnumValue,
+        ParenOpen => p.paren_shape(),
+        Lt        => p.angle_shape(),
+        Ident     => p.ident_shape(module_level),
+        _         => ValueShape.ExprValue,
     });
 }
 
@@ -203,7 +203,7 @@ value_shape* = (p :: Parser, module_level: bool) ValueShape {
 paren_shape = (p :: Parser) ValueShape {
     j = p.group_end_at(p.at);
     after = p.token_kind_at(j);
-    (after.same(TokenKind.LBrace) || (after.starts_type_kind() && !after.same(TokenKind.LParen))).match({
+    (after.same(TokenKind.BraceOpen) || (after.starts_type_kind() && !after.same(TokenKind.ParenOpen))).match({
         true  => ValueShape.FnValue,
         false => ValueShape.ExprValue,
     });
@@ -212,7 +212,7 @@ paren_shape = (p :: Parser) ValueShape {
 // `<T>(x: T) T` — the only value that begins with `<`.
 angle_shape = (p :: Parser) ValueShape {
     j = p.angles_end_at(p.at);
-    (j > p.at && p.token_kind_at(j).same(TokenKind.LParen)).match({
+    (j > p.at && p.token_kind_at(j).same(TokenKind.ParenOpen)).match({
         true  => ValueShape.FnValue,
         false => ValueShape.ExprValue,
     });
@@ -237,7 +237,7 @@ ident_shape = (p :: Parser, module_level: bool) ValueShape {
 // which is R1's whole claim.
 variant_ahead = (p :: Parser) bool {
     j ::= p.at + 1;
-    p.token_kind_at(j).same(TokenKind.LParen).match({
+    p.token_kind_at(j).same(TokenKind.ParenOpen).match({
         true  => { j = p.group_end_at(j); },
         false => (),
     });
@@ -278,26 +278,26 @@ closes_value = (p :: Parser, j: usize) bool {
 
 continues_expr = (kind: TokenKind) bool {
     kind.match({
-        Dot       => true,
-        LParen    => true,
-        LBracket  => true,
-        Lt        => true,
-        Star      => true,
-        Plus      => true,
-        Minus     => true,
-        Slash     => true,
-        Percent   => true,
-        PlusWrap  => true,
-        MinusWrap => true,
-        StarWrap  => true,
-        EqEq      => true,
-        BangEq    => true,
-        Gt        => true,
-        LtEq      => true,
-        GtEq      => true,
-        AndAnd    => true,
-        OrOr      => true,
-        _         => false,
+        Dot         => true,
+        ParenOpen   => true,
+        BracketOpen => true,
+        Lt          => true,
+        Star        => true,
+        Plus        => true,
+        Minus       => true,
+        Slash       => true,
+        Percent     => true,
+        PlusWrap    => true,
+        MinusWrap   => true,
+        StarWrap    => true,
+        EqEq        => true,
+        BangEq      => true,
+        Gt          => true,
+        LtEq        => true,
+        GtEq        => true,
+        AmpAmp      => true,
+        BarBar      => true,
+        _           => false,
     });
 }
 
@@ -345,14 +345,14 @@ assigns = (p: Parser, kind: TokenKind) bool {
 // else in a body is a binding.
 declares_value = (p :: Parser, j: usize) bool {
     kind = p.token_kind_at(j);
-    kind.same(TokenKind.LBrace)
+    kind.same(TokenKind.BraceOpen)
         || kind.same(TokenKind.Bar)
         || p.declares_fn(j, kind)
         || p.declares_enum(j, kind)
 }
 
 declares_fn = (p :: Parser, j: usize, kind: TokenKind) bool {
-    kind.same(TokenKind.LParen).match({
+    kind.same(TokenKind.ParenOpen).match({
         true  => p.fn_body_ahead(p.group_end_at(j)),
         false => kind.same(TokenKind.Lt) && p.fn_body_ahead(p.angles_end_at(j)),
     });
@@ -360,9 +360,9 @@ declares_fn = (p :: Parser, j: usize, kind: TokenKind) bool {
 
 fn_body_ahead = (p :: Parser, j: usize) bool {
     after = p.token_kind_at(j);
-    after.same(TokenKind.LBrace)
-        || after.same(TokenKind.LParen)
-        || (after.starts_type_kind() && !after.same(TokenKind.LParen))
+    after.same(TokenKind.BraceOpen)
+        || after.same(TokenKind.ParenOpen)
+        || (after.starts_type_kind() && !after.same(TokenKind.ParenOpen))
 }
 
 declares_enum = (p :: Parser, j: usize, kind: TokenKind) bool {
@@ -374,7 +374,7 @@ declares_enum = (p :: Parser, j: usize, kind: TokenKind) bool {
 
 bar_after = (p :: Parser, j: usize) bool {
     k ::= j + 1;
-    p.token_kind_at(k).same(TokenKind.LParen).match({
+    p.token_kind_at(k).same(TokenKind.ParenOpen).match({
         true  => { k = p.group_end_at(k); },
         false => (),
     });

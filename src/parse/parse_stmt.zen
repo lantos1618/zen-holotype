@@ -46,10 +46,10 @@ block_guarded = (p :: Parser) Res<BlockId, AllocError> {
 block_here = (p :: Parser) Res<BlockId, AllocError> {
     m = p.open();
     open = p.here_span();
-    p.expect(TokenKind.LBrace, "expected `{` to open a block").try();
+    p.expect(TokenKind.BraceOpen, "expected `{` to open a block").try();
     stmts ::= p.alloc.Vec<Stmt>();
     value ::= p.no_value();
-    running ::= !p.at_kind(TokenKind.RBrace) && !p.at_eof();
+    running ::= !p.at_kind(TokenKind.BraceClose) && !p.at_eof();
     loop(() { running }, (h) {
         before = p.at;
         p.one_item(stmts).try().match({
@@ -57,15 +57,15 @@ block_here = (p :: Parser) Res<BlockId, AllocError> {
             None  => (),
         });
         (p.at == before).match({
-            true  => { p.skip_one().try(); Ok(()) },
+            true  => { p.skip_one().try(); p.nothing() },
             false => p.nothing(),
         }).try();
-        (p.at_kind(TokenKind.RBrace) || p.at_eof()).match({
+        (p.at_kind(TokenKind.BraceClose) || p.at_eof()).match({
             true  => { running = false; },
             false => (),
         });
     });
-    p.expect_close(TokenKind.RBrace, "unclosed `{`: this block is never closed", open).try();
+    p.expect_close(TokenKind.BraceClose, "unclosed `{`: this block is never closed", open).try();
     p.tree.add_block(Block(
         stmts: stmts,
         value: value,
@@ -91,9 +91,9 @@ block_expr* = (p :: Parser) Res<ExprId, AllocError> {
 one_item = (p :: Parser, stmts :: Vec<Stmt>) Res<Res<ExprId>, AllocError> {
     m = p.open();
     p.peek().kind.match({
-        LBrace => { p.nested_block(stmts, m).try(); Ok(None) },
-        Ident  => p.ident_item(stmts, m),
-        _      => p.expr_item(stmts, m),
+        BraceOpen => { p.nested_block(stmts, m).try(); Ok(None) },
+        Ident     => p.ident_item(stmts, m),
+        _         => p.expr_item(stmts, m),
     });
 }
 
@@ -127,7 +127,7 @@ expr_item = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<Res<ExprId>, AllocErr
         Colon        => { p.bind_typed(stmts, m, target).try(); Ok(None) },
         Eq           => { p.bind(stmts, m, target, false).try(); Ok(None) },
         ColonColonEq => { p.bind(stmts, m, target, true).try(); Ok(None) },
-        Semi         => { p.expr_stmt(stmts, m, target).try(); Ok(None) },
+        Semicolon    => { p.expr_stmt(stmts, m, target).try(); Ok(None) },
         _            => p.tail_value(target),
     });
 }
@@ -137,7 +137,7 @@ expr_item = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<Res<ExprId>, AllocErr
 // keeps the diagnostic on the statement rather than on whatever the
 // next line turned out to be.
 tail_value = (p :: Parser, value: ExprId) Res<Res<ExprId>, AllocError> {
-    p.at_kind(TokenKind.RBrace).match({
+    p.at_kind(TokenKind.BraceClose).match({
         true  => Ok(Ok(value)),
         false => {
             p.error("expected `;` — a statement ends with one, a declaration does not").try();
@@ -160,7 +160,7 @@ bind = (p :: Parser, stmts :: Vec<Stmt>, m: Mark, target: ExprId, mutable: bool)
 bind_rest = (p :: Parser, stmts :: Vec<Stmt>, m: Mark, target: ExprId, t: Res<TypeId>, mutable: bool) Res<(), AllocError> {
     p.eat(TokenKind.Eq).try() || p.eat(TokenKind.ColonColonEq).try();
     value = p.expr().try();
-    p.expect(TokenKind.Semi, "expected `;` to end this binding").try();
+    p.expect(TokenKind.Semicolon, "expected `;` to end this binding").try();
     p.push(stmts, StmtKind.Bind(Bind(
         target: target,
         type: t,
@@ -194,7 +194,7 @@ push* = (p :: Parser, stmts :: Vec<Stmt>, kind: StmtKind, m: Mark) Res<(), Alloc
 skip_one = (p :: Parser) Res<(), AllocError> {
     p.at_eof().match({
         true  => p.nothing(),
-        false => { p.bump().try(); Ok(()) },
+        false => { p.bump().try(); p.nothing() },
     });
 }
 

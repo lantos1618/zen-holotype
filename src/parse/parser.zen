@@ -43,7 +43,7 @@
 Alloc, AllocError = std.mem
 Ast = ast.ast_arena
 Span, Pos, Trivia, TriviaKind, TriviaRun, no_trivia, Ident = ast.ast_span
-Token, TokenKind, is_trivia, same = parse.parse_token
+Token, TokenKind, Source, Lexed, is_trivia, same, text_of, empty_eof = parse.parse_token
 Diag, diag, diag_at = parse.parse_diag
 
 // How deep a nested construct may be before the parser stops rather
@@ -92,6 +92,13 @@ Mark* = {
 Parser* = {
     tokens: Vec<Token>,
 
+    // The bytes the tokens were cut from. A token is a kind and a
+    // span and carries no text — `lex_token.zen` is right that a `str`
+    // on every token of a ten-megabyte file holds something both ends
+    // of the span already name — so the parser holds the Source and
+    // slices it where a name or a literal needs its bytes.
+    source*: Source,
+
     // Always the index of a NON-trivia token. Everything between the
     // previous token and this one has already been drained into
     // `tree.trivia` and named by `pending`.
@@ -106,12 +113,15 @@ Parser* = {
 
     diags* :: Vec<Diag>,
 
-    file: str,
-
     // Where the last token consumed ended. A node's span is
     // `start_of(first token) .. end_of(last token)`, and this is the
     // second half — half-open, so it is one past the last byte.
     prev_end* :: Pos = Pos(line: 1, col: 1),
+
+    // The line the last token the cursor passed ended on. A blank line
+    // is a gap between two spans and nothing else, so this is the whole
+    // of the state that measuring one needs.
+    gap_line :: usize = 1,
 
     // The trivia gathered before `at`, unclaimed. A node beginning at
     // this token takes it; the first one to ask is the OUTERMOST,
@@ -143,27 +153,48 @@ Parser* = {
         });
     }
 
-    // What a cursor past the end reads. An empty token stream is not a
-    // stream a lexer produces — `Eof` is promised — but a parser that
-    // traps on one is a parser that crashes on a bug elsewhere, so the
-    // fallback is a synthetic token rather than an index.
+    // The text under the cursor, which two questions need: is this
+    // identifier the wildcard `_`, and is this method call `.impl(`.
+    at_text* = (self: @Self, want: str) bool {
+        self.at_kind(TokenKind.Ident) && self.text(self.peek()) == want
+    }
+
+    // What a cursor past the end reads. `scan` promises exactly one
+    // `Eof`, last, so this is that token — but a parser that traps on
+    // an empty stream is a parser that crashes on a bug somewhere
+    // else, so an empty one reads position zero and gets a `None` the
+    // caller below turns into `Eof` anyway.
     eof_token = (self: @Self) Token {
         (self.tokens.len == 0).match({
-            true  => Token(
-                kind: TokenKind.Eof,
-                text: "",
-                span: Span(file: self.file, start: self.prev_end, end: self.prev_end),
-            ),
-            false => self.tokens.get(self.tokens.len - 1).match({
-                Ok(t) => t,
-                None  => Token(
-                    kind: TokenKind.Eof,
-                    text: "",
-                    span: Span(file: self.file, start: self.prev_end, end: self.prev_end),
-                ),
-            }),
+            true  => empty_eof(),
+            false => self.last_token(),
         });
     }
+
+    last_token = (self: @Self) Token {
+        self.tokens.get(self.tokens.len - 1).match({
+            Ok(t) => t,
+            None  => empty_eof(),
+        });
+    }
+
+    // The lexer's `Span` carries no `file` and its `Pos` carries a byte
+    // `offset`; an AST node's `Span` carries the file and no offset.
+    // Both are right where they are — a token belongs to one Source and
+    // a node outlives it — so the conversion happens HERE, once, and
+    // nothing downstream sees two span types.
+    span_of* = (self: @Self, t: Token) Span {
+        Span(
+            file: self.source.file,
+            start: Pos(line: t.span.start.line, col: t.span.start.col),
+            end: Pos(line: t.span.end.line, col: t.span.end.col),
+        );
+    }
+
+    // A token's bytes: quotes, escapes and comment markers included,
+    // exactly as written. `Literal.text` is specified as the raw source
+    // slice, because the formatter reprints it byte for byte.
+    text* = (self: @Self, t: Token) str { text_of(self.source, t) }
 
     // One non-trivia token further on. Two grammatical decisions need
     // it and only two: `name:` versus `name =` inside a record body,
@@ -176,17 +207,19 @@ Parser* = {
     // second index to keep in agreement.
     peek_n* = (self: @Self, n: usize) Token {
         found ::= self.eof_token();
+        stop ::= false;
         seen ::= 0;
         Range(self.at, self.tokens.len).loop((h, k) {
             t = self.token_at(k);
             t.kind.is_trivia().match({
                 true  => (),
                 false => (seen == n).match({
-                    true  => { found = t; h.break(); },
+                    true  => { found = t; stop = true; h.break(); },
                     false => { seen = seen + 1; },
                 }),
             });
         });
+        stop;
         found;
     }
 
@@ -210,19 +243,14 @@ Parser* = {
 
     // The span of the token under the cursor: what an "unexpected"
     // diagnostic points at when the mistake really is here.
-    here_span* = (self: @Self) Span {
-        self.tokens.get(self.at).match({
-            Ok(t) => t.span,
-            None  => Span(file: self.file, start: self.prev_end, end: self.prev_end),
-        });
-    }
+    here_span* = (self: @Self) Span { self.span_of(self.peek()) }
 
     here* = (self: @Self) Pos { self.here_span().start }
 
     // A node's span, closed. `start` was taken before its first token
     // was consumed; `prev_end` is where its last one ended.
     span_from* = (self: @Self, start: Pos) Span {
-        Span(file: self.file, start: start, end: self.prev_end)
+        Span(file: self.source.file, start: start, end: self.prev_end)
     }
 
     // Open a node: where it starts, and the trivia that came before
@@ -248,7 +276,7 @@ Parser* = {
     ident_here = (self :: @Self) Res<Ident, AllocError> {
         span = self.here_span();
         token = self.bump().try();
-        Ok(Ident(text: token.text, span: span));
+        Ok(Ident(text: self.text(token), span: span));
     }
 
     ident_missing = (self :: @Self, message: str) Res<Ident, AllocError> {
@@ -277,7 +305,7 @@ Parser* = {
     // nothing downstream mistakes it for source the author wrote.
     empty_span* = (self: @Self) Span {
         here = self.here();
-        Span(file: self.file, start: here, end: here);
+        Span(file: self.source.file, start: here, end: here);
     }
 
     // -----------------------------------------------------------------
@@ -292,7 +320,8 @@ Parser* = {
     // has not reached.
     bump* = (self :: @Self) Res<Token, AllocError> {
         token = self.peek();
-        self.prev_end = token.span.end;
+        self.prev_end = self.span_of(token).end;
+        self.gap_line = token.span.end.line;
         self.at = self.at + 1;
         self.drain().try();
         Ok(token);
@@ -307,9 +336,11 @@ Parser* = {
             t = self.token_at(k);
             t.kind.is_trivia().match({
                 true  => self.keep_trivia(t),
-                false => { stop = k; h.break(); Ok(()) },
+                false => { stop = k; h.break(); self.nothing() },
             }).try();
+            self.gap_line = t.span.end.line;
         });
+        self.blank_before(self.token_at(stop)).try();
         self.at = stop;
         self.pending = self.tree.trivia_run(mark);
         Ok(());
@@ -323,11 +354,42 @@ Parser* = {
     }
 
     keep_trivia = (self :: @Self, t: Token) Res<(), AllocError> {
+        self.blank_before(t).try();
         self.tree.add_trivia(Trivia(
             kind: t.kind.trivia_kind(),
-            text: t.text,
-            span: t.span,
-        ))
+            text: self.text(t),
+            span: self.span_of(t),
+        ));
+    }
+
+    // A BLANK LINE IS DERIVED, NOT LEXED, and that is the lexer being
+    // right rather than the parser making do: whitespace "is
+    // recoverable exactly from the gap between two spans, and 'was
+    // there a blank line here' is `next.start.line > prev.end.line + 1`
+    // rather than a stored fact that can go stale."
+    //
+    // So the gap is measured here, once, at the only place that cares:
+    // the formatter must not silently delete a blank line the author
+    // wrote, and `TriviaKind.Blank` is where it survives. One `Blank`
+    // stands for a run however long — collapsing them is a formatting
+    // rule, and a rule needs somewhere to apply.
+    blank_before = (self :: @Self, t: Token) Res<(), AllocError> {
+        (t.span.start.line > self.gap_line + 1).match({
+            true  => self.keep_blank(t),
+            false => self.nothing(),
+        });
+    }
+
+    keep_blank = (self :: @Self, t: Token) Res<(), AllocError> {
+        self.tree.add_trivia(Trivia(
+            kind: TriviaKind.Blank,
+            text: "",
+            span: Span(
+                file: self.source.file,
+                start: Pos(line: self.gap_line + 1, col: 1),
+                end: Pos(line: t.span.start.line, col: 1),
+            ),
+        ));
     }
 
     // Consume `kind` if it is here. The predicate half of the parser:
@@ -489,7 +551,7 @@ Parser* = {
 
     enter* = (self :: @Self) Res<(), AllocError> {
         (self.depth == 0).match({
-            true  => { self.anchor = self.here_span(); Ok(()) },
+            true  => { self.anchor = self.here_span(); self.nothing() },
             false => self.nothing(),
         }).try();
         self.depth = self.depth + 1;
@@ -509,23 +571,34 @@ Parser* = {
     leave* = (self :: @Self) () { self.depth = self.depth - 1; }
 }
 
-// `alloc.Parser(tokens, file)` — a ufcs function whose first parameter
-// is an Alloc, beside the type it builds, exactly as `Vec` and `Ast`
-// are. A bare value: nothing here owns a page yet.
+// `alloc.Parser(lexed)` — a ufcs function whose first parameter is an
+// Alloc, beside the type it builds, exactly as `Vec`, `Ast` and
+// `Lexer` are. A bare value: nothing here owns a page yet.
+//
+// It takes what `scan` RETURNS, tokens and source together, because
+// the two are useless apart: a token is a span into bytes it does not
+// carry. `lexed.diags` stays the caller's — a file that did not lex is
+// reported and not parsed, and deciding that is the driver's job, not
+// this one's.
 //
 // The cursor is NOT primed here. Priming drains trivia, which
 // allocates, and a constructor that can fail is a constructor every
-// caller has to `.try()`. `parse_module` primes it as its first act.
-Parser* = (a: Alloc, tokens: Vec<Token>, file: str) Parser {
+// caller has to `.try()`. `module` primes it as its first act.
+Parser* = (a: Alloc, lexed: Lexed) Parser {
+    origin = Span(
+        file: lexed.source.file,
+        start: Pos(line: 1, col: 1),
+        end: Pos(line: 1, col: 1),
+    );
     Parser(
-        tokens: tokens,
+        tokens: lexed.tokens,
+        source: lexed.source,
         tree: a.Ast(),
         diags: a.Vec<Diag>(),
-        file: file,
         pending: no_trivia(),
-        anchor: Span(file: file, start: Pos(line: 1, col: 1), end: Pos(line: 1, col: 1)),
+        anchor: origin,
         alloc: a,
-    )
+    );
 }
 
 // What a trivia token is, as trivia. The two alphabets overlap by
@@ -533,7 +606,6 @@ Parser* = (a: Alloc, tokens: Vec<Token>, file: str) Parser {
 trivia_kind* = (self: TokenKind) TriviaKind {
     self.match({
         BlockComment => TriviaKind.BlockComment,
-        Blank        => TriviaKind.Blank,
         _            => TriviaKind.LineComment,
     });
 }

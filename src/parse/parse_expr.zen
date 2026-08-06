@@ -98,8 +98,8 @@ consume_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 // loop below knows to stop.
 precedence* = (kind: TokenKind) usize {
     kind.match({
-        OrOr      => 1,
-        AndAnd    => 2,
+        BarBar    => 1,
+        AmpAmp    => 2,
         EqEq      => 3,
         BangEq    => 3,
         Lt        => 4,
@@ -120,8 +120,8 @@ precedence* = (kind: TokenKind) usize {
 
 binary_op = (kind: TokenKind) BinOp {
     kind.match({
-        OrOr      => BinOp.Or,
-        AndAnd    => BinOp.And,
+        BarBar    => BinOp.Or,
+        AmpAmp    => BinOp.And,
         EqEq      => BinOp.Equal,
         BangEq    => BinOp.NotEqual,
         Lt        => BinOp.Less,
@@ -150,7 +150,7 @@ binary_from = (p :: Parser, m: Mark, min: usize) Res<ExprId, AllocError> {
         prec = p.peek().kind.precedence();
         running = prec > 0 && prec >= min;
         running.match({
-            true  => { lhs = p.binary_step(m, prec, lhs).try(); Ok(()) },
+            true  => { lhs = p.binary_step(m, prec, lhs).try(); p.nothing() },
             false => p.nothing(),
         }).try();
     });
@@ -212,7 +212,7 @@ postfix = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     loop(() { running }, (h) {
         running = p.postfix_continues();
         running.match({
-            true  => { base = p.postfix_step(m, base).try(); Ok(()) },
+            true  => { base = p.postfix_step(m, base).try(); p.nothing() },
             false => p.nothing(),
         }).try();
     });
@@ -224,20 +224,20 @@ postfix = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 // `alloc.Vec<i32>()` is a call, and only the scan can tell.
 postfix_continues = (p :: Parser) bool {
     p.peek().kind.match({
-        Dot      => true,
-        LBracket => true,
-        LParen   => true,
-        Lt       => p.targs_ahead(),
-        _        => false,
+        Dot         => true,
+        BracketOpen => true,
+        ParenOpen   => true,
+        Lt          => p.targs_ahead(),
+        _           => false,
     });
 }
 
 postfix_step = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
     p.peek().kind.match({
-        Dot      => p.after_dot(m, base),
-        LBracket => p.index_expr(m, base),
-        Lt       => p.targs_call(m, base),
-        _        => p.call_expr(m, base, p.alloc.Vec<TypeId>()),
+        Dot         => p.after_dot(m, base),
+        BracketOpen => p.index_expr(m, base),
+        Lt          => p.targs_call(m, base),
+        _           => p.call_expr(m, base, p.alloc.Vec<TypeId>()),
     });
 }
 
@@ -261,8 +261,8 @@ after_dot = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
 // Recognised by name HERE, once, which is precisely what stops the
 // name from having to be special-cased everywhere else.
 dot_target = (p :: Parser, m: Mark, base: ExprId, name: Ident) Res<ExprId, AllocError> {
-    is_match = name.text == "match" && p.at_kind(TokenKind.LParen);
-    is_try = name.text == "try" && p.at_kind(TokenKind.LParen);
+    is_match = name.text == "match" && p.at_kind(TokenKind.ParenOpen);
+    is_try = name.text == "try" && p.at_kind(TokenKind.ParenOpen);
     is_match.match({
         true  => p.match_expr(m, base, name.span),
         false => is_try.match({
@@ -280,7 +280,7 @@ match_expr = (p :: Parser, m: Mark, scrutinee: ExprId, name_span: Span) Res<Expr
     p.bump().try();
     list ::= p.alloc.Vec<Arm>();
     arms_span = p.arms(list).try();
-    p.expect_close(TokenKind.RParen, "unclosed `(`: this `.match` is never closed", open).try();
+    p.expect_close(TokenKind.ParenClose, "unclosed `(`: this `.match` is never closed", open).try();
     p.add_expr(ExprKind.Match(Match(
         scrutinee: scrutinee,
         name_span: name_span,
@@ -293,7 +293,7 @@ match_expr = (p :: Parser, m: Mark, scrutinee: ExprId, name_span: Span) Res<Expr
 try_expr = (p :: Parser, m: Mark, operand: ExprId) Res<ExprId, AllocError> {
     open = p.here_span();
     p.bump().try();
-    p.expect_close(TokenKind.RParen, "`.try()` takes no arguments", open).try();
+    p.expect_close(TokenKind.ParenClose, "`.try()` takes no arguments", open).try();
     p.add_expr(ExprKind.Try(Try(operand: operand)), m.bare());
 }
 
@@ -301,7 +301,7 @@ index_expr = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
     open = p.here_span();
     p.bump().try();
     index = p.expr().try();
-    p.expect_close(TokenKind.RBracket, "unclosed `[`: this index is never closed", open).try();
+    p.expect_close(TokenKind.BracketClose, "unclosed `[`: this index is never closed", open).try();
     p.add_expr(ExprKind.Index(Index(base: base, index: index)), m.bare());
 }
 
@@ -323,13 +323,13 @@ args* = (p :: Parser, out :: Vec<Arg>) Res<Span, AllocError> {
     start = p.here();
     open = p.here_span();
     p.bump().try();
-    running ::= !p.at_kind(TokenKind.RParen) && !p.at_eof();
+    running ::= !p.at_kind(TokenKind.ParenClose) && !p.at_eof();
     loop(() { running }, (h) {
         before = p.at;
         out.add(p.one_arg().try()).try();
-        running = !p.at_kind(TokenKind.RParen) && !p.at_eof() && p.at > before;
+        running = !p.at_kind(TokenKind.ParenClose) && !p.at_eof() && p.at > before;
     });
-    p.expect_close(TokenKind.RParen, "unclosed `(`: this argument list is never closed", open).try();
+    p.expect_close(TokenKind.ParenClose, "unclosed `(`: this argument list is never closed", open).try();
     Ok(p.span_from(start));
 }
 
@@ -364,7 +364,7 @@ named_arg_name = (p :: Parser) Res<Res<Ident>, AllocError> {
 // `{` starts an expression, which is what keeps `Name = { .. }` a
 // struct declaration everywhere else (grammar D11).
 arg_value = (p :: Parser) Res<ExprId, AllocError> {
-    p.at_kind(TokenKind.LBrace).match({
+    p.at_kind(TokenKind.BraceOpen).match({
         true  => p.record_expr(),
         false => p.expr(),
     });
@@ -383,20 +383,20 @@ record_expr = (p :: Parser) Res<ExprId, AllocError> {
 
 primary = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     p.peek().kind.match({
-        Ident      => p.name_expr(m),
-        Int        => p.literal_expr(m, LiteralKind.Int),
-        Float      => p.literal_expr(m, LiteralKind.Float),
-        Str        => p.literal_expr(m, LiteralKind.Str),
-        Char       => p.literal_expr(m, LiteralKind.Char),
-        True       => p.literal_expr(m, LiteralKind.Bool),
-        False      => p.literal_expr(m, LiteralKind.Bool),
-        SelfType   => p.word_expr(m, ExprKind.SelfType),
-        Scope      => p.word_expr(m, ExprKind.Scope),
-        Meta       => p.meta_expr(m),
-        LParen     => p.paren_or_lambda(m),
-        LBracket   => p.bracket_expr(m),
-        Lt         => p.generic_lambda(m),
-        _          => {
+        Ident       => p.name_expr(m),
+        Int(_)      => p.literal_expr(m, LiteralKind.Int),
+        Float       => p.literal_expr(m, LiteralKind.Float),
+        Str         => p.literal_expr(m, LiteralKind.Str),
+        Char        => p.literal_expr(m, LiteralKind.Char),
+        True        => p.literal_expr(m, LiteralKind.Bool),
+        False       => p.literal_expr(m, LiteralKind.Bool),
+        AtSelf      => p.word_expr(m, ExprKind.SelfType),
+        AtScope     => p.word_expr(m, ExprKind.Scope),
+        AtMeta      => p.meta_expr(m),
+        ParenOpen   => p.paren_or_lambda(m),
+        BracketOpen => p.bracket_expr(m),
+        Lt          => p.generic_lambda(m),
+        _           => {
             p.error("expected an expression").try();
             p.poison_expr();
         },
@@ -405,12 +405,12 @@ primary = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 
 name_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     token = p.bump().try();
-    p.add_expr(ExprKind.Name(Name(text: token.text)), m);
+    p.add_expr(ExprKind.Name(Name(text: p.text(token))), m);
 }
 
 literal_expr = (p :: Parser, m: Mark, kind: LiteralKind) Res<ExprId, AllocError> {
     token = p.bump().try();
-    p.add_expr(ExprKind.Literal(Literal(kind: kind, text: token.text)), m);
+    p.add_expr(ExprKind.Literal(Literal(kind: kind, text: p.text(token))), m);
 }
 
 word_expr = (p :: Parser, m: Mark, kind: ExprKind) Res<ExprId, AllocError> {
@@ -424,13 +424,13 @@ word_expr = (p :: Parser, m: Mark, kind: ExprKind) Res<ExprId, AllocError> {
 meta_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     p.bump().try();
     open = p.here_span();
-    p.expect(TokenKind.LParen, "expected `(` after `@meta`").try();
+    p.expect(TokenKind.ParenOpen, "expected `(` after `@meta`").try();
     typed = p.at_kind(TokenKind.Ident) && p.peek_next().kind.same(TokenKind.Colon);
     node = typed.match({
         true  => p.typed_meta(m),
         false => p.value_meta(m),
     }).try();
-    p.expect_close(TokenKind.RParen, "unclosed `(`: this `@meta` is never closed", open).try();
+    p.expect_close(TokenKind.ParenClose, "unclosed `(`: this `@meta` is never closed", open).try();
     Ok(node);
 }
 
@@ -457,7 +457,7 @@ paren_or_lambda = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 paren_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     open = p.here_span();
     p.bump().try();
-    p.at_kind(TokenKind.RParen).match({
+    p.at_kind(TokenKind.ParenClose).match({
         true  => p.unit_expr(m),
         false => p.grouped_expr(m, open),
     });
@@ -474,7 +474,7 @@ unit_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 // `(a + b) * c`.
 grouped_expr = (p :: Parser, m: Mark, open: Span) Res<ExprId, AllocError> {
     inner = p.expr().try();
-    p.expect_close(TokenKind.RParen, "unclosed `(`: this expression is never closed", open).try();
+    p.expect_close(TokenKind.ParenClose, "unclosed `(`: this expression is never closed", open).try();
     p.add_expr(ExprKind.Paren(Paren(inner: inner)), m);
 }
 
@@ -520,7 +520,7 @@ bracket_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 fixed_array = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     t = p.type().try();
     elems ::= p.alloc.Vec<ExprId>();
-    span = p.elem_list(elems, TokenKind.RParen, "unclosed `(`: this fixed array's arguments are never closed").try();
+    span = p.elem_list(elems, TokenKind.ParenClose, "unclosed `(`: this fixed array's arguments are never closed").try();
     p.add_expr(ExprKind.FixedArray(FixedArray(
         type: t,
         elems: elems,
@@ -530,7 +530,7 @@ fixed_array = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 
 array_lit = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     elems ::= p.alloc.Vec<ExprId>();
-    p.elem_list(elems, TokenKind.RBracket, "unclosed `[`: this array literal is never closed").try();
+    p.elem_list(elems, TokenKind.BracketClose, "unclosed `[`: this array literal is never closed").try();
     p.add_expr(ExprKind.Array(ArrayLit(elems: elems)), m);
 }
 

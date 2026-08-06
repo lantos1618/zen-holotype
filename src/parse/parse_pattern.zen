@@ -21,7 +21,7 @@ Alloc, AllocError = std.mem
 Span, Pos, Ident, QualifiedName, no_trivia = ast.ast_span
 PatternId = ast.ast_id
 Pattern, PatternKind, PatName, Destructure, Literal, LiteralKind = ast.ast_node
-Token, TokenKind, same = parse.parse_token
+Token, TokenKind, same, WILDCARD = parse.parse_token
 Parser, Mark = parse.parser
 
 pattern* = (p :: Parser) Res<PatternId, AllocError> {
@@ -41,18 +41,27 @@ pattern_guarded = (p :: Parser) Res<PatternId, AllocError> {
 pattern_here = (p :: Parser) Res<PatternId, AllocError> {
     m = p.open();
     p.peek().kind.match({
-        Underscore => p.wild_pattern(m),
-        Ident      => p.path_pattern(m),
-        Int        => p.literal_pattern(m, LiteralKind.Int),
-        Float      => p.literal_pattern(m, LiteralKind.Float),
-        Str        => p.literal_pattern(m, LiteralKind.Str),
-        Char       => p.literal_pattern(m, LiteralKind.Char),
-        True       => p.literal_pattern(m, LiteralKind.Bool),
-        False      => p.literal_pattern(m, LiteralKind.Bool),
-        _          => {
+        Ident  => p.name_or_wild(m),
+        Int(_) => p.literal_pattern(m, LiteralKind.Int),
+        Float  => p.literal_pattern(m, LiteralKind.Float),
+        Str    => p.literal_pattern(m, LiteralKind.Str),
+        Char   => p.literal_pattern(m, LiteralKind.Char),
+        True   => p.literal_pattern(m, LiteralKind.Bool),
+        False  => p.literal_pattern(m, LiteralKind.Bool),
+        _      => {
             p.error("expected a pattern").try();
             p.poison_pattern();
         },
+    });
+}
+
+// "cover every case or write `_`" — and `_` reaches here as an
+// ordinary identifier, because a wildcard is a spelling question in a
+// pattern position rather than a lexical one.
+name_or_wild = (p :: Parser, m: Mark) Res<PatternId, AllocError> {
+    p.at_text(WILDCARD).match({
+        true  => p.wild_pattern(m),
+        false => p.path_pattern(m),
     });
 }
 
@@ -64,14 +73,14 @@ wild_pattern = (p :: Parser, m: Mark) Res<PatternId, AllocError> {
 
 literal_pattern = (p :: Parser, m: Mark, kind: LiteralKind) Res<PatternId, AllocError> {
     token = p.bump().try();
-    p.add_pattern(PatternKind.Literal(Literal(kind: kind, text: token.text)), m);
+    p.add_pattern(PatternKind.Literal(Literal(kind: kind, text: p.text(token))), m);
 }
 
 // `None`, `Macos`, `Shape.Unit` — and `Ok(n)`, which is the same rule
 // with a payload behind it.
 path_pattern = (p :: Parser, m: Mark) Res<PatternId, AllocError> {
     name = p.qualified_name().try();
-    p.at_kind(TokenKind.LParen).match({
+    p.at_kind(TokenKind.ParenOpen).match({
         true  => p.destructure_pattern(m, name),
         false => p.add_pattern(PatternKind.Name(PatName(name: name)), m),
     });
@@ -81,7 +90,7 @@ destructure_pattern = (p :: Parser, m: Mark, name: QualifiedName) Res<PatternId,
     open = p.here_span();
     p.bump().try();
     binder = p.pattern().try();
-    p.expect_close(TokenKind.RParen, "unclosed `(`: this pattern's payload is never closed", open).try();
+    p.expect_close(TokenKind.ParenClose, "unclosed `(`: this pattern's payload is never closed", open).try();
     p.add_pattern(PatternKind.Destructure(Destructure(name: name, binder: binder)), m);
 }
 

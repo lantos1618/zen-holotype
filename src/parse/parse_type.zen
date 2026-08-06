@@ -20,7 +20,7 @@ Alloc, AllocError = std.mem
 Span, Pos, Ident, no_trivia = ast.ast_span
 TypeId, ExprId = ast.ast_id
 Type, TypeKind, Named, Union, FnType, ArrayType, Param, TParam = ast.ast_node
-Token, TokenKind, same = parse.parse_token
+Token, TokenKind, same, WILDCARD = parse.parse_token
 Parser, Mark = parse.parser
 expr = parse.parse_expr
 params_list, type_params = parse.parse_member
@@ -73,17 +73,27 @@ primary_type_at = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
 
 primary_type_here = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     p.peek().kind.match({
-        Ident      => p.named_type(m),
-        SelfType   => p.token_type(TypeKind.SelfType, m),
-        Underscore => p.token_type(TypeKind.Infer, m),
-        Ellipsis   => p.token_type(TypeKind.Variadic, m),
-        LBracket   => p.array_type(m),
-        LParen     => p.paren_type(m),
-        Lt         => p.fn_type(m),
-        _          => {
+        Ident        => p.named_or_infer(m),
+        AtSelf       => p.token_type(TypeKind.SelfType, m),
+        Ellipsis     => p.token_type(TypeKind.Variadic, m),
+        BracketOpen  => p.array_type(m),
+        ParenOpen    => p.paren_type(m),
+        Lt           => p.fn_type(m),
+        _            => {
             p.error("expected a type").try();
             p.poison_type();
         },
+    });
+}
+
+// `_` is an identifier to the lexer — "the parser reads the wildcard
+// pattern, the lexer only sees a name" — so the `_` of `Res<Cfg, _>`
+// is decided here, by its spelling, in the one type position that can
+// mean it.
+named_or_infer = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
+    p.at_text(WILDCARD).match({
+        true  => p.token_type(TypeKind.Infer, m),
+        false => p.named_type(m),
     });
 }
 
@@ -130,7 +140,7 @@ array_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     elem = p.type().try();
     p.expect(TokenKind.Comma, "expected `,` between a fixed array's element type and its length").try();
     count = p.expr().try();
-    p.expect_close(TokenKind.RBracket, "unclosed `[`: this fixed array type is never closed", open).try();
+    p.expect_close(TokenKind.BracketClose, "unclosed `[`: this fixed array type is never closed", open).try();
     p.add_type(TypeKind.Array(ArrayType(elem: elem, count: count)), m);
 }
 
@@ -178,14 +188,13 @@ starts_type* = (p :: Parser) bool { p.peek().kind.starts_type_kind() }
 
 starts_type_kind* = (kind: TokenKind) bool {
     kind.match({
-        Ident      => true,
-        SelfType   => true,
-        Underscore => true,
-        Ellipsis   => true,
-        LBracket   => true,
-        LParen     => true,
-        Lt         => true,
-        _          => false,
+        Ident       => true,
+        AtSelf      => true,
+        Ellipsis    => true,
+        BracketOpen => true,
+        ParenOpen   => true,
+        Lt          => true,
+        _           => false,
     });
 }
 
