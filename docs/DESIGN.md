@@ -118,11 +118,15 @@ The shape of every rule below is the same: **reject rather than reinterpret.** A
 
 | form | meaning |
 |---|---|
-| `name*` | exported from the module (same `*` as types) |
+| `name*` | exported from the module (same `*` as types) — **module level and struct members only** |
 | `= sig` | required: impl must provide it |
 | `= sig {..}` | sealed: provided, cannot be overridden |
 | `::= sig {..}` | default: provided, impl may rebind it |
 | `::= sig` | optional hook: impl may provide it |
+
+**`*` is a module-level and struct-member marker, and nowhere else.** Law 6 says `*` means the name crosses a module boundary. A binding inside a function body cannot cross one — it does not outlive the call — so `*` on it means nothing, and a marker that means nothing is a marker someone will read as meaning something. `helper* = (a: i32) i32 {..}` inside a body is rejected by name, not by accident.
+
+The corner this closes is sharp and was found by a parser: `*` is also multiplication, so a statement beginning `n *` has to be either an exported declaration or a product, and the parser cannot ask which until it has read further. Restricting `*` to the two places it has meaning removes the fork entirely at body level, which is the only place the ambiguity is reachable.
 
 **Sum types are written with `|`, always.** A nominal enum and an error union are the same construct — the doc already says a union "is an anonymous enum of two variants" — so they get one syntax and not two:
 
