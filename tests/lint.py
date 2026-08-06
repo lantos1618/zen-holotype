@@ -43,7 +43,7 @@ RULES: dict[str, tuple[str, str]] = {
     "orphan-expected": (ERROR, "an .expected with no .zen beside it"),
     "orphan-aux": (ERROR, "an .exit/.stderr with no test beside it"),
     "foreign-file": (ERROR, "a file whose suffix is not one TESTING.md names"),
-    "doc-file": (WARN, "prose inside a suite; TESTING.md does not provide for it"),
+    "doc-file": (WARN, "prose below area level, where the runner does not ignore it"),
     "dir-entry-name": (ERROR, "a directory test's entry point must be main.zen"),
     "dir-expected-name": (ERROR, "a directory test's expectation lives at the directory root"),
     "dir-no-expected": (ERROR, "a directory holding an entry point but no expectation"),
@@ -90,8 +90,9 @@ CENTRAL_FIX: dict[str, str] = {
         "next author copies the directory and now `.exit` looks required."
     ),
     "doc-file": (
-        "Have `TESTING.md` permit one `README.md` per area. Both files here are "
-        "worth keeping, and a format that has no room for prose gets prose anyway."
+        "`TESTING.md` now permits one `README.md` per area directory — a format "
+        "with no room for prose gets prose anyway. Below that level it is not "
+        "prose beside the tests but a file inside one."
     ),
 }
 
@@ -174,9 +175,15 @@ class Linter:
     def check_flat_file(self, kind: str, base: Path, f: Path, suite: str) -> None:
         if f.suffix not in KNOWN_SUFFIXES:
             if f.suffix == ".md":
+                # TESTING.md permits one README per AREA directory and says the
+                # runner ignores it. Deeper than that it is not prose beside the
+                # tests, it is a file inside one -- where it reads as part of a
+                # module tree and the runner does not ignore it.
+                if f.parent.parent == base:
+                    return
                 self.flag("doc-file", f, suite, f"{f.name} is prose, not a test",
-                          "keep it and have TESTING.md permit one README per area, "
-                          "or move it under docs/")
+                          "TESTING.md permits prose at area level; this is "
+                          "deeper, inside a test, so move it up or under docs/")
             else:
                 self.flag("foreign-file", f, suite,
                           f"{f.name} is not part of the test format",

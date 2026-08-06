@@ -66,7 +66,7 @@ Positions are 1-based line, 1-based **byte** column, and point at the first byte
 
 Write one only when the test is genuinely waiting on a stage, never to quiet a test you have not diagnosed. The difference is that a deferred test names *what* it is waiting for, and the harness tells you when the wait is over.
 
-A `must-fail` test may also carry `.exit` and `.stderr`. An area directory may carry a `README.md`; the runner ignores it.
+A `must-fail` test may also carry `.exit` and `.stderr`. An area directory may carry prose — a `README.md`, or a table of exact spans like `corpus/parse/POSITIONS.md`; the runner ignores it. Deeper than area level it is not prose beside the tests but a file inside one, where it lands in a module tree.
 
 **Assumptions the whole corpus rests on**, stated here so no test has to restate them: `Ok(0)` from `main` exits 0; `println` appends exactly one `\n`; `{}` on an integer prints decimal with no separators; stdout is compared byte-exactly including the trailing newline.
 
