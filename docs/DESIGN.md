@@ -395,6 +395,14 @@ Names are qualified by path, imports bind locally, and two modules may define th
 
 The two halves fit together because they answer different questions. A bare name asks "what is `Vec` here", which two modules can disagree about, so it needs an import. `x.get(0)` asks "what can this value do", which only `x`'s type can answer.
 
+**Three gaps a `time` module makes unavoidable, named here so they are decided rather than worked around.**
+
+*There is no operator overloading.* `==` through `Eq` is the only operator that dispatches to an impl, so `a + b` on a `Duration` is not writable and a module that wants it writes `add`. Whether arithmetic operators should dispatch is a real question — it is the difference between a `Duration` reading like a number and reading like a record — but it is a language decision, and until it is made, a comment promising `+ - * /` on a struct is describing a language this is not.
+
+*There is no `Ord`.* `std.core` has `Eq` and `Hash` and nothing that orders. Adding one is not a fifth trait beside them: **`Ord` and `Eq` must agree**, exactly as `Eq` and `Hash` must, and a type where `eq` says equal while `compare` says less is a sorted container that loses rows. Whichever is sealed in terms of the other, the relationship is the design.
+
+*A clock is authority and a duration is not.* `Duration`, `Instant`, `Timestamp` and a broken-down civil time are values — no `Env`, constructible in a test, no capability. A `Clock` that reads one, and the timers it schedules, need `Ref` and `Context` and therefore the actor runtime. They do not belong in the same module: `std.core` sits below everything, and a `Clock` declared there would make the prelude's core depend on stage 5. It is also what makes "comptime has no clock" true by construction rather than by convention — comptime has no `Env`, and now no import path to one.
+
 **`zen build` takes an explicit entry, and `Fs` gets no directory listing.** The driver finds the entry by probing `main.zen` and the root's own name, which cannot find a single-file program named anything else — and the obvious fix, listing the directory, is the wrong one. `std.env.Fs` has four members and its header says why: "There is no open handle, no seek, no listing and no permission surface… Every member added here is a member the self-hosted compiler has to keep working forever." A listing is also authority to enumerate, which is a bigger capability than reading a path you were given.
 
 The information already exists at the call site: whoever invokes the compiler knows which file is the entry. So `zen build <root> --entry <file>` is the answer, and the capability surface does not grow. A build is still a root — the entry names where to start inside it, and everything else follows imports as it always did.
