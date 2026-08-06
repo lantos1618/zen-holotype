@@ -220,6 +220,8 @@ A `Sink` dissolves it. A console is a sink, a `String` is a sink, and `println` 
 
 **A statement ends with `;`. A declaration does not.** That is the whole rule, and it holds without a lexer that counts newlines:
 
+**A function type may not be written where a value is expected.** `f = (a: i32) () i32` and "returns unit, and the next member is named `i32`" are the same tokens — a signature always writes its return type, so `()` in return position and `()` as an empty parameter list cannot be told apart by looking left. The tree-sitter grammar dodges it with a declared GLR conflict; a recursive-descent parser has no such move, so the rule is: after a `)`, a `(` or a `<` never begins a return type in **expression** position. A zero-parameter function type is therefore written only in *parameter* position — `cond: () bool`, `body: () Res<T, E>` — where the following token is a `,` or a `)` and nothing is ambiguous. Every one in the standard library already sits there, so this costs nothing today; it is written down because it is a restriction the parser enforces and no reader could derive.
+
 ```groovy fragment
 Vec*<T> = { .. }                 // declaration: struct. no semicolon.
 Shape = Circle(Circle) | Unit    // declaration: enum. no semicolon.

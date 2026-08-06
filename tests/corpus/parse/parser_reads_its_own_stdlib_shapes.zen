@@ -1,0 +1,43 @@
+// The four shapes that stopped the self-hosted parser from reading its
+// own standard library, driven THROUGH src/parse.
+//
+// This test exists because the first four written for these bugs could
+// not fail. They were ordinary Zen programs whose `main` printed a
+// constant, so the BOOTSTRAPPER parsed them and `src/parse` was never
+// staged for them at all -- reverting the fix would have left every one
+// of them green. A gate that cannot fail reads as coverage and guards
+// nothing, so the test has to scan, construct a Parser, and look at
+// `p.diags` itself. That is what the six `parser_*` tests beside this
+// one do, and it is the only form that fails first for the right reason.
+//
+// TWO causes underlie all four shapes, which is why they are one test:
+//
+//   A. the bounded lookahead scans indexed the RAW token stream, and a
+//      comment is a token. `p.at` is trivia-free but `at + 1` is not, so
+//      a comment between enum variants made `variant_ahead` miss the
+//      bar and the declaration was read as a union TYPE instead.
+//
+//   B. `()` in return position was read as a nullary function type's
+//      parameter list, because the token after the `)` of a
+//      signature-only member is the NEXT MEMBER'S NAME -- which can
+//      begin a type. So one member's unit return swallowed the next
+//      member's name. `(i + 1) < f.len` is the same fault in expression
+//      position: `<` can begin a type, because `<T>(a: T) T` is one.
+
+scan, Source = lex.lex
+Parser = parse.parser
+
+SOURCE: str = "Handle = {\n    next* = (self: @Self) ()\n    stop* = (self: @Self) ()\n}\nKind =\n      Ident            // a comment between variants\n    | Int(u64)         // and another, after a payload\n    | Eof\nPtr*<T> = {\n    write* = (self: @Self, i: usize, v: T) ()\n    free*  ::= <U>(self: @Self) ()\n}\nat = (f: str, i: usize) bool {\n    (i + 1) < f.len;\n}\n"
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    lexed = scan(alloc, Source(file: "t.zen", text: SOURCE)).try();
+    p ::= alloc.Parser(lexed);
+    m = p.module("t").try();
+
+    // the whole assertion: every shape above is legal Zen, so a parser
+    // that reads its own stdlib reports nothing and finds all four
+    println("lex {} parse {}", lexed.diags.len, p.diags.len);
+    println("decls {}", m.decls.len);
+    Ok(0);
+}
