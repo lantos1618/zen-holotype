@@ -69,6 +69,60 @@ millis_of*  = (self: Duration) u64 { self.ns / NS_PER_MILLI }
 seconds_of* = (self: Duration) u64 { self.ns / NS_PER_SECOND }
 minutes_of* = (self: Duration) u64 { self.ns / NS_PER_MINUTE }
 
+// AND HERE AN ENUM IS RIGHT, which is the other half of the rule
+// above. Choosing a unit to PRINT in is a distinction that survives:
+// `unit_of` answers it, a caller matches on the answer to pick a
+// suffix, and two callers can disagree about presentation without
+// disagreeing about the span. That is exactly what a variant is for.
+//
+// So the unit is an enum — it was never the storage that wanted one.
+// Keeping it in the VALUE would make `Duration(Second, 1)` and
+// `Duration(Milli, 1000)` two representations of one span, and Map
+// needs Eq and Hash to agree about that ("the hash finds the row
+// fast, eq confirms the key"): normalise in one and not the other and
+// an equal key hashes differently. Deriving it costs a comparison and
+// cannot disagree with anything.
+Unit* = Nano | Micro | Milli | Second | Minute
+
+// The largest unit this span fills at least once. 1500ms is Second,
+// 999ms is Milli, and 0 is Nano because a span of nothing has no
+// larger unit to claim.
+unit_of* = (self: Duration) Unit {
+    (self.ns >= NS_PER_MINUTE).match({
+        true  => Unit.Minute,
+        false => (self.ns >= NS_PER_SECOND).match({
+            true  => Unit.Second,
+            false => (self.ns >= NS_PER_MILLI).match({
+                true  => Unit.Milli,
+                false => (self.ns >= NS_PER_MICRO).match({
+                    true  => Unit.Micro,
+                    false => Unit.Nano,
+                }),
+            }),
+        }),
+    });
+}
+
+// How many of that unit, truncating — the pair `unit_of` and this one
+// are what a Display impl reads, and neither needs the other's answer
+// stored anywhere.
+count_in* = (self: Duration, u: Unit) u64 {
+    u.match({
+        Nano   => self.ns,
+        Micro  => self.ns / NS_PER_MICRO,
+        Milli  => self.ns / NS_PER_MILLI,
+        Second => self.ns / NS_PER_SECOND,
+        Minute => self.ns / NS_PER_MINUTE,
+    });
+}
+
+suffix* = (u: Unit) str {
+    u.match({
+        Nano => "ns", Micro => "us", Milli => "ms",
+        Second => "s", Minute => "m",
+    });
+}
+
 add* = (self: Duration, other: Duration) Duration {
     Duration(ns: self.ns + other.ns)
 }
