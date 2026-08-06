@@ -15,10 +15,13 @@
 // closes a `Res<i32>` or a `Res<i32, E>`, and DESIGN.md's hoisting rule
 // turns on exactly that.
 //
-// OVERLOAD RESOLUTION IS SEMA'S AND IS NOT THERE YET, so a name with
-// more than one declaration is REPORTED rather than picked between:
-// "resolution is on declared parameter types and arity", and a backend
-// guessing would be a second, worse copy of that rule.
+// OVERLOAD RESOLUTION IS SEMA'S AND IS READ BACK RATHER THAN REDONE.
+// `Cand` carries the `DeclId` it came from and `chosen` writes it into
+// `Checker.call_memo` under the call's own node id, so `loop`'s six
+// declarations arrive here as a decision rather than as an ambiguity.
+// A name with more than one declaration and NO recorded answer is still
+// reported: "resolution is on declared parameter types and arity", and
+// a backend guessing would be a second, worse copy of that rule.
 //
 // THE TYPE FALLBACK LIVES HERE for the same reason: sema does not type
 // a call yet, so it does not type a `.try()` on one either, and the
@@ -34,6 +37,7 @@ Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
+DeclId = sema.sema_id
 TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
@@ -223,6 +227,42 @@ lower_plain_call* = (be :: CBackend, id: ExprId, c: Call, name: str,
                     Res<(), AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, name, found).try();
+    be.check.resolved_call(id).match({
+        Ok(d) => chosen_def(be, id, c, name, found, d, recv, ctx, out),
+        None  => sole_def(be, id, c, name, found, recv, ctx, out),
+    })
+}
+
+// SEMA ALREADY ANSWERED THIS. `resolved_call` is the declaration
+// overload resolution picked, keyed on this very node, so six
+// declarations of `loop` are six candidates sema chose between and not
+// an ambiguity to re-discover. A backend re-deriving the choice from
+// the name would be a second, worse copy of a rule that has one home.
+chosen_def = (be :: CBackend, id: ExprId, c: Call, name: str,
+              found: Vec<Def>, want: DeclId, recv: Res<ExprId>, ctx: Ctx,
+              out :: String) Res<(), AllocError> {
+    def_with_id(found, want).match({
+        Ok(d) => call_kind(be, id, c, d, recv, ctx, out),
+        None  => sole_def(be, id, c, name, found, recv, ctx, out),
+    })
+}
+
+def_with_id = (found: Vec<Def>, want: DeclId) Res<Def> {
+    Range(0, found.len).find((i) {
+        found.get(i).match({ Ok(d) => d.id.eq(want), None => false })
+    }).match({
+        Ok(i) => found.get(i),
+        None  => None,
+    })
+}
+
+// Nothing resolved this node, so the only choice a backend may make is
+// the one with nothing to choose: exactly one declaration. Sema records
+// no answer for a call it could not settle, and picking between the
+// candidates here is the guess the whole seam exists to avoid.
+sole_def = (be :: CBackend, id: ExprId, c: Call, name: str, found: Vec<Def>,
+            recv: Res<ExprId>, ctx: Ctx, out :: String)
+           Res<(), AllocError> {
     found.len.match({
         0 => unresolved(be, id, name, out),
         1 => call_def(be, id, c, name, found, recv, ctx, out),

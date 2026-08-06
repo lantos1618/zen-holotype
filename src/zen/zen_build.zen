@@ -72,6 +72,7 @@ message = lex.lex
 scan, Source, Lexed = lex.lex
 Parser, module = parse.parse
 Checker, check_all = sema.sema
+PRELUDE, last_segment = sema.sema
 Emit, CBackend, emit_program = gen.gen
 
 Job = zen.zen_cli
@@ -192,6 +193,7 @@ Build* = {
     walk = (self :: @Self, entry: Unit) Res<(), AllocError> {
         seen ::= self.alloc.Vec<Unit>();
         seen.add(entry).try();
+        self.seed_prelude(seen).try();
         i ::= 0;
         loop(() { i < seen.len }, (h) {
             u = seen.get(i).match({ Ok(v) => v, None => entry });
@@ -199,6 +201,55 @@ Build* = {
             self.front(u, seen).try();
         });
         Ok(());
+    }
+
+    // THE ONE IMPORT NOBODY WRITES. "`std.core` is imported into every
+    // module, so `Res`, `Ok`, `Vec`, `Map`, `str`, `Env` and the rest
+    // are in scope everywhere without a line" — and a walk that follows
+    // imports will never follow the line that is not there.
+    //
+    // Law 2 makes `main = (env: Env) ..` the signature every program in
+    // the language opens with, so the first program anyone writes names
+    // `Env`, writes no import, and had no prelude in its `World` at all.
+    // Every prelude name was undefined, not just `Env`.
+    //
+    // PROBED, NOT REQUIRED. A root with no `std/` beside it is a
+    // program with no prelude, which `World.prelude_index` already
+    // answers `None` to and which the small multi-file tests in
+    // tests/corpus are. A missing prelude is not a fault, so nothing
+    // here counts one.
+    seed_prelude = (self :: @Self, seen :: Vec<Unit>) Res<(), AllocError> {
+        flat = self.dotted_path(PRELUDE, false).try();
+        self.env.fs.exists(flat).match({
+            true  => self.queue(flat, seen),
+            false => self.seed_prelude_folder(seen),
+        })
+    }
+
+    seed_prelude_folder = (self :: @Self, seen :: Vec<Unit>)
+                          Res<(), AllocError> {
+        nest = self.dotted_path(PRELUDE, true).try();
+        self.env.fs.exists(nest).match({
+            true  => self.queue(nest, seen),
+            false => Ok(()),
+        })
+    }
+
+    // `file_of`'s rule over a DOTTED STRING rather than a parsed
+    // `QualifiedName`: the prelude is named by a constant and no import
+    // wrote it, so there is no AST node to read the segments off.
+    dotted_path = (self: @Self, dotted: str, folder: bool)
+                  Res<str, AllocError> {
+        out ::= self.alloc.String("{}/", self.root).try();
+        Range(0, dotted.len).loop((h, i) {
+            out.add_byte(slash_for(dotted.index(i))).try();
+        });
+        folder.then(() {
+            out.add_byte('/').try();
+            out.add_bytes(last_segment(dotted)).try();
+        });
+        out.add_bytes(".zen").try();
+        Ok(out.view());
     }
 
     // `<root>/a/b/c.zen`, or `<root>/a/b/c/c.zen` when the last segment
@@ -576,6 +627,13 @@ EXT_BYTES : usize = 4
 
 dot_for = (b: u8) u8 {
     (b == '/').match({ true  => '.', false => b })
+}
+
+// The inverse, for the one module named by a dotted CONSTANT rather
+// than by a path: `std.core` is the prelude's name and `<root>/std/
+// core.zen` is where its bytes are.
+slash_for = (b: u8) u8 {
+    (b == '.').match({ true  => '/', false => b })
 }
 
 // The last segment of a dotted name — `mem` of `std.mem` — which is what

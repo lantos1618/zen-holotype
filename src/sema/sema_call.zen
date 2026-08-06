@@ -56,7 +56,7 @@ Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 Checker, Ctx, UNRESOLVED = sema.sema_check
 Found, Base, base_of, members_of, static_access = sema.sema_member
 is_type_def, opaque, nowhere = sema.sema_member
-satisfies_bound = sema.sema_bound
+satisfies_bound, check_bounds = sema.sema_bound
 type_from_ast, type_of, param_type = sema.sema_type
 
 // One candidate, as resolution sees it.
@@ -64,7 +64,14 @@ type_from_ast, type_of, param_type = sema.sema_type
 // `owner` is the declaration's qualified name, and it is what makes a
 // type parameter identifiable: `Ty.Var` is nominal on its owner as well
 // as its name, so `T` of one candidate is never `T` of another.
+//
+// `id` is WHICH DECLARATION this candidate came from, and it is what a
+// resolution is. Without it the answer to "which of the six `loop`s did
+// this call mean" exists only for as long as `chosen` runs, and every
+// later consumer has to re-derive it from the name — which is how a
+// backend ends up reporting an ambiguity that sema had settled.
 Cand* = {
+    id*: DeclId,
     name*: str,
     owner*: str,
     params*: Vec<TyId>,
@@ -94,12 +101,16 @@ Actual* = {
 // QUERY: the type of a call
 // ---------------------------------------------------------------------
 
-call_type* = (c :: Checker, node: Expr, call: Call, ctx: Ctx)
+// `id` is the CALL's own node id, and it is threaded rather than
+// derived: an `Expr` is a value and carries no id, so the only place
+// that knows which node this is, is the query that was asked about it.
+// It is the key `chosen` writes the resolution under.
+call_type* = (c :: Checker, id: ExprId, node: Expr, call: Call, ctx: Ctx)
              Res<TyId, AllocError> {
     callee = c.tree.expr_at(call.callee);
     callee.kind.match({
-        Access(a) => member_call(c, node, call, a, ctx),
-        Name(n)   => named_call(c, node, call, n.text, ctx),
+        Access(a) => member_call(c, id, node, call, a, ctx),
+        Name(n)   => named_call(c, id, node, call, n.text, ctx),
         _         => indirect_call(c, node, call, ctx),
     })
 }
@@ -137,13 +148,13 @@ value_actual = (c :: Checker, id: ExprId, span: Span, ctx: Ctx)
 // `f(..)`
 // ---------------------------------------------------------------------
 
-named_call = (c :: Checker, node: Expr, call: Call, name: str, ctx: Ctx)
-             Res<TyId, AllocError> {
+named_call = (c :: Checker, id: ExprId, node: Expr, call: Call, name: str,
+              ctx: Ctx) Res<TyId, AllocError> {
     actuals ::= c.alloc.Vec<Actual>();
     actuals_of(c, call.args, ctx, actuals).try();
     is_res_ctor(name).match({
         true  => res_ctor_type(c, name, actuals),
-        false => local_or_decl_call(c, node, call, name, actuals, ctx),
+        false => local_or_decl_call(c, id, node, call, name, actuals, ctx),
     })
 }
 
@@ -176,10 +187,11 @@ first_ty = (c :: Checker, actuals: Vec<Actual>) Res<TyId, AllocError> {
     })
 }
 
-local_or_decl_call = (c :: Checker, node: Expr, call: Call, name: str,
-                      actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
+local_or_decl_call = (c :: Checker, id: ExprId, node: Expr, call: Call,
+                      name: str, actuals: Vec<Actual>, ctx: Ctx)
+                     Res<TyId, AllocError> {
     c.lookup(name).match({
-        None   => decl_call(c, node, call, name, actuals, ctx),
+        None   => decl_call(c, id, node, call, name, actuals, ctx),
         Ok(b)  => fn_ret(c, node, b.ty),
     })
 }
@@ -193,15 +205,15 @@ local_or_decl_call = (c :: Checker, node: Expr, call: Call, name: str,
 // pairing `std.collections` uses for `Vec`, and matching the struct's
 // fields positionally instead of the function is what made three
 // constructors in this folder unwritable.
-decl_call = (c :: Checker, node: Expr, call: Call, name: str,
+decl_call = (c :: Checker, id: ExprId, node: Expr, call: Call, name: str,
              actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
     cands ::= c.alloc.Vec<Cand>();
     cands_of(c, ctx.module, name, cands).try();
     kept ::= c.alloc.Vec<Cand>();
     keep_matching(c, cands, actuals, kept).try();
     (kept.len > 0).match({
-        true  => chosen(c, kept, actuals),
-        false => construct_or_fail(c, node, name, cands, ctx),
+        true  => chosen(c, id, kept, actuals),
+        false => construct_or_fail(c, id, node, name, cands, ctx),
     })
 }
 
@@ -222,13 +234,13 @@ keep_one = (c :: Checker, k: Cand, actuals: Vec<Actual>, kept :: Vec<Cand>)
     })
 }
 
-construct_or_fail = (c :: Checker, node: Expr, name: str, cands: Vec<Cand>,
-                     ctx: Ctx) Res<TyId, AllocError> {
+construct_or_fail = (c :: Checker, id: ExprId, node: Expr, name: str,
+                     cands: Vec<Cand>, ctx: Ctx) Res<TyId, AllocError> {
     defs ::= c.alloc.Vec<Def>();
     c.world.defs_of(ctx.module, name, defs).try();
     type_def_of(defs).match({
         None    => no_overload(c, node, name, cands),
-        Ok(d)   => construct(c, d),
+        Ok(d)   => construct(c, id, d),
     })
 }
 
@@ -241,7 +253,12 @@ type_def_of = (defs: Vec<Def>) Res<Def> {
     })
 }
 
-construct = (c :: Checker, d: Def) Res<TyId, AllocError> {
+// CONSTRUCTING IS A RESOLUTION TOO, and it is recorded for the same
+// reason a call is: `Checker* = { .. }` beside `Checker* = (a: Alloc,
+// ..)` is two declarations of one name, and which of them a call site
+// meant is decided here and nowhere else.
+construct = (c :: Checker, id: ExprId, d: Def) Res<TyId, AllocError> {
+    c.resolve_call(id, d.id).try();
     empty ::= c.alloc.Vec<TyId>();
     c.types.named(d.id, d.qname, d.name, empty)
 }
@@ -258,16 +275,21 @@ no_overload = (c :: Checker, node: Expr, name: str, cands: Vec<Cand>)
     c.types.unknown()
 }
 
-chosen = (c :: Checker, kept: Vec<Cand>, actuals: Vec<Actual>)
+// The first candidate that matched, and THE PLACE THE ANSWER IS WRITTEN
+// DOWN. Everything after resolution — the backend most of all — reads
+// `call_memo` rather than asking the name again, because the name is
+// exactly what could not answer.
+chosen = (c :: Checker, id: ExprId, kept: Vec<Cand>, actuals: Vec<Actual>)
          Res<TyId, AllocError> {
     kept.get(0).match({
         None   => c.types.unknown(),
-        Ok(k)  => chosen_ret(c, k, actuals),
+        Ok(k)  => chosen_ret(c, id, k, actuals),
     })
 }
 
-chosen_ret = (c :: Checker, k: Cand, actuals: Vec<Actual>)
+chosen_ret = (c :: Checker, id: ExprId, k: Cand, actuals: Vec<Actual>)
              Res<TyId, AllocError> {
+    c.resolve_call(id, k.id).try();
     check_bounds(c, k, actuals).try();
     Ok(k.ret);
 }
@@ -276,12 +298,12 @@ chosen_ret = (c :: Checker, k: Cand, actuals: Vec<Actual>)
 // `x.f(..)`
 // ---------------------------------------------------------------------
 
-member_call = (c :: Checker, node: Expr, call: Call, ac: Access, ctx: Ctx)
-              Res<TyId, AllocError> {
+member_call = (c :: Checker, id: ExprId, node: Expr, call: Call, ac: Access,
+               ctx: Ctx) Res<TyId, AllocError> {
     b = base_of(c, ac.base, ctx).try();
     b.is_type.match({
         true  => static_call(c, node, call, ac, b.ty, ctx),
-        false => receiver_call(c, node, call, ac, b, ctx),
+        false => receiver_call(c, id, node, call, ac, b, ctx),
     })
 }
 
@@ -293,23 +315,24 @@ static_call = (c :: Checker, node: Expr, call: Call, ac: Access, ty: TyId,
     fn_ret(c, node, got)
 }
 
-receiver_call = (c :: Checker, node: Expr, call: Call, ac: Access, b: Base,
-                 ctx: Ctx) Res<TyId, AllocError> {
+receiver_call = (c :: Checker, id: ExprId, node: Expr, call: Call,
+                 ac: Access, b: Base, ctx: Ctx) Res<TyId, AllocError> {
     opaque(c, b.ty).match({
         true  => c.types.unknown(),
-        false => known_receiver_call(c, node, call, ac, b, ctx),
+        false => known_receiver_call(c, id, node, call, ac, b, ctx),
     })
 }
 
-known_receiver_call = (c :: Checker, node: Expr, call: Call, ac: Access,
-                       b: Base, ctx: Ctx) Res<TyId, AllocError> {
+known_receiver_call = (c :: Checker, id: ExprId, node: Expr, call: Call,
+                       ac: Access, b: Base, ctx: Ctx)
+                      Res<TyId, AllocError> {
     actuals ::= c.alloc.Vec<Actual>();
     actuals_of(c, call.args, ctx, actuals).try();
     found ::= c.alloc.Vec<Found>();
     members_of(c, b.ty, ac.name.text, found).try();
     (found.len > 0).match({
         true  => method_call(c, node, found, actuals),
-        false => ufcs_call(c, node, call, ac, b, actuals, ctx),
+        false => ufcs_call(c, id, node, call, ac, b, actuals, ctx),
     })
 }
 
@@ -352,13 +375,14 @@ first_found_ret = (c :: Checker, node: Expr, found: Vec<Found>)
 // "A free function whose first param is the type is callable as a
 // method." So the receiver becomes argument zero and resolution runs
 // exactly as it does for `f(x, ..)` — there is no second mechanism.
-ufcs_call = (c :: Checker, node: Expr, call: Call, ac: Access, b: Base,
-             actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
+ufcs_call = (c :: Checker, id: ExprId, node: Expr, call: Call, ac: Access,
+             b: Base, actuals: Vec<Actual>, ctx: Ctx)
+            Res<TyId, AllocError> {
     all ::= c.alloc.Vec<Actual>();
     all.add(Actual(ty: b.ty, is_lambda: false, arity: 0,
                    span: node.span)).try();
     actuals.loop((h, a) { all.add(a).try() });
-    decl_call(c, node, call, ac.name.text, all, ctx)
+    decl_call(c, id, node, call, ac.name.text, all, ctx)
 }
 
 indirect_call = (c :: Checker, node: Expr, call: Call, ctx: Ctx)
@@ -430,8 +454,9 @@ add_cand = (c :: Checker, d: Def, dec: Decl, f: Function, out :: Vec<Cand>)
     tbs ::= c.alloc.Vec<TBound>();
     collect_bounds(c, f, ctx, tbs).try();
     c.release_tvars(mark).try();
-    out.add(Cand(name: d.name, owner: d.qname, params: ptys, ret: rty,
-                 tbounds: tbs, generic: f.tparams.len > 0, span: dec.span))
+    out.add(Cand(id: d.id, name: d.name, owner: d.qname, params: ptys,
+                 ret: rty, tbounds: tbs, generic: f.tparams.len > 0,
+                 span: dec.span))
 }
 
 push_tparams = (c :: Checker, f: Function, owner: str) Res<(), AllocError> {
@@ -463,20 +488,64 @@ tparam_bounds = (c :: Checker, tp: TParam, ctx: Ctx, out :: Vec<TBound>)
 
 matches* = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
            Res<bool, AllocError> {
-    (cand.params.len == actuals.len).match({
-        false => Ok(false),
-        true  => all_fit(c, cand, actuals),
+    is_variadic(c, cand).match({
+        true  => variadic_matches(c, cand, actuals),
+        false => fixed_matches(c, cand, actuals),
     })
 }
 
-// Every argument, and no early exit — `find` takes a closure that
-// answers `bool`, and asking whether an argument keeps a bound is a
-// question that allocates. A candidate has a handful of parameters, so
-// the shape with nothing to get wrong is the right one.
-all_fit = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
+fixed_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
+                Res<bool, AllocError> {
+    (cand.params.len == actuals.len).match({
+        false => Ok(false),
+        true  => all_fit(c, cand, actuals, actuals.len),
+    })
+}
+
+// `...` IS NOT A PARAMETER, it is the statement that the list does not
+// end. So `(a: Alloc, fmt: str, args: ...)` takes two arguments and
+// then any number, and arity is a MINIMUM rather than an equality.
+//
+// Without this, `alloc.String("{}", x)` matched NOTHING — three actuals
+// against a candidate reporting three parameters, one of which is the
+// `...` — and fell through to `construct_or_fail`, which found the
+// `String` STRUCT of the same name and built one positionally. The
+// mistake was silent and it was not a diagnostic: the call typed as
+// `String` where the declaration says `Res<String, AllocError>`, so
+// every `.try()` on it lost its operand's type and every `.view()` on
+// the result was unresolvable.
+//
+// Only the FIXED PREFIX is checked. What the rest may be is
+// type-directed — `text_string.zen` says the call is expanded where it
+// is written — and a check on arguments whose types the language has
+// not settled would be inventing a rule.
+variadic_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
+                   Res<bool, AllocError> {
+    fixed = cand.params.len - 1;
+    (actuals.len >= fixed).match({
+        false => Ok(false),
+        true  => all_fit(c, cand, actuals, fixed),
+    })
+}
+
+// Does the last parameter say the list does not end? `sema_type.zen`
+// interns `...` as a primitive, so this is a name compare and not a
+// new kind of `Ty`.
+is_variadic = (c: Checker, cand: Cand) bool {
+    (cand.params.len > 0).match({
+        false => false,
+        true  => c.prim_name(ty_at(cand.params, cand.params.len - 1)).eq("..."),
+    })
+}
+
+// The first `n` arguments, and no early exit — `find` takes a closure
+// that answers `bool`, and asking whether an argument keeps a bound is
+// a question that allocates. A candidate has a handful of parameters,
+// so the shape with nothing to get wrong is the right one.
+all_fit = (c :: Checker, cand: Cand, actuals: Vec<Actual>, n: usize)
           Res<bool, AllocError> {
     ok ::= true;
-    Range(0, actuals.len).loop((h, i) {
+    Range(0, n).loop((h, i) {
         got = fits_at(c, cand, actuals, i).try();
         ok = ok && got;
     });
@@ -530,84 +599,8 @@ closure_fits = (c: Checker, p: TyId, arity: usize) bool {
 
 is_tvar* = (c: Checker, id: TyId) bool { c.is_var(id) }
 
-ty_at = (v: Vec<TyId>, i: usize) TyId {
+ty_at* = (v: Vec<TyId>, i: usize) TyId {
     v.get(i).match({ Ok(t) => t, None => UNRESOLVED })
-}
-
-// ---------------------------------------------------------------------
-// bounds at a call site
-//
-// "The bound is the promise; this call does not keep it." The type
-// argument is read off the parameter it appears in, which is the only
-// place a call site says what it is.
-// ---------------------------------------------------------------------
-
-check_bounds = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
-               Res<(), AllocError> {
-    cand.tbounds.loop((h, tb) {
-        check_one_bound(c, cand, tb, actuals).try();
-    });
-    Ok(());
-}
-
-check_one_bound = (c :: Checker, cand: Cand, tb: TBound,
-                   actuals: Vec<Actual>) Res<(), AllocError> {
-    param_of_var(c, cand, tb.name).match({
-        None    => Ok(()),
-        Ok(i)   => bound_at(c, tb, actuals, i),
-    })
-}
-
-// The first parameter written as the bare type parameter. A nested one
-// — `Vec<T>` — would need unification, and inferring a bound from a
-// position the language has not settled is inventing a reason.
-param_of_var = (c: Checker, cand: Cand, name: str) Res<usize> {
-    Range(0, cand.params.len).find((i) {
-        var_named(c, ty_at(cand.params, i), name, cand.owner)
-    })
-}
-
-var_named = (c: Checker, id: TyId, name: str, owner: str) bool {
-    c.types.at(id).match({
-        Var(v) => v.name.eq(name) && v.owner.eq(owner),
-        _      => false,
-    })
-}
-
-bound_at = (c :: Checker, tb: TBound, actuals: Vec<Actual>, i: usize)
-           Res<(), AllocError> {
-    actuals.get(i).match({
-        None    => Ok(()),
-        Ok(a)   => check_actual_bound(c, tb, a),
-    })
-}
-
-check_actual_bound = (c :: Checker, tb: TBound, a: Actual)
-                     Res<(), AllocError> {
-    unbounded(c, a.ty).match({
-        true  => Ok(()),
-        false => prove_bound(c, tb, a),
-    })
-}
-
-// Poison, a hole and another type parameter carry no answer, and
-// "never invent a diagnostic out of missing information".
-unbounded = (c: Checker, ty: TyId) bool {
-    opaque(c, ty) || is_tvar(c, ty)
-}
-
-prove_bound = (c :: Checker, tb: TBound, a: Actual) Res<(), AllocError> {
-    satisfies_bound(c, a.ty, tb.bound).try().match({
-        true  => Ok(()),
-        false => bound_not_satisfied(c, tb, a),
-    })
-}
-
-bound_not_satisfied = (c :: Checker, tb: TBound, a: Actual)
-                      Res<(), AllocError> {
-    c.report(a.span.file, a.span,
-             SemaFault.BoundNotSatisfied(TypeFault(
-                 name: tb.name, expected: tb.bound, found: a.ty)))
 }
 
 // ---------------------------------------------------------------------

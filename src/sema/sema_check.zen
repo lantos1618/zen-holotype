@@ -90,10 +90,26 @@ Checker* = {
     types* :: Types,
     diags :: Vec<Diag>,
 
-    // the memo tables. Both key on a node id, which is the whole reason
-    // ids exist rather than node values.
+    // the memo tables. All three key on a node id, which is the whole
+    // reason ids exist rather than node values.
     expr_memo* :: Map<ExprId, TyId>,
     type_memo* :: Map<TypeId, TyId>,
+
+    // WHICH DECLARATION DID THIS CALL MEAN. `sema_id.zen` names this as
+    // one of the three questions a declaration coordinate exists to be
+    // the key of, and it is the one nothing was recording.
+    //
+    // Overload resolution is sema's, and a backend that re-derives it
+    // from `defs_of` is a second, worse copy of the rule — it sees six
+    // declarations of `loop` and can only report an ambiguity sema had
+    // already settled. So the answer is written down where it is
+    // computed, and read back rather than recomputed.
+    //
+    // Only a call that RESOLVED is here. A `Res` constructor names no
+    // declaration, a call through a local names a value and not a
+    // declaration, and a call nothing matched has no answer to record —
+    // a miss means "ask the old way", never "there was no candidate".
+    call_memo* :: Map<ExprId, DeclId>,
 
     // the scope stack: one flat Vec with marks, not a chain of frames.
     // A chain needs indirection and every frame is an allocation; a
@@ -125,6 +141,16 @@ Checker* = {
     diag_at* = (self: @Self, i: usize) Res<Diag> { self.diags.get(i) }
 
     type_store* = (self: @Self) Types { self.types }
+
+    // The declaration this call resolved to, if resolution reached one.
+    resolved_call* = (self: @Self, id: ExprId) Res<DeclId> {
+        self.call_memo.get(id)
+    }
+
+    resolve_call* = (self :: @Self, id: ExprId, d: DeclId)
+                    Res<(), AllocError> {
+        self.call_memo.set(id, d)
+    }
 
     modules* = (self: @Self) World { self.world }
 
@@ -495,6 +521,7 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         diags: a.Vec<Diag>(),
         expr_memo: a.Map<ExprId, TyId>(),
         type_memo: a.Map<TypeId, TyId>(),
+        call_memo: a.Map<ExprId, DeclId>(),
         locals: a.Vec<Binding>(),
         tvars: a.Vec<Binding>(),
         bounds: a.Vec<Binding>(),

@@ -1,5 +1,15 @@
 // src/sema/sema_bound.zen
-// What a bound promises, and what an impl owes it.
+// What a bound promises, and who owes it: an IMPL, and a CALL SITE.
+//
+// Both halves ask one question — does this type keep that promise — and
+// both answer it through `satisfies_bound`. The impl half arrived first;
+// the call-site half moved here from `sema_call.zen` when that file
+// crossed STYLE.md's hard cap, and it belongs here rather than there:
+// `sema_call.zen`'s subject is WHICH DECLARATION a call means, and by
+// the time bounds are checked that has already been decided. The two
+// files depend on each other and that is fine — `sema_type` and
+// `sema_call` already do, and a module cycle is a name-resolution fact
+// with no cost in the output.
 //
 // Split from `sema_member.zen`, which answers "what does a dot reach".
 // These are two subjects and STYLE.md's rule is to split by subject: the
@@ -28,11 +38,12 @@ Range = std.core
 DeclId, ImplId = sema.sema_id
 TyId, Ty, Types, TyNamed = sema.sema_ty
 World, Def, decl_at = sema.sema_def
-Diag, SemaFault, NameFault = sema.sema_diag
+Diag, SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 bound_members, has_member, member_named, impl_span = sema.sema_member
-impl_bound_type = sema.sema_member
+impl_bound_type, opaque = sema.sema_member
 type_from_ast = sema.sema_type
+Cand, TBound, Actual, ty_at, is_tvar = sema.sema_call
 
 // "`A.impl(B, {..})` supplies a value for every field `B` declares."
 // Every field, and every member the bound left to the impl — a sealed or
@@ -151,4 +162,80 @@ bound_matches = (c :: Checker, im: Impl, mi: usize, bound: TyId)
                 Res<bool, AllocError> {
     got = impl_bound_type(c, im, mi).try();
     Ok(c.same_type(got, bound));
+}
+
+// ---------------------------------------------------------------------
+// bounds at a call site
+//
+// "The bound is the promise; this call does not keep it." The type
+// argument is read off the parameter it appears in, which is the only
+// place a call site says what it is.
+// ---------------------------------------------------------------------
+
+check_bounds* = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
+                Res<(), AllocError> {
+    cand.tbounds.loop((h, tb) {
+        check_one_bound(c, cand, tb, actuals).try();
+    });
+    Ok(());
+}
+
+check_one_bound = (c :: Checker, cand: Cand, tb: TBound,
+                   actuals: Vec<Actual>) Res<(), AllocError> {
+    param_of_var(c, cand, tb.name).match({
+        None    => Ok(()),
+        Ok(i)   => bound_at(c, tb, actuals, i),
+    })
+}
+
+// The first parameter written as the bare type parameter. A nested one
+// — `Vec<T>` — would need unification, and inferring a bound from a
+// position the language has not settled is inventing a reason.
+param_of_var = (c: Checker, cand: Cand, name: str) Res<usize> {
+    Range(0, cand.params.len).find((i) {
+        var_named(c, ty_at(cand.params, i), name, cand.owner)
+    })
+}
+
+var_named = (c: Checker, id: TyId, name: str, owner: str) bool {
+    c.types.at(id).match({
+        Var(v) => v.name.eq(name) && v.owner.eq(owner),
+        _      => false,
+    })
+}
+
+bound_at = (c :: Checker, tb: TBound, actuals: Vec<Actual>, i: usize)
+           Res<(), AllocError> {
+    actuals.get(i).match({
+        None    => Ok(()),
+        Ok(a)   => check_actual_bound(c, tb, a),
+    })
+}
+
+check_actual_bound = (c :: Checker, tb: TBound, a: Actual)
+                     Res<(), AllocError> {
+    unbounded(c, a.ty).match({
+        true  => Ok(()),
+        false => prove_bound(c, tb, a),
+    })
+}
+
+// Poison, a hole and another type parameter carry no answer, and
+// "never invent a diagnostic out of missing information".
+unbounded = (c: Checker, ty: TyId) bool {
+    opaque(c, ty) || is_tvar(c, ty)
+}
+
+prove_bound = (c :: Checker, tb: TBound, a: Actual) Res<(), AllocError> {
+    satisfies_bound(c, a.ty, tb.bound).try().match({
+        true  => Ok(()),
+        false => bound_not_satisfied(c, tb, a),
+    })
+}
+
+bound_not_satisfied = (c :: Checker, tb: TBound, a: Actual)
+                      Res<(), AllocError> {
+    c.report(a.span.file, a.span,
+             SemaFault.BoundNotSatisfied(TypeFault(
+                 name: tb.name, expected: tb.bound, found: a.ty)))
 }

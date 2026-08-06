@@ -239,12 +239,17 @@ compute_expr* = (c :: Checker, id: ExprId, ctx: Ctx)
     poison = c.types.unknown().try();
     c.expr_memo.set(id, poison).try();
     node = c.tree.expr_at(id);
-    got = c.expr_kind(node, ctx).try();
+    got = c.expr_kind(id, node, ctx).try();
     c.expr_memo.set(id, got).try();
     Ok(got);
 }
 
-expr_kind* = (c :: Checker, node: Expr, ctx: Ctx) Res<TyId, AllocError> {
+// `id` is threaded beside `node` for the one kind that needs to record
+// an answer under it: a call. An `Expr` is a value and carries no id,
+// so a query that wants to write into a memo keyed on the node has to
+// be told which node it is.
+expr_kind* = (c :: Checker, id: ExprId, node: Expr, ctx: Ctx)
+             Res<TyId, AllocError> {
     node.kind.match({
         Literal(l)  => c.literal_type(l),
         Unit        => c.types.prim("()"),
@@ -258,7 +263,7 @@ expr_kind* = (c :: Checker, node: Expr, ctx: Ctx) Res<TyId, AllocError> {
         Block(b)    => c.block_type(b, ctx),
         Match(m)    => c.match_type(node, m, ctx),
         Access(a)   => c.access_type(node, a, ctx),
-        Call(k)     => c.call_type(node, k, ctx),
+        Call(k)     => c.call_type(id, node, k, ctx),
         _           => c.types.unknown(),
     })
 }
