@@ -1,0 +1,733 @@
+// src/gen/gen_c/gen_c_loop.zen
+// The one construct that has no Zen definition anywhere.
+//
+// `src/std/core/loop/loop_iter.zen` declares six signatures and no
+// bodies, and says why: "a loop is the one thing that cannot be written
+// in a language whose only control flow is `.match`, `.loop` and
+// recursion". Writing `loop` in terms of `loop` is circular, and
+// writing it by recursion makes "compiles to a plain C for-loop" depend
+// on a tail-call optimisation nobody gates. So the backend IS the body
+// of all six, and this file is that.
+//
+// THE OVERLOAD IS READ OFF THE DECLARATION'S OWN PARAMETER NAMES.
+// `loop_iter.zen` writes the body's parameter list out — `(h:
+// LoopHandle, index: usize, value: T)` — and which of `index`, `value`
+// and `acc` appear is the whole difference between the six. So the
+// shape is a question about the signature sema already picked, never
+// about the lambda written at the call site: `(h, i)` binds to `value`
+// on the two-parameter form and to `index` on the counted one, and
+// only the declaration knows which.
+//
+// `h.break(v)` AND `h.next()` ARE `goto`s, NOT C's `break` AND
+// `continue`. An inlined body sits inside whatever the lowering of a
+// `.match` produced — an `if` chain today, and the reference backend
+// emits a `switch` in the same position — where a C `break` leaves that
+// construct rather than the loop. A label cannot be captured that way.
+//
+// WHAT THIS FILE DOES NOT LOWER, IT REFUSES BY NAME. A range whose
+// `start`, `end` or `at` is supplied by an `impl` — a `Vec`, which is
+// the other half of `Range`'s two impls — needs the impl-supplied
+// member machinery `gen_c_member.zen` also refuses, and the two want
+// closing together rather than one of them guessing.
+//
+// LOOPS NEVER ALLOCATE, and that is the signature rather than a
+// promise: no declaration in `loop_iter.zen` takes an `Alloc`. Nothing
+// here mints one. The body is inlined into the frame it was written in,
+// so there is no closure record, and `index`, `value` and `acc` are
+// plain automatic storage.
+
+Ast, Expr, ExprKind, ExprId, BlockId, Block, Lambda, Type, TypeKind = ast
+Decl, DeclKind, Function, FnType, Param, TypeId, Ident, Span = ast
+Access, Call, Arg = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+DeclId = sema.sema_id
+TyId, Ty, Types, TyNamed, TyRes = sema.sema_ty
+World, Def, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+type_from_ast = sema.sema_type
+write_usize = sema.sema_diag
+sym_local, sym_member, sym_gen, sym_variant = gen.gen_name
+RES_PATH = gen.gen_name
+GenFault = gen.gen_diag
+CBackend, LocalSlot, LoopFrame = gen.gen_c.gen_c_state
+unsupported, unresolved, untyped = gen.gen_c.gen_c_state
+ctype, declarator, is_unit = gen.gen_c.gen_c_type
+open, intern_res_open = gen.gen_c.gen_c_mono
+expr, ty_of = gen.gen_c.gen_c_expr
+Dest, block, write_dest = gen.gen_c.gen_c_stmt
+
+// -----------------------------------------------------------------
+// recognising the intrinsic
+// -----------------------------------------------------------------
+
+// A bodyless function whose last parameter is a body taking a
+// `LoopHandle`. Recognised by SHAPE and not by module and name, so the
+// six overloads are one case and anything written the same way joins
+// them without a second list to keep in step.
+is_loop_shape* = (be :: CBackend, f: Function) bool {
+    f.body.match({
+        Ok(_) => false,
+        None  => takes_handle(be, f.params),
+    })
+}
+
+takes_handle = (be :: CBackend, params: Vec<Param>) bool {
+    params.get(params.len - 1).match({
+        None  => false,
+        Ok(p) => param_is_handle_body(be, p),
+    })
+}
+
+param_is_handle_body = (be :: CBackend, p: Param) bool {
+    p.type.match({
+        None    => false,
+        Ok(tid) => type_is_handle_body(be, tid),
+    })
+}
+
+type_is_handle_body = (be :: CBackend, tid: TypeId) bool {
+    be.tree.type_at(tid).kind.match({
+        Fn(ft) => first_is_handle(be, ft.params),
+        _      => false,
+    })
+}
+
+first_is_handle = (be :: CBackend, params: Vec<Param>) bool {
+    params.get(0).match({
+        None  => false,
+        Ok(p) => param_names_handle(be, p),
+    })
+}
+
+param_names_handle = (be :: CBackend, p: Param) bool {
+    p.type.match({
+        None    => false,
+        Ok(tid) => type_named(be, tid).eq("LoopHandle"),
+    })
+}
+
+type_named = (be :: CBackend, tid: TypeId) str {
+    be.tree.type_at(tid).kind.match({
+        Named(n) => n.name.text,
+        _        => "",
+    })
+}
+
+// THE TYPE A LOOP CALL EVALUATES TO, when sema's own answer is open.
+//
+// `loop<R: Range<T>, T>` returns `Res<T>` and nothing settles `T`: it is
+// reachable only through the closure, and a closure infers FROM a
+// signature rather than into one. So sema hands back `Res<q>` — the
+// mangler's word for an argument nothing decided — and a binding
+// declared at it would be a C type that every loop in the program
+// shares. A range that supplies no `at` walks its own index space, so
+// its element is `usize`.
+loop_result_type* = (be :: CBackend, id: ExprId, got: TyId)
+                    Res<TyId, AllocError> {
+    loop_fn_at(be, id).match({
+        None  => Ok(got),
+        Ok(f) => settled_loop_type(be, got),
+    })
+}
+
+// The loop declaration this call resolved to, if it is one. Read off
+// sema's own answer — `resolved_call` records the `DeclId` overload
+// resolution picked, so six declarations of `loop` arrive as a decision.
+loop_fn_at = (be :: CBackend, id: ExprId) Res<Function> {
+    be.check.resolved_call(id).match({
+        None    => None,
+        Ok(did) => loop_fn_of(be, did),
+    })
+}
+
+loop_fn_of = (be :: CBackend, did: DeclId) Res<Function> {
+    decl_at(be.tree, did).match({
+        None  => None,
+        Ok(x) => loop_fn_decl(be, x),
+    })
+}
+
+loop_fn_decl = (be :: CBackend, x: Decl) Res<Function> {
+    x.kind.match({
+        Function(f) => keep_loop(be, f),
+        _           => None,
+    })
+}
+
+keep_loop = (be :: CBackend, f: Function) Res<Function> {
+    is_loop_shape(be, f).match({
+        true  => Ok(f),
+        false => None,
+    })
+}
+
+settled_loop_type = (be :: CBackend, got: TyId) Res<TyId, AllocError> {
+    elem = be.check.types.prim("usize").try();
+    settle_res(be, got, elem)
+}
+
+// -----------------------------------------------------------------
+// which of the six
+//
+// A `Shape` and not five booleans threaded side by side: the six
+// declarations differ in exactly these answers, and carrying them as
+// one value is what lets `lower_loop` read like the C it writes.
+// -----------------------------------------------------------------
+
+Shape* = {
+    wants_index*: bool,
+    wants_value*: bool,
+    wants_acc*: bool,
+    // the body is the last argument; everything before it is a range,
+    // a condition, or a fold's seed
+    lead*: usize,
+}
+
+shape_of = (be :: CBackend, f: Function) Res<Shape, AllocError> {
+    inner ::= be.alloc.Vec<Param>();
+    body_params(be, f, inner).try();
+    Ok(Shape(wants_index: names_after_first(inner, "index"),
+             wants_value: names_after_first(inner, "value"),
+             wants_acc: names_after_first(inner, "acc"),
+             lead: f.params.len - 1));
+}
+
+body_params = (be :: CBackend, f: Function, out :: Vec<Param>)
+              Res<(), AllocError> {
+    f.params.get(f.params.len - 1).match({
+        None  => Ok(()),
+        Ok(p) => collect_fn_params(be, p, out),
+    })
+}
+
+collect_fn_params = (be :: CBackend, p: Param, out :: Vec<Param>)
+                    Res<(), AllocError> {
+    p.type.match({
+        None    => Ok(()),
+        Ok(tid) => copy_fn_params(be, tid, out),
+    })
+}
+
+copy_fn_params = (be :: CBackend, tid: TypeId, out :: Vec<Param>)
+                 Res<(), AllocError> {
+    be.tree.type_at(tid).kind.match({
+        Fn(ft) => add_params(ft.params, out),
+        _      => Ok(()),
+    })
+}
+
+add_params = (params: Vec<Param>, out :: Vec<Param>) Res<(), AllocError> {
+    params.loop((h, p) { out.add(p).try(); });
+    Ok(());
+}
+
+// `h` is parameter zero of every body and is not one of the three, so
+// the search starts at one. Written as a counted walk rather than
+// `find` over a slice because the first parameter is excluded and a
+// range starting at 1 says that plainly.
+names_after_first = (params: Vec<Param>, name: str) bool {
+    got ::= false;
+    Range(1, params.len).loop((h, i) {
+        params.get(i).match({
+            None  => (),
+            Ok(p) => p.name.text.eq(name).then(() { got = true; }),
+        });
+    });
+    got
+}
+
+// -----------------------------------------------------------------
+// the lowering
+// -----------------------------------------------------------------
+
+// `args` is the call's arguments with the receiver, if there was one,
+// already at the front: `range.loop(body)` and `loop(range, body)` are
+// one call written two ways, which is what UFCS means.
+lower_loop* = (be :: CBackend, id: ExprId, c: Call, f: Function,
+               recv: Res<ExprId>, ctx: Ctx, want: TyId, out :: String)
+              Res<(), AllocError> {
+    args ::= be.alloc.Vec<ExprId>();
+    recv.match({
+        None  => Ok(()),
+        Ok(r) => args.add(r),
+    }).try();
+    c.args.loop((h, a) { args.add(a.value).try(); });
+    args.get(args.len - 1).match({
+        None  => unsupported(be, id, "a loop with no body", out),
+        Ok(b) => lower_with_body(be, id, f, args, b, ctx, want, out),
+    })
+}
+
+lower_with_body = (be :: CBackend, id: ExprId, f: Function,
+                   args: Vec<ExprId>, body: ExprId, ctx: Ctx, want: TyId,
+                   out :: String) Res<(), AllocError> {
+    lambda_at(be, body).match({
+        None    => unsupported(be, id, "a loop body written somewhere other than the call site", out),
+        Ok(lam) => lower_shaped(be, id, f, args, lam, ctx, want, out),
+    })
+}
+
+lambda_at* = (be :: CBackend, id: ExprId) Res<Lambda> {
+    be.tree.expr_at(id).kind.match({
+        Lambda(l) => Ok(l),
+        _         => None,
+    })
+}
+
+lower_shaped = (be :: CBackend, id: ExprId, f: Function, args: Vec<ExprId>,
+                lam: Lambda, ctx: Ctx, want: TyId, out :: String)
+               Res<(), AllocError> {
+    sh = shape_of(be, f).try();
+    sh.wants_acc.match({
+        true  => unsupported(be, id, "a fold, which threads an accumulator this backend does not carry yet", out),
+        false => lower_walk(be, id, sh, args, lam, ctx, want, out),
+    })
+}
+
+// THE FOUR NON-FOLD SHAPES, and the branch between them is what the
+// arguments before the body are:
+//
+//   nothing        while true
+//   a `() bool`    while cond, tested BEFORE each pass
+//   anything else  a Range, walked half-open
+lower_walk = (be :: CBackend, id: ExprId, sh: Shape, args: Vec<ExprId>,
+              lam: Lambda, ctx: Ctx, want: TyId, out :: String)
+             Res<(), AllocError> {
+    lead = first_lead(be, args);
+    lead.match({
+        None    => lower_forever(be, id, sh, None, lam, ctx, want, out),
+        Ok(one) => lower_led(be, id, sh, one, lam, ctx, want, out),
+    })
+}
+
+first_lead = (be :: CBackend, args: Vec<ExprId>) Res<ExprId> {
+    (args.len > 1).match({
+        false => None,
+        true  => args.get(0),
+    })
+}
+
+lower_led = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
+             lam: Lambda, ctx: Ctx, want: TyId, out :: String)
+            Res<(), AllocError> {
+    is_cond(be, one).match({
+        true  => lower_forever(be, id, sh, Ok(one), lam, ctx, want, out),
+        false => lower_range(be, id, sh, one, lam, ctx, want, out),
+    })
+}
+
+// The condition form's first argument is `() bool` — a lambda taking no
+// parameters. A range never is.
+is_cond = (be :: CBackend, one: ExprId) bool {
+    lambda_at(be, one).match({
+        None    => false,
+        Ok(lam) => lam.params.len == 0,
+    })
+}
+
+// -----------------------------------------------------------------
+// while true, and while cond
+// -----------------------------------------------------------------
+
+lower_forever = (be :: CBackend, id: ExprId, sh: Shape, cond: Res<ExprId>,
+                 lam: Lambda, ctx: Ctx, want: TyId, out :: String)
+                Res<(), AllocError> {
+    st = open_result(be, want, out).try();
+    counter ::= be.alloc.String().try();
+    sh.wants_index.match({
+        true  => open_counter(be, counter),
+        false => Ok(()),
+    }).try();
+    be.writeln("for (;;) {").try();
+    be.indent();
+    cond.match({
+        None    => Ok(()),
+        Ok(one) => write_cond_guard(be, one, st.brk, ctx),
+    }).try();
+    run_body(be, sh, lam, counter.view(), "", ctx).try();
+    close_pass(be, st, counter.view()).try();
+    Ok(());
+}
+
+// `while cond` is tested BEFORE each pass, "so a cond that is false to
+// begin with runs the body zero times". The condition is a closure like
+// the body is, so it is inlined the same way — into the top of the
+// loop, where a `for (;;)` puts what a `while` would have in its head.
+write_cond_guard = (be :: CBackend, one: ExprId, brk: usize, ctx: Ctx)
+                   Res<(), AllocError> {
+    lambda_at(be, one).match({
+        None    => Ok(()),
+        Ok(lam) => write_cond_body(be, lam, brk, ctx),
+    })
+}
+
+write_cond_body = (be :: CBackend, lam: Lambda, brk: usize, ctx: Ctx)
+                  Res<(), AllocError> {
+    bool_ty = be.check.types.prim("bool").try();
+    tmp ::= be.alloc.String().try();
+    sym_gen(tmp, "c", be.next_tmp()).try();
+    decl ::= be.alloc.String().try();
+    declarator(be, bool_ty, tmp.view(), decl).try();
+    decl.add_bytes(";").try();
+    be.writeln(decl.view()).try();
+    cmark = be.check.mark();
+    lmark = be.mark();
+    block(be, lam.body, ctx, bool_ty, Dest.Into(tmp.view())).try();
+    be.release(lmark).try();
+    be.check.release(cmark).try();
+    be.write("if (!").try();
+    be.write(tmp.view()).try();
+    be.writeln(") { goto ").try();
+    write_label(be, "brk", brk).try();
+    be.writeln("; }").try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// a range
+//
+// HALF-OPEN, and the counter is the index space. `Range(0, 5)` is five
+// passes; `index` counts PASSES and `value` is what the range holds, so
+// over `Range(10, 13)` they are 0,1,2 and 10,11,12 — one name for both
+// would make the two indistinguishable exactly when the range does not
+// start at zero.
+// -----------------------------------------------------------------
+
+lower_range = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
+               lam: Lambda, ctx: Ctx, want: TyId, out :: String)
+              Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    rty = ty_of(be, one, ctx, unknown).try();
+    supplies_bounds(be, rty).match({
+        false => unsupported(be, id, "a loop over a range whose bounds an impl supplies", out),
+        true  => lower_settled(be, id, sh, one, rty, lam, ctx, want, out),
+    })
+}
+
+// WHAT THE LOOP EVALUATES TO IS THE BACKEND'S ANSWER, NOT SEMA'S.
+// `loop<R: Range<T>, T>` returns `Res<T>` and nothing settles `T`: it is
+// reachable only through the closure, and a closure infers FROM a
+// signature rather than into one. So sema hands back `Res<q>` — the
+// mangler's word for a type argument nothing decided — and emitting that
+// is how `h.break(v)` in one loop and in another become one C type.
+// A range that supplies no `at` walks its own index space, so its
+// element is `usize` and the loop is `Res<usize>`.
+lower_settled = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
+                 rty: TyId, lam: Lambda, ctx: Ctx, want: TyId,
+                 out :: String) Res<(), AllocError> {
+    elem = be.check.types.prim("usize").try();
+    settled = settle_res(be, want, elem).try();
+    lower_bounded(be, id, sh, one, rty, lam, ctx, settled, out)
+}
+
+// The loop's `Res<T>` at a `T` the backend worked out, or the written
+// expectation when there was one — an expectation is a decision already
+// made and outranks a reconstruction.
+settle_res = (be :: CBackend, want: TyId, elem: TyId)
+             Res<TyId, AllocError> {
+    open(be, want).match({
+        false => Ok(want),
+        true  => intern_res_open(be.check, elem),
+    })
+}
+
+// Does the range's own declaration STORE `start` and `end`, rather than
+// supplying them through an impl? `Range(0, n)` does; a `Vec` does not,
+// and reading `v.zg_mstart` off one would name a member that is not
+// there. C would catch it, which is exactly the outcome a backend may
+// not produce — so it is a refusal with a position instead.
+supplies_bounds = (be :: CBackend, rty: TyId) bool {
+    has_field(be, rty, "start") && has_field(be, rty, "end")
+}
+
+has_field = (be :: CBackend, rty: TyId, name: str) bool {
+    be.check.types.at(rty).match({
+        Named(n) => decl_has_field(be, n.decl, name),
+        _        => false,
+    })
+}
+
+decl_has_field = (be :: CBackend, decl: DeclId, name: str) bool {
+    decl_at(be.tree, decl).match({
+        None  => false,
+        Ok(d) => struct_has_field(d, name),
+    })
+}
+
+struct_has_field = (d: Decl, name: str) bool {
+    got ::= false;
+    d.kind.match({
+        Struct(st) => st.members.loop((h, m) {
+            m.kind.match({
+                Field(fl) => fl.name.text.eq(name).then(() { got = true; }),
+                _         => (),
+            });
+        }),
+        _ => (),
+    });
+    got
+}
+
+lower_bounded = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
+                 rty: TyId, lam: Lambda, ctx: Ctx, want: TyId,
+                 out :: String) Res<(), AllocError> {
+    // the range is evaluated ONCE, into a temporary, because `start`
+    // and `end` are two reads of it and re-evaluating the expression
+    // between them would walk two different ranges
+    rng ::= be.alloc.String().try();
+    sym_gen(rng, "r", be.next_tmp()).try();
+    decl ::= be.alloc.String().try();
+    declarator(be, rty, rng.view(), decl).try();
+    decl.add_bytes(" = ").try();
+    expr(be, one, ctx, rty, decl).try();
+    decl.add_bytes(";").try();
+    be.writeln(decl.view()).try();
+
+    st = open_result(be, want, out).try();
+    usize_ty = be.check.types.prim("usize").try();
+    counter ::= be.alloc.String().try();
+    sym_gen(counter, "i", be.next_tmp()).try();
+    base ::= be.alloc.String().try();
+    sym_gen(base, "b", be.next_tmp()).try();
+    declare_usize(be, counter.view()).try();
+    declare_usize(be, base.view()).try();
+    limit ::= be.alloc.String().try();
+    sym_gen(limit, "n", be.next_tmp()).try();
+    declare_usize(be, limit.view()).try();
+    assign_member(be, counter.view(), rng.view(), "start").try();
+    assign_member(be, limit.view(), rng.view(), "end").try();
+    be.write(base.view()).try();
+    be.write(" = ").try();
+    be.write(counter.view()).try();
+    be.writeln(";").try();
+
+    be.write("while (").try();
+    be.write(counter.view()).try();
+    be.write(" < ").try();
+    be.write(limit.view()).try();
+    be.writeln(") {").try();
+    be.indent();
+    run_body(be, sh, lam, counter.view(), base.view(), ctx).try();
+    close_pass(be, st, counter.view()).try();
+    Ok(());
+}
+
+declare_usize = (be :: CBackend, name: str) Res<(), AllocError> {
+    usize_ty = be.check.types.prim("usize").try();
+    decl ::= be.alloc.String().try();
+    declarator(be, usize_ty, name, decl).try();
+    decl.add_bytes(";").try();
+    be.writeln(decl.view())
+}
+
+assign_member = (be :: CBackend, target: str, base: str, member: str)
+                Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes(target).try();
+    line.add_bytes(" = ").try();
+    line.add_bytes(base).try();
+    line.add_bytes(".").try();
+    sym_member(line, member).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view())
+}
+
+// -----------------------------------------------------------------
+// the parts every shape shares
+// -----------------------------------------------------------------
+
+// The loop's own value, and the frame `h.break` reads.
+//
+// "the loop evaluates to the final acc — or to `h.break(value)`, which
+// is what makes the two forms one thing rather than two." So a loop
+// that nothing broke out of evaluates to `None`, and the temporary is
+// initialised to it before the first pass rather than left to whatever
+// the frame held.
+open_result = (be :: CBackend, want: TyId, out :: String)
+              Res<LoopFrame, AllocError> {
+    brk = be.next_tmp();
+    cnt = be.next_tmp();
+    result ::= be.alloc.String().try();
+    keep = wants_result(be, want);
+    keep.match({
+        false => Ok(()),
+        true  => open_result_temp(be, want, result),
+    }).try();
+    // A loop with no storage still has to write SOMETHING where the
+    // expression goes, or the `(void)(..)` a discarded statement wraps it
+    // in is `(void)()` and the C does not parse. `0` is what the four
+    // report helpers write for the same reason.
+    keep.match({
+        true  => out.add_bytes(result.view()),
+        false => out.add_bytes("0"),
+    }).try();
+    frame = LoopFrame(brk: brk, cnt: cnt, result: result.view(),
+                      has_result: keep, ty: want);
+    be.push_loop(frame).try();
+    Ok(frame);
+}
+
+// A loop whose value nothing asked for gets no temporary — and writes
+// `0` where the expression goes, which is what the four report helpers
+// do and what keeps the emitted C parsing around a discarded loop.
+wants_result = (be :: CBackend, want: TyId) bool {
+    open(be, want).match({
+        true  => false,
+        false => is_res(be, want),
+    })
+}
+
+is_res = (be :: CBackend, want: TyId) bool {
+    be.check.types.at(want).match({
+        Res(_) => true,
+        _      => false,
+    })
+}
+
+open_result_temp = (be :: CBackend, want: TyId, result :: String)
+                   Res<(), AllocError> {
+    sym_gen(result, "v", be.next_tmp()).try();
+    decl ::= be.alloc.String().try();
+    declarator(be, want, result.view(), decl).try();
+    decl.add_bytes(" = (").try();
+    ctype(be, want, decl).try();
+    decl.add_bytes("){ .zg_tag = ").try();
+    sym_variant(decl, RES_PATH, "None").try();
+    decl.add_bytes(" };").try();
+    be.writeln(decl.view())
+}
+
+// The body, inlined into the frame it was written in. The handle and
+// the two threaded values are bound as ORDINARY LOCALS — `index` and
+// `value` are automatic storage, which is what "index and acc thread BY
+// VALUE, so no cell is heap-allocated" comes to in C.
+run_body = (be :: CBackend, sh: Shape, lam: Lambda, counter: str,
+            base: str, ctx: Ctx) Res<(), AllocError> {
+    unit = be.check.types.prim("()").try();
+    cmark = be.check.mark();
+    lmark = be.mark();
+    bind_handle(be, lam).try();
+    bind_threaded(be, sh, lam, counter, base, ctx).try();
+    block(be, lam.body, ctx, unit, Dest.Discard).try();
+    be.release(lmark).try();
+    be.check.release(cmark).try();
+    Ok(());
+}
+
+// `h` has no C storage: what the name means is the loop it came from.
+bind_handle = (be :: CBackend, lam: Lambda) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    lam.params.get(0).match({
+        None  => Ok(()),
+        Ok(p) => be.declare_handle(p.name.text, unknown, be.loop_depth()),
+    }).try();
+    be.check.bind(handle_name(lam), unknown, false).try();
+    Ok(());
+}
+
+handle_name = (lam: Lambda) str {
+    lam.params.get(0).match({ Ok(p) => p.name.text, None => "h" })
+}
+
+// Parameter one of the body, when the declaration says it wants one.
+// `index` counts passes and `value` is what the range holds, and on a
+// range that supplies no `at` the second IS the counter: "a Range that
+// supplies no `at` walks its own index space", which is what makes
+// `Range(0, 5)` a bare C for-loop.
+bind_threaded = (be :: CBackend, sh: Shape, lam: Lambda, counter: str,
+                 base: str, ctx: Ctx) Res<(), AllocError> {
+    (sh.wants_index || sh.wants_value).match({
+        false => Ok(()),
+        true  => bind_second(be, sh, lam, counter, base, ctx),
+    })
+}
+
+bind_second = (be :: CBackend, sh: Shape, lam: Lambda, counter: str,
+               base: str, ctx: Ctx) Res<(), AllocError> {
+    lam.params.get(1).match({
+        None  => Ok(()),
+        Ok(p) => bind_counted(be, sh, p, counter, base),
+    })
+}
+
+bind_counted = (be :: CBackend, sh: Shape, p: Param, counter: str,
+                base: str) Res<(), AllocError> {
+    usize_ty = be.check.types.prim("usize").try();
+    n = be.declare(p.name.text, usize_ty, false).try();
+    be.check.bind(p.name.text, usize_ty, false).try();
+    cname ::= be.alloc.String().try();
+    sym_local(cname, p.name.text, n).try();
+    decl ::= be.alloc.String().try();
+    declarator(be, usize_ty, cname.view(), decl).try();
+    decl.add_bytes(" = ").try();
+    write_counted(be, sh, counter, base, decl).try();
+    decl.add_bytes(";").try();
+    be.writeln(decl.view())
+}
+
+// `index` is the pass count, so it is measured from where the walk
+// started. A loop with no range has no base and counts from zero
+// already.
+write_counted = (be :: CBackend, sh: Shape, counter: str, base: str,
+                 out :: String) Res<(), AllocError> {
+    (sh.wants_index && (base.len > 0)).match({
+        true  => write_offset(counter, base, out),
+        false => out.add_bytes(counter),
+    })
+}
+
+write_offset = (counter: str, base: str, out :: String)
+               Res<(), AllocError> {
+    out.add_bytes("(").try();
+    out.add_bytes(counter).try();
+    out.add_bytes(" - ").try();
+    out.add_bytes(base).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+// The `index` a counted `for (;;)` needs when there is no range to take
+// one from.
+open_counter = (be :: CBackend, counter :: String) Res<(), AllocError> {
+    sym_gen(counter, "i", be.next_tmp()).try();
+    declare_usize(be, counter.view()).try();
+    be.write(counter.view()).try();
+    be.writeln(" = 0;").try();
+    Ok(());
+}
+
+// The tail of a pass: where `h.next()` lands, the step, and the `}`.
+// The break label goes AFTER the closing brace, which is what makes it
+// reachable from inside any construct the body happened to open.
+close_pass = (be :: CBackend, st: LoopFrame, counter: str)
+             Res<(), AllocError> {
+    write_label(be, "cnt", st.cnt).try();
+    be.writeln(": ;").try();
+    (counter.len > 0).match({
+        false => Ok(()),
+        true  => step_counter(be, counter),
+    }).try();
+    be.dedent();
+    be.writeln("}").try();
+    write_label(be, "brk", st.brk).try();
+    be.writeln(": ;").try();
+    be.pop_loop().try();
+    Ok(());
+}
+
+step_counter = (be :: CBackend, counter: str) Res<(), AllocError> {
+    be.write(counter).try();
+    be.write(" = ").try();
+    be.write(counter).try();
+    be.writeln(" + 1;").try();
+    Ok(());
+}
+
+write_label* = (be :: CBackend, stem: str, n: usize) Res<(), AllocError> {
+    name ::= be.alloc.String().try();
+    sym_gen(name, stem, n).try();
+    be.write(name.view())
+}

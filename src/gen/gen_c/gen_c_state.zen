@@ -61,6 +61,29 @@ LocalSlot* = {
     // through a dereference. A `::=` LOCAL is not by reference: it is
     // the frame's own storage and there is nothing to alias.
     by_ref*: bool,
+
+    // WHICH LOOP THIS NAME IS THE HANDLE OF, 1-based, or 0 for an
+    // ordinary binding. `(h, value) { .. }` binds `h` to a
+    // `LoopHandle`, which is not a value and has no C storage: it is
+    // the two labels of the loop it came from, so the binding carries
+    // the loop's depth and `h.break(v)` reads the frame back out.
+    // Depth and not a pointer because a body inlined inside another
+    // body has both loops in scope and the inner one shadows.
+    handle*: usize,
+}
+
+// The two labels and the result of one loop being lowered.
+//
+// `h.break(v)` and `h.next()` are `goto`s and not C's `break` and
+// `continue`: an inlined body sits inside whatever the lowering of a
+// `.match` produced, and a C `break` there would leave that construct
+// rather than the loop. A label is unambiguous wherever it is written.
+LoopFrame* = {
+    brk*: usize,        // the label a `break` jumps to
+    cnt*: usize,        // the label the next pass starts at
+    result*: str,       // the C name the loop's value lands in
+    has_result*: bool,  // ..when it has one; a discarded loop has none
+    ty*: TyId,          // the `Res<T>` that value is
 }
 
 // One member function reached through a dot, and the receiver it was
@@ -138,6 +161,8 @@ CBackend* = {
     // per function
     locals :: Vec<LocalSlot>,
     declared :: Vec<String>,
+    // the loops open at this point in the lowering, innermost last
+    loops :: Vec<LoopFrame>,
     tmp* :: usize,
 
     alloc*: Alloc,
@@ -405,8 +430,44 @@ CBackend* = {
         owned.add_bytes(name).try();
         self.declared.add(owned).try();
         self.locals.add(LocalSlot(name: name, index: n, ty: ty,
-                                  by_ref: by_ref)).try();
+                                  by_ref: by_ref, handle: 0)).try();
         Ok(n);
+    }
+
+    // Bind `h` to the loop it came from. A handle has no C storage and
+    // no declaration is written for it: what the name means is a pair
+    // of labels, and `depth` is where to read them.
+    declare_handle* = (self :: @Self, name: str, ty: TyId, depth: usize)
+                      Res<(), AllocError> {
+        self.locals.add(LocalSlot(name: name, index: 0, ty: ty,
+                                  by_ref: false, handle: depth))
+    }
+
+    // -----------------------------------------------------------------
+    // the loop stack
+    //
+    // A stack and not a field: `range.loop((h, r) { r.loop((g, c) { .. }) })`
+    // has two loops open at once, and `h.break` in the inner body must
+    // reach the outer one's labels rather than the innermost.
+    // -----------------------------------------------------------------
+
+    push_loop* = (self :: @Self, frame: LoopFrame) Res<(), AllocError> {
+        self.loops.add(frame)
+    }
+
+    pop_loop* = (self :: @Self) Res<(), AllocError> {
+        self.loops.take(self.loops.len - 1).match({
+            Ok(_) => Ok(()),
+            None  => Err(AllocError.OutOfMemory),
+        })
+    }
+
+    loop_depth* = (self: @Self) usize { self.loops.len }
+
+    // The frame a handle names. `depth` is 1-based, so it is also the
+    // count of loops that were open when the handle was bound.
+    loop_frame* = (self: @Self, depth: usize) Res<LoopFrame> {
+        self.loops.get(depth - 1)
     }
 
     declared_count = (self: @Self, name: str) usize {
@@ -440,6 +501,10 @@ CBackend* = {
         extra = self.declared.len;
         Range(0, extra).loop((h, i) {
             self.declared.take(self.declared.len - 1);
+        });
+        open = self.loops.len;
+        Range(0, open).loop((h, i) {
+            self.loops.take(self.loops.len - 1);
         });
         self.tmp = 0;
         Ok(());
@@ -476,6 +541,7 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         fn_bodies: a.Vec<String>(),
         locals: a.Vec<LocalSlot>(),
         declared: a.Vec<String>(),
+        loops: a.Vec<LoopFrame>(),
         tmp: 0,
         alloc: a,
     ));

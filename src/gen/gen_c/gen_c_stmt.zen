@@ -266,18 +266,77 @@ lower_bind = (be :: CBackend, s: Stmt, b: Bind, ctx: Ctx)
     target = be.tree.expr_at(b.target);
     ty = binding_type(be, b, ctx).try();
     target.kind.match({
-        Name(n) => declare_local(be, n.text, b, ty, ctx),
+        Name(n) => bind_name(be, n.text, b, ty, ctx),
         _       => assign_target(be, b, ty, ctx),
     }).try();
     want.index;
     Ok(());
 }
 
+// ZEN WRITES A DECLARATION AND A STORE THE SAME WAY, so which one this
+// is depends on what is already in scope: a second `x = ..` on a name
+// already bound, with no written type and no `::=`, is an ASSIGNMENT.
+//
+// Declaring it instead is not a cosmetic difference. `i ::= 0; loop(()
+// { i < 3 }, (h) { i = i + 1; })` emitted a fresh `zu_l1i_2` per pass
+// and the condition kept reading the original — a loop that never ends,
+// from C that compiles. The rule is the reference backend's, verified
+// against it.
+bind_name = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
+            Res<(), AllocError> {
+    is_store(be, name, b).match({
+        true  => assign_local(be, name, b, ty, ctx),
+        false => declare_local(be, name, b, ty, ctx),
+    })
+}
+
+is_store = (be :: CBackend, name: str, b: Bind) bool {
+    written = b.type.match({ Ok(_) => true, None => false });
+    (b.mutable == false) && (written == false) && bound_already(be, name)
+}
+
+bound_already = (be :: CBackend, name: str) bool {
+    be.slot_of(name).match({ Ok(_) => true, None => false })
+}
+
+assign_local = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
+               Res<(), AllocError> {
+    place ::= be.alloc.String().try();
+    expr(be, b.target, ctx, ty, place).try();
+    deliver(be, b.value, ctx, ty, Dest.Into(place.view())).try();
+    Ok(());
+}
+
+// A STORE TAKES THE PLACE'S OWN TYPE. `i = i + 1` into a `usize` slot is
+// a `usize`, whatever width the value's own reading would have picked —
+// which is "the destination's type wins" said about a name.
 binding_type = (be :: CBackend, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
     b.type.match({
         Ok(t) => be.check.type_from_ast(t, ctx),
+        None  => inferred_type(be, b, ctx, unknown),
+    })
+}
+
+inferred_type = (be :: CBackend, b: Bind, ctx: Ctx, unknown: TyId)
+                Res<TyId, AllocError> {
+    slot_type(be, b).match({
+        Ok(t) => Ok(t),
         None  => ty_of(be, b.value, ctx, unknown),
+    })
+}
+
+slot_type = (be :: CBackend, b: Bind) Res<TyId> {
+    (b.mutable == false).match({
+        false => None,
+        true  => named_slot_type(be, b.target),
+    })
+}
+
+named_slot_type = (be :: CBackend, target: ExprId) Res<TyId> {
+    be.tree.expr_at(target).kind.match({
+        Name(n) => be.slot_of(n.text).match({ Ok(s) => Ok(s.ty), None => None }),
+        _       => None,
     })
 }
 

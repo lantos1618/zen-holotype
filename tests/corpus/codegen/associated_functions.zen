@@ -1,0 +1,67 @@
+// `Type.name(..)` -- a member called with no receiver.
+//
+// DESIGN.md: "a struct body may bind a FUNCTION, read as `Type.name(..)`",
+// which is the existing `Type.NAME` constant form plus the fact that a
+// function is a value. It exists because a constructor does not travel with
+// the type it constructs: `seconds(n: u64) Duration` takes a `u64`, so UFCS
+// would file it under `u64` and put `.seconds()` on every integer in every
+// program.
+//
+// gen_c lowered this as a method and passed the TYPE as the receiver,
+// emitting `zu_f3_..D24secs(D2, 2)` -- an undeclared `D2`, with no Zen
+// diagnostic. It compiled to nothing and failed at `cc`, which is why the
+// assertion here is the program's OUTPUT and not the C.
+//
+// four shapes, because each is a different decision in `call_member`:
+//
+//   1. no parameters at all -- there is no first parameter to test
+//   2. a parameter that is not the receiver -- the constructor case, and
+//      the argument must be typed against parameter 0 rather than 1
+//   3. a real method beside them on the same type, reached the normal way,
+//      because the rule is per-member and not per-type
+//   4. an associated function that calls its own type's method
+
+Duration = {
+    ns*: u64,
+
+    zero* = () Duration { Duration(ns: 0) },
+    seconds* = (n: u64) Duration { Duration(ns: n * 1000000000) },
+    millis* = (n: u64) Duration { Duration(ns: n * 1000000) },
+
+    as_millis* = (self: @Self) u64 { self.ns / 1000000 },
+
+    round_trip* = (n: u64) u64 { Duration.millis(n).as_millis() },
+}
+
+// a type whose associated function is not a constructor: it returns
+// something else entirely, so nothing about the return type is doing the
+// work of finding it -- only the name and the missing receiver.
+Limits = {
+    bits*: usize,
+
+    widest* = () usize { 64 },
+    fits* = (n: u64) bool { n < 4294967296 },
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    z = Duration.zero();
+    s = Duration.seconds(2);
+    m = Duration.millis(1500);
+
+    println("zero {}", z.ns);
+    println("seconds {}", s.ns);
+    println("millis {} {}", m.ns, m.as_millis());
+    println("round {}", Duration.round_trip(7));
+    println("limits {}", Limits.widest());
+
+    ok = Limits.fits(10).match({
+        true => 1,
+        false => 0,
+    });
+    big = Limits.fits(5000000000).match({
+        true => 1,
+        false => 0,
+    });
+    println("fits {} {}", ok, big);
+    Ok(0);
+}

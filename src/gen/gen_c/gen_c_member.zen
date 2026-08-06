@@ -57,13 +57,29 @@ enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 ctype, is_unit, decl_ctx = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
 lower_plain_call, write_arg = gen.gen_c.gen_c_call
+handle_depth, lower_handle_call = gen.gen_c.gen_c_handle
 
 // -----------------------------------------------------------------
 // the entry point
 // -----------------------------------------------------------------
 
+// A LOOP HANDLE IS ASKED ABOUT FIRST, because it is not a value and
+// nothing else about it would answer. `h` has no C storage and no type
+// sema can name — what the binding holds is the loop it came from — so
+// `h.break(v)` has to be recognised at the name rather than resolved
+// through a receiver's type.
 lower_dot_call* = (be :: CBackend, id: ExprId, c: Call, a: Access, ctx: Ctx,
                    want: TyId, out :: String) Res<(), AllocError> {
+    depth = handle_depth(be, a.base);
+    (depth > 0).match({
+        true  => lower_handle_call(be, id, c, a, depth, ctx, out),
+        false => lower_resolved_dot(be, id, c, a, ctx, want, out),
+    })
+}
+
+lower_resolved_dot = (be :: CBackend, id: ExprId, c: Call, a: Access,
+                      ctx: Ctx, want: TyId, out :: String)
+                     Res<(), AllocError> {
     b = be.check.base_of(a.base, ctx).try();
     b.is_type.match({
         true  => lower_static_call(be, id, c, a, b.ty, ctx, out),

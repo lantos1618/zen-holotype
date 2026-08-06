@@ -726,6 +726,31 @@ def _is_fn_field(node):
     return False
 
 
+def _is_assoc_fn(e, decl):
+    """A struct-body member that takes no receiver: an ASSOCIATED function.
+
+    "A struct body may bind a name to a value, read as `Type.NAME`", and a
+    function is a value -- so `Duration.seconds(2)` is a member read through
+    its type, not a method with `Duration` shoved into the receiver slot.
+
+    A constructor is why this has to exist: it takes a number and returns the
+    type, so travelling with its first parameter would put `.seconds()` on
+    every `u64` in every program, `u64` being a prelude name. The first
+    parameter is the whole test -- `@Self`, or the owner spelled out, means a
+    method; anything else, including no parameter at all, means this.
+    """
+    fnode = e.fn_node(decl.node)
+    if fnode is None:
+        return False
+    params = e.params_of(fnode)
+    if not params:
+        return True
+    ty = f(params[0], "ty")
+    if ty is None or kind(ty) != "Named":
+        return True
+    return str(f(ty, "name", "")) not in ("@Self", decl.owner)
+
+
 # ---------------------------------------------------------------------------
 # the emitter
 # ---------------------------------------------------------------------------
@@ -3257,6 +3282,38 @@ class FnCtx:
         decl = self.pick_overload(cands, argnodes)
         return self.emit_call(decl, node, argnodes, targs, want)
 
+    def call_assoc(self, tdecl, name, node, args, targs, want):
+        """`Duration.seconds(2)` -- a member called with no receiver.
+
+        Returns None when the type has no such member, so an explicit-receiver
+        `Type.method(v, ..)` still resolves the way it always did.
+        """
+        ty = ("named", tdecl.parts, ())
+        owned = [d for d in self.owned_decls(ty, name, "fn")
+                 if self.e.fn_node(d.node) is not None]
+        cands = [d for d in owned if _is_assoc_fn(self.e, d)]
+        if not cands:
+            # The member exists but asks for a receiver. Lowering `D.millis(b)`
+            # as a method put the TYPE in the receiver slot and emitted an
+            # undeclared `D`; there is no spelling that reaches a method
+            # through its type, so say that instead of emitting the C.
+            if owned and self.module_named(tdecl.name) is None:
+                self.e.error(node, "`%s.%s` takes a receiver -- write "
+                                   "`value.%s(..)`" % (tdecl.name, name, name))
+                return ("0", UNKNOWN)
+            return None
+        argnodes = self.arg_nodes(args)
+        decl = self.pick_overload(cands, argnodes)
+        if decl.otparams and len(targs) < len(decl.otparams):
+            # With no receiver, the owner's type arguments have nowhere to
+            # come from. Saying so is the point: monomorphising at UNKNOWN
+            # would compile, and would be a different function.
+            self.e.error(node, "`%s.%s` needs `%s`'s type arguments written "
+                               "here: it is called with no receiver"
+                         % (tdecl.name, name, tdecl.name))
+            return ("0", UNKNOWN)
+        return self.emit_call(decl, node, argnodes, targs, want)
+
     def call_member(self, callee, node, args, targs, want):
         base = f(callee, "base")
         name = str(f(callee, "name", ""))
@@ -3267,6 +3324,10 @@ class FnCtx:
             tdecl = self.e.type_decl(bname, self.parts)
             if tdecl is not None and kind(tdecl.node) == "Enum":
                 return self.construct_variant(tdecl, name, node, args, targs, want)
+            if tdecl is not None:
+                got = self.call_assoc(tdecl, name, node, args, targs, want)
+                if got is not None:
+                    return got
             base_parts = self.module_named(bname)
             if base_parts is not None:
                 cands = [

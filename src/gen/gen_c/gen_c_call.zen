@@ -61,6 +61,7 @@ field_type, request_type = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
 is_print, lower_print = gen.gen_c.gen_c_print
 lower_dot_call = gen.gen_c.gen_c_member
+is_loop_shape, lower_loop = gen.gen_c.gen_c_loop
 
 // -----------------------------------------------------------------
 // `Res` values
@@ -347,10 +348,33 @@ construct_decl = (be :: CBackend, id: ExprId, c: Call, x: Decl, ty: TyId,
 // settled, because a bare `Vec` has no layout to write.
 construct_struct = (be :: CBackend, id: ExprId, c: Call, s: Struct,
                     ty: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
-    open(be, ty).match({
+    layout_open(be, s, ty, ctx).try().match({
         true  => unsupported(be, id, "a construction whose type arguments nothing settles", out),
         false => write_literal(be, c, s, ty, ctx, out),
     })
+}
+
+// A TYPE ARGUMENT NO STORAGE MEMBER READS DOES NOT CHANGE THE LAYOUT,
+// so leaving it free is not a refusal. `Range(0, 5)` leaves `T` free —
+// `start` and `end` are `usize` and `at` is a bodiless hook occupying no
+// bytes — and `Range(0, v.len)` is std's own ordinary way to walk an
+// index space. Asking the question of the type's ARGUMENTS made every
+// one of those unwritable; asking it of its STORAGE is the same question
+// about the thing that is actually being emitted.
+//
+// Two open `Range`s mangle alike, which is exactly right here and would
+// not be for a `Box<T>`: `held: T` is storage, so `Box` still refuses.
+layout_open = (be :: CBackend, s: Struct, ty: TyId, ctx: Ctx)
+              Res<bool, AllocError> {
+    dinst = recv_inst(be, ty).try();
+    got ::= false;
+    s.members.loop((h, m) {
+        field_type(be, m, ctx, dinst).match({
+            None    => (),
+            Ok(fty) => open(be, fty).then(() { got = true; }),
+        });
+    });
+    Ok(got);
 }
 
 write_literal = (be :: CBackend, c: Call, s: Struct, ty: TyId, ctx: Ctx,
@@ -483,8 +507,31 @@ call_decl = (be :: CBackend, id: ExprId, c: Call, d: Def, x: Decl,
     })
 }
 
+// THE LOOP INTRINSIC IS DECIDED BEFORE THE SIGNATURE IS READ, because
+// there is no signature to read: `loop_iter.zen`'s six declarations have
+// no bodies and their type parameters are reachable only through the
+// closure, which infers FROM a signature rather than settling one. So a
+// call to one of them is not an inference failure to report — it is the
+// construct whose body this backend is.
 call_fn = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
            recv: Res<ExprId>, ctx: Ctx, out :: String) Res<(), AllocError> {
+    is_loop_shape(be, f).match({
+        true  => lower_loop(be, id, c, f, recv, ctx, loop_want(be, id, ctx).try(), out),
+        false => call_signature(be, id, c, d, f, recv, ctx, out),
+    })
+}
+
+// What the loop evaluates to. `Res<T>` when something asked, and the
+// unknown when nothing did — a discarded loop still HAS a value, and
+// `open_result` reads this to decide whether to give it storage.
+loop_want = (be :: CBackend, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
+    unknown = be.check.types.unknown().try();
+    ty_of(be, id, ctx, unknown)
+}
+
+call_signature = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
+                  recv: Res<ExprId>, ctx: Ctx, out :: String)
+                 Res<(), AllocError> {
     raw = inst_at(be, id).try();
     inst = settled_inst(be, f.tparams, d.qname, raw).try();
     sig ::= be.alloc.Vec<TyId>();

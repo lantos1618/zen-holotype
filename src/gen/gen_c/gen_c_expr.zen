@@ -44,7 +44,8 @@ sym_local, sym_member, sym_variant, sym_gen, sym_fn = gen.gen_name
 RES_PATH, is_failure = gen.gen_name
 GenFault = gen.gen_diag
 CBackend, LocalSlot = gen.gen_c.gen_c_state
-sub, constructed = gen.gen_c.gen_c_mono
+sub, constructed, open = gen.gen_c.gen_c_mono
+loop_result_type = gen.gen_c.gen_c_loop
 unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_state
 lower_match, lower_try = gen.gen_c.gen_c_flow
 ctype, declarator, spellable, is_unit, c_prim = gen.gen_c.gen_c_type
@@ -90,8 +91,23 @@ ty_of* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
          Res<TyId, AllocError> {
     got = sub(be, be.check.type_of(id, ctx).try()).try();
     be.check.is_unknown(got).match({
-        false => Ok(got),
+        false => settled_answer(be, id, got),
         true  => fallback_type(be, id, ctx, want),
+    })
+}
+
+// AN OPEN TYPE IS NOT AN ANSWER. Sema types `range.loop(body)` as
+// `Res<T>` because the only thing that could settle `T` is the closure,
+// and a closure infers FROM a signature rather than into one — so the
+// answer comes back carrying a `Var`, and a binding declared at it would
+// be the one C type every loop in the program shares. The one form this
+// happens to is the loop family, and `gen_c_loop.zen` owns the rule for
+// it; everything else is handed back untouched.
+settled_answer = (be :: CBackend, id: ExprId, got: TyId)
+                 Res<TyId, AllocError> {
+    open(be, got).match({
+        false => Ok(got),
+        true  => loop_result_type(be, id, got),
     })
 }
 
