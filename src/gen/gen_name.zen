@@ -1,0 +1,369 @@
+// src/gen/gen_name.zen
+// The name a Zen declaration has in a flat namespace.
+//
+// C has one namespace and Zen lets two modules declare the same
+// top-level name, so a backend targeting C — or any other flat
+// target — has to encode a path into an identifier. PLAN.md 0.4 makes
+// the five decisions and this file is all five of them, so a second
+// backend inherits the answers rather than re-deciding them. That is
+// why it is here and not in `gen_c.zen`: the encoding names no C.
+//
+// 1. THE SCHEME IS LENGTH-PREFIXED. Joining path components with `_` is
+//    provably ambiguous, and STYLE.md's own sibling-prefix convention
+//    triggers it in this very tree: `parse` + `expr_kind` and
+//    `parse_expr` + `kind` join to one string. A component is its byte
+//    length followed by its bytes, and a list is a count, an underscore,
+//    then the components. A length is read as the maximal digit run and
+//    a Zen identifier can never start with a digit, so the parse back is
+//    unique:
+//
+//        alpha + beta_gamma  ->  2_5alpha10beta_gamma
+//        alpha_beta + gamma  ->  2_10alpha_beta5gamma
+//
+// 2. TWO PREFIXES, AND EVERY EMITTED IDENTIFIER IS UNDER ONE.
+//    `zu_` is derived from a user name, `zg_` is invented by the
+//    compiler. Neither begins with an underscore, so neither is
+//    reserved to the implementation by C11 7.1.3; `zu_` cannot produce
+//    `zg_`, so a user writing `zg_trap` cannot reach the runtime. And
+//    because EVERY user identifier is mangled, no C keyword and no
+//    standard-header macro can ever be emitted — decision 4 handled as
+//    an identifier CLASS rather than as a hand-kept keyword list, which
+//    subsumes every future `_Atomic` for free.
+//
+// 3. THE SITES. Types, functions, enum constants, struct members,
+//    locals and parameters, and module values each carry a letter, so
+//    two different kinds of thing can share a Zen name without sharing
+//    a C one. Struct members are the site everyone forgets and the one
+//    that breaks against `<errno.h>`.
+//
+// 5. A TYPE ARGUMENT RENDERS AS A PURE FUNCTION OF THE TYPE — `tcode`
+//    below, which reads a `TyId` and nothing else. Not of instantiation
+//    order, not of a counter, not of which module asked first.
+//    Determinism dies here or nowhere.
+//
+// THE C STANDARD TARGETED IS C99. It is stated in one place, and that
+// place is the runtime banner in `gen_c.zen`; this file only has to
+// know that the identifier rules it obeys are C11 7.1.3's, which C99
+// shares.
+
+str, String = std.text
+Vec = std.collections
+Alloc, AllocError = std.mem
+Range = std.core
+write_usize = sema.sema_diag
+TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
+World = sema.sema_def
+DeclId = sema.sema_id
+
+// Derived from a user name.
+USR* : str = "zu_"
+
+// Invented by the compiler: temporaries, helpers, the runtime, labels.
+GEN* : str = "zg_"
+
+// `Res` is structural in this compiler's type language — sema carries
+// `TyRes(value, error, form)` rather than a declaration, because
+// `Res<T>` and `Res<T, E>` are two arities of one name and every
+// `.try()` asks which form it has. It still has to answer to the name
+// the library gives it, so the path is written down once, here.
+RES_PATH* : str = "std.core.result.Res"
+
+// -----------------------------------------------------------------
+// the encoding
+// -----------------------------------------------------------------
+
+// One length-prefixed component: `alpha` -> `5alpha`.
+comp* = (out :: String, name: str) Res<(), AllocError> {
+    write_usize(out, name.len).try();
+    out.add_bytes(name)
+}
+
+// A list header: `3_`. A count always ends with `_` and a component
+// never does, which is what tells the two apart on the way back.
+count* = (out :: String, n: usize) Res<(), AllocError> {
+    write_usize(out, n).try();
+    out.add_bytes("_")
+}
+
+// A dotted Zen path as a counted list of components:
+// `std.core.result` -> `3_3std4core6result`.
+path* = (out :: String, qname: str) Res<(), AllocError> {
+    count(out, segments(qname)).try();
+    (qname.len > 0).then(() { write_segments(out, qname).try() });
+    Ok(());
+}
+
+// A dotted path plus one more component — an enum's path and a variant
+// name, which is the one place a symbol is a path with a tail.
+path_with* = (out :: String, qname: str, tail: str) Res<(), AllocError> {
+    count(out, segments(qname) + 1).try();
+    (qname.len > 0).then(() { write_segments(out, qname).try() });
+    comp(out, tail).try();
+    Ok(());
+}
+
+// How many dot-separated segments `qname` has. An empty path has none,
+// which is the only case that is not "one more than the dots".
+segments* = (qname: str) usize {
+    (qname.len == 0).match({
+        true  => 0,
+        false => dots(qname) + 1,
+    })
+}
+
+dots = (qname: str) usize {
+    n ::= 0;
+    Range(0, qname.len).loop((h, i) {
+        (qname.index(i) == '.').then(() { n = n + 1; });
+    });
+    n
+}
+
+write_segments = (out :: String, qname: str) Res<(), AllocError> {
+    start ::= 0;
+    Range(0, qname.len).loop((h, i) {
+        (qname.index(i) == '.').then(() {
+            comp(out, qname.slice(start, i)).try();
+            start = i + 1;
+        });
+    });
+    comp(out, qname.slice(start, qname.len)).try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// the sites
+// -----------------------------------------------------------------
+
+// The C name of a type: `zu_t4_3std4core6result3ResI1_b3i32`.
+//
+// `zu_` when the type is a user declaration or the library `Res`, and
+// `zg_` when the compiler composed it out of nothing a user wrote — an
+// anonymous union, a fixed array. Both are still `tcode`, so the name
+// stays a pure function of the type either way.
+sym_type* = (out :: String, types: Types, world: World, id: TyId)
+            Res<(), AllocError> {
+    out.add_bytes(prefix_of(types, id)).try();
+    tcode(out, types, world, id).try();
+    Ok(());
+}
+
+prefix_of = (types: Types, id: TyId) str {
+    types.at(id).match({
+        Named(_) => USR,
+        Res(_)   => USR,
+        _        => GEN,
+    })
+}
+
+// A function. `sig` is the declared parameter types, which is what
+// overloading resolves on — "resolution is on declared parameter types
+// and arity" — so two overloads of one name get two symbols by
+// construction rather than by a counter.
+sym_fn* = (out :: String, types: Types, world: World, qname: str,
+           sig: Vec<TyId>) Res<(), AllocError> {
+    out.add_bytes(USR).try();
+    out.add_bytes("f").try();
+    path(out, qname).try();
+    (sig.len > 0).then(() { write_sig(out, types, world, sig).try() });
+    Ok(());
+}
+
+write_sig = (out :: String, types: Types, world: World, sig: Vec<TyId>)
+            Res<(), AllocError> {
+    out.add_bytes("O").try();
+    tcode_list(out, types, world, sig).try();
+    Ok(());
+}
+
+// An enum constant: the enum's own path with the variant appended.
+//
+// The tag is a function of the DECLARATION and never of an
+// instantiation — `Res<i32, E>` and `Res<i32, F>` share `Ok`, and
+// emitting the constant per instance is a C redefinition.
+sym_variant* = (out :: String, qname: str, variant: str)
+               Res<(), AllocError> {
+    out.add_bytes(USR).try();
+    out.add_bytes("e").try();
+    path_with(out, qname, variant).try();
+    Ok(());
+}
+
+// A struct member. Not qualified: a member name only has to be unique
+// within its struct, and C gives every struct its own member namespace.
+// It is mangled anyway, because `x.errno` against `<errno.h>` is the
+// one collision a keyword list never catches.
+sym_member* = (out :: String, name: str) Res<(), AllocError> {
+    out.add_bytes(USR).try();
+    out.add_bytes("m").try();
+    comp(out, name).try();
+    Ok(());
+}
+
+// A local or a parameter. `n` distinguishes shadowing bindings of one
+// name in one function, and it is 1 for the first, which is written
+// without a suffix so the common case reads.
+sym_local* = (out :: String, name: str, n: usize) Res<(), AllocError> {
+    out.add_bytes(USR).try();
+    out.add_bytes("l").try();
+    comp(out, name).try();
+    (n > 1).then(() { write_shadow(out, n).try() });
+    Ok(());
+}
+
+write_shadow = (out :: String, n: usize) Res<(), AllocError> {
+    out.add_bytes("_").try();
+    write_usize(out, n).try();
+    Ok(());
+}
+
+// A module-level value binding.
+sym_value* = (out :: String, qname: str) Res<(), AllocError> {
+    out.add_bytes(USR).try();
+    out.add_bytes("v").try();
+    path(out, qname).try();
+    Ok(());
+}
+
+// A compiler-invented name: a temporary, a label, a helper.
+sym_gen* = (out :: String, stem: str, n: usize) Res<(), AllocError> {
+    out.add_bytes(GEN).try();
+    out.add_bytes(stem).try();
+    write_usize(out, n).try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// tcode — the name of a TYPE
+//
+// A pure function of the type and injective, which together are what
+// make an instantiation's name independent of the run that produced
+// it. The tag letters are lowercase and `I` is uppercase, so no tag
+// can be mistaken for the start of a component, and a user-written
+// `Pair_i32_i32` can never collide with `Pair<i32, i32>`.
+// -----------------------------------------------------------------
+
+tcode* = (out :: String, types: Types, world: World, id: TyId)
+         Res<(), AllocError> {
+    types.at(id).match({
+        Prim(p)  => tcode_prim(out, p.name),
+        Named(n) => tcode_of_named(out, types, world, n),
+        Res(r)   => tcode_res(out, types, world, r),
+        Fn(f)    => tcode_fn(out, types, world, f.params, f.ret),
+        Union(u) => tcode_union(out, types, world, u.members),
+        Var(_)   => out.add_bytes("q"),
+        Infer    => out.add_bytes("q"),
+        Unknown  => out.add_bytes("q"),
+    }).try();
+    Ok(());
+}
+
+// `()` is `z` and every other primitive is `b` plus its name. The unit
+// type is separated because it is the one primitive with no bytes: it
+// is `void` in a return position and unrepresentable in a field, and a
+// backend has to be able to see that without a string compare.
+tcode_prim = (out :: String, name: str) Res<(), AllocError> {
+    name.eq("()").match({
+        true  => out.add_bytes("z"),
+        false => tcode_scalar(out, name),
+    })
+}
+
+tcode_scalar = (out :: String, name: str) Res<(), AllocError> {
+    out.add_bytes("b").try();
+    comp(out, name).try();
+    Ok(());
+}
+
+// The declaration's path is written a segment at a time rather than
+// joined into a `String` first, so naming a type allocates nothing —
+// which matters because every emitted symbol goes through here and a
+// scratch buffer per name is a buffer per name.
+tcode_of_named = (out :: String, types: Types, world: World, n: TyNamed)
+                 Res<(), AllocError> {
+    out.add_bytes("t").try();
+    count(out, segments(module_of(world, n.decl)) + 1).try();
+    write_module_segments(out, world, n.decl).try();
+    comp(out, n.name).try();
+    (n.args.len > 0).then(() { write_args(out, types, world, n.args).try() });
+    Ok(());
+}
+
+write_args = (out :: String, types: Types, world: World, args: Vec<TyId>)
+             Res<(), AllocError> {
+    out.add_bytes("I").try();
+    tcode_list(out, types, world, args).try();
+    Ok(());
+}
+
+// `Res<T>` renders as the library type applied to one argument and
+// `Res<T, E>` to two, so a structural Res and a declared one have the
+// same C name. `Open` — what a bare `Ok(x)` is before an expectation
+// settles it — renders as the absence form, because that is the shape
+// it takes when nothing settles it.
+tcode_res = (out :: String, types: Types, world: World, r: TyRes)
+            Res<(), AllocError> {
+    out.add_bytes("t").try();
+    path(out, RES_PATH).try();
+    out.add_bytes("I").try();
+    count(out, res_arity(r.form)).try();
+    tcode(out, types, world, r.value).try();
+    is_failure(r.form).then(() { tcode(out, types, world, r.error).try() });
+    Ok(());
+}
+
+res_arity* = (form: ResForm) usize {
+    form.match({ Failure => 2, Absence => 1, Open => 1 })
+}
+
+is_failure* = (form: ResForm) bool {
+    form.match({ Failure => true, Absence => false, Open => false })
+}
+
+tcode_fn = (out :: String, types: Types, world: World, params: Vec<TyId>,
+            ret: TyId) Res<(), AllocError> {
+    out.add_bytes("f").try();
+    tcode(out, types, world, ret).try();
+    tcode_list(out, types, world, params).try();
+    Ok(());
+}
+
+// A union's members are already canonical — flat, sorted and deduped
+// by the intern store — so `A | B` and `B | A` reach this with one
+// order and produce one name. The sorting is the store's and is not
+// repeated here: two places that sort are two places that can disagree
+// about what sorted means.
+tcode_union = (out :: String, types: Types, world: World,
+               members: Vec<TyId>) Res<(), AllocError> {
+    out.add_bytes("u").try();
+    tcode_list(out, types, world, members).try();
+    Ok(());
+}
+
+tcode_list = (out :: String, types: Types, world: World, items: Vec<TyId>)
+             Res<(), AllocError> {
+    count(out, items.len).try();
+    items.loop((h, t) { tcode(out, types, world, t).try() });
+    Ok(());
+}
+
+// The module a declaration lives in.
+//
+// A symbol is built from the `DeclId` rather than from a carried
+// string, because a `TyNamed` holds the declaration and a bare name,
+// and the bare name is only there for a diagnostic — "two modules may
+// define the same top-level name without colliding", so the module is
+// the half that makes the symbol unique.
+module_of* = (world: World, decl: DeclId) str {
+    world.table_at(decl.module.to_usize()).match({
+        Ok(t) => t.name,
+        None  => "",
+    })
+}
+
+write_module_segments = (out :: String, world: World, decl: DeclId)
+                        Res<(), AllocError> {
+    name = module_of(world, decl);
+    (name.len > 0).then(() { write_segments(out, name).try() });
+    Ok(());
+}

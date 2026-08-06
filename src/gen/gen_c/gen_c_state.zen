@@ -1,0 +1,281 @@
+// src/gen/gen_c/gen_c_state.zen
+// What the C backend holds while it works.
+//
+// The split is `sema_check.zen`'s and for its reason: STATE here,
+// BEHAVIOUR in the files beside it, so the dependency points one way
+// and a lowering rule never has to import the thing lowering it.
+//
+// FIVE THINGS, and each one exists to keep the output a pure function
+// of the input:
+//
+//   - THE TYPE WORKLIST is two parallel `Vec`s and not a `Map`, because
+//     it is EMITTED. A `Map` cannot be walked in an order that survives
+//     a different insertion sequence, and `gen_emit.order` sorts these
+//     by mangled name — which is `tcode`, a pure function of the type.
+//   - THE LOCAL SCOPE is a stack with marks, exactly as sema's is, plus
+//     a per-function list of every name ever declared. The second one
+//     is what gives a shadowing binding its number: `zu_l1x` and
+//     `zu_l1x_2` are two C names for two Zen bindings that share a
+//     spelling, and the number counts declarations rather than depth so
+//     that leaving and re-entering a block cannot reuse one.
+//   - THE TEMPORARY COUNTER is reset at every function, so a function's
+//     temporaries depend on its own body and on nothing that was
+//     compiled before it.
+//   - THE HELPER SET records which integer types a checked operation
+//     was emitted for, so the runtime carries one family per type the
+//     program actually uses rather than all ten.
+//   - THE BODY BUFFER is scratch. Bodies are lowered first because
+//     lowering is what discovers which types and which helpers the
+//     program needs; the translation unit is assembled afterwards, in
+//     the order C requires.
+//
+// THE CHECKER IS TAKEN, NOT BORROWED. `Checker` owns `Vec`s and `Map`s,
+// so a copy diverges from the original the first time either grows —
+// the same reason `Parser` holds the `Ast` rather than handing it back.
+// Hand it in at construction and read every answer back off the
+// backend.
+
+Ast, ExprId, Span = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, Types = sema.sema_ty
+World = sema.sema_def
+Checker, Ctx = sema.sema_check
+Emit = gen.gen_emit
+Diag, GenFault = gen.gen_diag
+
+// One binding in scope, and the number that makes its C name unique
+// inside its function.
+LocalSlot* = {
+    name*: str,
+    index*: usize,
+    ty*: TyId,
+}
+
+CBackend* = {
+    tree*: Ast,
+    check* :: Checker,
+
+    // where bodies are lowered. Scratch: `emit_program` copies it into
+    // the caller's buffer after the pieces C wants first.
+    body* :: Emit,
+
+    diags :: Vec<Diag>,
+
+    // the types this program needs a C definition for
+    type_names* :: Vec<String>,
+    type_ids* :: Vec<TyId>,
+    type_done* :: Vec<bool>,
+
+    // the integer types a checked `+ - * / %` was emitted for
+    helper_types* :: Vec<String>,
+
+    // per function
+    locals :: Vec<LocalSlot>,
+    declared :: Vec<String>,
+    tmp* :: usize,
+
+    alloc*: Alloc,
+
+    // -----------------------------------------------------------------
+    // what came out
+    // -----------------------------------------------------------------
+
+    diag_count* = (self: @Self) usize { self.diags.len }
+
+    diag_at* = (self: @Self, i: usize) Res<Diag> { self.diags.get(i) }
+
+    render_diags* = (self: @Self, out :: String) Res<(), AllocError> {
+        self.diags.loop((h, d) {
+            d.render(out).try();
+            out.add_bytes("\n").try();
+        });
+        Ok(());
+    }
+
+    report* = (self :: @Self, file: str, span: Span, fault: GenFault)
+              Res<(), AllocError> {
+        self.diags.add(Diag(file: file, span: span, fault: fault))
+    }
+
+    // A fault raised against an expression, which is where almost every
+    // one of them is raised. Saves each call site the two-line walk
+    // back to the node for its position.
+    report_expr* = (self :: @Self, id: ExprId, fault: GenFault)
+                   Res<(), AllocError> {
+        node = self.tree.expr_at(id);
+        self.report(node.span.file, node.span, fault)
+    }
+
+    types* = (self: @Self) Types { self.check.types }
+
+    world* = (self: @Self) World { self.check.world }
+
+    // -----------------------------------------------------------------
+    // the type worklist
+    // -----------------------------------------------------------------
+
+    // Is this type already queued? The name is the identity, because
+    // the name IS the type: `tcode` is injective, so two types share a
+    // name exactly when they are one type.
+    type_index* = (self: @Self, name: str) Res<usize> {
+        Range(0, self.type_names.len).find((i) {
+            self.type_names.get(i).match({
+                Ok(s) => s.view().eq(name),
+                None  => false,
+            })
+        })
+    }
+
+    queue_type* = (self :: @Self, name: String, id: TyId)
+                  Res<(), AllocError> {
+        self.type_names.add(name).try();
+        self.type_ids.add(id).try();
+        self.type_done.add(false).try();
+        Ok(());
+    }
+
+    type_name_at* = (self: @Self, i: usize) str {
+        self.type_names.get(i).match({ Ok(s) => s.view(), None => "" })
+    }
+
+    type_id_at* = (self: @Self, i: usize) Res<TyId> { self.type_ids.get(i) }
+
+    is_done* = (self: @Self, i: usize) bool {
+        self.type_done.get(i).match({ Ok(b) => b, None => true })
+    }
+
+    mark_done* = (self :: @Self, i: usize) Res<(), AllocError> {
+        self.type_done.set(i, true).match({
+            None  => Err(AllocError.OutOfMemory),
+            Ok(_) => Ok(()),
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // the checked-arithmetic helpers
+    // -----------------------------------------------------------------
+
+    // One family per integer type the program actually performs a
+    // trapping operation on. A family and not a single helper because
+    // the eight are written by one rule and splitting them would make
+    // the runtime depend on which operators a program happened to use,
+    // which is a lot of conditional emission to save a few lines.
+    need_helpers* = (self :: @Self, prim: str) Res<(), AllocError> {
+        self.has_helpers(prim).match({
+            false => self.add_helpers(prim),
+            true  => Ok(()),
+        })
+    }
+
+    has_helpers = (self: @Self, prim: str) bool {
+        Range(0, self.helper_types.len).find((i) {
+            self.helper_types.get(i).match({
+                Ok(s) => s.view().eq(prim),
+                None  => false,
+            })
+        }).match({ Ok(_) => true, None => false })
+    }
+
+    add_helpers = (self :: @Self, prim: str) Res<(), AllocError> {
+        owned ::= self.alloc.String().try();
+        owned.add_bytes(prim).try();
+        self.helper_types.add(owned)
+    }
+
+    // -----------------------------------------------------------------
+    // locals
+    //
+    // `mark` / `release` rather than a chain of frames, exactly as
+    // sema's scope stack is: entering a block records where the stack
+    // was, leaving it drops everything added since, and shadowing falls
+    // out of walking from the top down.
+    // -----------------------------------------------------------------
+
+    mark* = (self: @Self) usize { self.locals.len }
+
+    release* = (self :: @Self, mark: usize) Res<(), AllocError> {
+        extra = self.locals.len - mark;
+        Range(0, extra).loop((h, i) {
+            self.locals.take(self.locals.len - 1);
+        });
+        Ok(());
+    }
+
+    // Introduce a binding, and answer with the number its C name
+    // carries. Counting DECLARATIONS rather than nesting depth is what
+    // makes the number unique inside the function: two sibling blocks
+    // each binding `x` get 1 and 2, and neither can collide with the
+    // other's C declaration.
+    declare* = (self :: @Self, name: str, ty: TyId) Res<usize, AllocError> {
+        n = self.declared_count(name) + 1;
+        owned ::= self.alloc.String().try();
+        owned.add_bytes(name).try();
+        self.declared.add(owned).try();
+        self.locals.add(LocalSlot(name: name, index: n, ty: ty)).try();
+        Ok(n);
+    }
+
+    declared_count = (self: @Self, name: str) usize {
+        n ::= 0;
+        self.declared.loop((h, s) {
+            s.view().eq(name).then(() { n = n + 1; });
+        });
+        n
+    }
+
+    // The innermost binding of `name`, or nothing. Walks from the top,
+    // which is the only thing the ordering of this stack is for.
+    slot_of* = (self: @Self, name: str) Res<LocalSlot> {
+        n = self.locals.len;
+        Range(0, n).find((k) {
+            self.locals.get(n - k - 1).match({
+                Ok(b) => b.name.eq(name),
+                None  => false,
+            })
+        }).match({
+            None  => None,
+            Ok(k) => self.locals.get(n - k - 1),
+        })
+    }
+
+    // Everything a function's frame holds, dropped between functions.
+    // The temporary counter is reset here and nowhere else, so a
+    // function's temporaries are a function of its own body.
+    reset_frame* = (self :: @Self) Res<(), AllocError> {
+        self.release(0).try();
+        extra = self.declared.len;
+        Range(0, extra).loop((h, i) {
+            self.declared.take(self.declared.len - 1);
+        });
+        self.tmp = 0;
+        Ok(());
+    }
+
+    next_tmp* = (self :: @Self) usize {
+        self.tmp = self.tmp + 1;
+        self.tmp
+    }
+}
+
+// `alloc.CBackend(tree, check)` — a ufcs function whose first parameter
+// is an Alloc, beside the type it builds, exactly as `Vec`, `Map`,
+// `Ast`, `Types` and `Checker` are.
+CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
+    Ok(CBackend(
+        tree: tree,
+        check: check,
+        body: a.Emit().try(),
+        diags: a.Vec<Diag>(),
+        type_names: a.Vec<String>(),
+        type_ids: a.Vec<TyId>(),
+        type_done: a.Vec<bool>(),
+        helper_types: a.Vec<String>(),
+        locals: a.Vec<LocalSlot>(),
+        declared: a.Vec<String>(),
+        tmp: 0,
+        alloc: a,
+    ));
+}

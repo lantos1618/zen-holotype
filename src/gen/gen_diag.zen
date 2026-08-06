@@ -1,0 +1,89 @@
+// src/gen/gen_diag.zen
+// What a backend says when it cannot lower something.
+//
+// THE SHAPE IS `sema_diag.zen`'s, and for its reason: A DIAGNOSTIC IS A
+// VALUE, NOT A RAISE. The only `Err` anywhere in this folder is
+// `AllocError`, so a program the backend only half understands still
+// EMITS — it produces the C it could produce and the faults it owes,
+// and a caller decides whether that is a translation unit or a report.
+//
+// THE FAULT SET IS SMALL ON PURPOSE, and every entry means the same
+// thing: this backend was asked for something it does not lower yet. A
+// backend has no opinions about a program's meaning — sema has already
+// had those, and a second copy of "expected i32, found str" here would
+// be a second place to keep them right. So there is no type-mismatch
+// fault and there never should be: if the backend disagrees with sema
+// about a type, the bug is in the backend.
+//
+// WHY THIS IS SHARED PLUMBING AND NOT THE C BACKEND'S. Every backend
+// has the same three ways of failing — a form it does not lower, a name
+// it cannot resolve to one thing, a type it cannot spell — and none of
+// the three names C.
+
+Span = ast.ast_span
+str, String = std.text
+Alloc, AllocError = std.mem
+write_pos = sema.sema_diag
+
+// Something the backend was handed and could not turn into code.
+//
+// `what` is the node form or the name, interned or a literal, never a
+// built sentence: a `Diag` stays copyable and costs no allocation to
+// raise, and `render` is the one place a sentence exists.
+GenFault* = Unsupported(str)     // a node form this backend does not lower yet
+          | Unresolved(str)      // a name with no declaration behind it
+          | Ambiguous(str)       // a name with more than one, and no overload rule
+          | Untyped(str)         // sema returned no type and context supplied none
+          | Unspellable(str)     // a type with no C spelling yet
+
+// One fault, and where it is.
+//
+// `file` is carried beside the span because a `Span` names a file
+// relative to the compilation root and the two must not drift — the
+// same pairing `sema.Diag` uses.
+Diag* = {
+    file*: str,
+    span*: Span,
+    fault*: GenFault,
+
+    // `file:line:col: message`, one line, no trailing newline. The
+    // caller adds the separator it wants, which is what lets a `Vec` of
+    // these render into one buffer.
+    render* = (self: @Self, out :: String) Res<(), AllocError> {
+        out.add_bytes(self.file).try();
+        out.add_bytes(":").try();
+        write_pos(out, self.span.start.line, self.span.start.col).try();
+        out.add_bytes(": ").try();
+        out.add_bytes(message(self.fault)).try();
+        detail(self.fault, out).try();
+        Ok(());
+    }
+}
+
+// The sentence, with nothing filled in. A fault's own words, so a
+// caller that only wants to classify never has to build a string.
+message* = (fault: GenFault) str {
+    fault.match({
+        Unsupported(_) => "codegen does not lower this yet:",
+        Unresolved(_)  => "codegen cannot resolve",
+        Ambiguous(_)   => "codegen found more than one declaration of",
+        Untyped(_)     => "codegen has no type for",
+        Unspellable(_) => "codegen cannot spell the type",
+    })
+}
+
+// What the fault names, quoted. Every variant carries exactly one
+// string, so this is one line rather than a table.
+detail* = (fault: GenFault, out :: String) Res<(), AllocError> {
+    what = fault.match({
+        Unsupported(w) => w,
+        Unresolved(w)  => w,
+        Ambiguous(w)   => w,
+        Untyped(w)     => w,
+        Unspellable(w) => w,
+    });
+    out.add_bytes(" `").try();
+    out.add_bytes(what).try();
+    out.add_bytes("`").try();
+    Ok(());
+}
