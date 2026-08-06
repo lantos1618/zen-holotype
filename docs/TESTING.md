@@ -184,6 +184,8 @@ The third is the one everyone skips and the one that decays fastest. A correct d
 
 ## Performance is a test
 
+**Not yet run, and that is worth stating where the claims are made.** `tests/bench/` holds the four files and `src/std/test/test.zen` declares `Bencher` and `BenchStats`, but there is no `make bench`: the budgets are enforced by `b.bench(..)` in a project's own `build.zen`, and executing a build file needs stage 1 further along than it is. So the two load-bearing claims below are currently **asserted and unmeasured** — which is the same shape as a gate that cannot fail, and `src/std/core/loop/loop_iter.zen:21` already cites `bench_loop.zen` as the thing that justifies how the loop family is typed. The day `zen build` can run a build file, this is the first thing to point at it.
+
 Because all allocation goes through `Alloc`, `allocs_op` and `bytes_op` are free to measure and **identical on every machine** — so they are hard gates. `ns_op` and build wall clock go to a rolling median.
 
 Two budgets from `DESIGN.md` are load-bearing claims about the language, not micro-benchmarks:
