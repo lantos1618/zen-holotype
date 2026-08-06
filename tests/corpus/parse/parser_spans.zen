@@ -3,8 +3,8 @@
 //
 // TESTING.md calls this "the one everyone skips and the one that
 // decays fastest", and POSITIONS.md is the table it decays against.
-// This is that table, executable. The conventions are POSITIONS.md's
-// and every one of them is asserted below:
+// This is those conventions, executable, on a file small enough to
+// hold in the head:
 //
 //   - 1-based lines, 1-based BYTE columns
 //   - half-open: `end` is one past the last byte, so `Point` on line 2
@@ -15,8 +15,15 @@
 //     does not
 //   - a node's span does NOT include its leading trivia
 //   - the module's span is the whole file, trivia included
-//
-// The source these tokens stand for, with the columns they assert:
+
+scan, Source = lex.lex
+Parser = parse.parser
+module = parse.parse_decl
+Ast = ast.ast_arena
+Span = ast.ast_span
+Decl, Block, Bind = ast.ast_node
+
+// The file, with the columns it asserts:
 //
 //   1  // a note
 //   2  Point = {
@@ -27,33 +34,7 @@
 //   7      p = Point(x: 3);
 //   8      0
 //   9  }
-//
-// src/lex/ did not exist when this was written, so the stream is built
-// by hand — which is also what makes the columns above an assertion
-// about the PARSER rather than about a scanner.
-
-Token, TokenKind = parse.parse_token
-Parser = parse.parser
-module = parse.parse_decl
-Ast = ast.ast_arena
-Span, Pos = ast.ast_span
-Decl, Block, Bind = ast.ast_node
-
-at = (k: TokenKind, t: str, line: usize, col: usize, width: usize) Token {
-    Token(
-        kind: k,
-        text: t,
-        span: Span(
-            file: "t.zen",
-            start: Pos(line: line, col: col),
-            end: Pos(line: line, col: col + width),
-        ),
-    )
-}
-
-push = (ts :: Vec<Token>, k: TokenKind, t: str, line: usize, col: usize, width: usize) Res<(), AllocError> {
-    ts.add(at(k, t, line, col, width))
-}
+SOURCE: str = "// a note\nPoint = {\n    x: i32,\n}\n\nmain = () i32 {\n    p = Point(x: 3);\n    0\n}\n"
 
 sp = (env: Env, label: str, s: Span) () {
     println("{} {}:{}..{}:{}", label, s.start.line, s.start.col, s.end.line, s.end.col);
@@ -130,48 +111,12 @@ show_bind = (env: Env, tree: Ast, bd: Bind) () {
 
 main = (env: Env) Res<i32, AllocError> {
     alloc ::= env.mem.alloc();
-    ts ::= alloc.Vec<Token>();
-
-    ts.push(TokenKind.LineComment, "// a note", 1, 1, 9).try();
-
-    ts.push(TokenKind.Ident, "Point", 2, 1, 5).try();
-    ts.push(TokenKind.Eq, "=", 2, 7, 1).try();
-    ts.push(TokenKind.LBrace, "{", 2, 9, 1).try();
-
-    ts.push(TokenKind.Ident, "x", 3, 5, 1).try();
-    ts.push(TokenKind.Colon, ":", 3, 6, 1).try();
-    ts.push(TokenKind.Ident, "i32", 3, 8, 3).try();
-    ts.push(TokenKind.Comma, ",", 3, 11, 1).try();
-
-    ts.push(TokenKind.RBrace, "}", 4, 1, 1).try();
-    ts.push(TokenKind.Blank, "", 5, 1, 0).try();
-
-    ts.push(TokenKind.Ident, "main", 6, 1, 4).try();
-    ts.push(TokenKind.Eq, "=", 6, 6, 1).try();
-    ts.push(TokenKind.LParen, "(", 6, 8, 1).try();
-    ts.push(TokenKind.RParen, ")", 6, 9, 1).try();
-    ts.push(TokenKind.Ident, "i32", 6, 11, 3).try();
-    ts.push(TokenKind.LBrace, "{", 6, 15, 1).try();
-
-    ts.push(TokenKind.Ident, "p", 7, 5, 1).try();
-    ts.push(TokenKind.Eq, "=", 7, 7, 1).try();
-    ts.push(TokenKind.Ident, "Point", 7, 9, 5).try();
-    ts.push(TokenKind.LParen, "(", 7, 14, 1).try();
-    ts.push(TokenKind.Ident, "x", 7, 15, 1).try();
-    ts.push(TokenKind.Colon, ":", 7, 16, 1).try();
-    ts.push(TokenKind.Int, "3", 7, 18, 1).try();
-    ts.push(TokenKind.RParen, ")", 7, 19, 1).try();
-    ts.push(TokenKind.Semi, ";", 7, 20, 1).try();
-
-    ts.push(TokenKind.Int, "0", 8, 5, 1).try();
-    ts.push(TokenKind.RBrace, "}", 9, 1, 1).try();
-    ts.push(TokenKind.Eof, "", 10, 1, 0).try();
-
-    p ::= alloc.Parser(ts, "t.zen");
+    lexed = scan(alloc, Source(file: "t.zen", text: SOURCE)).try();
+    p ::= alloc.Parser(lexed);
     m = p.module("t").try();
 
     sp(env, "module", m.span);
-    println("diags {}", p.diags.len);
+    println("lex {} parse {}", lexed.diags.len, p.diags.len);
     println("decls {}", m.decls.len);
 
     m.decls.get(0).match({

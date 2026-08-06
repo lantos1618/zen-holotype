@@ -17,8 +17,20 @@
 //   TRAILING the outermost node whose span ends before it on that line
 //   EOF      Module.trailing, which has nowhere else to go
 //
-// The source these tokens stand for:
-//
+// A BLANK LINE IS TRIVIA TOO, and it is the one piece the lexer does
+// not hand over: whitespace is not a token, so the parser derives a
+// `Blank` from the gap between two spans. A formatter that silently
+// deleted the blank line between two declarations would fail its own
+// round trip, so the derivation is asserted here beside the comments.
+
+scan, Source = lex.lex
+Parser = parse.parser
+module = parse.parse_decl
+Ast = ast.ast_arena
+TriviaRun = ast.ast_span
+Decl, Block = ast.ast_node
+ExprId = ast.ast_id
+
 //   1  // before the declaration
 //   2  Point = {
 //   3      x: i32,  // after the field
@@ -32,30 +44,7 @@
 //  11      });
 //  12  }
 //  13  // at end of file
-
-Token, TokenKind = parse.parse_token
-Parser = parse.parser
-module = parse.parse_decl
-Ast = ast.ast_arena
-Span, Pos, TriviaRun = ast.ast_span
-Decl, Block, Module = ast.ast_node
-ExprId = ast.ast_id
-
-at = (k: TokenKind, t: str, line: usize, col: usize, width: usize) Token {
-    Token(
-        kind: k,
-        text: t,
-        span: Span(
-            file: "t.zen",
-            start: Pos(line: line, col: col),
-            end: Pos(line: line, col: col + width),
-        ),
-    )
-}
-
-push = (ts :: Vec<Token>, k: TokenKind, t: str, line: usize, col: usize, width: usize) Res<(), AllocError> {
-    ts.add(at(k, t, line, col, width))
-}
+SOURCE: str = "// before the declaration\nPoint = {\n    x: i32,  // after the field\n}\n\nname = (s: Shape) str {\n    s.match({\n        // between the arms\n        Circle => \"c\",  // after an arm\n        Square => \"s\",\n    });\n}\n// at end of file\n"
 
 // Every piece of a run, in order. A count alone would pass while the
 // parser attached the wrong comment, which is the failure this test
@@ -67,7 +56,7 @@ show_run = (env: Env, tree: Ast, label: str, run: TriviaRun) () {
         t.kind.match({
             LineComment  => println("  line {} {}", t.span.start.line, t.text),
             BlockComment => println("  block {} {}", t.span.start.line, t.text),
-            Blank        => println("  blank {}", t.span.start.line),
+            Blank        => println("  blank {}..{}", t.span.start.line, t.span.end.line),
         });
     });
 }
@@ -113,59 +102,10 @@ show_arms_of = (env: Env, tree: Ast, id: ExprId) () {
 
 main = (env: Env) Res<i32, AllocError> {
     alloc ::= env.mem.alloc();
-    ts ::= alloc.Vec<Token>();
-
-    ts.push(TokenKind.LineComment, "// before the declaration", 1, 1, 25).try();
-    ts.push(TokenKind.Ident, "Point", 2, 1, 5).try();
-    ts.push(TokenKind.Eq, "=", 2, 7, 1).try();
-    ts.push(TokenKind.LBrace, "{", 2, 9, 1).try();
-    ts.push(TokenKind.Ident, "x", 3, 5, 1).try();
-    ts.push(TokenKind.Colon, ":", 3, 6, 1).try();
-    ts.push(TokenKind.Ident, "i32", 3, 8, 3).try();
-    ts.push(TokenKind.Comma, ",", 3, 11, 1).try();
-    ts.push(TokenKind.LineComment, "// after the field", 3, 14, 18).try();
-    ts.push(TokenKind.RBrace, "}", 4, 1, 1).try();
-    ts.push(TokenKind.Blank, "", 5, 1, 0).try();
-
-    ts.push(TokenKind.Ident, "name", 6, 1, 4).try();
-    ts.push(TokenKind.Eq, "=", 6, 6, 1).try();
-    ts.push(TokenKind.LParen, "(", 6, 8, 1).try();
-    ts.push(TokenKind.Ident, "s", 6, 9, 1).try();
-    ts.push(TokenKind.Colon, ":", 6, 10, 1).try();
-    ts.push(TokenKind.Ident, "Shape", 6, 12, 5).try();
-    ts.push(TokenKind.RParen, ")", 6, 17, 1).try();
-    ts.push(TokenKind.Ident, "str", 6, 19, 3).try();
-    ts.push(TokenKind.LBrace, "{", 6, 23, 1).try();
-
-    ts.push(TokenKind.Ident, "s", 7, 5, 1).try();
-    ts.push(TokenKind.Dot, ".", 7, 6, 1).try();
-    ts.push(TokenKind.Ident, "match", 7, 7, 5).try();
-    ts.push(TokenKind.LParen, "(", 7, 12, 1).try();
-    ts.push(TokenKind.LBrace, "{", 7, 13, 1).try();
-
-    ts.push(TokenKind.LineComment, "// between the arms", 8, 9, 19).try();
-    ts.push(TokenKind.Ident, "Circle", 9, 9, 6).try();
-    ts.push(TokenKind.FatArrow, "=>", 9, 16, 2).try();
-    ts.push(TokenKind.Str, "\"c\"", 9, 19, 3).try();
-    ts.push(TokenKind.Comma, ",", 9, 22, 1).try();
-    ts.push(TokenKind.LineComment, "// after an arm", 9, 25, 15).try();
-
-    ts.push(TokenKind.Ident, "Square", 10, 9, 6).try();
-    ts.push(TokenKind.FatArrow, "=>", 10, 16, 2).try();
-    ts.push(TokenKind.Str, "\"s\"", 10, 19, 3).try();
-    ts.push(TokenKind.Comma, ",", 10, 22, 1).try();
-
-    ts.push(TokenKind.RBrace, "}", 11, 5, 1).try();
-    ts.push(TokenKind.RParen, ")", 11, 6, 1).try();
-    ts.push(TokenKind.Semi, ";", 11, 7, 1).try();
-    ts.push(TokenKind.RBrace, "}", 12, 1, 1).try();
-
-    ts.push(TokenKind.LineComment, "// at end of file", 13, 1, 17).try();
-    ts.push(TokenKind.Eof, "", 14, 1, 0).try();
-
-    p ::= alloc.Parser(ts, "t.zen");
+    lexed = scan(alloc, Source(file: "t.zen", text: SOURCE)).try();
+    p ::= alloc.Parser(lexed);
     m = p.module("t").try();
-    println("diags {}", p.diags.len);
+    println("lex {} parse {}", lexed.diags.len, p.diags.len);
 
     show_run(env, p.tree, "module.leading", m.leading);
 
@@ -178,7 +118,10 @@ main = (env: Env) Res<i32, AllocError> {
     });
 
     m.decls.get(1).match({
-        Ok(d) => show_arms(env, p.tree, d),
+        Ok(d) => {
+            show_run(env, p.tree, "decl1.leading", d.leading);
+            show_arms(env, p.tree, d);
+        },
         None  => println("no decl 1"),
     });
 

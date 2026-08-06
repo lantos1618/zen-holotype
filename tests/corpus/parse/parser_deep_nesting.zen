@@ -20,42 +20,51 @@
 //   diagnostic: past the limit the parser stops descending, so every
 //   frame it unwinds through finds a delimiter it cannot close and
 //   would otherwise report it — 256 messages for one mistake.
-//
-// The run is built in a loop rather than written out, which is the
-// only reason a 10,000-deep test is cheap enough to keep.
 
-Token, TokenKind = parse.parse_token
+scan, Source = lex.lex
 Parser, MAX_DEPTH = parse.parser
 expr = parse.parse_expr
-Span, Pos = ast.ast_span
+Ast = ast.ast_arena
+ExprId = ast.ast_id
 
-at = (k: TokenKind, t: str, col: usize) Token {
-    Token(
-        kind: k,
-        text: t,
-        span: Span(file: "t.zen", start: Pos(line: 1, col: col), end: Pos(line: 1, col: col + 1)),
-    )
+// `((( .. 1 .. )))`, built rather than written out, which is the only
+// reason a 10,000-deep test is cheap enough to keep.
+//
+// It speaks `WriteError` rather than `AllocError` because `String.add`
+// does: writing into a growable String can fail to grow (AllocError)
+// and writing into a console can fail to write (IoError), and there is
+// no `From`, so the honest type is the union. `.try()` merges either
+// into this function's set for free.
+nested = (alloc: Alloc, depth: usize) Res<str, WriteError> {
+    sb ::= alloc.String("").try();
+    Range(0, depth).loop((h, i) { sb.add("(").try(); });
+    sb.add("1").try();
+    Range(0, depth).loop((h, i) { sb.add(")").try(); });
+    Ok(sb.view());
 }
 
-nested = (alloc: Alloc, depth: usize) Res<Vec<Token>, AllocError> {
-    ts ::= alloc.Vec<Token>();
-    Range(0, depth).loop((h, i) {
-        ts.add(at(TokenKind.LParen, "(", i + 1)).try();
+node_name = (tree: Ast, id: ExprId) str {
+    tree.expr_at(id).kind.match({
+        Paren(_)   => "paren",
+        Unit       => "unit",
+        Literal(_) => "literal",
+        _          => "other",
     });
-    ts.add(at(TokenKind.Int, "1", depth + 1)).try();
-    Range(0, depth).loop((h, i) {
-        ts.add(at(TokenKind.RParen, ")", depth + 2 + i)).try();
-    });
-    ts.add(at(TokenKind.Eof, "", depth + depth + 2)).try();
-    Ok(ts);
 }
 
-run = (env: Env, alloc: Alloc, depth: usize) Res<(), AllocError> {
-    ts = nested(alloc, depth).try();
-    p ::= alloc.Parser(ts, "t.zen");
+run = (env: Env, alloc: Alloc, depth: usize) Res<(), WriteError> {
+    text = nested(alloc, depth).try();
+    lexed = scan(alloc, Source(file: "t.zen", text: text)).try();
+    p ::= alloc.Parser(lexed);
     p.drain().try();
-    p.expr().try();
-    println("depth {} diags {}", depth, p.diags.len);
+    id = p.expr().try();
+
+    // A parse that stopped still hands back a tree that can be WALKED.
+    // That is the point of a poison node: the parser gives up on
+    // reading further, not on producing something well formed, so a
+    // consumer never has to ask whether the tree it was handed exists.
+    println("depth {} lex {} parse {} node {}", depth, lexed.diags.len, p.diags.len,
+        node_name(p.tree, id));
     p.diags.get(0).match({
         Ok(d) => println("  at {}:{} {}", d.span.start.line, d.span.start.col, d.message),
         None  => println("  no diagnostic"),
@@ -63,7 +72,7 @@ run = (env: Env, alloc: Alloc, depth: usize) Res<(), AllocError> {
     Ok(());
 }
 
-main = (env: Env) Res<i32, AllocError> {
+main = (env: Env) Res<i32, WriteError> {
     alloc ::= env.mem.alloc();
     println("limit {}", MAX_DEPTH);
 

@@ -292,12 +292,16 @@ Parser* = {
 
     // Success, spelled with its error type.
     //
-    // A workaround, and it says so: a bare `Ok(())` in one arm beside
-    // a `Res<(), AllocError>` call in the other is accepted by sema and
-    // then emitted by `gen_c` as two different C structs assigned to
-    // one temporary, which does not compile. Reported with a
-    // reproducer. Naming the type on both sides is also the honest
-    // thing — `Ok(())` alone is a `Res<()>`, which is a different type.
+    // `Ok(())` alone is a `Res<()>`, which is a DIFFERENT TYPE from
+    // `Res<(), AllocError>` — absence rather than failure — and a
+    // `.match` whose every arm is a bare `Ok(())` is therefore typed
+    // without an error channel. `.try()`ing that inside a function
+    // that has one emits C reading an `Err` field off a struct with no
+    // such field, and nothing says so until `cc` does.
+    //
+    // So every arm that means "nothing to do here" says which `Res` it
+    // is. That is a workaround for a real bootstrapper bug — reported
+    // with a reproducer — and it is also just the honest spelling.
     nothing* = (self: @Self) Res<(), AllocError> { Ok(()) }
 
     // An empty span at the cursor, for a poison node: it stands where
@@ -413,10 +417,15 @@ Parser* = {
     }
 
     // The two halves of `expect`, as functions rather than as blocks
-    // in the arms. That is a workaround and it says so: a `.match`
-    // whose arms are ALL blocks is typed `()` by the bootstrapper, so
-    // `.try()` on it is rejected. Reported with a reproducer; when it
-    // is fixed these three fold back into their callers.
+    // in the arms. That is a workaround and it says so.
+    //
+    // A `.match` in which EVERY arm's value is a bare `Ok(..)` is
+    // typed `Res<T>` — no error channel — and `.try()`ing it inside a
+    // `Res<T, E>` function then emits C that reads an `Err` field off
+    // a struct that has none. No diagnostic; it fails at `cc`. One arm
+    // returning a typed `Res<T, E>` pins the whole match, which is
+    // what these two do. Reported with a reproducer; when it is fixed
+    // they fold back into their caller.
     took = (self :: @Self) Res<bool, AllocError> {
         self.bump().try();
         Ok(true);
