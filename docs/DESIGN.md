@@ -133,6 +133,10 @@ AllocError* = | OutOfMemory                     // one variant: the bar leads
 Alias = Shape                                   // no bar, so an alias. unambiguous.
 ```
 
+**Cost to accept knowingly:** a declaration does not terminate and nothing is newline-sensitive, so a trailing bar swallows the next declaration's name as a variant. `Shape = Circle | Square |` followed by `main = ..` reads as `Shape = Circle | Square | main` with a stray `=`, and the diagnostic lands on the `=` rather than on the bar. That is the parser being right. The alternative — ending a declaration with a token, or making a newline mean something — costs more everywhere than this costs here.
+
+**An alias is the type, not a name that forwards to it.** `Alias = Shape` binds `Alias` to `Shape` itself, so `Alias.Circle` is `Shape.Circle` and a value of one is a value of the other — there is no conversion, because there are not two types. This is what makes the pair above observably different: under the alias reading `Alias.Circle` exists, and under the one-variant-enum reading it does not.
+
 The leading bar on a one-variant enum is the whole point: without it `AllocError = OutOfMemory` and `Alias = Shape` are the same three tokens, and `TestError = Failed(str)` and `Circle1 = AddFoo(Circle)` are the same five. With it, a parser needs no lookahead, no position rule, and no guess — and an enum may be declared anywhere, not only at module level.
 
 **One declaration form:** there are no traits, only structs. A struct whose fields happen to be functions, used as a bound, is what other languages call a trait — nothing marks it special, because nothing needs to. `A.impl(B, {..})` supplies a value for every field `B` declares: an `f64` field takes an `f64`, a function-typed field takes a function. One rule, no second mechanism — which is why the method table above and the field rules are the same table.

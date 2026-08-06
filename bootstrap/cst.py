@@ -1402,11 +1402,30 @@ def _arm_arrow(node, parent):
     return kids[1]
 
 
+def _dangling_bar(node, source: bytes):
+    """A `|` promises another variant. When the name after it is MISSING, the
+    parser resumes at the next declaration and reports the hole there — so the
+    diagnostic lands on the line BELOW the mistake, naming a token the author
+    did not write. The bar is where the fix goes, so scan back to it."""
+    if not node.is_missing or node.type != "identifier":
+        return None
+    i = node.start_byte
+    while i > 0 and source[i - 1 : i].isspace():
+        i -= 1
+    return i - 1 if source[i - 1 : i] == b"|" else None
+
+
 def _syntax_diag(node, parent, file: str, source: bytes):
     """`parent` is threaded rather than read off the node: py-tree-sitter
     reports a MISSING leaf's parent as the token before it."""
     span = Span(file, _point(node.start_point), _point(node.end_point))
     if node.is_missing:
+        bar = _dangling_bar(node, source)
+        if bar is not None:
+            starts = _line_starts(source)
+            at = _at(starts, bar)
+            return Diag(Span(file, at, _at(starts, bar + 1)),
+                        "expected variant: a `|` promises another one")
         if parent is not None and parent.type in EXPRESSION_HOLES:
             return Diag(span, "expected expression")
         return Diag(span, f"expected `{node.type}`")

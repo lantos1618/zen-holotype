@@ -52,6 +52,13 @@ MUST_FAIL = "must-fail"
 DIR_EXPECTED_NAMES = (".expected", "{name}.expected", "main.expected")
 DIR_EXIT_NAMES = (".exit", "{name}.exit", "main.exit")
 DIR_STDERR_NAMES = (".stderr", "{name}.stderr", "main.stderr")
+DIR_COUNT_NAMES = (".count", "{name}.count", "main.count")
+
+# What the compiler prints once it is done: `bootstrap: 3 diagnostic(s)`.
+# `.count` is the only assertion that needs it, and it is the only one that
+# cannot fall back to reading the diagnostics themselves -- two diagnostics
+# on one position are two, and the position list cannot tell.
+DIAG_TOTAL = re.compile(r"(\d+) diagnostic\(s\)")
 
 # A diagnostic position as it appears in compiler output: path:line:col, or a
 # bare line:col at the start of a line for a single-file compilation.
@@ -88,6 +95,8 @@ class Test:
     exit_path: Path | None = None
     stderr_lines: tuple[str, ...] = ()
     stderr_path: Path | None = None
+    count_max: int | None = None
+    count_path: Path | None = None
     is_dir: bool = False
 
     @property
@@ -152,6 +161,25 @@ def _read_exit(path: Path) -> int:
     return value
 
 
+def _read_count(path: Path) -> int:
+    """`.count` bounds the number of diagnostics; TESTING.md says only write
+    one where the count is the property under test. Zero would assert the
+    program is accepted, which is what a corpus test is for."""
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise HarnessError(f"{path}: unreadable ({exc})") from exc
+    if not raw:
+        raise HarnessError(f"{path}: empty; a count file must hold one integer")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise HarnessError(f"{path}: {raw!r} is not an integer") from exc
+    if value < 1:
+        raise HarnessError(f"{path}: {value} bounds nothing; a rejection is at least one diagnostic")
+    return value
+
+
 def _read_bytes(path: Path) -> bytes:
     try:
         return path.read_bytes()
@@ -173,6 +201,7 @@ def _make_test(
     expected: Path,
     exit_path: Path | None,
     stderr_path: Path | None,
+    count_path: Path | None,
     is_dir: bool,
 ) -> Test:
     return Test(
@@ -187,6 +216,8 @@ def _make_test(
         exit_path=exit_path,
         stderr_lines=_stderr_lines(stderr_path) if stderr_path else (),
         stderr_path=stderr_path,
+        count_max=_read_count(count_path) if count_path else None,
+        count_path=count_path,
         is_dir=is_dir,
     )
 
@@ -224,6 +255,7 @@ def collect(tests_dir: Path, into: Collection, kind: str) -> None:
                             expected,
                             _first_existing(child, DIR_EXIT_NAMES, child.name),
                             _first_existing(child, DIR_STDERR_NAMES, child.name),
+                            _first_existing(child, DIR_COUNT_NAMES, child.name),
                             is_dir=True,
                         )
                     )
@@ -243,6 +275,7 @@ def collect(tests_dir: Path, into: Collection, kind: str) -> None:
                     rel = child.relative_to(base).with_suffix("").as_posix()
                     exit_path = child.with_suffix(".exit")
                     stderr_path = child.with_suffix(".stderr")
+                    count_path = child.with_suffix(".count")
                     into.tests.append(
                         _make_test(
                             f"{kind}/{rel}",
@@ -253,6 +286,7 @@ def collect(tests_dir: Path, into: Collection, kind: str) -> None:
                             expected,
                             exit_path if exit_path.is_file() else None,
                             stderr_path if stderr_path.is_file() else None,
+                            count_path if count_path.is_file() else None,
                             is_dir=False,
                         )
                     )
@@ -602,6 +636,23 @@ def run_must_fail(test: Test, tool: Toolchain, work: Path, args: argparse.Namesp
             f"{test.expected_path.name} asserts no position; "
             "TESTING.md requires the diagnostic's position, exact"
         )
+
+    if test.count_max is not None:
+        total = DIAG_TOTAL.search(text)
+        if total is None:
+            # The bound cannot be checked, so the test does not pass. A count
+            # gate that silently gives up when it cannot count is the exact
+            # thing this assertion exists to prevent.
+            reasons.append(
+                f"{test.count_path.name} bounds the diagnostic count at "
+                f"{test.count_max}, but the compiler printed no "
+                f"`N diagnostic(s)` total to compare against"
+            )
+        elif int(total.group(1)) > test.count_max:
+            reasons.append(
+                f"{total.group(1)} diagnostics, at most {test.count_max} allowed "
+                f"[{test.count_path.name}]: one mistake must not cascade"
+            )
 
     return Result(test, not reasons, reasons, clip(text) if reasons else "")
 
