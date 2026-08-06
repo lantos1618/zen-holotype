@@ -5,7 +5,7 @@ CFLAGS  ?= -O2 -std=c99
 PY      ?= python3
 ROOT    ?= src
 
-.PHONY: all build seed test test-zen lint parse fixpoint determinism grammar grammar-test fmt clean help
+.PHONY: all build seed test test-zen lint parse design fixpoint determinism grammar grammar-test fmt clean help
 
 all: test
 
@@ -22,8 +22,14 @@ seed: zen
 	git add seed/zen.c
 
 ## test: the corpus and must-fail suites, against the bootstrapper
-test: parse
+test: parse design
 	$(PY) tests/run.py
+
+## design: every complete example in DESIGN.md must parse. PLAN.md 0.1 asks
+## for this; nothing was checking it, and the document had drifted from the
+## language it defines. A ```groovy fragment fence is read, not parsed.
+design: grammar
+	$(PY) scripts/design_examples.py
 
 ## parse: every .zen the tree claims is valid must parse. cheap, and it
 ## is the only thing standing behind example/ -- nothing else compiles

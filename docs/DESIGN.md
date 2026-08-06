@@ -145,7 +145,7 @@ The leading bar on a one-variant enum is the whole point: without it `AllocError
 
 A computed field is **read-only and non-addressable**: there is no storage, so there is nothing to take the address of and nothing to assign into. Mutation goes through exported methods, as it always does.
 
-```groovy
+```groovy fragment
 c = Circle(radius: 1.0);
 p = &c.width;     // ERROR: computed field, no address exists
 c.width = 5.0;    // ERROR: nothing to assign to
@@ -153,7 +153,7 @@ c.width = 5.0;    // ERROR: nothing to assign to
 
 The residue worth knowing: an impl may supply something expensive, and reading it in a loop hides real work behind a dot. The *simple* case is provable with machinery already here — if these two budgets ever stop matching, uniform access is not free and we want to know:
 
-```groovy
+```groovy fragment
 budgets: [
     Budget(name: "stored_field_read",   ns_op: 2, allocs_op: 0, bytes_op: 0),
     Budget(name: "computed_field_read", ns_op: 2, allocs_op: 0, bytes_op: 0),
@@ -191,7 +191,7 @@ The consequence worth stating: **there are no orphan impls.** A module may not i
 
 **A trait value is a fat value.** Since a "trait" is an ordinary struct, a trait *value* is an ordinary record: a receiver pointer plus one function pointer per method, copied by value. `shape.as(Display)` builds that record on the stack; storing it in a `Vec<Display>` copies it inline. No `dyn`, no vtable concept, no boxing, **no allocation** — so the Alloc law is satisfied rather than side-stepped. This is the same shape as `Alloc` itself. The one thing it costs: the record points at the receiver, so the receiver must outlive it — the ordinary rule for any pointer stored in a collection.
 
-```groovy
+```groovy fragment
 printers ::= alloc.Vec<Display>();
 printers.add(circle.as(Display)).try();   // 2 words copied in, no alloc
 ```
@@ -212,7 +212,7 @@ A `Sink` dissolves it. A console is a sink, a `String` is a sink, and `println` 
 
 **A statement ends with `;`. A declaration does not.** That is the whole rule, and it holds without a lexer that counts newlines:
 
-```groovy
+```groovy fragment
 Vec*<T> = { .. }                 // declaration: struct. no semicolon.
 Shape = Circle(Circle) | Unit    // declaration: enum. no semicolon.
 area* = (c: Circle) f64 { .. }   // declaration: function with a body. no semicolon.
@@ -232,7 +232,7 @@ Optional semicolons were the alternative and they carry a real hazard, not an ae
 
 **A block is a value too.** `@scope` stands for the enclosing block, exactly as `h: LoopHandle` stands for the enclosing loop — the same idea, one level down. It nests, and each block gets its own:
 
-```groovy
+```groovy fragment
 {
     outer = @scope;
     {
@@ -269,7 +269,7 @@ Inference inside a module, explicit at the boundary — law 6. A private refacto
 
 **A `None` never becomes an `Err`.** You name the reason:
 
-```groovy
+```groovy fragment
 row = table.get("ada").try();                        // ERROR: Res<User> is not Res<User, E>
 row = table.get("ada").ok_or(Error.NotFound).try();  // required form
 ```
@@ -303,7 +303,7 @@ This is a rule about **declarations**, not about every parameter list. A closure
 
 `@Self` is the type being declared, supplied by the compiler inside a struct or impl body. The `@` says exactly that: like `@meta`, it is not a name you could have written yourself.
 
-```groovy
+```groovy fragment
 add* = (self :: @Self, value: T) Res<(), AllocError> { ... }   // mutates
 get* = (self: @Self, i: usize) Res<T> { ... }                  // does not
 
@@ -313,7 +313,7 @@ w ::= alloc.Vec<i32>();  w.add(1);   // ok
 
 `@Self` is spelled `Vec<T>` when you write the same function outside the body — the two forms are the same function, and the second is what the first means:
 
-```groovy
+```groovy fragment
 Vec*<T> = { add* = (self :: @Self, value: T) Res<(), AllocError> { ... } }
 add*    = (v :: Vec<T>, value: T) Res<(), AllocError> { ... }   // identical
 ```
@@ -336,7 +336,7 @@ Three consequences worth stating, because each one is a place the rule looks lik
 - **Passing a `Drop` value to a parameter is a borrow, not a move.** `v.add(1)` does not consume `v`, and a receiver is just the first parameter — so nothing else could be true. A move is spelled `consume` at the call site, and only there.
 - **The compiler-inserted `drop` is exempt from the receiver rule.** `drop` is declared `(self :: @Self)`, but scope exit runs it on `:` bindings too. Destroying a value is not mutating it through a binding.
 
-```groovy
+```groovy fragment
 f = alloc.File("x.txt").try();
 g = consume f;                  // move, stated at the use site. f is dead after
 f.read();                       // ERROR: f was consumed
@@ -357,7 +357,7 @@ g = alloc.File(f.path).try();   // want another? construct it
 
 Sending an `iso` is the same `consume`, tracked the same way:
 
-```groovy
+```groovy fragment
 buf ::= alloc.Vec<u8>();
 worker.process(consume buf);
 buf.add(2).try();              // ERROR: buf was consumed
@@ -375,7 +375,7 @@ Names are qualified by path, imports bind locally, and two modules may define th
 
 **Re-export is an import whose bindings are starred.** No `export`, no `from` — `*` doing the same job it does everywhere else, and `=` being the binding it already is:
 
-```groovy
+```groovy fragment
 // src/std/core/core.zen
 Res, Ok, None = std.core.result     // imported, local to this module
 Res*, Ok*, None* = std.core.result  // imported AND re-exported
@@ -419,7 +419,11 @@ i32* = {
     MIN*: i32 = -2147483648,    // boundary obeys law 6 like everything else
     BITS*: usize = 32,
 }
+```
 
+and read back, in a body:
+
+```groovy fragment
 x = i32.MAX;              // a constant, resolved at comptime
 buf: [u8, i32.BITS]       // usable wherever a comptime value is
 ```
@@ -1296,7 +1300,7 @@ main = (env: Env) Res<i32, Error> {
 
     opts.verbose.then(() { println("hello, {}", name) });
 
-    Circle1 = AddFoo(Circle) // memoized on the call: one type
+    Circle1 = AddFoo(Circle); // memoized on the call: one type
     c1 = Circle1(radius: 1.0, foo: 1);
     a = c1.area();           // ufcs: free function, method syntax
 
