@@ -1,0 +1,427 @@
+// src/sema/sema_trap.zen
+// A trap the compiler can prove will fire is a compile error.
+//
+// DESIGN.md, the failure model: "`+ - *` trap on overflow. `/ %` trap on
+// a zero divisor, and on `i32.MIN / -1` — which is an overflow wearing
+// division's clothes. A trap the compiler can PROVE will fire —
+// `i32.MAX + 1`, a constant zero divisor, a literal index past a known
+// length — is a compile error, not a runtime trap. It is a bug, and it
+// is a bug that was visible without running the program."
+//
+// LITERALS ONLY, NEVER THROUGH A BINDING. Folding through a binding
+// would turn the trap corpus red: those programs deliberately route
+// `i32.MAX` through a variable so the compiler cannot see it, and a
+// compile error there would delete the runtime test rather than
+// strengthen it. So `const_int` folds literals, unary minus,
+// parentheses, `i32.MAX` and arithmetic on those — and stops.
+//
+// THE FOLDER MAY NOT TRAP ITSELF. `+` traps on overflow, so computing
+// `x + y` to find out whether it overflows is the bug it is looking for.
+// Every fold below TESTS FIRST and gives up rather than computing —
+// which is the same constraint DESIGN.md puts on `gen_c` one layer down,
+// for the same reason.
+//
+// THE INDEX RULE IS NOT HERE, AND THAT IS DELIBERATE. "A literal index
+// past a known length" needs the length, and a fixed array's type does
+// not carry its count: `array_type` interns `[]<elem>` and drops
+// `ArrayType.count`. Half of the rule — trapping on a negative literal
+// index — would be a rule that fires on one shape and stays silent on
+// the one people write. It is named in the report instead.
+
+Ast, Expr, ExprId, Binary, BinOp, Literal, LiteralKind, Span = ast
+Unary, UnOp, Access, Paren, Name = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str = std.text
+Range = std.core
+TyId, Types = sema.sema_ty
+Diag, SemaFault, NameFault = sema.sema_diag
+Checker, Ctx, is_integer = sema.sema_check
+
+// The widest integer this compiler can fold in. Written as a
+// subtraction because `-9223372036854775808` is unary minus applied to a
+// positive literal that does not fit — the classic the lexer corpus
+// already tests.
+I64_MAX* : i64 = 9223372036854775807
+I64_MIN* : i64 = -9223372036854775807 - 1
+
+// The largest magnitude whose square still fits an i64. A product of two
+// of these is under 4.7e18 and an i64 holds 9.2e18, so multiplication
+// inside this window never traps and outside it is not folded at all.
+FOLD_LIMIT* : i64 = 2147483647
+
+// ---------------------------------------------------------------------
+// the rule
+// ---------------------------------------------------------------------
+
+// Every arithmetic operator that traps, checked against what its
+// operands are known to be. The wrapping forms reach `_` and are
+// silent: "`+% -% *%` wrap, for when wrapping is the intent."
+check_binary* = (c :: Checker, b: Binary, ty: TyId) Res<(), AllocError> {
+    b.op.match({
+        Div => check_divisor(c, b, ty),
+        Rem => check_divisor(c, b, ty),
+        Add => check_overflow(c, b, ty),
+        Sub => check_overflow(c, b, ty),
+        Mul => check_overflow(c, b, ty),
+        _   => Ok(()),
+    })
+}
+
+check_divisor = (c :: Checker, b: Binary, ty: TyId) Res<(), AllocError> {
+    const_int(c, b.rhs).match({
+        None    => Ok(()),
+        Ok(d)   => divisor_is(c, b, ty, d),
+    })
+}
+
+divisor_is = (c :: Checker, b: Binary, ty: TyId, d: i64)
+             Res<(), AllocError> {
+    (d == 0).match({
+        true  => divide_by_zero(c, b),
+        false => min_over_minus_one(c, b, ty, d),
+    })
+}
+
+divide_by_zero = (c :: Checker, b: Binary) Res<(), AllocError> {
+    c.report(b.op_span.file, b.op_span,
+             SemaFault.ProvenDivideByZero(NameFault(name: "0")))
+}
+
+// `i32.MIN / -1` is an OVERFLOW, not a division by zero, and it faults
+// identically on x86. DESIGN.md names only the zero divisor;
+// docs/TESTING.md records this as the sentence the design still owes.
+min_over_minus_one = (c :: Checker, b: Binary, ty: TyId, d: i64)
+                     Res<(), AllocError> {
+    (d == 0 - 1).match({
+        true  => check_min_numerator(c, b, ty),
+        false => Ok(()),
+    })
+}
+
+check_min_numerator = (c :: Checker, b: Binary, ty: TyId)
+                      Res<(), AllocError> {
+    const_int(c, b.lhs).match({
+        None    => Ok(()),
+        Ok(n)   => numerator_is_min(c, b, ty, n),
+    })
+}
+
+numerator_is_min = (c :: Checker, b: Binary, ty: TyId, n: i64)
+                   Res<(), AllocError> {
+    name = c.prim_name(ty);
+    (is_integer(name) && (n == min_of(name))).match({
+        true  => overflow(c, b, name),
+        false => Ok(()),
+    })
+}
+
+check_overflow = (c :: Checker, b: Binary, ty: TyId) Res<(), AllocError> {
+    const_int(c, b.lhs).match({
+        None    => Ok(()),
+        Ok(x)   => with_lhs(c, b, ty, x),
+    })
+}
+
+with_lhs = (c :: Checker, b: Binary, ty: TyId, x: i64) Res<(), AllocError> {
+    const_int(c, b.rhs).match({
+        None    => Ok(()),
+        Ok(y)   => with_both(c, b, ty, x, y),
+    })
+}
+
+with_both = (c :: Checker, b: Binary, ty: TyId, x: i64, y: i64)
+            Res<(), AllocError> {
+    fold(b.op, x, y).match({
+        None    => Ok(()),
+        Ok(v)   => check_fits(c, b, ty, v),
+    })
+}
+
+// The type a literal ends up in is what decides: `200` fits an i32 and
+// not a u8, and "overflow traps for UNSIGNED types too. A `u8` reaching
+// 256 is the same bug an `i8` reaching 128 is."
+check_fits = (c :: Checker, b: Binary, ty: TyId, v: i64)
+             Res<(), AllocError> {
+    name = c.prim_name(ty);
+    (is_integer(name) && (fits(v, name) == false)).match({
+        true  => overflow(c, b, name),
+        false => Ok(()),
+    })
+}
+
+// The position is the OPERATOR token, which is where a runtime trap
+// prints too — one rule, one position, whichever side of the compile it
+// is discovered on.
+overflow = (c :: Checker, b: Binary, name: str) Res<(), AllocError> {
+    c.report(b.op_span.file, b.op_span,
+             SemaFault.ProvenOverflow(NameFault(name: name)))
+}
+
+// ---------------------------------------------------------------------
+// constant folding
+// ---------------------------------------------------------------------
+
+// What this expression is, when it is a literal integer the compiler can
+// see. Absence means "not provably anything", which is the answer for
+// every binding — on purpose.
+const_int* = (c: Checker, id: ExprId) Res<i64> {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Literal(l) => const_literal(l),
+        Paren(p)   => const_int(c, p.inner),
+        Unary(u)   => const_unary(c, u),
+        Binary(b)  => const_binary(c, b),
+        Access(a)  => const_prim_const(c, a),
+        _          => None,
+    })
+}
+
+const_literal = (l: Literal) Res<i64> {
+    l.kind.match({
+        Int => parse_i64(l.text),
+        _   => None,
+    })
+}
+
+const_unary = (c: Checker, u: Unary) Res<i64> {
+    u.op.match({
+        Neg => negate(c, u.operand),
+        _   => None,
+    })
+}
+
+negate = (c: Checker, id: ExprId) Res<i64> {
+    const_int(c, id).match({
+        None    => None,
+        Ok(v)   => Ok(0 - v),
+    })
+}
+
+const_binary = (c: Checker, b: Binary) Res<i64> {
+    const_int(c, b.lhs).match({
+        None    => None,
+        Ok(x)   => const_rhs(c, b, x),
+    })
+}
+
+const_rhs = (c: Checker, b: Binary, x: i64) Res<i64> {
+    const_int(c, b.rhs).match({
+        None    => None,
+        Ok(y)   => fold(b.op, x, y),
+    })
+}
+
+// `i32.MAX`, `i32.MIN`, `i32.BITS`. The base has to be the primitive's
+// own name written out: a binding of that type is not the type, and
+// folding through one would be folding through a binding.
+const_prim_const = (c: Checker, a: Access) Res<i64> {
+    base = c.tree.expr_at(a.base);
+    base.kind.match({
+        Name(n) => prim_const_value(n.text, a.name.text),
+        _       => None,
+    })
+}
+
+prim_const_value = (type_name: str, member: str) Res<i64> {
+    is_integer(type_name).match({
+        false => None,
+        true  => named_const(type_name, member),
+    })
+}
+
+named_const = (type_name: str, member: str) Res<i64> {
+    member.eq("MAX").match({
+        true  => Ok(max_of(type_name)),
+        false => min_or_bits(type_name, member),
+    })
+}
+
+min_or_bits = (type_name: str, member: str) Res<i64> {
+    member.eq("MIN").match({
+        true  => Ok(min_of(type_name)),
+        false => bits_const(type_name, member),
+    })
+}
+
+bits_const = (type_name: str, member: str) Res<i64> {
+    member.eq("BITS").match({
+        true  => Ok(bits_of(type_name)),
+        false => None,
+    })
+}
+
+// ---------------------------------------------------------------------
+// arithmetic that refuses to trap
+// ---------------------------------------------------------------------
+
+fold* = (op: BinOp, x: i64, y: i64) Res<i64> {
+    op.match({
+        Add => add_i64(x, y),
+        Sub => sub_i64(x, y),
+        Mul => mul_i64(x, y),
+        _   => None,
+    })
+}
+
+add_i64 = (x: i64, y: i64) Res<i64> {
+    safe = (y >= 0).match({
+        true  => x <= I64_MAX - y,
+        false => x >= I64_MIN - y,
+    });
+    safe.match({ true => Ok(x + y), false => None })
+}
+
+sub_i64 = (x: i64, y: i64) Res<i64> {
+    safe = (y >= 0).match({
+        true  => x >= I64_MIN + y,
+        false => x <= I64_MAX + y,
+    });
+    safe.match({ true => Ok(x - y), false => None })
+}
+
+// Only inside the window where a product cannot overflow. Outside it the
+// answer is "not provably anything", which is the honest one: the only
+// alternative is to compute the product and inspect it, and that is the
+// trap this rule exists to report.
+mul_i64 = (x: i64, y: i64) Res<i64> {
+    (small(x) && small(y)).match({
+        true  => Ok(x * y),
+        false => None,
+    })
+}
+
+small = (v: i64) bool { (v <= FOLD_LIMIT) && (v >= 0 - FOLD_LIMIT) }
+
+// ---------------------------------------------------------------------
+// reading a literal
+//
+// `std.core.num` carries no `str` to integer conversion — it carries
+// only lossless conversions between numeric types — so the digits are
+// read here. docs/SEMA_BOOTSTRAP_FIXES.md records it as a std gap: this
+// is `write_usize`'s inverse and belongs beside it in `std.text.text_fmt`.
+// ---------------------------------------------------------------------
+
+parse_i64* = (text: str) Res<i64> {
+    (text.len == 0).match({
+        true  => None,
+        false => digits_of(text),
+    })
+}
+
+digits_of = (text: str) Res<i64> {
+    v ::= 0;
+    ok ::= true;
+    Range(0, text.len).loop((h, i) {
+        d = digit_value(text[i]);
+        room = (d >= 0) && (v <= (I64_MAX - d) / 10);
+        v = step(v, d, room);
+        ok = ok && room;
+    });
+    ok.match({ true => Ok(v), false => None })
+}
+
+// The multiply happens only where it was already proved to fit — the
+// same discipline as the folds above, one level down.
+step = (v: i64, d: i64, room: bool) i64 {
+    room.match({ true => v * 10 + d, false => v })
+}
+
+digit_value = (b: u8) i64 {
+    ((b >= '0') && (b <= '9')).match({
+        true  => (b - '0').to_i64(),
+        false => 0 - 1,
+    })
+}
+
+// ---------------------------------------------------------------------
+// what fits what
+//
+// Written out rather than derived, because deriving it needs a shift and
+// "there are no bitwise operators".
+// ---------------------------------------------------------------------
+
+fits* = (v: i64, name: str) bool {
+    (v >= min_of(name)) && (v <= max_of(name))
+}
+
+signed_of = (name: str) bool {
+    name.eq("i8") || name.eq("i16") || name.eq("i32") || name.eq("i64")
+}
+
+max_of* = (name: str) i64 {
+    signed_of(name).match({
+        true  => signed_max(name),
+        false => unsigned_max(name),
+    })
+}
+
+min_of* = (name: str) i64 {
+    signed_of(name).match({
+        true  => signed_min(name),
+        false => 0,
+    })
+}
+
+signed_max = (name: str) i64 {
+    name.eq("i8").match({ true => 127, false => signed_max_16(name) })
+}
+
+signed_max_16 = (name: str) i64 {
+    name.eq("i16").match({ true => 32767, false => signed_max_32(name) })
+}
+
+signed_max_32 = (name: str) i64 {
+    name.eq("i32").match({ true => 2147483647, false => I64_MAX })
+}
+
+signed_min = (name: str) i64 {
+    name.eq("i8").match({ true => 0 - 128, false => signed_min_16(name) })
+}
+
+signed_min_16 = (name: str) i64 {
+    name.eq("i16").match({ true => 0 - 32768, false => signed_min_32(name) })
+}
+
+signed_min_32 = (name: str) i64 {
+    name.eq("i32").match({
+        true  => 0 - 2147483648,
+        false => I64_MIN,
+    })
+}
+
+// A u64 and a usize hold more than an i64 can name, so the ceiling here
+// is the folder's own and not the type's. A value that large is never
+// folded in the first place, so nothing is missed by saying so.
+unsigned_max = (name: str) i64 {
+    name.eq("u8").match({ true => 255, false => unsigned_max_16(name) })
+}
+
+unsigned_max_16 = (name: str) i64 {
+    name.eq("u16").match({ true => 65535, false => unsigned_max_32(name) })
+}
+
+unsigned_max_32 = (name: str) i64 {
+    name.eq("u32").match({ true => 4294967295, false => I64_MAX })
+}
+
+bits_of* = (name: str) i64 {
+    (name.eq("i8") || name.eq("u8")).match({
+        true  => 8,
+        false => bits_16(name),
+    })
+}
+
+bits_16 = (name: str) i64 {
+    (name.eq("i16") || name.eq("u16")).match({
+        true  => 16,
+        false => bits_32(name),
+    })
+}
+
+bits_32 = (name: str) i64 {
+    (name.eq("i32") || name.eq("u32")).match({
+        true  => 32,
+        false => 64,
+    })
+}

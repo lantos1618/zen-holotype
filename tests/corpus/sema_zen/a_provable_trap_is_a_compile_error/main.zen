@@ -1,0 +1,161 @@
+// A trap the compiler can prove will fire is a compile error.
+//
+// DESIGN.md, the failure model: "`i32.MAX + 1`, a constant zero divisor,
+// a literal index past a known length — is a compile error, not a
+// runtime trap. It is a bug, and it is a bug that was visible without
+// running the program."
+//
+// The properties:
+//
+//   - `i32.MAX + 1` is rejected, and the position is the OPERATOR token
+//   - so is a constant zero divisor, whatever the operand types are
+//   - so is `i32.MIN / -1`, and the message says OVERFLOW: it is an
+//     overflow wearing division's clothes, and faults identically on x86
+//   - `u8` gets no exemption: 200 + 100 does not fit one
+//   - the WRAPPING forms are silent, because wrapping is the intent
+//   - a value that reaches the operator through a BINDING is not folded,
+//     because the trap corpus deliberately routes `i32.MAX` through a
+//     variable so the compiler cannot see it, and a compile error there
+//     would delete the runtime test rather than strengthen it
+//
+// What is NOT here: a literal index past a fixed array's length. The
+// length is not in the type — `array_type` interns `[]<elem>` and drops
+// `ArrayType.count` — so half the rule would fire on one shape and stay
+// silent on the one people write. It is named in the report instead.
+
+Checker, Ctx = sema.sema_check
+TyId, Types = sema.sema_ty
+Ast = ast.ast_arena
+Expr, ExprKind, Literal, LiteralKind, Name, Access, Binary, BinOp = ast.ast_node
+Unary, UnOp, Type, TypeKind, Named = ast.ast_node
+Pos, Span, Ident, no_trivia = ast.ast_span
+ExprId, TypeId = ast.ast_id
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+
+// the operator's own position, which is what a trap prints. Each
+// expression gets its own line so the diagnostic can be told apart.
+at_line = (line: usize) Span {
+    Span(file: "in.zen", start: Pos(line: line, col: 5),
+         end: Pos(line: line, col: 6))
+}
+
+at = () Span { at_line(1) }
+
+expr = (tree :: Ast, kind: ExprKind) Res<ExprId, AllocError> {
+    tree.add_expr(Expr(kind: kind, span: at(),
+                       leading: no_trivia(), trailing: no_trivia()))
+}
+
+int_lit = (tree :: Ast, text: str) Res<ExprId, AllocError> {
+    expr(tree, ExprKind.Literal(Literal(kind: LiteralKind.Int, text: text)))
+}
+
+neg = (tree :: Ast, of: ExprId) Res<ExprId, AllocError> {
+    expr(tree, ExprKind.Unary(Unary(op: UnOp.Neg, op_span: at(),
+                                    operand: of)))
+}
+
+// `i32.MAX` — the base has to be the primitive's own name written out,
+// because a binding of that type is not the type
+prim_const = (tree :: Ast, type_name: str, member: str)
+             Res<ExprId, AllocError> {
+    base = expr(tree, ExprKind.Name(Name(text: type_name))).try();
+    expr(tree, ExprKind.Access(Access(
+        base: base, name: Ident(text: member, span: at()))))
+}
+
+name_of = (tree :: Ast, text: str) Res<ExprId, AllocError> {
+    expr(tree, ExprKind.Name(Name(text: text)))
+}
+
+binary = (tree :: Ast, op: BinOp, lhs: ExprId, rhs: ExprId, line: usize)
+         Res<ExprId, AllocError> {
+    tree.add_expr(Expr(
+        kind: ExprKind.Binary(Binary(op: op, op_span: at_line(line),
+                                     lhs: lhs, rhs: rhs)),
+        span: at_line(line), leading: no_trivia(), trailing: no_trivia()))
+}
+
+// ---------------------------------------------------------------------
+
+asked = (c :: Checker, a: Alloc, label: str, id: ExprId, ctx: Ctx)
+        Res<(), AllocError> {
+    before = c.diag_count();
+    c.type_of(id, ctx).try();
+    added = c.diag_count() - before;
+    println("{}: {} diagnostic(s)", label, added);
+    (added > 0).then(() { show(c, a, c.diag_count() - 1).try() });
+    Ok(());
+}
+
+show = (c :: Checker, a: Alloc, i: usize) Res<(), AllocError> {
+    out ::= a.String().try();
+    c.diag_at(i).match({
+        None    => Ok(()),
+        Ok(d)   => d.render(c.types, out),
+    }).try();
+    println("    {}", out.view());
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    tree ::= alloc.Ast();
+
+    one = int_lit(tree, "1").try();
+    zero = int_lit(tree, "0").try();
+    two_hundred = int_lit(tree, "200").try();
+    hundred = int_lit(tree, "100").try();
+    minus_one = neg(tree, one).try();
+
+    i32_max = prim_const(tree, "i32", "MAX").try();
+    i32_min = prim_const(tree, "i32", "MIN").try();
+    u8_max = prim_const(tree, "u8", "MAX").try();
+
+    // i32.MAX + 1, and the same sum with the wrapping operator
+    over = binary(tree, BinOp.Add, i32_max, one, 10).try();
+    wrapped = binary(tree, BinOp.AddWrap, i32_max, one, 11).try();
+
+    // i32.MAX - 1, which fits and must say nothing
+    fine = binary(tree, BinOp.Sub, i32_max, one, 12).try();
+
+    // a constant zero divisor, and a zero remainder divisor
+    div0 = binary(tree, BinOp.Div, i32_max, zero, 13).try();
+    rem0 = binary(tree, BinOp.Rem, i32_max, zero, 14).try();
+
+    // i32.MIN / -1 -- an overflow, not a division by zero
+    min_div = binary(tree, BinOp.Div, i32_min, minus_one, 15).try();
+
+    // unsigned gets no exemption. the operand type comes from u8.MAX,
+    // which is a u8, so the sum is checked against a u8
+    u8_sum = binary(tree, BinOp.Add, u8_max, hundred, 16).try();
+    u8_fits = binary(tree, BinOp.Sub, u8_max, hundred, 17).try();
+
+    // 200 + 100 with nothing to settle the literals' type: unsettled, so
+    // nothing is provable and nothing is said
+    unsettled = binary(tree, BinOp.Add, two_hundred, hundred, 18).try();
+
+    // through a BINDING: `big + 1` where big is an i32 the checker was
+    // told about but never saw a value for
+    big = name_of(tree, "big").try();
+    through_binding = binary(tree, BinOp.Add, big, one, 19).try();
+
+    c ::= alloc.Checker(tree).try();
+    none = c.types.unknown().try();
+    ctx = Ctx(0, none);
+    c.bind("big", c.types.prim("i32").try(), false).try();
+
+    asked(c, alloc, "i32.MAX + 1", over, ctx).try();
+    asked(c, alloc, "i32.MAX +% 1", wrapped, ctx).try();
+    asked(c, alloc, "i32.MAX - 1", fine, ctx).try();
+    asked(c, alloc, "i32.MAX / 0", div0, ctx).try();
+    asked(c, alloc, "i32.MAX % 0", rem0, ctx).try();
+    asked(c, alloc, "i32.MIN / -1", min_div, ctx).try();
+    asked(c, alloc, "u8.MAX + 100", u8_sum, ctx).try();
+    asked(c, alloc, "u8.MAX - 100", u8_fits, ctx).try();
+    asked(c, alloc, "200 + 100, no type to settle it", unsettled, ctx).try();
+    asked(c, alloc, "big + 1, through a binding", through_binding, ctx).try();
+    Ok(0);
+}

@@ -167,14 +167,6 @@ main = (env: Env) Res<i32, AllocError> {
     flag = expr(tree, ExprKind.Name(Name(text: "flag"))).try();
     mystery = expr(tree, ExprKind.Name(Name(text: "mystery"))).try();
 
-    c ::= alloc.Checker(tree).try();
-    none = c.types.unknown().try();
-    ctx = Ctx(0, none);
-
-    slot_ty = c.type_from_ast(slot_node, ctx).try();
-    c.bind("s", slot_ty, false).try();
-    c.bind("flag", c.types.bool_ty().try(), false).try();
-
     // COMPLETE over the pattern space: five arms, no wildcard
     full ::= alloc.Vec<Arm>();
     full.add(arm(tree, holds(tree, alloc, "Left",
@@ -222,6 +214,18 @@ main = (env: Env) Res<i32, AllocError> {
     blind.add(arm(tree, bare(tree, alloc, "Right").try(), one).try()).try();
     on_poison = expr(tree, ExprKind.Match(Match(
         scrutinee: mystery, name_span: at(), arms: blind, arms_span: at()))).try();
+
+    // THE TREE IS COMPLETE BEFORE THE CHECKER IS BUILT, and it has to be:
+    // `Checker` holds the `Ast` by value, so a node added afterwards is
+    // invisible to it and reading its id traps. The engine is a query over
+    // a finished tree, not a listener on a growing one.
+    c ::= alloc.Checker(tree).try();
+    none = c.types.unknown().try();
+    ctx = Ctx(0, none);
+
+    slot_ty = c.type_from_ast(slot_node, ctx).try();
+    c.bind("s", slot_ty, false).try();
+    c.bind("flag", c.types.bool_ty().try(), false).try();
 
     count(c, alloc, "every (Slot, Cell) pair covered", covered, ctx,
           c.diag_count()).try();

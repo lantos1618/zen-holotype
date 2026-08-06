@@ -14,17 +14,29 @@
 // So `c.type_of(id, ctx)` still reads as a method, resolution is ufcs,
 // and nothing at a call site changed.
 //
-// THE DEPENDENCY POINTS ONE WAY. This module imports `Checker`;
-// `sema_check.zen` imports nothing from here. Module cycles are a
-// compile error, so a split that did not point one way would not
-// compile — the constraint `ast_node.zen` records when it explains why
-// it is one file. What made this split possible where that one was
-// impossible: the engine holds STATE and these hold BEHAVIOUR, and only
-// the behaviour needed to know about the other.
+// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
+// is "what does this node mean", and the two queries share the memo
+// discipline, the poison rule and `.try()`'s four rules. The forms that
+// grew their own subject have already left — `Match` to `sema_match`,
+// `Access` to `sema_member`, `Call` to `sema_call`, the trap rule to
+// `sema_trap` — and what is left is the dispatch plus the forms with no
+// subject of their own.
+//
+// THE ENGINE HOLDS STATE AND THIS HOLDS BEHAVIOUR, which is what made
+// the split possible: `sema_check.zen` imports nothing from here.
+//
+// The claim this header used to make — that module cycles are a compile
+// error — is FALSE, and `AST_CONTRACT.md` says so in as many words:
+// "an import cycle is not a problem a whole-program compiler has". It
+// was tested rather than assumed, with two sibling modules calling each
+// other's functions, and it runs. That matters here because expression
+// typing IS mutually recursive across this folder: `Call` needs
+// `type_of` and `type_of` needs `Call`, so the cycle is the shape of the
+// problem and not a smell.
 
 Ast, Expr, ExprId, Type, TypeId, Span, Ident, Literal, LiteralKind = ast
 BinOp, UnOp, Block, BlockId, Stmt, StmtKind = ast
-Param, Binary, Unary, Bind, ExprStmt = ast
+Param, Binary, Unary, Bind, ExprStmt, Match, Access, Call = ast
 Alloc, AllocError = std.mem
 Vec, Map = std.collections
 str, String = std.text
@@ -36,6 +48,11 @@ Diag, SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 ARRAY_DECL, UNRESOLVED, is_prim, is_predicate = sema.sema_check
 absence_into_failure, both_failures = sema.sema_check
+match_type = sema.sema_match
+access_type = sema.sema_member
+call_type = sema.sema_call
+computed_member = sema.sema_member
+check_binary = sema.sema_trap
 
 // -----------------------------------------------------------------
 // QUERY: the type a written type node denotes
@@ -170,7 +187,18 @@ declared_type* = (c :: Checker, node: Type, name: Ident, args: Vec<TyId>,
                  ctx: Ctx) Res<TyId, AllocError> {
     is_prim(name.text).match({
         true  => c.types.prim(name.text),
-        false => c.lookup_named(node, name, args, ctx),
+        false => c.tvar_or_declared(node, name, args, ctx),
+    })
+}
+
+// The `T` of an enclosing `<T>` shadows a declaration of the same name,
+// exactly as a local binding does. Without this, resolving a generic's
+// own signature reports its own type parameter as an undefined name.
+tvar_or_declared* = (c :: Checker, node: Type, name: Ident, args: Vec<TyId>,
+                    ctx: Ctx) Res<TyId, AllocError> {
+    c.lookup_tvar(name.text).match({
+        None    => c.lookup_named(node, name, args, ctx),
+        Ok(b)   => Ok(b.ty),
     })
 }
 
@@ -223,10 +251,13 @@ expr_kind* = (c :: Checker, node: Expr, ctx: Ctx) Res<TyId, AllocError> {
         Name(n)     => c.name_type(node, n.text, ctx),
         Paren(p)    => c.type_of(p.inner, ctx),
         Binary(b)   => c.binary_type(node, b, ctx),
-        Unary(u)    => c.unary_type(u, ctx),
+        Unary(u)    => c.unary_type(node, u, ctx),
         Try(t)      => c.try_type(node, t.operand, ctx),
         Consume(x)  => c.type_of(x.operand, ctx),
         Block(b)    => c.block_type(b, ctx),
+        Match(m)    => c.match_type(node, m, ctx),
+        Access(a)   => c.access_type(node, a, ctx),
+        Call(k)     => c.call_type(node, k, ctx),
         _           => c.types.unknown(),
     })
 }
@@ -250,9 +281,26 @@ literal_type* = (c :: Checker, l: Literal) Res<TyId, AllocError> {
 name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
             Res<TyId, AllocError> {
     c.lookup(text).match({
-        None    => c.global_name_type(node, text, ctx),
+        None    => c.unbound_name_type(node, text, ctx),
         Ok(b)   => Ok(b.ty),
     })
+}
+
+// `None` is the prelude's own variant and there is nothing to resolve:
+// `Res<T>` is recognised structurally, exactly as the written type is,
+// so the value form is too. It carries no reason because there is none
+// to carry — that is what makes it an absence and not an error.
+unbound_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
+                    Res<TyId, AllocError> {
+    text.eq("None").match({
+        true  => c.none_type(),
+        false => c.global_name_type(node, text, ctx),
+    })
+}
+
+none_type* = (c :: Checker) Res<TyId, AllocError> {
+    hole = c.types.infer().try();
+    c.types.res_absence(hole)
 }
 
 global_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
@@ -287,10 +335,14 @@ binary_type* = (c :: Checker, node: Expr, b: Binary, ctx: Ctx)
               Res<TyId, AllocError> {
     lhs = c.type_of(b.lhs, ctx).try();
     rhs = c.type_of(b.rhs, ctx).try();
-    is_predicate(b.op).match({
+    got = is_predicate(b.op).match({
         true  => c.types.bool_ty(),
         false => c.arith_type(lhs, rhs),
-    })
+    }).try();
+    // a trap the compiler can prove will fire is a compile error, and
+    // the operand types are what decides what fits
+    c.check_binary(b, got).try();
+    Ok(got);
 }
 
 // The wider of the two: a literal takes the other side's type, which
@@ -305,13 +357,42 @@ arith_type* = (c :: Checker, lhs: TyId, rhs: TyId) Res<TyId, AllocError> {
     }));
 }
 
-unary_type* = (c :: Checker, u: Unary, ctx: Ctx) Res<TyId, AllocError> {
+unary_type* = (c :: Checker, node: Expr, u: Unary, ctx: Ctx)
+             Res<TyId, AllocError> {
     inner = c.type_of(u.operand, ctx).try();
     u.op.match({
         Not  => c.types.bool_ty(),
         Neg  => Ok(inner),
-        Addr => Ok(inner),
+        Addr => c.addr_type(node, u, inner, ctx),
     })
+}
+
+// `&c.width` on an impl-supplied field: there is no storage, so there is
+// no address. The diagnostic lands on the address-of expression, which
+// is where the `&` the author has to delete is.
+addr_type* = (c :: Checker, node: Expr, u: Unary, inner: TyId, ctx: Ctx)
+            Res<TyId, AllocError> {
+    operand = c.tree.expr_at(u.operand);
+    operand.kind.match({
+        Access(a) => c.addr_of_access(node, a, inner, ctx),
+        _         => Ok(inner),
+    })
+}
+
+addr_of_access* = (c :: Checker, node: Expr, a: Access, inner: TyId,
+                  ctx: Ctx) Res<TyId, AllocError> {
+    c.computed_member(a, ctx).try().match({
+        true  => c.no_address(node, a, inner),
+        false => Ok(inner),
+    })
+}
+
+no_address* = (c :: Checker, node: Expr, a: Access, inner: TyId)
+             Res<TyId, AllocError> {
+    c.report(node.span.file, node.span,
+                SemaFault.ComputedFieldAddress(
+                    NameFault(name: a.name.text))).try();
+    Ok(inner);
 }
 
 
@@ -480,7 +561,7 @@ bind_stmt* = (c :: Checker, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
         None    => Ok(got),
     }).try();
     c.check_assign(b, got, want, ctx).try();
-    c.bind_target(b, want).try();
+    c.bind_target(b, want, ctx).try();
     c.types.prim("()")
 }
 
@@ -494,11 +575,28 @@ check_assign* = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
 // Only a bare name introduces a binding. `c.len = ..` and
 // `buf[i] = ..` are assignments to something that already exists,
 // which is why `Bind.target` is an expression and not an `Ident`.
-bind_target* = (c :: Checker, b: Bind, ty: TyId) Res<(), AllocError> {
+bind_target* = (c :: Checker, b: Bind, ty: TyId, ctx: Ctx)
+              Res<(), AllocError> {
     target = c.tree.expr_at(b.target);
     target.kind.match({
-        Name(n) => c.bind(n.text, ty, b.mutable),
-        _       => Ok(()),
+        Name(n)   => c.bind(n.text, ty, b.mutable),
+        Access(a) => c.assign_access(target, a, ctx),
+        _         => Ok(()),
     }).try();
     Ok(());
+}
+
+// `c.width = 5` on an impl-supplied field: there is nothing to assign
+// into. "Mutation goes through exported methods, as it always does."
+assign_access* = (c :: Checker, target: Expr, a: Access, ctx: Ctx)
+                Res<(), AllocError> {
+    c.computed_member(a, ctx).try().match({
+        true  => c.no_storage(target, a),
+        false => Ok(()),
+    })
+}
+
+no_storage* = (c :: Checker, target: Expr, a: Access) Res<(), AllocError> {
+    c.report(target.span.file, target.span,
+                SemaFault.ComputedFieldAssign(NameFault(name: a.name.text)))
 }

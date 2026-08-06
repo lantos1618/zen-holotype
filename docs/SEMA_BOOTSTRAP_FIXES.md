@@ -351,3 +351,130 @@ for `Types`, `Checker` and `World`.
 uses `alloc.Lexer(source)`. Recorded again because three of the four
 constructors in `src/sema/` are declared this way, so the next component
 will meet it three more times.
+
+---
+
+## 10. A loop binding read inside a nested closure does not resolve
+
+**Blocking: yes for one shape, and one of the two forms is silent.**
+
+`x.loop((h, v) { <cond>.then(() { .. v .. }) })` — a `.then` closure
+nested inside a `.loop` closure — loses `v`. There are two symptoms and
+they depend on whether the inner use is `v` itself or a field of it:
+
+```groovy
+Row = { name*: str, ty*: usize }
+
+// (a) a FIELD of the loop binding: a Zen diagnostic, pointing at the field
+each = (rows: Vec<Row>, want: str, out :: Vec<usize>) Res<(), AllocError> {
+    rows.loop((h, r) {
+        r.name.eq(want).then(() { out.add(r.ty).try() });   // `no member `ty``
+    });
+    Ok(());
+}
+
+// (b) the loop binding ITSELF, when the `.then` receiver is a CALL:
+//     no Zen diagnostic at all, and the emitted C says `r` undeclared
+keep = (c: Checker, rows: Vec<Row>, kept :: Vec<Row>) Res<(), AllocError> {
+    rows.loop((h, r) {
+        c.wanted(r.ty).then(() { kept.add(r).try() });      // C: `r` undeclared
+    });
+    Ok(());
+}
+```
+
+Form (b) reaches `cc`, which is two tools downstream of the mistake.
+`sema_def.zen`'s `keep_exported` — `d.exported.then(() { out.add(d).try() })`
+— does NOT trip it, which is what made this hard to see: the receiver
+there is a plain field read, and the capture survives.
+
+**Workaround in `src/sema/`:** every such site is a named helper taking
+the loop binding as a written parameter, with the `.then` replaced by a
+`.match`. Seven sites in `sema_member.zen`, `sema_call.zen`,
+`sema_match.zen`, `sema_decl.zen` and `sema_check.zen` are written that
+way for this reason and no other. It reads better, which is the only
+consolation.
+
+---
+
+## 11. `Vec.get` on a locally-bound Vec resolves to `Map.get` at unknown
+   type arguments
+
+**Blocking: yes, and it fails in `cc` with no Zen diagnostic naming the
+line that caused it.**
+
+```groovy
+Found = { computed*: bool }
+
+// `found` is bound with `::=` from a generic call, and `.get` is read
+// inside an expression that has an expectation (`Ok(..)` around it)
+computed_member = (c :: Checker, ac: Access, ctx: Ctx) Res<bool, AllocError> {
+    found ::= c.alloc.Vec<Found>();
+    Ok(found.get(0).match({ Ok(f) => f.computed, None => false }));
+}
+```
+
+```
+std/collections/collections_map.zen:93:9: cannot infer the type of `Ok` here
+std/collections/collections_vec.zen:39:22: cannot infer the type of `Ok` here
+std/collections/collections_vec.zen:40:22: cannot infer the type of `None` here
+bootstrap: 3 diagnostic(s)
+```
+
+and then, from `cc`, on code nothing calls:
+
+```
+error: incompatible type for argument 1 of 'zu_f5_3ast6ast_id7BlockId4Hash4hash'
+       expected 'zu_t3_3ast6ast_id7BlockId' but argument is of type 'int'
+```
+
+The chain: `get` is resolved by name across the whole program rather than
+on the receiver, `Map.get` is a candidate, and it is instantiated at
+`K = ?`, `V = ?`. `Map.get` then calls `key.hash(..)` on an unknown type,
+which picks whatever `Hash` impl the tree happens to end with —
+`ast_id.zen`'s `BlockId` — and passes it the `int` literal `0`. The three
+diagnostics all point INSIDE `std/collections`, at correct code, and none
+of them names the file that caused it.
+
+This is `LEXER_BOOTSTRAP_FIXES.md` §7 again — global by-name method
+resolution — now producing a monomorphisation rather than a wrong
+diagnostic. The `Ok(..)` around the expression matters: the same `.get`
+as a trailing expression (`found.get(0).match({ .. })` returning `Res`)
+does not trip it, which is why `sema_type.zen`'s `lookup_named` has
+always been fine.
+
+**Workaround:** a one-line helper whose parameter type is WRITTEN.
+
+```groovy
+first_found = (found: Vec<Found>) Res<Found> { found.get(0) }
+```
+
+Three sites in `src/sema/` are written that way.
+
+---
+
+## 12. `Checker` holds the `Ast` by value, so the tree must be finished
+   first
+
+**Not a bug — a constraint worth writing down, because it costs an
+afternoon and the symptom is a trap two files away.**
+
+`Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError>` copies the
+`Ast`, and an `Ast` is six `Vec`s: pointer, length, capacity. A node
+added to the caller's `tree` after `alloc.Checker(tree)` is invisible to
+the checker, and asking about its id traps in `ast_arena.zen`'s `expr_at`
+— which is correct behaviour for an id the arena never handed out, and
+says nothing about where the mistake was.
+
+```
+ast/ast_arena.zen:108:28: trap: integer overflow
+```
+
+There is no reference type to hold it by instead, and taking one would
+not help: `Vec` grows by reallocating, so any copy taken before a growth
+points at freed pages. **The engine is a query over a FINISHED tree**,
+and every test in `tests/corpus/sema_zen/` builds the whole AST before
+constructing the checker for exactly this reason.
+
+Worth a sentence in `AST_CONTRACT.md`: "an `Ast` is a value, and a copy
+of it is a snapshot."

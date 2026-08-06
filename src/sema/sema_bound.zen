@@ -1,0 +1,142 @@
+// src/sema/sema_bound.zen
+// What a bound promises, and what an impl owes it.
+//
+// Split from `sema_member.zen`, which answers "what does a dot reach".
+// These are two subjects and STYLE.md's rule is to split by subject: the
+// member table is asked at every `p.x` in the program and has to be
+// fast; these two are asked once per impl and once per generic call, and
+// they are the only place in this folder that says a program is WRONG
+// about a bound rather than merely uninformative about one.
+//
+// The one thing they share is `bound_members` — the members a bound
+// declares — and it stays with the table, because the table is what
+// reads it on every access.
+//
+// A BOUND IS A PROMISE, and `satisfies_bound` is deliberately narrow: an
+// impl of it, or the same type, and nothing else. A type that happens to
+// have a field of the right name has not made the promise, and accepting
+// it would make the bound a shape check rather than a declaration —
+// which is the difference between "which struct's shape do I need" and
+// "whatever has these names".
+
+Ast, Decl, DeclKind, Struct, Impl, Member, MemberKind = ast
+Field, Const, Function, Form, Span, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+DeclId, ImplId = sema.sema_id
+TyId, Ty, Types, TyNamed = sema.sema_ty
+World, Def, decl_at = sema.sema_def
+Diag, SemaFault, NameFault = sema.sema_diag
+Checker, Ctx = sema.sema_check
+bound_members, has_member, member_named, impl_span = sema.sema_member
+type_from_ast = sema.sema_type
+
+// "`A.impl(B, {..})` supplies a value for every field `B` declares."
+// Every field, and every member the bound left to the impl — a sealed or
+// default member has a body already, and an optional hook is optional by
+// declaration.
+check_impl* = (c :: Checker, id: ImplId, mi: usize) Res<(), AllocError> {
+    c.world.impl_at(c.tree, id).match({
+        Ok(im) => check_impl_body(c, im, id, mi),
+        None   => Ok(()),
+    }).try();
+    Ok(());
+}
+
+check_impl_body = (c :: Checker, im: Impl, id: ImplId, mi: usize)
+                  Res<(), AllocError> {
+    poison = c.types.unknown().try();
+    bound = c.type_from_ast(im.bound, Ctx(mi, poison)).try();
+    members ::= c.alloc.Vec<Member>();
+    bound_members(c, bound, members).try();
+    span = impl_span(c, id);
+    members.loop((h, m) { owed(c, im, m, span).try() });
+    Ok(());
+}
+
+owed = (c :: Checker, im: Impl, m: Member, span: Span) Res<(), AllocError> {
+    (required(m) && (has_member(im.members, member_name(m)) == false)).match({
+        true  => missing(c, span, member_name(m)),
+        false => Ok(()),
+    })
+}
+
+// A field with no default, or a member the bound declared with no body
+// and no `::=`. The four forms are DESIGN.md's method table verbatim:
+// Required must be provided, Sealed and Default already are, and a Hook
+// is optional by construction.
+required* = (m: Member) bool {
+    m.kind.match({
+        Field(f)    => f.value.match({ Ok(_) => false, None => true }),
+        Function(f) => f.form.match({ Required => true, _ => false }),
+        Const(_)    => false,
+    })
+}
+
+member_name* = (m: Member) str {
+    m.kind.match({
+        Field(f)    => f.name.text,
+        Const(k)    => k.name.text,
+        Function(f) => f.name.text,
+    })
+}
+
+missing = (c :: Checker, span: Span, name: str) Res<(), AllocError> {
+    c.report(span.file, span, SemaFault.ImplMissingField(NameFault(name: name)))
+}
+
+// Does `ty` keep the promise `bound` makes? An impl of it, or the same
+// type — and nothing else. "The bound is the promise", so a type that
+// happens to have a field of the right name has not made one.
+satisfies_bound* = (c :: Checker, ty: TyId, bound: TyId)
+                   Res<bool, AllocError> {
+    ty.eq(bound).match({
+        true  => Ok(true),
+        false => impls_bound(c, ty, bound),
+    })
+}
+
+impls_bound = (c :: Checker, ty: TyId, bound: TyId) Res<bool, AllocError> {
+    c.types.at(ty).match({
+        Named(n) => named_impls_bound(c, n, bound),
+        _        => Ok(false),
+    })
+}
+
+named_impls_bound = (c :: Checker, n: TyNamed, bound: TyId)
+                    Res<bool, AllocError> {
+    ids ::= c.alloc.Vec<ImplId>();
+    c.world.impls_named(c.tree, n.name, ids).try();
+    hit ::= false;
+    ids.loop((h, id) {
+        got = local_bound_is(c, id, n, bound).try();
+        hit = hit || got;
+    });
+    Ok(hit);
+}
+
+local_bound_is = (c :: Checker, id: ImplId, n: TyNamed, bound: TyId)
+                 Res<bool, AllocError> {
+    (n.decl.module == id.decl.module).match({
+        true  => impl_bound_is(c, id, n, bound),
+        false => Ok(false),
+    })
+}
+
+impl_bound_is = (c :: Checker, id: ImplId, n: TyNamed, bound: TyId)
+                Res<bool, AllocError> {
+    poison = c.types.unknown().try();
+    ctx = Ctx(n.decl.module.to_usize(), poison);
+    c.world.impl_at(c.tree, id).match({
+        Ok(im) => bound_matches(c, im, ctx, bound),
+        None   => Ok(false),
+    })
+}
+
+bound_matches = (c :: Checker, im: Impl, ctx: Ctx, bound: TyId)
+                Res<bool, AllocError> {
+    got = c.type_from_ast(im.bound, ctx).try();
+    Ok(got.eq(bound));
+}

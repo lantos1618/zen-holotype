@@ -100,6 +100,20 @@ Checker* = {
     // stack needs a `usize` and `release` is what pops it.
     locals :: Vec<Binding>,
 
+    // the type parameters in scope, and the bounds on them. Two stacks
+    // with marks, the same shape and for the same reason.
+    //
+    // A `Binding`'s `name` is the type parameter's — `T` — and its `ty`
+    // is the `Ty.Var` it denotes in `tvars`, or one of its bounds in
+    // `bounds`. `<K: Eq + Hash, V>` is three rows in `tvars` terms and
+    // two in `bounds`, because "`Eq + Hash` is two requirements on one
+    // type" and a list is the only shape that holds two.
+    //
+    // Not a field on `Ctx`: a `Ctx` is copied into every sub-query, and
+    // a Vec copied by value is one Vec shared by accident.
+    tvars :: Vec<Binding>,
+    bounds :: Vec<Binding>,
+
     alloc*: Alloc,
 
     // -----------------------------------------------------------------
@@ -152,6 +166,79 @@ Checker* = {
         extra = self.locals.len - mark;
         Range(0, extra).loop((h, i) {
             self.locals.take(self.locals.len - 1);
+        });
+        Ok(());
+    }
+
+    // -----------------------------------------------------------------
+    // type parameters and their bounds
+    //
+    // `<T: Boxy>` puts `T` in scope as a type and `Boxy` in scope as
+    // what `T` promises — and that promise is the only thing that can
+    // choose between two impls supplying one name.
+    // -----------------------------------------------------------------
+
+    tvar_mark* = (self: @Self) usize { self.tvars.len }
+
+    push_tvar* = (self :: @Self, name: str, ty: TyId) Res<(), AllocError> {
+        self.tvars.add(Binding(name: name, ty: ty, mutable: false))
+    }
+
+    release_tvars* = (self :: @Self, mark: usize) Res<(), AllocError> {
+        extra = self.tvars.len - mark;
+        Range(0, extra).loop((h, i) {
+            self.tvars.take(self.tvars.len - 1);
+        });
+        Ok(());
+    }
+
+    // The `T` of an enclosing `<T>`, innermost first. A type parameter
+    // shadows a declaration of the same name, exactly as a local
+    // binding shadows one.
+    lookup_tvar* = (self: @Self, name: str) Res<Binding> {
+        n = self.tvars.len;
+        Range(0, n).find((k) {
+            self.tvars.get(n - k - 1).match({
+                Ok(b) => b.name.eq(name),
+                None  => false,
+            })
+        }).match({
+            None    => None,
+            Ok(k)   => self.tvars.get(n - k - 1),
+        })
+    }
+
+    bound_mark* = (self: @Self) usize { self.bounds.len }
+
+    push_bound* = (self :: @Self, name: str, ty: TyId) Res<(), AllocError> {
+        self.bounds.add(Binding(name: name, ty: ty, mutable: false))
+    }
+
+    release_bounds* = (self :: @Self, mark: usize) Res<(), AllocError> {
+        extra = self.bounds.len - mark;
+        Range(0, extra).loop((h, i) {
+            self.bounds.take(self.bounds.len - 1);
+        });
+        Ok(());
+    }
+
+    // Is this bound one a generic in scope declared? The question impl
+    // selection asks, and the only question it asks.
+    has_bound* = (self: @Self, ty: TyId) bool {
+        Range(0, self.bounds.len).find((i) {
+            self.bounds.get(i).match({ Ok(b) => b.ty.eq(ty), None => false })
+        }).match({ Ok(_) => true, None => false })
+    }
+
+    // Every bound on one type parameter. `<K: Eq + Hash>` has two, and
+    // a member reachable through either is reachable through `K`.
+    bounds_of* = (self: @Self, name: str, out :: Vec<TyId>)
+                 Res<(), AllocError> {
+        self.bounds.loop((h, b) {
+            // hoisted: a field read of a loop binding inside a nested
+            // closure does not resolve. docs/SEMA_BOOTSTRAP_FIXES.md §10
+            ty = b.ty;
+            b.name.eq(name).then(() { out.add(ty).try() });
         });
         Ok(());
     }
@@ -262,6 +349,15 @@ Checker* = {
 // `Types` are. It builds the module graph eagerly, because every query
 // below needs it and building it twice is the thing memoization exists
 // to prevent.
+//
+// THE TREE MUST BE FINISHED FIRST. An `Ast` is a value — six `Vec`s, each
+// a pointer, a length and a capacity — so this copies a SNAPSHOT. A node
+// added to the caller's tree afterwards is invisible here, and asking
+// about its id traps in `ast_arena.zen`, which is correct for an id the
+// arena never handed out and says nothing about where the mistake was.
+// Holding a reference instead would not help: a `Vec` grows by
+// reallocating, so any handle taken before a growth points at freed
+// pages. Sema is a query over a finished tree.
 Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
     Ok(Checker(
         tree: tree,
@@ -271,6 +367,8 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         expr_memo: a.Map<ExprId, TyId>(),
         type_memo: a.Map<TypeId, TyId>(),
         locals: a.Vec<Binding>(),
+        tvars: a.Vec<Binding>(),
+        bounds: a.Vec<Binding>(),
         alloc: a,
     ));
 }

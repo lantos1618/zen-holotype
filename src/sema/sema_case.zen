@@ -1,0 +1,177 @@
+// src/sema/sema_case.zen
+// What a value of a type can BE — the case list a `.match` is checked
+// against.
+//
+// This is one question and it has one answer per type, which is why it
+// is a file and not a section of `sema_match.zen`: the usefulness
+// algorithm asks it at every column of every row, and the rule for what
+// a case IS — bool has two, `Res` has two, a declared enum has its
+// variants, and everything else has none — is a statement about TYPES,
+// not about patterns.
+//
+// NO CASE LIST IS NOT AN ERROR. An `i32` has no case analysis; only `_`
+// covers it. So the answer is a `bool` beside the list rather than an
+// empty list, because "no cases" and "a type nobody can enumerate" are
+// different facts and a checker that confuses them demands a `_` on a
+// bool or accepts a match on an integer that covers nothing.
+
+Ast, Decl, DeclKind, Enum, Variant = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str = std.text
+Range = std.core
+TyId, Ty, Types, TyNamed, ResForm, TyRes = sema.sema_ty
+decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+type_from_ast = sema.sema_type
+
+// One case of a type: the name a pattern writes, and what it carries.
+//
+// A payload is ONE type and never a list, because `Variant.payload` is
+// one type and never a list — `Circle(Circle)`, `Failed(str)`. So a
+// normalised pattern has at most one sub-pattern, and the usefulness
+// matrix never grows a column it did not have.
+Case* = {
+    name*: str,
+    payload*: TyId,
+    has_payload*: bool,
+}
+
+// Every case of `ty`, appended to `out`. The answer is whether `ty` HAS
+// a case analysis at all: `false` means nothing but `_` can cover it,
+// and no exhaustiveness question may be asked of it.
+cases_of* = (c :: Checker, ty: TyId, out :: Vec<Case>) Res<bool, AllocError> {
+    c.types.at(ty).match({
+        Prim(p)  => bool_cases(c, p.name, out),
+        Res(r)   => res_cases(c, r, out),
+        Named(n) => named_cases(c, n, out),
+        _        => Ok(false),
+    })
+}
+
+// The payload `name` carries in `ty`, or poison when `ty` does not
+// declare that case. Poison rather than a diagnostic: a pattern naming
+// a case the type does not have is reported once, where the pattern is
+// normalised, and this is the second ask.
+case_payload* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
+    cases ::= c.alloc.Vec<Case>();
+    cases_of(c, ty, cases).try();
+    // the arm whose type is WRITTEN leads: a match takes its type from
+    // its first arm. See docs/SEMA_BOOTSTRAP_FIXES.md.
+    find_case(cases, name).match({
+        None   => c.types.unknown(),
+        Ok(cs) => Ok(cs.payload),
+    })
+}
+
+// How many sub-patterns a pattern for `name` has: one when the case
+// carries a payload, none when it does not. A case the type does not
+// declare falls back to what the pattern wrote, so a mistake about the
+// name does not also become a mistake about the shape.
+case_arity* = (c :: Checker, ty: TyId, name: str, wrote_sub: bool)
+              Res<usize, AllocError> {
+    cases ::= c.alloc.Vec<Case>();
+    cases_of(c, ty, cases).try();
+    Ok(find_case(cases, name).match({
+        Ok(cs) => bool_to_arity(cs.has_payload),
+        None   => bool_to_arity(wrote_sub),
+    }));
+}
+
+find_case* = (cases: Vec<Case>, name: str) Res<Case> {
+    Range(0, cases.len).find((i) {
+        cases.get(i).match({ Ok(cs) => cs.name.eq(name), None => false })
+    }).match({
+        Ok(i) => cases.get(i),
+        None  => None,
+    })
+}
+
+bool_to_arity = (b: bool) usize { b.match({ true => 1, false => 0 }) }
+
+// `bool` is an enum of two cases and gets no exemption: "one-sided is
+// spelled `.then`, which is a different word and cannot be a typo".
+bool_cases = (c :: Checker, name: str, out :: Vec<Case>) Res<bool, AllocError> {
+    name.eq("bool").match({
+        true  => add_bool(c, out),
+        false => Ok(false),
+    })
+}
+
+add_bool = (c :: Checker, out :: Vec<Case>) Res<bool, AllocError> {
+    unit = c.types.unit().try();
+    out.add(Case(name: "true", payload: unit, has_payload: false)).try();
+    out.add(Case(name: "false", payload: unit, has_payload: false)).try();
+    Ok(true);
+}
+
+// `Res<T>` is `Ok(T) | None` and `Res<T, E>` is `Ok(T) | Err(E)` —
+// declared in the prelude, recognised structurally here for the reason
+// `sema_type.zen` gives: sema asks which form a `Res` is at every
+// `.try()`, and a nominal answer would make each of those a field read.
+//
+// `Open` — a bare `Ok(..)` whose form no expectation has settled — is
+// matched as an absence. It is the weaker of the two, so a `None` arm
+// is accepted and an `Err` arm is not, which is the direction law 4
+// wants: failure stays visible.
+res_cases = (c :: Checker, r: TyRes, out :: Vec<Case>) Res<bool, AllocError> {
+    out.add(Case(name: "Ok", payload: r.value, has_payload: true)).try();
+    r.form.match({
+        Failure => add_err(c, r, out),
+        Absence => add_none(c, out),
+        Open    => add_none(c, out),
+    }).try();
+    Ok(true);
+}
+
+add_err = (c :: Checker, r: TyRes, out :: Vec<Case>) Res<(), AllocError> {
+    out.add(Case(name: "Err", payload: r.error, has_payload: true))
+}
+
+add_none = (c :: Checker, out :: Vec<Case>) Res<(), AllocError> {
+    unit = c.types.unit().try();
+    out.add(Case(name: "None", payload: unit, has_payload: false))
+}
+
+// A declared type. Only an enum has cases; a struct has fields, and a
+// struct scrutinee is covered by `_` alone.
+named_cases = (c :: Checker, n: TyNamed, out :: Vec<Case>)
+              Res<bool, AllocError> {
+    decl_at(c.tree, n.decl).match({
+        Ok(d) => enum_cases(c, d, n, out),
+        None  => Ok(false),
+    })
+}
+
+enum_cases = (c :: Checker, d: Decl, n: TyNamed, out :: Vec<Case>)
+             Res<bool, AllocError> {
+    d.kind.match({
+        Enum(e) => add_variants(c, e, n, out),
+        _       => Ok(false),
+    })
+}
+
+// A variant's payload type is resolved in the module that DECLARES the
+// enum, not in the module that is matching on it: `Slot = Left(Cell)`
+// means `Cell` as its own module sees it, and law 6 says the name
+// crossing a boundary is `Slot`, never `Cell`.
+add_variants = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
+               Res<bool, AllocError> {
+    poison = c.types.unknown().try();
+    ctx = Ctx(n.decl.module.to_usize(), poison);
+    e.variants.loop((h, v) {
+        out.add(Case(
+            name: v.name.text,
+            payload: variant_payload(c, v, ctx).try(),
+            has_payload: v.payload.match({ Ok(_) => true, None => false }),
+        )).try();
+    });
+    Ok(true);
+}
+
+variant_payload = (c :: Checker, v: Variant, ctx: Ctx) Res<TyId, AllocError> {
+    v.payload.match({
+        Ok(t) => c.type_from_ast(t, ctx),
+        None  => c.types.unit(),
+    })
+}

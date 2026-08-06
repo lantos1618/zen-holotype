@@ -1,0 +1,718 @@
+// src/sema/sema_call.zen
+// What a call means, and which declaration it means.
+//
+// DESIGN.md, Overloading: "Resolution is on declared parameter types AND
+// arity, and a closure's type is its full signature. There is no
+// carve-out: `loop` overloads on `(h: LoopHandle, value: T)` versus
+// `(h: LoopHandle, index: usize, value: T)` for exactly the reason
+// `toString` overloads on a buffer versus an allocator."
+//
+// So a closure argument is matched on its PARAMETER COUNT and not waved
+// through. That single line is why `loop` can be one name with six
+// declarations, and a resolver that treated every closure as
+// interchangeable would make five of them unreachable.
+//
+// PARAMETER NAMES ARE NOT IDENTITY. `TyFn` carries no names, so two
+// candidates differing only in them are one signature and there is
+// nothing to compare — which is exactly why declaring both is an error
+// AT THE DECLARATION, naming both. A call site cannot be where that is
+// discovered, because at a call site the two are indistinguishable; the
+// call is only what triggers the check.
+//
+// A GENERIC PARAMETER SWALLOWS A CONCRETE ONE. `<A>(init: A, ..)` and
+// `(alloc: Alloc, ..)` can never be told apart, so they may not be
+// overloads — which is why DESIGN.md gives the allocating loop variant
+// its own name, `map`. `swallows` below is that rule, and it is careful
+// in the one way the bootstrapper records paying for: only a type
+// parameter belonging to the CANDIDATE BEING TESTED is a wildcard.
+// Without that, `loop<R, T>(range: R, ..)` and `loop<K, V>(map:
+// Map<K,V>, ..)` look interchangeable, and the prelude declares both.
+//
+// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
+// is "which declaration does this call mean", and the declaration-site
+// rules are the same question asked without a call. `same_signature` and
+// `swallows` are the two halves of "can a call site tell these apart",
+// and `matches` is that same comparison against real arguments — three
+// readings of one predicate. Splitting them would leave the rule that
+// two candidates are indistinguishable in a module that cannot see what
+// distinguishing them means.
+//
+// A LAMBDA ARGUMENT'S BODY IS NOT TYPED HERE. "A closure passed to a
+// function whose signature is already known infers its parameter types
+// from that signature" — so typing the body before resolution has picked
+// a candidate would type it against parameters that do not exist yet.
+// The arity is what resolution needs and the arity is what it reads.
+
+Ast, Expr, ExprId, Call, Arg, Access, Lambda, Ident, Span, Pos = ast
+Decl, DeclKind, Function, TParam, Param, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+DeclId = sema.sema_id
+TyId, Ty, Types, TyFn, TyNamed, TyVar = sema.sema_ty
+World, Def, DefKind, decl_at = sema.sema_def
+Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
+Checker, Ctx, UNRESOLVED = sema.sema_check
+Found, Base, base_of, members_of, static_access = sema.sema_member
+is_type_def, opaque, nowhere = sema.sema_member
+satisfies_bound = sema.sema_bound
+type_from_ast, type_of, param_type = sema.sema_type
+
+// One candidate, as resolution sees it.
+//
+// `owner` is the declaration's qualified name, and it is what makes a
+// type parameter identifiable: `Ty.Var` is nominal on its owner as well
+// as its name, so `T` of one candidate is never `T` of another.
+Cand* = {
+    name*: str,
+    owner*: str,
+    params*: Vec<TyId>,
+    ret*: TyId,
+    tbounds*: Vec<TBound>,
+    generic*: bool,
+    span*: Span,
+}
+
+// One bound on one type parameter. A list, because `<K: Eq + Hash>` has
+// two and "`+` is not `|`".
+TBound* = {
+    name*: str,
+    bound*: TyId,
+}
+
+// One argument, as resolution sees it. A lambda has no type until a
+// signature settles it, so it carries what resolution actually uses.
+Actual* = {
+    ty*: TyId,
+    is_lambda*: bool,
+    arity*: usize,
+    span*: Span,
+}
+
+// ---------------------------------------------------------------------
+// QUERY: the type of a call
+// ---------------------------------------------------------------------
+
+call_type* = (c :: Checker, node: Expr, call: Call, ctx: Ctx)
+             Res<TyId, AllocError> {
+    callee = c.tree.expr_at(call.callee);
+    callee.kind.match({
+        Access(a) => member_call(c, node, call, a, ctx),
+        Name(n)   => named_call(c, node, call, n.text, ctx),
+        _         => indirect_call(c, node, call, ctx),
+    })
+}
+
+actuals_of = (c :: Checker, args: Vec<Arg>, ctx: Ctx, out :: Vec<Actual>)
+             Res<(), AllocError> {
+    args.loop((h, a) {
+        out.add(actual_of(c, a.value, a.span, ctx).try()).try();
+    });
+    Ok(());
+}
+
+actual_of = (c :: Checker, id: ExprId, span: Span, ctx: Ctx)
+            Res<Actual, AllocError> {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Lambda(l) => lambda_actual(c, l, span),
+        _         => value_actual(c, id, span, ctx),
+    })
+}
+
+lambda_actual = (c :: Checker, l: Lambda, span: Span)
+                Res<Actual, AllocError> {
+    poison = c.types.unknown().try();
+    Ok(Actual(ty: poison, is_lambda: true, arity: l.params.len, span: span));
+}
+
+value_actual = (c :: Checker, id: ExprId, span: Span, ctx: Ctx)
+               Res<Actual, AllocError> {
+    ty = c.type_of(id, ctx).try();
+    Ok(Actual(ty: ty, is_lambda: false, arity: 0, span: span));
+}
+
+// ---------------------------------------------------------------------
+// `f(..)`
+// ---------------------------------------------------------------------
+
+named_call = (c :: Checker, node: Expr, call: Call, name: str, ctx: Ctx)
+             Res<TyId, AllocError> {
+    actuals ::= c.alloc.Vec<Actual>();
+    actuals_of(c, call.args, ctx, actuals).try();
+    is_res_ctor(name).match({
+        true  => res_ctor_type(c, name, actuals),
+        false => local_or_decl_call(c, node, call, name, actuals, ctx),
+    })
+}
+
+// `Ok(x)` and `Err(e)` are the prelude's own variants and there is
+// nothing to resolve: `Res<T>` and `Res<T, E>` are two arities of one
+// name, recognised structurally exactly as `sema_type.zen` recognises
+// the written type. `Ok(x)` is OPEN — which `Res` it closes is not
+// decided until an expectation says.
+is_res_ctor = (name: str) bool { name.eq("Ok") || name.eq("Err") }
+
+res_ctor_type = (c :: Checker, name: str, actuals: Vec<Actual>)
+                Res<TyId, AllocError> {
+    payload = first_ty(c, actuals).try();
+    name.eq("Ok").match({
+        true  => c.types.res_open(payload),
+        false => err_res(c, payload),
+    })
+}
+
+// Only success lifts, so `Err(e)` says nothing about the value type.
+err_res = (c :: Checker, e: TyId) Res<TyId, AllocError> {
+    hole = c.types.infer().try();
+    c.types.res_failure(hole, e)
+}
+
+first_ty = (c :: Checker, actuals: Vec<Actual>) Res<TyId, AllocError> {
+    actuals.get(0).match({
+        None    => c.types.prim("()"),
+        Ok(a)   => Ok(a.ty),
+    })
+}
+
+local_or_decl_call = (c :: Checker, node: Expr, call: Call, name: str,
+                      actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
+    c.lookup(name).match({
+        None   => decl_call(c, node, call, name, actuals, ctx),
+        Ok(b)  => fn_ret(c, node, b.ty),
+    })
+}
+
+// A declaration of that name: a function to resolve against, or a type
+// to construct.
+//
+// The functions are tried FIRST and the type only when none matches,
+// which is the fix for the bootstrapper's §9: `World* = (a: Alloc, tree:
+// Ast) Res<World, AllocError>` declared beside `World* = { .. }` is the
+// pairing `std.collections` uses for `Vec`, and matching the struct's
+// fields positionally instead of the function is what made three
+// constructors in this folder unwritable.
+decl_call = (c :: Checker, node: Expr, call: Call, name: str,
+             actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
+    cands ::= c.alloc.Vec<Cand>();
+    cands_of(c, ctx.module, name, cands).try();
+    kept ::= c.alloc.Vec<Cand>();
+    keep_matching(c, cands, actuals, kept).try();
+    (kept.len > 0).match({
+        true  => chosen(c, kept, actuals),
+        false => construct_or_fail(c, node, name, cands, ctx),
+    })
+}
+
+keep_matching = (c :: Checker, cands: Vec<Cand>, actuals: Vec<Actual>,
+                 kept :: Vec<Cand>) Res<(), AllocError> {
+    cands.loop((h, k) { keep_one(c, k, actuals, kept).try() });
+    Ok(());
+}
+
+// A named helper rather than a `.then` inside the loop body: a loop
+// binding read inside a nested closure does not resolve.
+// docs/SEMA_BOOTSTRAP_FIXES.md §10.
+keep_one = (c: Checker, k: Cand, actuals: Vec<Actual>, kept :: Vec<Cand>)
+           Res<(), AllocError> {
+    matches(c, k, actuals).match({
+        true  => kept.add(k),
+        false => Ok(()),
+    })
+}
+
+construct_or_fail = (c :: Checker, node: Expr, name: str, cands: Vec<Cand>,
+                     ctx: Ctx) Res<TyId, AllocError> {
+    defs ::= c.alloc.Vec<Def>();
+    c.world.defs_of(ctx.module, name, defs).try();
+    type_def_of(defs).match({
+        None    => no_overload(c, node, name, cands),
+        Ok(d)   => construct(c, d),
+    })
+}
+
+type_def_of = (defs: Vec<Def>) Res<Def> {
+    Range(0, defs.len).find((i) {
+        defs.get(i).match({ Ok(d) => is_type_def(d.kind), None => false })
+    }).match({
+        Ok(i) => defs.get(i),
+        None  => None,
+    })
+}
+
+construct = (c :: Checker, d: Def) Res<TyId, AllocError> {
+    empty ::= c.alloc.Vec<TyId>();
+    c.types.named(d.id, d.qname, d.name, empty)
+}
+
+// No candidate of that arity or those types. Silent when there were no
+// candidates at all: the name resolved to something that is not a
+// function, and that is somebody else's diagnostic.
+no_overload = (c :: Checker, node: Expr, name: str, cands: Vec<Cand>)
+              Res<TyId, AllocError> {
+    (cands.len > 0).then(() {
+        c.report(node.span.file, node.span,
+                 SemaFault.NoOverload(NameFault(name: name))).try();
+    });
+    c.types.unknown()
+}
+
+chosen = (c :: Checker, kept: Vec<Cand>, actuals: Vec<Actual>)
+         Res<TyId, AllocError> {
+    kept.get(0).match({
+        None   => c.types.unknown(),
+        Ok(k)  => chosen_ret(c, k, actuals),
+    })
+}
+
+chosen_ret = (c :: Checker, k: Cand, actuals: Vec<Actual>)
+             Res<TyId, AllocError> {
+    check_bounds(c, k, actuals).try();
+    Ok(k.ret);
+}
+
+// ---------------------------------------------------------------------
+// `x.f(..)`
+// ---------------------------------------------------------------------
+
+member_call = (c :: Checker, node: Expr, call: Call, ac: Access, ctx: Ctx)
+              Res<TyId, AllocError> {
+    b = base_of(c, ac.base, ctx).try();
+    b.is_type.match({
+        true  => static_call(c, node, call, ac, b.ty, ctx),
+        false => receiver_call(c, node, call, ac, b, ctx),
+    })
+}
+
+// `Slot.Left(cell)` — a variant carrying a payload IS the function that
+// builds one, so this is an ordinary call through it.
+static_call = (c :: Checker, node: Expr, call: Call, ac: Access, ty: TyId,
+               ctx: Ctx) Res<TyId, AllocError> {
+    got = c.static_access(node, ac, ty, ctx).try();
+    fn_ret(c, node, got)
+}
+
+receiver_call = (c :: Checker, node: Expr, call: Call, ac: Access, b: Base,
+                 ctx: Ctx) Res<TyId, AllocError> {
+    opaque(c, b.ty).match({
+        true  => c.types.unknown(),
+        false => known_receiver_call(c, node, call, ac, b, ctx),
+    })
+}
+
+known_receiver_call = (c :: Checker, node: Expr, call: Call, ac: Access,
+                       b: Base, ctx: Ctx) Res<TyId, AllocError> {
+    actuals ::= c.alloc.Vec<Actual>();
+    actuals_of(c, call.args, ctx, actuals).try();
+    found ::= c.alloc.Vec<Found>();
+    members_of(c, b.ty, ac.name.text, found).try();
+    (found.len > 0).match({
+        true  => method_call(c, node, found, actuals),
+        false => ufcs_call(c, node, call, ac, b, actuals, ctx),
+    })
+}
+
+// A method's receiver is its first parameter — "a method is a UFCS
+// function whose first parameter happens to be named `self`" — so the
+// arity a call site sees is one less than the signature's.
+method_call = (c :: Checker, node: Expr, found: Vec<Found>,
+               actuals: Vec<Actual>) Res<TyId, AllocError> {
+    want = actuals.len + 1;
+    pick_arity(c, found, want).match({
+        None    => first_found_ret(c, node, found),
+        Ok(f)   => fn_ret(c, node, f.ty),
+    })
+}
+
+pick_arity = (c: Checker, found: Vec<Found>, want: usize) Res<Found> {
+    Range(0, found.len).find((i) {
+        found.get(i).match({
+            Ok(f) => fn_arity_is(c, f.ty, want),
+            None  => false,
+        })
+    }).match({
+        Ok(i) => found.get(i),
+        None  => None,
+    })
+}
+
+fn_arity_is = (c: Checker, ty: TyId, want: usize) bool {
+    c.types.at(ty).match({ Fn(f) => f.params.len == want, _ => false })
+}
+
+first_found_ret = (c :: Checker, node: Expr, found: Vec<Found>)
+                  Res<TyId, AllocError> {
+    found.get(0).match({
+        None   => c.types.unknown(),
+        Ok(f)  => fn_ret(c, node, f.ty),
+    })
+}
+
+// "A free function whose first param is the type is callable as a
+// method." So the receiver becomes argument zero and resolution runs
+// exactly as it does for `f(x, ..)` — there is no second mechanism.
+ufcs_call = (c :: Checker, node: Expr, call: Call, ac: Access, b: Base,
+             actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
+    all ::= c.alloc.Vec<Actual>();
+    all.add(Actual(ty: b.ty, is_lambda: false, arity: 0,
+                   span: node.span)).try();
+    actuals.loop((h, a) { all.add(a).try() });
+    decl_call(c, node, call, ac.name.text, all, ctx)
+}
+
+indirect_call = (c :: Checker, node: Expr, call: Call, ctx: Ctx)
+                Res<TyId, AllocError> {
+    ty = c.type_of(call.callee, ctx).try();
+    fn_ret(c, node, ty)
+}
+
+fn_ret = (c :: Checker, node: Expr, ty: TyId) Res<TyId, AllocError> {
+    c.types.at(ty).match({
+        Fn(f)   => Ok(f.ret),
+        Unknown => Ok(ty),
+        Infer   => Ok(ty),
+        _       => not_callable(c, node, ty),
+    })
+}
+
+not_callable = (c :: Checker, node: Expr, ty: TyId) Res<TyId, AllocError> {
+    poison = c.types.unknown().try();
+    c.report(node.span.file, node.span,
+             SemaFault.NotCallable(TypeFault(
+                 name: "", expected: poison, found: ty))).try();
+    c.types.unknown()
+}
+
+// ---------------------------------------------------------------------
+// candidates
+// ---------------------------------------------------------------------
+
+cands_of* = (c :: Checker, mi: usize, name: str, out :: Vec<Cand>)
+            Res<(), AllocError> {
+    defs ::= c.alloc.Vec<Def>();
+    c.world.defs_of(mi, name, defs).try();
+    defs.loop((h, d) { cand_of(c, d, out).try() });
+    Ok(());
+}
+
+cand_of = (c :: Checker, d: Def, out :: Vec<Cand>) Res<(), AllocError> {
+    decl_at(c.tree, d.id).match({
+        Ok(dec) => cand_from_decl(c, d, dec, out),
+        None    => Ok(()),
+    }).try();
+    Ok(());
+}
+
+cand_from_decl = (c :: Checker, d: Def, dec: Decl, out :: Vec<Cand>)
+                 Res<(), AllocError> {
+    dec.kind.match({
+        Function(f) => add_cand(c, d, dec, f, out),
+        _           => Ok(()),
+    })
+}
+
+// A signature is resolved in the module that DECLARES it, with the
+// declaration's own type parameters in scope — otherwise `<T>(a: T)`
+// reports its own `T` as an undefined name.
+add_cand = (c :: Checker, d: Def, dec: Decl, f: Function, out :: Vec<Cand>)
+           Res<(), AllocError> {
+    mark = c.tvar_mark();
+    poison = c.types.unknown().try();
+    ctx = Ctx(d.id.module.to_usize(), poison);
+    push_tparams(c, f, d.qname).try();
+    ptys ::= c.alloc.Vec<TyId>();
+    f.params.loop((h, p) { ptys.add(c.param_type(p, ctx).try()).try() });
+    rty = f.ret.match({
+        Ok(r)  => c.type_from_ast(r, ctx),
+        None   => c.types.prim("()"),
+    }).try();
+    tbs ::= c.alloc.Vec<TBound>();
+    collect_bounds(c, f, ctx, tbs).try();
+    c.release_tvars(mark).try();
+    out.add(Cand(name: d.name, owner: d.qname, params: ptys, ret: rty,
+                 tbounds: tbs, generic: f.tparams.len > 0, span: dec.span))
+}
+
+push_tparams = (c :: Checker, f: Function, owner: str) Res<(), AllocError> {
+    f.tparams.loop((h, tp) {
+        text = tp.name.text;
+        c.push_tvar(text, c.types.var(text, owner).try()).try();
+    });
+    Ok(());
+}
+
+collect_bounds = (c :: Checker, f: Function, ctx: Ctx, out :: Vec<TBound>)
+                 Res<(), AllocError> {
+    f.tparams.loop((h, tp) { tparam_bounds(c, tp, ctx, out).try() });
+    Ok(());
+}
+
+tparam_bounds = (c :: Checker, tp: TParam, ctx: Ctx, out :: Vec<TBound>)
+                Res<(), AllocError> {
+    text = tp.name.text;
+    tp.bounds.loop((h, b) {
+        out.add(TBound(name: text, bound: c.type_from_ast(b, ctx).try())).try();
+    });
+    Ok(());
+}
+
+// ---------------------------------------------------------------------
+// matching
+// ---------------------------------------------------------------------
+
+matches* = (c: Checker, cand: Cand, actuals: Vec<Actual>) bool {
+    (cand.params.len == actuals.len) && all_fit(c, cand, actuals)
+}
+
+all_fit = (c: Checker, cand: Cand, actuals: Vec<Actual>) bool {
+    Range(0, actuals.len).find((i) {
+        fits_at(c, cand, actuals, i) == false
+    }).match({ Ok(_) => false, None => true })
+}
+
+fits_at = (c: Checker, cand: Cand, actuals: Vec<Actual>, i: usize) bool {
+    p = ty_at(cand.params, i);
+    actuals.get(i).match({
+        Ok(a) => fits(c, a, p),
+        None  => false,
+    })
+}
+
+// A closure's type is its full signature, and its arity is the part a
+// call site can see without inferring anything.
+fits = (c: Checker, a: Actual, p: TyId) bool {
+    a.is_lambda.match({
+        true  => closure_fits(c, p, a.arity),
+        false => c.assignable(a.ty, p) || is_tvar(c, p),
+    })
+}
+
+closure_fits = (c: Checker, p: TyId, arity: usize) bool {
+    c.types.at(p).match({
+        Fn(f)  => f.params.len == arity,
+        Var(_) => true,
+        _      => false,
+    })
+}
+
+is_tvar* = (c: Checker, id: TyId) bool {
+    c.types.at(id).match({ Var(_) => true, _ => false })
+}
+
+ty_at = (v: Vec<TyId>, i: usize) TyId {
+    v.get(i).match({ Ok(t) => t, None => UNRESOLVED })
+}
+
+// ---------------------------------------------------------------------
+// bounds at a call site
+//
+// "The bound is the promise; this call does not keep it." The type
+// argument is read off the parameter it appears in, which is the only
+// place a call site says what it is.
+// ---------------------------------------------------------------------
+
+check_bounds = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
+               Res<(), AllocError> {
+    cand.tbounds.loop((h, tb) {
+        check_one_bound(c, cand, tb, actuals).try();
+    });
+    Ok(());
+}
+
+check_one_bound = (c :: Checker, cand: Cand, tb: TBound,
+                   actuals: Vec<Actual>) Res<(), AllocError> {
+    param_of_var(c, cand, tb.name).match({
+        None    => Ok(()),
+        Ok(i)   => bound_at(c, tb, actuals, i),
+    })
+}
+
+// The first parameter written as the bare type parameter. A nested one
+// — `Vec<T>` — would need unification, and inferring a bound from a
+// position the language has not settled is inventing a reason.
+param_of_var = (c: Checker, cand: Cand, name: str) Res<usize> {
+    Range(0, cand.params.len).find((i) {
+        var_named(c, ty_at(cand.params, i), name, cand.owner)
+    })
+}
+
+var_named = (c: Checker, id: TyId, name: str, owner: str) bool {
+    c.types.at(id).match({
+        Var(v) => v.name.eq(name) && v.owner.eq(owner),
+        _      => false,
+    })
+}
+
+bound_at = (c :: Checker, tb: TBound, actuals: Vec<Actual>, i: usize)
+           Res<(), AllocError> {
+    actuals.get(i).match({
+        None    => Ok(()),
+        Ok(a)   => check_actual_bound(c, tb, a),
+    })
+}
+
+check_actual_bound = (c :: Checker, tb: TBound, a: Actual)
+                     Res<(), AllocError> {
+    unbounded(c, a.ty).match({
+        true  => Ok(()),
+        false => prove_bound(c, tb, a),
+    })
+}
+
+// Poison, a hole and another type parameter carry no answer, and
+// "never invent a diagnostic out of missing information".
+unbounded = (c: Checker, ty: TyId) bool {
+    opaque(c, ty) || is_tvar(c, ty)
+}
+
+prove_bound = (c :: Checker, tb: TBound, a: Actual) Res<(), AllocError> {
+    satisfies_bound(c, a.ty, tb.bound).try().match({
+        true  => Ok(()),
+        false => bound_not_satisfied(c, tb, a),
+    })
+}
+
+bound_not_satisfied = (c :: Checker, tb: TBound, a: Actual)
+                      Res<(), AllocError> {
+    c.report(a.span.file, a.span,
+             SemaFault.BoundNotSatisfied(TypeFault(
+                 name: tb.name, expected: tb.bound, found: a.ty)))
+}
+
+// ---------------------------------------------------------------------
+// the declaration-site rules
+//
+// An overload set is wrong WHERE IT IS WRITTEN, so both diagnostics
+// carry both declarations' positions and neither carries a call's.
+// ---------------------------------------------------------------------
+
+check_overloads* = (c :: Checker, mi: usize, name: str)
+                   Res<(), AllocError> {
+    cands ::= c.alloc.Vec<Cand>();
+    cands_of(c, mi, name, cands).try();
+    Range(0, cands.len).loop((h, i) {
+        Range(i + 1, cands.len).loop((h2, j) {
+            check_pair(c, name, cands, i, j).try();
+        });
+    });
+    Ok(());
+}
+
+check_pair = (c :: Checker, name: str, cands: Vec<Cand>, i: usize, j: usize)
+             Res<(), AllocError> {
+    cands.get(i).match({
+        None    => Ok(()),
+        Ok(a)   => check_against(c, name, a, cands, j),
+    })
+}
+
+check_against = (c :: Checker, name: str, a: Cand, cands: Vec<Cand>,
+                 j: usize) Res<(), AllocError> {
+    cands.get(j).match({
+        None    => Ok(()),
+        Ok(b)   => compare(c, name, a, b),
+    })
+}
+
+compare = (c :: Checker, name: str, a: Cand, b: Cand) Res<(), AllocError> {
+    (a.params.len == b.params.len).match({
+        true  => compare_same_arity(c, name, a, b),
+        false => Ok(()),
+    })
+}
+
+compare_same_arity = (c :: Checker, name: str, a: Cand, b: Cand)
+                     Res<(), AllocError> {
+    same_signature(c, a, b).match({
+        true  => duplicate(c, name, a, b),
+        false => maybe_swallow(c, name, a, b),
+    })
+}
+
+// Names are documentation, so `<T>(first: T, second: T)` and
+// `<T>(left: T, right: T)` are the SAME signature. Two type parameters
+// in the same position are one type for this purpose: `<T>(a: T)` and
+// `<U>(a: U)` differ in nothing a call site can see.
+same_signature* = (c: Checker, a: Cand, b: Cand) bool {
+    Range(0, a.params.len).find((i) {
+        same_param(c, ty_at(a.params, i), ty_at(b.params, i)) == false
+    }).match({ Ok(_) => false, None => true })
+}
+
+same_param = (c: Checker, x: TyId, y: TyId) bool {
+    x.eq(y) || (is_tvar(c, x) && is_tvar(c, y))
+}
+
+maybe_swallow = (c :: Checker, name: str, a: Cand, b: Cand)
+                Res<(), AllocError> {
+    ((a.generic || b.generic) && swallows(c, a, b)).match({
+        true  => ambiguous(c, name, a, b),
+        false => Ok(()),
+    })
+}
+
+// Does either candidate's generic accept everything the other's
+// concrete parameter does, position by position? Only a type parameter
+// belonging to the candidate being tested is a wildcard — that is what
+// keeps `loop(range: R, ..)` and `loop(map: Map<K,V>, ..)` distinct.
+swallows* = (c: Checker, a: Cand, b: Cand) bool {
+    all_eat(c, a, b) || all_eat(c, b, a)
+}
+
+all_eat = (c: Checker, g: Cand, k: Cand) bool {
+    g.generic && Range(0, g.params.len).find((i) {
+        eats(c, ty_at(g.params, i), ty_at(k.params, i), g.owner) == false
+    }).match({ Ok(_) => false, None => true })
+}
+
+eats = (c: Checker, x: TyId, y: TyId, owner: str) bool {
+    var_of(c, x, owner) || x.eq(y) || structural_eats(c, x, y, owner)
+}
+
+var_of = (c: Checker, x: TyId, owner: str) bool {
+    c.types.at(x).match({ Var(v) => v.owner.eq(owner), _ => false })
+}
+
+structural_eats = (c: Checker, x: TyId, y: TyId, owner: str) bool {
+    c.types.at(x).match({
+        Fn(f)    => fn_eats(c, f, y, owner),
+        Named(n) => named_eats(c, n, y, owner),
+        _        => false,
+    })
+}
+
+fn_eats = (c: Checker, f: TyFn, y: TyId, owner: str) bool {
+    c.types.at(y).match({
+        Fn(g) => (f.params.len == g.params.len)
+                     && all_eats(c, f.params, g.params, owner)
+                     && eats(c, f.ret, g.ret, owner),
+        _     => false,
+    })
+}
+
+named_eats = (c: Checker, n: TyNamed, y: TyId, owner: str) bool {
+    c.types.at(y).match({
+        Named(m) => n.decl.eq(m.decl) && (n.args.len == m.args.len)
+                        && all_eats(c, n.args, m.args, owner),
+        _        => false,
+    })
+}
+
+all_eats = (c: Checker, xs: Vec<TyId>, ys: Vec<TyId>, owner: str) bool {
+    Range(0, xs.len).find((i) {
+        eats(c, ty_at(xs, i), ty_at(ys, i), owner) == false
+    }).match({ Ok(_) => false, None => true })
+}
+
+duplicate = (c :: Checker, name: str, a: Cand, b: Cand) Res<(), AllocError> {
+    c.report(a.span.file, a.span,
+             SemaFault.DuplicateSignature(PairFault(
+                 name: name, first: a.span, second: b.span)))
+}
+
+ambiguous = (c :: Checker, name: str, a: Cand, b: Cand) Res<(), AllocError> {
+    c.report(a.span.file, a.span,
+             SemaFault.AmbiguousOverload(PairFault(
+                 name: name, first: a.span, second: b.span)))
+}

@@ -1,0 +1,206 @@
+// src/sema/sema_decl.zen
+// What a module's declarations must satisfy, whether or not anything
+// calls them.
+//
+// Everything else in this folder is a QUERY: ask about a node and get an
+// answer. Three of the rules DESIGN.md fixes are not questions about a
+// node at all, and nobody would ever ask them:
+//
+//   - a duplicate signature is wrong at the DECLARATION, "named for both
+//     declarations", and a call site cannot discover it because at a
+//     call site the two are indistinguishable.
+//   - an impl missing a field is wrong at the IMPL, and a program that
+//     never reads the missing field would otherwise compile.
+//   - a body nobody calls still has to type-check, or the checker is a
+//     linter for reachable code.
+//
+// So this is the walk that asks them, and it is deliberately the only
+// walk in the folder. It is a driver over the queries, not a pass with
+// state of its own: everything it computes is memoized where the queries
+// already memoize it.
+
+Ast, Module, Decl, DeclKind, Function, TParam, BlockId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, Types = sema.sema_ty
+World, Def, DefKind, ModuleTable = sema.sema_def
+Checker, Ctx = sema.sema_check
+check_impl = sema.sema_bound
+check_overloads = sema.sema_call
+type_from_ast, param_type, block_type = sema.sema_type
+
+// Every declaration rule, for one module.
+check_module* = (c :: Checker, mi: usize) Res<(), AllocError> {
+    c.world.table_at(mi).match({
+        Ok(t) => check_table(c, t, mi),
+        None  => Ok(()),
+    })
+}
+
+// Every module in the compilation.
+check_all* = (c :: Checker) Res<(), AllocError> {
+    Range(0, c.world.count()).loop((h, mi) {
+        check_module(c, mi).try();
+    });
+    Ok(());
+}
+
+check_table = (c :: Checker, t: ModuleTable, mi: usize)
+              Res<(), AllocError> {
+    check_overload_sets(c, t, mi).try();
+    t.impls.loop((h, id) { check_impl(c, id, mi).try() });
+    check_bodies(c, mi).try();
+    Ok(());
+}
+
+// One overload set per NAME, and checked once. The rule is about a set,
+// a set has no order, and visiting it once per member would report the
+// same pair as many times as the set is large.
+check_overload_sets = (c :: Checker, t: ModuleTable, mi: usize)
+                      Res<(), AllocError> {
+    seen ::= c.alloc.Vec<str>();
+    t.defs.loop((h, d) { one_set(c, d, mi, seen).try() });
+    Ok(());
+}
+
+one_set = (c :: Checker, d: Def, mi: usize, seen :: Vec<str>)
+          Res<(), AllocError> {
+    (is_fn_def(d.kind) && (has_name(seen, d.name) == false)).match({
+        true  => new_set(c, d.name, mi, seen),
+        false => Ok(()),
+    })
+}
+
+new_set = (c :: Checker, name: str, mi: usize, seen :: Vec<str>)
+          Res<(), AllocError> {
+    seen.add(name).try();
+    c.check_overloads(mi, name).try();
+    Ok(());
+}
+
+is_fn_def = (k: DefKind) bool {
+    k.match({ FunctionDef => true, _ => false })
+}
+
+has_name = (seen: Vec<str>, name: str) bool {
+    Range(0, seen.len).find((i) {
+        seen.get(i).match({ Ok(s) => s.eq(name), None => false })
+    }).match({ Ok(_) => true, None => false })
+}
+
+// ---------------------------------------------------------------------
+// bodies
+// ---------------------------------------------------------------------
+
+check_bodies = (c :: Checker, mi: usize) Res<(), AllocError> {
+    c.tree.module_at(mi).match({
+        Ok(m) => check_decls(c, m, mi),
+        None  => Ok(()),
+    })
+}
+
+check_decls = (c :: Checker, m: Module, mi: usize) Res<(), AllocError> {
+    m.decls.loop((h, d) { check_decl(c, d, m, mi).try() });
+    Ok(());
+}
+
+check_decl = (c :: Checker, d: Decl, m: Module, mi: usize)
+             Res<(), AllocError> {
+    d.kind.match({
+        Function(f) => check_function(c, f, m, mi),
+        _           => Ok(()),
+    })
+}
+
+// A `Required` or `Hook` declaration has no body and nothing to check;
+// the other two forms do.
+check_function* = (c :: Checker, f: Function, m: Module, mi: usize)
+                  Res<(), AllocError> {
+    f.body.match({
+        Ok(b) => check_body(c, f, b, m, mi),
+        None  => Ok(()),
+    })
+}
+
+// The scope, the type parameters and the bounds all enter here and all
+// leave here, in one place, so a body that reports cannot leak a binding
+// into the next declaration.
+check_body = (c :: Checker, f: Function, body: BlockId, m: Module,
+              mi: usize) Res<(), AllocError> {
+    smark = c.mark();
+    tmark = c.tvar_mark();
+    bmark = c.bound_mark();
+    owner = qualified(c, m, f).try();
+    enter_generics(c, f, owner, mi).try();
+    ctx = body_ctx(c, f, mi).try();
+    bind_params(c, f, ctx).try();
+    c.block_type(body, ctx).try();
+    c.release_bounds(bmark).try();
+    c.release_tvars(tmark).try();
+    c.release(smark).try();
+    Ok(());
+}
+
+// `ret` and `has_ret` are what `.try()` answers to. A function that does
+// not return a `Res` has nowhere to return a failure TO, which is the
+// whole of the `TryOutsideRes` rule.
+body_ctx = (c :: Checker, f: Function, mi: usize) Res<Ctx, AllocError> {
+    poison = c.types.unknown().try();
+    base = Ctx(mi, poison);
+    ret = f.ret.match({
+        Ok(r)  => c.type_from_ast(r, base),
+        None   => c.types.prim("()"),
+    }).try();
+    Ok(Ctx(module: mi, ret: ret, has_ret: is_res(c, ret),
+           self_ty: poison, has_self: false));
+}
+
+is_res = (c: Checker, ty: TyId) bool {
+    c.types.at(ty).match({ Res(_) => true, _ => false })
+}
+
+// The bounds are resolved with the type parameters already in scope, so
+// `<T: Boxy, U: Vec<T>>` reads `T` as the parameter and not as a
+// declaration of that name somewhere else.
+enter_generics = (c :: Checker, f: Function, owner: str, mi: usize)
+                 Res<(), AllocError> {
+    f.tparams.loop((h, tp) {
+        text = tp.name.text;
+        c.push_tvar(text, c.types.var(text, owner).try()).try();
+    });
+    poison = c.types.unknown().try();
+    ctx = Ctx(mi, poison);
+    f.tparams.loop((h, tp) { push_bounds(c, tp, ctx).try() });
+    Ok(());
+}
+
+push_bounds = (c :: Checker, tp: TParam, ctx: Ctx) Res<(), AllocError> {
+    text = tp.name.text;
+    tp.bounds.loop((h, b) {
+        c.push_bound(text, c.type_from_ast(b, ctx).try()).try();
+    });
+    Ok(());
+}
+
+bind_params = (c :: Checker, f: Function, ctx: Ctx) Res<(), AllocError> {
+    f.params.loop((h, p) {
+        text = p.name.text;
+        mutable = p.mutable;
+        c.bind(text, c.param_type(p, ctx).try(), mutable).try();
+    });
+    Ok(());
+}
+
+// The declaration's module-qualified name, which is what a `Ty.Var` is
+// nominal on. Built the same way `sema_def.zen` builds a `Def.qname`,
+// because the two have to agree: a type parameter resolved here and the
+// same one resolved from a candidate must intern to one type.
+qualified = (c :: Checker, m: Module, f: Function) Res<str, AllocError> {
+    out ::= c.alloc.String().try();
+    out.add_bytes(m.name).try();
+    out.add_bytes(".").try();
+    out.add_bytes(f.name.text).try();
+    Ok(out.view());
+}

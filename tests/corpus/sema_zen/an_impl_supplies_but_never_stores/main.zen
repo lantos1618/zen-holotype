@@ -1,0 +1,371 @@
+// You satisfy requirements; you never impl storage.
+//
+// DESIGN.md, Declarations: "A field a type declares for itself is
+// storage. A field an impl supplies is computed, and is re-evaluated on
+// read, so it can never go stale. Layout never depends on which impls
+// are linked. When two impls declare the same name, the bound in scope
+// selects which is in view; with no bound to disambiguate it is an
+// error — never file order."
+//
+// The properties, one line each:
+//
+//   - a type's OWN field is storage, and it has an address
+//   - an impl-supplied field is COMPUTED, and it does not
+//   - a member the bound declares with a body comes along free
+//   - two impls supplying one name, with no bound in scope, is an error
+//     that names BOTH impls
+//   - the same name, with the bound in scope, resolves and says nothing
+//   - assigning to a computed field, and taking its address, are errors
+//   - an impl that leaves a required field out is an error at the impl
+//   - a bound is a promise, and a type with no impl of it has not made
+//     one
+//
+// `Boxy` here is nothing but storage plus one default method, exactly as
+// DESIGN.md's own `Rect` is. "Can this struct be a bound" and "can it be
+// a fat value" are two questions, and a checker that answers the first
+// by looking at what the struct is made of rejects the design document's
+// own example.
+
+Checker, Ctx = sema.sema_check
+Found, members_of = sema.sema_member
+check_module = sema.sema_decl
+TyId, Types = sema.sema_ty
+Ast = ast.ast_arena
+Expr, ExprKind, Literal, LiteralKind, Name, Access, Unary, UnOp = ast.ast_node
+Call, Arg, Block, Stmt, StmtKind, Bind = ast.ast_node
+Type, TypeKind, Named = ast.ast_node
+Decl, DeclKind, Struct, Impl, Function, Form = ast.ast_node
+Member, MemberKind, Field, Param, TParam, Module = ast.ast_node
+Pos, Span, Ident, no_trivia = ast.ast_span
+ExprId, TypeId, BlockId = ast.ast_id
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+
+at_line = (line: usize) Span {
+    Span(file: "in.zen", start: Pos(line: line, col: 1),
+         end: Pos(line: line, col: 2))
+}
+
+at = () Span { at_line(1) }
+
+id_of = (text: str) Ident { Ident(text: text, span: at()) }
+
+// ---------------------------------------------------------------- types
+
+ty = (tree :: Ast, kind: TypeKind) Res<TypeId, AllocError> {
+    tree.add_type(Type(kind: kind, span: at(),
+                       leading: no_trivia(), trailing: no_trivia()))
+}
+
+named_ty = (tree :: Ast, a: Alloc, text: str) Res<TypeId, AllocError> {
+    args ::= a.Vec<TypeId>();
+    ty(tree, TypeKind.Named(Named(name: id_of(text), args: args)))
+}
+
+self_ty = (tree :: Ast) Res<TypeId, AllocError> { ty(tree, TypeKind.SelfType) }
+
+// -------------------------------------------------------------- members
+
+field = (text: str, t: TypeId, mutable: bool) Member {
+    Member(kind: MemberKind.Field(Field(
+               name: id_of(text), exported: true, mutable: mutable,
+               type: Ok(t), value: None)),
+           span: at(), leading: no_trivia(), trailing: no_trivia())
+}
+
+// what an impl SUPPLIES: `name: value`, the same form construction uses
+supplies = (text: str, value: ExprId) Member {
+    Member(kind: MemberKind.Field(Field(
+               name: id_of(text), exported: false, mutable: false,
+               type: None, value: Ok(value))),
+           span: at(), leading: no_trivia(), trailing: no_trivia())
+}
+
+// `area* ::= (self: @Self) i32 { .. }` — a DEFAULT, so it comes along
+// with any impl of the bound rather than being owed by it
+method = (tree :: Ast, a: Alloc, text: str, ret: TypeId)
+         Res<Member, AllocError> {
+    stmts ::= a.Vec<Stmt>();
+    body = tree.add_block(Block(stmts: stmts, value: None, span: at(),
+                                leading: no_trivia(),
+                                trailing: no_trivia())).try();
+    params ::= a.Vec<Param>();
+    params.add(Param(name: id_of("self"), mutable: false,
+                     type: Ok(self_ty(tree).try()), span: at(),
+                     leading: no_trivia(), trailing: no_trivia())).try();
+    tparams ::= a.Vec<TParam>();
+    Ok(Member(kind: MemberKind.Function(Function(
+                  name: id_of(text), exported: true, form: Form.Default,
+                  tparams: tparams, params: params, params_span: at(),
+                  ret: Ok(ret), body: Ok(body))),
+              span: at(), leading: no_trivia(), trailing: no_trivia()));
+}
+
+// --------------------------------------------------------- declarations
+
+struct_decl = (a: Alloc, text: str, members: Vec<Member>, line: usize)
+              Res<Decl, AllocError> {
+    tparams ::= a.Vec<TParam>();
+    Ok(Decl(kind: DeclKind.Struct(Struct(
+                name: id_of(text), exported: true, tparams: tparams,
+                members: members, body_span: at())),
+            span: at_line(line), leading: no_trivia(),
+            trailing: no_trivia()));
+}
+
+impl_decl = (target: str, bound: TypeId, members: Vec<Member>, line: usize)
+            Decl {
+    Decl(kind: DeclKind.Impl(Impl(target: id_of(target), bound: bound,
+                                  members: members, body_span: at())),
+         span: at_line(line), leading: no_trivia(), trailing: no_trivia())
+}
+
+fn_decl = (a: Alloc, text: str, tparams: Vec<TParam>, params: Vec<Param>,
+           ret: TypeId, line: usize) Decl {
+    Decl(kind: DeclKind.Function(Function(
+             name: id_of(text), exported: true, form: Form.Required,
+             tparams: tparams, params: params, params_span: at(),
+             ret: Ok(ret), body: None)),
+         span: at_line(line), leading: no_trivia(), trailing: no_trivia())
+}
+
+// ---------------------------------------------------------- expressions
+
+expr = (tree :: Ast, kind: ExprKind) Res<ExprId, AllocError> {
+    tree.add_expr(Expr(kind: kind, span: at(),
+                       leading: no_trivia(), trailing: no_trivia()))
+}
+
+int_lit = (tree :: Ast) Res<ExprId, AllocError> {
+    expr(tree, ExprKind.Literal(Literal(kind: LiteralKind.Int, text: "2")))
+}
+
+name_of = (tree :: Ast, text: str) Res<ExprId, AllocError> {
+    expr(tree, ExprKind.Name(Name(text: text)))
+}
+
+dot = (tree :: Ast, base: ExprId, text: str) Res<ExprId, AllocError> {
+    expr(tree, ExprKind.Access(Access(base: base, name: id_of(text))))
+}
+
+// ---------------------------------------------------------------------
+
+// what a dot reaches, and whether it is STORAGE or a computation
+reaches = (c :: Checker, a: Alloc, label: str, ty: TyId, name: str)
+          Res<(), AllocError> {
+    found ::= c.alloc.Vec<Found>();
+    members_of(c, ty, name, found).try();
+    println("{}: {} supplier(s){}", label, found.len,
+            first_kind(c, a, found).try());
+    Ok(());
+}
+
+first_kind = (c :: Checker, a: Alloc, found: Vec<Found>)
+             Res<str, AllocError> {
+    out ::= a.String().try();
+    head(found).match({
+        None    => out.add_bytes(""),
+        Ok(f)   => describe(c, out, f),
+    }).try();
+    Ok(out.view());
+}
+
+head = (found: Vec<Found>) Res<Found> { found.get(0) }
+
+describe = (c :: Checker, out :: String, f: Found) Res<(), AllocError> {
+    out.add_bytes(", ").try();
+    out.add_bytes(f.computed.match({ true => "computed", false => "stored" })).try();
+    out.add_bytes(" ").try();
+    c.types.write_name(f.ty, out).try();
+    Ok(());
+}
+
+// how many diagnostics one question added, and the last thing said
+asked = (c :: Checker, a: Alloc, label: str, before: usize)
+        Res<(), AllocError> {
+    added = c.diag_count() - before;
+    println("{}: {} diagnostic(s)", label, added);
+    (added > 0).then(() { show(c, a, c.diag_count() - 1).try() });
+    Ok(());
+}
+
+show = (c :: Checker, a: Alloc, i: usize) Res<(), AllocError> {
+    out ::= a.String().try();
+    c.diag_at(i).match({
+        None    => Ok(()),
+        Ok(d)   => d.render(c.types, out),
+    }).try();
+    println("    {}", out.view());
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    tree ::= alloc.Ast();
+
+    i32t = named_ty(tree, alloc, "i32").try();
+
+    // Boxy = { width: i32, height: i32, area* ::= (self: @Self) i32 {..} }
+    boxy_members ::= alloc.Vec<Member>();
+    boxy_members.add(field("width", i32t, false)).try();
+    boxy_members.add(field("height", i32t, false)).try();
+    boxy_members.add(method(tree, alloc, "area", i32t).try()).try();
+
+    // Framed = { width: i32 } -- a second bound declaring the same name
+    framed_members ::= alloc.Vec<Member>();
+    framed_members.add(field("width", i32t, false)).try();
+
+    // Tile = { side: i32 } -- storage, and one i32 wide whatever is
+    // impl'd on it
+    tile_members ::= alloc.Vec<Member>();
+    tile_members.add(field("side", i32t, true)).try();
+
+    half_members ::= alloc.Vec<Member>();
+    half_members.add(field("side", i32t, false)).try();
+
+    dot_members ::= alloc.Vec<Member>();
+    dot_members.add(field("x", i32t, false)).try();
+
+    boxy_node = named_ty(tree, alloc, "Boxy").try();
+    framed_node = named_ty(tree, alloc, "Framed").try();
+    tvar_node = named_ty(tree, alloc, "T").try();
+    tile_node = named_ty(tree, alloc, "Tile").try();
+    dot_node = named_ty(tree, alloc, "Dot").try();
+
+    two = int_lit(tree).try();
+
+    tile_boxy ::= alloc.Vec<Member>();
+    tile_boxy.add(supplies("width", two)).try();
+    tile_boxy.add(supplies("height", two)).try();
+
+    tile_framed ::= alloc.Vec<Member>();
+    tile_framed.add(supplies("width", two)).try();
+
+    // an impl that leaves `height` out: Tile does not satisfy Boxy, and
+    // `area` would have nothing to read
+    half_boxy ::= alloc.Vec<Member>();
+    half_boxy.add(supplies("width", two)).try();
+
+    // scale = <T: Boxy>(shape: T, k: i32) i32
+    tbound ::= alloc.Vec<TypeId>();
+    tbound.add(boxy_node).try();
+    tparams ::= alloc.Vec<TParam>();
+    tparams.add(TParam(name: id_of("T"), bounds: tbound, span: at(),
+                       leading: no_trivia(), trailing: no_trivia())).try();
+    scale_params ::= alloc.Vec<Param>();
+    scale_params.add(Param(name: id_of("shape"), mutable: false,
+                           type: Ok(tvar_node), span: at(),
+                           leading: no_trivia(),
+                           trailing: no_trivia())).try();
+    scale_params.add(Param(name: id_of("k"), mutable: false,
+                           type: Ok(i32t), span: at(),
+                           leading: no_trivia(),
+                           trailing: no_trivia())).try();
+
+    decls ::= alloc.Vec<Decl>();
+    decls.add(struct_decl(alloc, "Boxy", boxy_members, 1).try()).try();
+    decls.add(struct_decl(alloc, "Framed", framed_members, 2).try()).try();
+    decls.add(struct_decl(alloc, "Tile", tile_members, 3).try()).try();
+    decls.add(struct_decl(alloc, "Half", half_members, 4).try()).try();
+    decls.add(struct_decl(alloc, "Dot", dot_members, 5).try()).try();
+    decls.add(impl_decl("Tile", boxy_node, tile_boxy, 20)).try();
+    decls.add(impl_decl("Tile", framed_node, tile_framed, 25)).try();
+    decls.add(impl_decl("Half", boxy_node, half_boxy, 30)).try();
+    decls.add(fn_decl(alloc, "scale", tparams, scale_params, i32t, 40)).try();
+
+    tree.add_module(Module(name: "main", decls: decls, span: at(),
+                           leading: no_trivia(), trailing: no_trivia())).try();
+
+    // the expressions: `t.side`, `t.width`, `t.area`, `t.width = 5`,
+    // `&t.width`, and `scale(d, 2)`
+    t = name_of(tree, "t").try();
+    tv = name_of(tree, "tv").try();
+    d = name_of(tree, "d").try();
+    t_width = dot(tree, t, "width").try();
+    tv_width = dot(tree, tv, "width").try();
+    addr = expr(tree, ExprKind.Unary(Unary(
+        op: UnOp.Addr, op_span: at(), operand: t_width))).try();
+
+    // `t.width = 5;` as a real statement, because assignment is a
+    // statement and the rule is about its TARGET
+    assign_target = dot(tree, t, "width").try();
+    five = int_lit(tree).try();
+    stmts ::= alloc.Vec<Stmt>();
+    stmts.add(Stmt(kind: StmtKind.Bind(Bind(
+                       target: assign_target, type: None, mutable: false,
+                       value: five)),
+                   span: at(), leading: no_trivia(),
+                   trailing: no_trivia())).try();
+    assign_block = tree.add_block(Block(
+        stmts: stmts, value: None, span: at(),
+        leading: no_trivia(), trailing: no_trivia())).try();
+
+    args ::= alloc.Vec<Arg>();
+    args.add(Arg(name: None, value: d, span: at_line(40),
+                 leading: no_trivia(), trailing: no_trivia())).try();
+    args.add(Arg(name: None, value: five, span: at(),
+                 leading: no_trivia(), trailing: no_trivia())).try();
+    callee = name_of(tree, "scale").try();
+    targs ::= alloc.Vec<TypeId>();
+    bad_call = expr(tree, ExprKind.Call(Call(
+        callee: callee, targs: targs, args: args, args_span: at()))).try();
+
+    // the tree is complete before the checker is built
+    c ::= alloc.Checker(tree).try();
+    none = c.types.unknown().try();
+    ctx = Ctx(0, none);
+
+    tile_ty = c.type_from_ast(tile_node, ctx).try();
+    dot_ty = c.type_from_ast(dot_node, ctx).try();
+    boxy_ty = c.type_from_ast(boxy_node, ctx).try();
+    var_ty = c.types.var("T", "main.scale").try();
+
+    c.bind("t", tile_ty, true).try();
+    c.bind("tv", var_ty, false).try();
+    c.bind("d", dot_ty, false).try();
+
+    // layout is Tile's own, and `side` is storage in it
+    reaches(c, alloc, "Tile.side", tile_ty, "side").try();
+    // `area` has one supplier -- Boxy declares it with a body, so it
+    // comes along free and Framed has nothing to say about it
+    reaches(c, alloc, "Tile.area", tile_ty, "area").try();
+    // `width` has two, which is the collision
+    reaches(c, alloc, "Tile.width", tile_ty, "width").try();
+
+    // reading it with no bound in scope: an error naming BOTH impls
+    before = c.diag_count();
+    c.type_of(t_width, ctx).try();
+    asked(c, alloc, "t.width, no bound in scope", before).try();
+
+    // the same name, with the bound in scope. `T: Boxy` is what selects
+    mark = c.bound_mark();
+    c.push_bound("T", boxy_ty).try();
+    before2 = c.diag_count();
+    got = c.type_of(tv_width, ctx).try();
+    out ::= alloc.String().try();
+    c.types.write_name(got, out).try();
+    println("tv.width, with T: Boxy in scope -> {}", out.view());
+    asked(c, alloc, "tv.width, bound in scope", before2).try();
+    c.release_bounds(mark).try();
+
+    // no storage, so nothing to assign into and no address to take
+    before3 = c.diag_count();
+    c.block_type(assign_block, ctx).try();
+    asked(c, alloc, "t.width = 2", before3).try();
+
+    before4 = c.diag_count();
+    c.type_of(addr, ctx).try();
+    asked(c, alloc, "&t.width", before4).try();
+
+    // the bound is the promise, and Dot has not made it
+    before5 = c.diag_count();
+    c.type_of(bad_call, ctx).try();
+    asked(c, alloc, "scale(d, 2)", before5).try();
+
+    // an impl supplies a value for EVERY field the bound declares
+    before6 = c.diag_count();
+    c.check_module(0).try();
+    asked(c, alloc, "the module's impls", before6).try();
+    Ok(0);
+}
