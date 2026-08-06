@@ -24,6 +24,7 @@ Token, TokenKind, same, WILDCARD = parse.parse_token
 Parser, Mark = parse.parser
 expr = parse.parse_expr
 params_list, type_params = parse.parse_member
+ret_ahead = parse.lookahead
 
 // A type, unions and all. The one entry point; everything else in
 // this file is below it.
@@ -151,10 +152,14 @@ array_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
 // parameter list with nothing after it is not one. That rule is also
 // what keeps `Res<(), AllocError>` reading as unit rather than as a
 // function of no arguments.
+//
+// `ret_ahead` and not `starts_type`, because the token after a `()` in
+// RETURN position is the next member's name and a name begins a type.
+// See lookahead.zen: this is the one call site that discovered it.
 paren_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     ps ::= p.alloc.Vec<Param>();
     span = p.params_list(ps).try();
-    (ps.len == 0 && !p.starts_type()).match({
+    (ps.len == 0 && !p.ret_ahead()).match({
         true  => p.add_type(TypeKind.Unit, m),
         false => p.fn_type_rest(m, p.alloc.Vec<TParam>(), ps, span),
     });

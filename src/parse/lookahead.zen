@@ -28,6 +28,15 @@
 // the cursor, adds a node, or records a diagnostic. That is the
 // property that makes a wrong guess cheap: it costs a rescan and never
 // a rewind.
+//
+// AND NOTHING HERE MAY READ A RAW INDEX. The cursor never lands on
+// trivia — `drain` guarantees it — but every scan below runs PAST the
+// cursor, into a stream that still holds comments. A question of the
+// form "what follows this group" answered with a comment is answered
+// wrong, and the mistake surfaces a line later on a construct that has
+// nothing to do with the comment: `K = A // c` then `| B(u64)` was read
+// as an alias, and the diagnostic landed on the payload. So every index
+// this file looks a kind up at goes through `live_at`.
 
 Alloc, AllocError = std.mem
 Token, TokenKind, same, is_trivia = parse.parse_token
@@ -48,6 +57,25 @@ ValueShape* = StructValue | EnumValue | FnValue | PathValue | AliasValue | ExprV
 // lookahead.
 // -------------------------------------------------------------------
 
+// The first index at or after `from` holding a token the grammar can
+// see. Trivia is in the stream because the formatter needs it there, so
+// every question below has to step over it.
+live_at* = (p :: Parser, from: usize) usize {
+    out ::= p.tokens_len();
+    Range(from, p.tokens_len()).loop((h, k) {
+        p.token_kind_at(k).is_trivia().match({
+            true  => (),
+            false => { out = k; h.break(); },
+        });
+    });
+    out;
+}
+
+// The kind of that token: the only way this file reads the stream.
+live_kind* = (p :: Parser, from: usize) TokenKind {
+    p.token_kind_at(p.live_at(from))
+}
+
 // A `(` here opens a lambda's parameters if a block or a return type
 // follows its `)`.
 //
@@ -56,11 +84,41 @@ ValueShape* = StructValue | EnumValue | FnValue | PathValue | AliasValue | ExprV
 // a lambda whose return type is written `()` or `(a: i32) i32` never
 // occurs in argument position — every lambda DESIGN.md writes there
 // omits its return type. Recorded because it is a choice, not a
-// derivation.
+// derivation, and it is the ONE way this question differs from the same
+// question asked of a declaration's value — see `fn_value_after`.
 lambda_ahead* = (p :: Parser) bool {
-    j = p.group_end_at(p.at);
-    after = p.token_kind_at(j);
-    after.same(TokenKind.BraceOpen) || (after.starts_type_kind() && !after.same(TokenKind.ParenOpen))
+    after = p.live_kind(p.group_end_at(p.at));
+    after.same(TokenKind.BraceOpen) || after.ret_start()
+}
+
+// What may follow a parameter list's `)` and still be a return type.
+//
+// `<` is refused, and that is P2: `<T>(a: T) T` is the one type that
+// begins with an angle, so `(i + 1) < f.len` read as a parameter list
+// followed by a generic function type — and the parser then wanted a
+// parameter name at `f`. A lambda or a signature whose RETURN TYPE is a
+// generic function type appears nowhere in DESIGN.md or in this
+// compiler's own source; a parenthesised comparison appears constantly.
+// `(x + 1) == y` never broke, which is the whole tell: `==` cannot
+// begin a type and `<` can.
+//
+// `(` is refused here and accepted by `fn_value_after`, because that is
+// the one place the expression reading and the declaration reading
+// genuinely disagree.
+ret_start* = (kind: TokenKind) bool {
+    kind.starts_type_kind()
+        && !kind.same(TokenKind.Lt)
+        && !kind.same(TokenKind.ParenOpen)
+}
+
+// The same question for a DECLARATION'S value, where a `(` after the
+// `)` is a return type written `()` — `strip_bom = (lx :: Lexer) () {..}`
+// — rather than a call of a parenthesised callee. A declaration's value
+// is not an expression statement, and a module level has none at all, so
+// nothing is given up by reading it this way; an expression keeps the
+// other reading, above.
+fn_value_after* = (kind: TokenKind) bool {
+    kind.same(TokenKind.BraceOpen) || kind.same(TokenKind.ParenOpen) || kind.ret_start()
 }
 
 // A `[` here opens a fixed array type applied to arguments if it holds
@@ -68,7 +126,7 @@ lambda_ahead* = (p :: Parser) bool {
 // follows. Anything else is an array literal.
 fixed_array_ahead* = (p :: Parser) bool {
     j = p.group_end_at(p.at);
-    p.token_kind_at(j).same(TokenKind.ParenOpen) && p.group_items_at(p.at, j) == 2
+    p.live_kind(j).same(TokenKind.ParenOpen) && p.group_items_at(p.at, j) == 2
 }
 
 // A `<` here opens type arguments if its matching `>` is followed by
@@ -76,7 +134,7 @@ fixed_array_ahead* = (p :: Parser) bool {
 // the one a wrong guess breaks silently.
 targs_ahead* = (p :: Parser) bool {
     j = p.angles_end_at(p.at);
-    (j > p.at) && p.token_kind_at(j).same(TokenKind.ParenOpen)
+    (j > p.at) && p.live_kind(j).same(TokenKind.ParenOpen)
 }
 
 // The index one past the delimiter group the cursor is sitting on.
@@ -201,9 +259,7 @@ value_shape* = (p :: Parser, module_level: bool) ValueShape {
 // block or a return type after its `)`; anything else is an ordinary
 // parenthesized expression.
 paren_shape = (p :: Parser) ValueShape {
-    j = p.group_end_at(p.at);
-    after = p.token_kind_at(j);
-    (after.same(TokenKind.BraceOpen) || (after.starts_type_kind() && !after.same(TokenKind.ParenOpen))).match({
+    p.live_kind(p.group_end_at(p.at)).fn_value_after().match({
         true  => ValueShape.FnValue,
         false => ValueShape.ExprValue,
     });
@@ -212,7 +268,7 @@ paren_shape = (p :: Parser) ValueShape {
 // `<T>(x: T) T` — the only value that begins with `<`.
 angle_shape = (p :: Parser) ValueShape {
     j = p.angles_end_at(p.at);
-    (j > p.at && p.token_kind_at(j).same(TokenKind.ParenOpen)).match({
+    (j > p.at && p.live_kind(j).same(TokenKind.ParenOpen)).match({
         true  => ValueShape.FnValue,
         false => ValueShape.ExprValue,
     });
@@ -236,25 +292,25 @@ ident_shape = (p :: Parser, module_level: bool) ValueShape {
 // payload, and a bar. The bar closes the fork the moment it appears,
 // which is R1's whole claim.
 variant_ahead = (p :: Parser) bool {
-    j ::= p.at + 1;
+    j ::= p.live_at(p.at + 1);
     p.token_kind_at(j).same(TokenKind.ParenOpen).match({
-        true  => { j = p.group_end_at(j); },
+        true  => { j = p.live_at(p.group_end_at(j)); },
         false => (),
     });
     p.token_kind_at(j).same(TokenKind.Bar);
 }
 
 path_or_alias = (p :: Parser) ValueShape {
-    j ::= p.at + 1;
+    j ::= p.live_at(p.at + 1);
     dotted ::= false;
     running ::= p.token_kind_at(j).same(TokenKind.Dot);
     loop(() { running }, (h) {
         dotted = true;
-        j = j + 2;
+        j = p.live_at(p.live_at(j + 1) + 1);
         running = p.token_kind_at(j).same(TokenKind.Dot);
     });
     p.token_kind_at(j).same(TokenKind.Lt).match({
-        true  => { j = p.angles_end_at(j); },
+        true  => { j = p.live_at(p.angles_end_at(j)); },
         false => (),
     });
     p.closes_value(j).match({
@@ -313,25 +369,26 @@ decl_head_ahead* = (p :: Parser, module_level: bool) bool {
 }
 
 head_shape_ahead = (p :: Parser) bool {
-    after = p.token_kind_at(p.at + 1);
+    j = p.live_at(p.at + 1);
+    after = p.token_kind_at(j);
     after.same(TokenKind.Star).match({
         true  => true,
         false => after.same(TokenKind.Lt).match({
-            true  => p.generic_head_ahead(),
-            false => p.assign_head_ahead(after),
+            true  => p.generic_head_ahead(j),
+            false => p.assign_head_ahead(after, j),
         }),
     });
 }
 
-generic_head_ahead = (p :: Parser) bool {
-    j = p.angles_end_at(p.at + 1);
-    (j > p.at + 1) && p.assigns(p.token_kind_at(j))
+generic_head_ahead = (p :: Parser, j: usize) bool {
+    k = p.angles_end_at(j);
+    (k > j) && p.assigns(p.live_kind(k))
 }
 
-assign_head_ahead = (p :: Parser, after: TokenKind) bool {
+assign_head_ahead = (p :: Parser, after: TokenKind, j: usize) bool {
     p.assigns(after).match({
         false => false,
-        true  => p.declares_value(p.at + 2),
+        true  => p.declares_value(p.live_at(j + 1)),
     });
 }
 
@@ -353,16 +410,9 @@ declares_value = (p :: Parser, j: usize) bool {
 
 declares_fn = (p :: Parser, j: usize, kind: TokenKind) bool {
     kind.same(TokenKind.ParenOpen).match({
-        true  => p.fn_body_ahead(p.group_end_at(j)),
-        false => kind.same(TokenKind.Lt) && p.fn_body_ahead(p.angles_end_at(j)),
+        true  => p.live_kind(p.group_end_at(j)).fn_value_after(),
+        false => kind.same(TokenKind.Lt) && p.live_kind(p.angles_end_at(j)).fn_value_after(),
     });
-}
-
-fn_body_ahead = (p :: Parser, j: usize) bool {
-    after = p.token_kind_at(j);
-    after.same(TokenKind.BraceOpen)
-        || after.same(TokenKind.ParenOpen)
-        || (after.starts_type_kind() && !after.same(TokenKind.ParenOpen))
 }
 
 declares_enum = (p :: Parser, j: usize, kind: TokenKind) bool {
@@ -373,10 +423,66 @@ declares_enum = (p :: Parser, j: usize, kind: TokenKind) bool {
 }
 
 bar_after = (p :: Parser, j: usize) bool {
-    k ::= j + 1;
+    k ::= p.live_at(j + 1);
     p.token_kind_at(k).same(TokenKind.ParenOpen).match({
-        true  => { k = p.group_end_at(k); },
+        true  => { k = p.live_at(p.group_end_at(k)); },
         false => (),
     });
     p.token_kind_at(k).same(TokenKind.Bar);
+}
+
+// -------------------------------------------------------------------
+// a return type, or the next declaration
+//
+// The fifth question, and the one nobody wrote down: a signature's
+// return type is followed by NOTHING — a declaration has no terminator
+// — so the token after it is the next member's name, and a name can
+// begin a type.
+//
+// It only bites where the return type is written `()`, because a
+// `Named` type stops at its own last token and never reaches for the
+// one after. `next* = (self: @Self) ()` on the line above
+// `stop* = (self: @Self) ()` read the `()` as a nullary function type's
+// parameter list and `stop` as its return type, and the body then
+// wanted a member name at the `*`. That shape is all of
+// loop_handle.zen, mem_ptr.zen and mem_alloc.zen, so the parser could
+// not read the standard library it is compiled against.
+// -------------------------------------------------------------------
+
+// Whether a return type really begins at the cursor. Everything a type
+// may begin with, minus the one thing that only LOOKS like one.
+ret_ahead* = (p :: Parser) bool {
+    p.peek().kind.starts_type_kind() && !p.member_head_ahead()
+}
+
+// Whether the cursor is on the head of a member or a declaration:
+// `name`, an optional `*`, optional type parameters, and the binder
+// that makes it a declaration. Nothing else in the language puts a
+// `:`, `::`, `=` or `::=` after a name, which is what makes one token
+// of scanning enough to tell a return type from the next line.
+member_head_ahead* = (p :: Parser) bool {
+    p.at_kind(TokenKind.Ident).match({
+        false => false,
+        true  => p.binder_after_head(),
+    });
+}
+
+binder_after_head = (p :: Parser) bool {
+    j ::= p.live_at(p.at + 1);
+    p.token_kind_at(j).same(TokenKind.Star).match({
+        true  => { j = p.live_at(j + 1); },
+        false => (),
+    });
+    p.token_kind_at(j).same(TokenKind.Lt).match({
+        true  => { j = p.live_at(p.angles_end_at(j)); },
+        false => (),
+    });
+    p.token_kind_at(j).binds();
+}
+
+binds = (kind: TokenKind) bool {
+    kind.same(TokenKind.Colon)
+        || kind.same(TokenKind.ColonColon)
+        || kind.same(TokenKind.Eq)
+        || kind.same(TokenKind.ColonColonEq)
 }

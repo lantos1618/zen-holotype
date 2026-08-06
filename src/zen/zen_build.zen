@@ -21,11 +21,16 @@
 // `<folder>/<folder>.zen`, so every path here is built from an import's
 // segments and ruled out with a stat.
 //
-// WHAT STOPS THIS FILE SHORT OF A COMPILER is written down at
-// `check_blocked` and `deliver` rather than hidden: sema needs one `Ast`
-// holding every module and a `Parser` builds its own, and emitting needs
-// a way to write a file that `Fs` does not have. Both are one
-// declaration each, and neither is in this folder.
+// THE PROGRAM IS ONE `Ast`, and `parse_it` is the whole of how. A
+// `Parser` is built around the tree the walk has filled so far and the
+// tree is read back off it before the next module is read, so one
+// counter hands out every id and an id means the same thing in every
+// module. `Build.tree` says what that costs and when the tree is
+// finished.
+//
+// WHAT STOPS THIS FILE SHORT OF A COMPILER is written down at `deliver`
+// rather than hidden: emitting needs a way to write a file that `Fs`
+// does not have. That is one declaration, and it is not in this folder.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -34,7 +39,7 @@ Range = std.core
 FsError = std.env
 
 Ast = ast.ast_arena
-Module, DeclKind, Function = ast.ast_node
+Module = ast.ast_node
 QualifiedName = ast.ast_span
 
 // THE `Diag` COLLISION. `lex`, `parse` and `sema` each export a type
@@ -57,7 +62,7 @@ message = lex.lex
 
 scan, Source, Lexed = lex.lex
 Parser, module = parse.parse
-Checker, Ctx, TyId, block_type, dotted = sema.sema
+Checker, check_all, dotted = sema.sema
 Emit, CBackend, emit_program = gen.gen
 
 Job = zen.zen_cli
@@ -82,8 +87,17 @@ Build* = {
     faults* :: usize = 0,
     units* :: usize = 0,
 
-    // The entry module's tree. See `check_blocked` for why it is one
-    // module's and not the program's.
+    // THE PROGRAM'S TREE, and there is exactly one. Every parser is
+    // built around it and hands it back, so an `ExprId` from the
+    // ninety-first module and one from the first are indices into the
+    // same arena — which is the only thing that makes a `Checker`
+    // holding this tree able to answer about either.
+    //
+    // It must be FINISHED before `alloc.Checker(tree)`:
+    // `SEMA_BOOTSTRAP_FIXES.md` §12 — a `Checker` copies the `Ast`, so
+    // an `Ast` is a value and a copy of it is a snapshot. `walk`
+    // completes before `back_end` is called, and nothing adds a node
+    // after that.
     tree* :: Ast,
 
     // -----------------------------------------------------------------
@@ -228,9 +242,20 @@ Build* = {
         Ok(());
     }
 
+    // ONE TREE, HANDED ALONG. The parser is built around the tree the
+    // walk has filled so far and the tree is read back off it before the
+    // next module is lexed, so every module in the program is in one
+    // arena and an id means the same thing everywhere. There is one
+    // parser alive at a time, which is what makes passing an `Ast` by
+    // value sound: a `Vec` is a header, and two owners would diverge the
+    // first time either grew.
+    //
+    // The order is the walk's order and the walk queues the entry first,
+    // so module 0 is the root — which is what `emit_c` passes to the
+    // backend and what `sema`'s `DefId.module` indexes.
     parse_it = (self :: @Self, u: Unit, lexed: Lexed, seen :: Vec<Unit>)
                Res<(), AllocError> {
-        p ::= self.alloc.Parser(lexed);
+        p ::= self.alloc.Parser(lexed, self.tree);
         m = p.module(u.name).try();
         n ::= 0;
         p.diags.loop((h, d) {
@@ -239,7 +264,8 @@ Build* = {
                     d.span.start.col, d.message);
         });
         self.faults = self.faults + n;
-        (self.units == 0).then(() { self.tree = p.tree; });
+        p.tree.add_module(m).try();
+        self.tree = p.tree;
         self.units = self.units + 1;
         self.imports_of(m, seen).try();
         Ok(());
@@ -277,77 +303,46 @@ Build* = {
     // `CBackend` takes the one sema built, so a type is decided once and
     // the backend never re-derives it.
     //
-    // A ONE-MODULE BUILD IS THE ONLY ONE THAT REACHES THEM TODAY, and
-    // `check_blocked` says why.
+    // ANY NUMBER OF MODULES REACHES THEM. `alloc.Checker(tree)` takes
+    // ONE `Ast` and reads every module out of it — `World` is built by
+    // walking `tree.module_count()` — and `parse_it` hands the one tree
+    // from parser to parser, so the whole program is already in it.
+    //
+    // NOTHING PARSED IS NOT AN ERROR HERE. The read or the lex already
+    // said why, and complaining about sema on top of that is "one
+    // mistake, one diagnostic" broken by the driver itself. A tree with
+    // no modules is also a tree `Checker` would walk zero times, so the
+    // guard is about the diagnostic and not about the crash.
+    //
+    // SYNTAX FAULTS DO NOT SKIP THE CHECK, and that is this file's own
+    // header: "the second mistake in a build is worth as much as the
+    // first". A poison node types as unknown, which is what a poison
+    // node is for; the tally is what the exit code reads and it already
+    // counted the syntax error.
     back_end = (self :: @Self, job: Job) Res<(), AllocError> {
-        (self.units == 1).match({
-            true  => self.check_tree(job),
-            false => self.check_skipped(),
+        (self.units == 0).match({
+            true  => Ok(()),
+            false => self.check_tree(job),
         })
     }
 
-    // Nothing parsed means the read already said why, and complaining
-    // about sema on top of that is "one mistake, one diagnostic" broken
-    // by the driver itself.
-    check_skipped = (self :: @Self) Res<(), AllocError> {
-        (self.units > 1).then(() { self.check_blocked(); });
-        Ok(());
-    }
-
-    // WHERE STAGE 1 STOPS TODAY, and it is one missing constructor.
-    //
-    // `alloc.Checker(tree)` takes ONE `Ast` and reads every module out
-    // of it — `World` is built by walking `tree.module_count()` — so a
-    // whole-program check needs every module in one tree. A `Parser`
-    // builds its own (`tree: a.Ast()`) and there is no constructor that
-    // hands it one, so N files means N trees. They cannot be merged
-    // afterwards either: an id is an index into its own tree's arenas,
-    // so a `Module` copied between trees points at the wrong nodes.
-    //
-    // `p.tree` is starred and mutable, but `DESIGN.md`: "`*` on a field
-    // means readable outside the module; mutation only ever goes through
-    // exported methods" — so a driver may not seat a tree either, and
-    // the other fields are unstarred, so it cannot build a `Parser`
-    // literal. The fix is `Parser(a: Alloc, lexed: Lexed, tree: Ast)`
-    // beside the one that exists, and it belongs in `src/parse`.
-    //
-    // Until then no real program is checkable, because no real program
-    // is one module: the prelude is `std.core` and sema has no
-    // auto-import. Checking one of N modules alone would report every
-    // imported name as undefined, which is not a measurement, it is
-    // noise.
-    check_blocked = (self :: @Self) () {
-        self.faults = self.faults + 1;
-        println("{} modules parsed; sema needs them in one Ast and a Parser builds its own",
-                self.units);
-        println("  see src/zen/zen_build.zen `check_blocked`: `Parser(a, lexed, tree)` is the missing constructor");
-    }
-
-    // THE PROTOCOL, and it is not obvious enough to leave unwritten:
-    // `type_of` on a `Name` consults locals that exist only while
-    // `block_type` is walking a body. So every function body is walked
-    // once to fill the memo, and only then does a caller read a type
-    // back off it.
+    // `check_all` IS THE WALK, and the driver does not get to write its
+    // own. `sema_decl.zen` is "deliberately the only walk in the folder"
+    // and it is the only thing that knows the protocol: a body's
+    // parameters, type parameters and bounds have to be in scope while
+    // `block_type` walks it, and they have to leave again before the
+    // next declaration. A driver that called `block_type` on each body
+    // itself would report every parameter of every function undefined,
+    // which is what this one did.
     check_tree = (self :: @Self, job: Job) Res<(), AllocError> {
         c ::= self.alloc.Checker(self.tree).try();
-        none = c.types.unknown().try();
-        self.bodies(c, Ctx(0, none)).try();
+        c.check_all().try();
         report ::= self.alloc.String("").try();
         c.render_diags(report).try();
         n = c.diag_count();
         self.faults = self.faults + n;
         (n > 0).then(() { println("{}", report.view()); });
         (n == 0).then(() { self.emit(c, job).try(); });
-        Ok(());
-    }
-
-    bodies = (self :: @Self, c :: Checker, ctx: Ctx) Res<(), AllocError> {
-        Range(0, self.tree.module_count()).loop((h, i) {
-            self.tree.module_at(i).match({
-                Ok(m) => module_bodies(c, m, ctx),
-                None  => Ok(()),
-            }).try();
-        });
         Ok(());
     }
 
@@ -438,34 +433,6 @@ build* = (env: Env, a: Alloc, job: Job) Res<i32, AllocError> {
     b.back_end(job).try();
     Ok(b.code());
 }
-
-// Every function body in one module, walked so the memo is filled.
-module_bodies = (c :: Checker, m: Module, ctx: Ctx) Res<(), AllocError> {
-    m.decls.loop((h, d) {
-        d.kind.match({
-            Function(f) => function_body(c, f, ctx),
-            _           => Ok(()),
-        }).try();
-    });
-    Ok(());
-}
-
-// A signature-only declaration has no body, and that is a shape and not
-// a mistake: a trait member is written `name* = sig` with nothing after
-// it.
-function_body = (c :: Checker, f: Function, ctx: Ctx) Res<(), AllocError> {
-    f.body.match({
-        Ok(id) => c.block_type(id, ctx),
-        None   => Ok(UNWALKED),
-    }).try();
-    Ok(());
-}
-
-// The `TyId` a body that was not walked stands for. Index 0 is what the
-// store's own construction order makes the first type ever interned;
-// nothing reads it, and it exists so the match above has two arms of one
-// type rather than a discarded value.
-UNWALKED*: TyId = TyId(index: 0)
 
 // The last path component of a root — `probe` of `tests/corpus/x/probe`
 // — which is what a folder repeats to name its root file. A root with no

@@ -594,6 +594,27 @@ Parser* = {
 // allocates, and a constructor that can fail is a constructor every
 // caller has to `.try()`. `module` primes it as its first act.
 Parser* = (a: Alloc, lexed: Lexed) Parser {
+    a.Parser(lexed, a.Ast())
+}
+
+// `alloc.Parser(lexed, tree)` — the same constructor, handed a tree that
+// is already holding modules.
+//
+// A WHOLE PROGRAM IS ONE `Ast`, and this is the whole of how. An id is
+// an index into its arena, so ninety-one parsers with ninety-one trees
+// are ninety-one id spaces and an `ExprId` from one means nothing to a
+// `Checker` holding another. There is one counter, so there must be one
+// tree, and a parser has to be handed it rather than make it.
+//
+// It is a VALUE and not a reference, and that is the protocol rather
+// than a compromise: the driver hands the tree in, the parser adds this
+// module's nodes to its copy, and the driver reads `p.tree` back before
+// building the next parser. One owner at a time, in sequence — which is
+// the same fact `Checker` relies on when it takes the finished tree by
+// value (SEMA_BOOTSTRAP_FIXES.md §12). Two parsers alive at once over
+// one tree would diverge the first time either `Vec` grew, and nothing
+// in this compiler wants that.
+Parser* = (a: Alloc, lexed: Lexed, tree: Ast) Parser {
     origin = Span(
         file: lexed.source.file,
         start: Pos(line: 1, col: 1),
@@ -602,7 +623,7 @@ Parser* = (a: Alloc, lexed: Lexed) Parser {
     Parser(
         tokens: lexed.tokens,
         source: lexed.source,
-        tree: a.Ast(),
+        tree: tree,
         diags: a.Vec<Diag>(),
         pending: no_trivia(),
         anchor: origin,

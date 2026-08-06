@@ -19,6 +19,7 @@
 // arena exists to make.
 
 Alloc, AllocError = std.mem
+str = std.text
 Trivia, TriviaRun, no_trivia = ast.ast_span
 ExprId, TypeId, PatternId, BlockId = ast.ast_id
 Expr, Type, Pattern, Block, Module = ast.ast_node
@@ -97,33 +98,49 @@ Ast* = {
     // through `Res` would put `.try()` on every child access in the
     // tree and destroy the signal that makes `.try()` readable.
     //
-    // The bounds check IS the subtraction: `len - i - 1` underflows for
-    // every i >= len, and unsigned underflow traps. No branch, and
-    // nothing to forget. std.text.text_str's `index` is the same
-    // idiom, one layer down.
+    // THE TRAP SAYS WHAT HAPPENED, and it costs a compare against a
+    // length already in a register. An earlier version let the
+    // subtraction underflow and trap on its own — no branch, nothing to
+    // forget — and what it printed was `trap: integer overflow` at a
+    // line inside this file, which names neither the id nor the cause
+    // and sent the one person who hit it two files away for an
+    // afternoon. A read of a node is a struct copy out of a Vec; the
+    // compare is free beside it, and `stale` is what the compare buys.
     // -----------------------------------------------------------------
 
     expr_at* = (self: @Self, id: ExprId) Expr {
         i = id.index.to_usize();
-        self.exprs.len - i - 1;
+        (i < self.exprs.len).match({
+            true  => (),
+            false => stale("expression", id.index, self.exprs.len),
+        });
         self.exprs.ptr().read(i);
     }
 
     type_at* = (self: @Self, id: TypeId) Type {
         i = id.index.to_usize();
-        self.types.len - i - 1;
+        (i < self.types.len).match({
+            true  => (),
+            false => stale("type", id.index, self.types.len),
+        });
         self.types.ptr().read(i);
     }
 
     pattern_at* = (self: @Self, id: PatternId) Pattern {
         i = id.index.to_usize();
-        self.patterns.len - i - 1;
+        (i < self.patterns.len).match({
+            true  => (),
+            false => stale("pattern", id.index, self.patterns.len),
+        });
         self.patterns.ptr().read(i);
     }
 
     block_at* = (self: @Self, id: BlockId) Block {
         i = id.index.to_usize();
-        self.blocks.len - i - 1;
+        (i < self.blocks.len).match({
+            true  => (),
+            false => stale("block", id.index, self.blocks.len),
+        });
         self.blocks.ptr().read(i);
     }
 
@@ -155,9 +172,35 @@ Ast* = {
     // `Range(0, run.len)` and never sees an absolute index. Out of
     // range traps, for the same reason the node readers do.
     trivia_at* = (self: @Self, run: TriviaRun, i: usize) Trivia {
-        run.len - i - 1;
+        (i < run.len).match({
+            true  => (),
+            false => stale("trivia", 0, run.len),
+        });
         self.trivia.ptr().read(run.at + i);
     }
+}
+
+// AN ID THE ARENA NEVER HANDED OUT, said in full before the trap fires.
+//
+// There is one cause worth naming and it is not "off by one". An `Ast`
+// is a VALUE and every one of its arenas is a `Vec` — a pointer, a
+// length and a capacity — so a copy of an `Ast` is a SNAPSHOT, and the
+// copy taken by `alloc.Checker(tree)` or `alloc.CBackend(tree, c)` is
+// the tree as it stood at that call. A node added afterwards exists in
+// the caller's tree and in no other, and its id is past the end of the
+// snapshot's arena. SEMA_BOOTSTRAP_FIXES.md §12 is the same fact from
+// the other side: the engine is a query over a FINISHED tree.
+//
+// It returns `()` and never does: the subtraction underflows, and
+// unsigned underflow traps. Printing first is what makes the trap's
+// `file:line:col` — which lands here, on the last line — worth having
+// at all, because by then the reason is already on the way out.
+stale = (what: str, index: u32, len: usize) () {
+    println("ast: {} id {} is past the end of an arena holding {}",
+            what, index, len);
+    println("  an Ast is a value, so a copy of one is a snapshot: a node added after");
+    println("  alloc.Checker(tree) or alloc.CBackend(tree, c) is not in the tree they hold");
+    len - len - 1;
 }
 
 // `alloc.Ast()` — a ufcs function whose first parameter is an Alloc,

@@ -1,0 +1,43 @@
+// A program of MORE THAN ONE MODULE is checked, and that is the whole
+// assertion.
+//
+// A `Parser` used to build its own `Ast`, so N files were N unrelated id
+// spaces and a `Checker` — which is built from ONE tree and answers
+// about ids — could only ever be handed a one-module program. The driver
+// now hands the tree from parser to parser and reads it back, so one
+// counter names every node in the compilation.
+//
+// `pair/` is two modules and the second is reached only by following an
+// import, which is what makes this different from the one-module root
+// beside it. Before the tree was threaded this printed "2 modules
+// parsed; sema needs them in one Ast" and exited 1, so a `0` here is the
+// whole of the change.
+//
+// WHAT IT DOES NOT PIN, said rather than implied: that EVERY module
+// reached the tree. A driver that kept only the last parser's tree would
+// check `pair.zen` alone, and `pair.zen` alone is a clean module — so
+// this test would still be green. Pinning that needs the LAST module
+// parsed to be the one that cannot stand alone, and the walk parses the
+// entry first; the module that depends on another is therefore always
+// the one a broken driver drops. `zen build src` is the test that
+// catches it, and it is not a corpus test yet.
+//
+// `build` is called directly rather than through `main` because
+// `env.argv` is empty in the generated C — see the report — so a real
+// command line cannot reach it yet.
+
+Alloc, AllocError = std.mem
+str = std.text
+Job, build = zen
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    run(env, a, "src/pair").try();
+    Ok(0);
+}
+
+run = (env: Env, a: Alloc, root: str) Res<(), AllocError> {
+    code = build(env, a, Job(root: root, out: "", emit_c: false)).try();
+    println("{} -> {}", root, code);
+    Ok(());
+}
