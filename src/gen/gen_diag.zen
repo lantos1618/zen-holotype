@@ -41,23 +41,36 @@ GenFault* = Unsupported(str)     // a node form this backend does not lower yet
 // `file` is carried beside the span because a `Span` names a file
 // relative to the compilation root and the two must not drift — the
 // same pairing `sema.Diag` uses.
-Diag* = {
+//
+// NAMED `GenDiag` AND NOT `Diag`, and the rename is not taste. Four
+// modules in this tree declare a `Diag` — the language allows it, since
+// "two modules may define the same top-level name without colliding" —
+// but the bootstrapper resolves a METHOD by name across the whole
+// program, so `d.render(out)` on this type found `sema.render`, which
+// takes three arguments. STYLE.md's grep test asks for the same thing
+// from the other direction: grep `GenDiag` and get one file.
+// docs/GEN_BOOTSTRAP_FIXES.md carries the reproducer.
+GenDiag* = {
     file*: str,
     span*: Span,
     fault*: GenFault,
+}
 
-    // `file:line:col: message`, one line, no trailing newline. The
-    // caller adds the separator it wants, which is what lets a `Vec` of
-    // these render into one buffer.
-    render* = (self: @Self, out :: String) Res<(), AllocError> {
-        out.add_bytes(self.file).try();
-        out.add_bytes(":").try();
-        write_pos(out, self.span.start.line, self.span.start.col).try();
-        out.add_bytes(": ").try();
-        out.add_bytes(message(self.fault)).try();
-        detail(self.fault, out).try();
-        Ok(());
-    }
+// `file:line:col: message`, one line, no trailing newline. The caller
+// adds the separator it wants, which is what lets a `Vec` of these
+// render into one buffer.
+//
+// A free function rather than a method for the reason above: a method
+// is resolved by name across every module and this one has to be
+// reachable without competing with three other renderers.
+render_gen* = (d: GenDiag, out :: String) Res<(), AllocError> {
+    out.add_bytes(d.file).try();
+    out.add_bytes(":").try();
+    write_pos(out, d.span.start.line, d.span.start.col).try();
+    out.add_bytes(": ").try();
+    out.add_bytes(message(d.fault)).try();
+    detail(d.fault, out).try();
+    Ok(());
 }
 
 // The sentence, with nothing filled in. A fault's own words, so a
@@ -73,17 +86,21 @@ message* = (fault: GenFault) str {
 }
 
 // What the fault names, quoted. Every variant carries exactly one
-// string, so this is one line rather than a table.
+// string, so this is one arm each and no table.
+//
+// The payload is written straight into the sink rather than bound to a
+// local first: binding a `str` out of an enum arm and holding it makes
+// the bootstrapper type the whole match as `()`, which is recorded in
+// docs/GEN_BOOTSTRAP_FIXES.md.
 detail* = (fault: GenFault, out :: String) Res<(), AllocError> {
-    what = fault.match({
-        Unsupported(w) => w,
-        Unresolved(w)  => w,
-        Ambiguous(w)   => w,
-        Untyped(w)     => w,
-        Unspellable(w) => w,
-    });
     out.add_bytes(" `").try();
-    out.add_bytes(what).try();
+    fault.match({
+        Unsupported(w) => out.add_bytes(w),
+        Unresolved(w)  => out.add_bytes(w),
+        Ambiguous(w)   => out.add_bytes(w),
+        Untyped(w)     => out.add_bytes(w),
+        Unspellable(w) => out.add_bytes(w),
+    }).try();
     out.add_bytes("`").try();
     Ok(());
 }

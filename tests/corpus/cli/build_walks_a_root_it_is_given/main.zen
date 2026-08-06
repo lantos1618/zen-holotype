@@ -1,0 +1,39 @@
+// `zen build <root>` end to end, over a root this test ships.
+//
+// The pipeline the CLI wires together is read -> lex -> parse -> check
+// -> emit, and everything before `check` runs today. What this asserts
+// is the part a driver is actually FOR:
+//
+//   - the entry point is COMPUTED. There is no directory listing in
+//     `std.env.Fs` on purpose, so a root is turned into a file by
+//     probing `<root>/main.zen`, `<root>/<basename>.zen`, `<root>/
+//     zen.zen` and stopping at the first that is there. `probe/` has
+//     only the second, which is the folder-root rule every module in
+//     `src/` already follows.
+//
+//   - a root that is not there is a DIAGNOSTIC AND AN EXIT CODE, not a
+//     trap and not a silent zero. `tests/run.py` and
+//     `scripts/fixpoint.sh` both read the code, so an honest one is
+//     load-bearing rather than polite.
+//
+// `build` is called directly rather than through `main` because
+// `env.argv` is empty in the generated C — see the report — so a real
+// command line cannot reach it yet. The moment argv is wired this test
+// still passes and `zen-1 build src` starts working.
+
+Alloc, AllocError = std.mem
+str = std.text
+Job, build = zen
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    run(env, a, "src/probe").try();
+    run(env, a, "src/absent").try();
+    Ok(0);
+}
+
+run = (env: Env, a: Alloc, root: str) Res<(), AllocError> {
+    code = build(env, a, Job(root: root, out: "", emit_c: false)).try();
+    println("{} -> {}", root, code);
+    Ok(());
+}

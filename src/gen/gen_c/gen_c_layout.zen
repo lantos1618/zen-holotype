@@ -1,0 +1,511 @@
+// src/gen/gen_c/gen_c_layout.zen
+// What a Zen type's C DEFINITION is: the bytes behind the spelling.
+//
+// Three shapes and no more. A struct is its storage fields. An enum is
+// a tag and a union of the payloads that have one — omitted entirely
+// when no variant carries anything, so `Signal = Start | Stop` is one
+// `int32_t` and not a struct wrapping an empty union. A `Res` is the
+// same shape built from two type ids rather than from a declaration.
+//
+// EVERY DEFINITION IS EMITTED ONCE AND IN A DETERMINISTIC ORDER: sorted
+// by mangled name, which is `tcode` and therefore a pure function of
+// the type. Within that order a definition is preceded by the
+// definitions it contains BY VALUE, because C needs a complete type for
+// a field and a forward `typedef` is not one. A pointer would need no
+// complete type, which is why the dependency walk looks at fields and
+// not at every mention.
+//
+// A TAG IS A FUNCTION OF THE DECLARATION AND NEVER OF AN INSTANTIATION:
+// `Res<i32, E>` and `Res<i32, F>` share `Ok`, so emitting the constant
+// per instance is a C redefinition. Two enumerators may share a value —
+// `Res<T>.None` and `Res<T, E>.Err` are both 1 — which is legal C and
+// is what keeps one name per variant.
+
+Ast, Decl, DeclKind, Struct, Enum, Variant, Member, MemberKind, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
+World, Def, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+type_from_ast = sema.sema_type
+write_usize = sema.sema_diag
+Emit, order = gen.gen_emit
+sym_type, sym_variant, sym_member, tcode, GEN, USR = gen.gen_name
+path_with, res_arity, is_failure, RES_PATH = gen.gen_name
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+ctype, declarator, is_unit, request_type = gen.gen_c.gen_c_type
+field_type, variant_type, decl_ctx, close_types = gen.gen_c.gen_c_type
+
+// -----------------------------------------------------------------
+// emission
+// -----------------------------------------------------------------
+
+// Every forward typedef, then every tag constant, then every
+// definition. The three are separate passes because C wants them in
+// that order: a tag is a plain `enum` constant and a definition may
+// mention any tag, and a definition may mention any typedef.
+emit_types* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    close_types(be).try();
+    seq = order(be.alloc, be.type_names).try();
+    seq.loop((h, i) { emit_typedef(be, out, i).try() });
+    out.line().try();
+    emit_tags(be, out, seq).try();
+    seq.loop((h, i) { define_type(be, out, i).try() });
+    Ok(());
+}
+
+emit_typedef = (be :: CBackend, out :: Emit, i: usize) Res<(), AllocError> {
+    name = be.type_name_at(i);
+    out.bytes("typedef struct ").try();
+    out.bytes(name).try();
+    out.bytes(" ").try();
+    out.bytes(name).try();
+    out.say(";").try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// tags
+//
+// A tag is a function of the DECLARATION and never of an
+// instantiation: `Res<i32, E>` and `Res<i32, F>` share `Ok`, so
+// emitting the constant per instance is a C redefinition. Two
+// enumerators may share a value — `Res<T>.None` and `Res<T, E>.Err`
+// are both 1 — which is legal C and is what keeps one name per
+// variant.
+// -----------------------------------------------------------------
+
+emit_tags = (be :: CBackend, out :: Emit, seq: Vec<usize>)
+            Res<(), AllocError> {
+    seen ::= be.alloc.Vec<String>();
+    seq.loop((h, i) { collect_tags(be, i, seen).try() });
+    (seen.len > 0).then(() { emit_tag_block(be, out, seen).try() });
+    Ok(());
+}
+
+emit_tag_block = (be :: CBackend, out :: Emit, seen: Vec<String>)
+                 Res<(), AllocError> {
+    tags = order(be.alloc, seen).try();
+    out.say("enum {").try();
+    out.indent();
+    tags.loop((h, i) {
+        seen.get(i).match({
+            None  => Ok(()),
+            Ok(s) => out.say(s.view()),
+        }).try();
+    });
+    out.dedent();
+    out.say("};").try();
+    out.line().try();
+    Ok(());
+}
+
+collect_tags = (be :: CBackend, i: usize, seen :: Vec<String>)
+               Res<(), AllocError> {
+    be.type_id_at(i).match({
+        None   => Ok(()),
+        Ok(id) => collect_tags_of(be, id, seen),
+    }).try();
+    Ok(());
+}
+
+collect_tags_of = (be :: CBackend, id: TyId, seen :: Vec<String>)
+                  Res<(), AllocError> {
+    be.types().at(id).match({
+        Res(r)   => collect_res_tags(be, r, seen),
+        Named(n) => collect_enum_tags(be, n, seen),
+        _        => Ok(()),
+    })
+}
+
+collect_res_tags = (be :: CBackend, r: TyRes, seen :: Vec<String>)
+                   Res<(), AllocError> {
+    add_tag(be, seen, RES_PATH, "Ok", 0).try();
+    is_failure(r.form).match({
+        true  => add_tag(be, seen, RES_PATH, "Err", 1),
+        false => add_tag(be, seen, RES_PATH, "None", 1),
+    }).try();
+    Ok(());
+}
+
+collect_enum_tags = (be :: CBackend, n: TyNamed, seen :: Vec<String>)
+                    Res<(), AllocError> {
+    decl_at(be.tree, n.decl).match({
+        None  => Ok(()),
+        Ok(d) => collect_decl_tags(be, n, d, seen),
+    }).try();
+    Ok(());
+}
+
+collect_decl_tags = (be :: CBackend, n: TyNamed, d: Decl, seen :: Vec<String>)
+                    Res<(), AllocError> {
+    qname ::= be.alloc.String().try();
+    write_qname(be, qname, n).try();
+    d.kind.match({
+        Enum(e) => write_variant_tags(be, e.variants, qname.view(), seen),
+        _       => Ok(()),
+    })
+}
+
+write_variant_tags = (be :: CBackend, variants: Vec<Variant>, qname: str,
+                      seen :: Vec<String>) Res<(), AllocError> {
+    variants.loop((h, i, v) {
+        add_tag(be, seen, qname, v.name.text, i).try();
+    });
+    Ok(());
+}
+
+// `zu_e<path> = <n>,` as one line, deduped by the whole line — two
+// declarations that produce the same constant produce the same bytes,
+// and a repeat is a repeat rather than a redefinition.
+add_tag = (be :: CBackend, seen :: Vec<String>, qname: str, variant: str,
+           value: usize) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    sym_variant(line, qname, variant).try();
+    line.add_bytes(" = ").try();
+    write_usize(line, value).try();
+    line.add_bytes(",").try();
+    has_line(seen, line.view()).match({
+        false => seen.add(line),
+        true  => Ok(()),
+    })
+}
+
+has_line = (seen: Vec<String>, text: str) bool {
+    Range(0, seen.len).find((i) {
+        seen.get(i).match({ Ok(s) => s.view().eq(text), None => false })
+    }).match({ Ok(_) => true, None => false })
+}
+
+// The module-qualified name of a declared type, which is what a tag
+// constant is a path of.
+write_qname* = (be :: CBackend, out :: String, n: TyNamed)
+               Res<(), AllocError> {
+    be.world().table_at(n.decl.module.to_usize()).match({
+        None  => Ok(()),
+        Ok(t) => write_dotted(out, t.name),
+    }).try();
+    out.add_bytes(n.name).try();
+    Ok(());
+}
+
+write_dotted = (out :: String, name: str) Res<(), AllocError> {
+    (name.len > 0).then(() {
+        out.add_bytes(name).try();
+        out.add_bytes(".").try();
+    });
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// definitions
+//
+// Dependency-first: a struct holding another BY VALUE needs a complete
+// type, and a forward typedef is not one. The marker is set before the
+// children are walked, so a by-value cycle terminates — it is a sema
+// error and is reported there, and this only has to not hang.
+// -----------------------------------------------------------------
+
+define_type = (be :: CBackend, out :: Emit, i: usize) Res<(), AllocError> {
+    be.is_done(i).match({
+        false => define_fresh(be, out, i),
+        true  => Ok(()),
+    })
+}
+
+define_fresh = (be :: CBackend, out :: Emit, i: usize) Res<(), AllocError> {
+    be.mark_done(i).try();
+    define_deps(be, out, i).try();
+    be.type_id_at(i).match({
+        None   => Ok(()),
+        Ok(id) => write_definition(be, out, be.type_name_at(i), id),
+    }).try();
+    Ok(());
+}
+
+define_deps = (be :: CBackend, out :: Emit, i: usize) Res<(), AllocError> {
+    deps ::= be.alloc.Vec<TyId>();
+    be.type_id_at(i).match({
+        None   => Ok(()),
+        Ok(id) => by_value_deps(be, id, deps),
+    }).try();
+    deps.loop((h, d) { define_dep(be, out, d).try() });
+    Ok(());
+}
+
+define_dep = (be :: CBackend, out :: Emit, id: TyId) Res<(), AllocError> {
+    name ::= be.alloc.String().try();
+    sym_type(name, be.types(), be.world(), id).try();
+    be.type_index(name.view()).match({
+        None    => Ok(()),
+        Ok(j)   => define_type(be, out, j),
+    }).try();
+    Ok(());
+}
+
+by_value_deps = (be :: CBackend, id: TyId, deps :: Vec<TyId>)
+                Res<(), AllocError> {
+    be.types().at(id).match({
+        Named(n) => decl_deps(be, n, deps),
+        Res(r)   => res_deps(be, r, deps),
+        _        => Ok(()),
+    })
+}
+
+res_deps = (be :: CBackend, r: TyRes, deps :: Vec<TyId>)
+           Res<(), AllocError> {
+    keep_composite(be, r.value, deps).try();
+    is_failure(r.form).then(() { keep_composite(be, r.error, deps).try() });
+    Ok(());
+}
+
+keep_composite = (be :: CBackend, id: TyId, deps :: Vec<TyId>)
+                 Res<(), AllocError> {
+    be.types().at(id).match({
+        Named(_) => deps.add(id),
+        Res(_)   => deps.add(id),
+        _        => Ok(()),
+    })
+}
+
+decl_deps = (be :: CBackend, n: TyNamed, deps :: Vec<TyId>)
+            Res<(), AllocError> {
+    decl_at(be.tree, n.decl).match({
+        None  => Ok(()),
+        Ok(d) => decl_kind_deps(be, n, d, deps),
+    }).try();
+    Ok(());
+}
+
+decl_kind_deps = (be :: CBackend, n: TyNamed, d: Decl, deps :: Vec<TyId>)
+                 Res<(), AllocError> {
+    ctx = decl_ctx(be, n);
+    d.kind.match({
+        Struct(s) => field_deps(be, s.members, ctx, deps),
+        Enum(e)   => variant_deps(be, n, e.variants, ctx, deps),
+        _         => Ok(()),
+    })
+}
+
+field_deps = (be :: CBackend, members: Vec<Member>, ctx: Ctx,
+              deps :: Vec<TyId>) Res<(), AllocError> {
+    members.loop((h, m) {
+        field_type(be, m, ctx).match({
+            None  => Ok(()),
+            Ok(t) => keep_composite(be, t, deps),
+        }).try();
+    });
+    Ok(());
+}
+
+variant_deps = (be :: CBackend, n: TyNamed, variants: Vec<Variant>, ctx: Ctx,
+                deps :: Vec<TyId>) Res<(), AllocError> {
+    variants.loop((h, v) {
+        variant_type(be, n, v, ctx).match({
+            None  => Ok(()),
+            Ok(t) => keep_composite(be, t, deps),
+        }).try();
+    });
+    Ok(());
+}
+
+write_definition = (be :: CBackend, out :: Emit, name: str, id: TyId)
+                   Res<(), AllocError> {
+    be.types().at(id).match({
+        Res(r)   => write_res_def(be, out, name, r),
+        Named(n) => write_named_def(be, out, name, n),
+        _        => Ok(()),
+    })
+}
+
+// `struct { int32_t zg_tag; union { T zu_m2Ok; E zu_m3Err; } zg_data; }`.
+// A unit payload takes no member: `Ok(())` carries nothing, and a void
+// member is illegal C.
+write_res_def = (be :: CBackend, out :: Emit, name: str, r: TyRes)
+                Res<(), AllocError> {
+    open_struct(out, name).try();
+    payloads ::= be.alloc.Vec<TyId>();
+    names ::= be.alloc.Vec<String>();
+    add_payload(be, payloads, names, r.value, "Ok").try();
+    is_failure(r.form).match({
+        true  => add_payload(be, payloads, names, r.error, "Err"),
+        false => Ok(()),
+    }).try();
+    write_union(be, out, payloads, names).try();
+    close_struct(out).try();
+    Ok(());
+}
+
+add_payload = (be :: CBackend, payloads :: Vec<TyId>, names :: Vec<String>,
+               id: TyId, variant: str) Res<(), AllocError> {
+    is_unit(be, id).match({
+        true  => Ok(()),
+        false => push_payload(be, payloads, names, id, variant),
+    })
+}
+
+push_payload = (be :: CBackend, payloads :: Vec<TyId>, names :: Vec<String>,
+                id: TyId, variant: str) Res<(), AllocError> {
+    m ::= be.alloc.String().try();
+    sym_member(m, variant).try();
+    payloads.add(id).try();
+    names.add(m).try();
+    Ok(());
+}
+
+write_named_def = (be :: CBackend, out :: Emit, name: str, n: TyNamed)
+                  Res<(), AllocError> {
+    decl_at(be.tree, n.decl).match({
+        None  => write_opaque(out, name),
+        Ok(d) => write_decl_def(be, out, name, n, d),
+    })
+}
+
+write_decl_def = (be :: CBackend, out :: Emit, name: str, n: TyNamed,
+                  d: Decl) Res<(), AllocError> {
+    ctx = decl_ctx(be, n);
+    d.kind.match({
+        Struct(s) => write_struct_def(be, out, name, s, ctx),
+        Enum(e)   => write_enum_def(be, out, name, n, e, ctx),
+        _         => write_opaque(out, name),
+    })
+}
+
+// A generic struct is not lowered: an instantiation needs its type
+// arguments substituted into every field, and monomorphisation is not
+// in this backend yet. An opaque body keeps the emitted C parsing
+// around the diagnostic the declaration site raises.
+write_struct_def = (be :: CBackend, out :: Emit, name: str, s: Struct,
+                    ctx: Ctx) Res<(), AllocError> {
+    (s.tparams.len > 0).match({
+        true  => write_opaque(out, name),
+        false => write_fields_def(be, out, name, s, ctx),
+    })
+}
+
+write_fields_def = (be :: CBackend, out :: Emit, name: str, s: Struct,
+                    ctx: Ctx) Res<(), AllocError> {
+    open_struct(out, name).try();
+    s.members.loop((h, m) {
+        field_type(be, m, ctx).match({
+            None  => Ok(()),
+            Ok(t) => write_field(be, out, m, t),
+        }).try();
+    });
+    // C11 6.7.2.1p1 wants a member; one byte, in one place, so a bare
+    // empty struct and an empty struct used as a field agree.
+    (storage_count(be, s, ctx) == 0).then(() { out.say("char zg_pad;").try() });
+    close_struct(out).try();
+    Ok(());
+}
+
+storage_count = (be :: CBackend, s: Struct, ctx: Ctx) usize {
+    n ::= 0;
+    s.members.loop((h, m) {
+        field_type(be, m, ctx).match({
+            Ok(_) => true,
+            None  => false,
+        }).then(() { n = n + 1; });
+    });
+    n
+}
+
+write_field = (be :: CBackend, out :: Emit, m: Member, t: TyId)
+              Res<(), AllocError> {
+    name ::= be.alloc.String().try();
+    member_name(be, m, name).try();
+    decl ::= be.alloc.String().try();
+    declarator(be, t, name.view(), decl).try();
+    decl.add_bytes(";").try();
+    out.say(decl.view())
+}
+
+member_name = (be :: CBackend, m: Member, out :: String)
+              Res<(), AllocError> {
+    m.kind.match({
+        Field(fld) => sym_member(out, fld.name.text),
+        Const(c)   => sym_member(out, c.name.text),
+        Function(f) => sym_member(out, f.name.text),
+    })
+}
+
+write_enum_def = (be :: CBackend, out :: Emit, name: str, n: TyNamed,
+                  e: Enum, ctx: Ctx) Res<(), AllocError> {
+    open_struct(out, name).try();
+    payloads ::= be.alloc.Vec<TyId>();
+    names ::= be.alloc.Vec<String>();
+    e.variants.loop((h, v) {
+        variant_type(be, n, v, ctx).match({
+            None  => Ok(()),
+            Ok(t) => add_payload(be, payloads, names, t, v.name.text),
+        }).try();
+    });
+    write_union(be, out, payloads, names).try();
+    close_struct(out).try();
+    Ok(());
+}
+
+// The tag, then the payload union when any variant carries one. The
+// union is omitted entirely for a tag-only enum, so `Signal = Start |
+// Stop` is one `int32_t` and not a struct with an empty union in it.
+open_struct = (out :: Emit, name: str) Res<(), AllocError> {
+    out.bytes("struct ").try();
+    out.bytes(name).try();
+    out.say(" {").try();
+    out.indent();
+    Ok(());
+}
+
+close_struct = (out :: Emit) Res<(), AllocError> {
+    out.dedent();
+    out.say("};").try();
+    out.line().try();
+    Ok(());
+}
+
+write_opaque = (out :: Emit, name: str) Res<(), AllocError> {
+    open_struct(out, name).try();
+    out.say("char zg_pad;").try();
+    close_struct(out).try();
+    Ok(());
+}
+
+write_union = (be :: CBackend, out :: Emit, payloads: Vec<TyId>,
+               names: Vec<String>) Res<(), AllocError> {
+    out.say("int32_t zg_tag;").try();
+    (payloads.len > 0).then(() {
+        write_union_body(be, out, payloads, names).try();
+    });
+    Ok(());
+}
+
+write_union_body = (be :: CBackend, out :: Emit, payloads: Vec<TyId>,
+                    names: Vec<String>) Res<(), AllocError> {
+    out.say("union {").try();
+    out.indent();
+    payloads.loop((h, i, t) {
+        write_union_member(be, out, names, i, t).try();
+    });
+    out.dedent();
+    out.say("} zg_data;").try();
+    Ok(());
+}
+
+write_union_member = (be :: CBackend, out :: Emit, names: Vec<String>,
+                      i: usize, t: TyId) Res<(), AllocError> {
+    names.get(i).match({
+        None  => Ok(()),
+        Ok(m) => write_member_line(be, out, m.view(), t),
+    })
+}
+
+write_member_line = (be :: CBackend, out :: Emit, name: str, t: TyId)
+                    Res<(), AllocError> {
+    decl ::= be.alloc.String().try();
+    declarator(be, t, name, decl).try();
+    decl.add_bytes(";").try();
+    out.say(decl.view())
+}

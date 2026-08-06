@@ -1,0 +1,60 @@
+// A backend that half-emits and says nothing is worse than one that
+// stops, so every form this one does not lower yet is a DIAGNOSTIC with
+// a position — and the C it could produce is still produced around it.
+// That is sema's rule ("a diagnostic is a value, nothing raises")
+// applied one stage later: the only `Err` in `src/gen/` is
+// `AllocError`.
+//
+// This test is the honest inventory. Each program below names one thing
+// the backend refuses, and the refusal is what is asserted.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Vec = std.collections
+Source, scan = lex
+Parser = parse.parser
+module = parse.parse_decl
+Ast = ast.ast_arena
+Checker = sema.sema_check
+Emit = gen.gen_emit
+CBackend, emit_program = gen.gen_c
+
+// generics are not monomorphised yet
+GENERIC : str = "identity = <T>(v: T) T { v }\nmain = (env: i32) i32 { 0 }\n"
+
+// a lambda is not lowered: an escaping closure needs a record and a
+// non-escaping one needs inlining, and neither is written
+LAMBDA : str = "main = (env: i32) i32 { f = (a: i32) i32 { a }\n0 }\n"
+
+// `==` on two structs is not C, and DESIGN.md never says `==` desugars
+// to `Eq.eq` — so this reports rather than emitting what cc refuses
+STRUCTS : str = "P = { x: i32 }\nsame = (a: P, b: P) bool { a == b }\nmain = (env: i32) i32 { 0 }\n"
+
+// a spilling right operand of `&&` would have its statements run
+// whether or not the left side held
+SHORTCIRCUIT : str = "main = (env: i32) bool { true && (1 == 1).match({ true => true, false => false }) }\n"
+
+report = (a: Alloc, label: str, text: str) Res<(), AllocError> {
+    lexed = scan(a, Source(file: "main.zen", text: text)).try();
+    p ::= a.Parser(lexed);
+    m = p.module("main").try();
+    p.tree.add_module(m).try();
+    chk ::= a.Checker(p.tree).try();
+    be ::= a.CBackend(p.tree, chk).try();
+    out ::= a.Emit().try();
+    be.emit_program(0, out).try();
+    faults ::= a.String().try();
+    be.render_diags(faults).try();
+    println("{}", label);
+    println("{}", faults.view());
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    report(alloc, "a generic function:", GENERIC).try();
+    report(alloc, "a lambda:", LAMBDA).try();
+    report(alloc, "comparing two structs:", STRUCTS).try();
+    report(alloc, "a spilling operand of &&:", SHORTCIRCUIT).try();
+    Ok(0);
+}

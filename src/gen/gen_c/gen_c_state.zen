@@ -36,15 +36,15 @@
 // backend.
 
 Ast, ExprId, Span = ast
+str, String = std.text
 Alloc, AllocError = std.mem
 Vec = std.collections
-str, String = std.text
 Range = std.core
 TyId, Types = sema.sema_ty
-World = sema.sema_def
+World, Def = sema.sema_def
 Checker, Ctx = sema.sema_check
 Emit = gen.gen_emit
-Diag, GenFault = gen.gen_diag
+GenDiag, GenFault, render_gen = gen.gen_diag
 
 // One binding in scope, and the number that makes its C name unique
 // inside its function.
@@ -58,19 +58,38 @@ CBackend* = {
     tree*: Ast,
     check* :: Checker,
 
-    // where bodies are lowered. Scratch: `emit_program` copies it into
-    // the caller's buffer after the pieces C wants first.
-    body* :: Emit,
+    // where a body is lowered. Scratch, and one per function: the
+    // translation unit is assembled from the kept texts afterwards.
+    buf :: Emit,
 
-    diags :: Vec<Diag>,
+    diags :: Vec<GenDiag>,
 
     // the types this program needs a C definition for
     type_names* :: Vec<String>,
     type_ids* :: Vec<TyId>,
-    type_done* :: Vec<bool>,
+    // `Vec<usize>` and not `Vec<bool>`: a `Res<bool>` defeats the
+    // bootstrapper's inference of `Ok`, which is recorded with a
+    // reproducer in docs/GEN_BOOTSTRAP_FIXES.md. 0 is pending, 1 is
+    // written.
+    type_done* :: Vec<usize>,
 
     // the integer types a checked `+ - * / %` was emitted for
     helper_types* :: Vec<String>,
+
+    // the functions to lower, and the ones already lowered.
+    //
+    // REACHABILITY, NOT THE WHOLE TREE. A compilation stages the whole
+    // of `std` beside the program, and lowering every declaration in it
+    // would emit a translation unit nobody asked for and a diagnostic
+    // for every form this backend does not reach yet. So the walk is
+    // seeded with one module's functions and follows the calls that
+    // resolve — which is also what "compilation is whole-program" means
+    // in practice: one merged graph, walked from a root.
+    fn_queue* :: Vec<Def>,
+    fn_seen :: Vec<String>,
+    fn_names* :: Vec<String>,
+    fn_protos* :: Vec<String>,
+    fn_bodies* :: Vec<String>,
 
     // per function
     locals :: Vec<LocalSlot>,
@@ -85,11 +104,11 @@ CBackend* = {
 
     diag_count* = (self: @Self) usize { self.diags.len }
 
-    diag_at* = (self: @Self, i: usize) Res<Diag> { self.diags.get(i) }
+    diag_at* = (self: @Self, i: usize) Res<GenDiag> { self.diags.get(i) }
 
     render_diags* = (self: @Self, out :: String) Res<(), AllocError> {
         self.diags.loop((h, d) {
-            d.render(out).try();
+            render_gen(d, out).try();
             out.add_bytes("\n").try();
         });
         Ok(());
@@ -97,7 +116,7 @@ CBackend* = {
 
     report* = (self :: @Self, file: str, span: Span, fault: GenFault)
               Res<(), AllocError> {
-        self.diags.add(Diag(file: file, span: span, fault: fault))
+        self.diags.add(GenDiag(file: file, span: span, fault: fault))
     }
 
     // A fault raised against an expression, which is where almost every
@@ -133,7 +152,7 @@ CBackend* = {
                   Res<(), AllocError> {
         self.type_names.add(name).try();
         self.type_ids.add(id).try();
-        self.type_done.add(false).try();
+        self.type_done.add(0).try();
         Ok(());
     }
 
@@ -144,11 +163,11 @@ CBackend* = {
     type_id_at* = (self: @Self, i: usize) Res<TyId> { self.type_ids.get(i) }
 
     is_done* = (self: @Self, i: usize) bool {
-        self.type_done.get(i).match({ Ok(b) => b, None => true })
+        self.type_done.get(i).match({ Ok(n) => n == 1, None => true })
     }
 
     mark_done* = (self :: @Self, i: usize) Res<(), AllocError> {
-        self.type_done.set(i, true).match({
+        self.type_done.set(i, 1).match({
             None  => Err(AllocError.OutOfMemory),
             Ok(_) => Ok(()),
         })
@@ -183,6 +202,77 @@ CBackend* = {
         owned ::= self.alloc.String().try();
         owned.add_bytes(prim).try();
         self.helper_types.add(owned)
+    }
+
+    // -----------------------------------------------------------------
+    // writing a body
+    //
+    // The buffer is NOT an exported field: `*` on a field means
+    // readable outside the module and "mutation only ever goes through
+    // exported methods", so these six are that. They also keep the
+    // lowering files from knowing that a body is written through an
+    // `Emit` at all.
+    // -----------------------------------------------------------------
+
+    write* = (self :: @Self, s: str) Res<(), AllocError> { self.buf.bytes(s) }
+
+    writeln* = (self :: @Self, s: str) Res<(), AllocError> { self.buf.say(s) }
+
+    newline* = (self :: @Self) Res<(), AllocError> { self.buf.line() }
+
+    indent* = (self :: @Self) () { self.buf.indent(); }
+
+    dedent* = (self :: @Self) () { self.buf.dedent(); }
+
+    text* = (self: @Self) str { self.buf.view() }
+
+    // A fresh buffer, so each function's body is a function of its own
+    // source and of nothing lowered before it.
+    open_buf* = (self :: @Self) Res<(), AllocError> {
+        self.buf = self.alloc.Emit().try();
+        Ok(());
+    }
+
+    // -----------------------------------------------------------------
+    // the function worklist
+    // -----------------------------------------------------------------
+
+    // Queue a function for lowering, once. The qualified name is the
+    // identity — two modules may declare `parse` and they are two
+    // functions.
+    need_function* = (self :: @Self, d: Def) Res<(), AllocError> {
+        self.seen_function(d.qname).match({
+            false => self.push_function(d),
+            true  => Ok(()),
+        })
+    }
+
+    seen_function = (self: @Self, qname: str) bool {
+        Range(0, self.fn_seen.len).find((i) {
+            self.fn_seen.get(i).match({
+                Ok(s) => s.view().eq(qname),
+                None  => false,
+            })
+        }).match({ Ok(_) => true, None => false })
+    }
+
+    push_function = (self :: @Self, d: Def) Res<(), AllocError> {
+        owned ::= self.alloc.String().try();
+        owned.add_bytes(d.qname).try();
+        self.fn_seen.add(owned).try();
+        self.fn_queue.add(d).try();
+        Ok(());
+    }
+
+    // One lowered function: its C name, its prototype and its body,
+    // held apart so the three can be emitted in the order C wants and
+    // sorted by the one key that is a pure function of the function.
+    add_function* = (self :: @Self, name: String, proto: String,
+                     body: String) Res<(), AllocError> {
+        self.fn_names.add(name).try();
+        self.fn_protos.add(proto).try();
+        self.fn_bodies.add(body).try();
+        Ok(());
     }
 
     // -----------------------------------------------------------------
@@ -267,15 +357,59 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
     Ok(CBackend(
         tree: tree,
         check: check,
-        body: a.Emit().try(),
-        diags: a.Vec<Diag>(),
+        buf: a.Emit().try(),
+        diags: a.Vec<GenDiag>(),
         type_names: a.Vec<String>(),
         type_ids: a.Vec<TyId>(),
-        type_done: a.Vec<bool>(),
+        type_done: a.Vec<usize>(),
         helper_types: a.Vec<String>(),
+        fn_queue: a.Vec<Def>(),
+        fn_seen: a.Vec<String>(),
+        fn_names: a.Vec<String>(),
+        fn_protos: a.Vec<String>(),
+        fn_bodies: a.Vec<String>(),
         locals: a.Vec<LocalSlot>(),
         declared: a.Vec<String>(),
         tmp: 0,
         alloc: a,
     ));
+}
+
+// -----------------------------------------------------------------
+// reporting, with something to emit while reporting
+//
+// Four shapes, and each one writes `0` into the caller's buffer so the
+// emitted C still parses around the diagnostic. They live beside
+// `report` rather than in a lowering file because all four lowering
+// files raise all four, and a helper with a caller in three modules
+// belongs below them.
+// -----------------------------------------------------------------
+
+// A node form this backend does not lower yet.
+unsupported* = (be :: CBackend, id: ExprId, what: str, out :: String)
+               Res<(), AllocError> {
+    be.report_expr(id, GenFault.Unsupported(what)).try();
+    out.add_bytes("0")
+}
+
+// A name with no declaration behind it.
+unresolved* = (be :: CBackend, id: ExprId, name: str, out :: String)
+              Res<(), AllocError> {
+    be.report_expr(id, GenFault.Unresolved(name)).try();
+    out.add_bytes("0")
+}
+
+// Sema had no type and the context supplied none.
+untyped* = (be :: CBackend, id: ExprId, what: str, out :: String)
+           Res<(), AllocError> {
+    be.report_expr(id, GenFault.Untyped(what)).try();
+    out.add_bytes("0")
+}
+
+// A name with more than one declaration, and no overload rule to
+// choose between them.
+ambiguous* = (be :: CBackend, id: ExprId, name: str, out :: String)
+             Res<(), AllocError> {
+    be.report_expr(id, GenFault.Ambiguous(name)).try();
+    out.add_bytes("0")
 }

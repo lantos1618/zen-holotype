@@ -1,0 +1,59 @@
+// The backend, end to end: lex, parse, check, emit, and print the C.
+//
+// The program compiled below is written down rather than read from a
+// file, because a corpus test's compilation root is its own directory
+// and the thing under test is what comes OUT, not where it came from.
+// It is deliberately the smallest program that exercises every piece
+// this backend claims: a struct and a field read, an enum and a match
+// on its tag, integer arithmetic with its traps, a nominal error enum,
+// `Ok` / `Err`, and `.try()` propagating a failure through a frame.
+//
+// DETERMINISM IS ASSERTED, NOT ASSUMED. The same source is compiled
+// twice, in one process, by two independent backends, and the two
+// translation units are compared byte for byte. TESTING.md calls this
+// the property the fixpoint oracle rests on.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Vec = std.collections
+Source, scan = lex
+Parser = parse.parser
+module = parse.parse_decl
+Ast = ast.ast_arena
+Checker = sema.sema_check
+Emit = gen.gen_emit
+CBackend, emit_program = gen.gen_c
+
+PROGRAM : str = "Fault = | Odd\nPoint = { x: i32, y: i32 }\nsum = (p: Point) i32 { p.x + p.y }\nhalve = (n: i32) Res<i32, Fault> { (n % 2 == 0).match({ true => Ok(n / 2), false => Err(Fault.Odd) }) }\nmain = (env: i32) Res<i32, Fault> { h = halve(sum(Point(x: 40, y: 44))).try(); Ok(h) }\n"
+
+emit = (a: Alloc, text: str, faults :: String) Res<String, AllocError> {
+    lexed = scan(a, Source(file: "main.zen", text: text)).try();
+    p ::= a.Parser(lexed);
+    m = p.module("main").try();
+    p.tree.add_module(m).try();
+    chk ::= a.Checker(p.tree).try();
+    be ::= a.CBackend(p.tree, chk).try();
+    out ::= a.Emit().try();
+    be.emit_program(0, out).try();
+    be.render_diags(faults).try();
+    kept ::= a.String().try();
+    kept.add_bytes(out.view()).try();
+    Ok(kept);
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    faults ::= alloc.String().try();
+    first = emit(alloc, PROGRAM, faults).try();
+
+    // twice, from nothing, in one process: byte-identical or the
+    // fixpoint oracle is worthless
+    again ::= alloc.String().try();
+    second = emit(alloc, PROGRAM, again).try();
+    println("byte-identical across two compilations: {}", first.view().eq(second.view()));
+    println("the backend lowered everything it was given: {}", faults.is_empty());
+    println("");
+    println("{}", first.view());
+    Ok(0);
+}

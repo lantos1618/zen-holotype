@@ -1,0 +1,341 @@
+// src/gen/gen_c/gen_c_type.zen
+// What a Zen type is in C: how it is SPELLED, and which types a
+// program needs at all.
+//
+// `gen_c_layout.zen` is the other half — what the spelling refers to.
+// The two are separated because a backend needs the spelling at every
+// parameter and the definition exactly once per type, which is why the
+// worklist between them exists.
+//
+// THE WORKLIST IS TWO PARALLEL `Vec`s KEYED BY MANGLED NAME, and the
+// name IS the identity: `tcode` is injective, so two types share a name
+// exactly when they are one type. It is closed to a fixpoint before
+// anything is emitted, because resolving a struct's fields discovers
+// more types.
+//
+// `Res` IS STRUCTURAL HERE, and that follows sema rather than
+// diverging from it: `TyRes(value, error, form)` carries no
+// declaration, because "`Res<T>` and `Res<T, E>` are two arities of one
+// name and sema asks which form it has at every `.try()`". It still
+// answers to the library's name — `std.core.result.Res` — so a
+// structural `Res` and a declared one are one C type.
+
+Ast, Decl, DeclKind, Struct, Enum, Variant, Member, MemberKind, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
+World, Def, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+type_from_ast = sema.sema_type
+write_usize = sema.sema_diag
+Emit, order = gen.gen_emit
+sym_type, sym_variant, sym_member, tcode, GEN, USR = gen.gen_name
+path_with, res_arity, is_failure, RES_PATH = gen.gen_name
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+
+// Closing the worklist is a fixpoint: defining a type discovers the
+// types of its fields, which may discover more. Eight passes is what
+// the bootstrapper allows and no real program has ever needed two —
+// a bound rather than a loop, because a backend that does not
+// terminate is worse than one that reports.
+MAX_TYPE_PASSES* : usize = 8
+
+// -----------------------------------------------------------------
+// spelling
+// -----------------------------------------------------------------
+
+// The C spelling of a type, written into `out`. Requests the type as a
+// side effect, because anything spelled is something that needs a
+// definition.
+//
+// It never reports: a spelling is wanted at a dozen sites and each of
+// them has a better position than this does. `spellable` is the
+// question to ask first, and `int` is what an unspellable type becomes
+// so the emitted C still parses around the diagnostic.
+ctype* = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
+    be.types().at(id).match({
+        Prim(p)  => out.add_bytes(c_prim(p.name)),
+        Named(_) => named_ctype(be, id, out),
+        Res(_)   => named_ctype(be, id, out),
+        _        => out.add_bytes("int"),
+    }).try();
+    Ok(());
+}
+
+named_ctype = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
+    request_type(be, id).try();
+    sym_type(out, be.types(), be.world(), id)
+}
+
+// A declarator: the spelling, a space, the name. Nothing in this
+// subset is a pointer type, so nothing binds to the name — the moment
+// `Ptr<T>` is lowered this is where the asterisk goes, in one place.
+declarator* = (be :: CBackend, id: TyId, name: str, out :: String)
+              Res<(), AllocError> {
+    ctype(be, id, out).try();
+    out.add_bytes(" ").try();
+    out.add_bytes(name).try();
+    Ok(());
+}
+
+// Can this type be spelled at all? Asked wherever a diagnostic has a
+// position to point at.
+spellable* = (be: CBackend, id: TyId) bool {
+    be.types().at(id).match({
+        Prim(p)  => c_prim_known(p.name),
+        Named(_) => true,
+        Res(_)   => true,
+        _        => false,
+    })
+}
+
+// A type with no bytes. `()` is `void` in a return position and is
+// illegal as a member, so `Ok(())` carries nothing and a unit field is
+// not emitted at all.
+is_unit* = (be: CBackend, id: TyId) bool {
+    be.types().at(id).match({
+        Prim(p) => p.name.eq("()"),
+        _       => false,
+    })
+}
+
+// The C scalar behind a Zen primitive.
+//
+// `int` and `float` are sema's LITERAL types — "an integer literal is
+// its own type until a context settles it". Reaching here means nothing
+// settled it, which is legal (`x = 5;` with no written type), so the
+// widest of the family is the honest answer and the same one every
+// time.
+//
+// WRITTEN AS NESTED `pick` CALLS AND NOT AS A MATCH ON THE NAME:
+// matching a `str` scrutinee against string-literal patterns emits
+// `zg_t == "i8"` and `cc` rejects it, which is the same family as the
+// `==`-on-an-enum bug and is recorded with a reproducer in
+// docs/GEN_BOOTSTRAP_FIXES.md. When that is fixed this becomes the
+// seventeen-arm match it wants to be.
+c_prim* = (name: str) str {
+    pick(name, "i8", "int8_t",
+    pick(name, "i16", "int16_t",
+    pick(name, "i32", "int32_t",
+    pick(name, "i64", "int64_t",
+    pick(name, "int", "int64_t",
+    pick(name, "u8", "uint8_t",
+    pick(name, "u16", "uint16_t",
+    pick(name, "u32", "uint32_t",
+         c_prim_wide(name)))))))))
+}
+
+c_prim_wide = (name: str) str {
+    pick(name, "u64", "uint64_t",
+    pick(name, "usize", "size_t",
+    pick(name, "f32", "float",
+    pick(name, "f64", "double",
+    pick(name, "float", "double",
+    pick(name, "bool", "bool",
+    pick(name, "str", "zg_str",
+    pick(name, "()", "void",
+         "int"))))))))
+}
+
+pick = (name: str, key: str, hit: str, miss: str) str {
+    name.eq(key).match({ true => hit, false => miss })
+}
+
+// `int` is the spelling an unspellable type falls back to, so it
+// cannot double as the answer for a Zen type that really is `int`.
+// The list is asked directly.
+c_prim_known* = (name: str) bool {
+    is_c_integer(name) || name.eq("f32") || name.eq("f64")
+        || name.eq("float") || name.eq("bool") || name.eq("str")
+        || name.eq("()")
+}
+
+// Is this an integer type a trapping operation can be emitted for?
+is_c_integer* = (name: str) bool {
+    name.eq("i8") || name.eq("i16") || name.eq("i32") || name.eq("i64")
+        || name.eq("int")
+        || name.eq("u8") || name.eq("u16") || name.eq("u32")
+        || name.eq("u64") || name.eq("usize")
+}
+
+is_signed* = (name: str) bool {
+    name.eq("i8") || name.eq("i16") || name.eq("i32") || name.eq("i64")
+        || name.eq("int")
+}
+
+// -----------------------------------------------------------------
+// the worklist
+// -----------------------------------------------------------------
+
+// Register a type for definition. The mangled name is the identity,
+// because `tcode` is injective: two types share a name exactly when
+// they are one type.
+request_type* = (be :: CBackend, id: TyId) Res<(), AllocError> {
+    name ::= be.alloc.String().try();
+    sym_type(name, be.types(), be.world(), id).try();
+    be.type_index(name.view()).match({
+        None  => be.queue_type(name, id),
+        Ok(_) => Ok(()),
+    })
+}
+
+// Walk every queued type's children until nothing new appears.
+close_types* = (be :: CBackend) Res<(), AllocError> {
+    Range(0, MAX_TYPE_PASSES).loop((h, pass) {
+        n = be.type_names.len;
+        Range(0, n).loop((hh, i) { request_children(be, i).try() });
+    });
+    Ok(());
+}
+
+request_children = (be :: CBackend, i: usize) Res<(), AllocError> {
+    be.type_id_at(i).match({
+        None     => Ok(()),
+        Ok(id)   => request_members(be, id),
+    }).try();
+    Ok(());
+}
+
+request_members = (be :: CBackend, id: TyId) Res<(), AllocError> {
+    be.types().at(id).match({
+        Named(n) => request_decl_members(be, n),
+        Res(r)   => request_res_members(be, r),
+        _        => Ok(()),
+    }).try();
+    Ok(());
+}
+
+request_res_members = (be :: CBackend, r: TyRes) Res<(), AllocError> {
+    request_if_composite(be, r.value).try();
+    is_failure(r.form).then(() { request_if_composite(be, r.error).try() });
+    Ok(());
+}
+
+request_if_composite = (be :: CBackend, id: TyId) Res<(), AllocError> {
+    is_unit(be, id).match({
+        true  => Ok(()),
+        false => request_if_named(be, id),
+    })
+}
+
+request_if_named = (be :: CBackend, id: TyId) Res<(), AllocError> {
+    be.types().at(id).match({
+        Named(_) => request_type(be, id),
+        Res(_)   => request_type(be, id),
+        _        => Ok(()),
+    })
+}
+
+request_decl_members = (be :: CBackend, n: TyNamed) Res<(), AllocError> {
+    decl_at(be.tree, n.decl).match({
+        None    => Ok(()),
+        Ok(d)   => request_from_decl(be, n, d),
+    }).try();
+    Ok(());
+}
+
+request_from_decl = (be :: CBackend, n: TyNamed, d: Decl)
+                    Res<(), AllocError> {
+    ctx = decl_ctx(be, n);
+    d.kind.match({
+        Struct(s) => request_fields(be, s.members, ctx),
+        Enum(e)   => request_variants(be, n, e.variants, ctx),
+        _         => Ok(()),
+    })
+}
+
+request_fields = (be :: CBackend, members: Vec<Member>, ctx: Ctx)
+                 Res<(), AllocError> {
+    members.loop((h, m) {
+        field_type(be, m, ctx).match({
+            None     => Ok(()),
+            Ok(t)    => request_if_composite(be, t),
+        }).try();
+    });
+    Ok(());
+}
+
+request_variants = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
+                    ctx: Ctx) Res<(), AllocError> {
+    variants.loop((h, v) {
+        variant_type(be, n, v, ctx).match({
+            None     => Ok(()),
+            Ok(t)    => request_if_composite(be, t),
+        }).try();
+    });
+    Ok(());
+}
+
+// The context a declaration's own member types are read in: its module,
+// and no `@Self` — a member type naming `@Self` by value would be a
+// type of infinite size, and one behind a `Ptr` is out of this subset.
+decl_ctx* = (be :: CBackend, n: TyNamed) Ctx {
+    Ctx(module: n.decl.module.to_usize(),
+        ret: TyId(index: 0), has_ret: false,
+        self_ty: TyId(index: 0), has_self: false)
+}
+
+// A struct member's storage type, or nothing when the member is not
+// storage. A method is a function and a struct-body constant is one
+// value per type; neither takes a field.
+field_type* = (be :: CBackend, m: Member, ctx: Ctx) Res<TyId> {
+    m.kind.match({
+        Field(fld) => fld.type.match({
+            None  => None,
+            Ok(t) => resolved(be, t, ctx),
+        }),
+        _ => None,
+    })
+}
+
+// A variant's payload type.
+//
+// Two readings, and DESIGN.md decides between them by what the names
+// MEAN: `Shape = Circle(Circle) | Unit` is nominal and a payload is
+// written, while `Error = AllocError | IoError` is "a union of existing
+// types" and each variant carries a value OF the type it names — so
+// `WriteError.IoError` records WHICH IoError, where tag-only it would
+// record only that there was one.
+variant_type* = (be :: CBackend, n: TyNamed, v: Variant, ctx: Ctx)
+                Res<TyId> {
+    v.payload.match({
+        Ok(t) => resolved(be, t, ctx),
+        None  => union_member_type(be, n, v),
+    })
+}
+
+// The type a bare variant name denotes, when it denotes one. Nothing
+// when the name is not a type in the declaring module, which is the
+// nominal reading and the common one.
+union_member_type = (be :: CBackend, n: TyNamed, v: Variant) Res<TyId> {
+    found ::= be.alloc.Vec<Def>();
+    be.world().defs_of(n.decl.module.to_usize(), v.name.text, found).match({
+        Err(_) => None,
+        Ok(_)  => named_of(be, found),
+    })
+}
+
+named_of = (be :: CBackend, found: Vec<Def>) Res<TyId> {
+    found.get(0).match({
+        None  => None,
+        Ok(d) => interned_named(be, d),
+    })
+}
+
+interned_named = (be :: CBackend, d: Def) Res<TyId> {
+    empty ::= be.alloc.Vec<TyId>();
+    be.check.types.named(d.id, d.qname, d.name, empty).match({
+        Err(_) => None,
+        Ok(id) => Ok(id),
+    })
+}
+
+resolved = (be :: CBackend, t: TypeId, ctx: Ctx) Res<TyId> {
+    be.check.type_from_ast(t, ctx).match({
+        Err(_) => None,
+        Ok(id) => Ok(id),
+    })
+}

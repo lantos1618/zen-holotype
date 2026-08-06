@@ -73,9 +73,59 @@ RES_PATH* : str = "std.core.result.Res"
 // -----------------------------------------------------------------
 
 // One length-prefixed component: `alpha` -> `5alpha`.
+//
+// A component that is not a Zen identifier is HEX-ESCAPED rather than
+// written through, because the output has to be a C identifier and not
+// every interned name is one: a fixed array is interned under `[]`, so
+// `[u8, 4]` would otherwise mangle to `zu_t1_2[]I1_b2u8`. The escape is
+// `x` followed by two hex digits a byte, which cannot collide with a
+// real identifier because a real identifier never reaches it.
 comp* = (out :: String, name: str) Res<(), AllocError> {
+    is_c_identifier(name).match({
+        true  => plain_comp(out, name),
+        false => escaped_comp(out, name),
+    })
+}
+
+plain_comp = (out :: String, name: str) Res<(), AllocError> {
     write_usize(out, name.len).try();
     out.add_bytes(name)
+}
+
+escaped_comp = (out :: String, name: str) Res<(), AllocError> {
+    write_usize(out, name.len * 2 + 1).try();
+    out.add_bytes("x").try();
+    Range(0, name.len).loop((h, i) {
+        out.add_byte(hex_digit(name.index(i) / 16)).try();
+        out.add_byte(hex_digit(name.index(i) % 16)).try();
+    });
+    Ok(());
+}
+
+// `[A-Za-z_][A-Za-z0-9_]*`, which is exactly what the language admits
+// as an identifier and exactly what C admits as one.
+is_c_identifier* = (name: str) bool {
+    (name.len > 0) && is_start(name.index(0)) && rest_is_ident(name)
+}
+
+rest_is_ident = (name: str) bool {
+    Range(1, name.len).find((i) { is_ident_byte(name.index(i)) == false })
+        .match({ Ok(_) => false, None => true })
+}
+
+is_start = (b: u8) bool {
+    (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '_'
+}
+
+is_ident_byte = (b: u8) bool {
+    is_start(b) || (b >= '0' && b <= '9')
+}
+
+hex_digit = (v: u8) u8 {
+    (v < 10).match({
+        true  => '0' + v,
+        false => 'a' + (v - 10),
+    })
 }
 
 // A list header: `3_`. A count always ends with `_` and a component

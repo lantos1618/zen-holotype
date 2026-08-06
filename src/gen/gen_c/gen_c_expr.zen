@@ -1,0 +1,633 @@
+// src/gen/gen_c/gen_c_expr.zen
+// What an expression is in C.
+//
+// Every lowering here has one shape: statements go to the backend's
+// buffer, and the C EXPRESSION that names the result goes into the
+// caller's buffer. `gen_c_stmt.zen` owns the other half — where that
+// result ends up — and `gen_c_flow.zen` owns the two forms that cannot
+// be C expressions at all.
+//
+// THE ONE PLACE THIS IS NOT SOUND IS SHORT CIRCUITING. `a && b` must
+// not evaluate `b` unless `a` held, and a spilled `b` emits its
+// statements before the `&&` is written. So a spilling right operand of
+// `&&` or `||` is REPORTED rather than mis-lowered. That is a real
+// restriction and it is named out loud rather than left to be found.
+//
+// TRAPS ARE THE FAILURE MODEL, not an option. `+ - *` go through a
+// checked helper, `/ %` through a guarded one, and the position is the
+// OPERATOR token — which is why `Binary` and `Unary` carry `op_span`.
+// `+% -% *%` go through the wrapping helper: they are separate
+// operators and not a flag, "because a flag is one `!` away from
+// generating the wrong one".
+//
+// SEMA IS THE ONLY SOURCE OF A TYPE. Where `type_of` answers, its
+// answer is used; where it does not yet — a call, a match, a record —
+// the CONTEXT's expected type is used, and where there is no
+// expectation either, an `Untyped` fault is raised rather than a guess.
+
+Ast, Expr, ExprKind, ExprId, BlockId, Block, Stmt, StmtKind, Bind = ast
+Decl, DeclKind, Struct, Member, MemberKind = ast
+Literal, LiteralKind, BinOp, UnOp, Binary, Unary, Match, Arm = ast
+Pattern, PatternKind, Access, Call, Arg, Span, Ident = ast
+Param, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
+World, Def, DefKind, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+type_of, type_from_ast, stmt_type = sema.sema_type
+write_usize = sema.sema_diag
+Emit = gen.gen_emit
+sym_local, sym_member, sym_variant, sym_gen, sym_fn = gen.gen_name
+RES_PATH, is_failure = gen.gen_name
+GenFault = gen.gen_diag
+CBackend, LocalSlot = gen.gen_c.gen_c_state
+unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_state
+lower_match, lower_try = gen.gen_c.gen_c_flow
+ctype, declarator, spellable, is_unit, c_prim = gen.gen_c.gen_c_type
+is_c_integer, is_signed, variant_type, decl_ctx = gen.gen_c.gen_c_type
+write_qname = gen.gen_c.gen_c_layout
+field_type, request_type = gen.gen_c.gen_c_type
+Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
+lower_call, res_value, is_res_ctor = gen.gen_c.gen_c_call
+
+// -----------------------------------------------------------------
+// expressions
+// -----------------------------------------------------------------
+
+// Does this form need statements of its own? A spilling form may not
+// appear where C wants a pure expression, and the two places that
+// matters — the right operand of `&&` / `||`, and an argument — ask
+// this first.
+spills* = (be: CBackend, id: ExprId) bool {
+    be.tree.expr_at(id).kind.match({
+        Match(_) => true,
+        Try(_)   => true,
+        Block(_) => true,
+        Paren(p) => spills(be, p.inner),
+        _        => false,
+    })
+}
+
+// The type of an expression.
+//
+// SEMA FIRST, ALWAYS. Where `type_of` answers, its answer is used and
+// this file has no opinion. Where it does not — sema does not type a
+// call yet, so it does not type a `.try()` on one either — the
+// declaration behind the callee is read instead, which is the same
+// "degrade to your own resolution when a query is absent" the
+// bootstrapper's backend documents. The moment sema types a call, the
+// fallback stops firing and nothing else changes.
+ty_of* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+         Res<TyId, AllocError> {
+    got = be.check.type_of(id, ctx).try();
+    be.check.is_unknown(got).match({
+        false => Ok(got),
+        true  => fallback_type(be, id, ctx, want),
+    })
+}
+
+fallback_type = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+                Res<TyId, AllocError> {
+    be.tree.expr_at(id).kind.match({
+        Call(c)  => call_type(be, c, ctx, want),
+        Paren(p) => ty_of(be, p.inner, ctx, want),
+        Try(t)   => try_value_type(be, t.operand, ctx, want),
+        _        => Ok(want),
+    })
+}
+
+// What a call evaluates to: the callee's declared return type, or the
+// type it constructs.
+call_type = (be :: CBackend, c: Call, ctx: Ctx, want: TyId)
+            Res<TyId, AllocError> {
+    be.tree.expr_at(c.callee).kind.match({
+        Name(n) => named_call_type(be, n.text, ctx, want),
+        _       => Ok(want),
+    })
+}
+
+named_call_type = (be :: CBackend, name: str, ctx: Ctx, want: TyId)
+                  Res<TyId, AllocError> {
+    is_res_ctor(name).match({
+        true  => Ok(want),
+        false => declared_call_type(be, name, ctx, want),
+    })
+}
+
+declared_call_type = (be :: CBackend, name: str, ctx: Ctx, want: TyId)
+                     Res<TyId, AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.defs_of(ctx.module, name, found).try();
+    found.len.match({
+        1 => def_call_type(be, found, want),
+        _ => Ok(want),
+    })
+}
+
+def_call_type = (be :: CBackend, found: Vec<Def>, want: TyId)
+                Res<TyId, AllocError> {
+    found.get(0).match({
+        None  => Ok(want),
+        Ok(d) => def_result_type(be, d, want),
+    })
+}
+
+def_result_type = (be :: CBackend, d: Def, want: TyId)
+                  Res<TyId, AllocError> {
+    d.kind.match({
+        FunctionDef => function_ret(be, d, want),
+        StructDef   => struct_type(be, d),
+        _           => Ok(want),
+    })
+}
+
+struct_type = (be :: CBackend, d: Def) Res<TyId, AllocError> {
+    empty ::= be.alloc.Vec<TyId>();
+    be.check.types.named(d.id, d.qname, d.name, empty)
+}
+
+function_ret = (be :: CBackend, d: Def, want: TyId) Res<TyId, AllocError> {
+    decl_at(be.tree, d.id).match({
+        None  => Ok(want),
+        Ok(x) => decl_ret(be, d, x, want),
+    })
+}
+
+decl_ret = (be :: CBackend, d: Def, x: Decl, want: TyId)
+           Res<TyId, AllocError> {
+    ctx = Ctx(module: d.id.module.to_usize(), ret: TyId(index: 0),
+              has_ret: false, self_ty: TyId(index: 0), has_self: false);
+    x.kind.match({
+        Function(f) => written_ret(be, f.ret, ctx, want),
+        _           => Ok(want),
+    })
+}
+
+written_ret = (be :: CBackend, ret: Res<TypeId>, ctx: Ctx, want: TyId)
+              Res<TyId, AllocError> {
+    ret.match({
+        None  => Ok(want),
+        Ok(t) => be.check.type_from_ast(t, ctx),
+    })
+}
+
+// `.try()` evaluates to its operand's Ok payload.
+try_value_type = (be :: CBackend, operand: ExprId, ctx: Ctx, want: TyId)
+                 Res<TyId, AllocError> {
+    unknown = be.check.types.unknown().try();
+    rt = ty_of(be, operand, ctx, unknown).try();
+    be.check.types.at(rt).match({
+        Res(r) => Ok(r.value),
+        _      => Ok(want),
+    })
+}
+
+// The `Res` an expression is, when it is one. `.try()` and a `match`
+// on a `Res` both need this and neither has a `want` that says it.
+res_type_of* = (be :: CBackend, id: ExprId, ctx: Ctx)
+               Res<TyId, AllocError> {
+    unknown = be.check.types.unknown().try();
+    ty_of(be, id, ctx, unknown)
+}
+
+expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, out :: String)
+        Res<(), AllocError> {
+    node = be.tree.expr_at(id);
+    node.kind.match({
+        Literal(l)  => lower_literal(be, id, l, ctx, want, out),
+        Name(n)     => lower_name(be, id, n.text, ctx, want, out),
+        Paren(p)    => lower_paren(be, p.inner, ctx, want, out),
+        Unary(u)    => lower_unary(be, node, u, ctx, want, out),
+        Binary(b)   => lower_binary(be, node, b, ctx, want, out),
+        Access(a)   => lower_access(be, id, a, ctx, want, out),
+        Call(c)     => lower_call(be, id, c, ctx, want, out),
+        Unit        => out.add_bytes("0"),
+        _           => unsupported(be, id, "this expression form", out),
+    }).try();
+    Ok(());
+}
+
+
+lower_paren = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+               out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    expr(be, id, ctx, want, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+// A literal is its RAW source slice, and that is deliberate: Zen's
+// escape set is `\n \t \r \0 \\ \' \"` and every one of those is a C
+// escape with the same meaning, so the bytes travel unchanged. A `str`
+// is not a `char *` though — it is a pointer and a length — so a
+// string literal is built as one.
+lower_literal = (be :: CBackend, id: ExprId, l: Literal, ctx: Ctx,
+                 want: TyId, out :: String) Res<(), AllocError> {
+    l.kind.match({
+        Str   => lower_str_literal(be, l, out),
+        Int   => out.add_bytes(l.text),
+        Float => out.add_bytes(l.text),
+        Char  => out.add_bytes(l.text),
+        Bool  => out.add_bytes(l.text),
+    }).try();
+    Ok(());
+}
+
+lower_str_literal = (be :: CBackend, l: Literal, out :: String)
+                    Res<(), AllocError> {
+    out.add_bytes("(zg_str){ (unsigned char *)").try();
+    out.add_bytes(l.text).try();
+    out.add_bytes(", ").try();
+    write_usize(out, decoded_len(l.text)).try();
+    out.add_bytes("u }").try();
+    Ok(());
+}
+
+// The byte length a string literal denotes: its raw slice without the
+// quotes, with each escape counting once.
+//
+// `esc` is "the previous byte opened an escape", so the byte that
+// closes one is not counted and the backslash that opened it is.
+decoded_len* = (raw: str) usize {
+    n ::= 0;
+    esc ::= false;
+    Range(1, quoted_end(raw)).loop((h, i) {
+        (esc == false).then(() { n = n + 1; });
+        esc = (esc == false) && (raw.index(i) == '\\');
+    });
+    n
+}
+
+quoted_end = (raw: str) usize {
+    (raw.len > 1).match({ true => raw.len - 1, false => 1 })
+}
+
+// A bare identifier: a local, or a name the module declares. `None` is
+// neither — it is a `Res` constructor, and `Res` is structural in this
+// compiler's type language, so its constructors are too.
+lower_name = (be :: CBackend, id: ExprId, text: str, ctx: Ctx, want: TyId,
+              out :: String) Res<(), AllocError> {
+    be.slot_of(text).match({
+        Ok(slot) => write_local(be, text, slot, out),
+        None     => lower_global_name(be, id, text, ctx, want, out),
+    })
+}
+
+write_local = (be :: CBackend, text: str, slot: LocalSlot, out :: String)
+              Res<(), AllocError> {
+    sym_local(out, text, slot.index)
+}
+
+lower_global_name = (be :: CBackend, id: ExprId, text: str, ctx: Ctx,
+                     want: TyId, out :: String) Res<(), AllocError> {
+    text.eq("None").match({
+        true  => res_value(be, id, want, "None", out),
+        false => unresolved(be, id, text, out),
+    })
+}
+
+
+// -----------------------------------------------------------------
+// operators
+// -----------------------------------------------------------------
+
+lower_unary = (be :: CBackend, node: Expr, u: Unary, ctx: Ctx, want: TyId,
+               out :: String) Res<(), AllocError> {
+    u.op.match({
+        Not  => wrap_unary(be, "!", u.operand, ctx, want, out),
+        Neg  => lower_negate(be, node, u, ctx, want, out),
+        Addr => unsupported(be, u.operand, "the address-of operator", out),
+    })
+}
+
+wrap_unary = (be :: CBackend, op: str, operand: ExprId, ctx: Ctx,
+              want: TyId, out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    out.add_bytes(op).try();
+    expr(be, operand, ctx, want, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+// Negation on an integer is `0 - x`, and it TRAPS: `-i32.MIN` is an
+// overflow like any other. On a float it is the C operator, which
+// cannot overflow.
+lower_negate = (be :: CBackend, node: Expr, u: Unary, ctx: Ctx, want: TyId,
+                out :: String) Res<(), AllocError> {
+    ty = ty_of(be, u.operand, ctx, want).try();
+    prim = be.check.prim_name(ty);
+    is_c_integer(prim).match({
+        false => wrap_unary(be, "-", u.operand, ctx, want, out),
+        true  => negate_checked(be, node, u, prim, ctx, ty, out),
+    })
+}
+
+negate_checked = (be :: CBackend, node: Expr, u: Unary, prim: str, ctx: Ctx,
+                  ty: TyId, out :: String) Res<(), AllocError> {
+    be.need_helpers(prim).try();
+    out.add_bytes("zg_sub_").try();
+    out.add_bytes(prim).try();
+    out.add_bytes("(0, ").try();
+    expr(be, u.operand, ctx, ty, out).try();
+    out.add_bytes(", ").try();
+    write_position(be, node.span.file, u.op_span, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+lower_binary = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx, want: TyId,
+                out :: String) Res<(), AllocError> {
+    is_logical(b.op).match({
+        true  => lower_logical(be, node, b, ctx, out),
+        false => lower_value_op(be, node, b, ctx, want, out),
+    })
+}
+
+is_logical* = (op: BinOp) bool {
+    op.match({ And => true, Or => true, _ => false })
+}
+
+is_comparison* = (op: BinOp) bool {
+    op.match({
+        Equal => true, NotEqual => true, Less => true, LessEq => true,
+        Greater => true, GreaterEq => true,
+        _ => false,
+    })
+}
+
+// `&&` and `||` short-circuit, so a right operand that needs
+// statements of its own cannot be lowered here: the statements would
+// run whether or not the left side held. Reported, not mis-lowered.
+lower_logical = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx,
+                 out :: String) Res<(), AllocError> {
+    bool_ty = be.check.types.bool_ty().try();
+    spills(be, b.rhs).match({
+        true  => unsupported(be, b.rhs, "a spilling operand of && or ||", out),
+        false => write_infix(be, b, c_op(b.op), ctx, bool_ty, out),
+    })
+}
+
+lower_value_op = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx,
+                  want: TyId, out :: String) Res<(), AllocError> {
+    operand = operand_type(be, b, ctx, want).try();
+    prim = be.check.prim_name(operand);
+    is_comparison(b.op).match({
+        true  => lower_compare(be, b, prim, ctx, operand, out),
+        false => lower_arith(be, node, b, prim, ctx, operand, out),
+    })
+}
+
+// The operands' type, which is not the expression's when the operator
+// is a comparison: `a == b` is `bool` whatever it compares.
+operand_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
+               Res<TyId, AllocError> {
+    lhs = be.check.type_of(b.lhs, ctx).try();
+    be.check.is_literal_ty(lhs).match({
+        false => literal_or(be, lhs, b, ctx, want),
+        true  => rhs_type(be, b, ctx, want),
+    })
+}
+
+literal_or = (be :: CBackend, lhs: TyId, b: Binary, ctx: Ctx, want: TyId)
+             Res<TyId, AllocError> {
+    be.check.is_unknown(lhs).match({
+        false => Ok(lhs),
+        true  => rhs_type(be, b, ctx, want),
+    })
+}
+
+rhs_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
+           Res<TyId, AllocError> {
+    rhs = be.check.type_of(b.rhs, ctx).try();
+    usable(be, rhs).match({
+        true  => Ok(rhs),
+        false => Ok(want),
+    })
+}
+
+usable = (be :: CBackend, id: TyId) bool {
+    be.check.is_unknown(id).match({
+        true  => false,
+        false => be.check.is_literal_ty(id) == false,
+    })
+}
+
+// Comparison is C's, and only on scalars. Two structs compared with
+// `==` is not C, and it is not Zen either — DESIGN.md gives `Eq` as an
+// ordinary struct with an `eq` method and never says `==` desugars to
+// it — so this reports rather than emitting something `cc` will refuse.
+lower_compare = (be :: CBackend, b: Binary, prim: str, ctx: Ctx,
+                 operand: TyId, out :: String) Res<(), AllocError> {
+    scalar(be, operand).match({
+        true  => write_infix(be, b, c_op(b.op), ctx, operand, out),
+        false => unsupported(be, b.lhs, "comparing values that are not scalars", out),
+    })
+}
+
+scalar = (be: CBackend, id: TyId) bool {
+    be.check.types.at(id).match({
+        Prim(p) => p.name.eq("str") == false && p.name.eq("()") == false,
+        _       => false,
+    })
+}
+
+write_infix = (be :: CBackend, b: Binary, op: str, ctx: Ctx, operand: TyId,
+               out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    expr(be, b.lhs, ctx, operand, out).try();
+    out.add_bytes(" ").try();
+    out.add_bytes(op).try();
+    out.add_bytes(" ").try();
+    expr(be, b.rhs, ctx, operand, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+c_op* = (op: BinOp) str {
+    op.match({
+        Add => "+", Sub => "-", Mul => "*", Div => "/", Rem => "%",
+        AddWrap => "+", SubWrap => "-", MulWrap => "*",
+        Equal => "==", NotEqual => "!=",
+        Less => "<", LessEq => "<=", Greater => ">", GreaterEq => ">=",
+        And => "&&", Or => "||",
+    })
+}
+
+// The helper an operator goes through. `+ - *` trap, `/ %` trap on a
+// zero divisor and on `MIN / -1`, and the wrapping forms do neither.
+helper_stem* = (op: BinOp) str {
+    op.match({
+        Add => "add", Sub => "sub", Mul => "mul",
+        Div => "div", Rem => "mod",
+        AddWrap => "wadd", SubWrap => "wsub", MulWrap => "wmul",
+        _ => "",
+    })
+}
+
+traps* = (op: BinOp) bool {
+    op.match({
+        AddWrap => false, SubWrap => false, MulWrap => false,
+        _ => true,
+    })
+}
+
+// Arithmetic on an integer goes through a helper, always. Nothing here
+// emits `a + b` and looks afterwards: signed overflow is undefined
+// behaviour in C and an after-the-fact test is one the optimizer is
+// entitled to delete.
+lower_arith = (be :: CBackend, node: Expr, b: Binary, prim: str, ctx: Ctx,
+               operand: TyId, out :: String) Res<(), AllocError> {
+    is_c_integer(prim).match({
+        true  => call_helper(be, node, b, prim, ctx, operand, out),
+        false => write_infix(be, b, c_op(b.op), ctx, operand, out),
+    })
+}
+
+call_helper = (be :: CBackend, node: Expr, b: Binary, prim: str, ctx: Ctx,
+               operand: TyId, out :: String) Res<(), AllocError> {
+    be.need_helpers(prim).try();
+    out.add_bytes("zg_").try();
+    out.add_bytes(helper_stem(b.op)).try();
+    out.add_bytes("_").try();
+    out.add_bytes(prim).try();
+    out.add_bytes("(").try();
+    expr(be, b.lhs, ctx, operand, out).try();
+    out.add_bytes(", ").try();
+    expr(be, b.rhs, ctx, operand, out).try();
+    // `.match` and not `.then`: a `.then` closure capturing more than
+    // one of its enclosing parameters is inlined with the receiver
+    // substituted into the wrong argument slot, which `cc` catches and
+    // docs/GEN_BOOTSTRAP_FIXES.md records.
+    traps(b.op).match({
+        true  => write_trap_args(be, node, b, out),
+        false => Ok(()),
+    }).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+write_trap_args = (be :: CBackend, node: Expr, b: Binary, out :: String)
+                  Res<(), AllocError> {
+    out.add_bytes(", ").try();
+    write_position(be, node.span.file, b.op_span, out).try();
+    Ok(());
+}
+
+// `"file", line, col` — the three arguments every trap takes. The
+// position is the OPERATOR token, and the file is relative to the
+// compilation root, which is what makes two checkouts of one tree emit
+// the same bytes.
+write_position* = (be :: CBackend, file: str, span: Span, out :: String)
+                  Res<(), AllocError> {
+    out.add_bytes("\"").try();
+    out.add_bytes(file).try();
+    out.add_bytes("\", ").try();
+    write_usize(out, span.start.line).try();
+    out.add_bytes(", ").try();
+    write_usize(out, span.start.col).try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// access and calls
+// -----------------------------------------------------------------
+
+// `p.x` on a struct, and `Shape.Unit` on an enum. The same node, and
+// the difference is whether the base is a value or a declaration —
+// "that access form already exists, so this adds a spelling, not a
+// concept".
+lower_access = (be :: CBackend, id: ExprId, a: Access, ctx: Ctx, want: TyId,
+                out :: String) Res<(), AllocError> {
+    base_decl(be, a.base, ctx).match({
+        Ok(ty) => write_variant_value(be, id, ty, a.name.text, out),
+        None   => write_field_access(be, a, ctx, out),
+    })
+}
+
+// The enum a base names, when the base is a bare name that resolves to
+// an enum declaration rather than to a local.
+base_decl = (be :: CBackend, base: ExprId, ctx: Ctx) Res<TyId> {
+    be.tree.expr_at(base).kind.match({
+        Name(n) => enum_named(be, n.text, ctx),
+        _       => None,
+    })
+}
+
+enum_named = (be :: CBackend, text: str, ctx: Ctx) Res<TyId> {
+    be.slot_of(text).match({
+        Ok(_) => None,
+        None  => enum_def_named(be, text, ctx),
+    })
+}
+
+enum_def_named = (be :: CBackend, text: str, ctx: Ctx) Res<TyId> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.defs_of(ctx.module, text, found).match({
+        Err(_) => None,
+        Ok(_)  => first_enum(be, found),
+    })
+}
+
+first_enum = (be :: CBackend, found: Vec<Def>) Res<TyId> {
+    found.get(0).match({
+        None  => None,
+        Ok(d) => enum_type_of(be, d),
+    })
+}
+
+enum_type_of = (be :: CBackend, d: Def) Res<TyId> {
+    d.kind.match({
+        EnumDef => intern_named(be, d),
+        _       => None,
+    })
+}
+
+intern_named = (be :: CBackend, d: Def) Res<TyId> {
+    empty ::= be.alloc.Vec<TyId>();
+    be.check.types.named(d.id, d.qname, d.name, empty).match({
+        Err(_) => None,
+        Ok(id) => Ok(id),
+    })
+}
+
+// A nullary variant is a value of its enum: the tag, and no payload.
+// A variant WITH a payload written as a bare access is a value that
+// has not been constructed, and sema is the one that says so.
+write_variant_value = (be :: CBackend, id: ExprId, ty: TyId, variant: str,
+                       out :: String) Res<(), AllocError> {
+    qname ::= be.alloc.String().try();
+    enum_qname(be, ty, qname).try();
+    out.add_bytes("(").try();
+    ctype(be, ty, out).try();
+    out.add_bytes("){ .zg_tag = ").try();
+    sym_variant(out, qname.view(), variant).try();
+    out.add_bytes(" }").try();
+    Ok(());
+}
+
+enum_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
+    be.check.types.at(ty).match({
+        Named(n) => write_qname(be, out, n),
+        _        => Ok(()),
+    })
+}
+
+write_field_access = (be :: CBackend, a: Access, ctx: Ctx, out :: String)
+                     Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    expr(be, a.base, ctx, unknown, out).try();
+    out.add_bytes(".").try();
+    sym_member(out, a.name.text).try();
+    Ok(());
+}
+
+// A call to a top-level function the module can see, and the two `Res`
+// constructors.
+//
+// OVERLOAD RESOLUTION IS SEMA'S AND IS NOT THERE YET, so a name with
+// more than one declaration is REPORTED rather than picked between:
+// "resolution is on declared parameter types and arity", and a backend
+// guessing would be a second, worse copy of that rule.

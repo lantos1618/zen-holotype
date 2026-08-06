@@ -1,0 +1,386 @@
+// src/gen/gen_c/gen_c_call.zen
+// What a call is in C, and what a type a call names becomes.
+//
+// `Point(x: 3, y: 4)` and `area(p)` are the same AST node. Which one it
+// is depends on what the callee NAMES — a struct is constructed, a
+// function is called — and that is a question about the declaration
+// rather than about the call. Both are here, with the third thing a
+// callee can name: `Ok` and `Err`, which are not functions at all.
+//
+// `Res` IS STRUCTURAL, so its constructors are built here from the
+// EXPECTED type rather than resolved. That follows sema: `TyRes` carries
+// no declaration, because `Res<T>` and `Res<T, E>` are two arities of
+// one name and sema asks which form it has at every `.try()`. It is also
+// why they need an expectation — `Ok(0)` alone does not say whether it
+// closes a `Res<i32>` or a `Res<i32, E>`, and DESIGN.md's hoisting rule
+// turns on exactly that.
+//
+// OVERLOAD RESOLUTION IS SEMA'S AND IS NOT THERE YET, so a name with
+// more than one declaration is REPORTED rather than picked between:
+// "resolution is on declared parameter types and arity", and a backend
+// guessing would be a second, worse copy of that rule.
+//
+// THE TYPE FALLBACK LIVES HERE for the same reason: sema does not type
+// a call yet, so it does not type a `.try()` on one either, and the
+// only place that can answer is the one that already resolves callees.
+// The moment sema types a call the fallback stops firing.
+
+Ast, Expr, ExprKind, ExprId, BlockId, Block, Stmt, StmtKind, Bind = ast
+Decl, DeclKind, Struct, Member, MemberKind = ast
+Literal, LiteralKind, BinOp, UnOp, Binary, Unary, Match, Arm = ast
+Pattern, PatternKind, Access, Call, Arg, Span, Ident = ast
+Param, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
+World, Def, DefKind, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+type_of, type_from_ast, stmt_type = sema.sema_type
+write_usize = sema.sema_diag
+Emit = gen.gen_emit
+sym_local, sym_member, sym_variant, sym_gen, sym_fn = gen.gen_name
+RES_PATH, is_failure = gen.gen_name
+GenFault = gen.gen_diag
+CBackend, LocalSlot = gen.gen_c.gen_c_state
+unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_state
+lower_match, lower_try = gen.gen_c.gen_c_flow
+ctype, declarator, spellable, is_unit, c_prim = gen.gen_c.gen_c_type
+is_c_integer, is_signed, variant_type, decl_ctx = gen.gen_c.gen_c_type
+write_qname = gen.gen_c.gen_c_layout
+field_type, request_type = gen.gen_c.gen_c_type
+expr, ty_of = gen.gen_c.gen_c_expr
+
+// -----------------------------------------------------------------
+// `Res` values
+//
+// `Ok(x)`, `Err(e)` and `None` are not calls to anything: sema carries
+// `Res` structurally, so the constructors are built here from the
+// EXPECTED type. Which is also why they need one — `Ok(0)` alone does
+// not say whether it closes a `Res<i32>` or a `Res<i32, E>`, and
+// DESIGN.md's hoisting rule turns on exactly that.
+// -----------------------------------------------------------------
+
+res_value* = (be :: CBackend, id: ExprId, want: TyId, variant: str,
+             out :: String) Res<(), AllocError> {
+    be.check.types.at(want).match({
+        Res(_) => write_res_tagged(be, want, variant, out),
+        _      => untyped(be, id, variant, out),
+    })
+}
+
+
+write_res_tagged = (be :: CBackend, want: TyId, variant: str, out :: String)
+                   Res<(), AllocError> {
+    out.add_bytes("(").try();
+    ctype(be, want, out).try();
+    out.add_bytes("){ .zg_tag = ").try();
+    sym_variant(out, RES_PATH, variant).try();
+    out.add_bytes(" }").try();
+    Ok(());
+}
+
+// `Ok(x)` / `Err(e)`: the tag, and the payload under the member the
+// variant names. A unit payload takes no member — `Ok(())` carries
+// nothing and a void member is illegal C.
+write_res_payload = (be :: CBackend, id: ExprId, want: TyId, variant: str,
+                     value: ExprId, payload: TyId, ctx: Ctx, out :: String)
+                    Res<(), AllocError> {
+    out.add_bytes("(").try();
+    ctype(be, want, out).try();
+    out.add_bytes("){ .zg_tag = ").try();
+    sym_variant(out, RES_PATH, variant).try();
+    is_unit(be, payload).match({
+        true  => Ok(()),
+        false => write_payload_init(be, variant, value, payload, ctx, out),
+    }).try();
+    out.add_bytes(" }").try();
+    Ok(());
+}
+
+write_payload_init = (be :: CBackend, variant: str, value: ExprId,
+                      payload: TyId, ctx: Ctx, out :: String)
+                     Res<(), AllocError> {
+    out.add_bytes(", .zg_data.").try();
+    sym_member(out, variant).try();
+    out.add_bytes(" = ").try();
+    expr(be, value, ctx, payload, out).try();
+    Ok(());
+}
+
+lower_call* = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx, want: TyId,
+              out :: String) Res<(), AllocError> {
+    be.tree.expr_at(c.callee).kind.match({
+        Name(n) => lower_named_call(be, id, c, n.text, ctx, want, out),
+        _       => unsupported(be, id, "a call through something not a name", out),
+    })
+}
+
+lower_named_call = (be :: CBackend, id: ExprId, c: Call, name: str, ctx: Ctx,
+                    want: TyId, out :: String) Res<(), AllocError> {
+    is_res_ctor(name).match({
+        true  => lower_res_ctor(be, id, c, name, ctx, want, out),
+        false => lower_plain_call(be, id, c, name, ctx, out),
+    })
+}
+
+is_res_ctor* = (name: str) bool { name.eq("Ok") || name.eq("Err") }
+
+lower_res_ctor = (be :: CBackend, id: ExprId, c: Call, name: str, ctx: Ctx,
+                  want: TyId, out :: String) Res<(), AllocError> {
+    be.check.types.at(want).match({
+        Res(r) => lower_res_arg(be, id, c, name, r, ctx, want, out),
+        _      => untyped(be, id, name, out),
+    })
+}
+
+lower_res_arg = (be :: CBackend, id: ExprId, c: Call, name: str, r: TyRes,
+                 ctx: Ctx, want: TyId, out :: String) Res<(), AllocError> {
+    payload = name.eq("Ok").match({ true => r.value, false => r.error });
+    c.args.get(0).match({
+        None  => write_res_tagged(be, want, name, out),
+        Ok(a) => write_res_payload(be, id, want, name, a.value, payload, ctx, out),
+    })
+}
+
+lower_plain_call = (be :: CBackend, id: ExprId, c: Call, name: str, ctx: Ctx,
+                    out :: String) Res<(), AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.defs_of(ctx.module, name, found).try();
+    found.len.match({
+        0 => unresolved(be, id, name, out),
+        1 => call_def(be, id, c, name, found, ctx, out),
+        _ => ambiguous(be, id, name, out),
+    })
+}
+
+
+call_def = (be :: CBackend, id: ExprId, c: Call, name: str, found: Vec<Def>,
+            ctx: Ctx, out :: String) Res<(), AllocError> {
+    found.get(0).match({
+        None  => unresolved(be, id, name, out),
+        Ok(d) => call_kind(be, id, c, d, ctx, out),
+    })
+}
+
+// `Point(x: 3, y: 4)` and `area(p)` are the same node. Which one it is
+// depends on what the callee names — a struct is constructed, a
+// function is called — and that is a question about the declaration,
+// not about the call.
+call_kind = (be :: CBackend, id: ExprId, c: Call, d: Def, ctx: Ctx,
+             out :: String) Res<(), AllocError> {
+    d.kind.match({
+        FunctionDef => call_resolved(be, id, c, d, ctx, out),
+        StructDef   => construct(be, id, c, d, ctx, out),
+        _           => unsupported(be, id, "a call to something that is not a function", out),
+    })
+}
+
+// -----------------------------------------------------------------
+// construction
+//
+// A C compound literal with one designated initialiser per argument.
+// Designators rather than positions because Zen's construction form is
+// `name: value` and the field order in the emitted struct is the
+// declaration's — writing positions would tie the two together for no
+// gain.
+// -----------------------------------------------------------------
+
+construct = (be :: CBackend, id: ExprId, c: Call, d: Def, ctx: Ctx,
+             out :: String) Res<(), AllocError> {
+    empty ::= be.alloc.Vec<TyId>();
+    ty = be.check.types.named(d.id, d.qname, d.name, empty).try();
+    request_type(be, ty).try();
+    decl_at(be.tree, d.id).match({
+        None  => unsupported(be, id, "a construction of an unknown type", out),
+        Ok(x) => construct_decl(be, id, c, x, ty, ctx, out),
+    })
+}
+
+construct_decl = (be :: CBackend, id: ExprId, c: Call, x: Decl, ty: TyId,
+                  ctx: Ctx, out :: String) Res<(), AllocError> {
+    x.kind.match({
+        Struct(s) => construct_struct(be, id, c, s, ty, ctx, out),
+        _         => unsupported(be, id, "a construction of a non-struct", out),
+    })
+}
+
+construct_struct = (be :: CBackend, id: ExprId, c: Call, s: Struct,
+                    ty: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
+    (s.tparams.len > 0).match({
+        true  => unsupported(be, id, "constructing a generic type", out),
+        false => write_literal(be, c, s, ty, ctx, out),
+    })
+}
+
+write_literal = (be :: CBackend, c: Call, s: Struct, ty: TyId, ctx: Ctx,
+                 out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    ctype(be, ty, out).try();
+    out.add_bytes(")").try();
+    (c.args.len == 0).match({
+        true  => out.add_bytes("{0}"),
+        false => write_initialisers(be, c, s, ctx, out),
+    }).try();
+    Ok(());
+}
+
+write_initialisers = (be :: CBackend, c: Call, s: Struct, ctx: Ctx,
+                      out :: String) Res<(), AllocError> {
+    dctx = decl_ctx_of(be, s, ctx);
+    out.add_bytes("{ ").try();
+    c.args.loop((h, i, a) {
+        (i > 0).then(() { out.add_bytes(", ").try() });
+        write_initialiser(be, a, i, s, dctx, ctx, out).try();
+    });
+    out.add_bytes(" }").try();
+    Ok(());
+}
+
+// A struct's own member types are read in the module that declares it,
+// which for a construction is the module the call resolved into.
+decl_ctx_of = (be :: CBackend, s: Struct, ctx: Ctx) Ctx { ctx }
+
+write_initialiser = (be :: CBackend, a: Arg, i: usize, s: Struct, dctx: Ctx,
+                     ctx: Ctx, out :: String) Res<(), AllocError> {
+    name = field_name(be, a, i, s, dctx).try();
+    out.add_bytes(".").try();
+    sym_member(out, name).try();
+    out.add_bytes(" = ").try();
+    want = storage_type(be, s, name, dctx);
+    expr(be, a.value, ctx, want, out)
+}
+
+// The field an argument supplies: the one it names, or the i-th
+// storage member when it does not.
+field_name = (be :: CBackend, a: Arg, i: usize, s: Struct, dctx: Ctx)
+             Res<str, AllocError> {
+    a.name.match({
+        None  => storage_name(be, s, i, dctx),
+        Ok(n) => Ok(n.text),
+    })
+}
+
+// The i-th storage member's name, for a positional argument. A method
+// and a struct-body constant are not storage and do not count.
+// Counted rather than collected: a `Vec<str>` cannot be read back —
+// `Vec.get` at `T = str` fails to infer its own `Ok`, which is
+// recorded with a two-line reproducer in docs/GEN_BOOTSTRAP_FIXES.md.
+storage_name = (be :: CBackend, s: Struct, i: usize, dctx: Ctx)
+               Res<str, AllocError> {
+    name ::= "";
+    seen ::= 0;
+    s.members.loop((h, m) {
+        is_storage(be, m, dctx).then(() {
+            (seen == i).then(() { name = member_text(m); });
+            seen = seen + 1;
+        });
+    });
+    Ok(name);
+}
+
+is_storage = (be :: CBackend, m: Member, dctx: Ctx) bool {
+    field_type(be, m, dctx).match({ Ok(_) => true, None => false })
+}
+
+member_text = (m: Member) str {
+    m.kind.match({
+        Field(f)    => f.name.text,
+        Const(c)    => c.name.text,
+        Function(f) => f.name.text,
+    })
+}
+
+// The declared type of the field an argument supplies, so a literal
+// argument takes the field's width rather than the widest one.
+//
+// Written as named helpers rather than as a closure chain: a `.then`
+// whose body captures several of its enclosing parameters is inlined
+// wrongly, and this shape produced a `Map` instantiated at unresolved
+// type arguments. docs/GEN_BOOTSTRAP_FIXES.md has the reproducer.
+storage_type = (be :: CBackend, s: Struct, name: str, dctx: Ctx) TyId {
+    found ::= TyId(index: 0);
+    s.members.loop((h, m) {
+        member_text(m).eq(name).then(() { found = named_field(be, m, dctx); });
+    });
+    found
+}
+
+named_field = (be :: CBackend, m: Member, dctx: Ctx) TyId {
+    field_type(be, m, dctx).match({
+        Ok(t) => t,
+        None  => TyId(index: 0),
+    })
+}
+
+// The symbol is built from the DECLARATION's parameter types, which is
+// what makes two overloads of a name two symbols. The declaration is
+// read back out of the AST because sema does not yet answer "what is
+// this function's type" — the seam closes when it does.
+call_resolved = (be :: CBackend, id: ExprId, c: Call, d: Def, ctx: Ctx,
+                 out :: String) Res<(), AllocError> {
+    sig ::= be.alloc.Vec<TyId>();
+    ok = signature_of(be, d, sig).try();
+    ok.match({
+        false => unsupported(be, id, "a call to something that is not a plain function", out),
+        true  => write_call(be, c, d, sig, ctx, out),
+    })
+}
+
+// The declared parameter types of a function, in order. `false` when
+// the declaration is not a plain non-generic function.
+signature_of* = (be :: CBackend, d: Def, sig :: Vec<TyId>)
+                Res<bool, AllocError> {
+    decl_at(be.tree, d.id).match({
+        None  => Ok(false),
+        Ok(x) => x.kind.match({
+            Function(f) => params_into(be, d, f.params, f.tparams.len, sig),
+            _           => Ok(false),
+        }),
+    })
+}
+
+params_into = (be :: CBackend, d: Def, params: Vec<Param>, ntparams: usize,
+               sig :: Vec<TyId>) Res<bool, AllocError> {
+    (ntparams > 0).match({
+        true  => Ok(false),
+        false => collect_params(be, d, params, sig),
+    })
+}
+
+collect_params = (be :: CBackend, d: Def, params: Vec<Param>,
+                  sig :: Vec<TyId>) Res<bool, AllocError> {
+    ctx = Ctx(module: d.id.module.to_usize(), ret: TyId(index: 0),
+              has_ret: false, self_ty: TyId(index: 0), has_self: false);
+    params.loop((h, p) {
+        p.type.match({
+            Ok(t) => add_param(be, t, ctx, sig),
+            None  => Ok(()),
+        }).try();
+    });
+    Ok(sig.len == params.len);
+}
+
+add_param = (be :: CBackend, t: TypeId, ctx: Ctx, sig :: Vec<TyId>)
+            Res<(), AllocError> {
+    sig.add(be.check.type_from_ast(t, ctx).try())
+}
+
+write_call = (be :: CBackend, c: Call, d: Def, sig: Vec<TyId>, ctx: Ctx,
+              out :: String) Res<(), AllocError> {
+    sym_fn(out, be.check.types, be.check.world, d.qname, sig).try();
+    out.add_bytes("(").try();
+    c.args.loop((h, i, a) {
+        (i > 0).then(() { out.add_bytes(", ").try() });
+        write_arg(be, a, i, sig, ctx, out).try();
+    });
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+write_arg = (be :: CBackend, a: Arg, i: usize, sig: Vec<TyId>, ctx: Ctx,
+             out :: String) Res<(), AllocError> {
+    want = sig.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
+    expr(be, a.value, ctx, want, out)
+}

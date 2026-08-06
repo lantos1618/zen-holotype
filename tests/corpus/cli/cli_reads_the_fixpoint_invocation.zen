@@ -1,0 +1,89 @@
+// The argument shape `scripts/fixpoint.sh` depends on, pinned.
+//
+//     zen build <root> --emit-c -o <file.c>
+//
+// `zen-1` is built out of `stage1.c` and then invoked exactly that way,
+// so this is not a test of a convenience — it is a test of the gate's
+// interface. If `cli` stops reading that line, the strongest oracle in
+// the project stops running and says nothing about why.
+//
+// The other half is the three commands PLAN.md names and this compiler
+// does not have yet. `fmt`, `test` and `lsp` must come back as
+// THEMSELVES and not as usage errors: an unwritten command and a typo
+// are different answers, and a caller acts on the difference.
+//
+// `cli` takes a `Vec<str>` and touches no capability, which is why this
+// test can hand it argument vectors no real command line would produce.
+
+Alloc, AllocError = std.mem
+Vec = std.collections
+str = std.text
+Cli, Job, cli = zen
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    // exactly what the fixpoint runs
+    show(a, line(a, "build", "src", "--emit-c", "-o", "stage2.c").try()).try();
+
+    // the flags in another order: a scan, not a positional grammar
+    show(a, line(a, "build", "-o", "out.c", "src", "--emit-c").try()).try();
+
+    // a root and nothing else is a complete command
+    show(a, line(a, "build", "src", "", "", "").try()).try();
+
+    // named, not yet written
+    show(a, line(a, "fmt", "", "", "", "").try()).try();
+    show(a, line(a, "lsp", "", "", "", "").try()).try();
+    show(a, line(a, "test", "", "", "", "").try()).try();
+
+    // nothing said at all
+    show(a, line(a, "", "", "", "", "").try()).try();
+
+    // a command this compiler does not have
+    show(a, line(a, "wat", "", "", "", "").try()).try();
+
+    // build with no root: the flags parsed, the subject did not arrive
+    show(a, line(a, "build", "--emit-c", "", "", "").try()).try();
+
+    // a flag nobody knows is NAMED rather than read as the root, which
+    // is how a typo in `--emit-c` becomes a compiler that quietly
+    // compiles the wrong tree
+    show(a, line(a, "build", "src", "--emit-see", "", "").try()).try();
+
+    // a second positional is a mistake and not a second root
+    show(a, line(a, "build", "src", "other", "", "").try()).try();
+
+    Ok(0);
+}
+
+show = (a: Alloc, argv: Vec<str>) Res<(), AllocError> {
+    cli(argv).match({
+        Build(j) => { println("build root={} out={} emit_c={}", j.root, j.out, j.emit_c); },
+        Later(n) => { println("later {}", n); },
+        Usage(w) => { println("usage `{}`", w); },
+    });
+    Ok(());
+}
+
+// `argv.get(0)` is the program path, so every line starts with one.
+// `""` is not an argument — a real argv holds no empty strings — so it
+// stands for "this line ends here".
+line = (a: Alloc, w0: str, w1: str, w2: str, w3: str, w4: str)
+       Res<Vec<str>, AllocError> {
+    v ::= a.Vec<str>();
+    v.add("/usr/bin/zen").try();
+    push(v, w0).try();
+    push(v, w1).try();
+    push(v, w2).try();
+    push(v, w3).try();
+    push(v, w4).try();
+    Ok(v);
+}
+
+push = (v :: Vec<str>, w: str) Res<(), AllocError> {
+    w.is_empty().match({
+        true  => Ok(()),
+        false => v.add(w),
+    })
+}

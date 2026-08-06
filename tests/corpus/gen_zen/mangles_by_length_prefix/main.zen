@@ -1,0 +1,78 @@
+// A flat target namespace needs an unambiguous encoding, and PLAN.md
+// 0.4 decision 1 says which: LENGTH-PREFIXED components, never a naive
+// join on `_`. This test is the counter-example that forces it —
+// `alpha` + `beta_gamma` and `alpha_beta` + `gamma` join to the same
+// string and encode to two — plus one row per symbol site, because
+// "which sites mangle" is decision 3 and struct members are the one
+// everybody forgets.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Vec = std.collections
+comp, count, path, path_with, segments = gen.gen_name
+sym_fn, sym_variant, sym_member, sym_local, sym_value, sym_gen = gen.gen_name
+USR, GEN, RES_PATH = gen.gen_name
+
+show = (a: Alloc, label: str, out: String) Res<(), AllocError> {
+    println("{} {}", label, out.view());
+    Ok(());
+}
+
+joined = (a: Alloc, first: str, second: str) Res<(), AllocError> {
+    out ::= a.String().try();
+    count(out, 2).try();
+    comp(out, first).try();
+    comp(out, second).try();
+    println("{} + {} -> {}", first, second, out.view());
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    // the collision a naive join has, closed by construction
+    joined(alloc, "alpha", "beta_gamma").try();
+    joined(alloc, "alpha_beta", "gamma").try();
+
+    println("segments of std.core.result: {}", segments("std.core.result"));
+    println("segments of nothing: {}", segments(""));
+
+    p ::= alloc.String().try();
+    path(p, "std.core.result").try();
+    show(alloc, "path:", p).try();
+
+    v ::= alloc.String().try();
+    sym_variant(v, RES_PATH, "Ok").try();
+    show(alloc, "variant:", v).try();
+
+    m ::= alloc.String().try();
+    sym_member(m, "errno").try();
+    show(alloc, "member:", m).try();
+
+    l ::= alloc.String().try();
+    sym_local(l, "acc", 1).try();
+    show(alloc, "local:", l).try();
+
+    l2 ::= alloc.String().try();
+    sym_local(l2, "acc", 2).try();
+    show(alloc, "shadowed local:", l2).try();
+
+    val ::= alloc.String().try();
+    sym_value(val, "main.LIMIT").try();
+    show(alloc, "module value:", val).try();
+
+    g ::= alloc.String().try();
+    sym_gen(g, "t", 3).try();
+    show(alloc, "generated:", g).try();
+
+    // a function with no parameters carries no signature; the two
+    // prefixes are the whole reserved-name story
+    f ::= alloc.String().try();
+    f.add_bytes(USR).try();
+    f.add_bytes("f").try();
+    path(f, "main.area").try();
+    show(alloc, "function:", f).try();
+    println("prefixes: {} {}", USR, GEN);
+
+    Ok(0);
+}

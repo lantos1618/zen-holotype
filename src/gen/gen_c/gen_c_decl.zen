@@ -1,0 +1,552 @@
+// src/gen/gen_c/gen_c_decl.zen
+// What a declaration is in C, and what a translation unit is.
+//
+// THE WALK IS REACHABILITY-DRIVEN. A compilation stages the whole of
+// `std` beside the program, so lowering every declaration in every
+// module would emit a translation unit nobody asked for. `emit_program`
+// is seeded with ONE module's functions and follows the calls that
+// resolve, which is what "compilation is whole-program" means in
+// practice: one merged graph, walked from a root, each thing emitted
+// exactly once.
+//
+// BODIES ARE LOWERED FIRST AND EMITTED LAST. Lowering is what discovers
+// which types need definitions and which checked-arithmetic helpers the
+// runtime must carry, and C wants both of those above the first use. So
+// each body is lowered into a buffer of its own, and the translation
+// unit is assembled afterwards in the order C requires — banner,
+// runtime, helpers, typedefs, tags, type definitions, prototypes,
+// bodies, `main`.
+//
+// EVERY LIST IS SORTED BY MANGLED NAME. That is what makes the output
+// independent of the order the modules were discovered in, which is the
+// property the determinism gate and the fixpoint oracle both stand on.
+// A prototype above every body is what lets the sort be by name rather
+// than by dependency: C needs a declaration before a call, not a
+// definition.
+
+Ast, Module, Decl, DeclKind, Function, Param, Span, Ident = ast
+BlockId, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, Ty, Types, TyRes = sema.sema_ty
+World, Def, DefKind, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+type_from_ast = sema.sema_type
+Emit, order = gen.gen_emit
+sym_fn, sym_local, sym_member, sym_variant = gen.gen_name
+RES_PATH = gen.gen_name
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+ctype, declarator, spellable, is_unit, is_c_integer = gen.gen_c.gen_c_type
+emit_types = gen.gen_c.gen_c_layout
+Dest, block = gen.gen_c.gen_c_stmt
+emit_banner, emit_floor, emit_helpers = gen.gen_c.gen_c_runtime
+
+// A bound on the reachable set, and a diagnostic at it rather than a
+// walk that does not terminate. Four thousand functions is more than
+// any program this backend compiles today and less than a runaway.
+MAX_FUNCTIONS* : usize = 4096
+
+// The whole translation unit for the program rooted at module `mi`.
+emit_program* = (be :: CBackend, mi: usize, out :: Emit)
+                Res<(), AllocError> {
+    seed(be, mi).try();
+    drain(be).try();
+    emit_banner(out).try();
+    emit_floor(out).try();
+    emit_helpers(be, out).try();
+    emit_types(be, out).try();
+    emit_protos(be, out).try();
+    emit_bodies(be, out).try();
+    emit_main(be, mi, out).try();
+    Ok(());
+}
+
+// Every function the root module declares. A module's own functions are
+// the roots because a module is what a caller asked to compile; what
+// they call is found by following them.
+seed = (be :: CBackend, mi: usize) Res<(), AllocError> {
+    be.tree.module_at(mi).match({
+        None  => Ok(()),
+        Ok(m) => seed_module(be, m, mi),
+    }).try();
+    Ok(());
+}
+
+seed_module = (be :: CBackend, m: Module, mi: usize) Res<(), AllocError> {
+    Range(0, m.decls.len).loop((h, di) {
+        seed_decl(be, m, mi, di).try();
+    });
+    Ok(());
+}
+
+seed_decl = (be :: CBackend, m: Module, mi: usize, di: usize)
+            Res<(), AllocError> {
+    m.decls.get(di).match({
+        None  => Ok(()),
+        Ok(d) => seed_function(be, m, mi, d),
+    }).try();
+    Ok(());
+}
+
+seed_function = (be :: CBackend, m: Module, mi: usize, d: Decl)
+                Res<(), AllocError> {
+    d.kind.match({
+        Function(f) => seed_named(be, m, mi, f),
+        _           => Ok(()),
+    })
+}
+
+// The declaration is found through `defs_of` rather than by index, so
+// the `Def` a seed carries is the same value a call site would resolve
+// to — one identity for a function, not two.
+seed_named = (be :: CBackend, m: Module, mi: usize, f: Function)
+             Res<(), AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.own_defs(mi, f.name.text, found).try();
+    found.loop((h, d) {
+        is_function(d).then(() { be.need_function(d).try() });
+    });
+    Ok(());
+}
+
+is_function = (d: Def) bool {
+    d.kind.match({ FunctionDef => true, _ => false })
+}
+
+// Lower everything queued, including whatever lowering queues. Bounded
+// rather than looped: a backend that does not terminate is worse than
+// one that reports.
+drain = (be :: CBackend) Res<(), AllocError> {
+    Range(0, MAX_FUNCTIONS).loop((h, i) {
+        (i < be.fn_queue.len).then(() { lower_queued(be, i).try() });
+    });
+    Ok(());
+}
+
+lower_queued = (be :: CBackend, i: usize) Res<(), AllocError> {
+    be.fn_queue.get(i).match({
+        None  => Ok(()),
+        Ok(d) => lower_def(be, d),
+    }).try();
+    Ok(());
+}
+
+lower_def = (be :: CBackend, d: Def) Res<(), AllocError> {
+    decl_at(be.tree, d.id).match({
+        None  => Ok(()),
+        Ok(x) => lower_decl(be, d, x),
+    }).try();
+    Ok(());
+}
+
+lower_decl = (be :: CBackend, d: Def, x: Decl) Res<(), AllocError> {
+    x.kind.match({
+        Function(f) => lower_function(be, d, x, f),
+        _           => Ok(()),
+    })
+}
+
+// -----------------------------------------------------------------
+// one function
+// -----------------------------------------------------------------
+
+// A generic function is not lowered: an instantiation needs its type
+// arguments substituted through the whole body, and monomorphisation
+// is not in this backend yet. A declaration with no body — `Required`
+// or `Hook` — has nothing to lower and is not a fault.
+lower_function = (be :: CBackend, d: Def, x: Decl, f: Function)
+                 Res<(), AllocError> {
+    (f.tparams.len > 0).match({
+        true  => be.report(x.span.file, x.span,
+                           GenFault.Unsupported("a generic function")),
+        false => lower_concrete(be, d, x, f),
+    })
+}
+
+lower_concrete = (be :: CBackend, d: Def, x: Decl, f: Function)
+                 Res<(), AllocError> {
+    f.body.match({
+        None    => Ok(()),
+        Ok(blk) => lower_body(be, d, x, f, blk),
+    })
+}
+
+lower_body = (be :: CBackend, d: Def, x: Decl, f: Function, blk: BlockId)
+             Res<(), AllocError> {
+    mi = d.id.module.to_usize();
+    ret = return_type(be, f, mi).try();
+    be.reset_frame().try();
+    be.check.release(0).try();
+    sig ::= be.alloc.Vec<TyId>();
+    proto ::= be.alloc.String().try();
+    bind_params(be, f, mi, sig).try();
+    write_proto(be, d, f, ret, sig, mi, proto).try();
+    be.open_buf().try();
+    write_body(be, blk, mi, ret).try();
+    keep(be, d, sig, proto).try();
+    Ok(());
+}
+
+return_type = (be :: CBackend, f: Function, mi: usize)
+              Res<TyId, AllocError> {
+    ctx = plain_ctx(be, mi);
+    f.ret.match({
+        Ok(t) => be.check.type_from_ast(t, ctx),
+        None  => be.check.types.prim("()"),
+    })
+}
+
+// A context with a module and nothing else: no `@Self`, no enclosing
+// `Res`. The one a signature is read in, since a signature has no
+// enclosing function of its own.
+plain_ctx* = (be :: CBackend, mi: usize) Ctx {
+    Ctx(module: mi, ret: TyId(index: 0), has_ret: false,
+        self_ty: TyId(index: 0), has_self: false)
+}
+
+// The context a BODY is lowered in. `ret` and `has_ret` are what
+// `.try()` answers to: "the enclosing function must return a
+// compatible Res".
+body_ctx* = (be :: CBackend, mi: usize, ret: TyId) Ctx {
+    Ctx(module: mi, ret: ret, has_ret: is_res(be, ret),
+        self_ty: TyId(index: 0), has_self: false)
+}
+
+is_res* = (be :: CBackend, ret: TyId) bool {
+    be.check.types.at(ret).match({ Res(_) => true, _ => false })
+}
+
+// Parameters are declared in the backend's scope AND in sema's, in
+// that order, because the C name a parameter gets is the one the
+// prototype has to print and the type it has is the one `type_of` must
+// answer with.
+bind_params = (be :: CBackend, f: Function, mi: usize, sig :: Vec<TyId>)
+              Res<(), AllocError> {
+    ctx = plain_ctx(be, mi);
+    f.params.loop((h, p) {
+        bind_param(be, p, ctx, sig).try();
+    });
+    Ok(());
+}
+
+bind_param = (be :: CBackend, p: Param, ctx: Ctx, sig :: Vec<TyId>)
+             Res<(), AllocError> {
+    ty = p.type.match({
+        Ok(t) => be.check.type_from_ast(t, ctx),
+        None  => be.check.types.unknown(),
+    }).try();
+    sig.add(ty).try();
+    be.declare(p.name.text, ty).try();
+    be.check.bind(p.name.text, ty, p.mutable).try();
+    Ok(());
+}
+
+// `static <ret> <symbol>(<params>)`. Static because a translation unit
+// is the whole program — separate compilation is not a thing this
+// language does — so nothing but C's own `main` needs external
+// linkage.
+write_proto = (be :: CBackend, d: Def, f: Function, ret: TyId,
+               sig: Vec<TyId>, mi: usize, out :: String)
+              Res<(), AllocError> {
+    check_spellable(be, d, ret, sig).try();
+    out.add_bytes("static ").try();
+    ctype(be, ret, out).try();
+    out.add_bytes(" ").try();
+    sym_fn(out, be.check.types, be.check.world, d.qname, sig).try();
+    out.add_bytes("(").try();
+    write_params(be, f, sig, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+write_params = (be :: CBackend, f: Function, sig: Vec<TyId>, out :: String)
+               Res<(), AllocError> {
+    (f.params.len == 0).match({
+        true  => out.add_bytes("void"),
+        false => write_param_list(be, f, sig, out),
+    })
+}
+
+write_param_list = (be :: CBackend, f: Function, sig: Vec<TyId>,
+                    out :: String) Res<(), AllocError> {
+    f.params.loop((h, i, p) {
+        (i > 0).then(() { out.add_bytes(", ").try() });
+        write_param(be, p, i, sig, out).try();
+    });
+    Ok(());
+}
+
+write_param = (be :: CBackend, p: Param, i: usize, sig: Vec<TyId>,
+               out :: String) Res<(), AllocError> {
+    ty = sig.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
+    name ::= be.alloc.String().try();
+    slot_index(be, p.name.text, name).try();
+    declarator(be, ty, name.view(), out)
+}
+
+slot_index = (be :: CBackend, name: str, out :: String)
+             Res<(), AllocError> {
+    n = be.slot_of(name).match({ Ok(s) => s.index, None => 1 });
+    sym_local(out, name, n)
+}
+
+// A type with no C spelling is reported once, at the signature, rather
+// than at every use of the parameter it belongs to.
+check_spellable = (be :: CBackend, d: Def, ret: TyId, sig: Vec<TyId>)
+                  Res<(), AllocError> {
+    report_unspellable(be, d, ret).try();
+    sig.loop((h, t) { report_unspellable(be, d, t).try() });
+    Ok(());
+}
+
+report_unspellable = (be :: CBackend, d: Def, t: TyId)
+                     Res<(), AllocError> {
+    spellable(be, t).match({
+        true  => Ok(()),
+        false => be.report(d.span.file, d.span,
+                           GenFault.Unspellable(d.name)),
+    })
+}
+
+// The statements, indented, and no braces: the braces belong to the
+// prototype the body is emitted under, and writing them in one place
+// is what keeps the two from disagreeing. A unit-returning function
+// discards its value; everything else returns one.
+write_body = (be :: CBackend, blk: BlockId, mi: usize, ret: TyId)
+             Res<(), AllocError> {
+    ctx = body_ctx(be, mi, ret);
+    be.indent();
+    block(be, blk, ctx, ret, destination(be, ret)).try();
+    Ok(());
+}
+
+destination = (be :: CBackend, ret: TyId) Dest {
+    is_unit(be, ret).match({
+        true  => Dest.Discard,
+        false => Dest.Return,
+    })
+}
+
+keep = (be :: CBackend, d: Def, sig: Vec<TyId>, proto: String)
+       Res<(), AllocError> {
+    name ::= be.alloc.String().try();
+    sym_fn(name, be.check.types, be.check.world, d.qname, sig).try();
+    text ::= be.alloc.String().try();
+    text.add_bytes(be.text()).try();
+    be.add_function(name, proto, text)
+}
+
+// -----------------------------------------------------------------
+// assembly
+// -----------------------------------------------------------------
+
+emit_protos = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    seq = order(be.alloc, be.fn_names).try();
+    seq.loop((h, i) {
+        be.fn_protos.get(i).match({
+            None  => Ok(()),
+            Ok(p) => write_proto_line(out, p),
+        }).try();
+    });
+    out.line().try();
+    Ok(());
+}
+
+write_proto_line = (out :: Emit, proto: String) Res<(), AllocError> {
+    out.bytes(proto.view()).try();
+    out.say(";").try();
+    Ok(());
+}
+
+emit_bodies = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    seq = order(be.alloc, be.fn_names).try();
+    seq.loop((h, i) {
+        write_body_at(be, out, i).try();
+    });
+    Ok(());
+}
+
+write_body_at = (be :: CBackend, out :: Emit, i: usize)
+                Res<(), AllocError> {
+    be.fn_protos.get(i).match({
+        None  => Ok(()),
+        Ok(p) => out.bytes(p.view()),
+    }).try();
+    out.say(" {").try();
+    be.fn_bodies.get(i).match({
+        None  => Ok(()),
+        Ok(b) => out.bytes(b.view()),
+    }).try();
+    out.say("}").try();
+    out.line().try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// the entry point
+//
+// `main` is the one name the C standard fixes for us, and it is the
+// one place a Zen function is called by something that is not Zen.
+// -----------------------------------------------------------------
+
+emit_main = (be :: CBackend, mi: usize, out :: Emit) Res<(), AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.own_defs(mi, "main", found).try();
+    found.get(0).match({
+        None  => Ok(()),
+        Ok(d) => write_main(be, d, out),
+    })
+}
+
+write_main = (be :: CBackend, d: Def, out :: Emit) Res<(), AllocError> {
+    decl_at(be.tree, d.id).match({
+        None  => Ok(()),
+        Ok(x) => write_main_call(be, d, x, out),
+    })
+}
+
+write_main_call = (be :: CBackend, d: Def, x: Decl, out :: Emit)
+                  Res<(), AllocError> {
+    x.kind.match({
+        Function(f) => write_entry(be, d, f, out),
+        _           => Ok(()),
+    })
+}
+
+write_entry = (be :: CBackend, d: Def, f: Function, out :: Emit)
+              Res<(), AllocError> {
+    mi = d.id.module.to_usize();
+    ret = return_type(be, f, mi).try();
+    sig ::= be.alloc.Vec<TyId>();
+    signature(be, f, mi, sig).try();
+    call ::= be.alloc.String().try();
+    sym_fn(call, be.check.types, be.check.world, d.qname, sig).try();
+    call.add_bytes("(").try();
+    write_zeroes(be, sig, call).try();
+    call.add_bytes(")").try();
+    out.say("int main(void) {").try();
+    out.indent();
+    write_exit(be, ret, call.view(), out).try();
+    out.dedent();
+    out.say("}").try();
+    Ok(());
+}
+
+// The signature again, without binding anything: `emit_main` runs
+// after every frame has been reset, and the symbol has to match the
+// one the prototype printed.
+signature = (be :: CBackend, f: Function, mi: usize, sig :: Vec<TyId>)
+            Res<(), AllocError> {
+    ctx = plain_ctx(be, mi);
+    f.params.loop((h, p) {
+        p.type.match({
+            Ok(t) => add_sig(be, t, ctx, sig),
+            None  => Ok(()),
+        }).try();
+    });
+    Ok(());
+}
+
+add_sig = (be :: CBackend, t: TypeId, ctx: Ctx, sig :: Vec<TyId>)
+          Res<(), AllocError> {
+    sig.add(be.check.type_from_ast(t, ctx).try())
+}
+
+// `main` may declare parameters this backend cannot construct — `Env`
+// is the capability root and there is no runtime behind it yet — so
+// each one is passed a zero value. It is honest rather than silent:
+// the program runs with an empty capability and says nothing it was
+// not asked to.
+write_zeroes = (be :: CBackend, sig: Vec<TyId>, out :: String)
+               Res<(), AllocError> {
+    sig.loop((h, i, t) {
+        (i > 0).then(() { out.add_bytes(", ").try() });
+        write_zero(be, t, out).try();
+    });
+    Ok(());
+}
+
+write_zero = (be :: CBackend, t: TyId, out :: String) Res<(), AllocError> {
+    be.check.types.at(t).match({
+        Prim(_) => out.add_bytes("0"),
+        _       => write_zero_struct(be, t, out),
+    })
+}
+
+write_zero_struct = (be :: CBackend, t: TyId, out :: String)
+                    Res<(), AllocError> {
+    out.add_bytes("(").try();
+    ctype(be, t, out).try();
+    out.add_bytes("){0}").try();
+    Ok(());
+}
+
+// `Ok(0)` from main exits 0 — the corpus rests on it. A `Res` whose Ok
+// payload is an integer becomes the exit code; anything else that is
+// not `Ok` exits 1.
+write_exit = (be :: CBackend, ret: TyId, call: str, out :: Emit)
+             Res<(), AllocError> {
+    be.check.types.at(ret).match({
+        Res(r) => write_res_exit(be, r, ret, call, out),
+        _      => write_plain_exit(be, ret, call, out),
+    })
+}
+
+write_res_exit = (be :: CBackend, r: TyRes, ret: TyId, call: str,
+                  out :: Emit) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    ctype(be, ret, line).try();
+    line.add_bytes(" zg_r = ").try();
+    line.add_bytes(call).try();
+    line.add_bytes(";").try();
+    out.say(line.view()).try();
+    guard ::= be.alloc.String().try();
+    guard.add_bytes("if (zg_r.zg_tag == ").try();
+    sym_variant(guard, RES_PATH, "Ok").try();
+    guard.add_bytes(") return ").try();
+    write_ok_value(be, r, guard).try();
+    guard.add_bytes(";").try();
+    out.say(guard.view()).try();
+    out.say("return 1;").try();
+    Ok(());
+}
+
+write_ok_value = (be :: CBackend, r: TyRes, out :: String)
+                 Res<(), AllocError> {
+    is_c_integer(be.check.prim_name(r.value)).match({
+        true  => write_ok_payload(out),
+        false => out.add_bytes("0"),
+    })
+}
+
+write_ok_payload = (out :: String) Res<(), AllocError> {
+    out.add_bytes("(int)zg_r.zg_data.").try();
+    sym_member(out, "Ok").try();
+    Ok(());
+}
+
+write_plain_exit = (be :: CBackend, ret: TyId, call: str, out :: Emit)
+                   Res<(), AllocError> {
+    is_c_integer(be.check.prim_name(ret)).match({
+        true  => write_int_exit(call, out),
+        false => write_void_exit(be, ret, call, out),
+    })
+}
+
+write_int_exit = (call: str, out :: Emit) Res<(), AllocError> {
+    out.bytes("return (int)").try();
+    out.bytes(call).try();
+    out.say(";").try();
+    Ok(());
+}
+
+write_void_exit = (be :: CBackend, ret: TyId, call: str, out :: Emit)
+                  Res<(), AllocError> {
+    out.bytes(call).try();
+    out.say(";").try();
+    out.say("return 0;").try();
+    Ok(());
+}

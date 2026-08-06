@@ -135,3 +135,198 @@ line 1 of the Zen backend's output will differ from `bootstrap/gen_c.py`'s.
 That is fine for the fixpoint, which compares stage2 against stage3 — both
 from the Zen backend — but it means the two backends' output cannot be
 diffed directly during the differential-oracle stage.
+
+---
+---
+
+# Part two: findings from writing `src/gen/`
+
+Everything above was an audit. What follows was found by building the backend
+and running it end to end, and each entry is either **acted on** or **recorded
+with a reproducer**. Reproducers run the way `tests/run.py` runs one: a
+compilation root holding the program as `main.zen` with the top-level modules
+of `src/` beside it, compiled as a **directory**.
+
+## What was acted on
+
+- **The `#error` ruling is carried out.** Every checked helper is now emitted
+  twice: `__builtin_*_overflow` under `#ifdef ZG_HAS_OVERFLOW_BUILTINS`, and
+  the reference's hand-written pre-operation range test under `#else` —
+  two-sided for signed add and subtract, four-quadrant for signed multiply,
+  one-sided for unsigned. `cc -std=c99` on a conforming compiler builds the
+  output. `gen_c_runtime.zen`'s header states it as a promise rather than a
+  cost.
+- **`comment()` collapsed to one `out.say`**, and the workaround's comment now
+  records that the grammar bug it dodged was fixed rather than repeating the
+  claim. Re-tested, not assumed.
+- **`comp` hex-escapes a non-identifier component.** `[]` — the name
+  `sema_type.array_type` interns a fixed array under — now mangles to
+  `x5b5d` rather than producing `zu_t1_2[]I1_b2u8`.
+- **Both files over the hard cap were split by subject**, and the folder root
+  is restored and lists the backend.
+
+## Confirmed bootstrapper bugs, most-blocking first
+
+### 1. `Vec.get` at `T = str` cannot infer its own `Ok`
+
+**Blocking: yes.** It is two diagnostics pointing at `std`, from a program that
+never mentions `std.collections`, and it takes the whole compilation down.
+
+```groovy
+Alloc, AllocError = std.mem
+str, String = std.text
+Vec = std.collections
+
+pick = (a: Alloc, i: usize) Res<str, AllocError> {
+    v ::= a.Vec<str>();
+    v.add("hello").try();
+    Ok(v.get(i).match({ Ok(s) => s, None => "" }));
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    println("{}", pick(alloc, 0).try());
+    Ok(0);
+}
+```
+
+```
+std/collections/collections_vec.zen:39:22: cannot infer the type of `Ok` here
+std/collections/collections_vec.zen:40:22: cannot infer the type of `None` here
+```
+
+`Vec<bool>` fails the same way. `Vec<Def>`, `Vec<TyId>`, `Vec<String>`,
+`Vec<Member>`, `Vec<Variant>` and `Map<ExprId, TyId>` are all fine, so it is
+not "a generic in a Vec" — it is `Res<T>` at particular `T`s, and `str` is the
+one a backend reaches for constantly.
+
+**Workaround:** `gen_c_call.storage_name` counts to the i-th storage member
+with two mutable locals rather than collecting names into a `Vec<str>`.
+
+### 2. A local `Vec<T>` read back in the same function can lose its type arguments
+
+**Blocking: yes, and the diagnostic names `std`.** The same shape as §1 from a
+different direction: the emitted C contains `Map.get` instantiated at
+`Map<q, q>` — `q` is the mangler's *unresolved* tag — called with a `BlockId`
+key that no program has.
+
+The version that failed:
+
+```groovy
+storage_type = (be :: CBackend, s: Struct, name: str, dctx: Ctx)
+               Res<TyId, AllocError> {
+    found ::= be.alloc.Vec<TyId>();
+    s.members.loop((h, m) { collect_named_field(be, m, name, dctx, found).try() });
+    Ok(found.get(0).match({ Ok(t) => t, None => TyId(index: 0) }));
+}
+```
+
+```
+std/collections/collections_map.zen:93:9: cannot infer the type of `Ok` here
+```
+
+The version that works is the same function with no collection at all — a
+mutable local assigned inside the loop. What makes this worse than §1 is that
+the failure is a **`Map`** the program does not use: resolution fell through to
+a global by-name search for `get` and found `Map.get`, which is
+`LEXER_BOOTSTRAP_FIXES.md` §7 surfacing in a new place.
+
+### 3. Two modules declaring `Diag` collide on a method name, and `cc` reports it
+
+**Blocking: yes for any program that imports both.** It reddened
+`corpus/cli/*`, which stages `sema` and `gen` together.
+
+`sema.sema_diag` declares `Diag` with a free `render(self: Diag, types, out)`.
+`gen.gen_diag` declared `Diag` with a method `render(self: @Self, out)`. A call
+`d.render(out)` on the *gen* value resolved to *sema's* function:
+
+```
+error: too many arguments to function 'zu_f4_3gen8gen_diag4Diag6render'
+note:  expected 'zu_t3_3gen8gen_diag4Diag' but argument is of type
+       'zu_t3_4sema9sema_diag4Diag'
+```
+
+DESIGN.md says "two modules may define the same top-level name without
+colliding", and four modules in this tree declare a `Diag`. The bootstrapper's
+member resolution does not honour that.
+
+**Workaround:** the type is `GenDiag` and the renderer is a free function
+`render_gen`. Uglier, unique tree-wide, and what STYLE.md's grep test asks for
+anyway.
+
+### 4. A struct field whose name matches a field of an unrelated type is read-only
+
+```
+gen_c_decl.zen:187:8: body is not writable outside module ast_node
+```
+
+from `be.body = be.alloc.Emit().try();`, where `body` is a `::` field of the
+backend's own struct. `ast.Function` declares `body*` — immutable, in another
+module — and the assignment was checked against *that*. Renaming the field to
+`buf` fixed it; the field is now unexported with six forwarding methods, which
+is what DESIGN.md asks for anyway ("mutation only ever goes through exported
+methods").
+
+### 5. A `.then` closure capturing several enclosing parameters is inlined wrong
+
+```groovy
+traps(b.op).then(() { write_trap_args(be, node, b, out).try() });
+```
+
+emitted
+
+```c
+write_trap_args(&be, node, traps(b.op), &out)
+```
+
+— the receiver of `.then` substituted into the third argument slot. `cc`
+catches it; there is no Zen diagnostic. A `.then` capturing one parameter is
+fine and is used throughout `std`.
+
+**Workaround:** `.match` with an explicit `false => Ok(())`, which reads better
+anyway.
+
+### 6. Binding an enum arm's payload to a local types the match as `()`
+
+```groovy
+what = fault.match({
+    Unsupported(w) => w,
+    Unresolved(w)  => w,
+    ...
+});
+out.add_bytes(what).try();
+```
+
+emits `void zu_l4what = 0;`. Every arm is `str` and the first one is too, so
+this is not `LEXER_BOOTSTRAP_FIXES.md` §2's first-arm rule — it is a payload
+binder reaching a local. **Workaround:** write the payload into the sink inside
+each arm.
+
+### 7. A `str` scrutinee against string-literal patterns — confirmed again
+
+Already recorded above; confirmed independently while writing `c_prim`, and
+`gen_c_runtime.signed_guard` / `unsigned_guard` are written as `.eq` chains for
+the same reason.
+
+## A parser finding
+
+**`x * 2` in statement position is parsed as a declaration.** A block whose
+value is a multiplication loses it:
+
+```groovy
+main = (env: i32) i32 { x = 6; x * 2 }
+```
+
+emits `return;`, and the backend reports `a declaration inside a body` at the
+`x`. `x + 2` in the same position is fine, and `(x * 2)` is fine. The `*` is
+being read as the export marker. It belongs in `src/parse/`, not here.
+
+## A design gap, not a bug
+
+**An unannotated integer binding is a literal type, and nothing settles it.**
+`x = 6` gives `x` sema's `int`, which this backend spells `int64_t`; a use of
+`x` in an `i32` context is then narrowed at the call to the checked helper. The
+value is right for anything that fits and silently truncates for anything that
+does not. Settling a literal's type from its context is bidirectional inference
+and it is sema's, not the backend's — recorded here because TESTING.md's "a
+literal at the exact type boundary" test will find it.

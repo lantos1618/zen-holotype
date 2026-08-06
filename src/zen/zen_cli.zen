@@ -1,0 +1,149 @@
+// src/zen/zen_cli.zen
+// The command line, and nothing else.
+//
+// THE INVOCATION IS FIXED, and it is fixed by an oracle rather than by
+// taste: `scripts/fixpoint.sh` builds `zen-1` out of `stage1.c` and then
+// runs it as
+//
+//     zen build <root> --emit-c -o <file.c>
+//
+// so the argument shape is this compiler's interface to the strongest
+// test in the project. Getting it wrong is not cosmetic — it is the gate
+// failing to run at all.
+//
+// THIS FILE TOUCHES NO CAPABILITY. It takes a `Vec<str>` and returns what
+// was asked for, which is what makes it the one part of the CLI a corpus
+// test can drive: `tests/corpus/cli/` hands it argument vectors it will
+// never see on a real command line, and reads the answer back. Everything
+// that reads a file or prints a line is in `zen_build.zen`.
+//
+// ONLY `build` IS WRITTEN. PLAN.md's line is "thin cli: build / fmt /
+// test / lsp", and the other three are stage 2, stage 1's `build.zen`,
+// and stage 4 respectively. They are NAMED here and answered with "not
+// yet" — a guess at their behaviour would be three surfaces nobody has
+// designed, and a command that silently does nothing is worse than one
+// that says it is not written.
+
+str = std.text
+Vec = std.collections
+
+// What the command line asked for.
+//
+// Three cases and not two: an unwritten command is not a usage error.
+// `zen fmt` is a real command of this compiler that has not been
+// written yet, and telling its author that is a different answer from
+// telling them they typed something meaningless.
+Cli* = Build(Job)
+     | Later(str)     // fmt / test / lsp — named, and not yet written
+     | Usage(str)     // the word that made no sense; empty means nothing was said
+
+// Everything `build` needs. `emit_c` is a flag and not a mode enum
+// because there is exactly one mode: PLAN.md says C is the backend and
+// "what not to build" names a second backend outright.
+Job* = {
+    root*: str,      // the compilation root: a DIRECTORY, always
+    out*: str,       // where the C goes; empty when `-o` was not given
+    emit_c*: bool,
+}
+
+USAGE*: str = "usage: zen build <root> --emit-c -o <file.c>"
+
+// What one argument is. A classifier rather than a chain of matches at
+// the scan site, because the scan has to stay readable while it also
+// carries the cursor, and four names beat four levels of nesting.
+Arg = EmitC | Out | Flag | Word
+
+// `argv.get(0)` is the program path, so the command is argv[1] and its
+// arguments start at 2.
+cli* = (argv: Vec<str>) Cli {
+    argv.get(1).match({
+        None     => Cli.Usage(""),
+        Ok(name) => command(argv, name),
+    })
+}
+
+command = (argv: Vec<str>, name: str) Cli {
+    name.eq("build").match({
+        true  => job_of(argv),
+        false => not_build(name),
+    })
+}
+
+not_build = (name: str) Cli {
+    is_later(name).match({
+        true  => Cli.Later(name),
+        false => Cli.Usage(name),
+    })
+}
+
+is_later = (name: str) bool {
+    name.eq("fmt") || name.eq("test") || name.eq("lsp")
+}
+
+// The scan. One pass, one cursor, and a `bad` that stops it: the first
+// argument that makes no sense is the one worth naming, and reporting
+// the fifth as well would bury it.
+job_of = (argv: Vec<str>) Cli {
+    root ::= "";
+    out ::= "";
+    emit ::= false;
+    bad ::= "";
+    i ::= 2;
+    loop(() { i < argv.len && bad.is_empty() }, (h) {
+        arg = at(argv, i);
+        i = i + 1;
+        classify(arg).match({
+            EmitC => { emit = true; },
+            Out   => { out = at(argv, i); i = i + 1; },
+            Flag  => { bad = arg; },
+            Word  => root.is_empty().match({
+                true  => { root = arg; },
+                false => { bad = arg; },
+            }),
+        });
+    });
+    verdict(root, out, emit, bad);
+}
+
+verdict = (root: str, out: str, emit: bool, bad: str) Cli {
+    bad.is_empty().match({
+        false => Cli.Usage(bad),
+        true  => root.is_empty().match({
+            true  => Cli.Usage(""),
+            false => Cli.Build(Job(root: root, out: out, emit_c: emit)),
+        }),
+    })
+}
+
+classify = (a: str) Arg {
+    a.eq("--emit-c").match({
+        true  => Arg.EmitC,
+        false => a.eq("-o").match({
+            true  => Arg.Out,
+            false => is_flag(a).match({
+                true  => Arg.Flag,
+                false => Arg.Word,
+            }),
+        }),
+    })
+}
+
+// A leading `-` is a flag whatever follows it, so an unknown one is
+// named rather than silently read as the root — which is how a typo in
+// `--emit-c` becomes a compiler that quietly compiles the wrong tree.
+is_flag = (a: str) bool {
+    a.is_empty().match({
+        true  => false,
+        false => a.index(0) == '-',
+    })
+}
+
+// An argument past the end is the empty string, which every caller
+// already has to handle: `-o` with nothing after it leaves `out` empty,
+// and that is reported where `out` is used rather than here.
+at = (argv: Vec<str>, i: usize) str {
+    argv.get(i).match({
+        Ok(s) => s,
+        None  => "",
+    })
+}

@@ -1,0 +1,566 @@
+// src/gen/gen_c/gen_c_flow.zen
+// What control flow is in C.
+//
+// Zen has exactly one conditional — `.match`, always exhaustive, in
+// every position — and exactly one non-local exit, `.try()`. Neither is
+// a C expression, so both live here: they are the two forms that emit
+// STATEMENTS and hand a destination its value, and everything in
+// `gen_c_expr.zen` that spills spills into one of them.
+//
+// A MATCH BECOMES AN `if` CHAIN AND NOT A `switch`. A pattern is not
+// always a constant — a binder matches everything, and a literal
+// pattern on a non-integer is a comparison — so `switch` would serve
+// only the enum case and the backend would carry two lowerings for one
+// construct. The chain closes with `zg_unreachable`, which is what
+// makes the C total: exhaustiveness is sema's to check, and until it
+// does, a value that matches no arm traps where it happens rather than
+// falling out of the function with an uninitialised result.
+//
+// `.try()` IS A RETURN, and that is DESIGN.md's own framing: "it
+// unwraps Ok, or returns the Err — or the None — from the ENCLOSING
+// function", which is "a jump out through a frame boundary, exactly
+// what `h.break(v)` does". So it lowers to a guard and a `return`, and
+// the thing returned is built from the enclosing function's OWN Res
+// type — never converted, because "there is no From".
+//
+// WHAT IS NOT LOWERED, AND WHY IT IS A REPORT RATHER THAN A GUESS:
+// widening an error set on the way out. `.try()` is legal when the
+// callee's set is contained in the caller's, and the two sets are then
+// different C types with different payload members. Building the
+// caller's value from the callee's needs a per-member map that this
+// backend does not have yet, and a silent memcpy would be a
+// miscompilation rather than a missing feature.
+
+Ast, Expr, ExprId, Match, Arm, Pattern, PatternId, PatternKind = ast
+Literal, LiteralKind, Decl, DeclKind, Enum, Variant, Span = ast
+Destructure, QualifiedName, Ident = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
+World, Def, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+type_of = sema.sema_type
+write_usize = sema.sema_diag
+Emit = gen.gen_emit
+sym_local, sym_member, sym_variant, sym_gen = gen.gen_name
+RES_PATH, is_failure = gen.gen_name
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+ctype, declarator, is_unit, variant_type, decl_ctx = gen.gen_c.gen_c_type
+write_qname = gen.gen_c.gen_c_layout
+Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
+expr, write_position, res_type_of, ty_of = gen.gen_c.gen_c_expr
+
+// -----------------------------------------------------------------
+// match
+// -----------------------------------------------------------------
+
+lower_match* = (be :: CBackend, node: Expr, m: Match, ctx: Ctx, ty: TyId,
+                dst: Dest) Res<(), AllocError> {
+    st = res_type_of(be, m.scrutinee, ctx).try();
+    scrut ::= be.alloc.String().try();
+    sym_gen(scrut, "s", be.next_tmp()).try();
+    declare_temp(be, st, scrut.view()).try();
+    deliver(be, m.scrutinee, ctx, st, Dest.Into(scrut.view())).try();
+    m.arms.loop((h, i, arm) {
+        open_arm(be, arm, i, st, scrut.view(), ctx).try();
+        deliver(be, arm.body, ctx, ty, dst).try();
+    });
+    close_arms(be, node, m).try();
+    Ok(());
+}
+
+declare_temp* = (be :: CBackend, ty: TyId, name: str) Res<(), AllocError> {
+    decl ::= be.alloc.String().try();
+    declarator(be, ty, name, decl).try();
+    decl.add_bytes(";").try();
+    be.writeln(decl.view())
+}
+
+// `if (..) {` for the first arm, `} else if (..) {` for the rest. The
+// bindings a pattern introduces are declared INSIDE the branch, which
+// is what makes `Ok(n)` legal in one arm and unknown in the next.
+open_arm = (be :: CBackend, arm: Arm, i: usize, st: TyId, scrut: str,
+            ctx: Ctx) Res<(), AllocError> {
+    cond ::= be.alloc.String().try();
+    arm_cond(be, arm.pattern, st, scrut, cond).try();
+    (i > 0).match({
+        true  => chain_arm(be, cond.view()),
+        false => first_arm(be, cond.view()),
+    }).try();
+    arm_bind(be, arm.pattern, st, scrut, ctx).try();
+    Ok(());
+}
+
+first_arm = (be :: CBackend, cond: str) Res<(), AllocError> {
+    be.write("if (").try();
+    be.write(cond).try();
+    be.writeln(") {").try();
+    be.indent();
+    Ok(());
+}
+
+chain_arm = (be :: CBackend, cond: str) Res<(), AllocError> {
+    be.dedent();
+    be.write("} else if (").try();
+    be.write(cond).try();
+    be.writeln(") {").try();
+    be.indent();
+    Ok(());
+}
+
+// The chain's `else`. A value that matched no arm is a bug — match is
+// always exhaustive — so it traps at the `match` token rather than
+// leaving the destination uninitialised.
+close_arms = (be :: CBackend, node: Expr, m: Match) Res<(), AllocError> {
+    (m.arms.len == 0).match({
+        true  => write_unreachable(be, node, m),
+        false => close_chain(be, node, m),
+    })
+}
+
+close_chain = (be :: CBackend, node: Expr, m: Match) Res<(), AllocError> {
+    be.dedent();
+    be.writeln("} else {").try();
+    be.indent();
+    write_unreachable(be, node, m).try();
+    be.dedent();
+    be.writeln("}").try();
+    Ok(());
+}
+
+write_unreachable = (be :: CBackend, node: Expr, m: Match)
+                    Res<(), AllocError> {
+    pos ::= be.alloc.String().try();
+    write_position(be, node.span.file, m.name_span, pos).try();
+    be.write("zg_unreachable(").try();
+    be.write(pos.view()).try();
+    be.writeln(");").try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// patterns
+// -----------------------------------------------------------------
+
+arm_cond = (be :: CBackend, pid: PatternId, st: TyId, scrut: str,
+            out :: String) Res<(), AllocError> {
+    pat = be.tree.pattern_at(pid);
+    pat.kind.match({
+        Wild           => out.add_bytes("1"),
+        Literal(l)     => literal_cond(be, pat, l, scrut, out),
+        Name(p)        => name_cond(be, p.name, st, scrut, out),
+        Destructure(d) => tag_cond(be, d.name, st, scrut, out),
+    }).try();
+    Ok(());
+}
+
+// `true =>` is the scrutinee, `false =>` is its negation, and an
+// integer or character pattern is an equality. A string pattern is not
+// lowered: `str` is a pointer and a length, so comparing one is a call
+// and not an operator.
+literal_cond = (be :: CBackend, pat: Pattern, l: Literal, scrut: str,
+                out :: String) Res<(), AllocError> {
+    l.kind.match({
+        Bool  => bool_cond(l.text, scrut, out),
+        Int   => equality(scrut, l.text, out),
+        Char  => equality(scrut, l.text, out),
+        Float => equality(scrut, l.text, out),
+        Str   => unsupported_cond(be, pat, out),
+    })
+}
+
+bool_cond = (text: str, scrut: str, out :: String) Res<(), AllocError> {
+    text.eq("true").match({
+        true  => out.add_bytes(scrut),
+        false => negate(scrut, out),
+    })
+}
+
+negate = (scrut: str, out :: String) Res<(), AllocError> {
+    out.add_bytes("!").try();
+    out.add_bytes(scrut).try();
+    Ok(());
+}
+
+equality = (scrut: str, text: str, out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    out.add_bytes(scrut).try();
+    out.add_bytes(" == ").try();
+    out.add_bytes(text).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+// A `str` is a pointer and a length, so comparing one is a call and
+// not an operator. The arm is reported and its condition is never
+// true, which keeps the chain total without inventing a comparison.
+unsupported_cond = (be :: CBackend, pat: Pattern, out :: String)
+                   Res<(), AllocError> {
+    be.report(pat.span.file, pat.span,
+              GenFault.Unsupported("a string pattern")).try();
+    out.add_bytes("0")
+}
+
+// A bare name is a nullary VARIANT when the scrutinee's type has one
+// by that name, and a BINDER otherwise. "They are the same tokens, and
+// which one it is depends on what is in scope" — here, on what the
+// scrutinee is.
+name_cond = (be :: CBackend, q: QualifiedName, st: TyId, scrut: str,
+             out :: String) Res<(), AllocError> {
+    is_variant(be, st, last_segment(q)).match({
+        true  => tag_cond(be, q, st, scrut, out),
+        false => out.add_bytes("1"),
+    })
+}
+
+tag_cond = (be :: CBackend, q: QualifiedName, st: TyId, scrut: str,
+            out :: String) Res<(), AllocError> {
+    qname ::= be.alloc.String().try();
+    enum_path(be, st, qname).try();
+    out.add_bytes("(").try();
+    out.add_bytes(scrut).try();
+    out.add_bytes(".zg_tag == ").try();
+    sym_variant(out, qname.view(), last_segment(q)).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+// `Shape.Unit` and `Unit` name the same variant; the path in front is
+// which type, and the scrutinee has already answered that.
+last_segment* = (q: QualifiedName) str {
+    q.segments.get(q.segments.len - 1).match({
+        Ok(seg) => seg.text,
+        None    => "",
+    })
+}
+
+// The bindings a pattern introduces, declared inside the branch that
+// tested it.
+arm_bind = (be :: CBackend, pid: PatternId, st: TyId, scrut: str, ctx: Ctx)
+           Res<(), AllocError> {
+    be.tree.pattern_at(pid).kind.match({
+        Name(p)        => bind_name(be, p.name, st, scrut, ctx),
+        Destructure(d) => bind_payload(be, d, st, scrut, ctx),
+        _              => Ok(()),
+    })
+}
+
+bind_name = (be :: CBackend, q: QualifiedName, st: TyId, scrut: str,
+             ctx: Ctx) Res<(), AllocError> {
+    name = last_segment(q);
+    is_variant(be, st, name).match({
+        true  => Ok(()),
+        false => bind_local(be, name, st, scrut),
+    })
+}
+
+// `Ok(n)` binds `n` to the payload under the variant's member. A
+// deeper pattern — `Left(Full(n))` — is not lowered: it needs the
+// payload's own variant list, and one level is what this backend
+// answers for.
+bind_payload = (be :: CBackend, d: Destructure, st: TyId, scrut: str,
+                ctx: Ctx) Res<(), AllocError> {
+    variant = last_segment(d.name);
+    inner = be.tree.pattern_at(d.binder);
+    payload_type(be, st, variant).match({
+        None  => Ok(()),
+        Ok(t) => bind_inner(be, inner, d.binder, t, variant, scrut),
+    })
+}
+
+bind_inner = (be :: CBackend, inner: Pattern, pid: PatternId, t: TyId,
+              variant: str, scrut: str) Res<(), AllocError> {
+    place ::= be.alloc.String().try();
+    place.add_bytes(scrut).try();
+    place.add_bytes(".zg_data.").try();
+    sym_member(place, variant).try();
+    inner.kind.match({
+        Name(p)  => bind_local(be, last_segment(p.name), t, place.view()),
+        Wild     => Ok(()),
+        _        => be.report(inner.span.file, inner.span,
+                              GenFault.Unsupported("a nested pattern")),
+    })
+}
+
+// A C declaration for a pattern binding, plus the same binding in
+// sema's own scope so `type_of` answers for every use of it.
+bind_local = (be :: CBackend, name: str, ty: TyId, init: str)
+             Res<(), AllocError> {
+    n = be.declare(name, ty).try();
+    be.check.bind(name, ty, false).try();
+    cname ::= be.alloc.String().try();
+    sym_local(cname, name, n).try();
+    decl ::= be.alloc.String().try();
+    declarator(be, ty, cname.view(), decl).try();
+    decl.add_bytes(" = ").try();
+    decl.add_bytes(init).try();
+    decl.add_bytes(";").try();
+    be.writeln(decl.view())
+}
+
+// -----------------------------------------------------------------
+// what an enum's variants are
+//
+// Two shapes and one question. `Res` carries no declaration — it is
+// structural in sema's type language — so its variants are read off
+// its form; everything else reads them off the declaration.
+// -----------------------------------------------------------------
+
+is_variant* = (be :: CBackend, st: TyId, name: str) bool {
+    be.check.types.at(st).match({
+        Res(r)   => res_has(r, name),
+        Named(n) => enum_has(be, n, name),
+        _        => false,
+    })
+}
+
+res_has = (r: TyRes, name: str) bool {
+    name.eq("Ok") || failure_name(r, name)
+}
+
+failure_name = (r: TyRes, name: str) bool {
+    is_failure(r.form).match({
+        true  => name.eq("Err"),
+        false => name.eq("None"),
+    })
+}
+
+enum_has = (be :: CBackend, n: TyNamed, name: str) bool {
+    decl_at(be.tree, n.decl).match({
+        None  => false,
+        Ok(d) => decl_has(d, name),
+    })
+}
+
+decl_has = (d: Decl, name: str) bool {
+    d.kind.match({
+        Enum(e) => variants_have(e.variants, name),
+        _       => false,
+    })
+}
+
+variants_have = (variants: Vec<Variant>, name: str) bool {
+    Range(0, variants.len).find((i) {
+        variants.get(i).match({
+            Ok(v) => v.name.text.eq(name),
+            None  => false,
+        })
+    }).match({ Ok(_) => true, None => false })
+}
+
+// The path a tag constant is built from.
+enum_path* = (be :: CBackend, st: TyId, out :: String) Res<(), AllocError> {
+    be.check.types.at(st).match({
+        Res(_)   => out.add_bytes(RES_PATH),
+        Named(n) => write_qname(be, out, n),
+        _        => Ok(()),
+    })
+}
+
+// The type a variant's payload has, or nothing when it carries none.
+payload_type* = (be :: CBackend, st: TyId, variant: str) Res<TyId> {
+    be.check.types.at(st).match({
+        Res(r)   => res_payload(be, r, variant),
+        Named(n) => enum_payload(be, n, variant),
+        _        => None,
+    })
+}
+
+res_payload = (be :: CBackend, r: TyRes, variant: str) Res<TyId> {
+    variant.eq("Ok").match({
+        true  => non_unit(be, r.value),
+        false => res_error_payload(be, r, variant),
+    })
+}
+
+res_error_payload = (be :: CBackend, r: TyRes, variant: str) Res<TyId> {
+    is_failure(r.form).match({
+        true  => non_unit(be, r.error),
+        false => None,
+    })
+}
+
+non_unit = (be :: CBackend, id: TyId) Res<TyId> {
+    is_unit(be, id).match({
+        true  => None,
+        false => Ok(id),
+    })
+}
+
+enum_payload = (be :: CBackend, n: TyNamed, variant: str) Res<TyId> {
+    decl_at(be.tree, n.decl).match({
+        None  => None,
+        Ok(d) => decl_payload(be, n, d, variant),
+    })
+}
+
+decl_payload = (be :: CBackend, n: TyNamed, d: Decl, variant: str)
+               Res<TyId> {
+    d.kind.match({
+        Enum(e) => variant_payload(be, n, e.variants, variant),
+        _       => None,
+    })
+}
+
+variant_payload = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
+                   variant: str) Res<TyId> {
+    found ::= be.alloc.Vec<TyId>();
+    collect_payload(be, n, variants, variant, found).match({
+        Err(_) => None,
+        Ok(_)  => first_payload(be, found),
+    })
+}
+
+collect_payload = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
+                   variant: str, found :: Vec<TyId>) Res<(), AllocError> {
+    ctx = decl_ctx(be, n);
+    variants.loop((h, v) {
+        v.name.text.eq(variant).then(() {
+            variant_type(be, n, v, ctx).match({
+                Ok(t) => found.add(t),
+                None  => Ok(()),
+            }).try();
+        });
+    });
+    Ok(());
+}
+
+first_payload = (be :: CBackend, found: Vec<TyId>) Res<TyId> {
+    found.get(0).match({
+        None  => None,
+        Ok(t) => non_unit(be, t),
+    })
+}
+
+// -----------------------------------------------------------------
+// `.try()`
+// -----------------------------------------------------------------
+
+lower_try* = (be :: CBackend, node: Expr, operand: ExprId, ctx: Ctx,
+              dst: Dest) Res<(), AllocError> {
+    rt = res_type_of(be, operand, ctx).try();
+    be.check.types.at(rt).match({
+        Res(r) => lower_try_res(be, node, operand, r, rt, ctx, dst),
+        _      => be.report_expr(operand,
+                                 GenFault.Untyped("the operand of .try()")),
+    })
+}
+
+lower_try_res = (be :: CBackend, node: Expr, operand: ExprId, r: TyRes,
+                 rt: TyId, ctx: Ctx, dst: Dest) Res<(), AllocError> {
+    tmp ::= be.alloc.String().try();
+    sym_gen(tmp, "t", be.next_tmp()).try();
+    declare_temp(be, rt, tmp.view()).try();
+    deliver(be, operand, ctx, rt, Dest.Into(tmp.view())).try();
+    write_guard(be, node, r, tmp.view(), ctx).try();
+    unwrap(be, r, tmp.view(), dst).try();
+    Ok(());
+}
+
+write_guard = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
+              Res<(), AllocError> {
+    be.write("if (").try();
+    be.write(tmp).try();
+    be.write(".zg_tag != ").try();
+    tag ::= be.alloc.String().try();
+    sym_variant(tag, RES_PATH, "Ok").try();
+    be.write(tag.view()).try();
+    be.writeln(") {").try();
+    be.indent();
+    propagate(be, node, r, tmp, ctx).try();
+    be.dedent();
+    be.writeln("}").try();
+    Ok(());
+}
+
+// The value the enclosing function returns. It is built from the
+// CALLER's own Res type and nothing is converted: "propagation merges
+// sets" is a containment rule, not a conversion, and there is no From.
+propagate = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
+            Res<(), AllocError> {
+    be.check.types.at(ctx.ret).match({
+        Res(want) => propagate_into(be, node, r, want, tmp, ctx),
+        _         => be.report(node.span.file, node.span,
+                               GenFault.Unsupported(".try() outside a Res function")),
+    })
+}
+
+propagate_into = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
+                  tmp: str, ctx: Ctx) Res<(), AllocError> {
+    same_set(r, want).match({
+        true  => write_propagation(be, r, want, tmp, ctx),
+        false => report_widening(be, node),
+    })
+}
+
+// The callee's error set and the caller's must be the SAME type, not
+// merely contained: two different sets are two different C types with
+// two different payload members, and mapping one onto the other needs
+// a per-member rewrite this backend does not have.
+same_set = (r: TyRes, want: TyRes) bool {
+    forms_agree(r.form, want.form) && r.error.eq(want.error)
+}
+
+forms_agree = (got: ResForm, want: ResForm) bool {
+    is_failure(got).match({
+        true  => is_failure(want),
+        false => is_failure(want) == false,
+    })
+}
+
+report_widening = (be :: CBackend, node: Expr) Res<(), AllocError> {
+    be.report(node.span.file, node.span,
+              GenFault.Unsupported("widening an error set through .try()")).try();
+    Ok(());
+}
+
+write_propagation = (be :: CBackend, r: TyRes, want: TyRes, tmp: str,
+                     ctx: Ctx) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes("return (").try();
+    ctype(be, ctx.ret, line).try();
+    line.add_bytes("){ .zg_tag = ").try();
+    failure_tag(be, r, line).try();
+    is_failure(r.form).then(() { carry_error(be, tmp, line).try() });
+    line.add_bytes(" };").try();
+    be.writeln(line.view())
+}
+
+failure_tag = (be :: CBackend, r: TyRes, out :: String) Res<(), AllocError> {
+    is_failure(r.form).match({
+        true  => sym_variant(out, RES_PATH, "Err"),
+        false => sym_variant(out, RES_PATH, "None"),
+    })
+}
+
+carry_error = (be :: CBackend, tmp: str, out :: String) Res<(), AllocError> {
+    out.add_bytes(", .zg_data.").try();
+    sym_member(out, "Err").try();
+    out.add_bytes(" = ").try();
+    out.add_bytes(tmp).try();
+    out.add_bytes(".zg_data.").try();
+    sym_member(out, "Err").try();
+    Ok(());
+}
+
+// `.try()` evaluates to the Ok payload. A unit payload has no member
+// to read, so the destination gets nothing — which is right: `()` is
+// not a value C can hold.
+unwrap = (be :: CBackend, r: TyRes, tmp: str, dst: Dest)
+         Res<(), AllocError> {
+    is_unit(be, r.value).match({
+        true  => Ok(()),
+        false => write_unwrap(be, tmp, dst),
+    })
+}
+
+write_unwrap = (be :: CBackend, tmp: str, dst: Dest) Res<(), AllocError> {
+    place ::= be.alloc.String().try();
+    place.add_bytes(tmp).try();
+    place.add_bytes(".zg_data.").try();
+    sym_member(place, "Ok").try();
+    write_dest(be, dst, place.view())
+}

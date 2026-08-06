@@ -1,0 +1,59 @@
+// src/zen/zen.zen
+// The CLI, and the folder's surface.
+//
+// PLAN.md's line is "thin cli: build / fmt / test / lsp", and thin is
+// the whole brief: `main` reads the command line, picks a command, and
+// returns its exit code. Everything a command does is one call away, in
+// a sibling, because "the compiler is a library from commit one" — `zen
+// build`, `zen fmt`, `zen lsp` and `zen test` are entry points into one
+// artifact and must never become four programs.
+//
+// A FOLDER AND NOT A FILE, and the reason is a gate. A folder root is
+// normally nothing but starred re-exports; this one also holds `main`,
+// which is the one declaration a program has exactly one of and which
+// re-exporting could not express anyway. The folder exists because
+// `tests/run.py` stages a test against the top-level DIRECTORIES of
+// `src/` — a top-level FILE there can never be reached by a corpus
+// test, so `src/zen.zen` would have been the one part of the compiler
+// nothing could test. `tests/corpus/cli/` imports this module.
+//
+// `main` RETURNS `Res<i32, AllocError>` because that is the only error
+// the seed subset lets it name: PLAN.md 0.5 has no error unions, so a
+// program that both opens files and allocates carries ONE nominal
+// error, and every other failure is a value. A failed read is counted
+// and printed like a syntax error, and the count is the exit code.
+
+AllocError = std.mem
+str = std.text
+
+Cli*, Job*, cli*, USAGE* = zen.zen_cli
+Build*, Unit*, build*, fs_message* = zen.zen_build
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    cli(env.argv).match({
+        Build(job)  => build(env, alloc, job),
+        Later(name) => later(name),
+        Usage(word) => usage(word),
+    })
+}
+
+// A command this compiler will have and does not yet. It is answered by
+// name rather than by silence: PLAN.md puts `fmt` at stage 2, `test`
+// behind `build.zen`, and `lsp` at stage 4, and a caller is better told
+// which than told nothing.
+later = (name: str) Res<i32, AllocError> {
+    println("zen {}: not yet — see docs/PLAN.md for the stage it arrives at", name);
+    Ok(2);
+}
+
+// Exit 2 and not 1: "this build found problems" and "I could not tell
+// what you asked for" are different answers, and `scripts/fixpoint.sh`
+// reads the code.
+usage = (word: str) Res<i32, AllocError> {
+    word.is_empty().match({
+        true  => println("{}", USAGE),
+        false => println("zen: unknown argument `{}`\n{}", word, USAGE),
+    });
+    Ok(2);
+}
