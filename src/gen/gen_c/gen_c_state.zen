@@ -35,7 +35,7 @@
 // Hand it in at construction and read every answer back off the
 // backend.
 
-Ast, ExprId, Span = ast
+Ast, ExprId, Span, Lambda = ast
 str, String = std.text
 Alloc, AllocError = std.mem
 Vec = std.collections
@@ -70,6 +70,41 @@ LocalSlot* = {
     // Depth and not a pointer because a body inlined inside another
     // body has both loops in scope and the inner one shadows.
     handle*: usize,
+
+    // WHICH CLOSURE THIS NAME IS, 1-based, or 0 for an ordinary
+    // binding. A lambda handed to a function-typed parameter has no C
+    // storage either: "a body is a non-escaping stack closure, inlined
+    // at the call site, so there is no closure record to box". So the
+    // binding carries an index into the backend's closure table and
+    // `f(x)` inlines the lambda rather than calling through a pointer.
+    closure*: usize,
+}
+
+// A lambda bound to a function-typed parameter, and everything the
+// inliner needs to put its body back where it was written.
+//
+// THE FRAME IS THE HALF THAT IS EASY TO GET WRONG. A closure's free
+// names mean what they meant WHERE IT WAS WRITTEN, and inlining puts
+// the body inside the callee's frame — where `find`'s own
+// `range.loop((h, value) { .. })` would otherwise capture a caller's
+// `h`, silently and with a different value rather than with an error.
+// So `home` and `check_home` are the two scope stacks' depths at the
+// point the lambda was written, and the inliner rewinds both.
+//
+// `ctx` is the CALLER's, and that is what makes a `.try()` inside a
+// lambda body return from the real function it was written in rather
+// than from the callee it was inlined into.
+Closure* = {
+    lam*: Lambda,
+    // the closure's declared parameter types, from the signature it was
+    // handed to: "a closure passed to a function whose signature is
+    // already known infers its parameter types from that signature"
+    ptys*: Vec<TyId>,
+    ret*: TyId,
+    home*: usize,
+    check_home*: usize,
+    inst*: Inst,
+    ctx*: Ctx,
 }
 
 // The two labels and the result of one loop being lowered.
@@ -163,6 +198,14 @@ CBackend* = {
     declared :: Vec<String>,
     // the loops open at this point in the lowering, innermost last
     loops :: Vec<LoopFrame>,
+    // every lambda bound during this function, appended and never
+    // popped: a `LocalSlot` names one by index and the index has to
+    // outlive the scope the name was visible in, because the body is
+    // lowered after the frame has been rewound past it.
+    closures :: Vec<Closure>,
+    // how many callees are open at this point. A bound, so a callee
+    // that inlines itself reports rather than not terminating.
+    depth* :: usize,
     tmp* :: usize,
 
     alloc*: Alloc,
@@ -430,9 +473,63 @@ CBackend* = {
         owned.add_bytes(name).try();
         self.declared.add(owned).try();
         self.locals.add(LocalSlot(name: name, index: n, ty: ty,
-                                  by_ref: by_ref, handle: 0)).try();
+                                  by_ref: by_ref, handle: 0,
+                                  closure: 0)).try();
         Ok(n);
     }
+
+    // Bind a name to a lambda. Like a handle, it has no C storage: what
+    // the name means is a body to inline, and the index is where it is
+    // kept.
+    declare_closure* = (self :: @Self, name: str, cl: Closure)
+                       Res<(), AllocError> {
+        self.closures.add(cl).try();
+        self.locals.add(LocalSlot(name: name, index: 0,
+                                  ty: cl.ret, by_ref: false, handle: 0,
+                                  closure: self.closures.len)).try();
+        Ok(());
+    }
+
+    closure_at* = (self: @Self, i: usize) Res<Closure> {
+        self.closures.get(i - 1)
+    }
+
+    // -----------------------------------------------------------------
+    // rewinding, for an inlined body
+    //
+    // `release` drops bindings; this MOVES them aside and puts them
+    // back. A closure is lowered in the frame it was written in, which
+    // is below the callee's own parameters — and those parameters are
+    // still live afterwards, so they cannot be dropped.
+    // -----------------------------------------------------------------
+
+    detach* = (self :: @Self, mark: usize, saved :: Vec<LocalSlot>)
+              Res<(), AllocError> {
+        extra = self.locals.len - mark;
+        Range(0, extra).loop((h, i) {
+            self.locals.take(self.locals.len - 1).match({
+                Ok(s) => saved.add(s).try(),
+                None  => (),
+            });
+        });
+        Ok(());
+    }
+
+    // `saved` came off the top, so it goes back bottom-first.
+    reattach* = (self :: @Self, saved: Vec<LocalSlot>) Res<(), AllocError> {
+        n = saved.len;
+        Range(0, n).loop((h, i) {
+            saved.get(n - i - 1).match({
+                Ok(s) => self.locals.add(s).try(),
+                None  => (),
+            });
+        });
+        Ok(());
+    }
+
+    enter_call* = (self :: @Self) () { self.depth = self.depth + 1; }
+
+    leave_call* = (self :: @Self) () { self.depth = self.depth - 1; }
 
     // Bind `h` to the loop it came from. A handle has no C storage and
     // no declaration is written for it: what the name means is a pair
@@ -440,7 +537,8 @@ CBackend* = {
     declare_handle* = (self :: @Self, name: str, ty: TyId, depth: usize)
                       Res<(), AllocError> {
         self.locals.add(LocalSlot(name: name, index: 0, ty: ty,
-                                  by_ref: false, handle: depth))
+                                  by_ref: false, handle: depth,
+                                  closure: 0))
     }
 
     // -----------------------------------------------------------------
@@ -506,6 +604,11 @@ CBackend* = {
         Range(0, open).loop((h, i) {
             self.loops.take(self.loops.len - 1);
         });
+        held = self.closures.len;
+        Range(0, held).loop((h, i) {
+            self.closures.take(self.closures.len - 1);
+        });
+        self.depth = 0;
         self.tmp = 0;
         Ok(());
     }
@@ -542,6 +645,8 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         locals: a.Vec<LocalSlot>(),
         declared: a.Vec<String>(),
         loops: a.Vec<LoopFrame>(),
+        closures: a.Vec<Closure>(),
+        depth: 0,
         tmp: 0,
         alloc: a,
     ));

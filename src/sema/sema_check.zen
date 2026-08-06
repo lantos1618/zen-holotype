@@ -220,6 +220,38 @@ Checker* = {
         Ok(());
     }
 
+    // Move every binding added since `mark` aside, and put it back.
+    //
+    // `release` DROPS; a backend inlining a closure has to rewind to
+    // the frame the closure was written in, lower its body there, and
+    // then carry on with the callee's own bindings still live. Two
+    // verbs because those are two different intentions, and only one of
+    // them is reversible.
+    detach_locals* = (self :: @Self, mark: usize, saved :: Vec<Binding>)
+                     Res<(), AllocError> {
+        extra = self.locals.len - mark;
+        Range(0, extra).loop((h, i) {
+            self.locals.take(self.locals.len - 1).match({
+                Ok(b) => saved.add(b).try(),
+                None  => (),
+            });
+        });
+        Ok(());
+    }
+
+    // `saved` came off the top, so it goes back bottom-first.
+    reattach_locals* = (self :: @Self, saved: Vec<Binding>)
+                       Res<(), AllocError> {
+        n = saved.len;
+        Range(0, n).loop((h, i) {
+            saved.get(n - i - 1).match({
+                Ok(b) => self.locals.add(b).try(),
+                None  => (),
+            });
+        });
+        Ok(());
+    }
+
     // -----------------------------------------------------------------
     // type parameters and their bounds
     //

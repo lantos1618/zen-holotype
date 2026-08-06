@@ -1,0 +1,644 @@
+// src/gen/gen_c/gen_c_inline.zen
+// A callee that was handed a lambda, and the lambda when it is called.
+//
+// `loop_iter.zen` states the claim this file keeps: "a body is a
+// non-escaping stack closure, inlined at the call site, so there is no
+// closure record to box". `gen_c_loop.zen` keeps it for the six loop
+// declarations, which have no bodies. This one keeps it for everything
+// else — `bool.then`, `find`, `Cursor.bump_while` — where the callee
+// DOES have a body and the lambda reaches it through an ordinary
+// function-typed parameter.
+//
+// SO A LAMBDA IS NEVER A VALUE HERE. Passing one INLINES THE CALLEE,
+// and calling the parameter it was bound to INLINES THE LAMBDA. There is
+// no function pointer, no closure record and no C spelling for a `()
+// bool` parameter — which is the same sentence as the allocation budget
+// `tests/bench/bench_loop.zen` gates.
+//
+// A CLOSURE'S FREE NAMES MEAN WHAT THEY MEANT WHERE IT WAS WRITTEN, and
+// this is the half that is easy to get wrong. Inlining puts the body
+// inside the callee's frame, so `find`'s own `range.loop((h, value) {
+// .. })` would capture a caller's `h` — silently, with a different value
+// rather than with an error. `Closure` carries the depth of BOTH scope
+// stacks at the point the lambda was written and `run_closure` rewinds
+// to them, which is what makes the capture hygienic. The bootstrapper
+// paid for this one and recorded it.
+//
+// AND IT CARRIES THE CALLER'S `Ctx`, so a `.try()` inside a lambda body
+// returns from the function the lambda was WRITTEN in. That is what
+// `d.exported.then(() { out.add(d).try() })` means, and reading it any
+// other way would return the wrong error type from the wrong frame.
+//
+// WHAT IS REFUSED, and by name: a return type nothing settles. `then<T>`
+// reaches `T` only through the closure, and a closure infers FROM a
+// signature rather than into one — so `T` is read off the lambda's own
+// body, and where that cannot be read the call is reported rather than
+// emitted at a guess.
+//
+// WHAT A CALL EVALUATES TO IS `gen_c_settle.zen`'s SUBJECT and not this
+// one. That is a question about types, asked before anything is written
+// and asked again by `ty_of` for a match scrutinee; this is a question
+// about statements. The two split there, and they meet at `inline_ret`.
+
+Ast, Expr, ExprKind, ExprId, BlockId, Block, Lambda, Param, TypeId = ast
+Decl, DeclKind, Function, Access, Call, Arg, Span, Ident = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+DeclId = sema.sema_id
+TyId, Ty, Types, TyFn, TyRes = sema.sema_ty
+World, Def, decl_at = sema.sema_def
+Checker, Ctx, Binding = sema.sema_check
+Inst = sema.sema_inst
+type_from_ast, param_type = sema.sema_type
+self_ctx = sema.sema_member
+sym_local, sym_gen = gen.gen_name
+GenFault = gen.gen_diag
+CBackend, LocalSlot, Closure = gen.gen_c.gen_c_state
+unsupported, unresolved = gen.gen_c.gen_c_state
+sub_with, open, inst_at, settled_inst, recv_inst = gen.gen_c.gen_c_mono
+enter_tparams, leave_tparams, enter_struct_tparams = gen.gen_c.gen_c_mono
+ctype, declarator, is_unit = gen.gen_c.gen_c_type
+expr, ty_of = gen.gen_c.gen_c_expr
+Dest, block = gen.gen_c.gen_c_stmt
+plain_ctx, body_ctx, self_body_ctx = gen.gen_c.gen_c_decl
+arguments, param_types, call_bindings, inline_ret = gen.gen_c.gen_c_settle
+compose, settle_params, settled = gen.gen_c.gen_c_settle
+
+// A bound on how deep inlining goes, and a diagnostic at it rather than
+// a walk that does not terminate. A recursive function taking a lambda
+// would otherwise unfold forever.
+INLINE_DEPTH* : usize = 12
+
+// -----------------------------------------------------------------
+// recognising
+// -----------------------------------------------------------------
+
+// Is this callee one to inline? A body to inline, and a lambda written
+// at the call site to inline it for.
+
+// -----------------------------------------------------------------
+// recognising
+// -----------------------------------------------------------------
+
+// Is this callee one to inline? A body to inline, and a lambda written
+// at the call site to inline it for.
+inlines* = (be: CBackend, c: Call, f: Function) bool {
+    has_body(f) && takes_lambda(be, c)
+}
+
+
+has_body* = (f: Function) bool {
+    f.body.match({ Ok(_) => true, None => false })
+}
+
+
+takes_lambda* = (be: CBackend, c: Call) bool {
+    got ::= false;
+    c.args.loop((h, a) {
+        got = got || is_lambda(be, a.value);
+    });
+    got
+}
+
+
+is_lambda* = (be: CBackend, id: ExprId) bool {
+    be.tree.expr_at(id).kind.match({ Lambda(_) => true, _ => false })
+}
+
+// Does this declaration take a body? Such a function is NEVER emitted:
+// a `(v: T) bool` parameter has no C spelling, so there is no symbol to
+// write and no way to pass one — it exists only inlined at its call
+// sites, which is what `loop_iter.zen`'s no-closure-record claim means
+// for a function that is not `loop`.
+
+// Does this declaration take a body? Such a function is NEVER emitted:
+// a `(v: T) bool` parameter has no C spelling, so there is no symbol to
+// write and no way to pass one — it exists only inlined at its call
+// sites, which is what `loop_iter.zen`'s no-closure-record claim means
+// for a function that is not `loop`.
+takes_closure* = (be: CBackend, f: Function) bool {
+    got ::= false;
+    f.params.loop((h, p) { got = got || param_is_fn(be, p); });
+    got
+}
+
+
+param_is_fn = (be: CBackend, p: Param) bool {
+    p.type.match({ Ok(t) => type_is_fn(be, t), None => false })
+}
+
+
+type_is_fn = (be: CBackend, t: TypeId) bool {
+    be.tree.type_at(t).kind.match({ Fn(_) => true, _ => false })
+}
+
+// The binding a name has when it is a closure, and nothing when it is
+// an ordinary local or nothing at all.
+
+// The binding a name has when it is a closure, and nothing when it is
+// an ordinary local or nothing at all.
+closure_slot* = (be :: CBackend, name: str) Res<LocalSlot> {
+    be.slot_of(name).match({
+        Ok(s) => keep_closure(s),
+        None  => None,
+    })
+}
+
+
+keep_closure = (s: LocalSlot) Res<LocalSlot> {
+    (s.closure > 0).match({ true => Ok(s), false => None })
+}
+
+// -----------------------------------------------------------------
+// inlining a callee: a free function, or one reached through ufcs
+// -----------------------------------------------------------------
+
+
+// -----------------------------------------------------------------
+// inlining a callee: a free function, or one reached through ufcs
+// -----------------------------------------------------------------
+
+inline_call* = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
+                recv: Res<ExprId>, ctx: Ctx, out :: String)
+               Res<(), AllocError> {
+    (be.depth > INLINE_DEPTH).match({
+        true  => unsupported(be, id, "an inlining that does not terminate", out),
+        false => inline_free(be, id, c, d, f, recv, ctx, out),
+    })
+}
+
+
+inline_free = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
+               recv: Res<ExprId>, ctx: Ctx, out :: String)
+              Res<(), AllocError> {
+    mi = d.id.module.to_usize();
+    dctx = plain_ctx(be, mi);
+    raw = inst_at(be, id).try();
+    inst = settled_inst(be, f.tparams, d.qname, raw).try();
+    mark = enter_tparams(be, f.tparams, d.qname).try();
+    argv ::= be.alloc.Vec<ExprId>();
+    arguments(be, c, recv, argv).try();
+    raws ::= be.alloc.Vec<TyId>();
+    param_types(be, f, dctx, inst, raws).try();
+    extra ::= be.alloc.Inst();
+    call_bindings(be, argv, raws, ctx, extra).try();
+    ret = inline_ret(be, f, dctx, inst, extra, argv, ctx).try();
+    full = compose(be, inst, extra).try();
+    ptys ::= be.alloc.Vec<TyId>();
+    settle_params(be, raws, extra, ptys).try();
+    bctx = body_ctx(be, mi, ret);
+    run_body(be, id, f, argv, ptys, ret, bctx, full, ctx, out).try();
+    leave_tparams(be, mark).try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// inlining a member
+//
+// A method is an ordinary function whose first parameter is the
+// receiver, so this is the same shape with `@Self` bound and the TYPE's
+// parameters in scope rather than the function's own.
+// -----------------------------------------------------------------
+
+
+// -----------------------------------------------------------------
+// inlining a member
+//
+// A method is an ordinary function whose first parameter is the
+// receiver, so this is the same shape with `@Self` bound and the TYPE's
+// parameters in scope rather than the function's own.
+// -----------------------------------------------------------------
+
+inline_method* = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
+                  decl: DeclId, f: Function, ctx: Ctx, out :: String)
+                 Res<(), AllocError> {
+    (be.depth > INLINE_DEPTH).match({
+        true  => unsupported(be, id, "an inlining that does not terminate", out),
+        false => inline_member(be, id, c, a, rty, decl, f, ctx, out),
+    })
+}
+
+
+inline_member = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
+                 decl: DeclId, f: Function, ctx: Ctx, out :: String)
+                Res<(), AllocError> {
+    mi = decl.module.to_usize();
+    sctx = be.check.self_ctx(mi, rty).try();
+    inst = recv_inst(be, rty).try();
+    mark = enter_struct_tparams(be, decl).try();
+    argv ::= be.alloc.Vec<ExprId>();
+    arguments(be, c, Ok(a.base), argv).try();
+    raws ::= be.alloc.Vec<TyId>();
+    param_types(be, f, sctx, inst, raws).try();
+    extra ::= be.alloc.Inst();
+    call_bindings(be, argv, raws, ctx, extra).try();
+    ret = inline_ret(be, f, sctx, inst, extra, argv, ctx).try();
+    full = compose(be, inst, extra).try();
+    ptys ::= be.alloc.Vec<TyId>();
+    settle_params(be, raws, extra, ptys).try();
+    bctx = self_body_ctx(be, mi, ret, rty, true);
+    run_body(be, id, f, argv, ptys, ret, bctx, full, ctx, out).try();
+    leave_tparams(be, mark).try();
+    Ok(());
+}
+
+// The receiver, if a ufcs call arrived through one, and then the
+// written arguments: `range.find(p)` and `find(range, p)` are one call
+// written two ways.
+
+// -----------------------------------------------------------------
+// the body, in the caller's frame
+// -----------------------------------------------------------------
+
+run_body = (be :: CBackend, id: ExprId, f: Function, argv: Vec<ExprId>,
+            ptys: Vec<TyId>, ret: TyId, bctx: Ctx, inst: Inst, ctx: Ctx,
+            out :: String) Res<(), AllocError> {
+    open(be, ret).match({
+        true  => unsupported(be, id, "a generic call whose type arguments nothing settles", out),
+        false => run_settled(be, f, argv, ptys, ret, bctx, inst, ctx, out),
+    })
+}
+
+
+run_settled = (be :: CBackend, f: Function, argv: Vec<ExprId>,
+               ptys: Vec<TyId>, ret: TyId, bctx: Ctx, inst: Inst, ctx: Ctx,
+               out :: String) Res<(), AllocError> {
+    f.body.match({
+        Ok(blk) => run_block(be, f, blk, argv, ptys, ret, bctx, inst, ctx, out),
+        None    => out.add_bytes("0"),
+    })
+}
+
+
+run_block = (be :: CBackend, f: Function, blk: BlockId, argv: Vec<ExprId>,
+             ptys: Vec<TyId>, ret: TyId, bctx: Ctx, inst: Inst, ctx: Ctx,
+             out :: String) Res<(), AllocError> {
+    result ::= be.alloc.String().try();
+    keeps = wants_value(be, ret);
+    keeps.match({
+        true  => open_temp(be, ret, result),
+        false => Ok(()),
+    }).try();
+
+    // the parameters go in ABOVE the caller's frame, and a closure
+    // remembers where that frame ended so its own body can go back
+    lmark = be.mark();
+    cmark = be.check.mark();
+    bind_params(be, f, argv, ptys, lmark, cmark, ctx).try();
+
+    held = be.inst;
+    be.enter_inst(inst);
+    be.enter_call();
+    block(be, blk, bctx, ret, dest_of(keeps, result.view())).try();
+    be.leave_call();
+    be.enter_inst(held);
+
+    be.release(lmark).try();
+    be.check.release(cmark).try();
+    write_result(be, keeps, result.view(), out)
+}
+
+// A call with no storage still writes SOMETHING where the expression
+// goes, or the `(void)(..)` a discarded statement wraps it in does not
+// parse — the same `0` the four report helpers write.
+
+// A call with no storage still writes SOMETHING where the expression
+// goes, or the `(void)(..)` a discarded statement wraps it in does not
+// parse — the same `0` the four report helpers write.
+write_result = (be :: CBackend, keeps: bool, result: str, out :: String)
+               Res<(), AllocError> {
+    keeps.match({
+        true  => out.add_bytes(result),
+        false => out.add_bytes("0"),
+    })
+}
+
+
+dest_of = (keeps: bool, result: str) Dest {
+    keeps.match({ true => Dest.Into(result), false => Dest.Discard })
+}
+
+
+wants_value = (be :: CBackend, ret: TyId) bool {
+    (is_unit(be, ret) == false) && (be.check.is_unknown(ret) == false)
+        && (open(be, ret) == false)
+}
+
+
+open_temp = (be :: CBackend, ret: TyId, result :: String)
+            Res<(), AllocError> {
+    sym_gen(result, "n", be.next_tmp()).try();
+    line ::= be.alloc.String().try();
+    declarator(be, ret, result.view(), line).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view())
+}
+
+
+bind_params = (be :: CBackend, f: Function, argv: Vec<ExprId>,
+               ptys: Vec<TyId>, home: usize, chome: usize, ctx: Ctx)
+              Res<(), AllocError> {
+    Range(0, f.params.len).loop((h, i) {
+        bind_param(be, f, argv, ptys, i, home, chome, ctx).try();
+    });
+    Ok(());
+}
+
+
+bind_param = (be :: CBackend, f: Function, argv: Vec<ExprId>,
+              ptys: Vec<TyId>, i: usize, home: usize, chome: usize,
+              ctx: Ctx) Res<(), AllocError> {
+    f.params.get(i).match({
+        Ok(p) => bind_valued(be, p, argv, ptys, i, home, chome, ctx),
+        None  => Ok(()),
+    })
+}
+
+
+bind_valued = (be :: CBackend, p: Param, argv: Vec<ExprId>,
+               ptys: Vec<TyId>, i: usize, home: usize, chome: usize,
+               ctx: Ctx) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    pty = ptys.get(i).match({ Ok(t) => t, None => unknown });
+    argv.get(i).match({
+        Ok(v) => bind_one(be, p, v, pty, home, chome, ctx),
+        None  => Ok(()),
+    })
+}
+
+
+bind_one = (be :: CBackend, p: Param, value: ExprId, pty: TyId,
+            home: usize, chome: usize, ctx: Ctx) Res<(), AllocError> {
+    be.tree.expr_at(value).kind.match({
+        Lambda(l) => bind_closure(be, p, l, pty, home, chome, ctx),
+        _         => bind_value(be, p, value, pty, ctx),
+    })
+}
+
+// A lambda gets no C storage and no declaration: what the name means is
+// a body, and the frame it was written in.
+
+// A lambda gets no C storage and no declaration: what the name means is
+// a body, and the frame it was written in.
+bind_closure = (be :: CBackend, p: Param, l: Lambda, pty: TyId,
+                home: usize, chome: usize, ctx: Ctx) Res<(), AllocError> {
+    ptys ::= be.alloc.Vec<TyId>();
+    ret = fn_parts(be, pty, ptys).try();
+    be.declare_closure(p.name.text, Closure(lam: l, ptys: ptys, ret: ret,
+                                            home: home, check_home: chome,
+                                            inst: be.inst, ctx: ctx))
+}
+
+// The parameter types and the return type a function TYPE carries.
+
+// The parameter types and the return type a function TYPE carries.
+fn_parts = (be :: CBackend, pty: TyId, ptys :: Vec<TyId>)
+           Res<TyId, AllocError> {
+    be.check.types.at(pty).match({
+        Fn(ft) => copy_fn_types(ft, ptys),
+        _      => be.check.types.unknown(),
+    })
+}
+
+
+copy_fn_types = (ft: TyFn, ptys :: Vec<TyId>) Res<TyId, AllocError> {
+    ft.params.loop((h, t) { ptys.add(t).try() });
+    Ok(ft.ret);
+}
+
+// AN ORDINARY ARGUMENT CROSSES A BOUNDARY HERE exactly as it does at a
+// real call, so it is lowered in the CALLER's frame — before the
+// parameter's own name can shadow anything it reads — and then declared.
+
+// AN ORDINARY ARGUMENT CROSSES A BOUNDARY HERE exactly as it does at a
+// real call, so it is lowered in the CALLER's frame — before the
+// parameter's own name can shadow anything it reads — and then declared.
+bind_value = (be :: CBackend, p: Param, value: ExprId, pty: TyId, ctx: Ctx)
+             Res<(), AllocError> {
+    text ::= be.alloc.String().try();
+    p.mutable.match({
+        true  => write_address(be, value, ctx, pty, text),
+        false => expr(be, value, ctx, pty, text),
+    }).try();
+    n = be.declare(p.name.text, pty, p.mutable).try();
+    be.check.bind(p.name.text, pty, p.mutable).try();
+    cname ::= be.alloc.String().try();
+    sym_local(cname, p.name.text, n).try();
+    line ::= be.alloc.String().try();
+    p.mutable.match({
+        true  => ref_declarator(be, pty, cname.view(), line),
+        false => declarator(be, pty, cname.view(), line),
+    }).try();
+    line.add_bytes(" = ").try();
+    line.add_bytes(text.view()).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view())
+}
+
+// A `::` parameter holds the ADDRESS of its argument, inlined or not:
+// the body writes the caller's own bytes and every read of the name is
+// a dereference, which is what `LocalSlot.by_ref` records.
+
+// A `::` parameter holds the ADDRESS of its argument, inlined or not:
+// the body writes the caller's own bytes and every read of the name is
+// a dereference, which is what `LocalSlot.by_ref` records.
+ref_declarator = (be :: CBackend, ty: TyId, name: str, out :: String)
+                 Res<(), AllocError> {
+    ctype(be, ty, out).try();
+    out.add_bytes(" *").try();
+    out.add_bytes(name).try();
+    Ok(());
+}
+
+
+write_address = (be :: CBackend, value: ExprId, ctx: Ctx, want: TyId,
+                 out :: String) Res<(), AllocError> {
+    out.add_bytes("&(").try();
+    expr(be, value, ctx, want, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// calling a closure
+//
+// The other half: a name bound to a lambda, called. The arguments are
+// written WHERE THE CALL IS, so they are lowered before the frame moves
+// — and then both scope stacks rewind to where the lambda was written,
+// which is what keeps a caller's `h` out of `find`'s reach.
+// -----------------------------------------------------------------
+
+
+// -----------------------------------------------------------------
+// calling a closure
+//
+// The other half: a name bound to a lambda, called. The arguments are
+// written WHERE THE CALL IS, so they are lowered before the frame moves
+// — and then both scope stacks rewind to where the lambda was written,
+// which is what keeps a caller's `h` out of `find`'s reach.
+// -----------------------------------------------------------------
+
+lower_closure_call* = (be :: CBackend, id: ExprId, c: Call, s: LocalSlot,
+                       ctx: Ctx, want: TyId, out :: String)
+                      Res<(), AllocError> {
+    be.closure_at(s.closure).match({
+        Ok(cl) => run_closure(be, id, c, cl, ctx, want, out),
+        None   => unresolved(be, id, s.name, out),
+    })
+}
+
+
+run_closure = (be :: CBackend, id: ExprId, c: Call, cl: Closure, ctx: Ctx,
+               want: TyId, out :: String) Res<(), AllocError> {
+    (be.depth > INLINE_DEPTH).match({
+        true  => unsupported(be, id, "an inlining that does not terminate", out),
+        false => run_lambda(be, c, cl, ctx, want, out),
+    })
+}
+
+
+run_lambda = (be :: CBackend, c: Call, cl: Closure, ctx: Ctx, want: TyId,
+              out :: String) Res<(), AllocError> {
+    argt ::= be.alloc.Vec<String>();
+    lower_args(be, c, cl, ctx, argt).try();
+
+    ret = closure_ret(be, cl, want).try();
+    result ::= be.alloc.String().try();
+    keeps = wants_value(be, ret);
+    keeps.match({
+        true  => open_temp(be, ret, result),
+        false => Ok(()),
+    }).try();
+
+    saved ::= be.alloc.Vec<LocalSlot>();
+    be.detach(cl.home, saved).try();
+    csaved ::= be.alloc.Vec<Binding>();
+    be.check.detach_locals(cl.check_home, csaved).try();
+    held = be.inst;
+    be.enter_inst(cl.inst);
+
+    lmark = be.mark();
+    cmark = be.check.mark();
+    bind_lambda_params(be, cl, argt).try();
+    be.enter_call();
+    block(be, cl.lam.body, cl.ctx, ret, dest_of(keeps, result.view())).try();
+    be.leave_call();
+    be.release(lmark).try();
+    be.check.release(cmark).try();
+
+    be.enter_inst(held);
+    be.check.reattach_locals(csaved).try();
+    be.reattach(saved).try();
+    write_result(be, keeps, result.view(), out)
+}
+
+// The closure's declared return type, or the expectation at the call
+// when the declaration left it open. `then`'s `f: () T` is the second
+// case: `T` is settled by the lambda's own body, and the payload the
+// result is being written into is where that answer arrives.
+
+// The closure's declared return type, or the expectation at the call
+// when the declaration left it open. `then`'s `f: () T` is the second
+// case: `T` is settled by the lambda's own body, and the payload the
+// result is being written into is where that answer arrives.
+closure_ret = (be :: CBackend, cl: Closure, want: TyId)
+              Res<TyId, AllocError> {
+    settled(be, cl.ret).match({
+        true  => Ok(cl.ret),
+        false => want_or_unit(be, want),
+    })
+}
+
+
+want_or_unit = (be :: CBackend, want: TyId) Res<TyId, AllocError> {
+    settled(be, want).match({
+        true  => Ok(want),
+        false => be.check.types.prim("()"),
+    })
+}
+
+
+lower_args = (be :: CBackend, c: Call, cl: Closure, ctx: Ctx,
+              argt :: Vec<String>) Res<(), AllocError> {
+    Range(0, c.args.len).loop((h, i) {
+        lower_one_arg(be, c, cl, i, ctx, argt).try();
+    });
+    Ok(());
+}
+
+
+lower_one_arg = (be :: CBackend, c: Call, cl: Closure, i: usize, ctx: Ctx,
+                 argt :: Vec<String>) Res<(), AllocError> {
+    c.args.get(i).match({
+        Ok(a) => lower_arg_value(be, a.value, cl, i, ctx, argt),
+        None  => Ok(()),
+    })
+}
+
+
+lower_arg_value = (be :: CBackend, value: ExprId, cl: Closure, i: usize,
+                   ctx: Ctx, argt :: Vec<String>) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    want = cl.ptys.get(i).match({ Ok(t) => t, None => unknown });
+    text ::= be.alloc.String().try();
+    expr(be, value, ctx, want, text).try();
+    argt.add(text)
+}
+
+
+bind_lambda_params = (be :: CBackend, cl: Closure, argt: Vec<String>)
+                     Res<(), AllocError> {
+    Range(0, cl.lam.params.len).loop((h, i) {
+        bind_lambda_param(be, cl, argt, i).try();
+    });
+    Ok(());
+}
+
+
+bind_lambda_param = (be :: CBackend, cl: Closure, argt: Vec<String>,
+                     i: usize) Res<(), AllocError> {
+    cl.lam.params.get(i).match({
+        Ok(p) => bind_lambda_named(be, cl, argt, i, p),
+        None  => Ok(()),
+    })
+}
+
+
+bind_lambda_named = (be :: CBackend, cl: Closure, argt: Vec<String>,
+                     i: usize, p: Param) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    ty = cl.ptys.get(i).match({ Ok(t) => t, None => unknown });
+    argt.get(i).match({
+        Ok(s) => declare_bound(be, p, ty, s.view()),
+        None  => Ok(()),
+    })
+}
+
+
+declare_bound = (be :: CBackend, p: Param, ty: TyId, text: str)
+                Res<(), AllocError> {
+    n = be.declare(p.name.text, ty, false).try();
+    be.check.bind(p.name.text, ty, false).try();
+    cname ::= be.alloc.String().try();
+    sym_local(cname, p.name.text, n).try();
+    line ::= be.alloc.String().try();
+    declarator(be, ty, cname.view(), line).try();
+    line.add_bytes(" = ").try();
+    line.add_bytes(text).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view())
+}
+
+// -----------------------------------------------------------------
+// what an inlined call evaluates to, asked BEFORE it is lowered
+//
+// `ty_of` has to answer for a match scrutinee before the scrutinee is
+// written, and sema's answer for `Range(0, n).find(p)` is `Res<T>` with
+// nothing bound — so a temporary declared at that answer and filled by
+// this file's answer is C that does not compile. This is the same
+// computation `inline_free` does, asked as a query: one implementation
+// and two callers, because the two have to agree by construction rather
+// than by inspection.
+// -----------------------------------------------------------------

@@ -35,12 +35,12 @@
 // rather than C that compiles and means something else.
 
 Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = ast
-Function, Param, Access, Call, Arg, Span, Ident, TypeId = ast
+Function, Param, Access, Call, Arg, Span, Ident, TypeId, Impl = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
-DeclId = sema.sema_id
+DeclId, ImplId = sema.sema_id
 TyId, Ty, Types, TyNamed, Prim = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
@@ -58,6 +58,8 @@ ctype, is_unit, decl_ctx = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
 lower_plain_call, write_arg = gen.gen_c.gen_c_call
 handle_depth, lower_handle_call = gen.gen_c.gen_c_handle
+inlines, inline_method = gen.gen_c.gen_c_inline
+is_ptr_member, lower_ptr_member = gen.gen_c.gen_c_ptr
 
 // -----------------------------------------------------------------
 // the entry point
@@ -177,8 +179,140 @@ with_site = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
     found ::= be.alloc.Vec<Member>();
     member_at(be, s, a.name.text, found).try();
     found.get(0).match({
-        None  => lower_ufcs(be, id, c, a, rty, ctx, out),
+        None  => supplied_or_ufcs(be, id, c, a, rty, s, ctx, out),
         Ok(m) => member_kind(be, id, c, a, rty, s, m, ctx, out),
+    })
+}
+
+// -----------------------------------------------------------------
+// a member an IMPL supplies
+//
+// `str` does not declare `eq`; `std.text` impls `Eq` on it. DESIGN.md
+// gives that one rule — "you satisfy requirements, you never impl
+// storage" — and what it means HERE is that the member is an ordinary
+// function of the receiver, living beside the type, reached under the
+// TARGET's qualified name.
+//
+// AND IT IS CALLED STATICALLY. "Can this struct be a bound" and "can it
+// be a fat value" are two questions, and only the second needs a record
+// of function pointers. Every call here has a receiver whose CONCRETE
+// type is known, so the impl's function is the one to call and it is
+// monomorphised like any other member — a fat value is wanted only where
+// a value's STATIC type is the bound, which nothing in this tree writes.
+// -----------------------------------------------------------------
+
+supplied_or_ufcs = (be :: CBackend, id: ExprId, c: Call, a: Access,
+                    rty: TyId, s: Site, ctx: Ctx, out :: String)
+                   Res<(), AllocError> {
+    impl_member(be, s, rty, a.name.text).try().match({
+        Ok(f) => lower_supplied(be, id, c, a, rty, s, f, ctx, out),
+        None  => lower_ufcs(be, id, c, a, rty, ctx, out),
+    })
+}
+
+lower_supplied = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
+                  s: Site, f: Function, ctx: Ctx, out :: String)
+                 Res<(), AllocError> {
+    inlines(be, c, f).match({
+        true  => inline_method(be, id, c, a, rty, s.decl, f, ctx, out),
+        false => lower_written_method(be, id, c, a, rty, s, f, ctx, out),
+    })
+}
+
+// The function an impl on this type supplies under `name`, when one
+// does.
+impl_member* = (be :: CBackend, s: Site, rty: TyId, name: str)
+               Res<Res<Function>, AllocError> {
+    found ::= be.alloc.Vec<Member>();
+    impl_member_at(be, s.decl, name, found).try();
+    Ok(bodied_fn(found));
+}
+
+bodied_fn = (found: Vec<Member>) Res<Function> {
+    found.get(0).match({
+        Ok(m) => member_fn(m),
+        None  => None,
+    })
+}
+
+member_fn = (m: Member) Res<Function> {
+    m.kind.match({
+        Function(f) => Ok(f),
+        _           => None,
+    })
+}
+
+// Every member an impl on `decl` supplies under `name`, with a BODY.
+//
+// "An impl lives with the type, not with the trait", so the search is
+// over the impls declared in the TARGET's own module and a same-named
+// type elsewhere is never confused for this one. A required member —
+// `at ::= (..) Res<T>` with no body — is what the impl OWES rather than
+// what it supplies, and calling it would name a symbol nothing defines.
+impl_member_at* = (be :: CBackend, decl: DeclId, name: str,
+                   out :: Vec<Member>) Res<(), AllocError> {
+    ids ::= be.alloc.Vec<ImplId>();
+    be.check.world.impls_named(be.tree, decl_name(be, decl), ids).try();
+    ids.loop((h, i) { collect_impl_fn(be, decl, i, name, out).try() });
+    Ok(());
+}
+
+decl_name = (be :: CBackend, decl: DeclId) str {
+    decl_at(be.tree, decl).match({
+        Ok(d) => struct_name(d),
+        None  => "",
+    })
+}
+
+struct_name = (d: Decl) str {
+    d.kind.match({
+        Struct(st) => st.name.text,
+        _          => "",
+    })
+}
+
+collect_impl_fn = (be :: CBackend, decl: DeclId, i: ImplId, name: str,
+                   out :: Vec<Member>) Res<(), AllocError> {
+    (decl.module == i.decl.module).match({
+        false => Ok(()),
+        true  => impl_fn_at(be, i, name, out),
+    })
+}
+
+impl_fn_at = (be :: CBackend, i: ImplId, name: str, out :: Vec<Member>)
+             Res<(), AllocError> {
+    be.check.world.impl_at(be.tree, i).match({
+        Ok(im) => keep_impl_fn(im, name, out),
+        None   => Ok(()),
+    })
+}
+
+keep_impl_fn = (im: Impl, name: str, out :: Vec<Member>)
+               Res<(), AllocError> {
+    im.members.loop((h, m) { keep_named_fn(m, name, out).try() });
+    Ok(());
+}
+
+keep_named_fn = (m: Member, name: str, out :: Vec<Member>)
+                Res<(), AllocError> {
+    member_named(m, name).match({
+        false => Ok(()),
+        true  => add_bodied(m, out),
+    })
+}
+
+add_bodied = (m: Member, out :: Vec<Member>) Res<(), AllocError> {
+    m.kind.match({
+        Function(f) => add_if_bodied(m, f, out),
+        _           => Ok(()),
+    })
+}
+
+add_if_bodied = (m: Member, f: Function, out :: Vec<Member>)
+                Res<(), AllocError> {
+    has_body(f).match({
+        false => Ok(()),
+        true  => out.add(m),
     })
 }
 
@@ -284,9 +418,38 @@ call_through_field = (be :: CBackend, id: ExprId, c: Call, a: Access,
     unsupported(be, id, "a call through a function-valued field", out)
 }
 
+// A MEMBER HANDED A LAMBDA IS INLINED, exactly as a free function is:
+// `cur.bump_while((b) { .. })` has a `(b: u8) bool` parameter, which has
+// no C spelling and nothing to pass.
 lower_method = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
                 s: Site, f: Function, ctx: Ctx, out :: String)
                Res<(), AllocError> {
+    inlines(be, c, f).match({
+        true  => inline_method(be, id, c, a, rty, s.decl, f, ctx, out),
+        false => lower_written_method(be, id, c, a, rty, s, f, ctx, out),
+    })
+}
+
+lower_written_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
+                        rty: TyId, s: Site, f: Function, ctx: Ctx,
+                        out :: String) Res<(), AllocError> {
+    is_ptr_member(be, rty, a.name.text).match({
+        true  => lower_ptr_member(be, id, c, a, rty, ctx, want_of(be, id, ctx).try(), out),
+        false => lower_declared_method(be, id, c, a, rty, s, f, ctx, out),
+    })
+}
+
+// `to<U>` with no written argument reads its answer off the expectation,
+// and a member call arrives here without one — so it is asked for, once,
+// where there is a node to ask about.
+want_of = (be :: CBackend, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
+    unknown = be.check.types.unknown().try();
+    ty_of(be, id, ctx, unknown)
+}
+
+lower_declared_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
+                         rty: TyId, s: Site, f: Function, ctx: Ctx,
+                         out :: String) Res<(), AllocError> {
     refuse_method(be, s, f).match({
         true  => unsupported(be, id, method_fault(be, s, f), out),
         false => write_method_call(be, id, c, a, rty, s, f, ctx, out),

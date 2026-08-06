@@ -55,6 +55,7 @@ field_type, request_type = gen.gen_c.gen_c_type
 Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
 plain_ctx = gen.gen_c.gen_c_decl
 lower_call, res_value, is_res_ctor = gen.gen_c.gen_c_call
+inline_result_type = gen.gen_c.gen_c_settle
 
 // -----------------------------------------------------------------
 // expressions
@@ -91,7 +92,7 @@ ty_of* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
          Res<TyId, AllocError> {
     got = sub(be, be.check.type_of(id, ctx).try()).try();
     be.check.is_unknown(got).match({
-        false => settled_answer(be, id, got),
+        false => settled_answer(be, id, ctx, got),
         true  => fallback_type(be, id, ctx, want),
     })
 }
@@ -103,11 +104,25 @@ ty_of* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
 // be the one C type every loop in the program shares. The one form this
 // happens to is the loop family, and `gen_c_loop.zen` owns the rule for
 // it; everything else is handed back untouched.
-settled_answer = (be :: CBackend, id: ExprId, got: TyId)
+settled_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                  Res<TyId, AllocError> {
     open(be, got).match({
         false => Ok(got),
-        true  => loop_result_type(be, id, got),
+        true  => settle_open(be, id, ctx, got),
+    })
+}
+
+// The loop family first, then a callee that is inlined. Both answer the
+// same shape of question — "sema left this open because only the closure
+// could settle it" — and both have to answer BEFORE anything is written,
+// because a match scrutinee's temporary is declared at this answer and
+// filled by the lowering's.
+settle_open = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
+              Res<TyId, AllocError> {
+    walked = loop_result_type(be, id, got).try();
+    open(be, walked).match({
+        false => Ok(walked),
+        true  => inline_result_type(be, id, ctx, walked),
     })
 }
 
@@ -719,10 +734,34 @@ enum_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
 write_field_access = (be :: CBackend, a: Access, ctx: Ctx, out :: String)
                      Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
+    rty = ty_of(be, a.base, ctx, unknown).try();
     expr(be, a.base, ctx, unknown, out).try();
     out.add_bytes(".").try();
-    sym_member(out, a.name.text).try();
+    field_name(be, rty, a.name.text, out).try();
     Ok(());
+}
+
+// `str` IS THE ONE TYPE WHOSE C REPRESENTATION IS THE RUNTIME FLOOR'S
+// rather than its declaration's. `gen_c_runtime.emit_floor` writes
+// `struct zg_str { unsigned char *data; size_t len; }` and every string
+// literal, every `zg_print_str` and every C caller already agrees on
+// those two names — so a read of `text_str.zen`'s `data` or `len` is
+// spelled the floor's way and not the mangler's. Everything else in the
+// language is mangled, which is what keeps two modules' `len` two
+// members.
+field_name = (be :: CBackend, rty: TyId, name: str, out :: String)
+             Res<(), AllocError> {
+    is_str(be, rty).match({
+        true  => out.add_bytes(name),
+        false => sym_member(out, name),
+    })
+}
+
+is_str = (be :: CBackend, rty: TyId) bool {
+    be.check.types.at(rty).match({
+        Prim(p) => p.name.eq("str"),
+        _       => false,
+    })
 }
 
 // A call to a top-level function the module can see, and the two `Res`

@@ -61,10 +61,45 @@ MAX_TYPE_PASSES* : usize = 8
 ctype* = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
     be.types().at(id).match({
         Prim(p)  => out.add_bytes(c_prim(p.name)),
-        Named(_) => named_ctype(be, id, out),
+        Named(n) => maybe_ptr(be, id, n, out),
         Res(_)   => named_ctype(be, id, out),
         _        => out.add_bytes("int"),
     }).try();
+    Ok(());
+}
+
+// A `Ptr<T>` IS A `T *` AND NOT A STRUCT. `mem_ptr.zen` says the whole
+// of it — "a Ptr<T> is one machine word, the address of a run of T" —
+// and its `addr` field is unexported precisely because nothing outside
+// std.mem may see the representation. Emitting the declaration's struct
+// instead would make `str`'s own `data` field a struct where the runtime
+// floor has a pointer, and the two spellings of `str` would disagree.
+//
+// This is where the asterisk goes, and it is the one place: `declarator`
+// writes the spelling, a space and the name, which is `uint8_t *p` — a
+// legal C declarator with the `*` bound to the name.
+maybe_ptr = (be :: CBackend, id: TyId, n: TyNamed, out :: String)
+            Res<(), AllocError> {
+    is_ptr_named(n).match({
+        true  => ptr_ctype(be, n, out),
+        false => named_ctype(be, id, out),
+    })
+}
+
+is_ptr_named* = (n: TyNamed) bool { n.name.eq("Ptr") }
+
+ptr_ctype = (be :: CBackend, n: TyNamed, out :: String)
+            Res<(), AllocError> {
+    n.args.get(0).match({
+        Ok(t) => elem_ctype(be, t, out),
+        None  => out.add_bytes("void *"),
+    })
+}
+
+elem_ctype = (be :: CBackend, t: TyId, out :: String) Res<(), AllocError> {
+    request_type(be, t).try();
+    ctype(be, t, out).try();
+    out.add_bytes(" *").try();
     Ok(());
 }
 
@@ -177,6 +212,32 @@ is_signed* = (name: str) bool {
 // because `tcode` is injective: two types share a name exactly when
 // they are one type.
 request_type* = (be :: CBackend, id: TyId) Res<(), AllocError> {
+    ptr_element(be, id).match({
+        Ok(et) => request_type(be, et),
+        None   => queue_definition(be, id),
+    })
+}
+
+// A `Ptr<T>` needs no definition of its own — it is spelled `T *`
+// wherever it appears — but the run it points at does, and a `T *`
+// member still needs `T`'s typedef above it. So a request for the
+// pointer is a request for the element, and the worklist's fixpoint
+// reaches through it the way it reaches through a field.
+ptr_element = (be :: CBackend, id: TyId) Res<TyId> {
+    be.types().at(id).match({
+        Named(n) => named_element(n),
+        _        => None,
+    })
+}
+
+named_element = (n: TyNamed) Res<TyId> {
+    is_ptr_named(n).match({
+        false => None,
+        true  => n.args.get(0),
+    })
+}
+
+queue_definition = (be :: CBackend, id: TyId) Res<(), AllocError> {
     name ::= be.alloc.String().try();
     sym_type(name, be.types(), be.world(), id).try();
     be.type_index(name.view()).match({

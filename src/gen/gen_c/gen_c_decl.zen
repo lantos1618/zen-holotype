@@ -47,6 +47,8 @@ signature_of = gen.gen_c.gen_c_call
 ctype, declarator, spellable, is_unit, is_c_integer = gen.gen_c.gen_c_type
 emit_types = gen.gen_c.gen_c_layout
 Dest, block = gen.gen_c.gen_c_stmt
+takes_closure = gen.gen_c.gen_c_inline
+impl_member_at = gen.gen_c.gen_c_member
 emit_banner, emit_floor, emit_helpers, emit_print = gen.gen_c.gen_c_runtime
 
 // A bound on the reachable set, and a diagnostic at it rather than a
@@ -113,9 +115,14 @@ seed_function = (be :: CBackend, m: Module, mi: usize, d: Decl)
 // in C; there is `Vec<i32>` for each `T` a program actually asked for,
 // and a call site is the only place that says which. So a generic
 // declaration is skipped here and reached through `call_reachable`.
+// A FUNCTION THAT TAKES A BODY IS NOT A ROOT EITHER, and for a stronger
+// reason than a generic one: there is no C spelling for a `(v: T) bool`
+// parameter at all, so such a declaration is never emitted — it exists
+// only inlined at its call sites, exactly as the six loop declarations
+// do.
 seed_named = (be :: CBackend, m: Module, mi: usize, f: Function)
              Res<(), AllocError> {
-    (f.tparams.len > 0).match({
+    ((f.tparams.len > 0) || takes_closure(be, f)).match({
         true  => Ok(()),
         false => seed_defs(be, mi, f),
     })
@@ -271,12 +278,25 @@ method_in_decl = (be :: CBackend, m: MethodRef, x: Decl)
     })
 }
 
+// THE TYPE'S OWN MEMBERS FIRST, THEN WHAT AN IMPL SUPPLIES — the same
+// order `sema_supply.zen` states, and for its reason: a member the
+// declaration writes is never contested, and one an impl supplies is
+// reached only when the declaration has none.
 method_member = (be :: CBackend, m: MethodRef, s: Struct)
                 Res<(), AllocError> {
     found ::= be.alloc.Vec<Member>();
     s.members.loop((h, mem) {
         member_named(mem, m.name).then(() { found.add(mem).try() });
     });
+    found.get(0).match({
+        None      => supplied_member(be, m),
+        Ok(mem)   => method_body(be, m, mem),
+    })
+}
+
+supplied_member = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
+    found ::= be.alloc.Vec<Member>();
+    impl_member_at(be, m.decl, m.name, found).try();
     found.get(0).match({
         None      => Ok(()),
         Ok(mem)   => method_body(be, m, mem),

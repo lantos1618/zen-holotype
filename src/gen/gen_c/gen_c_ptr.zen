@@ -1,0 +1,377 @@
+// src/gen/gen_c/gen_c_ptr.zen
+// The raw floor: what a `Ptr<T>` member is in C.
+//
+// `mem_ptr.zen` writes nine signatures and no bodies, and says why:
+// "the bodies belong to the backend: gen_c lowers a Ptr<T> to a `T*`
+// and these members to dereference, indexed store, pointer arithmetic
+// and memcpy. They are written as signatures because there is nothing
+// underneath to write them in — this is the one module in std that
+// cannot implement itself." So this file is those nine bodies, and it
+// is not an optimisation: without it `Vec`, `String` and `str` have no
+// way to touch memory at all.
+//
+// A `Ptr<T>` IS A `T *`. Sema has no pointer kind — a `Ptr<T>` arrives
+// as an ordinary `Named` — but `gen_c_type.ctype` spells it as C's own
+// pointer rather than as the struct the declaration describes, because
+// `str`'s `data` field has to be the same word the runtime floor's
+// `zg_str` holds. One representation and no second spelling.
+//
+// `to<U>` CHANGES THE ELEMENT TYPE, and that is the whole of it. Every
+// later `read`, `write`, `bytes` and `copy_from` scales by the element,
+// so a `to<U>` that answered with the receiver's own type would leave
+// them scaling by `T` — `Arena.realloc` reads its `usize` header through
+// exactly that, and as a no-op the read is ONE BYTE and every `Vec`
+// whose buffer reaches 256 bytes silently loses the rows written before
+// each grow. That bug cost this project a day and is recorded in
+// docs/LEXER_BOOTSTRAP_FIXES.md §1; the `targs` read below is what
+// stops it happening again.
+//
+// SCALING IS `sizeof` AND NOT A NUMBER THE COMPILER KNOWS. `bytes` is
+// "the only way anything in std can ask how big a T is", and C already
+// answers it — so the answer is spelled in the emitted program rather
+// than computed here, and a layout this backend never modelled cannot
+// disagree with the one `cc` chose.
+
+Ast, Expr, ExprId, Access, Call, Arg, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, Ty, Types, TyNamed = sema.sema_ty
+Checker, Ctx = sema.sema_check
+sym_member = gen.gen_name
+CBackend = gen.gen_c.gen_c_state
+unsupported, untyped = gen.gen_c.gen_c_state
+sub = gen.gen_c.gen_c_mono
+ctype, request_type = gen.gen_c.gen_c_type
+write_qname = gen.gen_c.gen_c_layout
+expr, ty_of = gen.gen_c.gen_c_expr
+
+// -----------------------------------------------------------------
+// recognising
+// -----------------------------------------------------------------
+
+// Is the receiver a `Ptr`, and is this one of the nine? Both halves are
+// asked: a user type declaring `read` is its own function, and a member
+// of `Ptr` this file does not know is a refusal with a position rather
+// than silence.
+is_ptr_member* = (be :: CBackend, rty: TyId, name: str) bool {
+    named_ptr(be, rty) && ptr_verb(name)
+}
+
+named_ptr = (be :: CBackend, rty: TyId) bool {
+    be.check.types.at(rty).match({
+        Named(n) => n.name.eq("Ptr"),
+        _        => false,
+    })
+}
+
+ptr_verb = (name: str) bool {
+    name.eq("read") || name.eq("write") || name.eq("offset")
+        || name.eq("back") || name.eq("bytes") || name.eq("copy_from")
+        || name.eq("to") || name.eq("is_null")
+}
+
+// The run's element type, which every member below scales by.
+elem_of = (be :: CBackend, rty: TyId) Res<TyId, AllocError> {
+    unknown = be.check.types.unknown().try();
+    be.check.types.at(rty).match({
+        Named(n) => Ok(n.args.get(0).match({ Ok(t) => t, None => unknown })),
+        _        => Ok(unknown),
+    })
+}
+
+// -----------------------------------------------------------------
+// the nine
+// -----------------------------------------------------------------
+
+lower_ptr_member* = (be :: CBackend, id: ExprId, c: Call, a: Access,
+                     rty: TyId, ctx: Ctx, want: TyId, out :: String)
+                    Res<(), AllocError> {
+    et = elem_of(be, rty).try();
+    base ::= be.alloc.String().try();
+    address(be, a.base, rty, ctx, base).try();
+    verb(be, id, c, a.name.text, rty, et, base.view(), ctx, want, out)
+}
+
+verb = (be :: CBackend, id: ExprId, c: Call, name: str, rty: TyId,
+        et: TyId, base: str, ctx: Ctx, want: TyId, out :: String)
+       Res<(), AllocError> {
+    name.eq("read").match({
+        true  => read_at(be, c, et, base, ctx, out),
+        false => verb_2(be, id, c, name, rty, et, base, ctx, want, out),
+    })
+}
+
+verb_2 = (be :: CBackend, id: ExprId, c: Call, name: str, rty: TyId,
+          et: TyId, base: str, ctx: Ctx, want: TyId, out :: String)
+         Res<(), AllocError> {
+    name.eq("write").match({
+        true  => write_at(be, c, et, base, ctx, out),
+        false => verb_3(be, id, c, name, rty, et, base, ctx, want, out),
+    })
+}
+
+verb_3 = (be :: CBackend, id: ExprId, c: Call, name: str, rty: TyId,
+          et: TyId, base: str, ctx: Ctx, want: TyId, out :: String)
+         Res<(), AllocError> {
+    name.eq("offset").match({
+        true  => shift(be, c, rty, et, base, " + ", ctx, out),
+        false => verb_4(be, id, c, name, rty, et, base, ctx, want, out),
+    })
+}
+
+verb_4 = (be :: CBackend, id: ExprId, c: Call, name: str, rty: TyId,
+          et: TyId, base: str, ctx: Ctx, want: TyId, out :: String)
+         Res<(), AllocError> {
+    name.eq("back").match({
+        true  => shift(be, c, rty, et, base, " - ", ctx, out),
+        false => verb_5(be, id, c, name, rty, et, base, ctx, want, out),
+    })
+}
+
+verb_5 = (be :: CBackend, id: ExprId, c: Call, name: str, rty: TyId,
+          et: TyId, base: str, ctx: Ctx, want: TyId, out :: String)
+         Res<(), AllocError> {
+    name.eq("bytes").match({
+        true  => byte_size(be, c, et, ctx, out),
+        false => verb_6(be, id, c, name, rty, et, base, ctx, want, out),
+    })
+}
+
+verb_6 = (be :: CBackend, id: ExprId, c: Call, name: str, rty: TyId,
+          et: TyId, base: str, ctx: Ctx, want: TyId, out :: String)
+         Res<(), AllocError> {
+    name.eq("copy_from").match({
+        true  => copy_run(be, c, rty, et, base, ctx, out),
+        false => verb_7(be, id, c, name, rty, et, base, ctx, want, out),
+    })
+}
+
+verb_7 = (be :: CBackend, id: ExprId, c: Call, name: str, rty: TyId,
+          et: TyId, base: str, ctx: Ctx, want: TyId, out :: String)
+         Res<(), AllocError> {
+    name.eq("is_null").match({
+        true  => null_test(base, out),
+        false => reinterpret(be, id, c, rty, base, ctx, want, out),
+    })
+}
+
+// The pointer itself. Parenthesised because the receiver is an
+// arbitrary expression and every use below indexes or offsets it.
+address = (be :: CBackend, base: ExprId, rty: TyId, ctx: Ctx,
+           out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    expr(be, base, ctx, rty, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+// `p.read(i)` is C's `p[i]`, with the scaling the cast supplies.
+read_at = (be :: CBackend, c: Call, et: TyId, base: str, ctx: Ctx,
+           out :: String) Res<(), AllocError> {
+    run(be, et, base, out).try();
+    out.add_bytes("[").try();
+    index_arg(be, c, 0, ctx, out).try();
+    out.add_bytes("]").try();
+    Ok(());
+}
+
+// A STORE IS A STATEMENT and the call it came from is an expression, so
+// the assignment goes to the buffer and a `0` goes where the value would
+// have been — the same shape `h.break` uses, and nothing reads that `0`
+// because `write` answers `()`.
+write_at = (be :: CBackend, c: Call, et: TyId, base: str, ctx: Ctx,
+            out :: String) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    run(be, et, base, line).try();
+    line.add_bytes("[").try();
+    index_arg(be, c, 0, ctx, line).try();
+    line.add_bytes("] = ").try();
+    value_arg(be, c, 1, et, ctx, line).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view()).try();
+    out.add_bytes("0")
+}
+
+// The run, ready to index. Already a `T *`, so there is nothing to cast.
+run = (be :: CBackend, et: TyId, base: str, out :: String)
+      Res<(), AllocError> {
+    request_type(be, et).try();
+    out.add_bytes(base).try();
+    Ok(());
+}
+
+// `offset` and `back`: a new `Ptr<T>` `count` ELEMENTS along. The
+// arithmetic is on the byte address, which is why the element size is
+// spelled — a `usize` has no negative, so `back` is a separate word and
+// not a sign.
+shift = (be :: CBackend, c: Call, rty: TyId, et: TyId, base: str, op: str,
+         ctx: Ctx, out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    out.add_bytes(base).try();
+    out.add_bytes(op).try();
+    out.add_bytes("(").try();
+    index_arg(be, c, 0, ctx, out).try();
+    out.add_bytes("))").try();
+    Ok(());
+}
+
+// `count` elements, in bytes. C answers how big a `T` is, so a layout
+// this backend never modelled cannot disagree with the one `cc` chose.
+byte_size = (be :: CBackend, c: Call, et: TyId, ctx: Ctx, out :: String)
+            Res<(), AllocError> {
+    request_type(be, et).try();
+    out.add_bytes("((").try();
+    index_arg(be, c, 0, ctx, out).try();
+    out.add_bytes(") * sizeof(").try();
+    ctype(be, et, out).try();
+    out.add_bytes("))").try();
+    Ok(());
+}
+
+// The runs may not overlap — "an allocator growing a run always has a
+// fresh destination, and that is the only caller in std" — so this is
+// `memcpy` and not `memmove`.
+copy_run = (be :: CBackend, c: Call, rty: TyId, et: TyId, base: str,
+            ctx: Ctx, out :: String) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes("memcpy((void *)").try();
+    line.add_bytes(base).try();
+    line.add_bytes(", (const void *)(").try();
+    value_arg(be, c, 0, rty, ctx, line).try();
+    line.add_bytes("), ").try();
+    count_bytes(be, c, et, ctx, line).try();
+    line.add_bytes(");").try();
+    be.writeln(line.view()).try();
+    out.add_bytes("0")
+}
+
+count_bytes = (be :: CBackend, c: Call, et: TyId, ctx: Ctx, out :: String)
+              Res<(), AllocError> {
+    out.add_bytes("((").try();
+    index_arg(be, c, 1, ctx, out).try();
+    out.add_bytes(") * sizeof(").try();
+    ctype(be, et, out).try();
+    out.add_bytes("))").try();
+    Ok(());
+}
+
+null_test = (base: str, out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    out.add_bytes(base).try();
+    out.add_bytes(" == NULL)").try();
+    Ok(());
+}
+
+// `to<U>()`: the same address, a different element type. The WRITTEN
+// type argument decides, which is the whole of the fix recorded at the
+// top of this file.
+reinterpret = (be :: CBackend, id: ExprId, c: Call, rty: TyId, base: str,
+               ctx: Ctx, want: TyId, out :: String) Res<(), AllocError> {
+    target_ptr(be, c, rty, ctx, want).try().match({
+        Ok(pt) => write_reinterpret(be, pt, base, out),
+        None   => untyped(be, id, "to", out),
+    })
+}
+
+// `Ptr<U>`, interned the way every other named type is: the receiver's
+// own declaration applied to the written argument.
+target_ptr = (be :: CBackend, c: Call, rty: TyId, ctx: Ctx, want: TyId)
+             Res<Res<TyId>, AllocError> {
+    c.targs.get(0).match({
+        Ok(t) => ptr_of_written(be, t, rty, ctx),
+        None  => Ok(keep_ptr(be, want)),
+    })
+}
+
+// A `to<U>` with no written argument can only mean the expectation, and
+// only when that expectation is a `Ptr` — anything else is a type the
+// backend would be inventing.
+keep_ptr = (be :: CBackend, want: TyId) Res<TyId> {
+    named_ptr(be, want).match({ true => Ok(want), false => None })
+}
+
+ptr_of_written = (be :: CBackend, t: TypeId, rty: TyId, ctx: Ctx)
+                 Res<Res<TyId>, AllocError> {
+    u = sub(be, be.check.type_from_ast(t, ctx).try()).try();
+    args ::= be.alloc.Vec<TyId>();
+    args.add(u).try();
+    be.check.types.at(rty).match({
+        Named(n) => named_with(be, n, args),
+        _        => Ok(None),
+    })
+}
+
+named_with = (be :: CBackend, n: TyNamed, args: Vec<TyId>)
+             Res<Res<TyId>, AllocError> {
+    qname ::= be.alloc.String().try();
+    write_qname(be, qname, n).try();
+    Ok(Ok(intern_ptr(be.check, n, qname.view(), args).try()));
+}
+
+// Through ONE field hop: `be.check.types.named(..)` spilled through two
+// hops lands the row in a copy of the store and hands back a `TyId` one
+// past the real store's end. docs/GEN_BOOTSTRAP_FIXES.md has the C.
+intern_ptr = (c :: Checker, n: TyNamed, qname: str, args: Vec<TyId>)
+             Res<TyId, AllocError> {
+    c.types.named(n.decl, qname, n.name, args)
+}
+
+write_reinterpret = (be :: CBackend, pt: TyId, base: str, out :: String)
+                    Res<(), AllocError> {
+    request_type(be, pt).try();
+    out.add_bytes("((").try();
+    ctype(be, pt, out).try();
+    out.add_bytes(")").try();
+    out.add_bytes(base).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// arguments
+// -----------------------------------------------------------------
+
+index_arg = (be :: CBackend, c: Call, i: usize, ctx: Ctx, out :: String)
+            Res<(), AllocError> {
+    usize_ty = be.check.types.prim("usize").try();
+    value_arg(be, c, i, usize_ty, ctx, out)
+}
+
+value_arg = (be :: CBackend, c: Call, i: usize, want: TyId, ctx: Ctx,
+             out :: String) Res<(), AllocError> {
+    c.args.get(i).match({
+        Ok(a) => expr(be, a.value, ctx, want, out),
+        None  => out.add_bytes("0"),
+    })
+}
+
+// -----------------------------------------------------------------
+// `null_ptr<T>()`
+//
+// A free function with no body, for the same reason the nine above have
+// none: "an empty collection owns no pages, so its data field holds a
+// null Ptr until the first grow". Its type comes from the expectation,
+// which every call site has — `data :: Ptr<T> = null_ptr<T>()` is the
+// only shape in the library.
+// -----------------------------------------------------------------
+
+is_null_ptr* = (name: str) bool { name.eq("null_ptr") }
+
+lower_null_ptr* = (be :: CBackend, id: ExprId, want: TyId, out :: String)
+                  Res<(), AllocError> {
+    named_ptr(be, want).match({
+        false => untyped(be, id, "null_ptr", out),
+        true  => write_null(be, want, out),
+    })
+}
+
+write_null = (be :: CBackend, want: TyId, out :: String)
+             Res<(), AllocError> {
+    request_type(be, want).try();
+    out.add_bytes("((").try();
+    ctype(be, want, out).try();
+    out.add_bytes(")NULL)").try();
+    Ok(());
+}
