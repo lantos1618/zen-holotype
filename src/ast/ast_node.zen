@@ -1,0 +1,633 @@
+// src/ast/ast_node.zen
+// What a node is: every declaration, type, expression, pattern and
+// statement form DESIGN.md admits, and nothing else.
+//
+// ONE MODULE, and that is forced rather than chosen. Declarations hold
+// expressions, expressions hold types, a type holds an expression
+// (`[u8, i32.BITS]`), a block holds statements and a statement holds a
+// declaration. The graph is a single strongly-connected component, and
+// module cycles are a compile error — so splitting these by category
+// would not compile. What could be lifted out was: `ast_span.zen` is
+// where a node is, `ast_id.zen` is how one is named, and both sit
+// below this file rather than beside it.
+//
+// THE SHAPE, once, because every family below repeats it:
+//
+//     Expr = { kind: ExprKind, span, leading, trailing }
+//     ExprKind = Call(Call) | Binary(Binary) | ..
+//
+// A wrapper struct carries what every node has, and a kind enum
+// carries what makes it that node. So `e.span` needs no match, and
+// `e.kind.match({ Binary(b) => .. })` binds the typed node in the arm
+// — which is exactly the shape DESIGN.md's `DumpAst` is written
+// against: "the kind is an ordinary enum carrying the node as payload,
+// so the arm BINDS the typed node and overload resolution just works".
+//
+// A CHILD IS NEVER HELD BY VALUE. It is an id into `Ast`. See
+// ast_id.zen for why that is the only shape that obeys DESIGN.md's
+// memoized-query decision.
+
+Span, Ident, QualifiedName, TriviaRun = ast.ast_span
+ExprId, TypeId, PatternId, BlockId = ast.ast_id
+
+// ---------------------------------------------------------------------
+// vocabulary
+//
+// The closed alphabets the nodes are written in. Each one is closed by
+// DESIGN.md, so a new entry in any of them is a language change.
+// ---------------------------------------------------------------------
+
+// `+ - *` trap on overflow; `+% -% *%` wrap, "for when wrapping is the
+// intent". They are separate operators and not a flag, because the
+// trapping and the wrapping form generate different C and a flag is
+// one `!` away from generating the wrong one.
+//
+// There are no bitwise operators. `Equal` and not `Eq` because `Eq` is
+// a prelude type and a variant that shadows one is a trap laid for the
+// next reader.
+BinOp* = Add | Sub | Mul | Div | Rem
+       | AddWrap | SubWrap | MulWrap
+       | Equal | NotEqual | Less | LessEq | Greater | GreaterEq
+       | And | Or
+
+// `!`, `-`, and `&` — the last one only ever appears in a diagnostic's
+// counter-example (`p = &c.width` on a computed field), but it parses,
+// so it has a node.
+UnOp* = Not | Neg | Addr
+
+// DESIGN.md's method table, verbatim. Export (`*`) is orthogonal and
+// lives on the member, not here.
+//
+//     Required   `= sig`        impl must provide it
+//     Sealed     `= sig {..}`   provided, cannot be overridden
+//     Default    `::= sig {..}` provided, impl may rebind it
+//     Hook       `::= sig`      optional, impl may provide it
+//
+// A plain top-level function with a body is Sealed: it is `= sig {..}`
+// and there is no fifth row for "not a member".
+Form* = Required | Sealed | Default | Hook
+
+LiteralKind* = Int | Float | Str | Char | Bool
+
+// `text` is the RAW source slice: quotes, escapes and all, exactly as
+// written. The formatter reprints it byte for byte, so decoding it
+// here would make `"\n"` and a literal newline indistinguishable on
+// the way out. The lexer has already rejected an unknown escape, a
+// leading zero and a multi-byte char literal, so decoding is a total
+// function by the time sema wants it.
+Literal* = {
+    kind*: LiteralKind,
+    text*: str,
+}
+
+// ---------------------------------------------------------------------
+// types
+// ---------------------------------------------------------------------
+
+Type* = {
+    kind*: TypeKind,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}
+
+// `Unit` is `()`. `SelfType` is `@Self` — a variant and not a `Named`
+// carrying the text "@Self", because DESIGN.md says it "is not a name
+// you could have written yourself", and a name-shaped `@Self` is one
+// scope-lookup bug away from being shadowed. `Infer` is the `_` of
+// `Res<Cfg, _>`. `Variadic` is the `...` of `args: ...`.
+TypeKind* = Named(Named)
+          | Union(Union)
+          | Fn(FnType)
+          | Array(ArrayType)
+          | Unit
+          | SelfType
+          | Infer
+          | Variadic
+
+// `i32`, `Vec<T>`, `Map<K, V>`, `Res<(), AllocError>`. There is no
+// qualified type — imports bind locally, so a type is always reachable
+// by a bare name, and adding `std.core.Res` is a design change.
+Named* = {
+    name*: Ident,
+    args*: Vec<TypeId>,
+}
+
+// `A | B` — "an anonymous enum of two variants, a structural enum".
+// FLAT: `A | B | C` is one Union of three members and never a Union of
+// a Union, so error-set merging is a concatenation and set equality is
+// not a tree walk.
+Union* = {
+    members*: Vec<TypeId>,
+}
+
+// A function TYPE — `(a: i32, b: i32) i32`. Parameters MUST name
+// themselves here as much as in a declaration: "`(i32, i32) i32` says
+// nothing about which `i32` is which". Names are documentation and
+// resolution never sees them, so two FnTypes differing only in
+// parameter names are one type.
+FnType* = {
+    tparams*: Vec<TParam>,
+    params*: Vec<Param>,
+    params_span*: Span,
+    ret*: TypeId,
+}
+
+// `[u8, 64]`, `[u8, i32.BITS]`. The count is an expression because it
+// is comptime, not because it is a literal.
+ArrayType* = {
+    elem*: TypeId,
+    count*: ExprId,
+}
+
+// ---------------------------------------------------------------------
+// patterns
+// ---------------------------------------------------------------------
+
+Pattern* = {
+    kind*: PatternKind,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}
+
+// `Name` covers BOTH a nullary variant (`None`, `Macos`, `Shape.Unit`)
+// and a binder (`n` in `Ok(n)`). They are the same tokens, and which
+// one it is depends on what is in scope — so it is sema's question and
+// not the parser's, and the parser answering it would be the parser
+// guessing.
+PatternKind* = Name(PatName)
+             | Destructure(Destructure)
+             | Wild
+             | Literal(Literal)
+
+PatName* = {
+    name*: QualifiedName,
+}
+
+// `Ok(n)`, `Circle(circle)`, `Ok(_)`, and nested: `Left(Full(n))`.
+// The binder is a full pattern, which is what makes `Unit` and
+// `Unit(_)` different nodes — they must be, or the formatter invents
+// or deletes a pair of parentheses.
+Destructure* = {
+    name*: QualifiedName,
+    binder*: PatternId,
+}
+
+// ---------------------------------------------------------------------
+// expressions
+// ---------------------------------------------------------------------
+
+Expr* = {
+    kind*: ExprKind,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}
+
+// `Access` is `p.x` — the expression DESIGN.md's grammar calls a
+// member expression. It is not spelled `Member` because `Member` is
+// taken by the thing a struct body is made of, and one name for two
+// concepts in the file four agents read is not a saving.
+ExprKind* = Name(Name)
+          | Literal(Literal)
+          | Unit
+          | SelfType
+          | Scope
+          | Meta(Meta)
+          | Paren(Paren)
+          | Array(ArrayLit)
+          | FixedArray(FixedArray)
+          | Lambda(Lambda)
+          | Call(Call)
+          | Match(Match)
+          | Try(Try)
+          | Record(Record)
+          | Access(Access)
+          | Index(Index)
+          | Unary(Unary)
+          | Binary(Binary)
+          | Consume(Consume)
+          | Block(BlockId)
+
+// A bare identifier. It carries text rather than an `Ident` because
+// the enclosing `Expr` already carries the span, and two spans for one
+// token is two things to keep in agreement.
+Name* = {
+    text*: str,
+}
+
+// `(n == 0)` is a node of its own — POSITIONS.md asserts a span for
+// it. Without one the formatter has to re-derive every pair of
+// parentheses from precedence, and `(a + b) * c` and `a + b * c` are
+// not the same program.
+Paren* = {
+    inner*: ExprId,
+}
+
+// `[0, 1, 2]`
+ArrayLit* = {
+    elems*: Vec<ExprId>,
+}
+
+// `[i32, 4](2, 3, 5, 7)` — a fixed-array type applied to its elements.
+// Its own kind rather than a Call, because an array literal is never a
+// callee and the reading has to be decidable at the `(`.
+FixedArray* = {
+    type*: TypeId,
+    elems*: Vec<ExprId>,
+    args_span*: Span,
+}
+
+// `(a: i32, b: i32) i32 { a + b }`, `(h, v) { .. }`, `() { .. }`.
+// Parameter types are optional here and only here: "a closure passed
+// to a function whose signature is already known infers its parameter
+// types from that signature". A declaration is not a lambda and must
+// write them.
+Lambda* = {
+    tparams*: Vec<TParam>,
+    params*: Vec<Param>,
+    params_span*: Span,
+    ret*: Res<TypeId>,
+    body*: BlockId,
+}
+
+// `f(a, b)`, `alloc.Vec<i32>()`, `Point(x: 3, y: 4)`.
+Call* = {
+    callee*: ExprId,
+    targs*: Vec<TypeId>,
+    args*: Vec<Arg>,
+    args_span*: Span,
+}
+
+// One argument. `name` is the `x` of `x: 3` — construction and an
+// impl's supplied field use the same form, so they use the same node.
+Arg* = {
+    name*: Res<Ident>,
+    value*: ExprId,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}
+
+// `(n == 0).match({ true => .., false => .. })`.
+//
+// A kind of its own rather than a Call, even though DESIGN.md says
+// match "is a method". Two reasons, both about not lying: its argument
+// is an arm list, which is not an expression and could not be passed
+// to anything else; and exhaustiveness is "a load-bearing correctness
+// property, not a lint", so the node it is checked on should not be
+// one the checker has to recognise by the callee's spelling.
+//
+// `name_span` is the `match` token. An "is not exhaustive" diagnostic
+// points there, and the formatter needs it to know where `.match(`
+// begins.
+Match* = {
+    scrutinee*: ExprId,
+    name_span*: Span,
+    arms*: Vec<Arm>,
+    arms_span*: Span,
+}
+
+// `pattern => expr`. `arrow_span` is the `=>`: the formatter aligns
+// arms on it, and it cannot align what it cannot locate.
+Arm* = {
+    pattern*: PatternId,
+    arrow_span*: Span,
+    body*: ExprId,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}
+
+// `.try()` — the non-local-exit intrinsic, NOT a call. There is no
+// `try` field on `Res` and no function of that name to import, so
+// parsing it as a call would create a name that must then be
+// special-cased everywhere it could be shadowed.
+Try* = {
+    operand*: ExprId,
+}
+
+// `{ src: Path("src/main.zen"), deps: [json] }` — the brace literal
+// that appears as a call argument and as the body of an impl. Its
+// entries are `Member`s and not `Arg`s because an impl supplies
+// methods as well as values: "an f64 field takes an f64, a
+// function-typed field takes a function", one rule and one node.
+Record* = {
+    entries*: Vec<Member>,
+}
+
+// `p.x`, `Shape.Unit`, `i32.MAX`, `alloc.Vec`. Field access, a
+// constant on a type, a variant and a ufcs method are all this node —
+// which is the point: "that access form already exists, so this adds a
+// spelling, not a concept".
+Access* = {
+    base*: ExprId,
+    name*: Ident,
+}
+
+// `buf[i]`. Bounds-checked and trapping on a fixed array; `Vec.get`
+// is a call and returns `Res`.
+Index* = {
+    base*: ExprId,
+    index*: ExprId,
+}
+
+// `op_span` is the operator token, and it is load-bearing rather than
+// cosmetic: a trap prints `file:line:col` and DESIGN.md fixes that
+// position as "the operator token".
+Unary* = {
+    op*: UnOp,
+    op_span*: Span,
+    operand*: ExprId,
+}
+
+Binary* = {
+    op*: BinOp,
+    op_span*: Span,
+    lhs*: ExprId,
+    rhs*: ExprId,
+}
+
+// `consume f` — a move, stated at the use site. The only thing the
+// capability system ever writes down.
+Consume* = {
+    operand*: ExprId,
+}
+
+// `@meta(n)` and `@meta(self: @Self)`. Stage 5, and the second form is
+// "the only place in the language where an argument carries a type
+// annotation" — so it gets fields of its own rather than being bent
+// into an `Arg`. Exactly one of `value` and `name`+`type` is present.
+Meta* = {
+    value*: Res<ExprId>,
+    name*: Res<Ident>,
+    type*: Res<TypeId>,
+}
+
+// ---------------------------------------------------------------------
+// statements and blocks
+// ---------------------------------------------------------------------
+
+// "A statement ends with `;`. A declaration does not." A Stmt's span
+// INCLUDES its `;` — otherwise deleting a statement leaves the
+// semicolon behind — and the expression inside it does not.
+Stmt* = {
+    kind*: StmtKind,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}
+
+// `Decl` is here because an enum, a struct, an impl or a function with
+// a body may be declared anywhere, not only at module level, and it
+// takes no `;` wherever it stands.
+StmtKind* = Bind(Bind)
+          | Expr(ExprStmt)
+          | Decl(Decl)
+          | Block(BlockId)
+
+// `x = e;`, `x ::= e;`, `x: T = e;`, `self.len = self.len + 1;`.
+//
+// The target is an expression, not a name: a member and an index are
+// binding targets too, and narrowing this to an `Ident` would make
+// `self.len = ..` unrepresentable.
+Bind* = {
+    target*: ExprId,
+    type*: Res<TypeId>,
+    mutable*: bool,
+    value*: ExprId,
+}
+
+ExprStmt* = {
+    expr*: ExprId,
+}
+
+// "A block is a value too." `value` is the trailing expression written
+// WITHOUT a `;`; DESIGN.md also lets a `;`-terminated tail (`Ok(0);`)
+// be the value, but that is a typing rule and not a syntactic one, so
+// this records only what was written and sema decides.
+Block* = {
+    stmts*: Vec<Stmt>,
+    value*: Res<ExprId>,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}
+
+// ---------------------------------------------------------------------
+// declarations
+// ---------------------------------------------------------------------
+
+Decl* = {
+    kind*: DeclKind,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}
+
+// `Import` is a DeclKind and not a separate list on `Module`, so that
+// `Module.decls` is the file in source order. A formatter that has to
+// merge two lists back into one order is a formatter that will get it
+// wrong once.
+DeclKind* = Struct(Struct)
+          | Enum(Enum)
+          | Alias(Alias)
+          | Function(Function)
+          | Impl(Impl)
+          | Import(Import)
+          | Const(Const)
+
+// `Vec*<T> = { .. }`. `body_span` is the `{ .. }`: a struct body is
+// not a `Block` — it holds members, not statements — but the
+// formatter still has to know where its braces are.
+Struct* = {
+    name*: Ident,
+    exported*: bool,
+    tparams*: Vec<TParam>,
+    members*: Vec<Member>,
+    body_span*: Span,
+}
+
+// `Shape = Circle(Circle) | Rect(Rect) | Unit`, `AllocError* = | OutOfMemory`.
+//
+// `leading_bar` is the bar of the one-variant form, and it is stored
+// rather than derived from `variants.len == 1` because the formatter
+// reprints what was written. It is also the whole reason an enum needs
+// no lookahead: without it `AllocError = OutOfMemory` and
+// `Alias = Shape` are the same three tokens.
+Enum* = {
+    name*: Ident,
+    exported*: bool,
+    tparams*: Vec<TParam>,
+    variants*: Vec<Variant>,
+    leading_bar*: Res<Span>,
+}
+
+// One payload type, never a list. A payload is a TYPE: `Circle(Circle)`,
+// `Failed(str)` — never `name: value`, which is what keeps
+// `Package(url: "..")` a call and not a variant.
+Variant* = {
+    name*: Ident,
+    payload*: Res<TypeId>,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}
+
+// `Alias = Shape`. "An alias is the type, not a name that forwards to
+// it" — so sema resolves it away and nothing downstream sees a second
+// type.
+Alias* = {
+    name*: Ident,
+    exported*: bool,
+    tparams*: Vec<TParam>,
+    target*: TypeId,
+}
+
+// `area* = (c: Circle) f64 { .. }`, `then* = <T>(b: bool, f: () T) Res<T>`.
+//
+// `form` and `body` are not redundant: `form` records whether `=` or
+// `::=` was written, `body` whether a `{ .. }` followed. Required and
+// Hook carry no body; Sealed and Default carry one.
+//
+// `ret` is optional because a lambda may omit it and mean `()`. A
+// declaration writes it — that is law 6 at the module boundary and
+// D15a inside one — and sema says so.
+Function* = {
+    name*: Ident,
+    exported*: bool,
+    form*: Form,
+    tparams*: Vec<TParam>,
+    params*: Vec<Param>,
+    params_span*: Span,
+    ret*: Res<TypeId>,
+    body*: Res<BlockId>,
+}
+
+// `Circle.impl(Rect, { width: .., height: .. })`.
+//
+// `target` is `Circle` and `bound` is `Rect` — DESIGN.md's word, since
+// "a bound is just which struct's shape do I need". The target is an
+// `Ident` and not a type: an impl lives in the module that declares
+// its target, so there is no qualified form to write and no orphan
+// impl to express.
+Impl* = {
+    target*: Ident,
+    bound*: TypeId,
+    members*: Vec<Member>,
+    body_span*: Span,
+}
+
+// `Res*, Ok*, None* = std.core.result`. Re-export is an import whose
+// bindings are starred, so there is no separate export node — the star
+// on the name is the whole mechanism.
+Import* = {
+    names*: Vec<ImportName>,
+    module*: QualifiedName,
+}
+
+ImportName* = {
+    name*: Ident,
+    exported*: bool,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}
+
+// A module-level value binding: `json_pkg = Package(url: "..", ..)`,
+// `STR_HASH_SEED*: u64 = 14695981039346656037`.
+//
+// The same node is a struct-body constant (`MAX*: i32 = 2147483647`),
+// where it means one value per type rather than storage per value.
+Const* = {
+    name*: Ident,
+    exported*: bool,
+    mutable*: bool,
+    type*: Res<TypeId>,
+    value*: ExprId,
+}
+
+// ---------------------------------------------------------------------
+// members
+//
+// What a struct body, an impl body and a record literal are all made
+// of. One node for the three, because DESIGN.md has one rule for them:
+// "a struct whose fields happen to be functions, used as a bound, is
+// what other languages call a trait — nothing marks it special".
+// ---------------------------------------------------------------------
+
+Member* = {
+    kind*: MemberKind,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}
+
+// The Field/Const split is SYNTACTIC and it is the grammar's R4:
+// inside a struct body, `name: T = value` (immutable, with a value) is
+// a constant, and `name :: T = value` (mutable, with a value) is a
+// field with a default. Const therefore never appears in an impl body
+// or a record literal, where `name: value` supplies a field.
+//
+// The residue, recorded because it is a hole and not a decision: an
+// IMMUTABLE field with a default is unspellable.
+MemberKind* = Field(Field)
+            | Const(Const)
+            | Function(Function)
+
+// `width: f64`, `len* :: usize = 0`, and — in an impl or a record —
+// `width: self.radius * 2.0`, where the type is absent because the
+// field being satisfied already has one.
+Field* = {
+    name*: Ident,
+    exported*: bool,
+    mutable*: bool,
+    type*: Res<TypeId>,
+    value*: Res<ExprId>,
+}
+
+// ---------------------------------------------------------------------
+// parameters
+// ---------------------------------------------------------------------
+
+// `self :: @Self` is not a receiver rule: `mutable` is "the ordinary
+// binding marker doing its ordinary job on the ordinary first
+// parameter". `type` is absent only in a closure.
+Param* = {
+    name*: Ident,
+    mutable*: bool,
+    type*: Res<TypeId>,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}
+
+// `<T>`, `<T: Rect>`, `<K: Eq + Hash, V>`. Bounds are a LIST because
+// `+` joins them and `|` does not: `Eq + Hash` is two requirements on
+// one type, where `A | B` is one type that is either.
+TParam* = {
+    name*: Ident,
+    bounds*: Vec<TypeId>,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}
+
+// ---------------------------------------------------------------------
+// modules
+// ---------------------------------------------------------------------
+
+// `name` is the dotted module path (`std.core.result`), which is the
+// module's identity; the file it came from is `span.file`, which every
+// node in it already carries.
+//
+// `trailing` is where a comment at end of file lives. It has nowhere
+// else to go, and a formatter that drops it fails its own round trip.
+Module* = {
+    name*: str,
+    decls*: Vec<Decl>,
+    span*: Span,
+    leading*: TriviaRun,
+    trailing*: TriviaRun,
+}

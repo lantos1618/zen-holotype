@@ -4,22 +4,26 @@
 // into a caller's buffer — and two sealed forms built on top of it,
 // so a type can never print two different ways.
 //
-// The shape is deliberate: `toString` takes a String the CALLER
-// owns, so a nested value writes into the buffer that is already
-// open and nesting never allocates. The allocating form is derived
-// from that one rather than declared beside it, which is what makes
-// "they can never diverge" a property of the code and not a promise
-// in a comment.
+// The shape is deliberate: `toString` takes a Sink the CALLER owns,
+// so a nested value writes into the buffer that is already open and
+// nesting never allocates — and printing does not allocate at all,
+// because `println` hands it the console it already holds. If it
+// took a String instead, printing would need a String, a String
+// needs an Alloc to grow, and `println` has no Alloc: printing
+// would allocate behind the caller's back (law 1) or hello-world
+// would need an arena. The allocating form is derived from the sink
+// form rather than declared beside it, which is what makes "they can
+// never diverge" a property of the code and not a promise in a
+// comment.
 
 Alloc = std.mem
 String = std.text
-IoError, WriteError = std.core.io
+Sink, WriteError = std.core.io
 
-// the two buffer forms fail one way — the sink rejects the bytes —
-// so they are IoError. the allocating form ALSO has to obtain the
-// buffer, which fails with AllocError, and there is no From to
-// paper over it. WriteError = IoError | AllocError is the honest
-// type, and .try() merges it into the caller's set for free.
+// every form here speaks WriteError, the union. a sink write fails
+// with IoError, obtaining or growing a buffer fails with AllocError,
+// and there is no From to paper over it, so the union is the honest
+// type and .try() merges it into the caller's set for free.
 //
 // std.core.io owns both, and they are imported rather than reached
 // through the prelude: this file is IN the prelude, so relying on it
@@ -35,11 +39,11 @@ Display* = {
     // with src/meta/meta.zen. DESIGN.md writes it, and it is kept
     // here verbatim so the gap is a body and not a design question:
     //
-    //     sb.add("{} {", @meta(self: @Self).name);
+    //     out.add("{} {", @meta(self: @Self).name);
     //     @meta(self: @Self).fields.loop((h, field) {
-    //         sb.add(" {}: {},", field.name, field.value);
+    //         out.add(" {}: {},", field.name, field.value);
     //     });
-    //     sb.add(" }");
+    //     out.add(" }");
     //     Ok(());
     //
     // Until that body lands it cannot be written sealed, and of the
@@ -49,14 +53,15 @@ Display* = {
     // optional hook (`::= sig`) obliges nobody, which is what "always
     // there, never yours" degrades to while the body is missing.
     // At stage 5 this gains its body and becomes sealed.
-    dump* ::= (self: @Self, sb :: String) Res<(), IoError>
+    dump* ::= (self: @Self, out :: Sink) Res<(), WriteError>
 
     // OUTLINED (::=, no body): the pretty representation. Impls
     // define THIS one and nothing else, and the format machinery
     // routes `{}` through it, falling back to dump when a type has
-    // none. It writes into an existing String, so a value nested
-    // three deep still costs one buffer.
-    toString* ::= (self: @Self, sb :: String) Res<(), IoError>
+    // none. It writes into a sink the CALLER owns, so a value nested
+    // three deep still costs one buffer — and printing one costs no
+    // buffer at all, because the sink is the console.
+    toString* ::= (self: @Self, out :: Sink) Res<(), WriteError>
 
     // SEALED (=): the allocating form. It is DERIVED — it makes a
     // buffer and calls the outlined form — so an impl that defines

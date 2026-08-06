@@ -10,15 +10,17 @@
 // realloc moves the bytes and every str taken before it is dangling. Take
 // the view after the last write, or take it again.
 //
-// Two error sets meet here, and the seam is deliberate: the buffer floor
+// Two error sets meet here, and the seam is now closed: the buffer floor
 // (`add_byte` / `add_bytes`) can only fail to ALLOCATE and says so, while
-// `add` is the door DESIGN.md declares and it speaks IoError. See the
-// report's AMBIGUITIES — there is no conversion between them in the
-// language, and one of the two has to give.
+// `add` — the door DESIGN.md declares — speaks WriteError, the union that
+// names both. There is still no conversion between the two sets, and none
+// is invented: `.try()` merges the narrower into the wider, which is the
+// wider set naming the narrower rather than a From.
 
 Vec = std.collections.collections
 Alloc, AllocError = std.mem.mem
 str, str_at = std.text.text_str
+Sink, WriteError = std.core.io
 
 String* = {
     data :: Vec<u8>,
@@ -30,7 +32,7 @@ String* = {
     // state, no varargs walk, and one implementation of the format rules.
     // Those rules — including that a `{` not followed by `}` is a literal —
     // live in text_fmt.zen
-    add* = (self :: @Self, fmt: str, args: ...) Res<(), IoError>
+    add* = (self :: @Self, fmt: str, args: ...) Res<(), WriteError>
 
     // borrows the buffer; see THE BORROW RULE above
     view* = (self: @Self) str { str_at(self.data.ptr(), self.data.len) }
@@ -48,6 +50,25 @@ String* = {
 
     add_byte* = (self :: @Self, b: u8) Res<(), AllocError> { self.data.add(b) }
 }
+
+// a String is a Sink: bytes written to it are appended to the buffer. This
+// is what lets `{}` format into a String and into a console through one
+// signature, with the format machinery never learning which it holds.
+//
+// `write` speaks WriteError because Sink does, and a String can only ever
+// produce the AllocError half — the IoError half is the cost DESIGN.md
+// accepts knowingly, paid only by a caller who matches on the error
+String.impl(Sink, {
+    write = (self :: @Self, bytes: str) Res<(), WriteError> {
+        self.add_bytes(bytes).try();
+        Ok(());
+    }
+
+    write_byte = (self :: @Self, b: u8) Res<(), WriteError> {
+        self.add_byte(b).try();
+        Ok(());
+    }
+})
 
 // the empty buffer. A ufcs function whose first parameter is an Alloc, so it
 // calls as `alloc.String()` — the surface DESIGN.md writes — while the
