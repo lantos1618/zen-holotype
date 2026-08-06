@@ -1,0 +1,60 @@
+// A ten-megabyte single-line file, which is TESTING.md's lexer stress case.
+// The bar is not speed, it is that the compiler never crashes and never
+// hangs on any input — so this asserts the shape of the answer rather than
+// the time it took.
+//
+// The input is BUILT rather than committed: a ten-megabyte fixture is a
+// ten-megabyte fixture in everyone's checkout forever, and the scanner
+// cannot tell the difference.
+//
+// Two shapes, because they stress different things. One enormous token
+// exercises the run scanner and the slice at the end of it; many small
+// tokens exercise the token Vec across every doubling it has.
+
+scan, Source, kind_name = lex.lex
+Alloc, AllocError = std.mem
+str, String = std.text
+
+MEGABYTE: usize = 1048576
+TEN_MEGABYTES: usize = 10485760
+
+// `count` copies of `chunk`, on one line
+repeat = (alloc: Alloc, chunk: str, count: usize) Res<String, AllocError> {
+    sb ::= alloc.String().try();
+    Range(0, count).loop((h, i) { sb.add_bytes(chunk).try(); });
+    Ok(sb);
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    // ONE identifier, ten megabytes long. `bump_while` walks it, `since`
+    // slices it, and neither recurses
+    huge = repeat(alloc, "abcdefghij", TEN_MEGABYTES / 10).try();
+    one = scan(alloc, Source(file: "huge.zen", text: huge.view())).try();
+    println("one token of {} bytes: {} token(s), {} diag(s)",
+        huge.len(), one.tokens.len, one.diags.len);
+    one.tokens.loop((h, t) {
+        println("  {} {}..{} ending at {}:{}", kind_name(t.kind),
+            t.span.start.offset, t.span.end.offset, t.span.end.line, t.span.end.col);
+    });
+
+    // many tokens on one line: `x ` 131072 times, so the token
+    // Vec crosses every doubling from 8 to 131072
+    many_src = repeat(alloc, "x ", MEGABYTE / 8).try();
+    many = scan(alloc, Source(file: "many.zen", text: many_src.view())).try();
+    println("many tokens over {} bytes: {} token(s), {} diag(s)",
+        many_src.len(), many.tokens.len, many.diags.len);
+
+    // the first and the last must both be intact: a token Vec that loses its
+    // early rows across a grow reads as a lexer bug and is not one
+    many.tokens.get(0).match({
+        Ok(t) => println("  first {} at {}:{}", kind_name(t.kind), t.span.start.line, t.span.start.col),
+        None  => println("  first missing"),
+    });
+    many.tokens.get(many.tokens.len - 2).match({
+        Ok(t) => println("  last  {} at {}:{}", kind_name(t.kind), t.span.start.line, t.span.start.col),
+        None  => println("  last missing"),
+    });
+    Ok(0);
+}

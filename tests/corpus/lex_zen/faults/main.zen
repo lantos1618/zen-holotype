@@ -1,0 +1,83 @@
+// Every LexFault, once, with its POSITION — because a correct diagnostic
+// pointing at the wrong token is what makes a language feel unfinished.
+//
+// The rule under test is ONE MISTAKE, ONE DIAGNOSTIC, ANCHORED WHERE THE FIX
+// GOES. An unterminated string is reported at its OPENING QUOTE and not at
+// the newline the scanner happened to notice, because end-of-file names no
+// useful location and the quote is what the author has to change.
+//
+// Lexing a file full of mistakes SUCCEEDS. It yields the tokens it could
+// read together with the faults it found, so one bad byte is never the end
+// of the file.
+
+scan, Source, message, BOM_FIRST, BOM_SECOND, BOM_THIRD = lex.lex
+Alloc, AllocError = std.mem
+str, String = std.text
+
+// how many tokens survived, and every fault with where it points
+dump = (env: Env, alloc: Alloc, label: str, text: str) Res<(), AllocError> {
+    out = scan(alloc, Source(file: "in.zen", text: text)).try();
+    println("{}: {} token(s)", label, out.tokens.len);
+    out.diags.loop((h, d) {
+        println("  in.zen:{}:{} {}", d.span.start.line, d.span.start.col, message(d.fault));
+    });
+    Ok(());
+}
+
+// the three bytes of a UTF-8 byte-order mark, which no string literal can
+// spell: they are not ASCII, and Zen's escape set is closed
+bom = (alloc: Alloc, before: str) Res<String, AllocError> {
+    sb ::= alloc.String().try();
+    sb.add_bytes(before).try();
+    sb.add_byte(BOM_FIRST).try();
+    sb.add_byte(BOM_SECOND).try();
+    sb.add_byte(BOM_THIRD).try();
+    Ok(sb);
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    println("-- strings");
+    dump(env, alloc, "UnterminatedString", "x \"never closed").try();
+    dump(env, alloc, "StringSpansLine   ", "x \"runs off\ny").try();
+    dump(env, alloc, "UnknownEscape     ", "\"a\\qb\"").try();
+    dump(env, alloc, "UnterminatedEscape", "\"a\\").try();
+
+    println("-- characters");
+    dump(env, alloc, "UnterminatedChar  ", "x 'a").try();
+    dump(env, alloc, "CharSpansLine     ", "x 'a\ny").try();
+    dump(env, alloc, "EmptyChar         ", "x ''").try();
+    dump(env, alloc, "CharTooLong       ", "x 'ab'").try();
+
+    println("-- comments");
+    dump(env, alloc, "UnterminatedComment", "x /* open").try();
+
+    println("-- numbers");
+    dump(env, alloc, "LeadingZero       ", "x 010").try();
+    dump(env, alloc, "FloatNeedsDigit   ", "x 12.").try();
+    dump(env, alloc, "SuffixOnNumber    ", "x 1abc").try();
+    dump(env, alloc, "IntegerOutOfRange ", "x 18446744073709551616").try();
+
+    println("-- names and bytes");
+    dump(env, alloc, "UnknownAtName     ", "x @foo").try();
+    dump(env, alloc, "StrayByte         ", "x ? y").try();
+    // a maximal run, reported ONCE: `~~~` is one mistake and not three
+    dump(env, alloc, "StrayByte, one run", "x ~~~ y").try();
+    // NOT at offset 0: anywhere else a byte-order mark is an ordinary
+    // invalid byte sequence, and saying so beats a file that parses
+    // differently depending on where an editor left a marker
+    dump(env, alloc, "MisplacedBom      ", bom(alloc, "x ").try().view()).try();
+
+    println("-- a bom at offset 0 is stripped, and is not a fault");
+    sb ::= alloc.String().try();
+    sb.add_byte(BOM_FIRST).try();
+    sb.add_byte(BOM_SECOND).try();
+    sb.add_byte(BOM_THIRD).try();
+    sb.add_bytes("x").try();
+    dump(env, alloc, "stripped at 0     ", sb.view()).try();
+
+    println("-- several mistakes in one file, all of them reported");
+    dump(env, alloc, "three faults      ", "010 @foo ?").try();
+    Ok(0);
+}

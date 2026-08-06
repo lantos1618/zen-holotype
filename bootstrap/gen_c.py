@@ -727,6 +727,9 @@ class Emitter:
         self._unions = {}  # enum parts -> is it a union of existing types?
         self._consumed = None  # names moved with `consume`, program-wide
         self._rets = {}    # id(fn node) -> its return type with `_` filled in
+        self._scope_ty = None  # the `Scope` type, resolved once
+        self.defer_envs = {}   # site number -> its capture struct's definition
+        self.defer_sites = 0   # deferred closures lifted so far, for naming
         self.graph = program if getattr(program, "modules", None) and hasattr(
             program, "lookup"
         ) else None
@@ -890,6 +893,28 @@ class Emitter:
                 return alias[0]
         return got[0]
 
+    # -- @scope ------------------------------------------------------------
+    #
+    # "A closure registered on a scope keeps its captures in that scope's own
+    # storage" (DESIGN.md).  So a `Scope` value is a POINTER to the enclosing
+    # block's record, and the record holds both the registered closures and
+    # their captures.  The block outlives every frame that registers on it --
+    # that is what non-escaping buys -- so the record is the one storage that
+    # is always still alive when the closure runs, and no allocator and no
+    # heap record take part.  This is not escaping-closure support and must
+    # not grow into it: nothing here works for a closure whose scope is not
+    # the storage.
+
+    def scope_type(self):
+        """`Scope`, as the tuple model sees it."""
+        if self._scope_ty is None:
+            decl = self.type_decl("Scope", ())
+            self._scope_ty = ("named", decl.parts, ()) if decl is not None else UNKNOWN
+        return self._scope_ty
+
+    def is_scope_ty(self, t):
+        return t is not None and t[0] == "named" and t == self.scope_type()
+
     # -- types -------------------------------------------------------------
 
     def resolve_type(self, node, subst=None, parts=(), self_ty=None):
@@ -1013,6 +1038,11 @@ class Emitter:
             inner = self.ctype(t[1])
             return inner + " *"
         if k in ("named", "array", "union"):
+            if k == "named" and self.is_scope_ty(t):
+                # a Scope is the block's record, reached by pointer: passing
+                # it INWARD has to reach the caller's stack, not a copy of it
+                self.needs.add("scope")
+                return GEN + "scope *"
             return self.request_type(t)
         if k == "fn":
             return GEN + "closure"
@@ -1725,6 +1755,44 @@ class Emitter:
         ctx.pop()
         self.bodies[cname] = head + " {\n" + ctx.text() + "}\n"
 
+    def defer_thunk(self, ctx, lam, caps, node):
+        """A deferred closure, lifted to a C function over the record's env.
+
+        The ONE closure that becomes a real function rather than being
+        inlined, and it is not the escaping closure the design forbids: its
+        environment is the block's storage, handed to it as `void *`, so
+        nothing is boxed and nothing is allocated.  Returns the function's
+        name and its capture struct's, or `None` when it captures nothing.
+        """
+        self.needs.add("scope")
+        self.defer_sites += 1
+        n = self.defer_sites
+        thunk = "%sd%d" % (GEN, n)
+        env = None
+        if caps:
+            env = "%senv%d" % (GEN, n)
+            fields = "".join(
+                "    %s;\n" % self.declarator(ty, "%sc%d" % (GEN, i))
+                for i, (_name, _code, ty) in enumerate(caps)
+            )
+            self.defer_envs[n] = "typedef struct %s {\n%s} %s;\n\n" % (env, fields, env)
+        inner = FnCtx(self, ctx.decl, ctx.subst, UNIT, ctx.self_ty)
+        inner.consumed = ctx.consumed
+        inner.push()
+        if env is not None:
+            inner.line("%s *%senv = (%s *)%sp;" % (env, GEN, env, GEN))
+            for i, (name, _code, ty) in enumerate(caps):
+                inner.scopes[-1][name] = ("(*%senv).%sc%d" % (GEN, GEN, i), ty)
+        if f(lam, "params", ()):
+            self.error(node, "a deferred closure takes no parameters")
+        inner.block_value(f(lam, "body"), UNIT)
+        inner.pop()
+        head = "static void %s(void *%sp)" % (thunk, GEN)
+        self.protos[thunk] = head + ";"
+        blank = "" if env is not None else "    (void)%sp;\n" % GEN
+        self.bodies[thunk] = head + " {\n" + blank + inner.text() + "}\n"
+        return thunk, env
+
     def self_type(self, decl, subst):
         """`@Self` for this declaration: the owning type, at the arguments
         this instantiation was made with."""
@@ -1760,6 +1828,7 @@ class Emitter:
         out.append(INCLUDES)
         out.append(self.prelude())
         out.append(types)
+        out.append(self.defer_section())
         out.append("/* ---- prototypes ---- */\n")
         for cname in sorted(self.protos):
             out.append(self.protos[cname] + "\n")
@@ -1771,11 +1840,35 @@ class Emitter:
 
     def prelude(self):
         parts = [PRELUDE_TYPES, PRELUDE_TRAP]
+        if "scope" in self.needs:
+            parts.append(PRELUDE_SCOPE)
         if "print" in self.needs:
             parts.append(PRELUDE_PRINT)
         for name in sorted(self.helpers):
             parts.append(HELPERS[name])
         return "".join(parts)
+
+    def defer_section(self):
+        """The block record, after the types a capture can name.
+
+        A slot's env is a union over every capture record in the program, so
+        it is exactly as large and as aligned as the largest one -- no
+        guessed byte count, and nothing to overflow.  How MANY closures one
+        block may carry is the one thing whole-program analysis cannot answer
+        (a `defer` in a loop is unbounded), so that bound is a constant and
+        exceeding it traps rather than corrupting the frame.
+        """
+        if "scope" not in self.needs:
+            return ""
+        out = ["/* ---- @scope: the block's own defer stack ---- */\n\n"]
+        for n in sorted(self.defer_envs):
+            out.append(self.defer_envs[n])
+        out.append("typedef union %sdefer_env {\n    char %snone;\n" % (GEN, GEN))
+        for n in sorted(self.defer_envs):
+            out.append("    %senv%d %su%d;\n" % (GEN, n, GEN, n))
+        out.append("} %sdefer_env;\n\n" % GEN)
+        out.append(DEFER_RUNTIME)
+        return "".join(out)
 
     def emit_types(self):
         # Every tag is forward-declared before any definition: a by-value
@@ -1961,6 +2054,9 @@ class FnCtx:
         # was written in -- a `.try()` inside an inlined body still has to
         # unwind the block it is physically standing in.
         self.dscopes = []
+        # One entry per `dscopes` entry, in step with it: the block's defer
+        # record, or None when nothing can register on that block.
+        self.sscopes = []
         self.consumed = frozenset()  # names `consume`d anywhere in this body
 
     # -- output ------------------------------------------------------------
@@ -2070,11 +2166,20 @@ class FnCtx:
                 continue
             self.emit_drop(cname, ty, flag)
 
+    def exit_scope(self, i, keep=None):
+        """One block leaving: its defers run LIFO, and ALL of them run before
+        ANY of its drops (DESIGN.md).  Every exit goes through here, so a
+        defer that runs at three exits out of four is not expressible."""
+        rec = self.sscopes[i]
+        if rec is not None:
+            self.line("%sscope_run(&%s);" % (GEN, rec))
+        self.unwind(self.dscopes[i], keep)
+
     def unwind_to(self, depth, keep=None):
         """Every block from the innermost out to `depth`: what a non-local
         exit -- `.try()`, `h.break()`, `h.next()` -- leaves behind."""
-        for entries in reversed(self.dscopes[depth:]):
-            self.unwind(entries, keep)
+        for i in reversed(range(depth, len(self.dscopes))):
+            self.exit_scope(i, keep)
 
     # -- statements --------------------------------------------------------
 
@@ -2085,10 +2190,29 @@ class FnCtx:
         if kind(block) != "Block":
             return self.expr(block)[0]
         self.dscopes.append([])
+        self.sscopes.append(None)
         try:
+            self.sscopes[-1] = self.scope_record(block)
             return self._block_body(block, want)
         finally:
             self.dscopes.pop()
+            self.sscopes.pop()
+
+    def scope_record(self, block):
+        """This block's defer record, declared before its first statement.
+
+        Only a block that writes `@scope` gets one: a nested block and a
+        lambda body each get their own, which is what "it nests, and each
+        block gets its own" means.  Its storage is automatic, so re-entering
+        the block -- the next iteration of a loop -- starts an empty stack.
+        """
+        if not _writes_scope(block):
+            return None
+        self.e.needs.add("scope")
+        rec = self.label("blk")
+        self.line("%sscope %s;" % (GEN, rec))
+        self.line("%s.%sn = 0;" % (rec, GEN))
+        return rec
 
     def _block_body(self, block, want=None):
         stmts = list(f(block, "stmts", ()) or ())
@@ -2105,23 +2229,24 @@ class FnCtx:
                     stmts = stmts[:-1]
         for stmt in stmts:
             self.stmt(stmt)
-        entries = self.dscopes[-1]
+        here = len(self.dscopes) - 1
+        entries = self.dscopes[here]
         if value is None:
-            self.unwind(entries)
+            self.exit_scope(here)
             return None
         code, ty = self.expr(value, want)
         code = self.coerce(code, ty, want)
-        if not entries:
+        if not entries and self.sscopes[here] is None:
             return code
         rty = want if want not in (None, UNKNOWN) else ty
         if rty in (None, UNIT, UNKNOWN):
-            self.unwind(entries, code)
+            self.exit_scope(here, code)
             return code
-        # the block's value is read BEFORE its bindings die, so it is spilled
-        # to a temporary and the drops run against that
+        # the block's value is read BEFORE its defers and its bindings die, so
+        # it is spilled to a temporary and the cleanup runs against that
         tmp = self.new_tmp(rty)
         self.line("%s = %s;" % (tmp, code))
-        self.unwind(entries, code)
+        self.exit_scope(here, code)
         return tmp
 
     def coerce(self, code, ty, want):
@@ -2949,8 +3074,10 @@ class FnCtx:
         argnodes = self.arg_nodes(args)
         if is_handle(rty):
             return self.lower_handle((rcode, rty), name, argnodes, node)
+        if self.e.is_scope_ty(rty):
+            return self.lower_defer(rcode, name, argnodes, node)
         if rty is not None and rty[0] == "ptr":
-            got = self.ptr_method(rcode, rty, name, argnodes, node)
+            got = self.ptr_method(rcode, rty, name, argnodes, node, targs)
             if got is not None:
                 return got
         if rty is not None and rty[0] == "named":
@@ -3117,7 +3244,7 @@ class FnCtx:
         self.line("%s = %s;" % (tmp, call))
         return (self.e.convert(tmp, ret, real_ret), real_ret or ret)
 
-    def ptr_method(self, rcode, rty, name, argnodes, node):
+    def ptr_method(self, rcode, rty, name, argnodes, node, targs=()):
         """`Ptr<T>`'s members ARE the backend.
 
         mem_ptr.zen writes every one of them as a signature and says why:
@@ -3154,6 +3281,19 @@ class FnCtx:
         if name == "is_null" and not argnodes:
             return ("(%s == NULL)" % paren(rcode), prim("bool"))
         if name == "to" and len(argnodes) == 0:
+            # `to<U>` must change the ELEMENT type: read, write, bytes and
+            # copy_from all scale by it, so returning the receiver's own type
+            # leaves them scaling by T.  Arena.realloc reads its usize header
+            # through `.to<usize>()`, so as a no-op that read is ONE BYTE, and
+            # every Vec whose buffer reaches 256 bytes silently loses the rows
+            # written before each grow -- 512 & 0xFF == 0, so `keep` is 0 and
+            # copy_from copies nothing.  Both bump and realloc truncate the
+            # same way, which is why nothing ever errored.
+            if targs:
+                u = self.e.resolve_type(targs[0], self.subst, self.parts, self.self_ty)
+                if u not in (None, UNKNOWN):
+                    return ("((%s *)%s)" % (self.e.ctype(u).strip(), paren(rcode)),
+                            ("ptr", u))
             return (rcode, rty)
         return None
 
@@ -4237,6 +4377,71 @@ class FnCtx:
         self.e.error(node, "LoopHandle has no `%s`" % name)
         return ("0", UNKNOWN)
 
+    def lower_defer(self, rcode, name, argnodes, node):
+        """`s.defer(() { .. })` -- push a closure onto that block's stack.
+
+        The closure runs long after this frame is gone, so its captures are
+        COPIED into the block's record here, at registration.  That is what
+        "a closure registered on a scope keeps its captures in that scope's
+        own storage" buys: the values are read where they are still alive.
+        """
+        if name != "defer":
+            self.e.error(node, "`Scope` has no `%s`" % name)
+            return ("0", UNKNOWN)
+        if len(argnodes) != 1 or kind(argnodes[0]) != "Lambda":
+            self.e.error(node, "`defer` takes a closure written at the call site")
+            return ("0", UNIT)
+        caps = self.captures(argnodes[0])
+        thunk, env = self.e.defer_thunk(self, argnodes[0], caps, node)
+        addr, size = "0", "0"
+        if env is not None:
+            tmp = self.label("cap")
+            self.line("%s %s;" % (env, tmp))
+            for i, (_name, code, _ty) in enumerate(caps):
+                self.line("%s.%sc%d = %s;" % (tmp, GEN, i, code))
+            addr, size = "&" + tmp, "sizeof %s" % tmp
+        file, line, col = self.e.pos.of(node)
+        self.line("%sdefer(%s, %s, %s, %s, %s, %d, %d);"
+                  % (GEN, rcode, thunk, addr, size,
+                     c_string(file.encode("utf-8")), line, col))
+        return ("0", UNIT)
+
+    def captures(self, lam):
+        """The frame values a deferred closure reads, in source order.
+
+        A name bound INSIDE the closure is not a capture; everything else it
+        names that resolves in this frame is, and is copied.  Over-capturing
+        costs a word in the record, under-capturing is a dangling read, so
+        the doubtful cases go in.
+        """
+        bound = set()
+        for n in zast.walk(lam):
+            if kind(n) == "Lambda":
+                for p in f(n, "params", ()) or ():
+                    bound.add(str(f(p, "name", "_")))
+            elif kind(n) == "PatVariant":
+                binder = f(n, "binder")
+                if isinstance(binder, str):
+                    bound.add(binder)
+        seen, out = set(), []
+        for n in zast.walk(f(lam, "body")):
+            if kind(n) != "Path":
+                continue
+            name = str(f(n, "name", ""))
+            if name in bound or name in seen:
+                continue
+            got = self.find(name)
+            if got is None:
+                continue
+            ty = got[1]
+            if ty is None or ty in (UNIT, UNKNOWN) or ty[0] in ("lambda", "loop", "fn"):
+                # a handle or an inlined closure names a frame that is going
+                # away; there is nothing to copy and nothing to run later
+                continue
+            seen.add(name)
+            out.append((name, got[0], ty))
+        return out
+
     def infer_fn_targs(self, decl, fnode, values, receiver, owner_tys=()):
         params = list(self.e.params_of(fnode))
         found = dict(zip(decl.otparams, owner_tys))
@@ -4903,8 +5108,11 @@ class FnCtx:
         return ("0", UNKNOWN)
 
     def ex_ScopeRef(self, node, want=None):
-        self.e.error(node, "`@scope` is not in the seed subset")
-        return ("0", UNKNOWN)
+        rec = self.sscopes[-1] if self.sscopes else None
+        if rec is None:  # pragma: no cover - scope_record scans for this node
+            self.e.error(node, "`@scope` has no enclosing block here")
+            return ("0", UNKNOWN)
+        return ("&" + rec, self.e.scope_type())
 
     def ex_MetaCall(self, node, want=None):
         self.e.error(node, "`@meta` is not in the seed subset (PLAN.md 0.5)")
@@ -4974,6 +5182,23 @@ def refine(ty, want):
 
 def is_handle(ty):
     return ty is not None and ty[0] == "loop"
+
+
+def _writes_scope(node):
+    """Does `@scope` in this subtree mean THIS block?
+
+    A nested block and a lambda body are blocks of their own, so the search
+    stops at each -- which is the whole of "it nests, and each block gets its
+    own", and the reason the inner example's defers run at the inner brace.
+    """
+    for child in zast.children(node):
+        if kind(child) == "ScopeRef":
+            return True
+        if kind(child) in ("Block", "Lambda"):
+            continue
+        if _writes_scope(child):
+            return True
+    return False
 
 # `(*p).f.g` is as much an lvalue as `x.f.g`, and a by-reference receiver is
 # spelled the first way everywhere.  Missing it copies the field into a
@@ -5198,6 +5423,51 @@ static size_t zg_idx_s(int64_t i, size_t len, const char *file,
     if (i < 0 || (uint64_t)i >= (uint64_t)len)
         zg_trap(file, line, col, "index out of bounds");
     return (size_t)i;
+}
+
+"""
+
+PRELUDE_SCOPE = """\
+/* `@scope` is the enclosing block as a value (DESIGN.md), so a Scope is a
+ * pointer to the block's own record.  The record holds the deferred closures
+ * AND their captures: the closure outlives the frame that registered it, and
+ * the block outlives the closure by construction, so the block is the only
+ * storage that is certainly still alive -- which is why defer needs no
+ * allocator and no escaping-closure machinery. */
+typedef struct zg_scope zg_scope;
+#define ZG_DEFER_MAX 32
+
+"""
+
+DEFER_RUNTIME = """\
+typedef struct zg_defer_slot {
+    void (*zg_fn)(void *);
+    zg_defer_env zg_env;
+} zg_defer_slot;
+
+struct zg_scope {
+    int zg_n;
+    zg_defer_slot zg_slot[ZG_DEFER_MAX];
+};
+
+static void zg_defer(zg_scope *s, void (*fn)(void *), const void *env,
+                     size_t n, const char *file, unsigned long line,
+                     unsigned long col) {
+    if (s->zg_n >= ZG_DEFER_MAX)
+        zg_trap(file, line, col, "too many deferred closures on one block");
+    s->zg_slot[s->zg_n].zg_fn = fn;
+    if (n) memcpy(&s->zg_slot[s->zg_n].zg_env, env, n);
+    s->zg_n++;
+}
+
+/* LIFO, and BEFORE the block's drops.  The count is lowered before the call,
+ * so running a scope twice is a no-op and a closure that registers another
+ * one on the same block still terminates. */
+static void zg_scope_run(zg_scope *s) {
+    while (s->zg_n > 0) {
+        s->zg_n--;
+        s->zg_slot[s->zg_n].zg_fn(&s->zg_slot[s->zg_n].zg_env);
+    }
 }
 
 """

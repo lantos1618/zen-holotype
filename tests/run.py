@@ -61,6 +61,11 @@ DIR_STAGE_NAMES = (".stage", "{name}.stage", "main.stage")
 # on one position are two, and the position list cannot tell.
 DIAG_TOTAL = re.compile(r"(\d+) diagnostic\(s\)")
 
+# The module named by an import's right-hand side: `Res* = std.core.result`
+# and `Kind, Pos = leaf` both name their first component. Module paths are
+# lowercase by convention, which is what keeps `= Package(..)` out.
+IMPORT_RHS = re.compile(r"=\s*([a-z][A-Za-z0-9_]*)\s*(?:\.|$)")
+
 # A diagnostic position as it appears in compiler output: path:line:col, or a
 # bare line:col at the start of a line for a single-file compilation.
 POS_WITH_PATH = re.compile(r"(?<![\w./-])([\w./+-]+\.zen):(\d+):(\d+)")
@@ -573,15 +578,54 @@ def stage(test: Test, tool: Toolchain, work: Path) -> Path:
     else:
         shutil.copy2(test.source, root / test.source.name)
 
-    # The WHOLE of src/, not just src/std. A program stands on the prelude, and
-    # from stage 1 the compiler's own modules (`lex`, `ast`, `parse`, ..) are
-    # siblings of `std` under the same root -- so staging only `std` means no
-    # corpus test can ever import one, and four subsystems each invent a
-    # private workaround instead. A test compiles against the same tree the
-    # compiler is built from, which is one rule and the honest one.
+    # `std` always -- it is the prelude, and every program stands on it.
+    # Any OTHER top-level module under src/ (`lex`, `ast`, `parse`, ..) only
+    # if this test's own sources name it.
+    #
+    # Staging the whole of src/ was the first attempt, and it is wrong for a
+    # reason worth writing down: the compiler compiles the whole staged tree,
+    # so ONE half-written module reddens every test in the suite -- not by
+    # failing them, but by adding its diagnostics to their counts, which is
+    # how a `.count` assertion starts failing because of a file it has never
+    # heard of. That couples every test to every module's health and makes
+    # working on two modules at once impossible.
+    #
+    # The name test is deliberately crude and deliberately UNDER-inclusive:
+    # a module that is wanted but not matched gives a plain "module not
+    # found", which names the problem, while an unwanted module that IS
+    # staged gives diagnostics from a file the author never mentioned.
     if tool.src_root and tool.src_root.is_dir():
-        shutil.copytree(tool.src_root, root, dirs_exist_ok=True)
+        wanted = _modules_named_in(root)
+        for entry in sorted(tool.src_root.iterdir()):
+            if entry.name != "std" and entry.name not in wanted:
+                continue
+            if entry.is_dir():
+                shutil.copytree(entry, root / entry.name, dirs_exist_ok=True)
+            else:
+                shutil.copy2(entry, root / entry.name)
     return root
+
+
+def _modules_named_in(root: Path) -> set[str]:
+    """Every bare word in the staged test's own sources.
+
+    An import names its module (`lex.lex`, or `lex` for a folder root), so a
+    module this test could possibly reach appears here as a word. Over-
+    matching costs a directory copy; under-matching costs a clear diagnostic.
+    """
+    names: set[str] = set()
+    for path in root.rglob("*.zen"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            # comments name modules constantly ("see src/parse"), and matching
+            # those stages a module the test never imports -- which is the
+            # exact coupling this function exists to remove
+            code = line.split("//", 1)[0]
+            names |= set(IMPORT_RHS.findall(code))
+    return names
 
 
 def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace) -> Result:

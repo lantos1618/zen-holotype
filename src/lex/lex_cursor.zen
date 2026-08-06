@@ -1,0 +1,93 @@
+// src/lex/lex_cursor.zen
+// The walk over the bytes, and the only place that knows what a line is.
+//
+// A cursor holds three numbers that must agree — offset, line, column —
+// and it is one type precisely so they cannot disagree: nothing advances
+// the offset except `bump`, and `bump` is what counts the newline.
+//
+// LF ENDS A LINE; CR DOES NOT. So a CRLF file and an LF file differ by one
+// byte of column and by nothing else, and a lone CR is ordinary whitespace
+// rather than a second line ending nobody tested.
+//
+// The column is a BYTE column, 1-based, counted from the first byte of the
+// line — which is what makes it agree with `offset` and with every tool
+// that maps byte ranges. A multi-byte character therefore advances the
+// column by its byte count, and a stripped byte-order mark leaves the
+// first real character at column 4. Both are the honest answer for a
+// column that says "byte" on the label.
+
+Pos = lex.lex_token
+BOM_FIRST, BOM_SECOND, BOM_THIRD = lex.lex_byte
+str = std.text
+
+Cursor* = {
+    src: str,
+    offset :: usize,
+    line :: usize,
+    col :: usize,
+
+    is_done* = (self: @Self) bool { self.offset == self.src.len }
+
+    // the byte under the cursor. None at end of file, which is a legitimate
+    // miss and not a bug: every scanner below asks this question at a point
+    // where the file is allowed to have ended
+    peek* = (self: @Self) Res<u8> { self.src.get(self.offset) }
+
+    // lookahead. `::=` needs two, `/*` and `12.5` need one, and nothing in
+    // Zen needs three
+    peek* = (self: @Self, ahead: usize) Res<u8> { self.src.get(self.offset + ahead) }
+
+    // the question every scanner actually asks. End of file answers no,
+    // which is right everywhere: a missing byte is not the byte you wanted
+    at_byte* = (self: @Self, b: u8) bool {
+        self.peek().match({ Ok(here) => here == b, None => false });
+    }
+
+    at_byte* = (self: @Self, ahead: usize, b: u8) bool {
+        self.peek(ahead).match({ Ok(here) => here == b, None => false });
+    }
+
+    pos* = (self: @Self) Pos {
+        Pos(offset: self.offset, line: self.line, col: self.col)
+    }
+
+    // one byte forward. Past the end it is a no-op, so a scanner that asks
+    // for one byte too many stops rather than running away
+    bump* = (self :: @Self) () {
+        (!self.is_done()).then(() { self.step(); });
+    }
+
+    // forward while the bytes keep answering yes. An identifier, a digit
+    // run, a line comment and a run of stray bytes are all this, so each of
+    // them is one line at the call site instead of a loop
+    bump_while* = (self :: @Self, keep: (b: u8) bool) () {
+        loop(
+            () { self.peek().match({ Ok(b) => keep(b), None => false }) },
+            (h) { self.bump(); },
+        );
+    }
+
+    // does a byte-order mark sit exactly here? Only offset 0 is ever asked,
+    // because that is the only place one is stripped — anywhere else it is
+    // an ordinary invalid byte sequence and the scanner says so
+    at_bom* = (self: @Self) bool {
+        self.at_byte(BOM_FIRST) && self.at_byte(1, BOM_SECOND) && self.at_byte(2, BOM_THIRD)
+    }
+
+    // the byte is known to exist: `bump` is guarded, and this is the half
+    // that must not be, because the column moves before the offset does
+    step = (self :: @Self) () {
+        self.at_byte('\n').match({
+            true  => { self.line = self.line + 1; self.col = 1; },
+            false => { self.col = self.col + 1; },
+        });
+        self.offset = self.offset + 1;
+    }
+}
+
+// the only way to build one outside this module: offset, line and col carry
+// no star, so nobody can start a cursor anywhere but the beginning. Named
+// `cursor_at` rather than `Cursor` for the reason `str_at` is: a
+// same-named constructor is reachable as `x.Cursor()` and not as
+// `Cursor(x)`, because a positional struct literal wins the plain call
+cursor_at* = (src: str) Cursor { Cursor(src: src, offset: 0, line: 1, col: 1) }

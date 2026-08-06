@@ -1,0 +1,239 @@
+// src/lex/lex_scan.zen
+// The driver: one byte decides which scanner runs, and the scanners that
+// need no value of their own live here — comments, names, `@` names, the
+// punctuation call, and the bytes that begin nothing.
+//
+// THE LOOP IS THE WHOLE CONTROL STRUCTURE. `step` reads one token or one
+// mistake and returns; nothing here backs up, and no scanner leaves the
+// cursor where it found it, so the loop always terminates. That is the
+// property that makes "the compiler never hangs, on any input" true for
+// this phase rather than hoped for.
+//
+// AFTER A FAULT, THE SCANNER KEEPS GOING. Every scanner resynchronises —
+// past the closing quote, to the end of the line, past the run of stray
+// bytes — because the second mistake in a file is worth as much as the
+// first, and a lexer that stops at the first one makes a user recompile
+// once per typo.
+//
+// WHAT THIS LEXER DELIBERATELY DOES NOT DO: it does not track brackets.
+// bootstrap/lex.py does, because it runs beside tree-sitter and is the only
+// thing that could. This one IS the parser's token source, and the parser
+// knows what it opened and what it expected to close it — so an unmatched
+// brace reported here would be a worse diagnostic arriving first, and one
+// mistake would get two messages.
+
+Lexer, Lexed = lex.lex_state
+Cursor = lex.lex_cursor      // for its methods: importing a type pulls its world along
+TokenKind, Source = lex.lex_token
+LexFault = lex.lex_diag
+ByteClass, class_of = lex.lex_byte
+punct_of, punct_kind = lex.lex_punct
+string, character, number = lex.lex_literal
+Alloc, AllocError = std.mem
+str = std.text
+
+// THE ENTRY POINT. Takes an Alloc because it builds two Vecs and law 1 has
+// no exemption; takes a Source because a lexer is handed bytes and never
+// opens a file — opening one is authority, and authority comes from Env.
+//
+// Err is AllocError and nothing else: a file full of lexical mistakes LEXES
+// SUCCESSFULLY, and hands back the tokens it read together with the faults
+// it found. Routing a bad byte through Err would make one typo the end of
+// the file, which is the behaviour this design exists to avoid.
+scan* = (alloc: Alloc, source: Source) Res<Lexed, AllocError> {
+    lx ::= alloc.Lexer(source);
+    lx.strip_bom();
+    loop(() { !lx.cur.is_done() }, (h) { lx.step().try(); });
+    lx.emit(TokenKind.Eof, lx.cur.pos()).try();
+    Ok(Lexed(source: source, tokens: lx.tokens, diags: lx.diags));
+}
+
+// A BOM IS STRIPPED ONLY AT OFFSET 0, and this is the only call. Anywhere
+// else it falls through to `stray` and is reported, because a file that
+// parses differently depending on where an editor left a marker is worse
+// than one that says so.
+//
+// The three bytes are stepped over rather than skipped, so the first real
+// character lands at column 4. A byte column that stopped counting bytes
+// would disagree with every tool that maps offsets, and "1-based BYTE
+// column" is what DESIGN.md says.
+strip_bom = (lx :: Lexer) () {
+    lx.cur.at_bom().then(() { lx.cur.bump(); lx.cur.bump(); lx.cur.bump(); });
+}
+
+// one token, or one mistake. The None arm is end of file, which the loop
+// has already excluded — but match is exhaustive in every position, and
+// answering it honestly costs one line
+step = (lx :: Lexer) Res<(), AllocError> {
+    lx.cur.peek().match({
+        Ok(b) => lx.dispatch(b),
+        None  => Ok(()),
+    });
+}
+
+dispatch = (lx :: Lexer, b: u8) Res<(), AllocError> {
+    class_of(b).match({
+        Space  => lx.skip(),
+        Slash  => lx.slash(),
+        Quote  => lx.string(),
+        Apos   => lx.character(),
+        Digit  => lx.number(),
+        Letter => lx.name(),
+        At     => lx.at_name(),
+        Other  => lx.punctuation(b),
+    });
+}
+
+// whitespace is not a token: the gap between two spans says everything
+// about it, and "was there a blank line here" is `next.start.line >
+// prev.end.line + 1` rather than a stored fact that can go stale
+skip = (lx :: Lexer) Res<(), AllocError> {
+    lx.cur.bump();
+    Ok(());
+}
+
+// ---------------------------------------------------------------------------
+// comments — trivia, and therefore TOKENS
+// ---------------------------------------------------------------------------
+
+// `/` is the one byte that needs lookahead: two comment shapes and a
+// division operator all start with it
+slash = (lx :: Lexer) Res<(), AllocError> {
+    lx.cur.at_byte(1, '/').match({
+        true  => lx.line_comment(),
+        false => lx.cur.at_byte(1, '*').match({
+            true  => lx.block_comment(),
+            false => lx.punctuation('/'),
+        }),
+    });
+}
+
+// to the end of the line, not including the newline: the newline is
+// whitespace and belongs to the gap, not to the comment
+line_comment = (lx :: Lexer) Res<(), AllocError> {
+    from = lx.cur.pos();
+    lx.cur.bump_while((b) { b != '\n' });
+    lx.emit(TokenKind.LineComment, from);
+}
+
+// BLOCK COMMENTS DO NOT NEST: `/* a /* b */` is closed. So the scan is for
+// the first `*/` and there is no depth counter to get wrong
+block_comment = (lx :: Lexer) Res<(), AllocError> {
+    from = lx.cur.pos();
+    lx.cur.bump();
+    lx.cur.bump();
+    closed ::= false;
+    loop((h) {
+        lx.cur.peek().match({
+            None    => { h.break(); },
+            Ok('*') => lx.cur.at_byte(1, '/').match({
+                true  => { lx.cur.bump(); lx.cur.bump(); closed = true; h.break(); },
+                false => { lx.cur.bump(); },
+            }),
+            Ok(_)   => { lx.cur.bump(); },
+        });
+    });
+
+    // unterminated: no token. There is no comment, only an opening — and the
+    // fault is reported at the `/*`, which is the thing that needs closing
+    closed.match({
+        true  => lx.emit(TokenKind.BlockComment, from),
+        false => lx.report(LexFault.UnterminatedComment, from),
+    });
+}
+
+// ---------------------------------------------------------------------------
+// names
+// ---------------------------------------------------------------------------
+
+// `[A-Za-z_][A-Za-z0-9_]*`, ASCII. `_` is an ordinary identifier here; that
+// it is the wildcard pattern is the parser's knowledge, not the lexer's
+name = (lx :: Lexer) Res<(), AllocError> {
+    from = lx.cur.pos();
+    lx.cur.bump_while((b) { b.is_ident_cont() });
+    lx.emit(word_kind(lx.since(from)), from);
+}
+
+// the three words the grammar reserves, and nothing else — Zen has no
+// keywords beyond these. A name that merely BEGINS with one, `truely` or
+// `consumer`, is a name, because the run was taken maximally first
+word_kind = (word: str) TokenKind {
+    word.eq("true").match({
+        true  => TokenKind.True,
+        false => word.eq("false").match({
+            true  => TokenKind.False,
+            false => word.eq("consume").match({
+                true  => TokenKind.Consume,
+                false => TokenKind.Ident,
+            }),
+        }),
+    });
+}
+
+// THE `@` NAMESPACE IS CLOSED at `@Self`, `@meta`, `@scope`. Adding a fourth
+// is a design change, not an implementation detail — so `@foo` is a lexical
+// error at the `@`, and never an unresolved name three phases later. One
+// mistake, one diagnostic, anchored where the fix goes
+at_name = (lx :: Lexer) Res<(), AllocError> {
+    from = lx.cur.pos();
+    lx.cur.bump();
+    lx.cur.bump_while((b) { b.is_ident_cont() });
+    at_kind(lx.since(from)).match({
+        Ok(kind) => lx.emit(kind, from),
+        None     => lx.report(LexFault.UnknownAtName, from),
+    });
+}
+
+// the whole namespace, matched with the `@` still attached so the table
+// reads as the three things a user writes
+at_kind = (word: str) Res<TokenKind> {
+    word.eq("@Self").match({
+        true  => Ok(TokenKind.AtSelf),
+        false => word.eq("@meta").match({
+            true  => Ok(TokenKind.AtMeta),
+            false => word.eq("@scope").match({
+                true  => Ok(TokenKind.AtScope),
+                false => None,
+            }),
+        }),
+    });
+}
+
+// ---------------------------------------------------------------------------
+// punctuation, and the bytes that are nothing
+// ---------------------------------------------------------------------------
+
+// `punct_of` is the table and its domain is the answer to "is this
+// punctuation". None cannot happen for a byte `class_of` called `Other`
+// unless the two ever disagree — and if they do, the fallthrough is a stray
+// byte, which is a safe answer rather than an invented token
+punctuation = (lx :: Lexer, b: u8) Res<(), AllocError> {
+    from = lx.cur.pos();
+    punct_of(b).match({
+        Ok(single) => lx.emit(punct_kind(lx.cur, b, single), from),
+        None       => lx.stray(),
+    });
+}
+
+// A MAXIMAL RUN, REPORTED ONCE: `~~~` is one mistake and not three. A
+// byte-order mark past offset 0 is called what it is, because "unexpected
+// character" for a marker an editor inserted invisibly is a diagnostic
+// nobody can act on
+stray = (lx :: Lexer) Res<(), AllocError> {
+    from = lx.cur.pos();
+    misplaced_bom = lx.cur.at_bom();
+    lx.cur.bump_while((b) { begins_no_token(b) });
+    misplaced_bom.match({
+        true  => lx.report(LexFault.MisplacedBom, from),
+        false => lx.report(LexFault.StrayByte, from),
+    });
+}
+
+// `?`, `#`, `~`, `$`, `^`, a backslash outside a literal, and every
+// non-ASCII byte: none of them begins a Zen token
+begins_no_token = (b: u8) bool {
+    class_of(b).match({
+        Other => punct_of(b).match({ Ok(_) => false, None => true }),
+        _     => false,
+    });
+}

@@ -1,0 +1,217 @@
+// src/lex/lex_literal.zen
+// Strings, characters, escapes and numbers — the four shapes that carry a
+// value rather than being one, and every lexical rule DESIGN.md states
+// about them.
+//
+// THE SHAPE OF ALL OF IT IS `REJECT RATHER THAN REINTERPRET`. A scanner
+// that silently picks a reading is how a language ends up with a
+// specification nobody can write down, and the readings it picks are always
+// the ones that hide the bug: `010` meaning 8, `"\q"` meaning `q`.
+//
+// A FAULT DOES NOT ALWAYS COST A TOKEN. `"a\qb"` is a well-formed string
+// with one bad escape in it, so it reports the escape AND emits the string —
+// the parser sees the shape it expected and nobody gets a second, worse
+// diagnostic about a missing expression. Where no well-formed token exists —
+// an unterminated string, an integer too wide for any type — nothing is
+// emitted, because there is nothing honest to emit.
+
+Lexer = lex.lex_state
+Cursor = lex.lex_cursor      // for its methods: importing a type pulls its world along
+Pos, TokenKind = lex.lex_token
+LexFault = lex.lex_diag
+is_escape = lex.lex_byte
+AllocError = std.mem
+str = std.text
+
+// ---------------------------------------------------------------------------
+// strings and characters
+// ---------------------------------------------------------------------------
+
+// the cursor is on the opening quote. A string does not span lines, and the
+// newline is the error — but the DIAGNOSTIC points at the opening quote,
+// because that is where the fix goes
+string* = (lx :: Lexer) Res<(), AllocError> {
+    from = lx.cur.pos();
+    lx.cur.bump();
+    loop((h) {
+        lx.cur.peek().match({
+            None     => { lx.report(LexFault.UnterminatedString, from).try(); h.break(); },
+            Ok('\n') => { lx.report(LexFault.StringSpansLine, from).try(); h.break(); },
+            // an escape that ran off the end has already reported the
+            // truncation; adding "and the string never closed" is a second
+            // diagnostic for the same missing bytes
+            Ok('\\') => {
+                lx.escape().try();
+                lx.cur.is_done().then(() { h.break(); });
+            },
+            Ok('"')  => { lx.cur.bump(); lx.emit(TokenKind.Str, from).try(); h.break(); },
+            Ok(_)    => { lx.cur.bump(); },
+        });
+    });
+    Ok(());
+}
+
+// the cursor is on the opening quote. A character literal holds exactly one
+// BYTE — `str` is bytes — so `''` and `'ab'` are both errors, and `'é'` is
+// two bytes and therefore not a character literal
+character* = (lx :: Lexer) Res<(), AllocError> {
+    from = lx.cur.pos();
+    lx.cur.bump();
+    lx.cur.peek().match({
+        None     => lx.report(LexFault.UnterminatedChar, from),
+        Ok('\n') => lx.report(LexFault.CharSpansLine, from),
+        Ok('\'') => { lx.cur.bump(); lx.report(LexFault.EmptyChar, from) },
+        Ok('\\') => { lx.escape().try(); lx.close_char(from) },
+        Ok(_)    => { lx.cur.bump(); lx.close_char(from) },
+    });
+}
+
+// one byte has been read, so the literal must close right here
+close_char = (lx :: Lexer, from: Pos) Res<(), AllocError> {
+    lx.cur.at_byte('\'').match({
+        true  => { lx.cur.bump(); lx.emit(TokenKind.Char, from) },
+        false => lx.overlong_char(from),
+    });
+}
+
+// it did not close where a one-byte literal must. Say WHICH of the two
+// reasons it is — too many bytes, or never closed at all — rather than
+// "syntax error", and read to the end of the literal so the next token
+// starts somewhere sensible
+overlong_char = (lx :: Lexer, from: Pos) Res<(), AllocError> {
+    lx.cur.bump_while((b) { (b != '\'') && (b != '\n') });
+    lx.cur.peek().match({
+        Ok('\'') => { lx.cur.bump(); lx.report(LexFault.CharTooLong, from) },
+        Ok(_)    => lx.report(LexFault.CharSpansLine, from),
+        None     => lx.report(LexFault.UnterminatedChar, from),
+    });
+}
+
+// the cursor is on the backslash. The escape set is `\n \t \r \0 \\ \' \"`
+// and nothing else, and the span is the backslash plus the byte it fails to
+// escape — two bytes, which is exactly what has to be changed
+escape* = (lx :: Lexer) Res<(), AllocError> {
+    from = lx.cur.pos();
+    lx.cur.bump();
+    lx.cur.peek().match({
+        None  => lx.report(LexFault.UnterminatedEscape, from),
+        Ok(b) => {
+            lx.cur.bump();
+            is_escape(b).match({
+                false => lx.report(LexFault.UnknownEscape, from),
+                true  => Ok(()),
+            })
+        },
+    });
+}
+
+// ---------------------------------------------------------------------------
+// numbers
+// ---------------------------------------------------------------------------
+
+// the cursor is on a digit. Decimal only: no hex, no exponent, no
+// separators, no type suffixes — a literal's type comes from its context,
+// which is the rule the rest of the language runs on
+number* = (lx :: Lexer) Res<(), AllocError> {
+    from = lx.cur.pos();
+    lx.cur.bump_while((b) { b.is_digit() });
+    whole = lx.since(from);
+
+    // Zen has no octal, so `010` cannot quietly mean 8. Python 3 made this
+    // exact call for this exact reason
+    has_leading_zero(whole).match({
+        true  => lx.report(LexFault.LeadingZero, from),
+        false => Ok(()),
+    }).try();
+
+    is_float = lx.fraction().try();
+
+    lx.suffix().try();
+
+    is_float.match({
+        true  => lx.emit(TokenKind.Float, from),
+        false => lx.emit_int(whole, from),
+    });
+}
+
+// `12.` is an error: a float has digits on both sides of the point. The gain
+// is that a number literal is never the base of a member access, so nothing
+// downstream needs lookahead to tell `1.max` from a malformed float
+fraction = (lx :: Lexer) Res<bool, AllocError> {
+    lx.cur.at_byte('.').match({
+        true  => lx.after_dot(),
+        false => Ok(false),
+    });
+}
+
+// the cursor is on the `.`. Both arms answer the same question — is this a
+// float — so both return the same shape, and the caller never has to know
+// which of them reported anything
+after_dot = (lx :: Lexer) Res<bool, AllocError> {
+    dot = lx.cur.pos();
+    digit_follows = lx.cur.peek(1).match({ Ok(b) => b.is_digit(), None => false });
+    lx.cur.bump();
+    digit_follows.match({
+        false => lx.report(LexFault.FloatNeedsDigit, dot),
+        true  => Ok(()),
+    }).try();
+    // unconditional, and correct either way: after `12.` the next byte is
+    // not a digit by construction, so this consumes nothing
+    lx.cur.bump_while((b) { b.is_digit() });
+    Ok(digit_follows);
+}
+
+// `1abc` is an error, not a number beside a name, and `0xFF` is an error and
+// not hex. Hex is deliberately not in v1: adding a token shape later is
+// compatible in a way that removing one is not
+suffix = (lx :: Lexer) Res<(), AllocError> {
+    at = lx.cur.pos();
+    lx.cur.bump_while((b) { b.is_ident_cont() });
+    (lx.cur.pos().offset > at.offset).match({
+        true  => lx.report(LexFault.SuffixOnNumber, at),
+        false => Ok(()),
+    });
+}
+
+// u64 is the widest integer type, so a value past it fits nothing at all and
+// no token is emitted — there is no honest value to put in one, and a parser
+// handed `Int` would have to invent a reading of digits the machine cannot
+// hold
+emit_int = (lx :: Lexer, whole: str, from: Pos) Res<(), AllocError> {
+    digits = digits_of(whole);
+    digits.overflow.match({
+        true  => lx.report(LexFault.IntegerOutOfRange, from),
+        false => lx.emit(TokenKind.Int(digits.value), from),
+    });
+}
+
+has_leading_zero = (whole: str) bool { (whole.len > 1) && (whole[0] == '0') }
+
+// the accumulated value, and whether it ran off the end of u64
+Digits* = {
+    value*: u64,
+    overflow*: bool,
+}
+
+// `+` and `*` TRAP on overflow, which is right for a bug and wrong for user
+// input: a literal too wide for u64 is bad input, not a compiler bug. So the
+// test happens BEFORE the multiply and never lets one fire
+digits_of* = (s: str) Digits {
+    Range(0, s.len).loop(Digits(value: 0, overflow: false), (h, i, at, acc: Digits) {
+        add_digit(acc, s[at])
+    }).match({
+        Ok(digits) => digits,
+        None       => Digits(value: 0, overflow: false),
+    });
+}
+
+// acc * 10 + d overflows exactly when acc > (u64.MAX - d) / 10. Once it has
+// overflowed it stays overflowed: the value is meaningless from there and
+// continuing to accumulate would only be one more chance to trap
+add_digit = (acc: Digits, b: u8) Digits {
+    d = (b - '0').to_u64();
+    (acc.overflow || (acc.value > (u64.MAX - d) / 10)).match({
+        true  => Digits(value: 0, overflow: true),
+        false => Digits(value: acc.value * 10 + d, overflow: false),
+    });
+}

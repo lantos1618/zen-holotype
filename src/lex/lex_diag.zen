@@ -1,0 +1,80 @@
+// src/lex/lex_diag.zen
+// What the lexer says when the bytes are wrong.
+//
+// A DIAGNOSTIC IS A VALUE, NOT A RAISE. It is collected and returned, so
+// one bad file never stops a run — and never stops the lexer either: after
+// every fault below the scanner resynchronises and keeps going, because
+// the second mistake in a file is worth as much as the first.
+//
+// A FAULT IS NOT A `Res` FAILURE. Lexing a file full of mistakes still
+// SUCCEEDS: it yields the tokens it could read and the diagnostics it
+// owes. The only way `lex` returns Err is `AllocError`, and the signature
+// says exactly that. Routing lexical mistakes through Err would make one
+// bad byte the end of the file, which is the behaviour this design exists
+// to avoid.
+//
+// A FAULT CARRIES NO TEXT. `message` is a fixed sentence and the span
+// names the bytes, so the renderer — which holds the Source — quotes the
+// offending run itself. That keeps a Diag comparable, printable, and free
+// of an allocation per mistake.
+//
+// ONE MISTAKE, ONE DIAGNOSTIC, ANCHORED WHERE THE FIX GOES. That is why
+// `StringSpansLine` points at the opening quote and not at the newline the
+// scanner happened to notice, and why a run of stray bytes is one
+// diagnostic rather than one per byte.
+
+Span = lex.lex_token
+str = std.text
+
+// every way a byte sequence can fail to be a Zen token. Each variant is a
+// distinct mistake with a distinct fix; none of them is "syntax error"
+LexFault* =
+      UnterminatedString       // end of file inside "..."
+    | StringSpansLine          // a newline inside "..."
+    | UnterminatedChar         // end of file inside '...'
+    | CharSpansLine            // a newline inside '...'
+    | EmptyChar                // ''
+    | CharTooLong              // 'ab', 'é'
+    | UnknownEscape            // \q
+    | UnterminatedEscape       // end of file after a backslash
+    | UnterminatedComment      // end of file inside /* ...
+    | LeadingZero              // 010
+    | FloatNeedsDigit          // 12.
+    | SuffixOnNumber           // 1abc, 0xFF
+    | IntegerOutOfRange        // wider than u64, so no type can hold it
+    | UnknownAtName            // @foo
+    | MisplacedBom             // a byte-order mark past offset 0
+    | StrayByte                // begins no token at all
+
+// where the mistake is, and which one it is. `file` rides along because a
+// Diag outlives the Source it came from — it is handed to a driver that is
+// holding diagnostics from several files at once
+Diag* = {
+    file*: str,
+    fault*: LexFault,
+    span*: Span,
+}
+
+// the sentence. Loose enough to reword, specific enough that it names the
+// rule rather than the symptom: every one of these is a line of
+// DESIGN.md's "Lexical rules", and the rule is what the reader needs
+message* = (fault: LexFault) str {
+    fault.match({
+        UnterminatedString  => "unterminated string literal: end of file before the closing quote",
+        StringSpansLine     => "unterminated string literal: a string literal does not span lines",
+        UnterminatedChar    => "unterminated character literal: end of file before the closing quote",
+        CharSpansLine       => "unterminated character literal: a character literal does not span lines",
+        EmptyChar           => "empty character literal: a character literal holds exactly one byte",
+        CharTooLong         => "a character literal holds exactly one byte; this one holds more",
+        UnknownEscape       => "unknown escape sequence: the escapes are \\n \\t \\r \\0 \\\\ \\' \\\"",
+        UnterminatedEscape  => "unterminated escape sequence: end of file after the backslash",
+        UnterminatedComment => "unterminated block comment: end of file before `*/`",
+        LeadingZero         => "a decimal literal has no leading zero, and Zen has no octal",
+        FloatNeedsDigit     => "a float literal needs a digit after the `.`",
+        SuffixOnNumber      => "an identifier may not start with a digit, and a number carries no suffix",
+        IntegerOutOfRange   => "integer literal out of range: the widest integer type is u64",
+        UnknownAtName       => "the `@` namespace is exactly `@Self`, `@meta`, `@scope`",
+        MisplacedBom        => "a byte-order mark is stripped only at the start of a file",
+        StrayByte           => "unexpected character: it begins no Zen token",
+    });
+}

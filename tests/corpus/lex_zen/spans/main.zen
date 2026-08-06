@@ -1,0 +1,53 @@
+// Positions, which is the thing everyone skips and the thing that decays
+// fastest. A correct token pointing at the wrong place is what makes a
+// language feel unfinished, and it is invisible until the LSP is unusable.
+//
+// Spans are HALF-OPEN: end is the first byte that is not part of the token,
+// so `end.offset - start.offset` is the length and the text between them is
+// exactly the token.
+
+scan, Source, kind_name, text_of = lex.lex
+Alloc = std.mem
+str = std.text
+
+dump = (env: Env, alloc: Alloc, label: str, text: str) Res<(), AllocError> {
+    src = Source(file: "in.zen", text: text);
+    out = scan(alloc, src).try();
+    println("{}", label);
+    out.tokens.loop((h, t) {
+        println("  {}..{} {}:{}..{}:{} [{}]",
+            t.span.start.offset, t.span.end.offset,
+            t.span.start.line, t.span.start.col,
+            t.span.end.line, t.span.end.col,
+            text_of(src, t));
+    });
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    dump(env, alloc, "one line", "ab cd").try();
+
+    // LF ends a line and the column restarts at 1
+    dump(env, alloc, "two lines, LF", "a\nbb").try();
+
+    // CR is ordinary whitespace, so a CRLF file differs from an LF file by
+    // exactly one skipped byte and by nothing else
+    dump(env, alloc, "two lines, CRLF", "a\r\nbb").try();
+
+    // a tab is ONE byte, so it advances the column by one. A column that
+    // counted tab stops would stop being a byte offset
+    dump(env, alloc, "tab", "\ta").try();
+
+    // the column is a BYTE column: é is two bytes inside a string literal,
+    // and the token after it starts two columns later
+    dump(env, alloc, "multi-byte bytes inside a literal", "\"é\" x").try();
+
+    // no trailing newline: Eof is the empty span at the last byte
+    dump(env, alloc, "no trailing newline", "x").try();
+
+    // and with one, so Eof lands on line 2
+    dump(env, alloc, "trailing newline", "x\n").try();
+    Ok(0);
+}

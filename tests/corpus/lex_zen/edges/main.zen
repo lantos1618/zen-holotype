@@ -1,0 +1,59 @@
+// The file shapes that are not programs: empty, blank, and the whitespace
+// nobody types on purpose. Each of these has produced a real bug in a real
+// compiler, and each costs one line to get right and an afternoon to find.
+
+scan, Source, kind_name, message, text_of = lex.lex
+Alloc, AllocError = std.mem
+str, String = std.text
+
+dump = (env: Env, alloc: Alloc, label: str, text: str) Res<(), AllocError> {
+    out = scan(alloc, Source(file: "in.zen", text: text)).try();
+    println("{}: {} token(s), {} diag(s)", label, out.tokens.len, out.diags.len);
+    out.tokens.loop((h, t) {
+        println("  {} at {}:{}", kind_name(t.kind), t.span.start.line, t.span.start.col);
+    });
+    Ok(());
+}
+
+// a byte no string literal can spell: the escape set is closed at
+// `\n \t \r \0 \\ \' \"`, and a vertical tab is not in it
+one_byte = (alloc: Alloc, b: u8, rest: str) Res<String, AllocError> {
+    sb ::= alloc.String().try();
+    sb.add_byte(b).try();
+    sb.add_bytes(rest).try();
+    Ok(sb);
+}
+
+VERTICAL_TAB: u8 = 11
+FORM_FEED: u8 = 12
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    // an empty file is not an error. It holds no tokens, so it holds only
+    // Eof — and Eof exists precisely so there is always something to point at
+    dump(env, alloc, "empty file        ", "").try();
+    dump(env, alloc, "spaces only       ", "   ").try();
+    dump(env, alloc, "newlines only     ", "\n\n\n").try();
+    dump(env, alloc, "tabs only         ", "\t\t").try();
+
+    // the two ancient page controls. A scanner that called these stray bytes
+    // would report "unexpected character" on a file some editor wrote, and
+    // that is a diagnostic nobody can act on
+    dump(env, alloc, "vertical tab      ", one_byte(alloc, VERTICAL_TAB, "x").try().view()).try();
+    dump(env, alloc, "form feed         ", one_byte(alloc, FORM_FEED, "x").try().view()).try();
+
+    // a lone carriage return is whitespace, not a second line ending
+    dump(env, alloc, "lone CR           ", "a\rb").try();
+    dump(env, alloc, "CRLF then LF      ", "a\r\nb\nc").try();
+
+    dump(env, alloc, "no trailing newline", "x").try();
+    dump(env, alloc, "trailing newline  ", "x\n").try();
+    dump(env, alloc, "trailing spaces   ", "x   ").try();
+
+    // `_` is an ordinary identifier to a lexer. That it is the wildcard
+    // pattern is the parser's knowledge, and putting it here would be that
+    // knowledge leaking one phase down
+    dump(env, alloc, "underscore        ", "_ _1 __ x_y").try();
+    Ok(0);
+}

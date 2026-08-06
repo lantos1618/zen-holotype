@@ -1,0 +1,60 @@
+// Numbers are decimal, and every way that can go wrong.
+//
+// The classic is `i32.MIN` written out: `-2147483648` is unary minus applied
+// to a POSITIVE that does not fit i32 on its own. The lexer must accept the
+// digits and hand the sign to the parser, which is why the accumulator is
+// unsigned and why the token carries a u64.
+
+scan, Source, kind_name, message, text_of, digits_of = lex.lex
+Alloc = std.mem
+str = std.text
+
+dump = (env: Env, alloc: Alloc, text: str) Res<(), AllocError> {
+    src = Source(file: "in.zen", text: text);
+    out = scan(alloc, src).try();
+    println("[{}]", text);
+    out.tokens.loop((h, t) {
+        println("  {} [{}]", kind_name(t.kind), text_of(src, t));
+    });
+    out.diags.loop((h, d) {
+        println("  ! {}:{} {}", d.span.start.line, d.span.start.col, message(d.fault));
+    });
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    println("-- accepted");
+    dump(env, alloc, "0").try();
+    dump(env, alloc, "7 42 1000000").try();
+    dump(env, alloc, "1.5 0.5 12.25").try();
+    // the extremes, written as literals. Each is a positive that only the
+    // NEXT wider type holds, and the minus is the parser's
+    dump(env, alloc, "2147483647 2147483648").try();
+    dump(env, alloc, "9223372036854775807 9223372036854775808").try();
+    dump(env, alloc, "18446744073709551615").try();
+
+    println("-- rejected");
+    // Zen has no octal, so `010` cannot quietly mean 8
+    dump(env, alloc, "010 007 00").try();
+    // a float has digits on BOTH sides of the point
+    dump(env, alloc, "12.").try();
+    // no type suffixes, and an identifier may not start with a digit
+    dump(env, alloc, "1abc").try();
+    // hex is not in v1: `0xFF` is a leading zero AND a suffix, and it is
+    // both of those rather than a number the lexer quietly reinterprets
+    dump(env, alloc, "0xFF").try();
+    // one past u64: no integer type holds it, so no token is emitted
+    dump(env, alloc, "18446744073709551616").try();
+    dump(env, alloc, "99999999999999999999999999999999").try();
+
+    println("-- the accumulator the parser shares");
+    // digits_of is exported so the parser reads a literal with the SAME
+    // accumulator the lexer range-checked it with
+    println("  0 -> {}", digits_of("0").value);
+    println("  2147483648 -> {}", digits_of("2147483648").value);
+    println("  18446744073709551615 -> {}", digits_of("18446744073709551615").value);
+    println("  one past u64 overflows -> {}", digits_of("18446744073709551616").overflow);
+    Ok(0);
+}

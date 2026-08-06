@@ -1,0 +1,164 @@
+// src/lex/lex_token.zen
+// What a token is: a kind, and where it came from.
+//
+// POSITIONS ARE DECIDED HERE because DESIGN.md decides them here — "every
+// AST node carries a file plus a half-open start..end span, each end a
+// line:col with a 1-based byte column, FROM THE LEXER UP". A point is not
+// enough: without an end the formatter cannot reprint a node and the LSP
+// cannot select one, and both of those are retrofits nobody survives.
+//
+// A Pos carries the byte OFFSET as well as the line and column. The offset
+// is what slices the source — `text_of` below — and the line:col is what a
+// diagnostic prints. Keeping both costs a word and saves every consumer a
+// scan, and they can never disagree because the cursor advances them
+// together.
+//
+// The FILE is not on a Span. Every token of one lex run shares it, so it
+// lives once on the Source that was lexed and once on each Diag that
+// escapes, rather than three words on every token of a ten-megabyte file.
+
+str = std.text
+
+// a half-open byte range's endpoint. `line` and `col` are 1-based, and
+// `col` is a BYTE column: `str` is bytes, so "héllo".len is 6 and the
+// column after the é is 4. An editor column and a byte column differ on
+// exactly the inputs where saying "byte" is the only honest answer
+Pos* = {
+    offset*: usize,
+    line*: usize,
+    col*: usize,
+}
+
+// half-open: start..end, so `end.offset - start.offset` is the length and
+// an empty span is start == end. Eof is the empty span at the last byte
+Span* = {
+    start*: Pos,
+    end*: Pos,
+}
+
+// the bytes that were lexed, and what to call them in a diagnostic. A
+// lexer takes text and a name for it; it never opens a file, because
+// opening one is authority and authority comes from Env
+Source* = {
+    file*: str,
+    text*: str,
+}
+
+// EVERY TOKEN SHAPE, flat. A nested `Punct(PunctKind)` would make every
+// parser match two levels deep to answer a one-level question.
+//
+// Comments are TOKENS, not discards: DESIGN.md attaches trivia to nodes,
+// and a lexer that drops a comment has already lost the formatter.
+// WHITESPACE is not a token — it is recoverable exactly from the gap
+// between two spans, and "was there a blank line here" is
+// `next.start.line > prev.end.line + 1` rather than a stored fact that can
+// go stale.
+TokenKind* =
+      Ident              // [A-Za-z_][A-Za-z0-9_]*, `_` included: the parser reads
+                         // the wildcard pattern, the lexer only sees a name
+    | Int(u64)           // the VALUE, already accumulated. The lexer had to add the
+                         // digits up to bounds-check them, so throwing the sum away
+                         // and making the parser redo it is work paid for twice.
+                         // u64 and not i64 because `-9223372036854775808` is unary
+                         // minus applied to a positive that only fits UNSIGNED —
+                         // the classic, and the reason the sign is the parser's
+    | Float              // no value: converting decimal digits to an f64 is a
+                         // ROUNDING decision, and rounding belongs where the target
+                         // type is known. A literal's type comes from its context,
+                         // so the lexer would have to guess. The digits are in the
+                         // span, which is the honest answer
+    | Str
+    | Char
+    | True | False       // reserved by the grammar, so they are not Idents
+    | Consume            // the one keyword. `consume` moves, stated at the use site
+    | AtSelf | AtMeta | AtScope   // the whole `@` namespace. It is closed at three
+
+    | LineComment | BlockComment
+
+    | ParenOpen | ParenClose
+    | BracketOpen | BracketClose
+    | BraceOpen | BraceClose
+    | Comma | Semicolon | Dot | Ellipsis
+    | Colon | ColonColon | ColonColonEq
+    | Eq | EqEq | Arrow
+    | Bang | BangEq
+    | Lt | LtEq | Gt | GtEq
+    | Amp | AmpAmp
+    | Bar | BarBar
+    | Plus | PlusWrap
+    | Minus | MinusWrap
+    | Star | StarWrap
+    | Slash | Percent
+
+    | Eof                // exactly one, last, spanning nothing. A parser that can
+                         // ask "what is here" at the end needs no second shape for
+                         // the end, and "unexpected end of file" gets a position
+
+Token* = {
+    kind*: TokenKind,
+    span*: Span,
+}
+
+// the bytes a token was cut from. No copy and no Alloc: a str is a
+// borrowed view, and the token already holds both ends of it
+text_of* = (source: Source, token: Token) str {
+    source.text.slice(token.span.start.offset, token.span.end.offset);
+}
+
+// what to call a kind out loud. The parser's "expected `;`, found `=>`" is
+// this function twice, so it belongs beside the enum rather than in
+// whichever consumer needed it first. Operators are named by their GLYPH
+// because that is what the author typed; a lexer does not know that `=` is
+// a binding, and saying so here would be the parser's knowledge leaking down
+kind_name* = (kind: TokenKind) str {
+    kind.match({
+        Ident        => "an identifier",
+        Int(_)       => "an integer literal",
+        Float        => "a float literal",
+        Str          => "a string literal",
+        Char         => "a character literal",
+        True         => "`true`",
+        False        => "`false`",
+        Consume      => "`consume`",
+        AtSelf       => "`@Self`",
+        AtMeta       => "`@meta`",
+        AtScope      => "`@scope`",
+        LineComment  => "a line comment",
+        BlockComment => "a block comment",
+        ParenOpen    => "`(`",
+        ParenClose   => "`)`",
+        BracketOpen  => "`[`",
+        BracketClose => "`]`",
+        BraceOpen    => "`{`",
+        BraceClose   => "`}`",
+        Comma        => "`,`",
+        Semicolon    => "`;`",
+        Dot          => "`.`",
+        Ellipsis     => "`...`",
+        Colon        => "`:`",
+        ColonColon   => "`::`",
+        ColonColonEq => "`::=`",
+        Eq           => "`=`",
+        EqEq         => "`==`",
+        Arrow        => "`=>`",
+        Bang         => "`!`",
+        BangEq       => "`!=`",
+        Lt           => "`<`",
+        LtEq         => "`<=`",
+        Gt           => "`>`",
+        GtEq         => "`>=`",
+        Amp          => "`&`",
+        AmpAmp       => "`&&`",
+        Bar          => "`|`",
+        BarBar       => "`||`",
+        Plus         => "`+`",
+        PlusWrap     => "`+%`",
+        Minus        => "`-`",
+        MinusWrap    => "`-%`",
+        Star         => "`*`",
+        StarWrap     => "`*%`",
+        Slash        => "`/`",
+        Percent      => "`%`",
+        Eof          => "end of file",
+    });
+}

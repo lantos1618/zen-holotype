@@ -1,0 +1,45 @@
+// Every token shape the grammar spells, and MAXIMAL MUNCH on all eleven
+// bytes that begin a longer token. Getting munch wrong produces no
+// diagnostic — `x ::= 1` silently becomes a comparison — so this is the
+// test that has to exist before the table is trusted.
+
+scan, Source, kind_name = lex.lex
+Alloc = std.mem
+str = std.text
+
+// one line per token: its NAME, so a wrong reading is legible rather than a
+// count that happens to match
+dump = (env: Env, alloc: Alloc, text: str) Res<(), AllocError> {
+    out = scan(alloc, Source(file: "in.zen", text: text)).try();
+    out.tokens.loop((h, token) {
+        println("  {}", kind_name(token.kind));
+    });
+    println("  diags {}", out.diags.len);
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    println("names and literals");
+    dump(env, alloc, "name _ _x9 true false consume 7 1.5 \"s\" 'c'").try();
+
+    println("the @ namespace");
+    dump(env, alloc, "@Self @meta @scope").try();
+
+    println("brackets and separators");
+    dump(env, alloc, "( ) [ ] { } , ; . ...").try();
+
+    println("maximal munch: the longer token wins");
+    dump(env, alloc, ": :: ::= = == => ! != < <= > >= & && | ||").try();
+
+    println("arithmetic, trapping and wrapping");
+    dump(env, alloc, "+ +% - -% * *% / %").try();
+
+    println("a name that merely begins with a keyword is a name");
+    dump(env, alloc, "truely falsey consumer _true").try();
+
+    println("no whitespace: munch is not driven by spacing");
+    dump(env, alloc, "x::=1;y==2").try();
+    Ok(0);
+}

@@ -1,0 +1,114 @@
+// src/lex/lex_punct.zen
+// Operators and brackets, and the rule that the longer token wins.
+//
+// MAXIMAL MUNCH IS THE WHOLE SUBJECT. `::=` is one token and not `::`
+// followed by `=`; `+%` is one and not `+` followed by `%`. Getting that
+// wrong does not produce a diagnostic, it produces a different program —
+// `x ::= 1` silently becoming a comparison — so it lives in one file with
+// one table and one helper that every multi-byte operator goes through.
+//
+// ONE TABLE. `punct_of` is the only place a punctuation byte is named, and
+// "is this byte punctuation?" is its domain rather than a second list.
+// lex_byte.zen deliberately has no `Punct` class for exactly this reason:
+// two lists disagree eventually, and the day they do, a byte lexes as a
+// token the table cannot name.
+
+TokenKind = lex.lex_token
+Cursor = lex.lex_cursor
+
+// what a punctuation byte reads as ON ITS OWN. None means it begins no Zen
+// token at all — `?`, `#`, `~`, `$`, `` ` ``, `^`, `\` — which is the
+// scanner's cue to report a stray byte rather than invent a reading
+punct_of* = (b: u8) Res<TokenKind> {
+    b.match({
+        '!' => Ok(TokenKind.Bang),
+        '%' => Ok(TokenKind.Percent),
+        '&' => Ok(TokenKind.Amp),
+        '(' => Ok(TokenKind.ParenOpen),
+        ')' => Ok(TokenKind.ParenClose),
+        '*' => Ok(TokenKind.Star),
+        '+' => Ok(TokenKind.Plus),
+        ',' => Ok(TokenKind.Comma),
+        '-' => Ok(TokenKind.Minus),
+        '.' => Ok(TokenKind.Dot),
+        '/' => Ok(TokenKind.Slash),
+        ':' => Ok(TokenKind.Colon),
+        ';' => Ok(TokenKind.Semicolon),
+        '<' => Ok(TokenKind.Lt),
+        '=' => Ok(TokenKind.Eq),
+        '>' => Ok(TokenKind.Gt),
+        '[' => Ok(TokenKind.BracketOpen),
+        ']' => Ok(TokenKind.BracketClose),
+        '{' => Ok(TokenKind.BraceOpen),
+        '|' => Ok(TokenKind.Bar),
+        '}' => Ok(TokenKind.BraceClose),
+        _   => None,
+    });
+}
+
+// the token at the cursor, consumed. `single` is what `punct_of` already
+// said this byte reads as alone, so the fallthrough arm is the answer for
+// every byte that starts nothing longer — no second table, and no arm that
+// can only be reached by a bug
+punct_kind* = (cur :: Cursor, b: u8, single: TokenKind) TokenKind {
+    b.match({
+        '!' => cur.pair('=', TokenKind.BangEq, TokenKind.Bang),
+        '&' => cur.pair('&', TokenKind.AmpAmp, TokenKind.Amp),
+        '|' => cur.pair('|', TokenKind.BarBar, TokenKind.Bar),
+        '<' => cur.pair('=', TokenKind.LtEq, TokenKind.Lt),
+        '>' => cur.pair('=', TokenKind.GtEq, TokenKind.Gt),
+        '+' => cur.pair('%', TokenKind.PlusWrap, TokenKind.Plus),
+        '-' => cur.pair('%', TokenKind.MinusWrap, TokenKind.Minus),
+        '*' => cur.pair('%', TokenKind.StarWrap, TokenKind.Star),
+        '.' => cur.dot_kind(),
+        ':' => cur.colon_kind(),
+        '=' => cur.equals_kind(),
+        _   => cur.solo(single),
+    });
+}
+
+// one byte, and that is the token
+solo* = (cur :: Cursor, kind: TokenKind) TokenKind {
+    cur.bump();
+    kind
+}
+
+// one byte, or two when `second` follows. Written once, so `+`/`+%` and
+// `*`/`*%` and `<`/`<=` cannot come to different conclusions
+pair* = (cur :: Cursor, second: u8, both: TokenKind, single: TokenKind) TokenKind {
+    cur.bump();
+    cur.at_byte(second).match({
+        true  => { cur.bump(); both },
+        false => single,
+    });
+}
+
+// `...` is varargs. `..` is not a Zen token, so it lexes as two dots and
+// the parser is the one that objects — a lexer that guessed a range
+// operator here would be inventing syntax
+dot_kind* = (cur :: Cursor) TokenKind {
+    (cur.at_byte(1, '.') && cur.at_byte(2, '.')).match({
+        true  => { cur.bump(); cur.bump(); cur.bump(); TokenKind.Ellipsis },
+        false => cur.solo(TokenKind.Dot),
+    });
+}
+
+// `::=` before `::` before `:`, which is the ordering that keeps a mutable
+// binding from lexing as a comparison
+colon_kind* = (cur :: Cursor) TokenKind {
+    cur.at_byte(1, ':').match({
+        false => cur.solo(TokenKind.Colon),
+        true  => cur.at_byte(2, '=').match({
+            true  => { cur.bump(); cur.bump(); cur.bump(); TokenKind.ColonColonEq },
+            false => { cur.bump(); cur.bump(); TokenKind.ColonColon },
+        }),
+    });
+}
+
+// `==` and `=>` are the two-byte readings; `=` is the binding
+equals_kind* = (cur :: Cursor) TokenKind {
+    cur.at_byte(1, '=').match({
+        true  => { cur.bump(); cur.bump(); TokenKind.EqEq },
+        false => cur.pair('>', TokenKind.Arrow, TokenKind.Eq),
+    });
+}

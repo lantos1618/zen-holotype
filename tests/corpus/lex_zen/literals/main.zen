@@ -1,0 +1,56 @@
+// Strings and character literals, and the two rules DESIGN.md states about
+// them: the escape set is closed, and neither one spans a line.
+//
+// A character literal holds exactly ONE BYTE, because `str` is bytes. So
+// `''` is empty, `'ab'` holds two, and `'é'` holds two as well — the last
+// one is the case that looks like it should work and does not.
+
+scan, Source, kind_name, message, text_of = lex.lex
+Alloc = std.mem
+str = std.text
+
+dump = (env: Env, alloc: Alloc, text: str) Res<(), AllocError> {
+    src = Source(file: "in.zen", text: text);
+    out = scan(alloc, src).try();
+    println("[{}]", text);
+    out.tokens.loop((h, t) {
+        println("  {} [{}]", kind_name(t.kind), text_of(src, t));
+    });
+    out.diags.loop((h, d) {
+        println("  ! {}:{} {}", d.span.start.line, d.span.start.col, message(d.fault));
+    });
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    println("-- strings");
+    dump(env, alloc, "\"\"").try();
+    dump(env, alloc, "\"plain\"").try();
+    dump(env, alloc, "\"tab\\there\"").try();
+    dump(env, alloc, "\"quote\\\" and backslash\\\\\"").try();
+    dump(env, alloc, "\"\\n\\t\\r\\0\\\\\\'\\\"\"").try();
+    // a `{}` is format-string CONTENT, not syntax: the lexer sees ordinary
+    // bytes and the format machinery reads them at the call
+    dump(env, alloc, "\"{} braces {\"").try();
+    // non-ASCII passes straight through inside a literal
+    dump(env, alloc, "\"héllo\"").try();
+    // an unknown escape is an error, but the string is otherwise well
+    // formed — so it reports the escape AND emits the token
+    dump(env, alloc, "\"a\\qb\"").try();
+
+    println("-- characters");
+    dump(env, alloc, "'a'").try();
+    dump(env, alloc, "':'").try();
+    dump(env, alloc, "'\\''").try();
+    dump(env, alloc, "'\\\\'").try();
+    dump(env, alloc, "'\\n' '\\t' '\\r' '\\0'").try();
+    dump(env, alloc, "''").try();
+    dump(env, alloc, "'ab'").try();
+    // two bytes, so not a character literal — this is the rule that looks
+    // like a bug until you remember str is bytes
+    dump(env, alloc, "'é'").try();
+    dump(env, alloc, "'\\q'").try();
+    Ok(0);
+}

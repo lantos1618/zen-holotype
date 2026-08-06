@@ -1,0 +1,62 @@
+// src/lex/lex.zen
+// The lexer's surface: nothing but starred re-exports.
+//
+// A folder root is a file of starred bindings and nothing else — that is
+// what makes a folder work, and it is why the eight files below can be
+// reorganised without a single consumer changing a line.
+//
+// THE CONTRACT, in one paragraph. `scan(alloc, source)` reads bytes and
+// hands back every token it could read together with every fault it found.
+// It fails only when it cannot allocate. A file with faults still yields
+// tokens, and the driver decides what to do with them — the rule this tree
+// has held to is that a file with lexical diagnostics is REPORTED and NOT
+// PARSED, because tree-sitter's opinion of the wreckage was only ever a
+// second diagnostic for one mistake, and a hand-written parser's would be
+// no better.
+//
+// THE TEN LEXICAL RULES, all of them from DESIGN.md's "Lexical rules", all
+// of them the same shape — REJECT RATHER THAN REINTERPRET:
+//
+//   the escape set is exactly `\n \t \r \0 \\ \' \"`      lex_literal.escape
+//   a string or char literal does not span lines,          lex_literal.string
+//     and the diagnostic points at the OPENING QUOTE       lex_literal.character
+//   a character literal holds exactly one byte             lex_literal.character
+//   a digit may not be followed by an identifier byte      lex_literal.suffix
+//   a leading zero is rejected; Zen has no octal           lex_literal.number
+//   `12.` is an error; a float has digits on both sides    lex_literal.fraction
+//   identifiers are ASCII                                  std.core.byte.is_ident_start
+//   block comments do not nest                             lex_scan.block_comment
+//   a BOM is stripped only at offset 0                     lex_scan.strip_bom
+//   `@` is closed to `@Self`, `@meta`, `@scope`            lex_scan.at_kind
+//
+// Hex is not in v1, and that is a decision with a cost stated rather than
+// hidden: bit masks are written in decimal until someone adds it. `0xFF` is
+// not "a number followed by an identifier character" but its own token
+// shape, and adding a token shape later is compatible in a way that
+// removing one is not.
+
+// what a token is, and where it came from
+Pos*, Span*, TokenKind*, Token*, Source*  = lex.lex_token
+text_of*, kind_name*                      = lex.lex_token
+
+// what the lexer says when the bytes are wrong
+LexFault*, Diag*, message*                = lex.lex_diag
+
+// the alphabet, and the byte-order mark no string literal can spell
+ByteClass*, class_of*, is_escape*         = lex.lex_byte
+BOM_FIRST*, BOM_SECOND*, BOM_THIRD*       = lex.lex_byte
+
+// the walk, and the maximal-munch table — exported because the parser's
+// error recovery re-reads both, not because a caller needs them to lex
+Cursor*, cursor_at*                       = lex.lex_cursor
+punct_of*, punct_kind*                    = lex.lex_punct
+
+// the scan in progress, and what it produced
+Lexer*, Lexed*                            = lex.lex_state
+
+// the digit accumulator, shared with the parser so a literal is read once
+// by one implementation rather than twice by two
+Digits*, digits_of*                       = lex.lex_literal
+
+// THE ENTRY POINT
+scan*                                     = lex.lex_scan
