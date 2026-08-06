@@ -5,7 +5,7 @@ CFLAGS  ?= -O2 -std=c99
 PY      ?= python3
 ROOT    ?= src
 
-.PHONY: all build seed test test-zen lint parse design fixpoint determinism grammar grammar-test fmt clean help
+.PHONY: all build seed test test-zen lint parse design cap fixpoint determinism grammar grammar-test fmt clean help
 
 all: test
 
@@ -22,8 +22,13 @@ seed: zen
 	git add seed/zen.c
 
 ## test: the corpus and must-fail suites, against the bootstrapper
-test: parse design
+test: parse design cap
 	$(PY) tests/run.py
+
+## cap: STYLE.md's line caps. Over 500 prints a note; over 800 fails,
+## unless the path carries a written reason in scripts/line_cap.py.
+cap:
+	$(PY) scripts/line_cap.py
 
 ## design: every complete example in DESIGN.md must parse. PLAN.md 0.1 asks
 ## for this; nothing was checking it, and the document had drifted from the

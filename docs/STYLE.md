@@ -38,7 +38,7 @@ Three tests, in order of how often you will need them:
 **A file is too big when it has two subjects. The line count is how you find out.**
 
 - **Over 500 lines: justify or split.** Not a failure, a prompt — read it and name its subjects out loud. Usually there are two.
-- **Over 800 lines: fails the build**, unless the path is listed in `build.zen` with a written reason. An exception you have to type a sentence for is an exception someone will read; a silent one is a file that grows forever.
+- **Over 800 lines: fails the build** — `make cap`, and it is part of `make test`. An exception is a path listed in `scripts/line_cap.py` **with a written reason**; the sentence is the point, because an exception you have to type one for is an exception someone will read, and a silent one is a file that grows forever. (This said `build.zen` for a long time and no such file existed, so nothing enforced it and a file crossed the cap unnoticed. One fact, one place — and the place has to be real.)
 - Generated files (`seed/zen.c`) and test corpora are exempt. They are not read.
 
 The cap is a trigger, never the rule. **You always split by subject, never by size.** `gen.zen` and `gen_c.zen` are backend-shared plumbing and the C backend — two subjects. `parse1.zen` and `parse2.zen` are one subject cut in half, which is worse than the file you started with, because now neither name means anything.
