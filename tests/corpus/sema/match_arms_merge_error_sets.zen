@@ -1,0 +1,52 @@
+// Two arms of one match are two ways of producing ONE value, so a match
+// cannot take its type from the first arm and hope.
+//
+// `true => Ok(())` beside `false => report(n)` types the match `Res<()>`
+// under first-arm-wins, and the second arm's `Res<(), AllocError>` then has
+// nowhere to go: gcc rejected the assignment, and in trailing position the
+// value was discarded instead.
+//
+// "The error type of a `Res` is a union, and propagation merges sets"
+// (DESIGN.md, Errors) is the rule; it applies across arms too.
+
+Fault = | Bad
+
+fails = (n: usize) Res<(), AllocError> {
+    (n == 0).match({
+        true  => Err(AllocError.OutOfMemory),
+        false => Ok(()),
+    });
+}
+
+faults = (n: usize) Res<(), Fault> {
+    (n == 0).match({
+        true  => Err(Fault.Bad),
+        false => Ok(()),
+    });
+}
+
+// a bare `Ok(())` arm FIRST, beside an arm that is already a Res carrying a set
+lifted_first = (n: usize) Res<bool, AllocError> {
+    (n > 0).match({
+        true  => Ok(()),
+        false => fails(n),
+    }).try();
+    Ok(true);
+}
+
+// two arms with DIFFERENT error sets: the match carries their union
+both_sets = (n: usize) Res<(), AllocError | Fault> {
+    (n > 1).match({
+        true  => fails(n),
+        false => faults(n),
+    }).try();
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError | Fault> {
+    println("{}", lifted_first(1).try());
+    println("{}", lifted_first(0).match({ Ok(_) => 1, Err(_) => 0 }));
+    println("{}", both_sets(2).match({ Ok(_) => 1, Err(_) => 0 }));
+    println("{}", both_sets(0).match({ Ok(_) => 1, Err(_) => 0 }));
+    Ok(0);
+}

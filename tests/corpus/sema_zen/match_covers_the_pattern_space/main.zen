@@ -1,0 +1,241 @@
+// Exhaustiveness is over the PATTERN SPACE, not over the top-level
+// variant list.
+//
+// DESIGN.md: "Match is always exhaustive, in every position: cover every
+// case or write `_`." The property this proves is the one a variant walk
+// cannot: `Left(Full(n))` covers part of `Left`, so a checker that only
+// counts top-level variants calls `Left(Full(n)) | Right(_) | Gone`
+// complete when `Left(Blank)` reaches no arm.
+//
+//   - every (Slot, Cell) pair covered      -> no diagnostic, no `_` needed
+//   - one nested pair missing              -> one diagnostic, naming Left
+//   - an arm below `_`                     -> unreachable, at the arm
+//   - a bool with one arm                  -> not exhaustive, no exemption
+//   - a scrutinee whose type is poison     -> NOTHING is said
+//
+// The last is the point of SEMA_BOOTSTRAP_FIXES.md §8: with no case list
+// every name in a pattern reads as a binder, which covers everything and
+// makes every arm after the first unreachable. Twenty-three confident
+// diagnostics came out of that, all of them wrong, none of them pointing
+// at the missing import that caused it.
+//
+// The AST is built through the arena API rather than parsed, as
+// tests/corpus/ast/expr_tree_round_trips_through_ids.zen is and for the
+// same reason: this is a test of sema, and routing it through a parser
+// would make a parser bug read as a sema bug.
+
+Checker, Ctx = sema.sema_check
+TyId, Types = sema.sema_ty
+Ast = ast.ast_arena
+Expr, ExprKind, Literal, LiteralKind, Name, Match, Arm = ast.ast_node
+Pattern, PatternKind, PatName, Destructure = ast.ast_node
+Type, TypeKind, Named = ast.ast_node
+Decl, DeclKind, Enum, Variant, Module, TParam = ast.ast_node
+Pos, Span, Ident, QualifiedName, no_trivia = ast.ast_span
+ExprId, TypeId, PatternId = ast.ast_id
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+
+// every node in this file is at the same place: the test is about
+// coverage, and a distinct span per node would be noise
+at = () Span {
+    Span(file: "in.zen", start: Pos(line: 1, col: 1), end: Pos(line: 1, col: 2))
+}
+
+id_of = (a: Alloc, text: str) Ident { Ident(text: text, span: at()) }
+
+qname = (a: Alloc, text: str) Res<QualifiedName, AllocError> {
+    segs ::= a.Vec<Ident>();
+    segs.add(id_of(a, text)).try();
+    Ok(QualifiedName(segments: segs, span: at()));
+}
+
+named_ty = (tree :: Ast, a: Alloc, text: str) Res<TypeId, AllocError> {
+    args ::= a.Vec<TypeId>();
+    tree.add_type(Type(
+        kind: TypeKind.Named(Named(name: id_of(a, text), args: args)),
+        span: at(), leading: no_trivia(), trailing: no_trivia()))
+}
+
+variant = (a: Alloc, text: str, payload: Res<TypeId>) Variant {
+    Variant(name: id_of(a, text), payload: payload, span: at(),
+            leading: no_trivia(), trailing: no_trivia())
+}
+
+enum_decl = (a: Alloc, text: str, variants: Vec<Variant>)
+            Res<Decl, AllocError> {
+    tparams ::= a.Vec<TParam>();
+    Ok(Decl(
+        kind: DeclKind.Enum(Enum(name: id_of(a, text), exported: true,
+                                 tparams: tparams, variants: variants,
+                                 leading_bar: None)),
+        span: at(), leading: no_trivia(), trailing: no_trivia()));
+}
+
+// ------------------------------------------------------------------ patterns
+
+pat = (tree :: Ast, kind: PatternKind) Res<PatternId, AllocError> {
+    tree.add_pattern(Pattern(kind: kind, span: at(),
+                             leading: no_trivia(), trailing: no_trivia()))
+}
+
+wild = (tree :: Ast) Res<PatternId, AllocError> { pat(tree, PatternKind.Wild) }
+
+// a bare name: a nullary case if the type has one, a binder otherwise --
+// and which it is, is what sema decides
+bare = (tree :: Ast, a: Alloc, text: str) Res<PatternId, AllocError> {
+    pat(tree, PatternKind.Name(PatName(name: qname(a, text).try())))
+}
+
+// `Left(inner)`
+holds = (tree :: Ast, a: Alloc, text: str, inner: PatternId)
+        Res<PatternId, AllocError> {
+    pat(tree, PatternKind.Destructure(
+        Destructure(name: qname(a, text).try(), binder: inner)))
+}
+
+// ---------------------------------------------------------------- expressions
+
+expr = (tree :: Ast, kind: ExprKind) Res<ExprId, AllocError> {
+    tree.add_expr(Expr(kind: kind, span: at(),
+                       leading: no_trivia(), trailing: no_trivia()))
+}
+
+int_lit = (tree :: Ast, text: str) Res<ExprId, AllocError> {
+    expr(tree, ExprKind.Literal(Literal(kind: LiteralKind.Int, text: text)))
+}
+
+arm = (tree :: Ast, p: PatternId, body: ExprId) Res<Arm, AllocError> {
+    Ok(Arm(pattern: p, arrow_span: at(), body: body, span: at(),
+           leading: no_trivia(), trailing: no_trivia()));
+}
+
+// ---------------------------------------------------------------------
+
+// how many diagnostics one question added, and what the last one says
+count = (c :: Checker, a: Alloc, label: str, id: ExprId, ctx: Ctx, before: usize)
+        Res<(), AllocError> {
+    c.type_of(id, ctx).try();
+    added = c.diag_count() - before;
+    println("{}: {} diagnostic(s)", label, added);
+    (added > 0).then(() { show_last(c, a).try() });
+    Ok(());
+}
+
+show_last = (c :: Checker, a: Alloc) Res<(), AllocError> {
+    out ::= a.String().try();
+    c.diag_at(c.diag_count() - 1).match({
+        None    => Ok(()),
+        Ok(d)   => d.render(c.types, out),
+    }).try();
+    println("    {}", out.view());
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    tree ::= alloc.Ast();
+
+    // Cell = Full(i32) | Blank
+    // Slot = Left(Cell) | Right(Cell) | Gone
+    i32_ty = named_ty(tree, alloc, "i32").try();
+    cell_ty_node = named_ty(tree, alloc, "Cell").try();
+
+    cell_variants ::= alloc.Vec<Variant>();
+    cell_variants.add(variant(alloc, "Full", Ok(i32_ty))).try();
+    cell_variants.add(variant(alloc, "Blank", None)).try();
+
+    slot_variants ::= alloc.Vec<Variant>();
+    slot_variants.add(variant(alloc, "Left", Ok(cell_ty_node))).try();
+    slot_variants.add(variant(alloc, "Right", Ok(cell_ty_node))).try();
+    slot_variants.add(variant(alloc, "Gone", None)).try();
+
+    decls ::= alloc.Vec<Decl>();
+    decls.add(enum_decl(alloc, "Cell", cell_variants).try()).try();
+    decls.add(enum_decl(alloc, "Slot", slot_variants).try()).try();
+    tree.add_module(Module(name: "main", decls: decls, span: at(),
+                           leading: no_trivia(), trailing: no_trivia())).try();
+
+    slot_node = named_ty(tree, alloc, "Slot").try();
+
+    one = int_lit(tree, "1").try();
+
+    // the scrutinees: `s` is a Slot, `flag` is a bool, `mystery` is not
+    // bound at all -- so its type is poison
+    s = expr(tree, ExprKind.Name(Name(text: "s"))).try();
+    flag = expr(tree, ExprKind.Name(Name(text: "flag"))).try();
+    mystery = expr(tree, ExprKind.Name(Name(text: "mystery"))).try();
+
+    c ::= alloc.Checker(tree).try();
+    none = c.types.unknown().try();
+    ctx = Ctx(0, none);
+
+    slot_ty = c.type_from_ast(slot_node, ctx).try();
+    c.bind("s", slot_ty, false).try();
+    c.bind("flag", c.types.bool_ty().try(), false).try();
+
+    // COMPLETE over the pattern space: five arms, no wildcard
+    full ::= alloc.Vec<Arm>();
+    full.add(arm(tree, holds(tree, alloc, "Left",
+                             bare(tree, alloc, "Full").try()).try(), one).try()).try();
+    full.add(arm(tree, holds(tree, alloc, "Left",
+                             bare(tree, alloc, "Blank").try()).try(), one).try()).try();
+    full.add(arm(tree, holds(tree, alloc, "Right",
+                             bare(tree, alloc, "Full").try()).try(), one).try()).try();
+    full.add(arm(tree, holds(tree, alloc, "Right",
+                             bare(tree, alloc, "Blank").try()).try(), one).try()).try();
+    full.add(arm(tree, bare(tree, alloc, "Gone").try(), one).try()).try();
+    covered = expr(tree, ExprKind.Match(Match(
+        scrutinee: s, name_span: at(), arms: full, arms_span: at()))).try();
+
+    // the SAME outer variants, one inner pair short: Left(Blank) reaches
+    // no arm, and only a checker that specialises the column can see it
+    partial ::= alloc.Vec<Arm>();
+    partial.add(arm(tree, holds(tree, alloc, "Left",
+                                bare(tree, alloc, "Full").try()).try(), one).try()).try();
+    partial.add(arm(tree, holds(tree, alloc, "Right",
+                                wild(tree).try()).try(), one).try()).try();
+    partial.add(arm(tree, bare(tree, alloc, "Gone").try(), one).try()).try();
+    nested_gap = expr(tree, ExprKind.Match(Match(
+        scrutinee: s, name_span: at(), arms: partial, arms_span: at()))).try();
+
+    // an arm below `_` can never run
+    shadowed ::= alloc.Vec<Arm>();
+    shadowed.add(arm(tree, holds(tree, alloc, "Left",
+                                 wild(tree).try()).try(), one).try()).try();
+    shadowed.add(arm(tree, wild(tree).try(), one).try()).try();
+    shadowed.add(arm(tree, bare(tree, alloc, "Gone").try(), one).try()).try();
+    after_wild = expr(tree, ExprKind.Match(Match(
+        scrutinee: s, name_span: at(), arms: shadowed, arms_span: at()))).try();
+
+    // bool is an enum of two cases and gets no exemption
+    half ::= alloc.Vec<Arm>();
+    half.add(arm(tree, bare(tree, alloc, "true").try(), one).try()).try();
+    one_sided = expr(tree, ExprKind.Match(Match(
+        scrutinee: flag, name_span: at(), arms: half, arms_span: at()))).try();
+
+    // a scrutinee whose type sema could not compute: the undefined name
+    // is one diagnostic, and coverage must add NOTHING to it
+    blind ::= alloc.Vec<Arm>();
+    blind.add(arm(tree, bare(tree, alloc, "Left").try(), one).try()).try();
+    blind.add(arm(tree, bare(tree, alloc, "Right").try(), one).try()).try();
+    on_poison = expr(tree, ExprKind.Match(Match(
+        scrutinee: mystery, name_span: at(), arms: blind, arms_span: at()))).try();
+
+    count(c, alloc, "every (Slot, Cell) pair covered", covered, ctx,
+          c.diag_count()).try();
+    count(c, alloc, "Left(Blank) covered by nothing", nested_gap, ctx,
+          c.diag_count()).try();
+    count(c, alloc, "an arm below `_`", after_wild, ctx,
+          c.diag_count()).try();
+    count(c, alloc, "one arm of a bool", one_sided, ctx,
+          c.diag_count()).try();
+
+    // the undefined name accounts for exactly one, and coverage for none
+    before = c.diag_count();
+    c.type_of(on_poison, ctx).try();
+    println("a match on a poison scrutinee: {} diagnostic(s)",
+            c.diag_count() - before);
+    Ok(0);
+}

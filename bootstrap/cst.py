@@ -185,6 +185,7 @@ RECORD_FIELD = "record_field"
 MATCH_BLOCK = "match_block"
 MATCH_ARM = "match_arm"
 ARROW = "=>"  # the one anonymous token a diagnostic has to name
+SEMICOLON = ";"  # the other one: it is what separates a statement from a value
 MEMBER_EXPRESSION = "member_expression"
 INDEX_EXPRESSION = "index_expression"
 UNARY_EXPRESSION = "unary_expression"
@@ -1436,6 +1437,17 @@ def _syntax_diag(node, parent, file: str, source: bytes):
             at = _at(starts, bar)
             return Diag(Span(file, at, _at(starts, bar + 1)),
                         "expected variant: a `|` promises another one")
+        if node.type == SEMICOLON and parent is not None \
+                and parent.type == LET_STATEMENT:
+            # `.then(() { x = 1 })`. The `;` is what is missing, not an
+            # expression: a binding is a STATEMENT, and "a statement ends with
+            # `;`, a declaration does not" is the whole rule (DESIGN.md,
+            # Control flow). So `x = 1` cannot be a block's trailing value —
+            # there is no assignment expression to produce one — and the fix
+            # is the semicolon, which is what this has to say.
+            return Diag(span,
+                        "expected `;`: an assignment is a statement, not a value — "
+                        "a statement ends with `;`, a declaration does not")
         if parent is not None and parent.type in EXPRESSION_HOLES:
             return Diag(span, "expected expression")
         return Diag(span, f"expected `{node.type}`")

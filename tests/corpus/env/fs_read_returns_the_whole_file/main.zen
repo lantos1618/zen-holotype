@@ -1,0 +1,33 @@
+// tests/corpus/env/fs_read_returns_the_whole_file/main.zen
+// The whole file, at once, into memory the caller's Alloc owns.
+//
+// The path: the runner stages this directory as `src/` and runs the
+// binary beside it, so the file this test ships is `src/source.zen`.
+// A compiler opens a path it was handed; this one is handed the same
+// way, and a staging change would report itself as NotFound rather
+// than as a wrong answer.
+
+FsError = std.env
+
+// the grow below can fail to allocate, and there is no From
+Error = FsError | AllocError | IoError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+
+    text = env.fs.read(alloc, "src/source.zen").try();
+    println("{} bytes", text.len());
+    println("{}", text.view());
+
+    // the buffer is an ordinary String: it holds a run from `alloc`
+    // and grows through the same realloc every other String uses.
+    // That is the ownership story, demonstrated rather than claimed
+    sb ::= env.fs.read(alloc, "src/source.zen").try();
+    sb.add("answer() == {}", 42).try();
+
+    // and the two reads are two runs: growing one leaves the other
+    // exactly as long as the file is
+    println("{} {}", sb.view().len, text.len());
+
+    Ok(0);
+}

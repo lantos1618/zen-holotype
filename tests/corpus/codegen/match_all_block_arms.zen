@@ -1,0 +1,57 @@
+// A `.match` whose arms are ALL blocks has a value like any other match.
+//
+// A block reports no type of its own unless something asks it to produce a
+// value, so a match made only of blocks used to type as `()`: no result
+// temporary was allocated, every arm's value was assigned nowhere, and the
+// match evaluated to zero -- with no diagnostic. One block arm beside one
+// expression arm was fine, which is what kept it hidden.
+//
+// DESIGN.md's own `Vec.set` is written this way
+// (`true => { self.data.write(i, value); Ok(()) }`), so the specified form
+// was the broken one.
+
+g = (n: usize) Res<usize, AllocError> {
+    (n == 0).match({
+        true  => { m = n + 1; Ok(m + 10) },
+        false => { m = n + 2; Ok(m + 20) },
+    });
+}
+
+// the same shape one level down: a block arm nested inside a block arm
+h = (n: usize) usize {
+    (n < 10).match({
+        true  => { a = n * 2; a + 1 },
+        false => {
+            b = n - 10;
+            (b == 0).match({
+                true  => { c = 100; c + 1 },
+                false => { d = 200; d + b },
+            })
+        },
+    });
+}
+
+// The boundary: a block arm whose tail is a STATEMENT has no value, so it
+// must not give the match a type its `()` sibling cannot produce. Reading a
+// trailing `x = ..;` as the block's value types this match `usize` and then
+// assigns 0 into it -- invalid C, from the opposite direction to the bug
+// above. A block HAS a value only when its tail carries no `;`.
+side_effects = (n: usize) usize {
+    seen ::= 0;
+    (n == 0).match({
+        true  => { seen = seen + 1; },
+        false => (),
+    });
+    seen;
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", side_effects(0));
+    println("{}", side_effects(1));
+    println("{}", g(0).try());
+    println("{}", g(5).try());
+    println("{}", h(3));
+    println("{}", h(10));
+    println("{}", h(12));
+    Ok(0);
+}

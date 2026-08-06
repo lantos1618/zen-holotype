@@ -2248,10 +2248,17 @@ class FnCtx:
     def _block_body(self, block, want=None):
         stmts = list(f(block, "stmts", ()) or ())
         value = f(block, "value")
-        if value is None and want not in (None, UNIT, UNKNOWN) and stmts:
+        if value is None and want not in (None, UNIT, UNKNOWN) and want is not INFER \
+                and stmts:
             # "`0;` closes a `Res<i32, E>` function exactly as `Ok(0);` does"
             # -- a trailing expression statement IS the block's value when one
             # is wanted, and is left alone when it evaluates to nothing.
+            #
+            # Under INFER nothing is wanted yet: the question is what this
+            # block HAS, and a semicolon-terminated statement is not it.
+            # Promoting one would let `{ stored = false; h.break(); }` claim
+            # a `Res<()>` it never produces, which types the whole match on
+            # it and leaves its `()` sibling assigning 0 to a Res.
             last = stmts[-1]
             if kind(last) == "ExprStmt":
                 _code, ty = self.peek(f(last, "expr"))
@@ -4327,18 +4334,24 @@ class FnCtx:
         """
         info = self.e.enum_info(ety) if ety is not None else None
         names = [v for v, p in (info[2] if info else ()) if p is None]
-        for i, name in enumerate(self.FS_ERRORS):
-            if name not in names:
-                continue
-            self.open("if (%s == %d) {" % (rc, i + 1))
+        chain = [n for n in self.FS_ERRORS if n in names]
+        if not chain:
+            self.line("%s = %s;" % (out, self.err_value(ret, ety, node)))
+            return
+        for name in chain[:-1]:
+            self.open("if (%s == %d) {" % (rc, self.FS_ERRORS.index(name) + 1))
             self.line("%s = %s;" % (out, self.make_variant(
                 ret, "Err", self.make_variant(ety, name, None))))
             self.close("} else {")
             self.indent += 1
-        self.line("%s = %s;" % (out, self.err_value(ret, ety, node)))
-        for name in self.FS_ERRORS:
-            if name in names:
-                self.close()
+        # the last one is the plain `else`: the helper returns exactly the
+        # ordinals above, so a chain that tested all of them would end in a
+        # branch nothing can reach -- and an unreachable arm naming a reason
+        # is how a wrong reason gets reported later
+        self.line("%s = %s;" % (out, self.make_variant(
+            ret, "Err", self.make_variant(ety, chain[-1], None))))
+        for _name in chain[:-1]:
+            self.close()
 
     def lower_fs(self, decl, fnode, node, argnodes, receiver):
         """`Fs`'s three members ARE the backend.
@@ -4368,7 +4381,13 @@ class FnCtx:
         payload = dict(info[2]) if info else {}
         sty = payload.get("Ok")
         ety = payload.get("Err")
-        alloc = argnodes[0] if isinstance(argnodes[0], tuple) else self.expr(argnodes[0])
+        # AT the declared type: `a` arrives as an Arena and the signature says
+        # Alloc, so lowering it at its own type would store the arena in the
+        # Vec's `alloc` field instead of the two-word handle onto it. The
+        # declaration is what says which -- law 7.
+        params = self.e.params_of(fnode)
+        aty = self.e.resolve_type(f(params[1], "ty"), {}, base) if len(params) > 1 else None
+        alloc = (self.value(argnodes[0], aty), aty)
         path = self.str_parts(argnodes[1], node)
         if sty is None or path is None:
             self.e.error(node, "Fs.read must return a Res<String, FsError>")
@@ -5796,6 +5815,94 @@ static void zg_print_u64(uint64_t v) { fprintf(stdout, "%llu", (unsigned long lo
 static void zg_print_f64(double v) { fprintf(stdout, "%g", v); }
 static void zg_print_bool(bool v) { zg_print_bytes(v ? "true" : "false", v ? 4u : 5u); }
 static void zg_print_nl(void) { fputc('\\n', stdout); }
+
+"""
+
+PRELUDE_FS = """\
+/* The filesystem capability.  `env.fs` is the only way to reach it (law 2:
+ * all authority flows from the Env `main` receives), and its members have no
+ * Zen body for the same reason `Ptr`'s have none -- there is nothing
+ * underneath to write them in.
+ *
+ * This block is emitted only for a program that touches the disk, which is
+ * why the two headers are here rather than at the top: it is the one place
+ * the generated C leaves C99 for POSIX, and a hello-world should not pay for
+ * it.  C has no way to ask whether a path is a directory, and a compiler
+ * walking a source tree has to know.  S_ISDIR is the one part of that a
+ * hosted library may leave out, so it is defined when the header did not. */
+#include <sys/stat.h>
+#include <errno.h>
+
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+#endif
+
+/* A path arrives as a `str`, which BORROWS its bytes and is therefore not
+ * NUL-terminated, and the kernel wants a NUL.  The copy lands in a fixed
+ * buffer so that asking whether a file exists never allocates: `exists` has
+ * no Alloc in its signature, so by law 1 it may not have any memory either. */
+#define ZG_PATH_MAX 4096
+
+/* FsError, by ordinal, in the order env.zen declares it.  gen_c turns the
+ * number back into a variant BY NAME, so this is a shape the two sides agree
+ * on rather than a constant one of them has to remember. */
+#define ZG_FS_OK 0
+#define ZG_FS_NOT_FOUND 1
+#define ZG_FS_DENIED 2
+#define ZG_FS_IS_DIR 3
+#define ZG_FS_FAILED 4
+
+static int zg_fs_path(char *buf, const unsigned char *p, size_t n) {
+    if (n >= (size_t)ZG_PATH_MAX) return 0;
+    if (n) memcpy(buf, p, n);
+    buf[n] = '\\0';
+    return 1;
+}
+
+/* -1 nothing is there, 0 a file, 1 a directory. */
+static int zg_fs_kind(const unsigned char *p, size_t n) {
+    char buf[ZG_PATH_MAX];
+    struct stat st;
+    if (!zg_fs_path(buf, p, n)) return -1;
+    if (stat(buf, &st) != 0) return -1;
+    return S_ISDIR(st.st_mode) ? 1 : 0;
+}
+
+/* How many bytes the file holds, or which failure to name.  A directory is
+ * ruled out HERE and not at the read: fopen on one succeeds on glibc and
+ * fails only at the first fread, which would report the reason as a read
+ * that stopped rather than as what it is. */
+static int zg_fs_size(const unsigned char *p, size_t n, size_t *out) {
+    char buf[ZG_PATH_MAX];
+    struct stat st;
+    if (!zg_fs_path(buf, p, n)) return ZG_FS_FAILED;
+    if (stat(buf, &st) != 0)
+        return errno == EACCES ? ZG_FS_DENIED : ZG_FS_NOT_FOUND;
+    if (S_ISDIR(st.st_mode)) return ZG_FS_IS_DIR;
+    if (st.st_size < 0) return ZG_FS_FAILED;
+    *out = (size_t)st.st_size;
+    return ZG_FS_OK;
+}
+
+/* Fill `dst` with up to `want` bytes.  `*got` is what actually arrived: the
+ * file may have shrunk between the size question and this one, and a short
+ * read is the honest length rather than a failure. */
+static int zg_fs_read(const unsigned char *p, size_t n, unsigned char *dst,
+                      size_t want, size_t *got) {
+    char buf[ZG_PATH_MAX];
+    FILE *fh;
+    *got = 0;
+    if (!zg_fs_path(buf, p, n)) return ZG_FS_FAILED;
+    fh = fopen(buf, "rb");
+    if (fh == NULL) {
+        if (errno == EISDIR) return ZG_FS_IS_DIR;
+        return errno == EACCES ? ZG_FS_DENIED : ZG_FS_NOT_FOUND;
+    }
+    if (want) *got = fread(dst, 1, want, fh);
+    if (ferror(fh)) { fclose(fh); return ZG_FS_FAILED; }
+    fclose(fh);
+    return ZG_FS_OK;
+}
 
 """
 

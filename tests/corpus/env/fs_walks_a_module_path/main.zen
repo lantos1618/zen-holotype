@@ -1,0 +1,36 @@
+// tests/corpus/env/fs_walks_a_module_path/main.zen
+// The job the capability was added for: resolving `<folder>/<folder>.zen`.
+//
+// This is why `is_dir` earns its place beside `read`. A module path is
+// COMPUTED, not discovered -- so no listing is needed -- but the walk
+// still has to tell a folder from a file before it opens anything, and
+// ruling a candidate out must cost a stat rather than a whole file.
+//
+// The runner stages this directory as `src/`, so the module tree this
+// test ships is rooted at `src/`.
+
+FsError = std.env
+Alloc = std.mem
+str = std.text
+
+// exactly the two questions the resolver asks, and in this order
+resolve = (env: Env, alloc: Alloc, root: str, module: str) Res<i32, FsError> {
+    println("{}: is_dir {}", module, env.fs.is_dir(root));
+    text = env.fs.read(alloc, root).try();
+    println("{}: {} bytes, starts {}", module, text.len(), text.view()[0]);
+    Ok(0);
+}
+
+main = (env: Env) Res<i32, FsError> {
+    alloc ::= env.mem.alloc();
+
+    // the folder is a folder, and its root file is beside it
+    println("src/probe is_dir {}", env.fs.is_dir("src/probe"));
+    println("src/probe exists {}", env.fs.exists("src/probe"));
+    resolve(env, alloc, "src/probe/probe.zen", "probe").try();
+
+    // a module that is not there is ruled out without a read
+    println("src/absent is_dir {}", env.fs.is_dir("src/absent"));
+    println("src/absent/absent.zen exists {}", env.fs.exists("src/absent/absent.zen"));
+    Ok(0);
+}

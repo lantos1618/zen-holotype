@@ -595,8 +595,15 @@ def stage(test: Test, tool: Toolchain, work: Path) -> Path:
     # found", which names the problem, while an unwanted module that IS
     # staged gives diagnostics from a file the author never mentioned.
     if tool.src_root and tool.src_root.is_dir():
-        available = {e.name: e for e in tool.src_root.iterdir()}
-        wanted = {"std"} | (_modules_named_in(root) & set(available))
+        # A test OWNS its own namespace. `corpus/modules/folder_root` declares
+        # its own `gen/`, and staging src/gen on top of it merged the two
+        # trees: the test's three-line gen.zen got a diagnostic reported at
+        # line 51, which is a line only src/gen/gen.zen has. Whatever the test
+        # defines wins, and the src module of that name is simply not staged.
+        mine = {e.name for e in root.iterdir()}
+        available = {e.name: e for e in tool.src_root.iterdir()
+                     if e.name not in mine}
+        wanted = ({"std"} | _modules_named_in(root)) & set(available)
         # TRANSITIVE. `parse` imports `lex`, so a test naming only `parse`
         # needs `lex` staged too or it gets "module lex.lex not found". The
         # first version scanned only the test's own sources and stopped there;
