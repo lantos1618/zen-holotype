@@ -1,0 +1,73 @@
+// tests/corpus/std/map_many_collisions_all_resolve.zen
+// SIXTY-FOUR keys sharing FOUR hashes, on purpose. Collisions are
+// what a hash table is tested by, not the happy path: every slot on
+// a cluster's probe path is occupied by a key that is not the one
+// being looked for, so the walk has to step past all of them and eq
+// has to be what stops it.
+//
+// a map that trusts the hash returns the first row in the cluster —
+// somebody else's value. one that stops walking at the first hash
+// match returns None for a key that is present. both are visible in
+// the counts below.
+
+Alloc, AllocError = std.mem
+Map = std.collections
+Range = std.core.range
+
+COUNT: usize = 64
+HASHES: u64 = 4
+
+Key = {
+    id: u64,
+}
+
+// four buckets for sixty-four keys: sixteen keys per hash value, and
+// the index still has to hold them all
+Key.impl(Hash, {
+    hash ::= (self: @Self, hasher :: Hasher) u64 { self.id % HASHES }
+})
+
+Key.impl(Eq, {
+    eq ::= (self: @Self, other: @Self) bool { self.id == other.id }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    m ::= alloc.Map<Key, usize>();
+
+    id ::= u64.MIN;
+    stored ::= true;
+    Range(0, COUNT).loop((h, i) {
+        m.set(Key(id: id), i).match({
+            Err(_) => { stored = false; h.break(); },
+            Ok(_)  => (),
+        });
+        id = id + 1;
+    });
+
+    found ::= usize.MIN;
+    right ::= usize.MIN;
+    probe ::= u64.MIN;
+    Range(0, COUNT).loop((h, i) {
+        m.get(Key(id: probe)).match({
+            None  => (),
+            Ok(v) => {
+                (v == i).then(() { right = right + 1; });
+                found = found + 1;
+            },
+        });
+        probe = probe + 1;
+    });
+
+    println("stored {}", stored);
+    println("found {} of {}", found, COUNT);
+    println("right {}", right);
+
+    // an absent key that hashes into the busiest cluster there is:
+    // the walk crosses occupied slots and must still answer None
+    m.get(Key(id: id)).match({
+        Ok(v) => println("absent {}", v),
+        None  => println("absent none"),
+    });
+    Ok(0);
+}

@@ -1,0 +1,75 @@
+// tests/corpus/std/map_grows_without_losing_a_key.zen
+// the index doubles at 8, 16, 32, 64, 128 and 256 slots, so three
+// hundred keys cross SIX growth points. a rehash that drops a row is
+// silent — the map simply answers None for a key it was handed — and
+// one that relinks a slot onto the wrong row is worse, because it
+// answers Ok with somebody else's value. both are asked about here.
+//
+// this is the shape of the bug that motivated the hash Map:
+// `Ptr.to<U>()` was a no-op, `Arena.realloc` dropped every row
+// written before a grow, and nothing caught it because a small
+// element type's first buffer never reaches the size where it shows
+// (docs/LEXER_BOOTSTRAP_FIXES.md §1). the test that would have caught
+// it fills past several growth points and asks for everything back.
+
+Alloc, AllocError = std.mem
+Map = std.collections
+Range = std.core.range
+
+COUNT: usize = 300
+MIX: u64 = 1000003
+
+Key = {
+    id: u64,
+}
+
+Key.impl(Hash, {
+    hash ::= (self: @Self, hasher :: Hasher) u64 { self.id *% MIX }
+})
+
+Key.impl(Eq, {
+    eq ::= (self: @Self, other: @Self) bool { self.id == other.id }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    m ::= alloc.Map<Key, usize>();
+
+    id ::= u64.MIN;
+    stored ::= true;
+    Range(0, COUNT).loop((h, i) {
+        m.set(Key(id: id), i).match({
+            Err(_) => { stored = false; h.break(); },
+            Ok(_)  => (),
+        });
+        id = id + 1;
+    });
+
+    // `found` catches a lost row, `right` catches a row found under
+    // the wrong key — a slot pointing at a neighbour reads as a hit
+    found ::= usize.MIN;
+    right ::= usize.MIN;
+    probe ::= u64.MIN;
+    Range(0, COUNT).loop((h, i) {
+        m.get(Key(id: probe)).match({
+            None  => (),
+            Ok(v) => {
+                (v == i).then(() { right = right + 1; });
+                found = found + 1;
+            },
+        });
+        probe = probe + 1;
+    });
+
+    println("stored {}", stored);
+    println("found {} of {}", found, COUNT);
+    println("right {}", right);
+
+    // `id` is one past the last key stored, so it never was one:
+    // absent stays absent through every rehash
+    m.get(Key(id: id)).match({
+        Ok(v) => println("absent {}", v),
+        None  => println("absent none"),
+    });
+    Ok(0);
+}

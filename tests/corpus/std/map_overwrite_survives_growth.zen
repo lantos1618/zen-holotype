@@ -1,0 +1,62 @@
+// tests/corpus/std/map_overwrite_survives_growth.zen
+// a key set before the index doubles, read after it has doubled
+// several times. `set` overwrites a row where it already sits, so a
+// rehash must carry the NEW value across — and a rehash that relinks
+// a stale slot, or a set that appended a second row instead of
+// overwriting the first, brings the old value back.
+
+Alloc, AllocError = std.mem
+Map = std.collections
+Range = std.core.range
+
+FILL: usize = 200
+MIX: u64 = 1000003
+
+Key = {
+    id: u64,
+}
+
+Key.impl(Hash, {
+    hash ::= (self: @Self, hasher :: Hasher) u64 { self.id *% MIX }
+})
+
+Key.impl(Eq, {
+    eq ::= (self: @Self, other: @Self) bool { self.id == other.id }
+})
+
+show = (m: Map<Key, usize>, id: u64, label: str) () {
+    m.get(Key(id: id)).match({
+        Ok(v) => println("{} {}", label, v),
+        None  => println("{} missing", label),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    m ::= alloc.Map<Key, usize>();
+
+    // written, then overwritten, both while the index is eight slots
+    m.set(Key(id: 1), 10).try();
+    m.set(Key(id: 1), 11).try();
+    m.show(1, "before");
+
+    id ::= u64.MIN;
+    stored ::= true;
+    Range(0, FILL).loop((h, i) {
+        // ids 0 and 1 are taken; start past them so the fill only
+        // adds keys and never overwrites the one under test
+        m.set(Key(id: id + 2), i).match({
+            Err(_) => { stored = false; h.break(); },
+            Ok(_)  => (),
+        });
+        id = id + 1;
+    });
+
+    println("stored {}", stored);
+    m.show(1, "after");
+
+    // and it is still overwritable once it has been carried across
+    m.set(Key(id: 1), 12).try();
+    m.show(1, "again");
+    Ok(0);
+}
