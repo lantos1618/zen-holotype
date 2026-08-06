@@ -1,0 +1,41 @@
+// a loop binding is in scope for the whole closure body, including a
+// closure nested inside it. both shapes: the `.then` receiver is a
+// field read of the binding, and the `.then` receiver is a CALL whose
+// argument is a field of the binding.
+
+Row = { name*: str, ty*: usize }
+
+Limit = { at*: usize }
+
+under = (l: Limit, n: usize) bool { n < l.at }
+
+named = (rows: Vec<Row>, want: str, out :: Vec<usize>) Res<(), AllocError> {
+    rows.loop((h, r) {
+        r.name.eq(want).then(() { out.add(r.ty).try() });
+    });
+    Ok(());
+}
+
+small = (l: Limit, rows: Vec<Row>, out :: Vec<usize>) Res<(), AllocError> {
+    rows.loop((h, r) {
+        l.under(r.ty).then(() { out.add(r.ty).try() });
+    });
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    rows ::= alloc.Vec<Row>();
+    rows.add(Row(name: "ada", ty: 1)).try();
+    rows.add(Row(name: "bob", ty: 9)).try();
+    rows.add(Row(name: "ada", ty: 3)).try();
+
+    hits ::= alloc.Vec<usize>();
+    named(rows, "ada", hits).try();
+    println("{}", hits.len);
+
+    few ::= alloc.Vec<usize>();
+    small(Limit(at: 5), rows, few).try();
+    println("{}", few.len);
+    Ok(0);
+}

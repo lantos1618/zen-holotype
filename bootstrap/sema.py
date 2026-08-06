@@ -1015,6 +1015,7 @@ class Sema:
         self._reported = set()
         self._errset_state = {}
         self._members_memo = {}
+        self._ufcs_index = None
         self._muted = 0
         self._resolving = set()
 
@@ -3352,8 +3353,16 @@ class Sema:
             for v in vals:
                 self.type_of(v, ctx)
             return UNIT
+        # The candidates are the RECEIVER's: what its type declares, what its
+        # impls supply, and the free functions whose first parameter is that
+        # type. A member of an unrelated type that happens to share the name
+        # is not one of them, and never was.
         m = self._member(bty, name, ctx)
-        if m is not None:
+        fns = self._ufcs_fns(name, bty, ctx)
+        # "a method is a UFCS function whose first parameter happens to be
+        # named self" — so the two are ONE overload set, and the arity picks
+        # between them exactly as it does between two free functions.
+        if m is not None and (not fns or self._method_fits(m, len(vals))):
             if m.ambiguous:
                 self.error(_after_dot(base, _span(callee), len(name)),
                            "method `%s` is ambiguous: two impls supply it and no bound "
@@ -3373,14 +3382,88 @@ class Sema:
                 self.type_of(v, ctx)
             return mty if mty is not None else ANY
 
-        # UFCS: a free function whose first parameter is the receiver's type
-        fns = self.lookup_fns(ctx.mod, name)
         if fns:
             return self._call_overload(name, fns, node, args, targs, ctx, span,
                                        receiver=(base, bty))
         for v in vals:
             self.type_of(v, ctx)
+        if self._answers_for(bty):
+            self.error(_after_dot(base, _span(callee), len(name)),
+                       "no method `%s` on `%s`" % (name, show(bty)))
+            return ERR
         return ANY
+
+    def _method_fits(self, m, nargs):
+        """Does any candidate in this method set take `nargs` arguments?
+        The receiver is the first parameter, so the rest line up after it."""
+        for cand in (m.overloads or ((m,) if m.ty is not None else ())):
+            t = cand.ty
+            if t is not None and t.kind == "fn" and t.args \
+                    and self._fits_arity(list(t.args[1:]), nargs):
+                return True
+        return False
+
+    def _ufcs_fns(self, name, bty, ctx):
+        """The free functions this receiver reaches through a dot.
+
+        Two sources, and the second is DESIGN.md's own sentence: "importing a
+        type pulls its world along: its methods, its trait impls, and exported
+        ufcs functions (a free function whose first param is the type is
+        callable as a method)". A name visible here counts, and so does any
+        EXPORTED free function anywhere whose first parameter is this type —
+        it travelled with the type, so naming the type is what reaches it.
+        `to_u64` is on no prelude line and `add(out :: Sink, ..)` lives a
+        layer above the `Sink` it takes; both are reached this way.
+
+        The first parameter is the whole gate. It is what makes a free
+        function a method at all, and sharing the name never was."""
+        if bty is None or bty.kind in ("error", "any"):
+            return ()
+        out, ids = [], set()
+        for fd in self.lookup_fns(ctx.mod, name) + self._exported_fns(name):
+            if id(fd) in ids or not self._takes_receiver(fd, bty, ctx):
+                continue
+            ids.add(id(fd))
+            out.append(fd)
+        return tuple(out)
+
+    def _exported_fns(self, name):
+        """Every exported free function of this name in the tree, in module
+        order. The receiver's type is what narrows it; this is only the pool
+        that filter runs over."""
+        if self._ufcs_index is None:
+            index = {}
+            for mi in self.mods:
+                for nm, group in mi.fns.items():
+                    for fd in group:
+                        if fd.exported:
+                            index.setdefault(nm, []).append(fd)
+            self._ufcs_index = {k: tuple(v) for k, v in index.items()}
+        return self._ufcs_index.get(name, ())
+
+    def _takes_receiver(self, fd, bty, ctx):
+        """The FIRST PARAMETER is what makes a free function reachable through
+        a dot, and a receiver whose type is not yet known reaches nothing."""
+        if not fd.params:
+            return False
+        fctx = self._fn_ctx(fd, {}, ctx.frame)
+        p0 = self.resolve_type(_g(fd.params[0], "ty", "type"), fctx, want_error=False)
+        return p0 is not None and self._unify(p0, bty, {}, None, ctx)
+
+    def _answers_for(self, ty):
+        """Is this receiver concrete enough that "it has no such method" is a
+        fact rather than a guess? A declared struct, enum or primitive knows
+        everything it has; a type parameter, a builtin or an unresolved type
+        does not, and a diagnostic from one of those would be about a program
+        that is fine."""
+        if ty is None:
+            return False
+        if ty.kind == "prim":
+            return self.prim_decls.get(ty.name) is not None
+        if ty.kind != "named" or ty.name.startswith("@"):
+            return False
+        td = self.types.get(ty.name)
+        return td is not None and td.kind in ("struct", "enum")
 
     def _pick_method(self, m, vals, ctx):
         """Overload resolution over a method set — same rule as a free

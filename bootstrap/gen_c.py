@@ -373,6 +373,28 @@ def int_info(t):
     return INT_VALUES[t[1]]
 
 
+def ty_label(t):
+    """A type as a diagnostic names it: the source spelling, not the C one.
+    "no method `get` on `Vec<Found>`" is only useful if the reader can find
+    `Vec<Found>` in what they wrote."""
+    if t is None or t == UNKNOWN:
+        return "this value"
+    if t[0] == "prim":
+        return t[1]
+    if t[0] == "unit":
+        return "()"
+    if t[0] == "ptr":
+        return "Ptr<%s>" % ty_label(t[1])
+    if t[0] == "array":
+        return "[%s, %s]" % (ty_label(t[2]), t[1])
+    if t[0] == "union":
+        return " | ".join(ty_label(m) for m in t[1])
+    if t[0] == "named":
+        head = t[1][-1] if t[1] else "?"
+        return "%s<%s>" % (head, ", ".join(ty_label(a) for a in t[2])) if t[2] else head
+    return t[0]
+
+
 def union_of(members):
     """Flatten and normalise a union; the member order is not observable."""
     flat = []
@@ -3285,7 +3307,16 @@ class FnCtx:
             # `toString(self, sb :: String)`, and resolution picks between
             # them on the declared parameter type like anywhere else.
             inherited = self.trait_methods(rty, name)
-            pool = list(with_body) + [d for d in inherited if d not in with_body]
+            # and the free functions that travel with the type: "a method is
+            # a UFCS function whose first parameter happens to be named self"
+            # (DESIGN.md, Ownership), so these are not a fallback for when the
+            # members miss -- they are in the same overload set, and the arity
+            # picks between them.
+            ufcs = self.ufcs_decls(name, rty)
+            pool = list(with_body)
+            for d in inherited + ufcs:
+                if d not in pool:
+                    pool.append(d)
             if pool:
                 decl = self.pick_overload(pool, argnodes, receiver=(rcode, rty))
                 own = any(d is decl for d in inherited)
@@ -3305,12 +3336,68 @@ class FnCtx:
                 return self.emit_call(door, node, argnodes, targs, want,
                                       receiver=(rcode, rty))
         # a ufcs free function: the receiver is the first parameter
-        cands = self.e.lookup(name, self.parts, "fn")
+        cands = self.ufcs_decls(name, rty)
+        if not cands and rty is not None and rty[0] == "named":
+            # ... or a bound's bodyless declaration, whose body is the backend
+            cands = self.trait_methods(rty, name, needs_body=False)
         if cands:
             decl = self.pick_overload(cands, argnodes, receiver=(rcode, rty))
             return self.emit_call(decl, node, argnodes, targs, want, receiver=(rcode, rty))
-        self.e.error(node, "no method `%s` on this value" % name)
+        self.e.error(node, "no method `%s` on `%s`" % (name, ty_label(rty)))
         return ("0", UNKNOWN)
+
+    def ufcs_decls(self, name, rty):
+        """The free functions this receiver reaches through a dot.
+
+        The FIRST PARAMETER is the gate, and it is the only one. A member of
+        an unrelated type that happens to share the name is not a candidate:
+        resolving `found.get(0)` by name across the program found `Map.get`
+        for a `Vec`, instantiated it at `K = ?, V = ?`, and reported three
+        diagnostics inside std/collections about code nothing called.
+
+        A receiver whose type is not yet known therefore reaches nothing --
+        which is the point. `peek` lowers a block's tail before the block's
+        own statements have bound anything, so an unknown receiver there is
+        an ordinary event and must not select a monomorphisation.
+        """
+        if rty is None or rty == UNKNOWN:
+            return []
+        out = []
+        for d in self.e.lookup(name, self.parts, "fn") + self.e.by_name.get(name, []):
+            if d.dkind != "fn" or d.owner or d in out:
+                continue        # a member; its owner decides, not its name
+            if not self.takes_receiver(d, rty):
+                continue
+            out.append(d)
+        return out
+
+    def takes_receiver(self, decl, rty):
+        """Is the receiver what this function's first parameter asks for?"""
+        fnode = self.e.fn_node(decl.node)
+        params = self.e.params_of(fnode) if fnode else ()
+        node = f(params[0], "ty") if params else None
+        if node is None:
+            return False
+        if kind(node) == "Named" and str(f(node, "name", "")) in (decl.tparams or ()):
+            # `loop*<R: Range<T>, T> = (range: R, ..)`: the first parameter IS
+            # a type parameter, so what narrows the receiver is its BOUND, and
+            # the bound is sema's question. From here it is a wildcard.
+            return True
+        # speculative: an unresolved type parameter here is not an error to
+        # report, exactly as it is not one in `intrinsic`
+        mark = len(self.e.diags)
+        subst = dict((tp, UNKNOWN) for tp in decl.tparams)
+        want = self.e.resolve_type(node, subst, decl.scope_parts)
+        del self.e.diags[mark:]
+        if want is None or want == UNKNOWN:
+            return False
+        if want[0] == "named":
+            return rty[0] == "named" and (
+                want[1][-1] == rty[1][-1]
+                or self.satisfies(rty, ("named", want[1], ())))
+        if want[0] == "prim":
+            return rty[0] == "prim" and want[1] == rty[1]
+        return want[0] == rty[0]
 
     def eq_call(self, lhs, rhs, node):
         """`a == b` on a type that impls `Eq`, as the call it is.
@@ -3328,12 +3415,18 @@ class FnCtx:
                                     receiver=lhs)
         return code
 
-    def trait_methods(self, rty, name):
+    def trait_methods(self, rty, name, needs_body=True):
         """Methods the receiver's type satisfies but does not declare.
 
         The impl supplies the required members; everything sealed or default
         on the bound comes along, compiled once per receiver type.  All of
         them, because a bound may declare two of one name.
+
+        `needs_body` is what tells a bound's DEFINITION from its signature.
+        `Alloc.create` is declared with no body anywhere -- the backend is its
+        body, exactly as it is for `Ptr`'s members -- so it is not a method to
+        compile for this receiver, but it is still the receiver's own answer
+        to `create` and nothing else in the program is.
         """
         out = []
         for d in sorted(self.e.by_name.get(name, []), key=lambda d: d.parts):
@@ -3346,7 +3439,7 @@ class FnCtx:
             if self.e.struct_decl(bound) is None or bound[1][-1] != d.owner:
                 continue
             fnode = self.e.fn_node(d.node)
-            if fnode is None or f(fnode, "body") is None:
+            if fnode is None or (needs_body and f(fnode, "body") is None):
                 continue
             if not self.satisfies(rty, bound):
                 continue
@@ -5077,7 +5170,7 @@ class FnCtx:
         scode, sty = self.expr(scrut)
         ty = want
         if ty in (None, UNKNOWN):
-            ty = self.arm_type(arms)
+            ty = self.arm_type(arms, sty)
         result = None
         if ty not in (None, UNIT, UNKNOWN):
             result = self.new_tmp(ty)
@@ -5094,7 +5187,7 @@ class FnCtx:
             self.match_scalar(node, scode, sty, arms, result, ty)
         return (result if result is not None else "0", ty or UNIT)
 
-    def arm_type(self, arms):
+    def arm_type(self, arms, sty=None):
         """The match's type, taken from the arm that carries the most
         information: a bare integer literal defaults to i32 and would make
         `(cap == 0).match({true => 8, false => cap * 2})` an i32 beside a
@@ -5110,12 +5203,18 @@ class FnCtx:
         best = None
         for arm in arms:
             body = f(arm, "body")
-            # a Block reports its type by being lowered; `peek` would reach
-            # `ex_Block`, which lowers it a second time to find the same answer
-            if kind(body) == "Block":
-                ty = self.peek_block(body)
-            else:
-                _code, ty = self.peek(body)
+            self.push()
+            try:
+                self.bind_arm(arm, sty)
+                # a Block reports its type by being lowered; `peek` would reach
+                # `ex_Block`, which lowers it a second time to find the same
+                # answer
+                if kind(body) == "Block":
+                    ty = self.peek_block(body)
+                else:
+                    _code, ty = self.peek(body)
+            finally:
+                self.pop()
             if ty in (None, UNIT, UNKNOWN):
                 continue
             if kind(body) == "Literal":
@@ -5123,6 +5222,33 @@ class FnCtx:
                 continue
             best = ty if best is None else self.wider_arm(best, ty)
         return best or fallback or UNIT
+
+    def bind_arm(self, arm, sty):
+        """This arm's binder, in scope, before its body is looked at.
+
+        `peek` "runs outside the scope the real lowering will run in", and an
+        arm body reads exactly what that scope holds -- `Ok(d) => d.render(..)`
+        is the whole of one. Without the binder the receiver has no type, and
+        an untyped receiver used to be answered by searching the program for
+        the NAME, which is how a `Vec` reached `Map.get`.
+
+        Nothing is emitted: the codes are placeholders, because the only
+        question here is the arm's TYPE.
+        """
+        if sty is None or sty[0] != "named":
+            return
+        info = self.e.enum_info(sty)
+        if not info:
+            return
+        pat = f(arm, "pattern")
+        if kind(pat) != "PatVariant":
+            return
+        mark = len(self.lines)
+        conds, binds = [], []
+        self.pat_conds("0", sty, pat, conds, binds)
+        del self.lines[mark:]
+        for name, bty, _code in binds:
+            self.scopes[-1][name] = ("0", bty)
 
     def wider_arm(self, a, b):
         """Of two arm types, the one the match as a whole has.
@@ -5154,6 +5280,15 @@ class FnCtx:
             value = self.block_value(body, ty)   # `_block_body` coerces its own tail
         else:
             value, vty = self.expr(body, ty)
+            if vty == UNIT and ty not in (None, UNIT, UNKNOWN):
+                # this arm produces NOTHING, and nothing does not coerce into
+                # the match's type: `_ => println(..)` beside `Call(c) =>
+                # c.args.loop(..)` is a match written in statement position for
+                # its effects.  Run it; leave the result slot alone.
+                if value and value not in ("", "0"):
+                    self.line("(void)(%s);" % value)
+                self.pop()
+                return
             if value is not None:
                 # an arm produces the MATCH's value, not its own: a `Res` whose
                 # error set is narrower than the match's has to be widened here

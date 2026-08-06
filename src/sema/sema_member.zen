@@ -39,13 +39,13 @@
 
 Ast, Expr, ExprId, Access, Ident, Span, Pos, TypeId = ast
 Decl, DeclKind, Struct, Impl, Member, MemberKind = ast
-Field, Const, Function, Form, Param = ast
+Field, Const, Function, Form, Param, TParam = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
 DeclId, ImplId = sema.sema_id
-TyId, Ty, Types, TyNamed = sema.sema_ty
+TyId, Ty, Types, TyNamed, Prim = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 Checker, Ctx, UNRESOLVED = sema.sema_check
@@ -311,10 +311,36 @@ ufcs_or_missing = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
                   Res<TyId, AllocError> {
     defs ::= c.alloc.Vec<Def>();
     c.world.defs_of(ctx.module, ac.name.text, defs).try();
-    (defs.len > 0).match({
+    (defs.len > 0 || unpromised(c, ty).try()).match({
         true  => c.types.unknown(),
         false => no_such_field(c, node, ac, ty),
     })
+}
+
+// A type parameter with no bound IN SCOPE. Poison, and not a mistake.
+//
+// "A type parameter's members are the ones its BOUNDS promise, and
+// nothing else" — so with no bound to read, sema knows nothing about
+// this type and a dot on it is a question it cannot answer. That is
+// exactly what `Unknown` is for: one mistake, one diagnostic, and this
+// is not the mistake.
+//
+// It is reachable because instantiation does not SUBSTITUTE yet:
+// `Vec<Def>.get` still answers with `Vec`'s own `T`, so `d.qname` on the
+// result would otherwise report a gap in this folder as an error in the
+// source. Inside `<T: Boxy>` the bound IS in scope, `bound_reachable`
+// reads its members, and a name `Boxy` does not declare still reports.
+unpromised = (c :: Checker, ty: TyId) Res<bool, AllocError> {
+    c.types.at(ty).match({
+        Var(v)  => without_bound(c, v.name),
+        _       => Ok(false),
+    })
+}
+
+without_bound = (c :: Checker, name: str) Res<bool, AllocError> {
+    bounds ::= c.alloc.Vec<TyId>();
+    c.bounds_of(name, bounds).try();
+    Ok(bounds.len == 0);
 }
 
 no_such_field = (c :: Checker, node: Expr, ac: Access, ty: TyId)
@@ -358,10 +384,45 @@ members_of* = (c :: Checker, ty: TyId, name: str, out :: Vec<Found>)
               Res<(), AllocError> {
     c.types.at(ty).match({
         Named(n) => named_members(c, n, ty, name, out),
+        Prim(p)  => prim_members(c, p, ty, name, out),
         Var(v)   => bound_reachable(c, v.name, ty, name, out),
         _        => Ok(()),
     }).try();
     Ok(());
+}
+
+// "A prelude declaration of a primitive's name IS that primitive."
+//
+// `str` is an ordinary struct in `std.text.text_str` carrying `len`,
+// `get`, `index` and `slice`; `i32` is one in `std.core.num` carrying
+// `MIN`, `MAX` and `BITS`. The members they declare belong to the
+// primitive the compiler already knows — they are NOT a second nominal
+// type standing beside it, and DESIGN.md says why getting that wrong is
+// not a small error: "it mints a `str` beside the `str` every literal
+// has, and then every literal, every trap check and every standard
+// library signature disagrees about which one they meant."
+//
+// So the lookup a `Prim` gets is the lookup a `Named` gets, over the
+// declaration the prelude exports under the same spelling — impls
+// included, which is how `str`'s `Eq` reaches a literal. The receiver
+// stays the primitive's `TyId`: `@Self` binds to the type the caller
+// asked about, and that is the one every literal already has.
+prim_members = (c :: Checker, p: Prim, ty: TyId, name: str,
+                out :: Vec<Found>) Res<(), AllocError> {
+    defs ::= c.alloc.Vec<Def>();
+    c.world.prelude_of(p.name, defs).try();
+    defs.get(0).match({
+        None    => Ok(()),
+        Ok(d)   => prim_decl_members(c, d, p, ty, name, out),
+    }).try();
+    Ok(());
+}
+
+prim_decl_members = (c :: Checker, d: Def, p: Prim, ty: TyId, name: str,
+                     out :: Vec<Found>) Res<(), AllocError> {
+    args ::= c.alloc.Vec<TyId>();
+    named_members(c, TyNamed(decl: d.id, name: p.name, args: args),
+                  ty, name, out)
 }
 
 // A type parameter's members are the ones its BOUNDS promise, and
@@ -439,10 +500,53 @@ struct_members = (c :: Checker, s: Struct, n: TyNamed, ty: TyId, name: str,
                   out :: Vec<Found>) Res<(), AllocError> {
     mi = n.decl.module.to_usize();
     poison = c.types.unknown().try();
+    tmark = c.tvar_mark();
+    enter_struct_tvars(c, s, mi).try();
     s.members.loop((h, m) {
         own_member(c, m, name, mi, ty, poison, out).try();
     });
+    c.release_tvars(tmark).try();
     Ok(());
+}
+
+// The `T` of `Vec<T>`, in scope in the members `Vec` declares.
+//
+// A struct's type parameters are in scope in its member signatures for
+// exactly the reason a function's are in scope in its body: the
+// declaration that introduced the name is where the name means
+// something. `sema_decl.zen`'s `enter_generics` does this for a
+// `DeclKind.Function` and nothing did it for a struct, so `Vec`'s own
+// `get* = (self: @Self, i: usize) Res<T>` reported `T` as an undefined
+// name inside the declaration that binds it.
+//
+// A `Ty.Var` and not the corresponding type ARGUMENT: substitution is
+// not this folder's yet, and `TyVar` is nominal on its owner precisely
+// so the `T` of `Vec` and the `T` of `Map` can never be confused while
+// it isn't.
+enter_struct_tvars = (c :: Checker, s: Struct, mi: usize)
+                     Res<(), AllocError> {
+    owner = tvar_owner(c, s.name.text, mi).try();
+    s.tparams.loop((h, tp) {
+        text = tp.name.text;
+        c.push_tvar(text, c.types.var(text, owner).try()).try();
+    });
+    Ok(());
+}
+
+// The declaration's module-qualified name, built the way
+// `sema_decl.zen` builds a function's: the two have to agree, because a
+// type parameter resolved from a declaration and the same one resolved
+// from a candidate must intern to one type.
+tvar_owner = (c :: Checker, name: str, mi: usize) Res<str, AllocError> {
+    out ::= c.alloc.String().try();
+    out.add_bytes(module_name(c, mi)).try();
+    out.add_bytes(".").try();
+    out.add_bytes(name).try();
+    Ok(out.view());
+}
+
+module_name = (c: Checker, mi: usize) str {
+    c.world.table_at(mi).match({ Ok(t) => t.name, None => "" })
 }
 
 // A named helper rather than a `.then` inside the loop body: a loop
@@ -562,13 +666,60 @@ impl_supplies = (c :: Checker, n: TyNamed, ty: TyId, name: str, id: ImplId,
 supplied = (c :: Checker, n: TyNamed, ty: TyId, name: str, id: ImplId,
             im: Impl, out :: Vec<Found>) Res<(), AllocError> {
     mi = n.decl.module.to_usize();
-    poison = c.types.unknown().try();
-    bctx = Ctx(mi, poison);
-    bound = c.type_from_ast(im.bound, bctx).try();
+    bound = impl_bound_type(c, im, mi).try();
     provides(c, im, bound, name).try().then(() {
         add_supplied(c, ty, bound, name, id, out).try();
     });
     Ok(());
+}
+
+// The bound an impl names, resolved with the TARGET's type parameters
+// in scope.
+//
+// `Vec.impl(Range<T>, ..)` writes `Vec`'s own `T`, and `Impl` has no
+// `tparams` field to read because there is nothing for it to hold: an
+// impl declares no type parameters, it borrows the ones the target
+// declared. Every reader of `im.bound` goes through here so the three
+// of them cannot disagree about what `T` meant — and because
+// `type_from_ast` memoizes on the node id, the FIRST reader decides for
+// all of them anyway.
+impl_bound_type* = (c :: Checker, im: Impl, mi: usize)
+                   Res<TyId, AllocError> {
+    poison = c.types.unknown().try();
+    tmark = c.tvar_mark();
+    enter_target_tvars(c, im.target.text, mi).try();
+    got = c.type_from_ast(im.bound, Ctx(mi, poison)).try();
+    c.release_tvars(tmark).try();
+    Ok(got);
+}
+
+// An impl lives in the module that declares its target, so the target
+// is looked up there and nowhere else — which is the same fact that
+// makes `Impl.target` an `Ident` and not a qualified type.
+enter_target_tvars = (c :: Checker, target: str, mi: usize)
+                     Res<(), AllocError> {
+    defs ::= c.alloc.Vec<Def>();
+    c.world.own_defs(mi, target, defs).try();
+    defs.get(0).match({
+        None    => Ok(()),
+        Ok(d)   => enter_def_tvars(c, d, mi),
+    }).try();
+    Ok(());
+}
+
+enter_def_tvars = (c :: Checker, d: Def, mi: usize) Res<(), AllocError> {
+    decl_at(c.tree, d.id).match({
+        Ok(x) => enter_decl_tvars(c, x, mi),
+        None  => Ok(()),
+    }).try();
+    Ok(());
+}
+
+enter_decl_tvars = (c :: Checker, d: Decl, mi: usize) Res<(), AllocError> {
+    d.kind.match({
+        Struct(s) => enter_struct_tvars(c, s, mi),
+        _         => Ok(()),
+    })
 }
 
 provides = (c :: Checker, im: Impl, bound: TyId, name: str)

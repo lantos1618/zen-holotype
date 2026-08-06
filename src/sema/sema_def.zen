@@ -83,6 +83,12 @@ ModuleTable* = {
     impls* :: Vec<ImplId>,
 }
 
+// The one module every other module imports without saying so.
+// `bootstrap/modules.py` names the same string, and it has to be the
+// same string: the two compilers must agree about which module is
+// ambient or a program means different things to each.
+PRELUDE*: str = "std.core"
+
 // The module graph, and every query over names.
 //
 // It carries the `Alloc` for the reason `Vec` and `Ast` do: the tables
@@ -118,11 +124,66 @@ World* = {
     // Own declarations first and they are the whole answer when there
     // are any: a module's own name is never shadowed by something it
     // imported, because the import would have been a redeclaration.
-    // Otherwise the imports are followed, and `*` gates every hop.
+    // Otherwise the imports are followed, and `*` gates every hop, and
+    // last of all the prelude — which is the only name a module gets
+    // without writing an import, and so the only one that loses every
+    // tie.
     defs_of* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
                Res<(), AllocError> {
         self.own_defs(mi, name, out).try();
         (out.len == 0).then(() { self.imported_defs(mi, name, out).try() });
+        (out.len == 0).then(() { self.prelude_defs(mi, name, out).try() });
+        Ok(());
+    }
+
+    // "A name that is not imported is not visible, and the prelude is
+    // the only exception. That exception is what auto-imported means:
+    // `std.core` is imported into every module, so `Res`, `Ok`, `Vec`,
+    // `Map`, `str`, `Env` and the rest are in scope everywhere without a
+    // line."
+    //
+    // It is one more hop of the SAME walk — `exports_of`, `*` gating
+    // every step — and not a whole-program name table, which is the
+    // thing DESIGN.md rules out in the same paragraph. A module that IS
+    // the prelude asks nothing: its own defs and its own imports have
+    // already been consulted, and asking again would only re-walk them.
+    prelude_defs = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
+                   Res<(), AllocError> {
+        self.index_of(PRELUDE).match({
+            Ok(p)   => self.prelude_exports(p, mi, name, out),
+            None    => Ok(()),
+        }).try();
+        Ok(());
+    }
+
+    prelude_exports = (self: @Self, p: usize, mi: usize, name: str,
+                       out :: Vec<Def>) Res<(), AllocError> {
+        (p == mi).match({
+            true  => Ok(()),
+            false => self.exported_defs(p, name, out),
+        }).try();
+        Ok(());
+    }
+
+    // Everything module `p` lets out under `name`, starting a fresh
+    // cycle guard. The entry point for asking a module that nobody
+    // imported.
+    exported_defs* = (self: @Self, p: usize, name: str, out :: Vec<Def>)
+                     Res<(), AllocError> {
+        seen ::= self.alloc.Vec<usize>();
+        self.exports_of(p, name, out, seen)
+    }
+
+    // What the prelude exports under `name`, asked from nowhere in
+    // particular. `defs_of` reaches the same answer as the last hop of
+    // an ordinary walk; this is the direct question, for the caller that
+    // holds a PRIMITIVE and so has no module to ask from.
+    prelude_of* = (self: @Self, name: str, out :: Vec<Def>)
+                  Res<(), AllocError> {
+        self.index_of(PRELUDE).match({
+            Ok(p)   => self.exported_defs(p, name, out),
+            None    => Ok(()),
+        }).try();
         Ok(());
     }
 

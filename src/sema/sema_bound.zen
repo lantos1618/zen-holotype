@@ -31,6 +31,7 @@ World, Def, decl_at = sema.sema_def
 Diag, SemaFault, NameFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 bound_members, has_member, member_named, impl_span = sema.sema_member
+impl_bound_type = sema.sema_member
 type_from_ast = sema.sema_type
 
 // "`A.impl(B, {..})` supplies a value for every field `B` declares."
@@ -47,8 +48,7 @@ check_impl* = (c :: Checker, id: ImplId, mi: usize) Res<(), AllocError> {
 
 check_impl_body = (c :: Checker, im: Impl, id: ImplId, mi: usize)
                   Res<(), AllocError> {
-    poison = c.types.unknown().try();
-    bound = c.type_from_ast(im.bound, Ctx(mi, poison)).try();
+    bound = impl_bound_type(c, im, mi).try();
     members ::= c.alloc.Vec<Member>();
     bound_members(c, bound, members).try();
     span = impl_span(c, id);
@@ -90,9 +90,18 @@ missing = (c :: Checker, span: Span, name: str) Res<(), AllocError> {
 // Does `ty` keep the promise `bound` makes? An impl of it, or the same
 // type — and nothing else. "The bound is the promise", so a type that
 // happens to have a field of the right name has not made one.
+//
+// `same_type` and not `eq`, and that is forced by what this folder does
+// not do yet: instantiation does not SUBSTITUTE. `Vec.impl(Range<T>,
+// ..)` writes `Vec`'s own `T`, the call `v.loop(..)` wants `loop`'s `T`,
+// and those are two `TyVar`s by construction — `TyVar` is nominal on its
+// owner precisely so they cannot be confused. An id compare therefore
+// says NO to every generic bound in the program, which is not a check,
+// it is a blanket rejection. `sema_check.zen` states the rule once and
+// both halves of this file read it.
 satisfies_bound* = (c :: Checker, ty: TyId, bound: TyId)
                    Res<bool, AllocError> {
-    ty.eq(bound).match({
+    c.same_type(ty, bound).match({
         true  => Ok(true),
         false => impls_bound(c, ty, bound),
     })
@@ -127,16 +136,19 @@ local_bound_is = (c :: Checker, id: ImplId, n: TyNamed, bound: TyId)
 
 impl_bound_is = (c :: Checker, id: ImplId, n: TyNamed, bound: TyId)
                 Res<bool, AllocError> {
-    poison = c.types.unknown().try();
-    ctx = Ctx(n.decl.module.to_usize(), poison);
+    mi = n.decl.module.to_usize();
     c.world.impl_at(c.tree, id).match({
-        Ok(im) => bound_matches(c, im, ctx, bound),
+        Ok(im) => bound_matches(c, im, mi, bound),
         None   => Ok(false),
     })
 }
 
-bound_matches = (c :: Checker, im: Impl, ctx: Ctx, bound: TyId)
+// Through `impl_bound_type` and not `type_from_ast` directly, so the
+// target's own type parameters are in scope: `Vec.impl(Range<T>, ..)`
+// writes `Vec`'s `T`, and there is no other declaration of that name to
+// find.
+bound_matches = (c :: Checker, im: Impl, mi: usize, bound: TyId)
                 Res<bool, AllocError> {
-    got = c.type_from_ast(im.bound, ctx).try();
-    Ok(got.eq(bound));
+    got = impl_bound_type(c, im, mi).try();
+    Ok(c.same_type(got, bound));
 }

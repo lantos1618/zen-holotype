@@ -50,7 +50,7 @@ Vec, Map = std.collections
 str, String = std.text
 Range = std.core
 DeclId = sema.sema_id
-TyId, Ty, Types, ResForm, TyRes = sema.sema_ty
+TyId, Ty, Types, ResForm, TyRes, TyNamed = sema.sema_ty
 World, Def, DefKind = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 
@@ -276,6 +276,78 @@ Checker* = {
             || self.is_infer(got) || self.is_infer(want)
             || self.literal_fits(got, want)
             || self.set_assignable(got, want)
+            || self.uninstantiated(got, want)
+    }
+
+    // WHAT NOBODY HAS SUBSTITUTED YET AGREES WITH ANYTHING.
+    //
+    // `sema.zen` says at the top of this folder that generic
+    // instantiation does not SUBSTITUTE, and this is where that costs
+    // something: `alloc.Vec<Member>()` answers `Vec<T>` — `Vec`'s own
+    // type parameter, untouched — and every `Vec<Member>` parameter in
+    // the program is written concretely. Comparing the two by id says no
+    // to every generic value there is, which is not a check, it is a
+    // blanket rejection, and "never invent a diagnostic out of missing
+    // information" forbids it.
+    //
+    // So a `TyVar` agrees: it is a type nobody has computed. Two
+    // applications of ONE declaration agree when their arguments do, by
+    // this same rule — which carries `Vec<T>` to `Vec<Member>` and still
+    // keeps `Vec<i32>` away from `Vec<str>`. An application against a
+    // bare head — `Range`, from a constructor call that never carried
+    // arguments — has nothing to compare, so the head decides alone.
+    //
+    // Every line of this deletes when substitution lands, and nothing
+    // else has to change when it does.
+    uninstantiated = (self: @Self, got: TyId, want: TyId) bool {
+        self.is_var(got) || self.is_var(want) || self.same_applied(got, want)
+    }
+
+    // One type, or two applications of one declaration. Asked on its own
+    // where assignability's other leniencies would be wrong — a poison
+    // type is not an impl of a bound.
+    same_type* = (self: @Self, a: TyId, b: TyId) bool {
+        a.eq(b) || self.uninstantiated(a, b)
+    }
+
+    same_applied = (self: @Self, got: TyId, want: TyId) bool {
+        self.types.at(got).match({
+            Named(g) => self.applied_to(g, want),
+            _        => false,
+        })
+    }
+
+    applied_to = (self: @Self, g: TyNamed, want: TyId) bool {
+        self.types.at(want).match({
+            Named(w) => g.decl.eq(w.decl) && self.args_agree(g.args, w.args),
+            _        => false,
+        })
+    }
+
+    args_agree = (self: @Self, g: Vec<TyId>, w: Vec<TyId>) bool {
+        (g.len == w.len).match({
+            false => true,
+            true  => self.every_arg_agrees(g, w),
+        })
+    }
+
+    every_arg_agrees = (self: @Self, g: Vec<TyId>, w: Vec<TyId>) bool {
+        Range(0, g.len).find((i) { self.arg_disagrees(g, w, i) })
+            .match({ Ok(_) => false, None => true })
+    }
+
+    arg_disagrees = (self: @Self, g: Vec<TyId>, w: Vec<TyId>, i: usize) bool {
+        g.get(i).match({
+            None    => false,
+            Ok(a)   => self.arg_unlike(a, w, i),
+        })
+    }
+
+    arg_unlike = (self: @Self, a: TyId, w: Vec<TyId>, i: usize) bool {
+        w.get(i).match({
+            None    => false,
+            Ok(b)   => self.assignable(a, b) == false,
+        })
     }
 
     // A union target accepts any of its members: widening an error set
@@ -325,6 +397,10 @@ Checker* = {
 
     is_infer* = (self: @Self, id: TyId) bool {
         self.types.at(id).match({ Infer => true, _ => false })
+    }
+
+    is_var* = (self: @Self, id: TyId) bool {
+        self.types.at(id).match({ Var(_) => true, _ => false })
     }
 
     prim_name* = (self: @Self, id: TyId) str {

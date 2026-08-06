@@ -1,0 +1,35 @@
+// a match is a value, and its type comes from its arms -- so an arm
+// whose body reads its own BINDER has to be read with that binder in
+// scope. `Ok(d) => d.render(out)` types the match by way of `render`,
+// which cannot be found without knowing what `d` is.
+//
+// the sibling arm produces nothing, and nothing does not become a
+// Res: this match is written in statement position for its effect.
+
+Diag = { code*: i32 }
+
+render = (d: Diag, out :: String) Res<(), WriteError> {
+    out.add("E{}", d.code).try();
+    Ok(());
+}
+
+first = (v: Vec<Diag>) Res<Diag> { v.get(0) }
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    out ::= alloc.String("").try();
+
+    ds ::= alloc.Vec<Diag>();
+    first(ds).match({
+        Ok(d) => d.render(out),
+        None  => println("no diagnostics"),
+    });
+
+    ds.add(Diag(code: 42)).try();
+    first(ds).match({
+        Ok(d) => d.render(out),
+        None  => println("no diagnostics"),
+    });
+    println("{}", out.view());
+    Ok(0);
+}
