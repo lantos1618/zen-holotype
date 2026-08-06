@@ -1,0 +1,176 @@
+// src/std/build/build.zen
+//
+// The api a build file is handed. A build file is an ordinary Zen
+// program — `build = (b :: Builder) Res<(), BuildError>` — so there
+// is no manifest format, no configuration language, and no second
+// place to learn. Packages are declarations at module level and
+// targets are calls in the body.
+//
+// `b` is `::` because b.add, b.exe and b.test MUTATE the graph.
+// b.module and b.os only read it, and their signatures say so.
+//
+// The phase order is the constraint everything here follows from:
+//
+//     parse every module  ->  run build.zen  ->  compile
+//
+// So b.module can READ any module's declarations — that is how test
+// discovery is written in a build file rather than baked into the
+// compiler — but a build file may never CALL code from the tree it
+// configures. That would need the tree compiled before the thing
+// that says how to compile it.
+
+Alloc = std.mem
+Env = std.env
+Vec = std.collections
+str = std.text
+
+// From elsewhere, and named here so the dependencies are a list
+// rather than a surprise: Path and Duration are unowned (see the
+// report), and Module and Function are src/ast.zen's own nodes —
+// the same ones gen_c consumes and @meta hands back. b.module
+// returning them is what makes a build file able to inspect its own
+// project.
+
+BuildError* = NotFound | FetchFailed | VersionConflict | HashMismatch
+
+// The target. A build file matches on these right here — no cfg
+// annotations, no ifdef, no preprocessor.
+Os* = Macos | Linux | Windows
+
+Arch* = X86_64 | Arm64
+
+// A dependency, hash-locked: url and version say what you asked
+// for, hash pins what you actually got. Fields are starred because
+// a build file names them at construction, and that is another
+// module.
+//
+// Fetched into a content-addressed cache and verified against the
+// hash. `zen add json` / `zen remove json` edit these lines for you
+// — the cli writes source, because source is the manifest.
+Package* = {
+    url*: str,
+    version*: str,
+    hash*: str,
+}
+
+// One resolved node in the graph: what b.add, b.lib and b.extern
+// hand back, and what a target's `deps` list is made of. Wiring is
+// per target and Swift-style — a module may import from `pkg` only
+// what the target that owns it declared.
+Dep* = {
+    name*: str,
+}
+
+// An executable target.
+Exe* = {
+    src*: Path,
+    deps*: Vec<Dep>,
+
+    // Defaults to build/{os}-{arch}/{name}. A default makes a field
+    // optional at construction, and Res<Path> is how "absent" is
+    // spelled — None means "you did not say", which is not the same
+    // as an empty path. It is `::` because that is the only member
+    // form that carries a default (a `:` member with a value is a
+    // constant); see the report.
+    out* :: Res<Path> = None,
+}
+
+// A system library linked into a target: `src` is the Zen-side
+// binding, `libs` the link names, `paths` where to find them.
+Lib* = {
+    src*: Path,
+    libs*: Vec<str>,
+    paths*: Vec<str>,
+}
+
+// C sources compiled alongside the tree, rather than a library
+// found on the system. Same three questions, different answer to
+// "where does the code come from", so it is a separate type and not
+// an alias — an Extern that gained a compiler flag would otherwise
+// grow one on Lib too.
+Extern* = {
+    src*: Path,
+    libs*: Vec<str>,
+    paths*: Vec<str>,
+}
+
+// A test target: the functions the walk found, and what they may
+// import. `zen test` runs this.
+Test* = {
+    tests*: Vec<Function>,
+    deps*: Vec<Dep>,
+}
+
+// A bench target. Same walk, different filter — and the budgets the
+// results are gated against, which live in the build file, in code,
+// reviewed like code.
+//
+// No `deps`: neither DESIGN.md's build file nor example/build.zen
+// passes one, and a required field nobody fills is a build file
+// that does not compile. It is added the day a bench needs a
+// package, not before.
+Bench* = {
+    benches*: Vec<Function>,
+    budgets*: Vec<Budget>,
+}
+
+// A locked expectation for one bench, matched to it by name.
+//
+// allocs_op and bytes_op are DETERMINISTIC — every allocation goes
+// through an Alloc, so the counts are identical on every machine —
+// and exceeding them FAILS THE BUILD. ns_op is wall clock, which
+// varies 2-5x on shared ci, so it rides a rolling median and fails
+// only on a sustained shift. A flaky gate gets switched off, and it
+// takes the honest gates down with it.
+Budget* = {
+    name*: str,
+    ns_op*: u64,
+    allocs_op*: u64,
+    bytes_op*: u64,
+}
+
+// The build graph, as the build file sees it.
+//
+// Every method below is a signature without a body: Builder is a
+// struct used as a bound, so the build driver (src/build/build.zen,
+// stage 1) supplies them, and a build file only ever holds the fat
+// value. That is the one declaration form doing its ordinary job —
+// nothing here is a trait, because there are no traits.
+Builder* = {
+    os*: Os,
+    arch*: Arch,
+    env*: Env,
+    alloc*: Alloc,   // the build-time arena
+
+    // The parsed module graph, as src/ast.zen's own nodes. This is
+    // the method that makes test discovery ordinary code:
+    //
+    //     tests ::= b.alloc.Vec<Function>();
+    //     b.module(Path("src")).functions.loop((h, f) {
+    //         (f.params.len == 1 && f.params.get(0).try().type == Tester)
+    //             .then(() { tests.add(f).try() });
+    //     });
+    //
+    // Change the filter, change what a test is. `:` because reading
+    // the graph does not write the builder's own bytes.
+    module* = (self: @Self, path: Path) Module
+
+    // Packages: declared in the build file, fetched into a
+    // content-addressed cache, verified against the hash.
+    add* ::= (self :: @Self, name: str, pkg: Package) Res<Dep, BuildError>
+    remove* ::= (self :: @Self, name: str) Res<(), BuildError>
+
+    // Targets. An exe is not something another target depends on,
+    // so it hands back nothing; a lib and an extern are, so they
+    // hand back the Dep that goes in a `deps` list.
+    exe* = (self :: @Self, name: str, target: Exe) Res<(), BuildError>
+    lib* = (self :: @Self, name: str, target: Lib) Res<Dep, BuildError>
+    extern* = (self :: @Self, name: str, target: Extern) Res<Dep, BuildError>
+    test* = (self :: @Self, name: str, target: Test) Res<(), BuildError>
+    bench* = (self :: @Self, name: str, target: Bench) Res<(), BuildError>
+
+    // The build budgets itself: total and per-target compile times
+    // ride the same rolling median a bench's ns_op does. A 20
+    // minute build is a bug, and bugs fail ci.
+    budget* = (self :: @Self, d: Duration) ()
+}

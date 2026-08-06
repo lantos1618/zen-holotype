@@ -49,6 +49,8 @@ Positions are 1-based line, 1-based **byte** column, and point at the first byte
 
 **A single-file test may write `line:col` and omit the path**, which resolves against the test's entry file. Four suites reached for this independently before it was allowed, which is the tell that the long form was asking for something nobody wanted to write. A right-line/wrong-file match is still a failure.
 
+**A test is compiled against the whole of `src/`, not just `src/std`.** From stage 1 the compiler's own modules — `lex`, `ast`, `parse`, `gen` — are siblings of `std` under one root, so staging only the prelude would mean no corpus test could ever import one and each subsystem would invent a private harness instead. The staged root *is* the compilation root, so `src/lex/lex.zen` is imported as `lex.lex`, exactly as `src/std/core/core.zen` is `std.core`.
+
 **A test's compilation root is its own directory.** Every asserted path is relative to that, and so is every path the compiler emits — which is what makes the determinism check comparing two copies of a tree at different absolute paths meaningful.
 
 **A directory test names its expectation `main.expected`**, matching the `main.zen` it already requires, and visible to `ls` in a way a dotfile is not. `.exit`, `.stderr`, `.count` and `.stage` follow the same rule.

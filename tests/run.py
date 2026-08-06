@@ -380,7 +380,7 @@ class Toolchain:
     emit_argv: list[str]  # command prefix; source and -o are appended
     style: str  # "bootstrap" (source first) | "zen" (source last)
 
-    std_root: Path | None = None  # every program is compiled WITH the prelude
+    src_root: Path | None = None  # the tree every test is compiled against
 
     def command(self, source: Path, out_c: Path, root: Path) -> list[str]:
         # A test is a program, and a program stands on std: `Res`, `Ok`, `Env`
@@ -414,7 +414,7 @@ def make_toolchain(args: argparse.Namespace) -> Toolchain:
             "bootstrap",
             [args.python, "-m", "bootstrap.bootstrap"],
             "bootstrap",
-            std_root=REPO_ROOT / "src" / "std",
+            src_root=REPO_ROOT / "src",
         )
 
     binary = Path(args.zen)
@@ -422,7 +422,7 @@ def make_toolchain(args: argparse.Namespace) -> Toolchain:
         binary = REPO_ROOT / binary
     if not (binary.is_file() and os.access(binary, os.X_OK)):
         raise HarnessError(f"no executable zen compiler at {binary}. Build one (`make build`).")
-    return Toolchain("zen", [str(binary)], "zen", std_root=REPO_ROOT / "src" / "std")
+    return Toolchain("zen", [str(binary)], "zen", src_root=REPO_ROOT / "src")
 
 
 # ------------------------------------------------------------------- running
@@ -573,8 +573,14 @@ def stage(test: Test, tool: Toolchain, work: Path) -> Path:
     else:
         shutil.copy2(test.source, root / test.source.name)
 
-    if tool.std_root and tool.std_root.is_dir():
-        shutil.copytree(tool.std_root, root / "std", dirs_exist_ok=True)
+    # The WHOLE of src/, not just src/std. A program stands on the prelude, and
+    # from stage 1 the compiler's own modules (`lex`, `ast`, `parse`, ..) are
+    # siblings of `std` under the same root -- so staging only `std` means no
+    # corpus test can ever import one, and four subsystems each invent a
+    # private workaround instead. A test compiles against the same tree the
+    # compiler is built from, which is one rule and the honest one.
+    if tool.src_root and tool.src_root.is_dir():
+        shutil.copytree(tool.src_root, root, dirs_exist_ok=True)
     return root
 
 
