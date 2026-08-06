@@ -595,10 +595,25 @@ def stage(test: Test, tool: Toolchain, work: Path) -> Path:
     # found", which names the problem, while an unwanted module that IS
     # staged gives diagnostics from a file the author never mentioned.
     if tool.src_root and tool.src_root.is_dir():
-        wanted = _modules_named_in(root)
-        for entry in sorted(tool.src_root.iterdir()):
-            if entry.name != "std" and entry.name not in wanted:
+        available = {e.name: e for e in tool.src_root.iterdir()}
+        wanted = {"std"} | (_modules_named_in(root) & set(available))
+        # TRANSITIVE. `parse` imports `lex`, so a test naming only `parse`
+        # needs `lex` staged too or it gets "module lex.lex not found". The
+        # first version scanned only the test's own sources and stopped there;
+        # that was fine while every stage-1 module stood alone and stopped
+        # being fine the moment two of them were wired together.
+        frontier = sorted(wanted)
+        while frontier:
+            name = frontier.pop()
+            entry = available[name]
+            if not entry.is_dir():
                 continue
+            for dep in sorted(_modules_named_in(entry) & set(available)):
+                if dep not in wanted:
+                    wanted.add(dep)
+                    frontier.append(dep)
+        for name in sorted(wanted):
+            entry = available[name]
             if entry.is_dir():
                 shutil.copytree(entry, root / entry.name, dirs_exist_ok=True)
             else:
