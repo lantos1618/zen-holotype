@@ -316,6 +316,20 @@ Mostly falls out. If sema is memoized queries and every node has a position, the
 
 If this stage turns out to be expensive, the cause is stage 0.3 — a batch compiler recompiling the world per keystroke — and the fix belongs there.
 
+**"Falls out" is a claim with preconditions, so they are listed and checked as they land.** Discovering at stage 4 that one quietly broke is the expensive version of this stage; checking them while stage 1 is being written is the cheap one.
+
+| precondition | state |
+|---|---|
+| sema is memoized queries | **holds** — `type_of` / `type_from_ast` memoized on AST ids |
+| every node carries a half-open span with a 1-based byte column | **holds** — `AST_CONTRACT.md`, gated by `corpus/parse/parser_spans` and `POSITIONS.md` |
+| go-to-def is a query | **holds** — `defs_of` |
+| diagnostics are values carrying positions | **holds** — every phase, no exceptions |
+| **a cursor position finds its node** | **MISSING** |
+
+The last one is the only primitive an LSP needs that nothing else does, and that is exactly why it is absent: every other consumer walks the tree downward from a root, while an editor arrives holding a byte offset and nothing else. It is small — the arena has every node's span already — but it must be *written down as owed*, because the day it is discovered is the day the server is being built and every other thing is also on fire.
+
+One correctness note that is now load-bearing for this stage as well: `type_of`'s memo key is the node id alone, which is sound only while a generic body is checked once. `src/sema/sema.zen` says it must become `(ExprId, instantiation)` in the same change that makes `T` resolve to an argument. Monomorphisation has since landed, so that key is on the critical path for hover being *correct* inside a generic, not merely fast.
+
 ---
 
 ## Stage 5 — actors, runtime, `@meta`
