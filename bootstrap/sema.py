@@ -2678,6 +2678,8 @@ class Sema:
         sym = self.resolve_name(name, ctx, node)
         if sym is None:
             return ERR
+        if sym.kind == "module":
+            return self.module_not_a_value(name, sym.decl, node)
         if sym.kind == "type":
             td = sym.decl
             if isinstance(td, TypeDef):
@@ -2710,6 +2712,9 @@ class Sema:
                 return Sym("type", var_ty(name))
         td = self.lookup_type(ctx.mod, name)
         if td is not None:
+            mi = self.module_alias(td)
+            if mi is not None:
+                return Sym("module", ERR, decl=mi)
             return Sym("type", ANY, decl=td)
         fns = self.lookup_fns(ctx.mod, name)
         if fns:
@@ -2734,6 +2739,44 @@ class Sema:
         if not quiet and not ctx.quiet:
             self.error(_span(node), "undefined name `%s`" % name)
         return None
+
+    def module_alias(self, td):
+        """The ModuleInfo `sh = shape` names, or None if it is a type alias.
+
+        Grammar R1a makes a single bare name on the right an ALIAS rather than
+        an import, so that `Alias = Shape` needs no lookahead. That decision
+        leaves the two readings sharing one node, and this is what tells them
+        apart: an alias whose target names a module and no type is a MODULE
+        alias, and a module is a namespace, not a type and not a value.
+
+        The distinction is load-bearing for the `*` gate. Every other spelling
+        of an import goes through `modules.py`, which checks exportedness; a
+        bare alias went through `lookup_type` instead, where nothing thought a
+        module was involved -- so `reseat = vec` beside an unstarred `reseat`
+        in `vec` made the unexported name callable."""
+        if td is None or td.kind != "alias" or td.tparams:
+            return None
+        target = td.target
+        if _k(target) not in ("Named", "Path", "Identifier"):
+            return None
+        if _tup(_g(target, "args")):
+            return None
+        name = _g(target, "name", default=None)
+        if not isinstance(name, str):
+            return None
+        mi = self.by_dotted.get(name)
+        if mi is None or mi is td.mod or self.is_builtin_type(name):
+            return None
+        # a type of that name wins: `Alias = Shape` is a type alias even in a
+        # tree that also has a module called `Shape`.
+        other = self.lookup_type(td.mod, name)
+        return None if other is not None and other is not td else mi
+
+    def module_not_a_value(self, name, mi, node):
+        self.error(_span(node),
+                   "`%s` names module `%s`: a module is only usable qualified, "
+                   "as `%s.<name>`" % (name, mi.name, name))
+        return ERR
 
     # -- member -------------------------------------------------------------
 
@@ -2796,7 +2839,9 @@ class Sema:
         return m.ty
 
     def _static_base(self, base, ctx):
-        """`Slot` in `Slot.Gone` / `i32` in `i32.MAX`: a TYPE, not a value."""
+        """`Slot` in `Slot.Gone` / `i32` in `i32.MAX`: a TYPE, not a value.
+        Or `sh` in `sh.Bag` after `sh = shape`: a MODULE, which is a namespace
+        and reaches only what the module starred."""
         if _k(base) not in ("Path", "Identifier"):
             return None
         name = _g(base, "name")
@@ -2806,13 +2851,26 @@ class Sema:
             return None
         td = self.lookup_type(ctx.mod, name)
         if td is not None:
-            return ("user", td)
+            mi = self.module_alias(td)
+            return ("module", mi) if mi is not None else ("user", td)
         if self.is_builtin_type(name):
             return ("builtin", name)
         return None
 
     def _static_member(self, static, name, node, ctx):
         kind, what = static
+        if kind == "module":
+            # `modules.py` gates members and free functions by name, wherever
+            # they are reached from. A TYPE has no such gate, so qualifying
+            # through a module alias was the one way to name an unstarred one.
+            td = what.types.get(name) or self.lookup_type(what, name)
+            if td is None:
+                return ANY
+            if not td.exported and td.mod is not ctx.mod:
+                self.error(_after_dot(_g(node, "base", "object"), _span(node), len(name)),
+                           "%s is not exported by module %s" % (name, what.name))
+                return ERR
+            return self.type_from_def(td, (), ctx)
         if kind == "builtin":
             if what in _INT_PRIMS and name in ("MIN", "MAX"):
                 return prim(what)
@@ -2890,6 +2948,8 @@ class Sema:
         if op in self._LOGIC:
             return BOOL
         if op in self._CMP:
+            if op in ("==", "!="):
+                self._check_eq_operands(node, lt, rt)
             return BOOL
         res = lt
         if lt.kind in ("intlit", "floatlit") and rt.kind not in ("intlit", "floatlit"):
@@ -2897,6 +2957,51 @@ class Sema:
         if PROVEN_TRAPS_ARE_ERRORS and op not in self._WRAP:
             self._proven_trap(node, op, lhs, rhs, res, ctx)
         return res
+
+    def _check_eq_operands(self, node, lt, rt):
+        """`==` is `Eq.eq`, so a type with no `Eq` cannot be compared with it.
+
+        gen_c already lowers `==` on a named type to the `eq` its impl
+        supplies — `str.impl(Eq, ..)` is where str's bytewise equality is
+        written. With no impl there is nothing to call, and a C `==` on a
+        struct or an enum is not legal C, so the operator is refused here
+        rather than reaching the C compiler.
+
+        Comparing tags and payloads structurally is the alternative and it is
+        worse: DESIGN.md lets an impl override `eq` for custom equality, and a
+        `==` that compared bytes instead would disagree with `.eq()` on the
+        same two values — which is exactly what the sealed law "ne is always
+        !eq, they can never diverge" exists to prevent.
+        """
+        ty = settle(lt)
+        if ty.kind in ("any", "error", "never", "variadic"):
+            ty = settle(rt)
+        # primitives and pointers compare with C's own `==`; a type parameter
+        # is re-checked at every instantiation, where it is concrete
+        if ty.kind not in ("named", "res", "union", "array"):
+            return
+        if ty.kind == "named" and (not ty.name or ty.name.startswith("@")):
+            return
+        if self._impls_eq(ty):
+            return
+        fix = ("write `%s.impl(Eq, { .. })`" % base_name(ty.name)
+               if ty.kind == "named" else "match on it")
+        self.error(_span(node),
+                   "`==` needs an `Eq`, and %s does not impl one: equality is a "
+                   "trait, so %s or compare the parts" % (show(ty), fix))
+
+    def _impls_eq(self, ty):
+        if ty.kind != "named":
+            return False  # Res, an anonymous union, an array: nothing owns them
+        target = self._decl_qname(ty)
+        if target is None:
+            return True  # nothing is known about it; do not invent an error
+        for im in self.impls_of(target):
+            if im.trait_name == "Eq" or base_name(im.trait) == "Eq":
+                return True
+        # a type that declares its own `eq` satisfies `Eq` without an impl
+        # block — "you satisfy requirements", and an impl is not the only way
+        return "eq" in self.members_of(ty)
 
     def _proven_trap(self, node, op, lhs, rhs, res, ctx):
         if op in ("/", "%"):
@@ -3134,6 +3239,10 @@ class Sema:
             for a in args:
                 self.type_of(self._arg_value(a), ctx)
             return ERR
+        if sym.kind == "module":
+            for a in args:
+                self.type_of(self._arg_value(a), ctx)
+            return self.module_not_a_value(name, sym.decl, callee)
         if sym.kind == "builtin_fn":
             return self._call_builtin(sym.decl, node, args, targs, ctx, expect)
         if sym.kind == "type":

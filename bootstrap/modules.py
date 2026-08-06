@@ -1170,18 +1170,30 @@ def _check_accesses(graph: Graph, info: ModuleInfo, diags: list) -> None:
 
     writes: list = []
     accesses: list = []
+    called: set = set()
     for node in _walk(info.node):
         target = _write_target(node)
         if target is not None:
             writes.append(id(target))
         if _kind(node) == "Member":
             accesses.append(node)
+        callee = getattr(node, "callee", None) if _kind(node) == "Call" else None
+        if _kind(callee) == "Member":
+            called.add(id(callee))
 
     for node in accesses:
         name = getattr(node, "name", None)
         if not isinstance(name, str) or not name:
             continue
-        found = graph.members.get(name, ()) + graph.functions.get(name, ())
+        # A free function is a candidate only where UFCS could pick it — at a
+        # CALL. `f.body` reads a field and can never mean a free function, so
+        # consulting them there lets an unexported `body` in the field's own
+        # module make the access unreachable and report a name that is not
+        # even visible here. An unexported name does not cross a boundary in
+        # any direction (law 6), least of all to shadow an exported field.
+        found = graph.members.get(name, ())
+        if id(node) in called:
+            found = found + graph.functions.get(name, ())
         if not found:
             continue  # not a name this program declares: not this gate's call
         candidates = _plausible(info, found)
