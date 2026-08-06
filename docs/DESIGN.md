@@ -230,6 +230,8 @@ Circle1 = AddFoo(Circle);        // a binding inside a body is a statement. semi
 println("done");                 // statement. semicolon.
 ```
 
+**A binding or assignment is a statement, so it can never be a block's trailing value** — there is no assignment *expression* to produce one from. `() { x = 1; }`, never `() { x = 1 }`. The compiler used to answer the second form with "expected expression", which names a thing the author did not want; it now names the rule that was broken.
+
 Optional semicolons were the alternative and they carry a real hazard, not an aesthetic one: a statement ending in an expression, followed by a line beginning `(` or `[`, silently becomes a call or an index of the previous line. Newline sensitivity was the other alternative, and it breaks the leading-dot continuation this doc already uses in `build.zen`.
 
 **Non-local exit** is one mechanism, not two special cases:
