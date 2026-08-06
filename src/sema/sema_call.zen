@@ -214,9 +214,9 @@ keep_matching = (c :: Checker, cands: Vec<Cand>, actuals: Vec<Actual>,
 // A named helper rather than a `.then` inside the loop body: a loop
 // binding read inside a nested closure does not resolve.
 // docs/SEMA_BOOTSTRAP_FIXES.md §10.
-keep_one = (c: Checker, k: Cand, actuals: Vec<Actual>, kept :: Vec<Cand>)
+keep_one = (c :: Checker, k: Cand, actuals: Vec<Actual>, kept :: Vec<Cand>)
            Res<(), AllocError> {
-    matches(c, k, actuals).match({
+    matches(c, k, actuals).try().match({
         true  => kept.add(k),
         false => Ok(()),
     })
@@ -461,30 +461,62 @@ tparam_bounds = (c :: Checker, tp: TParam, ctx: Ctx, out :: Vec<TBound>)
 // matching
 // ---------------------------------------------------------------------
 
-matches* = (c: Checker, cand: Cand, actuals: Vec<Actual>) bool {
-    (cand.params.len == actuals.len) && all_fit(c, cand, actuals)
+matches* = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
+           Res<bool, AllocError> {
+    (cand.params.len == actuals.len).match({
+        false => Ok(false),
+        true  => all_fit(c, cand, actuals),
+    })
 }
 
-all_fit = (c: Checker, cand: Cand, actuals: Vec<Actual>) bool {
-    Range(0, actuals.len).find((i) {
-        fits_at(c, cand, actuals, i) == false
-    }).match({ Ok(_) => false, None => true })
+// Every argument, and no early exit — `find` takes a closure that
+// answers `bool`, and asking whether an argument keeps a bound is a
+// question that allocates. A candidate has a handful of parameters, so
+// the shape with nothing to get wrong is the right one.
+all_fit = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
+          Res<bool, AllocError> {
+    ok ::= true;
+    Range(0, actuals.len).loop((h, i) {
+        got = fits_at(c, cand, actuals, i).try();
+        ok = ok && got;
+    });
+    Ok(ok);
 }
 
-fits_at = (c: Checker, cand: Cand, actuals: Vec<Actual>, i: usize) bool {
+fits_at = (c :: Checker, cand: Cand, actuals: Vec<Actual>, i: usize)
+          Res<bool, AllocError> {
     p = ty_at(cand.params, i);
     actuals.get(i).match({
         Ok(a) => fits(c, a, p),
-        None  => false,
+        None  => Ok(false),
     })
 }
 
 // A closure's type is its full signature, and its arity is the part a
 // call site can see without inferring anything.
-fits = (c: Checker, a: Actual, p: TyId) bool {
+fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
     a.is_lambda.match({
-        true  => closure_fits(c, p, a.arity),
-        false => c.assignable(a.ty, p) || is_tvar(c, p),
+        true  => Ok(closure_fits(c, p, a.arity)),
+        false => value_fits(c, a, p),
+    })
+}
+
+// Assignable, or an impl of the bound the parameter names.
+//
+// The second is not a conversion and not a fallback: "a bound is just
+// which struct's shape do I need", so an `Arena` is acceptable where
+// `Alloc` is declared exactly because `Arena.impl(Alloc, ..)` exists
+// and the promise was already kept at the impl. Without it `main`'s own
+// `alloc ::= env.mem.alloc()` — the first line of every program in the
+// language — cannot be passed to anything.
+//
+// It runs second because it is the expensive one: `satisfies_bound`
+// searches the impls of a type, and `assignable` is a `u32` compare in
+// the case that dominates.
+value_fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
+    c.assignable(a.ty, p).match({
+        true  => Ok(true),
+        false => satisfies_bound(c, a.ty, p),
     })
 }
 

@@ -89,6 +89,14 @@ ModuleTable* = {
 // ambient or a program means different things to each.
 PRELUDE*: str = "std.core"
 
+// The same file, spelled the long way. A folder root is reachable as
+// the folder and as the file — `std.core` and `std.core.core` name
+// `std/core/core.zen` — and which spelling a module table ends up
+// under is decided by whichever import reached it first. That must
+// not decide whether a program has a prelude, so both are tried and
+// the short one wins.
+PRELUDE_FILE*: str = "std.core.core"
+
 // The module graph, and every query over names.
 //
 // It carries the `Alloc` for the reason `Vec` and `Ast` do: the tables
@@ -149,11 +157,22 @@ World* = {
     // already been consulted, and asking again would only re-walk them.
     prelude_defs = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
                    Res<(), AllocError> {
-        self.index_of(PRELUDE).match({
+        self.prelude_index().match({
             Ok(p)   => self.prelude_exports(p, mi, name, out),
             None    => Ok(()),
         }).try();
         Ok(());
+    }
+
+    // Where the prelude is, under either of its two spellings. A
+    // program with no prelude module at all is a program with no
+    // prelude, which is a `None` and not a mistake — a test that
+    // compiles three files has one.
+    prelude_index* = (self: @Self) Res<usize> {
+        self.index_of(PRELUDE).match({
+            Ok(p)   => Ok(p),
+            None    => self.index_of(PRELUDE_FILE),
+        })
     }
 
     prelude_exports = (self: @Self, p: usize, mi: usize, name: str,
@@ -180,7 +199,7 @@ World* = {
     // holds a PRIMITIVE and so has no module to ask from.
     prelude_of* = (self: @Self, name: str, out :: Vec<Def>)
                   Res<(), AllocError> {
-        self.index_of(PRELUDE).match({
+        self.prelude_index().match({
             Ok(p)   => self.exported_defs(p, name, out),
             None    => Ok(()),
         }).try();

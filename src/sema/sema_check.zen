@@ -222,11 +222,32 @@ Checker* = {
         Ok(());
     }
 
+    // Did any generic in scope declare a bound on this NAME? The
+    // question `bounds_of` answers as a list, asked where only the
+    // existence matters — so it is a walk and not an allocation.
+    has_bound_named* = (self: @Self, name: str) bool {
+        Range(0, self.bounds.len).find((i) {
+            self.bounds.get(i).match({
+                Ok(b) => b.name.eq(name),
+                None  => false,
+            })
+        }).match({ Ok(_) => true, None => false })
+    }
+
     // Is this bound one a generic in scope declared? The question impl
     // selection asks, and the only question it asks.
     has_bound* = (self: @Self, ty: TyId) bool {
         Range(0, self.bounds.len).find((i) {
             self.bounds.get(i).match({ Ok(b) => b.ty.eq(ty), None => false })
+        }).match({ Ok(_) => true, None => false })
+    }
+
+    // Does anything in scope say what this type parameter promises? The
+    // question `bounds_of` answers with a list, asked as a predicate so
+    // "does this parameter promise anything at all" costs no allocation.
+    is_bounded* = (self: @Self, name: str) bool {
+        Range(0, self.bounds.len).find((i) {
+            self.bounds.get(i).match({ Ok(b) => b.name.eq(name), None => false })
         }).match({ Ok(_) => true, None => false })
     }
 
@@ -276,7 +297,39 @@ Checker* = {
             || self.is_infer(got) || self.is_infer(want)
             || self.literal_fits(got, want)
             || self.set_assignable(got, want)
+            || self.res_assignable(got, want)
             || self.uninstantiated(got, want)
+    }
+
+    // TWO `Res` AGREE WHEN THEIR PARTS DO, and this is the one place
+    // hoisting is paid for. "`Ok(x)` is written before anyone knows
+    // whether it closes a `Res<i32>` or a `Res<i32, E>`", so a bare
+    // `Ok(..)` is `Open` — a form nobody has decided — and `Open` closes
+    // either way. A DECIDED form must match: a `Res<T, E>` is not a
+    // `Res<T>`, and accepting one for the other would let a failure
+    // reach a signature with nowhere to return it.
+    //
+    // The parts go back through `assignable`, so `Res<u8>` reaches
+    // `ok_or`'s `Res<T>` by the same rule that carries `Vec<T>` to
+    // `Vec<Member>`, and `Res<i32>` still does not reach `Res<str>`.
+    res_assignable = (self: @Self, got: TyId, want: TyId) bool {
+        self.types.at(got).match({
+            Res(g) => self.res_fits(g, want),
+            _      => false,
+        })
+    }
+
+    res_fits = (self: @Self, g: TyRes, want: TyId) bool {
+        self.types.at(want).match({
+            Res(w) => self.res_parts_fit(g, w),
+            _      => false,
+        })
+    }
+
+    res_parts_fit = (self: @Self, g: TyRes, w: TyRes) bool {
+        forms_fit(g.form, w.form)
+            && self.assignable(g.value, w.value)
+            && self.assignable(g.error, w.error)
     }
 
     // WHAT NOBODY HAS SUBSTITUTED YET AGREES WITH ANYTHING.
@@ -475,6 +528,25 @@ is_predicate* = (op: BinOp) bool {
         Less => true, LessEq => true, Greater => true, GreaterEq => true,
         And => true, Or => true,
         _ => false,
+    })
+}
+
+// Which `Res` a value is, when one of the two has not been decided.
+// `Open` is what a bare `Ok(x)` carries and it closes either way; two
+// decided forms must be the same one.
+forms_fit* = (got: ResForm, want: ResForm) bool {
+    got.match({
+        Open    => true,
+        Absence => undecided_or(want, false),
+        Failure => undecided_or(want, true),
+    })
+}
+
+undecided_or = (f: ResForm, failure: bool) bool {
+    f.match({
+        Open    => true,
+        Failure => failure,
+        Absence => failure == false,
     })
 }
 

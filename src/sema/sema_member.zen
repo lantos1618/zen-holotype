@@ -53,7 +53,7 @@ is_prim, is_integer, is_float = sema.sema_check
 Case, cases_of, find_case = sema.sema_case
 is_case = sema.sema_match
 type_from_ast, type_of, param_type = sema.sema_type
-global_name_type = sema.sema_type
+global_name_type, def_type = sema.sema_type
 
 // One thing a dot could reach.
 //
@@ -146,9 +146,11 @@ value_base_of = (c :: Checker, node: Expr, text: str, ctx: Ctx)
     Ok(Base(ty: ty, is_type: false));
 }
 
+// Through `def_type` and not `named` directly, so a constant used as a
+// base reads its DECLARED type: `PATH.len` is a `str`'s `len`, and a
+// nominal type called `PATH` has no members at all.
 def_base = (c :: Checker, d: Def) Res<Base, AllocError> {
-    empty ::= c.alloc.Vec<TyId>();
-    ty = c.types.named(d.id, d.qname, d.name, empty).try();
+    ty = c.def_type(d).try();
     Ok(Base(ty: ty, is_type: is_type_def(d.kind)));
 }
 
@@ -242,7 +244,41 @@ value_access = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
 }
 
 opaque* = (c: Checker, ty: TyId) bool {
-    c.is_unknown(ty) || c.is_infer(ty)
+    c.is_unknown(ty) || c.is_infer(ty) || foreign_tvar(c, ty)
+}
+
+// A type parameter that is nobody's here: `Vec`'s own `T`, arriving on
+// a value because the call that produced it did not SUBSTITUTE. It is
+// not this function's `T` — `TyVar` is nominal on its owner precisely so
+// the two cannot be confused — and no bound in scope says what it
+// promises. Nothing here knows what it stands for, so it reaches no
+// members and owes no diagnostic.
+//
+// BOTH questions, because either alone gets a real case wrong. An
+// enclosing `<T>` is in `tvars` and its `t.width` IS a mistake — an
+// unbounded parameter promises nothing, so nothing is there. And a `T:
+// Boxy` reaches `Boxy`'s members whether or not the parameter itself was
+// pushed, which is what `bound_reachable` is written to answer.
+foreign_tvar = (c: Checker, ty: TyId) bool {
+    c.types.at(ty).match({
+        Var(v) => unowned_tvar(c, v.name, ty),
+        _      => false,
+    })
+}
+
+unowned_tvar = (c: Checker, name: str, ty: TyId) bool {
+    (in_scope_tvar(c, name, ty) == false) && (c.is_bounded(name) == false)
+}
+
+// Declared as a type parameter, or declared with a bound — either one
+// puts it in scope. The bound alone is enough and it is the case that
+// matters: `bound_reachable` reads bounds and nothing else, so a `T`
+// something in scope constrained has members to find, and calling it
+// foreign would silence the diagnostic the bound exists to make
+// possible.
+in_scope_tvar = (c: Checker, name: str, ty: TyId) bool {
+    c.has_bound_named(name)
+        || c.lookup_tvar(name).match({ Ok(b) => b.ty.eq(ty), None => false })
 }
 
 known_access = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
@@ -311,36 +347,10 @@ ufcs_or_missing = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
                   Res<TyId, AllocError> {
     defs ::= c.alloc.Vec<Def>();
     c.world.defs_of(ctx.module, ac.name.text, defs).try();
-    (defs.len > 0 || unpromised(c, ty).try()).match({
+    (defs.len > 0).match({
         true  => c.types.unknown(),
         false => no_such_field(c, node, ac, ty),
     })
-}
-
-// A type parameter with no bound IN SCOPE. Poison, and not a mistake.
-//
-// "A type parameter's members are the ones its BOUNDS promise, and
-// nothing else" — so with no bound to read, sema knows nothing about
-// this type and a dot on it is a question it cannot answer. That is
-// exactly what `Unknown` is for: one mistake, one diagnostic, and this
-// is not the mistake.
-//
-// It is reachable because instantiation does not SUBSTITUTE yet:
-// `Vec<Def>.get` still answers with `Vec`'s own `T`, so `d.qname` on the
-// result would otherwise report a gap in this folder as an error in the
-// source. Inside `<T: Boxy>` the bound IS in scope, `bound_reachable`
-// reads its members, and a name `Boxy` does not declare still reports.
-unpromised = (c :: Checker, ty: TyId) Res<bool, AllocError> {
-    c.types.at(ty).match({
-        Var(v)  => without_bound(c, v.name),
-        _       => Ok(false),
-    })
-}
-
-without_bound = (c :: Checker, name: str) Res<bool, AllocError> {
-    bounds ::= c.alloc.Vec<TyId>();
-    c.bounds_of(name, bounds).try();
-    Ok(bounds.len == 0);
 }
 
 no_such_field = (c :: Checker, node: Expr, ac: Access, ty: TyId)
@@ -767,12 +777,38 @@ add_supplied = (c :: Checker, ty: TyId, bound: TyId, name: str, id: ImplId,
     ))
 }
 
+// The third site of the same rule, and the one a member lookup alone
+// would not show: a bound's members are read in the bound's own scope.
+// `Slot<T> = { held*: T }` declares `T` and its members mean it, so
+// reading them without it reports `T` as undefined in the declaration
+// that binds it — from a caller that only asked what a dot reaches.
 bound_member_type = (c :: Checker, bound: TyId, name: str, self_ty: TyId)
                     Res<TyId, AllocError> {
     members ::= c.alloc.Vec<Member>();
     bound_members(c, bound, members).try();
     mi = bound_module(c, bound);
-    named_member_type(c, members, name, mi, self_ty)
+    tmark = c.tvar_mark();
+    enter_bound_tvars(c, bound, mi).try();
+    got = named_member_type(c, members, name, mi, self_ty).try();
+    c.release_tvars(tmark).try();
+    Ok(got);
+}
+
+enter_bound_tvars = (c :: Checker, bound: TyId, mi: usize)
+                    Res<(), AllocError> {
+    c.types.at(bound).match({
+        Named(n) => enter_named_tvars(c, n, mi),
+        _        => Ok(()),
+    })
+}
+
+enter_named_tvars = (c :: Checker, n: TyNamed, mi: usize)
+                    Res<(), AllocError> {
+    decl_at(c.tree, n.decl).match({
+        Ok(d) => enter_decl_tvars(c, d, mi),
+        None  => Ok(()),
+    }).try();
+    Ok(());
 }
 
 named_member_type = (c :: Checker, members: Vec<Member>, name: str,

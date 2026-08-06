@@ -478,3 +478,51 @@ constructing the checker for exactly this reason.
 
 Worth a sentence in `AST_CONTRACT.md`: "an `Ast` is a value, and a copy
 of it is a snapshot."
+
+---
+
+## 13. The driver names a module by the IMPORT that reached it, so one
+   file is two modules — and a program can lose its prelude
+
+**Blocking: it was, for whole-program checking. Worked around inside
+`sema_def.zen`; the defect is in `src/zen/zen_build.zen`.**
+
+`Build.enqueue` keys a `Unit` on `dotted(im.module)` — the spelling of
+the import that discovered the file — and `Build.file_of` maps that
+spelling back to a path. A folder root has two spellings for one file:
+`std/core/core.zen` is `std.core` when a module writes `Range =
+std.core` and `std.core.core` when it writes `Eq = std.core.core`. Both
+occur in `src/`, so that file is parsed TWICE and lands in the `Ast` as
+two modules with two names and one set of declarations.
+
+Two consequences, in order of how much they cost:
+
+1. **A program that never spells the short form has no prelude.**
+   `defs_of` reaches the prelude by asking `index_of("std.core")`, which
+   is DESIGN.md's name for it and `bootstrap/modules.py`'s `PRELUDE`.
+   A root whose modules all write `std.core.range`, `std.core.result`,
+   `std.core.core` gets `None` and every ambient name — `Vec`, `str`,
+   `Res` — becomes an undefined name, in `std` itself:
+
+   ```groovy
+   // main.zen, with src/std/ beside it
+   str = std.text
+   hello = (s: str) usize { s.len }
+   ```
+
+   ```
+   std/text/text_str.zen:72:21: no such field or method on this type `len`
+   ...18 diagnostics, none of them about main.zen
+   ```
+
+   `World.prelude_index` now tries `PRELUDE_FILE` (`std.core.core`)
+   when `PRELUDE` misses, which is correct on its own terms — both
+   spellings name one module — but it is covering for the driver.
+
+2. **Every declaration in a doubly-named module exists twice.** Nothing
+   depends on it today because the two tables are asked separately, but
+   any rule that counts declarations program-wide (a redeclaration
+   check, `impls_named`) will see doubles.
+
+The fix belongs in the driver: name a `Unit` by its resolved PATH, not
+by the import's spelling, and let two spellings find the one unit.

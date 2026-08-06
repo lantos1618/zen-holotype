@@ -1,0 +1,153 @@
+// A name that is not imported is not visible, and the prelude is the
+// only exception.
+//
+// DESIGN.md, Modules: "That exception is what 'auto-imported' means:
+// `std.core` is imported into every module, so `Res`, `Ok`, `Vec`,
+// `Map`, `str`, `Env` and the rest are in scope everywhere without a
+// line. Everything else needs its import, and this is not a formality —
+// a compiler that resolves any exported top-level name program-wide
+// makes 'two modules may define the same top-level name' impossible,
+// which is the property the flat namespace exists to provide."
+//
+// So there are FIVE properties, and the negative ones carry the weight:
+// a fallback that answers every name is the whole-program table that
+// paragraph rules out, and it would pass the positive tests alone.
+//
+//   - a prelude name resolves with no import                   -> yes
+//   - a name NOT in the prelude and NOT imported does not       -> no
+//   - the same name DOES resolve where it was imported          -> yes
+//   - an UNSTARRED declaration in the prelude stays private:
+//     the `*` gate applies at the prelude hop like any other    -> no
+//   - two modules declaring one name are two declarations, and
+//     each module sees its OWN                                  -> yes
+//
+// The last is the property the whole rule exists to protect, so it is
+// asserted rather than assumed: `own` and `other` both declare `Widget`
+// and neither imports the other.
+//
+// The AST is built through the arena API rather than parsed: this is a
+// test of name resolution, and routing it through a parser would make a
+// parser bug read as a resolution bug.
+
+World, Def, PRELUDE = sema.sema_def
+Ast = ast.ast_arena
+Decl, DeclKind, Struct, Import, ImportName, Member, Module = ast.ast_node
+TParam = ast.ast_node
+Pos, Span, Ident, QualifiedName, no_trivia = ast.ast_span
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+
+at = () Span {
+    Span(file: "in.zen", start: Pos(line: 1, col: 1),
+         end: Pos(line: 1, col: 2))
+}
+
+id_of = (text: str) Ident { Ident(text: text, span: at()) }
+
+// a struct declaration, starred or not. `exported` is the whole of the
+// visibility rule at the DECLARATION hop, and it is a parameter here so
+// the unstarred case can be asked for.
+struct_decl = (a: Alloc, text: str, exported: bool) Res<Decl, AllocError> {
+    members ::= a.Vec<Member>();
+    tparams ::= a.Vec<TParam>();
+    Ok(Decl(
+        kind: DeclKind.Struct(Struct(
+            name: id_of(text), exported: exported, tparams: tparams,
+            members: members, body_span: at())),
+        span: at(), leading: no_trivia(), trailing: no_trivia()));
+}
+
+// `Widget = other` — one binding, not re-exported. The `*` on the
+// IMPORT is what re-exports; this deliberately has none.
+import_decl = (a: Alloc, name: str, module: str) Res<Decl, AllocError> {
+    segments ::= a.Vec<Ident>();
+    segments.add(id_of(module)).try();
+    names ::= a.Vec<ImportName>();
+    names.add(ImportName(name: id_of(name), exported: false, span: at(),
+                         leading: no_trivia(),
+                         trailing: no_trivia())).try();
+    Ok(Decl(
+        kind: DeclKind.Import(Import(
+            names: names,
+            module: QualifiedName(segments: segments, span: at()))),
+        span: at(), leading: no_trivia(), trailing: no_trivia()));
+}
+
+module_of = (tree :: Ast, name: str, decls: Vec<Decl>)
+            Res<(), AllocError> {
+    tree.add_module(Module(name: name, decls: decls, span: at(),
+                           leading: no_trivia(),
+                           trailing: no_trivia())).try();
+    Ok(());
+}
+
+// The question, and the answer as a reader can check it: how many
+// declarations of `name` module `mi` can see, and which module each one
+// came from — because "two modules may define the same top-level name"
+// means a count alone would not tell them apart.
+visible = (w :: World, a: Alloc, label: str, mi: usize, name: str)
+          Res<(), AllocError> {
+    found ::= a.Vec<Def>();
+    w.defs_of(mi, name, found).try();
+    out ::= a.String().try();
+    found.loop((h, d) {
+        out.add_bytes(" ").try();
+        out.add_bytes(d.qname).try();
+    });
+    println("{}: {}{}", label, found.len, out.view());
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    tree ::= alloc.Ast();
+
+    // module 0 IS the prelude — the name is `PRELUDE`'s, because a
+    // module is addressable by its full dotted path only and the
+    // resolver has to find this one by that spelling
+    core ::= alloc.Vec<Decl>();
+    core.add(struct_decl(alloc, "Vec", true).try()).try();
+    core.add(struct_decl(alloc, "Scratch", false).try()).try();
+    module_of(tree, PRELUDE, core).try();
+
+    // module 1: declares `Gadget` and its own `Widget`, exports both
+    other ::= alloc.Vec<Decl>();
+    other.add(struct_decl(alloc, "Gadget", true).try()).try();
+    other.add(struct_decl(alloc, "Widget", true).try()).try();
+    module_of(tree, "other", other).try();
+
+    // module 2: imports nothing at all
+    bare ::= alloc.Vec<Decl>();
+    module_of(tree, "bare", bare).try();
+
+    // module 3: imports `Gadget` from `other`, and declares a `Widget`
+    // of its OWN — the collision the flat namespace has to survive
+    own ::= alloc.Vec<Decl>();
+    own.add(import_decl(alloc, "Gadget", "other").try()).try();
+    own.add(struct_decl(alloc, "Widget", true).try()).try();
+    module_of(tree, "own", own).try();
+
+    w ::= alloc.World(tree).try();
+
+    // the prelude is in scope with no import
+    visible(w, alloc, "bare sees Vec", 2, "Vec").try();
+
+    // and nothing else is
+    visible(w, alloc, "bare sees Gadget", 2, "Gadget").try();
+
+    // the `*` gate applies at the prelude hop like any other
+    visible(w, alloc, "bare sees Scratch", 2, "Scratch").try();
+
+    // a written import is what makes it visible
+    visible(w, alloc, "own sees Gadget", 3, "Gadget").try();
+
+    // and each module sees its OWN Widget, which is the property the
+    // whole rule exists to provide
+    visible(w, alloc, "own sees Widget", 3, "Widget").try();
+    visible(w, alloc, "other sees Widget", 1, "Widget").try();
+
+    // a module that imported nothing sees neither
+    visible(w, alloc, "bare sees Widget", 2, "Widget").try();
+    Ok(0);
+}

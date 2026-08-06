@@ -35,6 +35,7 @@
 // problem and not a smell.
 
 Ast, Expr, ExprId, Type, TypeId, Span, Ident, Literal, LiteralKind = ast
+Decl, DeclKind, Const = ast
 BinOp, UnOp, Block, BlockId, Stmt, StmtKind = ast
 Param, Binary, Unary, Bind, ExprStmt, Match, Access, Call = ast
 Alloc, AllocError = std.mem
@@ -43,7 +44,7 @@ str, String = std.text
 Range = std.core
 DeclId = sema.sema_id
 TyId, Ty, Types, ResForm, TyRes = sema.sema_ty
-World, Def, DefKind = sema.sema_def
+World, Def, DefKind, decl_at = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 ARRAY_DECL, UNRESOLVED, is_prim, is_predicate = sema.sema_check
@@ -323,9 +324,50 @@ unresolved_name* = (c :: Checker, node: Expr, text: str)
 // A name that denotes a DECLARATION rather than a value. A type used
 // as a value is the type itself — `Shape.Unit` reads through it —
 // and a function's own type is what overload resolution narrows.
+//
+// A CONSTANT IS NOT ITS OWN TYPE, and it is the one form here that
+// isn't. `RES_PATH* : str = "std.core.result.Res"` binds a `str`, and
+// reading the name as a nominal type called `RES_PATH` makes every
+// argument built from a constant fail to match the `str` parameter it
+// was written for — "no overload matches" on a call whose only
+// irregularity is that one argument was named.
 def_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
+    d.kind.match({
+        ConstDef => const_type(c, d),
+        _        => decl_as_type(c, d),
+    })
+}
+
+decl_as_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
     empty ::= c.alloc.Vec<TyId>();
     c.types.named(d.id, d.qname, d.name, empty)
+}
+
+// What a constant's name denotes: the type it was declared with, or —
+// with none written — the type of the value it was bound to. Resolved
+// in the module that DECLARES it, because a written type is a name and
+// a name means what it means where it was written.
+const_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
+    decl_at(c.tree, d.id).match({
+        Ok(x) => const_decl_type(c, x, d),
+        None  => c.types.unknown(),
+    })
+}
+
+const_decl_type = (c :: Checker, x: Decl, d: Def) Res<TyId, AllocError> {
+    poison = c.types.unknown().try();
+    ctx = Ctx(d.id.module.to_usize(), poison);
+    x.kind.match({
+        Const(k) => written_or_value(c, k, ctx),
+        _        => c.types.unknown(),
+    })
+}
+
+written_or_value = (c :: Checker, k: Const, ctx: Ctx) Res<TyId, AllocError> {
+    k.type.match({
+        Ok(t)   => c.type_from_ast(t, ctx),
+        None    => c.type_of(k.value, ctx),
+    })
 }
 
 // `a == b` is `bool` whatever the operands are; `a + b` is the

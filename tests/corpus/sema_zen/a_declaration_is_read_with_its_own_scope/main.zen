@@ -1,0 +1,297 @@
+// A declaration is read with what it declared already in scope.
+//
+// `sema_decl.zen` did this for a function's `<T>` and for nothing else,
+// so three declaration forms were read in a scope that was missing the
+// thing they had just introduced:
+//
+//   - a STRUCT's `<T>` is in scope in the members it declares, or
+//     `Vec`'s own `get* = (self: @Self, i: usize) Res<T>` reports `T`
+//     as an undefined name inside the declaration that binds it
+//   - an IMPL borrows the TARGET's, because `Vec.impl(Range<T>, ..)`
+//     writes `Vec`'s `T` and `ast.Impl` has no `tparams` field to hold
+//     one of its own
+//   - a CONSTANT denotes its DECLARED type and not itself: `PATH : str`
+//     binds a `str`, and reading the name as a nominal type called
+//     `PATH` makes every argument built from a constant fail to match
+//     the `str` parameter it was written for
+//
+// The fourth property is the one that stops the first two from being a
+// blanket amnesty. A `T` that NOTHING in scope declared — `Vec`'s own,
+// arriving on a value because instantiation does not SUBSTITUTE yet —
+// reaches no members and owes no diagnostic, but a `T` an enclosing
+// signature DID constrain still reports a name its bound does not
+// declare. Poison where sema knows nothing; a diagnostic where it does.
+//
+// The AST is built through the arena API rather than parsed: this is a
+// test of sema, and routing it through a parser would make a parser bug
+// read as a sema bug.
+
+Checker, Ctx = sema.sema_check
+World, Def = sema.sema_def
+check_impl = sema.sema_bound
+DeclId, ImplId = sema.sema_id
+Found, members_of = sema.sema_member
+TyId, Types = sema.sema_ty
+type_from_ast, type_of = sema.sema_type
+Ast = ast.ast_arena
+Expr, ExprKind, Name, Literal, LiteralKind, Access = ast.ast_node
+Decl, DeclKind, Struct, Const, Function, Form, Module = ast.ast_node
+Member, MemberKind, Field, Param, TParam, Impl = ast.ast_node
+Type, TypeKind, Named, Block, Stmt = ast.ast_node
+Pos, Span, Ident, no_trivia = ast.ast_span
+ExprId, TypeId, BlockId = ast.ast_id
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+
+at = () Span {
+    Span(file: "in.zen", start: Pos(line: 1, col: 1),
+         end: Pos(line: 1, col: 2))
+}
+
+id_of = (text: str) Ident { Ident(text: text, span: at()) }
+
+// ---------------------------------------------------------------- types
+
+ty = (tree :: Ast, kind: TypeKind) Res<TypeId, AllocError> {
+    tree.add_type(Type(kind: kind, span: at(),
+                       leading: no_trivia(), trailing: no_trivia()))
+}
+
+named_ty = (tree :: Ast, a: Alloc, text: str) Res<TypeId, AllocError> {
+    args ::= a.Vec<TypeId>();
+    ty(tree, TypeKind.Named(Named(name: id_of(text), args: args)))
+}
+
+// `Holder<T>` — a written name APPLIED to a type parameter, which is
+// the form an impl target and a member signature both reach for
+applied_ty = (tree :: Ast, a: Alloc, text: str, arg: TypeId)
+             Res<TypeId, AllocError> {
+    args ::= a.Vec<TypeId>();
+    args.add(arg).try();
+    ty(tree, TypeKind.Named(Named(name: id_of(text), args: args)))
+}
+
+// --------------------------------------------------------------- pieces
+
+tparam_of = (a: Alloc, text: str) Res<TParam, AllocError> {
+    bounds ::= a.Vec<TypeId>();
+    Ok(TParam(name: id_of(text), bounds: bounds, span: at(),
+              leading: no_trivia(), trailing: no_trivia()));
+}
+
+one_tparam = (a: Alloc, text: str) Res<Vec<TParam>, AllocError> {
+    out ::= a.Vec<TParam>();
+    out.add(tparam_of(a, text).try()).try();
+    Ok(out);
+}
+
+field_member = (text: str, t: TypeId) Member {
+    Member(
+        kind: MemberKind.Field(Field(
+            name: id_of(text), exported: true, mutable: false,
+            type: Ok(t), value: None)),
+        span: at(), leading: no_trivia(), trailing: no_trivia())
+}
+
+// `Holder<T> = { item*: T }` — the member whose type is the struct's
+// own type parameter, which is the whole subject
+holder_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
+    tvar = named_ty(tree, a, "T").try();
+    members ::= a.Vec<Member>();
+    members.add(field_member("item", tvar)).try();
+    Ok(Decl(
+        kind: DeclKind.Struct(Struct(
+            name: id_of("Holder"), exported: true,
+            tparams: one_tparam(a, "T").try(),
+            members: members, body_span: at())),
+        span: at(), leading: no_trivia(), trailing: no_trivia()));
+}
+
+// `Boxy = { size*: i32 }` — a bound, and nothing but storage, exactly
+// as DESIGN.md's own worked example is
+boxy_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
+    i32t = named_ty(tree, a, "i32").try();
+    members ::= a.Vec<Member>();
+    members.add(field_member("size", i32t)).try();
+    tparams ::= a.Vec<TParam>();
+    Ok(Decl(
+        kind: DeclKind.Struct(Struct(
+            name: id_of("Boxy"), exported: true, tparams: tparams,
+            members: members, body_span: at())),
+        span: at(), leading: no_trivia(), trailing: no_trivia()));
+}
+
+// `Holder.impl(Slot<T>, { held: self.item })` — the impl whose BOUND
+// names the target's type parameter and never declares one of its own.
+// It supplies what `Slot` requires, so the only thing left that can go
+// wrong is resolving `T`.
+impl_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
+    tvar = named_ty(tree, a, "T").try();
+    slot = applied_ty(tree, a, "Slot", tvar).try();
+    inner = name_of(tree, "self").try();
+    supplied = dot(tree, inner, "item").try();
+    members ::= a.Vec<Member>();
+    members.add(Member(
+        kind: MemberKind.Field(Field(
+            name: id_of("held"), exported: true, mutable: false,
+            type: None, value: Ok(supplied))),
+        span: at(), leading: no_trivia(),
+        trailing: no_trivia())).try();
+    Ok(Decl(
+        kind: DeclKind.Impl(Impl(
+            target: id_of("Holder"), bound: slot,
+            members: members, body_span: at())),
+        span: at(), leading: no_trivia(), trailing: no_trivia()));
+}
+
+// `Slot<T> = { held*: T }` — what the impl above promises
+slot_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
+    tvar = named_ty(tree, a, "T").try();
+    members ::= a.Vec<Member>();
+    members.add(field_member("held", tvar)).try();
+    Ok(Decl(
+        kind: DeclKind.Struct(Struct(
+            name: id_of("Slot"), exported: true,
+            tparams: one_tparam(a, "T").try(),
+            members: members, body_span: at())),
+        span: at(), leading: no_trivia(), trailing: no_trivia()));
+}
+
+// `PATH* : str = "src"` — a constant with a WRITTEN type
+const_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
+    strt = named_ty(tree, a, "str").try();
+    value = tree.add_expr(Expr(
+        kind: ExprKind.Literal(Literal(kind: LiteralKind.Str,
+                                       text: "\"src\"")),
+        span: at(), leading: no_trivia(),
+        trailing: no_trivia())).try();
+    Ok(Decl(
+        kind: DeclKind.Const(Const(
+            name: id_of("PATH"), exported: true, mutable: false,
+            type: Ok(strt), value: value)),
+        span: at(), leading: no_trivia(), trailing: no_trivia()));
+}
+
+// ---------------------------------------------------------- expressions
+
+expr = (tree :: Ast, kind: ExprKind) Res<ExprId, AllocError> {
+    tree.add_expr(Expr(kind: kind, span: at(),
+                       leading: no_trivia(), trailing: no_trivia()))
+}
+
+name_of = (tree :: Ast, text: str) Res<ExprId, AllocError> {
+    expr(tree, ExprKind.Name(Name(text: text)))
+}
+
+dot = (tree :: Ast, base: ExprId, field: str) Res<ExprId, AllocError> {
+    expr(tree, ExprKind.Access(Access(base: base, name: id_of(field))))
+}
+
+// ---------------------------------------------------------------- asks
+
+// The type a member of `ty` called `name` was declared with, or the
+// word for "there is no such member".
+declared = (c :: Checker, a: Alloc, label: str, ty: TyId, name: str)
+           Res<(), AllocError> {
+    found ::= a.Vec<Found>();
+    members_of(c, ty, name, found).try();
+    out ::= a.String().try();
+    found.get(0).match({
+        None    => out.add_bytes("none"),
+        Ok(f)   => c.types.write_name(f.ty, out),
+    }).try();
+    println("{} -> {}", label, out.view());
+    Ok(());
+}
+
+// What an expression is, and what asking cost in diagnostics.
+asked = (c :: Checker, a: Alloc, label: str, id: ExprId, ctx: Ctx)
+        Res<(), AllocError> {
+    before = c.diag_count();
+    got = c.type_of(id, ctx).try();
+    out ::= a.String().try();
+    c.types.write_name(got, out).try();
+    println("{} -> {}, {} diagnostic(s)", label, out.view(),
+            c.diag_count() - before);
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    tree ::= alloc.Ast();
+
+    decls ::= alloc.Vec<Decl>();
+    decls.add(holder_decl(alloc, tree).try()).try();
+    decls.add(slot_decl(alloc, tree).try()).try();
+    decls.add(boxy_decl(alloc, tree).try()).try();
+    decls.add(impl_decl(alloc, tree).try()).try();
+    decls.add(const_decl(alloc, tree).try()).try();
+
+    holder_node = named_ty(tree, alloc, "Holder").try();
+    boxy_node = named_ty(tree, alloc, "Boxy").try();
+
+    // `h.item` where `h: Holder` — the member whose written type is the
+    // struct's own `T`
+    h = name_of(tree, "h").try();
+    h_item = dot(tree, h, "item").try();
+
+    // `PATH` on its own. It denotes a `str`, not a nominal type called
+    // `PATH`, and that is the whole of the constant rule
+    path = name_of(tree, "PATH").try();
+
+    // `v.nope` where `v: T` and NOTHING declared `T` — poison
+    v = name_of(tree, "v").try();
+    v_nope = dot(tree, v, "nope").try();
+
+    // `b.nope` where `b: T` and `T: Boxy` IS in scope — a real mistake
+    b = name_of(tree, "b").try();
+    b_nope = dot(tree, b, "nope").try();
+    b_size = dot(tree, b, "size").try();
+
+    tree.add_module(Module(name: "main", decls: decls, span: at(),
+                           leading: no_trivia(),
+                           trailing: no_trivia())).try();
+
+    c ::= alloc.Checker(tree).try();
+    none = c.types.unknown().try();
+    ctx = Ctx(0, none);
+
+    holder_ty = c.type_from_ast(holder_node, ctx).try();
+    boxy_ty = c.type_from_ast(boxy_node, ctx).try();
+    foreign = c.types.var("T", "other.Elsewhere").try();
+    mine = c.types.var("T", "main.scale").try();
+
+    // a struct's `<T>` is in scope in the members it declares
+    declared(c, alloc, "Holder.item", holder_ty, "item").try();
+
+    // an impl borrows the target's, so `Slot<T>`'s member arrives too —
+    // and the impl itself resolves without a word, which is the half a
+    // member lookup alone would not show: an unresolvable `T` in the
+    // bound is a diagnostic at the IMPL, not a missing member
+    declared(c, alloc, "Holder.held", holder_ty, "held").try();
+    before_impl = c.diag_count();
+    check_impl(c, ImplId(decl: DeclId(module: 0, decl: 3)), 0).try();
+    println("impl of Slot<T>: {} diagnostic(s)",
+            c.diag_count() - before_impl);
+
+    c.bind("h", holder_ty, false).try();
+    c.bind("v", foreign, false).try();
+    c.bind("b", mine, false).try();
+    // `PATH` is deliberately NOT bound: a local shadows everything, and
+    // the rule under test is what the DECLARATION denotes
+
+    asked(c, alloc, "h.item", h_item, ctx).try();
+    asked(c, alloc, "PATH", path, ctx).try();
+
+    // a `T` nothing in scope declared: poison, and no diagnostic
+    asked(c, alloc, "v.nope (no T in scope)", v_nope, ctx).try();
+
+    // the same shape with the bound in scope: a real mistake, reported
+    mark = c.bound_mark();
+    c.push_bound("T", boxy_ty).try();
+    asked(c, alloc, "b.size (T: Boxy)", b_size, ctx).try();
+    asked(c, alloc, "b.nope (T: Boxy)", b_nope, ctx).try();
+    c.release_bounds(mark).try();
+    Ok(0);
+}

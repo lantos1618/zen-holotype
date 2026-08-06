@@ -1,0 +1,194 @@
+// A prelude declaration of a primitive's name IS that primitive.
+//
+// DESIGN.md, Modules: "`str` and `i32` are declared as ordinary structs
+// in the prelude — `str` in `std.text.text_str` carrying `len`, `get`,
+// `index` and `slice`; `i32` in `std.core.num` carrying `MIN`, `MAX` and
+// `BITS` — and the members they declare belong to the primitive the
+// compiler already knows. They are not a second nominal type that
+// shadows it. Getting this wrong is not a small error: it mints a `str`
+// beside the `str` every literal has, and then every literal, every trap
+// check and every standard-library signature disagrees about which one
+// they meant."
+//
+// So there are FOUR properties, and the last two are the ones a
+// hardcoded member table would pass while still being wrong:
+//
+//   - a member the prelude declares on `str` is reachable on a `str`  -> yes
+//   - a member it does not declare is still a diagnostic              -> yes
+//   - a string LITERAL and a `str`-typed value are ONE type, not two  -> yes
+//   - the receiver stays the PRIMITIVE, so `@Self` in the declared
+//     method is the type the literal already has                      -> yes
+//
+// The third is asserted by id, because `TyId` is interned and "a type is
+// an interned id": two ids that print the same and compare unequal is
+// exactly the failure DESIGN.md describes.
+//
+// The AST is built through the arena API rather than parsed: this is a
+// test of member lookup, and routing it through a parser would make a
+// parser bug read as a lookup bug.
+
+Checker, Ctx = sema.sema_check
+Types, TyId = sema.sema_ty
+PRELUDE = sema.sema_def
+Ast = ast.ast_arena
+Expr, ExprKind, Access, Name, Literal, LiteralKind = ast.ast_node
+Decl, DeclKind, Struct, Import, ImportName, Module = ast.ast_node
+Member, MemberKind, Field, Function, Form, Param, TParam = ast.ast_node
+Type, TypeKind, Named = ast.ast_node
+ExprId, TypeId = ast.ast_id
+Pos, Span, Ident, QualifiedName, no_trivia = ast.ast_span
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+
+at = () Span {
+    Span(file: "in.zen", start: Pos(line: 1, col: 1), end: Pos(line: 1, col: 2))
+}
+
+id_of = (text: str) Ident { Ident(text: text, span: at()) }
+
+named_type = (tree :: Ast, a: Alloc, text: str) Res<TypeId, AllocError> {
+    args ::= a.Vec<TypeId>();
+    tree.add_type(Type(kind: TypeKind.Named(Named(name: id_of(text), args: args)),
+                       span: at(), leading: no_trivia(), trailing: no_trivia()))
+}
+
+expr = (tree :: Ast, kind: ExprKind) Res<ExprId, AllocError> {
+    tree.add_expr(Expr(kind: kind, span: at(),
+                       leading: no_trivia(), trailing: no_trivia()))
+}
+
+dot = (tree :: Ast, base: ExprId, name: str) Res<ExprId, AllocError> {
+    expr(tree, ExprKind.Access(Access(base: base, name: id_of(name))))
+}
+
+// `len*: usize` — storage, and starred so a byte count is readable
+// outside the module that declares it
+field = (a: Alloc, tree :: Ast, name: str, type: str) Res<Member, AllocError> {
+    t = named_type(tree, a, type).try();
+    Ok(Member(kind: MemberKind.Field(Field(
+                  name: id_of(name), exported: true, mutable: false,
+                  type: Ok(t), value: None)),
+              span: at(), leading: no_trivia(), trailing: no_trivia()));
+}
+
+// `is_empty* = (self: @Self) bool` — a sealed method with a body, which
+// is what makes its type a function OF the receiver
+method = (a: Alloc, tree :: Ast, name: str, ret: str)
+         Res<Member, AllocError> {
+    self_ty = tree.add_type(Type(kind: TypeKind.SelfType, span: at(),
+                                 leading: no_trivia(),
+                                 trailing: no_trivia())).try();
+    rty = named_type(tree, a, ret).try();
+    params ::= a.Vec<Param>();
+    params.add(Param(name: id_of("self"), type: Ok(self_ty), mutable: false,
+                     value: None, span: at(), leading: no_trivia(),
+                     trailing: no_trivia())).try();
+    tparams ::= a.Vec<TParam>();
+    Ok(Member(kind: MemberKind.Function(Function(
+                  name: id_of(name), exported: true, form: Form.Sealed,
+                  tparams: tparams, params: params, params_span: at(),
+                  ret: Ok(rty), body: None)),
+              span: at(), leading: no_trivia(), trailing: no_trivia()));
+}
+
+struct_decl = (a: Alloc, text: str, members: Vec<Member>)
+              Res<Decl, AllocError> {
+    tparams ::= a.Vec<TParam>();
+    Ok(Decl(
+        kind: DeclKind.Struct(Struct(
+            name: id_of(text), exported: true, tparams: tparams,
+            members: members, body_span: at())),
+        span: at(), leading: no_trivia(), trailing: no_trivia()));
+}
+
+// `str* = std.text.text_str` — a re-export, which is an import whose
+// binding is starred. That is the whole of how the prelude reaches a
+// declaration it does not itself hold.
+reexport = (a: Alloc, name: str, module: str) Res<Decl, AllocError> {
+    segments ::= a.Vec<Ident>();
+    segments.add(id_of(module)).try();
+    names ::= a.Vec<ImportName>();
+    names.add(ImportName(name: id_of(name), exported: true, span: at(),
+                         leading: no_trivia(), trailing: no_trivia())).try();
+    Ok(Decl(
+        kind: DeclKind.Import(Import(
+            names: names,
+            module: QualifiedName(segments: segments, span: at()))),
+        span: at(), leading: no_trivia(), trailing: no_trivia()));
+}
+
+module_of = (tree :: Ast, name: str, decls: Vec<Decl>) Res<(), AllocError> {
+    tree.add_module(Module(name: name, decls: decls, span: at(),
+                           leading: no_trivia(), trailing: no_trivia())).try();
+    Ok(());
+}
+
+// what a node's type is CALLED, and how many diagnostics asking it cost
+reaches = (c :: Checker, a: Alloc, label: str, id: ExprId, ctx: Ctx)
+          Res<(), AllocError> {
+    before = c.diag_count();
+    ty = c.type_of(id, ctx).try();
+    out ::= a.String().try();
+    c.types.write_name(ty, out).try();
+    println("{} -> {} ({} diagnostic(s))", label, out.view(),
+            c.diag_count() - before);
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    tree ::= alloc.Ast();
+
+    // module 0 IS the prelude, under the spelling `defs_of` looks for.
+    // It declares nothing and re-exports `str`, which is what a folder
+    // root is.
+    core ::= alloc.Vec<Decl>();
+    core.add(reexport(alloc, "str", "std.text.text_str").try()).try();
+    module_of(tree, PRELUDE, core).try();
+
+    // module 1 declares `str` the way std.text does: a byte count and a
+    // question about it
+    members ::= alloc.Vec<Member>();
+    members.add(field(alloc, tree, "len", "usize").try()).try();
+    members.add(method(alloc, tree, "is_empty", "bool").try()).try();
+    text ::= alloc.Vec<Decl>();
+    text.add(struct_decl(alloc, "str", members).try()).try();
+    module_of(tree, "std.text.text_str", text).try();
+
+    // module 2 is ordinary user code and imports nothing at all
+    user ::= alloc.Vec<Decl>();
+    module_of(tree, "user", user).try();
+
+    s = expr(tree, ExprKind.Name(Name(text: "s"))).try();
+    s_len = dot(tree, s, "len").try();
+    s_empty = dot(tree, s, "is_empty").try();
+    s_nope = dot(tree, s, "nope").try();
+    literal = expr(tree, ExprKind.Literal(
+        Literal(kind: LiteralKind.Str, text: "\"hi\""))).try();
+
+    c ::= alloc.Checker(tree).try();
+    none = c.types.unknown().try();
+    ctx = Ctx(2, none);
+
+    // `s` is a `str` the way every string literal is one: the PRIMITIVE,
+    // not a nominal type that happens to be spelled the same
+    str_ty = c.types.str_ty().try();
+    c.bind("s", str_ty, false).try();
+
+    // a member the prelude declares on `str` is reachable on one
+    reaches(c, alloc, "s.len", s_len, ctx).try();
+    reaches(c, alloc, "s.is_empty", s_empty, ctx).try();
+
+    // and a member it does not declare is still a mistake: the rule
+    // makes the declaration reachable, it does not make the type opaque
+    reaches(c, alloc, "s.nope", s_nope, ctx).try();
+
+    // THE IDENTITY. A literal's type and the declared `str` are one
+    // interned id, so nothing downstream can disagree about which was
+    // meant. `write_name` printing the same twice would not show this —
+    // the whole failure mode is two ids with one name.
+    lit_ty = c.type_of(literal, ctx).try();
+    println("a literal and `str` are one id: {}", lit_ty.eq(str_ty));
+    Ok(0);
+}

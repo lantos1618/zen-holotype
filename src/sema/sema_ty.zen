@@ -348,9 +348,17 @@ Types* = {
 
     // Is `member` one of `set`'s members? A set of one is its member,
     // so a non-union answers by equality.
+    // AN UNSUBSTITUTED TYPE PARAMETER IS NOT A SET, and it is not an
+    // empty one either. `ok_or<T, E>` answers `Res<T, E>` with `E`
+    // untouched — instantiation does not SUBSTITUTE — so a `.try()` on
+    // its result asks whether a set nobody has computed is contained in
+    // the caller's. That question has no false answer, and answering
+    // false spells it "there is no From", which names a conversion the
+    // program never asked for. This arm goes when substitution lands.
     set_has* = (self: @Self, set: TyId, member: TyId) bool {
         self.at(set).match({
             Union(u) => self.vec_has(u.members, member),
+            Var(_)   => true,
             _        => set.eq(member),
         })
     }
@@ -362,6 +370,7 @@ Types* = {
     set_within* = (self: @Self, narrow: TyId, wide: TyId) bool {
         self.at(narrow).match({
             Union(u) => self.all_within(u.members, wide),
+            Var(_)   => true,
             _        => self.set_has(wide, narrow),
         })
     }
