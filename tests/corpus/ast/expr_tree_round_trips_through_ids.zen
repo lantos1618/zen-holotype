@@ -1,0 +1,65 @@
+// tests/corpus/ast/expr_tree_round_trips_through_ids.zen
+// the keystone shape, end to end. `1 + 2` is a Binary holding two
+// Exprs, which cannot exist by value -- an Expr containing an Expr has
+// no size -- so every child is an id into Ast. Build the tree, read it
+// back through expr_at, and the spans and the operator survive.
+
+Ast = ast.ast_arena
+Expr, ExprKind, Binary, Literal, LiteralKind, BinOp = ast.ast_node
+ExprId = ast.ast_id
+Span, Pos, no_trivia = ast.ast_span
+
+// line 1, one column wide per character, which is all this test needs
+// a span to be
+at = (col: usize, width: usize) Span {
+    Span(
+        file: "one_plus_two.zen",
+        start: Pos(line: 1, col: col),
+        end: Pos(line: 1, col: col + width),
+    )
+}
+
+int_expr = (tree :: Ast, text: str, col: usize) Res<ExprId, AllocError> {
+    tree.add_expr(Expr(
+        kind: ExprKind.Literal(Literal(kind: LiteralKind.Int, text: text)),
+        span: at(col, 1),
+        leading: no_trivia(),
+        trailing: no_trivia(),
+    ))
+}
+
+show = (env: Env, tree: Ast, id: ExprId) () {
+    e = tree.expr_at(id);
+    e.kind.match({
+        Literal(l) => println("int {} at {}", l.text, e.span.start.col),
+        Binary(b)  => {
+            println("binary {}..{}", e.span.start.col, e.span.end.col);
+            show(env, tree, b.lhs);
+            println("op at {}", b.op_span.start.col);
+            show(env, tree, b.rhs);
+        },
+        _          => println("unexpected"),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    tree ::= alloc.Ast();
+
+    lhs = int_expr(tree, "1", 1).try();
+    rhs = int_expr(tree, "2", 5).try();
+    root = tree.add_expr(Expr(
+        kind: ExprKind.Binary(Binary(
+            op: BinOp.Add,
+            op_span: at(3, 1),
+            lhs: lhs,
+            rhs: rhs,
+        )),
+        span: at(1, 5),
+        leading: no_trivia(),
+        trailing: no_trivia(),
+    )).try();
+
+    show(env, tree, root);
+    Ok(0);
+}

@@ -1,0 +1,60 @@
+// tests/corpus/ast/trivia_attaches_as_a_run.zen
+// trivia is attached to nodes, not discarded, and a node names a
+// contiguous RUN of the one list Ast keeps in source order. The four
+// calls are the whole protocol: mark, add, run, read. A node with no
+// trivia -- almost every node -- carries a run of length 0.
+//
+// The comment's text is written WITHOUT its `//` markers, which is not
+// what a real lexer would store: a string literal containing `//`
+// makes the NEXT string literal in the file fail to parse. Restore the
+// markers when that is fixed; the reproducer is in the report.
+
+Ast = ast.ast_arena
+Expr, ExprKind, Name = ast.ast_node
+Trivia, TriviaKind, Span, Pos, no_trivia = ast.ast_span
+
+line_span = (line: usize) Span {
+    Span(
+        file: "answer.zen",
+        start: Pos(line: line, col: 1),
+        end: Pos(line: line, col: 2),
+    )
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    tree ::= alloc.Ast();
+
+    mark = tree.trivia_mark();
+    tree.add_trivia(Trivia(
+        kind: TriviaKind.LineComment,
+        text: "the answer",
+        span: line_span(1),
+    )).try();
+    tree.add_trivia(Trivia(
+        kind: TriviaKind.Blank,
+        text: "",
+        span: line_span(2),
+    )).try();
+    run = tree.trivia_run(mark);
+
+    id = tree.add_expr(Expr(
+        kind: ExprKind.Name(Name(text: "answer")),
+        span: line_span(3),
+        leading: run,
+        trailing: no_trivia(),
+    )).try();
+
+    e = tree.expr_at(id);
+    println("leading {}", e.leading.len);
+    Range(0, e.leading.len).loop((h, i) {
+        t = tree.trivia_at(e.leading, i);
+        t.kind.match({
+            LineComment  => println("comment {}", t.text),
+            BlockComment => println("block {}", t.text),
+            Blank        => println("blank"),
+        });
+    });
+    println("trailing {}", e.trailing.len);
+    Ok(0);
+}

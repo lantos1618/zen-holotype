@@ -29,6 +29,7 @@
 
 Span, Ident, QualifiedName, TriviaRun = ast.ast_span
 ExprId, TypeId, PatternId, BlockId = ast.ast_id
+Alloc, AllocError = std.mem
 
 // ---------------------------------------------------------------------
 // vocabulary
@@ -630,4 +631,23 @@ Module* = {
     span*: Span,
     leading*: TriviaRun,
     trailing*: TriviaRun,
+}
+
+// The module's function declarations, in source order.
+//
+// DESIGN.md's `build.zen` writes `b.module(Path("src")).functions` and
+// filters it to find tests — "change the filter, change what a test
+// is". It is a function taking an `Alloc` and not a field, for the
+// reason every collecting thing in this language is: gathering into a
+// Vec allocates, no Alloc parameter means no allocation, and storing a
+// second copy beside `decls` would be one fact in two places.
+functions* = (self: Module, a: Alloc) Res<Vec<Function>, AllocError> {
+    found ::= a.Vec<Function>();
+    self.decls.loop((h, d) {
+        d.kind.match({
+            Function(f) => found.add(f),
+            _           => Ok(()),
+        }).try();
+    });
+    Ok(found);
 }
