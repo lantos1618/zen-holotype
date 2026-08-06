@@ -724,6 +724,7 @@ class Emitter:
         self.instances = 0
         self.expanding = []  # constants being inlined, to catch a self-reference
         self._drops = {}   # type parts -> the Drop impl's `drop`, or None
+        self._unions = {}  # enum parts -> is it a union of existing types?
         self._consumed = None  # names moved with `consume`, program-wide
         self._rets = {}    # id(fn node) -> its return type with `_` filled in
         self.graph = program if getattr(program, "modules", None) and hasattr(
@@ -1101,10 +1102,17 @@ class Emitter:
                 self.ctype(ft)
         elif kind(node) == "Enum":
             variants = []
+            union = self.enum_is_union(decl)
             for v in f(node, "variants", ()) or ():
                 vname = str(f(v, "name", ""))
                 payload = f(v, "payload")
                 pty = self.resolve_type(payload, subst, base) if payload is not None else None
+                if union:
+                    # "`A | B` is an anonymous enum of two variants -- a
+                    # STRUCTURAL enum."  A variant that names a type carries a
+                    # value of that type, so `WriteError.IoError` records WHICH
+                    # IoError; tag-only, it would record only that there was one.
+                    pty = self.union_member_ty(vname, base)
                 if pty == UNIT:
                     pty = None  # `Ok(())` carries nothing; a void member is illegal C
                 variants.append((vname, pty))
@@ -1299,23 +1307,52 @@ class Emitter:
             self._consumed = frozenset(names)
         return self._consumed
 
-    def error_set_members(self, ty):
-        """The members of `Error = AllocError | IoError`, or None.
-
-        DESIGN.md draws the line at "a union of EXISTING types": that is what
-        makes the declaration a set rather than an ordinary enum, and it is
-        the only thing that makes propagating one set into another safe.
-        `CfgError = Missing | Bad` names no types and is not one.
-        """
-        info = self.enum_info(ty)
-        if info is None or not info[2]:
+    def union_member_ty(self, vname, base):
+        """The type a union member's NAME denotes, or None if it denotes none."""
+        decl = self.type_decl(vname, base, 0)
+        if decl is None or decl.tparams:
             return None
-        names = [v for v, _p in info[2]]
-        outer = tuple(ty[1][:-1])
-        for name in names:
-            if self.type_decl(name, outer, 0) is None:
-                return None
-        return names
+        if kind(decl.node) == "Alias":
+            return self.resolve_type(f(decl.node, "target"), {}, decl.scope_parts)
+        return ("named", decl.parts, ())
+
+    def enum_is_union(self, decl):
+        """Is this enum declaration `A | B`, a union of EXISTING types?
+
+        DESIGN.md draws the line there: that is what makes the declaration a
+        set rather than an ordinary enum, and it is the only thing that makes
+        propagating one set into another safe.  `CfgError = Missing | Bad`
+        names no types and is not one.  Two or more variants, none carrying a
+        payload of its own, every name a type -- the same three questions
+        sema's `enum_is_union` asks, because a disagreement between the two
+        halves is exactly what a structural enum cannot survive.
+        """
+        if decl is None or kind(decl.node) != "Enum":
+            return False
+        key = decl.parts
+        if key in self._unions:
+            return self._unions[key]
+        self._unions[key] = False   # a variant naming its own enum is nominal
+        vs = list(f(decl.node, "variants", ()) or ())
+        ok = len(vs) >= 2
+        mark = len(self.diags)
+        for v in vs if ok else ():
+            if f(v, "payload") is not None:
+                ok = False
+                break
+            if self.union_member_ty(str(f(v, "name", "")), decl.scope_parts) is None:
+                ok = False
+                break
+        del self.diags[mark:]   # asking the question reports nothing
+        self._unions[key] = ok
+        return ok
+
+    def error_set_members(self, ty):
+        """The members of `Error = AllocError | IoError`, or None."""
+        info = self.enum_info(ty)
+        if info is None or not self.enum_is_union(info[3]):
+            return None
+        return [v for v, _p in info[2]]
 
     def drop_takes_address(self, decl):
         """`drop = (self :: @Self)` is passed by address, as every `::`
@@ -2395,12 +2432,25 @@ class FnCtx:
                     return self.type_member(inner, name, node, depth + 1)
             return None
         if kind(node_t) == "Enum":
+            # `Error = AllocError | IoError` writes no payload down, but each
+            # variant carries its member, so `Error.IoError` alone is as
+            # incomplete as `Shape.Circle` alone -- and answering it with a
+            # tag beside uninitialised bytes would be the compiler inventing
+            # the very value the union exists to carry.
+            union = self.e.enum_is_union(tdecl)
             for v in f(node_t, "variants", ()) or ():
-                if str(f(v, "name", "")) == name and f(v, "payload") is None:
+                if str(f(v, "name", "")) != name:
+                    continue
+                if union:
+                    self.e.error(node, "`%s.%s` carries a value of type `%s` -- "
+                                       "write `%s.%s(e)`"
+                                 % (tdecl.name, name, name, tdecl.name, name))
                     ty = ("named", tdecl.parts, ())
                     return (self.make_variant(ty, name, None), ty)
-                if str(f(v, "name", "")) == name:
-                    return None  # a payload variant: handled at the Call
+                if f(v, "payload") is None:
+                    ty = ("named", tdecl.parts, ())
+                    return (self.make_variant(ty, name, None), ty)
+                return None  # a payload variant: handled at the Call
         for c in list(f(node_t, "consts", ()) or ()) + list(f(node_t, "fields", ()) or ()):
             if str(f(c, "name", "")) != name:
                 continue
@@ -4726,7 +4776,7 @@ class FnCtx:
     # Nothing here converts, and nothing here invents a reason -- when a member
     # has no home in the wider set the answer is None and the caller reports.
 
-    def widen_error(self, code, sty, pty):
+    def widen_error(self, code, sty, pty, seen=()):
         if sty is None or pty is None or sty == pty \
                 or UNKNOWN in (sty, pty):
             return code
@@ -4737,6 +4787,8 @@ class FnCtx:
             if sty[0] == "union" and all(m in members for m in sty[1]):
                 return self.per_member(code, sty,
                                        lambda m, v: self.into_union(v, m, pty))
+            if sty[0] == "named":
+                return self.spread_set(code, sty, pty, seen)
             return None
         if pty[0] == "named":
             info = self.e.enum_info(pty)
@@ -4748,12 +4800,13 @@ class FnCtx:
                 # ARE the member types, so an AllocError selects the variant of
                 # that name.  Only the wider set naming the narrower.
                 name = sty[1][-1]
-                if name in variants:
+                if name in variants and variants[name] in (None, sty):
                     return self.make_variant(
                         pty, name, code if variants[name] is not None else None)
-                return self.set_into_set(code, sty, pty, variants)
+                return self.spread_set(code, sty, pty, seen)
             if sty[0] == "union" and all(
-                    m[0] == "named" and m[1][-1] in variants for m in sty[1]):
+                    m[0] == "named" and variants.get(m[1][-1], m) == m
+                    for m in sty[1]):
                 return self.per_member(
                     code, sty,
                     lambda m, v: self.make_variant(
@@ -4761,31 +4814,38 @@ class FnCtx:
                         v if variants[m[1][-1]] is not None else None))
         return None
 
-    def set_into_set(self, code, sty, pty, variants):
-        """One named set into a wider named set, member by member.
+    def spread_set(self, code, sty, pty, seen):
+        """A NAMED set widened into `pty`, one arm per member, on its tag.
 
-        `WriteError = IoError | AllocError` and `Error = AllocError | IoError`
-        are two names for the same set, and an `IoError` arriving through
-        either is the same `IoError`: the merge renames nothing.  This is the
-        one-member case above, said for every member -- so it applies only to
-        a "union of existing types", never to an ordinary enum that happens to
-        share variant names, which is what `members` checks.
+        `WriteError = IoError | AllocError` and `IoError | AllocError` are the
+        same two variants under two spellings, and an `IoError` arriving
+        through either is the same `IoError`: the merge renames nothing and
+        carries every value across whole.  Each member is then widened in its
+        own right, so a set of sets terminates at the members that are not
+        sets.  This applies only to a "union of existing types", never to an
+        ordinary enum that happens to share variant names, which is what
+        `error_set_members` checks.
+
+        The order is the declaration's, so this is a pure function of the two
+        types.  `seen` is what stops `A = B | X` and `B = A | Y` from
+        descending forever; a set that contains itself has no finite value
+        anyway, and the answer here is the same None a stranger gets.
         """
-        members = self.e.error_set_members(sty)
-        if members is None or any(v not in variants for v in members):
+        if self.e.error_set_members(sty) is None or sty[1] in seen:
             return None
-        info = self.e.enum_info(sty)
+        seen = seen + (sty[1],)
         out = None
-        for vname, spay in reversed(info[2]):
-            if variants[vname] is not None and spay is None:
-                return None    # the wider set wants a payload this one lost
-            inner = None
-            if variants[vname] is not None:
-                inner = "%s.%sdata.%s" % (paren(code), GEN, sym_member(vname))
-            built = self.make_variant(pty, vname, inner)
-            out = built if out is None else "(%s.%stag == %s ? %s : %s)" % (
+        for vname, spay in reversed(self.e.enum_info(sty)[2]):
+            if spay is None:
+                return None    # a member the set did not keep
+            got = self.widen_error(
+                "%s.%sdata.%s" % (paren(code), GEN, sym_member(vname)),
+                spay, pty, seen)
+            if got is None:
+                return None
+            out = got if out is None else "(%s.%stag == %s ? %s : %s)" % (
                 paren(code), GEN,
-                sym_variant(self.e.variant_parts(sty, vname)), built, out)
+                sym_variant(self.e.variant_parts(sty, vname)), got, out)
         return out
 
     def into_union(self, code, member, uty):

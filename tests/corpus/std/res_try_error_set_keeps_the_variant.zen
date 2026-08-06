@@ -1,0 +1,52 @@
+// tests/corpus/std/res_try_error_set_keeps_the_variant.zen
+// `A | B` is a STRUCTURAL enum, so a member arrives carrying its own
+// value. One IoError is raised, crosses four spellings of the same set,
+// and has to come out the far end still saying which IoError it was:
+//
+//   IoError                       the member itself
+//   WriteError = IoError|AllocError   a NAMED union of existing types
+//   Res<(), _>                    the STRUCTURAL union that flattens to
+//   Error = AllocError|IoError    a wider named set
+//
+// A tag-only representation prints "Closed" here, because a set that
+// remembers only "some IoError" has to invent one on the way back out.
+
+Error = AllocError | IoError
+
+raise = () Res<(), IoError> {
+    Err(IoError.Full);
+}
+
+// into the named set of existing types
+through_named = () Res<(), WriteError> {
+    raise().try();
+    Ok(());
+}
+
+// into the structural union the inferred set spells it as
+through_structural = () Res<(), _> {
+    through_named().try();
+    Ok(());
+}
+
+// and back into a wider named set
+through_wider = () Res<(), Error> {
+    through_structural().try();
+    Ok(());
+}
+
+main = (env: Env) Res<i32, Error> {
+    through_wider().match({
+        Ok(_) => println("no error"),
+        Err(e) => e.match({
+            AllocError(_) => println("AllocError"),
+            IoError(io) => io.match({
+                Closed      => println("Closed"),
+                Full        => println("Full"),
+                Invalid     => println("Invalid"),
+                Interrupted => println("Interrupted"),
+            }),
+        }),
+    });
+    Ok(0);
+}
