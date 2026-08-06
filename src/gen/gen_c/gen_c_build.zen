@@ -1,0 +1,228 @@
+// src/gen/gen_c/gen_c_build.zen
+// `Point(x: 3, y: 4)` — what a callee that names a TYPE is.
+//
+// `gen_c_call.zen` opens by saying the two are one node: "`Point(x: 3,
+// y: 4)` and `area(p)` are the same AST node. Which one it is depends
+// on what the callee NAMES — a struct is constructed, a function is
+// called — and that is a question about the declaration rather than
+// about the call." That question is asked there and answered here, and
+// the two are separate files because building a value and calling a
+// function have nothing in common past the node they share.
+//
+// A C COMPOUND LITERAL WITH ONE DESIGNATED INITIALISER PER ARGUMENT.
+// Designators rather than positions because Zen's construction form is
+// `name: value` and the field order in the emitted struct is the
+// declaration's — writing positions would tie the two together for no
+// gain.
+//
+// WHAT IS BEING BUILT IS SEMA'S ANSWER FOR THIS NODE, and the
+// declaration alone is the fallback: `Box<i32>(held: 7)` writes its
+// argument outright and only the node knows it.
+
+Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = ast
+Function, Literal, LiteralKind, Access, Call, Arg, Span, Ident = ast
+Param, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+DeclId = sema.sema_id
+TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
+World, Def, DefKind, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+Inst = sema.sema_inst
+type_of, type_from_ast = sema.sema_type
+sym_member = gen.gen_name
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+unsupported, unresolved, untyped = gen.gen_c.gen_c_state
+open, constructed, recv_inst = gen.gen_c.gen_c_mono
+ctype, is_unit, field_type, request_type = gen.gen_c.gen_c_type
+expr, ty_of = gen.gen_c.gen_c_expr
+
+// -----------------------------------------------------------------
+// construction
+//
+// A C compound literal with one designated initialiser per argument.
+// Designators rather than positions because Zen's construction form is
+// `name: value` and the field order in the emitted struct is the
+// declaration's — writing positions would tie the two together for no
+// gain.
+// -----------------------------------------------------------------
+
+construct* = (be :: CBackend, id: ExprId, c: Call, d: Def, ctx: Ctx,
+             out :: String) Res<(), AllocError> {
+    ty = construct_type(be, id, d, ctx).try();
+    request_type(be, ty).try();
+    decl_at(be.tree, d.id).match({
+        None  => unsupported(be, id, "a construction of an unknown type", out),
+        Ok(x) => construct_decl(be, id, c, x, ty, ctx, out),
+    })
+}
+
+// WHAT IS BEING BUILT IS SEMA'S ANSWER FOR THIS NODE. `Box<i32>(held: 7)`
+// writes its argument outright and only the node knows it — the
+// declaration alone says `Box<T>`, which is what `constructed` can
+// derive and why it is the FALLBACK and not the answer. Sema records
+// the written arguments at the call; this reads them back, exactly as
+// `chosen_def` reads back which declaration the call meant.
+construct_type = (be :: CBackend, id: ExprId, d: Def, ctx: Ctx)
+                 Res<TyId, AllocError> {
+    unknown = be.check.types.unknown().try();
+    got = ty_of(be, id, ctx, unknown).try();
+    be.check.is_unknown(got).match({
+        false => Ok(got),
+        true  => constructed(be, d),
+    })
+}
+
+construct_decl = (be :: CBackend, id: ExprId, c: Call, x: Decl, ty: TyId,
+                  ctx: Ctx, out :: String) Res<(), AllocError> {
+    x.kind.match({
+        Struct(s) => construct_struct(be, id, c, s, ty, ctx, out),
+        _         => unsupported(be, id, "a construction of a non-struct", out),
+    })
+}
+
+// A GENERIC TYPE IS CONSTRUCTED AT ITS ARGUMENTS, not refused: `Vec(..)`
+// inside `Vec<T>`'s own constructor builds the `Vec<i32>` this emission
+// is at. What is still refused is a construction whose arguments nothing
+// settled, because a bare `Vec` has no layout to write.
+construct_struct = (be :: CBackend, id: ExprId, c: Call, s: Struct,
+                    ty: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
+    layout_open(be, s, ty, ctx).try().match({
+        true  => unsupported(be, id, "a construction whose type arguments nothing settles", out),
+        false => write_literal(be, c, s, ty, ctx, out),
+    })
+}
+
+// A TYPE ARGUMENT NO STORAGE MEMBER READS DOES NOT CHANGE THE LAYOUT,
+// so leaving it free is not a refusal. `Range(0, 5)` leaves `T` free —
+// `start` and `end` are `usize` and `at` is a bodiless hook occupying no
+// bytes — and `Range(0, v.len)` is std's own ordinary way to walk an
+// index space. Asking the question of the type's ARGUMENTS made every
+// one of those unwritable; asking it of its STORAGE is the same question
+// about the thing that is actually being emitted.
+//
+// Two open `Range`s mangle alike, which is exactly right here and would
+// not be for a `Box<T>`: `held: T` is storage, so `Box` still refuses.
+layout_open = (be :: CBackend, s: Struct, ty: TyId, ctx: Ctx)
+              Res<bool, AllocError> {
+    dinst = recv_inst(be, ty).try();
+    got ::= false;
+    s.members.loop((h, m) {
+        field_type(be, m, ctx, dinst).match({
+            None    => (),
+            Ok(fty) => open(be, fty).then(() { got = true; }),
+        });
+    });
+    Ok(got);
+}
+
+write_literal = (be :: CBackend, c: Call, s: Struct, ty: TyId, ctx: Ctx,
+                 out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    ctype(be, ty, out).try();
+    out.add_bytes(")").try();
+    (c.args.len == 0).match({
+        true  => out.add_bytes("{0}"),
+        false => write_initialisers(be, c, s, ty, ctx, out),
+    }).try();
+    Ok(());
+}
+
+write_initialisers = (be :: CBackend, c: Call, s: Struct, ty: TyId,
+                      ctx: Ctx, out :: String) Res<(), AllocError> {
+    dctx = decl_ctx_of(be, s, ctx);
+    // the CONSTRUCTED type's own arguments: `Box<i32>(held: 7)` supplies
+    // an `i32`, and reading the field's declared `T` without them would
+    // give the literal no width to take.
+    dinst = recv_inst(be, ty).try();
+    out.add_bytes("{ ").try();
+    c.args.loop((h, i, a) {
+        (i > 0).then(() { out.add_bytes(", ").try() });
+        write_initialiser(be, a, i, s, dinst, dctx, ctx, out).try();
+    });
+    out.add_bytes(" }").try();
+    Ok(());
+}
+
+// A struct's own member types are read in the module that declares it,
+// which for a construction is the module the call resolved into.
+decl_ctx_of = (be :: CBackend, s: Struct, ctx: Ctx) Ctx { ctx }
+
+write_initialiser = (be :: CBackend, a: Arg, i: usize, s: Struct,
+                     dinst: Inst, dctx: Ctx, ctx: Ctx, out :: String)
+                    Res<(), AllocError> {
+    name = field_name(be, a, i, s, dinst, dctx).try();
+    out.add_bytes(".").try();
+    sym_member(out, name).try();
+    out.add_bytes(" = ").try();
+    want = storage_type(be, s, name, dinst, dctx);
+    expr(be, a.value, ctx, want, out)
+}
+
+// The field an argument supplies: the one it names, or the i-th
+// storage member when it does not.
+field_name = (be :: CBackend, a: Arg, i: usize, s: Struct, dinst: Inst,
+              dctx: Ctx) Res<str, AllocError> {
+    a.name.match({
+        None  => storage_name(be, s, i, dinst, dctx),
+        Ok(n) => Ok(n.text),
+    })
+}
+
+// The i-th storage member's name, for a positional argument. A method
+// and a struct-body constant are not storage and do not count.
+// Counted rather than collected: a `Vec<str>` cannot be read back —
+// `Vec.get` at `T = str` fails to infer its own `Ok`, which is
+// recorded with a two-line reproducer in docs/GEN_BOOTSTRAP_FIXES.md.
+storage_name = (be :: CBackend, s: Struct, i: usize, dinst: Inst,
+                dctx: Ctx) Res<str, AllocError> {
+    name ::= "";
+    seen ::= 0;
+    s.members.loop((h, m) {
+        is_storage(be, m, dinst, dctx).then(() {
+            (seen == i).then(() { name = member_text(m); });
+            seen = seen + 1;
+        });
+    });
+    Ok(name);
+}
+
+is_storage = (be :: CBackend, m: Member, dinst: Inst, dctx: Ctx) bool {
+    field_type(be, m, dctx, dinst).match({ Ok(_) => true, None => false })
+}
+
+member_text = (m: Member) str {
+    m.kind.match({
+        Field(f)    => f.name.text,
+        Const(c)    => c.name.text,
+        Function(f) => f.name.text,
+    })
+}
+
+// The declared type of the field an argument supplies, so a literal
+// argument takes the field's width rather than the widest one.
+//
+// Written as named helpers rather than as a closure chain: a `.then`
+// whose body captures several of its enclosing parameters is inlined
+// wrongly, and this shape produced a `Map` instantiated at unresolved
+// type arguments. docs/GEN_BOOTSTRAP_FIXES.md has the reproducer.
+storage_type = (be :: CBackend, s: Struct, name: str, dinst: Inst,
+                dctx: Ctx) TyId {
+    found ::= TyId(index: 0);
+    s.members.loop((h, m) {
+        member_text(m).eq(name).then(() {
+            found = named_field(be, m, dinst, dctx);
+        });
+    });
+    found
+}
+
+named_field = (be :: CBackend, m: Member, dinst: Inst, dctx: Ctx) TyId {
+    field_type(be, m, dctx, dinst).match({
+        Ok(t) => t,
+        None  => TyId(index: 0),
+    })
+}

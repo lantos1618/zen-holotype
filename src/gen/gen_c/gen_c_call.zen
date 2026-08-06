@@ -4,8 +4,11 @@
 // `Point(x: 3, y: 4)` and `area(p)` are the same AST node. Which one it
 // is depends on what the callee NAMES — a struct is constructed, a
 // function is called — and that is a question about the declaration
-// rather than about the call. Both are here, with the third thing a
-// callee can name: `Ok` and `Err`, which are not functions at all.
+// rather than about the call. THE QUESTION IS ASKED HERE and the
+// construction is `gen_c_build.zen`'s: building a value and calling a
+// function have nothing in common past the node they share. The third
+// thing a callee can name IS here — `Ok` and `Err`, which are not
+// functions at all and are built from the expected type.
 //
 // `Res` IS STRUCTURAL, so its constructors are built here from the
 // EXPECTED type rather than resolved. That follows sema: `TyRes` carries
@@ -56,6 +59,7 @@ constructed, intern_named, recv_inst = gen.gen_c.gen_c_mono
 lower_match, lower_try = gen.gen_c.gen_c_flow
 ctype, declarator, spellable, is_unit, c_prim = gen.gen_c.gen_c_type
 is_c_integer, is_signed, variant_type, decl_ctx = gen.gen_c.gen_c_type
+c_prim_known = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
 field_type, request_type = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
@@ -66,6 +70,7 @@ is_loop_shape, lower_loop = gen.gen_c.gen_c_loop
 inlines, inline_call, closure_slot = gen.gen_c.gen_c_inline
 is_null_ptr, lower_null_ptr = gen.gen_c.gen_c_ptr
 lower_closure_call = gen.gen_c.gen_c_inline
+construct = gen.gen_c.gen_c_build
 
 // -----------------------------------------------------------------
 // `Res` values
@@ -271,10 +276,76 @@ lower_plain_call* = (be :: CBackend, id: ExprId, c: Call, name: str,
                     Res<(), AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, name, found).try();
+    travelled_defs(be, name, recv, ctx, found).try();
     be.check.resolved_call(id).match({
         Ok(d) => chosen_def(be, id, c, name, found, d, recv, ctx, out),
         None  => sole_def(be, id, c, name, found, recv, ctx, out),
     })
+}
+
+// THE FUNCTIONS THAT TRAVELLED WITH THE RECEIVER'S TYPE, and THE SAME
+// POOL SEMA RESOLVED AGAINST. `sema_call.travelled_cands` is the other
+// half; the two have to agree or `resolved_call` names a declaration
+// this list does not hold and the fallback re-decides it.
+//
+// Only a dot asks — `recv` is `None` for `f(a)` — and only a function
+// whose FIRST PARAMETER is the receiver's own type answers. Without
+// it `to_usize`, which is on no prelude line and is a method on every
+// integer in this tree, resolves to nothing.
+travelled_defs = (be :: CBackend, name: str, recv: Res<ExprId>, ctx: Ctx,
+                  found :: Vec<Def>) Res<(), AllocError> {
+    recv.match({
+        Ok(r) => travelled_for(be, name, r, ctx, found),
+        None  => Ok(()),
+    })
+}
+
+travelled_for = (be :: CBackend, name: str, r: ExprId, ctx: Ctx,
+                 found :: Vec<Def>) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    rty = ty_of(be, r, ctx, unknown).try();
+    defs ::= be.alloc.Vec<Def>();
+    be.check.world.exported_named(name, defs).try();
+    defs.loop((h, d) { keep_travelled(be, d, rty, found).try() });
+    Ok(());
+}
+
+keep_travelled = (be :: CBackend, d: Def, rty: TyId, found :: Vec<Def>)
+                 Res<(), AllocError> {
+    dup = has_def(found, d.id);
+    dup.match({
+        true  => Ok(()),
+        false => add_receiving(be, d, rty, found),
+    })
+}
+
+add_receiving = (be :: CBackend, d: Def, rty: TyId, found :: Vec<Def>)
+                Res<(), AllocError> {
+    receives(be, d, rty).try().match({
+        true  => found.add(d),
+        false => Ok(()),
+    })
+}
+
+// Is the receiver this declaration's first parameter? Read off the
+// DECLARED type, uninstantiated — so `(self: u32)` answers and
+// `<T>(self: T)` does not, which is right: a bare parameter would
+// swallow every receiver in the program.
+receives = (be :: CBackend, d: Def, rty: TyId) Res<bool, AllocError> {
+    inst ::= be.alloc.Inst();
+    sig ::= be.alloc.Vec<TyId>();
+    ok = signature_of(be, d, inst, sig).try();
+    Ok(ok && first_is(sig, rty));
+}
+
+first_is = (sig: Vec<TyId>, rty: TyId) bool {
+    sig.get(0).match({ Ok(t) => t.eq(rty), None => false })
+}
+
+has_def = (found: Vec<Def>, id: DeclId) bool {
+    Range(0, found.len).find((i) {
+        found.get(i).match({ Ok(d) => d.id.eq(id), None => false })
+    }).match({ Ok(_) => true, None => false })
 }
 
 // SEMA ALREADY ANSWERED THIS. `resolved_call` is the declaration
@@ -337,193 +408,6 @@ call_kind = (be :: CBackend, id: ExprId, c: Call, d: Def, recv: Res<ExprId>,
     })
 }
 
-// -----------------------------------------------------------------
-// construction
-//
-// A C compound literal with one designated initialiser per argument.
-// Designators rather than positions because Zen's construction form is
-// `name: value` and the field order in the emitted struct is the
-// declaration's — writing positions would tie the two together for no
-// gain.
-// -----------------------------------------------------------------
-
-construct = (be :: CBackend, id: ExprId, c: Call, d: Def, ctx: Ctx,
-             out :: String) Res<(), AllocError> {
-    ty = construct_type(be, id, d, ctx).try();
-    request_type(be, ty).try();
-    decl_at(be.tree, d.id).match({
-        None  => unsupported(be, id, "a construction of an unknown type", out),
-        Ok(x) => construct_decl(be, id, c, x, ty, ctx, out),
-    })
-}
-
-// WHAT IS BEING BUILT IS SEMA'S ANSWER FOR THIS NODE. `Box<i32>(held: 7)`
-// writes its argument outright and only the node knows it — the
-// declaration alone says `Box<T>`, which is what `constructed` can
-// derive and why it is the FALLBACK and not the answer. Sema records
-// the written arguments at the call; this reads them back, exactly as
-// `chosen_def` reads back which declaration the call meant.
-construct_type = (be :: CBackend, id: ExprId, d: Def, ctx: Ctx)
-                 Res<TyId, AllocError> {
-    unknown = be.check.types.unknown().try();
-    got = ty_of(be, id, ctx, unknown).try();
-    be.check.is_unknown(got).match({
-        false => Ok(got),
-        true  => constructed(be, d),
-    })
-}
-
-construct_decl = (be :: CBackend, id: ExprId, c: Call, x: Decl, ty: TyId,
-                  ctx: Ctx, out :: String) Res<(), AllocError> {
-    x.kind.match({
-        Struct(s) => construct_struct(be, id, c, s, ty, ctx, out),
-        _         => unsupported(be, id, "a construction of a non-struct", out),
-    })
-}
-
-// A GENERIC TYPE IS CONSTRUCTED AT ITS ARGUMENTS, not refused: `Vec(..)`
-// inside `Vec<T>`'s own constructor builds the `Vec<i32>` this emission
-// is at. What is still refused is a construction whose arguments nothing
-// settled, because a bare `Vec` has no layout to write.
-construct_struct = (be :: CBackend, id: ExprId, c: Call, s: Struct,
-                    ty: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
-    layout_open(be, s, ty, ctx).try().match({
-        true  => unsupported(be, id, "a construction whose type arguments nothing settles", out),
-        false => write_literal(be, c, s, ty, ctx, out),
-    })
-}
-
-// A TYPE ARGUMENT NO STORAGE MEMBER READS DOES NOT CHANGE THE LAYOUT,
-// so leaving it free is not a refusal. `Range(0, 5)` leaves `T` free —
-// `start` and `end` are `usize` and `at` is a bodiless hook occupying no
-// bytes — and `Range(0, v.len)` is std's own ordinary way to walk an
-// index space. Asking the question of the type's ARGUMENTS made every
-// one of those unwritable; asking it of its STORAGE is the same question
-// about the thing that is actually being emitted.
-//
-// Two open `Range`s mangle alike, which is exactly right here and would
-// not be for a `Box<T>`: `held: T` is storage, so `Box` still refuses.
-layout_open = (be :: CBackend, s: Struct, ty: TyId, ctx: Ctx)
-              Res<bool, AllocError> {
-    dinst = recv_inst(be, ty).try();
-    got ::= false;
-    s.members.loop((h, m) {
-        field_type(be, m, ctx, dinst).match({
-            None    => (),
-            Ok(fty) => open(be, fty).then(() { got = true; }),
-        });
-    });
-    Ok(got);
-}
-
-write_literal = (be :: CBackend, c: Call, s: Struct, ty: TyId, ctx: Ctx,
-                 out :: String) Res<(), AllocError> {
-    out.add_bytes("(").try();
-    ctype(be, ty, out).try();
-    out.add_bytes(")").try();
-    (c.args.len == 0).match({
-        true  => out.add_bytes("{0}"),
-        false => write_initialisers(be, c, s, ty, ctx, out),
-    }).try();
-    Ok(());
-}
-
-write_initialisers = (be :: CBackend, c: Call, s: Struct, ty: TyId,
-                      ctx: Ctx, out :: String) Res<(), AllocError> {
-    dctx = decl_ctx_of(be, s, ctx);
-    // the CONSTRUCTED type's own arguments: `Box<i32>(held: 7)` supplies
-    // an `i32`, and reading the field's declared `T` without them would
-    // give the literal no width to take.
-    dinst = recv_inst(be, ty).try();
-    out.add_bytes("{ ").try();
-    c.args.loop((h, i, a) {
-        (i > 0).then(() { out.add_bytes(", ").try() });
-        write_initialiser(be, a, i, s, dinst, dctx, ctx, out).try();
-    });
-    out.add_bytes(" }").try();
-    Ok(());
-}
-
-// A struct's own member types are read in the module that declares it,
-// which for a construction is the module the call resolved into.
-decl_ctx_of = (be :: CBackend, s: Struct, ctx: Ctx) Ctx { ctx }
-
-write_initialiser = (be :: CBackend, a: Arg, i: usize, s: Struct,
-                     dinst: Inst, dctx: Ctx, ctx: Ctx, out :: String)
-                    Res<(), AllocError> {
-    name = field_name(be, a, i, s, dinst, dctx).try();
-    out.add_bytes(".").try();
-    sym_member(out, name).try();
-    out.add_bytes(" = ").try();
-    want = storage_type(be, s, name, dinst, dctx);
-    expr(be, a.value, ctx, want, out)
-}
-
-// The field an argument supplies: the one it names, or the i-th
-// storage member when it does not.
-field_name = (be :: CBackend, a: Arg, i: usize, s: Struct, dinst: Inst,
-              dctx: Ctx) Res<str, AllocError> {
-    a.name.match({
-        None  => storage_name(be, s, i, dinst, dctx),
-        Ok(n) => Ok(n.text),
-    })
-}
-
-// The i-th storage member's name, for a positional argument. A method
-// and a struct-body constant are not storage and do not count.
-// Counted rather than collected: a `Vec<str>` cannot be read back —
-// `Vec.get` at `T = str` fails to infer its own `Ok`, which is
-// recorded with a two-line reproducer in docs/GEN_BOOTSTRAP_FIXES.md.
-storage_name = (be :: CBackend, s: Struct, i: usize, dinst: Inst,
-                dctx: Ctx) Res<str, AllocError> {
-    name ::= "";
-    seen ::= 0;
-    s.members.loop((h, m) {
-        is_storage(be, m, dinst, dctx).then(() {
-            (seen == i).then(() { name = member_text(m); });
-            seen = seen + 1;
-        });
-    });
-    Ok(name);
-}
-
-is_storage = (be :: CBackend, m: Member, dinst: Inst, dctx: Ctx) bool {
-    field_type(be, m, dctx, dinst).match({ Ok(_) => true, None => false })
-}
-
-member_text = (m: Member) str {
-    m.kind.match({
-        Field(f)    => f.name.text,
-        Const(c)    => c.name.text,
-        Function(f) => f.name.text,
-    })
-}
-
-// The declared type of the field an argument supplies, so a literal
-// argument takes the field's width rather than the widest one.
-//
-// Written as named helpers rather than as a closure chain: a `.then`
-// whose body captures several of its enclosing parameters is inlined
-// wrongly, and this shape produced a `Map` instantiated at unresolved
-// type arguments. docs/GEN_BOOTSTRAP_FIXES.md has the reproducer.
-storage_type = (be :: CBackend, s: Struct, name: str, dinst: Inst,
-                dctx: Ctx) TyId {
-    found ::= TyId(index: 0);
-    s.members.loop((h, m) {
-        member_text(m).eq(name).then(() {
-            found = named_field(be, m, dinst, dctx);
-        });
-    });
-    found
-}
-
-named_field = (be :: CBackend, m: Member, dinst: Inst, dctx: Ctx) TyId {
-    field_type(be, m, dctx, dinst).match({
-        Ok(t) => t,
-        None  => TyId(index: 0),
-    })
-}
-
 // The symbol is built from the DECLARATION's parameter types, which is
 // what makes two overloads of a name two symbols. The declaration is
 // read back out of the AST because sema does not yet answer "what is
@@ -581,8 +465,101 @@ call_or_floor = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
                 Res<(), AllocError> {
     is_null_ptr(d.name).match({
         true  => lower_null_ptr(be, id, null_want(be, id, ctx).try(), out),
-        false => call_signature(be, id, c, d, f, recv, ctx, out),
+        false => call_or_convert(be, id, c, d, f, recv, ctx, out),
     })
+}
+
+// `to_u64* = (self: u8) u64` is a signature with no body, and
+// `std.core.num` says why: "conversions are methods, never a cast
+// keyword". A cast is the one thing that cannot be written in terms of
+// anything below it, so the backend is the body — the same bargain
+// `mem_ptr.zen`'s nine members strike.
+//
+// EMITTING THE CALL INSTEAD IS A LINKER ERROR, not a wrong answer: a
+// bodyless declaration defines no symbol. That is how this was found,
+// and it is why closing `to_usize`'s RESOLUTION without closing its
+// BODY moved the fault rather than fixing it.
+//
+// ONLY LOSSLESS WIDENING IS DECLARED, so the cast is the whole of it
+// and there is nothing to check. A narrowing conversion "can fail, so
+// it belongs in a Res-returning function someone writes on purpose",
+// and such a function has a body and never reaches here.
+call_or_convert = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
+                   recv: Res<ExprId>, ctx: Ctx, out :: String)
+                  Res<(), AllocError> {
+    convert_target(d, f).match({
+        Ok(t) => lower_convert(be, c, d, t, recv, ctx, out),
+        None  => call_signature(be, id, c, d, f, recv, ctx, out),
+    })
+}
+
+// The primitive a bodyless one-parameter `to_<prim>` names. Asked of
+// the DECLARATION and not of the name alone: a module's own `to_thing`
+// with a body is its own function and is called like any other.
+convert_target = (d: Def, f: Function) Res<str> {
+    convert_shape(f).match({
+        false => None,
+        true  => keep_prim(after_to(d.name)),
+    })
+}
+
+convert_shape = (f: Function) bool {
+    bodyless(f) && (f.params.len == 1) && (f.tparams.len == 0)
+}
+
+bodyless = (f: Function) bool {
+    f.body.match({ Ok(_) => false, None => true })
+}
+
+after_to = (name: str) str {
+    ((name.len > 3) && name.slice(0, 3).eq("to_")).match({
+        true  => name.slice(3, name.len),
+        false => "",
+    })
+}
+
+keep_prim = (target: str) Res<str> {
+    c_prim_known(target).match({ true => Ok(target), false => None })
+}
+
+// The receiver, or the sole written argument: `b.to_u64()` and
+// `to_u64(b)` are one call written two ways, which is what UFCS means.
+lower_convert = (be :: CBackend, c: Call, d: Def, target: str,
+                 recv: Res<ExprId>, ctx: Ctx, out :: String)
+                Res<(), AllocError> {
+    convert_operand(c, recv).match({
+        None  => out.add_bytes("0"),
+        Ok(v) => write_convert(be, d, v, target, ctx, out),
+    })
+}
+
+convert_operand = (c: Call, recv: Res<ExprId>) Res<ExprId> {
+    recv.match({
+        Ok(r) => Ok(r),
+        None  => arg_zero(c),
+    })
+}
+
+arg_zero = (c: Call) Res<ExprId> {
+    c.args.get(0).match({ Ok(a) => Ok(a.value), None => None })
+}
+
+// The operand takes the DECLARED parameter's type and not the target's,
+// so a literal argument is written at the width it is being converted
+// FROM — which is the width the declaration chose the overload on.
+write_convert = (be :: CBackend, d: Def, v: ExprId, target: str, ctx: Ctx,
+                 out :: String) Res<(), AllocError> {
+    inst ::= be.alloc.Inst();
+    sig ::= be.alloc.Vec<TyId>();
+    signature_of(be, d, inst, sig).try();
+    unknown = be.check.types.unknown().try();
+    src = sig.get(0).match({ Ok(t) => t, None => unknown });
+    out.add_bytes("(").try();
+    out.add_bytes(c_prim(target)).try();
+    out.add_bytes(")(").try();
+    expr(be, v, ctx, src, out).try();
+    out.add_bytes(")").try();
+    Ok(());
 }
 
 null_want = (be :: CBackend, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {

@@ -1,0 +1,347 @@
+// src/gen/gen_c/gen_c_op.zen
+// What an OPERATOR is in C.
+//
+// `gen_c_expr.zen` owns the expression FORMS — a literal, a name, an
+// access, a call, and the spill that puts a `.match` where C wants a
+// value. This file owns the one form that is not a shape but a
+// decision: `a + b`, `a == b`, `a && b`, where the operator's spelling
+// in C depends on what it is being applied to.
+//
+// THREE OPERATORS, THREE RULES, and they are genuinely three:
+//
+//   ARITHMETIC TRAPS. `+ - * /` on an integer go through a checked
+//   helper with a position, because "signed overflow is undefined
+//   behaviour in C, so gen_c cannot emit `a + b` and check afterwards".
+//   `+% -% *%` are the wrapping forms and are plain C.
+//
+//   `==` DISPATCHES. "`==` through `Eq` is the only operator that
+//   dispatches to an impl", so two values C cannot compare are compared
+//   by the `eq` their own type supplies — statically, because the
+//   operands' type is known. There is no `Ord`, so ordering has nothing
+//   to dispatch to and is refused by name.
+//
+//   `&&` AND `||` SHORT-CIRCUIT, which makes them the one place a spill
+//   may not be hoisted: the statements would run whether or not the
+//   left side held.
+
+Ast, Expr, ExprKind, ExprId, Span, Ident, TypeId = ast
+Literal, LiteralKind, BinOp, UnOp, Binary, Unary = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, Ty, Types, TyNamed = sema.sema_ty
+Checker, Ctx = sema.sema_check
+type_of = sema.sema_type
+write_usize = sema.sema_diag
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+unsupported, unresolved, untyped = gen.gen_c.gen_c_state
+sub, open = gen.gen_c.gen_c_mono
+ctype, declarator, is_unit, c_prim = gen.gen_c.gen_c_type
+is_c_integer, is_signed = gen.gen_c.gen_c_type
+lower_eq_call = gen.gen_c.gen_c_member
+expr, ty_of, spills, spills_anywhere = gen.gen_c.gen_c_expr
+
+// -----------------------------------------------------------------
+// operators
+// -----------------------------------------------------------------
+
+lower_unary* = (be :: CBackend, node: Expr, u: Unary, ctx: Ctx, want: TyId,
+               out :: String) Res<(), AllocError> {
+    u.op.match({
+        Not  => wrap_unary(be, "!", u.operand, ctx, want, out),
+        Neg  => lower_negate(be, node, u, ctx, want, out),
+        Addr => unsupported(be, u.operand, "the address-of operator", out),
+    })
+}
+
+wrap_unary = (be :: CBackend, op: str, operand: ExprId, ctx: Ctx,
+              want: TyId, out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    out.add_bytes(op).try();
+    expr(be, operand, ctx, want, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+// Negation on an integer is `0 - x`, and it TRAPS: `-i32.MIN` is an
+// overflow like any other. On a float it is the C operator, which
+// cannot overflow.
+lower_negate = (be :: CBackend, node: Expr, u: Unary, ctx: Ctx, want: TyId,
+                out :: String) Res<(), AllocError> {
+    ty = ty_of(be, u.operand, ctx, want).try();
+    prim = be.check.prim_name(ty);
+    is_c_integer(prim).match({
+        false => wrap_unary(be, "-", u.operand, ctx, want, out),
+        true  => negate_checked(be, node, u, prim, ctx, ty, out),
+    })
+}
+
+negate_checked = (be :: CBackend, node: Expr, u: Unary, prim: str, ctx: Ctx,
+                  ty: TyId, out :: String) Res<(), AllocError> {
+    be.need_helpers(prim).try();
+    out.add_bytes("zg_sub_").try();
+    out.add_bytes(prim).try();
+    out.add_bytes("(0, ").try();
+    expr(be, u.operand, ctx, ty, out).try();
+    out.add_bytes(", ").try();
+    write_position(be, node.span.file, u.op_span, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+lower_binary* = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx, want: TyId,
+                out :: String) Res<(), AllocError> {
+    is_logical(b.op).match({
+        true  => lower_logical(be, node, b, ctx, out),
+        false => lower_value_op(be, node, b, ctx, want, out),
+    })
+}
+
+is_logical* = (op: BinOp) bool {
+    op.match({ And => true, Or => true, _ => false })
+}
+
+is_comparison* = (op: BinOp) bool {
+    op.match({
+        Equal => true, NotEqual => true, Less => true, LessEq => true,
+        Greater => true, GreaterEq => true,
+        _ => false,
+    })
+}
+
+// `&&` and `||` short-circuit, so a right operand that needs statements
+// of its own cannot be lowered here: the statements would run whether
+// or not the left side held. Reported, not mis-lowered.
+//
+// THE QUESTION IS `spills_anywhere` AND NOT `spills`, and the
+// difference is a wrong answer rather than a refusal. `spills` asks
+// whether the operand IS a spilling form; `expr` now spills a nested
+// one into a temporary, so `a && (half(n).try() > 1)` — whose rhs is a
+// comparison, not a `.try()` — would have its `.try()` hoisted beside
+// the left and fire when `a` was false. The bootstrapper and this
+// backend disagreed by exactly that, which is what a differential run
+// is for.
+//
+// The lowering this wants is a temporary the left fills and the right
+// fills again under an `if`, which is C's own `&&` written out. It is
+// not written here because `corpus/gen_zen/reports_what_it_cannot_lower`
+// gates the refusal, and a backend may not decide that on its own.
+lower_logical = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx,
+                 out :: String) Res<(), AllocError> {
+    bool_ty = be.check.types.bool_ty().try();
+    spills_anywhere(be, b.rhs).match({
+        true  => unsupported(be, b.rhs, "a spilling operand of && or ||", out),
+        false => write_infix(be, b, c_op(b.op), ctx, bool_ty, out),
+    })
+}
+
+lower_value_op = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx,
+                  want: TyId, out :: String) Res<(), AllocError> {
+    operand = operand_type(be, b, ctx, want).try();
+    prim = be.check.prim_name(operand);
+    is_comparison(b.op).match({
+        true  => lower_compare(be, b, prim, ctx, operand, out),
+        false => lower_arith(be, node, b, prim, ctx, operand, out),
+    })
+}
+
+// The operands' type, which is not the expression's when the operator
+// is a comparison: `a == b` is `bool` whatever it compares.
+operand_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
+               Res<TyId, AllocError> {
+    lhs = sub(be, be.check.type_of(b.lhs, ctx).try()).try();
+    be.check.is_literal_ty(lhs).match({
+        false => literal_or(be, lhs, b, ctx, want),
+        true  => rhs_type(be, b, ctx, want),
+    })
+}
+
+literal_or = (be :: CBackend, lhs: TyId, b: Binary, ctx: Ctx, want: TyId)
+             Res<TyId, AllocError> {
+    be.check.is_unknown(lhs).match({
+        false => Ok(lhs),
+        true  => rhs_type(be, b, ctx, want),
+    })
+}
+
+rhs_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
+           Res<TyId, AllocError> {
+    rhs = sub(be, be.check.type_of(b.rhs, ctx).try()).try();
+    usable(be, rhs).match({
+        true  => Ok(rhs),
+        false => Ok(want),
+    })
+}
+
+usable = (be :: CBackend, id: TyId) bool {
+    be.check.is_unknown(id).match({
+        true  => false,
+        false => be.check.is_literal_ty(id) == false,
+    })
+}
+
+// Comparison is C's on a scalar, and an IMPL'S otherwise: "`==` through
+// `Eq` is the only operator that dispatches to an impl". So two values
+// C cannot compare are compared by the `eq` their own type supplies —
+// `s == "impl"` on a `str` is `str`'s `Eq`, which `std.text` impls.
+//
+// ORDERING IS NOT COVERED and is refused by name: "there is no `Ord`.
+// `std.core` has `Eq` and `Hash` and nothing that orders", so `<` on a
+// struct has nothing to dispatch to and inventing one here would be
+// this backend deciding a language question.
+lower_compare = (be :: CBackend, b: Binary, prim: str, ctx: Ctx,
+                 operand: TyId, out :: String) Res<(), AllocError> {
+    scalar(be, operand).match({
+        true  => write_infix(be, b, c_op(b.op), ctx, operand, out),
+        false => lower_dispatched(be, b, ctx, operand, out),
+    })
+}
+
+// A type that impls no `Eq`, and every ORDERING, keep the message they
+// have always had — `corpus/gen_zen/reports_what_it_cannot_lower` gates
+// it on a struct with no impl, and that program is refused for exactly
+// the reason it was: there is nothing to dispatch to. What changed is
+// the case the test does not cover.
+lower_dispatched = (be :: CBackend, b: Binary, ctx: Ctx, operand: TyId,
+                    out :: String) Res<(), AllocError> {
+    is_equality(b.op).match({
+        false => unsupported(be, b.lhs, "comparing values that are not scalars", out),
+        true  => lower_eq_op(be, b, ctx, operand, out),
+    })
+}
+
+// `!=` is the same call negated. There is no `ne` to write — DESIGN.md
+// names `Eq` and one method — so the negation is the operator's and
+// never the impl's.
+lower_eq_op = (be :: CBackend, b: Binary, ctx: Ctx, operand: TyId,
+               out :: String) Res<(), AllocError> {
+    text ::= be.alloc.String().try();
+    wrote = lower_eq_call(be, b.lhs, b.rhs, operand, ctx, text).try();
+    wrote.match({
+        false => unsupported(be, b.lhs, "comparing values that are not scalars", out),
+        true  => write_equality(be, b.op, text.view(), out),
+    })
+}
+
+write_equality = (be :: CBackend, op: BinOp, text: str, out :: String)
+                 Res<(), AllocError> {
+    is_negated(op).then(() { out.add_bytes("!").try() });
+    out.add_bytes("(").try();
+    out.add_bytes(text).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+is_equality = (op: BinOp) bool {
+    op.match({ Equal => true, NotEqual => true, _ => false })
+}
+
+is_negated = (op: BinOp) bool {
+    op.match({ NotEqual => true, _ => false })
+}
+
+scalar = (be: CBackend, id: TyId) bool {
+    be.check.types.at(id).match({
+        Prim(p) => p.name.eq("str") == false && p.name.eq("()") == false,
+        _       => false,
+    })
+}
+
+write_infix = (be :: CBackend, b: Binary, op: str, ctx: Ctx, operand: TyId,
+               out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    expr(be, b.lhs, ctx, operand, out).try();
+    out.add_bytes(" ").try();
+    out.add_bytes(op).try();
+    out.add_bytes(" ").try();
+    expr(be, b.rhs, ctx, operand, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+c_op* = (op: BinOp) str {
+    op.match({
+        Add => "+", Sub => "-", Mul => "*", Div => "/", Rem => "%",
+        AddWrap => "+", SubWrap => "-", MulWrap => "*",
+        Equal => "==", NotEqual => "!=",
+        Less => "<", LessEq => "<=", Greater => ">", GreaterEq => ">=",
+        And => "&&", Or => "||",
+    })
+}
+
+// The helper an operator goes through. `+ - *` trap, `/ %` trap on a
+// zero divisor and on `MIN / -1`, and the wrapping forms do neither.
+helper_stem* = (op: BinOp) str {
+    op.match({
+        Add => "add", Sub => "sub", Mul => "mul",
+        Div => "div", Rem => "mod",
+        AddWrap => "wadd", SubWrap => "wsub", MulWrap => "wmul",
+        _ => "",
+    })
+}
+
+traps* = (op: BinOp) bool {
+    op.match({
+        AddWrap => false, SubWrap => false, MulWrap => false,
+        _ => true,
+    })
+}
+
+// Arithmetic on an integer goes through a helper, always. Nothing here
+// emits `a + b` and looks afterwards: signed overflow is undefined
+// behaviour in C and an after-the-fact test is one the optimizer is
+// entitled to delete.
+lower_arith = (be :: CBackend, node: Expr, b: Binary, prim: str, ctx: Ctx,
+               operand: TyId, out :: String) Res<(), AllocError> {
+    is_c_integer(prim).match({
+        true  => call_helper(be, node, b, prim, ctx, operand, out),
+        false => write_infix(be, b, c_op(b.op), ctx, operand, out),
+    })
+}
+
+call_helper = (be :: CBackend, node: Expr, b: Binary, prim: str, ctx: Ctx,
+               operand: TyId, out :: String) Res<(), AllocError> {
+    be.need_helpers(prim).try();
+    out.add_bytes("zg_").try();
+    out.add_bytes(helper_stem(b.op)).try();
+    out.add_bytes("_").try();
+    out.add_bytes(prim).try();
+    out.add_bytes("(").try();
+    expr(be, b.lhs, ctx, operand, out).try();
+    out.add_bytes(", ").try();
+    expr(be, b.rhs, ctx, operand, out).try();
+    // `.match` and not `.then`: a `.then` closure capturing more than
+    // one of its enclosing parameters is inlined with the receiver
+    // substituted into the wrong argument slot, which `cc` catches and
+    // docs/GEN_BOOTSTRAP_FIXES.md records.
+    traps(b.op).match({
+        true  => write_trap_args(be, node, b, out),
+        false => Ok(()),
+    }).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+write_trap_args = (be :: CBackend, node: Expr, b: Binary, out :: String)
+                  Res<(), AllocError> {
+    out.add_bytes(", ").try();
+    write_position(be, node.span.file, b.op_span, out).try();
+    Ok(());
+}
+
+// `"file", line, col` — the three arguments every trap takes. The
+// position is the OPERATOR token, and the file is relative to the
+// compilation root, which is what makes two checkouts of one tree emit
+// the same bytes.
+write_position* = (be :: CBackend, file: str, span: Span, out :: String)
+                  Res<(), AllocError> {
+    out.add_bytes("\"").try();
+    out.add_bytes(file).try();
+    out.add_bytes("\", ").try();
+    write_usize(out, span.start.line).try();
+    out.add_bytes(", ").try();
+    write_usize(out, span.start.col).try();
+    Ok(());
+}

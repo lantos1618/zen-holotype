@@ -50,7 +50,7 @@ ctype, declarator, is_unit = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
 Dest, block = gen.gen_c.gen_c_stmt
 plain_ctx, body_ctx, self_body_ctx = gen.gen_c.gen_c_decl
-supplies_bounds = gen.gen_c.gen_c_loop
+supplies_bounds, range_element_type = gen.gen_c.gen_c_range
 inlines, has_body, is_lambda = gen.gen_c.gen_c_inline
 
 
@@ -386,38 +386,41 @@ range_element = (be :: CBackend, got: TyId, argv: Vec<ExprId>, ctx: Ctx,
 }
 
 
+// A `Vec` ANSWERS THIS TOO, and with its own element rather than with
+// an index: `range_element_type` is the one query, so `v.find(p)` and
+// `v.loop(body)` cannot disagree about what `T` is.
 element_of = (be :: CBackend, got: TyId, r: ExprId, ctx: Ctx, extra :: Inst)
              Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
     rty = ty_of(be, r, ctx, unknown).try();
-    supplies_bounds(be, rty).match({
-        false => Ok(got),
-        true  => walk_index_space(be, got, extra),
-    })
-}
-
-
-walk_index_space = (be :: CBackend, got: TyId, extra :: Inst)
-                   Res<TyId, AllocError> {
-    be.check.types.at(got).match({
-        Res(rs) => index_res(be, got, rs, extra),
-        _       => Ok(got),
-    })
-}
-
-
-index_res = (be :: CBackend, got: TyId, rs: TyRes, extra :: Inst)
-            Res<TyId, AllocError> {
-    keep_var(be, rs.value).match({
-        Ok(v) => usize_bound(be, got, v, extra),
+    elem = range_element_type(be, rty).try();
+    elem.match({
+        Ok(t) => walk_elements(be, got, t, extra),
         None  => Ok(got),
     })
 }
 
 
-usize_bound = (be :: CBackend, got: TyId, v: TyId, extra :: Inst)
-              Res<TyId, AllocError> {
-    elem = be.check.types.prim("usize").try();
+walk_elements = (be :: CBackend, got: TyId, elem: TyId, extra :: Inst)
+                Res<TyId, AllocError> {
+    be.check.types.at(got).match({
+        Res(rs) => index_res(be, got, rs, elem, extra),
+        _       => Ok(got),
+    })
+}
+
+
+index_res = (be :: CBackend, got: TyId, rs: TyRes, elem: TyId, extra :: Inst)
+            Res<TyId, AllocError> {
+    keep_var(be, rs.value).match({
+        Ok(v) => usize_bound(be, got, v, elem, extra),
+        None  => Ok(got),
+    })
+}
+
+
+usize_bound = (be :: CBackend, got: TyId, v: TyId, elem: TyId,
+               extra :: Inst) Res<TyId, AllocError> {
     extra.bind(v, elem).try();
     sub_with(be, got, extra)
 }

@@ -1,0 +1,607 @@
+// src/gen/gen_c/gen_c_range.zen
+// What a RANGE is, and what one pass of it hands out.
+//
+// `gen_c_loop.zen` owns the loop — which of the six overloads a call
+// is, where `h.break` lands, and what the body's parameters are bound
+// to. This file owns the other half of the same construct: the thing
+// being walked. They split there because `range.zen` does: "Range" is
+// one name wearing two readings, and BOTH are here —
+//
+//   CONCRETE. `Range(0, 5)` STORES its start and end, so a pass is a
+//   `usize` counter and the walk is a plain C for-loop.
+//   A BOUND. `Vec.impl(Range<T>, { start: 0, end: self.len, at ::= ..
+//   })` SUPPLIES them, so `start` and `end` are expressions read in the
+//   impl's own scope with `self` bound to the range, and a pass is
+//   whatever `at` returns.
+//
+// A `None` FROM `at` ENDS THE WALK, and that is specified rather than
+// defensive: "a container whose length moved under the loop stops
+// rather than reading past itself." It leaves through `h.break`'s own
+// label, so it lands after the closing brace rather than inside
+// whatever construct the body opened.
+//
+// THE BOUND IS RECOGNISED BY ITS SHAPE, never by its name. "A bound is
+// just which struct's shape do I need", so an impl satisfies `Range`
+// exactly when the struct it names declares `start` and `end` — the
+// same question `supplies_bounds` asks of a concrete range, asked of
+// the bound instead. Nothing here matches on the string "Range".
+//
+// AND `at` IS INLINED RATHER THAN CALLED. There is no call node in the
+// source to resolve — the loop wrote it — so the impl's body is run
+// directly with its parameters bound to C text this backend already
+// emitted. `bind_text` is that, and it is the one binding form in the
+// folder that takes bytes rather than an expression id.
+
+Ast, Expr, ExprKind, ExprId, BlockId, Block, Lambda, Type, TypeKind = ast
+Decl, DeclKind, Function, FnType, Param, TypeId, Ident, Span = ast
+Access, Call, Arg, Impl, Member, MemberKind, Field = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+DeclId, ImplId = sema.sema_id
+TyId, Ty, Types, TyNamed, TyRes = sema.sema_ty
+World, Def, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+type_from_ast = sema.sema_type
+member_named, self_ctx = sema.sema_member
+impl_bound_type = sema.sema_supply
+sym_local, sym_member, sym_gen, sym_variant = gen.gen_name
+RES_PATH = gen.gen_name
+GenFault = gen.gen_diag
+CBackend, LocalSlot, LoopFrame = gen.gen_c.gen_c_state
+unsupported, unresolved, untyped = gen.gen_c.gen_c_state
+ctype, declarator, is_unit = gen.gen_c.gen_c_type
+open, intern_res_open, recv_inst, sub_with = gen.gen_c.gen_c_mono
+enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
+expr, ty_of = gen.gen_c.gen_c_expr
+Dest, block, write_dest, deliver = gen.gen_c.gen_c_stmt
+write_label, Shape, open_result, close_pass = gen.gen_c.gen_c_loop
+run_body, declare_usize, settle_res = gen.gen_c.gen_c_loop
+
+// -----------------------------------------------------------------
+// a range that STORES its bounds
+// -----------------------------------------------------------------
+
+// Does the range's own declaration STORE `start` and `end`, rather than
+// supplying them through an impl? `Range(0, n)` does; a `Vec` does not,
+// and reading `v.zg_mstart` off one would name a member that is not
+// there. C would catch it, which is exactly the outcome a backend may
+// not produce — so it is a refusal with a position instead.
+supplies_bounds* = (be :: CBackend, rty: TyId) bool {
+    has_field(be, rty, "start") && has_field(be, rty, "end")
+}
+
+has_field = (be :: CBackend, rty: TyId, name: str) bool {
+    be.check.types.at(rty).match({
+        Named(n) => decl_has_field(be, n.decl, name),
+        _        => false,
+    })
+}
+
+decl_has_field = (be :: CBackend, decl: DeclId, name: str) bool {
+    decl_at(be.tree, decl).match({
+        None  => false,
+        Ok(d) => struct_has_field(d, name),
+    })
+}
+
+struct_has_field = (d: Decl, name: str) bool {
+    got ::= false;
+    d.kind.match({
+        Struct(st) => st.members.loop((h, m) {
+            m.kind.match({
+                Field(fl) => fl.name.text.eq(name).then(() { got = true; }),
+                _         => (),
+            });
+        }),
+        _ => (),
+    });
+    got
+}
+
+// -----------------------------------------------------------------
+// a range whose bounds an IMPL supplies
+//
+// `Vec.impl(Range<T>, { start: 0, end: self.len, at ::= .. })` is the
+// other of `range.zen`'s two impls, and what it supplies is COMPUTED
+// FIELDS: `start` and `end` are expressions read in the impl's own
+// scope with `self` bound to the range, not members to read off a
+// struct. `at` is the one thing the trait asks for — "walking is
+// at(start), at(start + 1), .. and a None ends the walk early, so a
+// container whose length moved under the loop stops rather than reading
+// past itself".
+//
+// THE BOUND IS RECOGNISED BY ITS SHAPE, not by its name. "A bound is
+// just which struct's shape do I need", so an impl satisfies `Range`
+// exactly when the struct it names declares `start` and `end` — the
+// same question `supplies_bounds` asks of a concrete range, asked of
+// the bound instead.
+// -----------------------------------------------------------------
+
+RangeImpl* = {
+    decl*: DeclId,      // the RECEIVER's declaration, whose parameters
+                        // the impl borrows
+    mi*: usize,         // the module the type and its impls live in
+    start*: ExprId,
+    end*: ExprId,
+    at*: Res<Function>,
+}
+
+range_impl* = (be :: CBackend, rty: TyId) Res<Res<RangeImpl>, AllocError> {
+    be.check.types.at(rty).match({
+        Named(n) => named_range_impl(be, n),
+        _        => Ok(None),
+    })
+}
+
+named_range_impl = (be :: CBackend, n: TyNamed)
+                   Res<Res<RangeImpl>, AllocError> {
+    ids ::= be.alloc.Vec<ImplId>();
+    be.check.world.impls_named(be.tree, n.name, ids).try();
+    found ::= be.alloc.Vec<RangeImpl>();
+    ids.loop((h, i) { keep_range_impl(be, n, i, found).try() });
+    Ok(found.get(0));
+}
+
+// "An impl lives with the type, not with the trait", so only impls in
+// the module that declares the type are this type's.
+keep_range_impl = (be :: CBackend, n: TyNamed, i: ImplId,
+                   out :: Vec<RangeImpl>) Res<(), AllocError> {
+    (n.decl.module == i.decl.module).match({
+        false => Ok(()),
+        true  => range_impl_at(be, n, i, out),
+    })
+}
+
+range_impl_at = (be :: CBackend, n: TyNamed, i: ImplId,
+                 out :: Vec<RangeImpl>) Res<(), AllocError> {
+    be.check.world.impl_at(be.tree, i).match({
+        Ok(im) => keep_if_range(be, n, im, out),
+        None   => Ok(()),
+    })
+}
+
+keep_if_range = (be :: CBackend, n: TyNamed, im: Impl,
+                 out :: Vec<RangeImpl>) Res<(), AllocError> {
+    mi = n.decl.module.to_usize();
+    bound = be.check.impl_bound_type(im, mi).try();
+    supplies_bounds(be, bound).match({
+        false => Ok(()),
+        true  => add_range_impl(be, n, im, mi, out),
+    })
+}
+
+// An impl that names the bound and supplies neither `start` nor `end`
+// is not one to walk: `impl_field` finds nothing and the search moves
+// on rather than emitting a bound nothing wrote.
+add_range_impl = (be :: CBackend, n: TyNamed, im: Impl, mi: usize,
+                  out :: Vec<RangeImpl>) Res<(), AllocError> {
+    lo = impl_field(be, im, "start").try();
+    lo.match({
+        None  => Ok(()),
+        Ok(s) => add_from_start(be, n, im, mi, s, out),
+    })
+}
+
+add_from_start = (be :: CBackend, n: TyNamed, im: Impl, mi: usize,
+                  s: ExprId, out :: Vec<RangeImpl>) Res<(), AllocError> {
+    hi = impl_field(be, im, "end").try();
+    at = impl_fn(be, im, "at").try();
+    hi.match({
+        None  => Ok(()),
+        Ok(e) => out.add(RangeImpl(decl: n.decl, mi: mi, start: s, end: e,
+                                   at: at)),
+    })
+}
+
+// The expression an impl supplies for a computed field.
+impl_field = (be :: CBackend, im: Impl, name: str)
+             Res<Res<ExprId>, AllocError> {
+    found ::= be.alloc.Vec<ExprId>();
+    im.members.loop((h, m) { keep_field_value(m, name, found).try() });
+    Ok(found.get(0));
+}
+
+keep_field_value = (m: Member, name: str, out :: Vec<ExprId>)
+                   Res<(), AllocError> {
+    member_named(m, name).match({
+        false => Ok(()),
+        true  => add_field_value(m, out),
+    })
+}
+
+add_field_value = (m: Member, out :: Vec<ExprId>) Res<(), AllocError> {
+    m.kind.match({
+        Field(fl) => add_written_value(fl, out),
+        _         => Ok(()),
+    })
+}
+
+add_written_value = (fl: Field, out :: Vec<ExprId>) Res<(), AllocError> {
+    fl.value.match({ Ok(e) => out.add(e), None => Ok(()) })
+}
+
+// The function an impl supplies under `name`, with a body. A required
+// member — `at ::= (..) Res<T>` with no body — is what the impl OWES
+// rather than what it supplies.
+impl_fn = (be :: CBackend, im: Impl, name: str)
+          Res<Res<Function>, AllocError> {
+    found ::= be.alloc.Vec<Function>();
+    im.members.loop((h, m) { keep_bodied_fn(m, name, found).try() });
+    Ok(found.get(0));
+}
+
+keep_bodied_fn = (m: Member, name: str, out :: Vec<Function>)
+                 Res<(), AllocError> {
+    member_named(m, name).match({
+        false => Ok(()),
+        true  => add_bodied_fn(m, out),
+    })
+}
+
+add_bodied_fn = (m: Member, out :: Vec<Function>) Res<(), AllocError> {
+    m.kind.match({
+        Function(f) => add_if_bodied(f, out),
+        _           => Ok(()),
+    })
+}
+
+add_if_bodied = (f: Function, out :: Vec<Function>) Res<(), AllocError> {
+    f.body.match({ Ok(_) => out.add(f), None => Ok(()) })
+}
+
+// -----------------------------------------------------------------
+// what a range hands out
+//
+// One query, three callers — the loop's own type, the lowering, and
+// `gen_c_settle.zen`'s `find<R: Range<T>, T>` — because a `T` three
+// places disagree about is a C type mismatch nothing reports.
+// -----------------------------------------------------------------
+
+// The `Res<T>` a pass of this range produces. A range that stores its
+// own bounds walks its own index space, so a pass produces a `usize`
+// and cannot miss; one whose `at` an impl supplies produces whatever
+// `at` returns, including the `None` that ends the walk.
+range_pass_type* = (be :: CBackend, rty: TyId) Res<Res<TyId>, AllocError> {
+    supplies_bounds(be, rty).match({
+        true  => index_pass(be),
+        false => impl_pass(be, rty),
+    })
+}
+
+index_pass = (be :: CBackend) Res<Res<TyId>, AllocError> {
+    usize_ty = be.check.types.prim("usize").try();
+    got = intern_res_open(be.check, usize_ty).try();
+    Ok(Ok(got));
+}
+
+impl_pass = (be :: CBackend, rty: TyId) Res<Res<TyId>, AllocError> {
+    range_impl(be, rty).try().match({
+        None   => Ok(None),
+        Ok(ri) => at_pass(be, rty, ri),
+    })
+}
+
+// An impl supplying no `at` walks its own index space, which is exactly
+// what `range.zen` says the hook being optional means.
+at_pass = (be :: CBackend, rty: TyId, ri: RangeImpl)
+          Res<Res<TyId>, AllocError> {
+    ri.at.match({
+        None  => index_pass(be),
+        Ok(f) => at_ret(be, rty, ri, f),
+    })
+}
+
+// `at`'s declared return type with `@Self` bound to the receiver and
+// the TYPE's parameters in scope, then the receiver's own arguments
+// substituted in — the same three steps `method_sig` takes for a
+// parameter, because `at` IS a member of the receiver.
+at_ret = (be :: CBackend, rty: TyId, ri: RangeImpl, f: Function)
+         Res<Res<TyId>, AllocError> {
+    sctx = be.check.self_ctx(ri.mi, rty).try();
+    inst = recv_inst(be, rty).try();
+    mark = enter_struct_tparams(be, ri.decl).try();
+    declared = declared_ret(be, f, sctx).try();
+    leave_tparams(be, mark).try();
+    got = sub_with(be, declared, inst).try();
+    Ok(keep_res(be, got));
+}
+
+declared_ret = (be :: CBackend, f: Function, sctx: Ctx)
+               Res<TyId, AllocError> {
+    f.ret.match({
+        Ok(t) => be.check.type_from_ast(t, sctx),
+        None  => be.check.types.prim("()"),
+    })
+}
+
+keep_res = (be :: CBackend, got: TyId) Res<TyId> {
+    be.check.types.at(got).match({
+        Res(_) => Ok(got),
+        _      => None,
+    })
+}
+
+// The element itself — the `Ok` payload of what a pass produces.
+range_element_type* = (be :: CBackend, rty: TyId)
+                      Res<Res<TyId>, AllocError> {
+    got = range_pass_type(be, rty).try();
+    Ok(got.match({
+        Ok(t) => res_value_of(be, t),
+        None  => None,
+    }));
+}
+
+res_value_of* = (be :: CBackend, t: TyId) Res<TyId> {
+    be.check.types.at(t).match({
+        Res(r) => Ok(r.value),
+        _      => None,
+    })
+}
+
+// Is this a `Res`? `impl_ctx` needs it for `has_ret`, and it is the
+// same three-line question `gen_c_decl.zen` asks; it lives here so the
+// loop and the range read one answer.
+is_res* = (be :: CBackend, want: TyId) bool {
+    be.check.types.at(want).match({ Res(_) => true, _ => false })
+}
+
+// A range whose `start` and `end` an impl supplies — a `Vec`, which is
+// the other half of `Range`'s two impls.
+lower_supplied* = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
+                  rty: TyId, lam: Lambda, ctx: Ctx, want: TyId,
+                  out :: String) Res<(), AllocError> {
+    range_impl(be, rty).try().match({
+        None   => unsupported(be, id, "a loop over a range whose bounds an impl supplies", out),
+        Ok(ri) => lower_impl_range(be, id, sh, one, rty, ri, lam, ctx, want, out),
+    })
+}
+
+lower_impl_range = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
+                    rty: TyId, ri: RangeImpl, lam: Lambda, ctx: Ctx,
+                    want: TyId, out :: String) Res<(), AllocError> {
+    range_pass_type(be, rty).try().match({
+        None     => unsupported(be, id, "a loop over a range whose element nothing settles", out),
+        Ok(pass) => lower_impl_walk(be, id, sh, one, rty, ri, pass, lam, ctx, want, out),
+    })
+}
+
+// THE SHAPE, AND WHY IT IS NOT `lower_bounded` WITH TWO READS SWAPPED.
+//
+// `start` and `end` are EXPRESSIONS in the impl's own scope, so each of
+// them may need statements of its own before it, which is why `self` is
+// bound to the range temporary once and both are delivered into a
+// declared `usize` rather than written into a C loop head.
+//
+// `at` is INLINED and not called: there is no call node here to resolve,
+// and the impl supplies a body. Its `Res<T>` is the pass, and a tag that
+// is not `Ok` leaves the walk through the same `brk` label `h.break`
+// uses — which is `range.zen`'s "a None ends the walk early", and what
+// keeps a container that shrank under the loop from reading past itself.
+lower_impl_walk = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
+                   rty: TyId, ri: RangeImpl, pass: TyId, lam: Lambda,
+                   ctx: Ctx, want: TyId, out :: String)
+                  Res<(), AllocError> {
+    elem = res_value_of(be, pass).match({ Ok(t) => t, None => pass });
+    settled = settle_res(be, want, elem).try();
+
+    // the range is evaluated ONCE, into a temporary: `start`, `end` and
+    // every `at` are reads of it, and re-evaluating the expression
+    // between them would walk several different ranges
+    rng ::= be.alloc.String().try();
+    sym_gen(rng, "r", be.next_tmp()).try();
+    decl ::= be.alloc.String().try();
+    declarator(be, rty, rng.view(), decl).try();
+    decl.add_bytes(" = ").try();
+    expr(be, one, ctx, rty, decl).try();
+    decl.add_bytes(";").try();
+    be.writeln(decl.view()).try();
+
+    st = open_result(be, settled, out).try();
+    counter ::= be.alloc.String().try();
+    sym_gen(counter, "i", be.next_tmp()).try();
+    base ::= be.alloc.String().try();
+    sym_gen(base, "b", be.next_tmp()).try();
+    limit ::= be.alloc.String().try();
+    sym_gen(limit, "n", be.next_tmp()).try();
+    declare_usize(be, counter.view()).try();
+    declare_usize(be, base.view()).try();
+    declare_usize(be, limit.view()).try();
+    supplied_bound(be, ri, rty, ri.start, counter.view(), rng.view()).try();
+    supplied_bound(be, ri, rty, ri.end, limit.view(), rng.view()).try();
+    be.write(base.view()).try();
+    be.write(" = ").try();
+    be.write(counter.view()).try();
+    be.writeln(";").try();
+
+    be.write("while (").try();
+    be.write(counter.view()).try();
+    be.write(" < ").try();
+    be.write(limit.view()).try();
+    be.writeln(") {").try();
+    be.indent();
+    value ::= be.alloc.String().try();
+    take_pass(be, ri, rty, pass, counter.view(), st.brk, rng.view(),
+              value).try();
+    run_body(be, sh, lam, counter.view(), base.view(), value.view(), elem,
+             ctx).try();
+    close_pass(be, st, counter.view()).try();
+    Ok(());
+}
+
+
+// -----------------------------------------------------------------
+// walking a range whose bounds an impl supplies
+//
+// The emission, as against the recognition above. `gen_c_loop.zen`
+// calls these in the order a pass runs them.
+// -----------------------------------------------------------------
+// The impl's `self`, bound to the range temporary. An ordinary local
+// holding a copy: the walk reads the range and never writes it, so
+// there is nothing to write through and no address to take.
+//
+// BOUND AROUND THE IMPL'S OWN EXPRESSIONS AND NOTHING WIDER. The
+// receiver's name is very often `self`, and the loop is very often
+// written inside a method that has one — so a binding held across the
+// walk shadows the enclosing `self` and the BODY's `self.f(..)` reaches
+// the range instead. That compiled and resolved to nothing, which is
+// how it was found; the frame it belongs to is the impl's expression,
+// not the loop.
+bind_self = (be :: CBackend, ri: RangeImpl, rty: TyId, rng: str)
+            Res<(), AllocError> {
+    bind_text(be, self_name(be, ri), rty, rng)
+}
+
+// What the impl calls its receiver. Read off `at`'s own first parameter
+// rather than assumed to be `self`, because `start: self.len` and
+// `at ::= (self: @Self, ..)` name it in one place and the declaration
+// is that place.
+self_name = (be :: CBackend, ri: RangeImpl) str {
+    ri.at.match({ Ok(f) => first_param_name(f), None => "self" })
+}
+
+first_param_name = (f: Function) str {
+    f.params.get(0).match({ Ok(p) => p.name.text, None => "self" })
+}
+
+// A name bound to C TEXT rather than to an expression node: `self` is a
+// temporary this file wrote and the counter is a local it declared, and
+// neither of them is an AST node to lower.
+bind_text* = (be :: CBackend, name: str, ty: TyId, text: str)
+            Res<(), AllocError> {
+    n = be.declare(name, ty, false).try();
+    be.check.bind(name, ty, false).try();
+    cname ::= be.alloc.String().try();
+    sym_local(cname, name, n).try();
+    line ::= be.alloc.String().try();
+    declarator(be, ty, cname.view(), line).try();
+    line.add_bytes(" = ").try();
+    line.add_bytes(text).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view())
+}
+
+// `start: 0` and `end: self.len`, evaluated in the module that wrote
+// the impl with `@Self` bound to the receiver and the receiver's own
+// type arguments in force.
+supplied_bound* = (be :: CBackend, ri: RangeImpl, rty: TyId, value: ExprId,
+                  target: str, rng: str) Res<(), AllocError> {
+    usize_ty = be.check.types.prim("usize").try();
+    ictx = impl_ctx(be, ri, usize_ty, rty);
+    inst = recv_inst(be, rty).try();
+    held = be.inst;
+    be.enter_inst(inst);
+    mark = enter_struct_tparams(be, ri.decl).try();
+    cmark = be.check.mark();
+    lmark = be.mark();
+    bind_self(be, ri, rty, rng).try();
+    deliver(be, value, ictx, usize_ty, Dest.Into(target)).try();
+    be.release(lmark).try();
+    be.check.release(cmark).try();
+    leave_tparams(be, mark).try();
+    be.enter_inst(held);
+    Ok(());
+}
+
+// A body in the impl's module with `@Self` bound. `self_body_ctx` says
+// the same thing for a member function; it is three fields, and reading
+// them out of `gen_c_decl.zen` would point this file at the one that
+// already points back at it.
+impl_ctx = (be :: CBackend, ri: RangeImpl, ret: TyId, self_ty: TyId) Ctx {
+    Ctx(module: ri.mi, ret: ret, has_ret: is_res(be, ret),
+        self_ty: self_ty, has_self: true)
+}
+
+// ONE PASS: `at(i)`, and the tag that ends the walk.
+//
+// `value` is left holding the C text of the `Ok` payload, which is what
+// `run_body` binds the body's second parameter to. A range with no `at`
+// hands out its own index, and then the counter IS the payload.
+take_pass* = (be :: CBackend, ri: RangeImpl, rty: TyId, pass: TyId,
+             counter: str, brk: usize, rng: str, value :: String)
+            Res<(), AllocError> {
+    ri.at.match({
+        None  => value.add_bytes(counter),
+        Ok(f) => run_at(be, ri, rty, pass, f, counter, brk, rng, value),
+    })
+}
+
+run_at = (be :: CBackend, ri: RangeImpl, rty: TyId, pass: TyId, f: Function,
+          counter: str, brk: usize, rng: str, value :: String)
+         Res<(), AllocError> {
+    tmp ::= be.alloc.String().try();
+    sym_gen(tmp, "a", be.next_tmp()).try();
+    line ::= be.alloc.String().try();
+    declarator(be, pass, tmp.view(), line).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view()).try();
+    inline_at(be, ri, rty, pass, f, counter, rng, tmp.view()).try();
+    write_pass_guard(be, tmp.view(), brk).try();
+    value.add_bytes(tmp.view()).try();
+    value.add_bytes(".zg_data.").try();
+    sym_member(value, "Ok").try();
+    Ok(());
+}
+
+// The `at` body, in the frame the loop is being written into. Its
+// parameters are the range and the counter, and both are C text this
+// file already wrote — so they are bound directly rather than lowered
+// from arguments that do not exist.
+inline_at = (be :: CBackend, ri: RangeImpl, rty: TyId, pass: TyId,
+             f: Function, counter: str, rng: str, tmp: str)
+            Res<(), AllocError> {
+    usize_ty = be.check.types.prim("usize").try();
+    ictx = impl_ctx(be, ri, pass, rty);
+    inst = recv_inst(be, rty).try();
+    held = be.inst;
+    be.enter_inst(inst);
+    mark = enter_struct_tparams(be, ri.decl).try();
+    cmark = be.check.mark();
+    lmark = be.mark();
+    bind_self(be, ri, rty, rng).try();
+    bind_index_param(be, f, usize_ty, counter).try();
+    be.enter_call();
+    run_at_body(be, f, ictx, pass, tmp).try();
+    be.leave_call();
+    be.release(lmark).try();
+    be.check.release(cmark).try();
+    leave_tparams(be, mark).try();
+    be.enter_inst(held);
+    Ok(());
+}
+
+// Parameter one of `at`. Parameter zero is the receiver and is already
+// bound for the whole walk.
+bind_index_param = (be :: CBackend, f: Function, usize_ty: TyId,
+                    counter: str) Res<(), AllocError> {
+    f.params.get(1).match({
+        None  => Ok(()),
+        Ok(p) => bind_text(be, p.name.text, usize_ty, counter),
+    })
+}
+
+run_at_body = (be :: CBackend, f: Function, ictx: Ctx, pass: TyId, tmp: str)
+              Res<(), AllocError> {
+    f.body.match({
+        None    => Ok(()),
+        Ok(blk) => block(be, blk, ictx, pass, Dest.Into(tmp)),
+    })
+}
+
+// A pass that missed ends the walk, and it leaves through `h.break`'s
+// own label so it lands after the closing brace rather than inside
+// whatever construct the body opened.
+write_pass_guard = (be :: CBackend, tmp: str, brk: usize)
+                   Res<(), AllocError> {
+    be.write("if (").try();
+    be.write(tmp).try();
+    be.write(".zg_tag != ").try();
+    tag ::= be.alloc.String().try();
+    sym_variant(tag, RES_PATH, "Ok").try();
+    be.write(tag.view()).try();
+    be.write(") { goto ").try();
+    write_label(be, "brk", brk).try();
+    be.writeln("; }").try();
+    Ok(());
+}

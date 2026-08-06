@@ -239,6 +239,36 @@ World* = {
         Ok(());
     }
 
+    // EVERY EXPORTED DECLARATION OF `name` IN THE PROGRAM, in module
+    // order.
+    //
+    // This is not a hole in the `*` gate, it is the other half of the
+    // sentence the gate is written in: "importing a type pulls its
+    // world along: its methods, its trait impls, and exported ufcs
+    // functions (a free function whose first param is the type is
+    // callable as a method)". A free function whose first parameter is
+    // `u32` TRAVELLED WITH `u32`, so naming the type is what reached
+    // it, and the module it happens to live in was never imported by
+    // anybody. `to_usize` is on no prelude line and is called all over
+    // this tree.
+    //
+    // THE RECEIVER'S TYPE IS THE GATE and it is not applied here: this
+    // is only the pool, and a `World` knows names rather than types.
+    // The caller filters on the first parameter, which is what makes a
+    // free function a method at all — sharing the name never was. So
+    // this is a query only a DOT may ask; `f(x)` still goes through
+    // `defs_of` and still cannot see a module it did not import.
+    exported_named* = (self: @Self, name: str, out :: Vec<Def>)
+                      Res<(), AllocError> {
+        Range(0, self.tables.len).loop((h, mi) {
+            self.tables.get(mi).match({
+                Ok(t)   => collect_exported(t.defs, name, out),
+                None    => Ok(()),
+            }).try();
+        });
+        Ok(());
+    }
+
     // What `mi` declares under `name`, starred or not. Visibility is a
     // question about crossing a boundary, and this has not crossed one.
     own_defs* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
@@ -513,6 +543,14 @@ collect_named = (defs: Vec<Def>, name: str, out :: Vec<Def>)
                 Res<(), AllocError> {
     defs.loop((h, d) {
         d.name.eq(name).then(() { out.add(d).try() });
+    });
+    Ok(());
+}
+
+collect_exported = (defs: Vec<Def>, name: str, out :: Vec<Def>)
+                   Res<(), AllocError> {
+    defs.loop((h, d) {
+        (d.exported && d.name.eq(name)).then(() { out.add(d).try() });
     });
     Ok(());
 }

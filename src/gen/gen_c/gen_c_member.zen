@@ -553,6 +553,81 @@ write_rest = (be :: CBackend, c: Call, f: Function, sig: Vec<TyId>,
 }
 
 // -----------------------------------------------------------------
+// a member call the source did not write
+//
+// "`==` through `Eq` is the only operator that dispatches to an impl."
+// So `a == b` on a type C cannot compare is a call to the `eq` that
+// type supplies, and it goes through THIS file's own path rather than a
+// second one — the symbol, the instantiation and the queue entry are
+// the ones `a.eq(b)` would have produced, so the two cannot disagree
+// about which function they mean.
+//
+// STATICALLY RESOLVED, like every other impl-supplied member here: the
+// operands' type is known, so no record of function pointers takes
+// part. The answer is whether anything was written, so a type impl'ing
+// no `Eq` is the caller's refusal to report and not a symbol nothing
+// defines.
+// -----------------------------------------------------------------
+
+lower_eq_call* = (be :: CBackend, lhs: ExprId, rhs: ExprId, rty: TyId,
+                  ctx: Ctx, out :: String) Res<bool, AllocError> {
+    site_of(be, rty).try().match({
+        None  => Ok(false),
+        Ok(s) => eq_through_site(be, lhs, rhs, rty, s, ctx, out),
+    })
+}
+
+eq_through_site = (be :: CBackend, lhs: ExprId, rhs: ExprId, rty: TyId,
+                   s: Site, ctx: Ctx, out :: String)
+                  Res<bool, AllocError> {
+    eq_fn(be, s, rty).try().match({
+        None  => Ok(false),
+        Ok(f) => write_eq(be, lhs, rhs, rty, s, f, ctx, out),
+    })
+}
+
+// The type's own `eq` first, then what an impl supplies — the order
+// `sema_supply.zen` states, and for its reason.
+eq_fn = (be :: CBackend, s: Site, rty: TyId) Res<Res<Function>, AllocError> {
+    found ::= be.alloc.Vec<Member>();
+    member_at(be, s, "eq", found).try();
+    bodied_fn(found).match({
+        Ok(f) => Ok(Ok(f)),
+        None  => impl_member(be, s, rty, "eq"),
+    })
+}
+
+write_eq = (be :: CBackend, lhs: ExprId, rhs: ExprId, rty: TyId, s: Site,
+            f: Function, ctx: Ctx, out :: String) Res<bool, AllocError> {
+    inst = recv_inst(be, rty).try();
+    mi = s.decl.module.to_usize();
+    sig ::= be.alloc.Vec<TyId>();
+    method_sig(be, rty, s.decl, f, mi, inst, sig).try();
+    (inst_open(be, inst) || any_open(be, sig)).match({
+        true  => Ok(false),
+        false => emit_eq(be, lhs, rhs, rty, s, f, sig, inst, ctx, out),
+    })
+}
+
+emit_eq = (be :: CBackend, lhs: ExprId, rhs: ExprId, rty: TyId, s: Site,
+           f: Function, sig: Vec<TyId>, inst: Inst, ctx: Ctx, out :: String)
+          Res<bool, AllocError> {
+    qname ::= be.alloc.String().try();
+    join(qname, s.qname, "eq").try();
+    sym ::= be.alloc.String().try();
+    sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
+    be.need_method(MethodRef(self_ty: rty, decl: s.decl, name: "eq",
+                             qname: qname.view()), inst, sym.view()).try();
+    out.add_bytes(sym.view()).try();
+    out.add_bytes("(").try();
+    write_arg(be, lhs, 0, f, sig, ctx, out).try();
+    out.add_bytes(", ").try();
+    write_arg(be, rhs, 1, f, sig, ctx, out).try();
+    out.add_bytes(")").try();
+    Ok(true);
+}
+
+// -----------------------------------------------------------------
 // ufcs
 //
 // "A free function whose first param is the type is callable as a

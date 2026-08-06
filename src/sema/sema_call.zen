@@ -60,6 +60,8 @@ Found, Base, base_of, members_of, static_access = sema.sema_member
 is_type_def, opaque, nowhere = sema.sema_member
 satisfies_bound, check_bounds = sema.sema_bound
 type_from_ast, type_of, param_type = sema.sema_type
+cands_of, travelled_cands, matches = sema.sema_cand
+ty_at, is_tvar = sema.sema_cand
 
 // One candidate, as resolution sees it.
 //
@@ -207,7 +209,7 @@ local_or_decl_call = (c :: Checker, id: ExprId, node: Expr, call: Call,
                       name: str, actuals: Vec<Actual>, ctx: Ctx)
                      Res<TyId, AllocError> {
     c.lookup(name).match({
-        None   => decl_call(c, id, node, call, name, actuals, ctx),
+        None   => decl_call(c, id, node, call, name, None, actuals, ctx),
         Ok(b)  => fn_ret(c, node, b.ty),
     })
 }
@@ -222,9 +224,11 @@ local_or_decl_call = (c :: Checker, id: ExprId, node: Expr, call: Call,
 // fields positionally instead of the function is what made three
 // constructors in this folder unwritable.
 decl_call = (c :: Checker, id: ExprId, node: Expr, call: Call, name: str,
-             actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
+             recv: Res<TyId>, actuals: Vec<Actual>, ctx: Ctx)
+            Res<TyId, AllocError> {
     cands ::= c.alloc.Vec<Cand>();
     cands_of(c, ctx.module, name, cands).try();
+    travelled_cands(c, name, recv, cands).try();
     kept ::= c.alloc.Vec<Cand>();
     keep_matching(c, cands, actuals, kept).try();
     (kept.len > 0).match({
@@ -393,7 +397,7 @@ ufcs_call = (c :: Checker, id: ExprId, node: Expr, call: Call, ac: Access,
     all.add(Actual(ty: b.ty, is_lambda: false, arity: 0, named: false,
                    span: node.span)).try();
     actuals.loop((h, a) { all.add(a).try() });
-    decl_call(c, id, node, call, ac.name.text, all, ctx)
+    decl_call(c, id, node, call, ac.name.text, Ok(b.ty), all, ctx)
 }
 
 indirect_call = (c :: Checker, node: Expr, call: Call, ctx: Ctx)
@@ -417,230 +421,6 @@ not_callable = (c :: Checker, node: Expr, ty: TyId) Res<TyId, AllocError> {
              SemaFault.NotCallable(TypeFault(
                  name: "", expected: poison, found: ty))).try();
     c.types.unknown()
-}
-
-// ---------------------------------------------------------------------
-// candidates
-// ---------------------------------------------------------------------
-
-cands_of* = (c :: Checker, mi: usize, name: str, out :: Vec<Cand>)
-            Res<(), AllocError> {
-    defs ::= c.alloc.Vec<Def>();
-    c.world.defs_of(mi, name, defs).try();
-    defs.loop((h, d) { cand_of(c, d, out).try() });
-    Ok(());
-}
-
-cand_of = (c :: Checker, d: Def, out :: Vec<Cand>) Res<(), AllocError> {
-    decl_at(c.tree, d.id).match({
-        Ok(dec) => cand_from_decl(c, d, dec, out),
-        None    => Ok(()),
-    }).try();
-    Ok(());
-}
-
-cand_from_decl = (c :: Checker, d: Def, dec: Decl, out :: Vec<Cand>)
-                 Res<(), AllocError> {
-    dec.kind.match({
-        Function(f) => add_cand(c, d, dec, f, out),
-        _           => Ok(()),
-    })
-}
-
-// A signature is resolved in the module that DECLARES it, with the
-// declaration's own type parameters in scope — otherwise `<T>(a: T)`
-// reports its own `T` as an undefined name.
-add_cand = (c :: Checker, d: Def, dec: Decl, f: Function, out :: Vec<Cand>)
-           Res<(), AllocError> {
-    mark = c.tvar_mark();
-    poison = c.types.unknown().try();
-    ctx = Ctx(d.id.module.to_usize(), poison);
-    push_tparams(c, f, d.qname).try();
-    tvs ::= c.alloc.Vec<TyId>();
-    tparam_vars(c, f.tparams, d.qname, tvs).try();
-    ptys ::= c.alloc.Vec<TyId>();
-    f.params.loop((h, p) { ptys.add(c.param_type(p, ctx).try()).try() });
-    rty = f.ret.match({
-        Ok(r)  => c.type_from_ast(r, ctx),
-        None   => c.types.prim("()"),
-    }).try();
-    tbs ::= c.alloc.Vec<TBound>();
-    collect_bounds(c, f, ctx, tbs).try();
-    c.release_tvars(mark).try();
-    out.add(Cand(id: d.id, name: d.name, owner: d.qname, params: ptys,
-                 ret: rty, tvars: tvs, tbounds: tbs,
-                 generic: f.tparams.len > 0, span: dec.span))
-}
-
-push_tparams = (c :: Checker, f: Function, owner: str) Res<(), AllocError> {
-    f.tparams.loop((h, tp) {
-        text = tp.name.text;
-        c.push_tvar(text, c.types.var(text, owner).try()).try();
-    });
-    Ok(());
-}
-
-collect_bounds = (c :: Checker, f: Function, ctx: Ctx, out :: Vec<TBound>)
-                 Res<(), AllocError> {
-    f.tparams.loop((h, tp) { tparam_bounds(c, tp, ctx, out).try() });
-    Ok(());
-}
-
-tparam_bounds = (c :: Checker, tp: TParam, ctx: Ctx, out :: Vec<TBound>)
-                Res<(), AllocError> {
-    text = tp.name.text;
-    tp.bounds.loop((h, b) {
-        out.add(TBound(name: text, bound: c.type_from_ast(b, ctx).try())).try();
-    });
-    Ok(());
-}
-
-// ---------------------------------------------------------------------
-// matching
-// ---------------------------------------------------------------------
-
-// A NAMED ARGUMENT SUPPLIES A FIELD AND NEVER A PARAMETER, so a call
-// written with one matches no function at all.
-//
-// AST_CONTRACT.md gives `name: value` to construction and to an impl's
-// supplied field; a call's arguments are positional. Without this,
-// `Vec(alloc: a)` — the body of `Vec`'s own constructor — resolves to
-// the CONSTRUCTOR rather than to the struct, because the function takes
-// one `Alloc` and so does the call. Sema answered `Vec<T>` either way,
-// so nothing showed until a backend was able to lower it: the emitted
-// C is a function calling itself with its own argument, which is
-// unbounded recursion with no diagnostic anywhere. It is the same shape
-// as the variadic mismatch that built a `String` positionally, and it
-// is why this rule is checked before an instantiation is trusted.
-matches* = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
-           Res<bool, AllocError> {
-    any_named(actuals).match({
-        true  => Ok(false),
-        false => by_arity(c, cand, actuals),
-    })
-}
-
-any_named = (actuals: Vec<Actual>) bool {
-    Range(0, actuals.len).find((i) {
-        actuals.get(i).match({ Ok(a) => a.named, None => false })
-    }).match({ Ok(_) => true, None => false })
-}
-
-by_arity = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
-           Res<bool, AllocError> {
-    is_variadic(c, cand).match({
-        true  => variadic_matches(c, cand, actuals),
-        false => fixed_matches(c, cand, actuals),
-    })
-}
-
-fixed_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
-                Res<bool, AllocError> {
-    (cand.params.len == actuals.len).match({
-        false => Ok(false),
-        true  => all_fit(c, cand, actuals, actuals.len),
-    })
-}
-
-// `...` IS NOT A PARAMETER, it is the statement that the list does not
-// end. So `(a: Alloc, fmt: str, args: ...)` takes two arguments and
-// then any number, and arity is a MINIMUM rather than an equality.
-//
-// Without this, `alloc.String("{}", x)` matched NOTHING — three actuals
-// against a candidate reporting three parameters, one of which is the
-// `...` — and fell through to `construct_or_fail`, which found the
-// `String` STRUCT of the same name and built one positionally. The
-// mistake was silent and it was not a diagnostic: the call typed as
-// `String` where the declaration says `Res<String, AllocError>`, so
-// every `.try()` on it lost its operand's type and every `.view()` on
-// the result was unresolvable.
-//
-// Only the FIXED PREFIX is checked. What the rest may be is
-// type-directed — `text_string.zen` says the call is expanded where it
-// is written — and a check on arguments whose types the language has
-// not settled would be inventing a rule.
-variadic_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
-                   Res<bool, AllocError> {
-    fixed = cand.params.len - 1;
-    (actuals.len >= fixed).match({
-        false => Ok(false),
-        true  => all_fit(c, cand, actuals, fixed),
-    })
-}
-
-// Does the last parameter say the list does not end? `sema_type.zen`
-// interns `...` as a primitive, so this is a name compare and not a
-// new kind of `Ty`.
-is_variadic = (c: Checker, cand: Cand) bool {
-    (cand.params.len > 0).match({
-        false => false,
-        true  => c.prim_name(ty_at(cand.params, cand.params.len - 1)).eq("..."),
-    })
-}
-
-// The first `n` arguments, and no early exit — `find` takes a closure
-// that answers `bool`, and asking whether an argument keeps a bound is
-// a question that allocates. A candidate has a handful of parameters,
-// so the shape with nothing to get wrong is the right one.
-all_fit = (c :: Checker, cand: Cand, actuals: Vec<Actual>, n: usize)
-          Res<bool, AllocError> {
-    ok ::= true;
-    Range(0, n).loop((h, i) {
-        got = fits_at(c, cand, actuals, i).try();
-        ok = ok && got;
-    });
-    Ok(ok);
-}
-
-fits_at = (c :: Checker, cand: Cand, actuals: Vec<Actual>, i: usize)
-          Res<bool, AllocError> {
-    p = ty_at(cand.params, i);
-    actuals.get(i).match({
-        Ok(a) => fits(c, a, p),
-        None  => Ok(false),
-    })
-}
-
-// A closure's type is its full signature, and its arity is the part a
-// call site can see without inferring anything.
-fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
-    a.is_lambda.match({
-        true  => Ok(closure_fits(c, p, a.arity)),
-        false => value_fits(c, a, p),
-    })
-}
-
-// Assignable, or an impl of the bound the parameter names.
-//
-// The second is not a conversion and not a fallback: "a bound is just
-// which struct's shape do I need", so an `Arena` is acceptable where
-// `Alloc` is declared exactly because `Arena.impl(Alloc, ..)` exists
-// and the promise was already kept at the impl. Without it `main`'s own
-// `alloc ::= env.mem.alloc()` — the first line of every program in the
-// language — cannot be passed to anything.
-//
-// It runs second because it is the expensive one: `satisfies_bound`
-// searches the impls of a type, and `assignable` is a `u32` compare in
-// the case that dominates.
-value_fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
-    c.assignable(a.ty, p).match({
-        true  => Ok(true),
-        false => satisfies_bound(c, a.ty, p),
-    })
-}
-
-closure_fits = (c: Checker, p: TyId, arity: usize) bool {
-    c.types.at(p).match({
-        Fn(f)  => f.params.len == arity,
-        Var(_) => true,
-        _      => false,
-    })
-}
-
-is_tvar* = (c: Checker, id: TyId) bool { c.is_var(id) }
-
-ty_at* = (v: Vec<TyId>, i: usize) TyId {
-    v.get(i).match({ Ok(t) => t, None => UNRESOLVED })
 }
 
 // ---------------------------------------------------------------------

@@ -7,18 +7,21 @@
 // result ends up — and `gen_c_flow.zen` owns the two forms that cannot
 // be C expressions at all.
 //
-// THE ONE PLACE THIS IS NOT SOUND IS SHORT CIRCUITING. `a && b` must
-// not evaluate `b` unless `a` held, and a spilled `b` emits its
-// statements before the `&&` is written. So a spilling right operand of
-// `&&` or `||` is REPORTED rather than mis-lowered. That is a real
-// restriction and it is named out loud rather than left to be found.
+// A SPILLING FORM WHERE C WANTS A VALUE IS PUT IN A TEMPORARY, which is
+// the one thing this file does that is not a shape-for-shape
+// translation. `deliver` hands a spilling form straight to its
+// destination because a destination is already a place; an argument is
+// not, so `spill_temp` makes one.
 //
-// TRAPS ARE THE FAILURE MODEL, not an option. `+ - *` go through a
-// checked helper, `/ %` through a guarded one, and the position is the
-// OPERATOR token — which is why `Binary` and `Unary` carry `op_span`.
-// `+% -% *%` go through the wrapping helper: they are separate
-// operators and not a flag, "because a flag is one `!` away from
-// generating the wrong one".
+// WHICH IS WHY `spills` HAS TWO FORMS. `spills` asks whether a node IS
+// a spill — `deliver`'s question. `spills_anywhere` asks whether one is
+// hiding inside it, which is what short-circuiting needs, because a
+// hoisted `.try()` runs whether or not the left side held.
+// `gen_c_op.zen` owns that rule; this file owns the two questions.
+//
+// OPERATORS ARE `gen_c_op.zen`'S SUBJECT. `a + b` is not a shape, it is
+// a decision about what is being added — a trap helper, an `Eq` impl,
+// or plain C — and it left when this file outgrew its cap.
 //
 // SEMA IS THE ONLY SOURCE OF A TYPE. Where `type_of` answers, its
 // answer is used; where it does not yet — a call, a match, a record —
@@ -55,6 +58,7 @@ field_type, request_type = gen.gen_c.gen_c_type
 Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
 plain_ctx = gen.gen_c.gen_c_decl
 lower_call, res_value, is_res_ctor = gen.gen_c.gen_c_call
+lower_unary, lower_binary = gen.gen_c.gen_c_op
 inline_result_type = gen.gen_c.gen_c_settle
 
 // -----------------------------------------------------------------
@@ -73,6 +77,39 @@ spills* = (be: CBackend, id: ExprId) bool {
         Paren(p) => spills(be, p.inner),
         _        => false,
     })
+}
+
+// Does lowering this expression need statements of its own ANYWHERE
+// inside it?
+//
+// `spills` asks about the form ITSELF, which is `deliver`'s question: a
+// form that is a spill goes straight to its destination. Short-circuit
+// has the other question, because a `.try()` three parens deep still
+// lowers to an `if` and a `return` and `expr` will hoist it out to
+// where the operand was written.
+//
+// AN UNRECOGNISED FORM ANSWERS YES. Being wrong in this direction is a
+// refusal with a position; being wrong in the other is a program that
+// computes the wrong thing, which is the one outcome a backend may not
+// produce.
+spills_anywhere* = (be: CBackend, id: ExprId) bool {
+    be.tree.expr_at(id).kind.match({
+        Literal(_) => false,
+        Name(_)    => false,
+        Unit       => false,
+        Paren(p)   => spills_anywhere(be, p.inner),
+        Unary(u)   => spills_anywhere(be, u.operand),
+        Binary(b)  => spills_anywhere(be, b.lhs) || spills_anywhere(be, b.rhs),
+        Access(a)  => spills_anywhere(be, a.base),
+        Call(c)    => call_spills(be, c),
+        _          => true,
+    })
+}
+
+call_spills = (be: CBackend, c: Call) bool {
+    got ::= spills_anywhere(be, c.callee);
+    c.args.loop((h, a) { got = got || spills_anywhere(be, a.value); });
+    got
 }
 
 // The type of an expression.
@@ -119,7 +156,7 @@ settled_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
 // filled by the lowering's.
 settle_open = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
               Res<TyId, AllocError> {
-    walked = loop_result_type(be, id, got).try();
+    walked = loop_result_type(be, id, ctx, got).try();
     open(be, walked).match({
         false => Ok(walked),
         true  => inline_result_type(be, id, ctx, walked),
@@ -229,8 +266,83 @@ res_type_of* = (be :: CBackend, id: ExprId, ctx: Ctx)
     ty_of(be, id, ctx, unknown)
 }
 
+// A SPILLING FORM WHERE C WANTS AN EXPRESSION IS SPILLED INTO A
+// TEMPORARY, and that is the whole of it.
+//
+// `decls.add(p.declaration(true).try())` is an ordinary thing to write
+// and `.try()` is an `if` and a `return`: there is no C expression for
+// it. `deliver` hands a spilling form STRAIGHT to its destination
+// because a destination is already a place — but an argument is not a
+// place, so one is made here. The temporary is declared and filled
+// BEFORE the statement being built, which is where every other spill in
+// this backend already lands: `deliver_simple` builds the expression
+// text first and writes the line after, so anything written while it
+// builds comes out ahead of it.
 expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, out :: String)
         Res<(), AllocError> {
+    spills(be, id).match({
+        true  => spill_temp(be, id, ctx, want, out),
+        false => write_expr(be, id, ctx, want, out),
+    })
+}
+
+spill_temp = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+              out :: String) Res<(), AllocError> {
+    ty = spill_type(be, id, ctx, want).try();
+    settled_place(be, ty).match({
+        false => unsupported(be, id, "a spilling form whose type nothing settles", out),
+        true  => spill_settled(be, id, ctx, ty, out),
+    })
+}
+
+// The type of the place the value lands in. The written expectation
+// when there is one — "the destination's type wins" — and the
+// expression's own answer when there is not.
+spill_type = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+             Res<TyId, AllocError> {
+    be.check.is_unknown(want).match({
+        false => Ok(want),
+        true  => ty_of(be, id, ctx, want),
+    })
+}
+
+settled_place = (be :: CBackend, ty: TyId) bool {
+    (be.check.is_unknown(ty) == false) && (open(be, ty) == false)
+}
+
+// A spilling form whose value is `()` has nothing to hold — a void
+// temporary is illegal C — and it still RUNS: dropping it would drop
+// the `.try()` that was the reason for writing it. `0` goes where the
+// expression went, which is what the four report helpers write.
+spill_settled = (be :: CBackend, id: ExprId, ctx: Ctx, ty: TyId,
+                 out :: String) Res<(), AllocError> {
+    is_unit(be, ty).match({
+        true  => spill_effect(be, id, ctx, ty, out),
+        false => spill_valued(be, id, ctx, ty, out),
+    })
+}
+
+spill_effect = (be :: CBackend, id: ExprId, ctx: Ctx, ty: TyId,
+                out :: String) Res<(), AllocError> {
+    deliver(be, id, ctx, ty, Dest.Discard).try();
+    out.add_bytes("0")
+}
+
+spill_valued = (be :: CBackend, id: ExprId, ctx: Ctx, ty: TyId,
+                out :: String) Res<(), AllocError> {
+    request_type(be, ty).try();
+    tmp ::= be.alloc.String().try();
+    sym_gen(tmp, "s", be.next_tmp()).try();
+    line ::= be.alloc.String().try();
+    declarator(be, ty, tmp.view(), line).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view()).try();
+    deliver(be, id, ctx, ty, Dest.Into(tmp.view())).try();
+    out.add_bytes(tmp.view())
+}
+
+write_expr = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+              out :: String) Res<(), AllocError> {
     node = be.tree.expr_at(id);
     node.kind.match({
         Literal(l)  => lower_literal(be, id, l, ctx, want, out),
@@ -406,247 +518,6 @@ is_literal_value = (be: CBackend, id: ExprId) bool {
     })
 }
 
-
-// -----------------------------------------------------------------
-// operators
-// -----------------------------------------------------------------
-
-lower_unary = (be :: CBackend, node: Expr, u: Unary, ctx: Ctx, want: TyId,
-               out :: String) Res<(), AllocError> {
-    u.op.match({
-        Not  => wrap_unary(be, "!", u.operand, ctx, want, out),
-        Neg  => lower_negate(be, node, u, ctx, want, out),
-        Addr => unsupported(be, u.operand, "the address-of operator", out),
-    })
-}
-
-wrap_unary = (be :: CBackend, op: str, operand: ExprId, ctx: Ctx,
-              want: TyId, out :: String) Res<(), AllocError> {
-    out.add_bytes("(").try();
-    out.add_bytes(op).try();
-    expr(be, operand, ctx, want, out).try();
-    out.add_bytes(")").try();
-    Ok(());
-}
-
-// Negation on an integer is `0 - x`, and it TRAPS: `-i32.MIN` is an
-// overflow like any other. On a float it is the C operator, which
-// cannot overflow.
-lower_negate = (be :: CBackend, node: Expr, u: Unary, ctx: Ctx, want: TyId,
-                out :: String) Res<(), AllocError> {
-    ty = ty_of(be, u.operand, ctx, want).try();
-    prim = be.check.prim_name(ty);
-    is_c_integer(prim).match({
-        false => wrap_unary(be, "-", u.operand, ctx, want, out),
-        true  => negate_checked(be, node, u, prim, ctx, ty, out),
-    })
-}
-
-negate_checked = (be :: CBackend, node: Expr, u: Unary, prim: str, ctx: Ctx,
-                  ty: TyId, out :: String) Res<(), AllocError> {
-    be.need_helpers(prim).try();
-    out.add_bytes("zg_sub_").try();
-    out.add_bytes(prim).try();
-    out.add_bytes("(0, ").try();
-    expr(be, u.operand, ctx, ty, out).try();
-    out.add_bytes(", ").try();
-    write_position(be, node.span.file, u.op_span, out).try();
-    out.add_bytes(")").try();
-    Ok(());
-}
-
-lower_binary = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx, want: TyId,
-                out :: String) Res<(), AllocError> {
-    is_logical(b.op).match({
-        true  => lower_logical(be, node, b, ctx, out),
-        false => lower_value_op(be, node, b, ctx, want, out),
-    })
-}
-
-is_logical* = (op: BinOp) bool {
-    op.match({ And => true, Or => true, _ => false })
-}
-
-is_comparison* = (op: BinOp) bool {
-    op.match({
-        Equal => true, NotEqual => true, Less => true, LessEq => true,
-        Greater => true, GreaterEq => true,
-        _ => false,
-    })
-}
-
-// `&&` and `||` short-circuit, so a right operand that needs
-// statements of its own cannot be lowered here: the statements would
-// run whether or not the left side held. Reported, not mis-lowered.
-lower_logical = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx,
-                 out :: String) Res<(), AllocError> {
-    bool_ty = be.check.types.bool_ty().try();
-    spills(be, b.rhs).match({
-        true  => unsupported(be, b.rhs, "a spilling operand of && or ||", out),
-        false => write_infix(be, b, c_op(b.op), ctx, bool_ty, out),
-    })
-}
-
-lower_value_op = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx,
-                  want: TyId, out :: String) Res<(), AllocError> {
-    operand = operand_type(be, b, ctx, want).try();
-    prim = be.check.prim_name(operand);
-    is_comparison(b.op).match({
-        true  => lower_compare(be, b, prim, ctx, operand, out),
-        false => lower_arith(be, node, b, prim, ctx, operand, out),
-    })
-}
-
-// The operands' type, which is not the expression's when the operator
-// is a comparison: `a == b` is `bool` whatever it compares.
-operand_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
-               Res<TyId, AllocError> {
-    lhs = sub(be, be.check.type_of(b.lhs, ctx).try()).try();
-    be.check.is_literal_ty(lhs).match({
-        false => literal_or(be, lhs, b, ctx, want),
-        true  => rhs_type(be, b, ctx, want),
-    })
-}
-
-literal_or = (be :: CBackend, lhs: TyId, b: Binary, ctx: Ctx, want: TyId)
-             Res<TyId, AllocError> {
-    be.check.is_unknown(lhs).match({
-        false => Ok(lhs),
-        true  => rhs_type(be, b, ctx, want),
-    })
-}
-
-rhs_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
-           Res<TyId, AllocError> {
-    rhs = sub(be, be.check.type_of(b.rhs, ctx).try()).try();
-    usable(be, rhs).match({
-        true  => Ok(rhs),
-        false => Ok(want),
-    })
-}
-
-usable = (be :: CBackend, id: TyId) bool {
-    be.check.is_unknown(id).match({
-        true  => false,
-        false => be.check.is_literal_ty(id) == false,
-    })
-}
-
-// Comparison is C's, and only on scalars. Two structs compared with
-// `==` is not C, and it is not Zen either — DESIGN.md gives `Eq` as an
-// ordinary struct with an `eq` method and never says `==` desugars to
-// it — so this reports rather than emitting something `cc` will refuse.
-lower_compare = (be :: CBackend, b: Binary, prim: str, ctx: Ctx,
-                 operand: TyId, out :: String) Res<(), AllocError> {
-    scalar(be, operand).match({
-        true  => write_infix(be, b, c_op(b.op), ctx, operand, out),
-        false => unsupported(be, b.lhs, "comparing values that are not scalars", out),
-    })
-}
-
-scalar = (be: CBackend, id: TyId) bool {
-    be.check.types.at(id).match({
-        Prim(p) => p.name.eq("str") == false && p.name.eq("()") == false,
-        _       => false,
-    })
-}
-
-write_infix = (be :: CBackend, b: Binary, op: str, ctx: Ctx, operand: TyId,
-               out :: String) Res<(), AllocError> {
-    out.add_bytes("(").try();
-    expr(be, b.lhs, ctx, operand, out).try();
-    out.add_bytes(" ").try();
-    out.add_bytes(op).try();
-    out.add_bytes(" ").try();
-    expr(be, b.rhs, ctx, operand, out).try();
-    out.add_bytes(")").try();
-    Ok(());
-}
-
-c_op* = (op: BinOp) str {
-    op.match({
-        Add => "+", Sub => "-", Mul => "*", Div => "/", Rem => "%",
-        AddWrap => "+", SubWrap => "-", MulWrap => "*",
-        Equal => "==", NotEqual => "!=",
-        Less => "<", LessEq => "<=", Greater => ">", GreaterEq => ">=",
-        And => "&&", Or => "||",
-    })
-}
-
-// The helper an operator goes through. `+ - *` trap, `/ %` trap on a
-// zero divisor and on `MIN / -1`, and the wrapping forms do neither.
-helper_stem* = (op: BinOp) str {
-    op.match({
-        Add => "add", Sub => "sub", Mul => "mul",
-        Div => "div", Rem => "mod",
-        AddWrap => "wadd", SubWrap => "wsub", MulWrap => "wmul",
-        _ => "",
-    })
-}
-
-traps* = (op: BinOp) bool {
-    op.match({
-        AddWrap => false, SubWrap => false, MulWrap => false,
-        _ => true,
-    })
-}
-
-// Arithmetic on an integer goes through a helper, always. Nothing here
-// emits `a + b` and looks afterwards: signed overflow is undefined
-// behaviour in C and an after-the-fact test is one the optimizer is
-// entitled to delete.
-lower_arith = (be :: CBackend, node: Expr, b: Binary, prim: str, ctx: Ctx,
-               operand: TyId, out :: String) Res<(), AllocError> {
-    is_c_integer(prim).match({
-        true  => call_helper(be, node, b, prim, ctx, operand, out),
-        false => write_infix(be, b, c_op(b.op), ctx, operand, out),
-    })
-}
-
-call_helper = (be :: CBackend, node: Expr, b: Binary, prim: str, ctx: Ctx,
-               operand: TyId, out :: String) Res<(), AllocError> {
-    be.need_helpers(prim).try();
-    out.add_bytes("zg_").try();
-    out.add_bytes(helper_stem(b.op)).try();
-    out.add_bytes("_").try();
-    out.add_bytes(prim).try();
-    out.add_bytes("(").try();
-    expr(be, b.lhs, ctx, operand, out).try();
-    out.add_bytes(", ").try();
-    expr(be, b.rhs, ctx, operand, out).try();
-    // `.match` and not `.then`: a `.then` closure capturing more than
-    // one of its enclosing parameters is inlined with the receiver
-    // substituted into the wrong argument slot, which `cc` catches and
-    // docs/GEN_BOOTSTRAP_FIXES.md records.
-    traps(b.op).match({
-        true  => write_trap_args(be, node, b, out),
-        false => Ok(()),
-    }).try();
-    out.add_bytes(")").try();
-    Ok(());
-}
-
-write_trap_args = (be :: CBackend, node: Expr, b: Binary, out :: String)
-                  Res<(), AllocError> {
-    out.add_bytes(", ").try();
-    write_position(be, node.span.file, b.op_span, out).try();
-    Ok(());
-}
-
-// `"file", line, col` — the three arguments every trap takes. The
-// position is the OPERATOR token, and the file is relative to the
-// compilation root, which is what makes two checkouts of one tree emit
-// the same bytes.
-write_position* = (be :: CBackend, file: str, span: Span, out :: String)
-                  Res<(), AllocError> {
-    out.add_bytes("\"").try();
-    out.add_bytes(file).try();
-    out.add_bytes("\", ").try();
-    write_usize(out, span.start.line).try();
-    out.add_bytes(", ").try();
-    write_usize(out, span.start.col).try();
-    Ok(());
-}
 
 // -----------------------------------------------------------------
 // access and calls
