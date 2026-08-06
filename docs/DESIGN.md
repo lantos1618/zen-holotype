@@ -200,6 +200,8 @@ printers.add(circle.as(Display)).try();   // 2 words copied in, no alloc
 
 A `Sink` dissolves it. A console is a sink, a `String` is a sink, and `println` hands `toString` the console it already holds — so **printing does not allocate at all**, and nesting still writes into the one buffer that is already open. It is the same move as `Alloc`: name the capability, pass it as a fat value, and let the caller decide what is behind it.
 
+**`Sink` has two members, not one.** `write_byte` looks redundant beside `write` and is not. The integer writers build a number a digit at a time, and a digit has no `str` to point at — `str` borrows bytes, and the only way to obtain something to borrow is a `Ptr` from an `Alloc`. So a sink that accepts bytes but not *a* byte makes printing an integer allocate, which is the one thing this whole design exists to prevent. The alternatives are worse: formatting digits in the C runtime moves the format rules out of `text_fmt.zen` and splits the single implementation in two, and a static digit table needs a `u64`→`usize` conversion the numeric surface does not have.
+
 `Sink.write` returns `WriteError`, the union, and that is the part worth arguing about. Writing to a console fails with `IoError` and writing to a growable `String` fails with `AllocError`; there is no `From`, so a single sink type cannot pretend those are one error. The union is the honest type — which is exactly the reason `WriteError` was introduced. **Cost to accept knowingly:** a caller writing into a `String` must handle an `IoError` that a `String` can never produce, and a caller writing to a console must handle an `AllocError` it can never produce. `.try()` merges either into the caller's set for free, so the cost is paid only where someone actually matches on the error.
 
 ---
@@ -466,9 +468,19 @@ String* = {
 // format machinery knowing which it has
 Sink* = {
     write* = (self :: @Self, bytes: str) Res<(), WriteError>
+
+    // a sink that takes bytes but not A byte forces every integer
+    // writer to allocate, which is the exact cost this design
+    // exists to avoid: digits are produced one at a time, `str`
+    // BORROWS bytes, and the only way to get a `str` to borrow is
+    // a `Ptr` from an Alloc. so one byte is its own member
+    write_byte* = (self :: @Self, byte: u8) Res<(), WriteError>
 }
 
-String.impl(Sink, { write = (self :: @Self, bytes: str) Res<(), WriteError> { .. } })
+String.impl(Sink, {
+    write      = (self :: @Self, bytes: str) Res<(), WriteError> { .. }
+    write_byte = (self :: @Self, byte: u8) Res<(), WriteError> { .. }
+})
 
 Display* = {
     // sealed (=): the mechanical debug dump. @meta walk over
