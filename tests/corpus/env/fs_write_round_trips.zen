@@ -1,0 +1,23 @@
+// `write` is the mirror of `read`, and it arrived when the fixpoint
+// needed it and not before: `zen build src -o stage2.c` cannot honour
+// its own `-o` without one. No append, no mode, no handle — the
+// compiler writes one file once. It takes no Alloc because it
+// allocates nothing: the bytes are the caller's and stay the caller's.
+FsError = std.env
+
+main = (env: Env) Res<i32, FsError> {
+    alloc ::= env.mem.alloc();
+    env.fs.write("out.txt", "round trip\n").try();
+    println("{}", env.fs.read(alloc, "out.txt").try().view());
+
+    // a path whose parent is not there is a caller's problem, not a bug
+    env.fs.write("nodir/x.txt", "x").match({
+        Ok(_)  => println("wrote into a missing directory"),
+        Err(_) => println("missing directory refused"),
+    });
+
+    // an empty write leaves an empty file, not a missing one
+    env.fs.write("empty.txt", "").try();
+    println("{}", env.fs.read(alloc, "empty.txt").try().len());
+    Ok(0);
+}

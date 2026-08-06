@@ -4444,7 +4444,8 @@ class FnCtx:
         base = decl.scope_parts
         ret = self.e.resolve_type(self.e.ret_of(fnode), {}, base)
         if not (name == "read" and len(argnodes) == 2) and not (
-                name in ("exists", "is_dir") and len(argnodes) == 1):
+                name in ("exists", "is_dir") and len(argnodes) == 1) and not (
+                name == "write" and len(argnodes) == 2):
             return None
         # only now: a program that never reaches one of these members must not
         # pay for <sys/stat.h>
@@ -4456,6 +4457,25 @@ class FnCtx:
                 return ("0", prim("bool"))
             test = "== 1" if name == "is_dir" else ">= 0"
             return ("(zg_fs_kind(%s, %s) %s)" % (path[0], path[1], test), prim("bool"))
+
+        if name == "write":
+            info = self.e.enum_info(ret)
+            ety = dict(info[2]).get("Err") if info else None
+            path = self.str_parts(argnodes[0], node)
+            data = self.str_parts(argnodes[1], node)
+            if path is None or data is None:
+                return ("0", ret)
+            rc = self.new_tmp(prim("i32"))
+            out = self.new_tmp(ret)
+            self.line("%s = zg_fs_write(%s, %s, %s, %s);" % (
+                rc, path[0], path[1], data[0], data[1]))
+            self.open("if (%s != 0) {" % rc)
+            self.fs_err(ret, ety, rc, out, node)
+            self.close("} else {")
+            self.indent += 1
+            self.line("%s = %s;" % (out, self.make_variant(ret, "Ok", None)))
+            self.close()
+            return (out, ret)
 
         # Res<String, FsError>: the buffer the Alloc hands out, wrapped in the
         # owner that tells the same story every other buffer in std tells.
@@ -4566,7 +4586,7 @@ class FnCtx:
             got = self.lower_mem(decl, fnode, node, argnodes, receiver)
             if got is not None:
                 return got
-        if decl.owner == "Fs" and decl.name in ("read", "exists", "is_dir"):
+        if decl.owner == "Fs" and decl.name in ("read", "write", "exists", "is_dir"):
             got = self.lower_fs(decl, fnode, node, argnodes, receiver)
             if got is not None:
                 return got
@@ -6006,6 +6026,21 @@ static int zg_fs_size(const unsigned char *p, size_t n, size_t *out) {
 /* Fill `dst` with up to `want` bytes.  `*got` is what actually arrived: the
  * file may have shrunk between the size question and this one, and a short
  * read is the honest length rather than a failure. */
+static int zg_fs_write(const unsigned char *p, size_t n,
+                       const unsigned char *src, size_t len) {
+    char buf[ZG_PATH_MAX];
+    FILE *fh;
+    if (!zg_fs_path(buf, p, n)) return ZG_FS_FAILED;
+    fh = fopen(buf, "wb");
+    if (fh == NULL) {
+        if (errno == EISDIR) return ZG_FS_IS_DIR;
+        return errno == EACCES ? ZG_FS_DENIED : ZG_FS_NOT_FOUND;
+    }
+    if (len && fwrite(src, 1, len, fh) != len) { fclose(fh); return ZG_FS_FAILED; }
+    if (fclose(fh) != 0) return ZG_FS_FAILED;
+    return ZG_FS_OK;
+}
+
 static int zg_fs_read(const unsigned char *p, size_t n, unsigned char *dst,
                       size_t want, size_t *got) {
     char buf[ZG_PATH_MAX];
