@@ -822,25 +822,27 @@ module.exports = grammar({
     // `"{}"` placeholders are format-string content, not syntax: the format
     // machinery routes `{}` through toString at the call, so the lexer sees
     // an ordinary string. (A-FMT)
-    string_literal: ($) =>
-      seq(
-        '"',
-        repeat(choice($.escape_sequence, token.immediate(/[^"\\]+/))),
-        token.immediate('"'),
-      ),
+    // ONE token, not a seq. A `seq` lets `extras` -- whitespace and both
+    // comment forms -- match BETWEEN its elements, so `"// x"` matched a
+    // line_comment INSIDE the string and ran to the end of the next line,
+    // corrupting every literal after it. A token has no seams for an extra
+    // to enter.
+    //
+    // `\n` is excluded on both branches because DESIGN.md's lexical rules
+    // say a string literal does not span lines, and a token is where that
+    // is expressible: as a `seq` the newline was matched by `[^"\\]+` and
+    // the rule could not state its own law.
+    string_literal: (_) =>
+      token(seq('"', repeat(choice(seq('\\', /[^\n]/), /[^"\\\n]/)), '"')),
 
     // "zen has `'a'` char literals; write `b == ':'` not `b == 58`"
-    char_literal: ($) =>
-      seq(
-        "'",
-        choice($.escape_sequence, token.immediate(/[^'\\]/)),
-        token.immediate("'"),
-      ),
+    // one token, for the same reason as string_literal above. A char
+    // literal holds exactly one byte (DESIGN.md), and does not span lines.
+    char_literal: (_) =>
+      token(seq("'", choice(seq('\\', /[^\n]/), /[^'\\\n]/), "'")),
 
     // the escape set is not enumerated in DESIGN.md; `\'` and `\\` are named
     // in TESTING.md. Anything after a backslash lexes, and sema decides.
-    escape_sequence: (_) => token.immediate(seq('\\', /./)),
-
     line_comment: (_) => token(seq('//', /[^\n]*/)),
 
     // D9: not nested.
