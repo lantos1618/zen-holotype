@@ -29,7 +29,7 @@ from typing import Sequence
 
 TESTS_DIR = Path(__file__).resolve().parent
 
-KNOWN_SUFFIXES = {".zen", ".expected", ".exit", ".stderr", ".count"}
+KNOWN_SUFFIXES = {".zen", ".expected", ".exit", ".stderr", ".count", ".stage"}
 POSITION = re.compile(r"^(?:(?P<path>[^\s:]+):)?(?P<line>\d+):(?P<col>\d+)$")
 MERGED = re.compile(r"^(?P<path>[^\s:]+):(?P<line>\d+):(?P<col>\d+):\s*\S")
 
@@ -42,7 +42,7 @@ RULES: dict[str, tuple[str, str]] = {
     "orphan-zen": (ERROR, "a .zen file that belongs to no test: it never runs, so it cannot go red"),
     "orphan-expected": (ERROR, "an .expected with no .zen beside it"),
     "orphan-aux": (ERROR, "an .exit/.stderr with no test beside it"),
-    "foreign-file": (ERROR, "a file whose suffix is not .zen/.expected/.exit/.stderr"),
+    "foreign-file": (ERROR, "a file whose suffix is not one TESTING.md names"),
     "doc-file": (WARN, "prose inside a suite; TESTING.md does not provide for it"),
     "dir-entry-name": (ERROR, "a directory test's entry point must be main.zen"),
     "dir-expected-name": (ERROR, "a directory test's expectation lives at the directory root"),
@@ -55,7 +55,7 @@ RULES: dict[str, tuple[str, str]] = {
     "mf-zero-position": (ERROR, "a position with a 0 line or column; both are 1-based"),
     "mf-blank-line": (WARN, "a blank line inside .expected"),
     "mf-aux-file": (ERROR, "a must-fail test carries .exit/.stderr, which the format does not define"),
-    "mf-bare-position": (INFO, "bare line:col, resolved against the entry file; TESTING.md allows this for single-file tests"),
+    "mf-bare-position": (ERROR, "bare line:col in a DIRECTORY test, which has no single entry to resolve against"),
     "corpus-exit-zero": (WARN, ".exit holds 0; TESTING.md says omit the file when it is 0"),
     "corpus-exit-bad": (ERROR, ".exit is not a single integer in 0..255"),
     "corpus-expected-crlf": (ERROR, ".expected contains a CR; stdout is compared byte for byte"),
@@ -276,13 +276,13 @@ class Linter:
 
         for aux in d.iterdir():
             if aux.is_file() and aux.suffix not in KNOWN_SUFFIXES and aux.name not in (
-                ".expected", ".exit", ".stderr", ".count"
+                ".expected", ".exit", ".stderr", ".count", ".stage"
             ):
                 self.flag("foreign-file", aux, suite, f"{aux.name} at a test root",
                           "remove it or have TESTING.md name it")
 
         if kind == "must-fail":
-            self.check_must_fail(expected, entry.name, suite)
+            self.check_must_fail(expected, entry.name, suite, is_dir=True)
             for name in (".exit", ".stderr", f"{d.name}.exit", f"{d.name}.stderr"):
                 if (d / name).is_file():
                     self.flag("mf-aux-file", d / name, suite,
@@ -293,7 +293,8 @@ class Linter:
 
     # ---------------------------------------------------------- the contents
 
-    def check_must_fail(self, expected: Path, entry_name: str, suite: str) -> None:
+    def check_must_fail(self, expected: Path, entry_name: str, suite: str,
+                        is_dir: bool = False) -> None:
         text = expected.read_text(encoding="utf-8", errors="replace")
         lines = text.splitlines()
         if not text.strip():
@@ -339,13 +340,16 @@ class Linter:
                           "line and column are both 1-based")
             if m["path"] is None:
                 bare.append(raw)
-        if bare:
-            # One finding per file: 100+ rows of the same thing is a wall, not a report.
+        if bare and is_dir:
+            # TESTING.md blesses the bare form for SINGLE-FILE tests, where it
+            # resolves against the one entry. A directory has several files and
+            # nothing to resolve against, so there the path is not optional.
+            # One finding per file: 100+ rows of the same thing is a wall.
             self.flag(
                 "mf-bare-position", expected, suite,
                 f"{len(bare)} position(s) omit the path: {', '.join(bare)}",
-                f"prefix each with {entry_name}:, or have TESTING.md bless the bare "
-                "form for single-file tests (recommended)",
+                f"prefix each with the file it belongs to; a directory test has "
+                "more than one, so there is nothing for a bare position to mean",
             )
 
     def check_corpus(
@@ -494,30 +498,30 @@ def report_markdown(lint: Linter) -> str:
             add(f"| `{rule}` | {sev} | {text} |")
     add("")
 
-    add("## Four of these need a spec decision, not an edit")
+    add("## The spec decided these; one migration is outstanding")
     add("")
-    add("`docs/TESTING.md` is authoritative, so where it is silent the fix is a")
-    add("sentence there — not a convention invented in a suite.")
+    add("`docs/TESTING.md` is authoritative. Every question this report used to")
+    add("carry has since been answered there, and they are listed so nobody")
+    add("re-opens one:")
     add("")
-    add("1. **What a directory test's expectation is called.** The spec says a")
-    add("   directory holds \"its module tree plus `.expected` / `.exit` / `.stderr` at")
-    add("   the directory root\", which reads equally as a literal `.expected` and as")
-    add("   `<name>.expected`. 22 tests chose the literal dotfile, one chose")
-    add("   `<name>.expected`, and `tests/determinism/fixture` chose `main.expected`.")
-    add("   The runner accepts all three; the spec should name one. A dotfile is")
-    add("   invisible to `ls` and to some `git add` habits, which argues for")
-    add("   `main.expected` — it also matches `main.zen`, already mandated.")
-    add("2. **Whether a position may omit its path.** See `mf-bare-position` above.")
-    add("3. **No way to bound the diagnostic count.** `TESTING.md` requires that \"one")
-    add("   syntax error must not cascade into fifty\", and the format cannot express")
-    add("   it: extra diagnostics are always allowed. `must-fail/parse` invented a")
-    add("   `.count` file, which nothing reads. Either add a `.count` (or")
-    add("   `.max-diagnostics`) to the format, or drop the requirement.")
-    add("4. **What a `must-fail` test's compilation root is.** For a flat test the")
-    add("   runner passes the `.zen` file; for a directory it passes the directory")
-    add("   (`tests/corpus/codegen/README.md` assumes the same). The paths a")
-    add("   diagnostic prints follow from that choice, and positions are asserted")
-    add("   against them, so it belongs in the spec.")
+    add("1. **A directory test names its expectation `main.expected`** — it matches")
+    add("   the `main.zen` already mandated, and a dotfile is invisible to `ls` and")
+    add("   to some `git add` habits. The runner still accepts the literal")
+    add("   `.expected` and `<name>.expected`, and **22 tests still use them**. That")
+    add("   is a rename, not a question.")
+    add("2. **A position may omit its path in a single-file test**, resolving")
+    add("   against the entry. A directory test has no single entry, so there it is")
+    add("   an error — which is what `mf-bare-position` now means.")
+    add("3. **`.count` bounds the diagnostic count**, and `tests/run.py` reads it.")
+    add("   It was invented by `must-fail/parse` and read by nothing, which made")
+    add("   \"one syntax error must not cascade into fifty\" unenforceable.")
+    add("4. **A test\'s compilation root is its own directory**, so every asserted")
+    add("   path is relative to it — which is what makes comparing two copies of a")
+    add("   tree at different absolute paths a meaningful determinism check.")
+    add("")
+    add("`.stage` joined the format later: it names the stage a test\'s feature")
+    add("arrives at, and a test ahead of `STAGE` is reported deferred rather than")
+    add("failed. It is not a skip — a deferred test that PASSES is a failure.")
     add("")
 
     add("## What is deliberately not a violation")
