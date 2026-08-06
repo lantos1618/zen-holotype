@@ -82,6 +82,34 @@ Everything below follows from these. When two rules seem to conflict, the law wi
 
 ---
 
+# Lexical rules
+
+A scanner cannot abstain. Every one of these was going to be decided by whoever wrote the first one, so they are decided here instead — that is the difference between a language and an implementation with a manual.
+
+The shape of every rule below is the same: **reject rather than reinterpret.** A scanner that silently picks a reading is how a language ends up with a specification nobody can write down, and the readings it picks are always the ones that hide the bug (`010` meaning 8, `"\q"` meaning `q`). Rejecting costs the author one keystroke. Reinterpreting costs a reader an afternoon.
+
+**Escapes.** The set is `\n \t \r \0 \\ \' \"` and nothing else. An unknown escape is an error, never a silent literal character: `"\q"` does not mean `q`.
+
+**A string or character literal does not span lines.** The newline is the error, and the diagnostic points at the **opening quote** — pointing at end-of-file names no useful location, because end-of-file is not where the mistake is.
+
+**A character literal holds exactly one byte.** `str` is bytes, so `''` and `'ab'` are both errors. `'é'` is two bytes and therefore not a character literal.
+
+**Numbers are decimal, and a digit may not be followed by an identifier character.** `1abc` is an error, not a number beside a name. There are no type suffixes — a literal's type comes from its context, which is the same rule the rest of the language runs on.
+
+- **A leading zero is rejected.** Zen has no octal, so `010` cannot quietly mean 8. Python 3 made this exact call for this exact reason.
+- **`12.` is an error**; a float has digits on both sides of the point. The gain is that a number literal is never the base of a member access, so `1.max` needs no lookahead to disambiguate from a malformed float.
+- Hex is therefore not in v1. `0xFF` is not "a number followed by an identifier character" but its own token shape, and adding a token shape later is compatible in a way that removing one is not. Cost to accept knowingly: bit masks are written in decimal until someone adds it.
+
+**Identifiers are ASCII** — `[A-Za-z_][A-Za-z0-9_]*`. Widening a character set later is compatible; narrowing it is not, so v1 takes the narrow end.
+
+**Block comments do not nest.** `/* a /* b */` is closed.
+
+**A BOM is stripped only at offset 0.** Anywhere else it is an ordinary invalid byte sequence, and saying so beats a file that parses differently depending on where an editor left a marker.
+
+**`@` is closed.** The namespace is exactly `@Self`, `@meta`, `@scope` — adding a fourth is a design change, not an implementation detail. So `@foo` is a lexical error at the `@`, and never an unresolved name later: one mistake, one diagnostic, anchored where the fix goes.
+
+---
+
 # Declarations
 
 **Conventions settled:** fields mirror bindings: `name: T` is set at construction and never reassigned, `name :: T` is mutable, and `= default` makes a field optional at construction. `*` on a field means readable outside the module; mutation only ever goes through exported methods.
