@@ -4991,7 +4991,7 @@ class FnCtx:
         elif sty is not None and sty[0] == "named" and self.e.enum_info(sty):
             self.match_enum(node, scode, sty, arms, result, ty)
         else:
-            self.match_scalar(node, scode, arms, result, ty)
+            self.match_scalar(node, scode, sty, arms, result, ty)
         return (result if result is not None else "0", ty or UNIT)
 
     def arm_type(self, arms):
@@ -5121,6 +5121,10 @@ class FnCtx:
         if k == "PatWild":
             return
         if k == "PatLit":
+            got = self.str_pat_cond(code, ty, pat)
+            if got is not None:
+                conds.append(got)
+                return
             conds.append("%s == %s" % (paren(code), str(f(pat, "text", "0"))))
             return
         if k != "PatVariant":
@@ -5135,6 +5139,34 @@ class FnCtx:
         if pty is not None:
             self.pat_conds("%s.%sdata.%s" % (paren(code), GEN, sym_member(vname)),
                            pty, f(pat, "binder"), conds, binds)
+
+    def str_pat_cond(self, code, ty, pat):
+        """`s.match({ "i8" => .. })` where `s` is a `str`.
+
+        A `str` is a struct, so the ordinary `==` this falls through to emitted
+        `zg_str == "i8"` -- a struct against a `char *`, which is invalid C and
+        was emitted SILENTLY. The backend written in Zen hit this and worked
+        around it with nested calls rather than the match it wanted.
+
+        Compared here the way `str.impl(Eq)` compares: the LENGTH first, then
+        the bytes. Length first is not an optimisation, it is the correctness:
+        comparing over the shorter length is the classic bug, and a prefix is
+        not the whole.
+        """
+        if f(pat, "kind") != "str":
+            return None
+        want = self.str_type()
+        if ty is None or ty != want:
+            return None
+        raw = decode_str(str(f(pat, "text", '""')))
+        data, length, user = self.str_names()
+        dname = sym_member(data) if user else "data"
+        lname = sym_member(length) if user else "len"
+        base = paren(code)
+        if not raw:
+            return "%s.%s == 0" % (base, lname)
+        return "(%s.%s == %d && memcmp(%s.%s, %s, %d) == 0)" % (
+            base, lname, len(raw), base, dname, c_string(raw), len(raw))
 
     def emit_arm(self, arm, pty, payload, result, ty):
         conds, binds = [], []
@@ -5222,7 +5254,7 @@ class FnCtx:
             )
         self.close()
 
-    def match_scalar(self, node, scode, arms, result, ty):
+    def match_scalar(self, node, scode, sty, arms, result, ty):
         first = True
         for arm in arms:
             pat = f(arm, "pattern")
@@ -5234,8 +5266,10 @@ class FnCtx:
                     self.close("} else {")
                     self.indent += 1
             else:
-                text = str(f(pat, "text", f(pat, "name", "0")))
-                cond = "%s == %s" % (paren(scode), text)
+                cond = self.str_pat_cond(scode, sty, pat)
+                if cond is None:
+                    text = str(f(pat, "text", f(pat, "name", "0")))
+                    cond = "%s == %s" % (paren(scode), text)
                 if first:
                     self.open("if (%s) {" % cond)
                 else:

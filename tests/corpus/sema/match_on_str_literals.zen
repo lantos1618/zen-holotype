@@ -1,0 +1,28 @@
+// `s.match({ "i8" => .. })` on a str scrutinee. A str is a STRUCT, so
+// the ordinary scalar lowering emitted `zg_str == "i8"` -- a struct
+// against a char * -- which is invalid C, and it was emitted SILENTLY.
+// The backend written in Zen hit this and worked around it with nested
+// calls rather than the match it wanted.
+//
+// Compared the way str.impl(Eq) compares: the LENGTH first, then the
+// bytes. Length first is the correctness, not an optimisation --
+// comparing over the shorter length is the classic bug, and a prefix is
+// not the whole, which is what the "i3" arm pins.
+width = (s: str) i32 {
+    s.match({
+        "i8"  => 8,
+        "i3"  => 3,
+        "i32" => 32,
+        _     => 0,
+    });
+}
+
+main = (env: Env) Res<i32, ArgError> {
+    println("{}", width("i8"));
+    println("{}", width("i32"));
+    println("{}", width("i3"));
+    println("{}", width("i"));
+    println("{}", width(""));
+    println("{}", width("i320"));
+    Ok(0);
+}
