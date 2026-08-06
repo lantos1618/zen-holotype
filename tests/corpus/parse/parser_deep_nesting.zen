@@ -1,0 +1,78 @@
+// tests/corpus/parse/parser_deep_nesting.zen
+// 10,000 nested parentheses are a diagnostic, not a crash.
+//
+// TESTING.md: "A recursive-descent parser stack-overflows and this is
+// a crash, not a diagnostic. Decide the depth limit and emit an error
+// at it." src/parse/parser.zen decides 256, against the machine rather
+// than against taste: the parser compiles to C and recurses through
+// four families, so 256 levels is tens of kilobytes of an eight-
+// megabyte stack — two orders of margin, and two orders above the
+// deepest construct anyone writes by hand.
+//
+// THREE THINGS ARE ASSERTED, and the third is the one that is easy to
+// get wrong:
+//
+//   it terminates, with an exit code and not a signal
+//   it says so — one diagnostic
+//   it is ANCHORED AT THE OUTERMOST BRACKET OF THE RUN. A diagnostic
+//   pointing at level 257 of a 10,000-deep file names the one place
+//   the author cannot see the problem from. And it must be ONE
+//   diagnostic: past the limit the parser stops descending, so every
+//   frame it unwinds through finds a delimiter it cannot close and
+//   would otherwise report it — 256 messages for one mistake.
+//
+// The run is built in a loop rather than written out, which is the
+// only reason a 10,000-deep test is cheap enough to keep.
+
+Token, TokenKind = parse.parse_token
+Parser, MAX_DEPTH = parse.parser
+expr = parse.parse_expr
+Span, Pos = ast.ast_span
+
+at = (k: TokenKind, t: str, col: usize) Token {
+    Token(
+        kind: k,
+        text: t,
+        span: Span(file: "t.zen", start: Pos(line: 1, col: col), end: Pos(line: 1, col: col + 1)),
+    )
+}
+
+nested = (alloc: Alloc, depth: usize) Res<Vec<Token>, AllocError> {
+    ts ::= alloc.Vec<Token>();
+    Range(0, depth).loop((h, i) {
+        ts.add(at(TokenKind.LParen, "(", i + 1)).try();
+    });
+    ts.add(at(TokenKind.Int, "1", depth + 1)).try();
+    Range(0, depth).loop((h, i) {
+        ts.add(at(TokenKind.RParen, ")", depth + 2 + i)).try();
+    });
+    ts.add(at(TokenKind.Eof, "", depth + depth + 2)).try();
+    Ok(ts);
+}
+
+run = (env: Env, alloc: Alloc, depth: usize) Res<(), AllocError> {
+    ts = nested(alloc, depth).try();
+    p ::= alloc.Parser(ts, "t.zen");
+    p.drain().try();
+    p.expr().try();
+    println("depth {} diags {}", depth, p.diags.len);
+    p.diags.get(0).match({
+        Ok(d) => println("  at {}:{} {}", d.span.start.line, d.span.start.col, d.message),
+        None  => println("  no diagnostic"),
+    });
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    println("limit {}", MAX_DEPTH);
+
+    // just inside the limit: an ordinary expression, nothing to say
+    run(env, alloc, 200).try();
+
+    // past it, and far past it. Both must produce exactly one
+    // diagnostic, anchored at column 1 — the outermost `(` of the run
+    run(env, alloc, 300).try();
+    run(env, alloc, 10000).try();
+    Ok(0);
+}

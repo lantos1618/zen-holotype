@@ -1,0 +1,72 @@
+// src/parse/parse_diag.zen
+// What a rejection is.
+//
+// "A compiler is mostly a diagnostics engine that occasionally emits
+// code" (TESTING.md), so this is not an afterthought hung off the
+// parser — it is the parser's other output, and it has the same
+// weight as the tree.
+//
+// THREE RULES, and every one of them is testable:
+//
+//   ONE MISTAKE, ONE DIAGNOSTIC. A missing `=>` is one message, not
+//   one per token the parser then failed to understand. The recovery
+//   in parser.zen exists to keep that promise; `.count` files in
+//   tests/must-fail bound it, per TESTING.md.
+//
+//   ANCHORED WHERE THE FIX GOES, not where the parser noticed. An
+//   unclosed `(` points at the OPENING delimiter — end of file names
+//   no useful location — and a too-deep nesting error points at the
+//   outermost bracket of the run rather than at the level that
+//   happened to exceed the limit.
+//
+//   COLLECTED, NEVER RAISED. A diagnostic is a value in a Vec. One bad
+//   declaration must not stop the file, or the second mistake is only
+//   ever found on the second run.
+//
+// WHERE THIS BELONGS, EVENTUALLY. Apply STYLE.md's stranger test: "a
+// message, a span, and a place to look instead" names no module. It is
+// not a parser type, it is a compiler type, and `lex`, `sema` and
+// `gen` will all want it. It lives here because there is nowhere else
+// yet and a module invented for one caller is worse; the moment the
+// lexer or sema needs it, that is STYLE.md's second-caller rule firing
+// and it moves. Reported.
+
+Span = ast.ast_span
+
+// A place to look that is not where the error is. `unclosed` points at
+// the `(`; `expected `=>`` points at the arm whose pattern was read.
+// One note and not a list: the parser's cases each have exactly one
+// second place, and the multi-position diagnostics TESTING.md requires
+// — an impl collision, a duplicate signature — are sema's, where both
+// positions are declarations and neither is subordinate.
+Note* = {
+    message*: str,
+    span*: Span,
+}
+
+// `message` is always a string LITERAL, never a built one, and that is
+// a decision rather than a limitation. A parser that formats its
+// messages needs an Alloc to say "expected `)`", so a diagnostic
+// could fail to be reported for want of memory — which is the one
+// moment a compiler must not be silent. Whole literals also read
+// better: "expected `=>` after this arm's pattern" says more than
+// "expected FatArrow, found Ident" ever does.
+Diag* = {
+    message*: str,
+    span*: Span,
+    note*: Res<Note>,
+}
+
+// The two constructors, so that a call site says which shape it is
+// building instead of writing `None` forty times.
+diag* = (message: str, span: Span) Diag {
+    Diag(message: message, span: span, note: None)
+}
+
+diag_at* = (message: str, span: Span, note_message: str, note_span: Span) Diag {
+    Diag(
+        message: message,
+        span: span,
+        note: Ok(Note(message: note_message, span: note_span)),
+    )
+}

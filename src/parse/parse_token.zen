@@ -1,0 +1,173 @@
+// src/parse/parse_token.zen
+// What the parser consumes.
+//
+// PROVISIONAL, AND IT SAYS SO. `src/lex/lex.zen` is being written in
+// parallel and did not exist when this parser was, so this file is the
+// interface the parser was written against rather than a second
+// scanner: it declares what a token IS and nothing about how one is
+// produced. There is no function here that reads a byte.
+//
+// When the lexer lands, the swap is mechanical and this file is
+// DELETED: every sibling replaces `= parse.parse_token` with
+// `= lex.lex`. Nothing else changes, because nothing else names a
+// token's representation.
+//
+// THE THREE ASSUMPTIONS, stated so the lexer can agree or disagree
+// with them in one reading:
+//
+//   1. TRIVIA IS IN THE STREAM. A comment and a run of blank lines are
+//      tokens, not a second list. AST_CONTRACT.md makes trivia
+//      ownership the parser's decision — "the parser decides this
+//      once; everything downstream just reads it" — and the parser
+//      cannot decide what it cannot see. It is also the only shape in
+//      which "the run before this token" is expressible without the
+//      lexer and the parser sharing an index space.
+//
+//   2. A TOKEN CARRIES ITS SOURCE SLICE. `text` is the raw bytes,
+//      quotes and escapes and comment markers included, because
+//      `Literal.text` is specified as "the raw source slice ... the
+//      formatter reprints it byte for byte".
+//
+//   3. THE STREAM ENDS WITH ONE `Eof`. A cursor past the end reads it
+//      forever, so no parse loop needs a length check to be safe, and
+//      an "unexpected end of file" diagnostic has a span to point at.
+//
+// A LEXICAL ERROR NEVER REACHES HERE. DESIGN.md's lexical rules are
+// all "reject rather than reinterpret", and bootstrap/lex.py already
+// rejects a file before anything walks it. So there is no `Error`
+// token kind: a file that did not lex is not parsed.
+
+Span = ast.ast_span
+
+// The alphabet, closed by DESIGN.md's lexical rules and grammar.js.
+//
+// `true`, `false`, `consume` and `_` are their own kinds rather than
+// identifiers, because grammar.js declares `word: $.identifier` and
+// therefore extracts them from the identifier token. `impl` is NOT
+// here: grammar.js D16 says "`impl` is NOT a reserved word", so
+// `A.impl(B, ..)` is recognised by shape and an ordinary binding may
+// still be called `impl`.
+//
+// The `@` namespace is exactly three entries, and they are tokens
+// rather than identifiers so that no user binding can collide with
+// one — which is what makes `@Self` un-shadowable.
+TokenKind* = Ident | Int | Float | Str | Char | True | False | Consume
+           | Underscore | SelfType | Meta | Scope
+           | LParen | RParen | LBracket | RBracket | LBrace | RBrace
+           | Comma | Semi | Dot | Ellipsis
+           | Colon | ColonColon | Eq | ColonColonEq | FatArrow
+           | Plus | Minus | Star | Slash | Percent
+           | PlusWrap | MinusWrap | StarWrap
+           | EqEq | BangEq | Lt | Gt | LtEq | GtEq
+           | AndAnd | OrOr | Bang | Amp | Bar
+           | LineComment | BlockComment | Blank
+           | Eof
+
+Token* = {
+    kind*: TokenKind,
+    text*: str,
+    span*: Span,
+}
+
+// A kind's number, which is what makes two kinds comparable.
+//
+// This exists because `==` on an enum value does not work: the
+// bootstrapper's sema accepts it and `gen_c` emits `a == b` on two C
+// structs, which is not C. Reported with a reproducer. When it is
+// fixed this function and every `.tag()` beside it delete, and the
+// alphabet loses nothing — the numbering is an implementation detail
+// with no meaning of its own, which is why nothing outside this module
+// may depend on a particular value.
+tag* = (self: TokenKind) usize {
+    self.match({
+        Ident        => 0,
+        Int          => 1,
+        Float        => 2,
+        Str          => 3,
+        Char         => 4,
+        True         => 5,
+        False        => 6,
+        Consume      => 7,
+        Underscore   => 8,
+        SelfType     => 9,
+        Meta         => 10,
+        Scope        => 11,
+        LParen       => 12,
+        RParen       => 13,
+        LBracket     => 14,
+        RBracket     => 15,
+        LBrace       => 16,
+        RBrace       => 17,
+        Comma        => 18,
+        Semi         => 19,
+        Dot          => 20,
+        Ellipsis     => 21,
+        Colon        => 22,
+        ColonColon   => 23,
+        Eq           => 24,
+        ColonColonEq => 25,
+        FatArrow     => 26,
+        Plus         => 27,
+        Minus        => 28,
+        Star         => 29,
+        Slash        => 30,
+        Percent      => 31,
+        PlusWrap     => 32,
+        MinusWrap    => 33,
+        StarWrap     => 34,
+        EqEq         => 35,
+        BangEq       => 36,
+        Lt           => 37,
+        Gt           => 38,
+        LtEq         => 39,
+        GtEq         => 40,
+        AndAnd       => 41,
+        OrOr         => 42,
+        Bang         => 43,
+        Amp          => 44,
+        Bar          => 45,
+        LineComment  => 46,
+        BlockComment => 47,
+        Blank        => 48,
+        Eof          => 49,
+    });
+}
+
+// Two kinds are the same kind. The parser asks this a few hundred
+// times and a fifty-arm match at each site is a table, not a
+// comparison.
+same* = (self: TokenKind, other: TokenKind) bool { self.tag() == other.tag() }
+
+// Whether a kind is trivia, asked in exactly one place — the cursor's
+// advance — and answered here because it is a fact about the alphabet
+// and not about the cursor.
+is_trivia* = (kind: TokenKind) bool {
+    kind.match({
+        LineComment  => true,
+        BlockComment => true,
+        Blank        => true,
+        _            => false,
+    });
+}
+
+// A closing delimiter's opener, and the reverse. The cursor keeps a
+// stack of open delimiters so that "unclosed `(`" can point at the
+// OPENING one — which is where the fix goes — rather than at the end
+// of the file, which names no useful location.
+opener_of* = (kind: TokenKind) Res<TokenKind> {
+    kind.match({
+        RParen   => Ok(TokenKind.LParen),
+        RBracket => Ok(TokenKind.LBracket),
+        RBrace   => Ok(TokenKind.LBrace),
+        _        => None,
+    });
+}
+
+closer_of* = (kind: TokenKind) Res<TokenKind> {
+    kind.match({
+        LParen   => Ok(TokenKind.RParen),
+        LBracket => Ok(TokenKind.RBracket),
+        LBrace   => Ok(TokenKind.RBrace),
+        _        => None,
+    });
+}

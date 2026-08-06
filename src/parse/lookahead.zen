@@ -1,0 +1,382 @@
+// src/parse/lookahead.zen
+// Everything this parser knows without consuming a token.
+//
+// It is one subject and it is the parser's whole design story. Zen has
+// three places where one token sequence has two readings, and a fourth
+// where seven declarations are written the same way; NONE of them is
+// resolved by backtracking, by a position rule, or by what the tokens
+// turn out to mean. Each is a scan to a matching delimiter and a look
+// at the token past it — bounded, side-effect free, and answered
+// before the construct is parsed rather than after.
+//
+// THE FOUR QUESTIONS:
+//
+//   `(..)` — a lambda's parameters, or a parenthesized expression?
+//   `[..]` — a fixed array type applied to arguments, or a literal?
+//   `<..>` — type arguments, or a comparison?
+//   `Name = <thing>` — which of seven declarations is this?
+//
+// WHY THESE ARE NOT IN parse_expr.zen AND parse_decl.zen, where they
+// were first written: STYLE.md's direction test. `parse_decl` needs a
+// bracket scanner and `parse_expr` needs one too, and a declaration
+// classifier importing from the expression parser to get one points
+// the dependency the wrong way. The general part goes down; this is
+// the general part.
+//
+// NOTHING HERE MUTATES. Every function takes `p :: Parser` only
+// because a `Vec` read goes through a receiver; not one of them moves
+// the cursor, adds a node, or records a diagnostic. That is the
+// property that makes a wrong guess cheap: it costs a rescan and never
+// a rewind.
+
+Alloc, AllocError = std.mem
+Token, TokenKind, same, is_trivia = parse.parse_token
+Parser = parse.parser
+starts_type_kind = parse.parse_type
+
+// What a declaration's value turned out to be. Not an AST node — it is
+// the answer to one question asked in one place, and naming it is what
+// keeps the seven readings of `Name = <thing>` a table rather than a
+// nest.
+ValueShape* = StructValue | EnumValue | FnValue | PathValue | AliasValue | ExprValue
+
+// -------------------------------------------------------------------
+// the bounded scans
+//
+// Each answers one question about a delimited run without consuming a
+// token and without backtracking. They are the whole of this parser's
+// lookahead.
+// -------------------------------------------------------------------
+
+// A `(` here opens a lambda's parameters if a block or a return type
+// follows its `)`.
+//
+// A `(` after the `)` is deliberately NOT a return type: `(f)(x)` is a
+// call of a parenthesized callee and it is the commoner reading, while
+// a lambda whose return type is written `()` or `(a: i32) i32` never
+// occurs in argument position — every lambda DESIGN.md writes there
+// omits its return type. Recorded because it is a choice, not a
+// derivation.
+lambda_ahead* = (p :: Parser) bool {
+    j = p.group_end_at(p.at);
+    after = p.token_kind_at(j);
+    after.same(TokenKind.LBrace) || (after.starts_type_kind() && !after.same(TokenKind.LParen))
+}
+
+// A `[` here opens a fixed array type applied to arguments if it holds
+// exactly two items — an element type and a length — and a `(`
+// follows. Anything else is an array literal.
+fixed_array_ahead* = (p :: Parser) bool {
+    j = p.group_end_at(p.at);
+    p.token_kind_at(j).same(TokenKind.LParen) && p.group_items_at(p.at, j) == 2
+}
+
+// A `<` here opens type arguments if its matching `>` is followed by
+// `(`. Otherwise it is a comparison, which is the commoner reading and
+// the one a wrong guess breaks silently.
+targs_ahead* = (p :: Parser) bool {
+    j = p.angles_end_at(p.at);
+    (j > p.at) && p.token_kind_at(j).same(TokenKind.LParen)
+}
+
+// The index one past the delimiter group the cursor is sitting on.
+// The cursor's own token, which every caller has already established
+// is an opener, closes the run at depth 0 — so an unclosed group
+// returns the length of the stream and every question above answers
+// "no" rather than guessing.
+group_end_at = (p :: Parser, from: usize) usize {
+    depth ::= 0;
+    out ::= p.tokens_len();
+    Range(from, p.tokens_len()).loop((h, k) {
+        depth = p.token_kind_at(k).delim_step(depth);
+        (depth == 0).then(() { out = k + 1; h.break() });
+    });
+    out;
+}
+
+// The same, for `<` and `>`, which are delimiters only here and so
+// cannot use the counter above. A `;`, a `{` or a `}` inside the run
+// means it was never a type argument list, and the scan gives up by
+// returning where it started.
+angles_end_at = (p :: Parser, from: usize) usize {
+    depth ::= 0;
+    out ::= from;
+    Range(from, p.tokens_len()).loop((h, k) {
+        kind = p.token_kind_at(k);
+        kind.angle_stop().match({
+            true  => { out = from; h.break(); },
+            false => {
+                depth = kind.angle_step(depth);
+                (depth == 0).then(() { out = k + 1; h.break() });
+            },
+        });
+    });
+    out;
+}
+
+// How many top-level items the group ending at `to` holds: one more
+// than the commas outside any nested group. An empty group holds none.
+group_items_at = (p :: Parser, from: usize, to: usize) usize {
+    depth ::= 0;
+    commas ::= 0;
+    empty ::= true;
+    Range(from + 1, to - 1).loop((h, k) {
+        kind = p.token_kind_at(k);
+        (kind.same(TokenKind.Comma) && depth == 0).then(() { commas = commas + 1; });
+        kind.is_trivia().match({
+            true  => (),
+            false => { empty = false; },
+        });
+        depth = kind.delim_step(depth);
+    });
+    empty.match({
+        true  => 0,
+        false => commas + 1,
+    });
+}
+
+// Depth arithmetic, in usize, which cannot go below zero. A closer at
+// depth 0 is malformed input and is clamped rather than trapped: these
+// scans answer a question about a guess, and a guess must not abort
+// the compilation.
+delim_step* = (kind: TokenKind, depth: usize) usize {
+    kind.match({
+        LParen   => depth + 1,
+        LBracket => depth + 1,
+        LBrace   => depth + 1,
+        RParen   => depth.down(),
+        RBracket => depth.down(),
+        RBrace   => depth.down(),
+        _        => depth,
+    });
+}
+
+angle_step = (kind: TokenKind, depth: usize) usize {
+    kind.match({
+        Lt => depth + 1,
+        Gt => depth.down(),
+        _  => depth,
+    });
+}
+
+// What proves a `<` was a comparison after all. A type argument list
+// never contains a statement terminator or a body.
+angle_stop = (kind: TokenKind) bool {
+    kind.match({
+        Semi   => true,
+        LBrace => true,
+        RBrace => true,
+        Eof    => true,
+        _      => false,
+    });
+}
+
+down = (d: usize) usize {
+    (d == 0).match({
+        true  => 0,
+        false => d - 1,
+    });
+}
+
+// -------------------------------------------------------------------
+// the shape of a value
+//
+// Bounded lookahead, never backtracking: at most a name, one balanced
+// group, and the token after it. That is the whole of what R1a needs,
+// and it is why a declaration can be classified before it is parsed.
+// -------------------------------------------------------------------
+
+value_shape* = (p :: Parser, module_level: bool) ValueShape {
+    p.peek().kind.match({
+        LBrace => ValueShape.StructValue,
+        Bar    => ValueShape.EnumValue,
+        LParen => p.paren_shape(),
+        Lt     => p.angle_shape(),
+        Ident  => p.ident_shape(module_level),
+        _      => ValueShape.ExprValue,
+    });
+}
+
+// `(a: i32) i32 { .. }` against `(a + b)`. A function is what has a
+// block or a return type after its `)`; anything else is an ordinary
+// parenthesized expression.
+paren_shape = (p :: Parser) ValueShape {
+    j = p.group_end_at(p.at);
+    after = p.token_kind_at(j);
+    (after.same(TokenKind.LBrace) || (after.starts_type_kind() && !after.same(TokenKind.LParen))).match({
+        true  => ValueShape.FnValue,
+        false => ValueShape.ExprValue,
+    });
+}
+
+// `<T>(x: T) T` — the only value that begins with `<`.
+angle_shape = (p :: Parser) ValueShape {
+    j = p.angles_end_at(p.at);
+    (j > p.at && p.token_kind_at(j).same(TokenKind.LParen)).match({
+        true  => ValueShape.FnValue,
+        false => ValueShape.ExprValue,
+    });
+}
+
+// A name is the hard one, and the leading bar is why it is not
+// impossible. `A(T) | B` is an enum; `a.b.c` is an import; a bare
+// `Name` or `Name<T>` at module level is an alias; anything that keeps
+// going is an expression.
+ident_shape = (p :: Parser, module_level: bool) ValueShape {
+    p.variant_ahead().match({
+        true  => ValueShape.EnumValue,
+        false => module_level.match({
+            true  => p.path_or_alias(),
+            false => ValueShape.ExprValue,
+        }),
+    });
+}
+
+// `Circle(Circle) |` or `Circle |` — a name, one optional balanced
+// payload, and a bar. The bar closes the fork the moment it appears,
+// which is R1's whole claim.
+variant_ahead = (p :: Parser) bool {
+    j ::= p.at + 1;
+    p.token_kind_at(j).same(TokenKind.LParen).match({
+        true  => { j = p.group_end_at(j); },
+        false => (),
+    });
+    p.token_kind_at(j).same(TokenKind.Bar);
+}
+
+path_or_alias = (p :: Parser) ValueShape {
+    j ::= p.at + 1;
+    dotted ::= false;
+    running ::= p.token_kind_at(j).same(TokenKind.Dot);
+    loop(() { running }, (h) {
+        dotted = true;
+        j = j + 2;
+        running = p.token_kind_at(j).same(TokenKind.Dot);
+    });
+    p.token_kind_at(j).same(TokenKind.Lt).match({
+        true  => { j = p.angles_end_at(j); },
+        false => (),
+    });
+    p.closes_value(j).match({
+        false => ValueShape.ExprValue,
+        true  => dotted.match({
+            true  => ValueShape.PathValue,
+            false => ValueShape.AliasValue,
+        }),
+    });
+}
+
+// Whether the token at `j` ends the value rather than continuing it. A
+// declaration has no terminator, so this is the only thing standing
+// between `Alias = Shape` and `Alias = Shape.member`.
+closes_value = (p :: Parser, j: usize) bool {
+    p.token_kind_at(j).continues_expr().match({
+        true  => false,
+        false => true,
+    });
+}
+
+continues_expr = (kind: TokenKind) bool {
+    kind.match({
+        Dot       => true,
+        LParen    => true,
+        LBracket  => true,
+        Lt        => true,
+        Star      => true,
+        Plus      => true,
+        Minus     => true,
+        Slash     => true,
+        Percent   => true,
+        PlusWrap  => true,
+        MinusWrap => true,
+        StarWrap  => true,
+        EqEq      => true,
+        BangEq    => true,
+        Gt        => true,
+        LtEq      => true,
+        GtEq      => true,
+        AndAnd    => true,
+        OrOr      => true,
+        _         => false,
+    });
+}
+
+// Whether the statement at the cursor is a declaration rather than a
+// binding. Only ever asked inside a body: at module level there are no
+// statements, so everything is a declaration and nothing has to
+// decide.
+decl_head_ahead* = (p :: Parser, module_level: bool) bool {
+    p.at_kind(TokenKind.Ident).match({
+        false => false,
+        true  => p.head_shape_ahead(),
+    });
+}
+
+head_shape_ahead = (p :: Parser) bool {
+    after = p.token_kind_at(p.at + 1);
+    after.same(TokenKind.Star).match({
+        true  => true,
+        false => after.same(TokenKind.Lt).match({
+            true  => p.generic_head_ahead(),
+            false => p.assign_head_ahead(after),
+        }),
+    });
+}
+
+generic_head_ahead = (p :: Parser) bool {
+    j = p.angles_end_at(p.at + 1);
+    (j > p.at + 1) && p.assigns(p.token_kind_at(j))
+}
+
+assign_head_ahead = (p :: Parser, after: TokenKind) bool {
+    p.assigns(after).match({
+        false => false,
+        true  => p.declares_value(p.at + 2),
+    });
+}
+
+assigns = (p: Parser, kind: TokenKind) bool {
+    kind.same(TokenKind.Eq) || kind.same(TokenKind.ColonColonEq)
+}
+
+// The same seven-way question as `value_shape`, asked one token
+// earlier and answered only far enough to know whether a `;` will
+// follow. A struct, an enum and a function are declarations; anything
+// else in a body is a binding.
+declares_value = (p :: Parser, j: usize) bool {
+    kind = p.token_kind_at(j);
+    kind.same(TokenKind.LBrace)
+        || kind.same(TokenKind.Bar)
+        || p.declares_fn(j, kind)
+        || p.declares_enum(j, kind)
+}
+
+declares_fn = (p :: Parser, j: usize, kind: TokenKind) bool {
+    kind.same(TokenKind.LParen).match({
+        true  => p.fn_body_ahead(p.group_end_at(j)),
+        false => kind.same(TokenKind.Lt) && p.fn_body_ahead(p.angles_end_at(j)),
+    });
+}
+
+fn_body_ahead = (p :: Parser, j: usize) bool {
+    after = p.token_kind_at(j);
+    after.same(TokenKind.LBrace)
+        || after.same(TokenKind.LParen)
+        || (after.starts_type_kind() && !after.same(TokenKind.LParen))
+}
+
+declares_enum = (p :: Parser, j: usize, kind: TokenKind) bool {
+    kind.same(TokenKind.Ident).match({
+        false => false,
+        true  => p.bar_after(j),
+    });
+}
+
+bar_after = (p :: Parser, j: usize) bool {
+    k ::= j + 1;
+    p.token_kind_at(k).same(TokenKind.LParen).match({
+        true  => { k = p.group_end_at(k); },
+        false => (),
+    });
+    p.token_kind_at(k).same(TokenKind.Bar);
+}

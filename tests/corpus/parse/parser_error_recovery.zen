@@ -1,0 +1,106 @@
+// tests/corpus/parse/parser_error_recovery.zen
+// One syntax error does not become fifty.
+//
+// TESTING.md lists this as a parser bug class in its own right, and
+// `.count` sidecar files exist because of it — "extra diagnostics are
+// otherwise always allowed, so 'a single syntax error must not cascade
+// into fifty' is inexpressible without it". This asserts the count
+// directly, and two things beside it:
+//
+//   THE MESSAGE IS ANCHORED WHERE THE FIX GOES. `Point { x: i32 }` is
+//   missing its `=`, and the diagnostic points at the `{` where one
+//   belongs — not at the end of the declaration, where the parser
+//   found out.
+//
+//   THE REST OF THE FILE STILL PARSES. The declaration after the bad
+//   one is read normally, which is the difference between a compiler
+//   that reports the second mistake on the first run and one that
+//   makes you fix them one at a time.
+//
+// The source these tokens stand for:
+//
+//   1  Point { x: i32 }
+//   2  main = () i32 { 0 }
+//   3  Other { }
+//   4  last = () i32 { 1 }
+
+Token, TokenKind = parse.parse_token
+Parser = parse.parser
+module = parse.parse_decl
+Span, Pos = ast.ast_span
+Decl = ast.ast_node
+
+at = (k: TokenKind, t: str, line: usize, col: usize, width: usize) Token {
+    Token(
+        kind: k,
+        text: t,
+        span: Span(
+            file: "t.zen",
+            start: Pos(line: line, col: col),
+            end: Pos(line: line, col: col + width),
+        ),
+    )
+}
+
+push = (ts :: Vec<Token>, k: TokenKind, t: str, line: usize, col: usize, width: usize) Res<(), AllocError> {
+    ts.add(at(k, t, line, col, width))
+}
+
+name_of = (d: Decl) str {
+    d.kind.match({
+        Struct(s)   => s.name.text,
+        Function(f) => f.name.text,
+        Enum(e)     => e.name.text,
+        Alias(a)    => a.name.text,
+        Const(c)    => c.name.text,
+        Impl(i)     => i.target.text,
+        Import(_)   => "import",
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    ts ::= alloc.Vec<Token>();
+
+    ts.push(TokenKind.Ident, "Point", 1, 1, 5).try();
+    ts.push(TokenKind.LBrace, "{", 1, 7, 1).try();
+    ts.push(TokenKind.Ident, "x", 1, 9, 1).try();
+    ts.push(TokenKind.Colon, ":", 1, 10, 1).try();
+    ts.push(TokenKind.Ident, "i32", 1, 12, 3).try();
+    ts.push(TokenKind.RBrace, "}", 1, 16, 1).try();
+
+    ts.push(TokenKind.Ident, "main", 2, 1, 4).try();
+    ts.push(TokenKind.Eq, "=", 2, 6, 1).try();
+    ts.push(TokenKind.LParen, "(", 2, 8, 1).try();
+    ts.push(TokenKind.RParen, ")", 2, 9, 1).try();
+    ts.push(TokenKind.Ident, "i32", 2, 11, 3).try();
+    ts.push(TokenKind.LBrace, "{", 2, 15, 1).try();
+    ts.push(TokenKind.Int, "0", 2, 17, 1).try();
+    ts.push(TokenKind.RBrace, "}", 2, 19, 1).try();
+
+    ts.push(TokenKind.Ident, "Other", 3, 1, 5).try();
+    ts.push(TokenKind.LBrace, "{", 3, 7, 1).try();
+    ts.push(TokenKind.RBrace, "}", 3, 9, 1).try();
+
+    ts.push(TokenKind.Ident, "last", 4, 1, 4).try();
+    ts.push(TokenKind.Eq, "=", 4, 6, 1).try();
+    ts.push(TokenKind.LParen, "(", 4, 8, 1).try();
+    ts.push(TokenKind.RParen, ")", 4, 9, 1).try();
+    ts.push(TokenKind.Ident, "i32", 4, 11, 3).try();
+    ts.push(TokenKind.LBrace, "{", 4, 15, 1).try();
+    ts.push(TokenKind.Int, "1", 4, 17, 1).try();
+    ts.push(TokenKind.RBrace, "}", 4, 19, 1).try();
+
+    ts.push(TokenKind.Eof, "", 5, 1, 0).try();
+
+    p ::= alloc.Parser(ts, "t.zen");
+    m = p.module("t").try();
+
+    println("diags {}", p.diags.len);
+    p.diags.loop((h, d) {
+        println("  {}:{} {}", d.span.start.line, d.span.start.col, d.message);
+    });
+    println("decls {}", m.decls.len);
+    m.decls.loop((h, d) { println("  {}", name_of(d)) });
+    Ok(0);
+}

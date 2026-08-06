@@ -1,0 +1,126 @@
+// src/parse/parse_pattern.zen
+// What a match arm matches.
+//
+// The one grammatical subject in this folder that reaches DOWN and
+// never sideways: a pattern contains patterns and literals and nothing
+// else. No expression, no type, no block. That is why it is its own
+// file and why it is the only one that could be read without reading
+// the rest.
+//
+// THE PARSER DOES NOT DECIDE WHAT A NAME IS. `Left(Blank)` and `Ok(n)`
+// are the same three tokens; whether the inner name binds the payload
+// or names a nullary variant depends on what is in scope, so it is
+// sema's question and a parser answering it would be a parser
+// guessing. Both arrive as `PatternKind.Name`.
+//
+// `Unit` AND `Unit(_)` ARE DIFFERENT NODES, which is why the binder is
+// a full pattern and not a name. They must be, or the formatter
+// invents or deletes a pair of parentheses.
+
+Alloc, AllocError = std.mem
+Span, Pos, Ident, QualifiedName, no_trivia = ast.ast_span
+PatternId = ast.ast_id
+Pattern, PatternKind, PatName, Destructure, Literal, LiteralKind = ast.ast_node
+Token, TokenKind, same = parse.parse_token
+Parser, Mark = parse.parser
+
+pattern* = (p :: Parser) Res<PatternId, AllocError> {
+    p.enter().try();
+    id = p.pattern_guarded().try();
+    p.leave();
+    Ok(id);
+}
+
+pattern_guarded = (p :: Parser) Res<PatternId, AllocError> {
+    p.too_deep.match({
+        true  => p.poison_pattern(),
+        false => p.pattern_here(),
+    });
+}
+
+pattern_here = (p :: Parser) Res<PatternId, AllocError> {
+    m = p.open();
+    p.peek().kind.match({
+        Underscore => p.wild_pattern(m),
+        Ident      => p.path_pattern(m),
+        Int        => p.literal_pattern(m, LiteralKind.Int),
+        Float      => p.literal_pattern(m, LiteralKind.Float),
+        Str        => p.literal_pattern(m, LiteralKind.Str),
+        Char       => p.literal_pattern(m, LiteralKind.Char),
+        True       => p.literal_pattern(m, LiteralKind.Bool),
+        False      => p.literal_pattern(m, LiteralKind.Bool),
+        _          => {
+            p.error("expected a pattern").try();
+            p.poison_pattern();
+        },
+    });
+}
+
+// "cover every case or write `_`"
+wild_pattern = (p :: Parser, m: Mark) Res<PatternId, AllocError> {
+    p.bump().try();
+    p.add_pattern(PatternKind.Wild, m);
+}
+
+literal_pattern = (p :: Parser, m: Mark, kind: LiteralKind) Res<PatternId, AllocError> {
+    token = p.bump().try();
+    p.add_pattern(PatternKind.Literal(Literal(kind: kind, text: token.text)), m);
+}
+
+// `None`, `Macos`, `Shape.Unit` — and `Ok(n)`, which is the same rule
+// with a payload behind it.
+path_pattern = (p :: Parser, m: Mark) Res<PatternId, AllocError> {
+    name = p.qualified_name().try();
+    p.at_kind(TokenKind.LParen).match({
+        true  => p.destructure_pattern(m, name),
+        false => p.add_pattern(PatternKind.Name(PatName(name: name)), m),
+    });
+}
+
+destructure_pattern = (p :: Parser, m: Mark, name: QualifiedName) Res<PatternId, AllocError> {
+    open = p.here_span();
+    p.bump().try();
+    binder = p.pattern().try();
+    p.expect_close(TokenKind.RParen, "unclosed `(`: this pattern's payload is never closed", open).try();
+    p.add_pattern(PatternKind.Destructure(Destructure(name: name, binder: binder)), m);
+}
+
+// `Shape.Unit`. Segments are kept apart so a diagnostic can point at
+// the segment that is wrong rather than at the whole name.
+//
+// How deep a path may be is a question DESIGN.md does not answer — it
+// writes only `Shape.Unit` — so this accepts any depth and leaves
+// rejecting what the language does not mean to sema, which is the one
+// place that knows what a segment resolves to.
+qualified_name* = (p :: Parser) Res<QualifiedName, AllocError> {
+    start = p.here();
+    segments ::= p.alloc.Vec<Ident>();
+    segments.add(p.ident("expected a name").try()).try();
+    loop(() { p.at_kind(TokenKind.Dot) }, (h) {
+        p.bump().try();
+        segments.add(p.ident("expected a name after `.`").try()).try();
+    });
+    Ok(QualifiedName(segments: segments, span: p.span_from(start)));
+}
+
+// What stands where a pattern could not be read. `_` and not a new
+// kind: a wildcard matches anything, so a poisoned arm can never make
+// a match look LESS exhaustive than it is and turn one syntax error
+// into a second, spurious, exhaustiveness error.
+poison_pattern* = (p :: Parser) Res<PatternId, AllocError> {
+    p.tree.add_pattern(Pattern(
+        kind: PatternKind.Wild,
+        span: p.empty_span(),
+        leading: no_trivia(),
+        trailing: no_trivia(),
+    ))
+}
+
+add_pattern* = (p :: Parser, kind: PatternKind, m: Mark) Res<PatternId, AllocError> {
+    p.tree.add_pattern(Pattern(
+        kind: kind,
+        span: p.span_from(m.start),
+        leading: m.leading,
+        trailing: no_trivia(),
+    ))
+}

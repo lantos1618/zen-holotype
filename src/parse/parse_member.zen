@@ -1,0 +1,366 @@
+// src/parse/parse_member.zen
+// What a declaration is made of: members, parameters, type parameters.
+//
+// ONE NODE SERVES A STRUCT BODY, AN IMPL BODY AND A RECORD LITERAL,
+// because DESIGN.md has one rule for the three: "a struct whose fields
+// happen to be functions, used as a bound, is what other languages
+// call a trait — nothing marks it special". So `Member` covers a
+// field, a constant and a method, and an impl supplying `width: ..`
+// and one supplying `toString ::= ..` go through the same function.
+//
+// BUT THEY ARE READ DIFFERENTLY, and that is grammar R4:
+//
+//   IN A STRUCT BODY a member writes a TYPE.
+//     x: i32                immutable field
+//     len* :: usize = 0     mutable field with a default
+//     MAX*: i32 = 2147483647   a CONSTANT — one value per type
+//     area* ::= (..) f64 {..}  a method
+//
+//   IN A RECORD a member writes a VALUE, because the field it
+//   satisfies already has the type.
+//     width: self.radius * 2.0
+//     toString ::= (self: @Self, out :: Sink) .. { .. }
+//
+//   `:` with a value is a constant; `::` with a value is a field with
+//   a default. That is the only syntactic difference between them, and
+//   the cost is that AN IMMUTABLE FIELD WITH A DEFAULT IS UNSPELLABLE.
+//   Recorded because it is a hole in the language, not a decision this
+//   parser made — and `Const` therefore never appears in an impl body
+//   or a record, where there is no type to hang it on.
+
+Alloc, AllocError = std.mem
+Span, Pos, Ident, no_trivia = ast.ast_span
+TypeId, ExprId, BlockId = ast.ast_id
+Member, MemberKind, Field, Const, Function, Param, TParam, Form = ast.ast_node
+Token, TokenKind, same = parse.parse_token
+Parser, Mark = parse.parser
+expr = parse.parse_expr
+type, starts_type = parse.parse_type
+block = parse.parse_stmt
+form_of, has_body = parse.parse_decl
+
+// -------------------------------------------------------------------
+// bodies
+// -------------------------------------------------------------------
+
+// `{ member (,)? member .. }` — the comma between members is OPTIONAL,
+// which is grammar D6 and not laxity: `Rect` separates its fields with
+// commas, `Alloc` separates its methods with nothing, and `Tester`
+// mixes both. All three are in DESIGN.md.
+struct_members* = (p :: Parser, out :: Vec<Member>) Res<Span, AllocError> {
+    p.member_list(out, true)
+}
+
+// The `{ .. }` of `A.impl(B, {..})` and of a construction argument.
+record_body* = (p :: Parser, out :: Vec<Member>) Res<Span, AllocError> {
+    p.member_list(out, false)
+}
+
+member_list = (p :: Parser, out :: Vec<Member>, typed: bool) Res<Span, AllocError> {
+    start = p.here();
+    open = p.here_span();
+    p.expect(TokenKind.LBrace, "expected `{` to open a body").try();
+    running ::= !p.at_kind(TokenKind.RBrace) && !p.at_eof();
+    loop(() { running }, (h) {
+        before = p.at;
+        out.add(p.one_member(typed).try()).try();
+        running = !p.at_kind(TokenKind.RBrace) && !p.at_eof() && p.at > before;
+    });
+    p.expect_close(TokenKind.RBrace, "unclosed `{`: this body is never closed", open).try();
+    Ok(p.span_from(start));
+}
+
+one_member = (p :: Parser, typed: bool) Res<Member, AllocError> {
+    m = p.open();
+    name = p.ident("expected a member name").try();
+    exported = p.eat(TokenKind.Star).try();
+    tparams ::= p.alloc.Vec<TParam>();
+    p.at_kind(TokenKind.Lt).match({
+        true  => p.type_params(tparams),
+        false => p.nothing(),
+    }).try();
+    kind = p.member_kind(name, exported, tparams, typed).try();
+    end = p.prev_end;
+    span = p.span_from(m.start);
+    p.eat(TokenKind.Comma).try();
+    Ok(Member(
+        kind: kind,
+        span: span,
+        leading: m.leading,
+        trailing: p.claim_trailing(end),
+    ));
+}
+
+member_kind = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, typed: bool) Res<MemberKind, AllocError> {
+    p.peek().kind.match({
+        Colon        => p.after_colon(name, exported, tparams, typed, false),
+        ColonColon   => p.after_colon(name, exported, tparams, typed, true),
+        Eq           => p.after_assign(name, exported, tparams, false),
+        ColonColonEq => p.after_assign(name, exported, tparams, true),
+        _            => {
+            p.error("expected `:`, `::`, `=` or `::=` after a member's name").try();
+            Ok(MemberKind.Field(Field(
+                name: name,
+                exported: exported,
+                mutable: false,
+                type: None,
+                value: None,
+            )));
+        },
+    });
+}
+
+// `x: i32`, `len :: usize = 0` in a struct body; `width: expr` in a
+// record. `typed` is which body we are in, and it is the only thing
+// that tells the two apart — the tokens are identical.
+after_colon = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, typed: bool, mutable: bool) Res<MemberKind, AllocError> {
+    p.bump().try();
+    typed.match({
+        true  => p.typed_member(name, exported, mutable),
+        false => p.supplied_member(name, exported, mutable),
+    });
+}
+
+// A struct body's member: a type, and possibly a default. R4 decides
+// which node it becomes, and this is the one place that rule is
+// applied so nothing downstream has to remember it.
+typed_member = (p :: Parser, name: Ident, exported: bool, mutable: bool) Res<MemberKind, AllocError> {
+    t = p.type().try();
+    value = p.eat(TokenKind.Eq).try().match({
+        true  => p.member_value(),
+        false => Ok(None),
+    }).try();
+    p.split_r4(name, exported, mutable, t, value);
+}
+
+split_r4 = (p :: Parser, name: Ident, exported: bool, mutable: bool, t: TypeId, value: Res<ExprId>) Res<MemberKind, AllocError> {
+    constant = !mutable && p.has_value(value);
+    constant.match({
+        true  => Ok(MemberKind.Const(Const(
+            name: name,
+            exported: exported,
+            mutable: false,
+            type: Ok(t),
+            value: p.the_value(value),
+        ))),
+        false => Ok(MemberKind.Field(Field(
+            name: name,
+            exported: exported,
+            mutable: mutable,
+            type: Ok(t),
+            value: value,
+        ))),
+    });
+}
+
+// A record's entry: `width: self.radius * 2.0`. There is no type,
+// because the field being satisfied already has one.
+supplied_member = (p :: Parser, name: Ident, exported: bool, mutable: bool) Res<MemberKind, AllocError> {
+    value = p.expr().try();
+    Ok(MemberKind.Field(Field(
+        name: name,
+        exported: exported,
+        mutable: mutable,
+        type: None,
+        value: Ok(value),
+    )));
+}
+
+// `name = sig {..}`, `name ::= sig`, and — in a record — `name = expr`
+// where the field being satisfied is not a function.
+after_assign = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, rebindable: bool) Res<MemberKind, AllocError> {
+    p.bump().try();
+    p.fn_member_ahead().match({
+        true  => p.fn_member(name, exported, tparams, rebindable),
+        false => p.value_member(name, exported, rebindable),
+    });
+}
+
+fn_member_ahead = (p :: Parser) bool {
+    p.at_kind(TokenKind.Lt) || p.at_kind(TokenKind.LParen)
+}
+
+fn_member = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, rebindable: bool) Res<MemberKind, AllocError> {
+    own ::= p.alloc.Vec<TParam>();
+    p.at_kind(TokenKind.Lt).match({
+        true  => p.type_params(own),
+        false => p.nothing(),
+    }).try();
+    ps ::= p.alloc.Vec<Param>();
+    span = p.params_list(ps).try();
+    ret = p.starts_type().match({
+        true  => p.member_ret(),
+        false => Ok(None),
+    }).try();
+    body = p.at_kind(TokenKind.LBrace).match({
+        true  => p.member_body(),
+        false => Ok(None),
+    }).try();
+    Ok(MemberKind.Function(Function(
+        name: name,
+        exported: exported,
+        form: form_of(rebindable, p.has_body(body)),
+        tparams: p.pick_tparams(tparams, own),
+        params: ps,
+        params_span: span,
+        ret: ret,
+        body: body,
+    )));
+}
+
+member_ret = (p :: Parser) Res<Res<TypeId>, AllocError> {
+    t = p.type().try();
+    Ok(Ok(t));
+}
+
+member_body = (p :: Parser) Res<Res<BlockId>, AllocError> {
+    b = p.block().try();
+    Ok(Ok(b));
+}
+
+value_member = (p :: Parser, name: Ident, exported: bool, mutable: bool) Res<MemberKind, AllocError> {
+    value = p.expr().try();
+    Ok(MemberKind.Field(Field(
+        name: name,
+        exported: exported,
+        mutable: mutable,
+        type: None,
+        value: Ok(value),
+    )));
+}
+
+member_value = (p :: Parser) Res<Res<ExprId>, AllocError> {
+    v = p.expr().try();
+    Ok(Ok(v));
+}
+
+has_value* = (p: Parser, value: Res<ExprId>) bool {
+    value.match({
+        Ok(_) => true,
+        None  => false,
+    });
+}
+
+// A `Const` must have a value: R4 only reads one when there is one, so
+// this is never reached with a `None`. The fallback keeps the function
+// total rather than trapping on a case the caller has already excluded.
+the_value* = (p: Parser, value: Res<ExprId>) ExprId {
+    value.match({
+        Ok(v) => v,
+        None  => ExprId(index: 0),
+    });
+}
+
+pick_tparams* = (p: Parser, head: Vec<TParam>, own: Vec<TParam>) Vec<TParam> {
+    (head.len == 0).match({
+        true  => own,
+        false => head,
+    });
+}
+
+// -------------------------------------------------------------------
+// parameters
+// -------------------------------------------------------------------
+
+// `(a: i32, b: i32)`, `(h, v)`, `()`. The span is the whole list
+// including its parentheses, because wrap-or-not is a decision about
+// the list and not about any one parameter.
+params_list* = (p :: Parser, out :: Vec<Param>) Res<Span, AllocError> {
+    start = p.here();
+    open = p.here_span();
+    p.expect(TokenKind.LParen, "expected `(` to open a parameter list").try();
+    running ::= !p.at_kind(TokenKind.RParen) && !p.at_eof();
+    loop(() { running }, (h) {
+        before = p.at;
+        out.add(p.one_param().try()).try();
+        running = !p.at_kind(TokenKind.RParen) && !p.at_eof() && p.at > before;
+    });
+    p.expect_close(TokenKind.RParen, "unclosed `(`: this parameter list is never closed", open).try();
+    Ok(p.span_from(start));
+}
+
+// "There is no implicit receiver": `self :: @Self` is the ordinary
+// binding marker doing its ordinary job on the ordinary first
+// parameter, so it needs no case of its own here.
+//
+// A type is optional only because a closure infers its parameter types
+// from the call. A declaration must write them — that is law 6 at a
+// module boundary and grammar D15a inside one — and it is sema's rule,
+// checked where the declaration is known.
+one_param = (p :: Parser) Res<Param, AllocError> {
+    m = p.open();
+    name = p.ident("expected a parameter name").try();
+    mutable = p.at_kind(TokenKind.ColonColon);
+    t = (p.at_kind(TokenKind.Colon) || mutable).match({
+        true  => p.param_type(),
+        false => Ok(None),
+    }).try();
+    end = p.prev_end;
+    span = p.span_from(m.start);
+    p.eat(TokenKind.Comma).try();
+    Ok(Param(
+        name: name,
+        mutable: mutable,
+        type: t,
+        span: span,
+        leading: m.leading,
+        trailing: p.claim_trailing(end),
+    ));
+}
+
+param_type = (p :: Parser) Res<Res<TypeId>, AllocError> {
+    p.bump().try();
+    t = p.type().try();
+    Ok(Ok(t));
+}
+
+// -------------------------------------------------------------------
+// type parameters
+// -------------------------------------------------------------------
+
+// `<T>`, `<T: Rect>`, `<K: Eq + Hash, V>`.
+//
+// Bounds are a LIST because `+` joins them and `|` does not: `Eq + Hash`
+// is two requirements on one type, where `A | B` is one type that is
+// either.
+type_params* = (p :: Parser, out :: Vec<TParam>) Res<(), AllocError> {
+    open = p.here_span();
+    p.expect(TokenKind.Lt, "expected `<` to open a type parameter list").try();
+    running ::= !p.at_kind(TokenKind.Gt) && !p.at_eof();
+    loop(() { running }, (h) {
+        before = p.at;
+        out.add(p.one_tparam().try()).try();
+        running = !p.at_kind(TokenKind.Gt) && !p.at_eof() && p.at > before;
+    });
+    p.expect_close(TokenKind.Gt, "unclosed `<`: this type parameter list is never closed", open).try();
+    Ok(());
+}
+
+one_tparam = (p :: Parser) Res<TParam, AllocError> {
+    m = p.open();
+    name = p.ident("expected a type parameter name").try();
+    bounds ::= p.alloc.Vec<TypeId>();
+    p.eat(TokenKind.Colon).try().match({
+        true  => p.type_bounds(bounds),
+        false => p.nothing(),
+    }).try();
+    end = p.prev_end;
+    span = p.span_from(m.start);
+    p.eat(TokenKind.Comma).try();
+    Ok(TParam(
+        name: name,
+        bounds: bounds,
+        span: span,
+        leading: m.leading,
+        trailing: p.claim_trailing(end),
+    ));
+}
+
+type_bounds = (p :: Parser, out :: Vec<TypeId>) Res<(), AllocError> {
+    out.add(p.type().try()).try();
+    loop(() { p.at_kind(TokenKind.Plus) }, (h) {
+        p.bump().try();
+        out.add(p.type().try()).try();
+    });
+    Ok(());
+}

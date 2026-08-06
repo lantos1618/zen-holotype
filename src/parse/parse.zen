@@ -1,0 +1,44 @@
+// src/parse/parse.zen
+//
+// The parser's whole surface, in one file of starred re-exports.
+// A folder root is its folder's public surface and nothing else, so
+// every name a consumer can reach through `parse` is listed here, and
+// anything absent is module-private on purpose: the bounded scans, the
+// poison builders and the seven-way `value_shape` fork are the
+// parser's own business and no caller has any use for them.
+//
+// WHAT A CONSUMER ACTUALLY NEEDS is four names. Build a `Parser` over a
+// token stream, call `module`, read the tree and the diagnostics back
+// off it:
+//
+//     p ::= alloc.Parser(tokens, "src/main.zen");
+//     m = p.module("main").try();
+//     p.diags.len.match({ .. });      // rejected, or not
+//     p.tree                          // every node m refers to
+//
+// The tree is read back off the Parser rather than returned beside the
+// module because an `Ast` owns `Vec`s: a copy of one diverges from the
+// original the first time either grows, so there is exactly one and
+// the Parser holds it.
+
+// what a parse produces, and what it produces instead when it fails
+Diag*, Note*, diag*, diag_at* = parse.parse_diag
+
+// what a parse consumes. PROVISIONAL — `src/lex/lex.zen` owns this
+// alphabet and this line becomes `Token*, TokenKind* = lex.lex` the
+// day it lands. See parse_token.zen's header for the three assumptions
+// the parser was written against.
+Token*, TokenKind* = parse.parse_token
+
+// the machine, and the one budget it enforces
+Parser*, Mark*, MAX_DEPTH* = parse.parser
+
+// the entry point, and the pieces a consumer that is not parsing a
+// whole file might want: `zen fmt` reads a module, an LSP completion
+// re-parses one expression, and a test builds one type.
+module*, declaration* = parse.parse_decl
+block* = parse.parse_stmt
+expr* = parse.parse_expr
+type* = parse.parse_type
+pattern* = parse.parse_pattern
+arms* = parse.parse_match

@@ -16,7 +16,7 @@ decays fastest". This is that test, written out: every row is a node in
   the separator that follows it: the field `x: i32` on line 5 is `5:5..5:11`
   and the comma at `5:11` belongs to the field list, not to the field.
 - A *statement* span **includes its terminating `;`**; the expression inside it
-  does not. `Ok(0);` is `25:5..25:11`; `Ok(0)` is `25:5..25:10`.
+  does not. `Ok(0);` is `22:5..22:11`; `Ok(0)` is `22:5..22:10`.
 - Trivia is a span like any other, attached to the node that owns it. The three
   comment lines at the top of the file are the leading trivia of the `Point`
   declaration -- **not** of the module. See the gaps at the bottom.
@@ -33,72 +33,114 @@ decays fastest". This is that test, written out: every row is a node in
 4. It never says whether a statement's span includes the `;`. This table says
    **yes** -- otherwise deleting a statement leaves the semicolon behind.
 
+## The drift, and which side won
+
+This table was written against a `positions.zen` whose `Sign` declaration was
+four lines of comma-separated variants:
+
+```groovy
+Sign =
+    Neg,
+    Zero,
+    Pos
+```
+
+The file no longer says that. It says `Sign = Neg | Zero | Pos`, on one line,
+and **the file is right**. `DESIGN.md` is the law and it is unambiguous --
+"Sum types are written with `|`, always" -- and `grammar.js` R1 retired the
+comma form explicitly, because it is what makes an alias and a one-variant enum
+different declarations rather than the same three tokens. The comma spelling
+survived only in `PLAN.md` 0.1's early sketch of the grammar.
+
+So the source was treated as authoritative and **this table was recomputed
+against it**, byte by byte. Five rows became four (an enum on one line has no
+separate line per variant, and it gains a row for the absent leading bar), and
+every row below the enum moved up by three lines. The columns were re-derived
+from the file rather than shifted, so a stale column cannot have survived the
+edit.
+
+One row is new rather than moved: the **statement** containing the `.match`.
+The old table asserted the match expression and never the statement around it,
+so the `;` convention was stated in the prose and tested only at `Ok(0);`.
+
+`tests/corpus/parse/parser_spans.zen` is this table made executable against the
+parser, on a smaller file. Both exist on purpose: that one is a gate, this one
+is the specification it was written from.
+
 | # | node | kind | span | source |
 |---|---|---|---|---|
-| 1 | module (whole file) | Module | `1:1..26:2` | `// positions.zen -- t ... , d);\n    Ok(0);\n}` |
+| 1 | module (whole file) | Module | `1:1..24:1` | the whole file, trivia included |
 | 2 | leading trivia of `Point` | Trivia | `1:1..3:66` | `// positions.zen -- t ...  line 4 is 4:1..4:6.` |
 | 3 | `Point` declaration | Struct | `4:1..7:2` | `Point = {\n    x: i32,\n    y: i32,\n}` |
 | 4 | `Point` name | Ident | `4:1..4:6` | `Point` |
-| 5 | `Point` body | Block | `4:9..7:2` | `{\n    x: i32,\n    y: i32,\n}` |
+| 5 | `Point` body | Body | `4:9..7:2` | `{\n    x: i32,\n    y: i32,\n}` |
 | 6 | field `x: i32` | Field | `5:5..5:11` | `x: i32` |
 | 7 | field name `x` | Ident | `5:5..5:6` | `x` |
 | 8 | field type `i32` | Type | `5:8..5:11` | `i32` |
 | 9 | field `y: i32` | Field | `6:5..6:11` | `y: i32` |
 | 10 | field type `i32` (second) | Type | `6:8..6:11` | `i32` |
-| 11 | `Sign` declaration | Enum | `9:1..12:8` | `Sign =\n    Neg,\n    Zero,\n    Pos` |
+| 11 | `Sign` declaration | Enum | `9:1..9:24` | `Sign = Neg \| Zero \| Pos` |
 | 12 | `Sign` name | Ident | `9:1..9:5` | `Sign` |
-| 13 | variant `Neg` | Variant | `10:5..10:8` | `Neg` |
-| 14 | variant `Zero` | Variant | `11:5..11:9` | `Zero` |
-| 15 | variant `Pos` (last, no comma) | Variant | `12:5..12:8` | `Pos` |
-| 16 | `sign_of` declaration | Function | `14:1..19:2` | `sign_of = (n: i32) Si ... Sign.Pos,\n    })\n}` |
-| 17 | `sign_of` name | Ident | `14:1..14:8` | `sign_of` |
-| 18 | parameter list | Params | `14:11..14:19` | `(n: i32)` |
-| 19 | parameter `n: i32` | Param | `14:12..14:18` | `n: i32` |
-| 20 | parameter name `n` | Ident | `14:12..14:13` | `n` |
-| 21 | parameter type `i32` | Type | `14:15..14:18` | `i32` |
-| 22 | return type `Sign` | Type | `14:20..14:24` | `Sign` |
-| 23 | `sign_of` body | Block | `14:25..19:2` | `{\n    (n == 0).match ... Sign.Pos,\n    })\n}` |
-| 24 | `(n == 0).match({..})` | Call | `15:5..18:7` | `(n == 0).match({\n    ... => Sign.Pos,\n    })` |
-| 25 | receiver `(n == 0)` | Paren | `15:5..15:13` | `(n == 0)` |
-| 26 | `n == 0` | Binary | `15:6..15:12` | `n == 0` |
-| 27 | operator `==` | Op | `15:8..15:10` | `==` |
-| 28 | literal `0` | Int | `15:11..15:12` | `0` |
-| 29 | method name `match` | Ident | `15:14..15:19` | `match` |
-| 30 | arm list `{..}` | Arms | `15:20..18:6` | `{\n        true => Si ...  => Sign.Pos,\n    }` |
-| 31 | arm `true => Sign.Zero` | Arm | `16:9..16:26` | `true => Sign.Zero` |
-| 32 | pattern `true` | Pattern | `16:9..16:13` | `true` |
-| 33 | arrow `=>` | Op | `16:14..16:16` | `=>` |
-| 34 | arm body `Sign.Zero` | Path | `16:17..16:26` | `Sign.Zero` |
-| 35 | arm `false => Sign.Pos` | Arm | `17:9..17:26` | `false => Sign.Pos` |
-| 36 | arrow `=>` (second arm) | Op | `17:15..17:17` | `=>` |
-| 37 | `main` declaration | Function | `21:1..26:2` | `main = (env: Env) Res ... , d);\n    Ok(0);\n}` |
-| 38 | parameter `env: Env` | Param | `21:9..21:17` | `env: Env` |
-| 39 | return type `Res<i32, ArgError>` | Type | `21:19..21:37` | `Res<i32, ArgError>` |
-| 40 | type argument `i32` | Type | `21:23..21:26` | `i32` |
-| 41 | type argument `ArgError` | Type | `21:28..21:36` | `ArgError` |
-| 42 | statement `p = Point(..);` | Bind | `22:5..22:27` | `p = Point(x: 3, y: 4);` |
-| 43 | call `Point(x: 3, y: 4)` | Call | `22:9..22:26` | `Point(x: 3, y: 4)` |
-| 44 | callee `Point` | Ident | `22:9..22:14` | `Point` |
-| 45 | named argument `x: 3` | Arg | `22:15..22:19` | `x: 3` |
-| 46 | argument value `3` | Int | `22:18..22:19` | `3` |
-| 47 | `p.x * p.x + p.y * p.y` | Binary | `23:9..23:30` | `p.x * p.x + p.y * p.y` |
-| 48 | its left operand `p.x * p.x` | Binary | `23:9..23:18` | `p.x * p.x` |
-| 49 | operator `+` | Op | `23:19..23:20` | `+` |
-| 50 | field access `p.x` | Field access | `23:9..23:12` | `p.x` |
-| 51 | field name `y` (last) | Ident | `23:29..23:30` | `y` |
-| 52 | call `println("{}", d)` | Call | `24:5..24:21` | `println("{}", d)` |
-| 53 | string literal `"{}"` | Str | `24:13..24:17` | `"{}"` |
-| 54 | `Ok(0)` | Call | `25:5..25:10` | `Ok(0)` |
-| 55 | statement `Ok(0);` | Bind | `25:5..25:11` | `Ok(0);` |
+| 13 | `Sign` leading bar | Span? | **absent** | no bar leads, so this is an enum of three and not an alias |
+| 14 | variant `Neg` | Variant | `9:8..9:11` | `Neg` |
+| 15 | variant `Zero` | Variant | `9:14..9:18` | `Zero` |
+| 16 | variant `Pos` (last) | Variant | `9:21..9:24` | `Pos` |
+| 17 | `sign_of` declaration | Function | `11:1..16:2` | `sign_of = (n: i32) Si ... Sign.Pos,\n    });\n}` |
+| 18 | `sign_of` name | Ident | `11:1..11:8` | `sign_of` |
+| 19 | parameter list | Params | `11:11..11:19` | `(n: i32)` |
+| 20 | parameter `n: i32` | Param | `11:12..11:18` | `n: i32` |
+| 21 | parameter name `n` | Ident | `11:12..11:13` | `n` |
+| 22 | parameter type `i32` | Type | `11:15..11:18` | `i32` |
+| 23 | return type `Sign` | Type | `11:20..11:24` | `Sign` |
+| 24 | `sign_of` body | Block | `11:25..16:2` | `{\n    (n == 0).match ... Sign.Pos,\n    });\n}` |
+| 25 | `(n == 0).match({..})` | Match | `12:5..15:7` | `(n == 0).match({\n    ... => Sign.Pos,\n    })` |
+| 26 | receiver `(n == 0)` | Paren | `12:5..12:13` | `(n == 0)` |
+| 27 | `n == 0` | Binary | `12:6..12:12` | `n == 0` |
+| 28 | operator `==` | Op | `12:8..12:10` | `==` |
+| 29 | literal `0` | Int | `12:11..12:12` | `0` |
+| 30 | method name `match` | Ident | `12:14..12:19` | `match` |
+| 31 | arm list `{..}` | Arms | `12:20..15:6` | `{\n        true => Si ...  => Sign.Pos,\n    }` |
+| 32 | arm `true => Sign.Zero` | Arm | `13:9..13:26` | `true => Sign.Zero` |
+| 33 | pattern `true` | Pattern | `13:9..13:13` | `true` |
+| 34 | arrow `=>` | Op | `13:14..13:16` | `=>` |
+| 35 | arm body `Sign.Zero` | Access | `13:17..13:26` | `Sign.Zero` |
+| 36 | arm `false => Sign.Pos` | Arm | `14:9..14:26` | `false => Sign.Pos` |
+| 37 | arrow `=>` (second arm) | Op | `14:15..14:17` | `=>` |
+| 38 | statement `(n == 0).match({..});` | Stmt | `12:5..15:8` | the whole statement, `;` included |
+| 39 | `main` declaration | Function | `18:1..23:2` | `main = (env: Env) Res ... , d);\n    Ok(0);\n}` |
+| 40 | parameter `env: Env` | Param | `18:9..18:17` | `env: Env` |
+| 41 | return type `Res<i32, ArgError>` | Type | `18:19..18:37` | `Res<i32, ArgError>` |
+| 42 | type argument `i32` | Type | `18:23..18:26` | `i32` |
+| 43 | type argument `ArgError` | Type | `18:28..18:36` | `ArgError` |
+| 44 | statement `p = Point(..);` | Stmt | `19:5..19:27` | `p = Point(x: 3, y: 4);` |
+| 45 | call `Point(x: 3, y: 4)` | Call | `19:9..19:26` | `Point(x: 3, y: 4)` |
+| 46 | callee `Point` | Name | `19:9..19:14` | `Point` |
+| 47 | named argument `x: 3` | Arg | `19:15..19:19` | `x: 3` |
+| 48 | argument value `3` | Int | `19:18..19:19` | `3` |
+| 49 | `p.x * p.x + p.y * p.y` | Binary | `20:9..20:30` | `p.x * p.x + p.y * p.y` |
+| 50 | its left operand `p.x * p.x` | Binary | `20:9..20:18` | `p.x * p.x` |
+| 51 | operator `+` | Op | `20:19..20:20` | `+` |
+| 52 | field access `p.x` | Access | `20:9..20:12` | `p.x` |
+| 53 | field name `y` (last) | Ident | `20:29..20:30` | `y` |
+| 54 | call `println("{}", d)` | Call | `21:5..21:21` | `println("{}", d)` |
+| 55 | string literal `"{}"` | Str | `21:13..21:17` | `"{}"` |
+| 56 | `Ok(0)` | Call | `22:5..22:10` | `Ok(0)` |
+| 57 | statement `Ok(0);` | Stmt | `22:5..22:11` | `Ok(0);` |
 
 ## How this file is checked
 
-There is no compiler yet, so the spans above were computed from the bytes of
-`positions.zen` and every one was verified by extracting `start..end` from the
-source and comparing it to the node it names. Once a parser exists, the harness
-must do the same in reverse: parse `positions.zen`, walk to each node, and
-compare its recorded span to the table. A row that cannot be located by name is
-a table that has drifted, and drift here is exactly the failure `TESTING.md`
-describes -- a correct diagnostic pointing at the wrong token.
+The spans above were computed from the bytes of `positions.zen` and every one
+was verified by extracting `start..end` from the source and comparing it to the
+node it names. A harness must do the same in reverse: parse `positions.zen`,
+walk to each node, and compare its recorded span to the table. A row that
+cannot be located by name is a table that has drifted, and drift here is
+exactly the failure `TESTING.md` describes -- a correct diagnostic pointing at
+the wrong token.
+
+That harness does not exist yet, and until it does this file is checked by
+hand, which is why it drifted once already. What DOES run is
+`parser_spans.zen`, which asserts the same conventions on a file small enough
+to build a token stream for by hand. Point the harness at this table the day
+`src/lex/` can turn `positions.zen` into tokens, and delete this paragraph.
 
 `positions.zen` is also an ordinary corpus program: it prints `25`.

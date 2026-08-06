@@ -1,0 +1,571 @@
+// src/parse/parse_expr.zen
+// Expressions: precedence, the postfix chain, and the three places one
+// `(` or one `[` has two readings.
+//
+// PRECEDENCE IS CLIMBED, NOT RECURSED THROUGH. `a + b + c + ..` is a
+// left-nested spine, and a parser that recurses once per operator
+// stack-overflows on a long one — which is exactly what happened to
+// the Python bootstrapper and had to be folded into a loop. So the
+// loop below extends the left operand in place and recurses only on
+// the RIGHT, where the nesting is the author's and the depth guard
+// covers it.
+//
+// DESIGN.md STATES NO PRECEDENCE AT ALL. grammar.js D1 settled it as
+// C-like and every operator left-associative, and this file follows
+// that table rather than inventing a second one. `+%` sits at exactly
+// the precedence of `+` and `*%` at that of `*`: they are the same
+// operation with a different overflow rule, not a different binding
+// strength. tests/corpus/parse/prec_*.zen gates one pair each.
+//
+// THE THREE AMBIGUITIES, all decided by a bounded scan to a matching
+// delimiter and one token past it — never by backtracking, and never
+// by what the elements turn out to mean:
+//
+//   `(..)` is a LAMBDA if `{` or a return type follows, otherwise a
+//   parenthesized expression. Grammar D15a makes a return type
+//   mandatory on a signature, so there is nothing else it could be.
+//
+//   `[..]` is a FIXED ARRAY TYPE APPLIED TO ARGUMENTS if it holds
+//   exactly two items and a `(` follows; otherwise an array literal.
+//   `[i32, 4](2, 3, 5, 7)` and `[0, 1, 2]` are the two cases and this
+//   is the whole of the rule.
+//
+//   `.match(` and `.try(` are their OWN nodes and not calls, because
+//   neither names anything a caller could have imported. AST_CONTRACT
+//   requires it: a `Try` parsed as a call "creates a name that must be
+//   special-cased everywhere it could be shadowed".
+
+Alloc, AllocError = std.mem
+Span, Pos, Ident, no_trivia = ast.ast_span
+ExprId, TypeId, BlockId = ast.ast_id
+Expr, ExprKind, Name, Paren, ArrayLit, FixedArray, Lambda, Call, Arg = ast.ast_node
+Match, Arm, Try, Record, Access, Index, Unary, Binary, Consume, Meta = ast.ast_node
+Literal, LiteralKind, UnOp, BinOp, Param, TParam, Member = ast.ast_node
+Token, TokenKind, same, is_trivia = parse.parse_token
+Parser, Mark = parse.parser
+type, type_args, starts_type = parse.parse_type
+lambda_ahead, fixed_array_ahead, targs_ahead = parse.lookahead
+arms = parse.parse_match
+block = parse.parse_stmt
+record_body, params_list, type_params = parse.parse_member
+
+// The lowest binding strength of all: `consume a + b` moves the sum,
+// not `a`. grammar.js D2.
+expr* = (p :: Parser) Res<ExprId, AllocError> {
+    p.enter().try();
+    id = p.expr_guarded().try();
+    p.leave();
+    Ok(id);
+}
+
+expr_guarded = (p :: Parser) Res<ExprId, AllocError> {
+    p.too_deep.match({
+        true  => p.poison_expr(),
+        false => p.expr_here(),
+    });
+}
+
+expr_here = (p :: Parser) Res<ExprId, AllocError> {
+    m = p.open();
+    p.at_kind(TokenKind.Consume).match({
+        true  => p.consume_expr(m),
+        false => p.binary_from(m, 1),
+    });
+}
+
+consume_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    p.bump().try();
+    operand = p.expr().try();
+    p.add_expr(ExprKind.Consume(Consume(operand: operand)), m);
+}
+
+// -------------------------------------------------------------------
+// precedence
+// -------------------------------------------------------------------
+
+// grammar.js D1's table, and the only place it is written down in this
+// compiler. 0 means "not a binary operator", which is also how the
+// loop below knows to stop.
+precedence* = (kind: TokenKind) usize {
+    kind.match({
+        OrOr      => 1,
+        AndAnd    => 2,
+        EqEq      => 3,
+        BangEq    => 3,
+        Lt        => 4,
+        Gt        => 4,
+        LtEq      => 4,
+        GtEq      => 4,
+        Plus      => 5,
+        Minus     => 5,
+        PlusWrap  => 5,
+        MinusWrap => 5,
+        Star      => 6,
+        Slash     => 6,
+        Percent   => 6,
+        StarWrap  => 6,
+        _         => 0,
+    });
+}
+
+binary_op = (kind: TokenKind) BinOp {
+    kind.match({
+        OrOr      => BinOp.Or,
+        AndAnd    => BinOp.And,
+        EqEq      => BinOp.Equal,
+        BangEq    => BinOp.NotEqual,
+        Lt        => BinOp.Less,
+        Gt        => BinOp.Greater,
+        LtEq      => BinOp.LessEq,
+        GtEq      => BinOp.GreaterEq,
+        Plus      => BinOp.Add,
+        Minus     => BinOp.Sub,
+        PlusWrap  => BinOp.AddWrap,
+        MinusWrap => BinOp.SubWrap,
+        Star      => BinOp.Mul,
+        Slash     => BinOp.Div,
+        Percent   => BinOp.Rem,
+        StarWrap  => BinOp.MulWrap,
+        _         => BinOp.Mul,
+    });
+}
+
+// The spine. `min` is the weakest operator this call will absorb; a
+// left-associative operator recurses at `min + 1` on its right, which
+// is what makes `a - b - c` read `(a - b) - c` and not `a - (b - c)`.
+binary_from = (p :: Parser, m: Mark, min: usize) Res<ExprId, AllocError> {
+    lhs ::= p.unary_at(m).try();
+    running ::= true;
+    loop(() { running }, (h) {
+        prec = p.peek().kind.precedence();
+        running = prec > 0 && prec >= min;
+        running.match({
+            true  => { lhs = p.binary_step(m, prec, lhs).try(); Ok(()) },
+            false => p.nothing(),
+        }).try();
+    });
+    Ok(lhs);
+}
+
+// One operator and its right operand, folded onto the spine. The
+// recursion is at `prec + 1`, which is what makes every operator
+// left-associative: `a - b - c` is `(a - b) - c`.
+binary_step = (p :: Parser, m: Mark, prec: usize, lhs: ExprId) Res<ExprId, AllocError> {
+    kind = p.peek().kind;
+    op_span = p.here_span();
+    p.bump().try();
+    rhs_mark = p.open();
+    rhs = p.binary_from(rhs_mark, prec + 1).try();
+    p.add_expr(ExprKind.Binary(Binary(
+        op: kind.binary_op(),
+        op_span: op_span,
+        lhs: lhs,
+        rhs: rhs,
+    )), m.bare());
+}
+
+// `!`, `-`, `&`. `&` appears once in DESIGN.md, in an example marked
+// ERROR for an unrelated reason — so it parses, and sema rejects
+// taking the address of a computed field.
+unary_at = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    op = p.peek().kind.match({
+        Bang  => Ok(UnOp.Not),
+        Minus => Ok(UnOp.Neg),
+        Amp   => Ok(UnOp.Addr),
+        _     => None,
+    });
+    op.match({
+        Ok(o) => p.unary_expr(m, o),
+        None  => p.postfix(m),
+    });
+}
+
+unary_expr = (p :: Parser, m: Mark, op: UnOp) Res<ExprId, AllocError> {
+    op_span = p.here_span();
+    p.bump().try();
+    inner_mark = p.open();
+    operand = p.unary_at(inner_mark).try();
+    p.add_expr(ExprKind.Unary(Unary(op: op, op_span: op_span, operand: operand)), m.bare());
+}
+
+// -------------------------------------------------------------------
+// the postfix chain
+//
+// `.name`, `.match({..})`, `.try()`, `[i]`, `(args)`, `<T>(args)` —
+// all left-associative, all a loop, so `env.args<Opts>().try()` costs
+// one frame rather than four.
+// -------------------------------------------------------------------
+
+postfix = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    base ::= p.primary(m).try();
+    running ::= true;
+    loop(() { running }, (h) {
+        running = p.postfix_continues();
+        running.match({
+            true  => { base = p.postfix_step(m, base).try(); Ok(()) },
+            false => p.nothing(),
+        }).try();
+    });
+    Ok(base);
+}
+
+// Whether the token here extends the chain. `<` is the only one that
+// needs more than its own identity: `a < b` is a comparison and
+// `alloc.Vec<i32>()` is a call, and only the scan can tell.
+postfix_continues = (p :: Parser) bool {
+    p.peek().kind.match({
+        Dot      => true,
+        LBracket => true,
+        LParen   => true,
+        Lt       => p.targs_ahead(),
+        _        => false,
+    });
+}
+
+postfix_step = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
+    p.peek().kind.match({
+        Dot      => p.after_dot(m, base),
+        LBracket => p.index_expr(m, base),
+        Lt       => p.targs_call(m, base),
+        _        => p.call_expr(m, base, p.alloc.Vec<TypeId>()),
+    });
+}
+
+// `alloc.Vec<i32>()` — type arguments, but only if a `(` closes them.
+// `a < b` is the other reading and it is by far the commoner one, so
+// the scan is what decides: a `<` whose `>` is not followed by `(` is
+// a comparison, and the postfix loop stops.
+targs_call = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
+    targs ::= p.alloc.Vec<TypeId>();
+    p.type_args(targs).try();
+    p.call_expr(m, base, targs);
+}
+
+after_dot = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
+    p.bump().try();
+    name = p.ident("expected a field or method name after `.`").try();
+    p.dot_target(m, base, name);
+}
+
+// The two intrinsics wear the shape of a method call and are not one.
+// Recognised by name HERE, once, which is precisely what stops the
+// name from having to be special-cased everywhere else.
+dot_target = (p :: Parser, m: Mark, base: ExprId, name: Ident) Res<ExprId, AllocError> {
+    is_match = name.text == "match" && p.at_kind(TokenKind.LParen);
+    is_try = name.text == "try" && p.at_kind(TokenKind.LParen);
+    is_match.match({
+        true  => p.match_expr(m, base, name.span),
+        false => is_try.match({
+            true  => p.try_expr(m, base),
+            false => p.add_expr(ExprKind.Access(Access(base: base, name: name)), m.bare()),
+        }),
+    });
+}
+
+// `.match({ pattern => expr, .. })`. Its own node and not a call: its
+// argument is an arm list, which is not an expression and could not be
+// passed to anything else, and exhaustiveness is checked on it.
+match_expr = (p :: Parser, m: Mark, scrutinee: ExprId, name_span: Span) Res<ExprId, AllocError> {
+    open = p.here_span();
+    p.bump().try();
+    list ::= p.alloc.Vec<Arm>();
+    arms_span = p.arms(list).try();
+    p.expect_close(TokenKind.RParen, "unclosed `(`: this `.match` is never closed", open).try();
+    p.add_expr(ExprKind.Match(Match(
+        scrutinee: scrutinee,
+        name_span: name_span,
+        arms: list,
+        arms_span: arms_span,
+    )), m.bare());
+}
+
+// `.try()` — the non-local-exit intrinsic.
+try_expr = (p :: Parser, m: Mark, operand: ExprId) Res<ExprId, AllocError> {
+    open = p.here_span();
+    p.bump().try();
+    p.expect_close(TokenKind.RParen, "`.try()` takes no arguments", open).try();
+    p.add_expr(ExprKind.Try(Try(operand: operand)), m.bare());
+}
+
+index_expr = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
+    open = p.here_span();
+    p.bump().try();
+    index = p.expr().try();
+    p.expect_close(TokenKind.RBracket, "unclosed `[`: this index is never closed", open).try();
+    p.add_expr(ExprKind.Index(Index(base: base, index: index)), m.bare());
+}
+
+call_expr = (p :: Parser, m: Mark, callee: ExprId, targs: Vec<TypeId>) Res<ExprId, AllocError> {
+    list ::= p.alloc.Vec<Arg>();
+    span = p.args(list).try();
+    p.add_expr(ExprKind.Call(Call(
+        callee: callee,
+        targs: targs,
+        args: list,
+        args_span: span,
+    )), m.bare());
+}
+
+// `(a, b: 3, { .. })`. An argument is named when an identifier is
+// followed by `:` — construction and an impl's supplied field use the
+// same form, so they use the same node.
+args* = (p :: Parser, out :: Vec<Arg>) Res<Span, AllocError> {
+    start = p.here();
+    open = p.here_span();
+    p.bump().try();
+    running ::= !p.at_kind(TokenKind.RParen) && !p.at_eof();
+    loop(() { running }, (h) {
+        before = p.at;
+        out.add(p.one_arg().try()).try();
+        running = !p.at_kind(TokenKind.RParen) && !p.at_eof() && p.at > before;
+    });
+    p.expect_close(TokenKind.RParen, "unclosed `(`: this argument list is never closed", open).try();
+    Ok(p.span_from(start));
+}
+
+one_arg = (p :: Parser) Res<Arg, AllocError> {
+    m = p.open();
+    named = p.at_kind(TokenKind.Ident) && p.peek_next().kind.same(TokenKind.Colon);
+    name = named.match({
+        true  => p.named_arg_name(),
+        false => Ok(None),
+    }).try();
+    value = p.arg_value().try();
+    end = p.prev_end;
+    span = p.span_from(m.start);
+    p.eat(TokenKind.Comma).try();
+    Ok(Arg(
+        name: name,
+        value: value,
+        span: span,
+        leading: m.leading,
+        trailing: p.claim_trailing(end),
+    ));
+}
+
+named_arg_name = (p :: Parser) Res<Res<Ident>, AllocError> {
+    name = p.ident("expected an argument name").try();
+    p.bump().try();
+    Ok(Ok(name));
+}
+
+// A `{` in argument position is a record — the brace literal an impl
+// body and a builder call are both made of. It is the only place a
+// `{` starts an expression, which is what keeps `Name = { .. }` a
+// struct declaration everywhere else (grammar D11).
+arg_value = (p :: Parser) Res<ExprId, AllocError> {
+    p.at_kind(TokenKind.LBrace).match({
+        true  => p.record_expr(),
+        false => p.expr(),
+    });
+}
+
+record_expr = (p :: Parser) Res<ExprId, AllocError> {
+    m = p.open();
+    entries ::= p.alloc.Vec<Member>();
+    p.record_body(entries).try();
+    p.add_expr(ExprKind.Record(Record(entries: entries)), m);
+}
+
+// -------------------------------------------------------------------
+// primaries
+// -------------------------------------------------------------------
+
+primary = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    p.peek().kind.match({
+        Ident      => p.name_expr(m),
+        Int        => p.literal_expr(m, LiteralKind.Int),
+        Float      => p.literal_expr(m, LiteralKind.Float),
+        Str        => p.literal_expr(m, LiteralKind.Str),
+        Char       => p.literal_expr(m, LiteralKind.Char),
+        True       => p.literal_expr(m, LiteralKind.Bool),
+        False      => p.literal_expr(m, LiteralKind.Bool),
+        SelfType   => p.word_expr(m, ExprKind.SelfType),
+        Scope      => p.word_expr(m, ExprKind.Scope),
+        Meta       => p.meta_expr(m),
+        LParen     => p.paren_or_lambda(m),
+        LBracket   => p.bracket_expr(m),
+        Lt         => p.generic_lambda(m),
+        _          => {
+            p.error("expected an expression").try();
+            p.poison_expr();
+        },
+    });
+}
+
+name_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    token = p.bump().try();
+    p.add_expr(ExprKind.Name(Name(text: token.text)), m);
+}
+
+literal_expr = (p :: Parser, m: Mark, kind: LiteralKind) Res<ExprId, AllocError> {
+    token = p.bump().try();
+    p.add_expr(ExprKind.Literal(Literal(kind: kind, text: token.text)), m);
+}
+
+word_expr = (p :: Parser, m: Mark, kind: ExprKind) Res<ExprId, AllocError> {
+    p.bump().try();
+    p.add_expr(kind, m);
+}
+
+// `@meta(n)` and `@meta(self: @Self)` — the second is the only place
+// in the language where an argument carries a type annotation, which
+// is why it has fields of its own rather than being bent into an Arg.
+meta_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    p.bump().try();
+    open = p.here_span();
+    p.expect(TokenKind.LParen, "expected `(` after `@meta`").try();
+    typed = p.at_kind(TokenKind.Ident) && p.peek_next().kind.same(TokenKind.Colon);
+    node = typed.match({
+        true  => p.typed_meta(m),
+        false => p.value_meta(m),
+    }).try();
+    p.expect_close(TokenKind.RParen, "unclosed `(`: this `@meta` is never closed", open).try();
+    Ok(node);
+}
+
+typed_meta = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    name = p.ident("expected a name inside `@meta`").try();
+    p.bump().try();
+    t = p.type().try();
+    p.add_expr(ExprKind.Meta(Meta(value: None, name: Ok(name), type: Ok(t))), m);
+}
+
+value_meta = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    value = p.expr().try();
+    p.add_expr(ExprKind.Meta(Meta(value: Ok(value), name: None, type: None)), m);
+}
+
+// `()`, `(n == 0)`, `(a: i32, b: i32) i32 { a + b }`, `(h, v) { .. }`.
+paren_or_lambda = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    p.lambda_ahead().match({
+        true  => p.lambda(m, p.alloc.Vec<TParam>()),
+        false => p.paren_expr(m),
+    });
+}
+
+paren_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    open = p.here_span();
+    p.bump().try();
+    p.at_kind(TokenKind.RParen).match({
+        true  => p.unit_expr(m),
+        false => p.grouped_expr(m, open),
+    });
+}
+
+unit_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    p.bump().try();
+    p.add_expr(ExprKind.Unit, m);
+}
+
+// `Paren` is a node of its own because POSITIONS.md asserts a span for
+// it, and because a formatter re-deriving parentheses from precedence
+// is a formatter that will eventually print `a + b * c` for
+// `(a + b) * c`.
+grouped_expr = (p :: Parser, m: Mark, open: Span) Res<ExprId, AllocError> {
+    inner = p.expr().try();
+    p.expect_close(TokenKind.RParen, "unclosed `(`: this expression is never closed", open).try();
+    p.add_expr(ExprKind.Paren(Paren(inner: inner)), m);
+}
+
+generic_lambda = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    tps ::= p.alloc.Vec<TParam>();
+    p.type_params(tps).try();
+    p.lambda(m, tps);
+}
+
+// A lambda's return type is optional and means `()` when omitted; a
+// DECLARATION must write one, and that is sema's rule rather than a
+// shape (AST_CONTRACT, `Function.ret`).
+lambda* = (p :: Parser, m: Mark, tps: Vec<TParam>) Res<ExprId, AllocError> {
+    ps ::= p.alloc.Vec<Param>();
+    span = p.params_list(ps).try();
+    ret = p.starts_type().match({
+        true  => p.lambda_ret(),
+        false => Ok(None),
+    }).try();
+    body = p.block().try();
+    p.add_expr(ExprKind.Lambda(Lambda(
+        tparams: tps,
+        params: ps,
+        params_span: span,
+        ret: ret,
+        body: body,
+    )), m);
+}
+
+lambda_ret = (p :: Parser) Res<Res<TypeId>, AllocError> {
+    t = p.type().try();
+    Ok(Ok(t));
+}
+
+// `[0, 1, 2]` against `[i32, 4](2, 3, 5, 7)`.
+bracket_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    p.fixed_array_ahead().match({
+        true  => p.fixed_array(m),
+        false => p.array_lit(m),
+    });
+}
+
+fixed_array = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    t = p.type().try();
+    elems ::= p.alloc.Vec<ExprId>();
+    span = p.elem_list(elems, TokenKind.RParen, "unclosed `(`: this fixed array's arguments are never closed").try();
+    p.add_expr(ExprKind.FixedArray(FixedArray(
+        type: t,
+        elems: elems,
+        args_span: span,
+    )), m);
+}
+
+array_lit = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
+    elems ::= p.alloc.Vec<ExprId>();
+    p.elem_list(elems, TokenKind.RBracket, "unclosed `[`: this array literal is never closed").try();
+    p.add_expr(ExprKind.Array(ArrayLit(elems: elems)), m);
+}
+
+// A comma-separated expression list between one delimiter and its
+// closer, trailing comma allowed. Shared by an array literal and a
+// fixed array's arguments, which differ only in which bracket they
+// use.
+elem_list = (p :: Parser, out :: Vec<ExprId>, close: TokenKind, message: str) Res<Span, AllocError> {
+    start = p.here();
+    open = p.here_span();
+    p.bump().try();
+    running ::= !p.at_kind(close) && !p.at_eof();
+    loop(() { running }, (h) {
+        before = p.at;
+        out.add(p.expr().try()).try();
+        p.eat(TokenKind.Comma).try();
+        running = !p.at_kind(close) && !p.at_eof() && p.at > before;
+    });
+    p.expect_close(close, message, open).try();
+    Ok(p.span_from(start));
+}
+
+// -------------------------------------------------------------------
+// nodes
+// -------------------------------------------------------------------
+
+// What stands where an expression could not be read. `Unit` and not a
+// new `Error` kind: the AST has no poison node, and adding one would
+// change a shape four subsystems are already built against for the
+// benefit of a tree nobody walks — `p.diags` is non-empty, so no
+// consumer ever reaches this. Reported as a hole rather than filled.
+poison_expr* = (p :: Parser) Res<ExprId, AllocError> {
+    p.tree.add_expr(Expr(
+        kind: ExprKind.Unit,
+        span: p.empty_span(),
+        leading: no_trivia(),
+        trailing: no_trivia(),
+    ))
+}
+
+add_expr* = (p :: Parser, kind: ExprKind, m: Mark) Res<ExprId, AllocError> {
+    p.tree.add_expr(Expr(
+        kind: kind,
+        span: p.span_from(m.start),
+        leading: m.leading,
+        trailing: no_trivia(),
+    ))
+}

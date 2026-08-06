@@ -1,0 +1,193 @@
+// tests/corpus/parse/parser_precedence.zen
+// The parser's precedence table, one operator pair per case.
+//
+// The prec_*.zen files beside this one assert what an expression
+// EVALUATES to, which catches a wrong table only when the two readings
+// differ numerically. This asserts the TREE, so `a + b +% c` grouping
+// the wrong way is visible even where both readings compute the same
+// number.
+//
+// DESIGN.md states no precedence at all; grammar.js D1 settled it as
+// C-like with every binary operator left-associative, and `+%` at
+// exactly the precedence of `+`. That is what is gated here.
+//
+// The parser is driven from a token stream built by hand, because
+// src/lex/ did not exist when this was written. Spans are all one
+// column wide: precedence is a question about shape, and
+// parser_spans.zen is where positions are asserted.
+
+Token, TokenKind = parse.parse_token
+Parser = parse.parser
+expr = parse.parse_expr
+Ast = ast.ast_arena
+ExprId = ast.ast_id
+Span, Pos = ast.ast_span
+BinOp, UnOp = ast.ast_node
+
+tk = (k: TokenKind, t: str) Token {
+    Token(
+        kind: k,
+        text: t,
+        span: Span(file: "t.zen", start: Pos(line: 1, col: 1), end: Pos(line: 1, col: 2)),
+    )
+}
+
+push = (ts :: Vec<Token>, k: TokenKind, t: str) Res<(), AllocError> {
+    ts.add(tk(k, t))
+}
+
+op_name = (op: BinOp) str {
+    op.match({
+        Add       => "+",
+        Sub       => "-",
+        Mul       => "*",
+        Div       => "/",
+        Rem       => "%",
+        AddWrap   => "+%",
+        SubWrap   => "-%",
+        MulWrap   => "*%",
+        Equal     => "==",
+        NotEqual  => "!=",
+        Less      => "<",
+        LessEq    => "<=",
+        Greater   => ">",
+        GreaterEq => ">=",
+        And       => "&&",
+        Or        => "||",
+    });
+}
+
+un_name = (op: UnOp) str {
+    op.match({
+        Not  => "!",
+        Neg  => "neg",
+        Addr => "&",
+    });
+}
+
+// One node per line, prefixed by its depth. Deliberately not an
+// indented tree: a depth number is exact where leading spaces in an
+// `.expected` file are easy to get wrong by one.
+show = (env: Env, tree: Ast, id: ExprId, depth: usize) () {
+    e = tree.expr_at(id);
+    e.kind.match({
+        Literal(l) => println("{} {}", depth, l.text),
+        Name(n)    => println("{} {}", depth, n.text),
+        Paren(pn)  => {
+            println("{} paren", depth);
+            show(env, tree, pn.inner, depth + 1);
+        },
+        Unary(u)   => {
+            println("{} {}", depth, un_name(u.op));
+            show(env, tree, u.operand, depth + 1);
+        },
+        Binary(b)  => {
+            println("{} {}", depth, op_name(b.op));
+            show(env, tree, b.lhs, depth + 1);
+            show(env, tree, b.rhs, depth + 1);
+        },
+        Access(a)  => {
+            println("{} .{}", depth, a.name.text);
+            show(env, tree, a.base, depth + 1);
+        },
+        _          => println("{} ?", depth),
+    });
+}
+
+run = (env: Env, alloc: Alloc, label: str, ts: Vec<Token>) Res<(), AllocError> {
+    println("== {}", label);
+    p ::= alloc.Parser(ts, "t.zen");
+    p.drain().try();
+    id = p.expr().try();
+    show(env, p.tree, id, 0);
+    println("diags {}", p.diags.len);
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    // `*` binds tighter than `+`
+    a ::= alloc.Vec<Token>();
+    a.push(TokenKind.Int, "2").try();
+    a.push(TokenKind.Plus, "+").try();
+    a.push(TokenKind.Int, "3").try();
+    a.push(TokenKind.Star, "*").try();
+    a.push(TokenKind.Int, "4").try();
+    a.push(TokenKind.Eof, "").try();
+    run(env, alloc, "2 + 3 * 4", a).try();
+
+    // `-` is left-associative: (1 - 2) - 3
+    b ::= alloc.Vec<Token>();
+    b.push(TokenKind.Int, "1").try();
+    b.push(TokenKind.Minus, "-").try();
+    b.push(TokenKind.Int, "2").try();
+    b.push(TokenKind.Minus, "-").try();
+    b.push(TokenKind.Int, "3").try();
+    b.push(TokenKind.Eof, "").try();
+    run(env, alloc, "1 - 2 - 3", b).try();
+
+    // `+%` is the precedence of `+`, so this is (1 + 2) +% 3
+    c ::= alloc.Vec<Token>();
+    c.push(TokenKind.Int, "1").try();
+    c.push(TokenKind.Plus, "+").try();
+    c.push(TokenKind.Int, "2").try();
+    c.push(TokenKind.PlusWrap, "+%").try();
+    c.push(TokenKind.Int, "3").try();
+    c.push(TokenKind.Eof, "").try();
+    run(env, alloc, "1 + 2 +% 3", c).try();
+
+    // `*%` is the precedence of `*`, so this is 1 + (2 *% 3)
+    d ::= alloc.Vec<Token>();
+    d.push(TokenKind.Int, "1").try();
+    d.push(TokenKind.Plus, "+").try();
+    d.push(TokenKind.Int, "2").try();
+    d.push(TokenKind.StarWrap, "*%").try();
+    d.push(TokenKind.Int, "3").try();
+    d.push(TokenKind.Eof, "").try();
+    run(env, alloc, "1 + 2 *% 3", d).try();
+
+    // comparison binds tighter than `&&`
+    e ::= alloc.Vec<Token>();
+    e.push(TokenKind.Ident, "a").try();
+    e.push(TokenKind.EqEq, "==").try();
+    e.push(TokenKind.Ident, "b").try();
+    e.push(TokenKind.AndAnd, "&&").try();
+    e.push(TokenKind.Ident, "c").try();
+    e.push(TokenKind.Eof, "").try();
+    run(env, alloc, "a == b && c", e).try();
+
+    // parentheses override, and the Paren node survives — a formatter
+    // re-deriving them from precedence eventually prints `a + b * c`
+    // for `(a + b) * c`
+    f ::= alloc.Vec<Token>();
+    f.push(TokenKind.LParen, "(").try();
+    f.push(TokenKind.Int, "2").try();
+    f.push(TokenKind.Plus, "+").try();
+    f.push(TokenKind.Int, "3").try();
+    f.push(TokenKind.RParen, ")").try();
+    f.push(TokenKind.Star, "*").try();
+    f.push(TokenKind.Int, "4").try();
+    f.push(TokenKind.Eof, "").try();
+    run(env, alloc, "(2 + 3) * 4", f).try();
+
+    // unary binds tighter than any binary operator
+    g ::= alloc.Vec<Token>();
+    g.push(TokenKind.Minus, "-").try();
+    g.push(TokenKind.Ident, "a").try();
+    g.push(TokenKind.Plus, "+").try();
+    g.push(TokenKind.Ident, "b").try();
+    g.push(TokenKind.Eof, "").try();
+    run(env, alloc, "-a + b", g).try();
+
+    // ... and looser than a postfix chain: `!x.ready` is `!(x.ready)`
+    i ::= alloc.Vec<Token>();
+    i.push(TokenKind.Bang, "!").try();
+    i.push(TokenKind.Ident, "x").try();
+    i.push(TokenKind.Dot, ".").try();
+    i.push(TokenKind.Ident, "ready").try();
+    i.push(TokenKind.Eof, "").try();
+    run(env, alloc, "!x.ready", i).try();
+
+    Ok(0);
+}

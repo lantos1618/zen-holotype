@@ -1,0 +1,215 @@
+// src/parse/parse_type.zen
+// Written types.
+//
+// "`Type` is a WRITTEN type. What sema computes is sema's" — so
+// nothing here resolves a name, checks an arity or decides whether
+// `Vec<T>` exists. It records what the author typed and where.
+//
+// THERE IS NO QUALIFIED TYPE. `std.core.Res` does not parse, because
+// imports bind locally and a type is always reachable by a bare name.
+// Adding one is a design change, not a missing case.
+//
+// A UNION IS FLAT. `A | B | C` is one `Union` of three members, never
+// a `Union` of a `Union`, so error-set merging is a concatenation and
+// set equality is not a tree walk. The bar is only ever read here in
+// TYPE position: at a declaration's right-hand side the same bar
+// separates enum variants, and parse_decl.zen decides which before
+// this file is ever entered.
+
+Alloc, AllocError = std.mem
+Span, Pos, Ident, no_trivia = ast.ast_span
+TypeId, ExprId = ast.ast_id
+Type, TypeKind, Named, Union, FnType, ArrayType, Param, TParam = ast.ast_node
+Token, TokenKind, same = parse.parse_token
+Parser, Mark = parse.parser
+expr = parse.parse_expr
+params_list, type_params = parse.parse_member
+
+// A type, unions and all. The one entry point; everything else in
+// this file is below it.
+type* = (p :: Parser) Res<TypeId, AllocError> {
+    p.enter().try();
+    id = p.union_type().try();
+    p.leave();
+    Ok(id);
+}
+
+// `A | B | C`, gathered flat. One member is not a union: `i32` stays
+// a `Named` rather than becoming a one-member `Union`, because the
+// formatter must not print a bar the author did not write.
+union_type = (p :: Parser) Res<TypeId, AllocError> {
+    m = p.open();
+    first = p.primary_type_at(m).try();
+    p.at_kind(TokenKind.Bar).match({
+        false => Ok(first),
+        true  => p.union_rest(m, first),
+    });
+}
+
+union_rest = (p :: Parser, m: Mark, first: TypeId) Res<TypeId, AllocError> {
+    members ::= p.alloc.Vec<TypeId>();
+    members.add(first).try();
+    loop(() { p.at_kind(TokenKind.Bar) }, (h) {
+        p.bump().try();
+        members.add(p.primary_type().try()).try();
+    });
+    p.add_type(TypeKind.Union(Union(members: members)), m)
+}
+
+// Everything a type may be that is not a union. The dispatch is on
+// the first token alone and needs no lookahead — which is the whole
+// reason `@Self`, `_` and `...` are tokens rather than names.
+primary_type = (p :: Parser) Res<TypeId, AllocError> {
+    m = p.open();
+    p.primary_type_at(m);
+}
+
+primary_type_at = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
+    p.too_deep.match({
+        true  => p.poison_type(),
+        false => p.primary_type_here(m),
+    });
+}
+
+primary_type_here = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
+    p.peek().kind.match({
+        Ident      => p.named_type(m),
+        SelfType   => p.token_type(TypeKind.SelfType, m),
+        Underscore => p.token_type(TypeKind.Infer, m),
+        Ellipsis   => p.token_type(TypeKind.Variadic, m),
+        LBracket   => p.array_type(m),
+        LParen     => p.paren_type(m),
+        Lt         => p.fn_type(m),
+        _          => {
+            p.error("expected a type").try();
+            p.poison_type();
+        },
+    });
+}
+
+// A one-token type: `@Self`, `_`, `...`.
+token_type = (p :: Parser, kind: TypeKind, m: Mark) Res<TypeId, AllocError> {
+    p.bump().try();
+    p.add_type(kind, m);
+}
+
+// `i32`, `Vec<T>`, `Map<K, V>`, `Res<(), AllocError>`.
+//
+// Zen has no `>>` operator, so nested generics close without a lexer
+// hack. That is a real property of the language and not luck.
+named_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
+    name = p.ident("expected a type name").try();
+    args ::= p.alloc.Vec<TypeId>();
+    p.at_kind(TokenKind.Lt).match({
+        true  => p.type_args(args),
+        false => p.nothing(),
+    }).try();
+    p.add_type(TypeKind.Named(Named(name: name, args: args)), m);
+}
+
+// `<i32, ArgError>` after a type name. A separate function from
+// `type_params` because these are arguments and those are
+// declarations: `<K: Eq + Hash, V>` has bounds and this never does.
+type_args* = (p :: Parser, out :: Vec<TypeId>) Res<(), AllocError> {
+    open = p.here_span();
+    p.bump().try();
+    out.add(p.type().try()).try();
+    loop(() { p.at_kind(TokenKind.Comma) }, (h) {
+        p.bump().try();
+        out.add(p.type().try()).try();
+    });
+    p.expect_close(TokenKind.Gt, "unclosed `<`: this type argument list is never closed", open).try();
+    Ok(());
+}
+
+// `[u8, 64]`, `[u8, i32.BITS]`. The count is an EXPRESSION because it
+// is comptime, not because it is a literal.
+array_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
+    open = p.here_span();
+    p.bump().try();
+    elem = p.type().try();
+    p.expect(TokenKind.Comma, "expected `,` between a fixed array's element type and its length").try();
+    count = p.expr().try();
+    p.expect_close(TokenKind.RBracket, "unclosed `[`: this fixed array type is never closed", open).try();
+    p.add_type(TypeKind.Array(ArrayType(elem: elem, count: count)), m);
+}
+
+// `()` the unit type, and `(a: i32, b: i32) i32` the function type.
+//
+// One `(` and two readings, decided by what follows the closing `)`:
+// a function type always writes its return type (grammar D15a), so a
+// parameter list with nothing after it is not one. That rule is also
+// what keeps `Res<(), AllocError>` reading as unit rather than as a
+// function of no arguments.
+paren_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
+    ps ::= p.alloc.Vec<Param>();
+    span = p.params_list(ps).try();
+    (ps.len == 0 && !p.starts_type()).match({
+        true  => p.add_type(TypeKind.Unit, m),
+        false => p.fn_type_rest(m, p.alloc.Vec<TParam>(), ps, span),
+    });
+}
+
+// `<T>(a: T) T` — a generic function type. The only place a type
+// begins with `<`.
+fn_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
+    tps ::= p.alloc.Vec<TParam>();
+    p.type_params(tps).try();
+    ps ::= p.alloc.Vec<Param>();
+    span = p.params_list(ps).try();
+    p.fn_type_rest(m, tps, ps, span);
+}
+
+fn_type_rest = (p :: Parser, m: Mark, tps: Vec<TParam>, ps: Vec<Param>, span: Span) Res<TypeId, AllocError> {
+    ret = p.type().try();
+    p.add_type(TypeKind.Fn(FnType(
+        tparams: tps,
+        params: ps,
+        params_span: span,
+        ret: ret,
+    )), m);
+}
+
+// Whether a type could begin here. Asked in exactly two places — is
+// this `)` the end of a unit type or of a parameter list, and does a
+// lambda write a return type — and answered from the first token,
+// because every type form above is decided by one.
+starts_type* = (p :: Parser) bool { p.peek().kind.starts_type_kind() }
+
+starts_type_kind* = (kind: TokenKind) bool {
+    kind.match({
+        Ident      => true,
+        SelfType   => true,
+        Underscore => true,
+        Ellipsis   => true,
+        LBracket   => true,
+        LParen     => true,
+        Lt         => true,
+        _          => false,
+    });
+}
+
+// What stands where a type could not be read. `Infer` and not a new
+// `Error` kind: `_` already means "unknown here", every consumer
+// already handles it, and the diagnostic already said what went
+// wrong. A poison node exists to keep the tree walkable, not to carry
+// a second copy of the error.
+poison_type* = (p :: Parser) Res<TypeId, AllocError> {
+    p.tree.add_type(Type(
+        kind: TypeKind.Infer,
+        span: p.empty_span(),
+        leading: no_trivia(),
+        trailing: no_trivia(),
+    ))
+}
+
+// Wrap a kind in the node every type shares. `start` was taken before
+// the type's first token; the end is where its last one finished.
+add_type* = (p :: Parser, kind: TypeKind, m: Mark) Res<TypeId, AllocError> {
+    p.tree.add_type(Type(
+        kind: kind,
+        span: p.span_from(m.start),
+        leading: m.leading,
+        trailing: no_trivia(),
+    ))
+}

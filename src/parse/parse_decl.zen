@@ -1,0 +1,436 @@
+// src/parse/parse_decl.zen
+// Declarations, and the one question this parser really has to answer.
+//
+// `Name = <thing>` IS SEVEN DIFFERENT DECLARATIONS. A struct, an enum,
+// an alias, a function, a function signature, an import and a
+// constant are all written with a name, an `=` and a value; grammar
+// R1a decides between them by the SHAPE of the value and nothing else,
+// and this file is the only place that knowledge lives.
+//
+//     { .. }              struct
+//     | A   /  A | B      enum — the leading bar is what makes a
+//                         one-variant enum and an alias different
+//                         declarations rather than the same three
+//                         tokens, and it is why no lookahead is needed
+//     (..) T { .. }       function, with a body
+//     (..) T              function, signature only
+//     a.b.c               import
+//     Name / Name<T>      alias
+//     anything else       a constant
+//
+// THE LEADING BAR IS THE WHOLE DESIGN. Without it `AllocError =
+// OutOfMemory` and `Alias = Shape` are indistinguishable, and
+// `TestError = Failed(str)` and `Circle1 = AddFoo(Circle)` are the same
+// five tokens. With it the fork closes before it opens, an enum is
+// declarable anywhere, and this parser needs no position rule and no
+// guess. tests/corpus/parse/leading_bar_separates_alias_from_enum.zen
+// is that pair, gated.
+//
+// COST TO ACCEPT KNOWINGLY, and DESIGN.md already prices it: a
+// declaration does not terminate, so `Shape = Circle | Square |`
+// followed by `main = ..` reads as a variant named `main` and a stray
+// `=`. The diagnostic lands on the `=` rather than on the bar. That is
+// this parser being right about the language.
+
+Alloc, AllocError = std.mem
+Span, Pos, Ident, QualifiedName, no_trivia = ast.ast_span
+TypeId, ExprId, BlockId = ast.ast_id
+Decl, DeclKind, Struct, Enum, Alias, Function, Impl, Import, Const = ast.ast_node
+Member, Variant, ImportName, Param, TParam, Form, Module = ast.ast_node
+Token, TokenKind, same = parse.parse_token
+Parser, Mark = parse.parser
+expr = parse.parse_expr
+type, starts_type = parse.parse_type
+ValueShape, value_shape, decl_head_ahead, delim_step = parse.lookahead
+block = parse.parse_stmt
+qualified_name = parse.parse_pattern
+struct_members, record_body, params_list, type_params = parse.parse_member
+
+// -------------------------------------------------------------------
+// the file
+// -------------------------------------------------------------------
+
+// A whole module. `name` is the dotted module path, which is the
+// module's identity; the file it came from is `span.file`, which every
+// node in it already carries.
+//
+// The module's span is the whole file — trivia included, because there
+// is nothing outside it for the trivia to be beside — and its trailing
+// run is whatever is left at end of file. A formatter that drops that
+// fails its own round trip.
+module* = (p :: Parser, name: str) Res<Module, AllocError> {
+    start = Pos(line: 1, col: 1);
+    p.drain().try();
+    decls ::= p.alloc.Vec<Decl>();
+    running ::= !p.at_eof();
+    loop(() { running }, (h) {
+        before = p.at;
+        decls.add(p.declaration(true).try()).try();
+        (p.at == before).match({
+            true  => p.recover(),
+            false => p.nothing(),
+        }).try();
+        running = !p.at_eof() && !p.too_deep;
+    });
+    trailing = p.claim_rest();
+    Ok(Module(
+        name: name,
+        decls: decls,
+        span: Span(file: p.file, start: start, end: p.here_span().end),
+        leading: no_trivia(),
+        trailing: trailing,
+    ));
+}
+
+// Recovery at module level: to the next token that could begin a
+// declaration, which is a name outside any bracket. One mistake, one
+// diagnostic, and the next declaration still gets parsed — which is
+// the difference between a compiler that reports fifty errors and one
+// that reports the same error fifty times.
+recover* = (p :: Parser) Res<(), AllocError> {
+    p.bump().try();
+    depth ::= 0;
+    running ::= !p.at_eof();
+    loop(() { running }, (h) {
+        kind = p.peek().kind;
+        depth = kind.delim_step(depth);
+        (depth == 0 && kind.same(TokenKind.Ident)).match({
+            true  => { running = false; Ok(()) },
+            false => p.skip(),
+        }).try();
+        running = running && !p.at_eof();
+    });
+    Ok(());
+}
+
+// -------------------------------------------------------------------
+// one declaration
+// -------------------------------------------------------------------
+
+declaration* = (p :: Parser, module_level: bool) Res<Decl, AllocError> {
+    m = p.open();
+    p.impl_ahead().match({
+        true  => p.impl_decl(m),
+        false => p.named_decl(m, module_level),
+    });
+}
+
+// `Circle.impl(Rect, { .. })` — a call in statement position that
+// declares. It is its own form and not a call because module level has
+// no expression statements at all, so giving it a rule costs no
+// ambiguity and gains a node the formatter and the LSP can match on.
+//
+// The target is an `Ident` and never qualified: an impl lives in the
+// module that declares its target, so there are no orphan impls and
+// there is no qualified form to write.
+impl_decl = (p :: Parser, m: Mark) Res<Decl, AllocError> {
+    target = p.ident("expected the type an impl is for").try();
+    p.bump().try();
+    p.bump().try();
+    open = p.here_span();
+    p.bump().try();
+    bound = p.type().try();
+    p.expect(TokenKind.Comma, "expected `,` between an impl's bound and its body").try();
+    body_start = p.here();
+    members ::= p.alloc.Vec<Member>();
+    p.record_body(members).try();
+    body_span = p.span_from(body_start);
+    p.eat(TokenKind.Comma).try();
+    p.expect_close(TokenKind.RParen, "unclosed `(`: this impl is never closed", open).try();
+    p.add_decl(DeclKind.Impl(Impl(
+        target: target,
+        bound: bound,
+        members: members,
+        body_span: body_span,
+    )), m);
+}
+
+// `Circle` `.` `impl` `(` — recognised by shape, because `impl` is not
+// a reserved word and an ordinary binding may still be called one.
+impl_ahead* = (p :: Parser) bool {
+    p.at_kind(TokenKind.Ident)
+        && p.peek_n(1).kind.same(TokenKind.Dot)
+        && p.peek_n(2).text == "impl"
+        && p.peek_n(3).kind.same(TokenKind.LParen)
+}
+
+named_decl = (p :: Parser, m: Mark, module_level: bool) Res<Decl, AllocError> {
+    names ::= p.alloc.Vec<ImportName>();
+    tparams ::= p.alloc.Vec<TParam>();
+    p.decl_names(names, tparams).try();
+    written = p.eat(TokenKind.Colon).try().match({
+        true  => p.written_type(),
+        false => Ok(None),
+    }).try();
+    mutable = p.at_kind(TokenKind.ColonColonEq);
+    ok = p.eat(TokenKind.Eq).try() || p.eat(TokenKind.ColonColonEq).try();
+    ok.match({
+        true  => p.nothing(),
+        false => p.error("expected `=` or `::=` after a declaration's name"),
+    }).try();
+    p.decl_value(m, names, tparams, written, mutable, module_level);
+}
+
+written_type = (p :: Parser) Res<Res<TypeId>, AllocError> {
+    t = p.type().try();
+    Ok(Ok(t));
+}
+
+// `Res*, Ok*, None*` — the name list exists for imports, because
+// "re-export is an import whose bindings are starred" and there is no
+// `export` and no `from`. Every other declaration has exactly one.
+decl_names = (p :: Parser, names :: Vec<ImportName>, tparams :: Vec<TParam>) Res<(), AllocError> {
+    names.add(p.one_decl_name(tparams).try()).try();
+    loop(() { p.at_kind(TokenKind.Comma) }, (h) {
+        p.bump().try();
+        names.add(p.one_decl_name(tparams).try()).try();
+    });
+    Ok(());
+}
+
+one_decl_name = (p :: Parser, tparams :: Vec<TParam>) Res<ImportName, AllocError> {
+    m = p.open();
+    name = p.ident("expected a name to declare").try();
+    exported = p.eat(TokenKind.Star).try();
+    p.at_kind(TokenKind.Lt).match({
+        true  => p.type_params(tparams),
+        false => p.nothing(),
+    }).try();
+    end = p.prev_end;
+    Ok(ImportName(
+        name: name,
+        exported: exported,
+        span: p.span_from(m.start),
+        leading: m.leading,
+        trailing: p.claim_trailing(end),
+    ));
+}
+
+// The fork. Everything above this point is the same for all seven
+// forms; everything below is the shape of the value deciding which one
+// was written.
+decl_value = (p :: Parser, m: Mark, names: Vec<ImportName>, tparams: Vec<TParam>,
+              written: Res<TypeId>, mutable: bool, module_level: bool) Res<Decl, AllocError> {
+    head = p.head_name(names);
+    (names.len > 1).match({
+        true  => p.import_decl(m, names),
+        false => p.value_shape(module_level).match({
+            StructValue => p.struct_decl(m, head, tparams),
+            EnumValue   => p.enum_decl(m, head, tparams),
+            FnValue     => p.fn_decl(m, head, tparams, mutable),
+            PathValue   => p.import_decl(m, names),
+            AliasValue  => p.alias_decl(m, head, tparams),
+            ExprValue   => p.const_decl(m, head, written, mutable),
+        }),
+    });
+}
+
+head_name = (p: Parser, names: Vec<ImportName>) ImportName {
+    names.get(0).match({
+        Ok(n) => n,
+        None  => ImportName(
+            name: Ident(text: "", span: p.here_span()),
+            exported: false,
+            span: p.here_span(),
+            leading: no_trivia(),
+            trailing: no_trivia(),
+        ),
+    });
+}
+
+// -------------------------------------------------------------------
+// the seven forms
+// -------------------------------------------------------------------
+
+struct_decl = (p :: Parser, m: Mark, head: ImportName, tparams: Vec<TParam>) Res<Decl, AllocError> {
+    body_start = p.here();
+    members ::= p.alloc.Vec<Member>();
+    p.struct_members(members).try();
+    p.add_decl(DeclKind.Struct(Struct(
+        name: head.name,
+        exported: head.exported,
+        tparams: tparams,
+        members: members,
+        body_span: p.span_from(body_start),
+    )), m);
+}
+
+// `Shape = Circle(Circle) | Rect(Rect) | Unit`, `AllocError* = | OutOfMemory`.
+//
+// The bar is stored rather than derived from `variants.len == 1`,
+// because the formatter reprints what was written and a one-variant
+// enum written with the bar must come back with it.
+enum_decl = (p :: Parser, m: Mark, head: ImportName, tparams: Vec<TParam>) Res<Decl, AllocError> {
+    bar = p.at_kind(TokenKind.Bar).match({
+        true  => p.bar_span(),
+        false => Ok(None),
+    }).try();
+    variants ::= p.alloc.Vec<Variant>();
+    variants.add(p.one_variant().try()).try();
+    loop(() { p.at_kind(TokenKind.Bar) }, (h) {
+        p.bump().try();
+        variants.add(p.one_variant().try()).try();
+    });
+    p.add_decl(DeclKind.Enum(Enum(
+        name: head.name,
+        exported: head.exported,
+        tparams: tparams,
+        variants: variants,
+        leading_bar: bar,
+    )), m);
+}
+
+bar_span = (p :: Parser) Res<Res<Span>, AllocError> {
+    span = p.here_span();
+    p.bump().try();
+    Ok(Ok(span));
+}
+
+// A payload is a TYPE — `Circle(Circle)`, `Failed(str)` — and never
+// `name: value`, which is what keeps `Package(url: "..")` a call and
+// not a variant. One payload, never a list.
+one_variant = (p :: Parser) Res<Variant, AllocError> {
+    m = p.open();
+    name = p.ident("expected a variant name").try();
+    payload = p.at_kind(TokenKind.LParen).match({
+        true  => p.variant_payload(),
+        false => Ok(None),
+    }).try();
+    end = p.prev_end;
+    Ok(Variant(
+        name: name,
+        payload: payload,
+        span: p.span_from(m.start),
+        leading: m.leading,
+        trailing: p.claim_trailing(end),
+    ));
+}
+
+variant_payload = (p :: Parser) Res<Res<TypeId>, AllocError> {
+    open = p.here_span();
+    p.bump().try();
+    t = p.type().try();
+    p.expect_close(TokenKind.RParen, "unclosed `(`: this variant's payload is never closed", open).try();
+    Ok(Ok(t));
+}
+
+// DESIGN.md's method table, verbatim: `form` records whether `=` or
+// `::=` was written and `body` whether a `{ .. }` followed, and the
+// two are not redundant.
+//
+//     = sig          Required   impl must provide it
+//     = sig {..}     Sealed     provided, cannot be overridden
+//     ::= sig {..}   Default    provided, impl may rebind it
+//     ::= sig        Hook       optional, impl may provide it
+fn_decl = (p :: Parser, m: Mark, head: ImportName, tparams: Vec<TParam>, mutable: bool) Res<Decl, AllocError> {
+    own ::= p.alloc.Vec<TParam>();
+    p.at_kind(TokenKind.Lt).match({
+        true  => p.type_params(own),
+        false => p.nothing(),
+    }).try();
+    ps ::= p.alloc.Vec<Param>();
+    span = p.params_list(ps).try();
+    ret = p.starts_type().match({
+        true  => p.fn_ret(),
+        false => Ok(None),
+    }).try();
+    body = p.at_kind(TokenKind.LBrace).match({
+        true  => p.fn_body(),
+        false => Ok(None),
+    }).try();
+    p.add_decl(DeclKind.Function(Function(
+        name: head.name,
+        exported: head.exported,
+        form: form_of(mutable, p.has_body(body)),
+        tparams: p.merge_tparams(tparams, own),
+        params: ps,
+        params_span: span,
+        ret: ret,
+        body: body,
+    )), m);
+}
+
+fn_ret = (p :: Parser) Res<Res<TypeId>, AllocError> {
+    t = p.type().try();
+    Ok(Ok(t));
+}
+
+fn_body = (p :: Parser) Res<Res<BlockId>, AllocError> {
+    b = p.block().try();
+    Ok(Ok(b));
+}
+
+has_body* = (p: Parser, body: Res<BlockId>) bool {
+    body.match({
+        Ok(_) => true,
+        None  => false,
+    });
+}
+
+form_of* = (rebindable: bool, body: bool) Form {
+    rebindable.match({
+        true  => body.match({
+            true  => Form.Default,
+            false => Form.Hook,
+        }),
+        false => body.match({
+            true  => Form.Sealed,
+            false => Form.Required,
+        }),
+    });
+}
+
+// Type parameters may be written on either side of the `=` —
+// `f*<T> = (x: T) T` and `f* = <T>(x: T) T` are the same declaration,
+// and DESIGN.md writes both. Whichever list is non-empty is the one.
+merge_tparams* = (p: Parser, head: Vec<TParam>, own: Vec<TParam>) Vec<TParam> {
+    (head.len == 0).match({
+        true  => own,
+        false => head,
+    });
+}
+
+// "An alias is the type, not a name that forwards to it." Sema
+// resolves it away, so nothing downstream ever sees a second type.
+alias_decl = (p :: Parser, m: Mark, head: ImportName, tparams: Vec<TParam>) Res<Decl, AllocError> {
+    target = p.type().try();
+    p.add_decl(DeclKind.Alias(Alias(
+        name: head.name,
+        exported: head.exported,
+        tparams: tparams,
+        target: target,
+    )), m);
+}
+
+import_decl = (p :: Parser, m: Mark, names: Vec<ImportName>) Res<Decl, AllocError> {
+    module_name = p.qualified_name().try();
+    p.add_decl(DeclKind.Import(Import(names: names, module: module_name)), m);
+}
+
+// A module-level value binding, and — through `parse_member.zen` — a
+// struct-body constant, which is the same node meaning one value per
+// type rather than storage per value.
+const_decl = (p :: Parser, m: Mark, head: ImportName, written: Res<TypeId>, mutable: bool) Res<Decl, AllocError> {
+    value = p.expr().try();
+    p.add_decl(DeclKind.Const(Const(
+        name: head.name,
+        exported: head.exported,
+        mutable: mutable,
+        type: written,
+        value: value,
+    )), m);
+}
+
+// -------------------------------------------------------------------
+// nodes
+// -------------------------------------------------------------------
+
+add_decl* = (p :: Parser, kind: DeclKind, m: Mark) Res<Decl, AllocError> {
+    end = p.prev_end;
+    Ok(Decl(
+        kind: kind,
+        span: p.span_from(m.start),
+        leading: m.leading,
+        trailing: p.claim_trailing(end),
+    ));
+}
