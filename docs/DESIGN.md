@@ -247,6 +247,8 @@ This is where `defer` lives, and it is why `defer` needs no keyword and no ambie
 
 **`@scope` is non-escaping.** It may be passed *inward*, so a helper can register cleanup on its caller's block, but it can never be stored in a struct, returned, or captured by an escaping closure. Same escaping/non-escaping distinction as above, now doing a third job.
 
+**A closure registered on a scope keeps its captures in that scope's own storage**, and this is what non-escaping buys. A deferred closure outlives the frame that wrote it — `register(@scope, env)` returns long before its cleanup runs — so its captures cannot live in the caller's frame, and a general escaping closure would need a heap record, which law 1 forbids without an `Alloc`. But the block it is registered on outlives it by construction, so the block's own defer stack is exactly the right storage: correctly sized, freed at block exit, no allocator. `defer` therefore needs no escaping-closure machinery at all — it needs the one guarantee `@scope` already makes. That is why the restriction is a feature and not a limitation.
+
 ---
 
 # Errors
