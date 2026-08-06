@@ -593,6 +593,86 @@ def _tparam_names(node):
     return tuple(str(f(tp, "name", "T")) for tp in (f(node, "tparams", ()) or ()))
 
 
+def _is_variadic(param):
+    """`args: ...` — the zero-or-more tail (ast.py spells it `Named("...")`)."""
+    ty = f(param, "ty")
+    return ty is not None and f(ty, "name", None) == "..."
+
+
+def _bare_name(name):
+    """A type's name without its arguments: `Range<T>` is an impl of `Range`."""
+    return str(name or "").split("<", 1)[0].strip()
+
+
+def _type_args(name):
+    """The arguments of a type written as text: `Range<T>` -> ("T",)."""
+    text = str(name or "")
+    if "<" not in text or not text.rstrip().endswith(">"):
+        return ()
+    inner = text[text.index("<") + 1:text.rstrip().rindex(">")]
+    return tuple(part.strip() for part in inner.split(",") if part.strip())
+
+
+def _block_value(body):
+    """What a block evaluates to, for a peek.  A `Block` lowered with no
+    expected type is a statement and answers `()`, so asking it what a body
+    RETURNS has to reach the value expression itself."""
+    if body is None or kind(body) != "Block":
+        return body
+    value = f(body, "value")
+    if value is not None:
+        return value
+    stmts = list(f(body, "stmts", ()) or ())
+    if stmts and kind(stmts[-1]) == "ExprStmt":
+        return f(stmts[-1], "expr")
+    return body
+
+
+def _bound_apps(tp):
+    """A type parameter's bounds, as (name, argument names) -- `<S: Shape<T>>`
+    is where a `T` that appears nowhere else is named."""
+    out = []
+
+    def walk(t):
+        if t is None:
+            return
+        if kind(t) == "Union":
+            for m in f(t, "members", ()) or ():
+                walk(m)
+            return
+        nm = f(t, "name", None)
+        if isinstance(nm, str):
+            out.append((nm, tuple(f(a, "name", None)
+                                  for a in (f(t, "args", ()) or ()))))
+
+    walk(f(tp, "bound"))
+    return tuple(out)
+
+
+def _bound_names(node):
+    """The names a declaration's type parameters are bounded by.
+
+    `<K: Eq + Hash>` arrives as a Union (ast.py's stopgap for an
+    intersection), so a union bound is every bound and not a choice.
+    """
+    out = []
+
+    def walk(t):
+        if t is None:
+            return
+        if kind(t) == "Union":
+            for m in f(t, "members", ()) or ():
+                walk(m)
+            return
+        nm = f(t, "name", None)
+        if isinstance(nm, str):
+            out.append(nm)
+
+    for tp in f(node, "tparams", ()) or ():
+        walk(f(tp, "bound"))
+    return tuple(out)
+
+
 def _is_fn_field(node):
     """A struct member whose value is a function: DESIGN.md's method form.
 
@@ -638,6 +718,7 @@ class Emitter:
         self.decls = {}  # (module parts, name) -> [Decl]
         self.by_key = {}  # (module, owner, name) -> [Decl]
         self.by_name = {}  # name -> [Decl]  (module-agnostic fallback)
+        self.impls = []    # (target, trait, trait args as written, target tparams)
         self.worklist = []
         self.done = set()
         self.instances = 0
@@ -655,9 +736,18 @@ class Emitter:
         self.by_name.setdefault(decl.name, []).append(decl)
 
     def _collect(self):
+        # Impls last: an impl entry is generic in the TARGET's parameters
+        # (`Vec.impl(Range<T>, ..)` writes `Res<T>` for Vec's own T), so the
+        # target has to be on the table before the entry is named.
+        impls = []
         for base, mod in self.mods:
             for node in f(mod, "decls", ()) or ():
-                self._collect_decl(base, node)
+                if kind(node) == "Impl":
+                    impls.append((base, node))
+                else:
+                    self._collect_decl(base, node)
+        for base, node in impls:
+            self._collect_decl(base, node)
 
     def _collect_decl(self, base, node):
         k = kind(node)
@@ -703,8 +793,17 @@ class Emitter:
             # `A.impl(B, {..})` supplies a value for every field B declares:
             # a function-typed field takes a function, an f64 field takes an
             # f64 expression, which is read back as a computed field.
-            target = str(f(node, "target", "") or "")
-            trait = str(f(node, "trait", "") or "")
+            # `Vec.impl(Range<T>, ..)` names the trait with its arguments
+            # applied, and the arguments are not part of its NAME: the impl is
+            # of Range, at T.  (cst.py hands both sides over as source text.)
+            target = _bare_name(f(node, "target", ""))
+            trait = _bare_name(f(node, "trait", ""))
+            tdecl = self.type_decl(target, base)
+            owner_tps = tdecl.tparams if tdecl is not None else ()
+            # `Vec.impl(Range<T>, ..)` says WHICH of Vec's own arguments the
+            # bound's argument is, and nothing else in the tree does.
+            self.impls.append((target, trait, _type_args(f(node, "trait", "")),
+                               owner_tps))
             for entry in f(node, "entries", ()) or ():
                 ename = str(f(entry, "name", "") or "")
                 if not ename:
@@ -712,7 +811,8 @@ class Emitter:
                 dk = "fn" if kind(entry) in ("Function", "Lambda") else "value"
                 self._add_decl(
                     Decl(base + (target, trait, ename), entry, dk, ename,
-                         _tparam_names(entry), owner=target, module=dotted)
+                         _tparam_names(entry), owner=target, module=dotted,
+                         otparams=owner_tps)
                 )
         elif k in ("Let", "Const") and isinstance(name, str):
             self._add_decl(Decl(base + (str(name),), node, "value", str(name),
@@ -1040,20 +1140,32 @@ class Emitter:
     # with storage is a concrete type, even when an impl supplies fields for
     # it, and it is never a fat value.
 
-    def trait_decl(self, ty):
+    def struct_decl(self, ty):
+        """The struct a named type refers to, whatever its shape.
+
+        Any struct may be used as a bound -- DESIGN.md's own example impls
+        `Rect`, which is nothing but storage.  So "can this name a bound" and
+        "is this a fat value" are two questions, and only the second one is
+        about shape.
+        """
         if ty is None or ty[0] != "named":
             return None
         for d in self.by_name.get(ty[1][-1], []):
             if d.dkind == "type" and d.parts == ty[1]:
-                node = d.node
-                if kind(node) != "Struct":
-                    return None
-                members = [m for m in (f(node, "fields", ()) or ()) if _is_fn_field(m)]
-                storage = [m for m in (f(node, "fields", ()) or ()) if not _is_fn_field(m)]
-                if members and not storage:
-                    return d
-                return None
+                return d if kind(d.node) == "Struct" else None
         return None
+
+    def trait_decl(self, ty):
+        d = self.struct_decl(ty)
+        if d is None:
+            return None
+        node = d.node
+        members = [m for m in (f(node, "fields", ()) or ()) if _is_fn_field(m)]
+        storage = [m for m in (f(node, "fields", ()) or ()) if not _is_fn_field(m)]
+        # only a struct that declares behaviour and no storage can BE a value:
+        # a fat value is a receiver plus one function pointer per method, and
+        # a storage field has no function pointer to carry.
+        return d if members and not storage else None
 
     def is_trait(self, ty):
         return self.trait_decl(ty) is not None
@@ -1664,6 +1776,7 @@ class FnCtx:
         self.depth = 0
         self.loops = []      # (break label, continue label, result temp, type)
         self.inlining = 0    # inline depth, so a recursive body cannot spin
+        self._bounds = None  # the bounds in scope, computed once on demand
 
     # -- output ------------------------------------------------------------
 
@@ -2010,8 +2123,19 @@ class FnCtx:
         self.e.error(node, "no member `%s` on this value" % name)
         return ("0", UNKNOWN)
 
-    def type_member(self, tdecl, name, node):
+    def type_member(self, tdecl, name, node, depth=0):
         node_t = tdecl.node
+        if kind(node_t) == "Alias" and depth < 8:
+            # "Alias.Circle exists, because Alias IS Shape": an alias is the
+            # type it names, and reading a variant through it is not a
+            # different question.
+            target = f(node_t, "target")
+            tname = f(target, "name", None) if target is not None else None
+            if isinstance(tname, str):
+                inner = self.e.type_decl(tname, tdecl.scope_parts)
+                if inner is not None and inner is not tdecl:
+                    return self.type_member(inner, name, node, depth + 1)
+            return None
         if kind(node_t) == "Enum":
             for v in f(node_t, "variants", ()) or ():
                 if str(f(v, "name", "")) == name and f(v, "payload") is None:
@@ -2047,6 +2171,16 @@ class FnCtx:
         for base, _mod in self.e.mods:
             if base[-1] == name or ".".join(base) == name:
                 return base
+        # `a = alpha` is an alias whose target NAMES a module: one hop, and
+        # only when nothing else answered, so a type never loses to a module
+        for d in self.e.lookup(name, self.parts, "type"):
+            target = f(d.node, "target")
+            tname = f(target, "name", None) if target is not None else None
+            if not isinstance(tname, str) or tname == name:
+                continue
+            for base, _mod in self.e.mods:
+                if base[-1] == tname or ".".join(base) == tname:
+                    return base
         for base, _mod in self.e.mods:
             if name in base:
                 return base
@@ -2083,9 +2217,33 @@ class FnCtx:
         got = self.owned_decls(ty, name, "fn")
         return self.e.request_fn(got[0], ()) if got else None
 
+    def bounds_in_view(self):
+        """The bounds this body was written under.
+
+        "When two impls declare the same name, the bound in scope selects
+        which is in view; with no bound to disambiguate it is an error --
+        never file order."  Monomorphisation has already replaced `T` with the
+        concrete type by the time gen_c runs, so the bound has to do the
+        selecting from here rather than through the type.
+        """
+        if self._bounds is None:
+            names = set(_bound_names(self.decl.node))
+            if self.decl.owner:
+                # a member's own body reads its own struct's fields: `Framed`
+                # is the bound in scope inside `Framed.border`.
+                names.add(self.decl.owner)
+            self._bounds = names
+        return self._bounds
+
     def computed_of(self, ty, name):
         """An impl-supplied field: computed, read-only, non-addressable."""
         got = self.owned_decls(ty, name, "value")
+        if len(got) > 1:
+            view = self.bounds_in_view()
+            # an impl entry's parts end `target/trait/name`
+            picked = [d for d in got if len(d.parts) >= 3 and d.parts[-2] in view]
+            if len(picked) == 1:
+                return picked[0]
         return got[0] if got else None
 
     def read_computed(self, ty, code, decl):
@@ -2187,10 +2345,26 @@ class FnCtx:
             self.line("%s = %s;" % (tmp, rcode))
             self.close()
             return (tmp, prim("bool"))
-        lcode, lty = self.expr(lhs, want if op in ARITH or op in WRAPPING else None)
+        hint = want if op in ARITH or op in WRAPPING else None
+        if not is_int(hint) and kind(lhs) == "Literal" and f(lhs, "kind") == "int":
+            # "an unannotated literal has no width yet" -- so the other side
+            # decides, and `0 - (v % 10)` on an i64 stays an i64 instead of
+            # being narrowed to the literal's default and trapping.
+            other = self.peek(rhs)[1]
+            if is_int(other):
+                hint = other
+        lcode, lty = self.expr(lhs, hint)
         rcode, rty = self.expr(rhs, lty if is_int(lty) else None)
         ty = lty if lty not in (None, UNKNOWN) else rty
         if op in COMPARE:
+            if op in ("==", "!=") and ty is not None and ty[0] == "named":
+                # `Eq` is an ordinary struct and `str.impl(Eq, ..)` is where
+                # str's equality is written, so `==` on a type that has one is
+                # that call -- a C `==` on a struct is not even legal C.
+                got = self.eq_call((lcode, ty), (rcode, rty or ty), node)
+                if got is not None:
+                    return ("(!%s)" % paren(got), prim("bool")) if op == "!=" \
+                        else (got, prim("bool"))
             return ("(%s %s %s)" % (paren(lcode), op, paren(rcode)), prim("bool"))
         if op in WRAPPING:
             base = {"+%": "wadd", "-%": "wsub", "*%": "wmul"}[op]
@@ -2277,6 +2451,9 @@ class FnCtx:
         tdecl = self.e.type_decl(name, self.parts)
         if tdecl is None:
             return None
+        return self.construct_type(tdecl, node, args, targs, want)
+
+    def construct_type(self, tdecl, node, args, targs, want):
         if kind(tdecl.node) == "Enum":
             return None  # a bare enum name is not a constructor
         targ_tys = tuple(self.e.resolve_type(t, self.subst, self.parts, self.self_ty) for t in targs)
@@ -2353,22 +2530,27 @@ class FnCtx:
             del self.e.diags[saved[3] :]
         return (code, ty)
 
-    def unify(self, tynode, actual, found):
+    def unify(self, tynode, actual, found, tparams=None):
         if tynode is None or actual is None:
             return
         if kind(tynode) == "Named":
             name = str(f(tynode, "name", ""))
             args = f(tynode, "args", ()) or ()
-            if not args and name not in PRIMS and self.is_tparam(name):
+            if not args and name not in PRIMS and self.is_tparam(name, tparams):
                 found.setdefault(name, actual)
                 return
             if actual[0] == "named" and args:
                 for sub, act in zip(args, actual[2]):
-                    self.unify(sub, act, found)
+                    self.unify(sub, act, found, tparams)
             if name in ("Ptr", "RawPtr") and actual[0] == "ptr" and args:
-                self.unify(args[0], actual[1], found)
+                self.unify(args[0], actual[1], found, tparams)
 
-    def is_tparam(self, name):
+    def is_tparam(self, name, tparams=None):
+        # The DECLARATION being instantiated says which names are its type
+        # parameters.  `signed = <unsigned>(typedef: unsigned) unsigned` is
+        # generic in `unsigned`, and a shape heuristic cannot know that.
+        if tparams is not None:
+            return name in tparams
         return name in self.subst or name in getattr(self, "_tparams", ()) or (
             len(name) <= 2 and name[0].isupper()
         )
@@ -2400,6 +2582,16 @@ class FnCtx:
                     argnodes = self.arg_nodes(args)
                     decl = self.pick_overload(cands, argnodes)
                     return self.emit_call(decl, node, argnodes, targs, want)
+                # `a.beta_Gamma(tag: 3)` -- a TYPE reached through a module
+                # binding.  Two modules may declare one name, so the module is
+                # part of the question and not decoration.
+                for d in self.e.decls.get((base_parts, name), []):
+                    if d.dkind != "type":
+                        continue
+                    if kind(d.node) == "Enum":
+                        return self.construct_variant(d, name, node, args,
+                                                      targs, want)
+                    return self.construct_type(d, node, args, targs, want)
         if kind(base) == "Path":
             bound = self.find(str(f(base, "name", "")))
             if bound is not None and bound[1] is not None and bound[1][0] == "loop":
@@ -2422,19 +2614,23 @@ class FnCtx:
             cands = [d for d in self.owned_decls(rty, name, "fn")
                      if self.e.fn_node(d.node) is not None]
             with_body = [d for d in cands if f(self.e.fn_node(d.node), "body") is not None]
-            if with_body:
-                decl = self.pick_overload(with_body, argnodes, receiver=(rcode, rty))
-                return self.emit_call(decl, node, argnodes, targs, want,
-                                      receiver=(rcode, rty))
             # CASE 1, the static one: the receiver's type is known, so a
-            # method the type does not define itself is the trait's own,
+            # method the type does not define itself is the bound's own,
             # compiled for THIS receiver -- `self.eq(..)` inside it resolves
             # to the impl, and no record and no indirection take part.
-            inherited = self.trait_method(rty, name, argnodes)
-            if inherited is not None:
-                decl, trait = inherited
+            #
+            # Both sets are ONE overload set: `Display` supplies a sealed
+            # `toString(self, a: Alloc)` beside the impl's
+            # `toString(self, sb :: String)`, and resolution picks between
+            # them on the declared parameter type like anywhere else.
+            inherited = self.trait_methods(rty, name)
+            pool = list(with_body) + [d for d in inherited if d not in with_body]
+            if pool:
+                decl = self.pick_overload(pool, argnodes, receiver=(rcode, rty))
+                own = any(d is decl for d in inherited)
                 return self.emit_call(decl, node, argnodes, targs, want,
-                                      receiver=(rcode, rty), self_ty=rty)
+                                      receiver=(rcode, rty),
+                                      self_ty=rty if own else None)
             if cands:
                 decl = self.pick_overload(cands, argnodes, receiver=(rcode, rty))
                 return self.emit_call(decl, node, argnodes, targs, want,
@@ -2447,27 +2643,46 @@ class FnCtx:
         self.e.error(node, "no method `%s` on this value" % name)
         return ("0", UNKNOWN)
 
-    def trait_method(self, rty, name, argnodes):
-        """A method the receiver's type satisfies but does not declare.
+    def eq_call(self, lhs, rhs, node):
+        """`a == b` on a type that impls `Eq`, as the call it is.
+
+        Statically resolved: the receiver's type is known, so this is a direct
+        call to the function the impl supplies and no record takes part.
+        """
+        ty = lhs[1]
+        cands = [d for d in self.owned_decls(ty, "eq", "fn")
+                 if self.e.fn_node(d.node) is not None
+                 and f(self.e.fn_node(d.node), "body") is not None]
+        if not cands:
+            return None
+        code, _rty = self.emit_call(cands[0], node, [rhs], (), prim("bool"),
+                                    receiver=lhs)
+        return code
+
+    def trait_methods(self, rty, name):
+        """Methods the receiver's type satisfies but does not declare.
 
         The impl supplies the required members; everything sealed or default
-        on the trait comes along, compiled once per receiver type.
+        on the bound comes along, compiled once per receiver type.  All of
+        them, because a bound may declare two of one name.
         """
-        best = None
+        out = []
         for d in sorted(self.e.by_name.get(name, []), key=lambda d: d.parts):
-            if d.dkind != "fn" or not d.owner:
+            if d.dkind != "fn" or not d.owner or d.owner == rty[1][-1]:
                 continue
-            trait = self.e.trait_decl(("named", d.parts[:-1], ()))
-            if trait is None:
+            bound = ("named", d.parts[:-1], ())
+            # the member's owner has to be the bound ITSELF -- an impl entry's
+            # parts end `target/trait/name`, and that is the impl's answer, not
+            # the bound's own declaration.
+            if self.e.struct_decl(bound) is None or bound[1][-1] != d.owner:
                 continue
             fnode = self.e.fn_node(d.node)
             if fnode is None or f(fnode, "body") is None:
                 continue
-            if not self.satisfies(rty, ("named", d.parts[:-1], ())):
+            if not self.satisfies(rty, bound):
                 continue
-            if best is None or len(self.e.params_of(fnode)) == len(argnodes) + 1:
-                best = (d, ("named", d.parts[:-1], ()))
-        return best
+            out.append(d)
+        return out
 
     def satisfies(self, ty, trait):
         """Does this type have an impl for that trait?  A concrete type that
@@ -2481,9 +2696,18 @@ class FnCtx:
             for x in d:
                 if x.owner == target and len(x.parts) >= 3 and x.parts[-2] == traitname:
                     return True
-        for _slot, name, member, _p, _r in self.e.trait_slots(trait):
-            if f(self.e.fn_node(member), "body") is not None:
+        decl = self.e.struct_decl(trait)
+        if decl is None:
+            return False
+        # a type that already declares everything the bound asks for
+        # satisfies it: storage counts, so `String` does not accidentally
+        # satisfy `Vec` by having none of `capacity`.
+        for m in f(decl.node, "fields", ()) or ():
+            name = str(f(m, "name", "") or "")
+            if not name:
                 continue
+            if _is_fn_field(m) and f(self.e.fn_node(m), "body") is not None:
+                continue        # sealed or default: it comes along free
             if not [x for x in self.e.by_name.get(name, []) if x.owner == target]:
                 return False
         return True
@@ -2589,15 +2813,24 @@ class FnCtx:
             return cands[0]
         want = len(argnodes) + (1 if receiver is not None else 0)
         exact = []
+        variadic = []
         loose = []
         for d in cands:
             fnode = self.e.fn_node(d.node)
-            n = len(self.e.params_of(fnode)) if fnode else -1
+            params = self.e.params_of(fnode) if fnode else ()
+            n = len(params) if fnode else -1
+            # `args: ...` is zero-or-more, so a variadic declares a MINIMUM
+            # arity -- and a fixed arity that fits is the more specific
+            # candidate, exactly as a concrete parameter beats a generic one.
+            if params and _is_variadic(params[-1]):
+                if want >= n - 1:
+                    variadic.append(d)
+                continue
             if n == want:
                 exact.append(d)
             elif n in (want + 1, want - 1):
                 loose.append(d)
-        pool = exact or loose or cands
+        pool = exact or variadic or loose or cands
         shaped = []
         for d in pool:
             params = self.e.params_of(self.e.fn_node(d.node))
@@ -2613,7 +2846,63 @@ class FnCtx:
                     ok = False
             if ok:
                 shaped.append(d)
-        return (shaped or pool)[0]
+        pool = shaped or pool
+        return self.by_param_types(pool, argnodes, receiver) if len(pool) > 1 else pool[0]
+
+    def by_param_types(self, pool, argnodes, receiver):
+        """"Resolution is on declared parameter types and arity."
+
+        Two candidates that differ only in a parameter's type -- `digit(d:
+        u64)` beside `digit(d: i64)` -- are the whole reason this is not an
+        arity question.  Resolving them by file order picks the wrong one
+        half the time, and on `0 - (v % 10)` that is a spurious trap.
+        """
+        # the receiver is the first parameter and nothing else -- so it is the
+        # first argument here too, and `Square(..).label()` picks square's
+        # `label` rather than the first one declared
+        atys = [receiver[1]] if receiver is not None else []
+        for value in argnodes:
+            if isinstance(value, tuple):
+                atys.append(value[1])
+            elif kind(value) == "Lambda" or (
+                    kind(value) == "Literal"
+                    and f(value, "kind") in ("int", "float")):
+                # "an unannotated literal has no width yet", so a NUMERIC one
+                # says nothing about which candidate was meant.  A string or a
+                # char does: its type is not open.
+                atys.append(None)
+            else:
+                atys.append(self.peek(value)[1])
+        best, score = None, None
+        for d in pool:
+            params = self.e.params_of(self.e.fn_node(d.node))
+            hits, bad = 0, 0
+            for idx, aty in enumerate(atys):
+                if idx >= len(params) or aty in (None, UNKNOWN):
+                    continue
+                pnode = f(params[idx], "ty")
+                pname = f(pnode, "name", None) if pnode is not None else None
+                if isinstance(pname, str) and pname in d.tparams:
+                    continue     # a generic parameter fits anything
+                mark = len(self.e.diags)
+                pty = self.e.resolve_type(pnode, {}, d.scope_parts)
+                del self.e.diags[mark:]
+                if pty in (None, UNKNOWN):
+                    continue
+                if pty == aty:
+                    hits += 1
+                elif pty[0] == "named" and aty[0] == "named":
+                    # a concrete type is acceptable where a bound it impls is
+                    # wanted, and nowhere else
+                    if self.satisfies(aty, pty):
+                        hits += 1
+                    else:
+                        bad += 1
+                elif pty[0] != aty[0] or pty[0] == "prim":
+                    bad += 1     # a different machine type: not this one
+            if score is None or (-bad, hits) > score:
+                best, score = d, (-bad, hits)
+        return best if best is not None else pool[0]
 
     def build_variant(self, decls, payload_node, want, node):
         """`Ok(v)` / `None` / `Err(e)` written without their enum.
@@ -2710,7 +2999,8 @@ class FnCtx:
         if f(fnode, "body") is None and is_loop_shape(self.e, fnode):
             return self.lower_loop(decl, fnode, node, argnodes, want, receiver)
         if f(fnode, "body") is None:
-            got = self.lower_intrinsic(decl, fnode, node, argnodes, want, receiver)
+            got = self.lower_intrinsic(decl, fnode, node, argnodes, want, receiver,
+                                       targs)
             if got is not None:
                 return got
         if f(fnode, "body") is None and decl.owner:
@@ -2741,21 +3031,26 @@ class FnCtx:
             else:
                 owner_tys = tuple(UNKNOWN for _ in decl.otparams)
         values = list(argnodes)
-        codes = []
-        if receiver is not None:
-            rwant = None
-            if params:
-                rwant = self.e.resolve_type(f(params[0], "ty"), {}, decl.scope_parts,
-                                            self_ty or receiver[1])
-            if params and f(params[0], "mutable", False):
-                codes.append(self.by_ref(receiver[0], receiver[1]))
-            else:
-                codes.append(self.coerce(receiver[0], receiver[1], rwant))
+        # the instantiation FIRST: the receiver's own parameter type is
+        # written in the declaration's type parameters (`unbox = <T>(b:
+        # Box<T>)`), so resolving it before they are known reports an
+        # `unknown type T` about a declaration that is perfectly well formed.
         own = decl.tparams[len(decl.otparams):]
         if own and len(targ_tys) != len(own):
             targ_tys = self.infer_fn_targs(decl, fnode, values, receiver, owner_tys)
         targ_tys = owner_tys + tuple(targ_tys)
         subst = dict(zip(decl.tparams, targ_tys))
+        codes = []
+        if receiver is not None:
+            rwant = None
+            if params:
+                rwant = self.e.resolve_type(f(params[0], "ty"), subst,
+                                            decl.scope_parts,
+                                            self_ty or receiver[1])
+            if params and f(params[0], "mutable", False):
+                codes.append(self.by_ref(receiver[0], receiver[1]))
+            else:
+                codes.append(self.coerce(receiver[0], receiver[1], rwant))
         for i, value in enumerate(values):
             idx = i + (1 if receiver is not None else 0)
             pty = (
@@ -2789,7 +3084,16 @@ class FnCtx:
         return "%s%s%d" % (GEN, stem, self.tmp)
 
     def bind_closure(self, name, lam, pty):
-        self.scopes[-1][name] = (name, ("lambda", lam, pty))
+        """A closure's free names mean what they meant WHERE IT WAS WRITTEN.
+
+        Inlining puts the body inside the callee's frame, and `find`'s own
+        `range.loop((h, value) { .. })` would otherwise shadow a caller's `h`
+        -- silently, with a different value rather than with an error.  So the
+        marker carries the depth of the scope stack it was written at, and
+        `inline_lambda` restores it.
+        """
+        self.scopes[-1][name] = (name, ("lambda", lam, pty, len(self.scopes),
+                                        (self.subst, self.parts, self.self_ty)))
 
     def inline_call(self, decl, fnode, node, argnodes, targs, want, receiver=None):
         """Inline a function that was handed a closure."""
@@ -2831,8 +3135,12 @@ class FnCtx:
                 self.bind_closure(pname, value, pty)
                 continue
             code, aty = self.expr(value, pty)
-            cn = self.declare(pname, pty if pty != UNKNOWN else aty)
-            self.line("%s = %s;" % (self.e.declarator(pty if pty != UNKNOWN else aty, cn), code))
+            ty = pty if pty != UNKNOWN else aty
+            # the argument crosses a boundary here exactly as it does at a
+            # real call, so an Arena reaching an `alloc: Alloc` builds the
+            # record rather than being copied into a differently shaped slot
+            self.line("%s = %s;" % (self.e.declarator(ty, self.declare(pname, ty)),
+                                    self.coerce(code, aty, pty)))
         saved_subst, saved_parts, saved_self = self.subst, self.parts, self.self_ty
         self.subst, self.parts, self.self_ty = subst, base, self_ty
         self.inlining += 1
@@ -2858,27 +3166,44 @@ class FnCtx:
         if ret in (None, UNKNOWN):
             ret = want
         result = self.new_tmp(ret) if ret not in (None, UNIT, UNKNOWN) else None
-        self.push()
+        # the arguments are written where the CALL is, so they are lowered
+        # before the frame moves
+        lowered = []
         for i, p in enumerate(params):
-            pname = str(f(p, "name", "_"))
             declared = self.e.resolve_type(f(p, "ty"), self.subst, self.parts, self.self_ty) \
                 if f(p, "ty") is not None else None
             expect = declared if declared not in (None, UNKNOWN) else (
                 want_params[i] if i < len(want_params) else None)
-            if i < len(argnodes):
-                value = argnodes[i]
-                if isinstance(value, tuple):     # an already-lowered value
-                    code, aty = value
-                else:
-                    code, aty = self.expr(value, expect)
-                ty = expect if expect not in (None, UNKNOWN) else aty
-                if is_handle(ty) or (aty is not None and aty[0] == "loop"):
-                    self.scopes[-1][pname] = (code, aty)
-                    continue
-                cn = self.declare(pname, ty)
-                self.line("%s = %s;" % (self.e.declarator(ty, cn), code))
+            if i >= len(argnodes):
+                self.e.error(node, "closure parameter `%s` has no argument"
+                             % str(f(p, "name", "_")))
+                lowered.append(None)
+                continue
+            value = argnodes[i]
+            if isinstance(value, tuple):     # an already-lowered value
+                code, aty = value
             else:
-                self.e.error(node, "closure parameter `%s` has no argument" % pname)
+                code, aty = self.expr(value, expect)
+            lowered.append((code, aty, expect))
+        # back to the frame the closure was written in, so its free names
+        # cannot be captured by the callee it was inlined into
+        home = None
+        if len(marker) > 4:
+            home = (self.scopes, self.subst, self.parts, self.self_ty)
+            self.scopes = self.scopes[:marker[3]]
+            self.subst, self.parts, self.self_ty = marker[4]
+        self.push()
+        for p, got in zip(params, lowered):
+            if got is None:
+                continue
+            pname = str(f(p, "name", "_"))
+            code, aty, expect = got
+            ty = expect if expect not in (None, UNKNOWN) else aty
+            if is_handle(ty) or (aty is not None and aty[0] == "loop"):
+                self.scopes[-1][pname] = (code, aty)
+                continue
+            cn = self.declare(pname, ty)
+            self.line("%s = %s;" % (self.e.declarator(ty, cn), code))
         self.inlining += 1
         self.open()
         value = self.block_value(f(lam, "body"), ret)
@@ -2887,6 +3212,8 @@ class FnCtx:
         self.close()
         self.inlining -= 1
         self.pop()
+        if home is not None:
+            self.scopes, self.subst, self.parts, self.self_ty = home
         return (result if result is not None else "0", ret or UNIT)
 
     # ---- the loop intrinsic --------------------------------------------
@@ -2914,7 +3241,6 @@ class FnCtx:
         wants_acc = "acc" in names[1:]
 
         ret = want if want not in (None, UNKNOWN) else None
-        result = self.new_tmp(ret) if ret not in (None, UNIT, UNKNOWN) else None
         brk, cnt = self.label("brk"), self.label("cnt")
 
         lead = args[:-1]
@@ -2930,6 +3256,18 @@ class FnCtx:
             if len(lead) > 1:
                 init_val = self.expr(lead[1], None)
 
+        if ret is None:
+            # "the loop evaluates to the final acc", and `h.break(value)`
+            # makes it an expression too -- so a loop whose value nothing
+            # asked for still HAS one, and the `.match` on it needs its type.
+            el = init_val[1] if (wants_acc and init_val) else \
+                self.range_elem(range_val)
+            if el not in (None, UNIT, UNKNOWN):
+                rdecl = self.e.type_decl("Res", self.parts, 1)
+                if rdecl is not None:
+                    ret = ("named", rdecl.parts, (el,))
+        result = self.new_tmp(ret) if ret not in (None, UNIT, UNKNOWN) else None
+
         acc = None
         if wants_acc and init_val is not None:
             acc = self.new_tmp(init_val[1])
@@ -2939,11 +3277,18 @@ class FnCtx:
 
         counter = None
         limit = None
+        base = None
         if range_val is not None:
             start, end = self.range_bounds(range_val, node)
             counter = self.new_tmp(prim("usize"))
             limit = self.new_tmp(prim("usize"))
+            # `index` counts ITERATIONS and `value` is what the range holds,
+            # so on `Range(10, 13)` they are 0,1,2 and 10,11,12 -- one name
+            # for both would make the two indistinguishable exactly when the
+            # range does not start at zero.
+            base = self.new_tmp(prim("usize"))
             self.line("%s = %s;" % (counter, start))
+            self.line("%s = %s;" % (base, counter))
             self.line("%s = %s;" % (limit, end))
             self.open("while (%s < %s) {" % (counter, limit))
         elif wants_index:
@@ -2964,12 +3309,18 @@ class FnCtx:
         handle = ("loop", len(self.loops))
         values = [(handle[0] and "0", handle)]
         if wants_index:
-            values.append((counter, prim("usize")))
+            values.append((("(%s - %s)" % (counter, base)) if base is not None
+                           else counter, prim("usize")))
         if wants_value:
             values.append(self.range_value(range_val, counter, node))
         if wants_acc and acc is not None:
             values.append((acc, init_val[1]))
-        got = self.inline_lambda(("body", ("lambda", body, None)), tuple(values), None, node)
+        # "acc threads through iterations, the loop evaluates to the final
+        # acc" -- so the body is lowered AT the accumulator's type, or its
+        # value has nowhere to land
+        got = self.inline_lambda(("body", ("lambda", body, None)), tuple(values),
+                                 init_val[1] if (wants_acc and init_val) else None,
+                                 node)
         if wants_acc and acc is not None and got[0] not in ("0", None):
             self.line("%s = %s;" % (acc, got[0]))
         self.line("%s: ;" % cnt)
@@ -2982,7 +3333,7 @@ class FnCtx:
             self.line("%s = %s;" % (result, self.ok_of(ret, acc, node)))
         return (result if result is not None else "0", ret or UNIT)
 
-    def lower_intrinsic(self, decl, fnode, node, argnodes, want, receiver):
+    def lower_intrinsic(self, decl, fnode, node, argnodes, want, receiver, targs=()):
         if decl.name in ("println", "print") and decl.owner == "Console":
             # "stdout / stderr.  This is what `println` resolves to."  Nothing
             # impls Console: it is the capability itself, so its one method is
@@ -2993,7 +3344,248 @@ class FnCtx:
             if ret in (None, UNIT, UNKNOWN):
                 return ("0", UNIT)
             return (self.ok_of(ret, None, node), ret)
+        params = self.e.params_of(fnode)
+        if params and _is_variadic(params[-1]):
+            got = self.lower_format_call(decl, fnode, node, argnodes, receiver)
+            if got is not None:
+                return got
+        if decl.owner == "Alloc" and decl.name == "create" and receiver is not None:
+            got = self.lower_create(decl, fnode, node, targs, want, receiver)
+            if got is not None:
+                return got
         return self._lower_intrinsic(decl, fnode, node, argnodes, want, receiver)
+
+    # ---- the format door -------------------------------------------------
+    #
+    # "`{}` routes through each argument's toString, which is TYPE-directed,
+    # so the call is expanded where it is written: the compiler steps
+    # text_fmt.fmt_next over `fmt` and emits an `add_bytes` for each literal
+    # run and a `toString` for each hole.  No runtime format state, no
+    # varargs walk, and one implementation of the format rules."  This is
+    # that expansion; the rules it implements are text_fmt.zen's.
+
+    @staticmethod
+    def fmt_pieces(raw):
+        """text_fmt.zen's format language, in full: `{}` is a hole, every
+        other byte -- including a lone `{` and every `}` -- is literal."""
+        out, run, i = [], bytearray(), 0
+        while i < len(raw):
+            if raw[i:i + 2] == b"{}":
+                out.append((bytes(run), True))
+                run = bytearray()
+                i += 2
+            else:
+                run.append(raw[i])
+                i += 1
+        out.append((bytes(run), False))
+        return out
+
+    def free_fn(self, name, arity):
+        """A writer text_fmt declares, by name: this expansion is the
+        backend's, so it reaches the one implementation directly rather than
+        through the caller's imports."""
+        for d in sorted(self.e.by_name.get(name, []), key=lambda d: d.parts):
+            if d.dkind != "fn" or d.owner:
+                continue
+            fnode = self.e.fn_node(d.node)
+            if fnode is None or f(fnode, "body") is None:
+                continue
+            if len(self.e.params_of(fnode)) == arity:
+                return d
+        return None
+
+    def full_of(self, ret, node):
+        """The Err a piece that could not be written produces.
+
+        Two error sets meet at `add` -- the buffer fails to GROW, the
+        signature says `IoError` -- and DESIGN.md has no conversion between
+        them.  `IoError.Full` is "no room: a fixed buffer, a full disk",
+        which is what a buffer that cannot grow is, so the reason is named
+        rather than invented (law 4).  `Res<String, AllocError>` has one
+        variant and it is exact.
+        """
+        info = self.e.enum_info(ret)
+        ety = dict(info[2]).get("Err") if info else None
+        if ety is None:
+            return self.none_of(ret, node)
+        einfo = self.e.enum_info(ety)
+        names = [v for v, p in (einfo[2] if einfo else ()) if p is None]
+        if not names:
+            return self.none_of(ret, node)
+        pick = "Full" if "Full" in names else names[0]
+        return self.make_variant(ret, "Err", self.make_variant(ety, pick, None))
+
+    def write_piece(self, got, result, ret, done, node):
+        """One write, and the short circuit that keeps a failure visible."""
+        if got is None:
+            return
+        code, gty = got
+        if gty is None or self.e.enum_info(gty) is None:
+            self.line("(void)(%s);" % code)
+            return
+        tmp = self.new_tmp(gty)
+        self.line("%s = %s;" % (tmp, code))
+        ok = sym_variant(self.e.variant_parts(gty, "Ok"))
+        self.open("if (%s.%stag != %s) {" % (tmp, GEN, ok))
+        self.line("%s = %s;" % (result, self.full_of(ret, node)))
+        self.line("goto %s;" % done)
+        self.close()
+
+    def write_hole(self, sb, value, node):
+        """`{}` on one argument: type-directed, resolved here."""
+        code, ty = (value if isinstance(value, tuple) else self.expr(value))
+        if ty is not None and ty[0] == "prim" and ty[1] in INT_VALUES:
+            name = "add_i64" if INT_VALUES[ty[1]][0] < 0 else "add_u64"
+            wide = prim("i64" if name == "add_i64" else "u64")
+            d = self.free_fn(name, 2)
+            if d is not None:
+                return self.emit_call(d, node, [("(%s)%s" % (
+                    "int64_t" if name == "add_i64" else "uint64_t",
+                    paren(code)), wide)], (), None, receiver=sb)
+        if ty is not None and ty[0] == "prim" and ty[1] == "bool":
+            d = self.free_fn("add_bool", 2)
+            if d is not None:
+                return self.emit_call(d, node, [(code, ty)], (), None, receiver=sb)
+        if ty is not None and ty == self.str_type():
+            return self.write_bytes(sb, (code, ty), node)
+        if ty is not None and ty[0] == "named":
+            # a Display: it writes into the buffer that is already open, so
+            # nesting never allocates
+            for d in self.owned_decls(ty, "toString", "fn"):
+                fnode = self.e.fn_node(d.node)
+                if fnode is None or f(fnode, "body") is None:
+                    continue
+                if len(self.e.params_of(fnode)) != 2:
+                    continue
+                return self.emit_call(d, node, [sb], (), None, receiver=(code, ty))
+        self.e.error(node, "cannot format a value of this type")
+        return None
+
+    def write_bytes(self, sb, arg, node):
+        d = None
+        for cand in self.owned_decls(sb[1], "add_bytes", "fn"):
+            if self.e.fn_node(cand.node) is not None:
+                d = cand
+                break
+        if d is None:
+            self.e.error(node, "String has no `add_bytes` to write through")
+            return None
+        return self.emit_call(d, node, [arg], (), None, receiver=sb)
+
+    def lower_format(self, sb, fmt_node, rest, result, ret, done, node):
+        if not (kind(fmt_node) == "Literal" and f(fmt_node, "kind") == "str"):
+            self.e.error(node, "a format string is read at compile time, so it "
+                               "must be written at the call site")
+            return
+        pieces = self.fmt_pieces(decode_str(str(f(fmt_node, "text", ""))))
+        holes = sum(1 for _r, h in pieces if h)
+        if holes != len(rest):
+            self.e.error(node, "the format string has %d hole(s) and the call "
+                               "passes %d argument(s)" % (holes, len(rest)))
+        n = 0
+        for run, hole in pieces:
+            if run:
+                self.write_piece(self.write_bytes(sb, (self.str_literal(run),
+                                                       self.str_type()), node),
+                                 result, ret, done, node)
+            if hole and n < len(rest):
+                self.write_piece(self.write_hole(sb, rest[n], node),
+                                 result, ret, done, node)
+                n += 1
+
+    def call_method(self, recv, name, args, node):
+        """A method call gen_c writes for itself, resolved the way a written
+        one is: the impl when the receiver is concrete, the record when the
+        receiver IS the bound."""
+        rcode, rty = recv
+        if rty is None or rty[0] != "named":
+            return None
+        if self.e.is_trait(rty) and self.e.has_impl(rty):
+            got = self.dispatch(rcode, rty, name, args, (), None, node)
+            if got is not None:
+                return got
+        cands = [d for d in self.owned_decls(rty, name, "fn")
+                 if self.e.fn_node(d.node) is not None
+                 and f(self.e.fn_node(d.node), "body") is not None]
+        inherited = self.trait_methods(rty, name)
+        pool = cands + [d for d in inherited if d not in cands]
+        if not pool:
+            return None
+        decl = self.pick_overload(pool, args, receiver=recv)
+        own = any(d is decl for d in inherited)
+        return self.emit_call(decl, node, args, (), None, receiver=recv,
+                              self_ty=rty if own else None)
+
+    def lower_create(self, decl, fnode, node, targs, want, receiver):
+        """`alloc.create<T>()` -- "one typed convenience, a default built on
+        raw" (DESIGN.md).  std declares it and writes no body, so the body is
+        the backend's: `raw` hands back bytes and `Ptr.to` names them.
+        """
+        elem = None
+        if targs:
+            elem = self.e.resolve_type(targs[0], self.subst, self.parts, self.self_ty)
+        if elem in (None, UNKNOWN) and want is not None and want[0] == "named":
+            info = self.e.enum_info(want)
+            ok = dict(info[2]).get("Ok") if info else None
+            if ok is not None and ok[0] == "ptr":
+                elem = ok[1]
+        if elem in (None, UNKNOWN):
+            self.e.error(node, "cannot infer what `create` is asked to make")
+            return ("0", UNKNOWN)
+        # ALIGN_MAX: mem_arena.zen aligns every run it re-requests to the
+        # strictest alignment any Zen value needs, so asking for it here is
+        # asking for what the arena would have given anyway.
+        args = [("sizeof(%s)" % self.e.ctype(elem).strip(), prim("usize")),
+                ("16", prim("usize"))]
+        got = self.call_method(receiver, "raw", args, node)
+        if got is None:
+            return None
+        subst = dict(zip(decl.tparams, (elem,)))
+        ret = self.e.resolve_type(self.e.ret_of(fnode), subst, decl.scope_parts,
+                                  self.e.self_type(decl, subst))
+        return (self.e.convert(got[0], got[1], ret), ret)
+
+    def lower_format_call(self, decl, fnode, node, argnodes, receiver):
+        """The two bodyless variadic doors: `sb.add(fmt, ..)` and the
+        allocating `alloc.String(fmt, ..)`."""
+        args = list(argnodes)
+        if decl.owner == "String" and decl.name == "add" and receiver is not None:
+            ret = self.e.resolve_type(self.e.ret_of(fnode), {}, decl.scope_parts,
+                                      self.e.self_type(decl, {}))
+            result = self.new_tmp(ret)
+            done = self.label("fmt")
+            self.line("%s = %s;" % (result, self.ok_of(ret, None, node)))
+            if args:
+                self.lower_format(receiver, args[0], args[1:], result, ret,
+                                  done, node)
+            self.line("%s: ;" % done)
+            return (result, ret)
+        if decl.owner is None and decl.name == "String" and receiver is not None:
+            # `alloc.String("{}", x)`: the empty form, then the same
+            # expansion `add` gets -- which is what keeps one set of rules
+            empty = self.free_fn("String", 1)
+            if empty is None:
+                return None
+            made = self.emit_call(empty, node, [], (), None, receiver=receiver)
+            ret = made[1]
+            result = self.new_tmp(ret)
+            done = self.label("fmt")
+            tmp = self.new_tmp(ret)
+            self.line("%s = %s;" % (tmp, made[0]))
+            self.line("%s = %s;" % (result, tmp))
+            ok = sym_variant(self.e.variant_parts(ret, "Ok"))
+            self.open("if (%s.%stag != %s) {" % (tmp, GEN, ok))
+            self.line("goto %s;" % done)
+            self.close()
+            info = self.e.enum_info(ret)
+            sty = dict(info[2]).get("Ok") if info else None
+            sb = ("%s.%sdata.%s" % (tmp, GEN, sym_member("Ok")), sty)
+            if args:
+                self.lower_format(sb, args[0], args[1:], result, ret, done, node)
+            self.line("%s = %s;" % (result, self.make_variant(ret, "Ok", sb[0])))
+            self.line("%s: ;" % done)
+            return (result, ret)
+        return None
 
     def field_of(self, ty, name):
         info = self.e.struct_info(ty)
@@ -3124,6 +3716,15 @@ class FnCtx:
             end = self.member_of(tmp, ty, "end", node)
             self._range = (tmp, ty)
             return (start, end)
+        if ty is not None and ty[0] == "array":
+            # "a fixed array satisfies Range intrinsically, and it is the one
+            # place the compiler supplies what no module could have written"
+            # -- `[T, N]` is a type constructor, so there is no
+            # `[T, N].impl(..)` to write and no module for it to live in.
+            tmp = self.new_tmp(ty)
+            self.line("%s = %s;" % (tmp, code))
+            self._range = (tmp, ty)
+            return ("0", str(ty[1]))
         self._range = None
         self.e.error(node, "a loop needs a Range")
         return ("0", "0")
@@ -3140,6 +3741,31 @@ class FnCtx:
         self.e.error(node, "a Range needs `%s`" % name)
         return "0"
 
+    def range_elem(self, range_val):
+        """What a Range walks over, without lowering the walk."""
+        if range_val is None:
+            return None
+        _code, ty = range_val
+        if ty is None:
+            return None
+        if ty[0] == "array":
+            return ty[2]
+        if ty[0] != "named":
+            return None
+        at = [d for d in self.owned_decls(ty, "at", "fn")
+              if self.e.fn_node(d.node) is not None
+              and f(self.e.fn_node(d.node), "body") is not None]
+        if not at:
+            return prim("usize")   # it walks its own index space
+        fnode = self.e.fn_node(at[0].node)
+        mark = len(self.e.diags)
+        got = self.e.resolve_type(self.e.ret_of(fnode),
+                                  dict(zip(at[0].tparams, ty[2])),
+                                  at[0].scope_parts, ty)
+        del self.e.diags[mark:]
+        info = self.e.enum_info(got) if got is not None and got[0] == "named" else None
+        return dict(info[2]).get("Ok") if info else None
+
     def range_value(self, range_val, counter, node):
         """The element at the counter: `at` when the Range supplies one, and
         the index itself when it does not -- `Range(0, 5)` walks its own
@@ -3147,6 +3773,11 @@ class FnCtx:
         if range_val is None or counter is None:
             return ("0", UNKNOWN)
         code, ty = range_val
+        if ty is not None and ty[0] == "array":
+            # its `at` is the bounds-checked index that already traps, and
+            # the walk never leaves the range, so the check is the C index
+            base = self._range[0] if self._range is not None else code
+            return ("%s.%selems[%s]" % (paren(base), GEN, counter), ty[2])
         at = self.owned_decls(ty, "at", "fn") if ty is not None and ty[0] == "named" else []
         at = [d for d in at if f(self.e.fn_node(d.node), "body") is not None]
         if not at:
@@ -3215,24 +3846,89 @@ class FnCtx:
         found = dict(zip(decl.otparams, owner_tys))
         offset = 1 if receiver is not None else 0
         if receiver is not None and params:
-            self.unify(f(params[0], "ty"), receiver[1], found)
+            self.unify(f(params[0], "ty"), receiver[1], found, decl.tparams)
         for i, value in enumerate(values):
             idx = i + offset
             if idx >= len(params):
                 break
             pty = f(params[idx], "ty")
             if not isinstance(value, tuple) and kind(value) == "Lambda" and pty is not None and kind(pty) == "FnType":
-                _c, rty = self.peek(f(value, "body"))
-                self.unify(f(pty, "ret"), rty, found)
                 for lp, dp in zip(f(value, "params", ()) or (), f(pty, "params", ()) or ()):
                     if f(lp, "ty") is not None:
                         self.unify(f(dp, "ty"), self.e.resolve_type(
-                            f(lp, "ty"), self.subst, self.parts, self.self_ty), found)
+                            f(lp, "ty"), self.subst, self.parts, self.self_ty),
+                            found, decl.tparams)
+                # "a closure passed to a function whose signature is already
+                # known infers its parameter types from that signature", so
+                # the body is peeked with them BOUND -- `map`'s `U` is the
+                # body's value and the body says `value * 2`.
+                self.push()
+                for lp, dp in zip(f(value, "params", ()) or (), f(pty, "params", ()) or ()):
+                    mark = len(self.e.diags)
+                    lty = self.e.resolve_type(f(dp, "ty"), found, decl.scope_parts)
+                    del self.e.diags[mark:]
+                    if lty not in (None, UNKNOWN):
+                        self.scopes[-1][str(f(lp, "name", "_"))] = ("0", lty)
+                try:
+                    _c, rty = self.peek(_block_value(f(value, "body")))
+                finally:
+                    self.pop()
+                self.unify(f(pty, "ret"), rty, found, decl.tparams)
                 continue
             _c, aty = self.peek(value)
-            self.unify(pty, aty, found)
+            self.unify(pty, aty, found, decl.tparams)
+        self.infer_from_bounds(decl, found)
         return tuple(found.get(tp, UNKNOWN)
                      for tp in decl.tparams[len(decl.otparams):])
+
+    def infer_from_bounds(self, decl, found):
+        """`<R: Range<T>, T>`: a parameter named ONLY inside another's bound.
+
+        range.zen mandates that form for the whole loop family -- a bound
+        monomorphises, so `at` is a direct call and the body inlines -- so
+        this is the inference half of that claim rather than an edge case.
+        The impl is where the answer is: `Vec.impl(Range<T>, ..)` says which
+        of the receiver's own arguments the bound's argument is.
+        """
+        for tp in f(decl.node, "tparams", ()) or ():
+            got = found.get(str(f(tp, "name", "")))
+            if got in (None, UNKNOWN) or got[0] != "named":
+                continue
+            for bname, bargs in _bound_apps(tp):
+                if not bargs:
+                    continue
+                if got[1][-1] == bname:
+                    # the argument IS the bound: `Range(0, 10)` reaching
+                    # `<R: Range<T>>`, where nothing else can name T
+                    for i, arg in enumerate(bargs):
+                        if arg is None or i >= len(got[2]):
+                            continue
+                        if found.get(arg, UNKNOWN) not in (None, UNKNOWN):
+                            continue
+                        el = got[2][i]
+                        if el in (None, UNKNOWN):
+                            # "a Range that supplies no `at` walks its own
+                            # index space" -- which is what `range_value`
+                            # lowers, so the inference has to say the same
+                            at = [d for d in self.owned_decls(got, "at", "fn")
+                                  if self.e.fn_node(d.node) is not None
+                                  and f(self.e.fn_node(d.node), "body") is not None]
+                            el = prim("usize") if not at else el
+                        if el not in (None, UNKNOWN):
+                            found[arg] = el
+                    continue
+                for target, trait, applied, owner_tps in self.e.impls:
+                    if target != got[1][-1] or trait != bname:
+                        continue
+                    for i, written in enumerate(applied):
+                        if i >= len(bargs) or bargs[i] is None:
+                            continue
+                        if found.get(bargs[i], UNKNOWN) not in (None, UNKNOWN):
+                            continue
+                        if written in owner_tps:
+                            j = owner_tps.index(written)
+                            if j < len(got[2]):
+                                found[bargs[i]] = got[2][j]
 
     # print ---------------------------------------------------------------
 
@@ -3375,6 +4071,9 @@ class FnCtx:
             value, _t = self.expr(body, ty)
         if result is not None and value is not None:
             self.line("%s = %s;" % (result, value))
+        elif result is None and value and value not in ("", "0"):
+            # an arm whose body is a call returning `()` still has to RUN
+            self.line("(void)(%s);" % value)
         self.pop()
 
     def match_bool(self, node, scode, arms, result, ty):
@@ -3407,46 +4106,126 @@ class FnCtx:
             self.arm_body(false_arm, result, ty)
         self.close()
 
+    def pat_conds(self, code, ty, pat, conds, binds):
+        """What a pattern tests and what it binds, at any depth.
+
+        `Left(Full(n))` is two tag tests and one binding, and the depth is
+        not a special form: the same three shapes -- a name, a variant, a
+        literal -- read the same way one level down.
+        """
+        if pat is None:
+            return
+        if isinstance(pat, str):
+            # cst hands a bare payload name over as text.  It names a VARIANT
+            # when the payload's type declares one and a binding otherwise --
+            # `Left(Blank)` against `Left(cell)`.
+            if pat == "_":
+                return
+            info = self.e.enum_info(ty) if ty is not None and ty[0] == "named" else None
+            if info is not None and pat in dict(info[2]):
+                conds.append("%s.%stag == %s" % (
+                    paren(code), GEN, sym_variant(self.e.variant_parts(ty, pat))))
+            elif ty is not None:
+                binds.append((pat, ty, code))
+            return
+        k = kind(pat)
+        if k == "PatWild":
+            return
+        if k == "PatLit":
+            conds.append("%s == %s" % (paren(code), str(f(pat, "text", "0"))))
+            return
+        if k != "PatVariant":
+            return
+        info = self.e.enum_info(ty) if ty is not None and ty[0] == "named" else None
+        vname = str(f(pat, "name", ""))
+        if info is None or vname not in dict(info[2]):
+            return
+        conds.append("%s.%stag == %s" % (
+            paren(code), GEN, sym_variant(self.e.variant_parts(ty, vname))))
+        pty = dict(info[2]).get(vname)
+        if pty is not None:
+            self.pat_conds("%s.%sdata.%s" % (paren(code), GEN, sym_member(vname)),
+                           pty, f(pat, "binder"), conds, binds)
+
+    def emit_arm(self, arm, pty, payload, result, ty):
+        conds, binds = [], []
+        self.pat_conds(payload, pty, f(f(arm, "pattern"), "binder"), conds, binds)
+        return conds, binds
+
+    def open_arm(self, binds, arm, result, ty):
+        self.push()
+        for name, bty, code in binds:
+            self.line("%s = %s;" % (self.e.declarator(bty, self.declare(name, bty)),
+                                    code))
+        self.arm_body(arm, result, ty)
+        self.pop()
+
     def match_enum(self, node, scode, sty, arms, result, ty):
         info = self.e.enum_info(sty)
         payloads = dict(info[2])
-        self.open("switch (%s.%stag) {" % (paren(scode), GEN))
+        # Arms group by the OUTER variant: `Left(Full(n))` and `Left(Blank)`
+        # are two arms of one case, and two C `case` labels for one tag is
+        # not legal C.  Everything below the tag is an if/else inside it.
+        order, groups, wild = [], {}, []
         for arm in arms:
             pat = f(arm, "pattern")
-            pk = kind(pat)
-            if pk == "PatWild":
-                self.line("default: {")
-            elif pk == "PatVariant":
-                vname = str(f(pat, "name", ""))
-                self.line(
-                    "case %s: {" % sym_variant(self.e.variant_parts(sty, vname))
-                )
+            vname = str(f(pat, "name", "")) if kind(pat) == "PatVariant" else None
+            if vname in payloads:
+                if vname not in groups:
+                    order.append(vname)
+                    groups[vname] = []
+                groups[vname].append(arm)
             else:
-                self.line("default: {")
-                vname = None
+                wild.append(arm)
+        self.open("switch (%s.%stag) {" % (paren(scode), GEN))
+        for vname in order:
+            self.line("case %s: {" % sym_variant(self.e.variant_parts(sty, vname)))
             self.indent += 1
-            self.push()
-            if pk == "PatVariant":
-                binder = f(pat, "binder")
-                vname = str(f(pat, "name", ""))
-                pty = payloads.get(vname)
-                if binder and binder != "_" and pty is not None:
-                    cn = self.declare(str(binder), pty)
-                    self.line(
-                        "%s = %s.%sdata.%s;"
-                        % (
-                            self.e.declarator(pty, cn),
-                            paren(scode),
-                            GEN,
-                            sym_member(vname),
-                        )
-                    )
-            self.arm_body(arm, result, ty)
-            self.pop()
+            pty = payloads.get(vname)
+            payload = ("%s.%sdata.%s" % (paren(scode), GEN, sym_member(vname))
+                       if pty is not None else None)
+            shaped = [(arm,) + self.emit_arm(arm, pty, payload, result, ty)
+                      for arm in groups[vname]]
+            plain = [s for s in shaped if not s[1]]
+            if len(shaped) == 1 and plain:
+                self.open_arm(shaped[0][2], shaped[0][0], result, ty)
+            else:
+                first, closed = True, False
+                for arm, conds, binds in shaped:
+                    if not conds:
+                        if first:
+                            self.open("{")
+                        else:
+                            self.close("} else {")
+                            self.indent += 1
+                        self.open_arm(binds, arm, result, ty)
+                        first, closed = False, True
+                        break
+                    head = " && ".join(conds)
+                    if first:
+                        self.open("if (%s) {" % head)
+                    else:
+                        self.close("} else if (%s) {" % head)
+                        self.indent += 1
+                    self.open_arm(binds, arm, result, ty)
+                    first, closed = False, True
+                if closed and not plain and wild:
+                    self.close("} else {")
+                    self.indent += 1
+                    self.open_arm([], wild[0], result, ty)
+                if closed:
+                    self.close()
             self.line("break;")
             self.indent -= 1
             self.line("}")
-        if not any(kind(f(a, "pattern")) == "PatWild" for a in arms):
+        if wild:
+            self.line("default: {")
+            self.indent += 1
+            self.open_arm([], wild[0], result, ty)
+            self.line("break;")
+            self.indent -= 1
+            self.line("}")
+        else:
             file, line, col = self.e.pos.of(node)
             self.line(
                 "default: %sunreachable(%s, %d, %d);"
@@ -3664,7 +4443,13 @@ def refine(ty, want):
 def is_handle(ty):
     return ty is not None and ty[0] == "loop"
 
-_LVALUE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+# `(*p).f.g` is as much an lvalue as `x.f.g`, and a by-reference receiver is
+# spelled the first way everywhere.  Missing it copies the field into a
+# temporary, so `self.entries.add(..)` grows a copy and the caller keeps the
+# old one -- a silent wrong answer rather than a compile error.
+_LVALUE = re.compile(
+    r"^(\(\*[A-Za-z_][A-Za-z0-9_]*\)|[A-Za-z_][A-Za-z0-9_]*)"
+    r"(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 ARITH = {"+", "-", "*", "/", "%"}
 WRAPPING = {"+%", "-%", "*%"}

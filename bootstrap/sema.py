@@ -160,6 +160,13 @@ def _tup(v):
     return (v,)
 
 
+def _bare_name(name):
+    """A type's name without its arguments: `Range<T>` is an impl of `Range`."""
+    if not isinstance(name, str):
+        return name
+    return name.split("<", 1)[0].strip()
+
+
 def _name_of(v):
     """A declaration name may be a str or a `declaration_name`-ish node."""
     if v is None:
@@ -1090,6 +1097,12 @@ class Sema:
         # satisfied by an impl in another (tests/corpus/sema/bound_third_module).
         for mi in self.mods:
             for im in mi.impls:
+                # A prelude name is visible without an import, so `Key.impl(Eq,
+                # ..)` has to register under `Eq`'s own qname or the bound
+                # `<K: Eq>` never meets it.  `_impl_from` runs before the
+                # tree-wide table exists, which is why the fixup is here.
+                im.target = self._requalify(mi, im.target, im.target_name)
+                im.trait = self._requalify(mi, im.trait, im.trait_name)
                 self.impls_by_target.setdefault(im.target, []).append(im)
         for k in self.impls_by_target:
             self.impls_by_target[k].sort(key=lambda i: _start(i.span))
@@ -1219,8 +1232,11 @@ class Sema:
                        tname, trait, entries, _span(call), call, mi)
 
     def _impl_from(self, mi, d):
-        tname = _name_of(_g(d, "target"))
-        trait = _name_of(_g(d, "trait"))
+        # `Vec.impl(Range<T>, ..)` names the bound with its arguments applied,
+        # and the arguments are not part of its NAME: this is an impl of
+        # Range, at T. (cst.py hands both sides over as source text.)
+        tname = _bare_name(_name_of(_g(d, "target")))
+        trait = _bare_name(_name_of(_g(d, "trait")))
         if not tname or not trait:
             return None
         return ImplDef(self._qualify(mi, tname), self._qualify(mi, trait),
@@ -1229,6 +1245,14 @@ class Sema:
     def _qualify(self, mi, name):
         td = self.lookup_type(mi, name)
         return td.qname if td else "@" + name
+
+    def _requalify(self, mi, qname, name):
+        """A qname `_qualify` could not resolve, tried again against the
+        tree-wide table -- which is where a prelude name lives."""
+        if not isinstance(qname, str) or not qname.startswith("@"):
+            return qname
+        td = self.lookup_type(mi, name) or self.global_by_name.get((name, None))
+        return td.qname if td is not None else qname
 
     # -- diagnostics --------------------------------------------------------
 
@@ -1711,10 +1735,15 @@ class Sema:
             if trait is not None:
                 for f in trait.fields:
                     nm = _name_of(_g(f, "name"))
-                    if not nm or nm in tnames:
+                    if not nm or not self._is_method_field(f):
                         continue
-                    if not self._is_method_field(f):
+                    if nm in tnames and not self._is_sealed_method(f):
                         continue
+                    # A SEALED method comes along even when the impl supplies
+                    # that name: `Display` declares `toString(sb :: String)`
+                    # outlined and `toString(a: Alloc)` sealed and derived
+                    # from it, and an impl defining the first must not lose
+                    # the second -- they are one overload set.
                     fty = self._field_type(f, Ctx(trait.mod, Scope(), subst=inner.subst))
                     supplied.setdefault(nm, []).append(
                         (im, Member(nm, fty, "method", False, owner=trait,
@@ -1723,14 +1752,21 @@ class Sema:
         for nm, cands in supplied.items():
             if nm in out:
                 continue        # the type's own storage wins over an impl
+            impls, seen = [], set()
+            for c in cands:
+                if id(c[0]) not in seen:
+                    seen.add(id(c[0]))
+                    impls.append(c[0])
             if len(cands) == 1:
                 out[nm] = cands[0][1]
+            elif len(impls) == 1:
+                # ONE impl supplying the name twice is an overload set, not a
+                # collision: `Display` declares `toString` outlined and
+                # sealed, and both arrive through the same impl.
+                m = cands[0][1]
+                m.overloads = tuple(c[1] for c in cands)
+                out[nm] = m
             else:
-                impls, seen = [], set()
-                for c in cands:
-                    if id(c[0]) not in seen:
-                        seen.add(id(c[0]))
-                        impls.append(c[0])
                 impls.sort(key=lambda i: _start(i.span))
                 first = cands[0][1]
                 # a fresh Member: the candidates themselves stay unmarked, so a
@@ -1760,6 +1796,15 @@ class Sema:
             return True
         val = _g(f, "default", "value")
         return _k(val) in ("Lambda", "Function")
+
+    @staticmethod
+    def _is_sealed_method(f):
+        """`= sig {..}`: provided, and an impl may not override it."""
+        if _k(f) != "Function":
+            return False
+        if _g(f, "body") is None:
+            return False
+        return (_g(f, "form", default="required") or "required") == "sealed"
 
     @staticmethod
     def _is_method_field_entry(e):
