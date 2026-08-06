@@ -184,6 +184,7 @@ RECORD = "record"
 RECORD_FIELD = "record_field"
 MATCH_BLOCK = "match_block"
 MATCH_ARM = "match_arm"
+ARROW = "=>"  # the one anonymous token a diagnostic has to name
 MEMBER_EXPRESSION = "member_expression"
 INDEX_EXPRESSION = "index_expression"
 UNARY_EXPRESSION = "unary_expression"
@@ -497,6 +498,29 @@ class _TriviaStore:
         return tuple(out)
 
 
+def _nests(node) -> bool:
+    """Whether this node is one LEVEL of a nested run, rather than the thing
+    that holds one. A function's body is the function, not a level inside it,
+    which is what makes the outermost `{` of `main`'s body a boundary and the
+    `{` after it the start of a run."""
+    if node.type in NOT_NESTING:
+        return False
+    parent = node.parent
+    return not (node.type == BLOCK and parent is not None and parent.type == FUNCTION)
+
+
+def outermost(node):
+    """Where a too-deep run STARTS. A depth diagnostic anchored at level 2001
+    points 2000 levels past the mistake; the fix goes at the outermost `(` or
+    `{`, so that is what it names."""
+    top = node
+    parent = node.parent
+    while parent is not None and _nests(parent):
+        top = parent
+        parent = parent.parent
+    return top
+
+
 # ===========================================================================
 # the walker
 # ===========================================================================
@@ -518,7 +542,9 @@ class Converter:
             return False
         if not self._too_deep:
             self._too_deep = True
-            self.error(node, f"nesting too deep: nests deeper than {MAX_NEST}")
+            self.error(
+                outermost(node), f"nesting too deep: nests deeper than {MAX_NEST}"
+            )
         return True
 
     # -- primitives --
@@ -1321,30 +1347,101 @@ class Converter:
 # ===========================================================================
 
 
+def _line_starts(source: bytes) -> list:
+    starts = [0]
+    for i, byte in enumerate(source):
+        if byte == 0x0A:
+            starts.append(i + 1)
+    return starts
+
+
+def _at(starts: list, byte: int) -> tuple:
+    """A byte offset as (1-based line, 1-based BYTE column)."""
+    row = bisect.bisect_right(starts, byte) - 1
+    return (row + 1, byte - starts[row] + 1)
+
+
+def _lex_diags(source: bytes, file: str) -> list:
+    """`lex.py` scans the same bytes first, because tree-sitter parses without
+    diagnosing: an ERROR node carries no message and often no useful span. Its
+    offsets become Spans here — this is the only place lexical offsets meet the
+    line table."""
+    _tokens, raw = L.scan(source)
+    if not raw:
+        return []
+    starts = _line_starts(source)
+    out = []
+    for start, end, message, notes in raw:
+        out.append(
+            Diag(
+                Span(file, _at(starts, start), _at(starts, end)),
+                message,
+                tuple(
+                    (Span(file, _at(starts, s), _at(starts, e)), text)
+                    for s, e, text in notes
+                ),
+            )
+        )
+    return out
+
+
+def _point(point) -> tuple:
+    return (point[0] + 1, point[1] + 1)
+
+
+def _arm_arrow(node, parent):
+    """An ERROR sitting directly in a match block is an arm the parser could
+    not read. When it holds a pattern and then more tokens with no `=>` among
+    them, the `=>` is what is missing, and it belongs in front of the arm's
+    body — which is where the fix goes, not where the arm began."""
+    if parent is None or parent.type != MATCH_BLOCK:
+        return None
+    kids = list(node.children)
+    if len(kids) < 2 or any(c.type == ARROW for c in kids):
+        return None
+    return kids[1]
+
+
+def _syntax_diag(node, parent, file: str, source: bytes):
+    """`parent` is threaded rather than read off the node: py-tree-sitter
+    reports a MISSING leaf's parent as the token before it."""
+    span = Span(file, _point(node.start_point), _point(node.end_point))
+    if node.is_missing:
+        if parent is not None and parent.type in EXPRESSION_HOLES:
+            return Diag(span, "expected expression")
+        return Diag(span, f"expected `{node.type}`")
+    if not source[node.end_byte :].strip():
+        # the error runs to the end of the file: the text simply stops, so the
+        # position that names the mistake is where it stops
+        end = _point(node.end_point)
+        return Diag(
+            Span(file, end, end),
+            "unexpected end of file: this declaration is not finished",
+        )
+    body = _arm_arrow(node, parent)
+    if body is not None:
+        return Diag(
+            Span(file, _point(body.start_point), _point(body.end_point)),
+            "expected `=>`: a match arm is `pattern => expr`",
+        )
+    text = source[node.start_byte : node.end_byte].decode("utf-8", "replace")
+    head = text.strip().splitlines()[0][:40] if text.strip() else ""
+    return Diag(span, f"syntax error near `{head}`")
+
+
 def _syntax_diags(root, file: str, source: bytes) -> list:
     """One diagnostic per ERROR / MISSING node. TESTING.md: one syntax error
     must not cascade into fifty, so only the outermost is reported."""
     out = []
-    stack = [root]
+    stack = [(root, None)]
     while stack:
-        node = stack.pop()
+        node, parent = stack.pop()
         if not node.has_error:
             continue
         if node.type == ERROR or node.is_missing:
-            start, end = node.start_point, node.end_point
-            span = Span(
-                file, (start[0] + 1, start[1] + 1), (end[0] + 1, end[1] + 1)
-            )
-            if node.is_missing:
-                out.append(Diag(span, f"expected `{node.type}`"))
-            else:
-                text = source[node.start_byte : node.end_byte].decode(
-                    "utf-8", "replace"
-                )
-                head = text.strip().splitlines()[0][:40] if text.strip() else ""
-                out.append(Diag(span, f"syntax error near `{head}`"))
+            out.append(_syntax_diag(node, parent, file, source))
             continue
-        stack.extend(reversed(node.children))
+        stack.extend((c, node) for c in reversed(node.children))
     out.sort(key=lambda d: (d.span.start, d.message))
     return out
 
@@ -1358,6 +1455,13 @@ def parse_source(source, path: str, name: str = ""):
     """
     if isinstance(source, str):
         source = source.encode("utf-8")
+    # The scanner runs FIRST and its verdict is final: a file that does not lex
+    # has no token stream to parse, so walking it would report tree-sitter's
+    # opinion of the wreckage on top of the real mistake (TESTING.md, "one
+    # syntax error must not cascade into fifty").
+    lexical = _lex_diags(source, path)
+    if lexical:
+        return None, tuple(lexical)
     # MAX_NEST levels of AST, a few python frames each; the guard reports,
     # the interpreter must not give out first
     if sys.getrecursionlimit() < 10 * MAX_NEST:
@@ -1365,6 +1469,12 @@ def parse_source(source, path: str, name: str = ""):
     tree = parser().parse(source)
     root = tree.root_node
     diags = _syntax_diags(root, path, source)
+    if diags:
+        # Same rule as a lexical error, one stage later: a tree with an ERROR
+        # in it is not a program, and walking it hands sema a hole to report a
+        # second time (`b = 2 +;` -> "expected expression" AND "undefined name
+        # ``"). One mistake, one diagnostic.
+        return None, tuple(diags)
     if not name:
         name = os.path.splitext(os.path.basename(path))[0]
     converter = Converter(source, path, root)

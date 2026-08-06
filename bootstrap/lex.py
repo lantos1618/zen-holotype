@@ -8,7 +8,10 @@ byte, a `'` with nothing after it) reaches the user as "syntax error near
 what is wrong and where.
 
 **It is not the parser's token source.** `bootstrap/cst.py` still walks the
-tree-sitter tree; this file only rejects. The two therefore have to agree
+tree-sitter tree; this file only rejects — but it rejects FIRST, and its
+verdict is final: `parse_source` returns these diagnostics and never walks a
+file that did not lex, because tree-sitter's opinion of the wreckage is a
+second diagnostic for one mistake. The two therefore have to agree
 about what a token is, and where they differ this one is deliberately the
 STRICTER: `grammar.js` lets a string literal span lines (`/[^"\\]+/` matches a
 newline) and lets `007` through, and both are rejected here. Stricter is safe
@@ -364,7 +367,11 @@ class _Scanner:
         here = self.i
         self.token("punct", here, here + 1)
         self.i = here + 1
-        if self.brackets_lost:
+        # A file that has already failed to lex has an unreliable bracket
+        # stack — `println("abc\");` swallows the `)` into the string, and the
+        # `}` two lines down then closes nothing. That is the same mistake,
+        # not a second one (TESTING.md: one error must not cascade).
+        if self.brackets_lost or self.diags:
             return
         if b in OPENERS:
             self.opens.append((here, OPENERS[b]))

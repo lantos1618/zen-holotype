@@ -53,6 +53,7 @@ sys.path[:] = [
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from bootstrap import ast as zast  # noqa: E402
 from bootstrap import gen_c  # noqa: E402
 from bootstrap import modules as zmodules  # noqa: E402
 
@@ -241,6 +242,35 @@ def own(graph, sema, root=""):
     return tuple(zown.check(graph, sema=sema, root=root) or ())
 
 
+def entry_diags(graph):
+    """A program is a tree with a `main` in it.
+
+    gen_c emits an empty translation unit and exits 0 when it finds none, so
+    an empty file -- or a file of nothing but comments -- would otherwise
+    "compile" and produce a binary that does nothing.
+
+    The compilation root's own files are the program; its subdirectories are
+    the modules the program stands on.  So the diagnostic lands on the first
+    top-level file, and a root holding nothing but subdirectories -- `src/`,
+    which is the stdlib and not a program -- is not asked for a `main` at all.
+    """
+    if graph.functions.get("main"):
+        return ()
+    paths = sorted(
+        info.path
+        for info in graph.modules.values()
+        if info.dotted != graph.prelude and "/" not in info.path
+    )
+    if not paths:
+        return ()
+    return (
+        zast.Diag(
+            zast.Span(paths[0], (1, 1), (1, 1)),
+            "no `main`: a program needs one, and this compilation declares none",
+        ),
+    )
+
+
 def prune(graph, keep):
     """Keep the named modules and what they import, and nothing else.
 
@@ -291,6 +321,11 @@ def compile_once(root, files, whole_tree):
     sema, sema_diags = analyse(graph, root)
     diags = list(getattr(graph, "diags", ()) or ()) + list(sema_diags)
     diags += list(own(graph, sema, root))
+    if not diags:
+        # last, and only when nothing else has anything to say: a file that
+        # failed to lex declares no `main` either, and that is not a second
+        # mistake
+        diags += list(entry_diags(graph))
     if diags:
         return "", diags
     text, gen_diags = gen_c.generate(graph, sema=sema, root=root)
