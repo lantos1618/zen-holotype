@@ -1,0 +1,36 @@
+// a defer that runs at three exits out of four is worse than one that runs
+// at none, because it will be trusted. so: every way out of a block, in one
+// program — falling off the end, `h.next()`, `h.break()`, and `.try()`
+// returning through a frame.
+
+Fail = | Boom
+
+fails = () Res<i32, Fail> {
+    Err(Fail.Boom);
+}
+
+// leaves through .try(), from an inner block, with a defer on each of the
+// two blocks it unwinds
+propagates = () Res<i32, Fail> {
+    @scope.defer(() { println("outer defer") });
+    {
+        @scope.defer(() { println("inner defer") });
+        fails().try();
+    }
+    Ok(0);
+}
+
+main = (env: Env) Res<i32, IoError> {
+    // 0 falls off the end of the body, 1 leaves by next, 2 leaves by break
+    [0, 1, 2, 3].loop((h, i: i32) {
+        @scope.defer(() { println("body defer {}", i) });
+        (i == 1).then(() { h.next() });
+        (i == 2).then(() { h.break() });
+        println("iter {}", i);
+    });
+    propagates().match({
+        Ok(_)  => println("unreachable"),
+        Err(_) => println("propagated"),
+    });
+    Ok(0);
+}

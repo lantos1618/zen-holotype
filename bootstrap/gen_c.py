@@ -163,6 +163,11 @@ MAX_INSTANCES = 4096  # infinite monomorphisation stops here, with a diagnostic
 MAX_EXPR_DEPTH = 24  # deeper than this spills to a temporary, per TESTING.md
 INLINE_DEPTH = 32  # a closure inlined into itself stops here, with a diagnostic
 
+# A deferred closure's body is lowered before its capture struct is named, so
+# that two lowerings of one closure compare equal and become one function.
+# The name is patched in afterwards; the marker cannot occur in C.
+ENVMARK = "\x01env\x01"
+
 
 # ---------------------------------------------------------------------------
 # node access
@@ -730,6 +735,7 @@ class Emitter:
         self._scope_ty = None  # the `Scope` type, resolved once
         self.defer_envs = {}   # site number -> its capture struct's definition
         self.defer_sites = 0   # deferred closures lifted so far, for naming
+        self._defer_cache = {}  # (body text, capture layout) -> (thunk, env)
         self.graph = program if getattr(program, "modules", None) and hasattr(
             program, "lookup"
         ) else None
@@ -1763,34 +1769,45 @@ class Emitter:
         environment is the block's storage, handed to it as `void *`, so
         nothing is boxed and nothing is allocated.  Returns the function's
         name and its capture struct's, or `None` when it captures nothing.
+
+        Two lowerings of one closure are one function.  Overload resolution
+        and the trailing-expression rule both lower speculatively and throw
+        the text away, and a thunk registered by a discarded lowering would
+        otherwise sit in the output as an unreferenced static.
         """
         self.needs.add("scope")
+        fields = "".join(
+            "    %s;\n" % self.declarator(ty, "%sc%d" % (GEN, i))
+            for i, (_name, _code, ty) in enumerate(caps)
+        )
+        inner = FnCtx(self, ctx.decl, ctx.subst, UNIT, ctx.self_ty)
+        inner.consumed = ctx.consumed
+        inner.push()
+        if caps:
+            inner.line("%s *%senv = (%s *)%sp;" % (ENVMARK, GEN, ENVMARK, GEN))
+            for i, (name, _code, ty) in enumerate(caps):
+                inner.scopes[-1][name] = ("(*%senv).%sc%d" % (GEN, GEN, i), ty)
+        else:
+            inner.line("(void)%sp;" % GEN)
+        if f(lam, "params", ()):
+            self.error(node, "a deferred closure takes no parameters")
+        inner.block_value(f(lam, "body"), UNIT)
+        inner.pop()
+        key = (inner.text(), fields)
+        if key in self._defer_cache:
+            return self._defer_cache[key]
         self.defer_sites += 1
         n = self.defer_sites
         thunk = "%sd%d" % (GEN, n)
         env = None
         if caps:
             env = "%senv%d" % (GEN, n)
-            fields = "".join(
-                "    %s;\n" % self.declarator(ty, "%sc%d" % (GEN, i))
-                for i, (_name, _code, ty) in enumerate(caps)
-            )
             self.defer_envs[n] = "typedef struct %s {\n%s} %s;\n\n" % (env, fields, env)
-        inner = FnCtx(self, ctx.decl, ctx.subst, UNIT, ctx.self_ty)
-        inner.consumed = ctx.consumed
-        inner.push()
-        if env is not None:
-            inner.line("%s *%senv = (%s *)%sp;" % (env, GEN, env, GEN))
-            for i, (name, _code, ty) in enumerate(caps):
-                inner.scopes[-1][name] = ("(*%senv).%sc%d" % (GEN, GEN, i), ty)
-        if f(lam, "params", ()):
-            self.error(node, "a deferred closure takes no parameters")
-        inner.block_value(f(lam, "body"), UNIT)
-        inner.pop()
         head = "static void %s(void *%sp)" % (thunk, GEN)
         self.protos[thunk] = head + ";"
-        blank = "" if env is not None else "    (void)%sp;\n" % GEN
-        self.bodies[thunk] = head + " {\n" + blank + inner.text() + "}\n"
+        self.bodies[thunk] = (head + " {\n" + inner.text() + "}\n").replace(
+            ENVMARK, env or "void")
+        self._defer_cache[key] = (thunk, env)
         return thunk, env
 
     def self_type(self, decl, subst):
@@ -2236,9 +2253,17 @@ class FnCtx:
             return None
         code, ty = self.expr(value, want)
         code = self.coerce(code, ty, want)
+        rty = want if want not in (None, UNKNOWN) else ty
+        if rty == UNIT and code not in ("", "0"):
+            # a tail expression of type `()` is the block's value in name
+            # only: nothing can read it, so it has to RUN here.  Handing it
+            # back instead loses a call whose whole purpose was its effect --
+            # `() { cleanup(x) }` emitting nothing at all.
+            self.line("(void)(%s);" % code)
+            self.exit_scope(here)
+            return "0"
         if not entries and self.sscopes[here] is None:
             return code
-        rty = want if want not in (None, UNKNOWN) else ty
         if rty in (None, UNIT, UNKNOWN):
             self.exit_scope(here, code)
             return code
@@ -5460,13 +5485,15 @@ static void zg_defer(zg_scope *s, void (*fn)(void *), const void *env,
     s->zg_n++;
 }
 
-/* LIFO, and BEFORE the block's drops.  The count is lowered before the call,
- * so running a scope twice is a no-op and a closure that registers another
- * one on the same block still terminates. */
+/* LIFO, and BEFORE the block's drops.  The slot is copied out and the count
+ * lowered before the call, so a closure that registers another one on the
+ * same block reuses the slot it is standing in without overwriting its own
+ * captures -- and running an already-run scope is a no-op. */
 static void zg_scope_run(zg_scope *s) {
     while (s->zg_n > 0) {
+        zg_defer_slot slot = s->zg_slot[s->zg_n - 1];
         s->zg_n--;
-        s->zg_slot[s->zg_n].zg_fn(&s->zg_slot[s->zg_n].zg_env);
+        slot.zg_fn(&slot.zg_env);
     }
 }
 
