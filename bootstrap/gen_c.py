@@ -4360,20 +4360,22 @@ class FnCtx:
         `env.fs` -- law 2, no ambient authority".  Nothing impls Fs, because
         Fs is the authority itself, exactly as Console and Mem are.
         """
-        self.e.needs.add("fs")
         name = decl.name
         base = decl.scope_parts
         ret = self.e.resolve_type(self.e.ret_of(fnode), {}, base)
+        if not (name == "read" and len(argnodes) == 2) and not (
+                name in ("exists", "is_dir") and len(argnodes) == 1):
+            return None
+        # only now: a program that never reaches one of these members must not
+        # pay for <sys/stat.h>
+        self.e.needs.add("fs")
 
-        if name in ("exists", "is_dir") and len(argnodes) == 1:
+        if name in ("exists", "is_dir"):
             path = self.str_parts(argnodes[0], node)
             if path is None:
                 return ("0", prim("bool"))
             test = "== 1" if name == "is_dir" else ">= 0"
             return ("(zg_fs_kind(%s, %s) %s)" % (path[0], path[1], test), prim("bool"))
-
-        if name != "read" or len(argnodes) != 2:
-            return None
 
         # Res<String, FsError>: the buffer the Alloc hands out, wrapped in the
         # owner that tells the same story every other buffer in std tells.
@@ -4457,10 +4459,13 @@ class FnCtx:
             self.e.error(node, "Fs.read must return a Res<String, FsError>")
             return "(%s){0}" % self.e.ctype(sty)
         inits = []
+        # len is what ARRIVED and capacity is what was asked for: a short read
+        # must not leave the String claiming bytes nobody ever wrote, and the
+        # run really is `want` wide, which is what grow may reuse
         for fname, value in (("data", buf), ("len", got), ("capacity", want)):
-            m, mt = self.field_of(vty, fname)
+            m, _mt = self.field_of(vty, fname)
             if m:
-                inits.append(".%s = %s" % (m, self.e.convert(value, None, mt)))
+                inits.append(".%s = %s" % (m, value))
         m, mt = self.field_of(vty, "alloc")
         if m:
             inits.append(".%s = %s" % (m, self.e.convert(alloc[0], alloc[1], mt)))
