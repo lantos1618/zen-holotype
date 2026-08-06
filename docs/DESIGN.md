@@ -593,13 +593,41 @@ Scope* = {
 ArgError* = Missing(str)   // required field absent; names the field
           | Parse(str)     // value present but not the field's type
 
+// the disk. Three members, and each earns its place: a compiler
+// reads a whole file at once, never streams and never seeks, so
+// there is no handle and no `open`. A module tree is
+// <folder>/<folder>.zen and is COMPUTED rather than discovered, so
+// nothing needs a listing -- but a walk still has to tell a folder
+// from a file before opening it, and ruling a candidate path out
+// should cost a stat rather than reading a megabyte to learn
+// nothing. Hence exactly is_dir and exists beside read.
+//
+// `read` takes an Alloc because it allocates, returns Res because a
+// missing file is a caller's problem and not a bug, and is `:`
+// because a handle's methods are `:` -- a bitwise copy of an Fs sees
+// the same filesystem.
+FsError* = NotFound | Denied | IsDir | Failed | OutOfMemory
+
+Fs* = {
+    read*   = (self: @Self, a: Alloc, path: str) Res<String, FsError>
+    exists* = (self: @Self, path: str) bool
+    is_dir* = (self: @Self, path: str) bool
+}
+
+// OutOfMemory is a member of FsError only because the seed subset has
+// no error unions and no From, and `read` allocates. When unions
+// arrive the signature becomes Res<String, FsError | AllocError> and
+// the variant goes. Writing is not here: nothing needs it until the
+// seed has to be regenerated, and a capability guessed before it has
+// a caller is the one the caller then has to work around.
+
 Env* = {
     argv: Vec<str>,       // raw argv; argv.get(0) is the program path
     vars: Map<str, str>,  // raw environment variables
     out: Console,         // stdout / stderr
     mem: Mem,             // page authority: env.mem.alloc() makes an arena
-    fs: Fs,
-    net: Net,
+    fs: Fs,               // the disk. `read` is the whole file at once
+    net: Net,             // named and empty until something needs it
     threads: Threads,     // the thread escape hatch, no longer ambient
 
     // typed args: declare a schema struct, @meta walks its
