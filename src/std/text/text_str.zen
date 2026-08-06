@@ -55,6 +55,30 @@ str_at* = (data: Ptr<u8>, len: usize) str { str(data: data, len: len) }
 STR_HASH_SEED*: u64 = 14695981039346656037
 STR_HASH_MULT*: u64 = 1099511628211
 
+// lexicographic byte order: the first differing byte decides, and when
+// one is a prefix of the other the shorter comes first. `str` is bytes,
+// so this is not collation and does not pretend to be — "Z" precedes
+// "a" because 0x5A precedes 0x61, and asking a language question about
+// text needs std.text.text_utf8 and a codepoint.
+//
+// It lives here by the stranger test — "orders two byte strings" names
+// no module — and it arrives now because THREE separate components had
+// each written their own: sema's type-key ordering, the backend's
+// section sort, and a deterministic emit generally. Every one of them
+// needs the same six lines, and every one of them needs the SAME six
+// lines, because gen_c must be a pure function of its input and two
+// orderings that disagree make two compilers disagree.
+before* = (self: str, other: str) bool {
+    shorter = (self.len < other.len).match({
+        true  => self.len,
+        false => other.len,
+    });
+    Range(0, shorter).find((i) { self.index(i) != other.index(i) }).match({
+        Ok(i) => self.index(i) < other.index(i),
+        None  => self.len < other.len,
+    });
+}
+
 str.impl(Eq, {
     // bytewise, and the LENGTH is part of it: a prefix is not the whole.
     // Comparing over the shorter length is the classic bug, so the lengths
