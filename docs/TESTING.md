@@ -59,6 +59,8 @@ Positions are 1-based line, 1-based **byte** column, and point at the first byte
 
 **A deferred test still runs.** Skipping it would make `.stage` a second gate that cannot fail — the day the feature landed, nothing would notice, and the file would sit there asserting a stage the project had left behind. Both outcomes carry information:
 
+| outcome | verdict |
+|---|---|
 | it fails | deferred. Expected, on the record, not counted as a failure. |
 | **it passes** | **a failure** — "delete the `.stage` file, the stage arrived". |
 
