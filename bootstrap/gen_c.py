@@ -332,6 +332,12 @@ NUMERIC = frozenset(list(INT_VALUES) + ["f32", "f64", "bool"])
 UNIT = ("unit",)
 UNKNOWN = ("unknown",)
 
+# A `want` that says "I have no expected type, but I do want a value."  It is
+# not a type and never reaches C: `None` already means "no expected type", but
+# it also means "nothing is reading this", and a block has to tell those two
+# apart to report the type of its own tail.  See `ex_Block`.
+INFER = ("infer",)
+
 
 def prim(name):
     return ("prim", name)
@@ -1120,10 +1126,15 @@ class Emitter:
             return
         if kind(node) == "Struct" and self.trait_decl(t) is not None:
             self.types[cname] = ("trait", t, self.trait_slots(t), decl)
-            deps = []
-            for _slot, _name, _m, params, ret in self.types[cname][2]:
-                deps.extend(self._deps(list(params) + [ret]))
-            self.type_order[cname] = tuple(sorted(set(deps)))
+            # A trait's slots are FUNCTION POINTERS, so none of them is by-value
+            # containment and none of them constrains definition order -- every
+            # tag is forward-declared above. Feeding the slot signatures to
+            # _deps made a trait depend on every type its methods mention,
+            # including itself: `Eq.eq = (self: @Self, other: @Self) bool`
+            # recorded Eq -> Eq and reported a by-value cycle in std.core.eq
+            # that stopped the whole of src/ compiling. The receiver is `void *`
+            # in the emitted record; it was never containment at all.
+            self.type_order[cname] = ()
         elif kind(node) == "Struct":
             fields = []
             for member in f(node, "fields", ()) or ():
@@ -1861,6 +1872,8 @@ class Emitter:
             parts.append(PRELUDE_SCOPE)
         if "print" in self.needs:
             parts.append(PRELUDE_PRINT)
+        if "fs" in self.needs:
+            parts.append(PRELUDE_FS)
         for name in sorted(self.helpers):
             parts.append(HELPERS[name])
         return "".join(parts)
@@ -2075,6 +2088,7 @@ class FnCtx:
         # record, or None when nothing can register on that block.
         self.sscopes = []
         self.consumed = frozenset()  # names `consume`d anywhere in this body
+        self.blk_ty = UNIT  # the type of the last block `_block_body` closed
 
     # -- output ------------------------------------------------------------
 
@@ -2249,11 +2263,16 @@ class FnCtx:
         here = len(self.dscopes) - 1
         entries = self.dscopes[here]
         if value is None:
+            self.blk_ty = UNIT
             self.exit_scope(here)
             return None
-        code, ty = self.expr(value, want)
-        code = self.coerce(code, ty, want)
-        rty = want if want not in (None, UNKNOWN) else ty
+        code, ty = self.expr(value, None if want is INFER else want)
+        if want is not INFER:
+            code = self.coerce(code, ty, want)
+        rty = ty if want in (None, UNKNOWN) or want is INFER else want
+        # the tail's type, for `ex_Block`: a block cannot report it any other
+        # way, because finding it means running the block
+        self.blk_ty = rty
         if rty == UNIT and code not in ("", "0"):
             # a tail expression of type `()` is the block's value in name
             # only: nothing can read it, so it has to RUN here.  Handing it
@@ -2292,10 +2311,46 @@ class FnCtx:
         info = self.e.enum_info(want)
         if info is None:
             return code
+        got = self.widen_res(code, ty, want)
+        if got is not None:
+            return got
         carriers = [v for v, p in info[2] if p is not None and p == ty]
         if len(carriers) != 1:
             return code
         return self.make_variant(want, carriers[0], code)
+
+    def widen_res(self, code, ty, want):
+        """A `Res` landing where a `Res` with a WIDER error set is expected.
+
+        "The error type of a `Res` is a union, and propagation merges sets"
+        (DESIGN.md, Errors) -- and `.try()` is not the only place a set
+        merges.  Two match arms raising different sets meet at the match's
+        own type, and that value has to be BUILT, not just named.
+
+        Widening only, exactly as `emit_propagate` does it: every member
+        keeps its own name, nothing converts, and a member with no home in
+        the wider set gives None here so the caller reports it rather than
+        the compiler inventing a reason.
+        """
+        if ty in (None, UNKNOWN) or ty[0] != "named" or ty[1] != want[1]:
+            return None
+        if len(ty[2]) != 2 or len(want[2]) != 2 or ty[2][0] != want[2][0]:
+            return None
+        if self.e.enum_info(ty) is None:
+            return None
+        # the value is read three times -- its tag and each payload -- so it
+        # lands in a temporary first
+        tmp = self.new_tmp(ty)
+        self.line("%s = %s;" % (tmp, code))
+        err = self.widen_error("%s.%sdata.%s" % (tmp, GEN, sym_member("Err")),
+                               ty[2][1], want[2][1])
+        if err is None:
+            return None
+        return "(%s.%stag == %s ? %s : %s)" % (
+            tmp, GEN, sym_variant(self.e.variant_parts(ty, "Ok")),
+            self.make_variant(want, "Ok",
+                              "%s.%sdata.%s" % (tmp, GEN, sym_member("Ok"))),
+            self.make_variant(want, "Err", err))
 
     def by_ref(self, code, ty):
         if _LVALUE.match(code):
@@ -3028,6 +3083,24 @@ class FnCtx:
             self.lines, self.tmp, self.indent = saved[0], saved[1], saved[2]
             del self.e.diags[saved[3] :]
         return (code, ty)
+
+    def peek_block(self, node):
+        """The type of a Block's tail, speculatively.
+
+        `peek` is not enough: `self.expr` on a Block asks this, so calling it
+        here would not terminate.  And peeking the tail NODE alone answers
+        nothing, because the tail reads bindings the block's own statements
+        declare.  So the block is lowered for real into a buffer that is then
+        thrown away, exactly as `peek` does."""
+        saved = (list(self.lines), self.tmp, self.indent, len(self.e.diags))
+        self.push()
+        try:
+            self.block_value(node, INFER)
+            return self.blk_ty
+        finally:
+            self.pop()
+            self.lines, self.tmp, self.indent = saved[0], saved[1], saved[2]
+            del self.e.diags[saved[3] :]
 
     def unify(self, tynode, actual, found, tparams=None):
         if tynode is None or actual is None:
@@ -4219,6 +4292,162 @@ class FnCtx:
             return ("0", UNIT)
         return None
 
+    # ---- the filesystem capability ---------------------------------------
+
+    #: FsError, by the ordinal PRELUDE_FS returns.  The names are env.zen's;
+    #: the number never leaves the generated C, and this is the one table
+    #: that maps between them.
+    FS_ERRORS = ("NotFound", "Denied", "IsDir", "Failed")
+
+    def str_parts(self, value, node):
+        """A `str` argument as (bytes, length), spilled once.
+
+        A `str` is a pointer and a count, and both are read -- so the value
+        lands in a temporary first or a call in the argument gets made twice.
+        """
+        code, ty = value if isinstance(value, tuple) else self.expr(value, self.str_type())
+        if ty is None or ty[0] != "named":
+            self.e.error(node, "a path is a `str`")
+            return None
+        dm, _dt = self.field_of(ty, "data")
+        lm, _lt = self.field_of(ty, "len")
+        if dm is None or lm is None:
+            self.e.error(node, "a path is a `str`")
+            return None
+        tmp = self.new_tmp(ty)
+        self.line("%s = %s;" % (tmp, code))
+        return ("(const unsigned char *)%s.%s" % (tmp, dm), "%s.%s" % (tmp, lm))
+
+    def fs_err(self, ret, ety, rc, out, node):
+        """`rc` -> `Err(<the variant it names>)`, written as the chain it is.
+
+        Reading the variant out of the enum rather than out of a number is
+        what lets env.zen reorder or rename its own error set without the
+        backend agreeing to it in secret.
+        """
+        info = self.e.enum_info(ety) if ety is not None else None
+        names = [v for v, p in (info[2] if info else ()) if p is None]
+        for i, name in enumerate(self.FS_ERRORS):
+            if name not in names:
+                continue
+            self.open("if (%s == %d) {" % (rc, i + 1))
+            self.line("%s = %s;" % (out, self.make_variant(
+                ret, "Err", self.make_variant(ety, name, None))))
+            self.close("} else {")
+            self.indent += 1
+        self.line("%s = %s;" % (out, self.err_value(ret, ety, node)))
+        for name in self.FS_ERRORS:
+            if name in names:
+                self.close()
+
+    def lower_fs(self, decl, fnode, node, argnodes, receiver):
+        """`Fs`'s three members ARE the backend.
+
+        env.zen writes them as signatures and says why: "reached only as
+        `env.fs` -- law 2, no ambient authority".  Nothing impls Fs, because
+        Fs is the authority itself, exactly as Console and Mem are.
+        """
+        self.e.needs.add("fs")
+        name = decl.name
+        base = decl.scope_parts
+        ret = self.e.resolve_type(self.e.ret_of(fnode), {}, base)
+
+        if name in ("exists", "is_dir") and len(argnodes) == 1:
+            path = self.str_parts(argnodes[0], node)
+            if path is None:
+                return ("0", prim("bool"))
+            test = "== 1" if name == "is_dir" else ">= 0"
+            return ("(zg_fs_kind(%s, %s) %s)" % (path[0], path[1], test), prim("bool"))
+
+        if name != "read" or len(argnodes) != 2:
+            return None
+
+        # Res<String, FsError>: the buffer the Alloc hands out, wrapped in the
+        # owner that tells the same story every other buffer in std tells.
+        info = self.e.enum_info(ret)
+        payload = dict(info[2]) if info else {}
+        sty = payload.get("Ok")
+        ety = payload.get("Err")
+        alloc = argnodes[0] if isinstance(argnodes[0], tuple) else self.expr(argnodes[0])
+        path = self.str_parts(argnodes[1], node)
+        if sty is None or path is None:
+            self.e.error(node, "Fs.read must return a Res<String, FsError>")
+            return ("0", ret)
+
+        want = self.new_tmp(prim("usize"))
+        got = self.new_tmp(prim("usize"))
+        rc = self.new_tmp(prim("i32"))
+        out = self.new_tmp(ret)
+        self.line("%s = 0;" % want)
+        self.line("%s = 0;" % got)
+        self.line("%s = zg_fs_size(%s, %s, &%s);" % (rc, path[0], path[1], want))
+        self.open("if (%s != 0) {" % rc)
+        self.fs_err(ret, ety, rc, out, node)
+        self.close("} else {")
+        self.indent += 1
+        # the run itself.  ALIGN_MAX, as `create` asks for: it is what the
+        # arena would have given anyway, and it keeps the size header the
+        # arena writes ahead of every run intact, so a String read off the
+        # disk still grows through the ordinary realloc.
+        run = self.call_method(alloc, "raw", [(want, prim("usize")),
+                                              ("16", prim("usize"))], node)
+        if run is None:
+            self.e.error(node, "Fs.read needs an Alloc")
+            return (out, ret)
+        self.fs_run(ret, ety, sty, run, alloc, want, got, rc, out, path, node)
+        self.close()
+        return (out, ret)
+
+    def fs_run(self, ret, ety, sty, run, alloc, want, got, rc, out, path, node):
+        """The Ok half: bytes into the run, run into a String."""
+        rinfo = self.e.enum_info(run[1])
+        ok = dict(rinfo[2]).get("Ok") if rinfo else None
+        buf = self.new_tmp(ok if ok is not None else ("ptr", prim("u8")))
+        tag = "%s.%stag" % (run[0], GEN)
+        self.open("if (%s != %s) {" % (
+            tag, sym_variant(self.e.variant_parts(run[1], "Ok"))))
+        # the one failure an allocation has, named in FsError's own set --
+        # there is no From, so the seed's single enum has to carry it.
+        self.line("%s = %s;" % (out, self.make_variant(
+            ret, "Err", self.make_variant(ety, "OutOfMemory", None))
+            if ety is not None else self.make_variant(ret, "Err", None)))
+        self.close("} else {")
+        self.indent += 1
+        self.line("%s = %s.%sdata.%s;" % (buf, run[0], GEN, sym_member("Ok")))
+        self.line("%s = zg_fs_read(%s, %s, (unsigned char *)%s, %s, &%s);"
+                  % (rc, path[0], path[1], buf, want, got))
+        self.open("if (%s != 0) {" % rc)
+        self.fs_err(ret, ety, rc, out, node)
+        self.close("} else {")
+        self.indent += 1
+        self.line("%s = %s;" % (out, self.make_variant(
+            ret, "Ok", self.fs_string(sty, buf, got, want, alloc, node))))
+        self.close()
+        self.close()
+
+    def fs_string(self, sty, buf, got, want, alloc, node):
+        """A String over a run the Alloc already owns.
+
+        `String` IS its `Vec<u8>` and the Vec's fields are collections'
+        private business, so this is the one place the backend writes them --
+        the same licence `lower_mem` takes with an ArenaState, and for the
+        same reason: the memory enters the program here.
+        """
+        dm, vty = self.field_of(sty, "data")
+        if dm is None or vty is None:
+            self.e.error(node, "Fs.read must return a Res<String, FsError>")
+            return "(%s){0}" % self.e.ctype(sty)
+        inits = []
+        for fname, value in (("data", buf), ("len", got), ("capacity", want)):
+            m, mt = self.field_of(vty, fname)
+            if m:
+                inits.append(".%s = %s" % (m, self.e.convert(value, None, mt)))
+        m, mt = self.field_of(vty, "alloc")
+        if m:
+            inits.append(".%s = %s" % (m, self.e.convert(alloc[0], alloc[1], mt)))
+        vec = "((%s){ %s })" % (self.e.ctype(vty), ", ".join(inits))
+        return "((%s){ .%s = %s })" % (self.e.ctype(sty), dm, vec)
+
     def err_value(self, ret, ety, node):
         """`Err(OutOfMemory)` -- the one failure a page request has."""
         if ety is None:
@@ -4231,6 +4460,10 @@ class FnCtx:
     def _lower_intrinsic(self, decl, fnode, node, argnodes, want, receiver):
         if decl.owner == "Mem" and decl.name in ("alloc", "page", "release"):
             got = self.lower_mem(decl, fnode, node, argnodes, receiver)
+            if got is not None:
+                return got
+        if decl.owner == "Fs" and decl.name in ("read", "exists", "is_dir"):
+            got = self.lower_fs(decl, fnode, node, argnodes, receiver)
             if got is not None:
                 return got
         """The bodyless declarations whose bodies ARE the backend.
@@ -4688,6 +4921,20 @@ class FnCtx:
     # control flow --------------------------------------------------------
 
     def ex_Block(self, node, want=None):
+        if want in (None, UNKNOWN):
+            # A block's type is its tail expression's type, and the only way
+            # to learn it is to RUN the block -- the tail reads bindings the
+            # block itself declares, so inspecting the tail node in isolation
+            # resolves nothing.  So lower speculatively, then lower again
+            # with the answer as `want`.
+            #
+            # Without this a block has no type to report, and a `.match`
+            # whose arms are ALL blocks therefore types as `()`: no result
+            # temporary is allocated and every arm's value is dropped, with
+            # no diagnostic and a zero in its place.
+            found = self.peek_block(node)
+            if found not in (None, UNIT, UNKNOWN):
+                want = found
         result = None
         if want not in (None, UNIT, UNKNOWN):
             result = self.new_tmp(want)
@@ -4727,26 +4974,66 @@ class FnCtx:
         """The match's type, taken from the arm that carries the most
         information: a bare integer literal defaults to i32 and would make
         `(cap == 0).match({true => 8, false => cap * 2})` an i32 beside a
-        usize, so an arm that is not a literal decides."""
+        usize, so an arm that is not a literal decides.
+
+        Every arm is consulted, not just the first informative one.  Two arms
+        are two ways of producing ONE value, so first-arm-wins is not a rule
+        that can hold: `true => Ok(())` beside `false => report(n)` types the
+        match `Res<()>`, and the second arm's `Res<(), AllocError>` then has
+        nowhere to go -- it either fails in the C compiler or, in trailing
+        position, is discarded."""
         fallback = None
+        best = None
         for arm in arms:
             body = f(arm, "body")
-            _code, ty = self.peek(body)
+            # a Block reports its type by being lowered; `peek` would reach
+            # `ex_Block`, which lowers it a second time to find the same answer
+            if kind(body) == "Block":
+                ty = self.peek_block(body)
+            else:
+                _code, ty = self.peek(body)
             if ty in (None, UNIT, UNKNOWN):
                 continue
             if kind(body) == "Literal":
                 fallback = fallback or ty
                 continue
-            return ty
-        return fallback or UNIT
+            best = ty if best is None else self.wider_arm(best, ty)
+        return best or fallback or UNIT
+
+    def wider_arm(self, a, b):
+        """Of two arm types, the one the match as a whole has.
+
+        Only one widening exists and it is the one DESIGN.md already names:
+        "the error type of a `Res` is a union, and propagation merges sets".
+        A `Res` carrying an error set is wider than the same `Res` without
+        one, and two error sets meet as their union.  Nothing else merges --
+        two genuinely different arm types are a type error, reported where
+        the arm is lowered rather than guessed at here."""
+        if a == b:
+            return a
+        if not (a[0] == "named" and b[0] == "named" and a[1] == b[1]):
+            return a
+        if not (a[2] and b[2] and a[2][0] == b[2][0]):
+            return a
+        if len(a[2]) == 1 and len(b[2]) == 2:
+            return b
+        if len(b[2]) == 1 and len(a[2]) == 2:
+            return a
+        if len(a[2]) == 2 and len(b[2]) == 2:
+            return ("named", a[1], (a[2][0], union_of([a[2][1], b[2][1]])))
+        return a
 
     def arm_body(self, arm, result, ty):
         body = f(arm, "body")
         self.push()
         if kind(body) == "Block":
-            value = self.block_value(body, ty)
+            value = self.block_value(body, ty)   # `_block_body` coerces its own tail
         else:
-            value, _t = self.expr(body, ty)
+            value, vty = self.expr(body, ty)
+            if value is not None:
+                # an arm produces the MATCH's value, not its own: a `Res` whose
+                # error set is narrower than the match's has to be widened here
+                value = self.coerce(value, vty, ty)
         if result is not None and value is not None:
             self.line("%s = %s;" % (result, value))
         elif result is None and value and value not in ("", "0"):

@@ -17,7 +17,18 @@ CFLAGS=${CFLAGS:--O2 -std=c99}
 
 rm -rf "$OUT" && mkdir -p "$OUT"
 
-python3 bootstrap/bootstrap.py "$ROOT" --emit-c -o "$OUT/stage1.c"
+# `-m bootstrap.bootstrap`, never the script path: bootstrap/ast.py shares its
+# name with the standard library's, and running the file directly makes
+# `dataclasses` import the wrong one and kill the interpreter. `--root` is not
+# optional either -- without it the compilation root is the inputs' common
+# ancestor, which for a single argument is the argument's parent.
+if ! python3 -m bootstrap.bootstrap "$ROOT" --root "$ROOT" --emit-c -o "$OUT/stage1.c"; then
+    echo "fixpoint: the bootstrapper could not compile $ROOT into a compiler." >&2
+    echo "  stage 1 is not finished. See docs/PLAN.md 'Stage 1 - self-host':" >&2
+    echo "  src/ needs lex, parse, sema, gen AND a src/zen.zen CLI that wires" >&2
+    echo "  them together, because zen-1 is invoked as \`zen-1 build <root>\`." >&2
+    exit 1
+fi
 $CC $CFLAGS "$OUT/stage1.c" -o "$OUT/zen-1"
 
 "$OUT/zen-1" build "$ROOT" --emit-c -o "$OUT/stage2.c"
