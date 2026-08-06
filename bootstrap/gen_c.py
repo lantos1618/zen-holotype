@@ -725,6 +725,7 @@ class Emitter:
         self.bodies = {}  # cname -> body text
         self.helpers = set()  # generated arithmetic helpers actually used
         self.needs = set()  # generated runtime pieces actually used
+        self.argv_vec_fields = ()
 
         self.decls = {}  # (module parts, name) -> [Decl]
         self.by_key = {}  # (module, owner, name) -> [Decl]
@@ -1866,6 +1867,40 @@ class Emitter:
         out.append(entry)
         return "".join(out)
 
+    def argv_prelude(self):
+        """`env.argv`, built once at startup from the C runtime's own argv.
+
+        Generated rather than a PRELUDE_ constant because it names the mangled
+        `Vec<str>` and `str` types, which are not known until they are
+        requested. The rows are never freed: they last exactly as long as the
+        process, and `argv` itself is storage the C runtime already owns, so a
+        row borrows rather than copies.
+        """
+        if len(self.argv_vec_fields) != 3:
+            return ""
+        vdata, vlen, vcap = self.argv_vec_fields
+        return (
+            "static %s %sargv_vec(int argc, char **argv) {\n"
+            "    %s v;\n"
+            "    memset(&v, 0, sizeof v);\n"
+            "    if (argc <= 0) return v;\n"
+            "    %s *rows = (%s *)malloc((size_t)argc * sizeof *rows);\n"
+            "    if (!rows) return v;\n"
+            "    for (int i = 0; i < argc; i++) {\n"
+            "        rows[i].%s = (unsigned char *)argv[i];\n"
+            "        rows[i].%s = strlen(argv[i]);\n"
+            "    }\n"
+            "    v.%s = rows;\n"
+            "    v.%s = (size_t)argc;\n"
+            "    v.%s = (size_t)argc;\n"
+            "    return v;\n"
+            "}\n\n"
+            % (self.argv_vec_ctype, GEN, self.argv_vec_ctype,
+               self.argv_str_ctype, self.argv_str_ctype,
+               self.argv_str_data, self.argv_str_len,
+               vdata, vlen, vcap)
+        )
+
     def prelude(self):
         parts = [PRELUDE_TYPES, PRELUDE_TRAP]
         if "scope" in self.needs:
@@ -2007,6 +2042,44 @@ class Emitter:
             return "".join(lines)
         return ""
 
+    def env_value(self, ety):
+        """The `Env` main receives, with `argv` actually filled in.
+
+        It was `(Env){0}` — a zeroed struct — so `env.argv.len` was 0 in every
+        program ever compiled, and `zg_argc`/`zg_argv` were assigned in `main`
+        and read by nothing. A compiler cannot be told what to compile that
+        way, which is what made this the last thing between the tree and a
+        fixpoint attempt.
+
+        The rows are one `malloc` at startup and are never freed: they live
+        exactly as long as the process, and `argv` itself is already static
+        storage the C runtime owns. The Vec's `alloc` stays zeroed, so growing
+        `env.argv` would fault — nobody grows argv, and the alternative is
+        handing main's arena to a value built before any arena exists.
+        """
+        vec_decl = self.type_decl("Vec")
+        str_decl = self.type_decl("str")
+        if vec_decl is None or str_decl is None:
+            return "(%s){0}" % self.ctype(ety)
+        str_ty = ("named", str_decl.parts, ())
+        vty = ("named", vec_decl.parts, (str_ty,))
+        einfo = self.types.get(self.request_type(ety))
+        if einfo is None or einfo[0] != "struct":
+            return "(%s){0}" % self.ctype(ety)
+        if not any(n == "argv" for n, _ in einfo[2]):
+            return "(%s){0}" % self.ctype(ety)
+        self.needs.add("argv")
+        self.argv_vec_ctype = self.ctype(vty)
+        self.argv_str_ctype = self.ctype(str_ty)
+        self.argv_str_data = sym_member("data")
+        self.argv_str_len = sym_member("len")
+        vinfo = self.types.get(self.request_type(vty))
+        names = [n for n, _ in vinfo[2]] if vinfo and vinfo[0] == "struct" else []
+        self.argv_vec_fields = tuple(sym_member(n) for n in ("data", "len", "capacity")
+                                     if n in names)
+        return "((%s){ .%s = %sargv_vec(argc, argv) })" % (
+            self.ctype(ety), sym_member("argv"), GEN)
+
     def entry_point(self):
         """`main`, the one name the C standard fixes for us."""
         cands = [d for d in self.by_name.get("main", []) if d.dkind == "fn"]
@@ -2022,8 +2095,15 @@ class Emitter:
         args = []
         for p in self.params_of(fnode):
             pty = self.resolve_type(f(p, "ty"), {}, decl.scope_parts)
-            args.append("(%s){0}" % self.ctype(pty) if pty[0] != "prim" else "0")
-        body = ["int main(int argc, char **argv) {\n"]
+            if pty[0] == "named" and pty[1] and pty[1][-1] == "Env":
+                args.append(self.env_value(pty))
+            else:
+                args.append("(%s){0}" % self.ctype(pty) if pty[0] != "prim" else "0")
+        # argv_vec names the mangled Vec<str> and str types, so it cannot go
+        # in the prelude: that is emitted BEFORE the type definitions. Here it
+        # sits directly above `main`, after every type is complete.
+        body = [self.argv_prelude() if "argv" in self.needs else ""]
+        body.append("int main(int argc, char **argv) {\n")
         body.append("    %sargc = argc;\n    %sargv = argv;\n" % (GEN, GEN))
         call = "%s(%s)" % (cname, ", ".join(args) if nparams else "")
         info = self.enum_info(ret) if ret[0] == "named" else None
