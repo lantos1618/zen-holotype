@@ -1,0 +1,138 @@
+// Four spellings of one error set are ONE type.
+//
+// tests/corpus/std/res_try_error_set_keeps_the_variant.zen sends a single
+// IoError.Full through `IoError`, `WriteError = IoError | AllocError`,
+// `Res<(), _>` and `Error = AllocError | IoError`, and demands it arrive
+// still saying `Full`. That test exercises the whole compiler; this one
+// exercises the property the whole compiler stands on — that the four
+// spellings INTERN TO THE SAME TyId — because a set that is not
+// canonical has to invent a variant on the way back out.
+//
+// The three canonicalisation laws, each with a line below:
+//   FLAT     a member that is a union contributes its members
+//   SORTED   `A | B` and `B | A` are one set
+//   DEDUPED  merging a set into itself is a no-op
+// and the collapse: a set of one IS its member, so `Res<T, E>` never
+// changes shape.
+
+Types, TyId = sema.sema_ty
+DeclId = sema.sema_id
+Diag, SemaFault, TypeFault, NameFault = sema.sema_diag
+Pos, Span = ast.ast_span
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+
+// A stand-in for a declaration. Nothing here reads the AST — a TyId's
+// identity is its intern key, and a nominal type keys on its qualified
+// name, so a coordinate and a name is all a type needs to exist.
+declared = (t :: Types, module: u32, qname: str, name: str)
+           Res<TyId, AllocError> {
+    none ::= t.alloc.Vec<TyId>();
+    t.named(DeclId(module: module, decl: 0), qname, name, none)
+}
+
+set_of2 = (t :: Types, a: TyId, b: TyId) Res<TyId, AllocError> {
+    parts ::= t.alloc.Vec<TyId>();
+    parts.add(a).try();
+    parts.add(b).try();
+    t.union_ty(parts)
+}
+
+set_of3 = (t :: Types, a: TyId, b: TyId, c: TyId) Res<TyId, AllocError> {
+    parts ::= t.alloc.Vec<TyId>();
+    parts.add(a).try();
+    parts.add(b).try();
+    parts.add(c).try();
+    t.union_ty(parts)
+}
+
+show = (t: Types, label: str, id: TyId) Res<(), AllocError> {
+    out ::= t.alloc.String().try();
+    t.write_name(id, out).try();
+    println("{} {}", label, out.view());
+    Ok(());
+}
+
+same = (label: str, a: TyId, b: TyId) () {
+    println("{} {}", label, a.eq(b));
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    t ::= alloc.Types();
+
+    io = declared(t, 0, "std.core.io.IoError", "IoError").try();
+    mem = declared(t, 1, "std.mem.AllocError", "AllocError").try();
+    arg = declared(t, 2, "std.env.ArgError", "ArgError").try();
+
+    // a nominal type is nominal on its DECLARATION, not its name: two
+    // modules may declare `IoError` and they are two types
+    twin = declared(t, 7, "other.IoError", "IoError").try();
+    same("nominal by declaration, not name:", io, twin);
+
+    // SORTED. `WriteError = IoError | AllocError` and
+    // `Error = AllocError | IoError` are the same set written twice
+    write_error = set_of2(t, io, mem).try();
+    error = set_of2(t, mem, io).try();
+    same("A | B is B | A:", write_error, error);
+    show(t, "the set:", write_error).try();
+
+    // DEDUPED. merging a set into itself changes nothing
+    same("A | A is A:", t.merge(io, io).try(), io);
+    same("merge is idempotent:", t.merge(write_error, write_error).try(), write_error);
+
+    // FLAT. a member that is itself a set contributes its members, so
+    // widening through a named union lands in the same place as
+    // spelling the members out
+    wider = t.merge(write_error, arg).try();
+    spelled = set_of3(t, arg, io, mem).try();
+    same("flat, however nested:", wider, spelled);
+    show(t, "the wider set:", wider).try();
+
+    // COLLAPSE. a set of one is its member — "a single error type is a
+    // set of one", so Res<T, E> never changes shape
+    one ::= alloc.Vec<TyId>();
+    one.add(io).try();
+    same("a set of one is its member:", t.union_ty(one).try(), io);
+
+    // CONTAINMENT is what `.try()` checks, and it is not a conversion
+    println("IoError is in WriteError: {}", t.set_has(write_error, io));
+    println("ArgError is in WriteError: {}", t.set_has(write_error, arg));
+    println("WriteError fits in the wider set: {}", t.set_within(write_error, wider));
+    println("the wider set fits in WriteError: {}", t.set_within(wider, write_error));
+
+    // and one member is still itself on the way back out: the set holds
+    // the TYPES, not tags, which is the whole of the corpus test above
+    members ::= alloc.Vec<TyId>();
+    t.members_of(wider, members).try();
+    println("members {}", members.len);
+    members.loop((h, m) { show(t, " ", m).try() });
+
+    // and the renderer prints a set the way it was written. A diagnostic
+    // carries TYPE IDS, never a formatted message, so this is the only
+    // place a sentence is built — and it needs the store to say what a
+    // TyId is called.
+    at = Span(file: "main.zen", start: Pos(line: 12, col: 5),
+              end: Pos(line: 12, col: 9));
+    d = Diag(
+        file: "main.zen",
+        span: at,
+        fault: SemaFault.NoErrorConversion(TypeFault(
+            name: "", expected: write_error, found: wider)),
+    );
+    line ::= alloc.String().try();
+    d.render(t, line).try();
+    println("{}", line.view());
+
+    missing = Diag(
+        file: "main.zen",
+        span: at,
+        fault: SemaFault.UndefinedName(NameFault(name: "ada")),
+    );
+    line2 ::= alloc.String().try();
+    missing.render(t, line2).try();
+    println("{}", line2.view());
+
+    Ok(0);
+}

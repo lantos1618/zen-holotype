@@ -1,0 +1,408 @@
+// src/sema/sema_def.zen
+// What a name means, and who is allowed to ask.
+//
+// `defs_of(name)` is the second query DESIGN.md names, and it returns a
+// LIST rather than a definition. That is not a hedge — it is what
+// overloading is: "resolution is on declared parameter types and arity",
+// so a name in scope denotes a candidate SET and choosing between them
+// is the call site's job, not resolution's. A `defs_of` that returned
+// one answer would have decided the thing overload resolution exists to
+// decide.
+//
+// THE `*` GATE, in one sentence: a name crosses a module boundary
+// exactly when it is starred, and re-export is an import whose bindings
+// are starred. So there is no second mechanism to implement — following
+// an import to the module that declares the name, and filtering by
+// `exported` at every hop, is the whole of it. A folder root is a file
+// of starred bindings, which means the chain is routinely two or three
+// hops deep and `std.core` reaches `std.core.result` through exactly
+// this walk.
+//
+// A MODULE TABLE IS A `Vec`, NOT A `Map`, and that is measured rather
+// than lazy: `Map.get` in this stdlib is `index_of`, which is a `find`
+// over every entry — a linear scan already. A `Map<str, Vec<Def>>` would
+// buy the same complexity for a nested generic and a second allocation
+// per name. The memo tables that DO key on an id use `Map`, because
+// there the key is a `u32` and the point is identity, not lookup speed.
+
+Ast, Module, Decl, DeclKind, Ident, Span, QualifiedName = ast
+Import, Impl = ast
+Alloc, AllocError = std.mem
+Vec, Map = std.collections
+str, String = std.text
+Range = std.core
+DeclId, ImplId = sema.sema_id
+
+// Which declaration form a name denotes. Not the declaration itself:
+// "if you have a `Decl`, you have the whole declaration", and this
+// layer only has to answer what KIND of thing was found so a caller
+// knows whether to expect a type or a value.
+//
+// Every variant carries the `Def` suffix, and that is the same rule
+// `ast_node.zen` follows when it writes `Equal` rather than `Eq`: a bare
+// `Struct` here is not a new name, it is `ast.Struct`, and
+// `A = B | C` where B and C are types in scope is DESIGN.md's OTHER
+// reading of that syntax — "a union of existing types". The bar form is
+// genuinely ambiguous between an enum and a union, and the language
+// resolves it by what the names mean, so a variant that shadows a type
+// silently becomes a union of it.
+DefKind* = StructDef | EnumDef | AliasDef | FunctionDef | ConstDef
+
+// One declaration, as a name resolves to it.
+//
+// `qname` is the module-qualified name and it is the identity — two
+// modules may declare `Circle` and they are two types. `name` is the
+// bare one, for a diagnostic to print.
+Def* = {
+    name*: str,
+    qname*: str,
+    kind*: DefKind,
+    id*: DeclId,
+    exported*: bool,
+    span*: Span,
+}
+
+// `Res*, Ok* = std.core.result` binds two names, each of which may or
+// may not be starred. Zen has no renaming import, so the local name and
+// the declared name are the same string — which is what makes following
+// the chain a lookup of the SAME name one module along.
+ImportBinding* = {
+    name*: str,
+    module*: str,
+    exported*: bool,
+    span*: Span,
+}
+
+// One module's own surface: what it declares, what it imports, and what
+// it impls. Built once per module by `build`.
+ModuleTable* = {
+    name*: str,
+    index*: u32,
+    defs* :: Vec<Def>,
+    imports* :: Vec<ImportBinding>,
+    impls* :: Vec<ImplId>,
+}
+
+// The module graph, and every query over names.
+//
+// It carries the `Alloc` for the reason `Vec` and `Ast` do: the tables
+// are built once and live as long as the compilation, so the allocator
+// is threaded in at construction and every query that grows a list says
+// `Res<_, AllocError>`.
+World* = {
+    tables :: Vec<ModuleTable>,
+    alloc: Alloc,
+
+    count* = (self: @Self) usize { self.tables.len }
+
+    table_at* = (self: @Self, i: usize) Res<ModuleTable> { self.tables.get(i) }
+
+    // Which module is spelled `std.core.result`? Modules are addressable
+    // by their full dotted path only: "names are qualified by path", and
+    // accepting a suffix would make two modules answer to one spelling.
+    index_of* = (self: @Self, name: str) Res<usize> {
+        Range(0, self.tables.len).find((i) {
+            self.tables.get(i).match({
+                Ok(t) => t.name.eq(name),
+                None  => false,
+            })
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // the queries
+    // -----------------------------------------------------------------
+
+    // Every declaration of `name` visible in module `mi`.
+    //
+    // Own declarations first and they are the whole answer when there
+    // are any: a module's own name is never shadowed by something it
+    // imported, because the import would have been a redeclaration.
+    // Otherwise the imports are followed, and `*` gates every hop.
+    defs_of* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
+               Res<(), AllocError> {
+        self.own_defs(mi, name, out).try();
+        (out.len == 0).then(() { self.imported_defs(mi, name, out).try() });
+        Ok(());
+    }
+
+    // What `mi` declares under `name`, starred or not. Visibility is a
+    // question about crossing a boundary, and this has not crossed one.
+    own_defs* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
+                Res<(), AllocError> {
+        self.tables.get(mi).match({
+            Ok(t)   => collect_named(t.defs, name, out),
+            None    => Ok(()),
+        }).try();
+        Ok(());
+    }
+
+    // What `mi` can see under `name` because it imported it.
+    //
+    // The `*` on the IMPORT is what re-exports; the `*` on the
+    // DECLARATION is what let it out of its own module. Both are
+    // checked, at their own hop, which is why a two-hop chain through a
+    // folder root works and a chain through an unstarred binding does
+    // not.
+    imported_defs* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
+                     Res<(), AllocError> {
+        seen ::= self.alloc.Vec<usize>();
+        self.follow(mi, name, out, seen)
+    }
+
+    // Every EXPORTED declaration of `name` in module `mi`, following
+    // that module's own re-exports. This is what one hop of the chain
+    // asks of the next.
+    exports_of* = (self: @Self, mi: usize, name: str, out :: Vec<Def>,
+                   seen :: Vec<usize>) Res<(), AllocError> {
+        starred ::= self.alloc.Vec<Def>();
+        self.own_defs(mi, name, starred).try();
+        keep_exported(starred, out).try();
+        // a folder root declares nothing and re-exports everything, so
+        // an empty answer here is the normal case and not a miss
+        (out.len == 0).then(() { self.follow(mi, name, out, seen).try() });
+        Ok(());
+    }
+
+    // Walk `mi`'s import list for `name` and ask the module it names.
+    //
+    // `seen` is the cycle guard, and it is needed rather than defensive:
+    // `std.core.display` and `std.text` import from each other, and a
+    // module graph is not required to be a tree.
+    follow = (self: @Self, mi: usize, name: str, out :: Vec<Def>,
+              seen :: Vec<usize>) Res<(), AllocError> {
+        visited(seen, mi).match({
+            false => self.follow_fresh(mi, name, out, seen),
+            true  => Ok(()),
+        })
+    }
+
+    follow_fresh = (self: @Self, mi: usize, name: str, out :: Vec<Def>,
+                    seen :: Vec<usize>) Res<(), AllocError> {
+        seen.add(mi).try();
+        self.tables.get(mi).match({
+            Ok(t) => self.follow_imports(t, name, out, seen),
+            None  => Ok(()),
+        }).try();
+        Ok(());
+    }
+
+    follow_imports = (self: @Self, t: ModuleTable, name: str, out :: Vec<Def>,
+                      seen :: Vec<usize>) Res<(), AllocError> {
+        t.imports.loop((h, binding) {
+            binding.name.eq(name).then(() {
+                self.follow_one(binding, name, out, seen).try();
+            });
+        });
+        Ok(());
+    }
+
+    follow_one = (self: @Self, binding: ImportBinding, name: str,
+                  out :: Vec<Def>, seen :: Vec<usize>) Res<(), AllocError> {
+        self.index_of(binding.module).match({
+            Ok(other) => self.exports_of(other, name, out, seen),
+            None      => Ok(()),
+        }).try();
+        Ok(());
+    }
+
+    // Every impl in the program whose target is this type name.
+    //
+    // Whole-program, and it has to be: "an impl lives with the type, not
+    // with the trait", so `str.impl(Eq, ..)` is in `std.text` and a
+    // caller in another module still has to find it. There are no orphan
+    // impls, so the search is over declaring modules and not over
+    // importers.
+    impls_named* = (self: @Self, tree: Ast, target: str, out :: Vec<ImplId>)
+                   Res<(), AllocError> {
+        Range(0, self.tables.len).loop((h, mi) {
+            self.tables.get(mi).match({
+                Ok(t) => self.impls_in(tree, t, target, out),
+                None  => Ok(()),
+            }).try();
+        });
+        Ok(());
+    }
+
+    impls_in = (self: @Self, tree: Ast, t: ModuleTable, target: str,
+                out :: Vec<ImplId>) Res<(), AllocError> {
+        t.impls.loop((h, id) {
+            self.impl_at(tree, id).match({
+                Ok(im)  => keep_if_target(im, target, id, out),
+                None    => Ok(()),
+            }).try();
+        });
+        Ok(());
+    }
+
+    // The `Impl` node an `ImplId` points at. A projection through the
+    // AST, kept here so no caller has to know an impl is a `DeclKind`.
+    impl_at* = (self: @Self, tree: Ast, id: ImplId) Res<Impl> {
+        decl_at(tree, id.decl).match({
+            None    => None,
+            Ok(d)   => d.kind.match({
+                Impl(i) => Ok(i),
+                _       => None,
+            }),
+        })
+    }
+}
+
+// Build the whole graph from a parsed `Ast`. One pass over every module
+// and every declaration in it, in source order, so the indices this
+// hands out are a pure function of the input.
+World* = (a: Alloc, tree: Ast) Res<World, AllocError> {
+    w ::= World(tables: a.Vec<ModuleTable>(), alloc: a);
+    Range(0, tree.module_count()).loop((h, i) {
+        tree.module_at(i).match({
+            Ok(m)   => add_module(w, a, m, i),
+            None    => Ok(()),
+        }).try();
+    });
+    Ok(w);
+}
+
+add_module = (w :: World, a: Alloc, m: Module, i: usize) Res<(), AllocError> {
+    t ::= ModuleTable(
+        name: m.name,
+        index: 0,
+        defs: a.Vec<Def>(),
+        imports: a.Vec<ImportBinding>(),
+        impls: a.Vec<ImplId>(),
+    );
+    Range(0, m.decls.len).loop((h, di) {
+        m.decls.get(di).match({
+            Ok(d)   => index_decl(t, a, m, d, i, di),
+            None    => Ok(()),
+        }).try();
+    });
+    w.tables.add(t).try();
+    Ok(());
+}
+
+// One declaration, filed under the name it binds.
+//
+// An `Import` binds names without declaring them and an `Impl` binds no
+// name at all, so those two go to their own lists; everything else is a
+// `Def`. The order of this match is the order of `DeclKind`, so a new
+// declaration form is a compile error here rather than a silent miss.
+index_decl = (t :: ModuleTable, a: Alloc, m: Module, d: Decl,
+              mi: usize, di: usize) Res<(), AllocError> {
+    id = decl_id(mi, di);
+    d.kind.match({
+        Struct(s)   => add_def(t, a, m, s.name, DefKind.StructDef, s.exported, id, d.span),
+        Enum(e)     => add_def(t, a, m, e.name, DefKind.EnumDef, e.exported, id, d.span),
+        Alias(x)    => add_def(t, a, m, x.name, DefKind.AliasDef, x.exported, id, d.span),
+        Function(f) => add_def(t, a, m, f.name, DefKind.FunctionDef, f.exported, id, d.span),
+        Const(c)    => add_def(t, a, m, c.name, DefKind.ConstDef, c.exported, id, d.span),
+        Import(im)  => add_imports(t, a, im, d.span),
+        Impl(_)     => t.impls.add(ImplId(decl: id)),
+    }).try();
+    Ok(());
+}
+
+add_def = (t :: ModuleTable, a: Alloc, m: Module, name: Ident, kind: DefKind,
+           exported: bool, id: DeclId, span: Span) Res<(), AllocError> {
+    q ::= a.String().try();
+    q.add_bytes(m.name).try();
+    q.add_bytes(".").try();
+    q.add_bytes(name.text).try();
+    t.defs.add(Def(
+        name: name.text,
+        qname: q.view(),
+        kind: kind,
+        id: id,
+        exported: exported,
+        span: span,
+    ))
+}
+
+// `Res*, Ok*, None* = std.core.result` is three bindings of one module,
+// each starred independently. The module path is flattened to its dotted
+// spelling once, here, so nothing downstream walks segments.
+add_imports = (t :: ModuleTable, a: Alloc, im: Import, span: Span)
+              Res<(), AllocError> {
+    path = dotted(a, im.module).try();
+    im.names.loop((h, n) {
+        t.imports.add(ImportBinding(
+            name: n.name.text,
+            module: path,
+            exported: n.exported,
+            span: span,
+        )).try();
+    });
+    Ok(());
+}
+
+// A `QualifiedName`'s dotted spelling — `std.core.result`.
+//
+// The segments are stored apart so a diagnostic can point at the one
+// that is wrong; this is the other direction, and it allocates, so it
+// takes an `Alloc` and says so. Rejoining rather than reading the span's
+// source text is deliberate: a `Span` names a position, and going back
+// to the bytes to recover something the AST already holds is how two
+// sources of one fact start disagreeing.
+dotted* = (a: Alloc, q: QualifiedName) Res<str, AllocError> {
+    out ::= a.String().try();
+    q.segments.loop((h, i, seg) {
+        (i > 0).then(() { out.add_bytes(".").try() });
+        out.add_bytes(seg.text).try();
+    });
+    Ok(out.view());
+}
+
+// The coordinate of a declaration. Both indices are positions in a
+// `Vec`, so they are `usize`, and `DeclId` holds `u32` for the reason
+// `ast_id.zen` gives. This is the one narrowing in the file and it is
+// done by counting rather than converting.
+decl_id* = (mi: usize, di: usize) DeclId {
+    DeclId(module: index_u32(mi), decl: index_u32(di))
+}
+
+// `usize` to `u32` by counting up, because `std.core.num` carries only
+// LOSSLESS conversions — a narrowing one can fail, so it is not there to
+// call. Counting is honest about that: a tree with four billion modules
+// saturates rather than wrapping, and four billion is not a number this
+// compiler reaches.
+//
+// This belongs in `std.core.num` as a `Res`-returning `to_u32`, and
+// `docs/SEMA_BOOTSTRAP_FIXES.md` records it as a std gap.
+index_u32* = (v: usize) u32 {
+    n ::= 0;
+    Range(0, v).loop((h, i) { n = n + 1; });
+    n
+}
+
+decl_at* = (tree: Ast, id: DeclId) Res<Decl> {
+    tree.module_at(id.module.to_usize()).match({
+        None    => None,
+        Ok(m)   => m.decls.get(id.decl.to_usize()),
+    })
+}
+
+keep_if_target = (im: Impl, target: str, id: ImplId, out :: Vec<ImplId>)
+                 Res<(), AllocError> {
+    im.target.text.eq(target).then(() { out.add(id).try() });
+    Ok(());
+}
+
+collect_named = (defs: Vec<Def>, name: str, out :: Vec<Def>)
+                Res<(), AllocError> {
+    defs.loop((h, d) {
+        d.name.eq(name).then(() { out.add(d).try() });
+    });
+    Ok(());
+}
+
+keep_exported = (defs: Vec<Def>, out :: Vec<Def>) Res<(), AllocError> {
+    defs.loop((h, d) {
+        d.exported.then(() { out.add(d).try() });
+    });
+    Ok(());
+}
+
+visited = (seen: Vec<usize>, mi: usize) bool {
+    Range(0, seen.len).find((i) {
+        seen.get(i).match({ Ok(v) => v == mi, None => false })
+    }).match({ Ok(_) => true, None => false })
+}

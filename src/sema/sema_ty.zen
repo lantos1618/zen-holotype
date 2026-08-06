@@ -1,0 +1,608 @@
+// src/sema/sema_ty.zen
+// What sema computes. NOT what the source wrote.
+//
+// `ast.Type` is a WRITTEN type — a name, a span, the trivia around it.
+// AST_CONTRACT.md is explicit that a type after inference is not a node:
+// "What sema computes is sema's, keyed on an id — that is what the ids
+// are for". This file is that thing.
+//
+// TYPES ARE INTERNED, and it is the single decision the rest of sema
+// stands on. Two types are equal exactly when their ids are equal, so
+// every comparison in overload resolution, in error-set merging and in
+// assignability is a `u32` compare rather than a structural walk. There
+// is no other way to make `A | B` and `B | A` the same type without
+// writing set equality by hand at every call site — and
+// `tests/corpus/std/res_try_error_set_keeps_the_variant.zen` sends one
+// `IoError.Full` through four spellings of one set and demands it
+// arrive as `Full`, which is exactly a demand that the four spellings
+// be one type.
+//
+// THE KEY IS THE IDENTITY. A type is interned under a string built from
+// its children's keys, so interning is one `Map` lookup and never a
+// recursion: by the time a compound type is built, every child already
+// has a key. Nominal types key on their DECLARATION and not their name,
+// because "two modules may define the same top-level name without
+// colliding" and `Circle = {radius: f64}` and `Sphere = {radius: f64}`
+// "are different types".
+//
+// The key is not the display name. `write_name` walks the structure to
+// print `Vec<i32>` where the key says `Vec#0.4<i32>`, because a
+// diagnostic that names a module index is a diagnostic nobody can read.
+
+Alloc, AllocError = std.mem
+Vec, Map = std.collections
+str, String = std.text
+Eq, Hash, Hasher = std.core
+Range = std.core
+DeclId = sema.sema_id
+
+// An interned type. The index into `Types`, and nothing else — the
+// whole point is that this is small enough to compare, hash and copy
+// without thinking about it.
+//
+// u32 for the reason `ast_id.zen` gives: `std.core.num` carries only
+// lossless conversions, and u32 is the widest integer with both
+// `to_usize` (to index the store) and `to_u64` (to hash).
+TyId* = { index*: u32 }
+
+TyId.impl(Eq, {
+    eq ::= (self: @Self, other: @Self) bool { self.index == other.index }
+})
+
+TyId.impl(Hash, {
+    hash = (self: @Self, hasher :: Hasher) u64 { self.index.to_u64() }
+})
+
+// The scalars the language builds in and no module declares: the
+// integers, the floats, `bool`, `str`, and `()`.
+//
+// A separate kind from `Named` rather than a declaration with no body,
+// because a primitive has no `DeclId` to be nominal on and inventing
+// one would put a fictional row in `Ast.modules`.
+Prim* = { name*: str }
+
+// A declared struct or enum, applied to its type arguments.
+// `Vec<i32>`, `Res<(), AllocError>`, `Circle`.
+//
+// `decl` is the identity and `name` is only carried so a diagnostic
+// need not walk back to the AST to say `Vec`.
+TyNamed* = {
+    decl*: DeclId,
+    name*: str,
+    args*: Vec<TyId>,
+}
+
+// A function type. Parameter NAMES are absent and that is the language
+// rule, not a saving: "Parameter names are documentation, not identity.
+// `(a: i32, b: i32) i32` and `(x: i32, y: i32) i32` are the same type,
+// and overload resolution never sees names."
+TyFn* = {
+    params*: Vec<TyId>,
+    ret*: TyId,
+}
+
+// A structural error set — "`A | B` is an anonymous enum of two
+// variants, a structural enum, not a new kind of type".
+//
+// CANONICAL, which is three properties and every one of them is load
+// bearing: FLAT (a member is never itself a union, so merging is a
+// concatenation), SORTED (so `A | B` and `B | A` intern to one id), and
+// DEDUPED (so merging a set into itself is a no-op). A union of one
+// collapses to its member before it is ever built, so `Res<T, E>` with
+// a single error type is that type and not a set wrapping it.
+TyUnion* = {
+    members*: Vec<TyId>,
+}
+
+// An unsubstituted type parameter: the `T` of `Vec<T>` inside `Vec`'s
+// own body. It is nominal on its OWNER as well as its name, so the `T`
+// of `Vec` and the `T` of `Map` are two types and substitution cannot
+// confuse them.
+TyVar* = {
+    name*: str,
+    owner*: str,
+}
+
+// `Infer` is the `_` of `Res<Cfg, _>` — a hole law 6 permits inside a
+// module and forbids at a `*` boundary.
+//
+// `Unknown` is POISON: a type sema could not compute because it already
+// reported why. It is not an error type and it never produces a second
+// diagnostic — one mistake, one diagnostic, and a cascade of "expected
+// Unknown" is the thing this variant exists to prevent.
+// Which `Res` a value is, when that is not yet decided.
+//
+// `Ok(0)` is written before anyone knows whether it closes a `Res<i32>`
+// or a `Res<i32, E>`, and DESIGN.md's hoisting rule turns on exactly
+// that: "hoisting only fires when exactly ONE variant carries the type".
+// So the form is carried rather than guessed, and `Open` is what a bare
+// `Ok(..)` produces until an expectation settles it.
+ResForm* = Absence | Failure | Open
+
+// `Res<T>` and `Res<T, E>` are one shape — "propagation merging error
+// sets never changes the shape of Res". `error` is meaningful only when
+// `form` is `Failure`; under `Absence` it is the unit type and under
+// `Open` it is the `Infer` hole.
+TyRes* = {
+    value*: TyId,
+    error*: TyId,
+    form*: ResForm,
+}
+
+Ty* = Prim(Prim)
+    | Res(TyRes)
+    | Named(TyNamed)
+    | Fn(TyFn)
+    | Union(TyUnion)
+    | Var(TyVar)
+    | Infer
+    | Unknown
+
+// The interning store.
+//
+// `kinds` and `keys` are parallel and are indexed by a `TyId`; `by_key`
+// is the inverse. `count` shadows `kinds.len` as a u32 for the reason
+// `Ast` keeps its own counters: a Vec's len is a usize and there is no
+// narrowing conversion to get back, on purpose, because a narrowing
+// conversion can fail.
+Types* = {
+    kinds :: Vec<Ty>,
+    keys :: Vec<String>,
+    by_key :: Map<str, TyId>,
+    count :: u32,
+    alloc: Alloc,
+
+    // -----------------------------------------------------------------
+    // reading
+    // -----------------------------------------------------------------
+
+    // What a type IS. Traps on an id this store never handed out, for
+    // the reason `Ast.expr_at` does: that is a compiler bug and not
+    // input a caller can act on.
+    at* = (self: @Self, id: TyId) Ty {
+        i = id.index.to_usize();
+        self.kinds.len - i - 1;
+        self.kinds.ptr().read(i);
+    }
+
+    // The intern key. Internal identity, not a name to show anyone.
+    key_at* = (self: @Self, id: TyId) str {
+        i = id.index.to_usize();
+        self.keys.len - i - 1;
+        self.keys.ptr().read(i).view();
+    }
+
+    count_of* = (self: @Self) u32 { self.count }
+
+    // -----------------------------------------------------------------
+    // interning
+    //
+    // One entry point. Everything below builds a key and calls it, so
+    // there is exactly one place that decides whether a type is new.
+    // -----------------------------------------------------------------
+
+    intern* = (self :: @Self, key: str, kind: Ty) Res<TyId, AllocError> {
+        // the None arm leads because a match takes its type from its
+        // first arm, and this is the arm whose type is written down.
+        self.by_key.get(key).match({
+            None   => self.fresh(key, kind),
+            Ok(id) => Ok(id),
+        })
+    }
+
+    // A key this store has not seen. Never called twice for one key —
+    // `intern` is the only caller and it has already looked.
+    fresh = (self :: @Self, key: str, kind: Ty) Res<TyId, AllocError> {
+        id = TyId(index: self.count);
+        owned ::= self.alloc.String().try();
+        owned.add_bytes(key).try();
+        // the map borrows the OWNED copy's bytes, never the caller's:
+        // a key built in a scratch String dies with it, and a Map row
+        // pointing at dead bytes is the bug that has no symptom
+        stable = owned.view();
+        self.keys.add(owned).try();
+        self.kinds.add(kind).try();
+        self.by_key.set(stable, id).try();
+        self.count = self.count + 1;
+        Ok(id);
+    }
+
+    // -----------------------------------------------------------------
+    // the constructors
+    // -----------------------------------------------------------------
+
+    // `i32`, `bool`, `str`, `()`. The key is the name: a primitive is
+    // nominal on nothing else, and no declaration can shadow one.
+    prim* = (self :: @Self, name: str) Res<TyId, AllocError> {
+        self.intern(name, Ty.Prim(Prim(name: name)))
+    }
+
+    unit* = (self :: @Self) Res<TyId, AllocError> { self.prim("()") }
+
+    bool_ty* = (self :: @Self) Res<TyId, AllocError> { self.prim("bool") }
+
+    str_ty* = (self :: @Self) Res<TyId, AllocError> { self.prim("str") }
+
+    // The hole, and the poison. Neither carries anything, so both are
+    // interned under a name no source can spell.
+    infer* = (self :: @Self) Res<TyId, AllocError> { self.intern("_", Ty.Infer) }
+
+    unknown* = (self :: @Self) Res<TyId, AllocError> { self.intern("?", Ty.Unknown) }
+
+    // A declared type applied to its arguments. The key names the
+    // DECLARATION, which is what makes two same-named types in two
+    // modules two types.
+    // `qname` is the declaration's module-qualified name — `std.collections.Vec`
+    // — and it, not `name`, is the identity: "two modules may define the
+    // same top-level name without colliding", so `Circle` alone would
+    // make two types one.
+    named* = (self :: @Self, decl: DeclId, qname: str, name: str, args: Vec<TyId>)
+             Res<TyId, AllocError> {
+        key ::= self.alloc.String().try();
+        key.add_bytes(qname).try();
+        self.write_args(key, args).try();
+        self.intern(key.view(), Ty.Named(TyNamed(decl: decl, name: name, args: args)))
+    }
+
+    // `Res<T>` — absence, carrying no reason because there is none.
+    res_absence* = (self :: @Self, value: TyId) Res<TyId, AllocError> {
+        unit = self.prim("()").try();
+        self.res_form(value, unit, ResForm.Absence)
+    }
+
+    // `Res<T, E>` — failure, with the set a caller can act on.
+    res_failure* = (self :: @Self, value: TyId, error: TyId)
+                   Res<TyId, AllocError> {
+        self.res_form(value, error, ResForm.Failure)
+    }
+
+    // What a bare `Ok(x)` is before an expectation settles it.
+    res_open* = (self :: @Self, value: TyId) Res<TyId, AllocError> {
+        hole = self.infer().try();
+        self.res_form(value, hole, ResForm.Open)
+    }
+
+    res_form = (self :: @Self, value: TyId, error: TyId, form: ResForm)
+               Res<TyId, AllocError> {
+        key ::= self.alloc.String().try();
+        key.add_bytes("Res").try();
+        key.add_bytes(form.match({
+            Absence => "?",
+            Failure => "!",
+            Open    => "~",
+        })).try();
+        key.add_bytes(self.key_at(value)).try();
+        key.add_bytes(",").try();
+        key.add_bytes(self.key_at(error)).try();
+        self.intern(key.view(),
+                    Ty.Res(TyRes(value: value, error: error, form: form)))
+    }
+
+    // A type variable, nominal on its owner as well as its name.
+    var* = (self :: @Self, name: str, owner: str) Res<TyId, AllocError> {
+        key ::= self.alloc.String().try();
+        key.add_bytes("%").try();
+        key.add_bytes(name).try();
+        key.add_bytes("@").try();
+        key.add_bytes(owner).try();
+        self.intern(key.view(), Ty.Var(TyVar(name: name, owner: owner)))
+    }
+
+    // A function type. Parameter names are not in the key because they
+    // are not in the type.
+    fn_ty* = (self :: @Self, params: Vec<TyId>, ret: TyId) Res<TyId, AllocError> {
+        key ::= self.alloc.String().try();
+        key.add_bytes("(").try();
+        params.loop((h, p) {
+            key.add_bytes(self.key_at(p)).try();
+            key.add_bytes(",").try();
+        });
+        key.add_bytes(")->").try();
+        key.add_bytes(self.key_at(ret)).try();
+        self.intern(key.view(), Ty.Fn(TyFn(params: params, ret: ret)))
+    }
+
+    // -----------------------------------------------------------------
+    // error sets
+    //
+    // The union constructor is the only one that CANONICALISES, and it
+    // is where the four spellings of one set become one id.
+    // -----------------------------------------------------------------
+
+    // `A | B`, from members in any order, at any nesting, with
+    // repetition. Flattens, sorts, dedupes, and collapses a set of one
+    // to its member.
+    union_ty* = (self :: @Self, members: Vec<TyId>) Res<TyId, AllocError> {
+        flat ::= self.alloc.Vec<TyId>();
+        self.flatten_into(flat, members).try();
+        canon ::= self.alloc.Vec<TyId>();
+        self.sort_unique_into(canon, flat).try();
+        // a set of one IS its member: `Res<T, E>` never changes shape,
+        // and "a single error type is a set of one"
+        canon.len.match({
+            0 => self.prim("()"),
+            1 => canon.get(0).match({ None => self.unknown(), Ok(m) => Ok(m) }),
+            _ => self.build_union(canon),
+        })
+    }
+
+    // The pair form, which is what `.try()` propagation actually asks
+    // for: the callee's set merged into the caller's.
+    merge* = (self :: @Self, a: TyId, b: TyId) Res<TyId, AllocError> {
+        both ::= self.alloc.Vec<TyId>();
+        both.add(a).try();
+        both.add(b).try();
+        self.union_ty(both)
+    }
+
+    // Is `member` one of `set`'s members? A set of one is its member,
+    // so a non-union answers by equality.
+    set_has* = (self: @Self, set: TyId, member: TyId) bool {
+        self.at(set).match({
+            Union(u) => self.vec_has(u.members, member),
+            _        => set.eq(member),
+        })
+    }
+
+    // Is every member of `narrow` also a member of `wide`? This is the
+    // whole of "no implicit error conversion": `.try()` is legal when
+    // the callee's set is already contained in the caller's declared
+    // one, and illegal otherwise. Nothing is converted either way.
+    set_within* = (self: @Self, narrow: TyId, wide: TyId) bool {
+        self.at(narrow).match({
+            Union(u) => self.all_within(u.members, wide),
+            _        => self.set_has(wide, narrow),
+        })
+    }
+
+    // The members of a set, as a list, whatever its shape. A caller
+    // that wants to walk an error set should not have to know whether
+    // it is a union or a set of one.
+    members_of* = (self: @Self, set: TyId, out :: Vec<TyId>) Res<(), AllocError> {
+        self.at(set).match({
+            Union(u) => self.copy_members(out, u.members),
+            _        => out.add(set),
+        }).try();
+        Ok(());
+    }
+
+    // The loop family returns `Res<T>` — an absence — so a bare `loop`
+    // cannot be a match arm beside an `add` that returns
+    // `Res<(), AllocError>`. Naming the walk gives both arms one type.
+    copy_members = (self: @Self, out :: Vec<TyId>, members: Vec<TyId>)
+                   Res<(), AllocError> {
+        members.loop((h, m) { out.add(m).try() });
+        Ok(());
+    }
+
+    // -----------------------------------------------------------------
+    // naming, for diagnostics
+    //
+    // The key is not showable — it names module and decl indices. This
+    // walks the structure instead, so `Res<(), IoError | AllocError>`
+    // prints the way it was written.
+    // -----------------------------------------------------------------
+
+    write_name* = (self: @Self, id: TyId, out :: String) Res<(), AllocError> {
+        self.at(id).match({
+            Prim(p)  => out.add_bytes(p.name),
+            Var(v)   => out.add_bytes(v.name),
+            Infer    => out.add_bytes("_"),
+            Unknown  => out.add_bytes("<unknown>"),
+            Named(n) => self.write_named(n, out),
+            Res(r)   => self.write_res(r, out),
+            Fn(f)    => self.write_fn(f, out),
+            Union(u) => self.write_union(u, out),
+        }).try();
+        Ok(());
+    }
+
+    // The name as a fresh String, for a caller that wants one value
+    // rather than a sink. Allocates, and says so.
+    name_of* = (self: @Self, id: TyId) Res<String, AllocError> {
+        out ::= self.alloc.String().try();
+        self.write_name(id, out).try();
+        Ok(out);
+    }
+
+    // -----------------------------------------------------------------
+    // the pieces the above stand on
+    // -----------------------------------------------------------------
+
+    write_res = (self: @Self, r: TyRes, out :: String) Res<(), AllocError> {
+        out.add_bytes("Res<").try();
+        self.write_name(r.value, out).try();
+        r.form.match({
+            Failure => self.write_res_error(r, out),
+            Absence => Ok(()),
+            Open    => Ok(()),
+        }).try();
+        out.add_bytes(">").try();
+        Ok(());
+    }
+
+    write_res_error = (self: @Self, r: TyRes, out :: String) Res<(), AllocError> {
+        out.add_bytes(", ").try();
+        self.write_name(r.error, out).try();
+        Ok(());
+    }
+
+    write_named = (self: @Self, n: TyNamed, out :: String) Res<(), AllocError> {
+        out.add_bytes(n.name).try();
+        (n.args.len > 0).then(() { self.write_arg_names(n.args, out).try() });
+        Ok(());
+    }
+
+    write_arg_names = (self: @Self, args: Vec<TyId>, out :: String)
+                      Res<(), AllocError> {
+        out.add_bytes("<").try();
+        args.loop((h, i, a) {
+            (i > 0).then(() { out.add_bytes(", ").try() });
+            self.write_name(a, out).try();
+        });
+        out.add_bytes(">").try();
+        Ok(());
+    }
+
+    write_fn = (self: @Self, f: TyFn, out :: String) Res<(), AllocError> {
+        out.add_bytes("(").try();
+        f.params.loop((h, i, p) {
+            (i > 0).then(() { out.add_bytes(", ").try() });
+            self.write_name(p, out).try();
+        });
+        out.add_bytes(") ").try();
+        self.write_name(f.ret, out).try();
+        Ok(());
+    }
+
+    write_union = (self: @Self, u: TyUnion, out :: String) Res<(), AllocError> {
+        u.members.loop((h, i, m) {
+            (i > 0).then(() { out.add_bytes(" | ").try() });
+            self.write_name(m, out).try();
+        });
+        Ok(());
+    }
+
+    write_args = (self: @Self, key :: String, args: Vec<TyId>)
+                 Res<(), AllocError> {
+        (args.len > 0).then(() { self.write_args_run(key, args).try() });
+        Ok(());
+    }
+
+    write_args_run = (self: @Self, key :: String, args: Vec<TyId>)
+                     Res<(), AllocError> {
+        key.add_bytes("<").try();
+        args.loop((h, a) {
+            key.add_bytes(self.key_at(a)).try();
+            key.add_bytes(",").try();
+        });
+        key.add_bytes(">").try();
+        Ok(());
+    }
+
+    build_union = (self :: @Self, canon: Vec<TyId>) Res<TyId, AllocError> {
+        key ::= self.alloc.String().try();
+        canon.loop((h, m) {
+            key.add_bytes(self.key_at(m)).try();
+            key.add_bytes("|").try();
+        });
+        self.intern(key.view(), Ty.Union(TyUnion(members: canon)))
+    }
+
+    // A member that is itself a union contributes its members and not
+    // itself: "`A | B | C` is one Union of three members, never a Union
+    // of a Union".
+    flatten_into = (self: @Self, out :: Vec<TyId>, members: Vec<TyId>)
+                   Res<(), AllocError> {
+        members.loop((h, m) {
+            self.at(m).match({
+                Union(u) => self.flatten_into(out, u.members),
+                _        => out.add(m),
+            }).try();
+        });
+        Ok(());
+    }
+
+    // Insertion sort, dropping a member equal to the one before it.
+    // A set has a handful of members and never more, so the shape that
+    // is obviously correct is the one to write.
+    sort_unique_into = (self: @Self, out :: Vec<TyId>, src: Vec<TyId>)
+                       Res<(), AllocError> {
+        src.loop((h, id) {
+            // the arm whose type is WRITTEN leads: a match takes its
+            // type from its first arm, and a bare `Ok(())` there would
+            // type the whole match as `Res<()>` and drop the other arm's
+            // error set on the floor. See docs/SEMA_BOOTSTRAP_FIXES.md.
+            self.vec_has(out, id).match({
+                false => self.insert_ordered(out, id),
+                true  => Ok(()),
+            }).try();
+        });
+        Ok(());
+    }
+
+    // Append, then walk the new element down to its place. No break:
+    // the pass is over a set, and a set is small enough that the
+    // version with nothing to get wrong is the right one.
+    insert_ordered = (self: @Self, out :: Vec<TyId>, id: TyId)
+                     Res<(), AllocError> {
+        out.add(id).try();
+        n = out.len;
+        Range(1, n).loop((h, k) {
+            j = n - k;
+            prev = out.get(j - 1).match({ Ok(v) => v, None => id });
+            cur = out.get(j).match({ Ok(v) => v, None => id });
+            self.before(cur, prev).then(() {
+                put(out, j - 1, cur).try();
+                put(out, j, prev).try();
+            });
+        });
+        Ok(());
+    }
+
+    // Lexicographic order on the intern keys. Ordering by id would be
+    // canonical too and would print a set in whatever order the
+    // compilation happened to intern it; ordering by key means
+    // `AllocError | IoError` reads the same way every time.
+    before = (self: @Self, a: TyId, b: TyId) bool {
+        key_before(self.key_at(a), self.key_at(b))
+    }
+
+    vec_has = (self: @Self, haystack: Vec<TyId>, needle: TyId) bool {
+        Range(0, haystack.len).find((i) {
+            haystack.get(i).match({ Ok(v) => v.eq(needle), None => false })
+        }).match({ Ok(_) => true, None => false })
+    }
+
+    all_within = (self: @Self, members: Vec<TyId>, wide: TyId) bool {
+        Range(0, members.len).find((i) {
+            members.get(i).match({
+                Ok(m) => self.set_has(wide, m) == false,
+                None  => false,
+            })
+        }).match({ Ok(_) => false, None => true })
+    }
+}
+
+// `alloc.Types()` — a ufcs function whose first parameter is an Alloc,
+// beside the type it builds, exactly as `Vec`, `Map` and `Ast` are. A
+// bare value and not a `Res`: an empty store owns no pages, so
+// construction cannot fail.
+Types* = (a: Alloc) Types {
+    Types(
+        kinds: a.Vec<Ty>(),
+        keys: a.Vec<String>(),
+        by_key: a.Map<str, TyId>(),
+        count: 0,
+        alloc: a,
+    )
+}
+
+// `Vec.set` refuses an index past the end and says so with a bare
+// `Res<()>` — an absence, carrying no reason. `.try()` will not lift one
+// into a function that returns `Res<_, AllocError>`, and it is right not
+// to: "a None never becomes an Err". Both indices here are in range by
+// construction — `j` walks `n-1..1` over a Vec of length `n` — so this
+// names the only reason a refusal could mean anything and moves on.
+put* = (out :: Vec<TyId>, i: usize, v: TyId) Res<(), AllocError> {
+    out.set(i, v).match({
+        None  => Err(AllocError.OutOfMemory),
+        Ok(_) => Ok(()),
+    })
+}
+
+// Lexicographic byte order on two strings.
+//
+// BY THE STRANGER TEST THIS IS NOT A SEMA FUNCTION — "orders two byte
+// strings" names no module, so it belongs beside `str`'s own `eq` in
+// `std.text.text_str`. It is here because `std.text` does not declare
+// one yet and `src/std/` is not this module's to edit;
+// `docs/SEMA_BOOTSTRAP_FIXES.md` records it as a std gap. The moment
+// text_str grows an ordering, this deletes and the import replaces it.
+key_before* = (a: str, b: str) bool {
+    shorter = (a.len < b.len).match({ true => a.len, false => b.len });
+    Range(0, shorter).find((i) { a[i] != b[i] }).match({
+        Ok(i) => a[i] < b[i],
+        None  => a.len < b.len,
+    })
+}

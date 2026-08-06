@@ -1,0 +1,107 @@
+// src/sema/sema_id.zen
+// How sema names the things the AST holds by value.
+//
+// `ast_id.zen` names the four arena'd families — an expression, a type,
+// a pattern, a block. It does not name the rest, and it says why: a
+// declaration, a member, an arm and a variant are "held BY VALUE inside
+// their parent's Vec, because none of them closes a cycle. If you have a
+// `Decl`, you have the whole declaration".
+//
+// That is true for holding and false for KEYING. DESIGN.md's decision 3
+// makes sema memoized queries, and a memo table is a `Map<K, V>` whose
+// K must be `Eq + Hash`. `impls_of(type)`, `members_of(type)` and
+// "which declaration did this name resolve to" all key on a declaration,
+// and a `Decl` value has no identity at all — two structurally equal
+// declarations in two modules are two declarations, and a `Vec<Decl>`
+// row is not something a `Map` can hold.
+//
+// So a declaration gets a coordinate: which module, which decl within
+// it, and — for a member — which member within that. It is the same
+// shape `ExprId` is, one level out, and for the same stated reason.
+//
+// EVERY ONE OF THESE IS A PURE FUNCTION OF THE SOURCE. A module's index
+// is its position in `Ast.modules`, a decl's is its position in
+// `Module.decls`. Nothing here is an address, so nothing here can make
+// gen_c non-deterministic.
+
+Eq, Hash, Hasher = std.core
+
+// FNV's odd prime, used to mix two indices into one hash. It is
+// declared here rather than imported because `std.text` keeps its own
+// seed private, and a hash mixer is not a text function.
+//
+// The multiply is `*%` and that is not an optimisation: `*` TRAPS on
+// overflow, and a mixing constant this size overflows u64 by design.
+// Wrapping IS the intent, so the wrapping operator is what says so.
+MIX* : u64 = 1099511628211
+
+// A top-level declaration: `Ast.modules[module].decls[decl]`.
+DeclId* = {
+    module*: u32,
+    decl*: u32,
+}
+
+// A member of a struct body or an impl body:
+// `..decls[decl].members[member]`. A separate type from `DeclId`
+// because passing one where the other belongs is the mistake this
+// whole file exists to make unrepresentable.
+MemberId* = {
+    module*: u32,
+    decl*: u32,
+    member*: u32,
+}
+
+// An `A.impl(B, {..})` declaration. It is a `DeclKind` like any other,
+// so this is a `DeclId` wearing a name that says which kind it points
+// at — `impls_of` returning a `Vec<DeclId>` would make every caller
+// remember what those ids were of.
+ImplId* = {
+    decl*: DeclId,
+}
+
+DeclId.impl(Eq, {
+    eq ::= (self: @Self, other: @Self) bool {
+        (self.module == other.module) && (self.decl == other.decl)
+    }
+})
+
+DeclId.impl(Hash, {
+    hash = (self: @Self, hasher :: Hasher) u64 {
+        (self.module.to_u64() *% MIX) +% self.decl.to_u64()
+    }
+})
+
+MemberId.impl(Eq, {
+    eq ::= (self: @Self, other: @Self) bool {
+        (self.module == other.module)
+            && (self.decl == other.decl)
+            && (self.member == other.member)
+    }
+})
+
+MemberId.impl(Hash, {
+    hash = (self: @Self, hasher :: Hasher) u64 {
+        (((self.module.to_u64() *% MIX) +% self.decl.to_u64()) *% MIX)
+            +% self.member.to_u64()
+    }
+})
+
+ImplId.impl(Eq, {
+    eq ::= (self: @Self, other: @Self) bool { self.decl.eq(other.decl) }
+})
+
+ImplId.impl(Hash, {
+    hash = (self: @Self, hasher :: Hasher) u64 { self.decl.hash(hasher) }
+})
+
+// The declaration a member belongs to. A member id is a decl id plus an
+// index, so this is a projection and not a lookup.
+owner* = (self: MemberId) DeclId {
+    DeclId(module: self.module, decl: self.decl)
+}
+
+// The member at `i` of `owner`. The one place the two coordinates are
+// joined, so nothing else has to remember the field order.
+member_at* = (self: DeclId, i: u32) MemberId {
+    MemberId(module: self.module, decl: self.decl, member: i)
+}

@@ -1,0 +1,277 @@
+// src/sema/sema_diag.zen
+// What sema says when a program means nothing.
+//
+// The shape is `lex_diag.zen`'s, for the reasons stated there and one
+// more that is sema's own.
+//
+// A DIAGNOSTIC IS A VALUE, NOT A RAISE. It is collected and returned, so
+// one bad declaration never stops a run. The only way a query returns
+// `Err` is `AllocError` — which is why every signature in this module
+// says `Res<T, AllocError>` and never invents a `SemaError` beside it.
+// A tree full of mistakes still ANALYSES: it yields the types it could
+// compute and the diagnostics it owes.
+//
+// A FAULT CARRIES WHAT THE SENTENCE NEEDS, AND NOTHING ELSE. The lexer
+// can afford a fault with no payload because its span names the bytes
+// and the renderer holds the source. Sema cannot: "expected i32, found
+// str" is not derivable from a position. But the payload is TYPE IDS and
+// interned strings, never a formatted message — so a `Diag` stays
+// comparable and costs no allocation to raise. `render` is where the
+// sentence is built, and it is the only place that allocates.
+//
+// THREE PAYLOAD SHAPES, NOT TWENTY-FOUR. A fault names something
+// (`NameFault`), contrasts two types (`TypeFault`), or points at two
+// declarations that cannot both stand (`PairFault`). Every diagnostic
+// sema has to make is one of those three, and a fourth shape would be a
+// sign that a check is doing two things.
+//
+// ONE MISTAKE, ONE DIAGNOSTIC. `Ty.Unknown` is the mechanism: a query
+// that has already reported returns poison, and poison never produces a
+// second sentence.
+
+Span = ast.ast_span
+str, String = std.text
+Vec = std.collections
+Alloc, AllocError = std.mem
+TyId, Types = sema.sema_ty
+
+// Something the program named, or failed to.
+NameFault* = { name*: str }
+
+// Two types that had to agree and did not. `expected` is what the
+// context demanded, `found` is what the expression is.
+TypeFault* = {
+    name*: str,
+    expected*: TyId,
+    found*: TyId,
+}
+
+// Two declarations, both named, because a diagnostic that reports an
+// ambiguity and shows one side of it is a diagnostic that sends the
+// reader hunting. `first` and `second` are declaration positions, never
+// the use site — an overload set is wrong where it is written.
+PairFault* = {
+    name*: str,
+    first*: Span,
+    second*: Span,
+}
+
+// Every way a well-formed parse can still mean nothing.
+//
+// Each variant is a distinct mistake with a distinct fix, and each one
+// is a line of DESIGN.md rather than a category. There is no
+// `TypeError`, because "type error" names the phase and not the rule
+// the author broke.
+SemaFault* =
+    // resolution
+      UndefinedName(NameFault)         // no binding of this name is in scope
+    | NotExported(NameFault)           // the name exists; `*` does not
+    | NoSuchField(TypeFault)           // the type has no member of that name
+
+    // types
+    | TypeMismatch(TypeFault)          // expected X, found Y
+    | NotCallable(TypeFault)           // the callee is not a function
+
+    // overloading
+    | NoOverload(NameFault)            // no candidate of that arity or those types
+    | DuplicateSignature(PairFault)    // param names are not identity
+    | AmbiguousOverload(PairFault)     // a generic parameter swallows a concrete one
+
+    // impls and bounds
+    | ImplMissingField(NameFault)      // an impl supplies every field, or it is not one
+    | AmbiguousMember(PairFault)       // two impls, no bound in scope to choose
+    | BoundNotSatisfied(TypeFault)     // no impl of the bound
+    | ComputedFieldAssign(NameFault)   // no storage, so nothing to assign into
+    | ComputedFieldAddress(NameFault)  // no storage, so no address exists
+
+    // Res, and the failure model
+    | TryOutsideRes(TypeFault)         // nowhere to return the failure to
+    | TryNeedsRes(TypeFault)           // `.try()` on something that is not a Res
+    | TryAbsenceIntoFailure(TypeFault) // a None never becomes an Err
+    | NoErrorConversion(TypeFault)     // there is no From
+    | InferredSetExported(NameFault)   // law 6: a `*` boundary writes its set
+    | HoistAmbiguous(TypeFault)        // two variants carry the type
+    | HoistNotSuccess(NameFault)       // only success lifts
+
+    // match
+    | NotExhaustive(NameFault)         // names the first case left uncovered
+    | UnreachableArm(NameFault)        // every value it matches is covered above
+
+    // the failure model, proved
+    | ProvenOverflow(NameFault)        // a trap the compiler can prove will fire
+    | ProvenDivideByZero(NameFault)
+    | ProvenIndexOutOfBounds(NameFault)
+
+    // termination
+    | InfiniteSize(TypeFault)          // a field cycle with no indirection
+    | InstantiationDepth(NameFault)    // the instantiation set is infinite
+
+// Where the mistake is, and which one it is.
+//
+// `file` rides along rather than being read back out of `span`, because
+// a Diag outlives the module it came from — a driver holds diagnostics
+// from every file at once and sorts them.
+Diag* = {
+    file*: str,
+    span*: Span,
+    fault*: SemaFault,
+}
+
+// The rule, as a sentence.
+//
+// Loose enough to reword, specific enough that it names the LAW rather
+// than the symptom: a reader who has just been told "type error" knows
+// only that they are stuck, and a reader told "only success lifts into
+// Res" knows what to write instead.
+message* = (fault: SemaFault) str {
+    fault.match({
+        UndefinedName(_)     => "undefined name: no binding of this name is in scope",
+        NotExported(_)       => "not exported: `*` is what lets a name cross a module boundary",
+        NoSuchField(_)       => "no such field or method on this type",
+        TypeMismatch(_)      => "type mismatch",
+        NotCallable(_)       => "this is not a function, so it cannot be called",
+        NoOverload(_)        => "no overload matches: resolution is on declared parameter types and arity",
+        DuplicateSignature(_) => "duplicate signature: parameter names are documentation, not identity",
+        AmbiguousOverload(_) => "ambiguous overload: a generic parameter swallows a concrete one, so these two can never be told apart at a call site",
+        ImplMissingField(_)  => "impl is missing a field: an impl supplies a value for every field the bound declares",
+        AmbiguousMember(_)   => "ambiguous: two impls supply this name and no bound in scope selects one",
+        BoundNotSatisfied(_) => "bound not satisfied: this type has no impl of the bound, so it has none of the fields the bound promises",
+        ComputedFieldAssign(_) => "cannot assign to a computed field: an impl-supplied field has no storage, so there is nothing to assign into",
+        ComputedFieldAddress(_) => "cannot take the address of a computed field: there is no storage, so no address exists",
+        TryOutsideRes(_)     => "`.try()` in a function that does not return Res: try unwraps Ok or returns the failure from the enclosing function, so there must be somewhere to return it to",
+        TryNeedsRes(_)       => "`.try()` needs a Res",
+        TryAbsenceIntoFailure(_) => "a None never becomes an Err: name the reason with `.ok_or(..)` first",
+        NoErrorConversion(_) => "no implicit error conversion: widen the declared set, there is no From",
+        InferredSetExported(_) => "inferred error set on an exported function: `*` means this name crosses a module boundary, so its type is written, not inferred",
+        HoistAmbiguous(_)    => "cannot be hoisted: hoisting fires only when exactly one variant carries the type, so write the variant out",
+        HoistNotSuccess(_)   => "only success lifts into Res: failure stays visible, so this must be written out",
+        NotExhaustive(_)     => "match is not exhaustive: cover every case or write `_` — match is exhaustive in every position",
+        UnreachableArm(_)    => "unreachable match arm: every value it could match is already covered above",
+        ProvenOverflow(_)    => "integer overflow: a trap the compiler can prove will fire is a compile error",
+        ProvenDivideByZero(_) => "divide by zero: a trap the compiler can prove will fire is a compile error",
+        ProvenIndexOutOfBounds(_) => "index out of bounds: a trap the compiler can prove will fire is a compile error",
+        InfiniteSize(_)      => "infinite size: the field cycle never reaches an indirection, so the layout does not terminate (`Ptr<T>` is the finite form)",
+        InstantiationDepth(_) => "instantiation depth exceeded: the type argument keeps widening, so the instantiation set is infinite",
+    });
+}
+
+// The whole diagnostic, on one line: `file:line:col: <sentence>`,
+// followed by whatever the fault carries.
+//
+// This is the only thing in this module that allocates, and it takes
+// the `Types` store because a `TyId` is not a name — printing one is
+// `Types.write_name`'s job and not a second copy of it here.
+render* = (self: Diag, types: Types, out :: String) Res<(), AllocError> {
+    out.add_bytes(self.file).try();
+    out.add_bytes(":").try();
+    write_pos(out, self.span.start.line, self.span.start.col).try();
+    out.add_bytes(": ").try();
+    out.add_bytes(message(self.fault)).try();
+    write_detail(self.fault, types, out).try();
+    Ok(());
+}
+
+// What the fault carries, appended to the sentence. A name is quoted; a
+// type contrast is written out both ways round, because "expected i32"
+// without "found str" is half a diagnostic.
+write_detail* = (fault: SemaFault, types: Types, out :: String)
+                Res<(), AllocError> {
+    fault.match({
+        UndefinedName(f)          => write_name(out, f),
+        NotExported(f)            => write_name(out, f),
+        NoOverload(f)             => write_name(out, f),
+        ImplMissingField(f)       => write_name(out, f),
+        ComputedFieldAssign(f)    => write_name(out, f),
+        ComputedFieldAddress(f)   => write_name(out, f),
+        InferredSetExported(f)    => write_name(out, f),
+        HoistNotSuccess(f)        => write_name(out, f),
+        NotExhaustive(f)          => write_name(out, f),
+        UnreachableArm(f)         => write_name(out, f),
+        ProvenOverflow(f)         => write_name(out, f),
+        ProvenDivideByZero(f)     => write_name(out, f),
+        ProvenIndexOutOfBounds(f) => write_name(out, f),
+        InstantiationDepth(f)     => write_name(out, f),
+
+        NoSuchField(f)            => write_types(out, types, f),
+        TypeMismatch(f)           => write_types(out, types, f),
+        NotCallable(f)            => write_types(out, types, f),
+        BoundNotSatisfied(f)      => write_types(out, types, f),
+        TryOutsideRes(f)          => write_types(out, types, f),
+        TryNeedsRes(f)            => write_types(out, types, f),
+        TryAbsenceIntoFailure(f)  => write_types(out, types, f),
+        NoErrorConversion(f)      => write_types(out, types, f),
+        HoistAmbiguous(f)         => write_types(out, types, f),
+        InfiniteSize(f)           => write_types(out, types, f),
+
+        DuplicateSignature(f)     => write_pair(out, f),
+        AmbiguousOverload(f)      => write_pair(out, f),
+        AmbiguousMember(f)        => write_pair(out, f),
+    }).try();
+    Ok(());
+}
+
+write_name = (out :: String, f: NameFault) Res<(), AllocError> {
+    quote(out, f.name)
+}
+
+// Both sides, always. `expected` first, because that is the order the
+// reader is thinking in: they wrote something, and the context wanted
+// something else.
+write_types = (out :: String, types: Types, f: TypeFault)
+              Res<(), AllocError> {
+    quote(out, f.name).try();
+    out.add_bytes(": expected ").try();
+    types.write_name(f.expected, out).try();
+    out.add_bytes(", found ").try();
+    types.write_name(f.found, out).try();
+    Ok(());
+}
+
+// Both declarations, named. The rule is "named for both declarations",
+// so a renderer that prints one position is not implementing it.
+write_pair = (out :: String, f: PairFault) Res<(), AllocError> {
+    quote(out, f.name).try();
+    out.add_bytes(": ").try();
+    write_pos(out, f.first.start.line, f.first.start.col).try();
+    out.add_bytes(" and ").try();
+    write_pos(out, f.second.start.line, f.second.start.col).try();
+    Ok(());
+}
+
+quote = (out :: String, name: str) Res<(), AllocError> {
+    (name.len > 0).then(() {
+        out.add_bytes(" `").try();
+        out.add_bytes(name).try();
+        out.add_bytes("`").try();
+    });
+    Ok(());
+}
+
+// `line:col`, both 1-based, the column counting bytes.
+//
+// This spells a decimal number a digit at a time rather than through
+// `String.add("{}", n)`, and that is forced rather than fussy: `add`
+// speaks `WriteError`, which is `AllocError | IoError`, and this module
+// returns `Res<_, AllocError>`. There is no From, so the wider set
+// cannot propagate into the narrower one — the language working exactly
+// as DESIGN.md specifies. Writing the digits keeps one error set.
+write_pos* = (out :: String, line: usize, col: usize) Res<(), AllocError> {
+    write_usize(out, line).try();
+    out.add_bytes(":").try();
+    write_usize(out, col).try();
+    Ok(());
+}
+
+// Most significant digit first, by recursion: the remainder is written
+// after the quotient, so no buffer and no reversal is needed.
+write_usize* = (out :: String, v: usize) Res<(), AllocError> {
+    (v >= 10).then(() { write_usize(out, v / 10).try() });
+    out.add_byte(digit_byte(v % 10))
+}
+
+digit_byte = (d: usize) u8 {
+    d.match({
+        0 => '0', 1 => '1', 2 => '2', 3 => '3', 4 => '4',
+        5 => '5', 6 => '6', 7 => '7', 8 => '8', _ => '9',
+    })
+}

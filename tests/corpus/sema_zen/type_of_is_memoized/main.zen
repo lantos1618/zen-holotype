@@ -1,0 +1,103 @@
+// `type_of(node)` is a QUERY, not a pass.
+//
+// DESIGN.md decision 3: "Sema is memoized queries, not monolithic passes.
+// `type_of(node)`, `defs_of(name)`. This is the same machinery as comptime
+// memoization — build it once." The observable consequences, each with a
+// line below:
+//
+//   - asking twice gives one answer, and the second ask costs a lookup
+//   - a diagnostic is a VALUE: a bad node yields poison and a Diag, and
+//     the nodes around it still get types
+//   - poison never cascades: one mistake, one diagnostic
+//
+// The AST is built through the arena API rather than parsed, which is
+// what tests/corpus/ast/expr_tree_round_trips_through_ids.zen does and
+// for the same reason: this is a test of sema, and routing it through a
+// parser would make a parser bug read as a sema bug.
+
+Checker, Ctx = sema.sema_check
+TyId, Types = sema.sema_ty
+Ast = ast.ast_arena
+Expr, ExprKind, Literal, LiteralKind, Name, Paren, Try, Binary, BinOp = ast.ast_node
+Pos, Span, no_trivia = ast.ast_span
+ExprId = ast.ast_id
+Alloc, AllocError = std.mem
+str, String = std.text
+
+// every node in this file is at the same place: the test is about types,
+// and a distinct span per node would be noise in the diagnostics
+at = () Span {
+    Span(file: "in.zen", start: Pos(line: 1, col: 1), end: Pos(line: 1, col: 2))
+}
+
+expr = (tree :: Ast, kind: ExprKind) Res<ExprId, AllocError> {
+    tree.add_expr(Expr(kind: kind, span: at(),
+                       leading: no_trivia(), trailing: no_trivia()))
+}
+
+int_lit = (tree :: Ast, text: str) Res<ExprId, AllocError> {
+    expr(tree, ExprKind.Literal(Literal(kind: LiteralKind.Int, text: text)))
+}
+
+// what a node's type is CALLED, which is the only readable form of a TyId
+show = (c :: Checker, a: Alloc, label: str, id: ExprId, ctx: Ctx)
+       Res<(), AllocError> {
+    ty = c.type_of(id, ctx).try();
+    out ::= a.String().try();
+    c.types.write_name(ty, out).try();
+    println("{} {}", label, out.view());
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    tree ::= alloc.Ast();
+
+    one = int_lit(tree, "1").try();
+    two = int_lit(tree, "2").try();
+    sum = expr(tree, ExprKind.Binary(Binary(
+        op: BinOp.Add, op_span: at(), lhs: one, rhs: two))).try();
+    less = expr(tree, ExprKind.Binary(Binary(
+        op: BinOp.Less, op_span: at(), lhs: one, rhs: two))).try();
+    wrapped = expr(tree, ExprKind.Paren(Paren(inner: less))).try();
+    text = expr(tree, ExprKind.Literal(
+        Literal(kind: LiteralKind.Str, text: "\"hi\""))).try();
+    nowhere = expr(tree, ExprKind.Name(Name(text: "ada"))).try();
+    bad_try = expr(tree, ExprKind.Try(Try(operand: one))).try();
+
+    c ::= alloc.Checker(tree).try();
+    none = c.types.unknown().try();
+    ctx = Ctx(0, none);
+
+    // a literal's type comes from its context, so until one arrives it
+    // is its own type and not a guess at i32
+    show(c, alloc, "1 is", one, ctx).try();
+    show(c, alloc, "1 + 2 is", sum, ctx).try();
+    show(c, alloc, "1 < 2 is", less, ctx).try();
+    show(c, alloc, "(1 < 2) is", wrapped, ctx).try();
+    show(c, alloc, "a string literal is", text, ctx).try();
+
+    // MEMOIZED. the second ask interns nothing new, because it computed
+    // nothing new — that is the whole claim, and a store that grew here
+    // would mean the query ran twice
+    before = c.types.count_of();
+    show(c, alloc, "1 + 2 is still", sum, ctx).try();
+    println("types interned by asking again: {}", c.types.count_of() - before);
+
+    // a diagnostic is a value. two bad nodes, two diagnostics, and every
+    // good node around them still has a type
+    println("diagnostics so far: {}", c.diag_count());
+    show(c, alloc, "an undefined name is", nowhere, ctx).try();
+    show(c, alloc, "`.try()` on an integer is", bad_try, ctx).try();
+    println("diagnostics now: {}", c.diag_count());
+
+    // POISON DOES NOT CASCADE: asking again re-reads the memo and does
+    // not report a second time
+    show(c, alloc, "the same undefined name is", nowhere, ctx).try();
+    println("diagnostics after asking again: {}", c.diag_count());
+
+    report ::= alloc.String().try();
+    c.render_diags(report).try();
+    println("{}", report.view());
+    Ok(0);
+}
