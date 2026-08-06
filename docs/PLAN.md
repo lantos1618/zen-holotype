@@ -222,6 +222,8 @@ Two traps to expect here, both consequences of laws in `DESIGN.md`:
 - **The `Alloc` receiver.** `Vec.alloc` is a `:` field and `grow` calls `realloc` through it, which only compiles because a handle's methods are `:`. If the stdlib is written with `Alloc.raw` as `:: @Self`, every collection needs a mutable allocator field and the shallowness buys nothing. Get this right in `mem/mem.zen` first, or fix it everywhere later.
 - **`Drop` before the checker exists.** Stage 3 is where use-after-consume becomes an error. Until then the arena's exactly-once guarantee is a convention the stdlib must honour by hand — which is precisely why the `consume` *syntax* ships at stage 0 even unchecked.
 
+**Outstanding here: the `Sink` migration, and it is one change or none.** `DESIGN.md` types `Display.toString` on a `Sink` so that printing allocates nothing; `src/std/core/display.zen` and the `display_*` corpus still write `sb :: String`. Those move together — `Sink` in `std`, sink dispatch in `gen_c`, and the corpus signatures in the same commit — because migrating the corpus first turns three green tests red against a compiler that has no `Sink`, and migrating `std` first does the same. `example/src/main.zen` already shows the target shape; it is the only file that could be moved early, because nothing compiles it yet.
+
 **Gate for stage 0:** the bootstrapper compiles and runs hello-world, the std corpus, and the trap corpus. Nothing about the real compiler yet.
 
 ---

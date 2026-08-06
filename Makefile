@@ -5,7 +5,7 @@ CFLAGS  ?= -O2 -std=c99
 PY      ?= python3
 ROOT    ?= src
 
-.PHONY: all build seed test test-zen lint fixpoint determinism grammar grammar-test fmt clean help
+.PHONY: all build seed test test-zen lint parse fixpoint determinism grammar grammar-test fmt clean help
 
 all: test
 
@@ -22,8 +22,17 @@ seed: zen
 	git add seed/zen.c
 
 ## test: the corpus and must-fail suites, against the bootstrapper
-test: grammar
+test: parse
 	$(PY) tests/run.py
+
+## parse: every .zen the tree claims is valid must parse. cheap, and it
+## is the only thing standing behind example/ -- nothing else compiles
+## it, because it is written against stage 5. must-fail/ is excluded on
+## purpose: those files exist to NOT parse.
+parse: grammar
+	@find src example tests/corpus -name '*.zen' -print0 \
+	  | xargs -0 -- sh -c 'cd grammar && npx tree-sitter parse --quiet --stat \
+	      $$(for f in "$$@"; do echo "../$$f"; done)' --
 
 ## test-zen: the same suites, against a built zen binary
 test-zen: build
