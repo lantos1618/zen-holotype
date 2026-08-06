@@ -616,6 +616,7 @@ FsError* = NotFound | Denied | IsDir | Failed | OutOfMemory
 
 Fs* = {
     read*   = (self: @Self, a: Alloc, path: str) Res<String, FsError>
+    write*  = (self: @Self, path: str, bytes: str) Res<(), FsError>
     exists* = (self: @Self, path: str) bool
     is_dir* = (self: @Self, path: str) bool
 }
@@ -623,9 +624,13 @@ Fs* = {
 // OutOfMemory is a member of FsError only because the seed subset has
 // no error unions and no From, and `read` allocates. When unions
 // arrive the signature becomes Res<String, FsError | AllocError> and
-// the variant goes. Writing is not here: nothing needs it until the
-// seed has to be regenerated, and a capability guessed before it has
-// a caller is the one the caller then has to work around.
+// the variant goes.
+//
+// `write` arrived the moment it had a caller and not before: `zen build
+// src -o stage2.c` cannot honour its own `-o` without one, so the
+// fixpoint could not complete. No append, no mode, no handle — the
+// compiler writes one file once. It takes no Alloc because it allocates
+// nothing: the bytes are the caller's and stay the caller's.
 
 Env* = {
     argv: Vec<str>,       // raw argv; argv.get(0) is the program path
