@@ -651,6 +651,16 @@ class Converter:
             result = self.function(names[0], operator, value, span)
         elif kind == MEMBER_EXPRESSION and self.dotted_path(value) is not None:
             result = self.import_(names, value, span)
+        elif kind == IDENTIFIER and len(names) > 1:
+            # `Kind, Pos, origin = leaf` -- a folder root is a module named by
+            # a single identifier (DESIGN.md: `src/gen/gen.zen` is module
+            # `gen`), so a bare RHS binding SEVERAL names is an import.  The
+            # guard above already accepts this shape; without this branch the
+            # dispatch below made it an Alias of names[0] and dropped the rest
+            # on the floor -- no diagnostic, names simply gone.  One name is
+            # still an alias: `Alias = Shape` is what the leading-bar rule
+            # exists to disambiguate, and grammar R1a decides it deliberately.
+            result = self.import_(names, value, span)
         elif kind in (IDENTIFIER, GENERIC_TYPE):
             name, exported, tparams = self.declaration_name(names[0])
             if tparams:
