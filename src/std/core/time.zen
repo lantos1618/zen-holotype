@@ -1,21 +1,86 @@
 // std.core.time
 // a span, not a clock. reading the clock is authority and lives
 // on Env; describing a duration is arithmetic and lives here
+//
+// ONE REPRESENTATION, AND THE UNIT IS NOT PART OF IT. A Duration is
+// a count of nanoseconds and nothing else. The unit you wrote is
+// consumed at construction: `seconds(60)` IS `Duration(ns: 6e10)`,
+// and afterwards nothing can ask which spelling made it.
+//
+// That is why this is five constructors and not an enum. An enum is
+// for a distinction that SURVIVES construction — `IoError` is one
+// because a caller matches on it later, and `Shape` is one because
+// a circle stays a circle. A unit is not:
+//
+//   - `Seconds(1)` and `Millis(1000)` are the same span, so as
+//     variants they would be two values that must compare equal,
+//     and `eq` would have to normalise before every comparison —
+//     which is this struct's representation, arrived at the long way
+//   - `add(Seconds(1), Millis(500))` would have to pick a unit for
+//     its result, a decision nobody wants to make and the type
+//     would force at every call
+//   - every operation grows an exhaustive match over five arms whose
+//     first act is to convert to a common unit
+//
+// The rule, and it generalises: IF THE DISTINCTION IS CONSUMED AT
+// CONSTRUCTION, IT IS A CONSTRUCTOR AND NOT A VARIANT.
+
+Res = std.core.result
 
 Duration* = {
     ns*: u64,
 }
 
-nanos*   = (n: u64) Duration
-micros*  = (n: u64) Duration
-millis*  = (n: u64) Duration
-seconds* = (n: u64) Duration
-minutes* = (n: u64) Duration
+// The unit conversions, in. Each is a ufcs function over `u64`, so
+// `seconds(60)` and `n.seconds()` are the same call — DESIGN.md: a
+// free function whose first parameter is a type travels with that
+// type. Note `60.seconds()` is NOT writable: a number literal
+// carries no member, because an identifier may not start with a
+// digit and a number carries no suffix. The receiver has to be a
+// binding.
+//
+// `Duration.seconds(60)` is not writable either, and a comment here
+// used to claim it was. `Duration.seconds` is a member lookup on the
+// TYPE, which the language provides for constants (`i32.MAX`) and
+// variants (`Shape.Unit`); `seconds` is neither, and UFCS puts it on
+// `u64` — its first parameter — not on `Duration`.
+NS_PER_MICRO*  : u64 = 1000
+NS_PER_MILLI*  : u64 = 1000000
+NS_PER_SECOND* : u64 = 1000000000
+NS_PER_MINUTE* : u64 = 60000000000
 
-// Duration.seconds(60) reads better than seconds(60) at a call
-// site far from this module, and both spellings are the same
-// function — a constant is looked up on the type, a ufcs call on
-// the argument
-add* = (self: Duration, other: Duration) Duration
-sub* = (self: Duration, other: Duration) Res<Duration>
-millis_of* = (self: Duration) u64
+nanos*   = (n: u64) Duration { Duration(ns: n) }
+micros*  = (n: u64) Duration { Duration(ns: n * NS_PER_MICRO) }
+millis*  = (n: u64) Duration { Duration(ns: n * NS_PER_MILLI) }
+seconds* = (n: u64) Duration { Duration(ns: n * NS_PER_SECOND) }
+minutes* = (n: u64) Duration { Duration(ns: n * NS_PER_MINUTE) }
+
+// and out. One accessor per constructor, because asymmetry here is
+// a trap: a caller who can build from minutes and read only millis
+// writes the division by hand, and gets it wrong once.
+//
+// These TRUNCATE, and say so in their names' shape rather than in
+// five comments: `millis_of` is how many whole milliseconds fit, not
+// a rounded one. A span of 1500 microseconds is 1 millisecond and
+// 500 microseconds, and nothing here pretends otherwise.
+nanos_of*   = (self: Duration) u64 { self.ns }
+micros_of*  = (self: Duration) u64 { self.ns / NS_PER_MICRO }
+millis_of*  = (self: Duration) u64 { self.ns / NS_PER_MILLI }
+seconds_of* = (self: Duration) u64 { self.ns / NS_PER_SECOND }
+minutes_of* = (self: Duration) u64 { self.ns / NS_PER_MINUTE }
+
+add* = (self: Duration, other: Duration) Duration {
+    Duration(ns: self.ns + other.ns)
+}
+
+// `sub` is a Res and `add` is not, and that asymmetry is the failure
+// model rather than an oversight. A Duration is unsigned, so a
+// shorter span minus a longer one has no answer to give — an absence
+// a caller acts on, which is `Res`. Overflowing `add` is a bug in
+// the caller's arithmetic and traps, like every other `+`.
+sub* = (self: Duration, other: Duration) Res<Duration> {
+    (self.ns >= other.ns).match({
+        true  => Ok(Duration(ns: self.ns - other.ns)),
+        false => None,
+    });
+}
