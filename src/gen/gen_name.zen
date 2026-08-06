@@ -54,6 +54,7 @@ write_usize = sema.sema_diag
 TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
 World = sema.sema_def
 DeclId = sema.sema_id
+Inst = sema.sema_inst
 
 // Derived from a user name.
 USR* : str = "zu_"
@@ -210,12 +211,24 @@ prefix_of = (types: Types, id: TyId) str {
 // overloading resolves on — "resolution is on declared parameter types
 // and arity" — so two overloads of one name get two symbols by
 // construction rather than by a counter.
+//
+// `inst` IS WHAT MAKES AN INSTANTIATION A SYMBOL. A generic function is
+// emitted once per distinct set of type arguments, so the arguments are
+// in the name — decision 5 of the header, and the reason `tcode` reads
+// nothing but the type. `Vec<i32>()` and `Vec<str>()` share a signature
+// (`(a: Alloc)`) and differ only here, which is why the signature alone
+// cannot be the identity.
+//
+// `O` and `I` are two sections and not one: the signature answers "which
+// overload" and the arguments answer "which instantiation", and a
+// program can differ in either without differing in the other.
 sym_fn* = (out :: String, types: Types, world: World, qname: str,
-           sig: Vec<TyId>) Res<(), AllocError> {
+           sig: Vec<TyId>, inst: Inst) Res<(), AllocError> {
     out.add_bytes(USR).try();
     out.add_bytes("f").try();
     path(out, qname).try();
     (sig.len > 0).then(() { write_sig(out, types, world, sig).try() });
+    (inst.len() > 0).then(() { write_targs(out, types, world, inst).try() });
     Ok(());
 }
 
@@ -224,6 +237,31 @@ write_sig = (out :: String, types: Types, world: World, sig: Vec<TyId>)
     out.add_bytes("O").try();
     tcode_list(out, types, world, sig).try();
     Ok(());
+}
+
+// The type arguments, in the order the instantiation bound them, which
+// is declaration order: `Inst` is a pair of parallel lists filled from
+// `tparams` and never from a `Map`, so two runs that bind the same
+// arguments write the same bytes.
+write_targs = (out :: String, types: Types, world: World, inst: Inst)
+              Res<(), AllocError> {
+    out.add_bytes("I").try();
+    count(out, inst.len()).try();
+    Range(0, inst.len()).loop((h, i) {
+        write_targ(out, types, world, inst, i).try();
+    });
+    Ok(());
+}
+
+// An argument this instantiation left free renders as `q`, the same
+// letter an unsubstituted parameter takes — and the consumer refuses
+// before it gets here, because two free parameters would be one symbol.
+write_targ = (out :: String, types: Types, world: World, inst: Inst,
+              i: usize) Res<(), AllocError> {
+    inst.arg_at(i).match({
+        None  => out.add_bytes("q"),
+        Ok(t) => tcode(out, types, world, t),
+    })
 }
 
 // An enum constant: the enum's own path with the variant appended.

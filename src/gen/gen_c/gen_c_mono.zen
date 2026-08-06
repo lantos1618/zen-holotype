@@ -1,0 +1,256 @@
+// src/gen/gen_c/gen_c_mono.zen
+// Monomorphisation: what the backend does with a type parameter.
+//
+// C has no generics, so a generic function is emitted ONCE PER DISTINCT
+// SET OF TYPE ARGUMENTS with the arguments in its mangled name. That is
+// the whole of the feature, and almost none of it is here — `sema_inst.zen`
+// already answers what each parameter became, at a call site and at a
+// generic receiver both. This file is the three things a BACKEND has to
+// do that sema does not:
+//
+//   - READ THE ANSWER BACK. `inst_at` is `Checker.resolved_inst` with the
+//     empty instantiation for a miss, so a non-generic call and a generic
+//     one go down one path.
+//   - PUT THE PARAMETERS BACK IN SCOPE while a DECLARED type is read.
+//     Sema resolves `(a: Alloc) Vec<T>` with `T` bound, then forgets;
+//     the backend asks the same question again later and has to bind it
+//     again or `T` is an undefined name. `enter_tparams` is that, and it
+//     is always paired with `leave_tparams`.
+//   - REFUSE AN OPEN TYPE. A `Var` that reaches `tcode` mangles to one
+//     letter, so two instantiations would become one symbol and `cc`
+//     would silently pick whichever body it saw last. `open` is asked
+//     before anything is emitted, and the fault names the function.
+//
+// THE ORDER IS DECLARATION ORDER AND NOTHING ELSE. An `Inst` is two
+// parallel lists filled from `tparams`, never a `Map`, so the `I` section
+// of a symbol is a pure function of the instantiation — which is the
+// property the fixpoint stands on.
+
+Ast, Decl, DeclKind, Struct, Function, TParam, Member, ExprId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+DeclId = sema.sema_id
+TyId, Ty, Types, TyNamed = sema.sema_ty
+World, Def, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+Inst, subst, has_var, inst_of_named, owner_of, zip = sema.sema_inst
+tparam_vars = sema.sema_inst
+CBackend = gen.gen_c.gen_c_state
+
+// ---------------------------------------------------------------------
+// interning, through ONE field and never two
+//
+// ⚠ `be.check.types.named(..)` DOES NOT INTERN. The bootstrapper spills
+// a `::` receiver reached through TWO field hops into a temporary and
+// calls the method on the temporary, so the row lands in a copy of the
+// store and the `TyId` handed back is one past the real store's end —
+// which the next `Types.at` traps on, a long way from the cause. One hop
+// (`c.types.named(..)` with `c :: Checker` a parameter) is correct, so
+// every mutating store call in this folder goes through a helper that
+// takes the checker as its own parameter. Recorded with the emitted C in
+// docs/GEN_BOOTSTRAP_FIXES.md.
+// ---------------------------------------------------------------------
+
+// The type a declaration NAMES, applied to `args`.
+intern_named* = (c :: Checker, d: Def, args: Vec<TyId>)
+                Res<TyId, AllocError> {
+    c.types.named(d.id, d.qname, d.name, args)
+}
+
+// One type parameter of a declaration, as the `Ty.Var` sema interned.
+intern_var* = (c :: Checker, name: str, owner: str) Res<TyId, AllocError> {
+    c.types.var(name, owner)
+}
+
+// THE TYPE A CONSTRUCTION BUILDS, at this emission's instantiation.
+//
+// `Vec(data: .., cap: 0)` inside `Vec<T>`'s own constructor builds a
+// `Vec<T>` and not a bare `Vec` — sema records exactly that, so the
+// backend has to agree or the two intern two different types under one
+// name. The declaration's own parameters go in, and the instantiation
+// being lowered turns them into what this emission is at.
+constructed* = (be :: CBackend, d: Def) Res<TyId, AllocError> {
+    args ::= be.alloc.Vec<TyId>();
+    decl_vars(be.check, d, args).try();
+    raw = intern_named(be.check, d, args).try();
+    sub(be, raw)
+}
+
+decl_vars = (c :: Checker, d: Def, out :: Vec<TyId>) Res<(), AllocError> {
+    decl_at(c.tree, d.id).match({
+        None  => Ok(()),
+        Ok(x) => decl_vars_of(c, d, x, out),
+    })
+}
+
+decl_vars_of = (c :: Checker, d: Def, x: Decl, out :: Vec<TyId>)
+               Res<(), AllocError> {
+    x.kind.match({
+        Struct(s) => tparam_vars(c, s.tparams, d.qname, out),
+        _         => Ok(()),
+    })
+}
+
+// ---------------------------------------------------------------------
+// reading the answer back
+// ---------------------------------------------------------------------
+
+// What this call instantiated its callee at. The empty instantiation
+// when sema recorded nothing, which is what every non-generic call is —
+// so a caller never has to ask whether the callee was generic first.
+inst_at* = (be :: CBackend, id: ExprId) Res<Inst, AllocError> {
+    be.check.resolved_inst(id).match({
+        Ok(i) => Ok(i),
+        None  => Ok(be.alloc.Inst()),
+    })
+}
+
+// The instantiation a generic RECEIVER carries: `Vec<GenDiag>` binds
+// `Vec`'s own `T`, which is what makes `v.add(x)` a call on the row type
+// the receiver actually holds.
+recv_inst* = (be :: CBackend, rty: TyId) Res<Inst, AllocError> {
+    be.check.types.at(rty).match({
+        Named(n) => be.check.inst_of_named(n),
+        _        => Ok(be.alloc.Inst()),
+    })
+}
+
+// A METHOD OF `Vec<T>` IS GENERIC IN `T` WHETHER OR NOT IT DECLARES ANY
+// PARAMETER OF ITS OWN — so the receiver's instantiation IS the method's,
+// and a method that also declares parameters of its own would need the
+// two concatenated. That second half is not written: nothing in this tree
+// declares one, and `refuse_method` still names it rather than guessing.
+
+// ---------------------------------------------------------------------
+// substituting
+// ---------------------------------------------------------------------
+
+// A type read out of sema, in terms of the instantiation being lowered.
+//
+// EVERY TYPE THE BACKEND READS GOES THROUGH HERE. Sema checks a generic
+// body exactly once, generically — "one mistake, one diagnostic" — so
+// every answer it gives inside `Vec<T>.add` is about `T` and the backend
+// is the one that knows this emission is the `i32` one.
+sub* = (be :: CBackend, ty: TyId) Res<TyId, AllocError> {
+    subst(be.check, ty, be.inst)
+}
+
+// The same, against an instantiation that is not the current one: a call
+// site substitutes into the CALLEE's declared types, which are in the
+// callee's parameters and not in the caller's.
+sub_with* = (be :: CBackend, ty: TyId, inst: Inst) Res<TyId, AllocError> {
+    subst(be.check, ty, inst)
+}
+
+// Does this type still mention a parameter nothing settled? The question
+// every emission asks before it writes a symbol.
+open* = (be: CBackend, ty: TyId) bool { has_var(be.check, ty) }
+
+// Is any of these types still open? `find` and not a loop, because the
+// answer is a `bool` and the first one is enough.
+any_open* = (be: CBackend, sig: Vec<TyId>) bool {
+    Range(0, sig.len).find((i) {
+        sig.get(i).match({ Ok(t) => open(be, t), None => false })
+    }).match({ Ok(_) => true, None => false })
+}
+
+// Did this instantiation leave a parameter free? A free argument mangles
+// to `q`, so two instantiations would be one symbol — the fault the
+// header names, asked where there is a call to point at.
+inst_open* = (be: CBackend, inst: Inst) bool {
+    Range(0, inst.len()).find((i) {
+        inst.arg_at(i).match({ Ok(t) => open(be, t), None => true })
+    }).match({ Ok(_) => true, None => false })
+}
+
+// THE CALL'S INSTANTIATION, IN THE CALLER'S TERMS.
+//
+// Sema records what the CALLEE's parameters became, and inside a generic
+// body what they became is often the CALLER's parameter: `Vec<T>.add`
+// calling `alloc.realloc<T>(..)` instantiates `realloc` at `T`, which is
+// concrete only once the enclosing emission says which `T`. So each
+// argument is put through the instantiation being lowered, and the
+// result is a list every reader of it can mangle.
+//
+// It is rebuilt rather than edited because an `Inst` is a value that a
+// memo holds: sema's copy must not change because a backend read it.
+// A parameter the call left free is bound TO ITSELF, so the list keeps
+// its length — a shorter list would make two instantiations one symbol,
+// which is the exact failure the length is there to prevent.
+settled_inst* = (be :: CBackend, tparams: Vec<TParam>, owner: str,
+                 inst: Inst) Res<Inst, AllocError> {
+    out ::= be.alloc.Inst();
+    tparams.loop((h, tp) { settle_one(be, tp, owner, inst, out).try() });
+    Ok(out);
+}
+
+settle_one = (be :: CBackend, tp: TParam, owner: str, inst: Inst,
+              out :: Inst) Res<(), AllocError> {
+    v = intern_var(be.check, tp.name.text, owner).try();
+    inst.lookup(v).match({
+        None  => out.bind(v, v),
+        Ok(t) => settle_bound(be, v, t, out),
+    })
+}
+
+settle_bound = (be :: CBackend, v: TyId, t: TyId, out :: Inst)
+               Res<(), AllocError> {
+    arg = sub(be, t).try();
+    out.bind(v, arg)
+}
+
+// ---------------------------------------------------------------------
+// putting the parameters back in scope
+//
+// `type_from_ast` reads a WRITTEN type, and a written `T` means nothing
+// unless `T` is bound. Sema binds it while it checks the declaration and
+// releases it after; the backend asks the same nodes again, later, and
+// has to bind it again. Always as a pair, and always around the smallest
+// span that reads a written type.
+// ---------------------------------------------------------------------
+
+enter_tparams* = (be :: CBackend, tparams: Vec<TParam>, owner: str)
+                 Res<usize, AllocError> {
+    mark = be.check.tvar_mark();
+    tparams.loop((h, tp) { enter_one(be, tp, owner).try() });
+    Ok(mark);
+}
+
+enter_one = (be :: CBackend, tp: TParam, owner: str) Res<(), AllocError> {
+    text = tp.name.text;
+    be.check.push_tvar(text, intern_var(be.check, text, owner).try())
+}
+
+leave_tparams* = (be :: CBackend, mark: usize) Res<(), AllocError> {
+    be.check.release_tvars(mark)
+}
+
+// The type parameters a STRUCT declares, in scope for its members. The
+// owner is built by sema's one builder, because `Var` is interned on it
+// and a parameter bound here has to be the same type sema bound.
+enter_struct_tparams* = (be :: CBackend, decl: DeclId)
+                        Res<usize, AllocError> {
+    mark = be.check.tvar_mark();
+    decl_at(be.tree, decl).match({
+        None  => Ok(()),
+        Ok(d) => enter_decl_tparams(be, decl, d),
+    }).try();
+    Ok(mark);
+}
+
+enter_decl_tparams = (be :: CBackend, decl: DeclId, d: Decl)
+                     Res<(), AllocError> {
+    d.kind.match({
+        Struct(s) => enter_struct_of(be, decl, s),
+        _         => Ok(()),
+    })
+}
+
+enter_struct_of = (be :: CBackend, decl: DeclId, s: Struct)
+                  Res<(), AllocError> {
+    owner = owner_of(be.check, decl.module.to_usize(), s.name.text).try();
+    s.tparams.loop((h, tp) { enter_one(be, tp, owner).try() });
+    Ok(());
+}

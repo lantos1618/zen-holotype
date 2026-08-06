@@ -44,6 +44,7 @@ sym_local, sym_member, sym_variant, sym_gen, sym_fn = gen.gen_name
 RES_PATH, is_failure = gen.gen_name
 GenFault = gen.gen_diag
 CBackend, LocalSlot = gen.gen_c.gen_c_state
+sub, constructed = gen.gen_c.gen_c_mono
 unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_state
 lower_match, lower_try = gen.gen_c.gen_c_flow
 ctype, declarator, spellable, is_unit, c_prim = gen.gen_c.gen_c_type
@@ -81,9 +82,13 @@ spills* = (be: CBackend, id: ExprId) bool {
 // "degrade to your own resolution when a query is absent" the
 // bootstrapper's backend documents. The moment sema types a call, the
 // fallback stops firing and nothing else changes.
+// THE INSTANTIATION IS APPLIED HERE, once, so that no lowering rule has
+// to remember to. Sema typed a generic body exactly once, generically —
+// `sema_inst.zen` says why — so every answer inside `Vec<T>.add` is
+// about `T`, and this is where it becomes the `i32` this emission is at.
 ty_of* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
          Res<TyId, AllocError> {
-    got = be.check.type_of(id, ctx).try();
+    got = sub(be, be.check.type_of(id, ctx).try()).try();
     be.check.is_unknown(got).match({
         false => Ok(got),
         true  => fallback_type(be, id, ctx, want),
@@ -146,8 +151,7 @@ def_result_type = (be :: CBackend, d: Def, want: TyId)
 }
 
 struct_type = (be :: CBackend, d: Def) Res<TyId, AllocError> {
-    empty ::= be.alloc.Vec<TyId>();
-    be.check.types.named(d.id, d.qname, d.name, empty)
+    constructed(be, d)
 }
 
 function_ret = (be :: CBackend, d: Def, want: TyId) Res<TyId, AllocError> {
@@ -171,7 +175,7 @@ written_ret = (be :: CBackend, ret: Res<TypeId>, ctx: Ctx, want: TyId)
               Res<TyId, AllocError> {
     ret.match({
         None  => Ok(want),
-        Ok(t) => be.check.type_from_ast(t, ctx),
+        Ok(t) => sub(be, be.check.type_from_ast(t, ctx).try()),
     })
 }
 
@@ -466,7 +470,7 @@ lower_value_op = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx,
 // is a comparison: `a == b` is `bool` whatever it compares.
 operand_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
                Res<TyId, AllocError> {
-    lhs = be.check.type_of(b.lhs, ctx).try();
+    lhs = sub(be, be.check.type_of(b.lhs, ctx).try()).try();
     be.check.is_literal_ty(lhs).match({
         false => literal_or(be, lhs, b, ctx, want),
         true  => rhs_type(be, b, ctx, want),
@@ -483,7 +487,7 @@ literal_or = (be :: CBackend, lhs: TyId, b: Binary, ctx: Ctx, want: TyId)
 
 rhs_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
            Res<TyId, AllocError> {
-    rhs = be.check.type_of(b.rhs, ctx).try();
+    rhs = sub(be, be.check.type_of(b.rhs, ctx).try()).try();
     usable(be, rhs).match({
         true  => Ok(rhs),
         false => Ok(want),
@@ -668,8 +672,7 @@ enum_type_of = (be :: CBackend, d: Def) Res<TyId> {
 }
 
 intern_named = (be :: CBackend, d: Def) Res<TyId> {
-    empty ::= be.alloc.Vec<TyId>();
-    be.check.types.named(d.id, d.qname, d.name, empty).match({
+    constructed(be, d).match({
         Err(_) => None,
         Ok(id) => Ok(id),
     })

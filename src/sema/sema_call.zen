@@ -44,7 +44,7 @@
 // The arity is what resolution needs and the arity is what it reads.
 
 Ast, Expr, ExprId, Call, Arg, Access, Lambda, Ident, Span, Pos = ast
-Decl, DeclKind, Function, TParam, Param, TypeId = ast
+Decl, DeclKind, Struct, Function, TParam, Param, TypeId = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -54,6 +54,7 @@ TyId, Ty, Types, TyFn, TyNamed, TyVar = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 Checker, Ctx, UNRESOLVED = sema.sema_check
+Inst, subst, unify, tparam_vars, zip = sema.sema_inst
 Found, Base, base_of, members_of, static_access = sema.sema_member
 is_type_def, opaque, nowhere = sema.sema_member
 satisfies_bound, check_bounds = sema.sema_bound
@@ -76,6 +77,12 @@ Cand* = {
     owner*: str,
     params*: Vec<TyId>,
     ret*: TyId,
+    // the `Ty.Var`s this candidate's own type parameters denote, in
+    // declaration order. They are built once, where the signature is
+    // resolved, because that is the only place `T` and `owner` are both
+    // in hand — and an instantiation is exactly a value for each of
+    // these.
+    tvars*: Vec<TyId>,
     tbounds*: Vec<TBound>,
     generic*: bool,
     span*: Span,
@@ -94,6 +101,13 @@ Actual* = {
     ty*: TyId,
     is_lambda*: bool,
     arity*: usize,
+    // did the argument NAME a field? `Point(x: 3)` and `f(3)` are the
+    // same node and are not the same thing: AST_CONTRACT.md gives the
+    // `name: value` form to construction and to an impl's supplied
+    // field, and a call's arguments are positional. Recorded here
+    // because resolution is the one place the difference decides
+    // anything.
+    named*: bool,
     span*: Span,
 }
 
@@ -118,30 +132,31 @@ call_type* = (c :: Checker, id: ExprId, node: Expr, call: Call, ctx: Ctx)
 actuals_of = (c :: Checker, args: Vec<Arg>, ctx: Ctx, out :: Vec<Actual>)
              Res<(), AllocError> {
     args.loop((h, a) {
-        out.add(actual_of(c, a.value, a.span, ctx).try()).try();
+        out.add(actual_of(c, a, ctx).try()).try();
     });
     Ok(());
 }
 
-actual_of = (c :: Checker, id: ExprId, span: Span, ctx: Ctx)
-            Res<Actual, AllocError> {
-    node = c.tree.expr_at(id);
+actual_of = (c :: Checker, a: Arg, ctx: Ctx) Res<Actual, AllocError> {
+    node = c.tree.expr_at(a.value);
     node.kind.match({
-        Lambda(l) => lambda_actual(c, l, span),
-        _         => value_actual(c, id, span, ctx),
+        Lambda(l) => lambda_actual(c, l, a),
+        _         => value_actual(c, a, ctx),
     })
 }
 
-lambda_actual = (c :: Checker, l: Lambda, span: Span)
-                Res<Actual, AllocError> {
+is_named = (a: Arg) bool { a.name.match({ Ok(_) => true, None => false }) }
+
+lambda_actual = (c :: Checker, l: Lambda, a: Arg) Res<Actual, AllocError> {
     poison = c.types.unknown().try();
-    Ok(Actual(ty: poison, is_lambda: true, arity: l.params.len, span: span));
+    Ok(Actual(ty: poison, is_lambda: true, arity: l.params.len,
+              named: is_named(a), span: a.span));
 }
 
-value_actual = (c :: Checker, id: ExprId, span: Span, ctx: Ctx)
-               Res<Actual, AllocError> {
-    ty = c.type_of(id, ctx).try();
-    Ok(Actual(ty: ty, is_lambda: false, arity: 0, span: span));
+value_actual = (c :: Checker, a: Arg, ctx: Ctx) Res<Actual, AllocError> {
+    ty = c.type_of(a.value, ctx).try();
+    Ok(Actual(ty: ty, is_lambda: false, arity: 0, named: is_named(a),
+              span: a.span));
 }
 
 // ---------------------------------------------------------------------
@@ -212,8 +227,8 @@ decl_call = (c :: Checker, id: ExprId, node: Expr, call: Call, name: str,
     kept ::= c.alloc.Vec<Cand>();
     keep_matching(c, cands, actuals, kept).try();
     (kept.len > 0).match({
-        true  => chosen(c, id, kept, actuals),
-        false => construct_or_fail(c, id, node, name, cands, ctx),
+        true  => chosen(c, id, call, kept, actuals, ctx),
+        false => construct_or_fail(c, id, node, call, name, cands, ctx),
     })
 }
 
@@ -234,13 +249,14 @@ keep_one = (c :: Checker, k: Cand, actuals: Vec<Actual>, kept :: Vec<Cand>)
     })
 }
 
-construct_or_fail = (c :: Checker, id: ExprId, node: Expr, name: str,
-                     cands: Vec<Cand>, ctx: Ctx) Res<TyId, AllocError> {
+construct_or_fail = (c :: Checker, id: ExprId, node: Expr, call: Call,
+                     name: str, cands: Vec<Cand>, ctx: Ctx)
+                    Res<TyId, AllocError> {
     defs ::= c.alloc.Vec<Def>();
     c.world.defs_of(ctx.module, name, defs).try();
     type_def_of(defs).match({
         None    => no_overload(c, node, name, cands),
-        Ok(d)   => construct(c, id, d),
+        Ok(d)   => construct(c, id, call, d, ctx),
     })
 }
 
@@ -257,10 +273,52 @@ type_def_of = (defs: Vec<Def>) Res<Def> {
 // reason a call is: `Checker* = { .. }` beside `Checker* = (a: Alloc,
 // ..)` is two declarations of one name, and which of them a call site
 // meant is decided here and nowhere else.
-construct = (c :: Checker, id: ExprId, d: Def) Res<TyId, AllocError> {
+// A GENERIC STRUCT IS CONSTRUCTED AT WHAT THE CALL WROTE, and at its own
+// parameters when the call wrote nothing.
+//
+// `Box<i32>(held: 7)` says which `Box` outright. `Vec(alloc: a)` inside
+// `Vec<T>`'s own constructor says nothing and means the declaration's
+// own `T` — which the enclosing instantiation then substitutes. Both
+// answer an APPLIED type: a bare `Vec` has no arguments to substitute
+// and no fields a backend could lay out, so it is never the answer.
+construct = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
+            Res<TyId, AllocError> {
     c.resolve_call(id, d.id).try();
-    empty ::= c.alloc.Vec<TyId>();
-    c.types.named(d.id, d.qname, d.name, empty)
+    args ::= c.alloc.Vec<TyId>();
+    ctor_args(c, call, d, ctx, args).try();
+    c.types.named(d.id, d.qname, d.name, args)
+}
+
+ctor_args = (c :: Checker, call: Call, d: Def, ctx: Ctx, out :: Vec<TyId>)
+            Res<(), AllocError> {
+    (call.targs.len == 0).match({
+        true  => decl_tparams(c, d, out),
+        false => written_ctor_args(c, call.targs, ctx, out),
+    })
+}
+
+// The written arguments mean what they mean AT THE CALL SITE, exactly as
+// a generic function's do.
+written_ctor_args = (c :: Checker, targs: Vec<TypeId>, ctx: Ctx,
+                     out :: Vec<TyId>) Res<(), AllocError> {
+    targs.loop((h, t) { out.add(c.type_from_ast(t, ctx).try()).try() });
+    Ok(());
+}
+
+decl_tparams = (c :: Checker, d: Def, out :: Vec<TyId>)
+               Res<(), AllocError> {
+    decl_at(c.tree, d.id).match({
+        None    => Ok(()),
+        Ok(dec) => struct_tparams(c, d, dec, out),
+    })
+}
+
+struct_tparams = (c :: Checker, d: Def, dec: Decl, out :: Vec<TyId>)
+                 Res<(), AllocError> {
+    dec.kind.match({
+        Struct(s) => tparam_vars(c, s.tparams, d.qname, out),
+        _         => Ok(()),
+    })
 }
 
 // No candidate of that arity or those types. Silent when there were no
@@ -279,19 +337,104 @@ no_overload = (c :: Checker, node: Expr, name: str, cands: Vec<Cand>)
 // DOWN. Everything after resolution — the backend most of all — reads
 // `call_memo` rather than asking the name again, because the name is
 // exactly what could not answer.
-chosen = (c :: Checker, id: ExprId, kept: Vec<Cand>, actuals: Vec<Actual>)
-         Res<TyId, AllocError> {
+chosen = (c :: Checker, id: ExprId, call: Call, kept: Vec<Cand>,
+          actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
     kept.get(0).match({
         None   => c.types.unknown(),
-        Ok(k)  => chosen_ret(c, id, k, actuals),
+        Ok(k)  => chosen_ret(c, id, call, k, actuals, ctx),
     })
 }
 
-chosen_ret = (c :: Checker, id: ExprId, k: Cand, actuals: Vec<Actual>)
-             Res<TyId, AllocError> {
+chosen_ret = (c :: Checker, id: ExprId, call: Call, k: Cand,
+              actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
     c.resolve_call(id, k.id).try();
     check_bounds(c, k, actuals).try();
-    Ok(k.ret);
+    instantiate(c, id, call, k, actuals, ctx)
+}
+
+// A GENERIC CANDIDATE IS INSTANTIATED, and this is the line `sema.zen`
+// used to say was missing: `<T>(x: T) T` called with an `i32` answers
+// `i32` and not `T`. The instantiation is recorded under the call's own
+// id beside the declaration, because everything downstream needs both —
+// a backend that knew which function but not which `T` would be picking
+// one of the two answers out of the air.
+instantiate = (c :: Checker, id: ExprId, call: Call, k: Cand,
+               actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
+    k.generic.match({
+        false => Ok(k.ret),
+        true  => instantiated_ret(c, id, call, k, actuals, ctx),
+    })
+}
+
+instantiated_ret = (c :: Checker, id: ExprId, call: Call, k: Cand,
+                    actuals: Vec<Actual>, ctx: Ctx)
+                   Res<TyId, AllocError> {
+    inst = call_inst(c, call, k, actuals, ctx).try();
+    c.resolve_inst(id, inst).try();
+    subst(c, k.ret, inst)
+}
+
+// WHAT THE CALL SAID `T` IS. Two sources and the written one wins,
+// because `bind` keeps the first binding: `alloc.Vec<Unit>()` names its
+// argument outright, and `alloc.realloc(p, n)` says it only through
+// `p: Ptr<T>` against a `Ptr<u8>`.
+//
+// A parameter neither source reaches stays free. That is not an error
+// here — a candidate is TRIED before it is chosen, and reporting from
+// inside a trial would name an overload the program never used — so the
+// refusal belongs at the consumer, which is what `has_var` is for.
+call_inst = (c :: Checker, call: Call, k: Cand, actuals: Vec<Actual>,
+             ctx: Ctx) Res<Inst, AllocError> {
+    inst ::= c.alloc.Inst();
+    written_targs(c, call, k, inst, ctx).try();
+    infer_targs(c, k, actuals, inst).try();
+    Ok(inst);
+}
+
+written_targs = (c :: Checker, call: Call, k: Cand, inst :: Inst, ctx: Ctx)
+                Res<(), AllocError> {
+    (call.targs.len == 0).match({
+        true  => Ok(()),
+        false => bind_written(c, call.targs, k, inst, ctx),
+    })
+}
+
+// The written arguments mean what they mean AT THE CALL SITE, so they
+// resolve in the caller's module and not the callee's.
+bind_written = (c :: Checker, targs: Vec<TypeId>, k: Cand, inst :: Inst,
+                ctx: Ctx) Res<(), AllocError> {
+    tys ::= c.alloc.Vec<TyId>();
+    targs.loop((h, t) { tys.add(c.type_from_ast(t, ctx).try()).try() });
+    zip(c, k.tvars, tys, inst).try();
+    Ok(());
+}
+
+infer_targs = (c :: Checker, k: Cand, actuals: Vec<Actual>, inst :: Inst)
+              Res<(), AllocError> {
+    Range(0, k.params.len).loop((h, i) {
+        infer_at(c, k, actuals, i, inst).try();
+    });
+    Ok(());
+}
+
+infer_at = (c :: Checker, k: Cand, actuals: Vec<Actual>, i: usize,
+            inst :: Inst) Res<(), AllocError> {
+    actuals.get(i).match({
+        None  => Ok(()),
+        Ok(a) => infer_from(c, ty_at(k.params, i), a, inst),
+    })
+}
+
+// A LAMBDA SAYS NOTHING ABOUT `T`. "A closure passed to a function whose
+// signature is already known infers its parameter types FROM that
+// signature", so the arrow points the other way and a lambda's poison
+// type is not an inference.
+infer_from = (c :: Checker, param: TyId, a: Actual, inst :: Inst)
+             Res<(), AllocError> {
+    a.is_lambda.match({
+        true  => Ok(()),
+        false => unify(c, param, a.ty, inst),
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -379,7 +522,7 @@ ufcs_call = (c :: Checker, id: ExprId, node: Expr, call: Call, ac: Access,
              b: Base, actuals: Vec<Actual>, ctx: Ctx)
             Res<TyId, AllocError> {
     all ::= c.alloc.Vec<Actual>();
-    all.add(Actual(ty: b.ty, is_lambda: false, arity: 0,
+    all.add(Actual(ty: b.ty, is_lambda: false, arity: 0, named: false,
                    span: node.span)).try();
     actuals.loop((h, a) { all.add(a).try() });
     decl_call(c, id, node, call, ac.name.text, all, ctx)
@@ -445,6 +588,8 @@ add_cand = (c :: Checker, d: Def, dec: Decl, f: Function, out :: Vec<Cand>)
     poison = c.types.unknown().try();
     ctx = Ctx(d.id.module.to_usize(), poison);
     push_tparams(c, f, d.qname).try();
+    tvs ::= c.alloc.Vec<TyId>();
+    tparam_vars(c, f.tparams, d.qname, tvs).try();
     ptys ::= c.alloc.Vec<TyId>();
     f.params.loop((h, p) { ptys.add(c.param_type(p, ctx).try()).try() });
     rty = f.ret.match({
@@ -455,8 +600,8 @@ add_cand = (c :: Checker, d: Def, dec: Decl, f: Function, out :: Vec<Cand>)
     collect_bounds(c, f, ctx, tbs).try();
     c.release_tvars(mark).try();
     out.add(Cand(id: d.id, name: d.name, owner: d.qname, params: ptys,
-                 ret: rty, tbounds: tbs, generic: f.tparams.len > 0,
-                 span: dec.span))
+                 ret: rty, tvars: tvs, tbounds: tbs,
+                 generic: f.tparams.len > 0, span: dec.span))
 }
 
 push_tparams = (c :: Checker, f: Function, owner: str) Res<(), AllocError> {
@@ -486,7 +631,34 @@ tparam_bounds = (c :: Checker, tp: TParam, ctx: Ctx, out :: Vec<TBound>)
 // matching
 // ---------------------------------------------------------------------
 
+// A NAMED ARGUMENT SUPPLIES A FIELD AND NEVER A PARAMETER, so a call
+// written with one matches no function at all.
+//
+// AST_CONTRACT.md gives `name: value` to construction and to an impl's
+// supplied field; a call's arguments are positional. Without this,
+// `Vec(alloc: a)` — the body of `Vec`'s own constructor — resolves to
+// the CONSTRUCTOR rather than to the struct, because the function takes
+// one `Alloc` and so does the call. Sema answered `Vec<T>` either way,
+// so nothing showed until a backend was able to lower it: the emitted
+// C is a function calling itself with its own argument, which is
+// unbounded recursion with no diagnostic anywhere. It is the same shape
+// as the variadic mismatch that built a `String` positionally, and it
+// is why this rule is checked before an instantiation is trusted.
 matches* = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
+           Res<bool, AllocError> {
+    any_named(actuals).match({
+        true  => Ok(false),
+        false => by_arity(c, cand, actuals),
+    })
+}
+
+any_named = (actuals: Vec<Actual>) bool {
+    Range(0, actuals.len).find((i) {
+        actuals.get(i).match({ Ok(a) => a.named, None => false })
+    }).match({ Ok(_) => true, None => false })
+}
+
+by_arity = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
            Res<bool, AllocError> {
     is_variadic(c, cand).match({
         true  => variadic_matches(c, cand, actuals),

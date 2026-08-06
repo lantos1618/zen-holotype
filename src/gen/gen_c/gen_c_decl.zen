@@ -33,6 +33,7 @@ Range = std.core
 TyId, Ty, Types, TyRes = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
+Inst = sema.sema_inst
 type_from_ast, param_type = sema.sema_type
 member_named, self_ctx = sema.sema_member
 Emit, order = gen.gen_emit
@@ -40,6 +41,9 @@ sym_fn, sym_local, sym_member, sym_variant = gen.gen_name
 RES_PATH = gen.gen_name
 GenFault = gen.gen_diag
 CBackend, MethodRef = gen.gen_c.gen_c_state
+sub, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
+enter_struct_tparams = gen.gen_c.gen_c_mono
+signature_of = gen.gen_c.gen_c_call
 ctype, declarator, spellable, is_unit, is_c_integer = gen.gen_c.gen_c_type
 emit_types = gen.gen_c.gen_c_layout
 Dest, block = gen.gen_c.gen_c_stmt
@@ -104,14 +108,43 @@ seed_function = (be :: CBackend, m: Module, mi: usize, d: Decl)
 // The declaration is found through `defs_of` rather than by index, so
 // the `Def` a seed carries is the same value a call site would resolve
 // to — one identity for a function, not two.
+//
+// A GENERIC FUNCTION IS NOT A ROOT. There is no such thing as `Vec<T>`
+// in C; there is `Vec<i32>` for each `T` a program actually asked for,
+// and a call site is the only place that says which. So a generic
+// declaration is skipped here and reached through `call_reachable`.
 seed_named = (be :: CBackend, m: Module, mi: usize, f: Function)
              Res<(), AllocError> {
+    (f.tparams.len > 0).match({
+        true  => Ok(()),
+        false => seed_defs(be, mi, f),
+    })
+}
+
+seed_defs = (be :: CBackend, mi: usize, f: Function) Res<(), AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.own_defs(mi, f.name.text, found).try();
-    found.loop((h, d) {
-        is_function(d).then(() { be.need_function(d).try() });
-    });
+    found.loop((h, d) { seed_def(be, d).try() });
     Ok(());
+}
+
+seed_def = (be :: CBackend, d: Def) Res<(), AllocError> {
+    is_function(d).match({
+        false => Ok(()),
+        true  => seed_root(be, d),
+    })
+}
+
+// The symbol is built the same way a call site builds it, because the
+// queue's identity IS the symbol: a root queued under one name and
+// called under another would be emitted twice.
+seed_root = (be :: CBackend, d: Def) Res<(), AllocError> {
+    inst ::= be.alloc.Inst();
+    sig ::= be.alloc.Vec<TyId>();
+    signature_of(be, d, inst, sig).try();
+    sym ::= be.alloc.String().try();
+    sym_fn(sym, be.check.types, be.check.world, d.qname, sig, inst).try();
+    be.need_function(d, inst, sym.view())
 }
 
 is_function = (d: Def) bool {
@@ -142,7 +175,16 @@ drain = (be :: CBackend) Res<(), AllocError> {
     Ok(());
 }
 
+// THE INSTANTIATION IS ENTERED BEFORE THE BODY AND NOT INSIDE IT. Every
+// type the lowering reads is substituted through `be.inst`, so the one
+// place that knows which emission this is has to be the one that sets
+// it — and a queue entry carries the instantiation precisely so the
+// symbol above the body is the symbol the call site wrote.
 lower_queued = (be :: CBackend, i: usize) Res<(), AllocError> {
+    be.enter_inst(be.queued_inst(i).match({
+        Ok(x) => x,
+        None  => be.alloc.Inst(),
+    }));
     be.fn_queue.get(i).match({
         None  => Ok(()),
         Ok(d) => lower_def(be, d),
@@ -151,6 +193,10 @@ lower_queued = (be :: CBackend, i: usize) Res<(), AllocError> {
 }
 
 lower_queued_method = (be :: CBackend, i: usize) Res<(), AllocError> {
+    be.enter_inst(be.queued_m_inst(i).match({
+        Ok(x) => x,
+        None  => be.alloc.Inst(),
+    }));
     be.m_queue.get(i).match({
         None  => Ok(()),
         Ok(m) => lower_method_ref(be, m),
@@ -177,20 +223,9 @@ lower_decl = (be :: CBackend, d: Def, x: Decl) Res<(), AllocError> {
 // one function
 // -----------------------------------------------------------------
 
-// A generic function is not lowered: an instantiation needs its type
-// arguments substituted through the whole body, and monomorphisation
-// is not in this backend yet. A declaration with no body — `Required`
-// or `Hook` — has nothing to lower and is not a fault.
+// A declaration with no body — `Required` or `Hook` — has nothing to
+// lower and is not a fault.
 lower_function = (be :: CBackend, d: Def, x: Decl, f: Function)
-                 Res<(), AllocError> {
-    (f.tparams.len > 0).match({
-        true  => be.report(x.span.file, x.span,
-                           GenFault.Unsupported("a generic function")),
-        false => lower_concrete(be, d, x, f),
-    })
-}
-
-lower_concrete = (be :: CBackend, d: Def, x: Decl, f: Function)
                  Res<(), AllocError> {
     f.body.match({
         None    => Ok(()),
@@ -198,11 +233,18 @@ lower_concrete = (be :: CBackend, d: Def, x: Decl, f: Function)
     })
 }
 
+// THE TYPE PARAMETERS ARE IN SCOPE FOR THE WHOLE BODY, not just the
+// signature: a local written `v: T` is a written type like any other,
+// and `T` means nothing unless it is bound. What each one BECAME is
+// `be.inst`, which the queue entry set.
 lower_body = (be :: CBackend, d: Def, x: Decl, f: Function, blk: BlockId)
              Res<(), AllocError> {
     mi = d.id.module.to_usize();
     ctx = plain_ctx(be, mi);
-    lower_shape(be, f, blk, d.qname, d.name, d.span, ctx, ctx.self_ty, mi)
+    mark = enter_tparams(be, f.tparams, d.qname).try();
+    lower_shape(be, f, blk, d.qname, d.name, d.span, ctx, ctx.self_ty, mi).try();
+    leave_tparams(be, mark).try();
+    Ok(());
 }
 
 // -----------------------------------------------------------------
@@ -257,11 +299,17 @@ method_fn = (be :: CBackend, m: MethodRef, mem: Member, f: Function)
     })
 }
 
+// The TYPE's parameters and not the member's: "a method of `Vec<T>` is
+// generic in `T` whether or not it declares any of its own", so what a
+// member body names is the declaration it lives in.
 method_shape = (be :: CBackend, m: MethodRef, mem: Member, f: Function,
                 blk: BlockId) Res<(), AllocError> {
     mi = m.decl.module.to_usize();
     ctx = be.check.self_ctx(mi, m.self_ty).try();
-    lower_shape(be, f, blk, m.qname, m.name, mem.span, ctx, m.self_ty, mi)
+    mark = enter_struct_tparams(be, m.decl).try();
+    lower_shape(be, f, blk, m.qname, m.name, mem.span, ctx, m.self_ty, mi).try();
+    leave_tparams(be, mark).try();
+    Ok(());
 }
 
 // -----------------------------------------------------------------
@@ -288,12 +336,15 @@ lower_shape = (be :: CBackend, f: Function, blk: BlockId, qname: str,
     Ok(());
 }
 
+// Written, then substituted: `Vec<T>.get` returns `Res<T>` and this
+// emission is the one that knows which `T`.
 return_type = (be :: CBackend, f: Function, ctx: Ctx)
               Res<TyId, AllocError> {
-    f.ret.match({
+    declared = f.ret.match({
         Ok(t) => be.check.type_from_ast(t, ctx),
         None  => be.check.types.prim("()"),
-    })
+    }).try();
+    sub(be, declared)
 }
 
 // A context with a module and nothing else: no `@Self`, no enclosing
@@ -342,7 +393,7 @@ bind_params = (be :: CBackend, f: Function, ctx: Ctx, sig :: Vec<TyId>)
 // about `@Self` can answer it.
 bind_param = (be :: CBackend, p: Param, ctx: Ctx, sig :: Vec<TyId>)
              Res<(), AllocError> {
-    ty = be.check.param_type(p, ctx).try();
+    ty = sub(be, be.check.param_type(p, ctx).try()).try();
     sig.add(ty).try();
     be.declare(p.name.text, ty, p.mutable).try();
     be.check.bind(p.name.text, ty, p.mutable).try();
@@ -360,7 +411,7 @@ write_proto = (be :: CBackend, qname: str, name: str, span: Span,
     out.add_bytes("static ").try();
     ctype(be, ret, out).try();
     out.add_bytes(" ").try();
-    sym_fn(out, be.check.types, be.check.world, qname, sig).try();
+    sym_fn(out, be.check.types, be.check.world, qname, sig, be.inst).try();
     out.add_bytes("(").try();
     write_params(be, f, sig, out).try();
     out.add_bytes(")").try();
@@ -450,7 +501,7 @@ destination = (be :: CBackend, ret: TyId) Dest {
 keep = (be :: CBackend, qname: str, sig: Vec<TyId>, proto: String)
        Res<(), AllocError> {
     name ::= be.alloc.String().try();
-    sym_fn(name, be.check.types, be.check.world, qname, sig).try();
+    sym_fn(name, be.check.types, be.check.world, qname, sig, be.inst).try();
     text ::= be.alloc.String().try();
     text.add_bytes(be.text()).try();
     be.add_function(name, proto, text)
@@ -540,7 +591,8 @@ write_entry = (be :: CBackend, d: Def, f: Function, out :: Emit)
     sig ::= be.alloc.Vec<TyId>();
     signature(be, f, mi, sig).try();
     call ::= be.alloc.String().try();
-    sym_fn(call, be.check.types, be.check.world, d.qname, sig).try();
+    empty ::= be.alloc.Inst();
+    sym_fn(call, be.check.types, be.check.world, d.qname, sig, empty).try();
     call.add_bytes("(").try();
     write_zeroes(be, sig, call).try();
     call.add_bytes(")").try();

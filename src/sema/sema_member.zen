@@ -49,6 +49,7 @@ TyId, Ty, Types, TyNamed, Prim = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 Checker, Ctx, UNRESOLVED = sema.sema_check
+Inst, subst, inst_of_named, owner_of = sema.sema_inst
 is_prim, is_integer, is_float = sema.sema_check
 Case, cases_of, find_case = sema.sema_case
 is_case = sema.sema_match
@@ -506,14 +507,21 @@ own_in_decl = (c :: Checker, d: Decl, n: TyNamed, ty: TyId, name: str,
     })
 }
 
+// THE RECEIVER'S ARGUMENTS ARE SUBSTITUTED INTO WHAT THE DECLARATION
+// PROMISED. `Vec`'s own `get* = (self: @Self, i: usize) Res<T>` resolves
+// to `Res<T>` with `T` a `Var`, because that is what it says where it is
+// written; a `Vec<u8>` reaching it answers `Res<u8>`. Which is the whole
+// of "a method on a generic type" — there is no second mechanism, and
+// the substitution is the receiver's own `TyNamed.args`.
 struct_members = (c :: Checker, s: Struct, n: TyNamed, ty: TyId, name: str,
                   out :: Vec<Found>) Res<(), AllocError> {
     mi = n.decl.module.to_usize();
     poison = c.types.unknown().try();
+    inst = inst_of_named(c, n).try();
     tmark = c.tvar_mark();
     enter_struct_tvars(c, s, mi).try();
     s.members.loop((h, m) {
-        own_member(c, m, name, mi, ty, poison, out).try();
+        own_member(c, m, name, mi, ty, poison, inst, out).try();
     });
     c.release_tvars(tmark).try();
     Ok(());
@@ -535,7 +543,7 @@ struct_members = (c :: Checker, s: Struct, n: TyNamed, ty: TyId, name: str,
 // it isn't.
 enter_struct_tvars = (c :: Checker, s: Struct, mi: usize)
                      Res<(), AllocError> {
-    owner = tvar_owner(c, s.name.text, mi).try();
+    owner = owner_of(c, mi, s.name.text).try();
     s.tparams.loop((h, tp) {
         text = tp.name.text;
         c.push_tvar(text, c.types.var(text, owner).try()).try();
@@ -543,38 +551,25 @@ enter_struct_tvars = (c :: Checker, s: Struct, mi: usize)
     Ok(());
 }
 
-// The declaration's module-qualified name, built the way
-// `sema_decl.zen` builds a function's: the two have to agree, because a
-// type parameter resolved from a declaration and the same one resolved
-// from a candidate must intern to one type.
-tvar_owner = (c :: Checker, name: str, mi: usize) Res<str, AllocError> {
-    out ::= c.alloc.String().try();
-    out.add_bytes(module_name(c, mi)).try();
-    out.add_bytes(".").try();
-    out.add_bytes(name).try();
-    Ok(out.view());
-}
-
-module_name = (c: Checker, mi: usize) str {
-    c.world.table_at(mi).match({ Ok(t) => t.name, None => "" })
-}
-
 // A named helper rather than a `.then` inside the loop body: a loop
 // binding read inside a nested closure does not resolve.
 // docs/SEMA_BOOTSTRAP_FIXES.md §10.
 own_member = (c :: Checker, m: Member, name: str, mi: usize, ty: TyId,
-              poison: TyId, out :: Vec<Found>) Res<(), AllocError> {
+              poison: TyId, inst: Inst, out :: Vec<Found>)
+             Res<(), AllocError> {
     member_named(m, name).match({
         false => Ok(()),
-        true  => add_own(c, m, name, mi, ty, poison, out),
+        true  => add_own(c, m, name, mi, ty, poison, inst, out),
     })
 }
 
 add_own = (c :: Checker, m: Member, name: str, mi: usize, ty: TyId,
-           poison: TyId, out :: Vec<Found>) Res<(), AllocError> {
+           poison: TyId, inst: Inst, out :: Vec<Found>)
+          Res<(), AllocError> {
+    declared = member_type(c, m, mi, ty).try();
     out.add(Found(
         name: name,
-        ty: member_type(c, m, mi, ty).try(),
+        ty: subst(c, declared, inst).try(),
         computed: false,
         mutable: member_mutable(m),
         bound: poison,

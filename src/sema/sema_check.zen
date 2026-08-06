@@ -53,6 +53,7 @@ DeclId = sema.sema_id
 TyId, Ty, Types, ResForm, TyRes, TyNamed = sema.sema_ty
 World, Def, DefKind = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
+Inst = sema.sema_inst
 
 // One name in scope, and what it is.
 //
@@ -111,6 +112,17 @@ Checker* = {
     // a miss means "ask the old way", never "there was no candidate".
     call_memo* :: Map<ExprId, DeclId>,
 
+    // WHAT DID THIS CALL INSTANTIATE ITS CALLEE WITH. The companion of
+    // `call_memo` and keyed the same way: a call to `<T>(x: T) T` picks
+    // a declaration AND a `T`, and only one of those two was being
+    // written down.
+    //
+    // The memo below is NOT re-keyed by it, and `sema_inst.zen` says
+    // why at length: a generic body is still checked exactly once,
+    // generically. What an instantiation changes is the answer at a
+    // CALL SITE, and `ExprId` already separates two call sites.
+    inst_memo* :: Map<ExprId, Inst>,
+
     // the scope stack: one flat Vec with marks, not a chain of frames.
     // A chain needs indirection and every frame is an allocation; a
     // stack needs a `usize` and `release` is what pops it.
@@ -150,6 +162,18 @@ Checker* = {
     resolve_call* = (self :: @Self, id: ExprId, d: DeclId)
                     Res<(), AllocError> {
         self.call_memo.set(id, d)
+    }
+
+    // What this call instantiated its callee's type parameters with.
+    // A miss means "the callee is not generic, or resolution could not
+    // settle it" — never "it instantiated at nothing".
+    resolved_inst* = (self: @Self, id: ExprId) Res<Inst> {
+        self.inst_memo.get(id)
+    }
+
+    resolve_inst* = (self :: @Self, id: ExprId, inst: Inst)
+                    Res<(), AllocError> {
+        self.inst_memo.set(id, inst)
     }
 
     modules* = (self: @Self) World { self.world }
@@ -522,6 +546,7 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         expr_memo: a.Map<ExprId, TyId>(),
         type_memo: a.Map<TypeId, TyId>(),
         call_memo: a.Map<ExprId, DeclId>(),
+        inst_memo: a.Map<ExprId, Inst>(),
         locals: a.Vec<Binding>(),
         tvars: a.Vec<Binding>(),
         bounds: a.Vec<Binding>(),

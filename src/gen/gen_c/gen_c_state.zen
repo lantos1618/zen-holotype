@@ -44,6 +44,7 @@ DeclId = sema.sema_id
 TyId, Types = sema.sema_ty
 World, Def = sema.sema_def
 Checker, Ctx = sema.sema_check
+Inst = sema.sema_inst
 Emit = gen.gen_emit
 GenDiag, GenFault, render_gen = gen.gen_diag
 
@@ -117,6 +118,18 @@ CBackend* = {
     // not a second kind of `Def`: a member has no top-level declaration
     // to mint one from, and `World` is the wrong place to teach that.
     m_queue* :: Vec<MethodRef>,
+    // WHAT EACH QUEUED THING IS INSTANTIATED AT, parallel to the queue
+    // beside it. A generic function is emitted once per distinct set of
+    // type arguments, so a queue entry is a `(declaration, instantiation)`
+    // pair — and the pair is carried rather than re-derived, because the
+    // symbol written at the call site and the symbol written above the
+    // body have to be the same bytes.
+    fn_insts :: Vec<Inst>,
+    m_insts :: Vec<Inst>,
+    // the instantiation the function CURRENTLY being lowered is at.
+    // Empty for everything that is not generic, which is what makes
+    // `subst` cost one field read on the common path.
+    inst* :: Inst,
     fn_seen :: Vec<String>,
     fn_names* :: Vec<String>,
     fn_protos* :: Vec<String>,
@@ -276,20 +289,28 @@ CBackend* = {
     // the function worklist
     // -----------------------------------------------------------------
 
-    // Queue a function for lowering, once. The qualified name is the
-    // identity — two modules may declare `parse` and they are two
-    // functions.
-    need_function* = (self :: @Self, d: Def) Res<(), AllocError> {
-        self.seen_function(d.qname).match({
-            false => self.push_function(d),
+    // Queue a function for lowering, once.
+    //
+    // THE MANGLED SYMBOL IS THE IDENTITY and the qualified name is not,
+    // for two reasons that arrived together: `loop` has six declarations
+    // under one qualified name and they are six functions, and
+    // `Vec<i32>()` and `Vec<str>()` are two emissions of one declaration.
+    // The symbol separates both, because it carries the signature and
+    // the type arguments — which is the same string the call site just
+    // wrote, so a queue hit means the caller is calling something
+    // already queued and never something merely named alike.
+    need_function* = (self :: @Self, d: Def, inst: Inst, sym: str)
+                     Res<(), AllocError> {
+        self.seen_function(sym).match({
+            false => self.push_function(d, inst, sym),
             true  => Ok(()),
         })
     }
 
-    seen_function = (self: @Self, qname: str) bool {
+    seen_function = (self: @Self, sym: str) bool {
         Range(0, self.fn_seen.len).find((i) {
             self.fn_seen.get(i).match({
-                Ok(s) => s.view().eq(qname),
+                Ok(s) => s.view().eq(sym),
                 None  => false,
             })
         }).match({ Ok(_) => true, None => false })
@@ -299,28 +320,48 @@ CBackend* = {
     // set as a free function's, because the same rule applies and the
     // two name spaces cannot collide: a method's qualified name has a
     // TYPE where a function's has a module.
-    need_method* = (self :: @Self, m: MethodRef) Res<(), AllocError> {
-        self.seen_function(m.qname).match({
-            false => self.push_method(m),
+    need_method* = (self :: @Self, m: MethodRef, inst: Inst, sym: str)
+                   Res<(), AllocError> {
+        self.seen_function(sym).match({
+            false => self.push_method(m, inst, sym),
             true  => Ok(()),
         })
     }
 
-    push_method = (self :: @Self, m: MethodRef) Res<(), AllocError> {
-        owned ::= self.alloc.String().try();
-        owned.add_bytes(m.qname).try();
-        self.fn_seen.add(owned).try();
+    push_method = (self :: @Self, m: MethodRef, inst: Inst, sym: str)
+                  Res<(), AllocError> {
+        self.remember(sym).try();
         self.m_queue.add(m).try();
+        self.m_insts.add(inst).try();
         Ok(());
     }
 
-    push_function = (self :: @Self, d: Def) Res<(), AllocError> {
-        owned ::= self.alloc.String().try();
-        owned.add_bytes(d.qname).try();
-        self.fn_seen.add(owned).try();
+    push_function = (self :: @Self, d: Def, inst: Inst, sym: str)
+                    Res<(), AllocError> {
+        self.remember(sym).try();
         self.fn_queue.add(d).try();
+        self.fn_insts.add(inst).try();
         Ok(());
     }
+
+    remember = (self :: @Self, sym: str) Res<(), AllocError> {
+        owned ::= self.alloc.String().try();
+        owned.add_bytes(sym).try();
+        self.fn_seen.add(owned)
+    }
+
+    // What the i-th queued thing is instantiated at. An entry with no
+    // row is not generic, which is what an empty `Inst` means.
+    queued_inst* = (self: @Self, i: usize) Res<Inst> { self.fn_insts.get(i) }
+
+    queued_m_inst* = (self: @Self, i: usize) Res<Inst> { self.m_insts.get(i) }
+
+    // ENTERING AN INSTANTIATION IS NOT A STACK. A body is lowered to
+    // completion before the next queue entry is popped — a call inside
+    // it queues rather than recurses — so one field is the whole of the
+    // state, and clearing it is what makes a non-generic body see no
+    // substitution at all.
+    enter_inst* = (self :: @Self, inst: Inst) () { self.inst = inst; }
 
     // One lowered function: its C name, its prototype and its body,
     // held apart so the three can be emitted in the order C wants and
@@ -426,6 +467,9 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         print_used: false,
         fn_queue: a.Vec<Def>(),
         m_queue: a.Vec<MethodRef>(),
+        fn_insts: a.Vec<Inst>(),
+        m_insts: a.Vec<Inst>(),
+        inst: a.Inst(),
         fn_seen: a.Vec<String>(),
         fn_names: a.Vec<String>(),
         fn_protos: a.Vec<String>(),

@@ -398,8 +398,14 @@ class Toolchain:
         if self.style == "bootstrap":
             return [*self.emit_argv, str(source), "--root", str(root),
                     "--emit-c", "-o", str(out_c)]
-        return [*self.emit_argv, "build", "--root", str(root),
-                "--emit-c", "-o", str(out_c), str(source)]
+        # The self-hosted CLI takes the root POSITIONALLY -- `zen build <root>
+        # --emit-c -o <file>` -- and knows no `--root`, because a build is a
+        # root and finding the entry inside it is the driver's job. It also
+        # takes no source argument for the same reason. Passing the
+        # bootstrapper's spelling made every differential run fail with
+        # `unknown argument --root`, which reads as 33 compiler bugs and is
+        # one harness bug.
+        return [*self.emit_argv, "build", str(root), "--emit-c", "-o", str(out_c)]
 
 
 def make_toolchain(args: argparse.Namespace) -> Toolchain:

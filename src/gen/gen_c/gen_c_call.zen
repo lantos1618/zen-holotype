@@ -41,6 +41,7 @@ DeclId = sema.sema_id
 TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
+Inst = sema.sema_inst
 type_of, type_from_ast, stmt_type = sema.sema_type
 write_usize = sema.sema_diag
 Emit = gen.gen_emit
@@ -49,6 +50,9 @@ RES_PATH, is_failure = gen.gen_name
 GenFault = gen.gen_diag
 CBackend, LocalSlot = gen.gen_c.gen_c_state
 unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_state
+sub, sub_with, open, any_open, inst_at = gen.gen_c.gen_c_mono
+settled_inst, inst_open, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
+constructed, intern_named = gen.gen_c.gen_c_mono
 lower_match, lower_try = gen.gen_c.gen_c_flow
 ctype, declarator, spellable, is_unit, c_prim = gen.gen_c.gen_c_type
 is_c_integer, is_signed, variant_type, decl_ctx = gen.gen_c.gen_c_type
@@ -305,12 +309,27 @@ call_kind = (be :: CBackend, id: ExprId, c: Call, d: Def, recv: Res<ExprId>,
 
 construct = (be :: CBackend, id: ExprId, c: Call, d: Def, ctx: Ctx,
              out :: String) Res<(), AllocError> {
-    empty ::= be.alloc.Vec<TyId>();
-    ty = be.check.types.named(d.id, d.qname, d.name, empty).try();
+    ty = construct_type(be, id, d, ctx).try();
     request_type(be, ty).try();
     decl_at(be.tree, d.id).match({
         None  => unsupported(be, id, "a construction of an unknown type", out),
         Ok(x) => construct_decl(be, id, c, x, ty, ctx, out),
+    })
+}
+
+// WHAT IS BEING BUILT IS SEMA'S ANSWER FOR THIS NODE. `Box<i32>(held: 7)`
+// writes its argument outright and only the node knows it — the
+// declaration alone says `Box<T>`, which is what `constructed` can
+// derive and why it is the FALLBACK and not the answer. Sema records
+// the written arguments at the call; this reads them back, exactly as
+// `chosen_def` reads back which declaration the call meant.
+construct_type = (be :: CBackend, id: ExprId, d: Def, ctx: Ctx)
+                 Res<TyId, AllocError> {
+    unknown = be.check.types.unknown().try();
+    got = ty_of(be, id, ctx, unknown).try();
+    be.check.is_unknown(got).match({
+        false => Ok(got),
+        true  => constructed(be, d),
     })
 }
 
@@ -322,10 +341,14 @@ construct_decl = (be :: CBackend, id: ExprId, c: Call, x: Decl, ty: TyId,
     })
 }
 
+// A GENERIC TYPE IS CONSTRUCTED AT ITS ARGUMENTS, not refused: `Vec(..)`
+// inside `Vec<T>`'s own constructor builds the `Vec<i32>` this emission
+// is at. What is still refused is a construction whose arguments nothing
+// settled, because a bare `Vec` has no layout to write.
 construct_struct = (be :: CBackend, id: ExprId, c: Call, s: Struct,
                     ty: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
-    (s.tparams.len > 0).match({
-        true  => unsupported(be, id, "constructing a generic type", out),
+    open(be, ty).match({
+        true  => unsupported(be, id, "a construction whose type arguments nothing settles", out),
         false => write_literal(be, c, s, ty, ctx, out),
     })
 }
@@ -454,11 +477,27 @@ call_decl = (be :: CBackend, id: ExprId, c: Call, d: Def, x: Decl,
 
 call_fn = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
            recv: Res<ExprId>, ctx: Ctx, out :: String) Res<(), AllocError> {
+    raw = inst_at(be, id).try();
+    inst = settled_inst(be, f.tparams, d.qname, raw).try();
     sig ::= be.alloc.Vec<TyId>();
-    ok = signature_of(be, d, sig).try();
+    ok = signature_of(be, d, inst, sig).try();
     ok.match({
         false => unsupported(be, id, plain_fault(be, d), out),
-        true  => call_reachable(be, c, d, f, sig, recv, ctx, out),
+        true  => call_settled(be, id, c, d, f, sig, inst, recv, ctx, out),
+    })
+}
+
+// A GENERIC CALL NOTHING SETTLED IS REFUSED, and it is refused here
+// rather than emitted. A free parameter mangles to one letter, so every
+// instantiation of that call would be one C symbol and the linker would
+// pick whichever body it saw last — a wrong answer with no diagnostic,
+// which is the one outcome a backend may not produce.
+call_settled = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
+                sig: Vec<TyId>, inst: Inst, recv: Res<ExprId>, ctx: Ctx,
+                out :: String) Res<(), AllocError> {
+    (inst_open(be, inst) || any_open(be, sig)).match({
+        true  => unsupported(be, id, "a generic call whose type arguments nothing settles", out),
+        false => call_reachable(be, id, c, d, f, sig, inst, recv, ctx, out),
     })
 }
 
@@ -467,16 +506,21 @@ call_fn = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
 // translation unit holds one module's declarations and calls symbols
 // nothing defines, which `cc` catches and a compiler should not have
 // emitted.
-call_reachable = (be :: CBackend, c: Call, d: Def, f: Function,
-                  sig: Vec<TyId>, recv: Res<ExprId>, ctx: Ctx,
+//
+// THE SYMBOL IS BUILT ONCE AND USED TWICE — as the queue's identity and
+// as the text of the call — because "was this already emitted" and "what
+// do I call" have to be the same question. Two `Vec` instantiations are
+// two entries exactly when they are two symbols.
+call_reachable = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
+                  sig: Vec<TyId>, inst: Inst, recv: Res<ExprId>, ctx: Ctx,
                   out :: String) Res<(), AllocError> {
-    be.need_function(d).try();
-    write_call(be, c, d, f, sig, recv, ctx, out)
+    sym ::= be.alloc.String().try();
+    sym_fn(sym, be.check.types, be.check.world, d.qname, sig, inst).try();
+    be.need_function(d, inst, sym.view()).try();
+    write_call(be, c, d, f, sig, sym.view(), recv, ctx, out)
 }
 
-// Which of the three things a callee can be that this backend does not
-// lower. Named apart rather than collapsed into one message, because a
-// generic function and a `::` parameter need different work.
+// Which of the things a callee can be that this backend does not lower.
 plain_fault = (be :: CBackend, d: Def) str {
     decl_at(be.tree, d.id).match({
         None  => "a call to something that is not a plain function",
@@ -486,64 +530,67 @@ plain_fault = (be :: CBackend, d: Def) str {
 
 decl_fault = (x: Decl) str {
     x.kind.match({
-        Function(f) => fn_fault(f),
+        Function(_) => "a call to a function whose parameters have no written type",
         _           => "a call to something that is not a plain function",
     })
 }
 
-fn_fault = (f: Function) str {
-    (f.tparams.len > 0).match({
-        true  => "a generic function",
-        false => "a call to something that is not a plain function",
-    })
-}
-
-// The declared parameter types of a function, in order. `false` when
-// the declaration is not a plain non-generic function.
+// The declared parameter types of a function, in order, at this
+// instantiation. `false` when the declaration is not a function or a
+// parameter has no written type to read.
 //
-signature_of* = (be :: CBackend, d: Def, sig :: Vec<TyId>)
+// THE TYPE PARAMETERS GO BACK IN SCOPE around the read: `(v: T)` is a
+// written type and `T` means nothing unless it is bound. Sema bound it
+// while it checked the declaration and let it go; this is the same
+// question asked again, later.
+signature_of* = (be :: CBackend, d: Def, inst: Inst, sig :: Vec<TyId>)
                 Res<bool, AllocError> {
     decl_at(be.tree, d.id).match({
         None  => Ok(false),
         Ok(x) => x.kind.match({
-            Function(f) => params_into(be, d, f, sig),
+            Function(f) => params_into(be, d, f, inst, sig),
             _           => Ok(false),
         }),
     })
 }
 
-params_into = (be :: CBackend, d: Def, f: Function, sig :: Vec<TyId>)
-              Res<bool, AllocError> {
-    plain(f).match({
-        false => Ok(false),
-        true  => collect_params(be, d, f.params, sig),
-    })
+params_into = (be :: CBackend, d: Def, f: Function, inst: Inst,
+               sig :: Vec<TyId>) Res<bool, AllocError> {
+    mark = enter_tparams(be, f.tparams, d.qname).try();
+    ok = collect_params(be, d, f.params, inst, sig).try();
+    leave_tparams(be, mark).try();
+    Ok(ok);
 }
 
 plain* = (f: Function) bool { f.tparams.len == 0 }
 
-collect_params = (be :: CBackend, d: Def, params: Vec<Param>,
+collect_params = (be :: CBackend, d: Def, params: Vec<Param>, inst: Inst,
                   sig :: Vec<TyId>) Res<bool, AllocError> {
     ctx = Ctx(module: d.id.module.to_usize(), ret: TyId(index: 0),
               has_ret: false, self_ty: TyId(index: 0), has_self: false);
     params.loop((h, p) {
         p.type.match({
-            Ok(t) => add_param(be, t, ctx, sig),
+            Ok(t) => add_param(be, t, ctx, inst, sig),
             None  => Ok(()),
         }).try();
     });
     Ok(sig.len == params.len);
 }
 
-add_param = (be :: CBackend, t: TypeId, ctx: Ctx, sig :: Vec<TyId>)
-            Res<(), AllocError> {
-    sig.add(be.check.type_from_ast(t, ctx).try())
+// The declared type, then the instantiation. One substitution and not
+// two: a declared parameter mentions the CALLEE's parameters and nothing
+// else, and `settled_inst` already put the caller's answers into the
+// arguments — so what comes out is in the caller's terms already.
+add_param = (be :: CBackend, t: TypeId, ctx: Ctx, inst: Inst,
+             sig :: Vec<TyId>) Res<(), AllocError> {
+    declared = be.check.type_from_ast(t, ctx).try();
+    sig.add(sub_with(be, declared, inst).try())
 }
 
 write_call = (be :: CBackend, c: Call, d: Def, f: Function, sig: Vec<TyId>,
-              recv: Res<ExprId>, ctx: Ctx, out :: String)
+              sym: str, recv: Res<ExprId>, ctx: Ctx, out :: String)
              Res<(), AllocError> {
-    sym_fn(out, be.check.types, be.check.world, d.qname, sig).try();
+    out.add_bytes(sym).try();
     out.add_bytes("(").try();
     first = write_receiver(be, recv, f, sig, ctx, out).try();
     c.args.loop((h, i, a) {

@@ -44,6 +44,7 @@ DeclId = sema.sema_id
 TyId, Ty, Types, TyNamed, Prim = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
+Inst = sema.sema_inst
 Base, Found, base_of, members_of, member_named, self_ctx = sema.sema_member
 Case, cases_of, find_case = sema.sema_case
 is_case = sema.sema_match
@@ -51,6 +52,8 @@ module_of, sym_fn, sym_member, sym_variant = gen.gen_name
 GenFault = gen.gen_diag
 CBackend, MethodRef = gen.gen_c.gen_c_state
 unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_state
+sub, sub_with, any_open, recv_inst, inst_open = gen.gen_c.gen_c_mono
+enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 ctype, is_unit, decl_ctx = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
 lower_plain_call, write_arg = gen.gen_c.gen_c_call
@@ -274,8 +277,14 @@ lower_method = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
     })
 }
 
+// A GENERIC RECEIVER IS NOT A REFUSAL ANY MORE: `Vec<GenDiag>.add` is
+// `Vec.add` emitted at `GenDiag`, and the receiver's own arguments say
+// which. What is still refused is a member declaring type parameters OF
+// ITS OWN — an instantiation would then be the receiver's arguments
+// followed by the call's, and nothing in this tree declares one — and a
+// member with no body, which is a capability whose floor is C's.
 refuse_method = (be :: CBackend, s: Site, f: Function) bool {
-    s.generic || (f.tparams.len > 0) || (has_body(f) == false)
+    (f.tparams.len > 0) || (has_body(f) == false)
 }
 
 has_body = (f: Function) bool {
@@ -283,20 +292,13 @@ has_body = (f: Function) bool {
 }
 
 method_fault = (be :: CBackend, s: Site, f: Function) str {
-    s.generic.match({
-        true  => "a method on a generic type",
+    (f.tparams.len > 0).match({
+        true  => "a generic method",
         false => method_fault_2(f),
     })
 }
 
 method_fault_2 = (f: Function) str {
-    (f.tparams.len > 0).match({
-        true  => "a generic method",
-        false => method_fault_3(f),
-    })
-}
-
-method_fault_3 = (f: Function) str {
     has_body(f).match({
         false => "a call to a member with no body",
         true  => "a call to a member this backend does not lower",
@@ -310,14 +312,26 @@ method_fault_3 = (f: Function) str {
 write_method_call = (be :: CBackend, id: ExprId, c: Call, a: Access,
                      rty: TyId, s: Site, f: Function, ctx: Ctx,
                      out :: String) Res<(), AllocError> {
+    inst = recv_inst(be, rty).try();
     mi = s.decl.module.to_usize();
     sig ::= be.alloc.Vec<TyId>();
-    method_sig(be, rty, f, mi, sig).try();
+    method_sig(be, rty, s.decl, f, mi, inst, sig).try();
+    (inst_open(be, inst) || any_open(be, sig)).match({
+        true  => unsupported(be, id, "a method on a receiver whose type arguments nothing settles", out),
+        false => emit_method_call(be, c, a, rty, s, f, sig, inst, ctx, out),
+    })
+}
+
+emit_method_call = (be :: CBackend, c: Call, a: Access, rty: TyId, s: Site,
+                    f: Function, sig: Vec<TyId>, inst: Inst, ctx: Ctx,
+                    out :: String) Res<(), AllocError> {
     qname ::= be.alloc.String().try();
     join(qname, s.qname, a.name.text).try();
+    sym ::= be.alloc.String().try();
+    sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
     be.need_method(MethodRef(self_ty: rty, decl: s.decl, name: a.name.text,
-                             qname: qname.view())).try();
-    sym_fn(out, be.check.types, be.check.world, qname.view(), sig).try();
+                             qname: qname.view()), inst, sym.view()).try();
+    out.add_bytes(sym.view()).try();
     out.add_bytes("(").try();
     write_arg(be, a.base, 0, f, sig, ctx, out).try();
     write_rest(be, c, f, sig, ctx, out).try();
@@ -329,13 +343,25 @@ write_method_call = (be :: CBackend, id: ExprId, c: Call, a: Access,
 // module that declares it with `@Self` bound to the receiver — which is
 // what makes `(self: @Self, i: usize)` read as a function of the
 // receiver rather than of a name nothing binds.
-method_sig* = (be :: CBackend, rty: TyId, f: Function, mi: usize,
-               sig :: Vec<TyId>) Res<(), AllocError> {
+//
+// AND WITH THE TYPE'S PARAMETERS BOUND, then substituted: `Vec<T>.add`
+// declares `(self :: @Self, v: T)`, and `T` is a written type that means
+// nothing until the declaration that introduced it is back in scope.
+// What it BECOMES is the receiver's own argument in that position.
+method_sig* = (be :: CBackend, rty: TyId, decl: DeclId, f: Function,
+               mi: usize, inst: Inst, sig :: Vec<TyId>)
+              Res<(), AllocError> {
     sctx = be.check.self_ctx(mi, rty).try();
-    f.params.loop((h, p) {
-        sig.add(be.check.param_type(p, sctx).try()).try();
-    });
+    mark = enter_struct_tparams(be, decl).try();
+    f.params.loop((h, p) { add_method_param(be, p, sctx, inst, sig).try() });
+    leave_tparams(be, mark).try();
     Ok(());
+}
+
+add_method_param = (be :: CBackend, p: Param, sctx: Ctx, inst: Inst,
+                    sig :: Vec<TyId>) Res<(), AllocError> {
+    declared = be.check.param_type(p, sctx).try();
+    sig.add(sub_with(be, declared, inst).try())
 }
 
 write_rest = (be :: CBackend, c: Call, f: Function, sig: Vec<TyId>,

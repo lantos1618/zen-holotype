@@ -526,3 +526,38 @@ Two consequences, in order of how much they cost:
 
 The fix belongs in the driver: name a `Unit` by its resolved PATH, not
 by the import's spelling, and let two spellings find the one unit.
+
+---
+
+## Differential findings — the self-hosted frontend vs the bootstrapper
+
+TESTING.md's second-strongest oracle, run for the first time:
+`tests/run.py --toolchain zen --zen <zen-1>`. Two independent
+implementations of Zen exist only during stage 1, and any disagreement is
+a bug in one of them with a *program* attached.
+
+**Result: 14 of 17 `corpus/modules/` directory tests pass through zen-1.**
+The self-hosted compiler builds and runs real multi-module programs. Three
+disagree, and each is a real gap in `src/sema/`:
+
+**D1. A variant re-exported as a bare name is not bound.**
+`corpus/modules/enum_variants_survive_a_root` — `Two`, `Three` and
+`Single` are variants re-exported from a folder root by name, and zen-1
+reports `undefined name` for each. The bootstrapper binds them.
+
+**D2. A module alias does not carry the module's types.**
+`corpus/modules/module_alias_qualified` — `sh = shape.shape` then
+`sh.Bag` gives `no such field or method on this type 'Bag': expected
+<unknown>, found sh`, i.e. the alias is being read as a VALUE and its
+members looked up on its type. A module alias is not a value; qualifying
+through it is a module path, not a field access. `type_survives_two_roots`
+fails the same way.
+
+**Single-file corpus tests cannot run through zen-1 at all**, and this is
+an entry-point rule, not a compiler bug. `run.py` stages a single-file
+test as `<name>.zen` — it cannot rename it to `main.zen` without breaking
+every `must-fail` position assertion, which names the file. `entry_of`
+probes `main`, `<root basename>`, then `zen`, so it finds none of them and
+says `<root>/zen.zen: nothing is at that path`. The rule that closes it:
+**a root holding exactly one top-level `.zen` file uses that file as the
+entry.** One file is a program and there is nothing to disambiguate.
