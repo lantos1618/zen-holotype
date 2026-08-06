@@ -54,7 +54,8 @@ TyId, Ty, Types, TyFn, TyNamed, TyVar = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 Checker, Ctx, UNRESOLVED = sema.sema_check
-Inst, subst, unify, tparam_vars, zip = sema.sema_inst
+Inst, tparam_vars = sema.sema_inst
+construct, instantiate = sema.sema_apply
 Found, Base, base_of, members_of, static_access = sema.sema_member
 is_type_def, opaque, nowhere = sema.sema_member
 satisfies_bound, check_bounds = sema.sema_bound
@@ -273,54 +274,6 @@ type_def_of = (defs: Vec<Def>) Res<Def> {
 // reason a call is: `Checker* = { .. }` beside `Checker* = (a: Alloc,
 // ..)` is two declarations of one name, and which of them a call site
 // meant is decided here and nowhere else.
-// A GENERIC STRUCT IS CONSTRUCTED AT WHAT THE CALL WROTE, and at its own
-// parameters when the call wrote nothing.
-//
-// `Box<i32>(held: 7)` says which `Box` outright. `Vec(alloc: a)` inside
-// `Vec<T>`'s own constructor says nothing and means the declaration's
-// own `T` — which the enclosing instantiation then substitutes. Both
-// answer an APPLIED type: a bare `Vec` has no arguments to substitute
-// and no fields a backend could lay out, so it is never the answer.
-construct = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
-            Res<TyId, AllocError> {
-    c.resolve_call(id, d.id).try();
-    args ::= c.alloc.Vec<TyId>();
-    ctor_args(c, call, d, ctx, args).try();
-    c.types.named(d.id, d.qname, d.name, args)
-}
-
-ctor_args = (c :: Checker, call: Call, d: Def, ctx: Ctx, out :: Vec<TyId>)
-            Res<(), AllocError> {
-    (call.targs.len == 0).match({
-        true  => decl_tparams(c, d, out),
-        false => written_ctor_args(c, call.targs, ctx, out),
-    })
-}
-
-// The written arguments mean what they mean AT THE CALL SITE, exactly as
-// a generic function's do.
-written_ctor_args = (c :: Checker, targs: Vec<TypeId>, ctx: Ctx,
-                     out :: Vec<TyId>) Res<(), AllocError> {
-    targs.loop((h, t) { out.add(c.type_from_ast(t, ctx).try()).try() });
-    Ok(());
-}
-
-decl_tparams = (c :: Checker, d: Def, out :: Vec<TyId>)
-               Res<(), AllocError> {
-    decl_at(c.tree, d.id).match({
-        None    => Ok(()),
-        Ok(dec) => struct_tparams(c, d, dec, out),
-    })
-}
-
-struct_tparams = (c :: Checker, d: Def, dec: Decl, out :: Vec<TyId>)
-                 Res<(), AllocError> {
-    dec.kind.match({
-        Struct(s) => tparam_vars(c, s.tparams, d.qname, out),
-        _         => Ok(()),
-    })
-}
-
 // No candidate of that arity or those types. Silent when there were no
 // candidates at all: the name resolved to something that is not a
 // function, and that is somebody else's diagnostic.
@@ -350,91 +303,6 @@ chosen_ret = (c :: Checker, id: ExprId, call: Call, k: Cand,
     c.resolve_call(id, k.id).try();
     check_bounds(c, k, actuals).try();
     instantiate(c, id, call, k, actuals, ctx)
-}
-
-// A GENERIC CANDIDATE IS INSTANTIATED, and this is the line `sema.zen`
-// used to say was missing: `<T>(x: T) T` called with an `i32` answers
-// `i32` and not `T`. The instantiation is recorded under the call's own
-// id beside the declaration, because everything downstream needs both —
-// a backend that knew which function but not which `T` would be picking
-// one of the two answers out of the air.
-instantiate = (c :: Checker, id: ExprId, call: Call, k: Cand,
-               actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
-    k.generic.match({
-        false => Ok(k.ret),
-        true  => instantiated_ret(c, id, call, k, actuals, ctx),
-    })
-}
-
-instantiated_ret = (c :: Checker, id: ExprId, call: Call, k: Cand,
-                    actuals: Vec<Actual>, ctx: Ctx)
-                   Res<TyId, AllocError> {
-    inst = call_inst(c, call, k, actuals, ctx).try();
-    c.resolve_inst(id, inst).try();
-    subst(c, k.ret, inst)
-}
-
-// WHAT THE CALL SAID `T` IS. Two sources and the written one wins,
-// because `bind` keeps the first binding: `alloc.Vec<Unit>()` names its
-// argument outright, and `alloc.realloc(p, n)` says it only through
-// `p: Ptr<T>` against a `Ptr<u8>`.
-//
-// A parameter neither source reaches stays free. That is not an error
-// here — a candidate is TRIED before it is chosen, and reporting from
-// inside a trial would name an overload the program never used — so the
-// refusal belongs at the consumer, which is what `has_var` is for.
-call_inst = (c :: Checker, call: Call, k: Cand, actuals: Vec<Actual>,
-             ctx: Ctx) Res<Inst, AllocError> {
-    inst ::= c.alloc.Inst();
-    written_targs(c, call, k, inst, ctx).try();
-    infer_targs(c, k, actuals, inst).try();
-    Ok(inst);
-}
-
-written_targs = (c :: Checker, call: Call, k: Cand, inst :: Inst, ctx: Ctx)
-                Res<(), AllocError> {
-    (call.targs.len == 0).match({
-        true  => Ok(()),
-        false => bind_written(c, call.targs, k, inst, ctx),
-    })
-}
-
-// The written arguments mean what they mean AT THE CALL SITE, so they
-// resolve in the caller's module and not the callee's.
-bind_written = (c :: Checker, targs: Vec<TypeId>, k: Cand, inst :: Inst,
-                ctx: Ctx) Res<(), AllocError> {
-    tys ::= c.alloc.Vec<TyId>();
-    targs.loop((h, t) { tys.add(c.type_from_ast(t, ctx).try()).try() });
-    zip(c, k.tvars, tys, inst).try();
-    Ok(());
-}
-
-infer_targs = (c :: Checker, k: Cand, actuals: Vec<Actual>, inst :: Inst)
-              Res<(), AllocError> {
-    Range(0, k.params.len).loop((h, i) {
-        infer_at(c, k, actuals, i, inst).try();
-    });
-    Ok(());
-}
-
-infer_at = (c :: Checker, k: Cand, actuals: Vec<Actual>, i: usize,
-            inst :: Inst) Res<(), AllocError> {
-    actuals.get(i).match({
-        None  => Ok(()),
-        Ok(a) => infer_from(c, ty_at(k.params, i), a, inst),
-    })
-}
-
-// A LAMBDA SAYS NOTHING ABOUT `T`. "A closure passed to a function whose
-// signature is already known infers its parameter types FROM that
-// signature", so the arrow points the other way and a lambda's poison
-// type is not an inference.
-infer_from = (c :: Checker, param: TyId, a: Actual, inst :: Inst)
-             Res<(), AllocError> {
-    a.is_lambda.match({
-        true  => Ok(()),
-        false => unify(c, param, a.ty, inst),
-    })
 }
 
 // ---------------------------------------------------------------------

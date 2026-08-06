@@ -1,0 +1,128 @@
+// A CURSOR POSITION FINDS ITS NODE — PLAN.md stage 4's one missing
+// precondition, and the only primitive an LSP needs that nothing else
+// does. Every other consumer walks down from a root; an editor arrives
+// holding a position and nothing else.
+//
+// The round trip this asserts is HOVER, in full and with no server:
+//
+//     position -> node_at -> ExprId -> type_of -> a type name
+//
+// It walks a REAL parsed file rather than a hand-built arena, because
+// the claim is about spans the parser produced. `type_of_is_memoized`
+// builds its tree through the arena API for the opposite reason: it is
+// a test of sema, and a parser bug there would read as a sema bug.
+// Here a parser bug IS the bug, so the parser is in the loop.
+//
+// The positions below are chosen to pin the rule rather than to
+// pass: the smallest node wins, a span is half-open so `end` is past
+// the node, and a position in no node at all is `None` and not a
+// failure — an editor hovering over a comment gets nothing, correctly.
+
+scan, Source = lex
+Parser = parse
+Ast, Pos, ExprId, NodeRef, node_at, expr_node_at = ast
+Checker = sema.sema_check
+check_all = sema.sema_decl
+Types = sema.sema_ty
+Alloc, AllocError = std.mem
+str, String = std.text
+
+SRC: str = "add = (a: i32, b: i32) i32 { a + b }\npick = (n: i32) i32 { [i32, 4](2, 3, 5, 7)[n] }\n"
+
+// what the node under `line:col` is, and what type it has. Two asks of
+// one position, which is what a hover does.
+hover = (c :: Checker, a: Alloc, line: usize, col: usize)
+        Res<(), AllocError> {
+    p = Pos(line: line, col: col);
+    expr_node_at(c.tree, "in.zen", p).match({
+        None  => println("{}:{} is in no expression", line, col),
+        Ok(e) => show(c, a, line, col, e),
+    })
+}
+
+// THE MEMO IS THE ANSWER. `check_all` has already typed every node in
+// the file, so a hover is a memo READ and not a second check — which is
+// the whole reason DESIGN.md decision 3 says sema is memoized queries
+// and not passes, and the reason PLAN.md can call an LSP thin.
+show = (c :: Checker, a: Alloc, line: usize, col: usize, e: ExprId)
+       Res<(), AllocError> {
+    out ::= a.String().try();
+    c.expr_memo.get(e).match({
+        None     => out.add_bytes("not checked").try(),
+        Ok(memo) => c.types.write_name(memo, out).try(),
+    });
+    span = c.tree.expr_at(e).span;
+    println("{}:{} -> node {}:{}..{}:{} : {}", line, col,
+            span.start.line, span.start.col, span.end.line, span.end.col,
+            out.view());
+    Ok(());
+}
+
+// the family the general query answers with, so the same position can
+// be shown to reach a TYPE node as well as an expression
+family = (c :: Checker, line: usize, col: usize) Res<(), AllocError> {
+    node_at(c.tree, "in.zen", Pos(line: line, col: col)).match({
+        None     => println("{}:{} is in no node", line, col),
+        Ok(node) => println("{}:{} -> {}", line, col, kind_of(node)),
+    });
+    Ok(());
+}
+
+kind_of = (node: NodeRef) str {
+    node.match({
+        ExprNode(_)    => "an expression",
+        TypeNode(_)    => "a written type",
+        PatternNode(_) => "a pattern",
+        BlockNode(_)   => "a block",
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    tree ::= alloc.Ast();
+
+    lexed = scan(alloc, Source(file: "in.zen", text: SRC)).try();
+    p ::= alloc.Parser(lexed, tree);
+    m = p.module("in").try();
+    p.tree.add_module(m).try();
+
+    c ::= alloc.Checker(p.tree).try();
+    check_all(c).try();
+
+    // column 30 is `a` of `a + b`, column 34 is `b`: the smallest node
+    // covering each is the name, not the binary expression around it
+    hover(c, alloc, 1, 30).try();
+    hover(c, alloc, 1, 34).try();
+
+    // column 32 is the `+`, which no leaf covers, so the smallest
+    // expression there is the binary node itself
+    hover(c, alloc, 1, 32).try();
+
+    // the general query sees what an expression query cannot: `i32` at
+    // column 11 is a written TYPE, and there is no expression there
+    family(c, 1, 11).try();
+    family(c, 1, 30).try();
+    hover(c, alloc, 1, 11).try();
+
+    // A SPAN IS HALF-OPEN, so `end` is PAST the node. `b` is 1:34..1:35
+    // and `a + b` is 1:30..1:35, so column 35 — one past the last byte
+    // of both — is inside neither, and the answer is `None` rather than
+    // the node the cursor just left. That is what keeps a hover stable
+    // as an editor walks a line, and closing the interval turns this
+    // line into `1:35 -> node 1:34..1:35`.
+    hover(c, alloc, 1, 35).try();
+
+    // past the end of the line entirely
+    hover(c, alloc, 1, 37).try();
+
+    // SMALLEST WINS, AND NOT FIRST FOUND. Line 2 column 25 is the `i32`
+    // inside `[i32, 4](..)`, which two nodes cover: the written type
+    // 2:24..2:27, and the fixed-array EXPRESSION 2:23..2:43 around it.
+    // The arenas are scanned expressions first, so a query that kept the
+    // first node it found would answer with the expression — this is the
+    // one position in the file where the containment rule is what
+    // decides, and mutating it turns the next line red.
+    family(c, 2, 25).try();
+    hover(c, alloc, 2, 25).try();
+    Ok(0);
+}

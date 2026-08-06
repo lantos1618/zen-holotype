@@ -35,6 +35,8 @@ sym_type, sym_variant, sym_member, tcode, GEN, USR = gen.gen_name
 path_with, res_arity, is_failure, RES_PATH = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
+Inst = sema.sema_inst
+sub_with, open, enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 intern_named = gen.gen_c.gen_c_mono
 
 // Closing the worklist is a fixpoint: defining a type discovers the
@@ -238,20 +240,34 @@ request_decl_members = (be :: CBackend, n: TyNamed) Res<(), AllocError> {
     Ok(());
 }
 
+// A DECLARATION'S MEMBER TYPES ARE READ AT THE TYPE'S OWN ARGUMENTS.
+// `Vec<u8>`'s `data` is a `Ptr<u8>` and not a `Ptr<T>`, so its parameters
+// go back in scope for the read and its arguments are substituted into
+// the answer — the same two steps every other reader of a generic
+// declaration takes, and `decl_inst` is the second one.
 request_from_decl = (be :: CBackend, n: TyNamed, d: Decl)
                     Res<(), AllocError> {
     ctx = decl_ctx(be, n);
+    inst = decl_inst(be, n).try();
+    mark = enter_struct_tparams(be, n.decl).try();
     d.kind.match({
-        Struct(s) => request_fields(be, s.members, ctx),
-        Enum(e)   => request_variants(be, n, e.variants, ctx),
+        Struct(s) => request_fields(be, s.members, ctx, inst),
+        Enum(e)   => request_variants(be, n, e.variants, ctx, inst),
         _         => Ok(()),
-    })
+    }).try();
+    leave_tparams(be, mark).try();
+    Ok(());
 }
 
-request_fields = (be :: CBackend, members: Vec<Member>, ctx: Ctx)
-                 Res<(), AllocError> {
+// What a type's own arguments bound its declaration's parameters to.
+decl_inst* = (be :: CBackend, n: TyNamed) Res<Inst, AllocError> {
+    be.check.inst_of_named(n)
+}
+
+request_fields = (be :: CBackend, members: Vec<Member>, ctx: Ctx,
+                  inst: Inst) Res<(), AllocError> {
     members.loop((h, m) {
-        field_type(be, m, ctx).match({
+        field_type(be, m, ctx, inst).match({
             None     => Ok(()),
             Ok(t)    => request_if_composite(be, t),
         }).try();
@@ -260,9 +276,9 @@ request_fields = (be :: CBackend, members: Vec<Member>, ctx: Ctx)
 }
 
 request_variants = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
-                    ctx: Ctx) Res<(), AllocError> {
+                    ctx: Ctx, inst: Inst) Res<(), AllocError> {
     variants.loop((h, v) {
-        variant_type(be, n, v, ctx).match({
+        variant_type(be, n, v, ctx, inst).match({
             None     => Ok(()),
             Ok(t)    => request_if_composite(be, t),
         }).try();
@@ -282,11 +298,12 @@ decl_ctx* = (be :: CBackend, n: TyNamed) Ctx {
 // A struct member's storage type, or nothing when the member is not
 // storage. A method is a function and a struct-body constant is one
 // value per type; neither takes a field.
-field_type* = (be :: CBackend, m: Member, ctx: Ctx) Res<TyId> {
+field_type* = (be :: CBackend, m: Member, ctx: Ctx, inst: Inst)
+              Res<TyId> {
     m.kind.match({
         Field(fld) => fld.type.match({
             None  => None,
-            Ok(t) => resolved(be, t, ctx),
+            Ok(t) => resolved(be, t, ctx, inst),
         }),
         _ => None,
     })
@@ -300,10 +317,10 @@ field_type* = (be :: CBackend, m: Member, ctx: Ctx) Res<TyId> {
 // types" and each variant carries a value OF the type it names — so
 // `WriteError.IoError` records WHICH IoError, where tag-only it would
 // record only that there was one.
-variant_type* = (be :: CBackend, n: TyNamed, v: Variant, ctx: Ctx)
-                Res<TyId> {
+variant_type* = (be :: CBackend, n: TyNamed, v: Variant, ctx: Ctx,
+                 inst: Inst) Res<TyId> {
     v.payload.match({
-        Ok(t) => resolved(be, t, ctx),
+        Ok(t) => resolved(be, t, ctx, inst),
         None  => union_member_type(be, n, v),
     })
 }
@@ -334,9 +351,16 @@ interned_named = (be :: CBackend, d: Def) Res<TyId> {
     })
 }
 
-resolved = (be :: CBackend, t: TypeId, ctx: Ctx) Res<TyId> {
+resolved = (be :: CBackend, t: TypeId, ctx: Ctx, inst: Inst) Res<TyId> {
     be.check.type_from_ast(t, ctx).match({
         Err(_) => None,
-        Ok(id) => Ok(id),
+        Ok(id) => substituted(be, id, inst),
+    })
+}
+
+substituted = (be :: CBackend, id: TyId, inst: Inst) Res<TyId> {
+    sub_with(be, id, inst).match({
+        Err(_) => None,
+        Ok(t)  => Ok(t),
     })
 }

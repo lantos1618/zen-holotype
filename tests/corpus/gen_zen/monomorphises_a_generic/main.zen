@@ -1,0 +1,83 @@
+// Monomorphisation, and the only proof that counts: two instantiations of
+// ONE declaration whose answers DIFFER.
+//
+// A backend that accepted generics but merged the instantiations would
+// pass every test that only checks a fault count — the C would compile,
+// and it would compute the wrong thing. So the program below is written
+// so that merging is VISIBLE:
+//
+//   - `Box<i32>` and `Box<u8>` must be two C structs. One opaque body
+//     shared between them loses `held` and the C will not compile.
+//   - `Box<i32>.get` and `Box<u8>.get` must be two symbols. One symbol
+//     takes one receiver type, and the other call site passes the wrong
+//     struct — which is the exact bug a stale `@Self` memo produced,
+//     found by running this and not by reading the diagnostics.
+//   - `first<i32>` and `first<u8>` must be two functions. Sharing one
+//     would truncate the `i32` through a `u8` return.
+//
+// The counts are printed rather than the C, because what is being
+// asserted is that the four names are FOUR and not two. A `.expected`
+// full of C would go red on every unrelated spelling change and would
+// still not say which of the four collapsed.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Vec = std.collections
+Source, scan = lex
+Parser = parse.parser
+module = parse.parse_decl
+Ast = ast.ast_arena
+Checker = sema.sema_check
+Emit = gen.gen_emit
+CBackend, emit_program = gen.gen_c
+
+PROGRAM : str = "Box<T> = { held: T\n\n    get = (self: @Self) T { self.held }\n}\nfirst = <T>(a: T, b: T) T { a }\nmain = (env: i32) Res<i32> { bi = Box<i32>(held: 7); bu = Box<u8>(held: 3); n = first<i32>(bi.get(), 100); m = first<u8>(bu.get(), 9); Ok(n) }\n"
+
+emit = (a: Alloc, text: str, faults :: String) Res<String, AllocError> {
+    lexed = scan(a, Source(file: "main.zen", text: text)).try();
+    p ::= a.Parser(lexed);
+    m = p.module("main").try();
+    p.tree.add_module(m).try();
+    chk ::= a.Checker(p.tree).try();
+    be ::= a.CBackend(p.tree, chk).try();
+    out ::= a.Emit().try();
+    be.emit_program(0, out).try();
+    be.render_diags(faults).try();
+    kept ::= a.String().try();
+    kept.add_bytes(out.view()).try();
+    Ok(kept);
+}
+
+// How many times `needle` occurs in `hay`. Written out because a count is
+// what the assertions below are: "two definitions", not "a definition".
+occurrences = (hay: str, needle: str) usize {
+    n ::= 0;
+    Range(0, hay.len).loop((h, i) {
+        starts_at(hay, needle, i).then(() { n = n + 1; });
+    });
+    n
+}
+
+starts_at = (hay: str, needle: str, i: usize) bool {
+    (i + needle.len <= hay.len)
+        && (Range(0, needle.len).find((k) { hay[i + k] != needle[k] })
+                .match({ Ok(_) => false, None => true }))
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    faults ::= alloc.String().try();
+    c = emit(alloc, PROGRAM, faults).try();
+
+    println("nothing was refused: {}", faults.is_empty());
+    // one `struct <name> {` line per instantiation, and the two names
+    // differ in their `I` section — which is `tcode`, a pure function of
+    // the type argument
+    println("Box instantiations defined: {}", occurrences(c.view(), "struct zu_t2_4main3BoxI"));
+    println("Box.get emissions: {}", occurrences(c.view(), "static uint8_t zu_f3_4main3Box3get")
+                                   + occurrences(c.view(), "static int32_t zu_f3_4main3Box3get"));
+    println("first emissions: {}", occurrences(c.view(), "static uint8_t zu_f2_4main5first")
+                                 + occurrences(c.view(), "static int32_t zu_f2_4main5first"));
+    println("no unsubstituted parameter reached a name: {}", occurrences(c.view(), "4main3BoxIq") == 0);
+    Ok(0);
+}

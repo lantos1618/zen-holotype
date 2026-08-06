@@ -41,6 +41,7 @@ Range = std.core
 TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
 World, Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
+Inst = sema.sema_inst
 type_of = sema.sema_type
 write_usize = sema.sema_diag
 Emit = gen.gen_emit
@@ -48,7 +49,9 @@ sym_local, sym_member, sym_variant, sym_gen = gen.gen_name
 RES_PATH, is_failure = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
+enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 ctype, declarator, is_unit, variant_type, decl_ctx = gen.gen_c.gen_c_type
+decl_inst = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
 Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
 expr, write_position, res_type_of, ty_of = gen.gen_c.gen_c_expr
@@ -414,18 +417,36 @@ variant_payload = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
     })
 }
 
+// A payload is read at the ENUM'S OWN ARGUMENTS, exactly as a struct
+// field is: `Slot<T>.Left` carries a `T`, and matching on a `Slot<u8>`
+// binds a `u8`.
 collect_payload = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
                    variant: str, found :: Vec<TyId>) Res<(), AllocError> {
     ctx = decl_ctx(be, n);
+    inst = decl_inst(be, n).try();
+    mark = enter_struct_tparams(be, n.decl).try();
     variants.loop((h, v) {
-        v.name.text.eq(variant).then(() {
-            variant_type(be, n, v, ctx).match({
-                Ok(t) => found.add(t),
-                None  => Ok(()),
-            }).try();
-        });
+        keep_payload(be, n, v, variant, ctx, inst, found).try();
     });
+    leave_tparams(be, mark).try();
     Ok(());
+}
+
+keep_payload = (be :: CBackend, n: TyNamed, v: Variant, variant: str,
+                ctx: Ctx, inst: Inst, found :: Vec<TyId>)
+               Res<(), AllocError> {
+    v.name.text.eq(variant).match({
+        false => Ok(()),
+        true  => add_payload_type(be, n, v, ctx, inst, found),
+    })
+}
+
+add_payload_type = (be :: CBackend, n: TyNamed, v: Variant, ctx: Ctx,
+                    inst: Inst, found :: Vec<TyId>) Res<(), AllocError> {
+    variant_type(be, n, v, ctx, inst).match({
+        Ok(t) => found.add(t),
+        None  => Ok(()),
+    })
 }
 
 first_payload = (be :: CBackend, found: Vec<TyId>) Res<TyId> {

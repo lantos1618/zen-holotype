@@ -52,7 +52,7 @@ CBackend, LocalSlot = gen.gen_c.gen_c_state
 unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_state
 sub, sub_with, open, any_open, inst_at = gen.gen_c.gen_c_mono
 settled_inst, inst_open, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
-constructed, intern_named = gen.gen_c.gen_c_mono
+constructed, intern_named, recv_inst = gen.gen_c.gen_c_mono
 lower_match, lower_try = gen.gen_c.gen_c_flow
 ctype, declarator, spellable, is_unit, c_prim = gen.gen_c.gen_c_type
 is_c_integer, is_signed, variant_type, decl_ctx = gen.gen_c.gen_c_type
@@ -360,18 +360,22 @@ write_literal = (be :: CBackend, c: Call, s: Struct, ty: TyId, ctx: Ctx,
     out.add_bytes(")").try();
     (c.args.len == 0).match({
         true  => out.add_bytes("{0}"),
-        false => write_initialisers(be, c, s, ctx, out),
+        false => write_initialisers(be, c, s, ty, ctx, out),
     }).try();
     Ok(());
 }
 
-write_initialisers = (be :: CBackend, c: Call, s: Struct, ctx: Ctx,
-                      out :: String) Res<(), AllocError> {
+write_initialisers = (be :: CBackend, c: Call, s: Struct, ty: TyId,
+                      ctx: Ctx, out :: String) Res<(), AllocError> {
     dctx = decl_ctx_of(be, s, ctx);
+    // the CONSTRUCTED type's own arguments: `Box<i32>(held: 7)` supplies
+    // an `i32`, and reading the field's declared `T` without them would
+    // give the literal no width to take.
+    dinst = recv_inst(be, ty).try();
     out.add_bytes("{ ").try();
     c.args.loop((h, i, a) {
         (i > 0).then(() { out.add_bytes(", ").try() });
-        write_initialiser(be, a, i, s, dctx, ctx, out).try();
+        write_initialiser(be, a, i, s, dinst, dctx, ctx, out).try();
     });
     out.add_bytes(" }").try();
     Ok(());
@@ -381,22 +385,23 @@ write_initialisers = (be :: CBackend, c: Call, s: Struct, ctx: Ctx,
 // which for a construction is the module the call resolved into.
 decl_ctx_of = (be :: CBackend, s: Struct, ctx: Ctx) Ctx { ctx }
 
-write_initialiser = (be :: CBackend, a: Arg, i: usize, s: Struct, dctx: Ctx,
-                     ctx: Ctx, out :: String) Res<(), AllocError> {
-    name = field_name(be, a, i, s, dctx).try();
+write_initialiser = (be :: CBackend, a: Arg, i: usize, s: Struct,
+                     dinst: Inst, dctx: Ctx, ctx: Ctx, out :: String)
+                    Res<(), AllocError> {
+    name = field_name(be, a, i, s, dinst, dctx).try();
     out.add_bytes(".").try();
     sym_member(out, name).try();
     out.add_bytes(" = ").try();
-    want = storage_type(be, s, name, dctx);
+    want = storage_type(be, s, name, dinst, dctx);
     expr(be, a.value, ctx, want, out)
 }
 
 // The field an argument supplies: the one it names, or the i-th
 // storage member when it does not.
-field_name = (be :: CBackend, a: Arg, i: usize, s: Struct, dctx: Ctx)
-             Res<str, AllocError> {
+field_name = (be :: CBackend, a: Arg, i: usize, s: Struct, dinst: Inst,
+              dctx: Ctx) Res<str, AllocError> {
     a.name.match({
-        None  => storage_name(be, s, i, dctx),
+        None  => storage_name(be, s, i, dinst, dctx),
         Ok(n) => Ok(n.text),
     })
 }
@@ -406,12 +411,12 @@ field_name = (be :: CBackend, a: Arg, i: usize, s: Struct, dctx: Ctx)
 // Counted rather than collected: a `Vec<str>` cannot be read back —
 // `Vec.get` at `T = str` fails to infer its own `Ok`, which is
 // recorded with a two-line reproducer in docs/GEN_BOOTSTRAP_FIXES.md.
-storage_name = (be :: CBackend, s: Struct, i: usize, dctx: Ctx)
-               Res<str, AllocError> {
+storage_name = (be :: CBackend, s: Struct, i: usize, dinst: Inst,
+                dctx: Ctx) Res<str, AllocError> {
     name ::= "";
     seen ::= 0;
     s.members.loop((h, m) {
-        is_storage(be, m, dctx).then(() {
+        is_storage(be, m, dinst, dctx).then(() {
             (seen == i).then(() { name = member_text(m); });
             seen = seen + 1;
         });
@@ -419,8 +424,8 @@ storage_name = (be :: CBackend, s: Struct, i: usize, dctx: Ctx)
     Ok(name);
 }
 
-is_storage = (be :: CBackend, m: Member, dctx: Ctx) bool {
-    field_type(be, m, dctx).match({ Ok(_) => true, None => false })
+is_storage = (be :: CBackend, m: Member, dinst: Inst, dctx: Ctx) bool {
+    field_type(be, m, dctx, dinst).match({ Ok(_) => true, None => false })
 }
 
 member_text = (m: Member) str {
@@ -438,16 +443,19 @@ member_text = (m: Member) str {
 // whose body captures several of its enclosing parameters is inlined
 // wrongly, and this shape produced a `Map` instantiated at unresolved
 // type arguments. docs/GEN_BOOTSTRAP_FIXES.md has the reproducer.
-storage_type = (be :: CBackend, s: Struct, name: str, dctx: Ctx) TyId {
+storage_type = (be :: CBackend, s: Struct, name: str, dinst: Inst,
+                dctx: Ctx) TyId {
     found ::= TyId(index: 0);
     s.members.loop((h, m) {
-        member_text(m).eq(name).then(() { found = named_field(be, m, dctx); });
+        member_text(m).eq(name).then(() {
+            found = named_field(be, m, dinst, dctx);
+        });
     });
     found
 }
 
-named_field = (be :: CBackend, m: Member, dctx: Ctx) TyId {
-    field_type(be, m, dctx).match({
+named_field = (be :: CBackend, m: Member, dinst: Inst, dctx: Ctx) TyId {
+    field_type(be, m, dctx, dinst).match({
         Ok(t) => t,
         None  => TyId(index: 0),
     })

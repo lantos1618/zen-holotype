@@ -63,7 +63,30 @@ check_binary = sema.sema_trap
 // a signature's parameter types are read at every call site.
 // -----------------------------------------------------------------
 
+// `@Self` IS THE ONE WRITTEN TYPE WHOSE MEANING IS NOT IN ITS NODE, so a
+// signature that names it may not be memoized.
+//
+// `Vec<T>.get` is written `(self: @Self, i: usize) Res<T>` ONCE, and the
+// answer differs per receiver: asked about `Vec<i32>` first and `Vec<u8>`
+// second, a memo keyed on the node hands the second asker the first
+// one's receiver. Nothing said so — the two agree on everything except
+// the parameter nobody compares — until monomorphisation made the
+// receiver part of a SYMBOL, and `Vec<u8>.get` was emitted taking a
+// `Vec<i32>`. That is the failure class this compiler has paid for
+// twice: C that compiles and means something else.
+//
+// A type parameter is NOT in this class and stays memoized: `T` denotes
+// a `Ty.Var` nominal on its owner, which is the same type wherever the
+// node is read from. Only the receiver travels in `ctx`.
 type_from_ast* = (c :: Checker, id: TypeId, ctx: Ctx)
+                 Res<TyId, AllocError> {
+    ctx.has_self.match({
+        true  => c.type_kind(c.tree.type_at(id), ctx),
+        false => c.memoized_type(id, ctx),
+    })
+}
+
+memoized_type* = (c :: Checker, id: TypeId, ctx: Ctx)
                  Res<TyId, AllocError> {
     c.type_memo.get(id).match({
         None    => c.compute_type(id, ctx),

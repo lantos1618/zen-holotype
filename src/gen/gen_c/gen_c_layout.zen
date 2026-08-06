@@ -38,6 +38,9 @@ GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 ctype, declarator, is_unit, request_type = gen.gen_c.gen_c_type
 field_type, variant_type, decl_ctx, close_types = gen.gen_c.gen_c_type
+decl_inst = gen.gen_c.gen_c_type
+Inst = sema.sema_inst
+open, any_open, enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 
 // -----------------------------------------------------------------
 // emission
@@ -283,17 +286,21 @@ decl_deps = (be :: CBackend, n: TyNamed, deps :: Vec<TyId>)
 decl_kind_deps = (be :: CBackend, n: TyNamed, d: Decl, deps :: Vec<TyId>)
                  Res<(), AllocError> {
     ctx = decl_ctx(be, n);
+    inst = decl_inst(be, n).try();
+    mark = enter_struct_tparams(be, n.decl).try();
     d.kind.match({
-        Struct(s) => field_deps(be, s.members, ctx, deps),
-        Enum(e)   => variant_deps(be, n, e.variants, ctx, deps),
+        Struct(s) => field_deps(be, s.members, ctx, inst, deps),
+        Enum(e)   => variant_deps(be, n, e.variants, ctx, inst, deps),
         _         => Ok(()),
-    })
+    }).try();
+    leave_tparams(be, mark).try();
+    Ok(());
 }
 
-field_deps = (be :: CBackend, members: Vec<Member>, ctx: Ctx,
+field_deps = (be :: CBackend, members: Vec<Member>, ctx: Ctx, inst: Inst,
               deps :: Vec<TyId>) Res<(), AllocError> {
     members.loop((h, m) {
-        field_type(be, m, ctx).match({
+        field_type(be, m, ctx, inst).match({
             None  => Ok(()),
             Ok(t) => keep_composite(be, t, deps),
         }).try();
@@ -302,9 +309,9 @@ field_deps = (be :: CBackend, members: Vec<Member>, ctx: Ctx,
 }
 
 variant_deps = (be :: CBackend, n: TyNamed, variants: Vec<Variant>, ctx: Ctx,
-                deps :: Vec<TyId>) Res<(), AllocError> {
+                inst: Inst, deps :: Vec<TyId>) Res<(), AllocError> {
     variants.loop((h, v) {
-        variant_type(be, n, v, ctx).match({
+        variant_type(be, n, v, ctx, inst).match({
             None  => Ok(()),
             Ok(t) => keep_composite(be, t, deps),
         }).try();
@@ -367,50 +374,66 @@ write_named_def = (be :: CBackend, out :: Emit, name: str, n: TyNamed)
 write_decl_def = (be :: CBackend, out :: Emit, name: str, n: TyNamed,
                   d: Decl) Res<(), AllocError> {
     ctx = decl_ctx(be, n);
+    inst = decl_inst(be, n).try();
+    mark = enter_struct_tparams(be, n.decl).try();
     d.kind.match({
-        Struct(s) => write_struct_def(be, out, name, s, ctx),
-        Enum(e)   => write_enum_def(be, out, name, n, e, ctx),
+        Struct(s) => write_struct_def(be, out, name, s, ctx, inst),
+        Enum(e)   => write_enum_def(be, out, name, n, e, ctx, inst),
         _         => write_opaque(out, name),
+    }).try();
+    leave_tparams(be, mark).try();
+    Ok(());
+}
+
+// A GENERIC STRUCT IS LAID OUT AT ITS ARGUMENTS: `Vec<u8>` holds a
+// `Ptr<u8>`, and one C definition per instantiation is what
+// monomorphisation IS.
+//
+// What is still opaque is a type whose arguments nothing settled. That
+// is not a generic struct — it is `Vec<T>` itself, which no program has
+// a value of, and whose fields would spell a `T` no C type exists for.
+// An opaque body keeps the translation unit parsing around the
+// diagnostic the reaching call site already raised.
+write_struct_def = (be :: CBackend, out :: Emit, name: str, s: Struct,
+                    ctx: Ctx, inst: Inst) Res<(), AllocError> {
+    fields ::= be.alloc.Vec<TyId>();
+    storage_types(be, s, ctx, inst, fields).try();
+    any_open(be, fields).match({
+        true  => write_opaque(out, name),
+        false => write_fields_def(be, out, name, s, ctx, inst, fields),
     })
 }
 
-// A generic struct is not lowered: an instantiation needs its type
-// arguments substituted into every field, and monomorphisation is not
-// in this backend yet. An opaque body keeps the emitted C parsing
-// around the diagnostic the declaration site raises.
-write_struct_def = (be :: CBackend, out :: Emit, name: str, s: Struct,
-                    ctx: Ctx) Res<(), AllocError> {
-    (s.tparams.len > 0).match({
-        true  => write_opaque(out, name),
-        false => write_fields_def(be, out, name, s, ctx),
-    })
+// The declared type of every member that is STORAGE, in declaration
+// order. Collected once because both the openness check and the field
+// lines want the same list, and reading it twice is two chances to
+// disagree about which members are storage.
+storage_types = (be :: CBackend, s: Struct, ctx: Ctx, inst: Inst,
+                 out :: Vec<TyId>) Res<(), AllocError> {
+    s.members.loop((h, m) {
+        field_type(be, m, ctx, inst).match({
+            None  => Ok(()),
+            Ok(t) => out.add(t),
+        }).try();
+    });
+    Ok(());
 }
 
 write_fields_def = (be :: CBackend, out :: Emit, name: str, s: Struct,
-                    ctx: Ctx) Res<(), AllocError> {
+                    ctx: Ctx, inst: Inst, fields: Vec<TyId>)
+                   Res<(), AllocError> {
     open_struct(out, name).try();
     s.members.loop((h, m) {
-        field_type(be, m, ctx).match({
+        field_type(be, m, ctx, inst).match({
             None  => Ok(()),
             Ok(t) => write_field(be, out, m, t),
         }).try();
     });
     // C11 6.7.2.1p1 wants a member; one byte, in one place, so a bare
     // empty struct and an empty struct used as a field agree.
-    (storage_count(be, s, ctx) == 0).then(() { out.say("char zg_pad;").try() });
+    (fields.len == 0).then(() { out.say("char zg_pad;").try() });
     close_struct(out).try();
     Ok(());
-}
-
-storage_count = (be :: CBackend, s: Struct, ctx: Ctx) usize {
-    n ::= 0;
-    s.members.loop((h, m) {
-        field_type(be, m, ctx).match({
-            Ok(_) => true,
-            None  => false,
-        }).then(() { n = n + 1; });
-    });
-    n
 }
 
 write_field = (be :: CBackend, out :: Emit, m: Member, t: TyId)
@@ -433,12 +456,12 @@ member_name = (be :: CBackend, m: Member, out :: String)
 }
 
 write_enum_def = (be :: CBackend, out :: Emit, name: str, n: TyNamed,
-                  e: Enum, ctx: Ctx) Res<(), AllocError> {
+                  e: Enum, ctx: Ctx, inst: Inst) Res<(), AllocError> {
     open_struct(out, name).try();
     payloads ::= be.alloc.Vec<TyId>();
     names ::= be.alloc.Vec<String>();
     e.variants.loop((h, v) {
-        variant_type(be, n, v, ctx).match({
+        variant_type(be, n, v, ctx, inst).match({
             None  => Ok(()),
             Ok(t) => add_payload(be, payloads, names, t, v.name.text),
         }).try();

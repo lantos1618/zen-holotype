@@ -1,0 +1,286 @@
+// src/sema/sema_supply.zen
+// What an IMPL supplies through a dot.
+//
+// `sema_member.zen` answers what a dot reaches; this answers the half of
+// it that the type did not declare. The two split because they are two
+// questions with two rules, and the file that held both said so in its
+// own title:
+//
+//   THE TYPE'S OWN MEMBERS ARE STORAGE and win outright. Layout is fixed
+//   at declaration and cannot depend on which impls are linked, so a
+//   member the declaration writes is never contested.
+//   AN IMPL'S ARE COMPUTED — "you satisfy requirements, you never impl
+//   storage" — re-evaluated on read, read-only, non-addressable, and
+//   invisible to layout. That is the whole of `Found.computed`.
+//
+// AN IMPL LIVES WITH THE TYPE, NOT WITH THE TRAIT, which is why
+// `Impl.target` is an `Ident` and not a qualified type: there is no
+// orphan impl to express, so the search is over one module's impls and a
+// same-named type elsewhere is never confused for this one.
+//
+// A BOUND'S MEMBERS ARE READ IN THE BOUND'S OWN SCOPE, and that is the
+// rule this file states three times because three readers need it.
+// `Slot<T> = { held*: T }` declares `T` and its members mean it, so
+// reading them without `T` bound reports it as undefined in the very
+// declaration that binds it — from a caller that only asked what a dot
+// reaches. `enter_*_tvars` is that binding, and it is always a pair.
+//
+// WHAT AN IMPL OWES is `sema_bound.zen`'s subject and not this one: this
+// file asks what an impl PROVIDES to a reader, and that one asks whether
+// it provided everything it promised. A required member with no body is
+// absent here and a diagnostic there.
+
+Ast, Expr, ExprId, Access, Ident, Span, Pos, TypeId = ast
+Decl, DeclKind, Struct, Impl, Member, MemberKind = ast
+Field, Const, Function, Form, Param, TParam = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+DeclId, ImplId = sema.sema_id
+TyId, Ty, Types, TyNamed, Prim = sema.sema_ty
+World, Def, DefKind, decl_at = sema.sema_def
+Checker, Ctx, UNRESOLVED = sema.sema_check
+Found, member_named, member_type, nowhere = sema.sema_member
+enter_struct_tvars, decl_span = sema.sema_member
+type_from_ast, param_type = sema.sema_type
+
+// "An impl lives with the type, not with the trait", so an impl of a
+// type is in that type's own module — which is why the module index is
+// part of the match and a same-named type elsewhere is not confused for
+// this one.
+impl_members* = (c :: Checker, n: TyNamed, ty: TyId, name: str,
+                out :: Vec<Found>) Res<(), AllocError> {
+    ids ::= c.alloc.Vec<ImplId>();
+    c.world.impls_named(c.tree, n.name, ids).try();
+    ids.loop((h, id) { local_impl(c, n, ty, name, id, out).try() });
+    Ok(());
+}
+
+local_impl = (c :: Checker, n: TyNamed, ty: TyId, name: str, id: ImplId,
+              out :: Vec<Found>) Res<(), AllocError> {
+    (n.decl.module == id.decl.module).match({
+        true  => impl_supplies(c, n, ty, name, id, out),
+        false => Ok(()),
+    })
+}
+
+impl_supplies = (c :: Checker, n: TyNamed, ty: TyId, name: str, id: ImplId,
+                 out :: Vec<Found>) Res<(), AllocError> {
+    c.world.impl_at(c.tree, id).match({
+        Ok(im) => supplied(c, n, ty, name, id, im, out),
+        None   => Ok(()),
+    }).try();
+    Ok(());
+}
+
+// An impl entry supplies the name, or the bound provides it with a body
+// of its own — `area` comes along free because it "only ever needed a
+// width and a height". Either way the TYPE is the one the bound
+// declares, never the supplied expression's: `width: self.radius * 2.0`
+// is an f64 because `Rect` said f64.
+supplied = (c :: Checker, n: TyNamed, ty: TyId, name: str, id: ImplId,
+            im: Impl, out :: Vec<Found>) Res<(), AllocError> {
+    mi = n.decl.module.to_usize();
+    bound = impl_bound_type(c, im, mi).try();
+    provides(c, im, bound, name).try().then(() {
+        add_supplied(c, ty, bound, name, id, out).try();
+    });
+    Ok(());
+}
+
+// The bound an impl names, resolved with the TARGET's type parameters
+// in scope.
+//
+// `Vec.impl(Range<T>, ..)` writes `Vec`'s own `T`, and `Impl` has no
+// `tparams` field to read because there is nothing for it to hold: an
+// impl declares no type parameters, it borrows the ones the target
+// declared. Every reader of `im.bound` goes through here so the three
+// of them cannot disagree about what `T` meant — and because
+// `type_from_ast` memoizes on the node id, the FIRST reader decides for
+// all of them anyway.
+impl_bound_type* = (c :: Checker, im: Impl, mi: usize)
+                   Res<TyId, AllocError> {
+    poison = c.types.unknown().try();
+    tmark = c.tvar_mark();
+    enter_target_tvars(c, im.target.text, mi).try();
+    got = c.type_from_ast(im.bound, Ctx(mi, poison)).try();
+    c.release_tvars(tmark).try();
+    Ok(got);
+}
+
+// An impl lives in the module that declares its target, so the target
+// is looked up there and nowhere else — which is the same fact that
+// makes `Impl.target` an `Ident` and not a qualified type.
+enter_target_tvars = (c :: Checker, target: str, mi: usize)
+                     Res<(), AllocError> {
+    defs ::= c.alloc.Vec<Def>();
+    c.world.own_defs(mi, target, defs).try();
+    defs.get(0).match({
+        None    => Ok(()),
+        Ok(d)   => enter_def_tvars(c, d, mi),
+    }).try();
+    Ok(());
+}
+
+enter_def_tvars = (c :: Checker, d: Def, mi: usize) Res<(), AllocError> {
+    decl_at(c.tree, d.id).match({
+        Ok(x) => enter_decl_tvars(c, x, mi),
+        None  => Ok(()),
+    }).try();
+    Ok(());
+}
+
+enter_decl_tvars = (c :: Checker, d: Decl, mi: usize) Res<(), AllocError> {
+    d.kind.match({
+        Struct(s) => enter_struct_tvars(c, s, mi),
+        _         => Ok(()),
+    })
+}
+
+provides = (c :: Checker, im: Impl, bound: TyId, name: str)
+           Res<bool, AllocError> {
+    has_member(im.members, name).match({
+        false => bound_provides(c, bound, name),
+        true  => Ok(true),
+    })
+}
+
+// The bound declares it AND gives it a body: sealed and default members
+// come along with the impl, a required one does not.
+bound_provides = (c :: Checker, bound: TyId, name: str)
+                 Res<bool, AllocError> {
+    members ::= c.alloc.Vec<Member>();
+    bound_members(c, bound, members).try();
+    Ok(provides_body(members, name));
+}
+
+provides_body = (members: Vec<Member>, name: str) bool {
+    Range(0, members.len).find((i) {
+        members.get(i).match({
+            Ok(m) => member_named(m, name) && has_body(m),
+            None  => false,
+        })
+    }).match({ Ok(_) => true, None => false })
+}
+
+has_body = (m: Member) bool {
+    m.kind.match({
+        Function(f) => f.body.match({ Ok(_) => true, None => false }),
+        _           => false,
+    })
+}
+
+add_supplied = (c :: Checker, ty: TyId, bound: TyId, name: str, id: ImplId,
+                out :: Vec<Found>) Res<(), AllocError> {
+    out.add(Found(
+        name: name,
+        ty: bound_member_type(c, bound, name, ty).try(),
+        computed: true,
+        mutable: false,
+        bound: bound,
+        span: impl_span(c, id),
+    ))
+}
+
+// The third site of the same rule, and the one a member lookup alone
+// would not show: a bound's members are read in the bound's own scope.
+// `Slot<T> = { held*: T }` declares `T` and its members mean it, so
+// reading them without it reports `T` as undefined in the declaration
+// that binds it — from a caller that only asked what a dot reaches.
+bound_member_type* = (c :: Checker, bound: TyId, name: str, self_ty: TyId)
+                    Res<TyId, AllocError> {
+    members ::= c.alloc.Vec<Member>();
+    bound_members(c, bound, members).try();
+    mi = bound_module(c, bound);
+    tmark = c.tvar_mark();
+    enter_bound_tvars(c, bound, mi).try();
+    got = named_member_type(c, members, name, mi, self_ty).try();
+    c.release_tvars(tmark).try();
+    Ok(got);
+}
+
+enter_bound_tvars = (c :: Checker, bound: TyId, mi: usize)
+                    Res<(), AllocError> {
+    c.types.at(bound).match({
+        Named(n) => enter_named_tvars(c, n, mi),
+        _        => Ok(()),
+    })
+}
+
+enter_named_tvars = (c :: Checker, n: TyNamed, mi: usize)
+                    Res<(), AllocError> {
+    decl_at(c.tree, n.decl).match({
+        Ok(d) => enter_decl_tvars(c, d, mi),
+        None  => Ok(()),
+    }).try();
+    Ok(());
+}
+
+named_member_type = (c :: Checker, members: Vec<Member>, name: str,
+                     mi: usize, self_ty: TyId) Res<TyId, AllocError> {
+    got ::= c.types.unknown().try();
+    members.loop((h, m) {
+        got = one_member_type(c, m, name, mi, self_ty, got).try();
+    });
+    Ok(got);
+}
+
+one_member_type = (c :: Checker, m: Member, name: str, mi: usize,
+                   self_ty: TyId, so_far: TyId) Res<TyId, AllocError> {
+    member_named(m, name).match({
+        true  => member_type(c, m, mi, self_ty),
+        false => Ok(so_far),
+    })
+}
+
+// The members a bound declares, in source order.
+bound_members* = (c :: Checker, bound: TyId, out :: Vec<Member>)
+                 Res<(), AllocError> {
+    c.types.at(bound).match({
+        Named(n) => bound_decl_members(c, n, out),
+        _        => Ok(()),
+    }).try();
+    Ok(());
+}
+
+bound_decl_members = (c :: Checker, n: TyNamed, out :: Vec<Member>)
+                     Res<(), AllocError> {
+    decl_at(c.tree, n.decl).match({
+        Ok(d) => copy_struct_members(d, out),
+        None  => Ok(()),
+    }).try();
+    Ok(());
+}
+
+copy_struct_members = (d: Decl, out :: Vec<Member>) Res<(), AllocError> {
+    d.kind.match({
+        Struct(s) => add_all_members(s, out),
+        _         => Ok(()),
+    })
+}
+
+add_all_members = (s: Struct, out :: Vec<Member>) Res<(), AllocError> {
+    s.members.loop((h, m) { out.add(m).try() });
+    Ok(());
+}
+
+bound_module = (c: Checker, bound: TyId) usize {
+    c.types.at(bound).match({
+        Named(n) => n.decl.module.to_usize(),
+        _        => 0,
+    })
+}
+
+has_member* = (members: Vec<Member>, name: str) bool {
+    Range(0, members.len).find((i) {
+        members.get(i).match({
+            Ok(m) => member_named(m, name),
+            None  => false,
+        })
+    }).match({ Ok(_) => true, None => false })
+}
+
+impl_span* = (c: Checker, id: ImplId) Span {
+    decl_span(c, id.decl)
+}
