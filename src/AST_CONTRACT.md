@@ -31,12 +31,22 @@ It is a folder because the node set alone is 650 lines and the whole is over
 900: `STYLE.md` fails the build past 800 and asks for a justification past 500.
 The split is by subject and the three subjects are the three lines above.
 
-**`ast_node.zen` is one file and that is forced, not lazy.** Declarations hold
-expressions, expressions hold types, a type holds an expression (`[u8, i32.BITS]`),
-a block holds statements and a statement holds a declaration. The node graph is
-one strongly-connected component and module cycles are a compile error, so
-splitting the nodes by category would not compile. Only the two genuinely lower
-layers could be lifted out, and they were.
+**`ast_node.zen` is one file, and the reason first given for it was wrong.**
+Declarations hold expressions, expressions hold types, a type holds an
+expression (`[u8, i32.BITS]`), a block holds statements and a statement holds a
+declaration — one strongly-connected component, certainly. But the claim that
+followed, that module cycles are a compile error, is **false**:
+`bootstrap/modules.py` says the opposite in as many words, and gives this
+language's own example — "`std.core.display` needing `String` while `std.text`
+wants `Display` is a real cycle and a legal one". An import cycle is not a
+problem a whole-program compiler has.
+
+So the file could be split by category and would compile. It is one file
+because the subjects genuinely are one subject, which is STYLE.md's actual
+rule — split by subject, never by size — and not because the compiler forbids
+the alternative. The two genuinely lower layers were lifted out and the rest
+was not; that judgement stands on its own, and anyone who disagrees with it
+should know they are free to act.
 
 ---
 
