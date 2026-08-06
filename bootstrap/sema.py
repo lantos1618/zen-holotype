@@ -3137,6 +3137,14 @@ class Sema:
                        % (show(ty), "Res<%s, E>" % show(ty.args[0])))
             return ty.args[0]
         if len(ty.args) == 2:
+            # An operand whose error set is still an open variable has no error
+            # to carry: `Ok(n + 1)` is a Res with an unconstrained `_`, and a
+            # bare `Ok` raises nothing.  Propagating THAT into a `Res<T>` is not
+            # a conversion, it is the absence of one -- and rejecting it made
+            # the natural spelling of a fallible walk illegal in every function
+            # whose failure is an absence rather than a reason.
+            if len(ret.args) == 1 and ty.args[1].kind in ("var", "any", "never"):
+                return ty.args[0]
             if len(ret.args) == 1:
                 self.error(span,
                            "no implicit error conversion: %s cannot propagate into %s"
