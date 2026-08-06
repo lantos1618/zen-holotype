@@ -139,6 +139,38 @@ emit_index = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
+// What `println` lowers into, and only for a program that prints.
+//
+// DESIGN.md routes `println(..)` through the `Env` in scope — it is
+// sugar for `<the Env in scope>.out.println(..)` — and `Console`'s
+// members are DECLARED WITHOUT A BODY for the same reason `Fs`'s are:
+// there is nothing underneath to write them in. So the sugar bottoms
+// out here, in the writes the backend emits directly: decimal with no
+// separators, and exactly one newline per `println`.
+//
+// `zg_print_str` takes a `zg_str` BY VALUE rather than a pointer and a
+// length, so printing a `str` needs no temporary and therefore no
+// statement of its own — which is what lets an argument be lowered as a
+// pure C expression.
+emit_print* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    be.uses_print().match({
+        false => Ok(()),
+        true  => write_print(out),
+    })
+}
+
+write_print = (out :: Emit) Res<(), AllocError> {
+    out.say("static void zg_print_bytes(const char *s, size_t n) { fwrite(s, 1, n, stdout); }").try();
+    out.say("static void zg_print_str(zg_str s) { fwrite(s.data, 1, s.len, stdout); }").try();
+    out.say("static void zg_print_i64(int64_t v) { fprintf(stdout, \"%lld\", (long long)v); }").try();
+    out.say("static void zg_print_u64(uint64_t v) { fprintf(stdout, \"%llu\", (unsigned long long)v); }").try();
+    out.say("static void zg_print_f64(double v) { fprintf(stdout, \"%g\", v); }").try();
+    out.say("static void zg_print_bool(bool v) { zg_print_bytes(v ? \"true\" : \"false\", v ? 4u : 5u); }").try();
+    out.say("static void zg_print_nl(void) { fputc('\\n', stdout); }").try();
+    out.line().try();
+    Ok(());
+}
+
 // One family per integer type the program actually performs a trapping
 // operation on, in sorted order, so the runtime is a function of the
 // program and not of the order its functions were lowered in.

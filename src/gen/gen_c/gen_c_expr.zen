@@ -26,7 +26,7 @@
 // expectation either, an `Untyped` fault is raised rather than a guess.
 
 Ast, Expr, ExprKind, ExprId, BlockId, Block, Stmt, StmtKind, Bind = ast
-Decl, DeclKind, Struct, Member, MemberKind = ast
+Decl, DeclKind, Struct, Member, MemberKind, Const = ast
 Literal, LiteralKind, BinOp, UnOp, Binary, Unary, Match, Arm = ast
 Pattern, PatternKind, Access, Call, Arg, Span, Ident = ast
 Param, TypeId = ast
@@ -51,6 +51,7 @@ is_c_integer, is_signed, variant_type, decl_ctx = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
 field_type, request_type = gen.gen_c.gen_c_type
 Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
+plain_ctx = gen.gen_c.gen_c_decl
 lower_call, res_value, is_res_ctor = gen.gen_c.gen_c_call
 
 // -----------------------------------------------------------------
@@ -276,16 +277,97 @@ lower_name = (be :: CBackend, id: ExprId, text: str, ctx: Ctx, want: TyId,
     })
 }
 
+// A `::` parameter holds the ADDRESS of its argument, so reading it is
+// a dereference. Parenthesised, because every use of it is a use of the
+// value: `(*p).x` and `*p.x` are different C.
 write_local = (be :: CBackend, text: str, slot: LocalSlot, out :: String)
               Res<(), AllocError> {
-    sym_local(out, text, slot.index)
+    slot.by_ref.match({
+        false => sym_local(out, text, slot.index),
+        true  => write_deref(be, text, slot, out),
+    })
+}
+
+write_deref = (be :: CBackend, text: str, slot: LocalSlot, out :: String)
+              Res<(), AllocError> {
+    out.add_bytes("(*").try();
+    sym_local(out, text, slot.index).try();
+    out.add_bytes(")").try();
+    Ok(());
 }
 
 lower_global_name = (be :: CBackend, id: ExprId, text: str, ctx: Ctx,
                      want: TyId, out :: String) Res<(), AllocError> {
     text.eq("None").match({
         true  => res_value(be, id, want, "None", out),
-        false => unresolved(be, id, text, out),
+        false => lower_global_value(be, id, text, ctx, want, out),
+    })
+}
+
+// A module-level constant, WRITTEN OUT AT EACH USE rather than emitted
+// as a C object. DESIGN.md's `name: T = value` is immutable and has no
+// address a program can take, so a use IS its value — and a `str`
+// constant emitted as a C object would need a static initialiser, which
+// is a second spelling of the same literal for no gain.
+//
+// A constant whose value is not a literal is REPORTED, because inlining
+// one would evaluate its expression once per use. That is the whole of
+// the restriction and it is named rather than assumed away.
+lower_global_value = (be :: CBackend, id: ExprId, text: str, ctx: Ctx,
+                      want: TyId, out :: String) Res<(), AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.defs_of(ctx.module, text, found).try();
+    found.get(0).match({
+        None  => unresolved(be, id, text, out),
+        Ok(d) => lower_def_value(be, id, d, text, want, out),
+    })
+}
+
+lower_def_value = (be :: CBackend, id: ExprId, d: Def, text: str,
+                   want: TyId, out :: String) Res<(), AllocError> {
+    d.kind.match({
+        ConstDef => lower_const(be, id, d, text, want, out),
+        _        => unresolved(be, id, text, out),
+    })
+}
+
+lower_const = (be :: CBackend, id: ExprId, d: Def, text: str, want: TyId,
+               out :: String) Res<(), AllocError> {
+    decl_at(be.tree, d.id).match({
+        None  => unresolved(be, id, text, out),
+        Ok(x) => lower_const_decl(be, id, x, d, text, want, out),
+    })
+}
+
+lower_const_decl = (be :: CBackend, id: ExprId, x: Decl, d: Def, text: str,
+                    want: TyId, out :: String) Res<(), AllocError> {
+    x.kind.match({
+        Const(k) => lower_const_value(be, id, k, d, want, out),
+        _        => unresolved(be, id, text, out),
+    })
+}
+
+// The constant's DECLARED type wins over the context's: `USAGE: str` is
+// a `str` wherever it is read, and a literal takes its width from the
+// declaration that named it.
+lower_const_value = (be :: CBackend, id: ExprId, k: Const, d: Def,
+                     want: TyId, out :: String) Res<(), AllocError> {
+    dctx = plain_ctx(be, d.id.module.to_usize());
+    ty = k.type.match({
+        Ok(t) => be.check.type_from_ast(t, dctx),
+        None  => Ok(want),
+    }).try();
+    is_literal_value(be, k.value).match({
+        false => unsupported(be, id, "a constant whose value is not a literal", out),
+        true  => expr(be, k.value, dctx, ty, out),
+    })
+}
+
+is_literal_value = (be: CBackend, id: ExprId) bool {
+    be.tree.expr_at(id).kind.match({
+        Literal(_) => true,
+        Unit       => true,
+        _          => false,
     })
 }
 

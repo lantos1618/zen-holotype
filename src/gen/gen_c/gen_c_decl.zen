@@ -25,7 +25,7 @@
 // definition.
 
 Ast, Module, Decl, DeclKind, Function, Param, Span, Ident = ast
-BlockId, TypeId = ast
+BlockId, TypeId, Struct, Member, MemberKind = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -33,16 +33,17 @@ Range = std.core
 TyId, Ty, Types, TyRes = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
-type_from_ast = sema.sema_type
+type_from_ast, param_type = sema.sema_type
+member_named, self_ctx = sema.sema_member
 Emit, order = gen.gen_emit
 sym_fn, sym_local, sym_member, sym_variant = gen.gen_name
 RES_PATH = gen.gen_name
 GenFault = gen.gen_diag
-CBackend = gen.gen_c.gen_c_state
+CBackend, MethodRef = gen.gen_c.gen_c_state
 ctype, declarator, spellable, is_unit, is_c_integer = gen.gen_c.gen_c_type
 emit_types = gen.gen_c.gen_c_layout
 Dest, block = gen.gen_c.gen_c_stmt
-emit_banner, emit_floor, emit_helpers = gen.gen_c.gen_c_runtime
+emit_banner, emit_floor, emit_helpers, emit_print = gen.gen_c.gen_c_runtime
 
 // A bound on the reachable set, and a diagnostic at it rather than a
 // walk that does not terminate. Four thousand functions is more than
@@ -56,6 +57,7 @@ emit_program* = (be :: CBackend, mi: usize, out :: Emit)
     drain(be).try();
     emit_banner(out).try();
     emit_floor(out).try();
+    emit_print(be, out).try();
     emit_helpers(be, out).try();
     emit_types(be, out).try();
     emit_protos(be, out).try();
@@ -119,9 +121,23 @@ is_function = (d: Def) bool {
 // Lower everything queued, including whatever lowering queues. Bounded
 // rather than looped: a backend that does not terminate is worse than
 // one that reports.
+// TWO QUEUES, INTERLEAVED. Lowering a free function discovers member
+// functions and lowering a member function discovers free ones, so
+// draining one to exhaustion and then the other does not converge —
+// each cursor advances one step per turn instead, which reaches a
+// fixpoint in one bounded walk.
 drain = (be :: CBackend) Res<(), AllocError> {
-    Range(0, MAX_FUNCTIONS).loop((h, i) {
-        (i < be.fn_queue.len).then(() { lower_queued(be, i).try() });
+    fi ::= 0;
+    mi ::= 0;
+    Range(0, MAX_FUNCTIONS).loop((h, k) {
+        (fi < be.fn_queue.len).then(() {
+            lower_queued(be, fi).try();
+            fi = fi + 1;
+        });
+        (mi < be.m_queue.len).then(() {
+            lower_queued_method(be, mi).try();
+            mi = mi + 1;
+        });
     });
     Ok(());
 }
@@ -130,6 +146,14 @@ lower_queued = (be :: CBackend, i: usize) Res<(), AllocError> {
     be.fn_queue.get(i).match({
         None  => Ok(()),
         Ok(d) => lower_def(be, d),
+    }).try();
+    Ok(());
+}
+
+lower_queued_method = (be :: CBackend, i: usize) Res<(), AllocError> {
+    be.m_queue.get(i).match({
+        None  => Ok(()),
+        Ok(m) => lower_method_ref(be, m),
     }).try();
     Ok(());
 }
@@ -177,22 +201,95 @@ lower_concrete = (be :: CBackend, d: Def, x: Decl, f: Function)
 lower_body = (be :: CBackend, d: Def, x: Decl, f: Function, blk: BlockId)
              Res<(), AllocError> {
     mi = d.id.module.to_usize();
-    ret = return_type(be, f, mi).try();
+    ctx = plain_ctx(be, mi);
+    lower_shape(be, f, blk, d.qname, d.name, d.span, ctx, ctx.self_ty, mi)
+}
+
+// -----------------------------------------------------------------
+// one member function
+//
+// A method is an ordinary function whose first parameter is the
+// receiver — "a method is a UFCS function whose first parameter happens
+// to be named `self`" — so it goes through the same shape, with `@Self`
+// bound and a qualified name carrying the TYPE rather than the module.
+// -----------------------------------------------------------------
+
+lower_method_ref = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
+    decl_at(be.tree, m.decl).match({
+        None  => Ok(()),
+        Ok(x) => method_in_decl(be, m, x),
+    })
+}
+
+method_in_decl = (be :: CBackend, m: MethodRef, x: Decl)
+                 Res<(), AllocError> {
+    x.kind.match({
+        Struct(s) => method_member(be, m, s),
+        _         => Ok(()),
+    })
+}
+
+method_member = (be :: CBackend, m: MethodRef, s: Struct)
+                Res<(), AllocError> {
+    found ::= be.alloc.Vec<Member>();
+    s.members.loop((h, mem) {
+        member_named(mem, m.name).then(() { found.add(mem).try() });
+    });
+    found.get(0).match({
+        None      => Ok(()),
+        Ok(mem)   => method_body(be, m, mem),
+    })
+}
+
+method_body = (be :: CBackend, m: MethodRef, mem: Member)
+              Res<(), AllocError> {
+    mem.kind.match({
+        Function(f) => method_fn(be, m, mem, f),
+        _           => Ok(()),
+    })
+}
+
+method_fn = (be :: CBackend, m: MethodRef, mem: Member, f: Function)
+            Res<(), AllocError> {
+    f.body.match({
+        None    => Ok(()),
+        Ok(blk) => method_shape(be, m, mem, f, blk),
+    })
+}
+
+method_shape = (be :: CBackend, m: MethodRef, mem: Member, f: Function,
+                blk: BlockId) Res<(), AllocError> {
+    mi = m.decl.module.to_usize();
+    ctx = be.check.self_ctx(mi, m.self_ty).try();
+    lower_shape(be, f, blk, m.qname, m.name, mem.span, ctx, m.self_ty, mi)
+}
+
+// -----------------------------------------------------------------
+// the shape both go through
+//
+// `sctx` is the context a SIGNATURE is read in — a free function's has
+// no `@Self` and a member's binds it to the receiver — and everything
+// else is the same question asked of the same nodes.
+// -----------------------------------------------------------------
+
+lower_shape = (be :: CBackend, f: Function, blk: BlockId, qname: str,
+               name: str, span: Span, sctx: Ctx, self_ty: TyId, mi: usize)
+              Res<(), AllocError> {
+    ret = return_type(be, f, sctx).try();
     be.reset_frame().try();
     be.check.release(0).try();
     sig ::= be.alloc.Vec<TyId>();
     proto ::= be.alloc.String().try();
-    bind_params(be, f, mi, sig).try();
-    write_proto(be, d, f, ret, sig, mi, proto).try();
+    bind_params(be, f, sctx, sig).try();
+    write_proto(be, qname, name, span, f, ret, sig, proto).try();
     be.open_buf().try();
-    write_body(be, blk, mi, ret).try();
-    keep(be, d, sig, proto).try();
+    write_body(be, blk, mi, ret, self_ty, sctx.has_self).try();
+    keep(be, qname, sig, proto).try();
     Ok(());
 }
 
-return_type = (be :: CBackend, f: Function, mi: usize)
+return_type = (be :: CBackend, f: Function, ctx: Ctx)
               Res<TyId, AllocError> {
-    ctx = plain_ctx(be, mi);
     f.ret.match({
         Ok(t) => be.check.type_from_ast(t, ctx),
         None  => be.check.types.prim("()"),
@@ -215,6 +312,15 @@ body_ctx* = (be :: CBackend, mi: usize, ret: TyId) Ctx {
         self_ty: TyId(index: 0), has_self: false)
 }
 
+// The same, for a member function: `@Self` stays bound while the body
+// is walked, because a method's body names it as freely as its
+// signature does.
+self_body_ctx* = (be :: CBackend, mi: usize, ret: TyId, self_ty: TyId,
+                  has_self: bool) Ctx {
+    Ctx(module: mi, ret: ret, has_ret: is_res(be, ret),
+        self_ty: self_ty, has_self: has_self)
+}
+
 is_res* = (be :: CBackend, ret: TyId) bool {
     be.check.types.at(ret).match({ Res(_) => true, _ => false })
 }
@@ -223,23 +329,22 @@ is_res* = (be :: CBackend, ret: TyId) bool {
 // that order, because the C name a parameter gets is the one the
 // prototype has to print and the type it has is the one `type_of` must
 // answer with.
-bind_params = (be :: CBackend, f: Function, mi: usize, sig :: Vec<TyId>)
+bind_params = (be :: CBackend, f: Function, ctx: Ctx, sig :: Vec<TyId>)
               Res<(), AllocError> {
-    ctx = plain_ctx(be, mi);
     f.params.loop((h, p) {
         bind_param(be, p, ctx, sig).try();
     });
     Ok(());
 }
 
+// Through `param_type` and not `type_from_ast`: `self :: @Self` has a
+// written type that means the receiver, and only the query that knows
+// about `@Self` can answer it.
 bind_param = (be :: CBackend, p: Param, ctx: Ctx, sig :: Vec<TyId>)
              Res<(), AllocError> {
-    ty = p.type.match({
-        Ok(t) => be.check.type_from_ast(t, ctx),
-        None  => be.check.types.unknown(),
-    }).try();
+    ty = be.check.param_type(p, ctx).try();
     sig.add(ty).try();
-    be.declare(p.name.text, ty).try();
+    be.declare(p.name.text, ty, p.mutable).try();
     be.check.bind(p.name.text, ty, p.mutable).try();
     Ok(());
 }
@@ -248,14 +353,14 @@ bind_param = (be :: CBackend, p: Param, ctx: Ctx, sig :: Vec<TyId>)
 // is the whole program — separate compilation is not a thing this
 // language does — so nothing but C's own `main` needs external
 // linkage.
-write_proto = (be :: CBackend, d: Def, f: Function, ret: TyId,
-               sig: Vec<TyId>, mi: usize, out :: String)
+write_proto = (be :: CBackend, qname: str, name: str, span: Span,
+               f: Function, ret: TyId, sig: Vec<TyId>, out :: String)
               Res<(), AllocError> {
-    check_spellable(be, d, ret, sig).try();
+    check_spellable(be, name, span, ret, sig).try();
     out.add_bytes("static ").try();
     ctype(be, ret, out).try();
     out.add_bytes(" ").try();
-    sym_fn(out, be.check.types, be.check.world, d.qname, sig).try();
+    sym_fn(out, be.check.types, be.check.world, qname, sig).try();
     out.add_bytes("(").try();
     write_params(be, f, sig, out).try();
     out.add_bytes(")").try();
@@ -279,12 +384,25 @@ write_param_list = (be :: CBackend, f: Function, sig: Vec<TyId>,
     Ok(());
 }
 
+// A `::` parameter is declared as a POINTER: "`::` means the method
+// writes the receiver's own bytes", and C has one way to say that.
 write_param = (be :: CBackend, p: Param, i: usize, sig: Vec<TyId>,
                out :: String) Res<(), AllocError> {
     ty = sig.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
     name ::= be.alloc.String().try();
     slot_index(be, p.name.text, name).try();
-    declarator(be, ty, name.view(), out)
+    p.mutable.match({
+        false => declarator(be, ty, name.view(), out),
+        true  => ref_declarator(be, ty, name.view(), out),
+    })
+}
+
+ref_declarator = (be :: CBackend, ty: TyId, name: str, out :: String)
+                 Res<(), AllocError> {
+    ctype(be, ty, out).try();
+    out.add_bytes(" *").try();
+    out.add_bytes(name).try();
+    Ok(());
 }
 
 slot_index = (be :: CBackend, name: str, out :: String)
@@ -295,19 +413,18 @@ slot_index = (be :: CBackend, name: str, out :: String)
 
 // A type with no C spelling is reported once, at the signature, rather
 // than at every use of the parameter it belongs to.
-check_spellable = (be :: CBackend, d: Def, ret: TyId, sig: Vec<TyId>)
-                  Res<(), AllocError> {
-    report_unspellable(be, d, ret).try();
-    sig.loop((h, t) { report_unspellable(be, d, t).try() });
+check_spellable = (be :: CBackend, name: str, span: Span, ret: TyId,
+                   sig: Vec<TyId>) Res<(), AllocError> {
+    report_unspellable(be, name, span, ret).try();
+    sig.loop((h, t) { report_unspellable(be, name, span, t).try() });
     Ok(());
 }
 
-report_unspellable = (be :: CBackend, d: Def, t: TyId)
+report_unspellable = (be :: CBackend, name: str, span: Span, t: TyId)
                      Res<(), AllocError> {
     spellable(be, t).match({
         true  => Ok(()),
-        false => be.report(d.span.file, d.span,
-                           GenFault.Unspellable(d.name)),
+        false => be.report(span.file, span, GenFault.Unspellable(name)),
     })
 }
 
@@ -315,9 +432,9 @@ report_unspellable = (be :: CBackend, d: Def, t: TyId)
 // prototype the body is emitted under, and writing them in one place
 // is what keeps the two from disagreeing. A unit-returning function
 // discards its value; everything else returns one.
-write_body = (be :: CBackend, blk: BlockId, mi: usize, ret: TyId)
-             Res<(), AllocError> {
-    ctx = body_ctx(be, mi, ret);
+write_body = (be :: CBackend, blk: BlockId, mi: usize, ret: TyId,
+              self_ty: TyId, has_self: bool) Res<(), AllocError> {
+    ctx = self_body_ctx(be, mi, ret, self_ty, has_self);
     be.indent();
     block(be, blk, ctx, ret, destination(be, ret)).try();
     Ok(());
@@ -330,10 +447,10 @@ destination = (be :: CBackend, ret: TyId) Dest {
     })
 }
 
-keep = (be :: CBackend, d: Def, sig: Vec<TyId>, proto: String)
+keep = (be :: CBackend, qname: str, sig: Vec<TyId>, proto: String)
        Res<(), AllocError> {
     name ::= be.alloc.String().try();
-    sym_fn(name, be.check.types, be.check.world, d.qname, sig).try();
+    sym_fn(name, be.check.types, be.check.world, qname, sig).try();
     text ::= be.alloc.String().try();
     text.add_bytes(be.text()).try();
     be.add_function(name, proto, text)
@@ -419,7 +536,7 @@ write_main_call = (be :: CBackend, d: Def, x: Decl, out :: Emit)
 write_entry = (be :: CBackend, d: Def, f: Function, out :: Emit)
               Res<(), AllocError> {
     mi = d.id.module.to_usize();
-    ret = return_type(be, f, mi).try();
+    ret = return_type(be, f, plain_ctx(be, mi)).try();
     sig ::= be.alloc.Vec<TyId>();
     signature(be, f, mi, sig).try();
     call ::= be.alloc.String().try();

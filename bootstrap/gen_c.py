@@ -3186,11 +3186,21 @@ class FnCtx:
         will run in -- a match arm's binder is not bound yet -- so a
         diagnostic from one would be an error about a program that is fine."""
         saved = (list(self.lines), self.tmp, self.indent, len(self.e.diags))
+        # ...and the WORKLIST, which is the half this used to miss.  A peek
+        # that reaches a call requests the function it thinks is being called,
+        # and a peek runs outside the real scope -- so a wrong guess left a
+        # request for a function nobody calls, and gen_c emitted it.  That is
+        # how `Map.get` at `K = ?` got monomorphised from a receiver whose
+        # type was not yet known.  Speculation must cost nothing: anything
+        # genuinely needed is requested again by the lowering that is real.
+        marks = (len(self.e.worklist), set(self.e.done))
         try:
             code, ty = self.expr(node)
         finally:
             self.lines, self.tmp, self.indent = saved[0], saved[1], saved[2]
             del self.e.diags[saved[3] :]
+            del self.e.worklist[marks[0] :]
+            self.e.done = marks[1]
         return (code, ty)
 
     def peek_block(self, node):
@@ -3202,12 +3212,15 @@ class FnCtx:
         declare.  So the block is lowered for real into a buffer that is then
         thrown away, exactly as `peek` does."""
         saved = (list(self.lines), self.tmp, self.indent, len(self.e.diags))
+        marks = (len(self.e.worklist), set(self.e.done))   # see `peek`
         self.push()
         try:
             self.block_value(node, INFER)
             return self.blk_ty
         finally:
             self.pop()
+            del self.e.worklist[marks[0] :]
+            self.e.done = marks[1]
             self.lines, self.tmp, self.indent = saved[0], saved[1], saved[2]
             del self.e.diags[saved[3] :]
 

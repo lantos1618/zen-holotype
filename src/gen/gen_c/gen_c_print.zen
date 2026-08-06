@@ -1,0 +1,318 @@
+// src/gen/gen_c/gen_c_print.zen
+// `println`, the one name that resolves to nothing a module declares.
+//
+// DESIGN.md bends exactly one law here and says so out loud:
+// "`println(...)` is sugar for `<the Env in scope>.out.println(...)`,
+// resolved BY TYPE, not by the name of the binding." So the sugar names
+// no function — there is nothing for `gen_name` to find — and the thing
+// it routes to, `Console.println`, is DECLARED WITHOUT A BODY for the
+// same reason `Fs.read` is: there is nothing underneath to write it in.
+// A capability's floor is the target language's, and for C that floor is
+// `fwrite` and `fprintf`.
+//
+// SO THE SUGAR BOTTOMS OUT IN WRITES, which is the answer
+// `bootstrap/gen_c.py` reached and the one the corpus already agrees
+// with: `{}` on an integer is decimal with no separators, and `println`
+// appends exactly one newline.
+//
+// THE `Env`-IN-SCOPE CLAUSE IS NOT ENFORCED HERE, and that is a refusal
+// rather than an oversight. "No Env in scope is a compile error" cannot
+// be applied by this file without rejecting the corpus that pins its
+// behaviour: `tests/corpus/cli/`'s `show = (a: Alloc, argv: Vec<str>)`
+// and `tests/corpus/gen_zen/`'s `report = (a: Alloc, label: str, text:
+// str)` both print, and neither has an `Env` binding in scope — the
+// `Env` is `main`'s, frames above. Enforcing the clause is a NAME
+// RESOLUTION rule and belongs in `src/sema/`, the only place that could
+// say which `Env` a nested frame is entitled to. A backend raising it
+// would be a second, worse copy of a rule sema has not written.
+//
+// NOTHING HERE ALLOCATES ON THE EMITTED SIDE. `toString` takes a `Sink`
+// precisely so printing a value needs no buffer, and a `str` prints
+// through `zg_print_str`, which takes the fat value itself — no
+// temporary, so an argument stays a pure C expression.
+
+Ast, Expr, ExprKind, ExprId, Literal, LiteralKind = ast
+Call, Arg, Span = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId = sema.sema_ty
+write_usize = sema.sema_diag
+Checker, Ctx = sema.sema_check
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+is_c_integer, is_signed = gen.gen_c.gen_c_type
+expr, ty_of = gen.gen_c.gen_c_expr
+
+// The two spellings, and the only two. `print` is `println` without the
+// newline; nothing else in the prelude reaches the console.
+is_print* = (name: str) bool { name.eq("println") || name.eq("print") }
+
+wants_newline* = (name: str) bool { name.eq("println") }
+
+// `println("a {} b", x)` — the pieces of the format and the values
+// between them, one write each. A print is a STATEMENT SEQUENCE whose
+// value is unit, so the writes go to the body and `0` goes to the
+// caller's expression buffer.
+lower_print* = (be :: CBackend, c: Call, name: str, ctx: Ctx, out :: String)
+               Res<(), AllocError> {
+    be.need_print();
+    write_args(be, c, ctx).try();
+    wants_newline(name).then(() { be.writeln("zg_print_nl();").try() });
+    out.add_bytes("0")
+}
+
+write_args = (be :: CBackend, c: Call, ctx: Ctx) Res<(), AllocError> {
+    c.args.get(0).match({
+        None  => Ok(()),
+        Ok(a) => write_from(be, c, a, ctx),
+    })
+}
+
+// A leading string literal is a FORMAT and the rest are its values.
+// Anything else is just a value, and so is everything after it:
+// `println(s)` prints `s`.
+write_from = (be :: CBackend, c: Call, first: Arg, ctx: Ctx)
+             Res<(), AllocError> {
+    format_of(be, first.value).match({
+        Ok(raw) => write_format(be, c, raw, ctx),
+        None    => write_values(be, c, 0, ctx),
+    })
+}
+
+// The raw source slice of a string literal, quotes included, when the
+// argument is one.
+format_of = (be :: CBackend, id: ExprId) Res<str> {
+    be.tree.expr_at(id).kind.match({
+        Literal(l) => literal_format(l),
+        _          => None,
+    })
+}
+
+literal_format = (l: Literal) Res<str> {
+    l.kind.match({
+        Str => Ok(l.text),
+        _   => None,
+    })
+}
+
+// Every value argument from `from` on, in order, with nothing between
+// them.
+write_values = (be :: CBackend, c: Call, from: usize, ctx: Ctx)
+               Res<(), AllocError> {
+    Range(from, c.args.len).loop((h, i) {
+        write_value_at(be, c, i, ctx).try();
+    });
+    Ok(());
+}
+
+write_value_at = (be :: CBackend, c: Call, i: usize, ctx: Ctx)
+                 Res<(), AllocError> {
+    c.args.get(i).match({
+        None  => Ok(()),
+        Ok(a) => write_value(be, a.value, ctx),
+    })
+}
+
+// -----------------------------------------------------------------
+// the format
+//
+// The literal's RAW slice is walked, never a decoded copy: Zen's escape
+// set is `\n \t \r \0 \\ \' \"` and every one of those is a C escape
+// with the same meaning, so a piece travels into the emitted C unchanged
+// and only its LENGTH has to be counted. That is the decision
+// `lower_str_literal` makes, for the same reason — and it is why a `\\`
+// is stepped over two bytes at a time here: a backslash that escapes a
+// brace must not open a hole.
+// -----------------------------------------------------------------
+
+write_format = (be :: CBackend, c: Call, raw: str, ctx: Ctx)
+               Res<(), AllocError> {
+    end = body_end(raw);
+    start ::= 1;
+    used ::= 1;
+    i ::= 1;
+    loop(() { i < end }, (h) {
+        hole = is_hole(raw, i, end);
+        hole.then(() {
+            write_piece(be, raw, start, i).try();
+            write_hole(be, c, used, ctx).try();
+            used = used + 1;
+            start = i + 2;
+        });
+        i = i + advance(raw, i, hole);
+    });
+    write_piece(be, raw, start, end).try();
+    write_values(be, c, used, ctx).try();
+    Ok(());
+}
+
+// The index one past the last byte of a literal's body: its raw slice
+// without the closing quote.
+body_end* = (raw: str) usize {
+    (raw.len > 1).match({ true => raw.len - 1, false => 1 })
+}
+
+is_hole = (raw: str, i: usize, end: usize) bool {
+    (i + 1 < end) && raw.index(i) == '{' && raw.index(i + 1) == '}'
+}
+
+advance = (raw: str, i: usize, hole: bool) usize {
+    hole.match({ true => 2, false => step_of(raw, i) })
+}
+
+step_of = (raw: str, i: usize) usize {
+    (raw.index(i) == '\\').match({ true => 2, false => 1 })
+}
+
+// A hole with no argument left prints itself, which is what the
+// bootstrapper does and what makes a stray `{}` visible rather than
+// silently swallowed.
+write_hole = (be :: CBackend, c: Call, used: usize, ctx: Ctx)
+             Res<(), AllocError> {
+    c.args.get(used).match({
+        None  => be.writeln("zg_print_bytes(\"{}\", 2);"),
+        Ok(a) => write_value(be, a.value, ctx),
+    })
+}
+
+// One literal chunk, and nothing at all when the chunk is empty —
+// `println("{}", x)` emits one write and not three.
+write_piece = (be :: CBackend, raw: str, start: usize, stop: usize)
+              Res<(), AllocError> {
+    (stop > start).match({
+        false => Ok(()),
+        true  => write_chunk(be, raw.slice(start, stop)),
+    })
+}
+
+write_chunk = (be :: CBackend, piece: str) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes("zg_print_bytes(\"").try();
+    line.add_bytes(piece).try();
+    line.add_bytes("\", ").try();
+    write_usize(line, decoded_bytes(piece)).try();
+    line.add_bytes("u);").try();
+    be.writeln(line.view())
+}
+
+// How many bytes a raw piece denotes: each escape counts once.
+decoded_bytes* = (piece: str) usize {
+    n ::= 0;
+    i ::= 0;
+    loop(() { i < piece.len }, (h) {
+        n = n + 1;
+        i = i + step_of(piece, i);
+    });
+    n
+}
+
+// -----------------------------------------------------------------
+// one value
+//
+// The write a `{}` becomes is chosen by the ARGUMENT'S TYPE and by
+// nothing else: DESIGN.md's `{}` carries no format spec, so there is
+// nothing else to read.
+// -----------------------------------------------------------------
+
+write_value = (be :: CBackend, arg: ExprId, ctx: Ctx) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    ty = ty_of(be, arg, ctx, unknown).try();
+    prim = be.check.prim_name(ty);
+    text ::= be.alloc.String().try();
+    expr(be, arg, ctx, ty, text).try();
+    write_typed(be, arg, prim, text.view())
+}
+
+write_typed = (be :: CBackend, arg: ExprId, prim: str, text: str)
+              Res<(), AllocError> {
+    fn = printer(prim);
+    fn.is_empty().match({
+        true  => print_fault(be, arg),
+        false => write_write(be, fn, cast_of(prim), text),
+    })
+}
+
+// The runtime helper a primitive prints through. Empty means this
+// backend has no write for the type, which is a diagnostic rather than a
+// guess: a `Display` prints through its own `toString`, and that is a
+// call this backend cannot make yet.
+printer* = (prim: str) str {
+    prim.eq("str").match({
+        true  => "zg_print_str",
+        false => scalar_printer(prim),
+    })
+}
+
+scalar_printer = (prim: str) str {
+    prim.eq("bool").match({
+        true  => "zg_print_bool",
+        false => number_printer(prim),
+    })
+}
+
+number_printer = (prim: str) str {
+    is_float(prim).match({
+        true  => "zg_print_f64",
+        false => integer_printer(prim),
+    })
+}
+
+integer_printer = (prim: str) str {
+    is_c_integer(prim).match({
+        false => "",
+        true  => signed_printer(prim),
+    })
+}
+
+signed_printer = (prim: str) str {
+    is_signed(prim).match({ true => "zg_print_i64", false => "zg_print_u64" })
+}
+
+is_float* = (prim: str) bool { prim.eq("f32") || prim.eq("f64") }
+
+// The C cast an argument takes on the way in. A `str` and a `bool` are
+// already the parameter's type and take none.
+cast_of* = (prim: str) str {
+    prim.eq("str").match({
+        true  => "",
+        false => scalar_cast(prim),
+    })
+}
+
+scalar_cast = (prim: str) str {
+    prim.eq("bool").match({
+        true  => "",
+        false => number_cast(prim),
+    })
+}
+
+number_cast = (prim: str) str {
+    is_float(prim).match({
+        true  => "(double)",
+        false => integer_cast(prim),
+    })
+}
+
+integer_cast = (prim: str) str {
+    is_signed(prim).match({ true => "(int64_t)", false => "(uint64_t)" })
+}
+
+write_write = (be :: CBackend, fn: str, cast: str, text: str)
+              Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes(fn).try();
+    line.add_bytes("(").try();
+    line.add_bytes(cast).try();
+    line.add_bytes("(").try();
+    line.add_bytes(text).try();
+    line.add_bytes("));").try();
+    be.writeln(line.view())
+}
+
+// A value with no write. Reported at the ARGUMENT rather than at the
+// call: the call is fine and one of its arguments is not.
+print_fault = (be :: CBackend, arg: ExprId) Res<(), AllocError> {
+    be.report_expr(arg, GenFault.Unsupported("printing a value of this type"))
+}

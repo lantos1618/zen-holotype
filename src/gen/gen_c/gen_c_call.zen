@@ -26,7 +26,7 @@
 // The moment sema types a call the fallback stops firing.
 
 Ast, Expr, ExprKind, ExprId, BlockId, Block, Stmt, StmtKind, Bind = ast
-Decl, DeclKind, Struct, Member, MemberKind = ast
+Decl, DeclKind, Struct, Member, MemberKind, Function = ast
 Literal, LiteralKind, BinOp, UnOp, Binary, Unary, Match, Arm = ast
 Pattern, PatternKind, Access, Call, Arg, Span, Ident = ast
 Param, TypeId = ast
@@ -51,6 +51,8 @@ is_c_integer, is_signed, variant_type, decl_ctx = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
 field_type, request_type = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
+is_print, lower_print = gen.gen_c.gen_c_print
+lower_dot_call = gen.gen_c.gen_c_member
 
 // -----------------------------------------------------------------
 // `Res` values
@@ -109,20 +111,88 @@ write_payload_init = (be :: CBackend, variant: str, value: ExprId,
     Ok(());
 }
 
+// THE THREE CALLEE FORMS. A bare name is a function or a type; a dot is
+// `gen_c_member.zen`'s subject and the three readings DESIGN.md gives
+// it; anything else is a value that happens to be callable, and the
+// general form is to lower the callee and call through it.
 lower_call* = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx, want: TyId,
               out :: String) Res<(), AllocError> {
     be.tree.expr_at(c.callee).kind.match({
-        Name(n) => lower_named_call(be, id, c, n.text, ctx, want, out),
-        _       => unsupported(be, id, "a call through something not a name", out),
+        Name(n)   => lower_named_call(be, id, c, n.text, ctx, want, out),
+        Access(a) => lower_dot_call(be, id, c, a, ctx, want, out),
+        _         => lower_indirect(be, id, c, ctx, out),
     })
+}
+
+// A callee that is neither a name nor a dot: lower the expression, then
+// call through it. The callee's type is what says how many arguments it
+// takes and what they are, so a callee sema could not type is REPORTED
+// rather than called with a guess at its signature.
+lower_indirect = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx,
+                  out :: String) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    fty = ty_of(be, c.callee, ctx, unknown).try();
+    be.check.types.at(fty).match({
+        Fn(f) => write_indirect(be, c, f.params, ctx, out),
+        _     => unsupported(be, id, "a call through a value that is not a function", out),
+    })
+}
+
+write_indirect = (be :: CBackend, c: Call, params: Vec<TyId>, ctx: Ctx,
+                  out :: String) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    out.add_bytes("(").try();
+    expr(be, c.callee, ctx, unknown, out).try();
+    out.add_bytes(")(").try();
+    c.args.loop((h, i, a) {
+        (i > 0).then(() { out.add_bytes(", ").try() });
+        write_indirect_arg(be, a, i, params, ctx, out).try();
+    });
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+// A callee that is a VALUE has a `TyFn` and no `Param` list, so there is
+// no `::` to read: a function type carries types and not binding
+// markers. Everything goes by value, which is what a `TyFn` means.
+write_indirect_arg = (be :: CBackend, a: Arg, i: usize, params: Vec<TyId>,
+                      ctx: Ctx, out :: String) Res<(), AllocError> {
+    want = params.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
+    expr(be, a.value, ctx, want, out)
 }
 
 lower_named_call = (be :: CBackend, id: ExprId, c: Call, name: str, ctx: Ctx,
                     want: TyId, out :: String) Res<(), AllocError> {
     is_res_ctor(name).match({
         true  => lower_res_ctor(be, id, c, name, ctx, want, out),
-        false => lower_plain_call(be, id, c, name, ctx, out),
+        false => lower_sugar_or_plain(be, id, c, name, ctx, out),
     })
+}
+
+// `println` is checked BEFORE resolution and only when nothing declares
+// it: DESIGN.md's sugar names no function, so there is nothing for the
+// walk to find, but a module that does declare `println` means its own.
+// `gen_c_print.zen` says why the `Env`-in-scope half of the law is not
+// enforced here.
+lower_sugar_or_plain = (be :: CBackend, id: ExprId, c: Call, name: str,
+                        ctx: Ctx, out :: String) Res<(), AllocError> {
+    is_sugar(be, name, ctx).try().match({
+        true  => lower_print(be, c, name, ctx, out),
+        false => lower_plain_call(be, id, c, name, None, ctx, out),
+    })
+}
+
+is_sugar = (be :: CBackend, name: str, ctx: Ctx) Res<bool, AllocError> {
+    is_print(name).match({
+        false => Ok(false),
+        true  => undeclared(be, name, ctx),
+    })
+}
+
+undeclared = (be :: CBackend, name: str, ctx: Ctx) Res<bool, AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.defs_of(ctx.module, name, found).try();
+    Ok(found.len == 0);
 }
 
 is_res_ctor* = (name: str) bool { name.eq("Ok") || name.eq("Err") }
@@ -144,23 +214,29 @@ lower_res_arg = (be :: CBackend, id: ExprId, c: Call, name: str, r: TyRes,
     })
 }
 
-lower_plain_call = (be :: CBackend, id: ExprId, c: Call, name: str, ctx: Ctx,
-                    out :: String) Res<(), AllocError> {
+// `recv` is the receiver a UFCS call reached this name through — "a free
+// function whose first param is the type is callable as a method", so
+// the receiver is argument zero and there is no second mechanism.
+// `None` is the ordinary `f(a)`.
+lower_plain_call* = (be :: CBackend, id: ExprId, c: Call, name: str,
+                     recv: Res<ExprId>, ctx: Ctx, out :: String)
+                    Res<(), AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, name, found).try();
     found.len.match({
         0 => unresolved(be, id, name, out),
-        1 => call_def(be, id, c, name, found, ctx, out),
+        1 => call_def(be, id, c, name, found, recv, ctx, out),
         _ => ambiguous(be, id, name, out),
     })
 }
 
 
 call_def = (be :: CBackend, id: ExprId, c: Call, name: str, found: Vec<Def>,
-            ctx: Ctx, out :: String) Res<(), AllocError> {
+            recv: Res<ExprId>, ctx: Ctx, out :: String)
+           Res<(), AllocError> {
     found.get(0).match({
         None  => unresolved(be, id, name, out),
-        Ok(d) => call_kind(be, id, c, d, ctx, out),
+        Ok(d) => call_kind(be, id, c, d, recv, ctx, out),
     })
 }
 
@@ -168,10 +244,10 @@ call_def = (be :: CBackend, id: ExprId, c: Call, name: str, found: Vec<Def>,
 // depends on what the callee names — a struct is constructed, a
 // function is called — and that is a question about the declaration,
 // not about the call.
-call_kind = (be :: CBackend, id: ExprId, c: Call, d: Def, ctx: Ctx,
-             out :: String) Res<(), AllocError> {
+call_kind = (be :: CBackend, id: ExprId, c: Call, d: Def, recv: Res<ExprId>,
+             ctx: Ctx, out :: String) Res<(), AllocError> {
     d.kind.match({
-        FunctionDef => call_resolved(be, id, c, d, ctx, out),
+        FunctionDef => call_resolved(be, id, c, d, recv, ctx, out),
         StructDef   => construct(be, id, c, d, ctx, out),
         _           => unsupported(be, id, "a call to something that is not a function", out),
     })
@@ -318,36 +394,93 @@ named_field = (be :: CBackend, m: Member, dctx: Ctx) TyId {
 // what makes two overloads of a name two symbols. The declaration is
 // read back out of the AST because sema does not yet answer "what is
 // this function's type" — the seam closes when it does.
-call_resolved = (be :: CBackend, id: ExprId, c: Call, d: Def, ctx: Ctx,
-                 out :: String) Res<(), AllocError> {
+call_resolved = (be :: CBackend, id: ExprId, c: Call, d: Def,
+                 recv: Res<ExprId>, ctx: Ctx, out :: String)
+                Res<(), AllocError> {
+    decl_at(be.tree, d.id).match({
+        None  => unsupported(be, id, "a call to something that is not a plain function", out),
+        Ok(x) => call_decl(be, id, c, d, x, recv, ctx, out),
+    })
+}
+
+call_decl = (be :: CBackend, id: ExprId, c: Call, d: Def, x: Decl,
+             recv: Res<ExprId>, ctx: Ctx, out :: String)
+            Res<(), AllocError> {
+    x.kind.match({
+        Function(f) => call_fn(be, id, c, d, f, recv, ctx, out),
+        _           => unsupported(be, id, "a call to something that is not a plain function", out),
+    })
+}
+
+call_fn = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
+           recv: Res<ExprId>, ctx: Ctx, out :: String) Res<(), AllocError> {
     sig ::= be.alloc.Vec<TyId>();
     ok = signature_of(be, d, sig).try();
     ok.match({
-        false => unsupported(be, id, "a call to something that is not a plain function", out),
-        true  => write_call(be, c, d, sig, ctx, out),
+        false => unsupported(be, id, plain_fault(be, d), out),
+        true  => call_reachable(be, c, d, f, sig, recv, ctx, out),
+    })
+}
+
+// THE WALK IS REACHABILITY-DRIVEN and this is the edge it follows: a
+// call that resolves queues the function it resolved to. Without it a
+// translation unit holds one module's declarations and calls symbols
+// nothing defines, which `cc` catches and a compiler should not have
+// emitted.
+call_reachable = (be :: CBackend, c: Call, d: Def, f: Function,
+                  sig: Vec<TyId>, recv: Res<ExprId>, ctx: Ctx,
+                  out :: String) Res<(), AllocError> {
+    be.need_function(d).try();
+    write_call(be, c, d, f, sig, recv, ctx, out)
+}
+
+// Which of the three things a callee can be that this backend does not
+// lower. Named apart rather than collapsed into one message, because a
+// generic function and a `::` parameter need different work.
+plain_fault = (be :: CBackend, d: Def) str {
+    decl_at(be.tree, d.id).match({
+        None  => "a call to something that is not a plain function",
+        Ok(x) => decl_fault(x),
+    })
+}
+
+decl_fault = (x: Decl) str {
+    x.kind.match({
+        Function(f) => fn_fault(f),
+        _           => "a call to something that is not a plain function",
+    })
+}
+
+fn_fault = (f: Function) str {
+    (f.tparams.len > 0).match({
+        true  => "a generic function",
+        false => "a call to something that is not a plain function",
     })
 }
 
 // The declared parameter types of a function, in order. `false` when
 // the declaration is not a plain non-generic function.
+//
 signature_of* = (be :: CBackend, d: Def, sig :: Vec<TyId>)
                 Res<bool, AllocError> {
     decl_at(be.tree, d.id).match({
         None  => Ok(false),
         Ok(x) => x.kind.match({
-            Function(f) => params_into(be, d, f.params, f.tparams.len, sig),
+            Function(f) => params_into(be, d, f, sig),
             _           => Ok(false),
         }),
     })
 }
 
-params_into = (be :: CBackend, d: Def, params: Vec<Param>, ntparams: usize,
-               sig :: Vec<TyId>) Res<bool, AllocError> {
-    (ntparams > 0).match({
-        true  => Ok(false),
-        false => collect_params(be, d, params, sig),
+params_into = (be :: CBackend, d: Def, f: Function, sig :: Vec<TyId>)
+              Res<bool, AllocError> {
+    plain(f).match({
+        false => Ok(false),
+        true  => collect_params(be, d, f.params, sig),
     })
 }
+
+plain* = (f: Function) bool { f.tparams.len == 0 }
 
 collect_params = (be :: CBackend, d: Def, params: Vec<Param>,
                   sig :: Vec<TyId>) Res<bool, AllocError> {
@@ -367,20 +500,62 @@ add_param = (be :: CBackend, t: TypeId, ctx: Ctx, sig :: Vec<TyId>)
     sig.add(be.check.type_from_ast(t, ctx).try())
 }
 
-write_call = (be :: CBackend, c: Call, d: Def, sig: Vec<TyId>, ctx: Ctx,
-              out :: String) Res<(), AllocError> {
+write_call = (be :: CBackend, c: Call, d: Def, f: Function, sig: Vec<TyId>,
+              recv: Res<ExprId>, ctx: Ctx, out :: String)
+             Res<(), AllocError> {
     sym_fn(out, be.check.types, be.check.world, d.qname, sig).try();
     out.add_bytes("(").try();
+    first = write_receiver(be, recv, f, sig, ctx, out).try();
     c.args.loop((h, i, a) {
-        (i > 0).then(() { out.add_bytes(", ").try() });
-        write_arg(be, a, i, sig, ctx, out).try();
+        (i + first > 0).then(() { out.add_bytes(", ").try() });
+        write_arg(be, a.value, i + first, f, sig, ctx, out).try();
     });
     out.add_bytes(")").try();
     Ok(());
 }
 
-write_arg = (be :: CBackend, a: Arg, i: usize, sig: Vec<TyId>, ctx: Ctx,
-             out :: String) Res<(), AllocError> {
+// The receiver a ufcs call arrived through, as argument zero. The answer
+// is how many arguments were written, which is what shifts the rest of
+// them one place along their own signature.
+write_receiver = (be :: CBackend, recv: Res<ExprId>, f: Function,
+                  sig: Vec<TyId>, ctx: Ctx, out :: String)
+                 Res<usize, AllocError> {
+    recv.match({
+        None     => Ok(0),
+        Ok(base) => write_recv_expr(be, base, f, sig, ctx, out),
+    })
+}
+
+write_recv_expr = (be :: CBackend, base: ExprId, f: Function,
+                   sig: Vec<TyId>, ctx: Ctx, out :: String)
+                  Res<usize, AllocError> {
+    write_arg(be, base, 0, f, sig, ctx, out).try();
+    Ok(1);
+}
+
+// An argument to a `::` parameter is passed BY ADDRESS. Zen's `::` on a
+// parameter is "the ordinary binding marker doing its ordinary job", and
+// what it says is that the callee writes the caller's own bytes — so
+// there has to be an address to write through. Every such argument is a
+// binding or a place, which is exactly what C's `&` takes.
+write_arg* = (be :: CBackend, value: ExprId, i: usize, f: Function,
+              sig: Vec<TyId>, ctx: Ctx, out :: String)
+             Res<(), AllocError> {
     want = sig.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
-    expr(be, a.value, ctx, want, out)
+    by_ref(f, i).match({
+        false => expr(be, value, ctx, want, out),
+        true  => write_address(be, value, ctx, want, out),
+    })
+}
+
+by_ref* = (f: Function, i: usize) bool {
+    f.params.get(i).match({ Ok(p) => p.mutable, None => false })
+}
+
+write_address = (be :: CBackend, value: ExprId, ctx: Ctx, want: TyId,
+                 out :: String) Res<(), AllocError> {
+    out.add_bytes("&(").try();
+    expr(be, value, ctx, want, out).try();
+    out.add_bytes(")").try();
+    Ok(());
 }

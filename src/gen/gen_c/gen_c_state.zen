@@ -40,6 +40,7 @@ str, String = std.text
 Alloc, AllocError = std.mem
 Vec = std.collections
 Range = std.core
+DeclId = sema.sema_id
 TyId, Types = sema.sema_ty
 World, Def = sema.sema_def
 Checker, Ctx = sema.sema_check
@@ -52,6 +53,27 @@ LocalSlot* = {
     name*: str,
     index*: usize,
     ty*: TyId,
+
+    // Is the C name a POINTER to the value rather than the value?
+    // "`::` means the method writes the receiver's OWN BYTES", so a
+    // `::` parameter is passed by address and every read of it goes
+    // through a dereference. A `::=` LOCAL is not by reference: it is
+    // the frame's own storage and there is nothing to alias.
+    by_ref*: bool,
+}
+
+// One member function reached through a dot, and the receiver it was
+// reached at.
+//
+// A `Def` cannot carry it: a member is not a top-level declaration and
+// `World` never mints one for it. So the identity is written out —
+// `qname` is the TYPE's qualified name plus the member's, which is what
+// makes two types' `get` two symbols without a counter.
+MethodRef* = {
+    self_ty*: TyId,
+    decl*: DeclId,   // the declaration that owns the member
+    name*: str,
+    qname*: str,
 }
 
 CBackend* = {
@@ -76,6 +98,11 @@ CBackend* = {
     // the integer types a checked `+ - * / %` was emitted for
     helper_types* :: Vec<String>,
 
+    // did anything reach `println`? The print floor is emitted only for
+    // a program that prints, exactly as the checked-arithmetic families
+    // are emitted only for the types a program computes on.
+    print_used :: bool,
+
     // the functions to lower, and the ones already lowered.
     //
     // REACHABILITY, NOT THE WHOLE TREE. A compilation stages the whole
@@ -86,6 +113,10 @@ CBackend* = {
     // resolve — which is also what "compilation is whole-program" means
     // in practice: one merged graph, walked from a root.
     fn_queue* :: Vec<Def>,
+    // the member functions reached through a dot. A second queue and
+    // not a second kind of `Def`: a member has no top-level declaration
+    // to mint one from, and `World` is the wrong place to teach that.
+    m_queue* :: Vec<MethodRef>,
     fn_seen :: Vec<String>,
     fn_names* :: Vec<String>,
     fn_protos* :: Vec<String>,
@@ -205,6 +236,14 @@ CBackend* = {
     }
 
     // -----------------------------------------------------------------
+    // the print floor
+    // -----------------------------------------------------------------
+
+    need_print* = (self :: @Self) () { self.print_used = true; }
+
+    uses_print* = (self: @Self) bool { self.print_used }
+
+    // -----------------------------------------------------------------
     // writing a body
     //
     // The buffer is NOT an exported field: `*` on a field means
@@ -256,6 +295,25 @@ CBackend* = {
         }).match({ Ok(_) => true, None => false })
     }
 
+    // Queue a member function for lowering, once. The same `fn_seen`
+    // set as a free function's, because the same rule applies and the
+    // two name spaces cannot collide: a method's qualified name has a
+    // TYPE where a function's has a module.
+    need_method* = (self :: @Self, m: MethodRef) Res<(), AllocError> {
+        self.seen_function(m.qname).match({
+            false => self.push_method(m),
+            true  => Ok(()),
+        })
+    }
+
+    push_method = (self :: @Self, m: MethodRef) Res<(), AllocError> {
+        owned ::= self.alloc.String().try();
+        owned.add_bytes(m.qname).try();
+        self.fn_seen.add(owned).try();
+        self.m_queue.add(m).try();
+        Ok(());
+    }
+
     push_function = (self :: @Self, d: Def) Res<(), AllocError> {
         owned ::= self.alloc.String().try();
         owned.add_bytes(d.qname).try();
@@ -299,12 +357,14 @@ CBackend* = {
     // makes the number unique inside the function: two sibling blocks
     // each binding `x` get 1 and 2, and neither can collide with the
     // other's C declaration.
-    declare* = (self :: @Self, name: str, ty: TyId) Res<usize, AllocError> {
+    declare* = (self :: @Self, name: str, ty: TyId, by_ref: bool)
+               Res<usize, AllocError> {
         n = self.declared_count(name) + 1;
         owned ::= self.alloc.String().try();
         owned.add_bytes(name).try();
         self.declared.add(owned).try();
-        self.locals.add(LocalSlot(name: name, index: n, ty: ty)).try();
+        self.locals.add(LocalSlot(name: name, index: n, ty: ty,
+                                  by_ref: by_ref)).try();
         Ok(n);
     }
 
@@ -363,7 +423,9 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         type_ids: a.Vec<TyId>(),
         type_done: a.Vec<usize>(),
         helper_types: a.Vec<String>(),
+        print_used: false,
         fn_queue: a.Vec<Def>(),
+        m_queue: a.Vec<MethodRef>(),
         fn_seen: a.Vec<String>(),
         fn_names: a.Vec<String>(),
         fn_protos: a.Vec<String>(),
