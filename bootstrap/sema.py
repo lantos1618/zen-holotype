@@ -3723,12 +3723,69 @@ class Sema:
         self._keep.append(fd.node)
         acc = []
         try:
+            self._prime(fd)
             self._walk_errors(fd.body, fd, acc)
         except RecursionError:
             pass
         out = union_ty(acc)
         self._errset_state[key] = out
         return out
+
+    def _prime(self, fd):
+        """Type the body once with the error position left OPEN, so every node
+        carries a recorded type before the sets are collected.
+
+        Without this, "what can this `.try()` raise" has to be answered from
+        the shape of the call -- and a guess by method name says `AllocError`
+        for `String.add`, which fails on the sink and raises `IoError`.  The
+        set is the union of what the body can raise, so it is read off the
+        body, not inferred from its spelling.
+
+        Open, not final: the run below is the least-fixed-point's first
+        iteration, so `.try()` has nothing to check against yet and every
+        diagnostic it could raise would be about a program the real check has
+        not looked at.  They are dropped; the real check reports.
+        """
+        if fd.body is None or fd.tparams:
+            return
+        n = len(self.diags)
+        try:
+            base = self._fn_ctx(fd, {}, None)
+            ret = self.resolve_type(fd.ret, base) if fd.ret is not None else UNIT
+            payload = ret.args[0] if (ret.kind == "res" and ret.args) else ANY
+            ctx = Ctx(base.mod, Scope(), fd, res_ty(payload, ANY), base.subst,
+                      base.bounds, base.frame, quiet=True)
+            for p in fd.params:
+                nm = _name_of(_g(p, "name"))
+                if not nm:
+                    continue
+                ctx.scope.put(nm, Sym("value", self.resolve_type(_g(p, "ty", "type"), ctx),
+                                      mutable=bool(_g(p, "mutable", default=False))))
+            self.check_block(fd.body, ctx, expect=ctx.ret, is_fn_body=True)
+        except RecursionError:
+            pass
+        except Exception:  # never raise: a body that will not type is not the run
+            pass
+        finally:
+            del self.diags[n:]
+
+    def error_set_ast(self, node):
+        """The inferred set of a `Res<T, _>` function, as an ast Type node.
+
+        gen_c's question, and the only one it can ask: `_` is an `Infer` node
+        and `resolve_type` has nothing to resolve it to, so the set has to
+        arrive already spelled in the ast's own vocabulary. `None` when the
+        node is not a function this pass knows, or when the set is empty — a
+        body that cannot fail has nothing to write in the error position, and
+        inventing a type there would be inventing a reason.
+        """
+        fd = self.by_node.get(id(node))
+        if not isinstance(fd, FnDef):
+            return None
+        ty = self.error_set_of(fd)
+        if ty is None or ty == NEVER:
+            return None
+        return self.as_ast_type(ty, _span(fd.ret) or fd.span)
 
     def _walk_errors(self, node, fd, acc):
         if node is None:
@@ -3751,10 +3808,19 @@ class Sema:
             self._walk_errors(child, fd, acc)
 
     def _error_of_expr(self, expr, fd):
-        """The E of whatever this expression produces, cheaply: enough for
-        inference, without dragging the whole type checker into a cycle."""
+        """The E of whatever this expression produces.
+
+        What `_prime` recorded, when it recorded anything; the shape-based
+        fallbacks below are for a generic body, which is not primed, and for
+        an expression the first iteration could not type.
+        """
         if expr is None:
             return None
+        got = self.node_type.get(id(expr))
+        if got is not None:
+            got = settle(got)
+            if got.kind == "res" and len(got.args) == 2 and got.args[1] != ANY:
+                return got.args[1]
         k = _k(expr)
         if k == "Call":
             callee = _g(expr, "callee", "function")
@@ -3764,6 +3830,13 @@ class Sema:
                     return self._declared_error(cand)
             elif _k(callee) == "Member":
                 nm = _name_of(_g(callee, "name", "property")) or _g(callee, "name", "property")
+                if nm == "ok_or":
+                    # "you name the reason": `ok_or(reason: E) Res<T, E>`, so
+                    # the argument IS the set.  Not a guess -- DESIGN.md makes
+                    # this the required form for turning a None into an Err.
+                    args = _tup(_g(expr, "args", "arguments"))
+                    if args:
+                        return self._static_type(self._arg_value(args[0]), fd)
                 if nm in ("add", "set", "String", "create", "raw", "realloc"):
                     return self.builtin_named("AllocError")
                 for cand in self.lookup_fns(fd.mod, nm):

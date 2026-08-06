@@ -723,6 +723,9 @@ class Emitter:
         self.done = set()
         self.instances = 0
         self.expanding = []  # constants being inlined, to catch a self-reference
+        self._drops = {}   # type parts -> the Drop impl's `drop`, or None
+        self._consumed = None  # names moved with `consume`, program-wide
+        self._rets = {}    # id(fn node) -> its return type with `_` filled in
         self.graph = program if getattr(program, "modules", None) and hasattr(
             program, "lookup"
         ) else None
@@ -1251,6 +1254,75 @@ class Emitter:
             return entry
         return None
 
+    # -- RAII ---------------------------------------------------------------
+
+    def drop_impl(self, ty):
+        """The `drop` a `T.impl(Drop, ..)` supplies for this type, or None.
+
+        Only a DIRECT impl counts.  Drop is not recursive here: `DESIGN.md`
+        gives `Vec.take` as the way a `Vec<T>` of Drop values is emptied --
+        "without this a Vec<T> of Drop values can be filled and never
+        emptied" -- which is only a sentence worth writing if the container
+        does not drop its elements for you.
+        """
+        if ty is None or ty[0] != "named":
+            return None
+        key = tuple(ty[1])
+        if key in self._drops:
+            return self._drops[key]
+        found = None
+        for d in self.decls.get((key, "drop"), []):
+            # `parts` is base + (target, trait, member): the trait component is
+            # what tells an impl of Drop from a type's own method named `drop`.
+            if d.dkind == "fn" and len(d.parts) >= 2 and d.parts[-2] == "Drop":
+                found = d
+                break
+        self._drops[key] = found
+        return found
+
+    def consumed_names(self):
+        """Every name written as `consume <name>` anywhere in the program.
+
+        Program-wide and not per-function on purpose: a body reaches gen_c
+        inlined into its caller's frame, so "was this binding moved" cannot be
+        asked of one function's source.  Over-approximating costs an unread
+        `int` on a frame; under-approximating costs a double free.
+        """
+        if self._consumed is None:
+            names = set()
+            for _base, mod in self.mods:
+                for node in zast.walk(mod) if zast is not None else ():
+                    if kind(node) == "Consume":
+                        operand = f(node, "operand")
+                        if operand is not None and kind(operand) == "Path":
+                            names.add(str(f(operand, "name", "")))
+            self._consumed = frozenset(names)
+        return self._consumed
+
+    def error_set_members(self, ty):
+        """The members of `Error = AllocError | IoError`, or None.
+
+        DESIGN.md draws the line at "a union of EXISTING types": that is what
+        makes the declaration a set rather than an ordinary enum, and it is
+        the only thing that makes propagating one set into another safe.
+        `CfgError = Missing | Bad` names no types and is not one.
+        """
+        info = self.enum_info(ty)
+        if info is None or not info[2]:
+            return None
+        names = [v for v, _p in info[2]]
+        outer = tuple(ty[1][:-1])
+        for name in names:
+            if self.type_decl(name, outer, 0) is None:
+                return None
+        return names
+
+    def drop_takes_address(self, decl):
+        """`drop = (self :: @Self)` is passed by address, as every `::`
+        receiver is; an impl that wrote `:` is passed by value."""
+        params = self.params_of(self.fn_node(decl.node))
+        return bool(params) and bool(f(params[0], "mutable", False))
+
     # -- building a fat value ----------------------------------------------
 
     def impl_entry(self, concrete, trait, name):
@@ -1478,9 +1550,39 @@ class Emitter:
         if fnode is None:
             return None
         if f(fnode, "ret") is not None:
-            return f(fnode, "ret")
+            return self.filled_ret(fnode, f(fnode, "ret"))
         ty = f(fnode, "ty")
-        return f(ty, "ret") if ty is not None else None
+        return self.filled_ret(fnode, f(ty, "ret") if ty is not None else None)
+
+    def filled_ret(self, fnode, node):
+        """`Res<T, _>` with the set sema inferred written in.
+
+        "Inference inside a module, explicit at the boundary" (law 6): the
+        boundary spelling is already a type, and this is the other half.  It
+        happens HERE, at the one funnel every caller reads a return type
+        through, so a caller and a callee can never disagree about what `_`
+        turned out to be.
+        """
+        if node is None or kind(node) != "Named" or str(f(node, "name", "")) != "Res":
+            return node
+        args = tuple(f(node, "args", ()) or ())
+        if len(args) != 2 or kind(args[1]) != "Infer":
+            return node
+        key = id(fnode)
+        if key in self._rets:
+            return self._rets[key]
+        filled = node
+        query = getattr(self.sema, "error_set_ast", None) if self.sema else None
+        if query is not None:
+            try:
+                got = query(fnode)
+            except Exception:  # pragma: no cover - a partial sema
+                got = None
+            if got is not None and zast is not None:
+                filled = zast.Named(str(f(node, "name", "")), (args[0], got),
+                                    span=getattr(node, "span", None))
+        self._rets[key] = filled
+        return filled
 
     def overload_sig(self, decl, subst):
         """Parameter types, but only for a name declared more than once.
@@ -1510,6 +1612,7 @@ class Emitter:
         self_ty = self_ty or self.self_type(decl, subst)
         ret = self.resolve_type(self.ret_of(fnode), subst, base, self_ty)
         ctx = FnCtx(self, decl, subst, ret, self_ty)
+        ctx.consumed = self.consumed_names()
 
         decls = []
         for p in params:
@@ -1774,9 +1877,16 @@ class FnCtx:
         self.counts = {}
         self.tmp = 0
         self.depth = 0
-        self.loops = []      # (break label, continue label, result temp, type)
+        self.loops = []      # (break, continue, result, type, acc, drop depth)
         self.inlining = 0    # inline depth, so a recursive body cannot spin
         self._bounds = None  # the bounds in scope, computed once on demand
+        # RAII.  One list per emitted C block, in DECLARATION order; scope exit
+        # walks it backwards.  This stack follows the emitted BRACES and not
+        # `self.scopes`, which `inline_lambda` rewinds to the frame a closure
+        # was written in -- a `.try()` inside an inlined body still has to
+        # unwind the block it is physically standing in.
+        self.dscopes = []
+        self.consumed = frozenset()  # names `consume`d anywhere in this body
 
     # -- output ------------------------------------------------------------
 
@@ -1824,6 +1934,73 @@ class FnCtx:
                 return scope[name]
         return None
 
+    # -- RAII --------------------------------------------------------------
+    #
+    # "the compiler calls drop when a BINDING leaves scope, reverse
+    # declaration order, exactly once."  So: only `let` bindings are tracked,
+    # never temporaries, never parameters (passing a Drop value to a parameter
+    # is a borrow), and never a match arm's payload binder, which names part
+    # of a value somebody else still owns.
+    #
+    # `consume` is the exactly-once half, and it is not a straight-line fact:
+    # a value may be moved on one path and not another.  A binding that is
+    # consumed ANYWHERE in the body therefore carries a live flag, cleared at
+    # the move and tested at every exit -- the same drop flag Rust uses, for
+    # the same reason.  A flag costs one `int` on the frame; getting this
+    # wrong statically costs a double free.
+
+    def track_drop(self, name, cname, ty):
+        """Register a binding for scope exit, if its type impls Drop."""
+        if not self.dscopes or self.e.drop_impl(ty) is None:
+            return
+        flag = None
+        if name in self.consumed:
+            flag = self.label("live")
+            self.line("int %s = 1;" % flag)
+        self.dscopes[-1].append((cname, ty, flag))
+
+    def kill_drop(self, node):
+        """`consume x` -- x is somebody else's now, so this frame must not
+        drop it."""
+        if kind(node) != "Path":
+            return
+        got = self.find(str(f(node, "name", "")))
+        if got is None:
+            return
+        for scope in self.dscopes:
+            for cname, _ty, flag in scope:
+                if cname == got[0] and flag is not None:
+                    self.line("%s = 0;" % flag)
+                    return
+
+    def emit_drop(self, cname, ty, flag):
+        decl = self.e.drop_impl(ty)
+        if decl is None:
+            return
+        fn = self.e.request_fn(decl, tuple(ty[2]))
+        arg = ("&" + cname) if self.e.drop_takes_address(decl) else cname
+        call = "%s(%s);" % (fn, arg)
+        self.line(("if (%s) { %s }" % (flag, call)) if flag else call)
+
+    def unwind(self, entries, keep=None):
+        """Drop one block's bindings, reverse declaration order.
+
+        `keep` is the block's value expression: a binding named in it is
+        being handed out of the block, so dropping it here would free what
+        the caller is about to read.  Leaving it undropped leaks; dropping it
+        is a use-after-free, and only one of those two is recoverable.
+        """
+        for cname, ty, flag in reversed(entries):
+            if keep and re.search(r"\b%s\b" % re.escape(cname), keep):
+                continue
+            self.emit_drop(cname, ty, flag)
+
+    def unwind_to(self, depth, keep=None):
+        """Every block from the innermost out to `depth`: what a non-local
+        exit -- `.try()`, `h.break()`, `h.next()` -- leaves behind."""
+        for entries in reversed(self.dscopes[depth:]):
+            self.unwind(entries, keep)
+
     # -- statements --------------------------------------------------------
 
     def block_value(self, block, want=None):
@@ -1832,6 +2009,13 @@ class FnCtx:
             return None
         if kind(block) != "Block":
             return self.expr(block)[0]
+        self.dscopes.append([])
+        try:
+            return self._block_body(block, want)
+        finally:
+            self.dscopes.pop()
+
+    def _block_body(self, block, want=None):
         stmts = list(f(block, "stmts", ()) or ())
         value = f(block, "value")
         if value is None and want not in (None, UNIT, UNKNOWN) and stmts:
@@ -1846,10 +2030,24 @@ class FnCtx:
                     stmts = stmts[:-1]
         for stmt in stmts:
             self.stmt(stmt)
+        entries = self.dscopes[-1]
         if value is None:
+            self.unwind(entries)
             return None
         code, ty = self.expr(value, want)
-        return self.coerce(code, ty, want)
+        code = self.coerce(code, ty, want)
+        if not entries:
+            return code
+        rty = want if want not in (None, UNKNOWN) else ty
+        if rty in (None, UNIT, UNKNOWN):
+            self.unwind(entries, code)
+            return code
+        # the block's value is read BEFORE its bindings die, so it is spilled
+        # to a temporary and the drops run against that
+        tmp = self.new_tmp(rty)
+        self.line("%s = %s;" % (tmp, code))
+        self.unwind(entries, code)
+        return tmp
 
     def coerce(self, code, ty, want):
         """Hoisting, and only in the direction DESIGN.md allows.
@@ -1950,6 +2148,7 @@ class FnCtx:
             self.e.error(node, "cannot infer a type for `%s`" % name)
         cname = self.declare(name, ty)
         self.line("%s = %s;" % (self.e.declarator(ty, cname), code))
+        self.track_drop(name, cname, ty)
 
     def expr_stmt(self, node):
         if node is None:
@@ -2323,9 +2522,12 @@ class FnCtx:
         return ("0", UNKNOWN)
 
     def ex_Consume(self, node, want=None):
-        # `consume` is a move; ownership is stage 3's checker, and the value
-        # itself is unchanged, so this is the operand.
-        return self.expr(f(node, "operand"), want)
+        # `consume` is a move: the bytes are unchanged, so the value IS the
+        # operand -- what changes is who drops it.  This frame no longer does.
+        operand = f(node, "operand")
+        got = self.expr(operand, want)
+        self.kill_drop(operand)
+        return got
 
     def ex_Binary(self, node, want=None):
         op = str(f(node, "op", ""))
@@ -2345,7 +2547,25 @@ class FnCtx:
             self.line("%s = %s;" % (tmp, rcode))
             self.close()
             return (tmp, prim("bool"))
-        hint = want if op in ARITH or op in WRAPPING else None
+        # `a + b + c + ..` is LEFT-nested, so one python frame per term turns a
+        # long line into a RecursionError -- and "a crash is not a diagnostic"
+        # (TESTING.md).  Raising the interpreter's limit only moves the number,
+        # so the spine is walked with a loop and folded outward.  The hint
+        # travels DOWN the spine exactly as it did through the recursion, and
+        # the operands are still evaluated left to right, so the emitted C is
+        # the same C.
+        spine = []
+        cur, hint = node, want
+        while True:
+            cop = str(f(cur, "op", ""))
+            hint = hint if cop in ARITH or cop in WRAPPING else None
+            spine.append((cur, cop, hint))
+            down = f(cur, "lhs")
+            if kind(down) != "Binary" or str(f(down, "op", "")) in ("=", "&&", "||"):
+                break
+            cur = down
+        base, _bop, hint = spine[-1]
+        lhs, rhs = f(base, "lhs"), f(base, "rhs")
         if not is_int(hint) and kind(lhs) == "Literal" and f(lhs, "kind") == "int":
             # "an unannotated literal has no width yet" -- so the other side
             # decides, and `0 - (v % 10)` on an i64 stays an i64 instead of
@@ -2353,8 +2573,28 @@ class FnCtx:
             other = self.peek(rhs)[1]
             if is_int(other):
                 hint = other
-        lcode, lty = self.expr(lhs, hint)
-        rcode, rty = self.expr(rhs, lty if is_int(lty) else None)
+        acc = self.expr(lhs, hint)
+        deep = self.depth + len(spine) - 1
+        for step, (cur, cop, _h) in enumerate(reversed(spine)):
+            lhs, rhs = f(cur, "lhs"), f(cur, "rhs")
+            lcode, lty = acc
+            rcode, rty = self.expr(rhs, lty if is_int(lty) else None)
+            acc = self.fold_binary(cur, cop, lhs, rhs, lcode, lty, rcode, rty)
+            acc = self.spill(acc, deep - step)
+        return acc
+
+    def spill(self, got, depth):
+        """`expr`'s rule, applied along a folded spine: past MAX_EXPR_DEPTH a
+        value lands in a temporary rather than in one more layer of C."""
+        code, ty = got
+        if depth > MAX_EXPR_DEPTH and ty not in (UNIT, UNKNOWN) \
+                and not code.isidentifier():
+            tmp = self.new_tmp(ty)
+            self.line("%s = %s;" % (tmp, code))
+            return (tmp, ty)
+        return got
+
+    def fold_binary(self, node, op, lhs, rhs, lcode, lty, rcode, rty):
         ty = lty if lty not in (None, UNKNOWN) else rty
         if op in COMPARE:
             if op in ("==", "!=") and ty is not None and ty[0] == "named":
@@ -3305,7 +3545,7 @@ class FnCtx:
         else:
             self.open("for (;;) {")
 
-        self.loops.append((brk, cnt, result, ret, acc))
+        self.loops.append((brk, cnt, result, ret, acc, len(self.dscopes)))
         handle = ("loop", len(self.loops))
         values = [(handle[0] and "0", handle)]
         if wants_index:
@@ -3824,11 +4064,15 @@ class FnCtx:
         if depth < 1 or depth > len(self.loops):
             self.e.error(node, "`%s` outside its loop" % name)
             return ("0", UNIT)
-        brk, cnt, result, ret, _acc = self.loops[depth - 1]
+        brk, cnt, result, ret, _acc, ddepth = self.loops[depth - 1]
         if name == "next":
+            # `h.next()` leaves this iteration's block, so this iteration's
+            # bindings die here rather than at the `}` the goto jumps over.
+            self.unwind_to(ddepth)
             self.line("goto %s;" % cnt)
             return ("0", UNIT)
         if name == "break":
+            code = None
             if argnodes and result is not None:
                 payload_ty = None
                 info = self.e.enum_info(ret) if ret is not None and ret[0] == "named" else None
@@ -3836,6 +4080,7 @@ class FnCtx:
                     payload_ty = dict(info[2]).get("Ok")
                 code, aty = self.expr(argnodes[0], payload_ty)
                 self.line("%s = %s;" % (result, self.ok_of(ret, code, node)))
+            self.unwind_to(ddepth, code)
             self.line("goto %s;" % brk)
             return ("0", UNIT)
         self.e.error(node, "LoopHandle has no `%s`" % name)
@@ -4283,6 +4528,10 @@ class FnCtx:
 
     def emit_propagate(self, node, tmp, ty, ok):
         """Rebuild this function's error variant from the operand's."""
+        # "every early exit is a scope exit."  `.try()` is the common one, and
+        # the error is carried in `tmp`, which is a temporary and never
+        # dropped -- so the whole frame can unwind before the return is built.
+        self.unwind_to(0)
         ret = self.ret
         rinfo = self.e.enum_info(ret) if ret is not None and ret[0] == "named" else None
         if rinfo is None:
@@ -4304,34 +4553,104 @@ class FnCtx:
             return
         src = "%s.%sdata.%s" % (tmp, GEN, sym_member(target))
         sty = dict(self.e.enum_info(ty)[2]).get(target)
-        if sty is not None and sty != pty and pty[0] == "named" and sty[0] == "named":
-            # Error sets merge: `WriteError = IoError | AllocError` is an enum
-            # whose variants are the member types, so propagating an
-            # AllocError into a WriteError selects the variant of that name.
-            # The error does not change identity -- there is no From here and
-            # no conversion invented, only the wider set naming the narrower.
+        got = self.widen_error(src, sty, pty)
+        if got is None:
+            # "There is no `From`, and no implicit error conversion."  The set
+            # this function declares does not contain what the operand raises,
+            # and inventing the conversion here would be the compiler deciding
+            # an error's identity.  Widen the declared set instead.
+            self.e.error(node, "no implicit error conversion: this error is not "
+                               "part of the set this function returns -- widen the "
+                               "declared set, there is no From")
+            got = "(%s){0}" % self.e.ctype(pty)
+        self.line("return %s;" % self.make_variant(ret, target, got))
+
+    # -- error sets ---------------------------------------------------------
+    #
+    # "The error type of a `Res` is a union, and propagation merges sets."
+    # Widening is the only move: every member of the operand's set has to be a
+    # member of this function's, and it keeps its own name on the way in.
+    # Nothing here converts, and nothing here invents a reason -- when a member
+    # has no home in the wider set the answer is None and the caller reports.
+
+    def widen_error(self, code, sty, pty):
+        if sty is None or pty is None or sty == pty \
+                or UNKNOWN in (sty, pty):
+            return code
+        if pty[0] == "union":
+            members = pty[1]
+            if sty in members:
+                return self.into_union(code, sty, pty)
+            if sty[0] == "union" and all(m in members for m in sty[1]):
+                return self.per_member(code, sty,
+                                       lambda m, v: self.into_union(v, m, pty))
+            return None
+        if pty[0] == "named":
             info = self.e.enum_info(pty)
-            member = sty[1][-1]
-            if info is not None and member in [v for v, _ in info[2]]:
-                inner = dict(info[2]).get(member)
-                wrapped = self.make_variant(pty, member, src if inner else None)
-                self.line("return %s;" % self.make_variant(ret, target, wrapped))
-                return
-        if pty[0] == "union" and sty is not None and sty != pty:
-            # error sets merge: wrap the operand's error into this function's
-            cname = self.e.ctype(pty)
-            wrapped = "((%s){ .%stag = %stag%s, .%sdata = { .%s = %s } })" % (
-                cname,
-                GEN,
-                GEN,
-                tcode(sty),
-                GEN,
-                GEN + "m" + tcode(sty),
-                src,
-            )
-            self.line("return %s;" % self.make_variant(ret, target, wrapped))
-            return
-        self.line("return %s;" % self.make_variant(ret, target, src))
+            if info is None:
+                return None
+            variants = dict(info[2])
+            if sty[0] == "named":
+                # `WriteError = IoError | AllocError` is an enum whose variants
+                # ARE the member types, so an AllocError selects the variant of
+                # that name.  Only the wider set naming the narrower.
+                name = sty[1][-1]
+                if name in variants:
+                    return self.make_variant(
+                        pty, name, code if variants[name] is not None else None)
+                return self.set_into_set(code, sty, pty, variants)
+            if sty[0] == "union" and all(
+                    m[0] == "named" and m[1][-1] in variants for m in sty[1]):
+                return self.per_member(
+                    code, sty,
+                    lambda m, v: self.make_variant(
+                        pty, m[1][-1],
+                        v if variants[m[1][-1]] is not None else None))
+        return None
+
+    def set_into_set(self, code, sty, pty, variants):
+        """One named set into a wider named set, member by member.
+
+        `WriteError = IoError | AllocError` and `Error = AllocError | IoError`
+        are two names for the same set, and an `IoError` arriving through
+        either is the same `IoError`: the merge renames nothing.  This is the
+        one-member case above, said for every member -- so it applies only to
+        a "union of existing types", never to an ordinary enum that happens to
+        share variant names, which is what `members` checks.
+        """
+        members = self.e.error_set_members(sty)
+        if members is None or any(v not in variants for v in members):
+            return None
+        info = self.e.enum_info(sty)
+        out = None
+        for vname, spay in reversed(info[2]):
+            if variants[vname] is not None and spay is None:
+                return None    # the wider set wants a payload this one lost
+            inner = None
+            if variants[vname] is not None:
+                inner = "%s.%sdata.%s" % (paren(code), GEN, sym_member(vname))
+            built = self.make_variant(pty, vname, inner)
+            out = built if out is None else "(%s.%stag == %s ? %s : %s)" % (
+                paren(code), GEN,
+                sym_variant(self.e.variant_parts(sty, vname)), built, out)
+        return out
+
+    def into_union(self, code, member, uty):
+        return "((%s){ .%stag = %stag%s, .%sdata = { .%s = %s } })" % (
+            self.e.ctype(uty), GEN, GEN, tcode(member), GEN,
+            GEN + "m" + tcode(member), code)
+
+    def per_member(self, code, sty, build):
+        """One arm per member of the source set, selected on its tag.  The
+        member order is the union's own, which `union_of` sorted, so this is a
+        pure function of the two types."""
+        out = None
+        for m in reversed(sty[1]):
+            built = build(m, "%s.%sdata.%s" % (paren(code), GEN,
+                                               GEN + "m" + tcode(m)))
+            out = built if out is None else "(%s.%stag == %stag%s ? %s : %s)" % (
+                paren(code), GEN, GEN, tcode(m), built, out)
+        return out
 
     def ex_Lambda(self, node, want=None):
         """A closure in value position.
