@@ -368,14 +368,31 @@ decl_head_ahead* = (p :: Parser, module_level: bool) bool {
     });
 }
 
+// A `*` here is the export marker ONLY if a binder follows it. It is
+// also multiplication, and reading it as the marker on sight made
+// `twice = (n: i32) i32 { n * 2 }` a declaration named `n` — the
+// commonest shape in the language, rejected. The star settles nothing
+// on its own; what settles it is the `=` that a declaration has and a
+// product does not.
 head_shape_ahead = (p :: Parser) bool {
     j = p.live_at(p.at + 1);
-    after = p.token_kind_at(j);
-    after.same(TokenKind.Star).match({
-        true  => true,
-        false => after.same(TokenKind.Lt).match({
-            true  => p.generic_head_ahead(j),
-            false => p.assign_head_ahead(after, j),
+    p.token_kind_at(j).same(TokenKind.Star).match({
+        true  => p.binder_ahead(p.live_at(j + 1), true),
+        false => p.binder_ahead(j, false),
+    });
+}
+
+// `<T>? = value`, the rest of a declaration's head. A STARRED name
+// needs no more than the binder, because a binding cannot be exported
+// and so there is no second reading to weigh; a bare name needs the
+// VALUE to declare as well, or `x = 3;` would be a declaration too.
+binder_ahead = (p :: Parser, j: usize, exported: bool) bool {
+    kind = p.token_kind_at(j);
+    kind.same(TokenKind.Lt).match({
+        true  => p.generic_head_ahead(j),
+        false => exported.match({
+            true  => p.assigns(kind),
+            false => p.assign_head_ahead(kind, j),
         }),
     });
 }

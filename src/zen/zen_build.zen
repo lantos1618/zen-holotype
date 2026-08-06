@@ -87,8 +87,19 @@ Job = zen.zen_cli
 // `docs/SEMA_BOOTSTRAP_FIXES.md` §13 is that bug with its reproducer.
 Unit* = {
     name*: str,     // the dotted module name: `std.core.result`
-    path*: str,     // where the bytes are, relative to nothing: as given
+    path*: str,     // where the bytes are, to open them: as given
+    rel*:  str,     // the same file, relative to the compilation ROOT
 }
+
+// `rel` exists because `path` must not reach a Span. Every diagnostic
+// and every emitted trap position carries its file, so an absolute path
+// puts the checkout's location into the OUTPUT — and two checkouts of
+// one tree then emit different bytes, which silently voids the fixpoint
+// oracle the whole plan rests on. TESTING.md states the rule: "every
+// path the compiler emits [is relative to the root], which is what makes
+// the determinism check comparing two copies of a tree at different
+// absolute paths meaningful."
+
 
 // One build. It holds the authority the phases need and the tally of
 // what went wrong, because the exit code is that tally and both
@@ -171,7 +182,7 @@ Build* = {
     // `std.core.core` are one module read once — see `Unit`.
     unit_at = (self: @Self, path: str) Res<Unit, AllocError> {
         name = module_name(self.alloc, self.root, path).try();
-        Ok(Unit(name: name, path: path));
+        Ok(Unit(name: name, path: path, rel: relative_to(self.root, path)));
     }
 
     // The whole program, breadth first from the entry. `seen` is both
@@ -246,7 +257,7 @@ Build* = {
     // and a hand-written parser's would be no better.
     lex_it = (self :: @Self, u: Unit, text: String, seen :: Vec<Unit>)
              Res<(), AllocError> {
-        lexed = scan(self.alloc, Source(file: u.path, text: text.view())).try();
+        lexed = scan(self.alloc, Source(file: u.rel, text: text.view())).try();
         lexed.is_clean().match({
             false => self.lex_faults(lexed),
             true  => self.parse_it(u, lexed, seen),
@@ -447,30 +458,35 @@ Build* = {
         Ok(());
     }
 
-    // WHERE THE BYTES GO, and the second thing standing between this
-    // file and a fixpoint. `-o <file>` cannot be honoured at all:
-    // `std.env.Fs` is `read`, `exists` and `is_dir`, and a compiler that
-    // emits C has to write one. `Console` is one `println` to stdout,
-    // so redirecting is not an answer either — the process cannot open
-    // the file its own argument names.
+    // WHERE THE BYTES GO. `-o <path>` writes the file; no `-o` sends the
+    // C to stdout, which is what `-o -` would mean anyway.
     //
-    // So the C goes to stdout, which is where `-o -` would send it
-    // anyway, and a `-o <path>` is a FAULT naming what is missing: a
-    // build asked for a file and did not produce one, and saying
-    // otherwise would be the exit code lying. `Fs.write*` in
-    // `src/std/env/env.zen` is one declaration and deletes this.
+    // This used to be a FAULT — `std.env.Fs` was `read`, `exists` and
+    // `is_dir`, so a compiler that emits C could not write one, and a
+    // build that was asked for a file and produced none had to say so
+    // rather than let the exit code lie. `Fs.write` closed it, exactly
+    // as the note here predicted it would.
+    //
+    // A write that fails is a fault and not a trap: the disk being full
+    // or the path being unwritable is a thing the caller acts on, and
+    // `scripts/fixpoint.sh` compares files that have to exist.
     deliver = (self :: @Self, job: Job, out: Emit) Res<(), AllocError> {
-        println("{}", out.view());
         job.out.is_empty().match({
-            true  => Ok(()),
-            false => self.no_write(job),
+            true  => { println("{}", out.view()); Ok(()) },
+            false => self.write_out(job, out),
         })
     }
 
-    no_write = (self :: @Self, job: Job) Res<(), AllocError> {
+    write_out = (self :: @Self, job: Job, out: Emit) Res<(), AllocError> {
+        self.env.fs.write(job.out, out.view()).match({
+            Ok(_)  => Ok(()),
+            Err(e) => self.write_failed(job, e),
+        })
+    }
+
+    write_failed = (self :: @Self, job: Job, e: FsError) Res<(), AllocError> {
         self.faults = self.faults + 1;
-        println("-o {}: std.env.Fs has read, exists and is_dir and no write, so the C went to stdout",
-                job.out);
+        println("-o {}: {}", job.out, fs_message(e));
         Ok(());
     }
 
@@ -541,6 +557,17 @@ module_name* = (a: Alloc, root: str, path: str) Res<str, AllocError> {
         out.add_byte(dot_for(inner.index(i))).try();
     });
     Ok(out.view());
+}
+
+// The same file, said relative to the compilation root: `module_name`
+// without the dots and without dropping the extension. One `+ 1` for
+// the separator, and a path that is not under the root comes back
+// unchanged rather than being sliced into nonsense.
+relative_to* = (root: str, path: str) str {
+    (path.len > root.len + 1).match({
+        true  => path.slice(root.len + 1, path.len),
+        false => path,
+    });
 }
 
 // `.zen`, and it is written here because `module_name` is the one place

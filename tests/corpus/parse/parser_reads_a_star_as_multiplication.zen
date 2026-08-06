@@ -1,0 +1,88 @@
+// tests/corpus/parse/parser_reads_a_star_as_multiplication.zen
+// `n * 2` is a product, not the head of an exported declaration.
+//
+// `*` is three things in this language: the export marker on a
+// declared name, the multiplication operator, and the first byte of
+// `*%`. The statement parser has to choose between the first two on
+// one token of lookahead, and it chose EXPORT unconditionally — so
+// `twice = (n: i32) i32 { n * 2 }` was read as a declaration named `n`
+// and rejected with "expected `=` or `::=` after a declaration's
+// name". The bootstrapper accepts that program, which makes it a
+// divergence between two implementations of one language rather than a
+// missing feature.
+//
+// IT IS DRIVEN THROUGH `src/parse` ON PURPOSE. A corpus program
+// compiled with `--toolchain bootstrap` exercises tree-sitter and
+// never stages this parser at all, so an ordinary program spelling
+// `n * 2` would have passed with the bug in place — a gate that cannot
+// fail. This one scans, builds a `Parser`, and reads `p.diags` itself,
+// exactly as `parser_reads_its_own_stdlib_shapes.zen` beside it does.
+//
+// ONE CAUSE, EVERY SHAPE BELOW. The choice is made in one function
+// (`lookahead.zen`'s `head_shape_ahead`), so this asserts the whole
+// family it governs at once: a trailing value, a `;`-terminated
+// statement, a `*%` in both, a name that is no parameter, an argument,
+// a match arm and an arm whose body is a block. `star_decl` is the
+// other side of the same fork — a genuine exported declaration nested
+// in a body — because a fix that reads `n * 2` correctly by forgetting
+// how to see `helper* = ..` has moved the bug rather than removed it.
+
+scan, Source = lex.lex
+Parser = parse.parser
+module = parse.parse_decl
+Ast = ast.ast_arena
+Decl, BinOp = ast.ast_node
+ExprId = ast.ast_id
+
+SOURCE: str = "base = 21\ndoubled = base * 2\nmul = (n: i32) i32 { n * 2 }\nwrap = (n: i32) i32 { n *% 2 }\nstmt = (n: i32) i32 { n * 2; 0 }\nstmt_wrap = (n: i32) i32 { n *% 2; 0 }\nlocal = () i32 { k = 3; k * 2 }\narg = (n: i32) i32 { mul(n * 2) }\narm = (n: i32) i32 { n.match({ _ => n * 2 }) }\narm_block = (n: i32) i32 { n.match({ _ => { n * 2 } }) }\nchain = (n: i32) i32 { n * 2 * 3 }\nstar_decl = (n: i32) i32 { helper* = (a: i32) i32 { a * 2 }\n    helper(n) }\n"
+
+op_name = (op: BinOp) str {
+    op.match({
+        Mul     => "mul",
+        MulWrap => "mulwrap",
+        _       => "other-op",
+    });
+}
+
+value_kind = (tree: Ast, v: Res<ExprId>) str {
+    v.match({
+        None   => "none",
+        Ok(id) => tree.expr_at(id).kind.match({
+            Binary(b)  => op_name(b.op),
+            Call(_)    => "call",
+            Match(_)   => "match",
+            Literal(_) => "literal",
+            Name(_)    => "name",
+            _          => "other",
+        }),
+    });
+}
+
+show = (tree: Ast, d: Decl) () {
+    d.kind.match({
+        Function(f) => f.body.match({
+            Ok(b) => println("  {} tail {} stmts {}",
+                f.name.text,
+                value_kind(tree, tree.block_at(b).value),
+                tree.block_at(b).stmts.len),
+            None  => println("  {} no body", f.name.text),
+        }),
+        Const(c)    => println("  {} const {}", c.name.text, value_kind(tree, Ok(c.value))),
+        _           => println("  other declaration"),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    lexed = scan(alloc, Source(file: "t.zen", text: SOURCE)).try();
+    p ::= alloc.Parser(lexed);
+    m = p.module("t").try();
+
+    println("lex {} parse {}", lexed.diags.len, p.diags.len);
+    p.diags.loop((h, d) {
+        println("  {}:{} {}", d.span.start.line, d.span.start.col, d.message);
+    });
+    println("decls {}", m.decls.len);
+    m.decls.loop((h, d) { show(p.tree, d) });
+    Ok(0);
+}
