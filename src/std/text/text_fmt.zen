@@ -18,14 +18,15 @@
 //
 // WHERE THE PARSE HAPPENS. `{}` routes through the argument's toString,
 // which is type-directed, so `add` is expanded where it is WRITTEN: the
-// compiler steps `fmt_next` over the format string and emits
-// `sb.add_bytes(<literal run>)` for each step and `arg.toString(sb)` for
-// each hole. That keeps one implementation of the rules above — this one —
-// and leaves no format state at runtime. A format string that runs out of
-// holes, or of arguments, is therefore a compile error and not a `?`.
+// compiler steps `fmt_next` over the format string and emits a write of
+// the literal run for each step and `arg.toString(out)` for each hole.
+// That keeps one implementation of the rules above — this one — and leaves
+// no format state at runtime. A format string that runs out of holes, or
+// of arguments, is therefore a compile error and not a `?`.
 
 String = std.text.text_string
 str = std.text.text_str
+Sink, WriteError = std.core.io
 
 // one step of a format string: the literal run before the next hole, and
 // where to resume. `literal` is a SLICE of the format string — no copy
@@ -54,38 +55,55 @@ fmt_next* = (f: str, from: usize) FmtStep {
 
 // ---------------------------------------------------------------------------
 // the primitive writers — what a {} lands on when the argument is a
-// primitive rather than a Display. They write into an existing String and
-// allocate nothing of their own, so nesting is free.
+// primitive rather than a Display. They write into a SINK the caller owns
+// and allocate nothing of their own, so nesting is free and printing —
+// where the sink is the console — allocates nothing at all.
 //
-// The writer for a `str` is String.add_bytes: bytes, verbatim. It is not
-// repeated here, because two copies of "write these bytes" is one copy too
-// many.
+// They take a Sink rather than a String for the reason DESIGN.md gives for
+// toString: `println` has no Alloc, so a writer that demanded a String
+// would make printing a number allocate. A String IS a Sink, so writing
+// into a buffer still reaches exactly these.
+//
+// The writer for a `str` is the sink's own `write`: bytes, verbatim. It is
+// not repeated here, because two copies of "write these bytes" is one copy
+// too many.
 // ---------------------------------------------------------------------------
 
+// the format door on ANY sink. `String.add` is the same door with a String
+// already in hand; this is the one a `toString` writes through, because what
+// it holds is a Sink and the sink may be a console.
+//
+// Declared, not defined, for the reason String.add is: the arguments are
+// type-directed, so the call is expanded where it is WRITTEN. A ufcs free
+// function rather than a Sink member, because a member would cut a slot into
+// the record that no impl could fill — the expansion is the compiler's, not
+// an implementation any sink supplies
+add* = (out :: Sink, fmt: str, args: ...) Res<(), WriteError>
+
 // decimal, no separators — TESTING.md's corpus-wide assumption
-add_u64* = (sb :: String, v: u64) Res<(), AllocError> {
-    (v >= 10).then(() { sb.add_u64(v / 10).try() });
-    sb.add_byte(digit(v % 10));
+add_u64* = (out :: Sink, v: u64) Res<(), WriteError> {
+    (v >= 10).then(() { out.add_u64(v / 10).try() });
+    out.write_byte(digit(v % 10));
 }
 
-add_i64* = (sb :: String, v: i64) Res<(), AllocError> {
-    (v < 0).then(() { sb.add_byte('-').try() });
+add_i64* = (out :: Sink, v: i64) Res<(), WriteError> {
+    (v < 0).then(() { out.write_byte('-').try() });
     // hand the digits a NON-POSITIVE value: i64.MIN has no positive
     // counterpart, so negating first traps on exactly one input, which is
     // the classic bug in every integer printer ever written
-    sb.add_digits((v < 0).match({ true => v, false => 0 - v }));
+    out.add_digits((v < 0).match({ true => v, false => 0 - v }));
 }
 
 // digits of a non-positive value, most significant first
-add_digits = (sb :: String, v: i64) Res<(), AllocError> {
-    (v <= -10).then(() { sb.add_digits(v / 10).try() });
-    sb.add_byte(digit(0 - (v % 10)));
+add_digits = (out :: Sink, v: i64) Res<(), WriteError> {
+    (v <= -10).then(() { out.add_digits(v / 10).try() });
+    out.write_byte(digit(0 - (v % 10)));
 }
 
-add_bool* = (sb :: String, v: bool) Res<(), AllocError> {
+add_bool* = (out :: Sink, v: bool) Res<(), WriteError> {
     v.match({
-        true  => sb.add_bytes("true"),
-        false => sb.add_bytes("false"),
+        true  => out.write("true"),
+        false => out.write("false"),
     });
 }
 

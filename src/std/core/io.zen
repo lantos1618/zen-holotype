@@ -9,15 +9,31 @@ IoError* = Closed          // the sink is gone: a closed pipe, a dropped socket
           | Invalid        // the bytes are not what this sink accepts
           | Interrupted    // retryable; the write made no progress
 
-// a sink is anything bytes can be written to. String is one, and
-// so is Console — which is why `{}` formatting works into either
-// without the format machinery knowing the difference
-Sink* = {
-    write* = (self :: @Self, bytes: str) Res<(), IoError>
-}
-
 // writing formatted text can fail two ways: the sink rejects it,
 // or the buffer cannot grow. neither converts into the other —
 // there is no From — so the honest type is the union, and .try()
 // merges it into the caller's set for free
 WriteError* = IoError | AllocError
+
+// a sink is anything bytes can be written to. String is one, and
+// so is Console — which is why `{}` formatting works into either
+// without the format machinery knowing the difference.
+//
+// `write` speaks WriteError, the union, and that cost is accepted
+// knowingly: a console can never produce AllocError and a growable
+// String can never produce IoError, but there is no From, so one
+// sink type cannot pretend the two are one error. `.try()` merges
+// either into the caller's set for free, so the cost is paid only
+// where someone actually matches on the error
+Sink* = {
+    write* = (self :: @Self, bytes: str) Res<(), WriteError>
+
+    // one byte. The format writers build a number digit by digit, and a
+    // digit has no `str` to point at: a str BORROWS bytes that already
+    // exist somewhere, and the only way to make one is str_at, which needs
+    // a Ptr, and the only source of a Ptr is an Alloc. A sink that could
+    // take bytes but not a byte would therefore force the integer writers
+    // to allocate — which is the exact cost this whole design exists to
+    // avoid. So the floor is two calls wide, not one
+    write_byte* = (self :: @Self, b: u8) Res<(), WriteError>
+}

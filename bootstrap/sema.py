@@ -796,9 +796,11 @@ BUILTIN_TYPES = {
     }),
     "Entry": dict(arity=2, fields={"hash": "u64", "key": "T0", "value": "T1"}),
     "String": dict(arity=0, fields={"data": "Vec<u8>"}, methods={
-        "add": "(self: @Self, fmt: str, args: ...) Res<(), IoError>",
+        "add": "(self: @Self, fmt: str, args: ...) Res<(), WriteError>",
         "view": "(self: @Self) str",
-        "toString": "(self: @Self, sb: String) Res<(), IoError>",
+        "write": "(self: @Self, bytes: str) Res<(), WriteError>",
+        "write_byte": "(self: @Self, b: u8) Res<(), WriteError>",
+        "toString": "(self: @Self, out: Sink) Res<(), WriteError>",
     }),
     "Alloc": dict(arity=0, methods={
         "raw": "(self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError>",

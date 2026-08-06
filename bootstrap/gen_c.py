@@ -1325,7 +1325,14 @@ class Emitter:
                 for p in self.params_of(fnode)]
         rret = self.resolve_type(self.ret_of(fnode), subst, base, concrete)
         names = ["%sa%d" % (GEN, i) for i in range(len(params))]
-        args = ["(*(%s *)%sself)" % (self.ctype(concrete), GEN)]
+        # `self :: @Self` takes the receiver BY REFERENCE, so the shim hands
+        # the pointer straight through; `self: @Self` takes it by value and
+        # the shim dereferences.  A String's `write` mutates the buffer the
+        # record points at, which only works if the pointer survives the shim
+        own = self.params_of(fnode)
+        args = ["(%s *)%sself" % (self.ctype(concrete), GEN)
+                if own and f(own[0], "mutable", False)
+                else "(*(%s *)%sself)" % (self.ctype(concrete), GEN)]
         nreal = max(0, len(real) - 1)
         for i, (pname, pty) in enumerate(zip(names, params)):
             if i >= nreal:
@@ -1349,6 +1356,37 @@ class Emitter:
                 cname, GEN,
                 "".join(", " + self.declarator(p, n) for n, p in zip(names, params)))
             body = "    %s;\n" % call
+        self.protos[cname] = head + ";"
+        self.bodies[cname] = head + " {\n" + body + "}\n"
+        return cname
+
+    def console_thunk(self, name, slot, params, ret):
+        """One slot of the console's Sink record.
+
+        The console has no Zen implementation to call -- the runtime IS the
+        implementation, exactly as it is for `Ptr`'s members -- so these are
+        written here rather than found.  Each one writes and reports success:
+        a console cannot fail to grow, and `print_bytes` has no failure to
+        report, so the honest answer on this path is Ok.
+        """
+        writes = {
+            "write": "    %sprint_bytes((const char *)%sa0.%s, (size_t)%sa0.%s);"
+                     % (GEN, GEN, sym_member("data"), GEN, sym_member("len")),
+            "write_byte": "    { char %sc = (char)%sa0; %sprint_bytes(&%sc, 1); }"
+                          % (GEN, GEN, GEN, GEN),
+        }
+        if name not in writes or not params:
+            return None
+        cname = "%sconsole_%s" % (GEN, name)
+        if cname in self.bodies:
+            return cname
+        head = "static %s %s(void *%sself, %s)" % (
+            self.ctype(ret), cname, GEN, self.declarator(params[0], GEN + "a0"))
+        body = writes[name] + "\n"
+        # a `()` payload is no storage, so Ok is a tag and nothing else
+        ok = "((%s){ .%stag = %s })" % (
+            self.ctype(ret), GEN, sym_variant(self.variant_parts(ret, "Ok")))
+        body += "    (void)%sself;\n    return %s;\n" % (GEN, ok)
         self.protos[cname] = head + ";"
         self.bodies[cname] = head + " {\n" + body + "}\n"
         return cname
@@ -1882,6 +1920,27 @@ class FnCtx:
         tmp = self.new_tmp(ty)
         self.line("%s = %s;" % (tmp, code))
         return "&" + tmp
+
+    def by_ref_as(self, code, ty, want, fallback=None):
+        """The address of an argument for a `::` parameter, at the type the
+        parameter declares.
+
+        A `::` parameter is a reference, so the ordinary answer is the
+        argument's own address.  When the parameter names a TRAIT and the
+        argument is concrete -- a String reaching `out :: Sink` -- the
+        reference has to be to a fat value, not to the String: the record is
+        what carries the function pointers.  It holds the String's address,
+        so writes through it still land in the caller's buffer, which is the
+        whole point of passing the sink by reference.
+        """
+        if want is not None and want[0] == "named" and self.e.is_trait(want) \
+                and ty not in (None, UNKNOWN) and ty[0] == "named" \
+                and not self.e.is_trait(ty):
+            fat = self.e.fat_value(self.addr_of(code, ty), ty, want)
+            tmp = self.new_tmp(want)
+            self.line("%s = %s;" % (tmp, fat))
+            return "&" + tmp
+        return self.by_ref(code, fallback if fallback is not None else ty)
 
     def value(self, node, want=None):
         """Lower an expression at the type its destination expects.
@@ -2635,6 +2694,14 @@ class FnCtx:
                 decl = self.pick_overload(cands, argnodes, receiver=(rcode, rty))
                 return self.emit_call(decl, node, argnodes, targs, want,
                                       receiver=(rcode, rty))
+        # `out.add(fmt, ..)` on a sink: the format door, which is expanded
+        # here rather than dispatched, so it is reached by name
+        if name == "add" and rty is not None and rty[0] == "named" \
+                and self.e.is_trait(rty):
+            door = self.sink_door()
+            if door is not None:
+                return self.emit_call(door, node, argnodes, targs, want,
+                                      receiver=(rcode, rty))
         # a ufcs free function: the receiver is the first parameter
         cands = self.e.lookup(name, self.parts, "fn")
         if cands:
@@ -3048,7 +3115,8 @@ class FnCtx:
                                             decl.scope_parts,
                                             self_ty or receiver[1])
             if params and f(params[0], "mutable", False):
-                codes.append(self.by_ref(receiver[0], receiver[1]))
+                codes.append(self.by_ref_as(receiver[0], receiver[1], rwant,
+                                            fallback=receiver[1]))
             else:
                 codes.append(self.coerce(receiver[0], receiver[1], rwant))
         for i, value in enumerate(values):
@@ -3061,7 +3129,7 @@ class FnCtx:
             )
             if idx < len(params) and f(params[idx], "mutable", False):
                 code, aty = (value if isinstance(value, tuple) else self.expr(value, pty))
-                codes.append(self.by_ref(code, pty or aty))
+                codes.append(self.by_ref_as(code, aty, pty, fallback=pty or aty))
             else:
                 codes.append(self.value(value, pty))
         cname = self.e.request_fn(decl, targ_tys, self_ty)
@@ -3394,6 +3462,26 @@ class FnCtx:
                 return d
         return None
 
+    def sink_door(self):
+        """text_fmt's `add(out :: Sink, fmt: str, args: ...)`.
+
+        Reached by name for the same reason the other writers are -- the
+        expansion is the backend's, so it must not depend on whether the
+        caller happened to import text_fmt.  Bodyless, so `free_fn` (which
+        wants a definition) is the wrong finder: this door has no body
+        anywhere, because the compiler IS its body.
+        """
+        for d in sorted(self.e.by_name.get("add", []), key=lambda d: d.parts):
+            if d.dkind != "fn" or d.owner:
+                continue
+            fnode = self.e.fn_node(d.node)
+            if fnode is None or f(fnode, "body") is not None:
+                continue
+            params = self.e.params_of(fnode)
+            if len(params) == 3 and _is_variadic(params[-1]):
+                return d
+        return None
+
     def full_of(self, ret, node):
         """The Err a piece that could not be written produces.
 
@@ -3462,15 +3550,23 @@ class FnCtx:
         return None
 
     def write_bytes(self, sb, arg, node):
-        d = None
-        for cand in self.owned_decls(sb[1], "add_bytes", "fn"):
-            if self.e.fn_node(cand.node) is not None:
-                d = cand
-                break
-        if d is None:
-            self.e.error(node, "String has no `add_bytes` to write through")
-            return None
-        return self.emit_call(d, node, [arg], (), None, receiver=sb)
+        """A literal run, or a `{}` that landed on a str: bytes, verbatim.
+
+        A concrete String is written through its own `add_bytes` -- a direct
+        call, no record -- and a Sink through the `write` it declares, which
+        is the one the console also answers.  Same bytes, two floors, and
+        which one applies is the receiver's type.
+        """
+        if sb[1] is not None and sb[1][0] == "named" and self.e.is_trait(sb[1]):
+            got = self.dispatch(sb[0], sb[1], "write", [arg], (), None, node)
+            if got is not None:
+                return got
+        for name in ("add_bytes", "write"):
+            for cand in self.owned_decls(sb[1], name, "fn"):
+                if self.e.fn_node(cand.node) is not None:
+                    return self.emit_call(cand, node, [arg], (), None, receiver=sb)
+        self.e.error(node, "this sink has no `write` to write through")
+        return None
 
     def lower_format(self, sb, fmt_node, rest, result, ret, done, node):
         if not (kind(fmt_node) == "Literal" and f(fmt_node, "kind") == "str"):
@@ -3549,7 +3645,12 @@ class FnCtx:
         """The two bodyless variadic doors: `sb.add(fmt, ..)` and the
         allocating `alloc.String(fmt, ..)`."""
         args = list(argnodes)
-        if decl.owner == "String" and decl.name == "add" and receiver is not None:
+        # `sb.add(fmt, ..)` on a String, and `out.add(fmt, ..)` on any Sink --
+        # the same door, expanded the same way.  The second is a ufcs free
+        # function so that a sink needs no slot for something the compiler
+        # writes, and it is what a `toString` holding a console goes through
+        if (decl.name == "add" and receiver is not None
+                and decl.owner in ("String", None)):
             ret = self.e.resolve_type(self.e.ret_of(fnode), {}, decl.scope_parts,
                                       self.e.self_type(decl, {}))
             result = self.new_tmp(ret)
@@ -4005,7 +4106,59 @@ class FnCtx:
                     % (GEN, tmp, sym_member("data"), tmp, sym_member("len"))
                 )
                 return
+            # a Display: `{}` routes through its toString, and the sink it is
+            # handed is the CONSOLE, so printing a value allocates nothing.
+            # This is the whole reason toString takes a Sink rather than a
+            # String -- println has no Alloc to give it one
+            if self.print_display(code, ty, node):
+                return
         self.e.error(node, "cannot print a value of this type")
+
+    def print_display(self, code, ty, node):
+        """`println("{}", shape)` as the call it is: shape.toString(console)."""
+        sink = self.console_sink()
+        if sink is None:
+            return False
+        for d in self.owned_decls(ty, "toString", "fn"):
+            fnode = self.e.fn_node(d.node)
+            if fnode is None or f(fnode, "body") is None:
+                continue
+            if len(self.e.params_of(fnode)) != 2:
+                continue
+            got = self.emit_call(d, node, [sink], (), None, receiver=(code, ty))
+            if got is not None:
+                self.line("(void)(%s);" % got[0])
+                return True
+        return False
+
+    def console_sink(self):
+        """The console, as a Sink: a fat value over the print runtime.
+
+        `println` holds a console and nothing else -- no Alloc, no buffer --
+        so the sink it hands to `toString` has no receiver at all.  `self` is
+        NULL because stdout is not a value the program owns; the two slots go
+        straight to the writes `println` itself lowers into.  Nothing is
+        allocated on this path, which is the property DESIGN.md's law 1 asks
+        for and the reason the whole Sink migration exists.
+        """
+        decl = None
+        for d in sorted(self.e.by_name.get("Sink", []), key=lambda d: d.parts):
+            if d.dkind == "type":
+                decl = d
+                break
+        if decl is None:
+            return None
+        ty = ("named", decl.parts, ())
+        if not self.e.is_trait(ty):
+            return None
+        self.e.needs.add("print")
+        inits = [".%sself = NULL" % GEN]
+        for slot, name, _member, params, ret in self.e.trait_slots(ty):
+            fn = self.e.console_thunk(name, slot, params, ret)
+            if fn is None:
+                return None
+            inits.append(".%s = %s" % (slot, fn))
+        return ("((%s){ %s })" % (self.e.ctype(ty), ", ".join(inits)), ty)
 
     # control flow --------------------------------------------------------
 
@@ -4317,6 +4470,9 @@ class FnCtx:
                 wrapped = self.make_variant(pty, member, src if inner else None)
                 self.line("return %s;" % self.make_variant(ret, target, wrapped))
                 return
+        if sty is not None and sty != pty and pty[0] == "named" and sty[0] == "named" \
+                and self.remap_set(ret, target, sty, pty, src):
+            return
         if pty[0] == "union" and sty is not None and sty != pty:
             # error sets merge: wrap the operand's error into this function's
             cname = self.e.ctype(pty)
@@ -4332,6 +4488,52 @@ class FnCtx:
             self.line("return %s;" % self.make_variant(ret, target, wrapped))
             return
         self.line("return %s;" % self.make_variant(ret, target, src))
+
+    def remap_set(self, ret, target, sty, pty, src):
+        """One error SET into another that spells the same members.
+
+        `WriteError = IoError | AllocError` and a caller's
+        `Error = AllocError | IoError` are the same set written in a
+        different order, and neither names the other as a variant, so the
+        rule one level up -- the wider set naming the narrower -- has nothing
+        to select.  What relates them is that every member of the source is a
+        member of the target, BY NAME.  The tag numbering is per declaration,
+        so the two disagree on the numbers and agree on the names: the
+        translation is a remap of one tag to the other, decided at runtime
+        because which member arrived is a runtime fact.
+
+        No conversion is invented and no error changes identity -- an
+        AllocError leaves as an AllocError.  Only the numbering moves.
+        Returns False when the sets do not line up, leaving the caller's
+        remaining rules to try.
+        """
+        sinfo = self.e.enum_info(sty)
+        pinfo = self.e.enum_info(pty)
+        if sinfo is None or pinfo is None:
+            return False
+        spayloads = dict(sinfo[2])
+        ppayloads = dict(pinfo[2])
+        members = [v for v, _ in sinfo[2]]
+        if not members or any(v not in ppayloads for v in members):
+            return False
+        # a member that carries a payload must carry the SAME one on both
+        # sides; rebuilding a differently-typed payload would be a conversion
+        for v in members:
+            if spayloads[v] is not None and spayloads[v] != ppayloads[v]:
+                return False
+        self.open("switch (%s.%stag) {" % (paren(src), GEN))
+        for v in members:
+            inner = None
+            if ppayloads[v] is not None and spayloads[v] is not None:
+                inner = "%s.%sdata.%s" % (paren(src), GEN, sym_member(v))
+            self.line("case %s: return %s;" % (
+                sym_variant(self.e.variant_parts(sty, v)),
+                self.make_variant(ret, target, self.make_variant(pty, v, inner))))
+        self.close("}")
+        # every member is accounted for above; C wants a value on the path it
+        # cannot see is dead
+        self.line("return (%s){0};" % self.e.ctype(ret))
+        return True
 
     def ex_Lambda(self, node, want=None):
         """A closure in value position.
