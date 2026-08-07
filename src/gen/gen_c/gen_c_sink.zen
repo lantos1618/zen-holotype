@@ -72,8 +72,16 @@ sink_display = gen.gen_c.gen_c_display
 // it is taken by address, and a declaration that takes its first
 // argument by value is not this.
 is_sink_door* = (be: CBackend, d: Def, f: Function) bool {
-    d.name.eq("add") && bodyless(f) && (f.params.len == 3)
-        && by_ref(f, 0) && last_is_variadic(be, f)
+    d.name.eq("add") && sink_door_shape(be, f)
+}
+
+// The door's shape with the name held out, because the MEMBER form has
+// no `Def` to read a name off — `s.add(..)` carries its name in the
+// access. Stated once so the two forms cannot drift into recognising
+// different declarations.
+sink_door_shape* = (be: CBackend, f: Function) bool {
+    bodyless(f) && (f.params.len == 3) && by_ref(f, 0)
+        && last_is_variadic(be, f)
 }
 
 bodyless* = (f: Function) bool {
@@ -100,6 +108,88 @@ variadic_param = (be: CBackend, p: Param) bool {
 
 variadic_type = (be: CBackend, t: TypeId) bool {
     be.tree.type_at(t).kind.match({ Variadic => true, _ => false })
+}
+
+// -----------------------------------------------------------------
+// the same door, reached through a receiver
+//
+// `String.add(self :: @Self, fmt: str, args: ...)` is NOT a second
+// door. It is the door's exact shape declared a second time, bodyless
+// for the same reason, because a String IS a Sink and `s.add("{}", x)`
+// has to mean what `add(s, "{}", x)` means. Declaring it on the type is
+// what makes the idiomatic spelling reachable at all; lowering it is
+// finding the one declaration and expanding it with the receiver as the
+// sink.
+//
+// THE FREE DECLARATION IS WHAT IS LOWERED, NOT THE MEMBER'S OWN, and
+// that is load-bearing rather than a shortcut. Everything the expansion
+// reads comes out of the DOOR'S module: `Sink`, the type the record is
+// built at and whose `write` slot every literal run travels through,
+// and `add_i64`/`add_u64`/`add_bool`, the writers a scalar hole
+// reaches. `text_string.zen` imports `Sink` but declares no writer, and
+// its own first parameter is `@Self` — a String, which is where the
+// bytes END UP and not the thing a write goes through. Reading the
+// member's declaration would resolve the sink to the wrong type and
+// find no writers at all.
+// -----------------------------------------------------------------
+
+lower_member_door* = (be :: CBackend, id: ExprId, c: Call, recv: ExprId,
+                      ctx: Ctx, out :: String) Res<(), AllocError> {
+    door_decl(be).try().match({
+        None  => unsupported(be, id, "a format door with no declaration", out),
+        Ok(d) => lower_at_decl(be, id, c, d, recv, ctx, out),
+    })
+}
+
+lower_at_decl = (be :: CBackend, id: ExprId, c: Call, d: Def, recv: ExprId,
+                 ctx: Ctx, out :: String) Res<(), AllocError> {
+    door_fn(be, d).match({
+        None  => unsupported(be, id, "a format door with no declaration", out),
+        Ok(g) => lower_sink_door(be, id, c, d, g, Ok(recv), ctx, out),
+    })
+}
+
+// The free door, found BY SHAPE across the program rather than by module
+// path. Nothing at the call site names `text_fmt`: `text_string.zen`
+// does not import it, it is not the prelude, and the caller wrote a dot
+// on a String. What identifies the door is that it is the one exported
+// `add` carrying the door's shape — `::` sink, three parameters, a
+// variadic tail, no body — and this tree's only other top-level `add`
+// takes two Durations by value.
+door_decl = (be :: CBackend) Res<Res<Def>, AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.exported_named("add", found).try();
+    kept ::= be.alloc.Vec<Def>();
+    found.loop((h, x) { keep_door(be, x, kept).try() });
+    Ok(kept.get(0));
+}
+
+keep_door = (be :: CBackend, x: Def, out :: Vec<Def>) Res<(), AllocError> {
+    door_fn(be, x).match({
+        None  => Ok(()),
+        Ok(g) => keep_shaped(be, g, x, out),
+    })
+}
+
+keep_shaped = (be :: CBackend, g: Function, x: Def, out :: Vec<Def>)
+              Res<(), AllocError> {
+    sink_door_shape(be, g).match({
+        true  => out.add(x),
+        false => Ok(()),
+    })
+}
+
+// The `Function` a `Def` declares, and `None` when it declares anything
+// else.
+door_fn = (be :: CBackend, d: Def) Res<Function> {
+    decl_at(be.tree, d.id).match({
+        None    => None,
+        Ok(dec) => decl_fn(dec),
+    })
+}
+
+decl_fn = (dec: Decl) Res<Function> {
+    dec.kind.match({ Function(g) => Ok(g), _ => None })
 }
 
 // -----------------------------------------------------------------
