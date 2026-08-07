@@ -67,6 +67,7 @@ is_ptr_member, lower_ptr_member = gen.gen_c.gen_c_ptr
 is_capability, lower_capability = gen.gen_c.gen_c_cap
 is_fat = gen.gen_c.gen_c_fat
 lower_fat_call = gen.gen_c.gen_c_bound
+lower_assoc_call = gen.gen_c.gen_c_assoc
 
 // -----------------------------------------------------------------
 // the entry point
@@ -104,14 +105,29 @@ lower_resolved_dot = (be :: CBackend, id: ExprId, c: Call, a: Access,
 // ordinary call and not a second construction form." So this writes the
 // same compound literal `gen_c_expr.zen` writes for a bare variant, with
 // the payload initialiser added.
+//
+// A NAME THAT IS NOT A VARIANT IS `gen_c_assoc.zen`'S: a struct body may
+// bind a function too, and `Duration.seconds(2)` reads it through the
+// type. It answers `false` where the type declares nothing of that name
+// that wants no receiver, and that is the refusal reported here — one
+// diagnostic for one mistake.
 // -----------------------------------------------------------------
 
 lower_static_call = (be :: CBackend, id: ExprId, c: Call, a: Access,
                      ty: TyId, ctx: Ctx, out :: String)
                     Res<(), AllocError> {
     be.check.is_case(ty, a.name.text).try().match({
-        false => unsupported(be, id, "a call on a type that is not a variant", out),
+        false => static_member_call(be, id, c, a, ty, ctx, out),
         true  => write_variant_call(be, id, c, a, ty, ctx, out),
+    })
+}
+
+static_member_call = (be :: CBackend, id: ExprId, c: Call, a: Access,
+                      ty: TyId, ctx: Ctx, out :: String)
+                     Res<(), AllocError> {
+    lower_assoc_call(be, id, c, a, ty, ctx, out).try().match({
+        true  => Ok(()),
+        false => unsupported(be, id, "a call on a type that is not a variant", out),
     })
 }
 
