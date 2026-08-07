@@ -1,25 +1,25 @@
 # Zen
 
-**Performance is locked down, not hoped for.** Benches live next to tests (take a `Bencher` like tests take a `Tester`), budgets are code in build.zen, and a regression fails the build. That includes the build itself: a 20 minute build is a bug, and bugs fail CI.
+**Performance is locked down, not hoped for.** Benches live next to tests (take a `Bencher` like tests take a `Tester`), budgets are code in build.zen, and a regression fails the build. That includes the build itself: a 20 minute build is a bug, and bugs fail CI. **Not implemented:** `Bencher` and `BenchStats` are declared in `std.test`, `Budget` in `std.build`, and the benches are written in `tests/bench/` — but the root `build.zen` that would run one against the other is stage 1 in `PLAN.md` and is not in the tree, so no budget gates anything.
 
 **Pipeline:** `mod_resolver -> lexer -> parser -> sema -> codegen`
 
-One stage per module, and modules are `<folder>/<folder>.zen` — a folder carries its root beside its children, so `src/gen/gen.zen` is module `gen` and `src/ast.zen` is module `ast`.
+One stage per module, and modules are `<folder>/<folder>.zen` — a folder carries its root beside its children, so `src/gen/gen.zen` is module `gen` and `src/ast/ast.zen` is module `ast`.
 
 ```
-build.zen              // this project's own build file
-src/zen.zen            // thin cli: build / fmt / test / lsp
-src/ast.zen            // THE ast. the compiler, @meta and gen_c all consume these nodes
+build.zen              // this project's own build file. stage 1; not in the tree
+src/zen/zen.zen        // thin cli: build / fmt / test / lsp
+src/ast/ast.zen        // THE ast. the compiler, @meta and gen_c all consume these nodes
 src/lex/lex.zen
 src/parse/parse.zen
 src/sema/sema.zen
 src/gen/gen.zen        // backend-shared plumbing
-src/gen/gen_c.zen      // the c backend
-src/build/build.zen    // the build driver behind `zen build`
-src/std/...            // the stdlib specified below. ~18 modules.
+src/gen/gen_c/gen_c.zen  // the c backend
+src/zen/zen_build.zen  // the build driver behind `zen build`
+src/std/...            // the stdlib specified below. ~34 modules.
 ```
 
-`src/ast.zen` is the keystone: one AST with three consumers, which is what makes `@meta` a view onto the compiler's own nodes rather than a parallel universe.
+`src/ast/ast.zen` is the keystone: one AST with three consumers, which is what makes `@meta` a view onto the compiler's own nodes rather than a parallel universe.
 
 **The full tree — including the bootstrapper, the seed, the test corpora, and which stage each piece appears at — lives in `PLAN.md`.** It is the authority; this sketch shows only the shape.
 
@@ -61,6 +61,8 @@ So four decisions, all made in week one, all brutal to retrofit:
 | 5 | actors + runtime | orthogonal; constrains nothing in the compiler |
 
 **Ship the ownership *syntax* at stage 0** even though nothing checks it. `self :: @Self` and `consume` cost nothing to parse and ignore. Defer the syntax and every line of stdlib written before stage 3 has to be revised; defer only the enforcement and nothing is lost.
+
+**So read the Ownership section below as law, not as behaviour.** Stages 2 and 3 are not in the tree: there is no `src/sema/sema_own.zen`, so `consume`, `::` and `iso` are parsed and ignored and a use-after-consume compiles; and there is no formatter, so `zen fmt` prints which stage it arrives at and exits 2. Everything those sections state is what the checker must decide when it is written.
 
 **Not needed, and traps if attempted early:** an optimizer (C is the backend), a second backend, a package manager, incremental codegen.
 
@@ -163,7 +165,7 @@ p = &c.width;     // ERROR: computed field, no address exists
 c.width = 5.0;    // ERROR: nothing to assign to
 ```
 
-The residue worth knowing: an impl may supply something expensive, and reading it in a loop hides real work behind a dot. The *simple* case is provable with machinery already here — if these two budgets ever stop matching, uniform access is not free and we want to know:
+The residue worth knowing: an impl may supply something expensive, and reading it in a loop hides real work behind a dot. The *simple* case is provable by a pair of budgets — if these two ever stop matching, uniform access is not free and we want to know. Both benches are written, in `tests/bench/bench_field.zen`; what fails the build on a divergence is the `build.zen` above, which is stage 1 and not in the tree:
 
 ```groovy fragment
 budgets: [
@@ -298,7 +300,7 @@ row = table.get("ada").ok_or(Error.NotFound).try();  // required form
 
 - `+ - *` **trap** on overflow. `+% -% *%` wrap, for when wrapping is the intent.
 - `/ %` **trap** on a zero divisor, and on `i32.MIN / -1` — which is an overflow wearing division's clothes, and faults identically on x86.
-- `buf[i]` on a fixed array is **bounds-checked and traps**. `Vec.get` still returns `Res<T>` — a lookup that can legitimately miss is not a bug.
+- `buf[i]` on a fixed array is **bounds-checked and traps**. **The count is part of the type** — `[u8, 64]` and `[u8, 65]` are different types — which is what makes the check possible with no length stored beside the bytes, and what lets a literal index past a known length be the compile error below rather than a runtime trap. `Vec.get` still returns `Res<T>` — a lookup that can legitimately miss is not a bug.
 - A trap **aborts the process**: it prints `file:line:col: trap: <what>` to stderr and exits `134`. The three whats are `integer overflow`, `divide by zero`, `index out of bounds`, and the position is the **operator** token. Column is a 1-based byte offset.
 - Overflow traps for **unsigned** types too. "A trap is for a bug" does not have a signedness exception, and a `u8` reaching 256 is the same bug a `i8` reaching 128 is.
 - A trap the compiler can **prove** will fire — `i32.MAX + 1`, a constant zero divisor, a literal index past a known length — is a **compile error**, not a runtime trap. It is a bug, and it is a bug that was visible without running the program.
@@ -409,7 +411,7 @@ The information already exists at the call site: whoever invokes the compiler kn
 
 **A constructor does not travel with the type it constructs, and that is the hole associated functions fill.** `seconds(n: u64) Duration` takes a `u64`, so by the rule above it travels with `u64` — which means `Duration = std.core.time` gives you every method and no way to make one. The two obvious answers are both wrong: listing the constructors in every import is the noise this rule exists to remove, and letting them travel with `u64` puts `.seconds()`, `.minutes()` and every other module's `u64`-taking function on every integer in every program, because `u64` is in the prelude.
 
-The answer is that a struct body may bind a **function**, read as `Type.name(..)` — `Duration.seconds(60)`. This is the existing "a struct body may bind a name to a value, read as `Type.NAME`" rule plus the fact that a function *is* a value here, and it puts the constructor in the one namespace that is already exactly right: the type it constructs. **Not implemented:** sema resolves `Type.name(..)` today, but `gen_c` lowers it as a method call and passes the *type* as the receiver, emitting C that names an undeclared identifier.
+The answer is that a struct body may bind a **function**, read as `Type.name(..)` — `Duration.seconds(60)`. This is the existing "a struct body may bind a name to a value, read as `Type.NAME`" rule plus the fact that a function *is* a value here, and it puts the constructor in the one namespace that is already exactly right: the type it constructs. **Not implemented:** sema resolves `Type.name(..)`, and `gen_c` refuses it rather than guessing — `src/gen/gen_c/gen_c_member.zen` raises a positioned `codegen does not lower this yet: 'a call on a type that is not a variant'`, because a backend that emits C for a form it does not understand turns one diagnostic into a C compiler's.
 
 **A prelude declaration of a primitive's name IS that primitive.** `str` and `i32` are declared as ordinary structs in the prelude — `str` in `std.text.text_str` carrying `len`, `get`, `index` and `slice`; `i32` in `std.core.num` carrying `MIN`, `MAX` and `BITS` — and the members they declare belong to the primitive the compiler already knows. They are not a second nominal type that shadows it. Getting this wrong is not a small error: it mints a `str` beside the `str` every literal has, and then every literal, every trap check and every standard-library signature disagrees about which one they meant.
 
@@ -1498,6 +1500,8 @@ main = (env: Env) Res<i32, Error> {
 # Still open
 
 - **`println` and `Env`.** Resolving `println` to the in-scope binding *of type* `Env` gives `Env` a slightly privileged position in name resolution. That is the cost of keeping both the no-ambient-authority law and a two-line hello-world. The alternative is no sugar at all: `env.out.println(..)` everywhere.
+- **Operator overloading.** `==` through `Eq` is the only operator that dispatches to an impl, so `a + b` on a `Duration` is not writable and a module that wants it writes `add`. Whether arithmetic should dispatch is the difference between a `Duration` reading like a number and one reading like a record, and it is a language decision nobody has made.
+- **`Ord`.** `std.core` has `Eq` and `Hash` and nothing that orders. The open question is not whether to add a trait: `Ord` and `Eq` must agree exactly as `Eq` and `Hash` must, so which of the two is sealed in terms of the other is the design.
 - **Supervision.** A trap aborts the process. Killing only the offending actor is the Pony answer and needs a supervision story that does not exist yet.
 - **`env.threads.spawn` vs `env.blocking.run`.** If the only legitimate use of a thread is running blocking work off the scheduler, the honest capability is `blocking.run` — it makes the misuse unrepresentable rather than merely discouraged.
 - **Comptime file reads.** Excluded from v1 for reproducibility. `@embed_file` is the feature people will ask for.
