@@ -1,0 +1,34 @@
+// tests/corpus/std/loop_fold_break_carries_its_value.zen
+// a fold has TWO ways out and they answer with different values: falling
+// off the end answers with the accumulator, `h.break(v)` answers with v.
+//
+// loop_break_with_value.zen already covers a loop with no accumulator, and
+// that one cannot catch this: with nothing to thread there is no
+// accumulator to write, so the write that clobbers the break's value never
+// runs. It takes a fold AND an early break in one program.
+//
+// The wrong answer here is 3, not garbage — 1+2, the accumulator at the
+// moment of the break. That is the shape worth testing: a fold that
+// compiles, runs, and quietly answers with a plausible number.
+
+main = (env: Env) Res<i32, AllocError> {
+    values = [1, 2, 3, 4];
+
+    values.loop(0, (h, index, value, acc: i32) {
+        (value == 3).then(() { h.break(999) });
+        acc + value
+    }).match({
+        Ok(n) => println("broke with {}", n),
+        None  => println("ran to the end"),
+    });
+
+    // and the fall-through still answers with the accumulator, so the fix
+    // cannot be "never write it"
+    values.loop(0, (h, index, value, acc: i32) {
+        acc + value
+    }).match({
+        Ok(n) => println("summed {}", n),
+        None  => println("summed none"),
+    });
+    Ok(0);
+}

@@ -4178,9 +4178,13 @@ class FnCtx:
             self.line("%s = %s + 1;" % (counter, counter))
         self.close()
         self.loops.pop()
-        self.line("%s: ;" % brk)
+        # Normal completion only, and it MUST precede the label: `h.break(v)`
+        # writes `result` and jumps to `brk` (see lower_break), so an
+        # assignment after the label overwrites the value the break carried
+        # and the fold silently returns its accumulator instead.
         if wants_acc and acc is not None and result is not None:
             self.line("%s = %s;" % (result, self.ok_of(ret, acc, node)))
+        self.line("%s: ;" % brk)
         return (result if result is not None else "0", ret or UNIT)
 
     def lower_intrinsic(self, decl, fnode, node, argnodes, want, receiver, targs=()):
