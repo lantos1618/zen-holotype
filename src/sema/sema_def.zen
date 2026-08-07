@@ -455,42 +455,58 @@ World* = {
                      seen :: Vec<usize>) Res<bool, AllocError> {
         defs ::= self.alloc.Vec<Def>();
         self.exported_defs(mi, name, defs).try();
-        hits ::= self.alloc.Vec<usize>();
+        hits ::= self.alloc.Vec<Def>();
         (defs.len == 0).then(() {
-            self.exports_variant(tree, mi, name, hits, seen).try();
+            self.exports_variant(tree, mi, name, hits, seen, true).try();
         });
         Ok(defs.len > 0 || hits.len > 0);
     }
 
-    // The variant half of the same walk, cycle guard and all: this
-    // module's own exported enums, then the starred imports it
-    // re-exports. `hits` accumulates rather than setting a flag; a scalar
-    // assigned from two nested closures is not something this resolves.
+    // THE ENUMS A BARE VARIANT NAME REACHES FROM `mi`, for the same
+    // reason: `Two` is a name a program may write and `defs_of` cannot
+    // answer for it. It is the SAME walk deliberately — the answer says
+    // which enum `Two` belongs to, and two walks that disagreed would
+    // pick two types. The enum is the answer and not the module holding
+    // it, because a nullary variant IS a value of its enum.
+    variant_defs* = (self: @Self, tree: Ast, mi: usize, name: str,
+                     out :: Vec<Def>) Res<(), AllocError> {
+        seen ::= self.alloc.Vec<usize>();
+        self.exports_variant(tree, mi, name, out, seen, false)
+    }
+
+    // The variant half of the same walk, cycle guard and all. `hits`
+    // accumulates rather than setting a flag; a scalar assigned from two
+    // nested closures is not something this resolves.
+    //
+    // `reexport` IS THE STAR, a parameter for the reason `follow`'s is:
+    // asked by `mi` ABOUT ITSELF nothing has crossed a boundary, so an
+    // unstarred enum and an unstarred import both still bind. Asked by
+    // somebody ELSE, both stars are required.
     exports_variant = (self: @Self, tree: Ast, mi: usize, name: str,
-                       hits :: Vec<usize>, seen :: Vec<usize>)
+                       hits :: Vec<Def>, seen :: Vec<usize>, reexport: bool)
                       Res<(), AllocError> {
         visited(seen, mi).match({
             true  => Ok(()),
-            false => self.variant_walk(tree, mi, name, hits, seen),
+            false => self.variant_walk(tree, mi, name, hits, seen, reexport),
         })
     }
 
     variant_walk = (self: @Self, tree: Ast, mi: usize, name: str,
-                    hits :: Vec<usize>, seen :: Vec<usize>)
+                    hits :: Vec<Def>, seen :: Vec<usize>, reexport: bool)
                    Res<(), AllocError> {
         seen.add(mi).try();
         self.tables.get(mi).match({
-            Ok(t) => self.variant_table(tree, t, mi, name, hits, seen),
+            Ok(t) => self.variant_table(tree, t, name, hits, seen, reexport),
             None  => Ok(()),
         })
     }
 
-    variant_table = (self: @Self, tree: Ast, t: ModuleTable, mi: usize,
-                     name: str, hits :: Vec<usize>, seen :: Vec<usize>)
+    variant_table = (self: @Self, tree: Ast, t: ModuleTable, name: str,
+                     hits :: Vec<Def>, seen :: Vec<usize>, reexport: bool)
                     Res<(), AllocError> {
-        own_variant(tree, t, mi, name, hits).try();
+        collect_variant(tree, t, name, reexport, hits).try();
         (hits.len == 0).then(() {
-            self.variant_each(tree, t, name, hits, seen).try();
+            self.variant_each(tree, t, name, hits, seen, reexport).try();
         });
         Ok(());
     }
@@ -500,29 +516,32 @@ World* = {
     // in a `.loop` closure does not survive the bootstrapper, and a
     // written parameter is SEMA_BOOTSTRAP_FIXES.md §10's workaround.
     variant_each = (self: @Self, tree: Ast, t: ModuleTable, name: str,
-                    hits :: Vec<usize>, seen :: Vec<usize>)
+                    hits :: Vec<Def>, seen :: Vec<usize>, reexport: bool)
                    Res<(), AllocError> {
         t.imports.loop((h, b) {
-            self.variant_hop(tree, b, name, hits, seen).try();
+            self.variant_hop(tree, b, name, hits, seen, reexport).try();
         });
         Ok(());
     }
 
     variant_hop = (self: @Self, tree: Ast, b: ImportBinding, name: str,
-                   hits :: Vec<usize>, seen :: Vec<usize>)
+                   hits :: Vec<Def>, seen :: Vec<usize>, reexport: bool)
                   Res<(), AllocError> {
-        (b.exported && b.name.eq(name)).match({
+        crosses = b.exported || (reexport == false);
+        (crosses && b.name.eq(name)).match({
             false => Ok(()),
             true  => self.variant_hop_to(tree, b.module, name, hits, seen),
         })
     }
 
+    // EVERY HOP PAST THE FIRST CROSSES A BOUNDARY, so the star is asked
+    // from here on whatever the first hop was asked as.
     variant_hop_to = (self: @Self, tree: Ast, module: str, name: str,
-                      hits :: Vec<usize>, seen :: Vec<usize>)
+                      hits :: Vec<Def>, seen :: Vec<usize>)
                      Res<(), AllocError> {
         self.index_of(module).match({
             None      => Ok(()),
-            Ok(other) => self.exports_variant(tree, other, name, hits, seen),
+            Ok(o)     => self.exports_variant(tree, o, name, hits, seen, true),
         })
     }
 
@@ -718,22 +737,21 @@ imports_name = (t: ModuleTable, name: str) bool {
     }).match({ Ok(_) => true, None => false })
 }
 
-own_variant = (tree: Ast, t: ModuleTable, mi: usize, name: str,
-               hits :: Vec<usize>) Res<(), AllocError> {
-    variant_named(tree, t, name).match({
-        true  => hits.add(mi),
-        false => Ok(()),
-    })
-}
-
-// An EXPORTED enum with a variant of this name; the star is the enum's.
-variant_named = (tree: Ast, t: ModuleTable, name: str) bool {
-    Range(0, t.defs.len).find((i) {
-        t.defs.get(i).match({
-            Ok(d) => d.exported && enum_has_variant(tree, d, name),
-            None  => false,
-        })
-    }).match({ Ok(_) => true, None => false })
+// The enums this module declares with a variant of this name.
+//
+// A VARIANT CARRIES NO STAR OF ITS OWN, so the enum's answers for it —
+// `Res*<T> = Ok(T) | None` files one `Def` and lets four names out. The
+// gate is asked only when `gated`, because a module reading its own file
+// has crossed no boundary and an unstarred enum there is still visible.
+collect_variant = (tree: Ast, t: ModuleTable, name: str, gated: bool,
+                   out :: Vec<Def>) Res<(), AllocError> {
+    t.defs.loop((h, d) {
+        lets_out = d.exported || (gated == false);
+        (lets_out && enum_has_variant(tree, d, name)).then(() {
+            out.add(d).try();
+        });
+    });
+    Ok(());
 }
 
 enum_has_variant = (tree: Ast, d: Def, name: str) bool {

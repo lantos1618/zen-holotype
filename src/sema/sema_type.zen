@@ -52,6 +52,7 @@ ARRAY_DECL, UNRESOLVED, is_prim, is_predicate = sema.sema_check
 absence_into_failure, both_failures = sema.sema_check
 match_type = sema.sema_match
 access_type = sema.sema_member
+variant_type = sema.sema_member
 call_type = sema.sema_call
 computed_member = sema.sema_member
 check_binary = sema.sema_trap
@@ -338,9 +339,33 @@ global_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
     found ::= c.alloc.Vec<Def>();
     c.world.defs_of(ctx.module, text, found).try();
     found.get(0).match({
-        None    => c.unresolved_name(node, text),
+        None    => c.variant_name_type(node, text, ctx),
         Ok(d)   => c.def_type(d),
     })
+}
+
+// A BARE VARIANT: `Two` where a visible enum declares it, and no
+// declaration of that name does.
+//
+// A declaration wins, and it has to: `Res*, Ok*, None* = std.core.result`
+// puts variant names in scope everywhere, so a program that also
+// declares one of them means the declaration. The variant is what is
+// left when nothing else answered — the same order patterns already
+// use, where a name is a case only when the type declares one.
+variant_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
+                    Res<TyId, AllocError> {
+    found ::= c.alloc.Vec<Def>();
+    c.world.variant_defs(c.tree, ctx.module, text, found).try();
+    found.get(0).match({
+        None    => c.unresolved_name(node, text),
+        Ok(d)   => c.bare_variant_type(d, text),
+    })
+}
+
+bare_variant_type = (c :: Checker, d: Def, text: str)
+                   Res<TyId, AllocError> {
+    ty = c.decl_as_type(d).try();
+    c.variant_type(ty, text)
 }
 
 unresolved_name* = (c :: Checker, node: Expr, text: str)
