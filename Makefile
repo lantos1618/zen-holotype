@@ -5,7 +5,7 @@ CFLAGS  ?= -O2 -std=c99
 PY      ?= python3
 ROOT    ?= src
 
-.PHONY: all build seed test test-zen lint parse design cap fixpoint determinism grammar grammar-test fmt clean help
+.PHONY: all build seed test test-zen lint parse design cap faults fixpoint determinism grammar grammar-test fmt clean help
 
 all: test
 
@@ -30,8 +30,15 @@ seed: zen
 	git add seed/zen.c
 
 ## test: the corpus and must-fail suites, against the bootstrapper
-test: parse design cap
+test: parse design cap faults
 	$(PY) tests/run.py
+
+## faults: every fault the compiler declares must have a site that raises
+## it. Green here does NOT mean every diagnostic works — it means none is
+## silently absent. The seven that are absent are written down in the
+## script's OWED ledger, so the debt can shrink and cannot quietly grow.
+faults:
+	$(PY) scripts/faults_reachable.py
 
 ## cap: STYLE.md's line caps. Over 500 prints a note; over 800 fails,
 ## unless the path carries a written reason in scripts/line_cap.py.
