@@ -354,19 +354,23 @@ keep_ptr = (be :: CBackend, want: TyId) Res<TyId> {
 ptr_of_written = (be :: CBackend, t: TypeId, rty: TyId, ctx: Ctx)
                  Res<Res<TyId>, AllocError> {
     u = sub(be, be.check.type_from_ast(t, ctx).try()).try();
-    args ::= be.alloc.Vec<TyId>();
-    args.add(u).try();
     be.check.types.at(rty).match({
-        Named(n) => named_with(be, n, args),
+        Named(n) => Ok(Ok(ptr_at(be, n, u).try())),
         _        => Ok(None),
     })
 }
 
-named_with = (be :: CBackend, n: TyNamed, args: Vec<TyId>)
-             Res<Res<TyId>, AllocError> {
+// THE SAME `Ptr` DECLARATION AT ANOTHER ELEMENT TYPE. `to<U>` builds one
+// and `gen_c_alloc.zen`'s `create<T>` builds the same one, so the
+// interning is written once — two spellings of it are two `TyId`s for
+// one type, and a `Ptr<T>` that does not compare equal to the `Ptr<T>` a
+// callee declared is a cast this backend would not know it needed.
+ptr_at* = (be :: CBackend, n: TyNamed, elem: TyId) Res<TyId, AllocError> {
+    args ::= be.alloc.Vec<TyId>();
+    args.add(elem).try();
     qname ::= be.alloc.String().try();
     write_qname(be, qname, n).try();
-    Ok(Ok(intern_ptr(be.check, n, qname.view(), args).try()));
+    intern_ptr(be.check, n, qname.view(), args)
 }
 
 // Through ONE field hop: `be.check.types.named(..)` spilled through two
