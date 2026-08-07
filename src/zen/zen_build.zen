@@ -524,10 +524,29 @@ Build* = {
         n = c.diag_count();
         self.faults = self.faults + n;
         (n > 0).then(() { println("{}", report.view()); });
-        absent = self.missing_main(c, job).try();
+        absent = self.main_check(c, job).try();
         self.faults = self.faults + absent;
         ((n + absent) == 0).then(() { self.emit(c, job).try(); });
         Ok(());
+    }
+
+    // ONE MISTAKE, ONE DIAGNOSTIC, and this is the phase where that is
+    // easiest to break. A file that failed to lex or parse is a
+    // FRAGMENT: whatever it declares, `main` is not reliably among
+    // them, so asking is asking a question the earlier fault already
+    // answered. `must-fail/lex/bom_mid_file` was told its byte-order
+    // mark was misplaced AND that it declared no program — two
+    // sentences, one mistake, and the second one wrong about why.
+    //
+    // A CLEAN TREE WITH NO `main` IS STILL REPORTED. That is the whole
+    // point of the check: nothing else in the pipeline notices, and an
+    // empty file lexes clean.
+    main_check = (self :: @Self, c :: Checker, job: Job)
+                 Res<usize, AllocError> {
+        (self.faults == 0).match({
+            false => Ok(0),
+            true  => self.missing_main(c, job),
+        })
     }
 
     // LAW 2 IS A LAW ABOUT PROGRAMS, and a root that declares no `main`
