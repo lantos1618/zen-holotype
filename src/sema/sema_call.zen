@@ -60,6 +60,7 @@ Found, Base, base_of, members_of, static_access = sema.sema_member
 is_type_def, opaque, nowhere = sema.sema_member
 satisfies_bound, check_bounds = sema.sema_bound
 type_from_ast, type_of, param_type = sema.sema_type
+alias_module, module_not_a_value = sema.sema_module
 cands_of, travelled_cands, matches = sema.sema_cand
 ty_at, is_tvar = sema.sema_cand
 
@@ -261,7 +262,20 @@ construct_or_fail = (c :: Checker, id: ExprId, node: Expr, call: Call,
     c.world.defs_of(ctx.module, name, defs).try();
     type_def_of(defs).match({
         None    => no_overload(c, node, name, cands),
-        Ok(d)   => construct(c, id, call, d, ctx),
+        Ok(d)   => construct_def(c, id, node, call, d, ctx),
+    })
+}
+
+// A MODULE IS NOT A CONSTRUCTOR. `is_type_def` answers about a `DefKind`
+// and an alias is a type declaration by kind — but `reseat = vec` aliases
+// a MODULE, and constructing it invented a nominal type of the alias's own
+// name that nothing declares. That is how an unstarred `reseat` inside
+// `vec` became callable through a name that never meant it.
+construct_def = (c :: Checker, id: ExprId, node: Expr, call: Call, d: Def,
+                 ctx: Ctx) Res<TyId, AllocError> {
+    c.alias_module(d.id).match({
+        None   => construct(c, id, call, d, ctx),
+        Ok(mi) => c.module_not_a_value(node.span, d.name, mi),
     })
 }
 

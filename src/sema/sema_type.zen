@@ -16,11 +16,11 @@
 //
 // OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
 // is "what does this node mean", and the two queries share the memo
-// discipline, the poison rule and `.try()`'s four rules. The forms that
-// grew their own subject have already left — `Match` to `sema_match`,
-// `Access` to `sema_member`, `Call` to `sema_call`, the trap rule to
-// `sema_trap` — and what is left is the dispatch plus the forms with no
-// subject of their own.
+// discipline and the poison rule. The forms that grew their own subject
+// have already left — `Match` to `sema_match`, `Access` to `sema_member`,
+// `Call` to `sema_call`, the trap rule to `sema_trap`, and the failure
+// model with `.try()` to `sema_try` — and what is left is the dispatch
+// plus the forms with no subject of their own.
 //
 // THE ENGINE HOLDS STATE AND THIS HOLDS BEHAVIOUR, which is what made
 // the split possible: `sema_check.zen` imports nothing from here.
@@ -35,7 +35,7 @@
 // problem and not a smell.
 
 Ast, Expr, ExprId, Type, TypeId, Span, Ident, Literal, LiteralKind = ast
-Decl, DeclKind, Const = ast
+Decl, DeclKind, Const, Alias, Enum = ast
 BinOp, UnOp, Block, BlockId, Stmt, StmtKind = ast
 Param, Binary, Unary, Bind, ExprStmt, Match, Access, Call = ast
 ArrayType, ArrayLit, FixedArray, Index = ast
@@ -44,13 +44,14 @@ Vec, Map = std.collections
 str, String = std.text
 Range = std.core
 DeclId = sema.sema_id
-TyId, Ty, Types, ResForm, TyRes, TyArray = sema.sema_ty
+TyId, Ty, Types, TyArray, TyNamed = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 named_or_union = sema.sema_union
-Diag, SemaFault, NameFault, TypeFault = sema.sema_diag
+Diag, SemaFault, NameFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 UNRESOLVED, is_prim, is_predicate = sema.sema_check
-absence_into_failure, both_failures = sema.sema_check
+try_type = sema.sema_try
+alias_module, module_not_a_value = sema.sema_module
 match_type = sema.sema_match
 access_type = sema.sema_member
 variant_type = sema.sema_member
@@ -239,7 +240,108 @@ lookup_named* = (c :: Checker, node: Type, name: Ident, args: Vec<TyId>,
     c.world.defs_of(ctx.module, name.text, found).try();
     found.get(0).match({
         None    => c.unresolved_type(node, name),
-        Ok(d)   => named_or_union(c, d, args),
+        Ok(d)   => c.declared_or_alias(d, args),
+    })
+}
+
+// "AN ALIAS IS THE TYPE, NOT A NAME THAT FORWARDS TO IT." `Alias = Shape`
+// binds `Alias` to `Shape` ITSELF, so `Alias.Circle` is `Shape.Circle` and
+// a value of one is a value of the other, because there are not two types.
+// So an alias RESOLVES THROUGH here, and nothing downstream sees a second
+// type — `ast_node.zen` says as much where `Alias` is declared, and no
+// backend has an arm for one.
+//
+// Answering with a nominal of the alias's OWN name is what it did instead,
+// and that type has no members, no variants and no impls: `a: Alias =
+// Alias.Circle` became "no such field or method on this type `Circle`",
+// which names neither the alias nor anything the author wrote.
+declared_or_alias* = (c :: Checker, d: Def, args: Vec<TyId>)
+                    Res<TyId, AllocError> {
+    d.kind.match({
+        AliasDef => c.alias_type(d, args),
+        _        => named_or_union(c, d, args),
+    })
+}
+
+// TWO ALIASES DO NOT RESOLVE THROUGH, and both keep the nominal the rest
+// of the compiler already recognises them by.
+//
+// A MODULE ALIAS has no type to resolve TO: `zz = vec` is grammar R1a's
+// other reading of the same three tokens, and `module_named_by` finds the
+// module back through this nominal's decl — which is what makes
+// `sh.reseat(3)` work. Using the bare name is a diagnostic raised where
+// the name is USED, not here.
+//
+// A PARAMETERISED ALIAS is a type constructor, and resolving its target
+// without substituting would answer with a type full of free parameters.
+// It stays nominal until substitution exists to do it properly.
+alias_type* = (c :: Checker, d: Def, args: Vec<TyId>)
+             Res<TyId, AllocError> {
+    c.alias_module(d.id).match({
+        Ok(_) => named_or_union(c, d, args),
+        None  => c.alias_decl_type(d, args),
+    })
+}
+
+alias_decl_type* = (c :: Checker, d: Def, args: Vec<TyId>)
+                  Res<TyId, AllocError> {
+    decl_at(c.tree, d.id).match({
+        None  => named_or_union(c, d, args),
+        Ok(x) => x.kind.match({
+            Alias(al) => c.alias_written_type(al, d, args),
+            _         => named_or_union(c, d, args),
+        }),
+    })
+}
+
+// The target, read in the module that DECLARED the alias: a written type
+// is a name, and a name means what it means where it was written.
+alias_written_type* = (c :: Checker, al: Alias, d: Def, args: Vec<TyId>)
+                     Res<TyId, AllocError> {
+    (al.tparams.len == 0).match({
+        false => named_or_union(c, d, args),
+        true  => c.alias_target_of(al, d),
+    })
+}
+
+alias_target_of* = (c :: Checker, al: Alias, d: Def) Res<TyId, AllocError> {
+    poison = c.types.unknown().try();
+    ctx = Ctx(d.id.module.to_usize(), poison);
+    c.type_from_ast(al.target, ctx)
+}
+
+// THE ENUM AN ALIAS NAMES, asked by the backend lowering `Alias.Circle`.
+//
+// The backend finds the enum a base names by looking the name up itself,
+// and an alias answered `AliasDef` there — so the variant had no enum to
+// belong to and `Alias` was reported as an unresolved value. It asks SEMA
+// rather than walking to the target a second time, because two walks that
+// disagreed would write a tag from one enum into a value of another, which
+// is C that compiles and means something else.
+//
+// `None` when the target is not an enum, which is the answer any other
+// declaration gives — a struct alias has no variants to reach.
+alias_enum* = (c :: Checker, d: Def) Res<TyId> {
+    c.def_type(d).match({
+        Err(_) => None,
+        Ok(ty) => c.enum_named_by(ty),
+    })
+}
+
+enum_named_by* = (c :: Checker, ty: TyId) Res<TyId> {
+    c.types.at(ty).match({
+        Named(n) => c.enum_decl_of(n, ty),
+        _        => None,
+    })
+}
+
+enum_decl_of* = (c :: Checker, n: TyNamed, ty: TyId) Res<TyId> {
+    decl_at(c.tree, n.decl).match({
+        None  => None,
+        Ok(x) => x.kind.match({
+            Enum(_) => Ok(ty),
+            _       => None,
+        }),
     })
 }
 
@@ -399,7 +501,20 @@ global_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
     c.world.defs_of(ctx.module, text, found).try();
     found.get(0).match({
         None    => c.variant_name_type(node, text, ctx),
-        Ok(d)   => c.def_type(d),
+        Ok(d)   => c.value_def_type(node, d),
+    })
+}
+
+// A MODULE IS A NAMESPACE, NOT A VALUE — and the mistake is the USE, not
+// the binding. `sh = shape` then `sh.reseat(3)` is a real pattern the
+// corpus gates; `println("{}", sh)` is not, and the two are the same
+// declaration. So the diagnostic lands here, where the bare name stands
+// where a value belongs, and says which module it names: the error this
+// used to produce was "cannot print a value of this type".
+value_def_type* = (c :: Checker, node: Expr, d: Def) Res<TyId, AllocError> {
+    c.alias_module(d.id).match({
+        None   => c.def_type(d),
+        Ok(mi) => c.module_not_a_value(node.span, d.name, mi),
     })
 }
 
@@ -444,11 +559,21 @@ unresolved_name* = (c :: Checker, node: Expr, text: str)
 // argument built from a constant fail to match the `str` parameter it
 // was written for — "no overload matches" on a call whose only
 // irregularity is that one argument was named.
+// AN ALIAS IS NOT ITS OWN TYPE EITHER, for the same reason a constant is
+// not: `Alias.Circle` is `Shape.Circle`, so the base a dot reaches through
+// has to be `Shape`. `declared_or_alias` is the same resolution the
+// written-type path takes, asked with no arguments.
 def_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
     d.kind.match({
         ConstDef => const_type(c, d),
+        AliasDef => c.def_alias_type(d),
         _        => decl_as_type(c, d),
     })
+}
+
+def_alias_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
+    empty ::= c.alloc.Vec<TyId>();
+    c.declared_or_alias(d, empty)
 }
 
 decl_as_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
@@ -548,139 +673,6 @@ no_address* = (c :: Checker, node: Expr, a: Access, inner: TyId)
                 SemaFault.ComputedFieldAddress(
                     NameFault(name: a.name.text))).try();
     Ok(inner);
-}
-
-
-// -----------------------------------------------------------------
-// `.try()`
-//
-// "It unwraps Ok, or returns the Err — or the None — from the
-// ENCLOSING function." Three rules go with it and all three are law
-// 4: the enclosing function must return a compatible Res, a `Res<T>`
-// may not try into a `Res<T, E>` function, and nothing is converted.
-// -----------------------------------------------------------------
-
-try_type* = (c :: Checker, node: Expr, operand: ExprId, ctx: Ctx)
-           Res<TyId, AllocError> {
-    got = c.type_of(operand, ctx).try();
-    c.types.at(got).match({
-        Res(r) => c.try_res(node, r, got, ctx),
-        _      => c.try_not_res(node, got, ctx),
-    })
-}
-
-try_not_res* = (c :: Checker, node: Expr, got: TyId, ctx: Ctx)
-              Res<TyId, AllocError> {
-    // poison never produces a second diagnostic
-    c.is_unknown(got).match({
-        false => c.try_needs_res(node, got),
-        true  => Ok(got),
-    })
-}
-
-try_needs_res* = (c :: Checker, node: Expr, got: TyId)
-                Res<TyId, AllocError> {
-    want = c.types.unknown().try();
-    c.report(node.span.file, node.span,
-                SemaFault.TryNeedsRes(TypeFault(
-                    name: "", expected: want, found: got))).try();
-    c.types.unknown()
-}
-
-try_res* = (c :: Checker, node: Expr, r: TyRes, got: TyId, ctx: Ctx)
-          Res<TyId, AllocError> {
-    ctx.has_ret.match({
-        false => c.try_outside_res(node, got),
-        true  => c.try_into(node, r, got, ctx),
-    })
-}
-
-try_outside_res* = (c :: Checker, node: Expr, got: TyId)
-                  Res<TyId, AllocError> {
-    want = c.types.unknown().try();
-    c.report(node.span.file, node.span,
-                SemaFault.TryOutsideRes(TypeFault(
-                    name: "", expected: want, found: got))).try();
-    Ok(got)
-}
-
-// The enclosing function returns a Res. Which one decides whether
-// this propagation is legal at all.
-try_into* = (c :: Checker, node: Expr, r: TyRes, got: TyId, ctx: Ctx)
-           Res<TyId, AllocError> {
-    c.types.at(ctx.ret).match({
-        Res(want) => c.try_merge(node, r, want, got),
-        _         => c.try_outside_res(node, got),
-    })
-}
-
-try_merge* = (c :: Checker, node: Expr, r: TyRes, want: TyRes, got: TyId)
-            Res<TyId, AllocError> {
-    // an absence propagating into a failure is the one shape law 4
-    // names outright: "a None never becomes an Err. You name the
-    // reason" — and `.ok_or(..)` is where that is written.
-    absence_into_failure(r.form, want.form).match({
-        true  => c.try_absence(node, got, r.value),
-        false => c.try_set(node, r, want),
-    })
-}
-
-try_absence* = (c :: Checker, node: Expr, got: TyId, value: TyId)
-              Res<TyId, AllocError> {
-    want = c.types.res_failure(value, got).try();
-    c.report(node.span.file, node.span,
-                SemaFault.TryAbsenceIntoFailure(TypeFault(
-                    name: "", expected: want, found: got))).try();
-    Ok(value)
-}
-
-// "propagation merges sets" — and merging is containment, not
-// conversion. The callee's set must already be part of the
-// caller's; there is no From to bridge them.
-try_set* = (c :: Checker, node: Expr, r: TyRes, want: TyRes)
-          Res<TyId, AllocError> {
-    both_failures(r.form, want.form).match({
-        true  => c.try_contained(node, r, want),
-        false => Ok(r.value),
-    })
-}
-
-// A caller whose own set is `_` has not declared one, so there is
-// nothing to be contained IN. It raises what the callee raises, and
-// `sema_raise.zen` settles the signature once the body is walked.
-try_contained* = (c :: Checker, node: Expr, r: TyRes, want: TyRes)
-                Res<TyId, AllocError> {
-    c.is_infer(want.error).match({
-        true  => c.try_raises(r),
-        false => c.try_declared(node, r, want),
-    })
-}
-
-// The callee's SET and not its name: `WriteError` raised into an
-// inferred set contributes `IoError` and `AllocError`, so that the
-// caller's own declared set is asked to contain members and not a
-// spelling. `union_ty` flattens the rest.
-try_raises* = (c :: Checker, r: TyRes) Res<TyId, AllocError> {
-    c.raise(c.set_of(r.error)).try();
-    Ok(r.value);
-}
-
-try_declared* = (c :: Checker, node: Expr, r: TyRes, want: TyRes)
-               Res<TyId, AllocError> {
-    c.types.set_within(c.set_of(r.error), c.set_of(want.error)).match({
-        false => c.try_no_conversion(node, r, want),
-        true  => Ok(r.value),
-    })
-}
-
-try_no_conversion* = (c :: Checker, node: Expr, r: TyRes, want: TyRes)
-                    Res<TyId, AllocError> {
-    c.report(node.span.file, node.span,
-                SemaFault.NoErrorConversion(TypeFault(
-                    name: "",
-                    expected: want.error,
-                    found: r.error))).try();
-    Ok(r.value)
 }
 
 // -----------------------------------------------------------------
