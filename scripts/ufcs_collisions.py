@@ -69,9 +69,15 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 #
 # All four found on the first run, and all four are the same thing: a private
 # helper someone wrote without noticing the type already had that method.
-# None is called at all, from anywhere -- they are dead. Deleting them is the
-# entire fix, and it belongs in the commit of whoever owns the file, not in
-# the commit that adds this check.
+#
+# TWO OF THE FOUR WERE LIVE, and the first report of them said all four were
+# dead. `at(argv, i)` ran three times in the CLI's argument scan and
+# `at(out, j)` twice in the emitter's insertion sort -- both shadowing
+# `Vec.at`, which returns `Res<T>` where the helpers returned the element
+# with a default. So do not read a finding here as latent until you have
+# grepped for the call sites: "nothing calls it yet" is a claim about the
+# tree, not a property of the collision, and it is the claim most likely to
+# be wrong.
 #
 # Deleting a line is how one closes; the staleness check below makes that
 # mandatory rather than optional. Adding a line requires this sentence to be
