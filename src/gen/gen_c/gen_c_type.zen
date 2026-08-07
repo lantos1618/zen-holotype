@@ -32,7 +32,7 @@ Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
-TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
+TyId, Ty, Types, TyNamed, TyRes, TyArray, ResForm = sema.sema_ty
 World, Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 type_from_ast = sema.sema_type
@@ -72,6 +72,7 @@ ctype* = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
         Named(n) => maybe_ptr(be, id, n, out),
         Res(_)   => named_ctype(be, id, out),
         Union(_) => named_ctype(be, id, out),
+        Array(_) => named_ctype(be, id, out),
         _        => out.add_bytes("int"),
     }).try();
     Ok(());
@@ -155,6 +156,7 @@ spellable* = (be: CBackend, id: TyId) bool {
         Named(_) => true,
         Res(_)   => true,
         Union(_) => true,
+        Array(_) => true,
         _        => false,
     })
 }
@@ -316,6 +318,7 @@ request_members = (be :: CBackend, id: TyId) Res<(), AllocError> {
         Named(n) => request_named_members(be, n, id),
         Res(r)   => request_res_members(be, r),
         Union(u) => request_union_members(be, u.members),
+        Array(a) => request_if_composite(be, a.elem),
         _        => Ok(()),
     }).try();
     Ok(());
@@ -357,6 +360,7 @@ request_if_named = (be :: CBackend, id: TyId) Res<(), AllocError> {
         Named(_) => request_type(be, id),
         Res(_)   => request_type(be, id),
         Union(_) => request_type(be, id),
+        Array(_) => request_type(be, id),
         _        => Ok(()),
     })
 }

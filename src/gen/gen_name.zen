@@ -51,7 +51,7 @@ Vec = std.collections
 Alloc, AllocError = std.mem
 Range = std.core
 write_usize = sema.sema_diag
-TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
+TyId, Ty, Types, TyNamed, TyRes, TyArray, ResForm = sema.sema_ty
 World = sema.sema_def
 DeclId = sema.sema_id
 Inst = sema.sema_inst
@@ -76,11 +76,10 @@ RES_PATH* : str = "std.core.result.Res"
 // One length-prefixed component: `alpha` -> `5alpha`.
 //
 // A component that is not a Zen identifier is HEX-ESCAPED rather than
-// written through, because the output has to be a C identifier and not
-// every interned name is one: a fixed array is interned under `[]`, so
-// `[u8, 4]` would otherwise mangle to `zu_t1_2[]I1_b2u8`. The escape is
-// `x` followed by two hex digits a byte, which cannot collide with a
-// real identifier because a real identifier never reaches it.
+// written through, because the output has to be a C identifier and a
+// name reaching here is not guaranteed to be one. The escape is `x`
+// followed by two hex digits a byte, which cannot collide with a real
+// identifier because a real identifier never reaches it.
 comp* = (out :: String, name: str) Res<(), AllocError> {
     is_c_identifier(name).match({
         true  => plain_comp(out, name),
@@ -394,6 +393,7 @@ tcode* = (out :: String, types: Types, world: World, id: TyId)
         Res(r)   => tcode_res(out, types, world, r),
         Fn(f)    => tcode_fn(out, types, world, f.params, f.ret),
         Union(u) => tcode_union(out, types, world, u.members),
+        Array(a) => tcode_array(out, types, world, a),
         Var(_)   => out.add_bytes("q"),
         Infer    => out.add_bytes("q"),
         Unknown  => out.add_bytes("q"),
@@ -461,6 +461,20 @@ res_arity* = (form: ResForm) usize {
 
 is_failure* = (form: ResForm) bool {
     form.match({ Failure => true, Absence => false, Open => false })
+}
+
+// `[i32, 4]` is `a4_bi32`. THE COUNT IS IN THE NAME because it is in the
+// type: `tcode` is injective and two types share a C name exactly when
+// they are one type, so `[i32, 4]` and `[i32, 5]` — which hold different
+// numbers of bytes — must not collide. The count is written as a list
+// header, so the `_` separates it from the element and nothing after it
+// can be read as more digits.
+tcode_array = (out :: String, types: Types, world: World, a: TyArray)
+              Res<(), AllocError> {
+    out.add_bytes("a").try();
+    count(out, a.count).try();
+    tcode(out, types, world, a.elem).try();
+    Ok(());
 }
 
 tcode_fn = (out :: String, types: Types, world: World, params: Vec<TyId>,

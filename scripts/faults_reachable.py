@@ -53,12 +53,6 @@ OWED = {
         "currently emits C that the C compiler rejects.",
     "HoistNotSuccess":
         "only success lifts into Res. Same unit as HoistAmbiguous.",
-    "ProvenIndexOutOfBounds":
-        "DESIGN.md:301 -- an index the compiler can prove is out of "
-        "bounds is a compile error. Unreachable by construction: a fixed "
-        "array's type does not carry its count, so there is nothing to "
-        "compare against. Blocked on fixed arrays, which are parsed and "
-        "then handled nowhere (zero hits for FixedArray in sema or gen).",
     "InfiniteSize":
         "a field cycle that never reaches an indirection. sema.zen:35 "
         "admits it; the layout walk does not terminate rather than "

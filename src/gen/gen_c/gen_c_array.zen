@@ -1,0 +1,280 @@
+// src/gen/gen_c/gen_c_array.zen
+// What a FIXED ARRAY is in C: its layout, its two literal forms, its
+// bounds-checked index, and the walk that makes it a Range.
+//
+// ONE FILE BECAUSE IT IS ONE SUBJECT, and the four parts are not
+// separable. The layout decides the member name, the literals write
+// through that member, the index reads through it, and the walk reads
+// through it once per pass — so splitting them by which caller asks
+// would put one C spelling in four files and give it four chances to
+// drift. Every other file in this folder holds a one-line arm that
+// lands here.
+//
+// A `[T, N]` IS A STRUCT AROUND A C ARRAY and not a bare `T[N]`. C
+// arrays do not assign, do not pass by value and do not return; a Zen
+// fixed array does all three — "lives on the stack, no alloc" —  and
+// wrapping it is the one representation that gives C's own value
+// semantics to something C spells as a pointer everywhere else.
+//
+// THE COUNT COMES FROM THE TYPE AND NEVER FROM THE EXPRESSION. It is
+// `TyArray.count`, interned, which is what "the count is part of the
+// type" buys: the bounds check needs no length stored beside the bytes,
+// and the array a `Res` carries has the same length as the one that was
+// written.
+//
+// A FIXED ARRAY SATISFIES `Range` INTRINSICALLY, and `std/core/range.zen`
+// says why it can be nothing else: "`[T, N]` is a type constructor, not
+// a name, so there is no `[T, N].impl(..)` to write". Its start is 0,
+// its end is the comptime count, and its `at` is the index below — so
+// the walk needs no `at` call and no `Res` per pass, which is what keeps
+// a fold over one a plain C for-loop.
+
+ExprId, ArrayLit, FixedArray, Index, Lambda = ast
+AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+TyId, TyArray = sema.sema_ty
+Ctx = sema.sema_check
+write_usize = sema.sema_diag
+Emit = gen.gen_emit
+sym_gen, GEN = gen.gen_name
+CBackend = gen.gen_c.gen_c_state
+unsupported = gen.gen_c.gen_c_state
+Shape = gen.gen_c.gen_c_shape
+Fold = gen.gen_c.gen_c_fold
+ctype, declarator, request_type, is_signed = gen.gen_c.gen_c_type
+expr, ty_of = gen.gen_c.gen_c_expr
+write_position = gen.gen_c.gen_c_op
+open_result, close_pass, run_body = gen.gen_c.gen_c_loop
+declare_usize, settle_res = gen.gen_c.gen_c_loop
+
+// The one member every fixed-array struct has. Written out rather than
+// composed, because the layout, the literals, the index and the walk all
+// have to spell it the same way and a shared constant is how they do.
+ELEMS* : str = "zg_elems"
+
+// The array reading of a type, and nothing for every other type. The
+// question a dozen dispatch arms ask, asked in one place.
+array_of* = (be :: CBackend, id: TyId) Res<TyArray> {
+    be.types().at(id).match({
+        Array(a) => Ok(a),
+        _        => None,
+    })
+}
+
+// -----------------------------------------------------------------
+// the layout
+// -----------------------------------------------------------------
+
+// `struct zg_a4_bi32 { int32_t zg_elems[4]; };`
+//
+// A COUNT OF ZERO STILL TAKES ONE ELEMENT. C99 6.7.5.2 forbids a zero
+// length array member, and a `[T, 0]` is reachable — an empty literal,
+// or a count that folded to nothing — so the storage is widened rather
+// than the C left to be rejected. Nothing indexes it: the bounds check
+// compares against the TYPE's count, which is still zero.
+write_array_def* = (be :: CBackend, out :: Emit, name: str, a: TyArray)
+                   Res<(), AllocError> {
+    out.bytes("struct ").try();
+    out.bytes(name).try();
+    out.say(" {").try();
+    out.indent();
+    line ::= be.alloc.String().try();
+    declarator(be, a.elem, ELEMS, line).try();
+    line.add_bytes("[").try();
+    line.write_usize(storage_count(a)).try();
+    line.add_bytes("];").try();
+    out.say(line.view()).try();
+    out.dedent();
+    out.say("};").try();
+    out.line().try();
+    Ok(());
+}
+
+storage_count = (a: TyArray) usize {
+    (a.count == 0).match({ true => 1, false => a.count })
+}
+
+// -----------------------------------------------------------------
+// the two literal forms
+//
+// `[0, 1, 2]` and `[i32, 4](2, 3, 5, 7)` are one C expression: a
+// compound literal holding the initialiser for the single member.
+// They differ only in where the element type comes from, so they meet
+// as soon as that is answered.
+// -----------------------------------------------------------------
+
+lower_array_lit* = (be :: CBackend, id: ExprId, a: ArrayLit, ctx: Ctx,
+                   want: TyId, out :: String) Res<(), AllocError> {
+    ty = ty_of(be, id, ctx, want).try();
+    write_elems(be, id, a.elems, ty, ctx, out)
+}
+
+lower_fixed_array* = (be :: CBackend, id: ExprId, f: FixedArray, ctx: Ctx,
+                     want: TyId, out :: String) Res<(), AllocError> {
+    ty = ty_of(be, id, ctx, want).try();
+    write_elems(be, id, f.elems, ty, ctx, out)
+}
+
+// `((struct zg_a4_bi32){ { 2, 3, 5, 7 } })` — the inner braces are the
+// member, the outer ones the struct.
+//
+// A literal whose type is not an array is a literal nothing typed, and
+// it is refused with a position rather than emitted at a guess: the C
+// for `[0, 1, 2]` at an unknown element type would compile and hold the
+// wrong number of bytes.
+write_elems = (be :: CBackend, id: ExprId, elems: Vec<ExprId>, ty: TyId,
+               ctx: Ctx, out :: String) Res<(), AllocError> {
+    array_of(be, ty).match({
+        None    => unsupported(be, id, "an array literal whose element type nothing settles", out),
+        Ok(a)   => write_compound(be, elems, ty, a, ctx, out),
+    })
+}
+
+write_compound = (be :: CBackend, elems: Vec<ExprId>, ty: TyId, a: TyArray,
+                  ctx: Ctx, out :: String) Res<(), AllocError> {
+    request_type(be, ty).try();
+    out.add_bytes("((").try();
+    ctype(be, ty, out).try();
+    out.add_bytes("){ { ").try();
+    // an empty literal still needs an initialiser, and `0` is the one
+    // that is legal for every element type the storage could have
+    (elems.len == 0).match({
+        true  => out.add_bytes("0"),
+        false => write_elem_list(be, elems, a, ctx, out),
+    }).try();
+    out.add_bytes(" } })").try();
+    Ok(());
+}
+
+write_elem_list = (be :: CBackend, elems: Vec<ExprId>, a: TyArray,
+                   ctx: Ctx, out :: String) Res<(), AllocError> {
+    elems.loop((h, i, e) {
+        (i > 0).then(() { out.add_bytes(", ").try() });
+        expr(be, e, ctx, a.elem, out).try();
+    });
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// the index
+// -----------------------------------------------------------------
+
+// `buf[i]` on a fixed array is BOUNDS-CHECKED AND TRAPS, and this is the
+// whole of that rule in the backend: the count comes from the type, so
+// nothing is stored beside the bytes and nothing has to be read to check.
+//
+// TWO HELPERS AND THE INDEX'S OWN TYPE PICKS ONE. A signed index has to
+// be tested for negativity as well as for the length, and testing it
+// through an unsigned comparison alone would let `-1` wrap into a
+// gigantic index that passes — which is exactly the check that reads one
+// element past the end with no diagnostic. `zg_idx_s` makes the split.
+write_array_index* = (be :: CBackend, ix: Index, base_ty: TyId, a: TyArray,
+                     ctx: Ctx, out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    expr(be, ix.base, ctx, base_ty, out).try();
+    out.add_bytes(").").try();
+    out.add_bytes(ELEMS).try();
+    out.add_bytes("[").try();
+    write_checked(be, ix, a, ctx, out).try();
+    out.add_bytes("]").try();
+    Ok(());
+}
+
+write_checked = (be :: CBackend, ix: Index, a: TyArray, ctx: Ctx,
+                 out :: String) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    ity = ty_of(be, ix.index, ctx, unknown).try();
+    counter = be.check.types.prim("usize").try();
+    out.add_bytes(GEN).try();
+    out.add_bytes(helper_of(be, ity)).try();
+    out.add_bytes("(").try();
+    expr(be, ix.index, ctx, counter, out).try();
+    out.add_bytes(", ").try();
+    out.write_usize(a.count).try();
+    out.add_bytes(", ").try();
+    write_position(be, be.tree.expr_at(ix.base).span.file, ix.op_span,
+                   out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+helper_of = (be :: CBackend, ity: TyId) str {
+    is_signed(be.check.prim_name(ity)).match({
+        true  => "idx_s",
+        false => "idx_u",
+    })
+}
+
+// -----------------------------------------------------------------
+// the walk
+//
+// `lower_bounded` in `gen_c_loop.zen` is the same shape with two reads
+// swapped: a concrete `Range` takes its bounds off the struct's own
+// `start` and `end`, and an array's are 0 and a constant the type
+// already knows. What it CANNOT share is the value handed to the body —
+// an element, not the counter — which is what an array's intrinsic `at`
+// comes to.
+// -----------------------------------------------------------------
+
+lower_array_walk* = (be :: CBackend, sh: Shape, one: ExprId, rty: TyId,
+                    a: TyArray, lam: Lambda, ctx: Ctx, want: TyId,
+                    fold: Fold, out :: String) Res<(), AllocError> {
+    settled = settle_res(be, want, a.elem).try();
+
+    // the array is evaluated ONCE, into a temporary: every pass is a
+    // read of it, and re-evaluating the expression per pass would walk a
+    // fresh array each time
+    rng ::= be.alloc.String().try();
+    sym_gen(rng, "r", be.next_tmp()).try();
+    decl ::= be.alloc.String().try();
+    declarator(be, rty, rng.view(), decl).try();
+    decl.add_bytes(" = ").try();
+    expr(be, one, ctx, rty, decl).try();
+    decl.add_bytes(";").try();
+    be.writeln(decl.view()).try();
+
+    st = open_result(be, settled, out).try();
+    counter ::= be.alloc.String().try();
+    sym_gen(counter, "i", be.next_tmp()).try();
+    declare_usize(be, counter.view()).try();
+    be.write(counter.view()).try();
+    be.writeln(" = 0;").try();
+
+    be.write("while (").try();
+    be.write(counter.view()).try();
+    be.write(" < ").try();
+    write_count(be, a).try();
+    be.writeln(") {").try();
+    be.indent();
+    value ::= be.alloc.String().try();
+    write_pass_value(be, rng.view(), counter.view(), value).try();
+    // the base is the counter's own start, and an array always starts at
+    // zero — so `index` and the counter are the same number and there is
+    // nothing to subtract
+    run_body(be, sh, lam, counter.view(), "", value.view(), a.elem, fold,
+             ctx).try();
+    close_pass(be, st, counter.view(), fold).try();
+    Ok(());
+}
+
+write_count = (be :: CBackend, a: TyArray) Res<(), AllocError> {
+    text ::= be.alloc.String().try();
+    text.write_usize(a.count).try();
+    be.write(text.view())
+}
+
+// The element at the counter, read straight through the member. The walk
+// never leaves the range — the counter is tested against the same count
+// the check would compare against — so there is no helper call here and
+// the fold stays a plain C for-loop.
+write_pass_value = (be :: CBackend, rng: str, counter: str, out :: String)
+                   Res<(), AllocError> {
+    out.add_bytes(rng).try();
+    out.add_bytes(".").try();
+    out.add_bytes(ELEMS).try();
+    out.add_bytes("[").try();
+    out.add_bytes(counter).try();
+    out.add_bytes("]").try();
+    Ok(());
+}

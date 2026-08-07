@@ -279,7 +279,7 @@ declaring both is an error at the declaration site.
 | `Try(Try)` | `operand` | `.try()` |
 | `Record(Record)` | `entries` | `{ src: Path(..), deps: [..] }` |
 | `Access(Access)` | `base, name` | `p.x`, `Shape.Unit`, `i32.MAX` |
-| `Index(Index)` | `base, index` | `buf[i]` |
+| `Index(Index)` | `base, index, op_span` | `buf[i]` |
 | `Unary(Unary)` | `op, op_span, operand` | |
 | `Binary(Binary)` | `op, op_span, lhs, rhs` | |
 | `Consume(Consume)` | `operand` | `consume f` |

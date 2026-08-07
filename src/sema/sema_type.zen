@@ -38,24 +38,25 @@ Ast, Expr, ExprId, Type, TypeId, Span, Ident, Literal, LiteralKind = ast
 Decl, DeclKind, Const = ast
 BinOp, UnOp, Block, BlockId, Stmt, StmtKind = ast
 Param, Binary, Unary, Bind, ExprStmt, Match, Access, Call = ast
+ArrayType, ArrayLit, FixedArray, Index = ast
 Alloc, AllocError = std.mem
 Vec, Map = std.collections
 str, String = std.text
 Range = std.core
 DeclId = sema.sema_id
-TyId, Ty, Types, ResForm, TyRes = sema.sema_ty
+TyId, Ty, Types, ResForm, TyRes, TyArray = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 named_or_union = sema.sema_union
 Diag, SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
-ARRAY_DECL, UNRESOLVED, is_prim, is_predicate = sema.sema_check
+UNRESOLVED, is_prim, is_predicate = sema.sema_check
 absence_into_failure, both_failures = sema.sema_check
 match_type = sema.sema_match
 access_type = sema.sema_member
 variant_type = sema.sema_member
 call_type = sema.sema_call
 computed_member = sema.sema_member
-check_binary = sema.sema_trap
+check_binary, const_count, check_index = sema.sema_trap
 
 // -----------------------------------------------------------------
 // QUERY: the type a written type node denotes
@@ -119,7 +120,7 @@ type_kind* = (c :: Checker, node: Type, ctx: Ctx) Res<TyId, AllocError> {
         Named(n)  => c.named_type(node, n.name, n.args, ctx),
         Union(u)  => c.union_type(u.members, ctx),
         Fn(f)     => c.fn_type(f.params, f.ret, ctx),
-        Array(t)  => c.array_type(t.elem, ctx),
+        Array(t)  => c.array_type(t, ctx),
     })
 }
 
@@ -156,16 +157,20 @@ param_type* = (c :: Checker, p: Param, ctx: Ctx) Res<TyId, AllocError> {
     })
 }
 
-// `[u8, 64]`. The element type is what an assignment has to agree
-// about; the COUNT is a comptime expression and is not carried here
-// yet, so a provable out-of-range index is out of reach. That is a
-// gap and it is named in the report rather than papered over.
-array_type* = (c :: Checker, elem: TypeId, ctx: Ctx)
+// `[u8, 64]`. BOTH HALVES ARE THE TYPE: the element is what an
+// assignment has to agree about, and the count is what makes `[u8, 64]`
+// and `[u8, 65]` two types — DESIGN.md:301, and the reason a bounds
+// check needs no length stored beside the bytes.
+//
+// The count is an EXPRESSION because it is comptime, not because it is a
+// literal, so `[u8, i32.BITS]` folds the same way `i32.MAX + 1` does.
+// One that folds to nothing is a count this compiler cannot carry; it
+// takes 0, which makes every index into it out of range and reported
+// rather than silently admitted.
+array_type* = (c :: Checker, t: ArrayType, ctx: Ctx)
              Res<TyId, AllocError> {
-    e = c.type_from_ast(elem, ctx).try();
-    args ::= c.alloc.Vec<TyId>();
-    args.add(e).try();
-    c.types.named(ARRAY_DECL, "[]", "[]", args)
+    e = c.type_from_ast(t.elem, ctx).try();
+    c.types.array(e, const_count(c, t.count))
 }
 
 // A written name, applied to its arguments.
@@ -289,8 +294,62 @@ expr_kind* = (c :: Checker, id: ExprId, node: Expr, ctx: Ctx)
         Match(m)    => c.match_type(node, m, ctx),
         Access(a)   => c.access_type(node, a, ctx),
         Call(k)     => c.call_type(id, node, k, ctx),
+        Array(a)    => c.array_lit_type(a, ctx),
+        FixedArray(f) => c.fixed_array_type(f, ctx),
+        Index(x)    => c.index_element_type(node, x, ctx),
         _           => c.types.unknown(),
     })
+}
+
+// `[0, 1, 2]` — a fixed array whose count is how many were written and
+// whose element is the first one's type. "the reading is chosen by what
+// the elements ARE": nothing here is a type, so this is a literal.
+//
+// The FIRST element decides, and the rest are typed for their own sake:
+// a diagnostic inside an element nobody read is still a diagnostic. An
+// empty literal has no element to ask, and `_` is the honest answer —
+// the same hole `Res<Cfg, _>` writes.
+array_lit_type* = (c :: Checker, a: ArrayLit, ctx: Ctx)
+                 Res<TyId, AllocError> {
+    elem ::= c.types.infer().try();
+    a.elems.loop((h, i, e) {
+        got = c.type_of(e, ctx).try();
+        (i == 0).then(() { elem = got; });
+    });
+    c.types.array(elem, a.elems.len)
+}
+
+// `[i32, 4](2, 3, 5, 7)` — the type is WRITTEN, so it is what the array
+// is, and the arguments are checked against its element rather than
+// asked what they are. A count that disagrees with how many were written
+// is not caught here: `check_assign` sees one type and the arguments are
+// not an assignment to it.
+fixed_array_type* = (c :: Checker, f: FixedArray, ctx: Ctx)
+                   Res<TyId, AllocError> {
+    ty = c.type_from_ast(f.type, ctx).try();
+    f.elems.loop((h, e) { c.type_of(e, ctx).try(); });
+    Ok(ty);
+}
+
+// `buf[i]`. The element, when the receiver is a fixed array — and the
+// one place a literal index can be compared against a count, because
+// this is where both are known at once. Everything else indexes through
+// the `index` its type declares, which is the backend's question and
+// stays poison here.
+index_element_type* = (c :: Checker, node: Expr, x: Index, ctx: Ctx)
+                     Res<TyId, AllocError> {
+    base = c.type_of(x.base, ctx).try();
+    c.type_of(x.index, ctx).try();
+    c.types.at(base).match({
+        Array(a) => c.array_element(node, x, a),
+        _        => c.types.unknown(),
+    })
+}
+
+array_element = (c :: Checker, node: Expr, x: Index, a: TyArray)
+               Res<TyId, AllocError> {
+    c.check_index(node, x, a).try();
+    Ok(a.elem);
 }
 
 // An integer literal is its own type until a context settles it —

@@ -40,7 +40,7 @@ Vec = std.collections
 str, String = std.text
 Range = std.core
 DeclId, ImplId = sema.sema_id
-TyId, Ty, Types, TyNamed, TyRes = sema.sema_ty
+TyId, Ty, Types, TyNamed, TyRes, TyArray = sema.sema_ty
 World, Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 type_from_ast = sema.sema_type
@@ -61,6 +61,7 @@ write_label, open_result, close_pass = gen.gen_c.gen_c_loop
 Shape = gen.gen_c.gen_c_shape
 run_body, declare_usize, settle_res = gen.gen_c.gen_c_loop
 Fold, no_fold = gen.gen_c.gen_c_fold
+array_of = gen.gen_c.gen_c_array
 
 // -----------------------------------------------------------------
 // a range that STORES its bounds
@@ -267,6 +268,24 @@ add_if_bodied = (f: Function, out :: Vec<Function>) Res<(), AllocError> {
 // and cannot miss; one whose `at` an impl supplies produces whatever
 // `at` returns, including the `None` that ends the walk.
 range_pass_type* = (be :: CBackend, rty: TyId) Res<Res<TyId>, AllocError> {
+    array_of(be, rty).match({
+        Ok(a) => array_pass(be, a),
+        None  => stored_or_supplied_pass(be, rty),
+    })
+}
+
+// A FIXED ARRAY'S PASS CANNOT MISS. Its `at` is the bounds-checked index
+// and the counter never leaves the count, so a pass is always the
+// element — which is what lets the walk carry no `Res` per pass and stay
+// a plain C for-loop. The `Res` here is the LOOP's own answer, not the
+// pass's.
+array_pass = (be :: CBackend, a: TyArray) Res<Res<TyId>, AllocError> {
+    got = intern_res_open(be.check, a.elem).try();
+    Ok(Ok(got));
+}
+
+stored_or_supplied_pass = (be :: CBackend, rty: TyId)
+                          Res<Res<TyId>, AllocError> {
     supplies_bounds(be, rty).match({
         true  => index_pass(be),
         false => impl_pass(be, rty),
