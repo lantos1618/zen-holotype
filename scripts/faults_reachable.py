@@ -54,10 +54,6 @@ OWED = {
         "spelling, so tests/must-fail/modules/unexported_fn compiles "
         "clean and resolves to std.core.byte.hex_digit. Owed by the "
         "module-visibility unit (sema_def.zen keep_exported).",
-    "InferredSetExported":
-        "DESIGN.md -- an exported function's type is written, not "
-        "inferred. Blocked on inferred error sets (`Res<T, _>`) not "
-        "being inferred at all; the two are one unit of work.",
     "HoistAmbiguous":
         "hoisting fires only when exactly one variant carries the type. "
         "Owed by the Res-hoisting unit; corpus/sema/hoist_single_variant "
