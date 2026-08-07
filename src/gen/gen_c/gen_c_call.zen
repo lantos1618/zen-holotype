@@ -46,6 +46,7 @@ World, Def, DefKind, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 Inst = sema.sema_inst
 type_of, type_from_ast, stmt_type = sema.sema_type
+satisfies_bound = sema.sema_bound
 write_usize = sema.sema_diag
 Emit = gen.gen_emit
 sym_local, sym_member, sym_variant, sym_gen, sym_fn = gen.gen_name
@@ -345,11 +346,22 @@ receives = (be :: CBackend, d: Def, rty: TyId) Res<bool, AllocError> {
     inst ::= be.alloc.Inst();
     sig ::= be.alloc.Vec<TyId>();
     ok = signature_of(be, d, inst, sig).try();
-    Ok(ok && first_is(sig, rty));
+    ok.match({ false => Ok(false), true => first_is(be, sig, rty) })
 }
 
-first_is = (sig: Vec<TyId>, rty: TyId) bool {
-    sig.get(0).match({ Ok(t) => t.eq(rty), None => false })
+// `satisfies_bound` — an impl of the declared type, or the same type —
+// and it is `sema_cand.takes_receiver`'s gate spelled a second time
+// because this is the second half of ONE pool. An `Arena` reaches
+// `Vec* = <T>(a: Alloc) Vec<T>` through `Arena.impl(Alloc, ..)`, and a
+// pool here narrower than sema's holds no declaration for the
+// `resolved_call` sema wrote down — so `sole_def` re-decides a call that
+// was already settled, and says it is not a function at all.
+first_is = (be :: CBackend, sig: Vec<TyId>, rty: TyId)
+           Res<bool, AllocError> {
+    sig.get(0).match({
+        None    => Ok(false),
+        Ok(t)   => satisfies_bound(be.check, rty, t),
+    })
 }
 
 has_def = (found: Vec<Def>, id: DeclId) bool {
