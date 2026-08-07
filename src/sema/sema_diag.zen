@@ -82,6 +82,7 @@ SemaFault* =
     // resolution
       UndefinedName(NameFault)         // no binding of this name is in scope
     | NotExported(ExportFault)         // the name exists; `*` does not
+    | ModuleNotAValue(ExportFault)     // a module is a namespace, not a value
     | NoSuchField(TypeFault)           // the type has no member of that name
 
     // types
@@ -143,6 +144,7 @@ message* = (fault: SemaFault) str {
     fault.match({
         UndefinedName(_)     => "undefined name: no binding of this name is in scope",
         NotExported(_)       => "a name crosses a module boundary only with `*`",
+        ModuleNotAValue(_)   => "a module is only usable qualified",
         NoSuchField(_)       => "no such field or method on this type",
         TypeMismatch(_)      => "type mismatch",
         NotCallable(_)       => "this is not a function, so it cannot be called",
@@ -195,6 +197,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
     fault.match({
         UndefinedName(f)          => out.write_name(f),
         NotExported(f)            => write_export(out, f),
+        ModuleNotAValue(f)        => write_module(out, f),
         NoOverload(f)             => out.write_name(f),
         ImplMissingField(f)       => out.write_name(f),
         ComputedFieldAssign(f)    => out.write_name(f),
@@ -242,6 +245,21 @@ write_export = (out :: String, f: ExportFault) Res<(), AllocError> {
     out.add_bytes(f.name).try();
     out.add_bytes(" is not exported by module ").try();
     out.add_bytes(f.module).try();
+    Ok(());
+}
+
+// WHICH MODULE, because that is the half a reader cannot see. `zz = vec`
+// and `Alias = Shape` are the same three tokens, so being told `zz` is not
+// a value leaves the author looking at a line that reads like a type
+// alias. Naming `vec` is what turns it back into one mistake.
+write_module = (out :: String, f: ExportFault) Res<(), AllocError> {
+    out.add_bytes(": `").try();
+    out.add_bytes(f.name).try();
+    out.add_bytes("` names module `").try();
+    out.add_bytes(f.module).try();
+    out.add_bytes("`, so write `").try();
+    out.add_bytes(f.name).try();
+    out.add_bytes(".<name>`").try();
     Ok(());
 }
 

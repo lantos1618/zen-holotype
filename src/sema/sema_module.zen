@@ -19,7 +19,7 @@
 // syntactic separates a module from a type, and every question below
 // starts by deciding which one it is looking at.
 
-Ast, Expr, Access, Ident, TypeId, Named = ast
+Ast, Expr, Access, Ident, Span, TypeId, Named = ast
 Decl, DeclKind, Alias, Function, Param = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
@@ -96,6 +96,23 @@ names_a_type = (c :: Checker, name: str, mi: usize) bool {
         Err(_) => true,
         Ok(_)  => found.len > 0,
     })
+}
+
+// A MODULE HAS NO VALUE, so a bare one is a mistake wherever it stands —
+// `println("{}", zz)` and `reseat(3)` are the two shapes, and both used to
+// reach the backend as "a value of this type" or "not a function". THE
+// DIAGNOSTIC BELONGS AT THE USE and not at the binding, because the same
+// binding read qualified is a pattern the corpus gates.
+//
+// It poisons rather than failing, the way every other report here does:
+// one mistake is one diagnostic, and a caller handed poison asks nothing
+// further of it.
+module_not_a_value* = (c :: Checker, span: Span, name: str, mi: usize)
+                     Res<TyId, AllocError> {
+    c.report(span.file, span,
+             SemaFault.ModuleNotAValue(ExportFault(
+                 name: name, module: module_name(c, mi)))).try();
+    c.types.unknown()
 }
 
 // `sh.reseat` / `a.beta_Gamma`: the name itself, reaching exactly what
