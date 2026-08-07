@@ -1,0 +1,50 @@
+// tests/corpus/std/res_try_error_set_spelled_both_ways.zen
+// DESIGN.md: "A union is its members. Order and spelling are not part
+// of its identity" — so `Flip = BErr | AErr` and `Wide = AErr | BErr`
+// are ONE type, and the consequence is a layout rule: "a union's tags
+// are numbered by a canonical order over its members, never by
+// declaration order."
+//
+// The two are written in opposite orders on purpose. A BErr raised at
+// the bottom crosses both and has to come out the far end still saying
+// B. Numbered by declaration, `Flip` calls a BErr 0 and `Wide` calls a
+// BErr 1, so the propagation between them renumbers and this prints A —
+// and prints it silently, with no diagnostic and no C that fails to
+// compile. That is why the tags and not the diagnostics are the thing
+// under test here.
+//
+// Neither error carries a payload, because what is being checked is
+// which member the tag says it is and nothing else.
+
+AErr = | AOnly
+BErr = | BOnly
+
+Flip = BErr | AErr
+Wide = AErr | BErr
+
+raise = () Res<(), BErr> {
+    Err(BErr.BOnly);
+}
+
+// into one spelling of the set
+through = () Res<(), Flip> {
+    raise().try();
+    Ok(());
+}
+
+// and across into the other, which is a copy and not a re-tagging
+widen = () Res<(), Wide> {
+    through().try();
+    Ok(());
+}
+
+main = (env: Env) Res<i32, Wide> {
+    widen().match({
+        Ok(_)  => println("no error"),
+        Err(e) => e.match({
+            AErr(_) => println("A"),
+            BErr(_) => println("B"),
+        }),
+    });
+    Ok(0);
+}

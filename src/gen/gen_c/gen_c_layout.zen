@@ -121,7 +121,7 @@ collect_tags_of = (be :: CBackend, id: TyId, seen :: Vec<String>)
                   Res<(), AllocError> {
     be.types().at(id).match({
         Res(r)   => collect_res_tags(be, r, seen),
-        Named(n) => collect_enum_tags(be, n, seen),
+        Named(n) => collect_enum_tags(be, id, n, seen),
         Union(u) => collect_union_tags(be, id, u, seen),
         _        => Ok(()),
     })
@@ -132,10 +132,9 @@ collect_tags_of = (be :: CBackend, id: TyId, seen :: Vec<String>)
 // `A | B` and `B | A` are one type and get one numbering. It is NOT a
 // declaration order, because a structural set has no declaration.
 //
-// That is exactly where it parts company with a declared enum of the
-// same members: `Error = AllocError | IoError` numbers by the order the
-// two were WRITTEN. Closing that gap means changing what a declared
-// union-reading enum numbers by, not what this does.
+// A declared enum READ AS A UNION now numbers by the same order —
+// `write_enum_tags` below — so `Error = AllocError | IoError` and the
+// structural `AllocError | IoError` agree tag for tag.
 collect_union_tags = (be :: CBackend, id: TyId, u: TyUnion,
                       seen :: Vec<String>) Res<(), AllocError> {
     u.members.loop((h, i, m) { add_union_tag(be, id, m, i, seen).try() });
@@ -165,23 +164,117 @@ collect_res_tags = (be :: CBackend, r: TyRes, seen :: Vec<String>)
     Ok(());
 }
 
-collect_enum_tags = (be :: CBackend, n: TyNamed, seen :: Vec<String>)
-                    Res<(), AllocError> {
+collect_enum_tags = (be :: CBackend, id: TyId, n: TyNamed,
+                     seen :: Vec<String>) Res<(), AllocError> {
     decl_at(be.tree, n.decl).match({
         None  => Ok(()),
-        Ok(d) => collect_decl_tags(be, n, d, seen),
+        Ok(d) => collect_decl_tags(be, id, n, d, seen),
     }).try();
     Ok(());
 }
 
-collect_decl_tags = (be :: CBackend, n: TyNamed, d: Decl, seen :: Vec<String>)
-                    Res<(), AllocError> {
+collect_decl_tags = (be :: CBackend, id: TyId, n: TyNamed, d: Decl,
+                     seen :: Vec<String>) Res<(), AllocError> {
     qname ::= be.alloc.String().try();
     write_qname(be, qname, n).try();
     d.kind.match({
-        Enum(e) => write_variant_tags(be, e.variants, qname.view(), seen),
+        Enum(e) => write_enum_tags(be, id, n, e, qname.view(), seen),
         _       => Ok(()),
     })
+}
+
+// A UNION'S TAGS ARE NUMBERED BY A CANONICAL ORDER OVER ITS MEMBERS,
+// NEVER BY DECLARATION ORDER. DESIGN.md: "A union is its members. Order
+// and spelling are not part of its identity" — `WriteError = IoError |
+// AllocError` and `Error = AllocError | IoError` are ONE type, so
+// numbering by declaration gives one type two numberings and makes
+// `.try()` from either spelling into the other a runtime re-tagging
+// switch for a difference the type system says does not exist.
+//
+// The canonical order is not reinvented here: `set_of` hands back the
+// union `union_ty` interned and sorted, which is the same order
+// `collect_union_tags` writes. Asking sema is what keeps the two from
+// drifting, and drift between what sema checks and what gen_c emits is
+// this compiler's worst failure class.
+//
+// A nominal enum is unaffected, exactly as DESIGN.md says: `Signal =
+// Start | Stop` names no types, `set_of` answers with the id it was
+// given, `variant_ranks` adds nothing, and declaration order stands.
+write_enum_tags = (be :: CBackend, id: TyId, n: TyNamed, e: Enum,
+                   qname: str, seen :: Vec<String>) Res<(), AllocError> {
+    ranks ::= be.alloc.Vec<usize>();
+    variant_ranks(be, id, n, e.variants, ranks).try();
+    (ranks.len == e.variants.len).match({
+        false => write_variant_tags(be, e.variants, qname, seen),
+        true  => write_ranked_tags(be, e.variants, ranks, qname, seen),
+    })
+}
+
+// All-or-nothing, and the length check above is how: a rank is added
+// only for a variant that HAS one, so one miss leaves the vec short and
+// the whole declaration falls back to declaration order. A mix would
+// give two variants one tag. The miss that is not hypothetical is a
+// variant whose own type is a set — `Error = WriteError | FsError`,
+// where `union_ty` flattened `WriteError` away and there is no member
+// left for the variant to rank against.
+variant_ranks = (be :: CBackend, id: TyId, n: TyNamed,
+                 variants: Vec<Variant>, ranks :: Vec<usize>)
+                Res<(), AllocError> {
+    canonical_members(be, id).match({
+        None    => Ok(()),
+        Ok(mem) => collect_ranks(be, n, variants, mem, ranks),
+    })
+}
+
+// The members of the set this NAME stands for. Nothing when the name is
+// not a union, which is the nominal reading and the common one.
+canonical_members = (be :: CBackend, id: TyId) Res<Vec<TyId>> {
+    be.types().at(be.check.set_of(id)).match({
+        Union(u) => Ok(u.members),
+        _        => None,
+    })
+}
+
+collect_ranks = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
+                 members: Vec<TyId>, ranks :: Vec<usize>)
+                Res<(), AllocError> {
+    ctx = decl_ctx(be, n);
+    inst = decl_inst(be, n).try();
+    mark = enter_struct_tparams(be, n.decl).try();
+    variants.loop((h, v) {
+        variant_rank(be, n, v, members, ctx, inst).match({
+            None  => Ok(()),
+            Ok(r) => ranks.add(r),
+        }).try();
+    });
+    leave_tparams(be, mark).try();
+    Ok(());
+}
+
+variant_rank = (be :: CBackend, n: TyNamed, v: Variant, members: Vec<TyId>,
+                ctx: Ctx, inst: Inst) Res<usize> {
+    variant_type(be, n, v, ctx, inst).match({
+        None  => None,
+        Ok(t) => rank_within(members, t),
+    })
+}
+
+rank_within = (members: Vec<TyId>, t: TyId) Res<usize> {
+    Range(0, members.len).find((i) {
+        members.get(i).match({ Ok(m) => m.eq(t), None => false })
+    })
+}
+
+write_ranked_tags = (be :: CBackend, variants: Vec<Variant>,
+                     ranks: Vec<usize>, qname: str, seen :: Vec<String>)
+                    Res<(), AllocError> {
+    variants.loop((h, i, v) {
+        ranks.get(i).match({
+            None  => Ok(()),
+            Ok(r) => add_tag(be, seen, qname, v.name.text, r),
+        }).try();
+    });
+    Ok(());
 }
 
 write_variant_tags = (be :: CBackend, variants: Vec<Variant>, qname: str,

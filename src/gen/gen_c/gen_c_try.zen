@@ -28,18 +28,23 @@
 // three answers, and they are three because a variant name and a member
 // type are not the same thing.
 //
-// WHAT IS STILL NOT LOWERED, AND WHY IT IS A REPORT RATHER THAN A GUESS:
-// a member a DECLARED caller's enum does not name as a variant. Sema
-// flattens, so `Error = WriteError | FsError` is a set of four where the
-// enum has two variants, and a `.try()` of an `AllocError` is contained
-// in it with no place here to put it. The same gap runs the other way —
-// a structural set propagating into a declared enum of the SAME members
-// — because the two number their tags differently: a declaration
-// numbers by declaration order and a set by the intern store's
-// canonical one. Closing either needs a re-tagging map, and which
-// numbering is canonical is a DESIGN.md decision before it is a gen_c
-// one. A silent memcpy would be a miscompilation rather than a missing
-// feature, so both report.
+// A SET AND ANOTHER SPELLING OF THE SAME SET ARE NOT TWO SETS, and
+// `Carry.Copy` is the whole of what that costs. DESIGN.md settled the
+// numbering — "a union's tags are numbered by a canonical order over
+// its members, never by declaration order" — so `Error = AllocError |
+// IoError` and `WriteError = IoError | AllocError` agree tag for tag,
+// and the propagation between them is bytes. This used to report, and
+// reporting was right while the numbering was open: a memcpy across two
+// numberings is a miscompilation rather than a missing feature.
+//
+// WHAT IS STILL NOT LOWERED: a STRICT widening — a callee's set into a
+// caller's larger one, where no single variant of the caller's names
+// the callee's whole set. `Error = WriteError | FsError` is a set of
+// four where the enum has two variants, and a `.try()` raising
+// `IoError | AllocError` into a set of three has a different canonical
+// rank in each. That one genuinely needs a per-member map, because the
+// two sets are genuinely two types; canonical numbering does not make
+// it a copy and was never claimed to. It reports.
 
 Ast, Expr, ExprId, Decl, DeclKind, Enum, Variant, Span = ast
 Alloc, AllocError = std.mem
@@ -152,8 +157,34 @@ propagate_error = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
                    tmp: str, ctx: Ctx) Res<(), AllocError> {
     r.error.eq(want.error).match({
         true  => write_propagation(be, r, want, tmp, ctx, Carry.Same),
+        false => propagate_wider(be, node, r, want, tmp, ctx),
+    })
+}
+
+// ONE SET IN TWO SPELLINGS IS NOT A WIDENING AT ALL.
+//
+// DESIGN.md: "A union is its members. Order and spelling are not part
+// of its identity" — `WriteError = IoError | AllocError`, `Error =
+// AllocError | IoError` and the structural `IoError | AllocError` an
+// inferred set arrives at with no declaration behind it are ONE type,
+// and `set_of` is the question that says so. Two ids reach here for one
+// type, so the ids are the wrong thing to compare.
+//
+// Which leaves only C's own nominal typing: one layout under two struct
+// tags. `Carry.Copy` is that, and it is a COPY rather than a re-tagging
+// switch because the tags agree — `gen_c_layout.write_enum_tags`
+// numbers a union's members canonically, which is the layout rule the
+// same DESIGN.md paragraph states and the whole reason to state it.
+propagate_wider = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
+                   tmp: str, ctx: Ctx) Res<(), AllocError> {
+    same_set(be, r.error, want.error).match({
+        true  => write_propagation(be, r, want, tmp, ctx, Carry.Copy),
         false => widen_or_report(be, node, r, want, tmp, ctx),
     })
+}
+
+same_set = (be :: CBackend, got: TyId, want: TyId) bool {
+    be.check.set_of(got).eq(be.check.set_of(want))
 }
 
 // A DECLARED SET AND A STRUCTURAL ONE ARE WIDENED INTO DIFFERENTLY, and
@@ -282,15 +313,27 @@ report_widening = (be :: CBackend, node: Expr) Res<(), AllocError> {
 // `Member` widens into a STRUCTURAL set, which has no variant names —
 // the member type is its own name, so the type is what is carried.
 //
-// Three cases and not a `Res<str>` with a convention: a variant name and
+// `Copy` is the caller's set and the callee's being ONE set spelled two
+// ways, where nothing is built and nothing is tagged: the bytes already
+// say which member they are.
+//
+// Four cases and not a `Res<str>` with a convention: a variant name and
 // a member type are two different things, and the C written for each is
 // different too.
-Carry = Same | Variant(str) | Member(TyId)
+Carry = Same | Variant(str) | Member(TyId) | Copy
 
 // `into` says how the caller's error payload is built out of the
-// callee's.
+// callee's — except for `Copy`, where it is not built.
 write_propagation = (be :: CBackend, r: TyRes, want: TyRes, tmp: str,
                      ctx: Ctx, into: Carry) Res<(), AllocError> {
+    into.match({
+        Copy => write_copy(be, r, tmp, ctx),
+        _    => write_built(be, r, want, tmp, ctx, into),
+    })
+}
+
+write_built = (be :: CBackend, r: TyRes, want: TyRes, tmp: str,
+               ctx: Ctx, into: Carry) Res<(), AllocError> {
     line ::= be.alloc.String().try();
     line.add_bytes("return (").try();
     ctype(be, ctx.ret, line).try();
@@ -300,6 +343,57 @@ write_propagation = (be :: CBackend, r: TyRes, want: TyRes, tmp: str,
         carry_error(be, want, tmp, into, line).try()
     });
     line.add_bytes(" };").try();
+    be.writeln(line.view())
+}
+
+// The same set, carried across the two struct tags C insists on.
+//
+// THE TWO LAYOUTS ARE IDENTICAL BY CONSTRUCTION and that is what makes
+// this three lines rather than a per-member switch: same members, so
+// the same payload union; canonical tags, so the same numbering; and
+// `sym_union_member` gives a member its own name on both sides. Bytes
+// are the whole of the meaning, which is DESIGN.md's "Canonical
+// numbering makes the widening a copy."
+//
+// `memcpy` and not an assignment because C's struct types are nominal:
+// there is no operator that spells "these two layouts are one". The
+// size is the DESTINATION's, which is safe because the sets are equal —
+// `same_set` is what admitted this — so both fields are one size.
+write_copy = (be :: CBackend, r: TyRes, tmp: str, ctx: Ctx)
+             Res<(), AllocError> {
+    w ::= be.alloc.String().try();
+    sym_gen(w, "w", be.next_tmp()).try();
+    write_carrier_decl(be, r, w.view(), ctx).try();
+    write_carrier_copy(be, w.view(), tmp).try();
+    ret ::= be.alloc.String().try();
+    ret.add_bytes("return ").try();
+    ret.add_bytes(w.view()).try();
+    ret.add_bytes(";").try();
+    be.writeln(ret.view())
+}
+
+write_carrier_decl = (be :: CBackend, r: TyRes, w: str, ctx: Ctx)
+                     Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    ctype(be, ctx.ret, line).try();
+    line.add_bytes(" ").try();
+    line.add_bytes(w).try();
+    line.add_bytes(" = { .zg_tag = ").try();
+    failure_tag(be, r, line).try();
+    line.add_bytes(" };").try();
+    be.writeln(line.view())
+}
+
+write_carrier_copy = (be :: CBackend, w: str, tmp: str)
+                     Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes("memcpy(&").try();
+    read_error(w, line).try();
+    line.add_bytes(", &").try();
+    read_error(tmp, line).try();
+    line.add_bytes(", sizeof(").try();
+    read_error(w, line).try();
+    line.add_bytes("));").try();
     be.writeln(line.view())
 }
 
@@ -316,9 +410,13 @@ carry_error = (be :: CBackend, want: TyRes, tmp: str, into: Carry,
     out.sym_member("Err").try();
     out.add_bytes(" = ").try();
     into.match({
-        Same       => read_error(tmp, out),
         Variant(v) => wrap_error(be, want.error, v, tmp, out),
         Member(m)  => wrap_set_error(be, want.error, m, tmp, out),
+        // `Same` carries the value across untouched. `Copy` would too,
+        // and never arrives: `write_propagation` sends it to
+        // `write_copy` before anything is built, because a copy across
+        // two struct tags is statements and not an initializer.
+        _          => read_error(tmp, out),
     }).try();
     Ok(());
 }
