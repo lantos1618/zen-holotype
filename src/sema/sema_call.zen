@@ -57,11 +57,11 @@ Checker, Ctx, UNRESOLVED = sema.sema_check
 Inst, tparam_vars = sema.sema_inst
 construct, instantiate = sema.sema_apply
 Found, Base, base_of, members_of, static_access = sema.sema_member
-is_type_def, opaque, nowhere = sema.sema_member
+is_type_def, opaque, nowhere, first_found = sema.sema_member
 satisfies_bound, check_bounds = sema.sema_bound
 type_from_ast, type_of, param_type = sema.sema_type
 cands_of, travelled_cands, matches = sema.sema_cand
-ty_at, is_tvar = sema.sema_cand
+ty_at, is_tvar, recv_sig_fits = sema.sema_cand
 
 // One candidate, as resolution sees it.
 //
@@ -354,13 +354,76 @@ known_receiver_call = (c :: Checker, id: ExprId, node: Expr, call: Call,
 // A method's receiver is its first parameter — "a method is a UFCS
 // function whose first parameter happens to be named `self`" — so the
 // arity a call site sees is one less than the signature's.
+//
+// DECLARED PARAMETER TYPES FIRST, AND ARITY ONLY AS A FALLBACK. This
+// asked arity alone, and arity is the half of the rule that cannot
+// separate `toString(self, out :: Sink)` from `toString(self, a:
+// Alloc)` — both are two. So the answer was whichever the member table
+// listed first, for a name whose whole point is that the ARGUMENT
+// decides. `display.zen` says it where the two are declared: "overload
+// resolution picks between them on the declared parameter type: a buffer
+// or an allocator."
+//
+// The arity fallback is kept and is not laziness: `fits` is a question
+// about types, and where a receiver's type is not settled, or the
+// signature is variadic, it answers `false` for every candidate.
+// Falling back leaves every call that resolves today resolving the same
+// way, so this can only change an answer where a strictly better one
+// exists.
 method_call = (c :: Checker, node: Expr, found: Vec<Found>,
                actuals: Vec<Actual>) Res<TyId, AllocError> {
-    want = actuals.len + 1;
-    pick_arity(c, found, want).match({
+    pick_fitting(c, found, actuals).try().match({
+        Ok(f)   => fn_ret(c, node, f.ty),
+        None    => by_arity_ret(c, node, found, actuals),
+    })
+}
+
+by_arity_ret = (c :: Checker, node: Expr, found: Vec<Found>,
+                actuals: Vec<Actual>) Res<TyId, AllocError> {
+    pick_arity(c, found, actuals.len + 1).match({
         None    => first_found_ret(c, node, found),
         Ok(f)   => fn_ret(c, node, f.ty),
     })
+}
+
+// The first member whose declared parameters accept these arguments.
+// FIRST and not "the only one": two members accepting the same call is
+// an overload set a call site cannot tell apart, and that is an error AT
+// THE DECLARATION — `check_overloads` names both — because at a call
+// site the two are indistinguishable and there is nothing to report.
+pick_fitting = (c :: Checker, found: Vec<Found>, actuals: Vec<Actual>)
+               Res<Res<Found>, AllocError> {
+    kept ::= c.alloc.Vec<Found>();
+    found.loop((h, f) { keep_fitting(c, f, actuals, kept).try() });
+    Ok(first_found(kept));
+}
+
+// A named helper rather than a `.then` inside the loop body: a loop
+// binding read inside a nested closure does not resolve.
+// docs/SEMA_BOOTSTRAP_FIXES.md §10.
+keep_fitting = (c :: Checker, f: Found, actuals: Vec<Actual>,
+                kept :: Vec<Found>) Res<(), AllocError> {
+    params ::= c.alloc.Vec<TyId>();
+    fn_params(c, f.ty, params).try();
+    recv_sig_fits(c, params, actuals).try().match({
+        true  => kept.add(f),
+        false => Ok(()),
+    })
+}
+
+// A member that is not a function has no parameters and fits no call.
+fn_params = (c :: Checker, ty: TyId, out :: Vec<TyId>)
+            Res<(), AllocError> {
+    c.types.at(ty).match({
+        Fn(f) => copy_tys(f.params, out),
+        _     => Ok(()),
+    }).try();
+    Ok(());
+}
+
+copy_tys = (xs: Vec<TyId>, out :: Vec<TyId>) Res<(), AllocError> {
+    xs.loop((h, x) { out.add(x).try() });
+    Ok(());
 }
 
 pick_arity = (c: Checker, found: Vec<Found>, want: usize) Res<Found> {

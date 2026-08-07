@@ -1,0 +1,55 @@
+// tests/must-fail/sema/overload_by_parameter_type_not_by_order.zen
+// `Display`'s two toStrings, with the DECLARATION ORDER REVERSED, and
+// that reversal is the whole point of the file.
+//
+// "Resolution is on declared parameter types and arity" — and at arity
+// two against two arity-two members, arity separates nothing, so the
+// declared parameter type is the entire rule. The corpus cannot say so:
+// `Display` declares the sink form first, so a resolver that stops at
+// arity and takes the first still lands on it, and every display test
+// passes for a reason that is not the rule. Here the ALLOCATING form is
+// written first, so order and type disagree and only one of them can be
+// what answered.
+//
+// A `String` is a `Sink` and is not an `Alloc`, so `p.render(buffer)`
+// reaches the outlined form, which writes into the caller's buffer and
+// answers Res<(), WriteError>. There is no String in that answer, and
+// binding one is the error below. Resolve by order instead and this
+// file compiles clean — which is what makes it a gate on the PICK and
+// not merely on the name.
+//
+// position: the binding whose declared type the call cannot produce.
+
+Error = AllocError | IoError
+
+Twice = {
+    // FIRST, and the wrong answer for the call below. Sealed and
+    // derived, exactly as `Display.toString` is.
+    render* = (self: @Self, a: Alloc) Res<String, WriteError> {
+        sb ::= a.String("").try();
+        self.render(sb).try();
+        Ok(sb);
+    }
+
+    // SECOND, and the one a Sink argument selects.
+    render* ::= (self: @Self, out :: Sink) Res<(), WriteError>
+}
+
+Point = {
+    x: i32,
+    y: i32,
+}
+
+Point.impl(Twice, {
+    render ::= (self: @Self, out :: Sink) Res<(), WriteError> {
+        out.add("{}:{}", self.x, self.y)
+    }
+})
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String("").try();
+    written: String = Point(x: 5, y: 6).render(sb).try();
+    println("{}", written.view());
+    Ok(0);
+}

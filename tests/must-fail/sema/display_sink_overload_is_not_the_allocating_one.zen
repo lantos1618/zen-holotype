@@ -1,0 +1,36 @@
+// tests/must-fail/sema/display_sink_overload_is_not_the_allocating_one.zen
+// the SAME two toStrings as the corpus test, resolved the other way
+// round. `Display` declares both at arity two, so arity separates
+// nothing and only the declared parameter type does: a Sink argument
+// reaches the outlined form, which writes into the caller's buffer and
+// answers Res<(), WriteError>. There is no String in that answer.
+//
+// so this is what a WRONG PICK looks like when nothing downstream can
+// hide it. a resolver that stopped at arity would hand back the sealed
+// allocating form's Res<String, WriteError>, `()` would be a String,
+// and this file would compile — which is exactly the mistake the corpus
+// cannot see, because there the sink form happens to be declared first
+// and picking by order gets the right answer for the wrong reason.
+//
+// position: the binding whose declared type the call cannot produce.
+
+Error = AllocError | IoError
+
+Point = {
+    x: i32,
+    y: i32,
+}
+
+Point.impl(Display, {
+    toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
+        out.add("{}:{}", self.x, self.y)
+    }
+})
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String("").try();
+    written: String = Point(x: 5, y: 6).toString(sb).try();
+    println("{}", written.view());
+    Ok(0);
+}

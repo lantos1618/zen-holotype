@@ -79,14 +79,57 @@ impl_supplies = (c :: Checker, n: TyNamed, ty: TyId, name: str, id: ImplId,
 // width and a height". Either way the TYPE is the one the bound
 // declares, never the supplied expression's: `width: self.radius * 2.0`
 // is an f64 because `Rect` said f64.
+//
+// A NAME IS AN OVERLOAD SET AND NOT A MEMBER, so this adds one `Found`
+// PER DECLARATION and never one per impl. `Display` declares two
+// `toString`s — a sink form and a sealed allocating one — and "overload
+// resolution picks between them on the declared parameter type" can only
+// be true if both survive to the call site. They did not: the type of
+// the name was a fold over the members that kept the LAST match, so a
+// set of two arrived as one, the allocating one, and every
+// `p.toString(buffer)` in the language typed as `Res<String,
+// WriteError>` while the backend correctly called the form returning
+// `Res<(), WriteError>`. Nothing in sema was choosing wrongly — there
+// was nothing left to choose FROM.
 supplied = (c :: Checker, n: TyNamed, ty: TyId, name: str, id: ImplId,
             im: Impl, out :: Vec<Found>) Res<(), AllocError> {
     mi = n.decl.module.to_usize();
     bound = impl_bound_type(c, im, mi).try();
-    provides(c, im, bound, name).try().then(() {
-        add_supplied(c, ty, bound, name, id, out).try();
-    });
+    tys ::= c.alloc.Vec<TyId>();
+    supplied_types(c, im, bound, name, ty, tys).try();
+    tys.loop((h, t) { add_supplied(c, t, bound, name, id, out).try() });
     Ok(());
+}
+
+// WHICH OF THE BOUND'S DECLARATIONS OF THIS NAME THE IMPL ACTUALLY
+// REACHES. A bodied member — sealed, or a default — comes along on its
+// own. A bodiless one is a requirement, and it is reachable exactly when
+// the impl supplied that name.
+//
+// Asking `has_member` of the impl rather than matching its entry against
+// a particular declaration is deliberate: which signature an impl
+// satisfied is `sema_bound.zen`'s question, it is answered there against
+// the whole set, and answering it a second time here with a weaker rule
+// is how two files come to disagree about what an impl provided.
+supplied_types = (c :: Checker, im: Impl, bound: TyId, name: str,
+                  self_ty: TyId, out :: Vec<TyId>) Res<(), AllocError> {
+    supplied_here = has_member(im.members, name);
+    all ::= c.alloc.Vec<Member>();
+    bound_members(c, bound, all).try();
+    kept ::= c.alloc.Vec<Member>();
+    all.loop((h, m) { keep_reachable(m, name, supplied_here, kept).try() });
+    member_types(c, bound, kept, self_ty, out)
+}
+
+// A named helper rather than a `.then` inside the loop body: a loop
+// binding read inside a nested closure does not resolve.
+// docs/SEMA_BOOTSTRAP_FIXES.md §10.
+keep_reachable = (m: Member, name: str, supplied_here: bool,
+                  kept :: Vec<Member>) Res<(), AllocError> {
+    (member_named(m, name) && (has_body(m) || supplied_here)).match({
+        true  => kept.add(m),
+        false => Ok(()),
+    })
 }
 
 // The bound an impl names, resolved with the TARGET's type parameters
@@ -138,32 +181,8 @@ enter_decl_tvars = (c :: Checker, d: Decl, mi: usize) Res<(), AllocError> {
     })
 }
 
-provides = (c :: Checker, im: Impl, bound: TyId, name: str)
-           Res<bool, AllocError> {
-    has_member(im.members, name).match({
-        false => bound_provides(c, bound, name),
-        true  => Ok(true),
-    })
-}
-
 // The bound declares it AND gives it a body: sealed and default members
 // come along with the impl, a required one does not.
-bound_provides = (c :: Checker, bound: TyId, name: str)
-                 Res<bool, AllocError> {
-    members ::= c.alloc.Vec<Member>();
-    bound_members(c, bound, members).try();
-    Ok(provides_body(members, name));
-}
-
-provides_body = (members: Vec<Member>, name: str) bool {
-    Range(0, members.len).find((i) {
-        members.get(i).match({
-            Ok(m) => member_named(m, name) && has_body(m),
-            None  => false,
-        })
-    }).match({ Ok(_) => true, None => false })
-}
-
 has_body = (m: Member) bool {
     m.kind.match({
         Function(f) => f.body.match({ Ok(_) => true, None => false }),
@@ -175,7 +194,7 @@ add_supplied = (c :: Checker, ty: TyId, bound: TyId, name: str, id: ImplId,
                 out :: Vec<Found>) Res<(), AllocError> {
     out.add(Found(
         name: name,
-        ty: bound_member_type(c, bound, name, ty).try(),
+        ty: ty,
         computed: true,
         mutable: false,
         bound: bound,
@@ -188,16 +207,41 @@ add_supplied = (c :: Checker, ty: TyId, bound: TyId, name: str, id: ImplId,
 // `Slot<T> = { held*: T }` declares `T` and its members mean it, so
 // reading them without it reports `T` as undefined in the declaration
 // that binds it — from a caller that only asked what a dot reaches.
+// THE FIRST declaration of the name, for a reader that wants a type and
+// not a set: a COMPUTED FIELD. `width: self.radius * 2.0` is one
+// declaration by construction — a field is storage-shaped and there is
+// no such thing as two of it — so first, last and only are the same
+// answer, and the caller that needs the set asks for the set.
 bound_member_type* = (c :: Checker, bound: TyId, name: str, self_ty: TyId)
-                    Res<TyId, AllocError> {
-    members ::= c.alloc.Vec<Member>();
-    bound_members(c, bound, members).try();
+                     Res<TyId, AllocError> {
+    tys ::= c.alloc.Vec<TyId>();
+    bound_member_types(c, bound, name, self_ty, tys).try();
+    tys.get(0).match({ Ok(t) => Ok(t), None => c.types.unknown() })
+}
+
+// EVERY declaration of the name, in source order, because a name is an
+// overload set. The caller chooses; a fold here would choose by writing
+// order and call it a type.
+bound_member_types* = (c :: Checker, bound: TyId, name: str, self_ty: TyId,
+                       out :: Vec<TyId>) Res<(), AllocError> {
+    all ::= c.alloc.Vec<Member>();
+    bound_members(c, bound, all).try();
+    kept ::= c.alloc.Vec<Member>();
+    all.loop((h, m) { keep_reachable(m, name, true, kept).try() });
+    member_types(c, bound, kept, self_ty, out)
+}
+
+// The types of members already chosen, resolved in the BOUND's own
+// scope. The `tvar` pair is what makes `Slot<T> = { held*: T }` readable
+// at all — see this file's header, third statement of the same rule.
+member_types = (c :: Checker, bound: TyId, ms: Vec<Member>, self_ty: TyId,
+                out :: Vec<TyId>) Res<(), AllocError> {
     mi = bound_module(c, bound);
     tmark = c.tvar_mark();
     enter_bound_tvars(c, bound, mi).try();
-    got = named_member_type(c, members, name, mi, self_ty).try();
+    ms.loop((h, m) { out.add(member_type(c, m, mi, self_ty).try()).try() });
     c.release_tvars(tmark).try();
-    Ok(got);
+    Ok(());
 }
 
 enter_bound_tvars = (c :: Checker, bound: TyId, mi: usize)
@@ -215,23 +259,6 @@ enter_named_tvars = (c :: Checker, n: TyNamed, mi: usize)
         None  => Ok(()),
     }).try();
     Ok(());
-}
-
-named_member_type = (c :: Checker, members: Vec<Member>, name: str,
-                     mi: usize, self_ty: TyId) Res<TyId, AllocError> {
-    got ::= c.types.unknown().try();
-    members.loop((h, m) {
-        got = one_member_type(c, m, name, mi, self_ty, got).try();
-    });
-    Ok(got);
-}
-
-one_member_type = (c :: Checker, m: Member, name: str, mi: usize,
-                   self_ty: TyId, so_far: TyId) Res<TyId, AllocError> {
-    member_named(m, name).match({
-        true  => member_type(c, m, mi, self_ty),
-        false => Ok(so_far),
-    })
 }
 
 // The members a bound declares, in source order.

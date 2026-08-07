@@ -52,7 +52,7 @@ Checker, Ctx, UNRESOLVED = sema.sema_check
 Inst, subst, inst_of_named, owner_of = sema.sema_inst
 is_prim, is_integer, is_float = sema.sema_check
 Case, cases_of, find_case = sema.sema_case
-impl_members, bound_members, bound_member_type = sema.sema_supply
+impl_members, bound_members, bound_member_types = sema.sema_supply
 has_member = sema.sema_supply
 is_case = sema.sema_match
 type_from_ast, type_of, param_type = sema.sema_type
@@ -398,7 +398,7 @@ computed_member* = (c :: Checker, ac: Access, ctx: Ctx)
 // to `Map.get` at unknown type arguments. A written parameter type is
 // what makes the receiver unambiguous.
 // docs/SEMA_BOOTSTRAP_FIXES.md §11.
-first_found = (found: Vec<Found>) Res<Found> { found.get(0) }
+first_found* = (found: Vec<Found>) Res<Found> { found.get(0) }
 
 // ---------------------------------------------------------------------
 // the member table
@@ -467,21 +467,32 @@ bound_reachable = (c :: Checker, tname: str, ty: TyId, name: str,
     Ok(());
 }
 
+// ONE `Found` PER DECLARATION, for the reason `sema_supply.zen` states
+// at `supplied`: `<T: Display>(t: T)` reaches the same two `toString`s a
+// concrete receiver does, and a bound that answered with one type would
+// make the generic case pick differently from the concrete one.
 bound_member = (c :: Checker, bound: TyId, ty: TyId, name: str,
                 out :: Vec<Found>) Res<(), AllocError> {
-    members ::= c.alloc.Vec<Member>();
-    bound_members(c, bound, members).try();
-    has_member(members, name).then(() {
-        out.add(Found(
-            name: name,
-            ty: bound_member_type(c, bound, name, ty).try(),
-            computed: true,
-            mutable: false,
-            bound: bound,
-            span: bound_span(c, bound),
-        )).try();
-    });
+    tys ::= c.alloc.Vec<TyId>();
+    bound_member_types(c, bound, name, ty, tys).try();
+    span = bound_span(c, bound);
+    tys.loop((h, t) { add_bound_member(t, bound, name, span, out).try() });
     Ok(());
+}
+
+// A named helper rather than a `.then` inside the loop body: a loop
+// binding read inside a nested closure does not resolve.
+// docs/SEMA_BOOTSTRAP_FIXES.md §10.
+add_bound_member = (t: TyId, bound: TyId, name: str, span: Span,
+                    out :: Vec<Found>) Res<(), AllocError> {
+    out.add(Found(
+        name: name,
+        ty: t,
+        computed: true,
+        mutable: false,
+        bound: bound,
+        span: span,
+    ))
 }
 
 bound_span = (c: Checker, bound: TyId) Span {
