@@ -1,0 +1,186 @@
+// src/sema/sema_module.zen
+// What a name QUALIFIED BY A MODULE means.
+//
+// DESIGN.md § Modules: "names are qualified by path, imports bind
+// locally, and two modules may define the same top-level name without
+// colliding". So `a.value` and `ab.value` are two declarations, and the
+// module is half of the question rather than decoration on it.
+//
+// THIS IS NOT `sema_member.zen`'S SUBJECT, which is what a dot reaches
+// on a TYPE — a field, a constant, a method, an impl-supplied member,
+// all of them selected out of one member table. A module has no member
+// table, no receiver and no layout; the only thing the two forms share
+// is the token between the names. They were one file until the shared
+// token was the only argument left for it.
+//
+// THE WHOLE PROBLEM IS THAT A MODULE ALIAS IS NOT SPELLED. `sh = shape`
+// and `Alias = Shape` are the same three tokens and parse to the same
+// `Alias` node — grammar R1a reads a bare RHS as an alias — so nothing
+// syntactic separates a module from a type, and every question below
+// starts by deciding which one it is looking at.
+
+Ast, Expr, Access, Ident, TypeId, Named = ast
+Decl, DeclKind, Alias, Function, Param = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+DeclId = sema.sema_id
+TyId, Ty, Types = sema.sema_ty
+World, Def, DefKind, decl_at, module_display = sema.sema_def
+SemaFault, ExportFault = sema.sema_diag
+Checker, Ctx = sema.sema_check
+type_from_ast, param_type, def_type, decl_as_type = sema.sema_type
+
+// The module a base names, when the base is an alias for one.
+module_named_by* = (c :: Checker, ty: TyId) Res<usize> {
+    c.types.at(ty).match({
+        Named(n) => c.alias_module(n.decl),
+        _        => None,
+    })
+}
+
+// THE MODULE A DECLARATION ALIASES, if it aliases one.
+//
+// The filters are the ones `zen_build.alias_of` already applies when it
+// decides whether to load a file for such a target, and they have to
+// stay the same: a loader that fetches a module sema then refuses is a
+// program whose meaning depends on which pass you ask.
+alias_module* = (c :: Checker, id: DeclId) Res<usize> {
+    decl_at(c.tree, id).match({
+        None  => None,
+        Ok(x) => x.kind.match({
+            Alias(al) => alias_target(c, al, id),
+            _         => None,
+        }),
+    })
+}
+
+// A parameterised alias is a type constructor rather than a name for a
+// module, and `Vec<u8>` names no module either: a module path takes no
+// type arguments.
+alias_target = (c :: Checker, al: Alias, id: DeclId) Res<usize> {
+    (al.tparams.len == 0).match({
+        false => None,
+        true  => alias_target_type(c, al.target, id),
+    })
+}
+
+alias_target_type = (c :: Checker, t: TypeId, id: DeclId) Res<usize> {
+    c.tree.type_at(t).kind.match({
+        Named(n) => module_for_target(c, n, id),
+        _        => None,
+    })
+}
+
+// A TYPE OF THAT NAME WINS. `Alias = Shape` stays a type alias even in a
+// tree that also holds a module called `Shape` — asked from the module
+// that WROTE the alias, because that is whose scope decided what the
+// name meant.
+module_for_target = (c :: Checker, n: Named, id: DeclId) Res<usize> {
+    names_a_type(c, n.name.text, id.module.to_usize()).match({
+        true  => None,
+        false => target_module(c, n),
+    })
+}
+
+target_module = (c :: Checker, n: Named) Res<usize> {
+    (n.args.len == 0).match({
+        false => None,
+        true  => c.world.index_of(n.name.text),
+    })
+}
+
+names_a_type = (c :: Checker, name: str, mi: usize) bool {
+    found ::= c.alloc.Vec<Def>();
+    c.world.defs_of(mi, name, found).match({
+        Err(_) => true,
+        Ok(_)  => found.len > 0,
+    })
+}
+
+// `sh.reseat` / `a.beta_Gamma`: the name itself, reaching exactly what
+// that module STARRED — `exported_defs` and not `defs_of`, so qualifying
+// through an alias is not a way around the gate a plain import would
+// have been stopped by.
+module_access* = (c :: Checker, node: Expr, ac: Access, mi: usize)
+                Res<TyId, AllocError> {
+    found ::= c.alloc.Vec<Def>();
+    c.world.exported_defs(mi, ac.name.text, found).try();
+    found.get(0).match({
+        None  => not_exported(c, ac, mi),
+        Ok(d) => module_def_type(c, d),
+    })
+}
+
+// A FUNCTION REACHED THROUGH A MODULE IS ITS SIGNATURE, not a nominal
+// type of its own name: `def_type` answers for a declaration used AS a
+// type, and a qualified call needs the thing a return type comes off, or
+// `println("{}", sh.reseat(3))` prints a value of no type.
+//
+// A STRUCT IS ITS CONSTRUCTOR, for the reason a payload variant is —
+// `sh.Bag(len: 1)` is a call node, and `sema_member.variant_ctor` makes
+// the same move for `Slot.Left(cell)`.
+//
+// That constructor takes no declared parameters, and that is a GAP
+// rather than a claim: construction is by NAME, the fields are checked
+// where a bare `Bag(len: 1)` is checked, and this path does not reach
+// that yet. It is written down because a reader will ask.
+module_def_type = (c :: Checker, d: Def) Res<TyId, AllocError> {
+    d.kind.match({
+        FunctionDef => module_fn_type(c, d),
+        StructDef   => module_ctor_type(c, d),
+        _           => c.def_type(d),
+    })
+}
+
+module_ctor_type = (c :: Checker, d: Def) Res<TyId, AllocError> {
+    ty = c.decl_as_type(d).try();
+    params ::= c.alloc.Vec<TyId>();
+    c.types.fn_ty(params, ty)
+}
+
+module_fn_type = (c :: Checker, d: Def) Res<TyId, AllocError> {
+    decl_at(c.tree, d.id).match({
+        None  => c.types.unknown(),
+        Ok(x) => x.kind.match({
+            Function(f) => decl_fn_type(c, d, f),
+            _           => c.types.unknown(),
+        }),
+    })
+}
+
+// Read in the DECLARING module's scope: a parameter's written type names
+// what that file could see, which is not what the caller can.
+//
+// A function with NO written return type returns `()`, which is what the
+// declaration means and not a hole to infer.
+decl_fn_type = (c :: Checker, d: Def, f: Function) Res<TyId, AllocError> {
+    poison = c.types.unknown().try();
+    ctx = Ctx(d.id.module.to_usize(), poison);
+    ptys ::= c.alloc.Vec<TyId>();
+    f.params.loop((h, p) { ptys.add(c.param_type(p, ctx).try()).try() });
+    rty = ret_type(c, f, ctx).try();
+    c.types.fn_ty(ptys, rty)
+}
+
+ret_type = (c :: Checker, f: Function, ctx: Ctx) Res<TyId, AllocError> {
+    f.ret.match({
+        Ok(t) => c.type_from_ast(t, ctx),
+        None  => c.types.prim("()"),
+    })
+}
+
+not_exported = (c :: Checker, ac: Access, mi: usize)
+              Res<TyId, AllocError> {
+    c.report(ac.name.span.file, ac.name.span,
+             SemaFault.NotExported(ExportFault(
+                 name: ac.name.text, module: module_name(c, mi)))).try();
+    c.types.unknown()
+}
+
+module_name = (c :: Checker, mi: usize) str {
+    c.world.table_at(mi).match({
+        Ok(t) => module_display(t.name),
+        None  => "",
+    })
+}

@@ -57,6 +57,7 @@ has_member = sema.sema_supply
 is_case = sema.sema_match
 type_from_ast, type_of, param_type = sema.sema_type
 global_name_type, def_type = sema.sema_type
+module_named_by, module_access = sema.sema_module
 
 // One thing a dot could reach.
 //
@@ -167,8 +168,21 @@ is_type_def* = (k: DefKind) bool {
 
 // A variant, or a constant on a type. "That access form already exists —
 // `Shape.Unit`, `Os.Macos` — so this adds a spelling, not a concept."
+//
+// A MODULE IS ASKED FIRST, because it is not a type at all: `sh = shape`
+// binds a name whose base has no members, no variants and no constants,
+// and every question below it would answer "no such field" correctly and
+// uselessly.
 static_access* = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
                 Res<TyId, AllocError> {
+    module_named_by(c, ty).match({
+        Ok(mi) => module_access(c, node, ac, mi),
+        None   => type_access(c, node, ac, ty, ctx),
+    })
+}
+
+type_access = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
+             Res<TyId, AllocError> {
     is_case(c, ty, ac.name.text).try().match({
         true  => variant_type(c, ty, ac.name.text),
         false => static_member(c, node, ac, ty, ctx),
