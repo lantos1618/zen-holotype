@@ -65,6 +65,8 @@ handle_depth, lower_handle_call = gen.gen_c.gen_c_handle
 inlines, inline_method = gen.gen_c.gen_c_inline
 is_ptr_member, lower_ptr_member = gen.gen_c.gen_c_ptr
 is_capability, lower_capability = gen.gen_c.gen_c_cap
+is_fat = gen.gen_c.gen_c_fat
+lower_fat_call = gen.gen_c.gen_c_bound
 
 // -----------------------------------------------------------------
 // the entry point
@@ -183,9 +185,38 @@ with_site = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
              s: Site, ctx: Ctx, out :: String) Res<(), AllocError> {
     found ::= be.alloc.Vec<Member>();
     member_at(be, s, a.name.text, found).try();
-    found.get(0).match({
+    by_arity(found, c.args.len + 1).match({
         None  => supplied_or_ufcs(be, id, c, a, rty, s, ctx, out),
         Ok(m) => member_kind(be, id, c, a, rty, s, m, ctx, out),
+    })
+}
+
+// A TYPE MAY DECLARE TWO MEMBERS OF ONE NAME. "Resolution is on
+// declared parameter types and arity", and `Cursor.peek()` and
+// `Cursor.peek(n)` are two functions — taking the first one emitted a
+// call to the wrong symbol with the right arguments, which `cc` caught
+// and which two same-arity overloads would have hidden.
+//
+// ARITY IS THE HALF A BACKEND CAN ANSWER WITHOUT REDOING SEMA'S RULE,
+// and where it does not separate them the first is still the answer:
+// picking on types too would be a second, worse copy of overload
+// resolution.
+by_arity* = (found: Vec<Member>, arity: usize) Res<Member> {
+    Range(0, found.len).find((i) {
+        found.get(i).match({
+            Ok(m) => member_arity(m) == arity,
+            None  => false,
+        })
+    }).match({
+        None  => found.get(0),
+        Ok(i) => found.get(i),
+    })
+}
+
+member_arity = (m: Member) usize {
+    m.kind.match({
+        Function(f) => f.params.len,
+        _           => 0,
     })
 }
 
@@ -209,7 +240,7 @@ with_site = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
 supplied_or_ufcs = (be :: CBackend, id: ExprId, c: Call, a: Access,
                     rty: TyId, s: Site, ctx: Ctx, out :: String)
                    Res<(), AllocError> {
-    impl_member(be, s, rty, a.name.text).try().match({
+    impl_member_of(be, s, a.name.text, c.args.len + 1).try().match({
         Ok(f) => lower_supplied(be, id, c, a, rty, s, f, ctx, out),
         None  => lower_ufcs(be, id, c, a, rty, ctx, out),
     })
@@ -231,6 +262,18 @@ impl_member* = (be :: CBackend, s: Site, rty: TyId, name: str)
     found ::= be.alloc.Vec<Member>();
     impl_member_at(be, s.decl, name, found).try();
     Ok(bodied_fn(found));
+}
+
+// The same question asked of an impl, at a known arity.
+impl_member_of* = (be :: CBackend, s: Site, name: str, arity: usize)
+                  Res<Res<Function>, AllocError> {
+    found ::= be.alloc.Vec<Member>();
+    impl_member_at(be, s.decl, name, found).try();
+    Ok(member_fn_of(by_arity(found, arity)));
+}
+
+member_fn_of = (m: Res<Member>) Res<Function> {
+    m.match({ Ok(x) => member_fn(x), None => None })
 }
 
 bodied_fn* = (found: Vec<Member>) Res<Function> {
@@ -458,6 +501,24 @@ lower_declared_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
     is_capability(be, rty, a.name.text).match({
         true  => lower_capability(be, id, c, a, rty, s.decl.module.to_usize(),
                                   f, ctx, out),
+        false => lower_bound_or_method(be, id, c, a, rty, s, f, ctx, out),
+    })
+}
+
+// A MEMBER WITH NO BODY ON A VALUE WHOSE STATIC TYPE IS THE BOUND is the
+// one call in the language that cannot be resolved statically: which
+// function it runs is decided by the impl behind the receiver, and the
+// receiver is a `void *` in a record. `gen_c_fat.zen` writes it.
+//
+// EVERYTHING ELSE STILL RESOLVES STATICALLY. A member with a body is
+// the bound's own default, specialised on this receiver; a receiver
+// with a concrete type is the impl's function, monomorphised. Neither
+// builds a record, which is the whole reason monomorphisation survives.
+lower_bound_or_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
+                         rty: TyId, s: Site, f: Function, ctx: Ctx,
+                         out :: String) Res<(), AllocError> {
+    (is_fat(be, rty) && (has_body(f) == false)).match({
+        true  => lower_fat_call(be, id, c, a, rty, s, f, ctx, out),
         false => lower_ordinary_method(be, id, c, a, rty, s, f, ctx, out),
     })
 }

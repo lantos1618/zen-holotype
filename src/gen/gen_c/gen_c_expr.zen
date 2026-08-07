@@ -48,19 +48,23 @@ RES_PATH, is_failure = gen.gen_name
 GenFault = gen.gen_diag
 CBackend, LocalSlot = gen.gen_c.gen_c_state
 sub, constructed, open = gen.gen_c.gen_c_mono
-loop_result_type = gen.gen_c.gen_c_loop
+loop_result_type = gen.gen_c.gen_c_shape
 unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_state
 lower_match, lower_try = gen.gen_c.gen_c_flow
 ctype, declarator, spellable, is_unit, c_prim = gen.gen_c.gen_c_type
 is_c_integer, is_signed, variant_type, decl_ctx = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
+lower_access, base_decl, type_const, TypeConst = gen.gen_c.gen_c_read
 field_type, request_type = gen.gen_c.gen_c_type
 Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
 plain_ctx = gen.gen_c.gen_c_decl
 lower_call, res_value, is_res_ctor = gen.gen_c.gen_c_call
+call_ret_type = gen.gen_c.gen_c_infer
 lower_unary, lower_binary = gen.gen_c.gen_c_op
 lower_index, index_type = gen.gen_c.gen_c_index
+is_ptr_member, ptr_member_type = gen.gen_c.gen_c_ptr
 inline_result_type = gen.gen_c.gen_c_settle
+needs_fat, write_fat_value = gen.gen_c.gen_c_fat
 
 // -----------------------------------------------------------------
 // expressions
@@ -129,11 +133,107 @@ call_spills = (be: CBackend, c: Call) bool {
 // about `T`, and this is where it becomes the `i32` this emission is at.
 ty_of* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
          Res<TyId, AllocError> {
+    local_answer(be, id).match({
+        Ok(t) => Ok(t),
+        None  => derived_answer(be, id, ctx, want),
+    })
+}
+
+derived_answer = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+                 Res<TyId, AllocError> {
+    ptr_answer(be, id, ctx, want).try().match({
+        Ok(t) => Ok(t),
+        None  => sema_answer(be, id, ctx, want),
+    })
+}
+
+// THE FRAME THAT DECLARED A BINDING IS THE AUTHORITY ON ITS TYPE, and
+// sema's memo is not — the memo is keyed by node id and nothing else,
+// so an answer computed while `Vec<Diag>.get` was being lowered is the
+// answer `Vec<TyId>.get` reads back. It emitted a call to the first
+// one's symbol with the second one's receiver, which `cc` caught and
+// which two types of one width would have hidden.
+//
+// A HANDLE AND A CLOSURE ARE NOT VALUES and have no type to give: `h`
+// is a pair of labels and a lambda is a body to inline, so both are
+// left to the paths that know what they are.
+local_answer = (be :: CBackend, id: ExprId) Res<TyId> {
+    be.tree.expr_at(id).kind.match({
+        Name(n) => named_slot(be, n.text),
+        _       => None,
+    })
+}
+
+named_slot = (be :: CBackend, name: str) Res<TyId> {
+    be.slot_of(name).match({
+        None  => None,
+        Ok(s) => value_slot(be, s),
+    })
+}
+
+value_slot = (be :: CBackend, s: LocalSlot) Res<TyId> {
+    ((s.handle == 0) && (s.closure == 0)).match({
+        false => None,
+        true  => keep_known(be, s.ty),
+    })
+}
+
+keep_known = (be :: CBackend, ty: TyId) Res<TyId> {
+    (be.check.is_unknown(ty) || open(be, ty)).match({
+        true  => None,
+        false => Ok(ty),
+    })
+}
+
+sema_answer = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+              Res<TyId, AllocError> {
     got = sub(be, be.check.type_of(id, ctx).try()).try();
     be.check.is_unknown(got).match({
         false => settled_answer(be, id, ctx, got),
         true  => fallback_type(be, id, ctx, want),
     })
+}
+
+// `Ptr`'S MEMBERS ARE THE BACKEND, so sema has no body to check for one
+// and answers `p.to<u8>()` with a `Ptr` whose element nothing settled —
+// an answer that is not unknown and carries no `Var`, so nothing
+// downstream questions it. A LOCAL DECLARED AT THAT TYPE IS A C POINTER
+// AT THE WRONG STRIDE: `src.back(8)` moved back thirty-two bytes,
+// `realloc` read a length nobody wrote, and every row before the last
+// grow was silently dropped. It compiled, and the differential oracle
+// is what caught it.
+//
+// So the backend answers first for exactly these members, which is the
+// same authority it already has over lowering them.
+ptr_answer = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+             Res<Res<TyId>, AllocError> {
+    be.tree.expr_at(id).kind.match({
+        Call(c) => ptr_call_answer(be, c, ctx, want),
+        _       => Ok(None),
+    })
+}
+
+ptr_call_answer = (be :: CBackend, c: Call, ctx: Ctx, want: TyId)
+                  Res<Res<TyId>, AllocError> {
+    be.tree.expr_at(c.callee).kind.match({
+        Access(a) => ptr_dot_answer(be, c, a, ctx, want),
+        _         => Ok(None),
+    })
+}
+
+ptr_dot_answer = (be :: CBackend, c: Call, a: Access, ctx: Ctx, want: TyId)
+                 Res<Res<TyId>, AllocError> {
+    unknown = be.check.types.unknown().try();
+    rty = ty_of(be, a.base, ctx, unknown).try();
+    is_ptr_member(be, rty, a.name.text).match({
+        false => Ok(None),
+        true  => ptr_answer_of(be, c, a, rty, ctx, want),
+    })
+}
+
+ptr_answer_of = (be :: CBackend, c: Call, a: Access, rty: TyId, ctx: Ctx,
+                 want: TyId) Res<Res<TyId>, AllocError> {
+    Ok(Ok(ptr_member_type(be, c, a, rty, ctx, want).try()));
 }
 
 // AN OPEN TYPE IS NOT AN ANSWER. Sema types `range.loop(body)` as
@@ -161,7 +261,35 @@ settle_open = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
     walked = loop_result_type(be, id, ctx, got).try();
     open(be, walked).match({
         false => Ok(walked),
-        true  => inline_result_type(be, id, ctx, walked),
+        true  => settle_inlined(be, id, ctx, walked),
+    })
+}
+
+// AND THEN THE CALL ITSELF. Sema types a generic call as its DECLARED
+// return, and inside a member body nothing recorded an instantiation to
+// close it — so a `.try()` on one lands in a temporary declared at
+// `Res<q, E>`, which is a C struct with an unresolved element. The
+// arguments say which instantiation it is; `gen_c_call.zen` asks them.
+settle_inlined = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
+                 Res<TyId, AllocError> {
+    inlined = inline_result_type(be, id, ctx, got).try();
+    open(be, inlined).match({
+        false => Ok(inlined),
+        true  => settle_call(be, id, ctx, inlined),
+    })
+}
+
+// A `.try()` ON ONE IS THE SAME QUESTION ONE NODE UP. Sema types
+// `f().try()` as the callee's declared `Ok` payload, which is the
+// parameter itself when the callee is generic — so the operand is
+// re-asked and the payload read off the answer.
+settle_call = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
+              Res<TyId, AllocError> {
+    be.tree.expr_at(id).kind.match({
+        Call(c)  => call_ret_type(be, id, c, ctx, got),
+        Try(t)   => try_value_type(be, t.operand, ctx, got),
+        Paren(p) => ty_of(be, p.inner, ctx, got),
+        _        => Ok(got),
     })
 }
 
@@ -281,8 +409,32 @@ res_type_of* = (be :: CBackend, id: ExprId, ctx: Ctx)
 // this backend already lands: `deliver_simple` builds the expression
 // text first and writes the line after, so anything written while it
 // builds comes out ahead of it.
+// A CONCRETE VALUE REACHING A SLOT WHOSE TYPE IS A BOUND becomes a fat
+// value, and this is the one place it happens: an argument, a field and
+// a return all arrive here with the destination's type, so passing an
+// `Arena` where an `Alloc` is wanted builds the record at all three
+// without a rule at any of them.
 expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, out :: String)
         Res<(), AllocError> {
+    needs_fat(be, id, ctx, want).try().match({
+        true  => fat_expr(be, id, ctx, want, out),
+        false => value_expr(be, id, ctx, want, out),
+    })
+}
+
+// The value AT ITS OWN TYPE, then the record over its address: lowering
+// it at the bound would ask for a record that does not exist yet.
+fat_expr = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+            out :: String) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    cty = ty_of(be, id, ctx, unknown).try();
+    code ::= be.alloc.String().try();
+    value_expr(be, id, ctx, cty, code).try();
+    write_fat_value(be, code.view(), cty, want, out)
+}
+
+value_expr = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+              out :: String) Res<(), AllocError> {
     spills(be, id).match({
         true  => spill_temp(be, id, ctx, want, out),
         false => write_expr(be, id, ctx, want, out),
@@ -509,7 +661,7 @@ lower_const_decl = (be :: CBackend, id: ExprId, x: Decl, d: Def, text: str,
 // The constant's DECLARED type wins over the context's: `USAGE: str` is
 // a `str` wherever it is read, and a literal takes its width from the
 // declaration that named it.
-lower_const_value = (be :: CBackend, id: ExprId, k: Const, d: Def,
+lower_const_value* = (be :: CBackend, id: ExprId, k: Const, d: Def,
                      want: TyId, out :: String) Res<(), AllocError> {
     dctx = plain_ctx(be, d.id.module.to_usize());
     ty = k.type.match({
@@ -534,8 +686,31 @@ is_pure_value* = (be :: CBackend, id: ExprId, ctx: Ctx) bool {
         Unary(u)   => is_pure_value(be, u.operand, ctx),
         Binary(b)  => is_pure_pair(be, b, ctx),
         Call(c)    => is_pure_construction(be, c, ctx),
+        Access(a)  => is_pure_access(be, a, ctx),
         _          => false,
     })
+}
+
+// A NULLARY VARIANT AND A CONSTANT ON A TYPE are both values of a
+// DECLARATION: neither names a function and neither reads a frame, so
+// both can be written wherever they are read. A field access cannot —
+// it reads a receiver.
+is_pure_access = (be :: CBackend, a: Access, ctx: Ctx) bool {
+    base_decl(be, a.base, ctx).match({
+        Ok(_) => true,
+        None  => has_type_const(be, a, ctx),
+    })
+}
+
+has_type_const = (be :: CBackend, a: Access, ctx: Ctx) bool {
+    type_const(be, a, ctx).match({
+        Err(_) => false,
+        Ok(r)  => found_const(r),
+    })
+}
+
+found_const = (r: Res<TypeConst>) bool {
+    r.match({ Ok(_) => true, None => false })
 }
 
 is_pure_pair = (be :: CBackend, b: Binary, ctx: Ctx) bool {
@@ -585,128 +760,3 @@ sole_struct = (found: Vec<Def>) bool {
 is_struct_def = (d: Def) bool {
     d.kind.match({ StructDef => true, _ => false })
 }
-
-
-// -----------------------------------------------------------------
-// access and calls
-// -----------------------------------------------------------------
-
-// `p.x` on a struct, and `Shape.Unit` on an enum. The same node, and
-// the difference is whether the base is a value or a declaration —
-// "that access form already exists, so this adds a spelling, not a
-// concept".
-lower_access = (be :: CBackend, id: ExprId, a: Access, ctx: Ctx, want: TyId,
-                out :: String) Res<(), AllocError> {
-    base_decl(be, a.base, ctx).match({
-        Ok(ty) => write_variant_value(be, id, ty, a.name.text, out),
-        None   => write_field_access(be, a, ctx, out),
-    })
-}
-
-// The enum a base names, when the base is a bare name that resolves to
-// an enum declaration rather than to a local.
-base_decl = (be :: CBackend, base: ExprId, ctx: Ctx) Res<TyId> {
-    be.tree.expr_at(base).kind.match({
-        Name(n) => enum_named(be, n.text, ctx),
-        _       => None,
-    })
-}
-
-enum_named = (be :: CBackend, text: str, ctx: Ctx) Res<TyId> {
-    be.slot_of(text).match({
-        Ok(_) => None,
-        None  => enum_def_named(be, text, ctx),
-    })
-}
-
-enum_def_named = (be :: CBackend, text: str, ctx: Ctx) Res<TyId> {
-    found ::= be.alloc.Vec<Def>();
-    be.check.world.defs_of(ctx.module, text, found).match({
-        Err(_) => None,
-        Ok(_)  => first_enum(be, found),
-    })
-}
-
-first_enum = (be :: CBackend, found: Vec<Def>) Res<TyId> {
-    found.get(0).match({
-        None  => None,
-        Ok(d) => enum_type_of(be, d),
-    })
-}
-
-enum_type_of = (be :: CBackend, d: Def) Res<TyId> {
-    d.kind.match({
-        EnumDef => intern_named(be, d),
-        _       => None,
-    })
-}
-
-intern_named = (be :: CBackend, d: Def) Res<TyId> {
-    constructed(be, d).match({
-        Err(_) => None,
-        Ok(id) => Ok(id),
-    })
-}
-
-// A nullary variant is a value of its enum: the tag, and no payload.
-// A variant WITH a payload written as a bare access is a value that
-// has not been constructed, and sema is the one that says so.
-write_variant_value = (be :: CBackend, id: ExprId, ty: TyId, variant: str,
-                       out :: String) Res<(), AllocError> {
-    qname ::= be.alloc.String().try();
-    enum_qname(be, ty, qname).try();
-    out.add_bytes("(").try();
-    ctype(be, ty, out).try();
-    out.add_bytes("){ .zg_tag = ").try();
-    sym_variant(out, qname.view(), variant).try();
-    out.add_bytes(" }").try();
-    Ok(());
-}
-
-enum_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
-    be.check.types.at(ty).match({
-        Named(n) => write_qname(be, out, n),
-        _        => Ok(()),
-    })
-}
-
-write_field_access = (be :: CBackend, a: Access, ctx: Ctx, out :: String)
-                     Res<(), AllocError> {
-    unknown = be.check.types.unknown().try();
-    rty = ty_of(be, a.base, ctx, unknown).try();
-    expr(be, a.base, ctx, unknown, out).try();
-    out.add_bytes(".").try();
-    field_name(be, rty, a.name.text, out).try();
-    Ok(());
-}
-
-// `str` IS THE ONE TYPE WHOSE C REPRESENTATION IS THE RUNTIME FLOOR'S
-// rather than its declaration's. `gen_c_runtime.emit_floor` writes
-// `struct zg_str { unsigned char *data; size_t len; }` and every string
-// literal, every `zg_print_str` and every C caller already agrees on
-// those two names — so a read of `text_str.zen`'s `data` or `len` is
-// spelled the floor's way and not the mangler's. Everything else in the
-// language is mangled, which is what keeps two modules' `len` two
-// members.
-field_name = (be :: CBackend, rty: TyId, name: str, out :: String)
-             Res<(), AllocError> {
-    is_str(be, rty).match({
-        true  => out.add_bytes(name),
-        false => sym_member(out, name),
-    })
-}
-
-is_str = (be :: CBackend, rty: TyId) bool {
-    be.check.types.at(rty).match({
-        Prim(p) => p.name.eq("str"),
-        _       => false,
-    })
-}
-
-// A call to a top-level function the module can see, and the two `Res`
-// constructors.
-//
-// OVERLOAD RESOLUTION IS SEMA'S AND IS NOT THERE YET, so a name with
-// more than one declaration is REPORTED rather than picked between:
-// "resolution is on declared parameter types and arity", and a backend
-// guessing would be a second, worse copy of that rule.

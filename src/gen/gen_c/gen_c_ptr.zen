@@ -81,6 +81,65 @@ elem_of = (be :: CBackend, rty: TyId) Res<TyId, AllocError> {
     })
 }
 
+// WHAT A `Ptr` MEMBER EVALUATES TO.
+//
+// Sema does not type a call, so a binding that holds one has no type
+// unless this answers — and `src = p.to<u8>()` declared at the wrong
+// element type is C POINTER ARITHMETIC AT THE WRONG STRIDE. It compiles,
+// it warns at most, and `src.back(8)` moves back thirty-two bytes. The
+// answers are the same ones the lowerings below write, read off the same
+// two facts: the receiver's element type, and the written type argument.
+ptr_member_type* = (be :: CBackend, c: Call, a: Access, rty: TyId,
+                    ctx: Ctx, want: TyId) Res<TyId, AllocError> {
+    et = elem_of(be, rty).try();
+    a.name.text.eq("read").match({
+        true  => Ok(et),
+        false => ptr_type_2(be, c, a, rty, ctx, want),
+    })
+}
+
+// `offset` and `back` answer with the pointer itself; `write` and
+// `copy_from` answer with nothing at all.
+ptr_type_2 = (be :: CBackend, c: Call, a: Access, rty: TyId, ctx: Ctx,
+              want: TyId) Res<TyId, AllocError> {
+    (a.name.text.eq("offset") || a.name.text.eq("back")).match({
+        true  => Ok(rty),
+        false => ptr_type_3(be, c, a, rty, ctx, want),
+    })
+}
+
+ptr_type_3 = (be :: CBackend, c: Call, a: Access, rty: TyId, ctx: Ctx,
+              want: TyId) Res<TyId, AllocError> {
+    a.name.text.eq("bytes").match({
+        true  => be.check.types.prim("usize"),
+        false => ptr_type_4(be, c, a, rty, ctx, want),
+    })
+}
+
+ptr_type_4 = (be :: CBackend, c: Call, a: Access, rty: TyId, ctx: Ctx,
+              want: TyId) Res<TyId, AllocError> {
+    a.name.text.eq("is_null").match({
+        true  => be.check.types.prim("bool"),
+        false => ptr_type_5(be, c, a, rty, ctx, want),
+    })
+}
+
+ptr_type_5 = (be :: CBackend, c: Call, a: Access, rty: TyId, ctx: Ctx,
+              want: TyId) Res<TyId, AllocError> {
+    a.name.text.eq("to").match({
+        false => be.check.types.prim("()"),
+        true  => ptr_target_type(be, c, rty, ctx, want),
+    })
+}
+
+ptr_target_type = (be :: CBackend, c: Call, rty: TyId, ctx: Ctx,
+                   want: TyId) Res<TyId, AllocError> {
+    target_ptr(be, c, rty, ctx, want).try().match({
+        Ok(pt) => Ok(pt),
+        None   => Ok(want),
+    })
+}
+
 // -----------------------------------------------------------------
 // the nine
 // -----------------------------------------------------------------

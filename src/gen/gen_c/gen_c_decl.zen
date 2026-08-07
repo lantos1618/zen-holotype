@@ -42,6 +42,7 @@ RES_PATH = gen.gen_name
 GenFault = gen.gen_diag
 CBackend, MethodRef = gen.gen_c.gen_c_state
 sub, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
+open_named = gen.gen_c.gen_c_mono
 enter_struct_tparams = gen.gen_c.gen_c_mono
 signature_of = gen.gen_c.gen_c_call
 ctype, declarator, spellable, is_unit, is_c_integer = gen.gen_c.gen_c_type
@@ -327,11 +328,40 @@ method_fn = (be :: CBackend, m: MethodRef, mem: Member, f: Function)
 method_shape = (be :: CBackend, m: MethodRef, mem: Member, f: Function,
                 blk: BlockId) Res<(), AllocError> {
     mi = m.decl.module.to_usize();
-    ctx = be.check.self_ctx(mi, m.self_ty).try();
+    self_ty = method_self(be, m).try();
+    ctx = be.check.self_ctx(mi, self_ty).try();
     mark = enter_struct_tparams(be, m.decl).try();
-    lower_shape(be, f, blk, m.qname, m.name, mem.span, ctx, m.self_ty, mi).try();
+    // AND THE MEMBER'S OWN, under the member's qualified name: an impl
+    // reached through a bound's erased slot is emitted at the byte type,
+    // and `T` in its body means nothing unless the same owner that bound
+    // it in the queue entry binds it again here.
+    enter_tparams(be, f.tparams, m.qname).try();
+    lower_shape(be, f, blk, m.qname, m.name, mem.span, ctx, self_ty, mi).try();
     leave_tparams(be, mark).try();
     Ok(());
+}
+
+// `@Self` FOR A GENERIC RECEIVER IS THE DECLARATION'S OWN TYPE, and for
+// every other receiver it is the one the call site reached. The
+// distinction is exactly where the memo can be wrong: a receiver with
+// no arguments has one emission and nothing to confuse, and `str`'s
+// receiver is a PRIMITIVE that no declaration's name interns to.
+method_self = (be :: CBackend, m: MethodRef) Res<TyId, AllocError> {
+    generic_recv(be, m.self_ty).match({
+        false => Ok(m.self_ty),
+        true  => open_self(be, m),
+    })
+}
+
+generic_recv = (be: CBackend, ty: TyId) bool {
+    be.check.types.at(ty).match({ Named(n) => n.args.len > 0, _ => false })
+}
+
+open_self = (be :: CBackend, m: MethodRef) Res<TyId, AllocError> {
+    open_named(be, m.decl).try().match({
+        None  => Ok(m.self_ty),
+        Ok(t) => Ok(t),
+    })
 }
 
 // -----------------------------------------------------------------
@@ -413,12 +443,21 @@ bind_params = (be :: CBackend, f: Function, ctx: Ctx, sig :: Vec<TyId>)
 // Through `param_type` and not `type_from_ast`: `self :: @Self` has a
 // written type that means the receiver, and only the query that knows
 // about `@Self` can answer it.
+//
+// TWO TYPES, AND THE DIFFERENCE IS THE WHOLE POINT. The C declaration
+// takes THIS EMISSION's type, because that is what the prototype
+// prints. Sema takes the DECLARED one, still in its own parameters,
+// because sema's memo is keyed by node id alone — a concrete answer
+// written there is the answer every other instantiation of this body
+// reads back. `ty_of` puts `be.inst` through every read, which is where
+// the concrete answer belongs and where it is correct once.
 bind_param = (be :: CBackend, p: Param, ctx: Ctx, sig :: Vec<TyId>)
              Res<(), AllocError> {
-    ty = sub(be, be.check.param_type(p, ctx).try()).try();
+    declared = be.check.param_type(p, ctx).try();
+    ty = sub(be, declared).try();
     sig.add(ty).try();
     be.declare(p.name.text, ty, p.mutable).try();
-    be.check.bind(p.name.text, ty, p.mutable).try();
+    be.check.bind(p.name.text, declared, p.mutable).try();
     Ok(());
 }
 

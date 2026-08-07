@@ -1,0 +1,433 @@
+// src/gen/gen_c/gen_c_bound.zen
+// THE CALL THROUGH A BOUND'S RECORD, and the erasure round-trip it
+// needs at both ends.
+//
+// `gen_c_fat.zen` is the other half: what a bound's record IS and how
+// one is built. This is what happens when a value of one is CALLED —
+// the only dynamic dispatch in the language, and the one place a
+// concrete type is not known at the call site.
+//
+// TWO CONVERSIONS AND ONE MULTIPLICATION. The slots are erased to the
+// byte type, so an argument goes DOWN to the slot's type and the answer
+// comes BACK UP to the caller's, and the element count the erasure
+// dropped travels beside the pointer. The multiplication lives in the
+// thunk and nowhere else (`gen_c_fat.zen` says why); this file's job is
+// the two conversions and the `sizeof` that feeds them.
+//
+// A CONVERSION REBUILDS AND NEVER REINTERPRETS. A pointer is cast and a
+// `Res` is rebuilt variant by variant, because nothing here may assume
+// that two pointer types share a representation or that two `Res`
+// instantiations share a layout.
+
+Ast, Expr, ExprId, Decl, DeclKind, Struct, Member, MemberKind = ast
+Function, Param, TParam, Access, Call, Arg, Span, Ident, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+DeclId = sema.sema_id
+TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
+World, Def, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+Inst = sema.sema_inst
+self_ctx = sema.sema_member
+param_type, type_from_ast = sema.sema_type
+sym_member, sym_gen, sym_variant = gen.gen_name
+RES_PATH, is_failure = gen.gen_name
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+unsupported = gen.gen_c.gen_c_state
+sub_with, open, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
+unify, arg_type = gen.gen_c.gen_c_mono
+enter_struct_tparams = gen.gen_c.gen_c_mono
+ctype, is_unit, request_type, is_ptr_named = gen.gen_c.gen_c_type
+expr, ty_of = gen.gen_c.gen_c_expr
+declare_temp = gen.gen_c.gen_c_flow
+Site, site_of, join = gen.gen_c.gen_c_member
+Slot, slots_of, set_line = gen.gen_c.gen_c_fat
+
+// -----------------------------------------------------------------
+// rebuilding a value at another type
+//
+// Erasure is what lets one slot serve every instantiation; this is the
+// way back. A pointer is cast and a `Res` is rebuilt variant by
+// variant. NOTHING HERE ASSUMES TWO POINTER TYPES SHARE A
+// REPRESENTATION, and nothing reinterprets a struct.
+// -----------------------------------------------------------------
+
+convert* = (be :: CBackend, code: str, src: TyId, dst: TyId, out :: String)
+           Res<(), AllocError> {
+    src.eq(dst).match({
+        true  => out.add_bytes(code),
+        false => convert_kind(be, code, src, dst, out),
+    })
+}
+
+convert_kind = (be :: CBackend, code: str, src: TyId, dst: TyId,
+                out :: String) Res<(), AllocError> {
+    be.types().at(dst).match({
+        Named(n) => convert_named(be, code, dst, n, out),
+        Res(r)   => convert_res(be, code, src, dst, r, out),
+        _        => out.add_bytes(code),
+    })
+}
+
+convert_named = (be :: CBackend, code: str, dst: TyId, n: TyNamed,
+                 out :: String) Res<(), AllocError> {
+    is_ptr_named(n).match({
+        true  => write_cast(be, code, dst, out),
+        false => out.add_bytes(code),
+    })
+}
+
+write_cast* = (be :: CBackend, code: str, dst: TyId, out :: String)
+             Res<(), AllocError> {
+    out.add_bytes("((").try();
+    ctype(be, dst, out).try();
+    out.add_bytes(")").try();
+    out.add_bytes(code).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+convert_res = (be :: CBackend, code: str, src: TyId, dst: TyId, d: TyRes,
+               out :: String) Res<(), AllocError> {
+    be.types().at(src).match({
+        Res(s) => rebuild_res(be, code, src, s, dst, d, out),
+        _      => out.add_bytes(code),
+    })
+}
+
+// The value is read three times — its tag and each payload — so it
+// lands in a temporary first.
+rebuild_res = (be :: CBackend, code: str, src: TyId, s: TyRes, dst: TyId,
+               d: TyRes, out :: String) Res<(), AllocError> {
+    request_type(be, dst).try();
+    tmp ::= be.alloc.String().try();
+    sym_gen(tmp, "t", be.next_tmp()).try();
+    declare_temp(be, src, tmp.view()).try();
+    set_line(be, tmp.view(), code).try();
+    out.add_bytes("(").try();
+    out.add_bytes(tmp.view()).try();
+    out.add_bytes(".zg_tag == ").try();
+    sym_variant(out, RES_PATH, "Ok").try();
+    out.add_bytes(" ? ").try();
+    res_arm(be, tmp.view(), "Ok", s.value, d.value, dst, out).try();
+    out.add_bytes(" : ").try();
+    fail_arm(be, tmp.view(), s, d, dst, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+fail_arm = (be :: CBackend, tmp: str, s: TyRes, d: TyRes, dst: TyId,
+            out :: String) Res<(), AllocError> {
+    is_failure(d.form).match({
+        true  => res_arm(be, tmp, "Err", s.error, d.error, dst, out),
+        false => bare_arm(be, "None", dst, out),
+    })
+}
+
+res_arm = (be :: CBackend, tmp: str, v: str, sp: TyId, dp: TyId, dst: TyId,
+           out :: String) Res<(), AllocError> {
+    is_unit(be, dp).match({
+        true  => bare_arm(be, v, dst, out),
+        false => payload_arm(be, tmp, v, sp, dp, dst, out),
+    })
+}
+
+bare_arm = (be :: CBackend, v: str, dst: TyId, out :: String)
+           Res<(), AllocError> {
+    arm_head(be, v, dst, out).try();
+    out.add_bytes(" })").try();
+    Ok(());
+}
+
+payload_arm = (be :: CBackend, tmp: str, v: str, sp: TyId, dp: TyId,
+               dst: TyId, out :: String) Res<(), AllocError> {
+    arm_head(be, v, dst, out).try();
+    out.add_bytes(", .zg_data.").try();
+    sym_member(out, v).try();
+    out.add_bytes(" = ").try();
+    read ::= be.alloc.String().try();
+    read.add_bytes(tmp).try();
+    read.add_bytes(".zg_data.").try();
+    sym_member(read, v).try();
+    convert(be, read.view(), sp, dp, out).try();
+    out.add_bytes(" })").try();
+    Ok(());
+}
+
+arm_head = (be :: CBackend, v: str, dst: TyId, out :: String)
+           Res<(), AllocError> {
+    out.add_bytes("((").try();
+    ctype(be, dst, out).try();
+    out.add_bytes("){ .zg_tag = ").try();
+    sym_variant(out, RES_PATH, v).try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// the call through the record
+//
+// THE ONLY DYNAMIC DISPATCH IN THE LANGUAGE. The value IS the bound, so
+// which function runs is decided by the impl behind the receiver and
+// nothing static can say which. Every other call — every one whose
+// receiver has a concrete type — is the impl's own function called
+// directly and monomorphised.
+// -----------------------------------------------------------------
+
+lower_fat_call* = (be :: CBackend, id: ExprId, c: Call, a: Access,
+                   rty: TyId, s: Site, f: Function, ctx: Ctx,
+                   out :: String) Res<(), AllocError> {
+    slots ::= be.alloc.Vec<Slot>();
+    slots_of(be, rty, slots).try();
+    pick_slot(slots, a.name.text, c.args.len).match({
+        None     => unsupported(be, id, "a call through a bound with no such member", out),
+        Ok(slot) => settle_call(be, id, c, a, rty, s, slot, ctx, out),
+    })
+}
+
+// A CALL THROUGH A BOUND'S RECORD THAT THE SOURCE DID NOT WRITE.
+//
+// `Fs.read` allocates its buffer through the `Alloc` it was handed, and
+// a capability's body IS this backend — so there is no call node to
+// lower and the record is still the only way to reach the impl. The
+// slot comes back with it, because the caller needs a temporary at the
+// type it answers with, and that type is the slot's own.
+//
+// The arguments arrive as text, each one already prefixed with its
+// comma: the caller writes them, because only the caller knows what
+// they are. A member with type parameters of its own is not reachable
+// this way and does not need to be — `raw` is bytes and nothing more.
+slot_call* = (be :: CBackend, recv: str, tty: TyId, name: str, args: str,
+              argc: usize, out :: String) Res<Res<Slot>, AllocError> {
+    slots ::= be.alloc.Vec<Slot>();
+    slots_of(be, tty, slots).try();
+    pick_slot(slots, name, argc).match({
+        None     => Ok(None),
+        Ok(slot) => write_named_slot(be, recv, slot, args, out),
+    })
+}
+
+write_named_slot = (be :: CBackend, recv: str, slot: Slot, args: str,
+                    out :: String) Res<Res<Slot>, AllocError> {
+    request_type(be, slot.ret).try();
+    out.add_bytes(recv).try();
+    out.add_bytes(".").try();
+    out.add_bytes(slot.sym.view()).try();
+    out.add_bytes("(").try();
+    out.add_bytes(recv).try();
+    out.add_bytes(".zg_self").try();
+    out.add_bytes(args).try();
+    out.add_bytes(")").try();
+    Ok(Ok(slot));
+}
+
+// By name and by ARITY: "resolution is on declared parameter types and
+// arity", and a bound may declare two members of one name.
+pick_slot = (slots: Vec<Slot>, name: str, args: usize) Res<Slot> {
+    Range(0, slots.len).find((i) {
+        slots.get(i).match({
+            Ok(s) => s.name.eq(name) && (s.params.len == args),
+            None  => false,
+        })
+    }).match({
+        None  => None,
+        Ok(i) => slots.get(i),
+    })
+}
+
+// WHAT THE MEMBER'S OWN TYPE PARAMETERS BECAME, read off the arguments.
+// The slot is erased, so the element size the call has to hand it comes
+// from here — and a parameter nothing settles is a refusal rather than
+// a `sizeof` of the wrong thing.
+settle_call = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
+               s: Site, slot: Slot, ctx: Ctx, out :: String)
+              Res<(), AllocError> {
+    owner ::= be.alloc.String().try();
+    join(owner, s.qname, slot.name).try();
+    sctx = be.check.self_ctx(s.decl.module.to_usize(), rty).try();
+    mark = enter_struct_tparams(be, s.decl).try();
+    enter_tparams(be, slot.f.tparams, owner.view()).try();
+    declared ::= be.alloc.Vec<TyId>();
+    declared_params(be, slot.f, sctx, declared).try();
+    ret = declared_ret(be, slot.f, sctx).try();
+    targs ::= be.alloc.Inst();
+    infer_targs(be, c, declared, ctx, targs).try();
+    leave_tparams(be, mark).try();
+    settled(be, slot, targs).match({
+        false => unsupported(be, id, "a call through a bound whose type arguments nothing settles", out),
+        true  => emit_fat_call(be, c, a, rty, slot, declared, ret, targs, ctx, out),
+    })
+}
+
+declared_params = (be :: CBackend, f: Function, sctx: Ctx,
+                   out :: Vec<TyId>) Res<(), AllocError> {
+    f.params.loop((h, i, p) { declared_param(be, p, i, sctx, out).try() });
+    Ok(());
+}
+
+declared_param = (be :: CBackend, p: Param, i: usize, sctx: Ctx,
+                  out :: Vec<TyId>) Res<(), AllocError> {
+    (i == 0).match({
+        true  => Ok(()),
+        false => add_declared(be, p, sctx, out),
+    })
+}
+
+add_declared = (be :: CBackend, p: Param, sctx: Ctx, out :: Vec<TyId>)
+               Res<(), AllocError> {
+    out.add(be.check.param_type(p, sctx).try())
+}
+
+declared_ret = (be :: CBackend, f: Function, sctx: Ctx)
+               Res<TyId, AllocError> {
+    f.ret.match({
+        Ok(t) => be.check.type_from_ast(t, sctx),
+        None  => be.check.types.prim("()"),
+    })
+}
+
+infer_targs = (be :: CBackend, c: Call, declared: Vec<TyId>, ctx: Ctx,
+               out :: Inst) Res<(), AllocError> {
+    c.args.loop((h, i, arg) {
+        infer_one(be, arg, i, declared, ctx, out).try();
+    });
+    Ok(());
+}
+
+infer_one = (be :: CBackend, arg: Arg, i: usize, declared: Vec<TyId>,
+             ctx: Ctx, out :: Inst) Res<(), AllocError> {
+    declared.get(i).match({
+        None  => Ok(()),
+        Ok(d) => infer_against(be, arg, d, ctx, out),
+    })
+}
+
+infer_against = (be :: CBackend, arg: Arg, d: TyId, ctx: Ctx, out :: Inst)
+                Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    actual = arg_type(be, arg.value, ctx, unknown).try();
+    unify(be, d, actual, out)
+}
+
+// Every parameter bound, and bound to something closed. A free argument
+// would become a `sizeof` of a type C has no name for.
+settled = (be: CBackend, slot: Slot, targs: Inst) bool {
+    (targs.len() == slot.elems) && all_closed(be, targs)
+}
+
+all_closed = (be: CBackend, targs: Inst) bool {
+    Range(0, targs.len()).find((i) {
+        targs.arg_at(i).match({ Ok(t) => open(be, t), None => true })
+    }).match({ Ok(_) => false, None => true })
+}
+
+// `<r> = <the receiver>; <r>.<slot>(<r>.zg_self, <args>, sizeof(T)..)`
+//
+// The receiver lands in a temporary because it is read twice — once for
+// the slot and once for the `void *` behind it — and an expression read
+// twice is an expression evaluated twice.
+emit_fat_call = (be :: CBackend, c: Call, a: Access, rty: TyId, slot: Slot,
+                 declared: Vec<TyId>, ret: TyId, targs: Inst, ctx: Ctx,
+                 out :: String) Res<(), AllocError> {
+    recv ::= be.alloc.String().try();
+    expr(be, a.base, ctx, rty, recv).try();
+    r ::= be.alloc.String().try();
+    sym_gen(r, "t", be.next_tmp()).try();
+    declare_temp(be, rty, r.view()).try();
+    set_line(be, r.view(), recv.view()).try();
+    call ::= be.alloc.String().try();
+    call.add_bytes(r.view()).try();
+    call.add_bytes(".").try();
+    call.add_bytes(slot.sym.view()).try();
+    call.add_bytes("(").try();
+    call.add_bytes(r.view()).try();
+    call.add_bytes(".zg_self").try();
+    fat_args(be, c, slot, declared, targs, ctx, call).try();
+    fat_sizes(be, targs, call).try();
+    call.add_bytes(")").try();
+    fat_result(be, slot, ret, targs, call.view(), out)
+}
+
+fat_args = (be :: CBackend, c: Call, slot: Slot, declared: Vec<TyId>,
+            targs: Inst, ctx: Ctx, out :: String) Res<(), AllocError> {
+    c.args.loop((h, i, arg) {
+        fat_arg(be, arg, i, slot, declared, targs, ctx, out).try();
+    });
+    Ok(());
+}
+
+// The argument at the type the DECLARATION gives it — which is what
+// turns an `Arena` into an `Alloc` one level down — then converted to
+// the erased type the slot carries.
+fat_arg = (be :: CBackend, arg: Arg, i: usize, slot: Slot,
+           declared: Vec<TyId>, targs: Inst, ctx: Ctx, out :: String)
+          Res<(), AllocError> {
+    want = sub_with(be, at_or_zero(declared, i), targs).try();
+    text ::= be.alloc.String().try();
+    expr(be, arg.value, ctx, want, text).try();
+    out.add_bytes(", ").try();
+    convert(be, text.view(), want, at_or_zero(slot.params, i), out).try();
+    Ok(());
+}
+
+at_or_zero = (v: Vec<TyId>, i: usize) TyId {
+    v.get(i).match({ Ok(t) => t, None => TyId(index: 0) })
+}
+
+// The element size the slot's erasure dropped, one per parameter, in
+// declaration order.
+fat_sizes = (be :: CBackend, targs: Inst, out :: String)
+            Res<(), AllocError> {
+    Range(0, targs.len()).loop((h, i) { fat_size(be, targs, i, out).try() });
+    Ok(());
+}
+
+fat_size = (be :: CBackend, targs: Inst, i: usize, out :: String)
+           Res<(), AllocError> {
+    targs.arg_at(i).match({
+        None  => out.add_bytes(", 1"),
+        Ok(t) => write_sizeof(be, t, out),
+    })
+}
+
+write_sizeof = (be :: CBackend, t: TyId, out :: String)
+               Res<(), AllocError> {
+    request_type(be, t).try();
+    out.add_bytes(", sizeof(").try();
+    ctype(be, t, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+// The slot answers at the ERASED type; the caller asked at its own. A
+// void-returning slot has nothing to rebuild and still has to run.
+fat_result = (be :: CBackend, slot: Slot, ret: TyId, targs: Inst,
+              call: str, out :: String) Res<(), AllocError> {
+    real = sub_with(be, ret, targs).try();
+    is_unit(be, slot.ret).match({
+        true  => fat_effect(be, call, out),
+        false => fat_value_back(be, slot, real, call, out),
+    })
+}
+
+fat_effect = (be :: CBackend, call: str, out :: String)
+             Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes(call).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view()).try();
+    out.add_bytes("0")
+}
+
+fat_value_back = (be :: CBackend, slot: Slot, real: TyId, call: str,
+                  out :: String) Res<(), AllocError> {
+    request_type(be, slot.ret).try();
+    request_type(be, real).try();
+    tmp ::= be.alloc.String().try();
+    sym_gen(tmp, "t", be.next_tmp()).try();
+    declare_temp(be, slot.ret, tmp.view()).try();
+    set_line(be, tmp.view(), call).try();
+    convert(be, tmp.view(), slot.ret, real, out)
+}

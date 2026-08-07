@@ -38,6 +38,7 @@ CBackend = gen.gen_c.gen_c_state
 Inst = sema.sema_inst
 sub_with, open, enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 intern_named = gen.gen_c.gen_c_mono
+request_slots = gen.gen_c.gen_c_fat
 
 // Closing the worklist is a fixpoint: defining a type discovers the
 // types of its fields, which may discover more. Eight passes is what
@@ -265,10 +266,22 @@ request_children = (be :: CBackend, i: usize) Res<(), AllocError> {
 
 request_members = (be :: CBackend, id: TyId) Res<(), AllocError> {
     be.types().at(id).match({
-        Named(n) => request_decl_members(be, n),
+        Named(n) => request_named_members(be, n, id),
         Res(r)   => request_res_members(be, r),
         _        => Ok(()),
     }).try();
+    Ok(());
+}
+
+// A BOUND'S SLOTS NEED DEFINITIONS TOO, and they are requested here
+// rather than ordered in `gen_c_layout.by_value_deps`: a slot is a
+// function pointer, so nothing in a record is by-value containment.
+// Feeding them to the dependency walk would record `Eq -> Eq` and
+// report a cycle that is not there.
+request_named_members = (be :: CBackend, n: TyNamed, id: TyId)
+                        Res<(), AllocError> {
+    request_decl_members(be, n).try();
+    request_slots(be, id).try();
     Ok(());
 }
 

@@ -1,0 +1,247 @@
+// src/gen/gen_c/gen_c_read.zen
+// WHAT A DOT READS.
+//
+// `gen_c_member.zen` owns `x.f(a)`; this owns `x.f`, and they are not
+// the same question. One node, `Access`, and three readings of it that
+// DESIGN.md separates by what the base NAMES:
+//
+//   Shape.Unit    a NULLARY VARIANT: the base names an enum, and the
+//                 variant IS a value of it — the tag and no payload
+//   usize.BITS    a CONSTANT ON A TYPE: the base names a declaration,
+//                 and the member is a value OF that declaration, read
+//                 out of nothing. "A prelude declaration of a
+//                 primitive's name IS that primitive", so `usize`'s
+//                 members are `std.core.num.usize`'s
+//   p.x           a FIELD: the base is a value, and this is the only
+//                 one of the three that reads a receiver
+//
+// The order is the order the questions can be answered in, and each one
+// is asked of the DECLARATION rather than of the spelling.
+//
+// `str` IS THE ONE TYPE WHOSE C REPRESENTATION IS THE RUNTIME FLOOR'S,
+// which is why the field rule is here rather than in the mangler.
+
+Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = ast
+Const, Access, Call, Span, Ident, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, Ty, Types, TyNamed = sema.sema_ty
+World, Def, DefKind, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+sym_member, sym_variant = gen.gen_name
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+unsupported, unresolved = gen.gen_c.gen_c_state
+constructed = gen.gen_c.gen_c_mono
+ctype = gen.gen_c.gen_c_type
+write_qname = gen.gen_c.gen_c_layout
+expr, ty_of, lower_const_value = gen.gen_c.gen_c_expr
+
+// -----------------------------------------------------------------
+// access and calls
+// -----------------------------------------------------------------
+
+// `p.x` on a struct, and `Shape.Unit` on an enum. The same node, and
+// the difference is whether the base is a value or a declaration —
+// "that access form already exists, so this adds a spelling, not a
+// concept".
+lower_access* = (be :: CBackend, id: ExprId, a: Access, ctx: Ctx, want: TyId,
+                out :: String) Res<(), AllocError> {
+    base_decl(be, a.base, ctx).match({
+        Ok(ty) => write_variant_value(be, id, ty, a.name.text, out),
+        None   => lower_type_or_field(be, id, a, ctx, want, out),
+    })
+}
+
+// `usize.BITS` — A CONSTANT DECLARED ON A TYPE, which is a value of the
+// declaration and never of a receiver: there is nothing to read it out
+// of. "A prelude declaration of a primitive's name IS that primitive",
+// so `usize`'s members are `std.core.num.usize`'s, and this reads the
+// written value exactly as a module-level constant is read.
+lower_type_or_field = (be :: CBackend, id: ExprId, a: Access, ctx: Ctx,
+                       want: TyId, out :: String) Res<(), AllocError> {
+    type_const(be, a, ctx).try().match({
+        None      => write_field_access(be, a, ctx, out),
+        Ok(pair)  => lower_const_value(be, id, pair.k, pair.d, want, out),
+    })
+}
+
+// A constant member, and the declaration it was found on — the second
+// half is what says which module its value is read in.
+TypeConst* = {
+    k: Const,
+    d: Def,
+}
+
+type_const* = (be :: CBackend, a: Access, ctx: Ctx)
+             Res<Res<TypeConst>, AllocError> {
+    be.tree.expr_at(a.base).kind.match({
+        Name(n) => named_type_const(be, n.text, a.name.text, ctx),
+        _       => Ok(None),
+    })
+}
+
+named_type_const = (be :: CBackend, base: str, name: str, ctx: Ctx)
+                   Res<Res<TypeConst>, AllocError> {
+    be.slot_of(base).match({
+        Ok(_) => Ok(None),
+        None  => decl_const(be, base, name, ctx),
+    })
+}
+
+decl_const = (be :: CBackend, base: str, name: str, ctx: Ctx)
+             Res<Res<TypeConst>, AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.defs_of(ctx.module, base, found).try();
+    hits ::= be.alloc.Vec<TypeConst>();
+    found.loop((h, d) { collect_type_const(be, d, name, hits).try() });
+    Ok(hits.get(0));
+}
+
+collect_type_const = (be :: CBackend, d: Def, name: str,
+                      out :: Vec<TypeConst>) Res<(), AllocError> {
+    decl_at(be.tree, d.id).match({
+        None  => Ok(()),
+        Ok(x) => collect_decl_const(be, x, d, name, out),
+    })
+}
+
+collect_decl_const = (be :: CBackend, x: Decl, d: Def, name: str,
+                      out :: Vec<TypeConst>) Res<(), AllocError> {
+    x.kind.match({
+        Struct(s) => collect_struct_const(s, d, name, out),
+        _         => Ok(()),
+    })
+}
+
+collect_struct_const = (s: Struct, d: Def, name: str,
+                        out :: Vec<TypeConst>) Res<(), AllocError> {
+    s.members.loop((h, m) { keep_const(m, d, name, out).try() });
+    Ok(());
+}
+
+keep_const = (m: Member, d: Def, name: str, out :: Vec<TypeConst>)
+             Res<(), AllocError> {
+    m.kind.match({
+        Const(k) => keep_named_const(k, d, name, out),
+        _        => Ok(()),
+    })
+}
+
+keep_named_const = (k: Const, d: Def, name: str, out :: Vec<TypeConst>)
+                   Res<(), AllocError> {
+    k.name.text.eq(name).match({
+        false => Ok(()),
+        true  => out.add(TypeConst(k: k, d: d)),
+    })
+}
+
+// The enum a base names, when the base is a bare name that resolves to
+// an enum declaration rather than to a local.
+base_decl* = (be :: CBackend, base: ExprId, ctx: Ctx) Res<TyId> {
+    be.tree.expr_at(base).kind.match({
+        Name(n) => enum_named(be, n.text, ctx),
+        _       => None,
+    })
+}
+
+enum_named = (be :: CBackend, text: str, ctx: Ctx) Res<TyId> {
+    be.slot_of(text).match({
+        Ok(_) => None,
+        None  => enum_def_named(be, text, ctx),
+    })
+}
+
+enum_def_named = (be :: CBackend, text: str, ctx: Ctx) Res<TyId> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.defs_of(ctx.module, text, found).match({
+        Err(_) => None,
+        Ok(_)  => first_enum(be, found),
+    })
+}
+
+first_enum = (be :: CBackend, found: Vec<Def>) Res<TyId> {
+    found.get(0).match({
+        None  => None,
+        Ok(d) => enum_type_of(be, d),
+    })
+}
+
+enum_type_of = (be :: CBackend, d: Def) Res<TyId> {
+    d.kind.match({
+        EnumDef => intern_named(be, d),
+        _       => None,
+    })
+}
+
+intern_named = (be :: CBackend, d: Def) Res<TyId> {
+    constructed(be, d).match({
+        Err(_) => None,
+        Ok(id) => Ok(id),
+    })
+}
+
+// A nullary variant is a value of its enum: the tag, and no payload.
+// A variant WITH a payload written as a bare access is a value that
+// has not been constructed, and sema is the one that says so.
+write_variant_value = (be :: CBackend, id: ExprId, ty: TyId, variant: str,
+                       out :: String) Res<(), AllocError> {
+    qname ::= be.alloc.String().try();
+    enum_qname(be, ty, qname).try();
+    out.add_bytes("(").try();
+    ctype(be, ty, out).try();
+    out.add_bytes("){ .zg_tag = ").try();
+    sym_variant(out, qname.view(), variant).try();
+    out.add_bytes(" }").try();
+    Ok(());
+}
+
+enum_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
+    be.check.types.at(ty).match({
+        Named(n) => write_qname(be, out, n),
+        _        => Ok(()),
+    })
+}
+
+write_field_access = (be :: CBackend, a: Access, ctx: Ctx, out :: String)
+                     Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    rty = ty_of(be, a.base, ctx, unknown).try();
+    expr(be, a.base, ctx, unknown, out).try();
+    out.add_bytes(".").try();
+    field_name(be, rty, a.name.text, out).try();
+    Ok(());
+}
+
+// `str` IS THE ONE TYPE WHOSE C REPRESENTATION IS THE RUNTIME FLOOR'S
+// rather than its declaration's. `gen_c_runtime.emit_floor` writes
+// `struct zg_str { unsigned char *data; size_t len; }` and every string
+// literal, every `zg_print_str` and every C caller already agrees on
+// those two names — so a read of `text_str.zen`'s `data` or `len` is
+// spelled the floor's way and not the mangler's. Everything else in the
+// language is mangled, which is what keeps two modules' `len` two
+// members.
+field_name = (be :: CBackend, rty: TyId, name: str, out :: String)
+             Res<(), AllocError> {
+    is_str(be, rty).match({
+        true  => out.add_bytes(name),
+        false => sym_member(out, name),
+    })
+}
+
+is_str = (be :: CBackend, rty: TyId) bool {
+    be.check.types.at(rty).match({
+        Prim(p) => p.name.eq("str"),
+        _       => false,
+    })
+}
+
+// A call to a top-level function the module can see, and the two `Res`
+// constructors.
+//
+// OVERLOAD RESOLUTION IS SEMA'S AND IS NOT THERE YET, so a name with
+// more than one declaration is REPORTED rather than picked between:
+// "resolution is on declared parameter types and arity", and a backend
+// guessing would be a second, worse copy of that rule.

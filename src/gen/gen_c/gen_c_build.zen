@@ -29,14 +29,15 @@ Range = std.core
 DeclId = sema.sema_id
 TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
-Checker, Ctx = sema.sema_check
-Inst = sema.sema_inst
+Checker, Ctx, is_prim = sema.sema_check
+Inst, tparam_vars = sema.sema_inst
 type_of, type_from_ast = sema.sema_type
 sym_member = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 unsupported, unresolved, untyped = gen.gen_c.gen_c_state
-open, constructed, recv_inst = gen.gen_c.gen_c_mono
+open, constructed, recv_inst, intern_named = gen.gen_c.gen_c_mono
+unify, arg_type, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 ctype, is_unit, field_type, request_type = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
 
@@ -56,7 +57,7 @@ construct* = (be :: CBackend, id: ExprId, c: Call, d: Def, ctx: Ctx,
     request_type(be, ty).try();
     decl_at(be.tree, d.id).match({
         None  => unsupported(be, id, "a construction of an unknown type", out),
-        Ok(x) => construct_decl(be, id, c, x, ty, ctx, out),
+        Ok(x) => construct_decl(be, id, c, x, d, ty, ctx, out),
     })
 }
 
@@ -76,10 +77,10 @@ construct_type = (be :: CBackend, id: ExprId, d: Def, ctx: Ctx)
     })
 }
 
-construct_decl = (be :: CBackend, id: ExprId, c: Call, x: Decl, ty: TyId,
-                  ctx: Ctx, out :: String) Res<(), AllocError> {
+construct_decl = (be :: CBackend, id: ExprId, c: Call, x: Decl, d: Def,
+                  ty: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
     x.kind.match({
-        Struct(s) => construct_struct(be, id, c, s, ty, ctx, out),
+        Struct(s) => construct_struct(be, id, c, s, d, ty, ctx, out),
         _         => unsupported(be, id, "a construction of a non-struct", out),
     })
 }
@@ -89,11 +90,103 @@ construct_decl = (be :: CBackend, id: ExprId, c: Call, x: Decl, ty: TyId,
 // is at. What is still refused is a construction whose arguments nothing
 // settled, because a bare `Vec` has no layout to write.
 construct_struct = (be :: CBackend, id: ExprId, c: Call, s: Struct,
-                    ty: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
-    layout_open(be, s, ty, ctx).try().match({
+                    d: Def, ty: TyId, ctx: Ctx, out :: String)
+                   Res<(), AllocError> {
+    named = prim_named(be, s, ty).try();
+    built = settle_construction(be, c, s, d, named, ctx).try();
+    layout_open(be, s, d, built, ctx).try().match({
         true  => unsupported(be, id, "a construction whose type arguments nothing settles", out),
-        false => write_literal(be, c, s, ty, ctx, out),
+        false => write_literal(be, c, s, d, built, ctx, out),
     })
+}
+
+// WHAT A CONSTRUCTION'S TYPE ARGUMENTS ARE, when nothing else said.
+//
+// `Entry(hash: h, key: key, value: value)` inside `Map<K, V>` builds an
+// `Entry<K, V>`, and the only thing that says so is the ARGUMENTS: sema
+// records a construction's type under the node, but only inside a body
+// it CHECKED, and it checks top-level declarations only. So each
+// argument is matched against the field it supplies — structurally, and
+// the enclosing emission has already said what `K` and `V` are.
+settle_construction = (be :: CBackend, c: Call, s: Struct, d: Def,
+                       ty: TyId, ctx: Ctx) Res<TyId, AllocError> {
+    open(be, ty).match({
+        false => Ok(ty),
+        true  => inferred_construction(be, c, s, d, ty, ctx),
+    })
+}
+
+inferred_construction = (be :: CBackend, c: Call, s: Struct, d: Def,
+                         ty: TyId, ctx: Ctx) Res<TyId, AllocError> {
+    dctx = Ctx(module: d.id.module.to_usize(), ret: TyId(index: 0),
+               has_ret: false, self_ty: TyId(index: 0), has_self: false);
+    mark = enter_tparams(be, s.tparams, d.qname).try();
+    empty ::= be.alloc.Inst();
+    found ::= be.alloc.Inst();
+    c.args.loop((h, i, a) {
+        unify_field(be, a, i, s, empty, dctx, ctx, found).try();
+    });
+    leave_tparams(be, mark).try();
+    rebuilt_type(be, d, s, found, ty)
+}
+
+unify_field = (be :: CBackend, a: Arg, i: usize, s: Struct, empty: Inst,
+               dctx: Ctx, ctx: Ctx, out :: Inst) Res<(), AllocError> {
+    name = field_name(be, a, i, s, empty, dctx).try();
+    declared = storage_type(be, s, name, empty, dctx);
+    unknown = be.check.types.unknown().try();
+    actual = arg_type(be, a.value, ctx, unknown).try();
+    unify(be, declared, actual, out)
+}
+
+// Every parameter in declaration order, or the type UNCHANGED when the
+// arguments left one unsaid — the caller refuses with a position, which
+// is better than a layout invented here.
+rebuilt_type = (be :: CBackend, d: Def, s: Struct, found: Inst, ty: TyId)
+               Res<TyId, AllocError> {
+    vars ::= be.alloc.Vec<TyId>();
+    tparam_vars(be.check, s.tparams, d.qname, vars).try();
+    args ::= be.alloc.Vec<TyId>();
+    vars.loop((h, v) { keep_arg(found, v, args).try() });
+    (args.len == vars.len).match({
+        false => Ok(ty),
+        true  => intern_named(be.check, d, args),
+    })
+}
+
+keep_arg = (found: Inst, v: TyId, out :: Vec<TyId>) Res<(), AllocError> {
+    found.lookup(v).match({
+        None  => Ok(()),
+        Ok(t) => out.add(t),
+    })
+}
+
+// "A PRELUDE DECLARATION OF A PRIMITIVE'S NAME IS THAT PRIMITIVE."
+// `text_str.zen` declares `str` with a `data` and a `len`, and the C
+// type behind it is the runtime floor's `zg_str` — every string
+// literal, every `zg_print_str` and every C caller already agrees on
+// that spelling. So `str(data: .., len: ..)` builds the PRIMITIVE, at
+// both ends: the compound literal's type, and each designator.
+prim_named = (be :: CBackend, s: Struct, ty: TyId) Res<TyId, AllocError> {
+    is_prim(s.name.text).match({
+        false => Ok(ty),
+        true  => be.check.types.prim(s.name.text),
+    })
+}
+
+// The floor's own member names for a primitive's fields, the mangler's
+// for everything else — the same rule `gen_c_expr.field_name` reads a
+// field back through.
+designator = (be :: CBackend, ty: TyId, name: str, out :: String)
+             Res<(), AllocError> {
+    is_prim_ty(be, ty).match({
+        true  => out.add_bytes(name),
+        false => sym_member(out, name),
+    })
+}
+
+is_prim_ty = (be :: CBackend, ty: TyId) bool {
+    be.check.types.at(ty).match({ Prim(_) => true, _ => false })
 }
 
 // A TYPE ARGUMENT NO STORAGE MEMBER READS DOES NOT CHANGE THE LAYOUT,
@@ -106,9 +199,16 @@ construct_struct = (be :: CBackend, id: ExprId, c: Call, s: Struct,
 //
 // Two open `Range`s mangle alike, which is exactly right here and would
 // not be for a `Box<T>`: `held: T` is storage, so `Box` still refuses.
-layout_open = (be :: CBackend, s: Struct, ty: TyId, ctx: Ctx)
+// THE STRUCT'S OWN PARAMETERS GO BACK IN SCOPE FOR THE READ, and they
+// have to: `Entry<K, V>` and `Map<K, V>` spell their parameters alike,
+// and a construction of one INSIDE the other resolved `K` to the
+// enclosing declaration's `Var` — a different type of the same name, so
+// the substitution missed and every `Map` in the language was refused.
+// The declaration that introduced the name is the one that binds it.
+layout_open = (be :: CBackend, s: Struct, d: Def, ty: TyId, ctx: Ctx)
               Res<bool, AllocError> {
     dinst = recv_inst(be, ty).try();
+    mark = enter_tparams(be, s.tparams, d.qname).try();
     got ::= false;
     s.members.loop((h, m) {
         field_type(be, m, ctx, dinst).match({
@@ -116,24 +216,27 @@ layout_open = (be :: CBackend, s: Struct, ty: TyId, ctx: Ctx)
             Ok(fty) => open(be, fty).then(() { got = true; }),
         });
     });
+    leave_tparams(be, mark).try();
     Ok(got);
 }
 
-write_literal = (be :: CBackend, c: Call, s: Struct, ty: TyId, ctx: Ctx,
-                 out :: String) Res<(), AllocError> {
+write_literal = (be :: CBackend, c: Call, s: Struct, d: Def, ty: TyId,
+                 ctx: Ctx, out :: String) Res<(), AllocError> {
     out.add_bytes("(").try();
     ctype(be, ty, out).try();
     out.add_bytes(")").try();
     (c.args.len == 0).match({
         true  => out.add_bytes("{0}"),
-        false => write_initialisers(be, c, s, ty, ctx, out),
+        false => write_initialisers(be, c, s, d, ty, ctx, out),
     }).try();
     Ok(());
 }
 
-write_initialisers = (be :: CBackend, c: Call, s: Struct, ty: TyId,
-                      ctx: Ctx, out :: String) Res<(), AllocError> {
+write_initialisers = (be :: CBackend, c: Call, s: Struct, d: Def,
+                      ty: TyId, ctx: Ctx, out :: String)
+                     Res<(), AllocError> {
     dctx = decl_ctx_of(be, s, ctx);
+    mark = enter_tparams(be, s.tparams, d.qname).try();
     // the CONSTRUCTED type's own arguments: `Box<i32>(held: 7)` supplies
     // an `i32`, and reading the field's declared `T` without them would
     // give the literal no width to take.
@@ -141,9 +244,10 @@ write_initialisers = (be :: CBackend, c: Call, s: Struct, ty: TyId,
     out.add_bytes("{ ").try();
     c.args.loop((h, i, a) {
         (i > 0).then(() { out.add_bytes(", ").try() });
-        write_initialiser(be, a, i, s, dinst, dctx, ctx, out).try();
+        write_initialiser(be, a, i, s, ty, dinst, dctx, ctx, out).try();
     });
     out.add_bytes(" }").try();
+    leave_tparams(be, mark).try();
     Ok(());
 }
 
@@ -152,11 +256,11 @@ write_initialisers = (be :: CBackend, c: Call, s: Struct, ty: TyId,
 decl_ctx_of = (be :: CBackend, s: Struct, ctx: Ctx) Ctx { ctx }
 
 write_initialiser = (be :: CBackend, a: Arg, i: usize, s: Struct,
-                     dinst: Inst, dctx: Ctx, ctx: Ctx, out :: String)
-                    Res<(), AllocError> {
+                     ty: TyId, dinst: Inst, dctx: Ctx, ctx: Ctx,
+                     out :: String) Res<(), AllocError> {
     name = field_name(be, a, i, s, dinst, dctx).try();
     out.add_bytes(".").try();
-    sym_member(out, name).try();
+    designator(be, ty, name, out).try();
     out.add_bytes(" = ").try();
     want = storage_type(be, s, name, dinst, dctx);
     expr(be, a.value, ctx, want, out)

@@ -41,6 +41,7 @@ field_type, variant_type, decl_ctx, close_types = gen.gen_c.gen_c_type
 decl_inst = gen.gen_c.gen_c_type
 Inst = sema.sema_inst
 open, any_open, enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
+Slot, is_fat, slots_of, slot_field = gen.gen_c.gen_c_fat
 
 // -----------------------------------------------------------------
 // emission
@@ -323,7 +324,7 @@ write_definition = (be :: CBackend, out :: Emit, name: str, id: TyId)
                    Res<(), AllocError> {
     be.types().at(id).match({
         Res(r)   => write_res_def(be, out, name, r),
-        Named(n) => write_named_def(be, out, name, n),
+        Named(n) => write_named_def(be, out, name, n, id),
         _        => Ok(()),
     })
 }
@@ -363,26 +364,62 @@ push_payload = (be :: CBackend, payloads :: Vec<TyId>, names :: Vec<String>,
     Ok(());
 }
 
-write_named_def = (be :: CBackend, out :: Emit, name: str, n: TyNamed)
-                  Res<(), AllocError> {
+write_named_def = (be :: CBackend, out :: Emit, name: str, n: TyNamed,
+                   id: TyId) Res<(), AllocError> {
     decl_at(be.tree, n.decl).match({
         None  => write_opaque(out, name),
-        Ok(d) => write_decl_def(be, out, name, n, d),
+        Ok(d) => write_decl_def(be, out, name, n, d, id),
     })
 }
 
 write_decl_def = (be :: CBackend, out :: Emit, name: str, n: TyNamed,
-                  d: Decl) Res<(), AllocError> {
+                  d: Decl, id: TyId) Res<(), AllocError> {
     ctx = decl_ctx(be, n);
     inst = decl_inst(be, n).try();
     mark = enter_struct_tparams(be, n.decl).try();
     d.kind.match({
-        Struct(s) => write_struct_def(be, out, name, s, ctx, inst),
+        Struct(s) => write_struct_or_fat(be, out, name, s, ctx, inst, id),
         Enum(e)   => write_enum_def(be, out, name, n, e, ctx, inst),
         _         => write_opaque(out, name),
     }).try();
     leave_tparams(be, mark).try();
     Ok(());
+}
+
+// A BOUND USED AS A VALUE IS A RECORD, and this is the fork DESIGN.md
+// draws: "a trait value is a receiver pointer plus one function pointer
+// per method, built on the stack, copied by value, no allocation". A
+// struct that declares behaviour and no storage has no fields to lay
+// out and is not empty either — it is the record.
+write_struct_or_fat = (be :: CBackend, out :: Emit, name: str, s: Struct,
+                       ctx: Ctx, inst: Inst, id: TyId)
+                      Res<(), AllocError> {
+    is_fat(be, id).match({
+        true  => write_fat_def(be, out, name, id),
+        false => write_struct_def(be, out, name, s, ctx, inst),
+    })
+}
+
+// `struct { void *zg_self; <ret> (*<slot>)(void *, ..); .. }`, one slot
+// per declared member in declaration order — a pure function of the
+// declaration, which is what lets two programs compile one bound to one
+// shape.
+write_fat_def = (be :: CBackend, out :: Emit, name: str, id: TyId)
+                Res<(), AllocError> {
+    slots ::= be.alloc.Vec<Slot>();
+    slots_of(be, id, slots).try();
+    open_struct(out, name).try();
+    out.say("void *zg_self;").try();
+    slots.loop((h, s) { write_slot_line(be, out, s).try() });
+    close_struct(out).try();
+    Ok(());
+}
+
+write_slot_line = (be :: CBackend, out :: Emit, s: Slot)
+                  Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    slot_field(be, s, line).try();
+    out.say(line.view())
 }
 
 // A GENERIC STRUCT IS LAID OUT AT ITS ARGUMENTS: `Vec<u8>` holds a

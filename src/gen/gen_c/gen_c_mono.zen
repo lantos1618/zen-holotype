@@ -32,12 +32,13 @@ Vec = std.collections
 str, String = std.text
 Range = std.core
 DeclId = sema.sema_id
-TyId, Ty, Types, TyNamed = sema.sema_ty
+TyId, Ty, Types, TyNamed, TyRes = sema.sema_ty
 World, Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 Inst, subst, has_var, inst_of_named, owner_of, zip = sema.sema_inst
 tparam_vars = sema.sema_inst
 CBackend = gen.gen_c.gen_c_state
+ty_of = gen.gen_c.gen_c_expr
 
 // ---------------------------------------------------------------------
 // interning, through ONE field and never two
@@ -99,6 +100,49 @@ decl_vars_of = (c :: Checker, d: Def, x: Decl, out :: Vec<TyId>)
         Struct(s) => tparam_vars(c, s.tparams, d.qname, out),
         _         => Ok(()),
     })
+}
+
+// THE TYPE A DECLARATION NAMES AT ITS OWN PARAMETERS: `Vec<T>`, never
+// `Vec<i32>`.
+//
+// SEMA MEMOISES AN EXPRESSION'S TYPE UNDER ITS NODE ID AND NOTHING ELSE
+// — `sema_inst.zen` says so, and says why: "a generic body is still
+// checked EXACTLY ONCE, generically, with its parameters as `Var`s". So
+// an answer computed inside `Vec<Row>.add` is the answer `Vec<u8>.add`
+// gets back, and a body lowered at a CONCRETE `@Self` writes exactly
+// that answer into the memo. It emitted `Vec<u8>.add` calling
+// `Vec<Row>.grow`, which `cc` caught and would not have caught for two
+// types of one width.
+//
+// So a generic body is read GENERICALLY and `sub` turns every answer
+// into the one this emission is at — which is what `ty_of`'s header
+// already promises and what this makes true.
+open_named* = (be :: CBackend, decl: DeclId) Res<Res<TyId>, AllocError> {
+    decl_at(be.tree, decl).match({
+        None  => Ok(None),
+        Ok(x) => open_named_decl(be, decl, x),
+    })
+}
+
+open_named_decl = (be :: CBackend, decl: DeclId, x: Decl)
+                  Res<Res<TyId>, AllocError> {
+    x.kind.match({
+        Struct(s) => open_struct_named(be, decl, s),
+        _         => Ok(None),
+    })
+}
+
+open_struct_named = (be :: CBackend, decl: DeclId, s: Struct)
+                    Res<Res<TyId>, AllocError> {
+    owner = owner_of(be.check, decl.module.to_usize(), s.name.text).try();
+    args ::= be.alloc.Vec<TyId>();
+    tparam_vars(be.check, s.tparams, owner, args).try();
+    Ok(Ok(named_at(be.check, decl, owner, s.name.text, args).try()));
+}
+
+named_at = (c :: Checker, decl: DeclId, qname: str, name: str,
+            args: Vec<TyId>) Res<TyId, AllocError> {
+    c.types.named(decl, qname, name, args)
 }
 
 // ---------------------------------------------------------------------
@@ -207,6 +251,104 @@ settle_bound = (be :: CBackend, v: TyId, t: TyId, out :: Inst)
                Res<(), AllocError> {
     arg = sub(be, t).try();
     out.bind(v, arg)
+}
+
+// ---------------------------------------------------------------------
+// what the ARGUMENTS say a parameter became
+//
+// Sema records an instantiation at a call and at a generic receiver —
+// but only inside a body it CHECKED, and it checks top-level
+// declarations only. Every call written inside a member body therefore
+// arrives with nothing recorded, and `Map<K, V>.set` is made of them.
+//
+// So the arguments are asked. STRUCTURAL AND TOTAL: a declared type
+// mentioning no parameter binds nothing, and a shape that does not line
+// up binds nothing rather than guessing — the caller asks afterwards
+// whether every parameter came out bound, and refuses when one did not.
+// FIRST BINDING WINS, which is `Inst.bind`'s own rule and the reason
+// `<T>(a: T, b: T)` against two different types is a mismatch somebody
+// else reports rather than a silent rebind.
+// ---------------------------------------------------------------------
+
+unify* = (be :: CBackend, declared: TyId, actual: TyId, out :: Inst)
+         Res<(), AllocError> {
+    be.check.types.at(declared).match({
+        Var(_)   => out.bind(declared, actual),
+        Named(n) => unify_named(be, n, actual, out),
+        Res(r)   => unify_res(be, r, actual, out),
+        _        => Ok(()),
+    })
+}
+
+unify_named = (be :: CBackend, n: TyNamed, actual: TyId, out :: Inst)
+              Res<(), AllocError> {
+    be.check.types.at(actual).match({
+        Named(m) => unify_args(be, n.args, m.args, out),
+        _        => Ok(()),
+    })
+}
+
+unify_args = (be :: CBackend, ds: Vec<TyId>, ts: Vec<TyId>, out :: Inst)
+             Res<(), AllocError> {
+    (ds.len == ts.len).match({
+        false => Ok(()),
+        true  => unify_each(be, ds, ts, out),
+    })
+}
+
+unify_each = (be :: CBackend, ds: Vec<TyId>, ts: Vec<TyId>, out :: Inst)
+             Res<(), AllocError> {
+    ds.loop((h, i, d) { unify_at(be, d, ts, i, out).try() });
+    Ok(());
+}
+
+unify_at = (be :: CBackend, d: TyId, ts: Vec<TyId>, i: usize, out :: Inst)
+           Res<(), AllocError> {
+    ts.get(i).match({
+        None  => Ok(()),
+        Ok(t) => unify(be, d, t, out),
+    })
+}
+
+unify_res = (be :: CBackend, r: TyRes, actual: TyId, out :: Inst)
+            Res<(), AllocError> {
+    be.check.types.at(actual).match({
+        Res(q) => unify_res_parts(be, r, q, out),
+        _      => Ok(()),
+    })
+}
+
+unify_res_parts = (be :: CBackend, r: TyRes, q: TyRes, out :: Inst)
+                  Res<(), AllocError> {
+    unify(be, r.value, q.value, out).try();
+    unify(be, r.error, q.error, out).try();
+    Ok(());
+}
+
+// THE TYPE OF AN ARGUMENT AS THE BACKEND KNOWS IT. A local is declared
+// in the BACKEND's scope and not in sema's — `gen_c_stmt.declare_local`
+// writes no binding into the checker — so a bare name is answered from
+// the frame that declared it, and everything else from `ty_of`.
+arg_type* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+            Res<TyId, AllocError> {
+    local_type(be, id).match({
+        Ok(t) => Ok(t),
+        None  => ty_of(be, id, ctx, want),
+    })
+}
+
+local_type = (be :: CBackend, id: ExprId) Res<TyId> {
+    be.tree.expr_at(id).kind.match({
+        Name(n) => slot_ty(be, n.text),
+        _       => None,
+    })
+}
+
+slot_ty = (be :: CBackend, name: str) Res<TyId> {
+    be.slot_of(name).match({
+        Ok(s) => Ok(s.ty),
+        None  => None,
+    })
 }
 
 // ---------------------------------------------------------------------
