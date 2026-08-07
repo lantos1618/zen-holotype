@@ -5,7 +5,7 @@ CFLAGS  ?= -O2 -std=c99
 PY      ?= python3
 ROOT    ?= src
 
-.PHONY: all build seed test test-zen lint parse design cap faults fixpoint determinism grammar grammar-test fmt clean help
+.PHONY: all build seed test test-zen lint parse design cap faults ufcs fixpoint determinism grammar grammar-test fmt clean help
 
 all: test
 
@@ -30,7 +30,7 @@ seed: zen
 	git add seed/zen.c
 
 ## test: the corpus and must-fail suites, against the bootstrapper
-test: parse design cap faults
+test: parse design cap faults ufcs
 	$(PY) tests/run.py
 
 ## faults: every fault the compiler declares must have a site that raises
@@ -39,6 +39,14 @@ test: parse design cap faults
 ## script's OWED ledger, so the debt can shrink and cannot quietly grow.
 faults:
 	$(PY) scripts/faults_reachable.py
+
+## ufcs: no `x.f(..)` may have two answers. a method on T and a free
+## function taking T as its first parameter are the same call under UFCS,
+## and Zen has no overloading — so the two compilers pick differently and
+## the corpus, built by only one of them, sees nothing. that is how a
+## stray `}` after every block got past 227 green tests.
+ufcs: grammar
+	$(PY) scripts/ufcs_collisions.py
 
 ## cap: STYLE.md's line caps. Over 500 prints a note; over 800 fails,
 ## unless the path carries a written reason in scripts/line_cap.py.
