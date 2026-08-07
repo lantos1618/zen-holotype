@@ -74,6 +74,7 @@ supplies_bounds, range_impl, RangeImpl = gen.gen_c.gen_c_range
 range_pass_type, range_element_type = gen.gen_c.gen_c_range
 bind_text, is_res, res_value_of = gen.gen_c.gen_c_range
 lower_supplied = gen.gen_c.gen_c_range
+array_of, lower_array_walk = gen.gen_c.gen_c_array
 
 // -----------------------------------------------------------------
 // the lowering
@@ -252,6 +253,20 @@ lower_range = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
                out :: String) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     rty = ty_of(be, one, ctx, unknown).try();
+    // A FIXED ARRAY IS ASKED ABOUT FIRST because it satisfies `Range`
+    // intrinsically: it stores no `start` and no `end`, and it has no
+    // declaration for an impl to live on, so neither of the two readings
+    // below would find it. `gen_c_array.zen` says why that is the only
+    // way `[T, N]` can satisfy anything.
+    array_of(be, rty).match({
+        Ok(a) => lower_array_walk(be, sh, one, rty, a, lam, ctx, want, fold, out),
+        None  => lower_range_impl(be, id, sh, one, rty, lam, ctx, want, fold, out),
+    })
+}
+
+lower_range_impl = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
+                    rty: TyId, lam: Lambda, ctx: Ctx, want: TyId,
+                    fold: Fold, out :: String) Res<(), AllocError> {
     supplies_bounds(be, rty).match({
         false => lower_impl_walk(be, id, sh, one, rty, lam, ctx, want, fold, out),
         true  => lower_settled(be, id, sh, one, rty, lam, ctx, want, fold, out),

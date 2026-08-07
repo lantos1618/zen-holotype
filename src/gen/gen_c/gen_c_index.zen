@@ -45,11 +45,20 @@ write_arg = gen.gen_c.gen_c_call
 Site, site_of, member_at = gen.gen_c.gen_c_member
 bodied_fn, impl_member = gen.gen_c.gen_c_impl
 method_sig, join = gen.gen_c.gen_c_member
+array_of, write_array_index = gen.gen_c.gen_c_array
 
 lower_index* = (be :: CBackend, id: ExprId, ix: Index, ctx: Ctx,
                 out :: String) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     rty = ty_of(be, ix.base, ctx, unknown).try();
+    array_of(be, rty).match({
+        Ok(a) => write_array_index(be, ix, rty, a, ctx, out),
+        None  => index_not_array(be, id, ix, rty, ctx, out),
+    })
+}
+
+index_not_array = (be :: CBackend, id: ExprId, ix: Index, rty: TyId,
+                   ctx: Ctx, out :: String) Res<(), AllocError> {
     is_raw_ptr(be, rty).match({
         true  => write_subscript(be, ix, ctx, out),
         false => index_through_member(be, id, ix, rty, ctx, out),
@@ -65,6 +74,14 @@ index_type* = (be :: CBackend, ix: Index, ctx: Ctx, want: TyId)
               Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
     rty = ty_of(be, ix.base, ctx, unknown).try();
+    array_of(be, rty).match({
+        Ok(a) => Ok(a.elem),
+        None  => not_array_index_type(be, rty, want),
+    })
+}
+
+not_array_index_type = (be :: CBackend, rty: TyId, want: TyId)
+                       Res<TyId, AllocError> {
     is_raw_ptr(be, rty).match({
         true  => Ok(ptr_element(be, rty, want)),
         false => member_index_type(be, rty, want),

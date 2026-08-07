@@ -122,8 +122,53 @@ satisfies_bound* = (c :: Checker, ty: TyId, bound: TyId)
 impls_bound = (c :: Checker, ty: TyId, bound: TyId) Res<bool, AllocError> {
     c.types.at(ty).match({
         Named(n) => named_impls_bound(c, n, bound),
+        Array(_) => Ok(array_satisfies(c, bound)),
         _        => Ok(false),
     })
+}
+
+// A FIXED ARRAY SATISFIES `Range` INTRINSICALLY, and `std/core/range.zen`
+// says why it can be nothing else: "`[T, N]` is a type constructor, not a
+// name, so there is no `[T, N].impl(..)` to write — the impl target in
+// the grammar is an identifier, and there is no module that declares
+// `[T, N]` for the impl to live in." So the compiler supplies what no
+// module could have written.
+//
+// RECOGNISED BY THE BOUND'S SHAPE and never by the name `Range`, which
+// is the rule the backend's own `supplies_bounds` already keeps: "a
+// bound is just which struct's shape do I need". Matching on the name
+// would make one library's spelling part of the language.
+array_satisfies = (c: Checker, bound: TyId) bool {
+    bound_declares(c, bound, "start") && bound_declares(c, bound, "end")
+}
+
+bound_declares = (c: Checker, bound: TyId, name: str) bool {
+    c.types.at(bound).match({
+        Named(n) => decl_declares(c, n, name),
+        _        => false,
+    })
+}
+
+decl_declares = (c: Checker, n: TyNamed, name: str) bool {
+    decl_at(c.tree, n.decl).match({
+        None  => false,
+        Ok(d) => struct_declares(d, name),
+    })
+}
+
+struct_declares = (d: Decl, name: str) bool {
+    got ::= false;
+    d.kind.match({
+        Struct(st) => st.members.loop((h, m) {
+            (member_named(m, name) && is_field(m)).then(() { got = true; });
+        }),
+        _ => (),
+    });
+    got
+}
+
+is_field = (m: Member) bool {
+    m.kind.match({ Field(_) => true, _ => false })
 }
 
 named_impls_bound = (c :: Checker, n: TyNamed, bound: TyId)

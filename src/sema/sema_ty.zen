@@ -46,6 +46,7 @@ str, String = std.text
 Eq, Hash, Hasher = std.core
 Range = std.core
 DeclId = sema.sema_id
+write_usize = sema.sema_diag
 
 // An interned type. The index into `Types`, and nothing else — the
 // whole point is that this is small enough to compare, hash and copy
@@ -105,6 +106,28 @@ TyUnion* = {
     members*: Vec<TyId>,
 }
 
+// `[i32, 4]` — a fixed array, on the stack, with no length stored beside
+// the bytes.
+//
+// THE COUNT IS PART OF THE TYPE, and DESIGN.md:301 says why in one
+// sentence: "`[u8, 64]` and `[u8, 65]` are different types — which is
+// what makes the check possible with no length stored beside the bytes,
+// and what lets a literal index past a known length be the compile error
+// below rather than a runtime trap." So it is a FIELD here and not a
+// number the backend re-derives: interning on it is what makes the two
+// arrays two types, and `sema_trap.zen` compares a literal index against
+// it because this is the only place the length exists.
+//
+// Not a `Named` on an invented declaration, which is what the count was
+// dropped to make room for: a fixed array has no `DeclId` — "`[T, N]` is
+// a type constructor, not a name" — and a nominal type keyed on a
+// fiction would have to carry the count in its spelling and parse it
+// back out.
+TyArray* = {
+    elem*: TyId,
+    count*: usize,
+}
+
 // An unsubstituted type parameter: the `T` of `Vec<T>` inside `Vec`'s
 // own body. It is nominal on its OWNER as well as its name, so the `T`
 // of `Vec` and the `T` of `Map` are two types and substitution cannot
@@ -145,6 +168,7 @@ Ty* = Prim(Prim)
     | Named(TyNamed)
     | Fn(TyFn)
     | Union(TyUnion)
+    | Array(TyArray)
     | Var(TyVar)
     | Infer
     | Unknown
@@ -303,6 +327,20 @@ Types* = {
                     Ty.Res(TyRes(value: value, error: error, form: form)))
     }
 
+    // `[i32, 4]`. THE COUNT IS IN THE KEY, so `[i32, 4]` and `[i32, 5]`
+    // intern as two ids and every comparison downstream — assignability,
+    // the bounds check, a parameter's type — sees two types.
+    array* = (self :: @Self, elem: TyId, count: usize)
+             Res<TyId, AllocError> {
+        key ::= self.alloc.String().try();
+        key.add_bytes("[").try();
+        key.add_bytes(self.key_at(elem)).try();
+        key.add_bytes(";").try();
+        key.write_usize(count).try();
+        key.add_bytes("]").try();
+        self.intern(key.view(), Ty.Array(TyArray(elem: elem, count: count)))
+    }
+
     // A type variable, nominal on its owner as well as its name.
     var* = (self :: @Self, name: str, owner: str) Res<TyId, AllocError> {
         key ::= self.alloc.String().try();
@@ -427,6 +465,7 @@ Types* = {
             Res(r)   => self.write_res(r, out),
             Fn(f)    => self.write_fn(f, out),
             Union(u) => self.write_union(u, out),
+            Array(a) => self.write_array(a, out),
         }).try();
         Ok(());
     }
@@ -486,6 +525,18 @@ Types* = {
         });
         out.add_bytes(") ").try();
         self.write_name(f.ret, out).try();
+        Ok(());
+    }
+
+    // `[i32, 4]` — the source spelling, count and all, because the count
+    // is what a diagnostic about a fixed array is usually about.
+    write_array = (self: @Self, a: TyArray, out :: String)
+                  Res<(), AllocError> {
+        out.add_bytes("[").try();
+        self.write_name(a.elem, out).try();
+        out.add_bytes(", ").try();
+        out.write_usize(a.count).try();
+        out.add_bytes("]").try();
         Ok(());
     }
 

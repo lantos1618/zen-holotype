@@ -21,20 +21,29 @@
 // which is the same constraint DESIGN.md puts on `gen_c` one layer down,
 // for the same reason.
 //
-// THE INDEX RULE IS NOT HERE, AND THAT IS DELIBERATE. "A literal index
-// past a known length" needs the length, and a fixed array's type does
-// not carry its count: `array_type` interns `[]<elem>` and drops
-// `ArrayType.count`. Half of the rule — trapping on a negative literal
-// index — would be a rule that fires on one shape and stays silent on
-// the one people write. It is named in the report instead.
+// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: there is one
+// subject — which traps the compiler can PROVE — and the four rules that
+// make it up are inseparable from the folder they stand on. Overflow,
+// zero divisor, `MIN / -1` and the index all ask `const_int` the same
+// question, and `const_int` is only correct because every fold below it
+// refuses to trap while looking for a trap. Splitting the index rule out
+// would put one caller of the folder in another file and give the
+// discipline two places to be kept.
+//
+// THE INDEX RULE IS HERE TOO, and it took the count moving into the
+// type to make it reachable. `Ty.Array` carries `count` — "`[u8, 64]`
+// and `[u8, 65]` are different types" — so `buf[4]` on a `[i32, 4]` has
+// both halves of the comparison in hand at the one node, and the rule
+// fires on the shape people actually write rather than only on a
+// negative index.
 
 Ast, Expr, ExprId, Binary, BinOp, Literal, LiteralKind, Span = ast
-Unary, UnOp, Access, Paren, Name = ast
+Unary, UnOp, Access, Paren, Name, Index = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str = std.text
 Range = std.core
-TyId, Types = sema.sema_ty
+TyId, Types, TyArray = sema.sema_ty
 Diag, SemaFault, NameFault = sema.sema_diag
 Checker, Ctx, is_integer = sema.sema_check
 
@@ -159,8 +168,93 @@ overflow = (c :: Checker, b: Binary, name: str) Res<(), AllocError> {
 }
 
 // ---------------------------------------------------------------------
+// the index rule
+//
+// "A literal index past a known length is a compile error." The length
+// is the count in the type and the index folds like every other operand
+// here, so an index that came through a binding is not provably
+// anything and is left to the runtime check — which is the same
+// LITERALS-ONLY discipline the arithmetic rules keep, and for the same
+// reason.
+// ---------------------------------------------------------------------
+
+check_index* = (c :: Checker, node: Expr, x: Index, a: TyArray)
+               Res<(), AllocError> {
+    const_int(c, x.index).match({
+        None    => Ok(()),
+        Ok(i)   => index_within(c, node, x, i, a.count),
+    })
+}
+
+// A NEGATIVE INDEX IS TESTED SEPARATELY and not folded into the
+// comparison: `len_of` floors at zero, so `-1` would arrive as an index
+// of 0 and pass. The runtime helper `zg_idx_s` makes the same split for
+// the same reason.
+index_within = (c :: Checker, node: Expr, x: Index, i: i64, count: usize)
+               Res<(), AllocError> {
+    ((i < 0) || (len_of(i) >= count)).match({
+        false => Ok(()),
+        true  => out_of_bounds(c, node, x),
+    })
+}
+
+// The position is the whole index EXPRESSION, where a runtime trap
+// prints the `[` token. They differ because they have different jobs: a
+// trap has only the operator to point at, and a compile error can point
+// at the thing the author has to change.
+out_of_bounds = (c :: Checker, node: Expr, x: Index) Res<(), AllocError> {
+    c.report(node.span.file, node.span,
+             SemaFault.ProvenIndexOutOfBounds(
+                 NameFault(name: written_index(c, x))))
+}
+
+// The index AS WRITTEN, which is what `ProvenDivideByZero` quotes its
+// `0` for: the reader needs to see which index. A literal's text is a
+// slice of the source the tree already owns, so nothing is allocated for
+// a diagnostic to outlive — and a folded expression quotes nothing,
+// which `quote` renders as nothing.
+written_index = (c: Checker, x: Index) str {
+    c.tree.expr_at(x.index).kind.match({
+        Literal(l) => l.text,
+        _          => "",
+    })
+}
+
+// ---------------------------------------------------------------------
 // constant folding
 // ---------------------------------------------------------------------
+
+// A COUNT IS A LENGTH, and `const_int` answers in `i64` because that is
+// the folder every rule in this file shares. `std.core.num` carries only
+// lossless conversions on purpose — a narrowing one can fail — so there
+// is no `to_usize` to call, and the digits are what crosses instead.
+//
+// A count that folds to nothing is not a count this compiler can carry,
+// and 0 is the answer that says so: every index into a zero-length array
+// is out of range, so the program is told rather than silently admitted.
+const_count* = (c: Checker, id: ExprId) usize {
+    const_int(c, id).match({
+        None    => 0,
+        Ok(v)   => len_of(v),
+    })
+}
+
+// `i64` to `usize`, most significant digit first. Ten passes at most,
+// and a negative value is not a length: it floors at zero, which is why
+// every caller tests the sign before calling.
+len_of* = (v: i64) usize {
+    (v <= 0).match({
+        true  => 0,
+        false => len_of(v / 10) * 10 + last_digit(v),
+    })
+}
+
+last_digit = (v: i64) usize {
+    (v % 10).match({
+        0 => 0, 1 => 1, 2 => 2, 3 => 3, 4 => 4,
+        5 => 5, 6 => 6, 7 => 7, 8 => 8, _ => 9,
+    })
+}
 
 // What this expression is, when it is a literal integer the compiler can
 // see. Absence means "not provably anything", which is the answer for
