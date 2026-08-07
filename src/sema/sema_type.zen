@@ -45,6 +45,7 @@ Range = std.core
 DeclId = sema.sema_id
 TyId, Ty, Types, ResForm, TyRes = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
+named_or_union = sema.sema_union
 Diag, SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 ARRAY_DECL, UNRESOLVED, is_prim, is_predicate = sema.sema_check
@@ -232,7 +233,7 @@ lookup_named* = (c :: Checker, node: Type, name: Ident, args: Vec<TyId>,
     c.world.defs_of(ctx.module, name.text, found).try();
     found.get(0).match({
         None    => c.unresolved_type(node, name),
-        Ok(d)   => c.types.named(d.id, d.qname, d.name, args),
+        Ok(d)   => named_or_union(c, d, args),
     })
 }
 
@@ -560,9 +561,29 @@ try_set* = (c :: Checker, node: Expr, r: TyRes, want: TyRes)
     })
 }
 
+// A caller whose own set is `_` has not declared one, so there is
+// nothing to be contained IN. It raises what the callee raises, and
+// `sema_raise.zen` settles the signature once the body is walked.
 try_contained* = (c :: Checker, node: Expr, r: TyRes, want: TyRes)
                 Res<TyId, AllocError> {
-    c.types.set_within(r.error, want.error).match({
+    c.is_infer(want.error).match({
+        true  => c.try_raises(r),
+        false => c.try_declared(node, r, want),
+    })
+}
+
+// The callee's SET and not its name: `WriteError` raised into an
+// inferred set contributes `IoError` and `AllocError`, so that the
+// caller's own declared set is asked to contain members and not a
+// spelling. `union_ty` flattens the rest.
+try_raises* = (c :: Checker, r: TyRes) Res<TyId, AllocError> {
+    c.raise(c.set_of(r.error)).try();
+    Ok(r.value);
+}
+
+try_declared* = (c :: Checker, node: Expr, r: TyRes, want: TyRes)
+               Res<TyId, AllocError> {
+    c.types.set_within(c.set_of(r.error), c.set_of(want.error)).match({
         false => c.try_no_conversion(node, r, want),
         true  => Ok(r.value),
     })
