@@ -38,7 +38,8 @@ Emit = gen.gen_emit
 sym_local, sym_member, sym_variant, sym_gen, sym_fn = gen.gen_name
 RES_PATH, is_failure = gen.gen_name
 GenFault = gen.gen_diag
-CBackend, LocalSlot = gen.gen_c.gen_c_state
+CBackend = gen.gen_c.gen_c_state
+LocalSlot = gen.gen_c.gen_c_frame
 unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_state
 lower_match, lower_try = gen.gen_c.gen_c_flow
 ctype, declarator, spellable, is_unit, c_prim = gen.gen_c.gen_c_type
@@ -46,6 +47,7 @@ is_c_integer, is_signed, variant_type, decl_ctx = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
 field_type, request_type = gen.gen_c.gen_c_type
 expr, ty_of, spills = gen.gen_c.gen_c_expr
+enter_block, leave_block, note_drop = gen.gen_c.gen_c_own
 
 Dest* = Discard | Return | Into(str)
 
@@ -62,6 +64,7 @@ block* = (be :: CBackend, id: BlockId, ctx: Ctx, want: TyId, dst: Dest)
     blk = be.tree.block_at(id);
     cmark = be.check.mark();
     lmark = be.mark();
+    enter_block(be, id).try();
     tail = tail_index(blk, dst);
     blk.stmts.loop((h, i, s) {
         (i < tail).then(() { stmt(be, s, ctx).try() });
@@ -110,7 +113,104 @@ wants_value* = (dst: Dest) bool {
     dst.match({ Discard => false, Return => true, Into(_) => true })
 }
 
+// A BLOCK THAT DESTROYS NOTHING CLOSES EXACTLY AS IT ALWAYS DID, which
+// is what keeps every program without a `Drop` type or a `@scope`
+// byte-for-byte where it was. Only a block with cleanup pending has to
+// care where its value is written, and it is the statements that have
+// just been lowered that say whether there is any.
 close_block = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId, dst: Dest,
+               tail: usize) Res<(), AllocError> {
+    has_cleanup(be).match({
+        false => plain_close(be, blk, ctx, want, dst, tail),
+        true  => cleaned_close(be, blk, ctx, want, dst, tail),
+    })
+}
+
+has_cleanup = (be :: CBackend) bool {
+    (be.block_depth() == 0).match({
+        true  => false,
+        false => frame_has_cleanup(be),
+    })
+}
+
+frame_has_cleanup = (be :: CBackend) bool {
+    be.block_at(be.block_depth() - 1).match({
+        None  => false,
+        Ok(f) => (f.rec > 0) || (be.drop_count() > f.mark),
+    })
+}
+
+plain_close = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId, dst: Dest,
+               tail: usize) Res<(), AllocError> {
+    close_value(be, blk, ctx, want, dst, tail).try();
+    leave_block(be, keep_name(be, blk))
+}
+
+// A `Discard` evaluates in place and an `Into` writes to storage the
+// block does not own, so both are already in the right order: the value
+// lands, then the cleanup runs. A `Return` is the one that is not —
+// control would have left before the cleanup was reached.
+cleaned_close = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId,
+                 dst: Dest, tail: usize) Res<(), AllocError> {
+    dst.match({
+        Return => returning_close(be, blk, ctx, want, tail),
+        _      => plain_close(be, blk, ctx, want, dst, tail),
+    })
+}
+
+// THE BLOCK'S VALUE IS READ BEFORE ITS BINDINGS DIE. It is spilled to a
+// temporary, the cleanup runs against that, and the temporary is what
+// returns.
+returning_close = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId,
+                   tail: usize) Res<(), AllocError> {
+    is_unit(be, want).match({
+        true  => unit_return(be, blk, ctx, want, tail),
+        false => spilled_return(be, blk, ctx, want, tail),
+    })
+}
+
+unit_return = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId,
+               tail: usize) Res<(), AllocError> {
+    close_value(be, blk, ctx, want, Dest.Discard, tail).try();
+    leave_block(be, "").try();
+    be.writeln("return;")
+}
+
+spilled_return = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId,
+                  tail: usize) Res<(), AllocError> {
+    tmp ::= be.alloc.String().try();
+    sym_gen(tmp, "k", be.next_tmp()).try();
+    decl ::= be.alloc.String().try();
+    declarator(be, want, tmp.view(), decl).try();
+    decl.add_bytes(";").try();
+    be.writeln(decl.view()).try();
+    close_value(be, blk, ctx, want, Dest.Into(tmp.view()), tail).try();
+    leave_block(be, keep_name(be, blk)).try();
+    be.write("return ").try();
+    be.write(tmp.view()).try();
+    be.writeln(";")
+}
+
+// A BINDING THE BLOCK IS HANDING OUT, and only a bare name can be one.
+// Dropping it here would free what the caller is about to read; a
+// larger expression has been COPIED into the destination by now, and a
+// binding it merely read is still this block's to destroy.
+keep_name = (be :: CBackend, blk: Block) str {
+    blk.value.match({
+        Ok(e) => bare_name(be, e),
+        None  => "",
+    })
+}
+
+bare_name = (be :: CBackend, id: ExprId) str {
+    be.tree.expr_at(id).kind.match({
+        Name(n)  => n.text,
+        Paren(p) => bare_name(be, p.inner),
+        _        => "",
+    })
+}
+
+close_value = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId, dst: Dest,
                tail: usize) Res<(), AllocError> {
     blk.value.match({
         Ok(e) => deliver(be, e, ctx, want, dst),
@@ -340,6 +440,15 @@ named_slot_type = (be :: CBackend, target: ExprId) Res<TyId> {
     })
 }
 
+// A BINDING, AND ONLY A BINDING, IS WHAT RAII TRACKS. "The compiler
+// calls drop when a BINDING leaves scope" — never a temporary, never a
+// parameter (passing a Drop value to a parameter is a borrow), never a
+// match arm's binder, which names part of a value somebody else still
+// owns. This is the one place a binding is introduced with storage of
+// its own, so it is the one place that registers one.
+//
+// AFTER the value has landed, because the drop list is walked backwards
+// and a binding built from an earlier one has to die first.
 declare_local = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
                 Res<(), AllocError> {
     n = be.declare(name, ty, false).try();
@@ -350,6 +459,7 @@ declare_local = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
     decl.add_bytes(";").try();
     be.writeln(decl.view()).try();
     deliver(be, b.value, ctx, ty, Dest.Into(cname.view())).try();
+    note_drop(be, name, n, ty).try();
     Ok(());
 }
 

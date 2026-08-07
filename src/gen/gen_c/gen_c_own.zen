@@ -1,0 +1,530 @@
+// src/gen/gen_c/gen_c_own.zen
+// EVERY EXIT IS A SCOPE EXIT.
+//
+// That is one law and this file is all of it. A block ends in more
+// ways than by reaching its closing brace — `.try()` returns through
+// it, `h.break()` and `h.next()` jump over it, and falling off the end
+// is only the fourth — and at every one of them the same two things
+// have to happen, in the same order. So there is exactly one function
+// that says what leaving a block does (`run_frame`), and the four
+// sites call it rather than each remembering. A defer that runs at
+// three exits out of four is worse than one that runs at none, because
+// it will be trusted.
+//
+// THE ORDER IS DESIGN.md'S AND IT IS OBSERVABLE. Defers run LIFO, and
+// ALL of a block's defers run before ANY of its drops: a defer is
+// registered ON THE BLOCK and a drop belongs TO THE VALUE, so they are
+// two stacks and not one interleaved one. Drops then run in REVERSE
+// DECLARATION ORDER, because a binding may name what an earlier one
+// built and destroying the foundation first is a use-after-free.
+//
+// `@scope` IS THE BLOCK, AS A VALUE. So a `Scope` is a POINTER to the
+// enclosing block's record, and the record holds both the registered
+// closures and their captures. The block outlives every frame that
+// registers on it — that is exactly what non-escaping buys — so the
+// record is the one storage certainly still alive when the closure
+// runs, and no allocator and no heap record take part. This is not
+// escaping-closure support and must not grow into it.
+//
+// ⚠ A LIFTED DEFER THUNK NEEDS NO NAME REMAPPING, AND THAT IS WHY
+// THERE IS NO REMAPPING LAYER HERE. The obvious design gives the
+// capture record fields of its own and rewrites every free name in the
+// closure body to read `(*env).c0` — which needs a second spelling for
+// a local and a hook in `lower_name`. This does not do that. The
+// record's fields carry THE SAME MANGLED C NAMES the enclosing frame
+// uses, and the thunk's prologue re-declares those names as locals
+// copied out of the record:
+//
+//     static void zg_d1(void *zg_p) {
+//         zg_env1 *zg_e = (zg_env1 *)zg_p;
+//         int32_t zu_l1i = zg_e->zu_l1i;      /* the prologue */
+//         ...                                 /* the body, unchanged */
+//     }
+//
+// so the closure body lowers through the ordinary `lower_name` path
+// with the ordinary `LocalSlot`s, and nothing about names changes. If
+// you came here looking for the remapping layer: it is absent on
+// purpose, and adding one would buy nothing.
+//
+// WHAT IS NOT DONE HERE: dropping a struct's fields, or a `Vec`'s
+// elements. Drop is not recursive — DESIGN.md gives `Vec.take` as the
+// way a `Vec<T>` of Drop values is emptied, "without this a `Vec<T>` of
+// Drop values can be filled and never emptied", which is only a
+// sentence worth writing if the container does not drop for you.
+
+Ast, Expr, ExprKind, ExprId, BlockId, Block, Stmt, StmtKind, Bind = ast
+Decl, DeclKind, Struct, Member, MemberKind, Function, Param = ast
+Impl, Call, Arg, Access, Match, Arm, Span, Ident, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+DeclId, ImplId = sema.sema_id
+TyId, Ty, Types, TyNamed = sema.sema_ty
+World, Def, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+Inst = sema.sema_inst
+member_named = sema.sema_member
+sym_local, sym_gen, sym_fn = gen.gen_name
+GenFault = gen.gen_diag
+CBackend, MethodRef = gen.gen_c.gen_c_state
+DropEntry, BlockFrame = gen.gen_c.gen_c_frame
+recv_inst = gen.gen_c.gen_c_mono
+Site, site_of, method_sig, join = gen.gen_c.gen_c_member
+
+// -----------------------------------------------------------------
+// entering and leaving a block
+// -----------------------------------------------------------------
+
+// A block opening. Its defer record is declared HERE, before its first
+// statement, because a closure registered by that statement has to
+// have somewhere to land. Only a block that writes `@scope` gets one —
+// "it nests, and each block gets its own" — and its storage is
+// automatic, so re-entering the block (the next pass of a loop) starts
+// from an empty stack.
+enter_block* = (be :: CBackend, id: BlockId) Res<(), AllocError> {
+    rec = writes_scope(be, id).match({
+        false => Ok(0),
+        true  => open_record(be),
+    }).try();
+    be.open_block(rec)
+}
+
+open_record = (be :: CBackend) Res<usize, AllocError> {
+    be.need_scope();
+    n = be.next_tmp();
+    name ::= be.alloc.String().try();
+    sym_gen(name, "b", n).try();
+    be.write("zg_scope ").try();
+    be.write(name.view()).try();
+    be.writeln(";").try();
+    be.write(name.view()).try();
+    be.writeln(".zg_n = 0;").try();
+    Ok(n);
+}
+
+// A block leaving by its own closing brace. `keep` is a binding the
+// block is handing OUT — dropping it here would free what the caller
+// is about to read — and "" when it is handing out nothing.
+leave_block* = (be :: CBackend, keep: str) Res<(), AllocError> {
+    (be.block_depth() == 0).match({
+        true  => Ok(()),
+        false => run_frame(be, be.block_depth() - 1, keep),
+    }).try();
+    be.close_block()
+}
+
+// Every block from the innermost out to `depth`: what a NON-LOCAL exit
+// leaves behind. `.try()`, `h.break()` and `h.next()` all jump over
+// closing braces, so the cleanup those braces stood for is written
+// here instead, before the jump.
+//
+// THE FRAMES ARE NOT POPPED. Control leaves, but the lowering is still
+// standing inside those blocks and their remaining statements are
+// still to be written — the `}` they were opened for will run this
+// again for the path that falls through to it.
+unwind_to* = (be :: CBackend, depth: usize, keep: str)
+             Res<(), AllocError> {
+    n = be.block_depth();
+    (n > depth).match({
+        false => Ok(()),
+        true  => unwind_frames(be, depth, n, keep),
+    })
+}
+
+unwind_frames = (be :: CBackend, depth: usize, n: usize, keep: str)
+                Res<(), AllocError> {
+    Range(0, n - depth).loop((h, k) {
+        run_frame(be, n - 1 - k, keep).try();
+    });
+    Ok(());
+}
+
+// ONE BLOCK LEAVING, and the only place that says what that means.
+run_frame = (be :: CBackend, i: usize, keep: str) Res<(), AllocError> {
+    be.block_at(i).match({
+        None  => Ok(()),
+        Ok(f) => run_cleanup(be, f, i, keep),
+    })
+}
+
+run_cleanup = (be :: CBackend, f: BlockFrame, i: usize, keep: str)
+              Res<(), AllocError> {
+    (f.rec > 0).match({
+        false => Ok(()),
+        true  => run_defers(be, f.rec),
+    }).try();
+    unwind_drops(be, f.mark, frame_end(be, i), keep)
+}
+
+// Where this block's drops stop: the next block's mark, or the end.
+frame_end = (be :: CBackend, i: usize) usize {
+    be.block_at(i + 1).match({
+        Ok(f) => f.mark,
+        None  => be.drop_count(),
+    })
+}
+
+run_defers = (be :: CBackend, rec: usize) Res<(), AllocError> {
+    name ::= be.alloc.String().try();
+    sym_gen(name, "b", rec).try();
+    be.write("zg_scope_run(&").try();
+    be.write(name.view()).try();
+    be.writeln(");").try();
+    Ok(());
+}
+
+// REVERSE DECLARATION ORDER, and the reason is not symmetry: a binding
+// may name what an earlier one built, so destroying the foundation
+// first is a use-after-free.
+unwind_drops = (be :: CBackend, mark: usize, end: usize, keep: str)
+               Res<(), AllocError> {
+    (end > mark).match({
+        false => Ok(()),
+        true  => drop_range(be, mark, end, keep),
+    })
+}
+
+drop_range = (be :: CBackend, mark: usize, end: usize, keep: str)
+             Res<(), AllocError> {
+    Range(0, end - mark).loop((h, k) {
+        be.drop_at(end - 1 - k).match({
+            None  => Ok(()),
+            Ok(e) => drop_unless_kept(be, e, keep),
+        }).try();
+    });
+    Ok(());
+}
+
+// A binding the block is handing out is left alone. Leaving it
+// undropped leaks; dropping it is a use-after-free of the value the
+// caller is about to read, and only one of those two is recoverable.
+drop_unless_kept = (be :: CBackend, e: DropEntry, keep: str)
+                   Res<(), AllocError> {
+    e.name.eq(keep).match({
+        true  => Ok(()),
+        false => write_drop(be, e),
+    })
+}
+
+// -----------------------------------------------------------------
+// what a drop is
+// -----------------------------------------------------------------
+
+// Register a binding for scope exit, if its type impls Drop.
+//
+// ONLY A BINDING, never a temporary, never a parameter — "passing a
+// Drop value to a parameter is a borrow, not a move" — and never a
+// match arm's payload binder, which names part of a value somebody
+// else still owns.
+note_drop* = (be :: CBackend, name: str, index: usize, ty: TyId)
+             Res<(), AllocError> {
+    has_drop(be, ty).try().match({
+        false => Ok(()),
+        true  => own_binding(be, name, index, ty),
+    })
+}
+
+own_binding = (be :: CBackend, name: str, index: usize, ty: TyId)
+              Res<(), AllocError> {
+    live = open_live_flag(be).try();
+    be.own_binding(DropEntry(name: name, index: index, ty: ty, live: live))
+}
+
+// The `int` that says whether this binding still owns its value.
+//
+// EVERY tracked binding gets one, whether or not this program moves
+// it. Asking "is this name `consume`d anywhere" cannot be answered per
+// function — a body reaches the backend inlined into its caller's
+// frame — so the honest answers are a program-wide scan or an
+// over-approximation, and over-approximating costs an `int` the C
+// compiler folds while under-approximating costs a double free.
+open_live_flag = (be :: CBackend) Res<usize, AllocError> {
+    n = be.next_tmp();
+    name ::= be.alloc.String().try();
+    sym_gen(name, "o", n).try();
+    be.write("int ").try();
+    be.write(name.view()).try();
+    be.writeln(" = 1;").try();
+    Ok(n);
+}
+
+// `consume x` — x is somebody else's now, so this frame must not drop
+// it. The nearest tracked binding of that name wins, which is the same
+// one `slot_of` would have found.
+release_binding* = (be :: CBackend, name: str) Res<(), AllocError> {
+    n = be.drop_count();
+    Range(0, n).loop((h, k) {
+        be.drop_at(n - 1 - k).match({
+            None  => Ok(()),
+            Ok(e) => clear_if_named(be, e, name),
+        }).try();
+    });
+    Ok(());
+}
+
+clear_if_named = (be :: CBackend, e: DropEntry, name: str)
+                 Res<(), AllocError> {
+    (e.name.eq(name) && (e.live > 0)).match({
+        false => Ok(()),
+        true  => write_clear(be, e.live),
+    })
+}
+
+write_clear = (be :: CBackend, live: usize) Res<(), AllocError> {
+    name ::= be.alloc.String().try();
+    sym_gen(name, "o", live).try();
+    be.write(name.view()).try();
+    be.writeln(" = 0;").try();
+    Ok(());
+}
+
+has_drop* = (be :: CBackend, ty: TyId) Res<bool, AllocError> {
+    site_of(be, ty).try().match({
+        None  => Ok(false),
+        Ok(s) => site_has_drop(be, s),
+    })
+}
+
+site_has_drop = (be :: CBackend, s: Site) Res<bool, AllocError> {
+    drop_fn(be, s.decl).try().match({
+        None   => Ok(false),
+        Ok(_)  => Ok(true),
+    })
+}
+
+write_drop = (be :: CBackend, e: DropEntry) Res<(), AllocError> {
+    site_of(be, e.ty).try().match({
+        None  => Ok(()),
+        Ok(s) => drop_through(be, e, s),
+    })
+}
+
+drop_through = (be :: CBackend, e: DropEntry, s: Site)
+               Res<(), AllocError> {
+    drop_fn(be, s.decl).try().match({
+        None  => Ok(()),
+        Ok(f) => guarded_drop(be, e, s, f),
+    })
+}
+
+// The flag is the whole of "exactly once" on a value that is moved on
+// one path and not another: cleared at the move, tested at every exit.
+guarded_drop = (be :: CBackend, e: DropEntry, s: Site, f: Function)
+               Res<(), AllocError> {
+    (e.live == 0).match({
+        true  => call_drop(be, e, s, f),
+        false => flagged_drop(be, e, s, f),
+    })
+}
+
+flagged_drop = (be :: CBackend, e: DropEntry, s: Site, f: Function)
+               Res<(), AllocError> {
+    flag ::= be.alloc.String().try();
+    sym_gen(flag, "o", e.live).try();
+    be.write("if (").try();
+    be.write(flag.view()).try();
+    be.writeln(") {").try();
+    be.indent();
+    call_drop(be, e, s, f).try();
+    be.dedent();
+    be.writeln("}").try();
+    Ok(());
+}
+
+// THE COMPILER-INSERTED CALL IS EXEMPT FROM THE RECEIVER RULE. `drop`
+// is declared `(self :: @Self)` and scope exit runs it on `:` bindings
+// too, "because destroying a value is not mutating it through a
+// binding" — so the address is taken whatever the binding was written
+// as.
+call_drop = (be :: CBackend, e: DropEntry, s: Site, f: Function)
+            Res<(), AllocError> {
+    inst = recv_inst(be, e.ty).try();
+    sig ::= be.alloc.Vec<TyId>();
+    method_sig(be, e.ty, s.decl, f, s.decl.module.to_usize(), inst,
+               sig).try();
+    qname ::= be.alloc.String().try();
+    join(qname, s.qname, "drop").try();
+    sym ::= be.alloc.String().try();
+    sym_fn(sym, be.check.types, be.check.world, qname.view(), sig,
+           inst).try();
+    be.need_method(MethodRef(self_ty: e.ty, decl: s.decl, name: "drop",
+                             arity: sig.len, qname: qname.view()),
+                   inst, sym.view()).try();
+    write_drop_call(be, e, sym.view(), by_address(f))
+}
+
+by_address = (f: Function) bool {
+    f.params.get(0).match({
+        Ok(p) => p.mutable,
+        None  => true,
+    })
+}
+
+write_drop_call = (be :: CBackend, e: DropEntry, sym: str, addr: bool)
+                  Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes(sym).try();
+    line.add_bytes("(").try();
+    addr.then(() { line.add_bytes("&").try() });
+    sym_local(line, e.name, e.index).try();
+    line.add_bytes(");").try();
+    be.writeln(line.view())
+}
+
+// The `drop` a `T.impl(Drop, { .. })` supplies, or nothing.
+//
+// THE TRAIT IS PART OF THE QUESTION AND NOT DECORATION. A type may
+// declare a method of its own named `drop` — `Emit` could — and running
+// that at scope exit would call something the program never asked to
+// have called. Only an impl OF Drop counts, which is the same test the
+// reference backend makes on the declaration's own path.
+drop_fn* = (be :: CBackend, decl: DeclId) Res<Res<Function>, AllocError> {
+    ids ::= be.alloc.Vec<ImplId>();
+    be.check.world.impls_named(be.tree, type_name(be, decl), ids).try();
+    found ::= be.alloc.Vec<Function>();
+    ids.loop((h, i) { collect_drop(be, decl, i, found).try() });
+    Ok(found.get(0));
+}
+
+type_name = (be :: CBackend, decl: DeclId) str {
+    decl_at(be.tree, decl).match({
+        Ok(d) => struct_name(d),
+        None  => "",
+    })
+}
+
+struct_name = (d: Decl) str {
+    d.kind.match({
+        Struct(st) => st.name.text,
+        _          => "",
+    })
+}
+
+// An impl lives in the module that declares its target, so a same-named
+// type elsewhere is never confused for this one.
+collect_drop = (be :: CBackend, decl: DeclId, i: ImplId,
+                found :: Vec<Function>) Res<(), AllocError> {
+    (decl.module == i.decl.module).match({
+        false => Ok(()),
+        true  => drop_in_impl(be, i, found),
+    })
+}
+
+drop_in_impl = (be :: CBackend, i: ImplId, found :: Vec<Function>)
+               Res<(), AllocError> {
+    be.check.world.impl_at(be.tree, i).match({
+        None    => Ok(()),
+        Ok(im)  => keep_drop_member(be, im, found),
+    })
+}
+
+keep_drop_member = (be :: CBackend, im: Impl, found :: Vec<Function>)
+                   Res<(), AllocError> {
+    bounds_drop(be, im).match({
+        false => Ok(()),
+        true  => scan_drop_members(im, found),
+    })
+}
+
+bounds_drop = (be :: CBackend, im: Impl) bool {
+    be.tree.type_at(im.bound).kind.match({
+        Named(n) => n.name.text.eq("Drop"),
+        _        => false,
+    })
+}
+
+scan_drop_members = (im: Impl, found :: Vec<Function>)
+                    Res<(), AllocError> {
+    im.members.loop((h, m) { keep_bodied_drop(m, found).try() });
+    Ok(());
+}
+
+keep_bodied_drop = (m: Member, found :: Vec<Function>)
+                   Res<(), AllocError> {
+    member_named(m, "drop").match({
+        false => Ok(()),
+        true  => add_bodied(m, found),
+    })
+}
+
+add_bodied = (m: Member, found :: Vec<Function>) Res<(), AllocError> {
+    m.kind.match({
+        Function(f) => add_if_bodied(f, found),
+        _           => Ok(()),
+    })
+}
+
+add_if_bodied = (f: Function, found :: Vec<Function>)
+                Res<(), AllocError> {
+    f.body.match({
+        None    => Ok(()),
+        Ok(_)   => found.add(f),
+    })
+}
+
+// -----------------------------------------------------------------
+// does this block write `@scope`?
+//
+// A NESTED BLOCK AND A LAMBDA BODY ARE BLOCKS OF THEIR OWN, so the
+// search stops at each. That is the whole of "it nests, and each block
+// gets its own", and the reason DESIGN.md's own example runs its inner
+// defers at the inner brace.
+// -----------------------------------------------------------------
+
+writes_scope* = (be :: CBackend, id: BlockId) bool {
+    blk = be.tree.block_at(id);
+    got ::= blk.value.match({
+        Ok(e) => expr_writes_scope(be, e),
+        None  => false,
+    });
+    blk.stmts.loop((h, s) { got = got || stmt_writes_scope(be, s); });
+    got
+}
+
+stmt_writes_scope = (be :: CBackend, s: Stmt) bool {
+    s.kind.match({
+        Expr(e)  => expr_writes_scope(be, e.expr),
+        Bind(b)  => expr_writes_scope(be, b.value),
+        Block(_) => false,
+        Decl(_)  => false,
+    })
+}
+
+expr_writes_scope = (be :: CBackend, id: ExprId) bool {
+    be.tree.expr_at(id).kind.match({
+        Scope         => true,
+        Paren(p)      => expr_writes_scope(be, p.inner),
+        Unary(u)      => expr_writes_scope(be, u.operand),
+        Binary(b)     => expr_writes_scope(be, b.lhs)
+                             || expr_writes_scope(be, b.rhs),
+        Access(a)     => expr_writes_scope(be, a.base),
+        Index(x)      => expr_writes_scope(be, x.base)
+                             || expr_writes_scope(be, x.index),
+        Try(t)        => expr_writes_scope(be, t.operand),
+        Consume(x)    => expr_writes_scope(be, x.operand),
+        Call(c)       => call_writes_scope(be, c),
+        Match(m)      => match_writes_scope(be, m),
+        Array(a)      => elems_write_scope(be, a.elems),
+        FixedArray(a) => elems_write_scope(be, a.elems),
+        _             => false,
+    })
+}
+
+call_writes_scope = (be :: CBackend, c: Call) bool {
+    got ::= expr_writes_scope(be, c.callee);
+    c.args.loop((h, a) { got = got || expr_writes_scope(be, a.value); });
+    got
+}
+
+match_writes_scope = (be :: CBackend, m: Match) bool {
+    got ::= expr_writes_scope(be, m.scrutinee);
+    m.arms.loop((h, a) { got = got || expr_writes_scope(be, a.body); });
+    got
+}
+
+elems_write_scope = (be :: CBackend, elems: Vec<ExprId>) bool {
+    got ::= false;
+    elems.loop((h, e) { got = got || expr_writes_scope(be, e); });
+    got
+}

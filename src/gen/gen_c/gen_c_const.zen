@@ -1,0 +1,185 @@
+// src/gen/gen_c/gen_c_const.zen
+// A NAME THAT IS NOT A LOCAL, and what makes writing its value out safe.
+//
+// `gen_c_expr.zen` resolves a bare identifier against the frame first;
+// when nothing there answers, the name is a module-level declaration
+// and this file is the rest of that question. It is its own subject
+// because the interesting part is not the lookup — it is the
+// SOUNDNESS CONDITION underneath it, which is a different kind of
+// reasoning from "what C does this expression become".
+//
+// A CONSTANT IS INLINED AT EACH USE, and that is sound exactly as far
+// as its value CANNOT BE OBSERVED TWICE. So the two halves live
+// together: `lower_const_value`, which writes the value out, and
+// `is_pure_value`, which is the licence to. Splitting them would leave
+// a rule in one file and its justification in another.
+
+Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Const, Struct = ast
+Literal, LiteralKind, Binary, Unary, Access, Call, Arg, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, Ty, Types = sema.sema_ty
+World, Def, DefKind, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+unresolved, unsupported = gen.gen_c.gen_c_state
+expr, ty_of = gen.gen_c.gen_c_expr
+base_decl, type_const, TypeConst = gen.gen_c.gen_c_read
+plain_ctx = gen.gen_c.gen_c_decl
+
+// A module-level constant, WRITTEN OUT AT EACH USE rather than emitted
+// as a C object. DESIGN.md's `name: T = value` is immutable and has no
+// address a program can take, so a use IS its value — and a `str`
+// constant emitted as a C object would need a static initialiser, which
+// is a second spelling of the same literal for no gain.
+//
+// A CONSTANT IS INLINED AT EACH USE, and that is sound exactly as far
+// as its value is PURE. `I64_MIN` is `-9223372036854775807 - 1` and
+// `UNRESOLVED` is `TyId(index: 0)`: evaluating either of those twice
+// cannot be observed, and what it costs is a compound literal or an
+// arithmetic the C compiler folds before it emits anything.
+//
+// ANYTHING ELSE IS STILL REPORTED, and the reason is the one this file
+// always had: a constant whose value CALLS something would run that
+// call once per use, and would stop being a constant. The restriction
+// did not go away — it moved from "is a literal" to "cannot be observed
+// twice", which is what it was always trying to say.
+lower_global_value* = (be :: CBackend, id: ExprId, text: str, ctx: Ctx,
+                       want: TyId, out :: String) Res<(), AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.defs_of(ctx.module, text, found).try();
+    found.get(0).match({
+        None  => unresolved(be, id, text, out),
+        Ok(d) => lower_def_value(be, id, d, text, want, out),
+    })
+}
+
+lower_def_value = (be :: CBackend, id: ExprId, d: Def, text: str,
+                   want: TyId, out :: String) Res<(), AllocError> {
+    d.kind.match({
+        ConstDef => lower_const(be, id, d, text, want, out),
+        _        => unresolved(be, id, text, out),
+    })
+}
+
+lower_const = (be :: CBackend, id: ExprId, d: Def, text: str, want: TyId,
+               out :: String) Res<(), AllocError> {
+    decl_at(be.tree, d.id).match({
+        None  => unresolved(be, id, text, out),
+        Ok(x) => lower_const_decl(be, id, x, d, text, want, out),
+    })
+}
+
+lower_const_decl = (be :: CBackend, id: ExprId, x: Decl, d: Def, text: str,
+                    want: TyId, out :: String) Res<(), AllocError> {
+    x.kind.match({
+        Const(k) => lower_const_value(be, id, k, d, want, out),
+        _        => unresolved(be, id, text, out),
+    })
+}
+
+// The constant's DECLARED type wins over the context's: `USAGE: str` is
+// a `str` wherever it is read, and a literal takes its width from the
+// declaration that named it.
+lower_const_value* = (be :: CBackend, id: ExprId, k: Const, d: Def,
+                      want: TyId, out :: String) Res<(), AllocError> {
+    dctx = plain_ctx(be, d.id.module.to_usize());
+    ty = k.type.match({
+        Ok(t) => be.check.type_from_ast(t, dctx),
+        None  => Ok(want),
+    }).try();
+    is_pure_value(be, k.value, dctx).match({
+        false => unsupported(be, id, "a constant whose value is not a literal", out),
+        true  => expr(be, k.value, dctx, ty, out),
+    })
+}
+
+// Can this expression be written twice without anyone being able to
+// tell? A literal can; so can an operator over things that can, and so
+// can a CONSTRUCTION of them — a compound literal names no function and
+// reads nothing. A call to anything else cannot, and neither can a name,
+// because a name is a local whose frame the use site is not in.
+is_pure_value* = (be :: CBackend, id: ExprId, ctx: Ctx) bool {
+    be.tree.expr_at(id).kind.match({
+        Literal(_) => true,
+        Unit       => true,
+        Unary(u)   => is_pure_value(be, u.operand, ctx),
+        Binary(b)  => is_pure_pair(be, b, ctx),
+        Call(c)    => is_pure_construction(be, c, ctx),
+        Access(a)  => is_pure_access(be, a, ctx),
+        _          => false,
+    })
+}
+
+// A NULLARY VARIANT AND A CONSTANT ON A TYPE are both values of a
+// DECLARATION: neither names a function and neither reads a frame, so
+// both can be written wherever they are read. A field access cannot —
+// it reads a receiver.
+is_pure_access = (be :: CBackend, a: Access, ctx: Ctx) bool {
+    base_decl(be, a.base, ctx).match({
+        Ok(_) => true,
+        None  => has_type_const(be, a, ctx),
+    })
+}
+
+has_type_const = (be :: CBackend, a: Access, ctx: Ctx) bool {
+    type_const(be, a, ctx).match({
+        Err(_) => false,
+        Ok(r)  => found_const(r),
+    })
+}
+
+found_const = (r: Res<TypeConst>) bool {
+    r.match({ Ok(_) => true, None => false })
+}
+
+is_pure_pair = (be :: CBackend, b: Binary, ctx: Ctx) bool {
+    is_pure_value(be, b.lhs, ctx) && is_pure_value(be, b.rhs, ctx)
+}
+
+// A call is pure only when its callee NAMES A TYPE: `TyId(index: 0)` is
+// a compound literal, `first_of(v)` is a function this use site would
+// run. The question is asked of the declaration and not of the spelling,
+// which is the same question `gen_c_call.zen` asks to decide between the
+// two readings of one node.
+is_pure_construction = (be :: CBackend, c: Call, ctx: Ctx) bool {
+    names_a_struct(be, c.callee, ctx) && pure_args(be, c, ctx)
+}
+
+pure_args = (be :: CBackend, c: Call, ctx: Ctx) bool {
+    every ::= true;
+    c.args.loop((h, a) {
+        impure = is_pure_value(be, a.value, ctx) == false;
+        impure.then(() { every = false; });
+    });
+    every
+}
+
+names_a_struct = (be :: CBackend, callee: ExprId, ctx: Ctx) bool {
+    be.tree.expr_at(callee).kind.match({
+        Name(n) => struct_named(be, n.text, ctx),
+        _       => false,
+    })
+}
+
+struct_named = (be :: CBackend, text: str, ctx: Ctx) bool {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.defs_of(ctx.module, text, found).match({
+        Err(_) => false,
+        Ok(_)  => sole_struct(found),
+    })
+}
+
+sole_struct = (found: Vec<Def>) bool {
+    found.get(0).match({
+        None  => false,
+        Ok(d) => is_struct_def(d),
+    })
+}
+
+is_struct_def = (d: Def) bool {
+    d.kind.match({ StructDef => true, _ => false })
+}
