@@ -328,6 +328,51 @@ value_fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
     })
 }
 
+// THE SAME QUESTION A `Cand` IS ASKED, ASKED OF A METHOD'S SIGNATURE.
+//
+// A method reaches resolution as a `Found` and not a `Cand` — it came
+// from a type's member table rather than from a module's declarations —
+// but "resolution is on declared parameter types AND arity" is one rule
+// and it must be one implementation, or a method and a ufcs function
+// resolve by different laws while DESIGN.md says they are the same
+// thing. `all_fit` is that implementation and this is the receiver
+// shifted off the front.
+//
+// PARAMETER ZERO IS THE RECEIVER and no argument corresponds to it: "a
+// method is a UFCS function whose first parameter happens to be named
+// `self`", so a call site's arity is one less than the signature's and
+// the comparison starts at one. The receiver is not re-checked here
+// because the member table is what found it — it is already known to be
+// a member of that type.
+recv_sig_fits* = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>)
+                 Res<bool, AllocError> {
+    (ps.len == actuals.len + 1).match({
+        false => Ok(false),
+        true  => args_fit(c, ps, actuals),
+    })
+}
+
+// No early exit, for `all_fit`'s reason: asking whether an argument
+// keeps a bound is a question that allocates, and `find` takes a closure
+// that answers `bool`.
+args_fit = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>)
+           Res<bool, AllocError> {
+    ok ::= true;
+    Range(0, actuals.len).loop((h, i) {
+        got = arg_fits_at(c, ps, actuals, i).try();
+        ok = ok && got;
+    });
+    Ok(ok);
+}
+
+arg_fits_at = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>, i: usize)
+              Res<bool, AllocError> {
+    actuals.get(i).match({
+        Ok(a) => fits(c, a, ty_at(ps, i + 1)),
+        None  => Ok(false),
+    })
+}
+
 closure_fits = (c: Checker, p: TyId, arity: usize) bool {
     c.types.at(p).match({
         Fn(f)  => f.params.len == arity,
