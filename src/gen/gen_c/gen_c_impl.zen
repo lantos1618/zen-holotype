@@ -1,0 +1,221 @@
+// src/gen/gen_c/gen_c_impl.zen
+// Which function an IMPL supplies for a name, and at what arity.
+//
+// Split out of `gen_c_member.zen`, which reached 796 lines against an
+// 800-line hard cap and had already had its comments trimmed twice to
+// fit — a file that pays for a line by deleting an explanation is a file
+// that has outgrown its subject.
+//
+// AND THE SUBJECT REALLY IS A SECOND ONE. `gen_c_member.zen` answers
+// "what does a dot reach on this receiver", which needs a `Site` — the
+// declaration that owns a type's members and the qualified name symbols
+// are built from. Nothing here needs one. An impl is found by the
+// DECLARATION it targets, so every entry point below takes a `DeclId`,
+// and that is what makes the split a line rather than a tangle: this
+// file imports nothing from `gen_c_member.zen`, so the dependency runs
+// one way and there is no cycle to arrange around.
+//
+// `by_arity` lives here rather than there for the same reason it is
+// used here: an impl is the place two members of one name actually turn
+// up, because a bound and a type may each supply one.
+
+Decl, Struct, Member, MemberKind, Function, Impl = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str = std.text
+Range = std.core
+DeclId, ImplId = sema.sema_id
+decl_at = sema.sema_def
+member_named = sema.sema_member
+CBackend = gen.gen_c.gen_c_state
+
+// A TYPE MAY DECLARE TWO MEMBERS OF ONE NAME. "Resolution is on
+// declared parameter types and arity", and `Cursor.peek()` and
+// `Cursor.peek(n)` are two functions — taking the first one emitted a
+// call to the wrong symbol with the right arguments, which `cc` caught
+// and which two same-arity overloads would have hidden.
+//
+// ARITY IS THE HALF A BACKEND CAN ANSWER WITHOUT REDOING SEMA'S RULE,
+// and where it does not separate them the first is still the answer:
+// picking on types too would be a second, worse copy of overload
+// resolution.
+by_arity* = (found: Vec<Member>, arity: usize) Res<Member> {
+    Range(0, found.len).find((i) {
+        found.get(i).match({
+            Ok(m) => member_arity(m) == arity,
+            None  => false,
+        })
+    }).match({
+        None  => found.get(0),
+        Ok(i) => found.get(i),
+    })
+}
+
+member_arity = (m: Member) usize {
+    m.kind.match({
+        Function(f) => f.params.len,
+        _           => 0,
+    })
+}
+// -----------------------------------------------------------------
+// a member an IMPL supplies
+//
+// `str` does not declare `eq`; `std.text` impls `Eq` on it. DESIGN.md
+// gives that one rule — "you satisfy requirements, you never impl
+// storage" — and what it means HERE is that the member is an ordinary
+// function of the receiver, living beside the type, reached under the
+// TARGET's qualified name.
+//
+// AND IT IS CALLED STATICALLY. "Can this struct be a bound" and "can it
+// be a fat value" are two questions, and only the second needs a record
+// of function pointers. Every call here has a receiver whose CONCRETE
+// type is known, so the impl's function is the one to call and it is
+// monomorphised like any other member — a fat value is wanted only where
+// a value's STATIC type is the bound, which nothing in this tree writes.
+// -----------------------------------------------------------------
+
+// The function an impl on this type supplies under `name`, when one
+// does.
+impl_member* = (be :: CBackend, decl: DeclId, name: str)
+               Res<Res<Function>, AllocError> {
+    found ::= be.alloc.Vec<Member>();
+    impl_member_at(be, decl, name, found).try();
+    Ok(bodied_fn(found));
+}
+
+// The same question asked of an impl, at a known arity.
+impl_member_of* = (be :: CBackend, decl: DeclId, name: str, arity: usize)
+                  Res<Res<Function>, AllocError> {
+    found ::= be.alloc.Vec<Member>();
+    impl_member_at(be, decl, name, found).try();
+    Ok(member_fn_of(by_arity(found, arity)));
+}
+
+member_fn_of = (m: Res<Member>) Res<Function> {
+    m.match({ Ok(x) => member_fn(x), None => None })
+}
+
+bodied_fn* = (found: Vec<Member>) Res<Function> {
+    found.get(0).match({
+        Ok(m) => member_fn(m),
+        None  => None,
+    })
+}
+
+member_fn = (m: Member) Res<Function> {
+    m.kind.match({
+        Function(f) => Ok(f),
+        _           => None,
+    })
+}
+
+// Every member an impl on `decl` supplies under `name`, with a BODY.
+//
+// "An impl lives with the type, not with the trait", so the search is
+// over the impls declared in the TARGET's own module and a same-named
+// type elsewhere is never confused for this one. A required member —
+// `at ::= (..) Res<T>` with no body — is what the impl OWES rather than
+// what it supplies, and calling it would name a symbol nothing defines.
+impl_member_at* = (be :: CBackend, decl: DeclId, name: str,
+                   out :: Vec<Member>) Res<(), AllocError> {
+    ids ::= be.alloc.Vec<ImplId>();
+    be.check.world.impls_named(be.tree, decl_name(be, decl), ids).try();
+    ids.loop((h, i) { collect_impl_fn(be, decl, i, name, out).try() });
+    Ok(());
+}
+
+decl_name = (be :: CBackend, decl: DeclId) str {
+    decl_at(be.tree, decl).match({
+        Ok(d) => struct_name(d),
+        None  => "",
+    })
+}
+
+struct_name = (d: Decl) str {
+    d.kind.match({
+        Struct(st) => st.name.text,
+        _          => "",
+    })
+}
+
+collect_impl_fn = (be :: CBackend, decl: DeclId, i: ImplId, name: str,
+                   out :: Vec<Member>) Res<(), AllocError> {
+    (decl.module == i.decl.module).match({
+        false => Ok(()),
+        true  => impl_fn_at(be, i, name, out),
+    })
+}
+
+impl_fn_at = (be :: CBackend, i: ImplId, name: str, out :: Vec<Member>)
+             Res<(), AllocError> {
+    be.check.world.impl_at(be.tree, i).match({
+        Ok(im) => keep_impl_fn(be, i, im, name, out),
+        None   => Ok(()),
+    })
+}
+
+// THE IMPL'S OWN MEMBERS, THEN THE BOUND'S DEFAULTS. "A struct whose
+// fields happen to be functions, used as a bound, is what other
+// languages call a trait", and `A.impl(B, {..})` supplies a value for
+// every field `B` declares — so a bodied member on `B` is a field the
+// bound ALREADY has a value for. `area` comes along free because it
+// "only ever needed a width and a height".
+//
+// THE SAME QUESTION `sema_supply.zen`'s `provides` ASKS, in the same
+// order: the impl entry, else the bound with a body of its own. Asking
+// only the impl block refused a call sema had already resolved, and a
+// backend that disagrees with the checker about what a dot reaches
+// reports "not implemented" for a program that is written correctly.
+keep_impl_fn = (be :: CBackend, i: ImplId, im: Impl, name: str,
+                out :: Vec<Member>) Res<(), AllocError> {
+    before = out.len;
+    im.members.loop((h, m) { keep_named_fn(m, name, out).try() });
+    (out.len == before).match({
+        true  => keep_bound_default(be, i, im, name, out),
+        false => Ok(()),
+    })
+}
+
+// A REQUIRED MEMBER IS STILL ABSENT HERE. `keep_named_fn` keeps only
+// what has a body, so `at ::= (..) Res<T>` on the bound is what the
+// impl OWES rather than what it supplies — and calling it would name a
+// symbol nothing defines.
+keep_bound_default = (be :: CBackend, i: ImplId, im: Impl, name: str,
+                      out :: Vec<Member>) Res<(), AllocError> {
+    bound = be.check.impl_bound_type(im, i.decl.module.to_usize()).try();
+    members ::= be.alloc.Vec<Member>();
+    be.check.bound_members(bound, members).try();
+    members.loop((h, m) { keep_named_fn(m, name, out).try() });
+    Ok(());
+}
+
+keep_named_fn = (m: Member, name: str, out :: Vec<Member>)
+                Res<(), AllocError> {
+    member_named(m, name).match({
+        false => Ok(()),
+        true  => add_bodied(m, out),
+    })
+}
+
+add_bodied = (m: Member, out :: Vec<Member>) Res<(), AllocError> {
+    m.kind.match({
+        Function(f) => add_if_bodied(m, f, out),
+        _           => Ok(()),
+    })
+}
+
+add_if_bodied = (m: Member, f: Function, out :: Vec<Member>)
+                Res<(), AllocError> {
+    has_body(f).match({
+        false => Ok(()),
+        true  => out.add(m),
+    })
+}
+
+// A DECLARATION WITH NO BODY IS NOT A DEFINITION. An impl entry that
+// only restates the bound's signature supplies nothing, and calling it
+// would name a symbol nothing defines — so it is filtered here rather
+// than refused later.
+has_body* = (f: Function) bool {
+    f.body.match({ Ok(_) => true, None => false })
+}
