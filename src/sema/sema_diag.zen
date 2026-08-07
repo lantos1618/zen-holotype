@@ -257,13 +257,31 @@ write_types = (out :: String, types: Types, f: TypeFault)
 
 // Both declarations, named. The rule is "named for both declarations",
 // so a renderer that prints one position is not implementing it.
+// BOTH DECLARATIONS, EACH WITH ITS FILE. `write_pos` alone gives
+// `9:1 and 11:1`, which reads fine to a person on one screen and is
+// useless to everything else: an editor cannot jump to it, and
+// `TESTING.md` requires every position a `.expected` names to appear as
+// `path:line:col`, so a bare pair silently failed the one test that
+// exercises this fault. A `Span` has carried its file all along — the
+// renderer was simply not asking for it.
+//
+// The two spans may be in DIFFERENT files, which is the case that makes
+// the full form necessary rather than merely tidy: two modules may each
+// declare the same signature, and naming one of them by line alone
+// points at the wrong file's line.
 write_pair = (out :: String, f: PairFault) Res<(), AllocError> {
     quote(out, f.name).try();
     out.add_bytes(": ").try();
-    write_pos(out, f.first.start.line, f.first.start.col).try();
+    write_at(out, f.first).try();
     out.add_bytes(" and ").try();
-    write_pos(out, f.second.start.line, f.second.start.col).try();
+    write_at(out, f.second).try();
     Ok(());
+}
+
+write_at = (out :: String, span: Span) Res<(), AllocError> {
+    out.add_bytes(span.file).try();
+    out.add_bytes(":").try();
+    write_pos(out, span.start.line, span.start.col)
 }
 
 quote = (out :: String, name: str) Res<(), AllocError> {
