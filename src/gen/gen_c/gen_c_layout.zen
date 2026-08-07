@@ -26,7 +26,7 @@ Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
-TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
+TyId, Ty, Types, TyNamed, TyRes, TyUnion, ResForm = sema.sema_ty
 World, Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 type_from_ast = sema.sema_type
@@ -34,6 +34,7 @@ write_usize = sema.sema_diag
 Emit, order = gen.gen_emit
 sym_type, sym_variant, sym_member, tcode, GEN, USR = gen.gen_name
 path_with, res_arity, is_failure, RES_PATH = gen.gen_name
+sym_union_variant, sym_union_member = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 ctype, declarator, is_unit, request_type = gen.gen_c.gen_c_type
@@ -121,7 +122,36 @@ collect_tags_of = (be :: CBackend, id: TyId, seen :: Vec<String>)
     be.types().at(id).match({
         Res(r)   => collect_res_tags(be, r, seen),
         Named(n) => collect_enum_tags(be, n, seen),
+        Union(u) => collect_union_tags(be, id, u, seen),
         _        => Ok(()),
+    })
+}
+
+// A STRUCTURAL SET NUMBERS ITS MEMBERS BY THE CANONICAL ORDER, which is
+// the intern store's sort and therefore a function of the set alone —
+// `A | B` and `B | A` are one type and get one numbering. It is NOT a
+// declaration order, because a structural set has no declaration.
+//
+// That is exactly where it parts company with a declared enum of the
+// same members: `Error = AllocError | IoError` numbers by the order the
+// two were WRITTEN. Closing that gap means changing what a declared
+// union-reading enum numbers by, not what this does.
+collect_union_tags = (be :: CBackend, id: TyId, u: TyUnion,
+                      seen :: Vec<String>) Res<(), AllocError> {
+    u.members.loop((h, i, m) { add_union_tag(be, id, m, i, seen).try() });
+    Ok(());
+}
+
+add_union_tag = (be :: CBackend, id: TyId, m: TyId, value: usize,
+                 seen :: Vec<String>) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    sym_union_variant(line, be.types(), be.world(), id, m).try();
+    line.add_bytes(" = ").try();
+    write_usize(line, value).try();
+    line.add_bytes(",").try();
+    has_line(seen, line.view()).match({
+        false => seen.add(line),
+        true  => Ok(()),
     })
 }
 
@@ -255,8 +285,17 @@ by_value_deps = (be :: CBackend, id: TyId, deps :: Vec<TyId>)
     be.types().at(id).match({
         Named(n) => decl_deps(be, n, deps),
         Res(r)   => res_deps(be, r, deps),
+        Union(u) => union_deps(be, u.members, deps),
         _        => Ok(()),
     })
+}
+
+// Every member is held BY VALUE in the payload union, so every member
+// needs a complete type above it.
+union_deps = (be :: CBackend, members: Vec<TyId>, deps :: Vec<TyId>)
+             Res<(), AllocError> {
+    members.loop((h, m) { keep_composite(be, m, deps).try() });
+    Ok(());
 }
 
 res_deps = (be :: CBackend, r: TyRes, deps :: Vec<TyId>)
@@ -271,6 +310,7 @@ keep_composite = (be :: CBackend, id: TyId, deps :: Vec<TyId>)
     be.types().at(id).match({
         Named(_) => deps.add(id),
         Res(_)   => deps.add(id),
+        Union(_) => deps.add(id),
         _        => Ok(()),
     })
 }
@@ -325,8 +365,47 @@ write_definition = (be :: CBackend, out :: Emit, name: str, id: TyId)
     be.types().at(id).match({
         Res(r)   => write_res_def(be, out, name, r),
         Named(n) => write_named_def(be, out, name, n, id),
+        Union(u) => write_union_def(be, out, name, u),
         _        => Ok(()),
     })
+}
+
+// A STRUCTURAL SET GETS THE SHAPE A DECLARED ONE ALREADY HAS: a tag and
+// a union of the member types. Nothing else would do — DESIGN.md calls
+// `A | B` "a structural enum, not a new kind of type", so giving it a
+// second representation is inventing the kind the design says it is
+// not, and a `.try()` between the two spellings of one set would then
+// need a runtime conversion where the language promises none.
+//
+// A member carries a value OF the type it names, for the reason
+// `variant_type` gives: `WriteError.IoError` records WHICH IoError,
+// where tag-only would record only that there was one.
+write_union_def = (be :: CBackend, out :: Emit, name: str, u: TyUnion)
+                  Res<(), AllocError> {
+    open_struct(out, name).try();
+    payloads ::= be.alloc.Vec<TyId>();
+    names ::= be.alloc.Vec<String>();
+    u.members.loop((h, m) { add_union_payload(be, payloads, names, m).try() });
+    write_union(be, out, payloads, names).try();
+    close_struct(out).try();
+    Ok(());
+}
+
+add_union_payload = (be :: CBackend, payloads :: Vec<TyId>,
+                     names :: Vec<String>, m: TyId) Res<(), AllocError> {
+    is_unit(be, m).match({
+        true  => Ok(()),
+        false => push_union_payload(be, payloads, names, m),
+    })
+}
+
+push_union_payload = (be :: CBackend, payloads :: Vec<TyId>,
+                      names :: Vec<String>, m: TyId) Res<(), AllocError> {
+    field ::= be.alloc.String().try();
+    sym_union_member(field, be.types(), be.world(), m).try();
+    payloads.add(m).try();
+    names.add(field).try();
+    Ok(());
 }
 
 // `struct { int32_t zg_tag; union { T zu_m2Ok; E zu_m3Err; } zg_data; }`.

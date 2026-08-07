@@ -288,6 +288,62 @@ sym_member* = (out :: String, name: str) Res<(), AllocError> {
     Ok(());
 }
 
+// -----------------------------------------------------------------
+// a STRUCTURAL union
+//
+// `A | B` written inline, or a set sema inferred, is an enum with no
+// declaration behind it — so it has no path, and the two sites that
+// need a path (a tag constant and a payload field) have to get one from
+// the type itself. `tcode` is that path: injective, and self-delimiting
+// because every component carries its length, so two type codes written
+// end to end parse back as two.
+// -----------------------------------------------------------------
+
+// A structural union's tag constant. `zg_`, because the set is
+// composed out of nothing a user wrote — the same reason `sym_type`
+// gives a structural union a `zg_` name.
+//
+// Both the set AND the member are in the name. The member alone would
+// collide across two sets that share it, and the set alone is not a
+// constant at all.
+sym_union_variant* = (out :: String, types: Types, world: World,
+                      set: TyId, member: TyId) Res<(), AllocError> {
+    out.add_bytes(GEN).try();
+    out.add_bytes("e").try();
+    tcode(out, types, world, set).try();
+    tcode(out, types, world, member).try();
+    Ok(());
+}
+
+// A structural union's payload field.
+//
+// A MEMBER THAT IS A DECLARATION TAKES ITS OWN NAME, which is exactly
+// what a declared union-reading enum writes for the same member:
+// `Error = AllocError | IoError` lays out `zu_m10AllocError`, and so
+// now does the structural `AllocError | IoError`. The two still number
+// their tags differently — a declaration numbers by declaration order
+// and a set has none — so this is the half of the agreement that is
+// available, and it is the half a re-tagging map would not have to
+// carry.
+sym_union_member* = (out :: String, types: Types, world: World,
+                     member: TyId) Res<(), AllocError> {
+    types.at(member).match({
+        Named(n) => sym_member(out, n.name),
+        _        => sym_union_member_gen(out, types, world, member),
+    })
+}
+
+// A member with no declaration has no written name, so its type code
+// stands in for one — all a field name has to be is a pure function of
+// the type, and `tcode` is that.
+sym_union_member_gen = (out :: String, types: Types, world: World,
+                        member: TyId) Res<(), AllocError> {
+    out.add_bytes(GEN).try();
+    out.add_bytes("m").try();
+    tcode(out, types, world, member).try();
+    Ok(());
+}
+
 // A local or a parameter. `n` distinguishes shadowing bindings of one
 // name in one function, and it is 1 for the first, which is written
 // without a suffix so the common case reads.

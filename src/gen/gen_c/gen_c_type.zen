@@ -19,6 +19,13 @@
 // name and sema asks which form it has at every `.try()`". It still
 // answers to the library's name — `std.core.result.Res` — so a
 // structural `Res` and a declared one are one C type.
+//
+// A UNION IS STRUCTURAL FOR THE SAME REASON AND NEEDS THE SAME
+// TREATMENT. `A | B` written inline, or a set sema inferred, has no
+// declaration to carry a layout — where a NAMED error set is already
+// covered, because gen_c's whole representation of a set is the
+// declared enum. So a structural union is a queued type like any other
+// and gets the enum's shape: a tag and a union of its members.
 
 Ast, Decl, DeclKind, Struct, Enum, Variant, Member, MemberKind, TypeId = ast
 Alloc, AllocError = std.mem
@@ -64,6 +71,7 @@ ctype* = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
         Prim(p)  => out.add_bytes(c_prim(p.name)),
         Named(n) => maybe_ptr(be, id, n, out),
         Res(_)   => named_ctype(be, id, out),
+        Union(_) => named_ctype(be, id, out),
         _        => out.add_bytes("int"),
     }).try();
     Ok(());
@@ -127,6 +135,7 @@ spellable* = (be: CBackend, id: TyId) bool {
         Prim(p)  => c_prim_known(p.name),
         Named(_) => true,
         Res(_)   => true,
+        Union(_) => true,
         _        => false,
     })
 }
@@ -268,8 +277,15 @@ request_members = (be :: CBackend, id: TyId) Res<(), AllocError> {
     be.types().at(id).match({
         Named(n) => request_named_members(be, n, id),
         Res(r)   => request_res_members(be, r),
+        Union(u) => request_union_members(be, u.members),
         _        => Ok(()),
     }).try();
+    Ok(());
+}
+
+request_union_members = (be :: CBackend, members: Vec<TyId>)
+                        Res<(), AllocError> {
+    members.loop((h, m) { request_if_composite(be, m).try() });
     Ok(());
 }
 
@@ -302,6 +318,7 @@ request_if_named = (be :: CBackend, id: TyId) Res<(), AllocError> {
     be.types().at(id).match({
         Named(_) => request_type(be, id),
         Res(_)   => request_type(be, id),
+        Union(_) => request_type(be, id),
         _        => Ok(()),
     })
 }
