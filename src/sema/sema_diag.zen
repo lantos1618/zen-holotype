@@ -19,11 +19,20 @@
 // comparable and costs no allocation to raise. `render` is where the
 // sentence is built, and it is the only place that allocates.
 //
-// THREE PAYLOAD SHAPES, NOT TWENTY-FOUR. A fault names something
-// (`NameFault`), contrasts two types (`TypeFault`), or points at two
-// declarations that cannot both stand (`PairFault`). Every diagnostic
-// sema has to make is one of those three, and a fourth shape would be a
-// sign that a check is doing two things.
+// FOUR PAYLOAD SHAPES, NOT TWENTY-FOUR. A fault names something
+// (`NameFault`), contrasts two types (`TypeFault`), points at two
+// declarations that cannot both stand (`PairFault`), or names something
+// and the module that would not let it out (`ExportFault`). A fifth
+// shape would be a sign that a check is doing two things.
+//
+// `ExportFault` earned its place by being got wrong first. `NotExported`
+// was raised through a `NameFault` whose single string had already been
+// joined into "hex_digit is not exported by module text" at the raise
+// site — so the sentence lived in `sema_def.zen`, this file's `message`
+// said "not exported" a second time, and the two halves could not be
+// reworded without touching both. A payload that is one field short
+// does not stay one field short; it moves the wording out of the
+// renderer.
 //
 // ONE MISTAKE, ONE DIAGNOSTIC. `Ty.Unknown` is the mechanism: a query
 // that has already reported returns poison, and poison never produces a
@@ -37,6 +46,13 @@ TyId, Types = sema.sema_ty
 
 // Something the program named, or failed to.
 NameFault* = { name*: str }
+
+// A name and the module that would not let it out. Two fields and not a
+// pre-joined string, because a fault carries WHAT WENT WRONG and this
+// file decides how it reads — a caller that composes the sentence itself
+// has taken that decision away, and the wording then lives in whichever
+// module happened to raise it.
+ExportFault* = { name*: str, module*: str }
 
 // Two types that had to agree and did not. `expected` is what the
 // context demanded, `found` is what the expression is.
@@ -65,7 +81,7 @@ PairFault* = {
 SemaFault* =
     // resolution
       UndefinedName(NameFault)         // no binding of this name is in scope
-    | NotExported(NameFault)           // the name exists; `*` does not
+    | NotExported(ExportFault)         // the name exists; `*` does not
     | NoSuchField(TypeFault)           // the type has no member of that name
 
     // types
@@ -126,7 +142,7 @@ Diag* = {
 message* = (fault: SemaFault) str {
     fault.match({
         UndefinedName(_)     => "undefined name: no binding of this name is in scope",
-        NotExported(_)       => "not exported: `*` is what lets a name cross a module boundary",
+        NotExported(_)       => "a name crosses a module boundary only with `*`",
         NoSuchField(_)       => "no such field or method on this type",
         TypeMismatch(_)      => "type mismatch",
         NotCallable(_)       => "this is not a function, so it cannot be called",
@@ -178,7 +194,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
                 Res<(), AllocError> {
     fault.match({
         UndefinedName(f)          => out.write_name(f),
-        NotExported(f)            => out.write_name(f),
+        NotExported(f)            => write_export(out, f),
         NoOverload(f)             => out.write_name(f),
         ImplMissingField(f)       => out.write_name(f),
         ComputedFieldAssign(f)    => out.write_name(f),
@@ -217,6 +233,18 @@ write_name = (out :: String, f: NameFault) Res<(), AllocError> {
 // Both sides, always. `expected` first, because that is the order the
 // reader is thinking in: they wrote something, and the context wanted
 // something else.
+// The name and the module that would not let it out, as a sentence
+// rather than a quoted fragment. Both halves are needed to act on it —
+// a reader told only `hex_digit` still has to find which of the file's
+// imports was the one that refused.
+write_export = (out :: String, f: ExportFault) Res<(), AllocError> {
+    out.add_bytes(": ").try();
+    out.add_bytes(f.name).try();
+    out.add_bytes(" is not exported by module ").try();
+    out.add_bytes(f.module).try();
+    Ok(());
+}
+
 write_types = (out :: String, types: Types, f: TypeFault)
               Res<(), AllocError> {
     quote(out, f.name).try();
