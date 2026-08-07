@@ -76,16 +76,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # Deleting a line is how one closes; the staleness check below makes that
 # mandatory rather than optional. Adding a line requires this sentence to be
 # written again for the new case, which is the point.
-OWED: dict[str, str] = {
-    "sema.sema_join:Checker.is_infer":
-        "a byte-identical copy of `Checker.is_infer`. sema_join.zen:94 reads "
-        "`c.is_unknown(id) || is_infer(c, id)` -- one method call and one "
-        "prefix call to the copy, on one line. Delete the copy.",
-    "sema.sema_match:Checker.is_var":
-        "a byte-identical copy of `Checker.is_var`, and sema_match.zen:250 "
-        "has the same one-line tell: `c.is_infer(sty) || is_var(c, sty)`. "
-        "Same fix, same reason.",
-}
+OWED: dict[str, str] = {}
 
 
 def modules():
