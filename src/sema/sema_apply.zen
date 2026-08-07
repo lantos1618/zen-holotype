@@ -39,7 +39,7 @@ DeclId = sema.sema_id
 TyId, Ty, Types, TyFn, TyNamed, TyVar = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Checker, Ctx, UNRESOLVED = sema.sema_check
-Inst, subst, unify, tparam_vars, zip = sema.sema_inst
+Inst, InstEdge, subst, unify, tparam_vars, zip = sema.sema_inst
 Cand, Actual = sema.sema_call
 ty_at = sema.sema_cand
 type_from_ast, type_of, param_type = sema.sema_type
@@ -111,7 +111,38 @@ instantiated_ret = (c :: Checker, id: ExprId, call: Call, k: Cand,
                    Res<TyId, AllocError> {
     inst = call_inst(c, call, k, actuals, ctx).try();
     c.resolve_inst(id, inst).try();
+    note_edge(c, id, k, inst).try();
     subst(c, k.ret, inst)
+}
+
+// THE EDGE THE TERMINATION CHECK FOLLOWS. `sema_depth.zen` asks whether
+// the instantiation set is finite, and it cannot ask it of one call: the
+// answer lives in the CHAIN a call belongs to, and `grow<Vec<T>>` is
+// only divergent because it sits inside `grow`. So the edge is recorded
+// here — where the callee, its type parameters and what this call gave
+// them are all in hand — and the walk runs once the whole program has
+// been checked.
+//
+// A parameter neither source of inference reached stays as its own
+// `Var`, exactly as it does in the type this returns. The walk stops on
+// a chain that still mentions one rather than guessing, which is the
+// same refusal `has_var` is for.
+note_edge = (c :: Checker, id: ExprId, k: Cand, inst: Inst)
+            Res<(), AllocError> {
+    args ::= c.alloc.Vec<TyId>();
+    k.tvars.loop((h, v) { args.add(arg_for(v, inst)).try() });
+    c.note_edge(InstEdge(
+        from_owner: c.owner_of_body(),
+        to_owner: k.owner,
+        to_name: k.name,
+        to_tvars: k.tvars,
+        args: args,
+        span: c.tree.expr_at(id).span,
+    ))
+}
+
+arg_for = (v: TyId, inst: Inst) TyId {
+    inst.lookup(v).match({ Ok(t) => t, None => v })
 }
 
 // WHAT THE CALL SAID `T` IS. Two sources and the written one wins,

@@ -39,7 +39,7 @@
 // symbol. The refusal belongs at the consumer, where there is a position
 // to report at.
 
-Ast, Decl, DeclKind, Struct, TParam = ast
+Ast, Decl, DeclKind, Struct, TParam, Span = ast
 Alloc, AllocError = std.mem
 Vec, Map = std.collections
 str, String = std.text
@@ -105,6 +105,32 @@ Inst* = {
             Ok(k) => self.args.get(k),
         })
     }
+}
+
+// ONE CALL INSTANTIATING ONE GENERIC DECLARATION — an `Inst` with the
+// call that made it, which is what `sema_depth.zen` needs to ask whether
+// the instantiation set is finite.
+//
+// `Checker.inst_memo` already holds the same answer keyed by call site,
+// but a `Map` is a lookup and never a listing, and the termination walk
+// needs EVERY edge rather than one. So the edges are also appended to a
+// `Vec` in the order they resolved.
+//
+// `from_owner` is the qualified name of the generic function whose BODY
+// holds the call, empty at the top level. It is what makes the walk a
+// graph rather than a list: an edge out of `ping` is one whose
+// `from_owner` is `ping`, and its `args` are then written in terms of
+// `ping`'s own type parameters — which is exactly what `subst` needs to
+// turn them into the next instantiation along the chain.
+InstEdge* = {
+    from_owner*: str,
+    to_owner*: str,
+    to_name*: str,
+    // the callee's own `Ty.Var`s and what this call gave them, both in
+    // declaration order, so the pair is a substitution
+    to_tvars*: Vec<TyId>,
+    args*: Vec<TyId>,
+    span*: Span,
 }
 
 // `alloc.Inst()` — a ufcs function whose first parameter is an Alloc,
