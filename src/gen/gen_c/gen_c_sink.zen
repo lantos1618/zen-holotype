@@ -18,13 +18,15 @@
 // it was.
 //
 // WHY THIS DOOR AND THE ALLOCATING ONE ARE SEPARATE FILES. They walk
-// the same format, and they share that walk. What they do NOT share is
-// the error: every write reachable from a `{}` — `Sink.write`,
+// the same format, and they share that walk — `lower_pieces_into`
+// below is the allocating door writing THESE pieces into the buffer it
+// just made, so the two hole sets are one hole set. What they do NOT
+// share is the error: every write reachable from a `{}` — `Sink.write`,
 // `text_fmt.add_i64`, a Display's own `toString` — answers with exactly
 // `Res<(), WriteError>`, which IS this door's declared return, so a
 // failing write is carried out by COPYING it and nothing is converted.
 // The allocating door returns `Res<String, AllocError>` and has no such
-// luck; `gen_c_fmt.zen` holds that half and its narrower hole set.
+// luck; `gen_c_fmt.zen` holds that half, and the buffer it makes.
 //
 // THE WRITERS ARE FOUND, NOT WRITTEN. `add_i64`, `add_u64` and
 // `add_bool` are ordinary Zen functions in the door's own module with
@@ -55,7 +57,7 @@ declare_temp = gen.gen_c.gen_c_flow
 signature_of = gen.gen_c.gen_c_call
 body_end, is_hole, advance, decoded_bytes, cast_of = gen.gen_c.gen_c_print
 slot_call = gen.gen_c.gen_c_bound
-set_line = gen.gen_c.gen_c_fat
+set_line, fat_value = gen.gen_c.gen_c_fat
 sink_display = gen.gen_c.gen_c_display
 
 // -----------------------------------------------------------------
@@ -190,6 +192,77 @@ door_fn = (be :: CBackend, d: Def) Res<Function> {
 
 decl_fn = (dec: Decl) Res<Function> {
     dec.kind.match({ Function(g) => Ok(g), _ => None })
+}
+
+// -----------------------------------------------------------------
+// the same door, into a buffer the caller already made
+//
+// `gen_c_fmt.zen`'s allocating door is `alloc.String()` followed by
+// EXACTLY these pieces, so it reaches them here instead of keeping a
+// second walk. It used to keep one, and the two drifted the way two
+// copies do: this one grew integers, bools and Displays and that one
+// stayed at `str`, so `alloc.String("point {}", p)` was a diagnostic
+// while `out.add("point {}", p)` wrote the point.
+//
+// A STRING IS A SINK, which is the whole reason this works: the buffer
+// becomes the door's own record through `fat_value` — ONE call, not a
+// second copy of the rule — and every writer reachable from a `{}` is
+// then reached the one way this file reaches it.
+//
+// A FAILING WRITE JUMPS TO A LABEL THE CALLER OWNS rather than leaving
+// an answer to inspect. The two doors declare different errors, so the
+// caller has to build its own; giving it a place to do that is one
+// `usize` and no test emitted on the succeeding path.
+// -----------------------------------------------------------------
+
+lower_pieces_into* = (be :: CBackend, id: ExprId, c: Call, addr: str,
+                      cty: TyId, fail: usize, recv: Res<ExprId>, ctx: Ctx)
+                     Res<bool, AllocError> {
+    door_decl(be).try().match({
+        None  => Ok(false),
+        Ok(d) => pieces_at_decl(be, id, c, addr, cty, fail, d, recv, ctx),
+    })
+}
+
+pieces_at_decl = (be :: CBackend, id: ExprId, c: Call, addr: str, cty: TyId,
+                  fail: usize, d: Def, recv: Res<ExprId>, ctx: Ctx)
+                 Res<bool, AllocError> {
+    door_fn(be, d).match({
+        None  => Ok(false),
+        Ok(f) => pieces_into_buffer(be, id, c, addr, cty, fail, d, f, recv, ctx),
+    })
+}
+
+pieces_into_buffer = (be :: CBackend, id: ExprId, c: Call, addr: str,
+                      cty: TyId, fail: usize, d: Def, f: Function,
+                      recv: Res<ExprId>, ctx: Ctx) Res<bool, AllocError> {
+    ret = declared_type(be, d, f.ret).try();
+    sty = sink_type(be, d, f).try();
+    sink ::= be.alloc.String().try();
+    buffer_sink(be, addr, cty, sty, sink).try();
+    tmp ::= be.alloc.String().try();
+    sym_gen(tmp, "t", be.next_tmp()).try();
+    declare_temp(be, ret, tmp.view()).try();
+    write_ok(be, ret, tmp.view()).try();
+    p = Piece(sink: sink.view(), sty: sty, tmp: tmp.view(), done: fail,
+              id: id, module: d.id.module.to_usize());
+    fmt_arg(c, recv).match({
+        None      => Ok(()),
+        Ok(first) => write_pieces(be, c, first, fmt_index(recv) + 1, p, ctx),
+    }).try();
+    Ok(true);
+}
+
+// The record over the caller's buffer, in a temporary of its own so
+// that every write names a place and `&` on it is an address — the
+// same shape `spill_sink` gives a sink that arrived as an argument.
+buffer_sink = (be :: CBackend, addr: str, cty: TyId, sty: TyId,
+               out :: String) Res<(), AllocError> {
+    value ::= be.alloc.String().try();
+    fat_value(be, addr, cty, sty, value).try();
+    sym_gen(out, "t", be.next_tmp()).try();
+    declare_temp(be, sty, out.view()).try();
+    set_line(be, out.view(), value.view())
 }
 
 // -----------------------------------------------------------------

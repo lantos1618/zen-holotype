@@ -14,49 +14,38 @@
 // resolution — so a compiler that skipped this door could not find its
 // own source files.
 //
-// THE FORMAT LANGUAGE IS `gen_c_print.zen`'s, walked by the same
-// helpers. One implementation of "where are the holes", because
-// `println("{}", x)` and `alloc.String("{}", x)` differ only in where
-// the bytes go — the console, or a buffer that can fail to grow.
+// WHAT IS LEFT HERE IS THE BUFFER, NOT THE FORMAT. This door is the
+// empty form followed by exactly the pieces `out.add(fmt, args)`
+// writes, so the walk, the writers and the record over the buffer are
+// `gen_c_sink.zen`'s and this file makes the String and hands it over.
+// It held a second walk once, and two walks drift: that one wrote a
+// `str` and reported every other hole, so `alloc.String("point {}", p)`
+// was a diagnostic while `out.add("point {}", p)` wrote the point.
 //
-// A FAILURE TO GROW IS THE CALL'S OWN `Err`. `add_bytes` returns
-// `Res<(), AllocError>` and this returns `Res<String, AllocError>`, so
-// the error travels across unchanged — "propagation merges sets" is a
-// containment rule and there is nothing to convert.
-//
-// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
-// is one call form, and the file is the four steps that form expands
-// into — recognise the door, make the buffer, walk the format, write a
-// piece. Each step reads the one before it and nothing else reads any
-// of them, so a split would put a module boundary inside a single
-// expansion and export three helpers that mean nothing apart.
+// WHAT THE TWO DOORS GENUINELY DO NOT SHARE IS THE ERROR, and that is
+// why they are still two files. A write answers `Res<(), WriteError>`,
+// this answers `Res<String, AllocError>`, and there is no conversion
+// between them — see `write_failure_arm`, which is the one point where
+// the sets meet.
 
-Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = ast
-Function, Literal, LiteralKind, Call, Arg, Param, Span, Ident, TypeId = ast
+ExprId, Decl, DeclKind, Function, Call = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
-Range = std.core
-DeclId = sema.sema_id
-TyId, Ty, Types, TyNamed, TyRes = sema.sema_ty
-World, Def, decl_at = sema.sema_def
-Checker, Ctx = sema.sema_check
+TyId, TyRes = sema.sema_ty
+Def, decl_at = sema.sema_def
+Ctx = sema.sema_check
 Inst = sema.sema_inst
-write_usize = sema.sema_diag
-sym_fn, sym_gen, sym_member, sym_variant, RES_PATH = gen.gen_name
-module_of = gen.gen_name
+sym_gen, sym_member = gen.gen_name
 GenFault = gen.gen_diag
-CBackend, MethodRef = gen.gen_c.gen_c_state
+CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_state
-recv_inst = gen.gen_c.gen_c_mono
-ctype = gen.gen_c.gen_c_type
-expr, ty_of = gen.gen_c.gen_c_expr
-body_end, is_hole, advance, decoded_bytes = gen.gen_c.gen_c_print
+expr = gen.gen_c.gen_c_expr
 declare_temp = gen.gen_c.gen_c_flow
 signature_of = gen.gen_c.gen_c_call
-method_sig, join = gen.gen_c.gen_c_member
+write_assign_err = gen.gen_c.gen_c_cap
 is_sink_door, lower_sink_door, bodyless = gen.gen_c.gen_c_sink
-last_is_variadic, call_symbol = gen.gen_c.gen_c_sink
+last_is_variadic, call_symbol, lower_pieces_into = gen.gen_c.gen_c_sink
 write_jump_unless_ok, write_goto, write_label = gen.gen_c.gen_c_sink
 
 // -----------------------------------------------------------------
@@ -173,14 +162,7 @@ write_door = (be :: CBackend, id: ExprId, c: Call, d: Def, e: Def,
     done = be.next_tmp();
     write_empty_call(be, e, ret, c, recv, ctx, tmp.view()).try();
     write_jump_unless_ok(be, tmp.view(), done).try();
-    // `alloc.String("")` is the empty form and one write of nothing, so
-    // a door with no format argument is not an error — it is the same
-    // expansion with no pieces in it.
-    fmt_arg(be, c, recv).match({
-        None      => Ok(()),
-        Ok(first) => write_pieces(be, c, first, fmt_index(recv) + 1, r, ret,
-                                  tmp.view(), done, ctx),
-    }).try();
+    write_buffer_pieces(be, id, c, r, ret, tmp.view(), done, recv, ctx).try();
     write_label(be, done).try();
     out.add_bytes(tmp.view())
 }
@@ -193,16 +175,6 @@ alloc_arg = (c: Call, recv: Res<ExprId>) Res<ExprId> {
         Ok(x) => Ok(x),
         None  => arg_at(c, 0),
     })
-}
-
-// The format string: the argument one place along from the allocator,
-// wherever the allocator was written.
-fmt_arg = (be: CBackend, c: Call, recv: Res<ExprId>) Res<ExprId> {
-    arg_at(c, fmt_index(recv))
-}
-
-fmt_index = (recv: Res<ExprId>) usize {
-    recv.match({ Ok(_) => 0, None => 1 })
 }
 
 arg_at = (c: Call, i: usize) Res<ExprId> {
@@ -239,241 +211,31 @@ write_alloc = (be :: CBackend, e: Def, a: ExprId, ctx: Ctx, out :: String)
 // -----------------------------------------------------------------
 // the pieces
 //
-// `gen_c_print.zen`'s walk over the raw literal, with the writes going
-// to a buffer instead of to the console.
+// NOT WALKED HERE. `gen_c_sink.zen` walks the format and picks the
+// writer for every hole, and this door's buffer IS a Sink, so the
+// pieces are that door's with a different sink under them. There were
+// two walks once and they drifted exactly as far as their writer sets:
+// this one wrote a `str` and reported everything else, so a Point in
+// `alloc.String("point {}", p)` was a diagnostic while the same Point
+// in `out.add("point {}", p)` was written.
 // -----------------------------------------------------------------
 
-write_pieces = (be :: CBackend, c: Call, first: ExprId, used0: usize,
-                r: TyRes, ret: TyId, tmp: str, done: usize, ctx: Ctx)
-               Res<(), AllocError> {
-    raw = format_of(be, first);
-    (raw.len == 0).match({
-        true  => write_value_piece(be, first, r, ret, tmp, done, ctx),
-        false => walk_format(be, c, raw, used0, r, ret, tmp, done, ctx),
+write_buffer_pieces = (be :: CBackend, id: ExprId, c: Call, r: TyRes,
+                       ret: TyId, tmp: str, done: usize, recv: Res<ExprId>,
+                       ctx: Ctx) Res<(), AllocError> {
+    addr ::= be.alloc.String().try();
+    ok_payload(be, tmp, addr).try();
+    fail = be.next_tmp();
+    wrote = lower_pieces_into(be, id, c, addr.view(), r.value, fail, recv,
+                              ctx).try();
+    wrote.match({
+        false => be.report_expr(id, GenFault.Unsupported("a format door with no sink")),
+        true  => write_failure_arm(be, ret, tmp, fail, done),
     })
 }
 
-// The raw source slice of a string literal, quotes included, and the
-// empty string when the argument is not one. A FORMAT IS READ AT
-// COMPILE TIME, so a computed one is not a format at all — it is the
-// first value, and `alloc.String(s)` appends `s`.
-format_of = (be: CBackend, id: ExprId) str {
-    be.tree.expr_at(id).kind.match({
-        Literal(l) => literal_format(l),
-        _          => "",
-    })
-}
-
-literal_format = (l: Literal) str {
-    l.kind.match({ Str => l.text, _ => "" })
-}
-
-walk_format = (be :: CBackend, c: Call, raw: str, used0: usize, r: TyRes,
-               ret: TyId, tmp: str, done: usize, ctx: Ctx)
-              Res<(), AllocError> {
-    end = body_end(raw);
-    start ::= 1;
-    used ::= used0;
-    i ::= 1;
-    loop(() { i < end }, (h) {
-        hole = is_hole(raw, i, end);
-        hole.then(() {
-            write_chunk_piece(be, raw, start, i, r, ret, tmp, done).try();
-            write_hole_piece(be, c, used, r, ret, tmp, done, ctx).try();
-            used = used + 1;
-            start = i + 2;
-        });
-        i = i + advance(raw, i, hole);
-    });
-    write_chunk_piece(be, raw, start, end, r, ret, tmp, done).try();
-    write_rest_pieces(be, c, used, r, ret, tmp, done, ctx).try();
-    Ok(());
-}
-
-// A hole with no argument left writes itself, which is what `println`
-// does and what makes a stray `{}` visible rather than swallowed.
-write_hole_piece = (be :: CBackend, c: Call, used: usize, r: TyRes,
-                    ret: TyId, tmp: str, done: usize, ctx: Ctx)
-                   Res<(), AllocError> {
-    arg_at(c, used).match({
-        None  => write_bytes_piece(be, "\"{}\"", 2, r, ret, tmp, done),
-        Ok(a) => write_value_piece(be, a, r, ret, tmp, done, ctx),
-    })
-}
-
-write_rest_pieces = (be :: CBackend, c: Call, used: usize, r: TyRes,
-                     ret: TyId, tmp: str, done: usize, ctx: Ctx)
-                    Res<(), AllocError> {
-    Range(used, c.args.len).loop((h, i) {
-        arg_at(c, i).match({
-            None  => Ok(()),
-            Ok(a) => write_value_piece(be, a, r, ret, tmp, done, ctx),
-        }).try();
-    });
-    Ok(());
-}
-
-// One literal chunk, and nothing at all when the chunk is empty.
-write_chunk_piece = (be :: CBackend, raw: str, start: usize, stop: usize,
-                     r: TyRes, ret: TyId, tmp: str, done: usize)
-                    Res<(), AllocError> {
-    (stop > start).match({
-        false => Ok(()),
-        true  => write_quoted(be, raw.slice(start, stop), r, ret, tmp, done),
-    })
-}
-
-write_quoted = (be :: CBackend, piece: str, r: TyRes, ret: TyId, tmp: str,
-                done: usize) Res<(), AllocError> {
-    quoted ::= be.alloc.String().try();
-    quoted.add_bytes("\"").try();
-    quoted.add_bytes(piece).try();
-    quoted.add_bytes("\"").try();
-    write_bytes_piece(be, quoted.view(), decoded_bytes(piece), r, ret, tmp,
-                      done)
-}
-
-// -----------------------------------------------------------------
-// one write, and the short circuit that keeps a failure visible
-// -----------------------------------------------------------------
-
-// `add_bytes(&zg_tN.zg_data.Ok, (zg_str){ .. })`, guarded.
-write_bytes_piece = (be :: CBackend, quoted: str, len: usize, r: TyRes,
-                     ret: TyId, tmp: str, done: usize)
-                    Res<(), AllocError> {
-    text ::= be.alloc.String().try();
-    text.add_bytes("(zg_str){ (unsigned char *)").try();
-    text.add_bytes(quoted).try();
-    text.add_bytes(", ").try();
-    write_usize(text, len).try();
-    text.add_bytes("u }").try();
-    write_sink_call(be, text.view(), r, ret, tmp, done)
-}
-
-// A `{}` on one argument, resolved by the argument's TYPE and by
-// nothing else — `{}` carries no format spec, so there is nothing else
-// to read.
-//
-// A `str` IS THE ONLY HOLE THIS DOOR WRITES, and anything else is
-// REPORTED rather than guessed at. `text_fmt.zen`'s `add_u64`,
-// `add_i64` and `add_bool` take a `Sink` — a bound, so a fat value —
-// and a `String` under construction is not one yet; building that
-// record here would be a second, worse copy of `gen_c_fat.zen`'s rule.
-// Until it is written, an integer in an allocating format is a
-// diagnostic with a position, which is the one outcome that is never
-// wrong.
-write_value_piece = (be :: CBackend, a: ExprId, r: TyRes, ret: TyId,
-                     tmp: str, done: usize, ctx: Ctx)
-                    Res<(), AllocError> {
-    unknown = be.check.types.unknown().try();
-    ty = ty_of(be, a, ctx, unknown).try();
-    text ::= be.alloc.String().try();
-    expr(be, a, ctx, ty, text).try();
-    be.check.prim_name(ty).eq("str").match({
-        false => be.report_expr(a, GenFault.Unsupported("formatting a value of this type into a String")),
-        true  => write_sink_call(be, text.view(), r, ret, tmp, done),
-    })
-}
-
-// -----------------------------------------------------------------
-// the sink
-// -----------------------------------------------------------------
-
-// `add_bytes` is `String`'s own member, reached by declaration and not
-// through the caller's imports: the expansion is the backend's, so a
-// caller that wrote `alloc.String("{}", s)` never named it.
-write_sink_call = (be :: CBackend, value: str, r: TyRes, ret: TyId,
-                   tmp: str, done: usize) Res<(), AllocError> {
-    sink ::= be.alloc.String().try();
-    ok_payload(be, tmp, sink).try();
-    call ::= be.alloc.String().try();
-    sink_symbol(be, r.value, call).try().match({
-        false => Ok(()),
-        true  => write_guarded_write(be, call.view(), sink.view(), value,
-                                     ret, tmp, done),
-    })
-}
-
-// The symbol of `String.add_bytes` at this receiver, queued so the walk
-// reaches its body. `false` when the payload declares no such member,
-// which is a translation unit that would not have linked.
-sink_symbol = (be :: CBackend, sty: TyId, out :: String)
-              Res<bool, AllocError> {
-    be.check.types.at(sty).match({
-        Named(n) => named_sink_symbol(be, sty, n, out),
-        _        => Ok(false),
-    })
-}
-
-named_sink_symbol = (be :: CBackend, sty: TyId, n: TyNamed, out :: String)
-                    Res<bool, AllocError> {
-    struct_fn(be, n.decl, "add_bytes").try().match({
-        None  => Ok(false),
-        Ok(f) => emit_sink_symbol(be, sty, n, f, out),
-    })
-}
-
-emit_sink_symbol = (be :: CBackend, sty: TyId, n: TyNamed, f: Function,
-                    out :: String) Res<bool, AllocError> {
-    inst = recv_inst(be, sty).try();
-    mi = n.decl.module.to_usize();
-    sig ::= be.alloc.Vec<TyId>();
-    method_sig(be, sty, n.decl, f, mi, inst, sig).try();
-    owner ::= be.alloc.String().try();
-    join(owner, module_of(be.check.world, n.decl), n.name).try();
-    qname ::= be.alloc.String().try();
-    join(qname, owner.view(), "add_bytes").try();
-    sym ::= be.alloc.String().try();
-    sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
-    be.need_method(MethodRef(self_ty: sty, decl: n.decl, name: "add_bytes",
-                             arity: sig.len, qname: qname.view()), inst, sym.view()).try();
-    out.add_bytes(sym.view()).try();
-    Ok(true);
-}
-
-// A bodied function member a struct declares under `name`.
-struct_fn = (be :: CBackend, decl: DeclId, name: str)
-            Res<Res<Function>, AllocError> {
-    found ::= be.alloc.Vec<Function>();
-    decl_at(be.tree, decl).match({
-        None  => Ok(()),
-        Ok(d) => collect_struct_fn(d, name, found),
-    }).try();
-    Ok(found.get(0));
-}
-
-collect_struct_fn = (d: Decl, name: str, out :: Vec<Function>)
-                    Res<(), AllocError> {
-    d.kind.match({
-        Struct(s) => keep_struct_fn(s, name, out),
-        _         => Ok(()),
-    })
-}
-
-keep_struct_fn = (s: Struct, name: str, out :: Vec<Function>)
-                 Res<(), AllocError> {
-    s.members.loop((h, m) { keep_named_fn(m, name, out).try() });
-    Ok(());
-}
-
-keep_named_fn = (m: Member, name: str, out :: Vec<Function>)
-                Res<(), AllocError> {
-    m.kind.match({
-        Function(f) => keep_bodied_named(f, name, out),
-        _           => Ok(()),
-    })
-}
-
-keep_bodied_named = (f: Function, name: str, out :: Vec<Function>)
-                    Res<(), AllocError> {
-    (f.name.text.eq(name) && (bodyless(f) == false)).match({
-        false => Ok(()),
-        true  => out.add(f),
-    })
-}
-
-// `zg_tN.zg_data.<Ok>` — the String the writes go into, taken by
-// address because every writer's receiver is a `::` parameter.
+// `&zg_tN.zg_data.<Ok>` — the String the writes go into, taken by
+// address because a sink record holds a pointer to its receiver.
 ok_payload = (be :: CBackend, tmp: str, out :: String)
              Res<(), AllocError> {
     out.add_bytes("&(").try();
@@ -484,75 +246,29 @@ ok_payload = (be :: CBackend, tmp: str, out :: String)
     Ok(());
 }
 
-write_guarded_write = (be :: CBackend, call: str, sink: str, value: str,
-                       ret: TyId, tmp: str, done: usize)
-                      Res<(), AllocError> {
-    wtmp ::= be.alloc.String().try();
-    sym_gen(wtmp, "t", be.next_tmp()).try();
-    wret = be.check.types.res_failure(unit_of(be).try(),
-                                      error_of(be, ret).try()).try();
-    declare_temp(be, wret, wtmp.view()).try();
-    line ::= be.alloc.String().try();
-    line.add_bytes(wtmp.view()).try();
-    line.add_bytes(" = ").try();
-    line.add_bytes(call).try();
-    line.add_bytes("(").try();
-    line.add_bytes(sink).try();
-    line.add_bytes(", ").try();
-    line.add_bytes(value).try();
-    line.add_bytes(");").try();
-    be.writeln(line.view()).try();
-    write_write_guard(be, wtmp.view(), ret, tmp, done)
-}
-
-unit_of = (be :: CBackend) Res<TyId, AllocError> { be.check.types.prim("()") }
-
-// The `Err` the door carries, which is the one a failing write
-// produces: both sides are `AllocError` and nothing is converted.
-error_of = (be :: CBackend, ret: TyId) Res<TyId, AllocError> {
-    be.check.types.at(ret).match({
-        Res(r) => Ok(r.error),
-        _      => be.check.types.unknown(),
-    })
-}
-
-// `if (zg_tK.zg_tag != Ok) { zg_tN = Err(zg_tK's Err); goto done; }`
-write_write_guard = (be :: CBackend, wtmp: str, ret: TyId, tmp: str,
+// `goto done; fail: ; zg_tN = Err(OutOfMemory);`
+//
+// THE TWO ERROR SETS MEET HERE AND NOWHERE ELSE. Every write reachable
+// from a `{}` answers `Res<(), WriteError>` and this door answers
+// `Res<String, AllocError>`; DESIGN.md has no conversion between them,
+// because the sets are not nested and narrowing does not exist. So the
+// reason is NAMED rather than carried: the one thing that can go wrong
+// writing into a String this door made a line ago is that it could not
+// GROW, and `OutOfMemory` is exactly that — `AllocError` has that one
+// variant and it is exact. The bootstrapper names it the same way and
+// says so at `full_of`.
+//
+// WIDENING THE DOOR'S DECLARED ERROR IS NOT THE ALTERNATIVE: 112
+// corpus mains return `Res<i32, AllocError>` and call this, so a door
+// answering `WriteError` would need a narrowing at every one of them.
+//
+// THE CONVERSION SITS ON THE FAILING PATH ONLY. A succeeding walk
+// jumps over it, so nothing tests a value that is `Ok` by
+// construction, and the door's own answer is left where it already is.
+write_failure_arm = (be :: CBackend, ret: TyId, tmp: str, fail: usize,
                      done: usize) Res<(), AllocError> {
-    be.write("if (").try();
-    be.write(wtmp).try();
-    be.write(".zg_tag != ").try();
-    tag ::= be.alloc.String().try();
-    sym_variant(tag, RES_PATH, "Ok").try();
-    be.write(tag.view()).try();
-    be.writeln(") {").try();
-    be.indent();
-    write_carry_err(be, wtmp, ret, tmp).try();
     write_goto(be, done).try();
-    be.dedent();
-    be.writeln("}").try();
-    Ok(());
+    write_label(be, fail).try();
+    write_assign_err(be, ret, "OutOfMemory", tmp)
 }
 
-write_carry_err = (be :: CBackend, wtmp: str, ret: TyId, tmp: str)
-                  Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(tmp).try();
-    line.add_bytes(" = (").try();
-    ctype(be, ret, line).try();
-    line.add_bytes("){ .zg_tag = ").try();
-    sym_variant(line, RES_PATH, "Err").try();
-    line.add_bytes(", .zg_data.").try();
-    sym_member(line, "Err").try();
-    line.add_bytes(" = ").try();
-    line.add_bytes(wtmp).try();
-    line.add_bytes(".zg_data.").try();
-    sym_member(line, "Err").try();
-    line.add_bytes(" };").try();
-    be.writeln(line.view())
-}
-
-// `if (zg_tN.zg_tag != Ok) { goto done; }` — the empty form failed and
-// there is nothing to write into. The jump, the goto and the label are
-// `gen_c_sink.zen`'s: both doors short-circuit the same way, and one
-// spelling of a label is one spelling.
