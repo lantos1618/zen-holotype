@@ -166,15 +166,32 @@ World* = {
     // are any: a module's own name is never shadowed by something it
     // imported, because the import would have been a redeclaration.
     // Otherwise the imports are followed, and `*` gates every hop, and
-    // last of all the prelude — which is the only name a module gets
-    // without writing an import, and so the only one that loses every
-    // tie.
+    // last of all the prelude — the only name a module gets without
+    // writing an import, and so the only one that loses every tie.
+    //
+    // AN IMPORT BINDING IS AUTHORITATIVE, which is why the last line
+    // asks a question the first two do not. The prelude is the exception
+    // for a name NOBODY imported; a module that wrote an import already
+    // said what the name means here, so a binding the `*` gate rejected
+    // resolves to NOTHING. Falling through was worse than a missing
+    // diagnostic: `hex_digit`, blocked at its own boundary, came back
+    // out of `std.core.byte` and ran instead.
     defs_of* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
                Res<(), AllocError> {
         self.own_defs(mi, name, out).try();
         (out.len == 0).then(() { self.imported_defs(mi, name, out).try() });
-        (out.len == 0).then(() { self.prelude_defs(mi, name, out).try() });
+        (out.len == 0 && (self.binds_name(mi, name) == false))
+            .then(() { self.prelude_defs(mi, name, out).try() });
         Ok(());
+    }
+
+    // Did `mi` write an import binding this name? Starred or not: a star
+    // says whether the binding leaves again, not whether it exists.
+    binds_name* = (self: @Self, mi: usize, name: str) bool {
+        self.tables.get(mi).match({
+            None    => false,
+            Ok(t)   => imports_name(t, name),
+        })
     }
 
     // "A name that is not imported is not visible, and the prelude is
@@ -290,7 +307,7 @@ World* = {
     imported_defs* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
                      Res<(), AllocError> {
         seen ::= self.alloc.Vec<usize>();
-        self.follow(mi, name, out, seen)
+        self.follow(mi, name, out, seen, false)
     }
 
     // Every EXPORTED declaration of `name` in module `mi`, following
@@ -303,37 +320,45 @@ World* = {
         keep_exported(starred, out).try();
         // a folder root declares nothing and re-exports everything, so
         // an empty answer here is the normal case and not a miss
-        (out.len == 0).then(() { self.follow(mi, name, out, seen).try() });
+        (out.len == 0).then(() { self.follow(mi, name, out, seen, true).try() });
         Ok(());
     }
 
     // Walk `mi`'s import list for `name` and ask the module it names.
     //
+    // `reexport` IS THE STAR ON THE BINDING, a parameter because the
+    // same list answers two questions. Asked by `mi` itself, every
+    // binding counts — an import binds locally whatever its star says.
+    // Asked by somebody ELSE, only starred ones do: a star on an import
+    // is the whole re-export mechanism, and the walk without this flag
+    // re-exported every unstarred import.
+    //
     // `seen` is the cycle guard, and it is needed rather than defensive:
     // `std.core.display` and `std.text` import from each other, and a
     // module graph is not required to be a tree.
     follow = (self: @Self, mi: usize, name: str, out :: Vec<Def>,
-              seen :: Vec<usize>) Res<(), AllocError> {
+              seen :: Vec<usize>, reexport: bool) Res<(), AllocError> {
         visited(seen, mi).match({
-            false => self.follow_fresh(mi, name, out, seen),
+            false => self.follow_fresh(mi, name, out, seen, reexport),
             true  => Ok(()),
         })
     }
 
     follow_fresh = (self: @Self, mi: usize, name: str, out :: Vec<Def>,
-                    seen :: Vec<usize>) Res<(), AllocError> {
+                    seen :: Vec<usize>, reexport: bool) Res<(), AllocError> {
         seen.add(mi).try();
         self.tables.get(mi).match({
-            Ok(t) => self.follow_imports(t, name, out, seen),
+            Ok(t) => self.follow_imports(t, name, out, seen, reexport),
             None  => Ok(()),
         }).try();
         Ok(());
     }
 
     follow_imports = (self: @Self, t: ModuleTable, name: str, out :: Vec<Def>,
-                      seen :: Vec<usize>) Res<(), AllocError> {
+                      seen :: Vec<usize>, reexport: bool) Res<(), AllocError> {
         t.imports.loop((h, binding) {
-            binding.name.eq(name).then(() {
+            crosses = binding.exported || (reexport == false);
+            (crosses && binding.name.eq(name)).then(() {
                 self.follow_one(binding, name, out, seen).try();
             });
         });
@@ -560,6 +585,12 @@ keep_exported = (defs: Vec<Def>, out :: Vec<Def>) Res<(), AllocError> {
         d.exported.then(() { out.add(d).try() });
     });
     Ok(());
+}
+
+imports_name = (t: ModuleTable, name: str) bool {
+    Range(0, t.imports.len).find((i) {
+        t.imports.get(i).match({ Ok(b) => b.name.eq(name), None => false })
+    }).match({ Ok(_) => true, None => false })
 }
 
 visited = (seen: Vec<usize>, mi: usize) bool {
