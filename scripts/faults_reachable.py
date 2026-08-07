@@ -70,13 +70,6 @@ OWED = {
         "a field cycle that never reaches an indirection. sema.zen:35 "
         "admits it; the layout walk does not terminate rather than "
         "reporting.",
-    "InstantiationDepth":
-        "sema.zen:34-38 admits substitution landed with no bound on "
-        "depth. NOT MERELY MISSING -- the compiler allocates without "
-        "bound and the OS kills it: 466MB in 0.84s on "
-        "tests/must-fail/sema/infinite_monomorphisation, which took the "
-        "test harness down twice. bootstrap/sema.py:2146 raises it "
-        "correctly and is the model. Highest priority in this list.",
 }
 
 VARIANT = re.compile(r"^\s*[|=]\s*([A-Z]\w*)\s*\(")

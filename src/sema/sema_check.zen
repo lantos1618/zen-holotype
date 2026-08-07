@@ -53,7 +53,7 @@ DeclId = sema.sema_id
 TyId, Ty, Types, ResForm, TyRes, TyNamed = sema.sema_ty
 World, Def, DefKind = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
-Inst = sema.sema_inst
+Inst, InstEdge = sema.sema_inst
 
 // One name in scope, and what it is.
 //
@@ -122,6 +122,20 @@ Checker* = {
     // generically. What an instantiation changes is the answer at a
     // CALL SITE, and `ExprId` already separates two call sites.
     inst_memo* :: Map<ExprId, Inst>,
+
+    // EVERY INSTANTIATION EDGE, in resolution order. The listing
+    // `inst_memo` cannot give: see `InstEdge` above.
+    edges :: Vec<InstEdge>,
+
+    // WHOSE BODY IS BEING CHECKED. The qualified name of the enclosing
+    // function while `check_body` walks it, empty outside one.
+    //
+    // A call records the edge it makes, and an edge is only a
+    // continuation of a chain if it knows which body it came from —
+    // `pong<Vec<T>>` diverges because it is inside `ping`, and read on
+    // its own it is just a call. `check_body` is the one place that
+    // knows, so it is the one place that sets this.
+    owner_now :: str = "",
 
     // THE SET A NAME STANDS FOR. `A | B` is a union of existing types
     // when every variant names one, and `WriteError` is then a NAME for
@@ -197,6 +211,23 @@ Checker* = {
                     Res<(), AllocError> {
         self.inst_memo.set(id, inst)
     }
+
+    // The instantiation graph, as a listing. `sema_depth.zen` is the
+    // only reader and it needs every edge, which a keyed memo cannot
+    // hand back.
+    note_edge* = (self :: @Self, e: InstEdge) Res<(), AllocError> {
+        self.edges.add(e)
+    }
+
+    edge_count* = (self: @Self) usize { self.edges.len }
+
+    edge_at* = (self: @Self, i: usize) Res<InstEdge> { self.edges.get(i) }
+
+    // Whose body is being walked. `check_body` brackets one declaration
+    // with these, so an edge recorded in between knows its caller.
+    enter_owner* = (self :: @Self, owner: str) () { self.owner_now = owner; }
+
+    owner_of_body* = (self: @Self) str { self.owner_now }
 
     modules* = (self: @Self) World { self.world }
 
@@ -644,6 +675,7 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         type_memo: a.Map<TypeId, TyId>(),
         call_memo: a.Map<ExprId, DeclId>(),
         inst_memo: a.Map<ExprId, Inst>(),
+        edges: a.Vec<InstEdge>(),
         set_memo: a.Map<TyId, TyId>(),
         raised: a.Vec<TyId>(),
         locals: a.Vec<Binding>(),

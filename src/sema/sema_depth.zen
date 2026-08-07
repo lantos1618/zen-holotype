@@ -1,0 +1,463 @@
+// src/sema/sema_depth.zen
+// Why the instantiation set is finite, and where to blame when it is not.
+//
+// A monomorphising compiler answers one instantiation at a time, and
+// every single request is legitimate on its own. So nothing downstream
+// can notice that `grow<T>` calling `grow<Vec<T>>` asks for grow<i32>,
+// grow<Vec<i32>>, grow<Vec<Vec<i32>>>, ... forever. Measured on the nine
+// lines of `tests/must-fail/sema/infinite_monomorphisation.zen` before
+// this file existed: 60GB and 113 seconds, and that is the GOOD case,
+// where the machine had the memory to spare. On a smaller one the OS
+// kills the compiler, which is not a diagnostic.
+//
+// THE BLAME RULE IS THE WHOLE DESIGN, and it is why this is a file
+// rather than a counter in `sema_apply.zen`. A counter reports wherever
+// it happens to run out. For
+//
+//     ping<T> -> pong<Vec<T>> -> ping<Vec<T>> -> pong<Vec<Vec<T>>> -> ..
+//
+// that is an arbitrary one of the two calls, and only ONE of them is the
+// mistake: `pong<Vec<T>>` WIDENS its type argument, while `ping<T>`
+// forwards what it was handed and would be correct beside any other
+// callee. So the chain is kept as a stack, and the diagnostic lands on
+// the innermost frame whose type arguments are structurally larger than
+// its caller's. That is the call the author has to change, and a depth
+// bound that reports at the wrong end of the cycle sends them to the
+// wrong function.
+//
+// A CHAIN RESTARTS AT A CONCRETE ARGUMENT, which is what keeps this
+// affordable. `f<i32>()` inside `g<T>` says nothing about `T`: the
+// callee's instantiation is fixed by the call site, and a program has
+// only as many call sites as it has lines. So an edge whose arguments
+// mention none of the caller's parameters is not followed as a
+// continuation — it is a ROOT, walked once in its own right. Divergence
+// needs growth and growth needs the caller's parameter, so no infinite
+// chain is missed, and the walk costs (call sites x budget) rather than
+// the size of the monomorphised program.
+//
+// WHAT IT DOES NOT SEE, stated rather than hidden: a call reached as a
+// METHOD — `v.add(x)` found through `members_of` — records no
+// instantiation, so it is not an edge here. Divergence threaded through
+// a method chain is not caught yet. That direction is a false NEGATIVE
+// and it costs a missing diagnostic, never a wrong one.
+
+Decl, Struct, Member, Field, Span = ast
+Alloc, AllocError = std.mem
+Vec, Map = std.collections
+str, String = std.text
+Range = std.core
+DeclId = sema.sema_id
+TyId, TyNamed = sema.sema_ty
+SemaFault, NameFault = sema.sema_diag
+decl_at = sema.sema_def
+Checker = sema.sema_check
+Inst, InstEdge, subst, subst_list = sema.sema_inst
+has_var, zip, owner_of = sema.sema_inst
+enter_struct_tvars, member_type, nowhere = sema.sema_member
+
+// HOW DEEP A CHAIN OF INSTANTIATIONS MAY GO before sema calls it
+// divergence, and it is the bootstrapper's number on purpose. The two
+// implementations have to agree about which programs are legal, and a
+// budget is exactly the kind of knob that would make them disagree on
+// nothing else. `bootstrap/sema.py`'s INSTANTIATION_DEPTH_BUDGET is 24;
+// so is this.
+//
+// A bad program fails the build. It never hangs and it never eats the
+// machine.
+DEPTH_BUDGET: usize = 24
+
+// One instantiation on the chain. `size` is the whole reason a frame is
+// kept rather than counted: blame is decided by comparing it with the
+// frame below.
+Frame = {
+    name: str,
+    span: Span,
+    size: usize,
+}
+
+// The walk's own state, threaded rather than global.
+//
+// `visited` is a `Map` and not a scan: the roots number in the thousands
+// for a real program, and a linear membership test would make this walk
+// quadratic in the size of the source for no reason.
+Walk = {
+    frames :: Vec<Frame>,
+    visited :: Map<str, bool>,
+    // ONE DIAGNOSTIC. Divergence is one mistake however many chains run
+    // through it, and a walk that reported per chain would print the
+    // same cycle once per entry into it.
+    done :: bool = false,
+}
+
+Walk* = (a: Alloc) Walk {
+    Walk(frames: a.Vec<Frame>(), visited: a.Map<str, bool>())
+}
+
+// ---------------------------------------------------------------------
+// the rule
+// ---------------------------------------------------------------------
+
+// Every instantiation chain the program starts, walked to the budget.
+//
+// Run after the whole program is checked, because that is when the edges
+// exist: an edge is recorded where a call RESOLVES, and the chain a call
+// belongs to is not knowable until every body has been walked.
+check_depth* = (c :: Checker) Res<(), AllocError> {
+    w ::= c.alloc.Walk();
+    fn_roots(c, w).try();
+    type_roots(c, w).try();
+    Ok(());
+}
+
+// ---------------------------------------------------------------------
+// functions
+// ---------------------------------------------------------------------
+
+// A root is a call that already knows what it instantiates: no type
+// parameter of the caller reaches its arguments.
+fn_roots = (c :: Checker, w :: Walk) Res<(), AllocError> {
+    Range(0, c.edge_count()).loop((h, i) { fn_root_at(c, i, w).try() });
+    Ok(());
+}
+
+fn_root_at = (c :: Checker, i: usize, w :: Walk) Res<(), AllocError> {
+    c.edge_at(i).match({
+        None  => Ok(()),
+        Ok(e) => root_if_settled(c, e, w),
+    })
+}
+
+root_if_settled = (c :: Checker, e: InstEdge, w :: Walk)
+                  Res<(), AllocError> {
+    settled(c, e.args).match({
+        false => Ok(()),
+        true  => enter(c, e.to_name, e.span, e.to_owner, e.to_tvars, e.args, w),
+    })
+}
+
+// One instantiation: push its frame, refuse if the chain is now too
+// deep, otherwise follow every call the callee's body makes.
+enter = (c :: Checker, name: str, span: Span, owner: str,
+         tvars: Vec<TyId>, args: Vec<TyId>, w :: Walk)
+        Res<(), AllocError> {
+    w.done.match({
+        true  => Ok(()),
+        false => enter_now(c, name, span, owner, tvars, args, w),
+    })
+}
+
+enter_now = (c :: Checker, name: str, span: Span, owner: str,
+             tvars: Vec<TyId>, args: Vec<TyId>, w :: Walk)
+            Res<(), AllocError> {
+    w.frames.add(Frame(name: name, span: span,
+                       size: args_size(c, args))).try();
+    over_budget(w).match({
+        true  => blame(c, w),
+        false => expand(c, owner, tvars, args, w),
+    }).try();
+    w.frames.take(w.frames.len - 1);
+    Ok(());
+}
+
+over_budget = (w: Walk) bool { w.frames.len > DEPTH_BUDGET }
+
+// The callee's own calls, with its type parameters bound to what this
+// instantiation gave them. Visited once per (declaration, arguments):
+// the same instantiation reached twice is the same subtree.
+expand = (c :: Checker, owner: str, tvars: Vec<TyId>, args: Vec<TyId>,
+          w :: Walk) Res<(), AllocError> {
+    key = node_key(c, owner, args).try();
+    w.visited.get(key).match({
+        Ok(_) => Ok(()),
+        None  => expand_fresh(c, owner, tvars, args, key, w),
+    })
+}
+
+expand_fresh = (c :: Checker, owner: str, tvars: Vec<TyId>,
+                args: Vec<TyId>, key: str, w :: Walk)
+               Res<(), AllocError> {
+    w.visited.set(key, true).try();
+    inst ::= c.alloc.Inst();
+    zip(c, tvars, args, inst).try();
+    Range(0, c.edge_count()).loop((h, i) {
+        out_edge(c, owner, i, inst, w).try();
+    });
+    Ok(());
+}
+
+out_edge = (c :: Checker, owner: str, i: usize, inst: Inst, w :: Walk)
+           Res<(), AllocError> {
+    c.edge_at(i).match({
+        None  => Ok(()),
+        Ok(e) => follow(c, owner, e, inst, w),
+    })
+}
+
+// Only a call inside THIS body, and only one that threads a type
+// parameter through. A call with settled arguments is a root of its own
+// and is walked there — following it here would re-derive the whole
+// monomorphised program at every node.
+follow = (c :: Checker, owner: str, e: InstEdge, inst: Inst, w :: Walk)
+         Res<(), AllocError> {
+    (e.from_owner.eq(owner) && (settled(c, e.args) == false)).match({
+        false => Ok(()),
+        true  => follow_subst(c, e, inst, w),
+    })
+}
+
+// A parameter the substitution did not reach leaves a `Var` behind, and
+// the chain stops there rather than guessing what it stood for. A guess
+// would be a diagnostic about a program nobody wrote.
+follow_subst = (c :: Checker, e: InstEdge, inst: Inst, w :: Walk)
+               Res<(), AllocError> {
+    args ::= c.alloc.Vec<TyId>();
+    subst_list(c, e.args, inst, args).try();
+    settled(c, args).match({
+        false => Ok(()),
+        true  => enter(c, e.to_name, e.span, e.to_owner, e.to_tvars, args, w),
+    })
+}
+
+// ---------------------------------------------------------------------
+// types
+// ---------------------------------------------------------------------
+
+// THE SAME RULE FOR A TYPE, and it needs no call at all. `Tree<T>` with
+// a field `child: Tree<Vec<T>>` needs `Tree<Vec<i32>>` to lay out
+// `Tree<i32>`, and so on down; no value of any of them is ever
+// constructed, because naming the type in a signature is already enough
+// to require its layout.
+//
+// THE ROOTS ARE READ OUT OF THE TYPE STORE. A generic struct matters
+// here only once something applies it to settled arguments, and every
+// such application is already interned — `Tree<i32>` is in the store
+// because `root_value` takes one. So there is no second pass over the
+// declarations to write, and a struct nothing ever names costs nothing.
+type_roots = (c :: Checker, w :: Walk) Res<(), AllocError> {
+    n = c.types.count_of().to_usize();
+    Range(0, n).loop((h, i) { type_root_at(c, i, w).try() });
+    Ok(());
+}
+
+type_root_at = (c :: Checker, i: usize, w :: Walk) Res<(), AllocError> {
+    c.types.kind_at(i).match({
+        Named(n) => type_root(c, n, w),
+        _        => Ok(()),
+    })
+}
+
+type_root = (c :: Checker, n: TyNamed, w :: Walk) Res<(), AllocError> {
+    ((n.args.len > 0) && settled(c, n.args)).match({
+        false => Ok(()),
+        true  => enter_type(c, n.name, nowhere(), n.decl, n.args, w),
+    })
+}
+
+// One applied type: push its frame, refuse past the budget, otherwise
+// expand the fields.
+enter_type = (c :: Checker, name: str, span: Span, id: DeclId,
+              args: Vec<TyId>, w :: Walk) Res<(), AllocError> {
+    w.done.match({
+        true  => Ok(()),
+        false => enter_type_now(c, name, span, id, args, w),
+    })
+}
+
+enter_type_now = (c :: Checker, name: str, span: Span, id: DeclId,
+                  args: Vec<TyId>, w :: Walk) Res<(), AllocError> {
+    w.frames.add(Frame(name: name, span: span,
+                       size: args_size(c, args))).try();
+    over_budget(w).match({
+        true  => blame(c, w),
+        false => expand_type(c, id, args, w),
+    }).try();
+    w.frames.take(w.frames.len - 1);
+    Ok(());
+}
+
+expand_type = (c :: Checker, id: DeclId, args: Vec<TyId>, w :: Walk)
+              Res<(), AllocError> {
+    decl_at(c.tree, id).match({
+        None  => Ok(()),
+        Ok(d) => expand_decl(c, d, id, args, w),
+    })
+}
+
+expand_decl = (c :: Checker, d: Decl, id: DeclId, args: Vec<TyId>,
+               w :: Walk) Res<(), AllocError> {
+    d.kind.match({
+        Struct(s) => expand_struct(c, s, id, args, w),
+        _         => Ok(()),
+    })
+}
+
+expand_struct = (c :: Checker, s: Struct, id: DeclId, args: Vec<TyId>,
+                 w :: Walk) Res<(), AllocError> {
+    mi = id.module.to_usize();
+    owner = owner_of(c, mi, s.name.text).try();
+    key = node_key(c, owner, args).try();
+    w.visited.get(key).match({
+        Ok(_) => Ok(()),
+        None  => expand_fields(c, s, mi, args, key, w),
+    })
+}
+
+// The type parameters are pushed exactly as `struct_members` pushes
+// them, because a field's written type resolves in the declaration that
+// binds its names: `child: Tree<Vec<T>>` reads `T` as this struct's own
+// parameter or it reads it as an undefined name.
+expand_fields = (c :: Checker, s: Struct, mi: usize, args: Vec<TyId>,
+                 key: str, w :: Walk) Res<(), AllocError> {
+    w.visited.set(key, true).try();
+    poison = c.types.unknown().try();
+    inst ::= c.alloc.Inst();
+    tmark = c.tvar_mark();
+    enter_struct_tvars(c, s, mi).try();
+    struct_inst(c, s, mi, args, inst).try();
+    s.members.loop((h, m) { field_edge(c, m, mi, poison, inst, w).try() });
+    c.release_tvars(tmark).try();
+    Ok(());
+}
+
+struct_inst = (c :: Checker, s: Struct, mi: usize, args: Vec<TyId>,
+               inst :: Inst) Res<(), AllocError> {
+    owner = owner_of(c, mi, s.name.text).try();
+    vars ::= c.alloc.Vec<TyId>();
+    s.tparams.loop((h, tp) {
+        vars.add(c.types.var(tp.name.text, owner).try()).try();
+    });
+    zip(c, vars, args, inst).try();
+    Ok(());
+}
+
+// Only STORAGE widens a layout. A member that is a function or a
+// constant is not laid out inside the struct, so it cannot be the reason
+// the layout fails to terminate.
+field_edge = (c :: Checker, m: Member, mi: usize, poison: TyId, inst: Inst,
+              w :: Walk) Res<(), AllocError> {
+    m.kind.match({
+        Field(_) => field_target(c, m, mi, poison, inst, w),
+        _        => Ok(()),
+    })
+}
+
+field_target = (c :: Checker, m: Member, mi: usize, poison: TyId,
+                inst: Inst, w :: Walk) Res<(), AllocError> {
+    declared = member_type(c, m, mi, poison).try();
+    applied = subst(c, declared, inst).try();
+    c.types.at(applied).match({
+        Named(n) => field_step(c, n, m.span, w),
+        _        => Ok(()),
+    })
+}
+
+field_step = (c :: Checker, n: TyNamed, span: Span, w :: Walk)
+             Res<(), AllocError> {
+    ((n.args.len > 0) && settled(c, n.args)).match({
+        false => Ok(()),
+        true  => enter_type(c, n.name, span, n.decl, n.args, w),
+    })
+}
+
+// ---------------------------------------------------------------------
+// blame
+// ---------------------------------------------------------------------
+
+// THE INNERMOST FRAME THAT WIDENED, and not whichever frame happened to
+// hit the ceiling. That is what makes the mutual case point at
+// `pong<Vec<T>>` — the call that grows — rather than at `ping<T>`, which
+// forwards what it was given.
+//
+// The fallback is the deepest frame, which is what a chain that reached
+// the budget without ever widening deserves: nothing grew, so no call is
+// more at fault than the last one.
+blame = (c :: Checker, w :: Walk) Res<(), AllocError> {
+    w.done = true;
+    w.frames.get(blamed(w)).match({
+        None  => Ok(()),
+        Ok(f) => c.report(f.span.file, f.span,
+                          SemaFault.InstantiationDepth(NameFault(name: f.name))),
+    })
+}
+
+// Scanned from the top down, so the first hit is the DEEPEST widening
+// frame. Index 0 is never a candidate: a root has no caller to have
+// outgrown.
+blamed = (w: Walk) usize {
+    n = w.frames.len;
+    Range(1, n).find((i) { widens(w, n - i) }).match({
+        Ok(i) => n - i,
+        None  => n - 1,
+    })
+}
+
+widens = (w: Walk, i: usize) bool {
+    frame_size(w, i) > frame_size(w, i - 1)
+}
+
+frame_size = (w: Walk, i: usize) usize {
+    w.frames.get(i).match({ Ok(f) => f.size, None => 0 })
+}
+
+// ---------------------------------------------------------------------
+// the two questions asked of a type argument list
+// ---------------------------------------------------------------------
+
+// Does this list still mention a type parameter nobody has substituted?
+// A chain is only followed once its arguments are settled, because an
+// unsettled one names no particular instantiation.
+settled = (c: Checker, args: Vec<TyId>) bool {
+    Range(0, args.len).find((i) {
+        args.get(i).match({ Ok(t) => has_var(c, t), None => false })
+    }).match({ Ok(_) => false, None => true })
+}
+
+// STRUCTURAL SIZE — the growth signal. `Vec<i32>` counts more than
+// `i32`, and that inequality is the whole of what "widens" means.
+args_size = (c: Checker, args: Vec<TyId>) usize { list_size(c, args, 0) }
+
+list_size = (c: Checker, list: Vec<TyId>, i: usize) usize {
+    (i < list.len).match({
+        false => 0,
+        true  => item_size(c, list, i) + list_size(c, list, i + 1),
+    })
+}
+
+item_size = (c: Checker, list: Vec<TyId>, i: usize) usize {
+    list.get(i).match({ Ok(t) => ty_size(c, t), None => 0 })
+}
+
+ty_size = (c: Checker, t: TyId) usize {
+    c.types.at(t).match({
+        Named(n) => 1 + args_size(c, n.args),
+        Res(r)   => 1 + ty_size(c, r.value) + ty_size(c, r.error),
+        Fn(f)    => 1 + args_size(c, f.params) + ty_size(c, f.ret),
+        Union(u) => 1 + args_size(c, u.members),
+        _        => 1,
+    })
+}
+
+// A node's identity: which declaration, at which arguments. The store's
+// own key is used for each argument because it is already canonical —
+// two spellings of one type intern to one id and so to one key.
+node_key = (c :: Checker, owner: str, args: Vec<TyId>)
+           Res<str, AllocError> {
+    out ::= c.alloc.String().try();
+    out.add_bytes(owner).try();
+    Range(0, args.len).loop((h, i) { key_part(c, args, i, out).try() });
+    Ok(out.view());
+}
+
+key_part = (c :: Checker, args: Vec<TyId>, i: usize, out :: String)
+           Res<(), AllocError> {
+    args.get(i).match({
+        None  => Ok(()),
+        Ok(t) => add_key(c, t, out),
+    })
+}
+
+add_key = (c :: Checker, t: TyId, out :: String) Res<(), AllocError> {
+    out.add_bytes(",").try();
+    out.add_bytes(c.types.key_at(t)).try();
+    Ok(());
+}
