@@ -80,14 +80,40 @@ travelled_of = (c :: Checker, name: str, rty: TyId, out :: Vec<Cand>)
 // ambiguity.
 keep_travelled = (c :: Checker, k: Cand, rty: TyId, out :: Vec<Cand>)
                  Res<(), AllocError> {
-    (takes_receiver(k, rty) && (has_cand(out, k.id) == false)).match({
+    takes = takes_receiver(c, k, rty).try();
+    (takes && (has_cand(out, k.id) == false)).match({
         true  => out.add(k),
         false => Ok(()),
     })
 }
 
-takes_receiver = (k: Cand, rty: TyId) bool {
-    k.params.get(0).match({ Ok(t) => t.eq(rty), None => false })
+// AN IMPL OF THE DECLARED BOUND IS THE RECEIVER'S TYPE, and the gate
+// read `t.eq(rty)`, which says it is not.
+//
+// DESIGN.md's own first line of every program is what falls through:
+// `alloc ::= env.mem.alloc()` is an `Arena`, `Vec* = <T>(a: Alloc)
+// Vec<T>` declares an `Alloc`, and "the call surface is identical —
+// `alloc.Vec<i32>()` either way" is only true if `Arena.impl(Alloc, ..)`
+// counts here. `value_fits` already counts it for arguments one and up;
+// parameter zero was the one place that did not, so an imported name
+// worked and a travelled one did not.
+//
+// Nothing showed while every caller also imported the function — that
+// path is `cands_of` and never asks this. It shows the moment a program
+// imports the TYPE and not the function: `alloc.Parser(lexed, tree)`
+// found no candidate at all, fell through to `construct_or_fail`, and
+// was built as a nominal type of its own name with no fields — which is
+// why the diagnostic named `tree` and not `Parser`.
+//
+// `satisfies_bound` and NOT `assignable`: "an impl of it, or the same
+// type, and nothing else". A receiver may not reach a `<T>(a: T)`
+// through a type variable's leniency, because a bare parameter would
+// swallow every receiver in the program.
+takes_receiver = (c :: Checker, k: Cand, rty: TyId) Res<bool, AllocError> {
+    k.params.get(0).match({
+        None    => Ok(false),
+        Ok(t)   => satisfies_bound(c, rty, t),
+    })
 }
 
 has_cand = (out: Vec<Cand>, id: DeclId) bool {

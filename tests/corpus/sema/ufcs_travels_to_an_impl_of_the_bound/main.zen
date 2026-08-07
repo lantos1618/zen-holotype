@@ -1,0 +1,38 @@
+// A UFCS FUNCTION TRAVELS TO AN IMPL OF THE BOUND IT DECLARES, not only
+// to the exact type.
+//
+// DESIGN.md: "the candidates are the members of `x`'s type, its impls'
+// and its bounds' methods, and every exported free function whose first
+// parameter type is `x`'s type", and one paragraph later, of the very
+// call below: "the call surface is identical — `alloc.Vec<i32>()` either
+// way, because a free function whose first parameter is the type is
+// callable as a method". `env.mem.alloc()` hands back an `Arena` and
+// `Vec` declares an `Alloc`, so "is the type" has to mean what it means
+// for every other parameter — an impl of the bound counts.
+//
+// ONLY THE TYPE IS IMPORTED. `boxed` is on no import line here, so the
+// only thing that can reach it is having travelled with `Box`. That is
+// what makes this a test of the travelled pool and not of an import: a
+// caller that imported the function would resolve through `cands_of`
+// and never ask the question this pins.
+//
+// The gate is still a gate. `labelled` shares the name-and-arity shape
+// and declares a `str` first, so an `Arena` must not reach it — a pool
+// that had stopped filtering would hold both and answer with whichever
+// came first.
+
+Box = box.box
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    // the receiver is an Arena; `boxed` declares an Alloc
+    b = alloc.boxed(7);
+    println("{}", b.n);
+    println("{}", b.twice());
+
+    // the same name, reached by the receiver that DOES declare it
+    l = "abc".labelled(10);
+    println("{}", l.n);
+    Ok(0);
+}
