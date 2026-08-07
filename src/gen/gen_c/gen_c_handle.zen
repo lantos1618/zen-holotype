@@ -30,11 +30,13 @@ Checker, Ctx = sema.sema_check
 sym_member, sym_gen, sym_variant = gen.gen_name
 RES_PATH = gen.gen_name
 GenFault = gen.gen_diag
-CBackend, LocalSlot, LoopFrame = gen.gen_c.gen_c_state
+CBackend = gen.gen_c.gen_c_state
+LocalSlot, LoopFrame = gen.gen_c.gen_c_frame
 unsupported = gen.gen_c.gen_c_state
 ctype, is_unit = gen.gen_c.gen_c_type
 expr = gen.gen_c.gen_c_expr
 write_label = gen.gen_c.gen_c_loop
+unwind_to = gen.gen_c.gen_c_own
 
 // -----------------------------------------------------------------
 // the two verbs
@@ -74,9 +76,20 @@ handle_verb = (be :: CBackend, id: ExprId, c: Call, name: str,
                fr: LoopFrame, ctx: Ctx, out :: String)
               Res<(), AllocError> {
     name.eq("next").match({
-        true  => jump_to(be, "cnt", fr.cnt, out),
+        true  => leave_pass(be, fr, out),
         false => handle_break(be, id, c, name, fr, ctx, out),
     })
+}
+
+// `h.next()` LEAVES THIS ITERATION'S BLOCK. Every exit is a scope exit,
+// and a `goto` jumps OVER the closing brace the cleanup was going to be
+// written at — so this iteration's defers and drops run here instead.
+// Nothing is handed out of a pass that ends this way, so there is
+// nothing to keep.
+leave_pass = (be :: CBackend, fr: LoopFrame, out :: String)
+             Res<(), AllocError> {
+    unwind_to(be, fr.depth, "").try();
+    jump_to(be, "cnt", fr.cnt, out)
 }
 
 handle_break = (be :: CBackend, id: ExprId, c: Call, name: str,
@@ -101,7 +114,31 @@ write_break = (be :: CBackend, id: ExprId, c: Call, fr: LoopFrame,
         false => Ok(()),
         true  => write_break_value(be, c, fr, ctx),
     }).try();
+    // THE VALUE IS WRITTEN BEFORE THE CLEANUP AND THE CLEANUP BEFORE THE
+    // JUMP, and the order is the whole of it: the result lands in
+    // storage outside the loop, so it survives the drops, and the drops
+    // are written on THIS side of the label because the `goto` jumps
+    // over the braces they would otherwise have been written at.
+    unwind_to(be, fr.depth, break_keep(be, c)).try();
     jump_to(be, "brk", fr.brk, out)
+}
+
+// A binding handed OUT of the loop by `h.break(x)` is not this pass's
+// to destroy. Only a bare name can be one — anything larger has been
+// copied into the result by now.
+break_keep = (be :: CBackend, c: Call) str {
+    c.args.get(0).match({
+        None  => "",
+        Ok(a) => bare_name(be, a.value),
+    })
+}
+
+bare_name = (be :: CBackend, id: ExprId) str {
+    be.tree.expr_at(id).kind.match({
+        Name(n)  => n.text,
+        Paren(p) => bare_name(be, p.inner),
+        _        => "",
+    })
 }
 
 write_break_value = (be :: CBackend, c: Call, fr: LoopFrame, ctx: Ctx)

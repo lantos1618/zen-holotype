@@ -1,0 +1,542 @@
+// src/gen/gen_c/gen_c_scope.zen
+// `@scope` — the enclosing block, as a value.
+//
+// `gen_c_own.zen` owns what LEAVING a block does. This file owns the
+// block as a thing a program can name: `@scope` itself, `s.defer(..)`,
+// and the one closure in the language that becomes a real C function.
+//
+// A `Scope` IS A POINTER TO THE BLOCK'S RECORD, and the record holds
+// both the registered closures and their captures. That is DESIGN.md's
+// own reasoning read as a layout: a deferred closure outlives the frame
+// that wrote it — `register(@scope, env)` returns long before its
+// cleanup runs — so its captures cannot live in the caller's frame, and
+// a general escaping closure would need a heap record, which law 1
+// forbids without an `Alloc`. But the block it is registered on
+// outlives it BY CONSTRUCTION. So the block's own record is the one
+// storage that is certainly still alive when the closure runs, it is
+// correctly sized, it is freed at block exit, and no allocator takes
+// part. `defer` needs no escaping-closure machinery at all — it needs
+// the one guarantee `@scope` already makes.
+//
+// WHICH IS WHY NOTHING HERE GENERALISES. This is not escaping-closure
+// support and must not grow into it: every line below is true only
+// because the scope IS the storage.
+//
+// ⚠ THE LIFTED THUNK NEEDS NO NAME REMAPPING. See the header of
+// `gen_c_own.zen` for the whole of it: the capture record's fields
+// carry THE SAME MANGLED C NAMES the enclosing frame uses, and the
+// thunk's prologue re-declares those names as locals copied out of the
+// record — so the closure body lowers through the ordinary `lower_name`
+// path with the ordinary `LocalSlot`s, and there is no remapping layer
+// to look for.
+
+Ast, Expr, ExprKind, ExprId, BlockId, Block, Stmt, StmtKind, Bind = ast
+Decl, DeclKind, Lambda, Call, Arg, Access, Match, Arm, Span = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, Ty, Types, TyNamed = sema.sema_ty
+World, Def = sema.sema_def
+Checker, Ctx = sema.sema_check
+Emit = gen.gen_emit
+sym_local, sym_gen = gen.gen_name
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+LocalSlot = gen.gen_c.gen_c_frame
+unsupported = gen.gen_c.gen_c_state
+intern_named = gen.gen_c.gen_c_mono
+ctype, declarator, is_scope_named = gen.gen_c.gen_c_type
+Dest, block = gen.gen_c.gen_c_stmt
+write_position = gen.gen_c.gen_c_op
+
+// -----------------------------------------------------------------
+// the `Scope` type
+//
+// SEMA DOES NOT TYPE `@scope` AND THE BACKEND DOES NOT ASK IT TO. A
+// `Scope` has no representation sema's type language could give it
+// — it is the block, and a block is not a value sema mints — so the
+// FRAME is the authority here, exactly as it is for a `LoopHandle`.
+// The difference is that a `Scope` can be written down (`s: Scope`),
+// so the type has to exist: it is the ordinary named type
+// `std/core/scope.zen` declares, and this resolves it once.
+// -----------------------------------------------------------------
+
+is_scope_ref* = (be :: CBackend, id: ExprId) bool {
+    be.tree.expr_at(id).kind.match({
+        Scope => true,
+        _     => false,
+    })
+}
+
+scope_type* = (be :: CBackend, ctx: Ctx) Res<TyId, AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.defs_of(ctx.module, "Scope", found).try();
+    found.get(0).match({
+        None  => be.check.types.unknown(),
+        Ok(d) => scope_named(be, d),
+    })
+}
+
+scope_named = (be :: CBackend, d: Def) Res<TyId, AllocError> {
+    empty ::= be.alloc.Vec<TyId>();
+    intern_named(be.check, d, empty)
+}
+
+// -----------------------------------------------------------------
+// `@scope`
+// -----------------------------------------------------------------
+
+// The address of THIS block's record. The innermost open block and not
+// a search outward: "it nests, and each block gets its own", so an
+// answer from an enclosing block would be the wrong block, quietly.
+lower_scope_ref* = (be :: CBackend, id: ExprId, out :: String)
+                   Res<(), AllocError> {
+    rec = innermost_record(be);
+    (rec == 0).match({
+        true  => unsupported(be, id, "`@scope` where no block is open", out),
+        false => write_record_ref(be, rec, out),
+    })
+}
+
+innermost_record = (be :: CBackend) usize {
+    (be.block_depth() == 0).match({
+        true  => 0,
+        false => record_of(be, be.block_depth() - 1),
+    })
+}
+
+record_of = (be :: CBackend, i: usize) usize {
+    be.block_at(i).match({
+        Ok(f) => f.rec,
+        None  => 0,
+    })
+}
+
+write_record_ref = (be :: CBackend, rec: usize, out :: String)
+                   Res<(), AllocError> {
+    out.add_bytes("&").try();
+    sym_gen(out, "b", rec)
+}
+
+// -----------------------------------------------------------------
+// `s.defer(() { .. })`
+// -----------------------------------------------------------------
+
+is_defer* = (be :: CBackend, rty: TyId, name: str) bool {
+    name.eq("defer") && scope_receiver(be, rty)
+}
+
+scope_receiver = (be :: CBackend, rty: TyId) bool {
+    be.check.types.at(rty).match({
+        Named(n) => is_scope_named(n),
+        _        => false,
+    })
+}
+
+// Push a closure onto that block's stack.
+//
+// THE CAPTURES ARE COPIED HERE, AT REGISTRATION. The closure runs long
+// after this frame is gone, so the values are read where they are still
+// alive — which is what `defer_captures_at_registration` observes when a
+// later write to the binding does not reach the closure.
+lower_defer* = (be :: CBackend, id: ExprId, c: Call, a: Access, ctx: Ctx,
+                out :: String) Res<(), AllocError> {
+    recv ::= be.alloc.String().try();
+    scope_operand(be, a.base, ctx, recv).try();
+    c.args.get(0).match({
+        None  => unsupported(be, id, "`defer` with no closure", out),
+        Ok(g) => defer_arg(be, id, g, recv.view(), ctx, out),
+    })
+}
+
+// The receiver is lowered as an ordinary expression — `@scope` becomes
+// `&zg_b1` and a `Scope` parameter is already the pointer — so both
+// spellings arrive here as the same C value.
+scope_operand = (be :: CBackend, base: ExprId, ctx: Ctx, out :: String)
+                Res<(), AllocError> {
+    is_scope_ref(be, base).match({
+        true  => lower_scope_ref(be, base, out),
+        false => write_scope_value(be, base, ctx, out),
+    })
+}
+
+write_scope_value = (be :: CBackend, base: ExprId, ctx: Ctx, out :: String)
+                    Res<(), AllocError> {
+    slot_name(be, base).match({
+        None    => unsupported(be, base, "a `Scope` reached through something other than a binding", out),
+        Ok(nm)  => write_scope_local(be, nm, out),
+    })
+}
+
+slot_name = (be :: CBackend, id: ExprId) Res<str> {
+    be.tree.expr_at(id).kind.match({
+        Name(n)  => Ok(n.text),
+        Paren(p) => slot_name(be, p.inner),
+        _        => None,
+    })
+}
+
+write_scope_local = (be :: CBackend, name: str, out :: String)
+                    Res<(), AllocError> {
+    be.slot_of(name).match({
+        None    => Ok(()),
+        Ok(s)   => sym_local(out, name, s.index),
+    })
+}
+
+// `defer` TAKES A CLOSURE WRITTEN AT THE CALL SITE. A function-typed
+// name handed to it would have no captures to copy and no body to lift,
+// so it is refused by name rather than lowered into something that
+// looks like it worked.
+defer_arg = (be :: CBackend, id: ExprId, g: Arg, recv: str, ctx: Ctx,
+             out :: String) Res<(), AllocError> {
+    be.tree.expr_at(g.value).kind.match({
+        Lambda(l) => defer_lambda(be, id, l, recv, ctx, out),
+        _         => unsupported(be, id, "`defer` given something other than a closure written at the call site", out),
+    })
+}
+
+defer_lambda = (be :: CBackend, id: ExprId, l: Lambda, recv: str, ctx: Ctx,
+                out :: String) Res<(), AllocError> {
+    (l.params.len > 0).match({
+        true  => unsupported(be, id, "a deferred closure that takes parameters", out),
+        false => register_closure(be, id, l, recv, ctx, out),
+    })
+}
+
+register_closure = (be :: CBackend, id: ExprId, l: Lambda, recv: str,
+                    ctx: Ctx, out :: String) Res<(), AllocError> {
+    be.need_scope();
+    caps ::= be.alloc.Vec<LocalSlot>();
+    captures(be, l.body, caps).try();
+    n = be.next_defer();
+    write_env_type(be, n, caps).try();
+    write_thunk(be, n, l, caps, ctx).try();
+    write_registration(be, id, n, caps, recv).try();
+    out.add_bytes("0")
+}
+
+// -----------------------------------------------------------------
+// the capture record
+// -----------------------------------------------------------------
+
+// The record's field names ARE the frame's own mangled local names,
+// which is what lets the thunk's prologue put the body back exactly
+// where it was written.
+write_env_type = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
+                 Res<(), AllocError> {
+    (caps.len == 0).match({
+        true  => Ok(()),
+        false => write_env_struct(be, n, caps),
+    })
+}
+
+write_env_struct = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
+                   Res<(), AllocError> {
+    text ::= be.alloc.String().try();
+    text.add_bytes("typedef struct ").try();
+    env_name(be, n, text).try();
+    text.add_bytes(" {\n").try();
+    caps.loop((h, s) { write_env_field(be, s, text).try() });
+    text.add_bytes("} ").try();
+    env_name(be, n, text).try();
+    text.add_bytes(";").try();
+    be.add_defer_env(text, n)
+}
+
+write_env_field = (be :: CBackend, s: LocalSlot, text :: String)
+                  Res<(), AllocError> {
+    text.add_bytes("    ").try();
+    cname ::= be.alloc.String().try();
+    sym_local(cname, s.name, s.index).try();
+    s.by_ref.match({
+        false => declarator(be, s.ty, cname.view(), text),
+        true  => ref_field(be, s.ty, cname.view(), text),
+    }).try();
+    text.add_bytes(";\n").try();
+    Ok(());
+}
+
+// A `::` binding IS an address everywhere else, so what the record
+// copies is the address and the prologue puts back a pointer of the
+// same name — which is what keeps `(*p)` reading the same storage.
+ref_field = (be :: CBackend, ty: TyId, name: str, text :: String)
+            Res<(), AllocError> {
+    ctype(be, ty, text).try();
+    text.add_bytes(" *").try();
+    text.add_bytes(name).try();
+    Ok(());
+}
+
+env_name = (be :: CBackend, n: usize, out :: String) Res<(), AllocError> {
+    sym_gen(out, "env", n)
+}
+
+// -----------------------------------------------------------------
+// the thunk
+// -----------------------------------------------------------------
+
+// THE ONE CLOSURE THAT BECOMES A REAL FUNCTION. Every other closure in
+// this language is inlined at its call site, and this one cannot be:
+// its call site is the block's closing brace, which may be any of four
+// exits. It is still not the escaping closure the design forbids — its
+// environment is the block's own storage, handed to it as a `void *`,
+// so nothing is boxed and nothing is allocated.
+write_thunk = (be :: CBackend, n: usize, l: Lambda, caps: Vec<LocalSlot>,
+               ctx: Ctx) Res<(), AllocError> {
+    proto ::= be.alloc.String().try();
+    thunk_proto(be, n, proto).try();
+    held = be.take_buf().try();
+    be.indent();
+    write_prologue(be, n, caps).try();
+    unit = be.check.types.prim("()").try();
+    block(be, l.body, ctx, unit, Dest.Discard).try();
+    text ::= be.alloc.String().try();
+    text.add_bytes(be.text()).try();
+    be.put_buf(held);
+    name ::= be.alloc.String().try();
+    sym_gen(name, "d", n).try();
+    be.add_function(name, proto, text)
+}
+
+thunk_proto = (be :: CBackend, n: usize, out :: String)
+              Res<(), AllocError> {
+    out.add_bytes("static void ").try();
+    sym_gen(out, "d", n).try();
+    out.add_bytes("(void *zg_p)").try();
+    Ok(());
+}
+
+// The prologue is the whole of the remapping: every captured name is
+// re-declared here, with the SAME C name it had in the enclosing frame,
+// initialised from the record. The body below it then lowers unchanged.
+write_prologue = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
+                 Res<(), AllocError> {
+    (caps.len == 0).match({
+        true  => be.writeln("(void)zg_p;"),
+        false => write_unpack(be, n, caps),
+    })
+}
+
+write_unpack = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
+               Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    env_name(be, n, line).try();
+    line.add_bytes(" *zg_e = (").try();
+    env_name(be, n, line).try();
+    line.add_bytes(" *)zg_p;").try();
+    be.writeln(line.view()).try();
+    caps.loop((h, s) { write_unpack_one(be, s).try() });
+    Ok(());
+}
+
+write_unpack_one = (be :: CBackend, s: LocalSlot) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    cname ::= be.alloc.String().try();
+    sym_local(cname, s.name, s.index).try();
+    s.by_ref.match({
+        false => declarator(be, s.ty, cname.view(), line),
+        true  => ref_field(be, s.ty, cname.view(), line),
+    }).try();
+    line.add_bytes(" = zg_e->").try();
+    line.add_bytes(cname.view()).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view())
+}
+
+// -----------------------------------------------------------------
+// the registration
+// -----------------------------------------------------------------
+
+write_registration = (be :: CBackend, id: ExprId, n: usize,
+                      caps: Vec<LocalSlot>, recv: str)
+                     Res<(), AllocError> {
+    cell ::= be.alloc.String().try();
+    (caps.len == 0).match({
+        true  => Ok(()),
+        false => fill_record(be, n, caps, cell),
+    }).try();
+    write_defer_call(be, id, n, cell.view(), recv)
+}
+
+fill_record = (be :: CBackend, n: usize, caps: Vec<LocalSlot>,
+               cell :: String) Res<(), AllocError> {
+    sym_gen(cell, "c", be.next_tmp()).try();
+    decl ::= be.alloc.String().try();
+    env_name(be, n, decl).try();
+    decl.add_bytes(" ").try();
+    decl.add_bytes(cell.view()).try();
+    decl.add_bytes(";").try();
+    be.writeln(decl.view()).try();
+    caps.loop((h, s) { copy_capture(be, s, cell.view()).try() });
+    Ok(());
+}
+
+copy_capture = (be :: CBackend, s: LocalSlot, cell: str)
+               Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes(cell).try();
+    line.add_bytes(".").try();
+    cname ::= be.alloc.String().try();
+    sym_local(cname, s.name, s.index).try();
+    line.add_bytes(cname.view()).try();
+    line.add_bytes(" = ").try();
+    line.add_bytes(cname.view()).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view())
+}
+
+// The position travels with the registration because the two things
+// that can go wrong here — too many closures on one block, a record
+// wider than a slot — are discovered when this runs, and a trap with
+// no position is a trap nobody can fix.
+write_defer_call = (be :: CBackend, id: ExprId, n: usize, cell: str,
+                    recv: str) Res<(), AllocError> {
+    node = be.tree.expr_at(id);
+    line ::= be.alloc.String().try();
+    line.add_bytes("zg_defer(").try();
+    line.add_bytes(recv).try();
+    line.add_bytes(", ").try();
+    sym_gen(line, "d", n).try();
+    write_defer_env_args(be, cell, line).try();
+    line.add_bytes(", ").try();
+    write_position(be, node.span.file, node.span, line).try();
+    line.add_bytes(");").try();
+    be.writeln(line.view())
+}
+
+write_defer_env_args = (be :: CBackend, cell: str, line :: String)
+                       Res<(), AllocError> {
+    (cell.len == 0).match({
+        true  => line.add_bytes(", 0, 0"),
+        false => write_env_args(cell, line),
+    })
+}
+
+write_env_args = (cell: str, line :: String) Res<(), AllocError> {
+    line.add_bytes(", &").try();
+    line.add_bytes(cell).try();
+    line.add_bytes(", sizeof ").try();
+    line.add_bytes(cell).try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// what a closure captures
+//
+// The frame values it reads, in source order, deduplicated.
+//
+// A NAME THE CLOSURE BINDS FOR ITSELF IS NOT A CAPTURE, and this does
+// not track that: it OVER-captures instead. A spare word in the record
+// costs a word; a missing one is a dangling read. And over-capturing
+// cannot collide — a binding written inside the body takes its number
+// from the same function-wide counter, so its C name differs from the
+// prologue's copy by construction.
+//
+// UNLIKE `writes_scope`, THIS DESCENDS INTO NESTED BLOCKS AND LAMBDAS.
+// A name read two blocks down is still read from this frame, and the
+// frame is what will be gone.
+// -----------------------------------------------------------------
+
+captures* = (be :: CBackend, id: BlockId, out :: Vec<LocalSlot>)
+            Res<(), AllocError> {
+    blk = be.tree.block_at(id);
+    blk.stmts.loop((h, s) { stmt_captures(be, s, out).try() });
+    blk.value.match({
+        Ok(e) => expr_captures(be, e, out),
+        None  => Ok(()),
+    })
+}
+
+stmt_captures = (be :: CBackend, s: Stmt, out :: Vec<LocalSlot>)
+                Res<(), AllocError> {
+    s.kind.match({
+        Expr(e)  => expr_captures(be, e.expr, out),
+        Bind(b)  => bind_captures(be, b, out),
+        Block(k) => captures(be, k, out),
+        Decl(_)  => Ok(()),
+    })
+}
+
+bind_captures = (be :: CBackend, b: Bind, out :: Vec<LocalSlot>)
+                Res<(), AllocError> {
+    expr_captures(be, b.value, out).try();
+    expr_captures(be, b.target, out)
+}
+
+expr_captures = (be :: CBackend, id: ExprId, out :: Vec<LocalSlot>)
+                Res<(), AllocError> {
+    be.tree.expr_at(id).kind.match({
+        Name(n)       => keep_capture(be, n.text, out),
+        Paren(p)      => expr_captures(be, p.inner, out),
+        Unary(u)      => expr_captures(be, u.operand, out),
+        Binary(b)     => pair_captures(be, b.lhs, b.rhs, out),
+        Access(a)     => expr_captures(be, a.base, out),
+        Index(x)      => pair_captures(be, x.base, x.index, out),
+        Try(t)        => expr_captures(be, t.operand, out),
+        Consume(x)    => expr_captures(be, x.operand, out),
+        Block(k)      => captures(be, k, out),
+        Lambda(l)     => captures(be, l.body, out),
+        Call(c)       => call_captures(be, c, out),
+        Match(m)      => match_captures(be, m, out),
+        Array(a)      => elem_captures(be, a.elems, out),
+        FixedArray(a) => elem_captures(be, a.elems, out),
+        _             => Ok(()),
+    })
+}
+
+pair_captures = (be :: CBackend, a: ExprId, b: ExprId,
+                 out :: Vec<LocalSlot>) Res<(), AllocError> {
+    expr_captures(be, a, out).try();
+    expr_captures(be, b, out)
+}
+
+call_captures = (be :: CBackend, c: Call, out :: Vec<LocalSlot>)
+                Res<(), AllocError> {
+    expr_captures(be, c.callee, out).try();
+    c.args.loop((h, a) { expr_captures(be, a.value, out).try() });
+    Ok(());
+}
+
+match_captures = (be :: CBackend, m: Match, out :: Vec<LocalSlot>)
+                 Res<(), AllocError> {
+    expr_captures(be, m.scrutinee, out).try();
+    m.arms.loop((h, a) { expr_captures(be, a.body, out).try() });
+    Ok(());
+}
+
+elem_captures = (be :: CBackend, elems: Vec<ExprId>, out :: Vec<LocalSlot>)
+                Res<(), AllocError> {
+    elems.loop((h, e) { expr_captures(be, e, out).try() });
+    Ok(());
+}
+
+// A HANDLE AND A CLOSURE ARE NOT VALUES and cannot be captured: `h` is
+// a pair of labels and a lambda is a body to inline, and neither has
+// bytes a record could hold. A `defer` that names one is left to the
+// path that knows what it is, which will report it there.
+keep_capture = (be :: CBackend, name: str, out :: Vec<LocalSlot>)
+               Res<(), AllocError> {
+    be.slot_of(name).match({
+        None    => Ok(()),
+        Ok(s)   => keep_value_slot(be, s, out),
+    })
+}
+
+keep_value_slot = (be :: CBackend, s: LocalSlot, out :: Vec<LocalSlot>)
+                  Res<(), AllocError> {
+    ((s.handle == 0) && (s.closure == 0) && (held(out, s) == false)).match({
+        false => Ok(()),
+        true  => out.add(s),
+    })
+}
+
+held = (out: Vec<LocalSlot>, s: LocalSlot) bool {
+    Range(0, out.len).find((i) {
+        out.get(i).match({
+            Ok(k) => k.name.eq(s.name) && (k.index == s.index),
+            None  => false,
+        })
+    }).match({ Ok(_) => true, None => false })
+}

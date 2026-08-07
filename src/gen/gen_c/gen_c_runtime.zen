@@ -180,6 +180,149 @@ write_print = (out :: Emit) Res<(), AllocError> {
 }
 
 // -----------------------------------------------------------------
+// `@scope` — the block's own defer stack
+//
+// A `Scope` is a POINTER to the enclosing block's record, and the
+// record holds the deferred closures AND their captures. The closure
+// outlives the frame that registered it, and the block outlives the
+// closure by construction, so the block is the only storage certainly
+// still alive — which is exactly why `defer` needs no allocator and no
+// escaping-closure machinery.
+//
+// A SLOT'S ENV IS A UNION OVER EVERY CAPTURE RECORD IN THE PROGRAM, so
+// it is exactly as large and as aligned as the largest one: no guessed
+// byte count, and nothing to overflow. HOW MANY closures one block may
+// carry is the one thing whole-program analysis cannot answer — a
+// `defer` in a loop is unbounded — so that bound is a constant, and
+// exceeding it traps at the registration rather than corrupting the
+// frame.
+//
+// EMITTED AFTER THE TYPES because a capture record names them, and
+// before the prototypes because a `Scope` parameter is spelled
+// `zg_scope *`. The forward declaration in the floor is what lets that
+// spelling appear anywhere at all.
+// -----------------------------------------------------------------
+
+// The name alone, before anything can spell `zg_scope *`. It is its own
+// emission and not part of `emit_floor` because the floor is what EVERY
+// program has, and a program that never defers must not carry this.
+emit_scope_floor* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    be.uses_scope().match({
+        false => Ok(()),
+        true  => write_scope_floor(out),
+    })
+}
+
+write_scope_floor = (out :: Emit) Res<(), AllocError> {
+    out.say("typedef struct zg_scope zg_scope;").try();
+    out.say("#define ZG_DEFER_MAX 32").try();
+    out.line().try();
+    Ok(());
+}
+
+emit_scope* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    be.uses_scope().match({
+        false => Ok(()),
+        true  => write_scope(be, out),
+    })
+}
+
+write_scope = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    comment(out, "@scope: the block's own defer stack").try();
+    write_defer_envs(be, out).try();
+    write_defer_union(be, out).try();
+    write_defer_runtime(out).try();
+    Ok(());
+}
+
+write_defer_envs = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    Range(0, be.defer_env_count()).loop((h, i) {
+        be.defer_env_at(i).match({
+            None    => Ok(()),
+            Ok(t)   => write_env_line(out, t),
+        }).try();
+    });
+    Ok(());
+}
+
+write_env_line = (out :: Emit, text: String) Res<(), AllocError> {
+    out.bytes(text.view()).try();
+    out.line().try();
+    Ok(());
+}
+
+// A program that defers but captures nothing still needs a union with
+// a member, so the `char` is not padding: it is what keeps the type
+// legal when it is the only member.
+write_defer_union = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    out.say("typedef union zg_defer_env {").try();
+    out.say("    char zg_none;").try();
+    Range(0, be.defer_env_count()).loop((h, i) {
+        write_union_member(out, be.defer_env_id(i)).try();
+    });
+    out.say("} zg_defer_env;").try();
+    out.line().try();
+    Ok(());
+}
+
+write_union_member = (out :: Emit, n: usize) Res<(), AllocError> {
+    out.bytes("    zg_env").try();
+    out.number(n).try();
+    out.bytes(" zg_u").try();
+    out.number(n).try();
+    out.say(";").try();
+    Ok(());
+}
+
+write_defer_runtime = (out :: Emit) Res<(), AllocError> {
+    out.say("typedef struct zg_defer_slot {").try();
+    out.say("    void (*zg_fn)(void *);").try();
+    out.say("    zg_defer_env zg_env;").try();
+    out.say("} zg_defer_slot;").try();
+    out.line().try();
+    out.say("struct zg_scope {").try();
+    out.say("    int zg_n;").try();
+    out.say("    zg_defer_slot zg_slot[ZG_DEFER_MAX];").try();
+    out.say("};").try();
+    out.line().try();
+    write_defer_push(out).try();
+    write_defer_run(out).try();
+    Ok(());
+}
+
+write_defer_push = (out :: Emit) Res<(), AllocError> {
+    out.say("static void zg_defer(zg_scope *s, void (*fn)(void *), const void *env,").try();
+    out.say("                     size_t n, const char *file, unsigned long line,").try();
+    out.say("                     unsigned long col) {").try();
+    out.say("    if (s->zg_n >= ZG_DEFER_MAX)").try();
+    out.say("        zg_trap(file, line, col, \"too many deferred closures on one block\");").try();
+    out.say("    s->zg_slot[s->zg_n].zg_fn = fn;").try();
+    out.say("    if (n) memcpy(&s->zg_slot[s->zg_n].zg_env, env, n);").try();
+    out.say("    s->zg_n++;").try();
+    out.say("}").try();
+    out.line().try();
+    Ok(());
+}
+
+// LIFO, and BEFORE the block's drops. The slot is copied out and the
+// count lowered before the call, so a closure that registers another
+// one on the same block reuses the slot it is standing in without
+// overwriting its own captures — and running an already-run scope is a
+// no-op, which is what makes a non-local exit followed by the closing
+// brace safe.
+write_defer_run = (out :: Emit) Res<(), AllocError> {
+    out.say("static void zg_scope_run(zg_scope *s) {").try();
+    out.say("    while (s->zg_n > 0) {").try();
+    out.say("        zg_defer_slot slot = s->zg_slot[s->zg_n - 1];").try();
+    out.say("        s->zg_n--;").try();
+    out.say("        slot.zg_fn(&slot.zg_env);").try();
+    out.say("    }").try();
+    out.say("}").try();
+    out.line().try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
 // the filesystem floor
 //
 // `Fs`'s members have no Zen body for the same reason `Console`'s have

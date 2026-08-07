@@ -65,6 +65,7 @@ write_qname = gen.gen_c.gen_c_layout
 Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
 expr, res_type_of, ty_of = gen.gen_c.gen_c_expr
 write_position = gen.gen_c.gen_c_op
+unwind_to = gen.gen_c.gen_c_own
 
 // -----------------------------------------------------------------
 // match
@@ -552,6 +553,13 @@ write_guard = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
     be.write(tag.view()).try();
     be.writeln(") {").try();
     be.indent();
+    // EVERY EARLY EXIT IS A SCOPE EXIT, and `.try()` is the common one:
+    // it is "a jump out through a frame boundary", so every block from
+    // here out to the function's own runs its defers and its drops
+    // first. Depth 0 is the whole frame. The error is carried in `tmp`,
+    // which is a temporary and is never tracked, so there is nothing
+    // here the returned value could be aliasing.
+    unwind_to(be, 0, "").try();
     propagate(be, node, r, tmp, ctx).try();
     be.dedent();
     be.writeln("}").try();
