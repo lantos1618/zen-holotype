@@ -63,6 +63,7 @@ call_ret_type = gen.gen_c.gen_c_infer
 lower_unary, lower_binary = gen.gen_c.gen_c_op
 lower_index, index_type = gen.gen_c.gen_c_index
 is_ptr_member, ptr_member_type = gen.gen_c.gen_c_ptr
+field_of = gen.gen_c.gen_c_cap
 inline_result_type = gen.gen_c.gen_c_settle
 needs_fat, write_fat_value = gen.gen_c.gen_c_fat
 
@@ -133,7 +134,7 @@ call_spills = (be: CBackend, c: Call) bool {
 // about `T`, and this is where it becomes the `i32` this emission is at.
 ty_of* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
          Res<TyId, AllocError> {
-    local_answer(be, id).match({
+    local_answer(be, id).try().match({
         Ok(t) => Ok(t),
         None  => derived_answer(be, id, ctx, want),
     })
@@ -157,10 +158,37 @@ derived_answer = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
 // A HANDLE AND A CLOSURE ARE NOT VALUES and have no type to give: `h`
 // is a pair of labels and a lambda is a body to inline, so both are
 // left to the paths that know what they are.
-local_answer = (be :: CBackend, id: ExprId) Res<TyId> {
+//
+// AND A FIELD READ FROM ONE IS THE SAME RULE ONE NODE UP. `e.key`
+// inside `Map<K, V>.confirms` is derived from `e`'s type and the
+// declaration, both of which the frame holds — so the memo has nothing
+// to add and one poisoned entry to give. Every instantiation of
+// `confirms` in this compiler called `str.eq`, including the ones whose
+// key is an `ExprId`, and swapping which map was built first swapped
+// which `eq` all of them called.
+local_answer = (be :: CBackend, id: ExprId) Res<Res<TyId>, AllocError> {
     be.tree.expr_at(id).kind.match({
-        Name(n) => named_slot(be, n.text),
-        _       => None,
+        Name(n)   => Ok(named_slot(be, n.text)),
+        Access(a) => field_slot(be, a),
+        _         => Ok(None),
+    })
+}
+
+field_slot = (be :: CBackend, a: Access) Res<Res<TyId>, AllocError> {
+    local_answer(be, a.base).try().match({
+        None  => Ok(None),
+        Ok(b) => known_field(be, b, a.name.text),
+    })
+}
+
+// A member that is not STORAGE has no answer here — a nullary variant,
+// a constant on a type and a method are three other readings of the
+// same node, and `gen_c_read.zen` owns all three.
+known_field = (be :: CBackend, base: TyId, name: str)
+              Res<Res<TyId>, AllocError> {
+    field_of(be, base, name).try().match({
+        None  => Ok(None),
+        Ok(t) => Ok(keep_known(be, t)),
     })
 }
 

@@ -49,7 +49,8 @@ ctype, declarator, spellable, is_unit, is_c_integer = gen.gen_c.gen_c_type
 emit_types = gen.gen_c.gen_c_layout
 Dest, block = gen.gen_c.gen_c_stmt
 takes_closure = gen.gen_c.gen_c_inline
-impl_member_at = gen.gen_c.gen_c_member
+impl_member_at, by_arity = gen.gen_c.gen_c_member
+emit_main = gen.gen_c.gen_c_main
 emit_banner, emit_floor, emit_helpers, emit_print = gen.gen_c.gen_c_runtime
 emit_fs = gen.gen_c.gen_c_runtime
 
@@ -285,13 +286,16 @@ method_in_decl = (be :: CBackend, m: MethodRef, x: Decl)
 // order `sema_supply.zen` states, and for its reason: a member the
 // declaration writes is never contested, and one an impl supplies is
 // reached only when the declaration has none.
+// AND AT THE ARITY THE CALL SITE RESOLVED, which is the same rule
+// `impl_member_of` reads an impl's members by: a name that names two
+// members names neither of them on its own.
 method_member = (be :: CBackend, m: MethodRef, s: Struct)
                 Res<(), AllocError> {
     found ::= be.alloc.Vec<Member>();
     s.members.loop((h, mem) {
         member_named(mem, m.name).then(() { found.add(mem).try() });
     });
-    found.get(0).match({
+    by_arity(found, m.arity).match({
         None      => supplied_member(be, m),
         Ok(mem)   => method_body(be, m, mem),
     })
@@ -300,7 +304,7 @@ method_member = (be :: CBackend, m: MethodRef, s: Struct)
 supplied_member = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
     found ::= be.alloc.Vec<Member>();
     impl_member_at(be, m.decl, m.name, found).try();
-    found.get(0).match({
+    by_arity(found, m.arity).match({
         None      => Ok(()),
         Ok(mem)   => method_body(be, m, mem),
     })
@@ -390,7 +394,7 @@ lower_shape = (be :: CBackend, f: Function, blk: BlockId, qname: str,
 
 // Written, then substituted: `Vec<T>.get` returns `Res<T>` and this
 // emission is the one that knows which `T`.
-return_type = (be :: CBackend, f: Function, ctx: Ctx)
+return_type* = (be :: CBackend, f: Function, ctx: Ctx)
               Res<TyId, AllocError> {
     declared = f.ret.match({
         Ok(t) => be.check.type_from_ast(t, ctx),
@@ -611,172 +615,5 @@ write_body_at = (be :: CBackend, out :: Emit, i: usize)
     }).try();
     out.say("}").try();
     out.line().try();
-    Ok(());
-}
-
-// -----------------------------------------------------------------
-// the entry point
-//
-// `main` is the one name the C standard fixes for us, and it is the
-// one place a Zen function is called by something that is not Zen.
-// -----------------------------------------------------------------
-
-emit_main = (be :: CBackend, mi: usize, out :: Emit) Res<(), AllocError> {
-    found ::= be.alloc.Vec<Def>();
-    be.check.world.own_defs(mi, "main", found).try();
-    found.get(0).match({
-        None  => Ok(()),
-        Ok(d) => write_main(be, d, out),
-    })
-}
-
-write_main = (be :: CBackend, d: Def, out :: Emit) Res<(), AllocError> {
-    decl_at(be.tree, d.id).match({
-        None  => Ok(()),
-        Ok(x) => write_main_call(be, d, x, out),
-    })
-}
-
-write_main_call = (be :: CBackend, d: Def, x: Decl, out :: Emit)
-                  Res<(), AllocError> {
-    x.kind.match({
-        Function(f) => write_entry(be, d, f, out),
-        _           => Ok(()),
-    })
-}
-
-write_entry = (be :: CBackend, d: Def, f: Function, out :: Emit)
-              Res<(), AllocError> {
-    mi = d.id.module.to_usize();
-    ret = return_type(be, f, plain_ctx(be, mi)).try();
-    sig ::= be.alloc.Vec<TyId>();
-    signature(be, f, mi, sig).try();
-    call ::= be.alloc.String().try();
-    empty ::= be.alloc.Inst();
-    sym_fn(call, be.check.types, be.check.world, d.qname, sig, empty).try();
-    call.add_bytes("(").try();
-    write_zeroes(be, sig, call).try();
-    call.add_bytes(")").try();
-    out.say("int main(void) {").try();
-    out.indent();
-    write_exit(be, ret, call.view(), out).try();
-    out.dedent();
-    out.say("}").try();
-    Ok(());
-}
-
-// The signature again, without binding anything: `emit_main` runs
-// after every frame has been reset, and the symbol has to match the
-// one the prototype printed.
-signature = (be :: CBackend, f: Function, mi: usize, sig :: Vec<TyId>)
-            Res<(), AllocError> {
-    ctx = plain_ctx(be, mi);
-    f.params.loop((h, p) {
-        p.type.match({
-            Ok(t) => add_sig(be, t, ctx, sig),
-            None  => Ok(()),
-        }).try();
-    });
-    Ok(());
-}
-
-add_sig = (be :: CBackend, t: TypeId, ctx: Ctx, sig :: Vec<TyId>)
-          Res<(), AllocError> {
-    sig.add(be.check.type_from_ast(t, ctx).try())
-}
-
-// `main` may declare parameters this backend cannot construct — `Env`
-// is the capability root and there is no runtime behind it yet — so
-// each one is passed a zero value. It is honest rather than silent:
-// the program runs with an empty capability and says nothing it was
-// not asked to.
-write_zeroes = (be :: CBackend, sig: Vec<TyId>, out :: String)
-               Res<(), AllocError> {
-    sig.loop((h, i, t) {
-        (i > 0).then(() { out.add_bytes(", ").try() });
-        write_zero(be, t, out).try();
-    });
-    Ok(());
-}
-
-write_zero = (be :: CBackend, t: TyId, out :: String) Res<(), AllocError> {
-    be.check.types.at(t).match({
-        Prim(_) => out.add_bytes("0"),
-        _       => write_zero_struct(be, t, out),
-    })
-}
-
-write_zero_struct = (be :: CBackend, t: TyId, out :: String)
-                    Res<(), AllocError> {
-    out.add_bytes("(").try();
-    ctype(be, t, out).try();
-    out.add_bytes("){0}").try();
-    Ok(());
-}
-
-// `Ok(0)` from main exits 0 — the corpus rests on it. A `Res` whose Ok
-// payload is an integer becomes the exit code; anything else that is
-// not `Ok` exits 1.
-write_exit = (be :: CBackend, ret: TyId, call: str, out :: Emit)
-             Res<(), AllocError> {
-    be.check.types.at(ret).match({
-        Res(r) => write_res_exit(be, r, ret, call, out),
-        _      => write_plain_exit(be, ret, call, out),
-    })
-}
-
-write_res_exit = (be :: CBackend, r: TyRes, ret: TyId, call: str,
-                  out :: Emit) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    ctype(be, ret, line).try();
-    line.add_bytes(" zg_r = ").try();
-    line.add_bytes(call).try();
-    line.add_bytes(";").try();
-    out.say(line.view()).try();
-    guard ::= be.alloc.String().try();
-    guard.add_bytes("if (zg_r.zg_tag == ").try();
-    sym_variant(guard, RES_PATH, "Ok").try();
-    guard.add_bytes(") return ").try();
-    write_ok_value(be, r, guard).try();
-    guard.add_bytes(";").try();
-    out.say(guard.view()).try();
-    out.say("return 1;").try();
-    Ok(());
-}
-
-write_ok_value = (be :: CBackend, r: TyRes, out :: String)
-                 Res<(), AllocError> {
-    is_c_integer(be.check.prim_name(r.value)).match({
-        true  => write_ok_payload(out),
-        false => out.add_bytes("0"),
-    })
-}
-
-write_ok_payload = (out :: String) Res<(), AllocError> {
-    out.add_bytes("(int)zg_r.zg_data.").try();
-    sym_member(out, "Ok").try();
-    Ok(());
-}
-
-write_plain_exit = (be :: CBackend, ret: TyId, call: str, out :: Emit)
-                   Res<(), AllocError> {
-    is_c_integer(be.check.prim_name(ret)).match({
-        true  => write_int_exit(call, out),
-        false => write_void_exit(be, ret, call, out),
-    })
-}
-
-write_int_exit = (call: str, out :: Emit) Res<(), AllocError> {
-    out.bytes("return (int)").try();
-    out.bytes(call).try();
-    out.say(";").try();
-    Ok(());
-}
-
-write_void_exit = (be :: CBackend, ret: TyId, call: str, out :: Emit)
-                  Res<(), AllocError> {
-    out.bytes(call).try();
-    out.say(";").try();
-    out.say("return 0;").try();
     Ok(());
 }

@@ -94,7 +94,7 @@ construct_struct = (be :: CBackend, id: ExprId, c: Call, s: Struct,
                    Res<(), AllocError> {
     named = prim_named(be, s, ty).try();
     built = settle_construction(be, c, s, d, named, ctx).try();
-    layout_open(be, s, d, built, ctx).try().match({
+    layout_open(be, s, d, built).try().match({
         true  => unsupported(be, id, "a construction whose type arguments nothing settles", out),
         false => write_literal(be, c, s, d, built, ctx, out),
     })
@@ -118,8 +118,7 @@ settle_construction = (be :: CBackend, c: Call, s: Struct, d: Def,
 
 inferred_construction = (be :: CBackend, c: Call, s: Struct, d: Def,
                          ty: TyId, ctx: Ctx) Res<TyId, AllocError> {
-    dctx = Ctx(module: d.id.module.to_usize(), ret: TyId(index: 0),
-               has_ret: false, self_ty: TyId(index: 0), has_self: false);
+    dctx = decl_ctx_of(be, d);
     mark = enter_tparams(be, s.tparams, d.qname).try();
     empty ::= be.alloc.Inst();
     found ::= be.alloc.Inst();
@@ -205,13 +204,14 @@ is_prim_ty = (be :: CBackend, ty: TyId) bool {
 // enclosing declaration's `Var` — a different type of the same name, so
 // the substitution missed and every `Map` in the language was refused.
 // The declaration that introduced the name is the one that binds it.
-layout_open = (be :: CBackend, s: Struct, d: Def, ty: TyId, ctx: Ctx)
+layout_open = (be :: CBackend, s: Struct, d: Def, ty: TyId)
               Res<bool, AllocError> {
+    dctx = decl_ctx_of(be, d);
     dinst = recv_inst(be, ty).try();
     mark = enter_tparams(be, s.tparams, d.qname).try();
     got ::= false;
     s.members.loop((h, m) {
-        field_type(be, m, ctx, dinst).match({
+        field_type(be, m, dctx, dinst).match({
             None    => (),
             Ok(fty) => open(be, fty).then(() { got = true; }),
         });
@@ -235,7 +235,7 @@ write_literal = (be :: CBackend, c: Call, s: Struct, d: Def, ty: TyId,
 write_initialisers = (be :: CBackend, c: Call, s: Struct, d: Def,
                       ty: TyId, ctx: Ctx, out :: String)
                      Res<(), AllocError> {
-    dctx = decl_ctx_of(be, s, ctx);
+    dctx = decl_ctx_of(be, d);
     mark = enter_tparams(be, s.tparams, d.qname).try();
     // the CONSTRUCTED type's own arguments: `Box<i32>(held: 7)` supplies
     // an `i32`, and reading the field's declared `T` without them would
@@ -251,9 +251,18 @@ write_initialisers = (be :: CBackend, c: Call, s: Struct, d: Def,
     Ok(());
 }
 
-// A struct's own member types are read in the module that declares it,
-// which for a construction is the module the call resolved into.
-decl_ctx_of = (be :: CBackend, s: Struct, ctx: Ctx) Ctx { ctx }
+// A STRUCT'S OWN MEMBER TYPES ARE READ IN THE MODULE THAT DECLARES IT,
+// and never in the one that constructs it. `Lexed` names `Vec<Token>`
+// and a caller that imported `Lexed` alone has no `Token` — read at the
+// call site the argument resolves to nothing, and because
+// `type_from_ast` memoizes on the node id that answer becomes every
+// later reader's, so the LAYOUT came out `Vec<q>` and `cc` rejected
+// forty-four initialisers. One reader with the wrong module poisons the
+// declaration for the whole program.
+decl_ctx_of = (be :: CBackend, d: Def) Ctx {
+    Ctx(module: d.id.module.to_usize(), ret: TyId(index: 0),
+        has_ret: false, self_ty: TyId(index: 0), has_self: false)
+}
 
 write_initialiser = (be :: CBackend, a: Arg, i: usize, s: Struct,
                      ty: TyId, dinst: Inst, dctx: Ctx, ctx: Ctx,

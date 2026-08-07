@@ -73,6 +73,7 @@ inlines, inline_call, closure_slot = gen.gen_c.gen_c_inline
 is_null_ptr, lower_null_ptr = gen.gen_c.gen_c_ptr
 lower_closure_call = gen.gen_c.gen_c_inline
 construct = gen.gen_c.gen_c_build
+is_format_door, lower_format_door = gen.gen_c.gen_c_fmt
 
 // -----------------------------------------------------------------
 // `Res` values
@@ -467,6 +468,19 @@ call_or_floor = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
                 Res<(), AllocError> {
     is_null_ptr(d.name).match({
         true  => lower_null_ptr(be, id, null_want(be, id, ctx).try(), out),
+        false => call_or_format(be, id, c, d, f, recv, ctx, out),
+    })
+}
+
+// `alloc.String("{}", x)` is a bodyless variadic declaration and the
+// backend is its body, for the same reason: a variadic parameter has no
+// C spelling and `{}` resolves by the argument's type, so there is
+// nothing one body could have been.
+call_or_format = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
+                  recv: Res<ExprId>, ctx: Ctx, out :: String)
+                 Res<(), AllocError> {
+    is_format_door(be, d, f).match({
+        true  => lower_format_door(be, id, c, d, f, recv, ctx, out),
         false => call_or_convert(be, id, c, d, f, recv, ctx, out),
     })
 }

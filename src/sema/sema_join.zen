@@ -1,0 +1,106 @@
+// src/sema/sema_join.zen
+// What a `.match` EVALUATES TO, when its arms do not all say the same
+// thing.
+//
+// One question, asked once per arm and folded: given what the match is
+// worth so far and what this arm is worth, what is it worth now? It is
+// its own file because it is its own subject — `sema_match.zen` decides
+// which values REACH an arm, and this decides what comes back out, and
+// neither needs the other's data structure.
+//
+// `Res` IS THE WHOLE OF THE DIFFICULTY, and it is a difficulty the
+// language chose on purpose. `Ok(x)` is OPEN — "which `Res` it closes is
+// not decided until an expectation says" — so an arm carrying one is
+// only half an answer, and the arm beside it is the other half. Joining
+// them is not subtyping and not unification: it is reading the FORM off
+// the arm that has one and the PAYLOAD off the arm that has one, because
+// in a match written `Ok(v)` / `None` neither arm knows both.
+//
+// EVERYTHING ELSE IS FIRST-ARM-WINS, and deliberately. Zen has no
+// numeric tower and no common supertype, so two arms of genuinely
+// different types are a program that means something the language
+// cannot express — and inventing a join for it would hide the mistake
+// rather than report it.
+
+Alloc, AllocError = std.mem
+TyId, Ty, Types, TyRes, ResForm = sema.sema_ty
+Checker = sema.sema_check
+
+join* = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
+    c.is_unknown(a).match({
+        true  => Ok(b),
+        false => keep_or_settle(c, a, b),
+    })
+}
+
+keep_or_settle = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
+    (open_res(c, a) && (c.is_unknown(b) == false)).match({
+        true  => settled_res(c, a, b),
+        false => Ok(a),
+    })
+}
+
+// SETTLING AN OPEN `Res` TAKES THE OTHER ARM'S FORM AND KEEPS ITS OWN
+// PAYLOAD. `op = p.peek().kind.match({ Bang => Ok(UnOp.Not), .., _ =>
+// None })` is a `Res<UnOp>`: the `None` arm is what says which FORM —
+// an absence, carrying no reason — and the `Ok` arms are the only
+// thing that says what it holds. Taking `None`'s type whole threw the
+// payload away and answered `Res<Infer>`, which a backend declares as
+// a C struct with an `int` where the `UnOp` goes.
+settled_res = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
+    c.types.at(b).match({
+        Res(rb) => settled_form(c, a, b, rb),
+        _       => Ok(b),
+    })
+}
+
+settled_form = (c :: Checker, a: TyId, b: TyId, rb: TyRes)
+               Res<TyId, AllocError> {
+    unsettled(c, rb.value).match({
+        false => Ok(b),
+        true  => carried_value(c, a, b, rb),
+    })
+}
+
+carried_value = (c :: Checker, a: TyId, b: TyId, rb: TyRes)
+                Res<TyId, AllocError> {
+    open_value(c, a).match({
+        None  => Ok(b),
+        Ok(v) => at_form(c, v, rb),
+    })
+}
+
+at_form = (c :: Checker, value: TyId, rb: TyRes) Res<TyId, AllocError> {
+    rb.form.match({
+        Absence => c.types.res_absence(value),
+        Failure => c.types.res_failure(value, rb.error),
+        Open    => c.types.res_open(value),
+    })
+}
+
+// The payload an open `Res` carries, when it carries a settled one.
+open_value = (c: Checker, id: TyId) Res<TyId> {
+    c.types.at(id).match({
+        Res(r) => keep_settled(c, r.value),
+        _      => None,
+    })
+}
+
+keep_settled = (c: Checker, value: TyId) Res<TyId> {
+    unsettled(c, value).match({ true => None, false => Ok(value) })
+}
+
+unsettled = (c: Checker, id: TyId) bool {
+    c.is_unknown(id) || is_infer(c, id)
+}
+
+is_infer = (c: Checker, id: TyId) bool {
+    c.types.at(id).match({ Infer => true, _ => false })
+}
+
+open_res = (c: Checker, id: TyId) bool {
+    c.types.at(id).match({
+        Res(r) => r.form.match({ Open => true, _ => false }),
+        _      => false,
+    })
+}
