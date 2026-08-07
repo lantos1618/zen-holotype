@@ -1,0 +1,48 @@
+// tests/corpus/std/loop_map_body_can_break_early.zen
+// `map`'s body takes the HANDLE and not only the index and the value,
+// and `loop_find.zen` says why: "a map may stop early — it keeps what it
+// made, because a partial map that reports nothing would throw away work
+// the body already did." So a `h.break()` from inside a mapped body is a
+// documented feature of the one loop word that allocates, and this is
+// what says so.
+//
+// IT EXISTS BECAUSE A MUTATION SURVIVED. The handle a nested closure
+// receives has to re-bind at the ENCLOSING loop's depth; binding it one
+// level in breaks the wrong loop. That mutation compiles cleanly, emits
+// valid C, and prints a plausible wrong answer — and nothing in the
+// corpus could tell. Every other `map` test runs its body to completion,
+// so the handle they pass is never used, and a handle nobody calls
+// cannot be bound to the wrong thing observably.
+//
+// So the assertion is not "map works". It is that the break happened at
+// the right DEPTH: the kept length says how many elements the body got
+// to, and the values say which ones. Break the wrong loop and both move.
+
+LoopError = | NoResult
+
+main = (env: Env) Res<i32, LoopError> {
+    alloc ::= env.mem.alloc();
+
+    // stop after the third element. `map` keeps what it made, so the
+    // result is three long and not six — a `map` that discarded a
+    // partial answer would report `None` here and `ok_or` would fire.
+    head = Range(0, 6).map(alloc, (h, index, value) {
+        (index == 3).then(() { h.break(); });
+        value * 10
+    }).ok_or(LoopError.NoResult).try();
+
+    println("len {}", head.len);
+    head.loop((h, n) {
+        println("{}", n);
+    });
+
+    // and a body that never breaks still runs to the end, so the break
+    // above is the reason for the short answer and not the shape of the
+    // call
+    all = Range(0, 4).map(alloc, (h, index, value) {
+        value + 1
+    }).ok_or(LoopError.NoResult).try();
+    println("all {}", all.len);
+
+    Ok(0);
+}
