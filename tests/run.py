@@ -387,7 +387,8 @@ class Toolchain:
 
     src_root: Path | None = None  # the tree every test is compiled against
 
-    def command(self, source: Path, out_c: Path, root: Path) -> list[str]:
+    def command(self, source: Path, out_c: Path, root: Path,
+                entry: str | None = None) -> list[str]:
         # A test is a program, and a program stands on std: `Res`, `Ok`, `Env`
         # and `println` are prelude names. Compiling a corpus file alone would
         # fail on every one of them and say nothing about the test.
@@ -398,14 +399,30 @@ class Toolchain:
         if self.style == "bootstrap":
             return [*self.emit_argv, str(source), "--root", str(root),
                     "--emit-c", "-o", str(out_c)]
+        # The two CLIs disagree about how a build is named, and both spellings
+        # are deliberate.
+        #
         # The self-hosted CLI takes the root POSITIONALLY -- `zen build <root>
         # --emit-c -o <file>` -- and knows no `--root`, because a build is a
-        # root and finding the entry inside it is the driver's job. It also
-        # takes no source argument for the same reason. Passing the
-        # bootstrapper's spelling made every differential run fail with
-        # `unknown argument --root`, which reads as 33 compiler bugs and is
-        # one harness bug.
-        return [*self.emit_argv, "build", str(root), "--emit-c", "-o", str(out_c)]
+        # root. Passing the bootstrapper's spelling made every differential run
+        # fail with `unknown argument --root`, which reads as 33 compiler bugs
+        # and is one harness bug.
+        #
+        # It takes no source argument either; where to START inside the root is
+        # `--entry`, and that is the other half of the same disagreement. The
+        # bootstrapper is handed the entry as a positional and the root as a
+        # flag; the self-hosted compiler is handed the root as a positional and
+        # the entry as a flag. Without `--entry` the driver probes `main.zen`,
+        # the root's own basename, and `zen.zen` -- which finds every directory
+        # test and NO single-file one, because `stage` copies `foo.zen` in
+        # under its own name. It cannot be renamed to `main.zen`: every
+        # must-fail position assertion names the file it was written in, so
+        # renaming reddens hundreds of expectations to paper over a missing
+        # flag. That gap scored the whole self-hosted corpus 38/393.
+        argv = [*self.emit_argv, "build", str(root)]
+        if entry:
+            argv += ["--entry", entry]
+        return [*argv, "--emit-c", "-o", str(out_c)]
 
 
 def make_toolchain(args: argparse.Namespace) -> Toolchain:
@@ -634,6 +651,25 @@ def stage(test: Test, tool: Toolchain, work: Path) -> Path:
     return root
 
 
+def staged_entry(test: Test) -> str:
+    """Where the staged tree starts, relative to its root.
+
+    `stage` copies a single-file test in under its OWN name and a directory
+    test in as itself, so the entry's path inside the staged root is the entry
+    relative to whichever of those `stage` copied. Nothing can guess that name:
+    a compilation root is a directory and `std.env.Fs` has no listing.
+
+    Passed for both shapes rather than only the one that needs it. The probe
+    would find `main.zen` for most directory tests, but not one whose entry is
+    `<name>.zen` -- the folder-root spelling, which the probe applies to the
+    STAGED root's basename (`src`) and not to the test's -- and a harness that
+    is right about the entry for one shape and lucky about it for the other is
+    one directory test away from a mystery.
+    """
+    base = test.source if test.source.is_dir() else test.source.parent
+    return test.entry.relative_to(base).as_posix()
+
+
 def _modules_named_in(root: Path) -> set[str]:
     """Every bare word in the staged test's own sources.
 
@@ -662,7 +698,7 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
 
     out_c = work / "out.c"
     root = stage(test, tool, work)
-    emit = run_process(tool.command(root, out_c, root), args.timeout)
+    emit = run_process(tool.command(root, out_c, root, staged_entry(test)), args.timeout)
     if emit.timed_out:
         return Result(test, False, [f"the compiler timed out after {args.timeout}s"])
     if emit.code != 0 or not out_c.is_file():
@@ -710,7 +746,7 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
 def run_must_fail(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace) -> Result:
     out_c = work / "out.c"
     root = stage(test, tool, work)
-    emit = run_process(tool.command(root, out_c, root), args.timeout)
+    emit = run_process(tool.command(root, out_c, root, staged_entry(test)), args.timeout)
     text = diagnostics(emit)
 
     if emit.timed_out:

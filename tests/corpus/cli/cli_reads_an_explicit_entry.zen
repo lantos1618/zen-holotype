@@ -1,0 +1,76 @@
+// `--entry <file>`, pinned.
+//
+// A compilation root is a DIRECTORY and `std.env.Fs` has no listing, so
+// the driver can only find an entry by probing conventional names —
+// `main.zen`, the root's own basename, `zen.zen`. A single-file program
+// called anything else is unreachable by probing and reachable only by
+// being named, which is what this flag is for. DESIGN.md decides it:
+// "`zen build <root> --entry <file>`, and the capability surface does
+// not grow."
+//
+// It is a FLAG WITH AN ARGUMENT and not a second positional, because a
+// build is still a root: the root says what is being compiled and the
+// entry says where inside it to start. A second bare word is still the
+// mistake it always was, and the test below that one pins it.
+//
+// `cli` takes a `Vec<str>` and touches no capability, which is why this
+// test can hand it argument vectors no real command line would produce.
+
+Alloc, AllocError = std.mem
+Vec = std.collections
+str = std.text
+Cli, Job, cli = zen
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    // what tests/run.py sends for a single-file test
+    show(a, line(a, "build", "src", "--entry", "weird_name.zen", "--emit-c").try()).try();
+
+    // no entry: empty, and the driver probes exactly as it always did.
+    // This is the fixpoint's own line.
+    show(a, line(a, "build", "src", "--emit-c", "", "").try()).try();
+
+    // a scan and not a positional grammar: the entry may lead
+    show(a, line(a, "build", "--entry", "a/b.zen", "src", "").try()).try();
+
+    // `--entry` with nothing after it leaves the entry empty, which is
+    // the probe — the same answer `-o` with nothing after it gives
+    show(a, line(a, "build", "src", "--entry", "", "").try()).try();
+
+    // the entry is not a root, so a second bare word is still a mistake
+    show(a, line(a, "build", "src", "--entry", "b.zen", "other").try()).try();
+
+    Ok(0);
+}
+
+show = (a: Alloc, argv: Vec<str>) Res<(), AllocError> {
+    cli(argv).match({
+        Build(j) => { println("build root={} entry={} emit_c={}", j.root, j.entry, j.emit_c); },
+        Later(n) => { println("later {}", n); },
+        Usage(w) => { println("usage `{}`", w); },
+    });
+    Ok(());
+}
+
+// `argv.get(0)` is the program path, so every line starts with one.
+// `""` is not an argument — a real argv holds no empty strings — so it
+// stands for "this line ends here".
+line = (a: Alloc, w0: str, w1: str, w2: str, w3: str, w4: str)
+       Res<Vec<str>, AllocError> {
+    v ::= a.Vec<str>();
+    v.add("/usr/bin/zen").try();
+    v.push(w0).try();
+    v.push(w1).try();
+    v.push(w2).try();
+    v.push(w3).try();
+    v.push(w4).try();
+    Ok(v);
+}
+
+push = (v :: Vec<str>, w: str) Res<(), AllocError> {
+    w.is_empty().match({
+        true  => Ok(()),
+        false => v.add(w),
+    })
+}

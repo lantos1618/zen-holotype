@@ -97,7 +97,7 @@ field_member = (text: str, t: TypeId) Member {
 // `Holder<T> = { item*: T }` — the member whose type is the struct's
 // own type parameter, which is the whole subject
 holder_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
-    tvar = named_ty(tree, a, "T").try();
+    tvar = tree.named_ty(a, "T").try();
     members ::= a.Vec<Member>();
     members.add(field_member("item", tvar)).try();
     Ok(Decl(
@@ -111,7 +111,7 @@ holder_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
 // `Boxy = { size*: i32 }` — a bound, and nothing but storage, exactly
 // as DESIGN.md's own worked example is
 boxy_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
-    i32t = named_ty(tree, a, "i32").try();
+    i32t = tree.named_ty(a, "i32").try();
     members ::= a.Vec<Member>();
     members.add(field_member("size", i32t)).try();
     tparams ::= a.Vec<TParam>();
@@ -127,10 +127,10 @@ boxy_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
 // It supplies what `Slot` requires, so the only thing left that can go
 // wrong is resolving `T`.
 impl_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
-    tvar = named_ty(tree, a, "T").try();
+    tvar = tree.named_ty(a, "T").try();
     slot = applied_ty(tree, a, "Slot", tvar).try();
     inner = name_of(tree, "self").try();
-    supplied = dot(tree, inner, "item").try();
+    supplied = tree.dot(inner, "item").try();
     members ::= a.Vec<Member>();
     members.add(Member(
         kind: MemberKind.Field(Field(
@@ -147,7 +147,7 @@ impl_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
 
 // `Slot<T> = { held*: T }` — what the impl above promises
 slot_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
-    tvar = named_ty(tree, a, "T").try();
+    tvar = tree.named_ty(a, "T").try();
     members ::= a.Vec<Member>();
     members.add(field_member("held", tvar)).try();
     Ok(Decl(
@@ -160,7 +160,7 @@ slot_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
 
 // `PATH* : str = "src"` — a constant with a WRITTEN type
 const_decl = (a: Alloc, tree :: Ast) Res<Decl, AllocError> {
-    strt = named_ty(tree, a, "str").try();
+    strt = tree.named_ty(a, "str").try();
     value = tree.add_expr(Expr(
         kind: ExprKind.Literal(Literal(kind: LiteralKind.Str,
                                        text: "\"src\"")),
@@ -181,11 +181,11 @@ expr = (tree :: Ast, kind: ExprKind) Res<ExprId, AllocError> {
 }
 
 name_of = (tree :: Ast, text: str) Res<ExprId, AllocError> {
-    expr(tree, ExprKind.Name(Name(text: text)))
+    tree.expr(ExprKind.Name(Name(text: text)))
 }
 
 dot = (tree :: Ast, base: ExprId, field: str) Res<ExprId, AllocError> {
-    expr(tree, ExprKind.Access(Access(base: base, name: id_of(field))))
+    tree.expr(ExprKind.Access(Access(base: base, name: id_of(field))))
 }
 
 // ---------------------------------------------------------------- asks
@@ -228,13 +228,13 @@ main = (env: Env) Res<i32, AllocError> {
     decls.add(impl_decl(alloc, tree).try()).try();
     decls.add(const_decl(alloc, tree).try()).try();
 
-    holder_node = named_ty(tree, alloc, "Holder").try();
-    boxy_node = named_ty(tree, alloc, "Boxy").try();
+    holder_node = tree.named_ty(alloc, "Holder").try();
+    boxy_node = tree.named_ty(alloc, "Boxy").try();
 
     // `h.item` where `h: Holder` — the member whose written type is the
     // struct's own `T`
     h = name_of(tree, "h").try();
-    h_item = dot(tree, h, "item").try();
+    h_item = tree.dot(h, "item").try();
 
     // `PATH` on its own. It denotes a `str`, not a nominal type called
     // `PATH`, and that is the whole of the constant rule
@@ -242,12 +242,12 @@ main = (env: Env) Res<i32, AllocError> {
 
     // `v.nope` where `v: T` and NOTHING declared `T` — poison
     v = name_of(tree, "v").try();
-    v_nope = dot(tree, v, "nope").try();
+    v_nope = tree.dot(v, "nope").try();
 
     // `b.nope` where `b: T` and `T: Boxy` IS in scope — a real mistake
     b = name_of(tree, "b").try();
-    b_nope = dot(tree, b, "nope").try();
-    b_size = dot(tree, b, "size").try();
+    b_nope = tree.dot(b, "nope").try();
+    b_size = tree.dot(b, "size").try();
 
     tree.add_module(Module(name: "main", decls: decls, span: at(),
                            leading: no_trivia(),
@@ -281,17 +281,17 @@ main = (env: Env) Res<i32, AllocError> {
     // `PATH` is deliberately NOT bound: a local shadows everything, and
     // the rule under test is what the DECLARATION denotes
 
-    asked(c, alloc, "h.item", h_item, ctx).try();
-    asked(c, alloc, "PATH", path, ctx).try();
+    c.asked(alloc, "h.item", h_item, ctx).try();
+    c.asked(alloc, "PATH", path, ctx).try();
 
     // a `T` nothing in scope declared: poison, and no diagnostic
-    asked(c, alloc, "v.nope (no T in scope)", v_nope, ctx).try();
+    c.asked(alloc, "v.nope (no T in scope)", v_nope, ctx).try();
 
     // the same shape with the bound in scope: a real mistake, reported
     mark = c.bound_mark();
     c.push_bound("T", boxy_ty).try();
-    asked(c, alloc, "b.size (T: Boxy)", b_size, ctx).try();
-    asked(c, alloc, "b.nope (T: Boxy)", b_nope, ctx).try();
+    c.asked(alloc, "b.size (T: Boxy)", b_size, ctx).try();
+    c.asked(alloc, "b.nope (T: Boxy)", b_nope, ctx).try();
     c.release_bounds(mark).try();
     Ok(0);
 }

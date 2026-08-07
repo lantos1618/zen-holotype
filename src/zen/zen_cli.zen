@@ -9,7 +9,8 @@
 //
 // so the argument shape is this compiler's interface to the strongest
 // test in the project. Getting it wrong is not cosmetic — it is the gate
-// failing to run at all.
+// failing to run at all. `--entry` is added BESIDE that line and never
+// into it: the fixpoint passes no entry and must keep finding one.
 //
 // THIS FILE TOUCHES NO CAPABILITY. It takes a `Vec<str>` and returns what
 // was asked for, which is what makes it the one part of the CLI a corpus
@@ -43,15 +44,17 @@ Cli* = Build(Job)
 Job* = {
     root*: str,      // the compilation root: a DIRECTORY, always
     out*: str,       // where the C goes; empty when `-o` was not given
+    entry*: str,     // where to START inside the root, relative to it;
+                     // empty means the driver probes, as it always did
     emit_c*: bool,
 }
 
-USAGE*: str = "usage: zen build <root> --emit-c -o <file.c>"
+USAGE*: str = "usage: zen build <root> [--entry <file>] --emit-c -o <file.c>"
 
 // What one argument is. A classifier rather than a chain of matches at
 // the scan site, because the scan has to stay readable while it also
-// carries the cursor, and four names beat four levels of nesting.
-Arg = EmitC | Out | Flag | Word
+// carries the cursor, and five names beat five levels of nesting.
+Arg = EmitC | Out | Entry | Flag | Word
 
 // `argv.get(0)` is the program path, so the command is argv[1] and its
 // arguments start at 2.
@@ -86,6 +89,7 @@ is_later = (name: str) bool {
 job_of = (argv: Vec<str>) Cli {
     root ::= "";
     out ::= "";
+    entry ::= "";
     emit ::= false;
     bad ::= "";
     i ::= 2;
@@ -95,6 +99,7 @@ job_of = (argv: Vec<str>) Cli {
         classify(arg).match({
             EmitC => { emit = true; },
             Out   => { out = at(argv, i); i = i + 1; },
+            Entry => { entry = at(argv, i); i = i + 1; },
             Flag  => { bad = arg; },
             Word  => root.is_empty().match({
                 true  => { root = arg; },
@@ -102,27 +107,36 @@ job_of = (argv: Vec<str>) Cli {
             }),
         });
     });
-    verdict(root, out, emit, bad);
+    verdict(root, out, entry, emit, bad);
 }
 
-verdict = (root: str, out: str, emit: bool, bad: str) Cli {
+verdict = (root: str, out: str, entry: str, emit: bool, bad: str) Cli {
     bad.is_empty().match({
         false => Cli.Usage(bad),
         true  => root.is_empty().match({
             true  => Cli.Usage(""),
-            false => Cli.Build(Job(root: root, out: out, emit_c: emit)),
+            false => Cli.Build(
+                Job(root: root, out: out, entry: entry, emit_c: emit)),
         }),
     })
 }
 
+// `--entry <file>` is a FILE INSIDE THE ROOT and not a second root, so
+// it is a flag with an argument exactly as `-o` is. The root stays
+// positional because a build is a root; the entry says where to start
+// in it, which is knowledge the caller already has and the compiler
+// cannot recover — `std.env.Fs` has no listing, on purpose.
 classify = (a: str) Arg {
     a.eq("--emit-c").match({
         true  => Arg.EmitC,
         false => a.eq("-o").match({
             true  => Arg.Out,
-            false => is_flag(a).match({
-                true  => Arg.Flag,
-                false => Arg.Word,
+            false => a.eq("--entry").match({
+                true  => Arg.Entry,
+                false => is_flag(a).match({
+                    true  => Arg.Flag,
+                    false => Arg.Word,
+                }),
             }),
         }),
     })

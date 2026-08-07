@@ -138,15 +138,15 @@ expr = (tree :: Ast, kind: ExprKind) Res<ExprId, AllocError> {
 }
 
 int_lit = (tree :: Ast) Res<ExprId, AllocError> {
-    expr(tree, ExprKind.Literal(Literal(kind: LiteralKind.Int, text: "2")))
+    tree.expr(ExprKind.Literal(Literal(kind: LiteralKind.Int, text: "2")))
 }
 
 name_of = (tree :: Ast, text: str) Res<ExprId, AllocError> {
-    expr(tree, ExprKind.Name(Name(text: text)))
+    tree.expr(ExprKind.Name(Name(text: text)))
 }
 
 dot = (tree :: Ast, base: ExprId, text: str) Res<ExprId, AllocError> {
-    expr(tree, ExprKind.Access(Access(base: base, name: id_of(text))))
+    tree.expr(ExprKind.Access(Access(base: base, name: id_of(text))))
 }
 
 // ---------------------------------------------------------------------
@@ -204,7 +204,7 @@ main = (env: Env) Res<i32, AllocError> {
     alloc ::= env.mem.alloc();
     tree ::= alloc.Ast();
 
-    i32t = named_ty(tree, alloc, "i32").try();
+    i32t = tree.named_ty(alloc, "i32").try();
 
     // Boxy = { width: i32, height: i32, area* ::= (self: @Self) i32 {..} }
     boxy_members ::= alloc.Vec<Member>();
@@ -227,11 +227,11 @@ main = (env: Env) Res<i32, AllocError> {
     dot_members ::= alloc.Vec<Member>();
     dot_members.add(field("x", i32t, false)).try();
 
-    boxy_node = named_ty(tree, alloc, "Boxy").try();
-    framed_node = named_ty(tree, alloc, "Framed").try();
-    tvar_node = named_ty(tree, alloc, "T").try();
-    tile_node = named_ty(tree, alloc, "Tile").try();
-    dot_node = named_ty(tree, alloc, "Dot").try();
+    boxy_node = tree.named_ty(alloc, "Boxy").try();
+    framed_node = tree.named_ty(alloc, "Framed").try();
+    tvar_node = tree.named_ty(alloc, "T").try();
+    tile_node = tree.named_ty(alloc, "Tile").try();
+    dot_node = tree.named_ty(alloc, "Dot").try();
 
     two = int_lit(tree).try();
 
@@ -282,14 +282,14 @@ main = (env: Env) Res<i32, AllocError> {
     t = name_of(tree, "t").try();
     tv = name_of(tree, "tv").try();
     d = name_of(tree, "d").try();
-    t_width = dot(tree, t, "width").try();
-    tv_width = dot(tree, tv, "width").try();
-    addr = expr(tree, ExprKind.Unary(Unary(
+    t_width = tree.dot(t, "width").try();
+    tv_width = tree.dot(tv, "width").try();
+    addr = tree.expr(ExprKind.Unary(Unary(
         op: UnOp.Addr, op_span: at(), operand: t_width))).try();
 
     // `t.width = 5;` as a real statement, because assignment is a
     // statement and the rule is about its TARGET
-    assign_target = dot(tree, t, "width").try();
+    assign_target = tree.dot(t, "width").try();
     five = int_lit(tree).try();
     stmts ::= alloc.Vec<Stmt>();
     stmts.add(Stmt(kind: StmtKind.Bind(Bind(
@@ -308,7 +308,7 @@ main = (env: Env) Res<i32, AllocError> {
                  leading: no_trivia(), trailing: no_trivia())).try();
     callee = name_of(tree, "scale").try();
     targs ::= alloc.Vec<TypeId>();
-    bad_call = expr(tree, ExprKind.Call(Call(
+    bad_call = tree.expr(ExprKind.Call(Call(
         callee: callee, targs: targs, args: args, args_span: at()))).try();
 
     // the tree is complete before the checker is built
@@ -336,7 +336,7 @@ main = (env: Env) Res<i32, AllocError> {
     // reading it with no bound in scope: an error naming BOTH impls
     before = c.diag_count();
     c.type_of(t_width, ctx).try();
-    asked(c, alloc, "t.width, no bound in scope", before).try();
+    c.asked(alloc, "t.width, no bound in scope", before).try();
 
     // the same name, with the bound in scope. `T: Boxy` is what selects
     mark = c.bound_mark();
@@ -346,26 +346,26 @@ main = (env: Env) Res<i32, AllocError> {
     out ::= alloc.String().try();
     c.types.write_name(got, out).try();
     println("tv.width, with T: Boxy in scope -> {}", out.view());
-    asked(c, alloc, "tv.width, bound in scope", before2).try();
+    c.asked(alloc, "tv.width, bound in scope", before2).try();
     c.release_bounds(mark).try();
 
     // no storage, so nothing to assign into and no address to take
     before3 = c.diag_count();
     c.block_type(assign_block, ctx).try();
-    asked(c, alloc, "t.width = 2", before3).try();
+    c.asked(alloc, "t.width = 2", before3).try();
 
     before4 = c.diag_count();
     c.type_of(addr, ctx).try();
-    asked(c, alloc, "&t.width", before4).try();
+    c.asked(alloc, "&t.width", before4).try();
 
     // the bound is the promise, and Dot has not made it
     before5 = c.diag_count();
     c.type_of(bad_call, ctx).try();
-    asked(c, alloc, "scale(d, 2)", before5).try();
+    c.asked(alloc, "scale(d, 2)", before5).try();
 
     // an impl supplies a value for EVERY field the bound declares
     before6 = c.diag_count();
     c.check_module(0).try();
-    asked(c, alloc, "the module's impls", before6).try();
+    c.asked(alloc, "the module's impls", before6).try();
     Ok(0);
 }

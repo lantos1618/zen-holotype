@@ -130,8 +130,44 @@ Build* = {
     // the walk
     // -----------------------------------------------------------------
 
-    // `zen build <root>` names a DIRECTORY, and a directory has no
-    // listing — so the entry point is a MODULE NAME resolved by the
+    // WHERE THE PROGRAM STARTS. `--entry <file>` answers it outright;
+    // without one, the root is probed.
+    //
+    // The probe is what a directory with no listing can do, and it can
+    // only find conventional names — which is why `--entry` exists.
+    // `std.env.Fs` has no listing on purpose ("every member added here
+    // is a member the self-hosted compiler has to keep working
+    // forever"), and enumerating a directory is strictly more authority
+    // than reading a path you were handed. The information is already
+    // at the call site: whoever invokes the compiler knows the entry.
+    // A single-file program named anything else is unreachable by
+    // probing and reachable by being named, and that is the whole of it.
+    //
+    // A build is still a ROOT. The entry says where to start inside it;
+    // every other module is found by following imports, exactly as
+    // before.
+    entry_of = (self :: @Self, named: str) Res<Unit, AllocError> {
+        named.is_empty().match({
+            false => self.entry_named(named),
+            true  => self.entry_probed(),
+        })
+    }
+
+    // `--entry` is relative to the root, because `Unit.rel` is what a
+    // Span carries and an absolute path in a Span puts the checkout's
+    // location into the emitted C — which voids the determinism check
+    // that compares two copies of a tree at different paths.
+    //
+    // NOT PROBED. A named entry that is not there is reported by the
+    // READ, which names the file the caller asked for; a probe
+    // reporting it as well would be one mistake said twice, and the
+    // caller who chose the name is owed the name back.
+    entry_named = (self :: @Self, named: str) Res<Unit, AllocError> {
+        path ::= self.alloc.String("{}/{}", self.root, named).try();
+        self.unit_at(path.view())
+    }
+
+    // No `--entry`, so the entry point is a MODULE NAME resolved by the
     // same two probes every other module gets. Three names, most
     // conventional first:
     //
@@ -142,10 +178,10 @@ Build* = {
     //               applied to the root itself
     //   zen         this tree, and only this tree
     //
-    // OPEN, and reported: the third is a special case where a language
-    // wants a rule. `src/` is a compiler whose entry PLAN.md names
-    // `src/zen.zen`, and neither name above reaches it.
-    entry_of = (self :: @Self) Res<Unit, AllocError> {
+    // The third is still a special case, and it is the one
+    // `scripts/fixpoint.sh` rides: the gate runs `zen build src` with
+    // no entry, so this order is load-bearing and must not move.
+    entry_probed = (self :: @Self) Res<Unit, AllocError> {
         first = self.candidate("main").try();
         self.env.fs.exists(first.path).match({
             true  => Ok(first),
@@ -565,7 +601,7 @@ Build* = (a: Alloc, env: Env, root: str) Build {
 // THE ENTRY POINT of this file: one command line's worth of build.
 build* = (env: Env, a: Alloc, job: Job) Res<i32, AllocError> {
     b ::= a.Build(env, job.root);
-    entry = b.entry_of().try();
+    entry = b.entry_of(job.entry).try();
     b.walk(entry).try();
     b.back_end(job).try();
     Ok(b.code());

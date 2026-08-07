@@ -103,7 +103,7 @@ expr = (tree :: Ast, kind: ExprKind) Res<ExprId, AllocError> {
 }
 
 int_lit = (tree :: Ast, text: str) Res<ExprId, AllocError> {
-    expr(tree, ExprKind.Literal(Literal(kind: LiteralKind.Int, text: text)))
+    tree.expr(ExprKind.Literal(Literal(kind: LiteralKind.Int, text: text)))
 }
 
 arm = (tree :: Ast, p: PatternId, body: ExprId) Res<Arm, AllocError> {
@@ -139,8 +139,8 @@ main = (env: Env) Res<i32, AllocError> {
 
     // Cell = Full(i32) | Blank
     // Slot = Left(Cell) | Right(Cell) | Gone
-    i32_ty = named_ty(tree, alloc, "i32").try();
-    cell_ty_node = named_ty(tree, alloc, "Cell").try();
+    i32_ty = tree.named_ty(alloc, "i32").try();
+    cell_ty_node = tree.named_ty(alloc, "Cell").try();
 
     cell_variants ::= alloc.Vec<Variant>();
     cell_variants.add(variant(alloc, "Full", Ok(i32_ty))).try();
@@ -157,62 +157,62 @@ main = (env: Env) Res<i32, AllocError> {
     tree.add_module(Module(name: "main", decls: decls, span: at(),
                            leading: no_trivia(), trailing: no_trivia())).try();
 
-    slot_node = named_ty(tree, alloc, "Slot").try();
+    slot_node = tree.named_ty(alloc, "Slot").try();
 
     one = int_lit(tree, "1").try();
 
     // the scrutinees: `s` is a Slot, `flag` is a bool, `mystery` is not
     // bound at all -- so its type is poison
-    s = expr(tree, ExprKind.Name(Name(text: "s"))).try();
-    flag = expr(tree, ExprKind.Name(Name(text: "flag"))).try();
-    mystery = expr(tree, ExprKind.Name(Name(text: "mystery"))).try();
+    s = tree.expr(ExprKind.Name(Name(text: "s"))).try();
+    flag = tree.expr(ExprKind.Name(Name(text: "flag"))).try();
+    mystery = tree.expr(ExprKind.Name(Name(text: "mystery"))).try();
 
     // COMPLETE over the pattern space: five arms, no wildcard
     full ::= alloc.Vec<Arm>();
-    full.add(arm(tree, holds(tree, alloc, "Left",
-                             bare(tree, alloc, "Full").try()).try(), one).try()).try();
-    full.add(arm(tree, holds(tree, alloc, "Left",
-                             bare(tree, alloc, "Blank").try()).try(), one).try()).try();
-    full.add(arm(tree, holds(tree, alloc, "Right",
-                             bare(tree, alloc, "Full").try()).try(), one).try()).try();
-    full.add(arm(tree, holds(tree, alloc, "Right",
-                             bare(tree, alloc, "Blank").try()).try(), one).try()).try();
-    full.add(arm(tree, bare(tree, alloc, "Gone").try(), one).try()).try();
-    covered = expr(tree, ExprKind.Match(Match(
+    full.add(tree.arm(holds(tree, alloc, "Left",
+                             tree.bare(alloc, "Full").try()).try(), one).try()).try();
+    full.add(tree.arm(holds(tree, alloc, "Left",
+                             tree.bare(alloc, "Blank").try()).try(), one).try()).try();
+    full.add(tree.arm(holds(tree, alloc, "Right",
+                             tree.bare(alloc, "Full").try()).try(), one).try()).try();
+    full.add(tree.arm(holds(tree, alloc, "Right",
+                             tree.bare(alloc, "Blank").try()).try(), one).try()).try();
+    full.add(tree.arm(tree.bare(alloc, "Gone").try(), one).try()).try();
+    covered = tree.expr(ExprKind.Match(Match(
         scrutinee: s, name_span: at(), arms: full, arms_span: at()))).try();
 
     // the SAME outer variants, one inner pair short: Left(Blank) reaches
     // no arm, and only a checker that specialises the column can see it
     partial ::= alloc.Vec<Arm>();
-    partial.add(arm(tree, holds(tree, alloc, "Left",
-                                bare(tree, alloc, "Full").try()).try(), one).try()).try();
-    partial.add(arm(tree, holds(tree, alloc, "Right",
+    partial.add(tree.arm(holds(tree, alloc, "Left",
+                                tree.bare(alloc, "Full").try()).try(), one).try()).try();
+    partial.add(tree.arm(holds(tree, alloc, "Right",
                                 wild(tree).try()).try(), one).try()).try();
-    partial.add(arm(tree, bare(tree, alloc, "Gone").try(), one).try()).try();
-    nested_gap = expr(tree, ExprKind.Match(Match(
+    partial.add(tree.arm(tree.bare(alloc, "Gone").try(), one).try()).try();
+    nested_gap = tree.expr(ExprKind.Match(Match(
         scrutinee: s, name_span: at(), arms: partial, arms_span: at()))).try();
 
     // an arm below `_` can never run
     shadowed ::= alloc.Vec<Arm>();
-    shadowed.add(arm(tree, holds(tree, alloc, "Left",
+    shadowed.add(tree.arm(holds(tree, alloc, "Left",
                                  wild(tree).try()).try(), one).try()).try();
-    shadowed.add(arm(tree, wild(tree).try(), one).try()).try();
-    shadowed.add(arm(tree, bare(tree, alloc, "Gone").try(), one).try()).try();
-    after_wild = expr(tree, ExprKind.Match(Match(
+    shadowed.add(tree.arm(wild(tree).try(), one).try()).try();
+    shadowed.add(tree.arm(tree.bare(alloc, "Gone").try(), one).try()).try();
+    after_wild = tree.expr(ExprKind.Match(Match(
         scrutinee: s, name_span: at(), arms: shadowed, arms_span: at()))).try();
 
     // bool is an enum of two cases and gets no exemption
     half ::= alloc.Vec<Arm>();
-    half.add(arm(tree, bare(tree, alloc, "true").try(), one).try()).try();
-    one_sided = expr(tree, ExprKind.Match(Match(
+    half.add(tree.arm(tree.bare(alloc, "true").try(), one).try()).try();
+    one_sided = tree.expr(ExprKind.Match(Match(
         scrutinee: flag, name_span: at(), arms: half, arms_span: at()))).try();
 
     // a scrutinee whose type sema could not compute: the undefined name
     // is one diagnostic, and coverage must add NOTHING to it
     blind ::= alloc.Vec<Arm>();
-    blind.add(arm(tree, bare(tree, alloc, "Left").try(), one).try()).try();
-    blind.add(arm(tree, bare(tree, alloc, "Right").try(), one).try()).try();
-    on_poison = expr(tree, ExprKind.Match(Match(
+    blind.add(tree.arm(tree.bare(alloc, "Left").try(), one).try()).try();
+    blind.add(tree.arm(tree.bare(alloc, "Right").try(), one).try()).try();
+    on_poison = tree.expr(ExprKind.Match(Match(
         scrutinee: mystery, name_span: at(), arms: blind, arms_span: at()))).try();
 
     // THE TREE IS COMPLETE BEFORE THE CHECKER IS BUILT, and it has to be:
