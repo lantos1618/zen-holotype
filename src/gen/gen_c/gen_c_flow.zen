@@ -43,7 +43,8 @@ ctype, declarator, is_unit, variant_type, decl_ctx = gen.gen_c.gen_c_type
 decl_inst = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
 Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
-expr, res_type_of, ty_of = gen.gen_c.gen_c_expr
+expr, res_type_of, ty_of, decoded_len = gen.gen_c.gen_c_expr
+is_str = gen.gen_c.gen_c_read
 write_position = gen.gen_c.gen_c_op
 
 // -----------------------------------------------------------------
@@ -143,7 +144,7 @@ arm_cond = (be :: CBackend, pid: PatternId, st: TyId, scrut: str,
     pat = be.tree.pattern_at(pid);
     pat.kind.match({
         Wild           => out.add_bytes("1"),
-        Literal(l)     => literal_cond(be, pat, l, scrut, out),
+        Literal(l)     => literal_cond(be, pat, l, st, scrut, out),
         Name(p)        => name_cond(be, p.name, st, scrut, out),
         Destructure(d) => destructure_cond(be, d, st, scrut, out),
     }).try();
@@ -162,12 +163,16 @@ destructure_cond = (be :: CBackend, d: Destructure, st: TyId, scrut: str,
     payload_cond(be, d, st, scrut, out)
 }
 
+// THE PAYLOAD'S TEST IS `arm_cond` AGAIN, one level down, against the
+// payload's place and the payload's type. Depth is not a special form:
+// `Left(Full(n))` is two tag tests for the same reason `Ok(3)` is a tag
+// test and a comparison, and the three shapes — a binder, a variant, a
+// literal — read the same way at every level.
 payload_cond = (be :: CBackend, d: Destructure, st: TyId, scrut: str,
                 out :: String) Res<(), AllocError> {
-    inner = be.tree.pattern_at(d.binder);
-    inner.kind.match({
-        Literal(l) => typed_payload_cond(be, d, inner, l, st, scrut, out),
-        _          => Ok(()),
+    payload_type(be, st, last_segment(d.name)).match({
+        None  => bare_payload(be, d),
+        Ok(t) => nested_cond(be, d, t, scrut, out),
     })
 }
 
@@ -175,24 +180,48 @@ payload_cond = (be :: CBackend, d: Destructure, st: TyId, scrut: str,
 // `.zg_data` for it would be a union member nothing declared. The arm
 // is refused rather than narrowed, which keeps the rule this file works
 // by: lower it exactly, or report it.
-typed_payload_cond = (be :: CBackend, d: Destructure, inner: Pattern,
-                      l: Literal, st: TyId, scrut: str, out :: String)
-                     Res<(), AllocError> {
-    payload_type(be, st, last_segment(d.name)).match({
-        None  => report_nested(be, inner),
-        Ok(_) => write_payload_cond(be, d, inner, l, scrut, out),
+bare_payload = (be :: CBackend, d: Destructure) Res<(), AllocError> {
+    inner = be.tree.pattern_at(d.binder);
+    inner.kind.match({
+        Literal(_) => report_nested(be, inner),
+        _          => Ok(()),
     })
 }
 
-write_payload_cond = (be :: CBackend, d: Destructure, inner: Pattern,
-                      l: Literal, scrut: str, out :: String)
-                     Res<(), AllocError> {
+nested_cond = (be :: CBackend, d: Destructure, t: TyId, scrut: str,
+               out :: String) Res<(), AllocError> {
+    narrows(be, d.binder, t).match({
+        false => Ok(()),
+        true  => write_nested_cond(be, d, t, scrut, out),
+    })
+}
+
+write_nested_cond = (be :: CBackend, d: Destructure, t: TyId, scrut: str,
+                     out :: String) Res<(), AllocError> {
     place ::= be.alloc.String().try();
-    place.add_bytes(scrut).try();
-    place.add_bytes(".zg_data.").try();
-    sym_member(place, last_segment(d.name)).try();
+    payload_place(be, last_segment(d.name), scrut, place).try();
     out.add_bytes(" && ").try();
-    literal_cond(be, inner, l, place.view(), out)
+    arm_cond(be, d.binder, t, place.view(), out)
+}
+
+// Whether a pattern tests anything at all. A wildcard and a binder match
+// every value, so joining their `1` onto the chain would say nothing;
+// every other shape narrows. This is why `Ok(n)` stays a bare tag test.
+narrows = (be :: CBackend, pid: PatternId, st: TyId) bool {
+    be.tree.pattern_at(pid).kind.match({
+        Wild    => false,
+        Name(p) => is_variant(be, st, last_segment(p.name)),
+        _       => true,
+    })
+}
+
+// Where a variant's payload lives: the union member under the tag. Both
+// the test and the binding reach it, and they must spell it the same.
+payload_place = (be :: CBackend, variant: str, scrut: str, out :: String)
+                Res<(), AllocError> {
+    out.add_bytes(scrut).try();
+    out.add_bytes(".zg_data.").try();
+    sym_member(out, variant)
 }
 
 report_nested = (be :: CBackend, inner: Pattern) Res<(), AllocError> {
@@ -201,17 +230,16 @@ report_nested = (be :: CBackend, inner: Pattern) Res<(), AllocError> {
 }
 
 // `true =>` is the scrutinee, `false =>` is its negation, and an
-// integer or character pattern is an equality. A string pattern is not
-// lowered: `str` is a pointer and a length, so comparing one is a call
-// and not an operator.
-literal_cond = (be :: CBackend, pat: Pattern, l: Literal, scrut: str,
-                out :: String) Res<(), AllocError> {
+// integer or character pattern is an equality. A string is the one
+// pattern that is not a scalar, so it is not an operator.
+literal_cond = (be :: CBackend, pat: Pattern, l: Literal, st: TyId,
+                scrut: str, out :: String) Res<(), AllocError> {
     l.kind.match({
         Bool  => bool_cond(l.text, scrut, out),
         Int   => equality(scrut, l.text, out),
         Char  => equality(scrut, l.text, out),
         Float => equality(scrut, l.text, out),
-        Str   => unsupported_cond(be, pat, out),
+        Str   => str_cond(be, pat, l, st, scrut, out),
     })
 }
 
@@ -237,9 +265,57 @@ equality = (scrut: str, text: str, out :: String) Res<(), AllocError> {
     Ok(());
 }
 
-// A `str` is a pointer and a length, so comparing one is a call and
-// not an operator. The arm is reported and its condition is never
-// true, which keeps the chain total without inventing a comparison.
+// A `str` is a pointer and a length, so `==` would compare a STRUCT
+// against a `char *` — invalid C, and it used to be emitted silently.
+// Compared the way `str.impl(Eq)` compares: the LENGTH first, then the
+// bytes. Length first is the correctness and not an optimisation —
+// comparing over the shorter length is the classic bug, and a prefix is
+// not the whole.
+//
+// `.data` and `.len` are spelled the runtime floor's way and not the
+// mangler's, because `zg_str` is the floor's struct.
+str_cond = (be :: CBackend, pat: Pattern, l: Literal, st: TyId, scrut: str,
+            out :: String) Res<(), AllocError> {
+    is_str(be, st).match({
+        false => unsupported_cond(be, pat, out),
+        true  => write_str_cond(l, scrut, out),
+    })
+}
+
+write_str_cond = (l: Literal, scrut: str, out :: String)
+                 Res<(), AllocError> {
+    n = decoded_len(l.text);
+    out.add_bytes("(").try();
+    out.add_bytes(scrut).try();
+    out.add_bytes(".len == ").try();
+    out.write_usize(n).try();
+    out.add_bytes("u").try();
+    (n > 0).match({
+        true  => str_bytes_cond(l, scrut, n, out),
+        false => Ok(()),
+    }).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+// The empty string is its length and nothing more: a zero-length `str`
+// may carry a null `data`, and that is not a pointer `memcmp` may be
+// handed even for zero bytes.
+str_bytes_cond = (l: Literal, scrut: str, n: usize, out :: String)
+                 Res<(), AllocError> {
+    out.add_bytes(" && memcmp(").try();
+    out.add_bytes(scrut).try();
+    out.add_bytes(".data, ").try();
+    out.add_bytes(l.text).try();
+    out.add_bytes(", ").try();
+    out.write_usize(n).try();
+    out.add_bytes("u) == 0").try();
+    Ok(());
+}
+
+// A string pattern on a scrutinee that is not a `str`. The arm is
+// reported and its condition is never true, which keeps the chain total
+// without inventing a comparison.
 unsupported_cond = (be :: CBackend, pat: Pattern, out :: String)
                    Res<(), AllocError> {
     be.report(pat.span.file, pat.span,
@@ -300,33 +376,26 @@ bind_name = (be :: CBackend, q: QualifiedName, st: TyId, scrut: str,
     })
 }
 
-// `Ok(n)` binds `n` to the payload under the variant's member. A
-// LITERAL payload binds nothing — `arm_cond` has already turned it into
-// a test — and a deeper pattern like `Left(Full(n))` is not lowered: it
-// needs the payload's own variant list, and one level is what this
-// backend answers for.
+// `Ok(n)` binds `n` to the payload under the variant's member, and
+// `Left(Full(n))` binds `n` one level further down — the payload's
+// place and the payload's type, walked by `arm_bind` again. THE BINDER
+// MUST BE BOUND AT THE DEPTH IT WAS WRITTEN AT, which is the whole of
+// why this recurses: a nested binder the walk never reached is a name
+// the arm body cannot resolve. A literal or a wildcard payload binds
+// nothing — `arm_cond` has already turned it into a test.
 bind_payload = (be :: CBackend, d: Destructure, st: TyId, scrut: str,
                 ctx: Ctx) Res<(), AllocError> {
-    variant = last_segment(d.name);
-    inner = be.tree.pattern_at(d.binder);
-    payload_type(be, st, variant).match({
+    payload_type(be, st, last_segment(d.name)).match({
         None  => Ok(()),
-        Ok(t) => bind_inner(be, inner, d.binder, t, variant, scrut),
+        Ok(t) => bind_inner(be, d, t, scrut, ctx),
     })
 }
 
-bind_inner = (be :: CBackend, inner: Pattern, pid: PatternId, t: TyId,
-              variant: str, scrut: str) Res<(), AllocError> {
+bind_inner = (be :: CBackend, d: Destructure, t: TyId, scrut: str, ctx: Ctx)
+             Res<(), AllocError> {
     place ::= be.alloc.String().try();
-    place.add_bytes(scrut).try();
-    place.add_bytes(".zg_data.").try();
-    sym_member(place, variant).try();
-    inner.kind.match({
-        Name(p)    => bind_local(be, last_segment(p.name), t, place.view()),
-        Wild       => Ok(()),
-        Literal(_) => Ok(()),
-        _          => report_nested(be, inner),
-    })
+    payload_place(be, last_segment(d.name), scrut, place).try();
+    arm_bind(be, d.binder, t, place.view(), ctx)
 }
 
 // A C declaration for a pattern binding, plus the same binding in
