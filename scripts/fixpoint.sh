@@ -17,6 +17,21 @@ CFLAGS=${CFLAGS:--O2 -std=c99}
 
 rm -rf "$OUT" && mkdir -p "$OUT"
 
+# THE BOOTSTRAPPER CANNOT PARSE WITHOUT THE GRAMMAR, and `grammar/zen.so` is
+# generated and untracked -- so a fresh checkout, or any worktree, has none.
+# Without this check the tree-sitter failure falls into the branch below and
+# is reported as "stage 1 is not finished", which sends a reader to look for
+# missing compiler phases that are all present. A setup error must not be
+# able to impersonate a result. `make fixpoint` depends on `grammar` and
+# never sees this; running this script directly is what does, which is how
+# every agent runs it.
+if [ ! -f grammar/zen.so ]; then
+    echo "fixpoint: grammar/zen.so is missing, so the bootstrapper cannot parse." >&2
+    echo "  It is generated and untracked. Run \`make grammar\` first." >&2
+    echo "  This is a setup error, not a verdict about the compiler." >&2
+    exit 2
+fi
+
 # `-m bootstrap.bootstrap`, never the script path: bootstrap/ast.py shares its
 # name with the standard library's, and running the file directly makes
 # `dataclasses` import the wrong one and kill the interpreter. `--root` is not
