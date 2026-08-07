@@ -561,8 +561,28 @@ try_set* = (c :: Checker, node: Expr, r: TyRes, want: TyRes)
     })
 }
 
+// A caller whose own set is `_` has not declared one, so there is
+// nothing to be contained IN. It raises what the callee raises, and
+// `sema_raise.zen` settles the signature once the body is walked.
 try_contained* = (c :: Checker, node: Expr, r: TyRes, want: TyRes)
                 Res<TyId, AllocError> {
+    c.is_infer(want.error).match({
+        true  => c.try_raises(r),
+        false => c.try_declared(node, r, want),
+    })
+}
+
+// The callee's SET and not its name: `WriteError` raised into an
+// inferred set contributes `IoError` and `AllocError`, so that the
+// caller's own declared set is asked to contain members and not a
+// spelling. `union_ty` flattens the rest.
+try_raises* = (c :: Checker, r: TyRes) Res<TyId, AllocError> {
+    c.raise(c.set_of(r.error)).try();
+    Ok(r.value);
+}
+
+try_declared* = (c :: Checker, node: Expr, r: TyRes, want: TyRes)
+               Res<TyId, AllocError> {
     c.types.set_within(c.set_of(r.error), c.set_of(want.error)).match({
         false => c.try_no_conversion(node, r, want),
         true  => Ok(r.value),

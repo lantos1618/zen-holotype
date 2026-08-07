@@ -1,0 +1,179 @@
+// src/sema/sema_raise.zen
+// What a body raises, and the signature that is inferred from it.
+//
+// `Res<T, _>` says the error set is a fact about the body and not
+// something the author will repeat. Nothing computed it, so every
+// `.try()` of such a function was answered with "no implicit error
+// conversion: expected CfgError, found _" — a diagnostic about a hole,
+// naming the hole as if it were a type.
+//
+// LAW 6 IS THE WHOLE RULE, and it is why this is not simply "infer
+// everything": "inferred inside the module, written at the boundary". A
+// private function's set is derivable from its body, and writing it out
+// is a second place to be wrong. An exported one crosses a module
+// boundary, so its type is part of what crossed and the compiler will
+// not invent it — which is what `InferredSetExported` says, and it is
+// declared in `sema_diag.zen` for exactly this.
+//
+// TWO SOURCES, AND BOTH ARE NEEDED. A `.try()` propagates its callee's
+// set through this frame and drops it in the accumulator on the way
+// past; a body that ends in `Err(..)` never propagates anything and
+// shows its set only in the type of the block. `parse_pair` has the
+// first and no second, `read_num` has the second and no first, and the
+// pair of them is the case TESTING.md names.
+//
+// THE ANSWER IS WRITTEN BACK INTO THE MEMO for the return type's own
+// node, which is what makes it visible to everyone else: a caller asks
+// `type_from_ast` of the callee's signature and gets the settled set,
+// and so does gen_c, which reads the same store after sema is done.
+// That makes the inference ORDER-DEPENDENT — a caller checked before
+// its callee sees `_` — and declaration order is what currently saves
+// it. The honest fix is to make this a query the callee's signature
+// pulls on demand rather than a fact its body pushes, and that is
+// bigger than the hole it would close.
+
+Function, Ident, Type, TypeId, Span = ast
+AllocError = std.mem
+Vec = std.collections
+Range = std.core
+TyId, TyRes = sema.sema_ty
+Checker, Ctx = sema.sema_check
+SemaFault, NameFault = sema.sema_diag
+
+// Called once per body, with the mark taken before it was walked.
+// Everything raised since then belongs to this function.
+settle_raised* = (c :: Checker, f: Function, ctx: Ctx, got: TyId,
+                  mark: usize) Res<(), AllocError> {
+    raised ::= c.alloc.Vec<TyId>();
+    c.take_raised(mark, raised).try();
+    inferred_error(c, ctx.ret).match({
+        None  => Ok(()),
+        Ok(_) => settle_signature(c, f, ctx, got, raised),
+    })
+}
+
+// The declared error, when the author wrote `_` for it. Nothing for a
+// function that named its set, or that returns no `Res` at all — in
+// both of those the raised list is dropped and the ordinary containment
+// rule has already reported anything wrong with it.
+inferred_error = (c :: Checker, ret: TyId) Res<TyId> {
+    c.types.at(ret).match({
+        Res(r) => infer_hole(c, r),
+        _      => None,
+    })
+}
+
+infer_hole = (c :: Checker, r: TyRes) Res<TyId> {
+    c.is_infer(r.error).match({
+        false => None,
+        true  => Ok(r.error),
+    })
+}
+
+settle_signature = (c :: Checker, f: Function, ctx: Ctx, got: TyId,
+                    raised :: Vec<TyId>) Res<(), AllocError> {
+    report_if_exported(c, f).try();
+    body_error(c, got, raised).try();
+    set = c.types.union_ty(raised).try();
+    write_ret(c, f, ctx, set)
+}
+
+// `*` means this name crosses a module boundary, and a type that
+// crosses is written. The set is still settled after the report, so one
+// unwritten signature is one diagnostic and not one per call site.
+report_if_exported = (c :: Checker, f: Function) Res<(), AllocError> {
+    f.exported.match({
+        false => Ok(()),
+        true  => report_hole(c, f),
+    })
+}
+
+// The report lands on the `_`, because the `_` is what the author has
+// to replace. Naming the function instead would point at the one token
+// in the line that is already correct.
+report_hole = (c :: Checker, f: Function) Res<(), AllocError> {
+    span = hole_span(c, f).match({ None => f.name.span, Ok(s) => s });
+    c.report(span.file, span,
+             SemaFault.InferredSetExported(NameFault(name: f.name.text)))
+}
+
+hole_span = (c :: Checker, f: Function) Res<Span> {
+    f.ret.match({
+        None   => None,
+        Ok(id) => res_hole_span(c, id),
+    })
+}
+
+res_hole_span = (c :: Checker, id: TypeId) Res<Span> {
+    c.tree.type_at(id).kind.match({
+        Named(n) => arg_span(c, n.args, 1),
+        _        => None,
+    })
+}
+
+arg_span = (c :: Checker, args: Vec<TypeId>, i: usize) Res<Span> {
+    args.get(i).match({
+        None    => None,
+        Ok(a)   => Ok(c.tree.type_at(a).span),
+    })
+}
+
+// The block's own type carries what a body raises by ENDING in it:
+// `Err(CfgError.Bad)` is the value of the block, never a propagation,
+// so nothing put it in the accumulator.
+body_error = (c :: Checker, got: TyId, raised :: Vec<TyId>)
+             Res<(), AllocError> {
+    c.types.at(got).match({
+        Res(r) => keep_error(c, r, raised),
+        _      => Ok(()),
+    })
+}
+
+keep_error = (c :: Checker, r: TyRes, raised :: Vec<TyId>)
+             Res<(), AllocError> {
+    carries_error(c, r).match({
+        false => Ok(()),
+        true  => raised.add(r.error),
+    })
+}
+
+// An absence carries `()` as its error and an unresolved one carries
+// poison. Neither is a member of anybody's set, and adding either would
+// make `Res<i32, _>` settle as a set containing `()`.
+carries_error = (c :: Checker, r: TyRes) bool {
+    c.is_infer(r.error).match({
+        true  => false,
+        false => real_error(c, r),
+    })
+}
+
+real_error = (c :: Checker, r: TyRes) bool {
+    c.is_unknown(r.error).match({
+        true  => false,
+        false => r.form.match({ Failure => true, _ => false }),
+    })
+}
+
+// The memo for the return type's own node, rewritten in place. Everyone
+// who asks what this signature means asks that node.
+write_ret = (c :: Checker, f: Function, ctx: Ctx, set: TyId)
+            Res<(), AllocError> {
+    f.ret.match({
+        None    => Ok(()),
+        Ok(id)  => write_ret_memo(c, id, ctx, set),
+    })
+}
+
+write_ret_memo = (c :: Checker, id: TypeId, ctx: Ctx, set: TyId)
+                 Res<(), AllocError> {
+    c.types.at(ctx.ret).match({
+        Res(r) => write_settled(c, id, r, set),
+        _      => Ok(()),
+    })
+}
+
+write_settled = (c :: Checker, id: TypeId, r: TyRes, set: TyId)
+                Res<(), AllocError> {
+    settled = c.types.res_failure(r.value, set).try();
+    c.type_memo.set(id, settled)
+}

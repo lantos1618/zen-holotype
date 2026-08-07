@@ -136,6 +136,15 @@ Checker* = {
     // for itself, which is what `set_of` answers.
     set_memo* :: Map<TyId, TyId>,
 
+    // WHAT THE BODY BEING CHECKED RAISES. A `Res<T, _>` declares that
+    // its set is a fact about its body, so the body has to be walked
+    // before the signature is known — and every `.try()` that propagates
+    // through it drops its callee's set in here on the way past.
+    //
+    // A stack with a mark, like `locals`, because a lambda body is
+    // checked inside its enclosing function's and raises through it.
+    raised :: Vec<TyId>,
+
     // the scope stack: one flat Vec with marks, not a chain of frames.
     // A chain needs indirection and every frame is an allocation; a
     // stack needs a `usize` and `release` is what pops it.
@@ -498,6 +507,34 @@ Checker* = {
         })
     }
 
+    // -----------------------------------------------------------------
+    // what a body raises
+    // -----------------------------------------------------------------
+
+    raised_mark* = (self: @Self) usize { self.raised.len }
+
+    raise* = (self :: @Self, e: TyId) Res<(), AllocError> {
+        self.raised.add(e)
+    }
+
+    // Everything raised since `mark`, moved out. It is a take and not a
+    // read because the enclosing body has already been walked: leaving
+    // the rows behind would make the NEXT function raise them too.
+    take_raised* = (self :: @Self, mark: usize, out :: Vec<TyId>)
+                   Res<(), AllocError> {
+        Range(mark, self.raised.len).loop((h, i) {
+            self.raised.get(i).match({
+                None    => Ok(()),
+                Ok(e)   => out.add(e),
+            }).try();
+        });
+        extra = self.raised.len - mark;
+        Range(0, extra).loop((h, i) {
+            self.raised.take(self.raised.len - 1);
+        });
+        Ok(());
+    }
+
     // The set a type stands for. A name declared `A | B` stands for the
     // union of what its variants name; everything else stands for
     // itself. `sema_union.zen` records the first kind.
@@ -608,6 +645,7 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         call_memo: a.Map<ExprId, DeclId>(),
         inst_memo: a.Map<ExprId, Inst>(),
         set_memo: a.Map<TyId, TyId>(),
+        raised: a.Vec<TyId>(),
         locals: a.Vec<Binding>(),
         tvars: a.Vec<Binding>(),
         bounds: a.Vec<Binding>(),
