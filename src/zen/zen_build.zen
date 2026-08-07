@@ -73,9 +73,17 @@ scan, Source, Lexed = lex.lex
 Parser, module = parse.parse
 Checker, check_all = sema.sema
 PRELUDE, last_segment = sema.sema
+Def, World = sema.sema
 Emit, CBackend, emit_program = gen.gen
 
 Job = zen.zen_cli
+
+// WHERE A PROGRAM STARTS, spelled once. It is both a module name the
+// entry probe looks for and the declaration the root must own, and the
+// two must not be able to drift apart — a probe that finds `main.zen`
+// and a check that demands `start` would reject every program in the
+// language and blame the file it just found.
+ENTRY: str = "main"
 
 // A module of the program: what it is called, and where its bytes are.
 //
@@ -112,6 +120,11 @@ Build* = {
 
     faults* :: usize = 0,
     units* :: usize = 0,
+
+    // The entry's path relative to the root, kept for the one
+    // diagnostic that is about the root itself rather than about
+    // anything a span could point at — see `missing_main`.
+    entry_rel* :: str = "",
 
     // THE PROGRAM'S TREE, and there is exactly one. Every parser is
     // built around it and hands it back, so an `ExprId` from the
@@ -182,7 +195,7 @@ Build* = {
     // `scripts/fixpoint.sh` rides: the gate runs `zen build src` with
     // no entry, so this order is load-bearing and must not move.
     entry_probed = (self :: @Self) Res<Unit, AllocError> {
-        first = self.candidate("main").try();
+        first = self.candidate(ENTRY).try();
         self.env.fs.exists(first.path).match({
             true  => Ok(first),
             false => self.entry_after_main(),
@@ -228,6 +241,7 @@ Build* = {
     // a worklist a Vec and not a recursion.
     walk = (self :: @Self, entry: Unit) Res<(), AllocError> {
         seen ::= self.alloc.Vec<Unit>();
+        self.entry_rel = entry.rel;
         seen.add(entry).try();
         self.seed_prelude(seen).try();
         i ::= 0;
@@ -510,8 +524,54 @@ Build* = {
         n = c.diag_count();
         self.faults = self.faults + n;
         (n > 0).then(() { println("{}", report.view()); });
-        (n == 0).then(() { self.emit(c, job).try(); });
+        absent = self.missing_main(c, job).try();
+        self.faults = self.faults + absent;
+        ((n + absent) == 0).then(() { self.emit(c, job).try(); });
         Ok(());
+    }
+
+    // LAW 2 IS A LAW ABOUT PROGRAMS, and a root that declares no `main`
+    // is not one. Nothing else in the pipeline notices: an empty file
+    // lexes clean, parses to a module with no declarations, checks
+    // without a complaint, and emits a translation unit that links to
+    // nothing — so the compiler reported success for a file with no
+    // program in it, and `tests/must-fail/lex/empty_file` and
+    // `only_comments` sat red saying exactly that.
+    //
+    // MODULE 0 AND `own_defs`, both deliberately. The walk queues the
+    // entry first, so module 0 is the root; and `defs_of` would fall
+    // through to the imports and then the prelude, which means a `main`
+    // ANYWHERE in the program would answer for the one the root owes.
+    //
+    // ASKED ONLY WHEN A PROGRAM IS BEING PRODUCED. `emit_c` is what
+    // separates "compile this into a program" from "walk this root and
+    // tell me what you found", and the second is a real question —
+    // `tests/corpus/cli/` points the driver at a library on purpose to
+    // measure the entry probe. Demanding `main` of a build that emits
+    // nothing would fail those for having no program in a test that
+    // never asked for one.
+    missing_main = (self :: @Self, c :: Checker, job: Job)
+                   Res<usize, AllocError> {
+        job.emit_c.match({
+            false => Ok(0),
+            true  => self.root_declares_main(c),
+        })
+    }
+
+    root_declares_main = (self :: @Self, c :: Checker) Res<usize, AllocError> {
+        found ::= self.alloc.Vec<Def>();
+        c.world.own_defs(0, ENTRY, found).try();
+        (found.len > 0).match({
+            true  => Ok(0),
+            false => self.no_main(),
+        })
+    }
+
+    // 1:1, because the mistake is the file and not a place in it.
+    no_main = (self :: @Self) Res<usize, AllocError> {
+        println("{}:1:1: no `{}`: law 2 makes `main = (env: Env) Res<i32, E>` where a program starts, and this root declares none",
+                self.entry_rel, ENTRY);
+        Ok(1);
     }
 
     // -----------------------------------------------------------------
