@@ -76,8 +76,65 @@ lower_negate = (be :: CBackend, node: Expr, u: Unary, ctx: Ctx, want: TyId,
     prim = be.check.prim_name(ty);
     is_c_integer(prim).match({
         false => wrap_unary(be, "-", u.operand, ctx, want, out),
-        true  => negate_checked(be, node, u, prim, ctx, ty, out),
+        true  => negate_integer(be, node, u, prim, ctx, ty, out),
     })
+}
+
+// A MINUS SIGN ON A LITERAL IS PART OF THE CONSTANT, not a subtraction
+// from zero, and folding it here is a correctness fix rather than an
+// optimisation. `0 - x` evaluates the positive first, and the magnitude
+// of `iN.MIN` is one past `iN.MAX` — so the checked subtract traps on
+// the way to a value the type holds exactly.
+//
+// That is the whole of `std/core/num.zen:54:17: trap: integer overflow`:
+// `i64.MIN - 1` never reached the subtraction the author wrote, because
+// the CONSTANT's own initialiser aborted first, carrying num.zen's
+// position with it. A trap must name where the program went wrong, so a
+// declaration that is merely read may not be where it points.
+negate_integer = (be :: CBackend, node: Expr, u: Unary, prim: str, ctx: Ctx,
+                  ty: TyId, out :: String) Res<(), AllocError> {
+    int_digits(be, u.operand).match({
+        Ok(digits) => write_negative_literal(digits, out),
+        None       => negate_checked(be, node, u, prim, ctx, ty, out),
+    })
+}
+
+// The digits of an integer literal, when the operand IS one. Written
+// without unwrapping parens: `-(1)` is a negation of a parenthesised
+// expression and stays one, which keeps the fold to the form the
+// grammar makes a constant.
+int_digits = (be: CBackend, id: ExprId) Res<str> {
+    be.tree.expr_at(id).kind.match({
+        Literal(l) => literal_digits(l),
+        _          => None,
+    })
+}
+
+literal_digits = (l: Literal) Res<str> {
+    l.kind.match({ Int => Ok(l.text), _ => None })
+}
+
+// THERE IS NO NEGATIVE LITERAL IN C. `-<digits>` is unary minus over a
+// POSITIVE constant, and `i64.MIN`'s magnitude is `i64.MAX + 1` — the
+// one value with no signed C type to be, so the negation would happen
+// unsigned and the result would reach `int64_t` by conversion.
+// <stdint.h> spells INT64_MIN as a difference for exactly that reason,
+// and so does this. Every narrower `MIN` has a magnitude a signed
+// constant already holds, so it needs nothing.
+I64_MIN_DIGITS: str = "9223372036854775808"
+I64_MIN_C: str = "(-9223372036854775807LL - 1LL)"
+
+write_negative_literal = (digits: str, out :: String) Res<(), AllocError> {
+    digits.eq(I64_MIN_DIGITS).match({
+        true  => out.add_bytes(I64_MIN_C),
+        false => write_neg(digits, out),
+    })
+}
+
+write_neg = (digits: str, out :: String) Res<(), AllocError> {
+    out.add_bytes("(-").try();
+    out.add_bytes(digits).try();
+    out.add_bytes(")")
 }
 
 negate_checked = (be :: CBackend, node: Expr, u: Unary, prim: str, ctx: Ctx,
