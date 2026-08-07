@@ -47,13 +47,6 @@ ENUMS = {
 # writing it down here is the enum reading complete while it is not,
 # which is the state this file was written to end.
 OWED = {
-    "NotExported":
-        "DESIGN.md:80 law 6 -- `*` is what lets a name cross a module "
-        "boundary. Worse than absent: an import binding that names an "
-        "unexported symbol falls through to a prelude name of the same "
-        "spelling, so tests/must-fail/modules/unexported_fn compiles "
-        "clean and resolves to std.core.byte.hex_digit. Owed by the "
-        "module-visibility unit (sema_def.zen keep_exported).",
     "HoistAmbiguous":
         "hoisting fires only when exactly one variant carries the type. "
         "Owed by the Res-hoisting unit; corpus/sema/hoist_single_variant "
