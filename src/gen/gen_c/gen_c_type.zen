@@ -91,11 +91,30 @@ maybe_ptr = (be :: CBackend, id: TyId, n: TyNamed, out :: String)
             Res<(), AllocError> {
     is_ptr_named(n).match({
         true  => ptr_ctype(be, n, out),
+        false => maybe_scope(be, id, n, out),
+    })
+}
+
+// A `Scope` IS A `zg_scope *` AND NOT A STRUCT, for exactly the reason
+// a `Ptr<T>` is a `T *`: `@scope` is the enclosing BLOCK, and a value
+// naming a block is the address of that block's record. Emitting the
+// declaration's struct instead would give `Scope` a `defer` FIELD —
+// storage for a member that has no body and never will, since
+// `gen_c_scope.zen` is its body.
+maybe_scope = (be :: CBackend, id: TyId, n: TyNamed, out :: String)
+              Res<(), AllocError> {
+    is_scope_named(n).match({
+        true  => out.add_bytes("zg_scope *"),
         false => named_ctype(be, id, out),
     })
 }
 
 is_ptr_named* = (n: TyNamed) bool { n.name.eq("Ptr") }
+
+// Beside `is_ptr_named` because it is the same question: these are the
+// two named types whose C spelling is the runtime floor's rather than
+// their declaration's.
+is_scope_named* = (n: TyNamed) bool { n.name.eq("Scope") }
 
 ptr_ctype = (be :: CBackend, n: TyNamed, out :: String)
             Res<(), AllocError> {
@@ -224,7 +243,26 @@ is_signed* = (name: str) bool {
 request_type* = (be :: CBackend, id: TyId) Res<(), AllocError> {
     ptr_element(be, id).match({
         Ok(et) => request_type(be, et),
-        None   => queue_definition(be, id),
+        None   => request_defined(be, id),
+    })
+}
+
+// A `Scope` HAS NO DEFINITION TO QUEUE. It is spelled `zg_scope *`, and
+// the record behind that pointer is the runtime's — queueing the
+// declaration would emit a struct with a `defer` FIELD, storage for a
+// member that has no body and never will, since `gen_c_scope.zen` is
+// its body.
+request_defined = (be :: CBackend, id: TyId) Res<(), AllocError> {
+    is_scope_type(be, id).match({
+        true  => Ok(()),
+        false => queue_definition(be, id),
+    })
+}
+
+is_scope_type* = (be :: CBackend, id: TyId) bool {
+    be.types().at(id).match({
+        Named(n) => is_scope_named(n),
+        _        => false,
     })
 }
 

@@ -59,6 +59,7 @@ declare_temp, enum_path, payload_type, is_variant = gen.gen_c.gen_c_flow
 lower_probe, lower_write, lower_read = gen.gen_c.gen_c_fs
 close_else, close_block = gen.gen_c.gen_c_fs
 lower_console_print = gen.gen_c.gen_c_print
+is_defer, lower_defer = gen.gen_c.gen_c_scope
 
 // -----------------------------------------------------------------
 // which members these are
@@ -93,8 +94,14 @@ is_fs_capability = (be :: CBackend, rty: TyId, name: str) bool {
 // the slot cannot work: `args: ...` has no C spelling, so the slot's
 // parameter came out as `ctype`'s `int` fallback and `cc` rejected every
 // argument handed to it.
+// `Scope.defer` is the LAST link and not a peer of the other five. It
+// is a capability by the same test — a bodiless member whose floor is
+// the target language's — but its receiver is a value the program made
+// rather than one `Env` handed it, so it cannot be recognised by owner
+// alone and `is_defer` asks its own question.
 is_console_capability = (be :: CBackend, rty: TyId, name: str) bool {
-    owner_of(be, rty).eq("Console") && name.eq("println")
+    (owner_of(be, rty).eq("Console") && name.eq("println"))
+        || is_defer(be, rty, name)
 }
 
 owner_of = (be :: CBackend, rty: TyId) str {
@@ -120,9 +127,25 @@ fs_verb = (name: str) bool {
 // the entry point
 // -----------------------------------------------------------------
 
+// `Scope.defer` IS ONE OF THESE AND FOR THE SAME REASON. `scope.zen`
+// declares it `= sig` with no body and says why — "the compiler
+// supplies the block" — so its floor is the target language's, exactly
+// as `Mem.alloc`'s and `Fs.write`'s are. It takes the short path
+// because its whole lowering is about the CLOSURE it was handed, and
+// the declared return and parameter types the four below need say
+// nothing about that.
 lower_capability* = (be :: CBackend, id: ExprId, c: Call, a: Access,
                      rty: TyId, mi: usize, f: Function, ctx: Ctx,
                      out :: String) Res<(), AllocError> {
+    is_defer(be, rty, a.name.text).match({
+        true  => lower_defer(be, id, c, a, ctx, out),
+        false => lower_env_capability(be, id, c, a, rty, mi, f, ctx, out),
+    })
+}
+
+lower_env_capability = (be :: CBackend, id: ExprId, c: Call, a: Access,
+                        rty: TyId, mi: usize, f: Function, ctx: Ctx,
+                        out :: String) Res<(), AllocError> {
     ret = cap_ret(be, rty, mi, f).try();
     request_type(be, ret).try();
     // `Fs.read`'s FIRST written parameter is an `Alloc`, and its

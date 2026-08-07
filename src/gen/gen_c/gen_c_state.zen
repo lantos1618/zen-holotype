@@ -47,79 +47,8 @@ Checker, Ctx = sema.sema_check
 Inst = sema.sema_inst
 Emit = gen.gen_emit
 GenDiag, GenFault, render_gen = gen.gen_diag
+LocalSlot, Closure, LoopFrame, DropEntry, BlockFrame = gen.gen_c.gen_c_frame
 
-// One binding in scope, and the number that makes its C name unique
-// inside its function.
-LocalSlot* = {
-    name*: str,
-    index*: usize,
-    ty*: TyId,
-
-    // Is the C name a POINTER to the value rather than the value?
-    // "`::` means the method writes the receiver's OWN BYTES", so a
-    // `::` parameter is passed by address and every read of it goes
-    // through a dereference. A `::=` LOCAL is not by reference: it is
-    // the frame's own storage and there is nothing to alias.
-    by_ref*: bool,
-
-    // WHICH LOOP THIS NAME IS THE HANDLE OF, 1-based, or 0 for an
-    // ordinary binding. `(h, value) { .. }` binds `h` to a
-    // `LoopHandle`, which is not a value and has no C storage: it is
-    // the two labels of the loop it came from, so the binding carries
-    // the loop's depth and `h.break(v)` reads the frame back out.
-    // Depth and not a pointer because a body inlined inside another
-    // body has both loops in scope and the inner one shadows.
-    handle*: usize,
-
-    // WHICH CLOSURE THIS NAME IS, 1-based, or 0 for an ordinary
-    // binding. A lambda handed to a function-typed parameter has no C
-    // storage either: "a body is a non-escaping stack closure, inlined
-    // at the call site, so there is no closure record to box". So the
-    // binding carries an index into the backend's closure table and
-    // `f(x)` inlines the lambda rather than calling through a pointer.
-    closure*: usize,
-}
-
-// A lambda bound to a function-typed parameter, and everything the
-// inliner needs to put its body back where it was written.
-//
-// THE FRAME IS THE HALF THAT IS EASY TO GET WRONG. A closure's free
-// names mean what they meant WHERE IT WAS WRITTEN, and inlining puts
-// the body inside the callee's frame — where `find`'s own
-// `range.loop((h, value) { .. })` would otherwise capture a caller's
-// `h`, silently and with a different value rather than with an error.
-// So `home` and `check_home` are the two scope stacks' depths at the
-// point the lambda was written, and the inliner rewinds both.
-//
-// `ctx` is the CALLER's, and that is what makes a `.try()` inside a
-// lambda body return from the real function it was written in rather
-// than from the callee it was inlined into.
-Closure* = {
-    lam*: Lambda,
-    // the closure's declared parameter types, from the signature it was
-    // handed to: "a closure passed to a function whose signature is
-    // already known infers its parameter types from that signature"
-    ptys*: Vec<TyId>,
-    ret*: TyId,
-    home*: usize,
-    check_home*: usize,
-    inst*: Inst,
-    ctx*: Ctx,
-}
-
-// The two labels and the result of one loop being lowered.
-//
-// `h.break(v)` and `h.next()` are `goto`s and not C's `break` and
-// `continue`: an inlined body sits inside whatever the lowering of a
-// `.match` produced, and a C `break` there would leave that construct
-// rather than the loop. A label is unambiguous wherever it is written.
-LoopFrame* = {
-    brk*: usize,        // the label a `break` jumps to
-    cnt*: usize,        // the label the next pass starts at
-    result*: str,       // the C name the loop's value lands in
-    has_result*: bool,  // ..when it has one; a discarded loop has none
-    ty*: TyId,          // the `Res<T>` that value is
-}
 
 // One member function reached through a dot, and the receiver it was
 // reached at.
@@ -209,6 +138,29 @@ CBackend* = {
     declared :: Vec<String>,
     // the loops open at this point in the lowering, innermost last
     loops :: Vec<LoopFrame>,
+    // the blocks open at this point, innermost last, and every binding
+    // they must destroy, flat and in DECLARATION order. One `Vec` with
+    // a mark per block rather than a `Vec` of `Vec`s, which is the
+    // shape the local scope stack above already uses.
+    blocks :: Vec<BlockFrame>,
+    drops :: Vec<DropEntry>,
+    // did anything reach `@scope`? The block record and its runtime are
+    // emitted only for a program that defers, exactly as the print
+    // floor is emitted only for a program that prints.
+    scope_used :: bool,
+    // one capture record per deferred closure that has captures, and
+    // the count of closures lifted so far, which is what names them.
+    // The count is program-wide rather than per function because the
+    // thunks are program-wide: they are `static` functions of the one
+    // translation unit, like every other function here.
+    //
+    // `defer_env_ids` IS NOT `0..defer_envs.len` and cannot be derived:
+    // a closure that captures nothing gets a site number and no record,
+    // so the records are a SUBSET of the sites and the union over them
+    // has to name the numbers that exist.
+    defer_envs :: Vec<String>,
+    defer_env_ids :: Vec<usize>,
+    defer_sites :: usize,
     // every lambda bound during this function, appended and never
     // popped: a `LocalSlot` names one by index and the index has to
     // outlive the scope the name was visible in, because the body is
@@ -344,6 +296,72 @@ CBackend* = {
     uses_fs* = (self: @Self) bool { self.fs_used }
 
     // -----------------------------------------------------------------
+    // the block stack, and what each block must destroy
+    //
+    // `gen_c_own.zen` owns the RULE; this owns the storage, exactly as
+    // the loop stack below is stored here and read there.
+    // -----------------------------------------------------------------
+
+    need_scope* = (self :: @Self) () { self.scope_used = true; }
+
+    uses_scope* = (self: @Self) bool { self.scope_used }
+
+    next_defer* = (self :: @Self) usize {
+        self.defer_sites = self.defer_sites + 1;
+        self.defer_sites
+    }
+
+    add_defer_env* = (self :: @Self, text: String, n: usize)
+                     Res<(), AllocError> {
+        self.defer_envs.add(text).try();
+        self.defer_env_ids.add(n).try();
+        Ok(());
+    }
+
+    defer_env_count* = (self: @Self) usize { self.defer_envs.len }
+
+    defer_env_at* = (self: @Self, i: usize) Res<String> {
+        self.defer_envs.get(i)
+    }
+
+    defer_env_id* = (self: @Self, i: usize) usize {
+        self.defer_env_ids.get(i).match({ Ok(n) => n, None => 0 })
+    }
+
+    open_block* = (self :: @Self, rec: usize) Res<(), AllocError> {
+        self.blocks.add(BlockFrame(mark: self.drops.len, rec: rec))
+    }
+
+    // Leaving a block forgets its bindings. The cleanup was written
+    // before this ran — closing the frame is bookkeeping, not an exit.
+    close_block* = (self :: @Self) Res<(), AllocError> {
+        self.blocks.take(self.blocks.len - 1).match({
+            None  => Ok(()),
+            Ok(f) => self.forget_drops(f.mark),
+        })
+    }
+
+    forget_drops = (self :: @Self, mark: usize) Res<(), AllocError> {
+        extra = self.drops.len - mark;
+        Range(0, extra).loop((h, i) {
+            self.drops.take(self.drops.len - 1);
+        });
+        Ok(());
+    }
+
+    block_depth* = (self: @Self) usize { self.blocks.len }
+
+    block_at* = (self: @Self, i: usize) Res<BlockFrame> { self.blocks.get(i) }
+
+    drop_count* = (self: @Self) usize { self.drops.len }
+
+    drop_at* = (self: @Self, i: usize) Res<DropEntry> { self.drops.get(i) }
+
+    own_binding* = (self :: @Self, e: DropEntry) Res<(), AllocError> {
+        self.drops.add(e)
+    }
+
+    // -----------------------------------------------------------------
     // writing a body
     //
     // The buffer is NOT an exported field: `*` on a field means
@@ -371,6 +389,19 @@ CBackend* = {
         self.buf = self.alloc.Emit().try();
         Ok(());
     }
+
+    // A BODY LOWERED INSIDE ANOTHER BODY. A deferred closure is the one
+    // closure that becomes a real C function rather than being inlined,
+    // and it is discovered in the middle of the frame that registers
+    // it — so the enclosing text is set aside and put back, which is
+    // `detach`/`reattach` said about the buffer.
+    take_buf* = (self :: @Self) Res<Emit, AllocError> {
+        held = self.buf;
+        self.buf = self.alloc.Emit().try();
+        Ok(held);
+    }
+
+    put_buf* = (self :: @Self, held: Emit) () { self.buf = held; }
 
     // -----------------------------------------------------------------
     // the function worklist
@@ -645,6 +676,11 @@ CBackend* = {
         Range(0, held).loop((h, i) {
             self.closures.take(self.closures.len - 1);
         });
+        self.forget_drops(0).try();
+        nested = self.blocks.len;
+        Range(0, nested).loop((h, i) {
+            self.blocks.take(self.blocks.len - 1);
+        });
         self.depth = 0;
         self.tmp = 0;
         Ok(());
@@ -671,6 +707,10 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         helper_types: a.Vec<String>(),
         print_used: false,
         fs_used: false,
+        scope_used: false,
+        defer_envs: a.Vec<String>(),
+        defer_env_ids: a.Vec<usize>(),
+        defer_sites: 0,
         fn_queue: a.Vec<Def>(),
         m_queue: a.Vec<MethodRef>(),
         fn_insts: a.Vec<Inst>(),
@@ -683,6 +723,8 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         locals: a.Vec<LocalSlot>(),
         declared: a.Vec<String>(),
         loops: a.Vec<LoopFrame>(),
+        blocks: a.Vec<BlockFrame>(),
+        drops: a.Vec<DropEntry>(),
         closures: a.Vec<Closure>(),
         depth: 0,
         tmp: 0,
