@@ -1,0 +1,323 @@
+// src/gen/gen_c/gen_c_display.zen
+// A VALUE THAT PRINTS ITSELF, and the console it prints into.
+//
+// DESIGN.md: "`println("{}", shape)` has to route through `toString`",
+// and `toString` writes into a SINK rather than into a `String` for a
+// reason it works out in full — a `String` needs an `Alloc` to grow,
+// `println` has no `Alloc`, so a `toString` that returned a buffer would
+// either allocate behind the caller's back (law 1) or make hello-world
+// take an arena. "A console is a sink, a `String` is a sink, and
+// `println` hands `toString` the console it already holds — so printing
+// does not allocate at all."
+//
+// SO THE CONSOLE IS BUILT HERE, and it is the one fat value the print
+// path constructs. `gen_c_fat.zen` holds the law about which bounds
+// become records and how; this file only says what goes in the slots,
+// and what goes in them is `gen_c_runtime.zen`'s writes. The record has
+// NO RECEIVER AT ALL — `zg_self` is NULL, because stdout is not a value
+// the program owns.
+//
+// THE CALL ITSELF IS STATICALLY RESOLVED, exactly as `==` through `Eq`
+// is: the argument's type is known, so the impl's own function is the
+// one to call and no second record takes part. A fat value is wanted
+// only where a value's STATIC type is the bound, and here that is the
+// sink and never the value being printed.
+
+ExprId, Member, MemberKind, Function = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+TyId = sema.sema_ty
+Def = sema.sema_def
+Checker = sema.sema_check
+sym_fn, sym_gen, sym_variant, RES_PATH = gen.gen_name
+CBackend, MethodRef = gen.gen_c.gen_c_state
+ctype, declarator, request_type = gen.gen_c.gen_c_type
+recv_inst = gen.gen_c.gen_c_mono
+Site, site_of, member_at, impl_member_of, by_arity = gen.gen_c.gen_c_member
+method_sig, join = gen.gen_c.gen_c_member
+Slot, slots_of = gen.gen_c.gen_c_fat
+
+// -----------------------------------------------------------------
+// the call
+// -----------------------------------------------------------------
+
+// `<the value>.toString(<the console>);` — `true` when it was written,
+// and `false` when the type supplies no `toString` this backend can
+// call, which is the caller's diagnostic and not this file's.
+console_display* = (be :: CBackend, ty: TyId, text: str)
+                   Res<bool, AllocError> {
+    site_of(be, ty).try().match({
+        None  => Ok(false),
+        Ok(s) => display_at_site(be, ty, s, text),
+    })
+}
+
+display_at_site = (be :: CBackend, ty: TyId, s: Site, text: str)
+                  Res<bool, AllocError> {
+    display_fn(be, s).try().match({
+        None  => Ok(false),
+        Ok(f) => write_display_call(be, ty, s, f, text),
+    })
+}
+
+// The type's own `toString` first, then what an impl supplies — the
+// order `sema_supply.zen` states, and for its reason. AT ARITY TWO,
+// because `Display` declares two of them: only the one taking a sink can
+// write into a console, and the allocating one is derived from it.
+display_fn = (be :: CBackend, s: Site) Res<Res<Function>, AllocError> {
+    found ::= be.alloc.Vec<Member>();
+    member_at(be, s, "toString", found).try();
+    sink_form(found).match({
+        Ok(f) => Ok(Ok(f)),
+        None  => impl_member_of(be, s, "toString", 2),
+    })
+}
+
+sink_form = (found: Vec<Member>) Res<Function> {
+    (found.len > 0).match({
+        false => None,
+        true  => member_function(by_arity(found, 2)),
+    })
+}
+
+member_function = (m: Res<Member>) Res<Function> {
+    m.match({
+        None    => None,
+        Ok(one) => one.kind.match({ Function(f) => Ok(f), _ => None }),
+    })
+}
+
+// `self: @Self` takes the receiver BY VALUE, which is what `display.zen`
+// declares and what an impl must match — a `toString` writes a value
+// out, it does not change it. A receiver written `::` would need an
+// address this path does not have, so it is refused rather than guessed
+// at, and the caller reports at the argument.
+write_display_call = (be :: CBackend, ty: TyId, s: Site, f: Function,
+                      text: str) Res<bool, AllocError> {
+    by_ref(f, 0).match({
+        true  => Ok(false),
+        false => with_console(be, ty, s, f, text),
+    })
+}
+
+by_ref = (f: Function, i: usize) bool {
+    f.params.get(i).match({ Ok(p) => p.mutable, None => false })
+}
+
+with_console = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str)
+               Res<bool, AllocError> {
+    sink ::= be.alloc.String().try();
+    console_sink(be, sink).try().match({
+        false => Ok(false),
+        true  => emit_display(be, ty, s, f, text, sink.view()),
+    })
+}
+
+// The symbol, the instantiation and the queue entry `p.toString(sb)`
+// would have produced, so the two cannot disagree about which function
+// they mean. THE RESULT IS DISCARDED: a console has no failure to
+// report — `zg_print_bytes` cannot fail and a console cannot fail to
+// grow — and `println` is a statement whose value is unit.
+emit_display = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str,
+                sink: str) Res<bool, AllocError> {
+    inst = recv_inst(be, ty).try();
+    sig ::= be.alloc.Vec<TyId>();
+    method_sig(be, ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
+    qname ::= be.alloc.String().try();
+    join(qname, s.qname, "toString").try();
+    sym ::= be.alloc.String().try();
+    sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
+    be.need_method(MethodRef(self_ty: ty, decl: s.decl, name: "toString",
+                             arity: sig.len, qname: qname.view()),
+                   inst, sym.view()).try();
+    line ::= be.alloc.String().try();
+    line.add_bytes("(void)").try();
+    line.add_bytes(sym.view()).try();
+    line.add_bytes("(").try();
+    line.add_bytes(text).try();
+    line.add_bytes(", ").try();
+    write_sink_arg(f, sink, line).try();
+    line.add_bytes(");").try();
+    be.writeln(line.view()).try();
+    Ok(true);
+}
+
+// `out :: Sink` takes the record BY ADDRESS, and a C compound literal is
+// an lvalue holding the enclosing block's storage — so the console
+// outlives the call it is written into and nothing is copied.
+write_sink_arg = (f: Function, sink: str, out :: String)
+                 Res<(), AllocError> {
+    by_ref(f, 1).then(() { out.add_bytes("&").try() });
+    out.add_bytes(sink).try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// the console, as a Sink
+//
+// The slots are written HERE rather than found, for the reason
+// `Console.println` has no body: the runtime IS the implementation, and
+// there is nothing underneath to write it in. A capability's floor is
+// the target language's, and for C that floor is `fwrite`.
+// -----------------------------------------------------------------
+
+console_sink* = (be :: CBackend, out :: String) Res<bool, AllocError> {
+    sink_ty(be).try().match({
+        None   => Ok(false),
+        Ok(ty) => write_console(be, ty, out),
+    })
+}
+
+// `Sink` as the prelude exports it. Reached by declaration and not
+// through the caller's imports, because the record is the backend's: a
+// caller that wrote `println("{}", p)` never named it.
+sink_ty = (be :: CBackend) Res<Res<TyId>, AllocError> {
+    defs ::= be.alloc.Vec<Def>();
+    be.check.world.prelude_of("Sink", defs).try();
+    defs.get(0).match({
+        None  => Ok(None),
+        Ok(d) => sink_named(be, d),
+    })
+}
+
+sink_named = (be :: CBackend, d: Def) Res<Res<TyId>, AllocError> {
+    args ::= be.alloc.Vec<TyId>();
+    Ok(Ok(be.check.types.named(d.id, d.qname, d.name, args).try()));
+}
+
+// A SLOT WITH NO RUNTIME WRITE LEAVES THE WHOLE RECORD UNAVAILABLE, and
+// the caller reports at the argument. `gen_c_fat.zen` puts a NULL in an
+// unanswered slot and is right to: an `Alloc.create` no arena supplies
+// is declared as a hook and never called. A console slot is called on
+// the first `{}`, so a NULL there would link and then crash — the one
+// outcome worse than a diagnostic.
+write_console = (be :: CBackend, ty: TyId, out :: String)
+                Res<bool, AllocError> {
+    be.need_print();
+    request_type(be, ty).try();
+    slots ::= be.alloc.Vec<Slot>();
+    slots_of(be, ty, slots).try();
+    body ::= be.alloc.String().try();
+    known ::= slots.len > 0;
+    slots.loop((h, s) {
+        console_slot(be, s, body).try().then(() { known = false; });
+    });
+    known.match({
+        false => Ok(false),
+        true  => finish_console(be, ty, body.view(), out),
+    })
+}
+
+finish_console = (be :: CBackend, ty: TyId, inits: str, out :: String)
+                 Res<bool, AllocError> {
+    out.add_bytes("((").try();
+    ctype(be, ty, out).try();
+    out.add_bytes("){ .zg_self = NULL").try();
+    out.add_bytes(inits).try();
+    out.add_bytes(" })").try();
+    Ok(true);
+}
+
+// `true` when this backend has no write for the slot.
+console_slot = (be :: CBackend, s: Slot, out :: String)
+               Res<bool, AllocError> {
+    console_body(s.name).is_empty().match({
+        true  => Ok(true),
+        false => write_slot_init(be, s, out),
+    })
+}
+
+write_slot_init = (be :: CBackend, s: Slot, out :: String)
+                  Res<bool, AllocError> {
+    name ::= be.alloc.String().try();
+    console_name(name, s.name).try();
+    need_console_fn(be, s, name.view()).try();
+    out.add_bytes(", .").try();
+    out.add_bytes(s.sym.view()).try();
+    out.add_bytes(" = ").try();
+    out.add_bytes(name.view()).try();
+    Ok(false);
+}
+
+// Named after the member it answers, so two requests for one slot are
+// one function and the name is a pure function of the target — the same
+// rule `gen_c_fat.zen`'s thunks follow.
+console_name = (out :: String, member: str) Res<(), AllocError> {
+    out.add_bytes("zg_console_").try();
+    out.add_bytes(member).try();
+    Ok(());
+}
+
+// The one statement a console slot is. Empty means this backend has no
+// write for that member of `Sink`.
+console_body = (member: str) str {
+    member.eq("write").match({
+        true  => "zg_print_str(zg_a0);",
+        false => byte_body(member),
+    })
+}
+
+// A BYTE HAS NO `str` TO POINT AT — `io.zen` says why the floor is two
+// calls wide — so it is written from the parameter's own storage. One
+// byte, no copy and no buffer.
+byte_body = (member: str) str {
+    member.eq("write_byte").match({
+        true  => "zg_print_bytes((const char *)&zg_a0, 1);",
+        false => "",
+    })
+}
+
+need_console_fn = (be :: CBackend, s: Slot, name: str)
+                  Res<(), AllocError> {
+    be.need_thunk(name).try().match({
+        false => Ok(()),
+        true  => emit_console_fn(be, s, name),
+    })
+}
+
+// A console cannot fail to grow and `zg_print_bytes` has no failure to
+// report, so the honest answer on this path is `Ok` — a tag and nothing
+// else, because a `()` payload is no storage.
+//
+// THE THREE PIECES A LOWERED FUNCTION IS HELD AS: a head with no
+// punctuation of its own, and a body that is only the statements.
+// `gen_c_decl.zen` writes the `;` for a prototype and the braces for a
+// definition, so one that carried either would get a second.
+emit_console_fn = (be :: CBackend, s: Slot, name: str)
+                  Res<(), AllocError> {
+    head ::= be.alloc.String().try();
+    console_head(be, s, name, head).try();
+    body ::= be.alloc.String().try();
+    body.add_bytes("    (void)zg_self;\n    ").try();
+    body.add_bytes(console_body(s.name)).try();
+    body.add_bytes("\n    return (").try();
+    ctype(be, s.ret, body).try();
+    body.add_bytes("){ .zg_tag = ").try();
+    sym_variant(body, RES_PATH, "Ok").try();
+    body.add_bytes(" };\n").try();
+    owned ::= be.alloc.String().try();
+    owned.add_bytes(name).try();
+    be.add_function(owned, head, body)
+}
+
+console_head = (be :: CBackend, s: Slot, name: str, out :: String)
+               Res<(), AllocError> {
+    out.add_bytes("static ").try();
+    ctype(be, s.ret, out).try();
+    out.add_bytes(" ").try();
+    out.add_bytes(name).try();
+    out.add_bytes("(void *zg_self").try();
+    s.params.loop((h, i, p) { console_param(be, p, i, out).try() });
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+console_param = (be :: CBackend, p: TyId, i: usize, out :: String)
+                Res<(), AllocError> {
+    out.add_bytes(", ").try();
+    nm ::= be.alloc.String().try();
+    sym_gen(nm, "a", i).try();
+    declarator(be, p, nm.view(), out).try();
+    Ok(());
+}

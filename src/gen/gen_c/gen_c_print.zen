@@ -41,9 +41,11 @@ TyId = sema.sema_ty
 write_usize = sema.sema_diag
 Checker, Ctx = sema.sema_check
 GenFault = gen.gen_diag
+sym_variant, RES_PATH = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
-is_c_integer, is_signed = gen.gen_c.gen_c_type
+is_c_integer, is_signed, ctype = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
+console_display = gen.gen_c.gen_c_display
 
 // The two spellings, and the only two. `print` is `println` without the
 // newline; nothing else in the prelude reaches the console.
@@ -57,10 +59,48 @@ wants_newline* = (name: str) bool { name.eq("println") }
 // caller's expression buffer.
 lower_print* = (be :: CBackend, c: Call, name: str, ctx: Ctx, out :: String)
                Res<(), AllocError> {
+    write_pieces(be, c, name, ctx).try();
+    out.add_bytes("0")
+}
+
+// `env.out.println(..)` — THE SAME FLOOR, REACHED THROUGH THE RECORD
+// INSTEAD OF THROUGH THE SUGAR.
+//
+// DESIGN.md makes the sugar "`<the Env in scope>.out.println(..)`
+// resolved BY TYPE", so the two spellings name ONE call and must bottom
+// out in one place. Writing the bound form as a call through `Console`'s
+// slot is not a second implementation of it, it is a broken one: the
+// slot's `args: ...` has no C spelling, `ctype` falls back to `int`, and
+// `cc` rejects the `zg_str` handed to it. A variadic parameter cannot be
+// lowered as a parameter — that is the bargain this whole file exists to
+// keep — so it is expanded here, where the argument types are still
+// known, for both spellings.
+//
+// AND IT ANSWERS `Ok`. The sugar's value is unit and this one's is the
+// declared `Res<(), IoError>`, because a program may write `.try()` on
+// it. `zg_print_bytes` has no failure to report, so `Ok` is the honest
+// answer — a tag and nothing else, since a `()` payload is no storage.
+//
+// THE RECEIVER IS NOT LOWERED, exactly as the sugar never lowers the
+// `Env` it resolved through: `env.out` is a field read of a record whose
+// slots this path does not call, so evaluating it would emit a value
+// nothing reads.
+lower_console_print* = (be :: CBackend, c: Call, name: str, ret: TyId,
+                        ctx: Ctx, out :: String) Res<(), AllocError> {
+    write_pieces(be, c, name, ctx).try();
+    out.add_bytes("((").try();
+    ctype(be, ret, out).try();
+    out.add_bytes("){ .zg_tag = ").try();
+    sym_variant(out, RES_PATH, "Ok").try();
+    out.add_bytes(" })")
+}
+
+write_pieces = (be :: CBackend, c: Call, name: str, ctx: Ctx)
+               Res<(), AllocError> {
     be.need_print();
     write_args(be, c, ctx).try();
     wants_newline(name).then(() { be.writeln("zg_print_nl();").try() });
-    out.add_bytes("0")
+    Ok(());
 }
 
 write_args = (be :: CBackend, c: Call, ctx: Ctx) Res<(), AllocError> {
@@ -222,22 +262,21 @@ write_value = (be :: CBackend, arg: ExprId, ctx: Ctx) Res<(), AllocError> {
     prim = be.check.prim_name(ty);
     text ::= be.alloc.String().try();
     expr(be, arg, ctx, ty, text).try();
-    write_typed(be, arg, prim, text.view())
+    write_typed(be, arg, ty, prim, text.view())
 }
 
-write_typed = (be :: CBackend, arg: ExprId, prim: str, text: str)
+write_typed = (be :: CBackend, arg: ExprId, ty: TyId, prim: str, text: str)
               Res<(), AllocError> {
     fn = printer(prim);
     fn.is_empty().match({
-        true  => print_fault(be, arg),
+        true  => write_display(be, arg, ty, text),
         false => write_write(be, fn, cast_of(prim), text),
     })
 }
 
 // The runtime helper a primitive prints through. Empty means this
-// backend has no write for the type, which is a diagnostic rather than a
-// guess: a `Display` prints through its own `toString`, and that is a
-// call this backend cannot make yet.
+// backend has no write for the type, and the value goes through its
+// own `toString` instead.
 printer* = (prim: str) str {
     prim.eq("str").match({
         true  => "zg_print_str",
@@ -311,8 +350,21 @@ write_write = (be :: CBackend, fn: str, cast: str, text: str)
     be.writeln(line.view())
 }
 
+// A value this backend has no primitive write for prints through its
+// own `toString`, into the console — `gen_c_display.zen` holds that
+// path and the record it hands over. A type that supplies none is where
+// the diagnostic finally is.
+write_display = (be :: CBackend, arg: ExprId, ty: TyId, text: str)
+                Res<(), AllocError> {
+    console_display(be, ty, text).try().match({
+        true  => Ok(()),
+        false => print_fault(be, arg),
+    })
+}
+
 // A value with no write. Reported at the ARGUMENT rather than at the
 // call: the call is fine and one of its arguments is not.
 print_fault = (be :: CBackend, arg: ExprId) Res<(), AllocError> {
     be.report_expr(arg, GenFault.Unsupported("printing a value of this type"))
 }
+

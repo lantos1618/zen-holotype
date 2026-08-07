@@ -58,6 +58,7 @@ expr = gen.gen_c.gen_c_expr
 declare_temp, enum_path, payload_type, is_variant = gen.gen_c.gen_c_flow
 lower_probe, lower_write, lower_read = gen.gen_c.gen_c_fs
 close_else, close_block = gen.gen_c.gen_c_fs
+lower_console_print = gen.gen_c.gen_c_print
 
 // -----------------------------------------------------------------
 // which members these are
@@ -76,7 +77,24 @@ is_capability* = (be :: CBackend, rty: TyId, name: str) bool {
 }
 
 is_fs_capability = (be :: CBackend, rty: TyId, name: str) bool {
-    owner_of(be, rty).eq("Fs") && fs_verb(name)
+    owner_of(be, rty).eq("Fs").match({
+        true  => fs_verb(name),
+        false => is_console_capability(be, rty, name),
+    })
+}
+
+// `Console.println` IS ONE OF THESE, and the header above says so: its
+// floor is `fwrite`, it is declared with no body for the same reason
+// `Fs.read` is, and `gen_c_print.zen` writes it. It reaches this file
+// only when the receiver was WRITTEN — `env.out.println(..)` — because
+// the sugar names no function at all and is recognised one level up.
+//
+// Without this it fell through to `lower_fat_call`, and a call through
+// the slot cannot work: `args: ...` has no C spelling, so the slot's
+// parameter came out as `ctype`'s `int` fallback and `cc` rejected every
+// argument handed to it.
+is_console_capability = (be :: CBackend, rty: TyId, name: str) bool {
+    owner_of(be, rty).eq("Console") && name.eq("println")
 }
 
 owner_of = (be :: CBackend, rty: TyId) str {
@@ -127,6 +145,15 @@ cap_param = (be :: CBackend, rty: TyId, mi: usize, f: Function)
 
 verb = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
         ret: TyId, aty: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
+    a.name.text.eq("println").match({
+        true  => lower_console_print(be, c, a.name.text, ret, ctx, out),
+        false => verb_1(be, id, c, a, rty, ret, aty, ctx, out),
+    })
+}
+
+verb_1 = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
+          ret: TyId, aty: TyId, ctx: Ctx, out :: String)
+         Res<(), AllocError> {
     a.name.text.eq("alloc").match({
         true  => lower_alloc(be, id, a, rty, ret, ctx, out),
         false => verb_2(be, id, c, a, rty, ret, aty, ctx, out),
