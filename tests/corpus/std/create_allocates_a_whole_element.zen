@@ -1,0 +1,52 @@
+// tests/corpus/std/create_allocates_a_whole_element.zen
+// `alloc.create<T>()` is "one T's worth of storage, already named"
+// (DESIGN.md), and one T's worth is the WHOLE of T. std writes no body
+// for it — the backend is its body, the way it is for Ptr's members —
+// so the number of bytes it asks `raw` for is written in exactly one
+// place and nothing but a test reads it back.
+//
+// AN UNDER-SIZED `create` COMPILES AND RUNS. The arena bumps by what it
+// was asked for and re-aligns the next run to ALIGN_MAX, so a `create`
+// that asks for ONE BYTE still hands back a distinct, correctly aligned
+// address — and any T that fits inside the alignment still round-trips
+// through it. That mutation left the entire suite byte-identical: 273
+// passing tests, every allocating one among them, and not one diagnostic.
+//
+// So the T here is deliberately WIDER THAN ALIGN_MAX and there are three
+// of them, created before any of them is written. The second run has to
+// begin a whole `Wide` past the first, not one alignment step past it.
+// Ask for less and the write to `b` lands on top of `a`'s tail, and the
+// last field of every earlier row comes back as a later row's.
+
+Wide = {
+    head: i64,
+    p1: i64,
+    p2: i64,
+    p3: i64,
+    p4: i64,
+    p5: i64,
+    p6: i64,
+    tail: i64,
+}
+
+// every field the same, so a row that reads back mixed is reading
+// someone else's bytes and says whose
+filled = (n: i64) Wide {
+    Wide(head: n, p1: n, p2: n, p3: n, p4: n, p5: n, p6: n, tail: n)
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    a = alloc.create<Wide>().try();
+    b = alloc.create<Wide>().try();
+    c = alloc.create<Wide>().try();
+
+    a.write(0, filled(1));
+    b.write(0, filled(2));
+    c.write(0, filled(3));
+
+    println("head {} {} {}", a.read(0).head, b.read(0).head, c.read(0).head);
+    println("tail {} {} {}", a.read(0).tail, b.read(0).tail, c.read(0).tail);
+    Ok(0);
+}

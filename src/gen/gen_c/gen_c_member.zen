@@ -65,6 +65,7 @@ lower_plain_call, write_arg = gen.gen_c.gen_c_call
 handle_depth, lower_handle_call = gen.gen_c.gen_c_handle
 inlines, inline_method = gen.gen_c.gen_c_inline
 is_ptr_member, lower_ptr_member = gen.gen_c.gen_c_ptr
+lower_create = gen.gen_c.gen_c_alloc
 is_capability, lower_capability = gen.gen_c.gen_c_cap
 is_fat = gen.gen_c.gen_c_fat
 lower_fat_call = gen.gen_c.gen_c_bound
@@ -591,8 +592,21 @@ emit_eq = (be :: CBackend, lhs: ExprId, rhs: ExprId, rty: TyId, s: Site,
 // argument, and is why `lower_plain_call` takes a receiver at all.
 // -----------------------------------------------------------------
 
+// `alloc.create<T>()` IS ASKED ABOUT FIRST, and only here at the end:
+// it is declared on `Alloc` with no body and no impl supplies one, so
+// the receiver's own declaration and its impls have both been searched
+// and missed by the time this runs — which is what lets a type that
+// declares a `create` of its own still win.
 lower_ufcs = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
               ctx: Ctx, out :: String) Res<(), AllocError> {
+    lower_create(be, id, c, a, rty, ctx, out).try().match({
+        true  => Ok(()),
+        false => ufcs_or_impl(be, id, c, a, rty, ctx, out),
+    })
+}
+
+ufcs_or_impl = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
+                ctx: Ctx, out :: String) Res<(), AllocError> {
     reaches(be, rty, a.name.text).try().match({
         true  => unsupported(be, id, "a call to an impl-supplied member", out),
         false => lower_plain_call(be, id, c, a.name.text, Ok(a.base), ctx, out),

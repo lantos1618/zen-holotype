@@ -58,6 +58,7 @@ ctype, declarator, spellable, is_unit, c_prim = gen.gen_c.gen_c_type
 is_c_integer, is_signed, variant_type, decl_ctx = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
 lower_access, base_decl, type_const, TypeConst = gen.gen_c.gen_c_read
+access_field_type = gen.gen_c.gen_c_read
 lower_array_lit, lower_fixed_array = gen.gen_c.gen_c_array
 field_type, request_type = gen.gen_c.gen_c_type
 Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
@@ -65,9 +66,10 @@ plain_ctx = gen.gen_c.gen_c_decl
 lower_call, res_value, is_res_ctor = gen.gen_c.gen_c_call
 needs_hoist, hoist_expr = gen.gen_c.gen_c_hoist
 call_ret_type = gen.gen_c.gen_c_infer
-lower_unary, lower_binary = gen.gen_c.gen_c_op
+lower_unary, lower_binary, binary_type = gen.gen_c.gen_c_op
 lower_index, index_type = gen.gen_c.gen_c_index
 is_ptr_member, ptr_member_type = gen.gen_c.gen_c_ptr
+create_type = gen.gen_c.gen_c_alloc
 field_of = gen.gen_c.gen_c_cap
 inline_result_type = gen.gen_c.gen_c_settle
 needs_fat, write_fat_value = gen.gen_c.gen_c_fat
@@ -280,7 +282,7 @@ ptr_dot_answer = (be :: CBackend, c: Call, a: Access, ctx: Ctx, want: TyId)
     unknown = be.check.types.unknown().try();
     rty = ty_of(be, a.base, ctx, unknown).try();
     is_ptr_member(be, rty, a.name.text).match({
-        false => Ok(None),
+        false => create_type(be, c, a, rty, ctx),
         true  => ptr_answer_of(be, c, a, rty, ctx, want),
     })
 }
@@ -350,11 +352,13 @@ settle_call = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
 fallback_type = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
                 Res<TyId, AllocError> {
     be.tree.expr_at(id).kind.match({
-        Call(c)  => call_type(be, c, ctx, want),
-        Paren(p) => ty_of(be, p.inner, ctx, want),
-        Try(t)   => try_value_type(be, t.operand, ctx, want),
-        Index(x) => index_type(be, x, ctx, want),
-        _        => Ok(want),
+        Call(c)   => call_type(be, c, ctx, want),
+        Paren(p)  => ty_of(be, p.inner, ctx, want),
+        Try(t)    => try_value_type(be, t.operand, ctx, want),
+        Index(x)  => index_type(be, x, ctx, want),
+        Access(a) => access_field_type(be, a, ctx, want),
+        Binary(b) => binary_type(be, b, ctx, want),
+        _         => Ok(want),
     })
 }
 

@@ -44,6 +44,7 @@ ctype = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
 bind_text = gen.gen_c.gen_c_range
 expr, ty_of = gen.gen_c.gen_c_expr
+field_of = gen.gen_c.gen_c_cap
 lower_const_value = gen.gen_c.gen_c_const
 
 // -----------------------------------------------------------------
@@ -237,6 +238,31 @@ enum_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
 // is gone by the time this runs. Picking the first would compile, and
 // would read the other impl's field.
 // -----------------------------------------------------------------
+
+// WHAT A FIELD READ EVALUATES TO, when the frame cannot say.
+//
+// `gen_c_expr.zen` walks a dot chain through the FRAME — the frame is
+// the authority on a binding's type — and that walk stops at the first
+// node that is not a name or a field. `p.read(0).value` has a CALL
+// under the dot, so the walk gives up one node short, and sema has
+// nothing either: `alloc.create<T>()` is a bodyless generic member, so
+// the whole chain hanging off `p` is unknown to it.
+//
+// The answer is the same two facts `write_field_access` below already
+// reads — the receiver's type, and the field on its declaration — asked
+// as a question instead of written as C. Without it the chain types as
+// the expectation, and an expectation is exactly what a `println`
+// argument does not have: `p.read(0).next` came back unknown and the
+// `read` on it had no receiver to resolve against.
+access_field_type* = (be :: CBackend, a: Access, ctx: Ctx, want: TyId)
+                     Res<TyId, AllocError> {
+    unknown = be.check.types.unknown().try();
+    rty = ty_of(be, a.base, ctx, unknown).try();
+    field_of(be, rty, a.name.text).try().match({
+        Ok(t) => Ok(t),
+        None  => Ok(want),
+    })
+}
 
 write_field_access = (be :: CBackend, id: ExprId, a: Access, ctx: Ctx,
                       out :: String) Res<(), AllocError> {

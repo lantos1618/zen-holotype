@@ -158,6 +158,35 @@ lower_binary* = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx, want: TyId,
     })
 }
 
+// WHAT AN OPERATOR EVALUATES TO, when sema could not say.
+//
+// `&&`, `||` and every comparison are `bool` whatever they were given;
+// everything else is its operands' own type, which is the rule
+// `operand_type` below already states. Sema answers this for everything
+// it typed, and what reaches here is an operand it could NOT type — a
+// field hanging off `alloc.create<T>()`, whose whole chain is the
+// backend's answer and not the memo's. `println("{}", a.n + b.n)` is
+// where it shows: an argument has no expectation to fall back on, so an
+// unanswered `+` is a value with no write and a refusal by type.
+binary_type* = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
+               Res<TyId, AllocError> {
+    (is_logical(b.op) || is_comparison(b.op)).match({
+        true  => be.check.types.bool_ty(),
+        false => operand_answer(be, b, ctx, want),
+    })
+}
+
+// The left operand, then the right: an arithmetic operator's operands
+// are one type, so either may be the one this backend can answer.
+operand_answer = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
+                 Res<TyId, AllocError> {
+    lhs = ty_of(be, b.lhs, ctx, want).try();
+    usable(be, lhs).match({
+        true  => Ok(lhs),
+        false => ty_of(be, b.rhs, ctx, want),
+    })
+}
+
 is_logical* = (op: BinOp) bool {
     op.match({ And => true, Or => true, _ => false })
 }
