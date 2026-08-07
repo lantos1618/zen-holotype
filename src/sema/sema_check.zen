@@ -123,6 +123,19 @@ Checker* = {
     // CALL SITE, and `ExprId` already separates two call sites.
     inst_memo* :: Map<ExprId, Inst>,
 
+    // THE SET A NAME STANDS FOR. `A | B` is a union of existing types
+    // when every variant names one, and `WriteError` is then a NAME for
+    // that set rather than a type of its own. The named type stays what
+    // it was — gen_c's whole representation of a set is the declared
+    // enum — and this says what it MEANS, which is the only part
+    // containment needs. `sema_union.zen` explains why both are kept.
+    //
+    // Keyed on the named `TyId` and not on the declaration, so the
+    // read-only side — `set_assignable` below — can ask without an
+    // allocator. A name absent from this table is nominal and stands
+    // for itself, which is what `set_of` answers.
+    set_memo* :: Map<TyId, TyId>,
+
     // the scope stack: one flat Vec with marks, not a chain of frames.
     // A chain needs indirection and every frame is an allocation; a
     // stack needs a `usize` and `release` is what pops it.
@@ -485,11 +498,26 @@ Checker* = {
         })
     }
 
+    // The set a type stands for. A name declared `A | B` stands for the
+    // union of what its variants name; everything else stands for
+    // itself. `sema_union.zen` records the first kind.
+    set_of* = (self: @Self, id: TyId) TyId {
+        self.set_memo.get(id).match({
+            None    => id,
+            Ok(set) => set,
+        })
+    }
+
     // A union target accepts any of its members: widening an error set
     // is what `.try()` does, and it is not a conversion.
+    //
+    // Both sides go through `set_of` because either may be a NAME for a
+    // set — `WriteError` accepting an `AllocError` is the whole point,
+    // and it is spelled with a name on both sides of the question.
     set_assignable = (self: @Self, got: TyId, want: TyId) bool {
-        self.types.at(want).match({
-            Union(_) => self.types.set_has(want, got),
+        wide = self.set_of(want);
+        self.types.at(wide).match({
+            Union(_) => self.types.set_within(self.set_of(got), wide),
             _        => false,
         })
     }
@@ -579,6 +607,7 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         type_memo: a.Map<TypeId, TyId>(),
         call_memo: a.Map<ExprId, DeclId>(),
         inst_memo: a.Map<ExprId, Inst>(),
+        set_memo: a.Map<TyId, TyId>(),
         locals: a.Vec<Binding>(),
         tvars: a.Vec<Binding>(),
         bounds: a.Vec<Binding>(),
