@@ -288,7 +288,7 @@ bind_extra = (extra: Inst, i: usize, v: TyId, full :: Inst)
 settle_from_body = (be :: CBackend, l: Lambda, i: usize, ptys: Vec<TyId>,
                     ctx: Ctx, extra :: Inst) Res<(), AllocError> {
     ret_var(be, i, ptys).match({
-        Ok(v) => bind_body_type(be, l, v, ctx, extra),
+        Ok(v) => bind_body_type(be, l, v, i, ptys, ctx, extra),
         None  => Ok(()),
     })
 }
@@ -324,9 +324,84 @@ keep_var = (be :: CBackend, t: TyId) Res<TyId> {
 }
 
 
-bind_body_type = (be :: CBackend, l: Lambda, v: TyId, ctx: Ctx,
-                  extra :: Inst) Res<(), AllocError> {
-    extra.bind(v, lambda_value_type(be, l, ctx).try())
+// THE BODY IS READ WITH ITS OWN PARAMETERS BOUND. "A closure passed to
+// a function whose signature is already known infers its parameter
+// types FROM that signature", and this is the half of that sentence the
+// backend owes: without it `map`'s `(h, index, value) { value * 2 }`
+// types `value` as nothing, answers `()`, and `U` becomes a Vec of
+// nothing rather than a Vec of what the body made — which is a wrong
+// answer with no diagnostic until something tries to print an element.
+//
+// The bindings are TYPES ONLY and are rewound immediately: nothing is
+// emitted, and the same parameters are declared again with C storage
+// when the body is actually lowered.
+bind_body_type = (be :: CBackend, l: Lambda, v: TyId, i: usize,
+                  ptys: Vec<TyId>, ctx: Ctx, extra :: Inst)
+                 Res<(), AllocError> {
+    cmark = be.check.mark();
+    lmark = be.mark();
+    peek_params(be, l, i, ptys).try();
+    got = lambda_value_type(be, l, ctx).try();
+    be.release(lmark).try();
+    be.check.release(cmark).try();
+    extra.bind(v, got)
+}
+
+peek_params = (be :: CBackend, l: Lambda, i: usize, ptys: Vec<TyId>)
+              Res<(), AllocError> {
+    ptys.get(i).match({
+        None  => Ok(()),
+        Ok(t) => peek_fn_params(be, l, t),
+    })
+}
+
+peek_fn_params = (be :: CBackend, l: Lambda, t: TyId) Res<(), AllocError> {
+    be.check.types.at(t).match({
+        Fn(ft) => peek_each_param(be, l, ft.params),
+        _      => Ok(()),
+    })
+}
+
+peek_each_param = (be :: CBackend, l: Lambda, params: Vec<TyId>)
+                  Res<(), AllocError> {
+    Range(0, l.params.len).loop((h, i) {
+        peek_param_at(be, l, params, i).try();
+    });
+    Ok(());
+}
+
+peek_param_at = (be :: CBackend, l: Lambda, params: Vec<TyId>, i: usize)
+                Res<(), AllocError> {
+    l.params.get(i).match({
+        None  => Ok(()),
+        Ok(p) => peek_param_named(be, p, params, i),
+    })
+}
+
+// A parameter whose type is still open says nothing, and binding it to
+// one would answer a later question with a `Var`. Left unbound, the
+// name simply does not resolve and the body answers `()` — which is
+// what it did before any of this.
+peek_param_named = (be :: CBackend, p: Param, params: Vec<TyId>, i: usize)
+                   Res<(), AllocError> {
+    params.get(i).match({
+        None  => Ok(()),
+        Ok(t) => peek_declare(be, p.name.text, t),
+    })
+}
+
+peek_declare = (be :: CBackend, name: str, ty: TyId) Res<(), AllocError> {
+    settled(be, ty).match({
+        false => Ok(()),
+        true  => declare_peek_slot(be, name, ty),
+    })
+}
+
+declare_peek_slot = (be :: CBackend, name: str, ty: TyId)
+                    Res<(), AllocError> {
+    be.declare(name, ty, false).try();
+    be.check.bind(name, ty, false).try();
+    Ok(());
 }
 
 // WHAT A LAMBDA BODY EVALUATES TO. A block with no value node is a
