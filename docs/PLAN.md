@@ -8,13 +8,14 @@ Companion to `DESIGN.md`. That file says what the language is and why; this one 
 
 ## The tree
 
-The whole repository, with the stage each piece appears at. Nothing here is optional and nothing is a placeholder — if a path is listed, something is expected to live there.
+The whole repository, with the stage each piece appears at. Nothing here is optional — every path is either in the tree or marked NOT WRITTEN, and a marked one is owed rather than optional.
 
 ```
 zen/
 ├── README.md                        # what Zen is; how to build from seed
 ├── Makefile                         # the only entry point a newcomer needs
-├── build.zen                        # this project's own build file (stage 1)
+├── build.zen                        # this project's own build file — NOT WRITTEN,
+│                                    #   and it is what `make bench` would stand on
 │
 ├── docs/
 │   ├── DESIGN.md                    # the language, and why. binding.
@@ -40,8 +41,10 @@ zen/
 │                                    #     regenerate, THEN commit. never the reverse.
 │
 ├── src/                             # the real compiler + stdlib, in zen
-│   ├── zen.zen                      # (1) thin cli: build / fmt / test / lsp
-│   ├── ast.zen                      # (1) THE ast. compiler, @meta and gen_c share it.
+│   ├── zen/zen.zen                  # (1) thin cli: build / fmt / test / lsp
+│   ├── zen/zen_cli.zen              # (1) argv -> Cli. touches no capability.
+│   ├── zen/zen_build.zen            # (1) the build driver behind `zen build`
+│   ├── ast/ast.zen                  # (1) THE ast. compiler, @meta and gen_c share it.
 │   ├── lex/lex.zen                  # (1)
 │   ├── parse/parse.zen              # (1) the module surface: starred re-exports
 │   ├── parse/parse_decl.zen         # (1) siblings repeat the folder as a prefix
@@ -50,36 +53,38 @@ zen/
 │   ├── sema/sema.zen                # (1)
 │   ├── sema/sema_type.zen           # (1) type checking, generic instantiation
 │   ├── sema/sema_match.zen          # (1) exhaustiveness
-│   ├── sema/sema_own.zen            # (3) ownership / sendability checker
+│   ├── sema/sema_depth.zen          # (1) the instantiation-depth bound
+│   ├── sema/sema_own.zen            # (3) ownership / sendability checker — NOT WRITTEN
 │   ├── gen/gen.zen                  # (1) backend-shared plumbing
-│   ├── gen/gen_c.zen                # (1) the c backend
-│   ├── build/build.zen              # (1) the build driver behind `zen build`
-│   ├── fmt/fmt.zen                  # (2) parse |> print. same parser, same trivia.
-│   ├── lsp/lsp.zen                  # (4) thin server over sema queries
-│   ├── meta/meta.zen                # (5) @meta over ast.zen nodes
-│   ├── comptime/comptime.zen        # (5) the step-budgeted evaluator
+│   ├── gen/gen_name.zen             # (1) the C symbol for everything
+│   ├── gen/gen_c/gen_c.zen          # (1) the c backend: a folder, ~35 files
+│   ├── fmt/fmt.zen                  # (2) parse |> print — NOT WRITTEN
+│   ├── lsp/lsp.zen                  # (4) thin server over sema queries — NOT WRITTEN
+│   ├── meta/meta.zen                # (5) @meta over ast nodes — NOT WRITTEN
+│   ├── comptime/comptime.zen        # (5) the step-budgeted evaluator — NOT WRITTEN
 │   │
 │   └── std/                         # (0.6) the floor. written BEFORE the compiler.
 │       ├── std.zen                  #       starred re-exports; the prelude assembles here
 │       ├── core/core.zen            #       prelude root
 │       ├── core/result.zen          #       Res<T>, Res<T,E>, .try()
 │       ├── core/bool.zen            #       then
-│       ├── core/loop.zen            #       the loop family, find, filter, map
+│       ├── core/loop/loop.zen       #       the loop family, find, filter, map
 │       ├── core/drop.zen            #       Drop
-│       ├── core/scope.zen           #       (3) Scope / @scope / defer
+│       ├── core/scope.zen           #       Scope / @scope / defer
 │       ├── core/eq.zen              #       Eq
 │       ├── core/hash.zen            #       Hash, Hasher
 │       ├── core/display.zen         #       Display: dump (5), toString (1)
-│       ├── mem/mem.zen              #       Alloc, AllocError, arena
-│       ├── text/text.zen
-│       ├── text/string.zen          #       str, String
-│       ├── collections/collections.zen
-│       ├── collections/vec.zen      #       Vec<T>
-│       ├── collections/map.zen      #       Map<K,V>, Entry
+│       ├── core/io.zen              #       Sink, WriteError
+│       ├── core/num.zen             #       the checked arithmetic floor
+│       ├── core/byte.zen            #       core/path.zen, core/range.zen, core/time.zen
+│       ├── mem/mem.zen              #       mem_alloc, mem_arena, mem_ptr
+│       ├── env/env.zen              #       Env, Mem, Fs, Console — the capabilities
+│       ├── text/text.zen            #       text_str, text_string, text_fmt, text_utf8
+│       ├── collections/collections.zen   #  collections_vec, collections_map
 │       ├── test/test.zen            #       Tester, Bencher, BenchStats
 │       ├── build/build.zen          #       Builder, Package, Budget
-│       ├── actor/actor.zen          #       (5) Actor, Context, Ref
-│       └── thread/thread.zen        #       (5) Threads, Thread
+│       ├── actor/actor.zen          #       (5) Actor, Context, Ref — NOT WRITTEN
+│       └── thread/thread.zen        #       (5) Threads, Thread — NOT WRITTEN
 │
 └── tests/
     ├── parse/                       # (0.1) tree-sitter corpus. every DESIGN.md block.
@@ -91,12 +96,14 @@ zen/
     │   ├── hello/
     │   ├── traps/                   #       one per trap: overflow, div0, index
     │   └── ...
-    ├── must-fail/                   # (3) compiles today, must STOP compiling
-    │   ├── use_after_consume.zen
-    │   ├── immutable_receiver.zen
-    │   └── send_ref.zen
+    ├── must-fail/                   # compiles today, must STOP compiling.
+    │   ├── lex/  parse/  sema/      #       by the phase that owes the diagnostic,
+    │   ├── modules/  traps/         #       not one flat directory
+    │   └── own/                     # (3) use_after_consume, immutable_receiver, send_ref
     └── bench/                       # (1) Bencher functions; budgets in build.zen
 ```
+
+**A path marked NOT WRITTEN is a promise, not a description.** The paragraph above says nothing here is a placeholder — that is a statement about intent, and this sketch had drifted far enough from the tree to read as a statement about fact. Eight of its paths named files that do not exist and nine more named files under the wrong name, which is worse than listing nothing: a reader checking whether the ownership checker exists found a path for it and stopped looking. Where a stage has not arrived, the marker says so.
 
 Three things about this tree that are decisions, not layout:
 
@@ -235,17 +242,17 @@ Two traps to expect here, both consequences of laws in `DESIGN.md`:
 Layout, per `DESIGN.md`:
 
 ```
-src/zen.zen          // thin CLI: build / fmt / test / lsp
-src/build.zen        // the build logic
-src/ast.zen          // THE ast — @meta, DumpAst and gen_c all consume these nodes
+src/zen/zen.zen      // thin CLI: build / fmt / test / lsp
+src/zen/zen_build.zen // the build logic
+src/ast/ast.zen      // THE ast — @meta, DumpAst and gen_c all consume these nodes
 src/lex/lex.zen
 src/parse/parse.zen
 src/sema/sema.zen
 src/gen/gen.zen
-src/gen/gen_c.zen
+src/gen/gen_c/gen_c.zen
 ```
 
-`src/ast.zen` is the keystone. One AST with three consumers — the compiler, `@meta`, and `gen_c` — and `@meta` returning these exact node types is what makes stage 5's metaprogramming free rather than a parallel universe.
+`src/ast/ast.zen` is the keystone. One AST with three consumers — the compiler, `@meta`, and `gen_c` — and `@meta` returning these exact node types is what makes stage 5's metaprogramming free rather than a parallel universe.
 
 Order: lexer → parser → sema → gen_c, each with its own tests, in one pass. Do not build a second frontend to "get started faster."
 
@@ -336,7 +343,7 @@ One correctness note that is now load-bearing for this stage as well: `type_of`'
 
 Orthogonal to everything above; it constrains nothing in the compiler.
 
-- `@meta` over `src/ast.zen` nodes: builds and reads, memoized on (function, arguments), declared types stay nominal
+- `@meta` over `src/ast/ast.zen` nodes: builds and reads, memoized on (function, arguments), declared types stay nominal
 - the comptime evaluator: language minus io and actors, may allocate, **step-budgeted so a bad `@meta` fails the build rather than hanging**, no file reads in v1
 - actors: per-actor arena rooted in the runtime (not `main`'s), one message at a time, causal ordering, quiescence exit
 - `main` returning is not the program exiting
