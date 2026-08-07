@@ -63,6 +63,7 @@ field_type, request_type = gen.gen_c.gen_c_type
 Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
 plain_ctx = gen.gen_c.gen_c_decl
 lower_call, res_value, is_res_ctor = gen.gen_c.gen_c_call
+needs_hoist, hoist_expr = gen.gen_c.gen_c_hoist
 call_ret_type = gen.gen_c.gen_c_infer
 lower_unary, lower_binary = gen.gen_c.gen_c_op
 lower_index, index_type = gen.gen_c.gen_c_index
@@ -475,10 +476,23 @@ res_type_of* = (be :: CBackend, id: ExprId, ctx: Ctx)
 // union target accepts any of its members". Without this it was emitted
 // as a bare member assignment into the set's struct — no tag, wrong
 // type, and `cc` rejecting a program nothing had reported.
+//
+// A BARE SUCCESS REACHING A `Res` SLOT IS THE THIRD OF THE SAME SHAPE.
+// `7;` closing a `Res<i32, E>` is `Ok(7)` — the same value, written
+// shorter — and it arrives here through the same three doors as the
+// other two. `gen_c_hoist.zen` builds it.
 expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, out :: String)
         Res<(), AllocError> {
     needs_set(be, id, ctx, want).try().match({
         true  => set_expr(be, id, ctx, want, out),
+        false => hoist_or_value(be, id, ctx, want, out),
+    })
+}
+
+hoist_or_value = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+                  out :: String) Res<(), AllocError> {
+    needs_hoist(be, id, ctx, want).try().match({
+        true  => hoist_expr(be, id, ctx, want, out),
         false => fat_or_value(be, id, ctx, want, out),
     })
 }

@@ -1,0 +1,71 @@
+// src/gen/gen_c/gen_c_hoist.zen
+// What hoisting is in C.
+//
+// DESIGN.md: "a bare T lifts into Res<T> wherever a Res is expected —
+// `0;` closes a `Res<i32, E>` function like `Ok(0);` does." In C that is
+// not a conversion and there is nothing to relax: a `Res` is a tagged
+// struct, an `i32` is four bytes, and `return 7;` from a function whose
+// return type is the struct is a program `cc` rejects. The value has to
+// be BUILT, exactly as a written `Ok(7)` is built.
+//
+// SO IT IS BUILT BY THE SAME CODE. `write_res_payload` is exported from
+// `gen_c_call.zen` for this: the tag, and the payload under the member
+// `Ok` names. Two copies of that layout would be two places to fix when
+// the layout moves, and the whole point of hoisting is that the two
+// forms are the SAME VALUE.
+//
+// ONLY SUCCESS, AND ONLY WHERE THE VALUE DOES NOT ALREADY FIT. Nothing
+// here decides whether the lift is LEGAL — `sema_hoist.zen` owns the
+// "exactly one variant carries the type" count and the refusal that
+// failure never lifts, and it reports before a backend runs. What is
+// left here is the one construction sema said would happen, and the
+// predicate is therefore narrow on purpose: a value already at the
+// wanted type is a copy, and a value that fits nothing is a mismatch
+// somebody else named.
+//
+// A TYPE NOBODY HAS COMPUTED IS NOT HOISTED. `assignable` waves poison
+// and an unsubstituted parameter through, so an `Unknown` receiver
+// answers "it already fits" and falls out of the predicate before any
+// value is wrapped. Being wrong in that direction emits the C that was
+// emitted before this file existed; being wrong in the other wraps a
+// value that was already a `Res`.
+
+Ast, Expr, ExprId = ast
+Alloc, AllocError = std.mem
+str, String = std.text
+TyId, Ty, Types, TyRes = sema.sema_ty
+Ctx = sema.sema_check
+CBackend = gen.gen_c.gen_c_state
+ty_of = gen.gen_c.gen_c_expr
+write_res_payload = gen.gen_c.gen_c_call
+
+// Does this value have to be lifted into the `Res` that is wanted?
+needs_hoist* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+               Res<bool, AllocError> {
+    be.check.types.at(want).match({
+        Res(r) => lifts_into(be, id, ctx, want, r),
+        _      => Ok(false),
+    })
+}
+
+lifts_into = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, r: TyRes)
+             Res<bool, AllocError> {
+    unknown = be.check.types.unknown().try();
+    cty = ty_of(be, id, ctx, unknown).try();
+    be.check.assignable(cty, want).match({
+        true  => Ok(false),
+        false => Ok(be.check.assignable(cty, r.value)),
+    })
+}
+
+// `Ok` over the value at the SUCCESS PAYLOAD'S type, which is what stops
+// the wrap from asking for itself again: the inner lowering is handed
+// `r.value`, the value already fits it, and `needs_hoist` says no.
+hoist_expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+               out :: String) Res<(), AllocError> {
+    be.check.types.at(want).match({
+        Res(r) => write_res_payload(be, id, want, "Ok", id, r.value, ctx,
+                                    out),
+        _      => Ok(()),
+    })
+}
