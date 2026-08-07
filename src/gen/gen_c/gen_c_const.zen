@@ -28,6 +28,7 @@ CBackend = gen.gen_c.gen_c_state
 unresolved, unsupported = gen.gen_c.gen_c_state
 expr, ty_of = gen.gen_c.gen_c_expr
 base_decl, type_const, TypeConst = gen.gen_c.gen_c_read
+intern_named, write_variant_value = gen.gen_c.gen_c_read
 plain_ctx = gen.gen_c.gen_c_decl
 
 // A module-level constant, WRITTEN OUT AT EACH USE rather than emitted
@@ -52,8 +53,32 @@ lower_global_value* = (be :: CBackend, id: ExprId, text: str, ctx: Ctx,
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, text, found).try();
     found.get(0).match({
-        None  => unresolved(be, id, text, out),
+        None  => lower_variant_value(be, id, text, ctx, out),
         Ok(d) => lower_def_value(be, id, d, text, want, out),
+    })
+}
+
+// A BARE VARIANT: `Once` where a visible enum declares it.
+//
+// The enum comes from the SAME walk sema used to type the node, asked
+// in the same order — a declaration first, the variant only when
+// nothing else answered. Two walks that disagreed would emit a tag from
+// one enum into a value of another, which C accepts and nothing catches.
+lower_variant_value = (be :: CBackend, id: ExprId, text: str, ctx: Ctx,
+                       out :: String) Res<(), AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.variant_defs(be.tree, ctx.module, text, found).try();
+    found.get(0).match({
+        None  => unresolved(be, id, text, out),
+        Ok(d) => lower_bare_variant(be, id, d, text, out),
+    })
+}
+
+lower_bare_variant = (be :: CBackend, id: ExprId, d: Def, text: str,
+                      out :: String) Res<(), AllocError> {
+    intern_named(be, d).match({
+        None   => unresolved(be, id, text, out),
+        Ok(ty) => write_variant_value(be, id, ty, text, out),
     })
 }
 
