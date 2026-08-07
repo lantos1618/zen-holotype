@@ -1,0 +1,96 @@
+// src/zen/zen_path.zen
+// What a module PATH means, said away from a build.
+//
+// A module lives at `<folder>/<folder>.zen` and a module NAME is that
+// path with its separators as dots. Both are facts about a string, and
+// neither is a phase of anything — `zen_build.zen`'s header already
+// said so ("a fact about a path, and it is written as free functions so
+// a second driver reads the same rule"), but saying it in a comment did
+// not move it, and the file went on growing around it.
+//
+// EVERY PATH THAT REACHES A SPAN IS RELATIVE TO THE COMPILATION ROOT,
+// and `relative_to` is the whole of how. TESTING.md says why it matters
+// rather than merely being tidy: an absolute path in a diagnostic puts
+// the checkout's location into the emitted C, and two checkouts of one
+// tree then emit different bytes — which silently voids the determinism
+// oracle the plan rests on.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Range = std.core
+
+QualifiedName = ast.ast_span
+
+// The last path component of a root — `probe` of `tests/corpus/x/probe`
+// — which is what a folder repeats to name its root file. A path with no
+// `/` in it is already its own basename, which is why `cut` starts at 0.
+base_of* = (root: str) str {
+    root.slice(root.after_last_slash(), root.len);
+}
+
+// One past the last `/`, and 0 when there is none — which is what makes
+// a path with a single component its own last component.
+after_last_slash* = (path: str) usize {
+    cut ::= 0;
+    Range(0, path.len).loop((h, i) {
+        (path.index(i) == '/').then(() { cut = i + 1; });
+    });
+    cut
+}
+
+// THE MODULE A PATH IS, and the name a `Unit` carries.
+//
+// The path relative to the root, with the separators as dots and the
+// extension off: `<root>/a/b/c.zen` is `a.b.c`. That is the file's
+// IDENTITY and it is one name, which is the point — a folder root has
+// a second, shorter spelling (`std.core` for `std/core/core.zen`) and
+// naming the module after whichever spelling arrived first is what made
+// one file two modules with one set of declarations.
+//
+// The short spelling is not lost: it is a way of WRITING the identity
+// rather than a second identity, and `World.index_of` is where the two
+// meet — the same split `bootstrap/modules.py` draws between a file's
+// `dotted` and the aliases its `_module_index` maps onto it.
+module_name* = (a: Alloc, root: str, path: str) Res<str, AllocError> {
+    inner = path.slice(root.len + 1, path.len - EXT_BYTES);
+    out ::= a.String().try();
+    Range(0, inner.len).loop((h, i) {
+        out.add_byte(dot_for(inner.index(i))).try();
+    });
+    Ok(out.view());
+}
+
+// The same file, said relative to the compilation root: `module_name`
+// without the dots and without dropping the extension. One `+ 1` for
+// the separator, and a path that is not under the root comes back
+// unchanged rather than being sliced into nonsense.
+relative_to* = (root: str, path: str) str {
+    (path.len > root.len + 1).match({
+        true  => path.slice(root.len + 1, path.len),
+        false => path,
+    });
+}
+
+// `.zen`, and it is written here because `module_name` is the one place
+// that has to take it back off.
+EXT_BYTES : usize = 4
+
+dot_for = (b: u8) u8 {
+    (b == '/').match({ true  => '.', false => b })
+}
+
+// The inverse, for the one module named by a dotted CONSTANT rather
+// than by a path: `std.core` is the prelude's name and `<root>/std/
+// core.zen` is where its bytes are.
+slash_for* = (b: u8) u8 {
+    (b == '.').match({ true  => '/', false => b })
+}
+
+// The last segment of a dotted name — `mem` of `std.mem` — which is what
+// a folder repeats to name its root file.
+last_of* = (q: QualifiedName) str {
+    q.segments.get(q.segments.len - 1).match({
+        Ok(s) => s.text,
+        None  => "",
+    })
+}

@@ -37,9 +37,9 @@
 // the `Build` that holds the tree, the tally and the authority, and
 // splitting the walk from the check would put the `Ast` in one file and
 // the only thing that finishes it in another. The one part that is NOT
-// about a build has already left: what a module NAME is (`module_name`
-// and its helpers, below) is a fact about a path, and it is written as
-// free functions so a second driver reads the same rule.
+// about a build has now actually left: what a module NAME is is a fact
+// about a path, it never mentioned a `Build`, and it is `zen_path.zen`
+// — free functions, so a second driver reads the same rule.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -77,6 +77,16 @@ Def, World = sema.sema
 Emit, CBackend, emit_program = gen.gen
 
 Job = zen.zen_cli
+
+// What a module PATH means, which is not a phase of a build and no
+// longer lives in this file: `zen_path.zen` holds it, and this file's
+// header has claimed since it was written that it should.
+//
+// Only the four called by BARE NAME are here. `base_of` and
+// `after_last_slash` take a `str` first and are reached through one, so
+// they travel with the value and importing them would say nothing.
+module_name, relative_to = zen.zen_path
+slash_for, last_of = zen.zen_path
 
 // WHERE A PROGRAM STARTS, spelled once. It is both a module name the
 // entry probe looks for and the declaration the root must own, and the
@@ -203,7 +213,7 @@ Build* = {
     }
 
     entry_after_main = (self :: @Self) Res<Unit, AllocError> {
-        second = self.candidate(base_of(self.root)).try();
+        second = self.candidate(self.root.base_of()).try();
         self.env.fs.exists(second.path).match({
             true  => Ok(second),
             false => self.candidate("zen"),
@@ -422,7 +432,64 @@ Build* = {
 
     enqueue = (self :: @Self, q: QualifiedName, seen :: Vec<Unit>)
               Res<(), AllocError> {
-        self.queue(self.file_of(q).try(), seen)
+        path = self.file_of(q).try();
+        self.queue(path, seen).try();
+        self.folder_root(path, seen)
+    }
+
+    // A NESTED MODULE TRAVELS WITH ITS FOLDER, and this is the one place
+    // an import-driven walk has to admit that UFCS is not import-driven.
+    //
+    // DESIGN.md: "the candidates are the members of `x`'s type, its
+    // impls' and its bounds' methods, and every exported free function
+    // whose FIRST PARAMETER TYPE is `x`'s type" — a whole-program query,
+    // and `World.exported_named` implements it as one over every module
+    // in the `World`. So the answer to `c.type_of(id, ctx)` depended on
+    // which modules the walk happened to load, and a program's MEANING
+    // is not something a loader gets to decide.
+    //
+    // It bit exactly where the rule is written down: `sema_check.zen`
+    // does NOT import `sema_type.zen`, on purpose, because `type_of`
+    // reaches a `Checker` BY UFCS. A file that imported `sema.sema_check`
+    // and asked for `type_of` got an empty pool and no candidate — the
+    // four `tests/corpus/sema_zen/` programs that are the LSP's queries
+    // said so, and said it as `codegen has no type for` because a call
+    // that resolves to nothing types as nothing.
+    //
+    // THE FOLDER ROOT IS THE ANSWER AND THE WHOLE TREE IS NOT. A folder
+    // root is a file of starred re-exports — `sema/sema.zen`'s own
+    // header: "this file is the module's public surface and nothing
+    // else" — so queueing it pulls in the siblings that complete the
+    // pool and nothing that the folder does not publish. It is also
+    // exactly what DESIGN.md's "importing a type pulls its world along"
+    // names, said as a load rule rather than as a comment.
+    //
+    // A MODULE THAT IS ITS OWN FOLDER ROOT IS ALREADY THAT SURFACE, so
+    // nothing more is queued: `std.mem` is `std/mem/mem.zen` and does
+    // NOT drag `std/std.zen` and the whole of std in behind it. The
+    // walk climbs one level, never to the compilation root.
+    folder_root = (self :: @Self, path: str, seen :: Vec<Unit>)
+                  Res<(), AllocError> {
+        cut = path.after_last_slash();
+        (cut > self.root.len + 1).match({
+            false => Ok(()),
+            true  => self.queue_folder_root(path.slice(0, cut - 1), path, seen),
+        })
+    }
+
+    // Probed, not required, and for the same reason `probe` above is: a
+    // folder with no root file is a folder the module graph would reject
+    // on its own terms, and reporting it from here would blame the
+    // import that merely lives next to it.
+    queue_folder_root = (self :: @Self, dir: str, path: str, seen :: Vec<Unit>)
+                        Res<(), AllocError> {
+        root_file ::= self.alloc.String("{}/{}.zen", dir, dir.base_of()).try();
+        skip = root_file.view().eq(path)
+            || !self.env.fs.exists(root_file.view());
+        skip.match({
+            true  => Ok(()),
+            false => self.queue(root_file.view(), seen),
+        })
     }
 
     // Queued on the PATH, because the path is the module and a spelling
@@ -684,80 +751,6 @@ build* = (env: Env, a: Alloc, job: Job) Res<i32, AllocError> {
     b.walk(entry).try();
     b.back_end(job).try();
     Ok(b.code());
-}
-
-// The last path component of a root — `probe` of `tests/corpus/x/probe`
-// — which is what a folder repeats to name its root file. A root with no
-// `/` in it is already its own basename, which is why `cut` starts at 0.
-base_of = (root: str) str {
-    root.slice(after_last_slash(root), root.len);
-}
-
-// One past the last `/`, and 0 when there is none — which is what makes
-// a path with a single component its own last component.
-after_last_slash = (path: str) usize {
-    cut ::= 0;
-    Range(0, path.len).loop((h, i) {
-        (path.index(i) == '/').then(() { cut = i + 1; });
-    });
-    cut
-}
-
-// THE MODULE A PATH IS, and the name a `Unit` carries.
-//
-// The path relative to the root, with the separators as dots and the
-// extension off: `<root>/a/b/c.zen` is `a.b.c`. That is the file's
-// IDENTITY and it is one name, which is the point — a folder root has
-// a second, shorter spelling (`std.core` for `std/core/core.zen`) and
-// naming the module after whichever spelling arrived first is what made
-// one file two modules with one set of declarations.
-//
-// The short spelling is not lost: it is a way of WRITING the identity
-// rather than a second identity, and `World.index_of` is where the two
-// meet — the same split `bootstrap/modules.py` draws between a file's
-// `dotted` and the aliases its `_module_index` maps onto it.
-module_name* = (a: Alloc, root: str, path: str) Res<str, AllocError> {
-    inner = path.slice(root.len + 1, path.len - EXT_BYTES);
-    out ::= a.String().try();
-    Range(0, inner.len).loop((h, i) {
-        out.add_byte(dot_for(inner.index(i))).try();
-    });
-    Ok(out.view());
-}
-
-// The same file, said relative to the compilation root: `module_name`
-// without the dots and without dropping the extension. One `+ 1` for
-// the separator, and a path that is not under the root comes back
-// unchanged rather than being sliced into nonsense.
-relative_to* = (root: str, path: str) str {
-    (path.len > root.len + 1).match({
-        true  => path.slice(root.len + 1, path.len),
-        false => path,
-    });
-}
-
-// `.zen`, and it is written here because `module_name` is the one place
-// that has to take it back off.
-EXT_BYTES : usize = 4
-
-dot_for = (b: u8) u8 {
-    (b == '/').match({ true  => '.', false => b })
-}
-
-// The inverse, for the one module named by a dotted CONSTANT rather
-// than by a path: `std.core` is the prelude's name and `<root>/std/
-// core.zen` is where its bytes are.
-slash_for = (b: u8) u8 {
-    (b == '.').match({ true  => '/', false => b })
-}
-
-// The last segment of a dotted name — `mem` of `std.mem` — which is what
-// a folder repeats to name its root file.
-last_of = (q: QualifiedName) str {
-    q.segments.get(q.segments.len - 1).match({
-        Ok(s) => s.text,
-        None  => "",
-    })
 }
 
 // What went wrong with a file, in the words the capability uses. Every
