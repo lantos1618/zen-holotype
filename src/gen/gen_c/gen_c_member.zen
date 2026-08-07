@@ -51,6 +51,7 @@ Checker, Ctx = sema.sema_check
 Inst = sema.sema_inst
 Base, Found, base_of, members_of, member_named, self_ctx = sema.sema_member
 Case, cases_of, find_case = sema.sema_case
+impl_bound_type, bound_members = sema.sema_supply
 is_case = sema.sema_match
 module_of, sym_fn, sym_member, sym_variant = gen.gen_name
 GenFault = gen.gen_diag
@@ -346,14 +347,43 @@ collect_impl_fn = (be :: CBackend, decl: DeclId, i: ImplId, name: str,
 impl_fn_at = (be :: CBackend, i: ImplId, name: str, out :: Vec<Member>)
              Res<(), AllocError> {
     be.check.world.impl_at(be.tree, i).match({
-        Ok(im) => keep_impl_fn(im, name, out),
+        Ok(im) => keep_impl_fn(be, i, im, name, out),
         None   => Ok(()),
     })
 }
 
-keep_impl_fn = (im: Impl, name: str, out :: Vec<Member>)
-               Res<(), AllocError> {
+// THE IMPL'S OWN MEMBERS, THEN THE BOUND'S DEFAULTS. "A struct whose
+// fields happen to be functions, used as a bound, is what other
+// languages call a trait", and `A.impl(B, {..})` supplies a value for
+// every field `B` declares — so a bodied member on `B` is a field the
+// bound ALREADY has a value for. `area` comes along free because it
+// "only ever needed a width and a height".
+//
+// THE SAME QUESTION `sema_supply.zen`'s `provides` ASKS, in the same
+// order: the impl entry, else the bound with a body of its own. Asking
+// only the impl block refused a call sema had already resolved, and a
+// backend that disagrees with the checker about what a dot reaches
+// reports "not implemented" for a program that is written correctly.
+keep_impl_fn = (be :: CBackend, i: ImplId, im: Impl, name: str,
+                out :: Vec<Member>) Res<(), AllocError> {
+    before = out.len;
     im.members.loop((h, m) { keep_named_fn(m, name, out).try() });
+    (out.len == before).match({
+        true  => keep_bound_default(be, i, im, name, out),
+        false => Ok(()),
+    })
+}
+
+// A REQUIRED MEMBER IS STILL ABSENT HERE. `keep_named_fn` keeps only
+// what has a body, so `at ::= (..) Res<T>` on the bound is what the
+// impl OWES rather than what it supplies — and calling it would name a
+// symbol nothing defines.
+keep_bound_default = (be :: CBackend, i: ImplId, im: Impl, name: str,
+                      out :: Vec<Member>) Res<(), AllocError> {
+    bound = be.check.impl_bound_type(im, i.decl.module.to_usize()).try();
+    members ::= be.alloc.Vec<Member>();
+    be.check.bound_members(bound, members).try();
+    members.loop((h, m) { keep_named_fn(m, name, out).try() });
     Ok(());
 }
 

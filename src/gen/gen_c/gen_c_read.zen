@@ -22,21 +22,26 @@
 // which is why the field rule is here rather than in the mangler.
 
 Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = ast
-Const, Access, Call, Span, Ident, TypeId = ast
+Const, Access, Call, Span, Ident, TypeId, Field, Impl = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
+DeclId, ImplId = sema.sema_id
 TyId, Ty, Types, TyNamed = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
+member_named = sema.sema_member
+impl_bound_type, bound_member_type = sema.sema_supply
 sym_member, sym_variant = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 unsupported, unresolved = gen.gen_c.gen_c_state
-constructed = gen.gen_c.gen_c_mono
+constructed, recv_inst = gen.gen_c.gen_c_mono
+enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 ctype = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
+bind_text = gen.gen_c.gen_c_range
 expr, ty_of = gen.gen_c.gen_c_expr
 lower_const_value = gen.gen_c.gen_c_const
 
@@ -64,7 +69,7 @@ lower_access* = (be :: CBackend, id: ExprId, a: Access, ctx: Ctx, want: TyId,
 lower_type_or_field = (be :: CBackend, id: ExprId, a: Access, ctx: Ctx,
                        want: TyId, out :: String) Res<(), AllocError> {
     type_const(be, a, ctx).try().match({
-        None      => write_field_access(be, a, ctx, out),
+        None      => write_field_access(be, id, a, ctx, out),
         Ok(pair)  => lower_const_value(be, id, pair.k, pair.d, want, out),
     })
 }
@@ -206,13 +211,195 @@ enum_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
     })
 }
 
-write_field_access = (be :: CBackend, a: Access, ctx: Ctx, out :: String)
-                     Res<(), AllocError> {
+// -----------------------------------------------------------------
+// a field the type declares, and a field an IMPL supplies
+//
+// "You satisfy requirements, you never impl storage." A field the
+// DECLARATION writes is storage and is read out of the receiver's
+// bytes. A field an IMPL supplies is COMPUTED: there is nothing in the
+// receiver to read, so what is emitted is the impl's own expression
+// with `self` bound to the receiver — re-evaluated on every read, which
+// is the whole of "it can never go stale".
+//
+// THE TYPE'S OWN MEMBER WINS OUTRIGHT, the order `sema_supply.zen`
+// states and for its reason: layout is fixed at declaration and cannot
+// depend on which impls are linked.
+//
+// TWO IMPLS SUPPLYING ONE NAME IS REFUSED HERE RATHER THAN GUESSED.
+// "The bound in scope selects which is in view — never file order", and
+// nothing pushes bounds during lowering: monomorphisation has already
+// replaced `T` with the concrete type, so the bound that would select
+// is gone by the time this runs. Picking the first would compile, and
+// would read the other impl's field.
+// -----------------------------------------------------------------
+
+write_field_access = (be :: CBackend, id: ExprId, a: Access, ctx: Ctx,
+                      out :: String) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     rty = ty_of(be, a.base, ctx, unknown).try();
+    found ::= be.alloc.Vec<Computed>();
+    supplied_fields(be, rty, a.name.text, found).try();
+    found.len.match({
+        0 => write_stored_field(be, a, rty, ctx, out),
+        1 => write_computed_field(be, a, rty, found, ctx, out),
+        _ => unsupported(be, id, "a computed field two impls supply", out),
+    })
+}
+
+write_stored_field = (be :: CBackend, a: Access, rty: TyId, ctx: Ctx,
+                      out :: String) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
     expr(be, a.base, ctx, unknown, out).try();
     out.add_bytes(".").try();
     field_name(be, rty, a.name.text, out).try();
+    Ok(());
+}
+
+// What an impl wrote for a field, and the three things reading it back
+// needs: the TARGET's declaration, whose type parameters the expression
+// names; the module it was written in; and the type the BOUND declared
+// — "`width: self.radius * 2.0` is an f64 because `Rect` said f64".
+Computed = {
+    value: ExprId,
+    decl: DeclId,
+    mi: usize,
+    ty: TyId,
+}
+
+supplied_fields = (be :: CBackend, rty: TyId, name: str,
+                   out :: Vec<Computed>) Res<(), AllocError> {
+    be.check.types.at(rty).match({
+        Named(n) => named_supplied(be, n, rty, name, out),
+        _        => Ok(()),
+    })
+}
+
+named_supplied = (be :: CBackend, n: TyNamed, rty: TyId, name: str,
+                  out :: Vec<Computed>) Res<(), AllocError> {
+    declares_own(be, n.decl, name).match({
+        true  => Ok(()),
+        false => impls_supplying(be, n, rty, name, out),
+    })
+}
+
+declares_own = (be: CBackend, id: DeclId, name: str) bool {
+    decl_at(be.tree, id).match({
+        Ok(d) => decl_has_member(d, name),
+        None  => false,
+    })
+}
+
+decl_has_member = (d: Decl, name: str) bool {
+    d.kind.match({
+        Struct(s) => struct_has_member(s, name),
+        _         => false,
+    })
+}
+
+struct_has_member = (s: Struct, name: str) bool {
+    got ::= false;
+    s.members.loop((h, m) { member_named(m, name).then(() { got = true; }) });
+    got
+}
+
+// "An impl lives with the type, not with the trait", so the search is
+// over the impls declared in the TARGET's own module and a same-named
+// type elsewhere is never confused for this one.
+impls_supplying = (be :: CBackend, n: TyNamed, rty: TyId, name: str,
+                   out :: Vec<Computed>) Res<(), AllocError> {
+    ids ::= be.alloc.Vec<ImplId>();
+    be.check.world.impls_named(be.tree, n.name, ids).try();
+    ids.loop((h, i) { local_supplied(be, n, rty, i, name, out).try() });
+    Ok(());
+}
+
+local_supplied = (be :: CBackend, n: TyNamed, rty: TyId, i: ImplId,
+                  name: str, out :: Vec<Computed>) Res<(), AllocError> {
+    (n.decl.module == i.decl.module).match({
+        false => Ok(()),
+        true  => supplied_in_impl(be, n, rty, i, name, out),
+    })
+}
+
+supplied_in_impl = (be :: CBackend, n: TyNamed, rty: TyId, i: ImplId,
+                    name: str, out :: Vec<Computed>) Res<(), AllocError> {
+    be.check.world.impl_at(be.tree, i).match({
+        Ok(im) => impl_supplied_value(be, n, rty, im, name, out),
+        None   => Ok(()),
+    })
+}
+
+impl_supplied_value = (be :: CBackend, n: TyNamed, rty: TyId, im: Impl,
+                       name: str, out :: Vec<Computed>)
+                      Res<(), AllocError> {
+    values ::= be.alloc.Vec<ExprId>();
+    im.members.loop((h, m) { keep_supplied_value(m, name, values).try() });
+    values.get(0).match({
+        None  => Ok(()),
+        Ok(v) => add_computed(be, n, rty, im, name, v, out),
+    })
+}
+
+keep_supplied_value = (m: Member, name: str, out :: Vec<ExprId>)
+                      Res<(), AllocError> {
+    member_named(m, name).match({
+        false => Ok(()),
+        true  => add_field_value(m, out),
+    })
+}
+
+add_field_value = (m: Member, out :: Vec<ExprId>) Res<(), AllocError> {
+    m.kind.match({
+        Field(fl) => add_written_value(fl, out),
+        _         => Ok(()),
+    })
+}
+
+add_written_value = (fl: Field, out :: Vec<ExprId>) Res<(), AllocError> {
+    fl.value.match({ Ok(e) => out.add(e), None => Ok(()) })
+}
+
+add_computed = (be :: CBackend, n: TyNamed, rty: TyId, im: Impl, name: str,
+                v: ExprId, out :: Vec<Computed>) Res<(), AllocError> {
+    mi = n.decl.module.to_usize();
+    bound = be.check.impl_bound_type(im, mi).try();
+    ty = be.check.bound_member_type(bound, name, rty).try();
+    out.add(Computed(value: v, decl: n.decl, mi: mi, ty: ty))
+}
+
+// The receiver is lowered FIRST and into a binding of its own: the
+// impl's expression names it once per mention, and `self` inside it is
+// the impl's `self` and not an enclosing method's. Bound around the
+// impl's own expression and nothing wider, which is the rule
+// `gen_c_range.zen` pays for in the other direction.
+write_computed_field = (be :: CBackend, a: Access, rty: TyId,
+                        found: Vec<Computed>, ctx: Ctx, out :: String)
+                       Res<(), AllocError> {
+    found.get(0).match({
+        None    => Ok(()),
+        Ok(cf)  => write_supplied_value(be, a, rty, cf, ctx, out),
+    })
+}
+
+write_supplied_value = (be :: CBackend, a: Access, rty: TyId, cf: Computed,
+                        ctx: Ctx, out :: String) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    recv ::= be.alloc.String().try();
+    expr(be, a.base, ctx, unknown, recv).try();
+    ictx = Ctx(module: cf.mi, ret: unknown, has_ret: false,
+               self_ty: rty, has_self: true);
+    inst = recv_inst(be, rty).try();
+    held = be.inst;
+    be.enter_inst(inst);
+    mark = enter_struct_tparams(be, cf.decl).try();
+    cmark = be.check.mark();
+    lmark = be.mark();
+    bind_text(be, "self", rty, recv.view()).try();
+    expr(be, cf.value, ictx, cf.ty, out).try();
+    be.release(lmark).try();
+    be.check.release(cmark).try();
+    leave_tparams(be, mark).try();
+    be.enter_inst(held);
     Ok(());
 }
 
