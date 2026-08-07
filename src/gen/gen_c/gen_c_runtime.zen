@@ -179,6 +179,165 @@ write_print = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
+// -----------------------------------------------------------------
+// the filesystem floor
+//
+// `Fs`'s members have no Zen body for the same reason `Console`'s have
+// none — there is nothing underneath to write them in — and this is
+// what they bottom out in. `gen_c_cap.zen` lowers the calls; these are
+// the four functions those calls name.
+//
+// EMITTED ONLY FOR A PROGRAM THAT TOUCHES THE DISK, which is why the
+// two headers are here rather than at the top: this is the one place
+// the generated C leaves C99 for POSIX, and a hello-world should not
+// pay for it. C has no way to ask whether a path is a directory, and a
+// compiler walking a source tree has to know. `S_ISDIR` is the part of
+// that a hosted implementation may leave out, so it is defined when the
+// header did not.
+//
+// THE ORDINALS ARE A CONTRACT WITH `gen_c_cap.zen` AND WITH NOTHING
+// ELSE. The number never leaves the generated C: the backend turns it
+// back into a variant by NAME, so `env.zen` may rename or reorder its
+// own error set without either side agreeing to it in secret.
+// -----------------------------------------------------------------
+
+emit_fs* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    be.uses_fs().match({
+        false => Ok(()),
+        true  => write_fs(out),
+    })
+}
+
+write_fs = (out :: Emit) Res<(), AllocError> {
+    out.say("#include <sys/stat.h>").try();
+    out.say("#include <errno.h>").try();
+    out.line().try();
+    out.say("#ifndef S_ISDIR").try();
+    out.say("#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)").try();
+    out.say("#endif").try();
+    out.line().try();
+    comment(out, "a borrowed str is not NUL-terminated and the kernel wants a NUL").try();
+    out.say("#define ZG_PATH_MAX 4096").try();
+    out.line().try();
+    write_fs_ordinals(out).try();
+    write_fs_path(out).try();
+    write_fs_kind(out).try();
+    write_fs_size(out).try();
+    write_fs_write(out).try();
+    write_fs_read(out).try();
+    Ok(());
+}
+
+write_fs_ordinals = (out :: Emit) Res<(), AllocError> {
+    comment(out, "FsError, by ordinal, in the order env.zen declares it").try();
+    out.say("#define ZG_FS_OK 0").try();
+    out.say("#define ZG_FS_NOT_FOUND 1").try();
+    out.say("#define ZG_FS_DENIED 2").try();
+    out.say("#define ZG_FS_IS_DIR 3").try();
+    out.say("#define ZG_FS_FAILED 4").try();
+    out.line().try();
+    Ok(());
+}
+
+// The copy lands in a fixed buffer so that asking whether a file exists
+// never allocates: `exists` has no Alloc in its signature, so by law 1
+// it may not have any memory either.
+write_fs_path = (out :: Emit) Res<(), AllocError> {
+    out.say("static int zg_fs_path(char *buf, const unsigned char *p, size_t n) {").try();
+    out.indent();
+    out.say("if (n >= (size_t)ZG_PATH_MAX) return 0;").try();
+    out.say("if (n) memcpy(buf, p, n);").try();
+    out.say("buf[n] = '\\0';").try();
+    out.say("return 1;").try();
+    out.dedent();
+    out.say("}").try();
+    out.line().try();
+    Ok(());
+}
+
+write_fs_kind = (out :: Emit) Res<(), AllocError> {
+    comment(out, "-1 nothing is there, 0 a file, 1 a directory").try();
+    out.say("static int zg_fs_kind(const unsigned char *p, size_t n) {").try();
+    out.indent();
+    out.say("char buf[ZG_PATH_MAX];").try();
+    out.say("struct stat st;").try();
+    out.say("if (!zg_fs_path(buf, p, n)) return -1;").try();
+    out.say("if (stat(buf, &st) != 0) return -1;").try();
+    out.say("return S_ISDIR(st.st_mode) ? 1 : 0;").try();
+    out.dedent();
+    out.say("}").try();
+    out.line().try();
+    Ok(());
+}
+
+// A directory is ruled out HERE and not at the read: fopen on one
+// succeeds on glibc and fails only at the first fread, which would
+// report the reason as a read that stopped rather than as what it is.
+write_fs_size = (out :: Emit) Res<(), AllocError> {
+    out.say("static int zg_fs_size(const unsigned char *p, size_t n, size_t *out) {").try();
+    out.indent();
+    out.say("char buf[ZG_PATH_MAX];").try();
+    out.say("struct stat st;").try();
+    out.say("if (!zg_fs_path(buf, p, n)) return ZG_FS_FAILED;").try();
+    out.say("if (stat(buf, &st) != 0)").try();
+    out.say("    return errno == EACCES ? ZG_FS_DENIED : ZG_FS_NOT_FOUND;").try();
+    out.say("if (S_ISDIR(st.st_mode)) return ZG_FS_IS_DIR;").try();
+    out.say("if (st.st_size < 0) return ZG_FS_FAILED;").try();
+    out.say("*out = (size_t)st.st_size;").try();
+    out.say("return ZG_FS_OK;").try();
+    out.dedent();
+    out.say("}").try();
+    out.line().try();
+    Ok(());
+}
+
+write_fs_write = (out :: Emit) Res<(), AllocError> {
+    out.say("static int zg_fs_write(const unsigned char *p, size_t n,").try();
+    out.say("                       const unsigned char *src, size_t len) {").try();
+    out.indent();
+    out.say("char buf[ZG_PATH_MAX];").try();
+    out.say("FILE *fh;").try();
+    out.say("if (!zg_fs_path(buf, p, n)) return ZG_FS_FAILED;").try();
+    out.say("fh = fopen(buf, \"wb\");").try();
+    out.say("if (fh == NULL) {").try();
+    out.say("    if (errno == EISDIR) return ZG_FS_IS_DIR;").try();
+    out.say("    return errno == EACCES ? ZG_FS_DENIED : ZG_FS_NOT_FOUND;").try();
+    out.say("}").try();
+    out.say("if (len && fwrite(src, 1, len, fh) != len) { fclose(fh); return ZG_FS_FAILED; }").try();
+    out.say("if (fclose(fh) != 0) return ZG_FS_FAILED;").try();
+    out.say("return ZG_FS_OK;").try();
+    out.dedent();
+    out.say("}").try();
+    out.line().try();
+    Ok(());
+}
+
+// `*got` is what actually ARRIVED: the file may have shrunk between the
+// size question and this one, and a short read is the honest length
+// rather than a failure.
+write_fs_read = (out :: Emit) Res<(), AllocError> {
+    out.say("static int zg_fs_read(const unsigned char *p, size_t n, unsigned char *dst,").try();
+    out.say("                      size_t want, size_t *got) {").try();
+    out.indent();
+    out.say("char buf[ZG_PATH_MAX];").try();
+    out.say("FILE *fh;").try();
+    out.say("*got = 0;").try();
+    out.say("if (!zg_fs_path(buf, p, n)) return ZG_FS_FAILED;").try();
+    out.say("fh = fopen(buf, \"rb\");").try();
+    out.say("if (fh == NULL) {").try();
+    out.say("    if (errno == EISDIR) return ZG_FS_IS_DIR;").try();
+    out.say("    return errno == EACCES ? ZG_FS_DENIED : ZG_FS_NOT_FOUND;").try();
+    out.say("}").try();
+    out.say("if (want) *got = fread(dst, 1, want, fh);").try();
+    out.say("if (ferror(fh)) { fclose(fh); return ZG_FS_FAILED; }").try();
+    out.say("fclose(fh);").try();
+    out.say("return ZG_FS_OK;").try();
+    out.dedent();
+    out.say("}").try();
+    out.line().try();
+    Ok(());
+}
+
 // One family per integer type the program actually performs a trapping
 // operation on, in sorted order, so the runtime is a function of the
 // program and not of the order its functions were lowered in.

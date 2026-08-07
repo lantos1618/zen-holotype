@@ -1,0 +1,717 @@
+// src/gen/gen_c/gen_c_cap.zen
+// The members whose BODY IS THE BACKEND.
+//
+// `Mem.alloc`, `Mem.page`, `Mem.release`, `Fs.exists`, `Fs.is_dir` and
+// `Fs.write` are declared in std with a signature and no body, and
+// env.zen says why: they are the authority itself. "A capability's
+// floor is the target language's", and for C that floor is `malloc`,
+// `free`, `stat` and `fopen`. `gen_c_print.zen` already says the same
+// sentence about `Console.println`; this file is the other four.
+//
+// SO THIS IS NOT A SPECIAL CASE BOLTED ONTO MEMBER DISPATCH. It is the
+// SAME rule `println` obeys, asked one level lower: a member with no
+// body is either a capability whose floor this file writes, or a
+// refusal `gen_c_member.zen` reports by name. Nothing else can be true
+// of it — a symbol for a bodiless declaration is a symbol nothing
+// defines.
+//
+// WHY THE BACKEND MAY WRITE AN ArenaState'S FIELDS. `mem_arena.zen`
+// keeps `ArenaState` unexported — "what an arena is made of is not part
+// of what an arena is" — and this file writes three of its fields
+// anyway. That is licensed by exactly one thing: the memory ENTERS THE
+// PROGRAM here. `Mem.alloc` is the only door, so the only alternative
+// is a second, hidden, hand-written C arena that std would then have to
+// agree with. One place knows the shape, and it is the place the value
+// is born.
+//
+// WHAT IS STILL REFUSED, AND WHY IT IS THE INTERESTING ONE. `Fs.read`
+// takes an `Alloc` and allocates the buffer through it. An `Alloc` is a
+// BOUND — "an ordinary struct whose fields happen to be functions" —
+// so a value of static type `Alloc` is a fat value, and this backend
+// does not build one yet. The refusal names that rather than the member,
+// because the member is not the problem: EVERY allocation in the
+// language goes through the same door, and `Fs.read` is simply the
+// first capability that walks through it.
+
+Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = ast
+Function, Access, Call, Arg, Span, Ident, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+DeclId = sema.sema_id
+TyId, Ty, Types, TyNamed = sema.sema_ty
+World, Def, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+Inst = sema.sema_inst
+member_named = sema.sema_member
+write_usize = sema.sema_diag
+sym_member, sym_variant, sym_gen, RES_PATH = gen.gen_name
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+unsupported = gen.gen_c.gen_c_state
+sub = gen.gen_c.gen_c_mono
+enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
+ctype, is_unit, field_type, request_type = gen.gen_c.gen_c_type
+decl_ctx, decl_inst = gen.gen_c.gen_c_type
+expr = gen.gen_c.gen_c_expr
+declare_temp, enum_path, payload_type, is_variant = gen.gen_c.gen_c_flow
+
+// -----------------------------------------------------------------
+// which members these are
+// -----------------------------------------------------------------
+
+// A capability is recognised by the RECEIVER'S TYPE and the member's
+// name together. Not by "has no body" alone: that is the question
+// `gen_c_member.zen` already asked, and answering it a second time here
+// would make any bodiless member anywhere in any program silently
+// become one of these six.
+is_capability* = (be :: CBackend, rty: TyId, name: str) bool {
+    owner_of(be, rty).eq("Mem").match({
+        true  => mem_verb(name),
+        false => is_fs_capability(be, rty, name),
+    })
+}
+
+is_fs_capability = (be :: CBackend, rty: TyId, name: str) bool {
+    owner_of(be, rty).eq("Fs") && fs_verb(name)
+}
+
+owner_of = (be :: CBackend, rty: TyId) str {
+    be.check.types.at(rty).match({
+        Named(n) => n.name,
+        _        => "",
+    })
+}
+
+mem_verb = (name: str) bool {
+    name.eq("alloc") || name.eq("page") || name.eq("release")
+}
+
+// `read` is in the set so that it reaches THIS file's refusal, which
+// names the bound, rather than `gen_c_member.zen`'s, which would name
+// the missing body — and the missing body is not what stops it.
+fs_verb = (name: str) bool {
+    name.eq("exists") || name.eq("is_dir") || name.eq("write")
+        || name.eq("read")
+}
+
+// -----------------------------------------------------------------
+// the entry point
+// -----------------------------------------------------------------
+
+lower_capability* = (be :: CBackend, id: ExprId, c: Call, a: Access,
+                     rty: TyId, mi: usize, f: Function, ctx: Ctx,
+                     out :: String) Res<(), AllocError> {
+    ret = cap_ret(be, rty, mi, f).try();
+    request_type(be, ret).try();
+    verb(be, id, c, a, rty, ret, ctx, out)
+}
+
+verb = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
+        ret: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
+    a.name.text.eq("alloc").match({
+        true  => lower_alloc(be, id, a, rty, ret, ctx, out),
+        false => verb_2(be, id, c, a, rty, ret, ctx, out),
+    })
+}
+
+verb_2 = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
+          ret: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
+    a.name.text.eq("page").match({
+        true  => lower_page(be, id, c, ret, ctx, out),
+        false => verb_3(be, id, c, a, rty, ret, ctx, out),
+    })
+}
+
+verb_3 = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
+          ret: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
+    a.name.text.eq("release").match({
+        true  => lower_release(be, c, ctx, out),
+        false => verb_4(be, id, c, a, rty, ret, ctx, out),
+    })
+}
+
+verb_4 = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
+          ret: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
+    a.name.text.eq("write").match({
+        true  => lower_write(be, id, c, ret, ctx, out),
+        false => verb_5(be, id, c, a, ret, ctx, out),
+    })
+}
+
+verb_5 = (be :: CBackend, id: ExprId, c: Call, a: Access, ret: TyId,
+          ctx: Ctx, out :: String) Res<(), AllocError> {
+    a.name.text.eq("read").match({
+        true  => unsupported(be, id, "a capability that allocates through a bound", out),
+        false => lower_probe(be, c, a.name.text, ctx, out),
+    })
+}
+
+// The declared return type, read in the module that declares the
+// member with `@Self` bound to the receiver — the same two steps
+// `gen_c_member.method_sig` takes for a parameter, and for the same
+// reason: `@Self` is a written type only that query answers.
+cap_ret = (be :: CBackend, rty: TyId, mi: usize, f: Function)
+          Res<TyId, AllocError> {
+    sctx = be.check.self_ctx(mi, rty).try();
+    declared = f.ret.match({
+        Ok(t) => be.check.type_from_ast(t, sctx),
+        None  => be.check.types.prim("()"),
+    }).try();
+    sub(be, declared)
+}
+
+// -----------------------------------------------------------------
+// `env.mem.alloc()` — where an arena comes from
+//
+// An `ArenaState` on the C heap, and an `Arena` holding its address.
+// The state is one `malloc` and never freed: `Arena.drop` releases the
+// PAGES, and the state itself is the handle every copy of the arena
+// shares — freeing it would invalidate a value that copies freely by
+// design.
+// -----------------------------------------------------------------
+
+lower_alloc = (be :: CBackend, id: ExprId, a: Access, rty: TyId, ret: TyId,
+               ctx: Ctx, out :: String) Res<(), AllocError> {
+    field_of(be, ret, "state").try().match({
+        None    => unsupported(be, id, "an Arena with no state field", out),
+        Ok(pty) => with_state(be, id, a, rty, ret, pty, ctx, out),
+    })
+}
+
+with_state = (be :: CBackend, id: ExprId, a: Access, rty: TyId, ret: TyId,
+              pty: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
+    pointee(be, pty).match({
+        None     => unsupported(be, id, "an Arena whose state is not a pointer", out),
+        Ok(cell) => write_arena(be, a, rty, ret, pty, cell, ctx, out),
+    })
+}
+
+write_arena = (be :: CBackend, a: Access, rty: TyId, ret: TyId, pty: TyId,
+               cell: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
+    recv ::= be.alloc.String().try();
+    expr(be, a.base, ctx, rty, recv).try();
+    tmp ::= be.alloc.String().try();
+    sym_gen(tmp, "t", be.next_tmp()).try();
+    declare_temp(be, pty, tmp.view()).try();
+    write_malloc(be, tmp.view(), cell, "").try();
+    set_field(be, tmp.view(), cell, "mem", recv.view()).try();
+    set_field(be, tmp.view(), cell, "head", "NULL").try();
+    set_field(be, tmp.view(), cell, "next", "0").try();
+    out.add_bytes("((").try();
+    ctype(be, ret, out).try();
+    out.add_bytes("){ .").try();
+    sym_member(out, "state").try();
+    out.add_bytes(" = ").try();
+    out.add_bytes(tmp.view()).try();
+    out.add_bytes(" })").try();
+    Ok(());
+}
+
+// `<tmp> = (<cell> *)malloc(sizeof(<cell>)<extra>);`
+write_malloc = (be :: CBackend, tmp: str, cell: TyId, extra: str)
+               Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes(tmp).try();
+    line.add_bytes(" = (").try();
+    ctype(be, cell, line).try();
+    line.add_bytes(" *)malloc(sizeof(").try();
+    ctype(be, cell, line).try();
+    line.add_bytes(")").try();
+    line.add_bytes(extra).try();
+    line.add_bytes(");").try();
+    be.writeln(line.view())
+}
+
+// One field of the freshly-made state, and nothing at all when the
+// declaration has no such field: std owns the shape, so a field it
+// drops is a line this file stops writing rather than a diagnostic.
+set_field = (be :: CBackend, tmp: str, cell: TyId, name: str, value: str)
+            Res<(), AllocError> {
+    field_of(be, cell, name).try().match({
+        None  => Ok(()),
+        Ok(_) => write_arrow_set(be, tmp, name, value),
+    })
+}
+
+write_arrow_set = (be :: CBackend, tmp: str, name: str, value: str)
+                  Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes(tmp).try();
+    line.add_bytes("->").try();
+    sym_member(line, name).try();
+    line.add_bytes(" = ").try();
+    line.add_bytes(value).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view())
+}
+
+// -----------------------------------------------------------------
+// `mem.page(size, prev)` — where a page comes from
+//
+// One run of `sizeof(Page) + size` bytes, with the `Page` header
+// written into its own first bytes. The header costs no second
+// allocation, which is what lets an arena describe a page without
+// owning memory it has not been given yet.
+// -----------------------------------------------------------------
+
+lower_page = (be :: CBackend, id: ExprId, c: Call, ret: TyId, ctx: Ctx,
+              out :: String) Res<(), AllocError> {
+    payload_type(be, ret, "Ok").match({
+        None    => unsupported(be, id, "Mem.page must return a Res<Ptr<Page>, E>", out),
+        Ok(pty) => page_cell(be, id, c, ret, pty, ctx, out),
+    })
+}
+
+page_cell = (be :: CBackend, id: ExprId, c: Call, ret: TyId, pty: TyId,
+             ctx: Ctx, out :: String) Res<(), AllocError> {
+    pointee(be, pty).match({
+        None     => unsupported(be, id, "Mem.page must return a Res<Ptr<Page>, E>", out),
+        Ok(cell) => write_page(be, c, ret, cell, ctx, out),
+    })
+}
+
+write_page = (be :: CBackend, c: Call, ret: TyId, cell: TyId, ctx: Ctx,
+              out :: String) Res<(), AllocError> {
+    usize_ty = be.check.types.prim("usize").try();
+    size ::= be.alloc.String().try();
+    arg_text(be, c, 0, usize_ty, ctx, size).try();
+    prev ::= be.alloc.String().try();
+    prev_text(be, c, ctx, prev).try();
+    szt ::= be.alloc.String().try();
+    sym_gen(szt, "t", be.next_tmp()).try();
+    raw ::= be.alloc.String().try();
+    sym_gen(raw, "t", be.next_tmp()).try();
+    dst ::= be.alloc.String().try();
+    sym_gen(dst, "t", be.next_tmp()).try();
+    declare_temp(be, usize_ty, szt.view()).try();
+    be.write("unsigned char *").try();
+    be.write(raw.view()).try();
+    be.writeln(";").try();
+    declare_temp(be, ret, dst.view()).try();
+    assign(be, szt.view(), size.view()).try();
+    write_page_malloc(be, raw.view(), cell, szt.view()).try();
+    open_null_test(be, raw.view()).try();
+    write_assign_err(be, ret, "OutOfMemory", dst.view()).try();
+    close_else(be).try();
+    write_page_header(be, raw.view(), cell, szt.view(), prev.view()).try();
+    write_page_ok(be, ret, cell, raw.view(), dst.view()).try();
+    close_block(be).try();
+    out.add_bytes(dst.view())
+}
+
+write_page_malloc = (be :: CBackend, raw: str, cell: TyId, szt: str)
+                    Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes(raw).try();
+    line.add_bytes(" = (unsigned char *)malloc(sizeof(").try();
+    ctype(be, cell, line).try();
+    line.add_bytes(") + ").try();
+    line.add_bytes(szt).try();
+    line.add_bytes(");").try();
+    be.writeln(line.view())
+}
+
+// The three fields of the header, written THROUGH the raw pointer:
+// `base` is the first byte past the header, which is what makes the
+// page describe itself.
+write_page_header = (be :: CBackend, raw: str, cell: TyId, szt: str,
+                     prev: str) Res<(), AllocError> {
+    cast ::= be.alloc.String().try();
+    cast.add_bytes("((").try();
+    ctype(be, cell, cast).try();
+    cast.add_bytes(" *)").try();
+    cast.add_bytes(raw).try();
+    cast.add_bytes(")").try();
+    base ::= be.alloc.String().try();
+    base.add_bytes("(").try();
+    base.add_bytes(raw).try();
+    base.add_bytes(" + sizeof(").try();
+    ctype(be, cell, base).try();
+    base.add_bytes("))").try();
+    set_field(be, cast.view(), cell, "prev", prev).try();
+    set_field(be, cast.view(), cell, "base", base.view()).try();
+    set_field(be, cast.view(), cell, "size", szt).try();
+    Ok(());
+}
+
+write_page_ok = (be :: CBackend, ret: TyId, cell: TyId, raw: str, dst: str)
+                Res<(), AllocError> {
+    value ::= be.alloc.String().try();
+    value.add_bytes("(").try();
+    ctype(be, cell, value).try();
+    value.add_bytes(" *)").try();
+    value.add_bytes(raw).try();
+    write_assign_ok(be, ret, value.view(), dst).try();
+    Ok(());
+}
+
+// `mem.release(page)` — one `free`, and the unit value every other
+// void-returning lowering writes.
+lower_release = (be :: CBackend, c: Call, ctx: Ctx, out :: String)
+                Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    page ::= be.alloc.String().try();
+    arg_text(be, c, 0, unknown, ctx, page).try();
+    line ::= be.alloc.String().try();
+    line.add_bytes("free((void *)(").try();
+    line.add_bytes(page.view()).try();
+    line.add_bytes("));").try();
+    be.writeln(line.view()).try();
+    out.add_bytes("0")
+}
+
+// The `prev` argument, or a null pointer when the call left it out.
+prev_text = (be :: CBackend, c: Call, ctx: Ctx, out :: String)
+            Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    c.args.get(1).match({
+        None  => out.add_bytes("NULL"),
+        Ok(a) => expr(be, a.value, ctx, unknown, out),
+    })
+}
+
+// -----------------------------------------------------------------
+// the filesystem
+//
+// A path arrives as a `str`, which borrows its bytes and is therefore
+// NOT NUL-terminated, and the kernel wants a NUL. The copy happens in
+// the C floor rather than here: `exists` has no `Alloc` in its
+// signature, so by law 1 it may not have any memory either.
+//
+// EVERY PATH IS SPILLED INTO A TEMPORARY FIRST. A `str` is a pointer
+// and a count, both of which are read, so an argument that is a call
+// would otherwise be made twice.
+// -----------------------------------------------------------------
+
+// `exists` and `is_dir`: one `stat`, and no failure a caller acts on.
+// A path that cannot be stat'd is, for the purpose of "should I try to
+// open this", a path that is not there.
+lower_probe = (be :: CBackend, c: Call, name: str, ctx: Ctx, out :: String)
+              Res<(), AllocError> {
+    be.need_fs();
+    path ::= be.alloc.String().try();
+    path_args(be, c, 0, ctx, path).try();
+    out.add_bytes("(zg_fs_kind(").try();
+    out.add_bytes(path.view()).try();
+    out.add_bytes(")").try();
+    out.add_bytes(probe_test(name)).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+probe_test = (name: str) str {
+    name.eq("is_dir").match({ true => " == 1", false => " >= 0" })
+}
+
+// `write`: the whole file at once, the mirror of `read`. It takes no
+// `Alloc` because it allocates nothing — the bytes are the caller's and
+// stay the caller's — which is also why it is the half of the pair this
+// backend can write today.
+lower_write = (be :: CBackend, id: ExprId, c: Call, ret: TyId, ctx: Ctx,
+               out :: String) Res<(), AllocError> {
+    be.need_fs();
+    i32_ty = be.check.types.prim("i32").try();
+    path ::= be.alloc.String().try();
+    path_args(be, c, 0, ctx, path).try();
+    data ::= be.alloc.String().try();
+    path_args(be, c, 1, ctx, data).try();
+    rc ::= be.alloc.String().try();
+    sym_gen(rc, "t", be.next_tmp()).try();
+    dst ::= be.alloc.String().try();
+    sym_gen(dst, "t", be.next_tmp()).try();
+    declare_temp(be, i32_ty, rc.view()).try();
+    declare_temp(be, ret, dst.view()).try();
+    write_fs_call(be, rc.view(), "zg_fs_write(", path.view(), data.view()).try();
+    open_rc_test(be, rc.view()).try();
+    fs_chain(be, ret, rc.view(), dst.view(), 1).try();
+    close_else(be).try();
+    write_assign_ok_unit(be, ret, dst.view()).try();
+    close_block(be).try();
+    out.add_bytes(dst.view())
+}
+
+write_fs_call = (be :: CBackend, rc: str, fn: str, first: str, second: str)
+                Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes(rc).try();
+    line.add_bytes(" = ").try();
+    line.add_bytes(fn).try();
+    line.add_bytes(first).try();
+    line.add_bytes(", ").try();
+    line.add_bytes(second).try();
+    line.add_bytes(");").try();
+    be.writeln(line.view())
+}
+
+// `(const unsigned char *)<tmp>.data, <tmp>.len` — the two halves of a
+// `str`, spilled once. `str` is the one type whose C representation is
+// the runtime floor's rather than its declaration's, so its fields are
+// spelled the floor's way and not the mangler's.
+path_args = (be :: CBackend, c: Call, i: usize, ctx: Ctx, out :: String)
+            Res<(), AllocError> {
+    sty = be.check.types.prim("str").try();
+    tmp ::= be.alloc.String().try();
+    sym_gen(tmp, "t", be.next_tmp()).try();
+    declare_temp(be, sty, tmp.view()).try();
+    value ::= be.alloc.String().try();
+    arg_text(be, c, i, sty, ctx, value).try();
+    assign(be, tmp.view(), value.view()).try();
+    out.add_bytes("(const unsigned char *)").try();
+    out.add_bytes(tmp.view()).try();
+    out.add_bytes(".data, ").try();
+    out.add_bytes(tmp.view()).try();
+    out.add_bytes(".len").try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// the failure chain
+//
+// The C floor answers with an ORDINAL and this turns it back into a
+// variant BY NAME, so env.zen may rename or reorder its own error set
+// without the backend agreeing to it in secret. The ordinals are the
+// floor's own, written down in exactly one place at each end.
+// -----------------------------------------------------------------
+
+fs_name = (n: usize) str {
+    (n == 1).match({ true => "NotFound", false => fs_name_2(n) })
+}
+
+fs_name_2 = (n: usize) str {
+    (n == 2).match({ true => "Denied", false => fs_name_3(n) })
+}
+
+fs_name_3 = (n: usize) str {
+    (n == 3).match({ true => "IsDir", false => "Failed" })
+}
+
+// `if (rc == 1) { .. } else { if (rc == 2) { .. } else { .. } }`. The
+// last arm is the plain `else`: the floor returns exactly these
+// ordinals, so a chain testing all four would end in a branch nothing
+// can reach — and an unreachable arm naming a reason is how a wrong
+// reason gets reported later.
+fs_chain = (be :: CBackend, ret: TyId, rc: str, dst: str, n: usize)
+           Res<(), AllocError> {
+    (n > 3).match({
+        true  => write_assign_err(be, ret, fs_name(n), dst),
+        false => fs_branch(be, ret, rc, dst, n),
+    })
+}
+
+fs_branch = (be :: CBackend, ret: TyId, rc: str, dst: str, n: usize)
+            Res<(), AllocError> {
+    open_ordinal_test(be, rc, n).try();
+    write_assign_err(be, ret, fs_name(n), dst).try();
+    close_else(be).try();
+    fs_chain(be, ret, rc, dst, n + 1).try();
+    close_block(be).try();
+    Ok(());
+}
+
+open_ordinal_test = (be :: CBackend, rc: str, n: usize)
+                    Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes("if (").try();
+    line.add_bytes(rc).try();
+    line.add_bytes(" == ").try();
+    write_usize(line, n).try();
+    line.add_bytes(") {").try();
+    be.writeln(line.view()).try();
+    be.indent();
+    Ok(());
+}
+
+open_rc_test = (be :: CBackend, rc: str) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes("if (").try();
+    line.add_bytes(rc).try();
+    line.add_bytes(" != 0) {").try();
+    be.writeln(line.view()).try();
+    be.indent();
+    Ok(());
+}
+
+open_null_test = (be :: CBackend, raw: str) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes("if (").try();
+    line.add_bytes(raw).try();
+    line.add_bytes(" == NULL) {").try();
+    be.writeln(line.view()).try();
+    be.indent();
+    Ok(());
+}
+
+close_else = (be :: CBackend) Res<(), AllocError> {
+    be.dedent();
+    be.writeln("} else {").try();
+    be.indent();
+    Ok(());
+}
+
+close_block = (be :: CBackend) Res<(), AllocError> {
+    be.dedent();
+    be.writeln("}").try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// the values these lowerings assign
+// -----------------------------------------------------------------
+
+assign = (be :: CBackend, dst: str, value: str) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes(dst).try();
+    line.add_bytes(" = ").try();
+    line.add_bytes(value).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view())
+}
+
+write_assign_ok_unit = (be :: CBackend, ret: TyId, dst: str)
+                       Res<(), AllocError> {
+    value ::= be.alloc.String().try();
+    write_res_head(be, ret, "Ok", value).try();
+    value.add_bytes(" })").try();
+    assign(be, dst, value.view())
+}
+
+write_assign_ok = (be :: CBackend, ret: TyId, payload: str, dst: str)
+                  Res<(), AllocError> {
+    value ::= be.alloc.String().try();
+    write_res_head(be, ret, "Ok", value).try();
+    value.add_bytes(", .zg_data.").try();
+    sym_member(value, "Ok").try();
+    value.add_bytes(" = ").try();
+    value.add_bytes(payload).try();
+    value.add_bytes(" })").try();
+    assign(be, dst, value.view())
+}
+
+// `Err(<the variant this ordinal names>)`, read out of the RETURN
+// type's own error enum. A set with no such variant gets a bare `Err`,
+// which is wrong only for a std that has already changed underneath
+// this file.
+write_assign_err = (be :: CBackend, ret: TyId, name: str, dst: str)
+                   Res<(), AllocError> {
+    value ::= be.alloc.String().try();
+    write_res_head(be, ret, "Err", value).try();
+    payload_type(be, ret, "Err").match({
+        None    => Ok(()),
+        Ok(ety) => write_err_payload(be, ety, name, value),
+    }).try();
+    value.add_bytes(" })").try();
+    assign(be, dst, value.view())
+}
+
+write_err_payload = (be :: CBackend, ety: TyId, name: str, out :: String)
+                    Res<(), AllocError> {
+    is_variant(be, ety, name).match({
+        false => Ok(()),
+        true  => write_err_variant(be, ety, name, out),
+    })
+}
+
+write_err_variant = (be :: CBackend, ety: TyId, name: str, out :: String)
+                    Res<(), AllocError> {
+    path ::= be.alloc.String().try();
+    enum_path(be, ety, path).try();
+    out.add_bytes(", .zg_data.").try();
+    sym_member(out, "Err").try();
+    out.add_bytes(" = ((").try();
+    ctype(be, ety, out).try();
+    out.add_bytes("){ .zg_tag = ").try();
+    sym_variant(out, path.view(), name).try();
+    out.add_bytes(" })").try();
+    Ok(());
+}
+
+write_res_head = (be :: CBackend, ret: TyId, variant: str, out :: String)
+                 Res<(), AllocError> {
+    out.add_bytes("((").try();
+    ctype(be, ret, out).try();
+    out.add_bytes("){ .zg_tag = ").try();
+    sym_variant(out, RES_PATH, variant).try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// reading the shapes these lowerings write
+// -----------------------------------------------------------------
+
+// The declared type of a STORAGE field, read at the type's own
+// arguments — `Vec<u8>`'s `data` is a `Ptr<u8>` and not a `Ptr<T>` —
+// and nothing when the type declares no such field.
+field_of* = (be :: CBackend, ty: TyId, name: str)
+            Res<Res<TyId>, AllocError> {
+    be.check.types.at(ty).match({
+        Named(n) => named_field_of(be, n, name),
+        _        => Ok(None),
+    })
+}
+
+named_field_of = (be :: CBackend, n: TyNamed, name: str)
+                 Res<Res<TyId>, AllocError> {
+    inst = decl_inst(be, n).try();
+    ctx = decl_ctx(be, n);
+    mark = enter_struct_tparams(be, n.decl).try();
+    found ::= be.alloc.Vec<TyId>();
+    decl_at(be.tree, n.decl).match({
+        None  => Ok(()),
+        Ok(d) => collect_field(be, d, name, ctx, inst, found),
+    }).try();
+    leave_tparams(be, mark).try();
+    Ok(found.get(0));
+}
+
+collect_field = (be :: CBackend, d: Decl, name: str, ctx: Ctx, inst: Inst,
+                 out :: Vec<TyId>) Res<(), AllocError> {
+    d.kind.match({
+        Struct(s) => keep_fields(be, s, name, ctx, inst, out),
+        _         => Ok(()),
+    })
+}
+
+keep_fields = (be :: CBackend, s: Struct, name: str, ctx: Ctx, inst: Inst,
+               out :: Vec<TyId>) Res<(), AllocError> {
+    s.members.loop((h, m) {
+        keep_named_field(be, m, name, ctx, inst, out).try();
+    });
+    Ok(());
+}
+
+keep_named_field = (be :: CBackend, m: Member, name: str, ctx: Ctx,
+                    inst: Inst, out :: Vec<TyId>) Res<(), AllocError> {
+    member_named(m, name).match({
+        false => Ok(()),
+        true  => add_field_type(be, m, ctx, inst, out),
+    })
+}
+
+add_field_type = (be :: CBackend, m: Member, ctx: Ctx, inst: Inst,
+                  out :: Vec<TyId>) Res<(), AllocError> {
+    field_type(be, m, ctx, inst).match({
+        None  => Ok(()),
+        Ok(t) => out.add(t),
+    })
+}
+
+// What a `Ptr<T>` points AT. Sema has no pointer kind — a `Ptr<T>`
+// arrives as an ordinary `Named` — so this is its first type argument
+// and nothing more.
+pointee = (be :: CBackend, ty: TyId) Res<TyId> {
+    be.check.types.at(ty).match({
+        Named(n) => n.args.get(0),
+        _        => None,
+    })
+}
+
+// One written argument, at the type the signature declares for it.
+arg_text = (be :: CBackend, c: Call, i: usize, want: TyId, ctx: Ctx,
+            out :: String) Res<(), AllocError> {
+    c.args.get(i).match({
+        None  => out.add_bytes("0"),
+        Ok(a) => expr(be, a.value, ctx, want, out),
+    })
+}

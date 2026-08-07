@@ -29,10 +29,14 @@
 // one more segment.
 //
 // WHAT THIS FILE REFUSES, it refuses BY NAME. A generic receiver needs
-// monomorphisation, a member with no body is a capability whose floor is
-// the target language's, and a `::` parameter is passed by address —
-// none of the three is written, and each is a `GenFault` with a position
-// rather than C that compiles and means something else.
+// monomorphisation and a `::` parameter is passed by address — neither
+// is written, and each is a `GenFault` with a position rather than C
+// that compiles and means something else.
+//
+// A MEMBER WITH NO BODY IS ASKED OF `gen_c_cap.zen` FIRST. Such a member
+// is either a capability whose floor is the target language's — and that
+// file writes the floor — or a declaration nothing defines, which is
+// still a refusal here.
 
 Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = ast
 Function, Param, Access, Call, Arg, Span, Ident, TypeId, Impl = ast
@@ -60,6 +64,7 @@ lower_plain_call, write_arg = gen.gen_c.gen_c_call
 handle_depth, lower_handle_call = gen.gen_c.gen_c_handle
 inlines, inline_method = gen.gen_c.gen_c_inline
 is_ptr_member, lower_ptr_member = gen.gen_c.gen_c_ptr
+is_capability, lower_capability = gen.gen_c.gen_c_cap
 
 // -----------------------------------------------------------------
 // the entry point
@@ -228,7 +233,7 @@ impl_member* = (be :: CBackend, s: Site, rty: TyId, name: str)
     Ok(bodied_fn(found));
 }
 
-bodied_fn = (found: Vec<Member>) Res<Function> {
+bodied_fn* = (found: Vec<Member>) Res<Function> {
     found.get(0).match({
         Ok(m) => member_fn(m),
         None  => None,
@@ -355,7 +360,7 @@ prim_site = (be :: CBackend, name: str) Res<Res<Site>, AllocError> {
     })
 }
 
-join = (out :: String, module: str, name: str) Res<(), AllocError> {
+join* = (out :: String, module: str, name: str) Res<(), AllocError> {
     (module.len > 0).then(() { out.add_bytes(module).try() });
     (module.len > 0).then(() { out.add_bytes(".").try() });
     out.add_bytes(name).try();
@@ -450,6 +455,16 @@ want_of = (be :: CBackend, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
 lower_declared_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
                          rty: TyId, s: Site, f: Function, ctx: Ctx,
                          out :: String) Res<(), AllocError> {
+    is_capability(be, rty, a.name.text).match({
+        true  => lower_capability(be, id, c, a, rty, s.decl.module.to_usize(),
+                                  f, ctx, out),
+        false => lower_ordinary_method(be, id, c, a, rty, s, f, ctx, out),
+    })
+}
+
+lower_ordinary_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
+                         rty: TyId, s: Site, f: Function, ctx: Ctx,
+                         out :: String) Res<(), AllocError> {
     refuse_method(be, s, f).match({
         true  => unsupported(be, id, method_fault(be, s, f), out),
         false => write_method_call(be, id, c, a, rty, s, f, ctx, out),
@@ -461,7 +476,8 @@ lower_declared_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
 // which. What is still refused is a member declaring type parameters OF
 // ITS OWN — an instantiation would then be the receiver's arguments
 // followed by the call's, and nothing in this tree declares one — and a
-// member with no body, which is a capability whose floor is C's.
+// member with no body that `gen_c_cap.zen` did not claim as a
+// capability, which is a symbol nothing would define.
 refuse_method = (be :: CBackend, s: Site, f: Function) bool {
     (f.tparams.len > 0) || (has_body(f) == false)
 }

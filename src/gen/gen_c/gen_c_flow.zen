@@ -156,9 +156,59 @@ arm_cond = (be :: CBackend, pid: PatternId, st: TyId, scrut: str,
         Wild           => out.add_bytes("1"),
         Literal(l)     => literal_cond(be, pat, l, scrut, out),
         Name(p)        => name_cond(be, p.name, st, scrut, out),
-        Destructure(d) => tag_cond(be, d.name, st, scrut, out),
+        Destructure(d) => destructure_cond(be, d, st, scrut, out),
     }).try();
     Ok(());
+}
+
+// A PAYLOAD PATTERN THAT IS A LITERAL NARROWS THE ARM, and testing only
+// the tag would be the worst kind of wrong: `Ok('\n')` and `Ok('\\')`
+// would compile to the same condition, the first would swallow every
+// `Ok`, and the C would be perfectly valid. So the two halves are
+// written together — the tag, and then the payload's own test, which is
+// `literal_cond` again one level down.
+destructure_cond = (be :: CBackend, d: Destructure, st: TyId, scrut: str,
+                    out :: String) Res<(), AllocError> {
+    tag_cond(be, d.name, st, scrut, out).try();
+    payload_cond(be, d, st, scrut, out)
+}
+
+payload_cond = (be :: CBackend, d: Destructure, st: TyId, scrut: str,
+                out :: String) Res<(), AllocError> {
+    inner = be.tree.pattern_at(d.binder);
+    inner.kind.match({
+        Literal(l) => typed_payload_cond(be, d, inner, l, st, scrut, out),
+        _          => Ok(()),
+    })
+}
+
+// A variant with no payload cannot have a literal one, and reaching
+// `.zg_data` for it would be a union member nothing declared. The arm
+// is refused rather than narrowed, which keeps the rule this file works
+// by: lower it exactly, or report it.
+typed_payload_cond = (be :: CBackend, d: Destructure, inner: Pattern,
+                      l: Literal, st: TyId, scrut: str, out :: String)
+                     Res<(), AllocError> {
+    payload_type(be, st, last_segment(d.name)).match({
+        None  => report_nested(be, inner),
+        Ok(_) => write_payload_cond(be, d, inner, l, scrut, out),
+    })
+}
+
+write_payload_cond = (be :: CBackend, d: Destructure, inner: Pattern,
+                      l: Literal, scrut: str, out :: String)
+                     Res<(), AllocError> {
+    place ::= be.alloc.String().try();
+    place.add_bytes(scrut).try();
+    place.add_bytes(".zg_data.").try();
+    sym_member(place, last_segment(d.name)).try();
+    out.add_bytes(" && ").try();
+    literal_cond(be, inner, l, place.view(), out)
+}
+
+report_nested = (be :: CBackend, inner: Pattern) Res<(), AllocError> {
+    be.report(inner.span.file, inner.span,
+              GenFault.Unsupported("a nested pattern"))
 }
 
 // `true =>` is the scrutinee, `false =>` is its negation, and an
@@ -262,9 +312,10 @@ bind_name = (be :: CBackend, q: QualifiedName, st: TyId, scrut: str,
 }
 
 // `Ok(n)` binds `n` to the payload under the variant's member. A
-// deeper pattern — `Left(Full(n))` — is not lowered: it needs the
-// payload's own variant list, and one level is what this backend
-// answers for.
+// LITERAL payload binds nothing — `arm_cond` has already turned it into
+// a test — and a deeper pattern like `Left(Full(n))` is not lowered: it
+// needs the payload's own variant list, and one level is what this
+// backend answers for.
 bind_payload = (be :: CBackend, d: Destructure, st: TyId, scrut: str,
                 ctx: Ctx) Res<(), AllocError> {
     variant = last_segment(d.name);
@@ -282,10 +333,10 @@ bind_inner = (be :: CBackend, inner: Pattern, pid: PatternId, t: TyId,
     place.add_bytes(".zg_data.").try();
     sym_member(place, variant).try();
     inner.kind.match({
-        Name(p)  => bind_local(be, last_segment(p.name), t, place.view()),
-        Wild     => Ok(()),
-        _        => be.report(inner.span.file, inner.span,
-                              GenFault.Unsupported("a nested pattern")),
+        Name(p)    => bind_local(be, last_segment(p.name), t, place.view()),
+        Wild       => Ok(()),
+        Literal(_) => Ok(()),
+        _          => report_nested(be, inner),
     })
 }
 

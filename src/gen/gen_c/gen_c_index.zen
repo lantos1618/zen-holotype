@@ -1,0 +1,193 @@
+// src/gen/gen_c/gen_c_index.zen
+// What `s[i]` means.
+//
+// A TYPE SAYS WHAT INDEXING MEANS, and what `str` says is
+// `text_str.index`: "an index out of range is a BUG, not a miss, so it
+// TRAPS", by an unsigned underflow that IS the bounds check. So this
+// file writes no check of its own and invents no semantics — it
+// resolves the member and calls it, which is `gen_c_member.zen`'s work
+// reached through brackets instead of through a dot.
+//
+// IT IS A SEPARATE FILE BECAUSE IT IS A SEPARATE QUESTION. `x.f(a)`
+// asks which of three things a dot names; `s[i]` has one reading and
+// two implementations of it, and the difference is the receiver:
+//
+//   p[i]   a `Ptr<T>` carries no length, so there is nothing to check
+//          and nothing to dispatch to. This is C's own subscript, and
+//          it is DESIGN.md's rule rather than this file's.
+//   s[i]   everything else goes through the `index` its type declares,
+//          or the one an impl supplies — the order `sema_supply.zen`
+//          states.
+//
+// AND THE TYPE IS ANSWERED HERE TOO. Sema does not type an index, and
+// `println`'s `{}` chooses its write by the argument's type — so
+// `index_type` answers the same two readings the lowering makes, in
+// this file, because two files answering it is two chances to disagree.
+
+Ast, Expr, ExprId, Member, Function, Index, Span = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+DeclId = sema.sema_id
+TyId, TyNamed = sema.sema_ty
+Checker, Ctx = sema.sema_check
+Inst = sema.sema_inst
+self_ctx = sema.sema_member
+type_from_ast = sema.sema_type
+sym_fn = gen.gen_name
+CBackend, MethodRef = gen.gen_c.gen_c_state
+unsupported = gen.gen_c.gen_c_state
+sub_with, any_open, recv_inst, inst_open = gen.gen_c.gen_c_mono
+enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
+is_ptr_named = gen.gen_c.gen_c_type
+expr, ty_of = gen.gen_c.gen_c_expr
+write_arg = gen.gen_c.gen_c_call
+Site, site_of, member_at, bodied_fn, impl_member = gen.gen_c.gen_c_member
+method_sig, join = gen.gen_c.gen_c_member
+
+lower_index* = (be :: CBackend, id: ExprId, ix: Index, ctx: Ctx,
+                out :: String) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    rty = ty_of(be, ix.base, ctx, unknown).try();
+    is_raw_ptr(be, rty).match({
+        true  => write_subscript(be, ix, ctx, out),
+        false => index_through_member(be, id, ix, rty, ctx, out),
+    })
+}
+
+// What `s[i]` EVALUATES TO, for a caller that needs the answer before
+// anything is written — `println`'s `{}` chooses its write by the
+// argument's type, and sema does not type an index. The element of a
+// raw pointer, or the return type of the `index` the receiver declares:
+// the same two readings the lowering makes, so the two cannot disagree.
+index_type* = (be :: CBackend, ix: Index, ctx: Ctx, want: TyId)
+              Res<TyId, AllocError> {
+    unknown = be.check.types.unknown().try();
+    rty = ty_of(be, ix.base, ctx, unknown).try();
+    is_raw_ptr(be, rty).match({
+        true  => Ok(ptr_element(be, rty, want)),
+        false => member_index_type(be, rty, want),
+    })
+}
+
+ptr_element = (be :: CBackend, rty: TyId, want: TyId) TyId {
+    be.check.types.at(rty).match({
+        Named(n) => n.args.get(0).match({ Ok(t) => t, None => want }),
+        _        => want,
+    })
+}
+
+member_index_type = (be :: CBackend, rty: TyId, want: TyId)
+                    Res<TyId, AllocError> {
+    site_of(be, rty).try().match({
+        None  => Ok(want),
+        Ok(s) => site_index_type(be, rty, s, want),
+    })
+}
+
+site_index_type = (be :: CBackend, rty: TyId, s: Site, want: TyId)
+                  Res<TyId, AllocError> {
+    found ::= be.alloc.Vec<Member>();
+    member_at(be, s, "index", found).try();
+    bodied_fn(found).match({
+        Ok(f) => index_ret(be, rty, s, f),
+        None  => Ok(want),
+    })
+}
+
+index_ret = (be :: CBackend, rty: TyId, s: Site, f: Function)
+            Res<TyId, AllocError> {
+    sctx = be.check.self_ctx(s.decl.module.to_usize(), rty).try();
+    mark = enter_struct_tparams(be, s.decl).try();
+    declared = f.ret.match({
+        Ok(t) => be.check.type_from_ast(t, sctx),
+        None  => be.check.types.prim("()"),
+    }).try();
+    leave_tparams(be, mark).try();
+    inst = recv_inst(be, rty).try();
+    sub_with(be, declared, inst)
+}
+
+is_raw_ptr = (be :: CBackend, rty: TyId) bool {
+    be.check.types.at(rty).match({
+        Named(n) => is_ptr_named(n),
+        _        => false,
+    })
+}
+
+write_subscript = (be :: CBackend, ix: Index, ctx: Ctx, out :: String)
+                  Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    counter = be.check.types.prim("usize").try();
+    out.add_bytes("(").try();
+    expr(be, ix.base, ctx, unknown, out).try();
+    out.add_bytes(")[").try();
+    expr(be, ix.index, ctx, counter, out).try();
+    out.add_bytes("]").try();
+    Ok(());
+}
+
+index_through_member = (be :: CBackend, id: ExprId, ix: Index, rty: TyId,
+                        ctx: Ctx, out :: String) Res<(), AllocError> {
+    site_of(be, rty).try().match({
+        None  => no_index(be, id, out),
+        Ok(s) => index_member(be, id, ix, rty, s, ctx, out),
+    })
+}
+
+// The type's own `index`, then what an impl supplies — the order
+// `sema_supply.zen` states, and the order `eq_fn` above uses.
+index_member = (be :: CBackend, id: ExprId, ix: Index, rty: TyId, s: Site,
+                ctx: Ctx, out :: String) Res<(), AllocError> {
+    found ::= be.alloc.Vec<Member>();
+    member_at(be, s, "index", found).try();
+    bodied_fn(found).match({
+        Ok(f) => write_index_call(be, id, ix, rty, s, f, ctx, out),
+        None  => supplied_index(be, id, ix, rty, s, ctx, out),
+    })
+}
+
+supplied_index = (be :: CBackend, id: ExprId, ix: Index, rty: TyId,
+                  s: Site, ctx: Ctx, out :: String) Res<(), AllocError> {
+    impl_member(be, s, rty, "index").try().match({
+        Ok(f) => write_index_call(be, id, ix, rty, s, f, ctx, out),
+        None  => no_index(be, id, out),
+    })
+}
+
+no_index = (be :: CBackend, id: ExprId, out :: String)
+           Res<(), AllocError> {
+    unsupported(be, id, "an index on a type that declares no `index`", out)
+}
+
+write_index_call = (be :: CBackend, id: ExprId, ix: Index, rty: TyId,
+                    s: Site, f: Function, ctx: Ctx, out :: String)
+                   Res<(), AllocError> {
+    inst = recv_inst(be, rty).try();
+    mi = s.decl.module.to_usize();
+    sig ::= be.alloc.Vec<TyId>();
+    method_sig(be, rty, s.decl, f, mi, inst, sig).try();
+    (inst_open(be, inst) || any_open(be, sig)).match({
+        true  => unsupported(be, id, "an index on a receiver whose type arguments nothing settles", out),
+        false => emit_index_call(be, ix, rty, s, f, sig, inst, ctx, out),
+    })
+}
+
+emit_index_call = (be :: CBackend, ix: Index, rty: TyId, s: Site,
+                   f: Function, sig: Vec<TyId>, inst: Inst, ctx: Ctx,
+                   out :: String) Res<(), AllocError> {
+    qname ::= be.alloc.String().try();
+    join(qname, s.qname, "index").try();
+    sym ::= be.alloc.String().try();
+    sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
+    be.need_method(MethodRef(self_ty: rty, decl: s.decl, name: "index",
+                             qname: qname.view()), inst, sym.view()).try();
+    out.add_bytes(sym.view()).try();
+    out.add_bytes("(").try();
+    write_arg(be, ix.base, 0, f, sig, ctx, out).try();
+    out.add_bytes(", ").try();
+    write_arg(be, ix.index, 1, f, sig, ctx, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+

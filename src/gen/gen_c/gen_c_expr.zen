@@ -59,6 +59,7 @@ Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
 plain_ctx = gen.gen_c.gen_c_decl
 lower_call, res_value, is_res_ctor = gen.gen_c.gen_c_call
 lower_unary, lower_binary = gen.gen_c.gen_c_op
+lower_index, index_type = gen.gen_c.gen_c_index
 inline_result_type = gen.gen_c.gen_c_settle
 
 // -----------------------------------------------------------------
@@ -101,6 +102,7 @@ spills_anywhere* = (be: CBackend, id: ExprId) bool {
         Unary(u)   => spills_anywhere(be, u.operand),
         Binary(b)  => spills_anywhere(be, b.lhs) || spills_anywhere(be, b.rhs),
         Access(a)  => spills_anywhere(be, a.base),
+        Index(x)   => spills_anywhere(be, x.base) || spills_anywhere(be, x.index),
         Call(c)    => call_spills(be, c),
         _          => true,
     })
@@ -169,6 +171,7 @@ fallback_type = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
         Call(c)  => call_type(be, c, ctx, want),
         Paren(p) => ty_of(be, p.inner, ctx, want),
         Try(t)   => try_value_type(be, t.operand, ctx, want),
+        Index(x) => index_type(be, x, ctx, want),
         _        => Ok(want),
     })
 }
@@ -352,6 +355,7 @@ write_expr = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
         Binary(b)   => lower_binary(be, node, b, ctx, want, out),
         Access(a)   => lower_access(be, id, a, ctx, want, out),
         Call(c)     => lower_call(be, id, c, ctx, want, out),
+        Index(x)    => lower_index(be, id, x, ctx, out),
         Unit        => out.add_bytes("0"),
         _           => unsupported(be, id, "this expression form", out),
     }).try();
@@ -457,9 +461,17 @@ lower_global_name = (be :: CBackend, id: ExprId, text: str, ctx: Ctx,
 // constant emitted as a C object would need a static initialiser, which
 // is a second spelling of the same literal for no gain.
 //
-// A constant whose value is not a literal is REPORTED, because inlining
-// one would evaluate its expression once per use. That is the whole of
-// the restriction and it is named rather than assumed away.
+// A CONSTANT IS INLINED AT EACH USE, and that is sound exactly as far
+// as its value is PURE. `I64_MIN` is `-9223372036854775807 - 1` and
+// `UNRESOLVED` is `TyId(index: 0)`: evaluating either of those twice
+// cannot be observed, and what it costs is a compound literal or an
+// arithmetic the C compiler folds before it emits anything.
+//
+// ANYTHING ELSE IS STILL REPORTED, and the reason is the one this file
+// always had: a constant whose value CALLS something would run that
+// call once per use, and would stop being a constant. The restriction
+// did not go away — it moved from "is a literal" to "cannot be observed
+// twice", which is what it was always trying to say.
 lower_global_value = (be :: CBackend, id: ExprId, text: str, ctx: Ctx,
                       want: TyId, out :: String) Res<(), AllocError> {
     found ::= be.alloc.Vec<Def>();
@@ -504,18 +516,74 @@ lower_const_value = (be :: CBackend, id: ExprId, k: Const, d: Def,
         Ok(t) => be.check.type_from_ast(t, dctx),
         None  => Ok(want),
     }).try();
-    is_literal_value(be, k.value).match({
+    is_pure_value(be, k.value, dctx).match({
         false => unsupported(be, id, "a constant whose value is not a literal", out),
         true  => expr(be, k.value, dctx, ty, out),
     })
 }
 
-is_literal_value = (be: CBackend, id: ExprId) bool {
+// Can this expression be written twice without anyone being able to
+// tell? A literal can; so can an operator over things that can, and so
+// can a CONSTRUCTION of them — a compound literal names no function and
+// reads nothing. A call to anything else cannot, and neither can a name,
+// because a name is a local whose frame the use site is not in.
+is_pure_value* = (be :: CBackend, id: ExprId, ctx: Ctx) bool {
     be.tree.expr_at(id).kind.match({
         Literal(_) => true,
         Unit       => true,
+        Unary(u)   => is_pure_value(be, u.operand, ctx),
+        Binary(b)  => is_pure_pair(be, b, ctx),
+        Call(c)    => is_pure_construction(be, c, ctx),
         _          => false,
     })
+}
+
+is_pure_pair = (be :: CBackend, b: Binary, ctx: Ctx) bool {
+    is_pure_value(be, b.lhs, ctx) && is_pure_value(be, b.rhs, ctx)
+}
+
+// A call is pure only when its callee NAMES A TYPE: `TyId(index: 0)` is
+// a compound literal, `first_of(v)` is a function this use site would
+// run. The question is asked of the declaration and not of the spelling,
+// which is the same question `gen_c_call.zen` asks to decide between the
+// two readings of one node.
+is_pure_construction = (be :: CBackend, c: Call, ctx: Ctx) bool {
+    names_a_struct(be, c.callee, ctx) && pure_args(be, c, ctx)
+}
+
+pure_args = (be :: CBackend, c: Call, ctx: Ctx) bool {
+    every ::= true;
+    c.args.loop((h, a) {
+        impure = is_pure_value(be, a.value, ctx) == false;
+        impure.then(() { every = false; });
+    });
+    every
+}
+
+names_a_struct = (be :: CBackend, callee: ExprId, ctx: Ctx) bool {
+    be.tree.expr_at(callee).kind.match({
+        Name(n) => struct_named(be, n.text, ctx),
+        _       => false,
+    })
+}
+
+struct_named = (be :: CBackend, text: str, ctx: Ctx) bool {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.defs_of(ctx.module, text, found).match({
+        Err(_) => false,
+        Ok(_)  => sole_struct(found),
+    })
+}
+
+sole_struct = (found: Vec<Def>) bool {
+    found.get(0).match({
+        None  => false,
+        Ok(d) => is_struct_def(d),
+    })
+}
+
+is_struct_def = (d: Def) bool {
+    d.kind.match({ StructDef => true, _ => false })
 }
 
 

@@ -34,6 +34,7 @@ TyId, Ty, Types, TyNamed = sema.sema_ty
 Checker, Ctx = sema.sema_check
 type_of = sema.sema_type
 write_usize = sema.sema_diag
+sym_gen = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 unsupported, unresolved, untyped = gen.gen_c.gen_c_state
@@ -41,6 +42,7 @@ sub, open = gen.gen_c.gen_c_mono
 ctype, declarator, is_unit, c_prim = gen.gen_c.gen_c_type
 is_c_integer, is_signed = gen.gen_c.gen_c_type
 lower_eq_call = gen.gen_c.gen_c_member
+declare_temp = gen.gen_c.gen_c_flow
 expr, ty_of, spills, spills_anywhere = gen.gen_c.gen_c_expr
 
 // -----------------------------------------------------------------
@@ -124,17 +126,77 @@ is_comparison* = (op: BinOp) bool {
 // backend disagreed by exactly that, which is what a differential run
 // is for.
 //
-// The lowering this wants is a temporary the left fills and the right
-// fills again under an `if`, which is C's own `&&` written out. It is
-// not written here because `corpus/gen_zen/reports_what_it_cannot_lower`
-// gates the refusal, and a backend may not decide that on its own.
+// SO IT IS WRITTEN OUT: a temporary the left fills, and the right
+// fills AGAIN under an `if` — which is C's own `&&`, spelled with the
+// statements where they belong. The right operand's statements are
+// emitted inside the branch, so a `.try()` in there returns only on the
+// pass that reached it, which is exactly the guarantee the operator
+// makes and the one the hoist broke.
+//
+// The infix form is kept for the common case rather than replaced by
+// this one. `a && b` on two pure operands is `a && b`, and emitting
+// three statements and a temporary for it would put a branch in front
+// of the C compiler on every comparison in the tree.
 lower_logical = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx,
                  out :: String) Res<(), AllocError> {
     bool_ty = be.check.types.bool_ty().try();
     spills_anywhere(be, b.rhs).match({
-        true  => unsupported(be, b.rhs, "a spilling operand of && or ||", out),
+        true  => write_short_circuit(be, b, bool_ty, ctx, out),
         false => write_infix(be, b, c_op(b.op), ctx, bool_ty, out),
     })
+}
+
+// `a && b` becomes
+//
+//     bool zg_tN;
+//     zg_tN = <a>;
+//     if (zg_tN) { <b's statements> zg_tN = <b>; }
+//
+// and `a || b` the same with the test negated. The left is lowered
+// FIRST and into a temporary of its own, because `<a>` may itself have
+// statements and they must land ahead of the branch rather than inside
+// it.
+write_short_circuit = (be :: CBackend, b: Binary, bool_ty: TyId, ctx: Ctx,
+                       out :: String) Res<(), AllocError> {
+    lhs ::= be.alloc.String().try();
+    expr(be, b.lhs, ctx, bool_ty, lhs).try();
+    tmp ::= be.alloc.String().try();
+    sym_gen(tmp, "b", be.next_tmp()).try();
+    declare_temp(be, bool_ty, tmp.view()).try();
+    write_assign(be, tmp.view(), lhs.view()).try();
+    open_guard(be, b.op, tmp.view()).try();
+    rhs ::= be.alloc.String().try();
+    expr(be, b.rhs, ctx, bool_ty, rhs).try();
+    write_assign(be, tmp.view(), rhs.view()).try();
+    be.dedent();
+    be.writeln("}").try();
+    out.add_bytes(tmp.view())
+}
+
+// `&&` runs its right operand when the left HELD; `||` when it did not.
+open_guard = (be :: CBackend, op: BinOp, tmp: str) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes("if (").try();
+    line.add_bytes(negation(op)).try();
+    line.add_bytes(tmp).try();
+    line.add_bytes(") {").try();
+    be.writeln(line.view()).try();
+    be.indent();
+    Ok(());
+}
+
+negation = (op: BinOp) str {
+    op.match({ Or => "!", _ => "" })
+}
+
+write_assign = (be :: CBackend, tmp: str, value: str)
+               Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes(tmp).try();
+    line.add_bytes(" = ").try();
+    line.add_bytes(value).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view())
 }
 
 lower_value_op = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx,
