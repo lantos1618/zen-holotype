@@ -1,0 +1,199 @@
+// src/sema/sema_hoist.zen
+// What lifts into a `Res`, and what does not.
+//
+// DESIGN.md: "hoisting: a bare T lifts into Res<T> wherever a Res is
+// expected — `0;` closes a `Res<i32, E>` function like `Ok(0);` does.
+// hoisting only fires when exactly ONE variant carries the type."
+//
+// TWO RULES, AND BOTH ARE REFUSALS. The lift itself needs no code here:
+// a value that fits the success payload is built as an `Ok` by the
+// backend, and sema has nothing to say about it. What sema owes is the
+// two cases where a reader would be guessing:
+//
+//   - `Res<i32, i32>` has TWO variants carrying an `i32`, so a bare 32
+//     has two readings and the explicit form is required.
+//   - only SUCCESS lifts. A bare error value at a `Res` return is not an
+//     `Err`, because a failure that lifted silently would be a failure
+//     nobody wrote.
+//
+// NEVER COUNT AN UNSETTLED SLOT. A candidate is a variant whose payload
+// type the value FITS, and `assignable` is deliberately lenient about a
+// type nobody has computed — a `Var`, an `Infer` hole, poison — so
+// counting those would make `<T, E>() Res<T, E>` ambiguous at every
+// tail. An undecided slot carries nothing yet, so the count stands down
+// and says nothing, which is this compiler's standing rule: never invent
+// a diagnostic out of missing information.
+//
+// THE TWO POSITIONS. A value meets a `Res` it did not ask for at a
+// function's tail and at a constructor's field, and those are the two
+// places called from — `sema_decl.zen` after the body is typed, and
+// `sema_apply.zen` after the construction's type is known. A binding
+// with a written type already goes through `coerce`, which reports the
+// ordinary mismatch.
+
+Ast, Expr, ExprId, Block, BlockId, Stmt, StmtKind, Call, Arg, Span = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str = std.text
+Range = std.core
+TyId, Ty, Types, TyRes, ResForm = sema.sema_ty
+SemaFault, NameFault, TypeFault = sema.sema_diag
+Checker, Ctx = sema.sema_check
+Found, members_of = sema.sema_member
+type_of = sema.sema_type
+
+// A value of type `got` arriving where `want` is expected, when nothing
+// else has already checked the pair. Silent unless the two hoisting
+// refusals apply: a value that simply does not fit is somebody else's
+// diagnostic, and a value that fits needs nothing at all.
+hoist_check* = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
+               Res<(), AllocError> {
+    c.assignable(got, want).match({
+        true  => Ok(()),
+        false => hoist_into(c, file, span, got, want),
+    })
+}
+
+hoist_into = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
+             Res<(), AllocError> {
+    c.types.at(want).match({
+        Res(r) => hoist_into_res(c, file, span, got, want, r),
+        _      => Ok(()),
+    })
+}
+
+// The candidate count, and the only three answers it has. Two carriers
+// is ambiguous; one that is the failure is a failure nobody wrote; the
+// success alone lifts and there is nothing to say.
+hoist_into_res = (c :: Checker, file: str, span: Span, got: TyId,
+                  want: TyId, r: TyRes) Res<(), AllocError> {
+    countable(c, r).match({
+        false => Ok(()),
+        true  => count_carriers(c, file, span, got, want, r),
+    })
+}
+
+count_carriers = (c :: Checker, file: str, span: Span, got: TyId,
+                  want: TyId, r: TyRes) Res<(), AllocError> {
+    ok = c.assignable(got, r.value);
+    err = carries_failure(c, got, r);
+    (ok && err).match({
+        true  => two_readings(c, file, span, got, want),
+        false => lone_failure(c, file, span, err),
+    })
+}
+
+// Reached only when the two carriers were not both present, so a
+// failure here is the ONLY reading — and it is the one that does not
+// lift.
+lone_failure = (c :: Checker, file: str, span: Span, err: bool)
+               Res<(), AllocError> {
+    err.match({
+        true  => failure_never_lifts(c, file, span),
+        false => Ok(()),
+    })
+}
+
+// A slot nobody has computed carries nothing YET, so a `Res` with an
+// unsettled success payload cannot be counted at all.
+countable = (c: Checker, r: TyRes) bool { settled(c, r.value) }
+
+// `error` is meaningful only under `Failure`: `Absence` puts the unit
+// type there and `Open` puts the `Infer` hole, and neither is a variant
+// carrying anything a value could be mistaken for.
+carries_failure = (c: Checker, got: TyId, r: TyRes) bool {
+    r.form.match({
+        Failure => settled(c, r.error) && c.assignable(got, r.error),
+        Absence => false,
+        Open    => false,
+    })
+}
+
+settled = (c: Checker, t: TyId) bool {
+    (c.is_var(t) || c.is_infer(t) || c.is_unknown(t)) == false
+}
+
+two_readings = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
+               Res<(), AllocError> {
+    c.report(file, span, SemaFault.HoistAmbiguous(TypeFault(
+        name: "", expected: want, found: got)))
+}
+
+// The variant that WOULD have carried it, named: the fix is to write
+// `Err(..)` out, and a diagnostic that says "only success lifts" without
+// naming what did not is half of one.
+failure_never_lifts = (c :: Checker, file: str, span: Span)
+                      Res<(), AllocError> {
+    c.report(file, span, SemaFault.HoistNotSuccess(NameFault(name: "Err")))
+}
+
+// -----------------------------------------------------------------
+// the two positions
+// -----------------------------------------------------------------
+
+// A body's value against the type the signature promised. This is the
+// one place a function's tail meets its return type, so it is the one
+// place a bare success can lift into a `Res` — or fail to.
+//
+// The span is the TAIL EXPRESSION'S, not the block's: the value that
+// would have been hoisted is what the author has to change.
+check_return* = (c :: Checker, body: BlockId, ctx: Ctx, got: TyId)
+                Res<(), AllocError> {
+    tail_expr(c, c.tree.block_at(body)).match({
+        None  => Ok(()),
+        Ok(e) => hoist_at(c, e, got, ctx.ret),
+    })
+}
+
+hoist_at = (c :: Checker, id: ExprId, got: TyId, want: TyId)
+           Res<(), AllocError> {
+    node = c.tree.expr_at(id);
+    hoist_check(c, node.span.file, node.span, got, want)
+}
+
+// The block's value, written with or without the closing `;` — the AST
+// records only which was written, and both are the block's value.
+tail_expr = (c: Checker, blk: Block) Res<ExprId> {
+    blk.value.match({
+        Ok(e) => Ok(e),
+        None  => last_stmt_expr(blk),
+    })
+}
+
+last_stmt_expr = (blk: Block) Res<ExprId> {
+    blk.stmts.get(blk.stmts.len - 1).match({
+        None  => None,
+        Ok(s) => s.kind.match({ Expr(e) => Ok(e.expr), _ => None }),
+    })
+}
+
+// `Row(n: 32)` on a field declared `Res<i32>`. A construction is the
+// other place a value lands somewhere it did not name, and the field's
+// declared type is what it lands in.
+//
+// NAMED ARGUMENTS ONLY. A field is reached by its name here; a
+// positional argument to a constructor is a different resolution and not
+// this rule's to interpret.
+check_ctor_fields* = (c :: Checker, call: Call, ty: TyId, ctx: Ctx)
+                     Res<(), AllocError> {
+    call.args.loop((h, a) { check_ctor_field(c, a, ty, ctx).try() });
+    Ok(());
+}
+
+check_ctor_field = (c :: Checker, a: Arg, ty: TyId, ctx: Ctx)
+                   Res<(), AllocError> {
+    a.name.match({
+        None    => Ok(()),
+        Ok(nm)  => check_named_field(c, a, nm.text, ty, ctx),
+    })
+}
+
+check_named_field = (c :: Checker, a: Arg, name: str, ty: TyId, ctx: Ctx)
+                    Res<(), AllocError> {
+    found ::= c.alloc.Vec<Found>();
+    members_of(c, ty, name, found).try();
+    found.get(0).match({
+        None  => Ok(()),
+        Ok(f) => hoist_at(c, a.value, c.type_of(a.value, ctx).try(), f.ty),
+    })
+}

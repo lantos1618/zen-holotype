@@ -18,9 +18,10 @@ only that somebody wrote the raise. The must-fail suite is what proves
 the rule is enforced; this is the cheap standing check underneath it.
 
 GREEN HERE DOES NOT MEAN EVERY DIAGNOSTIC WORKS. It means no fault is
-silently absent: the seven that are absent are written down in OWED
+silently absent: the ones still absent are written down in OWED
 below, each against the work that owes it. Closing one is deleting its
-line. Adding a variant without a raise site and without an OWED entry is
+line -- and the count is not written here, because a number in a comment
+is the next thing to go stale. OWED's length is the count. Adding a variant without a raise site and without an OWED entry is
 what turns this red -- so the debt can shrink and cannot quietly grow.
 """
 
@@ -47,12 +48,6 @@ ENUMS = {
 # writing it down here is the enum reading complete while it is not,
 # which is the state this file was written to end.
 OWED = {
-    "HoistAmbiguous":
-        "hoisting fires only when exactly one variant carries the type. "
-        "Owed by the Res-hoisting unit; corpus/sema/hoist_single_variant "
-        "currently emits C that the C compiler rejects.",
-    "HoistNotSuccess":
-        "only success lifts into Res. Same unit as HoistAmbiguous.",
     "InfiniteSize":
         "a field cycle that never reaches an indirection. sema.zen:35 "
         "admits it; the layout walk does not terminate rather than "
