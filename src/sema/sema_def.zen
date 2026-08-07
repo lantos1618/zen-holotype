@@ -28,12 +28,13 @@
 // OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
 // is "what a name means", and every query below is that one question
 // asked of a different scope — a module's own table, the imports it
-// follows, the prelude it never wrote, and which module a dotted path
-// even denotes. They all read `tables`, and a split would put the store
-// in one file and half its readers in another.
+// follows, the prelude it never wrote, which module a dotted path
+// denotes, and which import bindings the `*` gate refused. They all read
+// `tables`; a split would put the store in one file and its readers in
+// another.
 
 Ast, Module, Decl, DeclKind, Ident, Span, QualifiedName = ast
-Import, Impl = ast
+Import, Impl, Enum = ast
 Alloc, AllocError = std.mem
 Vec, Map = std.collections
 str, String = std.text
@@ -166,15 +167,32 @@ World* = {
     // are any: a module's own name is never shadowed by something it
     // imported, because the import would have been a redeclaration.
     // Otherwise the imports are followed, and `*` gates every hop, and
-    // last of all the prelude — which is the only name a module gets
-    // without writing an import, and so the only one that loses every
-    // tie.
+    // last of all the prelude — the only name a module gets without
+    // writing an import, and so the only one that loses every tie.
+    //
+    // AN IMPORT BINDING IS AUTHORITATIVE, which is why the last line
+    // asks a question the first two do not. The prelude is the exception
+    // for a name NOBODY imported; a module that wrote an import already
+    // said what the name means here, so a binding the `*` gate rejected
+    // resolves to NOTHING. Falling through was worse than a missing
+    // diagnostic: `hex_digit`, blocked at its own boundary, came back
+    // out of `std.core.byte` and ran instead.
     defs_of* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
                Res<(), AllocError> {
         self.own_defs(mi, name, out).try();
         (out.len == 0).then(() { self.imported_defs(mi, name, out).try() });
-        (out.len == 0).then(() { self.prelude_defs(mi, name, out).try() });
+        (out.len == 0 && (self.binds_name(mi, name) == false))
+            .then(() { self.prelude_defs(mi, name, out).try() });
         Ok(());
+    }
+
+    // Did `mi` write an import binding this name? Starred or not: a star
+    // says whether the binding leaves again, not whether it exists.
+    binds_name* = (self: @Self, mi: usize, name: str) bool {
+        self.tables.get(mi).match({
+            None    => false,
+            Ok(t)   => imports_name(t, name),
+        })
     }
 
     // "A name that is not imported is not visible, and the prelude is
@@ -290,7 +308,7 @@ World* = {
     imported_defs* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
                      Res<(), AllocError> {
         seen ::= self.alloc.Vec<usize>();
-        self.follow(mi, name, out, seen)
+        self.follow(mi, name, out, seen, false)
     }
 
     // Every EXPORTED declaration of `name` in module `mi`, following
@@ -303,37 +321,45 @@ World* = {
         keep_exported(starred, out).try();
         // a folder root declares nothing and re-exports everything, so
         // an empty answer here is the normal case and not a miss
-        (out.len == 0).then(() { self.follow(mi, name, out, seen).try() });
+        (out.len == 0).then(() { self.follow(mi, name, out, seen, true).try() });
         Ok(());
     }
 
     // Walk `mi`'s import list for `name` and ask the module it names.
     //
+    // `reexport` IS THE STAR ON THE BINDING, a parameter because the
+    // same list answers two questions. Asked by `mi` itself, every
+    // binding counts — an import binds locally whatever its star says.
+    // Asked by somebody ELSE, only starred ones do: a star on an import
+    // is the whole re-export mechanism, and the walk without this flag
+    // re-exported every unstarred import.
+    //
     // `seen` is the cycle guard, and it is needed rather than defensive:
     // `std.core.display` and `std.text` import from each other, and a
     // module graph is not required to be a tree.
     follow = (self: @Self, mi: usize, name: str, out :: Vec<Def>,
-              seen :: Vec<usize>) Res<(), AllocError> {
+              seen :: Vec<usize>, reexport: bool) Res<(), AllocError> {
         visited(seen, mi).match({
-            false => self.follow_fresh(mi, name, out, seen),
+            false => self.follow_fresh(mi, name, out, seen, reexport),
             true  => Ok(()),
         })
     }
 
     follow_fresh = (self: @Self, mi: usize, name: str, out :: Vec<Def>,
-                    seen :: Vec<usize>) Res<(), AllocError> {
+                    seen :: Vec<usize>, reexport: bool) Res<(), AllocError> {
         seen.add(mi).try();
         self.tables.get(mi).match({
-            Ok(t) => self.follow_imports(t, name, out, seen),
+            Ok(t) => self.follow_imports(t, name, out, seen, reexport),
             None  => Ok(()),
         }).try();
         Ok(());
     }
 
     follow_imports = (self: @Self, t: ModuleTable, name: str, out :: Vec<Def>,
-                      seen :: Vec<usize>) Res<(), AllocError> {
+                      seen :: Vec<usize>, reexport: bool) Res<(), AllocError> {
         t.imports.loop((h, binding) {
-            binding.name.eq(name).then(() {
+            crosses = binding.exported || (reexport == false);
+            (crosses && binding.name.eq(name)).then(() {
                 self.follow_one(binding, name, out, seen).try();
             });
         });
@@ -376,6 +402,128 @@ World* = {
             }).try();
         });
         Ok(());
+    }
+
+    // THE GATE, ASKED OF THE IMPORT RATHER THAN OF A USE.
+    //
+    // Every import binding in `mi` that the `*` gate rejects. BINDINGS
+    // and not a count, because the diagnostic names the binding's own
+    // span: `view, hex_digit = text.text` is one declaration and two
+    // bindings, and only one of them is wrong. TWO THINGS IT DOES NOT
+    // CLAIM: a module the program does not contain has nothing to have
+    // exported FROM, and a module importing ITSELF is the cycle rule.
+    blocked_imports* = (self: @Self, tree: Ast, mi: usize,
+                        out :: Vec<ImportBinding>) Res<(), AllocError> {
+        self.tables.get(mi).match({
+            Ok(t)   => self.blocked_in(tree, t, mi, out),
+            None    => Ok(()),
+        })
+    }
+
+    blocked_in = (self: @Self, tree: Ast, t: ModuleTable, mi: usize,
+                  out :: Vec<ImportBinding>) Res<(), AllocError> {
+        t.imports.loop((h, b) { self.blocked_one(tree, b, mi, out).try() });
+        Ok(());
+    }
+
+    blocked_one = (self: @Self, tree: Ast, b: ImportBinding, mi: usize,
+                   out :: Vec<ImportBinding>) Res<(), AllocError> {
+        self.index_of(b.module).match({
+            None      => Ok(()),
+            Ok(other) => self.blocked_from(tree, b, other, mi, out),
+        })
+    }
+
+    blocked_from = (self: @Self, tree: Ast, b: ImportBinding, other: usize,
+                    mi: usize, out :: Vec<ImportBinding>)
+                   Res<(), AllocError> {
+        seen ::= self.alloc.Vec<usize>();
+        crosses = self.exports_name(tree, other, b.name, seen).try();
+        (crosses || (other == mi)).match({
+            true  => Ok(()),
+            false => out.add(b),
+        })
+    }
+
+    // Does module `mi` let `name` out at all? `exported_defs` answers
+    // with DEFS; this answers yes or no and knows one thing more, because
+    // a VARIANT IS NOT A DECLARATION: `Res*<T> = Ok(T) | None` files one
+    // `Def` and `Res*, Ok*, Err*, None* = std.core.result` names four off
+    // it. So the enum's own star answers for its variants; filing them as
+    // `Def`s would put `Ok` in the table every bare name resolves through.
+    exports_name* = (self: @Self, tree: Ast, mi: usize, name: str,
+                     seen :: Vec<usize>) Res<bool, AllocError> {
+        defs ::= self.alloc.Vec<Def>();
+        self.exported_defs(mi, name, defs).try();
+        hits ::= self.alloc.Vec<usize>();
+        (defs.len == 0).then(() {
+            self.exports_variant(tree, mi, name, hits, seen).try();
+        });
+        Ok(defs.len > 0 || hits.len > 0);
+    }
+
+    // The variant half of the same walk, cycle guard and all: this
+    // module's own exported enums, then the starred imports it
+    // re-exports. `hits` accumulates rather than setting a flag; a scalar
+    // assigned from two nested closures is not something this resolves.
+    exports_variant = (self: @Self, tree: Ast, mi: usize, name: str,
+                       hits :: Vec<usize>, seen :: Vec<usize>)
+                      Res<(), AllocError> {
+        visited(seen, mi).match({
+            true  => Ok(()),
+            false => self.variant_walk(tree, mi, name, hits, seen),
+        })
+    }
+
+    variant_walk = (self: @Self, tree: Ast, mi: usize, name: str,
+                    hits :: Vec<usize>, seen :: Vec<usize>)
+                   Res<(), AllocError> {
+        seen.add(mi).try();
+        self.tables.get(mi).match({
+            Ok(t) => self.variant_table(tree, t, mi, name, hits, seen),
+            None  => Ok(()),
+        })
+    }
+
+    variant_table = (self: @Self, tree: Ast, t: ModuleTable, mi: usize,
+                     name: str, hits :: Vec<usize>, seen :: Vec<usize>)
+                    Res<(), AllocError> {
+        own_variant(tree, t, mi, name, hits).try();
+        (hits.len == 0).then(() {
+            self.variant_each(tree, t, name, hits, seen).try();
+        });
+        Ok(());
+    }
+
+    // The star and the name are asked INSIDE the helper, not in a
+    // `.then` around the call: a loop binding read from a closure nested
+    // in a `.loop` closure does not survive the bootstrapper, and a
+    // written parameter is SEMA_BOOTSTRAP_FIXES.md §10's workaround.
+    variant_each = (self: @Self, tree: Ast, t: ModuleTable, name: str,
+                    hits :: Vec<usize>, seen :: Vec<usize>)
+                   Res<(), AllocError> {
+        t.imports.loop((h, b) {
+            self.variant_hop(tree, b, name, hits, seen).try();
+        });
+        Ok(());
+    }
+
+    variant_hop = (self: @Self, tree: Ast, b: ImportBinding, name: str,
+                   hits :: Vec<usize>, seen :: Vec<usize>)
+                  Res<(), AllocError> {
+        (b.exported && b.name.eq(name)).match({
+            false => Ok(()),
+            true  => self.variant_hop_to(tree, b.module, name, hits, seen),
+        })
+    }
+
+    variant_hop_to = (self: @Self, tree: Ast, module: str, name: str,
+                      hits :: Vec<usize>, seen :: Vec<usize>)
+                     Res<(), AllocError> {
+        self.index_of(module).match({
+            None      => Ok(()),
+            Ok(other) => self.exports_variant(tree, other, name, hits, seen),
+        })
     }
 
     // The `Impl` node an `ImplId` points at. A projection through the
@@ -438,7 +586,7 @@ index_decl = (t :: ModuleTable, a: Alloc, m: Module, d: Decl,
         Alias(x)    => add_def(t, a, m, x.name, DefKind.AliasDef, x.exported, id, d.span),
         Function(f) => add_def(t, a, m, f.name, DefKind.FunctionDef, f.exported, id, d.span),
         Const(c)    => add_def(t, a, m, c.name, DefKind.ConstDef, c.exported, id, d.span),
-        Import(im)  => add_imports(t, a, im, d.span),
+        Import(im)  => add_imports(t, a, im),
         Impl(_)     => t.impls.add(ImplId(decl: id)),
     }).try();
     Ok(());
@@ -463,15 +611,17 @@ add_def = (t :: ModuleTable, a: Alloc, m: Module, name: Ident, kind: DefKind,
 // `Res*, Ok*, None* = std.core.result` is three bindings of one module,
 // each starred independently. The module path is flattened to its dotted
 // spelling once, here, so nothing downstream walks segments.
-add_imports = (t :: ModuleTable, a: Alloc, im: Import, span: Span)
-              Res<(), AllocError> {
+//
+// EACH BINDING KEEPS ITS OWN SPAN: one line binds three names and the
+// `*` gate rejects them one at a time.
+add_imports = (t :: ModuleTable, a: Alloc, im: Import) Res<(), AllocError> {
     path = dotted(a, im.module).try();
     im.names.loop((h, n) {
         t.imports.add(ImportBinding(
             name: n.name.text,
             module: path,
             exported: n.exported,
-            span: span,
+            span: n.name.span,
         )).try();
     });
     Ok(());
@@ -560,6 +710,80 @@ keep_exported = (defs: Vec<Def>, out :: Vec<Def>) Res<(), AllocError> {
         d.exported.then(() { out.add(d).try() });
     });
     Ok(());
+}
+
+imports_name = (t: ModuleTable, name: str) bool {
+    Range(0, t.imports.len).find((i) {
+        t.imports.get(i).match({ Ok(b) => b.name.eq(name), None => false })
+    }).match({ Ok(_) => true, None => false })
+}
+
+own_variant = (tree: Ast, t: ModuleTable, mi: usize, name: str,
+               hits :: Vec<usize>) Res<(), AllocError> {
+    variant_named(tree, t, name).match({
+        true  => hits.add(mi),
+        false => Ok(()),
+    })
+}
+
+// An EXPORTED enum with a variant of this name; the star is the enum's.
+variant_named = (tree: Ast, t: ModuleTable, name: str) bool {
+    Range(0, t.defs.len).find((i) {
+        t.defs.get(i).match({
+            Ok(d) => d.exported && enum_has_variant(tree, d, name),
+            None  => false,
+        })
+    }).match({ Ok(_) => true, None => false })
+}
+
+enum_has_variant = (tree: Ast, d: Def, name: str) bool {
+    decl_at(tree, d.id).match({
+        None    => false,
+        Ok(x)   => x.kind.match({
+            Enum(e) => named_variant(e, name),
+            _       => false,
+        }),
+    })
+}
+
+named_variant = (e: Enum, name: str) bool {
+    Range(0, e.variants.len).find((i) {
+        e.variants.get(i).match({
+            Ok(v) => v.name.text.eq(name),
+            None  => false,
+        })
+    }).match({ Ok(_) => true, None => false })
+}
+
+// `hex_digit is not exported by module text` — the sentence a rejected
+// binding is reported with, built here because naming a module is this
+// file's subject.
+not_exported_note* = (a: Alloc, b: ImportBinding) Res<str, AllocError> {
+    out ::= a.String().try();
+    out.add_bytes(b.name).try();
+    out.add_bytes(" is not exported by module ").try();
+    out.add_bytes(module_display(b.module)).try();
+    Ok(out.view());
+}
+
+// How a module is NAMED to a reader. `text/text.zen` answers to
+// `text.text` by the path rule and to `text` by the folder rule, and a
+// person wrote the folder form — so a repeated last segment collapses.
+module_display* = (name: str) str {
+    head = name.slice(0, cut_before(name));
+    last_segment(head).eq(last_segment(name)).match({
+        true  => head,
+        false => name,
+    })
+}
+
+// Where the last segment starts, minus its dot.
+cut_before = (name: str) usize {
+    cut ::= name.len;
+    Range(0, name.len).loop((h, i) {
+        (name.index(i) == '.').then(() { cut = i; });
+    });
+    cut
 }
 
 visited = (seen: Vec<usize>, mi: usize) bool {

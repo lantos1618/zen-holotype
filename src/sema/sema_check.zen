@@ -51,7 +51,8 @@ str, String = std.text
 Range = std.core
 DeclId = sema.sema_id
 TyId, Ty, Types, ResForm, TyRes, TyNamed = sema.sema_ty
-World, Def, DefKind = sema.sema_def
+World, Def, DefKind, ImportBinding = sema.sema_def
+not_exported_note = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 Inst, InstEdge = sema.sema_inst
 
@@ -666,7 +667,7 @@ Checker* = {
 // reallocating, so any handle taken before a growth points at freed
 // pages. Sema is a query over a finished tree.
 Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
-    Ok(Checker(
+    c ::= Checker(
         tree: tree,
         world: a.World(tree).try(),
         types: a.Types(),
@@ -682,7 +683,35 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         tvars: a.Vec<Binding>(),
         bounds: a.Vec<Binding>(),
         alloc: a,
-    ));
+    );
+    check_import_gate(c).try();
+    Ok(c);
+}
+
+// THE `*` GATE IS A FACT ABOUT THE GRAPH, so it is asked once, here,
+// where the graph is built — and not by a query, because no query would
+// ever reach it. `defs_of` can only ever answer "nothing is in scope
+// under that name"; the mistake is one hop away in the IMPORT, and by
+// the time a use site notices, the name it wanted has already been
+// filtered out. That is why this rule was silent for so long: the only
+// thing left to see was a backend that could not resolve a symbol, which
+// names the wrong phase and the wrong law.
+check_import_gate = (c :: Checker) Res<(), AllocError> {
+    blocked ::= c.alloc.Vec<ImportBinding>();
+    Range(0, c.world.count()).loop((h, mi) {
+        c.world.blocked_imports(c.tree, mi, blocked).try();
+    });
+    blocked.loop((h, b) { report_blocked(c, b).try() });
+    Ok(());
+}
+
+// A `NameFault` carries ONE string and this sentence names two things —
+// the name, and the module that would not let it out. Both go in the
+// payload, because a fault shape that holds two names is a change to
+// `sema_diag.zen`'s fault set and not to this rule.
+report_blocked = (c :: Checker, b: ImportBinding) Res<(), AllocError> {
+    c.report(b.span.file, b.span, SemaFault.NotExported(
+        NameFault(name: not_exported_note(c.alloc, b).try())))
 }
 
 // A context with nothing in it: module 0, no `@Self`, no enclosing Res.
