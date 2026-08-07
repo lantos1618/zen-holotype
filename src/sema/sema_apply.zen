@@ -30,18 +30,20 @@
 // enclosing instantiation then substitutes.
 
 Ast, Expr, ExprId, Call, Arg, Access, Lambda, Ident, Span, Pos = ast
-Decl, DeclKind, Struct, Function, TParam, Param, TypeId = ast
+Decl, DeclKind, Struct, Function, TParam, Param, TypeId, Impl = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
-DeclId = sema.sema_id
+DeclId, ImplId = sema.sema_id
 TyId, Ty, Types, TyFn, TyNamed, TyVar = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Checker, Ctx, UNRESOLVED = sema.sema_check
 Inst, InstEdge, subst, unify, tparam_vars, zip = sema.sema_inst
-Cand, Actual = sema.sema_call
+has_var, inst_of_named = sema.sema_inst
+Cand, TBound, Actual = sema.sema_call
 ty_at = sema.sema_cand
+impl_bound_type = sema.sema_supply
 type_from_ast, type_of, param_type = sema.sema_type
 
 // A GENERIC STRUCT IS CONSTRUCTED AT WHAT THE CALL WROTE, and at its own
@@ -159,6 +161,7 @@ call_inst = (c :: Checker, call: Call, k: Cand, actuals: Vec<Actual>,
     inst ::= c.alloc.Inst();
     written_targs(c, call, k, inst, ctx).try();
     infer_targs(c, k, actuals, inst).try();
+    infer_from_bounds(c, k, inst).try();
     Ok(inst);
 }
 
@@ -206,4 +209,182 @@ infer_from = (c :: Checker, param: TyId, a: Actual, inst :: Inst)
         true  => Ok(()),
         false => unify(c, param, a.ty, inst),
     })
+}
+
+// ---------------------------------------------------------------------
+// A PARAMETER NAMED ONLY INSIDE ANOTHER'S BOUND
+//
+// `<R: Range<T>, T> = (range: R, body: (h: LoopHandle, value: T) ())` is
+// the form the whole loop family is written in, and `range.zen` says
+// why: a bound MONOMORPHISES, so `at` is a direct call and the body
+// inlines. The cost is that `T` appears in no parameter of its own —
+// the only thing naming it is the closure, and "a closure infers its
+// parameter types FROM the signature" points that arrow the other way.
+// So the loop above leaves `T` free and everything downstream sees an
+// element nothing settled: `filter`'s own `alloc.Vec<T>()` has no
+// symbol to write, and a value typed `T` is a foreign parameter that
+// reaches no members at all.
+//
+// ONCE `R` IS KNOWN THE BOUND ANSWERS, and both shapes it comes in are
+// one unification against the bound as written.
+// ---------------------------------------------------------------------
+
+infer_from_bounds = (c :: Checker, k: Cand, inst :: Inst)
+                    Res<(), AllocError> {
+    k.tbounds.loop((h, tb) { infer_one_bound(c, k, tb, inst).try() });
+    Ok(());
+}
+
+infer_one_bound = (c :: Checker, k: Cand, tb: TBound, inst :: Inst)
+                  Res<(), AllocError> {
+    v = c.types.var(tb.name, k.owner).try();
+    inst.lookup(v).match({
+        None  => Ok(()),
+        Ok(g) => infer_through_bound(c, tb.bound, g, inst),
+    })
+}
+
+infer_through_bound = (c :: Checker, bound: TyId, g: TyId, inst :: Inst)
+                      Res<(), AllocError> {
+    same_head(c, bound, g).match({
+        true  => infer_own_bound(c, bound, g, inst),
+        false => infer_impl_bound(c, bound, g, inst),
+    })
+}
+
+same_head = (c: Checker, a: TyId, b: TyId) bool {
+    c.types.at(a).match({
+        Named(x) => head_is(c, x, b),
+        _        => false,
+    })
+}
+
+head_is = (c: Checker, x: TyNamed, b: TyId) bool {
+    c.types.at(b).match({ Named(y) => x.decl.eq(y.decl), _ => false })
+}
+
+// THE ARGUMENT IS THE BOUND ITSELF: `Range(0, 6)` reaching `R:
+// Range<T>`. A value of the bound's own type carries only what its
+// declaration gives it, and `range.zen` gives it nothing — "a Range
+// that supplies no `at` walks its own index space, which is what makes
+// `Range(0, 5)` mean 0, 1, 2, 3, 4 with nothing behind it". So an
+// argument nothing settled IS the index, and the index is a `usize`.
+//
+// That is not a guess, it is the answer the backend already writes:
+// `gen_c_loop.lower_settled` walks a range that stores its own bounds
+// with `elem` fixed at `usize`. The two have to agree, or a fold's
+// accumulator is declared at a type the walk does not produce.
+infer_own_bound = (c :: Checker, bound: TyId, g: TyId, inst :: Inst)
+                  Res<(), AllocError> {
+    usize_ty = c.types.prim("usize").try();
+    bs ::= c.alloc.Vec<TyId>();
+    gs ::= c.alloc.Vec<TyId>();
+    named_args(c, bound, bs).try();
+    named_args(c, g, gs).try();
+    (bs.len == gs.len).match({
+        false => Ok(()),
+        true  => unify_index_space(c, bs, gs, usize_ty, inst),
+    })
+}
+
+unify_index_space = (c :: Checker, bs: Vec<TyId>, gs: Vec<TyId>,
+                     usize_ty: TyId, inst :: Inst) Res<(), AllocError> {
+    bs.loop((h, i, b) {
+        unify(c, b, settled_or_index(c, ty_at(gs, i), usize_ty), inst).try();
+    });
+    Ok(());
+}
+
+settled_or_index = (c: Checker, t: TyId, usize_ty: TyId) TyId {
+    has_var(c, t).match({ true => usize_ty, false => t })
+}
+
+named_args = (c :: Checker, ty: TyId, out :: Vec<TyId>)
+             Res<(), AllocError> {
+    c.types.at(ty).match({
+        Named(n) => n.args.loop((h, a) { out.add(a).try() }),
+        _        => (),
+    });
+    Ok(());
+}
+
+// THE ARGUMENT IMPLS THE BOUND: `Vec<i32>` reaching `R: Range<T>`.
+// "An impl lives with the type, not with the trait", so the impls of
+// the argument's own declaration are the ones to read, and
+// `Vec.impl(Range<T>, ..)` is where it says which of `Vec`'s OWN
+// arguments the bound's argument is. The impl writes `Vec`'s `T`;
+// putting it through the receiver's own instantiation is what turns it
+// into `i32`.
+infer_impl_bound = (c :: Checker, bound: TyId, g: TyId, inst :: Inst)
+                   Res<(), AllocError> {
+    c.types.at(g).match({
+        Named(n) => infer_named_impl(c, bound, n, inst),
+        _        => Ok(()),
+    })
+}
+
+infer_named_impl = (c :: Checker, bound: TyId, n: TyNamed, inst :: Inst)
+                   Res<(), AllocError> {
+    impl_bound_at(c, bound, n).try().match({
+        None   => Ok(()),
+        Ok(gb) => unify(c, bound, gb, inst),
+    })
+}
+
+impl_bound_at = (c :: Checker, bound: TyId, n: TyNamed)
+                Res<Res<TyId>, AllocError> {
+    ids ::= c.alloc.Vec<ImplId>();
+    c.world.impls_named(c.tree, n.name, ids).try();
+    impl_bound_from(c, ids, 0, bound, n)
+}
+
+// The first impl of that bound. Written as a walk rather than a loop
+// because the answer is the FIRST hit and a `find` cannot ask a
+// question that allocates.
+impl_bound_from = (c :: Checker, ids: Vec<ImplId>, i: usize, bound: TyId,
+                   n: TyNamed) Res<Res<TyId>, AllocError> {
+    ids.get(i).match({
+        None   => Ok(None),
+        Ok(id) => impl_bound_or_next(c, ids, i, id, bound, n),
+    })
+}
+
+impl_bound_or_next = (c :: Checker, ids: Vec<ImplId>, i: usize, id: ImplId,
+                      bound: TyId, n: TyNamed) Res<Res<TyId>, AllocError> {
+    impl_applied(c, id, bound, n).try().match({
+        Ok(t) => Ok(Ok(t)),
+        None  => impl_bound_from(c, ids, i + 1, bound, n),
+    })
+}
+
+impl_applied = (c :: Checker, id: ImplId, bound: TyId, n: TyNamed)
+               Res<Res<TyId>, AllocError> {
+    (n.decl.module == id.decl.module).match({
+        false => Ok(None),
+        true  => impl_applied_local(c, id, bound, n),
+    })
+}
+
+impl_applied_local = (c :: Checker, id: ImplId, bound: TyId, n: TyNamed)
+                     Res<Res<TyId>, AllocError> {
+    c.world.impl_at(c.tree, id).match({
+        None   => Ok(None),
+        Ok(im) => impl_applied_of(c, im, bound, n),
+    })
+}
+
+impl_applied_of = (c :: Checker, im: Impl, bound: TyId, n: TyNamed)
+                  Res<Res<TyId>, AllocError> {
+    mi = n.decl.module.to_usize();
+    got = impl_bound_type(c, im, mi).try();
+    same_head(c, got, bound).match({
+        false => Ok(None),
+        true  => applied_at_recv(c, got, n),
+    })
+}
+
+applied_at_recv = (c :: Checker, got: TyId, n: TyNamed)
+                  Res<Res<TyId>, AllocError> {
+    recv = inst_of_named(c, n).try();
+    Ok(Ok(subst(c, got, recv).try()));
 }

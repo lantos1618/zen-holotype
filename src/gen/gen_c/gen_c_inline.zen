@@ -503,7 +503,8 @@ run_closure = (be :: CBackend, id: ExprId, c: Call, cl: Closure, ctx: Ctx,
 run_lambda = (be :: CBackend, c: Call, cl: Closure, ctx: Ctx, want: TyId,
               out :: String) Res<(), AllocError> {
     argt ::= be.alloc.Vec<String>();
-    lower_args(be, c, cl, ctx, argt).try();
+    hnd ::= be.alloc.Vec<usize>();
+    lower_args(be, c, cl, ctx, argt, hnd).try();
 
     ret = closure_ret(be, cl, want).try();
     result ::= be.alloc.String().try();
@@ -522,7 +523,7 @@ run_lambda = (be :: CBackend, c: Call, cl: Closure, ctx: Ctx, want: TyId,
 
     lmark = be.mark();
     cmark = be.check.mark();
-    bind_lambda_params(be, cl, argt).try();
+    bind_lambda_params(be, cl, argt, hnd).try();
     be.enter_call();
     block(be, cl.lam.body, cl.ctx, ret, dest_of(keeps, result.view())).try();
     be.leave_call();
@@ -562,55 +563,101 @@ want_or_unit = (be :: CBackend, want: TyId) Res<TyId, AllocError> {
 
 
 lower_args = (be :: CBackend, c: Call, cl: Closure, ctx: Ctx,
-              argt :: Vec<String>) Res<(), AllocError> {
+              argt :: Vec<String>, hnd :: Vec<usize>) Res<(), AllocError> {
     Range(0, c.args.len).loop((h, i) {
-        lower_one_arg(be, c, cl, i, ctx, argt).try();
+        lower_one_arg(be, c, cl, i, ctx, argt, hnd).try();
     });
     Ok(());
 }
 
 
 lower_one_arg = (be :: CBackend, c: Call, cl: Closure, i: usize, ctx: Ctx,
-                 argt :: Vec<String>) Res<(), AllocError> {
+                 argt :: Vec<String>, hnd :: Vec<usize>)
+                Res<(), AllocError> {
     c.args.get(i).match({
-        Ok(a) => lower_arg_value(be, a.value, cl, i, ctx, argt),
+        Ok(a) => lower_arg_value(be, a.value, cl, i, ctx, argt, hnd),
         None  => Ok(()),
     })
 }
 
 
+// A HANDLE PASSED ON IS NOT A VALUE COPIED. `map`'s own body is
+// `made.add(body(h, index, value))` — the handle it hands the caller's
+// closure is the loop it is walking, so `h.break(..)` in that closure
+// stops THIS loop, which is the early exit `loop_find.zen` documents.
+// A `LoopHandle` has no C storage — it is two labels and a depth — so
+// the argument is read as the loop it names, here, while that loop is
+// still the innermost one in scope.
 lower_arg_value = (be :: CBackend, value: ExprId, cl: Closure, i: usize,
-                   ctx: Ctx, argt :: Vec<String>) Res<(), AllocError> {
+                   ctx: Ctx, argt :: Vec<String>, hnd :: Vec<usize>)
+                  Res<(), AllocError> {
+    depth = handle_depth(be, value);
+    hnd.add(depth).try();
     unknown = be.check.types.unknown().try();
     want = cl.ptys.get(i).match({ Ok(t) => t, None => unknown });
     text ::= be.alloc.String().try();
-    expr(be, value, ctx, want, text).try();
+    (depth == 0).match({
+        true  => expr(be, value, ctx, want, text),
+        false => Ok(()),
+    }).try();
     argt.add(text)
 }
 
 
-bind_lambda_params = (be :: CBackend, cl: Closure, argt: Vec<String>)
-                     Res<(), AllocError> {
+handle_depth = (be :: CBackend, value: ExprId) usize {
+    be.tree.expr_at(value).kind.match({
+        Name(n) => slot_handle(be, n.text),
+        _       => 0,
+    })
+}
+
+
+slot_handle = (be :: CBackend, name: str) usize {
+    be.slot_of(name).match({ Ok(s) => s.handle, None => 0 })
+}
+
+
+bind_lambda_params = (be :: CBackend, cl: Closure, argt: Vec<String>,
+                      hnd: Vec<usize>) Res<(), AllocError> {
     Range(0, cl.lam.params.len).loop((h, i) {
-        bind_lambda_param(be, cl, argt, i).try();
+        bind_lambda_param(be, cl, argt, hnd, i).try();
     });
     Ok(());
 }
 
 
 bind_lambda_param = (be :: CBackend, cl: Closure, argt: Vec<String>,
-                     i: usize) Res<(), AllocError> {
+                     hnd: Vec<usize>, i: usize) Res<(), AllocError> {
     cl.lam.params.get(i).match({
-        Ok(p) => bind_lambda_named(be, cl, argt, i, p),
+        Ok(p) => bind_lambda_named(be, cl, argt, hnd, i, p),
         None  => Ok(()),
     })
 }
 
 
 bind_lambda_named = (be :: CBackend, cl: Closure, argt: Vec<String>,
-                     i: usize, p: Param) Res<(), AllocError> {
+                     hnd: Vec<usize>, i: usize, p: Param)
+                    Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     ty = cl.ptys.get(i).match({ Ok(t) => t, None => unknown });
+    depth = hnd.get(i).match({ Ok(d) => d, None => 0 });
+    (depth == 0).match({
+        false => bind_passed_handle(be, p, ty, depth),
+        true  => bind_copied_arg(be, argt, i, p, ty),
+    })
+}
+
+
+bind_passed_handle = (be :: CBackend, p: Param, ty: TyId, depth: usize)
+                     Res<(), AllocError> {
+    be.declare_handle(p.name.text, ty, depth).try();
+    be.check.bind(p.name.text, ty, false).try();
+    Ok(());
+}
+
+
+bind_copied_arg = (be :: CBackend, argt: Vec<String>, i: usize, p: Param,
+                   ty: TyId) Res<(), AllocError> {
     argt.get(i).match({
         Ok(s) => declare_bound(be, p, ty, s.view()),
         None  => Ok(()),

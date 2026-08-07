@@ -393,6 +393,22 @@ unify* = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
 // Poison never becomes a binding: an argument sema could not type says
 // nothing about `T`, and binding `T = <unknown>` would emit a type
 // nobody wrote.
+//
+// A TYPE THAT STILL MENTIONS A PARAMETER IS NOT POISON, and refusing it
+// was the one line that turned an OPEN answer into an OPAQUE one.
+// `Range(1, 4).map(alloc, ..)` answers `Res<Vec<U>>` — `map`'s own `U`,
+// which only the body settles — and `ok_or`'s `<T>(r: Res<T>, ..)` then
+// declined to bind `T` at all, so `.ok_or(..).try()` answered a bare
+// `T` rather than `Vec<U>`. `sema_call.zen` reaches no members through
+// a foreign `Var`, so the `.loop` on it resolved to nothing, and a
+// backend reading `call_memo` for an answer sema never wrote reported
+// six declarations of `loop` as an ambiguity.
+//
+// Openness is not lost by binding it — `Vec<U>` is as open as `U` — and
+// the refusal for it already lives at the consumer, which is what
+// `has_var` is asked for before a symbol is written. Binding keeps the
+// SHAPE, which is the whole of what the caller further down the chain
+// still needs.
 bind_actual = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
               Res<(), AllocError> {
     usable_actual(c, actual).match({
@@ -403,7 +419,6 @@ bind_actual = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
 
 usable_actual = (c: Checker, actual: TyId) bool {
     (c.is_unknown(actual) == false) && (c.is_infer(actual) == false)
-        && (has_var(c, actual) == false)
 }
 
 unify_named = (c :: Checker, n: TyNamed, actual: TyId, inst :: Inst)
