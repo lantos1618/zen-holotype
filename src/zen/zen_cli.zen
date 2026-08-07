@@ -30,13 +30,16 @@ Vec = std.collections
 
 // What the command line asked for.
 //
-// Three cases and not two: an unwritten command is not a usage error.
-// `zen fmt` is a real command of this compiler that has not been
-// written yet, and telling its author that is a different answer from
-// telling them they typed something meaningless.
+// Four cases and not one: every one of them is a different thing to
+// tell the caller, and collapsing any pair sends them to fix the wrong
+// line. `zen fmt` is a real command of this compiler that has not been
+// written yet, which is not the same as typing something meaningless;
+// and leaving out a required flag is not the same as misspelling one,
+// because nothing the caller wrote is wrong.
 Cli* = Build(Job)
      | Later(str)     // fmt / test / lsp — named, and not yet written
      | Usage(str)     // the word that made no sense; empty means nothing was said
+     | Missing(str)   // a flag the build needs and did not get
 
 // Everything `build` needs. `emit_c` is a flag and not a mode enum
 // because there is exactly one mode: PLAN.md says C is the backend and
@@ -115,9 +118,24 @@ verdict = (root: str, out: str, entry: str, emit: bool, bad: str) Cli {
         false => Cli.Usage(bad),
         true  => root.is_empty().match({
             true  => Cli.Usage(""),
-            false => Cli.Build(
-                Job(root: root, out: out, entry: entry, emit_c: emit)),
+            false => built(root, out, entry, emit),
         }),
+    })
+}
+
+// `--emit-c` IS THE BUILD, and a build without it is not a smaller
+// build — it is nothing. Emission is the only thing this compiler does
+// with the tree it checked; drop the flag and it type-checks the world,
+// throws the answer away, and exits 0 having written no file. That is
+// the silence this file's own header calls worse than saying so, and it
+// held for long enough that `make build` stood on it and produced no
+// binary — taking `test-zen`, `fmt` and `determinism` down with it,
+// because a target that cannot run cannot go red either.
+built = (root: str, out: str, entry: str, emit: bool) Cli {
+    emit.match({
+        false => Cli.Missing("--emit-c"),
+        true  => Cli.Build(
+            Job(root: root, out: out, entry: entry, emit_c: emit)),
     })
 }
 
