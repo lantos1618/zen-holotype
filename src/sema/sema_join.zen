@@ -36,7 +36,7 @@ join* = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
 keep_or_settle = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     (open_res(c, a) && (c.is_unknown(b) == false)).match({
         true  => settled_res(c, a, b),
-        false => Ok(a),
+        false => merged_or_first(c, a, b),
     })
 }
 
@@ -76,6 +76,59 @@ at_form = (c :: Checker, value: TyId, rb: TyRes) Res<TyId, AllocError> {
         Failure => c.types.res_failure(value, rb.error),
         Open    => c.types.res_open(value),
     })
+}
+
+// TWO SETTLED FAILURES ARE ONE VALUE WITH TWO WAYS TO GO WRONG, and the
+// match is worth `Res<T, Ea | Eb>`. "The error type of a `Res` is a
+// union, and propagation merges sets" (DESIGN.md, Errors) is stated
+// along a call, but an arm is the same join asked sideways: first-arm-
+// wins typed `true => fails(n)` / `false => faults(n)` as the first
+// arm's `Res<(), AllocError>`, and the second arm then had nowhere to
+// go — gcc rejected the assignment outright.
+//
+// THIS IS THE ONE EXCEPTION TO THE HEADER'S FIRST-ARM-WINS RULE, and it
+// is not a supertype being invented. The set already had a lattice —
+// `union_ty` canonicalises it and `set_within` reads it — so the join
+// exists in the language and only the arms had never been asked.
+merged_or_first = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
+    c.types.at(a).match({
+        Res(ra) => merge_against(c, a, b, ra),
+        _       => Ok(a),
+    })
+}
+
+merge_against = (c :: Checker, a: TyId, b: TyId, ra: TyRes)
+                Res<TyId, AllocError> {
+    c.types.at(b).match({
+        Res(rb) => merge_failures(c, a, ra, rb),
+        _       => Ok(a),
+    })
+}
+
+// ONLY TWO FAILURES OVER ONE VALUE TYPE MERGE. An absence carries no
+// reason, so it has no set to contribute; an open `Res` is the other
+// direction entirely and `settled_res` above already owns it; and two
+// different value types are exactly the "means something the language
+// cannot express" case the header keeps first-arm-wins for. An error
+// that is still a hole is not a set either — folding one in would
+// freeze an undecided type into a union nobody wrote.
+merge_failures = (c :: Checker, a: TyId, ra: TyRes, rb: TyRes)
+                 Res<TyId, AllocError> {
+    (is_failure(ra) && is_failure(rb) && ra.value.eq(rb.value)
+     && (unsettled(c, ra.error) == false)
+     && (unsettled(c, rb.error) == false)).match({
+        false => Ok(a),
+        true  => merged_failure(c, ra, rb),
+    })
+}
+
+merged_failure = (c :: Checker, ra: TyRes, rb: TyRes) Res<TyId, AllocError> {
+    set = c.types.merge(ra.error, rb.error).try();
+    c.types.res_failure(ra.value, set)
+}
+
+is_failure = (r: TyRes) bool {
+    r.form.match({ Failure => true, _ => false })
 }
 
 // The payload an open `Res` carries, when it carries a settled one.
