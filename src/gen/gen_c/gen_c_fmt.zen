@@ -55,53 +55,51 @@ body_end, is_hole, advance, decoded_bytes = gen.gen_c.gen_c_print
 declare_temp = gen.gen_c.gen_c_flow
 signature_of = gen.gen_c.gen_c_call
 method_sig, join = gen.gen_c.gen_c_member
+is_sink_door, lower_sink_door, bodyless = gen.gen_c.gen_c_sink
+last_is_variadic, call_symbol = gen.gen_c.gen_c_sink
+write_jump_unless_ok, write_goto, write_label = gen.gen_c.gen_c_sink
 
 // -----------------------------------------------------------------
 // recognising the door
 // -----------------------------------------------------------------
 
+// THE TWO FORMAT DOORS, asked as one question because `gen_c_call.zen`
+// asks it once. `alloc.String(fmt, args)` is this file's; `out.add(fmt,
+// args)` is `gen_c_sink.zen`'s, and they are separate files because
+// they carry a failure differently — see that file's head.
+is_format_door* = (be: CBackend, d: Def, f: Function) bool {
+    is_alloc_door(be, d, f) || is_sink_door(be, d, f)
+}
+
 // The bodyless `String(a: Alloc, fmt: str, args: ...)` and nothing
 // else. Asked of the DECLARATION rather than of the name: a module's
 // own three-parameter `String` with a body is an ordinary function and
 // is called like one.
-is_format_door* = (be: CBackend, d: Def, f: Function) bool {
+is_alloc_door = (be: CBackend, d: Def, f: Function) bool {
     d.name.eq("String") && bodyless(f) && (f.params.len == 3)
         && last_is_variadic(be, f)
-}
-
-bodyless = (f: Function) bool {
-    f.body.match({ Ok(_) => false, None => true })
-}
-
-last_is_variadic = (be: CBackend, f: Function) bool {
-    f.params.get(f.params.len - 1).match({
-        None    => false,
-        Ok(p)   => variadic_param(be, p),
-    })
-}
-
-variadic_param = (be: CBackend, p: Param) bool {
-    p.type.match({
-        None    => false,
-        Ok(t)   => variadic_type(be, t),
-    })
-}
-
-variadic_type = (be: CBackend, t: TypeId) bool {
-    be.tree.type_at(t).kind.match({ Variadic => true, _ => false })
 }
 
 // -----------------------------------------------------------------
 // the expansion
 // -----------------------------------------------------------------
 
+lower_format_door* = (be :: CBackend, id: ExprId, c: Call, d: Def,
+                      f: Function, recv: Res<ExprId>, ctx: Ctx,
+                      out :: String) Res<(), AllocError> {
+    is_sink_door(be, d, f).match({
+        true  => lower_sink_door(be, id, c, d, f, recv, ctx, out),
+        false => lower_alloc_door(be, id, c, d, f, recv, ctx, out),
+    })
+}
+
 // A temporary at the call's own return type, filled by the empty form
 // and then written into, and a label every failing write jumps to. The
 // temporary IS the answer: `add_bytes` writes the `Ok` payload in
 // place, so there is no second buffer to copy out of.
-lower_format_door* = (be :: CBackend, id: ExprId, c: Call, d: Def,
-                      f: Function, recv: Res<ExprId>, ctx: Ctx,
-                      out :: String) Res<(), AllocError> {
+lower_alloc_door = (be :: CBackend, id: ExprId, c: Call, d: Def,
+                    f: Function, recv: Res<ExprId>, ctx: Ctx,
+                    out :: String) Res<(), AllocError> {
     empty_form(be, d).try().match({
         None  => unsupported(be, id, "a format door with no empty form", out),
         Ok(e) => lower_with_empty(be, id, c, d, f, e, recv, ctx, out),
@@ -236,20 +234,6 @@ write_alloc = (be :: CBackend, e: Def, a: ExprId, ctx: Ctx, out :: String)
     unknown = be.check.types.unknown().try();
     want = sig.get(0).match({ Ok(t) => t, None => unknown });
     expr(be, a, ctx, want, out)
-}
-
-// The symbol of a plain, non-generic function, queued so the walk
-// reaches its body: "was this already emitted" and "what do I call"
-// have to be the same question.
-call_symbol = (be :: CBackend, d: Def, out :: String)
-              Res<(), AllocError> {
-    sig ::= be.alloc.Vec<TyId>();
-    inst ::= be.alloc.Inst();
-    signature_of(be, d, inst, sig).try();
-    sym ::= be.alloc.String().try();
-    sym_fn(sym, be.check.types, be.check.world, d.qname, sig, inst).try();
-    be.need_function(d, inst, sym.view()).try();
-    out.add_bytes(sym.view())
 }
 
 // -----------------------------------------------------------------
@@ -569,34 +553,6 @@ write_carry_err = (be :: CBackend, wtmp: str, ret: TyId, tmp: str)
 }
 
 // `if (zg_tN.zg_tag != Ok) { goto done; }` — the empty form failed and
-// there is nothing to write into.
-write_jump_unless_ok = (be :: CBackend, tmp: str, done: usize)
-                       Res<(), AllocError> {
-    be.write("if (").try();
-    be.write(tmp).try();
-    be.write(".zg_tag != ").try();
-    tag ::= be.alloc.String().try();
-    sym_variant(tag, RES_PATH, "Ok").try();
-    be.write(tag.view()).try();
-    be.writeln(") {").try();
-    be.indent();
-    write_goto(be, done).try();
-    be.dedent();
-    be.writeln("}").try();
-    Ok(());
-}
-
-write_goto = (be :: CBackend, done: usize) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("goto ").try();
-    sym_gen(line, "f", done).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view())
-}
-
-write_label = (be :: CBackend, done: usize) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    sym_gen(line, "f", done).try();
-    line.add_bytes(": ;").try();
-    be.writeln(line.view())
-}
+// there is nothing to write into. The jump, the goto and the label are
+// `gen_c_sink.zen`'s: both doors short-circuit the same way, and one
+// spelling of a label is one spelling.

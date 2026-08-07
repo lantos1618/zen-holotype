@@ -114,13 +114,63 @@ with_console = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str)
     })
 }
 
-// The symbol, the instantiation and the queue entry `p.toString(sb)`
-// would have produced, so the two cannot disagree about which function
-// they mean. THE RESULT IS DISCARDED: a console has no failure to
+// THE RESULT IS DISCARDED on this path: a console has no failure to
 // report — `zg_print_bytes` cannot fail and a console cannot fail to
-// grow — and `println` is a statement whose value is unit.
+// grow — and `println` is a statement whose value is unit. A caller
+// whose sink is a BUFFER needs the answer, and reaches the same call
+// through `sink_display` below.
 emit_display = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str,
                 sink: str) Res<bool, AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes("(void)").try();
+    display_call(be, ty, s, f, text, sink, line).try();
+    line.add_bytes(";").try();
+    be.writeln(line.view()).try();
+    Ok(true);
+}
+
+// `<value>.toString(<sink>)` AS AN EXPRESSION, for a caller that holds
+// a sink of its own and needs the `Res` the call answers with —
+// `gen_c_sink.zen`'s `{}` on a Display is exactly this call with the
+// door's buffer in place of the console. `false` when the type supplies
+// no `toString` this backend can call, which is the caller's diagnostic
+// and not this file's.
+sink_display* = (be :: CBackend, ty: TyId, text: str, sink: str,
+                 out :: String) Res<bool, AllocError> {
+    site_of(be, ty).try().match({
+        None  => Ok(false),
+        Ok(s) => sink_display_at(be, ty, s, text, sink, out),
+    })
+}
+
+sink_display_at = (be :: CBackend, ty: TyId, s: Site, text: str, sink: str,
+                   out :: String) Res<bool, AllocError> {
+    display_fn(be, s).try().match({
+        None  => Ok(false),
+        Ok(f) => sink_display_fn(be, ty, s, f, text, sink, out),
+    })
+}
+
+sink_display_fn = (be :: CBackend, ty: TyId, s: Site, f: Function,
+                   text: str, sink: str, out :: String)
+                  Res<bool, AllocError> {
+    by_ref(f, 0).match({
+        true  => Ok(false),
+        false => wrote_display(be, ty, s, f, text, sink, out),
+    })
+}
+
+wrote_display = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str,
+                 sink: str, out :: String) Res<bool, AllocError> {
+    display_call(be, ty, s, f, text, sink, out).try();
+    Ok(true);
+}
+
+// The symbol, the instantiation and the queue entry `p.toString(sb)`
+// would have produced, so the console path and the buffer path cannot
+// disagree about which function they mean.
+display_call = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str,
+                sink: str, out :: String) Res<(), AllocError> {
     inst = recv_inst(be, ty).try();
     sig ::= be.alloc.Vec<TyId>();
     method_sig(be, ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
@@ -131,16 +181,13 @@ emit_display = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str,
     be.need_method(MethodRef(self_ty: ty, decl: s.decl, name: "toString",
                              arity: sig.len, qname: qname.view()),
                    inst, sym.view()).try();
-    line ::= be.alloc.String().try();
-    line.add_bytes("(void)").try();
-    line.add_bytes(sym.view()).try();
-    line.add_bytes("(").try();
-    line.add_bytes(text).try();
-    line.add_bytes(", ").try();
-    write_sink_arg(f, sink, line).try();
-    line.add_bytes(");").try();
-    be.writeln(line.view()).try();
-    Ok(true);
+    out.add_bytes(sym.view()).try();
+    out.add_bytes("(").try();
+    out.add_bytes(text).try();
+    out.add_bytes(", ").try();
+    write_sink_arg(f, sink, out).try();
+    out.add_bytes(")").try();
+    Ok(());
 }
 
 // `out :: Sink` takes the record BY ADDRESS, and a C compound literal is
