@@ -10,9 +10,17 @@ ROOT    ?= src
 all: test
 
 ## build: what a newcomer runs. needs only a C compiler.
+##
+## TWO steps and not one, because the compiler emits C and does not link:
+## `zen build <root> --emit-c -o <file.c>` is the whole interface (see
+## src/zen/zen_cli.zen). This target used to say `-o zen-new` with no
+## --emit-c, which the driver accepts, writes nothing for, and exits 0
+## on -- so `build` produced no binary and every target standing on it
+## (test-zen, fmt, determinism) could not run at all.
 build: seed/zen.c
 	$(CC) $(CFLAGS) seed/zen.c -o zen
-	./zen build $(ROOT) -o zen-new && mv zen-new zen
+	./zen build $(ROOT) --emit-c -o zen-new.c
+	$(CC) $(CFLAGS) zen-new.c -o zen-new && mv zen-new zen && rm -f zen-new.c
 
 ## seed: regenerate AND stage, in one target. never two commands —
 ## commit-then-regenerate ships a seed one change stale, and only a
