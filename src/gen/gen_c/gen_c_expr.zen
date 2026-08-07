@@ -45,13 +45,15 @@ write_usize = sema.sema_diag
 Emit = gen.gen_emit
 sym_local, sym_member, sym_variant, sym_gen, sym_fn = gen.gen_name
 RES_PATH, is_failure = gen.gen_name
+sym_union_variant, sym_union_member = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 LocalSlot = gen.gen_c.gen_c_frame
 sub, constructed, open = gen.gen_c.gen_c_mono
 loop_result_type = gen.gen_c.gen_c_shape
 unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_state
-lower_match, lower_try = gen.gen_c.gen_c_flow
+lower_match = gen.gen_c.gen_c_flow
+lower_try = gen.gen_c.gen_c_try
 ctype, declarator, spellable, is_unit, c_prim = gen.gen_c.gen_c_type
 is_c_integer, is_signed, variant_type, decl_ctx = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
@@ -464,12 +466,93 @@ res_type_of* = (be :: CBackend, id: ExprId, ctx: Ctx)
 // a return all arrive here with the destination's type, so passing an
 // `Arena` where an `Alloc` is wanted builds the record at all three
 // without a rule at any of them.
+//
+// A MEMBER REACHING A SLOT WHOSE TYPE IS A STRUCTURAL SET is the same
+// shape and lands in the same place, for the same reason: `Err(
+// AllocError.OutOfMemory)` inside a `Res<(), AllocError | Fault>` is a
+// member written where the set is wanted, and sema admits it because "a
+// union target accepts any of its members". Without this it was emitted
+// as a bare member assignment into the set's struct — no tag, wrong
+// type, and `cc` rejecting a program nothing had reported.
 expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, out :: String)
         Res<(), AllocError> {
+    needs_set(be, id, ctx, want).try().match({
+        true  => set_expr(be, id, ctx, want, out),
+        false => fat_or_value(be, id, ctx, want, out),
+    })
+}
+
+fat_or_value = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+                out :: String) Res<(), AllocError> {
     needs_fat(be, id, ctx, want).try().match({
         true  => fat_expr(be, id, ctx, want, out),
         false => value_expr(be, id, ctx, want, out),
     })
+}
+
+// A value whose own type is a MEMBER of the wanted set, and not the set
+// itself — a value already at the set's type is a copy and needs
+// nothing.
+needs_set = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+            Res<bool, AllocError> {
+    be.check.types.at(want).match({
+        Union(_) => member_reaches_set(be, id, ctx, want),
+        _        => Ok(false),
+    })
+}
+
+member_reaches_set = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+                     Res<bool, AllocError> {
+    unknown = be.check.types.unknown().try();
+    cty = ty_of(be, id, ctx, unknown).try();
+    Ok(settled_member(be, cty, want));
+}
+
+// `set_has` answers TRUE for an unsubstituted type parameter, for the
+// reason `sema_ty` writes down at it — a set nobody has computed cannot
+// be said to be absent. That is the right answer for a containment
+// CHECK and the wrong one here, because there is no C value to tag, so
+// it is asked past.
+settled_member = (be: CBackend, cty: TyId, want: TyId) bool {
+    (be.check.is_unknown(cty) == false) && (cty.eq(want) == false)
+        && is_named_or_res(be, cty) && be.check.types.set_has(want, cty)
+}
+
+is_named_or_res = (be: CBackend, cty: TyId) bool {
+    be.check.types.at(cty).match({
+        Named(_) => true,
+        Res(_)   => true,
+        _        => false,
+    })
+}
+
+// The value at ITS OWN type, then the set built around it — lowering it
+// at the set would ask for the member to already be one.
+set_expr = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+            out :: String) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    cty = ty_of(be, id, ctx, unknown).try();
+    code ::= be.alloc.String().try();
+    value_expr(be, id, ctx, cty, code).try();
+    write_set_value(be, code.view(), cty, want, out)
+}
+
+// The set, tagged with the member the value IS and carrying it
+// unchanged. Exported because `.try()` widening builds the same value
+// out of a different piece of C — the two are one layout decision and
+// must not be written twice.
+write_set_value* = (be :: CBackend, code: str, member: TyId, set: TyId,
+                    out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    ctype(be, set, out).try();
+    out.add_bytes("){ .zg_tag = ").try();
+    sym_union_variant(out, be.types(), be.world(), set, member).try();
+    out.add_bytes(", .zg_data.").try();
+    sym_union_member(out, be.types(), be.world(), member).try();
+    out.add_bytes(" = ").try();
+    out.add_bytes(code).try();
+    out.add_bytes(" }").try();
+    Ok(());
 }
 
 // The value AT ITS OWN TYPE, then the record over its address: lowering

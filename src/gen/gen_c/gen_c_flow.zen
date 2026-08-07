@@ -2,10 +2,14 @@
 // What control flow is in C.
 //
 // Zen has exactly one conditional — `.match`, always exhaustive, in
-// every position — and exactly one non-local exit, `.try()`. Neither is
-// a C expression, so both live here: they are the two forms that emit
-// STATEMENTS and hand a destination its value, and everything in
-// `gen_c_expr.zen` that spills spills into one of them.
+// every position — and it is not a C expression, so it emits STATEMENTS
+// and hands a destination its value. Everything in `gen_c_expr.zen`
+// that spills spills into this or into `.try()`.
+//
+// `gen_c_try.zen` IS THE OTHER NON-LOCAL FORM and used to be the second
+// half of this file. The two share a destination and nothing else — a
+// match decides WHICH value, and `.try()` decides whether there is one
+// at all — so they are two subjects and now two files.
 //
 // A MATCH BECOMES AN `if` CHAIN AND NOT A `switch`. A pattern is not
 // always a constant — a binder matches everything, and a literal
@@ -15,30 +19,6 @@
 // makes the C total: exhaustiveness is sema's to check, and until it
 // does, a value that matches no arm traps where it happens rather than
 // falling out of the function with an uninitialised result.
-//
-// `.try()` IS A RETURN, and that is DESIGN.md's own framing: "it
-// unwraps Ok, or returns the Err — or the None — from the ENCLOSING
-// function", which is "a jump out through a frame boundary, exactly
-// what `h.break(v)` does". So it lowers to a guard and a `return`, and
-// the thing returned is built from the enclosing function's OWN Res
-// type — never converted, because "there is no From".
-//
-// WIDENING A SET ON THE WAY OUT IS A CONSTRUCTION, NOT A COPY. `.try()`
-// is legal when the callee's set is CONTAINED in the caller's, and this
-// used to demand the two be the same type — which made every merge
-// DESIGN.md promises a report. A set is a declared enum whose variants
-// are named by the types they carry, so the caller's error value is
-// built: tagged with the callee's error type's own name, carrying the
-// callee's error unchanged. Nothing converts, and there is still no
-// From; the value moves one box out.
-//
-// WHAT IS STILL NOT LOWERED, AND WHY IT IS A REPORT RATHER THAN A GUESS:
-// a member the caller's declaration does not name as a variant. Sema
-// flattens, so `Error = WriteError | FsError` is a set of four where the
-// enum has two variants, and a `.try()` of an `AllocError` is contained
-// in it with no place here to put it. That is a nested set the backend
-// has no layout for, and a silent memcpy would be a miscompilation
-// rather than a missing feature.
 
 Ast, Expr, ExprId, Match, Arm, Pattern, PatternId, PatternKind = ast
 Literal, LiteralKind, Decl, DeclKind, Enum, Variant, Span = ast
@@ -65,7 +45,6 @@ write_qname = gen.gen_c.gen_c_layout
 Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
 expr, res_type_of, ty_of = gen.gen_c.gen_c_expr
 write_position = gen.gen_c.gen_c_op
-unwind_to = gen.gen_c.gen_c_own
 
 // -----------------------------------------------------------------
 // match
@@ -516,276 +495,4 @@ first_payload = (be :: CBackend, found: Vec<TyId>) Res<TyId> {
         None  => None,
         Ok(t) => non_unit(be, t),
     })
-}
-
-// -----------------------------------------------------------------
-// `.try()`
-// -----------------------------------------------------------------
-
-lower_try* = (be :: CBackend, node: Expr, operand: ExprId, ctx: Ctx,
-              dst: Dest) Res<(), AllocError> {
-    rt = res_type_of(be, operand, ctx).try();
-    be.check.types.at(rt).match({
-        Res(r) => lower_try_res(be, node, operand, r, rt, ctx, dst),
-        _      => be.report_expr(operand,
-                                 GenFault.Untyped("the operand of .try()")),
-    })
-}
-
-lower_try_res = (be :: CBackend, node: Expr, operand: ExprId, r: TyRes,
-                 rt: TyId, ctx: Ctx, dst: Dest) Res<(), AllocError> {
-    tmp ::= be.alloc.String().try();
-    sym_gen(tmp, "t", be.next_tmp()).try();
-    declare_temp(be, rt, tmp.view()).try();
-    deliver(be, operand, ctx, rt, Dest.Into(tmp.view())).try();
-    write_guard(be, node, r, tmp.view(), ctx).try();
-    unwrap(be, r, tmp.view(), dst).try();
-    Ok(());
-}
-
-write_guard = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
-              Res<(), AllocError> {
-    be.write("if (").try();
-    be.write(tmp).try();
-    be.write(".zg_tag != ").try();
-    tag ::= be.alloc.String().try();
-    sym_variant(tag, RES_PATH, "Ok").try();
-    be.write(tag.view()).try();
-    be.writeln(") {").try();
-    be.indent();
-    // EVERY EARLY EXIT IS A SCOPE EXIT, and `.try()` is the common one:
-    // it is "a jump out through a frame boundary", so every block from
-    // here out to the function's own runs its defers and its drops
-    // first. Depth 0 is the whole frame. The error is carried in `tmp`,
-    // which is a temporary and is never tracked, so there is nothing
-    // here the returned value could be aliasing.
-    unwind_to(be, 0, "").try();
-    propagate(be, node, r, tmp, ctx).try();
-    be.dedent();
-    be.writeln("}").try();
-    Ok(());
-}
-
-// The value the enclosing function returns. It is built from the
-// CALLER's own Res type and nothing is converted: "propagation merges
-// sets" is a containment rule, not a conversion, and there is no From.
-propagate = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
-            Res<(), AllocError> {
-    be.check.types.at(ctx.ret).match({
-        Res(want) => propagate_into(be, node, r, want, tmp, ctx),
-        _         => be.report(node.span.file, node.span,
-                               GenFault.Unsupported(".try() outside a Res function")),
-    })
-}
-
-// The two forms must agree — an absence cannot become a failure and
-// sema has already said so — and then the error is either the caller's
-// own or one member of it.
-propagate_into = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
-                  tmp: str, ctx: Ctx) Res<(), AllocError> {
-    forms_agree(r.form, want.form).match({
-        false => report_widening(be, node),
-        true  => propagate_failure(be, node, r, want, tmp, ctx),
-    })
-}
-
-// The error types only matter when there is an error to carry. An
-// absence propagates as a tag and nothing else, and a bare `Ok(..)`
-// raises nothing — "its error set is an open `_` with nothing in it" —
-// so comparing that set to the caller's asks about a value neither one
-// will ever hold.
-propagate_failure = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
-                     tmp: str, ctx: Ctx) Res<(), AllocError> {
-    is_failure(r.form).match({
-        false => write_propagation(be, r, want, tmp, ctx, None),
-        true  => propagate_error(be, node, r, want, tmp, ctx),
-    })
-}
-
-// The same set carries straight across: one C type, one payload member,
-// nothing to build. A different one is a widening, and `into` names the
-// variant it widens through.
-propagate_error = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
-                   tmp: str, ctx: Ctx) Res<(), AllocError> {
-    r.error.eq(want.error).match({
-        true  => write_propagation(be, r, want, tmp, ctx, None),
-        false => widen_or_report(be, node, r, want, tmp, ctx),
-    })
-}
-
-widen_or_report = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
-                   tmp: str, ctx: Ctx) Res<(), AllocError> {
-    carrier(be, want.error, r.error).match({
-        None  => report_widening(be, node),
-        Ok(v) => write_propagation(be, r, want, tmp, ctx, Ok(v)),
-    })
-}
-
-// Which variant of the caller's set carries `err`.
-//
-// Compared by TYPE and not by name: two modules may each declare an
-// `AllocError` and they are two types, so a name match would tag the
-// wrong variant and the payload would be read as the wrong struct.
-carrier = (be :: CBackend, set: TyId, err: TyId) Res<str> {
-    be.check.types.at(set).match({
-        Named(n) => named_carrier(be, n, err),
-        _        => None,
-    })
-}
-
-named_carrier = (be :: CBackend, n: TyNamed, err: TyId) Res<str> {
-    decl_at(be.tree, n.decl).match({
-        None  => None,
-        Ok(d) => decl_carrier(be, n, d, err),
-    })
-}
-
-decl_carrier = (be :: CBackend, n: TyNamed, d: Decl, err: TyId) Res<str> {
-    d.kind.match({
-        Enum(e) => variant_carrying(be, n, e.variants, err),
-        _       => None,
-    })
-}
-
-// The walk allocates and the answer is an absence, so the two are kept
-// apart the way `variant_payload` above keeps them apart: a lookup that
-// ran out of memory has not found a carrier.
-variant_carrying = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
-                    err: TyId) Res<str> {
-    found ::= be.alloc.Vec<str>();
-    collect_carrier(be, n, variants, err, found).match({
-        Err(_) => None,
-        Ok(_)  => found.get(0),
-    })
-}
-
-collect_carrier = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
-                   err: TyId, found :: Vec<str>) Res<(), AllocError> {
-    ctx = decl_ctx(be, n);
-    inst = decl_inst(be, n).try();
-    mark = enter_struct_tparams(be, n.decl).try();
-    variants.loop((h, v) {
-        keep_carrier(be, n, v, err, ctx, inst, found).try();
-    });
-    leave_tparams(be, mark).try();
-    Ok(());
-}
-
-keep_carrier = (be :: CBackend, n: TyNamed, v: Variant, err: TyId,
-                ctx: Ctx, inst: Inst, found :: Vec<str>)
-               Res<(), AllocError> {
-    carries(be, n, v, err, ctx, inst).match({
-        false => Ok(()),
-        true  => found.add(v.name.text),
-    })
-}
-
-carries = (be :: CBackend, n: TyNamed, v: Variant, err: TyId, ctx: Ctx,
-           inst: Inst) bool {
-    variant_type(be, n, v, ctx, inst).match({
-        None  => false,
-        Ok(t) => t.eq(err),
-    })
-}
-
-forms_agree = (got: ResForm, want: ResForm) bool {
-    is_failure(got).match({
-        true  => is_failure(want),
-        false => is_failure(want) == false,
-    })
-}
-
-report_widening = (be :: CBackend, node: Expr) Res<(), AllocError> {
-    be.report(node.span.file, node.span,
-              GenFault.Unsupported("widening an error set through .try()")).try();
-    Ok(());
-}
-
-// `into` is the variant of the caller's set to widen through, and
-// nothing when the two sets are already one type.
-write_propagation = (be :: CBackend, r: TyRes, want: TyRes, tmp: str,
-                     ctx: Ctx, into: Res<str>) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("return (").try();
-    ctype(be, ctx.ret, line).try();
-    line.add_bytes("){ .zg_tag = ").try();
-    failure_tag(be, r, line).try();
-    is_failure(r.form).then(() {
-        carry_error(be, want, tmp, into, line).try()
-    });
-    line.add_bytes(" };").try();
-    be.writeln(line.view())
-}
-
-failure_tag = (be :: CBackend, r: TyRes, out :: String) Res<(), AllocError> {
-    is_failure(r.form).match({
-        true  => out.sym_variant(RES_PATH, "Err"),
-        false => out.sym_variant(RES_PATH, "None"),
-    })
-}
-
-carry_error = (be :: CBackend, want: TyRes, tmp: str, into: Res<str>,
-               out :: String) Res<(), AllocError> {
-    out.add_bytes(", .zg_data.").try();
-    out.sym_member("Err").try();
-    out.add_bytes(" = ").try();
-    into.match({
-        None  => read_error(tmp, out),
-        Ok(v) => wrap_error(be, want.error, v, tmp, out),
-    }).try();
-    Ok(());
-}
-
-read_error = (tmp: str, out :: String) Res<(), AllocError> {
-    out.add_bytes(tmp).try();
-    out.add_bytes(".zg_data.").try();
-    out.sym_member("Err").try();
-    Ok(());
-}
-
-// The caller's set, built around the callee's error: tagged with the
-// variant that names the callee's error TYPE, carrying the value
-// unchanged. The two `Res`es are two C structs with two different
-// payload members, so there was never a copy that could have worked —
-// which is what the old report was telling the truth about.
-wrap_error = (be :: CBackend, set: TyId, variant: str, tmp: str,
-              out :: String) Res<(), AllocError> {
-    qname ::= be.alloc.String().try();
-    set_qname(be, set, qname).try();
-    out.add_bytes("(").try();
-    ctype(be, set, out).try();
-    out.add_bytes("){ .zg_tag = ").try();
-    out.sym_variant(qname.view(), variant).try();
-    out.add_bytes(", .zg_data.").try();
-    out.sym_member(variant).try();
-    out.add_bytes(" = ").try();
-    read_error(tmp, out).try();
-    out.add_bytes(" }").try();
-    Ok(());
-}
-
-set_qname = (be :: CBackend, set: TyId, out :: String) Res<(), AllocError> {
-    be.check.types.at(set).match({
-        Named(n) => write_qname(be, out, n),
-        _        => Ok(()),
-    })
-}
-
-// `.try()` evaluates to the Ok payload. A unit payload has no member
-// to read, so the destination gets nothing — which is right: `()` is
-// not a value C can hold.
-unwrap = (be :: CBackend, r: TyRes, tmp: str, dst: Dest)
-         Res<(), AllocError> {
-    is_unit(be, r.value).match({
-        true  => Ok(()),
-        false => write_unwrap(be, tmp, dst),
-    })
-}
-
-write_unwrap = (be :: CBackend, tmp: str, dst: Dest) Res<(), AllocError> {
-    place ::= be.alloc.String().try();
-    place.add_bytes(tmp).try();
-    place.add_bytes(".zg_data.").try();
-    sym_member(place, "Ok").try();
-    write_dest(be, dst, place.view())
 }
