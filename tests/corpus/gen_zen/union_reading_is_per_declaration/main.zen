@@ -1,0 +1,93 @@
+// DESIGN.md decides between two readings of `A | B` by what the names
+// MEAN: a union of existing types when EVERY variant names a type in
+// scope, a nominal enum otherwise. THE QUESTION IS ABOUT THE
+// DECLARATION.
+//
+// Asked one variant at a time it has a different answer, and the wrong
+// answer is silent. `Kind` below is nominal, because `Ident` and `Arrow`
+// are not types — but `Payload` is, so a per-variant decision gives that
+// one variant a `Payload` to carry. The program still compiles, still
+// runs, still prints the same thing; the enum is just wider, holding a
+// union member nothing ever reads.
+//
+// That is exactly what shipped. `lex.TokenKind` has sixty variants and
+// one of them is `Eq`, which the prelude also exports as the equality
+// bound — so every token the compiler lexed carried a three-word trait
+// record, and `TokenKind` was 32 bytes where 16 would do. `ast.ExprKind`
+// had the same thing with `@scope`'s `Scope`. Both were in the seed.
+//
+// SO THIS TEST ASSERTS ON THE EMITTED C AND NOT ON STDOUT. Nothing about
+// what the program PRINTS changes when the decision goes wrong, which is
+// why 395 green corpus tests said nothing about it for as long as it was
+// there. The bootstrap had it right the whole time and the self-hosted
+// port dropped the per-declaration check — a disagreement between two
+// implementations that no output could show.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Vec = std.collections
+Source, scan = lex
+Parser = parse.parser
+module = parse.parse_decl
+Ast = ast.ast_arena
+Checker = sema.sema_check
+Emit = gen.gen_emit
+CBackend, emit_program = gen.gen_c
+
+// `Kind` is NOMINAL: Ident and Arrow name nothing, so the declaration is
+// an enum and `Payload` is a bare tag like the other two.
+//
+// `Either` is a UNION: every variant names a type, so each carries a
+// value of it — `Either.Left(..)` records WHICH Left, where tag-only it
+// would record only that there was one.
+PROGRAM : str = "Payload = { n: i32 }\nLeft = { a: i32 }\nRight = { b: i32 }\nKind = Ident | Payload | Arrow\nEither = Left | Right\nmain = (env: i32) Res<i32> { k = Kind.Payload; e = Either.Left(Left(a: 1)); Ok(0) }\n"
+
+emit = (a: Alloc, text: str, faults :: String) Res<String, AllocError> {
+    lexed = scan(a, Source(file: "main.zen", text: text)).try();
+    p ::= a.Parser(lexed);
+    m = p.module("main").try();
+    p.tree.add_module(m).try();
+    chk ::= a.Checker(p.tree).try();
+    be ::= a.CBackend(p.tree, chk).try();
+    out ::= a.Emit().try();
+    be.emit_program(0, out).try();
+    be.render_diags(faults).try();
+    kept ::= a.String().try();
+    kept.add_bytes(out.view()).try();
+    Ok(kept);
+}
+
+occurrences = (hay: str, needle: str) usize {
+    n ::= 0;
+    Range(0, hay.len).loop((h, i) {
+        starts_at(hay, needle, i).then(() { n = n + 1; });
+    });
+    n
+}
+
+starts_at = (hay: str, needle: str, i: usize) bool {
+    (i + needle.len <= hay.len)
+        && (Range(0, needle.len).find((k) { hay[i + k] != needle[k] })
+                .match({ Ok(_) => false, None => true }))
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    faults ::= alloc.String().try();
+    c = emit(alloc, PROGRAM, faults).try();
+
+    println("nothing was refused: {}", faults.is_empty());
+
+    // THE ASSERTION. A nominal enum's variant does not carry the type it
+    // happens to be named after, so `Payload` appears in the C as its own
+    // struct and NOT as a member of Kind's union.
+    println("Kind carries no Payload: {}",
+            occurrences(c.view(), "zu_m7Payload") == 0);
+
+    // and the other reading is untouched: every variant of Either names a
+    // type, so both carry one
+    println("Either carries Left: {}", occurrences(c.view(), "zu_m4Left") == 1);
+    println("Either carries Right: {}", occurrences(c.view(), "zu_m5Right") == 1);
+
+    Ok(0);
+}

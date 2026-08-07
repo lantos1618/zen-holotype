@@ -709,11 +709,9 @@ typedef struct zu_t4_3std3mem9mem_arena10ArenaState zu_t4_3std3mem9mem_arena10Ar
 typedef struct zu_t4_3std3mem9mem_arena3Mem zu_t4_3std3mem9mem_arena3Mem;
 typedef struct zu_t4_3std3mem9mem_arena4Page zu_t4_3std3mem9mem_arena4Page;
 typedef struct zu_t4_3std3mem9mem_arena5Arena zu_t4_3std3mem9mem_arena5Arena;
-typedef struct zu_t4_3std4core2eq2Eq zu_t4_3std4core2eq2Eq;
 typedef struct zu_t4_3std4core2io7IoError zu_t4_3std4core2io7IoError;
 typedef struct zu_t4_3std4core4hash6Hasher zu_t4_3std4core4hash6Hasher;
 typedef struct zu_t4_3std4core5range5RangeI1_q zu_t4_3std4core5range5RangeI1_q;
-typedef struct zu_t4_3std4core5scope5Scope zu_t4_3std4core5scope5Scope;
 typedef struct zu_t4_3std4core6result3ResI1_b2u8 zu_t4_3std4core6result3ResI1_b2u8;
 typedef struct zu_t4_3std4core6result3ResI1_b3i64 zu_t4_3std4core6result3ResI1_b3i64;
 typedef struct zu_t4_3std4core6result3ResI1_b3str zu_t4_3std4core6result3ResI1_b3str;
@@ -1053,9 +1051,10 @@ enum {
     zu_e4_3lex9lex_token9TokenKind9ParenOpen = 13,
     zu_e4_3lex9lex_token9TokenKind9Semicolon = 20,
     zu_e4_3zen7zen_cli3Arg3Out = 1,
-    zu_e4_3zen7zen_cli3Arg4Flag = 2,
-    zu_e4_3zen7zen_cli3Arg4Word = 3,
+    zu_e4_3zen7zen_cli3Arg4Flag = 3,
+    zu_e4_3zen7zen_cli3Arg4Word = 4,
     zu_e4_3zen7zen_cli3Arg5EmitC = 0,
+    zu_e4_3zen7zen_cli3Arg5Entry = 2,
     zu_e4_3zen7zen_cli3Cli5Build = 0,
     zu_e4_3zen7zen_cli3Cli5Later = 1,
     zu_e4_3zen7zen_cli3Cli5Usage = 2,
@@ -1454,11 +1453,6 @@ struct zu_t3_3ast8ast_node4Name {
     zg_str zu_m4text;
 };
 
-struct zu_t4_3std4core5scope5Scope {
-    void *zg_self;
-    void (*zu_m5defer)(void *, int);
-};
-
 struct zu_t3_3ast8ast_node4Meta {
     zu_t4_3std4core6result3ResI1_t3_3ast6ast_id6ExprId zu_m5value;
     zu_t4_3std4core6result3ResI1_t3_3ast8ast_span5Ident zu_m4name;
@@ -1539,7 +1533,6 @@ struct zu_t3_3ast8ast_node8ExprKind {
     union {
         zu_t3_3ast8ast_node4Name zu_m4Name;
         zu_t3_3ast8ast_node7Literal zu_m7Literal;
-        zu_t4_3std4core5scope5Scope zu_m5Scope;
         zu_t3_3ast8ast_node4Meta zu_m4Meta;
         zu_t3_3ast8ast_node5Paren zu_m5Paren;
         zu_t3_3ast8ast_node8ArrayLit zu_m5Array;
@@ -1862,17 +1855,10 @@ struct zu_t3_3lex9lex_state5Lexer {
     zu_t4_3std11collections15collections_vec3VecI1_t3_3lex8lex_diag4Diag zu_m5diags;
 };
 
-struct zu_t4_3std4core2eq2Eq {
-    void *zg_self;
-    bool (*zu_m2eq)(void *, zu_t4_3std4core2eq2Eq);
-    bool (*zu_m2ne)(void *, zu_t4_3std4core2eq2Eq);
-};
-
 struct zu_t3_3lex9lex_token9TokenKind {
     int32_t zg_tag;
     union {
         uint64_t zu_m3Int;
-        zu_t4_3std4core2eq2Eq zu_m2Eq;
     } zg_data;
 };
 
@@ -1888,6 +1874,7 @@ struct zu_t3_3zen7zen_cli3Arg {
 struct zu_t3_3zen7zen_cli3Job {
     zg_str zu_m4root;
     zg_str zu_m3out;
+    zg_str zu_m5entry;
     bool zu_m6emit_c;
 };
 
@@ -4174,7 +4161,7 @@ static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli3cliO1_t4_3std11collections15col
 static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli6job_ofO1_t4_3std11collections15collections_vec3VecI1_b3str(zu_t4_3std11collections15collections_vec3VecI1_b3str zu_l4argv);
 static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli7commandO2_t4_3std11collections15collections_vec3VecI1_b3strb3str(zu_t4_3std11collections15collections_vec3VecI1_b3str zu_l4argv, zg_str zu_l4name);
 static bool zu_f3_3zen7zen_cli7is_flagO1_b3str(zg_str zu_l1a);
-static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli7verdictO4_b3strb3strb4boolb3str(zg_str zu_l4root, zg_str zu_l3out, bool zu_l4emit, zg_str zu_l3bad);
+static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli7verdictO5_b3strb3strb3strb4boolb3str(zg_str zu_l4root, zg_str zu_l3out, zg_str zu_l5entry, bool zu_l4emit, zg_str zu_l3bad);
 static zu_t3_3zen7zen_cli3Arg zu_f3_3zen7zen_cli8classifyO1_b3str(zg_str zu_l1a);
 static bool zu_f3_3zen7zen_cli8is_laterO1_b3str(zg_str zu_l4name);
 static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli9not_buildO1_b3str(zg_str zu_l4name);
@@ -5285,6 +5272,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ge
 static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_c_stmt9slot_typeO2_t4_3gen5gen_c11gen_c_state8CBackendt3_3ast8ast_node4Bind(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_3ast8ast_node4Bind zu_l1b);
 static size_t zu_f4_3gen5gen_c10gen_c_stmt9stmt_tailO2_t3_3ast8ast_node5Blockt4_3gen5gen_c10gen_c_stmt4Dest(zu_t3_3ast8ast_node5Block zu_l3blk, zu_t4_3gen5gen_c10gen_c_stmt4Dest zu_l3dst);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type10declaratorO4_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty4TyIdb3strt4_3std4text11text_string6String(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty4TyId zu_l2id, zg_str zu_l4name, zu_t4_3std4text11text_string6String *zu_l3out);
+static bool zu_f4_3gen5gen_c10gen_c_type10defs_namedO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedb3str(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zg_str zu_l4name);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type10elem_ctypeO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty4TyIdt4_3std4text11text_string6String(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty4TyId zu_l1t, zu_t4_3std4text11text_string6String *zu_l3out);
 static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_c_type10field_typeO4_t4_3gen5gen_c11gen_c_state8CBackendt3_3ast8ast_node6Membert3_4sema10sema_check3Ctxt3_4sema9sema_inst4Inst(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_3ast8ast_node6Member zu_l1m, zu_t3_4sema10sema_check3Ctx zu_l3ctx, zu_t3_4sema9sema_inst4Inst zu_l4inst);
 static zg_str zu_f4_3gen5gen_c10gen_c_type11c_prim_wideO1_b3str(zg_str zu_l4name);
@@ -5295,9 +5283,11 @@ static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_
 static bool zu_f4_3gen5gen_c10gen_c_type12c_prim_knownO1_b3str(zg_str zu_l4name);
 static bool zu_f4_3gen5gen_c10gen_c_type12is_c_integerO1_b3str(zg_str zu_l4name);
 static bool zu_f4_3gen5gen_c10gen_c_type12is_ptr_namedO1_t3_4sema7sema_ty7TyNamed(zu_t3_4sema7sema_ty7TyNamed zu_l1n);
+static bool zu_f4_3gen5gen_c10gen_c_type12names_a_typeO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node7Variant(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node7Variant zu_l1v);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type12request_typeO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty4TyId(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty4TyId zu_l2id);
 static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_c_type12variant_typeO5_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node7Variantt3_4sema10sema_check3Ctxt3_4sema9sema_inst4Inst(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node7Variant zu_l1v, zu_t3_4sema10sema_check3Ctx zu_l3ctx, zu_t3_4sema9sema_inst4Inst zu_l4inst);
 static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_c_type13named_elementO1_t3_4sema7sema_ty7TyNamed(zu_t3_4sema7sema_ty7TyNamed zu_l1n);
+static bool zu_f4_3gen5gen_c10gen_c_type13union_readingO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamed(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n);
 static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_c_type14interned_namedO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema8sema_def3Def(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema8sema_def3Def zu_l1d);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type14request_fieldsO4_t4_3gen5gen_c11gen_c_state8CBackendt4_3std11collections15collections_vec3VecI1_t3_3ast8ast_node6Membert3_4sema10sema_check3Ctxt3_4sema9sema_inst4Inst(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t4_3std11collections15collections_vec3VecI1_t3_3ast8ast_node6Member zu_l7members, zu_t3_4sema10sema_check3Ctx zu_l3ctx, zu_t3_4sema9sema_inst4Inst zu_l4inst);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type15request_membersO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty4TyId(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty4TyId zu_l2id);
@@ -5305,8 +5295,12 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ge
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type16request_childrenO2_t4_3gen5gen_c11gen_c_state8CBackendb5usize(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, size_t zu_l1i);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type16request_if_namedO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty4TyId(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty4TyId zu_l2id);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type16request_variantsO5_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt4_3std11collections15collections_vec3VecI1_t3_3ast8ast_node7Variantt3_4sema10sema_check3Ctxt3_4sema9sema_inst4Inst(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t4_3std11collections15collections_vec3VecI1_t3_3ast8ast_node7Variant zu_l8variants, zu_t3_4sema10sema_check3Ctx zu_l3ctx, zu_t3_4sema9sema_inst4Inst zu_l4inst);
+static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_c_type17bare_variant_typeO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node7Variant(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node7Variant zu_l1v);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type17request_from_declO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node4Decl(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node4Decl zu_l1d);
 static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_c_type17union_member_typeO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node7Variant(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node7Variant zu_l1v);
+static bool zu_f4_3gen5gen_c10gen_c_type18enum_union_readingO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node4Decl(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node4Decl zu_l1d);
+static bool zu_f4_3gen5gen_c10gen_c_type18no_nominal_variantO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node4Enum(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node4Enum zu_l1e);
+static bool zu_f4_3gen5gen_c10gen_c_type19every_variant_namedO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node4Enum(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node4Enum zu_l1e);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type19request_res_membersO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty5TyRes(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty5TyRes zu_l1r);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type20request_decl_membersO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamed(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type20request_if_compositeO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty4TyId(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty4TyId zu_l2id);
@@ -6129,7 +6123,9 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build10lex_faultsO2_t3_3zen9zen_build5Buildt3_3lex9lex_state5Lexed(zu_t3_3zen9zen_build5Build *zu_l4self, zu_t3_3lex9lex_state5Lexed zu_l5lexed);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build11alias_namedO3_t3_3zen9zen_build5Buildt3_3ast8ast_node5Namedt4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(zu_t3_3zen9zen_build5Build *zu_l4self, zu_t3_3ast8ast_node5Named zu_l1n, zu_t4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit *zu_l4seen);
 static zu_t4_3std4core6result3ResI2_b3strt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build11dotted_pathO3_t3_3zen9zen_build5Buildb3strb4bool(zu_t3_3zen9zen_build5Build zu_l4self, zg_str zu_l6dotted, bool zu_l6folder);
+static zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build11entry_namedO2_t3_3zen9zen_build5Buildb3str(zu_t3_3zen9zen_build5Build *zu_l4self, zg_str zu_l5named);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build11queue_freshO3_t3_3zen9zen_build5Buildb3strt4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(zu_t3_3zen9zen_build5Build *zu_l4self, zg_str zu_l4path, zu_t4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit *zu_l4seen);
+static zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build12entry_probedO1_t3_3zen9zen_build5Build(zu_t3_3zen9zen_build5Build *zu_l4self);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build12seed_preludeO2_t3_3zen9zen_build5Buildt4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(zu_t3_3zen9zen_build5Build *zu_l4self, zu_t4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit *zu_l4seen);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build12write_failedO3_t3_3zen9zen_build5Buildt3_3zen7zen_cli3Jobt4_3std3env3env7FsError(zu_t3_3zen9zen_build5Build *zu_l4self, zu_t3_3zen7zen_cli3Job zu_l3job, zu_t4_3std3env3env7FsError zu_l1e);
 static zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build16entry_after_mainO1_t3_3zen9zen_build5Build(zu_t3_3zen9zen_build5Build *zu_l4self);
@@ -6150,7 +6146,7 @@ static zu_t4_3std4core6result3ResI2_b3strt4_3std3mem9mem_alloc10AllocError zu_f4
 static zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build7unit_atO2_t3_3zen9zen_build5Buildb3str(zu_t3_3zen9zen_build5Build zu_l4self, zg_str zu_l4path);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build8alias_ofO3_t3_3zen9zen_build5Buildt3_3ast8ast_node5Aliast4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(zu_t3_3zen9zen_build5Build *zu_l4self, zu_t3_3ast8ast_node5Alias zu_l2al, zu_t4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit *zu_l4seen);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build8back_endO2_t3_3zen9zen_build5Buildt3_3zen7zen_cli3Job(zu_t3_3zen9zen_build5Build *zu_l4self, zu_t3_3zen7zen_cli3Job zu_l3job);
-static zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build8entry_ofO1_t3_3zen9zen_build5Build(zu_t3_3zen9zen_build5Build *zu_l4self);
+static zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build8entry_ofO2_t3_3zen9zen_build5Buildb3str(zu_t3_3zen9zen_build5Build *zu_l4self, zg_str zu_l5named);
 static zu_t4_3std4core6result3ResI1_t4_3std4text11text_string6String zu_f4_3zen9zen_build5Build8fs_faultO3_t3_3zen9zen_build5Buildb3strt4_3std3env3env7FsError(zu_t3_3zen9zen_build5Build *zu_l4self, zg_str zu_l4path, zu_t4_3std3env3env7FsError zu_l1e);
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build8parse_itO4_t3_3zen9zen_build5Buildt3_3zen9zen_build4Unitt3_3lex9lex_state5Lexedt4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(zu_t3_3zen9zen_build5Build *zu_l4self, zu_t3_3zen9zen_build4Unit zu_l1u, zu_t3_3lex9lex_state5Lexed zu_l5lexed, zu_t4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit *zu_l4seen);
 static zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build9candidateO2_t3_3zen9zen_build5Buildb3str(zu_t3_3zen9zen_build5Build zu_l4self, zg_str zu_l4name);
@@ -7079,7 +7075,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f3_3ge
 
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f3_3gen8gen_name12escaped_compO2_t4_3std4text11text_string6Stringb3str(zu_t4_3std4text11text_string6String *zu_l3out, zg_str zu_l4name) {
     zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zg_t1;
-    zg_t1 = zu_f3_4sema9sema_diag11write_usizeO2_t4_3std4text11text_string6Stringb5usize(&((*zu_l3out)), zg_add_usize(zg_mul_usize(zu_l4name.len, 2, "gen/gen_name.zen", 97, 31), 1, "gen/gen_name.zen", 97, 35));
+    zg_t1 = zu_f3_4sema9sema_diag11write_usizeO2_t4_3std4text11text_string6Stringb5usize(&((*zu_l3out)), zg_add_usize(zg_mul_usize(zu_l4name.len, 2, "gen/gen_name.zen", 97, 30), 1, "gen/gen_name.zen", 97, 34));
     if (zg_t1.zg_tag != zu_e5_3std4core6result3Res2Ok) {
         return (zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res3Err, .zg_data.zu_m3Err = zg_t1.zg_data.zu_m3Err };
     }
@@ -8849,14 +8845,14 @@ static zu_t4_3std4core6result3ResI2_b3i32t4_3std3mem9mem_alloc10AllocError zu_f3
     bool zg_s1;
     zg_s1 = zu_f5_3std4text8text_str3str8is_emptyO1_b3str(zu_l4word);
     if (zg_s1) {
-        zg_print_str(((zg_str){ (unsigned char *)"usage: zen build <root> --emit-c -o <file.c>", 44u }));
+        zg_print_str(((zg_str){ (unsigned char *)"usage: zen build <root> [--entry <file>] --emit-c -o <file.c>", 61u }));
         zg_print_nl();
         (void)(0);
     } else if (!zg_s1) {
         zg_print_bytes("zen: unknown argument `", 23u);
         zg_print_str((zu_l4word));
         zg_print_bytes("`\n", 2u);
-        zg_print_str(((zg_str){ (unsigned char *)"usage: zen build <root> --emit-c -o <file.c>", 44u }));
+        zg_print_str(((zg_str){ (unsigned char *)"usage: zen build <root> [--entry <file>] --emit-c -o <file.c>", 61u }));
         zg_print_nl();
         (void)(0);
     } else {
@@ -8874,7 +8870,7 @@ static zg_str zu_f3_3zen7zen_cli2atO2_t4_3std11collections15collections_vec3VecI
     } else if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res4None)) {
         return (zg_str){ (unsigned char *)"", 0u };
     } else {
-        zg_unreachable("zen/zen_cli.zen", 145, 17);
+        zg_unreachable("zen/zen_cli.zen", 159, 17);
     }
 }
 
@@ -8887,7 +8883,7 @@ static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli3cliO1_t4_3std11collections15col
         zg_str zu_l4name = zg_s1.zg_data.zu_m2Ok;
         return zu_f3_3zen7zen_cli7commandO2_t4_3std11collections15collections_vec3VecI1_b3strb3str(zu_l4argv, zu_l4name);
     } else {
-        zg_unreachable("zen/zen_cli.zen", 59, 17);
+        zg_unreachable("zen/zen_cli.zen", 62, 17);
     }
 }
 
@@ -8896,6 +8892,8 @@ static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli6job_ofO1_t4_3std11collections15
     zu_l4root = (zg_str){ (unsigned char *)"", 0u };
     zg_str zu_l3out;
     zu_l3out = (zg_str){ (unsigned char *)"", 0u };
+    zg_str zu_l5entry;
+    zu_l5entry = (zg_str){ (unsigned char *)"", 0u };
     bool zu_l4emit;
     zu_l4emit = false;
     zg_str zu_l3bad;
@@ -8910,14 +8908,17 @@ static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli6job_ofO1_t4_3std11collections15
         zg_brk1; }
         zg_str zu_l3arg;
         zu_l3arg = zu_f3_3zen7zen_cli2atO2_t4_3std11collections15collections_vec3VecI1_b3strb5usize(zu_l4argv, zu_l1i);
-        zu_l1i = zg_add_int(zu_l1i, 1, "zen/zen_cli.zen", 94, 15);
+        zu_l1i = zg_add_int(zu_l1i, 1, "zen/zen_cli.zen", 98, 15);
         zu_t3_3zen7zen_cli3Arg zg_s5;
         zg_s5 = zu_f3_3zen7zen_cli8classifyO1_b3str(zu_l3arg);
         if ((zg_s5.zg_tag == zu_e4_3zen7zen_cli3Arg5EmitC)) {
             zu_l4emit = true;
         } else if ((zg_s5.zg_tag == zu_e4_3zen7zen_cli3Arg3Out)) {
             zu_l3out = zu_f3_3zen7zen_cli2atO2_t4_3std11collections15collections_vec3VecI1_b3strb5usize(zu_l4argv, zu_l1i);
-            zu_l1i = zg_add_int(zu_l1i, 1, "zen/zen_cli.zen", 97, 49);
+            zu_l1i = zg_add_int(zu_l1i, 1, "zen/zen_cli.zen", 101, 49);
+        } else if ((zg_s5.zg_tag == zu_e4_3zen7zen_cli3Arg5Entry)) {
+            zu_l5entry = zu_f3_3zen7zen_cli2atO2_t4_3std11collections15collections_vec3VecI1_b3strb5usize(zu_l4argv, zu_l1i);
+            zu_l1i = zg_add_int(zu_l1i, 1, "zen/zen_cli.zen", 102, 51);
         } else if ((zg_s5.zg_tag == zu_e4_3zen7zen_cli3Arg4Flag)) {
             zu_l3bad = zu_l3arg;
         } else if ((zg_s5.zg_tag == zu_e4_3zen7zen_cli3Arg4Word)) {
@@ -8928,16 +8929,16 @@ static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli6job_ofO1_t4_3std11collections15
             } else if (!zg_s6) {
                 zu_l3bad = zu_l3arg;
             } else {
-                zg_unreachable("zen/zen_cli.zen", 99, 38);
+                zg_unreachable("zen/zen_cli.zen", 104, 38);
             }
         } else {
-            zg_unreachable("zen/zen_cli.zen", 95, 23);
+            zg_unreachable("zen/zen_cli.zen", 99, 23);
         }
         zg_cnt2: ;
     }
     zg_brk1: ;
     (void)(zg_v3);
-    return zu_f3_3zen7zen_cli7verdictO4_b3strb3strb4boolb3str(zu_l4root, zu_l3out, zu_l4emit, zu_l3bad);
+    return zu_f3_3zen7zen_cli7verdictO5_b3strb3strb3strb4boolb3str(zu_l4root, zu_l3out, zu_l5entry, zu_l4emit, zu_l3bad);
 }
 
 static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli7commandO2_t4_3std11collections15collections_vec3VecI1_b3strb3str(zu_t4_3std11collections15collections_vec3VecI1_b3str zu_l4argv, zg_str zu_l4name) {
@@ -8948,7 +8949,7 @@ static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli7commandO2_t4_3std11collections1
     } else if (!zg_s1) {
         return zu_f3_3zen7zen_cli9not_buildO1_b3str(zu_l4name);
     } else {
-        zg_unreachable("zen/zen_cli.zen", 66, 22);
+        zg_unreachable("zen/zen_cli.zen", 69, 22);
     }
 }
 
@@ -8960,11 +8961,11 @@ static bool zu_f3_3zen7zen_cli7is_flagO1_b3str(zg_str zu_l1a) {
     } else if (!zg_s1) {
         return (zu_f5_3std4text8text_str3str5indexO2_b3strb5usize(zu_l1a, 0) == '-');
     } else {
-        zg_unreachable("zen/zen_cli.zen", 135, 18);
+        zg_unreachable("zen/zen_cli.zen", 149, 18);
     }
 }
 
-static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli7verdictO4_b3strb3strb4boolb3str(zg_str zu_l4root, zg_str zu_l3out, bool zu_l4emit, zg_str zu_l3bad) {
+static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli7verdictO5_b3strb3strb3strb4boolb3str(zg_str zu_l4root, zg_str zu_l3out, zg_str zu_l5entry, bool zu_l4emit, zg_str zu_l3bad) {
     bool zg_s1;
     zg_s1 = zu_f5_3std4text8text_str3str8is_emptyO1_b3str(zu_l3bad);
     if (!zg_s1) {
@@ -8975,12 +8976,12 @@ static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli7verdictO4_b3strb3strb4boolb3str
         if (zg_s2) {
             return (zu_t3_3zen7zen_cli3Cli){ .zg_tag = zu_e4_3zen7zen_cli3Cli5Usage, .zg_data.zu_m5Usage = (zg_str){ (unsigned char *)"", 0u } };
         } else if (!zg_s2) {
-            return (zu_t3_3zen7zen_cli3Cli){ .zg_tag = zu_e4_3zen7zen_cli3Cli5Build, .zg_data.zu_m5Build = (zu_t3_3zen7zen_cli3Job){ .zu_m4root = zu_l4root, .zu_m3out = zu_l3out, .zu_m6emit_c = zu_l4emit } };
+            return (zu_t3_3zen7zen_cli3Cli){ .zg_tag = zu_e4_3zen7zen_cli3Cli5Build, .zg_data.zu_m5Build = (zu_t3_3zen7zen_cli3Job){ .zu_m4root = zu_l4root, .zu_m3out = zu_l3out, .zu_m5entry = zu_l5entry, .zu_m6emit_c = zu_l4emit } };
         } else {
-            zg_unreachable("zen/zen_cli.zen", 111, 34);
+            zg_unreachable("zen/zen_cli.zen", 116, 34);
         }
     } else {
-        zg_unreachable("zen/zen_cli.zen", 109, 20);
+        zg_unreachable("zen/zen_cli.zen", 114, 20);
     }
 }
 
@@ -8996,19 +8997,27 @@ static zu_t3_3zen7zen_cli3Arg zu_f3_3zen7zen_cli8classifyO1_b3str(zg_str zu_l1a)
             return (zu_t3_3zen7zen_cli3Arg){ .zg_tag = zu_e4_3zen7zen_cli3Arg3Out };
         } else if (!zg_s2) {
             bool zg_s3;
-            zg_s3 = zu_f3_3zen7zen_cli7is_flagO1_b3str(zu_l1a);
+            zg_s3 = zu_f5_3std4text8text_str3str2eqO2_b3strb3str(zu_l1a, (zg_str){ (unsigned char *)"--entry", 7u });
             if (zg_s3) {
-                return (zu_t3_3zen7zen_cli3Arg){ .zg_tag = zu_e4_3zen7zen_cli3Arg4Flag };
+                return (zu_t3_3zen7zen_cli3Arg){ .zg_tag = zu_e4_3zen7zen_cli3Arg5Entry };
             } else if (!zg_s3) {
-                return (zu_t3_3zen7zen_cli3Arg){ .zg_tag = zu_e4_3zen7zen_cli3Arg4Word };
+                bool zg_s4;
+                zg_s4 = zu_f3_3zen7zen_cli7is_flagO1_b3str(zu_l1a);
+                if (zg_s4) {
+                    return (zu_t3_3zen7zen_cli3Arg){ .zg_tag = zu_e4_3zen7zen_cli3Arg4Flag };
+                } else if (!zg_s4) {
+                    return (zu_t3_3zen7zen_cli3Arg){ .zg_tag = zu_e4_3zen7zen_cli3Arg4Word };
+                } else {
+                    zg_unreachable("zen/zen_cli.zen", 136, 37);
+                }
             } else {
-                zg_unreachable("zen/zen_cli.zen", 123, 33);
+                zg_unreachable("zen/zen_cli.zen", 134, 38);
             }
         } else {
-            zg_unreachable("zen/zen_cli.zen", 121, 29);
+            zg_unreachable("zen/zen_cli.zen", 132, 29);
         }
     } else {
-        zg_unreachable("zen/zen_cli.zen", 119, 22);
+        zg_unreachable("zen/zen_cli.zen", 130, 22);
     }
 }
 
@@ -9024,7 +9033,7 @@ static zu_t3_3zen7zen_cli3Cli zu_f3_3zen7zen_cli9not_buildO1_b3str(zg_str zu_l4n
     } else if (!zg_s1) {
         return (zu_t3_3zen7zen_cli3Cli){ .zg_tag = zu_e4_3zen7zen_cli3Cli5Usage, .zg_data.zu_m5Usage = zu_l4name };
     } else {
-        zg_unreachable("zen/zen_cli.zen", 73, 20);
+        zg_unreachable("zen/zen_cli.zen", 76, 20);
     }
 }
 
@@ -9042,13 +9051,13 @@ static zg_str zu_f3_3zen9zen_build10fs_messageO1_t4_3std3env3env7FsError(zu_t4_3
     } else if ((zg_s1.zg_tag == zu_e5_3std3env3env7FsError11OutOfMemory)) {
         return (zg_str){ (unsigned char *)"the buffer could not be obtained", 32u };
     } else {
-        zg_unreachable("zen/zen_build.zen", 652, 7);
+        zg_unreachable("zen/zen_build.zen", 688, 7);
     }
 }
 
 static zu_t4_3std4core6result3ResI2_b3strt4_3std3mem9mem_alloc10AllocError zu_f3_3zen9zen_build11module_nameO3_t4_3std3mem9mem_alloc5Allocb3strb3str(zu_t4_3std3mem9mem_alloc5Alloc zu_l1a, zg_str zu_l4root, zg_str zu_l4path) {
     zg_str zu_l5inner;
-    zu_l5inner = zu_f5_3std4text8text_str3str5sliceO3_b3strb5usizeb5usize(zu_l4path, zg_add_usize(zu_l4root.len, 1, "zen/zen_build.zen", 605, 33), zg_sub_usize(zu_l4path.len, 4, "zen/zen_build.zen", 605, 47));
+    zu_l5inner = zu_f5_3std4text8text_str3str5sliceO3_b3strb5usizeb5usize(zu_l4path, zg_add_usize(zu_l4root.len, 1, "zen/zen_build.zen", 641, 33), zg_sub_usize(zu_l4path.len, 4, "zen/zen_build.zen", 641, 47));
     zu_t4_3std4text11text_string6String zu_l3out;
     zu_t4_3std4core6result3ResI2_t4_3std4text11text_string6Stringt4_3std3mem9mem_alloc10AllocError zg_t1;
     zg_t1 = zu_f4_3std4text11text_string6StringO1_t4_3std3mem9mem_alloc5Alloc(zu_l1a);
@@ -9081,13 +9090,13 @@ static zu_t4_3std4core6result3ResI2_b3strt4_3std3mem9mem_alloc10AllocError zu_f3
 
 static zg_str zu_f3_3zen9zen_build11relative_toO2_b3strb3str(zg_str zu_l4root, zg_str zu_l4path) {
     bool zg_s1;
-    zg_s1 = ((zu_l4path.len > zg_add_usize(zu_l4root.len, 1, "zen/zen_build.zen", 618, 26)));
+    zg_s1 = ((zu_l4path.len > zg_add_usize(zu_l4root.len, 1, "zen/zen_build.zen", 654, 26)));
     if (zg_s1) {
-        return zu_f5_3std4text8text_str3str5sliceO3_b3strb5usizeb5usize(zu_l4path, zg_add_usize(zu_l4root.len, 1, "zen/zen_build.zen", 619, 38), zu_l4path.len);
+        return zu_f5_3std4text8text_str3str5sliceO3_b3strb5usizeb5usize(zu_l4path, zg_add_usize(zu_l4root.len, 1, "zen/zen_build.zen", 655, 38), zu_l4path.len);
     } else if (!zg_s1) {
         return zu_l4path;
     } else {
-        zg_unreachable("zen/zen_build.zen", 618, 31);
+        zg_unreachable("zen/zen_build.zen", 654, 31);
     }
 }
 
@@ -9109,7 +9118,7 @@ static size_t zu_f3_3zen9zen_build16after_last_slashO1_b3str(zg_str zu_l4path) {
         bool zg_s9;
         zg_s9 = zu_l1b;
         if (zg_s9) {
-            zu_l3cut = zg_add_usize(zu_l1i, 1, "zen/zen_build.zen", 586, 50);
+            zu_l3cut = zg_add_usize(zu_l1i, 1, "zen/zen_build.zen", 622, 50);
             (void)(0);
             zg_n8 = (zu_t4_3std4core6result3ResI1_z){ .zg_tag = zu_e5_3std4core6result3Res2Ok };
         } else if (!zg_s9) {
@@ -9135,7 +9144,7 @@ static zu_t4_3std4core6result3ResI2_b3i32t4_3std3mem9mem_alloc10AllocError zu_f3
     zu_l1b = zu_f3_3zen9zen_build5BuildO3_t4_3std3mem9mem_alloc5Alloct4_3std3env3env3Envb3str(zu_l1a, zu_l3env, zu_l3job.zu_m4root);
     zu_t3_3zen9zen_build4Unit zu_l5entry;
     zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zg_t1;
-    zg_t1 = zu_f4_3zen9zen_build5Build8entry_ofO1_t3_3zen9zen_build5Build(&(zu_l1b));
+    zg_t1 = zu_f4_3zen9zen_build5Build8entry_ofO2_t3_3zen9zen_build5Buildb3str(&(zu_l1b), zu_l3job.zu_m5entry);
     if (zg_t1.zg_tag != zu_e5_3std4core6result3Res2Ok) {
         return (zu_t4_3std4core6result3ResI2_b3i32t4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res3Err, .zg_data.zu_m3Err = zg_t1.zg_data.zu_m3Err };
     }
@@ -9165,20 +9174,20 @@ static uint8_t zu_f3_3zen9zen_build7dot_forO1_b2u8(uint8_t zu_l1b) {
     } else if (!zg_s1) {
         return zu_l1b;
     } else {
-        zg_unreachable("zen/zen_build.zen", 629, 16);
+        zg_unreachable("zen/zen_build.zen", 665, 16);
     }
 }
 
 static zg_str zu_f3_3zen9zen_build7last_ofO1_t3_3ast8ast_span13QualifiedName(zu_t3_3ast8ast_span13QualifiedName zu_l1q) {
     zu_t4_3std4core6result3ResI1_t3_3ast8ast_span5Ident zg_s1;
-    zg_s1 = zu_f5_3std11collections15collections_vec3Vec3getO2_t4_3std11collections15collections_vec3VecI1_t3_3ast8ast_span5Identb5usizeI1_t3_3ast8ast_span5Ident(zu_l1q.zu_m8segments, zg_sub_usize(zu_l1q.zu_m8segments.zu_m3len, 1, "zen/zen_build.zen", 642, 35));
+    zg_s1 = zu_f5_3std11collections15collections_vec3Vec3getO2_t4_3std11collections15collections_vec3VecI1_t3_3ast8ast_span5Identb5usizeI1_t3_3ast8ast_span5Ident(zu_l1q.zu_m8segments, zg_sub_usize(zu_l1q.zu_m8segments.zu_m3len, 1, "zen/zen_build.zen", 678, 35));
     if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res2Ok)) {
         zu_t3_3ast8ast_span5Ident zu_l1s = zg_s1.zg_data.zu_m2Ok;
         return zu_l1s.zu_m4text;
     } else if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res4None)) {
         return (zg_str){ (unsigned char *)"", 0u };
     } else {
-        zg_unreachable("zen/zen_build.zen", 642, 40);
+        zg_unreachable("zen/zen_build.zen", 678, 40);
     }
 }
 
@@ -9190,7 +9199,7 @@ static uint8_t zu_f3_3zen9zen_build9slash_forO1_b2u8(uint8_t zu_l1b) {
     } else if (!zg_s1) {
         return zu_l1b;
     } else {
-        zg_unreachable("zen/zen_build.zen", 636, 16);
+        zg_unreachable("zen/zen_build.zen", 672, 16);
     }
 }
 
@@ -16083,7 +16092,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f3_4se
     zg_s2 = zu_l1b;
     if (zg_s2) {
         zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zg_t3;
-        zg_t3 = zu_f3_4sema9sema_diag11write_usizeO2_t4_3std4text11text_string6Stringb5usize(&((*zu_l3out)), zg_div_usize(zu_l1v, 10, "sema/sema_diag.zen", 268, 44));
+        zg_t3 = zu_f3_4sema9sema_diag11write_usizeO2_t4_3std4text11text_string6Stringb5usize(&((*zu_l3out)), zg_div_usize(zu_l1v, 10, "sema/sema_diag.zen", 268, 43));
         if (zg_t3.zg_tag != zu_e5_3std4core6result3Res2Ok) {
             return (zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res3Err, .zg_data.zu_m3Err = zg_t3.zg_data.zu_m3Err };
         }
@@ -31775,6 +31784,20 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ge
     return (zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res2Ok };
 }
 
+static bool zu_f4_3gen5gen_c10gen_c_type10defs_namedO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedb3str(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zg_str zu_l4name) {
+    zu_t4_3std11collections15collections_vec3VecI1_t3_4sema8sema_def3Def zu_l5found;
+    zu_l5found = zu_f4_3std11collections15collections_vec3VecO1_t4_3std3mem9mem_alloc5AllocI1_t3_4sema8sema_def3Def((*zu_l2be).zu_m5alloc);
+    zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zg_s1;
+    zg_s1 = zu_f4_4sema8sema_def5World7defs_ofO4_t3_4sema8sema_def5Worldb5usizeb3strt4_3std11collections15collections_vec3VecI1_t3_4sema8sema_def3Def(zu_f5_3gen5gen_c11gen_c_state8CBackend5worldO1_t4_3gen5gen_c11gen_c_state8CBackend((*zu_l2be)), (size_t)(zu_l1n.zu_m4decl.zu_m6module), zu_l4name, &(zu_l5found));
+    if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res3Err)) {
+        return false;
+    } else if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res2Ok)) {
+        return (zu_l5found.zu_m3len > 0);
+    } else {
+        zg_unreachable("gen/gen_c/gen_c_type.zen", 487, 63);
+    }
+}
+
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type10elem_ctypeO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty4TyIdt4_3std4text11text_string6String(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty4TyId zu_l1t, zu_t4_3std4text11text_string6String *zu_l3out) {
     zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zg_t1;
     zg_t1 = zu_f4_3gen5gen_c10gen_c_type12request_typeO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty4TyId(&((*zu_l2be)), zu_l1t);
@@ -31892,7 +31915,7 @@ static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_
         zu_t3_4sema7sema_ty4TyId zu_l1t = zg_s1.zg_data.zu_m2Ok;
         return (zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId){ .zg_tag = zu_e5_3std4core6result3Res2Ok, .zg_data.zu_m2Ok = zu_l1t };
     } else {
-        zg_unreachable("gen/gen_c/gen_c_type.zen", 436, 28);
+        zg_unreachable("gen/gen_c/gen_c_type.zen", 516, 28);
     }
 }
 
@@ -31906,6 +31929,18 @@ static bool zu_f4_3gen5gen_c10gen_c_type12is_c_integerO1_b3str(zg_str zu_l4name)
 
 static bool zu_f4_3gen5gen_c10gen_c_type12is_ptr_namedO1_t3_4sema7sema_ty7TyNamed(zu_t3_4sema7sema_ty7TyNamed zu_l1n) {
     return zu_f5_3std4text8text_str3str2eqO2_b3strb3str(zu_l1n.zu_m4name, (zg_str){ (unsigned char *)"Ptr", 3u });
+}
+
+static bool zu_f4_3gen5gen_c10gen_c_type12names_a_typeO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node7Variant(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node7Variant zu_l1v) {
+    zu_t4_3std4core6result3ResI1_t3_3ast6ast_id6TypeId zg_s1;
+    zg_s1 = zu_l1v.zu_m7payload;
+    if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res2Ok)) {
+        return false;
+    } else if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res4None)) {
+        return zu_f4_3gen5gen_c10gen_c_type10defs_namedO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedb3str(&((*zu_l2be)), zu_l1n, zu_l1v.zu_m4name.zu_m4text);
+    } else {
+        zg_unreachable("gen/gen_c/gen_c_type.zen", 479, 15);
+    }
 }
 
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type12request_typeO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty4TyId(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty4TyId zu_l2id) {
@@ -31946,6 +31981,19 @@ static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_
     }
 }
 
+static bool zu_f4_3gen5gen_c10gen_c_type13union_readingO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamed(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n) {
+    zu_t4_3std4core6result3ResI1_t3_3ast8ast_node4Decl zg_s1;
+    zg_s1 = zu_f3_4sema8sema_def7decl_atO2_t3_3ast9ast_arena3Astt3_4sema7sema_id6DeclId((*zu_l2be).zu_m4tree, zu_l1n.zu_m4decl);
+    if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res4None)) {
+        return false;
+    } else if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res2Ok)) {
+        zu_t3_3ast8ast_node4Decl zu_l1d = zg_s1.zg_data.zu_m2Ok;
+        return zu_f4_3gen5gen_c10gen_c_type18enum_union_readingO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node4Decl(&((*zu_l2be)), zu_l1n, zu_l1d);
+    } else {
+        zg_unreachable("gen/gen_c/gen_c_type.zen", 439, 30);
+    }
+}
+
 static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_c_type14interned_namedO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema8sema_def3Def(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema8sema_def3Def zu_l1d) {
     zu_t4_3std11collections15collections_vec3VecI1_t3_4sema7sema_ty4TyId zu_l5empty;
     zu_l5empty = zu_f4_3std11collections15collections_vec3VecO1_t4_3std3mem9mem_alloc5AllocI1_t3_4sema7sema_ty4TyId((*zu_l2be).zu_m5alloc);
@@ -31957,7 +32005,7 @@ static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_
         zu_t3_4sema7sema_ty4TyId zu_l2id = zg_s1.zg_data.zu_m2Ok;
         return (zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId){ .zg_tag = zu_e5_3std4core6result3Res2Ok, .zg_data.zu_m2Ok = zu_l2id };
     } else {
-        zg_unreachable("gen/gen_c/gen_c_type.zen", 422, 38);
+        zg_unreachable("gen/gen_c/gen_c_type.zen", 502, 38);
     }
 }
 
@@ -32118,6 +32166,20 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ge
     return (zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res2Ok };
 }
 
+static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_c_type17bare_variant_typeO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node7Variant(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node7Variant zu_l1v) {
+    zu_t4_3std11collections15collections_vec3VecI1_t3_4sema8sema_def3Def zu_l5found;
+    zu_l5found = zu_f4_3std11collections15collections_vec3VecO1_t4_3std3mem9mem_alloc5AllocI1_t3_4sema8sema_def3Def((*zu_l2be).zu_m5alloc);
+    zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zg_s1;
+    zg_s1 = zu_f4_4sema8sema_def5World7defs_ofO4_t3_4sema8sema_def5Worldb5usizeb3strt4_3std11collections15collections_vec3VecI1_t3_4sema8sema_def3Def(zu_f5_3gen5gen_c11gen_c_state8CBackend5worldO1_t4_3gen5gen_c11gen_c_state8CBackend((*zu_l2be)), (size_t)(zu_l1n.zu_m4decl.zu_m6module), zu_l1v.zu_m4name.zu_m4text, &(zu_l5found));
+    if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res3Err)) {
+        return (zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId){ .zg_tag = zu_e5_3std4core6result3Res4None };
+    } else if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res2Ok)) {
+        return zu_f4_3gen5gen_c10gen_c_type8named_ofO2_t4_3gen5gen_c11gen_c_state8CBackendt4_3std11collections15collections_vec3VecI1_t3_4sema8sema_def3Def(&((*zu_l2be)), zu_l5found);
+    } else {
+        zg_unreachable("gen/gen_c/gen_c_type.zen", 432, 70);
+    }
+}
+
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3gen5gen_c10gen_c_type17request_from_declO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node4Decl(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node4Decl zu_l1d) {
     zu_t3_4sema10sema_check3Ctx zu_l3ctx;
     zu_l3ctx = zu_f4_3gen5gen_c10gen_c_type8decl_ctxO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamed(&((*zu_l2be)), zu_l1n);
@@ -32161,16 +32223,96 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ge
 }
 
 static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_c_type17union_member_typeO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node7Variant(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node7Variant zu_l1v) {
-    zu_t4_3std11collections15collections_vec3VecI1_t3_4sema8sema_def3Def zu_l5found;
-    zu_l5found = zu_f4_3std11collections15collections_vec3VecO1_t4_3std3mem9mem_alloc5AllocI1_t3_4sema8sema_def3Def((*zu_l2be).zu_m5alloc);
-    zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zg_s1;
-    zg_s1 = zu_f4_4sema8sema_def5World7defs_ofO4_t3_4sema8sema_def5Worldb5usizeb3strt4_3std11collections15collections_vec3VecI1_t3_4sema8sema_def3Def(zu_f5_3gen5gen_c11gen_c_state8CBackend5worldO1_t4_3gen5gen_c11gen_c_state8CBackend((*zu_l2be)), (size_t)(zu_l1n.zu_m4decl.zu_m6module), zu_l1v.zu_m4name.zu_m4text, &(zu_l5found));
-    if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res3Err)) {
+    bool zg_s1;
+    zg_s1 = zu_f4_3gen5gen_c10gen_c_type13union_readingO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamed(&((*zu_l2be)), zu_l1n);
+    if (!zg_s1) {
         return (zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId){ .zg_tag = zu_e5_3std4core6result3Res4None };
-    } else if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res2Ok)) {
-        return zu_f4_3gen5gen_c10gen_c_type8named_ofO2_t4_3gen5gen_c11gen_c_state8CBackendt4_3std11collections15collections_vec3VecI1_t3_4sema8sema_def3Def(&((*zu_l2be)), zu_l5found);
+    } else if (zg_s1) {
+        return zu_f4_3gen5gen_c10gen_c_type17bare_variant_typeO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node7Variant(&((*zu_l2be)), zu_l1n, zu_l1v);
     } else {
-        zg_unreachable("gen/gen_c/gen_c_type.zen", 407, 70);
+        zg_unreachable("gen/gen_c/gen_c_type.zen", 424, 26);
+    }
+}
+
+static bool zu_f4_3gen5gen_c10gen_c_type18enum_union_readingO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node4Decl(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node4Decl zu_l1d) {
+    zu_t3_3ast8ast_node8DeclKind zg_s1;
+    zg_s1 = zu_l1d.zu_m4kind;
+    if ((zg_s1.zg_tag == zu_e4_3ast8ast_node8DeclKind4Enum)) {
+        zu_t3_3ast8ast_node4Enum zu_l1e = zg_s1.zg_data.zu_m4Enum;
+        return zu_f4_3gen5gen_c10gen_c_type18no_nominal_variantO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node4Enum(&((*zu_l2be)), zu_l1n, zu_l1e);
+    } else if (1) {
+        return false;
+    } else {
+        zg_unreachable("gen/gen_c/gen_c_type.zen", 446, 12);
+    }
+}
+
+static bool zu_f4_3gen5gen_c10gen_c_type18no_nominal_variantO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node4Enum(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node4Enum zu_l1e) {
+    bool zg_s1;
+    zg_s1 = ((zu_l1e.zu_m8variants.zu_m3len < 2));
+    if (zg_s1) {
+        return false;
+    } else if (!zg_s1) {
+        return zu_f4_3gen5gen_c10gen_c_type19every_variant_namedO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node4Enum(&((*zu_l2be)), zu_l1n, zu_l1e);
+    } else {
+        zg_unreachable("gen/gen_c/gen_c_type.zen", 460, 26);
+    }
+}
+
+static bool zu_f4_3gen5gen_c10gen_c_type19every_variant_namedO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node4Enum(zu_t4_3gen5gen_c11gen_c_state8CBackend *zu_l2be, zu_t3_4sema7sema_ty7TyNamed zu_l1n, zu_t3_3ast8ast_node4Enum zu_l1e) {
+    zu_t4_3std4core6result3ResI1_b5usize zg_s1;
+    zu_t4_3std4core6result3ResI1_b5usize zg_n2;
+    zu_t4_3std4core5range5RangeI1_q zu_l5range = (zu_t4_3std4core5range5RangeI1_q){ .zu_m5start = 0, .zu_m3end = zu_l1e.zu_m8variants.zu_m3len };
+    zu_t4_3std4core5range5RangeI1_q zg_r3 = zu_l5range;
+    zu_t4_3std4core6result3ResI1_b5usize zg_v6 = (zu_t4_3std4core6result3ResI1_b5usize){ .zg_tag = zu_e5_3std4core6result3Res4None };
+    size_t zg_i7;
+    size_t zg_b8;
+    size_t zg_n9;
+    zg_i7 = zg_r3.zu_m5start;
+    zg_n9 = zg_r3.zu_m3end;
+    zg_b8 = zg_i7;
+    while (zg_i7 < zg_n9) {
+        size_t zu_l5value = zg_i7;
+        zu_t4_3std4core6result3ResI1_z zg_n10;
+        bool zg_n11;
+        size_t zu_l1i = zu_l5value;
+        zu_t4_3std4core6result3ResI1_t3_3ast8ast_node7Variant zg_s12;
+        zg_s12 = zu_f5_3std11collections15collections_vec3Vec3getO2_t4_3std11collections15collections_vec3VecI1_t3_3ast8ast_node7Variantb5usizeI1_t3_3ast8ast_node7Variant(zu_l1e.zu_m8variants, zu_l1i);
+        if ((zg_s12.zg_tag == zu_e5_3std4core6result3Res4None)) {
+            zg_n11 = true;
+        } else if ((zg_s12.zg_tag == zu_e5_3std4core6result3Res2Ok)) {
+            zu_t3_3ast8ast_node7Variant zu_l1v = zg_s12.zg_data.zu_m2Ok;
+            zg_n11 = (!zu_f4_3gen5gen_c10gen_c_type12names_a_typeO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty7TyNamedt3_3ast8ast_node7Variant(&((*zu_l2be)), zu_l1n, zu_l1v));
+        } else {
+            zg_unreachable("gen/gen_c/gen_c_type.zen", 468, 27);
+        }
+        bool zu_l1b = zg_n11;
+        bool zg_s13;
+        zg_s13 = zu_l1b;
+        if (zg_s13) {
+            zg_v6 = (zu_t4_3std4core6result3ResI1_b5usize){ .zg_tag = zu_e5_3std4core6result3Res2Ok, .zg_data.zu_m2Ok = zu_l5value };
+            goto zg_brk4;
+            (void)(0);
+            (void)(0);
+            zg_n10 = (zu_t4_3std4core6result3ResI1_z){ .zg_tag = zu_e5_3std4core6result3Res2Ok };
+        } else if (!zg_s13) {
+            zg_n10 = (zu_t4_3std4core6result3ResI1_z){ .zg_tag = zu_e5_3std4core6result3Res4None };
+        } else {
+            zg_unreachable("std/core/bool.zen", 22, 7);
+        }
+        (void)(zg_n10);
+        zg_cnt5: ;
+        zg_i7 = zg_i7 + 1;
+    }
+    zg_brk4: ;
+    zg_n2 = zg_v6;
+    zg_s1 = zg_n2;
+    if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res2Ok)) {
+        return false;
+    } else if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res4None)) {
+        return true;
+    } else {
+        zg_unreachable("gen/gen_c/gen_c_type.zen", 472, 8);
     }
 }
 
@@ -32310,7 +32452,7 @@ static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_
         zu_t3_4sema8sema_def3Def zu_l1d = zg_s1.zg_data.zu_m2Ok;
         return zu_f4_3gen5gen_c10gen_c_type14interned_namedO2_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema8sema_def3Def(&((*zu_l2be)), zu_l1d);
     } else {
-        zg_unreachable("gen/gen_c/gen_c_type.zen", 414, 18);
+        zg_unreachable("gen/gen_c/gen_c_type.zen", 494, 18);
     }
 }
 
@@ -32323,7 +32465,7 @@ static zu_t4_3std4core6result3ResI1_t3_4sema7sema_ty4TyId zu_f4_3gen5gen_c10gen_
         zu_t3_4sema7sema_ty4TyId zu_l2id = zg_s1.zg_data.zu_m2Ok;
         return zu_f4_3gen5gen_c10gen_c_type11substitutedO3_t4_3gen5gen_c11gen_c_state8CBackendt3_4sema7sema_ty4TyIdt3_4sema9sema_inst4Inst(&((*zu_l2be)), zu_l2id, zu_l4inst);
     } else {
-        zg_unreachable("gen/gen_c/gen_c_type.zen", 429, 36);
+        zg_unreachable("gen/gen_c/gen_c_type.zen", 509, 36);
     }
 }
 
@@ -50870,7 +51012,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     }
     size_t zu_l1n;
     zu_l1n = zu_f4_4sema10sema_check7Checker10diag_countO1_t3_4sema10sema_check7Checker(zu_l1c);
-    (*zu_l4self).zu_m6faults = zg_add_usize((*zu_l4self).zu_m6faults, zu_l1n, "zen/zen_build.zen", 475, 35);
+    (*zu_l4self).zu_m6faults = zg_add_usize((*zu_l4self).zu_m6faults, zu_l1n, "zen/zen_build.zen", 511, 35);
     zu_t4_3std4core6result3ResI1_z zg_n7;
     bool zu_l1b = ((zu_l1n > 0));
     bool zg_s8;
@@ -50938,7 +51080,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
         } else if (1) {
             zg_t9 = (zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res2Ok };
         } else {
-            zg_unreachable("zen/zen_build.zen", 364, 20);
+            zg_unreachable("zen/zen_build.zen", 400, 20);
         }
         if (zg_t9.zg_tag != zu_e5_3std4core6result3Res2Ok) {
             return (zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res3Err, .zg_data.zu_m3Err = zg_t9.zg_data.zu_m3Err };
@@ -50971,7 +51113,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
         zg_a8 = zu_f5_3std11collections15collections_vec3Vec3getO2_t4_3std11collections15collections_vec3VecI1_t3_3lex8lex_diag4Diagb5usizeI1_t3_3lex8lex_diag4Diag(zu_l4self_4, zu_l5index);
         if (zg_a8.zg_tag != zu_e5_3std4core6result3Res2Ok) { goto zg_brk2; }
         zu_t3_3lex8lex_diag4Diag zu_l1d = zg_a8.zg_data.zu_m2Ok;
-        zu_l1n = zg_add_int(zu_l1n, 1, "zen/zen_build.zen", 321, 19);
+        zu_l1n = zg_add_int(zu_l1n, 1, "zen/zen_build.zen", 357, 19);
         zg_print_str((zu_l1d.zu_m4file));
         zg_print_bytes(":", 1u);
         zg_print_u64((uint64_t)(zu_l1d.zu_m4span.zu_m5start.zu_m4line));
@@ -50986,7 +51128,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     }
     zg_brk2: ;
     (void)(zg_v4);
-    (*zu_l4self).zu_m6faults = zg_add_usize((*zu_l4self).zu_m6faults, zu_l1n, "zen/zen_build.zen", 325, 35);
+    (*zu_l4self).zu_m6faults = zg_add_usize((*zu_l4self).zu_m6faults, zu_l1n, "zen/zen_build.zen", 361, 35);
     return (zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res2Ok };
 }
 
@@ -50998,7 +51140,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     } else if (zg_s1) {
         return zu_f4_3zen9zen_build5Build5probeO3_t3_3zen9zen_build5Buildb3strt4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(&((*zu_l4self)), zu_l1n.zu_m4name.zu_m4text, &((*zu_l4seen)));
     } else {
-        zg_unreachable("zen/zen_build.zen", 415, 27);
+        zg_unreachable("zen/zen_build.zen", 451, 27);
     }
 }
 
@@ -51079,6 +51221,41 @@ static zu_t4_3std4core6result3ResI2_b3strt4_3std3mem9mem_alloc10AllocError zu_f4
     return (zu_t4_3std4core6result3ResI2_b3strt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res2Ok, .zg_data.zu_m2Ok = zu_f5_3std4text11text_string6String4viewO1_t4_3std4text11text_string6String(zu_l3out) };
 }
 
+static zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build11entry_namedO2_t3_3zen9zen_build5Buildb3str(zu_t3_3zen9zen_build5Build *zu_l4self, zg_str zu_l5named) {
+    zu_t4_3std4text11text_string6String zu_l4path;
+    zu_t4_3std4core6result3ResI2_t4_3std4text11text_string6Stringt4_3std3mem9mem_alloc10AllocError zg_t1;
+    zu_t4_3std4core6result3ResI2_t4_3std4text11text_string6Stringt4_3std3mem9mem_alloc10AllocError zg_t2;
+    zg_t2 = zu_f4_3std4text11text_string6StringO1_t4_3std3mem9mem_alloc5Alloc((*zu_l4self).zu_m5alloc);
+    if (zg_t2.zg_tag != zu_e5_3std4core6result3Res2Ok) {
+        goto zg_f3;
+    }
+    zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zg_t4;
+    zg_t4 = zu_f5_3std4text11text_string6String9add_bytesO2_t4_3std4text11text_string6Stringb3str(&(zg_t2.zg_data.zu_m2Ok), (*zu_l4self).zu_m4root);
+    if (zg_t4.zg_tag != zu_e5_3std4core6result3Res2Ok) {
+        zg_t2 = (zu_t4_3std4core6result3ResI2_t4_3std4text11text_string6Stringt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res3Err, .zg_data.zu_m3Err = zg_t4.zg_data.zu_m3Err };
+        goto zg_f3;
+    }
+    zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zg_t5;
+    zg_t5 = zu_f5_3std4text11text_string6String9add_bytesO2_t4_3std4text11text_string6Stringb3str(&(zg_t2.zg_data.zu_m2Ok), (zg_str){ (unsigned char *)"/", 1u });
+    if (zg_t5.zg_tag != zu_e5_3std4core6result3Res2Ok) {
+        zg_t2 = (zu_t4_3std4core6result3ResI2_t4_3std4text11text_string6Stringt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res3Err, .zg_data.zu_m3Err = zg_t5.zg_data.zu_m3Err };
+        goto zg_f3;
+    }
+    zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zg_t6;
+    zg_t6 = zu_f5_3std4text11text_string6String9add_bytesO2_t4_3std4text11text_string6Stringb3str(&(zg_t2.zg_data.zu_m2Ok), zu_l5named);
+    if (zg_t6.zg_tag != zu_e5_3std4core6result3Res2Ok) {
+        zg_t2 = (zu_t4_3std4core6result3ResI2_t4_3std4text11text_string6Stringt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res3Err, .zg_data.zu_m3Err = zg_t6.zg_data.zu_m3Err };
+        goto zg_f3;
+    }
+    zg_f3: ;
+    zg_t1 = zg_t2;
+    if (zg_t1.zg_tag != zu_e5_3std4core6result3Res2Ok) {
+        return (zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res3Err, .zg_data.zu_m3Err = zg_t1.zg_data.zu_m3Err };
+    }
+    zu_l4path = zg_t1.zg_data.zu_m2Ok;
+    return zu_f4_3zen9zen_build5Build7unit_atO2_t3_3zen9zen_build5Buildb3str((*zu_l4self), zu_f5_3std4text11text_string6String4viewO1_t4_3std4text11text_string6String(zu_l4path));
+}
+
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build11queue_freshO3_t3_3zen9zen_build5Buildb3strt4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(zu_t3_3zen9zen_build5Build *zu_l4self, zg_str zu_l4path, zu_t4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit *zu_l4seen) {
     zu_t3_3zen9zen_build4Unit zg_s1;
     zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zg_t2;
@@ -51088,6 +51265,27 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     }
     zg_s1 = zg_t2.zg_data.zu_m2Ok;
     return zu_f5_3std11collections15collections_vec3Vec3addO2_t4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unitt3_3zen9zen_build4UnitI1_t3_3zen9zen_build4Unit(&((*zu_l4seen)), zg_s1);
+}
+
+static zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build12entry_probedO1_t3_3zen9zen_build5Build(zu_t3_3zen9zen_build5Build *zu_l4self) {
+    zu_t3_3zen9zen_build4Unit zu_l5first;
+    zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zg_t1;
+    zg_t1 = zu_f4_3zen9zen_build5Build9candidateO2_t3_3zen9zen_build5Buildb3str((*zu_l4self), (zg_str){ (unsigned char *)"main", 4u });
+    if (zg_t1.zg_tag != zu_e5_3std4core6result3Res2Ok) {
+        return (zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res3Err, .zg_data.zu_m3Err = zg_t1.zg_data.zu_m3Err };
+    }
+    zu_l5first = zg_t1.zg_data.zu_m2Ok;
+    bool zg_s2;
+    zg_str zg_t3;
+    zg_t3 = zu_l5first.zu_m4path;
+    zg_s2 = (zg_fs_kind((const unsigned char *)zg_t3.data, zg_t3.len) >= 0);
+    if (zg_s2) {
+        return (zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res2Ok, .zg_data.zu_m2Ok = zu_l5first };
+    } else if (!zg_s2) {
+        return zu_f4_3zen9zen_build5Build16entry_after_mainO1_t3_3zen9zen_build5Build(&((*zu_l4self)));
+    } else {
+        zg_unreachable("zen/zen_build.zen", 186, 40);
+    }
 }
 
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build12seed_preludeO2_t3_3zen9zen_build5Buildt4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(zu_t3_3zen9zen_build5Build *zu_l4self, zu_t4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit *zu_l4seen) {
@@ -51107,12 +51305,12 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     } else if (!zg_s2) {
         return zu_f4_3zen9zen_build5Build19seed_prelude_folderO2_t3_3zen9zen_build5Buildt4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(&((*zu_l4self)), &((*zu_l4seen)));
     } else {
-        zg_unreachable("zen/zen_build.zen", 223, 34);
+        zg_unreachable("zen/zen_build.zen", 259, 34);
     }
 }
 
 static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build12write_failedO3_t3_3zen9zen_build5Buildt3_3zen7zen_cli3Jobt4_3std3env3env7FsError(zu_t3_3zen9zen_build5Build *zu_l4self, zu_t3_3zen7zen_cli3Job zu_l3job, zu_t4_3std3env3env7FsError zu_l1e) {
-    (*zu_l4self).zu_m6faults = zg_add_usize((*zu_l4self).zu_m6faults, 1, "zen/zen_build.zen", 539, 35);
+    (*zu_l4self).zu_m6faults = zg_add_usize((*zu_l4self).zu_m6faults, 1, "zen/zen_build.zen", 575, 35);
     zg_print_bytes("-o ", 3u);
     zg_print_str((zu_l3job.zu_m3out));
     zg_print_bytes(": ", 2u);
@@ -51139,7 +51337,7 @@ static zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc1
     } else if (!zg_s2) {
         return zu_f4_3zen9zen_build5Build9candidateO2_t3_3zen9zen_build5Buildb3str((*zu_l4self), (zg_str){ (unsigned char *)"zen", 3u });
     } else {
-        zg_unreachable("zen/zen_build.zen", 158, 41);
+        zg_unreachable("zen/zen_build.zen", 194, 41);
     }
 }
 
@@ -51160,7 +51358,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     } else if (!zg_s2) {
         return (zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res2Ok };
     } else {
-        zg_unreachable("zen/zen_build.zen", 232, 34);
+        zg_unreachable("zen/zen_build.zen", 268, 34);
     }
 }
 
@@ -51172,7 +51370,7 @@ static int32_t zu_f4_3zen9zen_build5Build4codeO1_t3_3zen9zen_build5Build(zu_t3_3
     } else if (!zg_s1) {
         return 1;
     } else {
-        zg_unreachable("zen/zen_build.zen", 551, 28);
+        zg_unreachable("zen/zen_build.zen", 587, 28);
     }
 }
 
@@ -51184,7 +51382,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     } else if (zg_s1) {
         return zu_f4_3zen9zen_build5Build6emit_cO3_t3_3zen9zen_build5Buildt3_4sema10sema_check7Checkert3_3zen7zen_cli3Job(&((*zu_l4self)), &((*zu_l1c)), zu_l3job);
     } else {
-        zg_unreachable("zen/zen_build.zen", 490, 20);
+        zg_unreachable("zen/zen_build.zen", 526, 20);
     }
 }
 
@@ -51251,7 +51449,7 @@ static zu_t4_3std4core6result3ResI1_t4_3std4text11text_string6String zu_f4_3zen9
         zu_t4_3std3env3env7FsError zu_l1e = zg_s1.zg_data.zu_m3Err;
         return zu_f4_3zen9zen_build5Build8fs_faultO3_t3_3zen9zen_build5Buildb3strt4_3std3env3env7FsError(&((*zu_l4self)), zu_l4path, zu_l1e);
     } else {
-        zg_unreachable("zen/zen_build.zen", 293, 44);
+        zg_unreachable("zen/zen_build.zen", 329, 44);
     }
 }
 
@@ -51285,9 +51483,9 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
         } else if ((zg_s7.zg_tag == zu_e5_3std4core6result3Res4None)) {
             zu_l1u = zu_l5entry;
         } else {
-            zg_unreachable("zen/zen_build.zen", 199, 29);
+            zg_unreachable("zen/zen_build.zen", 235, 29);
         }
-        zu_l1i = zg_add_int(zu_l1i, 1, "zen/zen_build.zen", 200, 19);
+        zu_l1i = zg_add_int(zu_l1i, 1, "zen/zen_build.zen", 236, 19);
         zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zg_t8;
         zg_t8 = zu_f4_3zen9zen_build5Build5frontO3_t3_3zen9zen_build5Buildt3_3zen9zen_build4Unitt4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(&((*zu_l4self)), zu_l1u, &(zu_l4seen));
         if (zg_t8.zg_tag != zu_e5_3std4core6result3Res2Ok) {
@@ -51309,7 +51507,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
         zu_t4_3std4text11text_string6String zu_l4text = zg_s1.zg_data.zu_m2Ok;
         return zu_f4_3zen9zen_build5Build6lex_itO4_t3_3zen9zen_build5Buildt3_3zen9zen_build4Unitt4_3std4text11text_string6Stringt4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(&((*zu_l4self)), zu_l1u, zu_l4text, &((*zu_l4seen)));
     } else {
-        zg_unreachable("zen/zen_build.zen", 286, 27);
+        zg_unreachable("zen/zen_build.zen", 322, 27);
     }
 }
 
@@ -51330,7 +51528,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     } else if (zg_s2) {
         return zu_f4_3zen9zen_build5Build5queueO3_t3_3zen9zen_build5Buildb3strt4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(&((*zu_l4self)), zu_l1u.zu_m4path, &((*zu_l4seen)));
     } else {
-        zg_unreachable("zen/zen_build.zen", 424, 36);
+        zg_unreachable("zen/zen_build.zen", 460, 36);
     }
 }
 
@@ -51385,7 +51583,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     } else if ((zg_s1.zg_tag == zu_e5_3std4core6result3Res4None)) {
         return zu_f4_3zen9zen_build5Build11queue_freshO3_t3_3zen9zen_build5Buildb3strt4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(&((*zu_l4self)), zu_l4path, &((*zu_l4seen)));
     } else {
-        zg_unreachable("zen/zen_build.zen", 383, 44);
+        zg_unreachable("zen/zen_build.zen", 419, 44);
     }
 }
 
@@ -51429,7 +51627,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     }
     size_t zu_l1n;
     zu_l1n = zu_f5_3gen5gen_c11gen_c_state8CBackend10diag_countO1_t4_3gen5gen_c11gen_c_state8CBackend(zu_l2be);
-    (*zu_l4self).zu_m6faults = zg_add_usize((*zu_l4self).zu_m6faults, zu_l1n, "zen/zen_build.zen", 506, 35);
+    (*zu_l4self).zu_m6faults = zg_add_usize((*zu_l4self).zu_m6faults, zu_l1n, "zen/zen_build.zen", 542, 35);
     zu_t4_3std4core6result3ResI1_z zg_n8;
     bool zu_l1b = ((zu_l1n > 0));
     bool zg_s9;
@@ -51565,7 +51763,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     } else if (zg_s2) {
         return zu_f4_3zen9zen_build5Build8parse_itO4_t3_3zen9zen_build5Buildt3_3zen9zen_build4Unitt3_3lex9lex_state5Lexedt4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(&((*zu_l4self)), zu_l1u, zu_l5lexed, &((*zu_l4seen)));
     } else {
-        zg_unreachable("zen/zen_build.zen", 312, 26);
+        zg_unreachable("zen/zen_build.zen", 348, 26);
     }
 }
 
@@ -51580,7 +51778,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     } else if (!zg_s1) {
         return zu_f4_3zen9zen_build5Build9write_outO3_t3_3zen9zen_build5Buildt3_3zen7zen_cli3Jobt3_3gen8gen_emit4Emit(&((*zu_l4self)), zu_l3job, zu_l3out);
     } else {
-        zg_unreachable("zen/zen_build.zen", 525, 28);
+        zg_unreachable("zen/zen_build.zen", 561, 28);
     }
 }
 
@@ -51612,7 +51810,7 @@ static zu_t4_3std4core6result3ResI2_b3strt4_3std3mem9mem_alloc10AllocError zu_f4
     } else if (!zg_s2) {
         return zu_f4_3zen9zen_build5Build6joinedO3_t3_3zen9zen_build5Buildt3_3ast8ast_span13QualifiedNameb4bool(zu_l4self, zu_l1q, true);
     } else {
-        zg_unreachable("zen/zen_build.zen", 261, 34);
+        zg_unreachable("zen/zen_build.zen", 297, 34);
     }
 }
 
@@ -51636,7 +51834,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     } else if (1) {
         return (zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res2Ok };
     } else {
-        zg_unreachable("zen/zen_build.zen", 406, 43);
+        zg_unreachable("zen/zen_build.zen", 442, 43);
     }
 }
 
@@ -51648,33 +51846,24 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     } else if (!zg_s1) {
         return zu_f4_3zen9zen_build5Build10check_treeO2_t3_3zen9zen_build5Buildt3_3zen7zen_cli3Job(&((*zu_l4self)), zu_l3job);
     } else {
-        zg_unreachable("zen/zen_build.zen", 455, 27);
+        zg_unreachable("zen/zen_build.zen", 491, 27);
     }
 }
 
-static zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build8entry_ofO1_t3_3zen9zen_build5Build(zu_t3_3zen9zen_build5Build *zu_l4self) {
-    zu_t3_3zen9zen_build4Unit zu_l5first;
-    zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zg_t1;
-    zg_t1 = zu_f4_3zen9zen_build5Build9candidateO2_t3_3zen9zen_build5Buildb3str((*zu_l4self), (zg_str){ (unsigned char *)"main", 4u });
-    if (zg_t1.zg_tag != zu_e5_3std4core6result3Res2Ok) {
-        return (zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res3Err, .zg_data.zu_m3Err = zg_t1.zg_data.zu_m3Err };
-    }
-    zu_l5first = zg_t1.zg_data.zu_m2Ok;
-    bool zg_s2;
-    zg_str zg_t3;
-    zg_t3 = zu_l5first.zu_m4path;
-    zg_s2 = (zg_fs_kind((const unsigned char *)zg_t3.data, zg_t3.len) >= 0);
-    if (zg_s2) {
-        return (zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res2Ok, .zg_data.zu_m2Ok = zu_l5first };
-    } else if (!zg_s2) {
-        return zu_f4_3zen9zen_build5Build16entry_after_mainO1_t3_3zen9zen_build5Build(&((*zu_l4self)));
+static zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc10AllocError zu_f4_3zen9zen_build5Build8entry_ofO2_t3_3zen9zen_build5Buildb3str(zu_t3_3zen9zen_build5Build *zu_l4self, zg_str zu_l5named) {
+    bool zg_s1;
+    zg_s1 = zu_f5_3std4text8text_str3str8is_emptyO1_b3str(zu_l5named);
+    if (!zg_s1) {
+        return zu_f4_3zen9zen_build5Build11entry_namedO2_t3_3zen9zen_build5Buildb3str(&((*zu_l4self)), zu_l5named);
+    } else if (zg_s1) {
+        return zu_f4_3zen9zen_build5Build12entry_probedO1_t3_3zen9zen_build5Build(&((*zu_l4self)));
     } else {
-        zg_unreachable("zen/zen_build.zen", 150, 40);
+        zg_unreachable("zen/zen_build.zen", 150, 26);
     }
 }
 
 static zu_t4_3std4core6result3ResI1_t4_3std4text11text_string6String zu_f4_3zen9zen_build5Build8fs_faultO3_t3_3zen9zen_build5Buildb3strt4_3std3env3env7FsError(zu_t3_3zen9zen_build5Build *zu_l4self, zg_str zu_l4path, zu_t4_3std3env3env7FsError zu_l1e) {
-    (*zu_l4self).zu_m6faults = zg_add_usize((*zu_l4self).zu_m6faults, 1, "zen/zen_build.zen", 300, 35);
+    (*zu_l4self).zu_m6faults = zg_add_usize((*zu_l4self).zu_m6faults, 1, "zen/zen_build.zen", 336, 35);
     zg_print_str((zu_l4path));
     zg_print_bytes(": ", 2u);
     zg_print_str((zu_f3_3zen9zen_build10fs_messageO1_t4_3std3env3env7FsError(zu_l1e)));
@@ -51712,7 +51901,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
         zg_a9 = zu_f5_3std11collections15collections_vec3Vec3getO2_t4_3std11collections15collections_vec3VecI1_t3_5parse10parse_diag4Diagb5usizeI1_t3_5parse10parse_diag4Diag(zu_l4self_4, zu_l5index);
         if (zg_a9.zg_tag != zu_e5_3std4core6result3Res2Ok) { goto zg_brk3; }
         zu_t3_5parse10parse_diag4Diag zu_l1d = zg_a9.zg_data.zu_m2Ok;
-        zu_l1n = zg_add_int(zu_l1n, 1, "zen/zen_build.zen", 346, 19);
+        zu_l1n = zg_add_int(zu_l1n, 1, "zen/zen_build.zen", 382, 19);
         zg_print_str((zu_l1d.zu_m4span.zu_m4file));
         zg_print_bytes(":", 1u);
         zg_print_u64((uint64_t)(zu_l1d.zu_m4span.zu_m5start.zu_m4line));
@@ -51727,14 +51916,14 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
     }
     zg_brk3: ;
     (void)(zg_v5);
-    (*zu_l4self).zu_m6faults = zg_add_usize((*zu_l4self).zu_m6faults, zu_l1n, "zen/zen_build.zen", 350, 35);
+    (*zu_l4self).zu_m6faults = zg_add_usize((*zu_l4self).zu_m6faults, zu_l1n, "zen/zen_build.zen", 386, 35);
     zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zg_t10;
     zg_t10 = zu_f4_3ast9ast_arena3Ast10add_moduleO2_t3_3ast9ast_arena3Astt3_3ast8ast_node6Module(&(zu_l1p.zu_m4tree), zu_l1m);
     if (zg_t10.zg_tag != zu_e5_3std4core6result3Res2Ok) {
         return (zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res3Err, .zg_data.zu_m3Err = zg_t10.zg_data.zu_m3Err };
     }
     (*zu_l4self).zu_m4tree = zu_l1p.zu_m4tree;
-    (*zu_l4self).zu_m5units = zg_add_usize((*zu_l4self).zu_m5units, 1, "zen/zen_build.zen", 353, 33);
+    (*zu_l4self).zu_m5units = zg_add_usize((*zu_l4self).zu_m5units, 1, "zen/zen_build.zen", 389, 33);
     zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zg_t11;
     zg_t11 = zu_f4_3zen9zen_build5Build10imports_ofO3_t3_3zen9zen_build5Buildt3_3ast8ast_node6Modulet4_3std11collections15collections_vec3VecI1_t3_3zen9zen_build4Unit(&((*zu_l4self)), zu_l1m, &((*zu_l4seen)));
     if (zg_t11.zg_tag != zu_e5_3std4core6result3Res2Ok) {
@@ -51843,7 +52032,7 @@ static zu_t4_3std4core6result3ResI2_t3_3zen9zen_build4Unitt4_3std3mem9mem_alloc1
     } else if (!zg_s19) {
         return zu_f4_3zen9zen_build5Build7unit_atO2_t3_3zen9zen_build5Buildb3str(zu_l4self, zu_f5_3std4text11text_string6String4viewO1_t4_3std4text11text_string6String(zu_l4nest));
     } else {
-        zg_unreachable("zen/zen_build.zen", 175, 19);
+        zg_unreachable("zen/zen_build.zen", 211, 19);
     }
 }
 
@@ -51880,7 +52069,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f4_3ze
         zu_t4_3std3env3env7FsError zu_l1e = zg_s1.zg_data.zu_m3Err;
         return zu_f4_3zen9zen_build5Build12write_failedO3_t3_3zen9zen_build5Buildt3_3zen7zen_cli3Jobt4_3std3env3env7FsError(&((*zu_l4self)), zu_l3job, zu_l1e);
     } else {
-        zg_unreachable("zen/zen_build.zen", 532, 48);
+        zg_unreachable("zen/zen_build.zen", 568, 48);
     }
 }
 

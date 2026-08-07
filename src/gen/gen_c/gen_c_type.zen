@@ -402,11 +402,91 @@ variant_type* = (be :: CBackend, n: TyNamed, v: Variant, ctx: Ctx,
 // The type a bare variant name denotes, when it denotes one. Nothing
 // when the name is not a type in the declaring module, which is the
 // nominal reading and the common one.
+//
+// THE QUESTION IS ABOUT THE DECLARATION AND NOT ABOUT ONE VARIANT.
+// DESIGN.md: `A | B` is a union of existing types when EVERY variant
+// names a type in scope, and a nominal enum otherwise. Asked one
+// variant at a time it has a different answer, and the difference is
+// not academic — it is how `TokenKind` came to carry a trait. Sixty
+// variants, exactly one of which (`Eq`, the `=` token) collides with a
+// prelude export, and that one silently took `std.core.eq.Eq` as its
+// payload: three dead words in every token the compiler lexes, and a
+// union member no code path ever reads or writes.
+//
+// DESIGN.md names this collision and says it "must be reported, not
+// silently reinterpreted". Two modules had already worked around it by
+// renaming — `ast_node.zen` writes `Equal`, `sema_def.zen` suffixes
+// every variant with `Def` — which is the workaround DESIGN.md predicts
+// and not the rule. Deciding per declaration is the rule, and it costs
+// nothing: the scan stops at the first variant that is not a bare type
+// name, which for a nominal enum is normally the first variant.
 union_member_type = (be :: CBackend, n: TyNamed, v: Variant) Res<TyId> {
+    union_reading(be, n).match({
+        false => None,
+        true  => bare_variant_type(be, n, v),
+    })
+}
+
+bare_variant_type = (be :: CBackend, n: TyNamed, v: Variant) Res<TyId> {
     found ::= be.alloc.Vec<Def>();
     be.world().defs_of(n.decl.module.to_usize(), v.name.text, found).match({
         Err(_) => None,
         Ok(_)  => named_of(be, found),
+    })
+}
+
+union_reading = (be :: CBackend, n: TyNamed) bool {
+    decl_at(be.tree, n.decl).match({
+        None  => false,
+        Ok(d) => enum_union_reading(be, n, d),
+    })
+}
+
+enum_union_reading = (be :: CBackend, n: TyNamed, d: Decl) bool {
+    d.kind.match({
+        Enum(e) => no_nominal_variant(be, n, e),
+        _       => false,
+    })
+}
+
+// One variant that is not a bare type name settles it for the whole
+// declaration, so this looks for that counterexample and reports its
+// absence rather than asking every variant to agree.
+//
+// Fewer than two variants is nominal whatever the name means. A union
+// of one existing type is that type, and DESIGN.md spells that without
+// a bar — so `X = | Foo` was written with the bar on purpose.
+no_nominal_variant = (be :: CBackend, n: TyNamed, e: Enum) bool {
+    (e.variants.len < 2).match({
+        true  => false,
+        false => every_variant_named(be, n, e),
+    })
+}
+
+every_variant_named = (be :: CBackend, n: TyNamed, e: Enum) bool {
+    Range(0, e.variants.len).find((i) {
+        e.variants.get(i).match({
+            None  => true,
+            Ok(v) => !names_a_type(be, n, v),
+        })
+    }).match({ Ok(_) => false, None => true })
+}
+
+// A written payload means the variant is not a bare name, so the union
+// reading is already out — `Shape = Circle(Circle) | Unit` is nominal
+// however many of its names are also types.
+names_a_type = (be :: CBackend, n: TyNamed, v: Variant) bool {
+    v.payload.match({
+        Ok(_) => false,
+        None  => defs_named(be, n, v.name.text),
+    })
+}
+
+defs_named = (be :: CBackend, n: TyNamed, name: str) bool {
+    found ::= be.alloc.Vec<Def>();
+    be.world().defs_of(n.decl.module.to_usize(), name, found).match({
+        Err(_) => false,
+        Ok(_)  => found.len > 0,
     })
 }
 
