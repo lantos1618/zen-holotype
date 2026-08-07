@@ -77,15 +77,6 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # mandatory rather than optional. Adding a line requires this sentence to be
 # written again for the new case, which is the point.
 OWED: dict[str, str] = {
-    "gen.gen_emit:Vec.at":
-        "`at(v: Vec<usize>, i)` returns the element; `Vec.at` from "
-        "`Vec.impl(Range<T>, ..)` returns `Res<T>`. Different return types "
-        "for one `v.at(i)`. Dead: no call site in the file, and it is not "
-        "exported, so there can be none elsewhere.",
-    "zen.zen_cli:Vec.at":
-        "the same helper written a second time, over `Vec<str>`, and also "
-        "dead. Two independent authors reaching for the same name is what "
-        "makes `at` worth reporting rather than excusing.",
     "sema.sema_join:Checker.is_infer":
         "a byte-identical copy of `Checker.is_infer`. sema_join.zen:94 reads "
         "`c.is_unknown(id) || is_infer(c, id)` -- one method call and one "
