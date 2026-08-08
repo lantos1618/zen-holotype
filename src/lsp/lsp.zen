@@ -19,22 +19,31 @@
 //   lsp_decl.zen       which declared name a position is inside
 //   lsp_uri.zen        a document URI, as a path the compiler can open
 //   lsp_hover.zen      the one query wired to sema
+//   lsp_colour.zen     semanticTokens: colour, out of the lexer alone
 //   lsp_diag.zen       publishDiagnostics: the build, grouped by file
 //   lsp_serve.zen      lifecycle, the overlay, and the dispatch table
 //   lsp_stdio.zen      the pipe: frames in on stdin, frames out on stdout
 //
 // ---------------------------------------------------------------------
 // WHAT IS BUILT: L1 whole — transport, lifecycle, sync and diagnostics
-// — plus ONE query.
+// — plus TWO queries.
 //
-// `initialize`, `shutdown`, `textDocument/hover`, Full document sync,
-// and `textDocument/publishDiagnostics` from all three phases, over
-// stdio — `zen lsp` with no arguments is what an editor launches, and
+// `initialize`, `shutdown`, `textDocument/hover`,
+// `textDocument/semanticTokens/full`, Full document sync, and
+// `textDocument/publishDiagnostics` from all three phases, over stdio —
+// `zen lsp` with no arguments is what an editor launches, and
 // `std.env.Stdin` is the capability that made it possible. Everything
 // else in `design_lsp.md` §2's table is refused by name with `-32601`,
 // which is worth more than a broad surface that guesses: a skeleton
 // answering one request correctly can be extended, and a server
 // inventing answers has to be un-trusted first.
+//
+// THE TWO QUERIES COST DIFFERENT THINGS, and that difference is the
+// most useful thing in this folder. Hover and diagnostics need a build
+// — a root, a disk, a `Checker`, about a second — and go quiet without
+// one. Colour needs a `scan` and nothing else, so it answers on an
+// unsaved buffer, in a workspace-less session, and in a file that does
+// not parse. That is why VS Code gets colour from a server at all.
 //
 // DIAGNOSTICS ARE ALL THREE PHASES OR THEY ARE NOTHING. An editor
 // showing type errors and silently not showing syntax errors teaches
@@ -43,11 +52,16 @@
 //
 // WHAT IS NOT BUILT, precisely, so nobody has to discover it:
 //
-//   - documentSymbol, definition, semanticTokens, references,
-//     completion, formatting, signatureHelp, rename — L2 to L4.
+//   - documentSymbol, definition, references, completion, formatting,
+//     signatureHelp, rename — L2 to L4.
+//   - semanticTokens in its SEMANTIC form, and its `range` and
+//     `full/delta` shapes. `lsp_colour.zen` answers the lexical, full
+//     one; telling a type from a function from a variable needs a memo
+//     on an `Ident` in `src/sema/`, which `design_lsp.md` §2 prices at
+//     L4 and which this folder may not invent.
 
 WirePos*, LineRun*, Step*, to_pos*, to_wire*, run_of*, step_at* = lsp.lsp_pos
-write_wire*, write_range* = lsp.lsp_pos
+write_wire*, write_range*, wire_at*, units_of* = lsp.lsp_pos
 JsonId*, Run*, Pair*, Json*, Jsons*, write_text*, whole_of* = lsp.lsp_json
 JsonFault*, Reader*, read*, push_utf8*, byte_of* = lsp.lsp_json_read
 Envelope*, FrameFault*, frame_at*, write_frame*, write_decimal* = lsp.lsp_frame
@@ -56,6 +70,8 @@ Tell*, TypeAt*, ValueAt*, told_at*, is_nothing* = lsp.lsp_decl
 Hover*, hover_at*, hover_in*, no_type* = lsp.lsp_hover
 FILE_SCHEME*, path_of*, uri_at* = lsp.lsp_uri
 Spot*, Diagnostics*, found_in*, publish*, ERROR* = lsp.lsp_diag
-Server*, serve*, CAPABILITIES* = lsp.lsp_serve
+Colour*, index_of*, name_of*, colour_of* = lsp.lsp_colour
+write_legend*, write_tokens* = lsp.lsp_colour
+Server*, serve*, write_capabilities*, SEMANTIC_TOKENS* = lsp.lsp_serve
 frame_byte*, frame_why* = lsp.lsp_serve
 Drain*, serve_stdio* = lsp.lsp_stdio

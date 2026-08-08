@@ -195,6 +195,40 @@ to_wire* = (text: str, p: Pos) WirePos {
     WirePos(line: line, character: units);
 }
 
+// A LEXER'S `line:col`, ON THE WIRE. The lexer's `Pos` carries a byte
+// offset and the AST's does not, so they are two types spelling one
+// pair of numbers — and `lsp_colour.zen` holds the lexer's. Converting
+// through this rather than building an AST `Pos` at the call site is
+// this file's rule kept from the outside: the caller names a line and a
+// column and receives wire coordinates, and never assembles either.
+wire_at* = (text: str, line: usize, col: usize) WirePos {
+    to_wire(text, Pos(line: line, col: col))
+}
+
+// HOW LONG A BYTE RANGE IS, IN THE WIRE'S UNITS. `semanticTokens`
+// carries a `length` beside every position and it is UTF-16 code units
+// exactly as the position is — so `end.offset - start.offset` is right
+// for ASCII and silently wrong for the string literal that finally has
+// an `é` in it. It is here and not with its one caller because it is
+// the same arithmetic `to_wire` walks, one step at a time, and a second
+// copy of that walk is a second place the surrogate rule can be got
+// wrong.
+//
+// It counts from `from` and STOPS AT OR AFTER `upto` rather than
+// exactly at it, because `step_at` answers one byte for a sequence it
+// could not decode and a range whose end lands mid-sequence would
+// otherwise never terminate.
+units_of* = (text: str, from: usize, upto: usize) usize {
+    at ::= from;
+    units ::= 0;
+    loop(() { at < upto }, (h) {
+        step = step_at(text, at);
+        at = at + step.bytes;
+        units = units + step.units;
+    });
+    units;
+}
+
 // The byte offset a 1-based column names, clamped into its line.
 //
 // Column 0 cannot happen either, and clamps to the start — so the two

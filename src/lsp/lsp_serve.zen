@@ -1,7 +1,7 @@
 // src/lsp/lsp_serve.zen
 // The server: lifecycle, a document overlay, and a dispatch table.
 //
-// It answers FOUR requests and handles THREE notifications, and it
+// It answers FIVE requests and handles THREE notifications, and it
 // refuses everything else BY NAME with `-32601` and the method spelled
 // back. That is deliberate, and it is `src/zen/zen_cli.zen`'s own rule
 // applied one level down — a command that silently does nothing is
@@ -11,7 +11,10 @@
 //
 //   initialize                 capabilities, and the gate opens
 //   shutdown                   `null`, and no more work is accepted
-//   textDocument/hover         lsp_hover.zen — the one real query
+//   textDocument/hover         lsp_hover.zen — the one sema-backed query
+//   textDocument/semanticTokens/full
+//                              lsp_colour.zen — the lexer's own tokens,
+//                              which is why it needs no build at all
 //   everything else            -32601, with the method named
 //   initialized / exit / $/cancelRequest   notifications, no reply
 //   didOpen / didChange / didClose         the overlay, Full sync only
@@ -57,6 +60,10 @@ Jsons, JsonId, write_text, written = lsp.lsp_json
 read, JsonFault = lsp.lsp_json_read
 FrameFault, frame_at, write_frame, write_decimal = lsp.lsp_frame
 Hover, hover_at, hover_in = lsp.lsp_hover
+// The colours, and the legend `initialize` has to advertise them under.
+// Both come from `lsp_colour.zen` so the index a token carries and the
+// list it indexes cannot be spelled in two files.
+write_legend, write_tokens = lsp.lsp_colour
 // The one message this server sends unprompted, and the policy that
 // decides when. `lsp_diag.zen` holds both; this file holds the trigger.
 Diagnostics = lsp.lsp_diag
@@ -161,7 +168,10 @@ Server* = {
                 true  => { self.stopping = true; result(tree, rid, "null", msg) },
                 false => method.eq("textDocument/hover").match({
                     true  => self.hovered(tree, req, rid, msg),
-                    false => self.unknown(tree, rid, method, msg),
+                    false => method.eq(SEMANTIC_TOKENS).match({
+                        true  => self.coloured(tree, req, rid, msg),
+                        false => self.unknown(tree, rid, method, msg),
+                    }),
                 }),
             }),
         })
@@ -185,7 +195,9 @@ Server* = {
         self.ready = true;
         self.workspace = path_of(string_at(tree, params_of(tree, req),
                                            "rootUri"));
-        result(tree, rid, CAPABILITIES, msg)
+        caps ::= self.a.String().try();
+        write_capabilities(caps).try();
+        result(tree, rid, caps.view(), msg)
     }
 
     // REFUSED BY NAME. The method is echoed into the message so a
@@ -319,6 +331,33 @@ Server* = {
             false => body.add_bytes("null").try(),
             true  => write_hover(h, body).try(),
         });
+        result(tree, rid, body.view(), msg)
+    }
+
+    // COLOUR, and it needs NOTHING the other two answers need. No
+    // workspace, no build, no `Checker` — `lsp_colour.zen` runs the
+    // lexer over the buffer and nothing else, so this is the one query
+    // here that is honest about a file with no root, a file that does
+    // not parse, and a file that is on no disk.
+    //
+    // A DOCUMENT THAT WAS NEVER OPENED IS `-32602`, the same refusal
+    // hover makes and for the same reason: the server has no bytes for
+    // that uri, an empty token list would read as "this file has no
+    // colour in it", and a client sending one has a bug worth naming.
+    coloured = (self :: @Self, tree: Jsons, req: JsonId, rid: JsonId,
+                msg :: String) Res<(), AllocError> {
+        uri = string_at(tree, param(tree, req, "textDocument"), "uri");
+        self.docs.get(uri).match({
+            None     => failed(tree, rid, INVALID_PARAMS,
+                               "no open document for that uri", msg),
+            Ok(text) => self.answer_colour(tree, rid, uri, text, msg),
+        })
+    }
+
+    answer_colour = (self :: @Self, tree: Jsons, rid: JsonId, uri: str,
+                     text: str, msg :: String) Res<(), AllocError> {
+        body ::= self.a.String().try();
+        write_tokens(self.a, uri, text, body).try();
         result(tree, rid, body.view(), msg)
     }
 
@@ -539,8 +578,33 @@ write_hover = (h: Hover, out :: String) Res<(), AllocError> {
     out.add_bytes("}}")
 }
 
+// WHAT THIS SERVER SAYS IT CAN DO, and it says only what it does.
+//
+// It is WRITTEN and no longer a constant, because the semantic-token
+// legend belongs to `lsp_colour.zen` — the array a `tokenType` indexes
+// and the index itself cannot be spelled in two files without one day
+// disagreeing, and the disagreement is silent: every colour in the file
+// shifts by one and nothing errors.
+//
 // Sync kind 1 is Full — see this file's header for why it is not 2.
-CAPABILITIES*: str = "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true},\"serverInfo\":{\"name\":\"zen\",\"version\":\"0\"}}"
+//
+// `full: true` AND NOTHING ELSE. The protocol lets a server advertise
+// `full: {delta: true}` and `range: true`, and a client believes what it
+// is told: advertise `range` and VS Code will send
+// `textDocument/semanticTokens/range`, which this server does not
+// answer, so it is refused with `-32601` and the file has NO COLOUR AT
+// ALL with nothing on screen to say why. A capability is a promise, and
+// the only safe promise is the one that is already kept.
+write_capabilities* = (out :: String) Res<(), AllocError> {
+    out.add_bytes("{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"semanticTokensProvider\":{\"legend\":").try();
+    write_legend(out).try();
+    out.add_bytes(",\"full\":true}},\"serverInfo\":{\"name\":\"zen\",\"version\":\"0\"}}")
+}
+
+// The one method `semanticTokensProvider` above promises. Spelled once,
+// beside the promise, so the route and the advertisement are read
+// together.
+SEMANTIC_TOKENS*: str = "textDocument/semanticTokens/full"
 
 // JSON-RPC's codes, as MAGNITUDES. Every one of them is negative on the
 // wire and the sign is written by the one function that emits them, so
