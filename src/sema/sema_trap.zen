@@ -256,16 +256,46 @@ last_digit = (v: i64) usize {
     })
 }
 
+// HOW FAR THE FOLDER WILL WALK before it gives up.
+//
+// An operator chain is left-nested and `parse_expr.zen` builds it with
+// a LOOP, so nothing bounds the length of `a + b + c + ..` — one line
+// of `tests/corpus/lex/long_single_line.zen` is ten thousand terms —
+// and folding it by recursion is a segmentation fault on a long enough
+// line. A crash is not a diagnostic (docs/TESTING.md).
+//
+// A BUDGET IS THE RIGHT SHAPE HERE, where elsewhere in this compiler a
+// bound has to REPORT. This is a prover: DESIGN.md asks for a compile
+// error where the compiler can PROVE the trap fires, and declining to
+// prove is already what this file does for every value that arrived
+// through a binding. Past the budget the answer is "not provably
+// anything" and the runtime check does the work — a diagnostic lost,
+// never a program mis-compiled, and never a program refused.
+//
+// 256 is past anything written by hand and inside the stack by orders;
+// only a machine-length chain reaches it.
+FOLD_DEPTH: usize = 256
+
 // What this expression is, when it is a literal integer the compiler can
 // see. Absence means "not provably anything", which is the answer for
 // every binding — on purpose.
 const_int* = (c: Checker, id: ExprId) Res<i64> {
-    node = c.tree.expr_at(id);
+    const_within(c, id, FOLD_DEPTH)
+}
+
+const_within = (c: Checker, id: ExprId, left: usize) Res<i64> {
+    (left == 0).match({
+        true  => None,
+        false => const_node(c, c.tree.expr_at(id), left - 1),
+    })
+}
+
+const_node = (c: Checker, node: Expr, left: usize) Res<i64> {
     node.kind.match({
         Literal(l) => const_literal(l),
-        Paren(p)   => const_int(c, p.inner),
-        Unary(u)   => const_unary(c, u),
-        Binary(b)  => const_binary(c, b),
+        Paren(p)   => const_within(c, p.inner, left),
+        Unary(u)   => const_unary(c, u, left),
+        Binary(b)  => const_binary(c, b, left),
         Access(a)  => const_prim_const(c, a),
         _          => None,
     })
@@ -278,29 +308,29 @@ const_literal = (l: Literal) Res<i64> {
     })
 }
 
-const_unary = (c: Checker, u: Unary) Res<i64> {
+const_unary = (c: Checker, u: Unary, left: usize) Res<i64> {
     u.op.match({
-        Neg => negate(c, u.operand),
+        Neg => negate(c, u.operand, left),
         _   => None,
     })
 }
 
-negate = (c: Checker, id: ExprId) Res<i64> {
-    const_int(c, id).match({
+negate = (c: Checker, id: ExprId, left: usize) Res<i64> {
+    const_within(c, id, left).match({
         None    => None,
         Ok(v)   => Ok(0 - v),
     })
 }
 
-const_binary = (c: Checker, b: Binary) Res<i64> {
-    const_int(c, b.lhs).match({
+const_binary = (c: Checker, b: Binary, left: usize) Res<i64> {
+    const_within(c, b.lhs, left).match({
         None    => None,
-        Ok(x)   => const_rhs(c, b, x),
+        Ok(x)   => const_rhs(c, b, x, left),
     })
 }
 
-const_rhs = (c: Checker, b: Binary, x: i64) Res<i64> {
-    const_int(c, b.rhs).match({
+const_rhs = (c: Checker, b: Binary, x: i64, left: usize) Res<i64> {
+    const_within(c, b.rhs, left).match({
         None    => None,
         Ok(y)   => fold(b.op, x, y),
     })

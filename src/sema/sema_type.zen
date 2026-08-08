@@ -58,6 +58,7 @@ variant_type = sema.sema_member
 call_type = sema.sema_call
 computed_member = sema.sema_member
 check_binary, const_count, check_index = sema.sema_trap
+seed_left_spine, spine_ahead = sema.sema_spine
 
 // -----------------------------------------------------------------
 // QUERY: the type a written type node denotes
@@ -611,8 +612,21 @@ written_or_value = (c :: Checker, k: Const, ctx: Ctx) Res<TyId, AllocError> {
 // `a == b` is `bool` whatever the operands are; `a + b` is the
 // operands' type. Both sides are typed either way, because a
 // diagnostic inside an unused operand is still a diagnostic.
+//
+// THE LEFT OPERAND IS SEEDED FIRST WHEN IT IS ITSELF AN OPERATOR, and
+// `sema_spine.zen` says why: an operator chain is left-nested and the
+// parser builds it with a loop, so `b.lhs` may be ten thousand levels
+// deep and recursing into it is a segmentation fault. The seed types
+// those levels bottom up, which is the order this function would have
+// reached them in anyway, so the `type_of` below is a memo hit and
+// every answer is unchanged. The guard keeps the walk's frame off the
+// stack for an ordinary operand, which is what most operands are.
 binary_type* = (c :: Checker, node: Expr, b: Binary, ctx: Ctx)
               Res<TyId, AllocError> {
+    c.spine_ahead(b.lhs).match({
+        false => Ok(()),
+        true  => c.seed_left_spine(b.lhs, ctx),
+    }).try();
     lhs = c.type_of(b.lhs, ctx).try();
     rhs = c.type_of(b.rhs, ctx).try();
     got = is_predicate(b.op).match({

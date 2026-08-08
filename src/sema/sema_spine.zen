@@ -1,0 +1,98 @@
+// src/sema/sema_spine.zen
+// An operator chain is a SPINE, not a tree.
+//
+// `a + b + c + ..` parses as `((a + b) + c) ..`, and `parse_expr.zen`
+// builds it with a loop — `binary_from` folds each operator onto the
+// left in place. So the parser's depth bound never counts a term, and
+// the length of a `+` chain is bounded by nothing at all: one line of
+// `tests/corpus/lex/long_single_line.zen` is ten thousand of them.
+//
+// `type_of` on the root then recurses once per term — compute_expr,
+// expr_kind, binary_type, type_of — and at four frames a term an
+// eight-megabyte stack runs out somewhere past a thousand. What the
+// user sees is a segmentation fault, and "a crash is not a diagnostic"
+// (docs/TESTING.md). The bootstrapper answers the same fact in
+// `gen_c.py`'s `ex_Binary`, which walks the spine with a loop for this
+// reason and says so.
+//
+// SO THE SPINE IS WALKED WITH A CURSOR AND TYPED FROM THE BOTTOM UP.
+// Every left operand is in `expr_memo` before the level above asks for
+// it, so the recursion that remains is one level deep however long the
+// line. Nothing else changes: `binary_type` types its left operand
+// first, so bottom-up IS the recursion's own order, and the types and
+// the diagnostics are the ones it produced.
+//
+// ONLY THE LEFT SPINE, AND ONLY THROUGH `Binary`. Every other nesting
+// — parentheses, unary, a call's arguments — is recursive descent in
+// the parser too, so `MAX_DEPTH` already bounds it, and a walk through
+// those would be machinery guarding a case that cannot arise. The
+// binary spine is the one construct that escapes that bound, because
+// it is the one the parser builds iteratively.
+
+Expr, ExprId, Binary = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+TyId = sema.sema_ty
+Checker, Ctx = sema.sema_check
+// the query this file exists to keep shallow; the cycle back to
+// `sema_type` is the shape of expression typing and not a smell, for
+// the reason that file's header gives
+type_of = sema.sema_type
+
+// Is there a spine below this operand at all?
+//
+// ASKED AT THE CALL SITE, and that is not a micro-optimisation. The
+// walk below holds a `Vec` and a cursor, so its frame is far fatter
+// than the recursion it replaces — and almost every operand in almost
+// every program has no spine under it. Left unguarded it would put that
+// frame under every `+` and every `==` in the tree, which lowers the
+// depth at which OTHER constructs run the stack out. Measured: nested
+// `.match` lost a third of its headroom to exactly that.
+spine_ahead* = (c: Checker, id: ExprId) bool {
+    below(c, id).match({ None => false, Ok(_) => true })
+}
+
+// Type every level of the left spine below `id`, deepest first, so that
+// the caller's own recursion finds each one already answered.
+//
+// The walk STOPS AT A NODE ALREADY IN THE MEMO, which is what keeps the
+// whole spine linear rather than quadratic: the level above has just
+// been typed, so its left operand — and everything below that — is
+// answered, and the next walk is one step long.
+seed_left_spine* = (c :: Checker, id: ExprId, ctx: Ctx)
+                  Res<(), AllocError> {
+    spine ::= c.alloc.Vec<ExprId>();
+    down ::= id;
+    going ::= true;
+    loop(() { going }, (h) {
+        going = below(c, down).match({
+            None     => false,
+            Ok(next) => { spine.add(down).try(); down = next; true },
+        });
+    });
+    // `take` from the end is a pop, and the spine was collected top
+    // down, so this hands the levels back innermost first.
+    loop(() { spine.len > 0 }, (h) {
+        spine.take(spine.len - 1).match({
+            None   => c.types.unknown(),
+            Ok(at) => c.type_of(at, ctx),
+        }).try();
+    });
+    Ok(());
+}
+
+// One step down: the left operand of a binary node nothing has typed
+// yet, and `None` at anything else.
+below = (c: Checker, id: ExprId) Res<ExprId> {
+    c.expr_memo.get(id).match({
+        Ok(_) => None,
+        None  => left_of(c.tree.expr_at(id)),
+    })
+}
+
+left_of = (node: Expr) Res<ExprId> {
+    node.kind.match({
+        Binary(b) => Ok(b.lhs),
+        _         => None,
+    })
+}
