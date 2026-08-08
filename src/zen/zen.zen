@@ -77,9 +77,24 @@ not_yet = (name: str) Res<i32, AllocError> {
 // NO FLAGS, AND NO `--entry`. `design_lsp.md` §4 says why: a root is
 // discovered from `initialize`'s `rootUri`, and the driver already
 // probes when no entry is named.
+//
+// `--stdio` IS THE ONE WORD THIS ACCEPTS AND IGNORES, and it is not a
+// flag this compiler invented — it is what a client appends. VS Code's
+// `vscode-languageclient` adds it to an executable server's argv
+// whenever `TransportKind.stdio` is named, and other clients do the
+// same, because the convention predates servers that speak only one
+// transport. Without this the word arrives as `from`, the FILE form
+// finds no second name, and the server prints usage and exits 2 —
+// which from inside an editor reads as `write EPIPE` and "the server
+// crashed", naming nothing that is wrong.
+//
+// It was found the first time anyone ran this from a real editor,
+// which is the whole lesson: every gate here drives the server
+// directly, so not one of them passes the argv a client actually
+// sends.
 lsp = (env: Env, a: Alloc) Res<i32, AllocError> {
-    from = arg(env, 2);
-    to = arg(env, 3);
+    from = file_arg(env, 2);
+    to = file_arg(env, 3);
     from.is_empty().match({
         true  => serve_stdio(env, a),
         false => paired(env, a, from, to),
@@ -98,6 +113,15 @@ paired = (env: Env, a: Alloc, from: str, to: str) Res<i32, AllocError> {
 
 arg = (env: Env, i: usize) str {
     env.argv.get(i).match({ Ok(s) => s, None => "" })
+}
+
+// A transport word is not a filename. `""` is what "there is no file
+// here" already means to the caller above, so a client's `--stdio`
+// answers the same as an absent argument and the stdio path is reached
+// by the same branch rather than by a second one.
+file_arg = (env: Env, i: usize) str {
+    word = arg(env, i);
+    word.eq("--stdio").match({ true => "", false => word })
 }
 
 lsp_usage = () Res<i32, AllocError> {
