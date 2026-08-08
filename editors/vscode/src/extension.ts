@@ -52,13 +52,22 @@ const STARTUP_FAILED =
   "     evidence — set `zen.trace.server` to `verbose` and reload.\n" +
   "\n" +
   "Worth knowing before you file anything: this server answers hover and\n" +
-  "nothing else. It publishes NO diagnostics, so no squiggles is correct\n" +
-  "behaviour, not a failure. Hover answers on an identifier's use, on a\n" +
-  "parameter or local at its declaration, on a written type name, and on a\n" +
-  "function's name — where it hands the declaration back. It answers\n" +
-  "nothing on a struct's own name, a pattern binder, or anything whose type\n" +
-  "did not resolve, which today includes every IMPORTED name: the server\n" +
-  "checks the open file as a lone module. Everything else is `-32601`.";
+  "publishes diagnostics, and refuses everything else with `-32601`.\n" +
+  "\n" +
+  "Diagnostics are lex's, parse's and sema's, grouped per file — an error\n" +
+  "in a module you are not looking at is reported against that module —\n" +
+  "and a file you have fixed is cleared rather than left underlined. They\n" +
+  "need a workspace folder: with no `rootUri` the server publishes nothing\n" +
+  "at all, on purpose, because the only thing it could check without a\n" +
+  "root is the open file alone, and that calls every imported name\n" +
+  "undefined. A build runs per change, so squiggles lag your typing in a\n" +
+  "large module — about a second — and are instant in a small one.\n" +
+  "\n" +
+  "Hover answers on an identifier's use, on a parameter or local at its\n" +
+  "declaration, on a written type name, and on a function's name — where\n" +
+  "it hands the declaration back. With a workspace it answers imported\n" +
+  "names too. It answers nothing on a struct's own name, a pattern binder,\n" +
+  "or anything whose type did not resolve.";
 
 export async function activate(context: vscode.ExtensionContext) {
   output = vscode.window.createOutputChannel("Zen");

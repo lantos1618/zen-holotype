@@ -33,17 +33,35 @@ M.root = vim.env.ZEN_ROOT or vim.fn.expand("~/src/zen")
 -- because a corpus test cannot hold a pipe open, and both reach the same
 -- serve loop — but an editor wants this one.
 --
--- WHAT YOU GET, and it is worth knowing before you wonder why nothing is
--- happening: hover, and nothing else. There are no diagnostics — do not
--- wait for squiggles, the server never publishes any. Hover answers on an
--- identifier's USE, on a parameter or a local at its DECLARATION, on a
--- written type name, and on a function's name — where it gives the
--- declaration back, `add = (a: i32, b: i32) i32`. It answers nothing on a
--- struct's or enum's own name, on a pattern binder, or on anything whose
--- type did not resolve, which today includes every IMPORTED name: the
--- server checks the open file as a lone module. `null` there means "not
--- known", never "no type". Everything else comes back `-32601 no handler`.
--- Colour does not come from here at all; it comes from tree-sitter, below.
+-- WHAT YOU GET: hover, and diagnostics. Everything else comes back
+-- `-32601 no handler`, and colour does not come from here at all — it
+-- comes from tree-sitter, below.
+--
+-- DIAGNOSTICS ARE REAL NOW, so `:h vim.diagnostic` fills and squiggles
+-- appear. Opening or editing a `.zen` file builds the root behind it and
+-- publishes what the lexer, the parser and sema found. They are grouped
+-- PER FILE, so a mistake in a module you are not looking at underlines
+-- that module and not this buffer; a file you have fixed is cleared
+-- rather than left underlined; and a parse diagnostic's second position
+-- arrives as `relatedInformation`, which Neovim shows in the float.
+--
+-- They need a workspace. `root_markers` below is what supplies one, and
+-- a buffer opened outside any of them gets NO diagnostics on purpose:
+-- without a root the only thing the server could check is the file
+-- standing alone, which reports every imported name as undefined.
+--
+-- AND A BUILD RUNS PER CHANGE, so expect a lag while you type in a
+-- module that imports most of the compiler — about a second here — and
+-- none in a leaf one. There is no timed debounce and there cannot be one
+-- yet; see the note at the bottom of this file.
+--
+-- HOVER answers on an identifier's USE, on a parameter or a local at its
+-- DECLARATION, on a written type name, and on a function's name — where
+-- it gives the declaration back, `add = (a: i32, b: i32) i32`. With a
+-- workspace it answers IMPORTED names too, because the open buffer is
+-- checked as part of a build. It answers nothing on a struct's or enum's
+-- own name, on a pattern binder, or on anything whose type did not
+-- resolve; `null` there means "not known", never "no type".
 M.cmd = { M.root .. "/zen", "lsp" }
 
 -- ---------------------------------------------------------------------
@@ -131,6 +149,7 @@ return M
 --
 --   textDocument/hover     the type under the cursor, a declared name's
 --                          own type, or a function's signature. `K`.
+--   publishDiagnostics     lex, parse and sema, grouped per file
 --   initialize / shutdown  lifecycle
 --   didOpen/didChange/didClose   Full sync, no incremental
 --
@@ -139,9 +158,16 @@ return M
 -- surfaces that as "method not supported", which is the honest answer and
 -- not a bug in this config.
 --
--- There are no diagnostics yet either: sema's are values but lex's and
--- parse's are printed and dropped by the driver, and half a diagnostics
--- story is worse than none. So `:h vim.diagnostic` will stay empty.
+-- WHY DIAGNOSTICS LAG YOUR TYPING, and why there is no setting for it.
+-- The server marks a document changed and builds at the next point where
+-- it has answered everything that had arrived. That collapses a batch of
+-- changes into one build and means a superseded build never starts — but
+-- over a pipe the reader holds one message at a time, so in practice it
+-- is one whole-program build per keystroke. A timed debounce is what
+-- `docs/design_lsp.md` §5 asks for and it cannot be written yet: the
+-- server is single-threaded, its read blocks, and there is no clock, so
+-- it has no way to notice that you have stopped typing. What it does do
+-- is skip a change that carries bytes the buffer already held.
 --
 -- POSITION ENCODING. Neovim advertises `utf-8` among its
 -- `general.positionEncodings`, and this server does not claim it — it sends
