@@ -1,4 +1,12 @@
-I read all 5731 lines (the file is 5731, not 5651 — worth confirming you're on the same revision: HEAD is `1ca522f5`). Here is the map.
+# A map of `bootstrap/gen_c.py`
+
+`bootstrap/gen_c.py` is 6576 lines, and this document points into it by line number several hundred times.
+
+Those numbers are checked, not asserted: **`make refmap`** reads every `symbol (line)` and `file:line` claim below and verifies it against the file on disk, so a stale coordinate fails the build instead of misleading a reader. Run it after any edit to either file.
+
+What the gate cannot check is whether a paragraph *describes* the right thing — only that its coordinates resolve. `scripts/refmap.py` says so in its own header, and lists what else it leaves to a human.
+
+This page used to open by naming the revision it was written against. That is deliberately gone: the name was wrong, in a way no reader could have caught — at the commit it cited, the file was a different size than the same sentence claimed. A document that has to be trusted about which code it describes is a document that cannot be checked, so the gate reads the code instead.
 
 ---
 

@@ -99,6 +99,9 @@ DEFLINE = re.compile(r"^\s*(?:def|class)\s+(\w+)|^\s*(\w+)\s*=\s*\S")
 # Numbers a unit word marks as quantities rather than coordinates.
 QUANTITY = re.compile(r"^\s*(?:bytes?|lines?|-bit|%|,\s*\d+\s*\))|^(?:st|nd|rd|th)\b")
 NOT_A_REF = re.compile(r"(?:code|exit|byte|version|abi|column|col)\s+$", re.I)
+# The document states how long gen_c.py is. The old header stated it
+# wrong, and that error is why this file exists, so the fact is gated.
+SIZE = re.compile(r"gen_c\.py`? is ([\d,]{3,6}) lines")
 
 
 def definitions(src: str) -> dict[str, list[tuple[int, int]]]:
@@ -178,9 +181,16 @@ def resolve(name: str) -> Path | None:
 
 
 def symbol_in(span: str) -> str | None:
-    """The identifier a code span names, or None if it names no one thing."""
-    text = span.strip("`").split("=")[0].strip().lstrip(".")
-    text = re.sub(r"\(.*$", "", text).strip()
+    """The identifier a code span names, or None if it names no one thing.
+
+    `GEN="zg_"` names GEN, but `s == <literal text>` names nothing -- it is
+    an expression that happens to start with a variable, and taking `s`
+    from it anchors a whole paragraph on a one-letter local.
+    """
+    text = span.strip("`")
+    if "==" in text:
+        return None
+    text = re.sub(r"\(.*$", "", text.split("=")[0].strip().lstrip(".")).strip()
     return text if IDENT.match(text) else None
 
 
@@ -285,7 +295,19 @@ def main() -> int:
     whole = norm(" ".join(lines))
     occurs: dict[str, list[int]] = {}
 
-    claims, unread = harvest(DOC.read_text(), set(defs))
+    text = DOC.read_text()
+    claims, unread = harvest(text, set(defs))
+
+    stated = SIZE.search(text)
+    if not stated:
+        print("refmap: the document no longer states how long gen_c.py is."
+              " That sentence is gated on purpose -- the original header got"
+              " it wrong, and putting it back is how it stays right.")
+        return 1
+    if int(stated.group(1).replace(",", "")) != len(lines):
+        print(f"docs/GENC_REFERENCE_MAP.md: says gen_c.py is"
+              f" {stated.group(1)} lines; it is {len(lines)}")
+        return 1
     if not claims:
         print("refmap: parsed no claims out of docs/GENC_REFERENCE_MAP.md."
               " The document changed shape and this check just stopped"
