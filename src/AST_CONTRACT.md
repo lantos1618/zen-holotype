@@ -232,8 +232,9 @@ a default. `Const` therefore **never** appears in an impl body or a record
 literal, where `name: value` supplies a field and is a `Field` with no type.
 
 The parser applies R4 in one place so nothing downstream has to remember it.
-The residue, recorded because it is a hole and not a decision: **an immutable
-field with a default is unspellable.**
+The residue — **an immutable field with a default is unspellable** — is now a
+decision and not a hole: `DESIGN.md`'s "Declarations" section states R4 and
+prices it, which is what this file asked for.
 
 ### Types — `Type { kind, span, leading, trailing }`
 
@@ -469,7 +470,9 @@ place the decision is written down.
    versus `::`, which `DESIGN.md` uses for mutability and not for storage. The
    grammar's R4 makes `:` + a value mean *constant*, at the cost of leaving an
    immutable field with a default **unspellable**. That cost belongs in
-   `DESIGN.md`, priced, not in a grammar comment.
+   `DESIGN.md`, priced, not in a grammar comment. **Settled:** `DESIGN.md`'s
+   "Declarations" section now states R4 and its price, and "Constants on a type"
+   says the spelling decides everywhere. The AST is unchanged.
 
 3. **Does a node's span include its leading trivia?** `POSITIONS.md` says no and
    `Module` is the exception. Both are followed here; `DESIGN.md` says neither.

@@ -1,0 +1,104 @@
+// A FIELD'S DEFAULT, ACTUALLY APPLIED — and a struct-body constant read
+// off an instance.
+//
+// Two rules meet on one spelling, and the grammar's R4 separates them:
+// inside a struct body `name :: T = value` is STORAGE WITH A DEFAULT,
+// optional at construction, and `NAME: T = value` is a CONSTANT — one
+// value per type, read as `Type.NAME`. Both were broken, in different
+// ways, and neither could be seen from inside this compiler:
+//
+//   1. THE DEFAULT WAS DROPPED. Both back ends built the initialiser
+//      list out of the ARGUMENTS and never out of the declaration, so a
+//      field nobody supplied was left to C's `{0}` zeroing. Every
+//      default in the tree is a zero -- `Vec`'s `len :: usize = 0`,
+//      DESIGN.md's own `verbose :: bool = false` -- so the whole tree
+//      agreed with the bug and no differential could see it. The
+//      defaults below are therefore NON-ZERO, and `0`/`false` appear
+//      only as values an EXPLICIT argument overrode a non-zero default
+//      with: a test whose defaults are zeros cannot tell the feature
+//      from its absence.
+//
+//   2. A CONSTANT READ OFF AN INSTANCE EMITTED A FIELD THAT DOES NOT
+//      EXIST. `Type.NAME` folded, but `value.NAME` fell through to the
+//      ordinary field path and emitted `.zu_m4NAME` on a struct with no
+//      such member -- so the failure was `cc`'s, not Zen's. A constant
+//      is one value per type and there is nothing to read it out of, so
+//      it folds no matter which side of the dot the type arrives on.
+//      The bootstrapper already folded it; only the self-hosted backend
+//      did not, which is why this test asserts the OUTPUT.
+
+// Storage, with defaults. `::` is the mutability marker doing its
+// ordinary job; the default is only about construction.
+Mut = {
+    n*:: usize = 9,
+    flag*:: bool = true,
+    tag*:: str = "nine",
+}
+
+// A default that is a CONSTRUCTION and not a literal. `parser.zen`
+// writes exactly this shape (`prev_end :: Pos = Pos(line: 1, col: 1)`)
+// and it is the case a literal-only fold would miss.
+Pos = { line*: usize, col*: usize }
+
+Cursor = {
+    at*:: Pos = Pos(line: 1, col: 1),
+    depth*:: usize = 3,
+}
+
+// Defaults and a required field side by side, in both orders: the
+// initialiser list is written in DECLARATION order, and a default
+// filling a hole in the middle is the case an append-at-the-end fix
+// would get wrong.
+Mixed = {
+    lead*:: usize = 11,
+    required*: usize,
+    trail*:: bool = true,
+}
+
+// A struct-body constant beside real storage, so the constant must be
+// left out of the layout while the field beside it stays in.
+Limits = {
+    WIDTH*: usize = 64,
+    NAME*: str = "limits",
+    seen*:: usize = 5,
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    // no arguments at all: every default stands, and this is the path
+    // that used to emit a bare `{0}`.
+    a = Mut();
+    println("mut {} {} {}", a.n, a.flag, a.tag);
+
+    // some supplied, some defaulted -- and the supplied ones are the
+    // ZEROES, so this fails just as loudly if defaults are ignored as
+    // if arguments are.
+    b = Mut(n: 0);
+    println("mut-n {} {} {}", b.n, b.flag, b.tag);
+    c = Mut(flag: false, tag: "given");
+    println("mut-ft {} {} {}", c.n, c.flag, c.tag);
+
+    // a default is not a constant: the storage is writable after
+    // construction like any other `::` field.
+    d ::= Mut();
+    d.n = 40;
+    println("mut-w {} {} {}", d.n, d.flag, d.tag);
+
+    e = Cursor();
+    println("cursor {} {} {}", e.at.line, e.at.col, e.depth);
+    g = Cursor(at: Pos(line: 8, col: 2));
+    println("cursor-at {} {} {}", g.at.line, g.at.col, g.depth);
+
+    h = Mixed(required: 22);
+    println("mixed {} {} {}", h.lead, h.required, h.trail);
+    i = Mixed(lead: 0, required: 22, trail: false);
+    println("mixed-all {} {} {}", i.lead, i.required, i.trail);
+
+    // the constant, read through its type and through a value of it.
+    // Both are the same one value; the second is the one that emitted C
+    // naming a member the struct does not declare.
+    j = Limits();
+    println("limits {} {}", Limits.WIDTH, Limits.NAME);
+    println("limits-v {} {} {}", j.WIDTH, j.NAME, j.seen);
+
+    Ok(0);
+}

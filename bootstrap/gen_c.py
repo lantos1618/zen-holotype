@@ -706,8 +706,66 @@ def _bound_names(node):
     return tuple(out)
 
 
+def _is_pure_default(node):
+    """Can this expression be written twice without anyone being able to tell?
+
+    A default is emitted at EVERY construction that omitted the field, so it
+    must name no function and read no frame.  A literal can; so can an
+    operator over things that can, and so can a construction of them -- a
+    compound literal names no function and reads nothing.  A call to anything
+    else cannot, and neither can a bare name, because a name is a local whose
+    frame the use site is not in.
+
+    `src/gen/gen_c/gen_c_const.zen:is_pure_value` is the same predicate on the
+    other side, and it is the same gate a constant read is held to.
+    """
+    k = kind(node)
+    if k in ("Literal", "Unit"):
+        return True
+    if k == "Unary":
+        return _is_pure_default(f(node, "operand"))
+    if k == "Binary":
+        return _is_pure_default(f(node, "lhs")) and _is_pure_default(f(node, "rhs"))
+    if k == "Member":
+        return True  # `Shape.Unit`, `i32.MAX`: a value of a DECLARATION
+    if k == "Call":
+        return all(
+            _is_pure_default(f(a, "value") if kind(a) == "Arg" else a)
+            for a in f(node, "args", ()) or ()
+        )
+    return False
+
+
+def _field_defaults(node):
+    """`name :: T = value` -- the value a field takes when nobody supplies one.
+
+    DESIGN.md: "`= default` makes a field optional at construction."  A field
+    the call omitted is therefore not absent, it is the value its declaration
+    wrote -- and this walk is the only thing that knows that, because the
+    initialiser list is otherwise built out of the ARGUMENTS alone.  Nothing
+    in the tree could notice it was missing: every default in std is already
+    a zero, which is exactly what C's `{0}` was giving instead.
+
+    A default that is not a pure value is left to that zeroing.  `Vec`'s
+    `data :: Ptr<T> = null_ptr<T>()` is the only shape in the tree that
+    reaches it, and a null pointer is what zeroing gives.
+    """
+    out = {}
+    for member in f(node, "fields", ()) or ():
+        if _is_fn_field(member):
+            continue
+        value = f(member, "default")
+        if value is None:
+            value = f(member, "value")
+        if value is not None and _is_pure_default(value):
+            out[str(f(member, "name", ""))] = value
+    return out
+
+
 def _is_fn_field(node):
     """A struct member whose value is a function: DESIGN.md's method form.
+
+    There is one declaration form, so a method arrives three ways: as a
 
     There is one declaration form, so a method arrives three ways: as a
     `Function` in the struct's `fields`, as a `Field` whose type is a
@@ -3170,10 +3228,14 @@ class FnCtx:
         for i, value in enumerate(positional):
             if i < len(order):
                 values.setdefault(order[i], value)
+        defaults = _field_defaults(tdecl.node)
         inits = []
         for fname in order:
             if fname in values:
                 code = self.value(values[fname], fields.get(fname))
+                inits.append(".%s = %s" % (sym_member(fname), code))
+            elif fname in defaults:
+                code = self.value(defaults[fname], fields.get(fname))
                 inits.append(".%s = %s" % (sym_member(fname), code))
         cname = self.e.ctype(ty)
         if not inits:

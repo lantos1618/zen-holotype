@@ -40,6 +40,7 @@ open, constructed, recv_inst, intern_named = gen.gen_c.gen_c_mono
 unify, arg_type, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 ctype, is_unit, field_type, request_type = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
+is_pure_value = gen.gen_c.gen_c_const
 
 // -----------------------------------------------------------------
 // construction
@@ -220,15 +221,16 @@ layout_open = (be :: CBackend, s: Struct, d: Def, ty: TyId)
     Ok(got);
 }
 
+// A CONSTRUCTION WITH NO ARGUMENTS STILL HAS DEFAULTS TO WRITE, which
+// is why there is no shortcut here for the empty argument list. `{0}`
+// was that shortcut, and it is what made `Cursor()` come back zeroed
+// on a struct whose every field declared a value.
 write_literal = (be :: CBackend, c: Call, s: Struct, d: Def, ty: TyId,
                  ctx: Ctx, out :: String) Res<(), AllocError> {
     out.add_bytes("(").try();
     ctype(be, ty, out).try();
     out.add_bytes(")").try();
-    (c.args.len == 0).match({
-        true  => out.add_bytes("{0}"),
-        false => write_initialisers(be, c, s, d, ty, ctx, out),
-    }).try();
+    write_initialisers(be, c, s, d, ty, ctx, out).try();
     Ok(());
 }
 
@@ -250,12 +252,127 @@ write_initialisers = (be :: CBackend, c: Call, s: Struct, d: Def,
         seen = seen + supplied_initialiser(be, a, i, s, ty, dinst, dctx,
                                            ctx, seen, out).try();
     });
+    seen = seen + defaulted_initialisers(be, c, s, ty, dinst, dctx, seen,
+                                         out).try();
     // Every argument named a field the struct does not declare, so none
     // was written — and an EMPTY brace list is a GNU extension, not C99.
     (seen == 0).then(() { out.add_bytes("0").try() });
     out.add_bytes(" }").try();
     leave_tparams(be, mark).try();
     Ok(());
+}
+
+// -----------------------------------------------------------------
+// defaults
+//
+// "`= default` makes a field optional at construction" — so a field
+// the call omitted is not absent, it is the value its DECLARATION
+// wrote. Both back ends built the list out of the arguments alone and
+// left the rest to C's `{0}`, which is a different value in every case
+// but the one the whole tree happens to use: every default in std is
+// already a zero, so nothing here could notice.
+//
+// WRITTEN IN THE DECLARING MODULE'S CONTEXT and not the call's. The
+// expression came from the struct's own body and names what that
+// module can see; read at the call site a default like `Pos(line: 1,
+// col: 1)` resolves against whatever `Pos` the caller imported, or
+// against nothing at all.
+//
+// APPENDED AFTER THE ARGUMENTS rather than merged into declaration
+// order. C99 6.7.8 lets designators come in any order, and appending
+// is what keeps every construction in the language that has no
+// defaults emitting the byte-identical C it emitted before.
+// -----------------------------------------------------------------
+
+defaulted_initialisers = (be :: CBackend, c: Call, s: Struct, ty: TyId,
+                          dinst: Inst, dctx: Ctx, seen: usize,
+                          out :: String) Res<usize, AllocError> {
+    wrote ::= 0;
+    s.members.loop((h, m) {
+        wrote = wrote + default_initialiser(be, c, m, s, ty, dinst, dctx,
+                                            seen + wrote, out).try();
+    });
+    Ok(wrote);
+}
+
+default_initialiser = (be :: CBackend, c: Call, m: Member, s: Struct,
+                       ty: TyId, dinst: Inst, dctx: Ctx, seen: usize,
+                       out :: String) Res<usize, AllocError> {
+    name = member_text(m);
+    (is_storage(be, m, dinst, dctx) && !supplies(be, c, s, name, dinst, dctx))
+        .match({
+            false => Ok(0),
+            true  => member_default(be, m, name, s, ty, dinst, dctx, seen, out),
+        })
+}
+
+// The value a member declares, when it declares one that can be
+// written here. `is_pure_value` is the same gate a constant read is
+// held to, and for the same reason: this expression is emitted at
+// every construction site, so it must name no function and read no
+// frame. A default that is not one is left to the zeroing it already
+// got — `Vec`'s `data :: Ptr<T> = null_ptr<T>()` is the only shape in
+// the tree that reaches it, and a null pointer is what zeroing gives.
+member_default = (be :: CBackend, m: Member, name: str, s: Struct,
+                  ty: TyId, dinst: Inst, dctx: Ctx, seen: usize,
+                  out :: String) Res<usize, AllocError> {
+    declared_value(m).match({
+        None  => Ok(0),
+        Ok(v) => pure_default(be, v, name, s, ty, dinst, dctx, seen, out),
+    })
+}
+
+pure_default = (be :: CBackend, v: ExprId, name: str, s: Struct, ty: TyId,
+                dinst: Inst, dctx: Ctx, seen: usize, out :: String)
+               Res<usize, AllocError> {
+    is_pure_value(be, v, dctx).match({
+        false => Ok(0),
+        true  => write_default(be, v, name, s, ty, dinst, dctx, seen, out),
+    })
+}
+
+write_default = (be :: CBackend, v: ExprId, name: str, s: Struct, ty: TyId,
+                 dinst: Inst, dctx: Ctx, seen: usize, out :: String)
+                Res<usize, AllocError> {
+    (seen > 0).then(() { out.add_bytes(", ").try() });
+    out.add_bytes(".").try();
+    designator(be, ty, name, out).try();
+    out.add_bytes(" = ").try();
+    expr(be, v, dctx, storage_type(be, s, name, dinst, dctx), out).try();
+    Ok(1);
+}
+
+// A member's written value, whichever of the two member forms holds
+// it. `Const` cannot reach here — a constant is not storage — but the
+// two nodes carry the same field and asking both is what keeps this
+// from depending on that.
+declared_value = (m: Member) Res<ExprId> {
+    m.kind.match({
+        Field(f) => f.value,
+        Const(k) => k.value,
+        _        => None,
+    })
+}
+
+// Did the call supply this field? Under the SAME name rule the
+// argument walk used: a named argument names it, and a positional one
+// takes the i-th storage member. Asked here rather than remembered
+// from the walk because a `Vec<str>` cannot be read back.
+supplies = (be :: CBackend, c: Call, s: Struct, name: str, dinst: Inst,
+            dctx: Ctx) bool {
+    got ::= false;
+    c.args.loop((h, i, a) {
+        arg_supplies(be, a, i, s, name, dinst, dctx).then(() { got = true; });
+    });
+    got
+}
+
+arg_supplies = (be :: CBackend, a: Arg, i: usize, s: Struct, name: str,
+                dinst: Inst, dctx: Ctx) bool {
+    field_name(be, a, i, s, dinst, dctx).match({
+        Err(_) => false,
+        Ok(n)  => n.eq(name),
+    })
 }
 
 // AN ARGUMENT THAT NAMES NO STORAGE MEMBER SUPPLIES NOTHING, and writing
