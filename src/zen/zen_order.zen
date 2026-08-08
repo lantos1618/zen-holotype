@@ -1,0 +1,64 @@
+// src/zen/zen_order.zen
+// What order the module walk reaches modules in.
+//
+// A LEAF, AND ARITHMETIC ON AN INDEX. It imports `std.text` for `str.eq`
+// and nothing else — no `Build`, no `Job`, no capability — which is what
+// lets both the driver that walks (`zen_build.zen`) and the driver that
+// repeats (`zen_run.zen`) stand on it without either standing on the
+// other. `zen_path.zen` is the same shape for the same reason: "what a
+// module NAME is is a fact about a path".
+//
+// IT EXISTS FOR ONE GATE, written down here rather than discovered
+// later. `tests/determinism/check.sh` check 3 has nothing to vary
+// without it: the self-hosted CLI is handed a ROOT and computes the
+// module order itself, so the axis that used to shuffle a list of file
+// arguments had nowhere to attach. `tests/determinism/README.md`, "the
+// shuffle axis", carries the argument for moving it in here rather than
+// retiring it.
+
+str = std.text
+
+// THE `i`th MODULE TO REACH, out of `n` — the whole of `--permute`.
+// Three fixed permutations and an identity, which are the three
+// `check.sh` used to apply to a file list before the CLI stopped taking
+// one. Fixed, never random: a gate that fails once and passes on rerun
+// teaches you to press rerun.
+//
+// WHAT IT GUARDS: `gen_c_decl.zen`'s header claims "EVERY LIST IS
+// SORTED BY MANGLED NAME ... which is what makes the output independent
+// of the order the modules were discovered in, which is the property
+// the determinism gate and the fixpoint oracle both stand on". That was
+// a claim no gate read. Reordering the walk changes every module index,
+// and with it the insertion order into every table sema and gen build.
+//
+// THE ENTRY IS NEVER PERMUTED and cannot be: the walk queues it before
+// this is reached, `emit_program(be, 0, out)` compiles module 0, and
+// `root_declares_main` asks module 0 for `main`. Only the modules an
+// import reaches move.
+//
+// It cannot change WHICH modules load either — the reachable set is a
+// closure, and a closure does not depend on the order it is computed
+// in. Only `n > 0` reaches here, because the caller loops `n` times.
+walk_index* = (mode: str, n: usize, i: usize) usize {
+    mode.eq("reverse").match({
+        true  => n - 1 - i,
+        false => mode.eq("rotate").match({
+            true  => (i + 1) % n,
+            false => mode.eq("interleave").match({
+                true  => interleaved(n, i),
+                false => i,
+            }),
+        }),
+    })
+}
+
+// Evens then odds: the odd indices first, then the even ones. It is the
+// one of the three that a descending sort does not also produce, which
+// is why three permutations are checked and not one.
+interleaved = (n: usize, i: usize) usize {
+    half = n / 2;
+    (i < half).match({
+        true  => i * 2 + 1,
+        false => (i - half) * 2,
+    })
+}

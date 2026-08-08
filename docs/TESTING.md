@@ -164,11 +164,15 @@ The fixpoint oracle is worthless if `gen_c` is nondeterministic, and nondetermin
 
 - compile the same input twice in one process — byte-identical
 - compile in two processes — byte-identical
-- compile with a shuffled input file order — byte-identical
+- compile with a permuted module walk — byte-identical
 
-**`tests/determinism/check.sh` cannot run against the self-hosted compiler.** It invokes `zen build --emit-c <file list>`, the bootstrapper's spelling; `zen build <root> --emit-c -o <file>` is the whole self-hosted CLI, because a build *is* a root and finding the entry inside it is the driver's job. So the strongest property in the plan has been verified by hand on every stage-1 run instead of by its own script. The same mistake was in `tests/run.py`, where it read as 33 compiler bugs and was one harness bug.
+`make determinism` runs all three, plus two copies of the tree at different absolute paths and a static scan of the emitted C. It passes.
 
-Fixing it is not a signature change: one axis deliberately **shuffles the input order**, which has no meaning when the driver is handed a root and decides the order itself. Either that axis moves into the compiler (a flag that permutes the walk) or it is retired with a written reason — and retiring it silently would leave a script that reads as three axes while checking two.
+**It had never run.** `tests/determinism/check.sh` invoked `zen build --emit-c <file list>`, the bootstrapper's spelling; `zen build <root> --emit-c -o <file>` is the whole self-hosted CLI, because a build *is* a root and finding the entry inside it is the driver's job. So the gate exited 2 on its first compile and the strongest property in the plan was verified by hand on every stage-1 run instead of by its own script. The same mistake was in `tests/run.py`, where it read as 33 compiler bugs and was one harness bug.
+
+**The shuffle axis moved into the compiler** rather than being retired. `--permute reverse|rotate|interleave` reorders each module's import list and so the breadth-first walk; the entry stays module 0, because the backend compiles module 0 and the `main` check asks it. Retiring the axis was arguable — `std.env.Fs` has no directory listing on purpose, so `readdir` order cannot enter this compiler — but that argument covers only the filesystem-enumeration source. The walk order is still the order the *imports are written in*, so adding one import shifts every module index after it, and `gen_c_decl.zen`'s header already claims the output is independent of that. It was a claim no gate read. `tests/determinism/README.md`, "the shuffle axis", is the full argument.
+
+**Check 3 proves its instrument before it trusts it:** a compiler that accepted `--permute` and ignored it would pass by comparing a file with itself, so the script first breaks four modules and requires the diagnostic order — which is the walk order — to move. If it does not, that is a setup error and exit 2, not a pass.
 
 The usual sources, all of which must be designed out rather than found later: iterating a hash map without sorting, embedding a pointer value or address in a name, embedding a timestamp or path, relying on filesystem enumeration order, and any use of a random or time-seeded value.
 

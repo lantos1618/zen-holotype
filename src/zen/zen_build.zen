@@ -89,37 +89,20 @@ Job = zen.zen_cli
 module_name, relative_to = zen.zen_path
 slash_for, last_of = zen.zen_path
 
+// `Unit` went with them for the same reason — what a module is CALLED
+// and where its bytes ARE is a fact about a path, and the two functions
+// above are what fill its fields.
+Unit* = zen.zen_path
+
+// What order the walk reaches modules in: arithmetic on an index.
+walk_index = zen.zen_order
+
 // WHERE A PROGRAM STARTS, spelled once. It is both a module name the
 // entry probe looks for and the declaration the root must own, and the
 // two must not be able to drift apart — a probe that finds `main.zen`
 // and a check that demands `start` would reject every program in the
 // language and blame the file it just found.
 ENTRY: str = "main"
-
-// A module of the program: what it is called, and where its bytes are.
-//
-// THE PATH IS THE IDENTITY AND THE NAME IS DERIVED FROM IT. Two
-// spellings reach one file — `std/core/core.zen` is `std.core` to a
-// module that writes the folder and `std.core.core` to one that writes
-// the file — so a `Unit` keyed on the import that found it makes one
-// file two modules with one set of declarations, and a program that
-// never writes the short spelling then has no prelude at all.
-// `docs/SEMA_BOOTSTRAP_FIXES.md` §13 is that bug with its reproducer.
-Unit* = {
-    name*: str,     // the dotted module name: `std.core.result`
-    path*: str,     // where the bytes are, to open them: as given
-    rel*:  str,     // the same file, relative to the compilation ROOT
-}
-
-// `rel` exists because `path` must not reach a Span. Every diagnostic
-// and every emitted trap position carries its file, so an absolute path
-// puts the checkout's location into the OUTPUT — and two checkouts of
-// one tree then emit different bytes, which silently voids the fixpoint
-// oracle the whole plan rests on. TESTING.md states the rule: "every
-// path the compiler emits [is relative to the root], which is what makes
-// the determinism check comparing two copies of a tree at different
-// absolute paths meaningful."
-
 
 // One build. It holds the authority the phases need and the tally of
 // what went wrong, because the exit code is that tally and both
@@ -131,6 +114,10 @@ Build* = {
 
     faults* :: usize = 0,
     units* :: usize = 0,
+
+    // WHICH ORDER THE WALK REACHES MODULES IN; empty is the order the
+    // imports are written in. `zen_order.zen` is the whole of it.
+    permute* :: str = "",
 
     // The entry's path relative to the root, kept for the one
     // diagnostic that is about the root itself rather than about
@@ -418,14 +405,23 @@ Build* = {
 
     // Every module this one names, queued. An import is the only
     // declaration that reaches outside the file — except for the one
-    // below it, which is why this match has two arms and not one.
+    // below it, which is why `import_decl` matches twice and not once.
+    //
+    // BY INDEX AND NOT BY `loop`, because this is the one place the
+    // walk's order is decided and `walk_index` is what decides it. Per
+    // module rather than over the finished worklist because discovery
+    // and parsing interleave: parsing `seen[i]` is what appends its
+    // imports, so no whole list ever exists to shuffle.
     imports_of = (self :: @Self, m: Module, seen :: Vec<Unit>)
                  Res<(), AllocError> {
-        m.decls.loop((h, d) {
-            d.kind.match({
-                Import(im) => self.enqueue(im.module, seen),
-                Alias(al)  => self.alias_of(al, seen),
-                _          => Ok(()),
+        Range(0, m.decls.len).loop((h, i) {
+            m.decls.get(walk_index(self.permute, m.decls.len, i)).match({
+                None  => Ok(()),
+                Ok(d) => d.kind.match({
+                    Import(im) => self.enqueue(im.module, seen),
+                    Alias(al)  => self.alias_of(al, seen),
+                    _          => Ok(()),
+                }),
             }).try();
         });
         Ok(());
@@ -773,9 +769,16 @@ Build* = (a: Alloc, env: Env, root: str) Build {
     Build(env: env, alloc: a, root: root, tree: a.Ast())
 }
 
-// THE ENTRY POINT of this file: one command line's worth of build.
-build* = (env: Env, a: Alloc, job: Job) Res<i32, AllocError> {
+// ONE BUILD, WHOLE — the only thing this file publishes besides the
+// type, because every method it calls is private here. HOW MANY of them
+// a command line asks for is `zen_run.zen`, one way round.
+//
+// A FRESH `Build` each time, which matters once `--repeat` exists: a
+// run that reused the driver would carry exactly the state that flag
+// exists to look for.
+run_once* = (env: Env, a: Alloc, job: Job) Res<i32, AllocError> {
     b ::= a.Build(env, job.root);
+    b.permute = job.debug.permute;
     entry = b.entry_of(job.entry).try();
     b.walk(entry).try();
     b.back_end(job).try();
