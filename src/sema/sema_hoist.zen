@@ -178,14 +178,9 @@ refuse_return = (c :: Checker, blk: Block, node: Expr, got: TyId,
 // one has nothing to lift, and `assignable` has already answered
 // whether it fits. So the two go to different places.
 //
-// THIS CHANGES NOTHING TODAY and is written down so the next reader
-// does not mistake it for a fix. `wrong_return` reports only a `()`
-// tail — the general "the tail fits the return type" rule is blocked on
-// `str` being both a prim and a struct, which the comment below sets
-// out. Until that lands, `Err("not an error at all")` still closes a
-// function declared `Res<i32, Error>`, putting a `str` in a slot typed
-// as an error set. What this does buy is that the routing is right, so
-// turning the general rule on is one edit rather than two.
+// THIS IS WHAT CATCHES `Err("not an error at all")` in a function
+// declared `Res<i32, Error>`: the tail is a `Res`, so nothing lifts, and
+// `assignable` has already found that a `str` is not that error set.
 res_return = (c :: Checker, blk: Block, node: Expr, got: TyId,
               want: TyId, r: TyRes) Res<(), AllocError> {
     c.types.at(got).match({
@@ -194,41 +189,50 @@ res_return = (c :: Checker, blk: Block, node: Expr, got: TyId,
     })
 }
 
-// NOTHING IS NOT SOMETHING, and that is the whole of this rule. The
-// print sugar's value is unit — `gen_c_print.zen`: "a print is a
-// statement sequence whose value is unit" — so `f = () i32 {
-// println("x") }` returns nothing where an `i32` was promised.
+// THE TAIL FITS THE RETURN TYPE. That is the whole rule, and it is
+// general: the print sugar's value is unit — `gen_c_print.zen`: "a print
+// is a statement sequence whose value is unit" — so `f = () i32 {
+// println("x") }` returns nothing where an `i32` was promised, and
+// `Err("not an error at all")` no longer closes a `Res<i32, Error>`.
 //
-// ONLY `()` ON THE LEFT, AND NOT EVERY MISMATCH. "The tail fits the
-// return type" is the rule this wants to be, and it cannot be turned on
-// yet: `str` is a prim in the type store AND a struct `std.text`
-// declares, so `str_at`'s own `str(data: .., len: ..)` is not
-// `assignable` to its declared `str` and the general form reddens every
-// program that stands on std with `expected str, found str`. That is
-// one bug in the store rather than three hundred in the corpus, and it
-// is not this rule's to fix — see `sema_type.zen:467`.
+// IT WAS `()`-ON-THE-LEFT ONLY, and could not be more, because `str` was
+// a prim in the type store AND a struct `std.text` declares: `str_at`'s
+// own `str(data: .., len: ..)` was not `assignable` to its declared
+// `str`, and the general form reddened every program that stands on std
+// with `expected str, found str`. `sema_ty.named` now answers with the
+// primitive for a declaration of a primitive's name, so there is one
+// `str` and the general rule costs nothing.
 //
 // TWO EXEMPTIONS, AND THEY ARE ONE RULE SEEN FROM EITHER SIDE: a value
 // nobody asked for is not a value that must fit.
 //
 // A function declared `()` discards whatever its body ends with — that
-// IS what `()` means at a return type. And a `;`-terminated last
-// statement that yields nothing was never the block's value: DESIGN.md
-// lets `0;` close a function, so the AST hands the last statement over
-// as the tail either way, and the `;` is the only thing left that says
-// `println("x");` is a print rather than what the function returns.
-// Written without it, it is the return. The bootstrapper draws the line
-// in the same place.
+// IS what `()` means at a return type.
+//
+// AND A `;`-TERMINATED LAST STATEMENT THAT YIELDS NOTHING, which is the
+// rule `corpus/sema/statement_tail_is_not_a_value` states in those very
+// words: "a last statement that yields NOTHING is a statement". The `;`
+// alone is not the exemption and cannot be — DESIGN.md's "`0;` closes a
+// `Res<i32, E>` function like `Ok(0);` does" says a `;`-terminated tail
+// IS the return, and `block_type` carries its type out for exactly that
+// reason. So `println("noisy");` closes an `i32` function because there
+// is no value there to be the return, and `Err(Error.IoError);` does not,
+// because there is one and it does not fit.
 wrong_return = (c :: Checker, blk: Block, node: Expr, got: TyId, want: TyId)
                Res<(), AllocError> {
-    returns_nothing(c, blk, got).match({
+    value_was_asked_for(c, blk, got, want).match({
         false => Ok(()),
         true  => c.coerce(node.span.file, node.span, got, want, ""),
     })
 }
 
-returns_nothing = (c: Checker, blk: Block, got: TyId) bool {
-    unit_ty(c, got) && blk.value.match({ Ok(_) => true, None => false })
+value_was_asked_for = (c: Checker, blk: Block, got: TyId, want: TyId) bool {
+    (unit_ty(c, want) == false)
+        && (written_value(blk) || (unit_ty(c, got) == false))
+}
+
+written_value = (blk: Block) bool {
+    blk.value.match({ Ok(_) => true, None => false })
 }
 
 unit_ty = (c: Checker, t: TyId) bool { c.prim_name(t).eq("()") }

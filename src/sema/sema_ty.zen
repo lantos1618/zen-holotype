@@ -73,6 +73,26 @@ TyId.impl(Hash, {
 // one would put a fictional row in `Ast.modules`.
 Prim* = { name*: str }
 
+// The scalars no module declares. A list rather than a lookup, because
+// it is closed by the language and a name that is almost one of these is
+// a name, not a near miss.
+//
+// HERE AND NOT IN `sema_check.zen`, because `named` below has to ask it:
+// which names are primitives is a fact about `Prim`, and the store is
+// the one place that can hold it without importing the layer above.
+is_prim* = (name: str) bool {
+    is_integer(name) || is_float(name)
+        || name.eq("bool") || name.eq("str") || name.eq("()")
+}
+
+is_integer* = (name: str) bool {
+    name.eq("i8") || name.eq("i16") || name.eq("i32") || name.eq("i64")
+        || name.eq("u8") || name.eq("u16") || name.eq("u32") || name.eq("u64")
+        || name.eq("usize")
+}
+
+is_float* = (name: str) bool { name.eq("f32") || name.eq("f64") }
+
 // A declared struct or enum, applied to its type arguments.
 // `Vec<i32>`, `Res<(), AllocError>`, `Circle`.
 //
@@ -285,8 +305,32 @@ Types* = {
     // — and it, not `name`, is the identity: "two modules may define the
     // same top-level name without colliding", so `Circle` alone would
     // make two types one.
+    //
+    // "A PRELUDE DECLARATION OF A PRIMITIVE'S NAME IS THAT PRIMITIVE."
+    // `std.text` declares `str` with a `data` and a `len`, `std.core.num`
+    // declares `i32` with `MIN` and `MAX` — and those declarations give
+    // the primitive the compiler already knows its members. They are not
+    // a second nominal type standing beside it. Minting one here is what
+    // DESIGN.md warns of: "it mints a `str` beside the `str` every
+    // literal has, and then every literal, every trap check and every
+    // standard library signature disagrees about which one they meant" —
+    // and it did, so `str_at`'s own `str(data: .., len: ..)` was not
+    // assignable to its declared `str` and both printed as `str`.
+    //
+    // The member table said this already (`sema_member.prim_members`)
+    // and the backend patched it back up (`gen_c_build.prim_named`).
+    // Saying it where the type is MINTED is what makes the two the same
+    // `TyId`, which is the only form of "same type" this store has.
     named* = (self :: @Self, decl: DeclId, qname: str, name: str, args: Vec<TyId>)
              Res<TyId, AllocError> {
+        is_prim(name).match({
+            true  => self.prim(name),
+            false => self.declared(decl, qname, name, args),
+        })
+    }
+
+    declared = (self :: @Self, decl: DeclId, qname: str, name: str,
+                args: Vec<TyId>) Res<TyId, AllocError> {
         key ::= self.alloc.String().try();
         key.add_bytes(qname).try();
         self.write_args(key, args).try();
