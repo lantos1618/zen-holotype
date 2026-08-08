@@ -62,7 +62,7 @@ So four decisions, all made in week one, all brutal to retrofit:
 
 **Ship the ownership *syntax* at stage 0** even though nothing checks it. `self :: @Self` and `consume` cost nothing to parse and ignore. Defer the syntax and every line of stdlib written before stage 3 has to be revised; defer only the enforcement and nothing is lost.
 
-**So read the Ownership section below as law, not as behaviour.** Stages 2 and 3 are not in the tree: there is no `src/sema/sema_own.zen`, so `consume`, `::` and `iso` are parsed and ignored and a use-after-consume compiles; and there is no formatter, so `zen fmt` prints which stage it arrives at and exits 2. Everything those sections state is what the checker must decide when it is written.
+**So read the Ownership section below as law, and check the tree before reading it as behaviour.** Stage 2 is not there at all: no formatter, so `zen fmt` prints which stage it arrives at and exits 2. Stage 3 is there in part — `sema_own.zen`, `sema_recv.zen` and `sema_scope.zen` enforce the receiver rule, `consume` and use-after-move, the copy of a `Drop` value, the partial move that reaches a drop, and two of `@scope`'s three ways out. Two things below are still law and not behaviour: a `@scope` captured by an ESCAPING CLOSURE is not caught, because nothing computes which closures escape; and `iso` at a behavior parameter is stage 5, along with actors. What is checked, refuses; what is not, still compiles.
 
 **Not needed, and traps if attempted early:** an optimizer (C is the backend), a second backend, a package manager, incremental codegen.
 
