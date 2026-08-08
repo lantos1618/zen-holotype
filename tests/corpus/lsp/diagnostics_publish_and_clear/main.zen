@@ -1,0 +1,182 @@
+// DIAGNOSTICS ARE PUBLISHED, GROUPED, AND TAKEN BACK.
+//
+// `design_lsp.md` §7's L1 gate, third bullet, driven end to end: a
+// session over framed JSON-RPC, a real build behind it, and the frames
+// the server sent unprompted read back and printed.
+//
+// It asserts FIVE things, and each of them is a different way for a
+// first language server to be wrong:
+//
+//   - AN ERROR IS PUBLISHED AT ALL. Batch one opens a buffer with an
+//     unclosed `(` in it and the parse diagnostic comes back as a
+//     `publishDiagnostics` notification. Until today the editor showed
+//     nothing, ever.
+//
+//   - IT IS GROUPED BY FILE. `app/shape.zen` on disk has a sema fault
+//     of its own, and it arrives in its OWN notification against its
+//     OWN uri. A build reports across the whole program; publishing
+//     another file's errors against the open document would be a wrong
+//     answer, and a wrong answer is worse than no answer.
+//
+//   - THE NOTE SURVIVES. The parse diagnostic carries a `Note` — a
+//     second place to look, WITH a span — and it comes out as
+//     `relatedInformation` rather than being flattened into the
+//     sentence, which would throw the span away.
+//
+//   - AN ERROR THAT IS FIXED IS TAKEN BACK. Batch two closes the paren
+//     and supplies a corrected `shape.zen` as a second buffer, and BOTH
+//     files receive an EMPTY list. The protocol has no "remove": an
+//     empty list is the only way to clear one, and a server that
+//     publishes only what it finds leaves errors the user has already
+//     fixed on screen forever. That is the classic first-implementation
+//     bug and it is worse than publishing nothing at all.
+//
+//     The two files clear by DIFFERENT ROUTES and that is deliberate:
+//     `app.zen` is the document that was edited, which is always
+//     published; `shape.zen` was not touched in batch two and is
+//     cleared only because the server remembered it was showing an
+//     error. Delete either half and one of the two lines below keeps a
+//     diagnostic.
+//
+//   - TWO CHANGES COST ONE BUILD. Batch two carries a `didOpen` and a
+//     `didChange` in one buffer and produces ONE round of
+//     notifications, not two. A server that built per message would
+//     print four frames there instead of two.
+//
+// AND BATCH THREE IS THE MITIGATION: the same bytes sent again produce
+// no build and no frames at all. It is the only thing this server can
+// do about the per-keystroke cost, and `lsp_diag.zen` says why a timed
+// debounce is not implementable here.
+//
+// THE FRAMING IS UNWRAPPED AND NOT PRINTED — a `Content-Length` header
+// carries a CR and a `.expected` may not (docs/TESTING.md). Every byte
+// of the envelope is `a_session_is_answered_frame_by_frame`'s subject.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// THE BUFFER, TORN. The `(` opened in the body never closes, which is
+// what a file being edited looks like most of the time — and it is the
+// one parse diagnostic that carries a NOTE, because `expect_close`
+// anchors on the OPENING delimiter and says separately where the parser
+// actually gave up. That second span is the `relatedInformation` below.
+BROKEN*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = (q.x + n;\n    s\n}\n"
+
+// The same buffer, with the `(` closed — which is to say, never
+// opened: the expression it wrapped needed no parentheses.
+FIXED*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = q.x + n;\n    s\n}\n"
+
+// `app/shape.zen` without its undefined name. Supplied as a second
+// BUFFER rather than written to disk, so that clearing a file the user
+// is not editing is what the last batch measures.
+SHAPE*: str = "Point* = {\n    x*: i32,\n    y*: i32,\n}\n"
+
+// `tests/run.py` stages a directory test into `<work>/src` and runs the
+// program from `<work>`, so these are the paths the server will open.
+URI*: str = "file://src/app/app.zen"
+SHAPE_URI*: str = "file://src/app/shape.zen"
+
+// THE WORKSPACE IS NOT THE COMPILATION ROOT. The work directory is the
+// workspace; the root the documents are compiled against is `src`,
+// computed by `zen_path.root_for` climbing out of `src/app`, which holds
+// its own `app.zen`.
+ROOT_URI*: str = "file://."
+
+INITIALIZED*: str = "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}"
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    s ::= a.Server(env);
+
+    first ::= a.String().try();
+    open_session(a, first).try();
+    write_frame(INITIALIZED, first).try();
+    open_doc(a, URI, BROKEN, first).try();
+    batch(s, a, "a buffer with an unclosed paren", first.view()).try();
+
+    // ONE BATCH, TWO CHANGES, and the second of them is the document
+    // that was already wrong.
+    second ::= a.String().try();
+    open_doc(a, SHAPE_URI, SHAPE, second).try();
+    change_doc(a, URI, FIXED, second).try();
+    batch(s, a, "both files corrected, in one batch", second.view()).try();
+
+    third ::= a.String().try();
+    change_doc(a, URI, FIXED, third).try();
+    batch(s, a, "the bytes the buffer already held", third.view()).try();
+
+    Ok(0);
+}
+
+// --- the requests ------------------------------------------------------
+
+// `rootUri` IS WHAT MAKES THIS A BUILD. Without it the server has no
+// workspace and publishes nothing at all, which is `lsp_diag.zen`'s
+// refusal rather than a gap: a document checked as a lone module reports
+// every imported name as undefined.
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":").try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+// A `didOpen`'s text is a field OF the `textDocument`; a `didChange`'s
+// is `contentChanges[0].text` beside it. Two functions and not one with
+// a flag, because that difference is the whole of what a client gets
+// wrong here — and this test got it wrong first, which the server read
+// as a document opened with no bytes at all.
+open_doc = (a: Alloc, uri: str, text: str, into :: String)
+           Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// FULL SYNC: `contentChanges[0].text` IS the whole new buffer, because
+// `initialize` advertised `textDocumentSync: 1`.
+change_doc = (a: Alloc, uri: str, text: str, into :: String)
+             Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes("},\"contentChanges\":[{\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}]}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+// One batch through the server, and every frame it produced.
+batch = (s :: Server, a: Alloc, what: str, input: str) Res<(), AllocError> {
+    out ::= a.String().try();
+    serve(s, input, out).try();
+    println("--- {}", what);
+    walk(out.view());
+    Ok(());
+}
+
+// Every frame's body, one per line. Nothing is filtered: the reply to
+// `initialize` is printed beside the notifications, because a count that
+// silently dropped a frame would be a count nothing could check.
+walk = (out: str) () {
+    from ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && from < out.len }, (h) {
+        frame_at(out, from).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { seen = seen + 1; println("    {}", fr.body); from = fr.next; },
+        });
+    });
+    (seen == 0).then(() { println("    (no frames)"); });
+}

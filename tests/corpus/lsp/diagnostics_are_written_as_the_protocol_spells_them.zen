@@ -1,0 +1,115 @@
+// THE NOTIFICATION ITSELF, handed values no build would produce.
+//
+// `diagnostics_publish_and_clear` beside this one drives a real session
+// and is the slow, end-to-end half. This is the fast half and it is the
+// one that can assert the SHAPE: `publish` is a pure function from a
+// list of spots to one frame, so a table of spots chosen to hit every
+// branch costs no compilation at all.
+//
+// `cli_reads_an_explicit_entry.zen` is the pattern — a pure function
+// handed inputs no real client would send, with its answers read back.
+//
+// WHAT EACH ROW IS FOR, because a table with no reason per row is a
+// table nobody can shorten safely:
+//
+//   - THE EMPTY LIST. A file with nothing wrong publishes `[]`, and
+//     that is not a degenerate case — it is the only way the protocol
+//     lets a server take an error BACK. A `publish` that skipped a file
+//     with no spots would leave fixed errors on screen forever.
+//   - TWO IN ONE FILE. The comma between them, and the fact that both
+//     arrive in one notification rather than in two that replace each
+//     other.
+//   - GROUPING. Three spots across two URIs published as two frames,
+//     each holding only its own. Publishing another file's errors
+//     against the open document is the wrong answer this pins.
+//   - THE NOTE. `relatedInformation` with its own range, which is where
+//     `parse_diag.Note` goes — see `lsp_diag.zen` on why it is not
+//     glued onto the message.
+//   - THE COLUMN CONVERSION. The second line of `DOC` holds an `é`, two
+//     bytes and one UTF-16 unit, so a Zen byte column of 7 is wire
+//     character 5 and not 6. A writer that passed the byte column
+//     through, or subtracted one and stopped, prints 6.
+//   - ESCAPING. A message holding a quote and a backslash goes through
+//     `write_text`, the same escaper the JSON writer uses.
+//
+// THE FRAMING IS UNWRAPPED AND NOT PRINTED. A `Content-Length` header
+// carries a CR and a `.expected` may not (docs/TESTING.md); every byte
+// of the envelope is `a_session_is_answered_frame_by_frame`'s subject.
+
+str, String = std.text
+Vec = std.collections
+Alloc, AllocError = std.mem
+Pos, Span = ast.ast_span
+Note = parse.parse_diag
+Spot, publish = lsp.lsp_diag
+frame_at = lsp.lsp_frame
+
+// Line 2 opens with a two-byte `é`, which is the whole reason the
+// conversion is visible in the output.
+DOC*: str = "add = (a: i32, b: i32) i32 { a + b }\n    énd = 1;\n"
+
+A*: str = "file:///a.zen"
+B*: str = "file:///b.zen"
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    out ::= a.String().try();
+
+    // A file with nothing wrong: the empty list, which is the clear.
+    publish(a, A, DOC, a.Vec<Spot>(), out).try();
+
+    // Two in one file, and the second one carries a note.
+    two ::= a.Vec<Spot>();
+    two.add(plain(A, 1, 30, 1, 31, "undefined name: no binding of this name is in scope `a`")).try();
+    two.add(noted(A, 1, 8, 1, 9, "expected `)`", 1, 7, "the parser gave up here")).try();
+    publish(a, A, DOC, two, out).try();
+
+    // Three spots over two files, published as two frames. `B`'s row is
+    // on line 2, whose first character is two bytes wide.
+    both ::= a.Vec<Spot>();
+    both.add(plain(A, 1, 1, 1, 4, "one in a")).try();
+    both.add(plain(B, 2, 7, 2, 9, "one in b, past a two-byte character")).try();
+    both.add(plain(A, 1, 30, 1, 31, "another in a, said with a \" and a \\")).try();
+    publish(a, A, DOC, both, out).try();
+    publish(a, B, DOC, both, out).try();
+
+    walk(out.view());
+    Ok(0);
+}
+
+// A spot at a Zen span: 1-based line, 1-based BYTE column, half-open.
+plain = (uri: str, line: usize, col: usize, end_line: usize, end_col: usize,
+         said: str) Spot {
+    Spot(uri: uri, message: said, span: at(uri, line, col, end_line, end_col),
+         note: None)
+}
+
+noted = (uri: str, line: usize, col: usize, end_line: usize, end_col: usize,
+         said: str, note_line: usize, note_col: usize, why: str) Spot {
+    Spot(uri: uri, message: said, span: at(uri, line, col, end_line, end_col),
+         note: Ok(Note(message: why,
+                       span: at(uri, note_line, note_col, note_line,
+                                note_col + 1))))
+}
+
+at = (file: str, line: usize, col: usize, end_line: usize, end_col: usize) Span {
+    Span(file: file, start: Pos(line: line, col: col),
+         end: Pos(line: end_line, col: end_col))
+}
+
+// Every frame's body, one per line, in the order they were written.
+walk = (out: str) () {
+    from ::= 0;
+    n ::= 0;
+    going ::= true;
+    loop(() { going && from < out.len }, (h) {
+        frame_at(out, from).match({
+            Err(_) => { going = false; },
+            Ok(fr) => {
+                n = n + 1;
+                println("{}: {}", n, fr.body);
+                from = fr.next;
+            },
+        });
+    });
+}
