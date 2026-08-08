@@ -1729,7 +1729,7 @@ class Sema:
                 tnames.add(nm)
                 mty = ANY
                 if trait is not None:
-                    tf = self._trait_field(trait, nm)
+                    tf = self._trait_field(trait, nm, e)
                     if tf is not None:
                         mty = self._field_type(tf, Ctx(trait.mod, Scope(), subst=inner.subst))
                 supplied.setdefault(nm, []).append((im, Member(
@@ -1782,11 +1782,29 @@ class Sema:
                 out[nm] = m
         return out
 
-    def _trait_field(self, trait, name):
-        for f in trait.fields:
-            if _name_of(_g(f, "name")) == name:
-                return f
-        return None
+    def _trait_field(self, trait, name, entry=None):
+        """The bound's declaration of `name` that `entry` supplies.
+
+        A bound may declare one name TWICE -- `Display` has `toString`
+        outlined and sealed -- so returning the first match types an impl's
+        member with the OTHER overload's signature. That is how a sink form
+        supplied by an impl came out declared `(self, a: Alloc)`, and the
+        call then resolved by declaration order rather than by parameter
+        type. Arity separates them when it can; when it cannot, prefer the
+        one the impl is actually overriding, which is the one WITHOUT a
+        body -- a sealed method is derived and is not what an impl supplies.
+        """
+        found = [f for f in trait.fields if _name_of(_g(f, "name")) == name]
+        if not found:
+            return None
+        if len(found) == 1 or entry is None:
+            return found[0]
+        want = len(_g(entry, "params", default=()) or ())
+        same = [f for f in found
+                if len(_g(f, "params", default=()) or ()) == want]
+        pool = same or found
+        open_ = [f for f in pool if not self._is_sealed_method(f)]
+        return (open_ or pool)[0]
 
     @staticmethod
     def _is_method_field(f):
