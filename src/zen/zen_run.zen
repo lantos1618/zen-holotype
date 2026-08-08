@@ -24,7 +24,8 @@ Alloc, AllocError = std.mem
 Range = std.core
 
 Job = zen.zen_cli
-run_once = zen.zen_build
+Build = zen.zen_build
+entry_of = zen.zen_path
 
 // THE ENTRY POINT: one command line's worth of build, run `--repeat N`
 // times. One run is the default and costs nothing, which is what keeps
@@ -39,6 +40,33 @@ build* = (env: Env, a: Alloc, job: Job) Res<i32, AllocError> {
         worst = max_code(worst, run_once(env, a, job_for(a, job, i).try()).try());
     });
     Ok(worst);
+}
+
+// ONE BUILD, WHOLE, as a command line asks for one: walk it, check it,
+// emit it, say how many diagnostics, exit.
+//
+// IT MOVED HERE FROM `zen_build.zen` because it is the same subject
+// this file already had — how many builds a command line is worth, and
+// what each one is handed — and because that file was at its 800-line
+// cap with the editor's overlay still to add. Nothing about it changed.
+//
+// A FRESH `Build` each time, which matters once `--repeat` exists: a
+// run that reused the driver would carry exactly the state that flag
+// exists to look for.
+//
+// `Build.whole` is the OTHER way through the same phases, for a reader
+// that wants the `Checker` rather than an exit code. The two are
+// deliberately not written in terms of each other: this one reports as
+// it goes and emits at the end, and folding two orders of printing into
+// one method to save four lines is how a build's stdout moves by a byte.
+run_once* = (env: Env, a: Alloc, job: Job) Res<i32, AllocError> {
+    b ::= a.Build(env, job.root);
+    b.walk_order(job.debug.permute);
+    entry = entry_of(env, a, job.root, job.entry).try();
+    b.walk(entry).try();
+    b.back_end(job).try();
+    b.tally();
+    Ok(b.code());
 }
 
 // A BUILD ALWAYS RUNS AT LEAST ONCE, whatever the job says. `repeat` is
