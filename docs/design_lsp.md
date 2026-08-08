@@ -60,17 +60,17 @@ Four stages, named **L1–L4** so they are not confused with `PLAN.md`'s 0–5. 
 
 | request | the query it needs | state today | stage |
 |---|---|---|---|
-| `initialize` / `initialized` | none — capability negotiation | **missing**: transport (§4) | L1 |
-| `shutdown` / `exit` | none | **missing**: transport (§4) | L1 |
-| `textDocument/didOpen` / `didChange` / `didClose` | an overlay the driver reads before the disk | **missing**, one field and one branch at `src/zen/zen_build.zen:328` (§5) | L1 |
+| `initialize` / `initialized` | none — capability negotiation | **built**: `src/lsp/lsp_serve.zen` answers with `textDocumentSync: 1` and `hoverProvider: true`. Every request before it is `-32002` | L1 |
+| `shutdown` / `exit` | none | **built** | L1 |
+| `textDocument/didOpen` / `didChange` / `didClose` | an overlay the driver reads before the disk | **built as an overlay in the server** (Full sync). The driver half of §5 is still missing, so hover sees the open document as a LONE MODULE — an imported name has no type | L1 |
 | `textDocument/publishDiagnostics` | diagnostics as values with spans | **half**: sema is structured — `diag_count`/`diag_at` at `src/sema/sema_check.zen:151,153`, `Diag` at `src/sema/sema_diag.zen:114`. Lex and parse diagnostics are **printed and discarded** by the driver (`src/zen/zen_build.zen:358`, `:383`) and never leave it | L1 |
 | `textDocument/documentSymbol` | a module's declarations in source order, each with a span and a name-span | **exists**, no new query: `module_count`/`module_at` at `src/ast/ast_arena.zen:147,149`; `Decl.span` and `Ident.span` are LSP's `range` and `selectionRange` exactly | L2 |
-| `textDocument/hover` | the type under the cursor, printed | **exists**: `expr_node_at` (`src/ast/ast_find.zen:126`) → `expr_memo` (`src/sema/sema_check.zen:96`) → `Types.name_of` (`src/sema/sema_ty.zen:422`) | L2 |
+| `textDocument/hover` | the type under the cursor, printed | **exists**: `expr_node_at` (`src/ast/ast_find.zen:126`) → `expr_memo` (`src/sema/sema_check.zen:96`) → `Types.name_of` (`src/sema/sema_ty.zen:422`). **Built** — `src/lsp/lsp_hover.zen`, no new sema | L2 |
 | `textDocument/definition` | the span a name was declared at | **mostly**: `defs_of` → `Def.span` (`src/sema/sema_def.zen:172`, `:63`) for a module-level name; `call_memo` (`src/sema/sema_check.zen:113`) for a call; `Found.span` (`src/sema/sema_member.zen:66`) for a member. **Missing for locals** — see below | L2 |
 | `textDocument/semanticTokens`, lexical | the token stream | **exists**: `scan` and `Token{kind, span}` (`src/lex/lex.zen:62`, `src/lex/lex_token.zen:97`) | L2 |
 | `textDocument/references` | for a `DeclId`, every node that resolved to it | **missing**. `call_memo` is that map, forward and for calls only. Nothing records a resolved bare *name*, and nothing inverts | L3 |
 | `textDocument/completion` | the candidate set at a position | **partly**: after a dot, `members_of` (`src/sema/sema_member.zen:396`) and `cases_of` (`src/sema/sema_case.zen:43`) and `travelled_cands` (`src/sema/sema.zen:100`) are the three halves of `DESIGN.md:394`. **Missing**: `defs_of` takes an exact `name: str` and has no prefix form; and the incomplete-parse problem below | L3 |
-| `textDocument/formatting` | `parse \|> print` | **missing entirely**. There is no `src/fmt/`, and `src/zen/zen_cli.zen:82` answers `fmt` with `Later`. Blocked on `PLAN.md` stage 2, not on this document | L3 |
+| `textDocument/formatting` | `parse \|> print` | **the engine exists, the request does not**. `PLAN.md` stage 2 landed: `src/fmt/` formats a file, `zen fmt --check` gates the tree, and a re-lex guard requires an identical token stream before any edit is kept. What is missing is only the LSP request wired to it — and note the formatter models the FILE, not yet the DECLARATION, so `rangeFormatting` is not merely unimplemented, it is not yet expressible | L3 |
 | `textDocument/semanticTokens`, semantic | per-`Ident` resolution: is this a type, a function, a parameter? | **missing**: `defs_of` per identifier in a file, and nothing memoizes on an `Ident` | L4 |
 | `textDocument/signatureHelp` | which overloads a call could mean, and which parameter the cursor is in | **missing**, and harder here than elsewhere: `DESIGN.md:477` resolves on declared parameter types *and arity*, so there is never one signature to show | L4 |
 | `textDocument/rename` | references, plus a safety argument | **missing**, and see the hazard below | L4 |
@@ -241,6 +241,34 @@ The fix is in the driver, is small, and is worth doing for its own sake: `Build`
 
 ## 6. Clients
 
+**Both clients now exist, in `editors/`.** This section was written before they did, and what got built diverges from it in two places on purpose — both recorded below rather than quietly reconciled. `editors/README.md` is the user-facing half; this is the design half.
+
+```
+editors/
+├── README.md                     what works, what does not, and how to install
+├── nvim/zen.lua                  filetype + tree-sitter + vim.lsp.config
+├── nvim/queries/zen/highlights.scm
+└── vscode/                       TypeScript, vscode-languageclient, stdio
+```
+
+### What each client gets, per stage
+
+The L1–L4 staging in §2 is about the SERVER. This is the same staging read from the editor, because that is what a user actually experiences — and the two are not the same shape: colour arrives in Neovim without the server at all, and in VS Code only at L2.
+
+| | Neovim | VS Code |
+|---|---|---|
+| **colour** | **works now**, tree-sitter, no server | **not until L2** — needs `semanticTokens`; see the deviation below |
+| brackets, comment toggling, word selection | tree-sitter | **works now**, `language-configuration.json` |
+| **hover** | L2, blocked on transport | L2, blocked on transport |
+| go-to-definition | L2 (module-level), L3 (locals) | same |
+| document symbols / outline | L2 | L2, plus the breadcrumb bar for free |
+| diagnostics as you type | L1, blocked on the driver half of §5 | same |
+| completion | L3 | L3 |
+| format on save | L3 — engine exists, request does not | same |
+| references, rename, signature help | L4 | L4 |
+
+**Everything except colour is blocked on the same one thing**: the server cannot read a pipe, so no editor can talk to it (§4). Neither client changes when that lands — it is `zen.server.args` in VS Code and `M.cmd` in Neovim, one line each.
+
 ### Neovim
 
 Filetype detection first — `.zen` is not a filetype Neovim knows:
@@ -250,6 +278,17 @@ vim.filetype.add({ extension = { zen = "zen" } })
 ```
 
 Then the server, with no plugin and no `lspconfig` dependency:
+
+```lua
+vim.lsp.config("zen", {
+  cmd = { "zen", "lsp" },
+  filetypes = { "zen" },
+  root_markers = { "build.zen", ".git" },
+})
+vim.lsp.enable("zen")
+```
+
+**DEVIATION 1, and it is just a version.** This document originally specified the `vim.lsp.start` autocmd below; `editors/nvim/zen.lua` uses `vim.lsp.config`/`vim.lsp.enable`, which is the current API from Neovim 0.11 and what the machine this was built on runs. The autocmd form still works and is kept here for 0.10 and earlier:
 
 ```lua
 vim.api.nvim_create_autocmd("FileType", {
@@ -263,6 +302,8 @@ vim.api.nvim_create_autocmd("FileType", {
   end,
 })
 ```
+
+`editors/nvim/zen.lua` splits `setup()` into `.filetype()`, `.treesitter()` and `.lsp()` for one reason worth stating: **the highlighting half works today and the LSP half does not**, so a user should be able to take the half that works without the half that exits 2.
 
 `vim.fs.root` looking for `build.zen` is right for this language: `DESIGN.md` makes a build file a program and `PLAN.md`'s tree puts `build.zen` at the repository root, so it is the marker that means "this is a Zen project" — with `.git` as the fallback for a tree that has not got one yet.
 
@@ -290,11 +331,20 @@ So `package.json` must declare:
   "activationEvents": ["onLanguage:zen"],
   "contributes": {
     "languages": [{ "id": "zen", "extensions": [".zen"], "configuration": "./language-configuration.json" }],
-    "grammars": [{ "language": "zen", "scopeName": "source.zen", "path": "./syntaxes/zen.tmLanguage.json" }],
-    "configuration": { "properties": { "zen.server.path": { "type": "string", "default": "zen" } } }
+    "configuration": { "properties": { "zen.server.path": { "type": "string", "default": "./zen" } } }
   }
 }
 ```
+
+**DEVIATION 2, and this one is a real decision that should be ratified or overruled.** The sketch above originally contributed a `grammars` entry pointing at `./syntaxes/zen.tmLanguage.json`. **`editors/vscode/` ships no TextMate grammar, and the line is gone.**
+
+- Hand-writing one is the second grammar `PLAN.md:137` names in those words as the failure the plan exists to prevent — and unlike the tree-sitter grammar, nothing would gate it, so it would drift the first time the language moved.
+- Generating one from `grammar/` would be a third generated artifact, and `PLAN.md:127` says an ungated generated file is "a fork nobody is reading".
+- VS Code has **no public API** for loading a tree-sitter grammar from an extension, so `grammar/` cannot simply be reused there the way Neovim reuses it.
+
+**The cost is real and is being paid now:** `.zen` files in VS Code have brackets, comment toggling and word selection — from `language-configuration.json`, which is configuration and not a grammar — and **no colour at all** until the server answers `semanticTokens`. That request is already L2 in §2 with its query present (`scan`, `Token{kind, span}`), so the route costs no second grammar and no third artifact; it costs one more request.
+
+The alternative is to accept a second copy of the syntax rules and have colour sooner. That is a taste call about which is worse, and it belongs to whoever owns the language rather than to whoever writes the extension. **Recorded here so it is a decision and not an omission.**
 
 `"extensionKind": ["workspace"]` is the load-bearing line. Without it VS Code may install the extension on the UI side, where `activate()` runs on the local machine, `zen` is not on the PATH, the workspace is not on the disk, and the failure reads as "the server crashed".
 
