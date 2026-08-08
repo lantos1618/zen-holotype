@@ -741,16 +741,51 @@ stmt_type* = (c :: Checker, s: Stmt, ctx: Ctx) Res<TyId, AllocError> {
 }
 
 // `x = e;`, `x: T ::= e;`. A written type wins and the value is
-// checked against it; with none, the value's type is the binding's.
+// checked against it; with none, what the value is checked against
+// depends on whether the statement DECLARES or WRITES — `bind_want`.
 bind_stmt* = (c :: Checker, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
     got = c.type_of(b.value, ctx).try();
-    want = b.type.match({
-        Ok(t) => c.type_from_ast(t, ctx),
-        None  => Ok(got),
-    }).try();
+    want = c.bind_want(b, got, ctx).try();
     c.check_assign(b, got, want, ctx).try();
     c.bind_target(b, want, ctx).try();
     c.types.prim("()")
+}
+
+// WHAT THE VALUE HAS TO FIT, and it is not the same question in the two
+// statements Zen spells alike.
+//
+// A written type wins over both. With none, a BARE NAME declares, so it
+// takes whatever the value is and there is nothing to disagree with —
+// which is why this used to be `Ok(got)` unconditionally, and why the
+// unconditional answer was a hole rather than a shortcut. A PATH does
+// not declare: `p.x = e` and `buf[i] = e` write into storage that
+// already has a type, and `e` has to fit the storage exactly as an
+// argument has to fit a parameter. Answering `got` there made the check
+// `got` against `got`, which no value can fail.
+//
+// The value is typed BEFORE this is asked, which is the order the
+// annotated form already used: there is no expectation to push down, so
+// asking the place first would buy nothing and would type `b.target`
+// even for the declarations that have no place to ask about.
+bind_want* = (c :: Checker, b: Bind, got: TyId, ctx: Ctx)
+             Res<TyId, AllocError> {
+    b.type.match({
+        Ok(t) => c.type_from_ast(t, ctx),
+        None  => c.place_want(b.target, got, ctx),
+    })
+}
+
+// A target that is not a bare name is a place, and its type is the
+// ordinary type of the expression — `type_of` already answers it for
+// reads, and a write asks the identical question. Anything it cannot
+// resolve comes back poisoned, which `assignable` accepts, so an
+// unresolved place stays the fail-open it is everywhere else.
+place_want* = (c :: Checker, id: ExprId, got: TyId, ctx: Ctx)
+              Res<TyId, AllocError> {
+    c.tree.expr_at(id).kind.match({
+        Name(_) => Ok(got),
+        _       => c.type_of(id, ctx),
+    })
 }
 
 check_assign* = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
