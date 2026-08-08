@@ -20,21 +20,23 @@
 // the whole point: non-escaping means one direction, down the stack,
 // never out of it.
 //
-// TWO OF THE THREE WAYS OUT ARE CHECKED HERE — stored in a struct, and
-// returned. The third, captured by an escaping closure, is NOT, and the
-// debt is named rather than hidden: it needs an answer to "which
-// closures escape", and nothing in this tree computes one yet. The test
-// that owes it is `must-fail/own/scope_captured_by_escaping_closure`.
+// ALL THREE WAYS OUT ARE CHECKED HERE — stored in a struct, returned,
+// and captured by an escaping closure. The third needs an answer to
+// "which closures escape" and gets a narrow one; what it does not cover
+// is written out above `call_escapes` rather than left to be
+// discovered.
 
 Ast, Expr, ExprId, BlockId, Call, Arg, Decl, DeclKind, Struct = ast
-Paren = ast
+Paren, Access, Member, Function, Param, Span, TypeId = ast
 Alloc, AllocError = std.mem
 str = std.text
+Range = std.core
 DeclId = sema.sema_id
 decl_at = sema.sema_def
 Checker = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
-refuse = sema.sema_own
+refuse, Own, place_type, captures_scope = sema.sema_own
+own_member = sema.sema_recv
 
 // RETURNED. `here`'s block is gone by the time the caller has the value,
 // so every defer registered on it would run against a dead frame. Only
@@ -88,4 +90,107 @@ decl_is_struct = (c :: Checker, d: DeclId) bool {
 refuse_scope_args = (c :: Checker, k: Call) Res<(), AllocError> {
     k.args.loop((h, a) { refuse_if_scope(c, a.value).try() });
     Ok(());
+}
+
+// CAPTURED. The block outlives every frame registered on it, which is
+// what non-escaping buys and what makes a `Scope` a bare pointer into
+// automatic storage. A closure that outlives the block therefore holds
+// a pointer to a dead frame — a use-after-free, not a style rule.
+//
+// The name is what is reported, at the use inside the body, because the
+// capture IS the use: there is no separate capture list to point at.
+check_scope_captured* = (c :: Checker, o :: Own, span: Span, text: str)
+                        Res<(), AllocError> {
+    captures_scope(o, text).match({
+        false => Ok(()),
+        true  => refuse(c, span, SemaFault.ScopeEscapes(
+                     NameFault(name: text))),
+    })
+}
+
+// A binding of `@scope` names the block exactly as the keyword does, so
+// `sema_own.zen` records the answer on the binding when it declares it.
+// Chased no further than what is WRITTEN — `t = s` where `s` holds one
+// is not seen — which is the same syntactic reading the two rules above
+// have, and the same one they would need widening for.
+is_scope_value* = (c :: Checker, id: ExprId) bool {
+    c.tree.expr_at(id).kind.match({
+        Scope    => true,
+        Paren(p) => is_scope_value(c, p.inner),
+        _        => false,
+    })
+}
+
+// ---------------------------------------------------------------------
+// WHICH CLOSURES ESCAPE
+//
+// Read off the CALLEE'S SIGNATURE, which is law 7 doing the job it was
+// written for: "does it allocate, does it mutate, can it fail, does it
+// escape — read the signature". `spawn` is declared
+// `(self, a: Alloc, body: () Res<T, ThreadError>)` and the `Alloc`
+// beside the body is the declaration of exactly this: "an escaping
+// closure needs memory, so it says so". A callee handed no allocator
+// has nowhere to put a closure it is given, so it cannot keep one past
+// its own return; a callee handed one may keep every closure it gets.
+//
+// SO `loop`, `fold` AND `then` ARE UNTOUCHED — none of them takes an
+// Alloc — and `map` and `filter`, which do, are read as escaping at no
+// cost: a body has to NAME a `@scope` binding to be refused at all, and
+// a `@scope` inside a mapping function is the bug this rule is for.
+//
+// WHAT IT DOES NOT COVER, named rather than hidden. A free function
+// taking an `Alloc` is not asked, only a method: `own_member` is a
+// lookup through the receiver's type and there is no second door here
+// that does not report. A callee whose type is not memoized, or whose
+// member is supplied by an impl rather than written in the type's own
+// body, is read as NON-escaping — the fail-open direction this whole
+// walk takes, because a false rejection makes a correct program
+// uncompilable and a missing check only misses.
+// ---------------------------------------------------------------------
+
+call_escapes* = (c :: Checker, o :: Own, k: Call) bool {
+    c.tree.expr_at(k.callee).kind.match({
+        Access(a) => member_escapes(c, o, a),
+        _         => false,
+    })
+}
+
+member_escapes = (c :: Checker, o :: Own, a: Access) bool {
+    own_member(c, place_type(c, o, a.base), a.name.text).match({
+        None  => false,
+        Ok(m) => member_takes_alloc(c, m),
+    })
+}
+
+member_takes_alloc = (c :: Checker, m: Member) bool {
+    m.kind.match({
+        Function(f) => takes_alloc(c, f),
+        _           => false,
+    })
+}
+
+takes_alloc = (c :: Checker, f: Function) bool {
+    Range(0, f.params.len).find((i) {
+        f.params.get(i).match({
+            None  => false,
+            Ok(p) => param_is_alloc(c, p),
+        })
+    }).match({ Ok(_) => true, None => false })
+}
+
+// `Alloc` BY NAME, on the parameter as WRITTEN. The argument's own type
+// is the wrong thing to ask — `env.mem.alloc()` hands out an `Arena` —
+// and it is the callee that declares what it is entitled to keep.
+param_is_alloc = (c :: Checker, p: Param) bool {
+    p.type.match({
+        None    => false,
+        Ok(tid) => type_is_alloc(c, tid),
+    })
+}
+
+type_is_alloc = (c :: Checker, tid: TypeId) bool {
+    c.tree.type_at(tid).kind.match({
+        Named(n) => n.name.text.eq("Alloc"),
+        _        => false,
+    })
 }

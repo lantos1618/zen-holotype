@@ -1,0 +1,108 @@
+// src/sema/sema_drop.zen
+// A value the compiler drops may not be copied.
+//
+// The fourth of `sema_own.zen`'s rule siblings and the same shape as
+// the other three: one question, asked off the walk that file owns.
+// "The compiler calls drop exactly once, so `g = f` on a Drop type
+// cannot copy — both would drop."
+//
+// ONLY A PLACE IS A COPY. A call result is a fresh value that nobody
+// else names, and passing a place to a parameter is a borrow and not a
+// move — so a bare name on the right of a binding is the whole of what
+// this rule looks at.
+//
+// THE TRAIT IS PART OF THE QUESTION and not decoration: a type may
+// declare a method of its own named `drop`, and that one is not what
+// runs at scope exit. So an impl OF Drop is what is searched for, and
+// only in the module that declares the type — an impl lives with its
+// target, which is the same fact that makes orphan impls unwritable.
+//
+// Nothing fires when the type is unknown, which is the fail-open this
+// whole folder takes: a false rejection makes a correct program
+// uncompilable, and a missing check only misses.
+
+Expr, Bind, Impl, Span = ast
+AllocError = std.mem
+Vec = std.collections
+str = std.text
+ImplId = sema.sema_id
+TyId, TyNamed = sema.sema_ty
+Checker, Ctx = sema.sema_check
+SemaFault, NameFault = sema.sema_diag
+Own, find_var, var_type, refuse = sema.sema_own
+
+check_drop_copy* = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
+                   Res<(), AllocError> {
+    node = c.tree.expr_at(b.value);
+    node.kind.match({
+        Name(n) => drop_copy_of_name(c, o, node, n.text),
+        _       => Ok(()),
+    })
+}
+
+// A name this frame does not bind is a global or a constant, and it is
+// not a place this rule has an opinion about.
+drop_copy_of_name = (c :: Checker, o :: Own, node: Expr, text: str)
+                    Res<(), AllocError> {
+    find_var(o, text).match({
+        None  => Ok(()),
+        Ok(_) => refuse_if_drop(c, node.span, var_type(o, text), text),
+    })
+}
+
+refuse_if_drop = (c :: Checker, span: Span, ty: TyId, text: str)
+                 Res<(), AllocError> {
+    drops = is_drop_type(c, ty).try();
+    drops.match({
+        false => Ok(()),
+        true  => refuse(c, span, SemaFault.CopyOfDropValue(
+                     NameFault(name: text))),
+    })
+}
+
+// Does an impl OF Drop exist for this type?
+is_drop_type* = (c :: Checker, ty: TyId) Res<bool, AllocError> {
+    c.types.at(ty).match({
+        Named(n) => named_is_drop(c, n),
+        _        => Ok(false),
+    })
+}
+
+named_is_drop = (c :: Checker, n: TyNamed) Res<bool, AllocError> {
+    ids ::= c.alloc.Vec<ImplId>();
+    c.world.impls_named(c.tree, n.name, ids).try();
+    hits ::= c.alloc.Vec<bool>();
+    ids.loop((h, id) { keep_drop_impl(c, n, id, hits).try() });
+    Ok(hits.len > 0);
+}
+
+keep_drop_impl = (c :: Checker, n: TyNamed, id: ImplId, hits :: Vec<bool>)
+                 Res<(), AllocError> {
+    (n.decl.module == id.decl.module).match({
+        false => Ok(()),
+        true  => note_drop_impl(c, id, hits),
+    })
+}
+
+note_drop_impl = (c :: Checker, id: ImplId, hits :: Vec<bool>)
+                 Res<(), AllocError> {
+    c.world.impl_at(c.tree, id).match({
+        None   => Ok(()),
+        Ok(im) => add_if_drop(c, im, hits),
+    })
+}
+
+add_if_drop = (c :: Checker, im: Impl, hits :: Vec<bool>)
+              Res<(), AllocError> {
+    bound_named_drop(c, im).match({
+        false => Ok(()),
+        true  => hits.add(true),
+    })
+}
+
+bound_named_drop = (c :: Checker, im: Impl) bool {
+    c.tree.type_at(im.bound).kind.match({
+        Named(n) => n.name.text.eq("Drop"),
+        _        => false,
+    })
+}
