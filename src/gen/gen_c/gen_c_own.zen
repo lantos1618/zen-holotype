@@ -54,7 +54,7 @@
 
 Ast, Expr, ExprKind, ExprId, BlockId, Block, Stmt, StmtKind, Bind = ast
 Decl, DeclKind, Struct, Member, MemberKind, Function, Param = ast
-Impl, Call, Arg, Access, Match, Arm, Span, Ident, TypeId = ast
+Impl, Call, Arg, Access, Match, Arm, Span, Ident, TypeId, Binary = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -514,8 +514,7 @@ expr_writes_scope = (be :: CBackend, id: ExprId) bool {
         Scope         => true,
         Paren(p)      => expr_writes_scope(be, p.inner),
         Unary(u)      => expr_writes_scope(be, u.operand),
-        Binary(b)     => expr_writes_scope(be, b.lhs)
-                             || expr_writes_scope(be, b.rhs),
+        Binary(b)     => binary_writes_scope(be, b),
         Access(a)     => expr_writes_scope(be, a.base),
         Index(x)      => expr_writes_scope(be, x.base)
                              || expr_writes_scope(be, x.index),
@@ -526,6 +525,33 @@ expr_writes_scope = (be :: CBackend, id: ExprId) bool {
         Array(a)      => elems_write_scope(be, a.elems),
         FixedArray(a) => elems_write_scope(be, a.elems),
         _             => false,
+    })
+}
+
+// `a + b + c` is left-nested, and `parse_expr.zen` builds the chain
+// with a LOOP, so nothing bounds how deep `b.lhs` goes — the spine
+// section of `gen_c_op.zen` has the whole argument. Recursing into it
+// is a segmentation fault on a long enough line even from a predicate
+// as small as this one, so the spine is walked with a cursor: the
+// answer is the OR over every RIGHT operand and the base, which is what
+// the recursion accumulated.
+binary_writes_scope = (be :: CBackend, b: Binary) bool {
+    got ::= false;
+    down ::= b;
+    going ::= true;
+    loop(() { going }, (h) {
+        got = got || expr_writes_scope(be, down.rhs);
+        next = binary_below(be, down.lhs);
+        going = next.match({ None => false, Ok(_) => true });
+        down = next.match({ None => down, Ok(inner) => inner });
+    });
+    got || expr_writes_scope(be, down.lhs)
+}
+
+binary_below = (be :: CBackend, id: ExprId) Res<Binary> {
+    be.tree.expr_at(id).kind.match({
+        Binary(b) => Ok(b),
+        _         => None,
     })
 }
 

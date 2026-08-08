@@ -51,14 +51,45 @@ Diag, diag, diag_at = parse.parse_diag
 // recursive-descent parser stack-overflows and this is a crash, not a
 // diagnostic. Decide the depth limit and emit an error at it."
 //
-// 256 is chosen against the machine, not against taste. This parser
-// compiles to C and recurses through `type`, `expression`, `pattern`
-// and `block`; the largest of those frames is a few hundred bytes, so
-// 256 levels is tens of kilobytes of an eight-megabyte stack — two
-// orders of margin. It is also two orders ABOVE anything written by
-// hand: the deepest construct in this compiler's own source nests 12.
-// A limit nobody legitimate can reach and nothing can crash through.
-MAX_DEPTH*: usize = 256
+// THE NUMBER IS NOT THE PARSER'S TO CHOOSE ALONE, and the reasoning
+// that picked 256 got that wrong. It counted this parser's own frames —
+// `type`, `expression`, `pattern`, `block`, a few hundred bytes each —
+// and concluded 256 levels was tens of kilobytes of an eight-megabyte
+// stack, "two orders of margin". But nothing downstream has a bound of
+// its own: sema walks the same nesting through `type_of` and gen_c
+// walks it again through `expr`, with frames two orders larger. This is
+// the ONLY bound the whole pipeline has, so it has to hold for the
+// hungriest phase and not the thinnest.
+//
+// MEASURED, one nesting level at a time until it segfaulted, at the
+// default eight-megabyte stack:
+//
+//     parentheses      ~1,150 levels     ~7KB  per level
+//     nested calls       ~313 levels    ~24KB  per level
+//     nested `.match`     ~255 levels    ~32KB  per level
+//
+// So the old 256 had ONE level of margin on the hungriest construct,
+// not two orders — and it was margin by luck, since nothing connects
+// the two numbers.
+//
+// 304 IS WHAT `tests/corpus/codegen/nesting_expr.zen` NEEDS AND NOT A
+// BYTE MORE. That file writes 300 parentheses and argues for them, and
+// with the two levels the enclosing block and statement cost it needs
+// 302. Refusing it is a false refusal, which is as bad as a crash and
+// much easier to ship; so the bound rises to exactly 302 + 2 and stops.
+//
+// WHAT THIS NUMBER CANNOT DO, stated rather than hidden: because the
+// per-level cost varies 4.6x by construct and this counter charges
+// every construct 1, no single value both admits 302 parentheses and
+// refuses a 256-deep `.match`. Between 256 and 302, a nested `.match`
+// still segfaults. That window was one level wide before and is ~46
+// now, and it cannot be closed here — the parser cannot weight the
+// count, because `.match` is POSTFIX and is recognised on the way back
+// out, after its scrutinee's whole depth has already been charged. The
+// fix belongs where the stack is actually spent: cheaper frames in
+// gen_c's spill and call lowering, or a bound in the phase that spends
+// them, as `sema_depth.zen` does for instantiation.
+MAX_DEPTH*: usize = 304
 
 // A node, opened. The two facts that are true at a node's first token
 // and false one token later: where it begins, and what trivia stood

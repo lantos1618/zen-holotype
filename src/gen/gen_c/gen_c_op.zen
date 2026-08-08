@@ -43,7 +43,9 @@ ctype, declarator, is_unit, c_prim = gen.gen_c.gen_c_type
 is_c_integer, is_signed = gen.gen_c.gen_c_type
 lower_eq_call = gen.gen_c.gen_c_member
 declare_temp = gen.gen_c.gen_c_flow
-expr, ty_of, spills, spills_anywhere = gen.gen_c.gen_c_expr
+expr, ty_of, spills, spills_anywhere, needs_set = gen.gen_c.gen_c_expr
+needs_hoist = gen.gen_c.gen_c_hoist
+needs_fat = gen.gen_c.gen_c_fat
 
 // -----------------------------------------------------------------
 // operators
@@ -400,7 +402,39 @@ scalar = (be: CBackend, id: TyId) bool {
 write_infix = (be :: CBackend, b: Binary, op: str, ctx: Ctx, operand: TyId,
                out :: String) Res<(), AllocError> {
     out.add_bytes("(").try();
-    expr(be, b.lhs, ctx, operand, out).try();
+    lower_lhs(be, b.lhs, ctx, operand, out).try();
+    close_infix(be, b, op, ctx, operand, out)
+}
+
+// The left operand, walked as a spine only when there IS one.
+//
+// THE TEST IS HERE AND NOT INSIDE `spine_lhs`, and that is not a
+// micro-optimisation: the walk holds a `Vec` and a cursor, so its frame
+// is far fatter than the one recursive call it replaces. Under every
+// `+` and every `==` in the tree that costs depth the other constructs
+// need — measured, nested `.match` lost a third of its headroom to
+// exactly that. An operand that is not itself an operator takes the
+// path it always took.
+lower_lhs = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+             out :: String) Res<(), AllocError> {
+    spine_ahead(be, id).match({
+        false => expr(be, id, ctx, want, out),
+        true  => spine_lhs(be, id, ctx, want, out),
+    })
+}
+
+spine_ahead = (be :: CBackend, id: ExprId) bool {
+    be.tree.expr_at(id).kind.match({
+        Binary(_) => true,
+        _         => false,
+    })
+}
+
+// Everything after the left operand. Split out because the spine walk
+// below writes the two halves of a level at opposite ends of its two
+// passes, and the bytes may only be written down once.
+close_infix = (be :: CBackend, b: Binary, op: str, ctx: Ctx, operand: TyId,
+               out :: String) Res<(), AllocError> {
     out.add_bytes(" ").try();
     out.add_bytes(op).try();
     out.add_bytes(" ").try();
@@ -451,13 +485,23 @@ lower_arith = (be :: CBackend, node: Expr, b: Binary, prim: str, ctx: Ctx,
 
 call_helper = (be :: CBackend, node: Expr, b: Binary, prim: str, ctx: Ctx,
                operand: TyId, out :: String) Res<(), AllocError> {
+    open_helper(be, b, prim, out).try();
+    lower_lhs(be, b.lhs, ctx, operand, out).try();
+    close_helper(be, node, b, ctx, operand, out)
+}
+
+open_helper = (be :: CBackend, b: Binary, prim: str, out :: String)
+              Res<(), AllocError> {
     be.need_helpers(prim).try();
     out.add_bytes("zg_").try();
     out.add_bytes(helper_stem(b.op)).try();
     out.add_bytes("_").try();
     out.add_bytes(prim).try();
-    out.add_bytes("(").try();
-    expr(be, b.lhs, ctx, operand, out).try();
+    out.add_bytes("(")
+}
+
+close_helper = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx,
+                operand: TyId, out :: String) Res<(), AllocError> {
     out.add_bytes(", ").try();
     expr(be, b.rhs, ctx, operand, out).try();
     // `.match` and not `.then`: a `.then` closure capturing more than
@@ -477,6 +521,195 @@ write_trap_args = (be :: CBackend, node: Expr, b: Binary, out :: String)
     out.add_bytes(", ").try();
     write_position(be, node.span.file, b.op_span, out).try();
     Ok(());
+}
+
+// -----------------------------------------------------------------
+// the spine
+//
+// `a + b + c + ..` is `((a + b) + c) ..`, and `parse_expr.zen` builds
+// it with a LOOP — `binary_from` folds each operator onto the left in
+// place — so the parser's depth bound never counts a term and the
+// length of a chain is bounded by nothing at all. Lowering it by
+// recursing into `b.lhs` is three C frames per term, and one line of
+// `tests/corpus/lex/long_single_line.zen` is ten thousand terms:
+// eight megabytes of stack, and then a segmentation fault with no
+// diagnostic. "A crash is not a diagnostic" (docs/TESTING.md), and
+// `bootstrap/gen_c.py`'s `ex_Binary` answers the same fact the same
+// way, in a loop, and says so.
+//
+// THE BYTES OF A LEFT SPINE ARE ALREADY IN TWO HALVES:
+//
+//     zg_add_i32(zg_add_i32(0, 1, "f", 1, 9), 1, "f", 1, 13)
+//     ^^^^^^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+//       opens, outermost in    base   closes, innermost out
+//
+// so the levels are collected with a cursor and written in two passes
+// instead of n nested calls. The operand type still travels DOWN the
+// spine, the operands are still written left to right, and the
+// statements each one spills still land in the same order — so this
+// emits the bytes the recursion emitted, which `scripts/fixpoint.sh`
+// is what proves.
+//
+// A LEVEL THAT DOES NOT FOLD ENDS THE WALK and is handed back to
+// `expr`. That covers every door out of `expr` that is not a plain
+// value — a union tag, a hoist, a fat record — and the two operators
+// that are not written as open-operand-operand-close: a `==` that
+// dispatches to an `Eq` impl, and a `&&` whose right side spills and
+// must be lowered under a branch. Those nest only as deep as the
+// parser let them, so the recursion is bounded there.
+// -----------------------------------------------------------------
+
+// One level of the spine. `id` is the operator node and `operand` the
+// type its operands lower at; the node is re-read rather than stored
+// because a rung is kept for every term of a ten-thousand-term line.
+Rung = {
+    id: ExprId,
+    lhs: ExprId,
+    operand: TyId,
+    folds: bool,
+}
+
+// The left operand of an operator, written without recursing down the
+// spine below it.
+spine_lhs = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+             out :: String) Res<(), AllocError> {
+    rungs ::= be.alloc.Vec<Rung>();
+    down ::= id;
+    hint ::= want;
+    going ::= true;
+    // The rung that does NOT fold is pushed too, and is what leaves
+    // `down` and `hint` naming the base and the type it is wanted at.
+    loop(() { going }, (h) {
+        rung = rung_at(be, down, ctx, hint).try();
+        rungs.add(rung).try();
+        going = rung.folds;
+        down = rung.lhs;
+        hint = rung.operand;
+    });
+    folded = rungs.len - 1;
+    Range(0, folded).loop((h, i) { open_rung(be, rungs, i, out).try(); });
+    expr(be, down, ctx, hint, out).try();
+    Range(0, folded).loop((h, i) {
+        close_rung(be, rungs, folded - 1 - i, ctx, out).try();
+    });
+    Ok(());
+}
+
+// A node folds when `expr` would have reached `lower_binary` for it
+// and `lower_binary` would have written it as open-operand-operand-
+// close. Anything else answers a rung that stops the walk, naming
+// itself as the base.
+rung_at = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+          Res<Rung, AllocError> {
+    be.tree.expr_at(id).kind.match({
+        Binary(b) => binary_rung(be, id, b, ctx, want),
+        _         => Ok(base_rung(id, want)),
+    })
+}
+
+base_rung = (id: ExprId, want: TyId) Rung {
+    Rung(id: id, lhs: id, operand: want, folds: false)
+}
+
+// `expr`'s doors, asked in its own order: a value whose type is a
+// member of a wanted set, a form that hoists, a value reaching a
+// bound. `spills` is not asked because no `Binary` is a spill.
+binary_rung = (be :: CBackend, id: ExprId, b: Binary, ctx: Ctx, want: TyId)
+              Res<Rung, AllocError> {
+    plain = (needs_set(be, id, ctx, want).try() == false)
+        && (needs_hoist(be, id, ctx, want).try() == false)
+        && (needs_fat(be, id, ctx, want).try() == false);
+    plain.match({
+        false => Ok(base_rung(id, want)),
+        true  => operand_rung(be, id, b, ctx, want),
+    })
+}
+
+operand_rung = (be :: CBackend, id: ExprId, b: Binary, ctx: Ctx, want: TyId)
+               Res<Rung, AllocError> {
+    operand = level_type(be, b, ctx, want).try();
+    infix_shaped(be, b, operand).match({
+        false => Ok(base_rung(id, want)),
+        true  => Ok(Rung(id: id, lhs: b.lhs, operand: operand, folds: true)),
+    })
+}
+
+// What `lower_binary` will lower this level's OPERANDS at: `bool` for
+// the two short-circuiting operators, which take their type from the
+// operator and not from what they were given.
+level_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
+             Res<TyId, AllocError> {
+    is_logical(b.op).match({
+        true  => be.check.types.bool_ty(),
+        false => operand_type(be, b, ctx, want),
+    })
+}
+
+// The two that are not written as open-operand-operand-close: a
+// comparison of values C cannot compare goes through an `Eq` impl, and
+// a `&&` whose right side spills is written as a temporary and a
+// branch.
+infix_shaped = (be: CBackend, b: Binary, operand: TyId) bool {
+    is_logical(b.op).match({
+        true  => spills_anywhere(be, b.rhs) == false,
+        false => (is_comparison(b.op) == false) || scalar(be, operand),
+    })
+}
+
+// The two halves of one level, re-derived from the node. The `_` arms
+// cannot be reached — a rung that folds was built from a `Binary` —
+// and write nothing rather than inventing a diagnostic for a case that
+// does not arise.
+open_rung = (be :: CBackend, rungs: Vec<Rung>, at: usize, out :: String)
+            Res<(), AllocError> {
+    rungs.get(at).match({
+        None    => Ok(()),
+        Ok(rung) => be.tree.expr_at(rung.id).kind.match({
+            Binary(b) => open_op(be, b, rung.operand, out),
+            _         => Ok(()),
+        }),
+    })
+}
+
+close_rung = (be :: CBackend, rungs: Vec<Rung>, at: usize, ctx: Ctx,
+              out :: String) Res<(), AllocError> {
+    rungs.get(at).match({
+        None    => Ok(()),
+        Ok(rung) => close_node(be, be.tree.expr_at(rung.id), rung, ctx, out),
+    })
+}
+
+close_node = (be :: CBackend, node: Expr, rung: Rung, ctx: Ctx,
+              out :: String) Res<(), AllocError> {
+    node.kind.match({
+        Binary(b) => close_op(be, node, b, rung.operand, ctx, out),
+        _         => Ok(()),
+    })
+}
+
+open_op = (be :: CBackend, b: Binary, operand: TyId, out :: String)
+          Res<(), AllocError> {
+    prim = be.check.prim_name(operand);
+    helper_shaped(b, prim).match({
+        true  => open_helper(be, b, prim, out),
+        false => out.add_bytes("("),
+    })
+}
+
+close_op = (be :: CBackend, node: Expr, b: Binary, operand: TyId, ctx: Ctx,
+            out :: String) Res<(), AllocError> {
+    prim = be.check.prim_name(operand);
+    helper_shaped(b, prim).match({
+        true  => close_helper(be, node, b, ctx, operand, out),
+        false => close_infix(be, b, c_op(b.op), ctx, operand, out),
+    })
+}
+
+// `lower_arith`'s rule, read off the level rather than reached through
+// it: only integer arithmetic goes through a trap helper.
+helper_shaped = (b: Binary, prim: str) bool {
+    (is_logical(b.op) == false) && (is_comparison(b.op) == false)
+        && is_c_integer(prim)
 }
 
 // `"file", line, col` — the three arguments every trap takes. The
