@@ -6,6 +6,24 @@ Most of these are one rule with a test attached. A convention you cannot test is
 
 ---
 
+## What checks what
+
+That claim was false for a year: `make cap` stood behind one rule of the nine and nothing read the rest, so this document could drift from the tree and nothing said so. Here is the whole map, and it is the only place the map is written.
+
+| rule | gate |
+|---|---|
+| a prefix names its own folder; a folder has its root file; a file name means something; std depends only on std; an impl goes with its type; no `get_*`/`do_*`; no `// helpers` section; abbreviations are words | `make style` — `scripts/style.py` |
+| 500-line note, 800-line fail | `make cap` — `scripts/line_cap.py` |
+| no free function shadowing a method | `make ufcs` — `scripts/ufcs_collisions.py` |
+| match arms align their `=>`; blank-line and comment placement | `make fmt` — the formatter owns the whole shape of a printed file, so it is the authority and this document does not restate its rules |
+| every fault has a raise site | `make faults` |
+
+**The syntax laws are the grammar's, not this document's.** No `if`, no ternary, no `?`, no `as` cast, no `while` — `loop(cond, body)` is the while form — no fourth `@` entry, no adjacent-string concatenation, and every parameter named *and* typed. `DESIGN.md` states them (control flow, line 235; the loop overloads, line 965) and `grammar/grammar.js` cannot express a violation, so `make parse` is where they fail. Each was checked against the real grammar: every one is a parse error. Nothing here repeats them, because two copies of a fact is one stale fact waiting to happen.
+
+**Which is also the argument for parsing over grepping.** All 99 occurrences of `if` in `src/` are inside comments. So are all 549 of `as`, and all 90 of `?`. A style script that greps finds only prose; `scripts/style.py` parses with `bootstrap/cst.py`, the real grammar, for the same reason `ufcs_collisions.py` does.
+
+---
+
 ## Where things live
 
 **The rule: a module contains what is *about* its subject, and nothing else.**
@@ -207,3 +225,19 @@ Before proposing one, answer: what ordinary binding would have to exist for this
 **One fact, one place.** When `DESIGN.md` and `PLAN.md` both described the file tree, they immediately disagreed. Now the design shows the shape and points at the plan, which is the authority. Two copies of a fact is one stale fact waiting to happen.
 
 **Correct the document, not the parser.** When an ambiguity surfaces during implementation — the grammar cannot tell an alias from a one-variant enum — the fix goes in `DESIGN.md` first. A parser that quietly picks a reading is how a language ends up with no specification.
+
+---
+
+## What the tree owes this document
+
+Measured, once, against all 162 files of `src/`. Every rule above was counted rather than assumed — the interesting result is how few were being broken, which is worth writing down because it is what makes the gate cheap to keep.
+
+**Abbreviations — 147 sites, 18 files.** `blk` (103), `tp` (34), `tps` (10). `nd` is already at zero. This is the only rule with a standing debt, so it is the only one carrying a ledger: `ABBREV_OWED` in `scripts/style.py`, keyed by file, valued with the word each should be. Deleting a line is how one closes, and a line that no longer describes a violation fails the build — the debt can shrink and cannot quietly grow. They live in `gen_c/`, `sema/`, `parse/` and `ast/`; renaming them is an ordinary edit that nobody has made time for, not a design question.
+
+**`.then` inside a `.loop` — 29 of the 141 `.then` calls.** "Usually a missing loop word", and *usually* is load-bearing, which is why this is a list to read and not a gate. Two of the 29 prove why: `std/core/loop/loop_find.zen:45` **is** the definition of `find` and cannot be written any other way, and `lsp/lsp_pos.zen:80` carries a comment arguing the case — "a break would buy a shorter walk and cost the one thing worth having here — a body with a single exit." A gate that reports a decision its author already defended is the gate people switch off. The two clearest genuine finds: `gen_c/gen_c_const.zen:181`, where `pure_args` hand-rolls `.all(..)` with an `every ::=` accumulator, and `sema/sema_def.zen:729`, where `keep_exported` hand-rolls `.filter(..)`.
+
+**`add` for one, `add_all` for many — 18 sites named otherwise, and mostly defensible.** `push_method`, `push_loop`, `push_tvar`, `push_bound` and friends are stack pushes, where position *is* the point and the rule's own exception applies; `insert_ordered` says so in its name. Two are worth a second look: `collections_map.zen`'s `Map.append` — a map has no order, so `add` is the word — and `sema_supply.zen`'s `add_all_members`, where the rule spells the plural `add_all`. Against 78 correct `add*` names, the rule is alive, not dead.
+
+**Rules that are real and at 100%, now guarded so they stay there:** every one of the 130 prefixed files names its own folder; all 18 folders have their root; all 92 imports written by a `std` module import `std`; all 22 impls sit with their type; none of the 3628 functions is a `get_*` or a `do_*`; no file has a `// helpers` section; no comparison in the tree writes an ASCII code where a char literal exists.
+
+**Rules that cannot be checked, and are left to review.** The stranger test, the second-caller rule, and the direction test in general all ask what a function is *about* — only the std boundary is mechanical. "Method chains over nested calls" needs to know the natural receiver, which nothing in the source states. "No `Alloc` parameter, no allocation" needs a call graph: a crude version flags 2306 of 3628 functions, nearly all of them methods reaching an allocator through `self`. Comment density, "a name that needs a comment is the wrong name", "one behaviour per test", `::` versus `:` being the right marker, and "smallest correct change" are judgement, all of them. `scripts/style.py`'s header says the same thing in the same words, because a reader who opens the script deserves to find out there what it does not do.
