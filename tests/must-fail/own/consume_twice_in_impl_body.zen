@@ -1,0 +1,42 @@
+// The ownership walk is part of the body walk, so a body nothing walks
+// gets no ownership answers either. A method supplied by an impl moved
+// the same binding twice and the second move was seen by nobody — the
+// same double consume that `double_consume` rejects at top level.
+//
+// position: the second use of the dead binding.
+
+Buf = {
+    id: i32,
+}
+
+Buf.impl(Drop, {
+    drop = (self :: @Self) () { /* nothing to release: id is bytes */ }
+})
+
+Boxy = {
+    width: i32,
+    height: i32,
+
+    area* ::= (self: @Self) i32 { self.width * self.height }
+}
+
+Tile = {
+    side: i32,
+}
+
+Tile.impl(Boxy, {
+    width: self.side,
+    height: self.side,
+
+    area = (self: @Self) i32 {
+        f = Buf(id: 1);
+        g = consume f;
+        h = consume f;
+        g.id + h.id
+    }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", Tile(side: 2).area());
+    Ok(0);
+}

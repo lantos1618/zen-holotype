@@ -20,13 +20,13 @@
 // already memoize it.
 
 Ast, Module, Decl, DeclKind, Function, TParam, BlockId = ast
-Struct, Member = ast
+Struct, Impl, Member = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
 TyId, Types = sema.sema_ty
-World, Def, DefKind, ModuleTable = sema.sema_def
+World, Def, DefKind, ModuleTable, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 check_impl = sema.sema_bound
 check_overloads = sema.sema_call
@@ -132,116 +132,137 @@ check_decl = (c :: Checker, d: Decl, m: Module, mi: usize)
              Res<(), AllocError> {
     d.kind.match({
         Function(f) => check_function(c, f, m, mi),
-        Struct(s)   => type_members(c, s, m, mi),
+        Struct(s)   => struct_bodies(c, s, m, mi),
+        Impl(im)    => impl_bodies(c, im, m, mi),
         _           => Ok(()),
     })
 }
 
-// TYPING A STRUCT'S MEMBER BODIES, and only typing them.
-//
-// `check_body` below is the DECLARATION walk and runs the rules that
-// belong to a declaration. This runs the QUERIES, because a query's
+// A MEMBER'S BODY IS A BODY. It runs the queries, because a query's
 // answer is memoized and lowering reads it back — `supply_memo` above
 // all: `Boxy.area`'s body reads `self.width` off `Boxy`, and it is
 // EMITTED at every type that impls `Boxy`, by which time the bound that
 // says which impl supplies the `width` is gone. Nothing walked these
 // bodies, so there was no answer to read.
 //
-// The declaration rules for a member's body are not here: adding them
-// changes what the checker REJECTS, which is a wider change than what
-// it records.
-type_members = (c :: Checker, s: Struct, m: Module, mi: usize)
-               Res<(), AllocError> {
-    self_ty = struct_self(c, s, mi).try();
+// AND IT RUNS THE DECLARATION RULES, which for a long time it did not:
+// this was `check_body` minus `check_return` and minus `check_own`, on
+// the reasoning that a query only RECORDS while those two REJECT. The
+// reasoning described the change and not the rule. A member declares a
+// return type and a member moves values, so a member's body owed both
+// answers, and a struct-body method returning a `str` where its
+// signature promised an `i32` compiled clean — even when it was called.
+struct_bodies = (c :: Checker, s: Struct, m: Module, mi: usize)
+                Res<(), AllocError> {
+    self_ty = named_self(c, s.name.text, mi).try();
     tmark = c.tvar_mark();
     enter_struct_tvars(c, s, mi).try();
-    s.members.loop((h, mem) { type_member(c, mem, self_ty, m, mi).try() });
+    s.members.loop((h, mem) { member_body(c, mem, self_ty, m, mi).try() });
     c.release_tvars(tmark).try();
     Ok(());
 }
 
-// The struct's own type, with no arguments: `@Self` inside a member of
-// `Vec<T>` is the `Vec` the declaration writes, and the receiver a call
-// site reaches is a different question asked at the call site.
-struct_self = (c :: Checker, s: Struct, mi: usize) Res<TyId, AllocError> {
-    found ::= c.alloc.Vec<Def>();
-    c.world.defs_of(mi, s.name.text, found).try();
-    found.get(0).match({
+// AN IMPL BODY GOT NO WALK AT ALL. `check_decl` matched `Function` and
+// `Struct`, and an `Impl` fell through the wildcard — so a method an
+// impl supplies was typed by nobody and not one rule in this folder
+// reached it. What reached it instead was LOWERING, which is why a name
+// an impl-supplied method could not resolve came back as `codegen cannot
+// resolve` rather than as an undefined name.
+//
+// THE TYPE PARAMETERS ARE THE TARGET'S. `Vec.impl(Eq, ..)` supplies
+// methods on `Vec<T>` whose bodies name `T`, and the declaration that
+// binds `T` is `Vec` — the impl writes no parameter list of its own.
+impl_bodies = (c :: Checker, im: Impl, m: Module, mi: usize)
+              Res<(), AllocError> {
+    name = im.target.text;
+    self_ty = named_self(c, name, mi).try();
+    tmark = c.tvar_mark();
+    enter_target_tvars(c, name, mi).try();
+    im.members.loop((h, mem) { member_body(c, mem, self_ty, m, mi).try() });
+    c.release_tvars(tmark).try();
+    Ok(());
+}
+
+// The named declaration's own type, with no arguments: `@Self` inside a
+// member of `Vec<T>` is the `Vec` the declaration writes, and the
+// receiver a call site reaches is a different question asked at the call
+// site.
+named_self = (c :: Checker, name: str, mi: usize) Res<TyId, AllocError> {
+    target_decl(c, name, mi).try().match({
         Ok(d) => c.decl_as_type(d),
         None  => c.types.unknown(),
     })
 }
 
-type_member = (c :: Checker, mem: Member, self_ty: TyId, m: Module,
-               mi: usize) Res<(), AllocError> {
-    mem.kind.match({
-        Function(f) => type_member_fn(c, f, self_ty, m, mi),
-        _           => Ok(()),
-    })
-}
-
-type_member_fn = (c :: Checker, f: Function, self_ty: TyId, m: Module,
-                  mi: usize) Res<(), AllocError> {
-    f.body.match({
-        Ok(b) => type_member_body(c, f, b, self_ty, m, mi),
+enter_target_tvars = (c :: Checker, name: str, mi: usize)
+                     Res<(), AllocError> {
+    target_decl(c, name, mi).try().match({
+        Ok(d) => target_tvars(c, d, mi),
         None  => Ok(()),
     })
 }
 
-// The scope, the type parameters and the bounds enter and leave here for
-// the reason `check_body` states, and the raised list drains here for
-// the reason `settle_raised` states: a `.try()` in a member's body would
-// otherwise be attributed to the next declaration walked.
-type_member_body = (c :: Checker, f: Function, body: BlockId, self_ty: TyId,
-                    m: Module, mi: usize) Res<(), AllocError> {
-    smark = c.mark();
-    tmark = c.tvar_mark();
-    bmark = c.bound_mark();
-    owner = qualified(c, m, f).try();
-    enter_generics(c, f, owner, mi).try();
-    ctx = member_ctx(c, f, mi, self_ty).try();
-    bind_params(c, f, ctx).try();
-    rmark = c.raised_mark();
-    c.enter_owner(owner);
-    got = c.block_type(body, ctx).try();
-    c.enter_owner("");
-    settle_raised(c, f, ctx, got, rmark).try();
-    c.release_bounds(bmark).try();
-    c.release_tvars(tmark).try();
-    c.release(smark).try();
-    Ok(());
+target_decl = (c :: Checker, name: str, mi: usize)
+              Res<Res<Def>, AllocError> {
+    found ::= c.alloc.Vec<Def>();
+    c.world.defs_of(mi, name, found).try();
+    Ok(found.get(0));
 }
 
-// `body_ctx` with `@Self` bound: a member's body names it as freely as
-// its signature does.
-member_ctx = (c :: Checker, f: Function, mi: usize, self_ty: TyId)
-             Res<Ctx, AllocError> {
-    base = body_ctx(c, f, mi).try();
-    Ok(Ctx(module: base.module, ret: base.ret, has_ret: base.has_ret,
-           self_ty: self_ty, has_self: true));
+target_tvars = (c :: Checker, d: Def, mi: usize) Res<(), AllocError> {
+    decl_at(c.tree, d.id).match({
+        Ok(x) => target_decl_tvars(c, x, mi),
+        None  => Ok(()),
+    })
+}
+
+target_decl_tvars = (c :: Checker, d: Decl, mi: usize)
+                    Res<(), AllocError> {
+    d.kind.match({
+        Struct(s) => enter_struct_tvars(c, s, mi),
+        _         => Ok(()),
+    })
+}
+
+member_body = (c :: Checker, mem: Member, self_ty: TyId, m: Module,
+               mi: usize) Res<(), AllocError> {
+    mem.kind.match({
+        Function(f) => member_fn_body(c, f, self_ty, m, mi),
+        _           => Ok(()),
+    })
+}
+
+member_fn_body = (c :: Checker, f: Function, self_ty: TyId, m: Module,
+                  mi: usize) Res<(), AllocError> {
+    f.body.match({
+        Ok(b) => check_body(c, f, b, Ok(self_ty), m, mi),
+        None  => Ok(()),
+    })
 }
 
 // A `Required` or `Hook` declaration has no body and nothing to check;
-// the other two forms do.
+// the other two forms do. A top-level function has no `@Self`.
 check_function* = (c :: Checker, f: Function, m: Module, mi: usize)
                   Res<(), AllocError> {
     f.body.match({
-        Ok(b) => check_body(c, f, b, m, mi),
+        Ok(b) => check_body(c, f, b, None, m, mi),
         None  => Ok(()),
     })
 }
 
 // The scope, the type parameters and the bounds all enter here and all
 // leave here, in one place, so a body that reports cannot leak a binding
-// into the next declaration.
-check_body = (c :: Checker, f: Function, body: BlockId, m: Module,
-              mi: usize) Res<(), AllocError> {
+// into the next declaration. The raised list drains here for the reason
+// `settle_raised` states: a `.try()` in one body would otherwise be
+// attributed to the next declaration walked.
+check_body = (c :: Checker, f: Function, body: BlockId, self_ty: Res<TyId>,
+              m: Module, mi: usize) Res<(), AllocError> {
     smark = c.mark();
     tmark = c.tvar_mark();
     bmark = c.bound_mark();
     owner = qualified(c, m, f).try();
     enter_generics(c, f, owner, mi).try();
-    ctx = body_ctx(c, f, mi).try();
+    ctx = body_ctx(c, f, mi, self_ty).try();
     bind_params(c, f, ctx).try();
     rmark = c.raised_mark();
     c.enter_owner(owner);
@@ -264,7 +285,12 @@ check_body = (c :: Checker, f: Function, body: BlockId, m: Module,
 // `ret` and `has_ret` are what `.try()` answers to. A function that does
 // not return a `Res` has nowhere to return a failure TO, which is the
 // whole of the `TryOutsideRes` rule.
-body_ctx = (c :: Checker, f: Function, mi: usize) Res<Ctx, AllocError> {
+//
+// `self_ty` present is what a member's body names `@Self` as freely as
+// its signature does; absent is a top-level function, where the poison
+// type stands in and `has_self` says so.
+body_ctx = (c :: Checker, f: Function, mi: usize, self_ty: Res<TyId>)
+           Res<Ctx, AllocError> {
     poison = c.types.unknown().try();
     base = Ctx(mi, poison);
     ret = f.ret.match({
@@ -272,7 +298,16 @@ body_ctx = (c :: Checker, f: Function, mi: usize) Res<Ctx, AllocError> {
         None  => c.types.prim("()"),
     }).try();
     Ok(Ctx(module: mi, ret: ret, has_ret: is_res(c, ret),
-           self_ty: poison, has_self: false));
+           self_ty: self_or_poison(self_ty, poison),
+           has_self: self_ty_given(self_ty)));
+}
+
+self_or_poison = (self_ty: Res<TyId>, poison: TyId) TyId {
+    self_ty.match({ Ok(t) => t, None => poison })
+}
+
+self_ty_given = (self_ty: Res<TyId>) bool {
+    self_ty.match({ Ok(_) => true, None => false })
 }
 
 is_res = (c: Checker, ty: TyId) bool {
