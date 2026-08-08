@@ -46,6 +46,7 @@ ty_at = sema.sema_cand
 impl_bound_type = sema.sema_supply
 type_from_ast, type_of, param_type = sema.sema_type
 check_ctor_fields = sema.sema_hoist
+Found, members_of = sema.sema_member
 
 // A GENERIC STRUCT IS CONSTRUCTED AT WHAT THE CALL WROTE, and at its own
 // parameters when the call wrote nothing.
@@ -60,9 +61,96 @@ construct* = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
     c.resolve_call(id, d.id).try();
     args ::= c.alloc.Vec<TyId>();
     ctor_args(c, call, d, ctx, args).try();
-    ty = c.types.named(d.id, d.qname, d.name, args).try();
+    applied = c.types.named(d.id, d.qname, d.name, args).try();
+    ty = settled_ctor_type(c, call, d, ctx, args, applied).try();
     check_ctor_fields(c, call, ty, ctx).try();
     Ok(ty);
+}
+
+// ---------------------------------------------------------------------
+// WHAT THE ARGUMENTS SAY A CONSTRUCTION'S TYPE ARGUMENTS ARE
+//
+// `Pair(first: 5, second: p)` writes no type arguments, and the only
+// thing that says which `Pair` it is are the arguments: `first: A` meets
+// a `5`. That is the SAME inference a generic function's arguments
+// already get above — asked of a field instead of a parameter — and
+// leaving it out is what made a local `Pair<A, B>` at its own free
+// variables, so `p.first` reached no member and the backend had no
+// layout to write.
+//
+// A PARAMETER NO ARGUMENT REACHES STAYS FREE, exactly as it does at a
+// call. `Range(0, 5)` names no `T` and nothing here is entitled to
+// guess one; the refusal belongs at the consumer, which is what
+// `has_var` is for.
+// ---------------------------------------------------------------------
+
+settled_ctor_type = (c :: Checker, call: Call, d: Def, ctx: Ctx,
+                     vars: Vec<TyId>, applied: TyId)
+                    Res<TyId, AllocError> {
+    ((vars.len == 0) || (call.targs.len > 0)).match({
+        true  => Ok(applied),
+        false => ctor_type_from_args(c, call, d, ctx, vars, applied),
+    })
+}
+
+ctor_type_from_args = (c :: Checker, call: Call, d: Def, ctx: Ctx,
+                       vars: Vec<TyId>, applied: TyId)
+                      Res<TyId, AllocError> {
+    inst ::= c.alloc.Inst();
+    call.args.loop((h, a) { unify_ctor_arg(c, a, applied, ctx, inst).try() });
+    (inst.len() == 0).match({
+        true  => Ok(applied),
+        false => rebuilt_ctor_type(c, d, vars, inst),
+    })
+}
+
+rebuilt_ctor_type = (c :: Checker, d: Def, vars: Vec<TyId>, inst: Inst)
+                    Res<TyId, AllocError> {
+    args ::= c.alloc.Vec<TyId>();
+    vars.loop((h, v) { args.add(arg_for(v, inst)).try() });
+    c.types.named(d.id, d.qname, d.name, args)
+}
+
+// NAMED ARGUMENTS ONLY, the restriction `check_ctor_fields` already
+// states: a field is reached by its name, and a positional argument to
+// a constructor is a different resolution and not this rule's to read.
+unify_ctor_arg = (c :: Checker, a: Arg, applied: TyId, ctx: Ctx,
+                  inst :: Inst) Res<(), AllocError> {
+    a.name.match({
+        None   => Ok(()),
+        Ok(nm) => unify_ctor_field(c, a, nm.text, applied, ctx, inst),
+    })
+}
+
+// The field is read off the type at its OWN parameters, so a declared
+// `first: A` comes back as the very `Var` `vars` holds and the binding
+// lands where `rebuilt_ctor_type` looks for it.
+unify_ctor_field = (c :: Checker, a: Arg, name: str, applied: TyId,
+                    ctx: Ctx, inst :: Inst) Res<(), AllocError> {
+    found ::= c.alloc.Vec<Found>();
+    members_of(c, applied, name, found).try();
+    found.get(0).match({
+        None  => Ok(()),
+        Ok(f) => unify(c, f.ty, settled_arg_ty(c, a, ctx).try(), inst),
+    })
+}
+
+// A TYPE ARGUMENT IS NOT AN ANNOTATION. An unsettled integer literal is
+// `int` and settles to the type WRITTEN for it; a type argument writes
+// nothing, so `Pair(first: 5, ..)` settles its `5` the way every other
+// unannotated `5` settles rather than making `int` the argument a
+// mangled symbol then carries — which would mint a `Pair<int, int>`
+// beside the `Pair<i32, i32>` every annotated program builds.
+settled_arg_ty = (c :: Checker, a: Arg, ctx: Ctx) Res<TyId, AllocError> {
+    got = c.type_of(a.value, ctx).try();
+    c.is_literal_ty(got).match({
+        false => Ok(got),
+        true  => c.types.prim(literal_default(c.prim_name(got))),
+    })
+}
+
+literal_default = (name: str) str {
+    name.eq("int").match({ true => "i32", false => "f64" })
 }
 
 ctor_args = (c :: Checker, call: Call, d: Def, ctx: Ctx, out :: Vec<TyId>)

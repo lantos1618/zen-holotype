@@ -242,13 +242,60 @@ write_initialisers = (be :: CBackend, c: Call, s: Struct, d: Def,
     // give the literal no width to take.
     dinst = recv_inst(be, ty).try();
     out.add_bytes("{ ").try();
+    // The count of initialisers WRITTEN, not the argument index, because
+    // an argument that supplies no field writes none and a comma keyed
+    // to `i` would then open or close the list on nothing.
+    seen ::= 0;
     c.args.loop((h, i, a) {
-        (i > 0).then(() { out.add_bytes(", ").try() });
-        write_initialiser(be, a, i, s, ty, dinst, dctx, ctx, out).try();
+        seen = seen + supplied_initialiser(be, a, i, s, ty, dinst, dctx,
+                                           ctx, seen, out).try();
     });
+    // Every argument named a field the struct does not declare, so none
+    // was written — and an EMPTY brace list is a GNU extension, not C99.
+    (seen == 0).then(() { out.add_bytes("0").try() });
     out.add_bytes(" }").try();
     leave_tparams(be, mark).try();
     Ok(());
+}
+
+// AN ARGUMENT THAT NAMES NO STORAGE MEMBER SUPPLIES NOTHING, and writing
+// a designator for it is worse than dropping it: C has no `.bogus` on a
+// struct that does not declare one, so `Param(.., value: None)` against a
+// `Param` with no `value` came out as a C error about a member the author
+// never wrote — or, when the value was a bare `None`, as `codegen has no
+// type for None`, because the field lookup that would have supplied the
+// expected type found nothing. The bootstrapper walks the DECLARED
+// fields and never sees the extra argument at all; this is the same
+// answer reached from the other side.
+//
+// A field that does not exist is a diagnostic SEMA owes and neither
+// implementation raises. Until one does, the two must at least agree.
+supplied_initialiser = (be :: CBackend, a: Arg, i: usize, s: Struct,
+                        ty: TyId, dinst: Inst, dctx: Ctx, ctx: Ctx,
+                        seen: usize, out :: String) Res<usize, AllocError> {
+    name = field_name(be, a, i, s, dinst, dctx).try();
+    is_storage_named(be, s, name, dinst, dctx).match({
+        false => Ok(0),
+        true  => designated(be, a, name, s, ty, dinst, dctx, ctx, seen, out),
+    })
+}
+
+designated = (be :: CBackend, a: Arg, name: str, s: Struct, ty: TyId,
+              dinst: Inst, dctx: Ctx, ctx: Ctx, seen: usize, out :: String)
+             Res<usize, AllocError> {
+    (seen > 0).then(() { out.add_bytes(", ").try() });
+    write_initialiser(be, a, name, s, ty, dinst, dctx, ctx, out).try();
+    Ok(1);
+}
+
+is_storage_named = (be :: CBackend, s: Struct, name: str, dinst: Inst,
+                    dctx: Ctx) bool {
+    got ::= false;
+    s.members.loop((h, m) {
+        (member_text(m).eq(name) && is_storage(be, m, dinst, dctx))
+            .then(() { got = true; });
+    });
+    got
 }
 
 // A STRUCT'S OWN MEMBER TYPES ARE READ IN THE MODULE THAT DECLARES IT,
@@ -264,10 +311,9 @@ decl_ctx_of = (be :: CBackend, d: Def) Ctx {
         has_ret: false, self_ty: TyId(index: 0), has_self: false)
 }
 
-write_initialiser = (be :: CBackend, a: Arg, i: usize, s: Struct,
+write_initialiser = (be :: CBackend, a: Arg, name: str, s: Struct,
                      ty: TyId, dinst: Inst, dctx: Ctx, ctx: Ctx,
                      out :: String) Res<(), AllocError> {
-    name = field_name(be, a, i, s, dinst, dctx).try();
     out.add_bytes(".").try();
     designator(be, ty, name, out).try();
     out.add_bytes(" = ").try();
