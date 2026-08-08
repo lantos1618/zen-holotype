@@ -253,9 +253,9 @@ def declare(self, name, ty, byref=False):
     self.scopes[-1][name] = ("(*%s)" % cname if byref else cname, ty)
     return cname
 ```
-`self.counts` is per-`FnCtx`, not per-scope, so the *second* `x` anywhere in a function body becomes `zu_l1x_2`. A `::` (mutable) parameter is stored as `(*zu_l4self)` so every reader downstream is oblivious (`declare` 2317).
+`self.counts` is per-`FnCtx`, not per-scope, so the *second* `x` anywhere in a function body becomes `zu_l1x_2`. A `::` (mutable) parameter is stored as `(*zu_l4self)` so every reader downstream is oblivious (`declare` 2311-2318).
 
-Generated identifiers (all `zg_`): `zg_t<N>` temporaries; `zg_brk<N>`/`zg_cnt<N>` loop labels; `zg_fmt<N>` format-done label; `zg_blk<N>` scope record; `zg_cap<N>` capture instance; `zg_live<N>` drop flag; `zg_d<N>` defer thunk, `zg_env<N>` its capture struct, `zg_u<N>` its member in the `zg_defer_env` union, `zg_c<i>` capture fields; `zg_v<mangled-fn-minus-zu_>` trait thunk (`cname = GEN + "v" + target[len(USR):]`, 1580); `zg_console_write`/`zg_console_write_byte`, composed rather than written (`console_thunk` 1642); `zg_a<i>` thunk params; `zg_self`, `zg_tag`, `zg_data`, `zg_pad`, `zg_elems`, `zg_m<tcode>`, `zg_tag<tcode>`, `zg_n`, `zg_slot`, `zg_fn`, `zg_env`, `zg_none`, `zg_argc`, `zg_argv`.
+Generated identifiers (all `zg_`): `zg_t<N>` temporaries; `zg_brk<N>`/`zg_cnt<N>` loop labels; `zg_fmt<N>` format-done label; `zg_blk<N>` scope record; `zg_cap<N>` capture instance; `zg_live<N>` drop flag; `zg_d<N>` defer thunk, `zg_env<N>` its capture struct, `zg_u<N>` its member in the `zg_defer_env` union, `zg_c<i>` capture fields; `zg_v<mangled-fn-minus-zu_>` trait thunk (`cname = GEN + "v" + target[len(USR):]`, 1580); `zg_console_write`/`zg_console_write_byte`, composed rather than written (`console_thunk` 1625-1654); `zg_a<i>` thunk params; `zg_self`, `zg_tag`, `zg_data`, `zg_pad`, `zg_elems`, `zg_m<tcode>`, `zg_tag<tcode>`, `zg_n`, `zg_slot`, `zg_fn`, `zg_env`, `zg_none`, `zg_argc`, `zg_argv`.
 
 ## 2.5 C reserved words / reserved identifier classes
 
@@ -311,7 +311,7 @@ static size_t zg_idx_s(int64_t i, size_t len, const char *file,
 
 `zg_trap` is `fflush(stdout)` **before** the stderr write and after — so stdout ordering is deterministic in the `.stderr` corpus. Exit code 134 (SIGABRT-equivalent), via `exit`, not `abort()`.
 
-Trap message strings, complete set: `"integer overflow"`, `"divide by zero"`, `"index out of bounds"`, `"unreachable match arm"` (via `zg_unreachable`), `"too many deferred closures on one block"` (`DEFER_RUNTIME` 6269).
+Trap message strings, complete set: `"integer overflow"`, `"divide by zero"`, `"index out of bounds"`, `"unreachable match arm"` (via `zg_unreachable`), `"too many deferred closures on one block"` (`DEFER_RUNTIME` 6254-6287).
 
 ## 3.2 The checked-helper generator (`_checked_helpers` 6441-6543) — verbatim
 

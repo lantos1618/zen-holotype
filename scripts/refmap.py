@@ -27,9 +27,12 @@ few that a unit word marks as quantities.
 
 WHAT EACH KIND OF CLAIM IS CHECKED AGAINST, strongest first.
 
-  def    the nearest symbol is defined in gen_c.py, so the line must
-         fall inside that definition. A range must either sit within
-         the definition or cover its first line.
+  def    the nearest symbol is defined in gen_c.py. A single line in
+         prose must be that definition's FIRST line -- looser than that
+         and an off-by-one hides inside a long function forever. A table
+         row may cite any line inside it, because its own header column
+         says "line" and it inventories call sites. A range may be the
+         definition or a region within it.
   quote  a sentence the document quotes must appear within the lines.
   path   `file:line` -- the file must exist and hold that line.
   text   the nearest symbol is NOT a definition (a local, a struct
@@ -46,10 +49,12 @@ WHAT THIS CANNOT CHECK. Green here is not the document being true.
     determinism harness; they are an unrelated target, and the numbers
     were in bounds the whole time. A human found that, and a human is
     still what finds it.
-  * A `def` claim is satisfied anywhere inside the definition, because
-    the document legitimately cites both a function's first line and
-    call sites within its body, and nothing distinguishes them. Inside
-    a 400-line function that is a wide target.
+  * A RANGE is satisfied anywhere inside the definition, so ranges are
+    much weaker than single lines: `(2853-2868)` and `(2854-2869)` both
+    pass. Prefer a single line and a symbol wherever one will do.
+  * A table row may cite any interior line, so an off-by-one in the
+    determinism table is not caught. The rows are an inventory of
+    `sorted()` sites and there is nothing finer to compare them to.
   * A `loose` claim has nothing to anchor to. They are counted and
     printed separately -- that number is the document saying how much
     of itself it cannot defend, and the repair for any one of them is
@@ -195,10 +200,12 @@ def symbol_in(span: str) -> str | None:
 
 
 class Claim:
-    def __init__(self, kind, line, shown, lo, hi, sym=None, path=None, at=None):
+    def __init__(self, kind, line, shown, lo, hi, sym=None, path=None, at=None,
+                 table=False):
         self.kind, self.line, self.shown = kind, line, shown
         self.lo, self.hi, self.sym, self.path = lo, hi, sym, path
-        self.at = at  # (start, end) columns of the number itself
+        self.at = at      # (start, end) columns of the number itself
+        self.table = table  # a `| line | what |` row, which cites INTERIOR lines
 
 
 def anchors_of(line: str) -> list[tuple[int, str]]:
@@ -240,7 +247,8 @@ def harvest(doc: str, known: set[str] | None = None) -> tuple[list[Claim], int]:
                 near = [s for end, s in anchors_of(raw[: m.start()])]
                 sym = (on.group(1) or on.group(2)) if on else (near[-1] if near else None)
             claims.append(Claim("path", n, m.group(0), lo, int(hi) if hi else lo,
-                                sym=sym, path=name, at=m.span()))
+                                sym=sym, path=name, at=m.span(),
+                                table=raw.lstrip().startswith("|")))
         if fence:
             continue
 
@@ -268,7 +276,7 @@ def harvest(doc: str, known: set[str] | None = None) -> tuple[list[Claim], int]:
                 sym = row
             if sym:
                 claims.append(Claim("sym", n, f"`{sym}` {shown}", lo, hi, sym=sym,
-                                    at=m.span()))
+                                    at=m.span(), table=bool(row)))
                 continue
             quote = QUOTED.search(masked[: m.start()].rstrip(" ("))
             if quote:
@@ -304,10 +312,7 @@ def main() -> int:
               " That sentence is gated on purpose -- the original header got"
               " it wrong, and putting it back is how it stays right.")
         return 1
-    if int(stated.group(1).replace(",", "")) != len(lines):
-        print(f"docs/GENC_REFERENCE_MAP.md: says gen_c.py is"
-              f" {stated.group(1)} lines; it is {len(lines)}")
-        return 1
+    wrong_size = int(stated.group(1).replace(",", "")) != len(lines)
     if not claims:
         print("refmap: parsed no claims out of docs/GENC_REFERENCE_MAP.md."
               " The document changed shape and this check just stopped"
@@ -325,14 +330,22 @@ def main() -> int:
         return occurs[sym]
 
     def check_def(claim: Claim, spans) -> None:
-        # Satisfied by sitting inside the definition, or by covering its
-        # first line -- the document cites both whole functions and lines
-        # within them.
+        # A SINGLE line in prose names a definition, so it must be that
+        # definition's first line -- anything looser lets an off-by-one
+        # sit inside a long function forever. A table row is different:
+        # its header column is literally "line" and it cites call sites
+        # inside a function, so there interior lines are the point.
+        # A range may be the definition, or a region within it.
         for start, end in spans:
-            if (claim.lo >= start and claim.hi <= end) or claim.lo <= start <= claim.hi:
+            if claim.lo == claim.hi:
+                if claim.lo == start or (claim.table and start <= claim.lo <= end):
+                    return
+            elif (claim.lo >= start and claim.hi <= end) or claim.lo <= start <= claim.hi:
                 return
         where = ", ".join(f"{a}" if a == b else f"{a}-{b}" for a, b in spans)
-        stale.append((claim, f"`{claim.sym}` is defined at {where}"))
+        inside = any(a <= claim.lo <= b for a, b in spans)
+        note = " -- name its first line, or cite a range" if inside else ""
+        stale.append((claim, f"`{claim.sym}` is defined at {where}{note}"))
 
     for claim in claims:
         if claim.kind == "path":
@@ -385,6 +398,9 @@ def main() -> int:
 
     for claim, why in stale:
         print(f"docs/GENC_REFERENCE_MAP.md:{claim.line}: {claim.shown} -- {why}")
+    if wrong_size:
+        print(f"docs/GENC_REFERENCE_MAP.md: says gen_c.py is"
+              f" {stated.group(1)} lines; it is {len(lines)}")
 
     checked = sum(tally.values())
     print(f"\nrefmap: {checked} claims checked ({tally['def']} def, "
@@ -392,7 +408,7 @@ def main() -> int:
           f"{tally['loose']} loose{f', {weak} too common to mean much' if weak else ''}), "
           f"{unread} not read, {len(stale)} stale")
 
-    if stale:
+    if stale or wrong_size:
         print("  Each line above names where the symbol actually is. A number you\n"
               "  cannot verify is worse than one you delete: if a claim names\n"
               "  something that no longer exists, SAY SO in the document -- a\n"
