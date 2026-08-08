@@ -18,15 +18,18 @@
 // never see on a real command line, and reads the answer back. Everything
 // that reads a file or prints a line is in `zen_build.zen`.
 //
-// ONLY `build` IS WRITTEN. PLAN.md's line is "thin cli: build / fmt /
-// test / lsp", and the other three are stage 2, stage 1's `build.zen`,
-// and stage 4 respectively. They are NAMED here and answered with "not
-// yet" — a guess at their behaviour would be three surfaces nobody has
-// designed, and a command that silently does nothing is worse than one
-// that says it is not written.
+// `build` AND `fmt` ARE WRITTEN. PLAN.md's line is "thin cli: build /
+// fmt / test / lsp"; `fmt` arrived with stage 2, and `test` and `lsp`
+// are stage 1's `build.zen` and stage 4 respectively. Those two are
+// still NAMED here and answered with "not yet" — a guess at their
+// behaviour would be two surfaces nobody has designed, and a command
+// that silently does nothing is worse than one that says it is not
+// written.
 
+Alloc, AllocError = std.mem
 str = std.text
 Vec = std.collections
+Range = std.core
 
 // What the command line asked for.
 //
@@ -37,7 +40,8 @@ Vec = std.collections
 // and leaving out a required flag is not the same as misspelling one,
 // because nothing the caller wrote is wrong.
 Cli* = Build(Job)
-     | Later(str)     // fmt / test / lsp — named, and not yet written
+     | Fmt(FmtJob)
+     | Later(str)     // test / lsp — named, and not yet written
      | Usage(str)     // the word that made no sense; empty means nothing was said
      | Missing(str)   // a flag the build needs and did not get
 
@@ -52,7 +56,44 @@ Job* = {
     emit_c*: bool,
 }
 
-USAGE*: str = "usage: zen build <root> [--entry <file>] --emit-c -o <file.c>"
+// `zen fmt` takes FILES and never a directory, and that is `std.env.Fs`
+// having no listing rather than an omission here: "walking a source
+// tree needs none of them: a module path is COMPUTED". A build can
+// compute its own file set from the entry's imports; a format cannot,
+// because a file nobody imports still has to be formatted. So the file
+// set is the caller's, exactly as `make fmt` supplies it.
+FmtJob* = {
+    // The whole command line. The paths are the words after `fmt`, and
+    // they are read back out rather than copied at parse time because
+    // `cli` takes no `Alloc` — gathering them allocates, and law 1 says
+    // the signature that allocates is the one that says so.
+    argv*: Vec<str>,
+
+    // `--check`: report, change nothing. Without it the files are
+    // rewritten in place.
+    check*: bool,
+
+    // Every path the caller named.
+    paths* = (self: @Self, a: Alloc) Res<Vec<str>, AllocError> {
+        out ::= a.Vec<str>();
+        Range(ARGS, self.argv.len).loop((h, i) {
+            word = arg_at(self.argv, i);
+            is_word(word).match({
+                true  => out.add(word),
+                false => Ok(()),
+            }).try();
+        });
+        Ok(out);
+    }
+}
+
+// `argv.get(0)` is the program path and `argv.get(1)` is the command,
+// so a command's own arguments start here. Spelled once: two scans read
+// it and a `2` in one of them is a scan that silently starts on the
+// command.
+ARGS*: usize = 2
+
+USAGE*: str = "usage: zen build <root> [--entry <file>] --emit-c -o <file.c>\n       zen fmt [--check] <file.zen>..."
 
 // What one argument is. A classifier rather than a chain of matches at
 // the scan site, because the scan has to stay readable while it also
@@ -71,11 +112,18 @@ cli* = (argv: Vec<str>) Cli {
 command = (argv: Vec<str>, name: str) Cli {
     name.eq("build").match({
         true  => job_of(argv),
-        false => not_build(name),
+        false => not_build(argv, name),
     })
 }
 
-not_build = (name: str) Cli {
+not_build = (argv: Vec<str>, name: str) Cli {
+    name.eq("fmt").match({
+        true  => fmt_of(argv),
+        false => not_written(name),
+    })
+}
+
+not_written = (name: str) Cli {
     is_later(name).match({
         true  => Cli.Later(name),
         false => Cli.Usage(name),
@@ -83,8 +131,56 @@ not_build = (name: str) Cli {
 }
 
 is_later = (name: str) bool {
-    name.eq("fmt") || name.eq("test") || name.eq("lsp")
+    name.eq("test") || name.eq("lsp")
 }
+
+// `zen fmt [--check] <file.zen>...`. One flag and a list of paths, so
+// the scan is the build's scan with four cases collapsed into two: a
+// word is a path, and every path is kept rather than the second one
+// being a mistake.
+//
+// A FORMAT WITH NO PATHS IS NOT A SMALLER FORMAT, it is nothing — the
+// same reading `built` takes of a build with no `--emit-c`, and for the
+// same reason: a command that silently does nothing is worse than one
+// that says what it wanted.
+fmt_of = (argv: Vec<str>) Cli {
+    check ::= false;
+    bad ::= "";
+    words ::= 0;
+    Range(ARGS, argv.len).loop((h, i) {
+        word = arg_at(argv, i);
+        word.eq("--check").match({
+            true  => { check = true; },
+            false => is_flag(word).match({
+                true  => { bad = word; h.break(); },
+                false => { words = words + word_count(word); },
+            }),
+        });
+    });
+    fmt_verdict(argv, check, bad, words);
+}
+
+word_count = (word: str) usize {
+    is_word(word).match({
+        true  => 1,
+        false => 0,
+    })
+}
+
+fmt_verdict = (argv: Vec<str>, check: bool, bad: str, words: usize) Cli {
+    bad.is_empty().match({
+        false => Cli.Usage(bad),
+        true  => (words == 0).match({
+            true  => Cli.Usage(""),
+            false => Cli.Fmt(FmtJob(argv: argv, check: check)),
+        }),
+    })
+}
+
+// A path, as opposed to a flag or a gap in a test's argument vector.
+// `paths` and `fmt_of` must agree on this or the count and the list
+// disagree, so they read one function.
+is_word = (word: str) bool { !word.is_empty() && !is_flag(word) }
 
 // The scan. One pass, one cursor, and a `bad` that stops it: the first
 // argument that makes no sense is the one worth naming, and reporting
@@ -95,7 +191,7 @@ job_of = (argv: Vec<str>) Cli {
     entry ::= "";
     emit ::= false;
     bad ::= "";
-    i ::= 2;
+    i ::= ARGS;
     loop(() { i < argv.len && bad.is_empty() }, (h) {
         arg = arg_at(argv, i);
         i = i + 1;

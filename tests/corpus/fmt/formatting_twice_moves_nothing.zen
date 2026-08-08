@@ -1,0 +1,56 @@
+// FORMATTING IS A FIXPOINT, which is the first half of PLAN.md's stage-2
+// gate: "idempotence — `fmt(fmt(x)) == fmt(x)` on the corpus". A
+// formatter without it cannot be put in CI at all, because the second
+// run of a green build is a diff.
+//
+// The inputs are exactly the shapes this stage changes something in — a
+// run of blank lines, a blank line above the first declaration and below
+// the last, whitespace behind a declaration, a file that never ended in
+// a newline — plus the two that have nowhere obvious to go: a file of
+// nothing but comments, and a file of nothing.
+//
+// It drives `render` and not the `zen fmt` command, for the reason
+// `tests/corpus/cli/` drives `cli`: `src/fmt/` takes a `Lexed` and hands
+// back bytes, so it touches no capability and a test can hand it source
+// no file on disk holds.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+scan, Source = lex.lex
+render = fmt.fmt
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    settles(a, "a run of blank lines", "a = 1\n\n\n\n\nb = 2\n").try();
+    settles(a, "a blank first line", "\n\na = 1\n").try();
+    settles(a, "a blank last line", "a = 1\n\n\n").try();
+    settles(a, "no final newline", "a = 1").try();
+    settles(a, "space behind a declaration", "a = 1   \nb = 2\t\n").try();
+    settles(a, "a trailing comment", "a = 1     // why\n\n\nb = 2\n").try();
+    settles(a, "comments and nothing else", "// one\n\n\n// two\n").try();
+    settles(a, "an empty file", "").try();
+    Ok(0);
+}
+
+// Format, format the result, and say whether the second run moved a
+// byte. `MOVED` is the failure, and it is spelled loudly because a
+// diff-of-a-diff is what a reader of a red gate has to reconstruct.
+settles = (a: Alloc, what: str, text: str) Res<(), AllocError> {
+    first = formatted(a, text).try();
+    second = formatted(a, first.view()).try();
+    println("{}: {}", what, verdict(first.view().eq(second.view())));
+    Ok(());
+}
+
+verdict = (settled: bool) str {
+    settled.match({
+        true  => "fixpoint",
+        false => "MOVED",
+    })
+}
+
+formatted = (a: Alloc, text: str) Res<String, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out = render(a, lexed).try();
+    Ok(out.text);
+}

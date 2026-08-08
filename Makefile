@@ -98,9 +98,25 @@ grammar/zen.so: grammar/grammar.js grammar/tree-sitter.json
 grammar-test: grammar
 	cd grammar && npx tree-sitter test
 
-## fmt: the whole tree must already be formatted
+## fmt: the whole tree must already be formatted.
+##
+## `find`, and not a directory argument, because `zen fmt` takes FILES.
+## std.env.Fs has no listing on purpose, and unlike a build a format
+## cannot compute its own file set from an entry's imports: a file
+## nobody imports still has to be formatted. Same shape as `parse`
+## above, for the same reason. This said `--check src example tests`,
+## which named three directories at a command that has never been able
+## to open one.
+##
+## THREE EXCLUSIONS, and each is a suite whose BYTES are the test.
+## must-fail/ and tests/parse/ exist to not parse, and a formatter
+## refuses a file it cannot parse. tests/corpus/lex/ carries a BOM, a
+## CRLF, a missing final newline and trailing whitespace on purpose --
+## formatting those files would delete the seven tests in them.
 fmt: build
-	./zen fmt --check $(ROOT) example tests
+	@find $(ROOT) example tests/corpus -name '*.zen' \
+	    -not -path 'tests/corpus/lex/*' -print0 \
+	  | xargs -0 --no-run-if-empty ./zen fmt --check
 
 clean:
 	rm -f zen zen-new grammar/zen.so

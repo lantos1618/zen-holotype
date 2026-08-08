@@ -66,7 +66,10 @@ zen/
 │   ├── gen/gen.zen                  # (1) backend-shared plumbing
 │   ├── gen/gen_name.zen             # (1) the C symbol for everything
 │   ├── gen/gen_c/gen_c.zen          # (1) the c backend: a folder, ~35 files
-│   ├── fmt/fmt.zen                  # (2) parse |> print — NOT WRITTEN
+│   ├── fmt/fmt.zen                  # (2) parse |> print, plus the guard
+│   ├── fmt/fmt_src.zen              # (2) a span, back to the bytes it names
+│   ├── fmt/fmt_out.zen              # (2) where the formatted bytes go
+│   ├── zen/zen_fmt.zen              # (2) `zen fmt`: read, compare, write
 │   ├── lsp/lsp.zen                  # (4) thin server over sema queries — NOT WRITTEN
 │   ├── meta/meta.zen                # (5) @meta over ast nodes — NOT WRITTEN
 │   ├── comptime/comptime.zen        # (5) the step-budgeted evaluator — NOT WRITTEN
@@ -306,6 +309,10 @@ The formatter is `parse |> print`, over the same parser and the same trivia the 
 Rules from `DESIGN.md`: align `=>` in match arms, short arms on one line, wrap long ones, trailing comma on the last arm, preserve comments, never change semantics.
 
 **Gate:** `zen fmt --check` over the whole tree, in CI, failing the build. Plus idempotence — `fmt(fmt(x)) == fmt(x)` on the corpus.
+
+**What landed, and what it deliberately does not do.** `src/fmt/` prints the FILE: declarations in source order, each comment at the column it was written in, a run of blank lines collapsed to one, the whitespace behind a declaration gone, exactly one newline at the end. Every declaration's own text is copied byte for byte. So none of the match-arm rules above is implemented yet, and that is the point rather than an omission — those are layout decisions nobody has written down, a printer inventing them reflows a hundred and twenty files on its first run, and this stage's own advice is that later means a flag day.
+
+**The guard is what makes shipping a subset safe.** Whitespace is not a token and a comment is one, so formatting must leave the token stream identical — same count, same kind, same bytes. `render` re-lexes its own output and checks exactly that before returning it; a file that fails is left untouched and the build goes red. Every rule added to the printer later is checked by the same three lines, which is why the next form can be added one at a time instead of all at once. It caught its first bug within a minute of existing: a trailing comment belongs to the outermost node whose span ends before it, which for a multi-line enum is the last VARIANT and not the declaration, so a slice cut to `Decl.span` dropped the sentence in eight files.
 
 ---
 

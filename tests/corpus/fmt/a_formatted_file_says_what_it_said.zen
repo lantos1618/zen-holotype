@@ -1,0 +1,69 @@
+// THE SECOND HALF OF THE STAGE-2 GATE: a formatted file still means
+// what the file meant. `render` checks it on every call — the output is
+// re-lexed and its token stream compared to the input's, one for one —
+// and this test is that guard being exercised rather than trusted:
+//
+//   - it holds for input this stage rewrites (blank lines, gaps)
+//   - it holds for a comment in every position a comment can be in
+//   - `faithful` is FALSE for nothing here, and the day a printing rule
+//     is added that breaks it, this line is what goes red
+//
+// WHITESPACE IS NOT A TOKEN AND A COMMENT IS ONE, which is why the
+// property is checkable at all: everything a formatter may change is
+// invisible to the lexer, and everything it may not is a token.
+//
+// The golden output is here in full because "the comment moved" and
+// "the comment is gone" are both green under a property test that only
+// counts tokens — the position of a `//` is not a token's position, and
+// the one thing this stage promises about a comment is that it stays
+// where it was written.
+//
+// IT ALSO PINS THE ASYMMETRY, which is the honest shape of a formatter
+// that models the file and not yet the declaration: the run of blank
+// lines BETWEEN two declarations collapses to one, and the run INSIDE
+// `Point` does not. Inside a declaration is verbatim — the author's
+// bytes, whatever they are — and a rule that reached in there would be
+// this stage having an opinion about a form it does not print.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Range = std.core
+scan, Source = lex.lex
+render = fmt.fmt
+
+// A comment in every position the parser has a run for: leading a
+// declaration, trailing one on its own line, continuing a trailing
+// comment onto the next line (which belongs to the NEXT declaration,
+// and is the case a printer with an opinion about margins destroys),
+// inside a declaration, and after the last one at end of file.
+SOURCE: str = "// leads the file\n\n\nShape = Circle   // trails a declaration\n                 // and continues, indented, under itself\n\nPoint = {\n    x: i32,   // inside, and inside is verbatim\n\n\n    y: i32,\n}\n\n// nothing follows this but the end of the file\n"
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    lexed = scan(a, Source(file: "in.zen", text: SOURCE)).try();
+    out = render(a, lexed).try();
+
+    println("diagnostics: {}", out.diags.len);
+    println("faithful: {}", out.faithful);
+    println("---");
+    show(out.text.view());
+    println("---");
+    Ok(0);
+}
+
+// The bytes, with the final newline the file ends in shown as the end
+// of the last line rather than as a blank one. `println` appends a
+// newline of its own, so printing the buffer whole would put a line in
+// the expectation that is not in the file.
+show = (text: str) () {
+    line ::= 0;
+    from ::= 0;
+    Range(0, text.len).loop((h, i) {
+        (text.index(i) == '\n').then(() {
+            line = line + 1;
+            println("{} |{}", line, text.slice(from, i));
+            from = i + 1;
+        });
+    });
+}
