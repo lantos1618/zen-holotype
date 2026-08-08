@@ -1,0 +1,263 @@
+// src/sema/sema_layout.zen
+// Whether a struct has a size at all.
+//
+// DESIGN.md's rule is one sentence with two halves. `Node = { next:
+// Ptr<Node> }` is legal, because a pointer is one word and the layout
+// terminates; `Node = { next: Node }` is not, because it does not. The
+// second half was the last rule this compiler named a fault for and
+// never raised: nothing asked the layout question, so a struct that
+// contains itself by value reached gen_c and became C that a C compiler
+// rejects, with no Zen diagnostic to say why.
+//
+// A DECLARATION WALK, NOT A QUERY, for `sema_decl.zen`'s stated reason:
+// nobody asks a node this. `Room` and `Door` in the mutual case are
+// mentioned by no expression anywhere, and they still have to have
+// sizes.
+//
+// WHAT STOPS THE WALK. Each of these is an indirection or an
+// abstention, never an oversight:
+//
+//   - a field whose type is not a declared nominal — a primitive, a
+//     function, a union, a `Res`. None can close a cycle of by-value
+//     fields.
+//   - a GENERIC struct, at either end. `Ptr<T>` and `Vec<T>` ARE the
+//     indirections the rule names, and a cycle visible only after a
+//     type argument is substituted needs the substitution to see it —
+//     which is `sema_inst.zen`'s, and asking for it here would make a
+//     layout walk instantiate. Declining costs a diagnostic; it never
+//     refuses a program.
+//
+// ONE MISTAKE, ONE DIAGNOSTIC, and that is what `done` is really for.
+// `Room -> Door -> Room` is one cycle reachable from two declarations,
+// so the structs on it are marked the moment it is reported and the
+// walk from the other end says nothing.
+
+Ast, Decl, DeclKind, Struct, Member, MemberKind, Field = ast
+Ident, Pos, TypeId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+Range = std.core
+DeclId = sema.sema_id
+TyId, TyNamed, Types = sema.sema_ty
+World, Def, ModuleTable, decl_at = sema.sema_def
+SemaFault, NameFault = sema.sema_diag
+Checker, Ctx = sema.sema_check
+type_from_ast = sema.sema_type
+
+// One struct on the walk, and the FIELD that reached it. A blame is
+// always an edge, so the root frame's `site` is never read — which is
+// why it costs nothing to give the root the struct's own name.
+Frame = {
+    id: DeclId,
+    site: Ident,
+}
+
+// Every struct in the program, each walked at most once.
+check_layout* = (c :: Checker) Res<(), AllocError> {
+    path ::= c.alloc.Vec<Frame>();
+    done ::= c.alloc.Vec<DeclId>();
+    Range(0, c.world.count()).loop((h, mi) {
+        module_layout(c, mi, path, done).try();
+    });
+    Ok(());
+}
+
+module_layout = (c :: Checker, mi: usize, path :: Vec<Frame>,
+                 done :: Vec<DeclId>) Res<(), AllocError> {
+    c.world.table_at(mi).match({
+        None    => Ok(()),
+        Ok(t)   => table_layout(c, t, path, done),
+    })
+}
+
+table_layout = (c :: Checker, t: ModuleTable, path :: Vec<Frame>,
+                done :: Vec<DeclId>) Res<(), AllocError> {
+    t.defs.loop((h, d) { root_layout(c, d, path, done).try() });
+    Ok(());
+}
+
+// A struct already walked is skipped, and that is what makes this
+// linear rather than a walk per path through the field graph: if a
+// struct sits on a cycle, the walk that STARTED at it found it, so
+// arriving at it a second way can add nothing.
+root_layout = (c :: Checker, d: Def, path :: Vec<Frame>,
+               done :: Vec<DeclId>) Res<(), AllocError> {
+    struct_of(c, d.id).match({
+        None    => Ok(()),
+        Ok(s)   => enter(c, d.id, s, s.name, path, done),
+    })
+}
+
+enter = (c :: Checker, id: DeclId, s: Struct, site: Ident,
+         path :: Vec<Frame>, done :: Vec<DeclId>) Res<(), AllocError> {
+    contains(done, id).match({
+        true    => Ok(()),
+        false   => walk(c, id, s, site, path, done),
+    })
+}
+
+walk = (c :: Checker, id: DeclId, s: Struct, site: Ident,
+        path :: Vec<Frame>, done :: Vec<DeclId>) Res<(), AllocError> {
+    path.add(Frame(id: id, site: site)).try();
+    s.members.loop((h, m) { field_edge(c, m, path, done).try() });
+    path.take(path.len - 1);
+    done.add(id).try();
+    Ok(());
+}
+
+// Only a FIELD: a struct-body constant is one value per type and a
+// function member is code, so neither is storage the layout has to
+// account for.
+field_edge = (c :: Checker, m: Member, path :: Vec<Frame>,
+              done :: Vec<DeclId>) Res<(), AllocError> {
+    m.kind.match({
+        Field(f)    => typed_edge(c, f, path, done),
+        _           => Ok(()),
+    })
+}
+
+typed_edge = (c :: Checker, f: Field, path :: Vec<Frame>,
+              done :: Vec<DeclId>) Res<(), AllocError> {
+    f.type.match({
+        None    => Ok(()),
+        Ok(t)   => edge_from_top(c, t, f.name, path, done),
+    })
+}
+
+// A written type means what it means WHERE IT WAS WRITTEN, so the
+// module is the one the struct on top of the path was declared in.
+edge_from_top = (c :: Checker, t: TypeId, site: Ident, path :: Vec<Frame>,
+                 done :: Vec<DeclId>) Res<(), AllocError> {
+    path.get(path.len - 1).match({
+        None    => Ok(()),
+        Ok(fr)  => edge_from(c, fr, t, site, path, done),
+    })
+}
+
+// `type_from_ast` is the one reading of a written type, so a field
+// written `Ptr<Node>` answers `Ptr` here and never `Node`. The
+// indirection rule falls out of the type rather than being spelled a
+// second time.
+edge_from = (c :: Checker, fr: Frame, t: TypeId, site: Ident,
+             path :: Vec<Frame>, done :: Vec<DeclId>) Res<(), AllocError> {
+    poison = c.types.unknown().try();
+    ctx = Ctx(fr.id.module.to_usize(), poison);
+    ty = c.type_from_ast(t, ctx).try();
+    named_decl(c, ty).match({
+        None        => Ok(()),
+        Ok(next)    => step(c, next, site, path, done),
+    })
+}
+
+named_decl = (c: Checker, ty: TyId) Res<DeclId> {
+    c.types.at(ty).match({
+        Named(n)    => Ok(n.decl),
+        _           => None,
+    })
+}
+
+step = (c :: Checker, next: DeclId, site: Ident, path :: Vec<Frame>,
+        done :: Vec<DeclId>) Res<(), AllocError> {
+    index_on(path, next).match({
+        Ok(k)   => close(c, k, site, path, done),
+        None    => descend(c, next, site, path, done),
+    })
+}
+
+descend = (c :: Checker, next: DeclId, site: Ident, path :: Vec<Frame>,
+           done :: Vec<DeclId>) Res<(), AllocError> {
+    struct_of(c, next).match({
+        None    => Ok(()),
+        Ok(s)   => enter(c, next, s, site, path, done),
+    })
+}
+
+// THE BLAME IS THE EARLIEST FIELD ON THE CYCLE, not whichever one the
+// walk happened to arrive by. `Room -> Door -> Room` is one mistake
+// however it is reached, so the diagnostic has to land in the same
+// place either way — and the walk order is a pure function of the
+// source, so two runs agree.
+//
+// The cycle's edges are the frames after `k`, plus the one that closes
+// it. Frame `k` itself was entered by an edge from OUTSIDE the cycle,
+// so its site is not part of it.
+close = (c :: Checker, k: usize, site: Ident, path :: Vec<Frame>,
+         done :: Vec<DeclId>) Res<(), AllocError> {
+    blame ::= site;
+    Range(k + 1, path.len).loop((h, i) {
+        blame = earlier(blame, site_at(path, i, blame));
+    });
+    c.report(blame.span.file, blame.span,
+             SemaFault.InfiniteSize(NameFault(name: blame.text))).try();
+    seal(k, path, done).try();
+    Ok(());
+}
+
+// Every struct on the cycle, marked reported. The walk from its other
+// end then skips it, which is the whole of "one mistake, one
+// diagnostic" here.
+seal = (k: usize, path: Vec<Frame>, done :: Vec<DeclId>)
+       Res<(), AllocError> {
+    Range(k, path.len).loop((h, i) {
+        path.get(i).match({
+            None    => Ok(()),
+            Ok(fr)  => done.add(fr.id),
+        }).try();
+    });
+    Ok(());
+}
+
+// ---------------------------------------------------------------------
+// the small answers
+// ---------------------------------------------------------------------
+
+// The struct a declaration is, when it is one this walk can answer
+// about. A generic struct abstains — see the header.
+struct_of = (c: Checker, id: DeclId) Res<Struct> {
+    decl_at(c.tree, id).match({
+        None    => None,
+        Ok(x)   => monomorphic_struct(x),
+    })
+}
+
+monomorphic_struct = (x: Decl) Res<Struct> {
+    x.kind.match({
+        Struct(s)   => (s.tparams.len == 0).match({
+            true    => Ok(s),
+            false   => None,
+        }),
+        _           => None,
+    })
+}
+
+index_on = (path: Vec<Frame>, id: DeclId) Res<usize> {
+    Range(0, path.len).find((i) { at_is(path, i, id) })
+}
+
+at_is = (path: Vec<Frame>, i: usize, id: DeclId) bool {
+    path.get(i).match({
+        None    => false,
+        Ok(fr)  => fr.id.eq(id),
+    })
+}
+
+contains = (done: Vec<DeclId>, id: DeclId) bool {
+    Range(0, done.len).find((i) {
+        done.get(i).match({ None => false, Ok(x) => x.eq(id) })
+    }).match({ Ok(_) => true, None => false })
+}
+
+site_at = (path: Vec<Frame>, i: usize, fallback: Ident) Ident {
+    path.get(i).match({ Ok(fr) => fr.site, None => fallback })
+}
+
+// Nearer the top of a file. Two files cannot be ordered by position, so
+// the one found first wins; the walk order is fixed by the source, so
+// the answer is still the same on every run.
+earlier = (a: Ident, b: Ident) Ident {
+    before(b.span.start, a.span.start).match({ true => b, false => a })
+}
+
+before = (x: Pos, y: Pos) bool {
+    (x.line < y.line) || ((x.line == y.line) && (x.col < y.col))
+}

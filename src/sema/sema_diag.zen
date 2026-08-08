@@ -89,6 +89,7 @@ SemaFault* =
     // types
     | TypeMismatch(TypeFault)          // expected X, found Y
     | NotCallable(TypeFault)           // the callee is not a function
+    | LiteralOutOfRange(TypeFault)     // the family fits, the value does not
 
     // overloading
     | NoOverload(NameFault)            // no candidate of that arity or those types
@@ -121,7 +122,7 @@ SemaFault* =
     | ProvenIndexOutOfBounds(NameFault)
 
     // termination
-    | InfiniteSize(TypeFault)          // a field cycle with no indirection
+    | InfiniteSize(NameFault)          // a field cycle with no indirection
     | InstantiationDepth(NameFault)    // the instantiation set is infinite
 
 // Where the mistake is, and which one it is.
@@ -150,6 +151,7 @@ message* = (fault: SemaFault) str {
         NoSuchField(_)       => "no such field or method on this type",
         TypeMismatch(_)      => "type mismatch",
         NotCallable(_)       => "this is not a function, so it cannot be called",
+        LiteralOutOfRange(_) => "out of range: a literal's type comes from its context, and the context here cannot hold it",
         NoOverload(_)        => "no overload matches: resolution is on declared parameter types and arity",
         DuplicateSignature(_) => "duplicate signature: parameter names are documentation, not identity",
         AmbiguousOverload(_) => "ambiguous overload: a generic parameter swallows a concrete one, so these two can never be told apart at a call site",
@@ -213,6 +215,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         ProvenDivideByZero(f)     => out.write_name(f),
         ProvenIndexOutOfBounds(f) => out.write_name(f),
         InstantiationDepth(f)     => out.write_name(f),
+        InfiniteSize(f)           => out.write_name(f),
 
         NoSuchField(f)            => write_types(out, types, f),
         TypeMismatch(f)           => write_types(out, types, f),
@@ -223,7 +226,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         TryAbsenceIntoFailure(f)  => write_types(out, types, f),
         NoErrorConversion(f)      => write_types(out, types, f),
         HoistAmbiguous(f)         => write_types(out, types, f),
-        InfiniteSize(f)           => write_types(out, types, f),
+        LiteralOutOfRange(f)      => write_literal(out, types, f),
 
         DuplicateSignature(f)     => write_pair(out, f),
         AmbiguousOverload(f)      => write_pair(out, f),
@@ -285,6 +288,30 @@ write_types = (out :: String, types: Types, f: TypeFault)
     types.write_name(f.expected, out).try();
     out.add_bytes(", found ").try();
     types.write_name(f.found, out).try();
+    Ok(());
+}
+
+// `literal 2147483648 does not fit i32`. The number is the literal as
+// WRITTEN — a slice of the source, so nothing is formatted into the
+// fault — and it is absent exactly when the value was not written as
+// one: `-1` is unary minus applied to `1`, and quoting `1` in a
+// sentence about a value of `-1` would be false. The type still names
+// itself, so the sentence is complete either way.
+//
+// `text` is bound before the closure and not read through `f` inside
+// it: the bootstrapper loses a captured struct's type across a lambda
+// boundary, and `quote` above captures a bare `str` for the same
+// reason.
+write_literal = (out :: String, types: Types, f: TypeFault)
+                Res<(), AllocError> {
+    text = f.name;
+    out.add_bytes(": literal").try();
+    (text.len > 0).then(() {
+        out.add_bytes(" ").try();
+        out.add_bytes(text).try();
+    });
+    out.add_bytes(" does not fit ").try();
+    types.write_name(f.expected, out).try();
     Ok(());
 }
 
