@@ -4,46 +4,47 @@ Ten bugs, most-blocking first. Every reproducer is a complete program, run
 the way `tests/run.py` runs one: a compilation root holding the program as
 `main.zen` plus the whole of `src/` beside it.
 
-**One of them I fixed**, because it could not be worked around — §1. It is a
-fifteen-line change to `bootstrap/gen_c.py` and the diff is below. Everything
-else is recorded and worked around in `src/lex/`.
-
 ---
 
-## First: what is in this worktree that is not mine
+## Where this ledger stands
 
-The orchestrator's note reported 308 insertions in `bootstrap/gen_c.py` and 77
-in `bootstrap/sema.py` here. Those were real and none of them were mine.
+**Re-measured 2026-08-08 against `39313c6a`**, every reproducer below re-run
+through BOTH toolchains. Six of the ten are closed, one is closed in the
+self-hosted compiler only, and one — §4 — was recorded too narrowly and hides a
+worse defect than the one it describes.
 
-**This worktree was created from the wrong base commit** — `3800ad29`, a
-`main`-era tree with `src/compiler/` and no `docs/` at all. I detached onto
-`zen/reset` to get the tree the brief describes. At `bf58f405` that tree did
-not build: `src/std/std.zen` re-exported from `std.build` and `src/std/build/`
-was not in the commit (the `.gitignore` bug, since fixed), so every compile
-died and the baseline was 98 passed / 201 failed. I copied `bootstrap/*.py`
-and `src/std/` wholesale from `/home/ubuntu/zenc` to get a usable baseline.
-Seven of the eight bootstrap files were byte-identical to the shared checkout;
-the eighth differed only because it had been written to 29 seconds after I
-copied it.
+| § | what it claimed | bootstrap | `./zen` |
+|---|---|---|---|
+| 1 | `Ptr.to<U>()` no-op corrupts every `Vec` | **closed** | **closed** |
+| 2 | match takes its type from arm one, drops a bare `Ok(x)` | **closed** | **closed** |
+| 3 | void call in trailing-expression position discarded | **closed** | **closed** |
+| 4 | a `::` field's default is ignored | **open** | **open, and worse — see below** |
+| 5 | `==` on two enums passes sema, emits invalid C | **closed** | **closed** |
+| 6 | grammar reads `//` inside a string literal as a comment | n/a | **closed** |
+| 7 | method on an un-imported type resolves globally by name | **open** | open, different shape |
+| 8 | `--root .` unusable — discovery walks `tests/` | **open** | not measured |
+| 9 | same-named constructor loses to positional construction | **closed** | **closed** |
+| 10 | `loop` with `h.break(value)` does not infer its result | **open** | **closed** |
 
-That copy is now gone. The worktree has since been brought onto current
-`zen/reset` with `git restore --source=zen/reset`, and **the whole difference
-between this worktree and `zen/reset` is now**:
+A section marked closed keeps its reproducer, because a ledger that deletes
+what it fixed cannot be re-run — and re-running is the only reason to keep it.
 
-```
-$ git diff --stat zen/reset -- bootstrap
- bootstrap/gen_c.py | 15 ++++-
-```
-
-That fifteen lines is §1 below and nothing else.
+**§4 is the one to read.** It was filed as "a default on a `::` field is
+ignored". That is true, and it is true of BOTH implementations, not just the
+bootstrapper as filed. But the reproducer's other half is worse and was never
+written down: **a `:` field that has a default is dropped from the emitted
+struct entirely by the self-hosted compiler**, so any program that reads one
+fails to compile as C. Nothing catches either, because `src/` declares zero
+fields with defaults (`grep` over the tree: none) and no test in the corpus
+declares one. DESIGN.md:117 and DESIGN.md:1359 both specify the feature.
 
 ---
 
 ## 1. `Ptr.to<U>()` is a no-op, so `Arena.realloc` reads its header as one byte
 
-**Blocking: absolutely, and not workaroundable.** This is memory corruption in
-the standard library, it is silent, and it hits every collection in the
-language once it is big enough.
+**CLOSED.** The reproducer below now prints `100 101 ... 108` under both
+toolchains. It was memory corruption in the standard library, silent, and it
+hit every collection in the language once it was big enough.
 
 ### Symptom
 
@@ -113,54 +114,19 @@ symptom above looks like before you know why.
 ever held its own low byte in the first place; both sides truncate, which is
 why nothing errors.
 
-### The fix, as applied
+### The fix
 
-```diff
-@@ class FnCtx:
-         if rty is not None and rty[0] == "ptr":
--            got = self.ptr_method(rcode, rty, name, argnodes, node)
-+            got = self.ptr_method(rcode, rty, name, argnodes, node, targs)
-             if got is not None:
-                 return got
-
--    def ptr_method(self, rcode, rty, name, argnodes, node):
-+    def ptr_method(self, rcode, rty, name, argnodes, node, targs=()):
-
-         if name == "to" and len(argnodes) == 0:
-+            # `to<U>` must change the ELEMENT type: read, write, bytes and
-+            # copy_from all scale by it, so returning the receiver's own type
-+            # leaves them scaling by T.  Arena.realloc reads its usize header
-+            # through `.to<usize>()`, so as a no-op that read is ONE BYTE, and
-+            # every Vec whose buffer reaches 256 bytes silently loses the rows
-+            # written before each grow.
-+            if targs:
-+                u = self.e.resolve_type(targs[0], self.subst, self.parts, self.self_ty)
-+                if u not in (None, UNKNOWN):
-+                    return ("((%s *)%s)" % (self.e.ctype(u).strip(), paren(rcode)),
-+                            ("ptr", u))
-             return (rcode, rty)
-```
-
-### Evidence it is right and costs nothing
-
-Same tree, same tests, only this diff differing:
-
-| | passed | failed |
-|---|---|---|
-| `zen/reset` `gen_c.py` | 299 | 8 |
-| with this fix | **301** | **6** |
-
-The two that flip are `corpus/lex_zen/token_kinds` and
-`corpus/lex_zen/big_input` — the two lexer tests that scan more than eight
-tokens. The six that remain failing are pre-existing and untouched
-(`own/defer_runs_before_drop`, `own/scope_passed_inward`, and the four
-`std/display_*`).
+`ptr_method` now takes the call's type arguments and returns `("ptr", U)`, so
+`to<U>` changes the element type that `read`, `write`, `bytes` and `copy_from`
+scale by. `corpus/lex_zen/token_kinds` and `corpus/lex_zen/big_input` — the two
+lexer tests that scan more than eight tokens — are the ones that flipped, and
+they are the standing guard: both are in the corpus and both are green.
 
 **If you see a regression in `corpus/std/res_try_error_sets_merge` while
-integrating this, it is a stale `bootstrap/__pycache__`.** It cost me twenty
-minutes; `rm -rf bootstrap/__pycache__` and it passes.
+touching `bootstrap/`, it is a stale `bootstrap/__pycache__`.** It cost the
+original author twenty minutes; `rm -rf bootstrap/__pycache__` and it passes.
 
-### Why there is no workaround
+### Why there was no workaround
 
 `Vec` grows geometrically, so the buffer passes 256 bytes for any element type
 at some doubling — element size under 32 bytes only postpones it. There is no
@@ -171,9 +137,9 @@ avoids it.
 
 ## 2. A match takes its type from its FIRST arm, and a bare `Ok(x)` there is dropped
 
-**Blocking: yes, and silent.** This one cost the most time, because the
-program compiles and returns a zeroed `Res` whose tag happens to read as
-`Ok(false)`.
+**CLOSED.** The reproducer prints `true` under both toolchains. It was the
+costliest of the ten, because the program compiled and returned a zeroed `Res`
+whose tag happened to read as `Ok(false)`.
 
 ### Symptom
 
@@ -214,23 +180,23 @@ In `src/lex/lex_literal.zen` that made `1.5` lex as an integer literal: the
 `Ok(true)` saying "this is a float" was thrown away and the zeroed return read
 as `Ok(false)`.
 
-### Workaround in `src/lex/`
+### What the workaround left behind
 
-Put the arm whose type is known — the call returning `Res<T, E>` — **first**,
-so the match takes its type from that. Four matches in `src/lex/` are ordered
-`false` before `true` for this reason and no other; each is at the point where
-a reader would expect the other order.
-
-The related shape, `{ effect(); Ok(x) }` as a block arm, also loses its value.
-`DESIGN.md`'s own `Vec.set` writes `true => { self.data.write(i, value); Ok(()) }`,
-so the specified form is the one that breaks.
+While it was open, `src/lex/` put the arm whose type was known — the call
+returning `Res<T, E>` — **first**, so the match took its type from that. Four
+matches in `src/lex/` were ordered `false` before `true` for that reason and no
+other, each at a point where a reader would expect the other order. **Now that
+the bug is closed those four are load-bearing for nothing**, and anyone
+touching `src/lex/` should put them back in the natural order rather than
+preserve a shape whose only justification has gone.
 
 ---
 
 ## 3. A void call in trailing-expression position is silently discarded
 
-**Blocking: no — the discipline that avoids it is `DESIGN.md`'s own rule.** But
-there is no diagnostic and no C error; the program just does not do the thing.
+**CLOSED.** The reproducer prints `1` and `1` under both toolchains — the
+trailing-expression form now runs its effect. While it was open there was no
+diagnostic and no C error; the program simply did not do the thing.
 
 ```groovy
 Alpha = {
@@ -248,39 +214,101 @@ main = (env: Env) Res<i32, AllocError> {
 }
 ```
 
-`gen_c` emits an empty C function body for `once`. Worth pairing with §2: a
+`gen_c` emitted an empty C function body for `once`. Worth pairing with §2: a
 value in trailing position must NOT be semicolon-terminated, and an effect
-MUST be. That is exactly "a statement ends with `;`", so the two bugs together
-punish every departure from the specified style in one direction or the other,
-and never say so.
+MUST be. That is exactly "a statement ends with `;`", so while both were open
+they punished every departure from the specified style in one direction or the
+other, and never said so.
 
 ---
 
-## 4. A default on a `::` field is ignored at construction
+## 4. Field defaults do not work, in two different ways
+
+**OPEN, and filed too narrowly.** The original entry said "a default on a `::`
+field is ignored" and blamed the bootstrapper. Re-measuring found two defects,
+one of them worse and unrecorded.
 
 ```groovy
 Konst = { a: usize = 7, b :: usize = 9 }
 
 main = (env: Env) Res<i32, AllocError> {
     k = Konst();
-    println("{} {}", k.a, k.b);      // prints `7 0`; `7 9` is correct
+    println("{} {}", k.a, k.b);      // `7 9` is correct
     Ok(0);
 }
 ```
 
-The `:` field's default is applied; the `::` field's is not — it is
-zero-initialised. Nothing in `std` notices because every `::` default there is
-`0` or a null pointer (`Vec`'s `len* :: usize = 0`, `data :: Ptr<T> =
-null_ptr<T>()`), so a zeroed struct is indistinguishable from the intent.
-`DESIGN.md`'s own `Opts` has `verbose :: bool = false` — same coincidence.
+### 4a. A `::` field's default is ignored — in BOTH implementations
 
-**Workaround:** `Cursor` has no field defaults; `cursor_at` supplies all four
-explicitly. `line: 1` is exactly the non-zero default that would have been
-lost.
+```groovy
+C = { a :: usize = 9, b :: bool = true }
+// both toolchains print `0 false`; `9 true` is correct
+```
+
+The field is zero-initialised and the default is dropped. **This is not a
+bootstrapper bug**, as filed — the self-hosted compiler does exactly the same
+thing, which is why no differential test can see it: the two implementations
+agree, and they are both wrong. Only a corpus test asserting the printed value
+can catch it, and none exists.
+
+### 4b. A `:` field that HAS a default is dropped from the struct entirely
+
+This is the one nobody wrote down, and it is worse:
+
+```groovy
+A = { a: usize = 7 }
+main = (env: Env) Res<i32, AllocError> { println("{}", A().a); Ok(0); }
+```
+
+The bootstrapper prints `7`. The self-hosted compiler emits C that will not
+compile, because the field does not exist in the emitted struct:
+
+```
+error: 'zu_t2_4main1A' has no member named 'zu_m1a'
+    zg_print_u64((uint64_t)((zu_t2_4main1A){0}.zu_m1a));
+```
+
+`{ a: usize }` with no default is fine, and `{ a: usize = 7, b: usize }` keeps
+`b` and drops `a` — so the trigger is precisely **immutable field, with a
+default**. The storage was elided without teaching the reader, which reads like
+a half-landed "an immutable field with a default is a constant, not storage"
+decision. If that IS the intent, DESIGN.md does not say it and the member
+access has to fold to the constant; if it is not, the field must be emitted.
+
+### Why neither is caught
+
+`src/` declares **zero** fields with defaults — the grep over the whole tree
+returns nothing — and no corpus test declares one either. The compiler does not
+use the feature, so the compiler cannot notice it is broken. DESIGN.md:117
+("`= default` makes a field optional at construction") and DESIGN.md:1359 ("a
+field with a default is optional; no default and no `Res` means required")
+both specify it, and DESIGN.md's own `Opts` example uses `verbose :: bool =
+false` — a default of `false`, which is indistinguishable from the zeroing.
+That coincidence runs through `std` as well: `Vec`'s `len* :: usize = 0` and
+`data :: Ptr<T> = null_ptr<T>()` are both already zero.
+
+**Fixing this needs a corpus test with a NON-ZERO default first** — a test
+whose expected output is `7 9`, which is red today. That test is the gate; the
+fix is downstream of it.
+
+**Workaround, while open:** `Cursor` has no field defaults; `cursor_at`
+supplies all four explicitly. `line: 1` is exactly the non-zero default that
+would have been lost.
 
 ---
 
 ## 5. `==` on two enum values passes sema and emits invalid C
+
+**CLOSED, the way this entry asked for.** Both toolchains now refuse it in
+sema, and the must-fail test the entry said "does not exist" now does —
+`tests/must-fail/sema/eq_needs_an_impl`:
+
+```
+main.zen:6:19: `==` needs an `Eq`: equality dispatches to the impl, so write
+               one or compare the parts — `Res<u8>` has none
+```
+
+The record of what it used to do follows.
 
 ```groovy
 main = (env: Env) Res<i32, AllocError> {
@@ -298,19 +326,19 @@ error: invalid operands to binary == (have 'zu_t4_3std4core6result3ResI1_b2u8'
 ```
 
 `DESIGN.md` gives `Eq` as an ordinary struct with an `eq` method and never says
-`==` desugars to it, so the right fix is probably a sema rejection rather than
-a codegen change — which makes this a `must-fail/sema` test that does not
-exist.
+`==` desugars to it, so the right fix was a sema rejection rather than a
+codegen change. That is what landed.
 
-**Workaround:** `Cursor.at_byte` compares after unwrapping, which is clearer
-anyway.
+**Workaround, no longer needed but still the clearer code:** `Cursor.at_byte`
+compares after unwrapping.
 
 ---
 
 ## 6. The grammar reads a comment opener inside a string literal as a comment
 
-**Not the bootstrapper — `grammar/grammar.js`.** It stops a valid program from
-parsing at all.
+**CLOSED.** `npx tree-sitter parse` accepts all four lines below, and both
+toolchains compile and run the program. It was not a bootstrapper bug —
+`grammar/grammar.js` — and it stopped a valid program from parsing at all.
 
 ```groovy
 main = (env: Env) Res<i32, AllocError> {
@@ -327,20 +355,33 @@ main.zen:2:14: expected expression
 main.zen:6:1: expected `"`
 ```
 
-The `//` is lexed as a real line comment and swallows the closing quote. It
-fires when the opener follows whitespace or an escape sequence, and not when
-it follows ordinary content — so `token.immediate` on the string's content
-regex is not keeping `extras` out at those positions.
+The `//` was lexed as a real line comment and swallowed the closing quote. It
+fired when the opener followed whitespace or an escape sequence, and not when
+it followed ordinary content — `token.immediate` on the string's content regex
+was not keeping `extras` out at those positions.
 
-`bootstrap/lex.py` accepts all four, so the two implementations disagree, and
-the stricter one is the one that is right.
-
-**Workaround:** `tests/corpus/lex_zen/comments` builds every comment input a
-byte at a time through a `String` rather than writing it down.
+`tests/corpus/lex_zen/comments` still builds every comment input a byte at a
+time through a `String` rather than writing it down. That was the workaround;
+with the grammar fixed it is now just a slower way to say the same thing, and a
+test that writes the literals down directly would guard the grammar instead of
+routing around it.
 
 ---
 
 ## 7. A method call on a type whose module was not imported resolves by name, globally
+
+**OPEN, in both, in different shapes.** The bootstrapper still names an
+unrelated module; the self-hosted compiler no longer does, but answers a
+resolution question with a codegen diagnostic and names neither the type nor
+the missing import:
+
+```
+bootstrap   main.zen:12:7: bump is not exported by module mem_arena
+./zen       main.zen:12:5: codegen cannot resolve `bump`
+```
+
+Neither is the `no method bump on Cursor` this entry asks for. The original
+report follows.
 
 ```
 lex/lex_literal.zen:34:12: bump is not exported by module mem_arena
@@ -360,13 +401,15 @@ line. It should say `no method bump on Cursor` and name the import.
 
 ## 8. `--root .` is unusable, because discovery walks `tests/` and `example/`
 
-The brief's own gate:
+**OPEN, and grown.** Re-run today it is **158** diagnostics, not the 125
+recorded — the noise scales with `tests/parse/errors/`, so it gets worse every
+time someone adds a test that exists in order not to parse.
 
 ```
 $ python3 -m bootstrap.bootstrap --root . src/lex/lex.zen
-tests/parse/errors/ternary.zen:6:22: unexpected character `?`
-example/src/main.zen:6:8: module pkg.json not found
-... 125 diagnostics
+tests/parse/errors/while_loop.zen:6:11: syntax error near `n`
+tests/parse/errors/tuple_struct_fields.zen:10:2: unexpected end of file
+... bootstrap: 158 diagnostic(s)
 ```
 
 `zmodules.build(root)` walks the whole root before `prune` runs, and
@@ -378,6 +421,10 @@ the way dot-directories already are.
 ---
 
 ## 9. A same-named constructor loses to positional struct construction
+
+**CLOSED.** `Lexer(source)` against a `Lexer* = (source: Source) Lexer`
+declared beside the struct now picks the function under both toolchains. The
+original report follows.
 
 ```
 lex/lex_scan.zen:44:18: expected Source, found Alloc
@@ -391,13 +438,25 @@ positionally instead of against the function. `std` never trips over this
 because `alloc.Vec<i32>()` is written as a UFCS method call, where a struct
 literal is not a candidate.
 
-**Workaround:** `alloc.Lexer(source)` for the one whose first parameter is an
-`Alloc`, and the name `cursor_at` for the one whose first parameter is a `str`
-— following `std.text`'s own `str_at`, which exists for the same reason.
+**Workaround, no longer needed:** `alloc.Lexer(source)` for the one whose first
+parameter is an `Alloc`, and the name `cursor_at` for the one whose first
+parameter is a `str` — following `std.text`'s own `str_at`. `cursor_at` is a
+good name on its own merits and should stay; the UFCS spelling is now a free
+choice rather than a workaround.
 
 ---
 
 ## 10. `loop` with `h.break(value)` does not infer its result type
+
+**Closed in the self-hosted compiler, OPEN in the bootstrapper.** This is now a
+differential: `./zen` compiles the reproducer and prints `true`, and
+`bootstrap/` still says `unresolved name done` and then emits C that will not
+compile (`'Ok' undeclared`). The self-hosted compiler is the one that is right.
+
+Because the shipped compiler is correct, the pressure to fix `bootstrap/` is
+only that `make test` runs the corpus through it — so a corpus test using the
+inferred-break shape cannot be written until it is fixed. The original report
+follows.
 
 ```
 lex/lex_scan.zen:127:21: unresolved name `done`
@@ -419,6 +478,26 @@ the payload binding does not resolve.
 without a value.
 
 ---
+
+## What this ledger asks for next
+
+In the order the work would pay off:
+
+1. **A corpus test with a non-zero field default** (§4). It is red today under
+   both toolchains for `::` and breaks the C compile under `./zen` for `:`.
+   Until it exists, a specified feature that no test and no line of `src/`
+   exercises will stay broken indefinitely — this is the exact shape of gap
+   that the compiler's own self-use cannot find.
+2. **Decide what a `:` field with a default MEANS** (§4b) before fixing it. If
+   it is storage, emit it; if it folds to a constant, say so in DESIGN.md and
+   fold the read. The half-landed state is the bug.
+3. **`--root .`** (§8), now 158 diagnostics and growing with every must-fail
+   parse test added. Prune before reporting, or exclude `tests/`.
+4. **Name the type in the unresolved-method diagnostic** (§7). Neither
+   toolchain says which type has no such method, and neither names the import
+   that would fix it.
+5. **`h.break(value)` in `bootstrap/`** (§10) — the only thing it blocks is
+   writing a corpus test in the shape the shipped compiler already handles.
 
 ## Not bugs, recorded because I expected them to be
 
@@ -445,3 +524,7 @@ be named somewhere.
 By the stranger test they name **UTF-8**, not the lexer, so they belong beside
 `UTF8_LEAD_2_MIN` and friends in `std.text.text_utf8`. They are in `src/lex/`
 only because that module does not declare them yet. Say the word and they move.
+
+**Still true as of 2026-08-08** — all three are still declared in
+`src/lex/lex_byte.zen:40-42` and re-exported from `lex.zen:47`, and
+`std.text.text_utf8` still does not have them. Nobody has said the word.
