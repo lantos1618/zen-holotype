@@ -151,18 +151,26 @@ Build* = {
     // string `read` is handed. `docs/design_lsp.md` §5 chose this over
     // an `Fs` the server writes: `Fs`'s members have no bodies because
     // they ARE the authority, so interposing there is a language
-    // feature and this is one field.
+    // feature and this is one field. Said out loud rather than left to
+    // be inferred: this field exists for the editor, and it is the one
+    // place the "thin server over compiler internals" thesis bends.
     //
-    // EMPTY IN EVERY BUILD A COMMAND LINE ASKS FOR, and that is the
-    // constraint this field is held to rather than a hope: `run_once`
-    // never touches it, so a `zen build` misses on the first lookup and
-    // reads the disk exactly as it did before, and `scripts/fixpoint.sh`
-    // is what says so.
-    //
-    // Written down here rather than left to be inferred: this field
-    // exists for the editor, and it is the one place the "thin server
-    // over compiler internals" thesis bends.
+    // EMPTY IN EVERY BUILD A COMMAND LINE ASKS FOR, which is a
+    // constraint and not a hope: `run_once` never touches it, so a
+    // `zen build` misses on the first lookup and reads the disk exactly
+    // as before. `scripts/fixpoint.sh` is what says so.
     overlay* :: Map<str, str>,
+
+    // WHETHER A DIAGNOSTIC IS SAID OUT LOUD as it is found. True for a
+    // command line; false for `whole`, because a language server writes
+    // JSON-RPC frames to stdout and NOTHING else (`design_lsp.md` §6)
+    // and a `println` from the driver corrupts the protocol stream.
+    //
+    // NOT A CORNER CASE: a buffer being edited has an unclosed brace in
+    // it most of the time. `diags` is filled either way — only the
+    // saying is off, which is what leaves `publishDiagnostics`
+    // something to publish.
+    speaking* :: bool = true,
 
     // The entry's path relative to the root, kept for the one
     // diagnostic that is about the root itself rather than about
@@ -289,7 +297,7 @@ Build* = {
     // mistake is the whole file.
     fs_fault = (self :: @Self, path: str, e: FsError) Res<str> {
         self.faults = self.faults + 1;
-        println("{}: {}", path, fs_message(e));
+        self.speaking.then(() { println("{}: {}", path, fs_message(e)); });
         None;
     }
 
@@ -308,7 +316,7 @@ Build* = {
         self.faults = self.faults + 1;
         self.diags.add(d).try();
         self.diags.get(at).match({
-            Ok(held) => held.say(),
+            Ok(held) => self.speaking.then(() { held.say(); }),
             None     => (),
         });
         Ok(());
@@ -511,17 +519,14 @@ Build* = {
     // A WHOLE BUILD, FOR A READER THAT IS NOT A COMMAND LINE. `zen
     // build` ends at an exit code and that was the only way in, so the
     // language server — which wants the tree, the `Checker`'s memos and
-    // the diagnostics — had no entry point at all and checked the open
-    // document as a lone module instead. Every imported name in it was
-    // poison, and hover, which refuses poison, went silent on every real
-    // file in the tree.
+    // the diagnostics — had no entry point and checked the open document
+    // as a lone module instead. Every imported name in it was poison,
+    // and hover, which refuses poison, went silent on every real file.
     //
-    // NO EMIT AND NO PRINTING, and both matter. A server writes
-    // JSON-RPC frames to stdout and nothing else, so a `println` from
-    // the driver would corrupt the protocol stream (`design_lsp.md`
-    // §6); and there is no program to produce, only a question to
-    // answer. `self.faults` and `self.diags` still hold what went
-    // wrong, as values, which is what `publishDiagnostics` will read.
+    // NO EMIT AND NO SAYING. There is no program to produce, only a
+    // question to answer, and `speaking` above is why nothing is
+    // printed. `faults` and `diags` still hold what went wrong as
+    // values, which is what `publishDiagnostics` will read.
     //
     // `run_once` is NOT written in terms of this, deliberately: a
     // command line's build reports as it goes and emits at the end, and
@@ -530,6 +535,7 @@ Build* = {
     whole* = (self :: @Self, named: str, docs: Map<str, str>)
              Res<Checker, AllocError> {
         self.overlay = docs;
+        self.speaking = false;
         entry = entry_of(self.env, self.alloc, self.root, named).try();
         self.walk(entry).try();
         self.checked()
@@ -537,14 +543,12 @@ Build* = {
 
     // WHERE A `Checker` COMES FROM, and now the only place. This was
     // three lines inside `check_tree`, which made it a local that died
-    // with the method — `docs/design_lsp.md` §5 priced the overlay at
-    // "one field and one branch" and this is the line item that made
-    // that estimate wrong.
+    // with the method — §5 priced the overlay at "one field and one
+    // branch" and this is the line item that made that estimate wrong.
     //
     // HANDED BACK RATHER THAN STORED IN A FIELD. A `Checker` is a value
-    // whose `Map`s are headers, so a copy kept on the `Build` at this
-    // instant would silently stop agreeing with the one `emit` goes on
-    // using. One owner, one answer.
+    // whose `Map`s are headers, so a copy kept on the `Build` here would
+    // silently stop agreeing with the one `emit` goes on using.
     checked* = (self :: @Self) Res<Checker, AllocError> {
         c ::= self.alloc.Checker(self.tree).try();
         c.check_all().try();

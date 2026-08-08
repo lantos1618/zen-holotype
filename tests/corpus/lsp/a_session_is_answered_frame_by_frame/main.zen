@@ -152,7 +152,7 @@ visible = (b: u8, out :: String) Res<(), AllocError> {
 // ONE `serve` CALL FOR THE WHOLE SESSION, so the frame WALKER is
 // exercised too: a server that answered the first message and then lost
 // its place in the stream would pass a one-frame test and fail this one.
-session = (a: Alloc) Res<(), AllocError> {
+session = (env: Env, a: Alloc) Res<(), AllocError> {
     s ::= a.Server(env);
     input ::= a.String().try();
 
@@ -188,7 +188,7 @@ session = (a: Alloc) Res<(), AllocError> {
 // A separate call, because a malformed frame ENDS a session — see
 // `serve`'s header for why framing cannot recover — and ending the one
 // above would hide everything after it.
-broken = (a: Alloc, label: str, input: str) Res<(), AllocError> {
+broken = (env: Env, a: Alloc, label: str, input: str) Res<(), AllocError> {
     s ::= a.Server(env);
     out ::= a.String().try();
     serve(s, input, out).try();
@@ -197,33 +197,33 @@ broken = (a: Alloc, label: str, input: str) Res<(), AllocError> {
 
 main = (env: Env) Res<i32, AllocError> {
     alloc ::= env.mem.alloc();
-    session(alloc).try();
+    session(env, alloc).try();
 
     // A well-framed message whose BODY is not JSON. The frame is fine,
     // so a reply is possible, and the client is told which byte: `01`
     // is two numbers in JSON's grammar exactly as it is in Zen's.
-    broken(alloc, "bad json",
+    broken(env, alloc, "bad json",
            "Content-Length: 8\r\n\r\n{\"a\":01}").try();
 
     // A body that is valid JSON and then some. `Content-Length` and the
     // sender disagree, which is the failure that would otherwise
     // desynchronise every later frame.
-    broken(alloc, "two values",
+    broken(env, alloc, "two values",
            "Content-Length: 5\r\n\r\n{} {}").try();
 
     // Headers that never end.
-    broken(alloc, "no blank line", "Content-Length: 2\r\n{}").try();
+    broken(env, alloc, "no blank line", "Content-Length: 2\r\n{}").try();
 
     // A header block with no Content-Length in it.
-    broken(alloc, "no length", "Content-Type: x\r\n\r\n{}").try();
+    broken(env, alloc, "no length", "Content-Type: x\r\n\r\n{}").try();
 
     // A Content-Length longer than the bytes that followed.
-    broken(alloc, "short body", "Content-Length: 99\r\n\r\n{}").try();
+    broken(env, alloc, "short body", "Content-Length: 99\r\n\r\n{}").try();
 
     // Extra headers, and a header name in the wrong case. Both are
     // legal and both must be read — a client sending `content-length`
     // is not sending a malformed message.
-    broken(alloc, "odd headers",
+    broken(env, alloc, "odd headers",
            "Content-Type: application/vscode-jsonrpc\r\ncontent-length:  37  \r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\"}").try();
     Ok(0);
 }

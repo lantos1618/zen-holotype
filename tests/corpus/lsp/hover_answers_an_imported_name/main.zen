@@ -1,0 +1,206 @@
+// HOVER ANSWERS AN IMPORTED NAME, which needs a build and not a file.
+//
+// `hover_answers_at_a_declaration` beside this one measures hover on a
+// SELF-CONTAINED document — every type in it is `i32` — and that is
+// what let it read 10 of 12 while hover was still checking the open
+// buffer as a lone module. Point it at a file that imports something and
+// the number collapses: `Point` resolves to nothing, sema interns poison
+// for it, `write_ty_id` refuses to print poison, and the parameter, the
+// signature and the local that all mention it answer `null`. Since every
+// file in `src/` opens with an import, that was hover working on toy
+// files and going quiet exactly where a person works.
+//
+// So this test ships a ROOT and not a file: `app/app.zen` imports
+// `app.shape` beside it, and the server is told where the workspace is.
+// Measured over the same wire before the build landed, the twelve
+// positions below answered FOUR — the two `i32`s and the one parameter
+// that happened not to mention `Point`.
+//
+// THREE THINGS ARE ASSERTED AT ONCE, and each is a different failure:
+//
+//   - AN IMPORTED NAME HAS A TYPE. `Point` at 2:11 and the parameter at
+//     2:8 come from the other module. Nothing else in this suite covers
+//     that, because nothing else in this suite has two modules.
+//   - THE UNSAVED BUFFER IS WHAT GETS CHECKED. `app/app.zen` on disk
+//     names its parameter `p` and the buffer opened below names it `q`,
+//     so the signature at 2:0 says which one the checker saw. An
+//     overlay that stopped being consulted prints `p` here.
+//   - THE DRIVER DOES NOT SPEAK. `TORN` is a buffer with an unclosed
+//     brace — which is what a file being edited looks like most of the
+//     time — and the driver counts and collects that parse diagnostic
+//     without printing it. If it printed, the sentence would land in
+//     this test's stdout, in the middle of the frame stream, which over
+//     a real pipe is a client parse error at an offset nobody can
+//     explain. `.expected` holds no such line, so it cannot happen
+//     quietly.
+//
+// THE `null` ROWS ARE THE POINT AND NOT THE PADDING, same as next door:
+// a space and a brace must stay `null`, and so must the receiver of a
+// field access — `design_lsp.md` §2 records that one as a SEMA bug,
+// `expr_memo` having an entry for the whole `Access` and none for its
+// base. A widening that starts answering the first two is a regression.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, write_decimal, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// THE BUFFER, not the file. `q` where the disk says `p`.
+DOC*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = q.x + n;\n    s\n}\n"
+
+// A SECOND BUFFER FOR A FILE THAT IS NOT ON ANY DISK, torn off mid-edit
+// with its brace unclosed. Both halves of the overlay are here: bytes
+// that replace a file, and bytes that are the only copy there is.
+TORN*: str = "Point = app.shape\n\nnear = (q: Point) i32 {\n    q.x\n"
+
+// `tests/run.py` stages a directory test into `<work>/src` and runs the
+// program from `<work>`, so these are the paths the server will open.
+// `file://` and then a relative path is not what an editor sends — a
+// client sends `file:///…` — but `lsp_uri.zen` strips the scheme and
+// nothing else, which is exactly why the two forms are one code path.
+URI*: str = "file://src/app/app.zen"
+TORN_URI*: str = "file://src/app/torn.zen"
+ROOT_URI*: str = "file://src"
+
+// One probed position, in WIRE coordinates — 0-based line, 0-based
+// character — because that is what a client sends.
+Probe* = {
+    line*: usize,
+    character*: usize,
+    what*: str,
+}
+
+// The table, in source order.
+probes = (a: Alloc) Res<Vec<Probe>, AllocError> {
+    all ::= a.Vec<Probe>();
+    all.add(Probe(line: 0, character: 0,  what: "Point the import itself: null")).try();
+    all.add(Probe(line: 2, character: 0,  what: "near  the function's own name")).try();
+    all.add(Probe(line: 2, character: 4,  what: "      a space: null")).try();
+    all.add(Probe(line: 2, character: 8,  what: "q     a parameter typed from another module")).try();
+    all.add(Probe(line: 2, character: 11, what: "Point AN IMPORTED TYPE, written")).try();
+    all.add(Probe(line: 2, character: 18, what: "n     a parameter at its declaration")).try();
+    all.add(Probe(line: 2, character: 21, what: "i32   a parameter's written type")).try();
+    all.add(Probe(line: 2, character: 26, what: "i32   the return type")).try();
+    all.add(Probe(line: 2, character: 30, what: "{     the body's brace: null")).try();
+    all.add(Probe(line: 3, character: 4,  what: "s     a local at its declaration")).try();
+    all.add(Probe(line: 3, character: 8,  what: "q     the base of a field access: null")).try();
+    all.add(Probe(line: 3, character: 14, what: "n     a parameter, used")).try();
+    all.add(Probe(line: 4, character: 4,  what: "s     a local, used")).try();
+    Ok(all);
+}
+
+// --- the requests ------------------------------------------------------
+
+// `rootUri` IS THE WHOLE OF WHAT MAKES THIS A BUILD. Without it the
+// server has no workspace, falls back to the lone-module check, and
+// every row mentioning `Point` answers `null` — which is the state this
+// test was written to end.
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":").try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+open_doc = (a: Alloc, uri: str, text: str, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+hover = (a: Alloc, id: usize, uri: str, p: Probe, into :: String)
+        Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(",\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes("},\"position\":{\"line\":").try();
+    write_decimal(p.line, body).try();
+    body.add_bytes(",\"character\":").try();
+    write_decimal(p.character, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+// ONE `serve` CALL for the whole table, so a server that answered the
+// first hover and then lost its place in the stream fails here.
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    table = probes(a).try();
+
+    input ::= a.String().try();
+    open_session(a, input).try();
+    write_frame("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}", input).try();
+    open_doc(a, URI, DOC, input).try();
+    open_doc(a, TORN_URI, TORN, input).try();
+    table.loop((h, i, p) { hover(a, 10 + i, URI, p, input).try(); });
+    hover(a, 90, TORN_URI, torn_probe(), input).try();
+    write_frame("{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}", input).try();
+
+    s ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view(), table);
+    Ok(0);
+}
+
+// The torn buffer's one position: the function's name, where the file
+// stops before its body closes.
+torn_probe = () Probe {
+    Probe(line: 2, character: 0, what: "near  in a buffer whose brace never closes")
+}
+
+// Every reply, labelled with the position that asked for it.
+//
+// THE FRAMING IS UNWRAPPED AND NOT PRINTED, because
+// `a_session_is_answered_frame_by_frame` already pins every byte of it.
+// What is printed is the reply's JSON, whole — the `range` included,
+// since a right type under the wrong underline is still wrong.
+walk_replies = (out: str, table: Vec<Probe>) () {
+    at ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; labelled(seen, fr.body, table); seen = seen + 1; },
+        });
+    });
+}
+
+// Reply 0 is `initialize` and the last is `shutdown`; between them come
+// the table and then the torn buffer's single row. The subtraction is
+// guarded rather than let to underflow, which on a usize is a trap and
+// not a negative number.
+labelled = (i: usize, body: str, table: Vec<Probe>) () {
+    (i == 0).match({
+        true  => (),
+        false => table.get(i - 1).match({
+            None  => beyond(i, body, table),
+            Ok(p) => printed(p, body),
+        }),
+    });
+}
+
+// One past the table is the torn buffer; anything further is
+// `shutdown`, which is the other test's subject.
+beyond = (i: usize, body: str, table: Vec<Probe>) () {
+    (i == table.len + 1).match({
+        true  => printed(torn_probe(), body),
+        false => (),
+    });
+}
+
+printed = (p: Probe, body: str) () {
+    println("{}:{}  {}", p.line, p.character, p.what);
+    println("    {}", body);
+}
