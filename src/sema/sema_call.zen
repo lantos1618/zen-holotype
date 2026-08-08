@@ -175,9 +175,36 @@ named_call = (c :: Checker, id: ExprId, node: Expr, call: Call, name: str,
     actuals_of(c, call.args, ctx, actuals).try();
     is_res_ctor(name).match({
         true  => res_ctor_type(c, name, actuals),
+        false => print_or_call(c, id, node, call, name, actuals, ctx),
+    })
+}
+
+// THE PRINT SUGAR HAS A TYPE, AND IT IS `()`.
+//
+// `println(..)` is "sugar for `<the Env in scope>.out.println(..)`",
+// and no declaration of that name exists to resolve against — so a call
+// through it fell all the way to `no_overload`, found no candidate at
+// all, stayed silent by the rule above, and was answered with poison.
+// Poison agrees with everything, so `println("x")` was a legal value of
+// whatever type the context asked for. That is the poison mechanism
+// being spent on a value that is not a mistake: the sugar owes no
+// diagnostic, it simply returns nothing, and `()` is the type that says
+// so. `gen_c_print.zen` has said the same all along — "a print is a
+// statement sequence whose value is unit".
+//
+// THE TWO NAMES ARE `gen_c_print.is_print`'s, and they have to be: sema
+// answering `()` for a name the backend does not recognise as a print
+// would hand codegen an unresolved call wearing a real type.
+print_or_call = (c :: Checker, id: ExprId, node: Expr, call: Call,
+                 name: str, actuals: Vec<Actual>, ctx: Ctx)
+                Res<TyId, AllocError> {
+    is_print_sugar(name).match({
+        true  => c.types.prim("()"),
         false => local_or_decl_call(c, id, node, call, name, actuals, ctx),
     })
 }
+
+is_print_sugar = (name: str) bool { name.eq("println") || name.eq("print") }
 
 // `Ok(x)` and `Err(e)` are the prelude's own variants and there is
 // nothing to resolve: `Res<T>` and `Res<T, E>` are two arities of one

@@ -135,15 +135,82 @@ failure_never_lifts = (c :: Checker, file: str, span: Span)
 // one place a function's tail meets its return type, so it is the one
 // place a bare success can lift into a `Res` — or fail to.
 //
+// AND THE ONE PLACE A BODY THAT ENDS IN NOTHING IS CAUGHT. Hoisting was
+// the only question asked here, so a `()` tail closing an `i32` was
+// waved through — which is what let the print sugar close any function
+// at all.
+//
 // The span is the TAIL EXPRESSION'S, not the block's: the value that
 // would have been hoisted is what the author has to change.
 check_return* = (c :: Checker, body: BlockId, ctx: Ctx, got: TyId)
                 Res<(), AllocError> {
-    tail_expr(c, c.tree.block_at(body)).match({
+    blk = c.tree.block_at(body);
+    tail_expr(c, blk).match({
         None  => Ok(()),
-        Ok(e) => hoist_at(c, e, got, ctx.ret),
+        Ok(e) => return_fits(c, blk, e, got, ctx.ret),
     })
 }
+
+return_fits = (c :: Checker, blk: Block, id: ExprId, got: TyId, want: TyId)
+              Res<(), AllocError> {
+    node = c.tree.expr_at(id);
+    c.assignable(got, want).match({
+        true  => Ok(()),
+        false => refuse_return(c, blk, node, got, want),
+    })
+}
+
+// WHICH SENTENCE THIS IS, DECIDED BY `want` AND NOWHERE ELSE, so the
+// two rules cannot both fire on one tail: a `Res` return is the
+// hoisting question and `hoist_into_res` owns every answer it has —
+// including saying nothing — while any other return type is the
+// ordinary mismatch.
+refuse_return = (c :: Checker, blk: Block, node: Expr, got: TyId,
+                 want: TyId) Res<(), AllocError> {
+    c.types.at(want).match({
+        Res(r) => hoist_into_res(c, node.span.file, node.span, got, want, r),
+        _      => wrong_return(c, blk, node, got, want),
+    })
+}
+
+// NOTHING IS NOT SOMETHING, and that is the whole of this rule. The
+// print sugar's value is unit — `gen_c_print.zen`: "a print is a
+// statement sequence whose value is unit" — so `f = () i32 {
+// println("x") }` returns nothing where an `i32` was promised.
+//
+// ONLY `()` ON THE LEFT, AND NOT EVERY MISMATCH. "The tail fits the
+// return type" is the rule this wants to be, and it cannot be turned on
+// yet: `str` is a prim in the type store AND a struct `std.text`
+// declares, so `str_at`'s own `str(data: .., len: ..)` is not
+// `assignable` to its declared `str` and the general form reddens every
+// program that stands on std with `expected str, found str`. That is
+// one bug in the store rather than three hundred in the corpus, and it
+// is not this rule's to fix — see `sema_type.zen:467`.
+//
+// TWO EXEMPTIONS, AND THEY ARE ONE RULE SEEN FROM EITHER SIDE: a value
+// nobody asked for is not a value that must fit.
+//
+// A function declared `()` discards whatever its body ends with — that
+// IS what `()` means at a return type. And a `;`-terminated last
+// statement that yields nothing was never the block's value: DESIGN.md
+// lets `0;` close a function, so the AST hands the last statement over
+// as the tail either way, and the `;` is the only thing left that says
+// `println("x");` is a print rather than what the function returns.
+// Written without it, it is the return. The bootstrapper draws the line
+// in the same place.
+wrong_return = (c :: Checker, blk: Block, node: Expr, got: TyId, want: TyId)
+               Res<(), AllocError> {
+    returns_nothing(c, blk, got).match({
+        false => Ok(()),
+        true  => c.coerce(node.span.file, node.span, got, want, ""),
+    })
+}
+
+returns_nothing = (c: Checker, blk: Block, got: TyId) bool {
+    unit_ty(c, got) && blk.value.match({ Ok(_) => true, None => false })
+}
+
+unit_ty = (c: Checker, t: TyId) bool { c.prim_name(t).eq("()") }
 
 hoist_at = (c :: Checker, id: ExprId, got: TyId, want: TyId)
            Res<(), AllocError> {
@@ -160,8 +227,19 @@ tail_expr = (c: Checker, blk: Block) Res<ExprId> {
     })
 }
 
+// AN EMPTY BLOCK IS ASKED FIRST, and it has to be: `len - 1` on a
+// `usize` zero is an underflow, and underflow is a trap this compiler
+// aborts on — so `f = () () { }` did not compile to nothing, it killed
+// the compiler with `trap: integer overflow` pointing at this line.
 last_stmt_expr = (blk: Block) Res<ExprId> {
-    blk.stmts.get(blk.stmts.len - 1).match({
+    (blk.stmts.len > 0).match({
+        false => None,
+        true  => last_stmt_of(blk.stmts),
+    })
+}
+
+last_stmt_of = (stmts: Vec<Stmt>) Res<ExprId> {
+    stmts.get(stmts.len - 1).match({
         None  => None,
         Ok(s) => s.kind.match({ Expr(e) => Ok(e.expr), _ => None }),
     })
