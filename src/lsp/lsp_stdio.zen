@@ -58,8 +58,32 @@ serve_stdio* = (env: Env, a: Alloc) Res<i32, AllocError> {
         d = drain(server, a, str_at(held.ptr(), held.len), at).try();
         at = d.at;
         framed = d.framed;
+        after_drain(server, a).try();
     });
     Ok(exit_code(server.stopped(), framed));
+}
+
+// THE SETTLE POINT OVER A PIPE: everything that had arrived has been
+// answered, so a build owed to a `didChange` happens here. It is a
+// cheap no-op when nothing is owed, which is every read that carried a
+// header byte or a request.
+//
+// AND IT IS EVERY MESSAGE, NOT EVERY BATCH, which `lsp_diag.zen`'s
+// header is blunt about: `short_by` asks for exactly one message's
+// bytes and `Stdin.read` blocks until it has them, so this reader
+// cannot tell whether more input is waiting and cannot coalesce two
+// keystrokes that both arrived. `serve` over a buffer can, and the
+// missing piece for doing it here is named there.
+//
+// NOT CALLED `settled`. `Server` has a method of that name and this
+// takes one as its first parameter, so the two would be one call — this
+// folder's own rule about a free function shadowing a method, and the
+// one place in this file it could have been broken.
+after_drain = (server :: Server, a: Alloc) Res<(), AllocError> {
+    out ::= a.String().try();
+    server.settled(out).try();
+    print(out.view());
+    Ok(());
 }
 
 // `n` more bytes from stdin onto the end of `held`; `false` is end of

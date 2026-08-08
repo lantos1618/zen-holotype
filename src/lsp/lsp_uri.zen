@@ -26,7 +26,8 @@
 //     unchanged, which fails at the read rather than by opening the
 //     wrong file.
 
-str = std.text
+str, String = std.text
+Alloc, AllocError = std.mem
 
 // `file://` — seven bytes, and the two slashes are part of it. A
 // well-formed `file:` URI has an EMPTY authority, so the path's own
@@ -52,4 +53,31 @@ scheme_at = (uri: str) bool {
         true  => false,
         false => uri.slice(0, FILE_SCHEME.len).eq(FILE_SCHEME),
     })
+}
+
+// THE WAY BACK, and `publishDiagnostics` is why there has to be one.
+//
+// Hover is asked about a document and answers about the same one, so
+// until now every URI on this wire was one the client wrote and this
+// file only ever had to read them. A build reports across the WHOLE
+// program: a diagnostic names a module by its path relative to the
+// compilation root, and the notification carrying it has to name a URI.
+// So a path becomes a URI here, and it is the same seven bytes read the
+// other way.
+//
+// AN EXACT INVERSE OF `path_of` FOR THE ONE SCHEME IT UNDERSTANDS, and
+// that matters more than it looks: the URI built here is compared by
+// BYTES against the one the client opened the document with, and a
+// mismatch does not fail — it publishes a second, identical-looking
+// file whose errors nothing ever clears. `file://` + `/a/b.zen` is
+// `file:///a/b.zen` and `file://` + `src/b.zen` is `file://src/b.zen`,
+// which are the two forms `path_of` produces.
+//
+// A URI OF ANOTHER SCHEME NEVER REACHES THIS. `path_of` hands such a
+// URI back unchanged, `Fs.read` does not open it, so no module is built
+// from it and no diagnostic names it. Said out loud because the guard
+// that is not written here is the thing a reader will look for.
+uri_at* = (a: Alloc, root: str, rel: str) Res<str, AllocError> {
+    out ::= a.String("{}{}/{}", FILE_SCHEME, root, rel).try();
+    Ok(out.view());
 }

@@ -39,14 +39,30 @@
 // neither writes one, so `lsp_stdio.zen` could put a pipe under the same
 // server the corpus drives from a file, and the two answer identically
 // by construction rather than by agreement.
+//
+// ---------------------------------------------------------------------
+// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
+// is one session, and its parts are the lifecycle, the document store
+// and the table that routes one message — which share the `Server` that
+// holds all three. What crossed the line was `publishDiagnostics`, and
+// the half of it that is a SUBJECT of its own has already left: what a
+// build found, how it is grouped by file and when it is sent are
+// `lsp_diag.zen`'s, and what stays here is the trigger — a change marks,
+// and `settled` is where the transport says the batch is over.
 
 str, String = std.text
-Map = std.collections
+Vec, Map = std.collections
 Alloc, AllocError = std.mem
 Jsons, JsonId, write_text, written = lsp.lsp_json
 read, JsonFault = lsp.lsp_json_read
 FrameFault, frame_at, write_frame, write_decimal = lsp.lsp_frame
 Hover, hover_at, hover_in = lsp.lsp_hover
+// The one message this server sends unprompted, and the policy that
+// decides when. `lsp_diag.zen` holds both; this file holds the trigger.
+Diagnostics = lsp.lsp_diag
+// A wire coordinate, written where it is converted. This file kept a
+// private copy while hover was the only answer with a range.
+write_wire = lsp.lsp_pos
 path_of = lsp.lsp_uri
 
 // The whole of the server's state.
@@ -74,6 +90,17 @@ Server* = {
     workspace :: str = "",
 
     docs :: Map<str, str>,
+
+    // THE SAME DOCUMENTS, IN OPENING ORDER, because a `Map` in this
+    // tree answers `get` and cannot be walked — and a build's overlay
+    // has to carry EVERY unsaved buffer, not only the one being edited.
+    // One list beside one map is cheaper than a map that can iterate.
+    open :: Vec<str>,
+
+    // What has been said about those documents, and what is owed. The
+    // policy lives in `lsp_diag.zen`; this file only marks and settles.
+    notes :: Diagnostics,
+
     ready :: bool,        // `initialize` has been answered
     stopping :: bool,     // `shutdown` has been answered
 
@@ -214,7 +241,55 @@ Server* = {
     remember = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
         uri.is_empty().match({
             true  => written(),
-            false => self.docs.set(uri, text),
+            false => self.stored(uri, text),
+        })
+    }
+
+    // UNCHANGED BYTES ARE NOT A CHANGE, and this is the only mitigation
+    // for the per-keystroke build cost that this server can actually
+    // perform — `lsp_diag.zen`'s header says why a timed debounce
+    // cannot be. An editor re-sending `didOpen` for a file it already
+    // opened, or a `didChange` whose text is what the buffer already
+    // holds, is a whole-program build bought for nothing.
+    stored = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
+        self.docs.get(uri).match({
+            None     => self.changed_to(uri, text),
+            Ok(held) => held.eq(text).match({
+                true  => written(),
+                false => self.changed_to(uri, text),
+            }),
+        })
+    }
+
+    changed_to = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
+        self.docs.set(uri, text).try();
+        self.listed(uri).try();
+        self.notes.owes(uri);
+        Ok(());
+    }
+
+    listed = (self :: @Self, uri: str) Res<(), AllocError> {
+        self.open.find((u) { u.eq(uri) }).match({
+            Ok(_) => written(),
+            None  => self.open.add(uri),
+        })
+    }
+
+    // THE SETTLE POINT: every message the transport was holding has been
+    // answered, so a build owed to the last of them happens now. Called
+    // by `serve` at the end of a buffer and by `lsp_stdio.zen` after
+    // each drain — the two agree by calling one method rather than by
+    // each deciding when a batch has ended.
+    //
+    // NOTHING IS SENT AFTER `shutdown`. The protocol's rule is that no
+    // work is accepted once it has been answered, and an unprompted
+    // notification arriving between `shutdown` and `exit` is exactly the
+    // work a client has just said it does not want.
+    settled* = (self :: @Self, out :: String) Res<(), AllocError> {
+        self.stopping.match({
+            true  => written(),
+            false => self.notes.settled(self.env, self.workspace, self.open,
+                                        self.docs, out),
         })
     }
 
@@ -268,8 +343,8 @@ Server* = {
 }
 
 Server* = (a: Alloc, env: Env) Server {
-    Server(a: a, env: env, docs: a.Map<str, str>(), ready: false,
-           stopping: false)
+    Server(a: a, env: env, docs: a.Map<str, str>(), open: a.Vec<str>(),
+           notes: a.Diagnostics(), ready: false, stopping: false)
 }
 
 // Every frame in `input`, answered into `out`.
@@ -288,7 +363,11 @@ serve* = (s :: Server, input: str, out :: String) Res<(), AllocError> {
             Ok(fr) => { at = fr.next; s.one(fr.body, out).try(); },
         });
     });
-    Ok(());
+    // THE END OF A BUFFER IS A SETTLE POINT, which is what makes a
+    // whole batch of changes cost one build — and what lets a corpus
+    // test drive two batches through one server and watch a file's
+    // errors appear and then be taken back.
+    s.settled(out)
 }
 
 // A framing fault is reported to the caller's stream and NOT to a
@@ -454,22 +533,10 @@ write_hover = (h: Hover, out :: String) Res<(), AllocError> {
     out.add_bytes("{\"contents\":{\"kind\":\"plaintext\",\"value\":").try();
     write_text(h.shown, out).try();
     out.add_bytes("},\"range\":{\"start\":").try();
-    write_wire(h.start.line, h.start.character, out).try();
+    write_wire(h.start, out).try();
     out.add_bytes(",\"end\":").try();
-    write_wire(h.end.line, h.end.character, out).try();
+    write_wire(h.end, out).try();
     out.add_bytes("}}")
-}
-
-// The ONLY place in this file that writes a wire coordinate, and it
-// writes numbers `lsp_pos.zen` produced. Nothing here adds or subtracts
-// one — that rule is `lsp_pos.zen`'s header, and this is what obeying it
-// looks like from the outside.
-write_wire = (line: usize, character: usize, out :: String) Res<(), AllocError> {
-    out.add_bytes("{\"line\":").try();
-    write_decimal(line, out).try();
-    out.add_bytes(",\"character\":").try();
-    write_decimal(character, out).try();
-    out.add_bytes("}")
 }
 
 // Sync kind 1 is Full — see this file's header for why it is not 2.

@@ -34,10 +34,16 @@
 // pasted character — must not die on it. So every out-of-range input
 // CLAMPS, and an undecodable byte counts as one unit and one byte.
 
-str = std.text
+str, String = std.text
 Range = std.core
-Pos = ast.ast_span
+AllocError = std.mem
+Pos, Span = ast.ast_span
 codepoint_at, UTF8_MIN_4 = std.text.text_utf8
+// The decimal writer, from the file that already had to have one for a
+// `Content-Length`. It is one direction only — `lsp_frame.zen` reads
+// `lsp_json.zen` and neither reads this file — so nothing here closes a
+// loop.
+write_decimal = lsp.lsp_frame
 
 // A position as the wire spells it: 0-based line, UTF-16 units.
 //
@@ -196,4 +202,40 @@ to_wire* = (text: str, p: Pos) WirePos {
 target_of = (run: LineRun, col: usize) usize {
     at = (col == 0).match({ true => run.start, false => run.start + col - 1 });
     (at > run.end).match({ true => run.end, false => at })
+}
+
+// --- the same coordinates, said on the wire ----------------------------
+//
+// THESE LIVE BESIDE THE CONVERSION for the reason the header gives about
+// the conversion itself. A `range` is a pair of positions, and a pair
+// assembled in two files is a pair whose halves can disagree — the same
+// argument that put the 0-based line shift in the same function as the
+// column arithmetic, read one level up.
+//
+// `lsp_serve.zen` held a private copy of the first of these while hover
+// was the only answer carrying a range. `publishDiagnostics` is the
+// second caller, and STYLE.md's second-caller rule is that the second
+// caller is when it moves rather than when it is copied.
+
+write_wire* = (p: WirePos, out :: String) Res<(), AllocError> {
+    out.add_bytes("{\"line\":").try();
+    write_decimal(p.line, out).try();
+    out.add_bytes(",\"character\":").try();
+    write_decimal(p.character, out).try();
+    out.add_bytes("}")
+}
+
+// A Zen span, converted and written as the protocol's `range`.
+//
+// `text` IS THE DOCUMENT THE SPAN IS INTO, and it is a parameter rather
+// than something looked up because this file knows nothing about
+// documents. A span from one file converted against another's bytes is
+// the wrong underline in the right file, which is the failure a caller
+// has to be made to think about at the call.
+write_range* = (text: str, span: Span, out :: String) Res<(), AllocError> {
+    out.add_bytes("{\"start\":").try();
+    write_wire(to_wire(text, span.start), out).try();
+    out.add_bytes(",\"end\":").try();
+    write_wire(to_wire(text, span.end), out).try();
+    out.add_bytes("}")
 }
