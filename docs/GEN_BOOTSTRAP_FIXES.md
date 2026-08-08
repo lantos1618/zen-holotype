@@ -16,10 +16,11 @@ it names beside it, compiled as a **directory** — the root is passed to
 ## Where this ledger stands
 
 **Re-measured 2026-08-08 against `6ca27423`**, every entry below turned into a
-complete program and run through BOTH toolchains. **Thirteen of sixteen are
+complete program and run through BOTH toolchains. **Fourteen of sixteen are
 closed.** §5 closed later the same day; closing it uncovered §5b, which was
-added then. The two that remain are open in BOTH implementations, so the
-differential oracle cannot see either: both agree, and both are wrong.
+added then and closed the same day again. The ONE that remains, §L, is open in
+BOTH implementations, so the differential oracle cannot see it: both agree,
+and both are wrong.
 
 | # | what it claimed | bootstrap | `./zen` |
 |---|---|---|---|
@@ -35,7 +36,7 @@ differential oracle cannot see either: both agree, and both are wrong.
 | 3 | two modules declaring `Diag` collide on a method name | **closed** | **closed** |
 | 4 | a field named like an unrelated type's field is read-only | **closed** | **closed** |
 | 5 | a `.then` closure capturing several parameters is inlined wrong | **closed** | **closed** |
-| 5b | an inlined callee's immutable local overwrites the caller's | **open** | **open** |
+| 5b | an inlined callee's immutable local overwrites the caller's | **closed** | **closed** |
 | 6 | binding an enum arm's payload to a local types the match `()` | **closed** | **closed** |
 | 7 | a `str` scrutinee against string-literal patterns (= B) | **closed** | **closed** |
 | P | `x * 2` in statement position is parsed as a declaration | **closed** | **closed** |
@@ -57,9 +58,10 @@ own argument — in any position, at any arity, with no call at all. `(b >
 corrupted a caller's local named `gate` or `thing` the same way. `./zen` was
 correct throughout, which is what made it a one-lane fix.
 
-**§5b is what closing §5 uncovered**, and it is the one to read now: an inlined
-callee's *immutable* local replaces the caller's binding of that name, for the
-rest of the caller's body, in both implementations.
+**§5b is what closing §5 uncovered**, and it is CLOSED now: an inlined callee's
+*immutable* local replaced the caller's binding of that name, for the rest of
+the caller's body, in both implementations. The frame has a floor now and only
+the declaration-or-store decision consults it.
 
 **§L — "a design gap, not a bug" — is a soundness hole in the shipped
 compiler, and the entry that was filed too generously.** `sema_trap.check_literal`
@@ -556,6 +558,30 @@ locals. Mutation-verified: restoring the one-line defect turns it red.
 
 ## 5b. An inlined callee's IMMUTABLE local overwrites the caller's
 
+**CLOSED IN BOTH.** Both now print `before 7 / callee 77 / closure 7 /
+after 7`. Pinned by `tests/corpus/codegen/inlined_callee_keeps_its_own_local
+.zen`, which asserts the printed values — the only kind of test that could
+catch it, since both implementations agreed and the differential oracle
+compares them to each other.
+
+**THE CAUSE, and it is the same shape as §5 without being the same bug.**
+Zen writes a declaration and a store the same way, so which one `held = 77`
+is depends on what is already in scope — "a second `x = ..` on a name already
+bound is an assignment". That is a rule about ONE function's body, and
+inlining stacks the callee's bindings on top of the caller's without hiding
+them. Read across the join, the callee's first line was a store into `main`'s
+`held`. §5 was a depth recorded one step too late; this was a lookup that
+respected no depth at all.
+
+The frame has a FLOOR now — `CBackend.floor` in `src/`, `FnCtx.floor` in the
+bootstrapper — and exactly one decision consults it: declaration-or-store. A
+READ still sees the whole stack, because a lambda's free names are resolved
+by rewinding the stack rather than by a floor. A `Closure` carries the floor
+of the body it was WRITTEN in beside `home`, so `(n == 0).then(() { n = n + 1;
+})` on the writer's own local is still the writer's store.
+
+The original filing follows.
+
 **OPEN IN BOTH, found while fixing §5, invisible to the differential oracle
 because both implementations agree and both are wrong.** It is a separate bug
 from §5 and the §5 fix does not touch it: §5 was the closure's *view* of the
@@ -586,8 +612,8 @@ bootstrap   before 7   callee 77   closure 77   after 77
 own next statement reads the callee's binding. Spelling **both** locals `::=`
 instead of `=` gives `before 7 / callee 77 / closure 7 / after 7` under both,
 which is correct — so it is the immutable form specifically. The corpus test
-for §5 therefore uses `::=` for its callee-local case; the `=` shape cannot be
-asserted until this is fixed.
+for §5 therefore used `::=` for its callee-local case; the `=` shape is now
+asserted by `tests/corpus/codegen/inlined_callee_keeps_its_own_local.zen`.
 
 ## 6. Binding an enum arm's payload to a local types the match as `()`
 
