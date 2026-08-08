@@ -23,31 +23,107 @@
 // error, and every other failure is a value. A failed read is counted
 // and printed like a syntax error, and the count is the exit code.
 
-AllocError = std.mem
-str = std.text
+Alloc, AllocError = std.mem
+str, String = std.text
+FsError = std.env
 
 Cli*, Job*, FmtJob*, cli*, USAGE* = zen.zen_cli
 Build*, Unit*, build*, fs_message* = zen.zen_build
 format* = zen.zen_fmt
+Server, serve = lsp
 
 main = (env: Env) Res<i32, AllocError> {
     alloc ::= env.mem.alloc();
     cli(env.argv).match({
         Build(job)    => build(env, alloc, job),
         Fmt(job)      => format(env, alloc, job),
-        Later(name)   => later(name),
+        Later(name)   => later(env, alloc, name),
         Usage(word)   => usage(word),
         Missing(flag) => missing(flag),
     })
 }
 
-// A command this compiler will have and does not yet. It is answered by
-// name rather than by silence: PLAN.md puts `test` behind `build.zen`
-// and `lsp` at stage 4, and a caller is better told which than told
-// nothing. `fmt` left this list at stage 2.
-later = (name: str) Res<i32, AllocError> {
+// A command this compiler will have and does not yet — except `lsp`,
+// which now has a server behind it and reaches it from here.
+//
+// THE DISPATCH IS ON THE NAME AND NOT A NEW `Cli` VARIANT, deliberately:
+// `zen_cli.zen` is the file that decides what a command line MEANS, and
+// `lsp` does not yet take a flag, a root or an `--entry` that it would
+// have to decide about. When the stdio transport lands and `zen lsp`
+// takes arguments, the variant belongs there and this branch goes.
+later = (env: Env, alloc: Alloc, name: str) Res<i32, AllocError> {
+    name.eq("lsp").match({
+        true  => lsp(env, alloc),
+        false => not_yet(name),
+    })
+}
+
+not_yet = (name: str) Res<i32, AllocError> {
     println("zen {}: not yet — see docs/PLAN.md for the stage it arrives at", name);
     Ok(2);
+}
+
+// `zen lsp <requests> <replies>` — a language server over two FILES,
+// because there is no third option in this tree.
+//
+// A real client speaks `Content-Length` frames over stdin and stdout.
+// `Env` has neither: `src/std/env/env.zen:147` lists every capability
+// and none of them reads a byte stream, and `Console` is one `println`
+// (`:45`) that appends exactly one `\n`, which a frame may not have.
+// `docs/design_lsp.md` §4 prices the missing `Stdin.read` and its floor
+// in `gen_c`; until that lands, the FRAMES are real, the protocol is
+// real, and only the pipe is a file.
+//
+// It is spelled out rather than silently unavailable because that is
+// this folder's own rule (`zen_cli.zen`: a command that silently does
+// nothing is worse than one that says it is not written) — and because
+// a server that can be driven from a file is a server a test can drive.
+lsp = (env: Env, a: Alloc) Res<i32, AllocError> {
+    from = arg(env, 2);
+    to = arg(env, 3);
+    (from.is_empty() || to.is_empty()).match({
+        true  => lsp_usage(),
+        false => answer(env, a, from, to),
+    })
+}
+
+arg = (env: Env, i: usize) str {
+    env.argv.get(i).match({ Ok(s) => s, None => "" })
+}
+
+lsp_usage = () Res<i32, AllocError> {
+    println("zen lsp <requests> <replies>");
+    println("  Reads Content-Length framed JSON-RPC from <requests> and writes");
+    println("  the replies to <replies>. There is no stdin capability in this");
+    println("  tree, so a pipe is not on offer — see docs/design_lsp.md section 4.");
+    Ok(2);
+}
+
+answer = (env: Env, a: Alloc, from: str, to: str) Res<i32, AllocError> {
+    env.fs.read(a, from).match({
+        Err(e)    => unreadable(from, e),
+        Ok(input) => replies(env, a, input.view(), to),
+    })
+}
+
+replies = (env: Env, a: Alloc, input: str, to: str) Res<i32, AllocError> {
+    s ::= a.Server();
+    out ::= a.String().try();
+    serve(s, input, out).try();
+    env.fs.write(to, out.view()).match({
+        Err(e) => unwritable(to, e),
+        Ok(_)  => Ok(0),
+    })
+}
+
+unreadable = (path: str, e: FsError) Res<i32, AllocError> {
+    println("zen lsp: {}: {}", path, fs_message(e));
+    Ok(1);
+}
+
+unwritable = (path: str, e: FsError) Res<i32, AllocError> {
+    println("zen lsp: -o {}: {}", path, fs_message(e));
+    Ok(1);
 }
 
 // Exit 2 and not 1: "this build found problems" and "I could not tell

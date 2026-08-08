@@ -69,8 +69,12 @@ zen/
 │   ├── fmt/fmt.zen                  # (2) parse |> print, plus the guard
 │   ├── fmt/fmt_src.zen              # (2) a span, back to the bytes it names
 │   ├── fmt/fmt_out.zen              # (2) where the formatted bytes go
-│   ├── zen/zen_fmt.zen              # (2) `zen fmt`: read, compare, write
-│   ├── lsp/lsp.zen                  # (4) thin server over sema queries — NOT WRITTEN
+│   ├── zen/zen_fmt.zen              # (2) `zen fmt`: read, compare, write —
+│   │                                #     models the FILE, not yet the DECLARATION
+│   ├── lsp/lsp.zen                  # (4) thin server over sema queries — PARTLY:
+│   │                                #     transport, lifecycle, Full sync and hover.
+│   │                                #     Everything else refused by name; the stdio
+│   │                                #     transport awaits a Stdin capability
 │   ├── meta/meta.zen                # (5) @meta over ast nodes — NOT WRITTEN
 │   ├── comptime/comptime.zen        # (5) the step-budgeted evaluator — NOT WRITTEN
 │   │
@@ -346,9 +350,13 @@ If this stage turns out to be expensive, the cause is stage 0.3 — a batch comp
 | every node carries a half-open span with a 1-based byte column | **holds** — `AST_CONTRACT.md`, gated by `corpus/parse/parser_spans` and `POSITIONS.md` |
 | go-to-def is a query | **holds** — `defs_of` |
 | diagnostics are values carrying positions | **holds** — every phase, no exceptions |
-| **a cursor position finds its node** | **MISSING** |
+| **a cursor position finds its node** | **holds** — `ast_find.zen`'s `node_at` / `expr_node_at`, gated by `corpus/sema_zen/a_cursor_position_finds_its_node` |
 
-The last one is the only primitive an LSP needs that nothing else does, and that is exactly why it is absent: every other consumer walks the tree downward from a root, while an editor arrives holding a byte offset and nothing else. It is small — the arena has every node's span already — but it must be *written down as owed*, because the day it is discovered is the day the server is being built and every other thing is also on fire.
+That last one was the only primitive an LSP needs that nothing else does, and that is exactly why it was the one absent: every other consumer walks the tree downward from a root, while an editor arrives holding a byte offset and nothing else. It has since landed, and with it **every precondition above holds** — so "mostly falls out" has been tested rather than assumed.
+
+**What has been built against them: `src/lsp/`, and it is L1 of `docs/design_lsp.md` plus one query.** `initialize`, `shutdown`, Full document sync and `textDocument/hover` — the last one being `expr_node_at` into `expr_memo` into `Types.name_of`, with no new sema — and every other method refused by name with `-32601`. Gated by `corpus/lsp/`, three tests: the UTF-16/byte position conversion driven both ways, a JSON round trip with its rejections, and a recorded frame-by-frame session.
+
+**And one precondition that was NOT on this list turned out to gate the whole stage: there is no stdin.** `Env` has `argv`, `vars`, `out`, `mem`, `fs`, `net`, `threads` and nothing that reads a byte stream, and `Console.println` appends a `\n` a `Content-Length` frame may not carry. So `zen lsp` reads its requests from a FILE and writes its replies to another. The server, the framing and the protocol are real; only the pipe is not, and `design_lsp.md` §4 prices the capability that fixes it.
 
 One correctness note that is now load-bearing for this stage as well: `type_of`'s memo key is the node id alone, which is sound only while a generic body is checked once. `src/sema/sema.zen` says it must become `(ExprId, instantiation)` in the same change that makes `T` resolve to an argument. Monomorphisation has since landed, so that key is on the critical path for hover being *correct* inside a generic, not merely fast.
 
