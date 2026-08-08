@@ -73,6 +73,7 @@ scan, Source, Lexed = lex.lex
 Parser, module = parse.parse
 Checker, check_all = sema.sema
 PRELUDE, last_segment = sema.sema
+check_module_graph = sema.sema
 Def, World = sema.sema
 Emit, CBackend, emit_program = gen.gen
 
@@ -588,7 +589,16 @@ Build* = {
         c.check_all().try();
         report ::= self.alloc.String("").try();
         c.render_diags(report).try();
-        n = c.diag_count();
+        // TWO RULES ARE ABOUT THE MODULE GRAPH and not about any node in
+        // it, so nothing in `check_all`'s walk would ever ask them: a
+        // module that imports itself, and a top-level constant that needs
+        // a value from a module whose own needs it back. They render into
+        // the same report and are counted with everything else, which is
+        // what keeps them ahead of `emit` — a program with a constant
+        // cycle has no initialisation order, and the backend would say so
+        // as a second sentence about a hole the first one made.
+        n = c.diag_count()
+          + check_module_graph(self.alloc, self.tree, c.world, report).try();
         self.faults = self.faults + n;
         (n > 0).then(() { println("{}", report.view()); });
         absent = self.main_check(c, job).try();
