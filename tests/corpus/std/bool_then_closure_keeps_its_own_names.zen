@@ -1,0 +1,43 @@
+// tests/corpus/std/bool_then_closure_keeps_its_own_names.zen
+// a closure is written at the call site, so its free names mean what
+// they mean THERE. inlining puts the body inside the callee's frame,
+// and a caller local spelled like something the callee binds must
+// still be the caller's.
+//
+// `then` is declared `<T>(b: bool, f: () T)`, so `b` and `f` are the
+// two names a closure passed to it is most likely to collide with -
+// and `b` is bound to the receiver, which is a bool, so getting it
+// wrong prints `true` for a number rather than failing.
+//
+// it is not about `then`: `apply` below is an ordinary function that
+// happens to take a closure, and `held` is not a parameter at all -
+// it is a local of the callee, which shares the frame the parameters
+// are in.
+
+apply = <T>(gate: bool, thing: () T) Res<T> {
+    held ::= 77;
+    held = held + 1;
+    gate.match({
+        true  => Ok(thing()),
+        false => None,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    b = 3;
+    (b > 0).then(() { println("b {}", b) });
+
+    f = 4;
+    (f > 0).then(() { println("f {}", f) });
+
+    gate = 5;
+    apply(true, () { println("gate {}", gate) });
+
+    thing = 6;
+    apply(true, () { println("thing {}", thing) });
+
+    held ::= 7;
+    apply(true, () { println("held {}", held) });
+
+    Ok(0);
+}

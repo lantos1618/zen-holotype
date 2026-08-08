@@ -3997,7 +3997,7 @@ class FnCtx:
         self.tmp += 1
         return "%s%s%d" % (GEN, stem, self.tmp)
 
-    def bind_closure(self, name, lam, pty):
+    def bind_closure(self, name, lam, pty, home):
         """A closure's free names mean what they meant WHERE IT WAS WRITTEN.
 
         Inlining puts the body inside the callee's frame, and `find`'s own
@@ -4005,8 +4005,18 @@ class FnCtx:
         -- silently, with a different value rather than with an error.  So the
         marker carries the depth of the scope stack it was written at, and
         `inline_lambda` restores it.
+
+        `home` is the CALLER's depth, taken before `inline_call` pushed the
+        callee's frame -- and taking it after was this compiler's one capture
+        bug.  A lambda literal is written at the call site, so nothing the
+        callee binds is in scope for it: not the callee's parameters, not the
+        receiver bound under the first parameter's name, and not the callee's
+        own locals, which `block_value` puts in that same frame rather than a
+        nested one.  Keeping that frame is what made `(b > 0).then(() {
+        println("{}", b) })` print `true`: `bool.then`'s first parameter is
+        also spelled `b`, so the closure's own `b` found the receiver.
         """
-        self.scopes[-1][name] = (name, ("lambda", lam, pty, len(self.scopes),
+        self.scopes[-1][name] = (name, ("lambda", lam, pty, home,
                                         (self.subst, self.parts, self.self_ty)))
 
     def inline_call(self, decl, fnode, node, argnodes, targs, want, receiver=None):
@@ -4036,6 +4046,9 @@ class FnCtx:
         ret = refine(self.e.resolve_type(self.e.ret_of(fnode), subst, base, self_ty), want)
 
         result = self.new_tmp(ret) if ret not in (None, UNIT, UNKNOWN) else None
+        home = len(self.scopes)   # the caller's depth: every lambda argument
+                                  # below was written HERE, not in the frame
+                                  # the next line opens
         self.push()
         if receiver is not None and params:
             self.scopes[-1][str(f(params[0], "name", "self"))] = receiver
@@ -4046,7 +4059,7 @@ class FnCtx:
             pname = str(f(params[idx], "name", "_"))
             pty = ptys[idx]
             if kind(value) == "Lambda":
-                self.bind_closure(pname, value, pty)
+                self.bind_closure(pname, value, pty, home)
                 continue
             code, aty = self.expr(value, pty)
             ty = pty if pty != UNKNOWN else aty
