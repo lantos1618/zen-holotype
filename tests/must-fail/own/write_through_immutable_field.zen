@@ -1,0 +1,30 @@
+// the other half of the receiver promise. `::` on `bump` grants the
+// receiver's OWN bytes and nothing past them, so `items` being `:` still
+// refuses the write: a bitwise copy of the Outer would not see it. the
+// marker means the same thing inside the type as outside it.
+//
+// contrast own/immutable_receiver_field.zen, where the `:` field refuses
+// a `::` METHOD called through it. same field, same law, and the second
+// site exists because a struct-body method is never typed — nothing but
+// this walk ever looks at `bump`'s body.
+//
+// the second write is the same law at a top-level binding, where the
+// types ARE known: `p` is `:`, so `p.x` is refused even though `x` is
+// `::`. every link from the binding to the target has to permit it.
+
+Inner = { n :: i32 }
+
+Outer = {
+    inner: Inner,
+
+    bump* = (self :: @Self) () { self.inner.n = 1; }
+}
+
+main = (env: Env) Res<i32, IoError> {
+    o ::= Outer(inner: Inner(n: 0));
+    o.bump();
+    p = Inner(n: 0);
+    p.n = 2;
+    println("{}", o.inner.n + p.n);
+    Ok(0);
+}
