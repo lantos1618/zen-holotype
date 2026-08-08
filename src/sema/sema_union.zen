@@ -119,19 +119,31 @@ enum_members = (c :: Checker, decl: DeclId, e: Enum, out :: Vec<TyId>)
 //
 // A miss is unreachable — `union_reading` already found a type under
 // every one of these names — so it poisons rather than reports.
-member_type = (c :: Checker, decl: DeclId, name: str) Res<TyId, AllocError> {
+//
+// THE NAME AND THE SET IT FLATTENS TO ARE TWO ANSWERS, and which one is
+// wanted depends on the question. Building the set wants the flattening:
+// `Error = WriteError | FsError` is one set of however many. MATCHING
+// wants the name — `sema_case.zen` asks what a variant CARRIES, and
+// gen_c's `union_member_type` gives it the named type, so an arm's
+// binder has to be that same type or sema checks one and the backend
+// emits another.
+union_member* = (c :: Checker, decl: DeclId, name: str)
+                Res<TyId, AllocError> {
     found ::= c.alloc.Vec<Def>();
     c.world.defs_of(decl.module.to_usize(), name, found).try();
     found.get(0).match({
         None  => c.types.unknown(),
-        Ok(d) => member_set(c, d),
+        Ok(d) => member_named(c, d),
     })
 }
 
-member_set = (c :: Checker, d: Def) Res<TyId, AllocError> {
+member_named = (c :: Checker, d: Def) Res<TyId, AllocError> {
     empty ::= c.alloc.Vec<TyId>();
-    id = named_or_union(c, d, empty).try();
-    Ok(c.set_of(id));
+    named_or_union(c, d, empty)
+}
+
+member_type = (c :: Checker, decl: DeclId, name: str) Res<TyId, AllocError> {
+    Ok(c.set_of(union_member(c, decl, name).try()));
 }
 
 // -----------------------------------------------------------------
