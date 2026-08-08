@@ -37,6 +37,13 @@
 // ONE MISTAKE, ONE DIAGNOSTIC. `Ty.Unknown` is the mechanism: a query
 // that has already reported returns poison, and poison never produces a
 // second sentence.
+//
+// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
+// is "the sentence sema says", and its two halves — the law, and what
+// this program did to break it — are `message` and `write_detail`, read
+// together at every raise site and reworded together. Splitting them
+// would put half of each diagnostic in a file that cannot see the other
+// half, which is the exact failure `ExportFault` records above.
 
 Span = ast.ast_span
 str, String = std.text
@@ -85,6 +92,7 @@ SemaFault* =
     | NotWritable(ExportFault)         // `*` on a field grants reading, never writing
     | ModuleNotAValue(ExportFault)     // a module is a namespace, not a value
     | NoSuchField(TypeFault)           // the type has no member of that name
+    | MemberNeedsValue(TypeFault)      // a union's member IS a type, so naming it alone writes no value
 
     // types
     | TypeMismatch(TypeFault)          // expected X, found Y
@@ -172,6 +180,7 @@ message* = (fault: SemaFault) str {
         NotWritable(_)       => "`*` on a field means readable outside the module: mutation goes through exported methods",
         ModuleNotAValue(_)   => "a module is only usable qualified",
         NoSuchField(_)       => "a member is resolved on the receiver's type, so a name declared on another type is not a candidate",
+        MemberNeedsValue(_)  => "a union's member is the type it names, so the member alone is not a value",
         TypeMismatch(_)      => "type mismatch",
         NotCallable(_)       => "this is not a function, so it cannot be called",
         LiteralOutOfRange(_) => "out of range: a literal's type comes from its context, and the context here cannot hold it",
@@ -257,6 +266,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         PartiallyMoved(f)         => write_place(out, f, " is partially moved, so the drop has a hole: move the whole value or none of it"),
 
         NoSuchField(f)            => write_member(out, types, f),
+        MemberNeedsValue(f)       => write_needs_value(out, types, f),
         EqNeedsImpl(f)            => write_needs_eq(out, types, f),
         TypeMismatch(f)           => write_types(out, types, f),
         NotCallable(f)            => write_types(out, types, f),
@@ -303,6 +313,33 @@ write_member = (out :: String, types: Types, f: TypeFault)
     out.add_bytes("` on `").try();
     types.write_name(f.found, out).try();
     out.add_bytes("`").try();
+    Ok(());
+}
+
+// THE SPELLING THE READER HAS TO WRITE INSTEAD, which is the half a
+// position cannot give them: told only that `Error.IoError` is not a
+// value, an author has no way to guess whether the fix is a variant they
+// forgot to declare or an argument they forgot to pass.
+//
+// A `TypeFault` whose two ids are the SET and the member's own type,
+// rather than an expectation and what was found. There is no expectation
+// in this mistake — it is not that the wrong type turned up, it is that
+// no value was written at all — and the two types the sentence needs are
+// exactly two, so the shape fits and a fifth payload would carry the
+// same pair under a new name.
+write_needs_value = (out :: String, types: Types, f: TypeFault)
+                    Res<(), AllocError> {
+    out.add_bytes(" — `").try();
+    types.write_name(f.found, out).try();
+    out.add_bytes(".").try();
+    out.add_bytes(f.name).try();
+    out.add_bytes("` carries a value of type `").try();
+    types.write_name(f.expected, out).try();
+    out.add_bytes("`: write `").try();
+    types.write_name(f.found, out).try();
+    out.add_bytes(".").try();
+    out.add_bytes(f.name).try();
+    out.add_bytes("(e)`").try();
     Ok(());
 }
 
