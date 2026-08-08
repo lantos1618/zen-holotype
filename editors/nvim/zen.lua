@@ -34,8 +34,26 @@ M.root = vim.env.ZEN_ROOT or vim.fn.expand("~/src/zen")
 -- serve loop — but an editor wants this one.
 --
 -- WHAT YOU GET: hover, and diagnostics. Everything else comes back
--- `-32601 no handler`, and colour does not come from here at all — it
--- comes from tree-sitter, below.
+-- `-32601 no handler`.
+--
+-- COLOUR DOES NOT COME FROM HERE, and this is the one place that is
+-- worth restating rather than assuming. The server now answers
+-- `textDocument/semanticTokens`, and NOTHING ABOUT THAT CHANGES
+-- NEOVIM: colour here comes from tree-sitter, below, over the grammar
+-- this repository already ships, and it did so before the server could
+-- read a pipe. That answer exists for VS CODE, which cannot load a
+-- tree-sitter grammar from an extension and had no colour at all
+-- without it.
+--
+-- AND THE OVERLAY IS TURNED OFF HERE, in `M.lsp()`, which is the one
+-- behaviour change the new request forced on this file. Neovim's built-in
+-- client requests semantic tokens the moment a server advertises them and
+-- paints them ABOVE tree-sitter — 125 against 100 — so leaving it on
+-- would replace a query that knows a type by its POSITION with a lexer
+-- that cannot tell a type from a variable at all, and every `Vec` and
+-- `i32` in the buffer would lose its colour to `@lsp.type.variable`.
+-- That is a downgrade bought by a feature, so it is declined: this
+-- server's colour exists for VS Code, which has no grammar to lose.
 --
 -- DIAGNOSTICS ARE REAL NOW, so `:h vim.diagnostic` fills and squiggles
 -- appear. Opening or editing a `.zen` file builds the root behind it and
@@ -134,6 +152,28 @@ function M.lsp()
     root_markers = { "build.zen", ".git" },
   })
   vim.lsp.enable("zen")
+
+  -- KEEP TREE-SITTER'S COLOUR, DECLINE THE SERVER'S. See the header: the
+  -- server's semantic tokens are LEXICAL, so every identifier comes back
+  -- as `variable`, and Neovim paints semantic tokens above tree-sitter.
+  -- Left on, `Vec` and `i32` would stop being types on screen.
+  --
+  -- The capability is dropped rather than the tokens being requested and
+  -- discarded: a client that never advertises `semanticTokens` is never
+  -- sent them, so this costs one request per buffer rather than hiding
+  -- one. Set `vim.g.zen_semantic_tokens = true` to keep them — worth
+  -- doing on the day the server tells a type from a function.
+  vim.api.nvim_create_autocmd("LspAttach", {
+    callback = function(args)
+      if vim.g.zen_semantic_tokens then
+        return
+      end
+      local client = vim.lsp.get_client_by_id(args.data.client_id)
+      if client and client.name == "zen" then
+        client.server_capabilities.semanticTokensProvider = nil
+      end
+    end,
+  })
 end
 
 function M.setup()
@@ -149,6 +189,8 @@ return M
 --
 --   textDocument/hover     the type under the cursor, a declared name's
 --                          own type, or a function's signature. `K`.
+--   semanticTokens/full    colour, from the lexer — DECLINED HERE, see
+--                          `M.lsp()`; tree-sitter's is better
 --   publishDiagnostics     lex, parse and sema, grouped per file
 --   initialize / shutdown  lifecycle
 --   didOpen/didChange/didClose   Full sync, no incremental

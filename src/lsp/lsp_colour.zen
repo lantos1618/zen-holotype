@@ -1,0 +1,363 @@
+// src/lsp/lsp_colour.zen
+// `textDocument/semanticTokens/full`, lexical form — the colours, from
+// the compiler's own lexer.
+//
+// NAMED FOR WHAT IT PRODUCES AND NOT FOR THE REQUEST, because the
+// request's name is a lie about this file: nothing here is semantic.
+// `semanticTokens` is the only route the protocol offers for colour and
+// it is the one this server answers, but every answer below comes from
+// `scan` and a `TokenKind`, with no `Checker`, no build and no import
+// resolved. That is the whole point — see the header of `editors/README.md`
+// for the argument this file is the other half of.
+//
+// WHY THIS AND NOT A TEXTMATE GRAMMAR. `docs/PLAN.md:137` names a second
+// grammar as the failure the plan exists to prevent, and a generated one
+// would be a third ungated artifact. `docs/design_lsp.md` §2 named the
+// route that costs neither: the token stream is already here, so the
+// colours come from the lexer the compiler itself runs and CANNOT
+// disagree with it about what a token is.
+//
+// WHAT IT COSTS TO ANSWER: one `scan`. No `Parser`, no `Checker`, no
+// `Build`, nothing read from any disk. So unlike hover and diagnostics
+// this answers on an unsaved buffer with no workspace, in a file that
+// does not parse, and in about the time it takes to read the bytes.
+// A file with lexical faults still has tokens (`src/lex/lex.zen`'s
+// contract) and every one of them is still coloured.
+//
+// ---------------------------------------------------------------------
+// THE FIVE THINGS A SEMANTIC-TOKENS SERVER GETS WRONG, and what this
+// file does about each.
+//
+// 1. THE ENCODING IS DELTAS AND THE DELTAS ARE FROM THE PREVIOUS TOKEN.
+//    Five integers per token — `deltaLine, deltaStartChar, length,
+//    tokenType, tokenModifier` — where `deltaStartChar` is relative to
+//    the previous token's start ONLY when the two share a line, and
+//    absolute otherwise. `Painter` below is those two numbers and
+//    nothing else. Getting it wrong tints a file that drifts further
+//    off the further down you read, which looks like a rendering bug
+//    and is arithmetic.
+//
+// 2. THE NUMBERS ARE UTF-16, ON BOTH AXES THAT HAVE ONE. `character`
+//    and `length` are UTF-16 code units into the line, not bytes and
+//    not codepoints, and `lsp_pos.zen` is the only file that converts.
+//    A 4-byte emoji is 2 units and 4 bytes and an `é` is 1 unit and 2
+//    bytes, so a length taken from `end.offset - start.offset` is
+//    right for exactly the ASCII half of the world.
+//
+// 3. A MULTI-LINE TOKEN IS SPLIT, ONE RUN PER LINE. The standard
+//    encoding cannot express a token that crosses a newline unless the
+//    client advertised `multilineTokenSupport`, which most do not and
+//    which this server does not ask about. SPLITTING IS CHOSEN OVER
+//    OMITTING: a block comment is the one token here that spans lines,
+//    it is also the one a reader most wants greyed out, and an omitted
+//    one leaves a hole in the middle of a file. Each run gets the same
+//    colour, and a run of zero length — a blank line inside a block
+//    comment — is not emitted at all, because a zero-width token
+//    colours nothing and every client is entitled to be confused by one.
+//
+// 4. THE LEGEND IS DECLARED IN `initialize` AND INDEXED HERE.
+//    `tokenType` is an INDEX into the `tokenTypes` array the server
+//    advertised, so `index_of` and `write_legend` are one fact said
+//    twice and must agree. They are both below, in the same order, in
+//    one file, and the corpus test prints both halves.
+//
+// 5. `Ident` IS ONE KIND AND COLOUR WANTS SEVERAL — AND THIS FILE DOES
+//    NOT GUESS. A lexer cannot tell a type from a function from a
+//    variable: `Vec` and `add` and `n` are the same token, and Zen makes
+//    that sharper than most languages because a type is a bare
+//    identifier (`DESIGN.md`) with no keyword in front of it. Colouring
+//    by capitalisation would be a SECOND, WRONG specification of what a
+//    name means, living in `src/lsp/` where nothing may specify the
+//    language. So every `Ident` is `variable`, uniformly, and telling
+//    them apart is `design_lsp.md` §2's semantic row at L4 — it needs
+//    `defs_of` per identifier and a memo on `Ident`, which is a change
+//    in `src/sema/`. Hover already refuses to print sema's poison for
+//    the same reason: a wrong answer is worse than none.
+//
+// DELIMITERS ARE NOT COLOURED, and that is the same refusal one step
+// down. `(`, `)`, `[`, `]`, `{`, `}`, `,`, `;`, `.` and `:` are
+// structure, not meaning; a theme's default foreground is what a reader
+// expects them in, and calling a brace an `operator` would be this file
+// deciding something the lexer did not say. Operators proper — the
+// arithmetic, comparison, logical and binding glyphs — are `operator`,
+// because that is what they are.
+//
+// EVERY VARIANT OF `TokenKind` IS LISTED IN `colour_of`, with no `_`
+// arm. A token shape added to `src/lex/` should make this file fail to
+// compile and force a decision, rather than quietly arriving uncoloured.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Range = std.core
+scan, Source, Token, TokenKind = lex
+write_decimal = lsp.lsp_frame
+// `written()` is `Ok(())` with the writer's error type already on it, so
+// a match arm that writes nothing sits beside one that writes something
+// without the two having different types.
+written = lsp.lsp_json
+wire_at, units_of = lsp.lsp_pos
+
+// The legend, in order. A `tokenType` on the wire is a position in this
+// list, so the ORDER BELOW IS THE WIRE FORMAT and the two functions
+// under it are how it is spelled and how it is counted.
+//
+// `Text` is the legend's `string`. It is spelled differently only
+// because `TokenKind.Str` is matched in the same file and one name for
+// two things in one match is how a reader is misled.
+//
+// SIX AND NOT MORE. The protocol's standard type names are a long list
+// and every one this server cannot honestly produce is left out —
+// `type`, `function`, `parameter`, `property` are exactly the ones item
+// 5 of the header refuses. A legend that advertises them and never
+// emits them tells a theme to prepare colours it will never see.
+Colour* = Keyword | Text | Number | Comment | Operator | Variable
+
+// A colour's index in the legend. THE NUMBERS THE WIRE CARRIES.
+index_of* = (colour: Colour) usize {
+    colour.match({
+        Keyword  => 0,
+        Text     => 1,
+        Number   => 2,
+        Comment  => 3,
+        Operator => 4,
+        Variable => 5,
+    })
+}
+
+// A colour's name in the legend. STANDARD LSP TOKEN TYPE NAMES, all six,
+// so any theme colours them with no configuration — a server inventing
+// `zenKeyword` would be a server whose output is grey everywhere until
+// the user writes a `semanticTokenColorCustomizations` block.
+name_of* = (colour: Colour) str {
+    colour.match({
+        Keyword  => "keyword",
+        Text     => "string",
+        Number   => "number",
+        Comment  => "comment",
+        Operator => "operator",
+        Variable => "variable",
+    })
+}
+
+// The legend as `initialize` advertises it, written by walking the
+// variants IN INDEX ORDER — so the order lives in exactly one place a
+// reader can check against `index_of` by reading down the page.
+//
+// NO MODIFIERS. `tokenModifiers` is empty and every token this file
+// emits carries a modifier set of 0. `declaration`, `readonly`,
+// `static` and the rest are all facts about what a name MEANS, which is
+// item 5 again: a lexer knows none of them, and an empty list is how the
+// protocol spells "there are none".
+write_legend* = (out :: String) Res<(), AllocError> {
+    out.add_bytes("{\"tokenTypes\":[\"").try();
+    out.add_bytes(name_of(Colour.Keyword)).try();
+    next_name(Colour.Text, out).try();
+    next_name(Colour.Number, out).try();
+    next_name(Colour.Comment, out).try();
+    next_name(Colour.Operator, out).try();
+    next_name(Colour.Variable, out).try();
+    out.add_bytes("\"],\"tokenModifiers\":[]}")
+}
+
+next_name = (colour: Colour, out :: String) Res<(), AllocError> {
+    out.add_bytes("\",\"").try();
+    out.add_bytes(name_of(colour))
+}
+
+// WHAT EACH TOKEN SHAPE IS COLOURED, and `None` for the shapes this
+// file will not colour. Every variant of `TokenKind` appears, in the
+// order `src/lex/lex_token.zen` declares them, so the two can be read
+// side by side.
+//
+// `Ident` IS `variable` AND THAT IS THE HONEST ANSWER, not the useful
+// one — see item 5 of the header. `Char` is `string` because the
+// protocol's legend has no character type and a character literal is a
+// literal of text; naming it `number` because it holds one byte would
+// be a guess about what the author meant by it.
+//
+// `Eof` SPANS NOTHING, by construction, and a zero-length token is not
+// something to hand a client even where the encoding permits it.
+colour_of* = (kind: TokenKind) Res<Colour> {
+    kind.match({
+        Ident        => Ok(Colour.Variable),
+        Int(_)       => Ok(Colour.Number),
+        Float        => Ok(Colour.Number),
+        Str          => Ok(Colour.Text),
+        Char         => Ok(Colour.Text),
+        True         => Ok(Colour.Keyword),
+        False        => Ok(Colour.Keyword),
+        Consume      => Ok(Colour.Keyword),
+        AtSelf       => Ok(Colour.Keyword),
+        AtMeta       => Ok(Colour.Keyword),
+        AtScope      => Ok(Colour.Keyword),
+        LineComment  => Ok(Colour.Comment),
+        BlockComment => Ok(Colour.Comment),
+        ParenOpen    => None,
+        ParenClose   => None,
+        BracketOpen  => None,
+        BracketClose => None,
+        BraceOpen    => None,
+        BraceClose   => None,
+        Comma        => None,
+        Semicolon    => None,
+        Dot          => None,
+        Ellipsis     => Ok(Colour.Operator),
+        Colon        => None,
+        ColonColon   => Ok(Colour.Operator),
+        ColonColonEq => Ok(Colour.Operator),
+        Eq           => Ok(Colour.Operator),
+        EqEq         => Ok(Colour.Operator),
+        Arrow        => Ok(Colour.Operator),
+        Bang         => Ok(Colour.Operator),
+        BangEq       => Ok(Colour.Operator),
+        Lt           => Ok(Colour.Operator),
+        LtEq         => Ok(Colour.Operator),
+        Gt           => Ok(Colour.Operator),
+        GtEq         => Ok(Colour.Operator),
+        Amp          => Ok(Colour.Operator),
+        AmpAmp       => Ok(Colour.Operator),
+        Bar          => Ok(Colour.Operator),
+        BarBar       => Ok(Colour.Operator),
+        Plus         => Ok(Colour.Operator),
+        PlusWrap     => Ok(Colour.Operator),
+        Minus        => Ok(Colour.Operator),
+        MinusWrap    => Ok(Colour.Operator),
+        Star         => Ok(Colour.Operator),
+        StarWrap     => Ok(Colour.Operator),
+        Slash        => Ok(Colour.Operator),
+        Percent      => Ok(Colour.Operator),
+        Eof          => None,
+    })
+}
+
+// --- the encoding ------------------------------------------------------
+
+// WHERE THE PREVIOUS TOKEN STARTED, which is the entire state the
+// encoding needs, plus whether a comma is owed.
+//
+// It begins at line 0, character 0 rather than at "nothing yet", and
+// that is not a shortcut: the protocol says the first token's deltas are
+// measured from the origin, so the same subtraction that handles every
+// later token handles the first one and there is no special case to get
+// wrong.
+Painter = {
+    line :: usize,
+    character :: usize,
+    said :: bool,
+
+    // One run, as five integers. `length` is already in UTF-16 units and
+    // `colour` is already an index — both conversions happen before a
+    // number reaches this method, so nothing here can convert one twice.
+    put = (self :: @Self, line: usize, character: usize, length: usize,
+           colour: Colour, out :: String) Res<(), AllocError> {
+        self.said.match({ true => out.add_bytes(","), false => written() }).try();
+        delta_line = line - self.line;
+        // THE ONE BRANCH IN THE WHOLE ENCODING: a token on the same line
+        // as its predecessor measures from that predecessor's start; one
+        // on a later line measures from the start of its own line.
+        delta_character = (delta_line == 0).match({
+            true  => character - self.character,
+            false => character,
+        });
+        write_decimal(delta_line, out).try();
+        out.add_bytes(",").try();
+        write_decimal(delta_character, out).try();
+        out.add_bytes(",").try();
+        write_decimal(length, out).try();
+        out.add_bytes(",").try();
+        write_decimal(index_of(colour), out).try();
+        // The modifier set, always empty — see `write_legend`.
+        out.add_bytes(",0").try();
+        self.line = line;
+        self.character = character;
+        self.said = true;
+        Ok(());
+    }
+
+    // A token, as one run per line it covers.
+    //
+    // THE FIRST RUN'S CHARACTER IS CONVERTED AND EVERY LATER ONE IS
+    // ZERO. A run that begins because a newline ended the last one
+    // begins at the first byte of its line, which is character 0 in
+    // every encoding there is — so the conversion is paid once per
+    // token and not once per line, and the two cannot disagree.
+    paint = (self :: @Self, text: str, token: Token, colour: Colour,
+             out :: String) Res<(), AllocError> {
+        stop = token.span.end.offset;
+        from ::= token.span.start.offset;
+        line ::= zero_based(token.span.start.line);
+        character ::= wire_at(text, token.span.start.line,
+                              token.span.start.col).character;
+        loop(() { from < stop }, (h) {
+            upto = break_in(text, from, stop);
+            self.run(text, line, character, from, upto, colour, out).try();
+            // Past the `\n`, which belongs to neither run: it is inside
+            // the token's bytes and it colours nothing.
+            from = upto + 1;
+            line = line + 1;
+            character = 0;
+        });
+        Ok(());
+    }
+
+    // One line's worth, unless it is empty. A blank line inside a block
+    // comment is a real run of zero units, and zero-width tokens are not
+    // worth the client's trouble.
+    run = (self :: @Self, text: str, line: usize, character: usize,
+           from: usize, upto: usize, colour: Colour, out :: String)
+          Res<(), AllocError> {
+        (upto > from).match({
+            true  => self.put(line, character, units_of(text, from, upto),
+                              colour, out),
+            false => written(),
+        })
+    }
+}
+
+// The first `\n` in `from..stop`, or `stop`. What splits a multi-line
+// token, and the only place this file looks at a byte.
+break_in = (text: str, from: usize, stop: usize) usize {
+    Range(from, stop).find((i) { text.index(i) == '\n' }).match({
+        Ok(i) => i,
+        None  => stop,
+    })
+}
+
+// --- the answer --------------------------------------------------------
+
+// `text` coloured, as the protocol's reply body: `{"data":[..]}`.
+//
+// `name` is what the document is called for the purpose of a `Source`.
+// It is the CLIENT'S URI verbatim, exactly as `hover_at` uses it, and it
+// reaches nothing outside this call — a lexical pass has no second file
+// to name.
+//
+// A LEX FAULT IS NOT REPORTED HERE AND NOT ALLOWED TO STOP ANYTHING.
+// `scan` hands back every token it could read together with every fault
+// it found, `lsp_diag.zen` is what says the faults out loud, and a
+// buffer mid-keystroke is the normal case rather than the exception —
+// a server that went grey the moment a quote was opened would be worse
+// than one with no colour at all.
+write_tokens* = (a: Alloc, name: str, text: str, out :: String)
+                Res<(), AllocError> {
+    lexed = scan(a, Source(file: name, text: text)).try();
+    painter ::= Painter(line: 0, character: 0, said: false);
+    out.add_bytes("{\"data\":[").try();
+    lexed.tokens.loop((h, token) {
+        colour_of(token.kind).match({
+            None    => written(),
+            Ok(one) => painter.paint(text, token, one, out),
+        }).try();
+    });
+    out.add_bytes("]}")
+}
+
+// A 1-based line as the wire's 0-based one. Line 0 cannot come out of
+// the lexer — `lex_token.zen` says lines are 1-based from the cursor up
+// — but a subtraction on a `usize` traps rather than going negative, so
+// the impossible input clamps here for the same reason `lsp_pos.zen`
+// clamps it there: a server that traps on a number is a server that
+// stops answering.
+zero_based = (line: usize) usize {
+    (line == 0).match({ true => 0, false => line - 1 })
+}

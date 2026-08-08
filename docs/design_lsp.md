@@ -67,11 +67,12 @@ Four stages, named **L1–L4** so they are not confused with `PLAN.md`'s 0–5. 
 | `textDocument/documentSymbol` | a module's declarations in source order, each with a span and a name-span | **exists**, no new query: `module_count`/`module_at` at `src/ast/ast_arena.zen:147,149`; `Decl.span` and `Ident.span` are LSP's `range` and `selectionRange` exactly | L2 |
 | `textDocument/hover` | the type under the cursor, printed | **built, and widened** — `src/lsp/lsp_hover.zen` plus `src/lsp/lsp_decl.zen`, still no new sema. See the hover section below for what it answers, what it refuses, and the measurement | L2 |
 | `textDocument/definition` | the span a name was declared at | **mostly**: `defs_of` → `Def.span` (`src/sema/sema_def.zen:172`, `:63`) for a module-level name; `call_memo` (`src/sema/sema_check.zen:113`) for a call; `Found.span` (`src/sema/sema_member.zen:66`) for a member. **Missing for locals** — see below | L2 |
-| `textDocument/semanticTokens`, lexical | the token stream | **exists**: `scan` and `Token{kind, span}` (`src/lex/lex.zen:62`, `src/lex/lex_token.zen:97`) | L2 |
+| `textDocument/semanticTokens/full`, lexical | the token stream | **built**: `src/lsp/lsp_colour.zen`, over `scan` and `Token{kind, span}` (`src/lex/lex.zen:62`, `src/lex/lex_token.zen:97`) and nothing else. The one answer here that needs no build, no `Checker` and no workspace — see the colour section below | L2 |
 | `textDocument/references` | for a `DeclId`, every node that resolved to it | **missing**. `call_memo` is that map, forward and for calls only. Nothing records a resolved bare *name*, and nothing inverts | L3 |
 | `textDocument/completion` | the candidate set at a position | **partly**: after a dot, `members_of` (`src/sema/sema_member.zen:396`) and `cases_of` (`src/sema/sema_case.zen:43`) and `travelled_cands` (`src/sema/sema.zen:100`) are the three halves of `DESIGN.md:394`. **Missing**: `defs_of` takes an exact `name: str` and has no prefix form; and the incomplete-parse problem below | L3 |
 | `textDocument/formatting` | `parse \|> print` | **the engine exists, the request does not**. `PLAN.md` stage 2 landed: `src/fmt/` formats a file, `zen fmt --check` gates the tree, and a re-lex guard requires an identical token stream before any edit is kept. What is missing is only the LSP request wired to it — and note the formatter models the FILE, not yet the DECLARATION, so `rangeFormatting` is not merely unimplemented, it is not yet expressible | L3 |
-| `textDocument/semanticTokens`, semantic | per-`Ident` resolution: is this a type, a function, a parameter? | **missing**: `defs_of` per identifier in a file, and nothing memoizes on an `Ident` | L4 |
+| `textDocument/semanticTokens`, semantic | per-`Ident` resolution: is this a type, a function, a parameter? | **missing**: `defs_of` per identifier in a file, and nothing memoizes on an `Ident`. This is the ONLY thing that can distinguish `Vec` from `add` from `n`, all three of which are one `Ident`, and the lexical answer above refuses to guess rather than approximate it | L4 |
+| `textDocument/semanticTokens/range` and `/full/delta` | a sub-range, or a diff against a previous result | **missing, and deliberately not advertised.** A client asks for either one only when the server said it has it, so the capability is `full: true` and nothing more. Advertising one unanswered is `-32601`, which in VS Code renders as no colour at all with nothing on screen to say why | L3 |
 | `textDocument/signatureHelp` | which overloads a call could mean, and which parameter the cursor is in | **missing**, and harder here than elsewhere: `DESIGN.md:477` resolves on declared parameter types *and arity*, so there is never one signature to show | L4 |
 | `textDocument/rename` | references, plus a safety argument | **missing**, and see the hazard below | L4 |
 
@@ -145,6 +146,28 @@ The gate is `tests/corpus/lsp/hover_answers_an_imported_name`, which ships the r
 
 **The gate is `tests/corpus/lsp/hover_answers_at_a_declaration`**, which is the 12-position probe plus three poison rows, driven through framed JSON-RPC, asserting the value AND the range — so a right type under the wrong underline is still red. Half its rows assert `null`; a widening that starts answering those is a regression even though it looks like more coverage.
 
+### Colour, in full — because it is the second query built, and it cost the least of anything here
+
+**`src/lsp/lsp_colour.zen`, and the whole of it is one `scan`.** No `Parser`, no `Checker`, no `Build`, nothing read from any disk. That is not an economy, it is the property that makes the answer worth having: hover and diagnostics both need a build and both go quiet without a workspace, and colour is the one thing a user notices the *instant* a file opens. It answers on an unsaved buffer, in a session with no `rootUri`, and in a file that does not parse — `src/lex/lex.zen`'s contract is that a file with lexical faults still yields tokens, so a half-typed string literal costs the colour of that literal and nothing else.
+
+**Why this rather than a TextMate grammar** is `editors/README.md`'s argument and it stands unchanged: a second grammar is `PLAN.md:137`'s named failure, a generated one is `PLAN.md:127`'s ungated third artifact, and VS Code cannot load the tree-sitter grammar `grammar/` already holds. What this document said was the route that costs neither, and it was right; what it did not say is that the route is about two hundred lines.
+
+**`Ident` IS ONE KIND AND COLOUR WANTS SEVERAL, AND THE ANSWER IS TO REFUSE.** A lexer cannot tell a type from a function from a variable, and Zen makes that sharper than most languages: `DESIGN.md` has no keyword before a type, so `Vec`, `add` and `n` are the same token. Every `Ident` is therefore `variable`, uniformly. **Colouring by capitalisation was available and was rejected**: it would be a second, wrong, specification of what a name means, living in `src/lsp/`, which §1 says may never specify the language. It is the same rule that makes hover answer `null` rather than print `<unknown>`. The semantic row in the table above is the upgrade, it is L4, and it needs a memo on an `Ident` in `src/sema/`.
+
+**Delimiters are not coloured** — `(`, `)`, `[`, `]`, `{`, `}`, `,`, `;`, `.`, `:` — and operators are. That is the same refusal one step down: a brace is structure, and calling it `operator` would be this folder deciding something the lexer did not say.
+
+**The three arithmetic decisions**, each of which is a way to ship colour that drifts:
+
+- **The encoding is deltas from the PREVIOUS TOKEN**, and `deltaStartChar` is relative only when the two share a line. Wrong, and colour slides further off the further down a file you read — which looks like a rendering bug and is subtraction.
+- **`character` and `length` are both UTF-16 code units**, so `end.offset - start.offset` is correct for exactly the ASCII half of the world. `lsp_pos.zen` gained `units_of` for the length and `wire_at` for the position; §3's rule that no other file converts is unchanged.
+- **A multi-line token is SPLIT, one run per line**, because the standard encoding cannot express one unless the client advertised `multilineTokenSupport` — which this server does not ask about. Splitting was chosen over omitting: a block comment is the only token here that spans lines, it is also the one a reader most wants greyed, and omitting it leaves a hole in the middle of a file. A run of zero units — a blank line inside a block comment — is not emitted at all.
+
+**The legend moved the capabilities from a constant to a writer**, and that is worth a sentence because it is the failure that cannot be seen: a `tokenType` is an INDEX into the array `initialize` advertised, so the list and the numbers spelled in two files drift silently — every colour in the file shifts by one and nothing errors. `lsp_colour.zen` owns both.
+
+**The gate is `tests/corpus/lsp/colour_comes_from_the_lexer`**, which drives the server over framed JSON-RPC and then UNDOES the encoding: each five-integer group is added back up and the resulting `line:character` handed to `to_pos` — the inverse conversion — so the last column of every row is the bytes that group actually colours. A flat array of integers is unreviewable; a decoded row is. **Ten mutations were run against it and nine went red**: `deltaLine` made absolute, `deltaStartChar` never relative, two legend indices swapped, the legend's names written out of index order, UTF-16 units counted as bytes, the `length` taken in bytes, multi-line splitting disabled, zero-length runs emitted, `Ident` recoloured, and `range: true` advertised without a handler.
+
+**The tenth came back green and it is not a hole in the test.** §3 below suggests mutating `step_at`'s `c.value < UTF8_MIN_4` into a comparison on `c.len`, and predicts red. It is green, because those two conditions are *equivalent over anything `codepoint_at` returns `Ok` for*: `four_byte` rejects `value < UTF8_MIN_4` as overlong and `three_byte` rejects `value >= UTF8_MIN_3` failures, so a decoded length of 4 and a value at or above 65536 are one fact. **§3's suggested mutation is an equivalent mutant and that paragraph should be read as naming the wrong one** — the mutation that does go red is counting `units` as `bytes`, and it reddens three tests.
+
 **Rename is the request this language makes dangerous**, and it is worth writing down before someone ships it. Two rules collide with it. `DESIGN.md:394`: a UFCS call `x.f(..)` "never names `f`", so renaming an exported free function must rewrite call sites that do not contain that name in any bare-name position — a textual search finds them, and a textual search is exactly what a rename must not be. `DESIGN.md:140`: whether `A | B` is a union or a nominal enum "depends on what else is in scope", so renaming a *type* can silently change the meaning of an unrelated declaration in a module that imports it. Rename is L4 and it is L4 for a reason.
 
 ---
@@ -197,6 +220,8 @@ A corpus test, in the format `TESTING.md:27` fixes, driving `to_pos` and `to_wir
 The table must contain, at minimum: ASCII; a 2-byte `é`; a 3-byte CJK character; a 4-byte emoji, which is the only row where UTF-16 and codepoints disagree; a position at end-of-line; a position past end-of-line; a CRLF line; a tab; an empty line; and the last line of a file with no trailing newline.
 
 And then `TESTING.md:19`'s oracle, because this is exactly the code it exists for: **mutate the conversion — swap the 65536 for a comparison on `len`, drop the `+ 1` on the line — and watch a row go red.** If nothing goes red, the table is not the table.
+
+**One correction to that sentence, made by running it.** Swapping the 65536 for `c.len < 4` is an EQUIVALENT MUTANT and stays green, correctly: `four_byte` rejects an overlong `value < UTF8_MIN_4` and `three_byte` rejects `value >= UTF8_MIN_3` failures, so over anything `codepoint_at` answers `Ok` for, "four bytes" and "at or above 65536" are the same fact. The mutation that does go red is counting the units as the bytes — `Step(units: c.len, ..)` — and it reddens `positions_convert_both_ways`, `diagnostics_are_written_as_the_protocol_spells_them` and `colour_comes_from_the_lexer` together. Dropping the `+ 1` on the line still reddens as promised.
 
 ---
 
@@ -373,11 +398,11 @@ editors/
 
 ### What each client gets, per stage
 
-The L1–L4 staging in §2 is about the SERVER. This is the same staging read from the editor, because that is what a user actually experiences — and the two are not the same shape: colour arrives in Neovim without the server at all, and in VS Code only at L2.
+The L1–L4 staging in §2 is about the SERVER. This is the same staging read from the editor, because that is what a user actually experiences — and the two are not the same shape: colour arrives in Neovim without the server at all, and in VS Code through it.
 
 | | Neovim | VS Code |
 |---|---|---|
-| **colour** | **works now**, tree-sitter, no server | **not until L2** — needs `semanticTokens`; see the deviation below |
+| **colour** | **works**, tree-sitter, no server — and it does NOT come from `semanticTokens`, which changes nothing for Neovim | **works** — `semanticTokens`, lexical, from the compiler's own lexer; the deviation below explains why it is not a TextMate grammar |
 | brackets, comment toggling, word selection | tree-sitter | **works now**, `language-configuration.json` |
 | **hover** | **works** — the transport landed, and so did the build behind it | **works** |
 | go-to-definition | L2 (module-level), L3 (locals) | same |
@@ -429,7 +454,7 @@ vim.api.nvim_create_autocmd("FileType", {
 
 Two Neovim-specific notes worth having written down. Neovim advertises `general.positionEncodings` including `utf-8`, so it is the client that can exercise the short-circuit in §3 — which makes it a **bad** default for testing the conversion and a good one for testing that negotiation works. Test the UTF-16 path against a client that only speaks UTF-16. And Neovim's `vim.lsp.start` reuses a client with the same `name` and `root_dir`, so a crashed server is silently not restarted; during L1 development, restart explicitly.
 
-Syntax highlighting is separate and already exists: `grammar/` is a tree-sitter grammar, `DESIGN.md:30` says it "outlives the bootstrap as the editor and LSP grammar". Highlighting is tree-sitter's job in Neovim, and `semanticTokens` is a refinement over it, not a replacement.
+Syntax highlighting is separate and already exists: `grammar/` is a tree-sitter grammar, `DESIGN.md:30` says it "outlives the bootstrap as the editor and LSP grammar". Highlighting is tree-sitter's job in Neovim, and `semanticTokens` is a refinement over it, not a replacement — **so `lsp_colour.zen` landing changed nothing for Neovim**, which had colour before the server could read a pipe and has the same colour now. It is VS Code that had none, because it is VS Code that cannot load `grammar/`.
 
 ### VS Code, and this is a remote instance
 
@@ -462,9 +487,11 @@ So `package.json` must declare:
 - Generating one from `grammar/` would be a third generated artifact, and `PLAN.md:127` says an ungated generated file is "a fork nobody is reading".
 - VS Code has **no public API** for loading a tree-sitter grammar from an extension, so `grammar/` cannot simply be reused there the way Neovim reuses it.
 
-**The cost is real and is being paid now:** `.zen` files in VS Code have brackets, comment toggling and word selection — from `language-configuration.json`, which is configuration and not a grammar — and **no colour at all** until the server answers `semanticTokens`. That request is already L2 in §2 with its query present (`scan`, `Token{kind, span}`), so the route costs no second grammar and no third artifact; it costs one more request.
+**That cost has now been PAID, and it was the price this paragraph named.** It used to read "no colour at all until the server answers `semanticTokens`"; the server answers it. `src/lsp/lsp_colour.zen` is the whole of it, the colours come from the compiler's own lexer and therefore cannot disagree with the compiler, and no second grammar and no third generated artifact entered the tree. The colour section in §2 has the design; the refusal above is unchanged and was right.
 
-The alternative is to accept a second copy of the syntax rules and have colour sooner. That is a taste call about which is worse, and it belongs to whoever owns the language rather than to whoever writes the extension. **Recorded here so it is a decision and not an omission.**
+The alternative — a second copy of the syntax rules, for colour sooner — is now moot, and the record of the choice is kept because the *reasoning* is what generalises: the query that already exists beats the artifact that would have to be maintained. **What VS Code still gets from `language-configuration.json` rather than from the server is brackets, comment toggling and word selection**, which are configuration and not colour.
+
+**One thing about colour in VS Code that no server can control**, and it is worth knowing before someone reports a bug: semantic tokens are applied only when semantic highlighting is enabled. `editor.semanticHighlighting.enabled` defaults to `configuredByTheme` and every stock theme turns it on, but a user who has set it to `false` gets a perfectly correct token list that colours nothing, with nothing on screen to say why. `extension.ts` says so in the output channel at startup, because that is the same shape of silent failure as a server exiting 2 on an argument it did not recognise.
 
 `"extensionKind": ["workspace"]` is the load-bearing line. Without it VS Code may install the extension on the UI side, where `activate()` runs on the local machine, `zen` is not on the PATH, the workspace is not on the disk, and the failure reads as "the server crashed".
 
@@ -503,13 +530,17 @@ Gates 1 and 2 are green (`json_round_trips_and_rejects`, `a_session_is_answered_
 
 **L1 is done when** an editor connected to `zen lsp` shows the same errors, at the same places, as `zen build`. The first half is true; the second half is exactly what gate 3 would measure.
 
-### L2 — the queries that already exist
+### L2 — the queries that already exist — **HOVER AND COLOUR DONE**
 
 Hover, definition, documentSymbol, lexical semanticTokens. No new sema.
+
+**Two of the four are built.** Hover, and `semanticTokens/full` in its lexical form (`src/lsp/lsp_colour.zen`, §2's colour section). `definition` and `documentSymbol` are what is left here, and neither needs sema either — `Def.span`, `call_memo` and `Found.span` for the first, `module_count`/`module_at` with `Decl.span` and `Ident.span` for the second.
 
 **Gate:** a query corpus. Each test is a source file with cursor positions and the expected answer — for hover the type name `Types.name_of` produces, for definition a `file:line:col`, for documentSymbol the list. Same `.expected` format, same byte comparison. The positions are asserted in **Zen** coordinates in the fixture and converted at the wire, so a failure separates "the query is wrong" from "the conversion is wrong". Break it by returning the enclosing node instead of the smallest and watch hover go red.
 
 **Hover's half of that gate exists**: `tests/corpus/lsp/hover_answers_at_a_declaration`, a 15-row position table driven through framed JSON-RPC, asserting the value and the range together. It was mutation-verified against each of the three paths it guards — the name finder, the signature reprint and the poison refusal — and against the two `null` controls. See the hover section in §2.
+
+**Colour's half exists too**: `tests/corpus/lsp/colour_comes_from_the_lexer`, which drives the server and then decodes the delta encoding back through `to_pos` so every row prints the bytes it colours. Ten mutations, nine red, and the tenth is an equivalent mutant §3 wrongly predicted would fire — both facts are in §2's colour section. **Break it on purpose:** make `deltaLine` absolute and watch the file's colour slide down the page.
 
 Plus the §3 conversion gate, which lands here at the latest and preferably in L1.
 
@@ -521,7 +552,7 @@ References (a reverse index), completion (a prefix form of `defs_of`, and the ba
 
 ### L4 — the expensive ones
 
-Semantic tokens with resolution, signature help, rename.
+Semantic tokens with RESOLUTION — the lexical form is L2 and done; what is L4 is telling a type from a function from a parameter, which no lexer can — signature help, rename.
 
 **Gate for rename, and it is the only interesting one:** a rename applied to a copy of `src/` must leave the tree **compiling and byte-identical at the fixpoint after the inverse rename**. That is `make fixpoint` used as a rename oracle, it costs almost nothing because the script exists (`scripts/fixpoint.sh`), and it is the only test that can catch the two hazards in §2 — a UFCS call site that never named the function, and a variant name that changed what an unrelated declaration means.
 
