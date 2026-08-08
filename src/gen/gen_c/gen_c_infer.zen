@@ -34,6 +34,7 @@ CBackend = gen.gen_c.gen_c_state
 inst_at, inst_open, settled_inst = gen.gen_c.gen_c_mono
 sub_with, unify, arg_type = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
+fat_ret_type = gen.gen_c.gen_c_bound
 
 complete_inst* = (be :: CBackend, c: Call, d: Def, f: Function,
                  settled: Inst, recv: Res<ExprId>, ctx: Ctx)
@@ -118,8 +119,23 @@ call_ret_type* = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx,
                   want: TyId) Res<TyId, AllocError> {
     be.tree.expr_at(c.callee).kind.match({
         Name(n)   => named_ret_type(be, id, c, n.text, None, ctx, want),
-        Access(a) => named_ret_type(be, id, c, a.name.text, Ok(a.base), ctx, want),
+        Access(a) => access_ret_type(be, id, c, a, ctx, want),
         _         => Ok(want),
+    })
+}
+
+// A MEMBER OF A BOUND IS NOT A DECLARATION THE WORLD HOLDS, so the walk
+// below finds nothing for `alloc.realloc(..)` and answers with the
+// caller's own guess — which is exactly the unsettled type the caller
+// came here to replace. `gen_c_bound.fat_ret_type` reads the SLOT
+// instead, and it is asked first because it answers only for a receiver
+// whose static type really is a bound with a member of that name and
+// arity; a concrete receiver has no record and falls straight through.
+access_ret_type = (be :: CBackend, id: ExprId, c: Call, a: Access, ctx: Ctx,
+                   want: TyId) Res<TyId, AllocError> {
+    fat_ret_type(be, c, a, ctx).try().match({
+        Ok(t) => Ok(t),
+        None  => named_ret_type(be, id, c, a.name.text, Ok(a.base), ctx, want),
     })
 }
 

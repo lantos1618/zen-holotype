@@ -42,6 +42,7 @@ unify, arg_type = gen.gen_c.gen_c_mono
 enter_struct_tparams = gen.gen_c.gen_c_mono
 ctype, is_unit, request_type, is_ptr_named = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
+write_set_value = gen.gen_c.gen_c_widen
 declare_temp = gen.gen_c.gen_c_flow
 Site, site_of, join = gen.gen_c.gen_c_member
 Slot, slots_of, set_line = gen.gen_c.gen_c_fat
@@ -68,7 +69,38 @@ convert_kind = (be :: CBackend, code: str, src: TyId, dst: TyId,
     be.types().at(dst).match({
         Named(n) => convert_named(be, code, dst, n, out),
         Res(r)   => convert_res(be, code, src, dst, r, out),
+        Union(_) => convert_set(be, code, src, dst, out),
         _        => out.add_bytes(code),
+    })
+}
+
+// A MEMBER REACHING A SET IS TAGGED, NOT COPIED. `rebuild_res` walks
+// into the error payload with `convert` again, so a `Res<(), AllocError>`
+// rebuilt at `Res<(), AllocError | Fault>` lands here with the member on
+// one side and the set on the other. Those are two different C structs —
+// a bare copy is not a rougher version of the right answer, it is a
+// program `cc` refuses — and the value wanted is the one a program
+// writes out by hand, so it is built by the same
+// `gen_c_widen.write_set_value` that builds the written form.
+//
+// A SET REACHING A WIDER SET IS LEFT ALONE. Its tags are numbered over
+// its OWN members, so copying one across carries a number that means a
+// different member on the other side: a wrong error variant at runtime,
+// from C that compiles. `gen_c_try.write_retag` maps it member by
+// member, and that is a switch statement — which a conversion written
+// into an expression buffer cannot be.
+convert_set = (be :: CBackend, code: str, src: TyId, dst: TyId,
+               out :: String) Res<(), AllocError> {
+    tags_as_member(be, src, dst).match({
+        false => out.add_bytes(code),
+        true  => write_set_value(be, code, src, dst, out),
+    })
+}
+
+tags_as_member = (be :: CBackend, src: TyId, dst: TyId) bool {
+    be.types().at(src).match({
+        Union(_) => false,
+        _        => be.check.types.set_has(dst, src),
     })
 }
 
@@ -244,20 +276,84 @@ pick_slot = (slots: Vec<Slot>, name: str, args: usize) Res<Slot> {
 settle_call = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
                s: Site, slot: Slot, ctx: Ctx, out :: String)
               Res<(), AllocError> {
+    declared ::= be.alloc.Vec<TyId>();
+    targs ::= be.alloc.Inst();
+    ret = read_slot(be, c, rty, s, slot, ctx, declared, targs).try();
+    settled(be, slot, targs).match({
+        false => unsupported(be, id, "a call through a bound whose type arguments nothing settles", out),
+        true  => emit_fat_call(be, c, a, rty, slot, declared, ret, targs, ctx, out),
+    })
+}
+
+// THE DECLARATION'S OWN READING OF A SLOT: the parameter types as
+// written, the return type as written, and what the arguments make of
+// the member's type parameters. `settle_call` writes the call from these
+// and `fat_ret_type` answers with them, and the two must not be able to
+// disagree — the type a caller declares its temporary at and the type
+// the call is rebuilt to are the same type or the C is rejected.
+read_slot = (be :: CBackend, c: Call, rty: TyId, s: Site, slot: Slot,
+             ctx: Ctx, declared :: Vec<TyId>, targs :: Inst)
+            Res<TyId, AllocError> {
     owner ::= be.alloc.String().try();
     join(owner, s.qname, slot.name).try();
     sctx = be.check.self_ctx(s.decl.module.to_usize(), rty).try();
     mark = enter_struct_tparams(be, s.decl).try();
     enter_tparams(be, slot.f.tparams, owner.view()).try();
-    declared ::= be.alloc.Vec<TyId>();
     declared_params(be, slot.f, sctx, declared).try();
     ret = declared_ret(be, slot.f, sctx).try();
-    targs ::= be.alloc.Inst();
     infer_targs(be, c, declared, ctx, targs).try();
     leave_tparams(be, mark).try();
+    Ok(ret);
+}
+
+// WHAT A CALL THROUGH A RECORD IS WORTH, for a caller that has to name
+// the type before the call is written.
+//
+// A BOUND'S MEMBER IS NOT A DECLARATION THE WORLD HOLDS. `realloc` is
+// declared inside `Alloc`, so `gen_c_infer`'s walk over `defs_of` finds
+// nothing and hands back the caller's own guess — which for a generic
+// member is the DECLARED `Res<Ptr<T>, E>`, a C struct with an
+// unresolved element. `Buf.grow` is the shape that caught it:
+// `self.alloc.realloc(self.data, cap).try()` declared its temporary at
+// `Res<Ptr<q>, AllocError>` and assigned the slot's
+// `Res<Ptr<u8>, AllocError>` into it, and `cc` rejected a program sema
+// had admitted.
+//
+// The answer is `sub_with(ret, targs)` — the same value `fat_result`
+// converts the erased answer BACK to — read off the same `read_slot`.
+// Two derivations of one type would be two chances to disagree.
+fat_ret_type* = (be :: CBackend, c: Call, a: Access, ctx: Ctx)
+                Res<Res<TyId>, AllocError> {
+    unknown = be.check.types.unknown().try();
+    rty = ty_of(be, a.base, ctx, unknown).try();
+    slots ::= be.alloc.Vec<Slot>();
+    slots_of(be, rty, slots).try();
+    pick_slot(slots, a.name.text, c.args.len).match({
+        None     => Ok(None),
+        Ok(slot) => slot_ret_type(be, c, rty, slot, ctx),
+    })
+}
+
+slot_ret_type = (be :: CBackend, c: Call, rty: TyId, slot: Slot, ctx: Ctx)
+                Res<Res<TyId>, AllocError> {
+    site_of(be, rty).try().match({
+        None  => Ok(None),
+        Ok(s) => settled_ret_type(be, c, rty, s, slot, ctx),
+    })
+}
+
+// A TYPE ARGUMENT NOTHING SETTLES IS NO ANSWER, which is the same
+// refusal `settle_call` makes one door along and for the same reason:
+// the call it would describe is one this backend goes on to refuse, so
+// answering here would name a type no call is ever written at.
+settled_ret_type = (be :: CBackend, c: Call, rty: TyId, s: Site, slot: Slot,
+                    ctx: Ctx) Res<Res<TyId>, AllocError> {
+    declared ::= be.alloc.Vec<TyId>();
+    targs ::= be.alloc.Inst();
+    ret = read_slot(be, c, rty, s, slot, ctx, declared, targs).try();
     settled(be, slot, targs).match({
-        false => unsupported(be, id, "a call through a bound whose type arguments nothing settles", out),
-        true  => emit_fat_call(be, c, a, rty, slot, declared, ret, targs, ctx, out),
+        false => Ok(None),
+        true  => Ok(Ok(sub_with(be, ret, targs).try())),
     })
 }
 

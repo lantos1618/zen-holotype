@@ -1,0 +1,88 @@
+// tests/corpus/std/res_match_arm_widening_keeps_the_member.zen
+// `res_try_error_set_keeps_the_variant` asks this of `.try()`; this asks
+// it of the OTHER position a set is widened in, and it asks it for the
+// reason that position was got wrong.
+//
+// `match_arms_merge_error_sets` proves the arms COMPILE, and it cannot
+// prove more than that: it closes every result with `Err(_) => 0`, so a
+// widening that tagged the union with the wrong member — or copied the
+// bytes across with no tag at all — leaves it green. That is not a
+// hypothetical. The whole risk of BUILDING a value rather than assigning
+// one is that a wrong build still compiles.
+//
+// So each arm's error is carried out and READ. The two members are two
+// different types, so nothing but the tag the widening wrote says which
+// one arrived: a widening that tagged the union with the other member
+// takes the other arm here, and one that wrote no tag at all takes
+// whichever arm the tag slot happened to hold. Both are values `cc` is
+// perfectly happy with.
+//
+// WHICH VARIANT INSIDE THE MEMBER is not asked, and not because it does
+// not matter — a payload pattern under a union member is refused today
+// (`res_try_error_set_keeps_the_variant` is the test that names it), so
+// asking would block this on a hole in somebody else's file. The member
+// field is named after the member's own type, so a widening that tagged
+// one member and carried another does not compile.
+//
+// READ THROUGH THE NAMED SPELLING OF THE SAME SET, because a match on a
+// structural union is not exhaustive yet — a separate hole, and one this
+// test would otherwise be blocked on. "A union is its members. Order and
+// spelling are not part of its identity", so `Both` is the set `either`
+// already answers with and `.try()` carries the value into it unchanged.
+
+Fault = | Bad | Worse
+Snag  = | Low | High
+
+Both = Fault | Snag
+
+// one arm's set
+fails = (n: usize) Res<(), Fault> {
+    (n == 0).match({
+        true  => Err(Fault.Worse),
+        false => Ok(()),
+    });
+}
+
+// the other's, sharing not one member with it
+faults = (n: usize) Res<(), Snag> {
+    (n == 0).match({
+        true  => Err(Snag.Low),
+        false => Ok(()),
+    });
+}
+
+// THE JOIN, AND IN RETURN POSITION. Two arms of one match are two ways
+// of producing ONE value, so the match carries the union of their sets
+// and each arm is widened into it where it lands — which for a trailing
+// match is the function's own return.
+either = (n: usize) Res<(), Fault | Snag> {
+    (n > 1).match({
+        true  => fails(n - 2),
+        false => faults(n),
+    })
+}
+
+// the same set under its declared name
+through_named = (n: usize) Res<(), Both> {
+    either(n).try();
+    Ok(());
+}
+
+show = (n: usize) Res<i32, Both> {
+    through_named(n).match({
+        Ok(_)  => println("{}: ok", n),
+        Err(e) => e.match({
+            Fault(_) => println("{}: Fault", n),
+            Snag(_)  => println("{}: Snag", n),
+        }),
+    });
+    Ok(0);
+}
+
+main = (env: Env) Res<i32, Both> {
+    show(0).try();
+    show(1).try();
+    show(2).try();
+    show(3).try();
+    Ok(0);
+}

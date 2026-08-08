@@ -200,6 +200,41 @@ sub_with* = (be :: CBackend, ty: TyId, inst: Inst) Res<TyId, AllocError> {
 // every emission asks before it writes a symbol.
 open* = (be: CBackend, ty: TyId) bool { has_var(be.check, ty) }
 
+// THE SAME QUESTION, ASKED OF EVERY EMPTY SLOT AND NOT ONLY OF A FREE
+// PARAMETER.
+//
+// `gen_name.tcode` writes ONE letter — `q` — for a `Var`, an `Infer` and
+// an `Unknown` alike, and it is right to: none of the three names a type
+// C could be handed. `open` asks about the first of them only, because
+// the symbol-collision it was written for is a collision between two
+// INSTANTIATIONS. That is a narrower question than "can this be spelled",
+// and a `Res<Ptr<Unknown>, E>` is the gap between them: no `Var` in it,
+// so `open` says settled, and a temporary declared at it is a C struct
+// with an unresolved element that `cc` rejects.
+//
+// The walk is `sema_inst.has_var`'s, one variant wider, and it is here
+// rather than beside it because the reason is a BACKEND reason — what has
+// a C spelling — and sema has no stake in it.
+unsettled* = (be: CBackend, ty: TyId) bool {
+    be.types().at(ty).match({
+        Var(_)   => true,
+        Infer    => true,
+        Unknown  => true,
+        Named(n) => any_unsettled(be, n.args),
+        Res(r)   => unsettled(be, r.value) || unsettled(be, r.error),
+        Fn(f)    => any_unsettled(be, f.params) || unsettled(be, f.ret),
+        Union(u) => any_unsettled(be, u.members),
+        Array(a) => unsettled(be, a.elem),
+        _        => false,
+    })
+}
+
+any_unsettled = (be: CBackend, list: Vec<TyId>) bool {
+    Range(0, list.len).find((i) {
+        list.get(i).match({ Ok(t) => unsettled(be, t), None => false })
+    }).match({ Ok(_) => true, None => false })
+}
+
 // Is any of these types still open? `find` and not a loop, because the
 // answer is a `bool` and the first one is enough.
 any_open* = (be: CBackend, sig: Vec<TyId>) bool {

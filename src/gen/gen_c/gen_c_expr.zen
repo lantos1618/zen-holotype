@@ -45,11 +45,10 @@ write_usize = sema.sema_diag
 Emit = gen.gen_emit
 sym_local, sym_member, sym_variant, sym_gen, sym_fn = gen.gen_name
 RES_PATH, is_failure = gen.gen_name
-sym_union_variant, sym_union_member = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 LocalSlot = gen.gen_c.gen_c_frame
-sub, constructed, open = gen.gen_c.gen_c_mono
+sub, constructed, open, unsettled = gen.gen_c.gen_c_mono
 loop_result_type = gen.gen_c.gen_c_shape
 unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_state
 lower_match = gen.gen_c.gen_c_flow
@@ -65,6 +64,8 @@ Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
 plain_ctx = gen.gen_c.gen_c_decl
 lower_call, res_value, is_res_ctor = gen.gen_c.gen_c_call
 needs_hoist, hoist_expr = gen.gen_c.gen_c_hoist
+needs_widen, widen_expr, needs_set, set_expr = gen.gen_c.gen_c_widen
+is_print = gen.gen_c.gen_c_print
 call_ret_type = gen.gen_c.gen_c_infer
 lower_unary, lower_binary, binary_type = gen.gen_c.gen_c_op
 lower_index, index_type = gen.gen_c.gen_c_index
@@ -302,8 +303,31 @@ ptr_answer_of = (be :: CBackend, c: Call, a: Access, rty: TyId, ctx: Ctx,
 settled_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                  Res<TyId, AllocError> {
     open(be, got).match({
-        false => Ok(got),
+        false => opaque_answer(be, id, ctx, got),
         true  => settle_open(be, id, ctx, got),
+    })
+}
+
+// AND A TYPE THAT IS SPELLED WITH A HOLE IN IT IS NOT AN ANSWER EITHER.
+//
+// `open` asks about a free PARAMETER, and a member of a BOUND leaves
+// something else behind: `Alloc.realloc<T>` has no body for sema to
+// check, so `self.alloc.realloc(self.data, cap)` comes back typed
+// `Res<Ptr<?>, AllocError>` with the element neither substituted nor a
+// `Var` — a type `open` calls settled and `gen_name.tcode` writes `q`
+// for. A `.try()` on it declared its temporary at that spelling and
+// assigned the slot's real `Res<Ptr<u8>, AllocError>` into it.
+//
+// STRAIGHT TO THE CALL, and not through the loop and inline steps above:
+// those two settle a `Var` the closure or the callee's instantiation was
+// going to bind, and there is no parameter here for either to bind. What
+// is missing is what the ARGUMENTS say, which is the question
+// `settle_call` asks.
+opaque_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
+                Res<TyId, AllocError> {
+    unsettled(be, got).match({
+        false => Ok(got),
+        true  => settle_call(be, id, ctx, got),
     })
 }
 
@@ -386,7 +410,33 @@ declared_call_type = (be :: CBackend, name: str, ctx: Ctx, want: TyId)
     be.check.world.defs_of(ctx.module, name, found).try();
     found.len.match({
         1 => def_call_type(be, found, want),
+        0 => sugar_call_type(be, name, want),
         _ => Ok(want),
+    })
+}
+
+// THE PRINT SUGAR NAMES NO FUNCTION, so the walk above finds nothing and
+// the answer falls back to `want` — which is `Unknown` at every question
+// worth asking. Its value IS unit: `gen_c_print.lower_print` writes the
+// console calls as statements and hands `0` back as a placeholder for a
+// value C cannot hold, and `0` is only ever correct where the value is
+// discarded.
+//
+// ANSWERING `()` IS WHAT MAKES THE PLACEHOLDER UNREACHABLE. `Unknown`
+// agrees with everything, so `gen_c_hoist.needs_hoist` read a `println`
+// reaching a `Res<(), E>` as "it already fits" and emitted `return 0;`
+// from a function returning a struct — the one thing that file says it
+// exists to stop. With unit as the answer the lift fires, and
+// `write_res_payload` runs the print for effect before building the `Ok`.
+//
+// A MODULE THAT DECLARES ITS OWN `println` MEANS ITS OWN, which is
+// `gen_c_call.is_sugar`'s rule and why this sits under the zero-def arm
+// rather than in front of the walk.
+sugar_call_type = (be :: CBackend, name: str, want: TyId)
+                  Res<TyId, AllocError> {
+    is_print(name).match({
+        false => Ok(want),
+        true  => be.check.types.prim("()"),
     })
 }
 
@@ -474,17 +524,15 @@ res_type_of* = (be :: CBackend, id: ExprId, ctx: Ctx)
 // without a rule at any of them.
 //
 // A MEMBER REACHING A SLOT WHOSE TYPE IS A STRUCTURAL SET is the same
-// shape and lands in the same place, for the same reason: `Err(
-// AllocError.OutOfMemory)` inside a `Res<(), AllocError | Fault>` is a
-// member written where the set is wanted, and sema admits it because "a
-// union target accepts any of its members". Without this it was emitted
-// as a bare member assignment into the set's struct — no tag, wrong
-// type, and `cc` rejecting a program nothing had reported.
+// shape and lands in the same place, and so is a `Res` reaching a `Res`
+// whose error set is wider. `gen_c_widen.zen` owns both — they are one
+// sentence, "the destination admits more than the source has" — and it
+// says what each is built out of.
 //
-// A BARE SUCCESS REACHING A `Res` SLOT IS THE THIRD OF THE SAME SHAPE.
+// A BARE SUCCESS REACHING A `Res` SLOT IS THE FOURTH OF THE SAME SHAPE.
 // `7;` closing a `Res<i32, E>` is `Ok(7)` — the same value, written
 // shorter — and it arrives here through the same three doors as the
-// other two. `gen_c_hoist.zen` builds it.
+// others. `gen_c_hoist.zen` builds it.
 expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, out :: String)
         Res<(), AllocError> {
     needs_set(be, id, ctx, want).try().match({
@@ -497,6 +545,19 @@ hoist_or_value = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
                   out :: String) Res<(), AllocError> {
     needs_hoist(be, id, ctx, want).try().match({
         true  => hoist_expr(be, id, ctx, want, out),
+        false => widen_or_value(be, id, ctx, want, out),
+    })
+}
+
+// A `Res` REACHING A `Res` WITH A WIDER ERROR SET IS THE FOURTH OF THE
+// SAME SHAPE, and it arrives through the same three doors. It is asked
+// AFTER the hoist because the two are disjoint by construction — a value
+// that lifts is not already a `Res` — and before the fat reading because
+// a `Res` is never a bound. `gen_c_widen.zen` says what is claimed.
+widen_or_value = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+                  out :: String) Res<(), AllocError> {
+    needs_widen(be, id, ctx, want).try().match({
+        true  => widen_expr(be, id, ctx, want, out),
         false => fat_or_value(be, id, ctx, want, out),
     })
 }
@@ -507,71 +568,6 @@ fat_or_value = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
         true  => fat_expr(be, id, ctx, want, out),
         false => value_expr(be, id, ctx, want, out),
     })
-}
-
-// A value whose own type is a MEMBER of the wanted set, and not the set
-// itself — a value already at the set's type is a copy and needs
-// nothing.
-needs_set* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
-            Res<bool, AllocError> {
-    be.check.types.at(want).match({
-        Union(_) => member_reaches_set(be, id, ctx, want),
-        _        => Ok(false),
-    })
-}
-
-member_reaches_set = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
-                     Res<bool, AllocError> {
-    unknown = be.check.types.unknown().try();
-    cty = ty_of(be, id, ctx, unknown).try();
-    Ok(settled_member(be, cty, want));
-}
-
-// `set_has` answers TRUE for an unsubstituted type parameter, for the
-// reason `sema_ty` writes down at it — a set nobody has computed cannot
-// be said to be absent. That is the right answer for a containment
-// CHECK and the wrong one here, because there is no C value to tag, so
-// it is asked past.
-settled_member = (be: CBackend, cty: TyId, want: TyId) bool {
-    (be.check.is_unknown(cty) == false) && (cty.eq(want) == false)
-        && is_named_or_res(be, cty) && be.check.types.set_has(want, cty)
-}
-
-is_named_or_res = (be: CBackend, cty: TyId) bool {
-    be.check.types.at(cty).match({
-        Named(_) => true,
-        Res(_)   => true,
-        _        => false,
-    })
-}
-
-// The value at ITS OWN type, then the set built around it — lowering it
-// at the set would ask for the member to already be one.
-set_expr = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
-            out :: String) Res<(), AllocError> {
-    unknown = be.check.types.unknown().try();
-    cty = ty_of(be, id, ctx, unknown).try();
-    code ::= be.alloc.String().try();
-    value_expr(be, id, ctx, cty, code).try();
-    write_set_value(be, code.view(), cty, want, out)
-}
-
-// The set, tagged with the member the value IS and carrying it
-// unchanged. Exported because `.try()` widening builds the same value
-// out of a different piece of C — the two are one layout decision and
-// must not be written twice.
-write_set_value* = (be :: CBackend, code: str, member: TyId, set: TyId,
-                    out :: String) Res<(), AllocError> {
-    out.add_bytes("(").try();
-    ctype(be, set, out).try();
-    out.add_bytes("){ .zg_tag = ").try();
-    sym_union_variant(out, be.types(), be.world(), set, member).try();
-    out.add_bytes(", .zg_data.").try();
-    sym_union_member(out, be.types(), be.world(), member).try();
-    out.add_bytes(" = ").try();
-    out.add_bytes(code).try();
-    out.add_bytes(" }").try();
-    Ok(());
 }
 
 // The value AT ITS OWN TYPE, then the record over its address: lowering
@@ -585,8 +581,8 @@ fat_expr = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
     write_fat_value(be, code.view(), cty, want, out)
 }
 
-value_expr = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
-              out :: String) Res<(), AllocError> {
+value_expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+               out :: String) Res<(), AllocError> {
     spills(be, id).match({
         true  => spill_temp(be, id, ctx, want, out),
         false => write_expr(be, id, ctx, want, out),

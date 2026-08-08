@@ -1,0 +1,227 @@
+// src/gen/gen_c/gen_c_widen.zen
+// A VALUE REACHING A TYPE WIDER THAN ITS OWN, and the two shapes that
+// is: a MEMBER reaching a set, and a `Res` reaching a `Res` whose error
+// set is wider. Both are the same sentence — the destination admits more
+// values than the source has — and both are paid for the same way, by
+// BUILDING the wider value rather than assigning the narrower one, so
+// they are one subject and one file.
+//
+// The set half moved here from `gen_c_expr.zen`, which had grown two
+// subjects: what an expression IS, and what it has to become on the way
+// somewhere. `expr` still asks both questions in order — that is the
+// funnel every destination goes through — and the answers live here.
+//
+// ---------------------------------------------------------------------
+// widening a `Res` ANYWHERE THAT IS NOT A `return`
+//
+// "The error type of a `Res` is a union, and propagation merges sets"
+// (DESIGN.md, Errors) is a containment rule, and `gen_c_try.zen` pays
+// for it in the one position it was first needed: a `.try()` carrying
+// the callee's error out through the caller's own `Res`. But a match is
+// two ways of producing ONE value, so its arms meet the SAME rule at a
+// destination that is not a return —
+//
+//     (n > 1).match({ true => fails(n), false => faults(n) })
+//
+// — and each arm is delivered straight into the match's temporary, which
+// is declared at the merged type. `Res<(), AllocError>` assigned into a
+// `Res<(), AllocError | Fault>` is two different C structs, and `cc`
+// rejected a program sema had already admitted.
+//
+// A WIDENING IS A REBUILD, AND THE REBUILD ALREADY EXISTS.
+// `gen_c_bound.convert` rebuilds a `Res` variant by variant — the tag,
+// the success payload, the error payload — because the erasure round
+// trip needs exactly that and "nothing here assumes two `Res`
+// instantiations share a layout". A widening is that same rebuild with
+// the error payload converted instead of copied, so this file decides
+// WHEN, and `convert` decides HOW. Two copies of a layout decision are
+// two places to get it wrong.
+//
+// NARROW ON PURPOSE, AND THE REFUSAL IS THE OLD BEHAVIOUR. Only a
+// difference `convert` can actually build is claimed: same forms, the
+// same success payload, and an error that is either unchanged or ONE
+// MEMBER reaching a structural set. A set reaching a WIDER set is a
+// re-tagging — the two number their members differently — and that is a
+// statement, not an expression; `gen_c_try.write_retag` is what it costs.
+// Claiming it here would emit a copy carrying the wrong member number,
+// which is a wrong value at runtime with no diagnostic. So it is not
+// claimed, and it falls out to exactly the C this file was written to
+// replace: a bare assignment `cc` refuses, which is a report and not a
+// miscompilation.
+
+Ast, Expr, ExprId = ast
+Alloc, AllocError = std.mem
+str, String = std.text
+TyId, Ty, Types, TyRes, ResForm = sema.sema_ty
+Checker, Ctx = sema.sema_check
+is_failure = gen.gen_name
+CBackend = gen.gen_c.gen_c_state
+open = gen.gen_c.gen_c_mono
+expr, ty_of, value_expr = gen.gen_c.gen_c_expr
+convert = gen.gen_c.gen_c_bound
+ctype = gen.gen_c.gen_c_type
+sym_union_variant, sym_union_member = gen.gen_name
+
+// Does this value have to be REBUILT to reach the `Res` that is wanted?
+needs_widen* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+               Res<bool, AllocError> {
+    be.check.types.at(want).match({
+        Res(w) => widens_into(be, id, ctx, want, w),
+        _      => Ok(false),
+    })
+}
+
+// A TYPE NOBODY HAS COMPUTED IS NOT WIDENED, for `gen_c_hoist.zen`'s
+// reason one door along: an `Unknown` or a still-open answer says
+// nothing about what the value is, and rebuilding on that reading would
+// invent a conversion out of missing information.
+widens_into = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, w: TyRes)
+              Res<bool, AllocError> {
+    unknown = be.check.types.unknown().try();
+    cty = ty_of(be, id, ctx, unknown).try();
+    settled(be, cty).match({
+        false => Ok(false),
+        true  => Ok(res_widens(be, cty, want, w)),
+    })
+}
+
+settled = (be :: CBackend, cty: TyId) bool {
+    (be.check.is_unknown(cty) || open(be, cty)) == false
+}
+
+res_widens = (be :: CBackend, cty: TyId, want: TyId, w: TyRes) bool {
+    cty.eq(want).match({
+        true  => false,
+        false => res_parts_widen(be, cty, w),
+    })
+}
+
+res_parts_widen = (be :: CBackend, cty: TyId, w: TyRes) bool {
+    be.check.types.at(cty).match({
+        Res(g) => parts_widen(be, g, w),
+        _      => false,
+    })
+}
+
+// THE SUCCESS PAYLOAD MUST ALREADY AGREE. This file is about the ERROR
+// set and nothing else — a `Res<u8, E>` reaching a `Res<T, E>` is the
+// erasure's question and `gen_c_bound.zen` asks it where it arises, with
+// the instantiation in hand. Here there is none, so the two payloads
+// have to be one type or there is no widening to claim.
+parts_widen = (be :: CBackend, g: TyRes, w: TyRes) bool {
+    (is_failure(g.form) == is_failure(w.form)) && g.value.eq(w.value)
+        && error_widens(be, g, w)
+}
+
+// An absence carries no error, so its `error` slot is the unit type and
+// comparing it says nothing — the two `Res`es differ in their success
+// payload or not at all, and `parts_widen` has already answered that.
+error_widens = (be :: CBackend, g: TyRes, w: TyRes) bool {
+    is_failure(g.form).match({
+        false => false,
+        true  => member_reaches_set(be, g.error, w.error),
+    })
+}
+
+// ONE MEMBER REACHING A SET, and never a set reaching a wider one: the
+// header says why. `set_has` is sema's own containment test, the one
+// that admitted the program, so asking it again cannot disagree with the
+// check that let it through.
+member_reaches_set = (be :: CBackend, got: TyId, want: TyId) bool {
+    (got.eq(want) == false) && (is_set(be, got) == false)
+        && is_set(be, want) && be.check.types.set_has(want, got)
+}
+
+is_set = (be :: CBackend, ty: TyId) bool {
+    be.check.types.at(ty).match({ Union(_) => true, _ => false })
+}
+
+// THE VALUE AT ITS OWN TYPE, THEN REBUILT AT THE WANTED ONE. Lowering it
+// at `want` would ask the value to be something it is not; `convert`
+// spills it into a temporary of its own type and reads the tag and the
+// payload off that, which is the only way a rebuild can read a value
+// three times without evaluating it three times.
+widen_expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+               out :: String) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    cty = ty_of(be, id, ctx, unknown).try();
+    code ::= be.alloc.String().try();
+    expr(be, id, ctx, cty, code).try();
+    convert(be, code.view(), cty, want, out)
+}
+
+// ---------------------------------------------------------------------
+// a member reaching a SET
+//
+// The other shape, and the older one: `Err(AllocError.OutOfMemory)`
+// inside a `Res<(), AllocError | Fault>` is a member written where the
+// set is wanted, and sema admits it because "a union target accepts any
+// of its members". Without this it was emitted as a bare member
+// assignment into the set's struct — no tag, wrong type, and `cc`
+// rejecting a program nothing had reported.
+// ---------------------------------------------------------------------
+
+// A value whose own type is a MEMBER of the wanted set, and not the set
+// itself — a value already at the set's type is a copy and needs
+// nothing.
+needs_set* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+            Res<bool, AllocError> {
+    be.check.types.at(want).match({
+        Union(_) => member_reaches_set(be, id, ctx, want),
+        _        => Ok(false),
+    })
+}
+
+member_reaches_set = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+                     Res<bool, AllocError> {
+    unknown = be.check.types.unknown().try();
+    cty = ty_of(be, id, ctx, unknown).try();
+    Ok(settled_member(be, cty, want));
+}
+
+// `set_has` answers TRUE for an unsubstituted type parameter, for the
+// reason `sema_ty` writes down at it — a set nobody has computed cannot
+// be said to be absent. That is the right answer for a containment
+// CHECK and the wrong one here, because there is no C value to tag, so
+// it is asked past.
+settled_member = (be: CBackend, cty: TyId, want: TyId) bool {
+    (be.check.is_unknown(cty) == false) && (cty.eq(want) == false)
+        && is_named_or_res(be, cty) && be.check.types.set_has(want, cty)
+}
+
+is_named_or_res = (be: CBackend, cty: TyId) bool {
+    be.check.types.at(cty).match({
+        Named(_) => true,
+        Res(_)   => true,
+        _        => false,
+    })
+}
+
+// The value at ITS OWN type, then the set built around it — lowering it
+// at the set would ask for the member to already be one.
+set_expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
+             out :: String) Res<(), AllocError> {
+    unknown = be.check.types.unknown().try();
+    cty = ty_of(be, id, ctx, unknown).try();
+    code ::= be.alloc.String().try();
+    value_expr(be, id, ctx, cty, code).try();
+    write_set_value(be, code.view(), cty, want, out)
+}
+
+// The set, tagged with the member the value IS and carrying it
+// unchanged. Exported because `.try()` widening builds the same value
+// out of a different piece of C — the two are one layout decision and
+// must not be written twice.
+write_set_value* = (be :: CBackend, code: str, member: TyId, set: TyId,
+                    out :: String) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    ctype(be, set, out).try();
+    out.add_bytes("){ .zg_tag = ").try();
+    sym_union_variant(out, be.types(), be.world(), set, member).try();
+    out.add_bytes(", .zg_data.").try();
+    sym_union_member(out, be.types(), be.world(), member).try();
+    out.add_bytes(" = ").try();
+    out.add_bytes(code).try();
+    out.add_bytes(" }").try();
+    Ok(());
+}
