@@ -1,0 +1,153 @@
+// src/sema/sema_static.zen
+// `Type.NAME` — what a type's own name reaches, and what it still owes.
+//
+// SPLIT FROM `sema_member.zen`, WHICH ANSWERS WHAT A DOT REACHES ON A
+// VALUE. The two read alike and share nothing: there is no receiver
+// here, no impl, no bound, no `Found` and no selection rule — a
+// variant, a primitive's constant and a module member all come from the
+// DECLARATION alone. `sema_member.zen` was at the 800-line cap with two
+// subjects in it, and this is the one that was never about a dot.
+//
+// TWO ENTRIES, AND THE DIFFERENCE BETWEEN THEM IS THE WHOLE FILE.
+// `static_access` is `Type.NAME` as a call's callee — `Slot.Left(cell)`
+// resolves through it, and a payload-carrying variant answers with the
+// FUNCTION that builds one, which is what makes construction an
+// ordinary call. `static_value` is the same access standing alone,
+// where a value is wanted and no argument list follows. A union's
+// member is complete in the first position and incomplete in the
+// second, so the rule cannot live inside the shared half: refusing in
+// `variant_type` would refuse every legitimate construction in the
+// tree.
+
+Expr, ExprId, Access = ast
+AllocError = std.mem
+Vec = std.collections
+str = std.text
+// `Types` is imported for the STORE and not for a name written below:
+// `c.types.fn_ty(..)` is a method on it, and the bootstrapper resolves a
+// field's methods only where the field's type is in scope. Dropping it
+// as an unused name reddens `overload_resolution_reads_the_signature`,
+// which compiles this tree with the OTHER compiler.
+TyId, Types = sema.sema_ty
+is_integer, is_float = sema.sema_ty
+SemaFault, TypeFault = sema.sema_diag
+Checker, Ctx = sema.sema_check
+Case, cases_of, find_case = sema.sema_case
+is_case = sema.sema_match
+module_named_by, module_access = sema.sema_module
+value_access = sema.sema_member
+union_carrier = sema.sema_union
+
+// `Error.IoError` WRITTEN WHERE A VALUE GOES. Every member of a union
+// carries a value of the type it names — that is what `A | B` means —
+// so the member alone is a tag beside bytes nobody wrote, which is
+// precisely the value the union exists to carry. There is nothing to
+// hand back.
+//
+// ASKED HERE AND NOT IN `variant_type`, because `variant_type` answers
+// a call's callee too and a union member IS constructible: `Error
+// .IoError(e)` reaches `static_access` below without passing through
+// this function at all. A rule one step earlier would reject every
+// `Ok(..)`, every `Err(..)` and every enum construction in the tree.
+//
+// A NOMINAL ENUM'S PAYLOAD VARIANT IS A DIFFERENT CASE with a different
+// answer: `Slot.Left` names a function, and a function is a value.
+// `union_carrier` poisons for it, so the access falls straight through.
+static_value* = (c :: Checker, id: ExprId, node: Expr, ac: Access,
+                 ty: TyId, ctx: Ctx) Res<TyId, AllocError> {
+    carried = union_carrier(c, ty, ac.name.text).try();
+    c.is_unknown(carried).match({
+        true  => static_access(c, id, node, ac, ty, ctx),
+        false => needs_value(c, node, ac, ty, carried),
+    })
+}
+
+// THE SMALLEST OFFENDING NODE IS THE ACCESS, so `node.span` and not the
+// name after the dot: `IoError` alone is not the mistake — reading it
+// off `Error` without a value is — and not the enclosing `Err(..)`
+// either, which is written correctly around it.
+needs_value = (c :: Checker, node: Expr, ac: Access, ty: TyId,
+               carried: TyId) Res<TyId, AllocError> {
+    c.report(node.span.file, node.span,
+             SemaFault.MemberNeedsValue(TypeFault(
+                 name: ac.name.text, expected: carried, found: ty))).try();
+    c.types.unknown()
+}
+
+// A variant, or a constant on a type. "That access form already exists —
+// `Shape.Unit`, `Os.Macos` — so this adds a spelling, not a concept."
+//
+// A MODULE IS ASKED FIRST, because it is not a type at all: `sh = shape`
+// binds a name whose base has no members, no variants and no constants,
+// and every question below it would answer "no such field" correctly and
+// uselessly.
+static_access* = (c :: Checker, id: ExprId, node: Expr, ac: Access,
+                  ty: TyId, ctx: Ctx) Res<TyId, AllocError> {
+    module_named_by(c, ty).match({
+        Ok(mi) => module_access(c, node, ac, mi),
+        None   => type_access(c, id, node, ac, ty, ctx),
+    })
+}
+
+type_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ty: TyId,
+               ctx: Ctx) Res<TyId, AllocError> {
+    is_case(c, ty, ac.name.text).try().match({
+        true  => variant_type(c, ty, ac.name.text),
+        false => static_member(c, id, node, ac, ty, ctx),
+    })
+}
+
+// A nullary variant IS a value of the enum; one carrying a payload is
+// the function that builds one, which is what makes `Slot.Left(cell)` an
+// ordinary call and not a second construction form.
+variant_type* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
+    cases ::= c.alloc.Vec<Case>();
+    cases_of(c, ty, cases).try();
+    find_case(cases, name).match({
+        None   => c.types.unknown(),
+        Ok(cs) => variant_value(c, ty, cs),
+    })
+}
+
+variant_value = (c :: Checker, ty: TyId, cs: Case) Res<TyId, AllocError> {
+    cs.has_payload.match({
+        true  => variant_ctor(c, ty, cs),
+        false => Ok(ty),
+    })
+}
+
+variant_ctor = (c :: Checker, ty: TyId, cs: Case) Res<TyId, AllocError> {
+    params ::= c.alloc.Vec<TyId>();
+    params.add(cs.payload).try();
+    c.types.fn_ty(params, ty)
+}
+
+// `i32.MAX`, `i32.BITS`. Anything else falls through to the ordinary
+// member table, because a struct body may bind a constant too.
+static_member = (c :: Checker, id: ExprId, node: Expr, ac: Access,
+                 ty: TyId, ctx: Ctx) Res<TyId, AllocError> {
+    has_prim_const(c, ty, ac.name.text).match({
+        true  => prim_const_type(c, ty, ac.name.text),
+        false => value_access(c, id, node, ac, ty, ctx),
+    })
+}
+
+// "Every primitive numeric type carries MIN, MAX, and BITS from the
+// prelude." MIN and MAX are of the type; BITS is a count, so `usize`.
+has_prim_const = (c: Checker, ty: TyId, name: str) bool {
+    numeric_prim(c, ty)
+        && (name.eq("MIN") || name.eq("MAX") || name.eq("BITS"))
+}
+
+prim_const_type = (c :: Checker, ty: TyId, name: str)
+                  Res<TyId, AllocError> {
+    name.eq("BITS").match({
+        true  => c.types.prim("usize"),
+        false => Ok(ty),
+    })
+}
+
+numeric_prim = (c: Checker, ty: TyId) bool {
+    name = c.prim_name(ty);
+    is_integer(name) || is_float(name)
+}

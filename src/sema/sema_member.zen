@@ -29,7 +29,9 @@
 // against each other by the same selection rule; separating them would
 // put the rule in one module and two of its three inputs in another.
 // What did split out is `sema_bound.zen`: "what an impl OWES" is a
-// different question with a different answer shape.
+// different question with a different answer shape — and
+// `sema_static.zen`: `Type.NAME` has no receiver, no impl and no bound,
+// so not one word of the rule below applies to it.
 //
 // THE BOUND IN SCOPE SELECTS, NEVER FILE ORDER. Two impls supplying one
 // name is an error unless a generic in scope declared one of the two
@@ -51,14 +53,12 @@ Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 ExportFault = sema.sema_diag
 Checker, Ctx, UNRESOLVED = sema.sema_check
 Inst, subst, inst_of_named, owner_of, push_tparams = sema.sema_inst
-is_prim, is_integer, is_float = sema.sema_ty
-Case, cases_of, find_case = sema.sema_case
+is_prim = sema.sema_ty
 impl_members, bound_members, bound_member_types = sema.sema_supply
 has_member = sema.sema_supply
-is_case = sema.sema_match
 type_from_ast, type_of, param_type = sema.sema_type
 global_name_type, def_type = sema.sema_type
-module_named_by, module_access = sema.sema_module
+static_value = sema.sema_static
 
 // One thing a dot could reach.
 //
@@ -98,7 +98,7 @@ access_type* = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
                Res<TyId, AllocError> {
     b = base_of(c, ac.base, ctx).try();
     b.is_type.match({
-        true  => static_access(c, id, node, ac, b.ty, ctx),
+        true  => static_value(c, id, node, ac, b.ty, ctx),
         false => value_access(c, id, node, ac, b.ty, ctx),
     })
 }
@@ -172,88 +172,6 @@ is_type_def* = (k: DefKind) bool {
 }
 
 // ---------------------------------------------------------------------
-// `Type.NAME`
-// ---------------------------------------------------------------------
-
-// A variant, or a constant on a type. "That access form already exists —
-// `Shape.Unit`, `Os.Macos` — so this adds a spelling, not a concept."
-//
-// A MODULE IS ASKED FIRST, because it is not a type at all: `sh = shape`
-// binds a name whose base has no members, no variants and no constants,
-// and every question below it would answer "no such field" correctly and
-// uselessly.
-static_access* = (c :: Checker, id: ExprId, node: Expr, ac: Access,
-                  ty: TyId, ctx: Ctx) Res<TyId, AllocError> {
-    module_named_by(c, ty).match({
-        Ok(mi) => module_access(c, node, ac, mi),
-        None   => type_access(c, id, node, ac, ty, ctx),
-    })
-}
-
-type_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ty: TyId,
-               ctx: Ctx) Res<TyId, AllocError> {
-    is_case(c, ty, ac.name.text).try().match({
-        true  => variant_type(c, ty, ac.name.text),
-        false => static_member(c, id, node, ac, ty, ctx),
-    })
-}
-
-// A nullary variant IS a value of the enum; one carrying a payload is
-// the function that builds one, which is what makes `Slot.Left(cell)` an
-// ordinary call and not a second construction form.
-variant_type* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
-    cases ::= c.alloc.Vec<Case>();
-    cases_of(c, ty, cases).try();
-    find_case(cases, name).match({
-        None   => c.types.unknown(),
-        Ok(cs) => variant_value(c, ty, cs),
-    })
-}
-
-variant_value = (c :: Checker, ty: TyId, cs: Case) Res<TyId, AllocError> {
-    cs.has_payload.match({
-        true  => variant_ctor(c, ty, cs),
-        false => Ok(ty),
-    })
-}
-
-variant_ctor = (c :: Checker, ty: TyId, cs: Case) Res<TyId, AllocError> {
-    params ::= c.alloc.Vec<TyId>();
-    params.add(cs.payload).try();
-    c.types.fn_ty(params, ty)
-}
-
-// `i32.MAX`, `i32.BITS`. Anything else falls through to the ordinary
-// member table, because a struct body may bind a constant too.
-static_member = (c :: Checker, id: ExprId, node: Expr, ac: Access,
-                 ty: TyId, ctx: Ctx) Res<TyId, AllocError> {
-    has_prim_const(c, ty, ac.name.text).match({
-        true  => prim_const_type(c, ty, ac.name.text),
-        false => value_access(c, id, node, ac, ty, ctx),
-    })
-}
-
-// "Every primitive numeric type carries MIN, MAX, and BITS from the
-// prelude." MIN and MAX are of the type; BITS is a count, so `usize`.
-has_prim_const = (c: Checker, ty: TyId, name: str) bool {
-    numeric_prim(c, ty)
-        && (name.eq("MIN") || name.eq("MAX") || name.eq("BITS"))
-}
-
-prim_const_type = (c :: Checker, ty: TyId, name: str)
-                  Res<TyId, AllocError> {
-    name.eq("BITS").match({
-        true  => c.types.prim("usize"),
-        false => Ok(ty),
-    })
-}
-
-numeric_prim = (c: Checker, ty: TyId) bool {
-    name = c.prim_name(ty);
-    is_integer(name) || is_float(name)
-}
-
-// ---------------------------------------------------------------------
 // `value.name`
 // ---------------------------------------------------------------------
 
@@ -261,8 +179,8 @@ numeric_prim = (c: Checker, ty: TyId) bool {
 // them is how one mistake becomes a cascade: SEMA_BOOTSTRAP_FIXES.md §7
 // records twenty-two diagnostics naming unrelated modules for one
 // missing import.
-value_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ty: TyId,
-                ctx: Ctx) Res<TyId, AllocError> {
+value_access* = (c :: Checker, id: ExprId, node: Expr, ac: Access, ty: TyId,
+                 ctx: Ctx) Res<TyId, AllocError> {
     opaque(c, ty).match({
         true  => c.types.unknown(),
         false => known_access(c, id, node, ac, ty, ctx),

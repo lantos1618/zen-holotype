@@ -38,7 +38,7 @@ Vec = std.collections
 str = std.text
 Range = std.core
 DeclId = sema.sema_id
-TyId = sema.sema_ty
+TyId, TyNamed = sema.sema_ty
 Def, decl_at = sema.sema_def
 Checker = sema.sema_check
 
@@ -144,6 +144,57 @@ member_named = (c :: Checker, d: Def) Res<TyId, AllocError> {
 
 member_type = (c :: Checker, decl: DeclId, name: str) Res<TyId, AllocError> {
     Ok(c.set_of(union_member(c, decl, name).try()));
+}
+
+// The value `Type.NAME` leaves unwritten: what a union's member carries,
+// or poison when `ty` is not a union or `name` is not one of its
+// members. Poison and not a `bool`, because the diagnostic has to NAME
+// the type that is missing and the answer is already in hand.
+//
+// THE QUESTION IS SETTLED BY THE DECLARATION, exactly as `union_reading`
+// is: every variant of a union names a type, so every member carries
+// one, and there is no variant of one to exempt. A nominal enum answers
+// poison here even for a payload variant — `Slot.Left` is the function
+// that builds one, and a function is a value.
+union_carrier* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
+    c.types.at(ty).match({
+        Named(n) => named_carrier(c, n, name),
+        _        => c.types.unknown(),
+    })
+}
+
+named_carrier = (c :: Checker, n: TyNamed, name: str) Res<TyId, AllocError> {
+    (union_reading(c, n.decl) && variant_named(c, n.decl, name)).match({
+        true  => union_member(c, n.decl, name),
+        false => c.types.unknown(),
+    })
+}
+
+// Against the DECLARED variants and not `defs_of`, which would answer
+// for any type the declaring module can see: `Error.Vec` names no member
+// of `Error = AllocError | IoError`, and a lookup that found `Vec`
+// anyway would report the wrong mistake about it.
+variant_named = (c :: Checker, decl: DeclId, name: str) bool {
+    decl_at(c.tree, decl).match({
+        None  => false,
+        Ok(d) => decl_names_variant(d, name),
+    })
+}
+
+decl_names_variant = (d: Decl, name: str) bool {
+    d.kind.match({
+        Enum(e) => enum_names_variant(e, name),
+        _       => false,
+    })
+}
+
+enum_names_variant = (e: Enum, name: str) bool {
+    Range(0, e.variants.len).find((i) {
+        e.variants.get(i).match({
+            None  => false,
+            Ok(v) => v.name.text.eq(name),
+        })
+    }).match({ Ok(_) => true, None => false })
 }
 
 // -----------------------------------------------------------------
