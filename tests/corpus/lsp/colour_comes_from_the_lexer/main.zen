@@ -1,0 +1,239 @@
+// COLOUR COMES FROM THE LEXER, and the wire says so in five integers
+// per token.
+//
+// `design_lsp.md` §2's `semanticTokens, lexical` row, driven through the
+// SERVER: the legend `initialize` advertises, the route
+// `textDocument/semanticTokens/full`, and the encoding — all of it over
+// framed JSON-RPC, so a right token list under a wrong legend or a
+// route that is not reached is still red here.
+//
+// THE ENCODING IS DECODED BACK, and that is the whole reason this test
+// is readable. A flat array of integers is unreviewable: nobody can see
+// that `[0,3,3,5,0]` is wrong. So every group is undone — the deltas
+// added up, and the resulting `line:character` handed to `to_pos`,
+// which is the INVERSE conversion — and the bytes it names are printed.
+// A reader checks the arithmetic by reading the last column.
+//
+// That inverse is not decoration either: `to_wire` produced the numbers
+// and `to_pos` reads them back, so a conversion broken in BOTH
+// directions is the only kind that could survive this, and
+// `positions_convert_both_ways` is the test that will not let it.
+//
+// WHAT EACH ROW OF `DOC` IS FOR:
+//
+//   line 0  a comment on its own, so the first token in a file starts
+//           from the origin and its deltas are absolute
+//   line 1  a declaration: identifiers and an operator, and NO colour
+//           for `(`, `)`, `:`, `,` or `{` — the delimiters this server
+//           refuses to call operators
+//   line 2  A NON-ASCII STRING LITERAL, and then two more tokens AFTER
+//           it on the same line. The literal is 6 UTF-16 units and 9
+//           BYTES, so a `length` taken from the span's byte offsets
+//           reads 9, and a `character` counted in bytes puts the `+`
+//           three columns to the right. Both are visible below.
+//   line 3  `true`, which is a keyword and not an identifier — the
+//           lexer says so and this is where that shows
+//   line 4  an integer literal, so `number` is exercised
+//   lines 5-7  A BLOCK COMMENT ACROSS THREE LINES, one of them blank.
+//           The standard encoding cannot express a multi-line token, so
+//           it is SPLIT one run per line — and the blank line is a run
+//           of zero units, which is not emitted at all. The `deltaLine`
+//           of 2 between the two runs that ARE emitted is what says the
+//           skip happened.
+//   line 8  a last token, so the file does not end on the comment
+//
+// THE `null` HALF: a `semanticTokens` request for a uri that was never
+// opened is `-32602` and not an empty token list. An empty list means
+// "this file has no colour in it", which is a different sentence.
+
+str, String = std.text
+Vec = std.collections
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, write_decimal, frame_at = lsp.lsp_frame
+write_text, Jsons, JsonId = lsp.lsp_json
+read = lsp.lsp_json_read
+to_pos, run_of = lsp.lsp_pos
+Colour, index_of, name_of, write_legend = lsp.lsp_colour
+
+DOC*: str = "// a note\nadd = (a: i32) i32 {\n    s = \"hé😀\" + a;\n    ok = true;\n    n = 42;\n    /* two\n\n       lines */\n    a\n}\n"
+
+URI*: str = "file:///a.zen"
+
+// --- the legend --------------------------------------------------------
+
+// THE TWO HALVES OF ONE FACT, printed side by side. A `tokenType` on the
+// wire is an index into the array `initialize` advertises, so these must
+// agree, and the only way a reader can check that they do is to see
+// them together.
+said_legend = (a: Alloc) Res<(), AllocError> {
+    out ::= a.String().try();
+    write_legend(out).try();
+    println("legend {}", out.view());
+    one_colour(Colour.Keyword);
+    one_colour(Colour.Text);
+    one_colour(Colour.Number);
+    one_colour(Colour.Comment);
+    one_colour(Colour.Operator);
+    one_colour(Colour.Variable);
+    Ok(());
+}
+
+one_colour = (colour: Colour) () {
+    println("  {} {}", index_of(colour), name_of(colour));
+}
+
+// --- the requests ------------------------------------------------------
+
+open_doc = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(DOC, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+colours = (a: Alloc, id: usize, uri: str, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(",\"method\":\"textDocument/semanticTokens/full\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    said_legend(a).try();
+
+    input ::= a.String().try();
+    write_frame("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}", input).try();
+    open_doc(a, input).try();
+    colours(a, 2, URI, input).try();
+    colours(a, 3, "file:///never-opened.zen", input).try();
+    // THE TWO SHAPES THIS SERVER DOES NOT ADVERTISE, asked for anyway.
+    // A client sends `range` or `full/delta` only when it was told the
+    // server has them, so both must be `-32601` — and if either ever
+    // starts answering without the capability changing beside it, this
+    // is where that shows. A capability is a promise; the refusal below
+    // is what makes advertising only `full` an honest one.
+    write_frame("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"textDocument/semanticTokens/range\",\"params\":{}}", input).try();
+    write_frame("{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"textDocument/semanticTokens/full/delta\",\"params\":{}}", input).try();
+    write_frame("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"shutdown\"}", input).try();
+
+    s ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    replies(a, out.view()).try();
+    Ok(0);
+}
+
+// Every reply, in order. The first is `initialize` — printed whole,
+// because the legend it carries is what every index below is against —
+// and the one holding `data` is decoded.
+replies = (a: Alloc, out: str) Res<(), AllocError> {
+    at ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; reply(a, seen, fr.body).try(); seen = seen + 1; },
+        });
+    });
+    Ok(());
+}
+
+reply = (a: Alloc, i: usize, body: str) Res<(), AllocError> {
+    println("");
+    println("reply {}: {}", i, body);
+    decoded(a, body)
+}
+
+// --- undoing the encoding ----------------------------------------------
+
+// The five-integer groups of `result.data`, added back up.
+//
+// A reply with no `data` in it — `initialize`'s, and the `-32602` — is
+// left alone, so this walks every frame and prints under only the one
+// that has tokens.
+decoded = (a: Alloc, body: str) Res<(), AllocError> {
+    tree ::= a.Jsons();
+    read(a, tree, body).match({
+        Err(_)  => Ok(()),
+        Ok(msg) => walked(tree, data_of(tree, msg)),
+    })
+}
+
+data_of = (tree: Jsons, msg: JsonId) Res<JsonId> {
+    tree.field(msg, "result").match({
+        None    => None,
+        Ok(res) => tree.field(res, "data"),
+    })
+}
+
+// THE RUNNING TOTALS ARE THE DECODER. `line` and `character` are what
+// the client would be holding after every group, which is exactly what
+// the encoding means — so a decoder that reproduces the source text has
+// proved the encoder, and one that drifts down the file shows it.
+walked = (tree: Jsons, data: Res<JsonId>) Res<(), AllocError> {
+    data.match({
+        None      => Ok(()),
+        Ok(array) => walk_groups(tree, array),
+    })
+}
+
+walk_groups = (tree: Jsons, array: JsonId) Res<(), AllocError> {
+    line ::= 0;
+    character ::= 0;
+    at ::= 0;
+    going ::= true;
+    loop(() { going }, (h) {
+        tree.item(array, at).match({
+            None    => { going = false; },
+            Ok(_)   => {
+                delta_line = whole_at(tree, array, at);
+                delta_character = whole_at(tree, array, at + 1);
+                line = line + delta_line;
+                character = (delta_line == 0).match({
+                    true  => character + delta_character,
+                    false => delta_character,
+                });
+                shown(line, character, whole_at(tree, array, at + 2),
+                      whole_at(tree, array, at + 3),
+                      whole_at(tree, array, at + 4));
+                at = at + 5;
+            },
+        });
+    });
+    Ok(());
+}
+
+whole_at = (tree: Jsons, array: JsonId, at: usize) usize {
+    tree.item(array, at).match({
+        None  => 0,
+        Ok(v) => tree.whole(v).match({ Ok(n) => n, None => 0 }),
+    })
+}
+
+// One decoded token, and THE BYTES IT COVERS.
+//
+// The slice comes back through `to_pos`, the wire-to-Zen direction, so
+// the last column is the answer of a conversion this file did not make:
+// a `length` counted in bytes prints a slice that ends in the middle of
+// a character, and a `character` counted in bytes prints one that starts
+// in the wrong place.
+shown = (line: usize, character: usize, length: usize, colour: usize,
+         modifiers: usize) () {
+    run = run_of(DOC, line);
+    from = run.start + to_pos(DOC, line, character).col - 1;
+    upto = run.start + to_pos(DOC, line, character + length).col - 1;
+    println("  line {} char {} len {} type {} mod {}  [{}]",
+            line, character, length, colour, modifiers,
+            DOC.slice(from, upto));
+}
