@@ -1,0 +1,78 @@
+// A DIAGNOSTIC IS A VALUE, AND THE NOTE IS PART OF IT.
+//
+// `parse_diag.zen` states three rules and the second is "anchored where
+// the fix goes, not where the parser noticed": an unclosed `(` is
+// reported on the OPENING delimiter, and the place the parser actually
+// stopped is the NOTE. Two positions, and neither is optional — a
+// message anchored on the opener with nothing saying where the run
+// ended tells the reader the paren is unclosed without telling them
+// what swallowed the rest of the line.
+//
+// THIS IS A TEST BECAUSE THE NOTE WAS LOST. `diag_at` has been building
+// notes since it was written and `expect_close` has been its only
+// caller, but `zen build` printed `d.message` alone — so every note the
+// parser produced was collected into `Parser.diags`, carried out
+// intact, and dropped by the driver. A value nothing reads and a value
+// nothing prints are the same value, and nothing was red.
+//
+// IT ASSERTS THE FIELDS AND THEN THE RENDERING, in that order and for
+// two different reasons. The fields are what an editor gets —
+// `publishDiagnostics` wants a span, not a line of text
+// (`docs/design_lsp.md` §5) — and `say` is what a terminal gets, which
+// is the one path `zen build` takes. Breaking either turns this red;
+// asserting only the printed form would let a `Note` become a string
+// and nothing would notice.
+//
+// IT DRIVES THE PARSER AND NOT THE DRIVER, because a `Build` walks a
+// real directory and there is no root to point it at from in here. What
+// the driver adds on top is one `Vec` and one call, and every
+// `tests/must-fail` program covers that: `Build.report` prints the
+// diagnostic it has just collected, so a driver that stopped collecting
+// would print nothing at all.
+
+scan, Source = lex
+Parser = parse
+Ast = ast
+Diag, say = parse.parse_diag
+Alloc, AllocError = std.mem
+str = std.text
+
+// The argument list on line 2 is never closed, and the block opened on
+// line 1 goes with the file — TWO unclosed delimiters and ONE
+// diagnostic, which is the count this file prints first: the recovery
+// hushes the outer one, because the inner `(` is the mistake and the
+// `{` is only what it took down with it.
+SRC: str = "main = (env: Env) i32 {\n    println(\"{}\", 1 + 2;\n"
+
+// every field of one diagnostic, so a note that stopped being built and
+// a note that stopped being carried are both this line going missing
+show = (d: Diag) () {
+    println("{}:{}:{}..{}:{}: {}", d.span.file, d.span.start.line,
+            d.span.start.col, d.span.end.line, d.span.end.col, d.message);
+    d.note.match({
+        None  => println("    (no note)"),
+        Ok(n) => println("    note {}:{}..{}:{}: {}", n.span.start.line,
+                         n.span.start.col, n.span.end.line, n.span.end.col,
+                         n.message),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    tree ::= alloc.Ast();
+
+    lexed = scan(alloc, Source(file: "in.zen", text: SRC)).try();
+    p ::= alloc.Parser(lexed, tree);
+    m = p.module("in").try();
+    p.tree.add_module(m).try();
+
+    println("{} diagnostic(s), as values:", p.diags.len);
+    p.diags.loop((h, d) { show(d); });
+
+    // and the same diagnostics as `zen build` says them. This is the
+    // function the driver calls, so the indented `note:` line below is
+    // the one that used to be missing from the compiler's output.
+    println("as the driver says them:");
+    p.diags.loop((h, d) { d.say(); });
+    Ok(0);
+}
