@@ -59,6 +59,7 @@ call_type = sema.sema_call
 computed_member = sema.sema_member
 writable_member = sema.sema_member
 check_binary, const_count, check_index, check_literal = sema.sema_trap
+check_eq = sema.sema_bound
 seed_left_spine, spine_ahead = sema.sema_spine
 
 // -----------------------------------------------------------------
@@ -392,7 +393,7 @@ expr_kind* = (c :: Checker, id: ExprId, node: Expr, ctx: Ctx)
         Paren(p)    => c.type_of(p.inner, ctx),
         Binary(b)   => c.binary_type(node, b, ctx),
         Unary(u)    => c.unary_type(node, u, ctx),
-        Try(t)      => c.try_type(node, t.operand, ctx),
+        Try(t)      => c.try_type(t.name_span, t.operand, ctx),
         Consume(x)  => c.type_of(x.operand, ctx),
         Block(b)    => c.block_type(b, ctx),
         Match(m)    => c.match_type(node, m, ctx),
@@ -630,13 +631,17 @@ binary_type* = (c :: Checker, node: Expr, b: Binary, ctx: Ctx)
     }).try();
     lhs = c.type_of(b.lhs, ctx).try();
     rhs = c.type_of(b.rhs, ctx).try();
+    operand = c.arith_type(lhs, rhs).try();
     got = is_predicate(b.op).match({
         true  => c.types.bool_ty(),
-        false => c.arith_type(lhs, rhs),
+        false => Ok(operand),
     }).try();
     // a trap the compiler can prove will fire is a compile error, and
     // the operand types are what decides what fits
     c.check_binary(b, got).try();
+    // `==` dispatches to `Eq`, and a type with no impl has nothing to
+    // call — the operand type is what says so, never the result's
+    c.check_eq(b, operand).try();
     Ok(got);
 }
 

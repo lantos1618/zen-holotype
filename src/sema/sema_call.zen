@@ -60,6 +60,7 @@ Found, Base, base_of, members_of, static_access = sema.sema_member
 is_type_def, opaque, nowhere, first_found = sema.sema_member
 first_hidden, hidden_member = sema.sema_member
 satisfies_bound, check_bounds = sema.sema_bound
+bound_declares = sema.sema_supply
 type_from_ast, type_of, param_type = sema.sema_type
 alias_module, module_not_a_value = sema.sema_module
 cands_of, travelled_cands, matches = sema.sema_cand
@@ -234,8 +235,8 @@ decl_call = (c :: Checker, id: ExprId, node: Expr, call: Call, name: str,
     kept ::= c.alloc.Vec<Cand>();
     keep_matching(c, cands, actuals, kept).try();
     (kept.len > 0).match({
-        true  => chosen(c, id, call, kept, actuals, ctx),
-        false => construct_or_fail(c, id, node, call, name, cands, ctx),
+        true  => chosen(c, id, node, call, kept, actuals, ctx),
+        false => construct_or_fail(c, id, node, call, name, recv, cands, ctx),
     })
 }
 
@@ -257,13 +258,63 @@ keep_one = (c :: Checker, k: Cand, actuals: Vec<Actual>, kept :: Vec<Cand>)
 }
 
 construct_or_fail = (c :: Checker, id: ExprId, node: Expr, call: Call,
-                     name: str, cands: Vec<Cand>, ctx: Ctx)
+                     name: str, recv: Res<TyId>, cands: Vec<Cand>, ctx: Ctx)
                     Res<TyId, AllocError> {
     defs ::= c.alloc.Vec<Def>();
     c.world.defs_of(ctx.module, name, defs).try();
     type_def_of(defs).match({
-        None    => no_overload(c, node, name, cands),
+        None    => unresolved(c, node, call, name, recv, cands),
         Ok(d)   => construct_def(c, id, node, call, d, ctx),
+    })
+}
+
+// A CALL THROUGH A RECEIVER IS A MEMBER THAT IS NOT THERE, and that is a
+// different sentence from "no overload matches". `b.size()` where `size`
+// belongs to `Bag` has no candidate BECAUSE `size` is not on `Box` — so
+// the diagnostic has to name the type that was asked, and land on the
+// name after the dot rather than on the receiver expression. Reported
+// here whether or not a candidate of the name exists anywhere: for a
+// receiver call this IS the diagnostic, and nothing else in the folder
+// owes one.
+unresolved = (c :: Checker, node: Expr, call: Call, name: str,
+              recv: Res<TyId>, cands: Vec<Cand>) Res<TyId, AllocError> {
+    recv.match({
+        Ok(ty) => no_such_method(c, call, name, ty),
+        None   => no_overload(c, node, name, cands),
+    })
+}
+
+// A NAME A BOUND DECLARED IS NOT A NAME THE TYPE NEVER HEARD OF, even
+// when no impl supplies it. `alloc.create<Node>()` reaches nothing here
+// and is not a mistake — `gen_c_alloc.zen` writes that body — so this
+// asks `bound_declares` and not the member table, which is the question
+// whose answer is `no` for both.
+no_such_method = (c :: Checker, call: Call, name: str, ty: TyId)
+                 Res<TyId, AllocError> {
+    bound_declares(c, ty, name).try().match({
+        true  => c.types.unknown(),
+        false => report_no_method(c, call, name, ty),
+    })
+}
+
+report_no_method = (c :: Checker, call: Call, name: str, ty: TyId)
+                   Res<TyId, AllocError> {
+    poison = c.types.unknown().try();
+    at = callee_name_span(c, call);
+    c.report(at.file, at,
+             SemaFault.NoSuchField(TypeFault(
+                 name: name, expected: poison, found: ty))).try();
+    c.types.unknown()
+}
+
+// The name after the dot. A receiver call always has an `Access` callee
+// — that is what made it one — and the span is read back off the node
+// rather than threaded through six signatures that have no other use
+// for it.
+callee_name_span = (c: Checker, call: Call) Span {
+    c.tree.expr_at(call.callee).kind.match({
+        Access(a) => a.name.span,
+        _         => nowhere(),
     })
 }
 
@@ -309,18 +360,18 @@ no_overload = (c :: Checker, node: Expr, name: str, cands: Vec<Cand>)
 // DOWN. Everything after resolution — the backend most of all — reads
 // `call_memo` rather than asking the name again, because the name is
 // exactly what could not answer.
-chosen = (c :: Checker, id: ExprId, call: Call, kept: Vec<Cand>,
+chosen = (c :: Checker, id: ExprId, node: Expr, call: Call, kept: Vec<Cand>,
           actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
     kept.get(0).match({
         None   => c.types.unknown(),
-        Ok(k)  => chosen_ret(c, id, call, k, actuals, ctx),
+        Ok(k)  => chosen_ret(c, id, node, call, k, actuals, ctx),
     })
 }
 
-chosen_ret = (c :: Checker, id: ExprId, call: Call, k: Cand,
+chosen_ret = (c :: Checker, id: ExprId, node: Expr, call: Call, k: Cand,
               actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
     c.resolve_call(id, k.id).try();
-    check_bounds(c, k, actuals).try();
+    check_bounds(c, k, actuals, node.span).try();
     instantiate(c, id, call, k, actuals, ctx)
 }
 

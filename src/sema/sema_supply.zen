@@ -301,6 +301,83 @@ bound_module = (c: Checker, bound: TyId) usize {
     })
 }
 
+// ---------------------------------------------------------------------
+// DECLARED, WHICH IS NOT THE SAME AS REACHABLE
+//
+// `keep_reachable` above answers "does a dot reach this", and it
+// correctly answers NO for a hook no impl supplied. `Alloc.create` is
+// exactly that: `mem_alloc.zen` declares it with no body, no impl in the
+// language supplies one, and `gen_c_alloc.zen` writes the body. So
+// `alloc.create<Node>()` resolves to nothing in sema AND IS NOT A
+// MISTAKE — while `b.size()` on a `Box` resolves to nothing and is.
+//
+// Only a diagnostic needs to tell those apart, so only a diagnostic asks
+// this. A member lookup must keep answering "not reachable" to both, or
+// the type of `create` becomes a bodiless signature and the backend's
+// own answer stops being the one that counts.
+// ---------------------------------------------------------------------
+
+bound_declares* = (c :: Checker, ty: TyId, name: str)
+                  Res<bool, AllocError> {
+    c.types.at(ty).match({
+        Named(n) => impls_declare(c, n, name),
+        Prim(p)  => prim_impls_declare(c, p, name),
+        // a type parameter promises what its bounds promise, and what
+        // it stands for is not settled here
+        Var(_)   => Ok(true),
+        _        => Ok(false),
+    })
+}
+
+impls_declare = (c :: Checker, n: TyNamed, name: str)
+                Res<bool, AllocError> {
+    ids ::= c.alloc.Vec<ImplId>();
+    c.world.impls_named(c.tree, n.name, ids).try();
+    hit ::= false;
+    ids.loop((h, id) {
+        impl_declares(c, n, name, id).try().then(() { hit = true; });
+    });
+    Ok(hit);
+}
+
+impl_declares = (c :: Checker, n: TyNamed, name: str, id: ImplId)
+                Res<bool, AllocError> {
+    (n.decl.module == id.decl.module).match({
+        false => Ok(false),
+        true  => impl_bound_declares(c, n, name, id),
+    })
+}
+
+impl_bound_declares = (c :: Checker, n: TyNamed, name: str, id: ImplId)
+                      Res<bool, AllocError> {
+    c.world.impl_at(c.tree, id).match({
+        Ok(im) => bound_of_impl_declares(c, n, name, im),
+        None   => Ok(false),
+    })
+}
+
+bound_of_impl_declares = (c :: Checker, n: TyNamed, name: str, im: Impl)
+                         Res<bool, AllocError> {
+    bound = impl_bound_type(c, im, n.decl.module.to_usize()).try();
+    all ::= c.alloc.Vec<Member>();
+    bound_members(c, bound, all).try();
+    Ok(has_member(all, name));
+}
+
+// "A prelude declaration of a primitive's name IS that primitive", so
+// the impls on `str` are the impls on the declaration the prelude
+// exports under that spelling — the same detour `prim_members` makes.
+prim_impls_declare = (c :: Checker, p: Prim, name: str)
+                     Res<bool, AllocError> {
+    defs ::= c.alloc.Vec<Def>();
+    c.world.prelude_of(p.name, defs).try();
+    defs.get(0).match({
+        None  => Ok(false),
+        Ok(d) => impls_declare(c, TyNamed(decl: d.id, name: p.name,
+                                          args: c.alloc.Vec<TyId>()), name),
+    })
+}
+
 has_member* = (members: Vec<Member>, name: str) bool {
     Range(0, members.len).find((i) {
         members.get(i).match({

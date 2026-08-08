@@ -30,7 +30,7 @@
 // "whatever has these names".
 
 Ast, Decl, DeclKind, Struct, Impl, Member, MemberKind = ast
-Field, Const, Function, Form, Span, TypeId = ast
+Field, Const, Function, Form, Span, TypeId, Binary, BinOp = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -40,7 +40,7 @@ TyId, Ty, Types, TyNamed = sema.sema_ty
 World, Def, decl_at = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
-member_named, opaque = sema.sema_member
+member_named, opaque, Found, members_of = sema.sema_member
 bound_members, has_member, impl_span, impl_bound_type = sema.sema_supply
 type_from_ast = sema.sema_type
 Cand, TBound, Actual = sema.sema_call
@@ -218,19 +218,24 @@ bound_matches = (c :: Checker, im: Impl, mi: usize, bound: TyId)
 // place a call site says what it is.
 // ---------------------------------------------------------------------
 
-check_bounds* = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
+// `at` IS THE CALL AND NOT THE ARGUMENT. `Dot(x: 1)` is a well-formed
+// expression that means exactly what it says; what does not keep the
+// promise is the CALL that instantiates `scale` with `T = Dot`, and that
+// is the node whose first byte this reports. An argument is only the
+// offending node when the argument alone is wrong.
+check_bounds* = (c :: Checker, cand: Cand, actuals: Vec<Actual>, at: Span)
                 Res<(), AllocError> {
     cand.tbounds.loop((h, tb) {
-        check_one_bound(c, cand, tb, actuals).try();
+        check_one_bound(c, cand, tb, actuals, at).try();
     });
     Ok(());
 }
 
 check_one_bound = (c :: Checker, cand: Cand, tb: TBound,
-                   actuals: Vec<Actual>) Res<(), AllocError> {
+                   actuals: Vec<Actual>, at: Span) Res<(), AllocError> {
     param_of_var(c, cand, tb.name).match({
         None    => Ok(()),
-        Ok(i)   => bound_at(c, tb, actuals, i),
+        Ok(i)   => bound_at(c, tb, actuals, i, at),
     })
 }
 
@@ -250,19 +255,19 @@ var_named = (c: Checker, id: TyId, name: str, owner: str) bool {
     })
 }
 
-bound_at = (c :: Checker, tb: TBound, actuals: Vec<Actual>, i: usize)
-           Res<(), AllocError> {
+bound_at = (c :: Checker, tb: TBound, actuals: Vec<Actual>, i: usize,
+            at: Span) Res<(), AllocError> {
     actuals.get(i).match({
         None    => Ok(()),
-        Ok(a)   => check_actual_bound(c, tb, a),
+        Ok(a)   => check_actual_bound(c, tb, a, at),
     })
 }
 
-check_actual_bound = (c :: Checker, tb: TBound, a: Actual)
+check_actual_bound = (c :: Checker, tb: TBound, a: Actual, at: Span)
                      Res<(), AllocError> {
     unbounded(c, a.ty).match({
         true  => Ok(()),
-        false => prove_bound(c, tb, a),
+        false => prove_bound(c, tb, a, at),
     })
 }
 
@@ -272,16 +277,85 @@ unbounded = (c: Checker, ty: TyId) bool {
     opaque(c, ty) || is_tvar(c, ty)
 }
 
-prove_bound = (c :: Checker, tb: TBound, a: Actual) Res<(), AllocError> {
+prove_bound = (c :: Checker, tb: TBound, a: Actual, at: Span)
+              Res<(), AllocError> {
     satisfies_bound(c, a.ty, tb.bound).try().match({
         true  => Ok(()),
-        false => bound_not_satisfied(c, tb, a),
+        false => bound_not_satisfied(c, tb, a, at),
     })
 }
 
-bound_not_satisfied = (c :: Checker, tb: TBound, a: Actual)
+bound_not_satisfied = (c :: Checker, tb: TBound, a: Actual, at: Span)
                       Res<(), AllocError> {
-    c.report(a.span.file, a.span,
+    c.report(at.file, at,
              SemaFault.BoundNotSatisfied(TypeFault(
                  name: tb.name, expected: tb.bound, found: a.ty)))
+}
+
+// ---------------------------------------------------------------------
+// `==` is `Eq.eq`
+//
+// "`==` through `Eq` is the only operator that dispatches to an impl",
+// so a type supplying no `eq` has nothing for `==` to call. That is a
+// bound not kept, which is why the rule is here and not with the
+// operators: the question it asks is the one this file exists to ask.
+//
+// REFUSED IN SEMA AND NOT BY THE BACKEND, which is the whole of the
+// change: the program is wrong and will stay wrong, and "codegen does
+// not lower this yet" tells the reader the COMPILER is unfinished.
+//
+// COMPARING TAGS AND PAYLOADS STRUCTURALLY IS THE ALTERNATIVE AND IT IS
+// WORSE. An impl may override `eq` for custom equality, and a `==` that
+// compared bytes would then disagree with `.eq()` on the same two values
+// — which is exactly what "`ne` is always `!eq`, they can never diverge"
+// exists to prevent.
+// ---------------------------------------------------------------------
+
+check_eq* = (c :: Checker, b: Binary, operand: TyId) Res<(), AllocError> {
+    (is_eq_op(b.op) && dispatches_eq(c, operand)).match({
+        false => Ok(()),
+        true  => prove_eq(c, b, operand),
+    })
+}
+
+is_eq_op = (op: BinOp) bool {
+    op.match({ Equal => true, NotEqual => true, _ => false })
+}
+
+// A scalar is C's own `==` and needs no impl. Poison, a hole and a type
+// parameter carry no answer — "never invent a diagnostic out of missing
+// information" — and an unsubstituted `T` reaches the backend as the
+// type it was instantiated with, where the same question is asked again.
+dispatches_eq = (c: Checker, ty: TyId) bool {
+    (scalar_eq(c, ty) || unbounded(c, ty)) == false
+}
+
+// The backend's rule, asked one layer up: every primitive but `str` and
+// `()` compares with the C operator. `str` is on this side of the line
+// because it is an ordinary struct in the prelude and impls its own
+// `Eq` — which is how a literal comparison finds one.
+scalar_eq = (c: Checker, ty: TyId) bool {
+    c.types.at(ty).match({
+        Prim(p) => p.name.eq("str") == false && p.name.eq("()") == false,
+        _       => false,
+    })
+}
+
+prove_eq = (c :: Checker, b: Binary, operand: TyId) Res<(), AllocError> {
+    found ::= c.alloc.Vec<Found>();
+    members_of(c, operand, "eq", found).try();
+    (found.len > 0).match({
+        true  => Ok(()),
+        false => eq_needs_impl(c, b, operand),
+    })
+}
+
+// THE LEFT OPERAND'S FIRST BYTE, which is the `==` expression's own: an
+// operator chain is left-nested, so `a == b` begins where `a` does.
+eq_needs_impl = (c :: Checker, b: Binary, operand: TyId)
+                Res<(), AllocError> {
+    poison = c.types.unknown().try();
+    at = c.tree.expr_at(b.lhs).span;
+    c.report(at.file, at, SemaFault.EqNeedsImpl(TypeFault(
+        name: "", expected: poison, found: operand)))
 }
