@@ -100,16 +100,23 @@ Place* = {
 // and every frame is an allocation. `escaped` is one more such mark:
 // how many bindings were visible OUTSIDE the innermost escaping closure
 // body, and zero when the walk is in none.
+//
+// `method` is the name of the method this body belongs to, or empty. It
+// is here because `self` is the one binding in a frame whose marker is
+// not the author's to change where it stands: the `::` that would permit
+// a write through it goes on the METHOD, so a refusal at that link is a
+// different sentence, and this is what it prints.
 Own* = {
     vars :: Vec<OwnVar>,
     dead :: Vec<Place>,
     escaped :: usize,
+    method* :: str,
     alloc*: Alloc,
 }
 
 Own* = (a: Alloc) Res<Own, AllocError> {
     Ok(Own(vars: a.Vec<OwnVar>(), dead: a.Vec<Place>(), escaped: 0,
-           alloc: a));
+           method: "", alloc: a));
 }
 
 // ---------------------------------------------------------------------
@@ -123,10 +130,30 @@ Own* = (a: Alloc) Res<Own, AllocError> {
 check_own* = (c :: Checker, f: Function, body: BlockId, ctx: Ctx)
              Res<(), AllocError> {
     o ::= c.alloc.Own().try();
+    o.method = receiver_method(f, ctx);
     own_params(c, o, f).try();
     own_block(c, o, body, ctx).try();
     check_scope_returned(c, body).try();
     Ok(());
+}
+
+// The method this body belongs to, when its first parameter is the
+// receiver. EMPTY FOR A TOP-LEVEL FUNCTION, where a parameter that
+// happens to be called `self` is an ordinary borrow — `receiver_is_
+// mutable` draws the same line for the same reason, and calling one is
+// not a dot.
+receiver_method = (f: Function, ctx: Ctx) str {
+    (ctx.has_self && first_param_is_self(f)).match({
+        true  => f.name.text,
+        false => "",
+    })
+}
+
+first_param_is_self = (f: Function) bool {
+    f.params.get(0).match({
+        None  => false,
+        Ok(p) => p.name.text.eq("self"),
+    })
 }
 
 // A parameter is a borrow: the caller still owns it, so nothing may be

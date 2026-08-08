@@ -37,7 +37,6 @@ enter_struct_tvars = sema.sema_member
 settle_raised = sema.sema_raise
 check_return = sema.sema_hoist
 check_own = sema.sema_own
-check_self_writes = sema.sema_recv
 
 // Every declaration rule, for one module.
 check_module* = (c :: Checker, mi: usize) Res<(), AllocError> {
@@ -58,13 +57,16 @@ check_all* = (c :: Checker) Res<(), AllocError> {
     Range(0, c.world.count()).loop((h, mi) {
         check_module(c, mi).try();
     });
-    // these three are whole-program and all run LAST, for the same
-    // reason: a struct nobody mentions still has to have a size, a
-    // method nobody calls still may not write through a `:` self, and
+    // these two are whole-program and both run LAST, for the same
+    // reason: a struct nobody mentions still has to have a size, and
     // asking after the bodies means every field type a body already
     // resolved is a memo hit rather than a second resolution.
+    //
+    // A THIRD USED TO RUN HERE: an untyped walk for a `:` self writing
+    // itself, from the days when a member's body was typed by nobody.
+    // Member bodies are walked now, so `check_own` reaches those writes
+    // and the second walk only doubled every diagnostic it raised.
     check_layout(c).try();
-    check_self_writes(c).try();
     check_depth(c).try();
     Ok(());
 }

@@ -3087,7 +3087,13 @@ class Sema:
         ty = self.resolve_type(tnode, ctx)
         elem = ty.args[0] if ty.kind == "array" else ANY
         for e in _tup(_g(node, "elems", "elements", "args")):
-            self.type_of(e, ctx, expect=elem)
+            ety = self.type_of(e, ctx, expect=elem)
+            # An element is a value in the element type's position, and
+            # `expect` only offers a type -- nothing coerces to it. So
+            # `[i32, 2](1, 3000000000)` wrapped to -1294967296 here as
+            # well as in the self-hosted compiler, which is why no
+            # differential run could see it.
+            self._check_literal_fits(e, ety, elem, _span(e))
         return ty
 
     def _t_Lambda(self, node, ctx, expect):
