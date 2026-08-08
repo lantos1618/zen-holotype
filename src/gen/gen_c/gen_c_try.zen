@@ -37,14 +37,21 @@
 // reporting was right while the numbering was open: a memcpy across two
 // numberings is a miscompilation rather than a missing feature.
 //
-// WHAT IS STILL NOT LOWERED: a STRICT widening — a callee's set into a
-// caller's larger one, where no single variant of the caller's names
-// the callee's whole set. `Error = WriteError | FsError` is a set of
-// four where the enum has two variants, and a `.try()` raising
-// `IoError | AllocError` into a set of three has a different canonical
-// rank in each. That one genuinely needs a per-member map, because the
-// two sets are genuinely two types; canonical numbering does not make
-// it a copy and was never claimed to. It reports.
+// A STRICT WIDENING IS A RE-TAGGING, and it is the case canonical
+// numbering does not reach — nor was it ever claimed to, since that rule
+// is about two spellings of ONE set. A callee's `IoError | AllocError`
+// into a caller's set of three is two genuinely different types whose
+// canonical ranks genuinely differ, so `Carry.Retag` maps the tag member
+// by member and copies the payload, which needs no mapping: a member's
+// field is named after the member's own type on both sides.
+//
+// WHAT IS STILL NOT LOWERED: a widening whose destination cannot NAME
+// one of the members. `Error = WriteError | FsError` is a set of four
+// where the enum has two variants, so no variant names `IoError` and
+// there is no tag constant to map to. `gen_c_layout.variant_ranks`
+// refuses to rank that same shape and falls back to declaration order;
+// refusing it in both places is what keeps the tags written here equal
+// to the tags emitted there. It reports.
 
 Ast, Expr, ExprId, Decl, DeclKind, Enum, Variant, Span = ast
 Alloc, AllocError = std.mem
@@ -203,7 +210,7 @@ widen_or_report = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
 widen_into_enum = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
                    tmp: str, ctx: Ctx) Res<(), AllocError> {
     carrier(be, want.error, r.error).match({
-        None  => report_widening(be, node),
+        None  => retag_or_report(be, node, r, want, tmp, ctx),
         Ok(v) => write_propagation(be, r, want, tmp, ctx, Carry.Variant(v)),
     })
 }
@@ -220,9 +227,106 @@ widen_into_enum = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
 widen_into_set = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
                   tmp: str, ctx: Ctx) Res<(), AllocError> {
     be.check.types.set_has(want.error, r.error).match({
-        false => report_widening(be, node),
+        false => retag_or_report(be, node, r, want, tmp, ctx),
         true  => write_propagation(be, r, want, tmp, ctx,
                                    Carry.Member(r.error)),
+    })
+}
+
+// A STRICT WIDENING IS THE ONE CASE CANONICAL NUMBERING DOES NOT
+// COLLAPSE, and DESIGN.md never claimed it did: it says two spellings of
+// ONE set agree tag for tag. `Res<T, A|B>` into `Res<T, A|B|C>` is two
+// genuinely different sets — a member the destination adds anywhere but
+// last shifts every rank after it — so the tag really does have to be
+// mapped, member by member, and this is the "per-member switch" that
+// paragraph names as the price of getting the numbering wrong.
+//
+// Only the TAG is mapped. A member's payload field is named after the
+// member's own TYPE and carries a value of it, in a declared enum and a
+// structural set alike, so the payload crosses untouched — the bytes are
+// already the member they say they are, and only the number in front of
+// them means something different on each side.
+//
+// The map is decided before a byte is written, and a member either side
+// cannot name aborts back to a report. All-or-nothing for
+// `gen_c_layout.variant_ranks`' reason: a half-built map leaves some tag
+// unmapped, and an unmapped tag is a wrong ERROR VARIANT at runtime with
+// no diagnostic and no C that fails to compile.
+retag_or_report = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
+                   tmp: str, ctx: Ctx) Res<(), AllocError> {
+    retaggable(be, r.error, want.error).match({
+        false => report_widening(be, node),
+        true  => write_propagation(be, r, want, tmp, ctx, Carry.Retag),
+    })
+}
+
+retaggable = (be :: CBackend, from_set: TyId, to_set: TyId) bool {
+    within(be, from_set, to_set) && all_tagged(be, from_set, to_set)
+}
+
+// CONTAINMENT IS ASKED OF THE SETS, NOT OF THE SPELLINGS. `set_within`
+// walks the destination's member list, so a destination written as a
+// declared NAME has to be resolved to the union it stands for first —
+// the same `set_of` question `same_set` above asks, and asking it is
+// what keeps a widening this backend writes from disagreeing with the
+// containment sema admitted the `.try()` on.
+within = (be :: CBackend, from_set: TyId, to_set: TyId) bool {
+    narrow = be.check.set_of(from_set);
+    wide = be.check.set_of(to_set);
+    be.check.types.set_within(narrow, wide)
+}
+
+all_tagged = (be :: CBackend, from_set: TyId, to_set: TyId) bool {
+    members ::= be.alloc.Vec<TyId>();
+    canon = be.check.set_of(from_set);
+    be.check.types.members_of(canon, members).match({
+        Err(_) => false,
+        Ok(_)  => no_member_untagged(be, from_set, to_set, members),
+    })
+}
+
+no_member_untagged = (be :: CBackend, from_set: TyId, to_set: TyId,
+                      members: Vec<TyId>) bool {
+    untagged(be, from_set, to_set, members).match({
+        Ok(_) => false,
+        None  => true,
+    })
+}
+
+untagged = (be :: CBackend, from_set: TyId, to_set: TyId,
+            members: Vec<TyId>) Res<usize> {
+    Range(0, members.len).find((i) {
+        members.get(i).match({
+            None  => true,
+            Ok(m) => both_tagged(be, from_set, to_set, m) == false,
+        })
+    })
+}
+
+both_tagged = (be :: CBackend, from_set: TyId, to_set: TyId, m: TyId) bool {
+    tagged(be, from_set, m) && tagged(be, to_set, m)
+}
+
+// Has this set a tag constant for `m`? A structural set composes one out
+// of the two type codes and always has one. A declared enum names it
+// through the VARIANT that carries the member's type, so it has one only
+// when such a variant exists — which `Error = WriteError | FsError` does
+// NOT, because `union_ty` flattened `WriteError` into four members and
+// no variant names any one of them. That is the same shape
+// `gen_c_layout.variant_ranks` refuses to rank, and it must be refused
+// in both places or the tags this writes are not the tags that file
+// emitted.
+tagged = (be :: CBackend, set: TyId, m: TyId) bool {
+    be.check.types.at(set).match({
+        Union(_) => true,
+        _        => named_tagged(be, set, m),
+    })
+}
+
+named_tagged = (be :: CBackend, set: TyId, m: TyId) bool {
+    carrier(be, set, m).match({
+        None  => false,
+        Ok(_) => true,
     })
 }
 
@@ -317,18 +421,24 @@ report_widening = (be :: CBackend, node: Expr) Res<(), AllocError> {
 // ways, where nothing is built and nothing is tagged: the bytes already
 // say which member they are.
 //
-// Four cases and not a `Res<str>` with a convention: a variant name and
+// `Retag` is the caller's set being STRICTLY LARGER, where the payload
+// is copied like `Copy` but the tag cannot be: the two sets number the
+// same member differently and only a runtime map says which is which.
+// It carries nothing because the two sets are already in hand.
+//
+// Five cases and not a `Res<str>` with a convention: a variant name and
 // a member type are two different things, and the C written for each is
 // different too.
-Carry = Same | Variant(str) | Member(TyId) | Copy
+Carry = Same | Variant(str) | Member(TyId) | Copy | Retag
 
 // `into` says how the caller's error payload is built out of the
-// callee's — except for `Copy`, where it is not built.
+// callee's — except for `Copy` and `Retag`, where it is not built.
 write_propagation = (be :: CBackend, r: TyRes, want: TyRes, tmp: str,
                      ctx: Ctx, into: Carry) Res<(), AllocError> {
     into.match({
-        Copy => write_copy(be, r, tmp, ctx),
-        _    => write_built(be, r, want, tmp, ctx, into),
+        Copy  => write_copy(be, r, tmp, ctx),
+        Retag => write_retag(be, r, want, tmp, ctx),
+        _     => write_built(be, r, want, tmp, ctx, into),
     })
 }
 
@@ -365,11 +475,139 @@ write_copy = (be :: CBackend, r: TyRes, tmp: str, ctx: Ctx)
     sym_gen(w, "w", be.next_tmp()).try();
     write_carrier_decl(be, r, w.view(), ctx).try();
     write_carrier_copy(be, w.view(), tmp).try();
+    write_return(be, w.view())
+}
+
+// The caller's Res, its payload carried across and its TAG mapped.
+//
+// Statements and not an initializer, for `write_copy`'s reason and one
+// more: C has no expression that spells "this union's bytes are that
+// union's", and here the tag is not a constant either — it is a
+// function of the tag the value arrived carrying.
+write_retag = (be :: CBackend, r: TyRes, want: TyRes, tmp: str, ctx: Ctx)
+              Res<(), AllocError> {
+    w ::= be.alloc.String().try();
+    sym_gen(w, "w", be.next_tmp()).try();
+    write_carrier_decl(be, r, w.view(), ctx).try();
+    write_payload_copy(be, w.view(), tmp).try();
+    write_tag_map(be, r.error, want.error, w.view(), tmp).try();
+    write_return(be, w.view())
+}
+
+write_return = (be :: CBackend, w: str) Res<(), AllocError> {
     ret ::= be.alloc.String().try();
     ret.add_bytes("return ").try();
-    ret.add_bytes(w.view()).try();
+    ret.add_bytes(w).try();
     ret.add_bytes(";").try();
     be.writeln(ret.view())
+}
+
+// THE PAYLOAD ONLY, AND AT THE SOURCE'S SIZE. `write_carrier_copy` above
+// takes the whole error value at the DESTINATION's size, which it may do
+// because the two sets are equal. Here they are not: the destination's
+// tag is the one thing that must NOT be copied, and its payload union
+// may be the wider of the two, so its size is the wrong size to read
+// through the source.
+//
+// A union's members all begin at offset zero, so the source's payload
+// bytes land exactly where the destination reads the same member — and
+// there are never too many of them, because every source member is a
+// destination member and a union is at least as large as its largest.
+write_payload_copy = (be :: CBackend, w: str, tmp: str) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes("memcpy(&").try();
+    read_payload(w, line).try();
+    line.add_bytes(", &").try();
+    read_payload(tmp, line).try();
+    line.add_bytes(", sizeof(").try();
+    read_payload(tmp, line).try();
+    line.add_bytes("));").try();
+    be.writeln(line.view())
+}
+
+// A set of two or more members always HAS a payload union: there is one
+// unit type, so at most one member can be the empty one and the rest
+// carry something. A strict widening is only ever reached with a source
+// of two or more — one member is not a union, and a union of one
+// collapses to its member before it is ever built.
+read_payload = (v: str, out :: String) Res<(), AllocError> {
+    read_error(v, out).try();
+    out.add_bytes(".zg_data").try();
+    Ok(());
+}
+
+read_tag = (v: str, out :: String) Res<(), AllocError> {
+    read_error(v, out).try();
+    out.add_bytes(".zg_tag").try();
+    Ok(());
+}
+
+// One case per member of the SOURCE set, which is the only tag values
+// this value can arrive with. `retaggable` has already established that
+// both sides can name every one of them.
+write_tag_map = (be :: CBackend, from_set: TyId, to_set: TyId, w: str,
+                 tmp: str) Res<(), AllocError> {
+    members ::= be.alloc.Vec<TyId>();
+    canon = be.check.set_of(from_set);
+    be.check.types.members_of(canon, members).try();
+    open_switch(be, tmp).try();
+    members.loop((h, m) {
+        write_tag_case(be, from_set, to_set, m, w).try();
+    });
+    be.dedent();
+    be.writeln("}").try();
+    Ok(());
+}
+
+open_switch = (be :: CBackend, tmp: str) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes("switch (").try();
+    read_tag(tmp, line).try();
+    line.add_bytes(") {").try();
+    be.writeln(line.view()).try();
+    be.indent();
+    Ok(());
+}
+
+write_tag_case = (be :: CBackend, from_set: TyId, to_set: TyId, m: TyId,
+                  w: str) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes("case ").try();
+    write_member_tag(be, from_set, m, line).try();
+    line.add_bytes(": ").try();
+    read_tag(w, line).try();
+    line.add_bytes(" = ").try();
+    write_member_tag(be, to_set, m, line).try();
+    line.add_bytes("; break;").try();
+    be.writeln(line.view())
+}
+
+// The tag constant a set gives one of its members, whichever way the set
+// is spelled — the two namings `tagged` asks about, written out. The
+// miss `tagged` screens for writes nothing and cannot be reached: this
+// runs only after `retaggable` said every member has a name on both
+// sides.
+write_member_tag = (be :: CBackend, set: TyId, m: TyId, out :: String)
+                   Res<(), AllocError> {
+    be.check.types.at(set).match({
+        Union(_) => sym_union_variant(out, be.types(), be.world(), set, m),
+        _        => write_variant_tag(be, set, m, out),
+    })
+}
+
+write_variant_tag = (be :: CBackend, set: TyId, m: TyId, out :: String)
+                    Res<(), AllocError> {
+    carrier(be, set, m).match({
+        None  => Ok(()),
+        Ok(v) => write_named_tag(be, set, v, out),
+    })
+}
+
+write_named_tag = (be :: CBackend, set: TyId, v: str, out :: String)
+                  Res<(), AllocError> {
+    qname ::= be.alloc.String().try();
+    set_qname(be, set, qname).try();
+    out.sym_variant(qname.view(), v)
 }
 
 write_carrier_decl = (be :: CBackend, r: TyRes, w: str, ctx: Ctx)
@@ -412,10 +650,11 @@ carry_error = (be :: CBackend, want: TyRes, tmp: str, into: Carry,
     into.match({
         Variant(v) => wrap_error(be, want.error, v, tmp, out),
         Member(m)  => wrap_set_error(be, want.error, m, tmp, out),
-        // `Same` carries the value across untouched. `Copy` would too,
-        // and never arrives: `write_propagation` sends it to
-        // `write_copy` before anything is built, because a copy across
-        // two struct tags is statements and not an initializer.
+        // `Same` carries the value across untouched. `Copy` and `Retag`
+        // would too, and never arrive: `write_propagation` sends them to
+        // `write_copy` and `write_retag` before anything is built,
+        // because a copy across two struct tags is statements and not an
+        // initializer.
         _          => read_error(tmp, out),
     }).try();
     Ok(());
