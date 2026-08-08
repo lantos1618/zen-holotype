@@ -1,0 +1,56 @@
+// THE GATE ON THE STDIO TRANSPORT, and it is a BYTE COMPARISON on
+// purpose: `docs/design_lsp.md` section 4 asks for "a corpus test that
+// reads its own stdin and writes the bytes back with no newline added,
+// byte-compared", because a `Content-Length` frame is bytes and one
+// stray `\n` desynchronises every message after it.
+//
+// The input carries the three things a reader with any line or text
+// discipline gets wrong: an embedded newline, a NUL, and a two-byte
+// UTF-8 sequence straddling a chunk boundary — none of which may be
+// read as anything but a byte. It ends WITHOUT a trailing newline,
+// which is what makes `.expected` able to catch a writer that appends
+// one. No CR, and only because `.expected` may not hold one
+// (docs/TESTING.md); a CR is a byte like any other to this capability.
+//
+// `print` and not `println`: `println` appends exactly one `\n`
+// (docs/TESTING.md) and that is precisely why it cannot carry a frame.
+Vec = std.collections
+str_at = std.text
+
+// The chunk asked for per read. Small on purpose — the input is longer
+// than one chunk, so the loop really loops and a reader that answers
+// only the first chunk is a red test rather than a lucky green one.
+CHUNK: usize = 4
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    held ::= a.Vec<u8>();
+    reading ::= true;
+    loop(() { reading }, (h) {
+        // the room is the CALLER'S to make: `Stdin.read` has no Alloc,
+        // so it can only fill capacity that already exists
+        held.reserve(CHUNK).try();
+        env.in.read(held, CHUNK).match({
+            Err(_)  => { reading = false; },
+            Ok(got) => { reading = got > 0; },
+        });
+    });
+    print(str_at(held.ptr(), held.len));
+
+    // and the count, on a line of its own, so a read that silently
+    // dropped or duplicated bytes cannot pass by the echo alone
+    println("\n{} bytes", held.len);
+
+    // asking for more room than there is is `Full`, not a short read:
+    // the two are indistinguishable at the one place a caller must be
+    // able to tell them apart, so the capability refuses instead
+    tight ::= a.Vec<u8>();
+    env.in.read(tight, 1).match({
+        Ok(_)   => println("a read with no room was allowed"),
+        Err(io) => io.match({
+            Full => println("no room is refused, not read short"),
+            _    => println("no room named the wrong reason"),
+        }),
+    });
+    Ok(0);
+}

@@ -29,7 +29,7 @@ from typing import Sequence
 
 TESTS_DIR = Path(__file__).resolve().parent
 
-KNOWN_SUFFIXES = {".zen", ".expected", ".exit", ".stderr", ".count", ".stage"}
+KNOWN_SUFFIXES = {".zen", ".expected", ".exit", ".stderr", ".count", ".stage", ".stdin"}
 POSITION = re.compile(r"^(?:(?P<path>[^\s:]+):)?(?P<line>\d+):(?P<col>\d+)$")
 MERGED = re.compile(r"^(?P<path>[^\s:]+):(?P<line>\d+):(?P<col>\d+):\s*\S")
 
@@ -41,7 +41,7 @@ INFO = "INFO"
 RULES: dict[str, tuple[str, str]] = {
     "orphan-zen": (ERROR, "a .zen file that belongs to no test: it never runs, so it cannot go red"),
     "orphan-expected": (ERROR, "an .expected with no .zen beside it"),
-    "orphan-aux": (ERROR, "an .exit/.stderr with no test beside it"),
+    "orphan-aux": (ERROR, "an .exit/.stderr/.stdin with no test beside it"),
     "foreign-file": (ERROR, "a file whose suffix is not one TESTING.md names"),
     "doc-file": (WARN, "prose below area level, where the runner does not ignore it"),
     "dir-entry-name": (ERROR, "a directory test's entry point must be main.zen"),
@@ -54,7 +54,7 @@ RULES: dict[str, tuple[str, str]] = {
     "mf-bad-position": (ERROR, "a position line that is not path:line:col or line:col"),
     "mf-zero-position": (ERROR, "a position with a 0 line or column; both are 1-based"),
     "mf-blank-line": (WARN, "a blank line inside .expected"),
-    "mf-aux-file": (ERROR, "a must-fail test carries .exit/.stderr, which the format does not define"),
+    "mf-aux-file": (ERROR, "a must-fail test carries .exit/.stderr/.stdin, which the format does not define"),
     "mf-bare-position": (ERROR, "bare line:col in a DIRECTORY test, which has no single entry to resolve against"),
     "corpus-exit-zero": (WARN, ".exit holds 0; TESTING.md says omit the file when it is 0"),
     "corpus-exit-bad": (ERROR, ".exit is not a single integer in 0..255"),
@@ -209,7 +209,7 @@ class Linter:
             self.check_name(f, suite)
             if kind == "must-fail":
                 self.check_must_fail(expected, f.name, suite)
-                for aux in (".exit", ".stderr"):
+                for aux in (".exit", ".stderr", ".stdin"):
                     extra = stem.with_suffix(aux)
                     if extra.is_file():
                         self.flag(
@@ -283,14 +283,15 @@ class Linter:
 
         for aux in d.iterdir():
             if aux.is_file() and aux.suffix not in KNOWN_SUFFIXES and aux.name not in (
-                ".expected", ".exit", ".stderr", ".count", ".stage"
+                ".expected", ".exit", ".stderr", ".count", ".stage", ".stdin"
             ):
                 self.flag("foreign-file", aux, suite, f"{aux.name} at a test root",
                           "remove it or have TESTING.md name it")
 
         if kind == "must-fail":
             self.check_must_fail(expected, entry.name, suite, is_dir=True)
-            for name in (".exit", ".stderr", f"{d.name}.exit", f"{d.name}.stderr"):
+            for name in (".exit", ".stderr", ".stdin", f"{d.name}.exit",
+                         f"{d.name}.stderr", f"{d.name}.stdin"):
                 if (d / name).is_file():
                     self.flag("mf-aux-file", d / name, suite,
                               f"{name} beside a must-fail test",

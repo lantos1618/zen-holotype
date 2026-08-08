@@ -29,12 +29,13 @@ tests/corpus/<area>/<name>.zen         the program
 tests/corpus/<area>/<name>.expected    exact stdout, compared byte for byte
 tests/corpus/<area>/<name>.exit        expected exit code; omit the file when it is 0
 tests/corpus/<area>/<name>.stderr      expected stderr substring; omit when none
+tests/corpus/<area>/<name>.stdin       bytes fed to the PROGRAM's stdin; omit when it reads none
 
 tests/must-fail/<area>/<name>.zen      must be rejected
 tests/must-fail/<area>/<name>.expected the diagnostic, see below
 ```
 
-A test needing several source files is a **directory** of the same name, holding its module tree plus `.expected` / `.exit` / `.stderr` at the directory root. Module trees inside it follow `<folder>/<folder>.zen`, and the entry point is `main.zen`.
+A test needing several source files is a **directory** of the same name, holding its module tree plus `.expected` / `.exit` / `.stderr` / `.stdin` at the directory root. Module trees inside it follow `<folder>/<folder>.zen`, and the entry point is `main.zen`.
 
 **`.expected` in `must-fail` is line one, then one position per line after it:**
 
@@ -53,7 +54,9 @@ Positions are 1-based line, 1-based **byte** column, and point at the first byte
 
 **A test's compilation root is its own directory.** Every asserted path is relative to that, and so is every path the compiler emits — which is what makes the determinism check comparing two copies of a tree at different absolute paths meaningful.
 
-**A directory test names its expectation `main.expected`**, matching the `main.zen` it already requires, and visible to `ls` in a way a dotfile is not. `.exit`, `.stderr`, `.count` and `.stage` follow the same rule.
+**A directory test names its expectation `main.expected`**, matching the `main.zen` it already requires, and visible to `ls` in a way a dotfile is not. `.exit`, `.stderr`, `.stdin`, `.count` and `.stage` follow the same rule.
+
+**`.stdin` is the program's standard input, and it is the program's alone** — the compiler is never fed it. `std.env.Stdin` is a capability, and a capability is only tested by a program that exercises it, so without this file `zen lsp`'s transport would be gated by nothing. An **absent** `.stdin` is `/dev/null`; an **empty** one is a pipe that closes immediately, which is a different thing and the one a test of end-of-input needs.
 
 **`.count` bounds the number of diagnostics.** Extra diagnostics are otherwise always allowed — one file legitimately produces two — so "a single syntax error must not cascade into fifty" is inexpressible without it. Only write one where the count is the property under test.
 

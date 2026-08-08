@@ -31,21 +31,14 @@
 // subset has no threads.
 //
 // ---------------------------------------------------------------------
-// THE TRANSPORT IS A BUFFER, BECAUSE THERE IS NO STDIN.
+// THIS FILE HOLDS NO TRANSPORT, and that is why the transport could be
+// changed without touching it.
 //
-// `Env` is `argv`, `vars`, `out`, `mem`, `fs`, `net`, `threads`
-// (`src/std/env/env.zen:147`) and `Console` is one `println` (`:45`),
-// which appends exactly one `\n`. So this tree can neither READ a byte
-// stream nor WRITE an unterminated one, and a `Content-Length` frame
-// needs both. `design_lsp.md` §4 prices the missing capability — a
-// byte-counted `Stdin.read` with no line discipline, plus its floor in
-// `gen_c` — and it is not written here.
-//
-// What IS written is the server underneath it: `serve` takes the
-// request bytes and appends the reply bytes, so the transport is one
-// substitution away and everything above it is testable today. A caller
-// with a file has a working server now; a caller with a pipe has one
-// the day `Stdin` lands. THE SERVER IS NOT THE MISSING PIECE.
+// `one` takes the request bytes and appends the reply bytes; `serve`
+// walks a buffer of frames the same way. Neither reads a stream and
+// neither writes one, so `lsp_stdio.zen` could put a pipe under the same
+// server the corpus drives from a file, and the two answer identically
+// by construction rather than by agreement.
 
 str, String = std.text
 Map = std.collections
@@ -67,6 +60,11 @@ Server* = {
     docs :: Map<str, str>,
     ready :: bool,        // `initialize` has been answered
     stopping :: bool,     // `shutdown` has been answered
+
+    // Has `shutdown` been answered? The FIELD stays unexported: a
+    // transport needs to know when to stop reading, and nothing outside
+    // this file may decide when the server stops accepting work.
+    stopped* = (self: @Self) bool { self.stopping }
 
     // One message: read it, route it, frame whatever it produced.
     one* = (self :: @Self, body: str, out :: String) Res<(), AllocError> {
@@ -239,6 +237,11 @@ serve* = (s :: Server, input: str, out :: String) Res<(), AllocError> {
 // A framing fault is reported to the caller's stream and NOT to a
 // client, because a client that cannot be framed cannot be replied to
 // either. One line, naming the byte, and the session is over.
+//
+// The two readers of the fault are STARRED because `lsp_stdio.zen` says
+// the same sentence to a console rather than into a buffer, and a second
+// pair of matches over `FrameFault` would be a second answer to "which
+// byte" that could disagree with this one.
 frame_fault = (f: FrameFault, out :: String) Res<(), AllocError> {
     out.add_bytes("lsp: bad frame at byte ").try();
     write_decimal(frame_byte(f), out).try();
@@ -247,7 +250,7 @@ frame_fault = (f: FrameFault, out :: String) Res<(), AllocError> {
     out.add_bytes(")\n")
 }
 
-frame_byte = (f: FrameFault) usize {
+frame_byte* = (f: FrameFault) usize {
     f.match({
         NoBlank(i)   => i,
         NoLength(i)  => i,
@@ -256,7 +259,7 @@ frame_byte = (f: FrameFault) usize {
     })
 }
 
-frame_why = (f: FrameFault) str {
+frame_why* = (f: FrameFault) str {
     f.match({
         NoBlank(_)   => "the headers never ended",
         NoLength(_)  => "no Content-Length",

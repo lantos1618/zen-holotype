@@ -1,0 +1,96 @@
+// THE READING HALF OF THE STDIO TRANSPORT, driven over a real pipe.
+//
+// `a_session_is_answered_frame_by_frame` drives the SERVER over a buffer
+// that was already whole. This drives the part that has to make it
+// whole: `std.env.Stdin` reads EXACTLY what it is asked for and blocks
+// until it has it, so a reader that guesses waits for bytes the client
+// will not send until it has been answered. `short_by` is the answer —
+// ask the envelope how much is missing — and this is what pins it.
+//
+// THE LOOP HERE IS `lsp_stdio.zen`'s, DELIBERATELY. What it exercises is
+// underneath that file: `Vec.reserve`, the capability, and `short_by`'s
+// arithmetic. The server's own answers are somebody else's test, which
+// is also why nothing here prints a frame — a `Content-Length` header
+// carries a CR and a `.expected` may not (docs/TESTING.md).
+//
+// The fixture is awkward on purpose: a header this reader must skip
+// rather than reject, a header name in the wrong case, two messages back
+// to back with no separator, and a body holding a `\r\n` of its own —
+// which is exactly the byte pair a reader with any line discipline would
+// cut the message at.
+str, String, str_at = std.text
+Vec = std.collections
+Alloc, AllocError = std.mem
+Range = std.core
+frame_at, short_by = lsp
+
+// How far a pass got, and how many messages it has answered in total.
+//
+// A COUNT AND NOT A `::` PARAMETER, and that is not a style choice: the
+// bootstrapper miscompiles a `::` usize written inside a `loop` closure
+// and the self-hosted compiler does not, so the two toolchains printed
+// different numbers here. The disagreement is real and is written down;
+// this file simply does not need the form that exposes it.
+Pass = {
+    at*: usize,
+    seen*: usize,
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    held ::= a.Vec<u8>();
+    p ::= Pass(at: 0, seen: 0);
+    open ::= true;
+    loop(() { open }, (h) {
+        want = short_by(str_at(held.ptr(), held.len), p.at);
+        open = arrived(env, held, want).try();
+        p = drained(str_at(held.ptr(), held.len), p);
+    });
+    println("{} frame(s), {} byte(s) read, {} consumed", p.seen, held.len, p.at);
+    Ok(0);
+}
+
+// `n` more bytes onto the end of `held`, never fewer than one: a read of
+// nothing touches the stream, learns nothing and comes back.
+arrived = (env: Env, held :: Vec<u8>, n: usize) Res<bool, AllocError> {
+    want = (n == 0).match({ true => 1, false => n });
+    held.reserve(want).try();
+    env.in.read(held, want).match({
+        Err(_)  => Ok(false),
+        Ok(got) => Ok(got > 0),
+    })
+}
+
+// Every message that is now complete, and the byte the next one starts
+// at. A fault of any kind stops the pass — over a live stream most of
+// them just mean the rest has not arrived.
+drained = (held: str, p: Pass) Pass {
+    from ::= p.at;
+    seen ::= p.seen;
+    more ::= true;
+    loop(() { more && from < held.len }, (h) {
+        frame_at(held, from).match({
+            Err(_) => { more = false; },
+            Ok(fr) => {
+                seen = seen + 1;
+                // the LENGTH and the CR COUNT, not the body: a reader
+                // that cut the message at the first `\r\n` gets a
+                // shorter body, and one that stripped the CR gets the
+                // same length with a different count. Neither can
+                // survive both numbers.
+                println("frame {}: {} bytes, {} CR", seen, fr.body.len,
+                        carriage_returns(fr.body));
+                from = fr.next;
+            },
+        });
+    });
+    Pass(at: from, seen: seen);
+}
+
+carriage_returns = (s: str) usize {
+    n ::= 0;
+    Range(0, s.len).loop((h, i) {
+        (s.index(i) == '\r').then(() { n = n + 1; });
+    });
+    n;
+}

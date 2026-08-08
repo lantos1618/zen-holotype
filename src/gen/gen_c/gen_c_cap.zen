@@ -58,6 +58,7 @@ expr = gen.gen_c.gen_c_expr
 declare_temp, enum_path, payload_type, is_variant = gen.gen_c.gen_c_flow
 lower_probe, lower_write, lower_read = gen.gen_c.gen_c_fs
 close_else, close_brace = gen.gen_c.gen_c_fs
+lower_stdin_read = gen.gen_c.gen_c_stdin
 lower_console_print = gen.gen_c.gen_c_print
 is_defer, lower_defer = gen.gen_c.gen_c_scope
 
@@ -102,7 +103,16 @@ is_fs_capability = (be :: CBackend, rty: TyId, name: str) bool {
 // and `is_defer` asks its own question.
 is_console_capability = (be :: CBackend, rty: TyId, name: str) bool {
     (owner_of(be, rty).eq("Console") && name.eq("println"))
+        || is_stdin_read(be, rty, name)
         || is_defer(be, rty, name)
+}
+
+// `Stdin.read`, and the owner is the whole of the test: `Fs` declares a
+// `read` too, and the two are different lowerings over different floors.
+// Asking the name alone would send `env.in.read(..)` into the one that
+// wants a path.
+is_stdin_read = (be :: CBackend, rty: TyId, name: str) bool {
+    owner_of(be, rty).eq("Stdin") && name.eq("read")
 }
 
 owner_of = (be :: CBackend, rty: TyId) str {
@@ -167,8 +177,21 @@ cap_param = (be :: CBackend, rty: TyId, mi: usize, f: Function)
     })
 }
 
+// `Stdin.read` IS TESTED BEFORE THE NAME CHAIN and not inside it, because
+// the chain below asks names only and `read` is a name two capabilities
+// answer to. The owner is what tells them apart, so the owner has to be
+// asked first.
 verb = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
         ret: TyId, aty: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {
+    is_stdin_read(be, rty, a.name.text).match({
+        true  => lower_stdin_read(be, id, c, ret, aty, ctx, out),
+        false => console_verb(be, id, c, a, rty, ret, aty, ctx, out),
+    })
+}
+
+console_verb = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
+                ret: TyId, aty: TyId, ctx: Ctx, out :: String)
+               Res<(), AllocError> {
     a.name.text.eq("println").match({
         true  => lower_console_print(be, c, a.name.text, ret, ctx, out),
         false => verb_1(be, id, c, a, rty, ret, aty, ctx, out),

@@ -32,7 +32,7 @@ Build*, fs_message* = zen.zen_build
 Unit* = zen.zen_path
 build* = zen.zen_run
 format* = zen.zen_fmt
-Server, serve = lsp
+Server, serve, serve_stdio = lsp
 
 main = (env: Env) Res<i32, AllocError> {
     alloc ::= env.mem.alloc();
@@ -65,25 +65,32 @@ not_yet = (name: str) Res<i32, AllocError> {
     Ok(2);
 }
 
-// `zen lsp <requests> <replies>` — a language server over two FILES,
-// because there is no third option in this tree.
+// `zen lsp` — the language server, over stdin and stdout, which is what
+// an editor launches and the only thing it can launch.
 //
-// A real client speaks `Content-Length` frames over stdin and stdout.
-// `Env` has neither: `src/std/env/env.zen:147` lists every capability
-// and none of them reads a byte stream, and `Console` is one `println`
-// (`:45`) that appends exactly one `\n`, which a frame may not have.
-// `docs/design_lsp.md` §4 prices the missing `Stdin.read` and its floor
-// in `gen_c`; until that lands, the FRAMES are real, the protocol is
-// real, and only the pipe is a file.
+// `zen lsp <requests> <replies>` IS THE SAME SERVER OVER TWO FILES, and
+// it stays because it is what the corpus drives: a test cannot hold a
+// pipe open, and a transport nothing tests is a transport that rots.
+// Both spellings reach `lsp_serve.zen`, which holds no transport at all,
+// so the two cannot drift apart — see that file's header.
 //
-// It is spelled out rather than silently unavailable because that is
-// this folder's own rule (`zen_cli.zen`: a command that silently does
-// nothing is worse than one that says it is not written) — and because
-// a server that can be driven from a file is a server a test can drive.
+// NO FLAGS, AND NO `--entry`. `design_lsp.md` §4 says why: a root is
+// discovered from `initialize`'s `rootUri`, and the driver already
+// probes when no entry is named.
 lsp = (env: Env, a: Alloc) Res<i32, AllocError> {
     from = arg(env, 2);
     to = arg(env, 3);
-    (from.is_empty() || to.is_empty()).match({
+    from.is_empty().match({
+        true  => serve_stdio(env, a),
+        false => paired(env, a, from, to),
+    })
+}
+
+// One path and not two is a caller who meant to name both: the file form
+// answers INTO a file, so a `zen lsp requests.txt` with nowhere to write
+// would run a whole session and drop every reply.
+paired = (env: Env, a: Alloc, from: str, to: str) Res<i32, AllocError> {
+    to.is_empty().match({
         true  => lsp_usage(),
         false => answer(env, a, from, to),
     })
@@ -94,10 +101,9 @@ arg = (env: Env, i: usize) str {
 }
 
 lsp_usage = () Res<i32, AllocError> {
-    println("zen lsp <requests> <replies>");
-    println("  Reads Content-Length framed JSON-RPC from <requests> and writes");
-    println("  the replies to <replies>. There is no stdin capability in this");
-    println("  tree, so a pipe is not on offer — see docs/design_lsp.md section 4.");
+    println("zen lsp                       the language server, over stdin and stdout");
+    println("zen lsp <requests> <replies>  the same server over two files, which is");
+    println("                              what tests/corpus/lsp drives");
     Ok(2);
 }
 
