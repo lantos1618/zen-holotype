@@ -1,0 +1,382 @@
+// src/sema/sema_recv.zen
+// Who is allowed to write through a name.
+//
+// `sema_own.zen` answers who OWNS a value; this answers the other half
+// of DESIGN.md's ownership section, and the two are separate files
+// because they are separate questions. A move is a fact about the PATH
+// taken to a node, which is why that one is a flow walk carrying state.
+// A receiver requirement is a fact about a DECLARATION, checked against
+// the path spelled at one call site — so nothing here accumulates
+// anything, and every function below is a question with an answer.
+//
+// `::` ON A RECEIVER IS NOT A RECEIVER RULE. "It is the ordinary binding
+// marker doing its ordinary job on the ordinary first parameter", so
+// `add* = (self :: @Self, value: T)` and `add* = (v :: Vec<T>, value: T)`
+// are one function written two ways, and this file reads the same
+// `Param.mutable` off either.
+//
+// IT IS SHALLOW, WHICH IS WHAT MAKES IT USABLE. `::` means the method
+// writes the receiver's OWN BYTES and nothing more, so a handle's
+// methods are `:` even when they change the world: `Alloc.raw`
+// allocates, `@scope.defer` pushes a closure, `Env.spawn` starts an
+// actor, and not one of the three writes the two words it was reached
+// through. The test, when a signature is unclear, is whether a bitwise
+// copy of the receiver would see the change.
+//
+// So the requirement composes down the path: every link from the binding
+// to the receiver has to permit the write. A `:` field holding a Vec
+// refuses a `::` method, because a copy of the struct would not see the
+// write; a `:` field holding an `Alloc` accepts every method on it,
+// because none of them asks for the write at all. Same marker, opposite
+// answers, decided by the bitwise-copy test and not by this file.
+//
+// TWO SITES, TWO WALKS, and the second exists because nothing else walks
+// it. `sema_decl.zen` checks the bodies of top-level functions; a method
+// declared inside a struct body or an impl body is never typed, so a
+// write to `self` inside one would be seen by nobody. That second walk
+// reads no types at all — it is the one rule here that needs none, and
+// asking for one would be asking the type checker for a body it has
+// never seen.
+
+Ast, Expr, ExprId, BlockId, Stmt, StmtKind, Bind, Block = ast
+Decl, DeclKind, Struct, Impl, Member, MemberKind, Function = ast
+Call, Arg, Access, Match, Arm, Lambda, Index, Module, Span = ast
+Name, Paren, Try, Field, Const, ExprStmt = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str = std.text
+Range = std.core
+TyId, Ty, Types, TyNamed = sema.sema_ty
+World, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+SemaFault, NameFault = sema.sema_diag
+member_named = sema.sema_member
+Own, find_var, var_mutable, path_root = sema.sema_own
+place_type, refuse = sema.sema_own
+
+// ---------------------------------------------------------------------
+// RULE: a `::` method needs a mutable receiver
+//
+// ONLY A PATH ROOTED AT A LOCAL IS CHECKED, and that is a safety rule
+// rather than a shortcut. A receiver that is a call result is a
+// temporary this frame owns outright and can always be written; a
+// receiver rooted at a module or a type name is not a value at all, and
+// asking what type it is would make this walk report a mistake the
+// program does not contain.
+// ---------------------------------------------------------------------
+
+check_receiver* = (c :: Checker, o :: Own, k: Call, ctx: Ctx)
+                  Res<(), AllocError> {
+    c.tree.expr_at(k.callee).kind.match({
+        Access(a) => check_method_call(c, o, a, ctx),
+        _         => Ok(()),
+    })
+}
+
+check_method_call = (c :: Checker, o :: Own, a: Access, ctx: Ctx)
+                    Res<(), AllocError> {
+    path_root(c, o, a.base).match({
+        None  => Ok(()),
+        Ok(_) => check_receiver_path(c, o, a, ctx),
+    })
+}
+
+check_receiver_path = (c :: Checker, o :: Own, a: Access, ctx: Ctx)
+                      Res<(), AllocError> {
+    ty = place_type(c, o, a.base);
+    wants_mutable(c, ty, a.name.text).match({
+        false => Ok(()),
+        true  => require_mutable(c, o, a),
+    })
+}
+
+// The receiver is what is wrong and `::=` is the fix, so that is where
+// the diagnostic points — at the base of the dot, never at the method
+// name, which is declared correctly.
+require_mutable = (c :: Checker, o :: Own, a: Access) Res<(), AllocError> {
+    place_mutable(c, o, a.base).match({
+        true  => Ok(()),
+        false => refuse(c, c.tree.expr_at(a.base).span,
+                        SemaFault.NeedsMutableReceiver(
+                            NameFault(name: a.name.text))),
+    })
+}
+
+// Every link, from the binding out to the receiver. A link the lookup
+// cannot resolve permits the write, which is the fail-open this pair of
+// files applies everywhere: a false rejection makes a correct program
+// uncompilable, and a missing check only misses.
+place_mutable = (c :: Checker, o :: Own, id: ExprId) bool {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Name(n)   => var_mutable(o, n.text),
+        Paren(p)  => place_mutable(c, o, p.inner),
+        Access(a) => link_mutable(c, o, a),
+        _         => true,
+    })
+}
+
+link_mutable = (c :: Checker, o :: Own, a: Access) bool {
+    place_mutable(c, o, a.base)
+        && field_mutable(c, place_type(c, o, a.base), a.name.text)
+}
+
+// ---------------------------------------------------------------------
+// what a dot reaches, asked without reporting
+//
+// `sema_member.zen` answers this question properly, with impl selection
+// and bounds and substitution. This asks a much smaller one — is there a
+// member of this name, and what marker did it carry — and asks it off
+// the declaration directly, because the full query is entitled to raise
+// diagnostics and these walks are not: an ownership pass that reported
+// an ambiguity would be reporting it a second time.
+// ---------------------------------------------------------------------
+
+wants_mutable = (c: Checker, ty: TyId, name: str) bool {
+    own_member(c, ty, name).match({
+        None   => false,
+        Ok(m)  => receiver_is_mutable(m),
+    })
+}
+
+// A receiver is the first parameter and nothing more, so this asks what
+// the first parameter is. `self` BY NAME, because a free function whose
+// first parameter happens to be `::` is not a method with a mutable
+// receiver — it is a function taking a mutable parameter, and calling it
+// is not a dot.
+receiver_is_mutable* = (m: Member) bool {
+    m.kind.match({
+        Function(f) => first_param_mutable(f),
+        _           => false,
+    })
+}
+
+first_param_mutable = (f: Function) bool {
+    f.params.get(0).match({
+        None   => false,
+        Ok(p)  => p.name.text.eq("self") && p.mutable,
+    })
+}
+
+field_mutable = (c: Checker, ty: TyId, name: str) bool {
+    own_member(c, ty, name).match({
+        None   => true,
+        Ok(m)  => member_is_mutable(m),
+    })
+}
+
+member_is_mutable = (m: Member) bool {
+    m.kind.match({
+        Field(f)    => f.mutable,
+        Const(k)    => k.mutable,
+        Function(_) => true,
+    })
+}
+
+// THE TYPE'S OWN BODY, AND ONLY IT. An impl-supplied member is not
+// searched, and that is a deliberate narrowing rather than an omission:
+// selecting between two impls is `sema_member.zen`'s rule, it needs the
+// bounds in scope, and it may report an ambiguity — all three of which
+// this walk has given up. A `::` method supplied by an impl is therefore
+// a check this file does not make, which is the fail-open direction and
+// not the unsound one.
+//
+// It also costs nothing: a lookup with no impls to scan needs no
+// allocator, so every caller above stays a plain `bool`.
+own_member = (c: Checker, ty: TyId, name: str) Res<Member> {
+    c.types.at(ty).match({
+        Named(n) => named_member(c, n, name),
+        _        => None,
+    })
+}
+
+named_member = (c: Checker, n: TyNamed, name: str) Res<Member> {
+    decl_at(c.tree, n.decl).match({
+        None   => None,
+        Ok(d)  => decl_member(d, name),
+    })
+}
+
+decl_member = (d: Decl, name: str) Res<Member> {
+    d.kind.match({
+        Struct(st) => find_member(st.members, name),
+        _          => None,
+    })
+}
+
+find_member = (members: Vec<Member>, name: str) Res<Member> {
+    Range(0, members.len).find((i) {
+        members.get(i).match({
+            Ok(m)  => member_named(m, name),
+            None   => false,
+        })
+    }).match({
+        None   => None,
+        Ok(i)  => members.get(i),
+    })
+}
+
+// ---------------------------------------------------------------------
+// RULE: a `:` method may not write its own receiver
+//
+// The requirement is a PROMISE, not a consequence: it is declared, never
+// inferred from the body. So a `:` method that writes its own bytes is
+// an error IN THE METHOD, rather than a quiet upgrade to `::` that
+// breaks every caller in another module the next time the body changes.
+// ---------------------------------------------------------------------
+
+check_self_writes* = (c :: Checker) Res<(), AllocError> {
+    Range(0, c.world.count()).loop((h, mi) {
+        check_module_self_writes(c, mi).try();
+    });
+    Ok(());
+}
+
+check_module_self_writes = (c :: Checker, mi: usize) Res<(), AllocError> {
+    c.tree.module_at(mi).match({
+        None   => Ok(()),
+        Ok(m)  => check_decls_self_writes(c, m),
+    })
+}
+
+check_decls_self_writes = (c :: Checker, m: Module) Res<(), AllocError> {
+    m.decls.loop((h, d) { check_decl_self_writes(c, d).try() });
+    Ok(());
+}
+
+check_decl_self_writes = (c :: Checker, d: Decl) Res<(), AllocError> {
+    d.kind.match({
+        Struct(st) => check_members_self_writes(c, st.members),
+        Impl(im)   => check_members_self_writes(c, im.members),
+        _          => Ok(()),
+    })
+}
+
+check_members_self_writes = (c :: Checker, members: Vec<Member>)
+                            Res<(), AllocError> {
+    members.loop((h, m) { check_member_self_writes(c, m).try() });
+    Ok(());
+}
+
+check_member_self_writes = (c :: Checker, m: Member) Res<(), AllocError> {
+    m.kind.match({
+        Function(f) => check_fn_self_writes(c, f),
+        _           => Ok(()),
+    })
+}
+
+check_fn_self_writes = (c :: Checker, f: Function) Res<(), AllocError> {
+    (immutable_self(f) && has_body(f)).match({
+        false => Ok(()),
+        true  => scan_self_writes(c, f),
+    })
+}
+
+immutable_self = (f: Function) bool {
+    f.params.get(0).match({
+        None  => false,
+        Ok(p) => p.name.text.eq("self") && (p.mutable == false),
+    })
+}
+
+has_body = (f: Function) bool {
+    f.body.match({ Ok(_) => true, None => false })
+}
+
+scan_self_writes = (c :: Checker, f: Function) Res<(), AllocError> {
+    f.body.match({
+        None   => Ok(()),
+        Ok(b)  => self_writes_block(c, b, f.name.text),
+    })
+}
+
+self_writes_block = (c :: Checker, id: BlockId, fname: str)
+                    Res<(), AllocError> {
+    b = c.tree.block_at(id);
+    b.stmts.loop((h, s) { self_writes_stmt(c, s, fname).try() });
+    b.value.match({
+        None   => Ok(()),
+        Ok(v)  => self_writes_expr(c, v, fname),
+    }).try();
+    Ok(());
+}
+
+self_writes_stmt = (c :: Checker, s: Stmt, fname: str)
+                   Res<(), AllocError> {
+    s.kind.match({
+        Bind(b)  => self_writes_bind(c, b, fname),
+        Expr(e)  => self_writes_expr(c, e.expr, fname),
+        Block(x) => self_writes_block(c, x, fname),
+        Decl(_)  => Ok(()),
+    })
+}
+
+self_writes_bind = (c :: Checker, b: Bind, fname: str)
+                   Res<(), AllocError> {
+    refuse_if_self_target(c, b.target, fname).try();
+    self_writes_expr(c, b.value, fname).try();
+    Ok(());
+}
+
+// THE TARGET, NOT THE VALUE: reading `self.n` is what a `:` method is
+// for, and only writing it is refused. The position is the target
+// expression, which is where the write is written and where the `::`
+// that would permit it has to go.
+refuse_if_self_target = (c :: Checker, id: ExprId, fname: str)
+                        Res<(), AllocError> {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Access(a) => refuse_if_self_root(c, node, a.base, fname),
+        Index(x)  => refuse_if_self_root(c, node, x.base, fname),
+        _         => Ok(()),
+    })
+}
+
+refuse_if_self_root = (c :: Checker, node: Expr, base: ExprId, fname: str)
+                      Res<(), AllocError> {
+    rooted_at_self(c, base).match({
+        false => Ok(()),
+        true  => refuse(c, node.span, SemaFault.NeedsMutableReceiver(
+                     NameFault(name: fname))),
+    })
+}
+
+rooted_at_self = (c :: Checker, id: ExprId) bool {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Name(n)   => n.text.eq("self"),
+        Paren(p)  => rooted_at_self(c, p.inner),
+        Access(a) => rooted_at_self(c, a.base),
+        Index(x)  => rooted_at_self(c, x.base),
+        _         => false,
+    })
+}
+
+// A write hidden inside a nested body still writes. The recursion is
+// only over the forms that can HOLD a statement, because a write is a
+// statement and never an operand.
+self_writes_expr = (c :: Checker, id: ExprId, fname: str)
+                   Res<(), AllocError> {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Block(b)  => self_writes_block(c, b, fname),
+        Lambda(l) => self_writes_block(c, l.body, fname),
+        Paren(p)  => self_writes_expr(c, p.inner, fname),
+        Try(t)    => self_writes_expr(c, t.operand, fname),
+        Match(m)  => self_writes_arms(c, m, fname),
+        Call(k)   => self_writes_args(c, k, fname),
+        _         => Ok(()),
+    })
+}
+
+self_writes_arms = (c :: Checker, m: Match, fname: str)
+                   Res<(), AllocError> {
+    m.arms.loop((h, a) { self_writes_expr(c, a.body, fname).try() });
+    Ok(());
+}
+
+self_writes_args = (c :: Checker, k: Call, fname: str)
+                   Res<(), AllocError> {
+    k.args.loop((h, a) { self_writes_expr(c, a.value, fname).try() });
+    Ok(());
+}

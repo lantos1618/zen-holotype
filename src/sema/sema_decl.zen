@@ -33,6 +33,8 @@ check_depth = sema.sema_depth
 type_from_ast, param_type, block_type = sema.sema_type
 settle_raised = sema.sema_raise
 check_return = sema.sema_hoist
+check_own = sema.sema_own
+check_self_writes = sema.sema_recv
 
 // Every declaration rule, for one module.
 check_module* = (c :: Checker, mi: usize) Res<(), AllocError> {
@@ -53,6 +55,7 @@ check_all* = (c :: Checker) Res<(), AllocError> {
     Range(0, c.world.count()).loop((h, mi) {
         check_module(c, mi).try();
     });
+    check_self_writes(c).try();
     check_depth(c).try();
     Ok(());
 }
@@ -152,6 +155,12 @@ check_body = (c :: Checker, f: Function, body: BlockId, m: Module,
     c.enter_owner("");
     check_return(c, body, ctx, got).try();
     settle_raised(c, f, ctx, got, rmark).try();
+    // AFTER typing and BEFORE the scope is released. Ownership is a fact
+    // about the path to a node rather than about the node, so it is a
+    // walk and not a query; and it reads the types typing decided rather
+    // than computing any, so the parameters have to still be bound when
+    // it runs.
+    check_own(c, f, body, ctx).try();
     c.release_bounds(bmark).try();
     c.release_tvars(tmark).try();
     c.release(smark).try();

@@ -123,6 +123,28 @@ SemaFault* =
     | InfiniteSize(TypeFault)          // a field cycle with no indirection
     | InstantiationDepth(NameFault)    // the instantiation set is infinite
 
+    // ownership
+    //
+    // EVERY ONE OF THESE IS A `NameFault`, and that is the point of the
+    // four-shapes rule holding here too: an ownership mistake names a
+    // PLACE — `f`, `p.left`, `add` — and there is no second type to
+    // contrast it against and no second declaration to point at. A
+    // payload of its own would have been a fifth shape carrying exactly
+    // what the first already carries.
+    //
+    // THE SENTENCE LEADS WITH THE RULE AND THE DETAIL NAMES THE PLACE,
+    // which is the ordinary `message` + `write_detail` split and not a
+    // new one: "use after move" is the law, "f was consumed" is this
+    // program's instance of it. Reading the two together is the whole
+    // diagnostic, and neither half repeats the other.
+    | ConsumedUse(NameFault)           // a place that was moved out of
+    | NeedsMutableReceiver(NameFault)  // a `::` method reached through `:`
+    | PartiallyMoved(NameFault)        // a hole reaches the drop
+    | ConsumeNotAPlace(NameFault)      // an element index is not a place
+    | ConsumeThroughHandle(NameFault)  // move only what this frame owns
+    | CopyOfDropValue(NameFault)       // `g = f` would drop twice
+    | ScopeEscapes(NameFault)          // `@scope` left its block
+
 // Where the mistake is, and which one it is.
 //
 // `file` rides along rather than being read back out of `span`, because
@@ -170,6 +192,13 @@ message* = (fault: SemaFault) str {
         ProvenIndexOutOfBounds(_) => "index out of bounds: a trap the compiler can prove will fire is a compile error",
         InfiniteSize(_)      => "infinite size: the field cycle never reaches an indirection, so the layout does not terminate (`Ptr<T>` is the finite form)",
         InstantiationDepth(_) => "instantiation depth exceeded: the type argument keeps widening, so the instantiation set is infinite",
+        ConsumedUse(_)       => "use after move:",
+        NeedsMutableReceiver(_) => "the receiver is immutable:",
+        PartiallyMoved(_)    => "a partial move reaches the drop:",
+        ConsumeNotAPlace(_)  => "cannot consume an array element: the index is a runtime value, so which element is dead is not a fact the compiler holds",
+        ConsumeThroughHandle(_) => "cannot consume through a handle: you may only move what this frame owns, and a bitwise copy of a handle would be left pointing at a dead value",
+        CopyOfDropValue(_)   => "cannot copy a Drop value: drop runs exactly once, so two live names for one value would drop it twice — construct a second one, or write `consume`",
+        ScopeEscapes(_)      => "@scope may not escape: it names the enclosing block, so it may be passed inward but never stored in a struct, returned, or captured by an escaping closure",
     });
 }
 
@@ -210,6 +239,14 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         ProvenDivideByZero(f)     => out.write_name(f),
         ProvenIndexOutOfBounds(f) => out.write_name(f),
         InstantiationDepth(f)     => out.write_name(f),
+        ConsumeNotAPlace(f)       => out.write_name(f),
+        ConsumeThroughHandle(f)   => out.write_name(f),
+        CopyOfDropValue(f)        => out.write_name(f),
+        ScopeEscapes(f)           => out.write_name(f),
+
+        ConsumedUse(f)            => write_place(out, f, " was consumed, and a binding is dead from the move onwards"),
+        NeedsMutableReceiver(f)   => write_place(out, f, " needs a mutable receiver, so every link from the binding to it must permit the write"),
+        PartiallyMoved(f)         => write_place(out, f, " is partially moved, so the drop has a hole: move the whole value or none of it"),
 
         NoSuchField(f)            => write_types(out, types, f),
         TypeMismatch(f)           => write_types(out, types, f),
@@ -231,6 +268,22 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
 
 write_name = (out :: String, f: NameFault) Res<(), AllocError> {
     quote(out, f.name)
+}
+
+// An ownership sentence: the place, then what happened to it.
+//
+// UNQUOTED, unlike every other name this file prints, because the place
+// is the SUBJECT of a sentence and not evidence appended to one. "`f`
+// was consumed" reads as a fragment with a quoted token in it; "f was
+// consumed" reads as the claim it is, and it is the claim the ownership
+// tests assert. The tail travels with the raise site rather than living
+// in `message` because `message` has already said the law — repeating it
+// here would print the rule twice and the place never.
+write_place = (out :: String, f: NameFault, tail: str) Res<(), AllocError> {
+    out.add_bytes(" ").try();
+    out.add_bytes(f.name).try();
+    out.add_bytes(tail).try();
+    Ok(());
 }
 
 // Both sides, always. `expected` first, because that is the order the

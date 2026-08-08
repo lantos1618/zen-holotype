@@ -1,0 +1,91 @@
+// src/sema/sema_scope.zen
+// A block, as a value, that may not leave its block.
+//
+// `@scope` "stands for the enclosing block, exactly as `h: LoopHandle`
+// stands for the enclosing loop". So it is a value with a lifetime and
+// nothing else in the language has one: every other rule in this folder
+// is about a TYPE or about UNIQUENESS, and this one is about how long a
+// frame lasts. That is why it is not folded into `sema_own.zen` beside
+// the moves — one file, one question.
+//
+// NON-ESCAPING IS A FEATURE AND NOT A LIMITATION, which is the sentence
+// worth keeping in view while reading the refusals below. "A closure
+// registered on a scope keeps its captures in that scope's own storage",
+// and that works precisely because the block outlives the closure by
+// construction. Take the restriction away and `defer` needs a heap
+// record, which law 1 forbids without an `Alloc` — so the three ways out
+// are barred to buy the one guarantee that makes `defer` free.
+//
+// INWARD IS FINE. A helper registering cleanup on its caller's block is
+// the whole point: non-escaping means one direction, down the stack,
+// never out of it.
+//
+// TWO OF THE THREE WAYS OUT ARE CHECKED HERE — stored in a struct, and
+// returned. The third, captured by an escaping closure, is NOT, and the
+// debt is named rather than hidden: it needs an answer to "which
+// closures escape", and nothing in this tree computes one yet. The test
+// that owes it is `must-fail/own/scope_captured_by_escaping_closure`.
+
+Ast, Expr, ExprId, BlockId, Call, Arg, Decl, DeclKind, Struct = ast
+Paren = ast
+Alloc, AllocError = std.mem
+str = std.text
+DeclId = sema.sema_id
+decl_at = sema.sema_def
+Checker = sema.sema_check
+SemaFault, NameFault = sema.sema_diag
+refuse = sema.sema_own
+
+// RETURNED. `here`'s block is gone by the time the caller has the value,
+// so every defer registered on it would run against a dead frame. Only
+// the FUNCTION BODY's value is asked: a nested block whose value is a
+// `@scope` hands it to an enclosing block that is still open.
+check_scope_returned* = (c :: Checker, body: BlockId) Res<(), AllocError> {
+    c.tree.block_at(body).value.match({
+        None   => Ok(()),
+        Ok(v)  => refuse_if_scope(c, v),
+    })
+}
+
+refuse_if_scope* = (c :: Checker, id: ExprId) Res<(), AllocError> {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Scope     => refuse(c, node.span, SemaFault.ScopeEscapes(
+                         NameFault(name: ""))),
+        Paren(p)  => refuse_if_scope(c, p.inner),
+        _         => Ok(()),
+    })
+}
+
+// STORED. `register(@scope, env)` passes it inward and is legal;
+// `Holder(s: @scope)` puts it in a value that can outlive the block. The
+// two read the same at the call site and only the resolved declaration
+// tells them apart — which is exactly what `call_memo` was written down
+// for, and the one question this file asks that a syntactic reading
+// could not answer.
+check_scope_stored* = (c :: Checker, id: ExprId, k: Call)
+                      Res<(), AllocError> {
+    is_construction(c, id).match({
+        false => Ok(()),
+        true  => refuse_scope_args(c, k),
+    })
+}
+
+is_construction = (c :: Checker, id: ExprId) bool {
+    c.resolved_call(id).match({
+        None  => false,
+        Ok(d) => decl_is_struct(c, d),
+    })
+}
+
+decl_is_struct = (c :: Checker, d: DeclId) bool {
+    decl_at(c.tree, d).match({
+        None   => false,
+        Ok(dc) => dc.kind.match({ Struct(_) => true, _ => false }),
+    })
+}
+
+refuse_scope_args = (c :: Checker, k: Call) Res<(), AllocError> {
+    k.args.loop((h, a) { refuse_if_scope(c, a.value).try() });
+    Ok(());
+}
