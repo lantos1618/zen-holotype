@@ -34,11 +34,32 @@ pipe: `initialize` answers with `hoverProvider: true`, `didOpen` is
 accepted, `textDocument/hover` on `s` in `s = a + b` answers `i32`,
 `shutdown` answers, and the process exits **0**.
 
-**Now the honest part — this server answers hover and nothing else:**
+**Now the honest part — this server answers hover, publishes diagnostics,
+and refuses everything else:**
 
-- **No diagnostics.** The server never sends `publishDiagnostics`. No
-  squiggles is correct behaviour, not a failure, and no amount of waiting
-  will produce any. Errors still only come from running the compiler.
+- **Diagnostics work, and they are all three phases.** Open or edit a `.zen`
+  file in a workspace and the server builds the root behind it and publishes
+  what lex, parse and sema found — squiggles, in the editor, as you type.
+  They are **grouped per file**, so an error in a module you are not looking
+  at is reported against *that* file and not against the one on screen; and
+  a file whose errors you have fixed receives an empty list, so nothing
+  stale is left underlined. A parse diagnostic's second position — "the
+  parser gave up here" — arrives as `relatedInformation`, which your editor
+  renders as somewhere to jump to.
+- **Diagnostics need a workspace, and there is no fallback.** With no
+  `rootUri` the server publishes nothing at all, deliberately: without a
+  root the only thing it could check is the open file standing alone, and
+  that reports every imported name as undefined — a screenful of red about
+  a program that is fine. Silence is the honest answer there.
+- **A build runs per change, and this is the cost.** There is no timed
+  debounce and there cannot be one yet — the server is single-threaded with
+  a blocking read and no clock, so it has no way to notice that you have
+  stopped typing. What it does instead: changes that arrive together cost
+  one build, and a change that carries the bytes the buffer already held
+  costs none. In a file that imports most of the compiler a build is about
+  a second, so expect diagnostics to lag your typing in a large module and
+  to be instant in a leaf one. `docs/design_lsp.md` §5 has the reasoning
+  and names what would have to exist for a real debounce.
 - **Hover answers at a use AND at a declaration.** Probing every identifier
   position in a four-line function, **10 of 12** answer; the two that do not
   are a space and a brace, which must not. A parameter or a local at its
@@ -230,6 +251,7 @@ and therefore sema's.
 | `initialized` / `exit` / `$/cancelRequest` | notifications, no reply |
 | `textDocument/didOpen` / `didChange` / `didClose` | **works**, Full sync only |
 | `textDocument/hover` | **works** — a type, a declared name's type, or a function's signature |
+| `textDocument/publishDiagnostics` | **works** — lex, parse and sema, grouped per file, cleared when fixed |
 | everything else | **refused by name** with JSON-RPC `-32601` |
 
 "Everything else" is `textDocument/definition`, `documentSymbol`,
@@ -238,24 +260,29 @@ and `rename`. The refusal names the method and points at
 `docs/design_lsp.md`. An editor showing "method not supported" for those is
 the server being honest, not this configuration being wrong.
 
-**There are no diagnostics.** Every piece one needs now exists — sema's
-were always values, lex's and parse's are collected on the build, and the
-driver has a public entry that hands a build back — so what is left is the
-request and a policy about when to send it. Half a diagnostics story is
-worse than none, which is why it is not half-wired.
+**Diagnostics are published, and they are the whole story or none of it.**
+Sema's come off the `Checker` the driver hands back; lex's and parse's come
+off the build itself. A server showing type errors and silently swallowing
+syntax errors would teach you to distrust it, so both go out together.
+Every one is severity **Error** — this compiler has one tally and no phase
+produces anything a build survives, so there is nothing else to be.
 
-**Hover builds the root, once per hover.** There is no cache and no
-debounce, so a hover in a file that imports most of the compiler takes
-about a second on this machine; one in a leaf module is imperceptible.
-`docs/design_lsp.md` §5 names debounce and coalescing as the answer and
-`docs/PLAN.md:317` names where the real fix goes if that is not enough.
+**Hover builds the root, once per hover; a change builds it once too.**
+There is no cache, so a hover or an edit in a file that imports most of the
+compiler takes about a second on this machine and a leaf module is
+imperceptible. `docs/design_lsp.md` §5 says why the debounce it asks for
+cannot be written against a blocking read with no clock, and what the two
+mitigations that *were* possible are; `docs/PLAN.md:317` names where the
+real fix goes if that is not enough.
 
-**A workspace is required for the imported half.** The root is computed
-from the open document — climb out of every directory that holds its own
-name — with `initialize`'s `rootUri` as the floor it may not pass. A client
-that sends no `rootUri` gets the old lone-module answer, which is still
-honest: it types what the file declares and answers `null` for what it
-imports.
+**A workspace is required for the imported half, and for diagnostics at
+all.** The root is computed from the open document — climb out of every
+directory that holds its own name — with `initialize`'s `rootUri` as the
+floor it may not pass. A client that sends no `rootUri` gets the old
+lone-module answer for hover, which is still honest: it types what the file
+declares and answers `null` for what it imports. Diagnostics get nothing at
+all in that state, because the same lone-module check that makes hover go
+quiet would make diagnostics go loud and wrong.
 
 `zen fmt` exists as a command but wiring `textDocument/formatting` to it is
 a separate change and `docs/design_lsp.md` does not ask for it yet. Neither
@@ -310,6 +337,18 @@ Verified here, by running it:
   `tests/corpus/lsp/hover_answers_an_imported_name`, which additionally
   pins that the unsaved buffer beats the file on disk and that a buffer
   with an unclosed brace produces no stray output in the frame stream.
+- **Diagnostics were driven over a real pipe too**, against a two-module
+  project outside the checkout: `didOpen` of a buffer with an unclosed `(`
+  came back as one `publishDiagnostics` naming `file:///…/app.zen` with the
+  `relatedInformation` intact, a `didChange` closing it came back as the
+  same uri with `"diagnostics":[]`, `shutdown` answered, the process exited
+  **0** and there was not one byte on stdout that was not a frame. The same
+  session and a per-file grouping table are corpus tests —
+  `tests/corpus/lsp/diagnostics_publish_and_clear` and
+  `diagnostics_are_written_as_the_protocol_spells_them` — and six mutations
+  were run against them (drop the parse diagnostics, drop the clearing on
+  either of its two routes, drop the note, drop the grouping, drop the
+  unchanged-bytes skip). All six went red.
 - **The tree-sitter grammar loads in Neovim 0.12.2** via
   `vim.treesitter.language.add` at the `--abi 14` the Makefile passes, and
   parses.

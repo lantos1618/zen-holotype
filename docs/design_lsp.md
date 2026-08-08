@@ -63,7 +63,7 @@ Four stages, named **L1–L4** so they are not confused with `PLAN.md`'s 0–5. 
 | `initialize` / `initialized` | none — capability negotiation | **built**: `src/lsp/lsp_serve.zen` answers with `textDocumentSync: 1` and `hoverProvider: true`. Every request before it is `-32002` | L1 |
 | `shutdown` / `exit` | none | **built** | L1 |
 | `textDocument/didOpen` / `didChange` / `didClose` | an overlay the driver reads before the disk | **built, both halves** (Full sync). The server holds the buffer; `Build.overlay` is what the driver reads before `env.fs.read`, so an UNSAVED buffer — and a file that is on no disk at all — is what gets checked | L1 |
-| `textDocument/publishDiagnostics` | diagnostics as values with spans | **every piece exists; the request does not.** Sema's are `diag_count`/`diag_at` on the `Checker` (`src/sema/sema_check.zen:151,153`); lex's and parse's are the same pair on the `Build`; `Build.whole` hands both back and `Build.speaking` stops the driver printing them over the wire. What is left is a policy about when to send — see §5 | L1 |
+| `textDocument/publishDiagnostics` | diagnostics as values with spans | **built**, all three phases: `src/lsp/lsp_diag.zen`. Sema's come off the `Checker` `Build.whole` hands back (`src/sema/sema_check.zen:198,200`), lex's and parse's off the `Build`'s own `diag_count`/`diag_at`. Grouped by the URI each span names, one notification per file, and a file whose errors are gone gets an EMPTY list. The policy — when to send, and why it is not a timed debounce — is §5 | L1 |
 | `textDocument/documentSymbol` | a module's declarations in source order, each with a span and a name-span | **exists**, no new query: `module_count`/`module_at` at `src/ast/ast_arena.zen:147,149`; `Decl.span` and `Ident.span` are LSP's `range` and `selectionRange` exactly | L2 |
 | `textDocument/hover` | the type under the cursor, printed | **built, and widened** — `src/lsp/lsp_hover.zen` plus `src/lsp/lsp_decl.zen`, still no new sema. See the hover section below for what it answers, what it refuses, and the measurement | L2 |
 | `textDocument/definition` | the span a name was declared at | **mostly**: `defs_of` → `Def.span` (`src/sema/sema_def.zen:172`, `:63`) for a module-level name; `call_memo` (`src/sema/sema_check.zen:113`) for a call; `Found.span` (`src/sema/sema_member.zen:66`) for a member. **Missing for locals** — see below | L2 |
@@ -296,6 +296,18 @@ The per-keystroke cost is one `zen build src`. The mitigations that are *not* in
 
 `PLAN.md:317` is the standing note on this: if it is still too slow after that, the fix is in sema's query granularity and belongs there, not here.
 
+#### Two of those three landed, and the DEBOUNCE cannot be written — BUILT 2026-08-08
+
+**The first bullet is not implementable by this server and saying why is more useful than the bullet.** A quiet interval is something a server *observes*, and observing it needs one of three things this tree does not have: a non-blocking read, a read with a timeout, or a second thread. `Stdin.read` blocks until it has exactly the bytes it was asked for (§4, and it is the property that made `short_by` necessary); there is no clock capability; and `PLAN.md` puts threads at stage 5 while the compiler is written in the seed subset. A "debounce" built on a blocking read is a timer that fires when the next keystroke arrives, which is the opposite of the thing.
+
+**What replaced it is a settle point, and it makes bullet two stronger rather than weaker.** `didOpen` and `didChange` MARK a document as owing a build and return; the transport calls `Server.settled` when it has answered every message it currently holds. So:
+
+- **Coalescing is by construction.** Every change in one batch collapses to one build of the LAST buffer. The superseded build is never *started*, where the bullet above only asked for its results to be discarded — and "an older result must not overwrite a newer one" is then not a race that is handled but a race that cannot occur, because there is one build at a time and it is the newest document's.
+- **Over a buffer this is a whole batch; over the pipe it is every message.** `short_by` asks for exactly one message's bytes, so `lsp_stdio.zen`'s reader holds one frame at a time and cannot know whether more is waiting. `serve` — which the corpus drives — coalesces properly, and `tests/corpus/lsp/diagnostics_publish_and_clear` measures it: two document notifications, one round of publishes. **Over a real editor it coalesces nothing yet, and the missing piece is a read that can say "nothing more is waiting".** That is the honest state and it is written in `lsp_diag.zen`'s header too.
+- **The third bullet landed as the narrower thing a server can actually know**: `didOpen` or `didChange` carrying bytes the document already holds marks nothing at all. It does not know which modules the last build walked, so it cannot answer the bullet as written; it can answer "this buffer did not change", which is what an editor re-sending `didOpen` produces.
+
+**And a refusal worth recording: no workspace, no diagnostics.** Hover degrades to a lone-module check when there is no `rootUri`, because hover's failure mode is silence. Diagnostics' failure mode is *noise* — a lone-module check reports every imported name as undefined, which for any real file is a screenful of red about a program that is fine — so this one does not degrade at all. Same for a `rootUri` the open document is not under, which climbs to an empty root.
+
 ### The overlay
 
 `Fs.read` reads the disk (`src/std/env/env.zen:83`). An unsaved buffer is not on the disk. Two ways to interpose:
@@ -334,7 +346,16 @@ An earlier agent refused to land the field on its own and priced the rest. It na
 
 `Diag.note` also escapes now. It was being collected and never printed at all, so every note `diag_at` carried — including `expect_close`'s "the parser gave up here" — was thrown away.
 
-**What this does NOT yet do is publish them.** The diagnostics are values the driver holds and nothing in `src/lsp/` reads them — but the thing that was blocking it is gone. `Build.whole` hands back a `Checker` (whose `diag_count`/`diag_at` are sema's) and leaves `faults` and `diags` on the `Build` (which are lex's and parse's), and `Build.speaking` is what stops the driver printing them over the wire. **What is left is the request and a policy**: when to send, what to do with a build that is superseded, and whether an empty list must be published to clear the last one. None of that is a missing query.
+**And they are published — 2026-08-08, `src/lsp/lsp_diag.zen`.** `Build.whole` hands back a `Checker` (whose `diag_count`/`diag_at` are sema's) and leaves `faults` and `diags` on the `Build` (which are lex's and parse's); the server reads both, because an editor showing type errors and silently not showing syntax errors teaches a user to distrust it. Four decisions were the whole of the work, and none of them was a missing query:
+
+- **WHEN**: the settle point above.
+- **WHICH FILE**: a build reports across the program, so a diagnostic is grouped by the URI its own `span.file` names — `<root>/<rel>` through `lsp_uri.uri_at`, which is `path_of` read backwards so the URI built for the open document is byte-identical to the one the client opened it with. One notification per file. Publishing another file's errors against the open document would be a wrong answer, and this folder's rule is that a wrong answer is worse than none.
+- **CLEARING**: the protocol has no "remove" — a notification REPLACES a file's list — so an empty list is the only way to take an error back. The server keeps the set of URIs currently showing errors and publishes an empty list for every one this build found nothing in, plus always for the document that triggered it. **A server that publishes only what it finds leaves errors the user has already fixed on screen forever**, which is worse than publishing nothing.
+- **SEVERITY**: 1, Error, for everything, and that is a fact about this compiler rather than a simplification — one tally, one exit code off it, and no phase produces anything a build survives. One constant changes on the day there is a warning.
+
+**`Diag.note` becomes `relatedInformation`**, which is where the second half of the morning's work landed. A note is a sentence AND a span; folding it into the message throws the span away and leaves the reader told to look somewhere with no way to go there. Sema's second position stays inside its own sentence, because `write_detail` already writes a `PairFault`'s two declarations and lifting one out would be a second, divergent copy of how sema words a two-place diagnostic.
+
+**Gates**: `tests/corpus/lsp/diagnostics_are_written_as_the_protocol_spells_them` is the writer over a table of hand-built spots — the empty list, two in one file, grouping across two, the note, a UTF-16 column past a two-byte character, and escaping. `tests/corpus/lsp/diagnostics_publish_and_clear` is a real session over framed JSON-RPC with a real build behind it: a parse fault in one buffer and a sema fault in another, published separately, then both taken back. Six mutations were run against the pair — dropping the parse diagnostics, dropping `take_back`, dropping the always-publish of the edited document, dropping the note, dropping the grouping, and dropping the unchanged-bytes skip — and every one of them went red.
 
 **Known divergence, unreconciled:** the two compilers anchor the unclosed-delimiter note differently *and* word it differently — `./zen` says `3:24: the parser gave up here` (where the parser stopped), `bootstrap/` says `5:1: \`}\` here closes nothing` (the closer that arrived). A `.expected` asserts one substring plus positions that must all be reported, so **no shared expectation file can assert that note**. Neither anchor is obviously wrong.
 
@@ -363,7 +384,7 @@ The L1–L4 staging in §2 is about the SERVER. This is the same staging read fr
 | **hover** | **works** — the transport landed, and so did the build behind it | **works** |
 | go-to-definition | L2 (module-level), L3 (locals) | same |
 | document symbols / outline | L2 | L2, plus the breadcrumb bar for free |
-| diagnostics as you type | L1, and no longer blocked on anything but the request itself — see §5 | same |
+| **diagnostics as you type** | **works** — all three phases, grouped per file, cleared when fixed; §5 has the trigger policy | **works** |
 | completion | L3 | L3 |
 | format on save | L3 — engine exists, request does not | same |
 | references, rename, signature help | L4 | L4 |
@@ -470,7 +491,7 @@ Stdin, and byte-exact stdout. Before any protocol code.
 
 **Gate, and it is green:** `tests/corpus/env/stdin_echoes_its_bytes_exactly` reads its own stdin and writes the bytes back with no newline added, byte-compared. The harness could not feed a program stdin at all; `.stdin` is the sidecar that was added for it, and `docs/TESTING.md` names it. And the existing gates stay green — `make test`, `make fixpoint` — because a new capability member is a change to `std` and to `gen_c`, and `TESTING.md:11` says what the fixpoint is worth. **Break it on purpose:** make the write append a newline and watch the byte comparison fail.
 
-### L1 — transport, lifecycle, sync, diagnostics
+### L1 — transport, lifecycle, sync, diagnostics — **DONE**
 
 JSON in and out. Framing. `initialize`/`initialized`/`shutdown`/`exit`. Full document sync into a `Build` overlay. `publishDiagnostics` from all three phases.
 
@@ -480,7 +501,9 @@ JSON in and out. Framing. `initialize`/`initialized`/`shutdown`/`exit`. Full doc
 2. **A scripted session**: a recorded sequence of frames on stdin, the server's frames on stdout compared against a `.expected`. This is `tests/corpus/cli/cli_reads_an_explicit_entry.zen`'s shape one level up — a pure-ish function handed inputs no real client would produce.
 3. **Diagnostic parity**: for every program in `tests/must-fail/`, the diagnostics `zen lsp` publishes name the same positions the `.expected` file already asserts. **This gate is free** — the expectations exist — and it is the one that catches the server inventing its own positions. Break it by shifting a column by one and watch every row go red.
 
-**L1 is done when** an editor connected to `zen lsp` shows the same errors, at the same places, as `zen build`.
+Gates 1 and 2 are green (`json_round_trips_and_rejects`, `a_session_is_answered_frame_by_frame`, `frames_arrive_over_stdin`). **Gate 3 is still not written**, and it is the one that is left: `diagnostics_publish_and_clear` asserts a session and `diagnostics_are_written_as_the_protocol_spells_them` asserts the shape, but neither sweeps the 117 `must-fail` expectations, so nothing yet proves the wire positions and the compiler's positions are the same numbers over a corpus. It is still free and it is still the cheapest remaining L1 work.
+
+**L1 is done when** an editor connected to `zen lsp` shows the same errors, at the same places, as `zen build`. The first half is true; the second half is exactly what gate 3 would measure.
 
 ### L2 — the queries that already exist
 
