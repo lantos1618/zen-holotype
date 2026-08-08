@@ -20,6 +20,7 @@
 // already memoize it.
 
 Ast, Module, Decl, DeclKind, Function, TParam, BlockId = ast
+Struct, Member = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -31,7 +32,8 @@ check_impl = sema.sema_bound
 check_overloads = sema.sema_call
 check_depth = sema.sema_depth
 check_layout = sema.sema_layout
-type_from_ast, param_type, block_type = sema.sema_type
+type_from_ast, param_type, block_type, decl_as_type = sema.sema_type
+enter_struct_tvars = sema.sema_member
 settle_raised = sema.sema_raise
 check_return = sema.sema_hoist
 check_own = sema.sema_own
@@ -130,8 +132,93 @@ check_decl = (c :: Checker, d: Decl, m: Module, mi: usize)
              Res<(), AllocError> {
     d.kind.match({
         Function(f) => check_function(c, f, m, mi),
+        Struct(s)   => type_members(c, s, m, mi),
         _           => Ok(()),
     })
+}
+
+// TYPING A STRUCT'S MEMBER BODIES, and only typing them.
+//
+// `check_body` below is the DECLARATION walk and runs the rules that
+// belong to a declaration. This runs the QUERIES, because a query's
+// answer is memoized and lowering reads it back — `supply_memo` above
+// all: `Boxy.area`'s body reads `self.width` off `Boxy`, and it is
+// EMITTED at every type that impls `Boxy`, by which time the bound that
+// says which impl supplies the `width` is gone. Nothing walked these
+// bodies, so there was no answer to read.
+//
+// The declaration rules for a member's body are not here: adding them
+// changes what the checker REJECTS, which is a wider change than what
+// it records.
+type_members = (c :: Checker, s: Struct, m: Module, mi: usize)
+               Res<(), AllocError> {
+    self_ty = struct_self(c, s, mi).try();
+    tmark = c.tvar_mark();
+    enter_struct_tvars(c, s, mi).try();
+    s.members.loop((h, mem) { type_member(c, mem, self_ty, m, mi).try() });
+    c.release_tvars(tmark).try();
+    Ok(());
+}
+
+// The struct's own type, with no arguments: `@Self` inside a member of
+// `Vec<T>` is the `Vec` the declaration writes, and the receiver a call
+// site reaches is a different question asked at the call site.
+struct_self = (c :: Checker, s: Struct, mi: usize) Res<TyId, AllocError> {
+    found ::= c.alloc.Vec<Def>();
+    c.world.defs_of(mi, s.name.text, found).try();
+    found.get(0).match({
+        Ok(d) => c.decl_as_type(d),
+        None  => c.types.unknown(),
+    })
+}
+
+type_member = (c :: Checker, mem: Member, self_ty: TyId, m: Module,
+               mi: usize) Res<(), AllocError> {
+    mem.kind.match({
+        Function(f) => type_member_fn(c, f, self_ty, m, mi),
+        _           => Ok(()),
+    })
+}
+
+type_member_fn = (c :: Checker, f: Function, self_ty: TyId, m: Module,
+                  mi: usize) Res<(), AllocError> {
+    f.body.match({
+        Ok(b) => type_member_body(c, f, b, self_ty, m, mi),
+        None  => Ok(()),
+    })
+}
+
+// The scope, the type parameters and the bounds enter and leave here for
+// the reason `check_body` states, and the raised list drains here for
+// the reason `settle_raised` states: a `.try()` in a member's body would
+// otherwise be attributed to the next declaration walked.
+type_member_body = (c :: Checker, f: Function, body: BlockId, self_ty: TyId,
+                    m: Module, mi: usize) Res<(), AllocError> {
+    smark = c.mark();
+    tmark = c.tvar_mark();
+    bmark = c.bound_mark();
+    owner = qualified(c, m, f).try();
+    enter_generics(c, f, owner, mi).try();
+    ctx = member_ctx(c, f, mi, self_ty).try();
+    bind_params(c, f, ctx).try();
+    rmark = c.raised_mark();
+    c.enter_owner(owner);
+    got = c.block_type(body, ctx).try();
+    c.enter_owner("");
+    settle_raised(c, f, ctx, got, rmark).try();
+    c.release_bounds(bmark).try();
+    c.release_tvars(tmark).try();
+    c.release(smark).try();
+    Ok(());
+}
+
+// `body_ctx` with `@Self` bound: a member's body names it as freely as
+// its signature does.
+member_ctx = (c :: Checker, f: Function, mi: usize, self_ty: TyId)
+             Res<Ctx, AllocError> {
+    base = body_ctx(c, f, mi).try();
+    Ok(Ctx(module: base.module, ret: base.ret, has_ret: base.has_ret,
+           self_ty: self_ty, has_self: true));
 }
 
 // A `Required` or `Hook` declaration has no body and nothing to check;
