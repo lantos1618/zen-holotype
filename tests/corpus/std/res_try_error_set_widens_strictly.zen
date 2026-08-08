@@ -1,0 +1,55 @@
+// tests/corpus/std/res_try_error_set_widens_strictly.zen
+// DESIGN.md: "A union is its members. Order and spelling are not part
+// of its identity" — which settles two SPELLINGS of ONE set, and says
+// nothing about a set widening into a LARGER one. That case is two
+// genuinely different types, and its consequence is the opposite of the
+// layout rule's: canonical numbering makes a re-spelling a copy, and a
+// strict widening still has to re-tag.
+//
+// `Narrow = AErr | CErr` calls a CErr 1. `Wide = AErr | BErr | CErr`
+// calls it 2, because BErr sits between them and pushes it along. So a
+// CErr raised at the bottom crosses both and has to come out the far
+// end still saying C. Carried across with its tag untouched it prints
+// B — silently, with no diagnostic and no C that fails to compile,
+// which is why the printed member and not a diagnostic is what this
+// test asserts.
+//
+// Neither error carries a payload, because what is being checked is
+// which member the tag says it is and nothing else.
+
+AErr = | AOnly
+BErr = | BOnly
+CErr = | COnly
+
+Narrow = AErr | CErr
+Wide = AErr | BErr | CErr
+
+raise = () Res<(), CErr> {
+    Err(CErr.COnly);
+}
+
+// into the smaller set, through the member it is
+through = () Res<(), Narrow> {
+    raise().try();
+    Ok(());
+}
+
+// and out into the strictly larger one, which is a re-tagging and not a
+// copy: the member is the same member and its number is not the same
+// number
+widen = () Res<(), Wide> {
+    through().try();
+    Ok(());
+}
+
+main = (env: Env) Res<i32, Wide> {
+    widen().match({
+        Ok(_)  => println("no error"),
+        Err(e) => e.match({
+            AErr(_) => println("A"),
+            BErr(_) => println("B"),
+            CErr(_) => println("C"),
+        }),
+    });
+    Ok(0);
+}
