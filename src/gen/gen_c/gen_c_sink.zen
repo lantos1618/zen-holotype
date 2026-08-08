@@ -94,8 +94,22 @@ by_ref = (f: Function, i: usize) bool {
     f.params.get(i).match({ Ok(p) => p.mutable, None => false })
 }
 
+// A FUNCTION WITH NO PARAMETERS HAS NO LAST ONE, and `len - 1` on a
+// `usize` does not answer that question — it traps. `Vec.get` would have
+// returned `None` for the huge index, which is why this read as safe;
+// the subtraction never got that far. Its first caller was shielded by a
+// `params.len == 3` test in front of it, so the underflow waited for a
+// second caller to arrive, and one did (`associated_functions`, exit
+// 134). A guard belongs where the arithmetic is, not in whoever calls it.
 last_is_variadic* = (be: CBackend, f: Function) bool {
-    f.params.get(f.params.len - 1).match({
+    (f.params.len == 0).match({
+        true  => false,
+        false => tail_is_variadic(be, f, f.params.len - 1),
+    })
+}
+
+tail_is_variadic = (be: CBackend, f: Function, i: usize) bool {
+    f.params.get(i).match({
         None  => false,
         Ok(p) => variadic_param(be, p),
     })
