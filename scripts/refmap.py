@@ -146,6 +146,24 @@ def literal_of(quote: str) -> str:
     return norm(re.split(r"[<%]", quote)[0])
 
 
+def quote_line(want: str, lines: list[str], reach: int = 8) -> int | None:
+    """The line a quoted sentence STARTS on, or None.
+
+    Source wraps a sentence over several lines, so the search is over a
+    sliding window. The answer is the LAST window that still contains the
+    whole sentence: once the window starts past the sentence's first line
+    it can no longer hold all of it. Matching a prefix instead would be
+    wrong in a way this file was bitten by -- "generic instantiation did
+    not terminate" and the same words followed by "at `%s`" are two
+    different diagnostics, and a prefix picks the first one.
+    """
+    hit = None
+    for i in range(1, len(lines) + 1):
+        if want in norm(" ".join(lines[i - 1:i - 1 + reach])):
+            hit = i
+    return hit
+
+
 def resolve(name: str) -> Path | None:
     base = name.split("/")[-1]
     for candidate in (ROOT / name.lstrip("/"), ROOT / "bootstrap" / base, ROOT / base):
@@ -305,12 +323,9 @@ def main() -> int:
             want = literal_of(claim.sym)
             if len(want) < 8 or want in norm(" ".join(lines[claim.lo - 1:claim.hi])):
                 continue
-            hint = "that sentence is nowhere in the file"
-            if want in whole:
-                near = [i for i, s in enumerate(lines, 1) if want[:40] in norm(s)]
-                hint = (f"it reads at {near[0]}" if near
-                        else "it is in the file, wrapped across other lines")
-            stale.append((claim, hint))
+            at = quote_line(want, lines) if want in whole else None
+            stale.append((claim, f"it reads at {at}" if at
+                          else "that sentence is nowhere in the file"))
 
         elif claim.kind == "loose":
             tally["loose"] += 1
