@@ -1,0 +1,62 @@
+// A UNION MEMBER IS MATCHED WITH ITS VALUE, and the binder has the
+// member's own type. DESIGN.md: "A union is its members" — so an arm of
+// `Error = Torn | Frayed` names a TYPE, and `Torn(t)` binds a `Torn`.
+//
+// Read as payloadless tags instead, `t` binds `()`, `()` has no case
+// list, and every name inside the nested match reads as a BINDER — which
+// covers everything and makes each arm after the first unreachable.
+//
+// ASSERTING IT NEEDS THE VALUE READ BACK OUT. A tag-only union checks a
+// nested match perfectly well as long as nothing looks at what the
+// member carried, which is how a mistagged union stayed green: `Torn(t)`
+// binding some OTHER member's type is invisible until `t` is used. So
+// each arm goes one level PAST the union — into `Torn`'s own variants,
+// and into `Frayed`'s own field — and prints something only the right
+// member could produce.
+//
+// The values arrive by propagation rather than by writing `Error.Torn(..)`
+// at the call site, because that spelling is what `res_try_error_set_
+// keeps_the_variant` exercises and what the bootstrapper still refuses.
+
+Torn = Badly | Barely
+Frayed = { threads: i32 }
+
+Error = Torn | Frayed
+
+tear = (hard: bool) Res<i32, Torn> {
+    Err(hard.match({ true => Torn.Badly, false => Torn.Barely }));
+}
+
+fray = () Res<i32, Frayed> {
+    Err(Frayed(threads: 3));
+}
+
+widen_torn = (hard: bool) Res<i32, Error> {
+    tear(hard).try();
+    Ok(0);
+}
+
+widen_frayed = () Res<i32, Error> {
+    fray().try();
+    Ok(0);
+}
+
+describe = (env: Env, r: Res<i32, Error>) () {
+    r.match({
+        Ok(n)  => println("ok {}", n),
+        Err(e) => e.match({
+            Torn(t)   => t.match({
+                Badly  => println("torn badly"),
+                Barely => println("torn barely"),
+            }),
+            Frayed(f) => println("frayed {}", f.threads),
+        }),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    describe(env, widen_torn(true));
+    describe(env, widen_torn(false));
+    describe(env, widen_frayed());
+    Ok(0);
+}
