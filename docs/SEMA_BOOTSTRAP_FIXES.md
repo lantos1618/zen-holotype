@@ -356,6 +356,37 @@ will meet it three more times.
 
 ## 10. A loop binding read inside a nested closure does not resolve
 
+**CLOSED as written, 2026-08-08 — and a narrower shape survives. Read this
+before citing §10.** Both forms below were re-run against both toolchains and
+**both are accepted by both**: form (a) compiles clean, form (b) emits C that
+`cc` takes and that prints the right answer. Whatever fixed it is not recorded
+here; what matters is that the reproducer no longer reproduces, so a source
+comment citing §10 to justify a workaround is citing a gap that is not there.
+
+**What DOES still fail is a different capture, and only in the bootstrapper:**
+
+```groovy
+Fault = { name*: str }
+show = (f: Fault, out :: String) Res<(), AllocError> {
+    (f.name.len > 0).then(() { out.add_bytes(f.name).try() });   // bootstrap:
+    Ok(());                                    // `no member `name` on this value`
+}
+```
+
+A PARAMETER, not a loop binding, and no loop in sight. The self-hosted compiler
+accepts it. So the family is not "a loop binding in a nested closure" but "a
+struct reaching a `.then` body across a lambda boundary", and the loop case is
+the half that got fixed. An agent hit this independently the same day and worked
+around it by binding `text = f.name` before the closure.
+
+**The seven workaround sites named below are therefore no longer required**, and
+removing them is a real cleanup — but it is a cleanup, not a fix, and each site
+should be re-tested rather than assumed, since the surviving shape is close.
+
+---
+
+**Original entry, kept because the workarounds still exist and cite it:**
+
 **Blocking: yes for one shape, and one of the two forms is silent.**
 
 `x.loop((h, v) { <cond>.then(() { .. v .. }) })` — a `.then` closure
