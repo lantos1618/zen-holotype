@@ -50,11 +50,60 @@ Src* = {
     }
 
     column_of = (self: @Self, p: Pos) usize {
-        base = self.starts.get(p.line - 1).match({
+        self.bounded(self.line_at(p.line) + col_index(p.col))
+    }
+
+    // How many lines the file has. One more than the number of
+    // newlines, since a file that does not end in one still has a last
+    // line — `starts` holds a first byte for each.
+    lines* = (self: @Self) usize { self.starts.len }
+
+    // The first byte of a 1-based line, and the first byte PAST it.
+    //
+    // The pair is what turns "this `=>` is on line 9" back into bytes
+    // without a scan. `fmt_decl.zen` asks it once per line of the file
+    // and a scan per question would be quadratic, which is the same
+    // reason `starts` exists at all.
+    line_at* = (self: @Self, line: usize) usize {
+        (line == 0).match({
+            true  => 0,
+            false => self.starts.get(line - 1).match({
+                Ok(o) => o,
+                None  => self.text.len,
+            }),
+        })
+    }
+
+    after_line* = (self: @Self, line: usize) usize {
+        self.starts.get(line).match({
             Ok(o) => o,
             None  => self.text.len,
+        })
+    }
+
+    // Is `[from, to)` nothing but spaces?
+    //
+    // IT IS THE QUESTION A RULE ASKS BEFORE IT REWRITES A GAP. A
+    // formatter that sets the width of the run in front of a `=>` is
+    // safe exactly while that run is whitespace and nothing else — a
+    // `// why` or a `/* n */` sitting there is a COMMENT, which is a
+    // token, and replacing it with spaces is the failure mode this
+    // whole folder is arranged to make impossible. So the bytes are
+    // read before they are replaced, and an arm whose gap holds
+    // anything at all is left exactly as it was found.
+    //
+    // A tab is not a space here, deliberately. It is not a byte this
+    // rule knows the printed width of, so a gap holding one is a gap
+    // this rule declines rather than guesses at.
+    all_spaces* = (self: @Self, from: usize, to: usize) bool {
+        clear ::= true;
+        Range(from, self.bounded(to)).loop((h, i) {
+            (self.text.index(i) == ' ').match({
+                true  => (),
+                false => { clear = false; h.break(); },
+            });
         });
-        self.bounded(base + col_index(p.col))
+        clear;
     }
 
     bounded = (self: @Self, at: usize) usize {

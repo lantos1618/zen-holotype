@@ -1,0 +1,115 @@
+// THE FIRST RULE THAT KNOWS WHAT IT IS LOOKING AT. Everything else in
+// `src/fmt/` models the FILE — declarations in order, blanks collapsed,
+// one final newline — and copies each declaration's own bytes. This one
+// reaches inside and sets the width of the run of spaces in front of a
+// match arm's `=>`, which is `DESIGN.md`'s "align `=>` in match arms".
+//
+// SO IT IS THE FIRST RULE THAT COULD EAT CODE, and four of the five
+// cases below are that risk written down rather than argued about:
+//
+//   - a `=>` INSIDE A STRING LITERAL. `"0 => zero"` holds the two bytes
+//     a scanner would fire on, and it must come out byte for byte. The
+//     rule reads `Arm.arrow_span` from the parser and never the text, so
+//     it cannot see this one — and that is what the case pins.
+//   - a COMMENTED-OUT ARM. `// 12345 => 2,` is trivia, so it is not in
+//     the list and the arms around it must not widen to make room for
+//     it. A commented-out DECLARATION sits above `d` for the same
+//     reason.
+//   - a COMMENT IN THE GAP. `0 /* not a gap */ => 1` has a comment
+//     exactly where the pad would be written, and a comment is a TOKEN.
+//     The arm is refused, its neighbours align without it, and nothing
+//     is overwritten.
+//   - ARMS PACKED ONTO ONE LINE, which `gen_c_op.zen` writes. An arm
+//     that shares its line neither moves nor asks for a column, so a
+//     packed list comes through as its author left it. `q` is the case
+//     that costs something to get right: its first arm BEGINS a line and
+//     still shares it, so "begins a line" alone would pad it and shove
+//     the arm behind it sideways. Two refusals are needed, not one.
+//
+// AND THE FIXPOINT, on every case: `fmt(fmt(x)) == fmt(x)` is half of
+// PLAN.md's stage-2 gate and a rule that computed a column from bytes it
+// had just moved would fail it. This one computes from the END of a
+// pattern and writes only after it, so there is nothing to chase.
+//
+// `faithful` is the guard in `fmt.zen` — the output re-lexed and its
+// token stream compared to the input's — and it is printed per case
+// because it is what turns "I did not damage the string" from a claim
+// into a check.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Range = std.core
+scan, Source = lex.lex
+render = fmt.fmt
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    shows(a, "arms line up on the widest pattern",
+          "w = (n: i32) i32 {\n    n.match({\n        0 => 1,\n        123 => 2,\n        _ => 3,\n    })\n}\n").try();
+
+    shows(a, "a `=>` inside a string is not an arrow",
+          "s = (n: i32) str {\n    n.match({\n        0 => \"0 => zero\",\n        123 => \"many\",\n        _ => \"?\",\n    })\n}\n").try();
+
+    shows(a, "a commented-out arm is not in the list",
+          "// c = (n: i32) i32 { n.match({ 0 => 1, _ => 2 }) }\nd = (n: i32) i32 {\n    n.match({\n        0 => 1,\n        // 12345 => 2,\n        _ => 3,\n    })\n}\n").try();
+
+    shows(a, "a comment in the gap is not overwritten",
+          "g = (n: i32) i32 {\n    n.match({\n        0 /* not a gap */ => 1,\n        123 => 2,\n        _ => 3,\n    })\n}\n").try();
+
+    shows(a, "arms packed onto one line keep their spacing",
+          "p = (n: i32) i32 {\n    n.match({ 0 => 1, 123 => 2,\n        _ => 3,\n    })\n}\n").try();
+
+    shows(a, "an arm that opens a packed line is packed too",
+          "q = (n: i32) i32 {\n    n.match({\n        0 => 1, 123 => 2,\n        45678 => 3,\n        _ => 4,\n    })\n}\n").try();
+
+    Ok(0);
+}
+
+// Format, print the bytes, and format the bytes again to say whether
+// anything moved the second time. Both halves are here rather than in
+// two tests because a golden output that is not a fixpoint is a gate
+// that goes red on its own second run.
+shows = (a: Alloc, what: str, text: str) Res<(), AllocError> {
+    first = formatted(a, text).try();
+    second = formatted(a, first.view()).try();
+    println("== {}", what);
+    println("faithful: {}, {}", faithful_of(a, text).try(),
+            verdict(first.view().eq(second.view())));
+    show(first.view());
+    Ok(());
+}
+
+verdict = (settled: bool) str {
+    settled.match({
+        true  => "fixpoint",
+        false => "MOVED",
+    })
+}
+
+formatted = (a: Alloc, text: str) Res<String, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out = render(a, lexed).try();
+    Ok(out.text);
+}
+
+faithful_of = (a: Alloc, text: str) Res<bool, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out = render(a, lexed).try();
+    Ok(out.faithful);
+}
+
+// The bytes, with the final newline shown as the end of the last line
+// rather than as a blank one, and a `|` at both ends so a trailing space
+// would be visible in the expectation.
+show = (text: str) () {
+    line ::= 0;
+    from ::= 0;
+    Range(0, text.len).loop((h, i) {
+        (text.index(i) == '\n').then(() {
+            line = line + 1;
+            println("{} |{}|", line, text.slice(from, i));
+            from = i + 1;
+        });
+    });
+}
