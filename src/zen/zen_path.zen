@@ -155,6 +155,88 @@ candidate* = (env: Env, a: Alloc, root: str, name: str) Res<Unit, AllocError> {
     })
 }
 
+// WHERE A PROGRAM STARTS, spelled once. It is both a module name the
+// entry probe looks for and the declaration the root must own, and the
+// two must not be able to drift apart — a probe that finds `main.zen`
+// and a check that demands `start` would reject every program in the
+// language and blame the file it just found.
+ENTRY*: str = "main"
+
+// WHERE THE PROGRAM STARTS. `--entry <file>` answers it outright;
+// without one, the root is probed.
+//
+// The probe is what a directory with no listing can do, and it can only
+// find conventional names — which is why `--entry` exists. `std.env.Fs`
+// has no listing on purpose ("every member added here is a member the
+// self-hosted compiler has to keep working forever"), and enumerating a
+// directory is strictly more authority than reading a path you were
+// handed. The information is already at the call site: whoever invokes
+// the compiler knows the entry. A single-file program named anything
+// else is unreachable by probing and reachable by being named, and that
+// is the whole of it.
+//
+// A build is still a ROOT. The entry says where to start inside it;
+// every other module is found by following imports.
+//
+// FREE FUNCTIONS AND NOT METHODS ON `Build`, for the reason `unit_at`
+// gives just above: these read `env`, `alloc` and `root` and nothing
+// else a build holds — no tree, no tally, no phase — so a `self` here
+// was a fact about a path wearing a build's receiver. Moving them is
+// also what made room in `zen_build.zen`, which was at its cap.
+entry_of* = (env: Env, a: Alloc, root: str, named: str)
+            Res<Unit, AllocError> {
+    named.is_empty().match({
+        false => entry_named(env, a, root, named),
+        true  => entry_probed(env, a, root),
+    })
+}
+
+// `--entry` is relative to the root, because `Unit.rel` is what a Span
+// carries and an absolute path in a Span puts the checkout's location
+// into the emitted C — which voids the determinism check that compares
+// two copies of a tree at different paths.
+//
+// NOT PROBED. A named entry that is not there is reported by the READ,
+// which names the file the caller asked for; a probe reporting it as
+// well would be one mistake said twice, and the caller who chose the
+// name is owed the name back.
+entry_named = (env: Env, a: Alloc, root: str, named: str)
+              Res<Unit, AllocError> {
+    path ::= a.String("{}/{}", root, named).try();
+    unit_at(a, root, path.view())
+}
+
+// No `--entry`, so the entry point is a MODULE NAME resolved by the
+// same two probes every other module gets. Three names, most
+// conventional first:
+//
+//   main        every program in tests/corpus, and the
+//               `src: Path("src/main.zen")` DESIGN.md's own
+//               build.zen example writes
+//   <basename>  the folder-root rule `<folder>/<folder>.zen`,
+//               applied to the root itself
+//   zen         this tree, and only this tree
+//
+// The third is still a special case, and it is the one
+// `scripts/fixpoint.sh` rides: the gate runs `zen build src` with no
+// entry, so this order is load-bearing and must not move.
+entry_probed = (env: Env, a: Alloc, root: str) Res<Unit, AllocError> {
+    first = candidate(env, a, root, ENTRY).try();
+    env.fs.exists(first.path).match({
+        true  => Ok(first),
+        false => entry_after_main(env, a, root),
+    })
+}
+
+entry_after_main = (env: Env, a: Alloc, root: str) Res<Unit, AllocError> {
+    base = root.base_of();
+    second = candidate(env, a, root, base).try();
+    env.fs.exists(second.path).match({
+        true  => Ok(second),
+        false => candidate(env, a, root, "zen"),
+    })
+}
+
 // Where the bytes an IMPORT names are: `<root>/a/b/c.zen`, or
 // `<root>/a/b/c/c.zen` when the last segment names a folder. The plain
 // form is probed first because it is the common one, and a folder that
