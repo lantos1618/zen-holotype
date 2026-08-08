@@ -5,7 +5,7 @@ CFLAGS  ?= -O2 -std=c99
 PY      ?= python3
 ROOT    ?= src
 
-.PHONY: all build seed test test-zen lint parse design cap faults ufcs fixpoint determinism grammar grammar-test fmt clean help
+.PHONY: all build seed test test-zen lint parse design cap faults refmap ufcs fixpoint determinism grammar grammar-test fmt clean help
 
 all: test
 
@@ -30,7 +30,7 @@ seed: zen
 	git add seed/zen.c
 
 ## test: the corpus and must-fail suites, against the bootstrapper
-test: parse design cap faults ufcs
+test: parse design cap faults refmap ufcs
 	$(PY) tests/run.py
 
 ## faults: every fault the compiler declares must have a site that raises
@@ -39,6 +39,14 @@ test: parse design cap faults ufcs
 ## script's OWED ledger, so the debt can shrink and cannot quietly grow.
 faults:
 	$(PY) scripts/faults_reachable.py
+
+## refmap: docs/GENC_REFERENCE_MAP.md points at gen_c.py by line number,
+## hundreds of times. gen_c.py grew 845 lines under it and every claim
+## below the first insertion moved -- a map with shifted coordinates
+## sends a reader confidently to the wrong function. Green means the
+## coordinates resolve; it does NOT mean the prose is true.
+refmap:
+	$(PY) scripts/refmap.py
 
 ## ufcs: no `x.f(..)` may have two answers. a method on T and a free
 ## function taking T as its first parameter are the same call under UFCS,
