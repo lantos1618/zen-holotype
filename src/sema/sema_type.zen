@@ -57,8 +57,8 @@ access_type = sema.sema_member
 variant_type = sema.sema_static
 call_type = sema.sema_call
 computed_member = sema.sema_member
-writable_member = sema.sema_member
-check_binary, const_count, check_index, check_literal = sema.sema_trap
+bind_stmt = sema.sema_place
+check_binary, const_count, check_index = sema.sema_trap
 check_eq = sema.sema_bound
 seed_left_spine, spine_ahead = sema.sema_spine
 
@@ -740,91 +740,6 @@ stmt_type* = (c :: Checker, s: Stmt, ctx: Ctx) Res<TyId, AllocError> {
     })
 }
 
-// `x = e;`, `x: T ::= e;`. A written type wins and the value is
-// checked against it; with none, what the value is checked against
-// depends on whether the statement DECLARES or WRITES — `bind_want`.
-bind_stmt* = (c :: Checker, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
-    got = c.type_of(b.value, ctx).try();
-    want = c.bind_want(b, got, ctx).try();
-    c.check_assign(b, got, want, ctx).try();
-    c.bind_target(b, want, ctx).try();
-    c.types.prim("()")
-}
-
-// WHAT THE VALUE HAS TO FIT, and it is not the same question in the two
-// statements Zen spells alike.
-//
-// A written type wins over both. With none, a BARE NAME declares, so it
-// takes whatever the value is and there is nothing to disagree with —
-// which is why this used to be `Ok(got)` unconditionally, and why the
-// unconditional answer was a hole rather than a shortcut. A PATH does
-// not declare: `p.x = e` and `buf[i] = e` write into storage that
-// already has a type, and `e` has to fit the storage exactly as an
-// argument has to fit a parameter. Answering `got` there made the check
-// `got` against `got`, which no value can fail.
-//
-// The value is typed BEFORE this is asked, which is the order the
-// annotated form already used: there is no expectation to push down, so
-// asking the place first would buy nothing and would type `b.target`
-// even for the declarations that have no place to ask about.
-bind_want* = (c :: Checker, b: Bind, got: TyId, ctx: Ctx)
-             Res<TyId, AllocError> {
-    b.type.match({
-        Ok(t) => c.type_from_ast(t, ctx),
-        None  => c.place_want(b.target, got, ctx),
-    })
-}
-
-// A target that is not a bare name is a place, and its type is the
-// ordinary type of the expression — `type_of` already answers it for
-// reads, and a write asks the identical question. Anything it cannot
-// resolve comes back poisoned, which `assignable` accepts, so an
-// unresolved place stays the fail-open it is everywhere else.
-place_want* = (c :: Checker, id: ExprId, got: TyId, ctx: Ctx)
-              Res<TyId, AllocError> {
-    c.tree.expr_at(id).kind.match({
-        Name(_) => Ok(got),
-        _       => c.type_of(id, ctx),
-    })
-}
-
-check_assign* = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
-               Res<(), AllocError> {
-    node = c.tree.expr_at(b.value);
-    c.coerce(node.span.file, node.span, got, want, "").try();
-    // the family agreeing is not the value fitting: `n: i32 =
-    // 2147483648` is an `int` literal, and `literal_fits` says every
-    // one of those fits every integer type — so `coerce` said nothing
-    c.check_literal(b.value, got, want).try();
-    Ok(());
-}
-
-// Only a bare name introduces a binding. `c.len = ..` and
-// `buf[i] = ..` are assignments to something that already exists,
-// which is why `Bind.target` is an expression and not an `Ident`.
-bind_target* = (c :: Checker, b: Bind, ty: TyId, ctx: Ctx)
-              Res<(), AllocError> {
-    target = c.tree.expr_at(b.target);
-    target.kind.match({
-        Name(n)   => c.bind(n.text, ty, b.mutable),
-        Access(a) => c.assign_access(target, a, ctx),
-        _         => Ok(()),
-    }).try();
-    Ok(());
-}
-
-// `c.width = 5` on an impl-supplied field: there is nothing to assign
-// into. "Mutation goes through exported methods, as it always does."
-assign_access* = (c :: Checker, target: Expr, a: Access, ctx: Ctx)
-                Res<(), AllocError> {
-    c.writable_member(a, ctx).try();
-    c.computed_member(a, ctx).try().match({
-        true  => c.no_storage(target, a),
-        false => Ok(()),
-    })
-}
-
-no_storage* = (c :: Checker, target: Expr, a: Access) Res<(), AllocError> {
-    c.report(target.span.file, target.span,
-                SemaFault.ComputedFieldAssign(NameFault(name: a.name.text)))
-}
+// `target = value;` is its own subject and lives in `sema_place.zen`:
+// a declaration and a write are one statement here, and telling them
+// apart is a question about the TARGET rather than about any node.
