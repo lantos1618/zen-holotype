@@ -183,6 +183,15 @@ CBackend* = {
     // how many callees are open at this point. A bound, so a callee
     // that inlines itself reports rather than not terminating.
     depth* :: usize,
+    // WHERE THE BODY BEING LOWERED BEGINS in `locals`. Inlining stacks
+    // a callee's bindings on top of its caller's without hiding them,
+    // and one decision must not see through the join: "a second `x =
+    // ..` on a name already bound is an assignment" is a rule about one
+    // function's own body, and read across the join it made an inlined
+    // callee's `held = 77` store into a CALLER's `held` — for the rest
+    // of the caller, not just for the call. Zero while a real function's
+    // body is being lowered, which is what makes the common path free.
+    floor* :: usize,
     tmp* :: usize,
 
     alloc*: Alloc,
@@ -617,6 +626,12 @@ CBackend* = {
         Ok(());
     }
 
+    // Lower what follows as a DIFFERENT function's body, beginning at
+    // `floor`. Written the way `enter_inst` is — the caller holds the
+    // old value and hands it back — because the two are always entered
+    // and left together.
+    enter_frame* = (self :: @Self, floor: usize) () { self.floor = floor; }
+
     enter_call* = (self :: @Self) () { self.depth = self.depth + 1; }
 
     leave_call* = (self :: @Self) () { self.depth = self.depth - 1; }
@@ -681,6 +696,19 @@ CBackend* = {
         })
     }
 
+    // Is `name` bound in THE BODY BEING LOWERED? `slot_of` answers for
+    // the whole stack, which spans the caller of an inlined body — and
+    // the caller's bindings are another function's, whatever they are
+    // spelled.
+    bound_in_frame* = (self: @Self, name: str) bool {
+        Range(self.floor, self.locals.len).find((k) {
+            self.locals.get(k).match({
+                Ok(b) => b.name.eq(name),
+                None  => false,
+            })
+        }).match({ Ok(_) => true, None => false })
+    }
+
     // Everything a function's frame holds, dropped between functions.
     // The temporary counter is reset here and nowhere else, so a
     // function's temporaries are a function of its own body.
@@ -704,6 +732,7 @@ CBackend* = {
             self.blocks.take(self.blocks.len - 1);
         });
         self.depth = 0;
+        self.floor = 0;
         self.tmp = 0;
         Ok(());
     }
@@ -750,6 +779,7 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         drops: a.Vec<DropEntry>(),
         closures: a.Vec<Closure>(),
         depth: 0,
+        floor: 0,
         tmp: 0,
         alloc: a,
     ));
