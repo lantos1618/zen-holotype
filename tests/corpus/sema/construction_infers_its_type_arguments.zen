@@ -1,0 +1,42 @@
+// tests/corpus/sema/construction_infers_its_type_arguments.zen
+// `Pair(first: .., second: ..)` writes no type arguments, and the only
+// thing that says which `Pair` it is are the ARGUMENTS — the same
+// inference a generic function's arguments already get, asked of a field
+// instead of a parameter.
+//
+// THREE PROPERTIES, and each is written so a wrong answer changes what
+// the program PRINTS. A wrong type argument otherwise compiles: it lays
+// out a plausible struct, `cc` accepts it, and the only trace is a
+// mangled symbol nobody reads.
+//
+//   - WHICH parameter each argument settles. `A` and `B` are settled to
+//     different types, so binding them the other way round prints a
+//     float where the integer belongs.
+//   - WHAT an unannotated literal settles to. A type argument is not an
+//     annotation, so `2000000000` settles the way every other
+//     unannotated integer settles, to `i32`, and doubling it traps. At
+//     `i64` — or at the unsettled literal type `int`, which is 64 bits —
+//     the last line would print 4000000000 and the program would exit 0.
+//   - that a NON-LITERAL argument settles one too. `Pair(first: p, ..)`
+//     is a `Pair<Pair<i32, f64>, i32>`, and reading two fields down
+//     reaches a value only that answer has.
+
+// main must name an error type. a trap never lifts into Res: it aborts
+// the process
+Error = Overflow | DivideByZero | OutOfBounds
+
+Pair<A, B> = {
+    first: A,
+    second: B
+}
+
+main = (env: Env) Res<i32, Error> {
+    p = Pair(first: 2000000000, second: 2.5);
+    println("order {} {}", p.first, p.second);
+
+    nested = Pair(first: p, second: 7);
+    println("nested {} {}", nested.first.second, nested.second);
+
+    println("{}", p.first + p.first);
+    Ok(0);
+}
