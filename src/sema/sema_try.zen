@@ -87,14 +87,19 @@ try_merge* = (c :: Checker, at: Span, r: TyRes, want: TyRes, got: TyId)
     // names outright: "a None never becomes an Err. You name the
     // reason" — and `.ok_or(..)` is where that is written.
     absence_into_failure(r.form, want.form).match({
-        true  => c.try_absence(at, got, r.value),
+        true  => c.try_absence(at, got, r.value, want.error),
         false => c.try_set(at, r, want),
     })
 }
 
-try_absence* = (c :: Checker, at: Span, got: TyId, value: TyId)
+// `expected` IS THE ENCLOSING FUNCTION'S Res, and it took the failing
+// set to build it. This passed the OPERAND's type as the error, so a
+// `Res<i32>` tried into a `Res<i32, Error>` read "expected Res<i32,
+// Res<i32>>" — a type nobody wrote and nobody can write, offered to the
+// reader as the thing they were supposed to have produced.
+try_absence* = (c :: Checker, at: Span, got: TyId, value: TyId, err: TyId)
               Res<TyId, AllocError> {
-    want = c.types.res_failure(value, got).try();
+    want = c.types.res_failure(value, err).try();
     c.report(at.file, at,
                 SemaFault.TryAbsenceIntoFailure(TypeFault(
                     name: "", expected: want, found: got))).try();
