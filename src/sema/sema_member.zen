@@ -46,8 +46,9 @@ str, String = std.text
 Range = std.core
 DeclId, ImplId = sema.sema_id
 TyId, Ty, Types, TyNamed, Prim = sema.sema_ty
-World, Def, DefKind, decl_at = sema.sema_def
+World, Def, DefKind, decl_at, module_display = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
+ExportFault = sema.sema_diag
 Checker, Ctx, UNRESOLVED = sema.sema_check
 Inst, subst, inst_of_named, owner_of = sema.sema_inst
 is_prim, is_integer, is_float = sema.sema_check
@@ -64,11 +65,19 @@ module_named_by, module_access = sema.sema_module
 // `computed` is the whole of the storage rule: false means the type
 // declares it and it has an address, true means an impl supplies it and
 // it does not.
+//
+// `exported` and `module` are law 6, carried rather than decided here.
+// A member lookup does not know who is asking — `members_of` takes a
+// type and a name and no `Ctx` — and the star is a fact about the
+// DECLARATION, so both halves travel to the access site, the only place
+// each is known.
 Found* = {
     name*: str,
     ty*: TyId,
     computed*: bool,
     mutable*: bool,
+    exported*: bool,  // `*` on the member itself
+    module*: usize,   // the module that DECLARES it, never the one importing
     bound*: TyId,   // the bound that supplies it; poison when the type owns it
     span*: Span,    // the declaration, or the impl — where the fix goes
 }
@@ -298,11 +307,70 @@ in_scope_tvar = (c: Checker, name: str, ty: TyId) bool {
         || c.lookup_tvar(name).match({ Ok(b) => b.ty.eq(ty), None => false })
 }
 
+// LAW 6 REACHES MEMBERS, and it is the same law one level in: `*` means
+// the name crosses a module boundary. `Counter*` crossing does not carry
+// `step` with it, and `Vec*` travels with `add` and never with `grow`.
+//
+// BEFORE `pick`, not inside it. A member the asking module may not see
+// is not a candidate that loses a selection — it is not a candidate, and
+// the mistake is at the dot. Asking first is also what keeps the
+// diagnostic honest: `pick` would fall through to `ufcs_or_missing` and
+// say `slack` is no such field of `Bag`, which is false and sends the
+// reader to add a field that is already there.
+//
+// THE DECLARING MODULE DECIDES, never the importing one. `zz = vec` and
+// `Vec = vec.vec` reach the same declaration by different spellings, so
+// the comparison is against `Found.module`, which the member lookup read
+// off the declaration — the import cannot launder a name past the star.
 known_access = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
                Res<TyId, AllocError> {
     found ::= c.alloc.Vec<Found>();
     members_of(c, ty, ac.name.text, found).try();
-    pick(c, node, ac, ty, found, ctx)
+    first_hidden(found, ctx.module).match({
+        Ok(f) => hidden_member(c, ac, f),
+        None  => pick(c, node, ac, ty, found, ctx),
+    })
+}
+
+// The first member of the set the asking module may not see. A struct
+// declares a name once, so a set drawn from the type's own body has at
+// most one element and "first" is "the one"; a set drawn from impls is
+// all-computed and never hidden, because `named_members` consults impls
+// only when the type's own body answered nothing.
+//
+// EXPORTED BECAUSE `members_of` HAS TWO CONSUMERS: a call resolves its
+// own callee in `sema_call.zen`, so `x.f` and `x.f(..)` reach a member
+// by two paths. Gating only the one this file owns made `v.grow` a
+// mistake and `v.grow()` legal.
+first_hidden* = (found: Vec<Found>, mi: usize) Res<Found> {
+    Range(0, found.len).find((i) {
+        found.get(i).match({ Ok(f) => hidden_from(f, mi), None => false })
+    }).match({
+        Ok(i) => found.get(i),
+        None  => None,
+    })
+}
+
+// Inside the declaring module every member is reachable — that is what
+// makes `self.grow()` legal in `vec.zen` and `v.grow()` not.
+hidden_from = (f: Found, mi: usize) bool {
+    (f.exported == false) && (f.module != mi)
+}
+
+hidden_member* = (c :: Checker, ac: Access, f: Found) Res<TyId, AllocError> {
+    c.report(ac.name.span.file, ac.name.span,
+             SemaFault.NotExported(ExportFault(
+                 name: ac.name.text, module: c.module_of(f)))).try();
+    c.types.unknown()
+}
+
+// The name a reader wrote, not the path the compiler walked:
+// `module_display` collapses `vec.vec` back to the `vec` in the import.
+module_of = (c :: Checker, f: Found) str {
+    c.world.table_at(f.module).match({
+        Ok(t) => module_display(t.name),
+        None  => "",
+    })
 }
 
 pick = (c :: Checker, node: Expr, ac: Access, ty: TyId, found: Vec<Found>,
@@ -391,6 +459,47 @@ computed_member* = (c :: Checker, ac: Access, ctx: Ctx)
     found ::= c.alloc.Vec<Found>();
     members_of(c, b.ty, ac.name.text, found).try();
     Ok(first_found(found).match({ Ok(f) => f.computed, None => false }));
+}
+
+// TWO RULES, NOT ONE, and `field_write_outside` is the test that says
+// so: `total*` is starred, so reading it outside `counter` is exactly
+// what the star granted — and writing it is still refused. DESIGN.md
+// states both in one sentence: "`*` on a field means readable outside
+// the module; mutation only ever goes through exported methods." One
+// "may I touch this" predicate cannot express that, because the halves
+// disagree about `total` and agree about `step`.
+//
+// SO THIS RULE ASKS NOTHING ABOUT `*`. No star grants writing — an
+// exported field and an unexported one are equally unwritable from
+// outside — which is why it reads `module` and not `exported`, and why
+// a field that fails it is not told to add a star it already has.
+//
+// COMPUTED MEMBERS ARE NOT ITS BUSINESS: they have no storage at all,
+// `ComputedFieldAssign` says so in the reader's own terms, and their
+// `module` is not a declaring module to compare against.
+writable_member* = (c :: Checker, ac: Access, ctx: Ctx)
+                   Res<(), AllocError> {
+    b = base_of(c, ac.base, ctx).try();
+    found ::= c.alloc.Vec<Found>();
+    members_of(c, b.ty, ac.name.text, found).try();
+    first_found(found).match({
+        Ok(f) => written_from(c, ac, f, ctx),
+        None  => Ok(()),
+    })
+}
+
+written_from = (c :: Checker, ac: Access, f: Found, ctx: Ctx)
+               Res<(), AllocError> {
+    ((f.computed == false) && (f.module != ctx.module)).match({
+        true  => not_writable(c, ac, f),
+        false => Ok(()),
+    })
+}
+
+not_writable = (c :: Checker, ac: Access, f: Found) Res<(), AllocError> {
+    c.report(ac.name.span.file, ac.name.span,
+             SemaFault.NotWritable(ExportFault(
+                 name: ac.name.text, module: c.module_of(f))))
 }
 
 // `found.get(0)` written here rather than inline: a `Vec.get` on a
@@ -490,6 +599,8 @@ add_bound_member = (t: TyId, bound: TyId, name: str, span: Span,
         ty: t,
         computed: true,
         mutable: false,
+        exported: true,
+        module: 0,
         bound: bound,
         span: span,
     ))
@@ -599,6 +710,8 @@ add_own = (c :: Checker, m: Member, name: str, mi: usize, ty: TyId,
         ty: subst(c, declared, inst).try(),
         computed: false,
         mutable: member_mutable(m),
+        exported: member_exported(m),
+        module: mi,
         bound: poison,
         span: m.span,
     ))
@@ -617,6 +730,18 @@ member_mutable = (m: Member) bool {
         Field(f)    => f.mutable,
         Const(k)    => k.mutable,
         Function(_) => false,
+    })
+}
+
+// The same star, read off whichever of the three a member is. DESIGN.md
+// puts `*` at "module level and struct members only", and the three
+// member kinds each carry their own `exported` because the parser reads
+// one grammar for all three.
+member_exported* = (m: Member) bool {
+    m.kind.match({
+        Field(f)    => f.exported,
+        Const(k)    => k.exported,
+        Function(f) => f.exported,
     })
 }
 

@@ -58,6 +58,7 @@ Inst, tparam_vars = sema.sema_inst
 construct, instantiate = sema.sema_apply
 Found, Base, base_of, members_of, static_access = sema.sema_member
 is_type_def, opaque, nowhere, first_found = sema.sema_member
+first_hidden, hidden_member = sema.sema_member
 satisfies_bound, check_bounds = sema.sema_bound
 type_from_ast, type_of, param_type = sema.sema_type
 alias_module, module_not_a_value = sema.sema_module
@@ -352,6 +353,14 @@ receiver_call = (c :: Checker, id: ExprId, node: Expr, call: Call,
     })
 }
 
+// LAW 6 BEFORE OVERLOAD RESOLUTION, and the same gate `sema_member.zen`
+// puts before `pick`. A call resolves its own callee against the member
+// table rather than going through `access_type`, so a method the asking
+// module may not see arrives here and nowhere else — and a rule enforced
+// on `v.grow` but not on `v.grow()` is enforced on the spelling nobody
+// writes. Before, not after: a hidden member is not a candidate that
+// loses to another, and falling through to `ufcs_call` would report it
+// as a name the type does not have.
 known_receiver_call = (c :: Checker, id: ExprId, node: Expr, call: Call,
                        ac: Access, b: Base, ctx: Ctx)
                       Res<TyId, AllocError> {
@@ -359,6 +368,15 @@ known_receiver_call = (c :: Checker, id: ExprId, node: Expr, call: Call,
     actuals_of(c, call.args, ctx, actuals).try();
     found ::= c.alloc.Vec<Found>();
     members_of(c, b.ty, ac.name.text, found).try();
+    first_hidden(found, ctx.module).match({
+        Ok(f) => hidden_member(c, ac, f),
+        None  => reachable_call(c, id, node, call, ac, b, found, actuals, ctx),
+    })
+}
+
+reachable_call = (c :: Checker, id: ExprId, node: Expr, call: Call,
+                  ac: Access, b: Base, found: Vec<Found>,
+                  actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
     (found.len > 0).match({
         true  => method_call(c, node, found, actuals),
         false => ufcs_call(c, id, node, call, ac, b, actuals, ctx),
