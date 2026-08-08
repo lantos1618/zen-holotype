@@ -46,12 +46,21 @@ accepted, `textDocument/hover` on `s` in `s = a + b` answers `i32`,
   resolves to, and a function's name with its declaration handed back —
   `add = (a: i32, b: i32) i32`. It was **3 of 12** before, answering only at
   uses; see `docs/design_lsp.md` §2 for the table and the reasoning.
+- **And it answers an IMPORTED name, which needs a build.** The server sends
+  the open buffer through a real `zen build` of the root it works out from
+  the document, so a type from another module resolves. That function is
+  self-contained, so its 10 of 12 said nothing about a real file: the same
+  twelve positions over a two-module root answered **4 of 12** before this
+  and **9 of 12** after. The one still missing is the receiver of a field
+  access, which `docs/design_lsp.md` §2 records as a sema bug.
+- **What you have not saved is what gets checked.** The buffer is handed to
+  the driver ahead of the disk, so hover describes what is on your screen,
+  including a file that has never been written.
 - **A `null` hover means "not known", never "no type".** A struct's or
   enum's own name, a pattern binder and a type parameter at its declaration
-  all answer null, and so does anything whose type did not resolve — which
-  today is **every imported name**, because the server checks the open file
-  as a lone module. Hover refuses to print sema's `<unknown>` poison rather
-  than show you a type that does not exist.
+  all answer null, and so does anything whose type did not resolve. Hover
+  refuses to print sema's `<unknown>` poison rather than show you a type
+  that does not exist.
 - **Everything else is refused by name** with `-32601`: definition,
   completion, symbols, formatting, rename, references. Hover on a document
   that was never opened is `-32602`, not null.
@@ -229,17 +238,24 @@ and `rename`. The refusal names the method and points at
 `docs/design_lsp.md`. An editor showing "method not supported" for those is
 the server being honest, not this configuration being wrong.
 
-**There are no diagnostics.** Sema's are already values, but lex's and
-parse's are printed and dropped by the driver, and half a diagnostics story
-is worse than none — an editor that shows type errors and silently omits
-syntax errors teaches you to distrust it. `src/lsp/lsp.zen`'s header says
-this and `docs/design_lsp.md` §5 says where the fix goes.
+**There are no diagnostics.** Every piece one needs now exists — sema's
+were always values, lex's and parse's are collected on the build, and the
+driver has a public entry that hands a build back — so what is left is the
+request and a policy about when to send it. Half a diagnostics story is
+worse than none, which is why it is not half-wired.
 
-**There is no build overlay**, so hover checks the open document as a lone
-module and an imported name has no type. Hovering something local to the
-file is the case that works. An imported name resolves to sema's poison,
-and hover answers `null` rather than printing it — so on a real file in
-this tree, expect the local half to answer and the imported half not to.
+**Hover builds the root, once per hover.** There is no cache and no
+debounce, so a hover in a file that imports most of the compiler takes
+about a second on this machine; one in a leaf module is imperceptible.
+`docs/design_lsp.md` §5 names debounce and coalescing as the answer and
+`docs/PLAN.md:317` names where the real fix goes if that is not enough.
+
+**A workspace is required for the imported half.** The root is computed
+from the open document — climb out of every directory that holds its own
+name — with `initialize`'s `rootUri` as the floor it may not pass. A client
+that sends no `rootUri` gets the old lone-module answer, which is still
+honest: it types what the file declares and answers `null` for what it
+imports.
 
 `zen fmt` exists as a command but wiring `textDocument/formatting` to it is
 a separate change and `docs/design_lsp.md` does not ask for it yet. Neither
@@ -286,6 +302,14 @@ Verified here, by running it:
   two that stay null are a space and the body's brace. The same table is a
   corpus test, `tests/corpus/lsp/hover_answers_at_a_declaration`, so the
   number is a gate and not a claim in a README.
+- **And then measured again on a file that imports something**, because the
+  program above imports nothing and 10 of 12 turned out to be a fact about
+  the program rather than about hover. Twelve positions over a two-module
+  root, same pipe: **4 of 12** before the build landed, **9 of 12** after.
+  That table is also a corpus test,
+  `tests/corpus/lsp/hover_answers_an_imported_name`, which additionally
+  pins that the unsaved buffer beats the file on disk and that a buffer
+  with an unclosed brace produces no stray output in the frame stream.
 - **The tree-sitter grammar loads in Neovim 0.12.2** via
   `vim.treesitter.language.add` at the `--abi 14` the Makefile passes, and
   parses.

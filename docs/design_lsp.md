@@ -62,8 +62,8 @@ Four stages, named **L1–L4** so they are not confused with `PLAN.md`'s 0–5. 
 |---|---|---|---|
 | `initialize` / `initialized` | none — capability negotiation | **built**: `src/lsp/lsp_serve.zen` answers with `textDocumentSync: 1` and `hoverProvider: true`. Every request before it is `-32002` | L1 |
 | `shutdown` / `exit` | none | **built** | L1 |
-| `textDocument/didOpen` / `didChange` / `didClose` | an overlay the driver reads before the disk | **built as an overlay in the server** (Full sync). The driver half of §5 is still missing, so hover sees the open document as a LONE MODULE — an imported name has no type | L1 |
-| `textDocument/publishDiagnostics` | diagnostics as values with spans | **half**: sema is structured — `diag_count`/`diag_at` at `src/sema/sema_check.zen:151,153`, `Diag` at `src/sema/sema_diag.zen:114`. Lex and parse diagnostics are **printed and discarded** by the driver (`src/zen/zen_build.zen:358`, `:383`) and never leave it | L1 |
+| `textDocument/didOpen` / `didChange` / `didClose` | an overlay the driver reads before the disk | **built, both halves** (Full sync). The server holds the buffer; `Build.overlay` is what the driver reads before `env.fs.read`, so an UNSAVED buffer — and a file that is on no disk at all — is what gets checked | L1 |
+| `textDocument/publishDiagnostics` | diagnostics as values with spans | **every piece exists; the request does not.** Sema's are `diag_count`/`diag_at` on the `Checker` (`src/sema/sema_check.zen:151,153`); lex's and parse's are the same pair on the `Build`; `Build.whole` hands both back and `Build.speaking` stops the driver printing them over the wire. What is left is a policy about when to send — see §5 | L1 |
 | `textDocument/documentSymbol` | a module's declarations in source order, each with a span and a name-span | **exists**, no new query: `module_count`/`module_at` at `src/ast/ast_arena.zen:147,149`; `Decl.span` and `Ident.span` are LSP's `range` and `selectionRange` exactly | L2 |
 | `textDocument/hover` | the type under the cursor, printed | **built, and widened** — `src/lsp/lsp_hover.zen` plus `src/lsp/lsp_decl.zen`, still no new sema. See the hover section below for what it answers, what it refuses, and the measurement | L2 |
 | `textDocument/definition` | the span a name was declared at | **mostly**: `defs_of` → `Def.span` (`src/sema/sema_def.zen:172`, `:63`) for a module-level name; `call_memo` (`src/sema/sema_check.zen:113`) for a call; `Found.span` (`src/sema/sema_member.zen:66`) for a member. **Missing for locals** — see below | L2 |
@@ -94,7 +94,7 @@ add = (a: i32, b: i32) i32 {
 
 against the shipped binary over a real pipe, **3 of 12 positions answered**: `a` and `b` where they are used in `a + b`, and `s` where it is used on the last line. The function's own name, both parameters at their declarations, the local at its declaration and all three `i32` returned `null`. The rule was "an identifier in expression position resolves; a binding site or a type name does not" — and a user hovers a declaration to ask what something IS at least as often as a use.
 
-It is now **10 of 12**, the two remaining being a space and a brace, which must stay `null`. The widening cost no new sema. It cost one new query in `src/lsp/lsp_decl.zen` — *which name is the cursor inside* — because a name is not a node:
+It is now **10 of 12** on that program, the two remaining being a space and a brace, which must stay `null`. The widening cost no new sema. It cost one new query in `src/lsp/lsp_decl.zen` — *which name is the cursor inside* — because a name is not a node:
 
 | what a user hovers | where the answer comes from |
 |---|---|
@@ -112,7 +112,29 @@ Three decisions in that table are worth ratifying or overruling rather than inhe
 
 **A type name answers with what it RESOLVES to, and for `i32` that is `i32`.** A type's own name is a weak answer and this is the weakest case of it. It was chosen over the alternatives — a description, a field list, a size — because those are `documentSymbol`'s and `definition`'s answers wearing hover's clothes, and both are already in the table above with the queries they need. What makes it more than a tautology is what it does in the two cases where the source and the answer differ: `Alias = Shape` hovers as `Shape`, `Res<Cfg, _>` hovers with the hole filled as the checker filled it — and a name that resolves to nothing answers `null`, so `i32` is also saying *this name is a type the checker knows*, which is exactly the question a typo raises.
 
-**Poison is refused everywhere rather than printed.** `Ty.Unknown` is what sema interns for "a type I could not compute and have already reported", and `Types.write_name` spells it `<unknown>`. Hover checks any type it is about to print, recursively, and answers `null` if poison is anywhere inside it — so a function whose return type did not resolve has no hover at all rather than a signature with a hole in it. **This is not a corner case here**: the open document is checked as a lone module (§5), so until the overlay lands *every imported name is poison*, and without this gate the widening would have been confidently wrong across every real file in the tree.
+**Poison is refused everywhere rather than printed.** `Ty.Unknown` is what sema interns for "a type I could not compute and have already reported", and `Types.write_name` spells it `<unknown>`. Hover checks any type it is about to print, recursively, and answers `null` if poison is anywhere inside it — so a function whose return type did not resolve has no hover at all rather than a signature with a hole in it. **This gate is what made the next paragraph a measurement rather than a surprise**: it is why an unbuilt import failed loudly-by-silence instead of printing `<unknown>` at every position in `src/`.
+
+#### And 10 of 12 was measured on a file that imports nothing
+
+That program is self-contained — every type in it is `i32` — and **that is the only reason the number was 10.** The same twelve positions over a two-module root, driven through the shipped binary over a real pipe:
+
+```
+Point = app.shape                    // app/shape.zen declares Point
+
+near = (q: Point, n: i32) i32 {
+    s = q.x + n;
+    s
+}
+```
+
+**answered 4 of 12** while hover checked the open document as a lone module: the two written `i32`s, the parameter `n`, and `n` where it is used. `Point` resolved to nothing, sema interned poison, and the parameter typed by it, the local computed from it and the whole reprinted signature went `null` with it. **Every file in `src/` opens with an import**, so 10 of 12 described no file anyone works in.
+
+With the overlay and `Build.whole` behind it (§5), the same twelve answer **9**. The three that do not:
+
+- a space and a brace, which must stay `null`;
+- **the receiver of a field access** (`q` in `q.x`), which is the row already listed below as *a sema bug and not a hover one* — `expr_memo` has an entry for the whole `Access` and none for its base. Fixing it would make this 10 and would fix `hover_answers_at_a_declaration`'s equivalent row at the same time.
+
+The gate is `tests/corpus/lsp/hover_answers_an_imported_name`, which ships the root, and asserts three separate failures at once: an imported name resolving, the **unsaved buffer** rather than the file being what gets checked (the disk names the parameter `p` and the buffer names it `q`), and the driver **not printing** the parse diagnostic from a buffer whose brace never closes.
 
 **What still answers `null`, and why each is a fact about the compiler rather than about `src/lsp/`:**
 
@@ -120,7 +142,7 @@ Three decisions in that table are worth ratifying or overruling rather than inhe
 - **A pattern binder** (`n` in `Ok(n) => ..`). There is no pattern memo, and `Binding` is released at scope exit — the same gap open question note above prices at L3 for go-to-definition, and the same fix closes both.
 - **A type parameter at its declaration** (`T` in `<T>`). Same shape as a struct name.
 - **The receiver of a field access** (`p` in `p.left`). `expr_memo` has an entry for the whole `Access` and none for its base. That is a **sema bug and not a hover one** — the base is an expression the checker typed and did not write down — and it is the one row here that should simply be fixed rather than documented.
-- **An imported name**, until the overlay of §5 lands.
+- **An imported name, when there is no workspace.** With a `rootUri` this now answers, because the document is checked as part of a build (§5). Without one — a client that sends none, or the two-file form of `zen lsp` — the lone-module check is still what runs and an import still resolves to poison.
 - **A closure's parameter**, whose `Param.type` is absent by construction.
 
 **The gate is `tests/corpus/lsp/hover_answers_at_a_declaration`**, which is the 12-position probe plus three poison rows, driven through framed JSON-RPC, asserting the value AND the range — so a right type under the wrong underline is still red. Half its rows assert `null`; a widening that starts answering those is a regression even though it looks like more coverage.
@@ -283,17 +305,26 @@ The per-keystroke cost is one `zen build src`. The mitigations that are *not* in
 
 **Take (2), and say what it costs.** This is the LSP reaching into the driver, and it is the one place the "thin server over compiler internals" thesis bends. The price is one field on `Build` and the honesty of writing in its comment that the overlay exists for the editor. The alternative — a private copy of `walk` in `src/lsp/` — is the second implementation this whole document exists to prevent.
 
-#### "One field and one branch" was the wrong estimate — measured 2026-08-08
+#### "One field and one branch" was the wrong estimate — BUILT 2026-08-08
 
-The interposition really is one field and one branch. **The change is not**, and the difference is why the overlay is still not built: an overlay nothing can observe is not worth landing. Three costs this section never priced, found by an agent sent to build it:
+**The interposition really was one field and one branch**, exactly as specified: `Build.overlay` is a `Map<str, str>` keyed on `Unit.path`, and `Build.read` consults it before `env.fs.read`. Every other line below is code that made that branch reachable.
 
-1. **The LSP cannot drive a `Build` at all.** `entry_of`, `walk` and `back_end` are private. The only public entry is `build*`/`run_once`, which returns `Res<i32, AllocError>` — **an exit code**. No tree, no `Checker`, not even the diagnostics `Vec`.
-2. **`check_tree` creates the `Checker` locally and drops it.** Hover reads `expr_memo` off a `Checker`; nothing hands one back. `Build` has to retain it.
-3. **`lsp_hover` has to stop being a single-module check**, and the server has to store `rootUri` — work in `src/lsp/` and `zen.zen`, not the driver.
+An earlier agent refused to land the field on its own and priced the rest. It named three costs, and all three were real:
 
-So the honest price is: 1 field + 1 branch **+ a public build-and-keep entry point + `Build` retaining its `Checker` + a hover rewrite spanning two other files**. Landing only the field adds an unreachable branch to a file already at its 800-line cap.
+1. **The LSP could not drive a `Build` at all.** `entry_of`, `walk` and `back_end` were private and the only public entry was `run_once`, returning an exit code. **Now `Build.whole(named, docs)`** — walk a root, check it, hand the `Checker` back. No emit.
+2. **`check_tree` created the `Checker` locally and dropped it.** **Now `Build.checked`**, the one place a `Checker` comes from, called by `check_tree` and by `whole`. It **hands the value back rather than storing it in a field**, and the correction is worth recording: a `Checker`'s `Map`s are headers, so a copy retained on the `Build` mid-build would silently stop agreeing with the one `emit` goes on using. "`Build` has to retain it" was the wrong shape; "`Build` has to stop dropping it" was the requirement.
+3. **`lsp_hover` had to stop being a single-module check**, and the server had to store `rootUri`. Both landed — `hover_in`, and `Server.workspace`.
 
-**The lesson generalises past this section.** The estimate counted the code at the seam and not the code that makes the seam reachable. Any estimate in this document that names a line count should be read as "the edit", never "the change".
+**And four costs neither estimate had.** Each is the same shape as the original error — the code at the seam was priced and the code that makes the seam usable was not:
+
+4. **`zen_build.zen` was AT its 800-line cap.** The overlay could not be added until the file was split, which is two moves: the entry probe (`entry_of` and its three helpers, plus `ENTRY`) to `zen_path.zen` as free functions, and `run_once` to `zen_run.zen`, whose subject it already was. Neither is optional and neither is part of the feature.
+5. **The workspace root is not the compilation root.** An editor's `rootUri` is the repository — `root_markers = { "build.zen", ".git" }`, §6 — and this tree builds as `zen build src`. Resolving `lex.lex` against the repository finds nothing, which is indistinguishable from having no build at all, so hover would have answered `null` on every file in `src/` while looking like it worked. `zen_path.root_for` computes the root by climbing out of every directory that holds its own name, which is this file's own `<folder>/<folder>.zen` rule read upward.
+6. **The driver PRINTS its lex and parse diagnostics, and a server must not.** `println` writes to stdout, which is where JSON-RPC frames go (§6), and **a buffer being edited has an unclosed brace in it most of the time** — so this is the common case for this reader, not a corner. `Build.speaking` is false under `whole`; the `Vec` still fills, which is what leaves `publishDiagnostics` something to publish.
+7. **`Build.permute` is an exported field, and mutation of one goes through an exported method.** Moving `run_once` out of the module turned `b.permute = ..` into a diagnostic. One method, `walk_order`.
+
+**And one that is not about this feature at all**: `bootstrap/gen_c.py`'s `MAX_INSTANCES` was 4096, and `corpus/cli/build_walks_a_root_it_is_given` — which stages the whole driver — already emitted 4086 functions. Ten of headroom. The `src/lsp` → `src/zen` import this section *ratifies* took it to 4099 and **eleven tests in two suites went red**, with a diagnostic naming an arbitrary `std` function rather than the size. A guard on divergence is unaffected by the number; a guard on a program's size is what 4096 had quietly become. It is 8192 now.
+
+**The lesson generalises past this section, and it generalised twice.** The estimate counted the code at the seam and not the code that makes the seam reachable — and then the *revised* estimate did the same thing one level up, counting the seam's neighbours and not the file's line cap, the root discovery, the printing, or a constant in the other compiler. Any estimate in this document that names a line count should be read as "the edit", never "the change".
 
 ### Diagnostics have to escape the driver — **DONE**
 
@@ -303,7 +334,7 @@ So the honest price is: 1 field + 1 branch **+ a public build-and-keep entry poi
 
 `Diag.note` also escapes now. It was being collected and never printed at all, so every note `diag_at` carried — including `expect_close`'s "the parser gave up here" — was thrown away.
 
-**What this does NOT yet do is publish them.** The diagnostics are values the driver holds; nothing in `src/lsp/` reads them, because reading them needs the same public build entry point the overlay needs. `publishDiagnostics` is blocked behind item 1 above, not behind this.
+**What this does NOT yet do is publish them.** The diagnostics are values the driver holds and nothing in `src/lsp/` reads them — but the thing that was blocking it is gone. `Build.whole` hands back a `Checker` (whose `diag_count`/`diag_at` are sema's) and leaves `faults` and `diags` on the `Build` (which are lex's and parse's), and `Build.speaking` is what stops the driver printing them over the wire. **What is left is the request and a policy**: when to send, what to do with a build that is superseded, and whether an empty list must be published to clear the last one. None of that is a missing query.
 
 **Known divergence, unreconciled:** the two compilers anchor the unclosed-delimiter note differently *and* word it differently — `./zen` says `3:24: the parser gave up here` (where the parser stopped), `bootstrap/` says `5:1: \`}\` here closes nothing` (the closer that arrived). A `.expected` asserts one substring plus positions that must all be reported, so **no shared expectation file can assert that note**. Neither anchor is obviously wrong.
 
@@ -329,15 +360,15 @@ The L1–L4 staging in §2 is about the SERVER. This is the same staging read fr
 |---|---|---|
 | **colour** | **works now**, tree-sitter, no server | **not until L2** — needs `semanticTokens`; see the deviation below |
 | brackets, comment toggling, word selection | tree-sitter | **works now**, `language-configuration.json` |
-| **hover** | L2, blocked on transport | L2, blocked on transport |
+| **hover** | **works** — the transport landed, and so did the build behind it | **works** |
 | go-to-definition | L2 (module-level), L3 (locals) | same |
 | document symbols / outline | L2 | L2, plus the breadcrumb bar for free |
-| diagnostics as you type | L1, blocked on the driver half of §5 | same |
+| diagnostics as you type | L1, and no longer blocked on anything but the request itself — see §5 | same |
 | completion | L3 | L3 |
 | format on save | L3 — engine exists, request does not | same |
 | references, rename, signature help | L4 | L4 |
 
-**Everything except colour is blocked on the same one thing**: the server cannot read a pipe, so no editor can talk to it (§4). Neither client changes when that lands — it is `zen.server.args` in VS Code and `M.cmd` in Neovim, one line each.
+**That sentence used to read "everything except colour is blocked on the same one thing" — the server could not read a pipe.** `Env.in` landed and hover landed behind it, so the remaining rows are each blocked on their own request and nothing shared. Neither client changed when the transport arrived, exactly as predicted: it is `zen.server.args` in VS Code and `M.cmd` in Neovim, one line each, and neither needed touching.
 
 ### Neovim
 
