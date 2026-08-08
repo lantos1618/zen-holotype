@@ -44,7 +44,7 @@ Vec = std.collections
 str = std.text
 Range = std.core
 TyId, Types, TyArray = sema.sema_ty
-Diag, SemaFault, NameFault = sema.sema_diag
+Diag, SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker, Ctx, is_integer = sema.sema_check
 
 // The widest integer this compiler can fold in. Written as a
@@ -165,6 +165,103 @@ check_fits = (c :: Checker, b: Binary, ty: TyId, v: i64)
 overflow = (c :: Checker, b: Binary, name: str) Res<(), AllocError> {
     c.report(b.op_span.file, b.op_span,
              SemaFault.ProvenOverflow(NameFault(name: name)))
+}
+
+// ---------------------------------------------------------------------
+// the literal rule
+//
+// "A literal's type comes from its context", and `literal_fits` reads
+// that as: an `int` literal agrees with every integer type. That is
+// right about the FAMILY and says nothing about the VALUE, so
+// `n: i32 = 2147483648` went through and wrapped at codegen. It is the
+// same bug `i32.MAX + 1` is, one fold earlier, so it is a compile error
+// for the same stated reason.
+//
+// A LITERAL, NEVER A FOLDED EXPRESSION. `x: u8 = 200 + 100` is already
+// `ProvenOverflow` at the operator, and reporting here as well would
+// give one mistake two diagnostics. So this walks only the forms that
+// wrap a literal without changing what it is — parentheses, and the
+// unary minus that makes `-1` one literal rather than two tokens.
+//
+// UNFOLDABLE IS NOT REJECTED. `18446744073709551615` and
+// `-9223372036854775808` both exceed the `i64` this file folds in, so
+// `parse_i64` abstains and the rule says nothing — which is what keeps
+// `u64.MAX` and `i64.MIN` the legal literals `corpus/lex/
+// number_type_boundaries` pins them as. A rule written as "unfoldable
+// therefore wrong" would reject both.
+// ---------------------------------------------------------------------
+
+check_literal* = (c :: Checker, id: ExprId, got: TyId, want: TyId)
+                 Res<(), AllocError> {
+    is_integer(c.prim_name(want)).match({
+        false => Ok(()),
+        true  => literal_within(c, id, got, want),
+    })
+}
+
+literal_within = (c :: Checker, id: ExprId, got: TyId, want: TyId)
+                 Res<(), AllocError> {
+    literal_int(c, c.tree.expr_at(id)).match({
+        None    => Ok(()),
+        Ok(v)   => value_within(c, id, got, want, v),
+    })
+}
+
+value_within = (c :: Checker, id: ExprId, got: TyId, want: TyId, v: i64)
+               Res<(), AllocError> {
+    fits(v, c.prim_name(want)).match({
+        true  => Ok(()),
+        false => out_of_range(c, id, got, want),
+    })
+}
+
+// The position is the literal the author has to change, which for a
+// negated one is the `-` and not the digits after it.
+out_of_range = (c :: Checker, id: ExprId, got: TyId, want: TyId)
+               Res<(), AllocError> {
+    node = c.tree.expr_at(id);
+    c.report(node.span.file, node.span,
+             SemaFault.LiteralOutOfRange(TypeFault(
+                 name: written_literal(c, node), expected: want, found: got)))
+}
+
+// The literal AS WRITTEN, and nothing when the value was not written as
+// one — the same answer `written_index` gives for the same reason.
+// Parentheses do not change what a literal is; a minus does, so `-1`
+// stops here rather than quoting `1`.
+written_literal = (c: Checker, node: Expr) str {
+    node.kind.match({
+        Literal(l) => l.text,
+        Paren(p)   => written_literal(c, c.tree.expr_at(p.inner)),
+        _          => "",
+    })
+}
+
+// `const_int` walks operators and `i32.MAX` as well, which is what
+// `check_binary` needs and what this must not have. The recursion is
+// bounded by the parser's own nesting limit, because these are the two
+// forms the parser builds by recursing.
+literal_int = (c: Checker, node: Expr) Res<i64> {
+    node.kind.match({
+        Literal(l) => const_literal(l),
+        Paren(p)   => literal_int(c, c.tree.expr_at(p.inner)),
+        Unary(u)   => literal_neg(c, u),
+        _          => None,
+    })
+}
+
+literal_neg = (c: Checker, u: Unary) Res<i64> {
+    u.op.match({
+        Neg => negate_literal(c, u.operand),
+        _   => None,
+    })
+}
+
+negate_literal = (c: Checker, id: ExprId) Res<i64> {
+    literal_int(c, c.tree.expr_at(id)).match({
+        None    => None,
+        Ok(v)   => Ok(0 - v),
+    })
 }
 
 // ---------------------------------------------------------------------

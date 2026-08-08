@@ -47,12 +47,7 @@ ENUMS = {
 # that names the law and what blocks it, because the alternative to
 # writing it down here is the enum reading complete while it is not,
 # which is the state this file was written to end.
-OWED = {
-    "InfiniteSize":
-        "a field cycle that never reaches an indirection. sema.zen:35 "
-        "admits it; the layout walk does not terminate rather than "
-        "reporting.",
-}
+OWED = {}
 
 VARIANT = re.compile(r"^\s*[|=]\s*([A-Z]\w*)\s*\(")
 
