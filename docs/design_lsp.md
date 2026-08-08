@@ -65,7 +65,7 @@ Four stages, named **L1–L4** so they are not confused with `PLAN.md`'s 0–5. 
 | `textDocument/didOpen` / `didChange` / `didClose` | an overlay the driver reads before the disk | **built as an overlay in the server** (Full sync). The driver half of §5 is still missing, so hover sees the open document as a LONE MODULE — an imported name has no type | L1 |
 | `textDocument/publishDiagnostics` | diagnostics as values with spans | **half**: sema is structured — `diag_count`/`diag_at` at `src/sema/sema_check.zen:151,153`, `Diag` at `src/sema/sema_diag.zen:114`. Lex and parse diagnostics are **printed and discarded** by the driver (`src/zen/zen_build.zen:358`, `:383`) and never leave it | L1 |
 | `textDocument/documentSymbol` | a module's declarations in source order, each with a span and a name-span | **exists**, no new query: `module_count`/`module_at` at `src/ast/ast_arena.zen:147,149`; `Decl.span` and `Ident.span` are LSP's `range` and `selectionRange` exactly | L2 |
-| `textDocument/hover` | the type under the cursor, printed | **exists**: `expr_node_at` (`src/ast/ast_find.zen:126`) → `expr_memo` (`src/sema/sema_check.zen:96`) → `Types.name_of` (`src/sema/sema_ty.zen:422`). **Built** — `src/lsp/lsp_hover.zen`, no new sema | L2 |
+| `textDocument/hover` | the type under the cursor, printed | **built, and widened** — `src/lsp/lsp_hover.zen` plus `src/lsp/lsp_decl.zen`, still no new sema. See the hover section below for what it answers, what it refuses, and the measurement | L2 |
 | `textDocument/definition` | the span a name was declared at | **mostly**: `defs_of` → `Def.span` (`src/sema/sema_def.zen:172`, `:63`) for a module-level name; `call_memo` (`src/sema/sema_check.zen:113`) for a call; `Found.span` (`src/sema/sema_member.zen:66`) for a member. **Missing for locals** — see below | L2 |
 | `textDocument/semanticTokens`, lexical | the token stream | **exists**: `scan` and `Token{kind, span}` (`src/lex/lex.zen:62`, `src/lex/lex_token.zen:97`) | L2 |
 | `textDocument/references` | for a `DeclId`, every node that resolved to it | **missing**. `call_memo` is that map, forward and for calls only. Nothing records a resolved bare *name*, and nothing inverts | L3 |
@@ -80,6 +80,50 @@ Four stages, named **L1–L4** so they are not confused with `PLAN.md`'s 0–5. 
 **Locals have no span, and it is not an oversight.** `Binding` is `{ name, ty, mutable }` (`src/sema/sema_check.zen:63`) and locals are released at scope exit (`detach_locals`, `:230`). Nothing about a local survives `check_all`. Go-to-definition on a parameter therefore does not work and cannot be made to work from outside sema: the fix is a `span` on `Binding` plus a per-function record of the bindings that were live, which is a change in `src/sema/` and is priced at L3, not at L2.
 
 **Incomplete input is the completion problem, not resolution.** `x.` is not a parse. `f(a, ` is not a parse. So at the moment completion and signature help are wanted, there is no `Access` node and no `Call` node to ask about. This tree's parser reports and does not recover — `src/zen/zen_build.zen:341` states the position for the lexer and the same holds one level up. **Do not answer this by writing an error-recovering second parser.** The cheap answer, and the one this document recommends: the server scans *backwards from the cursor over the buffer's bytes* to find the trigger character and the base expression's end, asks `expr_node_at` about the base — which does parse — and never asks the parser about the incomplete part at all. That is a lexical heuristic living entirely in `src/lsp/`, it is testable, and it does not put a second grammar in the tree. It will be wrong sometimes. Say so in its header.
+
+### Hover, in full — because it is the only query built and it was measured
+
+The first version of hover was one path: `expr_node_at` → `expr_memo` → `Types.name_of`. That is the type of an EXPRESSION, and it turned out to be half of what hovering is for. Probing every identifier position in
+
+```
+add = (a: i32, b: i32) i32 {
+    s = a + b;
+    s
+}
+```
+
+against the shipped binary over a real pipe, **3 of 12 positions answered**: `a` and `b` where they are used in `a + b`, and `s` where it is used on the last line. The function's own name, both parameters at their declarations, the local at its declaration and all three `i32` returned `null`. The rule was "an identifier in expression position resolves; a binding site or a type name does not" — and a user hovers a declaration to ask what something IS at least as often as a use.
+
+It is now **10 of 12**, the two remaining being a space and a brace, which must stay `null`. The widening cost no new sema. It cost one new query in `src/lsp/lsp_decl.zen` — *which name is the cursor inside* — because a name is not a node:
+
+| what a user hovers | where the answer comes from |
+|---|---|
+| an expression (`a` in `a + b`) | `node_at` → `expr_memo` |
+| a **written type** (`i32`, `Vec<T>`, an alias) | `node_at` → `type_memo`, keyed on exactly that `TypeId` |
+| a **parameter** at its declaration | the `Param`'s own `type`, → `type_memo` |
+| a **local** at its declaration | the `Bind`'s annotation, or its value's `expr_memo` entry |
+| a **constant or field** at its declaration | its annotation, or its value |
+| a **function's name** | its declaration REPRINTED: `add = (a: i32, b: i32) i32` |
+| everything else | `null` |
+
+Three decisions in that table are worth ratifying or overruling rather than inheriting.
+
+**A function's name answers with a reprinted declaration and not with its type.** `Types.write_fn` would produce `(i32, i32) i32`; `ast_node.zen` already argued why that is worse — "`(i32, i32) i32` says nothing about which `i32` is which" — and parameter names are correctly *not* in the type, since two signatures differing only in them are one type. So the names come from the AST and the types from the memo, and nothing in the string is invented. Type-parameter **bounds are dropped**: `<T: Eq + Hash>` reprints as `<T>`.
+
+**A type name answers with what it RESOLVES to, and for `i32` that is `i32`.** A type's own name is a weak answer and this is the weakest case of it. It was chosen over the alternatives — a description, a field list, a size — because those are `documentSymbol`'s and `definition`'s answers wearing hover's clothes, and both are already in the table above with the queries they need. What makes it more than a tautology is what it does in the two cases where the source and the answer differ: `Alias = Shape` hovers as `Shape`, `Res<Cfg, _>` hovers with the hole filled as the checker filled it — and a name that resolves to nothing answers `null`, so `i32` is also saying *this name is a type the checker knows*, which is exactly the question a typo raises.
+
+**Poison is refused everywhere rather than printed.** `Ty.Unknown` is what sema interns for "a type I could not compute and have already reported", and `Types.write_name` spells it `<unknown>`. Hover checks any type it is about to print, recursively, and answers `null` if poison is anywhere inside it — so a function whose return type did not resolve has no hover at all rather than a signature with a hole in it. **This is not a corner case here**: the open document is checked as a lone module (§5), so until the overlay lands *every imported name is poison*, and without this gate the widening would have been confidently wrong across every real file in the tree.
+
+**What still answers `null`, and why each is a fact about the compiler rather than about `src/lsp/`:**
+
+- **A struct's or enum's own name** (`Foo` in `Foo = { .. }`). `type_memo` is keyed on a written `TypeId` and a declaration site has none. A *use* of `Foo` hovers. Fixing it means building the type a declaration denotes, in `src/sema/sema_type.zen`.
+- **A pattern binder** (`n` in `Ok(n) => ..`). There is no pattern memo, and `Binding` is released at scope exit — the same gap open question note above prices at L3 for go-to-definition, and the same fix closes both.
+- **A type parameter at its declaration** (`T` in `<T>`). Same shape as a struct name.
+- **The receiver of a field access** (`p` in `p.left`). `expr_memo` has an entry for the whole `Access` and none for its base. That is a **sema bug and not a hover one** — the base is an expression the checker typed and did not write down — and it is the one row here that should simply be fixed rather than documented.
+- **An imported name**, until the overlay of §5 lands.
+- **A closure's parameter**, whose `Param.type` is absent by construction.
+
+**The gate is `tests/corpus/lsp/hover_answers_at_a_declaration`**, which is the 12-position probe plus three poison rows, driven through framed JSON-RPC, asserting the value AND the range — so a right type under the wrong underline is still red. Half its rows assert `null`; a widening that starts answering those is a regression even though it looks like more coverage.
 
 **Rename is the request this language makes dangerous**, and it is worth writing down before someone ships it. Two rules collide with it. `DESIGN.md:394`: a UFCS call `x.f(..)` "never names `f`", so renaming an exported free function must rewrite call sites that do not contain that name in any bare-name position — a textual search finds them, and a textual search is exactly what a rename must not be. `DESIGN.md:140`: whether `A | B` is a union or a nominal enum "depends on what else is in scope", so renaming a *type* can silently change the meaning of an unrelated declaration in a module that imports it. Rename is L4 and it is L4 for a reason.
 
@@ -394,6 +438,8 @@ JSON in and out. Framing. `initialize`/`initialized`/`shutdown`/`exit`. Full doc
 Hover, definition, documentSymbol, lexical semanticTokens. No new sema.
 
 **Gate:** a query corpus. Each test is a source file with cursor positions and the expected answer — for hover the type name `Types.name_of` produces, for definition a `file:line:col`, for documentSymbol the list. Same `.expected` format, same byte comparison. The positions are asserted in **Zen** coordinates in the fixture and converted at the wire, so a failure separates "the query is wrong" from "the conversion is wrong". Break it by returning the enclosing node instead of the smallest and watch hover go red.
+
+**Hover's half of that gate exists**: `tests/corpus/lsp/hover_answers_at_a_declaration`, a 15-row position table driven through framed JSON-RPC, asserting the value and the range together. It was mutation-verified against each of the three paths it guards — the name finder, the signature reprint and the poison refusal — and against the two `null` controls. See the hover section in §2.
 
 Plus the §3 conversion gate, which lands here at the latest and preferably in L1.
 

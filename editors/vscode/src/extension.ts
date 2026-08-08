@@ -53,8 +53,12 @@ const STARTUP_FAILED =
   "\n" +
   "Worth knowing before you file anything: this server answers hover and\n" +
   "nothing else. It publishes NO diagnostics, so no squiggles is correct\n" +
-  "behaviour, not a failure. Hover answers on an identifier's use, not on\n" +
-  "its declaration or a type name. Everything else is `-32601 no handler`.";
+  "behaviour, not a failure. Hover answers on an identifier's use, on a\n" +
+  "parameter or local at its declaration, on a written type name, and on a\n" +
+  "function's name — where it hands the declaration back. It answers\n" +
+  "nothing on a struct's own name, a pattern binder, or anything whose type\n" +
+  "did not resolve, which today includes every IMPORTED name: the server\n" +
+  "checks the open file as a lone module. Everything else is `-32601`.";
 
 export async function activate(context: vscode.ExtensionContext) {
   output = vscode.window.createOutputChannel("Zen");
@@ -135,7 +139,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
   try {
     await client.start();
-    output.appendLine("zen: server started. `hover` is the one query it answers;");
+    output.appendLine(
+      "zen: server started. `hover` is the one query it answers — a type, or a function's signature;",
+    );
     output.appendLine(
       "zen: definition, completion, symbols, formatting and rename are refused by name with -32601.",
     );

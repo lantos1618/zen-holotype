@@ -1,0 +1,162 @@
+// HOVER ANSWERS AT A DECLARATION, not only at a use — and answers
+// `null` where it does not know.
+//
+// This is `design_lsp.md` §7's L2 gate said as a table: "a source file
+// with cursor positions and the expected answer". It drives the SERVER
+// and not `hover_at`, so every position below goes through the wire's
+// coordinates (`lsp_pos.zen`), the dispatch table (`lsp_serve.zen`) and
+// the JSON escaper on the way out. A query that got the right type at
+// the wrong span still fails here, because the `range` is asserted
+// beside the value.
+//
+// WHY IT EXISTS. Hover was measured against the program below by
+// probing every identifier in it, and answered at 3 positions of 12 —
+// `a`, `b` and `s` where they are USED, and nothing else. The nine it
+// missed were every binding site and every type name, which is to say
+// the half of hovering that asks "what IS this". The table below is
+// that measurement, frozen: if a future change narrows hover back to
+// expressions, the exact positions that regressed are named.
+//
+// THE `null` ROWS ARE THE POINT AND NOT THE PADDING. Two kinds:
+//
+//   - punctuation and whitespace, where a hover must not invent a node
+//   - `Nope`, a type that does not resolve — sema interns POISON for it
+//     and `Types.write_name` spells poison `<unknown>`. Answering that
+//     would be a hover that looks like an answer and names a type that
+//     does not exist, so it is `null`, and `bad`'s whole signature is
+//     `null` with it because one unresolved part poisons the reprint.
+//
+// A widening that starts answering those rows is a regression even
+// though it looks like more coverage. That is the failure mode this
+// half of the table is here to catch.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, write_decimal, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// The program hovered over. `add` is the one the measurement was taken
+// on; `bad` is the same shape written against a type that does not
+// exist, so the poison rows sit beside the answered ones.
+DOC*: str = "add = (a: i32, b: i32) i32 {\n    s = a + b;\n    s\n}\n\nbad = (x: Nope) Nope {\n    x\n}\n"
+
+URI*: str = "file:///a.zen"
+
+// One probed position, in WIRE coordinates — 0-based line, 0-based
+// character — because that is what a client sends and this test is on
+// the client's side of `lsp_pos.zen`.
+Probe* = {
+    line*: usize,
+    character*: usize,
+    what*: str,
+}
+
+// The table. Order is source order, so a reader can follow it down the
+// document, and `what` says which of the two halves each row is in.
+probes = (a: Alloc) Res<Vec<Probe>, AllocError> {
+    all ::= a.Vec<Probe>();
+    all.add(Probe(line: 0, character: 0,  what: "add  the function's own name")).try();
+    all.add(Probe(line: 0, character: 3,  what: "     a space: null")).try();
+    all.add(Probe(line: 0, character: 7,  what: "a    a parameter at its declaration")).try();
+    all.add(Probe(line: 0, character: 10, what: "i32  a parameter's written type")).try();
+    all.add(Probe(line: 0, character: 15, what: "b    a parameter at its declaration")).try();
+    all.add(Probe(line: 0, character: 18, what: "i32  a parameter's written type")).try();
+    all.add(Probe(line: 0, character: 23, what: "i32  the return type")).try();
+    all.add(Probe(line: 0, character: 27, what: "{    the body's brace: null")).try();
+    all.add(Probe(line: 1, character: 4,  what: "s    a local at its declaration")).try();
+    all.add(Probe(line: 1, character: 8,  what: "a    a parameter, used")).try();
+    all.add(Probe(line: 1, character: 12, what: "b    a parameter, used")).try();
+    all.add(Probe(line: 2, character: 4,  what: "s    a local, used")).try();
+    all.add(Probe(line: 5, character: 0,  what: "bad  a signature with poison in it: null")).try();
+    all.add(Probe(line: 5, character: 7,  what: "x    a parameter typed by poison: null")).try();
+    all.add(Probe(line: 5, character: 10, what: "Nope a type that does not resolve: null")).try();
+    Ok(all);
+}
+
+// --- the requests ------------------------------------------------------
+
+open_doc = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(DOC, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+hover = (a: Alloc, id: usize, p: Probe, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(",\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes("},\"position\":{\"line\":").try();
+    write_decimal(p.line, body).try();
+    body.add_bytes(",\"character\":").try();
+    write_decimal(p.character, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+// ONE `serve` CALL for the whole table, so a server that answered the
+// first hover and then lost its place in the stream fails here.
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    table = probes(a).try();
+
+    input ::= a.String().try();
+    write_frame("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}", input).try();
+    write_frame("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}", input).try();
+    open_doc(a, input).try();
+    table.loop((h, i, p) { hover(a, 10 + i, p, input).try(); });
+    write_frame("{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}", input).try();
+
+    s ::= a.Server();
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view(), table);
+    Ok(0);
+}
+
+// Every reply, labelled with the position that asked for it.
+//
+// THE FRAMING IS UNWRAPPED AND NOT PRINTED, because
+// `a_session_is_answered_frame_by_frame` already pins every byte of it
+// and a second copy of that assertion here would go red for a reason
+// that has nothing to do with hover. What is printed is the reply's
+// JSON, whole — the `range` included, since a right type under the
+// wrong underline is still wrong.
+walk_replies = (out: str, table: Vec<Probe>) () {
+    at ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; labelled(seen, fr.body, table); seen = seen + 1; },
+        });
+    });
+}
+
+// Reply 0 is `initialize` and the last is `shutdown`; the ones between
+// are the table, in order. Neither of the two is printed — they are the
+// other test's subject — and the subtraction is guarded rather than let
+// to underflow, which on a usize is a trap and not a negative number.
+labelled = (i: usize, body: str, table: Vec<Probe>) () {
+    (i == 0).match({
+        true  => (),
+        false => table.get(i - 1).match({
+            None    => (),
+            Ok(p)   => printed(p, body),
+        }),
+    });
+}
+
+printed = (p: Probe, body: str) () {
+    println("{}:{}  {}", p.line, p.character, p.what);
+    println("    {}", body);
+}

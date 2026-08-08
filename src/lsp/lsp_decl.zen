@@ -1,0 +1,309 @@
+// src/lsp/lsp_decl.zen
+// A cursor position, and WHAT THE THING UNDER IT IS.
+//
+// `ast_find.zen` answers "which node is at this position" and that is
+// not the same question. Three of the places a user hovers most are not
+// nodes in any arena at all:
+//
+//     add = (a: i32, b: i32) i32 { s = a + b; s }
+//     ^^^     ^                    ^
+//     |       |                    the target of a Bind, an Expr the
+//     |       |                    checker BOUND rather than typed
+//     |       the name of a Param, an `Ident` held by value
+//     the name of a Function, an `Ident` held by value
+//
+// `Ident` is not an arena family — `ast_arena.zen` says why, and it is
+// right: a name closes no cycle, so it is held by value inside its
+// parent and has no id. The consequence is that `node_at` cannot see
+// one, and a hover built only on `node_at` answers `null` at every
+// BINDING SITE while answering at every use. Measured on the program
+// above, that was 3 positions of 12.
+//
+// So this file scans for a NAME. It is the same shape as `ast_find.zen`
+// — a fold over what the arena already holds, no walk, no parent links
+// — and it hands back not a node but a `Tell`: what to say, and which
+// span to underline.
+//
+// NOTHING HERE ALLOCATES and nothing here knows what a type is called.
+// A `Tell` names the AST node whose type is the answer; turning that
+// into text is `lsp_hover.zen`'s half, because that needs the checker's
+// memos and this needs only the tree. The split is what keeps "which
+// name is under the cursor" testable without a `Checker`.
+//
+// WHERE THIS BELONGS, and it is not here. `design_lsp.md` §1 is explicit
+// that a missing query is fixed in `src/ast/` or `src/sema/` and never
+// in `src/lsp/`, and by that rule this file is `ast_find.zen`'s second
+// half and should sit beside it. It is here because it has exactly one
+// caller and `STYLE.md`'s second-caller rule has not fired yet. The day
+// `definition` or `documentSymbol` wants it, it moves to
+// `src/ast/ast_named.zen` unchanged.
+
+str = std.text
+Range = std.core
+Pos, Span = ast
+Ast, ExprId, TypeId, BlockId = ast
+Decl, Function, Param, Member, Const, Bind, Stmt = ast
+node_at, in_span = ast
+
+// The type under the cursor is the one the checker gave THIS node.
+// `span` is the name's own span and not the node's: hovering `a` in
+// `(a: i32)` must underline `a`, and the node whose type is the answer
+// is the `i32` beside it.
+TypeAt* = {
+    span*: Span,
+    id*: TypeId,
+}
+
+// The type under the cursor is the one the checker gave THIS
+// expression. `s = a + b` has no written type, so the local's type is
+// its value's — which is what a binding without an annotation MEANS,
+// not an approximation of it.
+ValueAt* = {
+    span*: Span,
+    id*: ExprId,
+}
+
+// What to say about the cursor, in the form that says where the answer
+// comes from rather than what it reads.
+//
+// `Nothing` is a real answer and is returned far more often than the
+// others: whitespace, punctuation, a comment, a pattern binder. It
+// becomes `null` on the wire, which the protocol wants and which reads
+// to a user as "not supported here" rather than as a claim.
+Tell* = Nothing
+      | Sig(Function)
+      | OfType(TypeAt)
+      | OfValue(ValueAt)
+
+// THE QUERY. A name first, a node second.
+//
+// The order is not a preference, it is containment: an `Ident`'s span is
+// the tightest span there can be at a declaring position, and at a
+// position inside a block the enclosing `Block` covers a nested
+// declaration's name. Asking `node_at` first would answer `BlockNode`
+// there and lose the name.
+told_at* = (tree: Ast, file: str, p: Pos) Tell {
+    named = named_at(tree, file, p);
+    is_nothing(named).match({
+        false => named,
+        true  => node_told(tree, file, p),
+    })
+}
+
+is_nothing* = (t: Tell) bool {
+    t.match({ Nothing => true, _ => false })
+}
+
+// The first non-`Nothing` of the two. A position is inside at most one
+// name, so there is never a real contest — this exists so a fold can be
+// written without a flag beside it.
+pick = (have: Tell, cand: Tell) Tell {
+    is_nothing(have).match({ true => cand, false => have })
+}
+
+// --- names ------------------------------------------------------------
+
+// Every declared name in the compilation, module level and nested.
+//
+// TWO SCANS AND NOT ONE, because a declaration reaches this file by two
+// routes: `Module.decls` for the top level, and `Block.stmts` for a
+// declaration written inside a body. The second is not a recursion into
+// the first — every block in the compilation is already flat in the
+// arena, so scanning it costs nothing a walk would have saved.
+named_at = (tree: Ast, file: str, p: Pos) Tell {
+    found ::= Tell.Nothing;
+    Range(0, tree.module_count()).loop((h, i) {
+        tree.module_at(i).match({
+            None  => (),
+            Ok(m) => m.decls.loop((h2, d) {
+                found = pick(found, decl_told(d, file, p));
+            }),
+        });
+    });
+    bid ::= BlockId(index: 0);
+    Range(0, tree.block_ids()).loop((h, i) {
+        tree.block_at(bid).stmts.loop((h2, s) {
+            found = pick(found, stmt_named(s, file, p));
+        });
+        bid = BlockId(index: bid.index + 1);
+    });
+    found;
+}
+
+stmt_named = (s: Stmt, file: str, p: Pos) Tell {
+    s.kind.match({
+        Decl(d) => decl_told(d, file, p),
+        _       => Tell.Nothing,
+    })
+}
+
+// AN ENUM'S NAME AND A STRUCT'S NAME ARE NOT HERE, and that is a
+// deliberate `null` rather than an oversight. `type_memo` is keyed on a
+// written `TypeId` and a declaration site has none — the name `Foo` in
+// `Foo = { .. }` is an `Ident`, not a type node — so the only way to
+// answer would be to build the type the declaration denotes, which is
+// `src/sema/`'s job and not this file's. A USE of `Foo` hovers fine,
+// because a use is a written type node.
+decl_told = (d: Decl, file: str, p: Pos) Tell {
+    d.kind.match({
+        Function(f) => fn_told(f, file, p),
+        Const(cn)   => const_told(cn, file, p),
+        Alias(al)   => at_type(al.name.span, al.target, in_span(al.name.span, file, p)),
+        Struct(st)  => members_told(st.members, file, p),
+        Impl(im)    => members_told(im.members, file, p),
+        Enum(_)     => Tell.Nothing,
+        Import(_)   => Tell.Nothing,
+    })
+}
+
+// The name of a function is its SIGNATURE, and its parameters are their
+// declared types. Both are one `in_span` away from each other, which is
+// why they are one function.
+fn_told = (f: Function, file: str, p: Pos) Tell {
+    in_span(f.name.span, file, p).match({
+        true  => Tell.Sig(f),
+        false => params_told(f.params, file, p),
+    })
+}
+
+params_told = (ps: Vec<Param>, file: str, p: Pos) Tell {
+    found ::= Tell.Nothing;
+    ps.loop((h, prm) { found = pick(found, param_told(prm, file, p)); });
+    found;
+}
+
+// A PARAMETER WITHOUT A WRITTEN TYPE IS `Nothing`. `Param.type` is
+// absent only in a closure, where the type comes from the position the
+// closure is passed at and nothing on the parameter records it. That is
+// a real gap and it answers `null`; inferring it here would be this
+// file guessing what sema knows.
+param_told = (prm: Param, file: str, p: Pos) Tell {
+    hit = in_span(prm.name.span, file, p);
+    prm.type.match({
+        None  => Tell.Nothing,
+        Ok(t) => at_type(prm.name.span, t, hit),
+    })
+}
+
+// `X: i32 = 5` answers from the annotation and `X = 5` from the value,
+// which is the same rule a `Bind` gets below and for the same reason:
+// an annotation is what the author declared and a value is what the
+// checker concluded. Where both exist the annotation is the answer.
+const_told = (cn: Const, file: str, p: Pos) Tell {
+    hit = in_span(cn.name.span, file, p);
+    cn.type.match({
+        Ok(t) => at_type(cn.name.span, t, hit),
+        None  => at_value(cn.name.span, cn.value, hit),
+    })
+}
+
+members_told = (ms: Vec<Member>, file: str, p: Pos) Tell {
+    found ::= Tell.Nothing;
+    ms.loop((h, m) { found = pick(found, member_told(m, file, p)); });
+    found;
+}
+
+member_told = (m: Member, file: str, p: Pos) Tell {
+    m.kind.match({
+        Function(f) => fn_told(f, file, p),
+        Const(cn)   => const_told(cn, file, p),
+        Field(fl)   => field_told(fl.name.span, fl.type, fl.value,
+                                  in_span(fl.name.span, file, p)),
+    })
+}
+
+// A struct field has a written type; a field SUPPLIED in an impl body
+// or a record literal has none and carries a value instead. Both are
+// the same node, so both are answered here and the one with neither —
+// unspellable today, per `ast_node.zen` — is `Nothing`.
+field_told = (span: Span, t: Res<TypeId>, v: Res<ExprId>, hit: bool) Tell {
+    t.match({
+        Ok(id) => at_type(span, id, hit),
+        None   => v.match({
+            Ok(e) => at_value(span, e, hit),
+            None  => Tell.Nothing,
+        }),
+    })
+}
+
+// --- nodes -------------------------------------------------------------
+
+// What `ast_find.zen` found, said as a `Tell`.
+//
+// A `TypeNode` is the addition that makes a WRITTEN TYPE hoverable —
+// `i32`, `Vec<T>`, `Res<Cfg, _>` — and it needs no new query at all:
+// `type_from_ast`'s memo is keyed on exactly this id.
+//
+// A `PatternNode` is `Nothing` and stays `Nothing`. `n` in `Ok(n)` is a
+// binder whose type the checker knows and does not write down: there is
+// no pattern memo, and `Binding` is released at scope exit
+// (`sema_check.zen`). Answering would mean re-deriving it, which is the
+// second implementation this folder exists not to contain.
+node_told = (tree: Ast, file: str, p: Pos) Tell {
+    node_at(tree, file, p).match({
+        None  => Tell.Nothing,
+        Ok(n) => n.match({
+            ExprNode(e)    => expr_told(tree, e),
+            TypeNode(t)    => at_type(tree.type_at(t).span, t, true),
+            PatternNode(_) => Tell.Nothing,
+            BlockNode(_)   => Tell.Nothing,
+        }),
+    })
+}
+
+// An expression, unless it is the TARGET of a binding.
+//
+// `s` in `s = a + b;` is an `Expr` the checker never typed as one — it
+// is the left of a `Bind`, and what the checker did with it was open a
+// scope entry. So `expr_memo` misses, and a hover that stopped there
+// answered `null` at the declaration of every local while answering at
+// every use of it. The binding's own type is the honest answer and it
+// is in the same node: its annotation if it has one, its value if not.
+expr_told = (tree: Ast, e: ExprId) Tell {
+    found ::= at_value(tree.expr_at(e).span, e, true);
+    bid ::= BlockId(index: 0);
+    Range(0, tree.block_ids()).loop((h, i) {
+        tree.block_at(bid).stmts.loop((h2, s) {
+            found = pick_bound(found, s, tree.expr_at(e).span, e);
+        });
+        bid = BlockId(index: bid.index + 1);
+    });
+    found;
+}
+
+pick_bound = (have: Tell, s: Stmt, span: Span, e: ExprId) Tell {
+    s.kind.match({
+        Bind(b) => bind_told(have, b, span, e),
+        _       => have,
+    })
+}
+
+bind_told = (have: Tell, b: Bind, span: Span, e: ExprId) Tell {
+    (b.target.index == e.index).match({
+        false => have,
+        true  => b.type.match({
+            Ok(t) => at_type(span, t, true),
+            None  => at_value(span, b.value, true),
+        }),
+    })
+}
+
+// --- the two constructors ----------------------------------------------
+//
+// `hit` is threaded rather than branched at every call site, so that
+// "did the cursor land on this name" is written once per name and the
+// shape of the answer is written once per KIND of answer.
+
+at_type = (span: Span, id: TypeId, hit: bool) Tell {
+    hit.match({
+        true  => Tell.OfType(TypeAt(span: span, id: id)),
+        false => Tell.Nothing,
+    })
+}
+
+at_value = (span: Span, id: ExprId, hit: bool) Tell {
+    hit.match({
+        true  => Tell.OfValue(ValueAt(span: span, id: id)),
+        false => Tell.Nothing,
+    })
+}
