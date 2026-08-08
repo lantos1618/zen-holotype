@@ -22,6 +22,17 @@
 // and no `DeclId` — so the lowering re-derives that from the AST, which
 // is the same seam `gen_c_call.zen` documents at `ty_of`.
 //
+// AND THE SEAM IS NARROWED HERE RATHER THAN CLOSED. `pick_member` below
+// chooses between two members of one name by calling `recv_sig_fits`,
+// which is the CHECKER'S predicate and the one it used on this very
+// call — so the two cannot disagree about the rule, only about the
+// inputs. Closing it properly means sema writing down WHICH MEMBER a
+// dot resolved to, and it cannot today: `call_memo` is `ExprId ->
+// DeclId`, a `DeclId` cannot name a member, and the recording point is
+// `sema_call.zen`'s `pick_fitting`. `MemberId` already exists for it —
+// `sema_id.zen` names "which declaration did this name resolve to" as
+// one of the three questions a coordinate exists to key.
+//
 // A MEMBER FUNCTION IS AN ORDINARY FUNCTION with the receiver's type as
 // its first parameter, and its symbol is the TYPE's qualified name plus
 // the member's. That is what makes two types' `get` two symbols without
@@ -40,16 +51,19 @@
 
 Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = ast
 Function, Param, Access, Call, Arg, Span, Ident, TypeId, Impl = ast
+Lambda = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
 DeclId, ImplId = sema.sema_id
-TyId, Ty, Types, TyNamed, Prim = sema.sema_ty
+TyId, Ty, Types, TyNamed, TyFn, Prim = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 Inst = sema.sema_inst
 Base, Found, base_of, members_of, member_named, self_ctx = sema.sema_member
+Actual = sema.sema_call
+recv_sig_fits, ty_at = sema.sema_cand
 Case, cases_of, find_case = sema.sema_case
 impl_bound_type, bound_members = sema.sema_supply
 is_case = sema.sema_match
@@ -71,7 +85,7 @@ is_fat = gen.gen_c.gen_c_fat
 lower_fat_call = gen.gen_c.gen_c_bound
 lower_assoc_call = gen.gen_c.gen_c_assoc
 sink_door_shape, lower_member_door = gen.gen_c.gen_c_sink
-by_arity, bodied_fn, impl_member, impl_member_of = gen.gen_c.gen_c_impl
+by_arity, bodied_fn, impl_member = gen.gen_c.gen_c_impl
 has_body = gen.gen_c.gen_c_impl
 impl_member_at = gen.gen_c.gen_c_impl
 
@@ -207,21 +221,143 @@ with_site = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
              s: Site, ctx: Ctx, out :: String) Res<(), AllocError> {
     found ::= be.alloc.Vec<Member>();
     member_at(be, s, a.name.text, found).try();
-    by_arity(found, c.args.len + 1).match({
+    pick_member(be, c, rty, s, found, ctx).try().match({
         None  => supplied_or_ufcs(be, id, c, a, rty, s, ctx, out),
         Ok(m) => member_kind(be, id, c, a, rty, s, m, ctx, out),
     })
 }
 
-
-
+// WHAT AN IMPL SUPPLIES IS AN OVERLOAD SET TOO, so it is picked apart by
+// the same rule and not by arity alone. `impl_member_of` asked at an
+// arity, and `Display`'s two `toString`s are both arity two.
 supplied_or_ufcs = (be :: CBackend, id: ExprId, c: Call, a: Access,
                     rty: TyId, s: Site, ctx: Ctx, out :: String)
                    Res<(), AllocError> {
-    impl_member_of(be, s.decl, a.name.text, c.args.len + 1).try().match({
-        Ok(f) => lower_supplied(be, id, c, a, rty, s, f, ctx, out),
+    found ::= be.alloc.Vec<Member>();
+    impl_member_at(be, s.decl, a.name.text, found).try();
+    pick_member(be, c, rty, s, found, ctx).try().match({
         None  => lower_ufcs(be, id, c, a, rty, ctx, out),
+        Ok(m) => supplied_kind(be, id, c, a, rty, s, m, ctx, out),
     })
+}
+
+supplied_kind = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
+                 s: Site, m: Member, ctx: Ctx, out :: String)
+                Res<(), AllocError> {
+    m.kind.match({
+        Function(f) => lower_supplied(be, id, c, a, rty, s, f, ctx, out),
+        _           => lower_ufcs(be, id, c, a, rty, ctx, out),
+    })
+}
+
+// -----------------------------------------------------------------
+// which of two members of one name
+//
+// "Resolution is on declared parameter types AND arity" (DESIGN.md,
+// Overloading), and a backend that reads only the second half answers
+// whichever the member table listed first. `Display` declares a
+// `toString` taking a sink and a sealed one taking an allocator; both
+// are arity two, and `p.toString(alloc)` lowered to the sink symbol
+// with the allocator passed as a `Sink` whose function pointers are
+// NULL. `cc` caught that one because the two return types differ. Two
+// overloads agreeing on their return type would have been silent.
+//
+// THE PREDICATE IS SEMA'S OWN. `recv_sig_fits` is what the checker used
+// to pick this very call's member — its header says why it exists at
+// all: "resolution is on declared parameter types AND arity is one rule
+// and it must be one implementation". Calling it here rather than
+// writing a second one is the difference between agreeing with the
+// checker and agreeing with it today.
+//
+// ONE CANDIDATE IS NOT A CHOICE. The whole of this runs only where a
+// name really did reach two members, so the common call pays for the
+// arity test and nothing more.
+// -----------------------------------------------------------------
+
+pick_member = (be :: CBackend, c: Call, rty: TyId, s: Site,
+               found: Vec<Member>, ctx: Ctx) Res<Res<Member>, AllocError> {
+    (found.len < 2).match({
+        true  => Ok(by_arity(be, found, c.args.len + 1)),
+        false => member_that_fits(be, c, rty, s, found, ctx),
+    })
+}
+
+member_that_fits = (be :: CBackend, c: Call, rty: TyId, s: Site,
+                    found: Vec<Member>, ctx: Ctx)
+                   Res<Res<Member>, AllocError> {
+    actuals ::= be.alloc.Vec<Actual>();
+    call_actuals(be, c, ctx, actuals).try();
+    kept ::= be.alloc.Vec<Member>();
+    found.loop((h, m) { keep_fits(be, m, rty, s, actuals, kept).try() });
+    Ok(fits_or_arity(be, kept, found, c.args.len + 1));
+}
+
+// THE FIRST THAT FITS, and arity when none does. Both halves are the
+// checker's: `pick_fitting` takes the first because "two members
+// accepting the same call is an error AT THE DECLARATION", and
+// `by_arity_ret` falls back for the case `fits` cannot answer — a
+// receiver whose type is not settled, or a variadic signature.
+fits_or_arity = (be: CBackend, kept: Vec<Member>, found: Vec<Member>,
+                 arity: usize) Res<Member> {
+    (kept.len > 0).match({
+        true  => kept.get(0),
+        false => by_arity(be, found, arity),
+    })
+}
+
+// A named helper rather than a `.then` inside the loop body: a loop
+// binding read inside a nested closure does not resolve.
+keep_fits = (be :: CBackend, m: Member, rty: TyId, s: Site,
+             actuals: Vec<Actual>, kept :: Vec<Member>)
+            Res<(), AllocError> {
+    m.kind.match({
+        Function(f) => keep_if_fits(be, m, f, rty, s, actuals, kept),
+        _           => Ok(()),
+    })
+}
+
+// `method_sig` and not the member's written types: `@Self` and the
+// type's own parameters have to be bound before a declared parameter
+// means anything, and the signature this builds is the one
+// `emit_method_call` will mangle into the symbol.
+keep_if_fits = (be :: CBackend, m: Member, f: Function, rty: TyId, s: Site,
+                actuals: Vec<Actual>, kept :: Vec<Member>)
+               Res<(), AllocError> {
+    inst = recv_inst(be, rty).try();
+    sig ::= be.alloc.Vec<TyId>();
+    method_sig(be, rty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
+    be.check.recv_sig_fits(sig, actuals).try().match({
+        true  => kept.add(m),
+        false => Ok(()),
+    })
+}
+
+call_actuals = (be :: CBackend, c: Call, ctx: Ctx, out :: Vec<Actual>)
+               Res<(), AllocError> {
+    c.args.loop((h, x) { out.add(arg_actual(be, x, ctx).try()).try() });
+    Ok(());
+}
+
+// WHAT RESOLUTION READS OFF AN ARGUMENT, and no more. A lambda has no
+// type until a signature settles it — "a closure's type is its full
+// signature" — so its PARAMETER COUNT is what a candidate is tested
+// against, which is the part a call site can see without inferring
+// anything.
+arg_actual = (be :: CBackend, x: Arg, ctx: Ctx) Res<Actual, AllocError> {
+    unknown = be.check.types.unknown().try();
+    be.tree.expr_at(x.value).kind.match({
+        Lambda(l) => Ok(Actual(ty: unknown, is_lambda: true,
+                               arity: l.params.len, named: false,
+                               span: x.span)),
+        _         => typed_actual(be, x, ctx, unknown),
+    })
+}
+
+typed_actual = (be :: CBackend, x: Arg, ctx: Ctx, unknown: TyId)
+               Res<Actual, AllocError> {
+    ty = ty_of(be, x.value, ctx, unknown).try();
+    Ok(Actual(ty: ty, is_lambda: false, arity: 0, named: false,
+              span: x.span));
 }
 
 lower_supplied = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
@@ -465,7 +601,7 @@ emit_method_call = (be :: CBackend, c: Call, a: Access, rty: TyId, s: Site,
     sym ::= be.alloc.String().try();
     sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
     be.need_method(MethodRef(self_ty: rty, decl: s.decl, name: a.name.text,
-                             arity: sig.len, qname: qname.view()), inst, sym.view()).try();
+                             sig: sig, qname: qname.view()), inst, sym.view()).try();
     out.add_bytes(sym.view()).try();
     out.add_bytes("(").try();
     write_arg(be, a.base, 0, f, sig, ctx, out).try();
@@ -573,7 +709,7 @@ emit_eq = (be :: CBackend, lhs: ExprId, rhs: ExprId, rty: TyId, s: Site,
     sym ::= be.alloc.String().try();
     sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
     be.need_method(MethodRef(self_ty: rty, decl: s.decl, name: "eq",
-                             arity: sig.len, qname: qname.view()), inst, sym.view()).try();
+                             sig: sig, qname: qname.view()), inst, sym.view()).try();
     out.add_bytes(sym.view()).try();
     out.add_bytes("(").try();
     write_arg(be, lhs, 0, f, sig, ctx, out).try();
@@ -607,7 +743,7 @@ lower_ufcs = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
 
 ufcs_or_impl = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
                 ctx: Ctx, out :: String) Res<(), AllocError> {
-    reaches(be, rty, a.name.text).try().match({
+    reaches(be, rty, a.name.text, c.args.len + 1).try().match({
         true  => unsupported(be, id, "a call to an impl-supplied member", out),
         false => lower_plain_call(be, id, c, a.name.text, Ok(a.base), ctx, out),
     })
@@ -620,8 +756,42 @@ ufcs_or_impl = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
 // impls `Eq` on it. Naming that is the difference between "this backend
 // has no impls yet" and "no such function", and only one of the two is
 // true.
-reaches = (be :: CBackend, rty: TyId, name: str) Res<bool, AllocError> {
+//
+// AT THIS CALL'S ARITY, because a name reached at another one is not
+// this call's name. `Box` declares `grow(self)` and a free `grow(b,
+// by)` travelled with the type; asking only whether the NAME is reached
+// refused `b.grow(10)` as unimplemented, when DESIGN.md says the two
+// are one overload set and the second is exactly the member this path
+// exists to reach.
+reaches = (be :: CBackend, rty: TyId, name: str, arity: usize)
+          Res<bool, AllocError> {
     found ::= be.alloc.Vec<Found>();
     be.check.members_of(rty, name, found).try();
-    Ok(found.len > 0);
+    Ok(any_at_arity(be, found, arity));
+}
+
+any_at_arity = (be: CBackend, found: Vec<Found>, arity: usize) bool {
+    Range(0, found.len).find((i) {
+        found.get(i).match({
+            Ok(f) => fn_takes_args(be, f.ty, arity),
+            None  => false,
+        })
+    }).match({ Ok(_) => true, None => false })
+}
+
+// A `Found` carries a type and not a declaration, so the arity is the
+// resolved signature's — and `...` is a minimum here for the reason
+// `gen_c_impl.zen`'s `fn_takes` gives, read off the interned primitive
+// rather than off the written parameter.
+fn_takes_args = (be: CBackend, ty: TyId, arity: usize) bool {
+    be.check.types.at(ty).match({
+        Fn(f) => (f.params.len == arity) || variadic_takes(be, f, arity),
+        _     => false,
+    })
+}
+
+variadic_takes = (be: CBackend, f: TyFn, arity: usize) bool {
+    (f.params.len > 0)
+        && be.check.prim_name(ty_at(f.params, f.params.len - 1)).eq("...")
+        && ((arity + 1) >= f.params.len)
 }

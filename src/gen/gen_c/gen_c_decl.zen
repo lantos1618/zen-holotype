@@ -36,6 +36,7 @@ Checker, Ctx = sema.sema_check
 Inst = sema.sema_inst
 type_from_ast, param_type = sema.sema_type
 member_named, self_ctx = sema.sema_member
+ty_at = sema.sema_cand
 Emit, order = gen.gen_emit
 sym_fn, sym_local, sym_member, sym_variant = gen.gen_name
 RES_PATH = gen.gen_name
@@ -50,6 +51,7 @@ emit_types = gen.gen_c.gen_c_layout
 Dest, block = gen.gen_c.gen_c_stmt
 takes_closure = gen.gen_c.gen_c_inline
 impl_member_at, by_arity = gen.gen_c.gen_c_impl
+method_sig = gen.gen_c.gen_c_member
 emit_main = gen.gen_c.gen_c_main
 emit_banner, emit_floor, emit_helpers, emit_print = gen.gen_c.gen_c_runtime
 emit_fs, emit_scope, emit_scope_floor = gen.gen_c.gen_c_runtime
@@ -290,8 +292,8 @@ method_in_decl = (be :: CBackend, m: MethodRef, x: Decl)
 // order `sema_supply.zen` states, and for its reason: a member the
 // declaration writes is never contested, and one an impl supplies is
 // reached only when the declaration has none.
-// AND AT THE ARITY THE CALL SITE RESOLVED, which is the same rule
-// `impl_member_of` reads an impl's members by: a name that names two
+// AND AT THE SIGNATURE THE CALL SITE RESOLVED, which is the same rule
+// `pick_member` reads a receiver's members by: a name that names two
 // members names neither of them on its own.
 method_member = (be :: CBackend, m: MethodRef, s: Struct)
                 Res<(), AllocError> {
@@ -299,7 +301,7 @@ method_member = (be :: CBackend, m: MethodRef, s: Struct)
     s.members.loop((h, mem) {
         member_named(mem, m.name).then(() { found.add(mem).try() });
     });
-    by_arity(found, m.arity).match({
+    by_sig(be, m, found).try().match({
         None      => supplied_member(be, m),
         Ok(mem)   => method_body(be, m, mem),
     })
@@ -308,10 +310,80 @@ method_member = (be :: CBackend, m: MethodRef, s: Struct)
 supplied_member = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
     found ::= be.alloc.Vec<Member>();
     impl_member_at(be, m.decl, m.name, found).try();
-    by_arity(found, m.arity).match({
+    by_sig(be, m, found).try().match({
         None      => Ok(()),
         Ok(mem)   => method_body(be, m, mem),
     })
+}
+
+// WHICH MEMBER THE CALL SITE MEANT, and not merely one of that arity.
+//
+// The entry carries the signature `sym_fn` mangled into the symbol this
+// body is about to be written under, so the member to lower is the one
+// whose own declared parameters ARE that signature. Asking arity picked
+// the first of `Display`'s two `toString`s for both of the queue's
+// entries: the sink body was emitted twice, once under the allocating
+// form's symbol, and every call to the second ran the first.
+//
+// ONE CANDIDATE IS NOT A CHOICE, so a name that names one member costs
+// the arity test and nothing else — `method_sig` resolves a whole
+// signature, and the queue is drained once per emitted function.
+by_sig = (be :: CBackend, m: MethodRef, found: Vec<Member>)
+         Res<Res<Member>, AllocError> {
+    (found.len < 2).match({
+        true  => Ok(by_arity(be, found, m.sig.len)),
+        false => member_with_sig(be, m, found),
+    })
+}
+
+member_with_sig = (be :: CBackend, m: MethodRef, found: Vec<Member>)
+                  Res<Res<Member>, AllocError> {
+    kept ::= be.alloc.Vec<Member>();
+    found.loop((h, mem) { keep_same_sig(be, m, mem, kept).try() });
+    Ok(kept_or_arity(be, kept, found, m.sig.len));
+}
+
+// ARITY WHEN NO SIGNATURE MATCHES, because not every queue entry's
+// signature was built by `method_sig`: `gen_c_fat.zen` erases a slot's
+// type parameters before mangling, so a thunk's entry names types this
+// comparison cannot reproduce. Falling back leaves every entry that
+// resolves today resolving the same way.
+kept_or_arity = (be: CBackend, kept: Vec<Member>, found: Vec<Member>,
+                 arity: usize) Res<Member> {
+    (kept.len > 0).match({
+        true  => kept.get(0),
+        false => by_arity(be, found, arity),
+    })
+}
+
+// A named helper rather than a `.then` inside the loop body: a loop
+// binding read inside a nested closure does not resolve.
+keep_same_sig = (be :: CBackend, m: MethodRef, mem: Member,
+                 kept :: Vec<Member>) Res<(), AllocError> {
+    mem.kind.match({
+        Function(f) => keep_if_same_sig(be, m, mem, f, kept),
+        _           => Ok(()),
+    })
+}
+
+// `be.inst` and not an empty one: the queue entry's instantiation was
+// entered before this body was reached, and it is the same `Inst` the
+// call site substituted its own signature through.
+keep_if_same_sig = (be :: CBackend, m: MethodRef, mem: Member, f: Function,
+                    kept :: Vec<Member>) Res<(), AllocError> {
+    sig ::= be.alloc.Vec<TyId>();
+    method_sig(be, m.self_ty, m.decl, f, m.decl.module.to_usize(),
+               be.inst, sig).try();
+    same_tys(sig, m.sig).match({
+        true  => kept.add(mem),
+        false => Ok(()),
+    })
+}
+
+same_tys = (a: Vec<TyId>, b: Vec<TyId>) bool {
+    (a.len == b.len) && Range(0, a.len).find((i) {
+        ty_at(a, i).eq(ty_at(b, i)) == false
+    }).match({ Ok(_) => false, None => true })
 }
 
 method_body = (be :: CBackend, m: MethodRef, mem: Member)
