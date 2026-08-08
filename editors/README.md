@@ -34,8 +34,8 @@ pipe: `initialize` answers with `hoverProvider: true`, `didOpen` is
 accepted, `textDocument/hover` on `s` in `s = a + b` answers `i32`,
 `shutdown` answers, and the process exits **0**.
 
-**Now the honest part — this server answers hover, publishes diagnostics,
-and refuses everything else:**
+**Now the honest part — this server answers hover and semantic tokens,
+publishes diagnostics, and refuses everything else:**
 
 - **Diagnostics work, and they are all three phases.** Open or edit a `.zen`
   file in a workspace and the server builds the root behind it and publishes
@@ -85,8 +85,16 @@ and refuses everything else:**
 - **Everything else is refused by name** with `-32601`: definition,
   completion, symbols, formatting, rename, references. Hover on a document
   that was never opened is `-32602`, not null.
-- **Colour does not come from the server** in either editor. Neovim gets it
-  from tree-sitter today; VS Code gets none until `semanticTokens` lands.
+- **Colour comes from two different places, and only one of them is the
+  server.** Neovim gets it from tree-sitter and always did; nothing about
+  Neovim changed when `semanticTokens` landed, and nothing needs to. VS
+  Code gets it from the server, because VS Code cannot load the
+  tree-sitter grammar this repository already has — `textDocument/
+  semanticTokens`, lexical, out of the compiler's own lexer. Comments,
+  literals, numbers, keywords and operators are coloured; **every other
+  identifier is one colour, because a lexer cannot tell a type from a
+  function from a variable and this server does not guess.** The section
+  below has the argument.
 
 If the launch shape ever changes, exactly one setting moves:
 
@@ -130,8 +138,16 @@ There is a 0.10-and-earlier snippet at the bottom of `nvim/zen.lua`.
 5. Put the cursor on an expression and press `K` for hover.
 
 `setup()` is three independent pieces and you can take them one at a time —
-`require("zen").filetype()`, `.treesitter()`, `.lsp()`. **The highlighting
-half works today**; only `.lsp()` is waiting on the transport.
+`require("zen").filetype()`, `.treesitter()`, `.lsp()`. Both halves work.
+
+**`.lsp()` deliberately declines the server's semantic tokens.** Neovim
+paints them above tree-sitter, and the server's are LEXICAL — every
+identifier comes back as `variable` — so leaving them on would take the
+colour off every type name in the buffer and replace a better answer with
+a worse one. Tree-sitter's query knows a type by its position; the lexer
+cannot. Set `vim.g.zen_semantic_tokens = true` before `setup()` to keep
+them anyway, which is the right thing to do on the day the server can
+tell a type from a function.
 
 The server is started with `root_markers = { "build.zen", ".git" }`.
 `build.zen` is first because `DESIGN.md` makes a build file a program and
@@ -184,7 +200,7 @@ Open a `.zen` file, hover over an expression. If anything goes wrong, the
 **Zen** output channel says what; set `zen.trace.server` to `verbose` to see
 the frames.
 
-### Syntax highlighting in VS Code: there is none, on purpose
+### Syntax highlighting in VS Code: from the compiler's lexer, not from a grammar
 
 `docs/design_lsp.md` §6 sketches a `contributes.grammars` entry pointing at
 `syntaxes/zen.tmLanguage.json`. **This extension deliberately does not ship
@@ -205,15 +221,46 @@ extension, so the grammar in `grammar/` cannot be reused there the way it is
 in Neovim.
 
 **The route that costs no second grammar is `textDocument/semanticTokens`,
-lexical form.** `docs/design_lsp.md` §2 lists it as L2 with the query already
-present — `scan` and `Token{kind, span}` in `src/lex/` — so the colours would
-come from the compiler's own lexer, which cannot disagree with the compiler.
-The server does not answer it yet.
+lexical form, and the server answers it.** `src/lsp/lsp_colour.zen` is the
+whole of it: one `scan`, a `TokenKind` mapped to a legend index, and the
+protocol's delta encoding. The colours come from the compiler's own lexer,
+so they cannot disagree with the compiler about what a token is — and no
+second grammar and no third generated artifact entered the tree.
 
-Until then `.zen` files in VS Code get bracket matching, comment toggling
-and correct word selection from `language-configuration.json` (which is
-configuration, not a grammar; its `wordPattern` is copied from the one
-`identifier` rule in `grammar/grammar.js`), and no colour.
+**It needs nothing.** No build, no `Checker`, no workspace, nothing read
+from any disk. So unlike hover and diagnostics — which need a root and
+about a second — colour appears on an unsaved buffer, in a folder-less
+window, and in a file that does not parse. A half-typed string literal
+costs the colour of that literal and nothing else.
+
+**What it colours, and what it refuses to.** Comments, string and
+character literals, numbers, `true`/`false`/`consume`/`@Self`/`@meta`/
+`@scope`, and the operators. **Every other identifier is `variable`,
+including every type and every function name** — and that is a refusal,
+not an oversight. A lexer cannot tell `Vec` from `add` from `n`; they are
+one token, and Zen has no keyword in front of a type. Colouring by
+capitalisation would be a second, wrong, specification of what a name
+means. Telling them apart needs sema, `docs/design_lsp.md` §2 prices it
+at L4, and until then a name is a name. Delimiters — `(`, `)`, `{`, `}`,
+`,`, `;`, `.`, `:` — are left in your theme's default foreground for the
+same reason: a brace is structure and calling it an operator would be
+inventing a fact.
+
+So Zen in VS Code is coloured about as far as a lexer can see it, and no
+further. **If you want types and calls in different colours, that is the
+sema-backed upgrade and it is not written.**
+
+**If a `.zen` file is still grey with the server running**, the cause is
+almost certainly not the server: VS Code applies semantic tokens only
+when semantic highlighting is on. `editor.semanticHighlighting.enabled`
+defaults to `configuredByTheme` and every stock theme enables it, but if
+yours does not, set it to `true`. The **Zen** output channel says this at
+startup rather than leaving you to find it.
+
+`.zen` files also get bracket matching, comment toggling and correct word
+selection from `language-configuration.json` (which is configuration, not
+a grammar; its `wordPattern` is copied from the one `identifier` rule in
+`grammar/grammar.js`).
 
 ---
 
@@ -251,14 +298,22 @@ and therefore sema's.
 | `initialized` / `exit` / `$/cancelRequest` | notifications, no reply |
 | `textDocument/didOpen` / `didChange` / `didClose` | **works**, Full sync only |
 | `textDocument/hover` | **works** — a type, a declared name's type, or a function's signature |
+| `textDocument/semanticTokens/full` | **works** — colour, from the lexer alone; no build, no workspace |
 | `textDocument/publishDiagnostics` | **works** — lex, parse and sema, grouped per file, cleared when fixed |
 | everything else | **refused by name** with JSON-RPC `-32601` |
 
 "Everything else" is `textDocument/definition`, `documentSymbol`,
-`completion`, `references`, `formatting`, `semanticTokens`, `signatureHelp`
-and `rename`. The refusal names the method and points at
-`docs/design_lsp.md`. An editor showing "method not supported" for those is
-the server being honest, not this configuration being wrong.
+`completion`, `references`, `formatting`, `signatureHelp`, `rename`, and
+`semanticTokens` in its `range` and `full/delta` shapes. The refusal names
+the method and points at `docs/design_lsp.md`. An editor showing "method
+not supported" for those is the server being honest, not this
+configuration being wrong.
+
+**`range` and `full/delta` are refused ON PURPOSE and are not advertised.**
+A client asks for either only when the server said it had it, so the
+capability is a bare `full: true`. Advertising one this server does not
+answer would produce `-32601` on every colour request, which VS Code
+renders as no colour at all with nothing on screen to say why.
 
 **Diagnostics are published, and they are the whole story or none of it.**
 Sema's come off the `Checker` the driver hands back; lex's and parse's come
@@ -349,6 +404,26 @@ Verified here, by running it:
   were run against them (drop the parse diagnostics, drop the clearing on
   either of its two routes, drop the note, drop the grouping, drop the
   unchanged-bytes skip). All six went red.
+- **Colour was driven over a real pipe, with a REALISTIC `initialize`.**
+  Not a minimal one: the probe sends the `capabilities` object VS Code
+  sends, including `textDocument.semanticTokens` with its 23 token types,
+  10 modifiers, `formats: ["relative"]`, `requests: {range, full: {delta}}`
+  and `multilineTokenSupport: false`. That distinction is not pedantry —
+  every gate in this repository drives the server directly, which is
+  exactly why nine of them could not see that `zen lsp` exited 2 on the
+  `--stdio` a real client appends. `zen lsp --stdio` answered
+  `initialize` with the legend, answered `semanticTokens/full`, answered
+  `shutdown` and exited **0**.
+- **The encoding was decoded back and checked by eye**, and then frozen as
+  `tests/corpus/lsp/colour_comes_from_the_lexer`, which does the decoding
+  inside the test: every five-integer group is added up and handed to
+  `to_pos`, so each row prints the bytes it colours. **Ten mutations were
+  run against it and nine went red** — `deltaLine` made absolute,
+  `deltaStartChar` never relative, two legend indices swapped, the legend
+  written out of index order, UTF-16 units counted as bytes, `length`
+  taken in bytes, multi-line splitting disabled, zero-length runs emitted,
+  `Ident` recoloured, and `range: true` advertised with no handler. The
+  tenth is an equivalent mutant and `docs/design_lsp.md` §2 says why.
 - **The tree-sitter grammar loads in Neovim 0.12.2** via
   `vim.treesitter.language.add` at the `--abi 14` the Makefile passes, and
   parses.
@@ -377,6 +452,17 @@ Verified here, by running it:
   above predates the transport and has not been repeated, and there is no
   VS Code on this machine. This is the single most valuable thing left to
   check, and it is a five-minute check for anyone with an editor open.
-- **Colour rendering was not eyeballed.** The Neovim highlighting is
-  verified as *captures produced at the right ranges*, not as pixels. Which
-  capture group maps to which colour is your colourscheme's business.
+- **Colour rendering was not eyeballed, in either editor.** The Neovim
+  highlighting is verified as *captures produced at the right ranges*, not
+  as pixels; which capture group maps to which colour is your
+  colourscheme's business. The VS Code colours are verified as *the right
+  five-integer groups over a real pipe*, decoded back to the exact bytes
+  they cover — but nobody has watched VS Code paint them. **This is the
+  five-minute check worth doing**: reload the window with a `.zen` file
+  open and comments should go grey, string and character literals should
+  take your theme's string colour, numbers its number colour, `true` and
+  `@Self` its keyword colour, and every other name one uniform colour.
+  If instead everything is grey, look at the **Zen** output channel: it
+  says whether the server started, and it names
+  `editor.semanticHighlighting.enabled` as the setting that discards
+  correct tokens without a word.
