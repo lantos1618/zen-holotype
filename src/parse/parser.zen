@@ -44,7 +44,7 @@ Alloc, AllocError = std.mem
 Ast = ast.ast_arena
 Span, Pos, Trivia, TriviaKind, TriviaRun, no_trivia, Ident = ast.ast_span
 Token, TokenKind, Source, Lexed, is_trivia, same, text_of, empty_eof = parse.parse_token
-Diag, diag, diag_at = parse.parse_diag
+Diag, diag, diag_at, truncated = parse.parse_diag
 
 // How deep a nested construct may be before the parser stops rather
 // than crashes. TESTING.md: "10,000 nested parens or blocks. A
@@ -571,8 +571,21 @@ Parser* = {
     error_at* = (self :: @Self, message: str, span: Span) Res<(), AllocError> {
         self.hushed().match({
             true  => self.nothing(),
-            false => { self.said = true; self.diags.add(diag(message, span)) },
+            false => self.say(message, span),
         });
+    }
+
+    // WHICH SENTENCE a rejection carries is `parse_diag.zen`'s and not
+    // this file's, including the one case where the caller's is
+    // overridden — a file that simply stopped. `truncated` is the whole
+    // of that rule; the two facts it needs about the cursor are the two
+    // passed in.
+    say = (self :: @Self, message: str, span: Span) Res<(), AllocError> {
+        self.said = true;
+        self.diags.add(diag(
+            truncated(message, span, self.at_eof(), self.here_span().start),
+            span,
+        ));
     }
 
     // SILENT UNTIL THE PARSER BELIEVES WHAT IT READS AGAIN. Two things

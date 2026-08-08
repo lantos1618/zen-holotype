@@ -1,0 +1,647 @@
+// src/sema/sema_cycle.zen
+// What a module may not depend on.
+//
+// Two rules, and they are about the module graph rather than about any
+// node in it — which is why they are here and not in `sema_decl.zen`'s
+// walk: nobody asks a declaration either question, and a program with
+// neither mistake in it has nothing for these to look at.
+//
+// AN IMPORT CYCLE IS NOT ONE OF THEM, and this compiler must not report
+// one. `ast_node.zen` is a single file precisely because "declarations
+// hold expressions, expressions hold types, a type holds an expression"
+// is one strongly connected component, and `std.core.display` needing
+// `String` from `std.text` while `std.text` wants `Display` for `str` is
+// a cycle in this tree's own standard library. A whole-program compiler
+// merges the graph: a type and a function have no initialisation order
+// to get wrong. `bootstrap/modules.py` allows them deliberately and says
+// so, and the two compilers have to draw this line in the same place or
+// a program means different things to each.
+//
+// A CYCLE IN TOP-LEVEL CONSTANTS is the different thing that stays an
+// error, and it is what "import cycle" names:
+//
+//     even.zen:  seed_odd = odd.odd        seed_even* = seed_odd + 1
+//     odd.zen:   seed_even = even.even     seed_odd*  = seed_even + 1
+//
+// There is no order that computes both, whatever the compiler does with
+// the modules. So the graph built below is over CONSTANTS and the
+// diagnostic is anchored on the IMPORT — because the dependency is what
+// the program means and the import is what the author wrote.
+//
+// A MODULE IMPORTING ITSELF is the second rule and it is not a cycle to
+// untangle, it is a typo: the one thing an import does is reach outside
+// the file, and this one names the file it is written in. It gets its
+// own sentence for that reason, and it is checked without building a
+// graph at all.
+//
+// THESE RENDER RATHER THAN RAISE, which is the one place this folder's
+// "a diagnostic is a value" shape does not fit. `sema_diag.zen` carries
+// four payload shapes and states that "a fifth shape would be a sign
+// that a check is doing two things" — and a cycle's payload is a LIST OF
+// MODULE NAMES, which is exactly that fifth shape. So the sentence is
+// built here, where the list is, and handed to the driver as text in the
+// same `String` sema's own diagnostics were rendered into. Reported: if
+// a second check ever wants a list payload, that is the second-caller
+// rule firing and `SemaFault` should grow one.
+//
+// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
+// is one question — what may a module depend on — and the two rules are
+// the two ways to answer it wrong. They share the thing that is hard,
+// which is deciding whether a written import path denotes a given module
+// (`names_module`), and they share where the reader is sent, which is
+// that import. Splitting them would put one line of a two-line law in
+// each of two files and duplicate the resolution both stand on.
+
+Ast, Module, Decl, Expr, Import, Pos, Span, ExprId = ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+World, Def, DefKind, dotted, module_display = sema.sema_def
+write_pos = sema.sema_diag
+
+// Every module-level constant, and which module wrote it.
+//
+// A `Span` and not an `ExprId`, because the names a constant's value
+// mentions are found by SCANNING the expression arena for what this span
+// contains. That is `ast_find.zen`'s technique and it is here for
+// `ast_find.zen`'s reason: "a walk would need every node form to know
+// its own children — the thing the id'd arenas exist to avoid". A walk
+// that forgot one form would silently miss a cycle and report nothing; a
+// span contains what it contains, whatever forms are added later.
+ConstSite = {
+    module: usize,
+    span:   Span,
+}
+
+// One module needing a constant of another before it can compute its
+// own. Both ends are indices into the `World`'s tables, which are the
+// modules in the order the walk found them.
+Edge = {
+    from: usize,
+    to:   usize,
+}
+
+// BOTH RULES, AND THE COUNT THEY OWE. The driver adds the count to its
+// tally and prints `out`, exactly as it does for sema's own diagnostics
+// — `zen_build.zen`'s `check_tree` is the one caller and the shape it
+// already had.
+check_module_graph* = (a: Alloc, tree: Ast, w: World, out :: String)
+                      Res<usize, AllocError> {
+    n ::= self_imports(a, tree, w, out).try();
+    n = n + const_cycles(a, tree, w, out).try();
+    Ok(n);
+}
+
+// ---------------------------------------------------------------------
+// a module that imports itself
+// ---------------------------------------------------------------------
+
+self_imports = (a: Alloc, tree: Ast, w: World, out :: String)
+               Res<usize, AllocError> {
+    n ::= 0;
+    Range(0, tree.module_count()).loop((h, mi) {
+        n = n + module_self_imports(a, tree, w, mi, out).try();
+    });
+    Ok(n);
+}
+
+module_self_imports = (a: Alloc, tree: Ast, w: World, mi: usize,
+                       out :: String) Res<usize, AllocError> {
+    tree.module_at(mi).match({
+        None  => Ok(0),
+        Ok(m) => decls_self_import(a, w, m, mi, out),
+    })
+}
+
+decls_self_import = (a: Alloc, w: World, m: Module, mi: usize, out :: String)
+                    Res<usize, AllocError> {
+    n ::= 0;
+    m.decls.loop((h, d) {
+        n = n + decl_self_import(a, w, m, d, mi, out).try();
+    });
+    Ok(n);
+}
+
+decl_self_import = (a: Alloc, w: World, m: Module, d: Decl, mi: usize,
+                    out :: String) Res<usize, AllocError> {
+    d.kind.match({
+        Import(im) => import_self(a, w, m, im, mi, out),
+        _          => Ok(0),
+    })
+}
+
+import_self = (a: Alloc, w: World, m: Module, im: Import, mi: usize,
+               out :: String) Res<usize, AllocError> {
+    path = dotted(a, im.module).try();
+    names_module(w, path, mi).match({
+        false => Ok(0),
+        true  => say_self_import(m, im.module.span, out),
+    })
+}
+
+// ANCHORED ON THE MODULE PATH and not on the names it binds. One line
+// may bind three names and every one of them is fine; the mistake is the
+// path they were asked to come from.
+say_self_import = (m: Module, at: Span, out :: String)
+                  Res<usize, AllocError> {
+    write_where(out, at).try();
+    out.add_bytes("module ").try();
+    out.add_bytes(module_display(m.name)).try();
+    out.add_bytes(" imports itself: an import is the one declaration that reaches OUTSIDE the file, and this one names the file it is written in").try();
+    out.add_bytes("\n").try();
+    Ok(1);
+}
+
+// ---------------------------------------------------------------------
+// a cycle in top-level constants
+// ---------------------------------------------------------------------
+
+// NO EDGES, NO WORK. A program whose constants never reach across a
+// module boundary — which is nearly every program, and this compiler's
+// own source is one — pays a single scan of the expression arena and
+// stops. The reachability below is only ever run on a graph that has
+// something in it.
+const_cycles = (a: Alloc, tree: Ast, w: World, out :: String)
+               Res<usize, AllocError> {
+    es = const_edges(a, tree, w).try();
+    (es.len == 0).match({
+        true  => Ok(0),
+        false => cycles_in(a, tree, w, es, out),
+    })
+}
+
+cycles_in = (a: Alloc, tree: Ast, w: World, es: Vec<Edge>, out :: String)
+            Res<usize, AllocError> {
+    n ::= 0;
+    Range(0, w.count()).loop((h, mi) {
+        n = n + cycle_at(a, tree, w, es, mi, out).try();
+    });
+    Ok(n);
+}
+
+// A module is ON a cycle exactly when it can reach itself in one hop or
+// more, which is what `reach_from` answers and why it seeds its frontier
+// with `start` and its result without it.
+cycle_at = (a: Alloc, tree: Ast, w: World, es: Vec<Edge>, mi: usize,
+            out :: String) Res<usize, AllocError> {
+    onward = reach_from(a, es, mi).try();
+    holds_index(onward, mi).match({
+        false => Ok(0),
+        true  => report_component(a, tree, w, es, mi, onward, out),
+    })
+}
+
+// ONE SENTENCE PER CYCLE, not one per module on it. Every member can
+// reach itself, so every member would otherwise report the same cycle
+// rotated — and the reader would be told the same thing three times.
+report_component = (a: Alloc, tree: Ast, w: World, es: Vec<Edge>, mi: usize,
+                    onward: Vec<usize>, out :: String)
+                   Res<usize, AllocError> {
+    comp = component_of(a, es, mi, onward).try();
+    first_named(w, comp, mi).match({
+        false => Ok(0),
+        true  => say_cycle(a, tree, w, es, mi, comp, out),
+    })
+}
+
+// The modules that need `mi` and that `mi` needs: a strongly connected
+// component, computed as two reachabilities rather than as Tarjan.
+//
+// That is a size decision made once and worth stating. Tarjan with no
+// recursion budget is an explicit work stack and a page of code; two
+// reachabilities are eight lines and cost `O(V·E)` on a graph whose
+// edges are cross-module CONSTANT uses. A program has a handful.
+component_of = (a: Alloc, es: Vec<Edge>, mi: usize, onward: Vec<usize>)
+               Res<Vec<usize>, AllocError> {
+    comp ::= a.Vec<usize>();
+    comp.add(mi).try();
+    onward.loop((h, j) {
+        keep_if_mutual(a, es, mi, j, comp).try();
+    });
+    Ok(comp);
+}
+
+keep_if_mutual = (a: Alloc, es: Vec<Edge>, mi: usize, j: usize,
+                  comp :: Vec<usize>) Res<(), AllocError> {
+    (j == mi).match({
+        true  => Ok(()),
+        false => add_if_reaches(a, es, mi, j, comp),
+    })
+}
+
+add_if_reaches = (a: Alloc, es: Vec<Edge>, mi: usize, j: usize,
+                  comp :: Vec<usize>) Res<(), AllocError> {
+    back = reach_from(a, es, j).try();
+    holds_index(back, mi).match({
+        false => Ok(()),
+        true  => comp.add(j),
+    })
+}
+
+// Is `mi` the earliest-NAMED module on this cycle?
+//
+// Canonicalising on the name is what makes the sentence stable: the same
+// cycle reads `even -> odd -> even` whichever module the walk happened
+// to enter it from. Index order would have been stable too and would
+// have depended on the walk, which is a loader's business and not a
+// program's meaning. `bootstrap/modules.py` canonicalises on the name
+// for the same reason.
+first_named = (w: World, comp: Vec<usize>, mi: usize) bool {
+    Range(0, comp.len).find((k) {
+        module_name_of(w, index_at(comp, k, mi)).before(module_name_of(w, mi))
+    }).match({
+        Ok(_) => false,
+        None  => true,
+    })
+}
+
+module_name_of = (w: World, mi: usize) str {
+    w.table_at(mi).match({
+        Ok(t) => t.name,
+        None  => "",
+    })
+}
+
+say_cycle = (a: Alloc, tree: Ast, w: World, es: Vec<Edge>, mi: usize,
+             comp: Vec<usize>, out :: String) Res<usize, AllocError> {
+    path = shortest_cycle(a, es, mi, comp).try();
+    at = edge_span(a, tree, w, mi, index_at(path, 1, mi)).try();
+    write_where(out, at).try();
+    out.add_bytes("import cycle: ").try();
+    Range(0, path.len).loop((h, k) {
+        write_hop(out, module_name_of(w, index_at(path, k, mi)), k).try();
+    });
+    out.add_bytes(": a top-level constant needs a value from a module whose own needs it back, and no order computes both").try();
+    out.add_bytes("\n").try();
+    Ok(1);
+}
+
+write_hop = (out :: String, name: str, k: usize) Res<(), AllocError> {
+    (k > 0).then(() { out.add_bytes(" -> ").try(); });
+    out.add_bytes(module_display(name))
+}
+
+// A shortest walk from `start` back to `start`, `start` at both ends.
+//
+// Breadth first, so the sentence names the tightest cycle there is
+// rather than whichever one a depth-first walk wandered into — a reader
+// handed a nine-module path for a two-module mistake has been told the
+// truth and not the answer.
+//
+// `prev` holds an index into `order` rather than a module, which is what
+// lets the path be walked back out with no map: `order` is append-only
+// and a module enters it exactly once.
+shortest_cycle = (a: Alloc, es: Vec<Edge>, start: usize, comp: Vec<usize>)
+                 Res<Vec<usize>, AllocError> {
+    order ::= a.Vec<usize>();
+    prev ::= a.Vec<usize>();
+    closed ::= a.Vec<usize>();
+    order.add(start).try();
+    prev.add(0).try();
+    i ::= 0;
+    loop(() { i < order.len && closed.len == 0 }, (h) {
+        from = index_at(order, i, start);
+        at = i;
+        es.loop((g, e) {
+            visit_edge(e, from, at, start, comp, order, prev, closed).try();
+        });
+        i = i + 1;
+    });
+    unwind_cycle(a, order, prev, closed, start)
+}
+
+visit_edge = (e: Edge, from: usize, at: usize, start: usize, comp: Vec<usize>,
+              order :: Vec<usize>, prev :: Vec<usize>, closed :: Vec<usize>)
+             Res<(), AllocError> {
+    (e.from == from).match({
+        false => Ok(()),
+        true  => take_edge(e.to, at, start, comp, order, prev, closed),
+    })
+}
+
+take_edge = (to: usize, at: usize, start: usize, comp: Vec<usize>,
+             order :: Vec<usize>, prev :: Vec<usize>, closed :: Vec<usize>)
+            Res<(), AllocError> {
+    (to == start).match({
+        true  => close_cycle(at, closed),
+        false => open_edge(to, at, comp, order, prev),
+    })
+}
+
+// The FIRST edge back to the start wins. Breadth first means it is on a
+// shortest walk, and a second one could only name a longer one.
+close_cycle = (at: usize, closed :: Vec<usize>) Res<(), AllocError> {
+    (closed.len == 0).match({
+        false => Ok(()),
+        true  => closed.add(at),
+    })
+}
+
+// Inside the component only: an edge leaving it can never come back, so
+// following one would search the whole graph to prove nothing.
+open_edge = (to: usize, at: usize, comp: Vec<usize>,
+             order :: Vec<usize>, prev :: Vec<usize>) Res<(), AllocError> {
+    (holds_index(comp, to) && !holds_index(order, to)).match({
+        false => Ok(()),
+        true  => { order.add(to).try(); prev.add(at) },
+    })
+}
+
+// The path, start first, read back off the predecessor chain and
+// reversed into place. `prev` always points EARLIER in `order` — a
+// module is appended after the one that reached it — so the walk back
+// strictly decreases and reaches 0.
+unwind_cycle = (a: Alloc, order: Vec<usize>, prev: Vec<usize>,
+                closed: Vec<usize>, start: usize) Res<Vec<usize>, AllocError> {
+    back ::= a.Vec<usize>();
+    at ::= index_at(closed, 0, 0);
+    back.add(index_at(order, at, start)).try();
+    loop(() { at > 0 }, (h) {
+        at = index_at(prev, at, 0);
+        back.add(index_at(order, at, start)).try();
+    });
+    path ::= a.Vec<usize>();
+    Range(0, back.len).loop((h, k) {
+        path.add(index_at(back, back.len - 1 - k, start)).try();
+    });
+    path.add(start).try();
+    Ok(path);
+}
+
+// Every module reachable from `start` by ONE HOP OR MORE. `start` seeds
+// the frontier and not the result, so it appears in the answer exactly
+// when something leads back to it — which is the whole cycle test.
+reach_from = (a: Alloc, es: Vec<Edge>, start: usize)
+             Res<Vec<usize>, AllocError> {
+    seen ::= a.Vec<usize>();
+    front ::= a.Vec<usize>();
+    front.add(start).try();
+    i ::= 0;
+    loop(() { i < front.len }, (h) {
+        from = index_at(front, i, start);
+        i = i + 1;
+        es.loop((g, e) { step_reach(e, from, seen, front).try(); });
+    });
+    Ok(seen);
+}
+
+step_reach = (e: Edge, from: usize, seen :: Vec<usize>, front :: Vec<usize>)
+             Res<(), AllocError> {
+    (e.from == from && !holds_index(seen, e.to)).match({
+        false => Ok(()),
+        true  => { seen.add(e.to).try(); front.add(e.to) },
+    })
+}
+
+// ---------------------------------------------------------------------
+// the constant graph
+// ---------------------------------------------------------------------
+
+// ONE SCAN OF THE EXPRESSION ARENA, and every name in it that is written
+// inside a module-level constant, resolved. Everything else falls out on
+// its kind, which is what makes scanning a whole program's expressions
+// on every build cheap enough to do.
+const_edges = (a: Alloc, tree: Ast, w: World) Res<Vec<Edge>, AllocError> {
+    sites = const_sites(a, tree).try();
+    es ::= a.Vec<Edge>();
+    eid ::= ExprId(index: 0);
+    Range(0, tree.expr_ids()).loop((h, i) {
+        name_edges(a, tree, w, sites, tree.expr_at(eid), es).try();
+        eid = ExprId(index: eid.index + 1);
+    });
+    Ok(es);
+}
+
+const_sites = (a: Alloc, tree: Ast) Res<Vec<ConstSite>, AllocError> {
+    sites ::= a.Vec<ConstSite>();
+    Range(0, tree.module_count()).loop((h, mi) {
+        module_const_sites(tree, mi, sites).try();
+    });
+    Ok(sites);
+}
+
+module_const_sites = (tree: Ast, mi: usize, sites :: Vec<ConstSite>)
+                     Res<(), AllocError> {
+    tree.module_at(mi).match({
+        None  => Ok(()),
+        Ok(m) => decl_const_sites(m, mi, sites),
+    })
+}
+
+decl_const_sites = (m: Module, mi: usize, sites :: Vec<ConstSite>)
+                   Res<(), AllocError> {
+    m.decls.loop((h, d) {
+        keep_const_site(d, mi, sites).try();
+    });
+    Ok(());
+}
+
+keep_const_site = (d: Decl, mi: usize, sites :: Vec<ConstSite>)
+                  Res<(), AllocError> {
+    d.kind.match({
+        Const(_) => sites.add(ConstSite(module: mi, span: d.span)),
+        _        => Ok(()),
+    })
+}
+
+name_edges = (a: Alloc, tree: Ast, w: World, sites: Vec<ConstSite>, e: Expr,
+              es :: Vec<Edge>) Res<(), AllocError> {
+    e.kind.match({
+        Name(n) => site_edges(a, w, sites, e.span, n.text, es),
+        _       => Ok(()),
+    })
+}
+
+site_edges = (a: Alloc, w: World, sites: Vec<ConstSite>, at: Span, name: str,
+              es :: Vec<Edge>) Res<(), AllocError> {
+    site_of(sites, at).match({
+        None   => Ok(()),
+        Ok(mi) => resolved_edges(a, w, mi, name, es),
+    })
+}
+
+// Which module-level constant this expression is written inside.
+site_of = (sites: Vec<ConstSite>, at: Span) Res<usize> {
+    Range(0, sites.len).find((k) {
+        sites.get(k).match({
+            Ok(s) => encloses(s.span, at),
+            None  => false,
+        })
+    }).match({
+        Ok(k) => site_module(sites, k),
+        None  => None,
+    })
+}
+
+site_module = (sites: Vec<ConstSite>, k: usize) Res<usize> {
+    sites.get(k).match({
+        Ok(s) => Ok(s.module),
+        None  => None,
+    })
+}
+
+// Is `at` inside `outer`, IN THE SAME FILE?
+//
+// `ast_find.inside` is this question asked without a file, which is the
+// one thing that cannot be dropped here: two modules' spans differ in
+// their file and overlap in their lines, so a containment test without
+// it would read one module's name as being inside another's constant.
+//
+// The positions are compared FIRST and they are integers. This runs once
+// per name in the program against every module-level constant in it, and
+// a file-name compare on every pair would be the whole cost of the check.
+encloses = (outer: Span, at: Span) bool {
+    at.start.at_or_after(outer.start)
+        && outer.end.at_or_after(at.end)
+        && outer.file.eq(at.file)
+}
+
+// Line first, then byte column. Written here rather than imported as
+// `ast_find.before` because `before` is ALSO `str`'s byte order and
+// `first_named` calls that one three lines' worth of scrolling away;
+// two functions of one name in one file is a reader's problem whatever
+// the resolver makes of it.
+at_or_after = (a: Pos, b: Pos) bool {
+    a.line > b.line || (a.line == b.line && a.col >= b.col)
+}
+
+// EVERY declaration this name could mean, filtered to the constants that
+// live somewhere else. A name resolving to a constant of this same module
+// is an ordering question inside one file, which is not this rule.
+resolved_edges = (a: Alloc, w: World, mi: usize, name: str, es :: Vec<Edge>)
+                 Res<(), AllocError> {
+    found ::= a.Vec<Def>();
+    w.defs_of(mi, name, found).try();
+    found.loop((h, d) {
+        keep_const_edge(d, mi, es).try();
+    });
+    Ok(());
+}
+
+keep_const_edge = (d: Def, mi: usize, es :: Vec<Edge>) Res<(), AllocError> {
+    other = d.id.module.to_usize();
+    (is_const(d.kind) && other != mi).match({
+        false => Ok(()),
+        true  => add_edge(mi, other, es),
+    })
+}
+
+is_const = (k: DefKind) bool {
+    k.match({
+        ConstDef => true,
+        _        => false,
+    })
+}
+
+add_edge = (from: usize, to: usize, es :: Vec<Edge>) Res<(), AllocError> {
+    has_edge(es, from, to).match({
+        true  => Ok(()),
+        false => es.add(Edge(from: from, to: to)),
+    })
+}
+
+has_edge = (es: Vec<Edge>, from: usize, to: usize) bool {
+    Range(0, es.len).find((k) {
+        es.get(k).match({
+            Ok(e) => e.from == from && e.to == to,
+            None  => false,
+        })
+    }).match({
+        Ok(_) => true,
+        None  => false,
+    })
+}
+
+// ---------------------------------------------------------------------
+
+// WHERE THE READER IS SENT: the import in `from` that names `to`.
+//
+// The dependency is between two CONSTANTS, but nobody writes a
+// dependency — they write an import, and that is the line to change. The
+// first such import wins, and the module's own span is the fallback for
+// the one way an edge exists without an import: the prelude, which every
+// module gets without writing a line.
+edge_span = (a: Alloc, tree: Ast, w: World, from: usize, to: usize)
+            Res<Span, AllocError> {
+    tree.module_at(from).match({
+        None  => Ok(nowhere()),
+        Ok(m) => module_edge_span(a, w, m, to),
+    })
+}
+
+module_edge_span = (a: Alloc, w: World, m: Module, to: usize)
+                   Res<Span, AllocError> {
+    spans ::= a.Vec<Span>();
+    m.decls.loop((h, d) {
+        keep_import_span(a, w, d, to, spans).try();
+    });
+    spans.get(0).match({
+        Ok(s) => Ok(s),
+        None  => Ok(m.span),
+    })
+}
+
+keep_import_span = (a: Alloc, w: World, d: Decl, to: usize,
+                    spans :: Vec<Span>) Res<(), AllocError> {
+    d.kind.match({
+        Import(im) => keep_if_names(a, w, im, to, spans),
+        _          => Ok(()),
+    })
+}
+
+keep_if_names = (a: Alloc, w: World, im: Import, to: usize,
+                 spans :: Vec<Span>) Res<(), AllocError> {
+    path = dotted(a, im.module).try();
+    names_module(w, path, to).match({
+        false => Ok(()),
+        true  => spans.add(im.module.span),
+    })
+}
+
+// Does this dotted path denote module `mi`? `index_of` and not a string
+// compare, because a folder root answers to two spellings and both of
+// them are the same module.
+names_module = (w: World, path: str, mi: usize) bool {
+    w.index_of(path).match({
+        Ok(j) => j == mi,
+        None  => false,
+    })
+}
+
+// A module the tree does not have is a module nothing can point at. It
+// is unreachable — `edge_span` is only ever asked about a module an edge
+// came out of — and exists because a fallback has to have a value.
+nowhere = () Span {
+    Span(file: "", start: Pos(line: 0, col: 0), end: Pos(line: 0, col: 0))
+}
+
+// `file:line:col: `, which is how every diagnostic this compiler prints
+// opens. `sema_diag.render` writes the same three fields for a `Diag`;
+// this writes them for a sentence that is not one.
+write_where = (out :: String, at: Span) Res<(), AllocError> {
+    out.add_bytes(at.file).try();
+    out.add_bytes(":").try();
+    write_pos(out, at.start.line, at.start.col).try();
+    out.add_bytes(": ").try();
+    Ok(());
+}
+
+index_at = (v: Vec<usize>, k: usize, fallback: usize) usize {
+    v.get(k).match({
+        Ok(x) => x,
+        None  => fallback,
+    })
+}
+
+holds_index = (v: Vec<usize>, x: usize) bool {
+    Range(0, v.len).find((k) {
+        v.get(k).match({
+            Ok(y) => y == x,
+            None  => false,
+        })
+    }).match({
+        Ok(_) => true,
+        None  => false,
+    })
+}
