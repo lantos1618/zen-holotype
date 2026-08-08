@@ -19,17 +19,25 @@
 //   - the SPACE AFTER A DECLARATION. Whatever ran to the end of the
 //     line behind the last token is gone.
 //
+//   - the WIDTH OF THE GAP IN FRONT OF A MATCH ARM'S `=>`, which is
+//     `fmt_decl.zen` and is the one rule here that knows what it is
+//     looking at. `DESIGN.md` asks for aligned arms and the parser
+//     already locates every `=>` for exactly this; nothing else about
+//     an arm is touched.
+//
 // WHAT IT PASSES THROUGH VERBATIM, said out loud because a formatter
 // that guesses is worse than one that abstains: EVERY DECLARATION'S OWN
-// TEXT. A struct body, a function signature, a match's arms, an enum's
-// variants, the alignment of a trailing comment — all of it is the
-// author's bytes, copied. The forms are modelled in the AST and could
-// be rebuilt; rebuilding them is a set of layout decisions nobody has
-// written down yet, and a printer inventing them would silently reflow
-// a hundred and twenty files on its first run. `docs/PLAN.md` names the
-// rules that are owed (align `=>` in match arms, short arms on one
-// line, wrap long ones) and they arrive as a `fmt_decl.zen` beside
-// this file, against a corpus, one form at a time.
+// TEXT, minus that one gap. A struct body, a function signature, an
+// arm's body, an enum's variants, the alignment of a trailing comment —
+// all of it is the author's bytes, copied. The forms are modelled in the
+// AST and could be rebuilt; rebuilding them is a set of layout decisions
+// nobody has written down yet, and a printer inventing them would
+// silently reflow a hundred and twenty files on its first run. The rules
+// `docs/PLAN.md` still owes — short arms on one line, wrap long ones, a
+// trailing comma on the last — arrive in `fmt_decl.zen` beside this
+// file, against a corpus, one form at a time. Each of them MOVES or ADDS
+// a token, which is the line the guard below draws and why `=>`
+// alignment, which moves neither, could go first.
 //
 // WHAT IT REFUSES: a file with lexical or syntactic faults. A tree with
 // a hole in it is a tree whose spans no longer describe the source, and
@@ -56,6 +64,7 @@ same = parse.parse_token
 
 Src* = fmt.fmt_src
 Out* = fmt.fmt_out
+Aligned* = fmt.fmt_decl
 
 // What formatting one file came to.
 //
@@ -103,7 +112,7 @@ rejected = (a: Alloc, diags: Vec<Diag>) Res<Render, AllocError> {
 printed = (a: Alloc, src: Src, tree: Ast, m: Module, lexed: Lexed)
           Res<Render, AllocError> {
     out ::= a.Out().try();
-    write_module(out, src, tree, m).try();
+    write_module(out, a, a.Aligned(src, tree).try(), src, tree, m).try();
     ok = unchanged_tokens(a, lexed, out.view()).try();
     Ok(Render(text: out.text, diags: a.Vec<Diag>(), faithful: ok));
 }
@@ -119,11 +128,11 @@ printed = (a: Alloc, src: Src, tree: Ast, m: Module, lexed: Lexed)
 // why: "a formatter that has to merge two lists back into one order is
 // a formatter that will get it wrong once". So there is one loop here
 // and no second pass.
-write_module* = (out :: Out, src: Src, tree: Ast, m: Module)
-                Res<(), AllocError> {
+write_module* = (out :: Out, a: Alloc, al: Aligned, src: Src, tree: Ast,
+                 m: Module) Res<(), AllocError> {
     m.decls.loop((h, i, d) {
         write_trivia(out, tree, d.leading).try();
-        out.say(decl_text(src, tree, m, i, d)).try();
+        write_decl(out, a, al, src, tree, m, i, d).try();
     });
     write_trivia(out, tree, m.trailing).try();
     Ok(());
@@ -168,10 +177,21 @@ write_trivia = (out :: Out, tree: Ast, run: TriviaRun) Res<(), AllocError> {
 // THE ONE THING DELETED IS TRAILING WHITESPACE, which the guard proves
 // is not a token, and blank lines — which are `Blank` trivia in the
 // NEXT item's leading run, and come back from there.
-decl_text = (src: Src, tree: Ast, m: Module, i: usize, d: Decl) str {
+//
+// AND THE ONE THING WIDENED OR NARROWED is the run of spaces in front
+// of a match arm's `=>`, which is `fmt_decl.zen` and is this stage's
+// first rule that knows what it is looking at. It is applied HERE,
+// inside the verbatim copy, rather than by a printer that rebuilds the
+// arm: the bytes are still the author's and only the width of a gap the
+// parser located is set. Everything else about the declaration — where
+// its body goes, how its arms wrap — is still copied and still owed.
+write_decl = (out :: Out, a: Alloc, al: Aligned, src: Src, tree: Ast,
+              m: Module, i: usize, d: Decl) Res<(), AllocError> {
     from = src.offset(d.span.start);
     to = src.offset(next_start(tree, m, i));
-    src.slice_at(from, src.trim_back(from, to))
+    text = al.padded(a, src, from, src.trim_back(from, to),
+                     d.span.start.line).try();
+    out.say(text.view())
 }
 
 // Where the next thing this file prints begins: the following
