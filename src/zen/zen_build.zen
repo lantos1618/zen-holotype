@@ -36,10 +36,10 @@
 // is one build, and its parts are the five phases of one — they share
 // the `Build` that holds the tree, the tally and the authority, and
 // splitting the walk from the check would put the `Ast` in one file and
-// the only thing that finishes it in another. The one part that is NOT
-// about a build has now actually left: what a module NAME is is a fact
-// about a path, it never mentioned a `Build`, and it is `zen_path.zen`
-// — free functions, so a second driver reads the same rule.
+// the only thing that finishes it in another. What is NOT about a build
+// has left: what a module is CALLED and where its bytes ARE never
+// mentioned a `Build` and is `zen_path.zen` — free functions, so a
+// second driver reads one rule.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -49,7 +49,7 @@ FsError = std.env
 
 Ast = ast.ast_arena
 Module, Alias, Named = ast.ast_node
-QualifiedName = ast.ast_span
+Pos, Span, QualifiedName = ast.ast_span
 
 // THE `Diag` COLLISION. `lex`, `parse` and `sema` each export a type
 // called `Diag` and a `message` beside it, and `A, B = module` cannot
@@ -69,6 +69,11 @@ QualifiedName = ast.ast_span
 // language would need rename-on-import. Reported.
 message = lex.lex
 
+// WHAT A DIAGNOSTIC IS ONCE IT LEAVES A PHASE, and it is `parse`'s
+// because that file's own header asked for it: "not a parser type, a
+// compiler type, and `lex`, `sema` and `gen` will all want it".
+Diag, diag, say = parse.parse_diag
+
 scan, Source, Lexed = lex.lex
 Parser, module = parse.parse
 Checker, check_all = sema.sema
@@ -83,15 +88,15 @@ Job = zen.zen_cli
 // longer lives in this file: `zen_path.zen` holds it, and this file's
 // header has claimed since it was written that it should.
 //
-// Only the four called by BARE NAME are here. `base_of` and
+// Only the ones called by BARE NAME are here. `base_of` and
 // `after_last_slash` take a `str` first and are reached through one, so
 // they travel with the value and importing them would say nothing.
-module_name, relative_to = zen.zen_path
-slash_for, last_of = zen.zen_path
+slash_for = zen.zen_path
+unit_at, candidate, file_of = zen.zen_path
 
 // `Unit` went with them for the same reason — what a module is CALLED
-// and where its bytes ARE is a fact about a path, and the two functions
-// above are what fill its fields.
+// and where its bytes ARE is a fact about a path, and `unit_at` above
+// is what fills its fields.
 Unit* = zen.zen_path
 
 // What order the walk reaches modules in: arithmetic on an index.
@@ -114,6 +119,23 @@ Build* = {
 
     faults* :: usize = 0,
     units* :: usize = 0,
+
+    // EVERY LEX AND PARSE DIAGNOSTIC THIS BUILD FOUND, in the order it
+    // found them; `faults` is only how many.
+    //
+    // A count was all there was: both phases hand their diagnostics
+    // over intact and the driver printed them and let them go, so the
+    // only consumer one could have was a terminal — and the note the
+    // parser had already built was not even that. `publishDiagnostics`
+    // needs the span, the sentence and the second place to look as
+    // VALUES (`docs/design_lsp.md` §5), and a server re-lexing for
+    // positions the driver already had is the second implementation
+    // that document exists to prevent.
+    //
+    // SEMA'S ARE NOT IN HERE: a `SemaFault` renders against the type
+    // store that decided it, and the `Checker` holding both already
+    // answers `diag_count`.
+    diags* :: Vec<Diag>,
 
     // WHICH ORDER THE WALK REACHES MODULES IN; empty is the order the
     // imports are written in. `zen_order.zen` is the whole of it.
@@ -175,7 +197,7 @@ Build* = {
     // caller who chose the name is owed the name back.
     entry_named = (self :: @Self, named: str) Res<Unit, AllocError> {
         path ::= self.alloc.String("{}/{}", self.root, named).try();
-        self.unit_at(path.view())
+        unit_at(self.alloc, self.root, path.view())
     }
 
     // No `--entry`, so the entry point is a MODULE NAME resolved by the
@@ -193,7 +215,7 @@ Build* = {
     // `scripts/fixpoint.sh` rides: the gate runs `zen build src` with
     // no entry, so this order is load-bearing and must not move.
     entry_probed = (self :: @Self) Res<Unit, AllocError> {
-        first = self.candidate(ENTRY).try();
+        first = candidate(self.env, self.alloc, self.root, ENTRY).try();
         self.env.fs.exists(first.path).match({
             true  => Ok(first),
             false => self.entry_after_main(),
@@ -201,36 +223,12 @@ Build* = {
     }
 
     entry_after_main = (self :: @Self) Res<Unit, AllocError> {
-        second = self.candidate(self.root.base_of()).try();
+        base = self.root.base_of();
+        second = candidate(self.env, self.alloc, self.root, base).try();
         self.env.fs.exists(second.path).match({
             true  => Ok(second),
-            false => self.candidate("zen"),
+            false => candidate(self.env, self.alloc, self.root, "zen"),
         })
-    }
-
-    // `<root>/<name>.zen`, or `<root>/<name>/<name>.zen` when the name
-    // is a folder. A candidate is returned whether or not it is there —
-    // a root with no entry is reported by the READ, which names the
-    // file, and a probe reporting it too would be one mistake twice —
-    // so the flat form also wins when NEITHER exists: the shorter path
-    // is the one a diagnostic should carry.
-    candidate = (self: @Self, name: str) Res<Unit, AllocError> {
-        flat ::= self.alloc.String("{}/{}.zen", self.root, name).try();
-        nest ::= self.alloc.String("{}/{}/{}.zen", self.root, name, name).try();
-        take_flat = self.env.fs.exists(flat.view())
-                 || !self.env.fs.exists(nest.view());
-        take_flat.match({
-            true  => self.unit_at(flat.view()),
-            false => self.unit_at(nest.view()),
-        })
-    }
-
-    // The module a FILE is. The name is a pure function of the path and
-    // never of the spelling that found it, so `std.core` and
-    // `std.core.core` are one module read once — see `Unit`.
-    unit_at = (self: @Self, path: str) Res<Unit, AllocError> {
-        name = module_name(self.alloc, self.root, path).try();
-        Ok(Unit(name: name, path: path, rel: relative_to(self.root, path)));
     }
 
     // The whole program, breadth first from the entry. `seen` is both
@@ -300,32 +298,6 @@ Build* = {
         Ok(out.view());
     }
 
-    // `<root>/a/b/c.zen`, or `<root>/a/b/c/c.zen` when the last segment
-    // names a folder. The plain form is probed first because it is the
-    // common one, and a folder that also has a file beside it is a
-    // collision the module graph would reject anyway.
-    file_of = (self: @Self, q: QualifiedName) Res<str, AllocError> {
-        flat = self.joined(q, false).try();
-        self.env.fs.exists(flat).match({
-            true  => Ok(flat),
-            false => self.joined(q, true),
-        })
-    }
-
-    joined = (self: @Self, q: QualifiedName, folder: bool) Res<str, AllocError> {
-        out ::= self.alloc.String("{}", self.root).try();
-        q.segments.loop((h, s) {
-            out.add_byte('/').try();
-            out.add_bytes(s.text).try();
-        });
-        folder.then(() {
-            out.add_byte('/').try();
-            out.add_bytes(last_of(q)).try();
-        });
-        out.add_bytes(".zen").try();
-        Ok(out.view());
-    }
-
     // -----------------------------------------------------------------
     // one module: read, lex, parse
     // -----------------------------------------------------------------
@@ -344,10 +316,33 @@ Build* = {
         })
     }
 
+    // COUNTED AND SAID, NOT COLLECTED: a `Diag` is a span, and here the
+    // mistake is the whole file.
     fs_fault = (self :: @Self, path: str, e: FsError) Res<String> {
         self.faults = self.faults + 1;
         println("{}: {}", path, fs_message(e));
         None;
+    }
+
+    // ONE DIAGNOSTIC, HELD AND SAID, and never one without the other.
+    //
+    // SAID OFF THE VEC AND NOT OFF THE ARGUMENT, which is what makes
+    // the collection load-bearing rather than a copy nobody reads: a
+    // `diags` that stopped collecting would also go silent, and all
+    // 117 of `tests/must-fail` would say so. "Collects diagnostics into
+    // a `Vec` and prints from it" is §5's own wording, taken literally.
+    //
+    // Said HERE and not from a pass at the end, which keeps stdout
+    // byte-identical: a failed READ prints as the walk reaches it.
+    report = (self :: @Self, d: Diag) Res<(), AllocError> {
+        at = self.diags.len;
+        self.faults = self.faults + 1;
+        self.diags.add(d).try();
+        self.diags.get(at).match({
+            Ok(held) => held.say(),
+            None     => (),
+        });
+        Ok(());
     }
 
     // A FILE WITH LEXICAL FAULTS IS REPORTED AND NOT PARSED. That is
@@ -363,14 +358,18 @@ Build* = {
         })
     }
 
+    // A LEXICAL FAULT TAKES THE DRIVER'S SHAPE HERE: a `LexFault` is an
+    // enum whose sentence is `message`, and a lex `Span` carries byte
+    // OFFSETS and no file. No note — the lexer builds none.
     lex_faults = (self :: @Self, lexed: Lexed) Res<(), AllocError> {
-        n ::= 0;
         lexed.diags.loop((h, d) {
-            n = n + 1;
-            println("{}:{}:{}: {}", d.file, d.span.start.line, d.span.start.col,
-                    message(d.fault));
+            at = Span(
+                file: d.file,
+                start: Pos(line: d.span.start.line, col: d.span.start.col),
+                end: Pos(line: d.span.end.line, col: d.span.end.col),
+            );
+            self.report(diag(message(d.fault), at)).try();
         });
-        self.faults = self.faults + n;
         Ok(());
     }
 
@@ -389,13 +388,8 @@ Build* = {
                Res<(), AllocError> {
         p ::= self.alloc.Parser(lexed, self.tree);
         m = p.module(u.name).try();
-        n ::= 0;
-        p.diags.loop((h, d) {
-            n = n + 1;
-            println("{}:{}:{}: {}", d.span.file, d.span.start.line,
-                    d.span.start.col, d.message);
-        });
-        self.faults = self.faults + n;
+        // Already the driver's shape, note and all: moved, not rebuilt.
+        p.diags.loop((h, d) { self.report(d).try(); });
         p.tree.add_module(m).try();
         self.tree = p.tree;
         self.units = self.units + 1;
@@ -429,7 +423,7 @@ Build* = {
 
     enqueue = (self :: @Self, q: QualifiedName, seen :: Vec<Unit>)
               Res<(), AllocError> {
-        path = self.file_of(q).try();
+        path = file_of(self.env, self.alloc, self.root, q).try();
         self.queue(path, seen).try();
         self.folder_root(path, seen)
     }
@@ -502,7 +496,7 @@ Build* = {
 
     queue_fresh = (self :: @Self, path: str, seen :: Vec<Unit>)
                   Res<(), AllocError> {
-        seen.add(self.unit_at(path).try())
+        seen.add(unit_at(self.alloc, self.root, path).try())
     }
 
     // A MODULE ALIAS IS AN `Alias`, NOT AN `Import`. `sh = shape` and
@@ -534,7 +528,7 @@ Build* = {
 
     probe = (self :: @Self, name: str, seen :: Vec<Unit>)
             Res<(), AllocError> {
-        u = self.candidate(name).try();
+        u = candidate(self.env, self.alloc, self.root, name).try();
         self.env.fs.exists(u.path).match({
             false => Ok(()),
             true  => self.queue(u.path, seen),
@@ -750,6 +744,12 @@ Build* = {
         (self.faults > 0).then(() { println("zen: {} diagnostic(s)", self.faults); });
     }
 
+    // WHAT THIS BUILD FOUND, as values — deliberately the pair
+    // `Checker` exports, so one reader shape serves both.
+    diag_count* = (self: @Self) usize { self.diags.len }
+
+    diag_at* = (self: @Self, i: usize) Res<Diag> { self.diags.get(i) }
+
     // 0 when the build is clean, 1 when anything at all went wrong.
     // One code and not one per phase: a caller acts on "did this
     // produce a program", and `tests/run.py` and `scripts/fixpoint.sh`
@@ -766,7 +766,7 @@ Build* = {
 // Alloc, beside the type it builds, exactly as `Vec`, `Ast` and `Parser`
 // are.
 Build* = (a: Alloc, env: Env, root: str) Build {
-    Build(env: env, alloc: a, root: root, tree: a.Ast())
+    Build(env: env, alloc: a, root: root, tree: a.Ast(), diags: a.Vec<Diag>())
 }
 
 // ONE BUILD, WHOLE — the only thing this file publishes besides the

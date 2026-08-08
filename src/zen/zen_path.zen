@@ -118,3 +118,68 @@ Unit* = {
 // path the compiler emits [is relative to the root], which is what makes
 // the determinism check comparing two copies of a tree at different
 // absolute paths meaningful."
+
+// The `Unit` a FILE is. The name is a pure function of the path and
+// never of the spelling that found it, so `std.core` and `std.core.core`
+// are one module read once.
+//
+// It is HERE and not on the driver because the two functions that fill
+// its fields are here and the type is here: a method on `Build` that
+// called nothing but `module_name` and `relative_to` was a fact about a
+// path wearing a build's `self`.
+unit_at* = (a: Alloc, root: str, path: str) Res<Unit, AllocError> {
+    name = module_name(a, root, path).try();
+    Ok(Unit(name: name, path: path, rel: relative_to(root, path)));
+}
+
+// `<root>/<name>.zen`, or `<root>/<name>/<name>.zen` when the name is a
+// folder — the rule at the top of this file, asked of a real directory.
+//
+// A stat and not a string, which is why this one takes an `Env`: the two
+// spellings are both well-formed and only the disk can say which one the
+// author wrote. That is still what a module path MEANS and not a phase
+// of a build, so it lives beside the rule rather than beside the walk.
+//
+// A candidate is returned whether or not it is there — a root with no
+// entry is reported by the READ, which names the file, and a probe
+// reporting it too would be one mistake twice — so the flat form also
+// wins when NEITHER exists: the shorter path is the one a diagnostic
+// should carry.
+candidate* = (env: Env, a: Alloc, root: str, name: str) Res<Unit, AllocError> {
+    flat ::= a.String("{}/{}.zen", root, name).try();
+    nest ::= a.String("{}/{}/{}.zen", root, name, name).try();
+    take_flat = env.fs.exists(flat.view()) || !env.fs.exists(nest.view());
+    take_flat.match({
+        true  => unit_at(a, root, flat.view()),
+        false => unit_at(a, root, nest.view()),
+    })
+}
+
+// Where the bytes an IMPORT names are: `<root>/a/b/c.zen`, or
+// `<root>/a/b/c/c.zen` when the last segment names a folder. The plain
+// form is probed first because it is the common one, and a folder that
+// also has a file beside it is a collision the module graph would
+// reject anyway.
+file_of* = (env: Env, a: Alloc, root: str, q: QualifiedName)
+           Res<str, AllocError> {
+    flat = joined(a, root, q, false).try();
+    env.fs.exists(flat).match({
+        true  => Ok(flat),
+        false => joined(a, root, q, true),
+    })
+}
+
+joined* = (a: Alloc, root: str, q: QualifiedName, folder: bool)
+          Res<str, AllocError> {
+    out ::= a.String("{}", root).try();
+    q.segments.loop((h, s) {
+        out.add_byte('/').try();
+        out.add_bytes(s.text).try();
+    });
+    folder.then(() {
+        out.add_byte('/').try();
+        out.add_bytes(last_of(q)).try();
+    });
+    out.add_bytes(".zen").try();
+    Ok(out.view());
+}

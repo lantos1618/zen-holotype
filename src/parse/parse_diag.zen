@@ -26,10 +26,18 @@
 // WHERE THIS BELONGS, EVENTUALLY. Apply STYLE.md's stranger test: "a
 // message, a span, and a place to look instead" names no module. It is
 // not a parser type, it is a compiler type, and `lex`, `sema` and
-// `gen` will all want it. It lives here because there is nowhere else
-// yet and a module invented for one caller is worse; the moment the
-// lexer or sema needs it, that is STYLE.md's second-caller rule firing
-// and it moves. Reported.
+// `gen` will all want it.
+//
+// THE SECOND CALLER HAS ARRIVED and the type did not move. `zen build`
+// now holds one `Vec` of these for the whole program and converts a
+// `lex.lex_diag.Diag` into one to fill it, which is STYLE.md's
+// second-caller rule firing exactly as predicted. What it did NOT get
+// is a neutral home: the two candidates are `ast`, which owes nothing
+// to either phase, and a new `zen_diag`, which would make the parser
+// depend on the driver. Moving it is a rename across `parse`, `zen`
+// and `lsp` and belongs in its own change; a FOURTH struct with these
+// three fields, invented to avoid the rename, is the duplication this
+// paragraph exists to prevent. Still reported, now with a caller.
 
 Pos, Span = ast.ast_span
 // which of two positions comes first, from the file that already had to
@@ -73,6 +81,35 @@ diag_at* = (message: str, span: Span, note_message: str, note_span: Span) Diag {
         span: span,
         note: Ok(Note(message: note_message, span: note_span)),
     )
+}
+
+// THE WHOLE DIAGNOSTIC, SAID — and the note is part of it.
+//
+// The driver used to print `d.message` and stop, so every note this
+// module has ever built was collected by the parser, carried in its
+// `Vec`, and dropped on the floor. `diag_at` has exactly one caller —
+// `expect_close`, the one case where the anchor is deliberately NOT
+// where the parser stopped — so the dropped half was precisely the
+// half that says where the parser DID stop, which is the second
+// position that rule exists to give the reader.
+//
+// HERE AND NOT IN THE DRIVER, for the reason `sema_diag.zen` puts
+// `render` beside its `Diag`: how a diagnostic reads is a fact about
+// the diagnostic. A second consumer — `zen lsp` — wants the same two
+// spans and the same two sentences as VALUES, and it gets them off
+// the fields; this is the one consumer that wants a terminal.
+//
+// INDENTED UNDER THE SENTENCE, which is the shape `bootstrap.py`'s
+// `render` already uses for a note, so the two compilers say a
+// two-position diagnostic the same way.
+say* = (self: Diag) () {
+    println("{}:{}:{}: {}", self.span.file, self.span.start.line,
+            self.span.start.col, self.message);
+    self.note.match({
+        None  => (),
+        Ok(n) => println("  note: {}:{}:{}: {}", n.span.file,
+                         n.span.start.line, n.span.start.col, n.message),
+    });
 }
 
 // THE FILE ENDING IS THE MISTAKE, and whatever the parser wanted next is
