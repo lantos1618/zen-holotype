@@ -1,0 +1,90 @@
+// src/zen/zen_run.zen
+// One command line's worth of runs.
+//
+// A SUBJECT THAT IS NOT "ONE BUILD", which is why it is a file and not
+// four more declarations in `zen_build.zen`. That file's subject is the
+// five phases of a build, and its parts share the `Build` that holds the
+// tree, the tally and the authority — this one is about how many times
+// that happens and where each result goes, which is a question about a
+// COMMAND rather than about a compilation. `zen_build.zen` was three
+// lines under STYLE.md's hard cap when `--repeat` arrived, and a cap is
+// how you find out a file has two subjects.
+//
+// EVERYTHING HERE EXISTS FOR ONE GATE. `tests/determinism/check.sh`
+// cannot write its first check without `--repeat`: state carried from
+// one compilation to the next — an address-derived name, a counter that
+// is not reset — is STABLE within a process and therefore invisible to
+// every check that compares two of them.
+//
+// IT DEPENDS ON `zen_build.zen` AND NOT THE OTHER WAY ROUND. The order
+// arithmetic both of them need is in `zen_order.zen`, a leaf, precisely
+// so this stays a one-way edge.
+
+Alloc, AllocError = std.mem
+Range = std.core
+
+Job = zen.zen_cli
+run_once = zen.zen_build
+
+// THE ENTRY POINT: one command line's worth of build, run `--repeat N`
+// times. One run is the default and costs nothing, which is what keeps
+// this the same program it was before the flag existed.
+//
+// The run NUMBER never reaches `run_once`: it is spent here, deciding
+// which `-o` that run is handed. A driver that took an index would have
+// to know what an index meant.
+build* = (env: Env, a: Alloc, job: Job) Res<i32, AllocError> {
+    worst ::= 0;
+    Range(0, at_least_one(job.debug.repeat)).loop((h, i) {
+        worst = max_code(worst, run_once(env, a, job_for(a, job, i).try()).try());
+    });
+    Ok(worst);
+}
+
+// A BUILD ALWAYS RUNS AT LEAST ONCE, whatever the job says. `repeat` is
+// 0 in any `Job` built without a `debug:` field, and `tests/corpus/cli/`
+// builds several — those tests are about the walk, and naming a debug
+// flag to ask for the ordinary behaviour would be noise in every one of
+// them. A loop over 0 runs compiles nothing, writes nothing and exits 0,
+// which is the silent success `zen_cli.zen`'s header calls worse than
+// saying so: two of those tests went green reporting no diagnostics for
+// a tree whose missing file is the entire assertion.
+//
+// `runs_of` keeps the COMMAND LINE off zero; this keeps every other
+// caller off it, and the two are deliberately not one check.
+at_least_one = (n: usize) usize {
+    (n == 0).match({
+        true  => 1,
+        false => n,
+    })
+}
+
+// WHERE RUN `i` WRITES. Run 0 writes where it was asked to; every later
+// run writes beside it, as `<-o>.<i+1>`. A repeat that overwrote one
+// path would leave `check.sh` comparing a file with itself, which is
+// that script's own stated failure mode.
+//
+// No `-o` at all means the C goes to stdout, where a run number has
+// nothing to attach to — so the job passes through and every run prints.
+job_for = (a: Alloc, job: Job, i: usize) Res<Job, AllocError> {
+    (i == 0 || job.out.is_empty()).match({
+        true  => Ok(job),
+        false => numbered(a, job, i),
+    })
+}
+
+numbered = (a: Alloc, job: Job, i: usize) Res<Job, AllocError> {
+    out ::= a.String("{}.{}", job.out, i + 1).try();
+    Ok(Job(root: job.root, out: out.view(), entry: job.entry,
+           emit_c: job.emit_c, debug: job.debug));
+}
+
+// The worse of two exit codes: a run that found something outranks a
+// run that did not, so `--repeat 2` over a broken tree still exits
+// non-zero even if only one of the two runs said so.
+max_code = (l: i32, r: i32) i32 {
+    (l > r).match({
+        true  => l,
+        false => r,
+    })
+}

@@ -18,6 +18,13 @@
 // never see on a real command line, and reads the answer back. Everything
 // that reads a file or prints a line is in `zen_build.zen`.
 //
+// TWO FLAGS ARE HERE FOR A GATE AND NOT FOR A USER: `--repeat N` and
+// `--permute <mode>`. They are deliberately absent from `USAGE`, which
+// is the one line a mistyped command prints — a debug flag belongs in
+// the document that depends on it, and `tests/determinism/README.md`
+// specifies both. `Debug` below says what each does; neither changes
+// what a build with neither of them emits.
+//
 // ONLY `build` IS WRITTEN. PLAN.md's line is "thin cli: build / fmt /
 // test / lsp", and the other three are stage 2, stage 1's `build.zen`,
 // and stage 4 respectively. They are NAMED here and answered with "not
@@ -27,6 +34,7 @@
 
 str = std.text
 Vec = std.collections
+Range = std.core
 
 // What the command line asked for.
 //
@@ -50,6 +58,26 @@ Job* = {
     entry*: str,     // where to START inside the root, relative to it;
                      // empty means the driver probes, as it always did
     emit_c*: bool,
+    debug*: Debug,
+}
+
+// THE TWO FLAGS THAT EXIST FOR A GATE, kept in a struct of their own so
+// that `Job`'s four fields stay the answer to "what is this build" and
+// these stay the answer to "and how is it being measured". Neither
+// changes what a clean build emits: the defaults below are exactly the
+// behaviour of a command line that names neither.
+//
+// `tests/determinism/README.md` calls both a CONTRACT, and it is right
+// to: `check.sh` cannot write its first check without `--repeat`, and
+// without `--permute` its third check has no way to vary anything at
+// all, because the self-hosted CLI takes a ROOT and computes the module
+// order itself. A gate that cannot vary its input is a gate that cannot
+// go red.
+Debug* = {
+    repeat*: usize,  // run the whole pipeline this many times, in one
+                     // process; 1 is one build and no extra files
+    permute*: str,   // reverse | rotate | interleave; empty is the
+                     // order the imports are written in
 }
 
 USAGE*: str = "usage: zen build <root> [--entry <file>] --emit-c -o <file.c>"
@@ -57,7 +85,7 @@ USAGE*: str = "usage: zen build <root> [--entry <file>] --emit-c -o <file.c>"
 // What one argument is. A classifier rather than a chain of matches at
 // the scan site, because the scan has to stay readable while it also
 // carries the cursor, and five names beat five levels of nesting.
-Arg = EmitC | Out | Entry | Flag | Word
+Arg = EmitC | Out | Entry | Repeat | Permute | Flag | Word
 
 // `argv.get(0)` is the program path, so the command is argv[1] and its
 // arguments start at 2.
@@ -93,6 +121,8 @@ job_of = (argv: Vec<str>) Cli {
     root ::= "";
     out ::= "";
     entry ::= "";
+    runs ::= 1;
+    perm ::= "";
     emit ::= false;
     bad ::= "";
     i ::= 2;
@@ -100,25 +130,28 @@ job_of = (argv: Vec<str>) Cli {
         arg = arg_at(argv, i);
         i = i + 1;
         classify(arg).match({
-            EmitC => { emit = true; },
-            Out   => { out = arg_at(argv, i); i = i + 1; },
-            Entry => { entry = arg_at(argv, i); i = i + 1; },
-            Flag  => { bad = arg; },
-            Word  => root.is_empty().match({
+            EmitC   => { emit = true; },
+            Out     => { out = arg_at(argv, i); i = i + 1; },
+            Entry   => { entry = arg_at(argv, i); i = i + 1; },
+            Repeat  => { runs = arg_at(argv, i).runs_of(); i = i + 1; },
+            Permute => { perm = arg_at(argv, i); i = i + 1; },
+            Flag    => { bad = arg; },
+            Word    => root.is_empty().match({
                 true  => { root = arg; },
                 false => { bad = arg; },
             }),
         });
     });
-    verdict(root, out, entry, emit, bad);
+    verdict(root, out, entry, emit, bad, Debug(repeat: runs, permute: perm));
 }
 
-verdict = (root: str, out: str, entry: str, emit: bool, bad: str) Cli {
+verdict = (root: str, out: str, entry: str, emit: bool, bad: str, dbg: Debug)
+          Cli {
     bad.is_empty().match({
         false => Cli.Usage(bad),
         true  => root.is_empty().match({
             true  => Cli.Usage(""),
-            false => built(root, out, entry, emit),
+            false => built(root, out, entry, emit, dbg),
         }),
     })
 }
@@ -131,11 +164,11 @@ verdict = (root: str, out: str, entry: str, emit: bool, bad: str) Cli {
 // held for long enough that `make build` stood on it and produced no
 // binary — taking `test-zen`, `fmt` and `determinism` down with it,
 // because a target that cannot run cannot go red either.
-built = (root: str, out: str, entry: str, emit: bool) Cli {
+built = (root: str, out: str, entry: str, emit: bool, dbg: Debug) Cli {
     emit.match({
         false => Cli.Missing("--emit-c"),
         true  => Cli.Build(
-            Job(root: root, out: out, entry: entry, emit_c: emit)),
+            Job(root: root, out: out, entry: entry, emit_c: emit, debug: dbg)),
     })
 }
 
@@ -151,10 +184,23 @@ classify = (a: str) Arg {
             true  => Arg.Out,
             false => a.eq("--entry").match({
                 true  => Arg.Entry,
-                false => is_flag(a).match({
-                    true  => Arg.Flag,
-                    false => Arg.Word,
-                }),
+                false => debug_arg(a),
+            }),
+        }),
+    })
+}
+
+// The two debug flags, split off so `classify` stops at four levels.
+// They take an argument exactly as `-o` and `--entry` do, so a missing
+// one leaves the default rather than swallowing the next word.
+debug_arg = (a: str) Arg {
+    a.eq("--repeat").match({
+        true  => Arg.Repeat,
+        false => a.eq("--permute").match({
+            true  => Arg.Permute,
+            false => is_flag(a).match({
+                true  => Arg.Flag,
+                false => Arg.Word,
             }),
         }),
     })
@@ -178,4 +224,31 @@ arg_at = (argv: Vec<str>, i: usize) str {
         Ok(s) => s,
         None  => "",
     })
+}
+
+// How many runs `--repeat <n>` asks for. Digits only, and ANYTHING ELSE
+// IS ONE — never zero. A debug flag that quietly ran the pipeline no
+// times would make the check it exists for pass by emitting nothing,
+// which is the exact failure `tests/determinism/check.sh` opens by
+// naming: a gate that succeeds when it cannot run.
+runs_of = (text: str) usize {
+    n ::= 0;
+    digits ::= text.is_empty() == false;
+    Range(0, text.len).loop((h, i) {
+        b = text.index(i);
+        b.is_digit().match({
+            true  => { n = n * 10 + place_of(b); },
+            false => { digits = false; },
+        });
+    });
+    (digits && n > 0).match({
+        true  => n,
+        false => 1,
+    })
+}
+
+// The value of one digit byte, widened. Guarded by `is_digit` at its one
+// call site, so the subtraction cannot go under.
+place_of = (b: u8) usize {
+    (b - '0').to_u32().to_usize()
 }
