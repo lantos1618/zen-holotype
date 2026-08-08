@@ -60,7 +60,7 @@ TyId, Ty, Types = sema.sema_ty
 World, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 Diag, SemaFault, NameFault = sema.sema_diag
-check_receiver = sema.sema_recv
+check_receiver, check_write_place = sema.sema_recv
 check_scope_returned, check_scope_stored = sema.sema_scope
 check_scope_captured, is_scope_value, call_escapes = sema.sema_scope
 check_drop_copy = sema.sema_drop
@@ -187,9 +187,16 @@ own_bind = (c :: Checker, o :: Own, b: Bind, ctx: Ctx) Res<(), AllocError> {
 // into. A write to a place that was moved out of REVIVES it — the hole
 // is filled, and a checker that never forgets would refuse the one fix
 // the author has.
+//
+// A PLACE IS ALSO A WRITE, and whether the markers on the path permit
+// one is `sema_recv.zen`'s rule, asked here because this is the walk
+// that knows a target from a value. A NAME is not passed to it: `n = 1`
+// is a fresh binding or an assignment depending on the scope below, and
+// that is a question only this file can answer.
 own_target = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
              Res<(), AllocError> {
     node = c.tree.expr_at(b.target);
+    check_write_place(c, o, b.target).try();
     node.kind.match({
         Name(n)   => bind_name(c, o, b, n.text, node.span, ctx),
         Access(a) => revive_field(c, o, a, ctx),

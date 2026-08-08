@@ -150,6 +150,7 @@ SemaFault* =
     // diagnostic, and neither half repeats the other.
     | ConsumedUse(NameFault)           // a place that was moved out of
     | NeedsMutableReceiver(NameFault)  // a `::` method reached through `:`
+    | ImmutableWrite(NameFault)        // a write through a `:` link of the path
     | PartiallyMoved(NameFault)        // a hole reaches the drop
     | ConsumeNotAPlace(NameFault)      // an element index is not a place
     | ConsumeThroughHandle(NameFault)  // move only what this frame owns
@@ -209,6 +210,7 @@ message* = (fault: SemaFault) str {
         InstantiationDepth(_) => "instantiation depth exceeded: the type argument keeps widening, so the instantiation set is infinite",
         ConsumedUse(_)       => "use after move:",
         NeedsMutableReceiver(_) => "the receiver is immutable:",
+        ImmutableWrite(_)    => "cannot write through an immutable binding:",
         PartiallyMoved(_)    => "a partial move reaches the drop:",
         ConsumeNotAPlace(_)  => "cannot consume an array element: the index is a runtime value, so which element is dead is not a fact the compiler holds",
         ConsumeThroughHandle(_) => "cannot consume through a handle: you may only move what this frame owns, and a bitwise copy of a handle would be left pointing at a dead value",
@@ -263,6 +265,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
 
         ConsumedUse(f)            => write_place(out, f, " was consumed, and a binding is dead from the move onwards"),
         NeedsMutableReceiver(f)   => write_place(out, f, " needs a mutable receiver, so every link from the binding to it must permit the write"),
+        ImmutableWrite(f)         => write_place(out, f, " is declared `:`, so it is set at construction and never reassigned — `::` is what permits a write"),
         PartiallyMoved(f)         => write_place(out, f, " is partially moved, so the drop has a hole: move the whole value or none of it"),
 
         NoSuchField(f)            => write_member(out, types, f),
