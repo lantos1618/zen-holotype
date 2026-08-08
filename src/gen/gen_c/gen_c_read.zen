@@ -231,12 +231,15 @@ enum_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
 // states and for its reason: layout is fixed at declaration and cannot
 // depend on which impls are linked.
 //
-// TWO IMPLS SUPPLYING ONE NAME IS REFUSED HERE RATHER THAN GUESSED.
+// TWO IMPLS SUPPLYING ONE NAME IS SEMA'S ANSWER READ BACK, NOT GUESSED.
 // "The bound in scope selects which is in view — never file order", and
 // nothing pushes bounds during lowering: monomorphisation has already
 // replaced `T` with the concrete type, so the bound that would select
 // is gone by the time this runs. Picking the first would compile, and
-// would read the other impl's field.
+// would read the other impl's field — valid C with the wrong value and
+// no diagnostic, which is why a bound stack HERE would be a second,
+// worse copy of a rule `sema_member.zen` already applies. It records
+// what it chose under the access's `ExprId`; this asks.
 // -----------------------------------------------------------------
 
 // WHAT A FIELD READ EVALUATES TO, when the frame cannot say.
@@ -273,8 +276,38 @@ write_field_access = (be :: CBackend, id: ExprId, a: Access, ctx: Ctx,
     found.len.match({
         0 => write_stored_field(be, a, rty, ctx, out),
         1 => write_computed_field(be, a, rty, found, ctx, out),
+        _ => write_selected_field(be, id, a, rty, found, ctx, out),
+    })
+}
+
+// WHICHEVER IMPL SEMA'S BOUND NAMED. A miss leaves `kept` empty and the
+// refusal stands: an answer nothing recorded is not an answer, and the
+// one thing this must never do is pick.
+write_selected_field = (be :: CBackend, id: ExprId, a: Access, rty: TyId,
+                        found: Vec<Computed>, ctx: Ctx, out :: String)
+                       Res<(), AllocError> {
+    kept ::= be.alloc.Vec<Computed>();
+    be.check.supply_memo.get(id).match({
+        None  => Ok(()),
+        Ok(b) => keep_supplied_by(found, b, kept),
+    }).try();
+    kept.len.match({
+        1 => write_computed_field(be, a, rty, kept, ctx, out),
         _ => unsupported(be, id, "a computed field two impls supply", out),
     })
+}
+
+keep_supplied_by = (found: Vec<Computed>, b: TyId, kept :: Vec<Computed>)
+                   Res<(), AllocError> {
+    found.loop((h, cf) { keep_if_bound(cf, b, kept).try() });
+    Ok(());
+}
+
+// A named helper rather than a `.then` inside the loop body: a loop
+// binding read inside a nested closure does not resolve.
+keep_if_bound = (cf: Computed, b: TyId, kept :: Vec<Computed>)
+                Res<(), AllocError> {
+    cf.bound.eq(b).match({ true => kept.add(cf), false => Ok(()) })
 }
 
 write_stored_field = (be :: CBackend, a: Access, rty: TyId, ctx: Ctx,
@@ -286,15 +319,18 @@ write_stored_field = (be :: CBackend, a: Access, rty: TyId, ctx: Ctx,
     Ok(());
 }
 
-// What an impl wrote for a field, and the three things reading it back
+// What an impl wrote for a field, and the four things reading it back
 // needs: the TARGET's declaration, whose type parameters the expression
-// names; the module it was written in; and the type the BOUND declared
-// — "`width: self.radius * 2.0` is an f64 because `Rect` said f64".
+// names; the module it was written in; the type the BOUND declared
+// — "`width: self.radius * 2.0` is an f64 because `Rect` said f64" —
+// and the bound itself, which is what sema's answer is matched against
+// when two impls supply the name.
 Computed = {
     value: ExprId,
     decl: DeclId,
     mi: usize,
     ty: TyId,
+    bound: TyId,
 }
 
 supplied_fields = (be :: CBackend, rty: TyId, name: str,
@@ -395,7 +431,7 @@ add_computed = (be :: CBackend, n: TyNamed, rty: TyId, im: Impl, name: str,
     mi = n.decl.module.to_usize();
     bound = be.check.impl_bound_type(im, mi).try();
     ty = be.check.bound_member_type(bound, name, rty).try();
-    out.add(Computed(value: v, decl: n.decl, mi: mi, ty: ty))
+    out.add(Computed(value: v, decl: n.decl, mi: mi, ty: ty, bound: bound))
 }
 
 // The receiver is lowered FIRST and into a binding of its own: the

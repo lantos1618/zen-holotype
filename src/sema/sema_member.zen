@@ -50,7 +50,7 @@ World, Def, DefKind, decl_at, module_display = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 ExportFault = sema.sema_diag
 Checker, Ctx, UNRESOLVED = sema.sema_check
-Inst, subst, inst_of_named, owner_of = sema.sema_inst
+Inst, subst, inst_of_named, owner_of, push_tparams = sema.sema_inst
 is_prim, is_integer, is_float = sema.sema_check
 Case, cases_of, find_case = sema.sema_case
 impl_members, bound_members, bound_member_types = sema.sema_supply
@@ -94,12 +94,12 @@ Base* = {
 // QUERY: the type of `base.name`
 // ---------------------------------------------------------------------
 
-access_type* = (c :: Checker, node: Expr, ac: Access, ctx: Ctx)
+access_type* = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
                Res<TyId, AllocError> {
     b = base_of(c, ac.base, ctx).try();
     b.is_type.match({
-        true  => static_access(c, node, ac, b.ty, ctx),
-        false => value_access(c, node, ac, b.ty, ctx),
+        true  => static_access(c, id, node, ac, b.ty, ctx),
+        false => value_access(c, id, node, ac, b.ty, ctx),
     })
 }
 
@@ -182,19 +182,19 @@ is_type_def* = (k: DefKind) bool {
 // binds a name whose base has no members, no variants and no constants,
 // and every question below it would answer "no such field" correctly and
 // uselessly.
-static_access* = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
-                Res<TyId, AllocError> {
+static_access* = (c :: Checker, id: ExprId, node: Expr, ac: Access,
+                  ty: TyId, ctx: Ctx) Res<TyId, AllocError> {
     module_named_by(c, ty).match({
         Ok(mi) => module_access(c, node, ac, mi),
-        None   => type_access(c, node, ac, ty, ctx),
+        None   => type_access(c, id, node, ac, ty, ctx),
     })
 }
 
-type_access = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
-             Res<TyId, AllocError> {
+type_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ty: TyId,
+               ctx: Ctx) Res<TyId, AllocError> {
     is_case(c, ty, ac.name.text).try().match({
         true  => variant_type(c, ty, ac.name.text),
-        false => static_member(c, node, ac, ty, ctx),
+        false => static_member(c, id, node, ac, ty, ctx),
     })
 }
 
@@ -225,11 +225,11 @@ variant_ctor = (c :: Checker, ty: TyId, cs: Case) Res<TyId, AllocError> {
 
 // `i32.MAX`, `i32.BITS`. Anything else falls through to the ordinary
 // member table, because a struct body may bind a constant too.
-static_member = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
-                Res<TyId, AllocError> {
+static_member = (c :: Checker, id: ExprId, node: Expr, ac: Access,
+                 ty: TyId, ctx: Ctx) Res<TyId, AllocError> {
     has_prim_const(c, ty, ac.name.text).match({
         true  => prim_const_type(c, ty, ac.name.text),
-        false => value_access(c, node, ac, ty, ctx),
+        false => value_access(c, id, node, ac, ty, ctx),
     })
 }
 
@@ -261,11 +261,11 @@ numeric_prim = (c: Checker, ty: TyId) bool {
 // them is how one mistake becomes a cascade: SEMA_BOOTSTRAP_FIXES.md §7
 // records twenty-two diagnostics naming unrelated modules for one
 // missing import.
-value_access = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
-               Res<TyId, AllocError> {
+value_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ty: TyId,
+                ctx: Ctx) Res<TyId, AllocError> {
     opaque(c, ty).match({
         true  => c.types.unknown(),
-        false => known_access(c, node, ac, ty, ctx),
+        false => known_access(c, id, node, ac, ty, ctx),
     })
 }
 
@@ -322,13 +322,13 @@ in_scope_tvar = (c: Checker, name: str, ty: TyId) bool {
 // `Vec = vec.vec` reach the same declaration by different spellings, so
 // the comparison is against `Found.module`, which the member lookup read
 // off the declaration — the import cannot launder a name past the star.
-known_access = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
-               Res<TyId, AllocError> {
+known_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ty: TyId,
+                ctx: Ctx) Res<TyId, AllocError> {
     found ::= c.alloc.Vec<Found>();
     members_of(c, ty, ac.name.text, found).try();
     first_hidden(found, ctx.module).match({
         Ok(f) => hidden_member(c, ac, f),
-        None  => pick(c, node, ac, ty, found, ctx),
+        None  => pick(c, id, node, ac, ty, found, ctx),
     })
 }
 
@@ -373,30 +373,44 @@ module_of = (c :: Checker, f: Found) str {
     })
 }
 
-pick = (c :: Checker, node: Expr, ac: Access, ty: TyId, found: Vec<Found>,
-        ctx: Ctx) Res<TyId, AllocError> {
+pick = (c :: Checker, id: ExprId, node: Expr, ac: Access, ty: TyId,
+        found: Vec<Found>, ctx: Ctx) Res<TyId, AllocError> {
     found.len.match({
         0 => ufcs_or_missing(c, node, ac, ty, ctx),
-        1 => first_type(c, found),
-        _ => select(c, node, ac, ty, found),
+        1 => first_type(c, id, ty, found),
+        _ => select(c, id, node, ac, ty, found),
     })
 }
 
-first_type = (c :: Checker, found: Vec<Found>) Res<TyId, AllocError> {
+// THE ONE PLACE A MEMBER IS SETTLED, so the one place the answer is
+// written down: monomorphisation replaces `T` with the concrete type,
+// and by lowering nothing says which impl was in view.
+first_type = (c :: Checker, id: ExprId, ty: TyId, found: Vec<Found>)
+             Res<TyId, AllocError> {
     found.get(0).match({
         None    => c.types.unknown(),
-        Ok(f)   => Ok(f.ty),
+        Ok(f)   => settled(c, id, ty, f),
     })
+}
+
+// The bound that promised it, or the receiver when the receiver's own
+// declaration carries it: `Boxy.area` reads `self.width` off `Boxy` and
+// EMITS at a `Tile` two impls supply a `width` for — `Boxy` picks.
+settled = (c :: Checker, id: ExprId, ty: TyId, f: Found)
+          Res<TyId, AllocError> {
+    from = c.is_unknown(f.bound).match({ true => ty, false => f.bound });
+    c.supply_memo.set(id, from).try();
+    Ok(f.ty);
 }
 
 // Two impls supply this name. The bound in scope selects; with none, it
 // is an error naming both, never file order.
-select = (c :: Checker, node: Expr, ac: Access, ty: TyId, found: Vec<Found>)
-         Res<TyId, AllocError> {
+select = (c :: Checker, id: ExprId, node: Expr, ac: Access, ty: TyId,
+          found: Vec<Found>) Res<TyId, AllocError> {
     kept ::= c.alloc.Vec<Found>();
     found.loop((h, f) { keep_bounded(c, f, kept).try() });
     kept.len.match({
-        1 => first_type(c, kept),
+        1 => first_type(c, id, ty, kept),
         _ => ambiguous(c, node, ac, found),
     })
 }
@@ -675,18 +689,13 @@ struct_members = (c :: Checker, s: Struct, n: TyNamed, ty: TyId, name: str,
 // `get* = (self: @Self, i: usize) Res<T>` reported `T` as an undefined
 // name inside the declaration that binds it.
 //
-// A `Ty.Var` and not the corresponding type ARGUMENT: substitution is
-// not this folder's yet, and `TyVar` is nominal on its owner precisely
-// so the `T` of `Vec` and the `T` of `Map` can never be confused while
-// it isn't.
+// A `Ty.Var` and not the corresponding type ARGUMENT: `TyVar` is
+// nominal on its owner precisely so the `T` of `Vec` and the `T` of
+// `Map` can never be confused.
 enter_struct_tvars* = (c :: Checker, s: Struct, mi: usize)
                      Res<(), AllocError> {
     owner = owner_of(c, mi, s.name.text).try();
-    s.tparams.loop((h, tp) {
-        text = tp.name.text;
-        c.push_tvar(text, c.types.var(text, owner).try()).try();
-    });
-    Ok(());
+    push_tparams(c, s.tparams, owner)
 }
 
 // A named helper rather than a `.then` inside the loop body: a loop
@@ -771,13 +780,21 @@ opt_type = (c :: Checker, t: Res<TypeId>, ctx: Ctx) Res<TyId, AllocError> {
     })
 }
 
+// A MEMBER'S OWN TYPE PARAMETERS ARE IN SCOPE IN ITS SIGNATURE, the same
+// rule `enter_struct_tvars` states one level out: `to* = <U>(self: @Self)
+// Ptr<U>` reads `U` as the parameter it declares, and nothing pushed it.
 fn_member_type = (c :: Checker, f: Function, ctx: Ctx)
                  Res<TyId, AllocError> {
+    tmark = c.tvar_mark();
+    owner = owner_of(c, ctx.module, f.name.text).try();
+    push_tparams(c, f.tparams, owner).try();
     ptys ::= c.alloc.Vec<TyId>();
     f.params.loop((h, p) { ptys.add(c.param_type(p, ctx).try()).try() });
     rty = f.ret.match({
         Ok(r)  => c.type_from_ast(r, ctx),
         None   => c.types.prim("()"),
     }).try();
-    c.types.fn_ty(ptys, rty)
+    got = c.types.fn_ty(ptys, rty).try();
+    c.release_tvars(tmark).try();
+    Ok(got);
 }
