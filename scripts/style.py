@@ -14,9 +14,11 @@ One fact, one place; a second copy is the stale one.
         `grammar/grammar.js` cannot express any of them, so `make parse` is
         the gate. Each was mutation-checked against the real grammar while
         writing this file: every one is a parse ERROR. A style script
-        grepping for `if` would only ever find the word in prose -- all 99
-        occurrences of `\\bif\\b` in src/ are inside comments, and all 549
-        of `\\bas\\b`, and all 90 of `?`. That is the whole argument for
+        grepping for them would find nothing but prose and diagnostics --
+        `if` occurs 101 times in src/ and `as` 605 and `?` 94, and the count
+        in CODE is zero for all three. 52 of the `if`s are inside string
+        literals, which is to say a grep would report the compiler's own
+        error messages as style violations. That is the whole argument for
         parsing over grepping, restated.
   every parameter has a name AND a type
         the grammar requires the name; `bootstrap/cst.py` requires the type

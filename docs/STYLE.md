@@ -20,7 +20,7 @@ That claim was false for a year: `make cap` stood behind one rule of the nine an
 
 **The syntax laws are the grammar's, not this document's.** No `if`, no ternary, no `?`, no `as` cast, no `while` — `loop(cond, body)` is the while form — no fourth `@` entry, no adjacent-string concatenation, and every parameter named *and* typed. `DESIGN.md` states them (control flow, line 235; the loop overloads, line 965) and `grammar/grammar.js` cannot express a violation, so `make parse` is where they fail. Each was checked against the real grammar: every one is a parse error. Nothing here repeats them, because two copies of a fact is one stale fact waiting to happen.
 
-**Which is also the argument for parsing over grepping.** All 99 occurrences of `if` in `src/` are inside comments. So are all 549 of `as`, and all 90 of `?`. A style script that greps finds only prose; `scripts/style.py` parses with `bootstrap/cst.py`, the real grammar, for the same reason `ufcs_collisions.py` does.
+**Which is also the argument for parsing over grepping.** `if` occurs 101 times in `src/`, `as` 605 times, `?` 94 times — and the count in *code* is zero for all three. They are in comments and, for 52 of the `if`s, inside string literals: a grep would report the compiler's own diagnostic messages as style violations. `scripts/style.py` parses with `bootstrap/cst.py`, the real grammar, for the same reason `ufcs_collisions.py` does.
 
 ---
 
