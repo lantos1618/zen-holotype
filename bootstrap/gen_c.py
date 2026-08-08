@@ -159,7 +159,7 @@ C_STANDARD = "C99 (ISO/IEC 9899:1999)"
 USR = "zu_"
 GEN = "zg_"
 
-MAX_INSTANCES = 4096  # infinite monomorphisation stops here, with a diagnostic
+MAX_INSTANCES = 8192  # a DIVERGENCE stops here; the driver measured 4099
 MAX_EXPR_DEPTH = 24  # deeper than this spills to a temporary, per TESTING.md
 INLINE_DEPTH = 32  # a closure inlined into itself stops here, with a diagnostic
 

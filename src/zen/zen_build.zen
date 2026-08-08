@@ -43,7 +43,7 @@
 
 Alloc, AllocError = std.mem
 str, String = std.text
-Vec = std.collections
+Vec, Map = std.collections
 Range = std.core
 FsError = std.env
 
@@ -94,6 +94,11 @@ Job = zen.zen_cli
 slash_for = zen.zen_path
 unit_at, candidate, file_of = zen.zen_path
 
+// WHERE A PROGRAM STARTS is a fact about a path too, and it left with
+// them: `ENTRY` is the module name the probe looks for AND the
+// declaration `root_declares_main` demands, so the two cannot drift.
+ENTRY, entry_of = zen.zen_path
+
 // `Unit` went with them for the same reason — what a module is CALLED
 // and where its bytes ARE is a fact about a path, and `unit_at` above
 // is what fills its fields.
@@ -101,13 +106,6 @@ Unit* = zen.zen_path
 
 // What order the walk reaches modules in: arithmetic on an index.
 walk_index = zen.zen_order
-
-// WHERE A PROGRAM STARTS, spelled once. It is both a module name the
-// entry probe looks for and the declaration the root must own, and the
-// two must not be able to drift apart — a probe that finds `main.zen`
-// and a check that demands `start` would reject every program in the
-// language and blame the file it just found.
-ENTRY: str = "main"
 
 // One build. It holds the authority the phases need and the tally of
 // what went wrong, because the exit code is that tally and both
@@ -141,6 +139,39 @@ Build* = {
     // imports are written in. `zen_order.zen` is the whole of it.
     permute* :: str = "",
 
+    // Mutation of an exported field goes through an exported method,
+    // which is the language's own rule and the reason this exists: the
+    // order is a DEBUG flag a command line decides, and a command
+    // line's worth of build is `zen_run.zen`.
+    walk_order* = (self :: @Self, order: str) () {
+        self.permute = order;
+    }
+
+    // THE EDITOR'S BUFFER, BEFORE THE DISK — keyed on `Unit.path`, the
+    // string `read` is handed. `docs/design_lsp.md` §5 chose this over
+    // an `Fs` the server writes: `Fs`'s members have no bodies because
+    // they ARE the authority, so interposing there is a language
+    // feature and this is one field. Said out loud rather than left to
+    // be inferred: this field exists for the editor, and it is the one
+    // place the "thin server over compiler internals" thesis bends.
+    //
+    // EMPTY IN EVERY BUILD A COMMAND LINE ASKS FOR, which is a
+    // constraint and not a hope: `run_once` never touches it, so a
+    // `zen build` misses on the first lookup and reads the disk exactly
+    // as before. `scripts/fixpoint.sh` is what says so.
+    overlay* :: Map<str, str>,
+
+    // WHETHER A DIAGNOSTIC IS SAID OUT LOUD as it is found. True for a
+    // command line; false for `whole`, because a language server writes
+    // JSON-RPC frames to stdout and NOTHING else (`design_lsp.md` §6)
+    // and a `println` from the driver corrupts the protocol stream.
+    //
+    // NOT A CORNER CASE: a buffer being edited has an unclosed brace in
+    // it most of the time. `diags` is filled either way — only the
+    // saying is off, which is what leaves `publishDiagnostics`
+    // something to publish.
+    speaking* :: bool = true,
+
     // The entry's path relative to the root, kept for the one
     // diagnostic that is about the root itself rather than about
     // anything a span could point at — see `missing_main`.
@@ -163,79 +194,11 @@ Build* = {
     // the walk
     // -----------------------------------------------------------------
 
-    // WHERE THE PROGRAM STARTS. `--entry <file>` answers it outright;
-    // without one, the root is probed.
-    //
-    // The probe is what a directory with no listing can do, and it can
-    // only find conventional names — which is why `--entry` exists.
-    // `std.env.Fs` has no listing on purpose ("every member added here
-    // is a member the self-hosted compiler has to keep working
-    // forever"), and enumerating a directory is strictly more authority
-    // than reading a path you were handed. The information is already
-    // at the call site: whoever invokes the compiler knows the entry.
-    // A single-file program named anything else is unreachable by
-    // probing and reachable by being named, and that is the whole of it.
-    //
-    // A build is still a ROOT. The entry says where to start inside it;
-    // every other module is found by following imports, exactly as
-    // before.
-    entry_of = (self :: @Self, named: str) Res<Unit, AllocError> {
-        named.is_empty().match({
-            false => self.entry_named(named),
-            true  => self.entry_probed(),
-        })
-    }
-
-    // `--entry` is relative to the root, because `Unit.rel` is what a
-    // Span carries and an absolute path in a Span puts the checkout's
-    // location into the emitted C — which voids the determinism check
-    // that compares two copies of a tree at different paths.
-    //
-    // NOT PROBED. A named entry that is not there is reported by the
-    // READ, which names the file the caller asked for; a probe
-    // reporting it as well would be one mistake said twice, and the
-    // caller who chose the name is owed the name back.
-    entry_named = (self :: @Self, named: str) Res<Unit, AllocError> {
-        path ::= self.alloc.String("{}/{}", self.root, named).try();
-        unit_at(self.alloc, self.root, path.view())
-    }
-
-    // No `--entry`, so the entry point is a MODULE NAME resolved by the
-    // same two probes every other module gets. Three names, most
-    // conventional first:
-    //
-    //   main        every program in tests/corpus, and the
-    //               `src: Path("src/main.zen")` DESIGN.md's own
-    //               build.zen example writes
-    //   <basename>  the folder-root rule `<folder>/<folder>.zen`,
-    //               applied to the root itself
-    //   zen         this tree, and only this tree
-    //
-    // The third is still a special case, and it is the one
-    // `scripts/fixpoint.sh` rides: the gate runs `zen build src` with
-    // no entry, so this order is load-bearing and must not move.
-    entry_probed = (self :: @Self) Res<Unit, AllocError> {
-        first = candidate(self.env, self.alloc, self.root, ENTRY).try();
-        self.env.fs.exists(first.path).match({
-            true  => Ok(first),
-            false => self.entry_after_main(),
-        })
-    }
-
-    entry_after_main = (self :: @Self) Res<Unit, AllocError> {
-        base = self.root.base_of();
-        second = candidate(self.env, self.alloc, self.root, base).try();
-        self.env.fs.exists(second.path).match({
-            true  => Ok(second),
-            false => candidate(self.env, self.alloc, self.root, "zen"),
-        })
-    }
-
     // The whole program, breadth first from the entry. `seen` is both
     // the queue and the set: a module reached twice is added once, and
     // the index walks a list that is still growing, which is what makes
     // a worklist a Vec and not a recursion.
-    walk = (self :: @Self, entry: Unit) Res<(), AllocError> {
+    walk* = (self :: @Self, entry: Unit) Res<(), AllocError> {
         seen ::= self.alloc.Vec<Unit>();
         self.entry_rel = entry.rel;
         seen.add(entry).try();
@@ -309,18 +272,32 @@ Build* = {
         })
     }
 
-    read = (self :: @Self, path: str) Res<String> {
-        self.env.fs.read(self.alloc, path).match({
+    // THE OVERLAY FIRST, THE DISK SECOND, and a miss is the whole of
+    // what a build without an editor attached does.
+    read = (self :: @Self, path: str) Res<str> {
+        self.overlay.get(path).match({
             Ok(text) => Ok(text),
+            None     => self.read_disk(path),
+        })
+    }
+
+    // A `str` AND NOT A `String`, because the only thing the walk does
+    // with the bytes is `view()` them: `scan` holds spans into them and
+    // `parse` reads those back, so the buffer already had to outlive
+    // the `String` local this used to return. Saying `str` is what lets
+    // one branch above hand back a buffer it does not own.
+    read_disk = (self :: @Self, path: str) Res<str> {
+        self.env.fs.read(self.alloc, path).match({
+            Ok(text) => Ok(text.view()),
             Err(e)   => self.fs_fault(path, e),
         })
     }
 
     // COUNTED AND SAID, NOT COLLECTED: a `Diag` is a span, and here the
     // mistake is the whole file.
-    fs_fault = (self :: @Self, path: str, e: FsError) Res<String> {
+    fs_fault = (self :: @Self, path: str, e: FsError) Res<str> {
         self.faults = self.faults + 1;
-        println("{}: {}", path, fs_message(e));
+        self.speaking.then(() { println("{}: {}", path, fs_message(e)); });
         None;
     }
 
@@ -339,7 +316,7 @@ Build* = {
         self.faults = self.faults + 1;
         self.diags.add(d).try();
         self.diags.get(at).match({
-            Ok(held) => held.say(),
+            Ok(held) => self.speaking.then(() { held.say(); }),
             None     => (),
         });
         Ok(());
@@ -349,9 +326,9 @@ Build* = {
     // `lex.zen`'s contract and not a shortcut: tree-sitter's opinion of
     // the wreckage was only ever a second diagnostic for one mistake,
     // and a hand-written parser's would be no better.
-    lex_it = (self :: @Self, u: Unit, text: String, seen :: Vec<Unit>)
+    lex_it = (self :: @Self, u: Unit, text: str, seen :: Vec<Unit>)
              Res<(), AllocError> {
-        lexed = scan(self.alloc, Source(file: u.rel, text: text.view())).try();
+        lexed = scan(self.alloc, Source(file: u.rel, text: text)).try();
         lexed.is_clean().match({
             false => self.lex_faults(lexed),
             true  => self.parse_it(u, lexed, seen),
@@ -468,7 +445,7 @@ Build* = {
         })
     }
 
-    // Probed, not required, and for the same reason `probe` above is: a
+    // Probed, not required, and for the same reason the entry probe is: a
     // folder with no root file is a folder the module graph would reject
     // on its own terms, and reporting it from here would blame the
     // import that merely lives next to it.
@@ -539,6 +516,45 @@ Build* = {
     // check
     // -----------------------------------------------------------------
 
+    // A WHOLE BUILD, FOR A READER THAT IS NOT A COMMAND LINE. `zen
+    // build` ends at an exit code and that was the only way in, so the
+    // language server — which wants the tree, the `Checker`'s memos and
+    // the diagnostics — had no entry point and checked the open document
+    // as a lone module instead. Every imported name in it was poison,
+    // and hover, which refuses poison, went silent on every real file.
+    //
+    // NO EMIT AND NO SAYING. There is no program to produce, only a
+    // question to answer, and `speaking` above is why nothing is
+    // printed. `faults` and `diags` still hold what went wrong as
+    // values, which is what `publishDiagnostics` will read.
+    //
+    // `run_once` is NOT written in terms of this, deliberately: a
+    // command line's build reports as it goes and emits at the end, and
+    // folding two orders of printing into one method to save four lines
+    // is how a build's stdout moves by a byte.
+    whole* = (self :: @Self, named: str, docs: Map<str, str>)
+             Res<Checker, AllocError> {
+        self.overlay = docs;
+        self.speaking = false;
+        entry = entry_of(self.env, self.alloc, self.root, named).try();
+        self.walk(entry).try();
+        self.checked()
+    }
+
+    // WHERE A `Checker` COMES FROM, and now the only place. This was
+    // three lines inside `check_tree`, which made it a local that died
+    // with the method — §5 priced the overlay at "one field and one
+    // branch" and this is the line item that made that estimate wrong.
+    //
+    // HANDED BACK RATHER THAN STORED IN A FIELD. A `Checker` is a value
+    // whose `Map`s are headers, so a copy kept on the `Build` here would
+    // silently stop agreeing with the one `emit` goes on using.
+    checked* = (self :: @Self) Res<Checker, AllocError> {
+        c ::= self.alloc.Checker(self.tree).try();
+        c.check_all().try();
+        Ok(c);
+    }
+
     // Check and emit are ONE method because they share a `Checker`:
     // `CBackend` takes the one sema built, so a type is decided once and
     // the backend never re-derives it.
@@ -559,7 +575,7 @@ Build* = {
     // first". A poison node types as unknown, which is what a poison
     // node is for; the tally is what the exit code reads and it already
     // counted the syntax error.
-    back_end = (self :: @Self, job: Job) Res<(), AllocError> {
+    back_end* = (self :: @Self, job: Job) Res<(), AllocError> {
         (self.units == 0).match({
             true  => Ok(()),
             false => self.check_tree(job),
@@ -575,8 +591,7 @@ Build* = {
     // itself would report every parameter of every function undefined,
     // which is what this one did.
     check_tree = (self :: @Self, job: Job) Res<(), AllocError> {
-        c ::= self.alloc.Checker(self.tree).try();
-        c.check_all().try();
+        c ::= self.checked().try();
         report ::= self.alloc.String("").try();
         c.render_diags(report).try();
         // TWO RULES ARE ABOUT THE MODULE GRAPH and not about any node in
@@ -766,24 +781,8 @@ Build* = {
 // Alloc, beside the type it builds, exactly as `Vec`, `Ast` and `Parser`
 // are.
 Build* = (a: Alloc, env: Env, root: str) Build {
-    Build(env: env, alloc: a, root: root, tree: a.Ast(), diags: a.Vec<Diag>())
-}
-
-// ONE BUILD, WHOLE — the only thing this file publishes besides the
-// type, because every method it calls is private here. HOW MANY of them
-// a command line asks for is `zen_run.zen`, one way round.
-//
-// A FRESH `Build` each time, which matters once `--repeat` exists: a
-// run that reused the driver would carry exactly the state that flag
-// exists to look for.
-run_once* = (env: Env, a: Alloc, job: Job) Res<i32, AllocError> {
-    b ::= a.Build(env, job.root);
-    b.permute = job.debug.permute;
-    entry = b.entry_of(job.entry).try();
-    b.walk(entry).try();
-    b.back_end(job).try();
-    b.tally();
-    Ok(b.code());
+    Build(env: env, alloc: a, root: root, tree: a.Ast(),
+          diags: a.Vec<Diag>(), overlay: a.Map<str, str>())
 }
 
 // What went wrong with a file, in the words the capability uses. Every
