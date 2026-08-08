@@ -593,7 +593,15 @@ Build* = {
         (n > 0).then(() { println("{}", report.view()); });
         absent = self.main_check(c, job).try();
         self.faults = self.faults + absent;
-        ((n + absent) == 0).then(() { self.emit(c, job).try(); });
+        // THE WHOLE TALLY AND NOT SEMA'S ALONE. This read `n + absent`,
+        // which is every fault except the ones the LEXER and the PARSER
+        // found — so a file with a syntax error and no name errors was
+        // handed to the backend anyway, and the backend said "codegen
+        // does not lower this yet" about the poison node the parser had
+        // already reported. Two sentences, one mistake, and the second
+        // one about a hole the first one made. `emit`'s own header is
+        // the rule: only a program sema agreed is a program.
+        (self.faults == 0).then(() { self.emit(c, job).try(); });
         Ok(());
     }
 
@@ -725,6 +733,17 @@ Build* = {
 
     // -----------------------------------------------------------------
 
+    // HOW MANY, on one line, last. "One mistake produces one
+    // diagnostic" is a claim about a NUMBER, and a compiler that prints
+    // its diagnostics and not its count leaves that claim unmeasurable:
+    // `tests/run.py` reads this line to enforce a `.count` sidecar, and
+    // without it every such test fails for want of something to
+    // compare against rather than for cascading. The bootstrapper has
+    // printed it all along.
+    tally* = (self: @Self) () {
+        (self.faults > 0).then(() { println("zen: {} diagnostic(s)", self.faults); });
+    }
+
     // 0 when the build is clean, 1 when anything at all went wrong.
     // One code and not one per phase: a caller acts on "did this
     // produce a program", and `tests/run.py` and `scripts/fixpoint.sh`
@@ -750,6 +769,7 @@ build* = (env: Env, a: Alloc, job: Job) Res<i32, AllocError> {
     entry = b.entry_of(job.entry).try();
     b.walk(entry).try();
     b.back_end(job).try();
+    b.tally();
     Ok(b.code());
 }
 

@@ -37,7 +37,7 @@ Parser, Mark = parse.parser
 expr = parse.parse_expr
 type = parse.parse_type
 ret_ahead = parse.lookahead
-block = parse.parse_stmt
+block, body_block = parse.parse_stmt
 form_of, has_body = parse.parse_decl
 
 // -------------------------------------------------------------------
@@ -215,7 +215,7 @@ member_ret = (p :: Parser) Res<Res<TypeId>, AllocError> {
 }
 
 member_body = (p :: Parser) Res<Res<BlockId>, AllocError> {
-    b = p.block().try();
+    b = p.body_block().try();
     Ok(Ok(b));
 }
 
@@ -270,11 +270,17 @@ params_list* = (p :: Parser, out :: Vec<Param>) Res<Span, AllocError> {
     start = p.here();
     open = p.here_span();
     p.expect(TokenKind.ParenOpen, "expected `(` to open a parameter list").try();
-    running ::= !p.at_kind(TokenKind.ParenClose) && !p.at_eof();
+    // A PARAMETER IS A NAME, so a token that is not one ends the list
+    // rather than being reported as a bad parameter. `(i + 1 < f.len;`
+    // is an unclosed `(` and the diagnostic that says so points at the
+    // opener, which is the mistake; "expected a parameter name" at the
+    // `+` names a place where nothing is wrong and arrives FIRST,
+    // burying it.
+    running ::= p.at_kind(TokenKind.Ident);
     loop(() { running }, (h) {
         before = p.at;
         out.add(p.one_param().try()).try();
-        running = !p.at_kind(TokenKind.ParenClose) && !p.at_eof() && p.at > before;
+        running = p.at_kind(TokenKind.Ident) && !p.at_eof() && p.at > before;
     });
     p.expect_close(TokenKind.ParenClose, "unclosed `(`: this parameter list is never closed", open).try();
     Ok(p.span_from(start));

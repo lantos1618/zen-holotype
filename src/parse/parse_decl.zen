@@ -42,7 +42,7 @@ Parser, Mark = parse.parser
 expr = parse.parse_expr
 type = parse.parse_type
 ValueShape, value_shape, decl_head_ahead, delim_step, ret_ahead = parse.lookahead
-block = parse.parse_stmt
+block, body_block = parse.parse_stmt
 qualified_name = parse.parse_pattern
 struct_members, record_body, params_list, type_params = parse.parse_member
 
@@ -65,6 +65,7 @@ module* = (p :: Parser, name: str) Res<Module, AllocError> {
     running ::= !p.at_eof();
     loop(() { running }, (h) {
         before = p.at;
+        p.resume();
         decls.add(p.declaration(true).try()).try();
         (p.at == before).match({
             true  => p.recover(),
@@ -190,7 +191,7 @@ decl_names = (p :: Parser, names :: Vec<ImportName>, tparams :: Vec<TParam>) Res
 
 one_decl_name = (p :: Parser, tparams :: Vec<TParam>) Res<ImportName, AllocError> {
     m = p.open();
-    name = p.ident("expected a name to declare").try();
+    name = p.ident("expected `identifier`: a declaration begins with the name it declares").try();
     exported = p.eat(TokenKind.Star).try();
     p.at_kind(TokenKind.Lt).match({
         true  => p.type_params(tparams),
@@ -267,9 +268,22 @@ enum_decl = (p :: Parser, m: Mark, head: ImportName, tparams: Vec<TParam>) Res<D
     }).try();
     variants ::= p.alloc.Vec<Variant>();
     variants.add(p.one_variant().try()).try();
-    loop(() { p.at_kind(TokenKind.Bar) }, (h) {
+    // A `|` PROMISES ANOTHER VARIANT, and when none arrives the mistake
+    // is the BAR. Nothing here is newline-sensitive and a declaration
+    // does not terminate, so the token after a trailing bar is the next
+    // declaration's name a line below — or the end of the file. Either
+    // way it is a position the author did not type the mistake at, and
+    // the bar is one they did.
+    running ::= p.at_kind(TokenKind.Bar);
+    loop(() { running }, (h) {
+        at_bar = p.here_span();
         p.bump().try();
-        variants.add(p.one_variant().try()).try();
+        another = p.at_kind(TokenKind.Ident);
+        another.match({
+            true  => { variants.add(p.one_variant().try()).try(); p.nothing() },
+            false => p.error_at("expected variant: a `|` promises another one", at_bar),
+        }).try();
+        running = another && p.at_kind(TokenKind.Bar);
     });
     p.add_decl(DeclKind.Enum(Enum(
         name: head.name,
@@ -356,7 +370,7 @@ fn_ret = (p :: Parser) Res<Res<TypeId>, AllocError> {
 }
 
 fn_body = (p :: Parser) Res<Res<BlockId>, AllocError> {
-    b = p.block().try();
+    b = p.body_block().try();
     Ok(Ok(b));
 }
 
