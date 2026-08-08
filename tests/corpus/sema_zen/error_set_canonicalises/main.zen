@@ -23,32 +23,40 @@ Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 
+// A CALLER BRINGS ITS OWN ALLOCATOR. `Types` keeps `kinds`, `keys`,
+// `by_key`, `count` and `alloc` unstarred — it is an intern store and
+// its storage is its own business — so these helpers thread the `Alloc`
+// `main` already holds rather than reaching through `t` for it. It is
+// the same allocator either way; the difference is that one spelling
+// asks the store for a field law 6 never let out.
+//
 // A stand-in for a declaration. Nothing here reads the AST — a TyId's
 // identity is its intern key, and a nominal type keys on its qualified
 // name, so a coordinate and a name is all a type needs to exist.
-declared = (t :: Types, module: u32, qname: str, name: str)
+declared = (t :: Types, mem: Alloc, module: u32, qname: str, name: str)
            Res<TyId, AllocError> {
-    none ::= t.alloc.Vec<TyId>();
+    none ::= mem.Vec<TyId>();
     t.named(DeclId(module: module, decl: 0), qname, name, none)
 }
 
-set_of2 = (t :: Types, a: TyId, b: TyId) Res<TyId, AllocError> {
-    parts ::= t.alloc.Vec<TyId>();
+set_of2 = (t :: Types, mem: Alloc, a: TyId, b: TyId) Res<TyId, AllocError> {
+    parts ::= mem.Vec<TyId>();
     parts.add(a).try();
     parts.add(b).try();
     t.union_ty(parts)
 }
 
-set_of3 = (t :: Types, a: TyId, b: TyId, c: TyId) Res<TyId, AllocError> {
-    parts ::= t.alloc.Vec<TyId>();
+set_of3 = (t :: Types, mem: Alloc, a: TyId, b: TyId, c: TyId)
+          Res<TyId, AllocError> {
+    parts ::= mem.Vec<TyId>();
     parts.add(a).try();
     parts.add(b).try();
     parts.add(c).try();
     t.union_ty(parts)
 }
 
-show = (t: Types, label: str, id: TyId) Res<(), AllocError> {
-    out ::= t.alloc.String().try();
+show = (t: Types, mem: Alloc, label: str, id: TyId) Res<(), AllocError> {
+    out ::= mem.String().try();
     t.write_name(id, out).try();
     println("{} {}", label, out.view());
     Ok(());
@@ -62,21 +70,21 @@ main = (env: Env) Res<i32, AllocError> {
     alloc ::= env.mem.alloc();
     t ::= alloc.Types();
 
-    io = declared(t, 0, "std.core.io.IoError", "IoError").try();
-    mem = declared(t, 1, "std.mem.AllocError", "AllocError").try();
-    arg = declared(t, 2, "std.env.ArgError", "ArgError").try();
+    io = declared(t, alloc, 0, "std.core.io.IoError", "IoError").try();
+    memr = declared(t, alloc, 1, "std.mem.AllocError", "AllocError").try();
+    arg = declared(t, alloc, 2, "std.env.ArgError", "ArgError").try();
 
     // a nominal type is nominal on its DECLARATION, not its name: two
     // modules may declare `IoError` and they are two types
-    twin = declared(t, 7, "other.IoError", "IoError").try();
+    twin = declared(t, alloc, 7, "other.IoError", "IoError").try();
     same("nominal by declaration, not name:", io, twin);
 
     // SORTED. `WriteError = IoError | AllocError` and
     // `Error = AllocError | IoError` are the same set written twice
-    write_error = set_of2(t, io, mem).try();
-    error = set_of2(t, mem, io).try();
+    write_error = set_of2(t, alloc, io, memr).try();
+    error = set_of2(t, alloc, memr, io).try();
     same("A | B is B | A:", write_error, error);
-    show(t, "the set:", write_error).try();
+    show(t, alloc, "the set:", write_error).try();
 
     // DEDUPED. merging a set into itself changes nothing
     same("A | A is A:", t.merge(io, io).try(), io);
@@ -86,9 +94,9 @@ main = (env: Env) Res<i32, AllocError> {
     // widening through a named union lands in the same place as
     // spelling the members out
     wider = t.merge(write_error, arg).try();
-    spelled = set_of3(t, arg, io, mem).try();
+    spelled = set_of3(t, alloc, arg, io, memr).try();
     same("flat, however nested:", wider, spelled);
-    show(t, "the wider set:", wider).try();
+    show(t, alloc, "the wider set:", wider).try();
 
     // COLLAPSE. a set of one is its member — "a single error type is a
     // set of one", so Res<T, E> never changes shape
@@ -107,7 +115,7 @@ main = (env: Env) Res<i32, AllocError> {
     members ::= alloc.Vec<TyId>();
     t.members_of(wider, members).try();
     println("members {}", members.len);
-    members.loop((h, m) { show(t, " ", m).try() });
+    members.loop((h, m) { show(t, alloc, " ", m).try() });
 
     // and the renderer prints a set the way it was written. A diagnostic
     // carries TYPE IDS, never a formatted message, so this is the only
