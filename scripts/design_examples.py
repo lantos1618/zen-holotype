@@ -11,6 +11,30 @@ fence mixed a declaration with the statements illustrating its use.
 A document nobody executes drifts from the language it defines, and here the
 document IS the language, so the drift is the language becoming two things.
 
+PARSING IS THE STRONGEST GATE THIS DOCUMENT CAN CARRY, and that is a measured
+claim rather than a modest one. The obvious next step is "must compile", and it
+does not work: of the ten complete examples, **none compiles**, and none of the
+ten is at fault.
+
+  - Six are DECLARATION UNITS -- a struct, an enum, an impl, a set of
+    signatures. They are complete compilation units and not programs, so the
+    driver refuses them for having no `main`, which is law 2 doing its job.
+  - `Builder` and `Tester` examples are a `build.zen` and a test file. Both
+    receive their one parameter from a driver, and the root `build.zen` that
+    would run them is stage 1 and NOT WRITTEN (PLAN.md says so).
+  - One illustrates a multi-file package layout and names files no single
+    fence can carry.
+
+So raising the bar would mean re-marking most of DESIGN.md's examples as
+`fragment` -- which would REMOVE them from the gate. The stronger-sounding
+rule is the weaker gate, and that is why this one stops where it does.
+
+WHAT GREEN HERE DOES NOT MEAN: that the examples work. It means the grammar
+accepts them, which is exactly the drift PLAN.md 0.1 asked to catch -- prose
+inventing syntax the parser never agreed to. Whether the language BEHAVES as
+the document says is `tests/corpus/`'s job, and DESIGN.md's laws are cited by
+name in those tests for that reason.
+
 FENCE KINDS. A ```groovy fence is a complete compilation unit and must parse.
 A ```groovy fragment fence is statements, record fields, or a body with a
 literal `..` placeholder -- shown out of context on purpose, so it is read but
