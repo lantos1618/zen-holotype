@@ -1,0 +1,120 @@
+// src/lsp/lsp_hover.zen
+// The one query, and the reason this stage was worth starting.
+//
+// A hover is four calls the compiler already answers:
+//
+//     position -> to_pos -> expr_node_at -> expr_memo -> Types.name_of
+//
+// and `tests/corpus/sema_zen/a_cursor_position_finds_its_node` is the
+// same round trip WITHOUT a server, which is what makes it the thing to
+// read before this file. Nothing here is a query; everything here is a
+// call into `src/ast/` and `src/sema/`, which is `DESIGN.md:45`'s "a
+// thin server over compiler internals" meant literally.
+//
+// `DESIGN.md` decision 3 is why the memo is READ and not recomputed:
+// "ask `type_of` twice and the second answer costs a `Map` lookup,
+// which is the property an LSP needs, and the reason hover is not a
+// recompile." `check_all` has already typed every node in the document,
+// so this file never builds a `Ctx` and never calls `type_of`.
+//
+// WHAT IT DOES INSTEAD OF A BUILD, and this is the honest limitation of
+// L1: the open document is lexed, parsed and checked AS ONE MODULE,
+// standing alone. It is not `zen_build.walk`, so an import resolves to
+// nothing and a name from another file has no type. Doing it properly
+// needs the overlay `design_lsp.md` §5 specifies — one `Map` field on
+// `Build`, consulted by `Build.read` before `env.fs.read` — and that is
+// a change in `src/zen/zen_build.zen`, not here. Until it lands, hover
+// answers about a single file and says so by answering `null` for
+// anything it could not type.
+//
+// AND IT REBUILDS PER HOVER. There is no cache across requests, because
+// `design_lsp.md` §5 already established there is no unit smaller than
+// the program and `PLAN.md:317` already named where the fix goes if
+// that is too slow — stage 0.3, not here. A server that cached a
+// `Checker` keyed on nothing would be a correctness bug bought with
+// speed nobody measured.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+scan, Source = lex
+Parser = parse
+Ast, ExprId = ast
+expr_node_at = ast.ast_find
+Checker = sema.sema_check
+check_all = sema.sema_decl
+// IMPORTED FOR ITS METHODS, not to be named below. `c.types.write_name`
+// is a method on `Types`, and without this line the bootstrapper resolves
+// the name against `sema_diag` instead and reports that `write_name` is
+// not exported there — a resolution failure that reads as a missing
+// function in a module this file never mentions.
+Types = sema.sema_ty
+to_pos, to_wire, WirePos = lsp.lsp_pos
+
+// What a hover found. `found` is false for a position covered by no
+// expression AND for one whose expression the checker never reached —
+// see below on why those two are one answer here.
+Hover* = {
+    found*: bool,
+    type_name*: str,
+    start*: WirePos,
+    end*: WirePos,
+}
+
+// The type under a wire position in `text`, and the span to underline.
+//
+// `name` is what the document is called for the purpose of spans. It is
+// the CLIENT'S URI, verbatim, and never a filesystem path: this file
+// hands the same string to `Source` and to `expr_node_at`, so the two
+// agree by construction, and no `file://` conversion is needed or
+// written. That conversion becomes necessary the moment a second file
+// is involved — see this folder's root for what is not built.
+hover_at* = (a: Alloc, name: str, text: str, line: usize, character: usize)
+            Res<Hover, AllocError> {
+    tree ::= a.Ast();
+    lexed = scan(a, Source(file: name, text: text)).try();
+    p ::= a.Parser(lexed, tree);
+    m = p.module("doc").try();
+    p.tree.add_module(m).try();
+    c ::= a.Checker(p.tree).try();
+    check_all(c).try();
+
+    // THE CONVERSION HAPPENS EXACTLY HERE AND NOWHERE ELSE ON THE WAY
+    // IN. Below this line every position is a Zen position.
+    pos = to_pos(text, line, character);
+    expr_node_at(c.tree, name, pos).match({
+        None  => Ok(no_type()),
+        Ok(e) => typed_at(c, a, text, e),
+    })
+}
+
+// A position in no expression is not a failure — `ast_find.zen` says so
+// and an editor hovering over a comment or over whitespace gets exactly
+// this. The server turns it into a `null` result, which is what the
+// protocol wants and is not an error either.
+no_type* = () Hover {
+    Hover(found: false, type_name: "",
+          start: WirePos(line: 0, character: 0),
+          end: WirePos(line: 0, character: 0))
+}
+
+// The memo read, and the span converted back out.
+//
+// A MISS IN THE MEMO IS ANSWERED AS "NOTHING" and not as a made-up
+// type. `design_lsp.md`'s open question 6 asks whether `expr_memo`
+// holds an answer for every expression after `check_all` and records
+// that it is unverified; until someone verifies it, inventing a name
+// for an unreached node would put a wrong type in front of a user and
+// call it a feature. `null` is the answer that cannot mislead.
+typed_at = (c :: Checker, a: Alloc, text: str, e: ExprId) Res<Hover, AllocError> {
+    out ::= a.String().try();
+    known ::= false;
+    c.expr_memo.get(e).match({
+        None     => (),
+        Ok(memo) => { c.types.write_name(memo, out).try(); known = true; },
+    });
+    span = c.tree.expr_at(e).span;
+    Ok(Hover(found: known,
+             type_name: out.view(),
+             start: to_wire(text, span.start),
+             end: to_wire(text, span.end)));
+}

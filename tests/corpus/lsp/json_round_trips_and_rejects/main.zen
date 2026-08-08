@@ -1,0 +1,204 @@
+// JSON ROUND TRIPS AND REJECTS — `design_lsp.md` §7's L1 gate number 1:
+// "a table of documents parsed and re-emitted, compared byte for byte,
+// plus a table of malformed documents that must be rejected with a
+// position."
+//
+// BOTH HALVES MATTER AND THE SECOND ONE MORE. A reader that accepts
+// everything round-trips perfectly and is useless as a transport;
+// `TESTING.md:17` is the standing rule that "a rejection with the wrong
+// span is a failure", so every refusal below prints the BYTE it
+// refused at, and every one of those bytes is the first byte that could
+// not be part of a JSON document.
+//
+// WHAT THE ROUND TRIP IS NOT. It is not byte-identity with the input:
+// insignificant whitespace is dropped, and `\/` comes back as `/`
+// because escaping a slash is optional and this writer never does it.
+// What it IS, and what makes it a real gate, is that emit(parse(x)) is
+// a FIXPOINT — feed the output back in and it does not move — plus a
+// number surviving exactly as written, which is why `Num` keeps its
+// lexeme instead of a parsed value.
+//
+// THE EMOJI ROW IS THE ONE THAT GETS SKIPPED. `design_lsp.md:174` says
+// so in advance: a `\ud83d\ude00` pair has to be recombined into one
+// codepoint before it is UTF-8 encoded, and an implementation that
+// encodes the halves separately produces two invalid sequences that
+// reappear two layers later as a wrong column. The row below emits the
+// same bytes as the raw `😀` one, and that is the assertion.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Jsons, JsonId = lsp.lsp_json
+read, JsonFault = lsp.lsp_json_read
+
+// Parse, re-emit, and parse the OUTPUT again — a conversion tested one
+// way passes with the error present in both, and a writer that drops a
+// byte is only visible on the second pass.
+trip = (a: Alloc, doc: str) Res<(), AllocError> {
+    trip_as(a, doc, doc)
+}
+
+// The same, under a name of its own. One row's input contains a
+// carriage return — expected files in this suite are LF-only and
+// `tests/lint.py` enforces it — so that row is ECHOED as a label while
+// still being PARSED as itself. Dropping the CR from the input instead
+// would have deleted the assertion that JSON's whitespace is exactly
+// space, tab, CR and LF.
+trip_as = (a: Alloc, label: str, doc: str) Res<(), AllocError> {
+    once ::= a.String().try();
+    tree ::= a.Jsons();
+    read(a, tree, doc).match({
+        Err(f) => println("{} !! {} at byte {}", label, why(f), at_byte(f)),
+        Ok(id) => { tree.write(id, once).try(); refeed(a, label, once.view()).try(); },
+    });
+    Ok(());
+}
+
+// The fixpoint check. If `emit(parse(emit(parse(x))))` differs from
+// `emit(parse(x))`, the writer and the reader disagree about something
+// and the second line says which.
+refeed = (a: Alloc, doc: str, out: str) Res<(), AllocError> {
+    twice ::= a.String().try();
+    tree ::= a.Jsons();
+    read(a, tree, out).match({
+        Err(f) => println("{} -> {} !! re-reading its own output: {}", doc, out, why(f)),
+        Ok(id) => {
+            tree.write(id, twice).try();
+            twice.view().eq(out).match({
+                true  => println("{} -> {}", doc, out),
+                false => println("{} -> {} NOT A FIXPOINT -> {}", doc, out, twice.view()),
+            });
+        },
+    });
+    Ok(());
+}
+
+// A field read out of a parsed document, which is the only thing the
+// server ever does with one. It is here because `field` has a rule of
+// its own — LAST WINS on a duplicate key — and a rule with no test is a
+// comment.
+pick = (a: Alloc, doc: str, name: str) Res<(), AllocError> {
+    tree ::= a.Jsons();
+    out ::= a.String().try();
+    read(a, tree, doc).match({
+        Err(f) => println("{} !! {} at byte {}", doc, why(f), at_byte(f)),
+        Ok(id) => tree.field(id, name).match({
+            None   => println("{} . {} -> absent", doc, name),
+            Ok(v)  => { tree.write(v, out).try();
+                        println("{} . {} -> {}", doc, name, out.view()); },
+        }),
+    });
+    Ok(());
+}
+
+// The byte a refusal names. `NoMemory` is the one fault with no
+// position — it is not about the document — and it answers 0, which no
+// row here reaches.
+at_byte = (f: JsonFault) usize {
+    f.match({
+        Unexpected(i) => i,
+        Truncated(i)  => i,
+        BadEscape(i)  => i,
+        BadNumber(i)  => i,
+        TooDeep(i)    => i,
+        Trailing(i)   => i,
+        NoMemory      => 0,
+    })
+}
+
+why = (f: JsonFault) str {
+    f.match({
+        Unexpected(_) => "unexpected byte",
+        Truncated(_)  => "ended inside a value",
+        BadEscape(_)  => "bad escape",
+        BadNumber(_)  => "not a JSON number",
+        TooDeep(_)    => "nested too deeply",
+        Trailing(_)   => "trailing bytes",
+        NoMemory      => "out of memory",
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    println("-- the three literals");
+    trip(a, "null").try();
+    trip(a, "true").try();
+    trip(a, "false").try();
+
+    println("-- numbers keep their lexeme");
+    trip(a, "0").try();
+    trip(a, "-0").try();
+    trip(a, "12").try();
+    trip(a, "1.5").try();
+    trip(a, "1e10").try();
+    trip(a, "-2.5E-3").try();
+    trip(a, "1E+2").try();
+
+    println("-- strings and escapes");
+    trip(a, "\"\"").try();
+    trip(a, "\"plain\"").try();
+    // a quote, a backslash and a slash. The slash comes back BARE,
+    // which is the one deliberate asymmetry in this reader/writer pair.
+    trip(a, "\"q\\\"b\\\\s\\/\"").try();
+    // the five control escapes. \b and \f have no character literal in
+    // this language, so they come back as \u0008 and \u000c.
+    trip(a, "\"\\n\\r\\t\\b\\f\"").try();
+    // a raw control byte is NOT legal JSON, but its escape is
+    trip(a, "\"\\u0000\\u001f\"").try();
+
+    println("-- \\u, all four widths");
+    trip(a, "\"\\u0041\"").try();          // one byte
+    trip(a, "\"\\u00e9\"").try();          // two: é
+    trip(a, "\"\\u4e2d\"").try();          // three: a CJK character
+    trip(a, "\"\\ud83d\\ude00\"").try();   // four: a surrogate PAIR
+
+    println("-- raw utf-8 passes through untouched");
+    trip(a, "\"é中😀\"").try();
+    // and the escaped form of the emoji emits the SAME bytes as the raw
+    // one above, which is what recombining the pair means
+    trip(a, "\"\\ud83d\\ude00y\"").try();
+    trip(a, "\"😀y\"").try();
+
+    println("-- containers, empty and nested");
+    trip(a, "[]").try();
+    trip(a, "{}").try();
+    trip(a, "[1,2,[3,[]]]").try();
+    trip(a, "{\"a\":1,\"b\":{},\"c\":[{}]}").try();
+
+    println("-- whitespace is insignificant");
+    trip_as(a, "<space tab cr lf around [1,2,{k:null}]>",
+            "  [ 1 ,\t2 ,\r\n {\n \"k\" : null } ]  ").try();
+
+    println("-- reading a field");
+    pick(a, "{\"a\":1,\"b\":2}", "b").try();
+    pick(a, "{\"a\":1}", "zzz").try();
+    // LAST WINS on a duplicate key, which a scan stopping at the first
+    // hit would get backwards
+    pick(a, "{\"d\":1,\"d\":2}", "d").try();
+    pick(a, "[1,2]", "a").try();
+
+    println("-- rejected, and the byte says where");
+    trip(a, "").try();
+    trip(a, "01").try();
+    trip(a, "1.").try();
+    trip(a, ".5").try();
+    trip(a, "1e").try();
+    trip(a, "-").try();
+    trip(a, "tru").try();
+    trip(a, "nul1").try();
+    trip(a, "\"unterminated").try();
+    trip(a, "\"\\q\"").try();
+    trip(a, "\"\\u00\"").try();
+    // a LONE high surrogate. It cannot be UTF-8 and is refused rather
+    // than replaced, because substituting U+FFFD hands the compiler a
+    // document that is not the one that was sent.
+    trip(a, "\"\\ud83d\"").try();
+    trip(a, "\"\\ude00\"").try();
+    trip(a, "{\"a\"}").try();
+    trip(a, "{\"a\":}").try();
+    trip(a, "[1,]").try();
+    trip(a, "[1").try();
+    trip(a, "{}x").try();
+    trip(a, "{} {}").try();
+    Ok(0);
+}

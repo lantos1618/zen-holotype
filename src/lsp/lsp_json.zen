@@ -1,0 +1,355 @@
+// src/lsp/lsp_json.zen
+// JSON as a value, an arena over it, and the writer.
+//
+// Nothing else in this tree speaks JSON, and the protocol does, so this
+// is the first of `design_lsp.md` §1's five genuinely-new things.
+//
+// IT LIVES HERE AND IT MOVES. `STYLE.md`'s stranger test says "parses a
+// JSON document" names no module and therefore belongs in `std`.
+// Against that stands `src/std/env/env.zen:83` — "every member added
+// here is a member the self-hosted compiler has to keep working
+// forever" — and the compiler will never parse JSON. So it starts in
+// `src/lsp/`, and this sentence is the standing note that it becomes
+// `std.json` the day a second caller wants it.
+//
+// A CHILD IS AN ID, NEVER A VALUE, and that is `src/AST_CONTRACT.md`
+// rule 2 rather than a stylistic echo of it: an `Obj` holding a `Json`
+// holding an `Obj` has no size, so the recursion goes through an arena
+// exactly the way `Expr` does. An array and an object each name a
+// contiguous RUN in a side list, which is also the AST's shape.
+//
+// A NUMBER IS ITS LEXEME. `Num` carries the bytes it was written with
+// rather than a parsed value, and that is a decision worth defending:
+//
+//   - JSON's number grammar is not Zen's. `1e10` and `-0` are JSON
+//     numbers; `DESIGN.md:99` rejects a leading zero and `:100` rejects
+//     `12.`. A reader parsing into a Zen numeric type would have to
+//     REJECT documents that are valid JSON, which is the one thing a
+//     transport may not do.
+//   - Every number this server actually reads is a small non-negative
+//     integer — a request id, a line, a character — and `whole` is that
+//     narrow reading, said out loud rather than assumed.
+//   - Keeping the lexeme makes the writer byte-exact for free, which is
+//     what makes the round-trip gate mean something.
+
+str, String = std.text
+Vec = std.collections
+Alloc, AllocError = std.mem
+Range = std.core
+hex_digit = std.core.byte
+
+// An index into a `Jsons`. A struct and not a bare usize, so an index
+// into `nodes` cannot be handed to something expecting an index into
+// `items` — the same reason `ExprId` is not a usize.
+JsonId* = { index*: usize }
+
+// A contiguous run in one of the side lists: arrays name a run of
+// `items`, objects a run of `pairs`.
+Run* = {
+    at*: usize,
+    len*: usize,
+}
+
+// One member of an object: the DECODED key, and its value. Decoded,
+// because `"ab"` and `"ab"` are the same member name and a lookup
+// comparing lexemes would miss on one of them.
+Pair* = {
+    key*: str,
+    value*: JsonId,
+}
+
+// The six JSON values. `Text` rather than `Str` because `str` is a type
+// in scope, and a variant shadowing it reads as a mistake every time.
+Json* = Null
+      | Bool(bool)
+      | Num(str)      // the lexeme, verbatim
+      | Text(str)     // the decoded bytes
+      | Arr(Run)      // a run of `items`
+      | Obj(Run)      // a run of `pairs`
+
+// The arena. `Types` in sema is the same shape and the same idea: one
+// store that owns every value, and ids that mean nothing without it.
+Jsons* = {
+    nodes :: Vec<Json>,
+    items :: Vec<JsonId>,
+    pairs :: Vec<Pair>,
+
+    // An id no `Jsons` handed out is a bug in the caller and not a
+    // miss, so it TRAPS rather than answering `Null` — a lie shaped
+    // like valid data is the worst of the three options. The
+    // subtraction IS the check, in `str.index`'s idiom.
+    at* = (self: @Self, id: JsonId) Json {
+        self.nodes.len - id.index - 1;
+        self.nodes.get(id.index).match({
+            Ok(v) => v,
+            None  => Json.Null,
+        })
+    }
+
+    add* = (self :: @Self, v: Json) Res<JsonId, AllocError> {
+        id = JsonId(index: self.nodes.len);
+        self.nodes.add(v).try();
+        Ok(id);
+    }
+
+    // Append a built-up list of children as ONE run. The children were
+    // collected into a caller-owned `Vec` first and are copied here,
+    // because a nested array's own children land in `items` between its
+    // siblings' — so a run can only be made contiguous after the fact.
+    add_items* = (self :: @Self, ids: Vec<JsonId>) Res<Run, AllocError> {
+        run = Run(at: self.items.len, len: ids.len);
+        Range(0, ids.len).loop((h, i) {
+            self.items.add(id_or_zero(ids.get(i))).try();
+        });
+        Ok(run);
+    }
+
+    add_pairs* = (self :: @Self, ps: Vec<Pair>) Res<Run, AllocError> {
+        run = Run(at: self.pairs.len, len: ps.len);
+        Range(0, ps.len).loop((h, i) {
+            self.pairs.add(pair_or_empty(ps.get(i))).try();
+        });
+        Ok(run);
+    }
+
+    // --- reading ----------------------------------------------------
+    //
+    // Every one of these answers `None` rather than failing, which is
+    // the shape a server wants: a request missing a field is a request
+    // to refuse by name, not a reason to stop reading the stream.
+
+    // The member named `name`, if `id` is an object that has one.
+    //
+    // LAST WINS on a duplicate key, so the scan runs to the end rather
+    // than stopping at the first hit. RFC 8259 leaves duplicates
+    // undefined; every mainstream implementation takes the last, and
+    // agreeing with them beats being novel about it.
+    field* = (self: @Self, id: JsonId, name: str) Res<JsonId> {
+        self.at(id).match({
+            Obj(run) => self.scan(run, name),
+            _        => None,
+        })
+    }
+
+    scan = (self: @Self, run: Run, name: str) Res<JsonId> {
+        found ::= JsonId(index: 0);
+        have ::= false;
+        Range(run.at, run.at + run.len).loop((h, i) {
+            p = pair_or_empty(self.pairs.get(i));
+            p.key.eq(name).then(() {
+                found = p.value;
+                have = true;
+            });
+        });
+        have.match({ true => Ok(found), false => None })
+    }
+
+    // Element `i` of an array. The one accessor `Run` needs from
+    // outside: `contentChanges[0]` is how a Full-sync `didChange`
+    // carries its text, and there is no other array this server reads.
+    item* = (self: @Self, id: JsonId, i: usize) Res<JsonId> {
+        self.at(id).match({
+            Arr(run) => (i < run.len).match({
+                true  => self.items.get(run.at + i),
+                false => None,
+            }),
+            _ => None,
+        })
+    }
+
+    text* = (self: @Self, id: JsonId) Res<str> {
+        self.at(id).match({ Text(s) => Ok(s), _ => None })
+    }
+
+    // A JSON number read as a non-negative integer, which is every
+    // number this protocol sends where the answer matters: an id, a
+    // line, a character, a length.
+    //
+    // `None` for a lexeme that is not exactly digits — a sign, a point
+    // or an exponent is a valid JSON number and NOT a whole one, and
+    // answering 1 for `1e10` is the kind of quiet wrong that surfaces
+    // three layers away as a position.
+    whole* = (self: @Self, id: JsonId) Res<usize> {
+        self.at(id).match({
+            Num(lex) => whole_of(lex),
+            _        => None,
+        })
+    }
+
+    // --- writing ----------------------------------------------------
+
+    // The value at `id`, as JSON, into `out`.
+    //
+    // Deterministic and with no spaces: members come out in the order
+    // they were read or built, so two runs of this server over one
+    // input produce one byte string. That is the property the
+    // round-trip gate compares against, and it is worth more than
+    // pretty output.
+    write* = (self: @Self, id: JsonId, out :: String) Res<(), AllocError> {
+        self.at(id).match({
+            Null     => out.add_bytes("null"),
+            Bool(b)  => out.add_bytes(b.match({ true => "true", false => "false" })),
+            Num(lex) => out.add_bytes(lex),
+            Text(s)  => write_text(s, out),
+            Arr(run) => self.write_items(run, out),
+            Obj(run) => self.write_pairs(run, out),
+        })
+    }
+
+    write_items = (self: @Self, run: Run, out :: String) Res<(), AllocError> {
+        out.add_bytes("[").try();
+        Range(0, run.len).loop((h, i) {
+            comma(i, out).try();
+            self.write(id_or_zero(self.items.get(run.at + i)), out).try();
+        });
+        out.add_bytes("]")
+    }
+
+    write_pairs = (self: @Self, run: Run, out :: String) Res<(), AllocError> {
+        out.add_bytes("{").try();
+        Range(0, run.len).loop((h, i) {
+            comma(i, out).try();
+            p = pair_or_empty(self.pairs.get(run.at + i));
+            write_text(p.key, out).try();
+            out.add_bytes(":").try();
+            self.write(p.value, out).try();
+        });
+        out.add_bytes("}")
+    }
+}
+
+Jsons* = (a: Alloc) Jsons {
+    Jsons(nodes: a.Vec<Json>(), items: a.Vec<JsonId>(), pairs: a.Vec<Pair>())
+}
+
+// The separator before element `i`, which is nothing before the first.
+comma = (i: usize, out :: String) Res<(), AllocError> {
+    (i > 0).match({ true => out.add_bytes(","), false => written() })
+}
+
+// `Ok(())` with its error side named — see `lsp_json_read.zen`'s `fine`
+// for why a bare one does not join against a sibling `Res<T, E>`.
+written* = () Res<(), AllocError> { Ok(()) }
+
+// An in-range `get` that the caller has already bounds-checked by
+// construction. These exist because `Res` has no `or`, and writing the
+// match five times would bury the five places that matter.
+id_or_zero = (r: Res<JsonId>) JsonId {
+    r.match({ Ok(v) => v, None => JsonId(index: 0) })
+}
+
+pair_or_empty = (r: Res<Pair>) Pair {
+    r.match({ Ok(v) => v, None => Pair(key: "", value: JsonId(index: 0)) })
+}
+
+// A JSON string literal, escaped, quotes included.
+//
+// SHARED BY THE WRITER AND BY EVERY REPLY, which is why it is a free
+// function rather than a method on `Jsons`: a reply is assembled as
+// text with no arena behind it, and a second escaper written for that
+// path is a second escaper to get wrong.
+//
+// The escape set is the minimum JSON requires: the quote, the
+// backslash, and everything below 32. `/` is NOT escaped — it is legal
+// bare, escaping it is optional, and "accepts `\/`, never writes it" is
+// the pair every other implementation ships.
+//
+// BYTES ABOVE 127 PASS THROUGH UNTOUCHED, which is what makes this
+// right for a language whose `str` is bytes: a valid UTF-8 sequence is
+// valid JSON as itself, and re-encoding it into `\u` escapes would mean
+// decoding it first — work nobody asked for, and the one place a
+// non-ASCII identifier could get corrupted on the way out.
+write_text* = (s: str, out :: String) Res<(), AllocError> {
+    out.add_byte('"').try();
+    Range(0, s.len).loop((h, i) {
+        escaped(s.index(i), out).try();
+    });
+    out.add_byte('"')
+}
+
+escaped = (b: u8, out :: String) Res<(), AllocError> {
+    (b == '"').match({
+        true  => out.add_bytes("\\\""),
+        false => (b == '\\').match({
+            true  => out.add_bytes("\\\\"),
+            false => (b < SPACE).match({
+                true  => control(b, out),
+                false => out.add_byte(b),
+            }),
+        }),
+    })
+}
+
+// The three JSON names worth having for a control byte, and `\u00XX`
+// for the rest. The named forms are not prettiness: a newline inside a
+// diagnostic message is the common case, and spelling it as a hex
+// escape would make every expected file in this suite unreadable.
+control = (b: u8, out :: String) Res<(), AllocError> {
+    (b == '\n').match({
+        true  => out.add_bytes("\\n"),
+        false => (b == '\r').match({
+            true  => out.add_bytes("\\r"),
+            false => (b == '\t').match({
+                true  => out.add_bytes("\\t"),
+                false => hex_escape(b, out),
+            }),
+        }),
+    })
+}
+
+// `\u00XX`, reachable only for a byte below 32 — so the high two digits
+// are always `00` and are written rather than computed, because the
+// value cannot make them anything else.
+hex_escape = (b: u8, out :: String) Res<(), AllocError> {
+    out.add_bytes("\\u00").try();
+    out.add_byte(hex_digit(b / NIBBLE_BASE)).try();
+    out.add_byte(hex_digit(b % NIBBLE_BASE))
+}
+
+SPACE*: u8 = 32
+NIBBLE_BASE*: u8 = 16
+
+// A lexeme read as a usize, or `None` if it is not exactly digits.
+//
+// Overflow answers `None` and never wraps: a `Content-Length` or a line
+// number that does not fit is a request this server cannot honour, and
+// answering with the low bits of it is worse than refusing.
+whole_of* = (lex: str) Res<usize> {
+    n ::= 0;
+    ok ::= !lex.is_empty();
+    Range(0, lex.len).loop((h, i) {
+        stepped(n, lex.index(i)).match({
+            Ok(next) => { n = next; },
+            None     => { ok = false; },
+        });
+    });
+    ok.match({ true => Ok(n), false => None })
+}
+
+// One more digit on the end of `n`.
+//
+// A FREE FUNCTION AND NOT A NESTED CLOSURE, and that is a bootstrapper
+// limit rather than taste: the obvious spelling puts a `.then(() { .. })`
+// inside the loop body and reads the loop's `b` from within it, and
+// `bootstrap/` resolves that capture to the wrong binding — it reports
+// "no method `to_u32` on `bool`", having found the loop's `ok` where `b`
+// was written. The self-hosted compiler gets it right; the two have to
+// agree, so the closure goes.
+stepped = (n: usize, b: u8) Res<usize> {
+    (b >= '0' && b <= '9').match({
+        false => None,
+        true  => fits(n, (b - '0').to_u32().to_usize()),
+    })
+}
+
+// The guard runs BEFORE the multiply, so an overflow is detected rather
+// than performed — an overflowing `*` TRAPS, and a trap is not a
+// refusal. A length that does not fit is a request to decline.
+fits = (n: usize, d: usize) Res<usize> {
+    (n > (USIZE_MAX - d) / 10).match({
+        true  => None,
+        false => Ok(n * 10 + d),
+    })
+}
+
+USIZE_MAX*: usize = 18446744073709551615

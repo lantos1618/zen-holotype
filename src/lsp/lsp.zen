@@ -1,0 +1,59 @@
+// src/lsp/lsp.zen
+// The language server, and the folder's surface.
+//
+// `PLAN.md` stage 4 and `docs/design_lsp.md` are what this folder is
+// graded against. `DESIGN.md:45` fixes its shape in one sentence — the
+// LSP is "a thin server over compiler internals" — and the way to check
+// that claim is to notice that NOTHING IN THIS FOLDER ANSWERS A
+// QUESTION ABOUT ZEN. `lsp_hover.zen` calls `expr_node_at` and reads
+// `expr_memo`; where a query is missing the fix belongs in `src/sema/`
+// or `src/ast/`, never here.
+//
+// A folder root is a file of starred re-exports and nothing else. A
+// name absent from this list is module-private on purpose.
+//
+//   lsp_pos.zen        the wire's coordinates and this language's
+//   lsp_json.zen       JSON as a value, an arena, and the writer
+//   lsp_json_read.zen  JSON in
+//   lsp_frame.zen      Content-Length framing
+//   lsp_hover.zen      the one query wired to sema
+//   lsp_serve.zen      lifecycle, the overlay, and the dispatch table
+//
+// ---------------------------------------------------------------------
+// WHAT IS BUILT: L1's transport and lifecycle, and ONE query.
+//
+// `initialize`, `shutdown`, `textDocument/hover`, and Full document
+// sync. Everything else in `design_lsp.md` §2's table is refused by
+// name with `-32601`, which is worth more than a broad surface that
+// guesses: a skeleton answering one request correctly can be extended,
+// and a server inventing answers has to be un-trusted first.
+//
+// WHAT IS NOT BUILT, precisely, so nobody has to discover it:
+//
+//   - THE STDIO TRANSPORT. There is no stdin in this tree and no way to
+//     write bytes without a trailing newline; `lsp_serve.zen`'s header
+//     prices both. `serve` takes bytes and appends bytes, so what is
+//     missing is a capability and not a server.
+//   - PUBLISHDIAGNOSTICS. Sema's diagnostics are already values
+//     (`sema_check.zen:151`), but lex's and parse's are printed and
+//     dropped by the driver (`zen_build.zen:358`, `:383`), and the fix
+//     for that is in `src/zen/zen_build.zen`. Half a diagnostics story
+//     is worse than none: an editor showing type errors and silently
+//     not showing syntax errors teaches the user to distrust it.
+//   - THE BUILD OVERLAY. `design_lsp.md` §5 specifies one `Map` field
+//     on `Build`, read by `Build.read` before `env.fs.read`. Without it
+//     hover checks the open document AS A LONE MODULE — see
+//     `lsp_hover.zen` — so an imported name has no type.
+//   - URI-TO-PATH CONVERSION. Not needed while one document is checked
+//     alone, because the URI is used verbatim as the span's file name.
+//     It becomes necessary with the overlay, and `design_lsp.md:304`
+//     says where it goes: beside `lsp_pos.zen`, same class of bug.
+//   - documentSymbol, definition, semanticTokens, references,
+//     completion, formatting, signatureHelp, rename — L2 to L4.
+
+WirePos*, LineRun*, Step*, to_pos*, to_wire*, run_of*, step_at* = lsp.lsp_pos
+JsonId*, Run*, Pair*, Json*, Jsons*, write_text*, whole_of* = lsp.lsp_json
+JsonFault*, Reader*, read*, push_utf8*, byte_of* = lsp.lsp_json_read
+Envelope*, FrameFault*, frame_at*, write_frame*, write_decimal* = lsp.lsp_frame
+Hover*, hover_at* = lsp.lsp_hover
+Server*, serve*, CAPABILITIES* = lsp.lsp_serve

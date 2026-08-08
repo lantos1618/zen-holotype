@@ -1,0 +1,419 @@
+// src/lsp/lsp_serve.zen
+// The server: lifecycle, a document overlay, and a dispatch table.
+//
+// It answers FOUR requests and handles THREE notifications, and it
+// refuses everything else BY NAME with `-32601` and the method spelled
+// back. That is deliberate, and it is `src/zen/zen_cli.zen`'s own rule
+// applied one level down — a command that silently does nothing is
+// worse than one that says it is not written. A server answering
+// `textDocument/completion` with an empty list would look like a
+// working server that had nothing to suggest.
+//
+//   initialize                 capabilities, and the gate opens
+//   shutdown                   `null`, and no more work is accepted
+//   textDocument/hover         lsp_hover.zen — the one real query
+//   everything else            -32601, with the method named
+//   initialized / exit / $/cancelRequest   notifications, no reply
+//   didOpen / didChange / didClose         the overlay, Full sync only
+//
+// SYNC IS FULL AND CANNOT USEFULLY BE INCREMENTAL. `design_lsp.md` §5
+// gives the three structural reasons — ids are indices in creation
+// order, a `Checker` copies a finished `Ast`, compilation is
+// whole-program — and the conclusion: applying a range edit into a
+// buffer and then handing the whole buffer to a whole-program compiler
+// buys nothing and costs a second implementation of text-range
+// arithmetic beside `lsp_pos.zen`'s.
+//
+// `$/cancelRequest` IS DROPPED AND NOT HONOURED, and saying so beats
+// advertising cancellation that cannot happen: there is no yield point
+// in `check_all`, and this server is single-threaded because
+// `PLAN.md:194` writes the compiler in the seed subset and the seed
+// subset has no threads.
+//
+// ---------------------------------------------------------------------
+// THE TRANSPORT IS A BUFFER, BECAUSE THERE IS NO STDIN.
+//
+// `Env` is `argv`, `vars`, `out`, `mem`, `fs`, `net`, `threads`
+// (`src/std/env/env.zen:147`) and `Console` is one `println` (`:45`),
+// which appends exactly one `\n`. So this tree can neither READ a byte
+// stream nor WRITE an unterminated one, and a `Content-Length` frame
+// needs both. `design_lsp.md` §4 prices the missing capability — a
+// byte-counted `Stdin.read` with no line discipline, plus its floor in
+// `gen_c` — and it is not written here.
+//
+// What IS written is the server underneath it: `serve` takes the
+// request bytes and appends the reply bytes, so the transport is one
+// substitution away and everything above it is testable today. A caller
+// with a file has a working server now; a caller with a pipe has one
+// the day `Stdin` lands. THE SERVER IS NOT THE MISSING PIECE.
+
+str, String = std.text
+Map = std.collections
+Alloc, AllocError = std.mem
+Jsons, JsonId, write_text, written = lsp.lsp_json
+read, JsonFault = lsp.lsp_json_read
+FrameFault, frame_at, write_frame, write_decimal = lsp.lsp_frame
+Hover, hover_at = lsp.lsp_hover
+
+// The whole of the server's state.
+//
+// `docs` maps a URI to the text of the open buffer. The text is a `str`
+// borrowed from the decoded JSON string in `a`, and that is safe for
+// exactly one reason worth writing down: `a` is an arena outliving the
+// session, so nothing it handed out is freed under the map. The day
+// this server runs on a per-request arena, this becomes a copy.
+Server* = {
+    a: Alloc,
+    docs :: Map<str, str>,
+    ready :: bool,        // `initialize` has been answered
+    stopping :: bool,     // `shutdown` has been answered
+
+    // One message: read it, route it, frame whatever it produced.
+    one* = (self :: @Self, body: str, out :: String) Res<(), AllocError> {
+        tree ::= self.a.Jsons();
+        msg ::= self.a.String().try();
+        read(self.a, tree, body).match({
+            Err(f)  => parse_error(f, msg),
+            Ok(req) => self.route(tree, req, msg),
+        }).try();
+        // AN EMPTY MESSAGE IS A NOTIFICATION AND GETS NO FRAME. The
+        // protocol forbids replying to one, and a server that answered
+        // `didChange` with anything at all would desynchronise a client
+        // that is counting replies.
+        msg.is_empty().match({
+            true  => written(),
+            false => write_frame(msg.view(), out),
+        })
+    }
+
+    route = (self :: @Self, tree: Jsons, req: JsonId, msg :: String)
+            Res<(), AllocError> {
+        method = method_of(tree, req);
+        // THE PRESENCE OF `id` IS WHAT MAKES A MESSAGE A REQUEST. Not
+        // the method name — the protocol says so, and a table of which
+        // names are notifications would be a second, divergent, copy of
+        // the specification.
+        tree.field(req, "id").match({
+            None    => self.notified(tree, req, method),
+            Ok(rid) => self.requested(tree, req, method, rid, msg),
+        })
+    }
+
+    // BEFORE `initialize`, EVERY REQUEST IS REFUSED with `-32002`. That
+    // is the protocol's rule and it is the one piece of lifecycle a
+    // server cannot skip without the client's own state machine going
+    // wrong.
+    requested = (self :: @Self, tree: Jsons, req: JsonId, method: str,
+                 rid: JsonId, msg :: String) Res<(), AllocError> {
+        (self.ready || method.eq("initialize")).match({
+            false => failed(tree, rid, NOT_INITIALIZED,
+                            "the server has not been initialized", msg),
+            true  => self.answered(tree, req, method, rid, msg),
+        })
+    }
+
+    answered = (self :: @Self, tree: Jsons, req: JsonId, method: str,
+                rid: JsonId, msg :: String) Res<(), AllocError> {
+        method.eq("initialize").match({
+            true  => { self.ready = true; result(tree, rid, CAPABILITIES, msg) },
+            false => method.eq("shutdown").match({
+                true  => { self.stopping = true; result(tree, rid, "null", msg) },
+                false => method.eq("textDocument/hover").match({
+                    true  => self.hovered(tree, req, rid, msg),
+                    false => self.unknown(tree, rid, method, msg),
+                }),
+            }),
+        })
+    }
+
+    // REFUSED BY NAME. The method is echoed into the message so a
+    // client's log says which request this server does not implement,
+    // rather than that some request failed.
+    unknown = (self :: @Self, tree: Jsons, rid: JsonId, method: str,
+               msg :: String) Res<(), AllocError> {
+        why ::= self.a.String().try();
+        why.add_bytes("no handler for ").try();
+        why.add_bytes(method).try();
+        why.add_bytes(" - see docs/design_lsp.md for the stage it arrives at").try();
+        failed(tree, rid, METHOD_NOT_FOUND, why.view(), msg)
+    }
+
+    // `initialized`, `exit`, `didClose` and `$/cancelRequest` all mean
+    // "nothing to do here", and they fall through the same `false` arm.
+    // They are named in this comment rather than in four empty branches,
+    // because four branches that do nothing hide the fifth that should
+    // have.
+    notified = (self :: @Self, tree: Jsons, req: JsonId, method: str)
+               Res<(), AllocError> {
+        method.eq("textDocument/didOpen").match({
+            true  => self.opened(tree, req),
+            false => method.eq("textDocument/didChange").match({
+                true  => self.changed(tree, req),
+                false => written(),
+            }),
+        })
+    }
+
+    opened = (self :: @Self, tree: Jsons, req: JsonId) Res<(), AllocError> {
+        doc = param(tree, req, "textDocument");
+        self.remember(string_at(tree, doc, "uri"), string_at(tree, doc, "text"))
+    }
+
+    // FULL SYNC: `contentChanges[0].text` is the whole new buffer,
+    // because `initialize` advertised `textDocumentSync: 1`. A change
+    // carrying a `range` would be an incremental one, this server never
+    // asked for those, and so the field is not read.
+    changed = (self :: @Self, tree: Jsons, req: JsonId) Res<(), AllocError> {
+        uri = string_at(tree, param(tree, req, "textDocument"), "uri");
+        edits = param(tree, req, "contentChanges");
+        text = tree.item(edits, 0).match({
+            None    => "",
+            Ok(one) => string_at(tree, one, "text"),
+        });
+        self.remember(uri, text)
+    }
+
+    // A URI with no text is not stored. An empty document and an absent
+    // one are different states, and a `didOpen` this server could not
+    // read must not look like a file the user emptied.
+    remember = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
+        uri.is_empty().match({
+            true  => written(),
+            false => self.docs.set(uri, text),
+        })
+    }
+
+    hovered = (self :: @Self, tree: Jsons, req: JsonId, rid: JsonId,
+               msg :: String) Res<(), AllocError> {
+        uri = string_at(tree, param(tree, req, "textDocument"), "uri");
+        where = param(tree, req, "position");
+        line = number_at(tree, where, "line");
+        character = number_at(tree, where, "character");
+        self.docs.get(uri).match({
+            // A hover on a document that was never opened is a client
+            // bug, and `-32602` names it rather than answering `null` —
+            // which would read as "no type here" and send whoever is
+            // debugging it to look in the wrong place.
+            None     => failed(tree, rid, INVALID_PARAMS,
+                               "no open document for that uri", msg),
+            Ok(text) => self.answer_hover(tree, rid, uri, text, line, character, msg),
+        })
+    }
+
+    answer_hover = (self :: @Self, tree: Jsons, rid: JsonId, uri: str,
+                    text: str, line: usize, character: usize, msg :: String)
+                   Res<(), AllocError> {
+        h = hover_at(self.a, uri, text, line, character).try();
+        body ::= self.a.String().try();
+        h.found.match({
+            false => body.add_bytes("null").try(),
+            true  => write_hover(h, body).try(),
+        });
+        result(tree, rid, body.view(), msg)
+    }
+}
+
+Server* = (a: Alloc) Server {
+    Server(a: a, docs: a.Map<str, str>(), ready: false, stopping: false)
+}
+
+// Every frame in `input`, answered into `out`.
+//
+// A malformed frame STOPS the session and is reported rather than
+// skipped: framing is the one layer where recovery is impossible by
+// construction, because the only thing that says where the next message
+// starts is the header of this one. Skipping forward would
+// resynchronise onto a byte inside somebody's document.
+serve* = (s :: Server, input: str, out :: String) Res<(), AllocError> {
+    at ::= 0;
+    going ::= true;
+    loop(() { going && at < input.len }, (h) {
+        frame_at(input, at).match({
+            Err(f) => { going = false; frame_fault(f, out).try(); },
+            Ok(fr) => { at = fr.next; s.one(fr.body, out).try(); },
+        });
+    });
+    Ok(());
+}
+
+// A framing fault is reported to the caller's stream and NOT to a
+// client, because a client that cannot be framed cannot be replied to
+// either. One line, naming the byte, and the session is over.
+frame_fault = (f: FrameFault, out :: String) Res<(), AllocError> {
+    out.add_bytes("lsp: bad frame at byte ").try();
+    write_decimal(frame_byte(f), out).try();
+    out.add_bytes(" (").try();
+    out.add_bytes(frame_why(f)).try();
+    out.add_bytes(")\n")
+}
+
+frame_byte = (f: FrameFault) usize {
+    f.match({
+        NoBlank(i)   => i,
+        NoLength(i)  => i,
+        BadLength(i) => i,
+        Short(i)     => i,
+    })
+}
+
+frame_why = (f: FrameFault) str {
+    f.match({
+        NoBlank(_)   => "the headers never ended",
+        NoLength(_)  => "no Content-Length",
+        BadLength(_) => "Content-Length is not a number",
+        Short(_)     => "fewer bytes than Content-Length promised",
+    })
+}
+
+// --- reading a request -----------------------------------------------
+//
+// Every one of these answers "" or 0 for a field it cannot find, and
+// none of them fails. A server is handed arbitrary bytes by definition,
+// and a missing field has to produce an empty answer rather than a
+// trap — the refusal happens later, by name, where it can carry an id.
+
+method_of = (tree: Jsons, req: JsonId) str {
+    string_at(tree, req, "method")
+}
+
+// `params.<name>`, or the request itself when there are no params, so
+// that a malformed message reads as one with every field absent.
+param = (tree: Jsons, req: JsonId, name: str) JsonId {
+    tree.field(req, "params").match({
+        None   => req,
+        Ok(ps) => tree.field(ps, name).match({ None => ps, Ok(v) => v }),
+    })
+}
+
+string_at = (tree: Jsons, obj: JsonId, name: str) str {
+    tree.field(obj, name).match({
+        None  => "",
+        Ok(v) => tree.text(v).match({ Ok(s) => s, None => "" }),
+    })
+}
+
+number_at = (tree: Jsons, obj: JsonId, name: str) usize {
+    tree.field(obj, name).match({
+        None  => 0,
+        Ok(v) => tree.whole(v).match({ Ok(n) => n, None => 0 }),
+    })
+}
+
+// --- the reply shapes ------------------------------------------------
+//
+// Built as TEXT and not through the arena, because a reply is a fixed
+// shape with two holes in it and an arena would mean building six nodes
+// to print eight bytes. Every string that could contain a quote goes
+// through `write_text`, which is `lsp_json.zen`'s escaper — the same one
+// the writer uses, so there is exactly one escaping rule in this folder.
+
+result = (tree: Jsons, rid: JsonId, body: str, msg :: String)
+         Res<(), AllocError> {
+    head(tree, rid, msg).try();
+    msg.add_bytes(",\"result\":").try();
+    msg.add_bytes(body).try();
+    msg.add_bytes("}")
+}
+
+failed = (tree: Jsons, rid: JsonId, code: usize, why: str, msg :: String)
+         Res<(), AllocError> {
+    head(tree, rid, msg).try();
+    msg.add_bytes(",\"error\":{\"code\":-").try();
+    write_decimal(code, msg).try();
+    msg.add_bytes(",\"message\":").try();
+    write_text(why, msg).try();
+    msg.add_bytes("}}")
+}
+
+// THE ID IS ECHOED VERBATIM, out of the arena it was read from. A
+// JSON-RPC id may be a number or a string, and re-emitting the node
+// rather than re-encoding a parsed value is how this server matches
+// either without a second representation of "an id".
+head = (tree: Jsons, rid: JsonId, msg :: String) Res<(), AllocError> {
+    msg.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    tree.write(rid, msg)
+}
+
+// A frame this server could not parse gets an error with a NULL id,
+// which is the protocol's answer for "I could not tell which request
+// this was" — the id lives inside the document that failed to parse.
+parse_error = (f: JsonFault, msg :: String) Res<(), AllocError> {
+    msg.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-").try();
+    write_decimal(PARSE_ERROR, msg).try();
+    msg.add_bytes(",\"message\":").try();
+    write_fault(f, msg).try();
+    msg.add_bytes("}}")
+}
+
+// The fault, with its byte offset. `TESTING.md:17` — "a rejection with
+// the wrong span is a failure" — is why the offset is carried all the
+// way out to the wire instead of being dropped for a rounder message.
+write_fault = (f: JsonFault, msg :: String) Res<(), AllocError> {
+    msg.add_byte('"').try();
+    msg.add_bytes(fault_why(f)).try();
+    fault_byte(f).match({
+        None  => written(),
+        Ok(i) => { msg.add_bytes(" at byte ").try(); write_decimal(i, msg) },
+    }).try();
+    msg.add_byte('"')
+}
+
+fault_why = (f: JsonFault) str {
+    f.match({
+        Unexpected(_) => "unexpected byte",
+        Truncated(_)  => "the document ended inside a value",
+        BadEscape(_)  => "bad escape",
+        BadNumber(_)  => "not a JSON number",
+        TooDeep(_)    => "nested too deeply",
+        Trailing(_)   => "trailing bytes after the value",
+        NoMemory      => "out of memory",
+    })
+}
+
+fault_byte = (f: JsonFault) Res<usize> {
+    f.match({
+        Unexpected(i) => Ok(i),
+        Truncated(i)  => Ok(i),
+        BadEscape(i)  => Ok(i),
+        BadNumber(i)  => Ok(i),
+        TooDeep(i)    => Ok(i),
+        Trailing(i)   => Ok(i),
+        NoMemory      => None,
+    })
+}
+
+// A `Hover` as the protocol spells one. `plaintext` and not `markdown`,
+// because a type name is not markup and rendering it as markup would
+// let a `*` inside a name become emphasis.
+write_hover = (h: Hover, out :: String) Res<(), AllocError> {
+    out.add_bytes("{\"contents\":{\"kind\":\"plaintext\",\"value\":").try();
+    write_text(h.type_name, out).try();
+    out.add_bytes("},\"range\":{\"start\":").try();
+    write_wire(h.start.line, h.start.character, out).try();
+    out.add_bytes(",\"end\":").try();
+    write_wire(h.end.line, h.end.character, out).try();
+    out.add_bytes("}}")
+}
+
+// The ONLY place in this file that writes a wire coordinate, and it
+// writes numbers `lsp_pos.zen` produced. Nothing here adds or subtracts
+// one — that rule is `lsp_pos.zen`'s header, and this is what obeying it
+// looks like from the outside.
+write_wire = (line: usize, character: usize, out :: String) Res<(), AllocError> {
+    out.add_bytes("{\"line\":").try();
+    write_decimal(line, out).try();
+    out.add_bytes(",\"character\":").try();
+    write_decimal(character, out).try();
+    out.add_bytes("}")
+}
+
+// Sync kind 1 is Full — see this file's header for why it is not 2.
+CAPABILITIES*: str = "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true},\"serverInfo\":{\"name\":\"zen\",\"version\":\"0\"}}"
+
+// JSON-RPC's codes, as MAGNITUDES. Every one of them is negative on the
+// wire and the sign is written by the one function that emits them, so
+// a code cannot be spelled positive by accident.
+PARSE_ERROR*: usize = 32700
+METHOD_NOT_FOUND*: usize = 32601
+INVALID_PARAMS*: usize = 32602
+NOT_INITIALIZED*: usize = 32002

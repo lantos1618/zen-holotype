@@ -1,0 +1,128 @@
+// POSITIONS CONVERT BOTH WAYS — the gate `design_lsp.md` §3 asks for,
+// and the one place in `src/lsp/` where a bug is silent.
+//
+// Two coordinate systems disagree on both axes: LSP counts lines from 0
+// and characters in UTF-16 code units, Zen counts lines from 1 and
+// columns in 1-based BYTES. Every row below is driven THROUGH BOTH
+// DIRECTIONS — `to_pos` then `to_wire` — because §3 says so and gives
+// the reason: a conversion tested one way passes with the error present
+// in both.
+//
+// The table is `design_lsp.md:133`'s minimum, and each row is here to
+// make one specific mutation go red:
+//
+//   ASCII                 drop the `+ 1` on the line, or on the column
+//   a 2-byte `é`          count bytes as characters
+//   a 3-byte CJK char     the same, one width further out
+//   a 4-byte emoji        THE ONLY ROW where UTF-16 and codepoints
+//                         disagree — swap the 65536 comparison for one
+//                         on `len` and only these lines move
+//   end of line           an off-by-one on the clamp
+//   past end of line      a clamp that is missing entirely
+//   a CRLF line           `\r` counted as a terminator instead of as a
+//                         byte of the line
+//   a tab                 a renderer's idea of a tab width leaking in
+//   an empty line         a line whose run has start == end
+//   a last line with no trailing newline
+//   a line past the end of the file
+//
+// MID-CHARACTER POSITIONS ARE THE OTHER HALF. `to_wire` is asked about
+// byte columns that land INSIDE a multi-byte sequence, and the answer
+// must round DOWN to that sequence's start — there is no wire position
+// between the two bytes of an `é`, and a conversion that invents one
+// hands the compiler a span slicing a codepoint in half.
+
+str = std.text
+AllocError = std.mem
+Pos = ast.ast_span
+to_pos, to_wire = lsp.lsp_pos
+
+// line 0  "ab"     ASCII
+// line 1  "é1"     2-byte lead
+// line 2  "中x"    3-byte lead
+// line 3  "😀y"    4-byte lead: two UTF-16 units, one codepoint
+// line 4  "\tz"    a tab
+// line 5  ""       empty
+// line 6  "cr\r"   CRLF: the \r belongs to the line
+// line 7  "end"    last line, no trailing newline
+SRC: str = "ab\né1\n中x\n😀y\n\tz\n\ncr\r\nend"
+
+// wire -> zen -> wire, in one line, so a row surviving one direction
+// and not the other is visible rather than averaged away.
+round = (line: usize, character: usize) Res<(), AllocError> {
+    p = to_pos(SRC, line, character);
+    w = to_wire(SRC, p);
+    println("wire {}:{} -> zen {}:{} -> wire {}:{}",
+            line, character, p.line, p.col, w.line, w.character);
+    Ok(());
+}
+
+// zen -> wire alone, for the byte columns no `to_pos` can produce: the
+// ones inside a character.
+back = (line: usize, col: usize) Res<(), AllocError> {
+    w = to_wire(SRC, Pos(line: line, col: col));
+    println("zen {}:{} -> wire {}:{}", line, col, w.line, w.character);
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("-- ascii");
+    round(0, 0).try();
+    round(0, 1).try();
+    round(0, 2).try();       // end of line: one past the last byte
+    round(0, 7).try();       // past end of line: clamps to the end
+
+    println("-- two-byte lead");
+    round(1, 0).try();
+    round(1, 1).try();       // one unit, two bytes: column 3, not 2
+    round(1, 2).try();
+
+    println("-- three-byte lead");
+    round(2, 0).try();
+    round(2, 1).try();       // column 4
+    round(2, 2).try();
+
+    println("-- four-byte lead, the surrogate pair");
+    round(3, 0).try();
+    // character 1 is INSIDE the pair. It rounds down to the start of the
+    // emoji, and the round trip comes back as 0 rather than 1 — which is
+    // the whole point of the row.
+    round(3, 1).try();
+    round(3, 2).try();       // past the emoji: two units, five bytes in
+    round(3, 3).try();
+
+    println("-- tab");
+    round(4, 0).try();
+    round(4, 1).try();
+
+    println("-- empty line");
+    round(5, 0).try();
+    round(5, 4).try();
+
+    println("-- crlf: the carriage return is a column");
+    round(6, 2).try();
+    round(6, 3).try();
+    round(6, 9).try();
+
+    println("-- last line, no trailing newline");
+    round(7, 0).try();
+    round(7, 3).try();
+    round(7, 9).try();
+
+    println("-- a line past the end of the file");
+    round(9, 0).try();
+    round(9, 4).try();
+
+    println("-- mid-character byte columns round down");
+    back(2, 2).try();        // the second byte of `é`
+    back(3, 2).try();        // the second byte of the CJK character
+    back(3, 3).try();        // the third
+    back(4, 2).try();        // inside the emoji
+    back(4, 3).try();
+    back(4, 4).try();
+
+    println("-- impossible inputs clamp rather than trap");
+    back(0, 0).try();        // line 0 and column 0 do not exist in Zen
+    back(1, 99).try();
+    Ok(0);
+}
