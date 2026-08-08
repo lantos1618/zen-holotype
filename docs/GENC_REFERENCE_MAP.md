@@ -541,7 +541,7 @@ Types are plain hashable tuples:
 ("array", count, T) | ("fn", ret, (params...)) | ("union", (members sorted by tcode))
 ("unit",) | ("unknown",) | ("variadic",) | ("lambda", ...) | ("loop", n)
 ```
-The last two are FnCtx-internal binding markers, never types (`bind_closure` 3648, `lower_loop` 4135).
+The last two are FnCtx-internal binding markers, never types (`bind_closure` 4000, `lower_loop` 4135).
 
 ## 4.2 Primitives (`PRIMS`, 285-301)
 

@@ -102,7 +102,7 @@ QUOTED = re.compile(r"\"([^\"]{8,160})\"[^()\"]{0,25}$")
 IDENT = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
 DEFLINE = re.compile(r"^\s*(?:def|class)\s+(\w+)|^\s*(\w+)\s*=\s*\S")
 # Numbers a unit word marks as quantities rather than coordinates.
-QUANTITY = re.compile(r"^\s*(?:bytes?|lines?|-bit|%|,\s*\d+\s*\))|^(?:st|nd|rd|th)\b")
+QUANTITY = re.compile(r"^\s*(?:bytes?|lines?|-bit|%)|^(?:st|nd|rd|th)\b")
 NOT_A_REF = re.compile(r"(?:code|exit|byte|version|abi|column|col)\s+$", re.I)
 # The document states how long gen_c.py is. The old header stated it
 # wrong, and that error is why this file exists, so the fact is gated.
