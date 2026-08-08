@@ -56,11 +56,13 @@ zen/
 │   ├── sema/sema_depth.zen          # (1) the instantiation-depth bound
 │   ├── sema/sema_own.zen            # (3) `consume` moves: the flow walk over places
 │   ├── sema/sema_recv.zen           # (3) `self :: @Self`: who may write through a name
-│   ├── sema/sema_scope.zen          # (3) `@scope` may not escape — one of three ways
-│                                    #     out is NOT WRITTEN: captured by an escaping
-│                                    #     closure, which needs an escape analysis
-│                                    #     nothing in the tree computes. Sendability
-│                                    #     (`iso` at a behavior parameter) is stage 5.
+│   ├── sema/sema_scope.zen          # (3) `@scope` may not escape — all three ways
+│                                    #     out. "Which closures escape" is read off
+│                                    #     the callee's signature: a closure handed
+│                                    #     to a call that also takes an `Alloc` may
+│                                    #     be kept. Sendability (`iso` at a behavior
+│                                    #     parameter) is stage 5.
+│   ├── sema/sema_drop.zen           # (3) a `Drop` value cannot be copied
 │   ├── gen/gen.zen                  # (1) backend-shared plumbing
 │   ├── gen/gen_name.zen             # (1) the C symbol for everything
 │   ├── gen/gen_c/gen_c.zen          # (1) the c backend: a folder, ~35 files

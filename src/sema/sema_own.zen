@@ -3,11 +3,11 @@
 //
 // PLAN.md stage 3. DESIGN.md's Ownership section is the law, and this
 // file takes the half of it that is about UNIQUENESS: `consume` is the
-// only move, a moved place is dead, a `Drop` value cannot be copied, and
-// a partial move may not reach the drop. Its two siblings take the other
-// halves — `sema_recv.zen` who may WRITE through a name, `sema_scope.zen`
-// how long a block LASTS — and all three are driven from here, because
-// this is the file with the walk.
+// only move, a moved place is dead, and a partial move may not reach the
+// drop. Its three siblings take the other halves — `sema_recv.zen` who
+// may WRITE through a name, `sema_scope.zen` how long a block LASTS,
+// `sema_drop.zen` what may not be COPIED — and all four are driven from
+// here, because this is the file with the walk.
 //
 // A SECOND WALK, NOT A SECOND TYPE CHECKER. Everything in this folder is
 // a memoized query over a node; this is the one rule family that is not
@@ -47,7 +47,7 @@
 // through an arm — which is why `.then` is not opaque here.
 
 Ast, Expr, ExprId, Block, BlockId, Stmt, StmtKind, Bind, ExprStmt = ast
-Decl, DeclKind, Struct, Impl, Member, MemberKind, Function, Param = ast
+Decl, DeclKind, Struct, Member, MemberKind, Function, Param = ast
 Call, Arg, Access, Match, Arm, Lambda, Index, Consume, Module = ast
 Span, Ident, Name, Paren, Try, Unary, Binary = ast
 ArrayLit, Record, FixedArray, Field, Const = ast
@@ -55,13 +55,15 @@ Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
-DeclId, ImplId = sema.sema_id
-TyId, Ty, Types, TyNamed = sema.sema_ty
+DeclId = sema.sema_id
+TyId, Ty, Types = sema.sema_ty
 World, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 Diag, SemaFault, NameFault = sema.sema_diag
 check_receiver = sema.sema_recv
 check_scope_returned, check_scope_stored = sema.sema_scope
+check_scope_captured, is_scope_value, call_escapes = sema.sema_scope
+check_drop_copy = sema.sema_drop
 
 // One name this frame can see, and what the ownership rules know of it.
 //
@@ -69,12 +71,14 @@ check_scope_returned, check_scope_stored = sema.sema_scope
 // `consume p.left` from `consume env.argv`: a local is storage this
 // block will drop, and a parameter is a borrow whose owner is somewhere
 // up the stack. `ty` is recorded rather than asked for, for the reason
-// the header gives.
+// the header gives. `scoped` is "this binding names a block", which is
+// what makes capturing it a capture of the block — `sema_scope.zen`.
 OwnVar* = {
     name*: str,
     ty*: TyId,
     mutable*: bool,
     owned*: bool,
+    scoped*: bool,
     span*: Span,
 }
 
@@ -93,15 +97,19 @@ Place* = {
 
 // The walk's state. A stack with marks, exactly as `Checker.locals` is
 // and for the reason stated there: a chain of frames needs indirection
-// and every frame is an allocation.
+// and every frame is an allocation. `escaped` is one more such mark:
+// how many bindings were visible OUTSIDE the innermost escaping closure
+// body, and zero when the walk is in none.
 Own* = {
     vars :: Vec<OwnVar>,
     dead :: Vec<Place>,
+    escaped :: usize,
     alloc*: Alloc,
 }
 
 Own* = (a: Alloc) Res<Own, AllocError> {
-    Ok(Own(vars: a.Vec<OwnVar>(), dead: a.Vec<Place>(), alloc: a));
+    Ok(Own(vars: a.Vec<OwnVar>(), dead: a.Vec<Place>(), escaped: 0,
+           alloc: a));
 }
 
 // ---------------------------------------------------------------------
@@ -123,6 +131,9 @@ check_own* = (c :: Checker, f: Function, body: BlockId, ctx: Ctx)
 
 // A parameter is a borrow: the caller still owns it, so nothing may be
 // moved out through it, and `mutable` is the `::` the declaration wrote.
+//
+// `scoped: false` even for a parameter declared `s: Scope`, and that is
+// the one shape the capture rule does not see — see `sema_scope.zen`.
 own_params = (c :: Checker, o :: Own, f: Function) Res<(), AllocError> {
     f.params.loop((h, p) { own_param(c, o, p).try() });
     Ok(());
@@ -131,8 +142,8 @@ own_params = (c :: Checker, o :: Own, f: Function) Res<(), AllocError> {
 own_param = (c :: Checker, o :: Own, p: Param) Res<(), AllocError> {
     text = p.name.text;
     ty = c.lookup(text).match({ Ok(b) => b.ty, None => UNTYPED });
-    o.vars.add(OwnVar(name: text, ty: ty, mutable: p.mutable,
-                      owned: false, span: p.name.span))
+    o.vars.add(OwnVar(name: text, ty: ty, mutable: p.mutable, owned: false,
+                      scoped: false, span: p.name.span))
 }
 
 // ---------------------------------------------------------------------
@@ -200,7 +211,8 @@ bind_name = (c :: Checker, o :: Own, b: Bind, text: str, span: Span,
 declare_var = (c :: Checker, o :: Own, b: Bind, text: str, span: Span,
                ctx: Ctx) Res<(), AllocError> {
     o.vars.add(OwnVar(name: text, ty: memo_type(c, b.value),
-                      mutable: b.mutable, owned: true, span: span))
+                      mutable: b.mutable, owned: true,
+                      scoped: is_scope_value(c, b.value), span: span))
 }
 
 revive_field = (c :: Checker, o :: Own, a: Access, ctx: Ctx)
@@ -222,7 +234,7 @@ own_expr = (c :: Checker, o :: Own, id: ExprId, ctx: Ctx)
         Consume(x)    => own_consume(c, o, x, ctx),
         Call(k)       => own_call(c, o, id, k, ctx),
         Match(m)      => own_match(c, o, m, ctx),
-        Lambda(l)     => own_lambda(c, o, l, ctx, false),
+        Lambda(l)     => own_lambda(c, o, l, ctx, false, false),
         Block(b)      => own_block(c, o, b, ctx),
         Paren(p)      => own_expr(c, o, p.inner, ctx),
         Try(t)        => own_expr(c, o, t.operand, ctx),
@@ -275,6 +287,7 @@ opt_expr = (c :: Checker, o :: Own, e: Res<ExprId>, ctx: Ctx)
 
 use_name = (c :: Checker, o :: Own, node: Expr, text: str)
            Res<(), AllocError> {
+    check_scope_captured(c, o, node.span, text).try();
     find_var(o, text).match({
         None  => Ok(()),
         Ok(i) => report_if_dead(c, o, node.span, i, ""),
@@ -365,100 +378,6 @@ kill_field = (c :: Checker, o :: Own, node: Expr, a: Access, root: usize)
 }
 
 // ---------------------------------------------------------------------
-// RULE: a `Drop` value cannot be copied
-//
-// "The compiler calls drop exactly once, so `g = f` on a Drop type
-// cannot copy — both would drop." Only a PLACE is a copy: a call result
-// is a fresh value that nobody else names, and passing a place to a
-// parameter is a borrow and not a move. Nothing fires when the type is
-// unknown, which is the ordinary fail-open.
-// ---------------------------------------------------------------------
-
-check_drop_copy = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
-                  Res<(), AllocError> {
-    node = c.tree.expr_at(b.value);
-    node.kind.match({
-        Name(n) => drop_copy_of_name(c, o, node, n.text),
-        _       => Ok(()),
-    })
-}
-
-drop_copy_of_name = (c :: Checker, o :: Own, node: Expr, text: str)
-                    Res<(), AllocError> {
-    find_var(o, text).match({
-        None  => Ok(()),
-        Ok(i) => drop_copy_of_var(c, o, node, text, i),
-    })
-}
-
-drop_copy_of_var = (c :: Checker, o :: Own, node: Expr, text: str,
-                    root: usize) Res<(), AllocError> {
-    o.vars.get(root).match({
-        None  => Ok(()),
-        Ok(v) => refuse_if_drop(c, node.span, v.ty, text),
-    })
-}
-
-refuse_if_drop = (c :: Checker, span: Span, ty: TyId, text: str)
-                 Res<(), AllocError> {
-    drops = is_drop_type(c, ty).try();
-    drops.match({
-        false => Ok(()),
-        true  => refuse(c, span, SemaFault.CopyOfDropValue(
-                     NameFault(name: text))),
-    })
-}
-
-// Does an impl OF Drop exist for this type? The trait is part of the
-// question and not decoration: a type may declare a method of its own
-// named `drop`, and that one is not what runs at scope exit.
-is_drop_type* = (c :: Checker, ty: TyId) Res<bool, AllocError> {
-    c.types.at(ty).match({
-        Named(n) => named_is_drop(c, n),
-        _        => Ok(false),
-    })
-}
-
-named_is_drop = (c :: Checker, n: TyNamed) Res<bool, AllocError> {
-    ids ::= c.alloc.Vec<ImplId>();
-    c.world.impls_named(c.tree, n.name, ids).try();
-    hits ::= c.alloc.Vec<bool>();
-    ids.loop((h, id) { keep_drop_impl(c, n, id, hits).try() });
-    Ok(hits.len > 0);
-}
-
-keep_drop_impl = (c :: Checker, n: TyNamed, id: ImplId, hits :: Vec<bool>)
-                 Res<(), AllocError> {
-    (n.decl.module == id.decl.module).match({
-        false => Ok(()),
-        true  => note_drop_impl(c, id, hits),
-    })
-}
-
-note_drop_impl = (c :: Checker, id: ImplId, hits :: Vec<bool>)
-                 Res<(), AllocError> {
-    c.world.impl_at(c.tree, id).match({
-        None   => Ok(()),
-        Ok(im) => add_if_drop(c, im, hits),
-    })
-}
-
-add_if_drop = (c :: Checker, im: Impl, hits :: Vec<bool>)
-              Res<(), AllocError> {
-    bound_named_drop(c, im).match({
-        false => Ok(()),
-        true  => hits.add(true),
-    })
-}
-
-bound_named_drop = (c :: Checker, im: Impl) bool {
-    c.tree.type_at(im.bound).kind.match({
-        Named(n) => n.name.text.eq("Drop"),
-        _        => false,
-    })
-}
-
-// ---------------------------------------------------------------------
 // RULE: a partial move may not reach the drop
 //
 // Drop runs on the whole binding at scope exit, and a field that was
@@ -517,19 +436,21 @@ own_call = (c :: Checker, o :: Own, id: ExprId, k: Call, ctx: Ctx)
 // not run, so it joins like a match arm; and unless it is `.then` — the
 // one closure form in the language that runs at most once — it may run
 // AGAIN, so a move of anything declared outside it is a move the second
-// iteration finds already made.
+// iteration finds already made. And it may OUTLIVE the call, which is
+// the other question the callee's signature answers — `call_escapes`.
 own_args = (c :: Checker, o :: Own, k: Call, ctx: Ctx)
            Res<(), AllocError> {
     repeats = repeating_body(c, k);
-    k.args.loop((h, a) { own_arg(c, o, a, repeats, ctx).try() });
+    escapes = call_escapes(c, o, k);
+    k.args.loop((h, a) { own_arg(c, o, a, repeats, escapes, ctx).try() });
     Ok(());
 }
 
-own_arg = (c :: Checker, o :: Own, a: Arg, repeats: bool, ctx: Ctx)
-          Res<(), AllocError> {
+own_arg = (c :: Checker, o :: Own, a: Arg, repeats: bool, escapes: bool,
+           ctx: Ctx) Res<(), AllocError> {
     node = c.tree.expr_at(a.value);
     node.kind.match({
-        Lambda(l) => own_lambda(c, o, l, ctx, repeats),
+        Lambda(l) => own_lambda(c, o, l, ctx, repeats, escapes),
         _         => own_expr(c, o, a.value, ctx),
     })
 }
@@ -544,12 +465,23 @@ repeating_body = (c :: Checker, k: Call) bool {
 // The body is walked once from the state at the call. What it moved is
 // then either reported — a repeated body reaches its own back edge — or
 // simply kept, which is the join: dead on some path is dead.
-own_lambda = (c :: Checker, o :: Own, l: Lambda, ctx: Ctx, repeats: bool)
-             Res<(), AllocError> {
+//
+// An ESCAPING body also marks what was visible outside it, and puts the
+// previous mark back on the way out. A body nested inside an escaping
+// one keeps the OUTER mark: the outer body is the one that outlives the
+// block, so a name it may not capture is closed to this one too.
+own_lambda = (c :: Checker, o :: Own, l: Lambda, ctx: Ctx, repeats: bool,
+              escapes: bool) Res<(), AllocError> {
     dmark = o.dead.len;
     vmark = o.vars.len;
+    outer = o.escaped;
+    o.escaped = (escapes && (outer == 0)).match({
+        false => outer,
+        true  => vmark,
+    });
     l.params.loop((h, p) { own_param(c, o, p).try() });
     own_block(c, o, l.body, ctx).try();
+    o.escaped = outer;
     own_release(o, vmark).try();
     repeats.then(() { report_back_edge(c, o, dmark).try() });
     Ok(());
@@ -655,6 +587,24 @@ var_mutable* = (o: Own, text: str) bool {
     })
 }
 
+// Whether naming this here is an escaping body reaching out for a block
+// — the state half of `sema_scope.zen`'s third rule, living here for
+// the reason `var_mutable` above gives: the state is this file's.
+//
+// An index below the mark was declared OUTSIDE the escaping body, and
+// zero — "in no escaping body at all" — needs no special case, because
+// no index is below zero. So the one comparison is also the switch.
+captures_scope* = (o: Own, text: str) bool {
+    find_var(o, text).match({
+        None  => false,
+        Ok(i) => (i < o.escaped) && scoped_at(o, i),
+    })
+}
+
+scoped_at = (o: Own, i: usize) bool {
+    o.vars.get(i).match({ Ok(v) => v.scoped, None => false })
+}
+
 owned_at = (o: Own, root: usize) bool {
     o.vars.get(root).match({ Ok(v) => v.owned, None => false })
 }
@@ -751,7 +701,7 @@ place_type* = (c :: Checker, o :: Own, id: ExprId) TyId {
     })
 }
 
-var_type = (o: Own, text: str) TyId {
+var_type* = (o: Own, text: str) TyId {
     find_var(o, text).match({
         None  => UNTYPED,
         Ok(i) => o.vars.get(i).match({ Ok(v) => v.ty, None => UNTYPED }),
