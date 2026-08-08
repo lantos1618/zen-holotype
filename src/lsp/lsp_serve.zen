@@ -46,7 +46,8 @@ Alloc, AllocError = std.mem
 Jsons, JsonId, write_text, written = lsp.lsp_json
 read, JsonFault = lsp.lsp_json_read
 FrameFault, frame_at, write_frame, write_decimal = lsp.lsp_frame
-Hover, hover_at = lsp.lsp_hover
+Hover, hover_at, hover_in = lsp.lsp_hover
+path_of = lsp.lsp_uri
 
 // The whole of the server's state.
 //
@@ -57,6 +58,21 @@ Hover, hover_at = lsp.lsp_hover
 // this server runs on a per-request arena, this becomes a copy.
 Server* = {
     a: Alloc,
+
+    // THE AUTHORITY A QUERY NEEDS. Hover is a build now, and a build
+    // reads the disk — so the server holds the same `Env` the driver
+    // does rather than a second way of opening a file.
+    env: Env,
+
+    // THE WORKSPACE, from `initialize`'s `rootUri`, as a path. Empty
+    // until `initialize` arrives or when the client sends none, and
+    // that emptiness is load-bearing: it is what sends hover back to
+    // the single-module answer instead of building a root nobody named.
+    //
+    // NOT THE COMPILATION ROOT. `zen_path.root_for` computes that from
+    // the document, and this is only the floor it may not climb past.
+    workspace :: str = "",
+
     docs :: Map<str, str>,
     ready :: bool,        // `initialize` has been answered
     stopping :: bool,     // `shutdown` has been answered
@@ -113,7 +129,7 @@ Server* = {
     answered = (self :: @Self, tree: Jsons, req: JsonId, method: str,
                 rid: JsonId, msg :: String) Res<(), AllocError> {
         method.eq("initialize").match({
-            true  => { self.ready = true; result(tree, rid, CAPABILITIES, msg) },
+            true  => self.initialized(tree, req, rid, msg),
             false => method.eq("shutdown").match({
                 true  => { self.stopping = true; result(tree, rid, "null", msg) },
                 false => method.eq("textDocument/hover").match({
@@ -122,6 +138,27 @@ Server* = {
                 }),
             }),
         })
+    }
+
+    // `initialize` IS WHERE A SERVER LEARNS WHERE IT IS, and it is the
+    // only message that carries it: `rootUri` arrives once and every
+    // later request names a document and nothing else.
+    //
+    // A CLIENT THAT SENDS NONE IS NOT AN ERROR. `rootUri` is nullable in
+    // the protocol and a single-file editor session has no root — the
+    // field stays empty, and hover falls back to checking the open
+    // document alone, which is what this server did for every document
+    // before there was a build behind it.
+    //
+    // `rootPath` IS NOT READ. It is the deprecated spelling of the same
+    // thing, and a second source for one fact is a second answer waiting
+    // to disagree with the first.
+    initialized = (self :: @Self, tree: Jsons, req: JsonId, rid: JsonId,
+                   msg :: String) Res<(), AllocError> {
+        self.ready = true;
+        self.workspace = path_of(string_at(tree, params_of(tree, req),
+                                           "rootUri"));
+        result(tree, rid, CAPABILITIES, msg)
     }
 
     // REFUSED BY NAME. The method is echoed into the message so a
@@ -201,7 +238,7 @@ Server* = {
     answer_hover = (self :: @Self, tree: Jsons, rid: JsonId, uri: str,
                     text: str, line: usize, character: usize, msg :: String)
                    Res<(), AllocError> {
-        h = hover_at(self.a, uri, text, line, character).try();
+        h = self.hover(uri, text, line, character).try();
         body ::= self.a.String().try();
         h.found.match({
             false => body.add_bytes("null").try(),
@@ -209,10 +246,30 @@ Server* = {
         });
         result(tree, rid, body.view(), msg)
     }
+
+    // WHICH OF THE TWO HOVERS, and the workspace is the whole of the
+    // decision.
+    //
+    // With one, the document is checked as part of a BUILD and an
+    // imported name has a type. Without one there is no root to build —
+    // a client that sent no `rootUri`, or the two-file form of `zen lsp`
+    // that `tests/corpus/lsp/` drives with a document that is not on any
+    // disk — and the old single-module answer is still the best honest
+    // one: it types what the file itself declares and answers `null`,
+    // never a guess, for what it imports.
+    hover = (self :: @Self, uri: str, text: str, line: usize,
+             character: usize) Res<Hover, AllocError> {
+        self.workspace.is_empty().match({
+            true  => hover_at(self.a, uri, text, line, character),
+            false => hover_in(self.env, self.a, self.workspace, path_of(uri),
+                              text, line, character),
+        })
+    }
 }
 
-Server* = (a: Alloc) Server {
-    Server(a: a, docs: a.Map<str, str>(), ready: false, stopping: false)
+Server* = (a: Alloc, env: Env) Server {
+    Server(a: a, env: env, docs: a.Map<str, str>(), ready: false,
+           stopping: false)
 }
 
 // Every frame in `input`, answered into `out`.
@@ -279,13 +336,17 @@ method_of = (tree: Jsons, req: JsonId) str {
     string_at(tree, req, "method")
 }
 
-// `params.<name>`, or the request itself when there are no params, so
-// that a malformed message reads as one with every field absent.
+// `params`, or the request itself when there are none, so that a
+// malformed message reads as one with every field absent.
+params_of = (tree: Jsons, req: JsonId) JsonId {
+    tree.field(req, "params").match({ None => req, Ok(ps) => ps })
+}
+
+// `params.<name>`, and the object itself when that field is absent —
+// which keeps the same "every field is empty" reading one level down.
 param = (tree: Jsons, req: JsonId, name: str) JsonId {
-    tree.field(req, "params").match({
-        None   => req,
-        Ok(ps) => tree.field(ps, name).match({ None => ps, Ok(v) => v }),
-    })
+    ps = params_of(tree, req);
+    tree.field(ps, name).match({ None => ps, Ok(v) => v })
 }
 
 string_at = (tree: Jsons, obj: JsonId, name: str) str {

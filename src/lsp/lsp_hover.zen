@@ -64,12 +64,19 @@
 // speed nobody measured.
 
 str, String = std.text
+Map = std.collections
 Alloc, AllocError = std.mem
 scan, Source = lex
 Parser = parse
 Ast, ExprId, TypeId, Span, Function = ast
 Checker = sema.sema_check
 check_all = sema.sema_decl
+// THE DRIVER, REACHED FROM THE SERVER, and `design_lsp.md` §5 is where
+// that inversion was argued and accepted: the alternative is a private
+// copy of `walk` in this folder, which is the second implementation
+// that document exists to prevent.
+Build = zen.zen_build
+root_for, relative_to = zen.zen_path
 // `Types` IS IMPORTED FOR ITS METHODS, not to be named below.
 // `c.types.write_name` is a method on `Types`, and without this line the
 // bootstrapper resolves the name against `sema_diag` instead and reports
@@ -116,6 +123,47 @@ hover_at* = (a: Alloc, name: str, text: str, line: usize, character: usize)
     // IN. Below this line every position is a Zen position.
     pos = to_pos(text, line, character);
     said(c, a, text, told_at(c.tree, name, pos))
+}
+
+// THE SAME QUESTION, ASKED OF A BUILD — which is the only way an
+// IMPORTED name has ever had a type.
+//
+// `hover_at` above checks the document standing alone, so `Vec`, `str`
+// and every name a real file opens with resolve to nothing, sema interns
+// poison for them, and `write_ty_id` — correctly — answers `null`. That
+// is hover working on a toy file and going quiet exactly where a person
+// works.
+//
+// THREE THINGS AND NOT ONE OVERLAY. `Build.overlay` really is one field
+// and one branch; what made this a change rather than an edit is that
+// the driver had no public entry that kept anything (`Build.whole`) and
+// nothing handed a `Checker` back (`Build.checked`). §5 has the revised
+// price.
+//
+// THE OPEN DOCUMENT IS THE ENTRY, not `main`. A file being edited is
+// usually not on the path from the program's entry — a library module, a
+// file nothing imports yet — and walking from `main` would answer `null`
+// for exactly those. Walking from the document reaches what the document
+// IMPORTS, which is what its names mean, and `folder_root` in the walk
+// is what pulls the sibling modules that complete a UFCS pool.
+//
+// THE COMPILATION ROOT IS COMPUTED AND NOT THE WORKSPACE. `root_for`
+// says why: an editor opens at the repository and this tree builds as
+// `zen build src`.
+//
+// `rel` AND NOT THE URI IS WHAT SPANS CARRY. A build names a module by
+// its path relative to the root, so `told_at` is asked with the same
+// string `Source` was given — the property `hover_at` got for free by
+// using the URI for both.
+hover_in* = (env: Env, a: Alloc, workspace: str, path: str, text: str,
+             line: usize, character: usize) Res<Hover, AllocError> {
+    root = root_for(env, a, workspace, path);
+    docs ::= a.Map<str, str>();
+    docs.set(path, text).try();
+    b ::= a.Build(env, root);
+    c = b.whole(relative_to(root, path), docs).try();
+    pos = to_pos(text, line, character);
+    said(c, a, text, told_at(c.tree, relative_to(root, path), pos))
 }
 
 // A position in nothing is not a failure — `ast_find.zen` says so and

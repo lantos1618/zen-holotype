@@ -1,0 +1,55 @@
+// src/lsp/lsp_uri.zen
+// A document URI, as a path the compiler can open.
+//
+// The protocol names a document by URI and `std.env.Fs` opens a PATH,
+// and until a second file was involved the difference did not matter:
+// `lsp_hover.zen` handed the client's URI straight to `Source` and to
+// `told_at`, so the two agreed by construction and nothing had to
+// convert anything. A build reads the disk, so this is where that stops.
+//
+// IT IS A FILE OF ITS OWN AND NOT A PAIR OF LINES IN `lsp_serve.zen`,
+// for the reason `design_lsp.md` §6 gives about the same class of bug:
+// a URI arriving as `vscode-remote://` rather than `file://` is a
+// conversion that has to be right in ONE place, and a second copy of it
+// beside the first is how a remote workspace silently hovers `null`.
+//
+// WHAT IT DOES NOT DO, said out loud because both are real:
+//
+//   - PERCENT-ESCAPES ARE NOT DECODED. A client sends `%20` for a space
+//     and this hands `%20` to `Fs.read`, which does not find the file
+//     and says so by path. Decoding needs an allocator and a hex
+//     grammar; it belongs here when a path with a space turns up, and
+//     the failure until then is a diagnostic and not a wrong answer.
+//   - NO SCHEME BUT `file:` IS UNDERSTOOD. `design_lsp.md` §6 records
+//     that a remote VS Code workspace sends `vscode-remote://<host>/…`,
+//     whose authority is not part of the path. Such a URI comes back
+//     unchanged, which fails at the read rather than by opening the
+//     wrong file.
+
+str = std.text
+
+// `file://` — seven bytes, and the two slashes are part of it. A
+// well-formed `file:` URI has an EMPTY authority, so the path's own
+// leading slash is the third: `file:///a/b.zen` is `/a/b.zen`.
+FILE_SCHEME*: str = "file://"
+
+// The path a URI names, or the URI itself when this file cannot say.
+//
+// A URI THAT IS ALREADY A PATH IS LEFT ALONE, which is what makes the
+// two-file form of `zen lsp` testable: `tests/corpus/lsp/` drives the
+// same server with paths relative to the work directory, and a
+// converter that insisted on a scheme would make the corpus and the
+// editor two different servers.
+path_of* = (uri: str) str {
+    scheme_at(uri).match({
+        false => uri,
+        true  => uri.slice(FILE_SCHEME.len, uri.len),
+    })
+}
+
+scheme_at = (uri: str) bool {
+    (uri.len < FILE_SCHEME.len).match({
+        true  => false,
+        false => uri.slice(0, FILE_SCHEME.len).eq(FILE_SCHEME),
+    })
+}

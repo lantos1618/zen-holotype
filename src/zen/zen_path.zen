@@ -60,6 +60,56 @@ module_name* = (a: Alloc, root: str, path: str) Res<str, AllocError> {
     Ok(out.view());
 }
 
+// The path one level up, and `""` when there is no level up. `slice(0,
+// cut - 1)` with `cut` at 0 subtracts one from a `usize`, which traps —
+// so the guard is the whole reason this is a function.
+parent_of* = (path: str) str {
+    cut = path.after_last_slash();
+    (cut == 0).match({
+        true  => "",
+        false => path.slice(0, cut - 1),
+    })
+}
+
+// WHICH ROOT A FILE WAS MEANT TO BE COMPILED AGAINST.
+//
+// An editor knows one directory — the workspace, from `initialize`'s
+// `rootUri` — and that is almost never the compilation root: this tree
+// is built as `zen build src` while a workspace opens at the repository,
+// and an import of `lex.lex` resolved against the repository looks for
+// `<repo>/lex/lex.zen` and finds nothing. Every imported name in every
+// file would come back undefined, which is indistinguishable from
+// having no build at all.
+//
+// THE RULE IS THE ONE THIS FILE ALREADY STATES, read upward. A module
+// lives at `<folder>/<folder>.zen`, so a directory that holds its own
+// name is INSIDE the program rather than the root of one — climb out of
+// it. `src/lsp` holds `lsp.zen`, so climb; `src` holds no `src.zen`, so
+// stop. `src/std/text` and `src/zen` answer `src` the same way.
+//
+// `floor` IS A GUARD AND NOT AN ANSWER. The climb stops at the
+// workspace whatever the disk says, so a home directory that happens to
+// hold a file named after itself cannot walk a build out of the project.
+root_for* = (env: Env, a: Alloc, floor: str, path: str) str {
+    dir ::= parent_of(path);
+    loop(() { dir.len > floor.len && holds_its_own_name(env, a, dir) }, (h) {
+        dir = parent_of(dir);
+    });
+    dir;
+}
+
+// `<dir>/<basename>.zen` — the folder-root spelling, asked of the disk.
+// A directory that cannot even be named is not one, so an allocation
+// that fails answers `false` rather than propagating: the caller is a
+// loop condition and the honest answer to "is this a module folder" when
+// the question could not be asked is "stop climbing".
+holds_its_own_name = (env: Env, a: Alloc, dir: str) bool {
+    a.String("{}/{}.zen", dir, dir.base_of()).match({
+        Err(_) => false,
+        Ok(f)  => env.fs.exists(f.view()),
+    })
+}
+
 // The same file, said relative to the compilation root: `module_name`
 // without the dots and without dropping the extension. One `+ 1` for
 // the separator, and a path that is not under the root comes back
