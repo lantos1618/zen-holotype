@@ -5,7 +5,7 @@ CFLAGS  ?= -O2 -std=c99
 PY      ?= python3
 ROOT    ?= src
 
-.PHONY: all build seed test test-zen lint parse design cap faults ufcs fixpoint determinism grammar grammar-test fmt clean help
+.PHONY: all build seed test test-zen lint parse design cap faults ufcs style fixpoint determinism grammar grammar-test fmt clean help
 
 all: test
 
@@ -30,7 +30,7 @@ seed: zen
 	git add seed/zen.c
 
 ## test: the corpus and must-fail suites, against the bootstrapper
-test: parse design cap faults ufcs
+test: parse design cap faults ufcs style
 	$(PY) tests/run.py
 
 ## faults: every fault the compiler declares must have a site that raises
@@ -52,6 +52,17 @@ ufcs: grammar
 ## unless the path carries a written reason in scripts/line_cap.py.
 cap:
 	$(PY) scripts/line_cap.py
+
+## style: the rest of STYLE.md — where a file lives, what it is named,
+## which way its imports point, whether an impl sits with its type. The
+## document said "most of these are one rule with a test attached" and
+## `cap` was the only rule that had one. Parses with bootstrap/cst.py
+## rather than grepping: every `if` and every `as` in src/ is inside a
+## comment, so a regex finds only prose. The syntax laws — no if, no
+## while, no ternary, no `as`, no fourth `@` entry — are the GRAMMAR's,
+## and `make parse` is where they fail; this does not duplicate them.
+style: grammar
+	$(PY) scripts/style.py
 
 ## design: every complete example in DESIGN.md must parse. PLAN.md 0.1 asks
 ## for this; nothing was checking it, and the document had drifted from the
