@@ -175,7 +175,27 @@ fn_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     p.fn_type_rest(m, tps, ps, span);
 }
 
+// DESIGN.md, Overloading: "Function types must name their parameters."
+// `(i32, i32) i32` is a legal parameter LIST — a closure infers its
+// types, so a bare name with none is allowed there — and never a legal
+// function type, so the two readings part here and nowhere earlier.
+//
+// Unsaid, it surfaces on the wrong line entirely: `apply = (f: (i32,
+// i32) i32, ..)` typed `f` as a function of two parameters named `i32`
+// and the only complaint was `add` undefined, three lines down at the
+// call.
+named_params = (p :: Parser, ps: Vec<Param>) Res<(), AllocError> {
+    ps.loop((h, param) {
+        param.type.match({
+            Ok(_) => p.nothing(),
+            None  => p.error_at("expected a parameter name: a function type must name its parameters, and this is a type where the name belongs", param.span),
+        }).try();
+    });
+    Ok(());
+}
+
 fn_type_rest = (p :: Parser, m: Mark, tps: Vec<TParam>, ps: Vec<Param>, span: Span) Res<TypeId, AllocError> {
+    p.named_params(ps).try();
     ret = p.type().try();
     p.add_type(TypeKind.Fn(FnType(
         tparams: tps,

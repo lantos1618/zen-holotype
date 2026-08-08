@@ -25,7 +25,7 @@ Token, TokenKind, same = parse.parse_token
 Parser, Mark = parse.parser
 expr, add_expr = parse.parse_expr
 type = parse.parse_type
-declaration = parse.parse_decl
+declaration, impl_ahead = parse.parse_decl
 decl_head_ahead = parse.lookahead
 
 // `{ statement* expression? }`
@@ -46,12 +46,18 @@ block_guarded = (p :: Parser) Res<BlockId, AllocError> {
 block_here = (p :: Parser) Res<BlockId, AllocError> {
     m = p.open();
     open = p.here_span();
-    p.expect(TokenKind.BraceOpen, "expected `{` to open a block").try();
+    // A BLOCK THAT NEVER OPENED IS NOT A STATEMENT BOUNDARY. `resume`
+    // ends the containment of one mistake, and a `{` the parser only
+    // wished for is the wrong place to end it: `(i + 1 < f.len;` read
+    // as a lambda arrives here with no brace at all, and everything the
+    // "body" then contains is still the same unclosed `(`.
+    opened = p.expect(TokenKind.BraceOpen, "expected `{` to open a block").try();
     stmts ::= p.alloc.Vec<Stmt>();
     value ::= p.no_value();
     running ::= !p.at_kind(TokenKind.BraceClose) && !p.at_eof();
     loop(() { running }, (h) {
         before = p.at;
+        opened.then(() { p.resume(); });
         p.one_item(stmts).try().match({
             Ok(v) => { value = Ok(v); running = false; },
             None  => (),
@@ -73,6 +79,18 @@ block_here = (p :: Parser) Res<BlockId, AllocError> {
         leading: m.leading,
         trailing: no_trivia(),
     ));
+}
+
+// The body of a function, a member or a lambda — the one block that is
+// not a level inside anything. A too-deep run is anchored at its
+// outermost bracket, and `main = () { {{{{ .. }}}} }` nests at the
+// first `{` on the statement and not at `main`'s own brace, which
+// names the declaration rather than the mistake.
+body_block* = (p :: Parser) Res<BlockId, AllocError> {
+    was = p.run_from();
+    id = p.block().try();
+    p.run_until(was);
+    Ok(id);
 }
 
 // A block in value position — a match arm's body, a nested block used
@@ -107,10 +125,30 @@ nested_block = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<(), AllocError> {
 // because the answer is a fact about the value's SHAPE (grammar R1a)
 // and that knowledge belongs in one place.
 ident_item = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<Res<ExprId>, AllocError> {
+    p.impl_ahead().match({
+        true  => { p.impl_item(stmts, m).try(); Ok(None) },
+        false => p.binding_item(stmts, m),
+    });
+}
+
+binding_item = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<Res<ExprId>, AllocError> {
     p.decl_head_ahead(false).match({
         true  => { p.decl_item(stmts, m).try(); Ok(None) },
         false => p.expr_item(stmts, m),
     });
+}
+
+// `A.impl(B, { .. })` INSIDE A BODY. DESIGN.md shows an impl at module
+// level only, and a declaration inside a body would have to say what
+// its scope is — so this is refused rather than guessed at.
+//
+// It is still PARSED as the impl it plainly is. Left to the expression
+// parser it reads as a method call, and the only thing said about it
+// was "no such field or method `impl`" from sema — a sentence about a
+// method nobody wrote, on a line whose real mistake is where it stands.
+impl_item = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<(), AllocError> {
+    p.error("`.impl` declares an impl, so it is legal only at module level, never inside a body").try();
+    p.decl_item(stmts, m)
 }
 
 decl_item = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<(), AllocError> {
@@ -140,7 +178,8 @@ tail_value = (p :: Parser, value: ExprId) Res<Res<ExprId>, AllocError> {
     p.at_kind(TokenKind.BraceClose).match({
         true  => Ok(Ok(value)),
         false => {
-            p.error("expected `;` — a statement ends with one, a declaration does not").try();
+            p.error_at("expected `;` — a statement ends with one, a declaration does not",
+                       p.gap_span()).try();
             Ok(Ok(value));
         },
     });
@@ -160,7 +199,7 @@ bind = (p :: Parser, stmts :: Vec<Stmt>, m: Mark, target: ExprId, mutable: bool)
 bind_rest = (p :: Parser, stmts :: Vec<Stmt>, m: Mark, target: ExprId, t: Res<TypeId>, mutable: bool) Res<(), AllocError> {
     p.eat(TokenKind.Eq).try() || p.eat(TokenKind.ColonColonEq).try();
     value = p.expr().try();
-    p.expect(TokenKind.Semicolon, "expected `;` to end this binding").try();
+    p.expect_after(TokenKind.Semicolon, "expected `;`: an assignment is a statement, not a value — a statement ends with `;`, a declaration does not").try();
     p.push(stmts, StmtKind.Bind(Bind(
         target: target,
         type: t,

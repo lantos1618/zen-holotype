@@ -78,17 +78,34 @@ Diag, diag, diag_at = parse.parse_diag
 // 302. Refusing it is a false refusal, which is as bad as a crash and
 // much easier to ship; so the bound rises to exactly 302 + 2 and stops.
 //
-// WHAT THIS NUMBER CANNOT DO, stated rather than hidden: because the
-// per-level cost varies 4.6x by construct and this counter charges
-// every construct 1, no single value both admits 302 parentheses and
-// refuses a 256-deep `.match`. Between 256 and 302, a nested `.match`
-// still segfaults. That window was one level wide before and is ~46
-// now, and it cannot be closed here — the parser cannot weight the
-// count, because `.match` is POSTFIX and is recognised on the way back
-// out, after its scrutinee's whole depth has already been charged. The
-// fix belongs where the stack is actually spent: cheaper frames in
-// gen_c's spill and call lowering, or a bound in the phase that spends
-// them, as `sema_depth.zen` does for instantiation.
+// THE WINDOW THAT WAS HERE IS CLOSED, and it was closed by counting
+// rather than by moving this number. The note that stood here said no
+// single value both admits 302 parentheses and refuses a 256-deep
+// `.match`, because the cost varies 4.6x by construct while the counter
+// charges every construct 1 — and that the parser could not weight it,
+// since `.match` is POSTFIX and recognised on the way back out.
+//
+// It is recognised on the way out; it is CHARGED on the way in. The
+// postfix loop takes a level per link before it takes the step
+// (`parse_expr.zen`), so a `.match` costs its scrutinee's level plus
+// its own and a nested call costs the same two. Measured against this
+// same 304, by bisection, the deepest program now accepted per shape:
+//
+//     parentheses         302        `.match`     151
+//     nested calls        151        `x.a.a..`    302
+//     `f(1)(1)..`         301        `x[0][0]..`  301
+//
+// Each is comfortably under its measured segfault depth above, and 302
+// parentheses is still exactly what `tests/corpus/codegen/nesting_expr`
+// asks for. The cost is that a 200-deep nested call is now refused
+// where it used to compile — nine levels short of the crash, which is
+// not margin worth keeping.
+//
+// WHAT IS STILL NOT BOUNDED HERE: the binary spine. `1 + 1 + ..` builds
+// a left-nested `Binary` chain in a loop and charges nothing, so its
+// depth is the file's length. It survives 200,000 terms because sema
+// walks that spine iteratively; the day something walks it by recursion
+// it will need a link charged the same way.
 MAX_DEPTH*: usize = 304
 
 // A node, opened. The two facts that are true at a node's first token
@@ -161,12 +178,25 @@ Parser* = {
     pending :: TriviaRun,
 
     // The depth guard. `anchor` is the outermost construct of the
-    // current run — set as depth leaves 0 — because a diagnostic that
-    // points at level 257 of a 10,000-deep file names the one place
-    // the author cannot see the problem from.
+    // current run — set as depth leaves `run_base` — because a
+    // diagnostic that points at level 257 of a 10,000-deep file names
+    // the one place the author cannot see the problem from.
+    //
+    // A RUN STARTS INSIDE A BODY AND NOT AT IT. A function's body is
+    // the function, not a level within it, so the outermost bracket of
+    // `main = () { {{{{ .. }}}} }` is the first `{` on the statement
+    // and not `main`'s own. `run_base` is the depth a run counts from
+    // and a body is the only thing that moves it; an ordinary nested
+    // block is a level like any other, which is what keeps the anchor
+    // on the first of ten thousand braces rather than the second.
     depth :: usize = 0,
+    run_base :: usize = 0,
     anchor :: Span,
     too_deep* :: bool = false,
+
+    // Whether a diagnostic has been reported since the last statement
+    // or declaration boundary. See `hushed`.
+    said :: bool = false,
 
     alloc*: Alloc,
 
@@ -311,7 +341,7 @@ Parser* = {
     }
 
     ident_missing = (self :: @Self, message: str) Res<Ident, AllocError> {
-        self.error(message).try();
+        self.error_at(message, self.gap_span()).try();
         Ok(Ident(text: "", span: self.empty_span()));
     }
 
@@ -341,6 +371,19 @@ Parser* = {
     empty_span* = (self: @Self) Span {
         here = self.here();
         Span(file: self.source.file, start: here, end: here);
+    }
+
+    // WHERE A MISSING TOKEN GOES, which is not where the parser found
+    // out it was missing. `(x == 0).then(() { x = 1 })` wants a `;`
+    // after the `1`; a caret on the `}` names the one token in the
+    // line that is fine, and the author has to work backwards to the
+    // gap. This is the same rule `expect_close` already follows for
+    // the other direction — anchor on a position someone can put a
+    // cursor on and type the fix — and it matters most at the end of a
+    // line, where the next token is on the NEXT one: a trailing `|` on
+    // line 15 reported at 16:1 names a line the author did not write.
+    gap_span* = (self: @Self) Span {
+        Span(file: self.source.file, start: self.prev_end, end: self.prev_end)
     }
 
     // -----------------------------------------------------------------
@@ -467,6 +510,25 @@ Parser* = {
         Ok(false);
     }
 
+    // `expect`, anchored where the missing token GOES rather than on
+    // the token that arrived instead. Not every `expect` wants this: a
+    // missing `=>` is best reported on the expression that turned up
+    // where the arrow belonged, because that IS the thing the reader
+    // has to look at. A missing `;` is the other case — it belongs
+    // after the value it ends, and a caret on the `}` names the one
+    // token on the line that is fine.
+    expect_after* = (self :: @Self, kind: TokenKind, message: str) Res<bool, AllocError> {
+        self.at_kind(kind).match({
+            true  => self.took(),
+            false => self.missed_after(message),
+        });
+    }
+
+    missed_after = (self :: @Self, message: str) Res<bool, AllocError> {
+        self.error_at(message, self.gap_span()).try();
+        Ok(false);
+    }
+
     // Consume a closing delimiter, or point at the OPENING one.
     //
     // This is the rule the whole diagnostics section exists for. The
@@ -482,14 +544,14 @@ Parser* = {
     }
 
     unclosed = (self :: @Self, message: str, open: Span) Res<bool, AllocError> {
-        self.too_deep.match({
+        self.hushed().match({
             true  => self.nothing(),
-            false => self.diags.add(diag_at(
+            false => { self.said = true; self.diags.add(diag_at(
                 message,
                 open,
                 "the parser gave up here",
                 self.here_span(),
-            )),
+            )) },
         }).try();
         Ok(false);
     }
@@ -507,18 +569,34 @@ Parser* = {
     }
 
     error_at* = (self :: @Self, message: str, span: Span) Res<(), AllocError> {
-        // SILENT ONCE THE LIMIT IS HIT, and this is the whole of "one
-        // mistake produces one diagnostic" for a file nested 10,000
-        // deep. Past the limit the parser stops descending, so every
-        // frame it unwinds through finds a delimiter it cannot close
-        // and would say so — 256 diagnostics for one mistake, and the
-        // real one buried at the top. Nothing said after the depth
-        // error is about the author's program.
-        self.too_deep.match({
+        self.hushed().match({
             true  => self.nothing(),
-            false => self.diags.add(diag(message, span)),
+            false => { self.said = true; self.diags.add(diag(message, span)) },
         });
     }
+
+    // SILENT UNTIL THE PARSER BELIEVES WHAT IT READS AGAIN. Two things
+    // stop it saying anything, and both are "one mistake, one
+    // diagnostic" (TESTING.md) rather than politeness.
+    //
+    // `too_deep`: past the limit the parser stops descending, so every
+    // frame it unwinds through finds a delimiter it cannot close and
+    // would say so — 256 sentences for one mistake and the real one
+    // buried at the top.
+    //
+    // `said`: everything after a syntax error inside one statement is a
+    // CONSEQUENCE of it. `(i + 1 < f.len;` was read as a lambda's
+    // parameter list because a `<` followed the `)` the author never
+    // typed, and that one wrong fork unwound into seven sentences —
+    // a missing `{`, a missing expression, a missing `;`, an unclosed
+    // block — none of which the author can act on. The statement is the
+    // unit this file's header says a mistake is contained in; `resume`
+    // is where the containment ends.
+    hushed = (self: @Self) bool { self.too_deep || self.said }
+
+    // A statement or a declaration boundary: whatever the parser reads
+    // next stands on its own, so the next mistake is a new one.
+    resume* = (self :: @Self) () { self.said = false; }
 
     // -----------------------------------------------------------------
     // trivia
@@ -587,10 +665,20 @@ Parser* = {
     // folder brackets itself with these two, and checks `too_deep`
     // before recursing again — which is what unwinds a 10,000-deep
     // file instead of riding it into the stack guard.
+    //
+    // THE COUNT IS THE TREE'S AND NOT THIS PARSER'S. That distinction
+    // cost a segfault: the postfix chain is a LOOP, so `a.b.c` is one
+    // frame here and three levels in the tree, and a counter that only
+    // charged recursion let the chain grow without limit. sema and
+    // gen_c then walked what was BUILT — `x` with a thousand `.a`s, or
+    // the run of `(` a bailed-out parser wrapped into calls — and died
+    // on it, past a bound that had already said everything was fine.
+    // So a link costs a level like anything else, and `unwind` is how a
+    // loop gives back the levels it charged one at a time.
     // -----------------------------------------------------------------
 
     enter* = (self :: @Self) Res<(), AllocError> {
-        (self.depth == 0).match({
+        (self.depth == self.run_base).match({
             true  => { self.anchor = self.here_span(); self.nothing() },
             false => self.nothing(),
         }).try();
@@ -599,7 +687,7 @@ Parser* = {
             true  => {
                 self.too_deep = true;
                 self.diags.add(diag(
-                    "this construct nests too deeply for the parser to read",
+                    "nesting too deep: this construct nests deeper than the parser reads",
                     self.anchor,
                 )).try();
                 Ok(());
@@ -608,7 +696,25 @@ Parser* = {
         });
     }
 
+    // A body opened, and the depth a run inside it counts from. The
+    // pair is a caller's to hold because a body is recognised by its
+    // CALLER — `fn_body`, `member_body`, a lambda's — and nowhere else:
+    // to `block` every brace looks alike.
+    run_from* = (self :: @Self) usize {
+        was = self.run_base;
+        self.run_base = self.depth + 1;
+        was;
+    }
+
+    run_until* = (self :: @Self, was: usize) () { self.run_base = was; }
+
     leave* = (self :: @Self) () { self.depth = self.depth - 1; }
+
+    // `leave`, once per link, for a loop that charged its levels one at
+    // a time. The links of a chain are all open until the chain ends —
+    // each node is built AROUND the last — so they are released
+    // together and not as the loop goes round.
+    unwind* = (self :: @Self, links: usize) () { self.depth = self.depth - links; }
 }
 
 // `alloc.Parser(lexed)` — a ufcs function whose first parameter is an
