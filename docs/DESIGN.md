@@ -116,6 +116,10 @@ The shape of every rule below is the same: **reject rather than reinterpret.** A
 
 **Conventions settled:** fields mirror bindings: `name: T` is set at construction and never reassigned, `name :: T` is mutable, and `= default` makes a field optional at construction. `*` on a field means readable outside the module; mutation only ever goes through exported methods.
 
+**A DEFAULT IS WRITTEN `name :: T = value`, AND ONLY THERE.** Inside a struct body `name: T = value` is already taken: it is a **constant on the type**, one value per type, read as `Type.NAME` — the form `i32.MAX` is declared with. The two are the same syntax down to the one character that elsewhere means mutability, so one of them has to lose, and the constant wins because it has no other spelling while a default has `::`. **The price is that an immutable field with a default is unspellable**, and it is written here rather than left in a grammar comment: a field you may supply and may omit, and that never changes after, is written `::` and kept immutable by the rule above it — mutation only ever goes through exported methods, and a type that exports none has none.
+
+A field the construction omits **is its default**, not zero. `Cursor()` on a `Cursor` whose every field declares a value is that value in every field, and the same is true of the fields a partial construction leaves out.
+
 **Method rules**, everywhere. Export (`*`) and overridability (`=` / `::=`) are orthogonal: exported-but-final is `name* = sig {..}`, and on methods `::=` means impls may rebind, not runtime mutation.
 
 | form | meaning |
@@ -477,6 +481,10 @@ buf: [u8, i32.BITS]       // usable wherever a comptime value is
 ```
 
 The distinction from a field: a field declares storage per value, a constant declares one value per type. `MAX: i32 = 2147483647` inside `i32` is the second, because `i32` has no instances to give it storage in. Every primitive numeric type carries `MIN`, `MAX`, and `BITS` from the prelude.
+
+**The spelling is what decides, and it decides everywhere.** `name: T = value` in a struct body is a constant whether or not the type has instances; `name :: T = value` is storage with a default. That is the whole rule, and the "Declarations" section above prices what it costs.
+
+**A constant is one value per type, so it folds wherever it is read.** `Limits.WIDTH` and `j.WIDTH` for a `j: Limits` are the same one value — a constant takes no storage, so there is nothing in `j` for the second to read and the type arriving on the left of the dot cannot change the answer.
 
 ---
 

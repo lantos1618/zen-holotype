@@ -9,16 +9,17 @@ the way `tests/run.py` runs one: a compilation root holding the program as
 ## Where this ledger stands
 
 **Re-measured 2026-08-08 against `39313c6a`**, every reproducer below re-run
-through BOTH toolchains. Six of the ten are closed, one is closed in the
-self-hosted compiler only, and one — §4 — was recorded too narrowly and hides a
-worse defect than the one it describes.
+through BOTH toolchains. Seven of the ten are closed and one is closed in the
+self-hosted compiler only. §4 was recorded too narrowly and hid a worse defect
+than the one it described; both halves are now closed and the language question
+the second half raised is answered in DESIGN.md.
 
 | § | what it claimed | bootstrap | `./zen` |
 |---|---|---|---|
 | 1 | `Ptr.to<U>()` no-op corrupts every `Vec` | **closed** | **closed** |
 | 2 | match takes its type from arm one, drops a bare `Ok(x)` | **closed** | **closed** |
 | 3 | void call in trailing-expression position discarded | **closed** | **closed** |
-| 4 | a `::` field's default is ignored | **open** | **open, and worse — see below** |
+| 4 | a `::` field's default is ignored | **closed** | **closed, and the worse half too** |
 | 5 | `==` on two enums passes sema, emits invalid C | **closed** | **closed** |
 | 6 | grammar reads `//` inside a string literal as a comment | n/a | **closed** |
 | 7 | method on an un-imported type resolves globally by name | **open** | open, different shape |
@@ -30,13 +31,16 @@ A section marked closed keeps its reproducer, because a ledger that deletes
 what it fixed cannot be re-run — and re-running is the only reason to keep it.
 
 **§4 is the one to read.** It was filed as "a default on a `::` field is
-ignored". That is true, and it is true of BOTH implementations, not just the
-bootstrapper as filed. But the reproducer's other half is worse and was never
+ignored". That is true, and it was true of BOTH implementations, not just the
+bootstrapper as filed. But the reproducer's other half was worse and was never
 written down: **a `:` field that has a default is dropped from the emitted
-struct entirely by the self-hosted compiler**, so any program that reads one
-fails to compile as C. Nothing catches either, because `src/` declares zero
-fields with defaults (`grep` over the tree: none) and no test in the corpus
-declares one. DESIGN.md:117 and DESIGN.md:1359 both specify the feature.
+struct entirely by the self-hosted compiler**, so any program that read one
+failed to compile as C. Nothing caught either, because no test in the corpus
+declared a field default — and the ones `src/` and `std` declare are all
+already zero, which is exactly what the bug produced. DESIGN.md:117 and
+DESIGN.md:1359 both specify the feature. `tests/corpus/codegen/field_defaults`
+is the test that was missing; it declares only non-zero defaults, because a
+zero default cannot tell the feature from its absence.
 
 ---
 
@@ -224,9 +228,12 @@ other, and never said so.
 
 ## 4. Field defaults do not work, in two different ways
 
-**OPEN, and filed too narrowly.** The original entry said "a default on a `::`
-field is ignored" and blamed the bootstrapper. Re-measuring found two defects,
-one of them worse and unrecorded.
+**CLOSED, both halves, and the question 4b asked has an answer in DESIGN.md.**
+The entry stands as written because the reasoning is what settled it; what each
+half turned out to be is recorded at the end of it.
+
+The original entry said "a default on a `::` field is ignored" and blamed the
+bootstrapper. Re-measuring found two defects, one of them worse and unrecorded.
 
 ```groovy
 Konst = { a: usize = 7, b :: usize = 9 }
@@ -294,6 +301,58 @@ fix is downstream of it.
 **Workaround, while open:** `Cursor` has no field defaults; `cursor_at`
 supplies all four explicitly. `line: 1` is exactly the non-zero default that
 would have been lost.
+
+### How both were closed
+
+`tests/corpus/codegen/field_defaults` is the test this entry asked for, written
+first and watched go red in both toolchains before a line of compiler moved. It
+declares only non-zero defaults, supplies `0` and `false` as *arguments* so a
+zeroing back end fails on the defaults and an argument-dropping one fails on
+those, and covers a default that is a construction (`Pos(line: 1, col: 1)`) and
+not a literal.
+
+**4a was one defect in two places, and the cause was the same sentence of code
+in each: the initialiser list was built out of the ARGUMENTS and never out of
+the DECLARATION.** A field nobody supplied got no initialiser and fell to C's
+`{0}`. `gen_c_build.zen` now appends a designator for every storage member the
+call omitted that declares a value, and `bootstrap/gen_c.py` fills the same
+holes as it walks the declared fields. A default is written in the DECLARING
+module's context, because the expression names what that module can see.
+
+Both back ends hold a default to the same purity gate a constant read is held
+to — a literal, an operator over literals, or a construction of them. A default
+that is not one is left to the zeroing it already got; `Vec`'s `data :: Ptr<T>
+= null_ptr<T>()` is the only shape in the tree that reaches the gate, and a
+null pointer is what zeroing gives. **That gate is a remaining hole, not a
+decision**: a `::` field defaulted to a call gets zero and no diagnostic.
+
+**4b was a different defect, self-hosted only, and the answer to its question
+is the CONSTANT reading — the field really is not storage.** Grammar R4,
+`grammar/grammar.js`, `src/AST_CONTRACT.md` and `src/parse/parse_member.zen` all
+already say so: inside a struct body `name: T = value` is a constant and
+`name :: T = value` is a field with a default. The deciding argument is that a
+constant has no other spelling — `i32.MAX` is declared `MAX*: i32 = 2147483647`
+and DESIGN.md's "Constants on a type" section gives it no alternative — while a
+field with a default has `::`. Reading `:` + a value as storage would leave the
+constant unwritable; reading it as a constant leaves the immutable-field-with-a-
+default unwritable, and `::` covers that shape. So the loss is one-sided.
+
+DESIGN.md now says it, which is what 4b required and what `AST_CONTRACT.md`'s
+open question 2 asked for: the "Declarations" section states R4 and prices it,
+and "Constants on a type" adds that the spelling decides everywhere and that a
+constant folds wherever it is read.
+
+The self-hosted bug was the second half of that: `Limits.WIDTH` folded and
+`j.WIDTH` did not. It fell through to the field path and emitted `.zu_m5WIDTH`
+on a struct declaring no such member, so the diagnostic came from `cc` and named
+a symbol the author never wrote. The bootstrapper already folded it, so this was
+also the two implementations disagreeing. `gen_c_read.zen` now asks the
+RECEIVER's declaration for a constant of that name before falling to the field
+path.
+
+**Still owed, and sema's, not codegen's:** supplying a constant at construction
+— `Limits(WIDTH: 8)` — is silently dropped by both back ends. It should be a
+diagnostic naming the member.
 
 ---
 
@@ -483,20 +542,24 @@ without a value.
 
 In the order the work would pay off:
 
-1. **A corpus test with a non-zero field default** (§4). It is red today under
-   both toolchains for `::` and breaks the C compile under `./zen` for `:`.
-   Until it exists, a specified feature that no test and no line of `src/`
-   exercises will stay broken indefinitely — this is the exact shape of gap
-   that the compiler's own self-use cannot find.
-2. **Decide what a `:` field with a default MEANS** (§4b) before fixing it. If
-   it is storage, emit it; if it folds to a constant, say so in DESIGN.md and
-   fold the read. The half-landed state is the bug.
-3. **`--root .`** (§8), now 158 diagnostics and growing with every must-fail
+1. ~~**A corpus test with a non-zero field default** (§4)~~ — done:
+   `tests/corpus/codegen/field_defaults`, written red first under both
+   toolchains, and both halves of §4 fixed under it.
+2. ~~**Decide what a `:` field with a default MEANS** (§4b)~~ — decided: it is a
+   constant, DESIGN.md says so, and the read folds in both toolchains.
+3. **Refuse a construction that supplies a constant** (§4). `Limits(WIDTH: 8)`
+   is silently dropped by both back ends; it should name the member. Sema's,
+   not codegen's.
+4. **A `::` field defaulted to a call still gets zero** (§4). Both back ends
+   gate a default on the same purity test a constant read gets, so
+   `Ptr<T> = null_ptr<T>()` falls through to zeroing — which is the right value
+   by luck. Something that is not is silently wrong and undiagnosed.
+5. **`--root .`** (§8), now 158 diagnostics and growing with every must-fail
    parse test added. Prune before reporting, or exclude `tests/`.
-4. **Name the type in the unresolved-method diagnostic** (§7). Neither
+6. **Name the type in the unresolved-method diagnostic** (§7). Neither
    toolchain says which type has no such method, and neither names the import
    that would fix it.
-5. **`h.break(value)` in `bootstrap/`** (§10) — the only thing it blocks is
+7. **`h.break(value)` in `bootstrap/`** (§10) — the only thing it blocks is
    writing a corpus test in the shape the shipped compiler already handles.
 
 ## Not bugs, recorded because I expected them to be

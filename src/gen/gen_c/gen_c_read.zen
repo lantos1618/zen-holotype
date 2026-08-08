@@ -71,9 +71,65 @@ lower_access* = (be :: CBackend, id: ExprId, a: Access, ctx: Ctx, want: TyId,
 lower_type_or_field = (be :: CBackend, id: ExprId, a: Access, ctx: Ctx,
                        want: TyId, out :: String) Res<(), AllocError> {
     type_const(be, a, ctx).try().match({
-        None      => write_field_access(be, id, a, ctx, out),
+        None      => lower_recv_const_or_field(be, id, a, ctx, want, out),
         Ok(pair)  => lower_const_value(be, id, pair.k, pair.d, want, out),
     })
+}
+
+// `j.WIDTH`, WHERE `WIDTH` IS A CONSTANT AND `j` IS A VALUE.
+//
+// A constant is one value per type and there is nothing in a receiver
+// to read it out of — so which side of the dot the TYPE arrives on
+// cannot change the answer. `Limits.WIDTH` folded and `j.WIDTH` fell
+// through to the field path, which emitted `.zg_m5WIDTH` on a struct
+// that declares no such member: the diagnostic came from `cc` and named
+// a symbol the author never wrote. The bootstrapper already folded it,
+// so this was also the two implementations disagreeing.
+//
+// ASKED AFTER `type_const` AND BEFORE THE FIELD PATH. A name that is
+// both is not possible — grammar R4 makes `NAME: T = value` a constant
+// and `name :: T = value` a field, one member each way — and a constant
+// is the reading that has no storage to fall back on.
+lower_recv_const_or_field = (be :: CBackend, id: ExprId, a: Access, ctx: Ctx,
+                             want: TyId, out :: String) Res<(), AllocError> {
+    recv_const(be, a, ctx).try().match({
+        None     => write_field_access(be, id, a, ctx, out),
+        Ok(pair) => lower_const_value(be, id, pair.k, pair.d, want, out),
+    })
+}
+
+// The constant a RECEIVER'S type declares under this name. The
+// receiver's type is the frame's answer, and its declaration is read in
+// the module that wrote it — a member's value names what that module
+// can see and never what the reader can.
+recv_const = (be :: CBackend, a: Access, ctx: Ctx)
+             Res<Res<TypeConst>, AllocError> {
+    unknown = be.check.types.unknown().try();
+    rty = ty_of(be, a.base, ctx, unknown).try();
+    be.check.types.at(rty).match({
+        Named(n) => named_recv_const(be, n, a.name.text),
+        _        => Ok(None),
+    })
+}
+
+named_recv_const = (be :: CBackend, n: TyNamed, name: str)
+                   Res<Res<TypeConst>, AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.own_defs(n.decl.module.to_usize(), n.name, found).try();
+    hits ::= be.alloc.Vec<TypeConst>();
+    found.loop((h, d) {
+        same_decl(d, n).then(() {
+            collect_type_const(be, d, name, hits).try();
+        });
+    });
+    Ok(hits.get(0));
+}
+
+// The def this type WAS interned from, and not merely one of that name:
+// a module may bind two declarations to one name and only one of them
+// is the receiver's.
+same_decl = (d: Def, n: TyNamed) bool {
+    d.id.module == n.decl.module && d.id.decl == n.decl.decl
 }
 
 // A constant member, and the declaration it was found on — the second
