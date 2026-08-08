@@ -52,7 +52,13 @@ const STARTUP_FAILED =
   "     evidence — set `zen.trace.server` to `verbose` and reload.\n" +
   "\n" +
   "Worth knowing before you file anything: this server answers hover and\n" +
-  "publishes diagnostics, and refuses everything else with `-32601`.\n" +
+  "semantic tokens, publishes diagnostics, and refuses everything else\n" +
+  "with `-32601`.\n" +
+  "\n" +
+  "Colour comes from `textDocument/semanticTokens`, which is why this\n" +
+  "extension ships no TextMate grammar — see editors/README.md for that\n" +
+  "argument. It is the one answer that needs no build and no workspace,\n" +
+  "so if hover and diagnostics are quiet, colour should still work.\n" +
   "\n" +
   "Diagnostics are lex's, parse's and sema's, grouped per file — an error\n" +
   "in a module you are not looking at is reported against that module —\n" +
@@ -149,11 +155,15 @@ export async function activate(context: vscode.ExtensionContext) {
   try {
     await client.start();
     output.appendLine(
-      "zen: server started. `hover` is the one query it answers — a type, or a function's signature;",
+      "zen: server started. It answers `hover` — a type, or a function's signature — and",
     );
     output.appendLine(
-      "zen: definition, completion, symbols, formatting and rename are refused by name with -32601.",
+      "zen: `semanticTokens`, which is where colour comes from; definition, completion,",
     );
+    output.appendLine(
+      "zen: symbols, formatting and rename are refused by name with -32601.",
+    );
+    warnIfSemanticHighlightingOff();
   } catch (err) {
     output.appendLine(`zen: the server failed to start: ${String(err)}`);
     output.appendLine(STARTUP_FAILED);
@@ -163,6 +173,48 @@ export async function activate(context: vscode.ExtensionContext) {
 
 export function deactivate(): Thenable<void> | undefined {
   return client?.stop();
+}
+
+// NO CLIENT CODE REGISTERS SEMANTIC TOKENS, and that is not an omission.
+// `vscode-languageclient` registers `SemanticTokensFeature` as one of its
+// default features, sends the client half of the capability itself, and —
+// on seeing `semanticTokensProvider` come back from `initialize` — calls
+// `vscode.languages.registerDocumentSemanticTokensProvider` with the
+// server's own legend. It asks for `full/delta` only when the server said
+// `full: {delta: true}` and for `range` only when it said `range: true`,
+// so advertising a bare `full: true` is what keeps it to the one request
+// this server answers.
+//
+// WHAT CAN STILL LEAVE THE FILE GREY, silently, with a server answering
+// perfectly. VS Code applies semantic tokens only when semantic
+// highlighting is on: `editor.semanticHighlighting.enabled` defaults to
+// `configuredByTheme`, every stock theme turns it on, and a user who has
+// set it to `false` — or a theme that leaves it off — gets a correct
+// token list that colours nothing, with nothing on screen to say why.
+// That is the same shape of failure as the server exiting 2 on `--stdio`:
+// invisible from the editor, obvious once named. So it is named, once, in
+// the channel where every other startup fact is.
+function warnIfSemanticHighlightingOff(): void {
+  const setting = vscode.workspace
+    .getConfiguration("editor")
+    .get<boolean | string>("semanticHighlighting.enabled");
+  if (setting === false) {
+    output.appendLine(
+      "zen: `editor.semanticHighlighting.enabled` is false, so VS Code will discard the",
+    );
+    output.appendLine(
+      "zen: colours this server sends. Set it to true, or to `configuredByTheme`.",
+    );
+    return;
+  }
+  if (setting === "configuredByTheme" || setting === undefined) {
+    output.appendLine(
+      "zen: colour is semantic tokens, which your theme must enable — stock themes do.",
+    );
+    output.appendLine(
+      "zen: If .zen files stay grey, set `editor.semanticHighlighting.enabled` to true.",
+    );
+  }
 }
 
 // A relative `zen.server.path` — and the default `./zen` is one, because
