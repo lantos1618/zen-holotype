@@ -40,7 +40,7 @@ Member, Variant, ImportName, Param, TParam, Form, Module = ast.ast_node
 Token, TokenKind, same = parse.parse_token
 Parser, Mark = parse.parser
 expr = parse.parse_expr
-type = parse.parse_type
+type, written_type = parse.parse_type
 ValueShape, value_shape, decl_head_ahead, delim_step, ret_ahead = parse.lookahead
 block, body_block = parse.parse_stmt
 qualified_name = parse.parse_pattern
@@ -170,11 +170,6 @@ named_decl = (p :: Parser, m: Mark, module_level: bool) Res<Decl, AllocError> {
         false => p.error("expected `=` or `::=` after a declaration's name"),
     }).try();
     p.decl_value(m, names, tparams, written, mutable, module_level);
-}
-
-written_type = (p :: Parser) Res<Res<TypeId>, AllocError> {
-    t = p.type().try();
-    Ok(Ok(t));
 }
 
 // `Res*, Ok*, None*` — the name list exists for imports, because
@@ -328,6 +323,16 @@ variant_payload = (p :: Parser) Res<Res<TypeId>, AllocError> {
     Ok(Ok(t));
 }
 
+fn_decl = (p :: Parser, m: Mark, head: ImportName, tparams: Vec<TParam>, mutable: bool) Res<Decl, AllocError> {
+    f = p.fn_value(head.name, head.exported, tparams, mutable).try();
+    p.add_decl(DeclKind.Function(f), m);
+}
+
+// `<T>(a: T) T { .. }`, whoever writes it: "a method is a `Function`
+// inside a `Member`" (AST_CONTRACT), so a declaration's function and an
+// impl's method are one node — and reading them is one rule, not one
+// rule per caller.
+//
 // DESIGN.md's method table, verbatim: `form` records whether `=` or
 // `::=` was written and `body` whether a `{ .. }` followed, and the
 // two are not redundant.
@@ -336,7 +341,7 @@ variant_payload = (p :: Parser) Res<Res<TypeId>, AllocError> {
 //     = sig {..}     Sealed     provided, cannot be overridden
 //     ::= sig {..}   Default    provided, impl may rebind it
 //     ::= sig        Hook       optional, impl may provide it
-fn_decl = (p :: Parser, m: Mark, head: ImportName, tparams: Vec<TParam>, mutable: bool) Res<Decl, AllocError> {
+fn_value* = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, rebindable: bool) Res<Function, AllocError> {
     own ::= p.alloc.Vec<TParam>();
     p.at_kind(TokenKind.Lt).match({
         true  => p.type_params(own),
@@ -345,28 +350,23 @@ fn_decl = (p :: Parser, m: Mark, head: ImportName, tparams: Vec<TParam>, mutable
     ps ::= p.alloc.Vec<Param>();
     span = p.params_list(ps).try();
     ret = p.ret_ahead().match({
-        true  => p.fn_ret(),
+        true  => p.written_type(),
         false => Ok(None),
     }).try();
     body = p.at_kind(TokenKind.BraceOpen).match({
         true  => p.fn_body(),
         false => Ok(None),
     }).try();
-    p.add_decl(DeclKind.Function(Function(
-        name: head.name,
-        exported: head.exported,
-        form: form_of(mutable, p.has_body(body)),
+    Ok(Function(
+        name: name,
+        exported: exported,
+        form: form_of(rebindable, p.has_body(body)),
         tparams: p.merge_tparams(tparams, own),
         params: ps,
         params_span: span,
         ret: ret,
         body: body,
-    )), m);
-}
-
-fn_ret = (p :: Parser) Res<Res<TypeId>, AllocError> {
-    t = p.type().try();
-    Ok(Ok(t));
+    ));
 }
 
 fn_body = (p :: Parser) Res<Res<BlockId>, AllocError> {
@@ -374,14 +374,14 @@ fn_body = (p :: Parser) Res<Res<BlockId>, AllocError> {
     Ok(Ok(b));
 }
 
-has_body* = (p: Parser, body: Res<BlockId>) bool {
+has_body = (p: Parser, body: Res<BlockId>) bool {
     body.match({
         Ok(_) => true,
         None  => false,
     });
 }
 
-form_of* = (rebindable: bool, body: bool) Form {
+form_of = (rebindable: bool, body: bool) Form {
     rebindable.match({
         true  => body.match({
             true  => Form.Default,
@@ -397,7 +397,7 @@ form_of* = (rebindable: bool, body: bool) Form {
 // Type parameters may be written on either side of the `=` —
 // `f*<T> = (x: T) T` and `f* = <T>(x: T) T` are the same declaration,
 // and DESIGN.md writes both. Whichever list is non-empty is the one.
-merge_tparams* = (p: Parser, head: Vec<TParam>, own: Vec<TParam>) Vec<TParam> {
+merge_tparams = (p: Parser, head: Vec<TParam>, own: Vec<TParam>) Vec<TParam> {
     (head.len == 0).match({
         true  => own,
         false => head,

@@ -30,15 +30,13 @@
 
 Alloc, AllocError = std.mem
 Span, Pos, Ident, no_trivia = ast.ast_span
-TypeId, ExprId, BlockId = ast.ast_id
-Member, MemberKind, Field, Const, Function, Param, TParam, Form = ast.ast_node
+TypeId, ExprId = ast.ast_id
+Member, MemberKind, Field, Const, Param, TParam = ast.ast_node
 Token, TokenKind, same = parse.parse_token
 Parser, Mark = parse.parser
 expr = parse.parse_expr
-type = parse.parse_type
-ret_ahead = parse.lookahead
-block, body_block = parse.parse_stmt
-form_of, has_body = parse.parse_decl
+type, written_type = parse.parse_type
+fn_value = parse.parse_decl
 
 // -------------------------------------------------------------------
 // bodies
@@ -154,8 +152,10 @@ split_r4 = (p :: Parser, name: Ident, exported: bool, mutable: bool, t: TypeId, 
     });
 }
 
-// A record's entry: `width: self.radius * 2.0`. There is no type,
-// because the field being satisfied already has one.
+// A record's entry, written `width: self.radius * 2.0` or `width =
+// ..`: the `:` and the `=` supply the same thing and read the same
+// way. There is no type, because the field being satisfied already
+// has one.
 supplied_member = (p :: Parser, name: Ident, exported: bool, mutable: bool) Res<MemberKind, AllocError> {
     value = p.expr().try();
     Ok(MemberKind.Field(Field(
@@ -173,7 +173,7 @@ after_assign = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, 
     p.bump().try();
     p.fn_member_ahead().match({
         true  => p.fn_member(name, exported, tparams, rebindable),
-        false => p.value_member(name, exported, rebindable),
+        false => p.supplied_member(name, exported, rebindable),
     });
 }
 
@@ -182,52 +182,8 @@ fn_member_ahead = (p :: Parser) bool {
 }
 
 fn_member = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, rebindable: bool) Res<MemberKind, AllocError> {
-    own ::= p.alloc.Vec<TParam>();
-    p.at_kind(TokenKind.Lt).match({
-        true  => p.type_params(own),
-        false => p.nothing(),
-    }).try();
-    ps ::= p.alloc.Vec<Param>();
-    span = p.params_list(ps).try();
-    ret = p.ret_ahead().match({
-        true  => p.member_ret(),
-        false => Ok(None),
-    }).try();
-    body = p.at_kind(TokenKind.BraceOpen).match({
-        true  => p.member_body(),
-        false => Ok(None),
-    }).try();
-    Ok(MemberKind.Function(Function(
-        name: name,
-        exported: exported,
-        form: form_of(rebindable, p.has_body(body)),
-        tparams: p.pick_tparams(tparams, own),
-        params: ps,
-        params_span: span,
-        ret: ret,
-        body: body,
-    )));
-}
-
-member_ret = (p :: Parser) Res<Res<TypeId>, AllocError> {
-    t = p.type().try();
-    Ok(Ok(t));
-}
-
-member_body = (p :: Parser) Res<Res<BlockId>, AllocError> {
-    b = p.body_block().try();
-    Ok(Ok(b));
-}
-
-value_member = (p :: Parser, name: Ident, exported: bool, mutable: bool) Res<MemberKind, AllocError> {
-    value = p.expr().try();
-    Ok(MemberKind.Field(Field(
-        name: name,
-        exported: exported,
-        mutable: mutable,
-        type: None,
-        value: Ok(value),
-    )));
+    f = p.fn_value(name, exported, tparams, rebindable).try();
+    Ok(MemberKind.Function(f));
 }
 
 member_value = (p :: Parser) Res<Res<ExprId>, AllocError> {
@@ -249,13 +205,6 @@ the_value* = (p: Parser, value: Res<ExprId>) ExprId {
     value.match({
         Ok(v) => v,
         None  => ExprId(index: 0),
-    });
-}
-
-pick_tparams* = (p: Parser, head: Vec<TParam>, own: Vec<TParam>) Vec<TParam> {
-    (head.len == 0).match({
-        true  => own,
-        false => head,
     });
 }
 
@@ -317,8 +266,7 @@ one_param = (p :: Parser) Res<Param, AllocError> {
 
 param_type = (p :: Parser) Res<Res<TypeId>, AllocError> {
     p.bump().try();
-    t = p.type().try();
-    Ok(Ok(t));
+    p.written_type();
 }
 
 // -------------------------------------------------------------------
