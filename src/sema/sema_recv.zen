@@ -30,22 +30,26 @@
 // because none of them asks for the write at all. Same marker, opposite
 // answers, decided by the bitwise-copy test and not by this file.
 //
-// TWO SITES, TWO WALKS. The second was written because nothing else
-// walked it: `sema_decl.zen` checked the bodies of top-level functions
-// and a method declared inside a struct body or an impl body was never
-// typed, so a write to `self` inside one was seen by nobody. It reads no
-// types at all, which is what let it run over a body the type checker
-// had never seen.
+// ONE SITE, ONE WALK, and it used to be two. The second was a whole
+// untyped walk of its own, written because nothing else reached a method
+// declared inside a struct body or an impl body — `sema_decl.zen` typed
+// only top-level functions, so a write to `self` inside a member was
+// seen by nobody. `sema_decl.zen` now walks every member body, and the
+// two walks reported the same write twice.
 //
-// THAT REASON IS GONE and the walk has outlived it. `sema_decl.zen` now
-// walks every member body — a struct's and an impl's — so `check_own`
-// reaches these writes too, and a `:` self assigning its own field
-// inside a member body is now reported TWICE, once as an immutable
-// binding and once as an immutable receiver. One of the two sentences is
-// owed a removal. It is not this change's to make: this walk needs no
-// types, so it still answers where typing poisoned and `check_own` went
-// quiet, and deciding it is redundant means proving that case empty
-// rather than watching the suite stay green.
+// THE CASE IT ANSWERED IS EMPTY, and that was measured rather than
+// assumed. The deleted walk traversed `module -> Struct|Impl -> members
+// -> Function with a body whose first parameter is named self`; the
+// typed walk traverses the identical decls and recurses through strictly
+// MORE expression forms, so it reaches every write the other did and
+// some it did not — its `::`-receiver rule missed an impl-body write
+// outright, because it read the fields off the impl rather than the
+// target. With it removed, the whole suite lost exactly one sentence and
+// no position: every diagnostic it raised was raised again here.
+//
+// SO ONLY THE SENTENCE SURVIVED IT, in `refuse_link` below. A refusal at
+// the `self` link names the METHOD and not the binding, because that is
+// where the `::` that would permit the write has to go.
 //
 // A CALL IS NOT THE ONLY WRITE. `p.x = 1` asks the same composed
 // question a `::` method does and got no answer at all until the third
@@ -55,10 +59,9 @@
 // `check_write_place`, and the walk that finds them stays in
 // `sema_own.zen` where the targets are already told from the values.
 
-Ast, Expr, ExprId, BlockId, Stmt, StmtKind, Bind, Block = ast
-Decl, DeclKind, Struct, Impl, Member, MemberKind, Function = ast
-Call, Arg, Access, Match, Arm, Lambda, Index, Module, Span = ast
-Name, Paren, Try, Field, Const, ExprStmt = ast
+Ast, Expr, ExprId, Span = ast
+Decl, DeclKind, Struct, Member, MemberKind, Function = ast
+Call, Access, Index, Name, Paren, Field, Const = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -172,8 +175,25 @@ refuse_immutable_link = (c :: Checker, o :: Own, node: Expr, id: ExprId)
                         Res<(), AllocError> {
     immutable_link(c, o, id).match({
         None   => Ok(()),
-        Ok(nm) => refuse(c, node.span, SemaFault.ImmutableWrite(
-                      NameFault(name: nm))),
+        Ok(nm) => refuse_link(c, o, node, nm),
+    })
+}
+
+// WHICH SENTENCE, DECIDED BY WHETHER THE LINK THAT REFUSED IS THE
+// RECEIVER. Every other link names a binding or a field the author can
+// re-mark where it stands; `self` names neither — the `::` that would
+// permit the write goes on the METHOD, so the method is what the
+// diagnostic has to name, and "self is declared `:`" tells a reader
+// nothing they can act on. It is also the promise the receiver rule
+// states: a `:` method that writes its own bytes is an error IN THE
+// METHOD, never a quiet upgrade to `::`.
+refuse_link = (c :: Checker, o :: Own, node: Expr, nm: str)
+              Res<(), AllocError> {
+    (nm.eq("self") && (o.method.len > 0)).match({
+        true  => refuse(c, node.span, SemaFault.NeedsMutableReceiver(
+                     NameFault(name: o.method))),
+        false => refuse(c, node.span, SemaFault.ImmutableWrite(
+                     NameFault(name: nm))),
     })
 }
 
@@ -300,259 +320,4 @@ find_member = (members: Vec<Member>, name: str) Res<Member> {
         None  => None,
         Ok(i) => members.get(i),
     })
-}
-
-// ---------------------------------------------------------------------
-// RULE: a method may not write what its markers do not permit
-//
-// The requirement is a PROMISE, not a consequence: it is declared, never
-// inferred from the body. So a `:` method that writes its own bytes is
-// an error IN THE METHOD, rather than a quiet upgrade to `::` that
-// breaks every caller in another module the next time the body changes.
-//
-// A `::` METHOD IS NOT UNRESTRICTED, and that is the second half of the
-// same promise. `::` grants the receiver's OWN bytes, so `self.items.n`
-// with `items: Vec<i32>` is still a write a copy of the receiver would
-// not see — the `:` on the field means what it means inside the type as
-// well as outside it.
-//
-// THE ENCLOSING DECLARATION IS THE ONLY TYPE THIS WALK KNOWS, which is
-// what makes the rule askable without a type checker: inside a method,
-// `self` is the struct the method is written in, so the FIRST link off
-// `self` is a member of that struct and can be read straight off the
-// members list. Every link past it belongs to some other type, and this
-// walk fails open on all of them — `sema_own.zen`'s targets go through
-// `check_write_place` above, which has the types to ask properly.
-// ---------------------------------------------------------------------
-
-// A method under this walk: the declaration it is written in, so the
-// first link off `self` can be resolved, and the two facts every refusal
-// below needs.
-SelfMethod = {
-    decl: Decl,
-    name: str,
-    mutable: bool,
-}
-
-check_self_writes* = (c :: Checker) Res<(), AllocError> {
-    Range(0, c.world.count()).loop((h, mi) {
-        check_module_self_writes(c, mi).try();
-    });
-    Ok(());
-}
-
-check_module_self_writes = (c :: Checker, mi: usize) Res<(), AllocError> {
-    c.tree.module_at(mi).match({
-        None  => Ok(()),
-        Ok(m) => check_decls_self_writes(c, m),
-    })
-}
-
-check_decls_self_writes = (c :: Checker, m: Module) Res<(), AllocError> {
-    m.decls.loop((h, d) { check_decl_self_writes(c, d).try() });
-    Ok(());
-}
-
-check_decl_self_writes = (c :: Checker, d: Decl) Res<(), AllocError> {
-    d.kind.match({
-        Struct(st) => check_members_self_writes(c, d, st.members),
-        Impl(im)   => check_members_self_writes(c, d, im.members),
-        _          => Ok(()),
-    })
-}
-
-check_members_self_writes = (c :: Checker, d: Decl, members: Vec<Member>)
-                            Res<(), AllocError> {
-    members.loop((h, m) { check_member_self_writes(c, d, m).try() });
-    Ok(());
-}
-
-check_member_self_writes = (c :: Checker, d: Decl, m: Member)
-                           Res<(), AllocError> {
-    m.kind.match({
-        Function(f) => check_fn_self_writes(c, d, f),
-        _           => Ok(()),
-    })
-}
-
-check_fn_self_writes = (c :: Checker, d: Decl, f: Function)
-                       Res<(), AllocError> {
-    (has_self(f) && has_body(f)).match({
-        false => Ok(()),
-        true  => scan_self_writes(c, f, SelfMethod(
-                     decl: d, name: f.name.text,
-                     mutable: first_param_mutable(f))),
-    })
-}
-
-has_self = (f: Function) bool {
-    f.params.get(0).match({
-        None  => false,
-        Ok(p) => p.name.text.eq("self"),
-    })
-}
-
-has_body = (f: Function) bool {
-    f.body.match({ Ok(_) => true, None => false })
-}
-
-scan_self_writes = (c :: Checker, f: Function, sm: SelfMethod)
-                   Res<(), AllocError> {
-    f.body.match({
-        None  => Ok(()),
-        Ok(b) => self_writes_block(c, b, sm),
-    })
-}
-
-self_writes_block = (c :: Checker, id: BlockId, sm: SelfMethod)
-                    Res<(), AllocError> {
-    b = c.tree.block_at(id);
-    b.stmts.loop((h, s) { self_writes_stmt(c, s, sm).try() });
-    b.value.match({
-        None  => Ok(()),
-        Ok(v) => self_writes_expr(c, v, sm),
-    }).try();
-    Ok(());
-}
-
-self_writes_stmt = (c :: Checker, s: Stmt, sm: SelfMethod)
-                   Res<(), AllocError> {
-    s.kind.match({
-        Bind(b)  => self_writes_bind(c, b, sm),
-        Expr(e)  => self_writes_expr(c, e.expr, sm),
-        Block(x) => self_writes_block(c, x, sm),
-        Decl(_)  => Ok(()),
-    })
-}
-
-self_writes_bind = (c :: Checker, b: Bind, sm: SelfMethod)
-                   Res<(), AllocError> {
-    refuse_if_self_target(c, b.target, sm).try();
-    self_writes_expr(c, b.value, sm).try();
-    Ok(());
-}
-
-// THE TARGET, NOT THE VALUE: reading `self.n` is what every method is
-// for, and only writing it is refused. The position is the target
-// expression, which is where the write is written and where the `::`
-// that would permit it has to go.
-refuse_if_self_target = (c :: Checker, id: ExprId, sm: SelfMethod)
-                        Res<(), AllocError> {
-    node = c.tree.expr_at(id);
-    node.kind.match({
-        Access(a) => refuse_if_self_root(c, node, id, a.base, sm),
-        Index(x)  => refuse_if_self_root(c, node, id, x.base, sm),
-        _         => Ok(()),
-    })
-}
-
-refuse_if_self_root = (c :: Checker, node: Expr, id: ExprId, base: ExprId,
-                       sm: SelfMethod) Res<(), AllocError> {
-    rooted_at_self(c, base).match({
-        false => Ok(()),
-        true  => refuse_self_write(c, node, id, sm),
-    })
-}
-
-// Two markers, two sentences. A `:` receiver refuses every write reached
-// through it and the METHOD's declaration is the fix; a `::` receiver
-// refuses only the links its own type declared `:`, and there the FIELD
-// is the fix. Pointing either sentence at the other marker sends the
-// reader to the one that is already right.
-refuse_self_write = (c :: Checker, node: Expr, id: ExprId, sm: SelfMethod)
-                    Res<(), AllocError> {
-    sm.mutable.match({
-        false => refuse(c, node.span, SemaFault.NeedsMutableReceiver(
-                     NameFault(name: sm.name))),
-        true  => refuse_self_field(c, node, id, sm),
-    })
-}
-
-refuse_self_field = (c :: Checker, node: Expr, id: ExprId, sm: SelfMethod)
-                    Res<(), AllocError> {
-    self_link(c, id).match({
-        None   => Ok(()),
-        Ok(nm) => refuse_unless_own_field(c, node, nm, sm),
-    })
-}
-
-refuse_unless_own_field = (c :: Checker, node: Expr, name: str,
-                           sm: SelfMethod) Res<(), AllocError> {
-    decl_member(sm.decl, name).match({
-        None  => Ok(()),
-        Ok(x) => member_is_mutable(x).match({
-            true  => Ok(()),
-            false => refuse(c, node.span, SemaFault.ImmutableWrite(
-                         NameFault(name: name))),
-        }),
-    })
-}
-
-// The first link off `self`, which for `self.a.b` is `a` and for
-// `self.a` is `a` as well. It is the only link in the path declared in
-// the type this method is written in, so it is the only one an untyped
-// walk may ask about.
-self_link = (c: Checker, id: ExprId) Res<str> {
-    node = c.tree.expr_at(id);
-    node.kind.match({
-        Paren(p)  => self_link(c, p.inner),
-        Index(x)  => self_link(c, x.base),
-        Access(a) => link_off_self(c, a),
-        _         => None,
-    })
-}
-
-link_off_self = (c: Checker, a: Access) Res<str> {
-    self_named(c, a.base).match({
-        true  => Ok(a.name.text),
-        false => self_link(c, a.base),
-    })
-}
-
-self_named = (c: Checker, id: ExprId) bool {
-    c.tree.expr_at(id).kind.match({
-        Name(n)  => n.text.eq("self"),
-        Paren(p) => self_named(c, p.inner),
-        _        => false,
-    })
-}
-
-rooted_at_self = (c :: Checker, id: ExprId) bool {
-    node = c.tree.expr_at(id);
-    node.kind.match({
-        Name(n)   => n.text.eq("self"),
-        Paren(p)  => rooted_at_self(c, p.inner),
-        Access(a) => rooted_at_self(c, a.base),
-        Index(x)  => rooted_at_self(c, x.base),
-        _         => false,
-    })
-}
-
-// A write hidden inside a nested body still writes. The recursion is
-// only over the forms that can HOLD a statement, because a write is a
-// statement and never an operand.
-self_writes_expr = (c :: Checker, id: ExprId, sm: SelfMethod)
-                   Res<(), AllocError> {
-    node = c.tree.expr_at(id);
-    node.kind.match({
-        Block(b)  => self_writes_block(c, b, sm),
-        Lambda(l) => self_writes_block(c, l.body, sm),
-        Paren(p)  => self_writes_expr(c, p.inner, sm),
-        Try(t)    => self_writes_expr(c, t.operand, sm),
-        Match(m)  => self_writes_arms(c, m, sm),
-        Call(k)   => self_writes_args(c, k, sm),
-        _         => Ok(()),
-    })
-}
-
-self_writes_arms = (c :: Checker, m: Match, sm: SelfMethod)
-                   Res<(), AllocError> {
-    m.arms.loop((h, a) { self_writes_expr(c, a.body, sm).try() });
-    Ok(());
-}
-
-self_writes_args = (c :: Checker, k: Call, sm: SelfMethod)
-                   Res<(), AllocError> {
-    k.args.loop((h, a) { self_writes_expr(c, a.value, sm).try() });
-    Ok(());
 }
