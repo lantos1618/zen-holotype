@@ -27,12 +27,18 @@ M.root = vim.env.ZEN_ROOT or vim.fn.expand("~/src/zen")
 -- what `docs/design_lsp.md` §4 specifies and what `docs/design_lsp.md:258`
 -- writes verbatim.
 --
--- IT DOES NOT WORK YET, and the reason is one missing capability rather
--- than a missing server: `Env` has `argv, vars, out, mem, fs, net, threads`
--- (`src/std/env/env.zen:147`) and nothing that reads a byte stream, so
--- `zen lsp` today takes two FILE arguments instead of a pipe. Run
--- `zen lsp` with no arguments and it says so. Until that lands, Neovim will
--- report the server exiting immediately; see `editors/README.md`.
+-- THIS WORKS. `Env` grew a `Stdin` capability, so `zen lsp` with no
+-- arguments reads `Content-Length` frames from stdin and writes replies to
+-- stdout. The two-FILE form (`zen lsp <requests> <replies>`) still exists
+-- because a corpus test cannot hold a pipe open, and both reach the same
+-- serve loop — but an editor wants this one.
+--
+-- WHAT YOU GET, and it is worth knowing before you wonder why nothing is
+-- happening: hover, and nothing else. There are no diagnostics — do not
+-- wait for squiggles, the server never publishes any — and hover answers on
+-- an identifier's USE, not on its declaration, not on a type name and not
+-- on a function name. Everything else comes back `-32601 no handler`.
+-- Colour does not come from here at all; it comes from tree-sitter, below.
 M.cmd = { M.root .. "/zen", "lsp" }
 
 -- ---------------------------------------------------------------------

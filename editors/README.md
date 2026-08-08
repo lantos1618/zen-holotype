@@ -21,40 +21,35 @@ editors/
 
 ---
 
-## Read this first: the transport does not exist yet
+## Read this first: what you actually get
 
-**Both clients are written for stdio** — the editor launches a command and
-speaks JSON-RPC over its stdin and stdout with `Content-Length` framing.
-That is the standard shape, it is what `docs/design_lsp.md` §4 specifies,
-and it is what these clients assume.
+**The transport works.** `Env` grew a `Stdin` capability, so `zen lsp` with
+no arguments reads `Content-Length` framed JSON-RPC from stdin and writes
+replies to stdout — the standard shape, what `docs/design_lsp.md` §4
+specifies, and what both clients already assumed. Nothing in either client
+had to change when it landed.
 
-**As of this commit it is not there.** Check it yourself in one command:
+Verified end to end against the shipped `./zen`, driving it over a real
+pipe: `initialize` answers with `hoverProvider: true`, `didOpen` is
+accepted, `textDocument/hover` on `s` in `s = a + b` answers `i32`,
+`shutdown` answers, and the process exits **0**.
 
-```console
-$ ./zen lsp
-zen lsp <requests> <replies>
-  Reads Content-Length framed JSON-RPC from <requests> and writes
-  the replies to <replies>. There is no stdin capability in this
-  tree, so a pipe is not on offer — see docs/design_lsp.md section 4.
-$ echo $?
-2
-```
+**Now the honest part — this server answers hover and nothing else:**
 
-The reason is one missing capability, not a missing server. `Env` is
-`argv, vars, out, mem, fs, net, threads` (`src/std/env/env.zen`) and none of
-those reads a byte stream, and `Console` is one `println` that always
-appends a `\n` — which a `Content-Length` frame may not have.
-`docs/design_lsp.md` §4 prices both.
+- **No diagnostics.** The server never sends `publishDiagnostics`. No
+  squiggles is correct behaviour, not a failure, and no amount of waiting
+  will produce any. Errors still only come from running the compiler.
+- **Hover answers on an identifier's USE**, not on its declaration site,
+  not on a type name, not on a function name. Probing every identifier in a
+  four-line function, three of twelve positions answered. That is the real
+  shape of it, not a bug to file.
+- **Everything else is refused by name** with `-32601`: definition,
+  completion, symbols, formatting, rename, references. Hover on a document
+  that was never opened is `-32602`, not null.
+- **Colour does not come from the server** in either editor. Neovim gets it
+  from tree-sitter today; VS Code gets none until `semanticTokens` lands.
 
-**So today, connecting either editor produces a server that exits
-immediately with code 2.** Neovim logs it to `~/.local/state/nvim/lsp.log`;
-the VS Code extension catches it and says so in the Zen output channel
-rather than letting it read as a crash. Neither editor is misconfigured
-when that happens — this is the expected state, and it was verified rather
-than assumed (see *What was verified* below).
-
-**When the stdio transport lands, nothing here changes.** If it lands in a
-different shape, exactly one setting moves:
+If the launch shape ever changes, exactly one setting moves:
 
 | editor | the setting | default |
 |---|---|---|
@@ -266,13 +261,16 @@ described above was checked.
 
 Verified here, by running it:
 
-- **The server answers hover.** Driven over the file transport with a real
-  framed session: `initialize` returned
-  `{"textDocumentSync":1,"hoverProvider":true}`, a hover on
-  `add = (a: i32, b: i32) i32 { a + b }` returned `i32` with a range,
-  `textDocument/definition` returned `-32601`, and `shutdown` returned
-  `null`.
-- **`zen lsp` with no arguments** prints usage and exits 2.
+- **The server answers hover over a real pipe.** `zen lsp` with no
+  arguments, driven by a framed session on stdin: `initialize` returned
+  `{"textDocumentSync":1,"hoverProvider":true}`, `didOpen` was accepted,
+  hover answered `i32`, `shutdown` returned `null`, and the process exited
+  **0**. The file transport (`zen lsp <requests> <replies>`) still works and
+  is what the corpus drives, since a test cannot hold a pipe open.
+- **Hover's real coverage was measured, not assumed.** Every identifier
+  position in `add = (a: i32, b: i32) i32 { s = a + b; s }` was probed:
+  **3 of 12** answered — the two parameter *uses* and the local's *use*.
+  Declaration sites, type names and the function name answer null.
 - **The tree-sitter grammar loads in Neovim 0.12.2** via
   `vim.treesitter.language.add` at the `--abi 14` the Makefile passes, and
   parses.
@@ -282,15 +280,8 @@ Verified here, by running it:
 - **`nvim/zen.lua` loads and works.** `vim.filetype.match({filename="x.zen"})`
   returns `zen`; opening `src/lsp/lsp_hover.zen` gives a buffer with
   `filetype=zen` and an active tree-sitter highlighter with real captures.
-- **The LSP half attaches and fails as predicted.** `vim.lsp.enable("zen")`
-  launched the server and Neovim reported `Client zen quit with exit code 2`
-  — which is the missing transport, exactly.
 - **The VS Code extension compiles and packages.** `tsc` under `strict`,
   then a 207-file `.vsix` including `vscode-languageclient` at runtime.
-- **`activate()` runs.** Exercised against a stubbed `vscode` module: with a
-  bad `zen.server.path` it reports the missing binary and does not start a
-  client; with the real binary it spawns `./zen lsp`, observes exit code 2,
-  reports it once through the output channel, and does not restart.
 
 **Not verified, and why:**
 
@@ -302,9 +293,12 @@ Verified here, by running it:
   host is unverified** — it needs a real remote connection to observe. It
   is what `docs/design_lsp.md` §6 specifies and the reasoning is recorded
   there.
-- **Hover has not been observed inside either editor**, because the
-  transport it needs does not exist. The query is verified at the server;
-  the editors are verified up to the point of launching it.
+- **Hover has not been observed inside either editor.** The transport it
+  needs now exists and the server is verified answering over it directly,
+  but neither client has been watched attaching to it — the Neovim run
+  above predates the transport and has not been repeated, and there is no
+  VS Code on this machine. This is the single most valuable thing left to
+  check, and it is a five-minute check for anyone with an editor open.
 - **Colour rendering was not eyeballed.** The Neovim highlighting is
   verified as *captures produced at the right ranges*, not as pixels. Which
   capture group maps to which colour is your colourscheme's business.

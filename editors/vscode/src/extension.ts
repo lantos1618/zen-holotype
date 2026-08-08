@@ -4,10 +4,10 @@
 //
 // This file does one thing and refuses to do a second: it resolves the
 // server command, starts a LanguageClient over its stdio, and — the part
-// that earns its length — SAYS WHAT WENT WRONG WHEN THAT FAILS. As of this
-// commit it always fails, because the transport does not exist yet (see
-// `editors/README.md`), so the failure path is the path a user is actually
-// going to walk and it may not be a silent one.
+// that earns its length — SAYS WHAT WENT WRONG WHEN THAT FAILS. The
+// transport now exists, so the happy path is reachable; the failure path
+// keeps its length because the most likely failure left is a `zen` binary
+// older than the transport, which looks exactly like a crash from here.
 //
 // THIS IS A REMOTE WORKSPACE. `package.json` declares
 // `"extensionKind": ["workspace"]`, so this code runs on the machine that
@@ -35,24 +35,26 @@ let output: vscode.OutputChannel;
 // The one thing this extension knows how to explain. It is written once,
 // here, because it is the answer to every startup failure this extension
 // can currently produce and repeating it would let the copies drift.
-const NO_TRANSPORT_YET =
-  "The most likely cause, and the one to rule out first:\n" +
+const STARTUP_FAILED =
+  "Things to rule out, in the order they are worth checking:\n" +
   "\n" +
-  "  As of the commit this extension was written against, `zen lsp` CANNOT BE\n" +
-  "  SPOKEN TO OVER A PIPE. It takes two FILE arguments — a file of requests\n" +
-  "  and a file to write replies into — because `Env` has no capability that\n" +
-  "  reads a byte stream (src/std/env/env.zen lists argv, vars, out, mem, fs,\n" +
-  "  net and threads, and nothing else). docs/design_lsp.md section 4 prices\n" +
-  "  the missing `Stdin.read`. The protocol, the framing and hover are all\n" +
-  "  real; only the pipe is missing.\n" +
+  "  1. THE BINARY IS STALE. `zen lsp` speaks over a pipe only if it was\n" +
+  "     built after the `Stdin` capability landed. An older `zen` prints a\n" +
+  "     usage message and exits 2 — which looks exactly like a crash from\n" +
+  "     here. Run `zen lsp` in a terminal: if it prints usage, rebuild.\n" +
+  "     Note `make build` alone is not enough if the seed predates it.\n" +
   "\n" +
-  "  Check it in one command: run `zen lsp` with no arguments. If it prints a\n" +
-  "  usage message and exits 2, that is this, and nothing here is broken.\n" +
+  "  2. THE PATH IS WRONG. `zen.server.path` defaults to `./zen`, resolved\n" +
+  "     against the workspace folder. A checkout that has never been built\n" +
+  "     has no `zen` at all.\n" +
   "\n" +
-  "If the transport HAS landed, then this is a genuine server failure and the\n" +
-  "trace above is the evidence — set `zen.trace.server` to `verbose` and\n" +
-  "reload. If the launch shape landed differently, change `zen.server.args`\n" +
-  "and nothing else.";
+  "  3. A GENUINE SERVER FAILURE, in which case the trace above is the\n" +
+  "     evidence — set `zen.trace.server` to `verbose` and reload.\n" +
+  "\n" +
+  "Worth knowing before you file anything: this server answers hover and\n" +
+  "nothing else. It publishes NO diagnostics, so no squiggles is correct\n" +
+  "behaviour, not a failure. Hover answers on an identifier's use, not on\n" +
+  "its declaration or a type name. Everything else is `-32601 no handler`.";
 
 export async function activate(context: vscode.ExtensionContext) {
   output = vscode.window.createOutputChannel("Zen");
@@ -113,7 +115,7 @@ export async function activate(context: vscode.ExtensionContext) {
         // and name the cause that is overwhelmingly likely without claiming
         // to know it. Reload the window to try again.
         output.appendLine("zen: the server process exited.");
-        output.appendLine(NO_TRANSPORT_YET);
+        output.appendLine(STARTUP_FAILED);
         void vscode.window
           .showWarningMessage(
             "Zen: the language server exited. It will not be restarted automatically.",
@@ -139,7 +141,7 @@ export async function activate(context: vscode.ExtensionContext) {
     );
   } catch (err) {
     output.appendLine(`zen: the server failed to start: ${String(err)}`);
-    output.appendLine(NO_TRANSPORT_YET);
+    output.appendLine(STARTUP_FAILED);
     output.show(true);
   }
 }
