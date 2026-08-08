@@ -57,7 +57,7 @@ sym_local, sym_gen = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 LocalSlot, Closure = gen.gen_c.gen_c_frame
-unsupported, unresolved = gen.gen_c.gen_c_state
+unsupported, unresolved = gen.gen_c.gen_c_report
 sub_with, open, inst_at, settled_inst, recv_inst = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams, enter_struct_tparams = gen.gen_c.gen_c_mono
 ctype, declarator, is_unit = gen.gen_c.gen_c_type
@@ -279,9 +279,14 @@ run_block = (be :: CBackend, f: Function, blk: BlockId, argv: Vec<ExprId>,
 
     held = be.inst;
     be.enter_inst(inst);
+    // THE CALLEE'S BODY BEGINS ABOVE THE CALLER'S BINDINGS. Its own
+    // `x = ..` is a declaration however many `x`es the caller has.
+    floor = be.floor;
+    be.enter_frame(lmark);
     be.enter_call();
     block(be, blk, bctx, ret, dest_of(keeps, result.view())).try();
     be.leave_call();
+    be.enter_frame(floor);
     be.enter_inst(held);
 
     be.release(lmark).try();
@@ -370,7 +375,8 @@ bind_closure = (be :: CBackend, p: Param, l: Lambda, pty: TyId,
     ret = fn_parts(be, pty, ptys).try();
     be.declare_closure(p.name.text, Closure(lam: l, ptys: ptys, ret: ret,
                                             home: home, check_home: chome,
-                                            inst: be.inst, ctx: ctx))
+                                            floor: be.floor, inst: be.inst,
+                                            ctx: ctx))
 }
 
 // The parameter types and the return type a function TYPE carries.
@@ -500,9 +506,15 @@ run_lambda = (be :: CBackend, c: Call, cl: Closure, ctx: Ctx, want: TyId,
     lmark = be.mark();
     cmark = be.check.mark();
     bind_lambda_params(be, cl, argt, hnd).try();
+    // BACK TO THE FRAME THE LAMBDA WAS WRITTEN IN, floor included: a
+    // lambda's `x = ..` on a name its own writer had already bound is
+    // that writer's store, exactly as it reads on the page.
+    floor = be.floor;
+    be.enter_frame(cl.floor);
     be.enter_call();
     block(be, cl.lam.body, cl.ctx, ret, dest_of(keeps, result.view())).try();
     be.leave_call();
+    be.enter_frame(floor);
     be.release(lmark).try();
     be.check.release(cmark).try();
 

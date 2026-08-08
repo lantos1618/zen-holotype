@@ -58,9 +58,25 @@ emit_fs, emit_scope, emit_scope_floor = gen.gen_c.gen_c_runtime
 emit_stdin = gen.gen_c.gen_c_stdin
 
 // A bound on the reachable set, and a diagnostic at it rather than a
-// walk that does not terminate. Four thousand functions is more than
-// any program this backend compiles today and less than a runaway.
-MAX_FUNCTIONS* : usize = 4096
+// walk that does not terminate.
+//
+// IT COUNTS FUNCTIONS LOWERED, and the unit is deliberate: it is the
+// same unit `bootstrap/gen_c.py`'s `MAX_INSTANCES` counts, at the same
+// number, so the two implementations agree about which programs they
+// accept rather than differing by a factor nobody wrote down. The
+// number this replaced was 4096 and it bounded LOOP TURNS, each of
+// which lowers one free function and one member function — a bound of
+// 4096 on one and 4096 on the other, which is neither 4096 nor 8192.
+//
+// WHAT SETS THE NUMBER. The largest program this backend compiles is
+// itself: `zen build src` lowers 3167 free functions and 902 member
+// functions, 4069 in all. `corpus/cli/build_walks_a_root_it_is_given`,
+// which stages the driver, lowers 3754. 8192 is a little over twice the
+// largest of those. A DIVERGENCE IS UNAFFECTED BY THE NUMBER: an
+// infinite monomorphisation has no bound and reaches 8192 exactly as
+// surely as it reached 4096, one pass later. A guard on a program's
+// SIZE is what the old number had quietly become.
+MAX_FUNCTIONS* : usize = 8192
 
 // The whole translation unit for the program rooted at module `mi`.
 emit_program* = (be :: CBackend, mi: usize, out :: Emit)
@@ -178,10 +194,16 @@ is_function = (d: Def) bool {
 // draining one to exhaustion and then the other does not converge —
 // each cursor advances one step per turn instead, which reaches a
 // fixpoint in one bounded walk.
+//
+// THE LOOP RUNS WHILE THERE IS WORK, not a fixed number of turns. The
+// fixed form did every remaining turn of a bound no program came near,
+// and — the reason it had to change — it could not tell a walk that had
+// finished from one that had been cut off, because both ended the same
+// way.
 drain = (be :: CBackend) Res<(), AllocError> {
     fi ::= 0;
     mi ::= 0;
-    Range(0, MAX_FUNCTIONS).loop((h, k) {
+    loop(() { more(be, fi, mi) }, (h) {
         (fi < be.fn_queue.len).then(() {
             lower_queued(be, fi).try();
             fi = fi + 1;
@@ -191,6 +213,54 @@ drain = (be :: CBackend) Res<(), AllocError> {
             mi = mi + 1;
         });
     });
+    report_overrun(be, fi, mi).try();
+    Ok(());
+}
+
+// Something left to lower, and room left to lower it in.
+more = (be :: CBackend, fi: usize, mi: usize) bool {
+    ((fi + mi) < MAX_FUNCTIONS)
+        && ((fi < be.fn_queue.len) || (mi < be.m_queue.len))
+}
+
+// The bound, said out loud. WITHOUT THIS THE BACKEND SIMPLY STOPS: it
+// writes a translation unit with functions missing from it, `cc`
+// reports the first call to one of them, and the reader looks for a
+// bug in a program that has none. Silent truncation is the worst
+// failure mode this compiler has.
+report_overrun = (be :: CBackend, fi: usize, mi: usize) Res<(), AllocError> {
+    (fi < be.fn_queue.len).then(() { overrun_at_fn(be, fi).try() });
+    ((fi >= be.fn_queue.len) && (mi < be.m_queue.len)).then(() {
+        overrun_at_method(be, mi).try()
+    });
+    Ok(());
+}
+
+// Reported at the first thing that was NOT lowered, which is the only
+// position that tells a reader anything: it is where the walk stopped.
+overrun_at_fn = (be :: CBackend, fi: usize) Res<(), AllocError> {
+    be.fn_queue.get(fi).match({
+        None  => Ok(()),
+        Ok(d) => be.report(d.span.file, d.span, GenFault.Overrun(MAX_FUNCTIONS)),
+    }).try();
+    Ok(());
+}
+
+overrun_at_method = (be :: CBackend, mi: usize) Res<(), AllocError> {
+    be.m_queue.get(mi).match({
+        None  => Ok(()),
+        Ok(m) => overrun_at_decl(be, m),
+    }).try();
+    Ok(());
+}
+
+// A member has no `Def` of its own, so its position is its owning
+// declaration's — the same `DeclId` the queue entry already carries.
+overrun_at_decl = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
+    decl_at(be.tree, m.decl).match({
+        None  => Ok(()),
+        Ok(x) => be.report(x.span.file, x.span, GenFault.Overrun(MAX_FUNCTIONS)),
+    }).try();
     Ok(());
 }
 

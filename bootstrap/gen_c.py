@@ -159,7 +159,13 @@ C_STANDARD = "C99 (ISO/IEC 9899:1999)"
 USR = "zu_"
 GEN = "zg_"
 
-MAX_INSTANCES = 8192  # a DIVERGENCE stops here; the driver measured 4099
+MAX_INSTANCES = 8192  # generic TYPE instantiations; a divergence stops here
+# Functions emitted, which is a different thing counted in a different loop and
+# was the same constant until the two diagnostics had to say different words.
+# `zen build src` lowers 4069 and the driver corpus test 4086, so 8192 is a
+# little over twice the largest program this compiler has.  A divergence has no
+# bound and reaches any number, one pass later.
+MAX_FUNCTIONS = 8192
 MAX_EXPR_DEPTH = 24  # deeper than this spills to a temporary, per TESTING.md
 INLINE_DEPTH = 32  # a closure inlined into itself stops here, with a diagnostic
 
@@ -1719,12 +1725,20 @@ class Emitter:
         guard = 0
         while self.worklist:
             guard += 1
-            if guard > MAX_INSTANCES:
+            if guard > MAX_FUNCTIONS:
                 # `f<T> = (x: T) { f<Vec<T>>(..) }` must terminate with an
                 # error rather than consume all memory (TESTING.md, Sema).
+                #
+                # THE MESSAGE NAMES THE BOUND.  It used to say "generic
+                # instantiation did not terminate at `write`" -- a std
+                # function chosen by sort order, in a program with no generics
+                # in it -- and eleven tests went red pointing at it.  What a
+                # reader needs is the constant, because raising it is the fix
+                # whenever the program is a program and not a divergence.
                 cname, decl = self.worklist[0][0], self.worklist[0][1]
                 self.error(decl.node,
-                           "generic instantiation did not terminate at `%s`" % decl.name)
+                           "gen_c reached its bound on the functions one "
+                           "program may lower: MAX_FUNCTIONS = %d" % MAX_FUNCTIONS)
                 break
             self.worklist.sort(key=lambda item: item[0])
             cname, decl, targs, self_ty = self.worklist.pop(0)
@@ -2259,6 +2273,14 @@ class FnCtx:
         self.lines = []
         self.indent = 1
         self.scopes = [{}]
+        # WHERE THE BODY BEING LOWERED BEGINS in `self.scopes`.  Inlining
+        # stacks a callee's frame on top of its caller's without hiding it,
+        # and one decision must not see through the join: "a second binding of
+        # a name already in scope is an assignment" is a rule about one
+        # function's own body, and read across the join it made an inlined
+        # callee's `held = 77` store into the CALLER's `held` -- for the rest
+        # of the caller, not merely for the call.
+        self.floor = 0
         self.counts = {}
         self.tmp = 0
         self.depth = 0
@@ -2319,6 +2341,21 @@ class FnCtx:
 
     def find(self, name):
         for scope in reversed(self.scopes):
+            if name in scope:
+                return scope[name]
+        return None
+
+    def find_in_frame(self, name):
+        """The innermost binding of `name` in THE BODY BEING LOWERED.
+
+        `find` answers for the whole stack, which spans the caller of an
+        inlined body -- and the caller's bindings belong to another function,
+        whatever they are spelled.  Only the declaration-or-store decision
+        asks this narrower question; a READ still sees the whole stack,
+        because a lambda's free names are resolved by rewinding the stack
+        rather than by consulting a floor.
+        """
+        for scope in reversed(self.scopes[self.floor:]):
             if name in scope:
                 return scope[name]
         return None
@@ -2624,7 +2661,7 @@ class FnCtx:
             code, _vt = self.expr(value)
             self.line("%s = %s;" % (target, code))
             return
-        existing = self.find(name)
+        existing = self.find_in_frame(name)
         want = (
             self.e.resolve_type(declared, self.subst, self.parts, self.self_ty)
             if declared is not None
@@ -4006,6 +4043,12 @@ class FnCtx:
         marker carries the depth of the scope stack it was written at, and
         `inline_lambda` restores it.
 
+        The floor beside it is the depth the WRITING FUNCTION's own body
+        begins at, which is not `home`: `home` is where the lambda was
+        written and the floor is where the body it was written in started.
+        `inline_lambda` restores both, so a lambda's `x = ..` on a name its
+        own writer had already bound stays that writer's store.
+
         `home` is the CALLER's depth, taken before `inline_call` pushed the
         callee's frame -- and taking it after was this compiler's one capture
         bug.  A lambda literal is written at the call site, so nothing the
@@ -4017,7 +4060,8 @@ class FnCtx:
         also spelled `b`, so the closure's own `b` found the receiver.
         """
         self.scopes[-1][name] = (name, ("lambda", lam, pty, home,
-                                        (self.subst, self.parts, self.self_ty)))
+                                        (self.subst, self.parts, self.self_ty),
+                                        self.floor))
 
     def inline_call(self, decl, fnode, node, argnodes, targs, want, receiver=None):
         """Inline a function that was handed a closure."""
@@ -4070,6 +4114,12 @@ class FnCtx:
                                     self.coerce(code, aty, pty)))
         saved_subst, saved_parts, saved_self = self.subst, self.parts, self.self_ty
         self.subst, self.parts, self.self_ty = subst, base, self_ty
+        # THE CALLEE'S BODY BEGINS ABOVE THE CALLER'S BINDINGS.  Its own
+        # `x = ..` is a declaration however many `x`es the caller has.  Set
+        # here and not before the arguments, which are the caller's own
+        # expressions and are lowered in the caller's frame.
+        saved_floor = self.floor
+        self.floor = home
         self.inlining += 1
         self.open()
         value = self.block_value(f(fnode, "body"), ret)
@@ -4077,6 +4127,7 @@ class FnCtx:
             self.line("%s = %s;" % (result, value))
         self.close()
         self.inlining -= 1
+        self.floor = saved_floor
         self.subst, self.parts, self.self_ty = saved_subst, saved_parts, saved_self
         self.pop()
         return (result if result is not None else "0", ret or UNIT)
@@ -4116,9 +4167,13 @@ class FnCtx:
         # cannot be captured by the callee it was inlined into
         home = None
         if len(marker) > 4:
-            home = (self.scopes, self.subst, self.parts, self.self_ty)
+            home = (self.scopes, self.subst, self.parts, self.self_ty, self.floor)
             self.scopes = self.scopes[:marker[3]]
             self.subst, self.parts, self.self_ty = marker[4]
+            # back to the WRITER's floor as well: inside this body a name the
+            # writer had already bound is that writer's binding, so `x = ..`
+            # on it is a store and not a fresh `x`
+            self.floor = marker[5]
         self.push()
         for p, got in zip(params, lowered):
             if got is None:
@@ -4140,7 +4195,7 @@ class FnCtx:
         self.inlining -= 1
         self.pop()
         if home is not None:
-            self.scopes, self.subst, self.parts, self.self_ty = home
+            self.scopes, self.subst, self.parts, self.self_ty, self.floor = home
         return (result if result is not None else "0", ret or UNIT)
 
     # ---- the loop intrinsic --------------------------------------------

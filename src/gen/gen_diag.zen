@@ -7,13 +7,20 @@
 // EMITS — it produces the C it could produce and the faults it owes,
 // and a caller decides whether that is a translation unit or a report.
 //
-// THE FAULT SET IS SMALL ON PURPOSE, and every entry means the same
-// thing: this backend was asked for something it does not lower yet. A
-// backend has no opinions about a program's meaning — sema has already
-// had those, and a second copy of "expected i32, found str" here would
-// be a second place to keep them right. So there is no type-mismatch
-// fault and there never should be: if the backend disagrees with sema
-// about a type, the bug is in the backend.
+// THE FAULT SET IS SMALL ON PURPOSE, and all but one entry means the
+// same thing: this backend was asked for something it does not lower
+// yet. A backend has no opinions about a program's meaning — sema has
+// already had those, and a second copy of "expected i32, found str"
+// here would be a second place to keep them right. So there is no
+// type-mismatch fault and there never should be: if the backend
+// disagrees with sema about a type, the bug is in the backend.
+//
+// THE ONE ENTRY THAT MEANS SOMETHING ELSE IS `Overrun`, and it is here
+// rather than nowhere because the alternative was measured: a backend
+// that reaches its own bound and stops writes a translation unit with
+// functions missing from it, `cc` reports the first call to one of
+// them, and the reader goes looking for a bug in their own program. A
+// limit nobody can hit is fine; a limit that is hit silently is not.
 //
 // WHY THIS IS SHARED PLUMBING AND NOT THE C BACKEND'S. Every backend
 // has the same three ways of failing — a form it does not lower, a name
@@ -23,18 +30,23 @@
 Span = ast.ast_span
 str, String = std.text
 Alloc, AllocError = std.mem
-write_pos = sema.sema_diag
+write_pos, write_usize = sema.sema_diag
 
 // Something the backend was handed and could not turn into code.
 //
 // `what` is the node form or the name, interned or a literal, never a
 // built sentence: a `Diag` stays copyable and costs no allocation to
 // raise, and `render` is the one place a sentence exists.
+//
+// `Overrun` carries a NUMBER and not a name, because the number is the
+// whole message: it is the bound that was reached, so a reader learns
+// which constant to raise rather than merely that something was large.
 GenFault* = Unsupported(str)     // a node form this backend does not lower yet
           | Unresolved(str)      // a name with no declaration behind it
           | Ambiguous(str)       // a name with more than one, and no overload rule
           | Untyped(str)         // sema returned no type and context supplied none
           | Unspellable(str)     // a type with no C spelling yet
+          | Overrun(usize)       // more functions reachable than the backend's bound
 
 // One fault, and where it is.
 //
@@ -82,25 +94,40 @@ message* = (fault: GenFault) str {
         Ambiguous(_)   => "codegen found more than one declaration of",
         Untyped(_)     => "codegen has no type for",
         Unspellable(_) => "codegen cannot spell the type",
+        Overrun(_)     => "codegen reached its bound on the functions one program may lower:",
     })
 }
 
-// What the fault names, quoted. Every variant carries exactly one
-// string, so this is one arm each and no table.
+// What the fault names: a name quoted, or a bound written out.
 //
 // The payload is written straight into the sink rather than bound to a
 // local first: binding a `str` out of an enum arm and holding it makes
 // the bootstrapper type the whole match as `()`, which is recorded in
 // docs/GEN_BOOTSTRAP_FIXES.md.
 detail* = (fault: GenFault, out :: String) Res<(), AllocError> {
-    out.add_bytes(" `").try();
     fault.match({
-        Unsupported(w) => out.add_bytes(w),
-        Unresolved(w)  => out.add_bytes(w),
-        Ambiguous(w)   => out.add_bytes(w),
-        Untyped(w)     => out.add_bytes(w),
-        Unspellable(w) => out.add_bytes(w),
-    }).try();
+        Unsupported(w) => write_quoted(out, w),
+        Unresolved(w)  => write_quoted(out, w),
+        Ambiguous(w)   => write_quoted(out, w),
+        Untyped(w)     => write_quoted(out, w),
+        Unspellable(w) => write_quoted(out, w),
+        Overrun(n)     => write_bound(out, n),
+    })
+}
+
+write_quoted = (out :: String, w: str) Res<(), AllocError> {
+    out.add_bytes(" `").try();
+    out.add_bytes(w).try();
     out.add_bytes("`").try();
+    Ok(());
+}
+
+// THE CONSTANT IS NAMED AND NOT ONLY MEASURED. A reader who is told a
+// program is too big learns nothing they can act on; a reader who is
+// told which constant stopped it can raise it, and a reader whose
+// program is genuinely a divergence learns that too.
+write_bound = (out :: String, n: usize) Res<(), AllocError> {
+    out.add_bytes(" gen_c_decl.MAX_FUNCTIONS = ").try();
+    out.write_usize(n).try();
     Ok(());
 }

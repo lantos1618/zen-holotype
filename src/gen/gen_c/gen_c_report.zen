@@ -1,0 +1,55 @@
+// src/gen/gen_c/gen_c_report.zen
+// Raising a fault, with something to emit while raising it.
+//
+// FOUR SHAPES, and each one writes `0` into the caller's buffer so the
+// emitted C still parses around the diagnostic. "A DIAGNOSTIC IS A
+// VALUE, NOT A RAISE" (gen_diag.zen): a program the backend only half
+// understands still emits — it produces the C it could produce and the
+// faults it owes, and a caller decides whether that is a translation
+// unit or a report. These are the four places that owe one.
+//
+// THEY ARE THEIR OWN FILE AND NOT `gen_c_state.zen`'s TAIL. They were
+// its tail, below `CBackend`, on the argument that a helper with a
+// caller in three modules belongs below them — and the count is not
+// three, it is twenty. A file named for what the backend HOLDS had
+// grown a second subject, which is what the line caps exist to notice.
+
+// `ast.ast_id` AND NOT `ast`: a lone `ExprId = ast` is read as a type
+// alias of a name called `ast` rather than as an import, and the whole
+// file then resolves against a type that does not exist. Every other
+// file here takes several names from `ast` on one line, so none of them
+// meets the ambiguity.
+ExprId = ast.ast_id
+str, String = std.text
+AllocError = std.mem
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+
+// A node form this backend does not lower yet.
+unsupported* = (be :: CBackend, id: ExprId, what: str, out :: String)
+               Res<(), AllocError> {
+    be.report_expr(id, GenFault.Unsupported(what)).try();
+    out.add_bytes("0")
+}
+
+// A name with no declaration behind it.
+unresolved* = (be :: CBackend, id: ExprId, name: str, out :: String)
+              Res<(), AllocError> {
+    be.report_expr(id, GenFault.Unresolved(name)).try();
+    out.add_bytes("0")
+}
+
+// Sema had no type and the context supplied none.
+untyped* = (be :: CBackend, id: ExprId, what: str, out :: String)
+           Res<(), AllocError> {
+    be.report_expr(id, GenFault.Untyped(what)).try();
+    out.add_bytes("0")
+}
+
+// A name with more than one declaration, and no overload rule to
+// choose between them.
+ambiguous* = (be :: CBackend, id: ExprId, name: str, out :: String)
+             Res<(), AllocError> {
+    be.report_expr(id, GenFault.Ambiguous(name)).try();
+    out.add_bytes("0")
+}

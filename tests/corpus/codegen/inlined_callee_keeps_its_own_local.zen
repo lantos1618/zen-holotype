@@ -1,0 +1,49 @@
+// tests/corpus/codegen/inlined_callee_keeps_its_own_local.zen
+// an inlined callee's own local is the CALLEE's, not the caller's.
+//
+// Zen writes a declaration and a store the same way, so which one
+// `held = 77` is depends on what is already in scope -- and inlining
+// stacks the callee's bindings on top of the caller's without hiding
+// them. Read across that join, the callee's first line became a store
+// into `main`'s `held`, so `main` read 77 back on its NEXT statement.
+// `after` is the assertion that matters: it has nothing to do with the
+// closure, and it was wrong in both implementations at once, which is
+// exactly the shape the differential oracle cannot see.
+//
+// The other two halves of the same rule are here because narrowing the
+// question is what could break them:
+//
+//   - `held = held + 1` inside the callee IS a store. The callee bound
+//     `held` itself one line earlier, so it is in the callee's own
+//     frame and the rule applies there normally.
+//
+//   - `n = n + 1` inside the CLOSURE is a store too. A closure is
+//     written at the call site, so its frame is the writer's and `n`
+//     is the writer's binding however deep it is inlined.
+//
+// The sibling test is tests/corpus/std/bool_then_closure_keeps_its_own
+// _names.zen, which covers the same join from the closure's side and
+// had to use `::=` for its callee local until this was fixed.
+
+apply = <T>(gate: bool, thing: () T) Res<T> {
+    held = 77;
+    held = held + 1;
+    println("callee {}", held);
+    gate.match({
+        true  => Ok(thing()),
+        false => None,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    held = 7;
+    println("before {}", held);
+    apply(true, () { println("closure {}", held) });
+    println("after {}", held);
+
+    n ::= 0;
+    (n == 0).then(() { n = n + 1; });
+    println("store {}", n);
+
+    Ok(0);
+}
