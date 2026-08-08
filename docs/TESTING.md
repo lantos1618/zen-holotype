@@ -166,6 +166,10 @@ The fixpoint oracle is worthless if `gen_c` is nondeterministic, and nondetermin
 - compile in two processes — byte-identical
 - compile with a shuffled input file order — byte-identical
 
+**`tests/determinism/check.sh` cannot run against the self-hosted compiler.** It invokes `zen build --emit-c <file list>`, the bootstrapper's spelling; `zen build <root> --emit-c -o <file>` is the whole self-hosted CLI, because a build *is* a root and finding the entry inside it is the driver's job. So the strongest property in the plan has been verified by hand on every stage-1 run instead of by its own script. The same mistake was in `tests/run.py`, where it read as 33 compiler bugs and was one harness bug.
+
+Fixing it is not a signature change: one axis deliberately **shuffles the input order**, which has no meaning when the driver is handed a root and decides the order itself. Either that axis moves into the compiler (a flag that permutes the walk) or it is retired with a written reason — and retiring it silently would leave a script that reads as three axes while checking two.
+
 The usual sources, all of which must be designed out rather than found later: iterating a hash map without sorting, embedding a pointer value or address in a name, embedding a timestamp or path, relying on filesystem enumeration order, and any use of a random or time-seeded value.
 
 ---
@@ -183,10 +187,6 @@ The third is the one everyone skips and the one that decays fastest. A correct d
 ---
 
 ## Performance is a test
-
-**`tests/determinism/check.sh` cannot run against the self-hosted compiler.** It invokes `zen build --emit-c <file list>`, the bootstrapper's spelling; `zen build <root> --emit-c -o <file>` is the whole self-hosted CLI, because a build *is* a root and finding the entry inside it is the driver's job. So the strongest property in the plan has been verified by hand on every stage-1 run instead of by its own script. The same mistake was in `tests/run.py`, where it read as 33 compiler bugs and was one harness bug.
-
-Fixing it is not a signature change: one axis deliberately **shuffles the input order**, which has no meaning when the driver is handed a root and decides the order itself. Either that axis moves into the compiler (a flag that permutes the walk) or it is retired with a written reason — and retiring it silently would leave a script that reads as three axes while checking two.
 
 **Not yet run, and that is worth stating where the claims are made.** `tests/bench/` holds the four files and `src/std/test/test.zen` declares `Bencher` and `BenchStats`, but there is no `make bench`: the budgets are enforced by `b.bench(..)` in a project's own `build.zen`, and executing a build file needs stage 1 further along than it is. So the two load-bearing claims below are currently **asserted and unmeasured** — which is the same shape as a gate that cannot fail, and `src/std/core/loop/loop_iter.zen:21` already cites `bench_loop.zen` as the thing that justifies how the loop family is typed. The day `zen build` can run a build file, this is the first thing to point at it.
 
