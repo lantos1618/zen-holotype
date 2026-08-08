@@ -133,8 +133,13 @@ def definitions(src: str) -> dict[str, list[tuple[int, int]]]:
 
 def norm(text: str) -> str:
     """Comment punctuation and line wrapping removed, so a sentence the
-    document quotes can be matched against source that wraps it."""
-    return re.sub(r"\s+", " ", re.sub(r"[#\"'`]", " ", text)).strip()
+    document quotes can be matched against source that wraps it.
+
+    Case-folded, because the document quotes a comment mid-sentence and
+    the comment starts one: "a method of `Vec<T>` is generic" against
+    "A method of `Vec<T>` is generic" is the same claim.
+    """
+    return re.sub(r"\s+", " ", re.sub(r"[#\"'`]", " ", text)).strip().lower()
 
 
 def literal_of(quote: str) -> str:
@@ -257,8 +262,12 @@ def harvest(doc: str, known: set[str] | None = None) -> tuple[list[Claim], int]:
                 continue
             quote = QUOTED.search(masked[: m.start()].rstrip(" ("))
             if quote:
-                claims.append(Claim("quote", n, f'"{quote.group(1)[:44]}..." {shown}',
-                                    lo, hi, sym=quote.group(1), at=m.span()))
+                # Masking blanked the code spans INSIDE the quotation; the
+                # columns are intact, so take the sentence from the real
+                # line or half of it arrives as whitespace.
+                said = raw[quote.start(1):quote.end(1)]
+                claims.append(Claim("quote", n, f'"{said[:44]}..." {shown}',
+                                    lo, hi, sym=said, at=m.span()))
             else:
                 claims.append(Claim("loose", n, shown, lo, hi, at=m.span()))
     return claims, unread

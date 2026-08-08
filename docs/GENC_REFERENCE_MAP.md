@@ -105,7 +105,7 @@ Note the ordering subtlety at 1845-1848: `entry_point()` is *computed* before `e
 
 ## 1.5 The declaration model
 
-`Decl` (568-601) `__slots__ = ("parts","node","dkind","name","tparams","module","owner","otparams")`. `dkind ∈ {"type","fn","value","variant"}`. Owner type params come **first**: `tparams = self.otparams + tuple(tparams)` (602) — "a method of `Vec<T>` is generic in T whether or not it declares any type parameters of its own, so ... an instantiation is (receiver args + call args)". `key` = `(module, owner or "", name)` (590). `scope_parts` = module parts + `(owner,)` and for an impl entry that is the **target** type, not the trait (594-600).
+`Decl` (568-601) `__slots__ = ("parts","node","dkind","name","tparams","module","owner","otparams")`. `dkind ∈ {"type","fn","value","variant"}`. Owner type params come **first**: `tparams = self.otparams + tuple(tparams)` (602) — "a method of `Vec<T>` is generic in T whether or not it declares any type parameters of its own, so ... an instantiation is (receiver args + call args)". `key` = `(module, owner or "", name)` (598). `scope_parts` = module parts + `(owner,)` and for an impl entry that is the **target** type, not the trait (594-600).
 
 `_collect` (863) does impls **last** (863-875). `_collect_decl` (877) registers: Struct/Enum/Alias as `"type"`; every enum variant as its own `"variant"` decl (`Ok`, `Err`, `None` are importable names, 779-787); struct fn-fields as `"fn"` with `otparams=_tparam_names(node)`; struct fields with a default and no type, and `consts`, as `"value"`; `Function` as `"fn"`; `Impl` entries as `base + (target, trait, ename)` with `dk = "fn" if kind(entry) in ("Function","Lambda") else "value"` (826-835) — the trait component in `parts[-2]` is how `drop_impl`/`impl_entry`/`trait_methods` tell an impl entry from a type's own method; `Let`/`Const` as `"value"`.
 
@@ -976,7 +976,7 @@ if len(marker) > 4:
 `lower_loop` (4135-4252) — full lowering:
 
 - Inner parameter *names* decide the shape: `wants_index = "index" in names[1:]`, `wants_value`, `wants_acc` (4155-4155).
-- Labels `brk`, `cnt` (3797). Non-local exits are `goto`, **not** C `break`/`continue`: "an inlined body can sit inside a `switch` that a match produced, where a C `break` would leave the switch and not the loop" (3777-3780).
+- Labels `brk`, `cnt` (3797). Non-local exits are `goto`, **not** C `break`/`continue`: "an inlined body can sit inside a `switch` that a match produced, where a C `break` would leave the switch and not the loop" (4139-4142).
 - The result type, when nothing asked: `Res<elem>` built from `type_decl("Res", parts, 1)` (993-1012) — "a loop whose value nothing asked for still HAS one, and the `.match` on it needs its type". `result` is pre-set to `none_of(ret)`.
 - Ranged form: three `size_t` temporaries `counter`, `limit`, `base`, then `while (counter < limit) {`. `index` is `(counter - base)` and `value` is the range's element — "on `Range(10, 13)` they are 0,1,2 and 10,11,12" (3838-3841).
 - `wants_index` without a range: `counter = 0` then `for (;;)`.
