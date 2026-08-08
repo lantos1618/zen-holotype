@@ -58,7 +58,7 @@ variant_type = sema.sema_static
 call_type = sema.sema_call
 computed_member = sema.sema_member
 bind_stmt = sema.sema_place
-check_binary, const_count, check_index = sema.sema_trap
+check_binary, const_count, check_index, check_literal = sema.sema_trap
 check_eq = sema.sema_bound
 seed_left_spine, spine_ahead = sema.sema_spine
 
@@ -430,11 +430,29 @@ array_lit_type* = (c :: Checker, a: ArrayLit, ctx: Ctx)
 // asked what they are. A count that disagrees with how many were written
 // is not caught here: `check_assign` sees one type and the arguments are
 // not an assignment to it.
+//
+// "CHECKED AGAINST ITS ELEMENT" WAS THE COMMENT AND NOT THE CODE: every
+// element was typed and then dropped, so `[i32, 2](1, 3000000000)`
+// wrapped to -1294967296 with nothing said. BOTH compilers did, which is
+// why no differential run could see it — an element is the one position
+// where a literal meets a type without an assignment, a parameter or a
+// field name anywhere in sight.
 fixed_array_type* = (c :: Checker, f: FixedArray, ctx: Ctx)
                    Res<TyId, AllocError> {
     ty = c.type_from_ast(f.type, ctx).try();
-    f.elems.loop((h, e) { c.type_of(e, ctx).try(); });
+    elem = element_of(c, ty);
+    f.elems.loop((h, e) {
+        c.type_of(e, ctx).try();
+        c.check_literal(e, elem).try();
+    });
     Ok(ty);
+}
+
+// A written array type that resolved to something else is a type
+// somebody has already reported on, and it expects nothing of its
+// elements.
+element_of = (c: Checker, ty: TyId) TyId {
+    c.types.at(ty).match({ Array(a) => a.elem, _ => ty })
 }
 
 // `buf[i]`. The element, when the receiver is a fixed array — and the

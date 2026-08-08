@@ -38,7 +38,7 @@
 // negative index.
 
 Ast, Expr, ExprId, Binary, BinOp, Literal, LiteralKind, Span = ast
-Unary, UnOp, Access, Paren, Name, Index = ast
+Unary, UnOp, Access, Paren, Name, Index, Match, Arm = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -189,40 +189,73 @@ overflow = (c :: Checker, b: Binary, name: str) Res<(), AllocError> {
 // `u64.MAX` and `i64.MIN` the legal literals `corpus/lex/
 // number_type_boundaries` pins them as. A rule written as "unfoldable
 // therefore wrong" would reject both.
+//
+// EVERY POSITION A LITERAL MEETS A TYPE, and there are six. This was
+// reached from `check_assign` alone, so `x: i32 = 3000000000` was
+// refused and the same literal passed as an argument, stored in a field,
+// returned, written in an arm or listed as a fixed-array element was
+// truncated in silence. The callers are `sema_place`, `sema_call`,
+// `sema_hoist` (return and constructor field) and `sema_type` (the array
+// element); the arm is walked here, because an arm has no caller of its
+// own — the context that settles it is the match's.
 // ---------------------------------------------------------------------
 
-check_literal* = (c :: Checker, id: ExprId, got: TyId, want: TyId)
+// THE ONLY ARGUMENT THAT MATTERS IS `want`. What the literal's own type
+// was — `int`, always, because nothing else folds here — is a value the
+// diagnostic never prints, and asking every caller for it is what kept
+// this rule to the one position that had it lying around.
+check_literal* = (c :: Checker, id: ExprId, want: TyId)
                  Res<(), AllocError> {
     is_integer(c.prim_name(want)).match({
         false => Ok(()),
-        true  => literal_within(c, id, got, want),
+        true  => literal_within(c, id, want),
     })
 }
 
-literal_within = (c :: Checker, id: ExprId, got: TyId, want: TyId)
+// AN ARM'S VALUE STANDS IN THE MATCH'S OWN POSITION. `m: i32 =
+// b.match({ true => 3000000000, .. })` puts the literal where the `i32`
+// is, and the match itself is not a literal — so a rule that stopped at
+// the node it was handed saw an expression with nothing in it. This is
+// the same reason parentheses are walked: the wrapper is not where the
+// author wrote the value.
+literal_within = (c :: Checker, id: ExprId, want: TyId)
                  Res<(), AllocError> {
-    literal_int(c, c.tree.expr_at(id)).match({
-        None  => Ok(()),
-        Ok(v) => value_within(c, id, got, want, v),
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Match(m) => arm_literals(c, m, want),
+        _        => folded_within(c, id, node, want),
     })
 }
 
-value_within = (c :: Checker, id: ExprId, got: TyId, want: TyId, v: i64)
+arm_literals = (c :: Checker, m: Match, want: TyId) Res<(), AllocError> {
+    m.arms.loop((h, a) { literal_within(c, a.body, want).try(); });
+    Ok(());
+}
+
+folded_within = (c :: Checker, id: ExprId, node: Expr, want: TyId)
+                Res<(), AllocError> {
+    literal_int(c, node).match({
+        None  => Ok(()),
+        Ok(v) => value_within(c, id, want, v),
+    })
+}
+
+value_within = (c :: Checker, id: ExprId, want: TyId, v: i64)
                Res<(), AllocError> {
     fits(v, c.prim_name(want)).match({
         true  => Ok(()),
-        false => out_of_range(c, id, got, want),
+        false => out_of_range(c, id, want),
     })
 }
 
 // The position is the literal the author has to change, which for a
 // negated one is the `-` and not the digits after it.
-out_of_range = (c :: Checker, id: ExprId, got: TyId, want: TyId)
-               Res<(), AllocError> {
+out_of_range = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
     node = c.tree.expr_at(id);
+    found = c.types.prim("int").try();
     c.report(node.span.file, node.span,
              SemaFault.LiteralOutOfRange(TypeFault(
-                 name: written_literal(c, node), expected: want, found: got)))
+                 name: written_literal(c, node), expected: want, found: found)))
 }
 
 // The literal AS WRITTEN, and nothing when the value was not written as

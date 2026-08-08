@@ -61,6 +61,7 @@ is_type_def, opaque, nowhere, first_found = sema.sema_member
 static_access = sema.sema_static
 first_hidden, hidden_member = sema.sema_member
 satisfies_bound, check_bounds = sema.sema_bound
+check_literal = sema.sema_trap
 bound_declares = sema.sema_supply
 type_from_ast, type_of, param_type = sema.sema_type
 alias_module, module_not_a_value = sema.sema_module
@@ -400,7 +401,45 @@ chosen_ret = (c :: Checker, id: ExprId, node: Expr, call: Call, k: Cand,
               actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
     c.resolve_call(id, k.id).try();
     check_bounds(c, k, actuals, node.span).try();
+    arg_literals(c, call.args, k.params, 0).try();
     instantiate(c, id, call, k, actuals, ctx)
+}
+
+// RESOLUTION PICKED THE CANDIDATE ON THE FAMILY, so somebody still has
+// to ask about the value. `fits` is `assignable`, and `assignable` reads
+// "a literal's type comes from its context" as: an `int` agrees with
+// every integer type — which is right about `narrow(3000000000)` being a
+// call to `narrow` and says nothing about 3000000000 not being an i32.
+//
+// AFTER RESOLUTION AND NOT DURING IT. A candidate that a literal
+// overflows is still the candidate the author meant; refusing it during
+// the fit would silently pick a wider overload instead of naming the
+// mistake, and with no wider one in scope would report "no overload
+// matches" for a call whose only fault is one digit too many.
+//
+// `off` IS THE RECEIVER. A method's parameter zero is `self` and no
+// argument corresponds to it — `recv_sig_fits`' rule, and it has to be
+// the same one here.
+arg_literals* = (c :: Checker, args: Vec<Arg>, params: Vec<TyId>, off: usize)
+               Res<(), AllocError> {
+    i ::= off;
+    args.loop((h, a) {
+        param_literal(c, a.value, params, i).try();
+        i = i + 1;
+    });
+    Ok(());
+}
+
+// A VARIADIC CALL HAS NO PARAMETER HERE, and a parameter nobody declared
+// expects nothing of the argument. The length is asked rather than
+// `ty_at`'s `UNRESOLVED`, which is type zero — whichever type that
+// happens to be interned as.
+param_literal = (c :: Checker, id: ExprId, params: Vec<TyId>, i: usize)
+                Res<(), AllocError> {
+    (i < params.len).match({
+        false => Ok(()),
+        true  => c.check_literal(id, ty_at(params, i)),
+    })
 }
 
 // ---------------------------------------------------------------------

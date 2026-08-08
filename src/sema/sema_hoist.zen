@@ -40,6 +40,7 @@ TyId, Ty, Types, TyRes, ResForm = sema.sema_ty
 SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 Found, members_of = sema.sema_member
+check_literal = sema.sema_trap
 type_of = sema.sema_type
 
 // A value of type `got` arriving where `want` is expected, when nothing
@@ -151,11 +152,14 @@ check_return* = (c :: Checker, body: BlockId, ctx: Ctx, got: TyId)
     })
 }
 
+// FITTING THE FAMILY IS NOT FITTING THE TYPE, which is why the agreeing
+// side has work to do: `f = () i32 { 3000000000 }` is an `int` literal
+// and `assignable` says every one of those fits every integer type.
 return_fits = (c :: Checker, blk: Block, id: ExprId, got: TyId, want: TyId)
               Res<(), AllocError> {
     node = c.tree.expr_at(id);
     c.assignable(got, want).match({
-        true  => Ok(()),
+        true  => c.check_literal(id, want),
         false => refuse_return(c, blk, node, got, want),
     })
 }
@@ -297,6 +301,16 @@ check_named_field = (c :: Checker, a: Arg, name: str, ty: TyId, ctx: Ctx)
     members_of(c, ty, name, found).try();
     found.get(0).match({
         None  => Ok(()),
-        Ok(f) => hoist_at(c, a.value, c.type_of(a.value, ctx).try(), f.ty),
+        Ok(f) => field_fits(c, a, f.ty, ctx),
     })
+}
+
+// A FIELD IS A TYPED SLOT, so the two questions a typed slot asks are
+// both asked: what lifts into it, and whether the value it is given fits
+// the type it declares. `Holder(n: 3000000000)` on an `n: i32` passed
+// the first and nobody had ever asked the second.
+field_fits = (c :: Checker, a: Arg, want: TyId, ctx: Ctx)
+             Res<(), AllocError> {
+    hoist_at(c, a.value, c.type_of(a.value, ctx).try(), want).try();
+    c.check_literal(a.value, want)
 }
