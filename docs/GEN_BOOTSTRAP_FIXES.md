@@ -112,7 +112,7 @@ The emitted header is
 ```
 
 so on every compiler anyone here runs, the fallback is preprocessed away. The
-34 corpus tests under `tests/corpus/traps/` gate the *builtin* arm and say
+35 corpus tests under `tests/corpus/traps/` gate the *builtin* arm and say
 nothing about the other. The arm was measured by hand instead, by renaming the
 macro in the emitted C:
 
