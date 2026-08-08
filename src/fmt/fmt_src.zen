@@ -1,0 +1,112 @@
+// src/fmt/fmt_src.zen
+// The bytes a module was parsed from, addressable by span.
+//
+// THE FORMATTER NEEDS ONE THING THE COMPILER NEVER DID: the original
+// text of a node it is not going to rebuild. `ast_span.zen` carries
+// `line:col` and drops the lexer's byte offset on purpose — "a token
+// belongs to one Source and a node outlives it" — so turning a node's
+// span back into bytes is a line index and a subtraction, and that
+// belongs beside the formatter rather than on every AST node.
+//
+// IT IS THE WHOLE OF WHAT "PASS THROUGH VERBATIM" MEANS. A form the
+// printer does not model is emitted as the author wrote it, byte for
+// byte, and this file is the one that can. Approximating such a form
+// instead is the failure it exists to make unnecessary.
+//
+// IT SPEAKS OFFSETS AND NOT SPANS, past `offset` itself. A formatter's
+// question is rarely "what is this node" — it is "what lies between
+// this node and the next thing I am going to print", which is two
+// positions from two different nodes with the author's whitespace in
+// between. A `Span` cannot say that, and building a synthetic one to
+// ask would be a span that describes nothing.
+
+Alloc, AllocError = std.mem
+str = std.text
+Vec = std.collections
+Range = std.core
+Pos = ast.ast_span
+
+Src* = {
+    text*: str,
+
+    // Byte offset of the first byte of each line. `starts.get(0)` is 0,
+    // and a `Pos` is 1-based, so line `n` begins at `starts.get(n - 1)`.
+    // Built once per file: a formatter asks for a hundred spans and a
+    // scan per span would be quadratic in the file.
+    starts: Vec<usize>,
+
+    // Where a position is, as a byte offset.
+    //
+    // CLAMPED AT BOTH ENDS rather than trapping, because the one caller
+    // that can hand this an out-of-range position is the end-of-file
+    // span — `module`'s end is `here_span().end`, the empty span past
+    // the last byte — and a formatter that refuses the last line of a
+    // file is a worse answer than one that reads to the end of it.
+    offset* = (self: @Self, p: Pos) usize {
+        (p.line == 0 || p.line > self.starts.len).match({
+            true  => self.text.len,
+            false => self.column_of(p),
+        })
+    }
+
+    column_of = (self: @Self, p: Pos) usize {
+        base = self.starts.get(p.line - 1).match({
+            Ok(o) => o,
+            None  => self.text.len,
+        });
+        self.bounded(base + col_index(p.col))
+    }
+
+    bounded = (self: @Self, at: usize) usize {
+        (at < self.text.len).match({
+            true  => at,
+            false => self.text.len,
+        })
+    }
+
+    // The bytes in `[from, to)`, verbatim.
+    slice_at* = (self: @Self, from: usize, to: usize) str {
+        (from < to).match({
+            true  => self.text.slice(self.bounded(from), self.bounded(to)),
+            false => "",
+        })
+    }
+
+    // `to`, walked back over whitespace, but never past `from`.
+    //
+    // This is where "the space after a declaration is gone" happens,
+    // and it is the only rule in this folder that DELETES a byte the
+    // author wrote. It is safe because the bytes are whitespace and
+    // whitespace is not a token — `fmt.zen`'s guard is exactly that
+    // statement, checked.
+    trim_back* = (self: @Self, from: usize, to: usize) usize {
+        end ::= self.bounded(to);
+        loop(() { end > from && self.text.index(end - 1).is_space() }, (h) {
+            end = end - 1;
+        });
+        end;
+    }
+}
+
+// A column is 1-based, so the index into the line is one less. A `0`
+// would underflow, and no lexer produces one — but a formatter reading
+// a synthetic span built by a test would, and an unsigned underflow
+// traps.
+col_index = (col: usize) usize {
+    (col == 0).match({
+        true  => 0,
+        false => col - 1,
+    })
+}
+
+// `alloc.Src(text)` — a ufcs function whose first parameter is an
+// Alloc, beside the type it builds, exactly as `Vec`, `Ast` and `Emit`
+// are. The line index is the only thing it allocates and it says so.
+Src* = (a: Alloc, text: str) Res<Src, AllocError> {
+    starts ::= a.Vec<usize>();
+    starts.add(0).try();
+    Range(0, text.len).loop((h, i) {
+        (text.index(i) == '\n').then(() { starts.add(i + 1).try() });
+    });
+    Ok(Src(text: text, starts: starts));
+}

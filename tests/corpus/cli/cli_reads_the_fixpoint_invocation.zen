@@ -7,10 +7,12 @@
 // interface. If `cli` stops reading that line, the strongest oracle in
 // the project stops running and says nothing about why.
 //
-// The other half is the three commands PLAN.md names and this compiler
-// does not have yet. `fmt`, `test` and `lsp` must come back as
-// THEMSELVES and not as usage errors: an unwritten command and a typo
-// are different answers, and a caller acts on the difference.
+// The other half is the commands PLAN.md names. `fmt` arrived at stage
+// 2 and is read here as itself — a flag and a list of files, where a
+// list of none is not a smaller format but no command at all. `test`
+// and `lsp` must still come back as THEMSELVES and not as usage errors:
+// an unwritten command and a typo are different answers, and a caller
+// acts on the difference.
 //
 // `cli` takes a `Vec<str>` and touches no capability, which is why this
 // test can hand it argument vectors no real command line would produce.
@@ -18,7 +20,7 @@
 Alloc, AllocError = std.mem
 Vec = std.collections
 str = std.text
-Cli, Job, cli = zen
+Cli, Job, FmtJob, cli = zen
 
 main = (env: Env) Res<i32, AllocError> {
     a ::= env.mem.alloc();
@@ -41,8 +43,19 @@ main = (env: Env) Res<i32, AllocError> {
     // a line that has a bigger hole in it
     show(a, line(a, "build", "", "", "", "").try()).try();
 
-    // named, not yet written
+    // the gate `make fmt` runs, and the same without the flag
+    show(a, line(a, "fmt", "--check", "a.zen", "b.zen", "").try()).try();
+    show(a, line(a, "fmt", "a.zen", "", "", "").try()).try();
+
+    // a format with no files is not a smaller format, it is nothing —
+    // the reading `built` takes of a build with no `--emit-c`
+    show(a, line(a, "fmt", "--check", "", "", "").try()).try();
     show(a, line(a, "fmt", "", "", "", "").try()).try();
+
+    // and an unknown flag is still NAMED rather than read as a path
+    show(a, line(a, "fmt", "--fix", "a.zen", "", "").try()).try();
+
+    // named, not yet written
     show(a, line(a, "lsp", "", "", "", "").try()).try();
     show(a, line(a, "test", "", "", "", "").try()).try();
 
@@ -69,10 +82,20 @@ main = (env: Env) Res<i32, AllocError> {
 show = (a: Alloc, argv: Vec<str>) Res<(), AllocError> {
     cli(argv).match({
         Build(j) => { println("build root={} out={} emit_c={}", j.root, j.out, j.emit_c); },
+        Fmt(j)   => { fmt_line(a, j).try(); },
         Later(n) => { println("later {}", n); },
         Usage(w) => { println("usage `{}`", w); },
         Missing(f) => { println("missing `{}`", f); },
     });
+    Ok(());
+}
+
+// The paths are read back off the argv rather than carried in the job:
+// `cli` takes no `Alloc`, and gathering them allocates.
+fmt_line = (a: Alloc, j: FmtJob) Res<(), AllocError> {
+    paths = j.paths(a).try();
+    println("fmt check={} paths={} first={}", j.check, paths.len,
+            paths.get(0).match({ Ok(p) => p, None => "" }));
     Ok(());
 }
 

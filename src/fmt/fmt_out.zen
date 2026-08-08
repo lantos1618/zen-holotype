@@ -1,0 +1,108 @@
+// src/fmt/fmt_out.zen
+// Where the formatted bytes go, and the two whitespace rules that are
+// this stage's whole opinion.
+//
+//   - A RUN OF BLANK LINES IS ONE BLANK LINE. `ast_span.zen` says a
+//     blank line between two declarations "is a thing the author wrote
+//     and the formatter must not silently delete", and one `Blank`
+//     stands for a run however long precisely so that collapsing it is
+//     a rule with somewhere to apply. This is that somewhere.
+//   - A BLANK LINE HAS TO SEPARATE SOMETHING. One owed before anything
+//     has been written, or after the last thing, separates nothing, so
+//     it is dropped — which is the same statement as "a file starts on
+//     its first line and ends with exactly one newline".
+//
+// The blank is OWED rather than written, and that is what makes both
+// rules one mechanism instead of three special cases: `gap` records
+// that a separator is due, `open` pays it only when content actually
+// follows, and paying twice is not possible because paying clears it.
+//
+// It is not `gen.gen_emit.Emit`, and the difference is the reason.
+// `Emit` indents by a depth in units of four and never sees a line it
+// did not write; this sink writes whole lines that already carry their
+// own indentation, and its state is a debt rather than a depth. Sharing
+// one type would mean a field each ignores.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Range = std.core
+
+// A column is 1-based everywhere in this compiler — `ast_span.zen` says
+// so of `Pos.col` — so the left margin is 1 and not 0. Named, because a
+// literal `1` in a loop bound is the kind of thing that becomes a `0`
+// in a refactor and moves every comment one space left.
+FIRST*: usize = 1
+
+Out* = {
+    // `::` because every write below writes THIS buffer's own bytes: a
+    // bitwise copy of an `Out` would not see them, which is exactly the
+    // test STYLE.md gives for the marker. `Emit` carries the same one
+    // for the same reason.
+    text* :: String,
+
+    // Anything at all has been written. Until it has, an owed blank
+    // separates the start of the file from its first line, which is
+    // nothing.
+    started :: bool = false,
+
+    // A blank line is due before the next content.
+    owed :: bool = false,
+
+    // One line of content and the newline that ends it. `s` may hold
+    // newlines of its own — a declaration passed through verbatim is
+    // one string — and they cost nothing here, because this sink adds
+    // no indentation for them to fight with.
+    say* = (self :: @Self, s: str) Res<(), AllocError> {
+        self.say_at(FIRST, s)
+    }
+
+    // The same, starting at the author's own column.
+    //
+    // A COMMENT KEEPS THE COLUMN IT WAS WRITTEN IN, and that is the
+    // verbatim rule applied to trivia rather than a missing feature:
+    //
+    //     | Eof                // exactly one, last, spanning nothing
+    //                          // and the sentence continues here
+    //
+    // the second line is the leading trivia of the NEXT declaration —
+    // a comment belongs to the outermost node whose span ends before it
+    // — so a printer with an opinion about where comments go would
+    // yank it to the margin and break a paragraph it never read. This
+    // stage has no such opinion, and `col` is how it says so.
+    say_at* = (self :: @Self, col: usize, s: str) Res<(), AllocError> {
+        self.open().try();
+        Range(FIRST, col).loop((h, i) { self.text.add_byte(' ').try() });
+        self.text.add_bytes(s).try();
+        self.text.add_byte('\n')
+    }
+
+    // Ask for a blank line before whatever comes next.
+    //
+    // It allocates nothing and still speaks `Res`, which is the one
+    // thing in this file that is about the language rather than about
+    // whitespace: its only caller stands it beside `say` in a match,
+    // and sibling arms must agree on a type. `Parser.nothing` carries
+    // the same three characters for the same reason.
+    blank* = (self :: @Self) Res<(), AllocError> {
+        self.owed = true;
+        Ok(());
+    }
+
+    open = (self :: @Self) Res<(), AllocError> {
+        (self.owed && self.started).then(() {
+            self.text.add_byte('\n').try();
+        });
+        self.owed = false;
+        self.started = true;
+        Ok(());
+    }
+
+    view* = (self: @Self) str { self.text.view() }
+}
+
+// `alloc.Out()` — a ufcs function whose first parameter is an Alloc,
+// beside the type it builds. It allocates its buffer at once and says
+// so, exactly as `Emit` does.
+Out* = (a: Alloc) Res<Out, AllocError> {
+    Ok(Out(text: a.String().try()));
+}
