@@ -4,179 +4,253 @@ Written by the orchestrator from a read-only audit of `src/gen/`, because two
 agents converged on that folder and the one that stood down produced the more
 useful artifact: a verification of the other's work against the reference.
 
+Part two below was found by building the backend and running it end to end.
+Reproducers run the way `tests/run.py` runs one: a compilation root holding the
+program as `main.zen` with `std` and whatever other top-level modules of `src/`
+it names beside it, compiled as a **directory** — the root is passed to
+`bootstrap` as both the source and `--root`, and to `./zen` positionally with
+`--entry main.zen`.
+
 ---
 
-## RULING: the `__builtin_*_overflow` fallback is required, not optional
+## Where this ledger stands
 
-`gen_c_runtime.zen` emits `#error "this backend needs __builtin_add_overflow
-and friends"` under `#else`, in place of the reference's hand-written
-pre-check. It is documented there as "COST ACCEPTED KNOWINGLY". **It is not
-accepted. Write the fallback.**
+**Re-measured 2026-08-08 against `6ca27423`**, every entry below turned into a
+complete program and run through BOTH toolchains. **Twelve of fifteen are
+closed.** One is open in the bootstrapper only and was filed far too narrowly;
+one is open in both, is much larger than filed, and is invisible to the
+differential oracle because both implementations agree and both are wrong.
 
-The reason is not style, it is `PLAN.md`'s central promise. The seed exists so
-that
+| # | what it claimed | bootstrap | `./zen` |
+|---|---|---|---|
+| A | the `#error` overflow fallback must be written | **closed, and verified** | **closed, and verified** |
+| B | `.match` on a `str` scrutinee emits a struct/pointer compare | **closed** | **closed** |
+| C | the grammar swallows a comment opener inside a string | n/a | **closed** |
+| D | `gen_name.comp` writes non-identifier bytes through raw | n/a | **closed** |
+| E | two files over `STYLE.md`'s 800-line build-failure cap | n/a | **closed** |
+| F | `expr_kind` returns `Unknown` for nine node forms | n/a | **closed** |
+| G | `gen.zen:51` exports no backend / the BANNER text differs | n/a | **closed** / **still true, harmless** |
+| 1 | `Vec.get` at `T = str` cannot infer its own `Ok` | **closed** | **closed** |
+| 2 | a local `Vec<T>` read back loses its type arguments | **closed** | **closed** |
+| 3 | two modules declaring `Diag` collide on a method name | **closed** | **closed** |
+| 4 | a field named like an unrelated type's field is read-only | **closed** | **closed** |
+| 5 | a `.then` closure capturing several parameters is inlined wrong | **open, and far worse — see below** | **closed** |
+| 6 | binding an enum arm's payload to a local types the match `()` | **closed** | **closed** |
+| 7 | a `str` scrutinee against string-literal patterns (= B) | **closed** | **closed** |
+| P | `x * 2` in statement position is parsed as a declaration | **closed** | **closed** |
+| L | an unannotated integer binding is a literal type, unsettled | **open, and larger** | **open, and larger still** |
+
+A section marked closed keeps its reproducer, because a ledger that deletes
+what it fixed cannot be re-run — and re-running is the only reason to keep it.
+
+### The two to read
+
+**§5 was filed as "a `.then` closure capturing several enclosing parameters is
+inlined wrong".** The capture count is not the trigger and `.then` is not the
+subject. **The bootstrapper's inliner is not hygienic.** `bool.then` is
+`<T>(b: bool, f: () T)`, and a free name `b` or `f` anywhere inside the closure
+is replaced by the caller's own argument — in any position, at any arity, with
+no call at all. `(b > 0).then(() { println("printed {}", b) })` prints `true`.
+It is not about `bool.then` either: a user-written `apply = <T>(gate: bool,
+thing: () T)` corrupts a caller's local named `gate` or `thing` the same way.
+`./zen` is correct throughout.
+
+**§L — "a design gap, not a bug" — is a soundness hole in the shipped
+compiler, and the entry that was filed too generously.** `sema_trap.check_literal`
+is reached from exactly ONE call site in `src/`: `sema_type.check_assign`, on a
+`Bind`. So `x: i32 = 3000000000` is refused and **every other position a
+literal can meet a narrower integer type is not** — a call argument, a record
+field, a return value, a match arm, a fixed-array element. `./zen` truncates
+all five silently. `bootstrap` catches four of the five and misses the
+fixed-array element, so that one shape is **both implementations wrong the same
+way**, which no differential test can see.
+
+`tests/must-fail/traps/literal_too_large_i32` exists and passes under both
+toolchains. It uses an annotated binding — the one shape that is checked.
+
+---
+---
+
+# Part one: the audit
+
+## A. RULING: the `__builtin_*_overflow` fallback is required, not optional
+
+**CLOSED, and the fallback arm is verified to work — which nothing else in the
+tree does.** The ruling and its reasoning are kept because the constraint is
+permanent.
+
+`gen_c_runtime.zen` used to emit `#error "this backend needs
+__builtin_add_overflow and friends"` under `#else`, documented there as "COST
+ACCEPTED KNOWINGLY". It was not accepted, for a reason that is not style but
+`PLAN.md`'s central promise:
 
 > **`build`: what a newcomer runs. needs only a C compiler.**
 
 `__builtin_add_overflow` is a GCC/Clang extension, not C99. A seed that
-`#error`s without it is a seed that only two compilers can build, which
-removes the reason the seed is committed at all. `DESIGN.md` says the backend
-emits C99; an `#error` on a missing extension is that promise failing loudly
-rather than being kept.
+`#error`s without it is a seed only two compilers can build, which removes the
+reason the seed is committed at all.
 
-The cost of the fallback is real and small: a few more lines per `(op, int
-type)` pair, emitted only for pairs a program actually uses. The cost of the
-`#error` is that `cc -std=c99` on a conforming compiler cannot build Zen.
+`gen_c_runtime.zen` now emits every checked helper twice —
+`__builtin_*_overflow` under `#ifdef ZG_HAS_OVERFLOW_BUILTINS`, and the
+reference's hand-written pre-operation range test under `#else`: two-sided for
+signed add and subtract, four-quadrant for signed multiply, one-sided for
+unsigned (`gen_c_runtime.zen:550-559`, `signed_guard` at 585, `unsigned_guard`
+at 647).
 
-`bootstrap/gen_c.py:5596-5698` has the fallback already written and tested by
-~34 corpus tests under `tests/corpus/traps/`. Port it.
+### Nothing compiles the `#else` arm
 
----
+The emitted header is
 
-## Confirmed bug in the bootstrapper
+```c
+#if defined(__GNUC__) && (__GNUC__ >= 5)
+#define ZG_HAS_OVERFLOW_BUILTINS 1
+#elif defined(__has_builtin)
+#if __has_builtin(__builtin_add_overflow)
+#define ZG_HAS_OVERFLOW_BUILTINS 1
+#endif
+#endif
+```
 
-**A `.match` on a `str` scrutinee against string-literal patterns emits a
-struct/pointer comparison.** The generated C reads
+so on every compiler anyone here runs, the fallback is preprocessed away. The
+34 corpus tests under `tests/corpus/traps/` gate the *builtin* arm and say
+nothing about the other. The arm was measured by hand instead, by renaming the
+macro in the emitted C:
+
+```bash
+./zen build $ROOT --entry main.zen --emit-c -o out.c
+sed 's/#define ZG_HAS_OVERFLOW_BUILTINS 1/#define ZG_NEVER_DEFINED 1/' out.c > fb.c
+cc -O0 -std=c99 -pedantic fb.c -o fb && ./fb; echo $?
+```
+
+Run over all 35 programs in `tests/corpus/traps/`: **35 compile clean under
+`-std=c99 -pedantic` and 35 exit with the code the test's `.exit` asks for.**
+The fallback is correct. It is also unguarded — a change to `signed_guard` that
+breaks it would go green everywhere. The cheap gate is the three lines above in
+CI over a handful of trap tests.
+
+## B. A `str` scrutinee against string-literal patterns
+
+**CLOSED in both.** The claim was that
 
 ```c
 if (zg_t2 == "i8")            /* zg_str struct vs char * */
 ```
 
-which is invalid, and it is emitted silently — there is no diagnostic. This is
-why `c_prim` is written as nested `pick` calls rather than the match it wants
-to be. Reported here rather than worked around further; the workaround is
-correct in the meantime.
-
----
-
-## A claimed bug that is NOT real, and cost real code
-
-`gen_c_runtime.zen:45-62` states that
-
-> a Zen string literal containing a comment opener does not parse — the
-> grammar reads it as a real comment and swallows the closing quote
-
-and writes `comment()` a byte at a time to avoid it. **That bug was fixed** in
-commit `e096260a`, "grammar: a string is one token, so nothing inside it is
-syntax". `string_literal` was a `seq`, and a `seq` lets `extras` — whitespace
-and both comment forms — match between its elements; it is now a single token
-with no seam for an extra to enter, and `tests/corpus/lex/string_containing_comment_markers.zen`
-gates it.
-
-Verified against real `std`: all three of
+was emitted silently, with no diagnostic, which is why `c_prim` was written as
+nested `pick` calls rather than the match it wants to be.
 
 ```groovy
-println("/* ---- types ---- */");
-println("// a line comment inside a string");
-println("a \"quote\" and a /* opener");
+c_prim = (n: str) str {
+    n.match({
+        "i8"  => "int8_t",
+        "i32" => "int32_t",
+        "str" => "zg_str",
+        _     => "void",
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", c_prim("i8"));
+    println("{}", c_prim("i32"));
+    println("{}", c_prim("str"));
+    println("{}", c_prim("nope"));
+    Ok(0);
+}
 ```
 
-parse and emit correctly. **The byte-at-a-time `comment()` can collapse to one
-`out.say`.**
+Both toolchains print `int8_t / int32_t / zg_str / void`.
+`tests/corpus/sema/match_on_str_literals` is the standing guard.
 
-The general lesson is worth more than the line count: a workaround outlives
-the bug unless it names the bug, and re-testing is cheaper than assuming.
+**Workarounds now load-bearing for nothing**, and both name this ledger in
+their own comments:
 
----
+- `src/gen/gen_c/gen_c_type.zen:188` — `c_prim` is eight nested `pick(..)`
+  calls draining into `c_prim_wide`, which is eight more, plus the `pick`
+  helper itself. Its comment says *"When that is fixed this becomes the
+  seventeen-arm match it wants to be."* It is fixed.
+- `src/gen/gen_c/gen_c_runtime.zen:585,647` — `signed_guard`,
+  `signed_sub_or_mul`, `unsigned_guard`, `unsigned_sub_or_mul` are `op.eq(..)`
+  chains, each a two-arm `.match` on a boolean, for the same reason. Four
+  functions collapse to two matches.
 
-## Latent bug in `gen_name`, which will bite the moment anything spells a fixed array
+## C. A claimed bug that was NOT real, and cost real code
 
-`gen_name.comp` does not encode non-identifier bytes. The reference's `comp()`
-hex-escapes anything failing `^[A-Za-z_][A-Za-z0-9_]*$`; this one writes the
-bytes through raw. `sema_type.array_type` interns a fixed array as
-`named(ARRAY_DECL, "[]", "[]", args)`, so `[u8, 4]` mangles to
+`gen_c_runtime.zen` used to state that a Zen string literal containing a
+comment opener does not parse, and wrote `comment()` a byte at a time to avoid
+it. **That bug was fixed** in `e096260a`, "grammar: a string is one token, so
+nothing inside it is syntax", and
+`tests/corpus/lex/string_containing_comment_markers.zen` gates it.
+`comment()` has since collapsed to one `out.say`.
 
-```
-zu_t1_2[]I1_b2u8
-```
+The general lesson is worth more than the line count: a workaround outlives the
+bug unless it names the bug, and re-testing is cheaper than assuming. It is why
+this file exists in this shape.
 
-which is not a legal C identifier. Nothing in the corpus spells a fixed array
-through the Zen backend yet, which is the only reason this is latent.
+## D. `gen_name.comp` wrote non-identifier bytes through raw
 
----
+**CLOSED.** `comp` (`gen_name.zen:83`) now tests `is_c_identifier` and routes a
+failure to `escaped_comp`, which writes `x` followed by two hex digits per
+byte. The specific hazard the entry named is gone twice over: a fixed array is
+no longer interned as `named(ARRAY_DECL, "[]", ..)` at all, but mangled by its
+own rule — `gen_name.zen:466`, "`[i32, 4]` is `a4_bi32`. THE COUNT IS IN THE
+NAME."
 
-## Two files are over the hard cap
+The entry said "nothing in the corpus spells a fixed array through the Zen
+backend yet, which is the only reason this is latent". That is no longer true
+either: `tests/corpus/parse/array_type_applied` builds `[i32, 4](2, 3, 5, 7)`
+and indexes it, and `tests/corpus/traps/index_runtime` and
+`index_at_len_runtime` trap on one.
 
-`gen_c_type.zen` (831 lines) and `gen_c_expr.zen` (973) both exceed
-`STYLE.md`'s 800-line **build failure** threshold. Split by subject, never by
-size — and note `STYLE.md` allows an exception only if the path is listed in
-`build.zen` with a written reason.
+## E. Two files over the hard cap
 
----
+**CLOSED.** `gen_c_type.zen` was 831 lines and `gen_c_expr.zen` 973; both were
+split by subject. `python3 scripts/line_cap.py` now reports **41 over 500, 0
+over 800**, and `gen_c_type.zen` is 579.
 
-## Sema's shape, for whoever finishes the backend
+## F. Sema's shape, for whoever finishes the backend
 
-- `expr_kind` returns `Unknown` for `Call`, `Access`, `Lambda`, `Record`,
-  `Index`, `FixedArray`, `Array`, `Scope`, `Meta`. **`Match` is handled** now,
-  via `sema_match` / `sema_case`.
-- The `block_type`-then-read-back protocol is mandatory, and stricter than it
-  first appeared: after the walk, `type_of` on a memo **miss** re-reports
-  `undefined name` into sema's diagnostics. A backend must read
-  `Checker.expr_memo` directly and never call `type_of`.
+The backend is finished, so these are history rather than instructions — but
+one of them was a claim and it is now false.
+
+- **`expr_kind` returns `Unknown` for `Call`, `Access`, `Lambda`, `Record`,
+  `Index`, `FixedArray`, `Array`, `Scope`, `Meta`.** **No longer true.**
+  `sema_type.zen:387` has no `Unknown` arm left; every form is answered.
+- The `block_type`-then-read-back protocol, and "a backend must read
+  `Checker.expr_memo` directly and never call `type_of`", still describes the
+  code: `expr_memo` is the memo (`sema_check.zen:101`) and `sema_own.zen:691`
+  reads it directly with an `UNTYPED` fallback rather than asking `type_of`.
 - Sema has no pointer type kind — `Ptr<T>` arrives as an ordinary `Named` — so
-  a declarator never binds an asterisk in this subset.
+  a declarator never binds an asterisk in this subset. Not re-measured.
 
----
+## G. Housekeeping
 
-## Housekeeping
-
-`src/gen/gen.zen:51` currently reads
+**CLOSED.** `src/gen/gen.zen` no longer comments out its own backend exports;
+it reads
 
 ```groovy
-// CBackend*, emit_program*, ctype*         = gen.gen_c
+CBackend*, emit_program*, Dest*          = gen.gen_c
+ctype*, C_STANDARD*, emit_types*         = gen.gen_c
 ```
 
-commented out to unblock module resolution while the backend is written.
-**It must be restored when the folder root lands**, or the `gen` module
-exports no backend and `src/zen.zen` has nothing to call.
-
-The reference `BANNER` / `INCLUDES` text is not reproduced byte-for-byte, so
-line 1 of the Zen backend's output will differ from `bootstrap/gen_c.py`'s.
-That is fine for the fixpoint, which compares stage2 against stage3 — both
-from the Zen backend — but it means the two backends' output cannot be
-diffed directly during the differential-oracle stage.
+**Still true, and still fine:** the reference `BANNER` / `INCLUDES` text is not
+reproduced byte-for-byte, so line 1 of the two backends' output differs
+(`/* Generated by the Zen compiler. */` against `/* Generated by the Zen
+bootstrapper (bootstrap/gen_c.py). */`). The fixpoint compares stage2 against
+stage3 — both from the Zen backend — so it is unaffected; it only means the two
+backends' C cannot be diffed directly.
 
 ---
 ---
 
 # Part two: findings from writing `src/gen/`
 
-Everything above was an audit. What follows was found by building the backend
-and running it end to end, and each entry is either **acted on** or **recorded
-with a reproducer**. Reproducers run the way `tests/run.py` runs one: a
-compilation root holding the program as `main.zen` with the top-level modules
-of `src/` beside it, compiled as a **directory**.
+## 1. `Vec.get` at `T = str` cannot infer its own `Ok`
 
-## What was acted on
-
-- **The `#error` ruling is carried out.** Every checked helper is now emitted
-  twice: `__builtin_*_overflow` under `#ifdef ZG_HAS_OVERFLOW_BUILTINS`, and
-  the reference's hand-written pre-operation range test under `#else` —
-  two-sided for signed add and subtract, four-quadrant for signed multiply,
-  one-sided for unsigned. `cc -std=c99` on a conforming compiler builds the
-  output. `gen_c_runtime.zen`'s header states it as a promise rather than a
-  cost.
-- **`comment()` collapsed to one `out.say`**, and the workaround's comment now
-  records that the grammar bug it dodged was fixed rather than repeating the
-  claim. Re-tested, not assumed.
-- **`comp` hex-escapes a non-identifier component.** `[]` — the name
-  `sema_type.array_type` interns a fixed array under — now mangles to
-  `x5b5d` rather than producing `zu_t1_2[]I1_b2u8`.
-- **Both files over the hard cap were split by subject**, and the folder root
-  is restored and lists the backend.
-
-## Confirmed bootstrapper bugs, most-blocking first
-
-### 1. `Vec.get` at `T = str` cannot infer its own `Ok`
-
-**Blocking: yes.** It is two diagnostics pointing at `std`, from a program that
-never mentions `std.collections`, and it takes the whole compilation down.
+**CLOSED in both.** The reproducer prints `hello` under each. It used to be two
+diagnostics pointing at `std`, from a program that never mentions
+`std.collections`, taking the whole compilation down.
 
 ```groovy
-Alloc, AllocError = std.mem
-str, String = std.text
-Vec = std.collections
-
 pick = (a: Alloc, i: usize) Res<str, AllocError> {
     v ::= a.Vec<str>();
     v.add("hello").try();
@@ -195,50 +269,76 @@ std/collections/collections_vec.zen:39:22: cannot infer the type of `Ok` here
 std/collections/collections_vec.zen:40:22: cannot infer the type of `None` here
 ```
 
-`Vec<bool>` fails the same way. `Vec<Def>`, `Vec<TyId>`, `Vec<String>`,
-`Vec<Member>`, `Vec<Variant>` and `Map<ExprId, TyId>` are all fine, so it is
-not "a generic in a Vec" — it is `Res<T>` at particular `T`s, and `str` is the
-one a backend reaches for constantly.
+`Vec<bool>` failed the same way, while `Vec<Def>`, `Vec<TyId>`, `Vec<String>`
+and `Map<ExprId, TyId>` were fine — so it was never "a generic in a Vec", it
+was `Res<T>` at particular `T`s, and `str` is the one a backend reaches for
+constantly.
 
-**Workaround:** `gen_c_call.storage_name` counts to the i-th storage member
-with two mutable locals rather than collecting names into a `Vec<str>`.
+**Workaround, no longer needed:** `gen_c_call.storage_name` counted to the i-th
+storage member with two mutable locals rather than collecting names into a
+`Vec<str>`. That function no longer exists under that name; whatever replaced
+it is free to collect.
 
-### 2. A local `Vec<T>` read back in the same function can lose its type arguments
+## 2. A local `Vec<T>` read back in the same function can lose its type arguments
 
-**Blocking: yes, and the diagnostic names `std`.** The same shape as §1 from a
-different direction: the emitted C contains `Map.get` instantiated at
-`Map<q, q>` — `q` is the mangler's *unresolved* tag — called with a `BlockId`
-key that no program has.
-
-The version that failed:
+**CLOSED in both**, and it is the one entry that already had a test written for
+it: `tests/corpus/sema/vec_get_in_a_helper_is_not_map_get`.
 
 ```groovy
-storage_type = (be :: CBackend, s: Struct, name: str, dctx: Ctx)
-               Res<TyId, AllocError> {
-    found ::= be.alloc.Vec<TyId>();
-    s.members.loop((h, m) { collect_named_field(be, m, name, dctx, found).try() });
-    Ok(found.get(0).match({ Ok(t) => t, None => TyId(index: 0) }));
+Ty = { index*: usize }
+
+first_named = (a: Alloc, n: usize) Res<Ty, AllocError> {
+    found ::= a.Vec<Ty>();
+    Range(0, n).loop((h, i) { found.add(Ty(index: i + 1)).try(); });
+    Ok(found.get(0).match({ Ok(t) => t, None => Ty(index: 0) }));
 }
 ```
+
+Both toolchains print `1`. It used to emit `Map.get` instantiated at
+`Map<q, q>` — `q` is the mangler's *unresolved* tag — for a `Map` the program
+does not use, and reported
 
 ```
 std/collections/collections_map.zen:93:9: cannot infer the type of `Ok` here
 ```
 
-The version that works is the same function with no collection at all — a
-mutable local assigned inside the loop. What makes this worse than §1 is that
-the failure is a **`Map`** the program does not use: resolution fell through to
-a global by-name search for `get` and found `Map.get`, which is
+Resolution had fallen through to a global by-name search for `get`, which is
 `LEXER_BOOTSTRAP_FIXES.md` §7 surfacing in a new place.
 
-### 3. Two modules declaring `Diag` collide on a method name, and `cc` reports it
+## 3. Two modules declaring `Diag` collide on a method name, and `cc` reports it
 
-**Blocking: yes for any program that imports both.** It reddened
-`corpus/cli/*`, which stages `sema` and `gen` together.
+**CLOSED in both, and now gated** —
+`tests/corpus/modules/same_type_name_method_and_free`, added by this audit,
+because nothing was covering the shape. `corpus/modules/same_name_overload`
+covers two modules declaring the same *free function* on two different types;
+this covers two modules declaring the same *type*, one with `render` as a free
+function and one with `render` as a method.
 
-`sema.sema_diag` declares `Diag` with a free `render(self: Diag, types, out)`.
-`gen.gen_diag` declared `Diag` with a method `render(self: @Self, out)`. A call
-`d.render(out)` on the *gen* value resolved to *sema's* function:
+```groovy
+// alpha/alpha.zen
+Diag* = { code*: usize }
+render* = (self: Diag, tag: usize) usize { self.code + tag }
+
+// beta/beta.zen
+Diag* = { note*: usize, render* = (self: @Self) usize { self.note * 10 } }
+
+// gamma/gamma.zen -- sees BETA's Diag
+Diag = beta.beta
+shout* = (n: usize) usize { d = Diag(note: n); d.render(); }
+
+// main.zen -- sees ALPHA's, and calls gamma
+Diag, render = alpha.alpha
+shout = gamma.gamma
+main = (env: Env) Res<i32, AllocError> {
+    a = Diag(code: 5);
+    println("{}", render(a, 1));   // 6
+    println("{}", a.render(1));    // 6
+    println("{}", shout(7));       // 70
+    Ok(0);
+}
+```
+
+It used to be `cc`, not Zen, that reported the collision:
 
 ```
 error: too many arguments to function 'zu_f4_3gen8gen_diag4Diag6render'
@@ -246,87 +346,341 @@ note:  expected 'zu_t3_3gen8gen_diag4Diag' but argument is of type
        'zu_t3_4sema9sema_diag4Diag'
 ```
 
-DESIGN.md says "two modules may define the same top-level name without
-colliding", and four modules in this tree declare a `Diag`. The bootstrapper's
-member resolution does not honour that.
+**Workaround, no longer load-bearing:** the gen type is `GenDiag` and the
+renderer is the free function `render_gen` (`src/gen/gen_diag.zen:66`), whose
+comment still says *"A free function rather than a method … a method is
+resolved by name across every module and this one has to be reachable without
+competing with three other renderers."* Resolution is on the receiver now.
+`GenDiag.render` is available if wanted — `python3 scripts/ufcs_collisions.py`
+is the arbiter, and it currently reports 0 ambiguous over 2960 UFCS free
+functions.
 
-**Workaround:** the type is `GenDiag` and the renderer is a free function
-`render_gen`. Uglier, unique tree-wide, and what STYLE.md's grep test asks for
-anyway.
+## 4. A struct field whose name matches a field of an unrelated type is read-only
 
-### 4. A struct field whose name matches a field of an unrelated type is read-only
+**CLOSED in both.** Both print `42`.
+
+```groovy
+Function = ast.ast_node      // declares `body*` -- immutable, another module
+
+Backend = { body :: usize }
+
+fill = (be :: Backend) Res<(), AllocError> {
+    be.body = 42;
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    be ::= Backend(body: 0);
+    fill(be).try();
+    println("{}", be.body);
+    Ok(0);
+}
+```
+
+It used to say
 
 ```
 gen_c_decl.zen:187:8: body is not writable outside module ast_node
 ```
 
-from `be.body = be.alloc.Emit().try();`, where `body` is a `::` field of the
-backend's own struct. `ast.Function` declares `body*` — immutable, in another
-module — and the assignment was checked against *that*. Renaming the field to
-`buf` fixed it; the field is now unexported with six forwarding methods, which
-is what DESIGN.md asks for anyway ("mutation only ever goes through exported
-methods").
+— the assignment checked against `ast.Function.body` instead of the backend's
+own field.
 
-### 5. A `.then` closure capturing several enclosing parameters is inlined wrong
+**Workaround, no longer needed but keep it:** the field was renamed `buf` and
+unexported behind six forwarding methods, which is what DESIGN.md asks for
+anyway ("mutation only ever goes through exported methods"). Nothing named
+`buf` survives in `gen_c.zen` today, so the code has moved on regardless.
+
+## 5. The bootstrapper's inliner is not hygienic
+
+**OPEN IN THE BOOTSTRAPPER ONLY, and filed far too narrowly.** The entry said
+"a `.then` closure capturing several enclosing parameters is inlined wrong",
+and pointed at an argument slot. Neither the capture count nor the slot is the
+trigger.
+
+`bool.then` is declared `<T>(b: bool, f: () T) Res<T>` (`std/core/bool.zen:21`).
+When the bootstrapper inlines it, it substitutes the callee's parameter names
+into the body **without renaming what the lambda already binds**. So any free
+`b` or `f` inside the closure is replaced by the caller's corresponding
+argument — the receiver for `b`, the lambda itself for `f`.
+
+### `b`: a silently wrong value, no diagnostic, valid C
 
 ```groovy
-traps(b.op).then(() { write_trap_args(be, node, b, out).try() });
+Sink = {
+    total* :: usize,
+    two* = (self :: @Self, x: usize, y: usize) Res<(), AllocError> {
+        self.total = x * 100 + y;
+        Ok(());
+    }
+}
+
+b_first = (s :: Sink, b: usize) Res<(), AllocError> {
+    (b > 0).then(() { s.two(b, 4).try() });     // 304
+    Ok(());
+}
+
+n_first = (s :: Sink, n: usize) Res<(), AllocError> {
+    (n > 0).then(() { s.two(n, 4).try() });     // 304
+    Ok(());
+}
+
+b_printed = (b: usize) Res<(), AllocError> {
+    (b > 0).then(() { println("printed {}", b) });   // printed 3
+    Ok(());
+}
 ```
 
-emitted
+```
+bootstrap   b_first 104     n_first 304     printed true
+./zen       b_first 304     n_first 304     printed 3
+```
+
+`b_first` gets `104` because `b` became the receiver `(b > 0)`, which is
+`true`, which is `1`. `n_first` — the same program with the parameter renamed —
+is correct, which is the whole proof. `b_printed` has no call, no arity and no
+argument slot at all, and still prints `true` for `3`.
+
+The emitted C says it plainly. From the original four-parameter case:
 
 ```c
-write_trap_args(&be, node, traps(b.op), &out)
+zg_t4 = zu_f3_4main4Sink4bump(&(*zu_l1s), zu_l1a, zu_f2_4main3big(zu_l1n));
+                                                  ^ the .then receiver, where `b` was
 ```
 
-— the receiver of `.then` substituted into the third argument slot. `cc`
-catches it; there is no Zen diagnostic. A `.then` capturing one parameter is
-fine and is used throughout `std`.
+A literal in the same position is untouched — `s.two(a, 3)` is correct — so
+this is name substitution, not positional.
 
-**Workaround:** `.match` with an explicit `false => Ok(())`, which reads better
-anyway.
-
-### 6. Binding an enum arm's payload to a local types the match as `()`
+### `f`: an undeclared identifier in the output
 
 ```groovy
-what = fault.match({
-    Unsupported(w) => w,
-    Unresolved(w)  => w,
-    ...
-});
-out.add_bytes(what).try();
+f_named = (s :: Sink, f: usize) Res<(), AllocError> {
+    (f > 0).then(() { s.two(f, 4).try() });
+    Ok(());
+}
 ```
 
-emits `void zu_l4what = 0;`. Every arm is `str` and the first one is too, so
-this is not `LEXER_BOOTSTRAP_FIXES.md` §2's first-arm rule — it is a payload
-binder reaching a local. **Workaround:** write the payload into the sink inside
-each arm.
+```
+error: 'f' undeclared (first use in this function)
+    zg_t4 = zu_f3_4main4Sink3two(&(*zu_l1s), f, ((size_t)4ULL));
+```
 
-### 7. A `str` scrutinee against string-literal patterns — confirmed again
+### It is not about `bool.then`
 
-Already recorded above; confirmed independently while writing `c_prim`, and
-`gen_c_runtime.signed_guard` / `unsigned_guard` are written as `.eq` chains for
-the same reason.
-
-## A parser finding
-
-**`x * 2` in statement position is parsed as a declaration.** A block whose
-value is a multiplication loses it:
+Any inlined function taking a lambda does it, including a user's own:
 
 ```groovy
-main = (env: i32) i32 { x = 6; x * 2 }
+apply = <T>(gate: bool, thing: () T) Res<T> {
+    gate.match({ true => Ok(thing()), false => None });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    thing = 7;  apply(true, () { println("thing {}", thing) });   // thing 7
+    gate  = 9;  apply(true, () { println("gate {}", gate) });     // gate 9
+    other = 5;  apply(true, () { println("other {}", other) });   // other 5
+    Ok(0);
+}
 ```
 
-emits `return;`, and the backend reports `a declaration inside a body` at the
-`x`. `x + 2` in the same position is fine, and `(x * 2)` is fine. The `*` is
-being read as the export marker. It belongs in `src/parse/`, not here.
+```
+bootstrap   main.zen:10:42: cannot print a value of this type
+            thing            gate true       other 5
+./zen       thing 7          gate 9          other 5
+```
 
-## A design gap, not a bug
+### What is at risk today
 
-**An unannotated integer binding is a literal type, and nothing settles it.**
-`x = 6` gives `x` sema's `int`, which this backend spells `int64_t`; a use of
-`x` in an `i32` context is then narrowed at the call to the checked helper. The
-value is right for anything that fits and silently truncates for anything that
-does not. Settling a literal's type from its context is bidirectional inference
-and it is sema's, not the backend's — recorded here because TESTING.md's "a
-literal at the exact type boundary" test will find it.
+A scan of every `.then(() { .. })` in the tree for a free `b` or `f` in the
+closure body finds **three sites**, all of one shape:
+
+```
+src/std/build/build.zen:151   (in the doc comment on `Builder.module`)
+example/build.zen:58          .then(() { tests.add(f).try() })
+example/build.zen:70          .then(() { benches.add(f).try() })
+```
+
+`f` is the loop's value binding, so these break the C compile rather than
+silently lying — but they are the language's own showcase of "test discovery is
+code, not compiler magic", and the shape `std.build` documents is the shape the
+bootstrapper cannot compile. `src/` is otherwise clean: every other `.then`
+either keeps `b`/`f` in the receiver, where it is fine, or uses another name.
+
+**Workaround, still load-bearing:** `.match({ true => .., false => Ok(()) })`
+in place of `.then`, which the ledger notes reads better anyway. Verified: the
+`.match` spelling of the same program is correct under both toolchains.
+
+**No corpus test.** Any test asserting the right value is red under
+`bootstrap`, and `make test` runs the corpus through the bootstrapper.
+
+## 6. Binding an enum arm's payload to a local types the match as `()`
+
+**CLOSED in both.** Both print `nope / gone / plain`.
+
+```groovy
+Fault = Unsupported(str) | Unresolved(str) | Plain
+
+describe = (f: Fault) str {
+    what = f.match({
+        Unsupported(w) => w,
+        Unresolved(w)  => w,
+        Plain          => "plain",
+    });
+    what;
+}
+```
+
+It used to emit `void zu_l4what = 0;`. Every arm was `str` and the first one
+was too, so it was never `LEXER_BOOTSTRAP_FIXES.md` §2's first-arm rule — it
+was a payload binder reaching a local.
+
+**Workaround now load-bearing for nothing:** `src/gen/gen_diag.zen:95-105`,
+`detail`, writes the payload straight into the sink in each of five arms, and
+its comment names this entry as the reason. It can be one `fault.match({..})`
+bound to a local and one `out.add_bytes(w)`.
+
+## 7. A `str` scrutinee against string-literal patterns — confirmed again
+
+Same as §B above; the two workarounds it left behind are listed there.
+
+## P. A parser finding: `x * 2` in statement position
+
+**CLOSED in both.** Both print `12`.
+
+```groovy
+double = (n: i64) i64 { x = n; x * 2 }
+```
+
+The block used to emit `return;` with "a declaration inside a body" reported at
+the `x`, because the `*` was read as the export marker. `x + 2` was fine and
+`(x * 2)` was fine, which is what made it a parser finding rather than a
+backend one.
+
+## L. An unannotated integer literal is unsettled — and that is the smallest part of it
+
+**OPEN IN BOTH, and this entry was the generous one.** It was filed as "a design
+gap, not a bug": `x = 6` gives `x` sema's `int`, a use of `x` in an `i32`
+context narrows at the call, and settling a literal's type from its context is
+bidirectional inference and sema's job. All true. What it does not say is that
+**the check which does exist runs in exactly one place.**
+
+`src/sema/sema_trap.zen:194` declares `check_literal`. `grep` finds one call
+site in the whole tree: `sema_type.zen:763`, inside `check_assign`, which
+`bind_stmt` calls. So the rule covers `x: i32 = <literal>` and nothing else.
+
+```groovy
+Holder = { n: i32 }
+narrow = (n: i32) i32 { n }
+ret = () i32 { 3000000000 }
+
+main = (env: Env) Res<i32, AllocError> {
+    println("param  {}", narrow(3000000000));
+    println("field  {}", Holder(n: 3000000000).n);
+    println("return {}", ret());
+    arr = [i32, 2](1, 3000000000);
+    println("elem   {}", arr[1]);
+    m: i32 = true.match({ true => 3000000000, false => 0 });
+    println("arm    {}", m);
+    Ok(0);
+}
+```
+
+| position | bootstrap | `./zen` |
+|---|---|---|
+| annotated binding `a: i32 = ..` | rejects | rejects |
+| call argument | rejects | **`-1294967296`** |
+| record field | rejects | **`-1294967296`** |
+| return value | rejects | **`-1294967296`** |
+| match arm at an annotated binding | rejects | **`-1294967296`** |
+| fixed-array element | **`-1294967296`** | **`-1294967296`** |
+| through an unannotated binding | **`-1294967296`** | **`-1294967296`** |
+
+```
+bootstrap  main.zen:6:16:  literal 3000000000 does not fit i32: i32 holds
+                           -2147483648..2147483647, so the value is out of range
+           main.zen:9:33:  (the same, at the call argument)
+           main.zen:10:36: (the same, at the field)
+           main.zen:14:35: (the same, at the match arm)
+           bootstrap: 4 diagnostic(s)
+./zen      param -1294967296   field -1294967296   return -1294967296
+           elem  -1294967296   arm   -1294967296   (exit 0)
+```
+
+### Why nothing catches it
+
+`tests/must-fail/traps/literal_too_large_i32` is the only test of the rule, and
+it writes `too_big: i32 = 2147483648` — **the one position that is checked.**
+It passes under both toolchains, so the suite is green and the rule looks
+covered.
+
+The fixed-array-element row is the dangerous one: the two implementations agree
+and are both wrong, so the differential oracle is blind to it and only a test
+asserting a value — or a rejection — can see it. The unannotated-binding row is
+the same, and is the shape the original entry described.
+
+### The tests that should exist, and why they are not here
+
+Neither can be landed today without reddening a gate that four other lanes are
+standing on. Written out so they can be added the moment the fix is:
+
+**`tests/must-fail/traps/literal_too_large_at_a_call/`** — a literal out of
+range for a narrower parameter. Green under `make test` (bootstrap rejects it),
+**red under `make test-zen`**, which is at 430/0 today.
+
+```groovy
+Error = Overflow | DivideByZero | OutOfBounds
+narrow = (n: i32) i32 { n }
+main = (env: Env) Res<i32, Error> { println("{}", narrow(2147483648)); Ok(0); }
+```
+
+expected diagnostic, at the literal's own position:
+
+```
+literal 2147483648 does not fit i32
+```
+
+**`tests/must-fail/traps/literal_too_large_in_an_array/`** — the same value as
+a fixed-array element. **Red under both.**
+
+```groovy
+Error = Overflow | DivideByZero | OutOfBounds
+main = (env: Env) Res<i32, Error> {
+    arr = [i32, 2](1, 2147483648);
+    println("{}", arr[1]);
+    Ok(0);
+}
+```
+
+---
+
+## What this ledger asks for next
+
+In the order the work would pay off:
+
+1. **Reach `check_literal` from every position a literal meets a type** (§L),
+   starting with a call argument and a record field. `./zen` accepts an
+   out-of-range literal in five of six positions and truncates it silently;
+   this is the shipped compiler, and the one test of the rule covers the one
+   position that works. The fixed-array-element case is wrong in *both*
+   implementations, so it can only be fixed by deciding, not by diffing.
+2. **Make the bootstrapper's inliner hygienic** (§5). Rename the callee's
+   parameters, or refuse to substitute into a name the lambda's own scope
+   binds. Until then `bool.then` silently corrupts any closure mentioning a
+   `b`, `example/build.zen` does not compile through `bootstrap`, and no
+   corpus test can be written in the shape the shipped compiler already gets
+   right.
+3. **Put the four §B/§6 workarounds back into their natural form** — they are
+   load-bearing for nothing and each names this file in a comment that is now
+   wrong:
+   - `gen_c_type.zen:188` `c_prim` + `c_prim_wide` + `pick` → one
+     seventeen-arm `.match`, which the comment there already asks for;
+   - `gen_c_runtime.zen:585,647` `signed_guard` / `signed_sub_or_mul` /
+     `unsigned_guard` / `unsigned_sub_or_mul` → two `.match`es on `op`;
+   - `gen_diag.zen:95` `detail` → bind the payload to a local, one
+     `out.add_bytes`;
+   - `gen_diag.zen:66` `render_gen` → `GenDiag.render`, if
+     `scripts/ufcs_collisions.py` stays at 0.
+4. **Gate the no-`__builtin` arm of the checked helpers** (§A). It is correct
+   today — 35 of 35 trap programs compile under `-std=c99 -pedantic` and trap
+   as expected with the macro renamed — and nothing anywhere would notice if it
+   stopped being. Three lines of `sed` and `cc` over a handful of trap tests is
+   the whole gate, and PLAN.md's "needs only a C compiler" is what it protects.
