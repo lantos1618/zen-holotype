@@ -12,11 +12,15 @@
 //     `publishDiagnostics` notification. Until today the editor showed
 //     nothing, ever.
 //
-//   - IT IS GROUPED BY FILE. `app/shape.zen` on disk has a sema fault
-//     of its own, and it arrives in its OWN notification against its
-//     OWN uri. A build reports across the whole program; publishing
-//     another file's errors against the open document would be a wrong
-//     answer, and a wrong answer is worse than no answer.
+//   - IT IS GROUPED BY FILE, AND ALL THREE PHASES ARE IN IT.
+//     `app/shape.zen` is opened as a second buffer with a SEMA fault
+//     where `app.zen` has a PARSE one, and each arrives in its OWN
+//     notification against its OWN uri. A build reports across the
+//     whole program; publishing another file's errors against the open
+//     document would be a wrong answer, and a wrong answer is worse
+//     than no answer. Sema's come off the `Checker` and the parser's
+//     off the `Build`, so a server that read only one of the two would
+//     lose a whole line here.
 //
 //   - THE NOTE SURVIVES. The parse diagnostic carries a `Note` — a
 //     second place to look, WITH a span — and it comes out as
@@ -24,7 +28,7 @@
 //     sentence, which would throw the span away.
 //
 //   - AN ERROR THAT IS FIXED IS TAKEN BACK. Batch two closes the paren
-//     and supplies a corrected `shape.zen` as a second buffer, and BOTH
+//     and drops the undefined name from the other buffer, and BOTH
 //     files receive an EMPTY list. The protocol has no "remove": an
 //     empty list is the only way to clear one, and a server that
 //     publishes only what it finds leaves errors the user has already
@@ -32,16 +36,15 @@
 //     bug and it is worse than publishing nothing at all.
 //
 //     The two files clear by DIFFERENT ROUTES and that is deliberate:
-//     `app.zen` is the document that was edited, which is always
-//     published; `shape.zen` was not touched in batch two and is
-//     cleared only because the server remembered it was showing an
-//     error. Delete either half and one of the two lines below keeps a
-//     diagnostic.
+//     `app.zen` is the document the build was triggered by, which is
+//     always published; `shape.zen` is not, and is cleared only because
+//     the server remembered it was showing an error. Delete either half
+//     and one of the two lines below keeps a diagnostic.
 //
-//   - TWO CHANGES COST ONE BUILD. Batch two carries a `didOpen` and a
-//     `didChange` in one buffer and produces ONE round of
-//     notifications, not two. A server that built per message would
-//     print four frames there instead of two.
+//   - TWO CHANGES COST ONE BUILD. Batches one and two each carry two
+//     document notifications and each produces ONE round of
+//     notifications. A server that built per message would print twice
+//     as many frames in both.
 //
 // AND BATCH THREE IS THE MITIGATION: the same bytes sent again produce
 // no build and no frames at all. It is the only thing this server can
@@ -69,9 +72,16 @@ BROKEN*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = (q
 // opened: the expression it wrapped needed no parentheses.
 FIXED*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = q.x + n;\n    s\n}\n"
 
-// `app/shape.zen` without its undefined name. Supplied as a second
-// BUFFER rather than written to disk, so that clearing a file the user
-// is not editing is what the last batch measures.
+// THE SECOND BUFFER, and its fault is SEMA's where the first one's is
+// the PARSER's — so the two halves of the diagnostics story travel in
+// one notification round. `missing` is no name in scope.
+//
+// IT IS A BUFFER AND NOT A FILE ON DISK because `tests/run.py` compiles
+// every module it stages, so a wrong one on disk fails the test before
+// the test runs. An editor supplies wrong programs the same way.
+SHAPE_BROKEN*: str = "Point* = {\n    x*: i32,\n    y*: i32,\n}\n\narea* = (p: Point) i32 {\n    p.x * missing\n}\n"
+
+// The same module with the undefined name gone.
 SHAPE*: str = "Point* = {\n    x*: i32,\n    y*: i32,\n}\n"
 
 // `tests/run.py` stages a directory test into `<work>/src` and runs the
@@ -91,16 +101,19 @@ main = (env: Env) Res<i32, AllocError> {
     a ::= env.mem.alloc();
     s ::= a.Server(env);
 
+    // TWO DOCUMENTS OPENED IN ONE BATCH, and only the last of them is
+    // edited from here on. One build answers for both.
     first ::= a.String().try();
     open_session(a, first).try();
     write_frame(INITIALIZED, first).try();
+    open_doc(a, SHAPE_URI, SHAPE_BROKEN, first).try();
     open_doc(a, URI, BROKEN, first).try();
-    batch(s, a, "a buffer with an unclosed paren", first.view()).try();
+    batch(s, a, "two buffers opened, each wrong its own way", first.view()).try();
 
-    // ONE BATCH, TWO CHANGES, and the second of them is the document
-    // that was already wrong.
+    // ONE BATCH, TWO CHANGES, and only the second of them is the
+    // document the notifications are triggered by.
     second ::= a.String().try();
-    open_doc(a, SHAPE_URI, SHAPE, second).try();
+    change_doc(a, SHAPE_URI, SHAPE, second).try();
     change_doc(a, URI, FIXED, second).try();
     batch(s, a, "both files corrected, in one batch", second.view()).try();
 
