@@ -39,10 +39,19 @@ accepted, `textDocument/hover` on `s` in `s = a + b` answers `i32`,
 - **No diagnostics.** The server never sends `publishDiagnostics`. No
   squiggles is correct behaviour, not a failure, and no amount of waiting
   will produce any. Errors still only come from running the compiler.
-- **Hover answers on an identifier's USE**, not on its declaration site,
-  not on a type name, not on a function name. Probing every identifier in a
-  four-line function, three of twelve positions answered. That is the real
-  shape of it, not a bug to file.
+- **Hover answers at a use AND at a declaration.** Probing every identifier
+  position in a four-line function, **10 of 12** answer; the two that do not
+  are a space and a brace, which must not. A parameter or a local at its
+  declaration answers with its type, a written type name with what it
+  resolves to, and a function's name with its declaration handed back —
+  `add = (a: i32, b: i32) i32`. It was **3 of 12** before, answering only at
+  uses; see `docs/design_lsp.md` §2 for the table and the reasoning.
+- **A `null` hover means "not known", never "no type".** A struct's or
+  enum's own name, a pattern binder and a type parameter at its declaration
+  all answer null, and so does anything whose type did not resolve — which
+  today is **every imported name**, because the server checks the open file
+  as a lone module. Hover refuses to print sema's `<unknown>` poison rather
+  than show you a type that does not exist.
 - **Everything else is refused by name** with `-32601`: definition,
   completion, symbols, formatting, rename, references. Hover on a document
   that was never opened is `-32602`, not null.
@@ -211,7 +220,7 @@ and therefore sema's.
 | `initialize` / `shutdown` | **works** |
 | `initialized` / `exit` / `$/cancelRequest` | notifications, no reply |
 | `textDocument/didOpen` / `didChange` / `didClose` | **works**, Full sync only |
-| `textDocument/hover` | **works** — the type under the cursor |
+| `textDocument/hover` | **works** — a type, a declared name's type, or a function's signature |
 | everything else | **refused by name** with JSON-RPC `-32601` |
 
 "Everything else" is `textDocument/definition`, `documentSymbol`,
@@ -228,7 +237,9 @@ this and `docs/design_lsp.md` §5 says where the fix goes.
 
 **There is no build overlay**, so hover checks the open document as a lone
 module and an imported name has no type. Hovering something local to the
-file is the case that works.
+file is the case that works. An imported name resolves to sema's poison,
+and hover answers `null` rather than printing it — so on a real file in
+this tree, expect the local half to answer and the imported half not to.
 
 `zen fmt` exists as a command but wiring `textDocument/formatting` to it is
 a separate change and `docs/design_lsp.md` does not ask for it yet. Neither
@@ -268,9 +279,13 @@ Verified here, by running it:
   **0**. The file transport (`zen lsp <requests> <replies>`) still works and
   is what the corpus drives, since a test cannot hold a pipe open.
 - **Hover's real coverage was measured, not assumed.** Every identifier
-  position in `add = (a: i32, b: i32) i32 { s = a + b; s }` was probed:
-  **3 of 12** answered — the two parameter *uses* and the local's *use*.
-  Declaration sites, type names and the function name answer null.
+  position in `add = (a: i32, b: i32) i32 { s = a + b; s }` was probed over
+  a real pipe, twice. It was **3 of 12** — the two parameter *uses* and the
+  local's *use*, with declaration sites, type names and the function name
+  answering null. It is now **10 of 12**: everything above answers, and the
+  two that stay null are a space and the body's brace. The same table is a
+  corpus test, `tests/corpus/lsp/hover_answers_at_a_declaration`, so the
+  number is a gate and not a claim in a README.
 - **The tree-sitter grammar loads in Neovim 0.12.2** via
   `vim.treesitter.language.add` at the `--abi 14` the Makefile passes, and
   parses.

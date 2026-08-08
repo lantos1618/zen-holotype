@@ -35,9 +35,14 @@ M.root = vim.env.ZEN_ROOT or vim.fn.expand("~/src/zen")
 --
 -- WHAT YOU GET, and it is worth knowing before you wonder why nothing is
 -- happening: hover, and nothing else. There are no diagnostics — do not
--- wait for squiggles, the server never publishes any — and hover answers on
--- an identifier's USE, not on its declaration, not on a type name and not
--- on a function name. Everything else comes back `-32601 no handler`.
+-- wait for squiggles, the server never publishes any. Hover answers on an
+-- identifier's USE, on a parameter or a local at its DECLARATION, on a
+-- written type name, and on a function's name — where it gives the
+-- declaration back, `add = (a: i32, b: i32) i32`. It answers nothing on a
+-- struct's or enum's own name, on a pattern binder, or on anything whose
+-- type did not resolve, which today includes every IMPORTED name: the
+-- server checks the open file as a lone module. `null` there means "not
+-- known", never "no type". Everything else comes back `-32601 no handler`.
 -- Colour does not come from here at all; it comes from tree-sitter, below.
 M.cmd = { M.root .. "/zen", "lsp" }
 
@@ -124,7 +129,8 @@ return M
 -- ---------------------------------------------------------------------
 -- WHAT THE SERVER ANSWERS, so nothing above promises more than it has
 --
---   textDocument/hover     the type under the cursor. `K` in Neovim.
+--   textDocument/hover     the type under the cursor, a declared name's
+--                          own type, or a function's signature. `K`.
 --   initialize / shutdown  lifecycle
 --   didOpen/didChange/didClose   Full sync, no incremental
 --
