@@ -2,13 +2,13 @@
 """A map of `bootstrap/gen_c.py` whose coordinates still resolve.
 
 `docs/GENC_REFERENCE_MAP.md` is built out of hundreds of claims shaped
-`symbol (line)` and `file:line`. Every one of them is a promise that a
-reader who jumps there lands on the thing being described. Nothing kept
-that promise: the map was written against a 5731-line gen_c.py, the file
-is longer now, and every claim below the first insertion point had
-drifted. A map with shifted coordinates is worse than no map -- it sends
-a reader CONFIDENTLY to the wrong function, which is more expensive than
-sending them nowhere.
+`symbol (line)`, `symbol line`, and `file:line`. Every one of them is a
+promise that a reader who jumps there lands on the thing being
+described. Nothing kept that promise: the map was written against a
+5731-line gen_c.py, the file is 6576 lines now, and every claim below
+the first insertion point had drifted. A map with shifted coordinates is
+worse than no map -- it sends a reader CONFIDENTLY to the wrong
+function, which costs more than sending them nowhere.
 
 The document also named the revision it was written against, and that
 was wrong too, in a way no reader could have caught: at the commit it
@@ -17,40 +17,54 @@ says the file is NOT. A header that identifies itself cannot be trusted
 to identify itself. So nothing here reads the document's own account of
 what it describes; every claim is checked against the file on disk.
 
-FOUR KINDS OF CLAIM, strongest first.
+HOW A CLAIM IS FOUND. Every integer in the prose is a candidate, because
+the document writes line references at least six ways -- `(1082)`,
+`1082-1085`, `4885/4902`, `line 4241`, a bare `| 362 |` table cell, and
+`gen_c.py:5709`. Keying on any one spelling would have read a fraction
+of the document and reported a clean bill for the rest. Numbers inside
+`code spans` are skipped (they are values, not coordinates), as are the
+few that a unit word marks as quantities.
 
-  def    `sym` (N)      -- sym is defined in gen_c.py; N must be its
-                           definition line, or inside N-M.
-  quote  "text" (N)     -- the sentence must appear within N-M.
-  path   file.py:N      -- the file must exist and hold that line, and
-                           if a `def`/`class`/assignment sits on the
-                           same line of the doc, it is checked as `def`.
-  text   `sym` (N)      -- sym is NOT a definition (a local, a struct
-                           field, an emitted C name), so all that can be
-                           checked is that it literally occurs in N-M.
+WHAT EACH KIND OF CLAIM IS CHECKED AGAINST, strongest first.
 
-WHAT THIS CANNOT CHECK, and it matters, because green here is not the
-same as the document being true.
+  def    the nearest symbol is defined in gen_c.py, so the line must
+         fall inside that definition. A range must either sit within
+         the definition or cover its first line.
+  quote  a sentence the document quotes must appear within the lines.
+  path   `file:line` -- the file must exist and hold that line.
+  text   the nearest symbol is NOT a definition (a local, a struct
+         field, a generated C name), so all that can be checked is that
+         it literally occurs in the claimed lines.
+  loose  a number with no symbol and no quotation near it. Only its
+         bounds are checkable.
 
-  * It checks COORDINATES, never prose. A paragraph may describe the
-    wrong thing entirely at a line number that resolves. One claim in
-    this document pointed at `Makefile:52-56` and said it documented the
-    determinism harness; those lines are a different target altogether,
-    and the numbers were in bounds the whole time. Nothing below would
-    have caught it. A human found it and a human is still what finds it.
-  * A bare `(N-M)` with no symbol and no quote next to it has nothing to
-    anchor to, so only its bounds are checked. Those are counted and
-    printed SEPARATELY -- a large range-only count is the document
-    telling you how much of itself it cannot defend, and the repair for
-    any one of them is to put a symbol or a quotation beside it.
-  * A `text` claim on a token as common as `self` passes almost
-    anywhere. Those are counted as weak and printed, rather than being
-    quietly folded into the pass total.
+WHAT THIS CANNOT CHECK. Green here is not the document being true.
+
+  * It checks COORDINATES, never prose. A paragraph can describe the
+    wrong thing entirely at a line number that resolves. One claim here
+    pointed at `Makefile:52-56` and said those lines documented the
+    determinism harness; they are an unrelated target, and the numbers
+    were in bounds the whole time. A human found that, and a human is
+    still what finds it.
+  * A `def` claim is satisfied anywhere inside the definition, because
+    the document legitimately cites both a function's first line and
+    call sites within its body, and nothing distinguishes them. Inside
+    a 400-line function that is a wide target.
+  * A `loose` claim has nothing to anchor to. They are counted and
+    printed separately -- that number is the document saying how much
+    of itself it cannot defend, and the repair for any one of them is
+    to put a symbol or a quotation beside it.
+  * A `text` claim on a token as common as `self` would pass almost
+    anywhere. Those are counted as weak rather than folded into the
+    pass total.
+  * Numbers it declined to read are counted as `unread`. That count is
+    not zero and is not meant to be: it is the residue this script is
+    honest about rather than silently dropping.
   * It cannot know about a claim the document SHOULD make and does not.
 
-The printed counts are the point of the counting: `refmap: N claims
-checked` dropping is how you notice that the document changed shape and
-this script stopped reading half of it.
+The counts are the point of the counting. `refmap: N claims checked`
+dropping is how you find out that the document changed shape and this
+script quietly stopped reading half of it.
 """
 
 from __future__ import annotations
@@ -67,13 +81,24 @@ SUBJECT = ROOT / "bootstrap/gen_c.py"
 # A token occurring on more than this many lines makes a `text` claim
 # vacuous -- it would pass at almost any number.
 COMMON = 100
+# How far a symbol may sit from the number it anchors. Wide enough for
+# "`sym`, 448-466", narrow enough that the next sentence's symbol does
+# not adopt an orphan.
+REACH = 32
 
-PAREN = re.compile(r"\((\d{2,4})(?:[-–](\d+))?\)")
+CODESPAN = re.compile(r"`[^`]*`")
+# Three digits, or a two-digit RANGE -- the document cites the module
+# docstring as `7-24`, but a bare small number in prose is a value
+# ("on `Range(10, 13)` they are 0,1,2"), not a coordinate.
+NUMBER = re.compile(r"(?<![\w.])(?:(\d{3,4})(?:\s*[-–]\s*(\d{2,4}))?"
+                    r"|(\d{1,2})\s*[-–]\s*(\d{2,4}))(?![\w.])")
 PATH = re.compile(r"([\w./-]*(?:\.py)|Makefile):(\d+)(?:[-–](\d+))?")
-TICK = re.compile(r"`([^`]+)`[*_\s]*$")
 QUOTED = re.compile(r"\"([^\"]{8,160})\"[^()\"]{0,25}$")
 IDENT = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
-ONLINE = re.compile(r"^\s*(?:def|class)\s+(\w+)|^\s*(\w+)\s*=\s*\S")
+DEFLINE = re.compile(r"^\s*(?:def|class)\s+(\w+)|^\s*(\w+)\s*=\s*\S")
+# Numbers a unit word marks as quantities rather than coordinates.
+QUANTITY = re.compile(r"^\s*(?:bytes?|lines?|-bit|%|,\s*\d+\s*\))|^(?:st|nd|rd|th)\b")
+NOT_A_REF = re.compile(r"(?:code|exit|byte|version|abi|column|col)\s+$", re.I)
 
 
 def definitions(src: str) -> dict[str, list[tuple[int, int]]]:
@@ -116,7 +141,7 @@ def literal_of(quote: str) -> str:
     """The part of a quotation before any `<name>` or `%s` stand-in.
 
     The document writes a format string's placeholder as `<name>`, so the
-    text after it never matches. The prefix still pins the line.
+    text after it never matches; the prefix still pins the line.
     """
     return norm(re.split(r"[<%]", quote)[0])
 
@@ -129,52 +154,96 @@ def resolve(name: str) -> Path | None:
     return None
 
 
+def symbol_in(span: str) -> str | None:
+    """The identifier a code span names, or None if it names no one thing."""
+    text = span.strip("`").split("=")[0].strip().lstrip(".")
+    text = re.sub(r"\(.*$", "", text).strip()
+    return text if IDENT.match(text) else None
+
+
 class Claim:
-    def __init__(self, kind, line, shown, lo, hi, sym=None, path=None):
+    def __init__(self, kind, line, shown, lo, hi, sym=None, path=None, at=None):
         self.kind, self.line, self.shown = kind, line, shown
         self.lo, self.hi, self.sym, self.path = lo, hi, sym, path
+        self.at = at  # (start, end) columns of the number itself
 
 
-def harvest(doc: str) -> list[Claim]:
-    """Every coordinate the document states, bound to what anchors it."""
+def anchors_of(line: str) -> list[tuple[int, str]]:
+    """(column where it ends, symbol) for every code span naming an identifier."""
+    out = []
+    for m in CODESPAN.finditer(line):
+        sym = symbol_in(m.group(0))
+        if sym:
+            out.append((m.end(), sym))
+    return out
+
+
+def harvest(doc: str, known: set[str] | None = None) -> tuple[list[Claim], int]:
+    """Every coordinate the document states, bound to whatever anchors it.
+
+    `known` is the set of names gen_c.py defines. A table row states its
+    line first and names the symbol afterwards, so the row's own symbol is
+    the anchor -- but only when it is one gen_c.py defines, or every such
+    row would anchor on whatever builtin the row happens to mention.
+
+    Returns the claims and a count of numbers deliberately not read, so
+    the residue is reported rather than disappearing.
+    """
+    known = known or set()
     claims: list[Claim] = []
+    unread = 0
     fence = False
-    for n, line in enumerate(doc.splitlines(), 1):
-        if line.lstrip().startswith("```"):
+
+    for n, raw in enumerate(doc.splitlines(), 1):
+        if raw.lstrip().startswith("```"):
             fence = not fence
             continue
 
-        for m in PATH.finditer(line):
+        for m in PATH.finditer(raw):
             name, lo, hi = m.group(1), int(m.group(2)), m.group(3)
-            shown = m.group(0)
             sym = None
             if name.endswith("gen_c.py"):
-                on = ONLINE.match(line)
-                tick = TICK.search(line[: m.start()].rstrip(" ,("))
-                if on:
-                    sym = on.group(1) or on.group(2)
-                elif tick and IDENT.match(tick.group(1)):
-                    sym = tick.group(1)
-            claims.append(Claim("path", n, shown, lo, int(hi) if hi else lo,
-                                sym=sym, path=name))
+                on = DEFLINE.match(raw)
+                near = [s for end, s in anchors_of(raw[: m.start()])]
+                sym = (on.group(1) or on.group(2)) if on else (near[-1] if near else None)
+            claims.append(Claim("path", n, m.group(0), lo, int(hi) if hi else lo,
+                                sym=sym, path=name, at=m.span()))
         if fence:
             continue
 
-        for m in PAREN.finditer(line):
-            lo, hi = int(m.group(1)), m.group(2)
-            hi = int(hi) if hi else lo
-            before = line[: m.start()]
-            tick = TICK.search(before)
-            quote = QUOTED.search(before)
-            if tick and IDENT.match(tick.group(1).split("=")[0].strip().lstrip(".")):
-                sym = tick.group(1).split("=")[0].strip().lstrip(".")
-                claims.append(Claim("sym", n, f"`{sym}` {m.group(0)}", lo, hi, sym=sym))
-            elif quote:
-                claims.append(Claim("quote", n, f'"{quote.group(1)[:48]}..." {m.group(0)}',
-                                    lo, hi, sym=quote.group(1)))
+        # Code spans hold values, not coordinates. Blanking them keeps every
+        # column where it was, so anchor distances stay meaningful.
+        masked = CODESPAN.sub(lambda m: " " * len(m.group(0)), raw)
+        masked = PATH.sub(lambda m: " " * len(m.group(0)), masked)
+        found = anchors_of(raw)
+        # A table row puts the number first and names the symbol after it.
+        row = (found[0][1] if raw.lstrip().startswith("|")
+               and found and found[0][1] in known else None)
+
+        for m in NUMBER.finditer(masked):
+            lo = int(m.group(1) or m.group(3))
+            hi = int(m.group(2) or m.group(4) or lo)
+            if QUANTITY.match(masked[m.end():]) or NOT_A_REF.search(masked[: m.start()]):
+                unread += 1
+                continue
+            shown = m.group(0)
+            before = [(end, s) for end, s in found if end <= m.start()]
+            sym = None
+            if before and m.start() - before[-1][0] <= REACH:
+                sym = before[-1][1]
+            elif row:
+                sym = row
+            if sym:
+                claims.append(Claim("sym", n, f"`{sym}` {shown}", lo, hi, sym=sym,
+                                    at=m.span()))
+                continue
+            quote = QUOTED.search(masked[: m.start()].rstrip(" ("))
+            if quote:
+                claims.append(Claim("quote", n, f'"{quote.group(1)[:44]}..." {shown}',
+                                    lo, hi, sym=quote.group(1), at=m.span()))
             else:
-                claims.append(Claim("range", n, m.group(0), lo, hi))
-    return claims
+                claims.append(Claim("loose", n, shown, lo, hi, at=m.span()))
+    return claims, unread
 
 
 def main() -> int:
@@ -186,10 +255,10 @@ def main() -> int:
     src = SUBJECT.read_text()
     lines = src.splitlines()
     defs = definitions(src)
-    occurs: dict[str, list[int]] = {}
     whole = norm(" ".join(lines))
+    occurs: dict[str, list[int]] = {}
 
-    claims = harvest(DOC.read_text())
+    claims, unread = harvest(DOC.read_text(), set(defs))
     if not claims:
         print("refmap: parsed no claims out of docs/GENC_REFERENCE_MAP.md."
               " The document changed shape and this check just stopped"
@@ -197,7 +266,7 @@ def main() -> int:
         return 1
 
     stale: list[tuple[Claim, str]] = []
-    tally = {"def": 0, "quote": 0, "path": 0, "text": 0, "range": 0}
+    tally = dict.fromkeys(("def", "quote", "path", "text", "loose"), 0)
     weak = 0
 
     def occurrences(sym: str) -> list[int]:
@@ -207,8 +276,12 @@ def main() -> int:
         return occurs[sym]
 
     def check_def(claim: Claim, spans) -> None:
-        if any(claim.lo <= start <= claim.hi for start, _ in spans):
-            return
+        # Satisfied by sitting inside the definition, or by covering its
+        # first line -- the document cites both whole functions and lines
+        # within them.
+        for start, end in spans:
+            if (claim.lo >= start and claim.hi <= end) or claim.lo <= start <= claim.hi:
+                return
         where = ", ".join(f"{a}" if a == b else f"{a}-{b}" for a, b in spans)
         stale.append((claim, f"`{claim.sym}` is defined at {where}"))
 
@@ -221,8 +294,7 @@ def main() -> int:
             count = len(target.read_text().splitlines())
             if claim.hi > count:
                 stale.append((claim, f"{claim.path} has only {count} lines"))
-                continue
-            if claim.sym and claim.sym in defs:
+            elif claim.sym in defs:
                 tally["def"] += 1
                 check_def(claim, defs[claim.sym])
             else:
@@ -231,9 +303,7 @@ def main() -> int:
         elif claim.kind == "quote":
             tally["quote"] += 1
             want = literal_of(claim.sym)
-            if len(want) < 8:
-                continue
-            if want in norm(" ".join(lines[claim.lo - 1:claim.hi])):
+            if len(want) < 8 or want in norm(" ".join(lines[claim.lo - 1:claim.hi])):
                 continue
             hint = "that sentence is nowhere in the file"
             if want in whole:
@@ -242,8 +312,8 @@ def main() -> int:
                         else "it is in the file, wrapped across other lines")
             stale.append((claim, hint))
 
-        elif claim.kind == "range":
-            tally["range"] += 1
+        elif claim.kind == "loose":
+            tally["loose"] += 1
             if claim.hi > len(lines):
                 stale.append((claim, f"gen_c.py has only {len(lines)} lines"))
 
@@ -260,18 +330,17 @@ def main() -> int:
                 weak += 1
             elif not any(claim.lo <= i <= claim.hi for i in seen):
                 shown = ", ".join(str(i) for i in seen[:6])
-                more = " ..." if len(seen) > 6 else ""
-                stale.append((claim, f"`{claim.sym}` occurs at {shown}{more}"))
+                stale.append((claim, f"`{claim.sym}` occurs at {shown}"
+                                     f"{' ...' if len(seen) > 6 else ''}"))
 
     for claim, why in stale:
         print(f"docs/GENC_REFERENCE_MAP.md:{claim.line}: {claim.shown} -- {why}")
 
     checked = sum(tally.values())
-    print(f"\nrefmap: {checked} claims checked "
-          f"({tally['def']} def, {tally['quote']} quoted, {tally['path']} path, "
-          f"{tally['text']} presence, {tally['range']} range-only"
-          f"{f', {weak} too common to mean much' if weak else ''}), "
-          f"{len(stale)} stale")
+    print(f"\nrefmap: {checked} claims checked ({tally['def']} def, "
+          f"{tally['quote']} quoted, {tally['path']} path, {tally['text']} presence, "
+          f"{tally['loose']} loose{f', {weak} too common to mean much' if weak else ''}), "
+          f"{unread} not read, {len(stale)} stale")
 
     if stale:
         print("  Each line above names where the symbol actually is. A number you\n"
