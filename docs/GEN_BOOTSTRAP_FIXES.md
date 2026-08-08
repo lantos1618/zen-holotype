@@ -16,10 +16,10 @@ it names beside it, compiled as a **directory** — the root is passed to
 ## Where this ledger stands
 
 **Re-measured 2026-08-08 against `6ca27423`**, every entry below turned into a
-complete program and run through BOTH toolchains. **Twelve of fifteen are
-closed.** One is open in the bootstrapper only and was filed far too narrowly;
-one is open in both, is much larger than filed, and is invisible to the
-differential oracle because both implementations agree and both are wrong.
+complete program and run through BOTH toolchains. **Thirteen of sixteen are
+closed.** §5 closed later the same day; closing it uncovered §5b, which was
+added then. The two that remain are open in BOTH implementations, so the
+differential oracle cannot see either: both agree, and both are wrong.
 
 | # | what it claimed | bootstrap | `./zen` |
 |---|---|---|---|
@@ -34,7 +34,8 @@ differential oracle because both implementations agree and both are wrong.
 | 2 | a local `Vec<T>` read back loses its type arguments | **closed** | **closed** |
 | 3 | two modules declaring `Diag` collide on a method name | **closed** | **closed** |
 | 4 | a field named like an unrelated type's field is read-only | **closed** | **closed** |
-| 5 | a `.then` closure capturing several parameters is inlined wrong | **open, and far worse — see below** | **closed** |
+| 5 | a `.then` closure capturing several parameters is inlined wrong | **closed** | **closed** |
+| 5b | an inlined callee's immutable local overwrites the caller's | **open** | **open** |
 | 6 | binding an enum arm's payload to a local types the match `()` | **closed** | **closed** |
 | 7 | a `str` scrutinee against string-literal patterns (= B) | **closed** | **closed** |
 | P | `x * 2` in statement position is parsed as a declaration | **closed** | **closed** |
@@ -46,14 +47,19 @@ what it fixed cannot be re-run — and re-running is the only reason to keep it.
 ### The two to read
 
 **§5 was filed as "a `.then` closure capturing several enclosing parameters is
-inlined wrong".** The capture count is not the trigger and `.then` is not the
-subject. **The bootstrapper's inliner is not hygienic.** `bool.then` is
-`<T>(b: bool, f: () T)`, and a free name `b` or `f` anywhere inside the closure
-is replaced by the caller's own argument — in any position, at any arity, with
-no call at all. `(b > 0).then(() { println("printed {}", b) })` prints `true`.
-It is not about `bool.then` either: a user-written `apply = <T>(gate: bool,
-thing: () T)` corrupts a caller's local named `gate` or `thing` the same way.
-`./zen` is correct throughout.
+inlined wrong", and it was neither the capture count nor `.then`. It is CLOSED
+now; the entry is kept in full because the shape is worth recognising.** The
+bootstrapper's inliner was not hygienic: `bool.then` is `<T>(b: bool, f: () T)`,
+and a free name `b` or `f` anywhere inside the closure resolved to the caller's
+own argument — in any position, at any arity, with no call at all. `(b >
+0).then(() { println("printed {}", b) })` printed `true`. It was not about
+`bool.then` either: a user-written `apply = <T>(gate: bool, thing: () T)`
+corrupted a caller's local named `gate` or `thing` the same way. `./zen` was
+correct throughout, which is what made it a one-lane fix.
+
+**§5b is what closing §5 uncovered**, and it is the one to read now: an inlined
+callee's *immutable* local replaces the caller's binding of that name, for the
+rest of the caller's body, in both implementations.
 
 **§L — "a design gap, not a bug" — is a soundness hole in the shipped
 compiler, and the entry that was filed too generously.** `sema_trap.check_literal`
@@ -393,10 +399,34 @@ anyway ("mutation only ever goes through exported methods"). Nothing named
 
 ## 5. The bootstrapper's inliner is not hygienic
 
-**OPEN IN THE BOOTSTRAPPER ONLY, and filed far too narrowly.** The entry said
-"a `.then` closure capturing several enclosing parameters is inlined wrong",
-and pointed at an argument slot. Neither the capture count nor the slot is the
-trigger.
+**CLOSED.** Fixed in `bootstrap/gen_c.py`; pinned by
+`tests/corpus/std/bool_then_closure_keeps_its_own_names.zen`, which is the
+first corpus test that could name a caller local the callee also binds. The
+whole entry below is kept, because a ledger that deletes what it fixed cannot
+be re-run — and the reproducers here now agree with the `./zen` column.
+
+The mechanism turned out to be one line, and it was not substitution at all.
+`bind_closure` recorded the scope depth by reading `len(self.scopes)` — but
+`inline_call` calls it *after* pushing the callee's frame, so the rewind in
+`inline_lambda` (`self.scopes = self.scopes[:marker[3]]`) kept that frame
+instead of dropping it. The depth is now taken at the call site, before the
+push. C names were never the problem: `FnCtx.declare` already numbers them
+uniquely, so no renaming pass was needed and none was written.
+
+**Scope of the fix, exactly.** It covers every binding that lives in the frame
+`inline_call` pushes: the callee's parameters, the receiver bound under the
+first parameter's name, and the callee's own **mutable** locals, which
+`block_value` puts in that same frame. It does **not** cover a callee's
+immutable local — `held = 77` rather than `held ::= 77` — which still wins over
+a caller's binding of that name, and does so in **both** implementations
+(§5b below). That is a different bug and it is still open.
+
+The original filing follows.
+
+**FILED AS OPEN IN THE BOOTSTRAPPER ONLY, and far too narrowly.** The entry
+said "a `.then` closure capturing several enclosing parameters is inlined
+wrong", and pointed at an argument slot. Neither the capture count nor the slot
+is the trigger.
 
 `bool.then` is declared `<T>(b: bool, f: () T) Res<T>` (`std/core/bool.zen:21`).
 When the bootstrapper inlines it, it substitutes the callee's parameter names
@@ -432,8 +462,9 @@ b_printed = (b: usize) Res<(), AllocError> {
 ```
 
 ```
-bootstrap   b_first 104     n_first 304     printed true
+bootstrap   b_first 104     n_first 304     printed true    <- before the fix
 ./zen       b_first 304     n_first 304     printed 3
+bootstrap   b_first 304     n_first 304     printed 3       <- after
 ```
 
 `b_first` gets `104` because `b` became the receiver `(b > 0)`, which is
@@ -465,6 +496,11 @@ error: 'f' undeclared (first use in this function)
     zg_t4 = zu_f3_4main4Sink3two(&(*zu_l1s), f, ((size_t)4ULL));
 ```
 
+The bare `f` is the closure marker's own first field — `bind_closure` stores
+`(name, ("lambda", ..))`, so a `find` that reached the callee's frame handed
+the *Zen* name back as if it were a C name. After the fix `f_named` compiles
+and prints `304` like the rest.
+
 ### It is not about `bool.then`
 
 Any inlined function taking a lambda does it, including a user's own:
@@ -484,14 +520,14 @@ main = (env: Env) Res<i32, AllocError> {
 
 ```
 bootstrap   main.zen:10:42: cannot print a value of this type
-            thing            gate true       other 5
+            thing            gate true       other 5         <- before the fix
 ./zen       thing 7          gate 9          other 5
+bootstrap   thing 7          gate 9          other 5         <- after
 ```
 
-### What is at risk today
+### What was at risk — now nothing
 
-A scan of every `.then(() { .. })` in the tree for a free `b` or `f` in the
-closure body finds **three sites**, all of one shape:
+The scan is unchanged and still finds exactly **three sites**, all of one shape:
 
 ```
 src/std/build/build.zen:151   (in the doc comment on `Builder.module`)
@@ -499,18 +535,59 @@ example/build.zen:58          .then(() { tests.add(f).try() })
 example/build.zen:70          .then(() { benches.add(f).try() })
 ```
 
-`f` is the loop's value binding, so these break the C compile rather than
-silently lying — but they are the language's own showcase of "test discovery is
-code, not compiler magic", and the shape `std.build` documents is the shape the
-bootstrapper cannot compile. `src/` is otherwise clean: every other `.then`
-either keeps `b`/`f` in the receiver, where it is fine, or uses another name.
+`f` is the loop's value binding, so these used to break the C compile rather
+than silently lie — but they are the language's own showcase of "test discovery
+is code, not compiler magic", and the shape `std.build` documented was the shape
+the bootstrapper could not compile. `src/` was otherwise clean: every other
+`.then` either keeps `b`/`f` in the receiver, where it is fine, or uses another
+name. The reduced form of those three — a `.then` closure reading the enclosing
+`loop`'s own `f` — now runs correctly under both toolchains.
 
-**Workaround, still load-bearing:** `.match({ true => .., false => Ok(()) })`
-in place of `.then`, which the ledger notes reads better anyway. Verified: the
-`.match` spelling of the same program is correct under both toolchains.
+**The workaround is load-bearing for nothing.** `.match({ true => .., false =>
+Ok(()) })` in place of `.then` is now a style preference and not a workaround.
+The 129 `false => Ok(())` arms in `src/` are the ordinary spelling of a
+one-sided conditional in a `Res<(), E>` position, not evasions of this bug: no
+`.then` in `src/` was ever affected, per the scan above.
 
-**No corpus test.** Any test asserting the right value is red under
-`bootstrap`, and `make test` runs the corpus through the bootstrapper.
+**Corpus test:** `tests/corpus/std/bool_then_closure_keeps_its_own_names.zen`.
+It covers the receiver's name (`b`), the closure parameter's name (`f`), a
+user-written callee's two parameter names, and one of that callee's own
+locals. Mutation-verified: restoring the one-line defect turns it red.
+
+## 5b. An inlined callee's IMMUTABLE local overwrites the caller's
+
+**OPEN IN BOTH, found while fixing §5, invisible to the differential oracle
+because both implementations agree and both are wrong.** It is a separate bug
+from §5 and the §5 fix does not touch it: §5 was the closure's *view* of the
+callee frame, this is a binding surviving the frame entirely.
+
+```groovy
+apply = <T>(gate: bool, thing: () T) Res<T> {
+    held = 77;
+    println("callee held {}", held);
+    gate.match({ true => Ok(thing()), false => None });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    held = 7;
+    println("caller held before {}", held);
+    apply(true, () { println("closure held {}", held) });
+    println("caller held after {}", held);
+    Ok(0);
+}
+```
+
+```
+bootstrap   before 7   callee 77   closure 77   after 77
+./zen       before 7   callee 77   closure 77   after 77
+```
+
+`after 77` is the tell, and it has nothing to do with the closure: the caller's
+own next statement reads the callee's binding. Spelling **both** locals `::=`
+instead of `=` gives `before 7 / callee 77 / closure 7 / after 7` under both,
+which is correct — so it is the immutable form specifically. The corpus test
+for §5 therefore uses `::=` for its callee-local case; the `=` shape cannot be
+asserted until this is fixed.
 
 ## 6. Binding an enum arm's payload to a local types the match as `()`
 
