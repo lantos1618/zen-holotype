@@ -239,11 +239,29 @@ The per-keystroke cost is one `zen build src`. The mitigations that are *not* in
 
 **Take (2), and say what it costs.** This is the LSP reaching into the driver, and it is the one place the "thin server over compiler internals" thesis bends. The price is one field on `Build` and the honesty of writing in its comment that the overlay exists for the editor. The alternative — a private copy of `walk` in `src/lsp/` — is the second implementation this whole document exists to prevent.
 
-### Diagnostics have to escape the driver
+#### "One field and one branch" was the wrong estimate — measured 2026-08-08
 
-`publishDiagnostics` needs `Diag` values, not printed lines. Sema is fine (`diag_count`/`diag_at`, `src/sema/sema_check.zen:151,153`). **Lex and parse are not**: `src/zen/zen_build.zen:358` and `:383` `println` them and drop them.
+The interposition really is one field and one branch. **The change is not**, and the difference is why the overlay is still not built: an overlay nothing can observe is not worth landing. Three costs this section never priced, found by an agent sent to build it:
 
-The fix is in the driver, is small, and is worth doing for its own sake: `Build` collects diagnostics into a `Vec` and prints from it. `zen build`'s stdout does not change — which `tests/run.py` and every `must-fail` expectation depend on — and `zen lsp` reads the `Vec`. Doing it any other way means the server re-lexes and re-parses to get positions the driver already had.
+1. **The LSP cannot drive a `Build` at all.** `entry_of`, `walk` and `back_end` are private. The only public entry is `build*`/`run_once`, which returns `Res<i32, AllocError>` — **an exit code**. No tree, no `Checker`, not even the diagnostics `Vec`.
+2. **`check_tree` creates the `Checker` locally and drops it.** Hover reads `expr_memo` off a `Checker`; nothing hands one back. `Build` has to retain it.
+3. **`lsp_hover` has to stop being a single-module check**, and the server has to store `rootUri` — work in `src/lsp/` and `zen.zen`, not the driver.
+
+So the honest price is: 1 field + 1 branch **+ a public build-and-keep entry point + `Build` retaining its `Checker` + a hover rewrite spanning two other files**. Landing only the field adds an unreachable branch to a file already at its 800-line cap.
+
+**The lesson generalises past this section.** The estimate counted the code at the seam and not the code that makes the seam reachable. Any estimate in this document that names a line count should be read as "the edit", never "the change".
+
+### Diagnostics have to escape the driver — **DONE**
+
+`publishDiagnostics` needs `Diag` values, not printed lines. Sema was always fine (`diag_count`/`diag_at`, `src/sema/sema_check.zen:151,153`); **lex and parse were not** — the driver `println`'d them and dropped them.
+
+**Landed 2026-08-08.** `Build` holds `diags: Vec<Diag>` and answers the same `diag_count`/`diag_at` pair `Checker` exports. No fourth struct was invented: `Diag` **is** `parse.parse_diag.Diag`, which that file's own header had already asked for. `report` prints *from* the `Vec` rather than from its argument, so the collection is load-bearing rather than a copy nobody reads — removing it silences the printing and takes all thirteen `must-fail/parse` tests red.
+
+`Diag.note` also escapes now. It was being collected and never printed at all, so every note `diag_at` carried — including `expect_close`'s "the parser gave up here" — was thrown away.
+
+**What this does NOT yet do is publish them.** The diagnostics are values the driver holds; nothing in `src/lsp/` reads them, because reading them needs the same public build entry point the overlay needs. `publishDiagnostics` is blocked behind item 1 above, not behind this.
+
+**Known divergence, unreconciled:** the two compilers anchor the unclosed-delimiter note differently *and* word it differently — `./zen` says `3:24: the parser gave up here` (where the parser stopped), `bootstrap/` says `5:1: \`}\` here closes nothing` (the closer that arrived). A `.expected` asserts one substring plus positions that must all be reported, so **no shared expectation file can assert that note**. Neither anchor is obviously wrong.
 
 ---
 
