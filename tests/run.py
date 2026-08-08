@@ -54,6 +54,7 @@ DIR_EXIT_NAMES = (".exit", "{name}.exit", "main.exit")
 DIR_STDERR_NAMES = (".stderr", "{name}.stderr", "main.stderr")
 DIR_COUNT_NAMES = (".count", "{name}.count", "main.count")
 DIR_STAGE_NAMES = (".stage", "{name}.stage", "main.stage")
+DIR_STDIN_NAMES = (".stdin", "{name}.stdin", "main.stdin")
 
 # What the compiler prints once it is done: `bootstrap: 3 diagnostic(s)`.
 # `.count` is the only assertion that needs it, and it is the only one that
@@ -118,6 +119,12 @@ class Test:
     count_path: Path | None = None
     stage_at: int | None = None
     stage_path: Path | None = None
+    # `.stdin` is fed to the PROGRAM, never to the compiler. A capability is
+    # only tested by exercising it, and `std.env.Stdin` cannot be reached by a
+    # program the harness hands an empty stream. Absent means /dev/null, which
+    # is what every test that does not read stdin still gets.
+    stdin_bytes: bytes | None = None
+    stdin_path: Path | None = None
     is_dir: bool = False
 
     @property
@@ -244,6 +251,7 @@ def _make_test(
     stderr_path: Path | None,
     count_path: Path | None,
     stage_path: Path | None,
+    stdin_path: Path | None,
     is_dir: bool,
 ) -> Test:
     return Test(
@@ -262,6 +270,8 @@ def _make_test(
         count_path=count_path,
         stage_at=_read_stage(stage_path) if stage_path else None,
         stage_path=stage_path,
+        stdin_bytes=_read_bytes(stdin_path) if stdin_path else None,
+        stdin_path=stdin_path,
         is_dir=is_dir,
     )
 
@@ -301,6 +311,7 @@ def collect(tests_dir: Path, into: Collection, kind: str) -> None:
                             _first_existing(child, DIR_STDERR_NAMES, child.name),
                             _first_existing(child, DIR_COUNT_NAMES, child.name),
                             _first_existing(child, DIR_STAGE_NAMES, child.name),
+                            _first_existing(child, DIR_STDIN_NAMES, child.name),
                             is_dir=True,
                         )
                     )
@@ -322,6 +333,7 @@ def collect(tests_dir: Path, into: Collection, kind: str) -> None:
                     stderr_path = child.with_suffix(".stderr")
                     count_path = child.with_suffix(".count")
                     stage_path = child.with_suffix(".stage")
+                    stdin_path = child.with_suffix(".stdin")
                     into.tests.append(
                         _make_test(
                             f"{kind}/{rel}",
@@ -334,6 +346,7 @@ def collect(tests_dir: Path, into: Collection, kind: str) -> None:
                             stderr_path if stderr_path.is_file() else None,
                             count_path if count_path.is_file() else None,
                             stage_path if stage_path.is_file() else None,
+                            stdin_path if stdin_path.is_file() else None,
                             is_dir=False,
                         )
                     )
@@ -466,12 +479,24 @@ class Run:
     signalled: bool
 
 
-def run_process(argv: list[str], timeout: float, cwd: Path | None = None) -> Run:
+def run_process(
+    argv: list[str],
+    timeout: float,
+    cwd: Path | None = None,
+    feed: bytes | None = None,
+) -> Run:
+    """`feed` is the bytes on the process's stdin; None is /dev/null.
+
+    None and b"" are different: an empty pipe is a stream that closes at once,
+    which is what a program reading stdin sees at end of input, while
+    /dev/null is what everything else gets. A test asserting end-of-input
+    behaviour needs the first, so the default cannot be b"".
+    """
     try:
         proc = subprocess.run(
             argv,
             cwd=str(cwd) if cwd else None,
-            stdin=subprocess.DEVNULL,
+            **({"input": feed} if feed is not None else {"stdin": subprocess.DEVNULL}),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
@@ -721,7 +746,7 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
 
     # Run in the work directory: a program that writes a file must not write it
     # into the test tree.
-    prog = run_process([str(binary)], args.run_timeout, cwd=work)
+    prog = run_process([str(binary)], args.run_timeout, cwd=work, feed=test.stdin_bytes)
     if prog.timed_out:
         return Result(test, False, [f"the program timed out after {args.run_timeout}s"])
 

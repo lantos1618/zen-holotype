@@ -74,7 +74,7 @@ zen/
 │   ├── lsp/lsp.zen                  # (4) thin server over sema queries — PARTLY:
 │   │                                #     transport, lifecycle, Full sync and hover.
 │   │                                #     Everything else refused by name; the stdio
-│   │                                #     transport awaits a Stdin capability
+│   │                                #     stdio transport, over std.env.Stdin
 │   ├── meta/meta.zen                # (5) @meta over ast nodes — NOT WRITTEN
 │   ├── comptime/comptime.zen        # (5) the step-budgeted evaluator — NOT WRITTEN
 │   │
@@ -356,7 +356,7 @@ That last one was the only primitive an LSP needs that nothing else does, and th
 
 **What has been built against them: `src/lsp/`, and it is L1 of `docs/design_lsp.md` plus one query.** `initialize`, `shutdown`, Full document sync and `textDocument/hover` — the last one being `expr_node_at` into `expr_memo` into `Types.name_of`, with no new sema — and every other method refused by name with `-32601`. Gated by `corpus/lsp/`, three tests: the UTF-16/byte position conversion driven both ways, a JSON round trip with its rejections, and a recorded frame-by-frame session.
 
-**And one precondition that was NOT on this list turned out to gate the whole stage: there is no stdin.** `Env` has `argv`, `vars`, `out`, `mem`, `fs`, `net`, `threads` and nothing that reads a byte stream, and `Console.println` appends a `\n` a `Content-Length` frame may not carry. So `zen lsp` reads its requests from a FILE and writes its replies to another. The server, the framing and the protocol are real; only the pipe is not, and `design_lsp.md` §4 prices the capability that fixes it.
+**And one precondition that was NOT on this list turned out to gate the whole stage: there was no stdin.** It has since landed — `Env` carries `in: Stdin`, a byte-counted `read` with no line discipline, floored in `src/gen/gen_c/gen_c_stdin.zen` — so **`zen lsp` with no arguments is a real stdio server an editor can launch.** `zen lsp <requests> <replies>` stays because it is what the corpus drives: a test cannot hold a pipe open. `design_lsp.md` §4 records what the capability cost and the one thing it required that nobody had written down — a reader over a blocking `fread` must ask for exactly what the envelope says is missing, or it deadlocks against the client it is answering.
 
 One correctness note that is now load-bearing for this stage as well: `type_of`'s memo key is the node id alone, which is sound only while a generic body is checked once. `src/sema/sema.zen` says it must become `(ExprId, instantiation)` in the same change that makes `T` resolve to an argument. Monomorphisation has since landed, so that key is on the critical path for hover being *correct* inside a generic, not merely fast.
 

@@ -58,6 +58,38 @@ frame_at* = (bytes: str, at: usize) Res<Envelope, FrameFault> {
     })
 }
 
+// How many more bytes the message beginning at `at` needs, and ZERO
+// when that cannot be known yet.
+//
+// THIS IS WHAT MAKES A LIVE TRANSPORT POSSIBLE, and it is here rather
+// than in `lsp_stdio.zen` because it is a question about the envelope.
+// `Stdin.read` reads EXACTLY what it is asked for and blocks until it
+// has it (`src/std/env/env.zen`), so a reader that asks for more than
+// the message holds is waiting for bytes the client will not send until
+// it has been answered — and the client is waiting for that answer.
+// Asking for exactly what is missing cannot deadlock.
+//
+// Zero means "ask for one byte", and one byte always makes progress: the
+// headers have not ended yet, so there is no length to compute from.
+// That is also why this is not simply `frame_at`'s `Short` read backward
+// — a header block still arriving has no `Content-Length` in it at all.
+short_by* = (bytes: str, at: usize) usize {
+    blank_at(bytes, at).match({
+        Err(_)    => 0,
+        Ok(blank) => length_in(bytes, at, blank).match({
+            Err(_) => 0,
+            Ok(n)  => missing(bytes, blank + BLANK_LEN + n),
+        }),
+    })
+}
+
+missing = (bytes: str, end: usize) usize {
+    (end > bytes.len).match({
+        true  => end - bytes.len,
+        false => 0,
+    })
+}
+
 // The offset of the `\r\n\r\n` that ends the header block.
 //
 // Found by scanning for the four bytes rather than by walking lines,

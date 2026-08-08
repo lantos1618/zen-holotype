@@ -39,7 +39,7 @@ Companion to `DESIGN.md`, `PLAN.md` and `TESTING.md`. Those say what the languag
 Five things, and only one of them is about the LSP.
 
 1. **JSON.** Nothing in this tree speaks it. `grep -ril json src/` returns three files and every hit is the word inside a package-name example (`src/std/build/build.zen:48`, `src/ast/ast_node.zen:542`). Cost is priced in §4.
-2. **Reading standard input.** `Env` has `argv`, `vars`, `out`, `mem`, `fs`, `net`, `threads` (`src/std/env/env.zen:147`) and nothing else. There is no stdin capability anywhere in the tree.
+2. ~~**Reading standard input.**~~ **LANDED.** `Env` now has `in: Stdin`, one byte-counted `read` with no line discipline, and its floor is `src/gen/gen_c/gen_c_stdin.zen`. §4 records what it cost and the one thing it turned out to require that this document did not anticipate.
 3. **Writing exact bytes to stdout.** `Console` has exactly one member, `println` (`src/std/env/env.zen:45`), which appends exactly one `\n` (`TESTING.md:73`). A JSON-RPC frame is CRLF-delimited and unterminated.
 4. **The position conversion.** §3. It is small, it is the classic bug, and it lives in one file.
 5. **The server itself**: a document overlay, a dispatch table, and lifecycle state.
@@ -142,9 +142,9 @@ And then `TESTING.md:19`'s oracle, because this is exactly the code it exists fo
 
 stdio, JSON-RPC 2.0, `Content-Length: <n>\r\n\r\n<body>`, `n` in bytes. `Content-Type` is optional and ignored on the way in; not written on the way out.
 
-### Reading — the capability that does not exist
+### Reading — the capability, as built
 
-There is no stdin. `Env` is `argv`, `vars`, `out`, `mem`, `fs`, `net`, `threads` (`src/std/env/env.zen:147`), and `Console` is one `println` (`:45`).
+**This section was the plan; what follows is what landed, and the two differ in one important place.** `Env` now carries `in: Stdin` beside `out: Console`.
 
 This is a **capability**, so it is added the way `Fs` was and for the reason `src/std/env/env.zen:83` gives: "Every member added here is a member the self-hosted compiler has to keep working forever." The narrowest member that can carry JSON-RPC:
 
@@ -156,15 +156,23 @@ Stdin* = {
 
 Blocking, byte-counted, no line discipline — a `Content-Length` body is bytes and a reader that splits on newlines corrupts it. **No `read_line`.** The framing header is found by reading and scanning, which the server does anyway.
 
-Cost: one declaration with no body in `src/std/env/env.zen`, plus its floor in `gen_c`. `src/gen/gen_c/gen_c_cap.zen` is the file that writes bodies for exactly this class of member and its header says so; `src/gen/gen_c/gen_c_fs.zen` is 467 lines for four `Fs` members over `fopen`/`stat`. One blocking `fread` from `stdin` is a small fraction of that — call it 60–90 lines of emitted-C plumbing plus the dispatch entry.
+Cost, as estimated: one declaration with no body in `src/std/env/env.zen`, plus its floor in `gen_c`, at 60–90 lines. **Actual: `src/gen/gen_c/gen_c_stdin.zen`, 253 lines holding the lowering *and* the emitted C**, plus six lines of recognition in `gen_c_cap.zen` and a `needs` flag in `gen_c_state.zen`. It is its own file rather than an addition to `gen_c_cap.zen` for a boring reason and a good one: `gen_c_runtime.zen` was 37 lines under the 800-line cap, and one capability is one subject.
+
+**`Vec.reserve` was not in the estimate and the capability cannot exist without it.** `read` has no `Alloc`, so by law 1 it has no memory, so it can only fill capacity that already exists — the room is the caller's to make. Asking for more than there is comes back `Full`, which is not a short read: at the one place a caller must be able to tell truncation from end of input, the two must not look alike.
+
+**And the sentence this document got wrong: `read` reads EXACTLY `n` bytes and blocks until it has them.** "Blocking, byte-counted" was written as though a pipe hands over what it has; `fread` does not, and C offers no way to ask how many bytes a stream holds. So a reader that asks for a fixed chunk waits for bytes the client will not send until it has been answered, while the client waits for that answer — a deadlock with no visible cause. The fix is `short_by` in `src/lsp/lsp_frame.zen`: **ask the envelope how many bytes are missing and read exactly that many**, one byte at a time while the headers are still arriving. Any future reader of a stream in this language has the same obligation.
+
+**One line of the C floor is load-bearing and is not about reading at all: `fflush(stdout)` before the `fread`.** C block-buffers a stdout that is not a terminal, so a server that answers and then blocks is holding its own answer. C99 permits an implementation to flush interactive streams at a blocking read; doing it explicitly makes it true for a pipe.
 
 ### Writing — the floor already exists
 
 `src/gen/gen_c/gen_c_runtime.zen:171` already emits `zg_print_bytes(const char *s, size_t n) { fwrite(s, 1, n, stdout); }` and `:172` the `zg_str` form. So exact-byte output is already in the runtime and only the Zen-side signature is missing.
 
-The design-correct move is not a new member on `Console` but the one `DESIGN.md:213` already names: **"a console is a sink, a `String` is a sink."** `Sink` is declared at `src/std/core/io.zen:28` with `write` and `write_byte`. Adding `Console.impl(Sink, ..)` gives byte-exact output *and* makes `Console` usable everywhere a `Sink` is, which is the shape the language already committed to.
+**And nothing had to be added: the `print` sugar already writes exact bytes.** `src/gen/gen_c/gen_c_print.zen:52` recognises `print` beside `println` and `:105` appends the newline only for the second, so `print(s)` is `fwrite(s.data, 1, s.len, stdout)` and nothing else. That landed with the print floor and this document did not notice it. `L0`'s "byte-exact stdout" was already done.
 
-**Cost to accept knowingly:** an impl of a bound is a fat value, and `src/gen/gen_c/gen_c_cap.zen:27` records that this backend "does not build one yet" for `Alloc` — the same refusal will meet `Console.impl(Sink, ..)`. If it does, the fallback is a bare `Console.write*` member lowered beside `println` in `src/gen/gen_c/gen_c_print.zen`, with a comment saying it is the `Sink` member in advance of the machinery. **That refusal is the single most likely thing to block L1, and it should be probed on day one rather than discovered in week three.**
+The `Sink` question below therefore did not gate L1 and is still open on its own merits: `DESIGN.md:213` says "a console is a sink, a `String` is a sink", and `Console.impl(Sink, ..)` would make `Console` usable everywhere a `Sink` is.
+
+**Cost to accept knowingly, when someone does it:** an impl of a bound is a fat value, and `gen_c_cap.zen`'s header records that this backend "does not build one yet" for `Alloc`. ~~That refusal is the single most likely thing to block L1~~ — it blocked nothing, because `print` was already there.
 
 ### JSON — what it costs
 
@@ -367,7 +375,7 @@ Every gate below is a `make` target or a suite under `tests/`, in the format `TE
 
 Stdin, and byte-exact stdout. Before any protocol code.
 
-**Gate:** a corpus test that reads its own stdin and writes the bytes back with no newline added, byte-compared. And the existing gates stay green — `make test`, `make fixpoint` — because a new capability member is a change to `std` and to `gen_c`, and `TESTING.md:11` says what the fixpoint is worth. **Break it on purpose:** make the write append a newline and watch the byte comparison fail.
+**Gate, and it is green:** `tests/corpus/env/stdin_echoes_its_bytes_exactly` reads its own stdin and writes the bytes back with no newline added, byte-compared. The harness could not feed a program stdin at all; `.stdin` is the sidecar that was added for it, and `docs/TESTING.md` names it. And the existing gates stay green — `make test`, `make fixpoint` — because a new capability member is a change to `std` and to `gen_c`, and `TESTING.md:11` says what the fixpoint is worth. **Break it on purpose:** make the write append a newline and watch the byte comparison fail.
 
 ### L1 — transport, lifecycle, sync, diagnostics
 
@@ -407,7 +415,7 @@ Semantic tokens with resolution, signature help, rename.
 
 Listed rather than guessed, per `PLAN.md:5`.
 
-1. **Does `Console.impl(Sink, ..)` compile today?** `src/gen/gen_c/gen_c_cap.zen:27` says the backend does not build a fat value for a bound yet, and names `Alloc` as the first capability to walk through that door. Whether `Console` meets the same refusal decides between a clean `Sink` impl and a bare `Console.write*` member. **Probe this first; it gates L0.**
+1. ~~**Does `Console.impl(Sink, ..)` compile today?**~~ **Moot for L1.** The `print` sugar already writes exact bytes, so L0 needed no new writer at all. The `Sink` impl remains worth doing and is no longer on anyone's critical path.
 2. **Where does JSON live?** `STYLE.md`'s stranger test says `std.json`; `src/std/env/env.zen:83`'s rule about members the compiler must keep working forever says not in `std`. This document picks `src/lsp/lsp_json.zen` with a note. Someone should overrule it or ratify it.
 3. **Should `Pos` carry a byte offset?** `src/lex/lex_token.zen:26` has one and `src/ast/ast_span.zen:25` does not. Adding one to the AST's `Pos` makes the §3 conversion cheaper and slicing source off a span direct — and it is one more word on every position in the tree, which `src/AST_CONTRACT.md` was careful about for trivia. Not resolvable from the tree: it needs a measurement.
 4. **What is the server's compilation root when `rootUri` is a directory with no entry?** `DESIGN.md:406` gives `zen build <root> --entry <file>` for exactly this, and `src/zen/zen_build.zen:184` probes `main`, then the root's basename, then `zen`. An editor opening a single file outside any root has none of those. Is that an error, a diagnostic, or a degraded mode that lexes and does not check?

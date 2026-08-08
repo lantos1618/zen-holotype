@@ -1956,6 +1956,8 @@ class Emitter:
             parts.append(PRELUDE_PRINT)
         if "fs" in self.needs:
             parts.append(PRELUDE_FS)
+        if "stdin" in self.needs:
+            parts.append(PRELUDE_STDIN)
         for name in sorted(self.helpers):
             parts.append(HELPERS[name])
         return "".join(parts)
@@ -4604,6 +4606,67 @@ class FnCtx:
         for _name in chain[:-1]:
             self.close()
 
+    def lower_stdin(self, decl, fnode, node, argnodes, receiver):
+        """`Stdin.read` -- the one way a byte stream enters a program.
+
+        env.zen writes it as a signature and says why: it is the authority
+        itself, reached only as `env.in`.  The floor is `fread` on stdin,
+        which is plain C99, so it is a `needs` of its own and not the
+        filesystem's -- a program reading a pipe must not be handed
+        <sys/stat.h> for it.
+
+        IT ALLOCATES NOTHING.  There is no Alloc in the signature, so by law 1
+        there is no memory either: it fills the SPARE CAPACITY of a run the
+        caller already owns, and `Vec.reserve` is what makes that room.  The
+        buffer arrives BY ADDRESS because the parameter is written `::`, and
+        the three fields it reads are the ones that say where the run is, how
+        much of it is written, and how wide it is.
+        """
+        if len(argnodes) != 2:
+            return None
+        base = decl.scope_parts
+        ret = self.e.resolve_type(self.e.ret_of(fnode), {}, base)
+        params = self.e.params_of(fnode)
+        vty = self.e.resolve_type(f(params[1], "ty"), {}, base) if len(params) > 1 else None
+        dm, _dt = self.field_of(vty, "data")
+        lm, _lt = self.field_of(vty, "len")
+        cm, _ct = self.field_of(vty, "capacity")
+        if dm is None or lm is None or cm is None:
+            self.e.error(node, "Stdin.read must take a Vec<u8>")
+            return ("0", ret)
+        self.e.needs.add("stdin")
+
+        info = self.e.enum_info(ret)
+        ety = dict(info[2]).get("Err") if info else None
+        buf = self.new_tmp(("ptr", vty))
+        want = self.new_tmp(prim("usize"))
+        got = self.new_tmp(prim("usize"))
+        rc = self.new_tmp(prim("i32"))
+        out = self.new_tmp(ret)
+        self.line("%s = &(%s);" % (buf, self.value(argnodes[0], vty)))
+        self.line("%s = %s;" % (want, self.value(argnodes[1], prim("usize"))))
+        self.line("%s = zg_stdin_read((unsigned char *)%s->%s, %s->%s, %s->%s, %s, &%s);"
+                  % (rc, buf, dm, buf, lm, buf, cm, want, got))
+        # the two failures a byte-counted read has, and no more: the room was
+        # too small, or the stream broke.  END OF INPUT IS NEITHER -- it is
+        # Ok(0) -- so there is no third arm and nothing here reports it.
+        self.open("if (%s == ZG_IO_FULL) {" % rc)
+        self.line("%s = %s;" % (out, self.make_variant(
+            ret, "Err", self.make_variant(ety, "Full", None))
+            if ety is not None else self.make_variant(ret, "Err", None)))
+        self.close("} else { if (%s != 0) {" % rc)
+        self.indent += 1
+        self.line("%s = %s;" % (out, self.make_variant(
+            ret, "Err", self.make_variant(ety, "Closed", None))
+            if ety is not None else self.make_variant(ret, "Err", None)))
+        self.close("} else {")
+        self.indent += 1
+        self.line("%s->%s = %s->%s + %s;" % (buf, lm, buf, lm, got))
+        self.line("%s = %s;" % (out, self.make_variant(ret, "Ok", got)))
+        self.close()
+        self.close()
+        return (out, ret)
+
     def lower_fs(self, decl, fnode, node, argnodes, receiver):
         """`Fs`'s three members ARE the backend.
 
@@ -4759,6 +4822,10 @@ class FnCtx:
                 return got
         if decl.owner == "Fs" and decl.name in ("read", "write", "exists", "is_dir"):
             got = self.lower_fs(decl, fnode, node, argnodes, receiver)
+            if got is not None:
+                return got
+        if decl.owner == "Stdin" and decl.name == "read":
+            got = self.lower_stdin(decl, fnode, node, argnodes, receiver)
             if got is not None:
                 return got
         """The bodyless declarations whose bodies ARE the backend.
@@ -6167,6 +6234,41 @@ static void zg_print_u64(uint64_t v) { fprintf(stdout, "%llu", (unsigned long lo
 static void zg_print_f64(double v) { fprintf(stdout, "%g", v); }
 static void zg_print_bool(bool v) { zg_print_bytes(v ? "true" : "false", v ? 4u : 5u); }
 static void zg_print_nl(void) { fputc('\\n', stdout); }
+
+"""
+
+PRELUDE_STDIN = """\
+/* Standard input, and the only way a byte stream reaches a program.  Plain
+ * C99 -- fread on stdin needs no POSIX header -- which is why it is not part
+ * of the filesystem block below.
+ *
+ * It allocates nothing: `Stdin.read` has no Alloc in its signature, so by law
+ * 1 it may not have any memory either.  It fills the spare capacity of a run
+ * the caller already owns, and asking for more than there is comes back Full
+ * rather than short -- a truncated read is indistinguishable from end of
+ * input at the one place a caller must be able to tell them apart.
+ *
+ * ZERO IS END OF INPUT AND NOT A FAILURE.  fread answers 0 for both a closed
+ * stream and an error, so ferror is what separates them.
+ *
+ * IT FLUSHES STDOUT BEFORE IT BLOCKS, and that one line is what makes a
+ * request/response server over two pipes work at all: C block-buffers a stdout
+ * that is not a terminal, so a program that answers and then waits is holding
+ * its own answer while the peer waits for it. */
+#define ZG_IO_OK 0
+#define ZG_IO_CLOSED 1
+#define ZG_IO_FULL 2
+
+static int zg_stdin_read(unsigned char *base, size_t len, size_t cap,
+                         size_t n, size_t *got) {
+    *got = 0;
+    if (n > cap - len) return ZG_IO_FULL;
+    if (n == 0) return ZG_IO_OK;
+    fflush(stdout);
+    *got = fread(base + len, 1, n, stdin);
+    if (*got == 0 && ferror(stdin)) return ZG_IO_CLOSED;
+    return ZG_IO_OK;
+}
 
 """
 

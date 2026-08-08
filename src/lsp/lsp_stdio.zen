@@ -1,0 +1,169 @@
+// src/lsp/lsp_stdio.zen
+// The transport: `Content-Length` frames over a pipe.
+//
+// `lsp_serve.zen` is the server and holds no transport at all — `one`
+// takes bytes and appends bytes. This file is the only thing between it
+// and an editor, and it is small on purpose: everything it does is read
+// bytes, hand complete frames over, and print what comes back.
+//
+// THE FRAMING IS NOT REDONE HERE. `lsp_frame.zen` answers "where does
+// this message end", and over a live stream its `Short` and `NoBlank`
+// stop being faults: a header block that has not ended and a body
+// shorter than its own `Content-Length` are bytes still in flight.
+// `partial` is that reading and it is the ONLY thing this file knows
+// about framing that the framing file does not.
+//
+// NOTHING IS WRITTEN WITH `println`. It appends exactly one `\n` and a
+// frame may not have one — that single byte is the whole reason
+// `design_lsp.md` section 4 called exact-byte output a missing piece.
+// `print` is the same writes without the newline.
+//
+// THE INPUT BUFFER ONLY GROWS. It is an arena's memory and the arena is
+// the session's, exactly as `Server.docs` is: nothing here is freed
+// before the process ends. A transport that reclaimed it would need a
+// `Vec` that can shrink and a document map that copies, and
+// `lsp_serve.zen`'s header already names the second as the cost of the
+// first.
+
+str, String, str_at = std.text
+Vec = std.collections
+Alloc, AllocError = std.mem
+FrameFault, frame_at, short_by = lsp.lsp_frame
+Server, frame_byte, frame_why = lsp.lsp_serve
+
+// How far a drain got, and whether the framing still made sense.
+Drain* = {
+    at*: usize,
+    framed*: bool,
+}
+
+// One session, until the stream closes or `shutdown` is answered.
+//
+// THE READ COMES FIRST AND THE ANSWERS SECOND, every time round, which
+// is what makes a frame split across two reads work: the bytes are
+// appended, and the drain simply finds one more complete message than it
+// did last time.
+//
+// EACH READ ASKS FOR EXACTLY WHAT THE ENVELOPE SAYS IS MISSING — that is
+// `short_by`, and `lsp_frame.zen` says why it cannot be a fixed chunk.
+serve_stdio* = (env: Env, a: Alloc) Res<i32, AllocError> {
+    server ::= a.Server();
+    held ::= a.Vec<u8>();
+    at ::= 0;
+    open ::= true;
+    framed ::= true;
+    loop(() { open && framed && !server.stopped() }, (h) {
+        seen = str_at(held.ptr(), held.len);
+        open = arrived(env, held, short_by(seen, at)).try();
+        d = drain(server, a, str_at(held.ptr(), held.len), at).try();
+        at = d.at;
+        framed = d.framed;
+    });
+    Ok(exit_code(server.stopped(), framed));
+}
+
+// `n` more bytes from stdin onto the end of `held`; `false` is end of
+// input.
+//
+// THE ROOM IS MADE FIRST. `Stdin.read` has no `Alloc`, so it can only
+// fill capacity that already exists, and asking for more than there is
+// comes back `Full` rather than short.
+//
+// A read that FAILS ends the session exactly as a read of zero does:
+// there is no client left to answer, and a server that kept looping on a
+// broken pipe would spin instead of exiting.
+arrived = (env: Env, held :: Vec<u8>, n: usize) Res<bool, AllocError> {
+    want = at_least_one(n);
+    held.reserve(want).try();
+    env.in.read(held, want).match({
+        Err(_)  => Ok(false),
+        Ok(got) => Ok(got > 0),
+    })
+}
+
+// Never zero. A read of nothing touches the stream, learns nothing and
+// comes back — a loop that did it would spin. One byte always makes
+// progress, and it is what a header block being scanned asks for anyway:
+// there is no `Content-Length` to compute a length from until it ends.
+at_least_one = (n: usize) usize {
+    (n == 0).match({ true => 1, false => n })
+}
+
+// Every complete frame in `held` from `at`, answered to stdout.
+//
+// It stops at the first fault of either kind. A PARTIAL one is not a
+// fault at all here — the next read is what fixes it — and a real one
+// ends the session, because the only thing that says where the next
+// message starts is the header of this one and skipping forward would
+// resynchronise onto a byte inside somebody's document.
+drain = (server :: Server, a: Alloc, held: str, at: usize)
+        Res<Drain, AllocError> {
+    from ::= at;
+    more ::= true;
+    framed ::= true;
+    loop(() { more && from < held.len }, (h) {
+        frame_at(held, from).match({
+            Ok(fr) => { from = fr.next; answered(server, a, fr.body).try(); },
+            Err(f) => { more = false; framed = partial(f); fault_line(f, framed); },
+        });
+    });
+    Ok(Drain(at: from, framed: framed));
+}
+
+// One message in, its reply out, and nothing between them.
+//
+// THE BODY IS COPIED FIRST, and this is the one line the transport
+// cannot leave out. `held` is reallocated by the next read, and the
+// server keeps `str`s that point into whatever it was handed — the open
+// documents are exactly that. A borrowed frame would leave the document
+// map pointing at freed pages one keystroke later.
+answered = (server :: Server, a: Alloc, body: str) Res<(), AllocError> {
+    kept ::= a.String().try();
+    kept.add_bytes(body).try();
+    out ::= a.String().try();
+    server.one(kept.view(), out).try();
+    // A NOTIFICATION PRODUCES NO BYTES and this prints none: the
+    // protocol forbids replying to one, and a client counting replies
+    // would desynchronise on anything at all.
+    print(out.view());
+    Ok(());
+}
+
+// Is this fault "the rest has not arrived yet"?
+//
+// Over a buffer `serve` treats every fault as the end of the session,
+// and over a live stream two of them are not faults: a header block that
+// has not ended, and a body shorter than its own `Content-Length`. The
+// other two are a client speaking a protocol this is not.
+partial = (f: FrameFault) bool {
+    f.match({
+        NoBlank(_)   => true,
+        Short(_)     => true,
+        NoLength(_)  => false,
+        BadLength(_) => false,
+    })
+}
+
+// A real framing fault, said once, to the same stream the replies went
+// to — because a client that cannot be framed cannot be replied to
+// either, and `println` here is correct precisely where `print` was
+// correct above: this is a line of text and not a frame.
+fault_line = (f: FrameFault, framed: bool) () {
+    framed.match({
+        true  => (),
+        false => println("lsp: bad frame at byte {} ({})",
+                         frame_byte(f), frame_why(f)),
+    });
+}
+
+// `exit 0` when `shutdown` was answered, and 1 otherwise, which is the
+// protocol's own rule for `exit` read one step earlier: this server
+// stops reading the moment it answers `shutdown`, so it never sees the
+// `exit` that follows.
+//
+// A stream that closed under a running server is the SAME answer as a
+// client that went away without asking, and so is a broken frame. One
+// is not more of a success than the other.
+exit_code = (stopped: bool, framed: bool) i32 {
+    (stopped && framed).match({ true => 0, false => 1 })
+}

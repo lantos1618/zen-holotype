@@ -110,6 +110,12 @@ CBackend* = {
     // program that never opens a file must not pay for them.
     fs_used :: bool,
 
+    // did anything read standard input? Its own flag and not `fs_used`,
+    // because the stdin floor is plain C99 `fread` and the filesystem
+    // floor is the POSIX one — a program that reads a pipe must not be
+    // handed `<sys/stat.h>` for it.
+    stdin_used :: bool,
+
     // the functions to lower, and the ones already lowered.
     //
     // REACHABILITY, NOT THE WHOLE TREE. A compilation stages the whole
@@ -302,6 +308,14 @@ CBackend* = {
     need_fs* = (self :: @Self) () { self.fs_used = true; }
 
     uses_fs* = (self: @Self) bool { self.fs_used }
+
+    // -----------------------------------------------------------------
+    // the stdin floor
+    // -----------------------------------------------------------------
+
+    need_stdin* = (self :: @Self) () { self.stdin_used = true; }
+
+    uses_stdin* = (self: @Self) bool { self.stdin_used }
 
     // -----------------------------------------------------------------
     // the block stack, and what each block must destroy
@@ -715,6 +729,7 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         helper_types: a.Vec<String>(),
         print_used: false,
         fs_used: false,
+        stdin_used: false,
         scope_used: false,
         defer_envs: a.Vec<String>(),
         defer_env_ids: a.Vec<usize>(),
