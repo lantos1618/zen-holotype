@@ -321,9 +321,13 @@ def main() -> int:
         elif claim.kind == "quote":
             tally["quote"] += 1
             want = literal_of(claim.sym)
-            if len(want) < 8 or want in norm(" ".join(lines[claim.lo - 1:claim.hi])):
+            if len(want) < 8:
                 continue
+            # Where the sentence STARTS is what the claim names; it may
+            # wrap past `hi`, so the span is not searched directly.
             at = quote_line(want, lines) if want in whole else None
+            if at is not None and claim.lo <= at <= claim.hi:
+                continue
             stale.append((claim, f"it reads at {at}" if at
                           else "that sentence is nowhere in the file"))
 

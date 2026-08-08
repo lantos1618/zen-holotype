@@ -692,29 +692,29 @@ The module docstring 7-24 is the binding contract. Every emission site sorts. Co
 | line | what | key |
 |---|---|---|
 | 362 | union `tcode` members | `sorted(tcode(m) for m in t[1])` — string sort of member codes |
-| 390 | `union_of` normalisation | `key=tcode` |
+| 398 | `union_of` normalisation | `key=tcode` |
 | 551 | `modules_of` | `key=lambda pair: pair[0]` (module path tuple) |
 | 1132 | trait deps | `sorted(set(deps))` (mangled type names) |
-| 1185 | `_deps` | `sorted(set(out))` |
+| 1286 | `_deps` | `sorted(set(out))` |
 | 1600 | `emit()` roots | `key=lambda d: d.parts` |
-| 1618 | `drain()` worklist | `key=lambda item: item[0]` (mangled cname) |
+| 1718 | `drain()` worklist | `key=lambda item: item[0]` (mangled cname) |
 | 1856 | prototypes | `sorted(self.protos)` (cname) |
 | 1859 | definitions | `sorted(self.bodies)` (cname) |
 | 1870 | arithmetic helpers | `sorted(self.helpers)` (helper name) |
 | 1887, 1890 | defer capture structs and union members | `sorted(self.defer_envs)` (site number) |
-| 1903 | `emit_types` todo | `sorted(self.types)` |
+| 2045 | `emit_types` todo | `sorted(self.types)` |
 | 1909 | forward typedefs | `sorted(self.types)` |
 | 1914 | enum tag constants | `sorted(self.consts)` (mangled constant name) |
 | 1917 | type bodies | `self.topo(sorted(bodies))` |
-| 1932, 1934 | `topo` ready set / cycle break | `sorted(...)` by name |
+| 2070, 2070 | `topo` ready set / cycle break | `sorted(...)` by name |
 | 1991 | union member layout | `key=tcode` |
-| 2008 | `entry_point` main pick | `key=lambda d: d.parts` |
-| 3209 | `trait_methods` | `key=lambda d: d.parts` |
-| 3363 | `pick_overload` candidates | `key=lambda d: d.parts` |
-| 3940 | `free_fn` | `key=lambda d: d.parts` |
-| 3959 | `sink_door` | `key=lambda d: d.parts` |
-| 4700 | `console_sink` Sink lookup | `key=lambda d: d.parts` |
-| 5610 | `_checked_helpers` table build | `sorted(INT_LIMITS.items())` |
+| 2190 | `entry_point` main pick | `key=lambda d: d.parts` |
+| 3556 | `trait_methods` | `key=lambda d: d.parts` |
+| 3716 | `pick_overload` candidates | `key=lambda d: d.parts` |
+| 4301 | `free_fn` | `key=lambda d: d.parts` |
+| 4315 | `sink_door` | `key=lambda d: d.parts` |
+| 5316 | `console_sink` Sink lookup | `key=lambda d: d.parts` |
+| 6441 | `_checked_helpers` table build | `sorted(INT_LIMITS.items())` |
 
 Other determinism mechanisms:
 
