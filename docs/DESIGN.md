@@ -411,6 +411,18 @@ The two halves fit together because they answer different questions. A bare name
 
 *There is no operator overloading.* `==` through `Eq` is the only operator that dispatches to an impl, so `a + b` on a `Duration` is not writable and a module that wants it writes `add`. Whether arithmetic operators should dispatch is a real question — it is the difference between a `Duration` reading like a number and reading like a record — but it is a language decision, and until it is made, a comment promising `+ - * /` on a struct is describing a language this is not.
 
+*And this document does not say what `a + b` MEANS when `a` and `b` have different types.* That silence is not harmless, because both implementations have an answer and nobody chose it. **Measured 2026-08-08, both toolchains:**
+
+```groovy
+f = (a: i32, b: str) i32 { a + b }        // ACCEPTED by ./zen AND by bootstrap/
+```
+
+The emitted C then fails to compile — `incompatible type for argument 2 of 'zg_add_i32'` — so the user's first news of a type error in the most common expression in any language is a C diagnostic naming a mangled internal function.
+
+**The rule both implementations actually follow is: a binary operator takes its LEFT operand's type, and the right operand is never checked against it.** Everything else observed follows from that one sentence: `(a: f64, b: bool) f64 { a * b }` is accepted and prints `2.5`; `(a: i32, b: bool) i32 { a + b }` prints `8`; and `(a: u8, b: i64) i64 { a + b }` *is* refused — not because the operands disagree, but because the expression types as `u8` and the declared return is `i64`. The check that appears to exist is the return check doing its job.
+
+Because both implementations agree, **the differential oracle is blind to this**, and it survived every suite. It is recorded here rather than in a bug ledger because the root cause is this document: a language that has `+` must say what `+` requires of its operands, and this one never did. The decision is upstream of the fix — implicit numeric widening, explicit `.to_f64()` conversions only (which is what the tree's no-`as`-cast rule implies), or something between — and it belongs to whoever owns the language, not to whoever next edits `sema_type.zen`.
+
 *There is no `Ord`.* `std.core` has `Eq` and `Hash` and nothing that orders. Adding one is not a fifth trait beside them: **`Ord` and `Eq` must agree**, exactly as `Eq` and `Hash` must, and a type where `eq` says equal while `compare` says less is a sorted container that loses rows. Whichever is sealed in terms of the other, the relationship is the design.
 
 *A clock is authority and a duration is not.* `Duration`, `Instant`, `Timestamp` and a broken-down civil time are values — no `Env`, constructible in a test, no capability. A `Clock` that reads one, and the timers it schedules, need `Ref` and `Context` and therefore the actor runtime. They do not belong in the same module: `std.core` sits below everything, and a `Clock` declared there would make the prelude's core depend on stage 5. It is also what makes "comptime has no clock" true by construction rather than by convention — comptime has no `Env`, and now no import path to one.
