@@ -168,8 +168,29 @@ return_fits = (c :: Checker, blk: Block, id: ExprId, got: TyId, want: TyId)
 refuse_return = (c :: Checker, blk: Block, node: Expr, got: TyId,
                  want: TyId) Res<(), AllocError> {
     c.types.at(want).match({
-        Res(r) => hoist_into_res(c, node.span.file, node.span, got, want, r),
+        Res(r) => res_return(c, blk, node, got, want, r),
         _      => wrong_return(c, blk, node, got, want),
+    })
+}
+
+// A TAIL THAT IS ALREADY A `Res` IS NOT A HOISTING QUESTION. Hoisting
+// asks whether a bare value can be LIFTED into a `Res`; a tail that is
+// one has nothing to lift, and `assignable` has already answered
+// whether it fits. So the two go to different places.
+//
+// THIS CHANGES NOTHING TODAY and is written down so the next reader
+// does not mistake it for a fix. `wrong_return` reports only a `()`
+// tail — the general "the tail fits the return type" rule is blocked on
+// `str` being both a prim and a struct, which the comment below sets
+// out. Until that lands, `Err("not an error at all")` still closes a
+// function declared `Res<i32, Error>`, putting a `str` in a slot typed
+// as an error set. What this does buy is that the routing is right, so
+// turning the general rule on is one edit rather than two.
+res_return = (c :: Checker, blk: Block, node: Expr, got: TyId,
+              want: TyId, r: TyRes) Res<(), AllocError> {
+    c.types.at(got).match({
+        Res(_) => wrong_return(c, blk, node, got, want),
+        _      => hoist_into_res(c, node.span.file, node.span, got, want, r),
     })
 }
 
