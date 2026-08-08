@@ -100,6 +100,7 @@ SemaFault* =
     | ImplMissingField(NameFault)      // an impl supplies every field, or it is not one
     | AmbiguousMember(PairFault)       // two impls, no bound in scope to choose
     | BoundNotSatisfied(TypeFault)     // no impl of the bound
+    | EqNeedsImpl(TypeFault)           // `==` dispatches to `Eq`, and there is none
     | ComputedFieldAssign(NameFault)   // no storage, so nothing to assign into
     | ComputedFieldAddress(NameFault)  // no storage, so no address exists
 
@@ -170,22 +171,23 @@ message* = (fault: SemaFault) str {
         NotExported(_)       => "a name crosses a module boundary only with `*`",
         NotWritable(_)       => "`*` on a field means readable outside the module: mutation goes through exported methods",
         ModuleNotAValue(_)   => "a module is only usable qualified",
-        NoSuchField(_)       => "no such field or method on this type",
+        NoSuchField(_)       => "a member is resolved on the receiver's type, so a name declared on another type is not a candidate",
         TypeMismatch(_)      => "type mismatch",
         NotCallable(_)       => "this is not a function, so it cannot be called",
         LiteralOutOfRange(_) => "out of range: a literal's type comes from its context, and the context here cannot hold it",
         NoOverload(_)        => "no overload matches: resolution is on declared parameter types and arity",
         DuplicateSignature(_) => "duplicate signature: parameter names are documentation, not identity",
         AmbiguousOverload(_) => "ambiguous overload: a generic parameter swallows a concrete one, so these two can never be told apart at a call site",
-        ImplMissingField(_)  => "impl is missing a field: an impl supplies a value for every field the bound declares",
+        ImplMissingField(_)  => "impl is missing field",
         AmbiguousMember(_)   => "ambiguous: two impls supply this name and no bound in scope selects one",
         BoundNotSatisfied(_) => "bound not satisfied: this type has no impl of the bound, so it has none of the fields the bound promises",
+        EqNeedsImpl(_)       => "`==` needs an `Eq`: equality dispatches to the impl, so write one or compare the parts",
         ComputedFieldAssign(_) => "cannot assign to a computed field: an impl-supplied field has no storage, so there is nothing to assign into",
         ComputedFieldAddress(_) => "cannot take the address of a computed field: there is no storage, so no address exists",
         TryOutsideRes(_)     => "`.try()` in a function that does not return Res: try unwraps Ok or returns the failure from the enclosing function, so there must be somewhere to return it to",
         TryNeedsRes(_)       => "`.try()` needs a Res",
         TryAbsenceIntoFailure(_) => "a None never becomes an Err: name the reason with `.ok_or(..)` first",
-        NoErrorConversion(_) => "no implicit error conversion: widen the declared set, there is no From",
+        NoErrorConversion(_) => "no implicit error conversion: this failure cannot propagate into the declared set, so widen the declaration — there is no From",
         InferredSetExported(_) => "inferred error set on an exported function: `*` means this name crosses a module boundary, so its type is written, not inferred",
         HoistAmbiguous(_)    => "cannot be hoisted: hoisting fires only when exactly one variant carries the type, so write the variant out",
         HoistNotSuccess(_)   => "only success lifts into Res: failure stays visible, so this must be written out",
@@ -233,7 +235,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         NotWritable(f)            => write_unwritable(out, f),
         ModuleNotAValue(f)        => write_module(out, f),
         NoOverload(f)             => out.write_name(f),
-        ImplMissingField(f)       => out.write_name(f),
+        ImplMissingField(f)       => write_missing(out, f),
         ComputedFieldAssign(f)    => out.write_name(f),
         ComputedFieldAddress(f)   => out.write_name(f),
         InferredSetExported(f)    => out.write_name(f),
@@ -254,7 +256,8 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         NeedsMutableReceiver(f)   => write_place(out, f, " needs a mutable receiver, so every link from the binding to it must permit the write"),
         PartiallyMoved(f)         => write_place(out, f, " is partially moved, so the drop has a hole: move the whole value or none of it"),
 
-        NoSuchField(f)            => write_types(out, types, f),
+        NoSuchField(f)            => write_member(out, types, f),
+        EqNeedsImpl(f)            => write_needs_eq(out, types, f),
         TypeMismatch(f)           => write_types(out, types, f),
         NotCallable(f)            => write_types(out, types, f),
         BoundNotSatisfied(f)      => write_types(out, types, f),
@@ -274,6 +277,44 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
 
 write_name = (out :: String, f: NameFault) Res<(), AllocError> {
     quote(out, f.name)
+}
+
+// THE FIELD NAME NEXT TO THE PHRASE THAT NEEDS IT. This read "impl is
+// missing a field: <the law> `height`", so the reader had to carry the
+// law between the two halves of one noun phrase — and the article was
+// the only thing keeping them apart. The law still leads; it just
+// follows the name it is about.
+write_missing = (out :: String, f: NameFault) Res<(), AllocError> {
+    quote(out, f.name).try();
+    out.add_bytes(": an impl supplies a value for every field the bound declares").try();
+    Ok(());
+}
+
+// THE NAME AND THE TYPE THAT WAS ASKED, because the type is the half the
+// reader cannot see: `size` is declared, plainly, three lines up — on
+// `Bag`. Told only that there is no `size`, an author goes and looks at
+// the declaration that does exist. `write_types` was here before and
+// printed "expected <unknown>, found Box": there is no expectation in a
+// member lookup, and a poison id rendered as one said so twice.
+write_member = (out :: String, types: Types, f: TypeFault)
+               Res<(), AllocError> {
+    out.add_bytes(": no `").try();
+    out.add_bytes(f.name).try();
+    out.add_bytes("` on `").try();
+    types.write_name(f.found, out).try();
+    out.add_bytes("`").try();
+    Ok(());
+}
+
+// Which type impls no `Eq`. There is no second type to contrast it
+// against — the operands agree, that is not what is wrong — so this
+// names one and not two.
+write_needs_eq = (out :: String, types: Types, f: TypeFault)
+                 Res<(), AllocError> {
+    out.add_bytes(" — `").try();
+    types.write_name(f.found, out).try();
+    out.add_bytes("` has none").try();
+    Ok(());
 }
 
 // An ownership sentence: the place, then what happened to it.
