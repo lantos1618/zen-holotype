@@ -1,0 +1,30 @@
+// The struct-body walk ran the queries and not `check_own`, so a method
+// declared inside a struct body could move the same binding twice and
+// nothing said so — `double_consume` rejects exactly this shape once it
+// is written at top level.
+//
+// position: the second use of the dead binding.
+
+Buf = {
+    id: i32,
+}
+
+Buf.impl(Drop, {
+    drop = (self :: @Self) () { /* nothing to release: id is bytes */ }
+})
+
+Boxy = {
+    width: i32,
+
+    twice* = (self: @Self) i32 {
+        f = Buf(id: 1);
+        g = consume f;
+        h = consume f;
+        g.id + h.id
+    }
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", Boxy(width: 2).twice());
+    Ok(0);
+}
