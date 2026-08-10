@@ -2617,7 +2617,7 @@ class FnCtx:
             self.make_variant(want, "Err", err))
 
     def by_ref(self, code, ty):
-        if _LVALUE.match(code):
+        if _is_lvalue(code):
             return "&" + code
         if code.startswith("(*") and code.endswith(")"):
             return code[2:-1]
@@ -2661,7 +2661,7 @@ class FnCtx:
     def addr_of(self, code, ty):
         """The receiver's address, without copying it where that would move
         the storage the record points at."""
-        if _LVALUE.match(code):
+        if _is_lvalue(code):
             return "&" + code
         tmp = self.new_tmp(ty)
         self.line("%s = %s;" % (tmp, code))
@@ -6119,9 +6119,42 @@ def _writes_scope(node):
 # spelled the first way everywhere.  Missing it copies the field into a
 # temporary, so `self.entries.add(..)` grows a copy and the caller keeps the
 # old one -- a silent wrong answer rather than a compile error.
-_LVALUE = re.compile(
-    r"^(\(\*[A-Za-z_][A-Za-z0-9_]*\)|[A-Za-z_][A-Za-z0-9_]*)"
-    r"(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+#
+# A SECOND HOP PARENTHESISES THE FIRST: field access spells its base with
+# `paren`, so `be.check.types` arrives as `((*be).check).types`, which names
+# the same storage and used not to be recognised.  `be.check.types.named(..)`
+# then interned into a COPY of the store and answered with a `TyId` one past
+# the real store's end -- gen_c_ptr.zen carries a hand-written one-hop
+# workaround for exactly this.
+_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_FIELD_TAIL = re.compile(r"^(.*)\.[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _wrapped(code):
+    """`code` is one paren pair around everything, not two neighbours."""
+    if not (code.startswith("(") and code.endswith(")")):
+        return False
+    depth = 0
+    for i, ch in enumerate(code):
+        depth += (ch == "(") - (ch == ")")
+        if depth == 0:
+            return i == len(code) - 1
+    return False
+
+
+def _is_lvalue(code):
+    """Does `code` NAME storage, rather than produce a value?"""
+    code = code.strip()
+    while True:
+        tail = _FIELD_TAIL.match(code)
+        if tail:
+            code = tail.group(1).strip()
+            continue
+        if _wrapped(code):
+            inner = code[1:-1].strip()
+            code = inner[1:] if inner.startswith("*") else inner
+            continue
+        return _NAME.match(code) is not None
 
 ARITH = {"+", "-", "*", "/", "%"}
 WRAPPING = {"+%", "-%", "*%"}
