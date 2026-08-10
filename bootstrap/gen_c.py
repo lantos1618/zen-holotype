@@ -293,6 +293,7 @@ PRIMS = {
     "i16": "int16_t",
     "i32": "int32_t",
     "i64": "int64_t",
+    "int": "int64_t",
     "u8": "uint8_t",
     "u16": "uint16_t",
     "u32": "uint32_t",
@@ -312,6 +313,7 @@ INT_LIMITS = {
     "i16": (True, 16, "INT16_MIN", "INT16_MAX"),
     "i32": (True, 32, "INT32_MIN", "INT32_MAX"),
     "i64": (True, 64, "INT64_MIN", "INT64_MAX"),
+    "int": (True, 64, "INT64_MIN", "INT64_MAX"),
     "isize": (True, 64, "PTRDIFF_MIN", "PTRDIFF_MAX"),
     "u8": (False, 8, "0", "UINT8_MAX"),
     "u16": (False, 16, "0", "UINT16_MAX"),
@@ -325,6 +327,7 @@ INT_VALUES = {
     "i16": (-32768, 32767, 16),
     "i32": (-2147483648, 2147483647, 32),
     "i64": (-9223372036854775808, 9223372036854775807, 64),
+    "int": (-9223372036854775808, 9223372036854775807, 64),
     "u8": (0, 255, 8),
     "u16": (0, 65535, 16),
     "u32": (0, 4294967295, 32),
@@ -343,6 +346,14 @@ UNKNOWN = ("unknown",)
 # it also means "nothing is reading this", and a block has to tell those two
 # apart to report the type of its own tail.  See `ex_Block`.
 INFER = ("infer",)
+
+# An integer literal whose context never settled it.  It is the literal FAMILY
+# and not a width: `int` is assignable to every integer type (`sema_check`'s
+# `literal_fits`), and `gen_c_type.zen` lowers it to `int64_t`.  Calling it
+# `i32` here made `v ::= 0` a 32-bit accumulator in a function whose every
+# other reader called it an `i64`, so `sema_trap.parse_i64` wrapped mid-digit
+# and answered with a truncated value that then FIT the type it overflowed.
+UNSETTLED_INT = ("prim", "int")
 
 
 def prim(name):
@@ -373,6 +384,28 @@ def tcode(t) -> str:
 
 def is_int(t):
     return t is not None and t[0] == "prim" and t[1] in INT_VALUES
+
+
+def same_int_family(a, b):
+    """Is `a` a value the slot `b` holds, without a conversion?
+
+    An UNSETTLED literal is every integer type at once -- that is the whole
+    of "a literal's type comes from its context" -- so the `Ok` of a
+    `Res<i32>` carries a bare `32` and the hoist fires.  A settled type is
+    only itself: an `i64` reaching an `i32` field is a narrowing the
+    language does not have.
+    """
+    return a == b or (is_int(a) and is_int(b) and UNSETTLED_INT in (a, b))
+
+
+def settled(ty):
+    """A TYPE ARGUMENT IS NOT AN ANNOTATION.  `Pair(first: 5, ..)` writes
+    nothing for `A`, so its `5` settles the way every other unannotated `5`
+    does; leaving it unsettled would mint a `Pair<int, ..>` beside the
+    `Pair<i32, ..>` every annotated program builds, and its arithmetic would
+    trap at a width no one wrote.  sema_apply.zen calls this
+    `literal_default`."""
+    return prim("i32") if ty == UNSETTLED_INT else ty
 
 
 def int_info(t):
@@ -2545,7 +2578,7 @@ class FnCtx:
         got = self.widen_res(code, ty, want)
         if got is not None:
             return got
-        carriers = [v for v, p in info[2] if p is not None and p == ty]
+        carriers = [v for v, p in info[2] if p is not None and same_int_family(p, ty)]
         if len(carriers) != 1:
             return code
         return self.make_variant(want, carriers[0], code)
@@ -2729,7 +2762,7 @@ class FnCtx:
         text = str(f(node, "text", ""))
         if lk == "int":
             value = parse_int(text)
-            ty = want if is_int(want) else prim("i32")
+            ty = want if is_int(want) else UNSETTLED_INT
             return (int_literal(value, ty), ty)
         if lk == "float":
             ty = want if want and want[0] == "prim" and want[1] in ("f32", "f64") else prim("f64")
@@ -3047,7 +3080,7 @@ class FnCtx:
         if op == "-":
             if kind(operand) == "Literal" and f(operand, "kind") == "int":
                 value = -parse_int(str(f(operand, "text", "0")))
-                t = want if is_int(want) else prim("i32")
+                t = want if is_int(want) else UNSETTLED_INT
                 return (int_literal(value, t), t)
             if is_int(ty):
                 file, line, col = self.e.pos.of(node)
@@ -3303,7 +3336,7 @@ class FnCtx:
             if value is None or fty is None:
                 continue
             _code, aty = self.peek(value)
-            self.unify(fty, aty, found)
+            self.unify(fty, settled(aty), found)
         return tuple(found.get(tp, UNKNOWN) for tp in tdecl.tparams)
 
     def peek(self, node):
@@ -3571,7 +3604,9 @@ class FnCtx:
                 want[1][-1] == rty[1][-1]
                 or self.satisfies(rty, ("named", want[1], ())))
         if want[0] == "prim":
-            return rty[0] == "prim" and want[1] == rty[1]
+            return rty[0] == "prim" and (
+                want[1] == rty[1]
+                or (rty[1] == "int" and want[1] in INT_VALUES))
         return want[0] == rty[0]
 
     def eq_call(self, lhs, rhs, node):
