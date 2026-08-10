@@ -25,7 +25,7 @@
 Ast, Expr, ExprId, Type, TypeId, Span, Ident, Literal, LiteralKind = ast
 Decl, DeclKind, Const, Alias, Enum = ast
 BinOp, UnOp, Block, BlockId, Stmt, StmtKind = ast
-Param, Binary, Unary, Bind, ExprStmt, Match, Access, Call = ast
+Param, Binary, Unary, Bind, ExprStmt, Match, Access, Call, Lambda = ast
 ArrayType, ArrayLit, FixedArray, Index = ast
 Alloc, AllocError = std.mem
 Vec, Map = std.collections
@@ -377,6 +377,23 @@ expr_kind* = (c :: Checker, id: ExprId, node: Expr, ctx: Ctx)
         Index(x)      => c.index_element_type(node, x, ctx),
         _             => c.types.unknown(),
     })
+}
+
+// A CLOSURE'S SHAPE, WHICH IS ITS ARITY AND NOTHING ELSE: `sema.zen`
+// says a closure "infers its parameter types FROM that signature, not
+// the other way", so every slot is the `_` hole and only the count is
+// known.
+//
+// NOT WHAT `expr_kind` ANSWERS, and deliberately. Poison is right for
+// a closure a signature is about to supply — the ordinary
+// `f.loop((h, v) { .. })` — and the price of poison is that it agrees
+// with everything. Only a caller that knows no signature is coming
+// asks for this instead; `sema_match.zen` is the one that does.
+lambda_type* = (c :: Checker, l: Lambda) Res<TyId, AllocError> {
+    hole = c.types.infer().try();
+    params ::= c.alloc.Vec<TyId>();
+    l.params.loop((h, p) { params.add(hole).try() });
+    c.types.fn_ty(params, hole)
 }
 
 // `[0, 1, 2]` — a fixed array whose count is how many were written and

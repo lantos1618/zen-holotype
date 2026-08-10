@@ -25,6 +25,7 @@ Checker, Ctx = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
 computed_member, writable_member = sema.sema_member
 check_literal = sema.sema_trap
+check_arms = sema.sema_hoist
 type_of, type_from_ast = sema.sema_type
 
 // `x = e;`, `x: T ::= e;`.
@@ -69,7 +70,24 @@ check_assign* = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
     // `int` literal, and `literal_fits` says every one fits every
     // integer type, so `coerce` alone said nothing
     c.check_literal(b.value, want).try();
+    written_want(c, b, want).try();
     Ok(());
+}
+
+// AN ARM STANDS WHERE THE MATCH STANDS (`sema_hoist.check_arms`), and a
+// declaration with a written type is such a place: `n: i32 = b.match({
+// true => 1, false => false })` puts both arms where `i32` is, and
+// `coerce` above only ever saw the first one's type.
+//
+// ONLY WHEN A TYPE WAS WRITTEN. `x := <match>` takes `want` FROM the
+// value, so the position has no word of its own — "expected" would
+// name whichever arm came first, and no arm is entitled to speak for
+// the rest.
+written_want = (c :: Checker, b: Bind, want: TyId) Res<(), AllocError> {
+    b.type.match({
+        Ok(_) => c.check_arms(b.value, want),
+        None  => Ok(()),
+    })
 }
 
 // Only a bare name introduces a binding; `c.len = ..` and `buf[i] = ..`
