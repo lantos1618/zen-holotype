@@ -5,31 +5,23 @@
 // expected — `0;` closes a `Res<i32, E>` function like `Ok(0);` does.
 // hoisting only fires when exactly ONE variant carries the type."
 //
-// TWO RULES, AND BOTH ARE REFUSALS. The lift itself needs no code here:
-// a value that fits the success payload is built as an `Ok` by the
-// backend, and sema has nothing to say about it. What sema owes is the
-// two cases where a reader would be guessing:
+// TWO RULES, BOTH REFUSALS. The lift itself needs no code: the backend
+// builds an `Ok` for a value that fits the success payload. Sema only
+// owes the two cases where a reader would be guessing:
+//   - `Res<i32, i32>` has TWO variants carrying `i32`, so a bare 32 is
+//     ambiguous and the explicit form is required.
+//   - only SUCCESS lifts. A bare error value at a `Res` return is not
+//     an `Err` — a failure that lifted silently would be unwritten.
 //
-//   - `Res<i32, i32>` has TWO variants carrying an `i32`, so a bare 32
-//     has two readings and the explicit form is required.
-//   - only SUCCESS lifts. A bare error value at a `Res` return is not an
-//     `Err`, because a failure that lifted silently would be a failure
-//     nobody wrote.
+// NEVER COUNT AN UNSETTLED SLOT: `assignable` is lenient about a type
+// nobody has computed (`Var`, `Infer`, poison), so counting those would
+// make `<T, E>() Res<T, E>` ambiguous at every tail. Standing rule:
+// never invent a diagnostic out of missing information.
 //
-// NEVER COUNT AN UNSETTLED SLOT. A candidate is a variant whose payload
-// type the value FITS, and `assignable` is deliberately lenient about a
-// type nobody has computed — a `Var`, an `Infer` hole, poison — so
-// counting those would make `<T, E>() Res<T, E>` ambiguous at every
-// tail. An undecided slot carries nothing yet, so the count stands down
-// and says nothing, which is this compiler's standing rule: never invent
-// a diagnostic out of missing information.
-//
-// THE TWO POSITIONS. A value meets a `Res` it did not ask for at a
-// function's tail and at a constructor's field, and those are the two
-// places called from — `sema_decl.zen` after the body is typed, and
-// `sema_apply.zen` after the construction's type is known. A binding
-// with a written type already goes through `coerce`, which reports the
-// ordinary mismatch.
+// THE TWO CALL SITES: a function's tail (`sema_decl.zen`, after the
+// body is typed) and a constructor's field (`sema_apply.zen`, after
+// the construction's type is known). A binding with a written type
+// goes through `coerce` instead, which reports the ordinary mismatch.
 
 Ast, Expr, ExprId, Block, BlockId, Stmt, StmtKind, Call, Arg, Span = ast
 Alloc, AllocError = std.mem
@@ -132,17 +124,17 @@ failure_never_lifts = (c :: Checker, file: str, span: Span)
 // the two positions
 // -----------------------------------------------------------------
 
-// A body's value against the type the signature promised. This is the
-// one place a function's tail meets its return type, so it is the one
-// place a bare success can lift into a `Res` — or fail to.
+// A body's value against the type the signature promised: the one
+// place a function's tail meets its return type, so the one place a
+// bare success can lift into a `Res` — or fail to.
 //
-// AND THE ONE PLACE A BODY THAT ENDS IN NOTHING IS CAUGHT. Hoisting was
-// the only question asked here, so a `()` tail closing an `i32` was
-// waved through — which is what let the print sugar close any function
-// at all.
+// Also the one place a body ending in nothing is caught: hoisting used
+// to be the only question asked here, so a `()` tail closing an `i32`
+// was waved through, which is what let the print sugar close any
+// function at all.
 //
-// The span is the TAIL EXPRESSION'S, not the block's: the value that
-// would have been hoisted is what the author has to change.
+// Span is the TAIL EXPRESSION'S, not the block's — that's the value
+// the author has to change.
 check_return* = (c :: Checker, body: BlockId, ctx: Ctx, got: TyId)
                 Res<(), AllocError> {
     blk = c.tree.block_at(body);
@@ -152,9 +144,9 @@ check_return* = (c :: Checker, body: BlockId, ctx: Ctx, got: TyId)
     })
 }
 
-// FITTING THE FAMILY IS NOT FITTING THE TYPE, which is why the agreeing
-// side has work to do: `f = () i32 { 3000000000 }` is an `int` literal
-// and `assignable` says every one of those fits every integer type.
+// Fitting the family isn't fitting the type: `f = () i32 { 3000000000 }`
+// is an `int` literal, and `assignable` says every one of those fits
+// every integer type — hence `check_literal` on the agreeing side too.
 return_fits = (c :: Checker, blk: Block, id: ExprId, got: TyId, want: TyId)
               Res<(), AllocError> {
     node = c.tree.expr_at(id);
@@ -164,11 +156,10 @@ return_fits = (c :: Checker, blk: Block, id: ExprId, got: TyId, want: TyId)
     })
 }
 
-// WHICH SENTENCE THIS IS, DECIDED BY `want` AND NOWHERE ELSE, so the
-// two rules cannot both fire on one tail: a `Res` return is the
-// hoisting question and `hoist_into_res` owns every answer it has —
-// including saying nothing — while any other return type is the
-// ordinary mismatch.
+// Decided by `want` and nowhere else, so the two rules can't both fire
+// on one tail: a `Res` return is the hoisting question and
+// `hoist_into_res` owns every answer to it (including silence); any
+// other return type is the ordinary mismatch.
 refuse_return = (c :: Checker, blk: Block, node: Expr, got: TyId,
                  want: TyId) Res<(), AllocError> {
     c.types.at(want).match({
@@ -177,14 +168,11 @@ refuse_return = (c :: Checker, blk: Block, node: Expr, got: TyId,
     })
 }
 
-// A TAIL THAT IS ALREADY A `Res` IS NOT A HOISTING QUESTION. Hoisting
-// asks whether a bare value can be LIFTED into a `Res`; a tail that is
-// one has nothing to lift, and `assignable` has already answered
-// whether it fits. So the two go to different places.
-//
-// THIS IS WHAT CATCHES `Err("not an error at all")` in a function
-// declared `Res<i32, Error>`: the tail is a `Res`, so nothing lifts, and
-// `assignable` has already found that a `str` is not that error set.
+// A tail that is already a `Res` isn't a hoisting question — nothing to
+// lift, and `assignable` already answered whether it fits. Catches
+// `Err("not an error at all")` in a function declared `Res<i32, Error>`:
+// the tail is a `Res`, nothing lifts, and `assignable` already found
+// that a `str` isn't that error set.
 res_return = (c :: Checker, blk: Block, node: Expr, got: TyId,
               want: TyId, r: TyRes) Res<(), AllocError> {
     c.types.at(got).match({
@@ -193,35 +181,30 @@ res_return = (c :: Checker, blk: Block, node: Expr, got: TyId,
     })
 }
 
-// THE TAIL FITS THE RETURN TYPE. That is the whole rule, and it is
-// general: the print sugar's value is unit — `gen_c_print.zen`: "a print
-// is a statement sequence whose value is unit" — so `f = () i32 {
+// The tail fits the return type — the whole rule, and general: the
+// print sugar's value is unit (`gen_c_print.zen`: "a print is a
+// statement sequence whose value is unit"), so `f = () i32 {
 // println("x") }` returns nothing where an `i32` was promised, and
 // `Err("not an error at all")` no longer closes a `Res<i32, Error>`.
 //
-// IT WAS `()`-ON-THE-LEFT ONLY, and could not be more, because `str` was
-// a prim in the type store AND a struct `std.text` declares: `str_at`'s
-// own `str(data: .., len: ..)` was not `assignable` to its declared
-// `str`, and the general form reddened every program that stands on std
-// with `expected str, found str`. `sema_ty.named` now answers with the
-// primitive for a declaration of a primitive's name, so there is one
-// `str` and the general rule costs nothing.
+// BUG FOUND THE HARD WAY: `str` was once both a prim in the type store
+// and a struct `std.text` declares, so `str_at`'s own `str(...)` wasn't
+// `assignable` to its declared `str` and the general rule reddened
+// every program that stands on std with "expected str, found str".
+// Fixed in `sema_ty.named`, which now answers with the primitive for a
+// declaration of a primitive's name — one `str`, rule costs nothing.
 //
-// TWO EXEMPTIONS, AND THEY ARE ONE RULE SEEN FROM EITHER SIDE: a value
-// nobody asked for is not a value that must fit.
-//
-// A function declared `()` discards whatever its body ends with — that
-// IS what `()` means at a return type.
-//
-// AND A `;`-TERMINATED LAST STATEMENT THAT YIELDS NOTHING, which is the
-// rule `corpus/sema/statement_tail_is_not_a_value` states in those very
-// words: "a last statement that yields NOTHING is a statement". The `;`
-// alone is not the exemption and cannot be — DESIGN.md's "`0;` closes a
-// `Res<i32, E>` function like `Ok(0);` does" says a `;`-terminated tail
-// IS the return, and `block_type` carries its type out for exactly that
-// reason. So `println("noisy");` closes an `i32` function because there
-// is no value there to be the return, and `Err(Error.IoError);` does not,
-// because there is one and it does not fit.
+// TWO EXEMPTIONS (one rule, either side: a value nobody asked for need
+// not fit):
+//   - a function declared `()` discards whatever its body ends with —
+//     that IS what `()` means at a return type.
+//   - a `;`-terminated last statement that yields NOTHING (see
+//     `corpus/sema/statement_tail_is_not_a_value`). The `;` alone isn't
+//     the exemption: DESIGN.md's "`0;` closes a `Res<i32, E>` function
+//     like `Ok(0);` does" makes a `;`-terminated tail the return, and
+//     `block_type` carries its type out for that reason. So
+//     `println("noisy");` closes an `i32` function (no value to return)
+//     but `Err(Error.IoError);` does not (a value that doesn't fit).
 wrong_return = (c :: Checker, blk: Block, node: Expr, got: TyId, want: TyId)
                Res<(), AllocError> {
     value_was_asked_for(c, blk, got, want).match({
@@ -256,10 +239,10 @@ tail_expr = (c: Checker, blk: Block) Res<ExprId> {
     })
 }
 
-// AN EMPTY BLOCK IS ASKED FIRST, and it has to be: `len - 1` on a
-// `usize` zero is an underflow, and underflow is a trap this compiler
-// aborts on — so `f = () () { }` did not compile to nothing, it killed
-// the compiler with `trap: integer overflow` pointing at this line.
+// Empty block asked first, and must be: `len - 1` on a `usize` zero
+// underflows, which this compiler traps on — `f = () () { }` used to
+// crash the compiler with `trap: integer overflow` here instead of
+// compiling to nothing.
 last_stmt_expr = (blk: Block) Res<ExprId> {
     (blk.stmts.len > 0).match({
         false => None,
@@ -274,13 +257,12 @@ last_stmt_of = (stmts: Vec<Stmt>) Res<ExprId> {
     })
 }
 
-// `Row(n: 32)` on a field declared `Res<i32>`. A construction is the
-// other place a value lands somewhere it did not name, and the field's
-// declared type is what it lands in.
+// `Row(n: 32)` on a field declared `Res<i32>`: construction is the
+// other place a value lands somewhere it didn't name, into the field's
+// declared type.
 //
-// NAMED ARGUMENTS ONLY. A field is reached by its name here; a
-// positional argument to a constructor is a different resolution and not
-// this rule's to interpret.
+// Named arguments only — a positional argument to a constructor is a
+// different resolution, not this rule's to interpret.
 check_ctor_fields* = (c :: Checker, call: Call, ty: TyId, ctx: Ctx)
                      Res<(), AllocError> {
     call.args.loop((h, a) { check_ctor_field(c, a, ty, ctx).try() });
@@ -305,10 +287,10 @@ check_named_field = (c :: Checker, a: Arg, name: str, ty: TyId, ctx: Ctx)
     })
 }
 
-// A FIELD IS A TYPED SLOT, so the two questions a typed slot asks are
-// both asked: what lifts into it, and whether the value it is given fits
-// the type it declares. `Holder(n: 3000000000)` on an `n: i32` passed
-// the first and nobody had ever asked the second.
+// A field is a typed slot: both its questions get asked — what lifts
+// into it, and whether the given value fits the declared type.
+// `Holder(n: 3000000000)` on `n: i32` used to pass the first while
+// nobody asked the second.
 field_fits = (c :: Checker, a: Arg, want: TyId, ctx: Ctx)
              Res<(), AllocError> {
     hoist_at(c, a.value, c.type_of(a.value, ctx).try(), want).try();

@@ -8,77 +8,51 @@
 //   LSP        0-based              UTF-16 code units into the line
 //   Zen        1-based              1-based BYTE column
 //
-// Zen's side is not negotiable and is fixed in four places —
-// `DESIGN.md:49`, `DESIGN.md:302`, `TESTING.md:48`, and
-// `src/ast/ast_span.zen:22`, which anticipated this file in one
-// sentence: "an LSP converting to UTF-16 at the wire is its own,
-// testable, step."
+// Zen's side is fixed in four places — `DESIGN.md:49`, `DESIGN.md:302`,
+// `TESTING.md:48`, and `src/ast/ast_span.zen:22`. THIS FILE IS THAT
+// CONVERSION AND IT LIVES ONLY HERE: no other file in `src/lsp/` may
+// construct or read an LSP position, and the 0-based/1-based line shift
+// lives in the SAME function as the column conversion so a reader sees
+// both at once.
 //
-// THIS IS THAT STEP, AND IT LIVES ONLY HERE. No other file in
-// `src/lsp/` may construct an LSP position or read one. The rule is not
-// tidiness: an off-by-one applied in two files is an off-by-one fixed
-// once and then applied twice, and the 0-based/1-based line shift has
-// to live in the SAME function as the column conversion so that a
-// reader sees both at once.
+// BOTH FUNCTIONS TAKE THE DOCUMENT TEXT: `Pos` carries no byte offset
+// (`src/ast/ast_span.zen:25`), so converting a column needs the line's
+// bytes.
 //
-// BOTH FUNCTIONS TAKE THE DOCUMENT TEXT, and that is a real ordering
-// constraint rather than an inconvenience: `Pos` deliberately carries
-// no byte offset (`src/ast/ast_span.zen:25`; the lexer's `Token` has
-// one and it dies at the parser boundary), so converting a column needs
-// the bytes of the line. The document store is therefore a precondition
-// for positions, not merely for sync.
-//
-// NEITHER FUNCTION FAILS. A server handed a position no client should
-// have sent still has to answer, and a server handed a buffer that is
-// not valid UTF-8 — which happens mid-keystroke, in the middle of a
-// pasted character — must not die on it. So every out-of-range input
-// CLAMPS, and an undecodable byte counts as one unit and one byte.
+// NEITHER FUNCTION FAILS: every out-of-range input CLAMPS, and an
+// undecodable byte counts as one unit and one byte.
 
 str, String = std.text
 Range = std.core
 AllocError = std.mem
 Pos, Span = ast.ast_span
 codepoint_at, UTF8_MIN_4 = std.text.text_utf8
-// The decimal writer, from the file that already had to have one for a
-// `Content-Length`. It is one direction only — `lsp_frame.zen` reads
-// `lsp_json.zen` and neither reads this file — so nothing here closes a
-// loop.
+// The decimal writer, from the file that already needed one for a
+// `Content-Length`. One direction only — `lsp_frame.zen` reads
+// `lsp_json.zen` and neither reads this file.
 write_decimal = lsp.lsp_frame
 
-// A position as the wire spells it: 0-based line, UTF-16 units.
-//
-// A distinct type from `Pos` on purpose. The two are the same pair of
-// numbers meaning different things, and the single most likely bug in a
-// language server is one of them arriving where the other was meant. A
-// struct name is the cheapest possible check on that.
+// A position as the wire spells it: 0-based line, UTF-16 units. A
+// distinct type from `Pos` on purpose — the cheapest check against the
+// two arriving swapped.
 WirePos* = {
     line*: usize,
     character*: usize,
 }
 
 // A half-open byte run naming one line of `text`. `start` is the first
-// byte of the line; `end` is the `\n` that terminates it, or the length
-// of the text on a last line with no trailing newline.
-//
-// A CRLF's `\r` IS PART OF THE LINE and not part of the terminator, so
-// `end` points at the `\n` and the `\r` is reachable as a column. That
-// is not a preference: `str` is bytes, the lexer already decided what a
-// line is, and a conversion that quietly dropped the `\r` would answer
-// with a column the rest of the compiler does not use.
+// byte; `end` is the `\n` that terminates it, or text.len on a last
+// line with no trailing newline. A CRLF's `\r` IS PART OF THE LINE, not
+// the terminator — dropping it would answer with a column the rest of
+// the compiler does not use.
 LineRun* = {
     start*: usize,
     end*: usize,
 }
 
-// The byte run of 0-based line `line` of `text`.
-//
-// Past the last line clamps to an EMPTY run at the end of the text
-// rather than failing, which is half of what makes `to_pos` total.
-//
-// The scan does not stop early and does not need to: `seen < line` goes
-// false once the line has been found and the guard then holds `at`
-// still, so a break would buy a shorter walk and cost the one thing
-// worth having here — a body with a single exit.
+// The byte run of 0-based line `line` of `text`. Past the last line
+// clamps to an EMPTY run at the end of the text — half of what makes
+// `to_pos` total.
 run_of* = (text: str, line: usize) LineRun {
     at ::= 0;
     seen ::= 0;
@@ -109,15 +83,10 @@ Step* = {
 }
 
 // THE ONE ARITHMETIC FACT: a codepoint below 65536 is one UTF-16 code
-// unit, and one at or above it is a surrogate PAIR and therefore two.
-// That single comparison is the entire difference between UTF-16 and
-// codepoints, and a 4-byte emoji is the only input that shows it —
-// which is why the test table has one. Written in decimal because
-// `DESIGN.md:101` puts hex outside v1.
-//
-// A byte that does not decode counts as one unit and one byte. A buffer
-// is not valid UTF-8 halfway through a paste, and a server that stopped
-// converting there would stop answering.
+// unit; one at or above it is a surrogate PAIR, so two. A 4-byte emoji is
+// the only input that shows it. A byte that does not decode counts as
+// one unit and one byte — a buffer mid-paste may not be valid UTF-8, and
+// the server must keep converting.
 step_at* = (text: str, at: usize) Step {
     codepoint_at(text, at).match({
         Err(_) => Step(units: 1, bytes: 1),
@@ -129,22 +98,10 @@ step_at* = (text: str, at: usize) Step {
 }
 
 // WIRE -> ZEN. A 0-based line and a UTF-16 character become a 1-based
-// line and a 1-based byte column.
-//
-// Two of the four decisions live here:
-//
-//   - A CHARACTER PAST THE END OF THE LINE CLAMPS to the end of the
-//     line. The LSP specification says so, and a client that sends one
-//     is not making an error a server should report — an editor holding
-//     the cursor at the end of a line it just shortened sends exactly
-//     this.
-//   - A CHARACTER LANDING INSIDE A MULTI-BYTE SEQUENCE ROUNDS DOWN to
-//     the start of that sequence. There is no byte column between the
-//     two bytes of an `é`, and inventing one hands the rest of the
-//     compiler a span that slices a codepoint in half.
-//
-// A tab is one unit and one byte. Editors render it wide; nothing here
-// cares, and a conversion that cared would disagree with the lexer.
+// line and a 1-based byte column. A CHARACTER PAST THE END OF THE LINE
+// CLAMPS to the end (per spec). A CHARACTER LANDING INSIDE A MULTI-BYTE
+// SEQUENCE ROUNDS DOWN to its start — there is no byte column between
+// the two bytes of an `é`. A tab is one unit and one byte.
 to_pos* = (text: str, line: usize, character: usize) Pos {
     run = run_of(text, line);
     at ::= run.start;
@@ -152,11 +109,8 @@ to_pos* = (text: str, line: usize, character: usize) Pos {
     done ::= false;
     loop(() { !done && at < run.end && units < character }, (h) {
         step = step_at(text, at);
-        // ROUNDING DOWN IS THIS BRANCH, and `done` is why it terminates:
-        // a step that would carry the count PAST the character asked for
-        // lands inside a sequence, so nothing moves — and a loop whose
-        // condition is unchanged by a pass that moves nothing has to be
-        // stopped by something other than its condition.
+        // ROUNDING DOWN: a step that would carry the count PAST the
+        // requested character lands inside a sequence, so nothing moves.
         ((units + step.units) > character).match({
             true  => { done = true; },
             false => { at = at + step.bytes; units = units + step.units; },
@@ -165,19 +119,12 @@ to_pos* = (text: str, line: usize, character: usize) Pos {
     Pos(line: line + 1, col: at - run.start + 1);
 }
 
-// ZEN -> WIRE, and the exact inverse of `to_pos`.
-//
-// The remaining clamp: a byte column past the end of its line clamps to
-// the end of the line, for the same reason and from the other side. A
-// column landing INSIDE a multi-byte sequence counts the units of every
-// sequence that ends at or before it and not the one it is inside,
-// which is the same round-down `to_pos` makes — so converting a
-// mid-sequence column out and back lands on the start of that sequence
-// rather than drifting one character per round trip.
-//
-// Line 0 cannot happen — Zen lines are 1-based from the lexer up — but
-// it clamps rather than traps, because a server that traps on a number
-// it was handed is a server that stops answering.
+// ZEN -> WIRE, the exact inverse of `to_pos`. A byte column past the end
+// of its line clamps to the end. A column landing INSIDE a multi-byte
+// sequence counts every sequence ending at or before it, not the one
+// it's inside — the same round-down `to_pos` makes, so a round trip
+// lands on the sequence start rather than drifting. Line 0 cannot happen
+// (Zen lines are 1-based) but clamps rather than traps.
 to_wire* = (text: str, p: Pos) WirePos {
     line = (p.line == 0).match({ true => 0, false => p.line - 1 });
     run = run_of(text, line);
@@ -195,28 +142,19 @@ to_wire* = (text: str, p: Pos) WirePos {
     WirePos(line: line, character: units);
 }
 
-// A LEXER'S `line:col`, ON THE WIRE. The lexer's `Pos` carries a byte
-// offset and the AST's does not, so they are two types spelling one
-// pair of numbers — and `lsp_colour.zen` holds the lexer's. Converting
-// through this rather than building an AST `Pos` at the call site is
-// this file's rule kept from the outside: the caller names a line and a
-// column and receives wire coordinates, and never assembles either.
+// A LEXER'S `line:col`, ON THE WIRE — `lsp_colour.zen`'s caller, since
+// the lexer's `Pos` carries a byte offset and the AST's does not. Keeps
+// this file's rule from the outside: the caller names a line and column,
+// never assembles wire coordinates itself.
 wire_at* = (text: str, line: usize, col: usize) WirePos {
     to_wire(text, Pos(line: line, col: col))
 }
 
-// HOW LONG A BYTE RANGE IS, IN THE WIRE'S UNITS. `semanticTokens`
-// carries a `length` beside every position and it is UTF-16 code units
-// exactly as the position is — so `end.offset - start.offset` is right
-// for ASCII and silently wrong for the string literal that finally has
-// an `é` in it. It is here and not with its one caller because it is
-// the same arithmetic `to_wire` walks, one step at a time, and a second
-// copy of that walk is a second place the surrogate rule can be got
-// wrong.
-//
-// It counts from `from` and STOPS AT OR AFTER `upto` rather than
-// exactly at it, because `step_at` answers one byte for a sequence it
-// could not decode and a range whose end lands mid-sequence would
+// HOW LONG A BYTE RANGE IS, IN THE WIRE'S UNITS. `semanticTokens` carries
+// a `length` in UTF-16 code units, so `end.offset - start.offset` is
+// right for ASCII and wrong once a string has an `é` in it. Stops AT OR
+// AFTER `upto` rather than exactly at it, since `step_at` answers one
+// byte for an undecodable sequence and a mid-sequence end would
 // otherwise never terminate.
 units_of* = (text: str, from: usize, upto: usize) usize {
     at ::= from;
@@ -229,10 +167,8 @@ units_of* = (text: str, from: usize, upto: usize) usize {
     units;
 }
 
-// The byte offset a 1-based column names, clamped into its line.
-//
-// Column 0 cannot happen either, and clamps to the start — so the two
-// impossible inputs are each handled once, in the place they arise.
+// The byte offset a 1-based column names, clamped into its line. Column
+// 0 cannot happen either, and clamps to the start.
 target_of = (run: LineRun, col: usize) usize {
     at = (col == 0).match({ true => run.start, false => run.start + col - 1 });
     (at > run.end).match({ true => run.end, false => at })
@@ -240,16 +176,10 @@ target_of = (run: LineRun, col: usize) usize {
 
 // --- the same coordinates, said on the wire ----------------------------
 //
-// THESE LIVE BESIDE THE CONVERSION for the reason the header gives about
-// the conversion itself. A `range` is a pair of positions, and a pair
-// assembled in two files is a pair whose halves can disagree — the same
-// argument that put the 0-based line shift in the same function as the
-// column arithmetic, read one level up.
-//
-// `lsp_serve.zen` held a private copy of the first of these while hover
-// was the only answer carrying a range. `publishDiagnostics` is the
-// second caller, and STYLE.md's second-caller rule is that the second
-// caller is when it moves rather than when it is copied.
+// Live beside the conversion: a `range` is a pair of positions, and a
+// pair assembled in two files is a pair whose halves can disagree.
+// Moved here from a private copy in `lsp_serve.zen` once
+// `publishDiagnostics` became a second caller (`STYLE.md`'s rule).
 
 write_wire* = (p: WirePos, out :: String) Res<(), AllocError> {
     out.add_bytes("{\"line\":").try();
@@ -259,13 +189,10 @@ write_wire* = (p: WirePos, out :: String) Res<(), AllocError> {
     out.add_bytes("}")
 }
 
-// A Zen span, converted and written as the protocol's `range`.
-//
-// `text` IS THE DOCUMENT THE SPAN IS INTO, and it is a parameter rather
-// than something looked up because this file knows nothing about
-// documents. A span from one file converted against another's bytes is
-// the wrong underline in the right file, which is the failure a caller
-// has to be made to think about at the call.
+// A Zen span, converted and written as the protocol's `range`. `text` IS
+// THE DOCUMENT THE SPAN IS INTO, passed rather than looked up — a span
+// converted against another file's bytes is the wrong underline in the
+// right file.
 write_range* = (text: str, span: Span, out :: String) Res<(), AllocError> {
     out.add_bytes("{\"start\":").try();
     write_wire(to_wire(text, span.start), out).try();

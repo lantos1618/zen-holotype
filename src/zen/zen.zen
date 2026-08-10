@@ -1,27 +1,23 @@
 // src/zen/zen.zen
 // The CLI, and the folder's surface.
 //
-// PLAN.md's line is "thin cli: build / fmt / test / lsp", and thin is
-// the whole brief: `main` reads the command line, picks a command, and
-// returns its exit code. Everything a command does is one call away, in
-// a sibling, because "the compiler is a library from commit one" — `zen
-// build`, `zen fmt`, `zen lsp` and `zen test` are entry points into one
-// artifact and must never become four programs.
+// PLAN.md: "thin cli: build / fmt / test / lsp" — `main` reads the
+// command line, picks a command, returns its exit code; everything a
+// command does is one call away in a sibling, since the compiler is a
+// library from commit one — `zen build`/`fmt`/`lsp`/`test` are entry
+// points into one artifact, never four programs.
 //
-// A FOLDER AND NOT A FILE, and the reason is a gate. A folder root is
-// normally nothing but starred re-exports; this one also holds `main`,
-// which is the one declaration a program has exactly one of and which
-// re-exporting could not express anyway. The folder exists because
-// `tests/run.py` stages a test against the top-level DIRECTORIES of
-// `src/` — a top-level FILE there can never be reached by a corpus
-// test, so `src/zen.zen` would have been the one part of the compiler
-// nothing could test. `tests/corpus/cli/` imports this module.
+// A FOLDER, NOT A FILE, because of a gate: `tests/run.py` stages a
+// test against the top-level DIRECTORIES of `src/`, so a top-level
+// FILE could never be reached by a corpus test. This folder also holds
+// `main`, the one declaration re-exporting couldn't express anyway.
+// `tests/corpus/cli/` imports this module.
 //
-// `main` RETURNS `Res<i32, AllocError>` because that is the only error
-// the seed subset lets it name: PLAN.md 0.5 has no error unions, so a
-// program that both opens files and allocates carries ONE nominal
-// error, and every other failure is a value. A failed read is counted
-// and printed like a syntax error, and the count is the exit code.
+// `main` RETURNS `Res<i32, AllocError>`, the only error the seed
+// subset lets it name (PLAN.md 0.5 has no error unions): a program
+// that opens files and allocates carries ONE nominal error, everything
+// else a value. A failed read is counted and printed like a syntax
+// error, and the count is the exit code.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -46,13 +42,12 @@ main = (env: Env) Res<i32, AllocError> {
 }
 
 // A command this compiler will have and does not yet — except `lsp`,
-// which now has a server behind it and reaches it from here.
+// which now has a server behind it, reached from here.
 //
-// THE DISPATCH IS ON THE NAME AND NOT A NEW `Cli` VARIANT, deliberately:
-// `zen_cli.zen` is the file that decides what a command line MEANS, and
-// `lsp` does not yet take a flag, a root or an `--entry` that it would
-// have to decide about. When the stdio transport lands and `zen lsp`
-// takes arguments, the variant belongs there and this branch goes.
+// DISPATCH ON THE NAME, NOT A NEW `Cli` VARIANT: `zen_cli.zen` decides
+// what a command line MEANS, and `lsp` doesn't yet take a flag/root/
+// `--entry` for it to decide about. Once `zen lsp` takes arguments,
+// the variant belongs there and this branch goes.
 later = (env: Env, alloc: Alloc, name: str) Res<i32, AllocError> {
     name.eq("lsp").match({
         true  => lsp(env, alloc),
@@ -65,33 +60,29 @@ not_yet = (name: str) Res<i32, AllocError> {
     Ok(2);
 }
 
-// `zen lsp` — the language server, over stdin and stdout, which is what
-// an editor launches and the only thing it can launch.
+// `zen lsp` — the language server over stdin and stdout, what an
+// editor launches and the only thing it can launch.
 //
-// `zen lsp <requests> <replies>` IS THE SAME SERVER OVER TWO FILES, and
-// it stays because it is what the corpus drives: a test cannot hold a
-// pipe open, and a transport nothing tests is a transport that rots.
-// Both spellings reach `lsp_serve.zen`, which holds no transport at all,
-// so the two cannot drift apart — see that file's header.
+// `zen lsp <requests> <replies>` IS THE SAME SERVER OVER TWO FILES,
+// kept because the corpus drives it: a test can't hold a pipe open,
+// and an untested transport rots. Both spellings reach
+// `lsp_serve.zen`, which holds no transport at all, so they can't
+// drift apart (see that file's header).
 //
-// NO FLAGS, AND NO `--entry`. `design_lsp.md` §4 says why: a root is
-// discovered from `initialize`'s `rootUri`, and the driver already
-// probes when no entry is named.
+// NO FLAGS, NO `--entry` (design_lsp.md §4): a root is discovered from
+// `initialize`'s `rootUri`, and the driver already probes when no
+// entry is named.
 //
-// `--stdio` IS THE ONE WORD THIS ACCEPTS AND IGNORES, and it is not a
-// flag this compiler invented — it is what a client appends. VS Code's
-// `vscode-languageclient` adds it to an executable server's argv
-// whenever `TransportKind.stdio` is named, and other clients do the
-// same, because the convention predates servers that speak only one
-// transport. Without this the word arrives as `from`, the FILE form
-// finds no second name, and the server prints usage and exits 2 —
-// which from inside an editor reads as `write EPIPE` and "the server
-// crashed", naming nothing that is wrong.
-//
-// It was found the first time anyone ran this from a real editor,
-// which is the whole lesson: every gate here drives the server
-// directly, so not one of them passes the argv a client actually
-// sends.
+// `--stdio` IS THE ONE WORD THIS ACCEPTS AND IGNORES — not invented
+// here, it's what a client appends: VS Code's `vscode-languageclient`
+// adds it to server argv whenever `TransportKind.stdio` is named
+// (other clients too), predating servers that speak only one
+// transport. Without swallowing it, the word arrives as `from`, the
+// FILE form finds no second name, and the server exits 2 — which from
+// inside an editor reads as `write EPIPE`/"the server crashed",
+// naming nothing that's actually wrong. Found the first time anyone
+// ran this from a real editor: every gate here drives the server
+// directly, so none of them ever passed the argv a real client sends.
 lsp = (env: Env, a: Alloc) Res<i32, AllocError> {
     from = file_arg(env, 2);
     to = file_arg(env, 3);
@@ -101,9 +92,9 @@ lsp = (env: Env, a: Alloc) Res<i32, AllocError> {
     })
 }
 
-// One path and not two is a caller who meant to name both: the file form
-// answers INTO a file, so a `zen lsp requests.txt` with nowhere to write
-// would run a whole session and drop every reply.
+// One path, not two, means the caller meant to name both: the file
+// form answers INTO a file, so `zen lsp requests.txt` with nowhere to
+// write would run a whole session and drop every reply.
 paired = (env: Env, a: Alloc, from: str, to: str) Res<i32, AllocError> {
     to.is_empty().match({
         true  => lsp_usage(),
@@ -115,10 +106,9 @@ arg = (env: Env, i: usize) str {
     env.argv.get(i).match({ Ok(s) => s, None => "" })
 }
 
-// A transport word is not a filename. `""` is what "there is no file
-// here" already means to the caller above, so a client's `--stdio`
-// answers the same as an absent argument and the stdio path is reached
-// by the same branch rather than by a second one.
+// A transport word is not a filename. `""` already means "no file
+// here" to the caller above, so a client's `--stdio` answers the same
+// as an absent argument, reaching the stdio path via the same branch.
 file_arg = (env: Env, i: usize) str {
     word = arg(env, i);
     word.eq("--stdio").match({ true => "", false => word })
@@ -158,9 +148,9 @@ unwritable = (path: str, e: FsError) Res<i32, AllocError> {
     Ok(1);
 }
 
-// Exit 2 and not 1: "this build found problems" and "I could not tell
-// what you asked for" are different answers, and `scripts/fixpoint.sh`
-// reads the code.
+// Exit 2 not 1: "this build found problems" and "I couldn't tell what
+// you asked for" are different answers; `scripts/fixpoint.sh` reads
+// the code.
 usage = (word: str) Res<i32, AllocError> {
     word.is_empty().match({
         true  => println("{}", USAGE),
@@ -169,9 +159,9 @@ usage = (word: str) Res<i32, AllocError> {
     Ok(2);
 }
 
-// A flag that was needed and absent is not an unknown argument: the
-// caller spelled everything right and left something out, and naming
-// which is the difference between a typo hunt and a one-word fix.
+// A flag needed and absent is not an unknown argument: the caller
+// spelled everything right and left one thing out, and naming which
+// is the difference between a typo hunt and a one-word fix.
 missing = (flag: str) Res<i32, AllocError> {
     println("zen build: `{}` is required — a build with no `{}` writes nothing\n{}",
             flag, flag, USAGE);

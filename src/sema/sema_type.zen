@@ -1,38 +1,26 @@
 // src/sema/sema_type.zen
-// The two questions a node is asked, and the answers cached against it.
-//
-// `type_from_ast(id)` is what a WRITTEN type denotes; `type_of(id)` is
-// what an EXPRESSION is. Both memoize on the node's id — which is what
+// The two questions a node is asked, and the answers cached against it:
+// `type_from_ast(id)` is what a WRITTEN type denotes, `type_of(id)` is
+// what an EXPRESSION is. Both memoize on the node's id (what
 // `ast_id.zen` made ids `Eq + Hash` for, and what `sema_check.zen` holds
-// the two `Map`s for.
+// the two `Map`s for).
 //
-// EVERY FUNCTION HERE IS A FREE FUNCTION ON `Checker`, and that is what
-// makes this a file rather than four hundred more lines of the engine.
-// DESIGN.md settles that the two are the same thing: "`@Self` is spelled
-// `Vec<T>` when you write the same function outside the body — the two
-// forms are the same function, and the second is what the first means."
-// So `c.type_of(id, ctx)` still reads as a method, resolution is ufcs,
-// and nothing at a call site changed.
+// EVERY FUNCTION HERE IS A FREE FUNCTION ON `Checker` — DESIGN.md: "the
+// two forms are the same function" — so `c.type_of(id, ctx)` still
+// reads as a method; that's what makes this a file instead of four
+// hundred more lines of the engine. One subject, "what does this node
+// mean", shared by the memo discipline and the poison rule: the forms
+// that grew their own subject have left (`Match`, `Access`, `Call`, the
+// trap rule, `.try()`, to `sema_match`/`sema_member`/`sema_call`/
+// `sema_trap`/`sema_try`), and `sema_check.zen` imports nothing from
+// here — the engine holds state, this holds behaviour.
 //
-// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
-// is "what does this node mean", and the two queries share the memo
-// discipline and the poison rule. The forms that grew their own subject
-// have already left — `Match` to `sema_match`, `Access` to `sema_member`,
-// `Call` to `sema_call`, the trap rule to `sema_trap`, and the failure
-// model with `.try()` to `sema_try` — and what is left is the dispatch
-// plus the forms with no subject of their own.
-//
-// THE ENGINE HOLDS STATE AND THIS HOLDS BEHAVIOUR, which is what made
-// the split possible: `sema_check.zen` imports nothing from here.
-//
-// The claim this header used to make — that module cycles are a compile
-// error — is FALSE, and `AST_CONTRACT.md` says so in as many words:
-// "an import cycle is not a problem a whole-program compiler has". It
-// was tested rather than assumed, with two sibling modules calling each
-// other's functions, and it runs. That matters here because expression
-// typing IS mutually recursive across this folder: `Call` needs
-// `type_of` and `type_of` needs `Call`, so the cycle is the shape of the
-// problem and not a smell.
+// Module cycles are NOT a compile error, tested rather than assumed
+// (two sibling modules calling each other's functions, and it runs):
+// `AST_CONTRACT.md` — "an import cycle is not a problem a whole-program
+// compiler has". Expression typing IS mutually recursive here (`Call`
+// needs `type_of`, `type_of` needs `Call`), so the cycle is the shape
+// of the problem, not a smell.
 
 Ast, Expr, ExprId, Type, TypeId, Span, Ident, Literal, LiteralKind = ast
 Decl, DeclKind, Const, Alias, Enum = ast
@@ -71,20 +59,16 @@ seed_left_spine, spine_ahead = sema.sema_spine
 // -----------------------------------------------------------------
 
 // `@Self` IS THE ONE WRITTEN TYPE WHOSE MEANING IS NOT IN ITS NODE, so a
-// signature that names it may not be memoized.
-//
-// `Vec<T>.get` is written `(self: @Self, i: usize) Res<T>` ONCE, and the
-// answer differs per receiver: asked about `Vec<i32>` first and `Vec<u8>`
-// second, a memo keyed on the node hands the second asker the first
-// one's receiver. Nothing said so — the two agree on everything except
-// the parameter nobody compares — until monomorphisation made the
-// receiver part of a SYMBOL, and `Vec<u8>.get` was emitted taking a
-// `Vec<i32>`. That is the failure class this compiler has paid for
-// twice: C that compiles and means something else.
+// signature that names it may not be memoized: `Vec<T>.get` is written
+// `(self: @Self, i: usize) Res<T>` ONCE, but a memo keyed on the node
+// would hand a `Vec<u8>` asker the `Vec<i32>` receiver from an earlier
+// ask. Nothing caught this until monomorphisation made the receiver
+// part of a SYMBOL, and `Vec<u8>.get` was emitted taking a `Vec<i32>` —
+// C that compiles and means something else, twice paid for.
 //
 // A type parameter is NOT in this class and stays memoized: `T` denotes
-// a `Ty.Var` nominal on its owner, which is the same type wherever the
-// node is read from. Only the receiver travels in `ctx`.
+// a `Ty.Var` nominal on its owner, the same type wherever it's read
+// from. Only the receiver travels in `ctx`.
 type_from_ast* = (c :: Checker, id: TypeId, ctx: Ctx)
                  Res<TyId, AllocError> {
     ctx.has_self.match({
@@ -104,9 +88,8 @@ memoized_type* = (c :: Checker, id: TypeId, ctx: Ctx)
 compute_type* = (c :: Checker, id: TypeId, ctx: Ctx)
                Res<TyId, AllocError> {
     // seed the memo with poison before recursing, so a type that
-    // mentions itself bottoms out instead of looping. A recursive
-    // type is a real thing — `Node = { next: Ptr<Node> }` — and the
-    // layout question is answered elsewhere.
+    // mentions itself bottoms out instead of looping (`Node = { next:
+    // Ptr<Node> }` is real; the layout question is answered elsewhere).
     poison = c.types.unknown().try();
     c.type_memo.set(id, poison).try();
     node = c.tree.type_at(id);
@@ -162,15 +145,13 @@ param_type* = (c :: Checker, p: Param, ctx: Ctx) Res<TyId, AllocError> {
 }
 
 // `[u8, 64]`. BOTH HALVES ARE THE TYPE: the element is what an
-// assignment has to agree about, and the count is what makes `[u8, 64]`
-// and `[u8, 65]` two types — DESIGN.md:301, and the reason a bounds
-// check needs no length stored beside the bytes.
+// assignment must agree about; the count is what makes `[u8, 64]` and
+// `[u8, 65]` two types (DESIGN.md:301) — why a bounds check needs no
+// length stored beside the bytes.
 //
-// The count is an EXPRESSION because it is comptime, not because it is a
-// literal, so `[u8, i32.BITS]` folds the same way `i32.MAX + 1` does.
-// One that folds to nothing is a count this compiler cannot carry; it
-// takes 0, which makes every index into it out of range and reported
-// rather than silently admitted.
+// The count is an EXPRESSION because it's comptime, not literal:
+// `[u8, i32.BITS]` folds like `i32.MAX + 1`. One that folds to nothing
+// takes 0, so every index into it is out of range and reported.
 array_type* = (c :: Checker, t: ArrayType, ctx: Ctx)
              Res<TyId, AllocError> {
     e = c.type_from_ast(t.elem, ctx).try();
@@ -179,11 +160,10 @@ array_type* = (c :: Checker, t: ArrayType, ctx: Ctx)
 
 // A written name, applied to its arguments.
 //
-// `Res` is recognised structurally rather than resolved, and that is
-// not a special case for a favourite type: `Res<T>` and `Res<T, E>`
-// are two arities of one name, sema asks "which form is this" at
-// every `.try()`, and a nominal answer would make every one of those
-// questions a field read through a declaration.
+// `Res` is recognised structurally rather than resolved — not a special
+// case for a favourite type: `Res<T>` and `Res<T, E>` are two arities
+// of one name, and sema asks "which form is this" at every `.try()`; a
+// nominal answer would make that a field read through a declaration.
 named_type* = (c :: Checker, node: Type, name: Ident, args: Vec<TypeId>,
               ctx: Ctx) Res<TyId, AllocError> {
     tys ::= c.alloc.Vec<TyId>();
@@ -213,11 +193,10 @@ res_failure_of* = (c :: Checker, args: Vec<TyId>, value: TyId)
     })
 }
 
-// A primitive, or a declaration the module can see.
-//
-// The primitive check comes first because no module declares `i32`
-// in a way this layer can reach, and a name that is both would be a
-// language change rather than a lookup order.
+// A primitive, or a declaration the module can see. The primitive
+// check comes first: no module declares `i32` in a way this layer can
+// reach, and a name that's both would be a language change, not a
+// lookup-order question.
 declared_type* = (c :: Checker, node: Type, name: Ident, args: Vec<TyId>,
                  ctx: Ctx) Res<TyId, AllocError> {
     is_prim(name.text).match({
@@ -248,16 +227,14 @@ lookup_named* = (c :: Checker, node: Type, name: Ident, args: Vec<TyId>,
 }
 
 // "AN ALIAS IS THE TYPE, NOT A NAME THAT FORWARDS TO IT." `Alias = Shape`
-// binds `Alias` to `Shape` ITSELF, so `Alias.Circle` is `Shape.Circle` and
-// a value of one is a value of the other, because there are not two types.
-// So an alias RESOLVES THROUGH here, and nothing downstream sees a second
-// type — `ast_node.zen` says as much where `Alias` is declared, and no
-// backend has an arm for one.
+// binds `Alias` to `Shape` ITSELF, so `Alias.Circle` is `Shape.Circle`;
+// an alias RESOLVES THROUGH here — nothing downstream sees a second
+// type, and no backend has an arm for one (`ast_node.zen`).
 //
-// Answering with a nominal of the alias's OWN name is what it did instead,
-// and that type has no members, no variants and no impls: `a: Alias =
-// Alias.Circle` became "no such field or method on this type `Circle`",
-// which names neither the alias nor anything the author wrote.
+// The alternative — a nominal of the alias's own name — has no members,
+// variants, or impls: `a: Alias = Alias.Circle` became "no such field
+// or method on this type `Circle`", naming neither the alias nor
+// anything the author wrote.
 declared_or_alias* = (c :: Checker, d: Def, args: Vec<TyId>)
                     Res<TyId, AllocError> {
     d.kind.match({
@@ -270,14 +247,13 @@ declared_or_alias* = (c :: Checker, d: Def, args: Vec<TyId>)
 // of the compiler already recognises them by.
 //
 // A MODULE ALIAS has no type to resolve TO: `zz = vec` is grammar R1a's
-// other reading of the same three tokens, and `module_named_by` finds the
-// module back through this nominal's decl — which is what makes
-// `sh.reseat(3)` work. Using the bare name is a diagnostic raised where
-// the name is USED, not here.
+// other reading of the same three tokens, and `module_named_by` finds
+// the module back through this nominal's decl (what makes `sh.reseat(3)`
+// work); the bare-name diagnostic is raised where the name is USED.
 //
-// A PARAMETERISED ALIAS is a type constructor, and resolving its target
-// without substituting would answer with a type full of free parameters.
-// It stays nominal until substitution exists to do it properly.
+// A PARAMETERISED ALIAS is a type constructor: resolving its target
+// without substituting would answer with a type full of free
+// parameters, so it stays nominal until substitution can do it properly.
 alias_type* = (c :: Checker, d: Def, args: Vec<TyId>)
              Res<TyId, AllocError> {
     c.alias_module(d.id).match({
@@ -314,16 +290,12 @@ alias_target_of* = (c :: Checker, al: Alias, d: Def) Res<TyId, AllocError> {
 }
 
 // THE ENUM AN ALIAS NAMES, asked by the backend lowering `Alias.Circle`.
-//
-// The backend finds the enum a base names by looking the name up itself,
-// and an alias answered `AliasDef` there — so the variant had no enum to
-// belong to and `Alias` was reported as an unresolved value. It asks SEMA
-// rather than walking to the target a second time, because two walks that
-// disagreed would write a tag from one enum into a value of another, which
-// is C that compiles and means something else.
-//
-// `None` when the target is not an enum, which is the answer any other
-// declaration gives — a struct alias has no variants to reach.
+// The backend used to look the base name up itself; an alias answered
+// `AliasDef` there, so `Alias` was reported as an unresolved value.
+// This asks SEMA instead of walking to the target a second time — two
+// walks that disagreed would write a tag from one enum into a value of
+// another, C that compiles and means something else. `None` when the
+// target is not an enum — a struct alias has no variants to reach.
 alias_enum* = (c :: Checker, d: Def) Res<TyId> {
     c.def_type(d).match({
         Err(_) => None,
@@ -408,13 +380,11 @@ expr_kind* = (c :: Checker, id: ExprId, node: Expr, ctx: Ctx)
 }
 
 // `[0, 1, 2]` — a fixed array whose count is how many were written and
-// whose element is the first one's type. "the reading is chosen by what
-// the elements ARE": nothing here is a type, so this is a literal.
-//
-// The FIRST element decides, and the rest are typed for their own sake:
-// a diagnostic inside an element nobody read is still a diagnostic. An
-// empty literal has no element to ask, and `_` is the honest answer —
-// the same hole `Res<Cfg, _>` writes.
+// whose element is the FIRST one's type ("the reading is chosen by what
+// the elements ARE": nothing here is a type, so this is a literal). The
+// rest are still typed, for their own diagnostics. An empty literal has
+// no element to ask, and `_` is the honest answer — the same hole
+// `Res<Cfg, _>` writes.
 array_lit_type* = (c :: Checker, a: ArrayLit, ctx: Ctx)
                  Res<TyId, AllocError> {
     elem ::= c.types.infer().try();
@@ -425,18 +395,16 @@ array_lit_type* = (c :: Checker, a: ArrayLit, ctx: Ctx)
     c.types.array(elem, a.elems.len)
 }
 
-// `[i32, 4](2, 3, 5, 7)` — the type is WRITTEN, so it is what the array
-// is, and the arguments are checked against its element rather than
-// asked what they are. A count that disagrees with how many were written
-// is not caught here: `check_assign` sees one type and the arguments are
-// not an assignment to it.
+// `[i32, 4](2, 3, 5, 7)` — the type is WRITTEN, so the arguments are
+// checked against its element rather than asked what they are. A count
+// mismatch isn't caught here: `check_assign` sees one type, not an
+// assignment to it.
 //
-// "CHECKED AGAINST ITS ELEMENT" WAS THE COMMENT AND NOT THE CODE: every
-// element was typed and then dropped, so `[i32, 2](1, 3000000000)`
-// wrapped to -1294967296 with nothing said. BOTH compilers did, which is
-// why no differential run could see it — an element is the one position
-// where a literal meets a type without an assignment, a parameter or a
-// field name anywhere in sight.
+// "CHECKED AGAINST ITS ELEMENT" WAS THE COMMENT, NOT THE CODE: every
+// element was typed and dropped, so `[i32, 2](1, 3000000000)` wrapped
+// to -1294967296 unreported — in both compilers, so no differential run
+// could catch it. An element is the one place a literal meets a type
+// with no assignment, parameter, or field name in sight.
 fixed_array_type* = (c :: Checker, f: FixedArray, ctx: Ctx)
                    Res<TyId, AllocError> {
     ty = c.type_from_ast(f.type, ctx).try();
@@ -455,11 +423,10 @@ element_of = (c: Checker, ty: TyId) TyId {
     c.types.at(ty).match({ Array(a) => a.elem, _ => ty })
 }
 
-// `buf[i]`. The element, when the receiver is a fixed array — and the
-// one place a literal index can be compared against a count, because
-// this is where both are known at once. Everything else indexes through
-// the `index` its type declares, which is the backend's question and
-// stays poison here.
+// `buf[i]`. The element, when the receiver is a fixed array — the one
+// place a literal index can be compared against a count, since both
+// are known at once here. Everything else indexes through the `index`
+// its type declares, the backend's question; it stays poison here.
 index_element_type* = (c :: Checker, node: Expr, x: Index, ctx: Ctx)
                      Res<TyId, AllocError> {
     base = c.type_of(x.base, ctx).try();
@@ -500,10 +467,9 @@ name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
     })
 }
 
-// `None` is the prelude's own variant and there is nothing to resolve:
-// `Res<T>` is recognised structurally, exactly as the written type is,
-// so the value form is too. It carries no reason because there is none
-// to carry — that is what makes it an absence and not an error.
+// `None` is the prelude's own variant: `Res<T>` is recognised
+// structurally, so the value form is too. It carries no reason — that's
+// what makes it an absence, not an error.
 unbound_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
                     Res<TyId, AllocError> {
     text.eq("None").match({
@@ -527,12 +493,11 @@ global_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
     })
 }
 
-// A MODULE IS A NAMESPACE, NOT A VALUE — and the mistake is the USE, not
-// the binding. `sh = shape` then `sh.reseat(3)` is a real pattern the
-// corpus gates; `println("{}", sh)` is not, and the two are the same
-// declaration. So the diagnostic lands here, where the bare name stands
-// where a value belongs, and says which module it names: the error this
-// used to produce was "cannot print a value of this type".
+// A MODULE IS A NAMESPACE, NOT A VALUE — the mistake is the USE, not
+// the binding: `sh = shape` then `sh.reseat(3)` is a real pattern the
+// corpus gates, but `println("{}", sh)` is not. The diagnostic lands
+// here, naming the module the bare name stands for — the old error was
+// "cannot print a value of this type".
 value_def_type* = (c :: Checker, node: Expr, d: Def) Res<TyId, AllocError> {
     c.alias_module(d.id).match({
         None   => c.def_type(d),
@@ -541,13 +506,10 @@ value_def_type* = (c :: Checker, node: Expr, d: Def) Res<TyId, AllocError> {
 }
 
 // A BARE VARIANT: `Two` where a visible enum declares it, and no
-// declaration of that name does.
-//
-// A declaration wins, and it has to: `Res*, Ok*, None* = std.core.result`
-// puts variant names in scope everywhere, so a program that also
-// declares one of them means the declaration. The variant is what is
-// left when nothing else answered — the same order patterns already
-// use, where a name is a case only when the type declares one.
+// declaration of that name does. A declaration wins, and must:
+// `Res*, Ok*, None* = std.core.result` puts variant names in scope
+// everywhere, so a program declaring one of them means the declaration
+// — the variant is what's left when nothing else answered.
 variant_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
                     Res<TyId, AllocError> {
     found ::= c.alloc.Vec<Def>();
@@ -571,20 +533,19 @@ unresolved_name* = (c :: Checker, node: Expr, text: str)
     c.types.unknown()
 }
 
-// A name that denotes a DECLARATION rather than a value. A type used
-// as a value is the type itself — `Shape.Unit` reads through it —
-// and a function's own type is what overload resolution narrows.
+// A name that denotes a DECLARATION rather than a value: a type used as
+// a value is the type itself (`Shape.Unit` reads through it), a
+// function's own type is what overload resolution narrows.
 //
-// A CONSTANT IS NOT ITS OWN TYPE, and it is the one form here that
-// isn't. `RES_PATH* : str = "std.core.result.Res"` binds a `str`, and
-// reading the name as a nominal type called `RES_PATH` makes every
-// argument built from a constant fail to match the `str` parameter it
-// was written for — "no overload matches" on a call whose only
-// irregularity is that one argument was named.
-// AN ALIAS IS NOT ITS OWN TYPE EITHER, for the same reason a constant is
-// not: `Alias.Circle` is `Shape.Circle`, so the base a dot reaches through
-// has to be `Shape`. `declared_or_alias` is the same resolution the
-// written-type path takes, asked with no arguments.
+// A CONSTANT IS NOT ITS OWN TYPE, the one form here that isn't:
+// `RES_PATH* : str = "std.core.result.Res"` binds a `str`, so reading
+// the name as a nominal type `RES_PATH` failed every argument built
+// from it against that `str` parameter — "no overload matches" on a
+// call whose only irregularity was a named argument.
+//
+// AN ALIAS IS NOT ITS OWN TYPE EITHER, for the same reason:
+// `Alias.Circle` is `Shape.Circle`. `declared_or_alias` is the
+// written-type path's resolution, asked with no arguments.
 def_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
     d.kind.match({
         ConstDef => const_type(c, d),
@@ -631,17 +592,16 @@ written_or_value = (c :: Checker, k: Const, ctx: Ctx) Res<TyId, AllocError> {
 }
 
 // `a == b` is `bool` whatever the operands are; `a + b` is the
-// operands' type. Both sides are typed either way, because a
-// diagnostic inside an unused operand is still a diagnostic.
+// operands' type — both sides typed either way, since a diagnostic
+// inside an unused operand is still a diagnostic.
 //
-// THE LEFT OPERAND IS SEEDED FIRST WHEN IT IS ITSELF AN OPERATOR, and
-// `sema_spine.zen` says why: an operator chain is left-nested and the
-// parser builds it with a loop, so `b.lhs` may be ten thousand levels
-// deep and recursing into it is a segmentation fault. The seed types
-// those levels bottom up, which is the order this function would have
-// reached them in anyway, so the `type_of` below is a memo hit and
-// every answer is unchanged. The guard keeps the walk's frame off the
-// stack for an ordinary operand, which is what most operands are.
+// THE LEFT OPERAND IS SEEDED FIRST WHEN IT IS ITSELF AN OPERATOR
+// (`sema_spine.zen`): an operator chain is left-nested and built with a
+// loop, so `b.lhs` can be ten thousand levels deep and recursing
+// segfaults. The seed types those levels bottom-up, the order this
+// function reaches them anyway, so `type_of` below is a memo hit; the
+// guard just keeps the walk's frame off the stack for an ordinary
+// operand — most of them.
 binary_type* = (c :: Checker, node: Expr, b: Binary, ctx: Ctx)
               Res<TyId, AllocError> {
     c.spine_ahead(b.lhs).match({
@@ -718,9 +678,8 @@ no_address* = (c :: Checker, node: Expr, a: Access, inner: TyId)
 // blocks
 //
 // "A block is a value too." Its value is the trailing expression
-// written without a `;`; DESIGN.md also lets a `;`-terminated tail
-// be the value, and the AST records only what was written, so this
-// is where that is decided.
+// written without a `;`, or — DESIGN.md — a `;`-terminated tail; the
+// AST records only what was written, and this is where that's decided.
 // -----------------------------------------------------------------
 
 block_type* = (c :: Checker, id: BlockId, ctx: Ctx)

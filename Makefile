@@ -5,7 +5,7 @@ CFLAGS  ?= -O2 -std=c99
 PY      ?= python3
 ROOT    ?= src
 
-.PHONY: all build seed test test-zen lint parse design cap faults refmap ufcs style fixpoint determinism grammar grammar-test fmt clean help
+.PHONY: all build seed test test-zen lint parse design cap dupcomments faults refmap ufcs style fixpoint determinism grammar grammar-test fmt clean help
 
 all: test
 
@@ -29,8 +29,14 @@ seed: zen
 	./zen build $(ROOT) --emit-c -o seed/zen.c
 	git add seed/zen.c
 
-## test: the corpus and must-fail suites, against the bootstrapper
-test: parse design cap faults refmap ufcs style
+## test: the corpus and must-fail suites, against the bootstrapper.
+##
+## `grammar-test` and `dupcomments` joined this list on 2026-08-10. Both
+## existed as targets nobody ran, which is the same disease `grammar-test`
+## was written to cure: a check outside `make test` is a check that goes
+## stale unobserved. If either one makes this target too slow to run, split
+## it out deliberately and say where it runs instead — do not just drop it.
+test: parse design cap dupcomments faults refmap ufcs style grammar-test
 	$(PY) tests/run.py
 
 ## faults: every fault the compiler declares must have a site that raises
@@ -60,6 +66,15 @@ ufcs: grammar
 ## unless the path carries a written reason in scripts/line_cap.py.
 cap:
 	$(PY) scripts/line_cap.py
+
+## dupcomments: no comment block may sit immediately above a copy of itself.
+## A merge or a bad paste leaves that behind and it survives review, because
+## a reader who has already read the paragraph does not notice reading it
+## again — gen_c_inline.zen held twelve such pairs and gen_c_settle.zen six.
+## ADJACENT only: the same explanation above two sibling helpers is somebody's
+## judgement about where a reader needs it, and this gate does not overrule it.
+dupcomments:
+	$(PY) scripts/dup_comments.py
 
 ## style: the rest of STYLE.md — where a file lives, what it is named,
 ## which way its imports point, whether an impl sits with its type. The
@@ -113,9 +128,15 @@ grammar/zen.so: grammar/grammar.js grammar/tree-sitter.json
 	cd grammar && npx tree-sitter generate --abi 14
 	$(CC) -shared -fPIC -o grammar/zen.so grammar/src/parser.c -I grammar/src
 
-## grammar-test: the tree-sitter corpus
+## grammar-test: the grammar's contract, both halves. This used to be
+## `npx tree-sitter test`, which reported "Total parses: 0" and exited 0 --
+## grammar/ has no corpus directory, so the target passed on an empty set.
+## The real check is scripts/grammar_test.py: every tests/parse/errors/*.zen
+## must FAIL to parse, and every .zen under tests/corpus and example must
+## keep parsing. A green run prints both counts; a count dropping is how you
+## notice the fixtures moved.
 grammar-test: grammar
-	cd grammar && npx tree-sitter test
+	$(PY) scripts/grammar_test.py
 
 ## fmt: the whole tree must already be formatted.
 ##

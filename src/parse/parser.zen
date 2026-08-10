@@ -8,37 +8,31 @@
 // terms of (`peek`, `at`, `eat`, `expect`, `error`, `bump`). A subject
 // file never touches `p.at` or `p.tree` directly.
 //
-// THREE THINGS LIVE HERE BECAUSE THEY ARE ONE THING. The cursor, the
-// trivia pump and the depth guard all read the same token stream in
-// the same order, and separating them would mean three modules
-// agreeing about an index.
+// OVER 500 LINES, JUSTIFIED: the cursor, the trivia pump and the depth
+// guard look like three subjects and are one — they all read the same
+// token stream in the same order, and splitting them would mean three
+// modules agreeing about an index. Everything that could leave has: the
+// alphabet is parse_token.zen, the diagnostic is parse_diag.zen, the
+// lookahead is lookahead.zen.
 //
 // THE FAILURE MODEL, and it is the reason every signature below reads
 // `Res<X, AllocError>` rather than `Res<X, ParseError>`:
 //
 //   A SYNTAX ERROR IS NOT A RETURNED FAILURE. It is a `Diag` appended
-//   to `p.diags` and a poison node put in the tree, so that parsing
-//   continues and the second mistake in a file is found on the first
-//   run. TESTING.md's "one syntax error must not cascade into fifty"
-//   is unachievable any other way: a parser that returns on the first
-//   error reports one diagnostic per run, and a parser that returns
-//   the error up the stack has to invent a node at every level anyway.
+//   to `p.diags` and a poison node put in the tree, so parsing
+//   continues and the second mistake is found on the first run.
+//   TESTING.md's "one syntax error must not cascade into fifty" is
+//   unachievable otherwise: returning on the first error reports one
+//   diagnostic per run, and returning the error up the stack has to
+//   invent a node at every level anyway.
 //
-//   RUNNING OUT OF MEMORY IS. It is the one thing a parse function
-//   cannot carry on through, it is `AllocError` because that is what
+//   RUNNING OUT OF MEMORY IS. It's the one thing a parse function
+//   can't carry on through — `AllocError` because that's what
 //   `Ast.add_expr` and `Vec.add` return, and the seed subset has no
-//   error unions and no conversion — so `Res<X, ParseError>` would
-//   make `.try()` illegal on every single node the parser builds.
-//   Naming the type after the phase would cost a match at every call
-//   site and buy nothing: there is no second error to tell it from.
-//
-// OVER 500 LINES, JUSTIFIED. The three sections below — the cursor,
-// the trivia pump and the depth guard — look like three subjects and
-// are one: they all read the same token stream in the same order, and
-// splitting them would mean three modules agreeing about an index,
-// which is the bug this file exists to make impossible. Everything
-// that could leave has: the alphabet is parse_token.zen, the
-// diagnostic is parse_diag.zen, the lookahead is lookahead.zen.
+//   error unions and no conversion, so `Res<X, ParseError>` would make
+//   `.try()` illegal on every node the parser builds. Naming the type
+//   after the phase costs a match at every call site and buys nothing:
+//   there is no second error to tell it from.
 
 Alloc, AllocError = std.mem
 Ast = ast.ast_arena
@@ -51,15 +45,15 @@ Diag, diag, diag_at, truncated = parse.parse_diag
 // recursive-descent parser stack-overflows and this is a crash, not a
 // diagnostic. Decide the depth limit and emit an error at it."
 //
-// THE NUMBER IS NOT THE PARSER'S TO CHOOSE ALONE, and the reasoning
-// that picked 256 got that wrong. It counted this parser's own frames —
-// `type`, `expression`, `pattern`, `block`, a few hundred bytes each —
+// THE NUMBER IS NOT THE PARSER'S TO CHOOSE ALONE — the reasoning that
+// picked 256 got that wrong: it counted this parser's own frames
+// (`type`, `expression`, `pattern`, `block`, a few hundred bytes each)
 // and concluded 256 levels was tens of kilobytes of an eight-megabyte
 // stack, "two orders of margin". But nothing downstream has a bound of
-// its own: sema walks the same nesting through `type_of` and gen_c
-// walks it again through `expr`, with frames two orders larger. This is
-// the ONLY bound the whole pipeline has, so it has to hold for the
-// hungriest phase and not the thinnest.
+// its own — sema walks the same nesting through `type_of`, gen_c
+// through `expr`, with frames two orders larger. This is the ONLY bound
+// the pipeline has, so it must hold for the hungriest phase, not the
+// thinnest.
 //
 // MEASURED, one nesting level at a time until it segfaulted, at the
 // default eight-megabyte stack:
@@ -72,24 +66,24 @@ Diag, diag, diag_at, truncated = parse.parse_diag
 // not two orders — and it was margin by luck, since nothing connects
 // the two numbers.
 //
-// 304 IS WHAT `tests/corpus/codegen/nesting_expr.zen` NEEDS AND NOT A
-// BYTE MORE. That file writes 300 parentheses and argues for them, and
-// with the two levels the enclosing block and statement cost it needs
-// 302. Refusing it is a false refusal, which is as bad as a crash and
-// much easier to ship; so the bound rises to exactly 302 + 2 and stops.
+// 304 IS WHAT `tests/corpus/codegen/nesting_expr.zen` NEEDS, NOT A BYTE
+// MORE: that file writes 300 parentheses, and the enclosing block and
+// statement cost two more levels, so it needs 302. Refusing it is a
+// false refusal — as bad as a crash and easier to ship — so the bound
+// rises to exactly 302 + 2 and stops.
 //
-// THE WINDOW THAT WAS HERE IS CLOSED, and it was closed by counting
-// rather than by moving this number. The note that stood here said no
-// single value both admits 302 parentheses and refuses a 256-deep
-// `.match`, because the cost varies 4.6x by construct while the counter
-// charges every construct 1 — and that the parser could not weight it,
-// since `.match` is POSTFIX and recognised on the way back out.
+// THE WINDOW THAT WAS HERE IS CLOSED — closed by counting, not by
+// moving this number. The old note said no single value both admits
+// 302 parentheses and refuses a 256-deep `.match`, since cost varies
+// 4.6x by construct while the counter charges every construct 1, and
+// that the parser couldn't weight it because `.match` is POSTFIX,
+// recognised on the way back out.
 //
-// It is recognised on the way out; it is CHARGED on the way in. The
-// postfix loop takes a level per link before it takes the step
+// Recognised on the way out, but CHARGED on the way in: the postfix
+// loop takes a level per link before it takes the step
 // (`parse_expr.zen`), so a `.match` costs its scrutinee's level plus
-// its own and a nested call costs the same two. Measured against this
-// same 304, by bisection, the deepest program now accepted per shape:
+// its own, same as a nested call. Measured against this same 304, by
+// bisection, the deepest program now accepted per shape:
 //
 //     parentheses         302        `.match`     151
 //     nested calls        151        `x.a.a..`    302
@@ -679,15 +673,15 @@ Parser* = {
     // before recursing again — which is what unwinds a 10,000-deep
     // file instead of riding it into the stack guard.
     //
-    // THE COUNT IS THE TREE'S AND NOT THIS PARSER'S. That distinction
+    // THE COUNT IS THE TREE'S AND NOT THIS PARSER'S — that distinction
     // cost a segfault: the postfix chain is a LOOP, so `a.b.c` is one
-    // frame here and three levels in the tree, and a counter that only
-    // charged recursion let the chain grow without limit. sema and
-    // gen_c then walked what was BUILT — `x` with a thousand `.a`s, or
-    // the run of `(` a bailed-out parser wrapped into calls — and died
-    // on it, past a bound that had already said everything was fine.
-    // So a link costs a level like anything else, and `unwind` is how a
-    // loop gives back the levels it charged one at a time.
+    // frame here but three levels in the tree, and a counter that only
+    // charged recursion let the chain grow unbounded. sema and gen_c
+    // then walked what was BUILT — `x` with a thousand `.a`s, or the
+    // run of `(` a bailed-out parser wrapped into calls — and died past
+    // a bound that had already said everything was fine. So a link
+    // costs a level like anything else, and `unwind` gives back what a
+    // loop charged, one at a time.
     // -----------------------------------------------------------------
 
     enter* = (self :: @Self) Res<(), AllocError> {
@@ -756,14 +750,13 @@ Parser* = (a: Alloc, lexed: Lexed) Parser {
 // `Checker` holding another. There is one counter, so there must be one
 // tree, and a parser has to be handed it rather than make it.
 //
-// It is a VALUE and not a reference, and that is the protocol rather
-// than a compromise: the driver hands the tree in, the parser adds this
-// module's nodes to its copy, and the driver reads `p.tree` back before
-// building the next parser. One owner at a time, in sequence — which is
-// the same fact `Checker` relies on when it takes the finished tree by
-// value (SEMA_BOOTSTRAP_FIXES.md §12). Two parsers alive at once over
-// one tree would diverge the first time either `Vec` grew, and nothing
-// in this compiler wants that.
+// It is a VALUE and not a reference — the protocol, not a compromise:
+// the driver hands the tree in, the parser adds this module's nodes to
+// its copy, and the driver reads `p.tree` back before building the next
+// parser. One owner at a time, in sequence — the same fact `Checker`
+// relies on when it takes the finished tree by value
+// (SEMA_BOOTSTRAP_FIXES.md §12). Two parsers alive at once over one
+// tree would diverge the first time either `Vec` grew.
 Parser* = (a: Alloc, lexed: Lexed, tree: Ast) Parser {
     origin = Span(
         file: lexed.source.file,

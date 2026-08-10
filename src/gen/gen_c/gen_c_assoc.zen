@@ -2,29 +2,26 @@
 // `Type.name(..)` — a member called with NO receiver.
 //
 // "A struct body may bind a name to a value, read as `Type.NAME`", and a
-// function is a value. So `Duration.seconds(2)` is a member read through
-// its type, and it is not a method with the type shoved into the
-// receiver slot — which is what this backend did, emitting an undeclared
-// `D2` that no Zen diagnostic named and only `cc` caught.
+// function is a value: `Duration.seconds(2)` is a member read through
+// its type, not a method with the type shoved into the receiver slot —
+// which is what this backend used to do, emitting an undeclared `D2`
+// that no Zen diagnostic named and only `cc` caught.
 //
-// A CONSTRUCTOR IS WHY THE FORM HAS TO EXIST. `seconds = (n: u64)
-// Duration` takes a number and returns the type, so travelling with its
-// first parameter would file it under `u64` and put `.seconds()` on
-// every integer in every program.
+// A CONSTRUCTOR IS WHY THE FORM HAS TO EXIST: `seconds = (n: u64)
+// Duration` takes a number and returns the type, so filing it under its
+// first parameter would put `.seconds()` on every integer.
 //
-// THE FIRST PARAMETER IS THE WHOLE TEST, and it is asked of the RESOLVED
-// type rather than of the written spelling: a parameter that is the
-// receiver's own type is a method — "a method is a UFCS function whose
-// first parameter happens to be named `self`" — whether it was written
-// `@Self` or spelled out. Anything else, including no parameter at all,
-// is an associated function. A method reached this way has no spelling
-// in the language, so it stays a refusal.
+// THE FIRST PARAMETER IS THE WHOLE TEST, asked of the RESOLVED type, not
+// the written spelling: a parameter that is the receiver's own type is a
+// method ("a UFCS function whose first parameter happens to be named
+// `self`"), whether written `@Self` or spelled out. Anything else,
+// including no parameter, is an associated function; a method reached
+// this way has no spelling in the language and stays a refusal.
 //
 // EVERYTHING ELSE IS `gen_c_member.zen`'S METHOD CALL WITH THE RECEIVER
-// DROPPED: the same qualified name, the same signature, the same queue
-// entry. The two cannot disagree about which function they mean, and
-// `gen_c_decl.zen` lowers the body it queues without knowing which of
-// the two asked for it.
+// DROPPED: same qualified name, signature, queue entry — the two cannot
+// disagree about which function they mean, and `gen_c_decl.zen` lowers
+// the queued body without knowing which of the two asked for it.
 
 Ast, Expr, ExprId, Decl, Struct, Member, MemberKind = ast
 Function, Param, Access, Call, Arg, Span, Ident = ast
@@ -79,10 +76,9 @@ lower_type_assoc = (be :: CBackend, id: ExprId, c: Call, a: Access,
 // no member table, only a module and a name.
 // ---------------------------------------------------------------------
 
-// THE MODULE IS HALF THE QUESTION. Two modules may declare one top-level
-// name, so the declaration is looked up in the module the alias names —
-// and through the `*` gate, which is the same query sema typed the node
-// with, so the two cannot mean different declarations.
+// THE MODULE IS HALF THE QUESTION: two modules may declare one
+// top-level name, so lookup goes through the module the alias names and
+// the `*` gate — the same query sema typed the node with.
 lower_module_call = (be :: CBackend, id: ExprId, c: Call, a: Access,
                      mi: usize, ctx: Ctx, out :: String)
                     Res<bool, AllocError> {
@@ -122,14 +118,13 @@ lower_module_fn = (be :: CBackend, id: ExprId, c: Call, d: Def, ctx: Ctx,
 
 // A NARROW PATH THAT REFUSES RATHER THAN GUESSES.
 //
-// `gen_c_call.zen` owns the general call — the loop intrinsic, inlining
-// a lambda parameter, the bodiless floor — and every door into it starts
-// by looking the name up from the CALLER's module, which is not where
-// this declaration lives. Rebuilding that chain here would be a second
-// answer to a question that has one, so the case with none of it is
-// emitted and the rest is reported. The arguments are still written in
-// the CALLER's `ctx`: a name inside an argument means what it means
-// where it was written, not where the callee was declared.
+// `gen_c_call.zen` owns the general call (loop intrinsic, lambda-param
+// inlining, bodiless floor), and every door into it looks the name up
+// from the CALLER's module — not where this declaration lives.
+// Rebuilding that chain here would be a second answer to a question
+// that has one, so only the plain case is emitted; the rest is
+// reported. Arguments are still written in the CALLER's `ctx`: a name
+// means what it means where written, not where the callee was declared.
 module_fn_decl = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
                   ctx: Ctx, out :: String) Res<bool, AllocError> {
     inst ::= be.alloc.Inst();

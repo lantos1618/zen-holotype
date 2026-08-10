@@ -1,78 +1,63 @@
 // src/std/test/test.zen
 //
-// There is no test keyword and no discovery baked into the
-// compiler. A test is a function whose single parameter is a
-// Tester, a bench is a function whose single parameter is a
-// Bencher, and build.zen finds them by walking the parsed module
-// tree itself (b.module) and filtering on that parameter. `zen
-// test` merely runs the target that walk registered.
+// No test keyword, no discovery baked into the compiler. A test is a
+// function whose single parameter is a Tester, a bench takes a
+// Bencher; build.zen finds them by walking the parsed module tree
+// (b.module) and filtering on that parameter — `zen test` just runs
+// the target that walk registered. Change the filter in build.zen and
+// you change what a test IS.
 //
-// The consequence worth stating: change the filter in build.zen and
-// you change what a test IS. That is only true because the rule
-// lives in a build program instead of in the compiler.
-//
-// The function name is the test name. Name them as sentences —
-// `vec_grows`, `map_handles_collision` — because that name is what
-// a failure prints.
+// The function name is the test name — name them as sentences
+// (`vec_grows`, `map_handles_collision`) since that's what a failure
+// prints.
 
 Alloc = std.mem
 Env = std.env
 str = std.text
 
-// One variant, so the bar leads. The str is what failed, in words:
-// a Tester that reported `Failed` with no reason would be a reason
-// invented, which is law 4 read backwards.
+// One variant, bar leads. The str is what failed, in words — a Tester
+// reporting `Failed` with no reason would be a reason invented, law 4
+// read backwards.
 TestError* = | Failed(str)
 
 Tester* = {
-    // Starred because a test reads them: `t.alloc.Vec<i32>()` is
-    // the first line of half the corpus, and it is user code in
-    // another module. An unstarred field would be invisible there
-    // (law 6) and the Tester would be unusable.
+    // Starred since a test reads it: `t.alloc.Vec<i32>()` is the first
+    // line of half the corpus, user code in another module (law 6).
     env*: Env,
 
-    // A per-test arena, dropped after each test — so a leak is
-    // contained to the test that leaked and can be reported against
-    // it by name.
+    // A per-test arena, dropped after each test, so a leak is
+    // contained to the test that leaked and reportable by name.
     alloc*: Alloc,
 
-    // The plain assertion. Res, not a trap: a failing expectation
-    // is something the harness acts on (it records the failure and
-    // runs the next test), and a trap is for a bug.
+    // Res, not a trap: a failing expectation is something the harness
+    // acts on (records it, runs the next test); a trap is for a bug.
     expect* = (self: @Self, cond: bool) Res<(), TestError>
 
-    // STAGE 5 for its BODY, not its signature. On failure it dumps
-    // both sides through Display.dump, and dump is an @meta
-    // field-wise walk that arrives with src/meta/meta.zen. Written
-    // any earlier it could only report "not equal", which is the
-    // half of the message nobody needs.
-    //
-    // The T: Eq bound is what makes the comparison the type's own
-    // equality rather than a bytewise guess.
+    // STAGE 5 for its BODY, not its signature: on failure it dumps
+    // both sides via Display.dump, an @meta field-wise walk arriving
+    // with src/meta/meta.zen (any earlier, it could only say "not
+    // equal"). The T: Eq bound makes the comparison the type's own
+    // equality, not a bytewise guess.
     expect_eq* = <T: Eq>(self: @Self, a: T, b: T) Res<(), TestError>
 }
 
-// Benchmarking is the same discovery shape with a different
-// parameter: a bench takes a Bencher exactly as a test takes a
-// Tester, and lives in the same file as the code it measures.
+// Same discovery shape, different parameter: a bench takes a Bencher
+// as a test takes a Tester, in the same file as the code it measures.
 //
-// Because ALL allocation goes through Alloc — the law — a Bencher
-// counts allocations and bytes per op for free, with no
-// instrumentation anywhere. That is why allocs_op and bytes_op are
-// a hard gate and ns_op is not: the two counts are identical on
-// every machine, and wall clock is not.
+// Because ALL allocation goes through Alloc, a Bencher counts
+// allocations and bytes per op for free, no instrumentation needed —
+// why allocs_op/bytes_op are a hard gate and ns_op (wall clock,
+// non-deterministic) is not.
 Bencher* = {
     env*: Env,
     alloc*: Alloc,
 
-    // Runs f until the timing stabilizes and reports what it cost.
-    // `:` and not `::` — a bitwise copy of the Bencher would see
-    // the same counters, because they live behind the handle.
+    // Runs f until timing stabilizes. `:` not `::` — a bitwise copy
+    // sees the same counters, since they live behind the handle.
     iter* = (self: @Self, f: () ()) BenchStats
 }
 
-// What one op cost. Starred fields: build.zen compares these
-// against a Budget, and that is another module.
+// What one op cost; build.zen compares these against a Budget.
 BenchStats* = {
     ns_op*: u64,
     allocs_op*: u64,

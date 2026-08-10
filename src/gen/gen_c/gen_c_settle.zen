@@ -70,10 +70,6 @@ arguments* = (be :: CBackend, c: Call, recv: Res<ExprId>, argv :: Vec<ExprId>)
 // The declared parameter types, at this call's instantiation. Through
 // `param_type` and not `type_from_ast`, because `self :: @Self` is a
 // written type only that query knows how to answer.
-
-// The declared parameter types, at this call's instantiation. Through
-// `param_type` and not `type_from_ast`, because `self :: @Self` is a
-// written type only that query knows how to answer.
 param_types* = (be :: CBackend, f: Function, dctx: Ctx, inst: Inst,
                ptys :: Vec<TyId>) Res<(), AllocError> {
     f.params.loop((h, p) { add_param_type(be, p, dctx, inst, ptys).try() });
@@ -85,16 +81,6 @@ add_param_type = (be :: CBackend, p: Param, dctx: Ctx, inst: Inst,
     declared = be.check.param_type(p, dctx).try();
     ptys.add(sub_with(be, declared, inst).try())
 }
-
-// -----------------------------------------------------------------
-// what the call evaluates to
-//
-// `then<T>(b: bool, f: () T)` reaches `T` only through the closure, and
-// a closure infers FROM a signature rather than into one — so sema hands
-// back `Res<T>` with nothing bound. The lambda's own body is the answer,
-// and reading it here is the inference half of "a closure passed to a
-// function whose signature is already known".
-// -----------------------------------------------------------------
 
 // -----------------------------------------------------------------
 // what the call evaluates to
@@ -119,16 +105,6 @@ inline_ret* = (be :: CBackend, f: Function, dctx: Ctx, inst: Inst,
         true  => range_element(be, got, argv, ctx, extra),
     })
 }
-
-// WHAT THE CALL SETTLES THAT THE CALL SITE DID NOT WRITE DOWN.
-//
-// Two sources, and the second is the whole reason this file exists:
-//
-//   - an ORDINARY argument settles a parameter written as that
-//     parameter — `find(range: R, ..)` handed a `Range` says `R`
-//   - a LAMBDA argument settles the parameter its declared RETURN type
-//     names — `then(f: () T)` says `T`, which nothing else can, because
-//     a closure infers FROM a signature rather than into one
 
 // WHAT THE CALL SETTLES THAT THE CALL SITE DID NOT WRITE DOWN.
 //
@@ -168,10 +144,6 @@ settle_from_arg = (be :: CBackend, value: ExprId, i: usize,
 // A parameter written as a bare type parameter takes its argument's own
 // type. Only a bare one: anything deeper is unification, and sema owns
 // that.
-
-// A parameter written as a bare type parameter takes its argument's own
-// type. Only a bare one: anything deeper is unification, and sema owns
-// that.
 settle_from_value = (be :: CBackend, value: ExprId, i: usize,
                      ptys: Vec<TyId>, ctx: Ctx, extra :: Inst)
                     Res<(), AllocError> {
@@ -195,13 +167,6 @@ settle_bare = (be :: CBackend, value: ExprId, t: TyId, ctx: Ctx,
 // the rule `construct_struct` already turns on. What `R` has to become
 // is the type the argument IS, whatever its own arguments are; only a
 // type sema could not name at all says nothing.
-
-// AN OPEN ARGUMENT TYPE STILL ANSWERS THIS ONE. `Range(0, 10)` interns
-// as `Range<T>` with `T` free, and that is not a failure — "a type
-// argument no storage member reads does not change the layout", which is
-// the rule `construct_struct` already turns on. What `R` has to become
-// is the type the argument IS, whatever its own arguments are; only a
-// type sema could not name at all says nothing.
 bind_arg_type = (be :: CBackend, value: ExprId, v: TyId, ctx: Ctx,
                  extra :: Inst) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
@@ -213,19 +178,11 @@ bind_arg_type = (be :: CBackend, value: ExprId, v: TyId, ctx: Ctx,
 }
 
 // The declared parameter types with this call's own answers in them.
-
-// The declared parameter types with this call's own answers in them.
 settle_params* = (be :: CBackend, raws: Vec<TyId>, extra: Inst,
                  ptys :: Vec<TyId>) Res<(), AllocError> {
     raws.loop((h, t) { ptys.add(sub_with(be, t, extra).try()).try() });
     Ok(());
 }
-
-// THE INSTANTIATION THE BODY IS LOWERED UNDER, which is the call's own
-// answers put through what this file worked out. Sema binds a parameter
-// nothing settled TO ITSELF so that the list keeps its length; composing
-// is where that placeholder becomes the answer, and every type the body
-// reads goes through `sub` against exactly this.
 
 // THE INSTANTIATION THE BODY IS LOWERED UNDER, which is the call's own
 // answers put through what this file worked out. Sema binds a parameter
@@ -282,10 +239,6 @@ settle_from_body = (be :: CBackend, l: Lambda, i: usize, ptys: Vec<TyId>,
         None  => Ok(()),
     })
 }
-
-// The closure's declared return type, when it is a bare type parameter.
-// Only a bare one: `Res<T>` in that position would need unification, and
-// nothing in this tree writes it.
 
 // The closure's declared return type, when it is a bare type parameter.
 // Only a bare one: `Res<T>` in that position would need unification, and
@@ -398,14 +351,6 @@ declare_peek_slot = (be :: CBackend, name: str, ty: TyId)
 // one is still `()`: a body with nothing to give gives nothing, and
 // `write_res_payload` evaluates a unit payload for its effect rather
 // than dropping it, so nothing is lost by saying so.
-
-// WHAT A LAMBDA BODY EVALUATES TO. A block with no value node is a
-// sequence of statements and evaluates to `()` — "a statement ends with
-// `;`" said about a closure — and a value node is typed like any other
-// expression. Where sema has no answer for that expression the honest
-// one is still `()`: a body with nothing to give gives nothing, and
-// `write_res_payload` evaluates a unit payload for its effect rather
-// than dropping it, so nothing is lost by saying so.
 lambda_value_type = (be :: CBackend, l: Lambda, ctx: Ctx)
                     Res<TyId, AllocError> {
     unit = be.check.types.prim("()").try();
@@ -426,12 +371,6 @@ value_or_unit = (be :: CBackend, e: ExprId, ctx: Ctx, unit: TyId)
 settled* = (be :: CBackend, t: TyId) bool {
     (be.check.is_unknown(t) == false) && (open(be, t) == false)
 }
-
-// `find<R: Range<T>, T>` names `T` only inside another parameter's
-// BOUND, and the range is what answers. This is `gen_c_loop.zen`'s rule
-// said about a call rather than about a loop: a range that stores its
-// own `start` and `end` walks its own index space, so its element is
-// `usize`.
 
 // `find<R: Range<T>, T>` names `T` only inside another parameter's
 // BOUND, and the range is what answers. This is `gen_c_loop.zen`'s rule
@@ -517,10 +456,6 @@ call_result = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx, got: TyId)
 // A bare name, or the name after a dot: `find(range, p)` and
 // `range.find(p)` are one call written two ways, and only the second
 // carries a receiver.
-
-// A bare name, or the name after a dot: `find(range, p)` and
-// `range.find(p)` are one call written two ways, and only the second
-// carries a receiver.
 callee_name = (be :: CBackend, c: Call) Res<str> {
     be.tree.expr_at(c.callee).kind.match({
         Name(n)   => Ok(n.text),
@@ -545,11 +480,6 @@ named_result = (be :: CBackend, id: ExprId, c: Call, name: str, ctx: Ctx,
         None  => Ok(got),
     })
 }
-
-// Sema's own answer where it recorded one, and otherwise the only
-// candidate — the same rule `lower_plain_call` follows, because a query
-// that resolved differently from the lowering would be worse than no
-// query at all.
 
 // Sema's own answer where it recorded one, and otherwise the only
 // candidate — the same rule `lower_plain_call` follows, because a query

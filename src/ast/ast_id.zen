@@ -1,40 +1,24 @@
 // src/ast/ast_id.zen
 // How a node is named.
 //
-// The four node families below are mutually recursive — an expression
-// holds types, a type holds an expression, a pattern holds patterns —
-// so a child is never held by value. It is held by an id into the
-// matching arena in `Ast`, and `ast_arena.zen` is the only thing that
-// turns one back into a node.
+// The four node families are mutually recursive (expr holds types,
+// type holds expr, pattern holds patterns), so children are held by id
+// into the matching `Ast` arena, never by value. Ids not `Ptr<Expr>`:
+// (1) `Node = { next: Node }` has no size — recursion needs indirection
+// regardless; (2) sema is memoized queries (DESIGN.md decision 3), and
+// a memo table's key must be `Eq + Hash` with real identity, which a
+// tree of values or a raw pointer doesn't have.
 //
-// Two reasons this is an id and not a `Ptr<Expr>`, and only the first
-// is about layout:
+// Four distinct types, not one `NodeId`: passing a TypeId where an
+// ExprId belongs is the mistake parallel agents will make, made
+// unrepresentable for free.
 //
-//   1. `Node = { next: Node }` has no size, so recursion needs an
-//      indirection whatever it is called.
-//   2. "Sema is memoized queries, not monolithic passes. `type_of(node)`,
-//      `defs_of(name)`" — DESIGN.md, decision 3. A memo table is a
-//      `Map<K, V>` and `K` must be `Eq + Hash`, so a node reference has
-//      to be a small value with an identity. A tree of values has no
-//      identity at all and a raw pointer has no exported one, so an id
-//      is the only shape in which that law can be obeyed.
+// An id is an INDEX in parser-creation order — a pure function of the
+// source, keeping gen_c deterministic (nothing here is an address).
 //
-// They are four types and not one `NodeId`, because passing a TypeId
-// where an ExprId belongs is exactly the mistake four agents building
-// against this in parallel are going to make, and it costs nothing to
-// make it unrepresentable.
-//
-// An id is an INDEX, assigned in the order the parser creates nodes.
-// That makes it a pure function of the source, which is what keeps
-// gen_c deterministic: nothing here is an address.
-//
-// The index is a u32, not a usize, and that is forced rather than
-// chosen. std.core.num carries only LOSSLESS conversions — a
-// narrowing one can fail, so it belongs in a Res-returning function
-// someone writes on purpose — and `u32` is the widest integer with
-// both `to_usize` (to index the arena) and `to_u64` (to hash). A
-// usize id could be neither indexed by a Map nor widened for a
-// hasher. Four billion nodes is the cost, and it is not a cost.
+// The index is `u32`, forced not chosen: std.core.num's conversions are
+// lossless-only, and `u32` is the widest int with both `to_usize` (index
+// the arena) and `to_u64` (hash). A usize id could do neither.
 
 Eq, Hash, Hasher = std.core.core
 
@@ -46,12 +30,10 @@ PatternId* = { index*: u32 }
 
 BlockId* = { index*: u32 }
 
-// Eq and Hash on all four, so a memoized query can key on a node. An
-// impl lives with the type it is about, and these four types are
-// declared here — std.core.eq could not have written them.
-//
-// The hash is the index itself: ids are dense and small, so mixing
-// would be work spent hiding a distribution that is already perfect.
+// Eq and Hash on all four so a memoized query can key on a node
+// (declared here, not in std.core.eq, since an impl lives with its type).
+// The hash is the index itself: ids are dense and small, already an
+// ideal distribution, so mixing would be wasted work.
 ExprId.impl(Eq, {
     eq ::= (self: @Self, other: @Self) bool { self.index == other.index }
 })

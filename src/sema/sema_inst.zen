@@ -1,43 +1,25 @@
 // src/sema/sema_inst.zen
-// What a type parameter BECOMES.
+// What a type parameter BECOMES. `sema_ty.zen` gives it its own type,
+// `Ty.Var`; this file substitutes it.
 //
-// `sema_ty.zen` gives a type parameter a type of its own — `Ty.Var`,
-// nominal on its owner as well as its name, "so substitution cannot
-// confuse them". This file is the substitution that sentence was
-// written for.
+// An instantiation is a pair of parallel lists, not a `Map` (same
+// reason as the backend's type worklist: small, built once, read many
+// times) — `vars` holds the `Ty.Var` ids, `args` what each became, so a
+// lookup is a `u32` compare.
 //
-// AN INSTANTIATION IS A PAIR OF PARALLEL LISTS and not a `Map`, for the
-// reason the backend's type worklist is: it is small, it is built once
-// and read many times, and a list is the shape whose iteration order is
-// a function of its construction. `vars` holds the `Ty.Var` ids and
-// `args` what each became, so a lookup is a `u32` compare — which is
-// exactly what interning bought.
+// The memo is not re-keyed by instantiation: a generic body is checked
+// exactly once, generically; `ExprId` already separates call sites, and
+// re-keying would re-check the body per instantiation, duplicating
+// every diagnostic it owes.
 //
-// THE MEMO IS NOT RE-KEYED, AND THAT IS THE DESIGN. `sema.zen` used to
-// say the expression memo would have to become `(ExprId, instantiation)`
-// in the same change that makes `T` resolve to an argument. It does not,
-// because a generic body is still checked EXACTLY ONCE — generically,
-// with its parameters as `Var`s. What instantiation changes is the
-// answer at a CALL SITE, and a call site has one instantiation: the memo
-// key `ExprId` already separates two calls to one generic function.
-// Re-keying would force the body to be re-checked per instantiation,
-// which would yield every diagnostic that body owes once per
-// instantiation — and "one mistake, one diagnostic" is not a rule this
-// folder gives up to save a substitution.
+// Substitution happens only at a call resolving (`sema_call.zen`) and a
+// member reached through a generic receiver (`sema_member.zen`);
+// everything downstream reads those answers rather than deriving them.
 //
-// So substitution happens at two places and nowhere else: where a call
-// RESOLVES (`sema_call.zen` records the instantiation under the call's
-// own id) and where a member is REACHED through a generic receiver
-// (`sema_member.zen` substitutes the receiver's arguments into what its
-// declaration promised). Everything downstream — the backend most of
-// all — reads those answers rather than deriving them.
-//
-// A PARTIAL SUBSTITUTION IS WORSE THAN NONE. `subst` leaves a `Var` it
-// has no binding for alone rather than guessing, and `has_var` is the
-// question every consumer must ask before it emits: a `Var` reaching a
-// backend mangles to one letter, which would make two instantiations one
-// symbol. The refusal belongs at the consumer, where there is a position
-// to report at.
+// A partial substitution is worse than none: `subst` leaves an unbound
+// `Var` alone; `has_var` is what every consumer must check before
+// emitting, since a `Var` reaching a backend mangles to one letter,
+// colliding two instantiations into one symbol.
 
 Ast, Decl, DeclKind, Struct, TParam, Span = ast
 Alloc, AllocError = std.mem
@@ -50,32 +32,27 @@ World, Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 
 // One instantiation: which concrete type each type parameter became.
-//
-// The two `Vec`s are private and every read goes through a method, so a
-// caller can hold an `Inst` by value — which is what lets one live in a
-// memo and in a backend's work queue at the same time without either
-// copy diverging: nothing mutates one after `bind` has finished.
+// The two `Vec`s are private, so an `Inst` can be held by value — living
+// in a memo and a backend work queue at once, since nothing mutates it
+// after `bind` finishes.
 Inst* = {
     vars :: Vec<TyId>,
     args :: Vec<TyId>,
 
-    // How many parameters this instantiation binds. Zero is the empty
-    // substitution, which every non-generic declaration is lowered
-    // under and which `subst` answers instantly.
+    // How many parameters this instantiation binds; zero is the empty
+    // substitution every non-generic declaration is lowered under.
     len* = (self: @Self) usize { self.vars.len }
 
-    // The i-th parameter and what it became, in declaration order. A
-    // caller that has to REBASE an instantiation — a call inside a
-    // generic body instantiates at the enclosing body's parameters —
-    // needs both halves, and this is the only reason `vars` is readable.
+    // The i-th parameter and what it became, in declaration order —
+    // needed to REBASE an instantiation (a call inside a generic body
+    // instantiates at the enclosing body's own parameters).
     var_at* = (self: @Self, i: usize) Res<TyId> { self.vars.get(i) }
 
     arg_at* = (self: @Self, i: usize) Res<TyId> { self.args.get(i) }
 
-    // Bind one parameter. FIRST BINDING WINS: unifying `<T>(a: T, b: T)`
-    // against `(i32, i32)` must not rebind `T` on the second argument,
-    // and a call that really does disagree is a mismatch the coercion
-    // check reports — inventing a second binding here would hide it.
+    // Bind one parameter; first binding wins. Unifying `<T>(a: T, b: T)`
+    // against `(i32, i32)` must not rebind `T` on the second argument —
+    // a real disagreement is a mismatch the coercion check reports.
     bind* = (self :: @Self, v: TyId, arg: TyId) Res<(), AllocError> {
         self.bound(v).match({
             true  => Ok(()),
@@ -93,9 +70,8 @@ Inst* = {
         self.lookup(v).match({ Ok(_) => true, None => false })
     }
 
-    // What `v` became, or nothing. Nothing means "no binding", never
-    // "bound to poison" — the two are different and only one of them is
-    // a reason to refuse.
+    // What `v` became, or nothing — "no binding", never "bound to
+    // poison"; only one of those is a reason to refuse.
     lookup* = (self: @Self, v: TyId) Res<TyId> {
         n = self.vars.len;
         Range(0, n).find((k) {
@@ -107,21 +83,16 @@ Inst* = {
     }
 }
 
-// ONE CALL INSTANTIATING ONE GENERIC DECLARATION — an `Inst` with the
-// call that made it, which is what `sema_depth.zen` needs to ask whether
-// the instantiation set is finite.
+// One call instantiating one generic declaration, paired with the call
+// that made it, for `sema_depth.zen` to ask whether the instantiation
+// set is finite. `Checker.inst_memo` holds the same answer keyed by
+// call site, but a `Map` never lists, so edges are also appended to a
+// `Vec` in resolution order for the termination walk.
 //
-// `Checker.inst_memo` already holds the same answer keyed by call site,
-// but a `Map` is a lookup and never a listing, and the termination walk
-// needs EVERY edge rather than one. So the edges are also appended to a
-// `Vec` in the order they resolved.
-//
-// `from_owner` is the qualified name of the generic function whose BODY
-// holds the call, empty at the top level. It is what makes the walk a
-// graph rather than a list: an edge out of `ping` is one whose
-// `from_owner` is `ping`, and its `args` are then written in terms of
-// `ping`'s own type parameters — which is exactly what `subst` needs to
-// turn them into the next instantiation along the chain.
+// `from_owner` is the generic function whose body holds the call (empty
+// at top level), making the walk a graph: an edge out of `ping` has
+// `from_owner = "ping"` and `args` in `ping`'s own type parameters, for
+// `subst` to chain forward.
 InstEdge* = {
     from_owner*: str,
     to_owner*: str,
@@ -133,9 +104,8 @@ InstEdge* = {
     span*: Span,
 }
 
-// `alloc.Inst()` — a ufcs function whose first parameter is an Alloc,
-// beside the type it builds, exactly as `Vec`, `Map` and `Types` are. A
-// bare value and not a `Res`: an empty instantiation owns no pages.
+// `alloc.Inst()`, a ufcs constructor like `Vec`, `Map` and `Types`. A
+// bare value, not a `Res`: an empty instantiation owns no pages.
 Inst* = (a: Alloc) Inst {
     Inst(vars: a.Vec<TyId>(), args: a.Vec<TyId>())
 }
@@ -144,11 +114,10 @@ Inst* = (a: Alloc) Inst {
 // substitution
 // ---------------------------------------------------------------------
 
-// `ty` with every bound parameter replaced. Structural and total: a type
-// mentioning no parameter is returned unchanged, and one mentioning a
-// parameter this instantiation does not bind keeps it — `has_var` is how
-// a consumer finds out, because this function has no position to report
-// at.
+// `ty` with every bound parameter replaced. Structural and total: an
+// unmentioned parameter is unchanged, a mentioned-but-unbound one keeps
+// it — `has_var` is how a consumer finds out, since this has no
+// position to report at.
 subst* = (c :: Checker, ty: TyId, inst: Inst) Res<TyId, AllocError> {
     (inst.len() == 0).match({
         true  => Ok(ty),
@@ -178,11 +147,10 @@ subst_named = (c :: Checker, n: TyNamed, ty: TyId, inst: Inst)
     })
 }
 
-// A `TyNamed` carries the bare name and the declaration but not the
-// qualified name the store keys on, so it is rebuilt from the
-// declaration — the same two segments `sema_def.zen` joins to make a
-// `Def.qname`, which is what makes an instantiation intern under the
-// path the generic form did.
+// `TyNamed` carries the bare name and declaration but not the qualified
+// name the store keys on, so it's rebuilt from the declaration — the
+// same two segments `Def.qname` joins, so the instantiation interns
+// under the generic form's own path.
 rebuild_named = (c :: Checker, n: TyNamed, inst: Inst)
                 Res<TyId, AllocError> {
     args ::= c.alloc.Vec<TyId>();
@@ -224,9 +192,8 @@ subst_fn = (c :: Checker, f: TyFn, ty: TyId, inst: Inst)
     c.types.fn_ty(params, ret)
 }
 
-// A set is rebuilt through `union_ty`, which canonicalises: substituting
-// two parameters that became one type collapses the set, exactly as
-// writing that set by hand would.
+// Rebuilt through `union_ty`, which canonicalises: substituting two
+// parameters into one type collapses the set, as writing it by hand would.
 subst_union = (c :: Checker, members: Vec<TyId>, ty: TyId, inst: Inst)
               Res<TyId, AllocError> {
     parts ::= c.alloc.Vec<TyId>();
@@ -240,13 +207,10 @@ subst_list* = (c :: Checker, src: Vec<TyId>, inst: Inst, out :: Vec<TyId>)
     Ok(());
 }
 
-// Does this type still mention a parameter nobody has substituted?
-//
-// THE QUESTION EVERY CONSUMER MUST ASK. `tcode` renders a `Var` as one
-// letter, so `Vec<T>` and `Vec<U>` would be one C name and one C
-// definition — a wrong answer with no diagnostic, which is the failure
-// class monomorphisation exists to avoid. A consumer that cannot answer
-// it refuses at a position instead.
+// Does this type still mention an unsubstituted parameter? `tcode`
+// renders a `Var` as one letter, so `Vec<T>`/`Vec<U>` would collide into
+// one C definition — silently wrong, the exact failure class
+// monomorphisation exists to avoid. Unanswerable consumers refuse instead.
 has_var* = (c: Checker, ty: TyId) bool {
     c.types.at(ty).match({
         Var(_)   => true,
@@ -268,12 +232,9 @@ any_has_var = (c: Checker, list: Vec<TyId>) bool {
 // where an instantiation comes from
 // ---------------------------------------------------------------------
 
-// The `Ty.Var`s a declaration's own type parameters denote.
-//
-// `owner` is the declaration's qualified name and it must be the SAME
-// string every reader builds, because `Var` is interned on it: a
-// parameter resolved from a declaration and the same one resolved from
-// a candidate have to be one type. `owner_of` is the one builder.
+// The `Ty.Var`s a declaration's type parameters denote. `owner` must be
+// the same string every reader builds, since `Var` is interned on it —
+// `owner_of` is the one builder.
 tparam_vars* = (c :: Checker, tparams: Vec<TParam>, owner: str,
                 out :: Vec<TyId>) Res<(), AllocError> {
     tparams.loop((h, tp) {
@@ -282,9 +243,8 @@ tparam_vars* = (c :: Checker, tparams: Vec<TParam>, owner: str,
     Ok(());
 }
 
-// The same vars, PUSHED INTO SCOPE rather than collected: a signature
-// that names `U` resolves it out of the tvar stack, and a struct's `<T>`
-// and a member's own `<U>` are the same push at two scales.
+// The same vars, PUSHED INTO SCOPE rather than collected: a struct's
+// `<T>` and a member's `<U>` resolve out of the tvar stack the same way.
 push_tparams* = (c :: Checker, tparams: Vec<TParam>, owner: str)
                 Res<(), AllocError> {
     tparams.loop((h, tp) {
@@ -294,10 +254,9 @@ push_tparams* = (c :: Checker, tparams: Vec<TParam>, owner: str)
     Ok(());
 }
 
-// A declaration's qualified name, built from its module and its own
-// name. `sema_call.zen` uses `Def.qname` and `sema_member.zen` builds
-// this by hand for a struct; they agree because they are the same two
-// segments joined the same way, and this is where that is written down.
+// A declaration's qualified name: module plus own name. `sema_call.zen`
+// and `sema_member.zen` agree with this because both join the same two
+// segments the same way.
 owner_of* = (c :: Checker, mi: usize, name: str) Res<str, AllocError> {
     out ::= c.alloc.String().try();
     out.add_bytes(module_name(c, mi)).try();
@@ -311,11 +270,8 @@ module_name* = (c: Checker, mi: usize) str {
 }
 
 // The instantiation a generic TYPE carries: `Vec<GenDiag>` binds `Vec`'s
-// own `T`. This is what makes a member of a generic receiver answer
-// about the receiver rather than about the declaration.
-//
-// Empty when the type is not an application of a generic declaration,
-// which is the common case and costs one field read.
+// own `T`, so a member of a generic receiver answers about the
+// receiver, not the declaration. Empty for the common non-generic case.
 inst_of_named* = (c :: Checker, n: TyNamed) Res<Inst, AllocError> {
     inst ::= c.alloc.Inst();
     (n.args.len > 0).match({
@@ -350,10 +306,9 @@ fill_tparams = (c :: Checker, n: TyNamed, s: Struct, inst :: Inst)
     Ok(());
 }
 
-// Bind each parameter to the argument in its position. A shorter
-// argument list binds what it can and leaves the rest free, which
-// `has_var` then refuses at the consumer — a positional list is the
-// whole of the rule and there is nothing else to check.
+// Bind each parameter to the argument in its position; a shorter
+// argument list binds what it can and leaves the rest for `has_var` to
+// refuse at the consumer.
 zip* = (c :: Checker, vars: Vec<TyId>, args: Vec<TyId>, inst :: Inst)
        Res<(), AllocError> {
     Range(0, vars.len).loop((h, i) {
@@ -382,15 +337,14 @@ zip_arg = (c :: Checker, v: TyId, args: Vec<TyId>, i: usize, inst :: Inst)
 // inference
 // ---------------------------------------------------------------------
 
-// Bind what an ARGUMENT says about a declared parameter's type
-// parameters. `<T>(p: Ptr<T>)` given a `Ptr<u8>` binds `T = u8`, and the
-// walk is the ordinary structural match — no occurs check, because a
-// `Var` never appears inside the ACTUAL: an actual is a type something
-// already has.
+// Bind what an argument says about a declared parameter's type
+// parameters. `<T>(p: Ptr<T>)` given `Ptr<u8>` binds `T = u8`; the walk
+// is ordinary structural match, no occurs check, since a `Var` never
+// appears inside the actual.
 //
-// SILENT ON DISAGREEMENT. A parameter that does not line up binds
-// nothing and the caller finds out through `has_var`; reporting here
-// would raise a diagnostic for an overload that was only being TRIED.
+// Silent on disagreement: a parameter that doesn't line up binds
+// nothing, and the caller finds out through `has_var` — reporting here
+// would raise a diagnostic for an overload that was only being tried.
 unify* = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
          Res<(), AllocError> {
     c.types.at(param).match({
@@ -402,25 +356,21 @@ unify* = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
     })
 }
 
-// Poison never becomes a binding: an argument sema could not type says
-// nothing about `T`, and binding `T = <unknown>` would emit a type
-// nobody wrote.
+// Poison never becomes a binding: an untypeable argument says nothing
+// about `T` — binding `T = <unknown>` would emit a type nobody wrote.
 //
-// A TYPE THAT STILL MENTIONS A PARAMETER IS NOT POISON, and refusing it
-// was the one line that turned an OPEN answer into an OPAQUE one.
-// `Range(1, 4).map(alloc, ..)` answers `Res<Vec<U>>` — `map`'s own `U`,
-// which only the body settles — and `ok_or`'s `<T>(r: Res<T>, ..)` then
-// declined to bind `T` at all, so `.ok_or(..).try()` answered a bare
-// `T` rather than `Vec<U>`. `sema_call.zen` reaches no members through
-// a foreign `Var`, so the `.loop` on it resolved to nothing, and a
-// backend reading `call_memo` for an answer sema never wrote reported
-// six declarations of `loop` as an ambiguity.
+// A type that still mentions a parameter is NOT poison — refusing it
+// here used to turn an open answer into an opaque one. Bug found the
+// hard way: `Range(1, 4).map(alloc, ..)` answers `Res<Vec<U>>` (map's
+// own `U`, settled only by the body), and `ok_or`'s
+// `<T>(r: Res<T>, ..)` declined to bind `T` at all — so
+// `.ok_or(..).try()` answered a bare `T` instead of `Vec<U>`.
+// `sema_call.zen` reaches no members through a foreign `Var`, so the
+// `.loop` on it resolved to nothing, and a backend reading `call_memo`
+// reported six declarations of `loop` as an ambiguity.
 //
-// Openness is not lost by binding it — `Vec<U>` is as open as `U` — and
-// the refusal for it already lives at the consumer, which is what
-// `has_var` is asked for before a symbol is written. Binding keeps the
-// SHAPE, which is the whole of what the caller further down the chain
-// still needs.
+// Binding keeps openness: `Vec<U>` is as open as `U`, and the refusal
+// for it already lives at the consumer via `has_var`.
 bind_actual = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
               Res<(), AllocError> {
     usable_actual(c, actual).match({
@@ -442,8 +392,7 @@ unify_named = (c :: Checker, n: TyNamed, actual: TyId, inst :: Inst)
 }
 
 // Only two applications of ONE declaration say anything about each
-// other's arguments: `Vec<T>` against `Map<K, V>` is a mismatch, not an
-// inference.
+// other's args: `Vec<T>` vs `Map<K, V>` is a mismatch, not inference.
 unify_args = (c :: Checker, n: TyNamed, m: TyNamed, inst :: Inst)
              Res<(), AllocError> {
     n.decl.eq(m.decl).match({

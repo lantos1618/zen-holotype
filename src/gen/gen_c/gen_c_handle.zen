@@ -1,23 +1,22 @@
 // src/gen/gen_c/gen_c_handle.zen
 // `h.break(v)` and `h.next()` — leaving a loop, and leaving a pass.
 //
-// Its own file rather than the tail of `gen_c_loop.zen` because it is
-// its own subject, and DESIGN.md is the one that says so: `.try()` "is a
-// jump out through a frame boundary, exactly what `h.break(v)` does".
-// The loop file answers what a loop IS; this one answers what a jump out
-// of one is, which is the same question `gen_c_flow.zen` answers for
-// `.try()`.
+// Its own file rather than the tail of `gen_c_loop.zen`: DESIGN.md
+// frames `.try()` as "a jump out through a frame boundary, exactly what
+// `h.break(v)` does" — the loop file answers what a loop IS, this one
+// what a jump out of one is, the same question `gen_c_flow.zen` answers
+// for `.try()`.
 //
-// BOTH ARE `goto`s AND NEITHER IS C's `break` OR `continue`. The body is
-// inlined into whatever the lowering of a `.match` produced — an `if`
-// chain today — and a C `break` written there would leave that construct
-// rather than the loop. A label cannot be captured that way, which is
-// the whole reason `LoopFrame` carries two of them.
+// Both are `goto`s, neither is C's `break`/`continue`: the body is
+// inlined into whatever the lowering of a `.match` produced (an `if`
+// chain today), and a C `break` there would leave that construct rather
+// than the loop. A label cannot be captured that way, the whole reason
+// `LoopFrame` carries two of them.
 //
-// A HANDLE IS NOT A VALUE. `h` has no C storage and no type sema can
-// name: what the binding holds is the DEPTH of the loop it came from, so
+// A handle is not a value: `h` has no C storage and no type sema can
+// name — the binding holds the DEPTH of the loop it came from, so
 // `h.break` is recognised at the NAME rather than resolved through a
-// receiver's type. That is why `handle_depth` is asked before anything
+// receiver's type. That's why `handle_depth` is asked before anything
 // else in `lower_dot_call`.
 
 Ast, Expr, ExprId, Access, Call, Arg = ast
@@ -39,11 +38,7 @@ write_label = gen.gen_c.gen_c_loop
 unwind_to = gen.gen_c.gen_c_own
 
 // -----------------------------------------------------------------
-// the two verbs
-//
-// The same jump `.try()` is, one frame down: DESIGN.md's own framing —
-// "a jump out through a frame boundary, exactly what `h.break(v)`
-// does".
+// the two verbs — the same jump `.try()` is, one frame down
 // -----------------------------------------------------------------
 
 // Is this dotted call one on a loop handle? The base has to be a bare
@@ -81,11 +76,10 @@ handle_verb = (be :: CBackend, id: ExprId, c: Call, name: str,
     })
 }
 
-// `h.next()` LEAVES THIS ITERATION'S BLOCK. Every exit is a scope exit,
-// and a `goto` jumps OVER the closing brace the cleanup was going to be
-// written at — so this iteration's defers and drops run here instead.
-// Nothing is handed out of a pass that ends this way, so there is
-// nothing to keep.
+// `h.next()` leaves this iteration's block. Every exit is a scope exit,
+// and a `goto` jumps OVER the closing brace the cleanup would run at —
+// so this iteration's defers and drops run here instead. Nothing is
+// handed out of a pass that ends this way, so there is nothing to keep.
 leave_pass = (be :: CBackend, fr: LoopFrame, out :: String)
              Res<(), AllocError> {
     unwind_to(be, fr.depth, "").try();
@@ -114,11 +108,10 @@ write_break = (be :: CBackend, id: ExprId, c: Call, fr: LoopFrame,
         false => Ok(()),
         true  => write_break_value(be, c, fr, ctx),
     }).try();
-    // THE VALUE IS WRITTEN BEFORE THE CLEANUP AND THE CLEANUP BEFORE THE
-    // JUMP, and the order is the whole of it: the result lands in
-    // storage outside the loop, so it survives the drops, and the drops
-    // are written on THIS side of the label because the `goto` jumps
-    // over the braces they would otherwise have been written at.
+    // The value is written before the cleanup, and the cleanup before
+    // the jump: the result lands in storage outside the loop, so it
+    // survives the drops — written on THIS side of the label because
+    // the `goto` jumps over the braces they'd otherwise run at.
     unwind_to(be, fr.depth, break_keep(be, c)).try();
     jump_to(be, "brk", fr.brk, out)
 }

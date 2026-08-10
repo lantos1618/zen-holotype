@@ -1,25 +1,23 @@
 // src/gen/gen_c/gen_c_layout.zen
 // What a Zen type's C DEFINITION is: the bytes behind the spelling.
 //
-// Three shapes and no more. A struct is its storage fields. An enum is
-// a tag and a union of the payloads that have one — omitted entirely
+// Three shapes, no more. A struct is its storage fields. An enum is a
+// tag and a union of the payloads that have one — omitted entirely
 // when no variant carries anything, so `Signal = Start | Stop` is one
-// `int32_t` and not a struct wrapping an empty union. A `Res` is the
-// same shape built from two type ids rather than from a declaration.
+// `int32_t`, not a struct wrapping an empty union. A `Res` is the same
+// shape, built from two type ids rather than a declaration.
 //
-// EVERY DEFINITION IS EMITTED ONCE AND IN A DETERMINISTIC ORDER: sorted
-// by mangled name, which is `tcode` and therefore a pure function of
-// the type. Within that order a definition is preceded by the
-// definitions it contains BY VALUE, because C needs a complete type for
-// a field and a forward `typedef` is not one. A pointer would need no
-// complete type, which is why the dependency walk looks at fields and
-// not at every mention.
+// EVERY DEFINITION IS EMITTED ONCE, IN DETERMINISTIC ORDER: sorted by
+// mangled name (`tcode`, a pure function of the type). A definition is
+// preceded by the definitions it contains BY VALUE, since C needs a
+// complete type for a field and a forward `typedef` isn't one; a
+// pointer needs no complete type, so the dependency walk looks at
+// fields, not every mention.
 //
-// A TAG IS A FUNCTION OF THE DECLARATION AND NEVER OF AN INSTANTIATION:
+// A TAG IS A FUNCTION OF THE DECLARATION, NEVER AN INSTANTIATION:
 // `Res<i32, E>` and `Res<i32, F>` share `Ok`, so emitting the constant
 // per instance is a C redefinition. Two enumerators may share a value —
-// `Res<T>.None` and `Res<T, E>.Err` are both 1 — which is legal C and
-// is what keeps one name per variant.
+// `Res<T>.None` and `Res<T, E>.Err` are both 1 — which is legal C.
 
 Ast, Decl, DeclKind, Struct, Enum, Variant, Member, MemberKind, TypeId = ast
 Alloc, AllocError = std.mem
@@ -49,10 +47,9 @@ write_array_def = gen.gen_c.gen_c_array
 // emission
 // -----------------------------------------------------------------
 
-// Every forward typedef, then every tag constant, then every
-// definition. The three are separate passes because C wants them in
-// that order: a tag is a plain `enum` constant and a definition may
-// mention any tag, and a definition may mention any typedef.
+// Forward typedefs, then tag constants, then definitions — three
+// passes because C wants that order: a tag is a plain `enum` constant,
+// and a definition may mention any tag or typedef.
 emit_types* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     close_types(be).try();
     seq = order(be.alloc, be.type_names).try();
@@ -74,14 +71,8 @@ emit_typedef = (be :: CBackend, out :: Emit, i: usize) Res<(), AllocError> {
 }
 
 // -----------------------------------------------------------------
-// tags
-//
-// A tag is a function of the DECLARATION and never of an
-// instantiation: `Res<i32, E>` and `Res<i32, F>` share `Ok`, so
-// emitting the constant per instance is a C redefinition. Two
-// enumerators may share a value — `Res<T>.None` and `Res<T, E>.Err`
-// are both 1 — which is legal C and is what keeps one name per
-// variant.
+// tags — a function of the DECLARATION, never an instantiation (see
+// file header)
 // -----------------------------------------------------------------
 
 emit_tags = (be :: CBackend, out :: Emit, seq: Vec<usize>)
@@ -128,14 +119,14 @@ collect_tags_of = (be :: CBackend, id: TyId, seen :: Vec<String>)
     })
 }
 
-// A STRUCTURAL SET NUMBERS ITS MEMBERS BY THE CANONICAL ORDER, which is
-// the intern store's sort and therefore a function of the set alone —
-// `A | B` and `B | A` are one type and get one numbering. It is NOT a
-// declaration order, because a structural set has no declaration.
+// A structural set numbers its members by the CANONICAL order — the
+// intern store's sort, a function of the set alone (`A | B` and `B | A`
+// are one type, one numbering). Not declaration order: a structural set
+// has none.
 //
-// A declared enum READ AS A UNION now numbers by the same order —
-// `write_enum_tags` below — so `Error = AllocError | IoError` and the
-// structural `AllocError | IoError` agree tag for tag.
+// A declared enum READ AS A UNION numbers the same way (`write_enum_tags`
+// below), so `Error = AllocError | IoError` and the structural
+// `AllocError | IoError` agree tag for tag.
 collect_union_tags = (be :: CBackend, id: TyId, u: TyUnion,
                       seen :: Vec<String>) Res<(), AllocError> {
     u.members.loop((h, i, m) { add_union_tag(be, id, m, i, seen).try() });
@@ -185,22 +176,21 @@ collect_decl_tags = (be :: CBackend, id: TyId, n: TyNamed, d: Decl,
 }
 
 // A UNION'S TAGS ARE NUMBERED BY A CANONICAL ORDER OVER ITS MEMBERS,
-// NEVER BY DECLARATION ORDER. DESIGN.md: "A union is its members. Order
+// NEVER DECLARATION ORDER. DESIGN.md: "A union is its members. Order
 // and spelling are not part of its identity" — `WriteError = IoError |
 // AllocError` and `Error = AllocError | IoError` are ONE type, so
-// numbering by declaration gives one type two numberings and makes
-// `.try()` from either spelling into the other a runtime re-tagging
-// switch for a difference the type system says does not exist.
+// numbering by declaration would give one type two numberings, making
+// `.try()` between the two spellings a runtime re-tagging switch for a
+// difference the type system says doesn't exist.
 //
-// The canonical order is not reinvented here: `set_of` hands back the
-// union `union_ty` interned and sorted, which is the same order
-// `collect_union_tags` writes. Asking sema is what keeps the two from
-// drifting, and drift between what sema checks and what gen_c emits is
-// this compiler's worst failure class.
+// The order isn't reinvented: `set_of` hands back the union interned
+// and sorted, the same order `collect_union_tags` writes — asking sema
+// keeps the two from drifting, and sema/gen_c drift is this compiler's
+// worst failure class.
 //
-// A nominal enum is unaffected, exactly as DESIGN.md says: `Signal =
-// Start | Stop` names no types, `set_of` answers with the id it was
-// given, `variant_ranks` adds nothing, and declaration order stands.
+// A nominal enum is unaffected: `Signal = Start | Stop` names no types,
+// `set_of` returns the given id, `variant_ranks` adds nothing, and
+// declaration order stands.
 write_enum_tags = (be :: CBackend, id: TyId, n: TyNamed, e: Enum,
                    qname: str, seen :: Vec<String>) Res<(), AllocError> {
     ranks ::= be.alloc.Vec<usize>();
@@ -211,13 +201,12 @@ write_enum_tags = (be :: CBackend, id: TyId, n: TyNamed, e: Enum,
     })
 }
 
-// All-or-nothing, and the length check above is how: a rank is added
-// only for a variant that HAS one, so one miss leaves the vec short and
-// the whole declaration falls back to declaration order. A mix would
-// give two variants one tag. The miss that is not hypothetical is a
-// variant whose own type is a set — `Error = WriteError | FsError`,
-// where `union_ty` flattened `WriteError` away and there is no member
-// left for the variant to rank against.
+// All-or-nothing via the length check above: a rank is added only for
+// a variant that HAS one, so one miss leaves the vec short and the
+// whole declaration falls back to declaration order (a mix would give
+// two variants one tag). The concrete miss: a variant whose own type is
+// a set — `Error = WriteError | FsError`, where `union_ty` flattened
+// `WriteError` away, leaving no member to rank against.
 variant_ranks = (be :: CBackend, id: TyId, n: TyNamed,
                  variants: Vec<Variant>, ranks :: Vec<usize>)
                 Res<(), AllocError> {
@@ -468,15 +457,14 @@ write_definition = (be :: CBackend, out :: Emit, name: str, id: TyId)
 }
 
 // A STRUCTURAL SET GETS THE SHAPE A DECLARED ONE ALREADY HAS: a tag and
-// a union of the member types. Nothing else would do — DESIGN.md calls
-// `A | B` "a structural enum, not a new kind of type", so giving it a
-// second representation is inventing the kind the design says it is
-// not, and a `.try()` between the two spellings of one set would then
-// need a runtime conversion where the language promises none.
+// a union of the member types. DESIGN.md calls `A | B` "a structural
+// enum, not a new kind of type" — a second representation would invent
+// the kind the design says it isn't, and need a runtime conversion
+// between two spellings of one set where the language promises none.
 //
-// A member carries a value OF the type it names, for the reason
-// `variant_type` gives: `WriteError.IoError` records WHICH IoError,
-// where tag-only would record only that there was one.
+// A member carries a value OF the type it names: `WriteError.IoError`
+// records WHICH IoError, where tag-only would record only that there
+// was one.
 write_union_def = (be :: CBackend, out :: Emit, name: str, u: TyUnion)
                   Res<(), AllocError> {
     open_struct(out, name).try();
@@ -599,14 +587,13 @@ write_slot_line = (be :: CBackend, out :: Emit, s: Slot)
 }
 
 // A GENERIC STRUCT IS LAID OUT AT ITS ARGUMENTS: `Vec<u8>` holds a
-// `Ptr<u8>`, and one C definition per instantiation is what
+// `Ptr<u8>` — one C definition per instantiation is what
 // monomorphisation IS.
 //
-// What is still opaque is a type whose arguments nothing settled. That
-// is not a generic struct — it is `Vec<T>` itself, which no program has
-// a value of, and whose fields would spell a `T` no C type exists for.
-// An opaque body keeps the translation unit parsing around the
-// diagnostic the reaching call site already raised.
+// Still opaque: a type whose arguments nothing settled — `Vec<T>`
+// itself, which no program has a value of and whose fields would spell
+// a `T` with no C type. An opaque body keeps the translation unit
+// parsing around the diagnostic the call site already raised.
 write_struct_def = (be :: CBackend, out :: Emit, name: str, s: Struct,
                     ctx: Ctx, inst: Inst) Res<(), AllocError> {
     fields ::= be.alloc.Vec<TyId>();
@@ -617,10 +604,9 @@ write_struct_def = (be :: CBackend, out :: Emit, name: str, s: Struct,
     })
 }
 
-// The declared type of every member that is STORAGE, in declaration
-// order. Collected once because both the openness check and the field
-// lines want the same list, and reading it twice is two chances to
-// disagree about which members are storage.
+// The declared type of every STORAGE member, in declaration order —
+// collected once so the openness check and field lines share one list
+// rather than risk disagreeing about which members are storage.
 storage_types = (be :: CBackend, s: Struct, ctx: Ctx, inst: Inst,
                  out :: Vec<TyId>) Res<(), AllocError> {
     s.members.loop((h, m) {
@@ -684,9 +670,8 @@ write_enum_def = (be :: CBackend, out :: Emit, name: str, n: TyNamed,
     Ok(());
 }
 
-// The tag, then the payload union when any variant carries one. The
-// union is omitted entirely for a tag-only enum, so `Signal = Start |
-// Stop` is one `int32_t` and not a struct with an empty union in it.
+// The tag, then the payload union when any variant carries one, omitted
+// entirely for a tag-only enum (see header).
 open_struct = (out :: Emit, name: str) Res<(), AllocError> {
     out.bytes("struct ").try();
     out.bytes(name).try();

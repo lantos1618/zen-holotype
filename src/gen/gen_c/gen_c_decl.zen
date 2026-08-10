@@ -4,25 +4,21 @@
 // THE WALK IS REACHABILITY-DRIVEN. A compilation stages the whole of
 // `std` beside the program, so lowering every declaration in every
 // module would emit a translation unit nobody asked for. `emit_program`
-// is seeded with ONE module's functions and follows the calls that
-// resolve, which is what "compilation is whole-program" means in
-// practice: one merged graph, walked from a root, each thing emitted
-// exactly once.
+// seeds ONE module's functions and follows the calls that resolve —
+// one merged graph, walked from a root, each thing emitted once.
 //
-// BODIES ARE LOWERED FIRST AND EMITTED LAST. Lowering is what discovers
-// which types need definitions and which checked-arithmetic helpers the
-// runtime must carry, and C wants both of those above the first use. So
-// each body is lowered into a buffer of its own, and the translation
-// unit is assembled afterwards in the order C requires — banner,
-// runtime, helpers, typedefs, tags, type definitions, prototypes,
-// bodies, `main`.
+// BODIES ARE LOWERED FIRST, EMITTED LAST. Lowering discovers which
+// types need definitions and which checked-arithmetic helpers the
+// runtime carries, and C wants both above the first use. Each body is
+// lowered into its own buffer, and the translation unit assembled
+// afterwards in the order C requires — banner, runtime, helpers,
+// typedefs, tags, type definitions, prototypes, bodies, `main`.
 //
-// EVERY LIST IS SORTED BY MANGLED NAME. That is what makes the output
-// independent of the order the modules were discovered in, which is the
-// property the determinism gate and the fixpoint oracle both stand on.
-// A prototype above every body is what lets the sort be by name rather
-// than by dependency: C needs a declaration before a call, not a
-// definition.
+// EVERY LIST IS SORTED BY MANGLED NAME, making output independent of
+// module discovery order — the property the determinism gate and
+// fixpoint oracle stand on. A prototype above every body is what lets
+// the sort be by name rather than dependency: C needs a declaration
+// before a call, not a definition.
 
 Ast, Module, Decl, DeclKind, Function, Param, Span, Ident = ast
 BlockId, TypeId, Struct, Member, MemberKind = ast
@@ -60,22 +56,21 @@ emit_stdin = gen.gen_c.gen_c_stdin
 // A bound on the reachable set, and a diagnostic at it rather than a
 // walk that does not terminate.
 //
-// IT COUNTS FUNCTIONS LOWERED, and the unit is deliberate: it is the
-// same unit `bootstrap/gen_c.py`'s `MAX_INSTANCES` counts, at the same
-// number, so the two implementations agree about which programs they
-// accept rather than differing by a factor nobody wrote down. The
-// number this replaced was 4096 and it bounded LOOP TURNS, each of
-// which lowers one free function and one member function — a bound of
-// 4096 on one and 4096 on the other, which is neither 4096 nor 8192.
+// IT COUNTS FUNCTIONS LOWERED — same unit as `bootstrap/gen_c.py`'s
+// `MAX_INSTANCES`, same number, so the two implementations agree on
+// which programs they accept rather than differing by an undocumented
+// factor. The number this replaced was 4096 and bounded LOOP TURNS,
+// each lowering one free function AND one member function — a bound of
+// 4096 on each, so neither 4096 nor 8192.
 //
-// WHAT SETS THE NUMBER. The largest program this backend compiles is
-// itself: `zen build src` lowers 3167 free functions and 902 member
-// functions, 4069 in all. `corpus/cli/build_walks_a_root_it_is_given`,
-// which stages the driver, lowers 3754. 8192 is a little over twice the
-// largest of those. A DIVERGENCE IS UNAFFECTED BY THE NUMBER: an
-// infinite monomorphisation has no bound and reaches 8192 exactly as
-// surely as it reached 4096, one pass later. A guard on a program's
-// SIZE is what the old number had quietly become.
+// WHAT SETS THE NUMBER: the largest program this backend compiles is
+// itself — `zen build src` lowers 3167 free + 902 member functions
+// (4069 total); `corpus/cli/build_walks_a_root_it_is_given`, staging the
+// driver, lowers 3754. 8192 is a little over twice the largest. A
+// DIVERGENCE IS UNAFFECTED BY THE NUMBER: an infinite monomorphisation
+// has no bound and hits 8192 exactly as surely as it hit 4096, one pass
+// later. This is a guard on a program's SIZE, which is what the old
+// number had quietly become.
 MAX_FUNCTIONS* : usize = 8192
 
 // The whole translation unit for the program rooted at module `mi`.
@@ -139,15 +134,13 @@ seed_function = (be :: CBackend, m: Module, mi: usize, d: Decl)
 // the `Def` a seed carries is the same value a call site would resolve
 // to — one identity for a function, not two.
 //
-// A GENERIC FUNCTION IS NOT A ROOT. There is no such thing as `Vec<T>`
-// in C; there is `Vec<i32>` for each `T` a program actually asked for,
-// and a call site is the only place that says which. So a generic
-// declaration is skipped here and reached through `call_reachable`.
-// A FUNCTION THAT TAKES A BODY IS NOT A ROOT EITHER, and for a stronger
-// reason than a generic one: there is no C spelling for a `(v: T) bool`
-// parameter at all, so such a declaration is never emitted — it exists
-// only inlined at its call sites, exactly as the six loop declarations
-// do.
+// A GENERIC FUNCTION IS NOT A ROOT. There is no `Vec<T>` in C, only
+// `Vec<i32>` for each `T` a program asked for, and only a call site says
+// which — so a generic declaration is skipped here, reached through
+// `call_reachable`. A FUNCTION THAT TAKES A BODY IS NOT A ROOT EITHER,
+// for a stronger reason: a `(v: T) bool` parameter has no C spelling at
+// all, so such a declaration is never emitted — it exists only inlined
+// at its call sites, like the six loop declarations.
 seed_named = (be :: CBackend, m: Module, mi: usize, f: Function)
              Res<(), AllocError> {
     ((f.tparams.len > 0) || takes_closure(be, f)).match({
@@ -187,19 +180,18 @@ is_function = (d: Def) bool {
 }
 
 // Lower everything queued, including whatever lowering queues. Bounded
-// rather than looped: a backend that does not terminate is worse than
+// rather than looped: a backend that doesn't terminate is worse than
 // one that reports.
+//
 // TWO QUEUES, INTERLEAVED. Lowering a free function discovers member
-// functions and lowering a member function discovers free ones, so
-// draining one to exhaustion and then the other does not converge —
-// each cursor advances one step per turn instead, which reaches a
-// fixpoint in one bounded walk.
+// functions and vice versa, so draining one to exhaustion then the
+// other doesn't converge — each cursor advances one step per turn,
+// reaching a fixpoint in one bounded walk.
 //
 // THE LOOP RUNS WHILE THERE IS WORK, not a fixed number of turns. The
-// fixed form did every remaining turn of a bound no program came near,
-// and — the reason it had to change — it could not tell a walk that had
-// finished from one that had been cut off, because both ended the same
-// way.
+// fixed form ran every remaining turn of a bound no program came near,
+// and couldn't tell a finished walk from a cut-off one — both ended the
+// same way.
 drain = (be :: CBackend) Res<(), AllocError> {
     fi ::= 0;
     mi ::= 0;
@@ -324,8 +316,8 @@ lower_function = (be :: CBackend, d: Def, x: Decl, f: Function)
 
 // THE TYPE PARAMETERS ARE IN SCOPE FOR THE WHOLE BODY, not just the
 // signature: a local written `v: T` is a written type like any other,
-// and `T` means nothing unless it is bound. What each one BECAME is
-// `be.inst`, which the queue entry set.
+// and `T` means nothing unless bound. What each one BECAME is
+// `be.inst`, set by the queue entry.
 lower_body = (be :: CBackend, d: Def, x: Decl, f: Function, blk: BlockId)
              Res<(), AllocError> {
     mi = d.id.module.to_usize();
@@ -360,13 +352,12 @@ method_in_decl = (be :: CBackend, m: MethodRef, x: Decl)
     })
 }
 
-// THE TYPE'S OWN MEMBERS FIRST, THEN WHAT AN IMPL SUPPLIES — the same
-// order `sema_supply.zen` states, and for its reason: a member the
-// declaration writes is never contested, and one an impl supplies is
-// reached only when the declaration has none.
-// AND AT THE SIGNATURE THE CALL SITE RESOLVED, which is the same rule
-// `pick_member` reads a receiver's members by: a name that names two
-// members names neither of them on its own.
+// THE TYPE'S OWN MEMBERS FIRST, THEN WHAT AN IMPL SUPPLIES — same order
+// `sema_supply.zen` states: a member the declaration writes is never
+// contested, one an impl supplies is reached only when the declaration
+// has none. AND AT THE SIGNATURE THE CALL SITE RESOLVED — same rule
+// `pick_member` reads a receiver's members by: a name naming two members
+// names neither on its own.
 method_member = (be :: CBackend, m: MethodRef, s: Struct)
                 Res<(), AllocError> {
     found ::= be.alloc.Vec<Member>();
@@ -388,18 +379,18 @@ supplied_member = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
     })
 }
 
-// WHICH MEMBER THE CALL SITE MEANT, and not merely one of that arity.
+// WHICH MEMBER THE CALL SITE MEANT, not merely one of that arity.
 //
 // The entry carries the signature `sym_fn` mangled into the symbol this
 // body is about to be written under, so the member to lower is the one
-// whose own declared parameters ARE that signature. Asking arity picked
-// the first of `Display`'s two `toString`s for both of the queue's
-// entries: the sink body was emitted twice, once under the allocating
-// form's symbol, and every call to the second ran the first.
+// whose declared parameters ARE that signature. Asking arity alone once
+// picked the first of `Display`'s two `toString`s for both queue
+// entries: the sink body was emitted twice, and every call to the
+// second ran the first.
 //
-// ONE CANDIDATE IS NOT A CHOICE, so a name that names one member costs
-// the arity test and nothing else — `method_sig` resolves a whole
-// signature, and the queue is drained once per emitted function.
+// ONE CANDIDATE IS NOT A CHOICE: a name naming one member costs only the
+// arity test — `method_sig` resolves a whole signature, and the queue is
+// drained once per emitted function.
 by_sig = (be :: CBackend, m: MethodRef, found: Vec<Member>)
          Res<Res<Member>, AllocError> {
     (found.len < 2).match({
@@ -493,11 +484,11 @@ method_shape = (be :: CBackend, m: MethodRef, mem: Member, f: Function,
     Ok(());
 }
 
-// `@Self` FOR A GENERIC RECEIVER IS THE DECLARATION'S OWN TYPE, and for
-// every other receiver it is the one the call site reached. The
+// `@Self` FOR A GENERIC RECEIVER IS THE DECLARATION'S OWN TYPE; for
+// every other receiver it's the one the call site reached. The
 // distinction is exactly where the memo can be wrong: a receiver with
 // no arguments has one emission and nothing to confuse, and `str`'s
-// receiver is a PRIMITIVE that no declaration's name interns to.
+// receiver is a PRIMITIVE no declaration's name interns to.
 method_self = (be :: CBackend, m: MethodRef) Res<TyId, AllocError> {
     generic_recv(be, m.self_ty).match({
         false => Ok(m.self_ty),
@@ -592,17 +583,17 @@ bind_params = (be :: CBackend, f: Function, ctx: Ctx, sig :: Vec<TyId>)
     Ok(());
 }
 
-// Through `param_type` and not `type_from_ast`: `self :: @Self` has a
-// written type that means the receiver, and only the query that knows
-// about `@Self` can answer it.
+// Through `param_type`, not `type_from_ast`: `self :: @Self` has a
+// written type meaning the receiver, and only the query that knows
+// `@Self` can answer it.
 //
 // TWO TYPES, AND THE DIFFERENCE IS THE WHOLE POINT. The C declaration
-// takes THIS EMISSION's type, because that is what the prototype
-// prints. Sema takes the DECLARED one, still in its own parameters,
-// because sema's memo is keyed by node id alone — a concrete answer
-// written there is the answer every other instantiation of this body
-// reads back. `ty_of` puts `be.inst` through every read, which is where
-// the concrete answer belongs and where it is correct once.
+// takes THIS EMISSION's type, since that's what the prototype prints.
+// Sema takes the DECLARED one, still in its own parameters, because
+// sema's memo is keyed by node id alone — a concrete answer written
+// there is the answer every other instantiation reads back. `ty_of`
+// puts `be.inst` through every read, where the concrete answer belongs
+// and is correct once.
 bind_param = (be :: CBackend, p: Param, ctx: Ctx, sig :: Vec<TyId>)
              Res<(), AllocError> {
     declared = be.check.param_type(p, ctx).try();

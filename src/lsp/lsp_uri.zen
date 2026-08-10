@@ -1,36 +1,24 @@
 // src/lsp/lsp_uri.zen
 // A document URI, as a path the compiler can open.
 //
-// The protocol names a document by URI and `std.env.Fs` opens a PATH,
-// and until a second file was involved the difference did not matter:
-// `lsp_hover.zen` handed the client's URI straight to `Source` and to
-// `told_at`, so the two agreed by construction and nothing had to
-// convert anything. A build reads the disk, so this is where that stops.
+// The protocol names a document by URI; `std.env.Fs` opens a PATH. A
+// build reads the disk, so this is where the conversion starts. A file
+// of its own, not a pair of lines in `lsp_serve.zen`: `design_lsp.md` §6
+// warns a `vscode-remote://` URI must convert correctly in ONE place, or
+// a second copy is how a remote workspace silently hovers `null`.
 //
-// IT IS A FILE OF ITS OWN AND NOT A PAIR OF LINES IN `lsp_serve.zen`,
-// for the reason `design_lsp.md` §6 gives about the same class of bug:
-// a URI arriving as `vscode-remote://` rather than `file://` is a
-// conversion that has to be right in ONE place, and a second copy of it
-// beside the first is how a remote workspace silently hovers `null`.
-//
-// WHAT IT DOES NOT DO, said out loud because both are real:
-//
-//   - PERCENT-ESCAPES ARE NOT DECODED. A client sends `%20` for a space
-//     and this hands `%20` to `Fs.read`, which does not find the file
-//     and says so by path. Decoding needs an allocator and a hex
-//     grammar; it belongs here when a path with a space turns up, and
-//     the failure until then is a diagnostic and not a wrong answer.
-//   - NO SCHEME BUT `file:` IS UNDERSTOOD. `design_lsp.md` §6 records
-//     that a remote VS Code workspace sends `vscode-remote://<host>/…`,
-//     whose authority is not part of the path. Such a URI comes back
-//     unchanged, which fails at the read rather than by opening the
-//     wrong file.
+// WHAT IT DOES NOT DO: PERCENT-ESCAPES ARE NOT DECODED (`%20` reaches
+// `Fs.read` unchanged, so a path with a space fails as a diagnostic, not
+// a wrong answer — decoding needs an allocator and a hex grammar); NO
+// SCHEME BUT `file:` IS UNDERSTOOD (`design_lsp.md` §6: a remote VS Code
+// workspace sends `vscode-remote://<host>/…`, whose authority is not
+// part of the path — such a URI comes back unchanged and fails at the
+// read rather than opening the wrong file).
 
 str, String = std.text
 Alloc, AllocError = std.mem
 
-// `file://` — seven bytes, and the two slashes are part of it. A
-// well-formed `file:` URI has an EMPTY authority, so the path's own
+// `file://` — seven bytes; the authority is empty, so the path's own
 // leading slash is the third: `file:///a/b.zen` is `/a/b.zen`.
 FILE_SCHEME*: str = "file://"
 
@@ -38,9 +26,7 @@ FILE_SCHEME*: str = "file://"
 //
 // A URI THAT IS ALREADY A PATH IS LEFT ALONE, which is what makes the
 // two-file form of `zen lsp` testable: `tests/corpus/lsp/` drives the
-// same server with paths relative to the work directory, and a
-// converter that insisted on a scheme would make the corpus and the
-// editor two different servers.
+// same server with paths relative to the work directory.
 path_of* = (uri: str) str {
     scheme_at(uri).match({
         false => uri,
@@ -55,28 +41,14 @@ scheme_at = (uri: str) bool {
     })
 }
 
-// THE WAY BACK, and `publishDiagnostics` is why there has to be one.
-//
-// Hover is asked about a document and answers about the same one, so
-// until now every URI on this wire was one the client wrote and this
-// file only ever had to read them. A build reports across the WHOLE
-// program: a diagnostic names a module by its path relative to the
-// compilation root, and the notification carrying it has to name a URI.
-// So a path becomes a URI here, and it is the same seven bytes read the
-// other way.
-//
-// AN EXACT INVERSE OF `path_of` FOR THE ONE SCHEME IT UNDERSTANDS, and
-// that matters more than it looks: the URI built here is compared by
-// BYTES against the one the client opened the document with, and a
-// mismatch does not fail — it publishes a second, identical-looking
-// file whose errors nothing ever clears. `file://` + `/a/b.zen` is
-// `file:///a/b.zen` and `file://` + `src/b.zen` is `file://src/b.zen`,
-// which are the two forms `path_of` produces.
-//
-// A URI OF ANOTHER SCHEME NEVER REACHES THIS. `path_of` hands such a
-// URI back unchanged, `Fs.read` does not open it, so no module is built
-// from it and no diagnostic names it. Said out loud because the guard
-// that is not written here is the thing a reader will look for.
+// THE WAY BACK. `publishDiagnostics` names a module by its path relative
+// to the compilation root, so the notification needs a URI — the exact
+// inverse of `path_of`, for the one scheme it understands. Built by
+// BYTES to match what the client opened the document with; a mismatch
+// would publish a second, identical-looking file whose errors nothing
+// ever clears. `file://` + `/a/b.zen` is `file:///a/b.zen`, and
+// `file://` + `src/b.zen` is `file://src/b.zen` — the two forms
+// `path_of` produces. A URI of another scheme never reaches this.
 uri_at* = (a: Alloc, root: str, rel: str) Res<str, AllocError> {
     out ::= a.String("{}{}/{}", FILE_SCHEME, root, rel).try();
     Ok(out.view());

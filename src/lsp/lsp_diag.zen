@@ -1,120 +1,72 @@
 // src/lsp/lsp_diag.zen
 // `textDocument/publishDiagnostics`: what a build found, said to a client.
 //
-// This is the request `design_lsp.md` §5 left when every piece under it
-// had landed — "what is left is the request and a policy" — and the
-// policy is the larger half. The queries are somebody else's: `Build`
-// answers `diag_count`/`diag_at` for lex and parse, the `Checker` that
-// `Build.whole` hands back answers the same pair for sema, and nothing
-// here decides what is wrong with a program. What it decides is WHEN to
+// `design_lsp.md` §5: the queries are somebody else's — `Build` answers
+// `diag_count`/`diag_at` for lex and parse, the `Checker` `Build.whole`
+// hands back answers the same pair for sema. This file decides WHEN to
 // build, WHICH file each answer belongs to, and how an answer is taken
 // BACK.
 //
-// ---------------------------------------------------------------------
-// WHEN, AND THE DEBOUNCE THAT IS NOT ONE
+// WHEN, AND THE DEBOUNCE THAT IS NOT ONE. §5 asks for a debounce — build
+// after a quiet interval — but a quiet interval cannot be observed:
+// `Stdin.read` blocks until it has exactly the bytes asked for
+// (`src/std/env/env.zen`), there is no clock, and threads arrive at
+// stage 5 (`PLAN.md`). So instead: A CHANGE MARKS, A SETTLE POINT
+// BUILDS. `didOpen`/`didChange` record which document is owed a build;
+// the transport calls `settled` once it has answered everything it
+// currently holds. This COALESCES a batch to ONE build of the LAST
+// buffer, and is ORDERED (one build at a time, always the newest
+// document, so §5's race is absent by construction).
 //
-// §5 asks for a debounce — "build after a quiet interval, not per
-// `didChange`" — and a quiet interval cannot be observed by this
-// server. `Stdin.read` blocks until it has exactly the bytes it asked
-// for (`src/std/env/env.zen`), there is no clock capability, and
-// `PLAN.md` puts threads at stage 5 while the compiler is written in
-// the seed subset. A server with one thread, a blocking read and no
-// clock has no way to ask either "has the user stopped typing" or "is
-// there more input waiting". Pretending otherwise would be a timer that
-// fires when the next keystroke arrives, which is the opposite of a
-// debounce.
+// HONEST ABOUT THE PIPE: over `lsp_stdio.zen` a settle point is every
+// message, since `short_by` asks for exactly one message's bytes and a
+// blocking reader cannot look past it — so over a real editor this
+// coalesces nothing yet (the missing piece is a read that can say
+// "nothing more is waiting", or a second thread). The cheap mitigation
+// meanwhile: `lsp_serve.zen` marks nothing when a `didOpen`/`didChange`
+// carries text the document already holds.
 //
-// SO THE RULE IS: A CHANGE MARKS, AND A SETTLE POINT BUILDS. `didOpen`
-// and `didChange` record which document is owed a build and return; the
-// transport calls `settled` when it has answered every message it
-// currently holds. Three things follow, and two of them are what §5
-// wanted:
+// WHICH FILE, AND WHY CLEARING IS THE HARD HALF. A build reports across
+// the whole program, so diagnostics belong to many files though only one
+// is open; every diagnostic is grouped by the URI its own span names,
+// one notification per URI.
 //
-//   - COALESCED. Every change in one batch collapses to ONE build, of
-//     the LAST buffer. A superseded build is never started, which is
-//     stronger than §5's "finished and its results discarded".
-//   - ORDERED. There is one build at a time and it is the most recent
-//     document's, so an older result cannot overwrite a newer one. The
-//     race §5 names is not handled here; it is absent by construction.
-//   - HONEST ABOUT THE PIPE. Over `lsp_stdio.zen` a settle point is
-//     every message, because `short_by` asks for exactly one message's
-//     bytes and a blocking reader cannot look past it. So over a real
-//     editor this coalesces nothing yet, and the missing piece is named
-//     rather than papered over: a read that can say "nothing more is
-//     waiting", or a second thread. Until one exists, the cheap half is
-//     below.
+// THE PROTOCOL HAS NO "REMOVE". A notification REPLACES a file's list,
+// so taking an error back means publishing an EMPTY list for that file
+// — a server publishing only what it found would leave stale errors on
+// screen forever. So `showing` is the set of URIs currently carrying
+// errors, and every build publishes for three sets: the edited file
+// (always), every file this build found something in, and every file
+// `showing` holds that this build found nothing in (the clearing).
 //
-// AND THE CHEAP HALF: UNCHANGED BYTES ARE NOT A CHANGE. `lsp_serve.zen`
-// marks nothing when a `didOpen` or a `didChange` carries the text the
-// document already holds, which is §5's "never build on `didOpen` of a
-// file already covered by the last build" narrowed to what a server can
-// actually know about itself.
+// SEVERITY, AND WHERE THE NOTE WENT. EVERY DIAGNOSTIC IS AN ERROR,
+// severity 1 — a fact about this compiler (one tally `Build.faults`, no
+// phase survives a build), not a simplification; changes the day a
+// warning exists.
 //
-// ---------------------------------------------------------------------
-// WHICH FILE, AND WHY CLEARING IS THE HARD HALF
+// THE NOTE BECOMES `relatedInformation`, NOT PART OF THE MESSAGE. A
+// `parse.parse_diag.Note` is a sentence AND A SPAN — folding it into the
+// message would throw the span away; `relatedInformation` is the
+// protocol's field for exactly that pair, rendered by a client as
+// somewhere to jump to.
 //
-// A build reports across the whole program, so its diagnostics belong
-// to many files and only one of them is open. Publishing another file's
-// errors against the open document would be a wrong answer, and this
-// folder's standing rule is that a wrong answer is worse than none — so
-// every diagnostic is grouped by the URI its own span names and each
-// URI gets its own notification.
-//
-// THE PROTOCOL HAS NO "REMOVE" AND THAT IS THE WHOLE PROBLEM. A
-// notification REPLACES a file's list, so the only way to take an error
-// back is to publish an EMPTY list for that file — and a server that
-// publishes only what it found leaves the last set of errors on screen
-// forever. That is the classic first-implementation bug and it is worse
-// than publishing nothing at all, because the errors it leaves are ones
-// the user has already fixed.
-//
-// So `showing` is the set of URIs currently carrying errors, and every
-// build publishes for three sets: the file that was edited (always,
-// empty or not), every file this build found something in, and every
-// file `showing` holds that this build found nothing in. The last of
-// those is the clearing, and `diagnostics_publish_and_clear` is what
-// says it happens.
-//
-// ---------------------------------------------------------------------
-// SEVERITY, AND WHERE THE NOTE WENT
-//
-// EVERY DIAGNOSTIC IS AN ERROR, severity 1, and that is a fact about
-// this compiler rather than a simplification. There is one tally —
-// `Build.faults` — one exit code off it, and no phase in the tree
-// produces anything a build survives. The day a warning exists, this is
-// the one constant that changes.
-//
-// THE NOTE BECOMES `relatedInformation` AND NOT PART OF THE MESSAGE. A
-// `parse.parse_diag.Note` is a sentence AND A SPAN — "a place to look
-// that is not where the error is" — and folding it into the message
-// throws the span away, leaving the reader told to look somewhere with
-// no way to go there. `relatedInformation` is the field the protocol
-// has for exactly that pair, and a client renders it as somewhere to
-// jump to. It was collected and dropped until this morning; dropping it
-// again one layer out would undo that.
-//
-// SEMA'S SECOND POSITION IS ALREADY IN ITS SENTENCE and is deliberately
-// left there. A `PairFault` names two declarations and `write_detail`
-// writes both, so lifting one out would be a second, divergent copy of
-// how sema words a two-place diagnostic. `sema_diag.zen` owns that and
-// this file only prints what it produced.
+// SEMA'S SECOND POSITION IS ALREADY IN ITS SENTENCE and stays there: a
+// `PairFault` names two declarations and `write_detail` writes both —
+// `sema_diag.zen` owns that wording.
 
 str, String = std.text
 Vec, Map = std.collections
 Alloc, AllocError = std.mem
 Range = std.core
 Span = ast.ast_span
-// PARSE'S `Diag` FLAT AND SEMA'S NOT, which is `zen_build.zen`'s
-// collision read one folder over: three modules export a type called
-// `Diag` and `A, B = module` cannot rename. This file wants parse's
-// `Note` as a value, and sema's diagnostic only long enough to render —
-// so sema's fields travel as parameters and its type is never named.
+// PARSE'S `Diag` AND SEMA'S both name `Diag` and `A, B = module` cannot
+// rename, so sema's diagnostic fields travel as parameters, its type
+// never named; only parse's `Note` is used as a value.
 Note = parse.parse_diag
 Checker = sema.sema_check
 SemaFault, message, write_detail = sema.sema_diag
-// IMPORTED FOR ITS METHODS. `c.types` is a `Types` and `write_detail`
-// takes one; without this line the bootstrapper resolves the field's
-// methods against another module, exactly as `lsp_hover.zen` records.
+// IMPORTED FOR ITS METHODS: without this line the bootstrapper resolves
+// `c.types`'s methods against another module (as `lsp_hover.zen` notes).
 Types = sema.sema_ty
 Build = zen.zen_build
 root_for, relative_to = zen.zen_path
@@ -123,17 +75,11 @@ write_text, written = lsp.lsp_json
 write_frame, write_decimal = lsp.lsp_frame
 path_of, uri_at = lsp.lsp_uri
 
-// ONE DIAGNOSTIC, ALREADY BELONGING TO A FILE.
-//
-// The `uri` is resolved at gather time and not at write time, because a
-// build knows its compilation root and a writer does not — and because
-// grouping by a string that is recomputed per use is grouping by a
-// string that can be recomputed differently.
-//
-// `message` IS TEXT AND NOT A FAULT. Sema's sentence needs the `Types`
-// store that decided it, and that store belongs to a `Checker` this
-// value must be allowed to outlive, so it is rendered while the checker
-// is still in hand. Parse's is already a `str` and is carried through.
+// ONE DIAGNOSTIC, ALREADY BELONGING TO A FILE. `uri` is resolved at
+// gather time, not write time: a build knows its compilation root, a
+// writer does not. `message` IS TEXT AND NOT A FAULT: sema's sentence
+// needs the `Types` store that decided it, belonging to a `Checker` this
+// value must outlive, so it renders while the checker is in hand.
 Spot* = {
     uri*: str,
     message*: str,
@@ -142,23 +88,19 @@ Spot* = {
 }
 
 // The server's diagnostics half: which document owes a build, and which
-// files are showing errors right now.
-//
-// A TYPE OF ITS OWN rather than four fields on `Server`, because the
-// policy above is the subject and `lsp_serve.zen` is a dispatch table.
-// The server owns the documents; this owns what has been said about
-// them.
+// files are showing errors right now. A TYPE OF ITS OWN rather than four
+// fields on `Server`: the server owns the documents, this owns what has
+// been said about them.
 Diagnostics* = {
     a: Alloc,
 
-    // The document a build is owed to, or "" when none is. One and not
-    // a queue: a build is whole-program, so the newest document's build
-    // answers for every older one.
+    // The document a build is owed to, or "" when none — one, not a
+    // queue: a build is whole-program, so the newest document answers
+    // for every older one.
     owed :: str = "",
 
-    // Every URI currently carrying a non-empty list. This is the ONLY
-    // thing that makes clearing possible, and it holds URIs rather than
-    // counts because what has to be undone is a notification.
+    // Every URI currently carrying a non-empty list — the ONLY thing
+    // that makes clearing possible.
     showing :: Vec<str>,
 
     // A document changed. Nothing is built here — see the header.
@@ -166,14 +108,10 @@ Diagnostics* = {
         self.owed = uri;
     }
 
-    // THE SETTLE POINT. Every message the transport held has been
-    // answered; if a build is owed, this is where it happens.
-    //
-    // `uris` and `docs` are the server's open documents — the list
-    // because a `Map` in this tree cannot be walked, and both because
-    // the overlay must carry EVERY unsaved buffer and not only the one
-    // that was edited. A build that read the disk for the others would
-    // report errors the user has already fixed in a file they can see.
+    // THE SETTLE POINT: if a build is owed, it happens here. `uris` and
+    // `docs` are the server's open documents; the overlay must carry
+    // EVERY unsaved buffer, not only the edited one — a build reading
+    // disk for the others would report errors already fixed on screen.
     settled* = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
                 docs: Map<str, str>, out :: String) Res<(), AllocError> {
         self.owed.is_empty().match({
@@ -182,18 +120,13 @@ Diagnostics* = {
         })
     }
 
-    // NO WORKSPACE, NO DIAGNOSTICS, and this is a refusal rather than a
-    // gap. Without a root there is nothing to build but the open file
-    // standing alone, and a lone-module check reports every imported
-    // name as undefined — which for any real file is a screen of red
-    // about a program that is fine. Hover can degrade to the lone
-    // module because its failure mode is silence; this one's failure
-    // mode is noise, so it does not degrade at all.
-    //
-    // A ROOT OF NOTHING IS NOT A ROOT either. `root_for` climbs out of
-    // the document's own directory and stops at the workspace, so a
-    // document that is not under the workspace at all climbs to "" —
-    // which is a client whose two halves disagree, not a program.
+    // NO WORKSPACE, NO DIAGNOSTICS — a refusal, not a gap. Without a
+    // root there is nothing to build but the open file alone, and a
+    // lone-module check reports every imported name as undefined: a
+    // screen of red about a program that is fine. Hover degrades to the
+    // lone module because its failure is silence; this one's is noise,
+    // so it does not degrade at all. A document not under the workspace
+    // (`root_for` climbs to "") is treated the same way.
     build_owed = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
                   docs: Map<str, str>, out :: String) Res<(), AllocError> {
         uri = self.owed;
@@ -236,9 +169,7 @@ Diagnostics* = {
     }
 
     // AN EMPTY LIST FOR EVERY FILE THAT HAS STOPPED BEING WRONG. The
-    // edited document is excluded because it was published first,
-    // whether or not it had anything — publishing it twice would be one
-    // frame saying two things.
+    // edited document is excluded — already published once.
     take_back = (self :: @Self, env: Env, uri: str, now: Vec<str>,
                  uris: Vec<str>, docs: Map<str, str>, spots: Vec<Spot>,
                  out :: String) Res<(), AllocError> {
@@ -267,20 +198,14 @@ gone = (u: str, uri: str, now: Vec<str>) bool {
 
 // --- the build ---------------------------------------------------------
 
-// A WHOLE BUILD, AND EVERYTHING THREE PHASES FOUND.
-//
-// The shape is `lsp_hover.zen`'s `hover_in` deliberately: the same
-// `Build.whole`, the same overlay, the same computed root. What differs
-// is only which of the build's outputs is read — hover wants the memos
-// and this wants the diagnostics, and BOTH halves are wanted here
-// because a server that showed type errors and silently swallowed
-// syntax errors would teach a user to distrust it.
-//
-// `speaking` IS ALREADY FALSE UNDER `whole`, which is what stops the
-// driver's `println` from landing in the middle of a frame stream. That
-// is the driver's guarantee and not this file's; what this file relies
-// on is the other half of the same change — that the diagnostics are
-// still COLLECTED while they are not said.
+// A WHOLE BUILD, AND EVERYTHING THREE PHASES FOUND. Shaped after
+// `lsp_hover.zen`'s `hover_in` deliberately (same `Build.whole`, overlay,
+// computed root); only which output is read differs — hover wants the
+// memos, this wants the diagnostics. Both halves matter so a server
+// never shows type errors while silently swallowing syntax errors.
+// `speaking` is already false under `whole` (stops the driver's
+// `println` landing mid frame-stream); this file relies on diagnostics
+// still being COLLECTED while not said.
 found_in* = (env: Env, a: Alloc, root: str, path: str, docs: Map<str, str>,
              spots :: Vec<Spot>) Res<(), AllocError> {
     b ::= a.Build(env, root);
@@ -290,8 +215,7 @@ found_in* = (env: Env, a: Alloc, root: str, path: str, docs: Map<str, str>,
 }
 
 // LEX AND PARSE, off the `Build`. `Diag.span.file` is the module's path
-// relative to the compilation root, which is exactly what a URI is
-// built from.
+// relative to the compilation root, exactly what a URI is built from.
 from_build = (b :: Build, a: Alloc, root: str, spots :: Vec<Spot>)
              Res<(), AllocError> {
     Range(0, b.diag_count()).loop((h, i) {
@@ -309,14 +233,11 @@ add_parse = (a: Alloc, root: str, said: str, span: Span, note: Res<Note>,
                    span: span, note: note))
 }
 
-// SEMA, off the `Checker` `whole` handed back — which is the whole
-// reason `Build.checked` returns a value instead of dropping one.
-//
-// THE SENTENCE IS RENDERED HERE, while the store that decided it is
-// still in hand, and it is `message` plus `write_detail` rather than
-// `render`: `render` opens with `file:line:col:`, and a position
-// written into a message that already travels beside a `range` is the
-// same fact said twice, once in a form no client can click.
+// SEMA, off the `Checker` `whole` handed back. THE SENTENCE IS RENDERED
+// HERE, while the store that decided it is in hand: `message` plus
+// `write_detail` rather than `render`, since `render` opens with
+// `file:line:col:` and a position already travelling beside a `range`
+// would be the same fact said twice, once in a form no client can click.
 from_check = (c :: Checker, a: Alloc, root: str, spots :: Vec<Spot>)
              Res<(), AllocError> {
     Range(0, c.diag_count()).loop((h, i) {
@@ -338,7 +259,7 @@ add_sema = (c :: Checker, a: Alloc, root: str, file: str, span: Span,
 }
 
 // Every open buffer, keyed the way `Build.read` looks one up: on the
-// path, which is what `Unit.path` holds and what `path_of` produces.
+// path, what `Unit.path` holds and `path_of` produces.
 overlay_of = (a: Alloc, uris: Vec<str>, docs: Map<str, str>)
              Res<Map<str, str>, AllocError> {
     over ::= a.Map<str, str>();
@@ -364,30 +285,20 @@ uris_of = (spots: Vec<Spot>, into :: Vec<str>) Res<(), AllocError> {
 
 // --- the notification --------------------------------------------------
 
-// ONE FILE'S WHOLE LIST, framed. Called for a file with nothing to say
-// as well as for one with plenty — an empty `diagnostics` array is not
-// a degenerate case here, it is the only way a client is told an error
-// is gone.
-//
-// THE TEXT IS THE FILE'S OWN. A span is a byte column into the file it
-// came from, so converting it against the open document's bytes would
-// underline the right file at a position from another one. An open
-// buffer is preferred over the disk for the same reason the build reads
-// it: the spans were computed from those bytes.
+// ONE FILE'S WHOLE LIST, framed — an empty `diagnostics` array is the
+// only way a client is told an error is gone. THE TEXT IS THE FILE'S
+// OWN: converting a span against another file's bytes would underline
+// the right file at the wrong position.
 say_one = (env: Env, a: Alloc, uri: str, uris: Vec<str>, docs: Map<str, str>,
            spots: Vec<Spot>, out :: String) Res<(), AllocError> {
     publish(a, uri, text_of(env, a, uri, docs), spots, out)
 }
 
 // The bytes the spans in `uri` were measured against: the open buffer if
-// there is one, the disk otherwise, and "" when neither answers.
-//
-// "" IS NOT A SILENT FAILURE. `to_wire` clamps, so every position in an
-// unreadable file converts to 0:0 — the diagnostic still reaches the
-// client, still names the file and still carries its sentence, and only
-// the underline is at the top. A dropped diagnostic would be the worse
-// half of that trade, since the file that could not be read is one the
-// build has already complained about.
+// there is one, disk otherwise, "" when neither answers. "" IS NOT A
+// SILENT FAILURE: `to_wire` clamps, so an unreadable file's positions
+// convert to 0:0 — the diagnostic still reaches the client and names the
+// file; only the underline is off. Worse to drop the diagnostic.
 text_of = (env: Env, a: Alloc, uri: str, docs: Map<str, str>) str {
     docs.get(uri).match({
         Ok(text) => text,
@@ -402,10 +313,9 @@ on_disk = (env: Env, a: Alloc, path: str) str {
     })
 }
 
-// `textDocument/publishDiagnostics`, as the protocol spells it.
-//
-// A NOTIFICATION AND NOT A REPLY: no `id`, and nothing is expected
-// back. It is the one message this server sends unprompted.
+// `textDocument/publishDiagnostics`, as the protocol spells it. A
+// NOTIFICATION AND NOT A REPLY: no `id`, the one message this server
+// sends unprompted.
 publish* = (a: Alloc, uri: str, text: str, spots: Vec<Spot>, out :: String)
            Res<(), AllocError> {
     body ::= a.String().try();
@@ -450,15 +360,11 @@ write_spot = (s: Spot, text: str, out :: String) Res<(), AllocError> {
     out.add_bytes("}")
 }
 
-// THE NOTE, AS THE SECOND PLACE TO LOOK — see the header for why it is
-// not glued onto the sentence.
-//
-// THE NOTE'S URI IS THE DIAGNOSTIC'S, and that is a fact about the
-// parser rather than a shortcut: `parse_diag.zen`'s one builder of a
-// note is `expect_close`, which anchors on the opening delimiter of the
-// same file it is reading. `n.span.file` and `s.uri` name the same
-// module, and using the URI already in hand avoids a second path-to-URI
-// conversion that could differ from the first.
+// THE NOTE, AS THE SECOND PLACE TO LOOK. THE NOTE'S URI IS THE
+// DIAGNOSTIC'S: `parse_diag.zen`'s only builder of a note,
+// `expect_close`, anchors on the opening delimiter of the same file it
+// is reading — reusing the URI already in hand avoids a second
+// path-to-URI conversion that could disagree.
 write_note = (s: Spot, text: str, out :: String) Res<(), AllocError> {
     s.note.match({
         None  => written(),
@@ -477,8 +383,6 @@ write_related = (uri: str, n: Note, text: str, out :: String)
     out.add_bytes("}]")
 }
 
-// `DiagnosticSeverity.Error`. See the header: this compiler has one
-// tally and no phase produces anything a build survives, so there is
-// one severity and this is the constant that changes on the day there
-// is a second.
+// `DiagnosticSeverity.Error` — the constant that changes the day there
+// is a second severity.
 ERROR*: usize = 1

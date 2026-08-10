@@ -1,27 +1,21 @@
 // src/gen/gen_c/gen_c_display.zen
-// A VALUE THAT PRINTS ITSELF, and the console it prints into.
+// A value that prints itself, and the console it prints into.
 //
-// DESIGN.md: "`println("{}", shape)` has to route through `toString`",
-// and `toString` writes into a SINK rather than into a `String` for a
-// reason it works out in full — a `String` needs an `Alloc` to grow,
-// `println` has no `Alloc`, so a `toString` that returned a buffer would
-// either allocate behind the caller's back (law 1) or make hello-world
-// take an arena. "A console is a sink, a `String` is a sink, and
-// `println` hands `toString` the console it already holds — so printing
-// does not allocate at all."
+// `toString` writes into a SINK, not a `String`: a `String` needs an
+// `Alloc` to grow and `println` has no `Alloc`, so a buffer-returning
+// `toString` would either allocate behind the caller's back (law 1) or
+// make hello-world take an arena. A console is a sink already, so
+// printing never allocates.
 //
-// SO THE CONSOLE IS BUILT HERE, and it is the one fat value the print
-// path constructs. `gen_c_fat.zen` holds the law about which bounds
-// become records and how; this file only says what goes in the slots,
-// and what goes in them is `gen_c_runtime.zen`'s writes. The record has
-// NO RECEIVER AT ALL — `zg_self` is NULL, because stdout is not a value
-// the program owns.
+// The console is the one fat value the print path constructs — see
+// `gen_c_fat.zen` for the record layout; this file only fills the slots
+// with `gen_c_runtime.zen`'s writes. `zg_self` is NULL: stdout is not a
+// value the program owns.
 //
-// THE CALL ITSELF IS STATICALLY RESOLVED, exactly as `==` through `Eq`
-// is: the argument's type is known, so the impl's own function is the
-// one to call and no second record takes part. A fat value is wanted
-// only where a value's STATIC type is the bound, and here that is the
-// sink and never the value being printed.
+// The call is resolved statically, like `==` through `Eq`: the
+// argument's type is known, so the impl's function is called directly
+// and no record takes part. A fat value is built only where the
+// DESTINATION's static type is the bound — here, the sink.
 
 ExprId, Member, MemberKind, Function = ast
 Alloc, AllocError = std.mem
@@ -43,9 +37,8 @@ Slot, slots_of = gen.gen_c.gen_c_fat
 // the call
 // -----------------------------------------------------------------
 
-// `<the value>.toString(<the console>);` — `true` when it was written,
-// and `false` when the type supplies no `toString` this backend can
-// call, which is the caller's diagnostic and not this file's.
+// `<the value>.toString(<the console>);` — `true` when written, `false`
+// when the type has no `toString`, which the caller diagnoses.
 console_display* = (be :: CBackend, ty: TyId, text: str)
                    Res<bool, AllocError> {
     site_of(be, ty).try().match({
@@ -63,9 +56,8 @@ display_at_site = (be :: CBackend, ty: TyId, s: Site, text: str)
 }
 
 // The type's own `toString` first, then what an impl supplies — the
-// order `sema_supply.zen` states, and for its reason. AT ARITY TWO,
-// because `Display` declares two of them: only the one taking a sink can
-// write into a console, and the allocating one is derived from it.
+// order `sema_supply.zen` states. Arity two: `Display` declares two
+// `toString`s, and only the sink-taking one can write into a console.
 display_fn = (be :: CBackend, s: Site) Res<Res<Function>, AllocError> {
     found ::= be.alloc.Vec<Member>();
     member_at(be, s, "toString", found).try();
@@ -89,11 +81,9 @@ member_function = (m: Res<Member>) Res<Function> {
     })
 }
 
-// `self: @Self` takes the receiver BY VALUE, which is what `display.zen`
-// declares and what an impl must match — a `toString` writes a value
-// out, it does not change it. A receiver written `::` would need an
-// address this path does not have, so it is refused rather than guessed
-// at, and the caller reports at the argument.
+// `self: @Self` takes the receiver by value, matching `display.zen`:
+// `toString` writes a value out, it does not change it. A `::` receiver
+// needs an address this path lacks, so it is refused, not guessed at.
 write_display_call = (be :: CBackend, ty: TyId, s: Site, f: Function,
                       text: str) Res<bool, AllocError> {
     by_ref(f, 0).match({
@@ -115,11 +105,9 @@ with_console = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str)
     })
 }
 
-// THE RESULT IS DISCARDED on this path: a console has no failure to
-// report — `zg_print_bytes` cannot fail and a console cannot fail to
-// grow — and `println` is a statement whose value is unit. A caller
-// whose sink is a BUFFER needs the answer, and reaches the same call
-// through `sink_display` below.
+// The result is discarded here: `zg_print_bytes` cannot fail and a
+// console cannot fail to grow, so `println`'s value is unit. A BUFFER
+// sink needs the answer instead — see `sink_display` below.
 emit_display = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str,
                 sink: str) Res<bool, AllocError> {
     line ::= be.alloc.String().try();
@@ -130,12 +118,9 @@ emit_display = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str,
     Ok(true);
 }
 
-// `<value>.toString(<sink>)` AS AN EXPRESSION, for a caller that holds
-// a sink of its own and needs the `Res` the call answers with —
-// `gen_c_sink.zen`'s `{}` on a Display is exactly this call with the
-// door's buffer in place of the console. `false` when the type supplies
-// no `toString` this backend can call, which is the caller's diagnostic
-// and not this file's.
+// `<value>.toString(<sink>)` as an EXPRESSION: `gen_c_sink.zen`'s `{}`
+// on a Display is this call with the door's buffer standing in for the
+// console. `false` when the type has no `toString`.
 sink_display* = (be :: CBackend, ty: TyId, text: str, sink: str,
                  out :: String) Res<bool, AllocError> {
     site_of(be, ty).try().match({
@@ -167,9 +152,8 @@ wrote_display = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str,
     Ok(true);
 }
 
-// The symbol, the instantiation and the queue entry `p.toString(sb)`
-// would have produced, so the console path and the buffer path cannot
-// disagree about which function they mean.
+// The symbol, instantiation and queue entry `p.toString(sb)` would
+// produce, so the console and buffer paths agree on which function is meant.
 display_call = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str,
                 sink: str, out :: String) Res<(), AllocError> {
     inst = recv_inst(be, ty).try();
@@ -204,10 +188,9 @@ write_sink_arg = (f: Function, sink: str, out :: String)
 // -----------------------------------------------------------------
 // the console, as a Sink
 //
-// The slots are written HERE rather than found, for the reason
-// `Console.println` has no body: the runtime IS the implementation, and
-// there is nothing underneath to write it in. A capability's floor is
-// the target language's, and for C that floor is `fwrite`.
+// The slots are written HERE, not found: `Console.println` has no body
+// because the runtime IS the implementation. A capability's floor is
+// the target language's; for C, that's `fwrite`.
 // -----------------------------------------------------------------
 
 console_sink* = (be :: CBackend, out :: String) Res<bool, AllocError> {
@@ -234,12 +217,10 @@ sink_named = (be :: CBackend, d: Def) Res<Res<TyId>, AllocError> {
     Ok(Ok(be.check.types.named(d.id, d.qname, d.name, args).try()));
 }
 
-// A SLOT WITH NO RUNTIME WRITE LEAVES THE WHOLE RECORD UNAVAILABLE, and
-// the caller reports at the argument. `gen_c_fat.zen` puts a NULL in an
-// unanswered slot and is right to: an `Alloc.create` no arena supplies
-// is declared as a hook and never called. A console slot is called on
-// the first `{}`, so a NULL there would link and then crash — the one
-// outcome worse than a diagnostic.
+// A slot with no runtime write leaves the whole record unavailable.
+// `gen_c_fat.zen` NULLs an unanswered slot, fine for an unused hook like
+// `Alloc.create` — but a console slot is called on the first `{}`, so a
+// NULL there would link and crash, worse than a diagnostic.
 write_console = (be :: CBackend, ty: TyId, out :: String)
                 Res<bool, AllocError> {
     be.need_print();
@@ -288,9 +269,8 @@ write_slot_init = (be :: CBackend, s: Slot, out :: String)
     Ok(false);
 }
 
-// Named after the member it answers, so two requests for one slot are
-// one function and the name is a pure function of the target — the same
-// rule `gen_c_fat.zen`'s thunks follow.
+// Named after the member it answers, so two requests for one slot share
+// one function — the same rule `gen_c_fat.zen`'s thunks follow.
 console_name = (out :: String, member: str) Res<(), AllocError> {
     out.add_bytes("zg_console_").try();
     out.add_bytes(member).try();
@@ -324,14 +304,12 @@ need_console_fn = (be :: CBackend, s: Slot, name: str)
     })
 }
 
-// A console cannot fail to grow and `zg_print_bytes` has no failure to
-// report, so the honest answer on this path is `Ok` — a tag and nothing
-// else, because a `()` payload is no storage.
+// A console cannot fail to grow and `zg_print_bytes` cannot fail, so the
+// honest answer is `Ok` — a tag, no `()` payload storage.
 //
-// THE THREE PIECES A LOWERED FUNCTION IS HELD AS: a head with no
-// punctuation of its own, and a body that is only the statements.
-// `gen_c_decl.zen` writes the `;` for a prototype and the braces for a
-// definition, so one that carried either would get a second.
+// A lowered function is held as a head with no punctuation and a body
+// that is only statements; `gen_c_decl.zen` writes the `;`/braces, so
+// one that carried either would get a second.
 emit_console_fn = (be :: CBackend, s: Slot, name: str)
                   Res<(), AllocError> {
     head ::= be.alloc.String().try();

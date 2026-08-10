@@ -2,23 +2,22 @@
 // THE FILESYSTEM CAPABILITY, in C.
 //
 // `gen_c_cap.zen` is the other half — the members whose body IS the
-// backend, and the memory ones. This is the four `Fs` declares, and
-// they are a subject of their own for a reason the code makes plain:
-// three of them are a `stat` and a `fopen`, and the fourth ALLOCATES.
+// backend, and the memory ones. This file covers the four `Fs`
+// declares: three are a `stat`/`fopen`, the fourth ALLOCATES.
 //
-// A PATH ARRIVES AS A `str`, which borrows its bytes and is therefore
-// NOT NUL-terminated, and the kernel wants a NUL. The copy happens in
-// the C floor rather than here: `exists` has no `Alloc` in its
-// signature, so by law 1 it may not have any memory either.
+// A path arrives as a `str` — borrowed bytes, NOT NUL-terminated — but
+// the kernel wants a NUL; the copy happens in the C floor, not here:
+// `exists` has no `Alloc` in its signature, so by law 1 it may not have
+// any memory either.
 //
-// `read` IS THE ONE THAT ALLOCATES, and it does it THROUGH A BOUND: it
-// takes an `Alloc`, which is "an ordinary struct whose fields happen to
-// be functions", so the value it was handed is a fat value and the
-// buffer comes out of a call through that record. It is the only place
-// in the backend that calls through one without a call node to lower.
+// `read` is the one that allocates, and does it THROUGH A BOUND: its
+// `Alloc` parameter is "an ordinary struct whose fields happen to be
+// functions", so the value handed in is a fat value and the buffer
+// comes out of a call through that record — the only place in the
+// backend that calls through one without a call node to lower.
 //
-// THE C FLOOR ANSWERS WITH AN ORDINAL and this turns it back into a
-// variant BY NAME, so `env.zen` may rename or reorder its own error set
+// The C floor answers with an ORDINAL, turned back into a variant BY
+// NAME here, so `env.zen` may rename or reorder its own error set
 // without the backend agreeing to it in secret. The ordinals are the
 // floor's own, written down in exactly one place at each end.
 
@@ -47,14 +46,9 @@ write_assign_ok, write_assign_ok_unit, write_assign_err = gen.gen_c.gen_c_cap
 // -----------------------------------------------------------------
 // the filesystem
 //
-// A path arrives as a `str`, which borrows its bytes and is therefore
-// NOT NUL-terminated, and the kernel wants a NUL. The copy happens in
-// the C floor rather than here: `exists` has no `Alloc` in its
-// signature, so by law 1 it may not have any memory either.
-//
-// EVERY PATH IS SPILLED INTO A TEMPORARY FIRST. A `str` is a pointer
-// and a count, both of which are read, so an argument that is a call
-// would otherwise be made twice.
+// Every path is spilled into a temporary first: a `str` is a pointer
+// and a count, both read, so an argument that is a call would
+// otherwise be made twice.
 // -----------------------------------------------------------------
 
 // `exists` and `is_dir`: one `stat`, and no failure a caller acts on.
@@ -141,19 +135,12 @@ path_args* = (be :: CBackend, c: Call, i: usize, ctx: Ctx, out :: String)
 // -----------------------------------------------------------------
 // `fs.read(alloc, path)` — THE CAPABILITY THAT ALLOCATES
 //
-// `Fs.read` takes an `Alloc` and puts the file in a buffer it hands
-// out. An `Alloc` is a BOUND — "an ordinary struct whose fields happen
-// to be functions" — so the value the caller passed is a FAT VALUE, and
-// this is the one place in the backend that calls through a record it
-// did not lower a call node for.
-//
-// THE `String` IS WRITTEN FIELD BY FIELD, which is the same licence
-// `lower_alloc` takes with an `ArenaState` and for the same reason: the
-// memory enters the program here, so the one place that knows the shape
-// is the place the value is born. `len` is what ARRIVED and `capacity`
-// is what was asked for — a short read must not leave a String claiming
-// bytes nobody ever wrote, and the run really is `want` wide, which is
-// what a later grow may reuse.
+// The `String` is written FIELD BY FIELD, the same licence `lower_alloc`
+// takes with an `ArenaState`: memory enters the program here, so the
+// one place that knows the shape is the place the value is born. `len`
+// is what ARRIVED and `capacity` is what was asked for — a short read
+// must not leave a String claiming bytes nobody ever wrote, and the
+// run really is `want` wide, which a later grow may reuse.
 // -----------------------------------------------------------------
 
 lower_read* = (be :: CBackend, id: ExprId, c: Call, ret: TyId, aty: TyId,
@@ -377,12 +364,7 @@ write_named_init = (be :: CBackend, name: str, value: str, out :: String,
 }
 
 // -----------------------------------------------------------------
-// the failure chain
-//
-// The C floor answers with an ORDINAL and this turns it back into a
-// variant BY NAME, so env.zen may rename or reorder its own error set
-// without the backend agreeing to it in secret. The ordinals are the
-// floor's own, written down in exactly one place at each end.
+// the failure chain — see the file header for the ordinal/name rule
 // -----------------------------------------------------------------
 
 fs_name = (n: usize) str {

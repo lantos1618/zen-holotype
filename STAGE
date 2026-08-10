@@ -3,11 +3,47 @@
    #
    # 4 IS THE GRADE, NOT A CLAIM THAT 1-4 ARE FINISHED.
    #
-   # THE BOARD IS GREEN AND THAT IS NOW THE THING TO DISTRUST. As of
-   # 2026-08-08 every suite passes -- 429 / 0, fixpoint byte-identical,
-   # every scanner clean. Read that as "nothing we thought to check is
-   # broken", never as "stage 4 is done", because the gap between those
-   # two sentences is where every silent bug in this tree has lived.
+   # THE BOARD IS NO LONGER GREEN, ON PURPOSE, AND THAT IS AN
+   # IMPROVEMENT. As of 2026-08-10 `make test` is 453 / 0 against the
+   # bootstrapper and `make test-zen` is 451 / 2 against the shipped
+   # compiler. BOTH REDS ARE REAL AND NEITHER IS FLAKE:
+   #
+   #     must-fail/sema/match_arms_disagree     the program compiled;
+   #                                            it must be rejected
+   #     must-fail/sema/match_arm_paren_form    message substring not
+   #                                            found
+   #
+   # THE SHIPPED COMPILER DOES NOT TYPE-CHECK MATCH ARMS. This is a
+   # silent wrong answer, not a missing message:
+   #
+   #     f = (b: bool) i32 { b.match({ true => 1, false => false }) }
+   #
+   # is accepted, emits C that cc accepts, RUNS, and prints 0. The
+   # bootstrapper says `expected i32, found bool`. With a `str` arm
+   # instead the emitted C returns a zg_str from an int32_t function
+   # and cc rejects it -- so today the type checker is not the
+   # authority on Zen's types, cc is, and only where the C types
+   # happen to disagree.
+   #
+   # The rule is already written down IN THE FILE THAT BREAKS IT.
+   # src/sema/sema_join.zen's header: "two arms of genuinely different
+   # types mean something the language cannot express -- inventing a
+   # join for it would hide the mistake rather than report it." `join`
+   # does the first half and nothing does the second. The diagnostic
+   # belongs at `merged_or_first`'s fall-through `Ok(a)`, which cannot
+   # raise one today because `join` is passed no span.
+   #
+   # HOW IT SURVIVED EVERY ORACLE, which is the reusable part: a corpus
+   # test is a VALID program, so none would ever contain mismatched
+   # arms; the differential oracle compares two compilers only on
+   # programs somebody wrote down; and no must-fail test covered arms
+   # until one was migrated in on 2026-08-10. A gap nothing exercises
+   # is invisible to a differential harness -- being wrong in only one
+   # implementation is not enough, something has to ASK.
+   #
+   # Read the green half as "nothing we thought to check is broken",
+   # never as "stage 4 is done", because the gap between those two
+   # sentences is where every silent bug in this tree has lived.
    #
    # Measured, not asserted, and all of it below the grade:
    #

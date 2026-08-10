@@ -149,8 +149,13 @@
 //      DECLARATION and a function TYPE must still write every type
 //      (DESIGN.md:223, 329); that is checked in bootstrap/cst.py, which is
 //      where the position is known, and it is a diagnostic rather than a parse
-//      error. Two fixtures in tests/parse/errors/ therefore fail one stage
-//      later than the rest — reported. (A-CLO)
+//      error. Fixtures for that rule therefore belong in tests/must-fail/,
+//      where the compiler's diagnostic is asserted, and NOT in
+//      tests/parse/errors/, which `make grammar-test` reads as "this
+//      grammar must reject it". They lived in the wrong place until
+//      2026-08-10; `bare_self_param` and `match_arm_paren_form` moved to
+//      tests/must-fail/ and `fn_type_unnamed_params` was dropped as a
+//      duplicate of the must-fail/parse test that already gated it. (A-CLO)
 //
 // D14. A return type is optional on a function with a body (`started ::=
 //      (self :: @Self, ctx: Context) { .. }`, DESIGN.md:1165) and omitted

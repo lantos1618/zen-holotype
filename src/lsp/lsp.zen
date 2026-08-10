@@ -1,16 +1,13 @@
 // src/lsp/lsp.zen
 // The language server, and the folder's surface.
 //
-// `PLAN.md` stage 4 and `docs/design_lsp.md` are what this folder is
-// graded against. `DESIGN.md:45` fixes its shape in one sentence — the
-// LSP is "a thin server over compiler internals" — and the way to check
-// that claim is to notice that NOTHING IN THIS FOLDER ANSWERS A
-// QUESTION ABOUT ZEN. `lsp_hover.zen` calls `expr_node_at` and reads
-// `expr_memo`; where a query is missing the fix belongs in `src/sema/`
-// or `src/ast/`, never here.
+// Graded against `PLAN.md` stage 4 and `docs/design_lsp.md`. `DESIGN.md:45`:
+// the LSP is "a thin server over compiler internals" — nothing here may
+// answer a question about Zen itself; a missing query belongs in
+// `src/sema/` or `src/ast/`.
 //
-// A folder root is a file of starred re-exports and nothing else. A
-// name absent from this list is module-private on purpose.
+// A folder root is starred re-exports only; an absent name is
+// module-private.
 //
 //   lsp_pos.zen        the wire's coordinates and this language's
 //   lsp_json.zen       JSON as a value, an arena, and the writer
@@ -24,41 +21,23 @@
 //   lsp_serve.zen      lifecycle, the overlay, and the dispatch table
 //   lsp_stdio.zen      the pipe: frames in on stdin, frames out on stdout
 //
-// ---------------------------------------------------------------------
-// WHAT IS BUILT: L1 whole — transport, lifecycle, sync and diagnostics
-// — plus TWO queries.
+// BUILT: L1 whole (transport, lifecycle, sync, diagnostics) plus TWO
+// queries — hover and semanticTokens/full — over stdio via `zen lsp`.
+// Everything else in `design_lsp.md` §2's table is refused with `-32601`.
 //
-// `initialize`, `shutdown`, `textDocument/hover`,
-// `textDocument/semanticTokens/full`, Full document sync, and
-// `textDocument/publishDiagnostics` from all three phases, over stdio —
-// `zen lsp` with no arguments is what an editor launches, and
-// `std.env.Stdin` is the capability that made it possible. Everything
-// else in `design_lsp.md` §2's table is refused by name with `-32601`,
-// which is worth more than a broad surface that guesses: a skeleton
-// answering one request correctly can be extended, and a server
-// inventing answers has to be un-trusted first.
+// Hover and diagnostics need a build (root, disk, a `Checker`, ~1s) and
+// go quiet without one. Colour needs only a `scan`, so it answers on an
+// unsaved buffer with no workspace, even on a file that does not parse —
+// why VS Code gets colour from this server at all.
 //
-// THE TWO QUERIES COST DIFFERENT THINGS, and that difference is the
-// most useful thing in this folder. Hover and diagnostics need a build
-// — a root, a disk, a `Checker`, about a second — and go quiet without
-// one. Colour needs a `scan` and nothing else, so it answers on an
-// unsaved buffer, in a workspace-less session, and in a file that does
-// not parse. That is why VS Code gets colour from a server at all.
+// Diagnostics are all three phases or nothing: lex/parse (on `Build`) go
+// out beside sema (on `Checker`), so type errors never show while syntax
+// errors go unreported.
 //
-// DIAGNOSTICS ARE ALL THREE PHASES OR THEY ARE NOTHING. An editor
-// showing type errors and silently not showing syntax errors teaches
-// the user to distrust it, so lex's and parse's — which live on the
-// `Build` — go out beside sema's, which live on the `Checker`.
-//
-// WHAT IS NOT BUILT, precisely, so nobody has to discover it:
-//
-//   - documentSymbol, definition, references, completion, formatting,
-//     signatureHelp, rename — L2 to L4.
-//   - semanticTokens in its SEMANTIC form, and its `range` and
-//     `full/delta` shapes. `lsp_colour.zen` answers the lexical, full
-//     one; telling a type from a function from a variable needs a memo
-//     on an `Ident` in `src/sema/`, which `design_lsp.md` §2 prices at
-//     L4 and which this folder may not invent.
+// NOT BUILT: documentSymbol, definition, references, completion,
+// formatting, signatureHelp, rename (L2-L4); semanticTokens' SEMANTIC
+// form and its `range`/`full+delta` shapes, which need a memo on `Ident`
+// in `src/sema/` (L4).
 
 WirePos*, LineRun*, Step*, to_pos*, to_wire*, run_of*, step_at* = lsp.lsp_pos
 write_wire*, write_range*, wire_at*, units_of* = lsp.lsp_pos

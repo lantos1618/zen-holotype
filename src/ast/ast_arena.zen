@@ -8,15 +8,12 @@
 //
 // Declarations, members, arms, arguments, parameters, variants and
 // statements are NOT arenas: each is held by value inside its parent's
-// `Vec`, because none of them closes a cycle. Only the four families
-// below are mutually recursive, so only they need naming apart from
-// holding.
+// `Vec`, since none of them closes a cycle. Only the four families
+// below are mutually recursive.
 //
-// Everything here allocates through one `Alloc` and says so. The AST
-// of a compilation is the longest-lived thing the compiler builds, so
-// the arena it comes from is the arena that outlives every phase —
-// dropping it frees the whole tree at once, which is the trade an
-// arena exists to make.
+// Everything here allocates through one `Alloc`. The AST is the
+// longest-lived thing the compiler builds, so dropping its arena frees
+// the whole tree at once — the trade an arena exists to make.
 
 Alloc, AllocError = std.mem
 str = std.text
@@ -36,11 +33,10 @@ Ast* = {
     // the formatter can walk this to prove it dropped nothing.
     trivia :: Vec<Trivia>,
 
-    // The id space. An id is a u32 (ast_id.zen says why) and a Vec's
-    // len is a usize, and std.core.num carries no narrowing conversion
-    // between them — on purpose, since a narrowing conversion can
-    // fail. So the count is kept as the id it will become. `add_expr`
-    // is the one place that keeps a counter and its arena equal.
+    // An id is a u32 (ast_id.zen says why); a Vec's len is a usize,
+    // and std.core.num deliberately has no narrowing conversion
+    // between them since one can fail. So the count is kept as the id
+    // it will become — `add_expr` keeps counter and arena equal.
     expr_count :: u32 = 0,
     type_count :: u32 = 0,
     pattern_count :: u32 = 0,
@@ -51,10 +47,9 @@ Ast* = {
     // -----------------------------------------------------------------
     // adding
     //
-    // A node is added once and never mutated: an id handed out stays
-    // pointing at the same node forever, which is what makes it a
-    // legal key for a memoized query. A transformation builds a new
-    // node and gets a new id.
+    // A node is added once and never mutated: an id stays pointing at
+    // the same node forever, making it a legal memoized-query key. A
+    // transformation builds a new node and gets a new id.
     // -----------------------------------------------------------------
 
     add_expr* = (self :: @Self, node: Expr) Res<ExprId, AllocError> {
@@ -92,20 +87,17 @@ Ast* = {
     // -----------------------------------------------------------------
     // reading
     //
-    // These TRAP rather than returning `Res`, and that is the failure
-    // model rather than a shortcut: an id past the end of its arena is
-    // a compiler bug, not input a caller can act on, and routing it
-    // through `Res` would put `.try()` on every child access in the
-    // tree and destroy the signal that makes `.try()` readable.
+    // These TRAP rather than returning `Res`: an id past the end of
+    // its arena is a compiler bug, not input a caller can act on, and
+    // routing it through `Res` would put `.try()` on every child
+    // access and bury the signal that makes `.try()` readable.
     //
-    // THE TRAP SAYS WHAT HAPPENED, and it costs a compare against a
-    // length already in a register. An earlier version let the
-    // subtraction underflow and trap on its own — no branch, nothing to
-    // forget — and what it printed was `trap: integer overflow` at a
-    // line inside this file, which names neither the id nor the cause
-    // and sent the one person who hit it two files away for an
-    // afternoon. A read of a node is a struct copy out of a Vec; the
-    // compare is free beside it, and `stale` is what the compare buys.
+    // The explicit compare exists because an earlier version let the
+    // subtraction underflow and trap on its own — it printed only
+    // `trap: integer overflow` at a line in this file, naming neither
+    // the id nor the cause, costing an afternoon to trace. `stale` is
+    // what the compare buys, for the price of one free-beside-the-copy
+    // length check.
     // -----------------------------------------------------------------
 
     expr_at* = (self: @Self, id: ExprId) Expr {
@@ -148,10 +140,9 @@ Ast* = {
 
     module_at* = (self: @Self, i: usize) Res<Module> { self.modules.get(i) }
 
-    // How many ids each arena has handed out. A consumer that arrives
-    // with a POSITION rather than a root has no tree to walk down —
-    // `ast_find.zen` scans instead, and a scan needs an end. Every id
-    // below `<family>_ids()` is one `<family>_at` will read.
+    // How many ids each arena has handed out. A consumer with a
+    // POSITION rather than a root has no tree to walk — `ast_find.zen`
+    // scans instead, and a scan needs an end.
     expr_ids* = (self: @Self) usize { self.exprs.len }
     type_ids* = (self: @Self) usize { self.types.len }
     pattern_ids* = (self: @Self) usize { self.patterns.len }
@@ -160,11 +151,10 @@ Ast* = {
     // -----------------------------------------------------------------
     // trivia
     //
-    // The protocol is four calls, and it exists because a run has to be
-    // contiguous: take a `mark`, add every piece the lexer produced,
-    // then close the run. A node's leading run is what the lexer
-    // gathered before its first token; its trailing run is what
-    // followed its last token up to the newline.
+    // Four calls because a run must be contiguous: take a `mark`, add
+    // every piece the lexer produced, then close the run. A node's
+    // leading run is what the lexer gathered before its first token;
+    // its trailing run is what followed the last token up to newline.
     // -----------------------------------------------------------------
 
     trivia_mark* = (self: @Self) usize { self.trivia.len }
@@ -177,9 +167,8 @@ Ast* = {
         TriviaRun(at: mark, len: self.trivia.len - mark)
     }
 
-    // `i` is an offset INSIDE the run, so a caller walks
-    // `Range(0, run.len)` and never sees an absolute index. Out of
-    // range traps, for the same reason the node readers do.
+    // `i` is an offset INSIDE the run, so a caller never sees an
+    // absolute index. Out of range traps, like the node readers.
     trivia_at* = (self: @Self, run: TriviaRun, i: usize) Trivia {
         (i < run.len).match({
             true  => (),
@@ -191,19 +180,16 @@ Ast* = {
 
 // AN ID THE ARENA NEVER HANDED OUT, said in full before the trap fires.
 //
-// There is one cause worth naming and it is not "off by one". An `Ast`
-// is a VALUE and every one of its arenas is a `Vec` — a pointer, a
-// length and a capacity — so a copy of an `Ast` is a SNAPSHOT, and the
-// copy taken by `alloc.Checker(tree)` or `alloc.CBackend(tree, c)` is
-// the tree as it stood at that call. A node added afterwards exists in
-// the caller's tree and in no other, and its id is past the end of the
-// snapshot's arena. SEMA_BOOTSTRAP_FIXES.md §12 is the same fact from
-// the other side: the engine is a query over a FINISHED tree.
+// The likely cause is not "off by one": `Ast` is a VALUE and each
+// arena is a `Vec` (pointer, length, capacity), so a copy of an `Ast`
+// is a SNAPSHOT. `alloc.Checker(tree)` or `alloc.CBackend(tree, c)`
+// captures the tree as it stood at that call; a node added afterwards
+// exists only in the caller's tree, and its id is past the snapshot's
+// arena end. SEMA_BOOTSTRAP_FIXES.md §12: the engine is a query over a
+// FINISHED tree.
 //
-// It returns `()` and never does: the subtraction underflows, and
-// unsigned underflow traps. Printing first is what makes the trap's
-// `file:line:col` — which lands here, on the last line — worth having
-// at all, because by then the reason is already on the way out.
+// Returns `()` but never does — the final subtraction underflows and
+// traps, after this has already printed the reason.
 stale = (what: str, index: u32, len: usize) () {
     println("ast: {} id {} is past the end of an arena holding {}",
             what, index, len);
@@ -212,10 +198,9 @@ stale = (what: str, index: u32, len: usize) () {
     len - len - 1;
 }
 
-// `alloc.Ast()` — a ufcs function whose first parameter is an Alloc,
-// beside the type it builds, exactly as `Vec` and `Map` are. A bare
-// value and not a `Res`: an empty arena owns no pages, so construction
-// cannot fail, and the first `add_` is what returns one.
+// `alloc.Ast()` — a ufcs constructor, like `Vec` and `Map`. Returns a
+// bare value, not a `Res`: an empty arena owns no pages, so
+// construction cannot fail; the first `add_` is what can.
 Ast* = (a: Alloc) Ast {
     Ast(
         modules: a.Vec<Module>(),

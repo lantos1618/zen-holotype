@@ -349,6 +349,7 @@ fn_value* = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, reb
     }).try();
     ps ::= p.alloc.Vec<Param>();
     span = p.params_list(ps).try();
+    p.typed_params(ps).try();
     ret = p.ret_ahead().match({
         true  => p.written_type(),
         false => Ok(None),
@@ -367,6 +368,30 @@ fn_value* = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, reb
         ret: ret,
         body: body,
     ));
+}
+
+// DESIGN.md:223 — "A method is a UFCS function whose first parameter
+// happens to be named `self`, and that parameter is written out like
+// every other one — a name and a type, never bare." A DECLARATION names
+// its types; only a CLOSURE infers them, which is why this is called
+// from `fn_value` and not from `params_list`, which both forms share.
+//
+// The sibling rule — a function TYPE must NAME its parameters — is
+// `named_params` in parse_type.zen. The bootstrapper raises both from
+// one block; this compiler had only the type half, so `len* = (self)
+// usize { .. }` walked through sema unremarked and was rejected by
+// codegen with `cannot spell the type`, naming neither `self` nor the
+// rule. A must-fail test that passes because gen_c cannot lower
+// something yet is a test resting on an accident: the day codegen
+// grows that ability the program is silently accepted.
+typed_params = (p :: Parser, ps: Vec<Param>) Res<(), AllocError> {
+    ps.loop((h, param) {
+        param.type.match({
+            Ok(_) => p.nothing(),
+            None  => p.error_at("a declaration's parameter needs a type: only a closure infers its parameter types", param.span),
+        }).try();
+    });
+    Ok(());
 }
 
 fn_body = (p :: Parser) Res<Res<BlockId>, AllocError> {

@@ -2,37 +2,29 @@
 // `out.add("{}:{}", self.x, self.y)` — the format door on ANY Sink, and
 // the door every idiomatic `toString` is written through.
 //
-// `text_fmt.zen` declares it and writes no body, and says why: "the
-// arguments are type-directed, so the call is expanded where it is
-// WRITTEN". A variadic parameter has no C spelling and `{}` is resolved
-// BY THE ARGUMENT'S TYPE, so there is nothing one body could have been —
-// the compiler IS the body, the same bargain `alloc.String("{}", x)`
-// strikes next door in `gen_c_fmt.zen`.
+// `text_fmt.zen` declares it with no body: a variadic parameter has no
+// C spelling and `{}` is resolved BY THE ARGUMENT'S TYPE, so the call
+// must be expanded where it is WRITTEN — the compiler is the body, the
+// same bargain `alloc.String("{}", x)` strikes in `gen_c_fmt.zen`.
 //
-// EMITTING THE CALL INSTEAD IS NOT A DIAGNOSTIC, IT IS A LINKER ERROR,
-// and that is how this was found: a bodyless declaration defines no
-// symbol, so every `toString` written the way DESIGN.md writes them
-// emitted a call to `..text_fmt3add..` that nothing defines. `cc`
-// reported it as an implicit declaration returning `int` — a wrong
-// answer with no position on it — rather than as the missing lowering
-// it was.
+// Found via a LINKER ERROR, not a diagnostic: a bodyless declaration
+// defines no symbol, so every `toString` written the way DESIGN.md
+// writes them emitted a call to `..text_fmt3add..` that nothing
+// defines. `cc` reported it as an implicit declaration returning `int`
+// rather than pointing at the missing lowering.
 //
-// WHY THIS DOOR AND THE ALLOCATING ONE ARE SEPARATE FILES. They walk
-// the same format, and they share that walk — `lower_pieces_into`
-// below is the allocating door writing THESE pieces into the buffer it
-// just made, so the two hole sets are one hole set. What they do NOT
-// share is the error: every write reachable from a `{}` — `Sink.write`,
-// `text_fmt.add_i64`, a Display's own `toString` — answers with exactly
-// `Res<(), WriteError>`, which IS this door's declared return, so a
-// failing write is carried out by COPYING it and nothing is converted.
-// The allocating door returns `Res<String, AllocError>` and has no such
-// luck; `gen_c_fmt.zen` holds that half, and the buffer it makes.
+// THIS DOOR AND THE ALLOCATING ONE ARE SEPARATE FILES because they
+// share the format walk (`lower_pieces_into` below is the allocating
+// door writing these pieces into the buffer it just made) but NOT the
+// error type: every write reachable from a `{}` answers with exactly
+// `Res<(), WriteError>`, this door's own declared return, so a failing
+// write is COPIED and nothing converted. The allocating door returns
+// `Res<String, AllocError>` instead; `gen_c_fmt.zen` holds that half.
 //
-// THE WRITERS ARE FOUND, NOT WRITTEN. `add_i64`, `add_u64` and
-// `add_bool` are ordinary Zen functions in the door's own module with
-// ordinary bodies, and this file only picks which one a hole reaches.
-// A second, C-side integer printer would be a second set of rules about
-// what a number looks like, and the corpus pins exactly one.
+// `add_i64`/`add_u64`/`add_bool` are FOUND, not written here — ordinary
+// Zen functions in the door's own module. A second C-side integer
+// printer would be a second set of rules about what a number looks
+// like, and the corpus pins exactly one.
 
 Expr, ExprId, Decl, DeclKind, Function, Param, Call, Arg = ast
 Literal, LiteralKind, TypeId = ast
@@ -65,14 +57,11 @@ sink_display = gen.gen_c.gen_c_display
 // -----------------------------------------------------------------
 
 // The bodyless `add(out :: Sink, fmt: str, args: ...)` and nothing
-// else. Asked of the DECLARATION rather than of the name: a module's
-// own three-parameter `add` with a body is an ordinary function and is
-// called like one, and so is a two-parameter `add_i64`.
+// else, asked of the DECLARATION rather than the name — a module's own
+// bodied three-parameter `add` is an ordinary function.
 //
-// THE RECEIVER MUST BE `::`. That is what tells this door apart from
-// any other variadic three-parameter `add` — a sink is written into, so
-// it is taken by address, and a declaration that takes its first
-// argument by value is not this.
+// THE RECEIVER MUST BE `::`: a sink is written into, so it is taken by
+// address; a first argument taken by value is not this door.
 is_sink_door* = (be: CBackend, d: Def, f: Function) bool {
     d.name.eq("add") && sink_door_shape(be, f)
 }
@@ -95,12 +84,10 @@ by_ref = (f: Function, i: usize) bool {
 }
 
 // A FUNCTION WITH NO PARAMETERS HAS NO LAST ONE, and `len - 1` on a
-// `usize` does not answer that question — it traps. `Vec.get` would have
-// returned `None` for the huge index, which is why this read as safe;
-// the subtraction never got that far. Its first caller was shielded by a
-// `params.len == 3` test in front of it, so the underflow waited for a
-// second caller to arrive, and one did (`associated_functions`, exit
-// 134). A guard belongs where the arithmetic is, not in whoever calls it.
+// `usize` traps rather than answering that question. The first caller
+// was shielded by a `params.len == 3` test in front of it, so the
+// underflow waited for a second caller (`associated_functions`, exit
+// 134) before it was found. The guard belongs where the arithmetic is.
 last_is_variadic* = (be: CBackend, f: Function) bool {
     (f.params.len == 0).match({
         true  => false,

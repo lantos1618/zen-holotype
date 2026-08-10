@@ -1,86 +1,66 @@
 // std.mem.mem_alloc
 //
 // LAW 1: there is NO ambient allocator. Anything that needs memory
-// takes an Alloc, so "does this allocate?" is answered by reading
-// the signature and never by reading the body. No Alloc parameter,
-// no allocation.
+// takes an Alloc, so "does this allocate?" is answered from the
+// signature alone: no Alloc parameter, no allocation.
 //
-// Alloc is an INTERFACE, which in Zen is an ordinary struct whose
-// fields happen to be functions — nothing marks it special because
-// nothing needs to. So an Alloc VALUE is the fat value every trait
-// value is: a receiver pointer plus one function pointer per
-// method, built on the stack, copied by value, never boxed and
-// never allocated. The law is satisfied rather than side-stepped.
+// Alloc is an INTERFACE — an ordinary struct whose fields happen to be
+// functions, nothing marked special. An Alloc VALUE is the fat value
+// every trait value is: receiver pointer plus one function pointer per
+// method, stack-built, copied by value, never boxed or allocated.
 
 Ptr = std.mem.mem_ptr
 
-// One variant, so the bar LEADS. Without it `AllocError =
-// OutOfMemory` and `Alias = Shape` are the same three tokens, and a
-// parser would need a guess where it now needs none.
-//
-// There is exactly one way to run out of memory, and no allocator
-// invents a second reason: law 4 says a reason is never invented.
+// One variant, so the bar LEADS: without it `AllocError = OutOfMemory`
+// and `Alias = Shape` are the same three tokens. Exactly one way to
+// run out of memory — law 4 says a reason is never invented.
 AllocError* = | OutOfMemory
 
-// The allocator interface. Everything that allocates takes one.
-// The implementations are an arena (env.mem.alloc(), and the one
-// this library ships), a fixed buffer, and C's malloc.
+// The allocator interface. Implementations: an arena (env.mem.alloc(),
+// the one this library ships), a fixed buffer, C's malloc.
 //
-// EVERY METHOD HERE TAKES `self: @Self`, NEVER `self :: @Self`.
-// This is the load-bearing line in the module and the whole reason
-// the file is worth reading twice:
-//
-//   an Alloc is a HANDLE. It is two words, it copies freely, and it
-//   is NOT Drop. The Arena behind it owns the memory and is what
-//   Drop applies to. Allocating changes the arena behind the
-//   handle, not the handle's own bytes — so a bitwise copy of the
-//   receiver sees the change, and DESIGN.md's test says the method
-//   is `:`.
+// EVERY METHOD HERE TAKES `self: @Self`, NEVER `self :: @Self` — the
+// load-bearing line in this module: an Alloc is a HANDLE, two words,
+// copies freely, NOT Drop (the Arena behind it owns the memory and is
+// what Drop applies to). Allocating mutates the arena, not the
+// handle's own bytes, so a bitwise copy still sees the change —
+// DESIGN.md's test for `:`.
 //
 // What it buys: Vec stores `alloc: Alloc` as an IMMUTABLE field and
-// Vec.grow calls realloc through it. Written the other way, that
-// call is illegal, every collection in the library needs a mutable
-// allocator field, and the shallowness of `::` buys nothing at all.
-// Get this wrong here and it is wrong in every file above.
+// Vec.grow calls realloc through it. The other way, that call is
+// illegal and every collection needs a mutable allocator field.
 Alloc* = {
-    // required (`= sig`, no body): an impl must provide these two.
-    // Everything else in std is built out of them.
+    // required (`= sig`, no body): an impl must provide these two;
+    // everything else in std is built from them.
     //
-    // raw is bytes and nothing more — size and alignment in, an
-    // address out. Naming what the bytes are is `Ptr.to`, one
-    // level down
+    // raw is bytes only — size and alignment in, address out. Naming
+    // what the bytes are is `Ptr.to`, one level down
     raw* = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError>
 
     // `count` is the NEW element count. A null p is a fresh
-    // allocation, which is what lets an empty Vec — one that owns
-    // no pages — grow through the same call as a full one
+    // allocation, letting an empty Vec grow through the same call as
+    // a full one
     realloc* = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError>
 
-    // optional hook (`::=`, no body). An arena no-ops this: it
-    // frees every page at once when it drops, which is the trade
-    // an arena exists to make. A malloc allocator does the real
-    // thing. Neither is a stub
+    // optional hook (`::=`, no body). An arena no-ops this (frees
+    // every page at once on drop); a malloc allocator does the real
+    // thing. Neither is a stub.
     free* ::= <T>(self: @Self, p: Ptr<T>) ()
 
-    // the typed conveniences: one T's worth of storage, already
-    // named, so a caller never writes a size or an alignment down
+    // typed convenience: one T's worth of storage, pre-sized
     create* ::= <T>(self: @Self) Res<Ptr<T>, AllocError>
 
-    // Vec, Map and String are NOT members. Each is a ufcs function
-    // declared beside its own type, taking an Alloc first — see
-    // DESIGN.md. `alloc.Vec<i32>()` is unchanged at the call site;
-    // what changes is that std.mem no longer has to see inside a
-    // Vec, so mem and collections stop importing each other.
+    // Vec, Map and String are NOT members — each is a ufcs function
+    // beside its own type, taking an Alloc first (DESIGN.md), so
+    // std.mem never sees inside a Vec and mem/collections don't
+    // cross-import.
 
-    // Vec and Map return a BARE value, not a Res: an empty one owns
-    // no pages yet, so construction cannot fail. The first add
-    // allocates, and THAT is what returns Res. The signature is
-    // the documentation — a call with no Res is a call that did not
-    // touch memory
+    // Vec and Map return a BARE value, not a Res: empty owns no pages
+    // so construction can't fail; the first add allocates and returns
+    // Res. The signature is the documentation.
 
-    // String is the exception, and it is an honest one: it takes a
-    // format and must hold the formatted result, so it allocates at
-    // once and says so. The empty overload is the buffer
-    // Display.toString fills — `sb ::= a.String().try()` — and
-    // resolution picks by arity, the ordinary rule
+    // String is the honest exception: it takes a format and must hold
+    // the result, so it allocates at once. The empty overload is the
+    // buffer Display.toString fills (`sb ::= a.String().try()`);
+    // resolution picks by arity.
 }

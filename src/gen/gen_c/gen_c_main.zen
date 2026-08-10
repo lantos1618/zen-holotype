@@ -1,20 +1,16 @@
 // src/gen/gen_c/gen_c_main.zen
 // `main`, and the one value the C runtime hands a Zen program.
 //
-// `main` is the one name the C standard fixes for us, and the one place
-// a Zen function is called by something that is not Zen. That makes it
-// the seam where two conventions meet: C's `int` exit status against
-// Zen's `Res`, and C's `argc`/`argv` against `Env`.
+// `main` is the seam where C's conventions meet Zen's: C's `int` exit
+// status against Zen's `Res`, and C's `argc`/`argv` against `Env`.
 //
-// IT LIVES BESIDE `gen_c_decl.zen` RATHER THAN IN IT because the two
-// answer different questions. That file's subject is "what is a
-// declaration in C, and what is a translation unit" — a walk, a queue
-// and an assembly order. This one's is a single function that no Zen
-// declaration describes, written from the outside in.
+// Separate from `gen_c_decl.zen` because that file answers "what is a
+// declaration in C" (a walk, a queue, an assembly order); this file is
+// one function no Zen declaration describes.
 //
-// AND IT IS EMITTED LAST, after every type and every body, which is why
-// `zg_argv_vec` can be written here at all: it names the mangled
-// `Vec<str>`, and that is not a name until a program has asked for one.
+// Emitted LAST, after every type and body, which is why `zg_argv_vec`
+// can be written here: it names the mangled `Vec<str>`, not a name
+// until a program has asked for one.
 
 Ast, Decl, DeclKind, Function, Param, Span, Ident, TypeId = ast
 Alloc, AllocError = std.mem
@@ -82,10 +78,8 @@ write_entry = (be :: CBackend, d: Def, f: Function, out :: Emit)
     Ok(());
 }
 
-// `main` TAKES C'S OWN `argc`/`argv` WHEN SOMETHING READS THEM, and
-// `void` when nothing does — a parameter no line mentions is a warning
-// on a conforming compiler and a promise this backend does not need to
-// make.
+// `main` takes `argc`/`argv` when something reads them, `void`
+// otherwise — an unused parameter is a warning on a conforming compiler.
 main_head = (wants_argv: bool) str {
     wants_argv.match({
         true  => "int main(int argc, char **argv) {",
@@ -93,9 +87,8 @@ main_head = (wants_argv: bool) str {
     })
 }
 
-// The signature again, without binding anything: `emit_main` runs
-// after every frame has been reset, and the symbol has to match the
-// one the prototype printed.
+// The signature again, without binding anything: `emit_main` runs after
+// every frame is reset, and the symbol must match the prototype's.
 signature = (be :: CBackend, f: Function, mi: usize, sig :: Vec<TyId>)
             Res<(), AllocError> {
     ctx = plain_ctx(be, mi);
@@ -113,11 +106,10 @@ add_sig = (be :: CBackend, t: TypeId, ctx: Ctx, sig :: Vec<TyId>)
     sig.add(be.check.type_from_ast(t, ctx).try())
 }
 
-// THE `Env` IS BUILT AND NOT ZEROED. `(Env){0}` made `env.argv.len` 0
-// in every program this backend ever compiled — so a compiler could
-// not be told what to compile, and no stage-2 binary could reach a
-// fixpoint. Every OTHER parameter is still a zero value: `Env` is the
-// capability root and `argv` is the one field the C runtime hands us.
+// `Env` is built, not zeroed: `(Env){0}` made `env.argv.len` 0 in every
+// program this backend compiled, so no stage-2 binary could fixpoint.
+// Every OTHER parameter is still a zero value; `argv` is the one field
+// the C runtime actually hands us.
 write_entry_args = (be :: CBackend, sig: Vec<TyId>, out :: String)
                    Res<(), AllocError> {
     sig.loop((h, i, t) {
@@ -146,9 +138,8 @@ write_env_value = (be :: CBackend, t: TyId, out :: String)
 }
 
 // The `Vec<str>` an `argv` field holds, when the parameter has one.
-// Asked of the TYPE and not of its name: what makes a struct the
-// capability root here is that it carries the rows, and a program with
-// no `Env` at all simply has no such parameter.
+// Asked of the TYPE, not the name: a struct qualifies by carrying the
+// rows, and a program with no `Env` simply has no such parameter.
 argv_field = (be :: CBackend, t: TyId) Res<Res<TyId>, AllocError> {
     field_of(be, t, "argv")
 }
@@ -165,20 +156,16 @@ argv_rows = (be :: CBackend, sig: Vec<TyId>, out :: Vec<TyId>)
 }
 
 // -----------------------------------------------------------------
-// `zg_argv_vec`
+// `zg_argv_vec`: written here (not `gen_c_runtime.zen`) because it
+// names the mangled `Vec<str>`, not a name until a program asks for one.
 //
-// Written here rather than in `gen_c_runtime.zen` because it names the
-// mangled `Vec<str>`, which is not a name until a program asks for one.
+// Rows borrow and are never freed: `argv` is process-lifetime storage
+// the C runtime owns, so each row is a pointer+length into it. The one
+// `malloc` is the row array, which outlives every reader by construction.
 //
-// THE ROWS BORROW AND ARE NEVER FREED. `argv` is storage the C runtime
-// already owns and it lasts exactly as long as the process, so a row is
-// a pointer and a length into it rather than a copy. The one `malloc`
-// is the row array itself, and it outlives every reader by
-// construction.
-//
-// THE `Vec`'S ALLOCATOR STAYS ZERO, so growing `env.argv` would fault.
-// Nobody grows argv — and the alternative is handing `main`'s arena to
-// a value built before any arena exists.
+// The `Vec`'s allocator stays zero, so growing `env.argv` would fault —
+// nobody grows argv, and the alternative is handing `main`'s arena to a
+// value built before any arena exists.
 // -----------------------------------------------------------------
 
 emit_argv_vec = (be :: CBackend, v: TyId, out :: Emit)
@@ -232,10 +219,8 @@ write_filled_rows = (be :: CBackend, v: TyId, out :: Emit)
     out.say(line.view())
 }
 
-// `(Vec<str>){ .data = <d>, .len = <n>, .capacity = <n> }`. The
-// allocator field is left out, so C zeroes it — which is the whole of
-// "growing argv would fault", stated by omission rather than by a
-// memset.
+// `(Vec<str>){ .data = <d>, .len = <n>, .capacity = <n> }`. Allocator
+// field left out, so C zeroes it (see note above).
 write_vec_literal = (be :: CBackend, v: TyId, data: str, n: str,
                      out :: String) Res<(), AllocError> {
     out.add_bytes("(").try();
@@ -272,8 +257,7 @@ write_zero_struct = (be :: CBackend, t: TyId, out :: String)
 }
 
 // `Ok(0)` from main exits 0 — the corpus rests on it. A `Res` whose Ok
-// payload is an integer becomes the exit code; anything else that is
-// not `Ok` exits 1.
+// payload is an integer becomes the exit code; anything not `Ok` exits 1.
 write_exit = (be :: CBackend, ret: TyId, call: str, out :: Emit)
              Res<(), AllocError> {
     be.check.types.at(ret).match({

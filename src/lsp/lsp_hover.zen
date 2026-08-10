@@ -6,31 +6,19 @@
 //
 //     position -> to_pos -> told_at -> a memo -> Types.name_of
 //
-// and `tests/corpus/sema_zen/a_cursor_position_finds_its_node` is the
-// same round trip WITHOUT a server, which is what makes it the thing to
-// read before this file. Nothing here is a query; everything here is a
-// call into `src/ast/` and `src/sema/`, which is `DESIGN.md:45`'s "a
-// thin server over compiler internals" meant literally.
+// (`tests/corpus/sema_zen/a_cursor_position_finds_its_node` is the same
+// round trip WITHOUT a server). Nothing here is a query; everything is a
+// call into `src/ast/` and `src/sema/` — `DESIGN.md:45`'s "a thin server
+// over compiler internals" meant literally. Memos are READ and not
+// recomputed (`DESIGN.md` decision 3): `check_all` has already typed
+// every node, so this file never calls `type_of`.
 //
-// `DESIGN.md` decision 3 is why the memos are READ and not recomputed:
-// "ask `type_of` twice and the second answer costs a `Map` lookup,
-// which is the property an LSP needs, and the reason hover is not a
-// recompile." `check_all` has already typed every node in the document,
-// so this file never builds a `Ctx` and never calls `type_of`.
-//
-// FOUR ANSWERS, AND NOT ONE. An earlier version of this file read
-// `expr_memo` and nothing else, and the consequence was measurable:
-// probing every identifier in
-//
-//     add = (a: i32, b: i32) i32 { s = a + b; s }
-//
-// exactly three positions answered — `a`, `b` and `s` where they are
-// USED — and the nine that did not were the function's own name, every
-// parameter at its declaration, the local at its declaration, and every
-// `i32`. A user hovers a declaration to ask what something IS at least
-// as often as a use, and hovering a type name is how a type gets found
-// out about. `lsp_decl.zen` is the finder that made the other three
-// reachable; this file is what each one is said as:
+// FOUR ANSWERS, AND NOT ONE. An earlier version read `expr_memo` alone;
+// probing every identifier in `add = (a: i32, b: i32) i32 { s = a + b; s }`
+// only three of twelve positions answered (`a`, `b`, `s` where USED),
+// missing the function's own name, every parameter/local at its
+// declaration, and every `i32`. `lsp_decl.zen` is the finder that made
+// the other three reachable; this file says each as:
 //
 //   Sig      a function's name  -> its declaration, reprinted from the
 //                                  AST's names and the checker's types
@@ -38,28 +26,22 @@
 //   OfValue  an expression      -> what `type_of` gave it
 //   Nothing  everything else    -> `null`, and see below
 //
-// A WRONG ANSWER IS WORSE THAN NO ANSWER, and that is the rule every
-// arm below is written against. `null` reads to a user as "hover is not
-// supported here"; a type reads as truth. So every path here answers
-// from a memo the checker WROTE, and a miss anywhere in a compound
-// answer — one parameter whose type never resolved, a signature with no
-// return type — discards the whole answer rather than shipping a
-// partial one. What that costs is listed at the bottom of this file.
+// A WRONG ANSWER IS WORSE THAN NO ANSWER — the rule every arm is written
+// against. A miss anywhere in a compound answer (one parameter
+// unresolved, no return type) discards the whole answer rather than
+// shipping a partial one — costs listed at the bottom.
 //
 // TWO WAYS IN, AND THE WORKSPACE DECIDES. `hover_in` checks the document
-// as part of a BUILD and is what an editor reaches; `hover_at` checks it
-// AS ONE MODULE, standing alone, and is what is left when there is no
-// root to build — a client that sent no `rootUri`, or the two-file form
-// of `zen lsp` whose document is on no disk. In the second, an import
-// resolves to nothing and a name from another file has no type, which
-// hover says by answering `null` rather than by guessing.
+// as part of a BUILD; `hover_at` checks it AS ONE MODULE standing alone,
+// for when there is no root to build (no `rootUri`, or the two-file form
+// of `zen lsp`) — there an import resolves to nothing and hover answers
+// `null` rather than guessing.
 //
-// AND IT REBUILDS PER HOVER. There is no cache across requests, because
-// `design_lsp.md` §5 already established there is no unit smaller than
-// the program and `PLAN.md:317` already named where the fix goes if
-// that is too slow — stage 0.3, not here. A server that cached a
-// `Checker` keyed on nothing would be a correctness bug bought with
-// speed nobody measured.
+// AND IT REBUILDS PER HOVER. No cache across requests: `design_lsp.md`
+// §5 established there is no unit smaller than the program;
+// `PLAN.md:317` names the fix if too slow (stage 0.3, not here) —
+// caching a `Checker` keyed on nothing would trade correctness for
+// unmeasured speed.
 
 str, String = std.text
 Map = std.collections
@@ -69,29 +51,21 @@ Parser = parse
 Ast, ExprId, TypeId, Span, Function = ast
 Checker = sema.sema_check
 check_all = sema.sema_decl
-// THE DRIVER, REACHED FROM THE SERVER, and `design_lsp.md` §5 is where
-// that inversion was argued and accepted: the alternative is a private
-// copy of `walk` in this folder, which is the second implementation
-// that document exists to prevent.
+// THE DRIVER, REACHED FROM THE SERVER (`design_lsp.md` §5): the
+// alternative is a private copy of `walk` in this folder.
 Build = zen.zen_build
 root_for, relative_to = zen.zen_path
-// `Types` IS IMPORTED FOR ITS METHODS, not to be named below.
-// `c.types.write_name` is a method on `Types`, and without this line the
-// bootstrapper resolves the name against `sema_diag` instead and reports
-// that `write_name` is not exported there — a resolution failure that
-// reads as a missing function in a module this file never mentions.
+// `Types` IS IMPORTED FOR ITS METHODS: without this line the
+// bootstrapper resolves `c.types.write_name` against `sema_diag` instead
+// and reports it as not exported there.
 Types, TyId = sema.sema_ty
 to_pos, to_wire, WirePos = lsp.lsp_pos
 Tell, told_at = lsp.lsp_decl
 
-// What a hover found. `found` is false for a position covered by
-// nothing AND for one whose type the checker never wrote down — see
-// above on why those two are one answer here.
-//
-// `shown` is TEXT AND NOT A TYPE NAME. It was called `type_name` while
-// the only answer was a type; a function's name answers with its
-// signature, and a field promising a type name while carrying a
-// declaration is the kind of small lie that gets read as a bug later.
+// What a hover found. `found` is false both for a position covered by
+// nothing and for one whose type the checker never wrote down. `shown`
+// is TEXT AND NOT A TYPE NAME: a function's name answers with its
+// signature.
 Hover* = {
     found*: bool,
     shown*: str,
@@ -100,13 +74,8 @@ Hover* = {
 }
 
 // The type under a wire position in `text`, and the span to underline.
-//
-// `name` is what the document is called for the purpose of spans. It is
-// the CLIENT'S URI, verbatim, and never a filesystem path: this file
-// hands the same string to `Source` and to `told_at`, so the two agree
-// by construction, and no `file://` conversion is needed or written.
-// That conversion becomes necessary the moment a second file is
-// involved — see this folder's root for what is not built.
+// `name` is the CLIENT'S URI, verbatim, never a filesystem path: handed
+// to both `Source` and `told_at`, so no `file://` conversion is needed.
 hover_at* = (a: Alloc, name: str, text: str, line: usize, character: usize)
             Res<Hover, AllocError> {
     tree ::= a.Ast();
@@ -123,36 +92,23 @@ hover_at* = (a: Alloc, name: str, text: str, line: usize, character: usize)
     said(c, a, text, told_at(c.tree, name, pos))
 }
 
-// THE SAME QUESTION, ASKED OF A BUILD — which is the only way an
-// IMPORTED name has ever had a type.
+// THE SAME QUESTION, ASKED OF A BUILD — the only way an IMPORTED name
+// has ever had a type. `hover_at` checks the document alone, so `Vec`,
+// `str` and any real import resolve to nothing and sema interns poison;
+// `write_ty_id` correctly answers `null`.
 //
-// `hover_at` above checks the document standing alone, so `Vec`, `str`
-// and every name a real file opens with resolve to nothing, sema interns
-// poison for them, and `write_ty_id` — correctly — answers `null`. That
-// is hover working on a toy file and going quiet exactly where a person
-// works.
+// THE OPEN DOCUMENT IS THE ENTRY, not `main`: a file being edited is
+// usually not reachable from the program's entry, so walking from the
+// document reaches what it IMPORTS instead (`folder_root` pulls the
+// sibling modules that complete a UFCS pool).
 //
-// THREE THINGS AND NOT ONE OVERLAY. `Build.overlay` really is one field
-// and one branch; what made this a change rather than an edit is that
-// the driver had no public entry that kept anything (`Build.whole`) and
-// nothing handed a `Checker` back (`Build.checked`). §5 has the revised
-// price.
+// THE COMPILATION ROOT IS COMPUTED AND NOT THE WORKSPACE: `root_for`
+// accounts for an editor opening at the repository while this tree
+// builds as `zen build src`.
 //
-// THE OPEN DOCUMENT IS THE ENTRY, not `main`. A file being edited is
-// usually not on the path from the program's entry — a library module, a
-// file nothing imports yet — and walking from `main` would answer `null`
-// for exactly those. Walking from the document reaches what the document
-// IMPORTS, which is what its names mean, and `folder_root` in the walk
-// is what pulls the sibling modules that complete a UFCS pool.
-//
-// THE COMPILATION ROOT IS COMPUTED AND NOT THE WORKSPACE. `root_for`
-// says why: an editor opens at the repository and this tree builds as
-// `zen build src`.
-//
-// `rel` AND NOT THE URI IS WHAT SPANS CARRY. A build names a module by
-// its path relative to the root, so `told_at` is asked with the same
-// string `Source` was given — the property `hover_at` got for free by
-// using the URI for both.
+// `rel` AND NOT THE URI IS WHAT SPANS CARRY: a build names a module by
+// its path relative to the root, so `told_at` gets the same string
+// `Source` was given.
 hover_in* = (env: Env, a: Alloc, workspace: str, path: str, text: str,
              line: usize, character: usize) Res<Hover, AllocError> {
     root = root_for(env, a, workspace, path);
@@ -164,19 +120,16 @@ hover_in* = (env: Env, a: Alloc, workspace: str, path: str, text: str,
     said(c, a, text, told_at(c.tree, relative_to(root, path), pos))
 }
 
-// A position in nothing is not a failure — `ast_find.zen` says so and
-// an editor hovering over a comment or over whitespace gets exactly
-// this. The server turns it into a `null` result, which is what the
-// protocol wants and is not an error either.
+// A position in nothing is not a failure — hovering a comment or
+// whitespace gets exactly this, turned into `null` by the server.
 no_type* = () Hover {
     Hover(found: false, shown: "",
           start: WirePos(line: 0, character: 0),
           end: WirePos(line: 0, character: 0))
 }
 
-// The `Tell`, said. One `String` for the whole answer, filled by
-// whichever arm applies, and thrown away unread when the arm could not
-// finish it.
+// The `Tell`, said — one `String`, thrown away unread if the arm could
+// not finish it.
 said = (c :: Checker, a: Alloc, text: str, t: Tell) Res<Hover, AllocError> {
     out ::= a.String().try();
     t.match({
@@ -189,9 +142,8 @@ said = (c :: Checker, a: Alloc, text: str, t: Tell) Res<Hover, AllocError> {
 
 nothing_found = () Res<Hover, AllocError> { Ok(no_type()) }
 
-// The span converted back out, and `known` carried through untouched.
-// THE ONLY PLACE A HOVER LEARNS ITS WIRE COORDINATES, which is
-// `lsp_pos.zen`'s rule obeyed from the outside.
+// The span converted back out — the ONLY place a hover learns its wire
+// coordinates, `lsp_pos.zen`'s rule obeyed from the outside.
 wired = (text: str, span: Span, known: bool, out :: String)
         Res<Hover, AllocError> {
     Ok(Hover(found: known,
@@ -203,27 +155,12 @@ wired = (text: str, span: Span, known: bool, out :: String)
 // --- the three answers -------------------------------------------------
 
 // A WRITTEN TYPE, resolved. `type_from_ast`'s memo is keyed on exactly
-// this `TypeId`, so `i32` costs a `Map` lookup and nothing else.
-//
-// WHAT THIS ANSWERS FOR `i32` IS `i32`, and that weakness is the answer
-// and not a placeholder for one. Three things make it worth having
-// anyway, and they are the reason this was chosen over a description or
-// a size:
-//
-//   - It is the RESOLVED type, not the written one. `Alias = Shape`
-//     hovers as `Shape`; `Res<Cfg, _>` hovers with the `_` filled in as
-//     the checker filled it; a `Vec<T>` inside a generic hovers with
-//     the `T` it actually stands for. Where the source and the answer
-//     agree, they agree because nothing was hidden.
-//   - A NAME THAT RESOLVES TO NOTHING ANSWERS `null`. So a hover that
-//     says `i32` is also saying "this name is a type the checker knows",
-//     which is exactly the question a typo raises and the one thing a
-//     tautology could not tell you.
-//   - Anything richer — a struct's fields, a doc comment, a size — is
-//     `documentSymbol`'s or `definition`'s answer wearing hover's
-//     clothes, and both are listed in `design_lsp.md` §2 with the
-//     queries they need. Inventing a fourth shape here would put the
-//     description of a type in a file that must not describe types.
+// this `TypeId`, so `i32` costs a `Map` lookup. WHAT THIS ANSWERS FOR
+// `i32` IS `i32` — a weak but worthwhile answer: it is the RESOLVED type
+// (`Alias = Shape` hovers as `Shape`), and a NAME THAT RESOLVES TO
+// NOTHING ANSWERS `null`, so `i32` also confirms the name is a type the
+// checker knows. Anything richer belongs to `documentSymbol` or
+// `definition` (`design_lsp.md` §2).
 write_ty = (c :: Checker, id: TypeId, out :: String) Res<bool, AllocError> {
     c.type_memo.get(id).match({
         None     => no_answer(),
@@ -231,14 +168,10 @@ write_ty = (c :: Checker, id: TypeId, out :: String) Res<bool, AllocError> {
     })
 }
 
-// AN EXPRESSION, from the memo the checker filled as it typed the body.
-//
-// A MISS IS ANSWERED AS "NOTHING" and not as a made-up type.
-// `design_lsp.md`'s open question 6 asks whether `expr_memo` holds an
-// answer for every expression after `check_all` and records that it is
-// unverified; until someone verifies it, inventing a name for an
-// unreached node would put a wrong type in front of a user and call it
-// a feature. `null` is the answer that cannot mislead.
+// AN EXPRESSION, from the memo the checker filled while typing the body.
+// A MISS IS ANSWERED AS "NOTHING", not a made-up type: `design_lsp.md`'s
+// open question 6 leaves unverified whether `expr_memo` covers every
+// expression after `check_all`.
 write_val = (c :: Checker, e: ExprId, out :: String) Res<bool, AllocError> {
     c.expr_memo.get(e).match({
         None     => no_answer(),
@@ -247,23 +180,13 @@ write_val = (c :: Checker, e: ExprId, out :: String) Res<bool, AllocError> {
 }
 
 // THE ONE PLACE A `TyId` BECOMES TEXT, and the one place poison is
-// stopped.
-//
-// `Ty.Unknown` is what sema interns for "a type I could not compute and
-// have already reported", and `Types.write_name` spells it `<unknown>`.
-// Printing that is the exact failure this stage was told not to commit:
-// a user who hovers `AllocError` in a document whose import did not
-// resolve gets a hover that looks like an answer and names a type that
-// does not exist. `null` is what "I do not know" is spelled on this
-// wire, so an unsettled type takes that route and the reason is the
-// header's: a wrong answer is worse than no answer.
-//
-// AND IT WAS THE COMMON CASE, not a corner. Before `hover_in`, every
-// imported name in every file resolved to poison — which this gate
-// turned into silence rather than into a hover confidently naming a
-// type that does not exist. It is what made the gap measurable: 4 of 12
-// on a file that imports something, against 10 of 12 on one that does
-// not. It still applies wherever there is no workspace to build.
+// stopped. `Ty.Unknown` is what sema interns for "a type I could not
+// compute and have already reported"; `Types.write_name` spells it
+// `<unknown>`, which would show a user a hover naming a type that does
+// not exist — so an unsettled type answers `null` instead. Was the
+// common case before `hover_in`: every imported name resolved to
+// poison, measured at 4/12 answers on a file that imports something vs
+// 10/12 on one that does not, and still applies with no workspace.
 write_ty_id = (c :: Checker, id: TyId, out :: String) Res<bool, AllocError> {
     poison_free(c, id).match({
         false => no_answer(),
@@ -271,17 +194,11 @@ write_ty_id = (c :: Checker, id: TyId, out :: String) Res<bool, AllocError> {
     })
 }
 
-// Does this type, anywhere inside it, contain poison?
-//
-// STRUCTURAL AND NOT TEXTUAL. Asking whether the rendered name contains
-// the substring `<unknown>` would be shorter and would put a second
-// spelling of sema's marker in this folder, where nothing else knows
-// how a type is printed. `Ty` is a closed nine-variant enum, so the
-// walk is total and the compiler says so when a variant is added.
-//
-// `Infer` is NOT poison and is deliberately let through: `_` in
-// `Res<Cfg, _>` is a hole law 6 permits, sema reported nothing about
-// it, and `_` is an honest thing to show a user who wrote one.
+// Does this type, anywhere inside it, contain poison? STRUCTURAL AND NOT
+// TEXTUAL: checking the rendered name for `<unknown>` would put a second
+// spelling of sema's marker here. `Ty` is a closed nine-variant enum, so
+// the walk is total. `Infer` is NOT poison: `_` in `Res<Cfg, _>` is a
+// hole law 6 permits, honest to show a user who wrote one.
 poison_free = (c :: Checker, id: TyId) bool {
     c.types.at(id).match({
         Unknown   => false,
@@ -301,26 +218,16 @@ all_poison_free = (c :: Checker, ids: Vec<TyId>) bool {
 }
 
 // A FUNCTION'S NAME ANSWERS WITH ITS DECLARATION, reprinted:
+// `add = (a: i32, b: i32) i32`, not `(i32, i32) i32` (what
+// `Types.write_name` would produce from the function's TYPE) — two
+// signatures differing only in parameter names are one type, so the
+// names come from the AST and are assembled here (`ast_node.zen`:
+// "`(i32, i32) i32` says nothing about which `i32` is which").
 //
-//     add = (a: i32, b: i32) i32
-//
-// and not with `(i32, i32) i32`, which is what `Types.write_name` would
-// produce from the function's type. The difference is the parameter
-// names, and `ast_node.zen` already made the argument for keeping them:
-// "`(i32, i32) i32` says nothing about which `i32` is which". They are
-// not in the TYPE — sema is right that two signatures differing only in
-// parameter names are one type — so they have to come from the AST, and
-// that is the whole reason this is assembled here rather than interned
-// as a `Ty.Fn` and printed.
-//
-// NOTHING IN IT IS INVENTED. Every name is an `Ident` the author wrote,
-// every type is a `TyId` the checker resolved, and the `=` and `::` are
-// the form the declaration was written in. Bounds on type parameters
-// are the one thing dropped — `<T: Eq + Hash>` prints as `<T>` — because
-// a bound is a `TypeId` list whose members are types in their own right
-// and printing them would double the length of the common case to serve
-// the rare one. Say so here rather than let a reader assume `T` is
-// unbounded.
+// NOTHING IN IT IS INVENTED, except bounds on type parameters, dropped:
+// `<T: Eq + Hash>` prints as `<T>` (printing a bound's own type members
+// would double the length of the common case) — said here so a reader
+// does not assume `T` is unbounded.
 write_decl_sig = (c :: Checker, f: Function, out :: String) Res<bool, AllocError> {
     out.add_bytes(f.name.text).try();
     out.add_bytes(" = ").try();
@@ -353,19 +260,15 @@ write_tparam_list = (f: Function, out :: String) Res<(), AllocError> {
     out.add_bytes(">")
 }
 
-// `self :: @Self` and `a: i32` are written differently and the
-// difference is load-bearing — it is whether the parameter may be
-// mutated — so a reprinted signature keeps it.
+// `self :: @Self` and `a: i32` differ in whether the parameter may be
+// mutated, so a reprinted signature keeps it.
 binder = (mutable: bool) str {
     mutable.match({ true => " :: ", false => ": " })
 }
 
 // A TYPE THAT WAS NOT WRITTEN IS NOT GUESSED. `Param.type` is absent in
-// a closure and `Function.ret` in a lambda; a DECLARATION writes both,
-// so an absent one here means the node is not the shape this answer
-// assumed. Rather than print `()` and be wrong for a reader who cannot
-// see which it was, the whole signature is discarded and the hover is
-// `null`.
+// a closure and `Function.ret` in a lambda; the whole signature is
+// discarded rather than printing `()` and being silently wrong.
 write_opt_ty = (c :: Checker, t: Res<TypeId>, out :: String)
                Res<bool, AllocError> {
     t.match({
@@ -374,40 +277,26 @@ write_opt_ty = (c :: Checker, t: Res<TypeId>, out :: String)
     })
 }
 
-// The two answers to "did that resolve", as functions so that sibling
-// match arms have one type between them rather than a bare `Ok` beside
-// a `Res<bool, AllocError>`.
+// The two answers to "did that resolve", as functions so sibling match
+// arms share one type.
 an_answer = () Res<bool, AllocError> { Ok(true) }
 
 no_answer = () Res<bool, AllocError> { Ok(false) }
 
 // --- what is still `null`, on purpose ----------------------------------
 //
-// Listed rather than left to be discovered, because every one of them is
-// a position where a user WILL hover and the reason it answers nothing
-// is a fact about the compiler and not about this file:
+// Listed so nobody rediscovers them — every one is a position a user
+// WILL hover:
 //
-//   - A STRUCT'S OR ENUM'S OWN NAME (`Foo` in `Foo = { .. }`).
-//     `type_memo` is keyed on a written `TypeId` and a declaration site
-//     has none. A USE of `Foo` hovers; its declaration does not.
-//     Fixing it means building the type a declaration denotes, which is
-//     `src/sema/sema_type.zen`'s `type_from_ast` and not reachable from
-//     a name.
-//   - A PATTERN BINDER (`n` in `Ok(n) => ..`). There is no pattern
-//     memo, and `sema_check.zen`'s `Binding` is released at scope exit,
-//     so nothing about it survives `check_all`. `design_lsp.md` §2 has
-//     the same gap written down for go-to-definition on a local and
-//     prices the fix at L3: a `span` on `Binding`, in `src/sema/`.
-//   - A TYPE PARAMETER AT ITS DECLARATION (`T` in `<T>`). Same shape as
-//     a struct name: the declaration is an `Ident`, and the `Ty.Var` it
-//     denotes is interned against an owner this file cannot name. `T`
-//     used as a type hovers, because a use is a written type node.
-//   - AN IMPORTED NAME, WHEN THERE IS NO WORKSPACE. With one it answers,
-//     because `hover_in` checks the document as part of a build. Without
-//     one, `Vec` in `Vec = std.collections` still has no type, and the
-//     import DECLARATION itself is `Nothing` either way — `decl_told`
-//     answers no `Tell` for an `Import`, the same shape as a struct's
-//     own name above.
-//   - A CLOSURE'S PARAMETER. `Param.type` is absent there by
-//     construction; the type comes from the position the closure is
-//     passed at, and the parameter records nothing.
+//   - A STRUCT'S OR ENUM'S OWN NAME (`Foo` in `Foo = { .. }`): a
+//     declaration site has no `TypeId`; a USE hovers, the declaration
+//     does not. Fix needs `sema_type.zen`'s `type_from_ast`.
+//   - A PATTERN BINDER (`n` in `Ok(n) => ..`): no pattern memo,
+//     `Binding` released at scope exit. `design_lsp.md` §2 prices the
+//     fix at L3.
+//   - A TYPE PARAMETER AT ITS DECLARATION (`T` in `<T>`): same shape as
+//     a struct name; `T` used as a type hovers.
+//   - AN IMPORTED NAME, WHEN THERE IS NO WORKSPACE: `hover_in` answers
+//     it; without one `Vec` in `Vec = std.collections` has no type, and
+//     the import DECLARATION is `Nothing` either way.
+//   - A CLOSURE'S PARAMETER: `Param.type` is absent by construction.

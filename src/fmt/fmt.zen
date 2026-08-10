@@ -1,55 +1,42 @@
 // src/fmt/fmt.zen
 // PLAN.md stage 2: `parse |> print`.
 //
-// THE SAME PARSER AND THE SAME TRIVIA. Nothing in this folder reads a
-// byte of Zen — `lex` reads the bytes, `parse` builds the tree, and
-// this file walks the tree the compiler itself is checked against.
-// PLAN.md rule 2 is the whole reason: "never a second parser, never a
-// second AST, never a 'just for the formatter' path. Two grammars is
-// the failure this plan exists to avoid."
+// THE SAME PARSER AND THE SAME TRIVIA — nothing here reads a byte of
+// Zen; `lex` reads bytes, `parse` builds the tree, this file walks the
+// same tree the compiler is checked against. PLAN.md rule 2: never a
+// second parser, never a second AST, never a "just for the formatter"
+// path.
 //
-// WHAT THIS STAGE FORMATS, and it is deliberately narrow:
+// WHAT THIS STAGE FORMATS, deliberately narrow:
+//   - the file's SHAPE: declarations in source order, one per line,
+//     with their leading/trailing comments.
+//   - BLANK LINES: a run collapses to one; dropped before the first
+//     decl or after the last; file ends with exactly one newline
+//     (`fmt_out.zen`).
+//   - trailing whitespace after a declaration.
+//   - the WIDTH OF THE GAP before a match arm's `=>` (`fmt_decl.zen`,
+//     the one rule here that knows what it's looking at — DESIGN.md
+//     asks for aligned arms and the parser already locates every `=>`).
 //
-//   - the file's SHAPE. Declarations in source order, each starting on
-//     its own line, with the comments that lead and trail them.
-//   - BLANK LINES. A run of them collapses to one; one before the
-//     first declaration or after the last is dropped; the file ends
-//     with exactly one newline. `fmt_out.zen` is that rule and nothing
-//     else.
-//   - the SPACE AFTER A DECLARATION. Whatever ran to the end of the
-//     line behind the last token is gone.
+// WHAT IT PASSES THROUGH VERBATIM: every declaration's own text, minus
+// that one gap — struct bodies, signatures, arm bodies, everything.
+// These forms could be rebuilt from the AST, but rebuilding means
+// layout decisions nobody has written down yet, and a printer
+// inventing them would silently reflow the whole corpus on its first
+// run. Remaining rules (short arms on one line, wrapping, trailing
+// commas) arrive in `fmt_decl.zen` one form at a time, against a
+// corpus — each one MOVES or ADDS a token, the line the guard below
+// draws, which is why `=>` alignment (which moves neither) went first.
 //
-//   - the WIDTH OF THE GAP IN FRONT OF A MATCH ARM'S `=>`, which is
-//     `fmt_decl.zen` and is the one rule here that knows what it is
-//     looking at. `DESIGN.md` asks for aligned arms and the parser
-//     already locates every `=>` for exactly this; nothing else about
-//     an arm is touched.
+// WHAT IT REFUSES: a file with lexical or syntactic faults — a tree
+// with a hole no longer describes the source, and printing from one is
+// how a formatter eats code.
 //
-// WHAT IT PASSES THROUGH VERBATIM, said out loud because a formatter
-// that guesses is worse than one that abstains: EVERY DECLARATION'S OWN
-// TEXT, minus that one gap. A struct body, a function signature, an
-// arm's body, an enum's variants, the alignment of a trailing comment —
-// all of it is the author's bytes, copied. The forms are modelled in the
-// AST and could be rebuilt; rebuilding them is a set of layout decisions
-// nobody has written down yet, and a printer inventing them would
-// silently reflow a hundred and twenty files on its first run. The rules
-// `docs/PLAN.md` still owes — short arms on one line, wrap long ones, a
-// trailing comma on the last — arrive in `fmt_decl.zen` beside this
-// file, against a corpus, one form at a time. Each of them MOVES or ADDS
-// a token, which is the line the guard below draws and why `=>`
-// alignment, which moves neither, could go first.
-//
-// WHAT IT REFUSES: a file with lexical or syntactic faults. A tree with
-// a hole in it is a tree whose spans no longer describe the source, and
-// printing from one is how a formatter eats code.
-//
-// AND THE GUARD THAT MAKES THE WHOLE ARRANGEMENT SAFE — `faithful`
-// below. Formatting moves whitespace and nothing else, so the token
-// stream of the output must equal the token stream of the input, one
-// for one, comments included. That is checkable in one extra `scan`,
-// it holds for every rule this stage will ever grow, and it turns
-// "silently reflowed something I did not model" from a bug that ships
-// into an outcome that cannot leave this function.
+// THE GUARD — `faithful` below: formatting moves whitespace and
+// nothing else, so the output's token stream must equal the input's,
+// one for one, comments included. Checkable in one extra `scan`; turns
+// "silently reflowed something unmodeled" from a shipped bug into an
+// outcome that cannot leave this function.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -66,35 +53,27 @@ Src* = fmt.fmt_src
 Out* = fmt.fmt_out
 Aligned* = fmt.fmt_decl
 
-// What formatting one file came to.
-//
-// Three fields and not a three-way enum, because a caller acts on all
-// three at once: it prints the diagnostics, it compares the text, and
-// it refuses to write when the guard says the tree changed. An enum
-// would make the driver match to learn things that are never in
-// conflict.
+// What formatting one file came to. Three fields, not a three-way enum:
+// a caller acts on all three at once (print diags, compare text, refuse
+// to write when the guard fails), which an enum would force into a
+// match over things that are never in conflict.
 Render* = {
-    // The formatted file. Meaningful only when `diags` is empty and
-    // `faithful` is true; empty otherwise, because there is nothing
-    // honest to put in it.
+    // Meaningful only when `diags` is empty and `faithful` is true;
+    // empty otherwise.
     text*: String,
 
-    // Syntax faults. Non-empty means the file was NOT formatted — the
-    // caller reports these and leaves the bytes alone.
+    // Non-empty means the file was NOT formatted — caller reports these
+    // and leaves the bytes alone.
     diags*: Vec<Diag>,
 
     // The output lexes to the same tokens as the input. False is a bug
-    // in this folder, and a caller that writes the file anyway has
-    // turned a formatter into an editor.
+    // in this folder; writing anyway turns a formatter into an editor.
     faithful*: bool,
 }
 
-// Format one already-lexed file.
-//
-// It takes a `Lexed` rather than bytes so that LEXICAL faults stay with
-// the caller: `lex.zen`'s contract is that a file with them is reported
-// and not parsed, and deciding that is the driver's job — the same
-// split `zen_build.zen` makes.
+// Format one already-lexed file. Takes `Lexed` not bytes so LEXICAL
+// faults stay with the caller: `lex.zen`'s contract is that a file with
+// them is reported, not parsed — the same split `zen_build.zen` makes.
 render* = (a: Alloc, lexed: Lexed) Res<Render, AllocError> {
     src = a.Src(lexed.source.text).try();
     p ::= a.Parser(lexed);
@@ -122,12 +101,8 @@ printed = (a: Alloc, src: Src, tree: Ast, m: Module, lexed: Lexed)
 // -------------------------------------------------------------------
 
 // The file: every declaration in source order, and the trivia that
-// belongs to each.
-//
-// `Module.decls` IS the file, imports included — `ast_node.zen` says
-// why: "a formatter that has to merge two lists back into one order is
-// a formatter that will get it wrong once". So there is one loop here
-// and no second pass.
+// belongs to each. `Module.decls` IS the file, imports included (see
+// ast_node.zen), so there's one loop here and no second pass.
 write_module* = (out :: Out, a: Alloc, al: Aligned, src: Src, tree: Ast,
                  m: Module) Res<(), AllocError> {
     m.decls.loop((h, i, d) {
@@ -138,13 +113,9 @@ write_module* = (out :: Out, a: Alloc, al: Aligned, src: Src, tree: Ast,
     Ok(());
 }
 
-// A run of comments and blanks, at the left margin.
-//
-// A comment's `text` is the raw source slice, markers and all, so a
-// block comment spanning six lines is one `say` of six lines. Nothing
-// here parses a comment and nothing rewraps one: `ast_span.zen` fixes
-// that — "the formatter reprints it byte for byte; nothing here parses
-// it".
+// A run of comments and blanks, at the left margin. `text` is the raw
+// source slice, so a six-line block comment is one `say` of six lines.
+// Nothing here parses or rewraps a comment (ast_span.zen).
 write_trivia = (out :: Out, tree: Ast, run: TriviaRun) Res<(), AllocError> {
     Range(0, run.len).loop((h, i) {
         piece = tree.trivia_at(run, i);
@@ -157,34 +128,23 @@ write_trivia = (out :: Out, tree: Ast, run: TriviaRun) Res<(), AllocError> {
 }
 
 // One declaration, as its author wrote it: from its first token to the
-// start of the next thing this file is going to print, with the
-// whitespace at the end taken off.
+// start of the next printed thing, trailing whitespace trimmed.
 //
-// IT IS BOUNDED BY THE NEXT PRINTED ITEM AND NOT BY THE DECLARATION'S
-// OWN SPAN, and that is the difference between a formatter and a
-// formatter that eats comments. A trailing comment belongs to the
-// OUTERMOST node whose span ends before it on that line, and for
+// BOUNDED BY THE NEXT PRINTED ITEM, NOT THE DECLARATION'S OWN SPAN —
+// the difference between a formatter and one that eats comments. E.g.
+// in `Cli* = Build(Job) | Missing(str)   // a flag ..`, the trailing
+// comment belongs to the last VARIANT, not the declaration, so
+// `Decl.span`/`Decl.trailing` stop short and a slice cut to either
+// would drop it. Copying the whole gap between printed items also
+// preserves the comment's alignment column.
 //
-//     Cli* = Build(Job)
-//          | Missing(str)   // a flag the build needs and did not get
+// DELETED: trailing whitespace (not a token, per the guard) and blank
+// lines (they live as `Blank` trivia in the NEXT item's leading run).
 //
-// that node is the last VARIANT, not the declaration — so `Decl.span`
-// stops at `)`, `Decl.trailing` is empty, and a slice cut to either
-// would drop the sentence. Everything between two printed items is the
-// author's, whoever inside claimed it, and copying the gap also keeps
-// the column that comment is aligned in.
-//
-// THE ONE THING DELETED IS TRAILING WHITESPACE, which the guard proves
-// is not a token, and blank lines — which are `Blank` trivia in the
-// NEXT item's leading run, and come back from there.
-//
-// AND THE ONE THING WIDENED OR NARROWED is the run of spaces in front
-// of a match arm's `=>`, which is `fmt_decl.zen` and is this stage's
-// first rule that knows what it is looking at. It is applied HERE,
-// inside the verbatim copy, rather than by a printer that rebuilds the
-// arm: the bytes are still the author's and only the width of a gap the
-// parser located is set. Everything else about the declaration — where
-// its body goes, how its arms wrap — is still copied and still owed.
+// WIDENED/NARROWED: the gap before a match arm's `=>` (`fmt_decl.zen`),
+// applied HERE inside the verbatim copy rather than by a rebuilding
+// printer — the bytes stay the author's, only that one gap's width is
+// set.
 write_decl = (out :: Out, a: Alloc, al: Aligned, src: Src, tree: Ast,
               m: Module, i: usize, d: Decl) Res<(), AllocError> {
     from = src.offset(d.span.start);
@@ -223,20 +183,15 @@ run_start = (tree: Ast, run: TriviaRun) Res<Pos> {
 
 // The output says exactly what the input said.
 //
-// WHITESPACE IS NOT A TOKEN and a comment IS one, which is what makes
-// this the right invariant rather than an approximation of one:
-// everything this stage is allowed to change is invisible to the lexer,
-// and everything it is not allowed to change is a token. So the streams
-// must match one for one — same count, same kind, same bytes — and any
-// rule added to the printer later is checked by the same three lines.
-//
-// It costs one extra scan of the file. That is the price of a formatter
-// that models a subset of the language and can prove it did not touch
+// Whitespace is not a token, a comment IS one — everything this stage
+// may change is invisible to the lexer, everything it may not is a
+// token. So the streams must match one for one (count, kind, bytes),
+// and any rule added later is checked by the same three lines. Costs
+// one extra scan, the price of proving a subset formatter untouched
 // the rest.
 //
-// It is not called `faithful`, which is what `Render` calls the ANSWER:
-// a free function and a field of one name are one name to the resolver
-// that has to decide what `x.faithful` means.
+// Not named `faithful` (that's `Render`'s field): a free function and
+// a field of one name would collide for the resolver.
 unchanged_tokens = (a: Alloc, before: Lexed, text: str) Res<bool, AllocError> {
     after = scan(a, Source(file: before.source.file, text: text)).try();
     Ok(after.is_clean() && same_stream(before, after));
@@ -257,11 +212,9 @@ every_token_same = (before: Lexed, after: Lexed) bool {
     ok;
 }
 
-// Kind AND bytes. The kind alone would let one identifier become
-// another; the bytes alone would already be enough, since this lexer is
-// a pure function of its input and no token's reading depends on what
-// is around it — so asking for both costs a comparison and removes the
-// need to have been right about that.
+// Kind AND bytes: kind alone would let one identifier become another;
+// bytes alone would suffice only if the lexer is context-free — asking
+// for both costs one comparison and removes the need to be sure of that.
 token_same = (before: Lexed, after: Lexed, i: usize) bool {
     before.tokens.get(i).match({
         None  => false,

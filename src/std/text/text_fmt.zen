@@ -2,27 +2,25 @@
 // the {} format machinery: the parser that reads a format string, and the
 // writers for the primitives a {} can land on.
 //
-// THE FORMAT LANGUAGE, in full. There is no width, no precision, no index,
-// no name — DESIGN.md writes exactly one placeholder and this is it:
+// THE FORMAT LANGUAGE, IN FULL — no width, no precision, no index, no
+// name, exactly one placeholder (DESIGN.md):
 //
 //   {}    a hole. The next argument, written through its toString.
-//   {     NOT followed by `}` is a LITERAL brace. DESIGN.md never escapes a
-//         brace, and Display.dump writes `sb.add("{} {", ..)` expecting that
-//         trailing `{` to print — so this is the rule, not a fallback.
+//   {     NOT followed by `}` is a LITERAL brace (DESIGN.md never
+//         escapes one; Display.dump writes `sb.add("{} {", ..)`
+//         expecting that trailing `{` to print).
 //   }     always a literal byte.
 //
-// The cost, stated rather than hidden: THERE IS NO WAY TO WRITE A LITERAL
-// `{}`. `"{}"` is always a hole, and no escape exists to say otherwise.
-// Adding one (`{{}}`, or `\{`) is a design change and belongs in DESIGN.md,
-// not in this parser — see the report's AMBIGUITIES.
+// THE COST, stated not hidden: THERE IS NO WAY TO WRITE A LITERAL `{}`.
+// `"{}"` is always a hole. Adding an escape (`{{}}`, `\{`) is a design
+// change for DESIGN.md, not this parser — see the report's AMBIGUITIES.
 //
-// WHERE THE PARSE HAPPENS. `{}` routes through the argument's toString,
-// which is type-directed, so `add` is expanded where it is WRITTEN: the
-// compiler steps `fmt_next` over the format string and emits a write of
-// the literal run for each step and `arg.toString(out)` for each hole.
-// That keeps one implementation of the rules above — this one — and leaves
-// no format state at runtime. A format string that runs out of holes, or
-// of arguments, is therefore a compile error and not a `?`.
+// WHERE THE PARSE HAPPENS: `{}` routes through the argument's
+// type-directed toString, so `add` is expanded where it's WRITTEN — the
+// compiler steps `fmt_next` over the format string, emitting a literal
+// write per step and `arg.toString(out)` per hole. One implementation
+// of the rules above, no runtime format state, and a format string
+// mismatched on holes/arguments is a compile error, not a `?`.
 
 str = std.text.text_str
 Sink, WriteError = std.core.io
@@ -35,16 +33,16 @@ FmtStep* = {
     next*: usize,      // where the next step starts. == f.len when spent
 }
 
-// the first `{` at or after `from` that OPENS a hole. A `{` with anything
-// else behind it is an ordinary byte and the scan walks straight past it,
-// which is what keeps it inside the literal run
+// the first `{` at or after `from` that OPENS a hole. A `{` with
+// anything else behind it is an ordinary byte, and the scan walks past
+// it, keeping it inside the literal run
 hole_at = (f: str, from: usize) Res<usize> {
     Range(from, f.len).find((i) { f[i] == '{' && (i + 1) < f.len && f[i + 1] == '}' })
 }
 
-// step the parser once: fmt_next(f, 0), then fmt_next(f, step.next), and so
-// on. A step with `hole` false is always the last one — the run it carries
-// is the rest of the string
+// step the parser once: fmt_next(f, 0), then fmt_next(f, step.next), and
+// so on. `hole` false is always the last step (its run is the rest of
+// the string).
 fmt_next* = (f: str, from: usize) FmtStep {
     f.hole_at(from).match({
         Ok(i) => FmtStep(literal: f.slice(from, i), hole: true, next: i + 2),
@@ -54,29 +52,27 @@ fmt_next* = (f: str, from: usize) FmtStep {
 
 // ---------------------------------------------------------------------------
 // the primitive writers — what a {} lands on when the argument is a
-// primitive rather than a Display. They write into a SINK the caller owns
-// and allocate nothing of their own, so nesting is free and printing —
-// where the sink is the console — allocates nothing at all.
+// primitive rather than a Display. Write into a SINK the caller owns,
+// allocate nothing, so nesting is free and printing to the console
+// allocates nothing at all.
 //
-// They take a Sink rather than a String for the reason DESIGN.md gives for
-// toString: `println` has no Alloc, so a writer that demanded a String
-// would make printing a number allocate. A String IS a Sink, so writing
-// into a buffer still reaches exactly these.
+// Take a Sink not a String, per DESIGN.md's reason for toString:
+// `println` has no Alloc, so a writer demanding a String would make
+// printing a number allocate. A String IS a Sink, so buffer-writing
+// still reaches these.
 //
-// The writer for a `str` is the sink's own `write`: bytes, verbatim. It is
-// not repeated here, because two copies of "write these bytes" is one copy
-// too many.
+// `str`'s writer is the sink's own `write` (bytes, verbatim) — not
+// repeated here.
 // ---------------------------------------------------------------------------
 
-// the format door on ANY sink. `String.add` is the same door with a String
-// already in hand; this is the one a `toString` writes through, because what
-// it holds is a Sink and the sink may be a console.
+// the format door on ANY sink; `String.add` is the same door with a
+// String already in hand. This is what `toString` writes through, since
+// what it holds is a Sink that may be a console.
 //
-// Declared, not defined, for the reason String.add is: the arguments are
-// type-directed, so the call is expanded where it is WRITTEN. A ufcs free
-// function rather than a Sink member, because a member would cut a slot into
-// the record that no impl could fill — the expansion is the compiler's, not
-// an implementation any sink supplies
+// Declared not defined, like String.add: arguments are type-directed,
+// expanded where WRITTEN. A ufcs free function, not a Sink member — a
+// member would cut a slot no impl could fill; the expansion is the
+// compiler's, not any sink's.
 add* = (out :: Sink, fmt: str, args: ...) Res<(), WriteError>
 
 // decimal, no separators — TESTING.md's corpus-wide assumption
@@ -106,10 +102,10 @@ add_bool* = (out :: Sink, v: bool) Res<(), WriteError> {
     });
 }
 
-// the digit table, twice over — once per integer domain, because a u64 past
-// i64.MAX cannot be widened into one. `'0' + d` would be shorter, but
-// DESIGN.md specifies no conversion between u64 and u8 and this file will
-// not invent one. `_` is the tenth arm: callers pass `v % 10`, so it is 9
+// the digit table, twice — once per integer domain, since a u64 past
+// i64.MAX can't widen into one. `'0' + d` would be shorter, but
+// DESIGN.md specifies no u64-to-u8 conversion and this file won't
+// invent one. `_` is the tenth arm: callers pass `v % 10`, so it's 9
 digit = (d: u64) u8 {
     d.match({
         0 => '0', 1 => '1', 2 => '2', 3 => '3', 4 => '4',

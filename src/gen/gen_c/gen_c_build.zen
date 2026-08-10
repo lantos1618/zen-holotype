@@ -3,17 +3,14 @@
 //
 // `gen_c_call.zen` opens by saying the two are one node: "`Point(x: 3,
 // y: 4)` and `area(p)` are the same AST node. Which one it is depends
-// on what the callee NAMES — a struct is constructed, a function is
-// called — and that is a question about the declaration rather than
-// about the call." That question is asked there and answered here, and
-// the two are separate files because building a value and calling a
-// function have nothing in common past the node they share.
+// on what the callee NAMES." That question is asked there and answered
+// here — separate files because building a value and calling a function
+// share nothing past the node.
 //
 // A C COMPOUND LITERAL WITH ONE DESIGNATED INITIALISER PER ARGUMENT.
-// Designators rather than positions because Zen's construction form is
-// `name: value` and the field order in the emitted struct is the
-// declaration's — writing positions would tie the two together for no
-// gain.
+// Designators, not positions: Zen's construction form is `name: value`
+// and the emitted field order is the declaration's, so positions would
+// tie the two together for no gain.
 //
 // WHAT IS BEING BUILT IS SEMA'S ANSWER FOR THIS NODE, and the
 // declaration alone is the fallback: `Box<i32>(held: 7)` writes its
@@ -44,12 +41,6 @@ is_pure_value = gen.gen_c.gen_c_const
 
 // -----------------------------------------------------------------
 // construction
-//
-// A C compound literal with one designated initialiser per argument.
-// Designators rather than positions because Zen's construction form is
-// `name: value` and the field order in the emitted struct is the
-// declaration's — writing positions would tie the two together for no
-// gain.
 // -----------------------------------------------------------------
 
 construct* = (be :: CBackend, id: ExprId, c: Call, d: Def, ctx: Ctx,
@@ -64,10 +55,10 @@ construct* = (be :: CBackend, id: ExprId, c: Call, d: Def, ctx: Ctx,
 
 // WHAT IS BEING BUILT IS SEMA'S ANSWER FOR THIS NODE. `Box<i32>(held: 7)`
 // writes its argument outright and only the node knows it — the
-// declaration alone says `Box<T>`, which is what `constructed` can
-// derive and why it is the FALLBACK and not the answer. Sema records
-// the written arguments at the call; this reads them back, exactly as
-// `chosen_def` reads back which declaration the call meant.
+// declaration alone says `Box<T>` (what `constructed` derives, hence
+// FALLBACK not the answer). Sema records the written arguments at the
+// call; this reads them back, as `chosen_def` reads back which
+// declaration the call meant.
 construct_type = (be :: CBackend, id: ExprId, d: Def, ctx: Ctx)
                  Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
@@ -88,8 +79,8 @@ construct_decl = (be :: CBackend, id: ExprId, c: Call, x: Decl, d: Def,
 
 // A GENERIC TYPE IS CONSTRUCTED AT ITS ARGUMENTS, not refused: `Vec(..)`
 // inside `Vec<T>`'s own constructor builds the `Vec<i32>` this emission
-// is at. What is still refused is a construction whose arguments nothing
-// settled, because a bare `Vec` has no layout to write.
+// is at. Still refused: a construction whose arguments settle to
+// nothing — a bare `Vec` has no layout to write.
 construct_struct = (be :: CBackend, id: ExprId, c: Call, s: Struct,
                     d: Def, ty: TyId, ctx: Ctx, out :: String)
                    Res<(), AllocError> {
@@ -104,11 +95,11 @@ construct_struct = (be :: CBackend, id: ExprId, c: Call, s: Struct,
 // WHAT A CONSTRUCTION'S TYPE ARGUMENTS ARE, when nothing else said.
 //
 // `Entry(hash: h, key: key, value: value)` inside `Map<K, V>` builds an
-// `Entry<K, V>`, and the only thing that says so is the ARGUMENTS: sema
-// records a construction's type under the node, but only inside a body
-// it CHECKED, and it checks top-level declarations only. So each
-// argument is matched against the field it supplies — structurally, and
-// the enclosing emission has already said what `K` and `V` are.
+// `Entry<K, V>`, and only the ARGUMENTS say so: sema records a
+// construction's type under the node only inside a body it CHECKED, and
+// it checks top-level declarations only. So each argument is matched
+// structurally against the field it supplies — the enclosing emission
+// has already said what `K` and `V` are.
 settle_construction = (be :: CBackend, c: Call, s: Struct, d: Def,
                        ty: TyId, ctx: Ctx) Res<TyId, AllocError> {
     open(be, ty).match({
@@ -162,11 +153,11 @@ keep_arg = (found: Inst, v: TyId, out :: Vec<TyId>) Res<(), AllocError> {
 }
 
 // "A PRELUDE DECLARATION OF A PRIMITIVE'S NAME IS THAT PRIMITIVE."
-// `text_str.zen` declares `str` with a `data` and a `len`, and the C
-// type behind it is the runtime floor's `zg_str` — every string
-// literal, every `zg_print_str` and every C caller already agrees on
-// that spelling. So `str(data: .., len: ..)` builds the PRIMITIVE, at
-// both ends: the compound literal's type, and each designator.
+// `text_str.zen` declares `str` with a `data` and a `len`; the C type
+// behind it is the runtime floor's `zg_str`, which every string
+// literal, `zg_print_str`, and C caller already agrees on. So
+// `str(data: .., len: ..)` builds the PRIMITIVE at both ends: the
+// compound literal's type and each designator.
 prim_named = (be :: CBackend, s: Struct, ty: TyId) Res<TyId, AllocError> {
     is_prim(s.name.text).match({
         false => Ok(ty),
@@ -191,20 +182,18 @@ is_prim_ty = (be :: CBackend, ty: TyId) bool {
 
 // A TYPE ARGUMENT NO STORAGE MEMBER READS DOES NOT CHANGE THE LAYOUT,
 // so leaving it free is not a refusal. `Range(0, 5)` leaves `T` free —
-// `start` and `end` are `usize` and `at` is a bodiless hook occupying no
-// bytes — and `Range(0, v.len)` is std's own ordinary way to walk an
-// index space. Asking the question of the type's ARGUMENTS made every
-// one of those unwritable; asking it of its STORAGE is the same question
-// about the thing that is actually being emitted.
+// `start`/`end` are `usize`, `at` is a bodiless hook with no bytes — and
+// `Range(0, v.len)` is std's ordinary way to walk an index space. Asking
+// of the type's ARGUMENTS made these unwritable; asking of its STORAGE
+// asks about what's actually emitted.
 //
-// Two open `Range`s mangle alike, which is exactly right here and would
-// not be for a `Box<T>`: `held: T` is storage, so `Box` still refuses.
-// THE STRUCT'S OWN PARAMETERS GO BACK IN SCOPE FOR THE READ, and they
-// have to: `Entry<K, V>` and `Map<K, V>` spell their parameters alike,
-// and a construction of one INSIDE the other resolved `K` to the
-// enclosing declaration's `Var` — a different type of the same name, so
-// the substitution missed and every `Map` in the language was refused.
-// The declaration that introduced the name is the one that binds it.
+// Two open `Range`s mangle alike (right here, wrong for `Box<T>`: `held:
+// T` is storage, so `Box` still refuses). THE STRUCT'S OWN PARAMETERS GO
+// BACK IN SCOPE FOR THE READ: `Entry<K, V>` and `Map<K, V>` spell
+// parameters alike, and constructing one INSIDE the other once resolved
+// `K` to the enclosing declaration's `Var` — a different type of the
+// same name — so every `Map` in the language was refused. The
+// declaration that introduced the name is the one that binds it.
 layout_open = (be :: CBackend, s: Struct, d: Def, ty: TyId)
               Res<bool, AllocError> {
     dctx = decl_ctx_of(be, d);
@@ -221,10 +210,10 @@ layout_open = (be :: CBackend, s: Struct, d: Def, ty: TyId)
     Ok(got);
 }
 
-// A CONSTRUCTION WITH NO ARGUMENTS STILL HAS DEFAULTS TO WRITE, which
-// is why there is no shortcut here for the empty argument list. `{0}`
-// was that shortcut, and it is what made `Cursor()` come back zeroed
-// on a struct whose every field declared a value.
+// A CONSTRUCTION WITH NO ARGUMENTS STILL HAS DEFAULTS TO WRITE, so there
+// is no shortcut for the empty argument list. `{0}` was that shortcut,
+// and it made `Cursor()` come back zeroed on a struct whose every field
+// declared a value.
 write_literal = (be :: CBackend, c: Call, s: Struct, d: Def, ty: TyId,
                  ctx: Ctx, out :: String) Res<(), AllocError> {
     out.add_bytes("(").try();
@@ -265,23 +254,20 @@ write_initialisers = (be :: CBackend, c: Call, s: Struct, d: Def,
 // -----------------------------------------------------------------
 // defaults
 //
-// "`= default` makes a field optional at construction" — so a field
-// the call omitted is not absent, it is the value its DECLARATION
-// wrote. Both back ends built the list out of the arguments alone and
-// left the rest to C's `{0}`, which is a different value in every case
-// but the one the whole tree happens to use: every default in std is
-// already a zero, so nothing here could notice.
+// "`= default` makes a field optional at construction" — a field the
+// call omitted is not absent, it's the value its DECLARATION wrote.
+// Previously the list was built from arguments alone, left to C's
+// `{0}` — wrong for any default but zero, which is why it went unnoticed
+// (every default in std happened to already be zero).
 //
-// WRITTEN IN THE DECLARING MODULE'S CONTEXT and not the call's. The
-// expression came from the struct's own body and names what that
-// module can see; read at the call site a default like `Pos(line: 1,
-// col: 1)` resolves against whatever `Pos` the caller imported, or
-// against nothing at all.
+// WRITTEN IN THE DECLARING MODULE'S CONTEXT, not the call's: the
+// expression names what that module can see; read at the call site, a
+// default like `Pos(line: 1, col: 1)` resolves against whatever `Pos`
+// the caller imported, or nothing at all.
 //
-// APPENDED AFTER THE ARGUMENTS rather than merged into declaration
-// order. C99 6.7.8 lets designators come in any order, and appending
-// is what keeps every construction in the language that has no
-// defaults emitting the byte-identical C it emitted before.
+// APPENDED AFTER THE ARGUMENTS, not merged into declaration order — C99
+// 6.7.8 lets designators come in any order, and appending keeps every
+// construction with no defaults emitting byte-identical C to before.
 // -----------------------------------------------------------------
 
 defaulted_initialisers = (be :: CBackend, c: Call, s: Struct, ty: TyId,
@@ -306,13 +292,13 @@ default_initialiser = (be :: CBackend, c: Call, m: Member, s: Struct,
         })
 }
 
-// The value a member declares, when it declares one that can be
-// written here. `is_pure_value` is the same gate a constant read is
-// held to, and for the same reason: this expression is emitted at
-// every construction site, so it must name no function and read no
-// frame. A default that is not one is left to the zeroing it already
-// got — `Vec`'s `data :: Ptr<T> = null_ptr<T>()` is the only shape in
-// the tree that reaches it, and a null pointer is what zeroing gives.
+// The value a member declares, when it can be written here.
+// `is_pure_value` is the same gate a constant read is held to: this
+// expression is emitted at every construction site, so it must name no
+// function and read no frame. A default that fails the gate is left to
+// the zeroing it already got — `Vec`'s `data :: Ptr<T> = null_ptr<T>()`
+// is the only shape that reaches it, and a null pointer is what zeroing
+// gives.
 member_default = (be :: CBackend, m: Member, name: str, s: Struct,
                   ty: TyId, dinst: Inst, dctx: Ctx, seen: usize,
                   out :: String) Res<usize, AllocError> {
@@ -375,17 +361,16 @@ arg_supplies = (be :: CBackend, a: Arg, i: usize, s: Struct, name: str,
     })
 }
 
-// AN ARGUMENT THAT NAMES NO STORAGE MEMBER SUPPLIES NOTHING, and writing
-// a designator for it is worse than dropping it: C has no `.bogus` on a
-// struct that does not declare one, so `Param(.., value: None)` against a
-// `Param` with no `value` came out as a C error about a member the author
-// never wrote — or, when the value was a bare `None`, as `codegen has no
-// type for None`, because the field lookup that would have supplied the
-// expected type found nothing. The bootstrapper walks the DECLARED
-// fields and never sees the extra argument at all; this is the same
-// answer reached from the other side.
+// AN ARGUMENT THAT NAMES NO STORAGE MEMBER SUPPLIES NOTHING; writing a
+// designator for it is worse than dropping it. C has no `.bogus` on a
+// struct that doesn't declare one, so `Param(.., value: None)` against a
+// `Param` with no `value` came out as a C error naming a member the
+// author never wrote — or, for a bare `None`, as `codegen has no type
+// for None`, since the field lookup that would supply the expected type
+// found nothing. The bootstrapper walks DECLARED fields and never sees
+// the extra argument; this reaches the same answer from the other side.
 //
-// A field that does not exist is a diagnostic SEMA owes and neither
+// A field that doesn't exist is a diagnostic SEMA owes and neither
 // implementation raises. Until one does, the two must at least agree.
 supplied_initialiser = (be :: CBackend, a: Arg, i: usize, s: Struct,
                         ty: TyId, dinst: Inst, dctx: Ctx, ctx: Ctx,
@@ -416,13 +401,13 @@ is_storage_named = (be :: CBackend, s: Struct, name: str, dinst: Inst,
 }
 
 // A STRUCT'S OWN MEMBER TYPES ARE READ IN THE MODULE THAT DECLARES IT,
-// and never in the one that constructs it. `Lexed` names `Vec<Token>`
-// and a caller that imported `Lexed` alone has no `Token` — read at the
-// call site the argument resolves to nothing, and because
-// `type_from_ast` memoizes on the node id that answer becomes every
-// later reader's, so the LAYOUT came out `Vec<q>` and `cc` rejected
-// forty-four initialisers. One reader with the wrong module poisons the
-// declaration for the whole program.
+// never the one that constructs it. `Lexed` names `Vec<Token>`, and a
+// caller that imported `Lexed` alone has no `Token` — read at the call
+// site the argument resolves to nothing, and since `type_from_ast`
+// memoizes on the node id, that answer becomes every later reader's: the
+// LAYOUT came out `Vec<q>` and `cc` rejected forty-four initialisers.
+// One reader with the wrong module poisons the declaration for the
+// whole program.
 decl_ctx_of = (be :: CBackend, d: Def) Ctx {
     Ctx(module: d.id.module.to_usize(), ret: TyId(index: 0),
         has_ret: false, self_ty: TyId(index: 0), has_self: false)
@@ -449,10 +434,9 @@ field_name = (be :: CBackend, a: Arg, i: usize, s: Struct, dinst: Inst,
 }
 
 // The i-th storage member's name, for a positional argument. A method
-// and a struct-body constant are not storage and do not count.
-// Counted rather than collected: a `Vec<str>` cannot be read back —
-// `Vec.get` at `T = str` fails to infer its own `Ok`, which is
-// recorded with a two-line reproducer in docs/GEN_BOOTSTRAP_FIXES.md.
+// and struct-body constant are not storage and don't count. Counted,
+// not collected: a `Vec<str>` can't be read back — `Vec.get` at
+// `T = str` fails to infer its own `Ok` (docs/GEN_BOOTSTRAP_FIXES.md).
 storage_name = (be :: CBackend, s: Struct, i: usize, dinst: Inst,
                 dctx: Ctx) Res<str, AllocError> {
     name ::= "";
@@ -479,12 +463,12 @@ member_text = (m: Member) str {
 }
 
 // The declared type of the field an argument supplies, so a literal
-// argument takes the field's width rather than the widest one.
+// argument takes the field's width, not the widest one.
 //
-// Written as named helpers rather than as a closure chain: a `.then`
-// whose body captures several of its enclosing parameters is inlined
-// wrongly, and this shape produced a `Map` instantiated at unresolved
-// type arguments. docs/GEN_BOOTSTRAP_FIXES.md has the reproducer.
+// Written as named helpers, not a closure chain: a `.then` whose body
+// captures several enclosing parameters is inlined wrongly, and this
+// shape once produced a `Map` instantiated at unresolved type arguments
+// (docs/GEN_BOOTSTRAP_FIXES.md).
 storage_type = (be :: CBackend, s: Struct, name: str, dinst: Inst,
                 dctx: Ctx) TyId {
     found ::= TyId(index: 0);

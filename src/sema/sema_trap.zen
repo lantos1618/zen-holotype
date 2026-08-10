@@ -1,41 +1,23 @@
 // src/sema/sema_trap.zen
-// A trap the compiler can prove will fire is a compile error.
+// A trap the compiler can prove will fire is a compile error: constant
+// overflow, a constant zero divisor, `i32.MIN / -1` (overflow wearing
+// division's clothes), and a literal index past a known length
+// (DESIGN.md, the failure model).
 //
-// DESIGN.md, the failure model: "`+ - *` trap on overflow. `/ %` trap on
-// a zero divisor, and on `i32.MIN / -1` — which is an overflow wearing
-// division's clothes. A trap the compiler can PROVE will fire —
-// `i32.MAX + 1`, a constant zero divisor, a literal index past a known
-// length — is a compile error, not a runtime trap. It is a bug, and it
-// is a bug that was visible without running the program."
+// Folds literals only, never through a binding — the trap corpus routes
+// values like `i32.MAX` through a variable specifically so the compiler
+// can't see them; folding through a binding would turn those runtime
+// tests into compile errors. `const_int` folds literals, unary minus,
+// parentheses, `i32.MAX`-style constants and arithmetic on those, then
+// stops.
 //
-// LITERALS ONLY, NEVER THROUGH A BINDING. Folding through a binding
-// would turn the trap corpus red: those programs deliberately route
-// `i32.MAX` through a variable so the compiler cannot see it, and a
-// compile error there would delete the runtime test rather than
-// strengthen it. So `const_int` folds literals, unary minus,
-// parentheses, `i32.MAX` and arithmetic on those — and stops.
+// The folder may not trap itself: `+` traps on overflow, so every fold
+// below tests first rather than computing `x + y` to see if it
+// overflows (the same constraint DESIGN.md puts on `gen_c`).
 //
-// THE FOLDER MAY NOT TRAP ITSELF. `+` traps on overflow, so computing
-// `x + y` to find out whether it overflows is the bug it is looking for.
-// Every fold below TESTS FIRST and gives up rather than computing —
-// which is the same constraint DESIGN.md puts on `gen_c` one layer down,
-// for the same reason.
-//
-// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: there is one
-// subject — which traps the compiler can PROVE — and the four rules that
-// make it up are inseparable from the folder they stand on. Overflow,
-// zero divisor, `MIN / -1` and the index all ask `const_int` the same
-// question, and `const_int` is only correct because every fold below it
-// refuses to trap while looking for a trap. Splitting the index rule out
-// would put one caller of the folder in another file and give the
-// discipline two places to be kept.
-//
-// THE INDEX RULE IS HERE TOO, and it took the count moving into the
-// type to make it reachable. `Ty.Array` carries `count` — "`[u8, 64]`
-// and `[u8, 65]` are different types" — so `buf[4]` on a `[i32, 4]` has
-// both halves of the comparison in hand at the one node, and the rule
-// fires on the shape people actually write rather than only on a
-// negative index.
+// The index rule lives here too because `Ty.Array` carries `count`
+// (`[u8, 64]` and `[u8, 65]` are different types), giving `buf[4]` on
+// `[i32, 4]` both halves of the comparison at one node.
 
 Ast, Expr, ExprId, Binary, BinOp, Literal, LiteralKind, Span = ast
 Unary, UnOp, Access, Paren, Name, Index, Match, Arm = ast
@@ -47,25 +29,22 @@ TyId, Types, TyArray, is_integer = sema.sema_ty
 Diag, SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 
-// The widest integer this compiler can fold in. Written as a
-// subtraction because `-9223372036854775808` is unary minus applied to a
-// positive literal that does not fit — the classic the lexer corpus
-// already tests.
+// The widest integer this compiler folds in; written as a subtraction
+// since `-9223372036854775808` is unary minus on a literal too big to
+// stand alone (the case the lexer corpus tests).
 I64_MAX* : i64 = 9223372036854775807
 I64_MIN* : i64 = -9223372036854775807 - 1
 
-// The largest magnitude whose square still fits an i64. A product of two
-// of these is under 4.7e18 and an i64 holds 9.2e18, so multiplication
-// inside this window never traps and outside it is not folded at all.
+// Largest magnitude whose square fits an i64 (two of these multiply to
+// under 4.7e18, well inside 9.2e18) — outside this window, not folded.
 FOLD_LIMIT* : i64 = 2147483647
 
 // ---------------------------------------------------------------------
 // the rule
 // ---------------------------------------------------------------------
 
-// Every arithmetic operator that traps, checked against what its
-// operands are known to be. The wrapping forms reach `_` and are
-// silent: "`+% -% *%` wrap, for when wrapping is the intent."
+// Dispatches trapping ops; wrapping forms (`+% -% *%`) fall to `_` and
+// stay silent by design.
 check_binary* = (c :: Checker, b: Binary, ty: TyId) Res<(), AllocError> {
     b.op.match({
         Div => check_divisor(c, b, ty),
@@ -147,9 +126,8 @@ with_both = (c :: Checker, b: Binary, ty: TyId, x: i64, y: i64)
     })
 }
 
-// The type a literal ends up in is what decides: `200` fits an i32 and
-// not a u8, and "overflow traps for UNSIGNED types too. A `u8` reaching
-// 256 is the same bug an `i8` reaching 128 is."
+// `200` fits an i32 but not a u8 — overflow traps for unsigned types
+// too, same bug at 256 as at 128 for an i8.
 check_fits = (c :: Checker, b: Binary, ty: TyId, v: i64)
              Res<(), AllocError> {
     name = c.prim_name(ty);
@@ -159,9 +137,8 @@ check_fits = (c :: Checker, b: Binary, ty: TyId, v: i64)
     })
 }
 
-// The position is the OPERATOR token, which is where a runtime trap
-// prints too — one rule, one position, whichever side of the compile it
-// is discovered on.
+// Position is the operator token, matching where a runtime trap prints
+// — one rule, one position, whichever side it's caught on.
 overflow = (c :: Checker, b: Binary, name: str) Res<(), AllocError> {
     c.report(b.op_span.file, b.op_span,
              SemaFault.ProvenOverflow(NameFault(name: name)))
@@ -170,40 +147,29 @@ overflow = (c :: Checker, b: Binary, name: str) Res<(), AllocError> {
 // ---------------------------------------------------------------------
 // the literal rule
 //
-// "A literal's type comes from its context", and `literal_fits` reads
-// that as: an `int` literal agrees with every integer type. That is
-// right about the FAMILY and says nothing about the VALUE, so
-// `n: i32 = 2147483648` went through and wrapped at codegen. It is the
-// same bug `i32.MAX + 1` is, one fold earlier, so it is a compile error
-// for the same stated reason.
+// `literal_fits` reads "a literal's type comes from its context" as an
+// `int` literal agreeing with every integer type — right about the
+// family, not the value, so `n: i32 = 2147483648` wrapped at codegen
+// (same bug as `i32.MAX + 1` one fold earlier).
 //
-// A LITERAL, NEVER A FOLDED EXPRESSION. `x: u8 = 200 + 100` is already
-// `ProvenOverflow` at the operator, and reporting here as well would
-// give one mistake two diagnostics. So this walks only the forms that
-// wrap a literal without changing what it is — parentheses, and the
-// unary minus that makes `-1` one literal rather than two tokens.
+// Walks only forms that wrap a literal without changing it — parens and
+// the unary minus that makes `-1` one literal — never a folded
+// expression: `x: u8 = 200 + 100` is already `ProvenOverflow` at the
+// operator, and reporting here too would double the diagnostic.
 //
-// UNFOLDABLE IS NOT REJECTED. `18446744073709551615` and
-// `-9223372036854775808` both exceed the `i64` this file folds in, so
-// `parse_i64` abstains and the rule says nothing — which is what keeps
-// `u64.MAX` and `i64.MIN` the legal literals `corpus/lex/
-// number_type_boundaries` pins them as. A rule written as "unfoldable
-// therefore wrong" would reject both.
+// Unfoldable is not rejected: `18446744073709551615` and
+// `-9223372036854775808` exceed the `i64` this file folds in, so
+// `parse_i64` abstains, keeping `u64.MAX`/`i64.MIN` legal per
+// `corpus/lex/number_type_boundaries`.
 //
-// EVERY POSITION A LITERAL MEETS A TYPE, and there are six. This was
-// reached from `check_assign` alone, so `x: i32 = 3000000000` was
-// refused and the same literal passed as an argument, stored in a field,
-// returned, written in an arm or listed as a fixed-array element was
-// truncated in silence. The callers are `sema_place`, `sema_call`,
-// `sema_hoist` (return and constructor field) and `sema_type` (the array
-// element); the arm is walked here, because an arm has no caller of its
-// own — the context that settles it is the match's.
+// Six call sites reach this, not just `check_assign`: `sema_place`,
+// `sema_call`, `sema_hoist` (return/ctor field), `sema_type` (array
+// element); a match arm is walked here since it has no caller of its
+// own — the match settles its context.
 // ---------------------------------------------------------------------
 
-// THE ONLY ARGUMENT THAT MATTERS IS `want`. What the literal's own type
-// was — `int`, always, because nothing else folds here — is a value the
-// diagnostic never prints, and asking every caller for it is what kept
-// this rule to the one position that had it lying around.
+// Only `want` matters: the literal's own type is always `int` (nothing
+// else folds), so no caller needs to pass it.
 check_literal* = (c :: Checker, id: ExprId, want: TyId)
                  Res<(), AllocError> {
     is_integer(c.prim_name(want)).match({
@@ -212,12 +178,9 @@ check_literal* = (c :: Checker, id: ExprId, want: TyId)
     })
 }
 
-// AN ARM'S VALUE STANDS IN THE MATCH'S OWN POSITION. `m: i32 =
-// b.match({ true => 3000000000, .. })` puts the literal where the `i32`
-// is, and the match itself is not a literal — so a rule that stopped at
-// the node it was handed saw an expression with nothing in it. This is
-// the same reason parentheses are walked: the wrapper is not where the
-// author wrote the value.
+// An arm's value sits in the match's own position: `m: i32 =
+// b.match({ true => 3000000000, .. })` puts the literal where `i32` is
+// — same reason parentheses are walked into.
 literal_within = (c :: Checker, id: ExprId, want: TyId)
                  Res<(), AllocError> {
     node = c.tree.expr_at(id);
@@ -258,10 +221,9 @@ out_of_range = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
                  name: written_literal(c, node), expected: want, found: found)))
 }
 
-// The literal AS WRITTEN, and nothing when the value was not written as
-// one — the same answer `written_index` gives for the same reason.
-// Parentheses do not change what a literal is; a minus does, so `-1`
-// stops here rather than quoting `1`.
+// The literal as written, empty if not written as one (same as
+// `written_index`). Parens don't change a literal; minus does, so
+// `-1` stops here, not `1`.
 written_literal = (c: Checker, node: Expr) str {
     node.kind.match({
         Literal(l) => l.text,
@@ -270,10 +232,8 @@ written_literal = (c: Checker, node: Expr) str {
     })
 }
 
-// `const_int` walks operators and `i32.MAX` as well, which is what
-// `check_binary` needs and what this must not have. The recursion is
-// bounded by the parser's own nesting limit, because these are the two
-// forms the parser builds by recursing.
+// Unlike `const_int`, walks only literal, paren and unary-minus forms —
+// recursion bounded by the parser's own nesting limit.
 literal_int = (c: Checker, node: Expr) Res<i64> {
     node.kind.match({
         Literal(l) => const_literal(l),
@@ -300,12 +260,10 @@ negate_literal = (c: Checker, id: ExprId) Res<i64> {
 // ---------------------------------------------------------------------
 // the index rule
 //
-// "A literal index past a known length is a compile error." The length
-// is the count in the type and the index folds like every other operand
-// here, so an index that came through a binding is not provably
-// anything and is left to the runtime check — which is the same
-// LITERALS-ONLY discipline the arithmetic rules keep, and for the same
-// reason.
+// A literal index past a known length is a compile error. The length is
+// the count in the type; the index folds like any other operand here,
+// so one reached through a binding is left to the runtime check — the
+// same literals-only discipline the arithmetic rules keep.
 // ---------------------------------------------------------------------
 
 check_index* = (c :: Checker, node: Expr, x: Index, a: TyArray)
@@ -316,10 +274,8 @@ check_index* = (c :: Checker, node: Expr, x: Index, a: TyArray)
     })
 }
 
-// A NEGATIVE INDEX IS TESTED SEPARATELY and not folded into the
-// comparison: `len_of` floors at zero, so `-1` would arrive as an index
-// of 0 and pass. The runtime helper `zg_idx_s` makes the same split for
-// the same reason.
+// Negative index tested separately: `len_of` floors at zero, so `-1`
+// would arrive as 0 and pass. `zg_idx_s` makes the same split at runtime.
 index_within = (c :: Checker, node: Expr, x: Index, i: i64, count: usize)
                Res<(), AllocError> {
     ((i < 0) || (len_of(i) >= count)).match({
@@ -328,21 +284,17 @@ index_within = (c :: Checker, node: Expr, x: Index, i: i64, count: usize)
     })
 }
 
-// The position is the whole index EXPRESSION, where a runtime trap
-// prints the `[` token. They differ because they have different jobs: a
-// trap has only the operator to point at, and a compile error can point
-// at the thing the author has to change.
+// Points at the whole index expression, not the `[` a runtime trap
+// prints: a compile error can point at what the author must change.
 out_of_bounds = (c :: Checker, node: Expr, x: Index) Res<(), AllocError> {
     c.report(node.span.file, node.span,
              SemaFault.ProvenIndexOutOfBounds(
                  NameFault(name: written_index(c, x))))
 }
 
-// The index AS WRITTEN, which is what `ProvenDivideByZero` quotes its
-// `0` for: the reader needs to see which index. A literal's text is a
-// slice of the source the tree already owns, so nothing is allocated for
-// a diagnostic to outlive — and a folded expression quotes nothing,
-// which `quote` renders as nothing.
+// The index as written (same pattern as `written_literal`): a source
+// slice the tree already owns, so nothing is allocated to outlive the
+// diagnostic; a fold quotes nothing.
 written_index = (c: Checker, x: Index) str {
     c.tree.expr_at(x.index).kind.match({
         Literal(l) => l.text,
@@ -354,14 +306,12 @@ written_index = (c: Checker, x: Index) str {
 // constant folding
 // ---------------------------------------------------------------------
 
-// A COUNT IS A LENGTH, and `const_int` answers in `i64` because that is
-// the folder every rule in this file shares. `std.core.num` carries only
-// lossless conversions on purpose — a narrowing one can fail — so there
-// is no `to_usize` to call, and the digits are what crosses instead.
+// `const_int` answers in `i64`, the folder every rule shares;
+// `std.core.num` carries only lossless conversions, so digits cross via
+// `len_of` rather than `to_usize`.
 //
-// A count that folds to nothing is not a count this compiler can carry,
-// and 0 is the answer that says so: every index into a zero-length array
-// is out of range, so the program is told rather than silently admitted.
+// A count that fails to fold becomes 0: every index into a zero-length
+// array is out of range, refused rather than silently admitted.
 const_count* = (c: Checker, id: ExprId) usize {
     const_int(c, id).match({
         None  => 0,
@@ -369,9 +319,8 @@ const_count* = (c: Checker, id: ExprId) usize {
     })
 }
 
-// `i64` to `usize`, most significant digit first. Ten passes at most,
-// and a negative value is not a length: it floors at zero, which is why
-// every caller tests the sign before calling.
+// `i64` to `usize`, MSD first, ten passes at most. Floors negatives at
+// zero — not a length — so every caller tests the sign first.
 len_of* = (v: i64) usize {
     (v <= 0).match({
         true  => 0,
@@ -386,29 +335,23 @@ last_digit = (v: i64) usize {
     })
 }
 
-// HOW FAR THE FOLDER WILL WALK before it gives up.
+// How far the folder walks before giving up. Operator chains are
+// left-nested and built with a loop, so `a + b + c + ..` is unbounded —
+// one line of `tests/corpus/lex/long_single_line.zen` hits ten thousand
+// terms — and folding by recursion would segfault on a long line (a
+// crash is not a diagnostic, docs/TESTING.md).
 //
-// An operator chain is left-nested and `parse_expr.zen` builds it with
-// a LOOP, so nothing bounds the length of `a + b + c + ..` — one line
-// of `tests/corpus/lex/long_single_line.zen` is ten thousand terms —
-// and folding it by recursion is a segmentation fault on a long enough
-// line. A crash is not a diagnostic (docs/TESTING.md).
+// A budget is right here (elsewhere a bound must REPORT) because this
+// is a prover: declining to prove is already what this file does for
+// values reached through a binding. Past the budget: "not provably
+// anything" — a lost diagnostic, never a mis-compile or a refusal.
 //
-// A BUDGET IS THE RIGHT SHAPE HERE, where elsewhere in this compiler a
-// bound has to REPORT. This is a prover: DESIGN.md asks for a compile
-// error where the compiler can PROVE the trap fires, and declining to
-// prove is already what this file does for every value that arrived
-// through a binding. Past the budget the answer is "not provably
-// anything" and the runtime check does the work — a diagnostic lost,
-// never a program mis-compiled, and never a program refused.
-//
-// 256 is past anything written by hand and inside the stack by orders;
-// only a machine-length chain reaches it.
+// 256 is past anything written by hand; only a machine-length chain
+// reaches it.
 FOLD_DEPTH: usize = 256
 
-// What this expression is, when it is a literal integer the compiler can
-// see. Absence means "not provably anything", which is the answer for
-// every binding — on purpose.
+// What this expression is, when a literal integer the compiler can see.
+// Absence means "not provably anything" — the answer for every binding.
 const_int* = (c: Checker, id: ExprId) Res<i64> {
     const_within(c, id, FOLD_DEPTH)
 }
@@ -466,9 +409,8 @@ const_rhs = (c: Checker, b: Binary, x: i64, left: usize) Res<i64> {
     })
 }
 
-// `i32.MAX`, `i32.MIN`, `i32.BITS`. The base has to be the primitive's
-// own name written out: a binding of that type is not the type, and
-// folding through one would be folding through a binding.
+// `i32.MAX/MIN/BITS` only: the base must be the primitive's own name,
+// not a binding of that type — else this folds through a binding.
 const_prim_const = (c: Checker, a: Access) Res<i64> {
     base = c.tree.expr_at(a.base);
     base.kind.match({
@@ -534,10 +476,8 @@ sub_i64 = (x: i64, y: i64) Res<i64> {
     safe.match({ true => Ok(x - y), false => None })
 }
 
-// Only inside the window where a product cannot overflow. Outside it the
-// answer is "not provably anything", which is the honest one: the only
-// alternative is to compute the product and inspect it, and that is the
-// trap this rule exists to report.
+// Only where a product can't overflow; outside it "not provably
+// anything" — computing to check would itself be the trap this catches.
 mul_i64 = (x: i64, y: i64) Res<i64> {
     (small(x) && small(y)).match({
         true  => Ok(x * y),
@@ -550,10 +490,10 @@ small = (v: i64) bool { (v <= FOLD_LIMIT) && (v >= 0 - FOLD_LIMIT) }
 // ---------------------------------------------------------------------
 // reading a literal
 //
-// `std.core.num` carries no `str` to integer conversion — it carries
-// only lossless conversions between numeric types — so the digits are
-// read here. docs/SEMA_BOOTSTRAP_FIXES.md records it as a std gap: this
-// is `write_usize`'s inverse and belongs beside it in `std.text.text_fmt`.
+// `std.core.num` carries no str-to-int conversion, only lossless
+// numeric ones, so the digits are read here. docs/SEMA_BOOTSTRAP_FIXES.md
+// tracks it as a std gap: `write_usize`'s inverse, belongs in
+// `std.text.text_fmt`.
 // ---------------------------------------------------------------------
 
 parse_i64* = (text: str) Res<i64> {
@@ -644,9 +584,8 @@ signed_min_32 = (name: str) i64 {
     })
 }
 
-// A u64 and a usize hold more than an i64 can name, so the ceiling here
-// is the folder's own and not the type's. A value that large is never
-// folded in the first place, so nothing is missed by saying so.
+// u64/usize hold more than an i64 can name, so this ceiling is the
+// folder's own, not the type's — such values are never folded anyway.
 unsigned_max = (name: str) i64 {
     name.eq("u8").match({ true => 255, false => unsigned_max_16(name) })
 }

@@ -1,21 +1,18 @@
 // src/std/text/text_string.zen
 // String — owned, growable text. Vec already carries len, capacity and the
-// Alloc it grows with, so String adds nothing on top: it IS the buffer.
-// There is no separate StringBuffer type, and there is no second growth
-// policy — a String grows exactly when and how a Vec<u8> does.
+// Alloc it grows with, so String IS the buffer, nothing added on top: no
+// separate StringBuffer type, no second growth policy.
 //
-// THE BORROW RULE, stated once because everything else follows from it:
-// `view` BORROWS the buffer, so the str it hands back is valid until the
-// next call that can grow the String — `add`, `add_bytes`, `add_byte`. A
-// realloc moves the bytes and every str taken before it is dangling. Take
-// the view after the last write, or take it again.
+// THE BORROW RULE, everything else follows from it: `view` BORROWS the
+// buffer, so the str it returns is valid until the next call that can grow
+// the String (`add`/`add_bytes`/`add_byte`) — a realloc moves the bytes and
+// any str taken before it dangles. Take the view after the last write, or
+// take it again.
 //
-// Two error sets meet here, and the seam is now closed: the buffer floor
-// (`add_byte` / `add_bytes`) can only fail to ALLOCATE and says so, while
-// `add` — the door DESIGN.md declares — speaks WriteError, the union that
-// names both. There is still no conversion between the two sets, and none
-// is invented: `.try()` merges the narrower into the wider, which is the
-// wider set naming the narrower rather than a From.
+// Two error sets meet here: the buffer floor (`add_byte`/`add_bytes`) can
+// only fail to ALLOCATE and says so; `add` (DESIGN.md's door) speaks
+// WriteError, the union naming both. No conversion between the sets is
+// invented — `.try()` merges the narrower into the wider.
 
 Vec = std.collections.collections
 Alloc, AllocError = std.mem.mem
@@ -25,13 +22,11 @@ Sink, WriteError = std.core.io
 String* = {
     data :: Vec<u8>,
 
-    // the format door. `{}` routes through each argument's toString, which
-    // is TYPE-directed, so the call is expanded where it is written: the
-    // compiler steps text_fmt.fmt_next over `fmt` and emits an `add_bytes`
-    // for each literal run and a `toString` for each hole. No runtime format
-    // state, no varargs walk, and one implementation of the format rules.
-    // Those rules — including that a `{` not followed by `}` is a literal —
-    // live in text_fmt.zen
+    // the format door. `{}` routes through each argument's TYPE-directed
+    // toString, expanded where it's written: the compiler steps
+    // text_fmt.fmt_next over `fmt`, emitting `add_bytes` per literal run
+    // and `toString` per hole. No runtime format state. Format rules
+    // (including `{` not followed by `}` being literal) live in text_fmt.zen
     add* = (self :: @Self, fmt: str, args: ...) Res<(), WriteError>
 
     // borrows the buffer; see THE BORROW RULE above
@@ -41,8 +36,8 @@ String* = {
 
     is_empty* = (self: @Self) bool { self.data.len == 0 }
 
-    // the floor `add` is expanded into, and the writer for a `{}` that lands
-    // on a str: bytes, verbatim, no format meaning read into them
+    // the floor `add` expands into, and the writer for a `{}` landing on a
+    // str: bytes, verbatim, no format meaning read
     add_bytes* = (self :: @Self, s: str) Res<(), AllocError> {
         Range(0, s.len).loop((h, i) { self.data.add(s[i]).try() });
         Ok(());
@@ -51,13 +46,13 @@ String* = {
     add_byte* = (self :: @Self, b: u8) Res<(), AllocError> { self.data.add(b) }
 }
 
-// a String is a Sink: bytes written to it are appended to the buffer. This
-// is what lets `{}` format into a String and into a console through one
-// signature, with the format machinery never learning which it holds.
+// a String is a Sink: bytes written to it append to the buffer — what lets
+// `{}` format into a String or a console through one signature, the format
+// machinery never learning which it holds.
 //
-// `write` speaks WriteError because Sink does, and a String can only ever
-// produce the AllocError half — the IoError half is the cost DESIGN.md
-// accepts knowingly, paid only by a caller who matches on the error
+// `write` speaks WriteError since Sink does, though a String only ever
+// produces the AllocError half — the IoError half is a cost DESIGN.md
+// accepts knowingly, paid only by a caller matching on the error
 String.impl(Sink, {
     write = (self :: @Self, bytes: str) Res<(), WriteError> {
         self.add_bytes(bytes).try();
@@ -70,13 +65,11 @@ String.impl(Sink, {
     }
 })
 
-// the empty buffer. A ufcs function whose first parameter is an Alloc, so it
-// calls as `alloc.String()` — the surface DESIGN.md writes — while the
-// dependency points DOWN: text knows mem, mem never has to know text
+// the empty buffer. ufcs constructor (`alloc.String()`, DESIGN.md's
+// surface); dependency points DOWN — text knows mem, mem never knows text
 String* = (a: Alloc) Res<String, AllocError> { Ok(String(data: a.Vec<u8>())) }
 
-// the allocating format form, `alloc.String("{}", x)`. Declared, not
-// defined, for the same reason `add` is: the arguments are type-directed and
-// the call is expanded where it is written, into this module's empty form
-// followed by the same expansion `add` gets
+// the allocating format form, `alloc.String("{}", x)`. Declared not
+// defined, like `add`: type-directed, expanded where written, into this
+// module's empty form followed by `add`'s own expansion
 String* = (a: Alloc, fmt: str, args: ...) Res<String, AllocError>

@@ -1,19 +1,15 @@
 // src/zen/zen_path.zen
 // What a module PATH means, said away from a build.
 //
-// A module lives at `<folder>/<folder>.zen` and a module NAME is that
-// path with its separators as dots. Both are facts about a string, and
-// neither is a phase of anything — `zen_build.zen`'s header already
-// said so ("a fact about a path, and it is written as free functions so
-// a second driver reads the same rule"), but saying it in a comment did
-// not move it, and the file went on growing around it.
+// A module lives at `<folder>/<folder>.zen`; a module NAME is that path
+// with separators as dots. Both are facts about a string, not a phase
+// of anything — written as free functions so a second driver reads the
+// same rule.
 //
-// EVERY PATH THAT REACHES A SPAN IS RELATIVE TO THE COMPILATION ROOT,
-// and `relative_to` is the whole of how. TESTING.md says why it matters
-// rather than merely being tidy: an absolute path in a diagnostic puts
-// the checkout's location into the emitted C, and two checkouts of one
-// tree then emit different bytes — which silently voids the determinism
-// oracle the plan rests on.
+// EVERY PATH THAT REACHES A SPAN IS RELATIVE TO THE COMPILATION ROOT
+// (`relative_to`): an absolute path in a diagnostic puts the checkout's
+// location into the emitted C, and two checkouts of one tree then emit
+// different bytes — silently voiding the determinism oracle (TESTING.md).
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -22,14 +18,14 @@ Range = std.core
 QualifiedName = ast.ast_span
 
 // The last path component of a root — `probe` of `tests/corpus/x/probe`
-// — which is what a folder repeats to name its root file. A path with no
-// `/` in it is already its own basename, which is why `cut` starts at 0.
+// — what a folder repeats to name its root file. `cut` starts at 0
+// since a `/`-free path is already its own basename.
 base_of* = (root: str) str {
     root.slice(root.after_last_slash(), root.len);
 }
 
-// One past the last `/`, and 0 when there is none — which is what makes
-// a path with a single component its own last component.
+// One past the last `/`, or 0 when there is none, making a single
+// component its own last component.
 after_last_slash* = (path: str) usize {
     cut ::= 0;
     Range(0, path.len).loop((h, i) {
@@ -40,17 +36,15 @@ after_last_slash* = (path: str) usize {
 
 // THE MODULE A PATH IS, and the name a `Unit` carries.
 //
-// The path relative to the root, with the separators as dots and the
-// extension off: `<root>/a/b/c.zen` is `a.b.c`. That is the file's
-// IDENTITY and it is one name, which is the point — a folder root has
-// a second, shorter spelling (`std.core` for `std/core/core.zen`) and
-// naming the module after whichever spelling arrived first is what made
-// one file two modules with one set of declarations.
+// The path relative to the root, separators as dots, extension off:
+// `<root>/a/b/c.zen` is `a.b.c` — the file's IDENTITY, one name. A
+// folder root has a second, shorter spelling (`std.core` for
+// `std/core/core.zen`); naming the module after whichever spelling
+// arrived first would make one file two modules.
 //
-// The short spelling is not lost: it is a way of WRITING the identity
-// rather than a second identity, and `World.index_of` is where the two
-// meet — the same split `bootstrap/modules.py` draws between a file's
-// `dotted` and the aliases its `_module_index` maps onto it.
+// The short spelling isn't lost — it's a way of WRITING the identity,
+// not a second one; `World.index_of` is where the two meet (same split
+// `bootstrap/modules.py` draws between a file's `dotted` and its aliases).
 module_name* = (a: Alloc, root: str, path: str) Res<str, AllocError> {
     inner = path.slice(root.len + 1, path.len - EXT_BYTES);
     out ::= a.String().try();
@@ -60,9 +54,9 @@ module_name* = (a: Alloc, root: str, path: str) Res<str, AllocError> {
     Ok(out.view());
 }
 
-// The path one level up, and `""` when there is no level up. `slice(0,
-// cut - 1)` with `cut` at 0 subtracts one from a `usize`, which traps —
-// so the guard is the whole reason this is a function.
+// The path one level up, `""` when there's no level up. `slice(0, cut -
+// 1)` with `cut` at 0 would underflow a `usize` and trap — the guard is
+// the whole reason this is a function.
 parent_of* = (path: str) str {
     cut = path.after_last_slash();
     (cut == 0).match({
@@ -73,23 +67,21 @@ parent_of* = (path: str) str {
 
 // WHICH ROOT A FILE WAS MEANT TO BE COMPILED AGAINST.
 //
-// An editor knows one directory — the workspace, from `initialize`'s
-// `rootUri` — and that is almost never the compilation root: this tree
-// is built as `zen build src` while a workspace opens at the repository,
-// and an import of `lex.lex` resolved against the repository looks for
-// `<repo>/lex/lex.zen` and finds nothing. Every imported name in every
-// file would come back undefined, which is indistinguishable from
-// having no build at all.
+// An editor knows one directory (the workspace, from `initialize`'s
+// `rootUri`), almost never the compilation root: this tree builds as
+// `zen build src` while a workspace opens at the repository, so
+// `lex.lex` resolved against the repository finds nothing and every
+// imported name comes back undefined — indistinguishable from no build
+// at all.
 //
-// THE RULE IS THE ONE THIS FILE ALREADY STATES, read upward. A module
-// lives at `<folder>/<folder>.zen`, so a directory that holds its own
-// name is INSIDE the program rather than the root of one — climb out of
-// it. `src/lsp` holds `lsp.zen`, so climb; `src` holds no `src.zen`, so
-// stop. `src/std/text` and `src/zen` answer `src` the same way.
+// THE RULE ALREADY STATED ABOVE, read upward: a module lives at
+// `<folder>/<folder>.zen`, so a directory holding its own name is
+// INSIDE a program, not its root — climb out. `src/lsp` holds
+// `lsp.zen` so climb; `src` holds no `src.zen` so stop.
 //
-// `floor` IS A GUARD AND NOT AN ANSWER. The climb stops at the
-// workspace whatever the disk says, so a home directory that happens to
-// hold a file named after itself cannot walk a build out of the project.
+// `floor` IS A GUARD, NOT AN ANSWER: the climb stops at the workspace
+// regardless of disk, so a home directory named after a file inside it
+// can't walk a build out of the project.
 root_for* = (env: Env, a: Alloc, floor: str, path: str) str {
     dir ::= parent_of(path);
     loop(() { dir.len > floor.len && holds_its_own_name(env, a, dir) }, (h) {
@@ -99,10 +91,9 @@ root_for* = (env: Env, a: Alloc, floor: str, path: str) str {
 }
 
 // `<dir>/<basename>.zen` — the folder-root spelling, asked of the disk.
-// A directory that cannot even be named is not one, so an allocation
-// that fails answers `false` rather than propagating: the caller is a
-// loop condition and the honest answer to "is this a module folder" when
-// the question could not be asked is "stop climbing".
+// An allocation failure answers `false` rather than propagating: the
+// caller is a loop condition, and the honest answer to "is this a
+// module folder" when the question can't be asked is "stop climbing".
 holds_its_own_name = (env: Env, a: Alloc, dir: str) bool {
     a.String("{}/{}.zen", dir, dir.base_of()).match({
         Err(_) => false,
@@ -110,10 +101,10 @@ holds_its_own_name = (env: Env, a: Alloc, dir: str) bool {
     })
 }
 
-// The same file, said relative to the compilation root: `module_name`
-// without the dots and without dropping the extension. One `+ 1` for
-// the separator, and a path that is not under the root comes back
-// unchanged rather than being sliced into nonsense.
+// The same file, relative to the compilation root: `module_name`
+// without the dots or dropped extension. `+ 1` for the separator; a
+// path not under the root comes back unchanged rather than sliced into
+// nonsense.
 relative_to* = (root: str, path: str) str {
     (path.len > root.len + 1).match({
         true  => path.slice(root.len + 1, path.len),
@@ -121,8 +112,8 @@ relative_to* = (root: str, path: str) str {
     });
 }
 
-// `.zen`, and it is written here because `module_name` is the one place
-// that has to take it back off.
+// `.zen`, written here since `module_name` is the one place that takes
+// it back off.
 EXT_BYTES : usize = 4
 
 dot_for = (b: u8) u8 {
@@ -130,14 +121,14 @@ dot_for = (b: u8) u8 {
 }
 
 // The inverse, for the one module named by a dotted CONSTANT rather
-// than by a path: `std.core` is the prelude's name and `<root>/std/
-// core.zen` is where its bytes are.
+// than a path: `std.core` is the prelude's name, `<root>/std/core.zen`
+// is where its bytes are.
 slash_for* = (b: u8) u8 {
     (b == '.').match({ true  => '/', false => b })
 }
 
-// The last segment of a dotted name — `mem` of `std.mem` — which is what
-// a folder repeats to name its root file.
+// The last segment of a dotted name — `mem` of `std.mem` — what a
+// folder repeats to name its root file.
 last_of* = (q: QualifiedName) str {
     q.segments.get(q.segments.len - 1).match({
         Ok(s) => s.text,
@@ -147,54 +138,50 @@ last_of* = (q: QualifiedName) str {
 
 // A module of the program: what it is called, and where its bytes are.
 //
-// THE PATH IS THE IDENTITY AND THE NAME IS DERIVED FROM IT. Two
-// spellings reach one file — `std/core/core.zen` is `std.core` to a
-// module that writes the folder and `std.core.core` to one that writes
-// the file — so a `Unit` keyed on the import that found it makes one
-// file two modules with one set of declarations, and a program that
-// never writes the short spelling then has no prelude at all.
-// `docs/SEMA_BOOTSTRAP_FIXES.md` §13 is that bug with its reproducer.
+// THE PATH IS THE IDENTITY, THE NAME IS DERIVED FROM IT. Two spellings
+// reach one file (`std/core/core.zen` is `std.core` to a module writing
+// the folder, `std.core.core` to one writing the file); a `Unit` keyed
+// on the import that found it would make one file two modules, and a
+// program that never writes the short spelling would have no prelude
+// at all. `docs/SEMA_BOOTSTRAP_FIXES.md` §13 is that bug with its
+// reproducer.
 Unit* = {
     name*: str,     // the dotted module name: `std.core.result`
     path*: str,     // where the bytes are, to open them: as given
     rel*:  str,     // the same file, relative to the compilation ROOT
 }
 
-// `rel` exists because `path` must not reach a Span. Every diagnostic
-// and every emitted trap position carries its file, so an absolute path
-// puts the checkout's location into the OUTPUT — and two checkouts of
-// one tree then emit different bytes, which silently voids the fixpoint
-// oracle the whole plan rests on. TESTING.md states the rule: "every
-// path the compiler emits [is relative to the root], which is what makes
-// the determinism check comparing two copies of a tree at different
-// absolute paths meaningful."
+// `rel` exists because `path` must not reach a Span: every diagnostic
+// and trap position carries its file, so an absolute path would put the
+// checkout's location into the OUTPUT, and two checkouts of one tree
+// would emit different bytes — silently voiding the fixpoint oracle
+// (TESTING.md).
 
-// The `Unit` a FILE is. The name is a pure function of the path and
-// never of the spelling that found it, so `std.core` and `std.core.core`
-// are one module read once.
+// The `Unit` a FILE is. The name is a pure function of the path, never
+// the spelling that found it, so `std.core` and `std.core.core` are one
+// module read once.
 //
-// It is HERE and not on the driver because the two functions that fill
-// its fields are here and the type is here: a method on `Build` that
-// called nothing but `module_name` and `relative_to` was a fact about a
-// path wearing a build's `self`.
+// HERE, not on the driver: the two functions filling its fields live
+// here — a `Build` method calling only `module_name`/`relative_to`
+// would be a fact about a path wearing a build's `self`.
 unit_at* = (a: Alloc, root: str, path: str) Res<Unit, AllocError> {
     name = module_name(a, root, path).try();
     Ok(Unit(name: name, path: path, rel: relative_to(root, path)));
 }
 
 // `<root>/<name>.zen`, or `<root>/<name>/<name>.zen` when the name is a
-// folder — the rule at the top of this file, asked of a real directory.
+// folder — the top-of-file rule, asked of a real directory.
 //
-// A stat and not a string, which is why this one takes an `Env`: the two
-// spellings are both well-formed and only the disk can say which one the
-// author wrote. That is still what a module path MEANS and not a phase
-// of a build, so it lives beside the rule rather than beside the walk.
+// A stat, not a string (hence the `Env`): both spellings are
+// well-formed, only the disk can say which the author wrote — still
+// what a module path MEANS, not a build phase, so it lives beside the
+// rule, not the walk.
 //
-// A candidate is returned whether or not it is there — a root with no
-// entry is reported by the READ, which names the file, and a probe
-// reporting it too would be one mistake twice — so the flat form also
-// wins when NEITHER exists: the shorter path is the one a diagnostic
-// should carry.
+// A candidate is returned whether or not it exists: a root with no
+// entry is reported by the READ (which names the file), so a probe
+// reporting it too would be the same mistake twice — the flat form
+// wins when NEITHER exists, since the shorter path is what a
+// diagnostic should carry.
 candidate* = (env: Env, a: Alloc, root: str, name: str) Res<Unit, AllocError> {
     flat ::= a.String("{}/{}.zen", root, name).try();
     nest ::= a.String("{}/{}/{}.zen", root, name, name).try();
@@ -205,34 +192,28 @@ candidate* = (env: Env, a: Alloc, root: str, name: str) Res<Unit, AllocError> {
     })
 }
 
-// WHERE A PROGRAM STARTS, spelled once. It is both a module name the
-// entry probe looks for and the declaration the root must own, and the
-// two must not be able to drift apart — a probe that finds `main.zen`
-// and a check that demands `start` would reject every program in the
-// language and blame the file it just found.
+// WHERE A PROGRAM STARTS, spelled once — both the module name the entry
+// probe looks for and the declaration the root must own, so a probe
+// finding `main.zen` and a check demanding `start` can't drift apart.
 ENTRY*: str = "main"
 
 // WHERE THE PROGRAM STARTS. `--entry <file>` answers it outright;
 // without one, the root is probed.
 //
-// The probe is what a directory with no listing can do, and it can only
-// find conventional names — which is why `--entry` exists. `std.env.Fs`
-// has no listing on purpose ("every member added here is a member the
-// self-hosted compiler has to keep working forever"), and enumerating a
-// directory is strictly more authority than reading a path you were
-// handed. The information is already at the call site: whoever invokes
-// the compiler knows the entry. A single-file program named anything
-// else is unreachable by probing and reachable by being named, and that
-// is the whole of it.
+// The probe is what a listing-less directory can do — conventional
+// names only, why `--entry` exists. `std.env.Fs` has no listing on
+// purpose (enumerating a directory is strictly more authority than
+// reading a handed path); the info is already at the call site, since
+// whoever invokes the compiler knows the entry.
 //
-// A build is still a ROOT. The entry says where to start inside it;
+// A build is still a ROOT: the entry says where to start inside it,
 // every other module is found by following imports.
 //
-// FREE FUNCTIONS AND NOT METHODS ON `Build`, for the reason `unit_at`
-// gives just above: these read `env`, `alloc` and `root` and nothing
-// else a build holds — no tree, no tally, no phase — so a `self` here
-// was a fact about a path wearing a build's receiver. Moving them is
-// also what made room in `zen_build.zen`, which was at its cap.
+// FREE FUNCTIONS, NOT METHODS ON `Build` (as `unit_at` above): these
+// read `env`/`alloc`/`root` and nothing else a build holds — no tree,
+// tally, or phase — so a `self` here would be a path wearing a build's
+// receiver. Moving them also made room in `zen_build.zen`, which was
+// at its cap.
 entry_of* = (env: Env, a: Alloc, root: str, named: str)
             Res<Unit, AllocError> {
     named.is_empty().match({
@@ -241,35 +222,30 @@ entry_of* = (env: Env, a: Alloc, root: str, named: str)
     })
 }
 
-// `--entry` is relative to the root, because `Unit.rel` is what a Span
-// carries and an absolute path in a Span puts the checkout's location
-// into the emitted C — which voids the determinism check that compares
-// two copies of a tree at different paths.
+// `--entry` is relative to the root, since `Unit.rel` is what a Span
+// carries and an absolute path there would void the determinism check.
 //
-// NOT PROBED. A named entry that is not there is reported by the READ,
-// which names the file the caller asked for; a probe reporting it as
-// well would be one mistake said twice, and the caller who chose the
-// name is owed the name back.
+// NOT PROBED: a named entry that isn't there is reported by the READ
+// (naming the file asked for) — a probe reporting it too would say the
+// same mistake twice, and the caller who chose the name is owed it back.
 entry_named = (env: Env, a: Alloc, root: str, named: str)
               Res<Unit, AllocError> {
     path ::= a.String("{}/{}", root, named).try();
     unit_at(a, root, path.view())
 }
 
-// No `--entry`, so the entry point is a MODULE NAME resolved by the
-// same two probes every other module gets. Three names, most
-// conventional first:
+// No `--entry`: the entry point is a MODULE NAME resolved by the same
+// two probes every other module gets. Three names, most conventional
+// first:
 //
-//   main        every program in tests/corpus, and the
-//               `src: Path("src/main.zen")` DESIGN.md's own
-//               build.zen example writes
-//   <basename>  the folder-root rule `<folder>/<folder>.zen`,
-//               applied to the root itself
+//   main        every program in tests/corpus, and DESIGN.md's own
+//               `src: Path("src/main.zen")` build.zen example
+//   <basename>  the folder-root rule `<folder>/<folder>.zen`, applied
+//               to the root itself
 //   zen         this tree, and only this tree
 //
-// The third is still a special case, and it is the one
-// `scripts/fixpoint.sh` rides: the gate runs `zen build src` with no
-// entry, so this order is load-bearing and must not move.
+// The third is still a special case: `scripts/fixpoint.sh` runs `zen
+// build src` with no entry, so this order is load-bearing.
 entry_probed = (env: Env, a: Alloc, root: str) Res<Unit, AllocError> {
     first = candidate(env, a, root, ENTRY).try();
     env.fs.exists(first.path).match({
@@ -289,9 +265,8 @@ entry_after_main = (env: Env, a: Alloc, root: str) Res<Unit, AllocError> {
 
 // Where the bytes an IMPORT names are: `<root>/a/b/c.zen`, or
 // `<root>/a/b/c/c.zen` when the last segment names a folder. The plain
-// form is probed first because it is the common one, and a folder that
-// also has a file beside it is a collision the module graph would
-// reject anyway.
+// form is probed first (the common case); a folder with a file beside
+// it is a collision the module graph rejects anyway.
 file_of* = (env: Env, a: Alloc, root: str, q: QualifiedName)
            Res<str, AllocError> {
     flat = joined(a, root, q, false).try();

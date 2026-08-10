@@ -1,17 +1,16 @@
 // src/sema/sema_try.zen
-// `.try()`, and the four rules that go with it.
+// `.try()`, and the rules that go with it.
 //
 // "It unwraps Ok, or returns the Err — or the None — from the ENCLOSING
-// function." Three rules go with that and all three are law 4: the
-// enclosing function must return a compatible Res, a `Res<T>` may not try
-// into a `Res<T, E>` function, and nothing is converted.
+// function." All law 4: the enclosing function must return a compatible
+// Res, a `Res<T>` may not try into a `Res<T, E>` function, and nothing
+// is converted.
 //
-// SPLIT OUT OF `sema_type.zen`, WHICH HAD ITS OWN BANNER FOR THIS ALREADY.
-// The subject there is "what does this node mean" and the memo discipline
-// that answers it; the subject here is the failure model — which Res forms
-// propagate into which, and what a set has to contain. `try_type` is one
-// arm of `expr_kind` and nothing else in the tree calls into this family,
-// so the seam is exactly one import.
+// Split out of `sema_type.zen` (subject: "what does this node mean" and
+// the memo discipline for it); this one is the failure model — which Res
+// forms propagate into which, what a set must contain. `try_type` is one
+// arm of `expr_kind` and nothing else calls into this family, so the
+// seam is exactly one import.
 
 ExprId, Span = ast
 AllocError = std.mem
@@ -21,12 +20,11 @@ Checker, Ctx = sema.sema_check
 absence_into_failure, both_failures = sema.sema_check
 type_of = sema.sema_type
 
-// `at` IS THE `try` TOKEN AND NOT THE NODE. Every rule below is about
-// the intrinsic, and the node's span starts at the operand — so
-// `checked(n).try()` reported on the node points at a call that is
-// perfectly well formed. `TESTING.md` asks for the first byte of the
-// smallest offending node, and the offending node is the four
-// characters the author has to change.
+// `at` is the `try` TOKEN, not the node — the node's span starts at the
+// operand, so `checked(n).try()` reported on the node would point at a
+// call that's perfectly well formed. TESTING.md asks for the first byte
+// of the smallest offending node: the four characters the author has to
+// change.
 try_type* = (c :: Checker, at: Span, operand: ExprId, ctx: Ctx)
            Res<TyId, AllocError> {
     got = c.type_of(operand, ctx).try();
@@ -38,7 +36,7 @@ try_type* = (c :: Checker, at: Span, operand: ExprId, ctx: Ctx)
 
 try_not_res* = (c :: Checker, at: Span, got: TyId, ctx: Ctx)
               Res<TyId, AllocError> {
-    // poison never produces a second diagnostic
+    // poison: no second diagnostic
     c.is_unknown(got).match({
         false => c.try_needs_res(at, got),
         true  => Ok(got),
@@ -71,8 +69,8 @@ try_outside_res* = (c :: Checker, at: Span, got: TyId)
     Ok(got)
 }
 
-// The enclosing function returns a Res. Which one decides whether
-// this propagation is legal at all.
+// The enclosing function returns a Res; which one decides whether this
+// propagation is legal at all.
 try_into* = (c :: Checker, at: Span, r: TyRes, got: TyId, ctx: Ctx)
            Res<TyId, AllocError> {
     c.types.at(ctx.ret).match({
@@ -83,20 +81,19 @@ try_into* = (c :: Checker, at: Span, r: TyRes, got: TyId, ctx: Ctx)
 
 try_merge* = (c :: Checker, at: Span, r: TyRes, want: TyRes, got: TyId)
             Res<TyId, AllocError> {
-    // an absence propagating into a failure is the one shape law 4
-    // names outright: "a None never becomes an Err. You name the
-    // reason" — and `.ok_or(..)` is where that is written.
+    // absence into failure is the shape law 4 names outright: "a None
+    // never becomes an Err. You name the reason" — `.ok_or(..)` is
+    // where that's written.
     absence_into_failure(r.form, want.form).match({
         true  => c.try_absence(at, got, r.value, want.error),
         false => c.try_set(at, r, want),
     })
 }
 
-// `expected` IS THE ENCLOSING FUNCTION'S Res, and it took the failing
-// set to build it. This passed the OPERAND's type as the error, so a
-// `Res<i32>` tried into a `Res<i32, Error>` read "expected Res<i32,
-// Res<i32>>" — a type nobody wrote and nobody can write, offered to the
-// reader as the thing they were supposed to have produced.
+// `expected` is the ENCLOSING FUNCTION's Res, built with the failing
+// set. BUG this replaced: passing the OPERAND's type as the error made
+// a `Res<i32>` tried into a `Res<i32, Error>` read "expected
+// Res<i32, Res<i32>>" — a type nobody wrote or could write.
 try_absence* = (c :: Checker, at: Span, got: TyId, value: TyId, err: TyId)
               Res<TyId, AllocError> {
     want = c.types.res_failure(value, err).try();
@@ -106,16 +103,14 @@ try_absence* = (c :: Checker, at: Span, got: TyId, value: TyId, err: TyId)
     Ok(value)
 }
 
-// "propagation merges sets" — and merging is containment, not
-// conversion. The callee's set must already be part of the
-// caller's; there is no From to bridge them.
+// "propagation merges sets" — containment, not conversion; the callee's
+// set must already be part of the caller's, no From bridges them.
 //
-// THE OTHER DIRECTION IS REFUSED TOO, and it is the half that was
-// missing: a `Res<T>` declares NO error, so a callee that raises a real
-// set has nowhere to propagate to. `absence_into_failure` above names
-// the mirror case, and letting this one through meant the only thing
-// standing behind law 4's "nothing is converted" was the backend
-// reporting that it could not lower the widening.
+// THE OTHER DIRECTION WAS THE MISSING HALF: a `Res<T>` declares NO
+// error, so a callee raising a real set has nowhere to propagate to
+// (`absence_into_failure` above is the mirror case). Letting this
+// through meant law 4's "nothing is converted" was enforced only by the
+// backend refusing to lower the widening.
 try_set* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
           Res<TyId, AllocError> {
     both_failures(r.form, want.form).match({
@@ -132,9 +127,9 @@ try_into_absence* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
     })
 }
 
-// The mirror of `sema_check.zen`'s `absence_into_failure`, and here
-// rather than beside it because that file is already at STYLE.md's note
-// line and this rule has one caller.
+// Mirrors `sema_check.zen`'s `absence_into_failure`; kept here rather
+// than beside it because that file is at STYLE.md's line cap and this
+// rule has one caller.
 failure_into_absence = (got: ResForm, want: ResForm) bool {
     got.match({
         Failure => want.match({ Absence => true, _ => false }),
@@ -142,8 +137,8 @@ failure_into_absence = (got: ResForm, want: ResForm) bool {
     })
 }
 
-// A caller whose own set is `_` has not declared one, so there is
-// nothing to be contained IN. It raises what the callee raises, and
+// A caller whose own set is `_` hasn't declared one, so there's nothing
+// to be contained IN — it raises what the callee raises, and
 // `sema_raise.zen` settles the signature once the body is walked.
 try_contained* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
                 Res<TyId, AllocError> {
@@ -154,9 +149,9 @@ try_contained* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
 }
 
 // The callee's SET and not its name: `WriteError` raised into an
-// inferred set contributes `IoError` and `AllocError`, so that the
-// caller's own declared set is asked to contain members and not a
-// spelling. `union_ty` flattens the rest.
+// inferred set contributes `IoError` and `AllocError`, so the caller's
+// declared set is asked to contain members, not a spelling. `union_ty`
+// flattens the rest.
 try_raises* = (c :: Checker, r: TyRes) Res<TyId, AllocError> {
     c.raise(c.set_of(r.error)).try();
     Ok(r.value);

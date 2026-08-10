@@ -1,13 +1,10 @@
 // src/lsp/lsp_serve.zen
 // The server: lifecycle, a document overlay, and a dispatch table.
 //
-// It answers FIVE requests and handles THREE notifications, and it
-// refuses everything else BY NAME with `-32601` and the method spelled
-// back. That is deliberate, and it is `src/zen/zen_cli.zen`'s own rule
-// applied one level down — a command that silently does nothing is
-// worse than one that says it is not written. A server answering
-// `textDocument/completion` with an empty list would look like a
-// working server that had nothing to suggest.
+// It answers FIVE requests and handles THREE notifications, and refuses
+// everything else BY NAME with `-32601` and the method spelled back —
+// `src/zen/zen_cli.zen`'s own rule one level down: a command that
+// silently does nothing is worse than one that says it is not written.
 //
 //   initialize                 capabilities, and the gate opens
 //   shutdown                   `null`, and no more work is accepted
@@ -19,39 +16,26 @@
 //   initialized / exit / $/cancelRequest   notifications, no reply
 //   didOpen / didChange / didClose         the overlay, Full sync only
 //
-// SYNC IS FULL AND CANNOT USEFULLY BE INCREMENTAL. `design_lsp.md` §5
-// gives the three structural reasons — ids are indices in creation
-// order, a `Checker` copies a finished `Ast`, compilation is
-// whole-program — and the conclusion: applying a range edit into a
-// buffer and then handing the whole buffer to a whole-program compiler
-// buys nothing and costs a second implementation of text-range
-// arithmetic beside `lsp_pos.zen`'s.
+// SYNC IS FULL AND CANNOT USEFULLY BE INCREMENTAL. `design_lsp.md` §5:
+// ids are indices in creation order, a `Checker` copies a finished
+// `Ast`, compilation is whole-program — so a range edit followed by
+// handing the whole buffer to a whole-program compiler buys nothing.
 //
-// `$/cancelRequest` IS DROPPED AND NOT HONOURED, and saying so beats
-// advertising cancellation that cannot happen: there is no yield point
-// in `check_all`, and this server is single-threaded because
-// `PLAN.md:194` writes the compiler in the seed subset and the seed
-// subset has no threads.
+// `$/cancelRequest` IS DROPPED, not honoured: there is no yield point in
+// `check_all`, and this server is single-threaded (`PLAN.md:194`: the
+// seed subset has no threads).
 //
-// ---------------------------------------------------------------------
-// THIS FILE HOLDS NO TRANSPORT, and that is why the transport could be
-// changed without touching it.
+// THIS FILE HOLDS NO TRANSPORT. `one` takes request bytes and appends
+// reply bytes; `serve` walks a buffer of frames the same way — so
+// `lsp_stdio.zen` puts a pipe under the same server the corpus drives
+// from a file, and the two answer identically by construction.
 //
-// `one` takes the request bytes and appends the reply bytes; `serve`
-// walks a buffer of frames the same way. Neither reads a stream and
-// neither writes one, so `lsp_stdio.zen` could put a pipe under the same
-// server the corpus drives from a file, and the two answer identically
-// by construction rather than by agreement.
-//
-// ---------------------------------------------------------------------
-// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
-// is one session, and its parts are the lifecycle, the document store
-// and the table that routes one message — which share the `Server` that
-// holds all three. What crossed the line was `publishDiagnostics`, and
-// the half of it that is a SUBJECT of its own has already left: what a
-// build found, how it is grouped by file and when it is sent are
-// `lsp_diag.zen`'s, and what stays here is the trigger — a change marks,
-// and `settled` is where the transport says the batch is over.
+// OVER 500 LINES, per STYLE.md's justification: the subject is one
+// session (lifecycle, document store, the table that routes one
+// message) sharing the `Server` that holds all three. `publishDiagnostics`
+// moved its own subject to `lsp_diag.zen`, leaving here only the
+// trigger — a change marks, `settled` is where the transport says the
+// batch is over.
 
 str, String = std.text
 Vec, Map = std.collections
@@ -74,46 +58,40 @@ path_of = lsp.lsp_uri
 
 // The whole of the server's state.
 //
-// `docs` maps a URI to the text of the open buffer. The text is a `str`
-// borrowed from the decoded JSON string in `a`, and that is safe for
-// exactly one reason worth writing down: `a` is an arena outliving the
-// session, so nothing it handed out is freed under the map. The day
-// this server runs on a per-request arena, this becomes a copy.
+// `docs` maps a URI to the open buffer's text, a `str` borrowed from the
+// decoded JSON string in `a`. Safe because `a` is an arena outliving the
+// session; a per-request arena would make this a copy.
 Server* = {
     a: Alloc,
 
-    // THE AUTHORITY A QUERY NEEDS. Hover is a build now, and a build
-    // reads the disk — so the server holds the same `Env` the driver
-    // does rather than a second way of opening a file.
+    // THE AUTHORITY A QUERY NEEDS. Hover is a build now and reads the
+    // disk, so the server holds the same `Env` the driver does.
     env: Env,
 
     // THE WORKSPACE, from `initialize`'s `rootUri`, as a path. Empty
-    // until `initialize` arrives or when the client sends none, and
-    // that emptiness is load-bearing: it is what sends hover back to
-    // the single-module answer instead of building a root nobody named.
-    //
-    // NOT THE COMPILATION ROOT. `zen_path.root_for` computes that from
-    // the document, and this is only the floor it may not climb past.
+    // until `initialize` arrives or the client sends none — load-bearing
+    // emptiness: it sends hover back to the single-module answer instead
+    // of building a root nobody named. NOT THE COMPILATION ROOT
+    // (`zen_path.root_for` computes that from the document); this is
+    // only the floor it may not climb past.
     workspace :: str = "",
 
     docs :: Map<str, str>,
 
-    // THE SAME DOCUMENTS, IN OPENING ORDER, because a `Map` in this
-    // tree answers `get` and cannot be walked — and a build's overlay
-    // has to carry EVERY unsaved buffer, not only the one being edited.
-    // One list beside one map is cheaper than a map that can iterate.
+    // THE SAME DOCUMENTS, IN OPENING ORDER: a `Map` here cannot be
+    // walked, and a build's overlay must carry EVERY unsaved buffer, not
+    // only the one being edited.
     open :: Vec<str>,
 
-    // What has been said about those documents, and what is owed. The
+    // What has been said about those documents, and what is owed — the
     // policy lives in `lsp_diag.zen`; this file only marks and settles.
     notes :: Diagnostics,
 
     ready :: bool,        // `initialize` has been answered
     stopping :: bool,     // `shutdown` has been answered
 
-    // Has `shutdown` been answered? The FIELD stays unexported: a
-    // transport needs to know when to stop reading, and nothing outside
-    // this file may decide when the server stops accepting work.
+    // Has `shutdown` been answered? The FIELD stays unexported: nothing
+    // outside this file may decide when the server stops accepting work.
     stopped* = (self: @Self) bool { self.stopping }
 
     // One message: read it, route it, frame whatever it produced.
@@ -124,10 +102,8 @@ Server* = {
             Err(f)  => parse_error(f, msg),
             Ok(req) => self.route(tree, req, msg),
         }).try();
-        // AN EMPTY MESSAGE IS A NOTIFICATION AND GETS NO FRAME. The
-        // protocol forbids replying to one, and a server that answered
-        // `didChange` with anything at all would desynchronise a client
-        // that is counting replies.
+        // AN EMPTY MESSAGE IS A NOTIFICATION AND GETS NO FRAME — the
+        // protocol forbids replying to one.
         msg.is_empty().match({
             true  => written(),
             false => write_frame(msg.view(), out),
@@ -137,20 +113,17 @@ Server* = {
     route = (self :: @Self, tree: Jsons, req: JsonId, msg :: String)
             Res<(), AllocError> {
         method = method_of(tree, req);
-        // THE PRESENCE OF `id` IS WHAT MAKES A MESSAGE A REQUEST. Not
-        // the method name — the protocol says so, and a table of which
-        // names are notifications would be a second, divergent, copy of
-        // the specification.
+        // THE PRESENCE OF `id` IS WHAT MAKES A MESSAGE A REQUEST, not
+        // the method name — a table of notification names would be a
+        // second, divergent copy of the spec.
         tree.field(req, "id").match({
             None    => self.notified(tree, req, method),
             Ok(rid) => self.requested(tree, req, method, rid, msg),
         })
     }
 
-    // BEFORE `initialize`, EVERY REQUEST IS REFUSED with `-32002`. That
-    // is the protocol's rule and it is the one piece of lifecycle a
-    // server cannot skip without the client's own state machine going
-    // wrong.
+    // BEFORE `initialize`, EVERY REQUEST IS REFUSED with `-32002` — the
+    // one piece of lifecycle a server cannot skip.
     requested = (self :: @Self, tree: Jsons, req: JsonId, method: str,
                  rid: JsonId, msg :: String) Res<(), AllocError> {
         (self.ready || method.eq("initialize")).match({
@@ -177,19 +150,16 @@ Server* = {
         })
     }
 
-    // `initialize` IS WHERE A SERVER LEARNS WHERE IT IS, and it is the
-    // only message that carries it: `rootUri` arrives once and every
-    // later request names a document and nothing else.
+    // `initialize` IS WHERE A SERVER LEARNS WHERE IT IS: `rootUri`
+    // arrives once and every later request names only a document.
     //
-    // A CLIENT THAT SENDS NONE IS NOT AN ERROR. `rootUri` is nullable in
-    // the protocol and a single-file editor session has no root — the
-    // field stays empty, and hover falls back to checking the open
-    // document alone, which is what this server did for every document
-    // before there was a build behind it.
+    // A CLIENT THAT SENDS NONE IS NOT AN ERROR. `rootUri` is nullable
+    // and a single-file editor session has no root — the field stays
+    // empty and hover falls back to checking the open document alone.
     //
-    // `rootPath` IS NOT READ. It is the deprecated spelling of the same
-    // thing, and a second source for one fact is a second answer waiting
-    // to disagree with the first.
+    // `rootPath` IS NOT READ — the deprecated spelling of the same
+    // thing, and a second source for one fact can disagree with the
+    // first.
     initialized = (self :: @Self, tree: Jsons, req: JsonId, rid: JsonId,
                    msg :: String) Res<(), AllocError> {
         self.ready = true;
@@ -200,9 +170,8 @@ Server* = {
         result(tree, rid, caps.view(), msg)
     }
 
-    // REFUSED BY NAME. The method is echoed into the message so a
-    // client's log says which request this server does not implement,
-    // rather than that some request failed.
+    // REFUSED BY NAME: the method is echoed so a client's log says which
+    // request is unimplemented, not that some request failed.
     unknown = (self :: @Self, tree: Jsons, rid: JsonId, method: str,
                msg :: String) Res<(), AllocError> {
         why ::= self.a.String().try();
@@ -213,10 +182,8 @@ Server* = {
     }
 
     // `initialized`, `exit`, `didClose` and `$/cancelRequest` all mean
-    // "nothing to do here", and they fall through the same `false` arm.
-    // They are named in this comment rather than in four empty branches,
-    // because four branches that do nothing hide the fifth that should
-    // have.
+    // "nothing to do here" and fall through the same `false` arm, named
+    // here rather than as four empty branches that would hide a fifth.
     notified = (self :: @Self, tree: Jsons, req: JsonId, method: str)
                Res<(), AllocError> {
         method.eq("textDocument/didOpen").match({
@@ -233,10 +200,9 @@ Server* = {
         self.remember(string_at(tree, doc, "uri"), string_at(tree, doc, "text"))
     }
 
-    // FULL SYNC: `contentChanges[0].text` is the whole new buffer,
-    // because `initialize` advertised `textDocumentSync: 1`. A change
-    // carrying a `range` would be an incremental one, this server never
-    // asked for those, and so the field is not read.
+    // FULL SYNC: `contentChanges[0].text` is the whole new buffer, since
+    // `initialize` advertised `textDocumentSync: 1`; a `range` field
+    // would mean incremental sync, never asked for, and is not read.
     changed = (self :: @Self, tree: Jsons, req: JsonId) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
         edits = param(tree, req, "contentChanges");
@@ -247,9 +213,8 @@ Server* = {
         self.remember(uri, text)
     }
 
-    // A URI with no text is not stored. An empty document and an absent
-    // one are different states, and a `didOpen` this server could not
-    // read must not look like a file the user emptied.
+    // A URI with no text is not stored — an empty document and an
+    // absent one are different states.
     remember = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
         uri.is_empty().match({
             true  => written(),
@@ -257,12 +222,9 @@ Server* = {
         })
     }
 
-    // UNCHANGED BYTES ARE NOT A CHANGE, and this is the only mitigation
-    // for the per-keystroke build cost that this server can actually
-    // perform — `lsp_diag.zen`'s header says why a timed debounce
-    // cannot be. An editor re-sending `didOpen` for a file it already
-    // opened, or a `didChange` whose text is what the buffer already
-    // holds, is a whole-program build bought for nothing.
+    // UNCHANGED BYTES ARE NOT A CHANGE — the only mitigation this server
+    // can perform for the per-keystroke build cost (`lsp_diag.zen`'s
+    // header says why a timed debounce cannot be).
     stored = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
         self.docs.get(uri).match({
             None     => self.changed_to(uri, text),
@@ -289,14 +251,11 @@ Server* = {
 
     // THE SETTLE POINT: every message the transport was holding has been
     // answered, so a build owed to the last of them happens now. Called
-    // by `serve` at the end of a buffer and by `lsp_stdio.zen` after
-    // each drain — the two agree by calling one method rather than by
-    // each deciding when a batch has ended.
+    // by `serve` at buffer end and by `lsp_stdio.zen` after each drain.
     //
-    // NOTHING IS SENT AFTER `shutdown`. The protocol's rule is that no
-    // work is accepted once it has been answered, and an unprompted
-    // notification arriving between `shutdown` and `exit` is exactly the
-    // work a client has just said it does not want.
+    // NOTHING IS SENT AFTER `shutdown`: no work is accepted once it has
+    // been answered, and an unprompted notification between `shutdown`
+    // and `exit` is work the client has just said it does not want.
     settled* = (self :: @Self, out :: String) Res<(), AllocError> {
         self.stopping.match({
             true  => written(),
@@ -312,10 +271,8 @@ Server* = {
         line = number_at(tree, where, "line");
         character = number_at(tree, where, "character");
         self.docs.get(uri).match({
-            // A hover on a document that was never opened is a client
-            // bug, and `-32602` names it rather than answering `null` —
-            // which would read as "no type here" and send whoever is
-            // debugging it to look in the wrong place.
+            // A client bug; `-32602` names it rather than answering
+            // `null`, which would misleadingly read as "no type here".
             None     => failed(tree, rid, INVALID_PARAMS,
                                "no open document for that uri", msg),
             Ok(text) => self.answer_hover(tree, rid, uri, text, line, character, msg),
@@ -334,16 +291,10 @@ Server* = {
         result(tree, rid, body.view(), msg)
     }
 
-    // COLOUR, and it needs NOTHING the other two answers need. No
-    // workspace, no build, no `Checker` — `lsp_colour.zen` runs the
-    // lexer over the buffer and nothing else, so this is the one query
-    // here that is honest about a file with no root, a file that does
-    // not parse, and a file that is on no disk.
-    //
-    // A DOCUMENT THAT WAS NEVER OPENED IS `-32602`, the same refusal
-    // hover makes and for the same reason: the server has no bytes for
-    // that uri, an empty token list would read as "this file has no
-    // colour in it", and a client sending one has a bug worth naming.
+    // COLOUR needs NOTHING the other two need: no workspace, no build,
+    // no `Checker` — `lsp_colour.zen` runs the lexer over the buffer
+    // alone, honest about a file with no root or that does not parse.
+    // A DOCUMENT NEVER OPENED IS `-32602`, the same refusal hover makes.
     coloured = (self :: @Self, tree: Jsons, req: JsonId, rid: JsonId,
                 msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -361,16 +312,11 @@ Server* = {
         result(tree, rid, body.view(), msg)
     }
 
-    // WHICH OF THE TWO HOVERS, and the workspace is the whole of the
-    // decision.
-    //
-    // With one, the document is checked as part of a BUILD and an
-    // imported name has a type. Without one there is no root to build —
-    // a client that sent no `rootUri`, or the two-file form of `zen lsp`
-    // that `tests/corpus/lsp/` drives with a document that is not on any
-    // disk — and the old single-module answer is still the best honest
-    // one: it types what the file itself declares and answers `null`,
-    // never a guess, for what it imports.
+    // WHICH OF THE TWO HOVERS: the workspace is the whole decision. With
+    // one, the document is checked as part of a BUILD and an imported
+    // name has a type. Without one — no `rootUri`, or the two-file form
+    // of `zen lsp` — the single-module answer types what the file
+    // declares and answers `null`, never a guess, for what it imports.
     hover = (self :: @Self, uri: str, text: str, line: usize,
              character: usize) Res<Hover, AllocError> {
         self.workspace.is_empty().match({
@@ -388,10 +334,9 @@ Server* = (a: Alloc, env: Env) Server {
 
 // Every frame in `input`, answered into `out`.
 //
-// A malformed frame STOPS the session and is reported rather than
-// skipped: framing is the one layer where recovery is impossible by
-// construction, because the only thing that says where the next message
-// starts is the header of this one. Skipping forward would
+// A malformed frame STOPS the session: framing is the one layer where
+// recovery is impossible — the header of this message is the only thing
+// that says where the next starts, so skipping forward would
 // resynchronise onto a byte inside somebody's document.
 serve* = (s :: Server, input: str, out :: String) Res<(), AllocError> {
     at ::= 0;
@@ -402,21 +347,16 @@ serve* = (s :: Server, input: str, out :: String) Res<(), AllocError> {
             Ok(fr) => { at = fr.next; s.one(fr.body, out).try(); },
         });
     });
-    // THE END OF A BUFFER IS A SETTLE POINT, which is what makes a
-    // whole batch of changes cost one build — and what lets a corpus
-    // test drive two batches through one server and watch a file's
-    // errors appear and then be taken back.
+    // THE END OF A BUFFER IS A SETTLE POINT — what makes a batch of
+    // changes cost one build.
     s.settled(out)
 }
 
-// A framing fault is reported to the caller's stream and NOT to a
-// client, because a client that cannot be framed cannot be replied to
-// either. One line, naming the byte, and the session is over.
-//
-// The two readers of the fault are STARRED because `lsp_stdio.zen` says
-// the same sentence to a console rather than into a buffer, and a second
-// pair of matches over `FrameFault` would be a second answer to "which
-// byte" that could disagree with this one.
+// A framing fault is reported to the caller's stream, not to a client
+// (which cannot be replied to if it cannot be framed). The two readers
+// of the fault are STARRED because `lsp_stdio.zen` says the same
+// sentence to a console — a second pair of matches would be a second,
+// possibly disagreeing, answer to "which byte".
 frame_fault = (f: FrameFault, out :: String) Res<(), AllocError> {
     out.add_bytes("lsp: bad frame at byte ").try();
     write_decimal(frame_byte(f), out).try();
@@ -446,22 +386,20 @@ frame_why* = (f: FrameFault) str {
 // --- reading a request -----------------------------------------------
 //
 // Every one of these answers "" or 0 for a field it cannot find, and
-// none of them fails. A server is handed arbitrary bytes by definition,
-// and a missing field has to produce an empty answer rather than a
-// trap — the refusal happens later, by name, where it can carry an id.
+// none fails — refusal happens later, by name, where it can carry an id.
 
 method_of = (tree: Jsons, req: JsonId) str {
     string_at(tree, req, "method")
 }
 
-// `params`, or the request itself when there are none, so that a
-// malformed message reads as one with every field absent.
+// `params`, or the request itself when there are none — a malformed
+// message reads as one with every field absent.
 params_of = (tree: Jsons, req: JsonId) JsonId {
     tree.field(req, "params").match({ None => req, Ok(ps) => ps })
 }
 
-// `params.<name>`, and the object itself when that field is absent —
-// which keeps the same "every field is empty" reading one level down.
+// `params.<name>`, and the object itself when absent — same reading one
+// level down.
 param = (tree: Jsons, req: JsonId, name: str) JsonId {
     ps = params_of(tree, req);
     tree.field(ps, name).match({ None => ps, Ok(v) => v })
@@ -483,11 +421,10 @@ number_at = (tree: Jsons, obj: JsonId, name: str) usize {
 
 // --- the reply shapes ------------------------------------------------
 //
-// Built as TEXT and not through the arena, because a reply is a fixed
-// shape with two holes in it and an arena would mean building six nodes
-// to print eight bytes. Every string that could contain a quote goes
-// through `write_text`, which is `lsp_json.zen`'s escaper — the same one
-// the writer uses, so there is exactly one escaping rule in this folder.
+// Built as TEXT and not through the arena: a reply is a fixed shape with
+// two holes, and an arena would mean building six nodes to print eight
+// bytes. Every quotable string goes through `write_text`,
+// `lsp_json.zen`'s escaper — one escaping rule in this folder.
 
 result = (tree: Jsons, rid: JsonId, body: str, msg :: String)
          Res<(), AllocError> {
@@ -507,18 +444,16 @@ failed = (tree: Jsons, rid: JsonId, code: usize, why: str, msg :: String)
     msg.add_bytes("}}")
 }
 
-// THE ID IS ECHOED VERBATIM, out of the arena it was read from. A
+// THE ID IS ECHOED VERBATIM, out of the arena it was read from — a
 // JSON-RPC id may be a number or a string, and re-emitting the node
-// rather than re-encoding a parsed value is how this server matches
-// either without a second representation of "an id".
+// matches either without a second representation of "an id".
 head = (tree: Jsons, rid: JsonId, msg :: String) Res<(), AllocError> {
     msg.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
     tree.write(rid, msg)
 }
 
-// A frame this server could not parse gets an error with a NULL id,
-// which is the protocol's answer for "I could not tell which request
-// this was" — the id lives inside the document that failed to parse.
+// A frame this server could not parse gets an error with a NULL id —
+// the id lives inside the document that failed to parse.
 parse_error = (f: JsonFault, msg :: String) Res<(), AllocError> {
     msg.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-").try();
     write_decimal(PARSE_ERROR, msg).try();
@@ -527,9 +462,8 @@ parse_error = (f: JsonFault, msg :: String) Res<(), AllocError> {
     msg.add_bytes("}}")
 }
 
-// The fault, with its byte offset. `TESTING.md:17` — "a rejection with
-// the wrong span is a failure" — is why the offset is carried all the
-// way out to the wire instead of being dropped for a rounder message.
+// The fault, with its byte offset — `TESTING.md:17`: "a rejection with
+// the wrong span is a failure".
 write_fault = (f: JsonFault, msg :: String) Res<(), AllocError> {
     msg.add_byte('"').try();
     msg.add_bytes(fault_why(f)).try();
@@ -564,10 +498,9 @@ fault_byte = (f: JsonFault) Res<usize> {
     })
 }
 
-// A `Hover` as the protocol spells one. `plaintext` and not `markdown`,
-// because neither a type name nor a reprinted signature is markup, and
-// rendering one as markup would let a `*` inside a name become emphasis
-// — which is not hypothetical here, since an exported name IS starred.
+// A `Hover` as the protocol spells one. `plaintext` and not `markdown`:
+// rendering as markup would let a `*` inside a name become emphasis —
+// not hypothetical, since an exported name IS starred.
 write_hover = (h: Hover, out :: String) Res<(), AllocError> {
     out.add_bytes("{\"contents\":{\"kind\":\"plaintext\",\"value\":").try();
     write_text(h.shown, out).try();
@@ -578,37 +511,31 @@ write_hover = (h: Hover, out :: String) Res<(), AllocError> {
     out.add_bytes("}}")
 }
 
-// WHAT THIS SERVER SAYS IT CAN DO, and it says only what it does.
+// WHAT THIS SERVER SAYS IT CAN DO, and only what it does.
 //
-// It is WRITTEN and no longer a constant, because the semantic-token
-// legend belongs to `lsp_colour.zen` — the array a `tokenType` indexes
-// and the index itself cannot be spelled in two files without one day
-// disagreeing, and the disagreement is silent: every colour in the file
-// shifts by one and nothing errors.
+// WRITTEN, not a constant: the semantic-token legend belongs to
+// `lsp_colour.zen`, and the index a `tokenType` uses cannot be spelled
+// in two files without one day silently disagreeing.
 //
-// Sync kind 1 is Full — see this file's header for why it is not 2.
+// Sync kind 1 is Full — see this file's header for why not 2.
 //
-// `full: true` AND NOTHING ELSE. The protocol lets a server advertise
-// `full: {delta: true}` and `range: true`, and a client believes what it
-// is told: advertise `range` and VS Code will send
-// `textDocument/semanticTokens/range`, which this server does not
-// answer, so it is refused with `-32601` and the file has NO COLOUR AT
-// ALL with nothing on screen to say why. A capability is a promise, and
-// the only safe promise is the one that is already kept.
+// `full: true` AND NOTHING ELSE. A client believes what it is told:
+// advertising `range` would make VS Code send
+// `textDocument/semanticTokens/range`, which this server refuses with
+// `-32601`, leaving the file with NO COLOUR AT ALL and no reason shown.
+// A capability is a promise; the only safe one is the one already kept.
 write_capabilities* = (out :: String) Res<(), AllocError> {
     out.add_bytes("{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"semanticTokensProvider\":{\"legend\":").try();
     write_legend(out).try();
     out.add_bytes(",\"full\":true}},\"serverInfo\":{\"name\":\"zen\",\"version\":\"0\"}}")
 }
 
-// The one method `semanticTokensProvider` above promises. Spelled once,
-// beside the promise, so the route and the advertisement are read
-// together.
+// The one method `semanticTokensProvider` above promises, spelled once
+// beside the promise.
 SEMANTIC_TOKENS*: str = "textDocument/semanticTokens/full"
 
-// JSON-RPC's codes, as MAGNITUDES. Every one of them is negative on the
-// wire and the sign is written by the one function that emits them, so
-// a code cannot be spelled positive by accident.
+// JSON-RPC's codes, as MAGNITUDES: negative on the wire, and the sign is
+// written by the one function that emits them.
 PARSE_ERROR*: usize = 32700
 METHOD_NOT_FOUND*: usize = 32601
 INVALID_PARAMS*: usize = 32602

@@ -1,28 +1,26 @@
 // src/gen/gen_c/gen_c_op.zen
 // What an OPERATOR is in C.
 //
-// `gen_c_expr.zen` owns the expression FORMS — a literal, a name, an
-// access, a call, and the spill that puts a `.match` where C wants a
-// value. This file owns the one form that is not a shape but a
-// decision: `a + b`, `a == b`, `a && b`, where the operator's spelling
-// in C depends on what it is being applied to.
+// `gen_c_expr.zen` owns the expression FORMS; this file owns the one
+// form that is not a shape but a decision: `a + b`, `a == b`, `a && b`,
+// where the operator's C spelling depends on what it's applied to.
 //
-// THREE OPERATORS, THREE RULES, and they are genuinely three:
+// THREE OPERATORS, THREE RULES:
 //
 //   ARITHMETIC TRAPS. `+ - * /` on an integer go through a checked
-//   helper with a position, because "signed overflow is undefined
-//   behaviour in C, so gen_c cannot emit `a + b` and check afterwards".
+//   helper with a position, because signed overflow is undefined
+//   behaviour in C — gen_c cannot emit `a + b` and check afterwards.
 //   `+% -% *%` are the wrapping forms and are plain C.
 //
 //   `==` DISPATCHES. "`==` through `Eq` is the only operator that
 //   dispatches to an impl", so two values C cannot compare are compared
-//   by the `eq` their own type supplies — statically, because the
-//   operands' type is known. There is no `Ord`, so ordering has nothing
-//   to dispatch to and is refused by name.
+//   by the `eq` their own type supplies — statically, since the
+//   operands' type is known. There is no `Ord`, so ordering is refused
+//   by name.
 //
-//   `&&` AND `||` SHORT-CIRCUIT, which makes them the one place a spill
-//   may not be hoisted: the statements would run whether or not the
-//   left side held.
+//   `&&` AND `||` SHORT-CIRCUIT, the one place a spill may not be
+//   hoisted: the statements would run whether or not the left side
+//   held.
 
 Ast, Expr, ExprKind, ExprId, Span, Ident, TypeId = ast
 Literal, LiteralKind, BinOp, UnOp, Binary, Unary = ast
@@ -84,16 +82,16 @@ lower_negate = (be :: CBackend, node: Expr, u: Unary, ctx: Ctx, want: TyId,
 }
 
 // A MINUS SIGN ON A LITERAL IS PART OF THE CONSTANT, not a subtraction
-// from zero, and folding it here is a correctness fix rather than an
-// optimisation. `0 - x` evaluates the positive first, and the magnitude
-// of `iN.MIN` is one past `iN.MAX` — so the checked subtract traps on
-// the way to a value the type holds exactly.
+// from zero — folding it here is a correctness fix, not an
+// optimisation. `0 - x` evaluates the positive first, and `iN.MIN`'s
+// magnitude is one past `iN.MAX`, so the checked subtract traps on the
+// way to a value the type holds exactly.
 //
-// That is the whole of `std/core/num.zen:54:17: trap: integer overflow`:
+// Concretely: `std/core/num.zen:54:17: trap: integer overflow` —
 // `i64.MIN - 1` never reached the subtraction the author wrote, because
 // the CONSTANT's own initialiser aborted first, carrying num.zen's
-// position with it. A trap must name where the program went wrong, so a
-// declaration that is merely read may not be where it points.
+// position. A trap must name where the program went wrong, so a
+// declaration merely read may not be where it points.
 negate_integer = (be :: CBackend, node: Expr, u: Unary, prim: str, ctx: Ctx,
                   ty: TyId, out :: String) Res<(), AllocError> {
     int_digits(be, u.operand).match({
@@ -118,12 +116,11 @@ literal_digits = (l: Literal) Res<str> {
 }
 
 // THERE IS NO NEGATIVE LITERAL IN C. `-<digits>` is unary minus over a
-// POSITIVE constant, and `i64.MIN`'s magnitude is `i64.MAX + 1` — the
-// one value with no signed C type to be, so the negation would happen
-// unsigned and the result would reach `int64_t` by conversion.
-// <stdint.h> spells INT64_MIN as a difference for exactly that reason,
-// and so does this. Every narrower `MIN` has a magnitude a signed
-// constant already holds, so it needs nothing.
+// POSITIVE constant, and `i64.MIN`'s magnitude is `i64.MAX + 1` — no
+// signed C type holds it, so the negation would happen unsigned and
+// reach `int64_t` by conversion. <stdint.h> spells INT64_MIN as a
+// difference for the same reason, and so does this. Every narrower
+// `MIN` has a magnitude a signed constant already holds.
 I64_MIN_DIGITS: str = "9223372036854775808"
 I64_MIN_C: str = "(-9223372036854775807LL - 1LL)"
 
@@ -163,14 +160,13 @@ lower_binary* = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx, want: TyId,
 
 // WHAT AN OPERATOR EVALUATES TO, when sema could not say.
 //
-// `&&`, `||` and every comparison are `bool` whatever they were given;
-// everything else is its operands' own type, which is the rule
-// `operand_type` below already states. Sema answers this for everything
-// it typed, and what reaches here is an operand it could NOT type — a
-// field hanging off `alloc.create<T>()`, whose whole chain is the
-// backend's answer and not the memo's. `println("{}", a.n + b.n)` is
-// where it shows: an argument has no expectation to fall back on, so an
-// unanswered `+` is a value with no write and a refusal by type.
+// `&&`, `||`, and every comparison are `bool` whatever they were given;
+// everything else is the operands' own type (`operand_type` below).
+// What reaches here is an operand sema could NOT type — e.g. a field
+// hanging off `alloc.create<T>()`, whose chain is the backend's answer,
+// not the memo's. `println("{}", a.n + b.n)` is where it shows: no
+// expectation to fall back on, so an unanswered `+` is a refusal by
+// type.
 binary_type* = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
                Res<TyId, AllocError> {
     (is_logical(b.op) || is_comparison(b.op)).match({
@@ -202,29 +198,26 @@ is_comparison* = (op: BinOp) bool {
     })
 }
 
-// `&&` and `||` short-circuit, so a right operand that needs statements
-// of its own cannot be lowered here: the statements would run whether
-// or not the left side held. Reported, not mis-lowered.
+// `&&` and `||` short-circuit, so a right operand needing statements of
+// its own can't be lowered here: the statements would run whether or
+// not the left side held. Reported, not mis-lowered.
 //
-// THE QUESTION IS `spills_anywhere` AND NOT `spills`, and the
-// difference is a wrong answer rather than a refusal. `spills` asks
-// whether the operand IS a spilling form; `expr` now spills a nested
-// one into a temporary, so `a && (half(n).try() > 1)` — whose rhs is a
-// comparison, not a `.try()` — would have its `.try()` hoisted beside
-// the left and fire when `a` was false. The bootstrapper and this
-// backend disagreed by exactly that, which is what a differential run
-// is for.
+// THE QUESTION IS `spills_anywhere`, NOT `spills` — a wrong answer, not
+// just a refusal, hinges on it. `spills` asks whether the operand IS a
+// spilling form; `expr` now spills a nested one into a temporary, so
+// `a && (half(n).try() > 1)` (rhs is a comparison, not a `.try()`)
+// would have its `.try()` hoisted beside the left and fire when `a` was
+// false. The bootstrapper and this backend once disagreed by exactly
+// that — caught by a differential run.
 //
 // SO IT IS WRITTEN OUT: a temporary the left fills, and the right
-// fills AGAIN under an `if` — which is C's own `&&`, spelled with the
-// statements where they belong. The right operand's statements are
-// emitted inside the branch, so a `.try()` in there returns only on the
-// pass that reached it, which is exactly the guarantee the operator
-// makes and the one the hoist broke.
+// fills AGAIN under an `if` — C's own `&&`, with statements where they
+// belong. The right operand's statements land inside the branch, so a
+// `.try()` there returns only on the pass that reached it — the
+// guarantee the hoist broke.
 //
-// The infix form is kept for the common case rather than replaced by
-// this one. `a && b` on two pure operands is `a && b`, and emitting
-// three statements and a temporary for it would put a branch in front
+// The infix form stays for the common case: `a && b` on two pure
+// operands is `a && b`, not three statements and a temporary in front
 // of the C compiler on every comparison in the tree.
 lower_logical = (be :: CBackend, node: Expr, b: Binary, ctx: Ctx,
                  out :: String) Res<(), AllocError> {
@@ -333,14 +326,14 @@ usable = (be :: CBackend, id: TyId) bool {
     })
 }
 
-// Comparison is C's on a scalar, and an IMPL'S otherwise: "`==` through
-// `Eq` is the only operator that dispatches to an impl". So two values
-// C cannot compare are compared by the `eq` their own type supplies —
-// `s == "impl"` on a `str` is `str`'s `Eq`, which `std.text` impls.
+// Comparison is C's on a scalar, an IMPL'S otherwise: "`==` through
+// `Eq` is the only operator that dispatches to an impl". Two values C
+// cannot compare are compared by the `eq` their own type supplies —
+// `s == "impl"` on a `str` is `str`'s `Eq`, impl'd by `std.text`.
 //
-// ORDERING IS NOT COVERED and is refused by name: "there is no `Ord`.
-// `std.core` has `Eq` and `Hash` and nothing that orders", so `<` on a
-// struct has nothing to dispatch to and inventing one here would be
+// ORDERING IS NOT COVERED, refused by name: "there is no `Ord`.
+// `std.core` has `Eq` and `Hash` and nothing that orders" — `<` on a
+// struct has nothing to dispatch to, and inventing one here would be
 // this backend deciding a language question.
 lower_compare = (be :: CBackend, b: Binary, prim: str, ctx: Ctx,
                  operand: TyId, out :: String) Res<(), AllocError> {
@@ -409,13 +402,12 @@ write_infix = (be :: CBackend, b: Binary, op: str, ctx: Ctx, operand: TyId,
 
 // The left operand, walked as a spine only when there IS one.
 //
-// THE TEST IS HERE AND NOT INSIDE `spine_lhs`, and that is not a
-// micro-optimisation: the walk holds a `Vec` and a cursor, so its frame
-// is far fatter than the one recursive call it replaces. Under every
-// `+` and every `==` in the tree that costs depth the other constructs
-// need — measured, nested `.match` lost a third of its headroom to
-// exactly that. An operand that is not itself an operator takes the
-// path it always took.
+// THE TEST IS HERE, NOT INSIDE `spine_lhs` — not a micro-optimisation:
+// the walk holds a `Vec` and a cursor, a far fatter frame than the one
+// recursive call it replaces. Under every `+` and `==` in the tree that
+// costs depth other constructs need — measured, nested `.match` lost a
+// third of its headroom to exactly that. A non-operator operand takes
+// the path it always took.
 lower_lhs = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
              out :: String) Res<(), AllocError> {
     spine_ahead(be, id).match({
@@ -472,10 +464,9 @@ traps* = (op: BinOp) bool {
     })
 }
 
-// Arithmetic on an integer goes through a helper, always. Nothing here
-// emits `a + b` and looks afterwards: signed overflow is undefined
-// behaviour in C and an after-the-fact test is one the optimizer is
-// entitled to delete.
+// Arithmetic on an integer always goes through a helper: nothing here
+// emits `a + b` and checks afterwards — an after-the-fact test is one
+// the optimizer is entitled to delete.
 lower_arith = (be :: CBackend, node: Expr, b: Binary, prim: str, ctx: Ctx,
                operand: TyId, out :: String) Res<(), AllocError> {
     is_c_integer(prim).match({
@@ -528,15 +519,13 @@ write_trap_args = (be :: CBackend, node: Expr, b: Binary, out :: String)
 // the spine
 //
 // `a + b + c + ..` is `((a + b) + c) ..`, and `parse_expr.zen` builds
-// it with a LOOP — `binary_from` folds each operator onto the left in
-// place — so the parser's depth bound never counts a term and the
-// length of a chain is bounded by nothing at all. Lowering it by
-// recursing into `b.lhs` is three C frames per term, and one line of
-// `tests/corpus/lex/long_single_line.zen` is ten thousand terms:
-// eight megabytes of stack, and then a segmentation fault with no
-// diagnostic. "A crash is not a diagnostic" (docs/TESTING.md), and
-// `bootstrap/gen_c.py`'s `ex_Binary` answers the same fact the same
-// way, in a loop, and says so.
+// it with a LOOP (`binary_from` folds each operator onto the left in
+// place), so nothing bounds a chain's length. Recursing into `b.lhs`
+// is three C frames per term; `tests/corpus/lex/long_single_line.zen`
+// is ten thousand terms — eight megabytes of stack, then a
+// segmentation fault with no diagnostic. "A crash is not a diagnostic"
+// (docs/TESTING.md); `bootstrap/gen_c.py`'s `ex_Binary` handles this
+// the same way, in a loop.
 //
 // THE BYTES OF A LEFT SPINE ARE ALREADY IN TWO HALVES:
 //
@@ -544,20 +533,18 @@ write_trap_args = (be :: CBackend, node: Expr, b: Binary, out :: String)
 //     ^^^^^^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 //       opens, outermost in    base   closes, innermost out
 //
-// so the levels are collected with a cursor and written in two passes
-// instead of n nested calls. The operand type still travels DOWN the
-// spine, the operands are still written left to right, and the
-// statements each one spills still land in the same order — so this
-// emits the bytes the recursion emitted, which `scripts/fixpoint.sh`
-// is what proves.
+// so levels are collected with a cursor and written in two passes
+// instead of n nested calls. Operand type still travels DOWN the
+// spine, operands are still written left to right, and each one's
+// spilled statements land in the same order — so this emits the same
+// bytes the recursion did, which `scripts/fixpoint.sh` proves.
 //
 // A LEVEL THAT DOES NOT FOLD ENDS THE WALK and is handed back to
-// `expr`. That covers every door out of `expr` that is not a plain
-// value — a union tag, a hoist, a fat record — and the two operators
-// that are not written as open-operand-operand-close: a `==` that
-// dispatches to an `Eq` impl, and a `&&` whose right side spills and
-// must be lowered under a branch. Those nest only as deep as the
-// parser let them, so the recursion is bounded there.
+// `expr`: every door out of `expr` that isn't a plain value (a union
+// tag, a hoist, a fat record), plus the two operators not written as
+// open-operand-operand-close (a dispatching `==`, a `&&` whose right
+// side spills). Those nest only as deep as the parser let them, so
+// recursion is bounded there.
 // -----------------------------------------------------------------
 
 // One level of the spine. `id` is the operator node and `operand` the

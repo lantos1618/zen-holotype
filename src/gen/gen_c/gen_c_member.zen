@@ -1,10 +1,9 @@
 // src/gen/gen_c/gen_c_member.zen
 // What a call through a DOT is.
 //
-// `gen_c_call.zen` owns `f(a)`; this file owns `x.f(a)`, and they are
-// not the same question. DESIGN.md has one rule and three readings of
-// it — "a method is a UFCS function whose first parameter happens to be
-// named `self`" — so `x.f(a)` is:
+// `gen_c_call.zen` owns `f(a)`; this file owns `x.f(a)`. DESIGN.md has
+// one rule and three readings of it — "a method is a UFCS function
+// whose first parameter happens to be named `self`" — so `x.f(a)` is:
 //
 //   Shape.Circle(c)   a VARIANT carrying a payload: the base names a
 //                     type, and a payload variant IS the function that
@@ -16,38 +15,33 @@
 //                     world along ... exported ufcs functions"
 //
 // SEMA ALREADY DECIDES BETWEEN THEM and this file asks it rather than
-// re-deciding: `base_of` says whether the base is a type or a value, and
-// `members_of` says what the dot reaches. What is NOT read back off sema
-// is which declaration a call resolved to — `Cand` carries a signature
-// and no `DeclId` — so the lowering re-derives that from the AST, which
-// is the same seam `gen_c_call.zen` documents at `ty_of`.
+// re-deciding: `base_of` says whether the base is a type or a value,
+// `members_of` says what the dot reaches. NOT read back off sema: which
+// declaration a call resolved to — `Cand` carries a signature and no
+// `DeclId` — so the lowering re-derives that from the AST (the same
+// seam `gen_c_call.zen` documents at `ty_of`).
 //
-// AND THE SEAM IS NARROWED HERE RATHER THAN CLOSED. `pick_member` below
-// chooses between two members of one name by calling `recv_sig_fits`,
-// which is the CHECKER'S predicate and the one it used on this very
-// call — so the two cannot disagree about the rule, only about the
-// inputs. Closing it properly means sema writing down WHICH MEMBER a
-// dot resolved to, and it cannot today: `call_memo` is `ExprId ->
-// DeclId`, a `DeclId` cannot name a member, and the recording point is
-// `sema_call.zen`'s `pick_fitting`. `MemberId` already exists for it —
-// `sema_id.zen` names "which declaration did this name resolve to" as
-// one of the three questions a coordinate exists to key.
+// THE SEAM IS NARROWED HERE, NOT CLOSED: `pick_member` below chooses
+// between two members of one name by calling `recv_sig_fits`, the
+// CHECKER'S OWN predicate — so the two can't disagree about the rule,
+// only the inputs. Closing it means sema recording WHICH MEMBER a dot
+// resolved to, and it can't today: `call_memo` is `ExprId -> DeclId`, a
+// `DeclId` can't name a member. `MemberId` already exists for this —
+// `sema_id.zen` names it as one of three questions a coordinate keys.
 //
 // A MEMBER FUNCTION IS AN ORDINARY FUNCTION with the receiver's type as
-// its first parameter, and its symbol is the TYPE's qualified name plus
-// the member's. That is what makes two types' `get` two symbols without
-// a counter, and it is `sym_fn`'s existing rule applied to a name with
-// one more segment.
+// its first parameter; its symbol is the TYPE's qualified name plus the
+// member's — `sym_fn`'s existing rule with one more segment, which is
+// what makes two types' `get` two symbols without a counter.
 //
-// WHAT THIS FILE REFUSES, it refuses BY NAME. A generic receiver needs
-// monomorphisation and a `::` parameter is passed by address — neither
-// is written, and each is a `GenFault` with a position rather than C
-// that compiles and means something else.
+// WHAT THIS FILE REFUSES, it refuses BY NAME: a generic receiver needing
+// monomorphisation, a `::` parameter passed by address — each a
+// `GenFault` with a position, never C that compiles but means something
+// else.
 //
-// A MEMBER WITH NO BODY IS ASKED OF `gen_c_cap.zen` FIRST. Such a member
-// is either a capability whose floor is the target language's — and that
-// file writes the floor — or a declaration nothing defines, which is
-// still a refusal here.
+// A MEMBER WITH NO BODY IS ASKED OF `gen_c_cap.zen` FIRST: either a
+// capability whose floor is the target language's (that file writes
+// it), or a declaration nothing defines — still a refusal here.
 
 Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = ast
 Function, Param, Access, Call, Arg, Span, Ident, TypeId, Impl = ast
@@ -93,11 +87,10 @@ impl_member_at = gen.gen_c.gen_c_impl
 // the entry point
 // -----------------------------------------------------------------
 
-// A LOOP HANDLE IS ASKED ABOUT FIRST, because it is not a value and
-// nothing else about it would answer. `h` has no C storage and no type
-// sema can name — what the binding holds is the loop it came from — so
-// `h.break(v)` has to be recognised at the name rather than resolved
-// through a receiver's type.
+// A LOOP HANDLE IS ASKED ABOUT FIRST: `h` has no C storage and no type
+// sema can name (the binding holds the loop it came from), so
+// `h.break(v)` must be recognised at the name, not resolved through a
+// receiver's type.
 lower_dot_call* = (be :: CBackend, id: ExprId, c: Call, a: Access, ctx: Ctx,
                    want: TyId, out :: String) Res<(), AllocError> {
     depth = handle_depth(be, a.base);
@@ -121,16 +114,15 @@ lower_resolved_dot = (be :: CBackend, id: ExprId, c: Call, a: Access,
 // `Shape.Circle(c)` — a variant that carries a payload
 //
 // "A nullary variant IS a value of the enum; one carrying a payload is
-// the function that builds one, which is what makes `Slot.Left(cell)` an
-// ordinary call and not a second construction form." So this writes the
-// same compound literal `gen_c_expr.zen` writes for a bare variant, with
-// the payload initialiser added.
+// the function that builds one" — `Slot.Left(cell)` is an ordinary
+// call, not a second construction form. Writes the same compound
+// literal `gen_c_expr.zen` writes for a bare variant, plus the payload.
 //
 // A NAME THAT IS NOT A VARIANT IS `gen_c_assoc.zen`'S: a struct body may
-// bind a function too, and `Duration.seconds(2)` reads it through the
-// type. It answers `false` where the type declares nothing of that name
-// that wants no receiver, and that is the refusal reported here — one
-// diagnostic for one mistake.
+// bind a function too (`Duration.seconds(2)` reads it through the
+// type). It answers `false` when the type declares nothing of that name
+// wanting no receiver — the refusal reported here, one diagnostic for
+// one mistake.
 // -----------------------------------------------------------------
 
 lower_static_call = (be :: CBackend, id: ExprId, c: Call, a: Access,
@@ -254,24 +246,22 @@ supplied_kind = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
 // which of two members of one name
 //
 // "Resolution is on declared parameter types AND arity" (DESIGN.md,
-// Overloading), and a backend that reads only the second half answers
-// whichever the member table listed first. `Display` declares a
-// `toString` taking a sink and a sealed one taking an allocator; both
-// are arity two, and `p.toString(alloc)` lowered to the sink symbol
-// with the allocator passed as a `Sink` whose function pointers are
-// NULL. `cc` caught that one because the two return types differ. Two
-// overloads agreeing on their return type would have been silent.
+// Overloading) — a backend reading only arity answers whichever the
+// member table listed first. `Display` declares a `toString` taking a
+// sink and a sealed one taking an allocator, both arity two;
+// `p.toString(alloc)` once lowered to the sink symbol with the
+// allocator passed as a `Sink` of NULL function pointers. `cc` caught
+// it only because the two return types differ — two overloads agreeing
+// on return type would have been silent.
 //
-// THE PREDICATE IS SEMA'S OWN. `recv_sig_fits` is what the checker used
-// to pick this very call's member — its header says why it exists at
-// all: "resolution is on declared parameter types AND arity is one rule
-// and it must be one implementation". Calling it here rather than
-// writing a second one is the difference between agreeing with the
-// checker and agreeing with it today.
+// THE PREDICATE IS SEMA'S OWN: `recv_sig_fits` is what the checker used
+// to pick this very call's member, so calling it here (rather than
+// writing a second one) means agreeing with the checker, not just
+// agreeing with it today.
 //
-// ONE CANDIDATE IS NOT A CHOICE. The whole of this runs only where a
-// name really did reach two members, so the common call pays for the
-// arity test and nothing more.
+// ONE CANDIDATE IS NOT A CHOICE — this only runs where a name really
+// did reach two members, so the common call pays only for the arity
+// test.
 // -----------------------------------------------------------------
 
 pick_member = (be :: CBackend, c: Call, rty: TyId, s: Site,
@@ -524,15 +514,15 @@ lower_bound_or_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
     })
 }
 
-// A MEMBER WITH NO BODY ON A VALUE WHOSE STATIC TYPE IS THE BOUND is the
-// one call in the language that cannot be resolved statically: which
-// function it runs is decided by the impl behind the receiver, and the
-// receiver is a `void *` in a record. `gen_c_fat.zen` writes it.
+// A MEMBER WITH NO BODY ON A VALUE WHOSE STATIC TYPE IS THE BOUND is
+// the one call that can't be resolved statically: which function runs
+// is decided by the impl behind the receiver, a `void *` in a record.
+// `gen_c_fat.zen` writes it.
 //
-// EVERYTHING ELSE STILL RESOLVES STATICALLY. A member with a body is
-// the bound's own default, specialised on this receiver; a receiver
-// with a concrete type is the impl's function, monomorphised. Neither
-// builds a record, which is the whole reason monomorphisation survives.
+// EVERYTHING ELSE STILL RESOLVES STATICALLY: a member with a body is
+// the bound's own default, specialised on this receiver; a concrete
+// receiver is the impl's function, monomorphised. Neither builds a
+// record — the whole reason monomorphisation survives.
 lower_fat_or_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
                        rty: TyId, s: Site, f: Function, ctx: Ctx,
                        out :: String) Res<(), AllocError> {
@@ -552,12 +542,12 @@ lower_ordinary_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
 }
 
 // A GENERIC RECEIVER IS NOT A REFUSAL ANY MORE: `Vec<GenDiag>.add` is
-// `Vec.add` emitted at `GenDiag`, and the receiver's own arguments say
-// which. What is still refused is a member declaring type parameters OF
-// ITS OWN — an instantiation would then be the receiver's arguments
-// followed by the call's, and nothing in this tree declares one — and a
-// member with no body that `gen_c_cap.zen` did not claim as a
-// capability, which is a symbol nothing would define.
+// `Vec.add` emitted at `GenDiag`, the receiver's own arguments say
+// which. Still refused: a member declaring type parameters OF ITS OWN
+// (instantiation would need the receiver's arguments plus the call's;
+// nothing in this tree declares one), and a member with no body that
+// `gen_c_cap.zen` didn't claim as a capability — a symbol nothing would
+// define.
 refuse_method = (be :: CBackend, s: Site, f: Function) bool {
     (f.tparams.len > 0) || (has_body(f) == false)
 }
@@ -611,14 +601,14 @@ emit_method_call = (be :: CBackend, c: Call, a: Access, rty: TyId, s: Site,
 }
 
 // The declared parameter types of a member function, resolved in the
-// module that declares it with `@Self` bound to the receiver — which is
-// what makes `(self: @Self, i: usize)` read as a function of the
-// receiver rather than of a name nothing binds.
+// module that declares it with `@Self` bound to the receiver — makes
+// `(self: @Self, i: usize)` read as a function of the receiver rather
+// than a name nothing binds.
 //
-// AND WITH THE TYPE'S PARAMETERS BOUND, then substituted: `Vec<T>.add`
-// declares `(self :: @Self, v: T)`, and `T` is a written type that means
-// nothing until the declaration that introduced it is back in scope.
-// What it BECOMES is the receiver's own argument in that position.
+// WITH THE TYPE'S PARAMETERS BOUND, then substituted: `Vec<T>.add`
+// declares `(self :: @Self, v: T)`; `T` means nothing until the
+// declaring declaration is back in scope, and it BECOMES the receiver's
+// own argument in that position.
 method_sig* = (be :: CBackend, rty: TyId, decl: DeclId, f: Function,
                mi: usize, inst: Inst, sig :: Vec<TyId>)
               Res<(), AllocError> {
@@ -648,17 +638,16 @@ write_rest = (be :: CBackend, c: Call, f: Function, sig: Vec<TyId>,
 // a member call the source did not write
 //
 // "`==` through `Eq` is the only operator that dispatches to an impl."
-// So `a == b` on a type C cannot compare is a call to the `eq` that
-// type supplies, and it goes through THIS file's own path rather than a
-// second one — the symbol, the instantiation and the queue entry are
-// the ones `a.eq(b)` would have produced, so the two cannot disagree
-// about which function they mean.
+// `a == b` on a type C cannot compare is a call to that type's `eq`,
+// going through THIS file's own path rather than a second one — the
+// symbol, instantiation, and queue entry are the ones `a.eq(b)` would
+// have produced, so the two can't disagree about which function they
+// mean.
 //
-// STATICALLY RESOLVED, like every other impl-supplied member here: the
-// operands' type is known, so no record of function pointers takes
-// part. The answer is whether anything was written, so a type impl'ing
-// no `Eq` is the caller's refusal to report and not a symbol nothing
-// defines.
+// STATICALLY RESOLVED, like every impl-supplied member here: operand
+// types are known, so no function-pointer record takes part. A type
+// impl'ing no `Eq` is the caller's refusal to report, not a symbol
+// nothing defines.
 // -----------------------------------------------------------------
 
 lower_eq_call* = (be :: CBackend, lhs: ExprId, rhs: ExprId, rty: TyId,
@@ -749,19 +738,18 @@ ufcs_or_impl = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
     })
 }
 
-// Does the dot reach this name through an IMPL rather than through the
-// declaration's own body? `members_of` answers over both, and the
-// caller has already found nothing in the body — so a hit here is an
-// impl, and `s.eq(t)` is one: `str` does not declare `eq`, `std.text`
-// impls `Eq` on it. Naming that is the difference between "this backend
-// has no impls yet" and "no such function", and only one of the two is
-// true.
+// Does the dot reach this name through an IMPL rather than the
+// declaration's own body? `members_of` answers over both; the caller
+// already found nothing in the body, so a hit here is an impl —
+// `s.eq(t)` is one: `str` doesn't declare `eq`, `std.text` impls `Eq`
+// on it. Naming that distinguishes "no impls yet" from "no such
+// function".
 //
-// AT THIS CALL'S ARITY, because a name reached at another one is not
-// this call's name. `Box` declares `grow(self)` and a free `grow(b,
-// by)` travelled with the type; asking only whether the NAME is reached
-// refused `b.grow(10)` as unimplemented, when DESIGN.md says the two
-// are one overload set and the second is exactly the member this path
+// AT THIS CALL'S ARITY: a name reached at another arity isn't this
+// call's name. `Box` declares `grow(self)` and a free `grow(b, by)`
+// travels with the type; asking only whether the NAME is reached once
+// refused `b.grow(10)` as unimplemented — DESIGN.md says the two are
+// one overload set and the second is exactly the member this path
 // exists to reach.
 reaches = (be :: CBackend, rty: TyId, name: str, arity: usize)
           Res<bool, AllocError> {

@@ -1,37 +1,27 @@
 // src/gen/gen_c/gen_c_runtime.zen
-// The C every emitted program stands on.
+// The C every emitted program stands on: the floor, same for every program;
+// the only thing that varies is WHICH checked-arithmetic helpers it needs.
 //
-// It is a separate subject from what a type or an expression becomes:
-// this is the floor, it is the same for every program, and the only
-// thing that varies is WHICH checked-arithmetic helpers a program
-// needs. A backend that inlined this into its lowering would have the
-// runtime spread across a hundred call sites.
+// THE FAILURE MODEL IS ENFORCED HERE. DESIGN.md: "signed overflow is
+// undefined behaviour in C, so `gen_c` may not emit `a + b` and inspect the
+// result afterwards — the optimizer is entitled to delete that check." So
+// nothing below performs the operation first; every helper tests, then
+// operates.
 //
-// THE FAILURE MODEL IS ENFORCED HERE, and it is a correctness
-// requirement rather than an implementation detail. DESIGN.md:
-// "signed overflow is undefined behaviour in C, so `gen_c` may not emit
-// `a + b` and inspect the result afterwards — the optimizer is entitled
-// to delete that check, and will." So NOTHING below ever performs the
-// operation first. Every helper tests, then operates.
+// A trap prints `file:line:col: trap: <what>` to stderr and exits 134. The
+// three whats are `integer overflow`, `divide by zero` and `index out of
+// bounds`; the position is the OPERATOR token, which is why `Binary` and
+// `Unary` carry an `op_span` at all.
 //
-// A trap prints `file:line:col: trap: <what>` to stderr and exits 134.
-// The three whats are `integer overflow`, `divide by zero` and
-// `index out of bounds`; the position is the OPERATOR token, which is
-// why `Binary` and `Unary` carry an `op_span` at all.
+// `i32.MIN / -1` traps as an OVERFLOW, not a division by zero — it faults
+// identically on x86; TESTING.md records that DESIGN.md names only the zero
+// divisor.
 //
-// `i32.MIN / -1` traps as an OVERFLOW and not as a division by zero.
-// It is an overflow wearing division's clothes and it faults
-// identically on x86; TESTING.md records that DESIGN.md names only the
-// zero divisor and needs a sentence.
-//
-// THE BUILTINS ARE A FAST PATH, NEVER A REQUIREMENT. Every checked
-// helper is emitted twice: `__builtin_*_overflow` where the compiler
-// has it, and a hand-written PRE-operation range test where it does
-// not. That is not defensive coding, it is PLAN.md's central promise —
-// "what a newcomer runs needs only a C compiler". A seed that
-// `#error`s without a GCC extension is a seed only two compilers can
-// build, which removes the reason the seed is committed at all. The
-// fallback costs a few lines per integer type a program actually uses.
+// THE BUILTINS ARE A FAST PATH, NEVER A REQUIREMENT. Every checked helper is
+// emitted twice: `__builtin_*_overflow` where the compiler has it, a
+// hand-written PRE-operation range test where it does not — PLAN.md's
+// promise that "what a newcomer runs needs only a C compiler". A seed that
+// `#error`s without a GCC extension defeats the reason a seed is committed.
 
 Alloc, AllocError = std.mem
 Vec = std.collections
@@ -46,10 +36,8 @@ C_STANDARD* : str = "C99 (ISO/IEC 9899:1999)"
 // `/* text */` on its own line.
 //
 // An earlier version wrote the delimiters a byte at a time, to dodge a
-// grammar bug where a comment opener inside a string literal was read
-// as a real comment. That bug is fixed — a string is one token now —
-// and the workaround was outliving it, which is what a workaround does
-// unless someone re-tests.
+// grammar bug where a comment opener inside a string literal was read as a
+// real comment. Fixed now that a string is one token, so this writes plain.
 comment* = (out :: Emit, text: str) Res<(), AllocError> {
     out.bytes("/* ").try();
     out.bytes(text).try();

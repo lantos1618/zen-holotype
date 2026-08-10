@@ -1,37 +1,26 @@
 // src/std/core/loop/loop_iter.zen
-// one construct. the compiler picks the variant by signature - the
-// ordinary overload rule, with a closure's type being its full
-// parameter list. no carve-out for closures, which is the whole
-// reason Zen needs no `for` keyword and no second control-flow
-// concept to go with it.
+// one construct. The compiler picks the variant by signature — the
+// ordinary overload rule, a closure's type being its full parameter
+// list. No carve-out for closures, which is why Zen needs no `for`
+// keyword and no second control-flow concept.
 //
-// LOOPS NEVER ALLOCATE. Every declaration here has no Alloc
-// parameter, and by law 1 that is not a promise, it is the
-// signature: no Alloc parameter, no allocation. The two words that
-// can allocate live in loop_find.zen, take an Alloc, and are
-// different NAMES rather than overloads - a generic `init: A` would
-// swallow `alloc: Alloc` and they could not be told apart.
+// LOOPS NEVER ALLOCATE: no declaration here takes an Alloc, and by
+// law 1 that's the signature, not a promise. The two words that can
+// allocate (loop_find.zen) take an Alloc and are different NAMES, not
+// overloads — a generic `init: A` would swallow `alloc: Alloc`.
+// Mechanically: a body is a non-escaping stack closure inlined at the
+// call site (no closure record to box), index/acc thread BY VALUE (no
+// heap cell across passes), and a fold over a stack array is a plain
+// C for-loop. tests/bench/bench_loop.zen gates that last one at
+// allocs_op: 0 — a hit of 1 means an inliner regression, boxing the
+// body, and fails the build.
 //
-// What the no-allocation claim rests on, mechanically:
-//   - a body is a non-escaping stack closure, inlined at the call
-//     site, so there is no closure record to box
-//   - index and acc thread BY VALUE, so no cell is heap-allocated
-//     to hold them across passes
-//   - a fold over a stack array is a plain C for-loop
-// tests/bench/bench_loop.zen gates the last one at allocs_op: 0.
-// If it is ever 1, an inliner regressed and the body is being
-// boxed - that budget is deterministic, so it fails the build.
-//
-// EVERY DECLARATION HERE IS A SIGNATURE, not a definition, and that
-// is a decision rather than an omission. A loop is the one thing
-// that cannot be written in a language whose only control flow is
-// `.match`, `.loop` and recursion: writing `loop` in terms of
-// `loop` is circular, and writing it by recursion makes "compiles
-// to a plain C for-loop" depend on a tail-call optimisation nobody
-// gates. So the compiler lowers each overload below to a C loop and
-// the budget is locked down rather than hoped for. Everything
-// ABOVE the primitive - find, filter, map - is ordinary Zen written
-// on top of it, which is what proves h.break is a general feature.
+// EVERY DECLARATION HERE IS A SIGNATURE, not a definition — deliberate:
+// a loop can't be written in terms of `.match`/`.loop`/recursion
+// (circular, or riding an ungated tail-call optimisation). The
+// compiler lowers each overload to a C loop directly. Everything
+// ABOVE the primitive — find, filter, map — is ordinary Zen on top of
+// it, proof h.break is a general feature.
 
 LoopHandle = std.core.loop.loop_handle
 Range      = std.core.range
@@ -41,45 +30,37 @@ Map        = std.collections
 // while true. h.break is the only way out.
 loop*<T> = (body: (h: LoopHandle) ()) Res<T>
 
-// while true, with iteration counter. one more parameter, and the
-// counter starts at 0 and threads by value.
+// while true, with iteration counter — one more parameter; counter
+// starts at 0 and threads by value.
 loop*<T> = (body: (h: LoopHandle, index: usize) ()) Res<T>
 
-// while cond. tested BEFORE each pass, so a cond that is false to
-// begin with runs the body zero times.
+// while cond, tested BEFORE each pass — a cond false to begin with
+// runs the body zero times.
 loop*<T> = (cond: () bool, body: (h: LoopHandle) ()) Res<T>
 
-// ranged / collection iteration, with and without index. index is
-// the pass count and value is the element: over Range(10, 13) they
-// are different numbers, and a body that confuses them prints the
-// same one twice.
+// ranged/collection iteration, with and without index. index is the
+// pass count, value is the element — over Range(10, 13) these differ,
+// and a body that confuses them prints the same one twice.
 loop*<R: Range<T>, T> = (range: R, body: (h: LoopHandle, index: usize, value: T) ()) Res<T>
 loop*<R: Range<T>, T> = (range: R, body: (h: LoopHandle, value: T) ()) Res<T>
 
 // fold: init seeds acc, acc threads through iterations, the loop
-// evaluates to the final acc - or to h.break(value), which is what
-// makes the two forms one thing rather than two. init is the answer
-// when there is nothing to fold.
+// evaluates to the final acc — or to h.break(value), one form not two.
+// init is the answer when there is nothing to fold.
 loop*<R: Range<T>, T, A> = (range: R, init: A, body: (h: LoopHandle, index: usize, value: T, acc: A) A) Res<A>
 
-// key/value containers, and A DIFFERENT NAME rather than a seventh
-// overload of loop. DESIGN.md writes this one as
+// key/value containers — A DIFFERENT NAME, not a seventh overload.
+// DESIGN.md writes this as
 //
 //     loop*<K, V> = (map: Map<K, V>, body: (h, key: K, value: V) ())
 //
-// and that cannot resolve against the ranged-with-index form two
-// declarations up. Both take two arguments; both take a
-// three-parameter body; and the first parameter is generic in one
-// and concrete in the other, which is exactly the case DESIGN.md's
-// own overloading section rules out - "a generic parameter swallows
-// a concrete one" - and which a call site therefore cannot tell
-// apart. That is a declaration-site error, named at both
-// declarations, not something a caller finds out later.
+// which can't resolve against the ranged-with-index form above: same
+// arg count, same three-param body, first param generic in one,
+// concrete in the other — exactly what DESIGN.md's overloading
+// section rules out ("a generic parameter swallows a concrete one").
+// A declaration-site error, reported as a doc bug against DESIGN.md
+// rather than resolved quietly here.
 //
-// The law forced `map` to be a name instead of an overload for the
-// identical reason, and this is the same trade taken the same way:
-// a Map hands out two things per pass and a Range hands out one, so
-// they were never one word, and the honest name says which you get.
-// Reported as a doc bug against DESIGN.md rather than resolved
-// quietly here.
+// Same trade `map` took: a Map hands out two things per pass, a Range
+// one — never one word, so the name says which you get.
 pairs*<K, V> = (map: Map<K, V>, body: (h: LoopHandle, key: K, value: V) ()) Res<()>

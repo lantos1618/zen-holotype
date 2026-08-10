@@ -1,58 +1,49 @@
 // std.core.result
 //
-// Res is the whole failure story. Res<T> is absence — a lookup
-// that can legitimately miss. Res<T, E> is failure with a reason a
-// caller can act on. A bug is neither: that is a trap.
-//
-// Law 4 keeps the two apart. Only success lifts, Err and None are
-// always written, and a reason is never invented.
+// Res is the whole failure story. Res<T> is absence — a lookup that
+// can legitimately miss. Res<T, E> is failure with a reason a caller
+// can act on. A bug is neither: that's a trap. Law 4 keeps the two
+// apart: only success lifts, Err and None are always written, a
+// reason is never invented.
 
 // absence: no reason is carried, because there is none to carry
 Res*<T> = Ok(T) | None
 
-// failure, with the reason. E is a set: `A | B` is an anonymous
-// enum of two variants, so propagation merging error sets never
-// changes the shape of Res and a single error type is a set of one
+// failure, with the reason. E is a set: `A | B` is an anonymous enum
+// of two variants, so merging error sets on propagation never changes
+// Res's shape — a single error type is just a set of one.
 Res*<T, E> = Ok(T) | Err(E)
 
-// HOISTING. A bare T lifts into Res<T> wherever a Res is expected,
-// so the obvious thing works without ceremony:
+// HOISTING. A bare T lifts into Res<T> wherever a Res is expected:
 //
 //   Foo = { bar: Res<i32> }
 //   foo = Foo(bar: 32)      // lifted to Ok(32)
 //   foo = Foo(bar: Ok(32))  // identical, written out
 //
-// The same holds in returns: `0;` closes a Res<i32, E> function
-// exactly as `Ok(0);` does. Hoisting fires only when exactly ONE
-// variant carries the type; anything ambiguous is written out.
-// Only success lifts — an Err and a None are always spelled, which
-// is law 4 at the level of syntax.
+// Same in returns: `0;` closes a Res<i32, E> exactly as `Ok(0);`
+// does. Fires only when exactly ONE variant carries the type — Err
+// and None are always spelled, law 4 at the level of syntax.
 
-// `.try()` IS AN INTRINSIC. The compiler knows it, so it is
-// documented here and declared nowhere: there is no `try` field on
-// Res and no function of that name to import.
-//
-// It unwraps Ok, or returns the Err — or the None — from the
-// ENCLOSING function. That is a jump out through a frame boundary,
-// which is precisely what `h.break(v)` is, so the two are one
-// mechanism and not two special cases: a non-escaping closure may
-// return through its caller. An escaping closure may not; it has
-// no caller frame to return through.
+// `.try()` IS AN INTRINSIC: documented here, declared nowhere — no
+// `try` field on Res, no function to import. Unwraps Ok, or returns
+// the Err (or None) from the ENCLOSING function — a jump through a
+// frame boundary, exactly what `h.break(v)` is: a non-escaping
+// closure may return through its caller, an escaping one may not (no
+// caller frame to return through).
 //
 //   sb ::= alloc.String("{}", x).try();   // Ok: sb is the String
 //   self.toString(sb).try();              // Err: this frame returns it
 //
-// Three rules go with it, all of them law 4 again:
+// Three rules, all law 4 again:
 //   - the enclosing function must return a compatible Res
-//   - a Res<T> may not .try() into a Res<T, E> function. Name the
+//   - a Res<T> may not .try() into a Res<T, E> function — name the
 //     reason first, with ok_or below
 //   - failure never indents: .try() is what makes early exit cheap
 //     enough that a pyramid is never the shorter option
 
-// names the reason an absence did not carry. This is the ONLY way a
-// Res<T> becomes a Res<T, E>: there is no From, no implicit
-// conversion, and an error never changes identity because the
-// compiler found a conversion somewhere.
+// names the reason an absence didn't carry. The ONLY way a Res<T>
+// becomes a Res<T, E>: no From, no implicit conversion — an error
+// never changes identity because the compiler found a conversion.
 //
 //   row = table.get("ada").try();                        // ERROR
 //   row = table.get("ada").ok_or(Error.NotFound).try();  // required form

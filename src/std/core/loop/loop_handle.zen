@@ -1,37 +1,26 @@
 // src/std/core/loop/loop_handle.zen
 // the enclosing loop, as a value.
 //
-// LoopHandle is to a loop what @scope is to a block - DESIGN.md
-// says so in as many words - and it is declared the same way
-// Scope is: a struct of signatures with no bodies and no storage.
+// LoopHandle is to a loop what @scope is to a block (DESIGN.md),
+// declared the same way: a struct of signatures, no bodies, no
+// storage. THESE THREE ARE INTRINSICS — nobody impls LoopHandle, the
+// compiler provides it like @Self: `next` and `break` don't return to
+// their caller, and there's no unwinding machinery for a library to
+// reach for.
 //
-// THESE THREE ARE INTRINSICS. Nobody impls LoopHandle; the
-// compiler provides it, the way it provides @Self. Pretending they
-// are ordinary functions would be the lie, because no ordinary
-// function can do what they do: `next` and `break` do not return
-// to their caller, and there is no unwinding machinery in this
-// language for a library to reach for.
-//
-// What they ARE is the general non-local exit, which is one
-// mechanism and not two special cases:
-//
-//   > A non-escaping closure may return through its caller.
-//   > `.try()` and `h.break()` are both this.
-//
-// `.try()` unwraps Ok or returns the Err from the enclosing
-// FUNCTION; `h.break(v)` returns v from the enclosing LOOP. Same
-// jump, same frame boundary, same reason it is legal - the body is
-// a stack closure, so its caller's frame is still on the stack
-// underneath it. An escaping closure may not, having no caller
-// frame to return through. So `loop` stays a genuinely ordinary
-// function: break is a language feature loop uses, not a privilege
-// the compiler grants to one name.
+// What they ARE is the general non-local exit, one mechanism not two:
+// a non-escaping closure may return through its caller, and `.try()`
+// and `h.break()` are both this. `.try()` unwraps Ok or returns Err
+// from the enclosing FUNCTION; `h.break(v)` returns v from the
+// enclosing LOOP — same jump, same frame boundary: the body is a
+// stack closure, so its caller's frame is still underneath it (an
+// escaping closure has none). So `loop` stays ordinary: break is a
+// feature loop uses, not a privilege granted to one name.
 //
 // A LoopHandle is non-escaping for the same reason @scope is: it
-// names a frame that is about to stop existing. It may be passed
-// INWARD - that is exactly what `loop(range, body)` does when it
-// hands `h` to the body - but never stored in a struct, returned,
-// or captured by an escaping closure.
+// names a frame about to stop existing. Passed INWARD — `h` to the
+// body in `loop(range, body)` — but never stored, returned, or
+// captured by an escaping closure.
 
 LoopHandle* = {
     // continue: leave THIS pass, run the next one. The rest of the
@@ -41,14 +30,11 @@ LoopHandle* = {
     // break with nothing: the loop evaluates to None.
     break* = (self: @Self) ()
 
-    // break with a value: the loop evaluates to Ok(value), which is
-    // what makes a loop an expression. T is the enclosing loop's
-    // own T - the one in its Res<T> - so it is fixed by the loop
-    // this handle names, never by the call.
-    //
-    // The `()` return type is a formality: neither break returns to
-    // its caller, so nothing ever observes it. `()` is the honest
-    // spelling of "you get nothing back" in a language whose type
-    // for "never returns" would be a fourth thing to explain.
+    // break with a value: the loop evaluates to Ok(value), making a
+    // loop an expression. T is the enclosing loop's own T (its Res<T>),
+    // fixed by the loop this handle names, never by the call. The `()`
+    // return type is a formality — break never returns to its caller,
+    // so nothing observes it, the honest spelling of "nothing back"
+    // without inventing a fourth "never returns" type.
     break*<T> = (self: @Self, value: T) ()
 }

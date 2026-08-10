@@ -2,31 +2,25 @@
 // What an expression is in C.
 //
 // Every lowering here has one shape: statements go to the backend's
-// buffer, and the C EXPRESSION that names the result goes into the
-// caller's buffer. `gen_c_stmt.zen` owns the other half — where that
-// result ends up — and `gen_c_flow.zen` owns the two forms that cannot
-// be C expressions at all.
+// buffer, and the C EXPRESSION naming the result goes to the caller's
+// buffer. `gen_c_stmt.zen` owns where that result ends up; `gen_c_flow.zen`
+// owns the two forms that cannot be C expressions at all.
 //
-// A SPILLING FORM WHERE C WANTS A VALUE IS PUT IN A TEMPORARY, which is
-// the one thing this file does that is not a shape-for-shape
-// translation. `deliver` hands a spilling form straight to its
-// destination because a destination is already a place; an argument is
-// not, so `spill_temp` makes one.
+// A spilling form where C wants a value is put in a temporary — the one
+// non-shape-for-shape thing this file does: `deliver` hands a spill
+// straight to its destination (already a place), but an argument is
+// not one, so `spill_temp` makes one. `spills` asks whether a node IS a
+// spill (`deliver`'s question); `spills_anywhere` asks whether one hides
+// inside it, which short-circuiting needs since a hoisted `.try()` runs
+// regardless of the left side — `gen_c_op.zen` owns that rule.
 //
-// WHICH IS WHY `spills` HAS TWO FORMS. `spills` asks whether a node IS
-// a spill — `deliver`'s question. `spills_anywhere` asks whether one is
-// hiding inside it, which is what short-circuiting needs, because a
-// hoisted `.try()` runs whether or not the left side held.
-// `gen_c_op.zen` owns that rule; this file owns the two questions.
+// Operators are `gen_c_op.zen`'s subject (`a + b` decides trap helper,
+// `Eq` impl, or plain C) and left when this file outgrew its cap.
 //
-// OPERATORS ARE `gen_c_op.zen`'S SUBJECT. `a + b` is not a shape, it is
-// a decision about what is being added — a trap helper, an `Eq` impl,
-// or plain C — and it left when this file outgrew its cap.
-//
-// SEMA IS THE ONLY SOURCE OF A TYPE. Where `type_of` answers, its
-// answer is used; where it does not yet — a call, a match, a record —
-// the CONTEXT's expected type is used, and where there is no
-// expectation either, an `Untyped` fault is raised rather than a guess.
+// Sema is the only source of a type: where `type_of` answers, its
+// answer is used; where it does not (call, match, record), the
+// context's expected type is used; with neither, an `Untyped` fault is
+// raised rather than a guess.
 
 Ast, Expr, ExprKind, ExprId, BlockId, Block, Stmt, StmtKind, Bind = ast
 Decl, DeclKind, Struct, Member, MemberKind, Const, Consume = ast
@@ -83,9 +77,8 @@ lower_global_value = gen.gen_c.gen_c_const
 // -----------------------------------------------------------------
 
 // Does this form need statements of its own? A spilling form may not
-// appear where C wants a pure expression, and the two places that
-// matters — the right operand of `&&` / `||`, and an argument — ask
-// this first.
+// appear where C wants a pure expression — the right operand of `&&`/`||`
+// and an argument ask this first.
 spills* = (be: CBackend, id: ExprId) bool {
     be.tree.expr_at(id).kind.match({
         Match(_) => true,
@@ -97,18 +90,14 @@ spills* = (be: CBackend, id: ExprId) bool {
 }
 
 // Does lowering this expression need statements of its own ANYWHERE
-// inside it?
+// inside it? `spills` asks about the form ITSELF (`deliver`'s
+// question); short-circuit needs this one, since a `.try()` three
+// parens deep still lowers to an `if`/`return` that `expr` hoists out
+// to where the operand was written.
 //
-// `spills` asks about the form ITSELF, which is `deliver`'s question: a
-// form that is a spill goes straight to its destination. Short-circuit
-// has the other question, because a `.try()` three parens deep still
-// lowers to an `if` and a `return` and `expr` will hoist it out to
-// where the operand was written.
-//
-// AN UNRECOGNISED FORM ANSWERS YES. Being wrong in this direction is a
-// refusal with a position; being wrong in the other is a program that
-// computes the wrong thing, which is the one outcome a backend may not
-// produce.
+// An unrecognised form answers YES: wrong in this direction is a
+// refusal with a position, wrong the other way is a program computing
+// the wrong thing — the one outcome a backend may not produce.
 spills_anywhere* = (be: CBackend, id: ExprId) bool {
     be.tree.expr_at(id).kind.match({
         Literal(_) => false,
@@ -134,25 +123,24 @@ call_spills = (be: CBackend, c: Call) bool {
 
 // The type of an expression.
 //
-// SEMA FIRST, ALWAYS. Where `type_of` answers, its answer is used and
-// this file has no opinion. Where it does not — sema does not type a
-// call yet, so it does not type a `.try()` on one either — the
-// declaration behind the callee is read instead, which is the same
-// "degrade to your own resolution when a query is absent" the
-// bootstrapper's backend documents. The moment sema types a call, the
-// fallback stops firing and nothing else changes.
-// THE INSTANTIATION IS APPLIED HERE, once, so that no lowering rule has
-// to remember to. Sema typed a generic body exactly once, generically —
-// `sema_inst.zen` says why — so every answer inside `Vec<T>.add` is
-// about `T`, and this is where it becomes the `i32` this emission is at.
-// `@scope` IS ANSWERED HERE AND NOT BY SEMA, for the same reason a
-// local's type is: the FRAME is the authority. A block is not a value
-// sema mints, so `type_of` has nothing to say about one — but a `Scope`
-// can be written down as a parameter, so the type itself is the
-// ordinary named type `std/core/scope.zen` declares, and this is where
-// the expression is matched to it. Without this, `inner = @scope;`
-// binds a local of unknown type and every use of `inner` after it is a
-// name with no receiver.
+// Sema first, always: where `type_of` answers, that answer is used.
+// Where it does not yet (sema doesn't type a call, so not a `.try()` on
+// one either), the callee's own declaration is read instead — the same
+// "degrade to your own resolution when absent" the bootstrapper's
+// backend documents. The fallback stops firing the moment sema types a
+// call.
+//
+// The instantiation is applied HERE, once, so no lowering rule has to
+// remember to: sema types a generic body once, generically, so every
+// answer inside `Vec<T>.add` is about `T` until this substitutes the
+// real `i32`.
+//
+// `@scope` is answered here, not by sema, for the same reason a local's
+// type is: the FRAME is the authority. A block is not a value sema
+// mints, but a `Scope` can be written as a parameter of the ordinary
+// named type `std/core/scope.zen` declares — matched here. Without
+// this, `inner = @scope;` binds a local of unknown type and every later
+// use of `inner` is a name with no receiver.
 ty_of* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
          Res<TyId, AllocError> {
     is_scope_ref(be, id).match({
@@ -177,24 +165,22 @@ derived_answer = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
     })
 }
 
-// THE FRAME THAT DECLARED A BINDING IS THE AUTHORITY ON ITS TYPE, and
-// sema's memo is not — the memo is keyed by node id and nothing else,
-// so an answer computed while `Vec<Diag>.get` was being lowered is the
-// answer `Vec<TyId>.get` reads back. It emitted a call to the first
-// one's symbol with the second one's receiver, which `cc` caught and
-// which two types of one width would have hidden.
+// The frame that declared a binding is the authority on its type, not
+// sema's memo — the memo is keyed by node id alone, so an answer cached
+// while lowering `Vec<Diag>.get` was read back for `Vec<TyId>.get`,
+// emitting a call to the first symbol with the second's receiver. `cc`
+// caught it; two types of one width would have hidden it.
 //
-// A HANDLE AND A CLOSURE ARE NOT VALUES and have no type to give: `h`
-// is a pair of labels and a lambda is a body to inline, so both are
-// left to the paths that know what they are.
+// A handle and a closure are not values and have no type to give: `h`
+// is a pair of labels, a lambda is a body to inline — both left to the
+// paths that know what they are.
 //
-// AND A FIELD READ FROM ONE IS THE SAME RULE ONE NODE UP. `e.key`
-// inside `Map<K, V>.confirms` is derived from `e`'s type and the
-// declaration, both of which the frame holds — so the memo has nothing
-// to add and one poisoned entry to give. Every instantiation of
-// `confirms` in this compiler called `str.eq`, including the ones whose
-// key is an `ExprId`, and swapping which map was built first swapped
-// which `eq` all of them called.
+// A field read from one is the same rule one node up: `e.key` inside
+// `Map<K, V>.confirms` derives from `e`'s type and the declaration, both
+// held by the frame, so the memo has only a poisoned entry to give.
+// Every instantiation of `confirms` called `str.eq`, including keys
+// typed `ExprId` — swapping which map was built first swapped which
+// `eq` every one of them called.
 local_answer = (be :: CBackend, id: ExprId) Res<Res<TyId>, AllocError> {
     be.tree.expr_at(id).kind.match({
         Name(n)   => Ok(named_slot(be, n.text)),
@@ -251,17 +237,16 @@ sema_answer = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
     })
 }
 
-// `Ptr`'S MEMBERS ARE THE BACKEND, so sema has no body to check for one
-// and answers `p.to<u8>()` with a `Ptr` whose element nothing settled —
-// an answer that is not unknown and carries no `Var`, so nothing
-// downstream questions it. A LOCAL DECLARED AT THAT TYPE IS A C POINTER
-// AT THE WRONG STRIDE: `src.back(8)` moved back thirty-two bytes,
-// `realloc` read a length nobody wrote, and every row before the last
-// grow was silently dropped. It compiled, and the differential oracle
-// is what caught it.
+// `Ptr`'s members ARE the backend, so sema has no body to check and
+// answers `p.to<u8>()` with a `Ptr` whose element nothing settled — not
+// unknown, carries no `Var`, so nothing downstream questions it. A
+// local declared at that type is a C pointer at the wrong stride:
+// `src.back(8)` moved back thirty-two bytes, `realloc` read a length
+// nobody wrote, and every row before the last grow was silently
+// dropped. It compiled; the differential oracle caught it.
 //
-// So the backend answers first for exactly these members, which is the
-// same authority it already has over lowering them.
+// So the backend answers first for exactly these members, the same
+// authority it already has over lowering them.
 ptr_answer = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
              Res<Res<TyId>, AllocError> {
     be.tree.expr_at(id).kind.match({
@@ -293,13 +278,12 @@ ptr_answer_of = (be :: CBackend, c: Call, a: Access, rty: TyId, ctx: Ctx,
     Ok(Ok(ptr_member_type(be, c, a, rty, ctx, want).try()));
 }
 
-// AN OPEN TYPE IS NOT AN ANSWER. Sema types `range.loop(body)` as
-// `Res<T>` because the only thing that could settle `T` is the closure,
-// and a closure infers FROM a signature rather than into one — so the
-// answer comes back carrying a `Var`, and a binding declared at it would
-// be the one C type every loop in the program shares. The one form this
-// happens to is the loop family, and `gen_c_loop.zen` owns the rule for
-// it; everything else is handed back untouched.
+// An open type is not an answer. Sema types `range.loop(body)` as
+// `Res<T>` because only the closure could settle `T`, and a closure
+// infers FROM a signature rather than into one — so the answer carries
+// a `Var`, and a binding declared at it would be the one C type every
+// loop shares. Only the loop family hits this; `gen_c_loop.zen` owns
+// the rule. Everything else is handed back untouched.
 settled_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                  Res<TyId, AllocError> {
     open(be, got).match({
@@ -308,21 +292,19 @@ settled_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
     })
 }
 
-// AND A TYPE THAT IS SPELLED WITH A HOLE IN IT IS NOT AN ANSWER EITHER.
+// A type spelled with a hole in it is not an answer either. `open`
+// asks about a free PARAMETER, but a BOUND's member leaves something
+// else: `Alloc.realloc<T>` has no body to check, so
+// `self.alloc.realloc(self.data, cap)` comes back `Res<Ptr<?>,
+// AllocError>` with the element neither substituted nor a `Var` — a
+// type `open` calls settled and `gen_name.tcode` writes `q` for. A
+// `.try()` on it declared its temporary at that spelling instead of the
+// real `Res<Ptr<u8>, AllocError>`.
 //
-// `open` asks about a free PARAMETER, and a member of a BOUND leaves
-// something else behind: `Alloc.realloc<T>` has no body for sema to
-// check, so `self.alloc.realloc(self.data, cap)` comes back typed
-// `Res<Ptr<?>, AllocError>` with the element neither substituted nor a
-// `Var` — a type `open` calls settled and `gen_name.tcode` writes `q`
-// for. A `.try()` on it declared its temporary at that spelling and
-// assigned the slot's real `Res<Ptr<u8>, AllocError>` into it.
-//
-// STRAIGHT TO THE CALL, and not through the loop and inline steps above:
-// those two settle a `Var` the closure or the callee's instantiation was
-// going to bind, and there is no parameter here for either to bind. What
-// is missing is what the ARGUMENTS say, which is the question
-// `settle_call` asks.
+// Straight to the call, not through the loop/inline steps above: those
+// settle a `Var` the closure or callee's instantiation was going to
+// bind, and there's no parameter here for either. What's missing is
+// what the ARGUMENTS say — `settle_call`'s question.
 opaque_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                 Res<TyId, AllocError> {
     unsettled(be, got).match({
@@ -415,22 +397,21 @@ declared_call_type = (be :: CBackend, name: str, ctx: Ctx, want: TyId)
     })
 }
 
-// THE PRINT SUGAR NAMES NO FUNCTION, so the walk above finds nothing and
-// the answer falls back to `want` — which is `Unknown` at every question
-// worth asking. Its value IS unit: `gen_c_print.lower_print` writes the
-// console calls as statements and hands `0` back as a placeholder for a
-// value C cannot hold, and `0` is only ever correct where the value is
-// discarded.
+// The print sugar names no function, so the walk above finds nothing
+// and falls back to `want` (`Unknown` at every question worth asking).
+// Its value IS unit: `gen_c_print.lower_print` writes the console calls
+// as statements and hands back `0` as a placeholder, correct only where
+// the value is discarded.
 //
-// ANSWERING `()` IS WHAT MAKES THE PLACEHOLDER UNREACHABLE. `Unknown`
-// agrees with everything, so `gen_c_hoist.needs_hoist` read a `println`
-// reaching a `Res<(), E>` as "it already fits" and emitted `return 0;`
-// from a function returning a struct — the one thing that file says it
-// exists to stop. With unit as the answer the lift fires, and
-// `write_res_payload` runs the print for effect before building the `Ok`.
+// Answering `()` makes that placeholder unreachable. `Unknown` agrees
+// with everything, so `gen_c_hoist.needs_hoist` used to read a
+// `println` reaching `Res<(), E>` as "already fits" and emit `return
+// 0;` from a function returning a struct — exactly what that file
+// exists to stop. With unit as the answer the lift fires instead, and
+// `write_res_payload` runs the print for effect before building `Ok`.
 //
-// A MODULE THAT DECLARES ITS OWN `println` MEANS ITS OWN, which is
-// `gen_c_call.is_sugar`'s rule and why this sits under the zero-def arm
+// A module declaring its own `println` means its own —
+// `gen_c_call.is_sugar`'s rule, why this sits under the zero-def arm
 // rather than in front of the walk.
 sugar_call_type = (be :: CBackend, name: str, want: TyId)
                   Res<TyId, AllocError> {
@@ -505,34 +486,26 @@ res_type_of* = (be :: CBackend, id: ExprId, ctx: Ctx)
     ty_of(be, id, ctx, unknown)
 }
 
-// A SPILLING FORM WHERE C WANTS AN EXPRESSION IS SPILLED INTO A
-// TEMPORARY, and that is the whole of it.
+// A spilling form where C wants an expression is spilled into a
+// temporary — that's the whole of it. `.try()` is an `if` and a
+// `return`, with no C expression for it; `deliver` hands a spill
+// straight to its destination (already a place), but an argument is
+// not one, so `spill_temp` makes one here, declared and filled BEFORE
+// the statement being built — same place every other spill lands,
+// since `deliver_simple` builds the expression text first and writes
+// the line after.
 //
-// `decls.add(p.declaration(true).try())` is an ordinary thing to write
-// and `.try()` is an `if` and a `return`: there is no C expression for
-// it. `deliver` hands a spilling form STRAIGHT to its destination
-// because a destination is already a place — but an argument is not a
-// place, so one is made here. The temporary is declared and filled
-// BEFORE the statement being built, which is where every other spill in
-// this backend already lands: `deliver_simple` builds the expression
-// text first and writes the line after, so anything written while it
-// builds comes out ahead of it.
-// A CONCRETE VALUE REACHING A SLOT WHOSE TYPE IS A BOUND becomes a fat
-// value, and this is the one place it happens: an argument, a field and
-// a return all arrive here with the destination's type, so passing an
-// `Arena` where an `Alloc` is wanted builds the record at all three
-// without a rule at any of them.
-//
-// A MEMBER REACHING A SLOT WHOSE TYPE IS A STRUCTURAL SET is the same
-// shape and lands in the same place, and so is a `Res` reaching a `Res`
-// whose error set is wider. `gen_c_widen.zen` owns both — they are one
-// sentence, "the destination admits more than the source has" — and it
-// says what each is built out of.
-//
-// A BARE SUCCESS REACHING A `Res` SLOT IS THE FOURTH OF THE SAME SHAPE.
-// `7;` closing a `Res<i32, E>` is `Ok(7)` — the same value, written
-// shorter — and it arrives here through the same three doors as the
-// others. `gen_c_hoist.zen` builds it.
+// Four conversions funnel through this same three-door path (argument,
+// field, return), each owned by whichever file builds it:
+//   - a concrete value reaching a BOUND-typed slot becomes a fat value
+//     (e.g. an `Arena` passed where `Alloc` is wanted), built here once
+//     rather than at each of the three sites;
+//   - a member reaching a structural-set slot, and a `Res` reaching a
+//     wider-error `Res`, are the same shape — "the destination admits
+//     more than the source has" — owned by `gen_c_widen.zen`;
+//   - a bare success reaching a `Res` slot is the fourth: `7;` closing
+//     `Res<i32, E>` is `Ok(7)` written shorter, built by
+//     `gen_c_hoist.zen`.
 expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, out :: String)
         Res<(), AllocError> {
     needs_set(be, id, ctx, want).try().match({
@@ -549,11 +522,11 @@ hoist_or_value = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
     })
 }
 
-// A `Res` REACHING A `Res` WITH A WIDER ERROR SET IS THE FOURTH OF THE
-// SAME SHAPE, and it arrives through the same three doors. It is asked
-// AFTER the hoist because the two are disjoint by construction — a value
-// that lifts is not already a `Res` — and before the fat reading because
-// a `Res` is never a bound. `gen_c_widen.zen` says what is claimed.
+// A `Res` reaching a `Res` with a wider error set arrives through the
+// same three doors as the other conversions. Asked AFTER hoist (the two
+// are disjoint by construction — a lifted value is not already a `Res`)
+// and BEFORE the fat reading (a `Res` is never a bound). `gen_c_widen.zen`
+// says what is claimed.
 widen_or_value = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
                   out :: String) Res<(), AllocError> {
     needs_widen(be, id, ctx, want).try().match({

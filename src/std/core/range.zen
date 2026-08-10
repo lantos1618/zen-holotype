@@ -1,47 +1,35 @@
 // src/std/core/range.zen
 // what every loop word walks.
 //
-// DESIGN.md types the loop family's first parameter `range: Range`
-// and then passes it a fixed array, a Vec and a Map, without ever
-// declaring Range. Both readings it leaves open are true at once,
-// and one name carries both:
+// DESIGN.md types the loop family's first parameter `range: Range`,
+// passing a fixed array, a Vec, a Map — without ever declaring Range.
+// One name carries both readings:
 //
-//   CONCRETE. `Range(0, 5)` constructs one. start and end are
-//   ordinary storage, half-open, so Range(0, 5) is five passes and
-//   the off-by-one that makes it six has a corpus test.
+//   CONCRETE: `Range(0, 5)` constructs one — half-open storage, so
+//   five passes (the off-by-one that makes it six has a corpus test).
 //
-//   A BOUND. `Range` is an ordinary struct used as a bound, which
-//   is all a bound ever is here (DESIGN.md: "a bound is just which
-//   struct's shape do I need"). A Vec satisfies it exactly as
-//   Circle satisfies Rect - by supplying values for the fields it
-//   does not store.
+//   A BOUND: an ordinary struct used as a bound (DESIGN.md: "a bound
+//   is just which struct's shape do I need"). A Vec satisfies it as
+//   Circle satisfies Rect — supplying values for fields it doesn't store.
 //
-// So the family is written `<R: Range<T>, T> = (range: R, ..)` and
-// not `(range: Range<T>, ..)`. The two are not the same thing:
-// `alloc: Alloc` establishes that an interface-TYPED parameter is a
-// fat value carrying function pointers, and a function pointer read
-// per element is not a plain C for-loop. A bound monomorphises, so
-// `at` is a direct call, the body inlines, and tests/bench/
-// bench_loop.zen can gate a fold at allocs_op: 0 and mean it.
-//
-// Nothing is impl'd here. A trait sits BELOW the types that satisfy
-// it, so an impl lives with the type - the two impls this file
-// needs are named at the bottom, and neither of them is ours.
+// So the family is `<R: Range<T>, T> = (range: R, ..)`, not
+// `(range: Range<T>, ..)`: an interface-TYPED param is a fat value
+// carrying function pointers, not a plain C for-loop. A bound
+// monomorphises instead — `at` is a direct call, the body inlines,
+// and tests/bench/bench_loop.zen gates a fold at allocs_op: 0. Nothing
+// is impl'd here: a trait sits BELOW the types that satisfy it — the
+// two impls this file needs live with their types, named at the bottom.
 
 Res = std.core.result
 
 // a half-open index interval [start, end), plus what lives at an
-// index. `at` is the ONE thing an impl supplies: walking is
-// at(start), at(start + 1), .. and a None ends the walk early, so a
+// index. `at` is the ONE thing an impl supplies — walking is
+// at(start), at(start+1).., and a None ends the walk early so a
 // container whose length moved under the loop stops rather than
-// reading past itself.
-//
-// `at` is an optional hook (`::=` with no body): a Range that
-// supplies none walks its own index space. That is what makes
-// `Range(0, 5)` mean 0, 1, 2, 3, 4 with nothing behind it, its fold
-// a bare C for-loop over a usize counter, and `Range(0, v.len)` the
-// ordinary way to walk indices rather than elements - which is how
-// std.collections already uses it.
+// reading past itself. `at` is an optional hook (`::=`, no body):
+// supplying none walks the index space itself — `Range(0, 5)` means
+// 0,1,2,3,4 with nothing behind it, and `Range(0, v.len)` is the
+// ordinary way to walk indices (how std.collections uses it).
 Range*<T> = {
     start*: usize,
     end*: usize,
@@ -51,26 +39,20 @@ Range*<T> = {
 
 // THE TWO IMPLS THIS FILE SPECIFIES AND DOES NOT OWN
 //
-// A VEC is a Range of its elements, and the impl is one line
-// because `get` already answers exactly the question `at` asks -
-// including the None past the end. It belongs in
-// std.collections.collections_vec, beside the type, and this is the
-// whole of it:
+// A VEC is a Range of its elements — one line, since `get` already
+// answers what `at` asks, including the None past the end. Lives in
+// std.collections.collections_vec, beside the type:
 //
 //     Vec.impl(Range<T>, {
 //         start: 0,
 //         end: self.len,
 //         at ::= (self: @Self, index: usize) Res<T> { self.get(index) }
 //     })
+// start/end are supplied, not stored, so growing mid-loop reports the
+// new end, not a stale one.
 //
-// start and end are supplied, not stored, so a Vec stays exactly as
-// wide as it was and a Vec that grows mid-loop reports its new end
-// rather than a stale one.
-//
-// A FIXED ARRAY satisfies Range intrinsically, and it is the one
-// place the compiler supplies what no module could have written:
-// `[T, N]` is a type constructor, not a name, so there is no
-// `[T, N].impl(..)` to write - the impl target in the grammar is an
-// identifier, and there is no module that declares `[T, N]` for the
-// impl to live in. Its start is 0, its end is the comptime length,
-// and its `at` is the bounds-checked index that already traps.
+// A FIXED ARRAY satisfies Range intrinsically — the one place the
+// compiler supplies what no module could write: `[T, N]` is a type
+// constructor, not a name, so there's no `[T, N].impl(..)` to write.
+// Its start is 0, end is the comptime length, `at` the bounds-checked
+// index that already traps.

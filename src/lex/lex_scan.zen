@@ -4,23 +4,20 @@
 // punctuation call, and the bytes that begin nothing.
 //
 // THE LOOP IS THE WHOLE CONTROL STRUCTURE. `step` reads one token or one
-// mistake and returns; nothing here backs up, and no scanner leaves the
-// cursor where it found it, so the loop always terminates. That is the
-// property that makes "the compiler never hangs, on any input" true for
-// this phase rather than hoped for.
+// mistake and returns; nothing backs up and no scanner leaves the cursor
+// where it found it, so the loop always terminates — "the compiler never
+// hangs, on any input" is true for this phase, not just hoped for.
 //
-// AFTER A FAULT, THE SCANNER KEEPS GOING. Every scanner resynchronises —
-// past the closing quote, to the end of the line, past the run of stray
-// bytes — because the second mistake in a file is worth as much as the
-// first, and a lexer that stops at the first one makes a user recompile
-// once per typo.
+// AFTER A FAULT, THE SCANNER KEEPS GOING: past the closing quote, to end of
+// line, past the run of stray bytes. The second mistake is worth as much
+// as the first, and a lexer that stops at one makes a user recompile once
+// per typo.
 //
-// WHAT THIS LEXER DELIBERATELY DOES NOT DO: it does not track brackets.
-// bootstrap/lex.py does, because it runs beside tree-sitter and is the only
-// thing that could. This one IS the parser's token source, and the parser
-// knows what it opened and what it expected to close it — so an unmatched
-// brace reported here would be a worse diagnostic arriving first, and one
-// mistake would get two messages.
+// WHAT THIS LEXER DELIBERATELY DOES NOT DO: track brackets. bootstrap/lex.py
+// does, because it runs beside tree-sitter and is the only thing that
+// could. This one IS the parser's token source, and the parser knows what
+// it opened and expected to close it — an unmatched brace reported here
+// would just be a worse diagnostic arriving first.
 
 Lexer, Lexed = lex.lex_state
 Cursor = lex.lex_cursor      // for its methods: importing a type pulls its world along
@@ -36,10 +33,9 @@ str = std.text
 // no exemption; takes a Source because a lexer is handed bytes and never
 // opens a file — opening one is authority, and authority comes from Env.
 //
-// Err is AllocError and nothing else: a file full of lexical mistakes LEXES
-// SUCCESSFULLY, and hands back the tokens it read together with the faults
-// it found. Routing a bad byte through Err would make one typo the end of
-// the file, which is the behaviour this design exists to avoid.
+// Err is AllocError and nothing else: a file full of mistakes LEXES
+// SUCCESSFULLY, returning the tokens read plus the faults found. Routing a
+// bad byte through Err would make one typo the end of the file.
 scan* = (alloc: Alloc, source: Source) Res<Lexed, AllocError> {
     lx ::= alloc.Lexer(source);
     lx.strip_bom();
@@ -49,14 +45,13 @@ scan* = (alloc: Alloc, source: Source) Res<Lexed, AllocError> {
 }
 
 // A BOM IS STRIPPED ONLY AT OFFSET 0, and this is the only call. Anywhere
-// else it falls through to `stray` and is reported, because a file that
-// parses differently depending on where an editor left a marker is worse
-// than one that says so.
+// else it falls through to `stray` and is reported — a file that parses
+// differently depending on where an editor left a marker is worse than one
+// that says so.
 //
-// The three bytes are stepped over rather than skipped, so the first real
-// character lands at column 4. A byte column that stopped counting bytes
-// would disagree with every tool that maps offsets, and "1-based BYTE
-// column" is what DESIGN.md says.
+// The three bytes are stepped over, not skipped, so the first real
+// character lands at column 4 — DESIGN.md specifies a 1-based BYTE column,
+// which must keep counting bytes to agree with `offset`.
 strip_bom = (lx :: Lexer) () {
     lx.cur.at_bom().then(() { lx.cur.bump(); lx.cur.bump(); lx.cur.bump(); });
 }

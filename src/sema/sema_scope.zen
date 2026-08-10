@@ -2,29 +2,23 @@
 // A block, as a value, that may not leave its block.
 //
 // `@scope` "stands for the enclosing block, exactly as `h: LoopHandle`
-// stands for the enclosing loop". So it is a value with a lifetime and
-// nothing else in the language has one: every other rule in this folder
-// is about a TYPE or about UNIQUENESS, and this one is about how long a
-// frame lasts. That is why it is not folded into `sema_own.zen` beside
-// the moves — one file, one question.
+// stands for the enclosing loop" — a value with a lifetime, which
+// nothing else in the language has (every other rule here is about a
+// TYPE or a UNIQUENESS), so it isn't folded into `sema_own.zen` beside
+// the moves.
 //
-// NON-ESCAPING IS A FEATURE AND NOT A LIMITATION, which is the sentence
-// worth keeping in view while reading the refusals below. "A closure
-// registered on a scope keeps its captures in that scope's own storage",
-// and that works precisely because the block outlives the closure by
-// construction. Take the restriction away and `defer` needs a heap
-// record, which law 1 forbids without an `Alloc` — so the three ways out
-// are barred to buy the one guarantee that makes `defer` free.
+// NON-ESCAPING IS A FEATURE, NOT A LIMITATION: a closure registered on
+// a scope keeps its captures in that scope's own storage, which works
+// because the block outlives the closure by construction. Take the
+// restriction away and `defer` needs a heap record, which law 1 forbids
+// without an `Alloc` — the three ways out below are barred to buy the
+// one guarantee that makes `defer` free. Inward is fine: a helper
+// registering cleanup on its caller's block is the whole point.
 //
-// INWARD IS FINE. A helper registering cleanup on its caller's block is
-// the whole point: non-escaping means one direction, down the stack,
-// never out of it.
-//
-// ALL THREE WAYS OUT ARE CHECKED HERE — stored in a struct, returned,
-// and captured by an escaping closure. The third needs an answer to
-// "which closures escape" and gets a narrow one; what it does not cover
-// is written out above `call_escapes` rather than left to be
-// discovered.
+// All three ways out are checked here — stored in a struct, returned,
+// captured by an escaping closure. The third needs "which closures
+// escape" and gets a narrow answer; what it doesn't cover is written
+// above `call_escapes` rather than left to be discovered.
 
 Ast, Expr, ExprId, BlockId, Call, Arg, Decl, DeclKind, Struct = ast
 Paren, Access, Member, Function, Param, Span, TypeId = ast
@@ -38,10 +32,10 @@ SemaFault, NameFault = sema.sema_diag
 refuse, Own, place_type, captures_scope = sema.sema_own
 own_member = sema.sema_recv
 
-// RETURNED. `here`'s block is gone by the time the caller has the value,
-// so every defer registered on it would run against a dead frame. Only
-// the FUNCTION BODY's value is asked: a nested block whose value is a
-// `@scope` hands it to an enclosing block that is still open.
+// RETURNED. The block is gone by the time the caller has the value, so
+// every defer on it would run against a dead frame. Only the FUNCTION
+// BODY's value is asked — a nested block's `@scope` value hands it to
+// an enclosing block that's still open.
 check_scope_returned* = (c :: Checker, body: BlockId) Res<(), AllocError> {
     c.tree.block_at(body).value.match({
         None  => Ok(()),
@@ -59,12 +53,10 @@ refuse_if_scope* = (c :: Checker, id: ExprId) Res<(), AllocError> {
     })
 }
 
-// STORED. `register(@scope, env)` passes it inward and is legal;
-// `Holder(s: @scope)` puts it in a value that can outlive the block. The
-// two read the same at the call site and only the resolved declaration
-// tells them apart — which is exactly what `call_memo` was written down
-// for, and the one question this file asks that a syntactic reading
-// could not answer.
+// STORED. `register(@scope, env)` passes it inward, legal; `Holder(s:
+// @scope)` puts it in a value that can outlive the block. Read the same
+// at the call site; only the resolved declaration tells them apart —
+// what `call_memo` exists for.
 check_scope_stored* = (c :: Checker, id: ExprId, k: Call)
                       Res<(), AllocError> {
     is_construction(c, id).match({
@@ -92,13 +84,11 @@ refuse_scope_args = (c :: Checker, k: Call) Res<(), AllocError> {
     Ok(());
 }
 
-// CAPTURED. The block outlives every frame registered on it, which is
-// what non-escaping buys and what makes a `Scope` a bare pointer into
-// automatic storage. A closure that outlives the block therefore holds
-// a pointer to a dead frame — a use-after-free, not a style rule.
-//
-// The name is what is reported, at the use inside the body, because the
-// capture IS the use: there is no separate capture list to point at.
+// CAPTURED. The block outlives every frame registered on it (what
+// non-escaping buys, and what makes `Scope` a bare pointer into
+// automatic storage), so a closure outliving the block holds a pointer
+// to a dead frame — use-after-free, not a style rule. Reported at the
+// use inside the body: no separate capture list to point at.
 check_scope_captured* = (c :: Checker, o :: Own, span: Span, text: str)
                         Res<(), AllocError> {
     captures_scope(o, text).match({
@@ -109,10 +99,9 @@ check_scope_captured* = (c :: Checker, o :: Own, span: Span, text: str)
 }
 
 // A binding of `@scope` names the block exactly as the keyword does, so
-// `sema_own.zen` records the answer on the binding when it declares it.
-// Chased no further than what is WRITTEN — `t = s` where `s` holds one
-// is not seen — which is the same syntactic reading the two rules above
-// have, and the same one they would need widening for.
+// `sema_own.zen` records the answer on it when declared. Chased no
+// further than what's WRITTEN — `t = s` where `s` holds one is not
+// seen, the same syntactic limit the two rules above have.
 is_scope_value* = (c :: Checker, id: ExprId) bool {
     c.tree.expr_at(id).kind.match({
         Scope    => true,
@@ -124,28 +113,21 @@ is_scope_value* = (c :: Checker, id: ExprId) bool {
 // ---------------------------------------------------------------------
 // WHICH CLOSURES ESCAPE
 //
-// Read off the CALLEE'S SIGNATURE, which is law 7 doing the job it was
-// written for: "does it allocate, does it mutate, can it fail, does it
-// escape — read the signature". `spawn` is declared
-// `(self, a: Alloc, body: () Res<T, ThreadError>)` and the `Alloc`
-// beside the body is the declaration of exactly this: "an escaping
-// closure needs memory, so it says so". A callee handed no allocator
-// has nowhere to put a closure it is given, so it cannot keep one past
-// its own return; a callee handed one may keep every closure it gets.
+// Read off the CALLEE'S SIGNATURE — law 7's job: "does it allocate,
+// mutate, fail, escape — read the signature". `spawn` is declared
+// `(self, a: Alloc, body: () Res<T, ThreadError>)`; the `Alloc` beside
+// the body says "an escaping closure needs memory" — no allocator, no
+// place to keep a closure past return.
 //
-// SO `loop`, `fold` AND `then` ARE UNTOUCHED — none of them takes an
-// Alloc — and `map` and `filter`, which do, are read as escaping at no
-// cost: a body has to NAME a `@scope` binding to be refused at all, and
-// a `@scope` inside a mapping function is the bug this rule is for.
+// So `loop`/`fold`/`then` are untouched (no Alloc param), and
+// `map`/`filter`, which do, are read as escaping at no cost: a body
+// must NAME a `@scope` binding to be refused at all.
 //
-// WHAT IT DOES NOT COVER, named rather than hidden. A free function
-// taking an `Alloc` is not asked, only a method: `own_member` is a
-// lookup through the receiver's type and there is no second door here
-// that does not report. A callee whose type is not memoized, or whose
-// member is supplied by an impl rather than written in the type's own
-// body, is read as NON-escaping — the fail-open direction this whole
-// walk takes, because a false rejection makes a correct program
-// uncompilable and a missing check only misses.
+// WHAT IT DOES NOT COVER, named rather than hidden: a free function
+// taking `Alloc` is not asked, only a method. A callee whose type isn't
+// memoized, or whose member comes from an impl rather than the type's
+// own body, reads as NON-escaping — fail-open, since a false rejection
+// makes a correct program uncompilable and a missing check only misses.
 // ---------------------------------------------------------------------
 
 call_escapes* = (c :: Checker, o :: Own, k: Call) bool {
@@ -178,9 +160,9 @@ takes_alloc = (c :: Checker, f: Function) bool {
     }).match({ Ok(_) => true, None => false })
 }
 
-// `Alloc` BY NAME, on the parameter as WRITTEN. The argument's own type
-// is the wrong thing to ask — `env.mem.alloc()` hands out an `Arena` —
-// and it is the callee that declares what it is entitled to keep.
+// `Alloc` by NAME, on the parameter as written — the argument's own
+// type is the wrong thing to ask (`env.mem.alloc()` hands out an
+// `Arena`); the callee declares what it's entitled to keep.
 param_is_alloc = (c :: Checker, p: Param) bool {
     p.type.match({
         None    => false,

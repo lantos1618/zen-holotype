@@ -3,33 +3,30 @@
 //
 // `Point(x: 3, y: 4)` and `area(p)` are the same AST node. Which one it
 // is depends on what the callee NAMES — a struct is constructed, a
-// function is called — and that is a question about the declaration
-// rather than about the call. THE QUESTION IS ASKED HERE and the
-// construction is `gen_c_build.zen`'s: building a value and calling a
-// function have nothing in common past the node they share. The third
-// thing a callee can name IS here — `Ok` and `Err`, which are not
-// functions at all and are built from the expected type.
+// function is called — a question about the declaration, not the call.
+// THE QUESTION IS ASKED HERE; construction is `gen_c_build.zen`'s. The
+// third thing a callee can name IS here — `Ok`/`Err`, not functions at
+// all, built from the expected type.
 //
 // `Res` IS STRUCTURAL, so its constructors are built here from the
-// EXPECTED type rather than resolved. That follows sema: `TyRes` carries
-// no declaration, because `Res<T>` and `Res<T, E>` are two arities of
-// one name and sema asks which form it has at every `.try()`. It is also
-// why they need an expectation — `Ok(0)` alone does not say whether it
-// closes a `Res<i32>` or a `Res<i32, E>`, and DESIGN.md's hoisting rule
-// turns on exactly that.
+// EXPECTED type, not resolved. This follows sema: `TyRes` carries no
+// declaration, because `Res<T>` and `Res<T, E>` are two arities of one
+// name that sema disambiguates at every `.try()`. It's also why an
+// expectation is needed — `Ok(0)` alone doesn't say `Res<i32>` or
+// `Res<i32, E>`, and DESIGN.md's hoisting rule turns on exactly that.
 //
-// OVERLOAD RESOLUTION IS SEMA'S AND IS READ BACK RATHER THAN REDONE.
-// `Cand` carries the `DeclId` it came from and `chosen` writes it into
-// `Checker.call_memo` under the call's own node id, so `loop`'s six
-// declarations arrive here as a decision rather than as an ambiguity.
-// A name with more than one declaration and NO recorded answer is still
-// reported: "resolution is on declared parameter types and arity", and
-// a backend guessing would be a second, worse copy of that rule.
+// OVERLOAD RESOLUTION IS SEMA'S, READ BACK RATHER THAN REDONE. `Cand`
+// carries the `DeclId` it came from, and `chosen` writes it into
+// `Checker.call_memo` under the call's node id, so `loop`'s six
+// declarations arrive here as a decision, not an ambiguity. A name with
+// more than one declaration and NO recorded answer is still reported: a
+// backend guessing would be a second, worse copy of sema's resolution
+// rule.
 //
-// THE TYPE FALLBACK LIVES HERE for the same reason: sema does not type
-// a call yet, so it does not type a `.try()` on one either, and the
-// only place that can answer is the one that already resolves callees.
-// The moment sema types a call the fallback stops firing.
+// THE TYPE FALLBACK LIVES HERE for the same reason: sema doesn't type a
+// call yet, so it doesn't type a `.try()` on one either, and only the
+// place that already resolves callees can answer. The fallback stops
+// firing the moment sema types a call.
 
 Ast, Expr, ExprKind, ExprId, BlockId, Block, Stmt, StmtKind, Bind = ast
 Decl, DeclKind, Struct, Member, MemberKind, Function = ast
@@ -80,12 +77,6 @@ is_format_door, lower_format_door = gen.gen_c.gen_c_fmt
 
 // -----------------------------------------------------------------
 // `Res` values
-//
-// `Ok(x)`, `Err(e)` and `None` are not calls to anything: sema carries
-// `Res` structurally, so the constructors are built here from the
-// EXPECTED type. Which is also why they need one — `Ok(0)` alone does
-// not say whether it closes a `Res<i32>` or a `Res<i32, E>`, and
-// DESIGN.md's hoisting rule turns on exactly that.
 // -----------------------------------------------------------------
 
 res_value* = (be :: CBackend, id: ExprId, want: TyId, variant: str,
@@ -110,15 +101,14 @@ write_res_tagged = (be :: CBackend, want: TyId, variant: str, out :: String)
 // variant names. A unit payload takes no member — `Ok(())` carries
 // nothing and a void member is illegal C.
 //
-// A UNIT PAYLOAD IS STILL EVALUATED. `Ok(f())` on a unit-returning `f`
-// carries nothing and DOES something, and writing only the tag would
-// drop the call — which is `bool.then`'s whole body once `T` is `()`.
-// The literal `()` is the one case with nothing to run.
+// A UNIT PAYLOAD IS STILL EVALUATED: `Ok(f())` on a unit-returning `f`
+// carries nothing but DOES something, and writing only the tag would
+// drop the call. The literal `()` is the one case with nothing to run.
 //
-// EXPORTED BECAUSE HOISTING BUILDS THE SAME VALUE. `7;` closing a
-// `Res<i32, E>` is `Ok(7)` — the same tag over the same payload — and
-// `gen_c_hoist.zen` writing its own copy would be two places holding one
-// layout decision.
+// EXPORTED BECAUSE HOISTING BUILDS THE SAME VALUE: `7;` closing a
+// `Res<i32, E>` is `Ok(7)`, the same tag over the same payload —
+// `gen_c_hoist.zen` writing its own copy would be two places holding
+// one layout decision.
 write_res_payload* = (be :: CBackend, id: ExprId, want: TyId, variant: str,
                       value: ExprId, payload: TyId, ctx: Ctx, out :: String)
                      Res<(), AllocError> {
@@ -161,9 +151,8 @@ write_payload_init = (be :: CBackend, variant: str, value: ExprId,
 }
 
 // THE THREE CALLEE FORMS. A bare name is a function or a type; a dot is
-// `gen_c_member.zen`'s subject and the three readings DESIGN.md gives
-// it; anything else is a value that happens to be callable, and the
-// general form is to lower the callee and call through it.
+// `gen_c_member.zen`'s subject; anything else is a callable value, and
+// the general form lowers the callee and calls through it.
 lower_call* = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx, want: TyId,
               out :: String) Res<(), AllocError> {
     be.tree.expr_at(c.callee).kind.match({
@@ -173,11 +162,10 @@ lower_call* = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx, want: TyId,
     })
 }
 
-// A NAME BOUND TO A LAMBDA IS NOT A CALL THROUGH A VALUE. `f(x)` inside
-// a callee that was handed a closure is the closure's own body, inlined
-// here: "a body is a non-escaping stack closure, inlined at the call
-// site, so there is no closure record to box", and a function-typed
-// parameter therefore has no C storage to call through.
+// A NAME BOUND TO A LAMBDA IS NOT A CALL THROUGH A VALUE: `f(x)` where
+// `f` was handed a closure is the closure's own body, inlined here — a
+// non-escaping stack closure has no closure record to box, so a
+// function-typed parameter has no C storage to call through.
 lower_name_callee = (be :: CBackend, id: ExprId, c: Call, name: str,
                      ctx: Ctx, want: TyId, out :: String)
                     Res<(), AllocError> {
@@ -188,9 +176,9 @@ lower_name_callee = (be :: CBackend, id: ExprId, c: Call, name: str,
 }
 
 // A callee that is neither a name nor a dot: lower the expression, then
-// call through it. The callee's type is what says how many arguments it
-// takes and what they are, so a callee sema could not type is REPORTED
-// rather than called with a guess at its signature.
+// call through it. The callee's type says how many arguments it takes
+// and what they are, so a callee sema couldn't type is REPORTED rather
+// than called with a guessed signature.
 lower_indirect = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx,
                   out :: String) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
@@ -232,11 +220,10 @@ lower_named_call = (be :: CBackend, id: ExprId, c: Call, name: str, ctx: Ctx,
     })
 }
 
-// `println` is checked BEFORE resolution and only when nothing declares
-// it: DESIGN.md's sugar names no function, so there is nothing for the
-// walk to find, but a module that does declare `println` means its own.
-// `gen_c_print.zen` says why the `Env`-in-scope half of the law is not
-// enforced here.
+// `println` is checked BEFORE resolution, only when nothing declares it:
+// the sugar names no function, so there's nothing for the walk to find,
+// but a module declaring its own `println` means that. `gen_c_print.zen`
+// says why the `Env`-in-scope half of the law isn't enforced here.
 lower_sugar_or_plain = (be :: CBackend, id: ExprId, c: Call, name: str,
                         ctx: Ctx, out :: String) Res<(), AllocError> {
     is_sugar(be, name, ctx).try().match({
@@ -293,15 +280,15 @@ lower_plain_call* = (be :: CBackend, id: ExprId, c: Call, name: str,
     })
 }
 
-// THE FUNCTIONS THAT TRAVELLED WITH THE RECEIVER'S TYPE, and THE SAME
-// POOL SEMA RESOLVED AGAINST. `sema_call.travelled_cands` is the other
-// half; the two have to agree or `resolved_call` names a declaration
-// this list does not hold and the fallback re-decides it.
+// THE FUNCTIONS THAT TRAVELLED WITH THE RECEIVER'S TYPE — THE SAME POOL
+// SEMA RESOLVED AGAINST. `sema_call.travelled_cands` is the other half;
+// the two must agree or `resolved_call` names a declaration this list
+// doesn't hold and the fallback re-decides it.
 //
-// Only a dot asks — `recv` is `None` for `f(a)` — and only a function
-// whose FIRST PARAMETER is the receiver's own type answers. Without
-// it `to_usize`, which is on no prelude line and is a method on every
-// integer in this tree, resolves to nothing.
+// Only a dot asks (`recv` is `None` for `f(a)`), and only a function
+// whose FIRST PARAMETER is the receiver's own type answers. Without it
+// `to_usize` — on no prelude line, a method on every integer — resolves
+// to nothing.
 travelled_defs = (be :: CBackend, name: str, recv: Res<ExprId>, ctx: Ctx,
                   found :: Vec<Def>) Res<(), AllocError> {
     recv.match({
@@ -349,12 +336,12 @@ receives = (be :: CBackend, d: Def, rty: TyId) Res<bool, AllocError> {
 }
 
 // `satisfies_bound` — an impl of the declared type, or the same type —
-// and it is `sema_cand.takes_receiver`'s gate spelled a second time
-// because this is the second half of ONE pool. An `Arena` reaches
-// `Vec* = <T>(a: Alloc) Vec<T>` through `Arena.impl(Alloc, ..)`, and a
-// pool here narrower than sema's holds no declaration for the
-// `resolved_call` sema wrote down — so `sole_def` re-decides a call that
-// was already settled, and says it is not a function at all.
+// is `sema_cand.takes_receiver`'s gate spelled again, since this is the
+// second half of ONE pool. An `Arena` reaches `Vec* = <T>(a: Alloc)
+// Vec<T>` through `Arena.impl(Alloc, ..)`; a pool narrower than sema's
+// holds no declaration for what `resolved_call` wrote down, so
+// `sole_def` re-decides an already-settled call and calls it not a
+// function at all.
 first_is = (be :: CBackend, sig: Vec<TyId>, rty: TyId)
            Res<bool, AllocError> {
     sig.get(0).match({
@@ -369,11 +356,10 @@ has_def = (found: Vec<Def>, id: DeclId) bool {
     }).match({ Ok(_) => true, None => false })
 }
 
-// SEMA ALREADY ANSWERED THIS. `resolved_call` is the declaration
-// overload resolution picked, keyed on this very node, so six
-// declarations of `loop` are six candidates sema chose between and not
-// an ambiguity to re-discover. A backend re-deriving the choice from
-// the name would be a second, worse copy of a rule that has one home.
+// SEMA ALREADY ANSWERED THIS: `resolved_call` is the declaration
+// overload resolution picked, keyed on this node, so six declarations
+// of `loop` are candidates sema already chose between, not an ambiguity
+// to re-discover.
 chosen_def = (be :: CBackend, id: ExprId, c: Call, name: str,
               found: Vec<Def>, want: DeclId, recv: Res<ExprId>, ctx: Ctx,
               out :: String) Res<(), AllocError> {
@@ -393,9 +379,8 @@ def_with_id = (found: Vec<Def>, want: DeclId) Res<Def> {
 }
 
 // Nothing resolved this node, so the only choice a backend may make is
-// the one with nothing to choose: exactly one declaration. Sema records
-// no answer for a call it could not settle, and picking between the
-// candidates here is the guess the whole seam exists to avoid.
+// the one with nothing to choose: exactly one declaration. Picking
+// between candidates here is the guess the whole seam exists to avoid.
 sole_def = (be :: CBackend, id: ExprId, c: Call, name: str, found: Vec<Def>,
             recv: Res<ExprId>, ctx: Ctx, out :: String)
            Res<(), AllocError> {
@@ -415,10 +400,8 @@ call_def = (be :: CBackend, id: ExprId, c: Call, name: str, found: Vec<Def>,
     })
 }
 
-// `Point(x: 3, y: 4)` and `area(p)` are the same node. Which one it is
-// depends on what the callee names — a struct is constructed, a
-// function is called — and that is a question about the declaration,
-// not about the call.
+// Same node, decided by what the callee names — a struct is
+// constructed, a function is called.
 call_kind = (be :: CBackend, id: ExprId, c: Call, d: Def, recv: Res<ExprId>,
              ctx: Ctx, out :: String) Res<(), AllocError> {
     d.kind.match({
@@ -428,10 +411,10 @@ call_kind = (be :: CBackend, id: ExprId, c: Call, d: Def, recv: Res<ExprId>,
     })
 }
 
-// The symbol is built from the DECLARATION's parameter types, which is
-// what makes two overloads of a name two symbols. The declaration is
-// read back out of the AST because sema does not yet answer "what is
-// this function's type" — the seam closes when it does.
+// The symbol is built from the DECLARATION's parameter types, making two
+// overloads of a name two symbols. Read back out of the AST because
+// sema doesn't yet answer "what is this function's type" — the seam
+// closes when it does.
 call_resolved = (be :: CBackend, id: ExprId, c: Call, d: Def,
                  recv: Res<ExprId>, ctx: Ctx, out :: String)
                 Res<(), AllocError> {
@@ -451,11 +434,10 @@ call_decl = (be :: CBackend, id: ExprId, c: Call, d: Def, x: Decl,
 }
 
 // THE LOOP INTRINSIC IS DECIDED BEFORE THE SIGNATURE IS READ, because
-// there is no signature to read: `loop_iter.zen`'s six declarations have
-// no bodies and their type parameters are reachable only through the
-// closure, which infers FROM a signature rather than settling one. So a
-// call to one of them is not an inference failure to report — it is the
-// construct whose body this backend is.
+// there's no signature to read: `loop_iter.zen`'s six declarations have
+// no bodies, and their type parameters are reachable only through the
+// closure, which infers FROM a signature rather than settling one. Not
+// an inference failure — it's the construct whose body this backend is.
 call_fn = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
            recv: Res<ExprId>, ctx: Ctx, out :: String) Res<(), AllocError> {
     is_loop_shape(be, f).match({
@@ -464,10 +446,10 @@ call_fn = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
     })
 }
 
-// A CALLEE HANDED A LAMBDA IS INLINED RATHER THAN CALLED, and that is
-// not an optimisation: a `() T` parameter has no C spelling, so there is
-// no symbol to emit and nothing to pass. `gen_c_inline.zen` is the
-// general case the loop intrinsic is the special one of.
+// A CALLEE HANDED A LAMBDA IS INLINED RATHER THAN CALLED, not an
+// optimisation: a `() T` parameter has no C spelling, so there's no
+// symbol to emit and nothing to pass. `gen_c_inline.zen` is the general
+// case the loop intrinsic is the special one of.
 call_or_inline = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
                   recv: Res<ExprId>, ctx: Ctx, out :: String)
                  Res<(), AllocError> {
@@ -478,8 +460,8 @@ call_or_inline = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
 }
 
 // `null_ptr<T>()` is a free function with no body, and the backend is
-// its body — the same bargain `mem_ptr.zen`'s nine members strike, in
-// the one place a Ptr is made rather than used.
+// its body — the same bargain `mem_ptr.zen`'s nine members strike, the
+// one place a Ptr is made rather than used.
 call_or_floor = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
                  recv: Res<ExprId>, ctx: Ctx, out :: String)
                 Res<(), AllocError> {
@@ -491,7 +473,7 @@ call_or_floor = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
 
 // `alloc.String("{}", x)` is a bodyless variadic declaration and the
 // backend is its body, for the same reason: a variadic parameter has no
-// C spelling and `{}` resolves by the argument's type, so there is
+// C spelling and `{}` resolves by the argument's type, so there's
 // nothing one body could have been.
 call_or_format = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
                   recv: Res<ExprId>, ctx: Ctx, out :: String)
@@ -502,21 +484,20 @@ call_or_format = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
     })
 }
 
-// `to_u64* = (self: u8) u64` is a signature with no body, and
-// `std.core.num` says why: "conversions are methods, never a cast
-// keyword". A cast is the one thing that cannot be written in terms of
-// anything below it, so the backend is the body — the same bargain
-// `mem_ptr.zen`'s nine members strike.
+// `to_u64* = (self: u8) u64` is a signature with no body — `std.core.num`
+// says why: "conversions are methods, never a cast keyword", and a cast
+// can't be written in terms of anything below it, so the backend is the
+// body.
 //
 // EMITTING THE CALL INSTEAD IS A LINKER ERROR, not a wrong answer: a
-// bodyless declaration defines no symbol. That is how this was found,
-// and it is why closing `to_usize`'s RESOLUTION without closing its
-// BODY moved the fault rather than fixing it.
+// bodyless declaration defines no symbol. That's how this was found —
+// closing `to_usize`'s RESOLUTION without closing its BODY moved the
+// fault rather than fixing it.
 //
-// ONLY LOSSLESS WIDENING IS DECLARED, so the cast is the whole of it
-// and there is nothing to check. A narrowing conversion "can fail, so
-// it belongs in a Res-returning function someone writes on purpose",
-// and such a function has a body and never reaches here.
+// ONLY LOSSLESS WIDENING IS DECLARED, so the cast is the whole of it,
+// nothing to check. A narrowing conversion "can fail, so it belongs in
+// a Res-returning function someone writes on purpose" — such a
+// function has a body and never reaches here.
 call_or_convert = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
                    recv: Res<ExprId>, ctx: Ctx, out :: String)
                   Res<(), AllocError> {
@@ -577,9 +558,9 @@ arg_zero = (c: Call) Res<ExprId> {
     c.args.get(0).match({ Ok(a) => Ok(a.value), None => None })
 }
 
-// The operand takes the DECLARED parameter's type and not the target's,
-// so a literal argument is written at the width it is being converted
-// FROM — which is the width the declaration chose the overload on.
+// The operand takes the DECLARED parameter's type, not the target's, so
+// a literal argument is written at the width it's converted FROM — the
+// width the declaration chose the overload on.
 write_convert = (be :: CBackend, d: Def, v: ExprId, target: str, ctx: Ctx,
                  out :: String) Res<(), AllocError> {
     inst ::= be.alloc.Inst();
@@ -622,11 +603,11 @@ call_signature = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
     })
 }
 
-// A GENERIC CALL NOTHING SETTLED IS REFUSED, and it is refused here
-// rather than emitted. A free parameter mangles to one letter, so every
-// instantiation of that call would be one C symbol and the linker would
-// pick whichever body it saw last — a wrong answer with no diagnostic,
-// which is the one outcome a backend may not produce.
+// A GENERIC CALL NOTHING SETTLED IS REFUSED, not emitted: a free
+// parameter mangles to one letter, so every instantiation would be one
+// C symbol and the linker would pick whichever body it saw last — a
+// wrong answer with no diagnostic, the one outcome a backend may not
+// produce.
 call_settled = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
                 sig: Vec<TyId>, inst: Inst, recv: Res<ExprId>, ctx: Ctx,
                 out :: String) Res<(), AllocError> {
@@ -638,14 +619,13 @@ call_settled = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
 
 // THE WALK IS REACHABILITY-DRIVEN and this is the edge it follows: a
 // call that resolves queues the function it resolved to. Without it a
-// translation unit holds one module's declarations and calls symbols
-// nothing defines, which `cc` catches and a compiler should not have
-// emitted.
+// translation unit calls symbols nothing defines — `cc` catches it, but
+// a compiler shouldn't have emitted it.
 //
-// THE SYMBOL IS BUILT ONCE AND USED TWICE — as the queue's identity and
-// as the text of the call — because "was this already emitted" and "what
-// do I call" have to be the same question. Two `Vec` instantiations are
-// two entries exactly when they are two symbols.
+// THE SYMBOL IS BUILT ONCE, USED TWICE — as the queue's identity and the
+// call's text — so "was this already emitted" and "what do I call" are
+// the same question. Two `Vec` instantiations are two entries exactly
+// when they're two symbols.
 call_reachable = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
                   sig: Vec<TyId>, inst: Inst, recv: Res<ExprId>, ctx: Ctx,
                   out :: String) Res<(), AllocError> {
@@ -671,13 +651,13 @@ decl_fault = (x: Decl) str {
 }
 
 // The declared parameter types of a function, in order, at this
-// instantiation. `false` when the declaration is not a function or a
+// instantiation. `false` when the declaration isn't a function or a
 // parameter has no written type to read.
 //
 // THE TYPE PARAMETERS GO BACK IN SCOPE around the read: `(v: T)` is a
-// written type and `T` means nothing unless it is bound. Sema bound it
-// while it checked the declaration and let it go; this is the same
-// question asked again, later.
+// written type and `T` means nothing unless bound. Sema bound it while
+// checking the declaration and let it go; this asks the same question
+// again, later.
 signature_of* = (be :: CBackend, d: Def, inst: Inst, sig :: Vec<TyId>)
                 Res<bool, AllocError> {
     decl_at(be.tree, d.id).match({
@@ -712,10 +692,10 @@ collect_params = (be :: CBackend, d: Def, params: Vec<Param>, inst: Inst,
     Ok(sig.len == params.len);
 }
 
-// The declared type, then the instantiation. One substitution and not
-// two: a declared parameter mentions the CALLEE's parameters and nothing
-// else, and `settled_inst` already put the caller's answers into the
-// arguments — so what comes out is in the caller's terms already.
+// The declared type, then the instantiation. One substitution, not two:
+// a declared parameter mentions only the CALLEE's parameters, and
+// `settled_inst` already put the caller's answers into the arguments —
+// what comes out is already in the caller's terms.
 add_param = (be :: CBackend, t: TypeId, ctx: Ctx, inst: Inst,
              sig :: Vec<TyId>) Res<(), AllocError> {
     declared = be.check.type_from_ast(t, ctx).try();
@@ -755,11 +735,10 @@ write_recv_expr = (be :: CBackend, base: ExprId, f: Function,
     Ok(1);
 }
 
-// An argument to a `::` parameter is passed BY ADDRESS. Zen's `::` on a
-// parameter is "the ordinary binding marker doing its ordinary job", and
-// what it says is that the callee writes the caller's own bytes — so
-// there has to be an address to write through. Every such argument is a
-// binding or a place, which is exactly what C's `&` takes.
+// An argument to a `::` parameter is passed BY ADDRESS: `::` says the
+// callee writes the caller's own bytes, so there has to be an address
+// to write through. Every such argument is a binding or a place —
+// exactly what C's `&` takes.
 write_arg* = (be :: CBackend, value: ExprId, i: usize, f: Function,
               sig: Vec<TyId>, ctx: Ctx, out :: String)
              Res<(), AllocError> {

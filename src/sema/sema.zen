@@ -2,54 +2,41 @@
 // Semantic analysis: the middle of the compiler.
 //
 // This file is the module's public surface and nothing else — a folder
-// root is a file of starred re-exports, which is what makes a folder
-// work. A name absent from this list is module-private on purpose.
+// root is a file of starred re-exports; a name absent here is
+// module-private on purpose.
 //
-// THE SHAPE, in four sentences, so nobody has to read five files to
-// start:
-//
-//   - Sema is MEMOIZED QUERIES, not passes. `alloc.Checker(tree)` builds
-//     the engine; `type_of(id, ctx)` and `type_from_ast(id, ctx)` are
-//     the two that answer about a node, and both cache on the node's id.
-//     That is what `ast_id.zen` made ids `Eq + Hash` for.
+// THE SHAPE:
+//   - MEMOIZED QUERIES, not passes. `alloc.Checker(tree)` builds the
+//     engine; `type_of(id, ctx)` and `type_from_ast(id, ctx)` answer
+//     about a node and cache on its id (why `ast_id.zen` made ids
+//     `Eq + Hash`).
 //   - A TYPE IS AN INTERNED ID. `TyId` compares by equality because the
-//     store canonicalises: `A | B` and `B | A` are one id, and that is
-//     what makes an error set a set rather than a tree walk.
-//   - A DIAGNOSTIC IS A VALUE. Nothing raises. The only `Err` anywhere
-//     in this folder is `AllocError`, so a program full of mistakes
-//     still analyses and yields every diagnostic it owes.
-//   - NAMES RESOLVE THROUGH THE MODULE GRAPH, and `*` gates every hop.
-//     Re-export is an import whose bindings are starred, so following an
-//     import and filtering by `exported` is the whole of the export
-//     rule — there is no second mechanism.
+//     store canonicalises (`A | B` == `B | A`), making an error set an
+//     actual set rather than a tree walk.
+//   - A DIAGNOSTIC IS A VALUE. Nothing raises; the only `Err` in this
+//     folder is `AllocError`, so a program full of mistakes still
+//     yields every diagnostic it owes.
+//   - NAMES RESOLVE THROUGH THE MODULE GRAPH, gated by `*` at every
+//     hop. Re-export is just an import whose bindings are starred —
+//     there is no second export mechanism.
+//   - INSTANTIATION SUBSTITUTES (`sema_inst.zen`). A generic body is
+//     checked once, generically; instantiation only changes the answer
+//     at a call site, which `ExprId` already separates — no need to
+//     re-key the expression memo per instantiation.
+//   - INSTANTIATION TERMINATES (`sema_depth.zen`): the monomorphising
+//     chain is walked after checking and bounded at a depth. Blame
+//     lands on the call that WIDENS its type argument, not on whichever
+//     frame hit the ceiling.
+//   - A STRUCT HAS A SIZE (`sema_layout.zen`), computed by a second
+//     declaration walk rather than a query, because a struct nothing
+//     mentions still needs a size. `Ptr<Node>` terminates the walk;
+//     `Node` does not.
 //
-//   - INSTANTIATION SUBSTITUTES. A call to `<T>(x: T) T` answers the
-//     argument's type, and a member reached through `Vec<u8>` answers
-//     about `u8`. `sema_inst.zen` is the substitution and says why the
-//     expression memo did NOT have to be re-keyed to carry one: a
-//     generic body is still checked exactly once, generically, and what
-//     an instantiation changes is the answer at a CALL SITE — which
-//     `ExprId` already separates.
-//
-//   - INSTANTIATION TERMINATES, and `sema_depth.zen` is why. A
-//     monomorphising compiler answers one instantiation at a time and
-//     cannot notice that the set is infinite, so the chain is walked
-//     once the program is checked and bounded at a depth. The blame is
-//     the interesting half: it lands on the call that WIDENS its type
-//     argument, never on whichever frame hit the ceiling.
-//
-//   - A STRUCT HAS A SIZE, and `sema_layout.zen` is the walk that says
-//     so. It is the folder's second declaration walk and not a query,
-//     because nobody asks a node this: a struct nothing mentions still
-//     has to have a size. `Ptr<Node>` terminates the walk and `Node`
-//     does not, which is the whole of the rule.
-//
-// AND ONE THING THAT IS DELIBERATELY NOT INFERRED: a type parameter
-// reachable only through a LAMBDA argument. "A closure passed to a
-// function whose signature is already known infers its parameter types
-// FROM that signature", so the arrow points the other way, and `loop`,
-// `then` and `find` are instantiated at nothing here. The backend
-// refuses them by name rather than guessing.
+// NOT INFERRED, deliberately: a type parameter reachable only through a
+// LAMBDA argument. A closure passed to a function with a known
+// signature infers its parameter types FROM that signature, not the
+// other way, so `loop`, `then`, `find` are instantiated at nothing
+// here — the backend refuses them by name rather than guessing.
 
 // how a declaration and a member are named, so a memo can key on one
 DeclId*, MemberId*, ImplId*, owner*, member_at* = sema.sema_id

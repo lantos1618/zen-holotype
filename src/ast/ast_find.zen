@@ -1,38 +1,24 @@
 // src/ast/ast_find.zen
-// A cursor position, and the node under it.
+// A cursor position, and the node under it — the LSP primitive
+// `PLAN.md` stage 4 lists as the only one nothing else needs (every
+// other consumer walks DOWNWARD from a root; an editor arrives holding
+// a byte offset).
 //
-// Every other consumer of this tree walks DOWNWARD from a root: the
-// checker starts at a module, the backend starts at `main`, the
-// formatter starts at a file. An editor does not. It arrives holding a
-// byte offset and nothing else, and asks which node is there —
-// `PLAN.md` stage 4 lists that as the one LSP primitive nothing else
-// needs, which is exactly why it was the one missing.
+// SCAN, NOT WALK: `ast_arena.zen` holds every expression, type,
+// pattern and block in one flat `Vec` with its span, so this is a fold
+// over four lists, needing no traversal, parent links, or second index.
 //
-// It is a SCAN AND NOT A WALK, and that is the point rather than a
-// shortcut. `ast_arena.zen` already holds every expression, type,
-// pattern and block in one flat `Vec` with its span, so "which node is
-// at this position" is a fold over four lists and needs no traversal,
-// no parent links and no second index. A walk would need every node
-// form to know its own children — the thing the id'd arenas exist to
-// avoid.
+// SMALLEST WINS: two nodes covering one position are always nested, so
+// "strictly inside the best so far" totally orders the candidates —
+// the answer is deterministic regardless of arena order, which is what
+// `fmt` and the fixpoint stand on.
 //
-// SMALLEST WINS, and containment is what orders the candidates: two
-// nodes covering one position are nested (a tree has no other shape),
-// so "strictly inside the best so far" is a total order over the
-// candidates and the answer does not depend on arena order. That is
-// what makes this deterministic, which is the property `fmt` and the
-// fixpoint both stand on.
+// Position convention is `AST_CONTRACT.md`'s: 1-based line, 1-based
+// BYTE column, span half-open (a position equal to `end` is PAST the
+// node).
 //
-// The position convention is `AST_CONTRACT.md`'s and is not restated
-// here: 1-based line, 1-based BYTE column, span half-open, so a
-// position equal to `end` is PAST the node. A cursor sitting one past
-// the last byte of `foo` is not on `foo`, which is what makes the
-// answer stable as an editor moves through a line.
-
-// NOTHING HERE ALLOCATES, and law 1 says so in the only way that
-// counts: no `Alloc` parameter on any signature below. A cursor query
-// runs per keystroke, and one that grew a list would be the first thing
-// an LSP had to work around.
+// NOTHING HERE ALLOCATES (law 1): no `Alloc` parameter below. A cursor
+// query runs per keystroke.
 str = std.text
 Range = std.core
 Pos, Span = ast.ast_span
@@ -64,11 +50,8 @@ inside* = (inner: Span, outer: Span) bool {
 }
 
 // THE QUERY: the smallest node of any family covering `p` in `file`.
-//
-// `None` when the position is in no node at all — past the end of the
-// file, or inside trivia, which is a run on `Ast` and not a node. That
-// is an answer and not a failure: an editor hovering over a comment
-// gets nothing, which is correct.
+// `None` when `p` is in no node — past EOF or inside trivia — which is
+// a correct answer (hovering a comment gets nothing), not a failure.
 node_at* = (tree: Ast, file: str, p: Pos) Res<NodeRef> {
     best ::= NodeRef.ExprNode(ExprId(index: 0));
     have ::= false;
@@ -116,13 +99,10 @@ node_at* = (tree: Ast, file: str, p: Pos) Res<NodeRef> {
     have.match({ true => Ok(best), false => None })
 }
 
-// HOVER'S OWN DOOR: the smallest EXPRESSION covering `p`.
-//
-// A separate query rather than a filter over `node_at`, because they
-// answer different questions. `x: i32 = 1` has a `Type` node over the
-// `i32` and an `Expr` over the `1`, and a hover on `i32` wants the type
-// node; a hover that wants a VALUE's type wants the expression that is
-// there, not the smallest node of any kind that happens to cover it.
+// HOVER'S OWN DOOR: the smallest EXPRESSION covering `p`. A separate
+// query rather than a filter over `node_at`: `x: i32 = 1` has a `Type`
+// node over `i32` and an `Expr` over `1` — hovering a VALUE's type
+// wants the expression specifically, not the smallest node of any kind.
 expr_node_at* = (tree: Ast, file: str, p: Pos) Res<ExprId> {
     best ::= ExprId(index: 0);
     have ::= false;

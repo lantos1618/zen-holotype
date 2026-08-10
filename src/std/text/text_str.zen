@@ -1,13 +1,12 @@
 // src/std/text/text_str.zen
 // str — a borrowed view of text: a pointer and a byte count. No alloc, no
-// growth, no allocator, no ownership. String literals are str, and they live
-// in static memory.
+// growth, no allocator, no ownership. String literals are str, living in
+// static memory.
 //
-// str is BYTES, and it never pretends otherwise. `len` is a byte count,
-// `s[i]` yields a u8, `==` is bytewise: "héllo".len is 6, not 5, and
-// "héllo"[1] is the first byte of a two-byte sequence rather than 'e'.
-// UTF-8 is a set of FUNCTIONS over these bytes — text_utf8.zen — paid for
-// only where the guarantee is wanted.
+// str is BYTES, never pretends otherwise: `len` is a byte count, `s[i]`
+// yields a u8, `==` is bytewise — "héllo".len is 6 not 5, "héllo"[1] is the
+// first byte of a two-byte sequence, not 'e'. UTF-8 is a set of FUNCTIONS
+// over these bytes (text_utf8.zen), paid for only where wanted.
 
 Ptr = std.mem.mem
 Eq, Hash, Hasher = std.core.core
@@ -18,9 +17,9 @@ str* = {
 
     is_empty* = (self: @Self) bool { self.len == 0 }
 
-    // the form for a lookup that can legitimately miss — Vec.get's shape.
-    // text_utf8 reads through this, because a sequence running off the end
-    // of the string is bad input and not a bug
+    // the lookup-can-legitimately-miss form (Vec.get's shape). text_utf8
+    // reads through this: a sequence running off the end is bad input,
+    // not a bug
     get* = (self: @Self, i: usize) Res<u8> {
         (i < self.len).match({
             true  => Ok(self.data.read(i)),
@@ -28,18 +27,18 @@ str* = {
         });
     }
 
-    // what `s[i]` means. An index out of range is a BUG, not a miss, so it
-    // TRAPS — the fixed-array rule of DESIGN.md's failure model, applied to
-    // bytes. `self.len - i - 1` underflows for every i >= len, and unsigned
-    // underflow is the trap: no branch, and nothing to forget to check
+    // what `s[i]` means. Out of range is a BUG not a miss, so it TRAPS —
+    // DESIGN.md's fixed-array failure rule, applied to bytes.
+    // `self.len - i - 1` underflows for every i >= len; unsigned
+    // underflow IS the trap, no branch needed.
     index* = (self: @Self, i: usize) u8 {
         self.len - i - 1;
         self.data.read(i);
     }
 
-    // a view into a view: the same bytes, no copy, no alloc. Out of range
-    // traps for the same reason `index` does, and by the same means — the
-    // two subtractions ARE the bounds check
+    // a view into a view: same bytes, no copy, no alloc. Out of range
+    // traps the same way `index` does — the two subtractions ARE the
+    // bounds check
     slice* = (self: @Self, from: usize, to: usize) str {
         tail = self.len - to;
         str(data: self.data.offset(from), len: self.len - from - tail);
@@ -55,19 +54,14 @@ str_at* = (data: Ptr<u8>, len: usize) str { str(data: data, len: len) }
 STR_HASH_SEED*: u64 = 14695981039346656037
 STR_HASH_MULT*: u64 = 1099511628211
 
-// lexicographic byte order: the first differing byte decides, and when
-// one is a prefix of the other the shorter comes first. `str` is bytes,
-// so this is not collation and does not pretend to be — "Z" precedes
-// "a" because 0x5A precedes 0x61, and asking a language question about
-// text needs std.text.text_utf8 and a codepoint.
+// lexicographic byte order: first differing byte decides, shorter wins a
+// prefix tie. Bytes not collation — "Z" precedes "a" (0x5A < 0x61); a
+// language-aware ordering needs std.text.text_utf8 and a codepoint.
 //
-// It lives here by the stranger test — "orders two byte strings" names
-// no module — and it arrives now because THREE separate components had
-// each written their own: sema's type-key ordering, the backend's
-// section sort, and a deterministic emit generally. Every one of them
-// needs the same six lines, and every one of them needs the SAME six
-// lines, because gen_c must be a pure function of its input and two
-// orderings that disagree make two compilers disagree.
+// Lives here (no module name fits "orders two byte strings" better) since
+// THREE components had each written their own — sema's type-key ordering,
+// the backend's section sort, deterministic emit — and gen_c must be a pure
+// function of its input, so all three need the SAME six lines.
 before* = (self: str, other: str) bool {
     shorter = (self.len < other.len).match({
         true  => self.len,
@@ -80,8 +74,8 @@ before* = (self: str, other: str) bool {
 }
 
 str.impl(Eq, {
-    // bytewise, and the LENGTH is part of it: a prefix is not the whole.
-    // Comparing over the shorter length is the classic bug, so the lengths
+    // bytewise, and the LENGTH is part of it: a prefix isn't the whole.
+    // Comparing over the shorter length is the classic bug, so lengths
     // decide first
     eq ::= (self: @Self, other: @Self) bool {
         (self.len == other.len).match({
@@ -97,10 +91,9 @@ str.impl(Eq, {
 })
 
 str.impl(Hash, {
-    // over the BYTES, never the pointer: equal bytes are one key, which is
-    // exactly what `==` says. A field-wise default would hash `data` — an
-    // address — and Map<str, V> would miss on every lookup.
-    // `*%` and `+%` wrap: a hash running past u64 is the intent, not a bug
+    // over the BYTES, never the pointer — matches `==`. A field-wise
+    // default would hash `data` (an address) and Map<str, V> would miss
+    // every lookup. `*%`/`+%` wrap: overflowing past u64 is the intent.
     hash ::= (self: @Self, hasher :: Hasher) u64 {
         acc ::= STR_HASH_SEED;
         Range(0, self.len).loop((h, i) {

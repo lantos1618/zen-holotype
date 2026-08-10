@@ -2,62 +2,43 @@
 // Who is allowed to write through a name.
 //
 // `sema_own.zen` answers who OWNS a value; this answers the other half
-// of DESIGN.md's ownership section, and the two are separate files
-// because they are separate questions. A move is a fact about the PATH
-// taken to a node, which is why that one is a flow walk carrying state.
-// A receiver requirement is a fact about a DECLARATION, checked against
-// the path spelled at one call site — so nothing here accumulates
-// anything, and every function below is a question with an answer.
+// of DESIGN.md's ownership section. A move is a fact about the PATH to a
+// node (a flow walk); a receiver requirement is a fact about a
+// DECLARATION checked against the path at one call site, so nothing
+// here accumulates — every function below is a question with an answer.
 //
-// `::` ON A RECEIVER IS NOT A RECEIVER RULE. "It is the ordinary binding
-// marker doing its ordinary job on the ordinary first parameter", so
-// `add* = (self :: @Self, value: T)` and `add* = (v :: Vec<T>, value: T)`
-// are one function written two ways, and this file reads the same
-// `Param.mutable` off either.
+// `::` on a receiver is not a special rule: it's the ordinary binding
+// marker on the ordinary first parameter (`self :: @Self` and `v ::
+// Vec<T>` read the same `Param.mutable`), and it is SHALLOW — it means
+// the method writes the receiver's own bytes and nothing more, so a
+// handle's methods stay `:` even when they change the world (`Alloc.raw`
+// allocates, `Env.spawn` starts an actor, neither writes the two words
+// it was reached through). The test: would a bitwise copy of the
+// receiver see the change?
 //
-// IT IS SHALLOW, WHICH IS WHAT MAKES IT USABLE. `::` means the method
-// writes the receiver's OWN BYTES and nothing more, so a handle's
-// methods are `:` even when they change the world: `Alloc.raw`
-// allocates, `@scope.defer` pushes a closure, `Env.spawn` starts an
-// actor, and not one of the three writes the two words it was reached
-// through. The test, when a signature is unclear, is whether a bitwise
-// copy of the receiver would see the change.
-//
-// So the requirement composes down the path: every link from the binding
-// to the receiver has to permit the write. A `:` field holding a Vec
-// refuses a `::` method, because a copy of the struct would not see the
+// The requirement composes down the path: every link from the binding
+// to the receiver must permit the write. A `:` field holding a `Vec`
+// refuses a `::` method, since a copy of the struct would not see the
 // write; a `:` field holding an `Alloc` accepts every method on it,
-// because none of them asks for the write at all. Same marker, opposite
-// answers, decided by the bitwise-copy test and not by this file.
+// since none of them asks for the write — same marker, opposite
+// answers, decided by the bitwise-copy test.
 //
-// ONE SITE, ONE WALK, and it used to be two. The second was a whole
-// untyped walk of its own, written because nothing else reached a method
-// declared inside a struct body or an impl body — `sema_decl.zen` typed
-// only top-level functions, so a write to `self` inside a member was
-// seen by nobody. `sema_decl.zen` now walks every member body, and the
-// two walks reported the same write twice.
+// One site, one walk — it used to be two. The second, untyped, walk
+// existed because `sema_decl.zen` once typed only top-level functions,
+// missing writes to `self` inside struct/impl members; now it walks
+// every member body, so the two walks reported the same write twice.
+// Measured, not assumed: the deleted walk's case is covered by the
+// typed walk through strictly more expression forms — its own
+// `::`-receiver rule even missed an impl-body write, reading fields off
+// the impl rather than the target. Removing it cost the suite one
+// sentence, no position; that sentence survives in `refuse_link` below,
+// naming the METHOD rather than the binding, since that is where the
+// `::` permitting the write has to go.
 //
-// THE CASE IT ANSWERED IS EMPTY, and that was measured rather than
-// assumed. The deleted walk traversed `module -> Struct|Impl -> members
-// -> Function with a body whose first parameter is named self`; the
-// typed walk traverses the identical decls and recurses through strictly
-// MORE expression forms, so it reaches every write the other did and
-// some it did not — its `::`-receiver rule missed an impl-body write
-// outright, because it read the fields off the impl rather than the
-// target. With it removed, the whole suite lost exactly one sentence and
-// no position: every diagnostic it raised was raised again here.
-//
-// SO ONLY THE SENTENCE SURVIVED IT, in `refuse_link` below. A refusal at
-// the `self` link names the METHOD and not the binding, because that is
-// where the `::` that would permit the write has to go.
-//
-// A CALL IS NOT THE ONLY WRITE. `p.x = 1` asks the same composed
-// question a `::` method does and got no answer at all until the third
-// rule below: the two receiver rules cover a method reached through a
-// `:` link and a `:` method writing itself, and neither of them is a
-// plain assignment into a field. So writes go through
-// `check_write_place`, and the walk that finds them stays in
-// `sema_own.zen` where the targets are already told from the values.
+// A call is not the only write: `p.x = 1` asks the same composed
+// question, answered by the third rule below. Writes go through
+// `check_write_place`, walked from `sema_own.zen` where targets are
+// already told from values.
 
 Ast, Expr, ExprId, Span = ast
 Decl, DeclKind, Struct, Member, MemberKind, Function = ast
@@ -77,12 +58,11 @@ place_type, refuse = sema.sema_own
 // ---------------------------------------------------------------------
 // RULE: a `::` method needs a mutable receiver
 //
-// ONLY A PATH ROOTED AT A LOCAL IS CHECKED, and that is a safety rule
-// rather than a shortcut. A receiver that is a call result is a
-// temporary this frame owns outright and can always be written; a
-// receiver rooted at a module or a type name is not a value at all, and
-// asking what type it is would make this walk report a mistake the
-// program does not contain.
+// Only a path rooted at a local is checked — a safety rule, not a
+// shortcut. A call-result receiver is a temporary this frame owns
+// outright and can always be written; a receiver rooted at a module or
+// type name is not a value at all, and asking its type would report a
+// mistake the program does not contain.
 // ---------------------------------------------------------------------
 
 check_receiver* = (c :: Checker, o :: Own, k: Call, ctx: Ctx)
@@ -110,9 +90,8 @@ check_receiver_path = (c :: Checker, o :: Own, a: Access, ctx: Ctx)
     })
 }
 
-// The receiver is what is wrong and `::=` is the fix, so that is where
-// the diagnostic points — at the base of the dot, never at the method
-// name, which is declared correctly.
+// The receiver is what is wrong, so the diagnostic points at the base
+// of the dot, never at the correctly-declared method name.
 require_mutable = (c :: Checker, o :: Own, a: Access) Res<(), AllocError> {
     place_mutable(c, o, a.base).match({
         true  => Ok(()),
@@ -123,9 +102,8 @@ require_mutable = (c :: Checker, o :: Own, a: Access) Res<(), AllocError> {
 }
 
 // Every link, from the binding out to the receiver. A link the lookup
-// cannot resolve permits the write, which is the fail-open this pair of
-// files applies everywhere: a false rejection makes a correct program
-// uncompilable, and a missing check only misses.
+// cannot resolve permits the write — the fail-open this pair of files
+// applies everywhere.
 place_mutable = (c :: Checker, o :: Own, id: ExprId) bool {
     node = c.tree.expr_at(id);
     node.kind.match({
@@ -144,16 +122,12 @@ link_mutable = (c :: Checker, o :: Own, a: Access) bool {
 // ---------------------------------------------------------------------
 // RULE: a write needs a mutable place
 //
-// The same composed question as the receiver rule, asked of a write
-// rather than a call, and for the same reason: `p.x = 1` needs `p` to
-// permit the write and `x` to be `::`, because a bitwise copy of `p`
-// would not see it. `sema_own.zen` owns the walk that finds the targets
-// and calls in here; the rule is this file's.
-//
-// A BARE NAME IS NOT A WRITE THIS RULE SEES. Zen spells assignment and
-// declaration the same, so `n = 1` is a write only when `n` is already
-// in scope — which is `sema_own.zen`'s question about its own scope
-// state, not this one. Only a path with a link in it arrives here.
+// The same composed question as the receiver rule, asked of a write:
+// `p.x = 1` needs `p` to permit the write and `x` to be `::`, since a
+// bitwise copy of `p` would not see it. `sema_own.zen` owns the walk
+// that finds the targets and calls in here; a bare name never arrives,
+// since Zen spells assignment and declaration the same, and whether
+// `n = 1` is a write is `sema_own.zen`'s question about its own scope.
 // ---------------------------------------------------------------------
 
 check_write_place* = (c :: Checker, o :: Own, id: ExprId)
@@ -166,11 +140,10 @@ check_write_place* = (c :: Checker, o :: Own, id: ExprId)
     })
 }
 
-// The position is the target, because that is where the write is
-// written. The NAME is the link that refuses, which is not the same
-// thing: `q.y = 2` with a `::` binding and a `:` field is wrong at `y`,
-// and naming `q` would send the reader to the one marker that is
-// already right.
+// The position is the target, where the write is written. The name is
+// the link that refuses, which is not the same thing: `q.y = 2` with a
+// `::` binding and a `:` field is wrong at `y`, and naming `q` would
+// send the reader to the marker that is already right.
 refuse_immutable_link = (c :: Checker, o :: Own, node: Expr, id: ExprId)
                         Res<(), AllocError> {
     immutable_link(c, o, id).match({
@@ -179,14 +152,11 @@ refuse_immutable_link = (c :: Checker, o :: Own, node: Expr, id: ExprId)
     })
 }
 
-// WHICH SENTENCE, DECIDED BY WHETHER THE LINK THAT REFUSED IS THE
-// RECEIVER. Every other link names a binding or a field the author can
-// re-mark where it stands; `self` names neither — the `::` that would
-// permit the write goes on the METHOD, so the method is what the
-// diagnostic has to name, and "self is declared `:`" tells a reader
-// nothing they can act on. It is also the promise the receiver rule
-// states: a `:` method that writes its own bytes is an error IN THE
-// METHOD, never a quiet upgrade to `::`.
+// Which sentence, decided by whether the refusing link is the receiver.
+// Every other link names a binding or field the author can re-mark;
+// `self` names neither — the `::` that would permit the write goes on
+// the METHOD, so the method is what the diagnostic names ("self is
+// declared `:`" gives the reader nothing to act on).
 refuse_link = (c :: Checker, o :: Own, node: Expr, nm: str)
               Res<(), AllocError> {
     (nm.eq("self") && (o.method.len > 0)).match({
@@ -198,9 +168,8 @@ refuse_link = (c :: Checker, o :: Own, node: Expr, nm: str)
 }
 
 // From the binding outwards, the first link that does not permit a
-// write. Outwards and not inwards, so a `:` binding is reported before
-// the fields reached through it — the binding is the one the author
-// wrote first and the one whose fix makes the rest legal.
+// write — so a `:` binding is reported before the fields reached
+// through it, since fixing the binding makes the rest legal.
 immutable_link = (c :: Checker, o :: Own, id: ExprId) Res<str> {
     node = c.tree.expr_at(id);
     node.kind.match({
@@ -230,12 +199,12 @@ field_link = (c: Checker, ty: TyId, name: str) Res<str> {
 // ---------------------------------------------------------------------
 // what a dot reaches, asked without reporting
 //
-// `sema_member.zen` answers this question properly, with impl selection
-// and bounds and substitution. This asks a much smaller one — is there a
-// member of this name, and what marker did it carry — and asks it off
-// the declaration directly, because the full query is entitled to raise
-// diagnostics and these walks are not: an ownership pass that reported
-// an ambiguity would be reporting it a second time.
+// `sema_member.zen` answers this properly, with impl selection, bounds,
+// and substitution. This asks a smaller question off the declaration
+// directly — is there a member of this name, what marker did it carry —
+// because the full query is entitled to raise diagnostics and these
+// walks are not: an ownership pass reporting an ambiguity would be
+// reporting it a second time.
 // ---------------------------------------------------------------------
 
 wants_mutable = (c: Checker, ty: TyId, name: str) bool {
@@ -246,10 +215,9 @@ wants_mutable = (c: Checker, ty: TyId, name: str) bool {
 }
 
 // A receiver is the first parameter and nothing more, so this asks what
-// the first parameter is. `self` BY NAME, because a free function whose
-// first parameter happens to be `::` is not a method with a mutable
-// receiver — it is a function taking a mutable parameter, and calling it
-// is not a dot.
+// the first parameter is. `self` by name: a free function whose first
+// parameter happens to be `::` is a function taking a mutable parameter,
+// not a method — calling it is not a dot.
 receiver_is_mutable* = (m: Member) bool {
     m.kind.match({
         Function(f) => first_param_mutable(f),
@@ -279,15 +247,12 @@ member_is_mutable = (m: Member) bool {
     })
 }
 
-// THE TYPE'S OWN BODY, AND ONLY IT. An impl-supplied member is not
-// searched, and that is a deliberate narrowing rather than an omission:
-// selecting between two impls is `sema_member.zen`'s rule, it needs the
-// bounds in scope, and it may report an ambiguity — all three of which
-// this walk has given up. A `::` method supplied by an impl is therefore
-// a check this file does not make, which is the fail-open direction and
-// not the unsound one.
-//
-// It also costs nothing: a lookup with no impls to scan needs no
+// The type's own body, and only it. An impl-supplied member is not
+// searched — a deliberate narrowing: selecting between impls is
+// `sema_member.zen`'s rule, needs bounds in scope, and may report an
+// ambiguity, all of which this walk has given up. A `::` method
+// supplied by an impl is a check this file does not make (fail-open,
+// not unsound), and it costs nothing: no impls to scan means no
 // allocator, so every caller above stays a plain `bool`.
 own_member* = (c: Checker, ty: TyId, name: str) Res<Member> {
     c.types.at(ty).match({

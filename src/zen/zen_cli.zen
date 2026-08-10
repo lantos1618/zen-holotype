@@ -1,38 +1,30 @@
 // src/zen/zen_cli.zen
 // The command line, and nothing else.
 //
-// THE INVOCATION IS FIXED, and it is fixed by an oracle rather than by
-// taste: `scripts/fixpoint.sh` builds `zen-1` out of `stage1.c` and then
-// runs it as
+// THE INVOCATION IS FIXED BY AN ORACLE, not by taste: `scripts/fixpoint.sh`
+// builds `zen-1` out of `stage1.c` and runs it as
 //
 //     zen build <root> --emit-c -o <file.c>
 //
-// so the argument shape is this compiler's interface to the strongest
-// test in the project. Getting it wrong is not cosmetic — it is the gate
-// failing to run at all. `--entry` is added BESIDE that line and never
-// into it: the fixpoint passes no entry and must keep finding one.
+// so this argument shape is the compiler's interface to the project's
+// strongest test — getting it wrong is the gate failing to run at all.
+// `--entry` is added BESIDE that line, never into it: the fixpoint
+// passes no entry and must keep finding one.
 //
-// THIS FILE TOUCHES NO CAPABILITY. It takes a `Vec<str>` and returns what
-// was asked for, which is what makes it the one part of the CLI a corpus
-// test can drive: `tests/corpus/cli/` hands it argument vectors it will
-// never see on a real command line, and reads the answer back. Everything
-// that reads a file or prints a line is in `zen_build.zen`.
+// THIS FILE TOUCHES NO CAPABILITY: it takes a `Vec<str>` and returns
+// what was asked for, the one part of the CLI a corpus test can drive
+// (`tests/corpus/cli/` hands it argv it'll never see for real). Reading
+// files or printing is all in `zen_build.zen`.
 //
-// TWO FLAGS ARE HERE FOR A GATE AND NOT FOR A USER: `--repeat N` and
-// `--permute <mode>`. They are deliberately absent from `USAGE`, which
-// is the one line a mistyped command prints — a debug flag belongs in
-// the document that depends on it, and `tests/determinism/README.md`
-// specifies both. `Debug` below says what each does; neither changes
-// what a build with neither of them emits.
+// `--repeat N` / `--permute <mode>` EXIST FOR A GATE, NOT A USER —
+// deliberately absent from `USAGE` (tests/determinism/README.md
+// specifies both). Neither changes what a build with neither emits.
 //
-// `build` AND `fmt` ARE WRITTEN. PLAN.md's line is "thin cli: build /
-// fmt / test / lsp"; `fmt` arrived with stage 2, and `test` and `lsp`
-// are stage 1's `build.zen` and stage 4 respectively. `lsp` has a
-// server behind it now and `zen.zen` dispatches on the name, because it
-// takes no arguments this file would have to decide about. Both are
-// still NAMED here and answered with "not yet" — a guess at their
-// behaviour would be surfaces nobody has designed, and a command that
-// silently does nothing is worse than one that says it is not written.
+// `build` AND `fmt` ARE WRITTEN; `test`/`lsp` are stage 1's `build.zen`
+// and stage 4. `lsp` now has a server and `zen.zen` dispatches on the
+// name (it takes no arguments this file would decide about). Both are
+// still NAMED here, answered "not yet" — a silent no-op is worse than
+// saying a command isn't written.
 
 Alloc, AllocError = std.mem
 str = std.text
@@ -41,21 +33,18 @@ Range = std.core
 
 // What the command line asked for.
 //
-// Four cases and not one: every one of them is a different thing to
-// tell the caller, and collapsing any pair sends them to fix the wrong
-// line. `zen fmt` is a real command of this compiler that has not been
-// written yet, which is not the same as typing something meaningless;
-// and leaving out a required flag is not the same as misspelling one,
-// because nothing the caller wrote is wrong.
+// Four cases, not one: collapsing any pair sends the caller to fix the
+// wrong thing. `zen fmt` unwritten isn't the same as a meaningless
+// command; a missing required flag isn't the same as a misspelled one
+// (nothing the caller wrote is wrong).
 Cli* = Build(Job)
      | Fmt(FmtJob)
      | Later(str)     // test / lsp — named, and not yet written
      | Usage(str)     // the word that made no sense; empty means nothing was said
      | Missing(str)   // a flag the build needs and did not get
 
-// Everything `build` needs. `emit_c` is a flag and not a mode enum
-// because there is exactly one mode: PLAN.md says C is the backend and
-// "what not to build" names a second backend outright.
+// Everything `build` needs. `emit_c` is a flag not a mode enum: there's
+// exactly one mode (PLAN.md: C is the backend).
 Job* = {
     root*: str,      // the compilation root: a DIRECTORY, always
     out*: str,       // where the C goes; empty when `-o` was not given
@@ -65,18 +54,16 @@ Job* = {
     debug*: Debug,
 }
 
-// THE TWO FLAGS THAT EXIST FOR A GATE, kept in a struct of their own so
-// that `Job`'s four fields stay the answer to "what is this build" and
-// these stay the answer to "and how is it being measured". Neither
-// changes what a clean build emits: the defaults below are exactly the
-// behaviour of a command line that names neither.
+// THE TWO GATE FLAGS, kept in their own struct so `Job`'s four fields
+// stay "what is this build" and these stay "how is it measured".
+// Neither changes what a clean build emits — the defaults below are
+// exactly the behaviour of naming neither.
 //
-// `tests/determinism/README.md` calls both a CONTRACT, and it is right
-// to: `check.sh` cannot write its first check without `--repeat`, and
-// without `--permute` its third check has no way to vary anything at
-// all, because the self-hosted CLI takes a ROOT and computes the module
-// order itself. A gate that cannot vary its input is a gate that cannot
-// go red.
+// tests/determinism/README.md calls both a CONTRACT: `check.sh` can't
+// write its first check without `--repeat`, and without `--permute`
+// its third check has nothing to vary (the self-hosted CLI computes
+// module order itself from a ROOT). A gate that can't vary its input
+// can't go red.
 Debug* = {
     repeat*: usize,  // run the whole pipeline this many times, in one
                      // process; 1 is one build and no extra files
@@ -84,17 +71,15 @@ Debug* = {
                      // order the imports are written in
 }
 
-// `zen fmt` takes FILES and never a directory, and that is `std.env.Fs`
-// having no listing rather than an omission here: "walking a source
-// tree needs none of them: a module path is COMPUTED". A build can
-// compute its own file set from the entry's imports; a format cannot,
-// because a file nobody imports still has to be formatted. So the file
-// set is the caller's, exactly as `make fmt` supplies it.
+// `zen fmt` takes FILES, never a directory — `std.env.Fs` has no
+// listing (a module path is COMPUTED). A build computes its file set
+// from the entry's imports; a format can't, since a file nobody
+// imports still needs formatting — so the file set is the caller's,
+// exactly as `make fmt` supplies it.
 FmtJob* = {
-    // The whole command line. The paths are the words after `fmt`, and
-    // they are read back out rather than copied at parse time because
-    // `cli` takes no `Alloc` — gathering them allocates, and law 1 says
-    // the signature that allocates is the one that says so.
+    // The whole command line. Paths (words after `fmt`) are read back
+    // out, not copied at parse time — `cli` takes no `Alloc`, and law 1
+    // says the allocating signature says so.
     argv*: Vec<str>,
 
     // `--check`: report, change nothing. Without it the files are
@@ -115,17 +100,15 @@ FmtJob* = {
     }
 }
 
-// `argv.get(0)` is the program path and `argv.get(1)` is the command,
-// so a command's own arguments start here. Spelled once: two scans read
-// it and a `2` in one of them is a scan that silently starts on the
-// command.
+// `argv.get(0)` is the program path, `argv.get(1)` the command, so a
+// command's own arguments start here. Spelled once: a stray `2` in one
+// of the two scans that read it would silently start on the command.
 ARGS*: usize = 2
 
 USAGE*: str = "usage: zen build <root> [--entry <file>] --emit-c -o <file.c>\n       zen fmt [--check] <file.zen>..."
 
-// What one argument is. A classifier rather than a chain of matches at
-// the scan site, because the scan has to stay readable while it also
-// carries the cursor, and five names beat five levels of nesting.
+// What one argument is. A classifier, not a chain of matches at the
+// scan site — the scan stays readable while it carries the cursor.
 Arg = EmitC | Out | Entry | Repeat | Permute | Flag | Word
 
 // `argv.get(0)` is the program path, so the command is argv[1] and its
@@ -162,15 +145,13 @@ is_later = (name: str) bool {
     name.eq("test") || name.eq("lsp")
 }
 
-// `zen fmt [--check] <file.zen>...`. One flag and a list of paths, so
-// the scan is the build's scan with four cases collapsed into two: a
-// word is a path, and every path is kept rather than the second one
-// being a mistake.
+// `zen fmt [--check] <file.zen>...`. One flag, a list of paths — the
+// build's scan with four cases collapsed to two: a word is a path, and
+// every path is kept.
 //
-// A FORMAT WITH NO PATHS IS NOT A SMALLER FORMAT, it is nothing — the
-// same reading `built` takes of a build with no `--emit-c`, and for the
-// same reason: a command that silently does nothing is worse than one
-// that says what it wanted.
+// A FORMAT WITH NO PATHS IS NOT A SMALLER FORMAT, it's nothing — same
+// reading `built` gives a build with no `--emit-c`, same reason: a
+// silent no-op is worse than saying what was wanted.
 fmt_of = (argv: Vec<str>) Cli {
     check ::= false;
     bad ::= "";
@@ -206,13 +187,11 @@ fmt_verdict = (argv: Vec<str>, check: bool, bad: str, words: usize) Cli {
 }
 
 // A path, as opposed to a flag or a gap in a test's argument vector.
-// `paths` and `fmt_of` must agree on this or the count and the list
-// disagree, so they read one function.
+// `paths` and `fmt_of` must agree on this, so they read one function.
 is_word = (word: str) bool { !word.is_empty() && !is_flag(word) }
 
-// The scan. One pass, one cursor, and a `bad` that stops it: the first
-// argument that makes no sense is the one worth naming, and reporting
-// the fifth as well would bury it.
+// The scan. One pass, one cursor, a `bad` that stops it: the first
+// argument that makes no sense is worth naming; a fifth would bury it.
 job_of = (argv: Vec<str>) Cli {
     root ::= "";
     out ::= "";
@@ -252,14 +231,13 @@ verdict = (root: str, out: str, entry: str, emit: bool, bad: str, dbg: Debug)
     })
 }
 
-// `--emit-c` IS THE BUILD, and a build without it is not a smaller
-// build — it is nothing. Emission is the only thing this compiler does
-// with the tree it checked; drop the flag and it type-checks the world,
-// throws the answer away, and exits 0 having written no file. That is
-// the silence this file's own header calls worse than saying so, and it
-// held for long enough that `make build` stood on it and produced no
-// binary — taking `test-zen`, `fmt` and `determinism` down with it,
-// because a target that cannot run cannot go red either.
+// `--emit-c` IS THE BUILD; without it a build is not smaller, it's
+// nothing. Emission is the only thing this compiler does with the tree
+// it checked; drop the flag and it type-checks the world, throws the
+// answer away, exits 0 having written no file. That silent bug once
+// held long enough that `make build` produced no binary — taking
+// `test-zen`, `fmt` and `determinism` down with it, since a target that
+// can't run can't go red either.
 built = (root: str, out: str, entry: str, emit: bool, dbg: Debug) Cli {
     emit.match({
         false => Cli.Missing("--emit-c"),
@@ -268,11 +246,11 @@ built = (root: str, out: str, entry: str, emit: bool, dbg: Debug) Cli {
     })
 }
 
-// `--entry <file>` is a FILE INSIDE THE ROOT and not a second root, so
-// it is a flag with an argument exactly as `-o` is. The root stays
-// positional because a build is a root; the entry says where to start
-// in it, which is knowledge the caller already has and the compiler
-// cannot recover — `std.env.Fs` has no listing, on purpose.
+// `--entry <file>` is a FILE INSIDE THE ROOT, not a second root — a
+// flag with an argument, like `-o`. The root stays positional (a build
+// is a root); the entry says where to start in it, knowledge the
+// caller has and the compiler can't recover (`std.env.Fs` has no
+// listing, on purpose).
 classify = (a: str) Arg {
     a.eq("--emit-c").match({
         true  => Arg.EmitC,
@@ -287,8 +265,8 @@ classify = (a: str) Arg {
 }
 
 // The two debug flags, split off so `classify` stops at four levels.
-// They take an argument exactly as `-o` and `--entry` do, so a missing
-// one leaves the default rather than swallowing the next word.
+// They take an argument like `-o`/`--entry`, so a missing one leaves
+// the default rather than swallowing the next word.
 debug_arg = (a: str) Arg {
     a.eq("--repeat").match({
         true  => Arg.Repeat,
@@ -303,8 +281,8 @@ debug_arg = (a: str) Arg {
 }
 
 // A leading `-` is a flag whatever follows it, so an unknown one is
-// named rather than silently read as the root — which is how a typo in
-// `--emit-c` becomes a compiler that quietly compiles the wrong tree.
+// named rather than silently read as the root — otherwise a typo in
+// `--emit-c` compiles the wrong tree, quietly.
 is_flag = (a: str) bool {
     a.is_empty().match({
         true  => false,
@@ -313,8 +291,8 @@ is_flag = (a: str) bool {
 }
 
 // An argument past the end is the empty string, which every caller
-// already has to handle: `-o` with nothing after it leaves `out` empty,
-// and that is reported where `out` is used rather than here.
+// already handles: `-o` with nothing after leaves `out` empty, reported
+// where `out` is used, not here.
 arg_at = (argv: Vec<str>, i: usize) str {
     argv.get(i).match({
         Ok(s) => s,
@@ -322,11 +300,10 @@ arg_at = (argv: Vec<str>, i: usize) str {
     })
 }
 
-// How many runs `--repeat <n>` asks for. Digits only, and ANYTHING ELSE
-// IS ONE — never zero. A debug flag that quietly ran the pipeline no
-// times would make the check it exists for pass by emitting nothing,
-// which is the exact failure `tests/determinism/check.sh` opens by
-// naming: a gate that succeeds when it cannot run.
+// How many runs `--repeat <n>` asks for. Digits only, ANYTHING ELSE IS
+// ONE, never zero — a debug flag quietly running the pipeline zero
+// times would make its own check pass by emitting nothing: a gate that
+// succeeds when it can't run.
 runs_of = (text: str) usize {
     n ::= 0;
     digits ::= text.is_empty() == false;
@@ -343,8 +320,8 @@ runs_of = (text: str) usize {
     })
 }
 
-// The value of one digit byte, widened. Guarded by `is_digit` at its one
-// call site, so the subtraction cannot go under.
+// The value of one digit byte, widened. Guarded by `is_digit` at its
+// one call site, so the subtraction can't underflow.
 place_of = (b: u8) usize {
     (b - '0').to_u32().to_usize()
 }

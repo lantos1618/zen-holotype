@@ -2,29 +2,28 @@
 // Monomorphisation: what the backend does with a type parameter.
 //
 // C has no generics, so a generic function is emitted ONCE PER DISTINCT
-// SET OF TYPE ARGUMENTS with the arguments in its mangled name. That is
-// the whole of the feature, and almost none of it is here — `sema_inst.zen`
-// already answers what each parameter became, at a call site and at a
-// generic receiver both. This file is the three things a BACKEND has to
-// do that sema does not:
+// SET OF TYPE ARGUMENTS, with the arguments in its mangled name.
+// `sema_inst.zen` already answers what each parameter became, at a call
+// site and a generic receiver both; this file is the three things a
+// BACKEND has to do that sema does not:
 //
 //   - READ THE ANSWER BACK. `inst_at` is `Checker.resolved_inst` with the
 //     empty instantiation for a miss, so a non-generic call and a generic
 //     one go down one path.
 //   - PUT THE PARAMETERS BACK IN SCOPE while a DECLARED type is read.
 //     Sema resolves `(a: Alloc) Vec<T>` with `T` bound, then forgets;
-//     the backend asks the same question again later and has to bind it
-//     again or `T` is an undefined name. `enter_tparams` is that, and it
-//     is always paired with `leave_tparams`.
+//     the backend asks again later and must rebind it or `T` is an
+//     undefined name. `enter_tparams` is that, always paired with
+//     `leave_tparams`.
 //   - REFUSE AN OPEN TYPE. A `Var` that reaches `tcode` mangles to one
 //     letter, so two instantiations would become one symbol and `cc`
 //     would silently pick whichever body it saw last. `open` is asked
 //     before anything is emitted, and the fault names the function.
 //
-// THE ORDER IS DECLARATION ORDER AND NOTHING ELSE. An `Inst` is two
-// parallel lists filled from `tparams`, never a `Map`, so the `I` section
-// of a symbol is a pure function of the instantiation — which is the
-// property the fixpoint stands on.
+// Order is DECLARATION ORDER, nothing else: an `Inst` is two parallel
+// lists filled from `tparams`, never a `Map`, so the `I` section of a
+// symbol is a pure function of the instantiation — the property the
+// fixpoint stands on.
 
 Ast, Decl, DeclKind, Struct, Function, TParam, Member, ExprId = ast
 Alloc, AllocError = std.mem
@@ -43,15 +42,15 @@ ty_of = gen.gen_c.gen_c_expr
 // ---------------------------------------------------------------------
 // interning, through ONE field and never two
 //
-// ⚠ `be.check.types.named(..)` DOES NOT INTERN. The bootstrapper spills
-// a `::` receiver reached through TWO field hops into a temporary and
-// calls the method on the temporary, so the row lands in a copy of the
-// store and the `TyId` handed back is one past the real store's end —
-// which the next `Types.at` traps on, a long way from the cause. One hop
-// (`c.types.named(..)` with `c :: Checker` a parameter) is correct, so
-// every mutating store call in this folder goes through a helper that
-// takes the checker as its own parameter. Recorded with the emitted C in
-// docs/GEN_BOOTSTRAP_FIXES.md.
+// ⚠ `be.check.types.named(..)` DOES NOT INTERN if reached through TWO
+// field hops. The bootstrapper spills a `::` receiver reached that way
+// into a temporary and calls the method on it, so the row lands in a
+// copy of the store and the `TyId` handed back is one past the real
+// store's end — which the next `Types.at` traps on, far from the cause.
+// One hop (`c.types.named(..)` with `c :: Checker` a parameter) is
+// correct, so every mutating store call in this folder goes through a
+// helper taking the checker as its own parameter. Recorded with the
+// emitted C in docs/GEN_BOOTSTRAP_FIXES.md.
 // ---------------------------------------------------------------------
 
 // The type a declaration NAMES, applied to `args`.
@@ -65,10 +64,9 @@ intern_var* = (c :: Checker, name: str, owner: str) Res<TyId, AllocError> {
     c.types.var(name, owner)
 }
 
-// `Res<T>` — the one-argument form, which is what every loop word
-// returns. Here rather than at the call site for the reason at the top
-// of this file: interning goes through ONE field hop or the row lands in
-// a copy of the store.
+// `Res<T>` — the one-argument form every loop word returns. Kept here
+// rather than at the call site for the same one-hop interning reason
+// as above.
 intern_res_open* = (c :: Checker, value: TyId) Res<TyId, AllocError> {
     c.types.res_open(value)
 }
@@ -76,10 +74,10 @@ intern_res_open* = (c :: Checker, value: TyId) Res<TyId, AllocError> {
 // THE TYPE A CONSTRUCTION BUILDS, at this emission's instantiation.
 //
 // `Vec(data: .., cap: 0)` inside `Vec<T>`'s own constructor builds a
-// `Vec<T>` and not a bare `Vec` — sema records exactly that, so the
-// backend has to agree or the two intern two different types under one
-// name. The declaration's own parameters go in, and the instantiation
-// being lowered turns them into what this emission is at.
+// `Vec<T>`, not a bare `Vec` — sema records exactly that, so the
+// backend must agree or intern two different types under one name.
+// The declaration's own parameters go in; the instantiation being
+// lowered turns them into what this emission is at.
 constructed* = (be :: CBackend, d: Def) Res<TyId, AllocError> {
     args ::= be.alloc.Vec<TyId>();
     decl_vars(be.check, d, args).try();
@@ -105,18 +103,17 @@ decl_vars_of = (c :: Checker, d: Def, x: Decl, out :: Vec<TyId>)
 // THE TYPE A DECLARATION NAMES AT ITS OWN PARAMETERS: `Vec<T>`, never
 // `Vec<i32>`.
 //
-// SEMA MEMOISES AN EXPRESSION'S TYPE UNDER ITS NODE ID AND NOTHING ELSE
-// — `sema_inst.zen` says so, and says why: "a generic body is still
-// checked EXACTLY ONCE, generically, with its parameters as `Var`s". So
-// an answer computed inside `Vec<Row>.add` is the answer `Vec<u8>.add`
-// gets back, and a body lowered at a CONCRETE `@Self` writes exactly
-// that answer into the memo. It emitted `Vec<u8>.add` calling
-// `Vec<Row>.grow`, which `cc` caught and would not have caught for two
-// types of one width.
+// Sema memoises an expression's type under its node ID and nothing
+// else (`sema_inst.zen`: "a generic body is checked EXACTLY ONCE,
+// generically, with its parameters as `Var`s"), so an answer computed
+// inside `Vec<Row>.add` is the answer `Vec<u8>.add` gets back too. A
+// body lowered at a CONCRETE `@Self` that wrote that answer straight
+// into the memo once emitted `Vec<u8>.add` calling `Vec<Row>.grow` —
+// caught by `cc`, but wouldn't be for two types of one width.
 //
 // So a generic body is read GENERICALLY and `sub` turns every answer
-// into the one this emission is at — which is what `ty_of`'s header
-// already promises and what this makes true.
+// into the one this emission is at, making true what `ty_of`'s header
+// promises.
 open_named* = (be :: CBackend, decl: DeclId) Res<Res<TyId>, AllocError> {
     decl_at(be.tree, decl).match({
         None  => Ok(None),
@@ -169,11 +166,11 @@ recv_inst* = (be :: CBackend, rty: TyId) Res<Inst, AllocError> {
     })
 }
 
-// A METHOD OF `Vec<T>` IS GENERIC IN `T` WHETHER OR NOT IT DECLARES ANY
-// PARAMETER OF ITS OWN — so the receiver's instantiation IS the method's,
-// and a method that also declares parameters of its own would need the
-// two concatenated. That second half is not written: nothing in this tree
-// declares one, and `refuse_method` still names it rather than guessing.
+// A method of `Vec<T>` is generic in `T` whether or not it declares
+// parameters of its own — so the receiver's instantiation IS the
+// method's. A method that ALSO declares its own parameters would need
+// the two concatenated; that half is unwritten (nothing in this tree
+// declares one), and `refuse_method` names it rather than guessing.
 
 // ---------------------------------------------------------------------
 // substituting
@@ -182,9 +179,9 @@ recv_inst* = (be :: CBackend, rty: TyId) Res<Inst, AllocError> {
 // A type read out of sema, in terms of the instantiation being lowered.
 //
 // EVERY TYPE THE BACKEND READS GOES THROUGH HERE. Sema checks a generic
-// body exactly once, generically — "one mistake, one diagnostic" — so
-// every answer it gives inside `Vec<T>.add` is about `T` and the backend
-// is the one that knows this emission is the `i32` one.
+// body exactly once, generically ("one mistake, one diagnostic"), so
+// every answer inside `Vec<T>.add` is about `T` — the backend is the
+// one that knows this emission is the `i32` one.
 sub* = (be :: CBackend, ty: TyId) Res<TyId, AllocError> {
     subst(be.check, ty, be.inst)
 }
@@ -200,21 +197,20 @@ sub_with* = (be :: CBackend, ty: TyId, inst: Inst) Res<TyId, AllocError> {
 // every emission asks before it writes a symbol.
 open* = (be: CBackend, ty: TyId) bool { has_var(be.check, ty) }
 
-// THE SAME QUESTION, ASKED OF EVERY EMPTY SLOT AND NOT ONLY OF A FREE
+// THE SAME QUESTION, ASKED OF EVERY EMPTY SLOT, NOT ONLY A FREE
 // PARAMETER.
 //
-// `gen_name.tcode` writes ONE letter — `q` — for a `Var`, an `Infer` and
-// an `Unknown` alike, and it is right to: none of the three names a type
-// C could be handed. `open` asks about the first of them only, because
-// the symbol-collision it was written for is a collision between two
-// INSTANTIATIONS. That is a narrower question than "can this be spelled",
-// and a `Res<Ptr<Unknown>, E>` is the gap between them: no `Var` in it,
-// so `open` says settled, and a temporary declared at it is a C struct
-// with an unresolved element that `cc` rejects.
+// `gen_name.tcode` writes ONE letter — `q` — for a `Var`, `Infer`, and
+// `Unknown` alike, since none of the three names a type C could be
+// handed. `open` asks about the first only, because it was written for
+// symbol collision between two INSTANTIATIONS — narrower than "can this
+// be spelled". `Res<Ptr<Unknown>, E>` is the gap: no `Var` in it, so
+// `open` says settled, but a temporary declared at it is a C struct
+// with an unresolved element `cc` rejects.
 //
-// The walk is `sema_inst.has_var`'s, one variant wider, and it is here
-// rather than beside it because the reason is a BACKEND reason — what has
-// a C spelling — and sema has no stake in it.
+// The walk is `sema_inst.has_var`'s, one variant wider; kept here
+// rather than beside it because the reason is a BACKEND one (what has a
+// C spelling), and sema has no stake in it.
 unsettled* = (be: CBackend, ty: TyId) bool {
     be.types().at(ty).match({
         Var(_)   => true,
@@ -254,18 +250,17 @@ inst_open* = (be: CBackend, inst: Inst) bool {
 
 // THE CALL'S INSTANTIATION, IN THE CALLER'S TERMS.
 //
-// Sema records what the CALLEE's parameters became, and inside a generic
-// body what they became is often the CALLER's parameter: `Vec<T>.add`
-// calling `alloc.realloc<T>(..)` instantiates `realloc` at `T`, which is
-// concrete only once the enclosing emission says which `T`. So each
-// argument is put through the instantiation being lowered, and the
-// result is a list every reader of it can mangle.
+// Sema records what the CALLEE's parameters became, and inside a
+// generic body that's often the CALLER's parameter: `Vec<T>.add`
+// calling `alloc.realloc<T>(..)` instantiates `realloc` at `T`, concrete
+// only once the enclosing emission says which `T`. Each argument is put
+// through the instantiation being lowered, giving a list every reader
+// can mangle.
 //
-// It is rebuilt rather than edited because an `Inst` is a value that a
-// memo holds: sema's copy must not change because a backend read it.
-// A parameter the call left free is bound TO ITSELF, so the list keeps
-// its length — a shorter list would make two instantiations one symbol,
-// which is the exact failure the length is there to prevent.
+// Rebuilt rather than edited because an `Inst` is a value a memo holds:
+// sema's copy must not change because a backend read it. A parameter
+// the call left free is bound TO ITSELF, keeping the list's length — a
+// shorter list would make two instantiations one symbol.
 settled_inst* = (be :: CBackend, tparams: Vec<TParam>, owner: str,
                  inst: Inst) Res<Inst, AllocError> {
     out ::= be.alloc.Inst();
@@ -291,18 +286,17 @@ settle_bound = (be :: CBackend, v: TyId, t: TyId, out :: Inst)
 // ---------------------------------------------------------------------
 // what the ARGUMENTS say a parameter became
 //
-// Sema records an instantiation at a call and at a generic receiver —
-// but only inside a body it CHECKED, and it checks top-level
-// declarations only. Every call written inside a member body therefore
-// arrives with nothing recorded, and `Map<K, V>.set` is made of them.
+// Sema records an instantiation at a call and a generic receiver, but
+// only inside a body it CHECKED — top-level declarations only. Calls
+// inside a member body arrive with nothing recorded (`Map<K, V>.set` is
+// made of them), so the arguments are asked instead.
 //
-// So the arguments are asked. STRUCTURAL AND TOTAL: a declared type
-// mentioning no parameter binds nothing, and a shape that does not line
-// up binds nothing rather than guessing — the caller asks afterwards
-// whether every parameter came out bound, and refuses when one did not.
-// FIRST BINDING WINS, which is `Inst.bind`'s own rule and the reason
-// `<T>(a: T, b: T)` against two different types is a mismatch somebody
-// else reports rather than a silent rebind.
+// STRUCTURAL AND TOTAL: a declared type mentioning no parameter binds
+// nothing, and a shape that doesn't line up binds nothing rather than
+// guessing — the caller checks afterwards that every parameter came out
+// bound. FIRST BINDING WINS (`Inst.bind`'s own rule), so
+// `<T>(a: T, b: T)` against two different types is a mismatch someone
+// else reports, not a silent rebind.
 // ---------------------------------------------------------------------
 
 unify* = (be :: CBackend, declared: TyId, actual: TyId, out :: Inst)
@@ -389,11 +383,10 @@ slot_ty = (be :: CBackend, name: str) Res<TyId> {
 // ---------------------------------------------------------------------
 // putting the parameters back in scope
 //
-// `type_from_ast` reads a WRITTEN type, and a written `T` means nothing
-// unless `T` is bound. Sema binds it while it checks the declaration and
-// releases it after; the backend asks the same nodes again, later, and
-// has to bind it again. Always as a pair, and always around the smallest
-// span that reads a written type.
+// `type_from_ast` reads a WRITTEN type, meaningless unless `T` is bound.
+// Sema binds it while checking the declaration then releases it; the
+// backend asks the same nodes again later and must rebind it — always
+// as a pair, around the smallest span that reads a written type.
 // ---------------------------------------------------------------------
 
 enter_tparams* = (be :: CBackend, tparams: Vec<TParam>, owner: str)

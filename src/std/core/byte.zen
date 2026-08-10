@@ -1,27 +1,18 @@
 // src/std/core/byte.zen
 // what you can ask a byte, and it is all ASCII.
 //
-// These live in core rather than in std.text on the direction test:
-// text_str, text_utf8 and every lexer want them, and none of them
-// want each other. A byte is a primitive, so its questions sit at
-// the same layer num.zen's extremes do — and this is a separate
-// file from num.zen because "how wide is i32" and "is this byte a
-// digit" are two subjects, whatever their types have in common.
+// Lives in core, not std.text: text_str, text_utf8 and every lexer
+// want these and none want each other. Separate from num.zen because
+// "how wide is i32" and "is this byte a digit" are different subjects.
+// ASCII-only throughout: a str is bytes (DESIGN.md), so `"héllo"[1]`
+// is a continuation byte and `is_alpha` on it is correctly false — a
+// codepoint question belongs to std.text.text_utf8, not here.
 //
-// ASCII, said once here so no function below repeats it: every
-// predicate answers about the byte ALONE. A str is bytes (DESIGN.md),
-// so `"héllo"[1]` is a continuation byte and `is_alpha` on it is
-// false — correctly, because that byte is not a letter, it is half of
-// one. Asking a letter-shaped question about non-ASCII text is a
-// std.text.text_utf8 question, and it needs a codepoint, not a byte.
-//
-// UFCS makes these read as methods: `b.is_digit()`, not
-// `is_digit(b)`. They are free functions because a primitive has no
-// struct body to hang them in — the call surface is identical.
+// UFCS makes these read as methods: `b.is_digit()`, not `is_digit(b)`.
+// Free functions because a primitive has no struct body to hang them in.
 
-// A byte's ASCII value is its own; naming these is the one place the
-// magic numbers are allowed to be written, because here they ARE the
-// subject rather than a stand-in for it.
+// A byte's own ASCII value; naming it here is the one place a magic
+// number is allowed — it IS the subject, not a stand-in for it.
 DIGIT_ZERO* : u8 = '0'
 DIGIT_NINE* : u8 = '9'
 LOWER_A*    : u8 = 'a'
@@ -34,8 +25,7 @@ UPPER_Z*    : u8 = 'Z'
 // the gap between an upper and a lower letter. 'a' - 'A'
 CASE_GAP*   : u8 = 32
 
-// the ASCII range: one past the last is the first byte that is part
-// of a multi-byte sequence
+// ASCII range: one past the last is the first multi-byte-sequence byte
 ASCII_MAX*  : u8 = 127
 
 // how many digits a base-16 digit stands for
@@ -53,15 +43,14 @@ is_alpha* = (b: u8) bool { b.is_lower() || b.is_upper() }
 
 is_alnum* = (b: u8) bool { b.is_alpha() || b.is_digit() }
 
-// what a lexer skips. `\v` and `\f` are here because a scanner that
-// treats them as ordinary bytes reports "unexpected character" on a
-// file some editor wrote, which is a diagnostic nobody can act on
+// what a lexer skips. `\v`/`\f` included: treating them as ordinary
+// bytes yields an "unexpected character" diagnostic nobody can act on
 is_space* = (b: u8) bool {
     b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == 11 || b == 12
 }
 
-// an identifier's first byte and its later bytes differ by exactly
-// one thing, so they are two names rather than one with a flag
+// first byte and later bytes differ by exactly one thing — two names,
+// not one with a flag
 is_ident_start* = (b: u8) bool { b.is_alpha() || b == '_' }
 
 is_ident_cont*  = (b: u8) bool { b.is_alnum() || b == '_' }
@@ -70,10 +59,8 @@ is_hex_digit* = (b: u8) bool {
     b.is_digit() || (b >= LOWER_A && b <= LOWER_F) || (b >= UPPER_A && b <= UPPER_F)
 }
 
-// Res, not a trap: a caller asking "is this a digit, and which one"
-// is asking a question that can legitimately miss — the str.get
-// shape. A caller that already knows it holds a digit reads through
-// `.try()` and pays nothing for the certainty it has.
+// Res, not a trap: "is this a digit, and which one" can legitimately
+// miss (str.get shape). A caller already certain pays nothing via `.try()`.
 digit_value* = (b: u8) Res<u8> {
     b.is_digit().match({
         true  => Ok(b - DIGIT_ZERO),
@@ -94,9 +81,8 @@ hex_value* = (b: u8) Res<u8> {
     });
 }
 
-// case folding is ASCII-only and says so in its name's neighbourhood
-// rather than in each body: a byte outside A-Z / a-z comes back
-// unchanged, because there is no case to fold
+// ASCII-only case folding: a byte outside A-Z/a-z comes back
+// unchanged — there is no case to fold
 to_lower* = (b: u8) u8 {
     b.is_upper().match({
         true  => b + CASE_GAP,
@@ -111,16 +97,13 @@ to_upper* = (b: u8) u8 {
     });
 }
 
-// the low nibble as its hex digit. The caller splits the byte, because
-// a byte is two digits and a function returning one of them has to be
-// told which — `(b / HEX_BASE).hex_digit()` then `(b % HEX_BASE)`.
-// TRAPS above 15: a nibble out of range is a bug in the caller's shift,
-// not a miss, and the failure model puts those in different worlds
+// the low nibble as its hex digit. Caller splits the byte first —
+// `(b / HEX_BASE).hex_digit()` then `(b % HEX_BASE)`. TRAPS above 15:
+// an out-of-range nibble is a bug in the caller's shift, not a miss.
 hex_digit* = (nibble: u8) u8 {
-    // the trap, in str.index's idiom: this underflows for every nibble
-    // >= HEX_BASE, and unsigned underflow IS the trap -- no branch, and
-    // nothing to forget to check. A literal `/ 0` cannot be used here:
-    // a trap the compiler can prove will fire is a compile error.
+    // str.index's idiom: underflows for nibble >= HEX_BASE — unsigned
+    // underflow IS the trap. Can't write `/ 0` literally: the compiler
+    // rejects a trap it can prove will always fire.
     HEX_BASE - nibble - 1;
     (nibble < 10).match({
         true  => DIGIT_ZERO + nibble,

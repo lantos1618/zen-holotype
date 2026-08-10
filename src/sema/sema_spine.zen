@@ -2,32 +2,27 @@
 // An operator chain is a SPINE, not a tree.
 //
 // `a + b + c + ..` parses as `((a + b) + c) ..`, and `parse_expr.zen`
-// builds it with a loop — `binary_from` folds each operator onto the
-// left in place. So the parser's depth bound never counts a term, and
-// the length of a `+` chain is bounded by nothing at all: one line of
-// `tests/corpus/lex/long_single_line.zen` is ten thousand of them.
+// builds it with a loop (`binary_from` folds each operator onto the
+// left in place) — so a `+` chain's length is bounded by nothing: one
+// line of `tests/corpus/lex/long_single_line.zen` is ten thousand of
+// them.
 //
-// `type_of` on the root then recurses once per term — compute_expr,
-// expr_kind, binary_type, type_of — and at four frames a term an
-// eight-megabyte stack runs out somewhere past a thousand. What the
-// user sees is a segmentation fault, and "a crash is not a diagnostic"
-// (docs/TESTING.md). The bootstrapper answers the same fact in
-// `gen_c.py`'s `ex_Binary`, which walks the spine with a loop for this
-// reason and says so.
+// `type_of` on the root recurses once per term (compute_expr,
+// expr_kind, binary_type, type_of); at four frames a term, an
+// eight-megabyte stack runs out past a thousand — a segfault, and "a
+// crash is not a diagnostic" (docs/TESTING.md). The bootstrapper's
+// `gen_c.py:ex_Binary` walks the spine with a loop for the same reason.
 //
-// SO THE SPINE IS WALKED WITH A CURSOR AND TYPED FROM THE BOTTOM UP.
-// Every left operand is in `expr_memo` before the level above asks for
-// it, so the recursion that remains is one level deep however long the
-// line. Nothing else changes: `binary_type` types its left operand
-// first, so bottom-up IS the recursion's own order, and the types and
-// the diagnostics are the ones it produced.
+// So the spine is walked with a cursor and typed BOTTOM-UP: every left
+// operand is in `expr_memo` before the level above asks for it, so the
+// recursion left is one level deep however long the line — the same
+// order `binary_type` already types its left operand in.
 //
-// ONLY THE LEFT SPINE, AND ONLY THROUGH `Binary`. Every other nesting
-// — parentheses, unary, a call's arguments — is recursive descent in
-// the parser too, so `MAX_DEPTH` already bounds it, and a walk through
-// those would be machinery guarding a case that cannot arise. The
-// binary spine is the one construct that escapes that bound, because
-// it is the one the parser builds iteratively.
+// Only the LEFT spine, only through `Binary`. Every other nesting —
+// parens, unary, call args — is recursive descent in the parser too, so
+// `MAX_DEPTH` already bounds it; the binary spine is the one construct
+// that escapes that bound, since it's the one the parser builds
+// iteratively.
 
 Expr, ExprId, Binary = ast
 Alloc, AllocError = std.mem
@@ -39,26 +34,21 @@ Checker, Ctx = sema.sema_check
 // the reason that file's header gives
 type_of = sema.sema_type
 
-// Is there a spine below this operand at all?
-//
-// ASKED AT THE CALL SITE, and that is not a micro-optimisation. The
-// walk below holds a `Vec` and a cursor, so its frame is far fatter
-// than the recursion it replaces — and almost every operand in almost
-// every program has no spine under it. Left unguarded it would put that
-// frame under every `+` and every `==` in the tree, which lowers the
-// depth at which OTHER constructs run the stack out. Measured: nested
-// `.match` lost a third of its headroom to exactly that.
+// Is there a spine below this operand at all? Asked at the call site,
+// not as a micro-optimisation: the walk below holds a `Vec` and a
+// cursor, a frame far fatter than the recursion it replaces, and almost
+// every operand has no spine under it. Left unguarded it would sit
+// under every `+`/`==` in the tree and lower the depth at which OTHER
+// constructs run the stack out — measured: nested `.match` lost a third
+// of its headroom to exactly that.
 spine_ahead* = (c: Checker, id: ExprId) bool {
     below(c, id).match({ None => false, Ok(_) => true })
 }
 
-// Type every level of the left spine below `id`, deepest first, so that
-// the caller's own recursion finds each one already answered.
-//
-// The walk STOPS AT A NODE ALREADY IN THE MEMO, which is what keeps the
-// whole spine linear rather than quadratic: the level above has just
-// been typed, so its left operand — and everything below that — is
-// answered, and the next walk is one step long.
+// Type every level of the left spine below `id`, deepest first, so the
+// caller's own recursion finds each one already answered. Stops at a
+// node already in the memo, keeping the whole spine linear rather than
+// quadratic: the next walk is one step long.
 seed_left_spine* = (c :: Checker, id: ExprId, ctx: Ctx)
                   Res<(), AllocError> {
     spine ::= c.alloc.Vec<ExprId>();

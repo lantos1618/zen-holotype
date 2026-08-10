@@ -1,36 +1,27 @@
 // src/sema/sema_layout.zen
 // Whether a struct has a size at all.
 //
-// DESIGN.md's rule is one sentence with two halves. `Node = { next:
-// Ptr<Node> }` is legal, because a pointer is one word and the layout
-// terminates; `Node = { next: Node }` is not, because it does not. The
-// second half was the last rule this compiler named a fault for and
-// never raised: nothing asked the layout question, so a struct that
-// contains itself by value reached gen_c and became C that a C compiler
-// rejects, with no Zen diagnostic to say why.
+// DESIGN.md's rule has two halves: `Node = { next: Ptr<Node> }` is legal
+// (a pointer is one word, layout terminates); `Node = { next: Node }` is
+// not. The second half was named a fault but never raised — nothing
+// asked the layout question, so a self-containing struct reached gen_c
+// and became C a C compiler rejects, with no Zen diagnostic to say why.
 //
-// A DECLARATION WALK, NOT A QUERY, for `sema_decl.zen`'s stated reason:
-// nobody asks a node this. `Room` and `Door` in the mutual case are
-// mentioned by no expression anywhere, and they still have to have
-// sizes.
+// A declaration walk, not a query: nobody asks a node this (`Room` and
+// `Door` in the mutual case are mentioned by no expression anywhere and
+// still need sizes).
 //
-// WHAT STOPS THE WALK. Each of these is an indirection or an
-// abstention, never an oversight:
+// What stops the walk, each an indirection or abstention, never an
+// oversight: a field whose type isn't a declared nominal (primitive,
+// function, union, `Res`) can't close a cycle of by-value fields; a
+// GENERIC struct at either end abstains too — `Ptr<T>`/`Vec<T>` are the
+// named indirections, and a cycle visible only after substitution needs
+// `sema_inst.zen` to see it, so asking here would make the walk
+// instantiate. Declining costs a diagnostic, never a program.
 //
-//   - a field whose type is not a declared nominal — a primitive, a
-//     function, a union, a `Res`. None can close a cycle of by-value
-//     fields.
-//   - a GENERIC struct, at either end. `Ptr<T>` and `Vec<T>` ARE the
-//     indirections the rule names, and a cycle visible only after a
-//     type argument is substituted needs the substitution to see it —
-//     which is `sema_inst.zen`'s, and asking for it here would make a
-//     layout walk instantiate. Declining costs a diagnostic; it never
-//     refuses a program.
-//
-// ONE MISTAKE, ONE DIAGNOSTIC, and that is what `done` is really for.
-// `Room -> Door -> Room` is one cycle reachable from two declarations,
-// so the structs on it are marked the moment it is reported and the
-// walk from the other end says nothing.
+// One mistake, one diagnostic — what `done` is for: `Room -> Door ->
+// Room` is marked the moment it's reported, so the walk from the other
+// end says nothing.
 
 Ast, Decl, DeclKind, Struct, Member, MemberKind, Field = ast
 Ident, Pos, TypeId = ast
@@ -44,8 +35,8 @@ SemaFault, NameFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 type_from_ast = sema.sema_type
 
-// One struct on the walk, and the FIELD that reached it. A blame is
-// always an edge, so the root frame's `site` is never read — which is
+// One struct on the walk, and the field that reached it. A blame is
+// always an edge, so the root frame's `site` is never read, which is
 // why it costs nothing to give the root the struct's own name.
 Frame = {
     id: DeclId,
@@ -76,10 +67,9 @@ table_layout = (c :: Checker, t: ModuleTable, path :: Vec<Frame>,
     Ok(());
 }
 
-// A struct already walked is skipped, and that is what makes this
-// linear rather than a walk per path through the field graph: if a
-// struct sits on a cycle, the walk that STARTED at it found it, so
-// arriving at it a second way can add nothing.
+// A struct already walked is skipped, which is what makes this linear
+// rather than a walk per path: if a struct sits on a cycle, the walk
+// that started at it found it, so arriving a second way adds nothing.
 root_layout = (c :: Checker, d: Def, path :: Vec<Frame>,
                done :: Vec<DeclId>) Res<(), AllocError> {
     struct_of(c, d.id).match({
@@ -105,9 +95,8 @@ walk = (c :: Checker, id: DeclId, s: Struct, site: Ident,
     Ok(());
 }
 
-// Only a FIELD: a struct-body constant is one value per type and a
-// function member is code, so neither is storage the layout has to
-// account for.
+// Only a field: a struct-body constant is one value per type and a
+// function member is code, neither storage the layout must account for.
 field_edge = (c :: Checker, m: Member, path :: Vec<Frame>,
               done :: Vec<DeclId>) Res<(), AllocError> {
     m.kind.match({
@@ -124,8 +113,8 @@ typed_edge = (c :: Checker, f: Field, path :: Vec<Frame>,
     })
 }
 
-// A written type means what it means WHERE IT WAS WRITTEN, so the
-// module is the one the struct on top of the path was declared in.
+// A written type means what it means where it was written, so the
+// module used is the one the struct atop the path was declared in.
 edge_from_top = (c :: Checker, t: TypeId, site: Ident, path :: Vec<Frame>,
                  done :: Vec<DeclId>) Res<(), AllocError> {
     path.get(path.len - 1).match({
@@ -135,9 +124,8 @@ edge_from_top = (c :: Checker, t: TypeId, site: Ident, path :: Vec<Frame>,
 }
 
 // `type_from_ast` is the one reading of a written type, so a field
-// written `Ptr<Node>` answers `Ptr` here and never `Node`. The
-// indirection rule falls out of the type rather than being spelled a
-// second time.
+// written `Ptr<Node>` answers `Ptr` here, never `Node` — the indirection
+// rule falls out of the type instead of being spelled a second time.
 edge_from = (c :: Checker, fr: Frame, t: TypeId, site: Ident,
              path :: Vec<Frame>, done :: Vec<DeclId>) Res<(), AllocError> {
     poison = c.types.unknown().try();
@@ -172,15 +160,14 @@ descend = (c :: Checker, next: DeclId, site: Ident, path :: Vec<Frame>,
     })
 }
 
-// THE BLAME IS THE EARLIEST FIELD ON THE CYCLE, not whichever one the
-// walk happened to arrive by. `Room -> Door -> Room` is one mistake
-// however it is reached, so the diagnostic has to land in the same
-// place either way — and the walk order is a pure function of the
-// source, so two runs agree.
+// The blame is the earliest field on the cycle, not whichever the walk
+// happened to arrive by: `Room -> Door -> Room` is one mistake however
+// reached, so the diagnostic must land the same place either way — the
+// walk order is a pure function of the source, so two runs agree.
 //
 // The cycle's edges are the frames after `k`, plus the one that closes
-// it. Frame `k` itself was entered by an edge from OUTSIDE the cycle,
-// so its site is not part of it.
+// it. Frame `k` was entered by an edge from outside the cycle, so its
+// site is not part of it.
 close = (c :: Checker, k: usize, site: Ident, path :: Vec<Frame>,
          done :: Vec<DeclId>) Res<(), AllocError> {
     blame ::= site;
@@ -193,9 +180,8 @@ close = (c :: Checker, k: usize, site: Ident, path :: Vec<Frame>,
     Ok(());
 }
 
-// Every struct on the cycle, marked reported. The walk from its other
-// end then skips it, which is the whole of "one mistake, one
-// diagnostic" here.
+// Every struct on the cycle, marked reported, so the walk from its
+// other end skips it — "one mistake, one diagnostic."
 seal = (k: usize, path: Vec<Frame>, done :: Vec<DeclId>)
        Res<(), AllocError> {
     Range(k, path.len).loop((h, i) {
@@ -211,8 +197,8 @@ seal = (k: usize, path: Vec<Frame>, done :: Vec<DeclId>)
 // the small answers
 // ---------------------------------------------------------------------
 
-// The struct a declaration is, when it is one this walk can answer
-// about. A generic struct abstains — see the header.
+// The struct a declaration is, when this walk can answer about one. A
+// generic struct abstains — see the header.
 struct_of = (c: Checker, id: DeclId) Res<Struct> {
     decl_at(c.tree, id).match({
         None  => None,
@@ -252,8 +238,8 @@ site_at = (path: Vec<Frame>, i: usize, fallback: Ident) Ident {
 }
 
 // Nearer the top of a file. Two files cannot be ordered by position, so
-// the one found first wins; the walk order is fixed by the source, so
-// the answer is still the same on every run.
+// the one found first wins; the walk order is fixed, so every run
+// agrees.
 earlier = (a: Ident, b: Ident) Ident {
     before(b.span.start, a.span.start).match({ true => b, false => a })
 }

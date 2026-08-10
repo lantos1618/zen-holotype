@@ -6,19 +6,17 @@
 // and hands a destination its value. Everything in `gen_c_expr.zen`
 // that spills spills into this or into `.try()`.
 //
-// `gen_c_try.zen` IS THE OTHER NON-LOCAL FORM and used to be the second
-// half of this file. The two share a destination and nothing else — a
-// match decides WHICH value, and `.try()` decides whether there is one
-// at all — so they are two subjects and now two files.
+// `gen_c_try.zen` is the other non-local form, once the second half of
+// this file: a match decides WHICH value, `.try()` decides whether
+// there is one at all — two subjects, now two files.
 //
-// A MATCH BECOMES AN `if` CHAIN AND NOT A `switch`. A pattern is not
-// always a constant — a binder matches everything, and a literal
-// pattern on a non-integer is a comparison — so `switch` would serve
-// only the enum case and the backend would carry two lowerings for one
-// construct. The chain closes with `zg_unreachable`, which is what
-// makes the C total: exhaustiveness is sema's to check, and until it
-// does, a value that matches no arm traps where it happens rather than
-// falling out of the function with an uninitialised result.
+// A match becomes an `if` chain, not a `switch`: a pattern is not
+// always a constant (a binder matches everything, a literal pattern on
+// a non-integer is a comparison), so `switch` would serve only the enum
+// case. The chain closes with `zg_unreachable`, which makes the C
+// total — exhaustiveness is sema's to check, and until it does, a value
+// matching no arm traps there instead of falling out with an
+// uninitialised result.
 
 Ast, Expr, ExprId, Match, Arm, Pattern, PatternId, PatternKind = ast
 Literal, LiteralKind, Decl, DeclKind, Enum, Variant, Span = ast
@@ -151,23 +149,22 @@ arm_cond = (be :: CBackend, pid: PatternId, st: TyId, scrut: str,
     Ok(());
 }
 
-// A PAYLOAD PATTERN THAT IS A LITERAL NARROWS THE ARM, and testing only
-// the tag would be the worst kind of wrong: `Ok('\n')` and `Ok('\\')`
-// would compile to the same condition, the first would swallow every
-// `Ok`, and the C would be perfectly valid. So the two halves are
-// written together — the tag, and then the payload's own test, which is
-// `literal_cond` again one level down.
+// A payload pattern that is a literal narrows the arm; testing only the
+// tag would be the worst kind of wrong: `Ok('\n')` and `Ok('\\')` would
+// compile to the same (valid) condition, the first swallowing every
+// `Ok`. So the tag and the payload's own test (`literal_cond`, one
+// level down) are written together.
 destructure_cond = (be :: CBackend, d: Destructure, st: TyId, scrut: str,
                     out :: String) Res<(), AllocError> {
     tag_cond(be, d.name, st, scrut, out).try();
     payload_cond(be, d, st, scrut, out)
 }
 
-// THE PAYLOAD'S TEST IS `arm_cond` AGAIN, one level down, against the
-// payload's place and the payload's type. Depth is not a special form:
-// `Left(Full(n))` is two tag tests for the same reason `Ok(3)` is a tag
-// test and a comparison, and the three shapes — a binder, a variant, a
-// literal — read the same way at every level.
+// The payload's test is `arm_cond` again, one level down, against the
+// payload's place and type. Depth is not a special form: `Left(Full(n))`
+// is two tag tests for the same reason `Ok(3)` is a tag test and a
+// comparison — a binder, a variant, a literal read the same way at
+// every level.
 payload_cond = (be :: CBackend, d: Destructure, st: TyId, scrut: str,
                 out :: String) Res<(), AllocError> {
     payload_type(be, st, last_segment(d.name)).match({
@@ -266,14 +263,13 @@ equality = (scrut: str, text: str, out :: String) Res<(), AllocError> {
 }
 
 // A `str` is a pointer and a length, so `==` would compare a STRUCT
-// against a `char *` — invalid C, and it used to be emitted silently.
-// Compared the way `str.impl(Eq)` compares: the LENGTH first, then the
-// bytes. Length first is the correctness and not an optimisation —
-// comparing over the shorter length is the classic bug, and a prefix is
-// not the whole.
+// against a `char *` — invalid C, once emitted silently. Compared the
+// way `str.impl(Eq)` does: LENGTH first, then bytes. Length first is
+// correctness, not optimisation — comparing over the shorter length is
+// the classic bug, and a prefix is not the whole.
 //
-// `.data` and `.len` are spelled the runtime floor's way and not the
-// mangler's, because `zg_str` is the floor's struct.
+// `.data` and `.len` are spelled the runtime floor's way, not the
+// mangler's: `zg_str` is the floor's struct.
 str_cond = (be :: CBackend, pat: Pattern, l: Literal, st: TyId, scrut: str,
             out :: String) Res<(), AllocError> {
     is_str(be, st).match({
@@ -376,13 +372,12 @@ bind_name = (be :: CBackend, q: QualifiedName, st: TyId, scrut: str,
     })
 }
 
-// `Ok(n)` binds `n` to the payload under the variant's member, and
-// `Left(Full(n))` binds `n` one level further down — the payload's
-// place and the payload's type, walked by `arm_bind` again. THE BINDER
-// MUST BE BOUND AT THE DEPTH IT WAS WRITTEN AT, which is the whole of
-// why this recurses: a nested binder the walk never reached is a name
-// the arm body cannot resolve. A literal or a wildcard payload binds
-// nothing — `arm_cond` has already turned it into a test.
+// `Ok(n)` binds `n` to the payload under the variant's member;
+// `Left(Full(n))` binds `n` one level further down, walked by
+// `arm_bind` again. The binder must be bound at the depth it was
+// written at — a nested binder the walk never reached is a name the arm
+// body cannot resolve. A literal or wildcard payload binds nothing;
+// `arm_cond` has already turned it into a test.
 bind_payload = (be :: CBackend, d: Destructure, st: TyId, scrut: str,
                 ctx: Ctx) Res<(), AllocError> {
     payload_type(be, st, last_segment(d.name)).match({

@@ -3,34 +3,26 @@
 //
 // DESIGN.md: "`A | B` is a union of existing types when EVERY variant
 // names a type in scope, and a nominal enum otherwise." The C backend
-// decides exactly that — `union_reading` in `gen_c_type.zen` — and sema
-// decided nothing, so `WriteError = IoError | AllocError` was a nominal
-// enum of two bare tags here, and an `AllocError` value was therefore
-// not a member of it. Every "no implicit error conversion: expected
-// WriteError, found AllocError" in the corpus was that one hole: not a
-// conversion the program asked for, a SET the checker had never built.
-// The store already knew how to hold one — `union_ty` canonicalises,
-// `set_within` answers containment — nothing ever built one for a NAME.
+// decided that (`union_reading` in `gen_c_type.zen`); sema decided
+// nothing, so `WriteError = IoError | AllocError` was a nominal enum of
+// two bare tags and an `AllocError` value wasn't a member of it — every
+// "no implicit error conversion: expected WriteError, found
+// AllocError" in the corpus was that hole, a SET the checker never
+// built (the store already knew how: `union_ty` canonicalises,
+// `set_within` answers containment — nothing built one for a NAME).
 //
-// THE SET IS RECORDED BESIDE THE NAMED TYPE, NOT IN PLACE OF IT, and
-// that is the one design decision here worth arguing about. Answering
-// `Ty.Union` for `WriteError` is what DESIGN.md's alias rule implies —
-// "an alias is the type, not a name that forwards to it" — and it was
-// tried first. It type-checks and it emits C that does not compile:
-// `gen_c_type.zen:62` has no `Ty.Union` arm, falls to `_ => "int"`, and
-// a `Res` whose error member is an `int` is handed a struct. The
-// backend's whole representation of a set is the DECLARED enum, whose
-// variants are named by the types they carry, so taking the name away
-// takes the representation away with it. Recording the set against the
-// name keeps both: sema answers containment, gen_c keeps the layout it
-// already emits correctly. When gen_c grows a `Ty.Union` arm this table
-// is what `named_or_union` stops needing.
+// THE SET IS RECORDED BESIDE THE NAMED TYPE, NOT IN PLACE OF IT.
+// Answering `Ty.Union` for `WriteError` follows DESIGN.md's alias rule
+// and was tried first: it type-checks but emits C that doesn't compile
+// (`gen_c_type.zen:62` has no `Ty.Union` arm, falls to `_ => "int"`,
+// hands a struct-typed `Res` error member an `int`). The backend
+// represents a set as the DECLARED enum named by its carried types, so
+// taking the name away takes the representation with it; recording the
+// set against the name keeps both.
 //
-// THE QUESTION IS ABOUT THE DECLARATION AND NOT ABOUT ONE VARIANT.
-// Asked one variant at a time it has a different answer, and the
-// difference is not academic: a sixty-variant `TokenKind` with one `Eq`
-// would grow a payload nobody wrote. One variant that is not a bare
-// type name settles the whole declaration.
+// THE QUESTION IS ABOUT THE DECLARATION, NOT ONE VARIANT: a sixty-
+// variant `TokenKind` with one `Eq` would grow a payload nobody wrote,
+// so one non-type-name variant settles the whole declaration.
 
 Decl, Enum, Variant = ast
 AllocError = std.mem
@@ -43,8 +35,8 @@ Def, decl_at = sema.sema_def
 Checker = sema.sema_check
 
 // What a written name denotes, plus the set it stands for when it
-// stands for one. The type is the same `Ty.Named` it has always been —
-// the answer to "is this set contained in that one" is what changed.
+// stands for one. The type is still the same `Ty.Named` — only the
+// answer to "is this set contained in that one" changed.
 named_or_union* = (c :: Checker, d: Def, args: Vec<TyId>)
                   Res<TyId, AllocError> {
     id = c.types.named(d.id, d.qname, d.name, args).try();
@@ -52,9 +44,9 @@ named_or_union* = (c :: Checker, d: Def, args: Vec<TyId>)
     Ok(id);
 }
 
-// Nothing to do twice, and nothing to do for a nominal enum. A hit is
-// either the finished set or the seed of one being computed, and both
-// mean this walk is already under way somewhere below.
+// Nothing to do twice, nothing to do for a nominal enum. A hit is
+// either the finished set or the seed of one being computed — either
+// way this walk is already under way somewhere below.
 record_set = (c :: Checker, id: TyId, decl: DeclId) Res<(), AllocError> {
     c.set_memo.get(id).match({
         Ok(_) => Ok(()),
@@ -70,11 +62,11 @@ record_if_union = (c :: Checker, id: TyId, decl: DeclId)
     })
 }
 
-// Seeded with the name's own id before the walk, the way `compute_type`
+// Seeded with the name's own id before the walk, like `compute_type`
 // seeds poison and for the same reason: a member is resolved through
-// `named_or_union` too, so `A = A | B` would not otherwise stop. A set
-// that contains itself falls back to being nominal, which is the
-// reading that adds no member rather than an infinite one.
+// `named_or_union` too, so `A = A | B` wouldn't otherwise stop. A set
+// that contains itself falls back to nominal — no member rather than an
+// infinite one.
 compute_set = (c :: Checker, id: TyId, decl: DeclId) Res<(), AllocError> {
     c.set_memo.set(id, id).try();
     members ::= c.alloc.Vec<TyId>();
@@ -100,10 +92,10 @@ decl_members = (c :: Checker, decl: DeclId, d: Decl, out :: Vec<TyId>)
     })
 }
 
-// A member that is ITSELF a set contributes its members and not its
-// name, because `set_of` hands back what `union_ty` flattened: `Error =
-// WriteError | FsError` is one set of however many, and containment is
-// answered about it without knowing how it was spelled.
+// A member that is ITSELF a set contributes its members, not its name:
+// `set_of` hands back what `union_ty` flattened, so `Error = WriteError
+// | FsError` is one set of however many, and containment is answered
+// without knowing how it was spelled.
 enum_members = (c :: Checker, decl: DeclId, e: Enum, out :: Vec<TyId>)
                Res<(), AllocError> {
     e.variants.loop((h, v) {
@@ -113,20 +105,16 @@ enum_members = (c :: Checker, decl: DeclId, e: Enum, out :: Vec<TyId>)
 }
 
 // The type a bare variant name denotes, resolved in the module that
-// DECLARES the enum. `WriteError = IoError | AllocError` means those two
+// DECLARES the enum: `WriteError = IoError | AllocError` means those two
 // as `std.core.io` sees them; law 6 says the name crossing a boundary is
-// `WriteError`, never its members.
+// `WriteError`, never its members. A miss is unreachable (`union_reading`
+// already found a type under every name), so this poisons, not reports.
 //
-// A miss is unreachable — `union_reading` already found a type under
-// every one of these names — so it poisons rather than reports.
-//
-// THE NAME AND THE SET IT FLATTENS TO ARE TWO ANSWERS, and which one is
-// wanted depends on the question. Building the set wants the flattening:
-// `Error = WriteError | FsError` is one set of however many. MATCHING
-// wants the name — `sema_case.zen` asks what a variant CARRIES, and
-// gen_c's `union_member_type` gives it the named type, so an arm's
-// binder has to be that same type or sema checks one and the backend
-// emits another.
+// NAME vs FLATTENED SET are two different answers: building the set
+// wants the flattening, MATCHING wants the name — `sema_case.zen` asks
+// what a variant CARRIES and gen_c's `union_member_type` gives it the
+// named type, so an arm's binder must be that same type or sema checks
+// one and the backend emits another.
 union_member* = (c :: Checker, decl: DeclId, name: str)
                 Res<TyId, AllocError> {
     found ::= c.alloc.Vec<Def>();
@@ -147,15 +135,14 @@ member_type = (c :: Checker, decl: DeclId, name: str) Res<TyId, AllocError> {
 }
 
 // The value `Type.NAME` leaves unwritten: what a union's member carries,
-// or poison when `ty` is not a union or `name` is not one of its
-// members. Poison and not a `bool`, because the diagnostic has to NAME
-// the type that is missing and the answer is already in hand.
+// or poison when `ty` isn't a union or `name` isn't one of its members.
+// Poison and not a `bool`, since the diagnostic must NAME the missing
+// type and the answer is already in hand.
 //
-// THE QUESTION IS SETTLED BY THE DECLARATION, exactly as `union_reading`
-// is: every variant of a union names a type, so every member carries
-// one, and there is no variant of one to exempt. A nominal enum answers
-// poison here even for a payload variant — `Slot.Left` is the function
-// that builds one, and a function is a value.
+// Settled by the DECLARATION, like `union_reading`: every variant of a
+// union names a type, so every member carries one. A nominal enum
+// answers poison here even for a payload variant — `Slot.Left` is the
+// function that builds one, and a function is a value.
 union_carrier* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
     c.types.at(ty).match({
         Named(n) => named_carrier(c, n, name),
@@ -170,10 +157,10 @@ named_carrier = (c :: Checker, n: TyNamed, name: str) Res<TyId, AllocError> {
     })
 }
 
-// Against the DECLARED variants and not `defs_of`, which would answer
-// for any type the declaring module can see: `Error.Vec` names no member
-// of `Error = AllocError | IoError`, and a lookup that found `Vec`
-// anyway would report the wrong mistake about it.
+// Against the DECLARED variants, not `defs_of` (which would answer for
+// any type the declaring module can see): `Error.Vec` names no member of
+// `Error = AllocError | IoError`, and a lookup that found `Vec` anyway
+// would report the wrong mistake.
 variant_named = (c :: Checker, decl: DeclId, name: str) bool {
     decl_at(c.tree, decl).match({
         None  => false,
@@ -202,10 +189,10 @@ enum_names_variant = (e: Enum, name: str) bool {
 //
 // Below here is `gen_c_type.zen`'s decision, asked of a `Checker`
 // rather than a `CBackend`. THE TWO MUST AGREE, or sema checks one type
-// and the backend emits another, which is this compiler's worst failure
-// class — so this mirrors it rather than improving on it, down to
-// answering "not a union" when a lookup runs out of memory. That is the
-// reading that invents no member.
+// and the backend emits another — this compiler's worst failure class —
+// so this mirrors it rather than improving on it, down to answering
+// "not a union" when a lookup runs out of memory (the reading that
+// invents no member).
 // -----------------------------------------------------------------
 
 union_reading* = (c :: Checker, decl: DeclId) bool {
@@ -222,9 +209,9 @@ enum_union_reading = (c :: Checker, decl: DeclId, d: Decl) bool {
     })
 }
 
-// Fewer than two variants is nominal whatever the name means. A union of
+// Fewer than two variants is nominal whatever the name means: a union of
 // one existing type IS that type, and DESIGN.md spells that without a
-// bar — so `X = | Foo` was written with the bar on purpose.
+// bar — `X = | Foo` was written with the bar on purpose.
 no_nominal_variant = (c :: Checker, decl: DeclId, e: Enum) bool {
     (e.variants.len < 2).match({
         true  => false,
@@ -232,9 +219,9 @@ no_nominal_variant = (c :: Checker, decl: DeclId, e: Enum) bool {
     })
 }
 
-// Looks for the counterexample and reports its absence, so the scan
-// stops at the first variant that is not a bare type name — which for a
-// nominal enum is normally the first one.
+// Looks for the counterexample and reports its absence: the scan stops
+// at the first variant that isn't a bare type name — normally the first
+// one, for a nominal enum.
 every_variant_named = (c :: Checker, decl: DeclId, e: Enum) bool {
     Range(0, e.variants.len).find((i) {
         e.variants.get(i).match({
@@ -244,7 +231,7 @@ every_variant_named = (c :: Checker, decl: DeclId, e: Enum) bool {
     }).match({ Ok(_) => false, None => true })
 }
 
-// A written payload means the variant is not a bare name, so the union
+// A written payload means the variant isn't a bare name, so the union
 // reading is already out — `Shape = Circle(Circle) | Unit` is nominal
 // however many of its names are also types.
 names_a_type = (c :: Checker, decl: DeclId, v: Variant) bool {

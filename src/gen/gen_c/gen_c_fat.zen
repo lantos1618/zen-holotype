@@ -1,41 +1,38 @@
 // src/gen/gen_c/gen_c_fat.zen
-// A BOUND USED AS A VALUE, and the only place this backend dispatches
+// A bound used as a value, and the only place this backend dispatches
 // through a pointer.
 //
-// "There are no traits, only structs. A struct whose fields happen to
-// be functions, used as a bound, is what other languages call a trait
-// — nothing marks it special, because nothing needs to." So a bound is
-// recognised BY ITS SHAPE: it declares behaviour and no storage. And a
-// value of one is the fat value DESIGN.md specifies — A RECEIVER
-// POINTER PLUS ONE FUNCTION POINTER PER METHOD, built on the stack,
-// copied by value, never boxed and never allocated. Deliberately Zig's
-// `std.mem.Allocator` shape, which is why the Alloc law is satisfied
-// rather than side-stepped.
+// "A struct whose fields happen to be functions, used as a bound, is
+// what other languages call a trait" — recognised BY ITS SHAPE: it
+// declares behaviour and no storage. A value of one is the fat value
+// DESIGN.md specifies — a receiver pointer plus one function pointer
+// per method, built on the stack, copied by value, never boxed or
+// allocated. Deliberately Zig's `std.mem.Allocator` shape, which is why
+// the Alloc law is satisfied rather than side-stepped.
 //
-// THE DISTINCTION THIS FILE EXISTS TO KEEP. "Can this struct be a
+// The distinction this file exists to keep: "can this struct be a
 // bound" and "can it be a fat value" are TWO questions, and only the
 // second is about shape — DESIGN.md's own worked example impls `Rect`,
-// which is nothing but storage. MOST CALL SITES RESOLVE STATICALLY:
+// which is nothing but storage. Most call sites resolve statically:
 // the receiver's concrete type is known, so the impl's function is
-// called directly and monomorphised, and no record takes part. A fat
-// value is built ONLY where a value's STATIC type is the bound —
-// `alloc: Alloc` holding an `Arena`. Conflating the two makes every
-// call indirect and throws the monomorphisation away.
+// called directly and monomorphised, no record involved. A fat value
+// is built ONLY where a value's STATIC type is the bound (`alloc:
+// Alloc` holding an `Arena`). Conflating the two makes every call
+// indirect and throws the monomorphisation away.
 //
-// ERASURE IS WHAT LETS ONE SLOT SERVE EVERY INSTANTIATION. A record is
-// a function of the DECLARATION and of nothing else, so a generic
-// member — `realloc<T>(p: Ptr<T>, count: usize)` — takes one slot,
-// compiled at the byte type: `Ptr<u8>`, with one `size_t` beside it
-// carrying the element size the erasure dropped. That is the same
-// trade `raw` states one level down — "raw is bytes and nothing more"
-// — and it is why the count reaching the slot is an ELEMENT count and
-// the multiplication lives in exactly one place, the thunk.
+// Erasure is what lets one slot serve every instantiation: a record is
+// a function of the DECLARATION alone, so a generic member —
+// `realloc<T>(p: Ptr<T>, count: usize)` — takes one slot, compiled at
+// the byte type `Ptr<u8>`, with a `size_t` beside it carrying the
+// element size erasure dropped — the same trade `raw` states one level
+// down ("raw is bytes and nothing more"). The count reaching the slot
+// is therefore an ELEMENT count, and the multiplication lives in
+// exactly one place: the thunk.
 //
-// A THUNK IS A CALL AND NEVER A CAST. The slots are erased and the
-// impl's function is not, so something has to sit between them; casting
-// the function pointer would be undefined behaviour. One `void *`-
-// receiving shim per (impl member, slot), named after the function it
-// calls so two requests for one shim are one shim.
+// A thunk is a call and never a cast: slots are erased and the impl's
+// function is not, so casting the function pointer would be undefined
+// behaviour. One `void *`-receiving shim per (impl member, slot), named
+// after the function it calls so two requests for one shim are one.
 
 Ast, Expr, ExprId, Decl, DeclKind, Struct, Member, MemberKind = ast
 Function, Param, TParam, Access, Call, Arg, Span, Ident, TypeId = ast
@@ -131,11 +128,10 @@ is_storage = (m: Member) bool {
 // -----------------------------------------------------------------
 // the slots
 //
-// ONE SLOT PER DECLARED MEMBER, IN DECLARATION ORDER. The layout is a
-// pure function of the declaration and of nothing else — not of which
-// impls exist, not of the order they were found in. Determinism is the
-// reason, and so is the ability to compile two programs' records to the
-// same shape.
+// One slot per declared member, in declaration order — a pure function
+// of the declaration alone, not of which impls exist or the order they
+// were found. Determinism, and the ability to compile two programs'
+// records to the same shape.
 // -----------------------------------------------------------------
 
 Slot* = {
@@ -323,11 +319,10 @@ slot_param = (be :: CBackend, p: TyId, out :: String) Res<(), AllocError> {
     Ok(());
 }
 
-// EVERY TYPE A SLOT SPELLS NEEDS A DEFINITION, and none of them
-// constrains definition order: a slot is a function pointer, so nothing
-// in a record is by-value containment. Feeding these to the dependency
-// walk would make `Eq` depend on `Eq` and report a by-value cycle that
-// is not there.
+// Every type a slot spells needs a definition, but none constrains
+// definition order: a slot is a function pointer, not by-value
+// containment. Feeding these to the dependency walk would make `Eq`
+// depend on `Eq` and report a by-value cycle that is not there.
 request_slots* = (be :: CBackend, ty: TyId) Res<(), AllocError> {
     is_fat(be, ty).match({
         false => Ok(()),
@@ -486,11 +481,10 @@ thunk_name = (out :: String, sym: str) Res<(), AllocError> {
     Ok(());
 }
 
-// THE THREE PIECES A LOWERED FUNCTION IS HELD AS, and in the shape the
-// emitter expects them: a head with no punctuation of its own, and a
-// body that is only the statements. `gen_c_decl.zen` writes the `;` for
-// a prototype and the braces for a definition, so a thunk that carried
-// either would get a second one.
+// A lowered function is held as a head with no punctuation and a body
+// that is only statements — the shape the emitter expects. `gen_c_decl.zen`
+// writes the `;`/braces, so a thunk that carried either would get a
+// second one.
 emit_thunk = (be :: CBackend, s: Slot, cty: TyId, f: Function,
               sig: Vec<TyId>, sym: str, name: str) Res<(), AllocError> {
     head ::= be.alloc.String().try();
@@ -571,10 +565,10 @@ recv_by_ref = (f: Function) bool {
     f.params.get(0).match({ Ok(p) => p.mutable, None => false })
 }
 
-// A COUNT BESIDE AN ERASED POINTER IS AN ELEMENT COUNT, and the impl
-// this shim calls was compiled for bytes. The size the erasure dropped
-// is the argument that puts it back — and the multiplication is HERE
-// and nowhere else, so a call site never has to know the rule.
+// A count beside an erased pointer is an element count, but the impl
+// this shim calls was compiled for bytes. The size erasure dropped is
+// the argument that puts it back — the multiplication happens HERE and
+// nowhere else, so a call site never has to know the rule.
 thunk_arg = (be :: CBackend, s: Slot, sig: Vec<TyId>, i: usize,
              out :: String) Res<(), AllocError> {
     out.add_bytes(", ").try();
@@ -697,13 +691,13 @@ spill_address = (be :: CBackend, code: str, cty: TyId, out :: String)
     Ok(());
 }
 
-// IS THIS EMITTED TEXT A C PLACE? A name, a field hop, a dereference or
-// an index — and never a call, which is the one thing whose address may
-// not be taken. A CALL IS RECOGNISED BY AN OPEN PAREN THAT FOLLOWS A
-// NAME, which is exactly what a call is and what `(*p).x` is not.
+// Is this emitted text a C place? A name, a field hop, a dereference or
+// an index — never a call, the one thing whose address may not be
+// taken. A call is recognised by an open paren following a name, which
+// `(*p).x` is not.
 //
-// Conservative in the safe direction: text this does not recognise gets
-// a temporary, which is correct and costs one copy.
+// Conservative in the safe direction: unrecognised text gets a
+// temporary, correct at the cost of one copy.
 is_place = (code: str) bool {
     (code.len > 0) && place_bytes(code) && (has_call(code) == false)
 }

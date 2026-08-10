@@ -29,15 +29,15 @@
 // `gen` will all want it.
 //
 // THE SECOND CALLER HAS ARRIVED and the type did not move. `zen build`
-// now holds one `Vec` of these for the whole program and converts a
-// `lex.lex_diag.Diag` into one to fill it, which is STYLE.md's
-// second-caller rule firing exactly as predicted. What it did NOT get
-// is a neutral home: the two candidates are `ast`, which owes nothing
-// to either phase, and a new `zen_diag`, which would make the parser
-// depend on the driver. Moving it is a rename across `parse`, `zen`
-// and `lsp` and belongs in its own change; a FOURTH struct with these
-// three fields, invented to avoid the rename, is the duplication this
-// paragraph exists to prevent. Still reported, now with a caller.
+// now holds one `Vec` of these for the whole program, converting a
+// `lex.lex_diag.Diag` into one — STYLE.md's second-caller rule firing
+// exactly as predicted. It did NOT get a neutral home: candidates are
+// `ast` (owes nothing to either phase) or a new `zen_diag` (would make
+// the parser depend on the driver). Moving it is a rename across
+// `parse`, `zen` and `lsp` and belongs in its own change — a FOURTH
+// struct with these three fields, invented to avoid the rename, is the
+// duplication this note exists to prevent. Still reported, now with a
+// caller.
 
 Pos, Span = ast.ast_span
 // which of two positions comes first, from the file that already had to
@@ -86,18 +86,16 @@ diag_at* = (message: str, span: Span, note_message: str, note_span: Span) Diag {
 // THE WHOLE DIAGNOSTIC, SAID — and the note is part of it.
 //
 // The driver used to print `d.message` and stop, so every note this
-// module has ever built was collected by the parser, carried in its
-// `Vec`, and dropped on the floor. `diag_at` has exactly one caller —
-// `expect_close`, the one case where the anchor is deliberately NOT
-// where the parser stopped — so the dropped half was precisely the
-// half that says where the parser DID stop, which is the second
-// position that rule exists to give the reader.
+// module built was collected, carried in a `Vec`, and dropped on the
+// floor. `diag_at` has exactly one caller — `expect_close`, the one case
+// where the anchor is deliberately NOT where the parser stopped — so the
+// dropped half was exactly the half that says where the parser DID stop.
 //
 // HERE AND NOT IN THE DRIVER, for the reason `sema_diag.zen` puts
-// `render` beside its `Diag`: how a diagnostic reads is a fact about
-// the diagnostic. A second consumer — `zen lsp` — wants the same two
-// spans and the same two sentences as VALUES, and it gets them off
-// the fields; this is the one consumer that wants a terminal.
+// `render` beside its `Diag`: how a diagnostic reads is a fact about the
+// diagnostic. A second consumer — `zen lsp` — wants the same two spans
+// and sentences as VALUES off the fields; this is the one consumer that
+// wants a terminal.
 //
 // INDENTED UNDER THE SENTENCE, which is the shape `bootstrap.py`'s
 // `render` already uses for a note, so the two compilers say a
@@ -115,29 +113,25 @@ say* = (self: Diag) () {
 // THE FILE ENDING IS THE MISTAKE, and whatever the parser wanted next is
 // only how it found out.
 //
-// "expected `=` or `::=` after a declaration's name" is TRUE of a file
-// that stops after an identifier, and it is also advice nobody can take:
-// there is no line left to put the `=` on. Two files truncated in two
-// different places were told two different things and neither of them
-// was that they were truncated — `tests/must-fail/lex/eof_in_identifier`
-// and `eof_in_number` are that pair, and `bootstrap/cst.py` names the
-// end of file in both, which it has to: a must-fail test asserts a
-// substring of what the compiler SAYS, so a sentence only one of the two
-// compilers can produce is a test only one of them can run.
+// "expected `=` or `::=` after a declaration's name" is true of a file
+// that stops after an identifier, but it's advice nobody can act on: no
+// line is left to put the `=` on. `tests/must-fail/lex/eof_in_identifier`
+// and `eof_in_number` truncate in different places and both must say they
+// were truncated — `bootstrap/cst.py` names EOF in both, and since a
+// must-fail test asserts a substring of what the compiler says, only a
+// sentence both compilers can produce is a test both can run.
 //
 // TWO FACTS HOLD, AND THE SECOND IS THE WHOLE RULE. `ended` says nothing
-// is left to read. `at` says where the sentence is anchored, and the
-// third rule at the top of this file is "anchored where the fix goes,
-// not where the parser noticed" — so a diagnostic pointing EARLIER than
-// the end has already named a token the author WROTE. `Shape = Circle |
-// Square |` is anchored on the bar, and a bar promising a variant is the
-// mistake whether or not the file goes on; `must-fail/parse/
-// enum_trailing_bar` says exactly that in its own header. A sentence
-// with nowhere earlier to point is the only one that is about the
-// ending.
+// is left to read; `at` says where the sentence anchors. Per this file's
+// third rule (anchor where the fix goes), a diagnostic pointing EARLIER
+// than the end has already named a token the author WROTE — `Shape =
+// Circle | Square |` anchors on the bar, since a bar promising a variant
+// is the mistake regardless of what follows (`must-fail/parse/
+// enum_trailing_bar`). Only a sentence with nowhere earlier to point is
+// about the ending.
 //
-// `expect_close` never reaches this at all: it anchors on the OPENING
-// delimiter, which is earlier by construction.
+// `expect_close` never reaches this: it anchors on the OPENING delimiter,
+// earlier by construction.
 truncated* = (message: str, at: Span, ended: bool, end: Pos) str {
     (ended && !before(at.start, end)).match({
         true  => "unexpected end of file: a file ends between declarations, and this one ends inside one",

@@ -1,28 +1,22 @@
 // src/sema/sema_place.zen
 // `target = value;` — the one statement Zen spells two ways.
 //
-// Zen writes a DECLARATION and a WRITE identically, and `ast.Bind` keeps
-// them identical: one target expression, one value, no flag saying
-// which. So every rule about an assignment starts by asking which of the
-// two it is looking at, and that question is this file's subject.
+// `ast.Bind` writes a DECLARATION and a WRITE identically: one target
+// expression, one value, no flag saying which. Every rule about an
+// assignment starts by deciding which it's looking at — this file's
+// subject.
 //
-// A BARE NAME DECLARES. There is nothing to disagree with — the binding
-// takes whatever the value turned out to be — so the only work is
-// putting the name in scope.
+// A bare name DECLARES: nothing to disagree with, so the only work is
+// putting the name in scope. Anything else is a PLACE, which already
+// has a type, an owner and a marker — `p.x = e` / `buf[i] = e` write
+// into storage declared elsewhere, so the value must FIT it, the field
+// must be writable, and it must have storage at all. Three rules about
+// the target, none asked of a declaration.
 //
-// ANYTHING ELSE IS A PLACE, and a place already has a type, an owner and
-// a marker. `p.x = e` and `buf[i] = e` write into storage the program
-// declared somewhere else, so the value has to FIT that storage, the
-// field has to be one this module may write, and the field has to have
-// storage at all. Three rules, all of them about the target, none of
-// them asked of a declaration.
-//
-// It lives beside `sema_type.zen` rather than in it because that file is
-// "what does this node mean" and this is "what does this statement do" —
-// and because a place is where the type question stops being the only
-// one. `sema_own.zen` and `sema_recv.zen` ask the remaining two, about
-// who owns the place and who may write through it; the split between
-// those two and this one is types here, permission there.
+// Lives beside `sema_type.zen` ("what does this node mean") rather than
+// in it ("what does this statement do"). `sema_own.zen` and
+// `sema_recv.zen` ask the remaining two questions, who owns the place
+// and who may write through it: types here, permission there.
 
 Expr, ExprId, Bind, Access, Span, Ast = ast
 AllocError = std.mem
@@ -42,15 +36,12 @@ bind_stmt* = (c :: Checker, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
     c.types.prim("()")
 }
 
-// WHAT THE VALUE HAS TO FIT. A written type wins. With none, a bare name
-// declares and takes the value's own type; a path writes into storage
-// that already has one. This answered `got` for both, which asked
-// whether the value fits itself — a check no value can fail, and the
-// reason `self.n = "not an int"` on an `n :: i32` compiled clean.
-//
-// The value is typed BEFORE this is asked, the order the annotated form
-// already used: nothing pushes an expectation down, so asking the place
-// first would buy nothing and would type a target that may not exist.
+// What the value has to fit. A written type wins; with none, a bare
+// name takes the value's own type, a path takes the storage's. BUG this
+// replaced: answering `got` for both asked whether the value fits
+// itself, a check no value can fail — `self.n = "not an int"` on an
+// `n :: i32` compiled clean. Value is typed BEFORE this is asked, since
+// asking the place first would type a target that may not exist.
 bind_want* = (c :: Checker, b: Bind, got: TyId, ctx: Ctx)
              Res<TyId, AllocError> {
     b.type.match({
@@ -59,10 +50,9 @@ bind_want* = (c :: Checker, b: Bind, got: TyId, ctx: Ctx)
     })
 }
 
-// A place's type is the ordinary type of the expression: `type_of`
-// answers it for reads, and a write asks the identical question of the
-// identical node. Whatever it cannot resolve comes back poisoned, which
-// `assignable` accepts, so an unresolved place fails open.
+// A place's type is `type_of`'s answer for reads — a write asks the
+// same question of the same node. Unresolved comes back poisoned, which
+// `assignable` accepts: an unresolved place fails open.
 place_want* = (c :: Checker, id: ExprId, got: TyId, ctx: Ctx)
               Res<TyId, AllocError> {
     c.tree.expr_at(id).kind.match({
@@ -75,16 +65,16 @@ check_assign* = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
                Res<(), AllocError> {
     node = c.tree.expr_at(b.value);
     c.coerce(node.span.file, node.span, got, want, "").try();
-    // the family agreeing is not the value fitting: `n: i32 =
-    // 2147483648` is an `int` literal, and `literal_fits` says every
-    // one of those fits every integer type — so `coerce` said nothing
+    // family agreeing != value fitting: `n: i32 = 2147483648` is an
+    // `int` literal, and `literal_fits` says every one fits every
+    // integer type, so `coerce` alone said nothing
     c.check_literal(b.value, want).try();
     Ok(());
 }
 
-// Only a bare name introduces a binding. `c.len = ..` and
-// `buf[i] = ..` are assignments to something that already exists,
-// which is why `Bind.target` is an expression and not an `Ident`.
+// Only a bare name introduces a binding; `c.len = ..` and `buf[i] = ..`
+// assign to something that already exists — why `Bind.target` is an
+// expression, not an `Ident`.
 bind_target* = (c :: Checker, b: Bind, ty: TyId, ctx: Ctx)
               Res<(), AllocError> {
     target = c.tree.expr_at(b.target);

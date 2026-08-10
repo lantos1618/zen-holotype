@@ -2,29 +2,23 @@
 // JSON in. A recursive-descent reader over bytes, into `lsp_json`'s
 // arena.
 //
-// SPLIT FROM THE WRITER BY PREFIX FAMILY and not by taste: the two
-// halves share only the value type, they are read at different times —
-// one when a request arrives, one when a reply is built — and together
-// they are past the size a file in this tree is allowed to be.
+// SPLIT FROM THE WRITER BY PREFIX FAMILY, not taste: the two halves
+// share only the value type, are read at different times, and together
+// exceed the size a file here is allowed to be.
 //
-// A REJECTION CARRIES A BYTE OFFSET, every time. `TESTING.md:17` is the
-// standing rule ("a rejection with the wrong span is a failure") and it
-// applies to a transport as much as to a compiler: a client sending
-// malformed JSON gets told WHERE, and an offset the reader guessed is
-// worse than no offset at all. That is why every variant of `JsonFault`
-// but one carries a `usize`.
+// A REJECTION CARRIES A BYTE OFFSET, every time (`TESTING.md:17`: "a
+// rejection with the wrong span is a failure"), so every `JsonFault`
+// variant but one carries a `usize`.
 //
-// ONE NOMINAL ERROR AND NOT A UNION, because `PLAN.md:200` puts error
-// unions outside the seed subset. That is what puts `NoMemory` here
-// beside `AllocError`'s own — the same choice `FsError` made and for
-// the same reason. When unions arrive this becomes
-// `Res<JsonId, JsonFault | AllocError>` and `NoMemory` goes.
+// ONE NOMINAL ERROR AND NOT A UNION: `PLAN.md:200` puts error unions
+// outside the seed subset (the same choice `FsError` made), hence
+// `NoMemory` beside `AllocError`'s own. Becomes
+// `Res<JsonId, JsonFault | AllocError>` when unions arrive.
 //
-// WHAT THIS READER DOES NOT DO: it does not recover. The first fault
-// stops it, and the caller answers `-32700 ParseError`. A transport
-// that guessed at the rest of a corrupt frame would resynchronise onto
-// something that is not a message boundary, and the failure would
-// surface three requests later as an unrelated one.
+// THIS READER DOES NOT RECOVER: the first fault stops it and the caller
+// answers `-32700 ParseError` — guessing at the rest of a corrupt frame
+// would resynchronise onto a non-boundary and surface the failure three
+// requests later as an unrelated one.
 
 str, String = std.text
 Vec = std.collections
@@ -42,17 +36,13 @@ JsonFault* = Unexpected(usize)   // a byte that cannot begin what is expected he
            | Trailing(usize)     // a complete value, and then more bytes
            | NoMemory            // the arena could not grow
 
-// A depth ceiling, and it is a security property rather than a
-// nicety: this reader recurses, a JSON document's nesting is chosen by
-// whoever sends it, and `[[[[[...` with no ceiling is a stack overflow
-// reachable from the wire. 64 is deeper than any LSP message and
-// shallower than any stack.
+// A depth ceiling, a security property not a nicety: this reader
+// recurses, and `[[[[[...` with no ceiling is a stack overflow reachable
+// from the wire. 64 is deeper than any LSP message.
 MAX_NESTING*: usize = 64
 
-// The cursor. It holds the Alloc because DECODING A STRING ALLOCATES —
-// an escape means the decoded bytes are not a run of the input and
-// cannot be borrowed from it — and law 1 says a function that allocates
-// says so in its signature.
+// The cursor. Holds the Alloc because DECODING A STRING ALLOCATES — an
+// escape means the decoded bytes cannot be borrowed from the input.
 Reader* = {
     text: str,
     a: Alloc,
@@ -107,16 +97,14 @@ Reader* = {
         })
     }
 
-    // JSON's number grammar, in full, because a transport does not get
-    // to have opinions about the numbers it carries:
+    // JSON's number grammar, in full:
     //
     //     -? ( 0 | [1-9][0-9]* ) ( . [0-9]+ )? ( [eE] [+-]? [0-9]+ )?
     //
-    // It is validated and NOT evaluated. The lexeme is what is stored —
-    // see `lsp_json.zen`'s header for why — so this function's whole
-    // job is to find where the number ends and to refuse the shapes
-    // that are not numbers. `01`, `.5`, `1.` and `1e` are each rejected
-    // here, at the byte that makes them wrong.
+    // Validated and NOT evaluated — the lexeme is what is stored (see
+    // `lsp_json.zen`'s header) — so this finds where the number ends and
+    // refuses non-numbers: `01`, `.5`, `1.`, `1e` each rejected at the
+    // byte that makes them wrong.
     number = (self :: @Self, tree :: Jsons) Res<JsonId, JsonFault> {
         from = self.at;
         self.byte_if('-');
@@ -139,8 +127,7 @@ Reader* = {
     }
 
     // A point must be followed by at least one digit — `1.` is not a
-    // JSON number, and neither is `.5`, which `integer_part` already
-    // refused one byte earlier.
+    // JSON number.
     fraction_part = (self :: @Self) Res<(), JsonFault> {
         self.byte_if('.').match({
             false => fine(),
@@ -184,19 +171,15 @@ Reader* = {
         self.at = self.at + 1;
         kids ::= self.a.Vec<JsonId>();
         self.spaces();
-        // PEEKED AND NOT CONSUMED. Consuming the closer here to decide
-        // whether the container is empty leaves `close` with nothing to
-        // consume, and `[]` then reports the END OF THE DOCUMENT — a
-        // fault pointing at a byte nowhere near the mistake. Every LSP
-        // message ends `"params":{}}`, so this was every message.
+        // PEEKED AND NOT CONSUMED: consuming the closer here would leave
+        // `close` nothing to consume, so `[]` would report the END OF
+        // THE DOCUMENT — nowhere near the mistake, and this was every
+        // message (every LSP message ends `"params":{}}`).
         more ::= !self.here(']');
         loop(() { more }, (h) {
             faulted_ok(kids.add(self.value(tree).try())).try();
             self.spaces();
             more = self.byte_if(',');
-            // A comma that is not followed by a value, or a missing
-            // one, both land on the next pass or on `close` — so the
-            // separator is checked in exactly one place.
             more.then(() { self.spaces(); });
         });
         self.close(']').try();
@@ -233,10 +216,9 @@ Reader* = {
         })
     }
 
-    // An unterminated container reports the END of the input and not
-    // the byte after the last element: "your document stopped" is the
-    // true statement, and pointing at a plausible-looking comma sends
-    // the reader of the error to the wrong place.
+    // An unterminated container reports the END of the input, not the
+    // byte after the last element — a plausible-looking comma would send
+    // the reader to the wrong place.
     close = (self :: @Self, b: u8) Res<(), JsonFault> {
         self.byte_if(b).match({
             true  => fine(),
@@ -252,12 +234,10 @@ Reader* = {
         faulted(tree.add(Json.Text(s)));
     }
 
-    // The decoded bytes of the string at the cursor.
-    //
-    // NO ESCAPE MEANS NO ALLOCATION: the common case is a run of the
-    // input, so it is borrowed as a slice and nothing is copied. Only a
-    // string that actually contains a backslash is rebuilt, which
-    // matters because every key of every message goes through here.
+    // The decoded bytes of the string at the cursor. NO ESCAPE MEANS NO
+    // ALLOCATION: the common case is borrowed as a slice; only a string
+    // with a backslash is rebuilt — matters since every key goes
+    // through here.
     text_at = (self :: @Self) Res<str, JsonFault> {
         self.byte_if('"').match({
             false => Err(JsonFault.Unexpected(self.at)),
@@ -298,9 +278,8 @@ Reader* = {
         Ok(out.view());
     }
 
-    // One byte of a string that has already been found to contain an
-    // escape. The cursor is PAST `b`, so `escape` starts where it
-    // expects to: on the byte after the backslash.
+    // One byte of a string already found to contain an escape. The
+    // cursor is PAST `b`, so `escape` starts on the byte after it.
     copy_one = (self :: @Self, b: u8, out :: String) Res<(), JsonFault> {
         (b == '\\').match({
             true  => self.escape(out),
@@ -323,18 +302,13 @@ Reader* = {
     }
 
     // `\uXXXX`, and the surrogate PAIR that follows it when the first
-    // half is a high surrogate.
-    //
-    // RECOMBINING THE PAIR IS THE STEP THAT GETS SKIPPED, and
-    // `design_lsp.md:174` says so in advance: skip it and a `😀` in a
-    // document becomes two invalid codepoints, which reappears two
-    // layers later as a column that is off by one. So it is done here,
-    // and the corpus test has an emoji in it.
-    //
-    // A LONE SURROGATE is a fault and not a replacement character. It
-    // cannot be encoded as UTF-8, `str` is bytes that other parts of
-    // this compiler will decode, and substituting U+FFFD would hand
-    // them a document that is not the one that was sent.
+    // half is a high surrogate. RECOMBINING THE PAIR IS THE STEP THAT
+    // GETS SKIPPED (`design_lsp.md:174`): skip it and a `😀` becomes two
+    // invalid codepoints, reappearing two layers later as an off-by-one
+    // column — done here, and the corpus test has an emoji in it. A LONE
+    // SURROGATE is a fault, not a replacement character: it cannot be
+    // encoded as UTF-8, and U+FFFD would hand downstream a document that
+    // is not the one sent.
     unicode = (self :: @Self, out :: String) Res<(), JsonFault> {
         hi = self.four_hex().try();
         (hi >= SURROGATE_HI_MIN && hi <= SURROGATE_HI_MAX).match({
@@ -383,9 +357,9 @@ Reader* = {
 
     // --- the cursor -------------------------------------------------
 
-    // The byte under the cursor. `Truncated` and not `Unexpected`,
-    // because running out of input is a different thing from finding
-    // the wrong byte and a client can act on the difference.
+    // The byte under the cursor. `Truncated` and not `Unexpected`: a
+    // client can act on the difference between running out and a wrong
+    // byte.
     peek = (self: @Self) Res<u8, JsonFault> {
         self.text.get(self.at).match({
             Ok(b) => Ok(b),
@@ -393,25 +367,21 @@ Reader* = {
         })
     }
 
-    // Is `b` under the cursor? Nothing moves. `byte_if` is the version
-    // that consumes, and the two are separate because deciding whether a
-    // container is empty must NOT eat the byte that closes it.
+    // Is `b` under the cursor? Nothing moves — separate from `byte_if`
+    // because deciding emptiness must NOT eat the closing byte.
     here = (self: @Self, b: u8) bool {
         self.text.get(self.at).match({ Ok(x) => x == b, None => false })
     }
 
-    // Consume `b` if it is there, and say whether it was. The whole
-    // cursor discipline is this one function, `here` and `spaces`.
+    // Consume `b` if it is there, and say whether it was.
     byte_if = (self :: @Self, b: u8) bool {
         found = self.here(b);
         found.then(() { self.at = self.at + 1; });
         found;
     }
 
-    // JSON's whitespace is exactly these four. Not `is_space`, which is
-    // this language's set and includes a vertical tab that JSON does
-    // not allow — a transport follows the wire's grammar, never its
-    // host's.
+    // JSON's whitespace is exactly these four — not `is_space`, this
+    // language's set, which includes a vertical tab JSON does not allow.
     spaces = (self :: @Self) () {
         loop(() { self.space_here() }, (h) { self.at = self.at + 1; });
         ();
@@ -435,14 +405,11 @@ Reader* = {
     up = (self :: @Self) () { self.depth = self.depth - 1; }
 }
 
-// THE ENTRY POINT: one complete value, and nothing after it.
-//
-// `Trailing` is checked rather than ignored, and that is the difference
-// between a transport and a scanner: a frame whose body is `{}{}` is
-// two messages in one envelope, which means the sender and this server
-// disagree about `Content-Length`, which means every later frame is
-// misaligned. Catching it here turns a silent desync into one named
-// error at the byte where they first disagreed.
+// THE ENTRY POINT: one complete value, and nothing after it. `Trailing`
+// is checked rather than ignored: a body of `{}{}` means the sender and
+// this server disagree about `Content-Length`, and every later frame
+// would be misaligned — caught here as one named error instead of a
+// silent desync.
 read* = (a: Alloc, tree :: Jsons, text: str) Res<JsonId, JsonFault> {
     r ::= Reader(text: text, a: a, at: 0, depth: 0);
     root = r.value(tree).try();
@@ -453,8 +420,8 @@ read* = (a: Alloc, tree :: Jsons, text: str) Res<JsonId, JsonFault> {
     })
 }
 
-// The escapes that stand for one byte. `/` is in the set because JSON
-// allows it, even though nothing ever needs to write it that way.
+// The escapes that stand for one byte. `/` is in the set — JSON allows
+// it, though nothing here ever writes it that way.
 simple = (b: u8) Res<u8> {
     (b == '"').match({
         true  => Ok(b),
@@ -481,9 +448,9 @@ two_char = (b: u8) Res<u8> {
     })
 }
 
-// `\b` and `\f` have no character literal in this language — the lexer
-// takes `\n \t \r \0 \\ \' \"` and no more — so they are named by their
-// codepoints, which is what a character literal would have meant.
+// `\b` and `\f` have no character literal in this language (the lexer
+// takes `\n \t \r \0 \\ \' \"` and no more), so they are named by
+// codepoint.
 control_char = (b: u8) Res<u8> {
     (b == 'b').match({
         true  => Ok(BACKSPACE),
@@ -491,11 +458,9 @@ control_char = (b: u8) Res<u8> {
     })
 }
 
-// A codepoint, as UTF-8, appended.
-//
-// The inverse of `std.text.text_utf8`'s decoder and written in the same
-// idiom: Zen has no bitwise operators, so a 6-bit shift is a division
-// by 64 and a mask is a remainder. That is exact, not an approximation.
+// A codepoint, as UTF-8, appended — the inverse of
+// `std.text.text_utf8`'s decoder, same idiom: no bitwise operators, so a
+// 6-bit shift is division by 64 and a mask is a remainder.
 push_utf8* = (v: u32, out :: String) Res<(), AllocError> {
     (v < ONE_BYTE_MAX).match({
         true  => out.add_byte(byte_of(v)),
@@ -527,25 +492,15 @@ four_wide = (v: u32, out :: String) Res<(), AllocError> {
     out.add_byte(byte_of(CONT + v % CONT_SCALE))
 }
 
-// A u32 known to be a byte, AS a byte.
-//
-// THIS IS A NARROWING CONVERSION AND THIS LANGUAGE HAS NONE.
-// `src/std/core/num.zen:124` is explicit that only lossless widening
-// lives there and that "a narrowing conversion can fail, so it belongs
-// in a Res-returning function someone writes on purpose". This is that
-// function, written where it is needed, and it COUNTS rather than
-// narrows — at most 256 passes, paid only on an escape, which is the
-// rarest byte in any message this server reads.
-//
-// It traps rather than returning `Res` because every caller above has
-// already established the range by construction: a remainder mod 64
-// plus 128 cannot leave a byte, and a caller that could get this wrong
-// has a bug rather than an input problem.
-//
-// THE RIGHT FIX IS A PRIMITIVE. `to_u8* = (self: u32) Res<u8>` in
-// `std.core.num` would delete this function, and it is the kind of
-// member that needs a second caller before it earns its place — this
-// is the first.
+// A u32 known to be a byte, AS a byte. THIS IS A NARROWING CONVERSION
+// AND THIS LANGUAGE HAS NONE (`src/std/core/num.zen:124`: "a narrowing
+// conversion can fail, so it belongs in a Res-returning function someone
+// writes on purpose"). This COUNTS rather than narrows: at most 256
+// passes, paid only on an escape, the rarest byte this server reads. It
+// traps rather than returning `Res` because every caller above has
+// already established the range by construction. THE RIGHT FIX IS A
+// PRIMITIVE: `to_u8* = (self: u32) Res<u8>` in `std.core.num` would
+// delete this, once it has a second caller.
 byte_of* = (v: u32) u8 {
     BYTE_MAX_U32 - v;
     b ::= ZERO_BYTE;
@@ -553,34 +508,23 @@ byte_of* = (v: u32) u8 {
     b;
 }
 
-// `Ok(())` with its error side NAMED.
-//
-// A bare `Ok(())` in one arm of a match whose sibling is a
-// `Res<(), JsonFault>` infers the one-parameter `Res` instead, and the
-// two do not join. Writing the constant once, with its type on a
-// signature, is cheaper than annotating every arm — and it is the same
-// trap `faulted` exists for, one level down.
+// `Ok(())` with its error side NAMED: a bare `Ok(())` in one match arm
+// whose sibling is `Res<(), JsonFault>` infers the one-parameter `Res`
+// instead, and the two do not join.
 fine* = () Res<(), JsonFault> { Ok(()) }
 
-// A `Res` that failed to allocate, as a `JsonFault`. There is no `From`
-// in the seed subset (`PLAN.md:200`), so the conversion is written out.
-//
-// TWO FUNCTIONS AND NOT ONE, and the second one is a backend gap
-// pinned down rather than worked around.
-//
-// The generic `faulted` handles every payload that IS a value. The unit
-// case needs its own, because
+// A `Res` that failed to allocate, as a `JsonFault`. No `From` in the
+// seed subset (`PLAN.md:200`), so this is written out. TWO FUNCTIONS AND
+// NOT ONE, pinning down a backend gap: the unit-case version,
 //
 //     faulted_ok = (r: Res<(), AllocError>) Res<(), JsonFault> {
 //         r.match({ Ok(value) => Ok(value), .. })
 //     }
 //
-// type-checks and then fails in the backend with "codegen cannot
-// resolve `value`". The three value-carrying instantiations —
-// `JsonId`, `Run`, `String` — all lower; only `()` does not. So the
-// defect is BINDING A UNIT PAYLOAD OUT OF AN `Ok` AND RE-WRAPPING IT,
-// and `Ok(_) => fine()` sidesteps it by never naming the value that has
-// no representation. That is a `src/gen/` bug and it is not fixed here.
+// type-checks and then fails in the backend with "codegen cannot resolve
+// `value`" — `JsonId`, `Run`, `String` all lower; only `()` does not.
+// `Ok(_) => fine()` sidesteps it by never naming the value. A `src/gen/`
+// bug, not fixed here.
 faulted* = <T>(r: Res<T, AllocError>) Res<T, JsonFault> {
     r.match({ Ok(value) => Ok(value), Err(why) => Err(JsonFault.NoMemory) });
 }
@@ -596,10 +540,9 @@ ZERO_U32*: u32 = 0
 HEX_BASE_U32*: u32 = 16
 BYTE_MAX_U32*: u32 = 255
 
-// UTF-16's surrogate halves, and what a pair means. `design_lsp.md`
-// spells the arithmetic out: a pair encodes a codepoint at or above
-// 65536, the high half carries the top ten bits and the low half the
-// bottom ten.
+// UTF-16's surrogate halves: a pair encodes a codepoint at or above
+// 65536, the high half carrying the top ten bits and the low half the
+// bottom ten (`design_lsp.md`).
 SURROGATE_HI_MIN*: u32 = 55296     // D800
 SURROGATE_HI_MAX*: u32 = 56319     // DBFF
 SURROGATE_LO_MIN*: u32 = 56320     // DC00

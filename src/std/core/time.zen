@@ -1,29 +1,18 @@
 // std.core.time
-// a span, not a clock. reading the clock is authority and lives
-// on Env; describing a duration is arithmetic and lives here
+// a span, not a clock — reading the clock is authority (lives on Env);
+// describing a duration is arithmetic (lives here).
 //
-// ONE REPRESENTATION, AND THE UNIT IS NOT PART OF IT. A Duration is
-// a count of nanoseconds and nothing else. The unit you wrote is
-// consumed at construction: `seconds(60)` IS `Duration(ns: 6e10)`,
-// and afterwards nothing can ask which spelling made it.
+// ONE REPRESENTATION: a Duration is a nanosecond count, nothing else.
+// The unit is consumed at construction — `seconds(60)` IS
+// `Duration(ns: 6e10)` — so nothing later can ask which spelling made it.
 //
-// That is why this is five constructors and not an enum. An enum is
-// for a distinction that SURVIVES construction — `IoError` is one
-// because a caller matches on it later, and `Shape` is one because
-// a circle stays a circle. A unit is not:
-//
-//   - `Seconds(1)` and `Millis(1000)` are the same span, so as
-//     variants they would be two values that must compare equal,
-//     and `eq` would have to normalise before every comparison —
-//     which is this struct's representation, arrived at the long way
-//   - `add(Seconds(1), Millis(500))` would have to pick a unit for
-//     its result, a decision nobody wants to make and the type
-//     would force at every call
-//   - every operation grows an exhaustive match over five arms whose
-//     first act is to convert to a common unit
-//
-// The rule, and it generalises: IF THE DISTINCTION IS CONSUMED AT
-// CONSTRUCTION, IT IS A CONSTRUCTOR AND NOT A VARIANT.
+// Five constructors, not an enum, because the unit doesn't SURVIVE
+// construction (unlike `IoError` or `Shape`, which a caller matches on
+// later): `Seconds(1)` and `Millis(1000)` are the same span, so as
+// variants `eq` would need to normalise first, `add` would need to
+// pick a result unit, and every op would open a five-arm match just
+// to convert. Rule, generalised: if the distinction is consumed at
+// construction, it's a constructor, not a variant.
 
 Res = std.core.result
 
@@ -31,19 +20,12 @@ Duration* = {
     ns*: u64,
 }
 
-// The unit conversions, in. Each is a ufcs function over `u64`, so
-// `seconds(60)` and `n.seconds()` are the same call — DESIGN.md: a
-// free function whose first parameter is a type travels with that
-// type. Note `60.seconds()` is NOT writable: a number literal
-// carries no member, because an identifier may not start with a
-// digit and a number carries no suffix. The receiver has to be a
-// binding.
-//
-// `Duration.seconds(60)` is not writable either, and a comment here
-// used to claim it was. `Duration.seconds` is a member lookup on the
-// TYPE, which the language provides for constants (`i32.MAX`) and
-// variants (`Shape.Unit`); `seconds` is neither, and UFCS puts it on
-// `u64` — its first parameter — not on `Duration`.
+// The unit conversions, in. Each is a ufcs fn over `u64` — `seconds(60)`
+// and `n.seconds()` are the same call. NOT writable: `60.seconds()`
+// (a literal carries no member) or `Duration.seconds(60)` (a comment
+// here used to wrongly claim it was — `Duration.seconds` is a TYPE
+// lookup, for constants/variants, and `seconds` is neither; UFCS puts
+// it on `u64`, its first param, not on `Duration`).
 NS_PER_MICRO*  : u64 = 1000
 NS_PER_MILLI*  : u64 = 1000000
 NS_PER_SECOND* : u64 = 1000000000
@@ -55,38 +37,27 @@ millis*  = (n: u64) Duration { Duration(ns: n * NS_PER_MILLI) }
 seconds* = (n: u64) Duration { Duration(ns: n * NS_PER_SECOND) }
 minutes* = (n: u64) Duration { Duration(ns: n * NS_PER_MINUTE) }
 
-// and out. One accessor per constructor, because asymmetry here is
-// a trap: a caller who can build from minutes and read only millis
-// writes the division by hand, and gets it wrong once.
-//
-// These TRUNCATE, and say so in their names' shape rather than in
-// five comments: `millis_of` is how many whole milliseconds fit, not
-// a rounded one. A span of 1500 microseconds is 1 millisecond and
-// 500 microseconds, and nothing here pretends otherwise.
+// and out. One accessor per constructor — asymmetry is a trap (build
+// from minutes, read only millis, and someone hand-divides and gets
+// it wrong). These TRUNCATE: `millis_of` is whole milliseconds fit,
+// not rounded — 1500us is 1ms + 500us, not 1.5ms.
 nanos_of*   = (self: Duration) u64 { self.ns }
 micros_of*  = (self: Duration) u64 { self.ns / NS_PER_MICRO }
 millis_of*  = (self: Duration) u64 { self.ns / NS_PER_MILLI }
 seconds_of* = (self: Duration) u64 { self.ns / NS_PER_SECOND }
 minutes_of* = (self: Duration) u64 { self.ns / NS_PER_MINUTE }
 
-// AND HERE AN ENUM IS RIGHT, which is the other half of the rule
-// above. Choosing a unit to PRINT in is a distinction that survives:
-// `unit_of` answers it, a caller matches on the answer to pick a
-// suffix, and two callers can disagree about presentation without
-// disagreeing about the span. That is exactly what a variant is for.
-//
-// So the unit is an enum — it was never the storage that wanted one.
-// Keeping it in the VALUE would make `Duration(Second, 1)` and
-// `Duration(Milli, 1000)` two representations of one span, and Map
-// needs Eq and Hash to agree about that ("the hash finds the row
-// fast, eq confirms the key"): normalise in one and not the other and
-// an equal key hashes differently. Deriving it costs a comparison and
-// cannot disagree with anything.
+// AND HERE AN ENUM IS RIGHT — printing survives construction: two
+// callers can disagree about presentation without disagreeing about
+// the span. Keeping it in the VALUE instead would make
+// `Duration(Second, 1)` and `Duration(Milli, 1000)` two
+// representations of one span — Map's Eq/Hash need those to agree,
+// and normalising in one but not the other hashes an equal key
+// differently.
 Unit* = Nano | Micro | Milli | Second | Minute
 
-// The largest unit this span fills at least once. 1500ms is Second,
-// 999ms is Milli, and 0 is Nano because a span of nothing has no
-// larger unit to claim.
+// Largest unit this span fills at least once: 1500ms is Second, 999ms
+// is Milli, 0 is Nano (nothing has no larger unit to claim).
 unit_of* = (self: Duration) Unit {
     (self.ns >= NS_PER_MINUTE).match({
         true  => Unit.Minute,
@@ -103,9 +74,8 @@ unit_of* = (self: Duration) Unit {
     });
 }
 
-// How many of that unit, truncating — the pair `unit_of` and this one
-// are what a Display impl reads, and neither needs the other's answer
-// stored anywhere.
+// how many of that unit, truncating — paired with unit_of for Display,
+// neither storing the other's answer.
 count_in* = (self: Duration, u: Unit) u64 {
     u.match({
         Nano   => self.ns,
@@ -127,11 +97,9 @@ add* = (self: Duration, other: Duration) Duration {
     Duration(ns: self.ns + other.ns)
 }
 
-// `sub` is a Res and `add` is not, and that asymmetry is the failure
-// model rather than an oversight. A Duration is unsigned, so a
-// shorter span minus a longer one has no answer to give — an absence
-// a caller acts on, which is `Res`. Overflowing `add` is a bug in
-// the caller's arithmetic and traps, like every other `+`.
+// `sub` is a Res, `add` isn't: Duration is unsigned, so a shorter
+// span minus a longer one has no answer (Res). Overflowing `add` is
+// a caller bug and traps, like every other `+`.
 sub* = (self: Duration, other: Duration) Res<Duration> {
     (self.ns >= other.ns).match({
         true  => Ok(Duration(ns: self.ns - other.ns)),

@@ -2,23 +2,15 @@
 // The bytes a module was parsed from, addressable by span.
 //
 // THE FORMATTER NEEDS ONE THING THE COMPILER NEVER DID: the original
-// text of a node it is not going to rebuild. `ast_span.zen` carries
-// `line:col` and drops the lexer's byte offset on purpose — "a token
-// belongs to one Source and a node outlives it" — so turning a node's
-// span back into bytes is a line index and a subtraction, and that
-// belongs beside the formatter rather than on every AST node.
+// text of a node it won't rebuild. `ast_span.zen` carries `line:col`
+// and drops the lexer's byte offset on purpose (a node outlives its
+// Source), so turning a span back into bytes is a line index plus a
+// subtraction — belongs beside the formatter, not on every AST node.
+// This is the whole mechanism behind "pass through verbatim".
 //
-// IT IS THE WHOLE OF WHAT "PASS THROUGH VERBATIM" MEANS. A form the
-// printer does not model is emitted as the author wrote it, byte for
-// byte, and this file is the one that can. Approximating such a form
-// instead is the failure it exists to make unnecessary.
-//
-// IT SPEAKS OFFSETS AND NOT SPANS, past `offset` itself. A formatter's
-// question is rarely "what is this node" — it is "what lies between
-// this node and the next thing I am going to print", which is two
-// positions from two different nodes with the author's whitespace in
-// between. A `Span` cannot say that, and building a synthetic one to
-// ask would be a span that describes nothing.
+// SPEAKS OFFSETS, NOT SPANS, past `offset` itself: a formatter usually
+// asks "what lies between this node and the next thing I print" — two
+// positions from two different nodes — which no single `Span` can say.
 
 Alloc, AllocError = std.mem
 str = std.text
@@ -29,19 +21,15 @@ Pos = ast.ast_span
 Src* = {
     text*: str,
 
-    // Byte offset of the first byte of each line. `starts.get(0)` is 0,
-    // and a `Pos` is 1-based, so line `n` begins at `starts.get(n - 1)`.
-    // Built once per file: a formatter asks for a hundred spans and a
-    // scan per span would be quadratic in the file.
+    // Byte offset of the first byte of each line. `starts.get(0)` is 0;
+    // `Pos` is 1-based, so line `n` begins at `starts.get(n - 1)`. Built
+    // once per file so a per-span scan doesn't go quadratic.
     starts: Vec<usize>,
 
-    // Where a position is, as a byte offset.
-    //
-    // CLAMPED AT BOTH ENDS rather than trapping, because the one caller
-    // that can hand this an out-of-range position is the end-of-file
-    // span — `module`'s end is `here_span().end`, the empty span past
-    // the last byte — and a formatter that refuses the last line of a
-    // file is a worse answer than one that reads to the end of it.
+    // Where a position is, as a byte offset. CLAMPED AT BOTH ENDS
+    // rather than trapping: the one caller that can hand an
+    // out-of-range position is the end-of-file span, and refusing the
+    // last line is worse than reading to the end of it.
     offset* = (self: @Self, p: Pos) usize {
         (p.line == 0 || p.line > self.starts.len).match({
             true  => self.text.len,
@@ -53,17 +41,13 @@ Src* = {
         self.bounded(self.line_at(p.line) + col_index(p.col))
     }
 
-    // How many lines the file has. One more than the number of
-    // newlines, since a file that does not end in one still has a last
-    // line — `starts` holds a first byte for each.
+    // One more than the newline count — a file without a trailing
+    // newline still has a last line.
     lines* = (self: @Self) usize { self.starts.len }
 
-    // The first byte of a 1-based line, and the first byte PAST it.
-    //
-    // The pair is what turns "this `=>` is on line 9" back into bytes
-    // without a scan. `fmt_decl.zen` asks it once per line of the file
-    // and a scan per question would be quadratic, which is the same
-    // reason `starts` exists at all.
+    // The first byte of a 1-based line, and the first byte PAST it —
+    // turns "this `=>` is on line 9" back into bytes without a scan
+    // (fmt_decl.zen asks once per line).
     line_at* = (self: @Self, line: usize) usize {
         (line == 0).match({
             true  => 0,
@@ -81,20 +65,14 @@ Src* = {
         })
     }
 
-    // Is `[from, to)` nothing but spaces?
+    // Is `[from, to)` nothing but spaces? The question a rule asks
+    // before rewriting a gap: a `// why` sitting there is a COMMENT
+    // (a token), and replacing it with spaces is the exact failure this
+    // folder prevents — so a gap holding anything but spaces is left
+    // untouched.
     //
-    // IT IS THE QUESTION A RULE ASKS BEFORE IT REWRITES A GAP. A
-    // formatter that sets the width of the run in front of a `=>` is
-    // safe exactly while that run is whitespace and nothing else — a
-    // `// why` or a `/* n */` sitting there is a COMMENT, which is a
-    // token, and replacing it with spaces is the failure mode this
-    // whole folder is arranged to make impossible. So the bytes are
-    // read before they are replaced, and an arm whose gap holds
-    // anything at all is left exactly as it was found.
-    //
-    // A tab is not a space here, deliberately. It is not a byte this
-    // rule knows the printed width of, so a gap holding one is a gap
-    // this rule declines rather than guesses at.
+    // A tab is not a space here, deliberately: its printed width is
+    // unknown, so a gap holding one is declined rather than guessed at.
     all_spaces* = (self: @Self, from: usize, to: usize) bool {
         clear ::= true;
         Range(from, self.bounded(to)).loop((h, i) {
@@ -121,13 +99,9 @@ Src* = {
         })
     }
 
-    // `to`, walked back over whitespace, but never past `from`.
-    //
-    // This is where "the space after a declaration is gone" happens,
-    // and it is the only rule in this folder that DELETES a byte the
-    // author wrote. It is safe because the bytes are whitespace and
-    // whitespace is not a token — `fmt.zen`'s guard is exactly that
-    // statement, checked.
+    // `to`, walked back over whitespace, never past `from`. The only
+    // rule in this folder that DELETES an author's byte — safe because
+    // it's whitespace, and whitespace is not a token (fmt.zen's guard).
     trim_back* = (self: @Self, from: usize, to: usize) usize {
         end ::= self.bounded(to);
         loop(() { end > from && self.text.index(end - 1).is_space() }, (h) {
@@ -137,10 +111,9 @@ Src* = {
     }
 }
 
-// A column is 1-based, so the index into the line is one less. A `0`
-// would underflow, and no lexer produces one — but a formatter reading
-// a synthetic span built by a test would, and an unsigned underflow
-// traps.
+// A column is 1-based, so the line index is one less. No lexer
+// produces a `0` column, but a test-built synthetic span might, and an
+// unsigned underflow traps.
 col_index = (col: usize) usize {
     (col == 0).match({
         true  => 0,
@@ -148,9 +121,8 @@ col_index = (col: usize) usize {
     })
 }
 
-// `alloc.Src(text)` — a ufcs function whose first parameter is an
-// Alloc, beside the type it builds, exactly as `Vec`, `Ast` and `Emit`
-// are. The line index is the only thing it allocates and it says so.
+// `alloc.Src(text)` — ufcs constructor, like `Vec`/`Ast`/`Emit`. The
+// line index is the only thing it allocates.
 Src* = (a: Alloc, text: str) Res<Src, AllocError> {
     starts ::= a.Vec<usize>();
     starts.add(0).try();

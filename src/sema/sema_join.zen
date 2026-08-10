@@ -2,25 +2,22 @@
 // What a `.match` EVALUATES TO, when its arms do not all say the same
 // thing.
 //
-// One question, asked once per arm and folded: given what the match is
-// worth so far and what this arm is worth, what is it worth now? It is
-// its own file because it is its own subject — `sema_match.zen` decides
-// which values REACH an arm, and this decides what comes back out, and
-// neither needs the other's data structure.
+// One question, folded once per arm: given what the match is worth so
+// far and what this arm is worth, what is it worth now? Its own file
+// because it's its own subject — `sema_match.zen` decides which values
+// REACH an arm, this decides what comes back out.
 //
-// `Res` IS THE WHOLE OF THE DIFFICULTY, and it is a difficulty the
-// language chose on purpose. `Ok(x)` is OPEN — "which `Res` it closes is
-// not decided until an expectation says" — so an arm carrying one is
-// only half an answer, and the arm beside it is the other half. Joining
-// them is not subtyping and not unification: it is reading the FORM off
-// the arm that has one and the PAYLOAD off the arm that has one, because
-// in a match written `Ok(v)` / `None` neither arm knows both.
+// `Res` is the whole difficulty, and a deliberate one. `Ok(x)` is
+// OPEN — which `Res` it closes isn't decided until an expectation
+// says — so an arm carrying one is only half an answer. Joining is not
+// subtyping or unification: it reads the FORM off the arm that has one
+// and the PAYLOAD off the arm that has one, since a match written
+// `Ok(v)` / `None` has neither arm knowing both.
 //
-// EVERYTHING ELSE IS FIRST-ARM-WINS, and deliberately. Zen has no
-// numeric tower and no common supertype, so two arms of genuinely
-// different types are a program that means something the language
-// cannot express — and inventing a join for it would hide the mistake
-// rather than report it.
+// Everything else is first-arm-wins, deliberately: Zen has no numeric
+// tower and no common supertype, so two arms of genuinely different
+// types mean something the language cannot express — inventing a join
+// for it would hide the mistake rather than report it.
 
 Alloc, AllocError = std.mem
 TyId, Ty, Types, TyRes, ResForm = sema.sema_ty
@@ -40,13 +37,12 @@ keep_or_settle = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     })
 }
 
-// SETTLING AN OPEN `Res` TAKES THE OTHER ARM'S FORM AND KEEPS ITS OWN
-// PAYLOAD. `op = p.peek().kind.match({ Bang => Ok(UnOp.Not), .., _ =>
-// None })` is a `Res<UnOp>`: the `None` arm is what says which FORM —
-// an absence, carrying no reason — and the `Ok` arms are the only
-// thing that says what it holds. Taking `None`'s type whole threw the
-// payload away and answered `Res<Infer>`, which a backend declares as
-// a C struct with an `int` where the `UnOp` goes.
+// Settling an open `Res` takes the other arm's FORM and keeps its own
+// PAYLOAD. E.g. `op = p.peek().kind.match({ Bang => Ok(UnOp.Not), ..,
+// _ => None })` is `Res<UnOp>`: `None` says the FORM (absence, no
+// reason), `Ok` says the PAYLOAD. Taking `None`'s type whole threw the
+// payload away and answered `Res<Infer>` — a backend struct with an
+// `int` where `UnOp` goes.
 settled_res = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     c.types.at(b).match({
         Res(rb) => settled_form(c, a, b, rb),
@@ -78,18 +74,17 @@ at_form = (c :: Checker, value: TyId, rb: TyRes) Res<TyId, AllocError> {
     })
 }
 
-// TWO SETTLED FAILURES ARE ONE VALUE WITH TWO WAYS TO GO WRONG, and the
-// match is worth `Res<T, Ea | Eb>`. "The error type of a `Res` is a
-// union, and propagation merges sets" (DESIGN.md, Errors) is stated
-// along a call, but an arm is the same join asked sideways: first-arm-
-// wins typed `true => fails(n)` / `false => faults(n)` as the first
-// arm's `Res<(), AllocError>`, and the second arm then had nowhere to
-// go — gcc rejected the assignment outright.
+// Two settled failures are one value with two ways to go wrong: the
+// match is worth `Res<T, Ea | Eb>`. DESIGN.md (Errors): "the error
+// type of a Res is a union, and propagation merges sets" — stated for
+// a call, but an arm is the same join sideways. First-arm-wins typed
+// `true => fails(n)` / `false => faults(n)` as `Res<(), AllocError>`
+// and left the second arm nowhere to go; gcc rejected the assignment.
 //
-// THIS IS THE ONE EXCEPTION TO THE HEADER'S FIRST-ARM-WINS RULE, and it
-// is not a supertype being invented. The set already had a lattice —
-// `union_ty` canonicalises it and `set_within` reads it — so the join
-// exists in the language and only the arms had never been asked.
+// This is the one exception to first-arm-wins, and not an invented
+// supertype: the set already has a lattice (`union_ty` canonicalises,
+// `set_within` reads it), so the join exists and only the arms had
+// never been asked.
 merged_or_first = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     c.types.at(a).match({
         Res(ra) => merge_against(c, a, b, ra),
@@ -105,13 +100,12 @@ merge_against = (c :: Checker, a: TyId, b: TyId, ra: TyRes)
     })
 }
 
-// ONLY TWO FAILURES OVER ONE VALUE TYPE MERGE. An absence carries no
-// reason, so it has no set to contribute; an open `Res` is the other
-// direction entirely and `settled_res` above already owns it; and two
-// different value types are exactly the "means something the language
-// cannot express" case the header keeps first-arm-wins for. An error
-// that is still a hole is not a set either — folding one in would
-// freeze an undecided type into a union nobody wrote.
+// Only two failures over one value type merge. An absence carries no
+// reason (no set to contribute); an open `Res` is `settled_res`'s case
+// above; two different value types are the "cannot express" case
+// first-arm-wins is for. An error still a hole is not a set either —
+// folding it in would freeze an undecided type into a union nobody
+// wrote.
 merge_failures = (c :: Checker, a: TyId, ra: TyRes, rb: TyRes)
                  Res<TyId, AllocError> {
     (is_failure(ra) && is_failure(rb) && ra.value.eq(rb.value)

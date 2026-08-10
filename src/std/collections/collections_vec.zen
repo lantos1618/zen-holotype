@@ -7,23 +7,21 @@ Alloc, AllocError, Ptr, null_ptr = std.mem
 Range = std.core.range
 
 Vec*<T> = {
-    // an empty Vec owns no pages: a null data and a zero capacity ARE
-    // the empty state, and realloc takes a null p as a fresh
-    // allocation — so the first grow runs the same call every later
-    // one does
+    // an empty Vec owns no pages: null data + zero capacity ARE the
+    // empty state, and realloc treats a null p as a fresh allocation,
+    // so the first grow runs the same call every later one does
     data :: Ptr<T> = null_ptr<T>(),
     len* :: usize = 0,      // * is readable outside; mutation still only via methods
     capacity :: usize = 0,
 
-    // `:` set once at construction. an Alloc is a handle — two words
-    // pointing at the arena — so grow can realloc THROUGH it while the
-    // field itself stays immutable. `::` is shallow, and this is why
+    // `:` set once at construction: an Alloc is a handle (two words
+    // into the arena), so grow can realloc THROUGH it while the field
+    // itself stays immutable — `::` is shallow, hence this.
     alloc: Alloc,
 
     // grow lands in THIS frame, never inside a closure: the match is a
-    // value and the .try() on it belongs to add. so a failed grow
-    // returns Err from add and provably cannot fall through to the
-    // write below
+    // value, `.try()` on it belongs to add, so a failed grow returns
+    // Err from add and cannot fall through to the write below
     add* = (self :: @Self, value: T) Res<(), AllocError> {
         (self.len == self.capacity).match({
             true  => self.grow(),
@@ -41,13 +39,12 @@ Vec*<T> = {
         });
     }
 
-    // the buffer itself. String.view builds a `str` over this Vec's
-    // storage and cannot go through get; `data` stays unexported
+    // String.view builds a `str` over this Vec's storage and cannot go
+    // through get; `data` stays unexported.
     ptr* = (self: @Self) Ptr<T> { self.data }
 
-    // the dual of get, and what a Map overwrites a row through. past
-    // len is None exactly as get is: a write that can legitimately
-    // miss is not a bug either
+    // dual of get, what a Map overwrites a row through. past len is
+    // None exactly as get is.
     set* = (self :: @Self, i: usize, value: T) Res<()> {
         (i < self.len).match({
             true  => { self.data.write(i, value); Ok(()) },
@@ -55,8 +52,8 @@ Vec*<T> = {
         });
     }
 
-    // moves an element OUT, leaving the vec one shorter. without this a
-    // Vec<T> of Drop values can be filled and never emptied
+    // moves an element OUT, leaving the vec one shorter — without this
+    // a Vec<T> of Drop values can be filled and never emptied
     take* = (self :: @Self, i: usize) Res<T> {
         value = self.get(i).try();
         Range(i + 1, self.len).loop((h, j) {
@@ -66,17 +63,13 @@ Vec*<T> = {
         Ok(value);
     }
 
-    // room for `n` MORE elements, before anything writes them.
-    //
-    // It exists because a CAPABILITY'S FLOOR fills a run this module
-    // did not allocate: `Stdin.read` (std.env) hands the C floor the
-    // buffer's spare capacity and the floor reads into it, so the room
-    // has to be there BEFORE the call and cannot be made inside one.
-    // Every other filler goes through `add` and needs none of this.
-    //
-    // It asks for DOUBLE what was requested, so that a caller reading a
-    // stream a chunk at a time reallocs a logarithmic number of times
-    // rather than once per chunk.
+    // room for `n` MORE elements, before anything writes them. Exists
+    // because a CAPABILITY'S FLOOR fills a run this module did not
+    // allocate: `Stdin.read` (std.env) hands the C floor the buffer's
+    // spare capacity and reads into it, so the room must exist BEFORE
+    // the call. Every other filler goes through `add` and needs none
+    // of this. Asks for DOUBLE requested so a chunked stream reader
+    // reallocs a logarithmic, not linear, number of times.
     reserve* = (self :: @Self, n: usize) Res<(), AllocError> {
         want = self.len + n;
         (want <= self.capacity).match({
@@ -99,15 +92,13 @@ Vec*<T> = {
     }
 }
 
-// a Vec IS a Range of its elements, and the impl is one line because
-// `get` already answers exactly the question `at` asks — including the
-// None past the end, which is what stops a walk rather than reading
-// past the buffer.
+// a Vec IS a Range of its elements — `get` already answers exactly
+// what `at` asks, None-past-end included, which is what stops a walk
+// rather than reading past the buffer.
 //
-// start and end are SUPPLIED, not stored (DESIGN.md: "you satisfy
-// requirements, you never impl storage"), so a Vec stays exactly as
-// wide as it was and one that grows mid-loop reports its new end
-// rather than a stale one.
+// start/end are SUPPLIED, not stored (DESIGN.md: satisfy requirements,
+// never impl storage), so a Vec growing mid-loop reports its new end,
+// not a stale one.
 Vec.impl(Range<T>, {
     start: 0,
     end: self.len,
@@ -115,15 +106,11 @@ Vec.impl(Range<T>, {
     at ::= (self: @Self, index: usize) Res<T> { self.get(index) }
 })
 
-// `alloc.Vec<i32>()`: a ufcs function whose first parameter is an
-// Alloc, so it calls as a method on one. it lives beside Vec rather
-// than on Alloc because only this module can see data and capacity,
-// and a Vec-shaped default inside std.mem would point the dependency
-// the wrong way.
+// `alloc.Vec<i32>()`: ufcs constructor, lives beside Vec (not on
+// Alloc) since only this module sees data/capacity.
 //
-// a bare value and not a Res: an empty Vec owns no pages, so
-// construction cannot fail. the first add allocates and THAT is what
-// returns Res
+// a bare value, not a Res: an empty Vec owns no pages so construction
+// can't fail — the first add allocates, and THAT is what returns Res
 Vec* = <T>(a: Alloc) Vec<T> {
     Vec(alloc: a)
 }

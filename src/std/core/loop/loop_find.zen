@@ -2,33 +2,25 @@
 // the loop words that delete guards, and the two that allocate.
 //
 // "A `.then` inside a loop is usually a missing loop word" - these
-// are the words it is missing. find stops at the first match;
-// filter keeps every match; map keeps a value per element.
+// are the words it's missing. find stops at the first match; filter
+// keeps every match; map keeps a value per element.
 //
-// SPLIT OUT BY NAME, NOT OVERLOADED. map and filter take an Alloc
-// and so they cannot be overloads of loop: a generic `init: A`
-// swallows a concrete `alloc: Alloc`, so fold's
-// `(range, init, body)` and a hypothetical `(range, alloc, body)`
-// are the same signature to resolution and could not be told
-// apart. A different name is honest anyway - these are the ones
-// that allocate, and law 1 says the signature answers that.
+// SPLIT OUT BY NAME, NOT OVERLOADED. map and filter take an Alloc, so
+// they can't overload loop: a generic `init: A` swallows a concrete
+// `alloc: Alloc`, so fold's `(range, init, body)` and a hypothetical
+// `(range, alloc, body)` are the same signature to resolution. A
+// different name says which ones allocate (law 1: the signature answers).
 //
-// find takes no Alloc, so it cannot allocate, so it returns
-// Res<T> rather than a collection. A miss is None, not a trap: a
-// search that legitimately finds nothing is not a bug.
-//
-// UNLIKE loop_iter.zen, all three are written out. They are
-// ordinary Zen over the primitive, and writing them is the proof
-// that h.break is a general language feature rather than a
-// privilege the compiler grants to one name - find is three lines
-// and the third one is a break.
+// find takes no Alloc, so it returns Res<T>, not a collection — a miss
+// is None, not a trap. UNLIKE loop_iter.zen, all three are written out
+// as ordinary Zen over the primitive, proof h.break is a general
+// feature, not a privilege granted to one name.
 
-// Vec crosses a folder boundary, and it is the one dependency this
-// module has that its siblings do not: map and filter say Vec in
-// their return types, so std.core.loop knows std.collections. That
-// is the order PLAN.md 0.6 already builds in - Vec at step 3, the
-// loop family at step 5 - and it is why the Range impl for Vec
-// lives over there rather than here.
+// Vec crosses a folder boundary, the one dependency this module has
+// that its siblings don't: map/filter return Vec, so std.core.loop
+// knows std.collections. Matches PLAN.md 0.6's build order (Vec at
+// step 3, loop family at step 5) — why the Range impl for Vec lives
+// over there, not here.
 Res, Ok, None = std.core.result
 then          = std.core.bool
 Alloc         = std.mem
@@ -37,26 +29,21 @@ Range         = std.core.range
 LoopHandle    = std.core.loop.loop_handle
 loop          = std.core.loop.loop_iter
 
-// the first element the predicate accepts, or None. the predicate
-// takes only the value: there is no handle, because a predicate
-// that could break is a find, and this is it.
+// first element the predicate accepts, or None. Predicate takes only
+// the value — no handle, because a predicate that could break is a
+// find, and this is it.
 find*<R: Range<T>, T> = (range: R, pred: (value: T) bool) Res<T> {
     range.loop((h, value) {
         pred(value).then(() { h.break(value) });
     })
 }
 
-// every element the predicate accepts, in order. nothing matching
-// is an empty Vec and NOT a None - the walk succeeded, it just
-// kept nothing.
-//
-// None is reserved for the one real failure: the Vec could not
-// grow. Res<Vec<T>> has no Err channel to carry AllocError, and
-// law 4 forbids inventing one - a None never becomes an Err and an
-// Err never quietly becomes a None. So the break below is what
-// out-of-memory looks like from the outside, and a caller that
-// needs to act on it writes `.ok_or(..)`, which is the required
-// form for naming a reason.
+// every element the predicate accepts, in order — nothing matching is
+// an empty Vec, NOT a None (the walk succeeded, it kept nothing). None
+// is reserved for the one real failure: Vec couldn't grow. Res<Vec<T>>
+// has no Err channel for AllocError, and law 4 forbids inventing one,
+// so the break below IS out-of-memory from the outside — a caller that
+// needs to act on it writes `.ok_or(..)`, the required form.
 filter*<R: Range<T>, T> = (range: R, alloc: Alloc, pred: (value: T) bool) Res<Vec<T>> {
     kept ::= alloc.Vec<T>();
     room ::= true;
@@ -74,10 +61,9 @@ filter*<R: Range<T>, T> = (range: R, alloc: Alloc, pred: (value: T) bool) Res<Ve
     })
 }
 
-// a value per element, collected into a Vec. the body takes the
-// handle as well as the index and the value, so a map may stop
-// early - it keeps what it made, because a partial map that
-// reports nothing would throw away work the body already did.
+// a value per element, collected into a Vec. The body takes the
+// handle too, so a map may stop early — it keeps what it made, since
+// reporting nothing would throw away work already done.
 map*<R: Range<T>, T, U> = (range: R, alloc: Alloc, body: (h: LoopHandle, index: usize, value: T) U) Res<Vec<U>> {
     made ::= alloc.Vec<U>();
     room ::= true;

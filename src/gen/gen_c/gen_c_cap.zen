@@ -2,36 +2,33 @@
 // The members whose BODY IS THE BACKEND.
 //
 // `Mem.alloc`, `Mem.page`, `Mem.release`, `Fs.exists`, `Fs.is_dir` and
-// `Fs.write` are declared in std with a signature and no body, and
-// env.zen says why: they are the authority itself. "A capability's
-// floor is the target language's", and for C that floor is `malloc`,
-// `free`, `stat` and `fopen`. `gen_c_print.zen` already says the same
-// sentence about `Console.println`; this file is the other four.
+// `Fs.write` are declared in std with a signature and no body — env.zen
+// says why: they are the authority itself. "A capability's floor is the
+// target language's", and for C that floor is `malloc`, `free`, `stat`,
+// `fopen`. `gen_c_print.zen` says the same about `Console.println`; this
+// file is the other four.
 //
-// SO THIS IS NOT A SPECIAL CASE BOLTED ONTO MEMBER DISPATCH. It is the
-// SAME rule `println` obeys, asked one level lower: a member with no
-// body is either a capability whose floor this file writes, or a
-// refusal `gen_c_member.zen` reports by name. Nothing else can be true
-// of it — a symbol for a bodiless declaration is a symbol nothing
-// defines.
+// NOT A SPECIAL CASE BOLTED ONTO MEMBER DISPATCH — the SAME rule
+// `println` obeys, one level lower: a bodiless member is either a
+// capability whose floor this file writes, or a refusal
+// `gen_c_member.zen` reports by name. Nothing else can be true of it —
+// a symbol for a bodiless declaration is a symbol nothing defines.
 //
 // WHY THE BACKEND MAY WRITE AN ArenaState'S FIELDS. `mem_arena.zen`
-// keeps `ArenaState` unexported — "what an arena is made of is not part
-// of what an arena is" — and this file writes three of its fields
-// anyway. That is licensed by exactly one thing: the memory ENTERS THE
-// PROGRAM here. `Mem.alloc` is the only door, so the only alternative
-// is a second, hidden, hand-written C arena that std would then have to
-// agree with. One place knows the shape, and it is the place the value
-// is born.
+// keeps `ArenaState` unexported ("what an arena is made of is not part
+// of what an arena is"), yet this file writes three of its fields
+// anyway — licensed by one thing: the memory ENTERS THE PROGRAM here.
+// `Mem.alloc` is the only door; the alternative is a second, hidden,
+// hand-written C arena std would have to agree with. One place knows
+// the shape: the place the value is born.
 //
-// WHAT IS STILL REFUSED, AND WHY IT IS THE INTERESTING ONE. `Fs.read`
+// WHAT IS STILL REFUSED, AND WHY IT'S THE INTERESTING ONE. `Fs.read`
 // takes an `Alloc` and allocates the buffer through it. An `Alloc` is a
-// BOUND — "an ordinary struct whose fields happen to be functions" —
-// so a value of static type `Alloc` is a fat value, and this backend
-// does not build one yet. The refusal names that rather than the member,
-// because the member is not the problem: EVERY allocation in the
-// language goes through the same door, and `Fs.read` is simply the
-// first capability that walks through it.
+// BOUND ("an ordinary struct whose fields happen to be functions"), so
+// a value of static type `Alloc` is a fat value this backend doesn't
+// build yet. The refusal names that, not the member — EVERY allocation
+// in the language goes through the same door, and `Fs.read` is simply
+// the first capability that walks through it.
 
 Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = ast
 Function, Access, Call, Arg, Span, Ident, TypeId = ast
@@ -67,10 +64,9 @@ is_defer, lower_defer = gen.gen_c.gen_c_scope
 // -----------------------------------------------------------------
 
 // A capability is recognised by the RECEIVER'S TYPE and the member's
-// name together. Not by "has no body" alone: that is the question
-// `gen_c_member.zen` already asked, and answering it a second time here
-// would make any bodiless member anywhere in any program silently
-// become one of these six.
+// name together, not by "has no body" alone — that's `gen_c_member.zen`'s
+// question, and answering it again here would make any bodiless member
+// anywhere silently become one of these six.
 is_capability* = (be :: CBackend, rty: TyId, name: str) bool {
     owner_of(be, rty).eq("Mem").match({
         true  => mem_verb(name),
@@ -85,22 +81,18 @@ is_fs_capability = (be :: CBackend, rty: TyId, name: str) bool {
     })
 }
 
-// `Console.println` IS ONE OF THESE, and the header above says so: its
-// floor is `fwrite`, it is declared with no body for the same reason
-// `Fs.read` is, and `gen_c_print.zen` writes it. It reaches this file
-// only when the receiver was WRITTEN — `env.out.println(..)` — because
-// the sugar names no function at all and is recognised one level up.
+// `Console.println` IS ONE OF THESE: floor is `fwrite`, bodiless for
+// the same reason `Fs.read` is, and `gen_c_print.zen` writes it. Reaches
+// this file only when the receiver was WRITTEN (`env.out.println(..)`)
+// — the sugar names no function and is recognised one level up.
+// Without this it fell through to `lower_fat_call`: `args: ...` has no
+// C spelling, so the slot's parameter came out as `ctype`'s `int`
+// fallback and `cc` rejected every argument handed to it.
 //
-// Without this it fell through to `lower_fat_call`, and a call through
-// the slot cannot work: `args: ...` has no C spelling, so the slot's
-// parameter came out as `ctype`'s `int` fallback and `cc` rejected every
-// argument handed to it.
-//
-// `Scope.defer` IS THE LAST LINK AND NOT A PEER of the other five. It is
-// a capability by the same test — a bodiless member whose floor is the
-// target language's — but its receiver is a value the program made
-// rather than one `Env` handed it, so owner alone cannot recognise it
-// and `is_defer` asks its own question.
+// `Scope.defer` IS THE LAST LINK, NOT A PEER of the other five — a
+// capability by the same test, but its receiver is a value the program
+// made rather than one `Env` handed it, so owner alone can't recognise
+// it and `is_defer` asks its own question.
 is_console_capability = (be :: CBackend, rty: TyId, name: str) bool {
     (owner_of(be, rty).eq("Console") && name.eq("println"))
         || is_stdin_read(be, rty, name)
@@ -138,13 +130,12 @@ fs_verb = (name: str) bool {
 // the entry point
 // -----------------------------------------------------------------
 
-// `Scope.defer` IS ONE OF THESE AND FOR THE SAME REASON. `scope.zen`
-// declares it `= sig` with no body and says why — "the compiler
-// supplies the block" — so its floor is the target language's, exactly
-// as `Mem.alloc`'s and `Fs.write`'s are. It takes the short path
-// because its whole lowering is about the CLOSURE it was handed, and
-// the declared return and parameter types the four below need say
-// nothing about that.
+// `Scope.defer` IS ONE OF THESE, same reason: `scope.zen` declares it
+// `= sig` with no body ("the compiler supplies the block"), floor is
+// the target language's, like `Mem.alloc`'s and `Fs.write`'s. Takes the
+// short path because its whole lowering is about the CLOSURE it was
+// handed — the declared types the four below need say nothing about
+// that.
 lower_capability* = (be :: CBackend, id: ExprId, c: Call, a: Access,
                      rty: TyId, mi: usize, f: Function, ctx: Ctx,
                      out :: String) Res<(), AllocError> {
@@ -159,11 +150,10 @@ lower_env_capability = (be :: CBackend, id: ExprId, c: Call, a: Access,
                         out :: String) Res<(), AllocError> {
     ret = cap_ret(be, rty, mi, f).try();
     request_type(be, ret).try();
-    // `Fs.read`'s FIRST written parameter is an `Alloc`, and its
-    // DECLARED type is what says so — the argument arrives as an Arena,
-    // and lowering it at its own type would hand the buffer's owner an
-    // arena where the two-word handle belongs. Law 7: the declaration
-    // decides.
+    // `Fs.read`'s FIRST written parameter is an `Alloc` per its
+    // DECLARED type — the argument arrives as an Arena, and lowering it
+    // at its own type would hand the buffer's owner an arena where the
+    // two-word handle belongs. Law 7: the declaration decides.
     aty = cap_param(be, rty, mi, f).try();
     verb(be, id, c, a, rty, ret, aty, ctx, out)
 }
@@ -259,11 +249,10 @@ cap_ret = (be :: CBackend, rty: TyId, mi: usize, f: Function)
 // -----------------------------------------------------------------
 // `env.mem.alloc()` — where an arena comes from
 //
-// An `ArenaState` on the C heap, and an `Arena` holding its address.
-// The state is one `malloc` and never freed: `Arena.drop` releases the
-// PAGES, and the state itself is the handle every copy of the arena
-// shares — freeing it would invalidate a value that copies freely by
-// design.
+// An `ArenaState` on the C heap, an `Arena` holding its address. State
+// is one `malloc`, never freed: `Arena.drop` releases the PAGES, and
+// the state is the handle every copy of the arena shares — freeing it
+// would invalidate a value that copies freely by design.
 // -----------------------------------------------------------------
 
 lower_alloc = (be :: CBackend, id: ExprId, a: Access, rty: TyId, ret: TyId,

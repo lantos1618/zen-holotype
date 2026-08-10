@@ -1,44 +1,21 @@
 // src/sema/sema_ty.zen
-// What sema computes. NOT what the source wrote.
+// What sema computes, not what the source wrote: `ast.Type` is a
+// WRITTEN type; this is what it means, keyed on an id (AST_CONTRACT.md).
 //
-// `ast.Type` is a WRITTEN type — a name, a span, the trivia around it.
-// AST_CONTRACT.md is explicit that a type after inference is not a node:
-// "What sema computes is sema's, keyed on an id — that is what the ids
-// are for". This file is that thing.
+// TYPES ARE INTERNED: two types are equal exactly when their ids are
+// equal, so every comparison (overload resolution, error-set merging,
+// assignability) is a `u32` compare, never a structural walk — the only
+// way to make `A | B` and `B | A` the same type without hand-written
+// set equality everywhere
+// (`tests/corpus/std/res_try_error_set_keeps_the_variant.zen` sends one
+// `IoError.Full` through four spellings and demands `Full`).
 //
-// TYPES ARE INTERNED, and it is the single decision the rest of sema
-// stands on. Two types are equal exactly when their ids are equal, so
-// every comparison in overload resolution, in error-set merging and in
-// assignability is a `u32` compare rather than a structural walk. There
-// is no other way to make `A | B` and `B | A` the same type without
-// writing set equality by hand at every call site — and
-// `tests/corpus/std/res_try_error_set_keeps_the_variant.zen` sends one
-// `IoError.Full` through four spellings of one set and demands it
-// arrive as `Full`, which is exactly a demand that the four spellings
-// be one type.
-//
-// THE KEY IS THE IDENTITY. A type is interned under a string built from
-// its children's keys, so interning is one `Map` lookup and never a
-// recursion: by the time a compound type is built, every child already
-// has a key. Nominal types key on their DECLARATION and not their name,
-// because "two modules may define the same top-level name without
-// colliding" and `Circle = {radius: f64}` and `Sphere = {radius: f64}`
-// "are different types".
-//
-// The key is not the display name. `write_name` walks the structure to
-// print `Vec<i32>` where the key says `std.collections.Vec<i32>`,
-// because a diagnostic that names a module path is not what a reader
-// asked for.
-//
-// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: this file has
-// one subject — what a type IS — and the three things it does to a type
-// are inseparable. Interning is only correct if canonicalisation happens
-// at construction, and canonicalisation is only expressible if the store
-// can already read a member's key. Splitting the union rules out would
-// put `union_ty` in one module and the `intern` it must call in another,
-// with the store passed back and forth; splitting `write_name` out would
-// separate the display of a type from the definition of one. The line
-// count is a prompt to name the subjects, and here there is one.
+// THE KEY IS THE IDENTITY: a type interns under a string built from its
+// children's keys (one `Map` lookup, never a recursion). Nominal types
+// key on their DECLARATION, not their name, so same-named types in two
+// modules stay distinct; the key is not the display name, though —
+// `write_name` walks the structure to print `Vec<i32>` where the key
+// says `std.collections.Vec<i32>`.
 
 Alloc, AllocError = std.mem
 Vec, Map = std.collections
@@ -48,9 +25,8 @@ Range = std.core
 DeclId = sema.sema_id
 write_usize = sema.sema_diag
 
-// An interned type. The index into `Types`, and nothing else — the
-// whole point is that this is small enough to compare, hash and copy
-// without thinking about it.
+// An interned type: the index into `Types`, and nothing else — small
+// enough to compare, hash and copy without thinking about it.
 //
 // u32 for the reason `ast_id.zen` gives: `std.core.num` carries only
 // lossless conversions, and u32 is the widest integer with both
@@ -65,21 +41,18 @@ TyId.impl(Hash, {
     hash = (self: @Self, hasher :: Hasher) u64 { self.index.to_u64() }
 })
 
-// The scalars the language builds in and no module declares: the
-// integers, the floats, `bool`, `str`, and `()`.
-//
-// A separate kind from `Named` rather than a declaration with no body,
-// because a primitive has no `DeclId` to be nominal on and inventing
+// The scalars the language builds in: the integers, the floats, `bool`,
+// `str`, `()`. A separate kind from `Named`, not a declaration with no
+// body — a primitive has no `DeclId` to be nominal on, and inventing
 // one would put a fictional row in `Ast.modules`.
 Prim* = { name*: str }
 
-// The scalars no module declares. A list rather than a lookup, because
-// it is closed by the language and a name that is almost one of these is
-// a name, not a near miss.
+// A list rather than a lookup: the set is closed by the language, and a
+// name that is almost one of these is a name, not a near miss.
 //
-// HERE AND NOT IN `sema_check.zen`, because `named` below has to ask it:
-// which names are primitives is a fact about `Prim`, and the store is
-// the one place that can hold it without importing the layer above.
+// HERE AND NOT IN `sema_check.zen`: `named` below has to ask it, and the
+// store is the one place that can hold this fact without importing the
+// layer above.
 is_prim* = (name: str) bool {
     is_integer(name) || is_float(name)
         || name.eq("bool") || name.eq("str") || name.eq("()")
@@ -93,84 +66,65 @@ is_integer* = (name: str) bool {
 
 is_float* = (name: str) bool { name.eq("f32") || name.eq("f64") }
 
-// A declared struct or enum, applied to its type arguments.
-// `Vec<i32>`, `Res<(), AllocError>`, `Circle`.
-//
-// `decl` is the identity and `name` is only carried so a diagnostic
-// need not walk back to the AST to say `Vec`.
+// A declared struct or enum applied to its type arguments — `Vec<i32>`,
+// `Res<(), AllocError>`, `Circle`. `decl` is the identity; `name` is
+// only carried so a diagnostic need not walk back to the AST to say it.
 TyNamed* = {
     decl*: DeclId,
     name*: str,
     args*: Vec<TyId>,
 }
 
-// A function type. Parameter NAMES are absent and that is the language
-// rule, not a saving: "Parameter names are documentation, not identity.
-// `(a: i32, b: i32) i32` and `(x: i32, y: i32) i32` are the same type,
-// and overload resolution never sees names."
+// A function type. Parameter NAMES are absent by language rule, not a
+// saving: "parameter names are documentation, not identity" — `(a: i32,
+// b: i32) i32` and `(x: i32, y: i32) i32` are the same type.
 TyFn* = {
     params*: Vec<TyId>,
     ret*: TyId,
 }
 
-// A structural error set — "`A | B` is an anonymous enum of two
-// variants, a structural enum, not a new kind of type".
-//
-// CANONICAL, which is three properties and every one of them is load
-// bearing: FLAT (a member is never itself a union, so merging is a
-// concatenation), SORTED (so `A | B` and `B | A` intern to one id), and
-// DEDUPED (so merging a set into itself is a no-op). A union of one
-// collapses to its member before it is ever built, so `Res<T, E>` with
-// a single error type is that type and not a set wrapping it.
+// A structural error set, not a new kind of type: an anonymous enum of
+// its variants. CANONICAL — FLAT (a member is never itself a union),
+// SORTED (`A | B` and `B | A` intern to one id), DEDUPED (merging a set
+// into itself is a no-op) — and a union of one collapses to its member,
+// so `Res<T, E>` with a single error type is that type, not a set.
 TyUnion* = {
     members*: Vec<TyId>,
 }
 
-// `[i32, 4]` — a fixed array, on the stack, with no length stored beside
-// the bytes.
+// `[i32, 4]` — a fixed array, on the stack, no length stored beside the
+// bytes. THE COUNT IS PART OF THE TYPE (DESIGN.md:301: `[u8, 64]` and
+// `[u8, 65]` are different types), so a literal index past a known
+// length is a compile error, not a runtime trap; it's a FIELD, not a
+// backend re-derivation, since `sema_trap.zen` compares a literal index
+// against it and this is the only place the length exists.
 //
-// THE COUNT IS PART OF THE TYPE, and DESIGN.md:301 says why in one
-// sentence: "`[u8, 64]` and `[u8, 65]` are different types — which is
-// what makes the check possible with no length stored beside the bytes,
-// and what lets a literal index past a known length be the compile error
-// below rather than a runtime trap." So it is a FIELD here and not a
-// number the backend re-derives: interning on it is what makes the two
-// arrays two types, and `sema_trap.zen` compares a literal index against
-// it because this is the only place the length exists.
-//
-// Not a `Named` on an invented declaration, which is what the count was
-// dropped to make room for: a fixed array has no `DeclId` — "`[T, N]` is
-// a type constructor, not a name" — and a nominal type keyed on a
-// fiction would have to carry the count in its spelling and parse it
-// back out.
+// Not a `Named` on an invented declaration: a fixed array has no
+// `DeclId` (it's a type constructor, not a name), and a nominal type
+// keyed on a fiction would have to parse the count back out of its own
+// spelling.
 TyArray* = {
     elem*: TyId,
     count*: usize,
 }
 
 // An unsubstituted type parameter: the `T` of `Vec<T>` inside `Vec`'s
-// own body. It is nominal on its OWNER as well as its name, so the `T`
-// of `Vec` and the `T` of `Map` are two types and substitution cannot
-// confuse them.
+// own body. Nominal on its OWNER as well as its name, so the `T` of
+// `Vec` and the `T` of `Map` are two types substitution can't confuse.
 TyVar* = {
     name*: str,
     owner*: str,
 }
 
 // `Infer` is the `_` of `Res<Cfg, _>` — a hole law 6 permits inside a
-// module and forbids at a `*` boundary.
-//
-// `Unknown` is POISON: a type sema could not compute because it already
-// reported why. It is not an error type and it never produces a second
-// diagnostic — one mistake, one diagnostic, and a cascade of "expected
-// Unknown" is the thing this variant exists to prevent.
-// Which `Res` a value is, when that is not yet decided.
-//
-// `Ok(0)` is written before anyone knows whether it closes a `Res<i32>`
-// or a `Res<i32, E>`, and DESIGN.md's hoisting rule turns on exactly
-// that: "hoisting only fires when exactly ONE variant carries the type".
-// So the form is carried rather than guessed, and `Open` is what a bare
-// `Ok(..)` produces until an expectation settles it.
+// module and forbids at a `*` boundary. `Unknown` is POISON: a type
+// sema could not compute because it already reported why, so it never
+// triggers a second "expected Unknown".
+// Which `Res` a value is, when that is not yet decided: `Ok(0)` is
+// written before anyone knows whether it closes `Res<i32>` or
+// `Res<i32, E>`. DESIGN.md's hoisting fires only when exactly ONE
+// variant carries the type, so the form is carried rather than guessed
+// — `Open` is what a bare `Ok(..)` produces until an expectation settles.
 ResForm* = Absence | Failure | Open
 
 // `Res<T>` and `Res<T, E>` are one shape — "propagation merging error
@@ -193,13 +147,11 @@ Ty* = Prim(Prim)
     | Infer
     | Unknown
 
-// The interning store.
-//
-// `kinds` and `keys` are parallel and are indexed by a `TyId`; `by_key`
-// is the inverse. `count` shadows `kinds.len` as a u32 for the reason
-// `Ast` keeps its own counters: a Vec's len is a usize and there is no
-// narrowing conversion to get back, on purpose, because a narrowing
-// conversion can fail.
+// The interning store: `kinds` and `keys` are parallel, indexed by a
+// `TyId`; `by_key` is the inverse. `count` shadows `kinds.len` as a u32
+// for the reason `Ast` keeps its own counters — a Vec's len is a usize
+// and there's deliberately no narrowing conversion back, since one can
+// fail.
 Types* = {
     kinds :: Vec<Ty>,
     keys :: Vec<String>,
@@ -211,24 +163,20 @@ Types* = {
     // reading
     // -----------------------------------------------------------------
 
-    // What a type IS. Traps on an id this store never handed out, for
-    // the reason `Ast.expr_at` does: that is a compiler bug and not
-    // input a caller can act on.
+    // What a type IS. Traps on an id this store never handed out — same
+    // as `Ast.expr_at`: a compiler bug, not input a caller can act on.
     at* = (self: @Self, id: TyId) Ty {
         i = id.index.to_usize();
         self.kinds.len - i - 1;
         self.kinds.ptr().read(i);
     }
 
-    // The i-th type interned, BY POSITION. `at` answers about an id a
-    // caller already holds; this is for the one reader that has to walk
-    // the whole store — `sema_depth.zen`, which asks which applied types
-    // exist without anybody having handed it their ids.
+    // The i-th type interned, BY POSITION — for the one reader that walks
+    // the whole store without ids, `sema_depth.zen`. `at` answers about
+    // an id a caller already holds; this doesn't.
     //
-    // A `usize` and not a `TyId` because a loop index is a `usize` and
-    // there is no narrowing conversion back to the `u32` a `TyId` holds.
-    // That absence is deliberate — a narrowing conversion can fail — so
-    // the position is what crosses, and only a kind comes back.
+    // A `usize`, not a `TyId`: no narrowing conversion goes from a loop
+    // index back to the `u32` a `TyId` holds, so only a kind comes back.
     kind_at* = (self: @Self, i: usize) Ty {
         self.kinds.len - i - 1;
         self.kinds.ptr().read(i);
@@ -298,29 +246,19 @@ Types* = {
 
     unknown* = (self :: @Self) Res<TyId, AllocError> { self.intern("?", Ty.Unknown) }
 
-    // A declared type applied to its arguments. The key names the
-    // DECLARATION, which is what makes two same-named types in two
-    // modules two types.
-    // `qname` is the declaration's module-qualified name — `std.collections.Vec`
-    // — and it, not `name`, is the identity: "two modules may define the
-    // same top-level name without colliding", so `Circle` alone would
-    // make two types one.
+    // A declared type applied to its arguments. `qname` (module-
+    // qualified, e.g. `std.collections.Vec`), not `name`, is the
+    // identity — what keeps same-named types in different modules two
+    // types.
     //
-    // "A PRELUDE DECLARATION OF A PRIMITIVE'S NAME IS THAT PRIMITIVE."
-    // `std.text` declares `str` with a `data` and a `len`, `std.core.num`
-    // declares `i32` with `MIN` and `MAX` — and those declarations give
-    // the primitive the compiler already knows its members. They are not
-    // a second nominal type standing beside it. Minting one here is what
-    // DESIGN.md warns of: "it mints a `str` beside the `str` every
-    // literal has, and then every literal, every trap check and every
-    // standard library signature disagrees about which one they meant" —
-    // and it did, so `str_at`'s own `str(data: .., len: ..)` was not
-    // assignable to its declared `str` and both printed as `str`.
-    //
-    // The member table said this already (`sema_member.prim_members`)
-    // and the backend patched it back up (`gen_c_build.prim_named`).
-    // Saying it where the type is MINTED is what makes the two the same
-    // `TyId`, which is the only form of "same type" this store has.
+    // A PRELUDE DECLARATION OF A PRIMITIVE'S NAME IS THAT PRIMITIVE:
+    // `std.text`'s `str` and `std.core.num`'s `i32` give the primitive
+    // the members the compiler already knows, not a second nominal
+    // type. Minting one here duplicated `str` (`str_at`'s own
+    // `str(data:.., len:..)` wasn't assignable to the declared `str`,
+    // and both printed as `str`) — the member table
+    // (`sema_member.prim_members`) and backend already assumed this, so
+    // saying it where the type is MINTED makes the two the same `TyId`.
     named* = (self :: @Self, decl: DeclId, qname: str, name: str, args: Vec<TyId>)
              Res<TyId, AllocError> {
         is_prim(name).match({
@@ -372,8 +310,7 @@ Types* = {
     }
 
     // `[i32, 4]`. THE COUNT IS IN THE KEY, so `[i32, 4]` and `[i32, 5]`
-    // intern as two ids and every comparison downstream — assignability,
-    // the bounds check, a parameter's type — sees two types.
+    // intern as two ids.
     array* = (self :: @Self, elem: TyId, count: usize)
              Res<TyId, AllocError> {
         key ::= self.alloc.String().try();
@@ -410,15 +347,12 @@ Types* = {
     }
 
     // -----------------------------------------------------------------
-    // error sets
-    //
-    // The union constructor is the only one that CANONICALISES, and it
-    // is where the four spellings of one set become one id.
+    // error sets — `union_ty` is the only constructor that CANONICALISES,
+    // where the four spellings of one set become one id.
     // -----------------------------------------------------------------
 
-    // `A | B`, from members in any order, at any nesting, with
-    // repetition. Flattens, sorts, dedupes, and collapses a set of one
-    // to its member.
+    // `A | B`, from members in any order, any nesting, with repetition:
+    // flattens, sorts, dedupes, and collapses a set of one to its member.
     union_ty* = (self :: @Self, members: Vec<TyId>) Res<TyId, AllocError> {
         flat ::= self.alloc.Vec<TyId>();
         self.flatten_into(flat, members).try();
@@ -444,13 +378,12 @@ Types* = {
 
     // Is `member` one of `set`'s members? A set of one is its member,
     // so a non-union answers by equality.
-    // AN UNSUBSTITUTED TYPE PARAMETER IS NOT A SET, and it is not an
-    // empty one either. `ok_or<T, E>` answers `Res<T, E>` with `E`
-    // untouched — instantiation does not SUBSTITUTE — so a `.try()` on
-    // its result asks whether a set nobody has computed is contained in
-    // the caller's. That question has no false answer, and answering
-    // false spells it "there is no From", which names a conversion the
-    // program never asked for. This arm goes when substitution lands.
+    //
+    // AN UNSUBSTITUTED TYPE PARAMETER IS NOT A SET (nor an empty one):
+    // `ok_or<T, E>` answers with `E` untouched, so `.try()` asks whether
+    // an uncomputed set is contained in the caller's — false there would
+    // spell "there is no From", a conversion never asked for. This arm
+    // goes when substitution lands.
     set_has* = (self: @Self, set: TyId, member: TyId) bool {
         self.at(set).match({
             Union(u) => self.vec_has(u.members, member),
@@ -471,9 +404,8 @@ Types* = {
         })
     }
 
-    // The members of a set, as a list, whatever its shape. A caller
-    // that wants to walk an error set should not have to know whether
-    // it is a union or a set of one.
+    // The members of a set, as a list, whatever its shape — a caller
+    // walking an error set shouldn't have to know union vs. set-of-one.
     members_of* = (self: @Self, set: TyId, out :: Vec<TyId>) Res<(), AllocError> {
         self.at(set).match({
             Union(u) => self.copy_members(out, u.members),
@@ -482,9 +414,9 @@ Types* = {
         Ok(());
     }
 
-    // The loop family returns `Res<T>` — an absence — so a bare `loop`
-    // cannot be a match arm beside an `add` that returns
-    // `Res<(), AllocError>`. Naming the walk gives both arms one type.
+    // The loop family returns `Res<T>` (an absence), so a bare `loop`
+    // can't sit in a match arm beside an `add` returning
+    // `Res<(), AllocError>`; naming the walk gives both arms one type.
     copy_members = (self: @Self, out :: Vec<TyId>, members: Vec<TyId>)
                    Res<(), AllocError> {
         members.loop((h, m) { out.add(m).try() });
@@ -492,11 +424,8 @@ Types* = {
     }
 
     // -----------------------------------------------------------------
-    // naming, for diagnostics
-    //
-    // The key is not showable — it names module and decl indices. This
-    // walks the structure instead, so `Res<(), IoError | AllocError>`
-    // prints the way it was written.
+    // naming, for diagnostics: the key is not showable (module/decl
+    // indices), so this walks the structure to print what was written.
     // -----------------------------------------------------------------
 
     write_name* = (self: @Self, id: TyId, out :: String) Res<(), AllocError> {
@@ -618,9 +547,8 @@ Types* = {
         self.intern(key.view(), Ty.Union(TyUnion(members: canon)))
     }
 
-    // A member that is itself a union contributes its members and not
-    // itself: "`A | B | C` is one Union of three members, never a Union
-    // of a Union".
+    // A member that is itself a union contributes its members, not
+    // itself: "`A | B | C` is one Union of three, never a Union of a Union".
     flatten_into = (self: @Self, out :: Vec<TyId>, members: Vec<TyId>)
                    Res<(), AllocError> {
         members.loop((h, m) {
@@ -670,9 +598,8 @@ Types* = {
     }
 
     // Lexicographic order on the intern keys. Ordering by id would be
-    // canonical too and would print a set in whatever order the
-    // compilation happened to intern it; ordering by key means
-    // `AllocError | IoError` reads the same way every time.
+    // canonical too, but would print a set in whatever order it happened
+    // to be interned; ordering by key is stable across runs.
     before = (self: @Self, a: TyId, b: TyId) bool {
         key_before(self.key_at(a), self.key_at(b))
     }
@@ -707,12 +634,11 @@ Types* = (a: Alloc) Types {
     )
 }
 
-// `Vec.set` refuses an index past the end and says so with a bare
-// `Res<()>` — an absence, carrying no reason. `.try()` will not lift one
-// into a function that returns `Res<_, AllocError>`, and it is right not
-// to: "a None never becomes an Err". Both indices here are in range by
-// construction — `j` walks `n-1..1` over a Vec of length `n` — so this
-// names the only reason a refusal could mean anything and moves on.
+// `Vec.set` refuses an index past the end with a bare `Res<()>` — no
+// reason carried, so `.try()` won't lift it into `Res<_, AllocError>`
+// ("a None never becomes an Err"). Both indices here are in range by
+// construction (`j` walks `n-1..1` over a Vec of length `n`), so this
+// names the only possible refusal reason.
 put* = (out :: Vec<TyId>, i: usize, v: TyId) Res<(), AllocError> {
     out.set(i, v).match({
         None  => Err(AllocError.OutOfMemory),
@@ -722,12 +648,11 @@ put* = (out :: Vec<TyId>, i: usize, v: TyId) Res<(), AllocError> {
 
 // Lexicographic byte order on two strings.
 //
-// BY THE STRANGER TEST THIS IS NOT A SEMA FUNCTION — "orders two byte
-// strings" names no module, so it belongs beside `str`'s own `eq` in
-// `std.text.text_str`. It is here because `std.text` does not declare
-// one yet and `src/std/` is not this module's to edit;
-// `docs/SEMA_BOOTSTRAP_FIXES.md` records it as a std gap. The moment
-// text_str grows an ordering, this deletes and the import replaces it.
+// BY THE STRANGER TEST THIS IS NOT A SEMA FUNCTION: it belongs beside
+// `str`'s own `eq` in `std.text.text_str`, and is here only because
+// `std.text` doesn't declare one yet and `src/std/` isn't this
+// module's to edit (`docs/SEMA_BOOTSTRAP_FIXES.md` records the gap).
+// Delete this once text_str grows an ordering.
 key_before* = (a: str, b: str) bool {
     shorter = (a.len < b.len).match({ true => a.len, false => b.len });
     Range(0, shorter).find((i) { a[i] != b[i] }).match({

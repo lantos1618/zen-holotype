@@ -2,41 +2,35 @@
 // `alloc.create<T>()` — the one member of `Alloc` whose body is this
 // backend's.
 //
-// `mem_alloc.zen` declares it as a hook and writes no body, and NO IMPL
-// IN THE LANGUAGE SUPPLIES ONE — `gen_c_fat.zen` puts a NULL in its slot
-// for exactly that reason, and is right to. So the sentence
-// `gen_c_ptr.zen` says about `Ptr`'s nine members is true of this one
-// too, and DESIGN.md already says what it is: "the typed conveniences:
-// one T's worth of storage, already named". One T's worth of storage is
-// `raw`; NAMING it is `Ptr.to`.
+// `mem_alloc.zen` declares it as a hook with no body, and no impl in the
+// language supplies one — `gen_c_fat.zen` puts a NULL in its slot for
+// that reason. DESIGN.md calls it "the typed conveniences: one T's
+// worth of storage, already named": storage is `raw`, naming it is
+// `Ptr.to`.
 //
-// WITHOUT THIS FILE THE CALL RESOLVES TO NOTHING AND THE BINDING IS THE
-// POINTER. `p = alloc.create<Node>().try()` left `p` with no type, so
-// `p.write(0, ..)` and `p.read(0)` were unresolved one line later — one
-// missing member reported as three, none of them naming the member.
+// WITHOUT THIS FILE THE CALL RESOLVES TO NOTHING: `p =
+// alloc.create<Node>().try()` left `p` untyped, so `p.write(0, ..)` and
+// `p.read(0)` were reported unresolved a line later — one missing
+// member surfacing as three errors, none naming it.
 //
-// NOTHING HERE IS NEW MACHINERY. The `raw` called is the receiver's OWN,
-// under the symbol `a.raw(..)` would have produced; the
-// `Res<Ptr<u8>, E>` it answers with is rebuilt at `Res<Ptr<T>, E>` by
-// `gen_c_bound.zen`'s `convert`, which exists because erasure needs the
-// same rebuild and which reads its operand out of a temporary — so `raw`
-// is called ONCE and the allocation a second call would make and drop
-// never happens. The only thing written here is the argument list, and
-// it is written as TEXT because there is no call node to read it from:
+// NO NEW MACHINERY: the `raw` called is the receiver's OWN, under the
+// symbol `a.raw(..)` would produce. Its `Res<Ptr<u8>, E>` is rebuilt at
+// `Res<Ptr<T>, E>` by `gen_c_bound.zen`'s `convert` (erasure needs the
+// same rebuild), reading its operand out of a temporary — so `raw` is
+// called ONCE, not twice with the second allocation leaking. The
+// argument list is written as TEXT, since there's no call node for it:
 // the source wrote `create`, not `raw`.
 //
-// 16 IS ALIGN_MAX AND NOT A GUESS. `mem_arena.zen` re-requests every run
-// at the strictest alignment any Zen value needs, so asking for it here
-// asks for what the arena would have given anyway — and it keeps the
-// size header the arena writes ahead of a run intact. `gen_c_fs.zen`
-// writes the same 16 for the same reason.
+// 16 IS ALIGN_MAX, not a guess — `mem_arena.zen` re-requests every run
+// at the strictest alignment any Zen value needs, so this asks for what
+// the arena would give anyway and keeps its size header intact.
+// `gen_c_fs.zen` writes the same 16 for the same reason.
 //
-// AND THE ELEMENT TYPE IS NOT LOOKED UP BY NAME. `Ptr` and `AllocError`
-// are prelude names, and interning them here would be a second opinion
-// about which declaration they are. Both come off `raw`'s own declared
-// return type instead: it is already `Res<Ptr<u8>, AllocError>`, so the
-// element is the ONLY thing that changes and the error set is the
-// allocator's own.
+// ELEMENT TYPE IS NOT LOOKED UP BY NAME. `Ptr`/`AllocError` are prelude
+// names; interning them here would be a second opinion on which
+// declaration they are. Both come off `raw`'s own declared return type
+// (`Res<Ptr<u8>, AllocError>`) instead — element is the only thing that
+// changes, error set is the allocator's own.
 
 Ast, Expr, ExprId, Access, Call, Function, TypeId = ast
 Alloc, AllocError = std.mem
@@ -71,14 +65,12 @@ RawFn* = {
     f*: Function,
 }
 
-// Is this `alloc.create<T>()`? THE NAME AND A RECEIVER THAT REALLY
-// ALLOCATES, both — a type with no `raw` has no `create` this file
-// could write, and claiming one would be a `malloc` invented out of a
-// spelling.
+// Is this `alloc.create<T>()`? Checks the name AND a receiver that
+// really allocates — a type with no `raw` has no `create` this file
+// could write.
 //
-// Asked LAST, after the receiver's own declaration and its impls have
-// both been searched, so a type declaring a `create` of its own still
-// wins outright.
+// Asked LAST, after the receiver's own declaration and impls are
+// searched, so a type declaring its own `create` still wins.
 alloc_raw* = (be :: CBackend, rty: TyId, name: str)
              Res<Res<RawFn>, AllocError> {
     name.eq("create").match({
@@ -116,10 +108,9 @@ Created* = {
     ret*: TyId,
 }
 
-// `Res<Ptr<T>, AllocError>`. Sema does not answer it — `create` is a
-// generic member with no body, so nothing checked one and the memo holds
-// an unknown — and an unanswered `.try()` operand is a temporary
-// declared at nothing.
+// `Res<Ptr<T>, AllocError>`. Sema doesn't answer it — `create` is a
+// generic member with no body, so the memo holds an unknown — and an
+// unanswered `.try()` operand is a temporary declared at nothing.
 create_type* = (be :: CBackend, c: Call, a: Access, rty: TyId, ctx: Ctx)
                Res<Res<TyId>, AllocError> {
     alloc_raw(be, rty, a.name.text).try().match({

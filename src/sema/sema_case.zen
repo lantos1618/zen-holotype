@@ -2,18 +2,16 @@
 // What a value of a type can BE — the case list a `.match` is checked
 // against.
 //
-// This is one question and it has one answer per type, which is why it
-// is a file and not a section of `sema_match.zen`: the usefulness
-// algorithm asks it at every column of every row, and the rule for what
-// a case IS — bool has two, `Res` has two, a declared enum has its
-// variants, and everything else has none — is a statement about TYPES,
-// not about patterns.
+// Its own file rather than a section of `sema_match.zen` because the
+// usefulness algorithm asks this at every column of every row, and the
+// rule for what a case IS (bool: two, `Res`: two, declared enum: its
+// variants, else: none) is a statement about TYPES, not patterns.
 //
-// NO CASE LIST IS NOT AN ERROR. An `i32` has no case analysis; only `_`
-// covers it. So the answer is a `bool` beside the list rather than an
-// empty list, because "no cases" and "a type nobody can enumerate" are
-// different facts and a checker that confuses them demands a `_` on a
-// bool or accepts a match on an integer that covers nothing.
+// No case list is not an error: an `i32` has no case analysis, only `_`
+// covers it. The answer is a `bool` beside the list, not an empty list
+// — "no cases" and "a type nobody can enumerate" are different facts,
+// and conflating them either demands a `_` on a bool or accepts a match
+// on an integer that covers nothing.
 
 Ast, Decl, DeclKind, Enum, Variant = ast
 Alloc, AllocError = std.mem
@@ -28,10 +26,10 @@ union_reading, union_member = sema.sema_union
 
 // One case of a type: the name a pattern writes, and what it carries.
 //
-// A payload is ONE type and never a list, because `Variant.payload` is
-// one type and never a list — `Circle(Circle)`, `Failed(str)`. So a
-// normalised pattern has at most one sub-pattern, and the usefulness
-// matrix never grows a column it did not have.
+// A payload is ONE type, never a list — `Variant.payload` is likewise
+// one type (`Circle(Circle)`, `Failed(str)`). So a normalised pattern
+// has at most one sub-pattern, and the usefulness matrix never grows a
+// column it did not have.
 Case* = {
     name*: str,
     payload*: TyId,
@@ -50,20 +48,18 @@ cases_of* = (c :: Checker, ty: TyId, out :: Vec<Case>) Res<bool, AllocError> {
     })
 }
 
-// A STRUCTURAL `A | B` HAS NO CASE LIST HERE, AND THAT IS A HOLD RATHER
-// THAN A READING. DESIGN.md's "a union is its members" says the members
-// ARE the cases, and `Ty.Union` carries them — the four lines that hand
-// them back were written, and they make `e: AllocError | Fault` match
-// exactly as the declared `Error = AllocError | Fault` does.
+// A structural `A | B` has no case list here — a hold, not a reading.
+// DESIGN.md's "a union is its members" means `Ty.Union`'s members ARE
+// the cases, so `e: AllocError | Fault` matches exactly as declared
+// `Error = AllocError | Fault` does.
 //
-// They emit C that does not compile. A match on a structural set lowers
-// its arms through `sym_variant(type_qname(set), name)` and the tag the
-// LAYOUT wrote is `sym_union_variant`'s `zg_e<set><member>`, so every
-// arm tests an undeclared constant. Returning a bare member where the
-// set is expected does not widen either — `pick = () Error { Snag(..) }`
-// returns the member struct raw, which is a gap the declared spelling
-// has too. Both are in gen_c, and until they close, "match is not
-// exhaustive" is a rejection where the alternative is a miscompile.
+// KNOWN GAP (gen_c): a match on a structural set lowers arms through
+// `sym_variant(type_qname(set), name)`, but the tag layout wrote is
+// `sym_union_variant`'s `zg_e<set><member>` — every arm tests an
+// undeclared constant, C doesn't compile. Returning a bare member where
+// the set is expected has the same gap (`pick = () Error { Snag(..) }`
+// returns the raw member struct). Until both close, "match is not
+// exhaustive" here is a rejection standing in for a miscompile.
 
 // The payload `name` carries in `ty`, or poison when `ty` does not
 // declare that case. Poison rather than a diagnostic: a pattern naming
@@ -121,15 +117,14 @@ add_bool = (c :: Checker, out :: Vec<Case>) Res<bool, AllocError> {
     Ok(true);
 }
 
-// `Res<T>` is `Ok(T) | None` and `Res<T, E>` is `Ok(T) | Err(E)` —
-// declared in the prelude, recognised structurally here for the reason
-// `sema_type.zen` gives: sema asks which form a `Res` is at every
-// `.try()`, and a nominal answer would make each of those a field read.
+// `Res<T>` is `Ok(T) | None`, `Res<T, E>` is `Ok(T) | Err(E)` — declared
+// in the prelude but recognised structurally: sema asks which form a
+// `Res` is at every `.try()`, and a nominal answer would make each of
+// those a field read (see `sema_type.zen`).
 //
-// `Open` — a bare `Ok(..)` whose form no expectation has settled — is
-// matched as an absence. It is the weaker of the two, so a `None` arm
-// is accepted and an `Err` arm is not, which is the direction law 4
-// wants: failure stays visible.
+// `Open` (a bare `Ok(..)` with no settled form) matches as an absence —
+// the weaker reading, so a `None` arm is accepted and an `Err` arm is
+// not, keeping failure visible (law 4).
 res_cases = (c :: Checker, r: TyRes, out :: Vec<Case>) Res<bool, AllocError> {
     out.add(Case(name: "Ok", payload: r.value, has_payload: true)).try();
     r.form.match({
@@ -167,10 +162,9 @@ enum_cases = (c :: Checker, d: Decl, n: TyNamed, out :: Vec<Case>)
     })
 }
 
-// The two readings of `A | B` are two case lists, and DESIGN.md's
-// "a union is its members" is the whole difference: a NOMINAL enum's
-// variant is a tag that may carry a written payload, a UNION's variant
-// IS a type and always carries one.
+// The two readings of `A | B` are two case lists (DESIGN.md: "a union
+// is its members"): a nominal enum's variant is a tag that may carry a
+// written payload; a union's variant IS a type and always carries one.
 variant_cases = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
                 Res<bool, AllocError> {
     union_reading(c, n.decl).match({
@@ -179,19 +173,19 @@ variant_cases = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
     })
 }
 
-// A UNION MEMBER CARRIES ITSELF. `Error = AllocError | IoError` is
-// matched `IoError(io)`, and `io` is an `IoError` — nothing else could
-// it be, because a set that remembered only "some IoError" would have to
-// invent one on the way back out.
+// A union member carries itself: `Error = AllocError | IoError` matched
+// `IoError(io)` binds `io: IoError` — nothing else could it be, since a
+// set that only remembered "some IoError" would have to invent one on
+// the way back out.
 //
-// Reading these as payloadless tags is what made every arm after the
-// first unreachable in `corpus/std/res_try_error_set_keeps_the_variant`:
-// `io` was bound to `()`, `()` has no case list, so `Closed` read as a
-// BINDER and covered the three arms below it. The payload is the type
-// the variant NAMES rather than the set it flattens to, because that is
-// what `gen_c_type.zen`'s `union_member_type` emits — and sema checking
-// one type while the backend emits another is this compiler's worst
-// failure class.
+// BUG FOUND THE HARD WAY (`corpus/std/res_try_error_set_keeps_the_
+// variant`): reading these as payloadless tags bound `io` to `()`,
+// which has no case list, so `Closed` read as a BINDER and made every
+// arm after the first unreachable. Fix: payload is the type the
+// variant NAMES, not the set it flattens to — matching what
+// `gen_c_type.zen`'s `union_member_type` emits. Sema checking one type
+// while the backend emits another is this compiler's worst failure
+// class.
 add_members = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
               Res<bool, AllocError> {
     e.variants.loop((h, v) {
@@ -204,10 +198,10 @@ add_members = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
     Ok(true);
 }
 
-// A variant's payload type is resolved in the module that DECLARES the
-// enum, not in the module that is matching on it: `Slot = Left(Cell)`
-// means `Cell` as its own module sees it, and law 6 says the name
-// crossing a boundary is `Slot`, never `Cell`.
+// A variant's payload type resolves in the module that DECLARES the
+// enum, not the one matching on it: `Slot = Left(Cell)` means `Cell` as
+// its own module sees it — law 6 says the name crossing a boundary is
+// `Slot`, never `Cell`.
 add_variants = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
                Res<bool, AllocError> {
     poison = c.types.unknown().try();

@@ -1,54 +1,37 @@
 // src/fmt/fmt_decl.zen
 // The first rule that reaches INSIDE a declaration: `=>` alignment.
 //
-// `DESIGN.md` names four rules for a match — align `=>`, short arms on
-// one line, wrap long ones, a trailing comma on the last — and this
-// file is the first of them. It is first because it is the only one of
-// the four that changes nothing but whitespace, and `fmt.zen`'s guard
-// is precisely the statement that whitespace is not a token. The other
-// three MOVE a token or ADD one, so each of them needs an argument of
-// its own about why the program still says what it said; this one
-// inherits the argument already written down.
+// DESIGN.md names four match rules (align `=>`, short arms on one
+// line, wrap long ones, trailing comma on the last); this is first
+// because it's the only one that changes nothing but whitespace —
+// `fmt.zen`'s guard already covers that. The other three MOVE or ADD a
+// token and need their own argument for why the program still means
+// what it meant.
 //
-// IT IS NOT A PRINTER AND DOES NOT REBUILD AN ARM. The declaration's
-// bytes are still the author's, copied — this rule only sets the WIDTH
-// of the run of spaces between an arm's pattern and its `=>`. That is
-// what keeps it addable one rule at a time: a printer that rebuilt an
-// arm would have to decide where its body goes, and nobody has written
-// that down.
+// NOT A PRINTER, DOESN'T REBUILD AN ARM: bytes stay the author's; this
+// only sets the WIDTH of the spaces between a pattern and its `=>`.
 //
-// WHAT IT REFUSES TO TOUCH, which is most of the reason it is safe:
+// REFUSES TO TOUCH:
+//   - an arm sharing a line with another (e.g. packed `Add => "+", Sub
+//     => "-"` in gen_c_op.zen) — it takes no pad and asks no column, so
+//     it neither moves nor drags neighbors. Invariant the whole file
+//     rests on: AT MOST ONE `=>` MOVES PER LINE, so the pad table is
+//     one entry per line and two pads can never collide.
+//   - an arm whose pattern and `=>` aren't on one line.
+//   - an arm with anything but spaces before its `=>` (a comment there
+//     is a token; replacing it with spaces is the exact accident this
+//     folder exists to prevent).
 //
-//   - an arm sharing a line with another. `Add => "+", Sub => "-"` is
-//     written in `gen_c_op.zen` and packing several arms onto a line is
-//     a shape this rule has no opinion about. Such an arm takes no pad
-//     AND asks for no column, so it neither moves nor drags the arms
-//     that do have a line to themselves — which is why the packed lists
-//     in that file come through untouched. That is also the invariant
-//     the whole file rests on: AT MOST ONE `=>` MOVES PER LINE, so a pad
-//     table can be one entry per line and two pads can never land on the
-//     same bytes.
-//   - an arm whose pattern and `=>` are not on one line.
-//   - an arm with anything but spaces between its pattern and its `=>`.
-//     A comment can legally sit there, a comment is a token, and
-//     replacing one with spaces is exactly the accident this folder
-//     exists to prevent.
+// CANNOT SEE A STRING LITERAL OR COMMENT AT ALL: every position read is
+// a `Span` the PARSER produced, so `=>` inside `"a => b"` or a
+// commented-out arm is never named by `Arm.arrow_span`. No scan for
+// the characters `=`/`>` — deliberate, not incidental.
 //
-// AND IT CANNOT SEE A STRING LITERAL OR A COMMENT AT ALL, which is the
-// answer to the question a byte-level formatter has to keep answering.
-// Every position it reads is a `Span` the PARSER produced — the arm's,
-// the pattern's, the `=>`'s — so a `=>` inside `"a => b"` is a run of
-// bytes in a `Literal` token that no `Arm.arrow_span` names, and a
-// commented-out `A => 1,` is inside a `Trivia` that no arm names. There
-// is no scan for the characters `=` and `>` in this file, and that is
-// deliberate rather than incidental.
-//
-// WHY IT IS IDEMPOTENT, since a formatter without that cannot be a
-// gate. The column an arm asks for is one past the END of its pattern,
-// and a pad is written entirely AFTER that pattern — so formatting
-// moves no byte that the next run's answer is computed from. The one
-// way that could break is a pad shifting a LATER arm rightward on the
-// same line, and an arm sharing its line with another is refused above.
+// IDEMPOTENT: the column an arm asks for is one past the END of its
+// pattern, and a pad is written entirely AFTER that — so a run never
+// moves a byte the next run's answer depends on. The only way that
+// could break (a pad shifting a later arm on the same line) is refused
+// above.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -59,45 +42,35 @@ Ast = ast.ast_arena
 Expr, Match, Arm = ast.ast_node
 Src = fmt.fmt_src
 
-// One `=>` that is going to move, and where to.
-//
-// It names BYTES rather than a column, because applying it is a copy:
-// the gap `[from, to)` between the pattern's last byte and the `=>` is
-// replaced by `width` spaces and nothing else on the line is read. A
-// column would have to be re-derived against a line whose earlier bytes
-// might themselves have moved, and they never do here only because of
-// the one-arm-per-line rule above — so saying it in bytes is saying it
-// in the terms the copy actually runs in.
+// One `=>` that is going to move, and where to. Named in BYTES not a
+// column: applying it is a copy of `[from, to)` replaced by `width`
+// spaces, and a column would need re-deriving against a line whose
+// earlier bytes might have moved (they never do, by the one-arm-per-line
+// rule above, so bytes are the terms the copy actually runs in).
 Pad = {
     from: usize,
     to: usize,
     width: usize,
 }
 
-// Nothing to do on this line. `to` of 0 is the sentinel and cannot
-// collide with a real pad: a `=>` at byte 0 of a file has no pattern in
-// front of it to be aligned against.
+// Nothing to do on this line. `to` of 0 is the sentinel: a `=>` at byte
+// 0 has no pattern in front of it to align against.
 no_pad = () Pad { Pad(from: 0, to: 0, width: 0) }
 
 // Every `=>` in one file that is going to move, worked out once.
 //
-// ONE ENTRY PER LINE, which is a table and not a list on purpose. The
-// arms of a file arrive in ARENA order — `parse` adds a node after its
-// children, so a match nested in an arm body is numbered before the arm
-// that holds it — and a list in that order would have to be sorted
-// before it could be applied left to right. Keying by line skips the
-// sort, and it is only legal because a pad is only ever recorded for an
-// arm that has its line to itself.
+// ONE ENTRY PER LINE (a table, not a list): arms arrive in ARENA order
+// (a nested match is numbered before the arm holding it), which isn't
+// left-to-right order and would need sorting. Keying by line skips
+// that — legal only because a pad is ever recorded for an arm that has
+// its own line.
 Aligned* = {
     pads :: Vec<Pad>,
 
     record = (self :: @Self, line: usize, p: Pad) Res<(), AllocError> {
-        // A line past the end of the table has nothing to record, and
-        // there is no line past the end of the table: it is built one
-        // entry per line of the file this tree was parsed from. The
-        // single `_` is how a `Res<()>` is spent inside a function that
-        // speaks `Res<(), AllocError>` — the two are different types and
-        // `.try()` cannot join them.
+        // No line is ever past the table's end (one entry per source
+        // line, by construction). `_` because `Res<()>` and
+        // `Res<(), AllocError>` are different types `.try()` can't join.
         self.pads.set(line, p).match({
             _ => Ok(()),
         })
@@ -111,12 +84,9 @@ Aligned* = {
     }
 
     // The bytes of `[from, to)`, with every pad inside them applied.
-    //
-    // `line` is where `from` is, and it is a parameter rather than
-    // something looked up because the caller already holds it: a
-    // declaration is printed from its own span, and a span carries its
-    // line. Walking a line at a time is what makes the table's key
-    // usable without a search.
+    // `line` (where `from` is) is a parameter since the caller already
+    // has it from the span; walking a line at a time uses the table's
+    // key without a search.
     padded* = (self: @Self, a: Alloc, src: Src, from: usize, to: usize,
                line: usize) Res<String, AllocError> {
         out ::= a.String().try();
@@ -137,13 +107,9 @@ Aligned* = {
         Ok(out);
     }
 
-    // Where the copy stops this time round: the end of line `ln`, or
-    // `to`, whichever comes first.
-    //
-    // IT CAN NEVER RETURN `at`, and the loop above would not end if it
-    // could. `after_line` of a line the file does not have is the end of
-    // the text, which is at or past `to`, so the fallback is what
-    // terminates a walk that has run off the end of the table.
+    // Where the copy stops this round: end of line `ln`, or `to`,
+    // whichever is first. Can never return `at` (the loop wouldn't
+    // terminate) — a line past EOF falls back to `to`.
     line_stop = (self: @Self, src: Src, ln: usize, at: usize, to: usize) usize {
         end = src.after_line(ln);
         (end > at && end < to).match({
@@ -153,15 +119,11 @@ Aligned* = {
     }
 }
 
-// `alloc.Aligned(src, tree)` — a ufcs function whose first parameter is
-// an Alloc, beside the type it builds, exactly as `Src` and `Out` are.
-//
-// It scans the expression arena rather than walking down from the
-// module, for the reason `ast_find.zen` gives: every expression in the
-// compilation is already in one flat `Vec` with its span, so "every
-// match in this file" is a fold and needs no traversal and no parent
-// links. One `Ast` holds one file here — `render` builds a `Parser` per
-// file — so the scan sees this file's arms and no others.
+// `alloc.Aligned(src, tree)` — ufcs constructor, like `Src`/`Out`.
+// Scans the expression arena rather than walking from the module (see
+// ast_find.zen: one flat `Vec` needs no traversal or parent links).
+// One `Ast` holds one file (`render` builds a `Parser` per file), so
+// the scan sees only this file's arms.
 Aligned* = (a: Alloc, src: Src, tree: Ast) Res<Aligned, AllocError> {
     pads ::= a.Vec<Pad>();
     Range(0, src.lines() + 2).loop((h, i) { pads.add(no_pad()).try() });
@@ -182,19 +144,15 @@ align_expr = (al :: Aligned, src: Src, tree: Ast, e: Expr) Res<(), AllocError> {
     })
 }
 
-// Nothing to align here. It allocates nothing and still speaks
-// `Res<(), AllocError>`, which is `Out.blank`'s reason repeated: its
-// only caller stands it beside `align_arms` in a match, and sibling arms
-// must agree on a type.
+// Nothing to align here. Allocates nothing but still speaks
+// `Res<(), AllocError>` since its caller matches it beside `align_arms`,
+// and sibling arms must agree on a type.
 unaligned = () Res<(), AllocError> { Ok(()) }
 
-// One arm list, in two passes: what column the widest arm asks for, and
-// then the pad each arm needs to reach it.
-//
-// TWO PASSES AND NOT ONE, because alignment is a property of the LIST
-// and not of an arm — the answer for the first arm depends on the last.
-// `col` of 0 means the list holds nothing this rule may move, which is
-// every single-line match in the tree and is the common case.
+// One arm list, in two passes: the widest arm's column, then the pad
+// each arm needs to reach it. Two passes because alignment is a
+// property of the LIST, not an arm — the first arm's answer depends on
+// the last. `col` of 0 means nothing here is movable (the common case).
 align_arms = (al :: Aligned, src: Src, tree: Ast, mt: Match)
              Res<(), AllocError> {
     col ::= 0;
@@ -218,9 +176,9 @@ pad_arm = (al :: Aligned, src: Src, tree: Ast, mt: Match, i: usize,
     })
 }
 
-// `col` is the LIST's column, so an arm with a shorter pattern gets the
-// difference in spaces. The subtraction cannot go under: `col` is a
-// maximum over `end.col + 1` and this arm is one of the terms.
+// `col` is the LIST's column; a shorter-patterned arm gets the
+// difference in spaces. Subtraction can't underflow: `col` is a max
+// over `end.col + 1` and this arm is one of the terms.
 pad_one = (al :: Aligned, src: Src, tree: Ast, mt: Match, i: usize,
            arm: Arm, col: usize) Res<(), AllocError> {
     movable(src, tree, mt, i, arm).match({
@@ -236,13 +194,9 @@ pad_one = (al :: Aligned, src: Src, tree: Ast, mt: Match, i: usize,
     })
 }
 
-// The column this arm's `=>` asks for — one past the end of its
-// pattern — or 0 when the arm is not one this rule may move.
-//
-// A column and not a `Res<usize>`, because the caller wants a maximum
-// and 0 is the identity of that: an unmovable arm has to contribute
-// nothing to the list's answer, and "nothing" and "zero" are the same
-// number here.
+// The column this arm's `=>` asks for (one past the pattern's end), or
+// 0 when unmovable — plain usize not `Res<usize>` since the caller
+// wants a max and 0 is that max's identity element.
 arrow_col = (src: Src, tree: Ast, mt: Match, i: usize) usize {
     mt.arms.get(i).match({
         None    => 0,
@@ -253,12 +207,9 @@ arrow_col = (src: Src, tree: Ast, mt: Match, i: usize) usize {
     })
 }
 
-// May this rule set the width of the gap in front of this arm's `=>`?
-//
-// Every clause is a refusal and the header of this file says why each
-// one is there. Read together they say: the arm begins a line, ends it,
-// wears its `=>` on that same line, and has nothing but spaces where
-// the pad is going.
+// May this rule set the width before this arm's `=>`? (See header for
+// why each clause exists.) Together: the arm begins a line, ends it,
+// carries its `=>` on that line, and has only spaces where the pad goes.
 movable = (src: Src, tree: Ast, mt: Match, i: usize, arm: Arm) bool {
     line = arm.arrow_span.start.line;
     end = tree.pattern_at(arm.pattern).span.end;
@@ -269,14 +220,10 @@ movable = (src: Src, tree: Ast, mt: Match, i: usize, arm: Arm) bool {
         && src.all_spaces(src.offset(end), src.offset(arm.arrow_span.start))
 }
 
-// Nothing else on this arm's line: whatever follows it — the next arm,
-// or the `}` that closes the list — begins on a later one.
-//
-// `arms_span` is the braces, so its end is the line the list closes on,
-// which is what makes `x.match({ true => a, false => b })` refuse its
-// LAST arm as well as its first. A node's span excludes the separator
-// after it (POSITIONS.md), so the `,` between two arms on one line is
-// in neither, and this still reads them as sharing the line.
+// Nothing else on this arm's line: the next arm, or the closing `}`,
+// begins on a later one. `arms_span` is the braces, so its end is where
+// the list closes — which is why `x.match({ true => a, false => b })`
+// refuses its LAST arm too, not just its first.
 alone = (mt: Match, i: usize, arm: Arm) bool {
     after = mt.arms.get(i + 1).match({
         Ok(next) => next.span.start.line,

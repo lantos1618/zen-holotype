@@ -3,21 +3,17 @@
 //
 // DESIGN.md § Modules: "names are qualified by path, imports bind
 // locally, and two modules may define the same top-level name without
-// colliding". So `a.value` and `ab.value` are two declarations, and the
-// module is half of the question rather than decoration on it.
+// colliding" — so `a.value` and `ab.value` are two declarations, and
+// the module is half the question.
 //
-// THIS IS NOT `sema_member.zen`'S SUBJECT, which is what a dot reaches
-// on a TYPE — a field, a constant, a method, an impl-supplied member,
-// all of them selected out of one member table. A module has no member
-// table, no receiver and no layout; the only thing the two forms share
-// is the token between the names. They were one file until the shared
-// token was the only argument left for it.
+// Not `sema_member.zen`'s subject: that's what a dot reaches on a TYPE
+// (field, constant, method, impl member — one member table). A module
+// has no member table, receiver, or layout.
 //
-// THE WHOLE PROBLEM IS THAT A MODULE ALIAS IS NOT SPELLED. `sh = shape`
-// and `Alias = Shape` are the same three tokens and parse to the same
-// `Alias` node — grammar R1a reads a bare RHS as an alias — so nothing
-// syntactic separates a module from a type, and every question below
-// starts by deciding which one it is looking at.
+// The whole problem: a module alias is not spelled. `sh = shape` and
+// `Alias = Shape` parse to the same `Alias` node (grammar R1a reads a
+// bare RHS as an alias), so nothing syntactic tells a module from a
+// type — every question below starts by deciding which it's looking at.
 
 Ast, Expr, Access, Ident, Span, TypeId, Named = ast
 Decl, DeclKind, Alias, Function, Param = ast
@@ -39,12 +35,10 @@ module_named_by* = (c :: Checker, ty: TyId) Res<usize> {
     })
 }
 
-// THE MODULE A DECLARATION ALIASES, if it aliases one.
-//
-// The filters are the ones `zen_build.alias_of` already applies when it
-// decides whether to load a file for such a target, and they have to
-// stay the same: a loader that fetches a module sema then refuses is a
-// program whose meaning depends on which pass you ask.
+// The module a declaration aliases, if it aliases one. Filters mirror
+// `zen_build.alias_of`'s and must stay in sync — a loader that fetches
+// a module sema then refuses is a program whose meaning depends on
+// which pass you ask.
 alias_module* = (c :: Checker, id: DeclId) Res<usize> {
     decl_at(c.tree, id).match({
         None  => None,
@@ -72,10 +66,9 @@ alias_target_type = (c :: Checker, t: TypeId, id: DeclId) Res<usize> {
     })
 }
 
-// A TYPE OF THAT NAME WINS. `Alias = Shape` stays a type alias even in a
-// tree that also holds a module called `Shape` — asked from the module
-// that WROTE the alias, because that is whose scope decided what the
-// name meant.
+// A type of that name wins: `Alias = Shape` stays a type alias even
+// beside a module called `Shape`, asked from the module that wrote the
+// alias since that's whose scope decided what it meant.
 module_for_target = (c :: Checker, n: Named, id: DeclId) Res<usize> {
     names_a_type(c, n.name.text, id.module.to_usize()).match({
         true  => None,
@@ -98,15 +91,11 @@ names_a_type = (c :: Checker, name: str, mi: usize) bool {
     })
 }
 
-// A MODULE HAS NO VALUE, so a bare one is a mistake wherever it stands —
-// `println("{}", zz)` and `reseat(3)` are the two shapes, and both used to
-// reach the backend as "a value of this type" or "not a function". THE
-// DIAGNOSTIC BELONGS AT THE USE and not at the binding, because the same
-// binding read qualified is a pattern the corpus gates.
-//
-// It poisons rather than failing, the way every other report here does:
-// one mistake is one diagnostic, and a caller handed poison asks nothing
-// further of it.
+// A module has no value; a bare one is a mistake wherever it stands
+// (`println("{}", zz)`, `reseat(3)`) — both used to reach the backend as
+// "a value of this type" or "not a function". Reported at the USE, not
+// the binding, since the same binding read qualified is legal. Poisons
+// rather than fails, like every report here.
 module_not_a_value* = (c :: Checker, span: Span, name: str, mi: usize)
                      Res<TyId, AllocError> {
     c.report(span.file, span,
@@ -115,10 +104,9 @@ module_not_a_value* = (c :: Checker, span: Span, name: str, mi: usize)
     c.types.unknown()
 }
 
-// `sh.reseat` / `a.beta_Gamma`: the name itself, reaching exactly what
-// that module STARRED — `exported_defs` and not `defs_of`, so qualifying
-// through an alias is not a way around the gate a plain import would
-// have been stopped by.
+// `sh.reseat` / `a.beta_Gamma`: reaches exactly what that module STARRED
+// (`exported_defs` not `defs_of`), so qualifying through an alias isn't
+// a way around the gate a plain import would hit.
 module_access* = (c :: Checker, node: Expr, ac: Access, mi: usize)
                 Res<TyId, AllocError> {
     found ::= c.alloc.Vec<Def>();
@@ -129,19 +117,15 @@ module_access* = (c :: Checker, node: Expr, ac: Access, mi: usize)
     })
 }
 
-// A FUNCTION REACHED THROUGH A MODULE IS ITS SIGNATURE, not a nominal
-// type of its own name: `def_type` answers for a declaration used AS a
-// type, and a qualified call needs the thing a return type comes off, or
-// `println("{}", sh.reseat(3))` prints a value of no type.
+// A function reached through a module is its SIGNATURE, not a nominal
+// type of its own name — else `println("{}", sh.reseat(3))` prints a
+// value of no type. A struct is its CONSTRUCTOR, same as a payload
+// variant: `sh.Bag(len: 1)` is a call node, like `sema_static
+// .variant_ctor` for `Slot.Left(cell)`.
 //
-// A STRUCT IS ITS CONSTRUCTOR, for the reason a payload variant is —
-// `sh.Bag(len: 1)` is a call node, and `sema_static.variant_ctor` makes
-// the same move for `Slot.Left(cell)`.
-//
-// That constructor takes no declared parameters, and that is a GAP
-// rather than a claim: construction is by NAME, the fields are checked
-// where a bare `Bag(len: 1)` is checked, and this path does not reach
-// that yet. It is written down because a reader will ask.
+// KNOWN GAP: that constructor takes no declared parameters. Construction
+// is by NAME, fields checked where a bare `Bag(len: 1)` is; this path
+// doesn't reach that yet.
 module_def_type = (c :: Checker, d: Def) Res<TyId, AllocError> {
     d.kind.match({
         FunctionDef => module_fn_type(c, d),
@@ -167,10 +151,8 @@ module_fn_type = (c :: Checker, d: Def) Res<TyId, AllocError> {
 }
 
 // Read in the DECLARING module's scope: a parameter's written type names
-// what that file could see, which is not what the caller can.
-//
-// A function with NO written return type returns `()`, which is what the
-// declaration means and not a hole to infer.
+// what that file could see, not what the caller can. No written return
+// type means `()` — the declaration's meaning, not a hole to infer.
 decl_fn_type = (c :: Checker, d: Def, f: Function) Res<TyId, AllocError> {
     poison = c.types.unknown().try();
     ctx = Ctx(d.id.module.to_usize(), poison);

@@ -1,59 +1,48 @@
 // src/parse/parse_token.zen
 // What the parser asks of a token, and nothing else.
 //
-// The alphabet itself is `src/lex/lex_token.zen`'s and is re-exported
-// here unchanged, so a sibling writes `TokenKind` once and imports it
-// from one place. What this file adds is two questions the lexer had
-// no reason to answer, because neither is about scanning: are two
-// kinds the same kind, and is this kind trivia.
+// The alphabet is `src/lex/lex_token.zen`'s, re-exported unchanged so a
+// sibling writes `TokenKind` once. This file adds two questions the lexer
+// had no reason to answer: are two kinds the same kind, and is this kind
+// trivia.
 //
-// THIS FILE WAS WRITTEN BEFORE THE LEXER EXISTED, as a stated
-// interface the parser could be built against while `src/lex/` was
-// being built in parallel. It has now been reconciled with the real
-// one. Four assumptions held and three did not; each disagreement is
-// recorded here rather than papered over, because the next person to
-// read `Token` will want to know which side moved.
+// THIS FILE WAS WRITTEN BEFORE THE LEXER EXISTED, as a stated interface
+// to build the parser against while `src/lex/` was built in parallel. Now
+// reconciled with the real one — four assumptions held, three did not,
+// and each disagreement is recorded here rather than papered over:
 //
-//   HELD. Comments are tokens rather than a second list, so the parser
-//   sees everything and decides ownership once. Exactly one `Eof`,
-//   last, spanning nothing, so no parse loop needs a length check.
-//   Kinds are FLAT rather than a nested `Punct(..)`. A token is a kind
-//   and a span.
+//   HELD. Comments are tokens, not a second list — the parser sees
+//   everything and decides ownership once. Exactly one `Eof`, last,
+//   spanning nothing. Kinds are FLAT, not a nested `Punct(..)`. A token
+//   is a kind and a span.
 //
-//   MOVED — A TOKEN CARRIES NO TEXT. The assumed shape was
-//   `{kind, text, span}`; the real one is `{kind, span}` and the bytes
-//   come from `text_of(source, token)`, which slices the `Source`. The
-//   lexer is right and the assumption was wasteful: a `str` is two
-//   words on every token of a ten-megabyte file, to hold something
-//   both ends of the span already name. The parser therefore carries
-//   the `Source` — see `Parser.source`.
+//   MOVED — A TOKEN CARRIES NO TEXT. Assumed `{kind, text, span}`; real
+//   shape is `{kind, span}`, bytes come from `text_of(source, token)`
+//   slicing the `Source`. The lexer is right: a `str` field would be two
+//   words per token of a ten-megabyte file to hold what both span ends
+//   already name. The parser carries the `Source` instead — see
+//   `Parser.source`.
 //
-//   MOVED — THERE IS NO `Blank` TOKEN. The assumption was that a run
-//   of blank lines arrives as a token, because `TriviaKind.Blank`
-//   exists and something has to produce it. The lexer does not emit
-//   whitespace at all, and its reason is better than the assumption:
-//   it "is recoverable exactly from the gap between two spans, and
-//   'was there a blank line here' is `next.start.line >
-//   prev.end.line + 1` rather than a stored fact that can go stale."
-//   So the parser derives it, in `drain`, and that is the whole cost.
+//   MOVED — THERE IS NO `Blank` TOKEN. Assumed a run of blank lines
+//   arrives as one, since `TriviaKind.Blank` exists. The lexer emits no
+//   whitespace at all — "recoverable exactly from the gap between two
+//   spans... rather than a stored fact that can go stale" — so the
+//   parser derives it in `drain`.
 //
 //   MOVED — THERE IS NO `Underscore` TOKEN. `_` matches the identifier
-//   rule, and the lexer says so deliberately: "the parser reads the
-//   wildcard pattern, the lexer only sees a name". So `_` arrives as
-//   an `Ident` and the two places that care — a wildcard pattern and
-//   an inferred type — compare its text. That is right: `_` is a
-//   spelling question in two grammatical positions, not a lexical one.
+//   rule deliberately: "the parser reads the wildcard pattern, the lexer
+//   only sees a name". `_` arrives as `Ident`; a wildcard pattern and an
+//   inferred type compare its text — right, since `_` is a spelling
+//   question in two grammatical positions, not a lexical one.
 //
-// ONE DISAGREEMENT IS STILL OPEN AND IS NOT THIS MODULE'S TO CLOSE.
-// `lex` and `ast` each declare a `Pos` and a `Span`, and they are
-// different types: the lexer's `Pos` carries `offset` beside `line`
-// and `col`, and its `Span` carries no `file` because every token of
-// one run shares it. Both choices are right for a lexer and neither is
-// right for an AST node, which outlives its `Source` and is compared
-// across files. So the parser CONVERTS, once, in `Parser.span_of`.
-// That is the honest place for it — but `ast_span.zen` landing after
-// `lex_token.zen` means nobody has yet decided whether one type should
-// serve both. Reported; `src/lex/` and `src/ast/` are not ours to edit.
+// ONE DISAGREEMENT IS STILL OPEN, NOT THIS MODULE'S TO CLOSE: `lex` and
+// `ast` each declare a `Pos`/`Span`, and they differ (the lexer's `Pos`
+// has `offset`; its `Span` has no `file`, since one lex run shares it).
+// Both are right for a lexer, neither for an AST node, which outlives its
+// `Source` and is compared across files. The parser CONVERTS once, in
+// `Parser.span_of` — the honest place, but `ast_span.zen` landing after
+// `lex_token.zen` means nobody has decided whether one type should serve
+// both. Reported; `src/lex/` and `src/ast/` are not ours to edit.
 
 Token*, TokenKind*, Source*, Lexed*, text_of*, kind_name* = lex.lex
 
@@ -66,13 +55,12 @@ Pos, Span = lex.lex
 // one crashes on a bug somewhere else, and the crash is what nobody
 // can diagnose.
 //
-// It is built HERE rather than in parser.zen for a reason that is a
-// bootstrapper bug and not a design: `lex` and `ast` both declare a
-// `Span`, so parser.zen cannot name the lexer's, and constructing
-// through an alias (`LexSpan* = Span`, then `LexSpan(..)`) emits the
-// ALIAS'S ZEN NAME as a C function call and does not compile.
-// Reported with a reproducer. This file imports only the lexer's, so
-// here the name is unambiguous and no alias is needed.
+// Built HERE rather than in parser.zen because of a bootstrapper bug, not
+// a design choice: `lex` and `ast` both declare a `Span`, so parser.zen
+// can't name the lexer's, and constructing through an alias (`LexSpan* =
+// Span`, then `LexSpan(..)`) emits the ALIAS'S ZEN NAME as a C function
+// call and doesn't compile (reported with a reproducer). This file
+// imports only the lexer's, so the name is unambiguous here.
 empty_eof* = () Token {
     at = Pos(offset: 0, line: 1, col: 1);
     Token(kind: TokenKind.Eof, span: Span(start: at, end: at));

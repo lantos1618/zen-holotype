@@ -1,14 +1,8 @@
 // src/std/text/text_utf8.zen
-// UTF-8 as FUNCTIONS OVER BYTES. `str` is bytes and never pretends
-// otherwise, so this file is where the character guarantee is paid for —
-// and only here. Nothing above it becomes slower because this exists.
-//
-// Two things this file needs that DESIGN.md does not give, both flagged in
-// the report rather than smuggled in:
-//   - `b.to_u32()`, the LOSSLESS widening of a byte into the accumulator a
-//     codepoint is built in. Only widening is assumed; nothing here narrows.
-//   - Zen has no bitwise operators, so a 6-bit shift is written as
-//     multiplication by UTF8_CONT_SCALE. That is exact, not an approximation.
+// UTF-8 as FUNCTIONS OVER BYTES: `str` is plain bytes, and this is the only
+// file that pays for the character guarantee. Two assumptions beyond
+// DESIGN.md: `b.to_u32()` only widens, never narrows; Zen has no bitwise
+// ops, so a 6-bit shift is exact multiplication by UTF8_CONT_SCALE.
 
 str = std.text.text_str
 
@@ -21,18 +15,16 @@ Codepoint* = {
     len*: usize,
 }
 
-// a walk over the codepoints of a str: a position, and the bytes it walks.
-// No Alloc, so it can never be a collection — it is a cursor, and the caller
-// keeps whatever it wants to keep
+// a walk over the codepoints of a str. No Alloc, so it is a cursor, not a
+// collection — the caller keeps whatever it wants to keep
 Codepoints* = {
     bytes: str,
     at* :: usize,
 
     is_done* = (self: @Self) bool { self.at == self.bytes.len }
 
-    // decodes the sequence at the cursor and steps past it. Call it while
-    // `is_done` is false: at the end there is no sequence, and Invalid(len)
-    // says exactly that rather than inventing a friendlier reason
+    // decodes the sequence at the cursor and steps past it. Only valid while
+    // `is_done` is false
     next* = (self :: @Self) Res<u32, Utf8Error> {
         c = codepoint_at(self.bytes, self.at).try();
         self.at = self.at + c.len;
@@ -74,8 +66,7 @@ count_codepoints* = (s: str) Res<usize, Utf8Error> {
 }
 
 // ---------------------------------------------------------------------------
-// the table. Every boundary below is UTF-8's own, and each one is a fact a
-// caller may want, so each one is starred
+// UTF-8's own boundaries, exported since callers may want them
 // ---------------------------------------------------------------------------
 
 UTF8_ASCII_MAX*: u8 = 128       // first byte that is not a codepoint by itself
@@ -94,9 +85,8 @@ UTF8_SURROGATE_MAX*: u32 = 57343
 UTF8_MAX_CODEPOINT*: u32 = 1114111
 UTF8_MAX_LEN*: usize = 4        // no sequence is longer
 
-// how wide the sequence starting with `lead` is, or 0 when `lead` cannot
-// start one at all: a continuation byte, an overlong lead, or a lead past
-// the last one that can reach U+10FFFF
+// width of the sequence starting with `lead`, or 0 if it can't start one:
+// a continuation byte, an overlong lead, or past reach of U+10FFFF
 sequence_len = (lead: u8) usize {
     (lead < UTF8_ASCII_MAX).match({
         true  => 1,
@@ -113,8 +103,7 @@ sequence_len = (lead: u8) usize {
     });
 }
 
-// the 6 payload bits of the continuation byte at `at`, or the offset that
-// is not one
+// the 6 payload bits of the continuation byte at `at`
 continuation = (s: str, at: usize) Res<u32, Utf8Error> {
     b = s.get(at).ok_or(Utf8Error.Invalid(at)).try();
     ((b >= UTF8_CONT_MIN) && (b < UTF8_LEAD_MIN)).match({

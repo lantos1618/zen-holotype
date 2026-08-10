@@ -1,50 +1,42 @@
 // src/gen/gen_name.zen
 // The name a Zen declaration has in a flat namespace.
 //
-// C has one namespace and Zen lets two modules declare the same
-// top-level name, so a backend targeting C — or any other flat
-// target — has to encode a path into an identifier. PLAN.md 0.4 makes
-// the five decisions and this file is all five of them, so a second
-// backend inherits the answers rather than re-deciding them. That is
-// why it is here and not in `gen_c.zen`: the encoding names no C.
+// C has one namespace; Zen lets two modules declare the same top-level
+// name. PLAN.md 0.4 makes five decisions for encoding a path into a C
+// identifier; this file is all five, so a second backend inherits them.
+// Lives here, not `gen_c.zen`, because the encoding names no C.
 //
-// 1. THE SCHEME IS LENGTH-PREFIXED. Joining path components with `_` is
-//    provably ambiguous, and STYLE.md's own sibling-prefix convention
-//    triggers it in this very tree: `parse` + `expr_kind` and
-//    `parse_expr` + `kind` join to one string. A component is its byte
-//    length followed by its bytes, and a list is a count, an underscore,
-//    then the components. A length is read as the maximal digit run and
-//    a Zen identifier can never start with a digit, so the parse back is
-//    unique:
-//
+// 1. LENGTH-PREFIXED SCHEME. Joining components with `_` is provably
+//    ambiguous — STYLE.md's own sibling-prefix convention triggers it:
+//    `parse`+`expr_kind` and `parse_expr`+`kind` join to one string. A
+//    component is its byte length then its bytes; a list is a count, an
+//    underscore, then the components. A Zen identifier never starts
+//    with a digit, so the length (maximal digit run) parses back
+//    uniquely:
 //        alpha + beta_gamma  ->  2_5alpha10beta_gamma
 //        alpha_beta + gamma  ->  2_10alpha_beta5gamma
 //
-// 2. TWO PREFIXES, AND EVERY EMITTED IDENTIFIER IS UNDER ONE.
-//    `zu_` is derived from a user name, `zg_` is invented by the
-//    compiler. Neither begins with an underscore, so neither is
-//    reserved to the implementation by C11 7.1.3; `zu_` cannot produce
-//    `zg_`, so a user writing `zg_trap` cannot reach the runtime. And
-//    because EVERY user identifier is mangled, no C keyword and no
-//    standard-header macro can ever be emitted — decision 4 handled as
-//    an identifier CLASS rather than as a hand-kept keyword list, which
-//    subsumes every future `_Atomic` for free.
+// 2. TWO PREFIXES, every emitted identifier under one. `zu_` from a
+//    user name, `zg_` invented by the compiler. Neither starts with an
+//    underscore, so neither is C11 7.1.3-reserved; `zu_` cannot produce
+//    `zg_`, so `zg_trap` written by a user can't reach the runtime.
+//    Every user identifier is mangled, so no C keyword or header macro
+//    is ever emitted — decision 4 handled as an identifier CLASS, not a
+//    hand-kept keyword list, which also covers every future `_Atomic`.
 //
 // 3. THE SITES. Types, functions, enum constants, struct members,
-//    locals and parameters, and module values each carry a letter, so
-//    two different kinds of thing can share a Zen name without sharing
-//    a C one. Struct members are the site everyone forgets and the one
-//    that breaks against `<errno.h>`.
+//    locals/parameters, and module values each carry a letter, so two
+//    kinds of thing can share a Zen name without sharing a C one.
+//    Struct members are the site everyone forgets, and the one that
+//    breaks against `<errno.h>`.
 //
-// 5. A TYPE ARGUMENT RENDERS AS A PURE FUNCTION OF THE TYPE — `tcode`
-//    below, which reads a `TyId` and nothing else. Not of instantiation
-//    order, not of a counter, not of which module asked first.
+// 5. A TYPE ARGUMENT RENDERS AS A PURE FUNCTION OF THE TYPE (`tcode`
+//    below) — never instantiation order, a counter, or asking order.
 //    Determinism dies here or nowhere.
 //
-// THE C STANDARD TARGETED IS C99. It is stated in one place, and that
-// place is the runtime banner in `gen_c.zen`; this file only has to
-// know that the identifier rules it obeys are C11 7.1.3's, which C99
-// shares.
+// C STANDARD TARGETED IS C99, stated once in the runtime banner in
+// `gen_c.zen`; this file only needs C11 7.1.3's identifier rules, which
+// C99 shares.
 
 str, String = std.text
 Vec = std.collections
@@ -75,11 +67,9 @@ RES_PATH* : str = "std.core.result.Res"
 
 // One length-prefixed component: `alpha` -> `5alpha`.
 //
-// A component that is not a Zen identifier is HEX-ESCAPED rather than
-// written through, because the output has to be a C identifier and a
-// name reaching here is not guaranteed to be one. The escape is `x`
-// followed by two hex digits a byte, which cannot collide with a real
-// identifier because a real identifier never reaches it.
+// A component that is not a Zen identifier is HEX-ESCAPED, since the
+// output must be a C identifier: `x` followed by two hex digits per
+// byte, which can't collide since a real identifier never reaches it.
 comp* = (out :: String, name: str) Res<(), AllocError> {
     is_c_identifier(name).match({
         true  => plain_comp(out, name),
@@ -187,10 +177,9 @@ write_segments = (out :: String, qname: str) Res<(), AllocError> {
 
 // The C name of a type: `zu_t4_3std4core6result3ResI1_b3i32`.
 //
-// `zu_` when the type is a user declaration or the library `Res`, and
-// `zg_` when the compiler composed it out of nothing a user wrote — an
-// anonymous union, a fixed array. Both are still `tcode`, so the name
-// stays a pure function of the type either way.
+// `zu_` for a user declaration or the library `Res`; `zg_` when the
+// compiler composed it from nothing a user wrote (anonymous union,
+// fixed array). Both are still `tcode` — a pure function of the type.
 sym_type* = (out :: String, types: Types, world: World, id: TyId)
             Res<(), AllocError> {
     out.add_bytes(prefix_of(types, id)).try();
@@ -206,21 +195,19 @@ prefix_of = (types: Types, id: TyId) str {
     })
 }
 
-// A function. `sig` is the declared parameter types, which is what
-// overloading resolves on — "resolution is on declared parameter types
-// and arity" — so two overloads of one name get two symbols by
-// construction rather than by a counter.
+// A function. `sig` is the declared parameter types (what overloading
+// resolves on), so two overloads of one name get two symbols by
+// construction, not a counter.
 //
-// `inst` IS WHAT MAKES AN INSTANTIATION A SYMBOL. A generic function is
-// emitted once per distinct set of type arguments, so the arguments are
-// in the name — decision 5 of the header, and the reason `tcode` reads
-// nothing but the type. `Vec<i32>()` and `Vec<str>()` share a signature
-// (`(a: Alloc)`) and differ only here, which is why the signature alone
-// cannot be the identity.
+// `inst` IS WHAT MAKES AN INSTANTIATION A SYMBOL: a generic function is
+// emitted once per distinct type-argument set, so the arguments go in
+// the name (decision 5). `Vec<i32>()` and `Vec<str>()` share a signature
+// (`(a: Alloc)`) and differ only here — signature alone can't be the
+// identity.
 //
-// `O` and `I` are two sections and not one: the signature answers "which
-// overload" and the arguments answer "which instantiation", and a
-// program can differ in either without differing in the other.
+// `O` and `I` are two sections, not one: signature answers "which
+// overload", arguments answer "which instantiation"; a program can
+// differ in either independently.
 sym_fn* = (out :: String, types: Types, world: World, qname: str,
            sig: Vec<TyId>, inst: Inst) Res<(), AllocError> {
     out.add_bytes(USR).try();
@@ -291,20 +278,18 @@ sym_member* = (out :: String, name: str) Res<(), AllocError> {
 // a STRUCTURAL union
 //
 // `A | B` written inline, or a set sema inferred, is an enum with no
-// declaration behind it — so it has no path, and the two sites that
-// need a path (a tag constant and a payload field) have to get one from
-// the type itself. `tcode` is that path: injective, and self-delimiting
-// because every component carries its length, so two type codes written
-// end to end parse back as two.
+// declaration — no path. The tag constant and payload field sites that
+// need one get it from the type itself: `tcode`, injective and
+// self-delimiting (every component carries its length), so two type
+// codes end to end parse back as two.
 // -----------------------------------------------------------------
 
-// A structural union's tag constant. `zg_`, because the set is
-// composed out of nothing a user wrote — the same reason `sym_type`
-// gives a structural union a `zg_` name.
+// A structural union's tag constant. `zg_`, same reason `sym_type`
+// gives a structural union a `zg_` name: composed from nothing a user
+// wrote.
 //
-// Both the set AND the member are in the name. The member alone would
-// collide across two sets that share it, and the set alone is not a
-// constant at all.
+// Both set AND member are in the name — member alone collides across
+// sets that share it, and set alone isn't a constant at all.
 sym_union_variant* = (out :: String, types: Types, world: World,
                       set: TyId, member: TyId) Res<(), AllocError> {
     out.add_bytes(GEN).try();
@@ -316,13 +301,13 @@ sym_union_variant* = (out :: String, types: Types, world: World,
 
 // A structural union's payload field.
 //
-// A MEMBER THAT IS A DECLARATION TAKES ITS OWN NAME, which is exactly
-// what a declared union-reading enum writes for the same member:
-// `Error = AllocError | IoError` lays out `zu_m10AllocError`, and so
-// does the structural `AllocError | IoError`. Their TAGS agree too, now
-// that `gen_c_layout.write_enum_tags` numbers a union-reading enum
-// canonically — which is what leaves the two identical bit for bit and
-// makes a propagation between them a copy rather than a re-tagging map.
+// A MEMBER THAT IS A DECLARATION TAKES ITS OWN NAME — a declared
+// union-reading enum writes the same field: `Error = AllocError |
+// IoError` and the structural `AllocError | IoError` both lay out
+// `zu_m10AllocError`. Their tags agree too, now that
+// `gen_c_layout.write_enum_tags` numbers a union-reading enum
+// canonically, so propagation between them is a copy, not a re-tagging
+// map.
 sym_union_member* = (out :: String, types: Types, world: World,
                      member: TyId) Res<(), AllocError> {
     types.at(member).match({
@@ -378,11 +363,10 @@ sym_gen* = (out :: String, stem: str, n: usize) Res<(), AllocError> {
 // -----------------------------------------------------------------
 // tcode — the name of a TYPE
 //
-// A pure function of the type and injective, which together are what
-// make an instantiation's name independent of the run that produced
-// it. The tag letters are lowercase and `I` is uppercase, so no tag
-// can be mistaken for the start of a component, and a user-written
-// `Pair_i32_i32` can never collide with `Pair<i32, i32>`.
+// Pure function of the type, injective — makes an instantiation's name
+// independent of the run that produced it. Tag letters are lowercase,
+// `I` is uppercase, so a tag is never mistaken for a component start:
+// user-written `Pair_i32_i32` can never collide with `Pair<i32, i32>`.
 // -----------------------------------------------------------------
 
 tcode* = (out :: String, types: Types, world: World, id: TyId)
@@ -420,8 +404,7 @@ tcode_scalar = (out :: String, name: str) Res<(), AllocError> {
 
 // The declaration's path is written a segment at a time rather than
 // joined into a `String` first, so naming a type allocates nothing —
-// which matters because every emitted symbol goes through here and a
-// scratch buffer per name is a buffer per name.
+// every emitted symbol goes through here.
 tcode_of_named = (out :: String, types: Types, world: World, n: TyNamed)
                  Res<(), AllocError> {
     out.add_bytes("t").try();
@@ -439,11 +422,10 @@ write_args = (out :: String, types: Types, world: World, args: Vec<TyId>)
     Ok(());
 }
 
-// `Res<T>` renders as the library type applied to one argument and
-// `Res<T, E>` to two, so a structural Res and a declared one have the
-// same C name. `Open` — what a bare `Ok(x)` is before an expectation
-// settles it — renders as the absence form, because that is the shape
-// it takes when nothing settles it.
+// `Res<T>` renders as the library type applied to one argument,
+// `Res<T, E>` to two — so a structural Res and a declared one share a C
+// name. `Open` (a bare `Ok(x)` before an expectation settles it)
+// renders as the absence form, its shape when nothing settles it.
 tcode_res = (out :: String, types: Types, world: World, r: TyRes)
             Res<(), AllocError> {
     out.add_bytes("t").try();
@@ -463,12 +445,10 @@ is_failure* = (form: ResForm) bool {
     form.match({ Failure => true, Absence => false, Open => false })
 }
 
-// `[i32, 4]` is `a4_bi32`. THE COUNT IS IN THE NAME because it is in the
-// type: `tcode` is injective and two types share a C name exactly when
-// they are one type, so `[i32, 4]` and `[i32, 5]` — which hold different
-// numbers of bytes — must not collide. The count is written as a list
-// header, so the `_` separates it from the element and nothing after it
-// can be read as more digits.
+// `[i32, 4]` is `a4_bi32`. THE COUNT IS IN THE NAME because it's in the
+// type: `tcode` is injective, so `[i32, 4]` and `[i32, 5]` must not
+// collide. Written as a list header, so `_` separates it from the
+// element and nothing after can be read as more digits.
 tcode_array = (out :: String, types: Types, world: World, a: TyArray)
               Res<(), AllocError> {
     out.add_bytes("a").try();
@@ -485,11 +465,10 @@ tcode_fn = (out :: String, types: Types, world: World, params: Vec<TyId>,
     Ok(());
 }
 
-// A union's members are already canonical — flat, sorted and deduped
-// by the intern store — so `A | B` and `B | A` reach this with one
-// order and produce one name. The sorting is the store's and is not
-// repeated here: two places that sort are two places that can disagree
-// about what sorted means.
+// A union's members are already canonical — flat, sorted, deduped by
+// the intern store — so `A | B` and `B | A` reach this in one order and
+// produce one name. Sorting is the store's, not repeated here: two
+// places that sort are two places that can disagree.
 tcode_union = (out :: String, types: Types, world: World,
                members: Vec<TyId>) Res<(), AllocError> {
     out.add_bytes("u").try();
@@ -506,11 +485,10 @@ tcode_list = (out :: String, types: Types, world: World, items: Vec<TyId>)
 
 // The module a declaration lives in.
 //
-// A symbol is built from the `DeclId` rather than from a carried
-// string, because a `TyNamed` holds the declaration and a bare name,
-// and the bare name is only there for a diagnostic — "two modules may
-// define the same top-level name without colliding", so the module is
-// the half that makes the symbol unique.
+// Built from `DeclId`, not a carried string: `TyNamed` holds the
+// declaration and a bare name, but the bare name is diagnostic-only —
+// two modules may share a top-level name, so the module is the half
+// that makes the symbol unique.
 module_of* = (world: World, decl: DeclId) str {
     world.table_at(decl.module.to_usize()).match({
         Ok(t) => t.name,

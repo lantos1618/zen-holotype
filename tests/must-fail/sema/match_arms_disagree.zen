@@ -1,0 +1,31 @@
+// MUST FAIL: two arms of a `.match` with genuinely different types.
+// src/sema/sema_join.zen's own header states the rule: "two arms of
+// genuinely different types mean something the language cannot express —
+// inventing a join for it would hide the mistake rather than report it."
+//
+// THE SELF-HOSTED COMPILER DOES NOT REPORT IT. `join` correctly declines
+// to invent a supertype and returns the first arm's type; nothing then
+// says the second arm disagreed. `merged_or_first`'s fall-through `Ok(a)`
+// is where the diagnostic belongs, and cannot raise one today because
+// `join` is not passed a span.
+//
+// WHY THIS IS WORSE THAN A MISSING MESSAGE. With a `str` second arm the
+// emitted C returns a `zg_str` from an `int32_t` function and cc rejects
+// it, so the mistake surfaces as a C error full of mangled names. With a
+// `bool` second arm — this file — the C compiles, the program RUNS, and
+// prints 0. A wrong answer that looks plausible, which is why no oracle
+// caught it: a corpus test would never contain mismatched arms, and no
+// must-fail test covered them until 2026-08-10.
+//
+// The bootstrapper reports `expected i32, found bool` at 24:18.
+f = (b: bool) i32 {
+    b.match({
+        true  => 1,
+        false => false,
+    })
+}
+
+main = (env: Env) Res<i32, ArgError> {
+    println("{}", f(false));
+    Ok(0);
+}

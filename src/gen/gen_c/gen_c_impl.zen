@@ -2,22 +2,21 @@
 // Which function an IMPL supplies for a name, and at what arity.
 //
 // Split out of `gen_c_member.zen`, which reached 796 lines against an
-// 800-line hard cap and had already had its comments trimmed twice to
-// fit — a file that pays for a line by deleting an explanation is a file
-// that has outgrown its subject.
+// 800-line hard cap after its comments had already been trimmed twice
+// — a file that pays for a line by deleting an explanation has
+// outgrown its subject.
 //
-// AND THE SUBJECT REALLY IS A SECOND ONE. `gen_c_member.zen` answers
-// "what does a dot reach on this receiver", which needs a `Site` — the
-// declaration that owns a type's members and the qualified name symbols
-// are built from. Nothing here needs one. An impl is found by the
-// DECLARATION it targets, so every entry point below takes a `DeclId`,
-// and that is what makes the split a line rather than a tangle: this
-// file imports nothing from `gen_c_member.zen`, so the dependency runs
-// one way and there is no cycle to arrange around.
+// And the subject really is a second one: `gen_c_member.zen` answers
+// "what does a dot reach on this receiver", needing a `Site` (the
+// declaration that owns a type's members and its qualified-name
+// symbols). Nothing here needs one — an impl is found by the
+// DECLARATION it targets, so every entry point below takes a `DeclId`.
+// This file imports nothing from `gen_c_member.zen`, so the dependency
+// runs one way with no cycle to arrange around.
 //
-// `by_arity` lives here rather than there for the same reason it is
-// used here: an impl is the place two members of one name actually turn
-// up, because a bound and a type may each supply one.
+// `by_arity` lives here for the same reason it's used here: an impl is
+// where two members of one name actually turn up, since a bound and a
+// type may each supply one.
 
 Decl, Struct, Member, MemberKind, Function, Impl = ast
 Alloc, AllocError = std.mem
@@ -30,24 +29,23 @@ member_named = sema.sema_member
 CBackend = gen.gen_c.gen_c_state
 last_is_variadic = gen.gen_c.gen_c_sink
 
-// A TYPE MAY DECLARE TWO MEMBERS OF ONE NAME. "Resolution is on
+// A type may declare two members of one name. "Resolution is on
 // declared parameter types and arity", and `Cursor.peek()` and
 // `Cursor.peek(n)` are two functions — taking the first one emitted a
-// call to the wrong symbol with the right arguments, which `cc` caught
-// and which two same-arity overloads would have hidden.
+// call to the wrong symbol with the right arguments, a bug `cc` caught
+// but two same-arity overloads would have hidden.
 //
-// ARITY IS THE HALF A BACKEND CAN ANSWER WITHOUT REDOING SEMA'S RULE.
+// Arity is the half a backend can answer without redoing sema's rule.
 // The other half is `gen_c_member.zen`'s `pick_member`, which asks the
 // ARGUMENTS where arity cannot separate the candidates — `Display`
 // declares two `toString`s and both take two parameters.
 //
-// A MEMBER OF THE WRONG ARITY IS THE WRONG MEMBER, and this answered
-// with one: `found.get(0)` was the fallback for every miss, so `Box`'s
-// own `grow(self)` was the answer to `b.grow(10)`. That emitted a call
-// to a one-parameter symbol with two arguments — `too many arguments to
-// function ... Box4grow` — and it hid the free `grow(b, by)` that the
-// receiver's world travelled with, which is the one DESIGN.md says is
-// in the same overload set.
+// A member of the wrong arity is the wrong member, and this once
+// answered with one: `found.get(0)` was the fallback for every miss, so
+// `Box`'s own `grow(self)` answered `b.grow(10)`, emitting a call to a
+// one-parameter symbol with two arguments ("too many arguments to
+// function ... Box4grow") — hiding the free `grow(b, by)` that
+// DESIGN.md says is in the same overload set.
 by_arity* = (be: CBackend, found: Vec<Member>, arity: usize) Res<Member> {
     Range(0, found.len).find((i) {
         found.get(i).match({
@@ -67,17 +65,17 @@ member_takes = (be: CBackend, m: Member, arity: usize) bool {
     })
 }
 
-// `...` IS NOT A PARAMETER, it is the statement that the list does not
-// end — `sema_cand.zen`'s `variadic_matches` reads it the same way — so
-// a variadic member's arity is a MINIMUM. `String.add(self :: @Self,
-// fmt: str, args: ...)` is the one member `sb.add(" and ")` and
-// `sb.add("{} is {}", x, y)` both reach, and counting `...` as a
-// parameter made it unreachable from either.
+// `...` is not a parameter, it's the statement that the list does not
+// end — `sema_cand.zen`'s `variadic_matches` reads it the same way —
+// so a variadic member's arity is a MINIMUM. `String.add(self :: @Self,
+// fmt: str, args: ...)` is the one member both `sb.add(" and ")` and
+// `sb.add("{} is {}", x, y)` reach; counting `...` as a parameter made
+// it unreachable from either.
 //
 // An associated function declares no parameters at all, and asking
-// whether its last one is variadic used to trap on `0 - 1` — a `usize`
-// underflow inside `last_is_variadic`. That guard now lives where the
-// arithmetic is, so this reads as the question it is.
+// whether its last one is variadic used to trap on `0 - 1` (a `usize`
+// underflow inside `last_is_variadic`). That guard now lives where the
+// arithmetic is.
 fn_takes = (be: CBackend, f: Function, arity: usize) bool {
     last_is_variadic(be, f).match({
         true  => (arity + 1) >= f.params.len,
@@ -85,11 +83,11 @@ fn_takes = (be: CBackend, f: Function, arity: usize) bool {
     })
 }
 
-// A MEMBER THAT IS NOT A FUNCTION HAS NO PARAMETER LIST, so arity says
-// nothing about it and the first is still the whole answer — that is
-// the function-valued FIELD `gen_c_member.zen` calls through, and there
-// is nothing on it to count. Where every candidate IS a function, arity
-// is an answer and a miss is a miss.
+// A member that is not a function has no parameter list, so arity says
+// nothing and the first is still the whole answer — the function-valued
+// FIELD `gen_c_member.zen` calls through, with nothing on it to count.
+// Where every candidate IS a function, arity is an answer and a miss
+// is a miss.
 without_arity = (found: Vec<Member>) Res<Member> {
     any_function(found).match({
         true  => None,
@@ -110,18 +108,17 @@ is_function = (m: Member) bool {
 // -----------------------------------------------------------------
 // a member an IMPL supplies
 //
-// `str` does not declare `eq`; `std.text` impls `Eq` on it. DESIGN.md
-// gives that one rule — "you satisfy requirements, you never impl
-// storage" — and what it means HERE is that the member is an ordinary
-// function of the receiver, living beside the type, reached under the
-// TARGET's qualified name.
+// `str` does not declare `eq`; `std.text` impls `Eq` on it. DESIGN.md's
+// rule — "you satisfy requirements, you never impl storage" — means the
+// member is an ordinary function of the receiver, living beside the
+// type, reached under the TARGET's qualified name.
 //
-// AND IT IS CALLED STATICALLY. "Can this struct be a bound" and "can it
-// be a fat value" are two questions, and only the second needs a record
-// of function pointers. Every call here has a receiver whose CONCRETE
-// type is known, so the impl's function is the one to call and it is
-// monomorphised like any other member — a fat value is wanted only where
-// a value's STATIC type is the bound, which nothing in this tree writes.
+// And it is called statically: "can this struct be a bound" and "can
+// it be a fat value" are two questions, and only the second needs a
+// record of function pointers. Every call here has a receiver whose
+// CONCRETE type is known, so the impl's function is called directly
+// and monomorphised — a fat value is wanted only where a value's
+// STATIC type is the bound, which nothing in this tree writes.
 // -----------------------------------------------------------------
 
 // The function an impl on this type supplies under `name`, when one
@@ -162,10 +159,10 @@ member_fn = (m: Member) Res<Function> {
 // Every member an impl on `decl` supplies under `name`, with a BODY.
 //
 // "An impl lives with the type, not with the trait", so the search is
-// over the impls declared in the TARGET's own module and a same-named
-// type elsewhere is never confused for this one. A required member —
-// `at ::= (..) Res<T>` with no body — is what the impl OWES rather than
-// what it supplies, and calling it would name a symbol nothing defines.
+// over impls declared in the TARGET's own module — a same-named type
+// elsewhere is never confused for this one. A required member — `at
+// ::= (..) Res<T>` with no body — is what the impl OWES, not supplies;
+// calling it would name a symbol nothing defines.
 impl_member_at* = (be :: CBackend, decl: DeclId, name: str,
                    out :: Vec<Member>) Res<(), AllocError> {
     ids ::= be.alloc.Vec<ImplId>();
@@ -204,23 +201,23 @@ impl_fn_at = (be :: CBackend, i: ImplId, name: str, out :: Vec<Member>)
     })
 }
 
-// THE IMPL'S OWN MEMBERS, THEN THE BOUND'S DEFAULTS. "A struct whose
+// The impl's own members, then the bound's defaults. "A struct whose
 // fields happen to be functions, used as a bound, is what other
 // languages call a trait", and `A.impl(B, {..})` supplies a value for
 // every field `B` declares — so a bodied member on `B` is a field the
 // bound ALREADY has a value for. `area` comes along free because it
 // "only ever needed a width and a height".
 //
-// BOTH, AND NOT EITHER/OR. This ran the bound only when the impl block
-// supplied nothing of that name, which reads a NAME as the unit when
-// `sema_supply.zen` says in capitals that the unit is an overload SET:
-// `Display` declares a `toString` taking a sink and a sealed one taking
-// an allocator, an impl supplies the first, and the second stopped
-// being a candidate the moment it did. So `p.toString(alloc)` lowered
-// to the sink symbol with an `Alloc` passed as a `Sink` — a record of
-// NULL function pointers — for a call sema had resolved correctly.
+// Both, not either/or. This once ran the bound only when the impl
+// block supplied nothing of that name — reading a NAME as the unit
+// when `sema_supply.zen` says the unit is an overload SET: `Display`
+// declares a `toString` taking a sink and a sealed one taking an
+// allocator; once an impl supplies the first, the second stops being a
+// candidate. So `p.toString(alloc)` lowered to the sink symbol with an
+// `Alloc` passed as a `Sink` — a record of NULL function pointers —
+// for a call sema had resolved correctly.
 //
-// THE ORDER IS THE ANSWER TO AN OVERRIDE. An impl entry restating a
+// The order is the answer to an override: an impl entry restating a
 // default comes first and wins every tie below, which is what "the
 // impl supplies it" means.
 keep_impl_fn = (be :: CBackend, i: ImplId, im: Impl, name: str,
@@ -229,10 +226,8 @@ keep_impl_fn = (be :: CBackend, i: ImplId, im: Impl, name: str,
     keep_bound_default(be, i, im, name, out)
 }
 
-// A REQUIRED MEMBER IS STILL ABSENT HERE. `keep_named_fn` keeps only
-// what has a body, so `at ::= (..) Res<T>` on the bound is what the
-// impl OWES rather than what it supplies — and calling it would name a
-// symbol nothing defines.
+// A required member is still absent here — `keep_named_fn` keeps only
+// what has a body (see `impl_member_at` above).
 keep_bound_default = (be :: CBackend, i: ImplId, im: Impl, name: str,
                       out :: Vec<Member>) Res<(), AllocError> {
     bound = be.check.impl_bound_type(im, i.decl.module.to_usize()).try();

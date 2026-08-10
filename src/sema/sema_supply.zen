@@ -1,34 +1,27 @@
 // src/sema/sema_supply.zen
-// What an IMPL supplies through a dot.
+// What an IMPL supplies through a dot. `sema_member.zen` answers what a
+// dot reaches; this file answers the half a type's own declaration
+// didn't provide.
 //
-// `sema_member.zen` answers what a dot reaches; this answers the half of
-// it that the type did not declare. The two split because they are two
-// questions with two rules, and the file that held both said so in its
-// own title:
+// The type's own members are storage and win outright — layout is fixed
+// at declaration, so it can't depend on which impls are linked. An
+// impl's members are computed ("you satisfy requirements, you never
+// impl storage"): re-evaluated on read, read-only, non-addressable,
+// invisible to layout — the whole of `Found.computed`.
 //
-//   THE TYPE'S OWN MEMBERS ARE STORAGE and win outright. Layout is fixed
-//   at declaration and cannot depend on which impls are linked, so a
-//   member the declaration writes is never contested.
-//   AN IMPL'S ARE COMPUTED — "you satisfy requirements, you never impl
-//   storage" — re-evaluated on read, read-only, non-addressable, and
-//   invisible to layout. That is the whole of `Found.computed`.
+// An impl lives with the type, not the trait: `Impl.target` is an
+// `Ident`, not a qualified type, so the search is over one module's
+// impls and a same-named type elsewhere is never confused for this one.
 //
-// AN IMPL LIVES WITH THE TYPE, NOT WITH THE TRAIT, which is why
-// `Impl.target` is an `Ident` and not a qualified type: there is no
-// orphan impl to express, so the search is over one module's impls and a
-// same-named type elsewhere is never confused for this one.
+// A bound's members are read in the bound's own scope — stated three
+// times below because three readers need it. `Slot<T> = { held*: T }`
+// declares `T`, so reading its members without `T` bound reports `T` as
+// undefined; `enter_*_tvars` is that binding, always a push/release pair.
 //
-// A BOUND'S MEMBERS ARE READ IN THE BOUND'S OWN SCOPE, and that is the
-// rule this file states three times because three readers need it.
-// `Slot<T> = { held*: T }` declares `T` and its members mean it, so
-// reading them without `T` bound reports it as undefined in the very
-// declaration that binds it — from a caller that only asked what a dot
-// reaches. `enter_*_tvars` is that binding, and it is always a pair.
-//
-// WHAT AN IMPL OWES is `sema_bound.zen`'s subject and not this one: this
-// file asks what an impl PROVIDES to a reader, and that one asks whether
-// it provided everything it promised. A required member with no body is
-// absent here and a diagnostic there.
+// What an impl OWES is `sema_bound.zen`'s subject, not this one: this
+// file asks what an impl provides, that one whether it provided
+// everything promised. A required member with no body is absent here, a
+// diagnostic there.
 
 Ast, Expr, ExprId, Access, Ident, Span, Pos, TypeId = ast
 Decl, DeclKind, Struct, Impl, Member, MemberKind = ast
@@ -45,10 +38,8 @@ Found, member_named, member_type, nowhere = sema.sema_member
 enter_struct_tvars, decl_span = sema.sema_member
 type_from_ast, param_type = sema.sema_type
 
-// "An impl lives with the type, not with the trait", so an impl of a
-// type is in that type's own module — which is why the module index is
-// part of the match and a same-named type elsewhere is not confused for
-// this one.
+// An impl lives with the type, not the trait, so the module index is
+// part of the match — a same-named type elsewhere is never confused.
 impl_members* = (c :: Checker, n: TyNamed, ty: TyId, name: str,
                 out :: Vec<Found>) Res<(), AllocError> {
     ids ::= c.alloc.Vec<ImplId>();
@@ -74,23 +65,18 @@ impl_supplies = (c :: Checker, n: TyNamed, ty: TyId, name: str, id: ImplId,
     Ok(());
 }
 
-// An impl entry supplies the name, or the bound provides it with a body
-// of its own — `area` comes along free because it "only ever needed a
-// width and a height". Either way the TYPE is the one the bound
-// declares, never the supplied expression's: `width: self.radius * 2.0`
-// is an f64 because `Rect` said f64.
+// An impl entry supplies the name, or the bound provides a body of its
+// own (`area` comes free needing only width and height). Either way the
+// TYPE is the bound's, never the supplied expression's:
+// `width: self.radius * 2.0` is an f64 because `Rect` said f64.
 //
-// A NAME IS AN OVERLOAD SET AND NOT A MEMBER, so this adds one `Found`
-// PER DECLARATION and never one per impl. `Display` declares two
-// `toString`s — a sink form and a sealed allocating one — and "overload
-// resolution picks between them on the declared parameter type" can only
-// be true if both survive to the call site. They did not: the type of
-// the name was a fold over the members that kept the LAST match, so a
-// set of two arrived as one, the allocating one, and every
-// `p.toString(buffer)` in the language typed as `Res<String,
-// WriteError>` while the backend correctly called the form returning
-// `Res<(), WriteError>`. Nothing in sema was choosing wrongly — there
-// was nothing left to choose FROM.
+// A name is an overload set, not a member, so this adds one `Found` per
+// declaration, never one per impl. Bug found the hard way: `Display`
+// declares two `toString`s (a sink form and a sealed allocating one),
+// and the type of the name used to fold over the members keeping only
+// the LAST match — so the set of two arrived as one, and every
+// `p.toString(buffer)` typed as `Res<String, WriteError>` while the
+// backend correctly called the form returning `Res<(), WriteError>`.
 supplied = (c :: Checker, n: TyNamed, ty: TyId, name: str, id: ImplId,
             im: Impl, out :: Vec<Found>) Res<(), AllocError> {
     mi = n.decl.module.to_usize();
@@ -101,16 +87,14 @@ supplied = (c :: Checker, n: TyNamed, ty: TyId, name: str, id: ImplId,
     Ok(());
 }
 
-// WHICH OF THE BOUND'S DECLARATIONS OF THIS NAME THE IMPL ACTUALLY
-// REACHES. A bodied member — sealed, or a default — comes along on its
-// own. A bodiless one is a requirement, and it is reachable exactly when
-// the impl supplied that name.
+// Which of the bound's declarations of a name the impl reaches: a
+// bodied member (sealed/default) comes along on its own; a bodiless one
+// is a requirement, reachable only when the impl supplied that name.
 //
-// Asking `has_member` of the impl rather than matching its entry against
-// a particular declaration is deliberate: which signature an impl
-// satisfied is `sema_bound.zen`'s question, it is answered there against
-// the whole set, and answering it a second time here with a weaker rule
-// is how two files come to disagree about what an impl provided.
+// Deliberately asks `has_member` rather than matching a particular
+// declaration — which signature an impl satisfied is `sema_bound.zen`'s
+// question, answered there against the whole set; a weaker rule here
+// would let the two files disagree.
 supplied_types = (c :: Checker, im: Impl, bound: TyId, name: str,
                   self_ty: TyId, out :: Vec<TyId>) Res<(), AllocError> {
     supplied_here = has_member(im.members, name);
@@ -132,16 +116,10 @@ keep_reachable = (m: Member, name: str, supplied_here: bool,
     })
 }
 
-// The bound an impl names, resolved with the TARGET's type parameters
-// in scope.
-//
-// `Vec.impl(Range<T>, ..)` writes `Vec`'s own `T`, and `Impl` has no
-// `tparams` field to read because there is nothing for it to hold: an
-// impl declares no type parameters, it borrows the ones the target
-// declared. Every reader of `im.bound` goes through here so the three
-// of them cannot disagree about what `T` meant — and because
-// `type_from_ast` memoizes on the node id, the FIRST reader decides for
-// all of them anyway.
+// The bound an impl names, resolved with the target's type parameters
+// in scope (`Vec.impl(Range<T>, ..)` writes `Vec`'s own `T`). `Impl` has
+// no `tparams` — it borrows the target's. `type_from_ast` memoizes on
+// the node id, so the first reader here decides for all.
 impl_bound_type* = (c :: Checker, im: Impl, mi: usize)
                    Res<TyId, AllocError> {
     poison = c.types.unknown().try();
@@ -153,8 +131,7 @@ impl_bound_type* = (c :: Checker, im: Impl, mi: usize)
 }
 
 // An impl lives in the module that declares its target, so the target
-// is looked up there and nowhere else — which is the same fact that
-// makes `Impl.target` an `Ident` and not a qualified type.
+// is looked up only there — same fact that makes `Impl.target` an `Ident`.
 enter_target_tvars = (c :: Checker, target: str, mi: usize)
                      Res<(), AllocError> {
     defs ::= c.alloc.Vec<Def>();
@@ -204,16 +181,10 @@ add_supplied = (c :: Checker, ty: TyId, bound: TyId, name: str, id: ImplId,
     ))
 }
 
-// The third site of the same rule, and the one a member lookup alone
-// would not show: a bound's members are read in the bound's own scope.
-// `Slot<T> = { held*: T }` declares `T` and its members mean it, so
-// reading them without it reports `T` as undefined in the declaration
-// that binds it — from a caller that only asked what a dot reaches.
-// THE FIRST declaration of the name, for a reader that wants a type and
-// not a set: a COMPUTED FIELD. `width: self.radius * 2.0` is one
-// declaration by construction — a field is storage-shaped and there is
-// no such thing as two of it — so first, last and only are the same
-// answer, and the caller that needs the set asks for the set.
+// Third site of the bound-scope rule (see header). Returns the FIRST
+// declaration, for a reader that wants a type not a set: a computed
+// field like `width: self.radius * 2.0` has only one declaration, so
+// first/last/only agree; set-needing callers ask for the set.
 bound_member_type* = (c :: Checker, bound: TyId, name: str, self_ty: TyId)
                      Res<TyId, AllocError> {
     tys ::= c.alloc.Vec<TyId>();
@@ -221,9 +192,8 @@ bound_member_type* = (c :: Checker, bound: TyId, name: str, self_ty: TyId)
     tys.get(0).match({ Ok(t) => Ok(t), None => c.types.unknown() })
 }
 
-// EVERY declaration of the name, in source order, because a name is an
-// overload set. The caller chooses; a fold here would choose by writing
-// order and call it a type.
+// EVERY declaration of the name, in source order — a name is an
+// overload set; a fold here would pick by writing order and call it a type.
 bound_member_types* = (c :: Checker, bound: TyId, name: str, self_ty: TyId,
                        out :: Vec<TyId>) Res<(), AllocError> {
     all ::= c.alloc.Vec<Member>();
@@ -233,9 +203,8 @@ bound_member_types* = (c :: Checker, bound: TyId, name: str, self_ty: TyId,
     member_types(c, bound, kept, self_ty, out)
 }
 
-// The types of members already chosen, resolved in the BOUND's own
-// scope. The `tvar` pair is what makes `Slot<T> = { held*: T }` readable
-// at all — see this file's header, third statement of the same rule.
+// Types of members already chosen, resolved in the bound's own scope —
+// the `tvar` pair that makes `Slot<T> = { held*: T }` readable.
 member_types = (c :: Checker, bound: TyId, ms: Vec<Member>, self_ty: TyId,
                 out :: Vec<TyId>) Res<(), AllocError> {
     mi = bound_module(c, bound);
@@ -302,19 +271,17 @@ bound_module = (c: Checker, bound: TyId) usize {
 }
 
 // ---------------------------------------------------------------------
-// DECLARED, WHICH IS NOT THE SAME AS REACHABLE
+// declared, which is not the same as reachable
 //
-// `keep_reachable` above answers "does a dot reach this", and it
-// correctly answers NO for a hook no impl supplied. `Alloc.create` is
-// exactly that: `mem_alloc.zen` declares it with no body, no impl in the
-// language supplies one, and `gen_c_alloc.zen` writes the body. So
-// `alloc.create<Node>()` resolves to nothing in sema AND IS NOT A
-// MISTAKE — while `b.size()` on a `Box` resolves to nothing and is.
+// `keep_reachable` answers "does a dot reach this" and correctly says
+// NO for a hook no impl supplied: `Alloc.create` has no body in
+// `mem_alloc.zen`, no impl supplies one, and `gen_c_alloc.zen` writes it
+// — so `alloc.create<Node>()` resolving to nothing in sema is not a
+// mistake, while `b.size()` on a `Box` resolving to nothing is.
 //
-// Only a diagnostic needs to tell those apart, so only a diagnostic asks
-// this. A member lookup must keep answering "not reachable" to both, or
-// the type of `create` becomes a bodiless signature and the backend's
-// own answer stops being the one that counts.
+// Only a diagnostic needs to tell those apart, so only a diagnostic
+// asks this; a member lookup must answer "not reachable" to both, or
+// the backend's own answer to what `create` does stops counting.
 // ---------------------------------------------------------------------
 
 bound_declares* = (c :: Checker, ty: TyId, name: str)
@@ -364,9 +331,8 @@ bound_of_impl_declares = (c :: Checker, n: TyNamed, name: str, im: Impl)
     Ok(has_member(all, name));
 }
 
-// "A prelude declaration of a primitive's name IS that primitive", so
-// the impls on `str` are the impls on the declaration the prelude
-// exports under that spelling — the same detour `prim_members` makes.
+// A prelude declaration of a primitive's name IS that primitive, so
+// impls on `str` are impls on the decl the prelude exports it as.
 prim_impls_declare = (c :: Checker, p: Prim, name: str)
                      Res<bool, AllocError> {
     defs ::= c.alloc.Vec<Def>();

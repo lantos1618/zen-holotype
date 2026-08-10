@@ -1,32 +1,29 @@
 // src/gen/gen_c/gen_c_fmt.zen
 // `alloc.String("{}/{}.zen", root, name)` — the allocating format door.
 //
-// `text_string.zen` declares it and writes no body, and says why: "the
-// call is expanded where it is written, into this module's empty form
-// followed by the same expansion `add` gets". A variadic parameter has
-// no C spelling and `{}` is resolved BY THE ARGUMENT'S TYPE, so there is
-// nothing a single body could have been — the compiler IS the body, the
-// same bargain `Ptr`'s members and `Console.println` strike.
+// `text_string.zen` declares it with no body: "the call is expanded
+// where it is written, into this module's empty form followed by the
+// same expansion `add` gets". A variadic parameter has no C spelling
+// and `{}` resolves BY THE ARGUMENT'S TYPE, so the compiler IS the
+// body — the same bargain `Ptr`'s members and `Console.println` strike.
 //
-// EMITTING THE CALL INSTEAD IS A LINKER ERROR AND NOT A WRONG ANSWER: a
+// Emitting the call instead is a LINKER error, not a wrong answer: a
 // bodyless declaration defines no symbol. `cc` reported seven of them
-// against stage 2, all of them in `zen_build.zen`'s module-path
-// resolution — so a compiler that skipped this door could not find its
-// own source files.
+// against stage 2, all in `zen_build.zen`'s module-path resolution — a
+// compiler that skipped this door could not find its own source files.
 //
-// WHAT IS LEFT HERE IS THE BUFFER, NOT THE FORMAT. This door is the
+// What is left here is the buffer, not the format: this door is the
 // empty form followed by exactly the pieces `out.add(fmt, args)`
-// writes, so the walk, the writers and the record over the buffer are
-// `gen_c_sink.zen`'s and this file makes the String and hands it over.
-// It held a second walk once, and two walks drift: that one wrote a
-// `str` and reported every other hole, so `alloc.String("point {}", p)`
-// was a diagnostic while `out.add("point {}", p)` wrote the point.
+// writes; the walk, writers and record over the buffer are
+// `gen_c_sink.zen`'s. It held a second walk once, and the two drifted —
+// that one wrote a `str` and reported every other hole, so
+// `alloc.String("point {}", p)` was a diagnostic while `out.add("point
+// {}", p)` wrote the point.
 //
-// WHAT THE TWO DOORS GENUINELY DO NOT SHARE IS THE ERROR, and that is
-// why they are still two files. A write answers `Res<(), WriteError>`,
-// this answers `Res<String, AllocError>`, and there is no conversion
-// between them — see `write_failure_arm`, which is the one point where
-// the sets meet.
+// What the two doors genuinely do not share is the ERROR, which is why
+// they are still two files: a write answers `Res<(), WriteError>`, this
+// answers `Res<String, AllocError>`, with no conversion between them —
+// see `write_failure_arm`, the one point where the sets meet.
 
 ExprId, Decl, DeclKind, Function, Call = ast
 Alloc, AllocError = std.mem
@@ -96,10 +93,9 @@ lower_alloc_door = (be :: CBackend, id: ExprId, c: Call, d: Def,
 }
 
 // The one-parameter `String` beside the door, in the door's OWN module.
-// Reached by declaration and not through the caller's imports, because
-// the expansion is the backend's: a caller that wrote
-// `alloc.String("{}", x)` never named the empty form and must not have
-// to import it.
+// Reached by declaration, not the caller's imports: the expansion is
+// the backend's, and a caller writing `alloc.String("{}", x)` never
+// named the empty form and must not have to import it.
 empty_form = (be :: CBackend, d: Def) Res<Res<Def>, AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(d.id.module.to_usize(), "String", found).try();
@@ -211,13 +207,10 @@ write_alloc = (be :: CBackend, e: Def, a: ExprId, ctx: Ctx, out :: String)
 // -----------------------------------------------------------------
 // the pieces
 //
-// NOT WALKED HERE. `gen_c_sink.zen` walks the format and picks the
-// writer for every hole, and this door's buffer IS a Sink, so the
-// pieces are that door's with a different sink under them. There were
-// two walks once and they drifted exactly as far as their writer sets:
-// this one wrote a `str` and reported everything else, so a Point in
-// `alloc.String("point {}", p)` was a diagnostic while the same Point
-// in `out.add("point {}", p)` was written.
+// Not walked here: `gen_c_sink.zen` walks the format and picks the
+// writer for every hole, and this door's buffer IS a Sink — so the
+// pieces are that door's, with a different sink under them (see the
+// file header for the drift this once caused).
 // -----------------------------------------------------------------
 
 write_buffer_pieces = (be :: CBackend, id: ExprId, c: Call, r: TyRes,
@@ -248,23 +241,20 @@ ok_payload = (be :: CBackend, tmp: str, out :: String)
 
 // `goto done; fail: ; zg_tN = Err(OutOfMemory);`
 //
-// THE TWO ERROR SETS MEET HERE AND NOWHERE ELSE. Every write reachable
-// from a `{}` answers `Res<(), WriteError>` and this door answers
-// `Res<String, AllocError>`; DESIGN.md has no conversion between them,
-// because the sets are not nested and narrowing does not exist. So the
-// reason is NAMED rather than carried: the one thing that can go wrong
-// writing into a String this door made a line ago is that it could not
-// GROW, and `OutOfMemory` is exactly that — `AllocError` has that one
-// variant and it is exact. The bootstrapper names it the same way and
-// says so at `full_of`.
+// The two error sets meet here and nowhere else. Every `{}` write
+// answers `Res<(), WriteError>`, this door answers `Res<String,
+// AllocError>`, and there is no conversion between the (non-nested)
+// sets. So the reason is NAMED rather than carried: the only thing that
+// can go wrong writing into a String this door just made is that it
+// couldn't GROW, which is exactly `OutOfMemory` — `AllocError`'s one
+// variant. The bootstrapper names it the same way at `full_of`.
 //
-// WIDENING THE DOOR'S DECLARED ERROR IS NOT THE ALTERNATIVE: 112
+// Widening the door's declared error is not the alternative: 112
 // corpus mains return `Res<i32, AllocError>` and call this, so a door
 // answering `WriteError` would need a narrowing at every one of them.
 //
-// THE CONVERSION SITS ON THE FAILING PATH ONLY. A succeeding walk
-// jumps over it, so nothing tests a value that is `Ok` by
-// construction, and the door's own answer is left where it already is.
+// The conversion sits on the failing path only — a succeeding walk
+// jumps over it, so nothing tests an already-`Ok` value.
 write_failure_arm = (be :: CBackend, ret: TyId, tmp: str, fail: usize,
                      done: usize) Res<(), AllocError> {
     write_goto(be, done).try();

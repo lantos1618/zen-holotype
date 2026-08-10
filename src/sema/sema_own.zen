@@ -1,50 +1,32 @@
 // src/sema/sema_own.zen
 // Who owns a value.
 //
-// PLAN.md stage 3. DESIGN.md's Ownership section is the law, and this
-// file takes the half of it that is about UNIQUENESS: `consume` is the
-// only move, a moved place is dead, and a partial move may not reach the
-// drop. Its three siblings take the other halves — `sema_recv.zen` who
-// may WRITE through a name, `sema_scope.zen` how long a block LASTS,
-// `sema_drop.zen` what may not be COPIED — and all four are driven from
-// here, because this is the file with the walk.
+// PLAN.md stage 3; DESIGN.md's Ownership section is the law. This file
+// covers UNIQUENESS — `consume` is the only move, a moved place is dead,
+// a partial move may not reach the drop. Siblings cover write access
+// (`sema_recv.zen`), block lifetime (`sema_scope.zen`), and copyability
+// (`sema_drop.zen`); all four are driven from here, the file with the
+// walk.
 //
-// A SECOND WALK, NOT A SECOND TYPE CHECKER. Everything in this folder is
-// a memoized query over a node; this is the one rule family that is not
-// a question about a node at all, because "was this binding already
-// moved out of" is a fact about the PATH taken to reach the node. So it
-// is a flow walk, run once per body, after typing — which is exactly the
-// shape `sema_decl.zen` already has for the rules nobody would ask.
+// A flow walk, not a memoized query, since "was this binding already
+// moved out of" is a fact about the PATH to the node. Runs once per
+// body, after typing, and never computes a type: by then the
+// block-local bindings typing put in `Checker.locals` are released, so
+// `type_of` on a name node would report a false undefined name. Types
+// come only from `Checker.expr_memo` or `OwnVar.ty`; missing either, the
+// rule does not fire.
 //
-// IT NEVER COMPUTES A TYPE, AND THAT IS A SAFETY PROPERTY RATHER THAN AN
-// OPTIMISATION. By the time this runs, the block-local bindings that
-// typing put in `Checker.locals` have been released, so asking
-// `type_of` about a name node would resolve it against an empty scope
-// and report an undefined name that the program does not contain. Every
-// type this file reads therefore comes from one of two places that
-// cannot report: `Checker.expr_memo`, which only ever answers what
-// typing already decided, and `OwnVar.ty`, which this walk recorded on
-// the way past. A type neither can supply means the rule does not fire.
+// Fails open: a false rejection makes a correct program uncompilable,
+// so an unresolved lookup answers "no opinion".
 //
-// FAIL OPEN, ALWAYS. A false rejection makes a correct program
-// uncompilable, and `src/` is a hundred and twenty modules of correct
-// program. So every lookup here answers "no opinion" when it cannot
-// answer, and each rule below states what it does when it does not know.
+// Tracks a place, not an expression — `consume p.left` is tracked,
+// `consume bufs[0]` is refused, since an element index is a runtime
+// value and "which element is dead" is not a fact the compiler holds.
 //
-// A PLACE, NOT AN EXPRESSION. `consume p.left` is tracked and
-// `consume bufs[0]` is refused, and the difference is the whole of what
-// a place is: a fixed name, or one fixed field of one. An element index
-// is a runtime value, so "which element is dead" is not a fact the
-// compiler holds; tracking whole bindings only would be too coarse to
-// see the field, and tracking arbitrary expressions would be a checker
-// with no bottom.
-//
-// THE JOIN IS "CONSUMED IF CONSUMED ANYWHERE". Match arms are
-// alternative paths and each starts from the state before the match, so
-// two arms that both consume one binding are not a double move; after
-// the match the binding is dead because it is dead on some path. A
-// closure body is the same join reached through a call rather than
-// through an arm — which is why `.then` is not opaque here.
+// Join = "consumed if consumed anywhere": match arms are alternative
+// paths from the pre-match state, so two arms consuming one binding is
+// not a double move. A closure body joins the same way through a call,
+// which is why `.then` is not opaque here.
 
 Ast, Expr, ExprId, Block, BlockId, Stmt, StmtKind, Bind, ExprStmt = ast
 Decl, DeclKind, Struct, Member, MemberKind, Function, Param = ast
@@ -66,13 +48,10 @@ check_scope_captured, is_scope_value, call_escapes = sema.sema_scope
 check_drop_copy = sema.sema_drop
 
 // One name this frame can see, and what the ownership rules know of it.
-//
-// `owned` is "this frame constructed the value", which is what separates
-// `consume p.left` from `consume env.argv`: a local is storage this
-// block will drop, and a parameter is a borrow whose owner is somewhere
-// up the stack. `ty` is recorded rather than asked for, for the reason
-// the header gives. `scoped` is "this binding names a block", which is
-// what makes capturing it a capture of the block — `sema_scope.zen`.
+// `owned` ("this frame constructed the value") separates `consume
+// p.left` from `consume env.argv` — local vs. borrowed. `ty` is
+// recorded rather than asked for (see header). `scoped` marks a binding
+// that names a block, so capturing it is a capture of the block.
 OwnVar* = {
     name*: str,
     ty*: TyId,
@@ -84,28 +63,20 @@ OwnVar* = {
 
 // A place that has been moved out of: a binding, or one of its fields.
 //
-// `root` is an index into `Own.vars` and not a name, so shadowing costs
-// nothing and releasing a scope is a comparison on the index. `field` is
-// empty for the whole binding. `span` is where the move was WRITTEN,
-// which is the position a loop's back edge reports against — the second
-// iteration's use of the dead binding is the `consume` itself.
+// `root` is an index into `Own.vars`, not a name, so shadowing costs
+// nothing. `field` is empty for the whole binding. `span` is where the
+// move was written — what a loop's back edge reports against.
 Place* = {
     root*: usize,
     field*: str,
     span*: Span,
 }
 
-// The walk's state. A stack with marks, exactly as `Checker.locals` is
-// and for the reason stated there: a chain of frames needs indirection
-// and every frame is an allocation. `escaped` is one more such mark:
-// how many bindings were visible OUTSIDE the innermost escaping closure
-// body, and zero when the walk is in none.
-//
-// `method` is the name of the method this body belongs to, or empty. It
-// is here because `self` is the one binding in a frame whose marker is
-// not the author's to change where it stands: the `::` that would permit
-// a write through it goes on the METHOD, so a refusal at that link is a
-// different sentence, and this is what it prints.
+// The walk's state: a stack with marks, like `Checker.locals`. `escaped`
+// is one more mark: how many bindings were visible outside the
+// innermost escaping closure body, zero when in none. `method` names
+// the method this body belongs to, or is empty — a refusal at `self`
+// (whose `::` goes on the METHOD, not the binding) prints it instead.
 Own* = {
     vars :: Vec<OwnVar>,
     dead :: Vec<Place>,
@@ -123,10 +94,9 @@ Own* = (a: Alloc) Res<Own, AllocError> {
 // the entry points
 // ---------------------------------------------------------------------
 
-// One function body. Called from `sema_decl.zen` with the body's own
-// context and with the parameters still bound, which is the only moment
-// at which a parameter's declared type and mutability can be read back
-// without re-deriving them.
+// One function body. Called from `sema_decl.zen` while parameters are
+// still bound — the only moment a parameter's declared type and
+// mutability can be read back without re-deriving them.
 check_own* = (c :: Checker, f: Function, body: BlockId, ctx: Ctx)
              Res<(), AllocError> {
     o ::= c.alloc.Own().try();
@@ -138,10 +108,8 @@ check_own* = (c :: Checker, f: Function, body: BlockId, ctx: Ctx)
 }
 
 // The method this body belongs to, when its first parameter is the
-// receiver. EMPTY FOR A TOP-LEVEL FUNCTION, where a parameter that
-// happens to be called `self` is an ordinary borrow — `receiver_is_
-// mutable` draws the same line for the same reason, and calling one is
-// not a dot.
+// receiver. Empty for a top-level function, where a parameter named
+// `self` is an ordinary borrow — calling it is not a dot.
 receiver_method = (f: Function, ctx: Ctx) str {
     (ctx.has_self && first_param_is_self(f)).match({
         true  => f.name.text,
@@ -158,9 +126,8 @@ first_param_is_self = (f: Function) bool {
 
 // A parameter is a borrow: the caller still owns it, so nothing may be
 // moved out through it, and `mutable` is the `::` the declaration wrote.
-//
-// `scoped: false` even for a parameter declared `s: Scope`, and that is
-// the one shape the capture rule does not see — see `sema_scope.zen`.
+// `scoped: false` even for `s: Scope` — the one shape the capture rule
+// does not see, see `sema_scope.zen`.
 own_params = (c :: Checker, o :: Own, f: Function) Res<(), AllocError> {
     f.params.loop((h, p) { own_param(c, o, p).try() });
     Ok(());
@@ -200,9 +167,8 @@ own_stmt = (c :: Checker, o :: Own, s: Stmt, ctx: Ctx) Res<(), AllocError> {
     })
 }
 
-// The value is read BEFORE the target is written, which is the order the
-// program runs in and the order the rules need: `f = consume f` reads a
-// live `f` and leaves a dead one.
+// The value is read before the target is written: `f = consume f` reads
+// a live `f` and leaves a dead one.
 own_bind = (c :: Checker, o :: Own, b: Bind, ctx: Ctx) Res<(), AllocError> {
     own_expr(c, o, b.value, ctx).try();
     check_drop_copy(c, o, b, ctx).try();
@@ -210,16 +176,12 @@ own_bind = (c :: Checker, o :: Own, b: Bind, ctx: Ctx) Res<(), AllocError> {
     Ok(());
 }
 
-// A binding target is a NAME the frame now owns, or a place written back
-// into. A write to a place that was moved out of REVIVES it — the hole
-// is filled, and a checker that never forgets would refuse the one fix
-// the author has.
-//
-// A PLACE IS ALSO A WRITE, and whether the markers on the path permit
-// one is `sema_recv.zen`'s rule, asked here because this is the walk
-// that knows a target from a value. A NAME is not passed to it: `n = 1`
-// is a fresh binding or an assignment depending on the scope below, and
-// that is a question only this file can answer.
+// A binding target is a name the frame now owns, or a place written
+// back into. A write to a place moved out of REVIVES it, filling the
+// hole. It is also checked against `sema_recv.zen`'s marker rule here,
+// since this walk knows a target from a value; a bare name is not
+// passed to it, since `n = 1` is a fresh binding or an assignment
+// depending on scope — a question only this file can answer.
 own_target = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
              Res<(), AllocError> {
     node = c.tree.expr_at(b.target);
@@ -231,9 +193,9 @@ own_target = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
     })
 }
 
-// A name already in scope is an assignment; a name that is not is a new
-// binding this frame owns. Zen spells both `x = e;`, so which one it is
-// is a question about the scope and not about the syntax.
+// A name already in scope is an assignment; one that isn't is a new
+// binding. Zen spells both `x = e;`, so which one it is is a question
+// about scope, not syntax.
 bind_name = (c :: Checker, o :: Own, b: Bind, text: str, span: Span,
              ctx: Ctx) Res<(), AllocError> {
     find_var(o, text).match({
@@ -328,9 +290,9 @@ use_name = (c :: Checker, o :: Own, node: Expr, text: str)
     })
 }
 
-// `p.left` is a place of its own and `p.right` beside it is untouched,
-// so the field is checked before the base is. Reaching the base too is
-// what makes `f.id` report `f` after `consume f`.
+// `p.left` is a place of its own; `p.right` beside it is untouched, so
+// the field is checked before the base. Reaching the base too is what
+// makes `f.id` report `f` after `consume f`.
 use_access = (c :: Checker, o :: Own, node: Expr, a: Access, ctx: Ctx)
              Res<(), AllocError> {
     path_root(c, o, a.base).match({
@@ -391,10 +353,9 @@ consume_field = (c :: Checker, o :: Own, node: Expr, a: Access, ctx: Ctx)
     })
 }
 
-// YOU MAY ONLY MOVE WHAT THIS FRAME OWNS. A parameter is a borrow, and a
-// handle is two words that a bitwise copy duplicates — moving out of one
-// would leave every other copy holding a dead value, and there is no
-// single binding the checker could mark dead to prevent that.
+// Only what this frame owns may move. A handle is two words a bitwise
+// copy duplicates — moving out of one would leave every other copy
+// holding a dead value, with no single binding to mark dead.
 consume_field_of = (c :: Checker, o :: Own, node: Expr, a: Access,
                     root: usize) Res<(), AllocError> {
     owned_at(o, root).match({
@@ -414,10 +375,9 @@ kill_field = (c :: Checker, o :: Own, node: Expr, a: Access, root: usize)
 // ---------------------------------------------------------------------
 // RULE: a partial move may not reach the drop
 //
-// Drop runs on the whole binding at scope exit, and a field that was
-// moved out is not there to drop. The diagnostic points at the binding
-// rather than at the move, because the binding is the thing about to be
-// dropped and "move the whole value or none of it" is the fix.
+// Drop runs on the whole binding at scope exit, and a moved-out field
+// isn't there to drop. The diagnostic points at the binding, not the
+// move, because "move the whole value or none of it" is the fix.
 // ---------------------------------------------------------------------
 
 check_partial_moves = (c :: Checker, o :: Own, mark: usize)
@@ -466,12 +426,11 @@ own_call = (c :: Checker, o :: Own, id: ExprId, k: Call, ctx: Ctx)
     Ok(());
 }
 
-// A LAMBDA ARGUMENT IS A PATH, NOT AN OPAQUE VALUE. Its body may or may
-// not run, so it joins like a match arm; and unless it is `.then` — the
-// one closure form in the language that runs at most once — it may run
-// AGAIN, so a move of anything declared outside it is a move the second
-// iteration finds already made. And it may OUTLIVE the call, which is
-// the other question the callee's signature answers — `call_escapes`.
+// A lambda argument is a path, not an opaque value: its body may or may
+// not run, so it joins like a match arm, and unless it is `.then` it may
+// run again, so a move of anything declared outside it is a move the
+// second iteration finds already made. It may also outlive the call,
+// per `call_escapes`.
 own_args = (c :: Checker, o :: Own, k: Call, ctx: Ctx)
            Res<(), AllocError> {
     repeats = repeating_body(c, k);
@@ -496,14 +455,12 @@ repeating_body = (c :: Checker, k: Call) bool {
     })
 }
 
-// The body is walked once from the state at the call. What it moved is
-// then either reported — a repeated body reaches its own back edge — or
-// simply kept, which is the join: dead on some path is dead.
-//
-// An ESCAPING body also marks what was visible outside it, and puts the
-// previous mark back on the way out. A body nested inside an escaping
-// one keeps the OUTER mark: the outer body is the one that outlives the
-// block, so a name it may not capture is closed to this one too.
+// Walked once from the state at the call; what it moved is reported (a
+// repeated body reaching its own back edge) or kept, dead on some path
+// is dead. An escaping body also marks what was visible outside it,
+// restoring the mark on exit; nested inside another escaping body it
+// keeps the OUTER mark, since a name the outer body may not capture is
+// closed to the inner one too.
 own_lambda = (c :: Checker, o :: Own, l: Lambda, ctx: Ctx, repeats: bool,
               escapes: bool) Res<(), AllocError> {
     dmark = o.dead.len;
@@ -522,8 +479,7 @@ own_lambda = (c :: Checker, o :: Own, l: Lambda, ctx: Ctx, repeats: bool,
 }
 
 // Everything moved inside the body that outlives it names a binding the
-// body did not declare, because `own_release` has already dropped the
-// ones it did.
+// body did not declare — `own_release` already dropped the ones it did.
 report_back_edge = (c :: Checker, o :: Own, dmark: usize)
                    Res<(), AllocError> {
     Range(dmark, o.dead.len).loop((h, i) {
@@ -554,9 +510,9 @@ own_match = (c :: Checker, o :: Own, m: Match, ctx: Ctx)
     Ok(());
 }
 
-// Each arm starts from the state before the match, which is what a
-// sequential walk gets wrong: two arms that both consume one binding are
-// one move on either path, not two on one.
+// Each arm starts from the state before the match — a sequential walk
+// would get this wrong, treating two arms that each consume one binding
+// as two moves rather than one move on either path.
 own_arm = (c :: Checker, o :: Own, a: Arm, dmark: usize,
            joined :: Vec<Place>, ctx: Ctx) Res<(), AllocError> {
     own_expr(c, o, a.body, ctx).try();
@@ -607,13 +563,10 @@ path_root* = (c :: Checker, o :: Own, id: ExprId) Res<usize> {
     })
 }
 
-// Whether a write through this name is permitted at all. It reads
-// `Own.vars`, which is why it lives here and not beside the receiver
-// rule that asks it: the state is this file's, and a field reached from
-// another module is a field that had to be starred to be reached.
-//
-// A name this frame does not bind is a global or a constant, and the
-// rule has no opinion about one — the fail-open direction.
+// Whether a write through this name is permitted at all. Lives here,
+// not beside the receiver rule that asks it, because it reads
+// `Own.vars`. A name this frame does not bind is a global or a
+// constant, and the rule has no opinion — the fail-open direction.
 var_mutable* = (o: Own, text: str) bool {
     find_var(o, text).match({
         None  => true,
@@ -622,12 +575,9 @@ var_mutable* = (o: Own, text: str) bool {
 }
 
 // Whether naming this here is an escaping body reaching out for a block
-// — the state half of `sema_scope.zen`'s third rule, living here for
-// the reason `var_mutable` above gives: the state is this file's.
-//
-// An index below the mark was declared OUTSIDE the escaping body, and
-// zero — "in no escaping body at all" — needs no special case, because
-// no index is below zero. So the one comparison is also the switch.
+// — the state half of `sema_scope.zen`'s third rule. An index below the
+// mark was declared outside the escaping body; zero ("in no escaping
+// body") needs no special case, since no index is below zero.
 captures_scope* = (o: Own, text: str) bool {
     find_var(o, text).match({
         None  => false,
@@ -681,7 +631,7 @@ take_all = (o :: Own) Res<(), AllocError> {
     Ok(());
 }
 
-// Leaving a scope drops its bindings AND everything said about them: a
+// Leaving a scope drops its bindings and everything said about them: a
 // place whose root is gone is not a place any more, and leaving the row
 // behind would let a later binding inherit its index and its death.
 own_release = (o :: Own, mark: usize) Res<(), AllocError> {
@@ -718,9 +668,9 @@ dotted_name = (c :: Checker, base: str, field: str) Res<str, AllocError> {
     Ok(out.view());
 }
 
-// WHAT TYPING ALREADY DECIDED, AND NOTHING MORE. A miss is not a reason
-// to compute one: see the header — computing a type here resolves names
-// against a scope this walk has already left.
+// What typing already decided, and nothing more. A miss is not a reason
+// to compute one: see the header — a type computed here would resolve
+// names against a scope this walk has already left.
 memo_type = (c :: Checker, id: ExprId) TyId {
     c.expr_memo.get(id).match({ Ok(ty) => ty, None => UNTYPED })
 }
@@ -742,10 +692,9 @@ var_type* = (o: Own, text: str) TyId {
     })
 }
 
-// The `TyId` that stands for "this file was never told". It is index 0,
-// which the store's construction order makes the first type interned;
-// nothing reads it as a type, only as the answer that turns every rule
-// above off.
+// The `TyId` that stands for "this file was never told" — index 0, the
+// first type the store's construction order interns; nothing reads it
+// as a type, only as the answer that turns every rule above off.
 UNTYPED* : TyId = TyId(index: 0)
 
 refuse* = (c :: Checker, span: Span, fault: SemaFault) Res<(), AllocError> {

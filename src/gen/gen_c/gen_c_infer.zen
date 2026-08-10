@@ -1,23 +1,18 @@
 // src/gen/gen_c/gen_c_infer.zen
-// WHAT THE ARGUMENTS SAY, when sema said nothing.
+// Infers what sema didn't record.
 //
-// Sema records what a call instantiated its callee at, and what a call
-// evaluates to — but ONLY INSIDE A BODY IT CHECKED, and it checks
-// top-level declarations only. Every call written inside a MEMBER body
-// therefore arrives with nothing recorded, and `Map<K, V>` is made of
-// them: `put(self.entries, .., entry)` is `put<Entry<K, V>>`, and only
-// the arguments say so.
+// Sema records a call's instantiation and value type only inside bodies
+// it checked (top-level decls). Calls inside MEMBER bodies get nothing
+// recorded, so `Map<K, V>`'s `put(self.entries, .., entry)` (really
+// `put<Entry<K, V>>`) must be inferred from the arguments alone.
 //
-// TWO ANSWERS, ONE QUESTION. `complete_inst` says what the callee was
-// instantiated at; `call_ret_type` says what the call is worth. They
-// share the instantiation deliberately — the type a temporary is
-// declared at and the symbol the call writes must not be able to
-// disagree, and they cannot when one derives the other.
+// `complete_inst` (callee instantiation) and `call_ret_type` (call's
+// value type) deliberately share the instantiation, so a temporary's
+// declared type and the call's symbol can never disagree.
 //
-// ASKED ONLY WHERE THE RECORDED ANSWER LEFT A PARAMETER FREE. A call
-// sema did settle is untouched: its answer is the one the type checker
-// agreed to, and re-deriving it would be a second, worse copy of a rule
-// that already exists.
+// Runs only where sema's answer left a parameter free; a call sema
+// already settled is left untouched — re-deriving it would just be a
+// worse copy of sema's own rule.
 
 Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Function, Param = ast
 Access, Call, Arg, Span, Ident, TypeId = ast
@@ -62,9 +57,8 @@ inferred_inst = (be :: CBackend, c: Call, d: Def, f: Function,
     settled_inst(be, f.tparams, d.qname, found)
 }
 
-// The parameter types AS WRITTEN, still in the callee's own parameters:
-// unification needs the `Vec<T>` and not what some other call made of
-// it.
+// Parameter types AS WRITTEN, not substituted — unification needs
+// `Vec<T>`, not what some other call made of it.
 written_params = (be :: CBackend, f: Function, dctx: Ctx,
                   out :: Vec<TyId>) Res<(), AllocError> {
     f.params.loop((h, p) { written_param(be, p, dctx, out).try() });
@@ -104,17 +98,15 @@ unify_against = (be :: CBackend, value: ExprId, d: TyId, ctx: Ctx,
     unify(be, d, actual, out)
 }
 
-// WHAT A CALL EVALUATES TO, at the instantiation the arguments settle.
+// What a call evaluates to, at the arguments' settled instantiation.
 //
-// Sema types a generic call as its DECLARED return — `Res<T, E>` — and
-// inside a member body there is no recorded instantiation to close it.
-// A TEMPORARY DECLARED AT THAT TYPE IS A C STRUCT WITH AN UNRESOLVED
-// ELEMENT: `Res<q, AllocError>`, which `cc` rejects and which every
-// `.try()` on a generic call would otherwise have to be refused for.
+// Sema types a generic call as its declared return (`Res<T, E>`); inside
+// a member body there's no recorded instantiation to close it, so a
+// temporary declared at that type is a C struct with an unresolved
+// element (`Res<q, AllocError>`), which `cc` rejects.
 //
-// The callee is resolved the way the lowering resolves it and the
-// instantiation is `complete_inst`'s, so the type a temporary is
-// declared at and the symbol the call writes cannot disagree.
+// Resolves the callee the way lowering does, using `complete_inst`'s
+// instantiation, so declared type and call symbol can't disagree.
 call_ret_type* = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx,
                   want: TyId) Res<TyId, AllocError> {
     be.tree.expr_at(c.callee).kind.match({
@@ -124,13 +116,12 @@ call_ret_type* = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx,
     })
 }
 
-// A MEMBER OF A BOUND IS NOT A DECLARATION THE WORLD HOLDS, so the walk
-// below finds nothing for `alloc.realloc(..)` and answers with the
-// caller's own guess — which is exactly the unsettled type the caller
-// came here to replace. `gen_c_bound.fat_ret_type` reads the SLOT
-// instead, and it is asked first because it answers only for a receiver
-// whose static type really is a bound with a member of that name and
-// arity; a concrete receiver has no record and falls straight through.
+// A bound's member isn't a declaration the World holds, so the walk
+// below finds nothing for `alloc.realloc(..)` and falls back to the
+// caller's own (unsettled) guess. `gen_c_bound.fat_ret_type` is tried
+// first since it only answers when the receiver's static type is a
+// bound with a matching member; a concrete receiver falls straight
+// through.
 access_ret_type = (be :: CBackend, id: ExprId, c: Call, a: Access, ctx: Ctx,
                    want: TyId) Res<TyId, AllocError> {
     fat_ret_type(be, c, a, ctx).try().match({
@@ -139,10 +130,9 @@ access_ret_type = (be :: CBackend, id: ExprId, c: Call, a: Access, ctx: Ctx,
     })
 }
 
-// ONE CANDIDATE OR NOTHING. A name with more than one declaration is an
-// overload, and picking between them is sema's rule — a second copy of
-// it here would be a worse one, and this query has an honest answer
-// without it: the type the caller already had.
+// One candidate or nothing — overload resolution is sema's rule;
+// duplicating it here would be worse than just returning the type the
+// caller already had.
 named_ret_type = (be :: CBackend, id: ExprId, c: Call, name: str,
                   recv: Res<ExprId>, ctx: Ctx, want: TyId)
                  Res<TyId, AllocError> {

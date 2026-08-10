@@ -1,25 +1,24 @@
 // src/gen/gen_c/gen_c_fold.zen
 // THE SIXTH SHAPE: an accumulator, and what a fold evaluates to.
 //
-// `gen_c_loop.zen` writes the five shapes that walk and discard. This
+// `gen_c_loop.zen` writes the five shapes that walk and discard; this
 // is the one that THREADS: "init seeds acc, acc threads through
 // iterations, the loop evaluates to the final acc — or to
-// `h.break(value)`, which is what makes the two forms one thing rather
-// than two."
+// `h.break(value)`, which is what makes the two forms one thing".
 //
-// THREE THINGS FOLLOW FROM THAT SENTENCE and this file is those three:
-//
-//   - `acc` IS ONE AUTOMATIC LOCAL. "index and acc thread BY VALUE, so
-//     no cell is heap-allocated" — so the seed is written into it
-//     before the first pass, and the body's OWN VALUE is written back
-//     into it at the end of every one. The assignment is the thread.
-//   - THE RESULT IS `Ok(acc)`, WRITTEN BEFORE THE BREAK LABEL. A fold
-//     that ran to the end has an answer where a walk has none; a
+// Three things follow, and this file is those three:
+//   - `acc` is ONE AUTOMATIC LOCAL. "index and acc thread BY VALUE, so
+//     no cell is heap-allocated" — seeded before the first pass, and
+//     the body's own value written back at the end of every one. The
+//     assignment IS the thread.
+//   - The result is `Ok(acc)`, WRITTEN BEFORE THE BREAK LABEL. A fold
+//     that ran to the end has an answer where a walk has none;
 //     `h.break(v)` jumps PAST that line, so the break's value wins.
-//     Writing it after the label is what makes a break silently return
-//     the accumulator, which is what `bootstrap/gen_c.py` does today.
-//   - A FOLD EVALUATES TO ITS ACCUMULATOR AND NOT TO WHAT IT WALKED:
-//     `Res<A>`, never `Res<T>`. The seed is what says which.
+//     Writing it after the label would make a break silently return
+//     the accumulator instead — which is what `bootstrap/gen_c.py`
+//     does today.
+//   - A fold evaluates to its accumulator, not what it walked:
+//     `Res<A>`, never `Res<T>`. The seed says which.
 
 Ast, Expr, ExprId, Lambda, Function, Param, Call, Access = ast
 Alloc, AllocError = std.mem
@@ -40,10 +39,10 @@ lower_walk, settle_res, bind_element = gen.gen_c.gen_c_loop
 Shape, shape_of, loop_element, loop_fn_at = gen.gen_c.gen_c_shape
 arg_value, recv_of = gen.gen_c.gen_c_shape
 
-// THE ACCUMULATOR A FOLD THREADS, and nothing at all for the five
-// shapes that do not. `acc` threads BY VALUE — "no cell is
-// heap-allocated" — so it is one automatic local written at the end of
-// every pass, which is exactly what the body's own value is.
+// The accumulator a fold threads, nothing for the five shapes that do
+// not. `acc` threads BY VALUE — "no cell is heap-allocated" — one
+// automatic local written at the end of every pass to the body's own
+// value.
 Fold* = {
     cell*: str,
     ty*: TyId,
@@ -55,14 +54,10 @@ no_fold* = (be :: CBackend) Res<Fold, AllocError> {
     Ok(Fold(cell: "", ty: unknown, has: false));
 }
 
-// THE SIXTH SHAPE. `init seeds acc, acc threads through iterations, the
-// loop evaluates to the final acc — or to `h.break(value)`, which is
-// what makes the two forms one thing rather than two."
-//
-// So the accumulator is ONE LOCAL, seeded before the first pass and
-// assigned the body's own value at the end of every one; and the loop's
-// result is `Ok(acc)` written where a walk writes nothing, because a
-// fold that ran to the end has an answer and a walk does not.
+// The sixth shape: the accumulator is ONE LOCAL, seeded before the
+// first pass and assigned the body's own value at the end of every
+// one; the loop's result is `Ok(acc)`, written where a walk writes
+// nothing — see the file header for why.
 lower_fold* = (be :: CBackend, id: ExprId, sh: Shape, args: Vec<ExprId>,
               lam: Lambda, ctx: Ctx, want: TyId, out :: String)
              Res<(), AllocError> {
@@ -191,12 +186,10 @@ call_seed = (be :: CBackend, c: Call) Res<ExprId> {
     })
 }
 
-// THE RESULT, WRITTEN BEFORE THE BREAK LABEL. A fold that ran to the
-// end has an answer where a walk has none — the temporary was seeded
-// `None` before the first pass, and this is the one place it becomes
-// `Ok(acc)`. `h.break(v)` jumps PAST this line, so the break's value
-// wins; writing it after the label is what makes a break silently
-// return the accumulator instead.
+// The result, written before the break label — see the file header.
+// The temporary was seeded `None` before the first pass; this is where
+// it becomes `Ok(acc)`, and `h.break(v)` jumps PAST this line so the
+// break's value wins.
 write_fold_result* = (be :: CBackend, st: LoopFrame, fold: Fold)
                      Res<(), AllocError> {
     (fold.has && st.has_result).match({

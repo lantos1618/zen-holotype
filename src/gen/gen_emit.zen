@@ -1,30 +1,23 @@
 // src/gen/gen_emit.zen
 // Where the bytes go, and the one rule that makes them reproducible.
 //
-// DETERMINISM IS A PROPERTY OF THIS FILE, not a thing to check for
-// afterwards. PLAN.md 0.4 and TESTING.md both make it the load-bearing
-// assumption — the fixpoint oracle, the strongest gate in the plan, is
-// worthless without it — so the two mechanisms that buy it live here
-// and nowhere else:
-//
+// DETERMINISM IS A PROPERTY OF THIS FILE, not checked for afterwards.
+// PLAN.md 0.4 / TESTING.md: the fixpoint oracle is worthless without it.
+// Two mechanisms buy it, both here only:
 //   - THE ONLY WAY OUT IS `Emit`. A backend never touches the caller's
-//     buffer, so there is one place a byte is written and one place to
-//     look when the output moves.
-//   - `order` IS THE ONLY WAY TO ORDER A COLLECTION. Anything gathered
-//     from a map, a module walk or a file list is emitted through it,
-//     sorted by a key that is a pure function of the thing. Nothing in
-//     this folder iterates a `Map`, and nothing emits in discovery
-//     order.
+//     buffer, so there's one place a byte is written.
+//   - `order` IS THE ONLY WAY TO ORDER A COLLECTION, sorted by a key
+//     that's a pure function of the thing. Nothing here iterates a
+//     `Map` or emits in discovery order.
 //
-// WHAT `Emit` DOES NOT DO IS AS DELIBERATE. It does not wrap lines, it
-// does not know what C is, and it has no opinion about where a brace
-// goes. It is a buffer, a depth and a newline rule; the shape of the
-// output belongs to the backend that writes it.
+// `Emit` deliberately does NOT wrap lines, know what C is, or place
+// braces — it's a buffer, a depth, and a newline rule; output shape
+// belongs to the backend.
 //
-// THE BUFFER IS READ BACK OFF THE `Emit`, never returned beside it.
-// A `String` owns a `Vec`, so a copy diverges from the original the
-// first time either grows — the same reason `Parser` holds the `Ast`
-// rather than handing it back.
+// THE BUFFER IS READ BACK OFF THE `Emit`, never returned beside it — a
+// `String` owns a `Vec`, so a copy diverges from the original on first
+// growth (same reason `Parser` holds the `Ast` rather than handing it
+// back).
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -41,10 +34,9 @@ Emit* = {
     text :: String,
     depth :: usize,
 
-    // A newline has been written and nothing since, so the next byte
-    // starts a line and must indent first. Tracking it here rather than
-    // at every call site is what keeps a blank line blank: a line with
-    // nothing on it never gets its indent.
+    // A newline was just written; the next byte starts a line and must
+    // indent first. Tracked here, not per call site, so a blank line
+    // stays blank — nothing on it, no indent.
     fresh :: bool,
 
     // -----------------------------------------------------------------
@@ -61,21 +53,17 @@ Emit* = {
         self.text.add_byte(b)
     }
 
-    // A decimal, no separators, most significant digit first.
-    //
-    // It is here rather than in the backend because every backend
-    // writes numbers and none of them should write digits. `std.text`
-    // has no `AllocError`-only integer writer — the format machinery
-    // speaks `WriteError`, the union — which is recorded as a std gap
-    // in docs/SEMA_BOOTSTRAP_FIXES.md; until it exists, this borrows
-    // sema's.
+    // A decimal, no separators, most significant digit first. Lives
+    // here (not per-backend) since every backend writes numbers.
+    // `std.text` has no `AllocError`-only integer writer — the format
+    // machinery speaks `WriteError` (std gap, docs/SEMA_BOOTSTRAP_FIXES.md)
+    // — so this borrows sema's until one exists.
     number* = (self :: @Self, v: usize) Res<(), AllocError> {
         self.open_line().try();
         write_usize(self.text, v)
     }
 
-    // End the line. A blank line is `line` twice and gets no indent,
-    // which is the whole reason `fresh` is a field.
+    // End the line. A blank line is `line` twice and gets no indent.
     line* = (self :: @Self) Res<(), AllocError> {
         self.text.add_byte('\n').try();
         self.fresh = true;
@@ -107,9 +95,8 @@ Emit* = {
 
     indent* = (self :: @Self) () { self.depth = self.depth + 1; }
 
-    // Saturating, because an unbalanced backend should produce ugly C
-    // and not a trap: a wrong indent is a bug you can read, and an
-    // aborted compilation is one you cannot.
+    // Saturating: an unbalanced backend should produce ugly, readable C,
+    // not an aborted compilation.
     dedent* = (self :: @Self) () {
         (self.depth > 0).then(() { self.depth = self.depth - 1; });
     }
@@ -123,26 +110,24 @@ Emit* = {
     len* = (self: @Self) usize { self.text.len() }
 }
 
-// `alloc.Emit()` — a ufcs function whose first parameter is an Alloc,
-// beside the type it builds, exactly as `Vec`, `Map`, `Ast` and `Types`
-// are. It allocates its buffer at once and says so.
+// `alloc.Emit()` — ufcs constructor beside the type it builds, like
+// `Vec`, `Map`, `Ast`, `Types`. Allocates its buffer up front.
 Emit* = (a: Alloc) Res<Emit, AllocError> {
     Ok(Emit(text: a.String().try(), depth: 0, fresh: true));
 }
 
 // THE ONE ORDERING PRIMITIVE. The positions of `keys`, rearranged so
-// that reading them in the returned order reads the keys in
-// lexicographic byte order.
+// reading them in the returned order reads `keys` in lexicographic byte
+// order.
 //
-// A permutation rather than a sorted copy, so the caller keeps whatever
-// it is the keys belong to — a declaration, a type, a function — and
-// this file never has to know what that is.
+// A permutation, not a sorted copy, so the caller keeps whatever the
+// keys belong to (a declaration, a type, a function) without this file
+// needing to know what that is.
 //
-// Insertion sort, and STABLE: two equal keys keep their input order, so
-// a duplicate name (which a backend should be reporting, not silently
-// reordering) does not move under a shuffled input. A translation unit
-// has hundreds of top-level names and never millions, so the version
-// with nothing to get wrong is the right one.
+// Insertion sort, STABLE: equal keys keep input order, so a duplicate
+// name (a backend should report that, not silently reorder it) doesn't
+// move under shuffled input. Hundreds of top-level names per unit, never
+// millions — the simplest-to-verify version is the right one.
 order* = (a: Alloc, keys: Vec<String>) Res<Vec<usize>, AllocError> {
     out ::= a.Vec<usize>();
     Range(0, keys.len).loop((h, i) {
@@ -167,10 +152,9 @@ insert_ordered = (out :: Vec<usize>, keys: Vec<String>, i: usize)
     Ok(());
 }
 
-// `keys[i]` strictly before `keys[j]`. Strict, so equal keys never
-// swap and the sort stays stable. The ordering itself is
-// `std.text`'s — "orders two byte strings lexicographically" names no
-// module, so it belongs beside `str.eq` and not here.
+// `keys[i]` strictly before `keys[j]` — strict, so equal keys never
+// swap and the sort stays stable. Ordering itself is `std.text`'s,
+// beside `str.eq`, not here.
 earlier = (keys: Vec<String>, i: usize, j: usize) bool {
     view_at(keys, i).before(view_at(keys, j))
 }
@@ -183,12 +167,10 @@ index_at = (v: Vec<usize>, i: usize) usize {
     v.get(i).match({ Ok(n) => n, None => 0 })
 }
 
-// `Vec.set` refuses an index past the end with a bare `Res<()>` — an
-// absence, carrying no reason — and `.try()` will not lift one into a
-// function that returns `Res<_, AllocError>`, because "a None never
-// becomes an Err". Both indices here are in range by construction, so
-// this names the only reason a refusal could mean anything and moves
-// on. `sema_ty.zen` carries the same five lines for the same reason.
+// `Vec.set` refuses an out-of-range index with a bare `Res<()>` (no
+// reason), and `.try()` won't lift a `None` into `Res<_, AllocError>`.
+// Both indices here are in range by construction; `sema_ty.zen` carries
+// the same five lines for the same reason.
 put = (out :: Vec<usize>, i: usize, v: usize) Res<(), AllocError> {
     out.set(i, v).match({
         None  => Err(AllocError.OutOfMemory),

@@ -1,36 +1,29 @@
 // src/sema/sema_raise.zen
-// What a body raises, and the signature that is inferred from it.
+// What a body raises, and the signature inferred from it.
 //
-// `Res<T, _>` says the error set is a fact about the body and not
-// something the author will repeat. Nothing computed it, so every
-// `.try()` of such a function was answered with "no implicit error
-// conversion: expected CfgError, found _" — a diagnostic about a hole,
-// naming the hole as if it were a type.
+// `Res<T, _>` says the error set is a fact about the body, not
+// something the author repeats. Before this file computed it, every
+// `.try()` of such a function got "no implicit error conversion:
+// expected CfgError, found _" — a diagnostic naming the hole as if it
+// were a type.
 //
-// LAW 6 IS THE WHOLE RULE, and it is why this is not simply "infer
-// everything": "inferred inside the module, written at the boundary". A
-// private function's set is derivable from its body, and writing it out
-// is a second place to be wrong. An exported one crosses a module
-// boundary, so its type is part of what crossed and the compiler will
-// not invent it — which is what `InferredSetExported` says, and it is
-// declared in `sema_diag.zen` for exactly this.
+// Law 6 is the whole rule: "inferred inside the module, written at the
+// boundary". A private function's set is derivable from its body
+// (writing it out is a second place to be wrong); an exported one
+// crosses a module boundary, so the compiler won't invent its type
+// (`InferredSetExported`, in `sema_diag.zen`).
 //
-// TWO SOURCES, AND BOTH ARE NEEDED. A `.try()` propagates its callee's
-// set through this frame and drops it in the accumulator on the way
-// past; a body that ends in `Err(..)` never propagates anything and
-// shows its set only in the type of the block. `parse_pair` has the
-// first and no second, `read_num` has the second and no first, and the
-// pair of them is the case TESTING.md names.
+// TWO SOURCES, BOTH NEEDED: a `.try()` propagates its callee's set into
+// the accumulator; a body ending in `Err(..)` never propagates and
+// shows its set only in the block's own type. `parse_pair` has the
+// first, `read_num` the second — the pair TESTING.md names.
 //
-// THE ANSWER IS WRITTEN BACK INTO THE MEMO for the return type's own
-// node, which is what makes it visible to everyone else: a caller asks
-// `type_from_ast` of the callee's signature and gets the settled set,
-// and so does gen_c, which reads the same store after sema is done.
-// That makes the inference ORDER-DEPENDENT — a caller checked before
-// its callee sees `_` — and declaration order is what currently saves
-// it. The honest fix is to make this a query the callee's signature
-// pulls on demand rather than a fact its body pushes, and that is
-// bigger than the hole it would close.
+// Written back into the MEMO for the return type's own node, which is
+// what a caller's `type_from_ast` and gen_c both read after sema is
+// done — making inference ORDER-DEPENDENT (a caller checked before its
+// callee sees `_`), saved only by declaration order. A query the
+// callee's signature pulls on demand would be the honest fix, bigger
+// than this hole warrants.
 
 Function, Ident, Type, TypeId, Span = ast
 AllocError = std.mem
@@ -52,10 +45,10 @@ settle_raised* = (c :: Checker, f: Function, ctx: Ctx, got: TyId,
     })
 }
 
-// The declared error, when the author wrote `_` for it. Nothing for a
-// function that named its set, or that returns no `Res` at all — in
-// both of those the raised list is dropped and the ordinary containment
-// rule has already reported anything wrong with it.
+// The declared error, when the author wrote `_` for it — `None` for a
+// function that named its set or returns no `Res` at all; the raised
+// list is dropped there since the ordinary containment rule already
+// reported anything wrong.
 inferred_error = (c :: Checker, ret: TyId) Res<TyId> {
     c.types.at(ret).match({
         Res(r) => infer_hole(c, r),
@@ -78,9 +71,9 @@ settle_signature = (c :: Checker, f: Function, ctx: Ctx, got: TyId,
     write_ret(c, f, ctx, set)
 }
 
-// `*` means this name crosses a module boundary, and a type that
-// crosses is written. The set is still settled after the report, so one
-// unwritten signature is one diagnostic and not one per call site.
+// `*` means this name crosses a module boundary, and a crossing type is
+// written. The set is still settled after the report, so one unwritten
+// signature is one diagnostic, not one per call site.
 report_if_exported = (c :: Checker, f: Function) Res<(), AllocError> {
     f.exported.match({
         false => Ok(()),
@@ -88,9 +81,9 @@ report_if_exported = (c :: Checker, f: Function) Res<(), AllocError> {
     })
 }
 
-// The report lands on the `_`, because the `_` is what the author has
-// to replace. Naming the function instead would point at the one token
-// in the line that is already correct.
+// Lands on the `_`, since that's what the author has to replace —
+// naming the function instead would point at the one token already
+// correct.
 report_hole = (c :: Checker, f: Function) Res<(), AllocError> {
     span = hole_span(c, f).match({ None => f.name.span, Ok(s) => s });
     c.report(span.file, span,
@@ -119,8 +112,8 @@ arg_span = (c :: Checker, args: Vec<TypeId>, i: usize) Res<Span> {
 }
 
 // The block's own type carries what a body raises by ENDING in it:
-// `Err(CfgError.Bad)` is the value of the block, never a propagation,
-// so nothing put it in the accumulator.
+// `Err(CfgError.Bad)` is the block's value, never a propagation, so
+// nothing put it in the accumulator.
 body_error = (c :: Checker, got: TyId, raised :: Vec<TyId>)
              Res<(), AllocError> {
     c.types.at(got).match({
@@ -137,9 +130,9 @@ keep_error = (c :: Checker, r: TyRes, raised :: Vec<TyId>)
     })
 }
 
-// An absence carries `()` as its error and an unresolved one carries
-// poison. Neither is a member of anybody's set, and adding either would
-// make `Res<i32, _>` settle as a set containing `()`.
+// An absence carries `()` as its error, an unresolved one poison —
+// neither is a member of anybody's set; adding either would make
+// `Res<i32, _>` settle as a set containing `()`.
 carries_error = (c :: Checker, r: TyRes) bool {
     c.is_infer(r.error).match({
         true  => false,
@@ -154,7 +147,7 @@ real_error = (c :: Checker, r: TyRes) bool {
     })
 }
 
-// The memo for the return type's own node, rewritten in place. Everyone
+// The memo for the return type's own node, rewritten in place — everyone
 // who asks what this signature means asks that node.
 write_ret = (c :: Checker, f: Function, ctx: Ctx, set: TyId)
             Res<(), AllocError> {

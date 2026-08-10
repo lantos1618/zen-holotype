@@ -2,32 +2,25 @@
 // What a FIXED ARRAY is in C: its layout, its two literal forms, its
 // bounds-checked index, and the walk that makes it a Range.
 //
-// ONE FILE BECAUSE IT IS ONE SUBJECT, and the four parts are not
-// separable. The layout decides the member name, the literals write
-// through that member, the index reads through it, and the walk reads
-// through it once per pass — so splitting them by which caller asks
-// would put one C spelling in four files and give it four chances to
-// drift. Every other file in this folder holds a one-line arm that
-// lands here.
+// ONE FILE, ONE SUBJECT: the layout decides the member name, the
+// literals write through it, the index reads through it, the walk reads
+// through it once per pass. Splitting by caller would put one C
+// spelling in four files with four chances to drift.
 //
-// A `[T, N]` IS A STRUCT AROUND A C ARRAY and not a bare `T[N]`. C
-// arrays do not assign, do not pass by value and do not return; a Zen
-// fixed array does all three — "lives on the stack, no alloc" —  and
-// wrapping it is the one representation that gives C's own value
-// semantics to something C spells as a pointer everywhere else.
+// A `[T, N]` IS A STRUCT AROUND A C ARRAY, not a bare `T[N]`: C arrays
+// don't assign, pass by value, or return, but a Zen fixed array does all
+// three ("lives on the stack, no alloc") — wrapping gives it C's own
+// value semantics.
 //
-// THE COUNT COMES FROM THE TYPE AND NEVER FROM THE EXPRESSION. It is
-// `TyArray.count`, interned, which is what "the count is part of the
-// type" buys: the bounds check needs no length stored beside the bytes,
-// and the array a `Res` carries has the same length as the one that was
-// written.
+// THE COUNT COMES FROM THE TYPE, NEVER THE EXPRESSION — `TyArray.count`,
+// interned, so the bounds check needs no length stored beside the
+// bytes, and a `Res`-carried array has the length that was written.
 //
-// A FIXED ARRAY SATISFIES `Range` INTRINSICALLY, and `std/core/range.zen`
-// says why it can be nothing else: "`[T, N]` is a type constructor, not
-// a name, so there is no `[T, N].impl(..)` to write". Its start is 0,
-// its end is the comptime count, and its `at` is the index below — so
-// the walk needs no `at` call and no `Res` per pass, which is what keeps
-// a fold over one a plain C for-loop.
+// A FIXED ARRAY SATISFIES `Range` INTRINSICALLY (`std/core/range.zen`:
+// "`[T, N]` is a type constructor, not a name, so there is no `[T,
+// N].impl(..)` to write"). Start is 0, end is the comptime count, `at`
+// is the index below — no `at` call or `Res` per pass, so a fold stays
+// a plain C for-loop.
 
 ExprId, ArrayLit, FixedArray, Index, Lambda = ast
 AllocError = std.mem
@@ -68,11 +61,11 @@ array_of* = (be :: CBackend, id: TyId) Res<TyArray> {
 
 // `struct zg_a4_bi32 { int32_t zg_elems[4]; };`
 //
-// A COUNT OF ZERO STILL TAKES ONE ELEMENT. C99 6.7.5.2 forbids a zero
-// length array member, and a `[T, 0]` is reachable — an empty literal,
-// or a count that folded to nothing — so the storage is widened rather
-// than the C left to be rejected. Nothing indexes it: the bounds check
-// compares against the TYPE's count, which is still zero.
+// A COUNT OF ZERO STILL TAKES ONE ELEMENT: C99 6.7.5.2 forbids a
+// zero-length array member, and `[T, 0]` is reachable (empty literal, or
+// a count folded to nothing), so storage is widened rather than left for
+// `cc` to reject. Nothing indexes it — the bounds check compares
+// against the TYPE's count, still zero.
 write_array_def* = (be :: CBackend, out :: Emit, name: str, a: TyArray)
                    Res<(), AllocError> {
     out.bytes("struct ").try();
@@ -116,13 +109,12 @@ lower_fixed_array* = (be :: CBackend, id: ExprId, f: FixedArray, ctx: Ctx,
     write_elems(be, id, f.elems, ty, ctx, out)
 }
 
-// `((struct zg_a4_bi32){ { 2, 3, 5, 7 } })` — the inner braces are the
-// member, the outer ones the struct.
+// `((struct zg_a4_bi32){ { 2, 3, 5, 7 } })` — inner braces are the
+// member, outer ones the struct.
 //
-// A literal whose type is not an array is a literal nothing typed, and
-// it is refused with a position rather than emitted at a guess: the C
-// for `[0, 1, 2]` at an unknown element type would compile and hold the
-// wrong number of bytes.
+// A literal whose type isn't an array is refused with a position rather
+// than emitted at a guess: `[0, 1, 2]` at an unknown element type would
+// compile and hold the wrong number of bytes.
 write_elems = (be :: CBackend, id: ExprId, elems: Vec<ExprId>, ty: TyId,
                ctx: Ctx, out :: String) Res<(), AllocError> {
     array_of(be, ty).match({
@@ -160,15 +152,13 @@ write_elem_list = (be :: CBackend, elems: Vec<ExprId>, a: TyArray,
 // the index
 // -----------------------------------------------------------------
 
-// `buf[i]` on a fixed array is BOUNDS-CHECKED AND TRAPS, and this is the
-// whole of that rule in the backend: the count comes from the type, so
-// nothing is stored beside the bytes and nothing has to be read to check.
+// `buf[i]` on a fixed array is BOUNDS-CHECKED AND TRAPS: count comes
+// from the type, so nothing is stored beside the bytes to check.
 //
-// TWO HELPERS AND THE INDEX'S OWN TYPE PICKS ONE. A signed index has to
-// be tested for negativity as well as for the length, and testing it
-// through an unsigned comparison alone would let `-1` wrap into a
-// gigantic index that passes — which is exactly the check that reads one
-// element past the end with no diagnostic. `zg_idx_s` makes the split.
+// TWO HELPERS, the index's own type picks one. A signed index needs a
+// negativity test too — an unsigned comparison alone lets `-1` wrap into
+// a huge index that passes, reading one element past the end with no
+// diagnostic. `zg_idx_s` makes that split.
 write_array_index* = (be :: CBackend, ix: Index, base_ty: TyId, a: TyArray,
                      ctx: Ctx, out :: String) Res<(), AllocError> {
     out.add_bytes("(").try();
@@ -210,11 +200,10 @@ helper_of = (be :: CBackend, ity: TyId) str {
 // the walk
 //
 // `lower_bounded` in `gen_c_loop.zen` is the same shape with two reads
-// swapped: a concrete `Range` takes its bounds off the struct's own
-// `start` and `end`, and an array's are 0 and a constant the type
-// already knows. What it CANNOT share is the value handed to the body —
-// an element, not the counter — which is what an array's intrinsic `at`
-// comes to.
+// swapped: a concrete `Range` takes bounds off `start`/`end`, an
+// array's are 0 and a type-known constant. What it can't share is the
+// value handed to the body — an element, not the counter — an array's
+// intrinsic `at`.
 // -----------------------------------------------------------------
 
 lower_array_walk* = (be :: CBackend, sh: Shape, one: ExprId, rty: TyId,
@@ -264,10 +253,8 @@ write_count = (be :: CBackend, a: TyArray) Res<(), AllocError> {
     be.write(text.view())
 }
 
-// The element at the counter, read straight through the member. The walk
-// never leaves the range — the counter is tested against the same count
-// the check would compare against — so there is no helper call here and
-// the fold stays a plain C for-loop.
+// The element at the counter, read straight through the member — no
+// helper call, since the walk never leaves the range being checked.
 write_pass_value = (be :: CBackend, rng: str, counter: str, out :: String)
                    Res<(), AllocError> {
     out.add_bytes(rng).try();
