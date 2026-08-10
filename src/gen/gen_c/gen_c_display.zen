@@ -24,13 +24,14 @@ str, String = std.text
 TyId = sema.sema_ty
 Def = sema.sema_def
 Checker = sema.sema_check
-sym_fn, sym_gen, sym_variant, RES_PATH = gen.gen_name
-CBackend, MethodRef = gen.gen_c.gen_c_state
+sym_gen, sym_variant, RES_PATH = gen.gen_name
+CBackend = gen.gen_c.gen_c_state
 ctype, declarator, request_type = gen.gen_c.gen_c_type
 recv_inst = gen.gen_c.gen_c_mono
 Site, site_of, member_at = gen.gen_c.gen_c_member
 impl_member_of, by_arity = gen.gen_c.gen_c_impl
-method_sig, join = gen.gen_c.gen_c_member
+by_ref = gen.gen_c.gen_c_call
+method_sig, member_symbol = gen.gen_c.gen_c_member
 Slot, slots_of = gen.gen_c.gen_c_fat
 
 // -----------------------------------------------------------------
@@ -90,10 +91,6 @@ write_display_call = (be :: CBackend, ty: TyId, s: Site, f: Function,
         true  => Ok(false),
         false => with_console(be, ty, s, f, text),
     })
-}
-
-by_ref = (f: Function, i: usize) bool {
-    f.params.get(i).match({ Ok(p) => p.mutable, None => false })
 }
 
 with_console = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str)
@@ -159,13 +156,7 @@ display_call = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str,
     inst = recv_inst(be, ty).try();
     sig ::= be.alloc.Vec<TyId>();
     method_sig(be, ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
-    qname ::= be.alloc.String().try();
-    join(qname, s.qname, "toString").try();
-    sym ::= be.alloc.String().try();
-    sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
-    be.need_method(MethodRef(self_ty: ty, decl: s.decl, name: "toString",
-                             sig: sig, qname: qname.view()),
-                   inst, sym.view()).try();
+    sym = member_symbol(be, ty, s, "toString", sig, inst).try();
     out.add_bytes(sym.view()).try();
     out.add_bytes("(").try();
     out.add_bytes(text).try();

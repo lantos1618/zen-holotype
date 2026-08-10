@@ -39,7 +39,7 @@ ctype, declarator, request_type, is_signed = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
 write_position = gen.gen_c.gen_c_op
 open_result, close_pass, run_body = gen.gen_c.gen_c_loop
-declare_usize, settle_res = gen.gen_c.gen_c_loop
+declare_usize, settle_res, walk_temp = gen.gen_c.gen_c_loop
 
 // The one member every fixed-array struct has. Written out rather than
 // composed, because the layout, the literals, the index and the walk all
@@ -211,17 +211,7 @@ lower_array_walk* = (be :: CBackend, sh: Shape, one: ExprId, rty: TyId,
                     fold: Fold, out :: String) Res<(), AllocError> {
     settled = settle_res(be, want, a.elem).try();
 
-    // the array is evaluated ONCE, into a temporary: every pass is a
-    // read of it, and re-evaluating the expression per pass would walk a
-    // fresh array each time
-    rng ::= be.alloc.String().try();
-    sym_gen(rng, "r", be.next_tmp()).try();
-    decl ::= be.alloc.String().try();
-    declarator(be, rty, rng.view(), decl).try();
-    decl.add_bytes(" = ").try();
-    expr(be, one, ctx, rty, decl).try();
-    decl.add_bytes(";").try();
-    be.writeln(decl.view()).try();
+    rng = walk_temp(be, one, rty, ctx).try();
 
     st = open_result(be, settled, out).try();
     counter ::= be.alloc.String().try();

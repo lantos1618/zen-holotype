@@ -52,16 +52,17 @@ GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 LocalSlot, LoopFrame = gen.gen_c.gen_c_frame
 unsupported, unresolved, untyped = gen.gen_c.gen_c_report
-ctype, declarator, is_unit = gen.gen_c.gen_c_type
+ctype, declarator, is_unit, declared_ret = gen.gen_c.gen_c_type
 open, intern_res_open, recv_inst, sub_with = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 expr, ty_of = gen.gen_c.gen_c_expr
 Dest, block, write_dest, deliver = gen.gen_c.gen_c_stmt
 write_label, open_result, close_pass = gen.gen_c.gen_c_loop
 Shape = gen.gen_c.gen_c_shape
-run_body, declare_usize, settle_res = gen.gen_c.gen_c_loop
+run_body, declare_usize, settle_res, walk_temp = gen.gen_c.gen_c_loop
 Fold, no_fold = gen.gen_c.gen_c_fold
 array_of = gen.gen_c.gen_c_array
+impl_field = gen.gen_c.gen_c_impl
 
 // -----------------------------------------------------------------
 // a range that STORES its bounds
@@ -199,33 +200,6 @@ add_from_start = (be :: CBackend, n: TyNamed, im: Impl, mi: usize,
     })
 }
 
-// The expression an impl supplies for a computed field.
-impl_field = (be :: CBackend, im: Impl, name: str)
-             Res<Res<ExprId>, AllocError> {
-    found ::= be.alloc.Vec<ExprId>();
-    im.members.loop((h, m) { keep_field_value(m, name, found).try() });
-    Ok(found.get(0));
-}
-
-keep_field_value = (m: Member, name: str, out :: Vec<ExprId>)
-                   Res<(), AllocError> {
-    member_named(m, name).match({
-        false => Ok(()),
-        true  => add_field_value(m, out),
-    })
-}
-
-add_field_value = (m: Member, out :: Vec<ExprId>) Res<(), AllocError> {
-    m.kind.match({
-        Field(fl) => add_written_value(fl, out),
-        _         => Ok(()),
-    })
-}
-
-add_written_value = (fl: Field, out :: Vec<ExprId>) Res<(), AllocError> {
-    fl.value.match({ Ok(e) => out.add(e), None => Ok(()) })
-}
-
 // The function an impl supplies under `name`, with a body. A required
 // member — `at ::= (..) Res<T>` with no body — is what the impl OWES
 // rather than what it supplies.
@@ -330,14 +304,6 @@ at_ret = (be :: CBackend, rty: TyId, ri: RangeImpl, f: Function)
     Ok(keep_res(be, got));
 }
 
-declared_ret = (be :: CBackend, f: Function, sctx: Ctx)
-               Res<TyId, AllocError> {
-    f.ret.match({
-        Ok(t) => be.check.type_from_ast(t, sctx),
-        None  => be.check.types.prim("()"),
-    })
-}
-
 keep_res = (be :: CBackend, got: TyId) Res<TyId> {
     be.check.types.at(got).match({
         Res(_) => Ok(got),
@@ -408,17 +374,7 @@ lower_impl_walk = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
     elem = res_value_of(be, pass).match({ Ok(t) => t, None => pass });
     settled = settle_res(be, want, elem).try();
 
-    // the range is evaluated ONCE, into a temporary: `start`, `end` and
-    // every `at` are reads of it, and re-evaluating the expression
-    // between them would walk several different ranges
-    rng ::= be.alloc.String().try();
-    sym_gen(rng, "r", be.next_tmp()).try();
-    decl ::= be.alloc.String().try();
-    declarator(be, rty, rng.view(), decl).try();
-    decl.add_bytes(" = ").try();
-    expr(be, one, ctx, rty, decl).try();
-    decl.add_bytes(";").try();
-    be.writeln(decl.view()).try();
+    rng = walk_temp(be, one, rty, ctx).try();
 
     st = open_result(be, settled, out).try();
     counter ::= be.alloc.String().try();

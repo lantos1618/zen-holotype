@@ -33,17 +33,16 @@ Checker, Ctx = sema.sema_check
 Inst = sema.sema_inst
 self_ctx = sema.sema_member
 type_from_ast = sema.sema_type
-sym_fn = gen.gen_name
-CBackend, MethodRef = gen.gen_c.gen_c_state
+CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 sub_with, any_open, recv_inst, inst_open = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
-is_ptr_named = gen.gen_c.gen_c_type
+is_ptr_named, declared_ret = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
 write_arg = gen.gen_c.gen_c_call
 Site, site_of, member_at = gen.gen_c.gen_c_member
 bodied_fn, impl_member = gen.gen_c.gen_c_impl
-method_sig, join = gen.gen_c.gen_c_member
+method_sig, member_symbol = gen.gen_c.gen_c_member
 array_of, write_array_index = gen.gen_c.gen_c_array
 
 lower_index* = (be :: CBackend, id: ExprId, ix: Index, ctx: Ctx,
@@ -115,10 +114,7 @@ index_ret = (be :: CBackend, rty: TyId, s: Site, f: Function)
             Res<TyId, AllocError> {
     sctx = be.check.self_ctx(s.decl.module.to_usize(), rty).try();
     mark = enter_struct_tparams(be, s.decl).try();
-    declared = f.ret.match({
-        Ok(t) => be.check.type_from_ast(t, sctx),
-        None  => be.check.types.prim("()"),
-    }).try();
+    declared = declared_ret(be, f, sctx).try();
     leave_tparams(be, mark).try();
     inst = recv_inst(be, rty).try();
     sub_with(be, declared, inst)
@@ -192,12 +188,7 @@ write_index_call = (be :: CBackend, id: ExprId, ix: Index, rty: TyId,
 emit_index_call = (be :: CBackend, ix: Index, rty: TyId, s: Site,
                    f: Function, sig: Vec<TyId>, inst: Inst, ctx: Ctx,
                    out :: String) Res<(), AllocError> {
-    qname ::= be.alloc.String().try();
-    join(qname, s.qname, "index").try();
-    sym ::= be.alloc.String().try();
-    sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
-    be.need_method(MethodRef(self_ty: rty, decl: s.decl, name: "index",
-                             sig: sig, qname: qname.view()), inst, sym.view()).try();
+    sym = member_symbol(be, rty, s, "index", sig, inst).try();
     out.add_bytes(sym.view()).try();
     out.add_bytes("(").try();
     write_arg(be, ix.base, 0, f, sig, ctx, out).try();

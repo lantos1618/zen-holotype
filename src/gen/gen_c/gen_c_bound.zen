@@ -40,12 +40,12 @@ unsupported = gen.gen_c.gen_c_report
 sub_with, open, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 unify, arg_type = gen.gen_c.gen_c_mono
 enter_struct_tparams = gen.gen_c.gen_c_mono
-ctype, is_unit, request_type, is_ptr_named = gen.gen_c.gen_c_type
+ctype, is_unit, request_type, is_ptr_named, declared_ret = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
 write_set_value = gen.gen_c.gen_c_widen
 declare_temp = gen.gen_c.gen_c_flow
 Site, site_of, join = gen.gen_c.gen_c_member
-Slot, slots_of, set_line = gen.gen_c.gen_c_fat
+Slot, slots_of = gen.gen_c.gen_c_fat
 
 // -----------------------------------------------------------------
 // rebuilding a value at another type
@@ -135,7 +135,7 @@ rebuild_res = (be :: CBackend, code: str, src: TyId, s: TyRes, dst: TyId,
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "t", be.next_tmp()).try();
     declare_temp(be, src, tmp.view()).try();
-    set_line(be, tmp.view(), code).try();
+    be.set_line(tmp.view(), code).try();
     out.add_bytes("(").try();
     out.add_bytes(tmp.view()).try();
     out.add_bytes(".zg_tag == ").try();
@@ -372,14 +372,6 @@ add_declared = (be :: CBackend, p: Param, sctx: Ctx, out :: Vec<TyId>)
     out.add(be.check.param_type(p, sctx).try())
 }
 
-declared_ret = (be :: CBackend, f: Function, sctx: Ctx)
-               Res<TyId, AllocError> {
-    f.ret.match({
-        Ok(t) => be.check.type_from_ast(t, sctx),
-        None  => be.check.types.prim("()"),
-    })
-}
-
 infer_targs = (be :: CBackend, c: Call, declared: Vec<TyId>, ctx: Ctx,
                out :: Inst) Res<(), AllocError> {
     c.args.loop((h, i, arg) {
@@ -428,7 +420,7 @@ emit_fat_call = (be :: CBackend, c: Call, a: Access, rty: TyId, slot: Slot,
     r ::= be.alloc.String().try();
     sym_gen(r, "t", be.next_tmp()).try();
     declare_temp(be, rty, r.view()).try();
-    set_line(be, r.view(), recv.view()).try();
+    be.set_line(r.view(), recv.view()).try();
     call ::= be.alloc.String().try();
     call.add_bytes(r.view()).try();
     call.add_bytes(".").try();
@@ -520,6 +512,6 @@ fat_value_back = (be :: CBackend, slot: Slot, real: TyId, call: str,
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "t", be.next_tmp()).try();
     declare_temp(be, slot.ret, tmp.view()).try();
-    set_line(be, tmp.view(), call).try();
+    be.set_line(tmp.view(), call).try();
     convert(be, tmp.view(), slot.ret, real, out)
 }

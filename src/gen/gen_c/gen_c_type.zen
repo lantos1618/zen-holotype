@@ -27,7 +27,8 @@
 // declared enum. So a structural union is a queued type like any other
 // and gets the enum's shape: a tag and a union of its members.
 
-Ast, Decl, DeclKind, Struct, Enum, Variant, Member, MemberKind, TypeId = ast
+Ast, Decl, DeclKind, Struct, Enum, Variant, Member, MemberKind = ast
+Function, TypeId = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -209,7 +210,10 @@ c_prim_wide = (name: str) str {
          "int"))))))))
 }
 
-pick = (name: str, key: str, hit: str, miss: str) str {
+// ONE ENTRY OF A STRING TABLE, and the tables are written as nests of
+// it: `pick(n, k, hit, <the rest>)`. `gen_c_runtime.zen` spells its trap
+// helpers' limit macros the same way.
+pick* = (name: str, key: str, hit: str, miss: str) str {
     name.eq(key).match({ true => hit, false => miss })
 }
 
@@ -426,6 +430,19 @@ decl_ctx* = (be :: CBackend, n: TyNamed) Ctx {
     Ctx(module: n.decl.module.to_usize(),
         ret: TyId(index: 0), has_ret: false,
         self_ty: TyId(index: 0), has_self: false)
+}
+
+// THE RETURN TYPE AS WRITTEN, and `()` when nothing was written — a
+// function that declares no return type returns unit, it does not
+// return "unknown". Eight lowerings each re-read `f.ret` this way and
+// then substituted their own instantiation over the answer; the reading
+// is one rule and the substituting is theirs.
+declared_ret* = (be :: CBackend, f: Function, ctx: Ctx)
+                Res<TyId, AllocError> {
+    f.ret.match({
+        Ok(t) => be.check.type_from_ast(t, ctx),
+        None  => be.check.types.prim("()"),
+    })
 }
 
 // A struct member's storage type, or nothing when the member is not

@@ -54,12 +54,12 @@ lower_access, base_decl, type_const, TypeConst = gen.gen_c.gen_c_read
 access_field_type = gen.gen_c.gen_c_read
 lower_array_lit, lower_fixed_array = gen.gen_c.gen_c_array
 field_type, request_type = gen.gen_c.gen_c_type
-Dest, deliver, write_dest = gen.gen_c.gen_c_stmt
+Dest, deliver, write_dest, destination_type = gen.gen_c.gen_c_stmt
 plain_ctx = gen.gen_c.gen_c_decl
 lower_call, res_value, is_res_ctor = gen.gen_c.gen_c_call
 needs_hoist, hoist_expr = gen.gen_c.gen_c_hoist
 needs_widen, widen_expr, needs_set, set_expr = gen.gen_c.gen_c_widen
-is_print = gen.gen_c.gen_c_print
+is_print, body_end = gen.gen_c.gen_c_print
 call_ret_type = gen.gen_c.gen_c_infer
 lower_unary, lower_binary, binary_type = gen.gen_c.gen_c_op
 lower_index, index_type = gen.gen_c.gen_c_index
@@ -564,22 +564,23 @@ value_expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
 
 spill_temp = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
               out :: String) Res<(), AllocError> {
-    ty = spill_type(be, id, ctx, want).try();
+    ty = destination_type(be, id, ctx, want).try();
     settled_place(be, ty).match({
         false => unsupported(be, id, "a spilling form whose type nothing settles", out),
         true  => spill_settled(be, id, ctx, ty, out),
     })
 }
 
-// The type of the place the value lands in. The written expectation
-// when there is one — "the destination's type wins" — and the
-// expression's own answer when there is not.
-spill_type = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
-             Res<TyId, AllocError> {
-    be.check.is_unknown(want).match({
-        false => Ok(want),
-        true  => ty_of(be, id, ctx, want),
-    })
+// NOTHING WROTE AN EXPECTATION, so the node answers for itself. A
+// lowering that reaches for a `want` it was never handed — `to<U>` on a
+// member call, a null pointer, a loop's value — asks here rather than
+// each inventing the unknown to ask `ty_of` with. The answer may still
+// be the unknown, and that is information: a discarded loop still HAS a
+// value, and `open_result` reads this to decide whether to give it
+// storage.
+want_of* = (be :: CBackend, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
+    unknown = be.check.types.unknown().try();
+    ty_of(be, id, ctx, unknown)
 }
 
 settled_place = (be :: CBackend, ty: TyId) bool {
@@ -702,15 +703,11 @@ lower_str_literal = (be :: CBackend, l: Literal, out :: String)
 decoded_len* = (raw: str) usize {
     n ::= 0;
     esc ::= false;
-    Range(1, quoted_end(raw)).loop((h, i) {
+    Range(1, body_end(raw)).loop((h, i) {
         (esc == false).then(() { n = n + 1; });
         esc = (esc == false) && (raw.index(i) == '\\');
     });
     n
-}
-
-quoted_end = (raw: str) usize {
-    (raw.len > 1).match({ true => raw.len - 1, false => 1 })
 }
 
 // A bare identifier: a local, or a name the module declares. `None` is

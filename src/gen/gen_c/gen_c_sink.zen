@@ -46,10 +46,10 @@ ctype = gen.gen_c.gen_c_type
 is_c_integer, is_signed = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
 declare_temp = gen.gen_c.gen_c_flow
-signature_of = gen.gen_c.gen_c_call
+signature_of, recv_arg, arg_value, by_ref = gen.gen_c.gen_c_call
 body_end, is_hole, advance, decoded_bytes, cast_of = gen.gen_c.gen_c_print
 slot_call = gen.gen_c.gen_c_bound
-set_line, fat_value = gen.gen_c.gen_c_fat
+fat_value = gen.gen_c.gen_c_fat
 sink_display = gen.gen_c.gen_c_display
 
 // -----------------------------------------------------------------
@@ -77,10 +77,6 @@ sink_door_shape* = (be: CBackend, f: Function) bool {
 
 bodyless* = (f: Function) bool {
     f.body.match({ Ok(_) => false, None => true })
-}
-
-by_ref = (f: Function, i: usize) bool {
-    f.params.get(i).match({ Ok(p) => p.mutable, None => false })
 }
 
 // A FUNCTION WITH NO PARAMETERS HAS NO LAST ONE, and `len - 1` on a
@@ -263,7 +259,7 @@ buffer_sink = (be :: CBackend, addr: str, cty: TyId, sty: TyId,
     fat_value(be, addr, cty, sty, value).try();
     sym_gen(out, "t", be.next_tmp()).try();
     declare_temp(be, sty, out.view()).try();
-    set_line(be, out.view(), value.view())
+    be.set_line(out.view(), value.view())
 }
 
 // -----------------------------------------------------------------
@@ -333,7 +329,7 @@ door_ctx = (d: Def) Ctx {
 // name, which is a place, so `&` on it is an address and not a spill.
 write_sink_temp = (be :: CBackend, c: Call, recv: Res<ExprId>, sty: TyId,
                    ctx: Ctx, out :: String) Res<bool, AllocError> {
-    sink_arg(c, recv).match({
+    recv_arg(c, recv).match({
         None  => Ok(false),
         Ok(a) => spill_sink(be, a, sty, ctx, out),
     })
@@ -345,7 +341,7 @@ spill_sink = (be :: CBackend, a: ExprId, sty: TyId, ctx: Ctx,
     expr(be, a, ctx, sty, code).try();
     sym_gen(out, "t", be.next_tmp()).try();
     declare_temp(be, sty, out.view()).try();
-    set_line(be, out.view(), code.view()).try();
+    be.set_line(out.view(), code.view()).try();
     Ok(true);
 }
 
@@ -379,29 +375,15 @@ write_ok = (be :: CBackend, ret: TyId, tmp: str) Res<(), AllocError> {
     value.add_bytes("){ .zg_tag = ").try();
     sym_variant(value, RES_PATH, "Ok").try();
     value.add_bytes(" }").try();
-    set_line(be, tmp, value.view())
-}
-
-// Argument zero of the SIGNATURE: the receiver when the call was
-// written `out.add(..)`, and the first written argument when it was
-// written `add(out, ..)`. The same shift `write_call` makes.
-sink_arg = (c: Call, recv: Res<ExprId>) Res<ExprId> {
-    recv.match({
-        Ok(x) => Ok(x),
-        None  => arg_at(c, 0),
-    })
+    be.set_line(tmp, value.view())
 }
 
 fmt_arg = (c: Call, recv: Res<ExprId>) Res<ExprId> {
-    arg_at(c, fmt_index(recv))
+    arg_value(c, fmt_index(recv))
 }
 
 fmt_index = (recv: Res<ExprId>) usize {
     recv.match({ Ok(_) => 0, None => 1 })
-}
-
-arg_at = (c: Call, i: usize) Res<ExprId> {
-    c.args.get(i).match({ Ok(a) => Ok(a.value), None => None })
 }
 
 // -----------------------------------------------------------------
@@ -470,7 +452,7 @@ walk_format = (be :: CBackend, c: Call, raw: str, used0: usize, p: Piece,
 // does and what makes a stray `{}` visible rather than swallowed.
 write_hole = (be :: CBackend, c: Call, used: usize, p: Piece, ctx: Ctx)
              Res<(), AllocError> {
-    arg_at(c, used).match({
+    arg_value(c, used).match({
         None  => write_literal(be, "{}", p),
         Ok(a) => write_value(be, a, p, ctx),
     })
@@ -479,7 +461,7 @@ write_hole = (be :: CBackend, c: Call, used: usize, p: Piece, ctx: Ctx)
 write_rest = (be :: CBackend, c: Call, used: usize, p: Piece, ctx: Ctx)
              Res<(), AllocError> {
     Range(used, c.args.len).loop((h, i) {
-        arg_at(c, i).match({
+        arg_value(c, i).match({
             None  => Ok(()),
             Ok(a) => write_value(be, a, p, ctx),
         }).try();
@@ -676,7 +658,7 @@ call_symbol* = (be :: CBackend, d: Def, out :: String)
 // goes, and carrying it is the jump and nothing else — no rebuild, no
 // re-tag, and no error set to widen.
 write_guarded = (be :: CBackend, call: str, p: Piece) Res<(), AllocError> {
-    set_line(be, p.tmp, call).try();
+    be.set_line(p.tmp, call).try();
     write_jump_unless_ok(be, p.tmp, p.done)
 }
 

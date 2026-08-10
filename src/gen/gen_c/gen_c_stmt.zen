@@ -203,7 +203,9 @@ keep_name = (be :: CBackend, blk: Block) str {
     })
 }
 
-bare_name = (be :: CBackend, id: ExprId) str {
+// Only a bare name — a `Paren` is still one — can be a binding this
+// block owns; anything larger has already been copied into a value.
+bare_name* = (be :: CBackend, id: ExprId) str {
     be.tree.expr_at(id).kind.match({
         Name(n)  => n.text,
         Paren(p) => bare_name(be, p.inner),
@@ -286,8 +288,8 @@ deliver_spilling = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
 // comes from its context" one level up, and it is what keeps a
 // `.match` in return position building the function's own `Res` rather
 // than whatever join its arms happened to produce.
-destination_type = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
-                   Res<TyId, AllocError> {
+destination_type* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+                    Res<TyId, AllocError> {
     be.check.is_unknown(want).match({
         false => Ok(want),
         true  => ty_of(be, id, ctx, want),
@@ -386,7 +388,7 @@ lower_bind = (be :: CBackend, s: Stmt, b: Bind, ctx: Ctx)
 bind_name = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
             Res<(), AllocError> {
     is_store(be, name, b).match({
-        true  => assign_local(be, name, b, ty, ctx),
+        true  => assign_target(be, b, ty, ctx),
         false => declare_local(be, name, b, ty, ctx),
     })
 }
@@ -399,14 +401,6 @@ bind_name = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
 is_store = (be :: CBackend, name: str, b: Bind) bool {
     written = b.type.match({ Ok(_) => true, None => false });
     (b.mutable == false) && (written == false) && be.bound_in_frame(name)
-}
-
-assign_local = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
-               Res<(), AllocError> {
-    place ::= be.alloc.String().try();
-    expr(be, b.target, ctx, ty, place).try();
-    deliver(be, b.value, ctx, ty, Dest.Into(place.view())).try();
-    Ok(());
 }
 
 // A STORE TAKES THE PLACE'S OWN TYPE. `i = i + 1` into a `usize` slot is

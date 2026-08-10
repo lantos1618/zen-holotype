@@ -40,7 +40,7 @@ expr = gen.gen_c.gen_c_expr
 declare_temp, payload_type = gen.gen_c.gen_c_flow
 Slot = gen.gen_c.gen_c_fat
 slot_call = gen.gen_c.gen_c_bound
-assign, arg_text, field_of = gen.gen_c.gen_c_cap
+arg_text, field_of = gen.gen_c.gen_c_cap
 write_assign_ok, write_assign_ok_unit, write_assign_err = gen.gen_c.gen_c_cap
 
 // -----------------------------------------------------------------
@@ -123,7 +123,7 @@ path_args* = (be :: CBackend, c: Call, i: usize, ctx: Ctx, out :: String)
     declare_temp(be, sty, tmp.view()).try();
     value ::= be.alloc.String().try();
     arg_text(be, c, i, sty, ctx, value).try();
-    assign(be, tmp.view(), value.view()).try();
+    be.set_line(tmp.view(), value.view()).try();
     out.add_bytes("(const unsigned char *)").try();
     out.add_bytes(tmp.view()).try();
     out.add_bytes(".data, ").try();
@@ -183,8 +183,8 @@ read_run = (be :: CBackend, id: ExprId, c: Call, ret: TyId, sty: TyId,
     declare_temp(be, usize_ty, got.view()).try();
     declare_temp(be, i32_ty, rc.view()).try();
     declare_temp(be, ret, dst.view()).try();
-    assign(be, want.view(), "0").try();
-    assign(be, got.view(), "0").try();
+    be.set_line(want.view(), "0").try();
+    be.set_line(got.view(), "0").try();
     write_size_call(be, rc.view(), path.view(), want.view()).try();
     open_rc_test(be, rc.view()).try();
     fs_chain(be, ret, rc.view(), dst.view(), 1).try();
@@ -204,7 +204,7 @@ hold_alloc = (be :: CBackend, c: Call, aty: TyId, ctx: Ctx,
     value ::= be.alloc.String().try();
     arg_text(be, c, 0, aty, ctx, value).try();
     declare_temp(be, aty, out.view()).try();
-    assign(be, out.view(), value.view()).try();
+    be.set_line(out.view(), value.view()).try();
     Ok(());
 }
 
@@ -251,7 +251,7 @@ run_and_read = (be :: CBackend, ret: TyId, sty: TyId, vty: TyId, aty: TyId,
     run ::= be.alloc.String().try();
     sym_gen(run, "t", be.next_tmp()).try();
     declare_temp(be, slot.ret, run.view()).try();
-    assign(be, run.view(), call).try();
+    be.set_line(run.view(), call).try();
     open_not_ok(be, run.view()).try();
     write_assign_err(be, ret, "OutOfMemory", dst).try();
     close_else(be).try();
@@ -284,7 +284,7 @@ read_ok_payload = (be :: CBackend, run: str, buf: str)
     value.add_bytes(run).try();
     value.add_bytes(".zg_data.").try();
     sym_member(value, "Ok").try();
-    assign(be, buf, value.view())
+    be.set_line(buf, value.view())
 }
 
 open_not_ok = (be :: CBackend, run: str) Res<(), AllocError> {
@@ -425,7 +425,9 @@ open_rc_test* = (be :: CBackend, rc: str) Res<(), AllocError> {
     Ok(());
 }
 
-open_null_test = (be :: CBackend, raw: str) Res<(), AllocError> {
+// `if (<p> == NULL) {` — the one failure any C call answering with a
+// pointer has, whether it opened a file or asked for a page.
+open_null_test* = (be :: CBackend, raw: str) Res<(), AllocError> {
     line ::= be.alloc.String().try();
     line.add_bytes("if (").try();
     line.add_bytes(raw).try();

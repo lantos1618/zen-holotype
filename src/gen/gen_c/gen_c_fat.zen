@@ -54,7 +54,7 @@ GenFault = gen.gen_diag
 CBackend, MethodRef = gen.gen_c.gen_c_state
 sub, sub_with, open, intern_var, recv_inst = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams, enter_struct_tparams = gen.gen_c.gen_c_mono
-ctype, declarator, is_unit, request_type = gen.gen_c.gen_c_type
+ctype, declarator, is_unit, request_type, declared_ret = gen.gen_c.gen_c_type
 is_ptr_named = gen.gen_c.gen_c_type
 ty_of = gen.gen_c.gen_c_expr
 declare_temp = gen.gen_c.gen_c_flow
@@ -258,10 +258,7 @@ add_erased = (be :: CBackend, p: Param, sctx: Ctx, erase: Inst,
 
 erased_ret = (be :: CBackend, f: Function, sctx: Ctx, erase: Inst)
              Res<TyId, AllocError> {
-    declared = f.ret.match({
-        Ok(t) => be.check.type_from_ast(t, sctx),
-        None  => be.check.types.prim("()"),
-    }).try();
+    declared = declared_ret(be, f, sctx).try();
     sub_with(be, declared, erase)
 }
 
@@ -685,7 +682,7 @@ spill_address = (be :: CBackend, code: str, cty: TyId, out :: String)
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "t", be.next_tmp()).try();
     declare_temp(be, cty, tmp.view()).try();
-    set_line(be, tmp.view(), code).try();
+    be.set_line(tmp.view(), code).try();
     out.add_bytes("&").try();
     out.add_bytes(tmp.view()).try();
     Ok(());
@@ -722,15 +719,4 @@ has_call = (code: str) bool {
     Range(1, code.len).find((i) {
         (code.index(i) == '(') && is_word_byte(code.index(i - 1))
     }).match({ Ok(_) => true, None => false })
-}
-
-// ONE LINE OF C, and the two files that build records share it: a
-// spilled receiver and a spilled result are the same statement.
-set_line* = (be :: CBackend, dst: str, value: str) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(dst).try();
-    line.add_bytes(" = ").try();
-    line.add_bytes(value).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view())
 }

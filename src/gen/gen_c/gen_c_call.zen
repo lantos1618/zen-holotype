@@ -63,7 +63,7 @@ is_c_integer, is_signed, variant_type, decl_ctx = gen.gen_c.gen_c_type
 c_prim_known = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
 field_type, request_type = gen.gen_c.gen_c_type
-expr, ty_of = gen.gen_c.gen_c_expr
+expr, ty_of, want_of = gen.gen_c.gen_c_expr
 Dest, deliver = gen.gen_c.gen_c_stmt
 is_print, lower_print = gen.gen_c.gen_c_print
 lower_dot_call = gen.gen_c.gen_c_member
@@ -369,7 +369,10 @@ chosen_def = (be :: CBackend, id: ExprId, c: Call, name: str,
     })
 }
 
-def_with_id = (found: Vec<Def>, want: DeclId) Res<Def> {
+// The candidate sema resolved to. Read out of the queue's own
+// entries, so a query and a lowering that both start from the same
+// `resolved_call` cannot disagree about which declaration it named.
+def_with_id* = (found: Vec<Def>, want: DeclId) Res<Def> {
     Range(0, found.len).find((i) {
         found.get(i).match({ Ok(d) => d.id.eq(want), None => false })
     }).match({
@@ -441,7 +444,7 @@ call_decl = (be :: CBackend, id: ExprId, c: Call, d: Def, x: Decl,
 call_fn = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
            recv: Res<ExprId>, ctx: Ctx, out :: String) Res<(), AllocError> {
     is_loop_shape(be, f).match({
-        true  => lower_loop(be, id, c, f, recv, ctx, loop_want(be, id, ctx).try(), out),
+        true  => lower_loop(be, id, c, f, recv, ctx, want_of(be, id, ctx).try(), out),
         false => call_or_inline(be, id, c, d, f, recv, ctx, out),
     })
 }
@@ -466,7 +469,7 @@ call_or_floor = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
                  recv: Res<ExprId>, ctx: Ctx, out :: String)
                 Res<(), AllocError> {
     is_null_ptr(d.name).match({
-        true  => lower_null_ptr(be, id, null_want(be, id, ctx).try(), out),
+        true  => lower_null_ptr(be, id, want_of(be, id, ctx).try(), out),
         false => call_or_format(be, id, c, d, f, recv, ctx, out),
     })
 }
@@ -541,21 +544,25 @@ keep_prim = (target: str) Res<str> {
 lower_convert = (be :: CBackend, c: Call, d: Def, target: str,
                  recv: Res<ExprId>, ctx: Ctx, out :: String)
                 Res<(), AllocError> {
-    convert_operand(c, recv).match({
+    recv_arg(c, recv).match({
         None  => out.add_bytes("0"),
         Ok(v) => write_convert(be, d, v, target, ctx, out),
     })
 }
 
-convert_operand = (c: Call, recv: Res<ExprId>) Res<ExprId> {
+// ARGUMENT ZERO OF THE SIGNATURE: the receiver when the call was
+// written `x.f(..)`, and the first written argument when it was written
+// `f(x, ..)`. The same shift `write_call` makes, and the one every
+// lowering that reads past the dot needs.
+recv_arg* = (c: Call, recv: Res<ExprId>) Res<ExprId> {
     recv.match({
         Ok(r) => Ok(r),
-        None  => arg_zero(c),
+        None  => arg_value(c, 0),
     })
 }
 
-arg_zero = (c: Call) Res<ExprId> {
-    c.args.get(0).match({ Ok(a) => Ok(a.value), None => None })
+arg_value* = (c: Call, i: usize) Res<ExprId> {
+    c.args.get(i).match({ Ok(a) => Ok(a.value), None => None })
 }
 
 // The operand takes the DECLARED parameter's type, not the target's, so
@@ -574,19 +581,6 @@ write_convert = (be :: CBackend, d: Def, v: ExprId, target: str, ctx: Ctx,
     expr(be, v, ctx, src, out).try();
     out.add_bytes(")").try();
     Ok(());
-}
-
-null_want = (be :: CBackend, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
-    unknown = be.check.types.unknown().try();
-    ty_of(be, id, ctx, unknown)
-}
-
-// What the loop evaluates to. `Res<T>` when something asked, and the
-// unknown when nothing did — a discarded loop still HAS a value, and
-// `open_result` reads this to decide whether to give it storage.
-loop_want = (be :: CBackend, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
-    unknown = be.check.types.unknown().try();
-    ty_of(be, id, ctx, unknown)
 }
 
 call_signature = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
@@ -753,8 +747,11 @@ by_ref* = (f: Function, i: usize) bool {
     f.params.get(i).match({ Ok(p) => p.mutable, None => false })
 }
 
-write_address = (be :: CBackend, value: ExprId, ctx: Ctx, want: TyId,
-                 out :: String) Res<(), AllocError> {
+// A `::` parameter is handed the ADDRESS of its argument, and that is
+// true of an inlined body's argument too — `gen_c_inline.zen` writes the
+// same `&(..)` for the same reason.
+write_address* = (be :: CBackend, value: ExprId, ctx: Ctx, want: TyId,
+                  out :: String) Res<(), AllocError> {
     out.add_bytes("&(").try();
     expr(be, value, ctx, want, out).try();
     out.add_bytes(")").try();

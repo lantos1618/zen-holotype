@@ -68,7 +68,7 @@ unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_report
 sub, sub_with, any_open, recv_inst, inst_open = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 ctype, is_unit, decl_ctx = gen.gen_c.gen_c_type
-expr, ty_of = gen.gen_c.gen_c_expr
+expr, ty_of, want_of = gen.gen_c.gen_c_expr
 lower_plain_call, write_arg = gen.gen_c.gen_c_call
 handle_depth, lower_handle_call = gen.gen_c.gen_c_handle
 inlines, inline_method = gen.gen_c.gen_c_inline
@@ -79,7 +79,7 @@ is_fat = gen.gen_c.gen_c_fat
 lower_fat_call = gen.gen_c.gen_c_bound
 lower_assoc_call = gen.gen_c.gen_c_assoc
 sink_door_shape, lower_member_door = gen.gen_c.gen_c_sink
-by_arity, bodied_fn, impl_member = gen.gen_c.gen_c_impl
+by_arity, bodied_fn, impl_member, kept_or_arity = gen.gen_c.gen_c_impl
 has_body = gen.gen_c.gen_c_impl
 impl_member_at = gen.gen_c.gen_c_impl
 
@@ -237,7 +237,7 @@ supplied_kind = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
                  s: Site, m: Member, ctx: Ctx, out :: String)
                 Res<(), AllocError> {
     m.kind.match({
-        Function(f) => lower_supplied(be, id, c, a, rty, s, f, ctx, out),
+        Function(f) => lower_method(be, id, c, a, rty, s, f, ctx, out),
         _           => lower_ufcs(be, id, c, a, rty, ctx, out),
     })
 }
@@ -272,6 +272,11 @@ pick_member = (be :: CBackend, c: Call, rty: TyId, s: Site,
     })
 }
 
+// THE FIRST THAT FITS, and arity when none does. Both halves are the
+// checker's: `pick_fitting` takes the first because "two members
+// accepting the same call is an error AT THE DECLARATION", and
+// `by_arity_ret` falls back for the case `fits` cannot answer — a
+// receiver whose type is not settled, or a variadic signature.
 member_that_fits = (be :: CBackend, c: Call, rty: TyId, s: Site,
                     found: Vec<Member>, ctx: Ctx)
                    Res<Res<Member>, AllocError> {
@@ -279,20 +284,7 @@ member_that_fits = (be :: CBackend, c: Call, rty: TyId, s: Site,
     call_actuals(be, c, ctx, actuals).try();
     kept ::= be.alloc.Vec<Member>();
     found.loop((h, m) { keep_fits(be, m, rty, s, actuals, kept).try() });
-    Ok(fits_or_arity(be, kept, found, c.args.len + 1));
-}
-
-// THE FIRST THAT FITS, and arity when none does. Both halves are the
-// checker's: `pick_fitting` takes the first because "two members
-// accepting the same call is an error AT THE DECLARATION", and
-// `by_arity_ret` falls back for the case `fits` cannot answer — a
-// receiver whose type is not settled, or a variadic signature.
-fits_or_arity = (be: CBackend, kept: Vec<Member>, found: Vec<Member>,
-                 arity: usize) Res<Member> {
-    (kept.len > 0).match({
-        true  => kept.get(0),
-        false => by_arity(be, found, arity),
-    })
+    Ok(kept_or_arity(be, kept, found, c.args.len + 1));
 }
 
 // A named helper rather than a `.then` inside the loop body: a loop
@@ -348,15 +340,6 @@ typed_actual = (be :: CBackend, x: Arg, ctx: Ctx, unknown: TyId)
     ty = ty_of(be, x.value, ctx, unknown).try();
     Ok(Actual(ty: ty, is_lambda: false, arity: 0, named: false,
               span: x.span));
-}
-
-lower_supplied = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
-                  s: Site, f: Function, ctx: Ctx, out :: String)
-                 Res<(), AllocError> {
-    inlines(be, c, f).match({
-        true  => inline_method(be, id, c, a, rty, s.decl, f, ctx, out),
-        false => lower_written_method(be, id, c, a, rty, s, f, ctx, out),
-    })
 }
 
 // -----------------------------------------------------------------
@@ -482,14 +465,6 @@ lower_written_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
     })
 }
 
-// `to<U>` with no written argument reads its answer off the expectation,
-// and a member call arrives here without one — so it is asked for, once,
-// where there is a node to ask about.
-want_of = (be :: CBackend, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
-    unknown = be.check.types.unknown().try();
-    ty_of(be, id, ctx, unknown)
-}
-
 lower_declared_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
                          rty: TyId, s: Site, f: Function, ctx: Ctx,
                          out :: String) Res<(), AllocError> {
@@ -583,15 +558,28 @@ write_method_call = (be :: CBackend, id: ExprId, c: Call, a: Access,
     })
 }
 
+// THE CALLEE OF A CALL REACHED BY MEMBER NAME: its qualified name, the
+// symbol mangled from it, and the queue entry that makes the compiler
+// emit the body that symbol names. Six lowerings reach a member this
+// way — a method, `eq`, `index`, an associated function, `raw`, `drop`,
+// `toString` — and a queue entry built differently from the symbol
+// written beside it is a call to a function nothing defines.
+member_symbol* = (be :: CBackend, ty: TyId, s: Site, name: str,
+                  sig: Vec<TyId>, inst: Inst) Res<String, AllocError> {
+    qname ::= be.alloc.String().try();
+    join(qname, s.qname, name).try();
+    sym ::= be.alloc.String().try();
+    sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
+    be.need_method(MethodRef(self_ty: ty, decl: s.decl, name: name,
+                             sig: sig, qname: qname.view()),
+                   inst, sym.view()).try();
+    Ok(sym);
+}
+
 emit_method_call = (be :: CBackend, c: Call, a: Access, rty: TyId, s: Site,
                     f: Function, sig: Vec<TyId>, inst: Inst, ctx: Ctx,
                     out :: String) Res<(), AllocError> {
-    qname ::= be.alloc.String().try();
-    join(qname, s.qname, a.name.text).try();
-    sym ::= be.alloc.String().try();
-    sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
-    be.need_method(MethodRef(self_ty: rty, decl: s.decl, name: a.name.text,
-                             sig: sig, qname: qname.view()), inst, sym.view()).try();
+    sym = member_symbol(be, rty, s, a.name.text, sig, inst).try();
     out.add_bytes(sym.view()).try();
     out.add_bytes("(").try();
     write_arg(be, a.base, 0, f, sig, ctx, out).try();
@@ -693,12 +681,7 @@ write_eq = (be :: CBackend, lhs: ExprId, rhs: ExprId, rty: TyId, s: Site,
 emit_eq = (be :: CBackend, lhs: ExprId, rhs: ExprId, rty: TyId, s: Site,
            f: Function, sig: Vec<TyId>, inst: Inst, ctx: Ctx, out :: String)
           Res<bool, AllocError> {
-    qname ::= be.alloc.String().try();
-    join(qname, s.qname, "eq").try();
-    sym ::= be.alloc.String().try();
-    sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
-    be.need_method(MethodRef(self_ty: rty, decl: s.decl, name: "eq",
-                             sig: sig, qname: qname.view()), inst, sym.view()).try();
+    sym = member_symbol(be, rty, s, "eq", sig, inst).try();
     out.add_bytes(sym.view()).try();
     out.add_bytes("(").try();
     write_arg(be, lhs, 0, f, sig, ctx, out).try();

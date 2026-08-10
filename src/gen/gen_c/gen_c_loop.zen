@@ -299,17 +299,7 @@ settle_res* = (be :: CBackend, want: TyId, elem: TyId)
 lower_bounded = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
                  rty: TyId, lam: Lambda, ctx: Ctx, want: TyId, fold: Fold,
                  out :: String) Res<(), AllocError> {
-    // the range is evaluated ONCE, into a temporary, because `start`
-    // and `end` are two reads of it and re-evaluating the expression
-    // between them would walk two different ranges
-    rng ::= be.alloc.String().try();
-    sym_gen(rng, "r", be.next_tmp()).try();
-    decl ::= be.alloc.String().try();
-    declarator(be, rty, rng.view(), decl).try();
-    decl.add_bytes(" = ").try();
-    expr(be, one, ctx, rty, decl).try();
-    decl.add_bytes(";").try();
-    be.writeln(decl.view()).try();
+    rng = walk_temp(be, one, rty, ctx).try();
 
     st = open_result(be, want, out).try();
     usize_ty = be.check.types.prim("usize").try();
@@ -339,6 +329,24 @@ lower_bounded = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
              usize_ty, fold, ctx).try();
     close_pass(be, st, counter.view(), fold).try();
     Ok(());
+}
+
+// THE COLLECTION IS EVALUATED ONCE, into a temporary of its own, and
+// every pass — and every bound a pass reads — is a read of that
+// temporary. Re-evaluating the expression between two reads would walk
+// a different collection each time, so an array, a range and a bounded
+// range all open the same way.
+walk_temp* = (be :: CBackend, one: ExprId, rty: TyId, ctx: Ctx)
+             Res<String, AllocError> {
+    rng ::= be.alloc.String().try();
+    sym_gen(rng, "r", be.next_tmp()).try();
+    decl ::= be.alloc.String().try();
+    declarator(be, rty, rng.view(), decl).try();
+    decl.add_bytes(" = ").try();
+    expr(be, one, ctx, rty, decl).try();
+    decl.add_bytes(";").try();
+    be.writeln(decl.view()).try();
+    Ok(rng);
 }
 
 declare_usize* = (be :: CBackend, name: str) Res<(), AllocError> {

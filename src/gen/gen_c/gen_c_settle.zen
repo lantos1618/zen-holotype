@@ -47,9 +47,10 @@ LocalSlot, Closure = gen.gen_c.gen_c_frame
 unsupported, unresolved = gen.gen_c.gen_c_report
 sub_with, open, inst_at, settled_inst, recv_inst = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams, enter_struct_tparams = gen.gen_c.gen_c_mono
-ctype, declarator, is_unit = gen.gen_c.gen_c_type
+ctype, declarator, is_unit, declared_ret = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
 Dest, block = gen.gen_c.gen_c_stmt
+def_with_id = gen.gen_c.gen_c_call
 plain_ctx, body_ctx, self_body_ctx = gen.gen_c.gen_c_decl
 supplies_bounds, range_element_type = gen.gen_c.gen_c_range
 inlines, has_body, is_lambda = gen.gen_c.gen_c_inline
@@ -95,10 +96,7 @@ add_param_type = (be :: CBackend, p: Param, dctx: Ctx, inst: Inst,
 inline_ret* = (be :: CBackend, f: Function, dctx: Ctx, inst: Inst,
               extra :: Inst, argv: Vec<ExprId>, ctx: Ctx)
              Res<TyId, AllocError> {
-    declared = f.ret.match({
-        Ok(t) => be.check.type_from_ast(t, dctx),
-        None  => be.check.types.prim("()"),
-    }).try();
+    declared = declared_ret(be, f, dctx).try();
     got = sub_with(be, sub_with(be, declared, inst).try(), extra).try();
     open(be, got).match({
         false => Ok(got),
@@ -487,17 +485,8 @@ named_result = (be :: CBackend, id: ExprId, c: Call, name: str, ctx: Ctx,
 // query at all.
 pick_def = (be :: CBackend, id: ExprId, found: Vec<Def>) Res<Def> {
     be.check.resolved_call(id).match({
-        Ok(w) => def_with(found, w),
+        Ok(w) => def_with_id(found, w),
         None  => sole_of(found),
-    })
-}
-
-def_with = (found: Vec<Def>, want: DeclId) Res<Def> {
-    Range(0, found.len).find((i) {
-        found.get(i).match({ Ok(d) => d.id.eq(want), None => false })
-    }).match({
-        Ok(i) => found.get(i),
-        None  => None,
     })
 }
 
