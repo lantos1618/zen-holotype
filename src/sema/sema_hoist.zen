@@ -392,12 +392,16 @@ check_named_field = (c :: Checker, a: Arg, name: str, ty: TyId, ctx: Ctx)
     })
 }
 
-// A field is a typed slot: both its questions get asked — what lifts
-// into it, and whether the given value fits the declared type.
-// `Holder(n: 3000000000)` on `n: i32` used to pass the first while
-// nobody asked the second.
+// A field is a typed slot: all of its questions get asked — what lifts
+// into it, whether the given value fits the declared type, and whether
+// every ARM of a match written there fits it. `Holder(n: 3000000000)` on
+// `n: i32` used to pass the first while nobody asked the second;
+// `Holder(n: b.match({ true => 1, false => false }))` passed the first
+// two while nobody asked the third, and a field is where a wrong value
+// stops being one expression's mistake and gets STORED.
 field_fits = (c :: Checker, a: Arg, want: TyId, ctx: Ctx)
              Res<(), AllocError> {
     hoist_at(c, a.value, c.type_of(a.value, ctx).try(), want).try();
-    c.check_literal(a.value, want)
+    c.check_literal(a.value, want).try();
+    check_arms(c, a.value, want)
 }

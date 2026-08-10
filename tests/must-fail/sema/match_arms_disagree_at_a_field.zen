@@ -1,0 +1,27 @@
+// MUST FAIL: two arms of a `.match` disagree, and the match stands in a
+// CONSTRUCTOR FIELD. `n: i32` is the position's declared word, and both
+// arms owe it — `sema_hoist.field_fits` already asks the field's two
+// other questions ("what lifts into it, and whether the given value fits
+// the declared type") and this is the third.
+//
+// The second of the three positions `check_arms` was landed without;
+// `match_arms_disagree_at_an_argument` is the first.
+//
+// A FIELD IS THE WORST OF THE THREE to leave open, because the wrong
+// value is then STORED. The argument case hands a bad `i32` to one call;
+// this writes it into a struct that outlives the expression, and every
+// later read of `.n` reports a 0 nobody wrote.
+Holder = { n: i32 }
+
+f = (b: bool) i32 {
+    h = Holder(n: b.match({
+        true  => 1,
+        false => false,
+    }));
+    h.n;
+}
+
+main = (env: Env) Res<i32, ArgError> {
+    println("{}", f(false));
+    Ok(0);
+}

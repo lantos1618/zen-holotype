@@ -62,6 +62,7 @@ static_access = sema.sema_static
 first_hidden, hidden_member = sema.sema_member
 satisfies_bound, check_bounds = sema.sema_bound
 check_literal = sema.sema_trap
+check_arms = sema.sema_hoist
 bound_declares = sema.sema_supply
 type_from_ast, type_of, param_type = sema.sema_type
 alias_module, module_not_a_value = sema.sema_module
@@ -401,8 +402,22 @@ chosen_ret = (c :: Checker, id: ExprId, node: Expr, call: Call, k: Cand,
               actuals: Vec<Actual>, ctx: Ctx) Res<TyId, AllocError> {
     c.resolve_call(id, k.id).try();
     check_bounds(c, k, actuals, node.span).try();
-    arg_literals(c, call.args, k.params, 0).try();
+    arg_literals(c, call.args, k.params, recv_off(call, actuals)).try();
     instantiate(c, id, call, k, actuals, ctx)
+}
+
+// WHETHER PARAMETER ZERO HAS AN ARGUMENT, derived and not plumbed:
+// `ufcs_call` prepends the receiver to the ACTUALS resolution matched
+// on, and `actuals_of` is otherwise one-for-one with the written
+// arguments — so the difference is 1 for `x.f(a)` and 0 for `f(a)`.
+//
+// `arg_literals` documented this offset from the day it was written and
+// the one call site passed 0. So `x.f(a)` checked `a` against the
+// RECEIVER's type; `check_literal` is silent when that is not an integer
+// type, which kept an assertion that was already written and already
+// tested inert for every dotted call in the language.
+recv_off = (call: Call, actuals: Vec<Actual>) usize {
+    actuals.len - call.args.len
 }
 
 // RESOLUTION PICKED THE CANDIDATE ON THE FAMILY, so somebody still has
@@ -417,9 +432,8 @@ chosen_ret = (c :: Checker, id: ExprId, node: Expr, call: Call, k: Cand,
 // mistake, and with no wider one in scope would report "no overload
 // matches" for a call whose only fault is one digit too many.
 //
-// `off` IS THE RECEIVER. A method's parameter zero is `self` and no
-// argument corresponds to it — `recv_sig_fits`' rule, and it has to be
-// the same one here.
+// `off` IS THE RECEIVER — `recv_sig_fits`' rule, and `recv_off` above
+// is where this call site decides it.
 arg_literals* = (c :: Checker, args: Vec<Arg>, params: Vec<TyId>, off: usize)
                Res<(), AllocError> {
     i ::= off;
@@ -438,8 +452,20 @@ param_literal = (c :: Checker, id: ExprId, params: Vec<TyId>, i: usize)
                 Res<(), AllocError> {
     (i < params.len).match({
         false => Ok(()),
-        true  => c.check_literal(id, ty_at(params, i)),
+        true  => param_wants(c, id, ty_at(params, i)),
     })
+}
+
+// ONE QUESTION ASKED OF TWO SHAPES: a literal is asked whether it fits
+// the declared type, and a match is several values standing in one
+// place, so every ARM is asked the same thing (`sema_hoist.check_arms`,
+// the rule itself and never a second copy of it). Resolution picked the
+// candidate on the FIRST arm's type and no arm speaks for the rest —
+// which is how `g(b.match({ true => 1, false => false }))` reached an
+// `i32` parameter as a 0 nobody wrote.
+param_wants = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
+    c.check_literal(id, want).try();
+    c.check_arms(id, want)
 }
 
 // ---------------------------------------------------------------------

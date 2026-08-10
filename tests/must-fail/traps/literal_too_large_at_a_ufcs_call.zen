@@ -1,0 +1,30 @@
+// tests/must-fail/traps/literal_too_large_at_a_ufcs_call.zen
+// the SAME rule as literal_too_large_at_a_call, written with a dot.
+//
+// `b.stash(n)` and `stash(b, n)` are ONE call — a method is a UFCS
+// function whose first parameter happens to be named `self` — so the
+// argument owes the parameter the same answer either way. It did not:
+// `sema_call.arg_literals` takes an offset for exactly this ("`off` IS
+// THE RECEIVER. A method's parameter zero is `self` and no argument
+// corresponds to it"), and the one call site passed 0 unconditionally.
+//
+// So the dotted spelling compared `n` against the RECEIVER's declared
+// type. `check_literal` says nothing when that type is not an integer
+// one, which is why an assertion that was already written and already
+// tested was silently inert for every dotted call in the language.
+//
+// The self-hosted compiler ACCEPTED this and truncated to -1294967296;
+// the bootstrapper rejected it. A divergence no differential run could
+// find, because it takes a must-fail test to notice that one compiler
+// said nothing.
+Error = Overflow | DivideByZero | OutOfBounds
+
+Box = { v: i32 }
+
+stash = (b: Box, n: i32) i32 { b.v + n }
+
+main = (env: Env) Res<i32, Error> {
+    b = Box(v: 1);
+    println("{}", b.stash(3000000000));
+    Ok(0);
+}
