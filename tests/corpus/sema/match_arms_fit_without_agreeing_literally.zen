@@ -1,0 +1,96 @@
+// AN ARM STANDS WHERE THE MATCH STANDS, and "stands there" is `fits`,
+// never `is the same type as`. This is the corpus half of that rule:
+// `must-fail/sema/match_arms_disagree*` proves the four positions REJECT
+// arms that disagree, and widening a rule like that is precisely the
+// change that turns valid programs into errors — so these are the shapes
+// the rule must keep accepting.
+//
+// `match_arms_merge_error_sets` and `std/res_match_arm_widening_keeps_
+// the_member` already ask this at a RETURN, which was the only position
+// `check_arms` was wired into when it landed. It reaches an ARGUMENT, a
+// FIELD and an ARRAY ELEMENT too, and none of those go through a block —
+// so none of them get the `;`-terminated tail's exemption, and every
+// shape below has to be legal on the strength of `fits` alone.
+//
+// FOUR SHAPES, one per thing `refuse_arm` is careful about:
+//
+//   1. a bare `Ok(..)`/`Err(..)` arm against a SETTLED `Res`. The arm is
+//      Open and `forms_fit` says Open closes either way; nothing here
+//      names `Fault`, and it must still be that `Res<i32, Fault>`.
+//   2. arms carrying DIFFERENT error sets, each widened into the
+//      position's union. `set_assignable` accepts a member into its
+//      union, and the position — not the first arm — is what says which
+//      union.
+//   3. a bare VALUE arm HOISTED into a `Res` field. `refuse_arm` routes
+//      a `Res` want to `hoist_into_res` and never to `coerce`, so
+//      hoisting owns every answer including silence, exactly as at a
+//      return.
+//   4. arms as elements of a WRITTEN array type, where the element type
+//      is the position's word and there is no name to blame.
+//
+// AN ARM THAT DIVERGES is not among them, and not by oversight: `return`
+// is a statement, an arm body is an expression, and the language has no
+// panic. `true => return 7` is a syntax error in both compilers, so
+// there is no divergent arm to exempt.
+
+Fault = | Bad
+Snag  = | Low
+
+fails = (n: usize) Res<(), Fault> {
+    (n == 0).match({ true => Err(Fault.Bad), false => Ok(()) });
+}
+
+faults = (n: usize) Res<(), Snag> {
+    (n == 0).match({ true => Err(Snag.Low), false => Ok(()) });
+}
+
+takes = (r: Res<i32, Fault>) i32 { r.match({ Ok(v) => v, Err(_) => -1 }) }
+
+// 1. bare Ok/Err arms against a settled Res PARAMETER
+open_arm = (b: bool) i32 {
+    takes(b.match({
+        true  => Ok(1),
+        false => Err(Fault.Bad),
+    }))
+}
+
+// 2. two error sets widened into the PARAMETER's union
+wide = (r: Res<(), Fault | Snag>) i32 { r.match({ Ok(_) => 1, Err(_) => 0 }) }
+
+widened_arm = (n: usize) i32 {
+    wide((n > 1).match({
+        true  => fails(n),
+        false => faults(n),
+    }))
+}
+
+Slot = { r: Res<i32, Fault> }
+
+// 1 again, at a FIELD
+field_open = (b: bool) i32 {
+    s = Slot(r: b.match({ true => Ok(2), false => Err(Fault.Bad) }));
+    takes(s.r);
+}
+
+// 3. bare values HOISTED into the field's declared Res
+field_hoisted = (b: bool) i32 {
+    s = Slot(r: b.match({ true => 3, false => 4 }));
+    takes(s.r);
+}
+
+// 4. arms as ELEMENTS of a written array type
+element_arms = (b: bool) i32 {
+    xs = [i32, 2](1, b.match({ true => 5, false => 6 }));
+    xs[1];
+}
+
+main = (env: Env) Res<i32, ArgError> {
+    println("{}", open_arm(true));
+    println("{}", open_arm(false));
+    println("{}", widened_arm(2));
+    println("{}", widened_arm(0));
+    println("{}", field_open(true));
+    println("{}", field_hoisted(false));
+    println("{}", element_arms(true));
+    Ok(0);
+}
