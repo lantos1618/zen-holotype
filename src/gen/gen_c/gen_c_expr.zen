@@ -677,12 +677,38 @@ lower_literal = (be :: CBackend, id: ExprId, l: Literal, ctx: Ctx,
                  want: TyId, out :: String) Res<(), AllocError> {
     l.kind.match({
         Str   => lower_str_literal(be, l, out),
-        Int   => out.add_bytes(l.text),
+        Int   => lower_int_literal(l.text, out),
         Float => out.add_bytes(l.text),
         Char  => out.add_bytes(l.text),
         Bool  => out.add_bytes(l.text),
     }).try();
     Ok(());
+}
+
+// A DECIMAL CONSTANT WITH NO SUFFIX HAS NO UNSIGNED TYPE IN C99, so one
+// too large for `long long` is a constraint violation — `cc` picks
+// `unsigned long long` anyway and warns, on every build, about `u64.MAX`
+// and about FNV's basis. The suffix is read off the DIGITS and not off
+// the settled type: a value `i64` can hold needs nothing, and one it
+// cannot hold cannot be signed.
+lower_int_literal = (text: str, out :: String) Res<(), AllocError> {
+    out.add_bytes(text).try();
+    over_i64(text).match({
+        true  => out.add_bytes("ULL"),
+        false => Ok(()),
+    })
+}
+
+I64_MAX_DIGITS: str = "9223372036854775807"
+
+// `lex_literal.number` reads decimal only — no separators, no leading
+// zero, no suffix — so more digits is a larger number and equal digits
+// order the same way bytes do.
+over_i64 = (text: str) bool {
+    (text.len == I64_MAX_DIGITS.len).match({
+        true  => I64_MAX_DIGITS.before(text),
+        false => text.len > I64_MAX_DIGITS.len,
+    })
 }
 
 lower_str_literal = (be :: CBackend, l: Literal, out :: String)

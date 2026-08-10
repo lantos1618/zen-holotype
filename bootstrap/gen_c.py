@@ -293,6 +293,7 @@ PRIMS = {
     "i16": "int16_t",
     "i32": "int32_t",
     "i64": "int64_t",
+    "int": "int64_t",
     "u8": "uint8_t",
     "u16": "uint16_t",
     "u32": "uint32_t",
@@ -312,6 +313,7 @@ INT_LIMITS = {
     "i16": (True, 16, "INT16_MIN", "INT16_MAX"),
     "i32": (True, 32, "INT32_MIN", "INT32_MAX"),
     "i64": (True, 64, "INT64_MIN", "INT64_MAX"),
+    "int": (True, 64, "INT64_MIN", "INT64_MAX"),
     "isize": (True, 64, "PTRDIFF_MIN", "PTRDIFF_MAX"),
     "u8": (False, 8, "0", "UINT8_MAX"),
     "u16": (False, 16, "0", "UINT16_MAX"),
@@ -325,6 +327,7 @@ INT_VALUES = {
     "i16": (-32768, 32767, 16),
     "i32": (-2147483648, 2147483647, 32),
     "i64": (-9223372036854775808, 9223372036854775807, 64),
+    "int": (-9223372036854775808, 9223372036854775807, 64),
     "u8": (0, 255, 8),
     "u16": (0, 65535, 16),
     "u32": (0, 4294967295, 32),
@@ -343,6 +346,19 @@ UNKNOWN = ("unknown",)
 # it also means "nothing is reading this", and a block has to tell those two
 # apart to report the type of its own tail.  See `ex_Block`.
 INFER = ("infer",)
+
+# A match in tail position writes its own `return` per arm and hands back no
+# value.  It stands where a result temporary would, so every writer of one
+# tests for it.
+RETURNED = ("returned",)
+
+# An integer literal whose context never settled it.  It is the literal FAMILY
+# and not a width: `int` is assignable to every integer type (`sema_check`'s
+# `literal_fits`), and `gen_c_type.zen` lowers it to `int64_t`.  Calling it
+# `i32` here made `v ::= 0` a 32-bit accumulator in a function whose every
+# other reader called it an `i64`, so `sema_trap.parse_i64` wrapped mid-digit
+# and answered with a truncated value that then FIT the type it overflowed.
+UNSETTLED_INT = ("prim", "int")
 
 
 def prim(name):
@@ -373,6 +389,28 @@ def tcode(t) -> str:
 
 def is_int(t):
     return t is not None and t[0] == "prim" and t[1] in INT_VALUES
+
+
+def same_int_family(a, b):
+    """Is `a` a value the slot `b` holds, without a conversion?
+
+    An UNSETTLED literal is every integer type at once -- that is the whole
+    of "a literal's type comes from its context" -- so the `Ok` of a
+    `Res<i32>` carries a bare `32` and the hoist fires.  A settled type is
+    only itself: an `i64` reaching an `i32` field is a narrowing the
+    language does not have.
+    """
+    return a == b or (is_int(a) and is_int(b) and UNSETTLED_INT in (a, b))
+
+
+def settled(ty):
+    """A TYPE ARGUMENT IS NOT AN ANNOTATION.  `Pair(first: 5, ..)` writes
+    nothing for `A`, so its `5` settles the way every other unannotated `5`
+    does; leaving it unsettled would mint a `Pair<int, ..>` beside the
+    `Pair<i32, ..>` every annotated program builds, and its arithmetic would
+    trap at a width no one wrote.  sema_apply.zen calls this
+    `literal_default`."""
+    return prim("i32") if ty == UNSETTLED_INT else ty
 
 
 def int_info(t):
@@ -1884,7 +1922,15 @@ class Emitter:
 
         body = f(fnode, "body")
         ctx.push()
+        # A BODY THAT IS ONE MATCH IS A TAIL CALL PER ARM, and C only sees one
+        # when the call is written under `return`.  Spilling it to a temporary
+        # first costs a frame per arm, and `own_expr` -> `own_pair` ->
+        # `own_expr` then needs 16MB of stack for the 10000-term expression in
+        # corpus/lex/long_single_line, where the self-hosted backend -- which
+        # writes the `return` -- needs 3MB.
+        ctx.tail = ret not in (None, UNIT, UNKNOWN)
         value = ctx.block_value(body, ret)
+        ctx.tail = False
         if ret != UNIT and value is not None:
             ctx.line("return %s;" % value)
         elif ret != UNIT:
@@ -2298,6 +2344,10 @@ class FnCtx:
         self.sscopes = []
         self.consumed = frozenset()  # names `consume`d anywhere in this body
         self.blk_ty = UNIT  # the type of the last block `_block_body` closed
+        # Is the expression about to be lowered the FUNCTION's value?  Set for
+        # the body block's tail and for nothing else; `_block_body` clears it
+        # before the statements and `ex_Match` clears it before its arms.
+        self.tail = False
 
     # -- output ------------------------------------------------------------
 
@@ -2470,6 +2520,8 @@ class FnCtx:
         return rec
 
     def _block_body(self, block, want=None):
+        tail = self.tail
+        self.tail = False
         stmts = list(f(block, "stmts", ()) or ())
         value = f(block, "value")
         if value is None and want not in (None, UNIT, UNKNOWN) and want is not INFER \
@@ -2497,7 +2549,17 @@ class FnCtx:
             self.blk_ty = UNIT
             self.exit_scope(here)
             return None
+        # A tail that RETURNS instead of producing a value.  Only where the
+        # frame has nothing left to run: a defer or a live drop has to happen
+        # between the value and the return, and a `return` inside the match
+        # would jump over it.
+        self.tail = (tail and here == 0 and want is not INFER
+                     and not entries and self.sscopes[here] is None)
         code, ty = self.expr(value, None if want is INFER else want)
+        self.tail = False
+        if code is None:
+            self.blk_ty = ty
+            return None
         if want is not INFER:
             code = self.coerce(code, ty, want)
         rty = ty if want in (None, UNKNOWN) or want is INFER else want
@@ -2545,7 +2607,7 @@ class FnCtx:
         got = self.widen_res(code, ty, want)
         if got is not None:
             return got
-        carriers = [v for v, p in info[2] if p is not None and p == ty]
+        carriers = [v for v, p in info[2] if p is not None and same_int_family(p, ty)]
         if len(carriers) != 1:
             return code
         return self.make_variant(want, carriers[0], code)
@@ -2584,7 +2646,7 @@ class FnCtx:
             self.make_variant(want, "Err", err))
 
     def by_ref(self, code, ty):
-        if _LVALUE.match(code):
+        if _is_lvalue(code):
             return "&" + code
         if code.startswith("(*") and code.endswith(")"):
             return code[2:-1]
@@ -2628,7 +2690,7 @@ class FnCtx:
     def addr_of(self, code, ty):
         """The receiver's address, without copying it where that would move
         the storage the record points at."""
-        if _LVALUE.match(code):
+        if _is_lvalue(code):
             return "&" + code
         tmp = self.new_tmp(ty)
         self.line("%s = %s;" % (tmp, code))
@@ -2716,6 +2778,11 @@ class FnCtx:
 
     def _expr(self, node, want=None):
         k = kind(node)
+        # Tail position reaches only THROUGH the forms that change nothing.
+        # A match inside a call argument is not the function's value, and one
+        # that returned from there would return the argument.
+        if k not in ("Match", "Paren"):
+            self.tail = False
         method = getattr(self, "ex_" + k, None)
         if method is None:
             self.e.error(node, "gen_c cannot lower a %s expression" % k)
@@ -2729,7 +2796,7 @@ class FnCtx:
         text = str(f(node, "text", ""))
         if lk == "int":
             value = parse_int(text)
-            ty = want if is_int(want) else prim("i32")
+            ty = want if is_int(want) else UNSETTLED_INT
             return (int_literal(value, ty), ty)
         if lk == "float":
             ty = want if want and want[0] == "prim" and want[1] in ("f32", "f64") else prim("f64")
@@ -3047,7 +3114,7 @@ class FnCtx:
         if op == "-":
             if kind(operand) == "Literal" and f(operand, "kind") == "int":
                 value = -parse_int(str(f(operand, "text", "0")))
-                t = want if is_int(want) else prim("i32")
+                t = want if is_int(want) else UNSETTLED_INT
                 return (int_literal(value, t), t)
             if is_int(ty):
                 file, line, col = self.e.pos.of(node)
@@ -3303,7 +3370,7 @@ class FnCtx:
             if value is None or fty is None:
                 continue
             _code, aty = self.peek(value)
-            self.unify(fty, aty, found)
+            self.unify(fty, settled(aty), found)
         return tuple(found.get(tp, UNKNOWN) for tp in tdecl.tparams)
 
     def peek(self, node):
@@ -3571,7 +3638,9 @@ class FnCtx:
                 want[1][-1] == rty[1][-1]
                 or self.satisfies(rty, ("named", want[1], ())))
         if want[0] == "prim":
-            return rty[0] == "prim" and want[1] == rty[1]
+            return rty[0] == "prim" and (
+                want[1] == rty[1]
+                or (rty[1] == "int" and want[1] in INT_VALUES))
         return want[0] == rty[0]
 
     def eq_call(self, lhs, rhs, node):
@@ -5440,6 +5509,8 @@ class FnCtx:
         return (result if result is not None else "0", want or UNIT)
 
     def ex_Match(self, node, want=None):
+        tail = self.tail
+        self.tail = False
         scrut = f(node, "scrutinee")
         arms = list(f(node, "arms", ()) or ())
         scode, sty = self.expr(scrut)
@@ -5448,7 +5519,7 @@ class FnCtx:
             ty = self.arm_type(arms, sty)
         result = None
         if ty not in (None, UNIT, UNKNOWN):
-            result = self.new_tmp(ty)
+            result = RETURNED if tail and ty == self.ret else self.new_tmp(ty)
         tmp = self.new_tmp(sty) if sty not in (None, UNIT, UNKNOWN) else None
         if tmp:
             self.line("%s = %s;" % (tmp, scode))
@@ -5460,6 +5531,8 @@ class FnCtx:
             self.match_enum(node, scode, sty, arms, result, ty)
         else:
             self.match_scalar(node, scode, sty, arms, result, ty)
+        if result is RETURNED:
+            return (None, ty)
         return (result if result is not None else "0", ty or UNIT)
 
     def arm_type(self, arms, sty=None):
@@ -5568,7 +5641,10 @@ class FnCtx:
                 # an arm produces the MATCH's value, not its own: a `Res` whose
                 # error set is narrower than the match's has to be widened here
                 value = self.coerce(value, vty, ty)
-        if result is not None and value is not None:
+        if result is RETURNED:
+            if value is not None:
+                self.line("return %s;" % value)
+        elif result is not None and value is not None:
             self.line("%s = %s;" % (result, value))
         elif result is None and value and value not in ("", "0"):
             # an arm whose body is a call returning `()` still has to RUN
@@ -6084,9 +6160,42 @@ def _writes_scope(node):
 # spelled the first way everywhere.  Missing it copies the field into a
 # temporary, so `self.entries.add(..)` grows a copy and the caller keeps the
 # old one -- a silent wrong answer rather than a compile error.
-_LVALUE = re.compile(
-    r"^(\(\*[A-Za-z_][A-Za-z0-9_]*\)|[A-Za-z_][A-Za-z0-9_]*)"
-    r"(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+#
+# A SECOND HOP PARENTHESISES THE FIRST: field access spells its base with
+# `paren`, so `be.check.types` arrives as `((*be).check).types`, which names
+# the same storage and used not to be recognised.  `be.check.types.named(..)`
+# then interned into a COPY of the store and answered with a `TyId` one past
+# the real store's end -- gen_c_ptr.zen carries a hand-written one-hop
+# workaround for exactly this.
+_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_FIELD_TAIL = re.compile(r"^(.*)\.[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _wrapped(code):
+    """`code` is one paren pair around everything, not two neighbours."""
+    if not (code.startswith("(") and code.endswith(")")):
+        return False
+    depth = 0
+    for i, ch in enumerate(code):
+        depth += (ch == "(") - (ch == ")")
+        if depth == 0:
+            return i == len(code) - 1
+    return False
+
+
+def _is_lvalue(code):
+    """Does `code` NAME storage, rather than produce a value?"""
+    code = code.strip()
+    while True:
+        tail = _FIELD_TAIL.match(code)
+        if tail:
+            code = tail.group(1).strip()
+            continue
+        if _wrapped(code):
+            inner = code[1:-1].strip()
+            code = inner[1:] if inner.startswith("*") else inner
+            continue
+        return _NAME.match(code) is not None
 
 ARITH = {"+", "-", "*", "/", "%"}
 WRAPPING = {"+%", "-%", "*%"}
