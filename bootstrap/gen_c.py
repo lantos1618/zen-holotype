@@ -347,6 +347,11 @@ UNKNOWN = ("unknown",)
 # apart to report the type of its own tail.  See `ex_Block`.
 INFER = ("infer",)
 
+# A match in tail position writes its own `return` per arm and hands back no
+# value.  It stands where a result temporary would, so every writer of one
+# tests for it.
+RETURNED = ("returned",)
+
 # An integer literal whose context never settled it.  It is the literal FAMILY
 # and not a width: `int` is assignable to every integer type (`sema_check`'s
 # `literal_fits`), and `gen_c_type.zen` lowers it to `int64_t`.  Calling it
@@ -1917,7 +1922,15 @@ class Emitter:
 
         body = f(fnode, "body")
         ctx.push()
+        # A BODY THAT IS ONE MATCH IS A TAIL CALL PER ARM, and C only sees one
+        # when the call is written under `return`.  Spilling it to a temporary
+        # first costs a frame per arm, and `own_expr` -> `own_pair` ->
+        # `own_expr` then needs 16MB of stack for the 10000-term expression in
+        # corpus/lex/long_single_line, where the self-hosted backend -- which
+        # writes the `return` -- needs 3MB.
+        ctx.tail = ret not in (None, UNIT, UNKNOWN)
         value = ctx.block_value(body, ret)
+        ctx.tail = False
         if ret != UNIT and value is not None:
             ctx.line("return %s;" % value)
         elif ret != UNIT:
@@ -2331,6 +2344,10 @@ class FnCtx:
         self.sscopes = []
         self.consumed = frozenset()  # names `consume`d anywhere in this body
         self.blk_ty = UNIT  # the type of the last block `_block_body` closed
+        # Is the expression about to be lowered the FUNCTION's value?  Set for
+        # the body block's tail and for nothing else; `_block_body` clears it
+        # before the statements and `ex_Match` clears it before its arms.
+        self.tail = False
 
     # -- output ------------------------------------------------------------
 
@@ -2503,6 +2520,8 @@ class FnCtx:
         return rec
 
     def _block_body(self, block, want=None):
+        tail = self.tail
+        self.tail = False
         stmts = list(f(block, "stmts", ()) or ())
         value = f(block, "value")
         if value is None and want not in (None, UNIT, UNKNOWN) and want is not INFER \
@@ -2530,7 +2549,17 @@ class FnCtx:
             self.blk_ty = UNIT
             self.exit_scope(here)
             return None
+        # A tail that RETURNS instead of producing a value.  Only where the
+        # frame has nothing left to run: a defer or a live drop has to happen
+        # between the value and the return, and a `return` inside the match
+        # would jump over it.
+        self.tail = (tail and here == 0 and want is not INFER
+                     and not entries and self.sscopes[here] is None)
         code, ty = self.expr(value, None if want is INFER else want)
+        self.tail = False
+        if code is None:
+            self.blk_ty = ty
+            return None
         if want is not INFER:
             code = self.coerce(code, ty, want)
         rty = ty if want in (None, UNKNOWN) or want is INFER else want
@@ -2749,6 +2778,11 @@ class FnCtx:
 
     def _expr(self, node, want=None):
         k = kind(node)
+        # Tail position reaches only THROUGH the forms that change nothing.
+        # A match inside a call argument is not the function's value, and one
+        # that returned from there would return the argument.
+        if k not in ("Match", "Paren"):
+            self.tail = False
         method = getattr(self, "ex_" + k, None)
         if method is None:
             self.e.error(node, "gen_c cannot lower a %s expression" % k)
@@ -5475,6 +5509,8 @@ class FnCtx:
         return (result if result is not None else "0", want or UNIT)
 
     def ex_Match(self, node, want=None):
+        tail = self.tail
+        self.tail = False
         scrut = f(node, "scrutinee")
         arms = list(f(node, "arms", ()) or ())
         scode, sty = self.expr(scrut)
@@ -5483,7 +5519,7 @@ class FnCtx:
             ty = self.arm_type(arms, sty)
         result = None
         if ty not in (None, UNIT, UNKNOWN):
-            result = self.new_tmp(ty)
+            result = RETURNED if tail and ty == self.ret else self.new_tmp(ty)
         tmp = self.new_tmp(sty) if sty not in (None, UNIT, UNKNOWN) else None
         if tmp:
             self.line("%s = %s;" % (tmp, scode))
@@ -5495,6 +5531,8 @@ class FnCtx:
             self.match_enum(node, scode, sty, arms, result, ty)
         else:
             self.match_scalar(node, scode, sty, arms, result, ty)
+        if result is RETURNED:
+            return (None, ty)
         return (result if result is not None else "0", ty or UNIT)
 
     def arm_type(self, arms, sty=None):
@@ -5603,7 +5641,10 @@ class FnCtx:
                 # an arm produces the MATCH's value, not its own: a `Res` whose
                 # error set is narrower than the match's has to be widened here
                 value = self.coerce(value, vty, ty)
-        if result is not None and value is not None:
+        if result is RETURNED:
+            if value is not None:
+                self.line("return %s;" % value)
+        elif result is not None and value is not None:
             self.line("%s = %s;" % (result, value))
         elif result is None and value and value not in ("", "0"):
             # an arm whose body is a call returning `()` still has to RUN
