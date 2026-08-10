@@ -28,7 +28,7 @@ Vec = std.collections
 str, String = std.text
 Emit, order = gen.gen_emit
 CBackend = gen.gen_c.gen_c_state
-c_prim, is_signed = gen.gen_c.gen_c_type
+c_prim, is_signed, pick = gen.gen_c.gen_c_type
 
 // The C standard this backend targets, stated in exactly one place.
 C_STANDARD* : str = "C99 (ISO/IEC 9899:1999)"
@@ -563,7 +563,7 @@ fallback = (out :: Emit, ct: str, prim: str, op: str) Res<(), AllocError> {
 }
 
 c_symbol* = (op: str) str {
-    pair(op, "add", "+", pair(op, "sub", "-", "*"))
+    pick(op, "add", "+", pick(op, "sub", "-", "*"))
 }
 
 // `a + b` overflows a signed type at the top when b is positive and at
@@ -656,6 +656,11 @@ one_sided = (out :: Emit, lead: str, bound: str, tail: str)
     Ok(());
 }
 
+// THE WRAPPING FORM ITSELF: the operands go through the unsigned type
+// of the same width, where wrapping is defined, and come back with an
+// implementation-defined conversion every compiler this targets defines
+// as two's complement. It is both the portable fallback's answer and
+// the whole body of `+%`.
 wrapped_return = (out :: Emit, ct: str, uct: str, sym: str)
                  Res<(), AllocError> {
     out.bytes("return (").try();
@@ -694,58 +699,44 @@ write_min_guard = (out :: Emit, prim: str) Res<(), AllocError> {
     Ok(());
 }
 
-// `+% -% *%` wrap, "for when wrapping is the intent". The operands go
-// through the unsigned type of the same width, where wrapping is
-// defined, and come back with an implementation-defined conversion
-// every compiler this targets defines as two's complement.
+// `+% -% *%` wrap, "for when wrapping is the intent" — the wrapping
+// form with no guard in front of it.
 wrapping = (out :: Emit, ct: str, uct: str, prim: str, op: str, sym: str)
            Res<(), AllocError> {
     open_helper(out, ct, prim, op, false).try();
-    out.bytes("return (").try();
-    out.bytes(ct).try();
-    out.bytes(")((").try();
-    out.bytes(uct).try();
-    out.bytes(")a ").try();
-    out.bytes(sym).try();
-    out.bytes(" (").try();
-    out.bytes(uct).try();
-    out.say(")b);").try();
+    wrapped_return(out, ct, uct, sym).try();
     close_helper(out).try();
     Ok(());
 }
 
 unsigned_of* = (ct: str) str {
-    pair(ct, "int8_t", "uint8_t",
-    pair(ct, "int16_t", "uint16_t",
-    pair(ct, "int32_t", "uint32_t",
-    pair(ct, "int64_t", "uint64_t",
-    pair(ct, "ptrdiff_t", "size_t",
+    pick(ct, "int8_t", "uint8_t",
+    pick(ct, "int16_t", "uint16_t",
+    pick(ct, "int32_t", "uint32_t",
+    pick(ct, "int64_t", "uint64_t",
+    pick(ct, "ptrdiff_t", "size_t",
          ct)))))
 }
 
 max_macro* = (prim: str) str {
-    pair(prim, "i8", "INT8_MAX",
-    pair(prim, "i16", "INT16_MAX",
-    pair(prim, "i32", "INT32_MAX",
-    pair(prim, "i64", "INT64_MAX",
-    pair(prim, "int", "INT64_MAX",
-    pair(prim, "u8", "UINT8_MAX",
-    pair(prim, "u16", "UINT16_MAX",
-    pair(prim, "u32", "UINT32_MAX",
-    pair(prim, "u64", "UINT64_MAX",
-    pair(prim, "usize", "SIZE_MAX",
+    pick(prim, "i8", "INT8_MAX",
+    pick(prim, "i16", "INT16_MAX",
+    pick(prim, "i32", "INT32_MAX",
+    pick(prim, "i64", "INT64_MAX",
+    pick(prim, "int", "INT64_MAX",
+    pick(prim, "u8", "UINT8_MAX",
+    pick(prim, "u16", "UINT16_MAX",
+    pick(prim, "u32", "UINT32_MAX",
+    pick(prim, "u64", "UINT64_MAX",
+    pick(prim, "usize", "SIZE_MAX",
          "0"))))))))))
 }
 
 min_macro* = (prim: str) str {
-    pair(prim, "i8", "INT8_MIN",
-    pair(prim, "i16", "INT16_MIN",
-    pair(prim, "i32", "INT32_MIN",
-    pair(prim, "i64", "INT64_MIN",
-    pair(prim, "int", "INT64_MIN",
+    pick(prim, "i8", "INT8_MIN",
+    pick(prim, "i16", "INT16_MIN",
+    pick(prim, "i32", "INT32_MIN",
+    pick(prim, "i64", "INT64_MIN",
+    pick(prim, "int", "INT64_MIN",
          "0")))))
-}
-
-pair = (name: str, key: str, hit: str, miss: str) str {
-    name.eq(key).match({ true => hit, false => miss })
 }

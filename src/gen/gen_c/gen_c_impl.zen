@@ -18,7 +18,7 @@
 // where two members of one name actually turn up, since a bound and a
 // type may each supply one.
 
-Decl, Struct, Member, MemberKind, Function, Impl = ast
+Decl, Struct, Member, MemberKind, Function, Impl, Field, ExprId = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -55,6 +55,19 @@ by_arity* = (be: CBackend, found: Vec<Member>, arity: usize) Res<Member> {
     }).match({
         None  => without_arity(found),
         Ok(i) => found.get(i),
+    })
+}
+
+// THE FIRST THAT SURVIVED THE FILTER, and arity when none did. Two
+// filters narrow an overload set — a written signature (`by_sig`) and a
+// call's actual arguments (`member_that_fits`) — and both end the same
+// way, because arity is what a backend can still answer when the
+// narrower question has no answer at all.
+kept_or_arity* = (be: CBackend, kept: Vec<Member>, found: Vec<Member>,
+                  arity: usize) Res<Member> {
+    (kept.len > 0).match({
+        true  => kept.get(0),
+        false => by_arity(be, found, arity),
     })
 }
 
@@ -156,6 +169,35 @@ member_fn = (m: Member) Res<Function> {
     })
 }
 
+// The expression an impl supplies for a computed field. A range's
+// `start`/`end` and a bound's computed member are the same question
+// asked of the same member list.
+impl_field* = (be :: CBackend, im: Impl, name: str)
+              Res<Res<ExprId>, AllocError> {
+    found ::= be.alloc.Vec<ExprId>();
+    im.members.loop((h, m) { keep_field_value(m, name, found).try() });
+    Ok(found.get(0));
+}
+
+keep_field_value = (m: Member, name: str, out :: Vec<ExprId>)
+                   Res<(), AllocError> {
+    member_named(m, name).match({
+        false => Ok(()),
+        true  => add_field_value(m, out),
+    })
+}
+
+add_field_value = (m: Member, out :: Vec<ExprId>) Res<(), AllocError> {
+    m.kind.match({
+        Field(fl) => add_written_value(fl, out),
+        _         => Ok(()),
+    })
+}
+
+add_written_value = (fl: Field, out :: Vec<ExprId>) Res<(), AllocError> {
+    fl.value.match({ Ok(e) => out.add(e), None => Ok(()) })
+}
+
 // Every member an impl on `decl` supplies under `name`, with a BODY.
 //
 // "An impl lives with the type, not with the trait", so the search is
@@ -171,7 +213,10 @@ impl_member_at* = (be :: CBackend, decl: DeclId, name: str,
     Ok(());
 }
 
-decl_name = (be :: CBackend, decl: DeclId) str {
+// The name a declaration's struct goes by — the key `impls_named` is
+// asked with. Exported because finding a type's impls starts here
+// whatever the caller wants them for.
+decl_name* = (be :: CBackend, decl: DeclId) str {
     decl_at(be.tree, decl).match({
         Ok(d) => struct_name(d),
         None  => "",

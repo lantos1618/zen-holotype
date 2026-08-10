@@ -39,7 +39,7 @@ CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 expr = gen.gen_c.gen_c_expr
 declare_temp = gen.gen_c.gen_c_flow
-signature_of = gen.gen_c.gen_c_call
+signature_of, recv_arg, arg_value = gen.gen_c.gen_c_call
 write_assign_err = gen.gen_c.gen_c_cap
 is_sink_door, lower_sink_door, bodyless = gen.gen_c.gen_c_sink
 last_is_variadic, call_symbol, lower_pieces_into = gen.gen_c.gen_c_sink
@@ -163,20 +163,6 @@ write_door = (be :: CBackend, id: ExprId, c: Call, d: Def, e: Def,
     out.add_bytes(tmp.view())
 }
 
-// Argument zero of the SIGNATURE: the receiver when the call was
-// written `alloc.String(..)`, and the first written argument when it
-// was written `String(alloc, ..)`. The same shift `write_call` makes.
-alloc_arg = (c: Call, recv: Res<ExprId>) Res<ExprId> {
-    recv.match({
-        Ok(x) => Ok(x),
-        None  => arg_at(c, 0),
-    })
-}
-
-arg_at = (c: Call, i: usize) Res<ExprId> {
-    c.args.get(i).match({ Ok(a) => Ok(a.value), None => None })
-}
-
 // `zg_tN = <empty>(<alloc>);`
 write_empty_call = (be :: CBackend, e: Def, ret: TyId, c: Call,
                     recv: Res<ExprId>, ctx: Ctx, tmp: str)
@@ -186,7 +172,7 @@ write_empty_call = (be :: CBackend, e: Def, ret: TyId, c: Call,
     line.add_bytes(" = ").try();
     call_symbol(be, e, line).try();
     line.add_bytes("(").try();
-    alloc_arg(c, recv).match({
+    recv_arg(c, recv).match({
         None  => Ok(()),
         Ok(a) => write_alloc(be, e, a, ctx, line),
     }).try();

@@ -54,12 +54,13 @@ World, Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 Inst = sema.sema_inst
 member_named = sema.sema_member
-sym_local, sym_gen, sym_fn = gen.gen_name
+sym_local, sym_gen = gen.gen_name
 GenFault = gen.gen_diag
-CBackend, MethodRef = gen.gen_c.gen_c_state
+CBackend = gen.gen_c.gen_c_state
+decl_name = gen.gen_c.gen_c_impl
 DropEntry, BlockFrame = gen.gen_c.gen_c_frame
 recv_inst = gen.gen_c.gen_c_mono
-Site, site_of, method_sig, join = gen.gen_c.gen_c_member
+Site, site_of, method_sig, member_symbol = gen.gen_c.gen_c_member
 
 // -----------------------------------------------------------------
 // entering and leaving a block
@@ -343,14 +344,7 @@ call_drop = (be :: CBackend, e: DropEntry, s: Site, f: Function)
     sig ::= be.alloc.Vec<TyId>();
     method_sig(be, e.ty, s.decl, f, s.decl.module.to_usize(), inst,
                sig).try();
-    qname ::= be.alloc.String().try();
-    join(qname, s.qname, "drop").try();
-    sym ::= be.alloc.String().try();
-    sym_fn(sym, be.check.types, be.check.world, qname.view(), sig,
-           inst).try();
-    be.need_method(MethodRef(self_ty: e.ty, decl: s.decl, name: "drop",
-                             sig: sig, qname: qname.view()),
-                   inst, sym.view()).try();
+    sym = member_symbol(be, e.ty, s, "drop", sig, inst).try();
     write_drop_call(be, e, sym.view(), by_address(f))
 }
 
@@ -380,24 +374,10 @@ write_drop_call = (be :: CBackend, e: DropEntry, sym: str, addr: bool)
 // an impl OF Drop counts — the same test the reference backend makes.
 drop_fn* = (be :: CBackend, decl: DeclId) Res<Res<Function>, AllocError> {
     ids ::= be.alloc.Vec<ImplId>();
-    be.check.world.impls_named(be.tree, type_name(be, decl), ids).try();
+    be.check.world.impls_named(be.tree, decl_name(be, decl), ids).try();
     found ::= be.alloc.Vec<Function>();
     ids.loop((h, i) { collect_drop(be, decl, i, found).try() });
     Ok(found.get(0));
-}
-
-type_name = (be :: CBackend, decl: DeclId) str {
-    decl_at(be.tree, decl).match({
-        Ok(d) => struct_name(d),
-        None  => "",
-    })
-}
-
-struct_name = (d: Decl) str {
-    d.kind.match({
-        Struct(st) => st.name.text,
-        _          => "",
-    })
 }
 
 // An impl lives in the module that declares its target, so a same-named

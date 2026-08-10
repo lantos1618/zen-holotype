@@ -42,11 +42,11 @@ sub, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 open_named = gen.gen_c.gen_c_mono
 enter_struct_tparams = gen.gen_c.gen_c_mono
 signature_of = gen.gen_c.gen_c_call
-ctype, declarator, spellable, is_unit, is_c_integer = gen.gen_c.gen_c_type
+ctype, declarator, spellable, is_unit, is_c_integer, declared_ret = gen.gen_c.gen_c_type
 emit_types = gen.gen_c.gen_c_layout
 Dest, block = gen.gen_c.gen_c_stmt
 takes_closure = gen.gen_c.gen_c_inline
-impl_member_at, by_arity = gen.gen_c.gen_c_impl
+impl_member_at, by_arity, kept_or_arity = gen.gen_c.gen_c_impl
 method_sig = gen.gen_c.gen_c_member
 emit_main = gen.gen_c.gen_c_main
 emit_banner, emit_floor, emit_helpers, emit_print = gen.gen_c.gen_c_runtime
@@ -399,24 +399,16 @@ by_sig = (be :: CBackend, m: MethodRef, found: Vec<Member>)
     })
 }
 
-member_with_sig = (be :: CBackend, m: MethodRef, found: Vec<Member>)
-                  Res<Res<Member>, AllocError> {
-    kept ::= be.alloc.Vec<Member>();
-    found.loop((h, mem) { keep_same_sig(be, m, mem, kept).try() });
-    Ok(kept_or_arity(be, kept, found, m.sig.len));
-}
-
 // ARITY WHEN NO SIGNATURE MATCHES, because not every queue entry's
 // signature was built by `method_sig`: `gen_c_fat.zen` erases a slot's
 // type parameters before mangling, so a thunk's entry names types this
 // comparison cannot reproduce. Falling back leaves every entry that
 // resolves today resolving the same way.
-kept_or_arity = (be: CBackend, kept: Vec<Member>, found: Vec<Member>,
-                 arity: usize) Res<Member> {
-    (kept.len > 0).match({
-        true  => kept.get(0),
-        false => by_arity(be, found, arity),
-    })
+member_with_sig = (be :: CBackend, m: MethodRef, found: Vec<Member>)
+                  Res<Res<Member>, AllocError> {
+    kept ::= be.alloc.Vec<Member>();
+    found.loop((h, mem) { keep_same_sig(be, m, mem, kept).try() });
+    Ok(kept_or_arity(be, kept, found, m.sig.len));
 }
 
 // A named helper rather than a `.then` inside the loop body: a loop
@@ -535,10 +527,7 @@ lower_shape = (be :: CBackend, f: Function, blk: BlockId, qname: str,
 // emission is the one that knows which `T`.
 return_type* = (be :: CBackend, f: Function, ctx: Ctx)
               Res<TyId, AllocError> {
-    declared = f.ret.match({
-        Ok(t) => be.check.type_from_ast(t, ctx),
-        None  => be.check.types.prim("()"),
-    }).try();
+    declared = declared_ret(be, f, ctx).try();
     sub(be, declared)
 }
 
@@ -652,8 +641,11 @@ write_param = (be :: CBackend, p: Param, i: usize, sig: Vec<TyId>,
     })
 }
 
-ref_declarator = (be :: CBackend, ty: TyId, name: str, out :: String)
-                 Res<(), AllocError> {
+// A `::` parameter holds the ADDRESS of its argument, inlined or not:
+// the body writes the caller's own bytes and every read of the name is
+// a dereference, which is what `LocalSlot.by_ref` records.
+ref_declarator* = (be :: CBackend, ty: TyId, name: str, out :: String)
+                  Res<(), AllocError> {
     ctype(be, ty, out).try();
     out.add_bytes(" *").try();
     out.add_bytes(name).try();
