@@ -22,8 +22,15 @@
 // body is typed) and a constructor's field (`sema_apply.zen`, after
 // the construction's type is known). A binding with a written type
 // goes through `coerce` instead, which reports the ordinary mismatch.
+//
+// AND ONE RULE THAT IS NOT ABOUT HOISTING AT ALL, at the bottom of the
+// file: `check_arms`, which puts a match's ARMS where the match itself
+// stands. It lives here because every answer it has for a `Res` slot
+// is one of the answers above — an arm is a tail, and a tail that
+// lifts must go on lifting.
 
 Ast, Expr, ExprId, Block, BlockId, Stmt, StmtKind, Call, Arg, Span = ast
+Match, Arm = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -126,7 +133,8 @@ failure_never_lifts = (c :: Checker, file: str, span: Span)
 
 // A body's value against the type the signature promised: the one
 // place a function's tail meets its return type, so the one place a
-// bare success can lift into a `Res` — or fail to.
+// bare success can lift into a `Res` — or fail to. The tail's ARMS are
+// checked beside it, under the same exemption: see `check_arms`.
 //
 // Also the one place a body ending in nothing is caught: hoisting used
 // to be the only question asked here, so a `()` tail closing an `i32`
@@ -140,7 +148,19 @@ check_return* = (c :: Checker, body: BlockId, ctx: Ctx, got: TyId)
     blk = c.tree.block_at(body);
     tail_expr(c, blk).match({
         None  => Ok(()),
-        Ok(e) => return_fits(c, blk, e, got, ctx.ret),
+        Ok(e) => tail_fits(c, blk, e, got, ctx.ret),
+    })
+}
+
+// The tail as ONE value, then the tail's arms as the several values it
+// actually is. `value_was_asked_for` gates both, so the `;`-terminated
+// unit tail that closes any function keeps closing it — arms and all.
+tail_fits = (c :: Checker, blk: Block, id: ExprId, got: TyId, want: TyId)
+            Res<(), AllocError> {
+    return_fits(c, blk, id, got, want).try();
+    value_was_asked_for(c, blk, got, want).match({
+        false => Ok(()),
+        true  => check_arms(c, id, want),
     })
 }
 
@@ -254,6 +274,91 @@ last_stmt_of = (stmts: Vec<Stmt>) Res<ExprId> {
     stmts.get(stmts.len - 1).match({
         None  => None,
         Ok(s) => s.kind.match({ Expr(e) => Ok(e.expr), _ => None }),
+    })
+}
+
+// -----------------------------------------------------------------
+// the third position: an arm
+// -----------------------------------------------------------------
+
+// EVERY ARM PRODUCES THE MATCH'S VALUE, so every arm stands where the
+// match stands and owes what the match owes.
+//
+// Nothing asked them. `sema_join.zen` says what a match is WORTH and
+// deliberately declines to invent a supertype for arms that disagree —
+// "two arms of genuinely different types mean something the language
+// cannot express" — but declining answered the FIRST arm's type and
+// said nothing about the rest. `f = (b: bool) i32 { b.match({ true =>
+// 1, false => false }) }` typed as `i32`, compiled, ran, and printed
+// 0: a wrong answer, not a missing message.
+//
+// ASKED HERE AND NOT IN THE JOIN, because the join has no expectation
+// to name. "expected i32" is the POSITION's word; the first arm is not
+// entitled to speak for the position, and a diagnostic that said
+// "expected int" — the first arm's literal type — would blame the
+// wrong line. Same walk `check_literal` already makes for a literal's
+// range, for the reason given there: "a match arm is walked here since
+// it has no caller of its own — the match settles its context".
+check_arms* = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Match(m) => arms_within(c, m, want),
+        _        => Ok(()),
+    })
+}
+
+// A nested match's arms are the values; the inner match is only how
+// they were chosen — same recursion, same reason as `literal_within`.
+arms_within = (c :: Checker, m: Match, want: TyId) Res<(), AllocError> {
+    m.arms.loop((h, a) { arm_within(c, a.body, want).try() });
+    Ok(());
+}
+
+arm_within = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Match(m) => arms_within(c, m, want),
+        _        => arm_fits(c, id, node, want),
+    })
+}
+
+// THE TYPE THE MATCH ALREADY COMPUTED, never a fresh one: the arm's
+// pattern binders left scope when the arm did, so re-typing `Ok(n) =>
+// n` here would report `n` undefined. A miss is silence — an arm the
+// match never typed is not an arm this rule knows anything about.
+arm_fits = (c :: Checker, id: ExprId, node: Expr, want: TyId)
+           Res<(), AllocError> {
+    c.expr_memo.get(id).match({
+        None    => Ok(()),
+        Ok(got) => arm_agrees(c, node, got, want),
+    })
+}
+
+// Refused exactly the way a return is, and it must be: an arm is a
+// tail. So a `Res` want is hoisting's question and hoisting's alone
+// (`true => 1` still closes a `Res<i32, E>` match), and anything else
+// is the ordinary mismatch.
+arm_agrees = (c :: Checker, node: Expr, got: TyId, want: TyId)
+             Res<(), AllocError> {
+    c.assignable(got, want).match({
+        true  => Ok(()),
+        false => refuse_arm(c, node, got, want),
+    })
+}
+
+refuse_arm = (c :: Checker, node: Expr, got: TyId, want: TyId)
+             Res<(), AllocError> {
+    c.types.at(want).match({
+        Res(r) => arm_into_res(c, node, got, want, r),
+        _      => c.coerce(node.span.file, node.span, got, want, ""),
+    })
+}
+
+arm_into_res = (c :: Checker, node: Expr, got: TyId, want: TyId, r: TyRes)
+               Res<(), AllocError> {
+    c.types.at(got).match({
+        Res(_) => c.coerce(node.span.file, node.span, got, want, ""),
+        _      => hoist_into_res(c, node.span.file, node.span, got, want, r),
     })
 }
 

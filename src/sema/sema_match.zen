@@ -37,7 +37,7 @@
 
 Ast, Expr, ExprId, Span, Pos, Ident, Literal, LiteralKind = ast
 Pattern, PatternKind, PatName, Destructure, PatternId = ast
-Match, Arm, QualifiedName = ast
+Match, Arm, QualifiedName, Lambda = ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -47,7 +47,7 @@ Diag, SemaFault, NameFault = sema.sema_diag
 Checker, Ctx, UNRESOLVED = sema.sema_check
 Case, cases_of, case_payload, case_arity = sema.sema_case
 find_case = sema.sema_case
-type_of = sema.sema_type
+type_of, lambda_type = sema.sema_type
 join = sema.sema_join
 
 // A pattern, normalised: the three shapes the algorithm knows.
@@ -602,8 +602,37 @@ arm_body_type = (c :: Checker, mt: Match, i: usize, ctx: Ctx)
                 Res<TyId, AllocError> {
     mt.arms.get(i).match({
         None    => c.types.unknown(),
-        Ok(arm) => c.type_of(arm.body, ctx),
+        Ok(arm) => arm_value_type(c, arm.body, ctx),
     })
+}
+
+// `Ok => (n) { n }` — the payload written to the RIGHT of the arrow,
+// where it is a closure literal and not a binder. DESIGN.md:152:
+// "arms are `pattern => expr`", "payloads bind in the pattern:
+// `Ok(n) => n`". The form parses, so only sema can refuse it, and
+// refusing it needs the arm to be worth SOMETHING: `expr_kind`
+// answers poison for a closure because a call's signature usually
+// supplies its types, and here no signature is coming — an arm is a
+// value, and the match settles its context. So the closure is worth
+// its shape, written into the memo the same way `compute_expr` would,
+// because `sema_hoist.zen` reads the arm's type back from there.
+//
+// It was poison until 2026-08-10, poison agrees with everything, and
+// the form reached the backend to be told "codegen does not lower this
+// yet" — the wrong phase naming the wrong law.
+arm_value_type = (c :: Checker, id: ExprId, ctx: Ctx)
+                 Res<TyId, AllocError> {
+    c.tree.expr_at(id).kind.match({
+        Lambda(l) => arm_closure_type(c, id, l),
+        _         => c.type_of(id, ctx),
+    })
+}
+
+arm_closure_type = (c :: Checker, id: ExprId, l: Lambda)
+                   Res<TyId, AllocError> {
+    got = c.lambda_type(l).try();
+    c.expr_memo.set(id, got).try();
+    Ok(got);
 }
 
 // The names a pattern introduces, in the arm's own scope: `Ok(n)` binds
