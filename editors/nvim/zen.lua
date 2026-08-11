@@ -7,11 +7,11 @@
 -- Requires Neovim 0.11 or newer for `vim.lsp.config`/`vim.lsp.enable`. The
 -- 0.10-and-earlier route is at the bottom of this file.
 --
--- ONE SETTING MATTERS. `M.cmd` below is how the server is launched, and it
--- is the only line that changes when the stdio transport lands. Read
--- `editors/README.md` before assuming it works — as of this commit the
--- server cannot be spoken to over a pipe, and this config will fail to
--- attach. The highlighting half works today regardless of the server.
+-- ONE SETTING MATTERS. `M.cmd` below is how the server is launched: the
+-- stdio transport has landed, so `zen lsp` with no arguments speaks
+-- JSON-RPC over its own stdin/stdout, and this config attaches. What can
+-- still be wrong on a new machine is `M.root` — it must point at the
+-- checkout this file was copied from.
 
 local M = {}
 
