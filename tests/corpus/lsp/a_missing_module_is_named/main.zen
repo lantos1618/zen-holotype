@@ -1,0 +1,132 @@
+// A MISSING MODULE IS NAMED, not just its downstream damage.
+//
+// An import whose file is not on disk is a READ fault, and a read fault
+// was counted, and printed on a command line — and dropped from
+// `Build.diags`, the only channel `publishDiagnostics` reads. A
+// language server builds with `speaking` false (a `println` would
+// corrupt the frame stream), so an editor rooted where an import is
+// unreachable — a `build.zen` opened outside the tree carrying `std` —
+// showed `undefined name` for every imported name and never the cause.
+//
+// This asserts TWO things:
+//
+//   - THE CAUSE IS PUBLISHED, UNDER ITS OWN URI. The buffer imports
+//     `app.absent`, which exists nowhere; the notification for
+//     `app/absent/absent.zen` carries "nothing is at that path" at
+//     0:0 — the file cannot be read, so `to_wire` clamps the whole-file
+//     span, and the URI is what names it. The downstream `undefined
+//     name` still arrives against the open buffer, as before.
+//
+//   - THE CLEARING REACHES A FILE THAT WAS NEVER OPEN. Batch two fixes
+//     the buffer and BOTH lists come back empty: the missing file's
+//     diagnostic is taken back though no document names it, because
+//     `showing` remembered it.
+//
+// THE FRAMING IS UNWRAPPED AND NOT PRINTED, as in
+// `diagnostics_publish_and_clear` — a `Content-Length` header carries a
+// CR and a `.expected` may not (docs/TESTING.md).
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// THE BUFFER, IMPORTING WHAT IS NOT THERE. `Absent` is used exactly
+// once, as a parameter type — the use is where sema reports an
+// undefined name, never the import line.
+BROKEN*: str = "Point = app.shape\nAbsent = app.absent\n\nnear = (p: Point, n: Absent) i32 {\n    p.x\n}\n"
+
+// The same buffer with the import gone — the file as it sits on disk.
+FIXED*: str = "Point = app.shape\n\nnear = (p: Point, n: i32) i32 {\n    s = p.x + n;\n    s\n}\n"
+
+// `tests/run.py` stages a directory test into `<work>/src` and runs the
+// program from `<work>`, so these are the paths the server will open.
+URI*: str = "file://src/app/app.zen"
+ABSENT_URI*: str = "file://src/app/absent/absent.zen"
+
+// THE WORKSPACE IS NOT THE COMPILATION ROOT — `zen_path.root_for`
+// climbs out of `src/app`, which holds its own `app.zen`, to `src`.
+ROOT_URI*: str = "file://."
+
+INITIALIZED*: str = "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}"
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    s ::= a.Server(env);
+
+    first ::= a.String().try();
+    open_session(a, first).try();
+    write_frame(INITIALIZED, first).try();
+    open_doc(a, URI, BROKEN, first).try();
+    batch(s, a, "a buffer importing a module that is not there", first.view()).try();
+
+    second ::= a.String().try();
+    change_doc(a, URI, FIXED, second).try();
+    batch(s, a, "the import removed", second.view()).try();
+
+    Ok(0);
+}
+
+// --- the requests ------------------------------------------------------
+
+// `rootUri` IS WHAT MAKES THIS A BUILD: without it the server has no
+// workspace and publishes nothing at all — `lsp_diag.zen`'s refusal,
+// not a gap.
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":").try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+open_doc = (a: Alloc, uri: str, text: str, into :: String)
+           Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// FULL SYNC: `contentChanges[0].text` IS the whole new buffer, because
+// `initialize` advertised `textDocumentSync: 1`.
+change_doc = (a: Alloc, uri: str, text: str, into :: String)
+             Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes("},\"contentChanges\":[{\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}]}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+// One batch through the server, and every frame it produced.
+batch = (s :: Server, a: Alloc, what: str, input: str) Res<(), AllocError> {
+    out ::= a.String().try();
+    serve(s, input, out).try();
+    println("--- {}", what);
+    walk(out.view());
+    Ok(());
+}
+
+// Every frame's body, one per line. Nothing is filtered: a count that
+// silently dropped a frame would be a count nothing could check.
+walk = (out: str) () {
+    from ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && from < out.len }, (h) {
+        frame_at(out, from).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { seen = seen + 1; println("    {}", fr.body); from = fr.next; },
+        });
+    });
+    (seen == 0).then(() { println("    (no frames)"); });
+}

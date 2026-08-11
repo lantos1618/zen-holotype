@@ -84,7 +84,7 @@ Job = zen.zen_cli
 // `base_of`/`after_last_slash` take a `str` first, reached through the
 // value, so importing them by name would say nothing.
 slash_for = zen.zen_path
-unit_at, candidate, file_of = zen.zen_path
+unit_at, candidate, file_of, relative_to = zen.zen_path
 
 // WHERE A PROGRAM STARTS is a fact about a path too: `ENTRY` is the
 // module name the probe looks for AND the declaration
@@ -275,11 +275,31 @@ Build* = {
         })
     }
 
-    // COUNTED AND SAID, NOT COLLECTED: a `Diag` is a span, and here the
-    // mistake is the whole file.
+    // COUNTED, SAID AND HELD. A `Diag` is a span, and here the mistake
+    // is the whole file, so the span is its first position — the file IS
+    // the subject ("nothing is at that path" says nothing without it).
+    //
+    // HELD because a language server builds with `speaking` false — a
+    // `println` would corrupt the frame stream — and collecting is then
+    // the ONLY way a missing module reaches `publishDiagnostics`. An
+    // unreadable import surfaced only as the downstream `undefined name`
+    // faults, the cause nowhere among them: an editor rooted where `std`
+    // is unreachable showed phantom undefined names for every import.
     fs_fault = (self :: @Self, path: str, e: FsError) Res<str> {
         self.faults = self.faults + 1;
         self.speaking.then(() { println("{}: {}", path, fs_message(e)); });
+        at = Span(
+            file: relative_to(self.root, path),
+            start: Pos(line: 1, col: 1),
+            end: Pos(line: 1, col: 1),
+        );
+        // An allocation failure DROPS the held copy rather than
+        // propagating — `Res<str>`'s `None` is already spoken for ("the
+        // read failed"), and the fault is counted and said either way.
+        self.diags.add(diag(fs_message(e), at)).match({
+            Ok(_)  => (),
+            Err(_) => (),
+        });
         None;
     }
 
