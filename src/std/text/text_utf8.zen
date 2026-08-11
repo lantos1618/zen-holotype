@@ -86,20 +86,23 @@ UTF8_MAX_CODEPOINT*: u32 = 1114111
 UTF8_MAX_LEN*: usize = 4        // no sequence is longer
 
 // width of the sequence starting with `lead`, or 0 if it can't start one:
-// a continuation byte, an overlong lead, or past reach of U+10FFFF
+// a continuation byte, an overlong lead, or past reach of U+10FFFF.
+// Early return over a pyramid: the one-shot loop is a breakable block,
+// each `.then` a guard that returns its length, the last break the rest.
+// The typed binding is load-bearing — a match on the loop call itself
+// leaves T unresolved, and the bootstrapper lowers it to garbage
 sequence_len = (lead: u8) usize {
-    (lead < UTF8_ASCII_MAX).match({
-        true  => 1,
-        false => (lead < UTF8_LEAD_2_MIN).match({
-            true  => 0,
-            false => (lead < UTF8_LEAD_3_MIN).match({
-                true  => 2,
-                false => (lead < UTF8_LEAD_4_MIN).match({
-                    true  => 3,
-                    false => (lead < UTF8_LEAD_MAX).match({ true => 4, false => 0 }),
-                }),
-            }),
-        }),
+    found: Res<usize> = loop((h) {
+        (lead < UTF8_ASCII_MAX).then(() { h.break(1) });
+        (lead < UTF8_LEAD_2_MIN).then(() { h.break(0) });
+        (lead < UTF8_LEAD_3_MIN).then(() { h.break(2) });
+        (lead < UTF8_LEAD_4_MIN).then(() { h.break(3) });
+        (lead < UTF8_LEAD_MAX).then(() { h.break(4) });
+        h.break(0);
+    });
+    found.match({
+        Ok(len) => len,
+        None    => 0,
     });
 }
 

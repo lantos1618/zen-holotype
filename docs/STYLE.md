@@ -179,7 +179,26 @@ items.find((v) { v.is_ready() })
 
 **Guards close with a bare `_`.** Match is always exhaustive, in every position. If you find yourself wanting a partial match, you want `.then`, and it should be visible.
 
-**Early return over a pyramid.** `.try()` exists so that failure does not indent.
+**Early return over a pyramid.** `.try()` exists so that failure does not indent. When the early exit carries a value rather than a failure, a one-shot `loop` is the breakable block: each guard is a `.then` whose closure calls `h.break(v)`, and the fall-through `h.break` is the default. Bind the loop to a typed variable before matching on it — a match on the call itself leaves `T` unresolved, which the bootstrapper lowers to garbage instead of rejecting.
+
+```groovy
+// no
+(lead < UTF8_ASCII_MAX).match({
+    true  => 1,
+    false => (lead < UTF8_LEAD_2_MIN).match({
+        true  => 0,
+        false => ..      // one level deeper per range
+    }),
+});
+
+// yes
+found: Res<usize> = loop((h) {
+    (lead < UTF8_ASCII_MAX).then(() { h.break(1) });
+    (lead < UTF8_LEAD_2_MIN).then(() { h.break(0) });
+    h.break(2);          // the rest
+});
+found.match({ Ok(len) => len, None => 0 });
+```
 
 **No magic numbers.** `b == ':'`, never `b == 58`. Char literals exist.
 
