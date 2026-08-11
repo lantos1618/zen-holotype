@@ -296,10 +296,23 @@ def prune(graph, keep):
         for dep in getattr(info, "deps", ()) or ():
             if dep not in closure:
                 stack.append(dep)
+    # The prelude is every module's implicit import, so it joins the walk
+    # on the stack: appended to `closure` directly it would survive alone,
+    # and what IT re-exports from (std.core.num's declarations, impls and
+    # all) would be pruned out from under a program that imports nothing.
     if getattr(graph, "prelude", None):
         prelude = graph.prelude
         if prelude in graph.modules and prelude not in closure:
-            closure.append(prelude)
+            stack.append(prelude)
+            while stack:
+                dotted = stack.pop()
+                if dotted in closure:
+                    continue
+                closure.append(dotted)
+                info = graph.modules.get(dotted)
+                for dep in getattr(info, "deps", ()) or ():
+                    if dep not in closure:
+                        stack.append(dep)
     keep_set = sorted(set(closure))
     graph.modules = {k: v for k, v in sorted(graph.modules.items()) if k in keep_set}
     graph.order = tuple(d for d in graph.order if d in graph.modules)

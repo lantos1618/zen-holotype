@@ -3721,11 +3721,21 @@ class Sema:
     def satisfies(self, ty, bound):
         if ty == bound:
             return True
-        if ty.kind != "named" or bound.kind != "named":
+        if bound.kind != "named" or bound.name.startswith("@"):
             return True
-        if ty.name.startswith("@") or bound.name.startswith("@"):
+        # a primitive's impls hang off its prelude declaration
+        # (`u8.impl(ToU32, ..)`), so that declaration's key answers the
+        # question -- without this a prim actual vacuously "satisfied"
+        # every bound and the body failed at instantiation instead
+        if ty.kind == "prim":
+            impl_key = self._decl_qname(ty)
+        elif ty.kind == "named" and not ty.name.startswith("@"):
+            impl_key = ty.name
+        else:
             return True
-        for im in self.impls_of(ty.name):
+        if impl_key is None:
+            return True
+        for im in self.impls_of(impl_key):
             if im.trait == bound.name:
                 return True
         btd = self.types.get(bound.name)

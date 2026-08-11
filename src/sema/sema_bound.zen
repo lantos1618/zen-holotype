@@ -36,7 +36,7 @@ Vec = std.collections
 str, String = std.text
 Range = std.core
 DeclId, ImplId = sema.sema_id
-TyId, Ty, Types, TyNamed = sema.sema_ty
+TyId, Ty, Types, TyNamed, Prim = sema.sema_ty
 World, Def, decl_at = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
@@ -122,8 +122,27 @@ satisfies_bound* = (c :: Checker, ty: TyId, bound: TyId)
 impls_bound = (c :: Checker, ty: TyId, bound: TyId) Res<bool, AllocError> {
     c.types.at(ty).match({
         Named(n) => named_impls_bound(c, n, bound),
+        Prim(p)  => prim_impls_bound(c, p, bound),
         Array(_) => Ok(array_satisfies(c, bound)),
         _        => Ok(false),
+    })
+}
+
+// A primitive's impls hang off its prelude declaration — "a prelude
+// declaration of a primitive's name IS that primitive" (sema_member.zen's
+// prim_members, which a dot's lookup already goes through) — so the
+// question is the NAMED one, asked of that declaration under the
+// primitive's own spelling. `u8.impl(ToU32, ..)` is what makes
+// `<T: ToU32>` accept a u8.
+prim_impls_bound = (c :: Checker, p: Prim, bound: TyId) Res<bool, AllocError> {
+    defs ::= c.alloc.Vec<Def>();
+    c.world.prelude_of(p.name, defs).try();
+    defs.get(0).match({
+        None  => Ok(false),
+        Ok(d) => {
+            args ::= c.alloc.Vec<TyId>();
+            named_impls_bound(c, TyNamed(decl: d.id, name: p.name, args: args), bound)
+        },
     })
 }
 

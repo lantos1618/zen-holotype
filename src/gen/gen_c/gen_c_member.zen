@@ -82,6 +82,7 @@ sink_door_shape, lower_member_door = gen.gen_c.gen_c_sink
 by_arity, bodied_fn, impl_member, kept_or_arity = gen.gen_c.gen_c_impl
 has_body = gen.gen_c.gen_c_impl
 impl_member_at = gen.gen_c.gen_c_impl
+alias_of = gen.gen_c.gen_c_impl
 
 // -----------------------------------------------------------------
 // the entry point
@@ -716,8 +717,30 @@ lower_ufcs = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
 ufcs_or_impl = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
                 ctx: Ctx, out :: String) Res<(), AllocError> {
     reaches(be, rty, a.name.text, c.args.len + 1).try().match({
-        true  => unsupported(be, id, "a call to an impl-supplied member", out),
+        true  => impl_alias(be, id, c, a, rty, ctx, out),
         false => lower_plain_call(be, id, c, a.name.text, Ok(a.base), ctx, out),
+    })
+}
+
+// An impl member that IS another function — `widen_u32 = to_u32` in
+// std.core.num — lowers as that function with the receiver as argument
+// zero: the very call the alias names, so the two spellings cannot
+// disagree about what they mean. A member supplied any other way — a
+// lambda, a record — still meets the refusal below.
+impl_alias = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
+              ctx: Ctx, out :: String) Res<(), AllocError> {
+    site_of(be, rty).try().match({
+        None  => unsupported(be, id, "a call to an impl-supplied member", out),
+        Ok(s) => alias_target(be, id, c, a, s, ctx, out),
+    });
+}
+
+alias_target = (be :: CBackend, id: ExprId, c: Call, a: Access, s: Site,
+                ctx: Ctx, out :: String) Res<(), AllocError> {
+    found = alias_of(be, s.decl, a.name.text).try();
+    found.match({
+        Ok(t) => lower_plain_call(be, id, c, t, Ok(a.base), ctx, out),
+        None  => unsupported(be, id, "a call to an impl-supplied member", out),
     })
 }
 

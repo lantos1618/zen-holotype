@@ -3579,8 +3579,10 @@ class FnCtx:
                                       receiver=(rcode, rty))
         # a ufcs free function: the receiver is the first parameter
         cands = self.ufcs_decls(name, rty)
-        if not cands and rty is not None and rty[0] == "named":
-            # ... or a bound's bodyless declaration, whose body is the backend
+        if not cands and rty is not None and rty[0] in ("named", "prim"):
+            # ... or a bound's bodyless declaration, whose body is the backend.
+            # a primitive's bound (`u8.impl(ToU32, ..)`) is reached the same
+            # way: there is no named declaration to key on, only the impl
             cands = self.trait_methods(rty, name, needs_body=False)
         if cands:
             decl = self.pick_overload(cands, argnodes, receiver=(rcode, rty))
@@ -3694,9 +3696,17 @@ class FnCtx:
         """Does this type have an impl for that trait?  A concrete type that
         declares the member itself counts too -- there is one declaration
         form and an impl is not a second mechanism."""
-        if ty is None or ty[0] != "named":
+        if ty is None:
             return False
-        target = ty[1][-1]
+        if ty[0] == "prim":
+            # a primitive's impls (`str.impl(Eq, ..)`, `u8.impl(ToU32, ..)`)
+            # hang off the name itself: there is no declaration whose parts
+            # could carry them
+            target = ty[1]
+        elif ty[0] == "named":
+            target = ty[1][-1]
+        else:
+            return False
         traitname = trait[1][-1]
         for d in self.e.by_name.values():
             for x in d:
@@ -5043,6 +5053,16 @@ class FnCtx:
         del self.e.diags[mark:]
         if name.startswith("to_") and (receiver is not None or argnodes):
             target = name[3:]
+            if target in PRIMS:
+                value = receiver if receiver is not None else None
+                if value is None:
+                    v = argnodes[0]
+                    value = v if isinstance(v, tuple) else self.expr(v)
+                return ("(%s)%s" % (PRIMS[target], paren(value[0])), prim(target))
+        # the same cast behind a bound's name: `widen_u32` is ToU32's field,
+        # bodyless because the conversion has nothing underneath to write
+        if name.startswith("widen_") and (receiver is not None or argnodes):
+            target = name[6:]
             if target in PRIMS:
                 value = receiver if receiver is not None else None
                 if value is None:

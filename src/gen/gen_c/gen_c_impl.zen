@@ -312,3 +312,57 @@ add_if_bodied = (m: Member, f: Function, out :: Vec<Member>)
 has_body* = (f: Function) bool {
     f.body.match({ Ok(_) => true, None => false })
 }
+
+// -----------------------------------------------------------------
+// a member that IS another function
+//
+// `widen_u32 = to_u32` supplies the member as an ALIAS, not a body —
+// std.core.num's widening bounds are declared this way because the
+// conversion is a backend intrinsic and there is nothing to write a
+// body in. The answer here is the aliased function's name; the caller
+// (gen_c_member.zen) lowers the call as that function with the
+// receiver at argument zero, so the two spellings cannot disagree.
+// -----------------------------------------------------------------
+
+// The function an impl on the type aliases `name` to, when one does.
+// "An impl lives with the type", so the search is over the impls
+// declared in the target's own module — the same rule impl_member_at
+// keeps for members with bodies.
+alias_of* = (be :: CBackend, decl: DeclId, name: str) Res<Res<str>, AllocError> {
+    ids ::= be.alloc.Vec<ImplId>();
+    be.check.world.impls_named(be.tree, decl_name(be, decl), ids).try();
+    found ::= be.alloc.Vec<str>();
+    ids.loop((h, i) { keep_alias(be, i, decl, name, found).try() });
+    Ok(found.get(0));
+}
+
+keep_alias = (be :: CBackend, i: ImplId, decl: DeclId, name: str,
+              out :: Vec<str>) Res<(), AllocError> {
+    (i.decl.module == decl.module).match({
+        false => Ok(()),
+        true  => impl_alias_at(be, i, name, out),
+    })
+}
+
+impl_alias_at = (be :: CBackend, i: ImplId, name: str, out :: Vec<str>)
+                Res<(), AllocError> {
+    be.check.world.impl_at(be.tree, i).match({
+        None   => Ok(()),
+        Ok(im) => {
+            impl_field(be, im, name).try().match({
+                None  => Ok(()),
+                Ok(x) => add_alias(be, x, out),
+            })
+        },
+    })
+}
+
+// A bare Name and nothing else: `widen_u32 = to_u32` aliases a function;
+// `start = 0` would be a value, and lowering it as a call would be the
+// old fault spelled a new way
+add_alias = (be :: CBackend, x: ExprId, out :: Vec<str>) Res<(), AllocError> {
+    be.tree.expr_at(x).kind.match({
+        Name(n) => out.add(n.text),
+        _       => Ok(()),
+    })
+}
