@@ -6,9 +6,9 @@ Companion to `DESIGN.md`, `PLAN.md` and `TESTING.md`. Those say what the languag
 
 > LSP, formatter, and race checker are the visible goals, and **two of those three are not tools.** … Only the LSP is a genuinely separate program, and even it is a thin server over compiler internals.
 
-**Everything below is held to that.** A server is a transport, a coordinate conversion, and a table that maps a method name onto a query the compiler already answers. Where a query is missing, the fix belongs in `src/sema/` or `src/ast/`, not in `src/lsp/`. Where a query is *expensive*, `PLAN.md:317` already names the cause and the place the fix goes: "If this stage turns out to be expensive, the cause is stage 0.3 — a batch compiler recompiling the world per keystroke."
+**Everything below is held to that.** A server is a transport, a coordinate conversion, and a table that maps a method name onto a query the compiler already answers. Where a query is missing, the fix belongs in `src/sema/` or `src/ast/`, not in `src/lsp/`. Where a query is *expensive*, `PLAN.md:345` already names the cause and the place the fix goes: "If this stage turns out to be expensive, the cause is stage 0.3 — a batch compiler recompiling the world per keystroke."
 
-`STAGE` reads `4`, and `PLAN.md:60` puts the LSP at stage 4. This is not future work.
+`STAGE` reads `4`, and `PLAN.md:74` puts the LSP at stage 4. This is not future work.
 
 ---
 
@@ -18,39 +18,39 @@ Companion to `DESIGN.md`, `PLAN.md` and `TESTING.md`. Those say what the languag
 
 | what | where |
 |---|---|
-| a cursor position finds its node | `src/ast/ast_find.zen:72` (`node_at`), `:126` (`expr_node_at`) |
-| every node carries a half-open span with a 1-based byte column | `src/ast/ast_span.zen:25` (`Pos`), `:33` (`Span`, carrying `file`) |
-| every **name** carries its own span | `src/ast/ast_span.zen:76` (`Ident`), `:85` (`QualifiedName`) |
-| the type of an expression, memoized | `src/sema/sema_type.zen:253` (`type_of`), memo at `src/sema/sema_check.zen:96` |
-| the type a written type node denotes | `src/sema/sema_type.zen:81` (`type_from_ast`), memo at `src/sema/sema_check.zen:97` |
-| which declaration a call resolved to | `src/sema/sema_check.zen:113` (`call_memo`) |
-| what a name means in a module | `src/sema/sema_def.zen:172` (`defs_of`), `Def` with a `span` at `:63` |
-| what a dot reaches | `src/sema/sema_member.zen:396` (`members_of`), `Found` with a `span` at `:66` |
-| what a value of a type can be | `src/sema/sema_case.zen:43` (`cases_of`) |
-| a diagnostic as a value with a position | `src/sema/sema_diag.zen:114` (`Diag`), `:126` (`message`), `:164` (`render`) |
-| printing a `TyId` as text | `src/sema/sema_ty.zen:422` (`Types.name_of`) |
-| tokens, with comments among them | `src/lex/lex_token.zen:97` (`Token`), `:76` (`LineComment`/`BlockComment`) |
-| the whole pipeline, wired | `src/zen/zen_build.zen:602` (`build`) |
+| a cursor position finds its node | `src/ast/ast_find.zen:55` (`node_at`), `:106` (`expr_node_at`) |
+| every node carries a half-open span with a 1-based byte column | `src/ast/ast_span.zen:22` (`Pos`), `:30` (`Span`, carrying `file`) |
+| every **name** carries its own span | `src/ast/ast_span.zen:73` (`Ident`), `:82` (`QualifiedName`) |
+| the type of an expression, memoized | `src/sema/sema_type.zen:338` (`type_of`), memo at `src/sema/sema_check.zen:101` |
+| the type a written type node denotes | `src/sema/sema_type.zen:73` (`type_from_ast`), memo at `src/sema/sema_check.zen:102` |
+| which declaration a call resolved to | `src/sema/sema_check.zen:124` (`call_memo`) |
+| what a name means in a module | `src/sema/sema_def.zen:180` (`defs_of`), `Def` with a `span` at `:64` |
+| what a dot reaches | `src/sema/sema_member.zen:413` (`members_of`), `Found` with a `span` at `:63` |
+| what a value of a type can be | `src/sema/sema_case.zen:42` (`cases_of`) |
+| a diagnostic as a value with a position | `src/sema/sema_diag.zen:165` (`Diag`), `:177` (`message`), `:228` (`render`) |
+| printing a `TyId` as text | `src/sema/sema_ty.zen:448` (`Types.name_of`) |
+| tokens, with comments among them | `src/lex/lex_token.zen:96` (`Token`), `:75` (`LineComment`/`BlockComment`) |
+| the whole pipeline, wired | `src/zen/zen_run.zen:35` (`build`) |
 
-`PLAN.md:328` listed one precondition as **MISSING** — "a cursor position finds its node". It has since landed as `src/ast/ast_find.zen`, and that file's header says why it was the one absent: every other consumer walks downward from a root, and an editor arrives holding a position. **That table row is now green and `PLAN.md` should be updated to say so.**
+`PLAN.md:355` listed one precondition as **MISSING** — "a cursor position finds its node". It has since landed as `src/ast/ast_find.zen`, and that file's header says why it was the one absent: every other consumer walks downward from a root, and an editor arrives holding a position. **That table row is now green, and `PLAN.md` says so.**
 
 ### Genuinely new code
 
 Five things, and only one of them is about the LSP.
 
-1. **JSON.** Nothing in this tree speaks it. `grep -ril json src/` returns three files and every hit is the word inside a package-name example (`src/std/build/build.zen:48`, `src/ast/ast_node.zen:542`). Cost is priced in §4.
+1. ~~**JSON.** Nothing in this tree speaks it.~~ **LANDED** — `src/lsp/lsp_json.zen` is the value, the arena and the writer, `src/lsp/lsp_json_read.zen` the reader, gated by `corpus/lsp/json_round_trips_and_rejects`. It stays in `src/lsp/` per the move note in §4.
 2. ~~**Reading standard input.**~~ **LANDED.** `Env` now has `in: Stdin`, one byte-counted `read` with no line discipline, and its floor is `src/gen/gen_c/gen_c_stdin.zen`. §4 records what it cost and the one thing it turned out to require that this document did not anticipate.
-3. **Writing exact bytes to stdout.** `Console` has exactly one member, `println` (`src/std/env/env.zen:45`), which appends exactly one `\n` (`TESTING.md:73`). A JSON-RPC frame is CRLF-delimited and unterminated.
+3. **Writing exact bytes to stdout.** `Console` has exactly one member, `println` (`src/std/env/env.zen:38`), which appends exactly one `\n` (`TESTING.md:76`). A JSON-RPC frame is CRLF-delimited and unterminated.
 4. **The position conversion.** §3. It is small, it is the classic bug, and it lives in one file.
 5. **The server itself**: a document overlay, a dispatch table, and lifecycle state.
 
 ### Must NOT be reimplemented
 
-- **A second parser or a second AST.** `PLAN.md:115`: "Never a second parser, never a second AST, never a 'just for the formatter' path." An error-recovering "IDE parser" is that mistake wearing a new hat.
+- **A second parser or a second AST.** `PLAN.md:137`: "Never a second parser, never a second AST, never a 'just for the formatter' path." An error-recovering "IDE parser" is that mistake wearing a new hat.
 - **A formatter.** `textDocument/formatting` calls stage 2's `zen fmt`. If `fmt` cannot format a buffer that is not on disk, fix `fmt`.
 - **A diagnostics engine.** Every phase already produces diagnostics as values carrying spans. The server converts; it never decides what is wrong.
-- **Name resolution.** `DESIGN.md:392` and `:394` specify exactly what is visible and exactly what a dot reaches. A completion list assembled by any other rule is a second, wrong, specification of the language.
-- **An incremental compiler.** `DESIGN.md:67`: compilation is whole-program. `PLAN.md:365` lists incremental codegen under "what not to build". §5 says what that costs and what to do instead.
+- **Name resolution.** `DESIGN.md:404` and `:406` specify exactly what is visible and exactly what a dot reaches. A completion list assembled by any other rule is a second, wrong, specification of the language.
+- **An incremental compiler.** `DESIGN.md:67`: compilation is whole-program. `PLAN.md:397` lists incremental codegen under "what not to build". §5 says what that costs and what to do instead.
 
 ---
 
@@ -63,22 +63,22 @@ Four stages, named **L1–L4** so they are not confused with `PLAN.md`'s 0–5. 
 | `initialize` / `initialized` | none — capability negotiation | **built**: `src/lsp/lsp_serve.zen` answers with `textDocumentSync: 1` and `hoverProvider: true`. Every request before it is `-32002` | L1 |
 | `shutdown` / `exit` | none | **built** | L1 |
 | `textDocument/didOpen` / `didChange` / `didClose` | an overlay the driver reads before the disk | **built, both halves** (Full sync). The server holds the buffer; `Build.overlay` is what the driver reads before `env.fs.read`, so an UNSAVED buffer — and a file that is on no disk at all — is what gets checked | L1 |
-| `textDocument/publishDiagnostics` | diagnostics as values with spans | **built**, all three phases: `src/lsp/lsp_diag.zen`. Sema's come off the `Checker` `Build.whole` hands back (`src/sema/sema_check.zen:198,200`), lex's and parse's off the `Build`'s own `diag_count`/`diag_at`. Grouped by the URI each span names, one notification per file, and a file whose errors are gone gets an EMPTY list. The policy — when to send, and why it is not a timed debounce — is §5 | L1 |
-| `textDocument/documentSymbol` | a module's declarations in source order, each with a span and a name-span | **exists**, no new query: `module_count`/`module_at` at `src/ast/ast_arena.zen:147,149`; `Decl.span` and `Ident.span` are LSP's `range` and `selectionRange` exactly | L2 |
+| `textDocument/publishDiagnostics` | diagnostics as values with spans | **built**, all three phases: `src/lsp/lsp_diag.zen`. Sema's come off the `Checker` `Build.whole` hands back (`src/sema/sema_check.zen:197,199`), lex's and parse's off the `Build`'s own `diag_count`/`diag_at`. Grouped by the URI each span names, one notification per file, and a file whose errors are gone gets an EMPTY list. The policy — when to send, and why it is not a timed debounce — is §5 | L1 |
+| `textDocument/documentSymbol` | a module's declarations in source order, each with a span and a name-span | **exists**, no new query: `module_count`/`module_at` at `src/ast/ast_arena.zen:139,141`; `Decl.span` and `Ident.span` are LSP's `range` and `selectionRange` exactly | L2 |
 | `textDocument/hover` | the type under the cursor, printed | **built, and widened** — `src/lsp/lsp_hover.zen` plus `src/lsp/lsp_decl.zen`, still no new sema. See the hover section below for what it answers, what it refuses, and the measurement | L2 |
-| `textDocument/definition` | the span a name was declared at | **mostly**: `defs_of` → `Def.span` (`src/sema/sema_def.zen:172`, `:63`) for a module-level name; `call_memo` (`src/sema/sema_check.zen:113`) for a call; `Found.span` (`src/sema/sema_member.zen:66`) for a member. **Missing for locals** — see below | L2 |
-| `textDocument/semanticTokens/full`, lexical | the token stream | **built**: `src/lsp/lsp_colour.zen`, over `scan` and `Token{kind, span}` (`src/lex/lex.zen:62`, `src/lex/lex_token.zen:97`) and nothing else. The one answer here that needs no build, no `Checker` and no workspace — see the colour section below | L2 |
+| `textDocument/definition` | the span a name was declared at | **mostly**: `defs_of` → `Def.span` (`src/sema/sema_def.zen:180`, `:64`) for a module-level name; `call_memo` (`src/sema/sema_check.zen:124`) for a call; `Found.span` (`src/sema/sema_member.zen:63`) for a member. **Missing for locals** — see below | L2 |
+| `textDocument/semanticTokens/full`, lexical | the token stream | **built**: `src/lsp/lsp_colour.zen`, over `scan` and `Token{kind, span}` (`src/lex/lex.zen:57`, `src/lex/lex_token.zen:96`) and nothing else. The one answer here that needs no build, no `Checker` and no workspace — see the colour section below | L2 |
 | `textDocument/references` | for a `DeclId`, every node that resolved to it | **missing**. `call_memo` is that map, forward and for calls only. Nothing records a resolved bare *name*, and nothing inverts | L3 |
-| `textDocument/completion` | the candidate set at a position | **partly**: after a dot, `members_of` (`src/sema/sema_member.zen:396`) and `cases_of` (`src/sema/sema_case.zen:43`) and `travelled_cands` (`src/sema/sema.zen:100`) are the three halves of `DESIGN.md:394`. **Missing**: `defs_of` takes an exact `name: str` and has no prefix form; and the incomplete-parse problem below | L3 |
+| `textDocument/completion` | the candidate set at a position | **partly**: after a dot, `members_of` (`src/sema/sema_member.zen:413`) and `cases_of` (`src/sema/sema_case.zen:42`) and `travelled_cands` (`src/sema/sema.zen:97`) are the three halves of `DESIGN.md:406`. **Missing**: `defs_of` takes an exact `name: str` and has no prefix form; and the incomplete-parse problem below | L3 |
 | `textDocument/formatting` | `parse \|> print` | **the engine exists, the request does not**. `PLAN.md` stage 2 landed: `src/fmt/` formats a file, `zen fmt --check` gates the tree, and a re-lex guard requires an identical token stream before any edit is kept. What is missing is only the LSP request wired to it — and note the formatter models the FILE, not yet the DECLARATION, so `rangeFormatting` is not merely unimplemented, it is not yet expressible | L3 |
-| `textDocument/semanticTokens`, semantic | per-`Ident` resolution: is this a type, a function, a parameter? | **missing**: `defs_of` per identifier in a file, and nothing memoizes on an `Ident`. This is the ONLY thing that can distinguish `Vec` from `add` from `n`, all three of which are one `Ident`, and the lexical answer above refuses to guess rather than approximate it | L4 |
+| `textDocument/semanticTokens`, semantic | per-`Ident` resolution: is this a type, a function, a parameter? | ~~**missing**: `defs_of` per identifier in a file, and nothing memoizes on an `Ident`.~~ **LANDED** — and it turned out to need neither: `call_memo`, `type_memo` and the AST's own declaration kinds already answer type and function; the one genuinely new memo is `param_memo` (`src/sema/sema_check.zen`), keyed on the name EXPRESSION's `ExprId` since an `Ident` has no id. `src/lsp/lsp_names.zen` reads all of it off the diagnostics' build; `src/lsp/lsp_colour.zen` reclassifies only the `Ident`s it names | L4 |
 | `textDocument/semanticTokens/range` and `/full/delta` | a sub-range, or a diff against a previous result | **missing, and deliberately not advertised.** A client asks for either one only when the server said it has it, so the capability is `full: true` and nothing more. Advertising one unanswered is `-32601`, which in VS Code renders as no colour at all with nothing on screen to say why | L3 |
-| `textDocument/signatureHelp` | which overloads a call could mean, and which parameter the cursor is in | **missing**, and harder here than elsewhere: `DESIGN.md:477` resolves on declared parameter types *and arity*, so there is never one signature to show | L4 |
+| `textDocument/signatureHelp` | which overloads a call could mean, and which parameter the cursor is in | **missing**, and harder here than elsewhere: `DESIGN.md:505` resolves on declared parameter types *and arity*, so there is never one signature to show | L4 |
 | `textDocument/rename` | references, plus a safety argument | **missing**, and see the hazard below | L4 |
 
 **Three honest notes on that table.**
 
-**Locals have no span, and it is not an oversight.** `Binding` is `{ name, ty, mutable }` (`src/sema/sema_check.zen:63`) and locals are released at scope exit (`detach_locals`, `:230`). Nothing about a local survives `check_all`. Go-to-definition on a parameter therefore does not work and cannot be made to work from outside sema: the fix is a `span` on `Binding` plus a per-function record of the bindings that were live, which is a change in `src/sema/` and is priced at L3, not at L2.
+**Locals have no span, and it is not an oversight.** `Binding` is `{ name, ty, mutable }` (`src/sema/sema_check.zen:68`) and locals are released at scope exit (`detach_locals`, `:294`). Nothing about a local survives `check_all`. Go-to-definition on a parameter therefore does not work and cannot be made to work from outside sema: the fix is a `span` on `Binding` plus a per-function record of the bindings that were live, which is a change in `src/sema/` and is priced at L3, not at L2.
 
 **Incomplete input is the completion problem, not resolution.** `x.` is not a parse. `f(a, ` is not a parse. So at the moment completion and signature help are wanted, there is no `Access` node and no `Call` node to ask about. This tree's parser reports and does not recover — `src/zen/zen_build.zen:341` states the position for the lexer and the same holds one level up. **Do not answer this by writing an error-recovering second parser.** The cheap answer, and the one this document recommends: the server scans *backwards from the cursor over the buffer's bytes* to find the trigger character and the base expression's end, asks `expr_node_at` about the base — which does parse — and never asks the parser about the incomplete part at all. That is a lexical heuristic living entirely in `src/lsp/`, it is testable, and it does not put a second grammar in the tree. It will be wrong sometimes. Say so in its header.
 
@@ -130,9 +130,9 @@ near = (q: Point, n: i32) i32 {
 
 **answered 4 of 12** while hover checked the open document as a lone module: the two written `i32`s, the parameter `n`, and `n` where it is used. `Point` resolved to nothing, sema interned poison, and the parameter typed by it, the local computed from it and the whole reprinted signature went `null` with it. **Every file in `src/` opens with an import**, so 10 of 12 described no file anyone works in.
 
-With the overlay and `Build.whole` behind it (§5), the same twelve answer **10**. The two that do not are a space and a brace, which must stay `null`.
+With the overlay and `Build.whole` behind it (§5), the same twelve answer **9**. The three that do not are the import line, a space and a brace — the space and the brace must stay `null`, and the gate pins all three.
 
-**The receiver of a field access** (`q` in `q.x`) was a third, and it was the row listed below as *a sema bug and not a hover one*: `expr_memo` had an entry for the whole `Access` and none for its base. `sema_member.base_of` records the base now — a name base is typed straight out of the scope and never reached `type_of`, which is what memoizes — so it answers, and this program is 10.
+**The receiver of a field access** (`q` in `q.x`) was a third, and it was the row listed below as *a sema bug and not a hover one*: `expr_memo` had an entry for the whole `Access` and none for its base. `sema_member.base_of` records the base now — a name base is typed straight out of the scope and never reached `type_of`, which is what memoizes — so it answers, and this program is 9.
 
 The gate is `tests/corpus/lsp/hover_answers_an_imported_name`, which ships the root, and asserts three separate failures at once: an imported name resolving, the **unsaved buffer** rather than the file being what gets checked (the disk names the parameter `p` and the buffer names it `q`), and the driver **not printing** the parse diagnostic from a buffer whose brace never closes.
 
@@ -148,11 +148,13 @@ The gate is `tests/corpus/lsp/hover_answers_an_imported_name`, which ships the r
 
 ### Colour, in full — because it is the second query built, and it cost the least of anything here
 
-**`src/lsp/lsp_colour.zen`, and the whole of it is one `scan`.** No `Parser`, no `Checker`, no `Build`, nothing read from any disk. That is not an economy, it is the property that makes the answer worth having: hover and diagnostics both need a build and both go quiet without a workspace, and colour is the one thing a user notices the *instant* a file opens. It answers on an unsaved buffer, in a session with no `rootUri`, and in a file that does not parse — `src/lex/lex.zen`'s contract is that a file with lexical faults still yields tokens, so a half-typed string literal costs the colour of that literal and nothing else.
+**`src/lsp/lsp_colour.zen`, and the lexical half of it is one `scan`.** No `Parser`, no `Checker`, no `Build`, nothing read from any disk. That is not an economy, it is the property that makes the answer worth having: hover and diagnostics both need a build and both go quiet without a workspace, and colour is the one thing a user notices the *instant* a file opens. It answers on an unsaved buffer, in a session with no `rootUri`, and in a file that does not parse — `src/lex/lex.zen`'s contract is that a file with lexical faults still yields tokens, so a half-typed string literal costs the colour of that literal and nothing else. **The semantic half rides the diagnostics' build** and is one paragraph below; it changes none of those properties, because where there is no clean build there is no semantic half and the lexical answer is what remains.
 
 **Why this rather than a TextMate grammar** is `editors/README.md`'s argument and it stands unchanged: a second grammar is `PLAN.md:137`'s named failure, a generated one is `PLAN.md:127`'s ungated third artifact, and VS Code cannot load the tree-sitter grammar `grammar/` already holds. What this document said was the route that costs neither, and it was right; what it did not say is that the route is about two hundred lines.
 
-**`Ident` IS ONE KIND AND COLOUR WANTS SEVERAL, AND THE ANSWER IS TO REFUSE.** A lexer cannot tell a type from a function from a variable, and Zen makes that sharper than most languages: `DESIGN.md` has no keyword before a type, so `Vec`, `add` and `n` are the same token. Every `Ident` is therefore `variable`, uniformly. **Colouring by capitalisation was available and was rejected**: it would be a second, wrong, specification of what a name means, living in `src/lsp/`, which §1 says may never specify the language. It is the same rule that makes hover answer `null` rather than print `<unknown>`. The semantic row in the table above is the upgrade, it is L4, and it needs a memo on an `Ident` in `src/sema/`.
+**`Ident` IS ONE KIND AND COLOUR WANTS SEVERAL, AND THE LEXER'S ANSWER IS STILL TO REFUSE.** A lexer cannot tell a type from a function from a variable, and Zen makes that sharper than most languages: `DESIGN.md` has no keyword before a type, so `Vec`, `add` and `n` are the same token. Every `Ident` is therefore `variable`, lexically — **colouring by capitalisation was available and was rejected**: it would be a second, wrong, specification of what a name means, living in `src/lsp/`, which §1 says may never specify the language. It is the same rule that makes hover answer `null` rather than print `<unknown>`.
+
+**The semantic row in the table above has now LANDED, and the refusal is why it could.** Because nothing ever guessed, the upgrade is additive: `lsp_names.zen` walks the `Checker` the diagnostics' build already produced — the AST's declaration kinds for declaration sites, `type_memo` for written types, `call_memo` for callees, and the one new memo, `param_memo`, for parameter uses — and `lsp_colour.zen` repaints exactly the `Ident` tokens that walk named. The walk runs only on a CLEAN build: with faults outstanding the memos hold poison, and the file keeps its lexical colours rather than a wrong answer or a grey one. What stays `variable` and why — a function named but not called, a type in value position, a variant, a constant, a local, a type inside a struct or impl body (no `type_memo` entry where `@Self` is in scope) — is listed in `lsp_names.zen`'s header, and the list is the honest map of what sema writes down.
 
 **Delimiters are not coloured** — `(`, `)`, `[`, `]`, `{`, `}`, `,`, `;`, `.`, `:` — and operators are. That is the same refusal one step down: a brace is structure, and calling it `operator` would be this folder deciding something the lexer did not say.
 
@@ -168,7 +170,7 @@ The gate is `tests/corpus/lsp/hover_answers_an_imported_name`, which ships the r
 
 **The tenth came back green and it is not a hole in the test.** §3 below suggests mutating `step_at`'s `c.value < UTF8_MIN_4` into a comparison on `c.len`, and predicts red. It is green, because those two conditions are *equivalent over anything `codepoint_at` returns `Ok` for*: `four_byte` rejects `value < UTF8_MIN_4` as overlong and `three_byte` rejects `value >= UTF8_MIN_3` failures, so a decoded length of 4 and a value at or above 65536 are one fact. **§3's suggested mutation is an equivalent mutant and that paragraph should be read as naming the wrong one** — the mutation that does go red is counting `units` as `bytes`, and it reddens three tests.
 
-**Rename is the request this language makes dangerous**, and it is worth writing down before someone ships it. Two rules collide with it. `DESIGN.md:394`: a UFCS call `x.f(..)` "never names `f`", so renaming an exported free function must rewrite call sites that do not contain that name in any bare-name position — a textual search finds them, and a textual search is exactly what a rename must not be. `DESIGN.md:140`: whether `A | B` is a union or a nominal enum "depends on what else is in scope", so renaming a *type* can silently change the meaning of an unrelated declaration in a module that imports it. Rename is L4 and it is L4 for a reason.
+**Rename is the request this language makes dangerous**, and it is worth writing down before someone ships it. Two rules collide with it. `DESIGN.md:406`: a UFCS call `x.f(..)` "never names `f`", so renaming an exported free function must rewrite call sites that do not contain that name in any bare-name position — a textual search finds them, and a textual search is exactly what a rename must not be. `DESIGN.md:146`: whether `A | B` is a union or a nominal enum "depends on what else is in scope", so renaming a *type* can silently change the meaning of an unrelated declaration in a module that imports it. Rename is L4 and it is L4 for a reason.
 
 ---
 
@@ -183,11 +185,11 @@ Two coordinate systems:
 | LSP | **0-based** | **UTF-16 code units** into the line |
 | Zen | **1-based** | **1-based BYTE column** |
 
-Zen's side is fixed in four places and is not negotiable: `DESIGN.md:49` ("a `line:col` with a 1-based byte column, from the lexer up"), `DESIGN.md:302` (a trap's column is a 1-based byte offset), `TESTING.md:48` (every `must-fail` position is a 1-based byte column), and `src/ast/ast_span.zen:22`, which anticipated this document in one sentence:
+Zen's side is fixed in four places and is not negotiable: `DESIGN.md:49` ("a `line:col` with a 1-based byte column, from the lexer up"), `DESIGN.md:314` (a trap's column is a 1-based byte offset), `TESTING.md:49` (every `must-fail` position is a 1-based byte column), and `src/ast/ast_span.zen:22`, which anticipated this document in one sentence:
 
 > `col` counts BYTES, not codepoints and not UTF-16 units — `str` is bytes everywhere else in this language, and an LSP converting to UTF-16 at the wire is its own, testable, step.
 
-`src/AST_CONTRACT.md:477` lists "is a column a byte, a codepoint, or a UTF-16 unit?" as something `DESIGN.md` does not settle. **It is settled for Zen and it is settled for the wire; what was never written down is that they differ. This document is that sentence.**
+`src/AST_CONTRACT.md:480` lists "is a column a byte, a codepoint, or a UTF-16 unit?" as something `DESIGN.md` does not settle. **It is settled for Zen and it is settled for the wire; what was never written down is that they differ. This document is that sentence.**
 
 ### Where the conversion lives
 
@@ -200,11 +202,11 @@ to_pos*  = (text: str, line: usize, character: usize) Pos   // wire -> Zen
 to_wire* = (text: str, p: Pos) WirePos                      // Zen -> wire
 ```
 
-Both take the document text, because **neither `Pos` carries a byte offset.** `src/lex/lex_token.zen:26` has one and `src/ast/ast_span.zen:25` deliberately does not — the offset dies at the parser boundary. So converting a column requires the bytes of the line, which means **the document store is a precondition for positions, not merely for sync.** That is a real ordering constraint on L1.
+Both take the document text, because **neither `Pos` carries a byte offset.** `src/lex/lex_token.zen:26` has one and `src/ast/ast_span.zen:22` deliberately does not — the offset dies at the parser boundary. So converting a column requires the bytes of the line, which means **the document store is a precondition for positions, not merely for sync.** That is a real ordering constraint on L1.
 
 ### The algorithm, and the one arithmetic fact
 
-Walk to the start of line `line + 1` counting `\n`. Then walk forward decoding codepoints with `codepoint_at` (`src/std/text/text_utf8.zen:46`), which hands back a `Codepoint { value, len }` — `len` is the byte width, and the UTF-16 width is **1 when `value` is below 65536 and 2 otherwise**, because a codepoint at or above U+10000 is one surrogate pair. Written in decimal, because `DESIGN.md:101` puts hex outside v1.
+Walk to the start of line `line + 1` counting `\n`. Then walk forward decoding codepoints with `codepoint_at` (`src/std/text/text_utf8.zen:38`), which hands back a `Codepoint { value, len }` — `len` is the byte width, and the UTF-16 width is **1 when `value` is below 65536 and 2 otherwise**, because a codepoint at or above U+10000 is one surrogate pair. Written in decimal, because `DESIGN.md:101` puts hex outside v1.
 
 Four decisions the algorithm has to make and a scanner cannot abstain from:
 
@@ -255,9 +257,9 @@ Cost, as estimated: one declaration with no body in `src/std/env/env.zen`, plus 
 
 ### Writing — the floor already exists
 
-`src/gen/gen_c/gen_c_runtime.zen:171` already emits `zg_print_bytes(const char *s, size_t n) { fwrite(s, 1, n, stdout); }` and `:172` the `zg_str` form. So exact-byte output is already in the runtime and only the Zen-side signature is missing.
+`src/gen/gen_c/gen_c_runtime.zen:159` already emits `zg_print_bytes(const char *s, size_t n) { fwrite(s, 1, n, stdout); }` and `:160` the `zg_str` form. So exact-byte output is already in the runtime and only the Zen-side signature is missing.
 
-**And nothing had to be added: the `print` sugar already writes exact bytes.** `src/gen/gen_c/gen_c_print.zen:52` recognises `print` beside `println` and `:105` appends the newline only for the second, so `print(s)` is `fwrite(s.data, 1, s.len, stdout)` and nothing else. That landed with the print floor and this document did not notice it. `L0`'s "byte-exact stdout" was already done.
+**And nothing had to be added: the `print` sugar already writes exact bytes.** `src/gen/gen_c/gen_c_print.zen:52` recognises `print` beside `println` and `:102` appends the newline only for the second, so `print(s)` is `fwrite(s.data, 1, s.len, stdout)` and nothing else. That landed with the print floor and this document did not notice it. `L0`'s "byte-exact stdout" was already done.
 
 The `Sink` question below therefore did not gate L1 and is still open on its own merits: `DESIGN.md:213` says "a console is a sink, a `String` is a sink", and `Console.impl(Sink, ..)` would make `Console` usable everywhere a `Sink` is.
 
@@ -269,7 +271,7 @@ Nothing in the tree parses or emits JSON. Concretely:
 
 - **The value type is an arena, not a tree.** `Json = Null | Bool | Num | Str | Arr | Obj` is recursive, and `src/AST_CONTRACT.md` rule 2 already settled what this tree does about recursion: a child is an id, never a value, because "an `Expr` containing an `Expr` has no size". JSON gets a `JsonId` and a `Json` arena for the same reason, not as a stylistic echo.
 - **The reader must implement JSON's number and string grammars, which are not Zen's.** `1e10` and `-0` are JSON numbers; `DESIGN.md:99` rejects a leading zero and `:100` rejects `12.`. `é` is a **hex** escape in a language `DESIGN.md:101` gives no hex literals, and a `😀` pair must be recombined into one codepoint before it is UTF-8 encoded. That last item is the one that gets skipped and then reappears as a position bug in §3.
-- **One nominal error, not a union.** `PLAN.md:200` puts error unions outside the seed subset, so the reader carries a single `JsonFault`.
+- **One nominal error, not a union.** `PLAN.md:222` puts error unions outside the seed subset, so the reader carries a single `JsonFault`.
 - Estimate: **250–400 lines** for reader plus writer plus escapes, and a corpus test per `TESTING.md:27`.
 
 **Where it goes: `src/lsp/lsp_json.zen`, with a note that it moves.** `STYLE.md`'s stranger test says JSON belongs in `std` — "parses a JSON document" names no module. `STYLE.md`'s second-caller rule says it moves on its second caller. Against that stands `src/std/env/env.zen:83`'s rule about members the compiler must keep working forever, and **the compiler will never parse JSON.** So it starts in `src/lsp/` and the header carries the sentence that sends it to `std.json` the day anything else wants it.
@@ -285,13 +287,13 @@ Nothing in the tree parses or emits JSON. Concretely:
 | `shutdown` | reply `null`, stop accepting work, do not exit |
 | `exit` | exit **0** if `shutdown` was received, **1** otherwise |
 
-Those exit codes fit what is already there: `main` returns `Res<i32, AllocError>` (`src/zen/zen.zen:33`) and `usage` deliberately returns 2 rather than 1 (`src/zen/zen.zen:52`) because "this build found problems" and "I could not tell what you asked for" are different answers. The LSP adds a third pair and no new mechanism.
+Those exit codes fit what is already there: `main` returns `Res<i32, AllocError>` (`src/zen/zen.zen:33`) and `usage` deliberately returns 2 rather than 1 (`src/zen/zen.zen:154`) because "this build found problems" and "I could not tell what you asked for" are different answers. The LSP adds a third pair and no new mechanism.
 
 **`$/cancelRequest` is honoured between requests and not inside one.** A build is a build (§5); there is no yield point in `check_all`. Saying this out loud beats a server that advertises cancellation it cannot perform.
 
 ### The CLI
 
-`src/zen/zen_cli.zen:82` already names `lsp` beside `fmt` and `test`, and `src/zen/zen.zen:45` already answers all three with "not yet — see docs/PLAN.md for the stage it arrives at". So `zen lsp` costs one `Cli` variant and one call. **It takes no arguments in L1.** A root is discovered from `initialize`'s `rootUri`, and `--entry` (`src/zen/zen_cli.zen:124`) has an editor-side equivalent that L1 does not need: the server builds the root, and `DESIGN.md:406` already says the driver probes when no entry is named.
+`Cli.Later(str)` (`src/zen/zen_cli.zen:42`) already names `lsp` beside `test`, and `src/zen/zen.zen:53` already dispatches it to the server — the "not yet — see docs/PLAN.md for the stage it arrives at" answer at `:59` is `test`'s alone now. So `zen lsp` cost one branch and one call. **It takes no arguments in L1.** A root is discovered from `initialize`'s `rootUri`, and `--entry` (`src/zen/zen_cli.zen:51`) has an editor-side equivalent that L1 does not need: the server builds the root, and `DESIGN.md:430` already says the driver probes when no entry is named.
 
 ---
 
@@ -299,12 +301,12 @@ Those exit codes fit what is already there: `main` returns `Res<i32, AllocError>
 
 ### Can the compiler reparse one file? No.
 
-`zen build` today, in order: `build` (`src/zen/zen_build.zen:602`) constructs a `Build`, resolves the entry with `entry_of` (`:149`), then `walk` (`:229`) breadth-first over the import graph, reading each module through `env.fs.read` (`:328`), lexing (`:345`) and parsing (`:376`) each into **one shared `Ast`**; then `back_end` (`:490`) and `check_tree` (`:505`) build **one `Checker`** over the finished tree and run `check_all` (`src/sema/sema_decl.zen:43`).
+`zen build` today, in order: `build` (`src/zen/zen_run.zen:35`) constructs a `Build`, resolves the entry with `entry_of` (`src/zen/zen_path.zen:217`), then `walk` (`src/zen/zen_build.zen:185`) breadth-first over the import graph, reading each module through `env.fs.read` (`:272`), lexing (`:332`) and parsing (`:364`) each into **one shared `Ast`**; then `back_end` (`:572`) and `check_tree` (`:586`) build **one `Checker`** over the finished tree and run `check_all` (`src/sema/sema_decl.zen:56`).
 
 Three structural reasons a single file cannot be redone in place, each already written down in the tree:
 
 1. **Ids are indices in creation order** (`src/AST_CONTRACT.md`, "Ast — the arena"). Re-parsing a module in the middle of the walk renumbers every node after it, and every memo is keyed on those ids.
-2. **The `Checker` copies the `Ast` and requires it finished** — `src/zen/zen_build.zen:122` states it: "a `Checker` copies the `Ast`, so an `Ast` is a value and a copy of it is a snapshot."
+2. **The `Checker` copies the `Ast` and requires it finished** — `src/zen/zen_build.zen:172` states it: "a `Checker` copies the `Ast` as a value, so a copy is a snapshot."
 3. **Compilation is whole-program** (`DESIGN.md:67`), and `gen_c` emits each generic instantiation exactly once. There is no unit smaller than the program.
 
 ### So: full sync, whole builds, and a debounce
@@ -317,7 +319,7 @@ The per-keystroke cost is one `zen build src`. The mitigations that are *not* in
 - **Coalesce.** A `didChange` arriving during a build supersedes it; the build in flight is finished and its results discarded rather than published.
 - **Never build on `didOpen` of a file already covered by the last build.**
 
-`PLAN.md:317` is the standing note on this: if it is still too slow after that, the fix is in sema's query granularity and belongs there, not here.
+`PLAN.md:345` is the standing note on this: if it is still too slow after that, the fix is in sema's query granularity and belongs there, not here.
 
 #### Two of those three landed, and the DEBOUNCE cannot be written — BUILT 2026-08-08
 
@@ -333,10 +335,10 @@ The per-keystroke cost is one `zen build src`. The mitigations that are *not* in
 
 ### The overlay
 
-`Fs.read` reads the disk (`src/std/env/env.zen:83`). An unsaved buffer is not on the disk. Two ways to interpose:
+`Fs.read` reads the disk (`src/std/env/env.zen:94`). An unsaved buffer is not on the disk. Two ways to interpose:
 
-1. **A user-written `Fs` whose `read` consults an overlay first.** Wrong twice: `Fs`'s members have no bodies because they *are* the authority (`src/gen/gen_c/gen_c_cap.zen:1`), and a value of a bound type is a fat value the backend may not build yet (`:27`).
-2. **A `Map<str, String>` field on `Build`, consulted by `Build.read` (`src/zen/zen_build.zen:328`) before `env.fs.read`.** One field, one branch, no new language feature, keyed on `Unit.path`.
+1. **A user-written `Fs` whose `read` consults an overlay first.** Wrong twice: `Fs`'s members have no bodies because they *are* the authority (`src/gen/gen_c/gen_c_cap.zen:1`), and a value of a bound type is a fat value the backend may not build yet (`:28`).
+2. **A `Map<str, String>` field on `Build`, consulted by `Build.read` (`src/zen/zen_build.zen:260`) before `env.fs.read`.** One field, one branch, no new language feature, keyed on `Unit.path`.
 
 **Take (2), and say what it costs.** This is the LSP reaching into the driver, and it is the one place the "thin server over compiler internals" thesis bends. The price is one field on `Build` and the honesty of writing in its comment that the overlay exists for the editor. The alternative — a private copy of `walk` in `src/lsp/` — is the second implementation this whole document exists to prevent.
 
@@ -363,7 +365,7 @@ An earlier agent refused to land the field on its own and priced the rest. It na
 
 ### Diagnostics have to escape the driver — **DONE**
 
-`publishDiagnostics` needs `Diag` values, not printed lines. Sema was always fine (`diag_count`/`diag_at`, `src/sema/sema_check.zen:151,153`); **lex and parse were not** — the driver `println`'d them and dropped them.
+`publishDiagnostics` needs `Diag` values, not printed lines. Sema was always fine (`diag_count`/`diag_at`, `src/sema/sema_check.zen:197,199`); **lex and parse were not** — the driver `println`'d them and dropped them.
 
 **Landed 2026-08-08.** `Build` holds `diags: Vec<Diag>` and answers the same `diag_count`/`diag_at` pair `Checker` exports. No fourth struct was invented: `Diag` **is** `parse.parse_diag.Diag`, which that file's own header had already asked for. `report` prints *from* the `Vec` rather than from its argument, so the collection is load-bearing rather than a copy nobody reads — removing it silences the printing and takes all thirteen `must-fail/parse` tests red.
 
@@ -402,7 +404,7 @@ The L1–L4 staging in §2 is about the SERVER. This is the same staging read fr
 
 | | Neovim | VS Code |
 |---|---|---|
-| **colour** | **works**, tree-sitter, no server — and it does NOT come from `semanticTokens`, which changes nothing for Neovim | **works** — `semanticTokens`, lexical, from the compiler's own lexer; the deviation below explains why it is not a TextMate grammar |
+| **colour** | **works**, tree-sitter, no server — and it does NOT come from `semanticTokens`, which changes nothing for Neovim | **works** — `semanticTokens`, from the compiler's own lexer and, on a clean build, its checker; the deviation below explains why it is not a TextMate grammar |
 | brackets, comment toggling, word selection | tree-sitter | **works now**, `language-configuration.json` |
 | **hover** | **works** — the transport landed, and so did the build behind it | **works** |
 | go-to-definition | L2 (module-level), L3 (locals) | same |
@@ -500,13 +502,13 @@ Four more things this constrains:
 - **The server path resolves on the remote.** `zen.server.path` must be read with the *remote* extension host's view of the filesystem, and a workspace-relative default (`./zen`, the binary `make build` produces) is more useful here than a global `zen`.
 - **Document URIs are `vscode-remote://…`, not `file://`.** The server must convert a URI to a path and back, and it must do it for the scheme it is actually sent. This is a small function and it belongs beside `lsp_pos.zen` — same class of bug, same rule about living in one place.
 - **VS Code does not offer `utf-8` position encoding.** So the UTF-16 conversion in §3 is not optional and VS Code is the client that proves it.
-- **Debugging is remote.** `console.log` from `activate()` lands in the remote extension host log, and the server's own stderr lands wherever the extension host puts it — not in the local terminal. Route the server's diagnostics through an LSP `window/logMessage` and an output channel, and **never write anything to stdout that is not a JSON-RPC frame**: `println` (`src/std/env/env.zen:45`) writes to stdout, so a stray debug print corrupts the protocol stream and the failure looks like a parse error in the client. That is a real hazard in this tree specifically, because `println` needs no capability parameter to reach.
+- **Debugging is remote.** `console.log` from `activate()` lands in the remote extension host log, and the server's own stderr lands wherever the extension host puts it — not in the local terminal. Route the server's diagnostics through an LSP `window/logMessage` and an output channel, and **never write anything to stdout that is not a JSON-RPC frame**: `println` (`src/std/env/env.zen:38`) writes to stdout, so a stray debug print corrupts the protocol stream and the failure looks like a parse error in the client. That is a real hazard in this tree specifically, because `println` needs no capability parameter to reach.
 
 ---
 
 ## 7. The stages, and a gate for each
 
-`PLAN.md:113`: "Every stage ends at a gate that can fail. Not 'the code is written' — a command that exits non-zero when the stage is wrong. … Before trusting a new gate, break the thing it guards on purpose and watch it go red."
+`PLAN.md:135`: "Every stage ends at a gate that can fail. Not 'the code is written' — a command that exits non-zero when the stage is wrong. … Before trusting a new gate, break the thing it guards on purpose and watch it go red."
 
 Every gate below is a `make` target or a suite under `tests/`, in the format `TESTING.md:27` fixes. **No gate below is "the editor feels right."**
 
@@ -542,6 +544,8 @@ Hover, definition, documentSymbol, lexical semanticTokens. No new sema.
 
 **Colour's half exists too**: `tests/corpus/lsp/colour_comes_from_the_lexer`, which drives the server and then decodes the delta encoding back through `to_pos` so every row prints the bytes it colours. Ten mutations, nine red, and the tenth is an equivalent mutant §3 wrongly predicted would fire — both facts are in §2's colour section. **Break it on purpose:** make `deltaLine` absolute and watch the file's colour slide down the page.
 
+**And the semantic half's gate is `tests/corpus/lsp/colour_comes_from_the_build`** (L4's row, landed early): a two-module build behind framed JSON-RPC, pinning that a type, a function and a parameter come back as three distinct indices, that the answer rides the diagnostics' build rather than running one of its own, and that a file with an undefined name is answered lexically — every identifier `variable` — until it compiles again. Mutation-verified on both new classifications.
+
 Plus the §3 conversion gate, which lands here at the latest and preferably in L1.
 
 ### L3 — the queries that need sema work
@@ -552,7 +556,7 @@ References (a reverse index), completion (a prefix form of `defs_of`, and the ba
 
 ### L4 — the expensive ones
 
-Semantic tokens with RESOLUTION — the lexical form is L2 and done; what is L4 is telling a type from a function from a parameter, which no lexer can — signature help, rename.
+~~Semantic tokens with RESOLUTION — the lexical form is L2 and done; what is L4 is telling a type from a function from a parameter, which no lexer can~~ — **the first of the three LANDED** (§2's colour section and table row): `type`, `function` and `parameter` joined the legend, the answers come off the diagnostics' build, and a file with errors keeps its lexical colours. What remains here is signature help and rename.
 
 **Gate for rename, and it is the only interesting one:** a rename applied to a copy of `src/` must leave the tree **compiling and byte-identical at the fixpoint after the inverse rename**. That is `make fixpoint` used as a rename oracle, it costs almost nothing because the script exists (`scripts/fixpoint.sh`), and it is the only test that can catch the two hazards in §2 — a UFCS call site that never named the function, and a variant name that changed what an unrelated declaration means.
 
@@ -564,9 +568,9 @@ Listed rather than guessed, per `PLAN.md:5`.
 
 1. ~~**Does `Console.impl(Sink, ..)` compile today?**~~ **Moot for L1.** The `print` sugar already writes exact bytes, so L0 needed no new writer at all. The `Sink` impl remains worth doing and is no longer on anyone's critical path.
 2. **Where does JSON live?** `STYLE.md`'s stranger test says `std.json`; `src/std/env/env.zen:83`'s rule about members the compiler must keep working forever says not in `std`. This document picks `src/lsp/lsp_json.zen` with a note. Someone should overrule it or ratify it.
-3. **Should `Pos` carry a byte offset?** `src/lex/lex_token.zen:26` has one and `src/ast/ast_span.zen:25` does not. Adding one to the AST's `Pos` makes the §3 conversion cheaper and slicing source off a span direct — and it is one more word on every position in the tree, which `src/AST_CONTRACT.md` was careful about for trivia. Not resolvable from the tree: it needs a measurement.
-4. **What is the server's compilation root when `rootUri` is a directory with no entry?** `DESIGN.md:406` gives `zen build <root> --entry <file>` for exactly this, and `src/zen/zen_build.zen:184` probes `main`, then the root's basename, then `zen`. An editor opening a single file outside any root has none of those. Is that an error, a diagnostic, or a degraded mode that lexes and does not check?
-5. **Is `zen lsp` allowed a second thread?** `Threads` exists (`src/std/env/env.zen:141`) but `PLAN.md` puts actors and threads at stage 5 and the compiler is written in the seed subset (`PLAN.md:194`), which excludes them. A single-threaded server cannot answer `shutdown` during a build. This document assumes single-threaded and says cancellation is honoured between requests; whether that is acceptable is a call nobody has made.
+3. **Should `Pos` carry a byte offset?** `src/lex/lex_token.zen:26` has one and `src/ast/ast_span.zen:22` does not. Adding one to the AST's `Pos` makes the §3 conversion cheaper and slicing source off a span direct — and it is one more word on every position in the tree, which `src/AST_CONTRACT.md` was careful about for trivia. Not resolvable from the tree: it needs a measurement.
+4. **What is the server's compilation root when `rootUri` is a directory with no entry?** `DESIGN.md:430` gives `zen build <root> --entry <file>` for exactly this, and `src/zen/zen_path.zen:249` probes `main`, then the root's basename, then `zen`. An editor opening a single file outside any root has none of those. Is that an error, a diagnostic, or a degraded mode that lexes and does not check?
+5. **Is `zen lsp` allowed a second thread?** `Threads` exists (`src/std/env/env.zen:134`) but `PLAN.md` puts actors and threads at stage 5 and the compiler is written in the seed subset (`PLAN.md:222`), which excludes them. A single-threaded server cannot answer `shutdown` during a build. This document assumes single-threaded and says cancellation is honoured between requests; whether that is acceptable is a call nobody has made.
 6. **Does `expr_memo` hold an answer for every expression after `check_all`?** Hover in L2 depends on it — the design is "run the check, then read the memo, and never reconstruct a `Ctx`". `compute_expr` writes a poison entry before computing, so *some* entry exists for anything walked. **The answer is no, and one instance is now closed and known:** a name in the base of a field access was typed by `sema_member.base_of` out of the scope, never reached `type_of`, and so was never recorded — `base_of` records it now. That is the shape of the question: not "does the walk reach it" but "does the path that types it go through the memo". Every path that does not is another such hole, and nothing enumerates them.
-7. **`PLAN.md:331`'s memo-key note.** "`type_of`'s memo key is the node id alone, which is sound only while a generic body is checked once… that key is on the critical path for hover being *correct* inside a generic." `src/sema/sema.zen:26` argues monomorphisation did not force a re-key because an instantiation changes the answer at a **call site**, which `ExprId` already separates. Those two statements are not obviously the same statement. Hover inside a generic body is where the difference shows, and no test asserts it.
-8. **Is trivia reachable from a position?** `Ast.trivia` is one list and a node names a run of it (`src/ast/ast_arena.zen:183`), but `node_at` deliberately answers `None` inside a comment (`src/ast/ast_find.zen:68`). Hover over a doc comment, and completion inside one, both need to know they are in trivia — and finding out costs a scan of a list nothing indexes by position.
+7. **`PLAN.md:363`'s memo-key note.** "`type_of`'s memo key is the node id alone, which is sound only while a generic body is checked once… that key is on the critical path for hover being *correct* inside a generic." `src/sema/sema.zen:26` argues monomorphisation did not force a re-key because an instantiation changes the answer at a **call site**, which `ExprId` already separates. Those two statements are not obviously the same statement. Hover inside a generic body is where the difference shows, and no test asserts it.
+8. **Is trivia reachable from a position?** `Ast.trivia` is one list and a node names a run of it (`src/ast/ast_arena.zen:34`), but `node_at` deliberately answers `None` inside a comment (`src/ast/ast_find.zen:53`). Hover over a doc comment, and completion inside one, both need to know they are in trivia — and finding out costs a scan of a list nothing indexes by position.

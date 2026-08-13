@@ -2,8 +2,9 @@
 // build files are zen programs; b is the Builder from std.build.
 // b is `::` because b.add / b.exe / b.test mutate the graph
 
-Budget, Builder, BuildError, Package = std.build
+Budget, Builder, BuildError, Function, Package = std.build
 Bencher, Tester = std.test
+seconds = std.core.time
 
 // packages are declared here as plain data — build files are
 // programs, so there is no separate manifest format. hash-locked,
@@ -54,7 +55,10 @@ build = (b :: Builder) Res<(), BuildError> {
 
     // test discovery is code, not compiler magic: walk the parsed
     // module tree and keep every function whose single parameter
-    // is a Tester. change the filter, change what a test is
+    // is a Tester. change the filter, change what a test is.
+    // STAGE 5: the walk reads @meta's ast nodes, which are opaque
+    // stand-ins until then (Module/Function in std.build) — this
+    // parses today and resolves at stage 5
     tests ::= b.alloc.Vec<Function>();
     b.module(Path("src")).functions.loop((h, f) {
         (f.params.len == 1 && f.params.get(0).try().type == Tester)
@@ -83,8 +87,10 @@ build = (b :: Builder) Res<(), BuildError> {
         ],
     });
 
-    // and the build budgets itself, so it never quietly grows
-    b.budget(Duration.seconds(60));
+    // and the build budgets itself, so it never quietly grows.
+    // UFCS spelling: Duration.seconds is a type lookup and seconds
+    // is not a member (std/core/time.zen says this in as many words)
+    b.budget(seconds(60));
 
     Ok(());
 }

@@ -82,12 +82,30 @@ parent_of* = (path: str) str {
 // `floor` IS A GUARD, NOT AN ANSWER: the climb stops at the workspace
 // regardless of disk, so a home directory named after a file inside it
 // can't walk a build out of the project.
+//
+// A directory holding a `build.zen` is ALSO root evidence, and the
+// second rule climbs where the first one stopped short: `example/src`
+// holds no `src.zen`, so a file opened there rooted at `example/src`
+// while the tree carrying `std` sits at `example` — the prelude never
+// seeds and every imported name comes back undefined. The editors
+// already mark a project this way (`editors/nvim/zen.lua`'s
+// `root_markers`), so the compiler reads the same marker or the two
+// disagree about one fact. Toward the floor, never past it, and when no
+// `build.zen` answers the first rule's answer stands.
 root_for* = (env: Env, a: Alloc, floor: str, path: str) str {
     dir ::= parent_of(path);
     loop(() { dir.len > floor.len && holds_its_own_name(env, a, dir) }, (h) {
         dir = parent_of(dir);
     });
-    dir;
+    settled = dir;
+    marked ::= dir;
+    loop(() { marked.len > floor.len && !holds_build_zen(env, a, marked) },
+         (h) { marked = parent_of(marked); });
+    (marked.len >= floor.len && !marked.is_empty()
+     && holds_build_zen(env, a, marked)).match({
+        true  => marked,
+        false => settled,
+    });
 }
 
 // `<dir>/<basename>.zen` — the folder-root spelling, asked of the disk.
@@ -96,6 +114,16 @@ root_for* = (env: Env, a: Alloc, floor: str, path: str) str {
 // module folder" when the question can't be asked is "stop climbing".
 holds_its_own_name = (env: Env, a: Alloc, dir: str) bool {
     a.String("{}/{}.zen", dir, dir.base_of()).match({
+        Err(_) => false,
+        Ok(f)  => env.fs.exists(f.view()),
+    })
+}
+
+// `<dir>/build.zen` — the project marker the editors already root by,
+// asked of the disk. The same allocation-failure contract as
+// `holds_its_own_name` above, and for the same reason.
+holds_build_zen = (env: Env, a: Alloc, dir: str) bool {
+    a.String("{}/build.zen", dir).match({
         Err(_) => false,
         Ok(f)  => env.fs.exists(f.view()),
     })

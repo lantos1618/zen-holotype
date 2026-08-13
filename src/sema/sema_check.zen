@@ -65,10 +65,15 @@ Inst, InstEdge = sema.sema_inst
 // the receiver rule and `sema_own.zen` for use-after-move — both walk
 // bodies this file has already typed, so the scope stack is where the
 // fact lives and neither of them has to re-derive it.
+//
+// `param` is the same shape of fact for the LSP: a formal parameter and
+// a `let`-style local paint two colours (`design_lsp.md` §2, L4), and a
+// use site cannot re-derive which it was once the scope is gone.
 Binding* = {
     name*: str,
     ty*: TyId,
     mutable*: bool,
+    param*: bool,
 }
 
 // What a query needs to know that its key does not carry.
@@ -122,6 +127,12 @@ Checker* = {
     // declaration, and a call nothing matched has no answer to record —
     // a miss means "ask the old way", never "there was no candidate".
     call_memo* :: Map<ExprId, DeclId>,
+
+    // WHICH NAME EXPRESSIONS DENOTE A FORMAL PARAMETER. Presence IS the
+    // answer — a miss means a local, a global, or a name nobody
+    // resolved, never "not a parameter". Written where resolution still
+    // holds the scope; read by `design_lsp.md` §2's L4 row.
+    param_memo* :: Map<ExprId, bool>,
 
     // WHAT DID THIS CALL INSTANTIATE ITS CALLEE WITH. The companion of
     // `call_memo` and keyed the same way: a call to `<T>(x: T) T` picks
@@ -268,9 +279,11 @@ Checker* = {
 
     mark* = (self: @Self) usize { self.locals.len }
 
-    bind* = (self :: @Self, name: str, ty: TyId, mutable: bool)
+    // `param` marks a formal parameter; `param_memo` is why it is recorded.
+    bind* = (self :: @Self, name: str, ty: TyId, mutable: bool, param: bool)
             Res<(), AllocError> {
-        self.locals.add(Binding(name: name, ty: ty, mutable: mutable))
+        self.locals.add(Binding(name: name, ty: ty, mutable: mutable,
+                                param: param))
     }
 
     // Drop every binding added since `mark`. `Vec` has no truncate, so
@@ -327,7 +340,8 @@ Checker* = {
     tvar_mark* = (self: @Self) usize { self.tvars.len }
 
     push_tvar* = (self :: @Self, name: str, ty: TyId) Res<(), AllocError> {
-        self.tvars.add(Binding(name: name, ty: ty, mutable: false))
+        self.tvars.add(Binding(name: name, ty: ty, mutable: false,
+                               param: false))
     }
 
     release_tvars* = (self :: @Self, mark: usize) Res<(), AllocError> {
@@ -357,7 +371,8 @@ Checker* = {
     bound_mark* = (self: @Self) usize { self.bounds.len }
 
     push_bound* = (self :: @Self, name: str, ty: TyId) Res<(), AllocError> {
-        self.bounds.add(Binding(name: name, ty: ty, mutable: false))
+        self.bounds.add(Binding(name: name, ty: ty, mutable: false,
+                                param: false))
     }
 
     release_bounds* = (self :: @Self, mark: usize) Res<(), AllocError> {
@@ -425,7 +440,6 @@ Checker* = {
             Ok(k) => self.locals.get(n - k - 1),
         })
     }
-
 
     // -----------------------------------------------------------------
     // agreement
@@ -686,6 +700,7 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         type_memo: a.Map<TypeId, TyId>(),
         supply_memo: a.Map<ExprId, TyId>(),
         call_memo: a.Map<ExprId, DeclId>(),
+        param_memo: a.Map<ExprId, bool>(),
         inst_memo: a.Map<ExprId, Inst>(),
         edges: a.Vec<InstEdge>(),
         set_memo: a.Map<TyId, TyId>(),

@@ -16,7 +16,10 @@
 //   lsp_decl.zen       which declared name a position is inside
 //   lsp_uri.zen        a document URI, as a path the compiler can open
 //   lsp_hover.zen      the one query wired to sema
-//   lsp_colour.zen     semanticTokens: colour, out of the lexer alone
+//   lsp_colour.zen     semanticTokens: colour, from the lexer, and from
+//                      the checker where it settled a name
+//   lsp_names.zen      the semantic half: which names a clean build
+//                      settled, read off the checker's memos
 //   lsp_diag.zen       publishDiagnostics: the build, grouped by file
 //   lsp_serve.zen      lifecycle, the overlay, and the dispatch table
 //   lsp_stdio.zen      the pipe: frames in on stdin, frames out on stdout
@@ -26,18 +29,20 @@
 // Everything else in `design_lsp.md` §2's table is refused with `-32601`.
 //
 // Hover and diagnostics need a build (root, disk, a `Checker`, ~1s) and
-// go quiet without one. Colour needs only a `scan`, so it answers on an
-// unsaved buffer with no workspace, even on a file that does not parse —
-// why VS Code gets colour from this server at all.
+// go quiet without one. Colour's LEXICAL half needs only a `scan`, so it
+// answers on an unsaved buffer with no workspace, even on a file that
+// does not parse — why VS Code gets colour from this server at all. The
+// SEMANTIC half (L4) rides the diagnostics' build: with no workspace, a
+// change not yet settled, or a program with faults, the answer degrades
+// to lexical and never to grey.
 //
 // Diagnostics are all three phases or nothing: lex/parse (on `Build`) go
 // out beside sema (on `Checker`), so type errors never show while syntax
 // errors go unreported.
 //
 // NOT BUILT: documentSymbol, definition, references, completion,
-// formatting, signatureHelp, rename (L2-L4); semanticTokens' SEMANTIC
-// form and its `range`/`full+delta` shapes, which need a memo on `Ident`
-// in `src/sema/` (L4).
+// formatting, signatureHelp, rename (L2-L4); semanticTokens' `range` and
+// `full/delta` shapes, deliberately not advertised (`design_lsp.md` §2).
 
 WirePos*, LineRun*, Step*, to_pos*, to_wire*, run_of*, step_at* = lsp.lsp_pos
 write_wire*, write_range*, wire_at*, units_of* = lsp.lsp_pos
@@ -49,8 +54,9 @@ Tell*, TypeAt*, ValueAt*, told_at*, is_nothing* = lsp.lsp_decl
 Hover*, hover_at*, hover_in*, no_type* = lsp.lsp_hover
 FILE_SCHEME*, path_of*, uri_at* = lsp.lsp_uri
 Spot*, Diagnostics*, found_in*, publish*, ERROR* = lsp.lsp_diag
-Colour*, index_of*, name_of*, colour_of* = lsp.lsp_colour
-write_legend*, write_tokens* = lsp.lsp_colour
+Colour*, Classed*, index_of*, name_of*, colour_of* = lsp.lsp_colour
+write_legend*, write_tokens*, sort_classes* = lsp.lsp_colour
+classify* = lsp.lsp_names
 Server*, serve*, write_capabilities*, SEMANTIC_TOKENS* = lsp.lsp_serve
 frame_byte*, frame_why* = lsp.lsp_serve
 Drain*, serve_stdio* = lsp.lsp_stdio

@@ -1,0 +1,119 @@
+// A `build.zen` MARKS THE PROJECT ROOT, and a source under it roots
+// there.
+//
+// `zen_path.root_for`'s first rule — climb out of a directory holding
+// its own name — stops short on an ordinary project layout:
+// `src/proj/app` here holds no `app.zen`, so a document opened at
+// `src/proj/app/deep.zen` used to root at `src/proj/app`, where no
+// `std` is. The prelude never seeded and every prelude name the buffer
+// touches (`Vec`, `str`, `usize`) came back `undefined name` — a
+// screen of phantom errors on a program that compiles fine. That was
+// the example project's state: `example/src/main.zen` rooted at
+// `example/src` while the tree carrying `std` sits at `example`, next
+// to `example/build.zen`.
+//
+// The editors already mark a project by its `build.zen`
+// (`editors/nvim/zen.lua`'s `root_markers`), and the compiler now reads
+// the same marker: the climb continues toward the workspace floor until
+// a directory holding `build.zen` answers. Here that is `src` — this
+// directory is staged to `<work>/src` and `std` is staged beside the
+// marker — so the opened buffer's ONE publishDiagnostics is an EMPTY
+// list. Every diagnostic the old rule printed named a prelude name, so
+// an empty list is reachable no other way.
+//
+// `app` sits INSIDE `proj`, a module shaped right, because lint's
+// dir-module-shape rule reads a test's immediate subdirectories — and
+// a subdirectory holding no own-name file is the shape under test.
+//
+// `a_missing_module_is_named` keeps the other half pinned: no
+// `build.zen` anywhere up to the floor, and the first rule's answer
+// stands unchanged.
+//
+// THE FRAMING IS UNWRAPPED AND NOT PRINTED, as in
+// `diagnostics_publish_and_clear` — a `Content-Length` header carries a
+// CR and a `.expected` may not (docs/TESTING.md).
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// THE BUFFER, byte for byte the file on disk — no imports at all, so
+// every name in it resolves through the prelude or not at all, and the
+// prelude only seeds when the root is the directory carrying `std`.
+DOC*: str = "// Two directories under the marker, and `app` holds no `app.zen`: the\n// holds-its-own-name climb stops here, and only the `build.zen` rule\n// climbs the last levels to `src`, where `std` is.\ntally* = (xs: Vec<i32>) usize {\n    xs.len\n}\n"
+
+// `tests/run.py` stages a directory test into `<work>/src` and runs the
+// program from `<work>`, so these are the paths the server will open.
+URI*: str = "file://src/proj/app/deep.zen"
+
+// THE WORKSPACE IS NOT THE COMPILATION ROOT — the marker climb stops at
+// `src`, one level above the workspace floor and two above where the
+// first rule stopped.
+ROOT_URI*: str = "file://."
+
+INITIALIZED*: str = "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}"
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    s ::= a.Server(env);
+
+    input ::= a.String().try();
+    open_session(a, input).try();
+    write_frame(INITIALIZED, input).try();
+    open_doc(a, URI, DOC, input).try();
+    batch(s, a, "a source under a build.zen-marked root", input.view()).try();
+
+    Ok(0);
+}
+
+// --- the requests ------------------------------------------------------
+
+// `rootUri` IS WHAT MAKES THIS A BUILD: without it the server has no
+// workspace and publishes nothing at all — `lsp_diag.zen`'s refusal,
+// not a gap.
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":").try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+open_doc = (a: Alloc, uri: str, text: str, into :: String)
+           Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+// One batch through the server, and every frame it produced.
+batch = (s :: Server, a: Alloc, what: str, input: str) Res<(), AllocError> {
+    out ::= a.String().try();
+    serve(s, input, out).try();
+    println("--- {}", what);
+    walk(out.view());
+    Ok(());
+}
+
+// Every frame's body, one per line. Nothing is filtered: a count that
+// silently dropped a frame would be a count nothing could check.
+walk = (out: str) () {
+    from ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && from < out.len }, (h) {
+        frame_at(out, from).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { seen = seen + 1; println("    {}", fr.body); from = fr.next; },
+        });
+    });
+    (seen == 0).then(() { println("    (no frames)"); });
+}

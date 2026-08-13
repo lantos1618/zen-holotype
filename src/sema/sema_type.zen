@@ -36,7 +36,7 @@ TyId, Ty, Types, TyArray, TyNamed, is_prim = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 named_or_union = sema.sema_union
 Diag, SemaFault, NameFault = sema.sema_diag
-Checker, Ctx = sema.sema_check
+Checker, Ctx, Binding = sema.sema_check
 UNRESOLVED, is_predicate = sema.sema_check
 try_type = sema.sema_try
 alias_module, module_not_a_value = sema.sema_module
@@ -363,7 +363,7 @@ expr_kind* = (c :: Checker, id: ExprId, node: Expr, ctx: Ctx)
         Literal(l)    => c.literal_type(l),
         Unit          => c.types.prim("()"),
         SelfType      => c.self_type(ctx),
-        Name(n)       => c.name_type(node, n.text, ctx),
+        Name(n)       => c.name_type(id, node, n.text, ctx),
         Paren(p)      => c.type_of(p.inner, ctx),
         Binary(b)     => c.binary_type(node, b, ctx),
         Unary(u)      => c.unary_type(node, u, ctx),
@@ -484,12 +484,25 @@ literal_type* = (c :: Checker, l: Literal) Res<TyId, AllocError> {
 // A bare identifier. A local shadows everything, then the module's
 // own declarations, then what it imported — and the `*` gate is
 // inside `defs_of`, not repeated here.
-name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
+name_type* = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
             Res<TyId, AllocError> {
     c.lookup(text).match({
         None  => c.unbound_name_type(node, text, ctx),
-        Ok(b) => Ok(b.ty),
+        Ok(b) => c.bound_name_type(id, b),
     })
+}
+
+// A name answered out of the scope stack. The id is threaded so a use
+// of a formal parameter is WRITTEN DOWN (`param_memo`): the binding is
+// released at scope exit, and after it the LSP has no way to tell a
+// parameter from a `let`-style local without this bit.
+bound_name_type = (c :: Checker, id: ExprId, b: Binding)
+                  Res<TyId, AllocError> {
+    b.param.match({
+        true  => c.param_memo.set(id, true),
+        false => Ok(()),
+    }).try();
+    Ok(b.ty);
 }
 
 // `None` is the prelude's own variant: `Res<T>` is recognised

@@ -1,0 +1,237 @@
+// COLOUR COMES FROM THE BUILD when the build is clean — and from the
+// lexer alone when it is not.
+//
+// `design_lsp.md` §2's L4 row, driven end to end: a session over framed
+// JSON-RPC with a real build behind it, so a `tokenType` index below is
+// the checker's answer carried over the wire, not a fixture's hope.
+//
+// WHAT IS PINNED, per batch:
+//
+//   - A TYPE, A FUNCTION AND A PARAMETER GET THREE DISTINCT INDICES.
+//     `Point` resolves to a struct in ANOTHER module, `near` is called,
+//     and `q`, `n` and `p` are used — 6, 7 and 8 below — while the
+//     local `s`, the field `x`, the import binding and the module path
+//     stay 5. The broken-file batches are what make that "stay"
+//     meaningful: the same bytes under a faulted build are 5
+//     everywhere.
+//
+//   - THE ANSWER RIDES THE DIAGNOSTICS' BUILD. Batch two asks for
+//     tokens and is answered WITHOUT a build of its own — no
+//     publishDiagnostics frame appears beside it, because no change was
+//     owed one. The build that answered ran at batch one's settle.
+//
+//   - A FILE THAT DOES NOT COMPILE KEEPS ITS LEXICAL COLOURS. Batch
+//     three introduces an undefined name; batch four's answer is the
+//     lexer's, every identifier `variable`. The doctrine is that a
+//     wrong answer is worse than none — and grey is worse than lexical.
+//
+//   - FIXING THE FILE BRINGS THE SEMANTIC ANSWER BACK. Batches five
+//     and six are one more round, so a classification that could only
+//     ever be written once would show here.
+//
+// The decoder is `colour_comes_from_the_lexer`'s: each five-integer
+// group is added back up and the resulting `line:character` handed to
+// `to_pos`, the INVERSE conversion, so the last column of every row is
+// the bytes that group actually colours.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, write_decimal, frame_at = lsp.lsp_frame
+write_text, Jsons, JsonId = lsp.lsp_json
+read = lsp.lsp_json_read
+to_pos, run_of = lsp.lsp_pos
+
+// THE BUFFER. One type used across a module boundary, one function
+// called, parameters used, a local and a field that must NOT move off
+// `variable`.
+CLEAN*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = q.x + n;\n    s\n}\n\nfar = (p: Point) i32 {\n    near(p, 1)\n}\n"
+
+// The same buffer with one name nobody declares. A SEMA fault, not a
+// parse one: the file still lexes and parses, so every token is there
+// to be coloured — lexically.
+BROKEN*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = q.x + missing;\n    s\n}\n\nfar = (p: Point) i32 {\n    near(p, 1)\n}\n"
+
+// `tests/run.py` stages a directory test into `<work>/src` and runs the
+// program from `<work>`, so these are the paths the server will open.
+URI*: str = "file://src/app/app.zen"
+ROOT_URI*: str = "file://."
+
+INITIALIZED*: str = "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}"
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    s ::= a.Server(env);
+
+    first ::= a.String().try();
+    open_session(a, first).try();
+    write_frame(INITIALIZED, first).try();
+    open_doc(a, URI, CLEAN, first).try();
+    batch(s, a, "a clean build settles, and classifies", CLEAN, first.view()).try();
+
+    second ::= a.String().try();
+    colours(a, 2, URI, second).try();
+    batch(s, a, "the tokens, off that same build", CLEAN, second.view()).try();
+
+    third ::= a.String().try();
+    change_doc(a, URI, BROKEN, third).try();
+    batch(s, a, "an undefined name breaks the build", BROKEN, third.view()).try();
+
+    fourth ::= a.String().try();
+    colours(a, 3, URI, fourth).try();
+    batch(s, a, "a broken build answers lexically", BROKEN, fourth.view()).try();
+
+    fifth ::= a.String().try();
+    change_doc(a, URI, CLEAN, fifth).try();
+    batch(s, a, "fixed again", CLEAN, fifth.view()).try();
+
+    sixth ::= a.String().try();
+    colours(a, 4, URI, sixth).try();
+    batch(s, a, "the semantic answer is back", CLEAN, sixth.view()).try();
+
+    Ok(0);
+}
+
+// --- the requests ------------------------------------------------------
+
+// `rootUri` IS WHAT MAKES THIS A BUILD — without one there is nothing
+// to classify with, which is `colour_comes_from_the_lexer`'s whole
+// point.
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":").try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+open_doc = (a: Alloc, uri: str, text: str, into :: String)
+           Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+change_doc = (a: Alloc, uri: str, text: str, into :: String)
+             Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes("},\"contentChanges\":[{\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}]}}").try();
+    write_frame(body.view(), into)
+}
+
+colours = (a: Alloc, id: usize, uri: str, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(",\"method\":\"textDocument/semanticTokens/full\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+// One batch through the server; every frame it produced, with a tokens
+// reply DECODED and anything else printed verbatim. `text` is what the
+// rows are sliced from — the buffer as the client last sent it.
+batch = (s :: Server, a: Alloc, what: str, text: str, input: str)
+        Res<(), AllocError> {
+    out ::= a.String().try();
+    serve(s, input, out).try();
+    println("--- {}", what);
+    walk(a, out.view(), text)
+}
+
+walk = (a: Alloc, out: str, text: str) Res<(), AllocError> {
+    from ::= 0;
+    going ::= true;
+    loop(() { going && from < out.len }, (h) {
+        frame_at(out, from).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { frame(a, fr.body, text).try(); from = fr.next; },
+        });
+    });
+    Ok(());
+}
+
+frame = (a: Alloc, body: str, text: str) Res<(), AllocError> {
+    tree ::= a.Jsons();
+    read(a, tree, body).match({
+        Err(_)  => Ok(()),
+        Ok(msg) => frame_body(a, tree, msg, body, text),
+    })
+}
+
+frame_body = (a: Alloc, tree: Jsons, msg: JsonId, body: str, text: str)
+             Res<(), AllocError> {
+    data_of(tree, msg).match({
+        None      => { println("    {}", body); Ok(()); },
+        Ok(array) => walk_groups(a, tree, array, text),
+    })
+}
+
+data_of = (tree: Jsons, msg: JsonId) Res<JsonId> {
+    tree.field(msg, "result").match({
+        None    => None,
+        Ok(res) => tree.field(res, "data"),
+    })
+}
+
+// --- undoing the encoding ----------------------------------------------
+
+// THE RUNNING TOTALS ARE THE DECODER. `line` and `character` are what
+// the client would be holding after every group, which is exactly what
+// the encoding means.
+walk_groups = (a: Alloc, tree: Jsons, array: JsonId, text: str)
+              Res<(), AllocError> {
+    line ::= 0;
+    character ::= 0;
+    at ::= 0;
+    going ::= true;
+    loop(() { going }, (h) {
+        tree.item(array, at).match({
+            None  => { going = false; },
+            Ok(_) => {
+                delta_line = whole_at(tree, array, at);
+                delta_character = whole_at(tree, array, at + 1);
+                line = line + delta_line;
+                character = (delta_line == 0).match({
+                    true  => character + delta_character,
+                    false => delta_character,
+                });
+                shown(text, line, character, whole_at(tree, array, at + 2),
+                      whole_at(tree, array, at + 3),
+                      whole_at(tree, array, at + 4));
+                at = at + 5;
+            },
+        });
+    });
+    Ok(());
+}
+
+whole_at = (tree: Jsons, array: JsonId, at: usize) usize {
+    tree.item(array, at).match({
+        None  => 0,
+        Ok(v) => tree.whole(v).match({ Ok(n) => n, None => 0 }),
+    })
+}
+
+// One decoded token, and THE BYTES IT COVERS — the slice comes back
+// through `to_pos`, the conversion this file did not make.
+shown = (text: str, line: usize, character: usize, length: usize,
+         colour: usize, modifiers: usize) () {
+    run = run_of(text, line);
+    from = run.start + to_pos(text, line, character).col - 1;
+    upto = run.start + to_pos(text, line, character + length).col - 1;
+    println("    line {} char {} len {} type {} mod {}  [{}]",
+            line, character, length, colour, modifiers,
+            text.slice(from, upto));
+}

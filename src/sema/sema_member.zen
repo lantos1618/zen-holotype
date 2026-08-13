@@ -38,7 +38,7 @@ TyId, Ty, Types, TyNamed, Prim = sema.sema_ty
 World, Def, DefKind, decl_at, module_display = sema.sema_def
 Diag, SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 ExportFault = sema.sema_diag
-Checker, Ctx, UNRESOLVED = sema.sema_check
+Checker, Ctx, Binding, UNRESOLVED = sema.sema_check
 Inst, subst, inst_of_named, owner_of, push_tparams = sema.sema_inst
 is_prim = sema.sema_ty
 impl_members, bound_members, bound_member_types = sema.sema_supply
@@ -103,7 +103,7 @@ base_of* = (c :: Checker, id: ExprId, ctx: Ctx) Res<Base, AllocError> {
 // wrong answer is worse than no answer (same rule `write_val` states).
 recorded_base = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
                 Res<Base, AllocError> {
-    b = named_base(c, node, text, ctx).try();
+    b = named_base(c, id, node, text, ctx).try();
     b.is_type.match({
         false => c.expr_memo.set(id, b.ty),
         true  => Ok(()),
@@ -116,12 +116,23 @@ value_base = (c :: Checker, id: ExprId, ctx: Ctx) Res<Base, AllocError> {
     Ok(Base(ty: ty, is_type: false));
 }
 
-named_base = (c :: Checker, node: Expr, text: str, ctx: Ctx)
+named_base = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
              Res<Base, AllocError> {
     c.lookup(text).match({
         None  => global_base(c, node, text, ctx),
-        Ok(b) => Ok(Base(ty: b.ty, is_type: false)),
+        Ok(b) => bound_base(c, id, b),
     })
+}
+
+// A base answered out of the scope stack — `p` in `p.left`. Same
+// recording as `sema_type.bound_name_type`: a parameter use is noted
+// so the LSP can paint it one once the scope is gone.
+bound_base = (c :: Checker, id: ExprId, b: Binding) Res<Base, AllocError> {
+    b.param.match({
+        true  => c.param_memo.set(id, true),
+        false => Ok(()),
+    }).try();
+    Ok(Base(ty: b.ty, is_type: false));
 }
 
 global_base = (c :: Checker, node: Expr, text: str, ctx: Ctx)

@@ -11,7 +11,10 @@
 //   textDocument/hover         lsp_hover.zen — the one sema-backed query
 //   textDocument/semanticTokens/full
 //                              lsp_colour.zen — the lexer's own tokens,
-//                              which is why it needs no build at all
+//                              reclassified by what the diagnostics'
+//                              build settled about each name
+//                              (lsp_names.zen), lexical alone when there
+//                              is no clean build
 //   everything else            -32601, with the method named
 //   initialized / exit / $/cancelRequest   notifications, no reply
 //   didOpen / didChange / didClose         the overlay, Full sync only
@@ -291,10 +294,11 @@ Server* = {
         result(tree, rid, body.view(), msg)
     }
 
-    // COLOUR needs NOTHING the other two need: no workspace, no build,
-    // no `Checker` — `lsp_colour.zen` runs the lexer over the buffer
-    // alone, honest about a file with no root or that does not parse.
-    // A DOCUMENT NEVER OPENED IS `-32602`, the same refusal hover makes.
+    // COLOUR READS WHAT THE DIAGNOSTICS' BUILD SETTLED. `classes_for`
+    // is empty without a workspace, before the first build, and from
+    // any change until the next clean one — and an empty list IS the
+    // lexical answer, so the fallback costs no branch. A DOCUMENT NEVER
+    // OPENED IS `-32602`, the same refusal hover makes.
     coloured = (self :: @Self, tree: Jsons, req: JsonId, rid: JsonId,
                 msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -308,7 +312,8 @@ Server* = {
     answer_colour = (self :: @Self, tree: Jsons, rid: JsonId, uri: str,
                      text: str, msg :: String) Res<(), AllocError> {
         body ::= self.a.String().try();
-        write_tokens(self.a, uri, text, body).try();
+        names = self.notes.classes_for(uri).try();
+        write_tokens(self.a, uri, text, names, body).try();
         result(tree, rid, body.view(), msg)
     }
 

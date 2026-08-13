@@ -6,11 +6,11 @@ A systems language: Pony's actors and capabilities, Zig's explicitness, and one 
 Shape = Circle(Circle) | Rect(Rect) | Unit
 
 Shape.impl(Display, {
-    toString ::= (self: @Self, sb :: String) Res<(), IoError> {
+    toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
         self.match({
-            Circle(c) => sb.add("circle: {}", c.radius),
-            Rect(r)   => sb.add("rect: {} {}", r.width, r.height),
-            Unit      => sb.add("unit"),
+            Circle(c) => out.add("circle: {}", c.radius),
+            Rect(r)   => out.add("rect: {} {}", r.width, r.height),
+            Unit      => out.add("unit"),
         })
     }
 })
@@ -63,9 +63,9 @@ bootstrap/   throwaway Python compiler. deleted once Zen self-hosts.
 seed/        the checked-in generated C. regenerate, THEN commit.
 src/         the real compiler and the standard library, in Zen
 example/     a project that uses the language
-tests/       ~800 files, written before the compiler that must pass them
+tests/       ~1130 files, written before the compiler that must pass them
 ```
 
 ## Status
 
-Stage 0. The grammar, the test suite, the module resolver, and the C backend exist; the standard library and self-hosting do not. `docs/PLAN.md` is the map, and every stage in it ends at a command that exits non-zero when the stage is wrong.
+Stage 4. The standard library, the self-hosted compiler, the formatter, and the ownership checker exist, and `make fixpoint` proves the compiler compiles itself to byte-identical C. The stage in progress is the LSP — hover, lexical semantic tokens, and diagnostics answer; everything else is refused by name. 4 is the grade the tree is measured against, not a claim that stages 1–4 are finished; `STAGE` at the repo root says what is still open. `docs/PLAN.md` is the map, and every stage in it ends at a command that exits non-zero when the stage is wrong.

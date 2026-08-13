@@ -1,0 +1,293 @@
+// src/lsp/lsp_names.zen
+// Which names sema settled, and what it settled them to — the semantic
+// half of `textDocument/semanticTokens/full`.
+//
+// `lsp_colour.zen`'s item 5 is the doctrine: a lexer cannot tell a type
+// from a function from a parameter, and GUESSING — by capitalisation,
+// by position — would be a second, wrong specification of what a name
+// means, which §1 of `design_lsp.md` forbids this folder to write. So
+// this file asks the one authority. It reads the memos a finished
+// `check_all` left on the `Checker`, plus what the AST itself kinds,
+// and hands `lsp_diag.zen` the spans. NOTHING IS RESOLVED HERE — no
+// `defs_of`, no scope walk; a name sema did not settle keeps the
+// lexer's `variable`.
+//
+// FOUR WALKS, one per place the answer is written down:
+//
+//   - DECLARATION SITES, from the AST alone: a `Function`'s name and
+//     its parameters, a `Struct`/`Enum`/`Alias` name, an `Impl`'s
+//     target. The declaration kind IS the answer; no memo is needed.
+//   - WRITTEN TYPES, from `type_memo`: a `Named` type node the checker
+//     resolved to something that is not poison is a type name. TYPES
+//     INSIDE A STRUCT OR IMPL BODY ARE NOT HERE — `type_from_ast` does
+//     not memoize where `@Self` is in scope (`sema_type.zen`), so a
+//     field's `i32` keeps the lexer's answer. A miss is honest; a
+//     guessed entry would not be.
+//   - CALLEE NAMES, from `call_memo`: a call that resolved to a
+//     declaration classifies the name it was called through — `function`
+//     for a `Function` decl, bare or through a receiver (`add(a, b)`,
+//     `x.f(..)`); `type` for a construction, but only when the type is
+//     named BARE (`Point(x: 1)`). `Shape.Circle(c)` records the enum
+//     too, and the name written there is the variant's — a variant is
+//     not a type.
+//   - PARAMETER USES, from `param_memo`: the one fact neither the AST
+//     nor a type can say, recorded where resolution still had the scope
+//     (`sema_check.zen`'s `Binding.param`).
+//
+// WHAT IS DELIBERATELY NOT CLASSIFIED, each because the honest answer
+// was never written down: a function named but not called; a type
+// named in value position (`Shape` in `Shape.Unit`); an enum variant;
+// a constant; an import binding; a local of every kind; a closure's
+// parameter. All stay `variable` — the lexer's answer, and never a
+// wrong one.
+//
+// THE BUILD MUST BE CLEAN. `lsp_diag.zen` calls `classify` only when
+// the build produced no diagnostics, so nothing here has to say what
+// poison means: a wrong answer is worse than none, and a file that
+// does not compile keeps its lexical colours.
+
+str = std.text
+Alloc, AllocError = std.mem
+Vec = std.collections
+Range = std.core
+Ast, Module, Decl, Block = ast
+Struct, Enum, Alias, Impl, Member, Function, Named, Call = ast
+Span, ExprId, TypeId, BlockId = ast
+Checker = sema.sema_check
+decl_at = sema.sema_def
+Classed, Colour = lsp.lsp_colour
+uri_at = lsp.lsp_uri
+written = lsp.lsp_json
+
+// Every name the checker settled, as `Classed` rows. ONE FLAT LIST
+// ACROSS THE WHOLE BUILD, not grouped by file — grouping is a
+// per-request question (`lsp_diag.zen`'s `classes_for` filters and
+// sorts), and a build answers for every module it walked.
+classify* = (a: Alloc, c: Checker, root: str, out :: Vec<Classed>)
+           Res<(), AllocError> {
+    decl_sites(a, c, root, out).try();
+    written_types(a, c, root, out).try();
+    expr_sites(a, c, root, out).try();
+    Ok(());
+}
+
+// One row. The URI is resolved HERE, at gather time, not at write time
+// — a build knows its compilation root and a writer does not, the same
+// seam `lsp_diag.zen`'s `Spot` crosses.
+class_as = (a: Alloc, root: str, span: Span, colour: Colour,
+            out :: Vec<Classed>) Res<(), AllocError> {
+    out.add(Classed(uri: uri_at(a, root, span.file).try(),
+                    line: span.start.line, col: span.start.col,
+                    colour: colour))
+}
+
+// --- declaration sites -------------------------------------------------
+
+decl_sites = (a: Alloc, c: Checker, root: str, out :: Vec<Classed>)
+             Res<(), AllocError> {
+    Range(0, c.tree.module_count()).loop((h, i) {
+        c.tree.module_at(i).match({
+            None  => written(),
+            Ok(m) => module_sites(a, root, m, out),
+        }).try();
+    });
+    nested_sites(a, c.tree, root, out)
+}
+
+module_sites = (a: Alloc, root: str, m: Module, out :: Vec<Classed>)
+               Res<(), AllocError> {
+    m.decls.loop((h, d) { decl_site(a, root, d, out).try(); });
+    Ok(());
+}
+
+// A declaration nested in a body — `lsp_decl.zen`'s two-scan shape:
+// every block is flat in the arena, so a nested decl is found without
+// recursing into its parent.
+nested_sites = (a: Alloc, tree: Ast, root: str, out :: Vec<Classed>)
+               Res<(), AllocError> {
+    bid ::= BlockId(index: 0);
+    Range(0, tree.block_ids()).loop((h, i) {
+        block_sites(a, root, tree.block_at(bid), out).try();
+        bid = BlockId(index: bid.index + 1);
+    });
+    Ok(());
+}
+
+block_sites = (a: Alloc, root: str, b: Block, out :: Vec<Classed>)
+              Res<(), AllocError> {
+    b.stmts.loop((h, s) {
+        s.kind.match({
+            Decl(d) => decl_site(a, root, d, out),
+            _       => written(),
+        }).try();
+    });
+    Ok(());
+}
+
+decl_site = (a: Alloc, root: str, d: Decl, out :: Vec<Classed>)
+            Res<(), AllocError> {
+    d.kind.match({
+        Function(f) => fn_site(a, root, f, out),
+        Struct(s)   => struct_site(a, root, s, out),
+        Enum(e)     => class_as(a, root, e.name.span, Colour.Type, out),
+        Alias(x)    => class_as(a, root, x.name.span, Colour.Type, out),
+        Impl(im)    => impl_site(a, root, im, out),
+        Const(_)    => written(),
+        Import(_)   => written(),
+    })
+}
+
+fn_site = (a: Alloc, root: str, f: Function, out :: Vec<Classed>)
+          Res<(), AllocError> {
+    class_as(a, root, f.name.span, Colour.Function, out).try();
+    f.params.loop((h, p) {
+        class_as(a, root, p.name.span, Colour.Parameter, out).try();
+    });
+    Ok(());
+}
+
+struct_site = (a: Alloc, root: str, s: Struct, out :: Vec<Classed>)
+              Res<(), AllocError> {
+    class_as(a, root, s.name.span, Colour.Type, out).try();
+    s.members.loop((h, m) { member_site(a, root, m, out).try(); });
+    Ok(());
+}
+
+impl_site = (a: Alloc, root: str, im: Impl, out :: Vec<Classed>)
+            Res<(), AllocError> {
+    class_as(a, root, im.target.span, Colour.Type, out).try();
+    im.members.loop((h, m) { member_site(a, root, m, out).try(); });
+    Ok(());
+}
+
+// A constant and a field keep the lexer's answer; a member FUNCTION is
+// a declaration site like any other.
+member_site = (a: Alloc, root: str, m: Member, out :: Vec<Classed>)
+              Res<(), AllocError> {
+    m.kind.match({
+        Function(f) => fn_site(a, root, f, out),
+        Const(_)    => written(),
+        Field(_)    => written(),
+    })
+}
+
+// --- written types -----------------------------------------------------
+
+// Every `Named` type node the checker memoized a non-poison answer
+// for. THE MEMO, NOT THE NAME, IS THE EVIDENCE: `Point` resolves, and
+// so does the `T` of `<T>` — both are types a reader should see
+// coloured alike.
+written_types = (a: Alloc, c: Checker, root: str, out :: Vec<Classed>)
+               Res<(), AllocError> {
+    tid ::= TypeId(index: 0);
+    Range(0, c.tree.type_ids()).loop((h, i) {
+        written_type(a, c, root, tid, out).try();
+        tid = TypeId(index: tid.index + 1);
+    });
+    Ok(());
+}
+
+written_type = (a: Alloc, c: Checker, root: str, tid: TypeId,
+                out :: Vec<Classed>) Res<(), AllocError> {
+    c.tree.type_at(tid).kind.match({
+        Named(n) => named_site(a, c, root, tid, n, out),
+        _        => written(),
+    })
+}
+
+named_site = (a: Alloc, c: Checker, root: str, tid: TypeId, n: Named,
+              out :: Vec<Classed>) Res<(), AllocError> {
+    c.type_memo.get(tid).match({
+        None   => written(),
+        Ok(ty) => c.is_unknown(ty).match({
+            true  => written(),
+            false => class_as(a, root, n.name.span, Colour.Type, out),
+        }),
+    })
+}
+
+// --- call sites and parameter uses -------------------------------------
+
+// One pass over every expression: a CALL asks `call_memo` what it
+// resolved to, a NAME asks `param_memo` whether it is a parameter.
+expr_sites = (a: Alloc, c: Checker, root: str, out :: Vec<Classed>)
+             Res<(), AllocError> {
+    eid ::= ExprId(index: 0);
+    Range(0, c.tree.expr_ids()).loop((h, i) {
+        expr_site(a, c, root, eid, out).try();
+        eid = ExprId(index: eid.index + 1);
+    });
+    Ok(());
+}
+
+expr_site = (a: Alloc, c: Checker, root: str, id: ExprId,
+             out :: Vec<Classed>) Res<(), AllocError> {
+    e = c.tree.expr_at(id);
+    e.kind.match({
+        Call(k) => call_site(a, c, root, id, k, out),
+        Name(_) => param_site(a, c, root, id, e.span, out),
+        _       => written(),
+    })
+}
+
+// A bare name's span IS the expression's — `Name` carries no `Ident`,
+// "the enclosing `Expr` already has the span" (`ast_node.zen`).
+param_site = (a: Alloc, c: Checker, root: str, id: ExprId, span: Span,
+              out :: Vec<Classed>) Res<(), AllocError> {
+    c.param_memo.get(id).match({
+        Ok(_) => class_as(a, root, span, Colour.Parameter, out),
+        None  => written(),
+    })
+}
+
+call_site = (a: Alloc, c: Checker, root: str, id: ExprId, k: Call,
+             out :: Vec<Classed>) Res<(), AllocError> {
+    c.resolved_call(id).match({
+        None    => written(),
+        Ok(did) => decl_at(c.tree, did).match({
+            None  => written(),
+            Ok(d) => callee_site(a, c, root, d, k, out),
+        }),
+    })
+}
+
+callee_site = (a: Alloc, c: Checker, root: str, d: Decl, k: Call,
+               out :: Vec<Classed>) Res<(), AllocError> {
+    d.kind.match({
+        Function(_) => fn_callee(a, c, root, k, out),
+        Struct(s)   => type_callee(a, c, root, k, s.name.text, out),
+        Enum(e)     => type_callee(a, c, root, k, e.name.text, out),
+        Alias(x)    => type_callee(a, c, root, k, x.name.text, out),
+        Const(_)    => written(),
+        Import(_)   => written(),
+        Impl(_)     => written(),
+    })
+}
+
+// The name a resolved call was made THROUGH: bare (`add(a, b)`) or the
+// member of an access (`x.f(..)` — `call_memo` holds the declaration
+// either way, and resolution is one rule, `sema_cand.zen`).
+fn_callee = (a: Alloc, c: Checker, root: str, k: Call,
+             out :: Vec<Classed>) Res<(), AllocError> {
+    callee = c.tree.expr_at(k.callee);
+    callee.kind.match({
+        Name(_)   => class_as(a, root, callee.span, Colour.Function, out),
+        Access(x) => class_as(a, root, x.name.span, Colour.Function, out),
+        _         => written(),
+    })
+}
+
+// A CONSTRUCTION names the type only when it names it bare and by its
+// own name: `Point(x: 1)`. The same memo entry covers `Shape.Circle(c)`,
+// where the name written is the variant's, and a variant is not a type.
+type_callee = (a: Alloc, c: Checker, root: str, k: Call, decl: str,
+               out :: Vec<Classed>) Res<(), AllocError> {
+    callee = c.tree.expr_at(k.callee);
+    callee.kind.match({
+        Name(n) => n.text.eq(decl).match({
+            true  => class_as(a, root, callee.span, Colour.Type, out),
+            false => written(),
+        }),
+        _       => written(),
+    })
+}

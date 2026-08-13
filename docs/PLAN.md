@@ -72,9 +72,10 @@ zen/
 │   ├── zen/zen_fmt.zen              # (2) `zen fmt`: read, compare, write —
 │   │                                #     models the FILE, not yet the DECLARATION
 │   ├── lsp/lsp.zen                  # (4) thin server over sema queries — PARTLY:
-│   │                                #     transport, lifecycle, Full sync and hover.
+│   │                                #     transport, lifecycle, Full sync, hover,
+│   │                                #     diagnostics, lexical semanticTokens.
 │   │                                #     Everything else refused by name; the stdio
-│   │                                #     stdio transport, over std.env.Stdin
+│   │                                #     transport, over std.env.Stdin
 │   ├── meta/meta.zen                # (5) @meta over ast nodes — NOT WRITTEN
 │   ├── comptime/comptime.zen        # (5) the step-budgeted evaluator — NOT WRITTEN
 │   │
@@ -102,10 +103,9 @@ zen/
 │       └── thread/thread.zen        #       (5) Threads, Thread — NOT WRITTEN
 │
 └── tests/
-    ├── parse/                       # (0.1) tree-sitter corpus. every DESIGN.md block.
-    │   ├── decls.txt
-    │   ├── match.txt
-    │   ├── generics.txt
+    ├── parse/                       # (0.1) every DESIGN.md construct, transcribed
+    │   ├── constructs.md            #       blind to grammar.js, so a disagreement
+    │   │                            #       localises an ambiguity in DESIGN.md
     │   └── errors/                  #       must FAIL to parse
     ├── corpus/                      # (0.4) program + expected stdout + exit code
     │   ├── hello/
@@ -230,12 +230,14 @@ Every item on the second list is a feature the Python bootstrapper would otherwi
 Order matters, because each layer needs the one below:
 
 1. `core/result.zen`, `core/bool.zen` — `Res`, `.try()`, `then`. No allocation, no dependencies.
-2. `mem/mem.zen` — `Alloc`, `AllocError`, the arena. Everything above allocates through this.
-3. `collections/vec.zen` — `Vec<T>`. The first real generic, and the first `Drop` user.
-4. `text/string.zen` — `str` (bytes, borrowed), `String` (`Vec<u8>`, owned).
-5. `core/loop.zen` — the `loop` family, `find`, `filter`, `map`. Inlined at the call site; only `map`/`filter` take an `Alloc`.
-6. `collections/map.zen` — needs `Eq` + `Hash`, so those come with it.
-7. `core/display.zen` — `toString` only. `dump` is `@meta` and waits for stage 5.
+2. `core/num.zen` — the extremes and width of every primitive numeric type, and the checked arithmetic floor. Depends on nothing but the trap.
+3. `mem/mem.zen` — `Alloc`, `AllocError`, the arena. Everything above allocates through this.
+4. `collections/vec.zen` — `Vec<T>`. The first real generic, and the first `Drop` user.
+5. `text/string.zen` — `str` (bytes, borrowed), `String` (`Vec<u8>`, owned).
+6. `core/loop.zen` — the `loop` family, `find`, `filter`, `map`. Inlined at the call site; only `map`/`filter` take an `Alloc`.
+7. `collections/map.zen` — needs `Eq` + `Hash`, so those come with it.
+8. `core/io.zen` — `Sink`, `WriteError`. Below `display`, whose signatures name both.
+9. `core/display.zen` — `toString` only, writing into the caller's `Sink`. `dump` is `@meta` and waits for stage 5.
 
 **Gate:** each of these has tests in `tests/corpus/` that the bootstrapper compiles and runs. `Vec` growing across a realloc, `Map` colliding on hash, a `String` outliving the loop that built it, an arena freeing everything at once.
 
@@ -244,7 +246,7 @@ Two traps to expect here, both consequences of laws in `DESIGN.md`:
 - **The `Alloc` receiver.** `Vec.alloc` is a `:` field and `grow` calls `realloc` through it, which only compiles because a handle's methods are `:`. If the stdlib is written with `Alloc.raw` as `:: @Self`, every collection needs a mutable allocator field and the shallowness buys nothing. Get this right in `mem/mem.zen` first, or fix it everywhere later.
 - **`Drop` before the checker exists.** Stage 3 is where use-after-consume becomes an error. Until then the arena's exactly-once guarantee is a convention the stdlib must honour by hand — which is precisely why the `consume` *syntax* ships at stage 0 even unchecked.
 
-**Outstanding here: the `Sink` migration, and it is one change or none.** `DESIGN.md` types `Display.toString` on a `Sink` so that printing allocates nothing; `src/std/core/display.zen` and the `display_*` corpus still write `sb :: String`. Those move together — `Sink` in `std`, sink dispatch in `gen_c`, and the corpus signatures in the same commit — because migrating the corpus first turns three green tests red against a compiler that has no `Sink`, and migrating `std` first does the same. `example/src/main.zen` already shows the target shape; it is the only file that could be moved early, because nothing compiles it yet.
+**The `Sink` migration has landed, and it moved as one change.** `DESIGN.md` types `Display.toString` on a `Sink` so that printing allocates nothing; `src/std/core/display.zen`, the sink dispatch in `gen_c` (`gen_c_sink.zen`), and the `display_*` corpus signatures moved together — migrating the corpus first would have turned three green tests red against a compiler with no `Sink`, and migrating `std` first the same. The one mistake that migration ordering cannot see is pinned instead: `tests/must-fail/sema/display_sink_overload_is_not_the_allocating_one` rejects a resolver that stops at arity and hands back the sealed allocating form's `Res<String, WriteError>` where the call meant the sink.
 
 **Gate for stage 0:** the bootstrapper compiles and runs hello-world, the std corpus, and the trap corpus. Nothing about the real compiler yet.
 

@@ -90,11 +90,14 @@ publishes diagnostics, and refuses everything else:**
   Neovim changed when `semanticTokens` landed, and nothing needs to. VS
   Code gets it from the server, because VS Code cannot load the
   tree-sitter grammar this repository already has — `textDocument/
-  semanticTokens`, lexical, out of the compiler's own lexer. Comments,
-  literals, numbers, keywords and operators are coloured; **every other
-  identifier is one colour, because a lexer cannot tell a type from a
-  function from a variable and this server does not guess.** The section
-  below has the argument.
+  semanticTokens`, out of the compiler's own lexer and, when the
+  diagnostics' build is clean, its checker. Comments, literals, numbers,
+  keywords and operators are always coloured; **types, functions and
+  parameters get their own colours where sema settled the name — and an
+  identifier it said nothing about is `variable`, because this server
+  does not guess.** With no workspace, a change not yet built, or a file
+  with errors, the answer is the lexer's: never grey, never wrong. The
+  section below has the argument.
 
 If the launch shape ever changes, exactly one setting moves:
 
@@ -141,13 +144,15 @@ There is a 0.10-and-earlier snippet at the bottom of `nvim/zen.lua`.
 `require("zen").filetype()`, `.treesitter()`, `.lsp()`. Both halves work.
 
 **`.lsp()` deliberately declines the server's semantic tokens.** Neovim
-paints them above tree-sitter, and the server's are LEXICAL — every
-identifier comes back as `variable` — so leaving them on would take the
-colour off every type name in the buffer and replace a better answer with
-a worse one. Tree-sitter's query knows a type by its position; the lexer
-cannot. Set `vim.g.zen_semantic_tokens = true` before `setup()` to keep
-them anyway, which is the right thing to do on the day the server can
-tell a type from a function.
+paints them above tree-sitter, and tree-sitter's answer needs no build
+and no workspace — it is there on the first frame, in any state of
+brokenness, where the server's sharper answer arrives with the
+diagnostics' build and steps back to lexical the moment the file has
+errors. Leaving the server's on would replace a sooner answer with a
+later one and repaint the buffer on every settle. Set
+`vim.g.zen_semantic_tokens = true` before `setup()` to take the server's
+anyway — it now can tell a type from a function, which is the day that
+flag was waiting for.
 
 The server is started with `root_markers = { "build.zen", ".git" }`.
 `build.zen` is first because `DESIGN.md` makes a build file a program and
@@ -221,34 +226,40 @@ extension, so the grammar in `grammar/` cannot be reused there the way it is
 in Neovim.
 
 **The route that costs no second grammar is `textDocument/semanticTokens`,
-lexical form, and the server answers it.** `src/lsp/lsp_colour.zen` is the
-whole of it: one `scan`, a `TokenKind` mapped to a legend index, and the
-protocol's delta encoding. The colours come from the compiler's own lexer,
-so they cannot disagree with the compiler about what a token is — and no
-second grammar and no third generated artifact entered the tree.
+and the server answers it.** `src/lsp/lsp_colour.zen` is the encoder: one
+`scan`, a `TokenKind` mapped to a legend index, and the protocol's delta
+encoding. The colours come from the compiler's own lexer, so they cannot
+disagree with the compiler about what a token is — and no second grammar
+and no third generated artifact entered the tree.
 
-**It needs nothing.** No build, no `Checker`, no workspace, nothing read
-from any disk. So unlike hover and diagnostics — which need a root and
-about a second — colour appears on an unsaved buffer, in a folder-less
-window, and in a file that does not parse. A half-typed string literal
-costs the colour of that literal and nothing else.
+**The lexical half needs nothing.** No build, no `Checker`, no workspace,
+nothing read from any disk. So unlike hover and diagnostics — which need
+a root and about a second — colour appears on an unsaved buffer, in a
+folder-less window, and in a file that does not parse. A half-typed
+string literal costs the colour of that literal and nothing else.
 
 **What it colours, and what it refuses to.** Comments, string and
 character literals, numbers, `true`/`false`/`consume`/`@Self`/`@meta`/
-`@scope`, and the operators. **Every other identifier is `variable`,
-including every type and every function name** — and that is a refusal,
-not an oversight. A lexer cannot tell `Vec` from `add` from `n`; they are
-one token, and Zen has no keyword in front of a type. Colouring by
-capitalisation would be a second, wrong, specification of what a name
-means. Telling them apart needs sema, `docs/design_lsp.md` §2 prices it
-at L4, and until then a name is a name. Delimiters — `(`, `)`, `{`, `}`,
-`,`, `;`, `.`, `:` — are left in your theme's default foreground for the
-same reason: a brace is structure and calling it an operator would be
-inventing a fact.
+`@scope`, and the operators — always. **Types, functions and parameters
+get their own colours where the diagnostics' build settled the name**:
+a name that resolved to a struct, enum or alias is `type`, a call that
+resolved to a function is `function`, a formal parameter at its
+declaration and its uses is `parameter`. That answer is sema's, read off
+the checker's memos by `src/lsp/lsp_names.zen` — never a guess from
+capitalisation, which would be a second, wrong, specification of what a
+name means. **An identifier sema said nothing about is `variable`**: a
+local, a field, an import binding, a name in a file whose build has
+errors. A wrong answer is worse than none, and a file that does not
+compile keeps its lexical colours rather than going grey. Delimiters —
+`(`, `)`, `{`, `}`, `,`, `;`, `.`, `:` — are left in your theme's
+default foreground for the same reason: a brace is structure and calling
+it an operator would be inventing a fact.
 
-So Zen in VS Code is coloured about as far as a lexer can see it, and no
-further. **If you want types and calls in different colours, that is the
-sema-backed upgrade and it is not written.**
+What the semantic half does not yet classify, because sema never wrote
+the answer down: a function named but not called, a type named in value
+position, an enum variant, a constant, a type written inside a struct or
+impl body. Those stay `variable` until the memo exists; the list is in
+`src/lsp/lsp_names.zen`'s header.
 
 **If a `.zen` file is still grey with the server running**, the cause is
 almost certainly not the server: VS Code applies semantic tokens only
@@ -298,7 +309,7 @@ and therefore sema's.
 | `initialized` / `exit` / `$/cancelRequest` | notifications, no reply |
 | `textDocument/didOpen` / `didChange` / `didClose` | **works**, Full sync only |
 | `textDocument/hover` | **works** — a type, a declared name's type, or a function's signature |
-| `textDocument/semanticTokens/full` | **works** — colour, from the lexer alone; no build, no workspace |
+| `textDocument/semanticTokens/full` | **works** — lexical always; `type`/`function`/`parameter` when the diagnostics' build is clean |
 | `textDocument/publishDiagnostics` | **works** — lex, parse and sema, grouped per file, cleared when fixed |
 | everything else | **refused by name** with JSON-RPC `-32601` |
 
@@ -424,6 +435,15 @@ Verified here, by running it:
   taken in bytes, multi-line splitting disabled, zero-length runs emitted,
   `Ident` recoloured, and `range: true` advertised with no handler. The
   tenth is an equivalent mutant and `docs/design_lsp.md` §2 says why.
+- **The semantic half is gated the same way.**
+  `tests/corpus/lsp/colour_comes_from_the_build` drives a two-module
+  project through framed JSON-RPC and pins that a type, a function and a
+  parameter come back as three DISTINCT indices, that the answer rides
+  the diagnostics' build (no second build beside the tokens request),
+  that a file with an undefined name is answered lexically — every
+  identifier `variable` — and that fixing it brings the semantic answer
+  back. Mutations run against it: parameters recoloured `function`, and
+  written types recoloured `variable` — both went red.
 - **The tree-sitter grammar loads in Neovim 0.12.2** via
   `vim.treesitter.language.add` at the `--abi 14` the Makefile passes, and
   parses.
@@ -461,7 +481,8 @@ Verified here, by running it:
   five-minute check worth doing**: reload the window with a `.zen` file
   open and comments should go grey, string and character literals should
   take your theme's string colour, numbers its number colour, `true` and
-  `@Self` its keyword colour, and every other name one uniform colour.
+  `@Self` its keyword colour, and — in a file whose build is clean —
+  types, functions and parameters should each take their own.
   If instead everything is grey, look at the **Zen** output channel: it
   says whether the server started, and it names
   `editor.semanticHighlighting.enabled` as the setting that discards

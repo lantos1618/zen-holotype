@@ -74,6 +74,12 @@ write_range = lsp.lsp_pos
 write_text, written = lsp.lsp_json
 write_frame, write_decimal = lsp.lsp_frame
 path_of, uri_at = lsp.lsp_uri
+// The semantic half of colour: what the build below settled about each
+// name, gathered by `lsp_names.zen` off the SAME `Checker` the
+// diagnostics come from — a second build per keystroke is the cost
+// `design_lsp.md` §5 prices, and it is paid nowhere twice.
+Classed, sort_classes = lsp.lsp_colour
+classify = lsp.lsp_names
 
 // ONE DIAGNOSTIC, ALREADY BELONGING TO A FILE. `uri` is resolved at
 // gather time, not write time: a build knows its compilation root, a
@@ -103,9 +109,36 @@ Diagnostics* = {
     // that makes clearing possible.
     showing :: Vec<str>,
 
-    // A document changed. Nothing is built here — see the header.
+    // WHAT THE LAST CLEAN BUILD KNEW ABOUT EACH NAME, for colour.
+    // Filled by `told` when the build found nothing wrong, EMPTIED by
+    // `owes` — one change stales everything, because the build is
+    // whole-program and what a name MEANS in an unchanged file can turn
+    // on an edit somewhere else. The fallback when this is empty is
+    // `lsp_colour.zen`'s lexical answer, which is never wrong.
+    classed :: Vec<Classed>,
+
+    // A document changed. Nothing is built here — see the header. The
+    // classifications go with the change: they describe the text the
+    // last build saw, not the text the buffer now holds.
     owes* = (self :: @Self, uri: str) () {
         self.owed = uri;
+        self.classed = self.a.Vec<Classed>();
+    }
+
+    // The names the last clean build classified in `uri`, sorted for
+    // `lsp_colour.zen`'s search. AN EMPTY VEC IS THE WHOLE FALLBACK:
+    // no workspace, no build yet, a change not yet settled and a build
+    // with faults all look alike here, and all mean "lexical colours".
+    classes_for* = (self :: @Self, uri: str) Res<Vec<Classed>, AllocError> {
+        found ::= self.a.Vec<Classed>();
+        self.classed.loop((h, cl) {
+            cl.uri.eq(uri).match({
+                true  => found.add(cl),
+                false => Ok(()),
+            }).try();
+        });
+        sort_classes(found).try();
+        Ok(found);
     }
 
     // THE SETTLE POINT: if a build is owed, it happens here. `uris` and
@@ -143,8 +176,10 @@ Diagnostics* = {
             uris: Vec<str>, docs: Map<str, str>, out :: String)
            Res<(), AllocError> {
         spots ::= self.a.Vec<Spot>();
+        classed ::= self.a.Vec<Classed>();
         found_in(env, self.a, root, path, overlay_of(self.a, uris, docs).try(),
-                 spots).try();
+                 spots, classed).try();
+        self.classed = classed;
         self.say_all(env, uri, uris, docs, spots, out)
     }
 
@@ -184,7 +219,7 @@ Diagnostics* = {
 }
 
 Diagnostics* = (a: Alloc) Diagnostics {
-    Diagnostics(a: a, showing: a.Vec<str>())
+    Diagnostics(a: a, showing: a.Vec<str>(), classed: a.Vec<Classed>())
 }
 
 // Was this URI showing errors and is it not among the ones that have
@@ -206,12 +241,23 @@ gone = (u: str, uri: str, now: Vec<str>) bool {
 // `speaking` is already false under `whole` (stops the driver's
 // `println` landing mid frame-stream); this file relies on diagnostics
 // still being COLLECTED while not said.
+//
+// THE SECOND OUTPUT IS COLOUR'S. `classed` is filled from the same
+// `Checker` when — and only when — the build found NOTHING wrong: with
+// faults outstanding the memos hold poison, and both files' doctrine is
+// that no answer beats a wrong one. An empty `classed` is not a failure
+// here; it is the lexical fallback's trigger.
 found_in* = (env: Env, a: Alloc, root: str, path: str, docs: Map<str, str>,
-             spots :: Vec<Spot>) Res<(), AllocError> {
+             spots :: Vec<Spot>, classed :: Vec<Classed>)
+            Res<(), AllocError> {
     b ::= a.Build(env, root);
     c = b.whole(relative_to(root, path), docs).try();
     from_build(b, a, root, spots).try();
-    from_check(c, a, root, spots)
+    from_check(c, a, root, spots).try();
+    (b.diag_count() == 0 && c.diag_count() == 0).match({
+        true  => classify(a, c, root, classed),
+        false => written(),
+    })
 }
 
 // LEX AND PARSE, off the `Build`. `Diag.span.file` is the module's path

@@ -171,6 +171,10 @@ function M.lsp()
       local client = vim.lsp.get_client_by_id(args.data.client_id)
       if client and client.name == "zen" then
         client.server_capabilities.semanticTokensProvider = nil
+        -- Nil-ing the capability stops FUTURE requests; it does not stop
+        -- the engine if Neovim's own LspAttach handler ran first and
+        -- already started it. `stop` makes the decline order-independent.
+        vim.lsp.semantic_tokens.stop(args.buf, client.id)
       end
     end,
   })

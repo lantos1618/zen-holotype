@@ -3,35 +3,41 @@
    #
    # 4 IS THE GRADE, NOT A CLAIM THAT 1-4 ARE FINISHED.
    #
-   # THE BOARD IS NO LONGER GREEN, ON PURPOSE, AND THAT IS AN
-   # IMPROVEMENT. As of 2026-08-10 `make test` is 453 / 0 against the
-   # bootstrapper and `make test-zen` is 451 / 2 against the shipped
-   # compiler. BOTH REDS ARE REAL AND NEITHER IS FLAKE:
+   # THE BOARD IS GREEN ON BOTH TOOLCHAINS. As of 2026-08-11
+   # `make test` is 464 / 0 against the bootstrapper and
+   # `make test-zen` is 464 / 0 against the shipped compiler, with
+   # the same four stage-5 tests deferred on each.
+   #
+   # IT WAS 451 / 2 FOR PART OF 2026-08-10, AND BOTH REDS WERE REAL:
    #
    #     must-fail/sema/match_arms_disagree     the program compiled;
    #                                            it must be rejected
    #     must-fail/sema/match_arm_paren_form    message substring not
    #                                            found
    #
-   # THE SHIPPED COMPILER DOES NOT TYPE-CHECK MATCH ARMS. This is a
+   # THE SHIPPED COMPILER DID NOT TYPE-CHECK MATCH ARMS. This was a
    # silent wrong answer, not a missing message:
    #
    #     f = (b: bool) i32 { b.match({ true => 1, false => false }) }
    #
-   # is accepted, emits C that cc accepts, RUNS, and prints 0. The
-   # bootstrapper says `expected i32, found bool`. With a `str` arm
-   # instead the emitted C returns a zg_str from an int32_t function
-   # and cc rejects it -- so today the type checker is not the
-   # authority on Zen's types, cc is, and only where the C types
-   # happen to disagree.
+   # was accepted, emitted C that cc accepted, RAN, and printed 0. The
+   # bootstrapper said `expected i32, found bool`. With a `str` arm
+   # instead the emitted C returned a zg_str from an int32_t function
+   # and cc rejected it -- so for that day the type checker was not
+   # the authority on Zen's types, cc was, and only where the C types
+   # happened to disagree.
    #
-   # The rule is already written down IN THE FILE THAT BREAKS IT.
-   # src/sema/sema_join.zen's header: "two arms of genuinely different
-   # types mean something the language cannot express -- inventing a
-   # join for it would hide the mistake rather than report it." `join`
-   # does the first half and nothing does the second. The diagnostic
-   # belongs at `merged_or_first`'s fall-through `Ok(a)`, which cannot
-   # raise one today because `join` is passed no span.
+   # FIXED THE SAME DAY, and not in the join. The rule was already
+   # written down IN THE FILE THAT BROKE IT -- src/sema/sema_join.zen's
+   # header: "two arms of genuinely different types mean something the
+   # language cannot express -- inventing a join for it would hide the
+   # mistake rather than report it." But the join has no expectation
+   # to name, so the diagnostic lives in `check_arms`
+   # (src/sema/sema_match.zen), which puts every arm where the match
+   # itself stands, at the two positions that wrote a type down: a
+   # function's tail and a binding with a written type. Three more
+   # must-fail tests pin the same question at a field, an argument
+   # and an element.
    #
    # HOW IT SURVIVED EVERY ORACLE, which is the reusable part: a corpus
    # test is a VALID program, so none would ever contain mismatched
@@ -41,16 +47,20 @@
    # is invisible to a differential harness -- being wrong in only one
    # implementation is not enough, something has to ASK.
    #
-   # Read the green half as "nothing we thought to check is broken",
+   # Read the green board as "nothing we thought to check is broken",
    # never as "stage 4 is done", because the gap between those two
    # sentences is where every silent bug in this tree has lived.
    #
    # Measured, not asserted, and all of it below the grade:
    #
-   #   - The LSP answers HOVER and nothing else. No diagnostics are ever
-   #     published, and hover answers on an identifier's USE -- probing
-   #     every identifier in a four-line function, 3 of 12 answered.
-   #     Everything else is refused by name with -32601.
+   #   - The LSP answers hover, lexical semanticTokens and the
+   #     lifecycle, and PUBLISHES DIAGNOSTICS -- all three phases, one
+   #     notification per file, an empty list when the errors are gone
+   #     (corpus/lsp/diagnostics_publish_and_clear). Hover answers 9 of
+   #     12 probed positions on a file that imports something -- the
+   #     import line, a space and a brace stay null, gated by
+   #     corpus/lsp/hover_answers_an_imported_name. Everything else is
+   #     still refused by name with -32601.
    #   - Stage 2's formatter models the FILE and not the DECLARATION. It
    #     normalises bytes, so `make fmt` is green; it does not know a
    #     declaration from a comment from a string literal.

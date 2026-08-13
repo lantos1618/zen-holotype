@@ -897,7 +897,10 @@ BenchStats* = {
 
 // std.build.zen
 
-BuildError* = NotFound | FetchFailed | VersionConflict | HashMismatch
+BuildError* = NotFound
+     | FetchFailed
+     | VersionConflict
+     | HashMismatch
 
 // a dependency, hash-locked: the url and version say what you
 // asked for, the hash pins what you actually got
@@ -1348,8 +1351,12 @@ Foo = {}
 Foo.impl(Actor, {
     // optional lifecycle hooks. println resolves through
     // ctx.env — a Context carries an Env, so one is in scope
-    started ::= (self :: @Self, ctx: Context) () { println("actor started") }
-    stopped ::= (self :: @Self, ctx: Context) () { println("actor stopped") }
+    started ::= (self :: @Self, ctx: Context) () { 
+        println("actor started") 
+    }
+    stopped ::= (self :: @Self, ctx: Context) () { 
+        println("actor stopped") 
+    }
 
     // behaviors: calling one on a Ref<Foo> enqueues a message
     // and returns immediately. params must be sendable (val or
@@ -1384,7 +1391,10 @@ Opts = {
     verbose :: bool = false, // --verbose or VERBOSE, defaults false
 }
 
-Error = AllocError | IoError | ArgError | ThreadError
+Error = AllocError
+    | IoError
+    | ArgError
+    | ThreadError
 
 // main receives the capability root. it is not named `self`:
 // main is not a method on Env. println finds the Env by TYPE

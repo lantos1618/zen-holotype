@@ -14,7 +14,7 @@ Companion to `PLAN.md`, which says which stage each gate arrives at.
 
 **3. Corpus.** Program in, expected stdout and exit code out. Cheap, and the thing that catches regressions in behaviour rather than in structure.
 
-**4. `must-fail`.** Programs that must be rejected, each with the expected diagnostic *and its position*. A rejection with the wrong span is a failure.
+**4. `must-fail`.** Programs that must be rejected, each with the expected diagnostic *and its position*. A rejection with the wrong span is a failure. This is also the only suite that can ask what no valid program asks: the shipped compiler accepted `f = (b: bool) i32 { b.match({ true => 1, false => false }) }` — it emitted C, ran, and printed 0 — because a corpus test is a valid program and the differential oracle only compares programs somebody wrote down. `must-fail/sema/match_arms_disagree` and `match_arm_paren_form` went red on 2026-08-10 and were fixed the same day, in `check_arms` (`src/sema/sema_match.zen`) rather than in the join, which has no expectation to name. `STAGE` keeps the whole story, because how they hid is the reusable part.
 
 **5. Mutation.** Periodically: mutate the compiler (flip a comparison, drop a case, change a constant), rebuild, and assert some test goes red. A gate that survives mutation is not guarding anything. This is how you find out that a scanner fails open, and it is the only way to find out.
 
