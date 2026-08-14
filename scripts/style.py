@@ -118,7 +118,6 @@ ABBREV_OWED: dict[str, str] = {
     "src/sema/sema_depth.zen:tp": "tparam",
     "src/sema/sema_hoist.zen:blk": "block",
     "src/sema/sema_inst.zen:tp": "tparam",
-    "src/sema/sema_type.zen:blk": "block",
 }
 
 # The abbreviations STYLE.md names. Not a general "short name" check -- `len`,

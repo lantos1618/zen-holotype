@@ -451,7 +451,7 @@ def assignable(a, b):
         return True
     if a.kind == "var" or b.kind == "var":
         # unsubstituted parameters: leniency here beats a false positive in a
-        # body that has not been instantiated yet.
+        # body checked generically, where the parameter is still opaque.
         return True
     if b.kind == "union":
         return any(assignable(a, m) for m in b.args)
@@ -1877,10 +1877,15 @@ class Sema:
         for mi in self.mods:
             for name in sorted(mi.fns):
                 for fd in mi.fns[name]:
-                    if fd.tparams:
-                        continue    # checked at each instantiation
                     try:
-                        self.check_function(fd, {}, None)
+                        # a generic body is checked TWICE by construction:
+                        # once here, generically, each parameter its own
+                        # opaque `var` — a mistake that owes nothing to the
+                        # arguments is wrong at the declaration, called or
+                        # not — and again per instantiation, which is the
+                        # answer gen_c and the LSP keep (`_vagueness`)
+                        sub = self._var_sub(fd.tparams) if fd.tparams else {}
+                        self.check_function(fd, sub, None)
                     except RecursionError:
                         # the bar is that the compiler never crashes and never
                         # hangs, on any input (TESTING.md, Fuzzing)
@@ -1909,9 +1914,11 @@ class Sema:
             for td in mi.type_all[name]:
                 if td.mod is not mi:
                     continue
-                if td.kind == "struct" and not td.tparams:
+                if td.kind != "struct":
+                    continue
+                if not td.tparams:
                     self.require_type(named(td.qname, ()), None, None)
-                    self._check_methods(td)
+                self._check_methods(td)
 
         for name in sorted(mi.fns):
             fns = mi.fns[name]
@@ -1922,18 +1929,40 @@ class Sema:
         for im in mi.impls:
             self._check_impl(im, base)
 
+    @staticmethod
+    def _var_sub(tparams):
+        """Each type parameter standing as its own opaque `var` — what a
+        generic body is checked against at its declaration. A `var` agrees
+        with everything (`assignable`), so only what owes nothing to the
+        arguments is validated there; the genuinely dependent stays deferred
+        to instantiation."""
+        sub = {}
+        for tp in tparams:
+            nm = _name_of(_g(tp, "name"))
+            if nm:
+                sub[nm] = var_ty(nm)
+        return sub
+
     def _check_methods(self, td, self_ty=None):
         """A method is a `Function` in the struct's own field tuple — one
         declaration form, so it is checked exactly like a free function, with
-        `@Self` bound."""
-        self_ty = self_ty or named(td.qname, ())
+        `@Self` bound. A generic struct's parameters stand as `var`s, so the
+        body is checked here even when nothing instantiates it."""
+        sub = self._var_sub(td.tparams)
+        if self_ty is None:
+            args = tuple(sub[nm] for nm in
+                         (_name_of(_g(tp, "name")) for tp in td.tparams) if nm)
+            self_ty = named(td.qname, args)
         for f in td.fields:
-            if _k(f) != "Function" or _g(f, "body") is None or _tup(_g(f, "tparams")):
+            if _k(f) != "Function" or _g(f, "body") is None:
                 continue
             fd = self._fn_from_function(td.mod, f)
             if fd is None:
                 continue
-            self.check_function(fd, {"@Self": self_ty}, None)
+            msub = dict(sub)
+            msub.update(self._var_sub(fd.tparams))
+            msub["@Self"] = self_ty
+            self.check_function(fd, msub, None)
 
     def _check_signature(self, fd, base):
         ctx = self._fn_ctx(fd, {}, None)
@@ -2056,17 +2085,29 @@ class Sema:
                        "impl of %s is missing field `%s`: an impl supplies a value "
                        "for every field the target declares"
                        % (im.trait_name, nm))
-        # the entries themselves are checked with `self` bound to the target
-        self_ty = named(im.target, ()) if im.target in self.types else ANY
-        ctx = Ctx(im.mod, Scope(),
-                  subst=(("@Self", self_ty),) if self_ty is not ANY else ())
+        # the entries themselves are checked with `self` bound to the target;
+        # a generic target's parameters stand as `var`s, the same rule a
+        # generic function's own body is checked under
+        td = self.types.get(im.target)
+        sub = self._var_sub(td.tparams) if td is not None else {}
+        if td is not None and td.tparams:
+            args = tuple(sub[nm] for nm in
+                         (_name_of(_g(tp, "name")) for tp in td.tparams) if nm)
+            self_ty = named(im.target, args)
+        else:
+            self_ty = named(im.target, ()) if td is not None else ANY
+        if self_ty is not ANY:
+            sub["@Self"] = self_ty
+        ctx = Ctx(im.mod, Scope(), subst=tuple(sorted(sub.items())))
         ctx.scope.put("self", Sym("value", self_ty))
         for e in im.entries:
             if _k(e) == "Function":
-                if _g(e, "body") is not None and not _tup(_g(e, "tparams")):
+                if _g(e, "body") is not None:
                     fd = self._fn_from_function(im.mod, e)
                     if fd is not None:
-                        self.check_function(fd, {"@Self": self_ty}, None)
+                        esub = dict(sub)
+                        esub.update(self._var_sub(fd.tparams))
+                        self.check_function(fd, esub, None)
                 continue
             val = _g(e, "value", "default")
             if val is not None:
@@ -2252,7 +2293,9 @@ class Sema:
             self.check_block(s, ctx)
             return
         if k == "ExprStmt":
-            self.type_of(_g(s, "expr"), ctx)
+            e = _g(s, "expr")
+            ty = self.type_of(e, ctx)
+            self._check_discarded(s, e, ty)
             return
         if k in ("Let", "Binding"):
             self._check_let(s, ctx)
@@ -2267,6 +2310,34 @@ class Sema:
         # anything else that is an expression
         if hasattr(s, "span"):
             self.type_of(s, ctx)
+
+    def _check_discarded(self, s, e, ty):
+        """A statement that is a pure expression computes a value nothing
+        reads. Only a PURE READ is flagged — a literal, a name, a field, a
+        match over those — because everything else can hide an effect: a
+        call is run for its effect, `.try()` propagates, `consume` moves,
+        arithmetic can trap (`self.len - i - 1;` is this tree's range
+        guard), `==` dispatches to `Eq`, and an assignment is a Binary
+        whose operator is `=` (CONTRACT.md's encoding)."""
+        if ty is None or ty.kind in ("unit", "any", "error", "never", "var"):
+            return
+        if not self._pure_read(e):
+            return
+        self.error(_span(s),
+                   "discarded value: `%s` is computed and read by nothing — "
+                   "bind it, or delete the statement" % show(ty))
+
+    def _pure_read(self, n):
+        k = _k(n)
+        if k in ("Literal", "Path", "Identifier"):
+            return True
+        if k == "Member":
+            return self._pure_read(_g(n, "base", "object"))
+        if k == "Match":
+            return (self._pure_read(_g(n, "scrutinee", "subject"))
+                    and all(self._pure_read(_g(a, "body"))
+                            for a in _tup(_g(n, "arms"))))
+        return False
 
     def _check_let(self, s, ctx):
         name = _g(s, "name", "target")
@@ -2368,8 +2439,16 @@ class Sema:
             else:
                 self.error(span, "expected %s, found %s" % (show(expect), show(got)))
             return
+        # NEVER COUNT AN UNSETTLED SLOT (src/sema/sema_hoist.zen's rule, and
+        # the corpus says it in hoist_unsettled_error_set): a type parameter
+        # agrees with everything in `assignable`, so counting one here would
+        # make `<T, E>() Res<T, E>` ambiguous at every tail. A generic body
+        # is checked generically now, which is where a var slot is met.
+        if expect.args[0].kind == "var":
+            return
         cands = [(nm, ptys) for nm, ptys in (self.ctors_of(expect) or [])
-                 if len(ptys) == 1 and assignable(ty, ptys[0])]
+                 if len(ptys) == 1 and ptys[0].kind != "var"
+                 and assignable(ty, ptys[0])]
         if len(cands) == 1:
             if cands[0][0] == "Ok":
                 return
@@ -2512,8 +2591,8 @@ class Sema:
     def _vagueness(ty):
         """How much of a type is still unknown. Used to keep the most
         informative answer when a node is checked more than once — a generic
-        body is checked per instantiation, and the instantiated answer is the
-        one gen_c and the LSP want."""
+        body is checked generically AND per instantiation, and the
+        instantiated answer is the one gen_c and the LSP want."""
         if ty is None:
             return 99
         if ty.kind in ("any", "error", "never", "var", "variadic", "intlit",
@@ -3228,6 +3307,15 @@ class Sema:
                     self.coerce(t, expect, _span(body), body)
             if result is None or result.kind in ("any", "error"):
                 result = t
+            elif result.kind == "none" and t.kind == "ok" and t.args:
+                # WHICH ARM IS OPEN IS THE AUTHOR'S ORDERING, not a fact
+                # about the type: `None` says the FORM and `Ok(v)` says the
+                # PAYLOAD, and neither arm knows both. First-arm-wins kept
+                # `none`, which settles to `res_ty(ANY)` -- the payload
+                # thrown away, and gen_c.py:3983 then cannot infer the
+                # variant. The self-hosted checker makes the same join in
+                # `sema_join.settle_reversed`, and the two must agree.
+                result = res_ty(t.args[0])
         return result if result is not None else UNIT
 
     # -- calls --------------------------------------------------------------

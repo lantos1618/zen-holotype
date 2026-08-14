@@ -1,0 +1,119 @@
+// src/sema/sema_effect.zen
+// Does this statement DO anything?
+//
+// A block's statements are run for their effects; only its last one,
+// when nothing else is written as the tail, is also its value
+// (`sema_type.block_type` reads it back out). So every other statement
+// that merely COMPUTES is a value nothing reads — almost always a
+// missing `.try()`, a call the author meant to keep, or a line left
+// behind by an edit.
+//
+// ITS OWN FILE BECAUSE IT IS ITS OWN QUESTION. `sema_type.zen` answers
+// "what does this node MEAN"; this answers "was it worth writing", and
+// the two share only the type the first hands the second. The split is
+// the same one `sema_join.zen` made from `sema_match.zen`.
+//
+// THE RULE IS DELIBERATELY NARROW, and every exemption below is a place
+// this language hides an effect behind an expression. A rule that
+// flagged more would be a rule people turn off.
+
+str = std.text
+Vec = std.collections
+AllocError = std.mem
+Block, Stmt, ExprStmt, Match, Arm, ExprId = std.ast
+TyId, Ty = sema.sema_ty
+Checker = sema.sema_check
+SemaFault, TypeFault = sema.sema_diag
+
+// THE ONE WAY IN, asked once per statement by `block_type`'s walk. It
+// takes the block and the position because whether a statement is the
+// tail is a fact about WHERE it stands, not about the statement.
+check_statement* = (c :: Checker, block: Block, i: usize, n: usize, s: Stmt,
+                    ty: TyId) Res<(), AllocError> {
+    is_tail(block, i, n).match({
+        true  => Ok(()),
+        false => c.check_discarded(s, ty),
+    })
+}
+
+// The last statement of a block with no written tail IS the block's
+// value — `block_type` reads it back out — so it is used, never
+// discarded.
+is_tail = (block: Block, i: usize, n: usize) bool {
+    block.value.match({ Ok(_) => false, None => i + 1 == n })
+}
+
+// A statement that is a pure expression computes a value nothing reads.
+check_discarded = (c :: Checker, s: Stmt, ty: TyId) Res<(), AllocError> {
+    s.kind.match({
+        Expr(e) => c.discarded_expr(s, e, ty),
+        _       => Ok(()),
+    })
+}
+
+discarded_expr = (c :: Checker, s: Stmt, e: ExprStmt, ty: TyId)
+                 Res<(), AllocError> {
+    (c.statement_value(ty) && c.pure_read(e.expr)).match({
+        true  => c.report_discarded(s, ty),
+        false => Ok(()),
+    })
+}
+
+// A `()` statement discarded nothing. Poison, a hole and a type
+// parameter are all "not yet known" — a parameter may BE `()` at the
+// call site — and a diagnostic out of missing information is invented,
+// not found.
+statement_value = (c: Checker, ty: TyId) bool {
+    c.types.at(ty).match({
+        Prim(p) => p.name.eq("()") == false,
+        Unknown => false,
+        Infer   => false,
+        Var(_)  => false,
+        _       => true,
+    })
+}
+
+// A PURE READ computes a value and nothing else: a literal, a name, a
+// field, a parenthesised read, a match over those. Everything else is
+// exempt, and each exemption is a place this language hides an effect
+// behind an expression:
+//
+//   - a CALL is run for its effect, `.try()` for the propagation,
+//     `consume` for the move;
+//   - ARITHMETIC can trap, and `self.len - i - 1;` is this tree's range
+//     guard — "unsigned underflow IS the trap" (std/core/byte.zen).
+//     What reads as dead is the check;
+//   - `==` dispatches to `Eq`, a call wearing an operator's clothes;
+//   - an INDEX into a fixed array is bounds-checked — the same trap.
+//
+// So the question is structural: any of those anywhere in the
+// expression makes the statement somebody's effect, not a discard.
+pure_read = (c :: Checker, id: ExprId) bool {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Literal(_) => true,
+        Name(_)    => true,
+        Access(a)  => c.pure_read(a.base),
+        Paren(p)   => c.pure_read(p.inner),
+        Match(m)   => c.pure_match(m),
+        _          => false,
+    })
+}
+
+pure_match = (c :: Checker, m: Match) bool {
+    (c.pure_read(m.scrutinee) && c.pure_arms(m.arms))
+}
+
+pure_arms = (c :: Checker, arms: Vec<Arm>) bool {
+    every ::= true;
+    arms.loop((h, a) { every = every && c.pure_read(a.body); });
+    every;
+}
+
+report_discarded = (c :: Checker, s: Stmt, ty: TyId) Res<(), AllocError> {
+    unit = c.types.prim("()").try();
+    c.report(s.span.file, s.span, SemaFault.DiscardedValue(TypeFault(
+        name: "",
+        expected: unit,
+        found: ty)))
+}

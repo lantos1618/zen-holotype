@@ -24,8 +24,10 @@ build: seed/zen.c
 
 ## seed: regenerate AND stage, in one target. never two commands —
 ## commit-then-regenerate ships a seed one change stale, and only a
-## full feature test catches it.
-seed: zen
+## full feature test catches it. Depends on `build`, not `zen`: there
+## is no `zen` rule — `build` is what produces ./zen, and a name with
+## no rule fails after `make clean` and goes stale while it exists.
+seed: build
 	./zen build $(ROOT) --emit-c -o seed/zen.c
 	git add seed/zen.c
 
@@ -179,7 +181,7 @@ asan: seed/zen.c
 ## leak: valgrind's answer to the same question. definite leaks only --
 ## still-reachable memory is where the deliberate argv rows land, and
 ## reporting them would fail every run on a known-non-bug.
-leak: zen
+leak: build
 	tests/bench/leak.sh ./zen
 
 ## profile: a frame-pointer build (zen-fp) self-compiles under perf record

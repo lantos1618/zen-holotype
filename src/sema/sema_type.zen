@@ -25,7 +25,7 @@
 Ast, Expr, ExprId, Type, TypeId, Span, Ident, Literal, LiteralKind = std.ast
 Decl, DeclKind, Const, Alias, Enum = std.ast
 BinOp, UnOp, Block, BlockId, Stmt, StmtKind = std.ast
-Param, Binary, Unary, Bind, ExprStmt, Match, Access, Call, Lambda = std.ast
+Param, Binary, Unary, Bind, ExprStmt, Match, Arm, Access, Call, Lambda = std.ast
 ArrayType, ArrayLit, FixedArray, Index = std.ast
 Alloc, AllocError = std.mem
 Vec, Map = std.collections
@@ -35,7 +35,7 @@ DeclId = sema.sema_id
 TyId, Ty, Types, TyArray, TyNamed, is_prim = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 named_or_union = sema.sema_union
-Diag, SemaFault, NameFault = sema.sema_diag
+Diag, SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker, Ctx, Binding = sema.sema_check
 UNRESOLVED, is_predicate = sema.sema_check
 try_type = sema.sema_try
@@ -48,6 +48,7 @@ computed_member = sema.sema_member
 bind_stmt = sema.sema_place
 check_binary, const_count, check_index, check_literal = sema.sema_trap
 check_arms = sema.sema_hoist
+check_statement = sema.sema_effect
 check_eq = sema.sema_bound
 seed_left_spine, spine_ahead = sema.sema_spine
 
@@ -727,9 +728,9 @@ no_address* = (c :: Checker, node: Expr, a: Access, inner: TyId)
 block_type* = (c :: Checker, id: BlockId, ctx: Ctx)
               Res<TyId, AllocError> {
     mark = c.mark();
-    blk = c.tree.block_at(id);
-    tail = c.walk_stmts(blk, ctx).try();
-    got = blk.value.match({
+    block = c.tree.block_at(id);
+    tail = c.walk_stmts(block, ctx).try();
+    got = block.value.match({
         Ok(e) => c.type_of(e, ctx),
         None  => Ok(tail),
     }).try();
@@ -741,11 +742,13 @@ block_type* = (c :: Checker, id: BlockId, ctx: Ctx)
 // after it. The last statement's type is carried out because a
 // `;`-terminated tail closes a function: "`0;` closes a Res<i32, E>
 // function like `Ok(0);` does".
-walk_stmts* = (c :: Checker, blk: Block, ctx: Ctx)
+walk_stmts* = (c :: Checker, block: Block, ctx: Ctx)
              Res<TyId, AllocError> {
     last ::= c.types.prim("()").try();
-    blk.stmts.loop((h, s) {
+    n = block.stmts.len;
+    block.stmts.loop((h, i, s) {
         last = c.stmt_type(s, ctx).try();
+        c.check_statement(block, i, n, s, last).try();
     });
     Ok(last);
 }

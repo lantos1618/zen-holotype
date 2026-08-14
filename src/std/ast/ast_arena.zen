@@ -17,6 +17,7 @@
 
 Alloc, AllocError = std.mem
 str = std.text
+Range = std.core
 Trivia, TriviaRun = std.ast.ast_span
 ExprId, TypeId, PatternId, BlockId = std.ast.ast_id
 Expr, Type, Pattern, Block, Module = std.ast.ast_node
@@ -104,7 +105,7 @@ Ast* = {
         i = id.index.to_usize();
         (i < self.exprs.len).match({
             true  => (),
-            false => stale("expression", id.index, self.exprs.len),
+            false => stale("expression", i, self.exprs.len),
         });
         self.exprs.ptr().read(i);
     }
@@ -113,7 +114,7 @@ Ast* = {
         i = id.index.to_usize();
         (i < self.types.len).match({
             true  => (),
-            false => stale("type", id.index, self.types.len),
+            false => stale("type", i, self.types.len),
         });
         self.types.ptr().read(i);
     }
@@ -122,7 +123,7 @@ Ast* = {
         i = id.index.to_usize();
         (i < self.patterns.len).match({
             true  => (),
-            false => stale("pattern", id.index, self.patterns.len),
+            false => stale("pattern", i, self.patterns.len),
         });
         self.patterns.ptr().read(i);
     }
@@ -131,7 +132,7 @@ Ast* = {
         i = id.index.to_usize();
         (i < self.blocks.len).match({
             true  => (),
-            false => stale("block", id.index, self.blocks.len),
+            false => stale("block", i, self.blocks.len),
         });
         self.blocks.ptr().read(i);
     }
@@ -147,6 +148,50 @@ Ast* = {
     type_ids* = (self: @Self) usize { self.types.len }
     pattern_ids* = (self: @Self) usize { self.patterns.len }
     block_ids* = (self: @Self) usize { self.blocks.len }
+
+    // -----------------------------------------------------------------
+    // scanning
+    //
+    // The fold a position-holding consumer (ast_find.zen, ast_named.zen)
+    // writes over every node of one family. ONE HELPER PER FAMILY, not
+    // one generic: the four id types are distinct on purpose
+    // (ast_id.zen), so nothing generic can span them. The id steps by
+    // hand beside `Range.loop` because the loop's index is a usize, an
+    // id is a u32, and there is deliberately no narrowing conversion
+    // between them (the count fields above say why).
+    // -----------------------------------------------------------------
+
+    exprs_each* = (self: @Self, body: (id: ExprId, node: Expr) ()) () {
+        id ::= ExprId(index: 0);
+        Range(0, self.exprs.len).loop((h, i) {
+            body(id, self.expr_at(id));
+            id = ExprId(index: id.index + 1);
+        });
+    }
+
+    types_each* = (self: @Self, body: (id: TypeId, node: Type) ()) () {
+        id ::= TypeId(index: 0);
+        Range(0, self.types.len).loop((h, i) {
+            body(id, self.type_at(id));
+            id = TypeId(index: id.index + 1);
+        });
+    }
+
+    patterns_each* = (self: @Self, body: (id: PatternId, node: Pattern) ()) () {
+        id ::= PatternId(index: 0);
+        Range(0, self.patterns.len).loop((h, i) {
+            body(id, self.pattern_at(id));
+            id = PatternId(index: id.index + 1);
+        });
+    }
+
+    blocks_each* = (self: @Self, body: (id: BlockId, node: Block) ()) () {
+        id ::= BlockId(index: 0);
+        Range(0, self.blocks.len).loop((h, i) {
+            body(id, self.block_at(id));
+            id = BlockId(index: id.index + 1);
+        });
+    }
 
     // -----------------------------------------------------------------
     // trivia
@@ -168,13 +213,21 @@ Ast* = {
     }
 
     // `i` is an offset INSIDE the run, so a caller never sees an
-    // absolute index. Out of range traps, like the node readers.
+    // absolute index. Out of range traps, like the node readers — and
+    // with the same two-sided discipline: the offset against the run,
+    // then the absolute index against the arena, since a run captured
+    // in a stale `Ast` snapshot is the same bug as a stale id.
     trivia_at* = (self: @Self, run: TriviaRun, i: usize) Trivia {
         (i < run.len).match({
             true  => (),
-            false => stale("trivia", 0, run.len),
+            false => stale("trivia", i, run.len),
         });
-        self.trivia.ptr().read(run.at + i);
+        at = run.at + i;
+        (at < self.trivia.len).match({
+            true  => (),
+            false => stale("trivia", at, self.trivia.len),
+        });
+        self.trivia.ptr().read(at);
     }
 }
 
@@ -190,7 +243,7 @@ Ast* = {
 //
 // Returns `()` but never does — the final subtraction underflows and
 // traps, after this has already printed the reason.
-stale = (what: str, index: u32, len: usize) () {
+stale = (what: str, index: usize, len: usize) () {
     println(
         "ast: {} id {} is past the end of an arena holding {}",
         what,
