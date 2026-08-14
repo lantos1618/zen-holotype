@@ -1,0 +1,171 @@
+// HOVER ANSWERS INSIDE A GENERIC BODY — the decl-checking gate's other
+// half. A generic body is checked once at its declaration, generically,
+// which is what fills the memos this server reads: the parameter typed
+// by `T`, the `T` it is typed by, and the locals of a body nothing has
+// instantiated all have answers because `check_all` walked the body
+// even though no call site ever will.
+//
+// Same table shape as `hover_answers_at_a_declaration`: wire positions,
+// the whole reply asserted, `range` included.
+//
+// THE ONE `null` IS DOCUMENTED, NOT A GAP: the type parameter AT ITS
+// DECLARATION (`T` in `<T>`) is in `lsp_hover.zen`'s footer list of
+// positions that answer `null` on purpose — a declaration site has no
+// `TypeId`. `T` USED as a type, one row down, hovers fine.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, write_decimal, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// The program hovered over: one generic function, never called. Every
+// answered row below is a memo the declaration-time walk filled.
+DOC*: str = "pick = <T>(a: T, b: i32) i32 {\n    s = b + 1;\n    s\n}\n"
+
+URI*: str = "file:///a.zen"
+
+// One probed position, in WIRE coordinates — 0-based line, 0-based
+// character — because that is what a client sends and this test is on
+// the client's side of `lsp_pos.zen`.
+Probe* = {
+    line*: usize,
+    character*: usize,
+    what*: str,
+}
+
+// The table. Order is source order, so a reader can follow it down the
+// document, and `what` says which of the two halves each row is in.
+probes = (a: Alloc) Res<Vec<Probe>, AllocError> {
+    all ::= a.Vec<Probe>();
+    all.add(Probe(
+        line: 0,
+        character: 0,
+        what: "pick the generic's own name")).try();
+    all.add(Probe(
+        line: 0,
+        character: 8,
+        what: "T    the type parameter's declaration: null")).try();
+    all.add(Probe(
+        line: 0,
+        character: 11,
+        what: "a    a parameter at its declaration")).try();
+    all.add(Probe(
+        line: 0,
+        character: 14,
+        what: "T    a parameter's written type")).try();
+    all.add(Probe(
+        line: 0,
+        character: 17,
+        what: "b    a parameter at its declaration")).try();
+    all.add(Probe(
+        line: 0,
+        character: 20,
+        what: "i32  a parameter's written type")).try();
+    all.add(Probe(line: 0, character: 25, what: "i32  the return type")).try();
+    all.add(Probe(
+        line: 1,
+        character: 4,
+        what: "s    a local at its declaration")).try();
+    all.add(Probe(line: 1, character: 8,  what: "b    a parameter, used")).try();
+    all.add(Probe(line: 2, character: 4,  what: "s    a local, used")).try();
+    Ok(all);
+}
+
+// --- the requests ------------------------------------------------------
+
+open_doc = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(DOC, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+hover = (a: Alloc, id: usize, p: Probe, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(
+        ",\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes("},\"position\":{\"line\":").try();
+    write_decimal(p.line, body).try();
+    body.add_bytes(",\"character\":").try();
+    write_decimal(p.character, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+// ONE `serve` CALL for the whole table, so a server that answered the
+// first hover and then lost its place in the stream fails here.
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    table = probes(a).try();
+
+    input ::= a.String().try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
+        input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input).try();
+    open_doc(a, input).try();
+    table.loop((h, i, p) { hover(a, 10 + i, p, input).try(); });
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input).try();
+
+    s ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view(), table);
+    Ok(0);
+}
+
+// Every reply, labelled with the position that asked for it.
+//
+// THE FRAMING IS UNWRAPPED AND NOT PRINTED, because
+// `a_session_is_answered_frame_by_frame` already pins every byte of it
+// and a second copy of that assertion here would go red for a reason
+// that has nothing to do with hover. What is printed is the reply's
+// JSON, whole — the `range` included, since a right type under the
+// wrong underline is still wrong.
+walk_replies = (out: str, table: Vec<Probe>) () {
+    at ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; labelled(
+                seen,
+                fr.body,
+                table); seen = seen + 1; },
+        });
+    });
+}
+
+// Reply 0 is `initialize` and the last is `shutdown`; the ones between
+// are the table, in order. Neither of the two is printed — they are the
+// other test's subject — and the subtraction is guarded rather than let
+// to underflow, which on a usize is a trap and not a negative number.
+labelled = (i: usize, body: str, table: Vec<Probe>) () {
+    (i == 0).match({
+        true  => (),
+        false => table.get(i - 1).match({
+            None  => (),
+            Ok(p) => printed(p, body),
+        }),
+    });
+}
+
+printed = (p: Probe, body: str) () {
+    println("{}:{}  {}", p.line, p.character, p.what);
+    println("    {}", body);
+}

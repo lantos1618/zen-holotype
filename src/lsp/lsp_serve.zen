@@ -74,7 +74,8 @@ relative_to = zen.zen_path
 method_of, params_of, param, string_at, number_at = lsp.lsp_reply
 result, failed, parse_error, write_hover, write_target = lsp.lsp_reply
 write_capabilities, SEMANTIC_TOKENS = lsp.lsp_reply
-METHOD_NOT_FOUND, INVALID_PARAMS, NOT_INITIALIZED = lsp.lsp_reply
+RpcFault, own_str = lsp.lsp_reply
+Request, request_of = lsp.lsp_reply
 path_of = lsp.lsp_uri
 
 // The whole of the server's state.
@@ -164,53 +165,31 @@ Server* = {
             false => failed(
                 tree,
                 rid,
-                NOT_INITIALIZED,
+                RpcFault.NotInitialized,
                 "the server has not been initialized",
                 msg),
             true  => self.answered(t, tree, req, method, rid, msg),
         })
     }
 
+    // ONE FLAT MATCH: the string compares already happened, once, in
+    // `request_of` — a compare-per-method ladder nests one level per
+    // method, and the parser budgets stack per nesting level.
     answered = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                 method: str, rid: JsonId, msg :: String)
                Res<(), AllocError> {
-        method.eq("initialize").match({
-            true  => self.initialized(t, tree, req, rid, msg),
-            false => method.eq("shutdown").match({
-                true  => { self.stopping = true; result(
-                    tree,
-                    rid,
-                    "null",
-                    msg) },
-                false => method.eq("textDocument/hover").match({
-                    true  => self.hovered(t, tree, req, rid, msg),
-                    false => method.eq("textDocument/definition").match({
-                        true  => self.defined(t, tree, req, rid, msg),
-                        false => method.eq(
-                            "textDocument/documentSymbol").match({
-                            true  => self.outlined(t, tree, req, rid, msg),
-                            false => method.eq(
-                                "textDocument/completion").match({
-                                true  => self.completed(t, tree, req, rid, msg),
-                                false => method.eq(SEMANTIC_TOKENS).match({
-                                    true  => self.coloured(
-                                        t,
-                                        tree,
-                                        req,
-                                        rid,
-                                        msg),
-                                    false => self.unknown(
-                                        t,
-                                        tree,
-                                        rid,
-                                        method,
-                                        msg),
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
+        request_of(method).match({
+            Initialize => self.initialized(t, tree, req, rid, msg),
+            Shutdown   => {
+                self.stopping = true;
+                result(tree, rid, "null", msg)
+            },
+            Hover      => self.hovered(t, tree, req, rid, msg),
+            Definition => self.defined(t, tree, req, rid, msg),
+            Outline    => self.outlined(t, tree, req, rid, msg),
+            Completion => self.completed(t, tree, req, rid, msg),
+            Colour     => self.coloured(t, tree, req, rid, msg),
+            Unknown    => self.unknown(t, tree, rid, method, msg),
         })
     }
 
@@ -227,7 +206,7 @@ Server* = {
     initialized = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                    rid: JsonId, msg :: String) Res<(), AllocError> {
         self.ready = true;
-        self.workspace = own(self.a, path_of(string_at(
+        self.workspace = own_str(self.a, path_of(string_at(
             tree,
             params_of(tree, req),
             "rootUri"))).try();
@@ -245,7 +224,7 @@ Server* = {
         why.add_bytes(method).try();
         why.add_bytes(
             " - see docs/design_lsp.md for the stage it arrives at").try();
-        failed(tree, rid, METHOD_NOT_FOUND, why.view(), msg)
+        failed(tree, rid, RpcFault.MethodNotFound, why.view(), msg)
     }
 
     // `initialized`, `exit`, `didClose` and `$/cancelRequest` all mean
@@ -303,8 +282,8 @@ Server* = {
     }
 
     changed_to = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
-        kept_uri = own(self.a, uri).try();
-        kept_text = own(self.a, text).try();
+        kept_uri = own_str(self.a, uri).try();
+        kept_text = own_str(self.a, text).try();
         self.docs.set(kept_uri, kept_text).try();
         self.listed(kept_uri).try();
         self.notes.owes(kept_uri);
@@ -353,7 +332,7 @@ Server* = {
             None     => failed(
                 tree,
                 rid,
-                INVALID_PARAMS,
+                RpcFault.InvalidParams,
                 "no open document for that uri",
                 msg),
             // THE WORKSPACE DECIDES, as for definition. Without one the
@@ -395,7 +374,7 @@ Server* = {
             None     => failed(
                 tree,
                 rid,
-                INVALID_PARAMS,
+                RpcFault.InvalidParams,
                 "no open document for that uri",
                 msg),
             Ok(text) => {
@@ -477,7 +456,7 @@ Server* = {
             None     => failed(
                 tree,
                 rid,
-                INVALID_PARAMS,
+                RpcFault.InvalidParams,
                 "no open document for that uri",
                 msg),
             Ok(text) => {
@@ -559,7 +538,7 @@ Server* = {
             None     => failed(
                 tree,
                 rid,
-                INVALID_PARAMS,
+                RpcFault.InvalidParams,
                 "no open document for that uri",
                 msg),
             Ok(text) => {
@@ -589,7 +568,7 @@ Server* = {
             None     => failed(
                 tree,
                 rid,
-                INVALID_PARAMS,
+                RpcFault.InvalidParams,
                 "no open document for that uri",
                 msg),
             Ok(text) => {
@@ -761,8 +740,3 @@ frame_why* = (f: FrameFault) str {
 // of the request (`lsp_json_read.zen`), so nothing held past the message
 // may borrow from either. `lsp_diag.zen`'s `owned_str` is the same five
 // lines for the same reason, private to its file.
-own = (a: Alloc, s: str) Res<str, AllocError> {
-    out ::= a.String().try();
-    out.add_bytes(s).try();
-    Ok(out.view());
-}

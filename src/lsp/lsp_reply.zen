@@ -71,11 +71,11 @@ result* = (tree: Jsons, rid: JsonId, body: str, msg :: String)
     msg.add_bytes("}")
 }
 
-failed* = (tree: Jsons, rid: JsonId, code: usize, why: str, msg :: String)
-          Res<(), AllocError> {
+failed* = (tree: Jsons, rid: JsonId, code: RpcFault, why: str,
+           msg :: String) Res<(), AllocError> {
     head(tree, rid, msg).try();
     msg.add_bytes(",\"error\":{\"code\":-").try();
-    write_decimal(code, msg).try();
+    write_decimal(rpc_code(code), msg).try();
     msg.add_bytes(",\"message\":").try();
     write_text(why, msg).try();
     msg.add_bytes("}}")
@@ -94,7 +94,7 @@ head = (tree: Jsons, rid: JsonId, msg :: String) Res<(), AllocError> {
 parse_error* = (f: JsonFault, msg :: String) Res<(), AllocError> {
     msg.add_bytes(
         "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-").try();
-    write_decimal(PARSE_ERROR, msg).try();
+    write_decimal(rpc_code(RpcFault.ParseError), msg).try();
     msg.add_bytes(",\"message\":").try();
     write_fault(f, msg).try();
     msg.add_bytes("}}")
@@ -104,35 +104,33 @@ parse_error* = (f: JsonFault, msg :: String) Res<(), AllocError> {
 // the wrong span is a failure".
 write_fault = (f: JsonFault, msg :: String) Res<(), AllocError> {
     msg.add_byte('"').try();
-    msg.add_bytes(fault_why(f)).try();
-    fault_byte(f).match({
+    said = fault_text(f);
+    msg.add_bytes(said.why).try();
+    said.at.match({
         None  => written(),
         Ok(i) => { msg.add_bytes(" at byte ").try(); write_decimal(i, msg) },
     }).try();
     msg.add_byte('"')
 }
 
-fault_why = (f: JsonFault) str {
-    f.match({
-        Unexpected(_) => "unexpected byte",
-        Truncated(_)  => "the document ended inside a value",
-        BadEscape(_)  => "bad escape",
-        BadNumber(_)  => "not a JSON number",
-        TooDeep(_)    => "nested too deeply",
-        Trailing(_)   => "trailing bytes after the value",
-        NoMemory      => "out of memory",
-    })
-}
+// The message and the byte offset from ONE match — a new `JsonFault`
+// variant edits one place, not two. `at` is `None` only for `NoMemory`,
+// which has no byte to name.
+FaultText = { why: str, at: Res<usize> }
 
-fault_byte = (f: JsonFault) Res<usize> {
+fault_text = (f: JsonFault) FaultText {
     f.match({
-        Unexpected(i) => Ok(i),
-        Truncated(i)  => Ok(i),
-        BadEscape(i)  => Ok(i),
-        BadNumber(i)  => Ok(i),
-        TooDeep(i)    => Ok(i),
-        Trailing(i)   => Ok(i),
-        NoMemory      => None,
+        Unexpected(i) => FaultText(why: "unexpected byte", at: Ok(i)),
+        Truncated(i)  => FaultText(
+            why: "the document ended inside a value",
+            at: Ok(i)),
+        BadEscape(i)  => FaultText(why: "bad escape", at: Ok(i)),
+        BadNumber(i)  => FaultText(why: "not a JSON number", at: Ok(i)),
+        TooDeep(i)    => FaultText(why: "nested too deeply", at: Ok(i)),
+        Trailing(i)   => FaultText(
+            why: "trailing bytes after the value",
+            at: Ok(i)),
+        NoMemory      => FaultText(why: "out of memory", at: None),
     })
 }
 
@@ -183,9 +181,97 @@ write_capabilities* = (out :: String) Res<(), AllocError> {
 // beside the promise.
 SEMANTIC_TOKENS*: str = "textDocument/semanticTokens/full"
 
-// JSON-RPC's codes, as MAGNITUDES: negative on the wire, and the sign is
-// written by the one function that emits them.
-PARSE_ERROR*: usize = 32700
-METHOD_NOT_FOUND*: usize = 32601
-INVALID_PARAMS*: usize = 32602
-NOT_INITIALIZED*: usize = 32002
+// THE METHODS THIS SERVER ANSWERS, as a union, for the same reason the
+// codes below are one: a router that compares strings in its arms nests
+// one level per method, and every arm holds a whole handler call. Named
+// here, the ladder is eight one-word arms and `lsp_serve.zen`'s
+// `answered` is one flat match.
+//
+// `Unknown` IS A VARIANT, not a failure: an LSP client may send any
+// method, and the answer to one this server does not implement is
+// `-32601`, which `answered` writes like any other reply.
+Request* = Initialize
+    | Shutdown
+    | Hover
+    | Definition
+    | Outline
+    | Completion
+    | Colour
+    | Unknown
+
+// The one place a method's spelling is compared. Ordered by how often a
+// session sends each: a document is hovered far more than it is opened.
+request_of* = (method: str) Request {
+    method.eq("textDocument/hover").match({
+        true  => Request.Hover,
+        false => request_after_hover(method),
+    })
+}
+
+request_after_hover = (method: str) Request {
+    method.eq("textDocument/definition").match({
+        true  => Request.Definition,
+        false => request_after_definition(method),
+    })
+}
+
+request_after_definition = (method: str) Request {
+    method.eq("textDocument/completion").match({
+        true  => Request.Completion,
+        false => request_after_completion(method),
+    })
+}
+
+request_after_completion = (method: str) Request {
+    method.eq("textDocument/documentSymbol").match({
+        true  => Request.Outline,
+        false => request_after_outline(method),
+    })
+}
+
+request_after_outline = (method: str) Request {
+    method.eq(SEMANTIC_TOKENS).match({
+        true  => Request.Colour,
+        false => request_after_colour(method),
+    })
+}
+
+request_after_colour = (method: str) Request {
+    method.eq("initialize").match({
+        true  => Request.Initialize,
+        false => method.eq("shutdown").match({
+            true  => Request.Shutdown,
+            false => Request.Unknown,
+        }),
+    })
+}
+
+// JSON-RPC's codes as a UNION: a call site names a fault, never a
+// number, and the wire's magnitude comes from this one match —
+// `lsp_colour.zen`'s `Colour`/`index_of` is the same move. MAGNITUDES,
+// because the sign is written by the one function that emits them.
+RpcFault* = ParseError
+    | MethodNotFound
+    | InvalidParams
+    | NotInitialized
+
+rpc_code = (f: RpcFault) usize {
+    f.match({
+        ParseError     => 32700,
+        MethodNotFound => 32601,
+        InvalidParams  => 32602,
+        NotInitialized => 32002,
+    })
+}
+
+// A `str` copied into an arena — what a session keeps may not borrow
+// the message's arena (dropped once the reply is written) nor the
+// request's bytes (only a string without escapes is a slice of the
+// request, `lsp_json_read.zen`). THE ONLY COPY: `lsp_serve.zen`'s `own`,
+// `lsp_diag.zen`'s `owned_str` and `lsp_built.zen`'s `owned` were these
+// same five lines under three names, and all three now call this one.
+own_str* = (a: Alloc, s: str) Res<str, AllocError> {
+    out ::= a.String().try();
+    out.add_bytes(s).try();
+    Ok(out.view());
+}

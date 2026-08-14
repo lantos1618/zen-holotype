@@ -63,7 +63,7 @@ root_for, relative_to = zen.zen_path
 // `Types` IS IMPORTED FOR ITS METHODS: without this line the
 // bootstrapper resolves `c.types.write_name` against `sema_diag` instead
 // and reports it as not exported there.
-Types, TyId, Prim = sema.sema_ty
+Types, TyId, Ty, Prim = sema.sema_ty
 Def, decl_at = sema.sema_def
 to_pos, to_wire, WirePos = lsp.lsp_pos
 Tell, told_at = lsp.lsp_decl
@@ -79,18 +79,62 @@ Hover* = {
     end*: WirePos,
 }
 
+// --- the two harnesses every way in shares ------------------------------
+
+// THE STANDALONE PARSE: the buffer scanned and parsed as one module,
+// never added to an arena unless the caller goes on to check it
+// (`symbols_at` does not — an outline is an AST fact). Every caller
+// names the module "doc"; `name` is what the spans carry as their file.
+parse_standalone* = (a: Alloc, name: str, text: str) Res<Parser, AllocError> {
+    tree ::= a.Ast();
+    lexed = scan(a, Source(file: name, text: text)).try();
+    Ok(a.Parser(lexed, tree));
+}
+
+// THE STANDALONE CHECK: the parse above, added to the arena and checked
+// whole — what every no-workspace query (`complete_at`, `definition_at`
+// and `hover_at` below) opens with.
+check_standalone* = (a: Alloc, name: str, text: str) Res<Checker, AllocError> {
+    p ::= parse_standalone(a, name, text).try();
+    m = p.module("doc").try();
+    p.tree.add_module(m).try();
+    c ::= a.Checker(p.tree).try();
+    check_all(c).try();
+    Ok(c);
+}
+
+// What `check_build` hands back: the root it computed (a cross-file
+// span converts against it), the document's name relative to it, and
+// the checker the walk filled.
+CheckedBuild* = {
+    root*: str,
+    rel*: str,
+    c*: Checker,
+}
+
+// THE BUILD-BACKED HARNESS the `*_in` queries share: the compilation
+// root COMPUTED and not the workspace (`root_for` accounts for an
+// editor opening at the repository while this tree builds as
+// `zen build src`), the open document as the entry — a file being
+// edited is usually not reachable from `main` — and the buffer in the
+// overlay, so the answer is about the text the editor shows.
+check_build* = (env: Env, a: Alloc, workspace: str, path: str, text: str)
+               Res<CheckedBuild, AllocError> {
+    root = root_for(env, a, workspace, path);
+    rel = relative_to(root, path);
+    docs ::= a.Map<str, str>();
+    docs.set(path, text).try();
+    b ::= a.Build(env, root);
+    c = b.whole(rel, docs).try();
+    Ok(CheckedBuild(root: root, rel: rel, c: c));
+}
+
 // The type under a wire position in `text`, and the span to underline.
 // `name` is the CLIENT'S URI, verbatim, never a filesystem path: handed
 // to both `Source` and `told_at`, so no `file://` conversion is needed.
 hover_at* = (a: Alloc, name: str, text: str, line: usize, character: usize)
             Res<Hover, AllocError> {
-    tree ::= a.Ast();
-    lexed = scan(a, Source(file: name, text: text)).try();
-    p ::= a.Parser(lexed, tree);
-    m = p.module("doc").try();
-    p.tree.add_module(m).try();
-    c ::= a.Checker(p.tree).try();
-    check_all(c).try();
+    c ::= check_standalone(a, name, text).try();
 
     // THE CONVERSION HAPPENS EXACTLY HERE AND NOWHERE ELSE ON THE WAY
     // IN. Below this line every position is a Zen position.
