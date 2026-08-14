@@ -11,7 +11,7 @@
 // divergence between two implementations of one language rather than a
 // missing feature.
 //
-// IT IS DRIVEN THROUGH `src/parse` ON PURPOSE. A corpus program
+// IT IS DRIVEN THROUGH `src/std/parse` ON PURPOSE. A corpus program
 // compiled with `--toolchain bootstrap` exercises tree-sitter and
 // never stages this parser at all, so an ordinary program spelling
 // `n * 2` would have passed with the bug in place — a gate that cannot
@@ -19,7 +19,7 @@
 // exactly as `parser_reads_its_own_stdlib_shapes.zen` beside it does.
 //
 // ONE CAUSE, EVERY SHAPE BELOW. The choice is made in one function
-// (`lookahead.zen`'s `head_shape_ahead`), so this asserts the whole
+// (`parse_lookahead.zen`'s `head_shape_ahead`), so this asserts the whole
 // family it governs at once: a trailing value, a `;`-terminated
 // statement, a `*%` in both, a name that is no parameter, an argument,
 // a match arm and an arm whose body is a block. `star_decl` is the
@@ -27,12 +27,12 @@
 // in a body — because a fix that reads `n * 2` correctly by forgetting
 // how to see `helper* = ..` has moved the bug rather than removed it.
 
-scan, Source = lex.lex
-Parser = parse.parser
-module = parse.parse_decl
-Ast = ast.ast_arena
-Decl, BinOp = ast.ast_node
-ExprId = ast.ast_id
+scan, Source = std.lex.lex
+Parser = std.parse.parser
+module = std.parse.parse_decl
+Ast = std.ast.ast_arena
+Decl, BinOp = std.ast.ast_node
+ExprId = std.ast.ast_id
 
 SOURCE: str = "base = 21\ndoubled = base * 2\nmul = (n: i32) i32 { n * 2 }\nwrap = (n: i32) i32 { n *% 2 }\nstmt = (n: i32) i32 { n * 2; 0 }\nstmt_wrap = (n: i32) i32 { n *% 2; 0 }\nlocal = () i32 { k = 3; k * 2 }\narg = (n: i32) i32 { mul(n * 2) }\narm = (n: i32) i32 { n.match({ _ => n * 2 }) }\narm_block = (n: i32) i32 { n.match({ _ => { n * 2 } }) }\nchain = (n: i32) i32 { n * 2 * 3 }\nstar_decl = (n: i32) i32 { helper* = (a: i32) i32 { a * 2 }\n    helper(n) }\n"
 
@@ -61,13 +61,15 @@ value_kind = (tree: Ast, v: Res<ExprId>) str {
 show = (tree: Ast, d: Decl) () {
     d.kind.match({
         Function(f) => f.body.match({
-            Ok(b) => println("  {} tail {} stmts {}",
+            Ok(b) => println(
+                "  {} tail {} stmts {}",
                 f.name.text,
                 value_kind(tree, tree.block_at(b).value),
                 tree.block_at(b).stmts.len),
             None  => println("  {} no body", f.name.text),
         }),
-        Const(c)    => println("  {} const {}", c.name.text, value_kind(tree, Ok(c.value))),
+        Const(c)    => println("  {} const {}", c.name.text, value_kind(tree, Ok(
+            c.value))),
         _           => println("  other declaration"),
     });
 }

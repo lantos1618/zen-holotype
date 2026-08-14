@@ -30,13 +30,13 @@
 Checker, Ctx = sema.sema_check
 Types, TyId = sema.sema_ty
 PRELUDE = sema.sema_def
-Ast = ast.ast_arena
-Expr, ExprKind, Access, Name, Literal, LiteralKind = ast.ast_node
-Decl, DeclKind, Struct, Import, ImportName, Module = ast.ast_node
-Member, MemberKind, Field, Function, Form, Param, TParam = ast.ast_node
-Type, TypeKind, Named = ast.ast_node
-ExprId, TypeId = ast.ast_id
-Pos, Span, Ident, QualifiedName, no_trivia = ast.ast_span
+Ast = std.ast.ast_arena
+Expr, ExprKind, Access, Name, Literal, LiteralKind = std.ast.ast_node
+Decl, DeclKind, Struct, Import, ImportName, Module = std.ast.ast_node
+Member, MemberKind, Field, Function, Form, Param, TParam = std.ast.ast_node
+Type, TypeKind, Named = std.ast.ast_node
+ExprId, TypeId = std.ast.ast_id
+Pos, Span, Ident, QualifiedName, no_trivia = std.ast.ast_span
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -49,13 +49,17 @@ id_of = (text: str) Ident { Ident(text: text, span: at()) }
 
 named_type = (tree :: Ast, a: Alloc, text: str) Res<TypeId, AllocError> {
     args ::= a.Vec<TypeId>();
-    tree.add_type(Type(kind: TypeKind.Named(Named(name: id_of(text), args: args)),
+    tree.add_type(Type(kind: TypeKind.Named(Named(name: id_of(
+        text), args: args)),
                        span: at(), leading: no_trivia(), trailing: no_trivia()))
 }
 
 expr = (tree :: Ast, kind: ExprKind) Res<ExprId, AllocError> {
-    tree.add_expr(Expr(kind: kind, span: at(),
-                       leading: no_trivia(), trailing: no_trivia()))
+    tree.add_expr(Expr(
+        kind: kind,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia()))
 }
 
 dot = (tree :: Ast, base: ExprId, name: str) Res<ExprId, AllocError> {
@@ -67,8 +71,11 @@ dot = (tree :: Ast, base: ExprId, name: str) Res<ExprId, AllocError> {
 field = (a: Alloc, tree :: Ast, name: str, type: str) Res<Member, AllocError> {
     t = named_type(tree, a, type).try();
     Ok(Member(kind: MemberKind.Field(Field(
-                  name: id_of(name), exported: true, mutable: false,
-                  type: Ok(t), value: None)),
+        name: id_of(name),
+        exported: true,
+        mutable: false,
+        type: Ok(t),
+        value: None)),
               span: at(), leading: no_trivia(), trailing: no_trivia()));
 }
 
@@ -76,19 +83,31 @@ field = (a: Alloc, tree :: Ast, name: str, type: str) Res<Member, AllocError> {
 // is what makes its type a function OF the receiver
 method = (a: Alloc, tree :: Ast, name: str, ret: str)
          Res<Member, AllocError> {
-    self_ty = tree.add_type(Type(kind: TypeKind.SelfType, span: at(),
-                                 leading: no_trivia(),
-                                 trailing: no_trivia())).try();
+    self_ty = tree.add_type(Type(
+        kind: TypeKind.SelfType,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia())).try();
     rty = named_type(tree, a, ret).try();
     params ::= a.Vec<Param>();
-    params.add(Param(name: id_of("self"), type: Ok(self_ty), mutable: false,
-                     value: None, span: at(), leading: no_trivia(),
-                     trailing: no_trivia())).try();
+    params.add(Param(
+        name: id_of("self"),
+        type: Ok(self_ty),
+        mutable: false,
+        value: None,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia())).try();
     tparams ::= a.Vec<TParam>();
     Ok(Member(kind: MemberKind.Function(Function(
-                  name: id_of(name), exported: true, form: Form.Sealed,
-                  tparams: tparams, params: params, params_span: at(),
-                  ret: Ok(rty), body: None)),
+        name: id_of(name),
+        exported: true,
+        form: Form.Sealed,
+        tparams: tparams,
+        params: params,
+        params_span: at(),
+        ret: Ok(rty),
+        body: None)),
               span: at(), leading: no_trivia(), trailing: no_trivia()));
 }
 
@@ -97,8 +116,11 @@ struct_decl = (a: Alloc, text: str, members: Vec<Member>)
     tparams ::= a.Vec<TParam>();
     Ok(Decl(
         kind: DeclKind.Struct(Struct(
-            name: id_of(text), exported: true, tparams: tparams,
-            members: members, body_span: at())),
+            name: id_of(text),
+            exported: true,
+            tparams: tparams,
+            members: members,
+            body_span: at())),
         span: at(), leading: no_trivia(), trailing: no_trivia()));
 }
 
@@ -109,8 +131,12 @@ reexport = (a: Alloc, name: str, module: str) Res<Decl, AllocError> {
     segments ::= a.Vec<Ident>();
     segments.add(id_of(module)).try();
     names ::= a.Vec<ImportName>();
-    names.add(ImportName(name: id_of(name), exported: true, span: at(),
-                         leading: no_trivia(), trailing: no_trivia())).try();
+    names.add(ImportName(
+        name: id_of(name),
+        exported: true,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia())).try();
     Ok(Decl(
         kind: DeclKind.Import(Import(
             names: names,
@@ -119,8 +145,12 @@ reexport = (a: Alloc, name: str, module: str) Res<Decl, AllocError> {
 }
 
 module_of = (tree :: Ast, name: str, decls: Vec<Decl>) Res<(), AllocError> {
-    tree.add_module(Module(name: name, decls: decls, span: at(),
-                           leading: no_trivia(), trailing: no_trivia())).try();
+    tree.add_module(Module(
+        name: name,
+        decls: decls,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia())).try();
     Ok(());
 }
 
@@ -131,8 +161,11 @@ reaches = (c :: Checker, a: Alloc, label: str, id: ExprId, ctx: Ctx)
     ty = c.type_of(id, ctx).try();
     out ::= a.String().try();
     c.types.write_name(ty, out).try();
-    println("{} -> {} ({} diagnostic(s))", label, out.view(),
-            c.diag_count() - before);
+    println(
+        "{} -> {} ({} diagnostic(s))",
+        label,
+        out.view(),
+        c.diag_count() - before);
     Ok(());
 }
 

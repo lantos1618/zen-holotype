@@ -28,12 +28,12 @@
 Checker, Ctx = sema.sema_check
 check_overloads = sema.sema_call
 TyId, Types = sema.sema_ty
-Ast = ast.ast_arena
-Expr, ExprKind, Literal, LiteralKind, Name, Call, Arg, Lambda = ast.ast_node
-Block, Stmt, Type, TypeKind, Named, FnType = ast.ast_node
-Decl, DeclKind, Function, Form, Param, TParam, Module = ast.ast_node
-Pos, Span, Ident, no_trivia = ast.ast_span
-ExprId, TypeId, BlockId = ast.ast_id
+Ast = std.ast.ast_arena
+Expr, ExprKind, Literal, LiteralKind, Name, Call, Arg, Lambda = std.ast.ast_node
+Block, Stmt, Type, TypeKind, Named, FnType = std.ast.ast_node
+Decl, DeclKind, Function, Form, Param, TParam, Module = std.ast.ast_node
+Pos, Span, Ident, no_trivia = std.ast.ast_span
+ExprId, TypeId, BlockId = std.ast.ast_id
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -42,8 +42,10 @@ str, String = std.text
 // the duplicate-signature diagnostic names BOTH declarations, and a
 // diagnostic that names one position twice has not implemented the rule
 at_line = (line: usize) Span {
-    Span(file: "in.zen", start: Pos(line: line, col: 1),
-         end: Pos(line: line, col: 2))
+    Span(
+        file: "in.zen",
+        start: Pos(line: line, col: 1),
+        end: Pos(line: line, col: 2))
 }
 
 at = () Span { at_line(1) }
@@ -53,8 +55,11 @@ id_of = (text: str) Ident { Ident(text: text, span: at()) }
 // ---------------------------------------------------------------- types
 
 ty = (tree :: Ast, a: Alloc, kind: TypeKind) Res<TypeId, AllocError> {
-    tree.add_type(Type(kind: kind, span: at(),
-                       leading: no_trivia(), trailing: no_trivia()))
+    tree.add_type(Type(
+        kind: kind,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia()))
 }
 
 named_ty = (tree :: Ast, a: Alloc, text: str) Res<TypeId, AllocError> {
@@ -67,8 +72,13 @@ unit_ty = (tree :: Ast, a: Alloc) Res<TypeId, AllocError> {
 }
 
 param_of = (text: str, t: TypeId) Param {
-    Param(name: id_of(text), mutable: false, type: Ok(t), span: at(),
-          leading: no_trivia(), trailing: no_trivia())
+    Param(
+        name: id_of(text),
+        mutable: false,
+        type: Ok(t),
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia())
 }
 
 // `(h: i32) ()` and `(h: i32, i: usize) ()` — two types, because a
@@ -76,8 +86,11 @@ param_of = (text: str, t: TypeId) Param {
 fn_ty = (tree :: Ast, a: Alloc, params: Vec<Param>, ret: TypeId)
         Res<TypeId, AllocError> {
     tparams ::= a.Vec<TParam>();
-    ty(tree, a, TypeKind.Fn(FnType(tparams: tparams, params: params,
-                                   params_span: at(), ret: ret)))
+    ty(tree, a, TypeKind.Fn(FnType(
+        tparams: tparams,
+        params: params,
+        params_span: at(),
+        ret: ret)))
 }
 
 // --------------------------------------------------------- declarations
@@ -89,16 +102,25 @@ fn_decl = (a: Alloc, text: str, tparams: Vec<TParam>, params: Vec<Param>,
            ret: TypeId, line: usize) Decl {
     Decl(
         kind: DeclKind.Function(Function(
-            name: id_of(text), exported: true, form: Form.Required,
-            tparams: tparams, params: params, params_span: at(),
-            ret: Ok(ret), body: None)),
+            name: id_of(text),
+            exported: true,
+            form: Form.Required,
+            tparams: tparams,
+            params: params,
+            params_span: at(),
+            ret: Ok(ret),
+            body: None)),
         span: at_line(line), leading: no_trivia(), trailing: no_trivia())
 }
 
 tparam_of = (a: Alloc, text: str) Res<TParam, AllocError> {
     bounds ::= a.Vec<TypeId>();
-    Ok(TParam(name: id_of(text), bounds: bounds, span: at(),
-              leading: no_trivia(), trailing: no_trivia()));
+    Ok(TParam(
+        name: id_of(text),
+        bounds: bounds,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia()));
 }
 
 one_tparam = (a: Alloc, text: str) Res<Vec<TParam>, AllocError> {
@@ -127,8 +149,11 @@ params_2 = (a: Alloc, p: Param, q: Param) Res<Vec<Param>, AllocError> {
 // ---------------------------------------------------------- expressions
 
 expr = (tree :: Ast, kind: ExprKind) Res<ExprId, AllocError> {
-    tree.add_expr(Expr(kind: kind, span: at(),
-                       leading: no_trivia(), trailing: no_trivia()))
+    tree.add_expr(Expr(
+        kind: kind,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia()))
 }
 
 int_lit = (tree :: Ast) Res<ExprId, AllocError> {
@@ -140,32 +165,45 @@ str_lit = (tree :: Ast) Res<ExprId, AllocError> {
 }
 
 arg_of = (value: ExprId) Arg {
-    Arg(name: None, value: value, span: at(),
-        leading: no_trivia(), trailing: no_trivia())
+    Arg(
+        name: None,
+        value: value,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia())
 }
 
 // a closure of `n` parameters, with no body worth speaking of: its ARITY
 // is the whole of what resolution reads
 closure = (tree :: Ast, a: Alloc, n: usize) Res<ExprId, AllocError> {
     stmts ::= a.Vec<Stmt>();
-    body = tree.add_block(Block(stmts: stmts, value: None, span: at(),
-                                leading: no_trivia(),
-                                trailing: no_trivia())).try();
+    body = tree.add_block(Block(
+        stmts: stmts,
+        value: None,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia())).try();
     params ::= a.Vec<Param>();
     i32t = tree.named_ty(a, "i32").try();
     Range(0, n).loop((h, k) { params.add(param_of("p", i32t)).try() });
     tparams ::= a.Vec<TParam>();
     tree.expr(ExprKind.Lambda(Lambda(
-        tparams: tparams, params: params, params_span: at(),
-        ret: None, body: body)))
+        tparams: tparams,
+        params: params,
+        params_span: at(),
+        ret: None,
+        body: body)))
 }
 
 call_of = (tree :: Ast, a: Alloc, name: str, args: Vec<Arg>)
           Res<ExprId, AllocError> {
     callee = tree.expr(ExprKind.Name(Name(text: name))).try();
     targs ::= a.Vec<TypeId>();
-    tree.expr(ExprKind.Call(Call(callee: callee, targs: targs,
-                                  args: args, args_span: at())))
+    tree.expr(ExprKind.Call(Call(
+        callee: callee,
+        targs: targs,
+        args: args,
+        args_span: at())))
 }
 
 args_of = (a: Alloc, one: ExprId) Res<Vec<Arg>, AllocError> {
@@ -233,55 +271,94 @@ main = (env: Env) Res<i32, AllocError> {
     avar = tree.named_ty(alloc, "A").try();
 
     // the two closure types: same return, different parameter lists
-    one_p = fn_ty(tree, alloc,
-                  params_1(alloc, param_of("h", i32t)).try(), unit).try();
+    one_p = fn_ty(
+        tree,
+        alloc,
+        params_1(alloc, param_of("h", i32t)).try(),
+        unit).try();
     two_p = fn_ty(tree, alloc,
-                  params_2(alloc, param_of("h", i32t),
-                           param_of("i", usizet)).try(), unit).try();
+                  params_2(
+                      alloc,
+                      param_of("h", i32t),
+                      param_of("i", usizet)).try(), unit).try();
 
     decls ::= alloc.Vec<Decl>();
 
     // by type, then by arity
     // the return types differ so the test can SEE which candidate was
     // picked: a `()` everywhere would prove only that something resolved
+    decls.add(fn_decl(
+        alloc,
+        "show",
+        no_tparams(alloc).try(),
+        params_1(alloc, param_of("n", i32t)).try(),
+        i32t,
+        1)).try();
+    decls.add(fn_decl(
+        alloc,
+        "show",
+        no_tparams(alloc).try(),
+        params_1(alloc, param_of("s", strt)).try(),
+        strt,
+        2)).try();
     decls.add(fn_decl(alloc, "show", no_tparams(alloc).try(),
-                      params_1(alloc, param_of("n", i32t)).try(),
-                      i32t, 1)).try();
-    decls.add(fn_decl(alloc, "show", no_tparams(alloc).try(),
-                      params_1(alloc, param_of("s", strt)).try(),
-                      strt, 2)).try();
-    decls.add(fn_decl(alloc, "show", no_tparams(alloc).try(),
-                      params_2(alloc, param_of("a", i32t),
-                               param_of("b", i32t)).try(), usizet, 3)).try();
+                      params_2(
+                          alloc,
+                          param_of("a", i32t),
+                          param_of("b", i32t)).try(), usizet, 3)).try();
 
     // the loop-shaped case: the two differ ONLY in the closure's
     // parameter list, which IS its type. the return types differ so the
     // test can see which one was picked
-    decls.add(fn_decl(alloc, "run", no_tparams(alloc).try(),
-                      params_1(alloc, param_of("body", one_p)).try(),
-                      i32t, 4)).try();
-    decls.add(fn_decl(alloc, "run", no_tparams(alloc).try(),
-                      params_1(alloc, param_of("body", two_p)).try(),
-                      strt, 5)).try();
+    decls.add(fn_decl(
+        alloc,
+        "run",
+        no_tparams(alloc).try(),
+        params_1(alloc, param_of("body", one_p)).try(),
+        i32t,
+        4)).try();
+    decls.add(fn_decl(
+        alloc,
+        "run",
+        no_tparams(alloc).try(),
+        params_1(alloc, param_of("body", two_p)).try(),
+        strt,
+        5)).try();
 
     // parameter names are documentation, not identity
     decls.add(fn_decl(alloc, "combine", one_tparam(alloc, "T").try(),
-                      params_2(alloc, param_of("first", tvar),
-                               param_of("second", tvar)).try(), tvar, 6)).try();
+                      params_2(
+                          alloc,
+                          param_of("first", tvar),
+                          param_of("second", tvar)).try(), tvar, 6)).try();
     decls.add(fn_decl(alloc, "combine", one_tparam(alloc, "T").try(),
-                      params_2(alloc, param_of("left", tvar),
-                               param_of("right", tvar)).try(), tvar, 7)).try();
+                      params_2(
+                          alloc,
+                          param_of("left", tvar),
+                          param_of("right", tvar)).try(), tvar, 7)).try();
 
     // a generic parameter swallows a concrete one
-    decls.add(fn_decl(alloc, "fold", one_tparam(alloc, "A").try(),
-                      params_1(alloc, param_of("init", avar)).try(),
-                      avar, 8)).try();
-    decls.add(fn_decl(alloc, "fold", no_tparams(alloc).try(),
-                      params_1(alloc, param_of("init", i32t)).try(),
-                      i32t, 9)).try();
+    decls.add(fn_decl(
+        alloc,
+        "fold",
+        one_tparam(alloc, "A").try(),
+        params_1(alloc, param_of("init", avar)).try(),
+        avar,
+        8)).try();
+    decls.add(fn_decl(
+        alloc,
+        "fold",
+        no_tparams(alloc).try(),
+        params_1(alloc, param_of("init", i32t)).try(),
+        i32t,
+        9)).try();
 
-    tree.add_module(Module(name: "main", decls: decls, span: at(),
-                           leading: no_trivia(), trailing: no_trivia())).try();
+    tree.add_module(Module(
+        name: "main",
+        decls: decls,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia())).try();
 
     // the calls
     n = int_lit(tree).try();
@@ -289,15 +366,21 @@ main = (env: Env) Res<i32, AllocError> {
     show_int = call_of(tree, alloc, "show", args_of(alloc, n).try()).try();
     show_str = call_of(tree, alloc, "show", args_of(alloc, s).try()).try();
     show_two = call_of(tree, alloc, "show", args_2(alloc, n, n).try()).try();
-    show_three = call_of(tree, alloc, "show",
-                         args_3(alloc, n, n, n).try()).try();
+    show_three = call_of(
+        tree,
+        alloc,
+        "show",
+        args_3(alloc, n, n, n).try()).try();
 
     plain = closure(tree, alloc, 1).try();
     indexed = closure(tree, alloc, 2).try();
     run_plain = call_of(tree, alloc, "run",
                         args_of(alloc, plain).try()).try();
-    run_indexed = call_of(tree, alloc, "run",
-                          args_of(alloc, indexed).try()).try();
+    run_indexed = call_of(
+        tree,
+        alloc,
+        "run",
+        args_of(alloc, indexed).try()).try();
 
     // the tree is complete before the checker is built: `Checker` holds
     // the `Ast` by value, so a node added afterwards is invisible to it

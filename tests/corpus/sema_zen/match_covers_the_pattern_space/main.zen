@@ -26,13 +26,13 @@
 
 Checker, Ctx = sema.sema_check
 TyId, Types = sema.sema_ty
-Ast = ast.ast_arena
-Expr, ExprKind, Literal, LiteralKind, Name, Match, Arm = ast.ast_node
-Pattern, PatternKind, PatName, Destructure = ast.ast_node
-Type, TypeKind, Named = ast.ast_node
-Decl, DeclKind, Enum, Variant, Module, TParam = ast.ast_node
-Pos, Span, Ident, QualifiedName, no_trivia = ast.ast_span
-ExprId, TypeId, PatternId = ast.ast_id
+Ast = std.ast.ast_arena
+Expr, ExprKind, Literal, LiteralKind, Name, Match, Arm = std.ast.ast_node
+Pattern, PatternKind, PatName, Destructure = std.ast.ast_node
+Type, TypeKind, Named = std.ast.ast_node
+Decl, DeclKind, Enum, Variant, Module, TParam = std.ast.ast_node
+Pos, Span, Ident, QualifiedName, no_trivia = std.ast.ast_span
+ExprId, TypeId, PatternId = std.ast.ast_id
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -55,29 +55,41 @@ named_ty = (tree :: Ast, a: Alloc, text: str) Res<TypeId, AllocError> {
     args ::= a.Vec<TypeId>();
     tree.add_type(Type(
         kind: TypeKind.Named(Named(name: id_of(a, text), args: args)),
-        span: at(), leading: no_trivia(), trailing: no_trivia()))
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia()))
 }
 
 variant = (a: Alloc, text: str, payload: Res<TypeId>) Variant {
-    Variant(name: id_of(a, text), payload: payload, span: at(),
-            leading: no_trivia(), trailing: no_trivia())
+    Variant(
+        name: id_of(a, text),
+        payload: payload,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia())
 }
 
 enum_decl = (a: Alloc, text: str, variants: Vec<Variant>)
             Res<Decl, AllocError> {
     tparams ::= a.Vec<TParam>();
     Ok(Decl(
-        kind: DeclKind.Enum(Enum(name: id_of(a, text), exported: true,
-                                 tparams: tparams, variants: variants,
-                                 leading_bar: None)),
+        kind: DeclKind.Enum(Enum(
+            name: id_of(a, text),
+            exported: true,
+            tparams: tparams,
+            variants: variants,
+            leading_bar: None)),
         span: at(), leading: no_trivia(), trailing: no_trivia()));
 }
 
 // ------------------------------------------------------------------ patterns
 
 pat = (tree :: Ast, kind: PatternKind) Res<PatternId, AllocError> {
-    tree.add_pattern(Pattern(kind: kind, span: at(),
-                             leading: no_trivia(), trailing: no_trivia()))
+    tree.add_pattern(Pattern(
+        kind: kind,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia()))
 }
 
 wild = (tree :: Ast) Res<PatternId, AllocError> { pat(tree, PatternKind.Wild) }
@@ -98,8 +110,11 @@ holds = (tree :: Ast, a: Alloc, text: str, inner: PatternId)
 // ---------------------------------------------------------------- expressions
 
 expr = (tree :: Ast, kind: ExprKind) Res<ExprId, AllocError> {
-    tree.add_expr(Expr(kind: kind, span: at(),
-                       leading: no_trivia(), trailing: no_trivia()))
+    tree.add_expr(Expr(
+        kind: kind,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia()))
 }
 
 int_lit = (tree :: Ast, text: str) Res<ExprId, AllocError> {
@@ -107,8 +122,13 @@ int_lit = (tree :: Ast, text: str) Res<ExprId, AllocError> {
 }
 
 arm = (tree :: Ast, p: PatternId, body: ExprId) Res<Arm, AllocError> {
-    Ok(Arm(pattern: p, arrow_span: at(), body: body, span: at(),
-           leading: no_trivia(), trailing: no_trivia()));
+    Ok(Arm(
+        pattern: p,
+        arrow_span: at(),
+        body: body,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia()));
 }
 
 // ---------------------------------------------------------------------
@@ -154,8 +174,12 @@ main = (env: Env) Res<i32, AllocError> {
     decls ::= alloc.Vec<Decl>();
     decls.add(enum_decl(alloc, "Cell", cell_variants).try()).try();
     decls.add(enum_decl(alloc, "Slot", slot_variants).try()).try();
-    tree.add_module(Module(name: "main", decls: decls, span: at(),
-                           leading: no_trivia(), trailing: no_trivia())).try();
+    tree.add_module(Module(
+        name: "main",
+        decls: decls,
+        span: at(),
+        leading: no_trivia(),
+        trailing: no_trivia())).try();
 
     slot_node = tree.named_ty(alloc, "Slot").try();
 
@@ -170,42 +194,70 @@ main = (env: Env) Res<i32, AllocError> {
     // COMPLETE over the pattern space: five arms, no wildcard
     full ::= alloc.Vec<Arm>();
     full.add(tree.arm(holds(tree, alloc, "Left",
-                             tree.bare(alloc, "Full").try()).try(), one).try()).try();
+                             tree.bare(
+                                 alloc,
+                                 "Full").try()).try(), one).try()).try();
     full.add(tree.arm(holds(tree, alloc, "Left",
-                             tree.bare(alloc, "Blank").try()).try(), one).try()).try();
+                             tree.bare(
+                                 alloc,
+                                 "Blank").try()).try(), one).try()).try();
     full.add(tree.arm(holds(tree, alloc, "Right",
-                             tree.bare(alloc, "Full").try()).try(), one).try()).try();
+                             tree.bare(
+                                 alloc,
+                                 "Full").try()).try(), one).try()).try();
     full.add(tree.arm(holds(tree, alloc, "Right",
-                             tree.bare(alloc, "Blank").try()).try(), one).try()).try();
+                             tree.bare(
+                                 alloc,
+                                 "Blank").try()).try(), one).try()).try();
     full.add(tree.arm(tree.bare(alloc, "Gone").try(), one).try()).try();
     covered = tree.expr(ExprKind.Match(Match(
-        scrutinee: s, name_span: at(), arms: full, arms_span: at()))).try();
+        scrutinee: s,
+        name_span: at(),
+        arms: full,
+        arms_span: at()))).try();
 
     // the SAME outer variants, one inner pair short: Left(Blank) reaches
     // no arm, and only a checker that specialises the column can see it
     partial ::= alloc.Vec<Arm>();
     partial.add(tree.arm(holds(tree, alloc, "Left",
-                                tree.bare(alloc, "Full").try()).try(), one).try()).try();
-    partial.add(tree.arm(holds(tree, alloc, "Right",
-                                wild(tree).try()).try(), one).try()).try();
+                                tree.bare(
+                                    alloc,
+                                    "Full").try()).try(), one).try()).try();
+    partial.add(tree.arm(holds(
+        tree,
+        alloc,
+        "Right",
+        wild(tree).try()).try(), one).try()).try();
     partial.add(tree.arm(tree.bare(alloc, "Gone").try(), one).try()).try();
     nested_gap = tree.expr(ExprKind.Match(Match(
-        scrutinee: s, name_span: at(), arms: partial, arms_span: at()))).try();
+        scrutinee: s,
+        name_span: at(),
+        arms: partial,
+        arms_span: at()))).try();
 
     // an arm below `_` can never run
     shadowed ::= alloc.Vec<Arm>();
-    shadowed.add(tree.arm(holds(tree, alloc, "Left",
-                                 wild(tree).try()).try(), one).try()).try();
+    shadowed.add(tree.arm(holds(
+        tree,
+        alloc,
+        "Left",
+        wild(tree).try()).try(), one).try()).try();
     shadowed.add(tree.arm(wild(tree).try(), one).try()).try();
     shadowed.add(tree.arm(tree.bare(alloc, "Gone").try(), one).try()).try();
     after_wild = tree.expr(ExprKind.Match(Match(
-        scrutinee: s, name_span: at(), arms: shadowed, arms_span: at()))).try();
+        scrutinee: s,
+        name_span: at(),
+        arms: shadowed,
+        arms_span: at()))).try();
 
     // bool is an enum of two cases and gets no exemption
     half ::= alloc.Vec<Arm>();
     half.add(tree.arm(tree.bare(alloc, "true").try(), one).try()).try();
     one_sided = tree.expr(ExprKind.Match(Match(
-        scrutinee: flag, name_span: at(), arms: half, arms_span: at()))).try();
+        scrutinee: flag,
+        name_span: at(),
+        arms: half,
+        arms_span: at()))).try();
 
     // a scrutinee whose type sema could not compute: the undefined name
     // is one diagnostic, and coverage must add NOTHING to it
@@ -213,7 +265,10 @@ main = (env: Env) Res<i32, AllocError> {
     blind.add(tree.arm(tree.bare(alloc, "Left").try(), one).try()).try();
     blind.add(tree.arm(tree.bare(alloc, "Right").try(), one).try()).try();
     on_poison = tree.expr(ExprKind.Match(Match(
-        scrutinee: mystery, name_span: at(), arms: blind, arms_span: at()))).try();
+        scrutinee: mystery,
+        name_span: at(),
+        arms: blind,
+        arms_span: at()))).try();
 
     // THE TREE IS COMPLETE BEFORE THE CHECKER IS BUILT, and it has to be:
     // `Checker` holds the `Ast` by value, so a node added afterwards is
@@ -227,10 +282,20 @@ main = (env: Env) Res<i32, AllocError> {
     c.bind("s", slot_ty, false, false).try();
     c.bind("flag", c.types.bool_ty().try(), false, false).try();
 
-    count(c, alloc, "every (Slot, Cell) pair covered", covered, ctx,
-          c.diag_count()).try();
-    count(c, alloc, "Left(Blank) covered by nothing", nested_gap, ctx,
-          c.diag_count()).try();
+    count(
+        c,
+        alloc,
+        "every (Slot, Cell) pair covered",
+        covered,
+        ctx,
+        c.diag_count()).try();
+    count(
+        c,
+        alloc,
+        "Left(Blank) covered by nothing",
+        nested_gap,
+        ctx,
+        c.diag_count()).try();
     count(c, alloc, "an arm below `_`", after_wild, ctx,
           c.diag_count()).try();
     count(c, alloc, "one arm of a bool", one_sided, ctx,
@@ -239,7 +304,8 @@ main = (env: Env) Res<i32, AllocError> {
     // the undefined name accounts for exactly one, and coverage for none
     before = c.diag_count();
     c.type_of(on_poison, ctx).try();
-    println("a match on a poison scrutinee: {} diagnostic(s)",
-            c.diag_count() - before);
+    println(
+        "a match on a poison scrutinee: {} diagnostic(s)",
+        c.diag_count() - before);
     Ok(0);
 }
