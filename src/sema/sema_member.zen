@@ -26,7 +26,7 @@
 // bounds (`Checker.bounds`). With nothing in scope, the diagnostic names
 // BOTH impls, not just one side.
 
-Ast, Expr, ExprId, Access, Ident, Span, Pos, TypeId = std.ast
+Ast, Expr, ExprId, Access, Ident, Span, Pos, TypeId, nowhere = std.ast
 Decl, DeclKind, Struct, Impl, Member, MemberKind = std.ast
 Field, Const, Function, Form, Param, TParam = std.ast
 Alloc, AllocError = std.mem
@@ -211,8 +211,10 @@ foreign_tvar = (c: Checker, ty: TyId) bool {
     })
 }
 
+// `in_scope_tvar` already asks about the bound as its first disjunct, so
+// asking again here answered nothing: `!(B || L) && !B` is `!B && !L`.
 unowned_tvar = (c: Checker, name: str, ty: TyId) bool {
-    (in_scope_tvar(c, name, ty) == false) && (c.is_bounded(name) == false)
+    in_scope_tvar(c, name, ty) == false
 }
 
 // Declared as a type parameter, or declared with a bound — either puts
@@ -221,7 +223,7 @@ unowned_tvar = (c: Checker, name: str, ty: TyId) bool {
 // constrained `T` has members to find — calling it foreign would silence
 // the diagnostic the bound exists to make possible.
 in_scope_tvar = (c: Checker, name: str, ty: TyId) bool {
-    c.has_bound_named(name)
+    c.is_bounded(name)
         || c.lookup_tvar(name).match({ Ok(b) => b.ty.eq(ty), None => false })
 }
 
@@ -520,10 +522,6 @@ bound_span = (c: Checker, bound: TyId) Span {
 
 decl_span* = (c: Checker, id: DeclId) Span {
     decl_at(c.tree, id).match({ Ok(d) => d.span, None => nowhere() })
-}
-
-nowhere* = () Span {
-    Span(file: "", start: Pos(line: 0, col: 0), end: Pos(line: 0, col: 0))
 }
 
 named_members = (c :: Checker, n: TyNamed, ty: TyId, name: str,
