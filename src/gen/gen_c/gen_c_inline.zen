@@ -50,7 +50,7 @@ DeclId = sema.sema_id
 TyId, Ty, Types, TyFn, TyRes = sema.sema_ty
 World, Def, decl_at = sema.sema_def
 Checker, Ctx, Binding = sema.sema_check
-Inst = sema.sema_inst
+Inst, has_var = sema.sema_inst
 type_from_ast, param_type = sema.sema_type
 self_ctx = sema.sema_member
 sym_local, sym_gen = gen.gen_name
@@ -58,7 +58,9 @@ GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 LocalSlot, Closure = gen.gen_c.gen_c_frame
 unsupported, unresolved = gen.gen_c.gen_c_report
-sub_with, open, inst_at, settled_inst, recv_inst = gen.gen_c.gen_c_mono
+has_body = gen.gen_c.gen_c_impl
+handle_depth = gen.gen_c.gen_c_handle
+sub_with, inst_at, settled_inst, recv_inst = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams, enter_struct_tparams = gen.gen_c.gen_c_mono
 ctype, declarator, is_unit = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
@@ -81,10 +83,6 @@ INLINE_DEPTH* : usize = 12
 // at the call site to inline it for.
 inlines* = (be: CBackend, c: Call, f: Function) bool {
     has_body(f) && takes_lambda(be, c)
-}
-
-has_body* = (f: Function) bool {
-    f.body.match({ Ok(_) => true, None => false })
 }
 
 takes_lambda* = (be: CBackend, c: Call) bool {
@@ -227,7 +225,7 @@ inline_member = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
 run_body = (be :: CBackend, id: ExprId, f: Function, argv: Vec<ExprId>,
             ptys: Vec<TyId>, ret: TyId, bctx: Ctx, inst: Inst, ctx: Ctx,
             out :: String) Res<(), AllocError> {
-    open(be, ret).match({
+    has_var(be.check, ret).match({
         true  => unsupported(
             be,
             id,
@@ -296,7 +294,7 @@ dest_of = (keeps: bool, result: str) Dest {
 
 wants_value = (be :: CBackend, ret: TyId) bool {
     (is_unit(be, ret) == false) && (be.check.is_unknown(ret) == false)
-        && (open(be, ret) == false)
+        && (has_var(be.check, ret) == false)
 }
 
 open_temp = (be :: CBackend, ret: TyId, result :: String)
@@ -529,17 +527,6 @@ lower_arg_value = (be :: CBackend, value: ExprId, cl: Closure, i: usize,
         false => Ok(()),
     }).try();
     argt.add(text)
-}
-
-handle_depth = (be :: CBackend, value: ExprId) usize {
-    be.tree.expr_at(value).kind.match({
-        Name(n) => slot_handle(be, n.text),
-        _       => 0,
-    })
-}
-
-slot_handle = (be :: CBackend, name: str) usize {
-    be.slot_of(name).match({ Ok(s) => s.handle, None => 0 })
 }
 
 bind_lambda_params = (be :: CBackend, cl: Closure, argt: Vec<String>,

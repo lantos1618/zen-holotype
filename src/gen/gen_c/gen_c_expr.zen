@@ -42,7 +42,8 @@ RES_PATH, is_failure = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 LocalSlot = gen.gen_c.gen_c_frame
-sub, constructed, open, unsettled = gen.gen_c.gen_c_mono
+sub, constructed, unsettled = gen.gen_c.gen_c_mono
+has_var = sema.sema_inst
 loop_result_type = gen.gen_c.gen_c_shape
 unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_report
 lower_match = gen.gen_c.gen_c_flow
@@ -222,7 +223,7 @@ value_slot = (be :: CBackend, s: LocalSlot) Res<TyId> {
 }
 
 keep_known = (be :: CBackend, ty: TyId) Res<TyId> {
-    (be.check.is_unknown(ty) || open(be, ty)).match({
+    (be.check.is_unknown(ty) || has_var(be.check, ty)).match({
         true  => None,
         false => Ok(ty),
     })
@@ -286,7 +287,7 @@ ptr_answer_of = (be :: CBackend, c: Call, a: Access, rty: TyId, ctx: Ctx,
 // the rule. Everything else is handed back untouched.
 settled_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                  Res<TyId, AllocError> {
-    open(be, got).match({
+    has_var(be.check, got).match({
         false => opaque_answer(be, id, ctx, got),
         true  => settle_open(be, id, ctx, got),
     })
@@ -321,7 +322,7 @@ opaque_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
 settle_open = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
               Res<TyId, AllocError> {
     walked = loop_result_type(be, id, ctx, got).try();
-    open(be, walked).match({
+    has_var(be.check, walked).match({
         false => Ok(walked),
         true  => settle_inlined(be, id, ctx, walked),
     })
@@ -335,7 +336,7 @@ settle_open = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
 settle_inlined = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                  Res<TyId, AllocError> {
     inlined = inline_result_type(be, id, ctx, got).try();
-    open(be, inlined).match({
+    has_var(be.check, inlined).match({
         false => Ok(inlined),
         true  => settle_call(be, id, ctx, inlined),
     })
@@ -433,13 +434,9 @@ def_result_type = (be :: CBackend, d: Def, want: TyId)
                   Res<TyId, AllocError> {
     d.kind.match({
         FunctionDef => function_ret(be, d, want),
-        StructDef   => struct_type(be, d),
+        StructDef   => constructed(be, d),
         _           => Ok(want),
     })
-}
-
-struct_type = (be :: CBackend, d: Def) Res<TyId, AllocError> {
-    constructed(be, d)
 }
 
 function_ret = (be :: CBackend, d: Def, want: TyId) Res<TyId, AllocError> {
@@ -592,7 +589,7 @@ want_of* = (be :: CBackend, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
 }
 
 settled_place = (be :: CBackend, ty: TyId) bool {
-    (be.check.is_unknown(ty) == false) && (open(be, ty) == false)
+    (be.check.is_unknown(ty) == false) && (has_var(be.check, ty) == false)
 }
 
 // A spilling form whose value is `()` has nothing to hold — a void

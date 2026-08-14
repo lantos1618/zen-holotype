@@ -44,7 +44,7 @@ DeclId = sema.sema_id
 TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
 World, Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
-Inst = sema.sema_inst
+Inst, has_var = sema.sema_inst
 self_ctx = sema.sema_member
 param_type, type_from_ast = sema.sema_type
 write_usize = sema.sema_diag
@@ -52,7 +52,7 @@ sym_member, sym_fn, sym_gen = gen.gen_name
 USR, GEN = gen.gen_name
 GenFault = gen.gen_diag
 CBackend, MethodRef = gen.gen_c.gen_c_state
-sub, sub_with, open, intern_var, recv_inst = gen.gen_c.gen_c_mono
+sub, sub_with, intern_var, recv_inst = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams, enter_struct_tparams = gen.gen_c.gen_c_mono
 ctype, declarator, is_unit, request_type, declared_ret = gen.gen_c.gen_c_type
 is_ptr_named = gen.gen_c.gen_c_type
@@ -346,7 +346,7 @@ request_slot = (be :: CBackend, s: Slot) Res<(), AllocError> {
 }
 
 request_if_real = (be :: CBackend, t: TyId) Res<(), AllocError> {
-    (is_unit(be, t) || open(be, t)).match({
+    (is_unit(be, t) || has_var(be.check, t)).match({
         true  => Ok(()),
         false => request_named_only(be, t),
     })
@@ -519,7 +519,7 @@ size_ty = (be :: CBackend) TyId {
     be.check.types.prim("usize").match({ Ok(t) => t, Err(_) => TyId(index: 0) })
 }
 
-thunk_param = (be :: CBackend, p: TyId, stem: str, i: usize, out :: String)
+thunk_param* = (be :: CBackend, p: TyId, stem: str, i: usize, out :: String)
               Res<(), AllocError> {
     out.add_bytes(", ").try();
     nm ::= be.alloc.String().try();
@@ -654,7 +654,7 @@ value_is_concrete = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
 }
 
 is_concrete = (be: CBackend, ty: TyId) bool {
-    is_named(be, ty) && (is_fat(be, ty) == false) && (open(be, ty) == false)
+    is_named(be, ty) && (is_fat(be, ty) == false) && (has_var(be.check, ty) == false)
 }
 
 is_named = (be: CBackend, ty: TyId) bool {

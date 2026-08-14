@@ -37,7 +37,7 @@ DeclId = sema.sema_id
 TyId, Ty, Types, TyFn, TyRes = sema.sema_ty
 World, Def, decl_at = sema.sema_def
 Checker, Ctx, Binding = sema.sema_check
-Inst = sema.sema_inst
+Inst, has_var = sema.sema_inst
 type_from_ast, param_type = sema.sema_type
 self_ctx = sema.sema_member
 sym_local, sym_gen = gen.gen_name
@@ -45,7 +45,7 @@ GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 LocalSlot, Closure = gen.gen_c.gen_c_frame
 unsupported, unresolved = gen.gen_c.gen_c_report
-sub_with, open, inst_at, settled_inst, recv_inst = gen.gen_c.gen_c_mono
+sub_with, inst_at, settled_inst, recv_inst = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams, enter_struct_tparams = gen.gen_c.gen_c_mono
 ctype, declarator, is_unit, declared_ret = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
@@ -53,7 +53,9 @@ Dest, block = gen.gen_c.gen_c_stmt
 def_with_id = gen.gen_c.gen_c_call
 plain_ctx, body_ctx, self_body_ctx = gen.gen_c.gen_c_decl
 supplies_bounds, range_element_type = gen.gen_c.gen_c_range
-inlines, has_body, is_lambda = gen.gen_c.gen_c_inline
+inlines, is_lambda = gen.gen_c.gen_c_inline
+has_body = gen.gen_c.gen_c_impl
+recv_of = gen.gen_c.gen_c_shape
 
 // The receiver, if a ufcs call arrived through one, and then the
 // written arguments: `range.find(p)` and `find(range, p)` are one call
@@ -98,7 +100,7 @@ inline_ret* = (be :: CBackend, f: Function, dctx: Ctx, inst: Inst,
              Res<TyId, AllocError> {
     declared = declared_ret(be, f, dctx).try();
     got = sub_with(be, sub_with(be, declared, inst).try(), extra).try();
-    open(be, got).match({
+    has_var(be.check, got).match({
         false => Ok(got),
         true  => range_element(be, got, argv, ctx, extra),
     })
@@ -367,7 +369,7 @@ value_or_unit = (be :: CBackend, e: ExprId, ctx: Ctx, unit: TyId)
 }
 
 settled* = (be :: CBackend, t: TyId) bool {
-    (be.check.is_unknown(t) == false) && (open(be, t) == false)
+    (be.check.is_unknown(t) == false) && (has_var(be.check, t) == false)
 }
 
 // `find<R: Range<T>, T>` names `T` only inside another parameter's
@@ -462,13 +464,6 @@ callee_name = (be :: CBackend, c: Call) Res<str> {
     })
 }
 
-callee_recv = (be :: CBackend, c: Call) Res<ExprId> {
-    be.tree.expr_at(c.callee).kind.match({
-        Access(a) => Ok(a.base),
-        _         => None,
-    })
-}
-
 named_result = (be :: CBackend, id: ExprId, c: Call, name: str, ctx: Ctx,
                 got: TyId) Res<TyId, AllocError> {
     found ::= be.alloc.Vec<Def>();
@@ -526,7 +521,7 @@ computed_result = (be :: CBackend, id: ExprId, c: Call, d: Def,
     inst = settled_inst(be, f.tparams, d.qname, raw).try();
     mark = enter_tparams(be, f.tparams, d.qname).try();
     argv ::= be.alloc.Vec<ExprId>();
-    arguments(be, c, callee_recv(be, c), argv).try();
+    arguments(be, c, recv_of(be, c.callee), argv).try();
     raws ::= be.alloc.Vec<TyId>();
     param_types(be, f, dctx, inst, raws).try();
     extra ::= be.alloc.Inst();

@@ -33,15 +33,15 @@
 // folder that takes bytes rather than an expression id.
 
 Ast, Expr, ExprKind, ExprId, BlockId, Block, Lambda, Type, TypeKind = std.ast
-Decl, DeclKind, Function, FnType, Param, TypeId, Ident, Span = std.ast
-Access, Call, Arg, Impl, Member, MemberKind, Field = std.ast
+DeclKind, Function, FnType, Param, TypeId, Ident, Span = std.ast
+Access, Call, Arg, Impl, Member, MemberKind, Field, Struct = std.ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
 DeclId, ImplId = sema.sema_id
 TyId, Ty, Types, TyNamed, TyRes, TyArray = sema.sema_ty
-World, Def, decl_at = sema.sema_def
+World, Def = sema.sema_def
 Checker, Ctx = sema.sema_check
 type_from_ast = sema.sema_type
 member_named, self_ctx = sema.sema_member
@@ -52,8 +52,8 @@ GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 LocalSlot, LoopFrame = gen.gen_c.gen_c_frame
 unsupported, unresolved, untyped = gen.gen_c.gen_c_report
-ctype, declarator, is_unit, declared_ret = gen.gen_c.gen_c_type
-open, intern_res_open, recv_inst, sub_with = gen.gen_c.gen_c_mono
+ctype, declarator, is_unit, declared_ret, struct_decl = gen.gen_c.gen_c_type
+intern_res_open, recv_inst, sub_with = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 expr, ty_of = gen.gen_c.gen_c_expr
 Dest, block, write_dest, deliver = gen.gen_c.gen_c_stmt
@@ -85,22 +85,19 @@ has_field = (be :: CBackend, rty: TyId, name: str) bool {
 }
 
 decl_has_field = (be :: CBackend, decl: DeclId, name: str) bool {
-    decl_at(be.tree, decl).match({
+    struct_decl(be, decl).match({
         None  => false,
-        Ok(d) => struct_has_field(d, name),
+        Ok(s) => struct_has_field(s, name),
     })
 }
 
-struct_has_field = (d: Decl, name: str) bool {
+struct_has_field = (s: Struct, name: str) bool {
     got ::= false;
-    d.kind.match({
-        Struct(st) => st.members.loop((h, m) {
-            m.kind.match({
-                Field(fl) => fl.name.text.eq(name).then(() { got = true; }),
-                _         => (),
-            });
-        }),
-        _          => (),
+    s.members.loop((h, m) {
+        m.kind.match({
+            Field(fl) => fl.name.text.eq(name).then(() { got = true; }),
+            _         => (),
+        });
     });
     got
 }

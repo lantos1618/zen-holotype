@@ -34,9 +34,11 @@ Vec = std.collections
 str, String = std.text
 Range = std.core
 TyId, Ty, Types, TyNamed, TyRes, TyArray, ResForm = sema.sema_ty
+DeclId = sema.sema_id
 World, Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 type_from_ast = sema.sema_type
+union_reading = sema.sema_union
 write_usize = sema.sema_diag
 Emit, order = gen.gen_emit
 sym_type, sym_variant, sym_member, tcode, GEN, USR = gen.gen_name
@@ -44,7 +46,7 @@ path_with, res_arity, is_failure, RES_PATH = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 Inst = sema.sema_inst
-sub_with, open, enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
+sub_with, enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 intern_named = gen.gen_c.gen_c_mono
 request_slots = gen.gen_c.gen_c_fat
 
@@ -423,6 +425,15 @@ request_variants = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
     Ok(());
 }
 
+// The struct a declaration IS, when it is one — the DeclId→Decl→Struct
+// unwrap every member search starts with.
+struct_decl* = (be: CBackend, decl: DeclId) Res<Struct> {
+    decl_at(be.tree, decl).match({
+        None  => None,
+        Ok(d) => d.kind.match({ Struct(s) => Ok(s), _ => None }),
+    })
+}
+
 // The context a declaration's own member types are read in: its module,
 // and no `@Self` — a member type naming `@Self` by value would be a
 // type of infinite size, and one behind a `Ptr` is out of this subset.
@@ -500,7 +511,7 @@ variant_type* = (be :: CBackend, n: TyNamed, v: Variant, ctx: Ctx,
 // nothing: the scan stops at the first variant that is not a bare type
 // name, which for a nominal enum is normally the first variant.
 union_member_type = (be :: CBackend, n: TyNamed, v: Variant) Res<TyId> {
-    union_reading(be, n).match({
+    union_reading(be.check, n.decl).match({
         false => None,
         true  => bare_variant_type(be, n, v),
     })
@@ -511,61 +522,6 @@ bare_variant_type = (be :: CBackend, n: TyNamed, v: Variant) Res<TyId> {
     be.world().defs_of(n.decl.module.to_usize(), v.name.text, found).match({
         Err(_) => None,
         Ok(_)  => named_of(be, found),
-    })
-}
-
-union_reading = (be :: CBackend, n: TyNamed) bool {
-    decl_at(be.tree, n.decl).match({
-        None  => false,
-        Ok(d) => enum_union_reading(be, n, d),
-    })
-}
-
-enum_union_reading = (be :: CBackend, n: TyNamed, d: Decl) bool {
-    d.kind.match({
-        Enum(e) => no_nominal_variant(be, n, e),
-        _       => false,
-    })
-}
-
-// One variant that is not a bare type name settles it for the whole
-// declaration, so this looks for that counterexample and reports its
-// absence rather than asking every variant to agree.
-//
-// Fewer than two variants is nominal whatever the name means. A union
-// of one existing type is that type, and DESIGN.md spells that without
-// a bar — so `X = | Foo` was written with the bar on purpose.
-no_nominal_variant = (be :: CBackend, n: TyNamed, e: Enum) bool {
-    (e.variants.len < 2).match({
-        true  => false,
-        false => every_variant_named(be, n, e),
-    })
-}
-
-every_variant_named = (be :: CBackend, n: TyNamed, e: Enum) bool {
-    Range(0, e.variants.len).find((i) {
-        e.variants.get(i).match({
-            None  => true,
-            Ok(v) => !names_a_type(be, n, v),
-        })
-    }).match({ Ok(_) => false, None => true })
-}
-
-// A written payload means the variant is not a bare name, so the union
-// reading is already out — `Shape = Circle(Circle) | Unit` is nominal
-// however many of its names are also types.
-names_a_type = (be :: CBackend, n: TyNamed, v: Variant) bool {
-    v.payload.match({
-        Ok(_) => false,
-        None  => defs_named(be, n, v.name.text),
-    })
-}
-
-defs_named = (be :: CBackend, n: TyNamed, name: str) bool {
-    found ::= be.alloc.Vec<Def>();
-    be.world().defs_of(n.decl.module.to_usize(), name, found).match({
-        Err(_) => false,
-        Ok(_)  => found.len > 0,
     })
 }
 

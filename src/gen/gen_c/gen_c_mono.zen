@@ -17,7 +17,7 @@
 //     `leave_tparams`.
 //   - REFUSE AN OPEN TYPE. A `Var` that reaches `tcode` mangles to one
 //     letter, so two instantiations would become one symbol and `cc`
-//     would silently pick whichever body it saw last. `open` is asked
+//     would silently pick whichever body it saw last. `has_var` is asked
 //     before anything is emitted, and the fault names the function.
 //
 // Order is DECLARATION ORDER, nothing else: an `Inst` is two parallel
@@ -193,19 +193,15 @@ sub_with* = (be :: CBackend, ty: TyId, inst: Inst) Res<TyId, AllocError> {
     subst(be.check, ty, inst)
 }
 
-// Does this type still mention a parameter nothing settled? The question
-// every emission asks before it writes a symbol.
-open* = (be: CBackend, ty: TyId) bool { has_var(be.check, ty) }
-
 // THE SAME QUESTION, ASKED OF EVERY EMPTY SLOT, NOT ONLY A FREE
 // PARAMETER.
 //
 // `gen_name.tcode` writes ONE letter — `q` — for a `Var`, `Infer`, and
 // `Unknown` alike, since none of the three names a type C could be
-// handed. `open` asks about the first only, because it was written for
+// handed. `has_var` asks about the first only, because it was written for
 // symbol collision between two INSTANTIATIONS — narrower than "can this
 // be spelled". `Res<Ptr<Unknown>, E>` is the gap: no `Var` in it, so
-// `open` says settled, but a temporary declared at it is a C struct
+// `has_var` says settled, but a temporary declared at it is a C struct
 // with an unresolved element `cc` rejects.
 //
 // The walk is `sema_inst.has_var`'s, one variant wider; kept here
@@ -235,7 +231,7 @@ any_unsettled = (be: CBackend, list: Vec<TyId>) bool {
 // answer is a `bool` and the first one is enough.
 any_open* = (be: CBackend, sig: Vec<TyId>) bool {
     Range(0, sig.len).find((i) {
-        sig.get(i).match({ Ok(t) => open(be, t), None => false })
+        sig.get(i).match({ Ok(t) => has_var(be.check, t), None => false })
     }).match({ Ok(_) => true, None => false })
 }
 
@@ -244,7 +240,7 @@ any_open* = (be: CBackend, sig: Vec<TyId>) bool {
 // header names, asked where there is a call to point at.
 inst_open* = (be: CBackend, inst: Inst) bool {
     Range(0, inst.len()).find((i) {
-        inst.arg_at(i).match({ Ok(t) => open(be, t), None => true })
+        inst.arg_at(i).match({ Ok(t) => has_var(be.check, t), None => true })
     }).match({ Ok(_) => true, None => false })
 }
 

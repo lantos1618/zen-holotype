@@ -278,7 +278,7 @@ deliver_spilling = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
         Match(m) => lower_match(be, node, m, ctx, ty, dst),
         Try(t)   => lower_try(be, node, t.operand, ctx, dst),
         Block(b) => block(be, b, ctx, ty, dst),
-        Paren(p) => deliver(be, p.inner, ctx, want, dst),
+        Paren(p) => deliver(be, p.inner, ctx, ty, dst),
         _        => Ok(()),
     })
 }
@@ -312,10 +312,7 @@ write_dest* = (be :: CBackend, dst: Dest, text: str) Res<(), AllocError> {
 }
 
 assign_line = (be :: CBackend, name: str, text: str) Res<(), AllocError> {
-    be.write(name).try();
-    be.write(" = ").try();
-    be.write(text).try();
-    be.writeln(";")
+    be.set_line(name, text)
 }
 
 return_line = (be :: CBackend, text: str) Res<(), AllocError> {
@@ -366,14 +363,13 @@ lower_expr_stmt = (be :: CBackend, s: Stmt, id: ExprId, ctx: Ctx)
 // something that already exists.
 lower_bind = (be :: CBackend, s: Stmt, b: Bind, ctx: Ctx)
              Res<(), AllocError> {
-    want = be.check.stmt_type(s, ctx).try();
+    be.check.stmt_type(s, ctx).try();
     target = be.tree.expr_at(b.target);
     ty = binding_type(be, b, ctx).try();
     target.kind.match({
         Name(n) => bind_name(be, n.text, b, ty, ctx),
         _       => assign_target(be, b, ty, ctx),
     }).try();
-    want.index;
     Ok(());
 }
 
