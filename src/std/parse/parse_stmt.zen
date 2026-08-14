@@ -1,4 +1,4 @@
-// src/parse/parse_stmt.zen
+// src/std/parse/parse_stmt.zen
 // Blocks, and the four things a statement can be.
 //
 // "A statement ends with `;`. A declaration does not." That is the
@@ -18,15 +18,15 @@
 // first mistake seen fifty times.
 
 Alloc, AllocError = std.mem
-Span, Pos, no_trivia = ast.ast_span
-ExprId, TypeId, BlockId = ast.ast_id
-Block, Stmt, StmtKind, Bind, ExprStmt, Decl, Expr, ExprKind = ast.ast_node
-Token, TokenKind, same = parse.parse_token
-Parser, Mark = parse.parser
-expr, add_expr = parse.parse_expr
-type = parse.parse_type
-declaration, impl_ahead = parse.parse_decl
-decl_head_ahead = parse.lookahead
+Span, Pos, no_trivia = std.ast.ast_span
+ExprId, TypeId, BlockId = std.ast.ast_id
+Block, Stmt, StmtKind, Bind, ExprStmt, Decl, Expr, ExprKind = std.ast.ast_node
+Token, TokenKind, same = std.parse.parse_token
+Parser, Mark = std.parse.parser
+expr, add_expr = std.parse.parse_expr
+type = std.parse.parse_type
+declaration, impl_ahead = std.parse.parse_decl
+decl_head_ahead = std.parse.parse_lookahead
 
 // `{ statement* expression? }`
 block* = (p :: Parser) Res<BlockId, AllocError> {
@@ -51,7 +51,9 @@ block_here = (p :: Parser) Res<BlockId, AllocError> {
     // wished for is the wrong place to end it: `(i + 1 < f.len;` read
     // as a lambda arrives here with no brace at all, and everything the
     // "body" then contains is still the same unclosed `(`.
-    opened = p.expect(TokenKind.BraceOpen, "expected `{` to open a block").try();
+    opened = p.expect(
+        TokenKind.BraceOpen,
+        "expected `{` to open a block").try();
     stmts ::= p.alloc.Vec<Stmt>();
     value ::= p.no_value();
     running ::= !p.at_kind(TokenKind.BraceClose) && !p.at_eof();
@@ -71,7 +73,10 @@ block_here = (p :: Parser) Res<BlockId, AllocError> {
             false => (),
         });
     });
-    p.expect_close(TokenKind.BraceClose, "unclosed `{`: this block is never closed", open).try();
+    p.expect_close(
+        TokenKind.BraceClose,
+        "unclosed `{`: this block is never closed",
+        open).try();
     p.tree.add_block(Block(
         stmts: stmts,
         value: value,
@@ -147,7 +152,8 @@ binding_item = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<Res<ExprId>, Alloc
 // was "no such field or method `impl`" from sema — a sentence about a
 // method nobody wrote, on a line whose real mistake is where it stands.
 impl_item = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<(), AllocError> {
-    p.error("`.impl` declares an impl, so it is legal only at module level, never inside a body").try();
+    p.error(
+        "`.impl` declares an impl, so it is legal only at module level, never inside a body").try();
     p.decl_item(stmts, m)
 }
 
@@ -178,8 +184,9 @@ tail_value = (p :: Parser, value: ExprId) Res<Res<ExprId>, AllocError> {
     p.at_kind(TokenKind.BraceClose).match({
         true  => Ok(Ok(value)),
         false => {
-            p.error_at("expected `;` — a statement ends with one, a declaration does not",
-                       p.gap_span()).try();
+            p.error_at(
+                "expected `;` — a statement ends with one, a declaration does not",
+                p.gap_span()).try();
             Ok(Ok(value));
         },
     });
@@ -199,7 +206,9 @@ bind = (p :: Parser, stmts :: Vec<Stmt>, m: Mark, target: ExprId, mutable: bool)
 bind_rest = (p :: Parser, stmts :: Vec<Stmt>, m: Mark, target: ExprId, t: Res<TypeId>, mutable: bool) Res<(), AllocError> {
     p.eat(TokenKind.Eq).try() || p.eat(TokenKind.ColonColonEq).try();
     value = p.expr().try();
-    p.expect_after(TokenKind.Semicolon, "expected `;`: an assignment is a statement, not a value — a statement ends with `;`, a declaration does not").try();
+    p.expect_after(
+        TokenKind.Semicolon,
+        "expected `;`: an assignment is a statement, not a value — a statement ends with `;`, a declaration does not").try();
     p.push(stmts, StmtKind.Bind(Bind(
         target: target,
         type: t,

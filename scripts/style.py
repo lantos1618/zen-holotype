@@ -101,7 +101,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # line number moves whenever someone edits above it, and a ledger that goes
 # stale on an unrelated edit is a ledger people learn to silence.
 ABBREV_OWED: dict[str, str] = {
-    "src/ast/ast_find.zen:blk": "block",
+    "src/std/ast/ast_find.zen:blk": "block",
     "src/gen/gen_c/gen_c_decl.zen:blk": "block",
     "src/gen/gen_c/gen_c_fat.zen:tp": "tparam",
     "src/gen/gen_c/gen_c_inline.zen:blk": "block",
@@ -111,8 +111,8 @@ ABBREV_OWED: dict[str, str] = {
     "src/gen/gen_c/gen_c_scope.zen:blk": "block",
     "src/gen/gen_c/gen_c_settle.zen:blk": "block",
     "src/gen/gen_c/gen_c_stmt.zen:blk": "block",
-    "src/parse/parse_expr.zen:tps": "tparams",
-    "src/parse/parse_type.zen:tps": "tparams",
+    "src/std/parse/parse_expr.zen:tps": "tparams",
+    "src/std/parse/parse_type.zen:tps": "tparams",
     "src/sema/sema_cand.zen:tp": "tparam",
     "src/sema/sema_decl.zen:tp": "tparam",
     "src/sema/sema_depth.zen:tp": "tparam",
@@ -213,11 +213,22 @@ def rule_vague(files):
 def rule_layer(files):
     """The direction test, in its one mechanical form: std depends only on std.
 
-    "`parse` may depend on `std.text`. `std.text` may never depend on
-    `parse`." The general rule needs a layer order this repository has not
-    written down; the std boundary is the half that is unambiguous, and it is
-    the half that inverts the whole module graph when it breaks.
+    "`std.parse` may depend on `std.text`. `std.text` may never depend on
+    `std.parse`." The compiler's own frontend lives INSIDE std now --
+    `std.lex`, `std.parse`, `std.ast`, the sublayer an ordinary program
+    imports to parse Zen -- so the boundary runs through std: everything
+    under `src/std/` imports std only, and PLAIN std (all of it but the
+    sublayer) may not import the sublayer. The sublayer itself may import
+    plain std, and its members may import each other. The general rule
+    needs a layer order this repository has not written down; the std
+    boundary is the half that is unambiguous, and it is the half that
+    inverts the whole module graph when it breaks.
     """
+    sublayer = ("std.lex", "std.parse", "std.ast")
+
+    def in_slayer(mod: str) -> bool:
+        return any(mod == s or mod.startswith(s + ".") for s in sublayer)
+
     checked, bad = 0, []
     for rel, _, module in files:
         mod = rel[len("src/"):-len(".zen")].replace("/", ".")
@@ -229,6 +240,10 @@ def rule_layer(files):
                 bad.append((rel, f"imports `{imp.path}`; std may not depend"
                                  f" upward, and a trait sits BELOW the types"
                                  f" that satisfy it"))
+            elif not in_slayer(mod) and in_slayer(imp.path):
+                bad.append((rel, f"imports `{imp.path}`; plain std may not"
+                                 f" depend on the compiler sublayer -- the"
+                                 f" sublayer reads std, never the reverse"))
     return checked, bad
 
 

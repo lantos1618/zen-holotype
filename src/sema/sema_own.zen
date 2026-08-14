@@ -28,11 +28,11 @@
 // not a double move. A closure body joins the same way through a call,
 // which is why `.then` is not opaque here.
 
-Ast, Expr, ExprId, Block, BlockId, Stmt, StmtKind, Bind, ExprStmt = ast
-Decl, DeclKind, Struct, Member, MemberKind, Function, Param = ast
-Call, Arg, Access, Match, Arm, Lambda, Index, Consume, Module = ast
-Span, Ident, Name, Paren, Try, Unary, Binary = ast
-ArrayLit, Record, FixedArray, Field, Const = ast
+Ast, Expr, ExprId, Block, BlockId, Stmt, StmtKind, Bind, ExprStmt = std.ast
+Decl, DeclKind, Struct, Member, MemberKind, Function, Param = std.ast
+Call, Arg, Access, Match, Arm, Lambda, Index, Consume, Module = std.ast
+Span, Ident, Name, Paren, Try, Unary, Binary = std.ast
+ArrayLit, Record, FixedArray, Field, Const = std.ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -86,8 +86,12 @@ Own* = {
 }
 
 Own* = (a: Alloc) Res<Own, AllocError> {
-    Ok(Own(vars: a.Vec<OwnVar>(), dead: a.Vec<Place>(), escaped: 0,
-           method: "", alloc: a));
+    Ok(Own(
+        vars: a.Vec<OwnVar>(),
+        dead: a.Vec<Place>(),
+        escaped: 0,
+        method: "",
+        alloc: a));
 }
 
 // ---------------------------------------------------------------------
@@ -136,8 +140,13 @@ own_params = (c :: Checker, o :: Own, f: Function) Res<(), AllocError> {
 own_param = (c :: Checker, o :: Own, p: Param) Res<(), AllocError> {
     text = p.name.text;
     ty = c.lookup(text).match({ Ok(b) => b.ty, None => UNTYPED });
-    o.vars.add(OwnVar(name: text, ty: ty, mutable: p.mutable, owned: false,
-                      scoped: false, span: p.name.span))
+    o.vars.add(OwnVar(
+        name: text,
+        ty: ty,
+        mutable: p.mutable,
+        owned: false,
+        scoped: false,
+        span: p.name.span))
 }
 
 // ---------------------------------------------------------------------
@@ -206,9 +215,13 @@ bind_name = (c :: Checker, o :: Own, b: Bind, text: str, span: Span,
 
 declare_var = (c :: Checker, o :: Own, b: Bind, text: str, span: Span,
                ctx: Ctx) Res<(), AllocError> {
-    o.vars.add(OwnVar(name: text, ty: memo_type(c, b.value),
-                      mutable: b.mutable, owned: true,
-                      scoped: is_scope_value(c, b.value), span: span))
+    o.vars.add(OwnVar(
+        name: text,
+        ty: memo_type(c, b.value),
+        mutable: b.mutable,
+        owned: true,
+        scoped: is_scope_value(c, b.value),
+        span: span))
 }
 
 revive_field = (c :: Checker, o :: Own, a: Access, ctx: Ctx)
@@ -326,7 +339,7 @@ own_consume = (c :: Checker, o :: Own, x: Consume, ctx: Ctx)
     node = c.tree.expr_at(x.operand);
     node.kind.match({
         Index(_)  => refuse(c, node.span, SemaFault.ConsumeNotAPlace(
-                         NameFault(name: ""))),
+            NameFault(name: ""))),
         Name(n)   => consume_name(c, o, node, n.text),
         Access(a) => consume_field(c, o, node, a, ctx),
         _         => own_expr(c, o, x.operand, ctx),
@@ -360,7 +373,7 @@ consume_field_of = (c :: Checker, o :: Own, node: Expr, a: Access,
                     root: usize) Res<(), AllocError> {
     owned_at(o, root).match({
         false => refuse(c, node.span, SemaFault.ConsumeThroughHandle(
-                     NameFault(name: a.name.text))),
+            NameFault(name: a.name.text))),
         true  => kill_field(c, o, node, a, root),
     })
 }
@@ -400,7 +413,7 @@ report_partial = (c :: Checker, o :: Own, i: usize) Res<(), AllocError> {
     o.vars.get(i).match({
         None  => Ok(()),
         Ok(v) => c.report(v.span.file, v.span, SemaFault.PartiallyMoved(
-                     NameFault(name: v.name))),
+            NameFault(name: v.name))),
     })
 }
 

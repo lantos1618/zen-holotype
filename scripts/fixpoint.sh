@@ -40,7 +40,8 @@ fi
 if ! python3 -m bootstrap.bootstrap "$ROOT" --root "$ROOT" --emit-c -o "$OUT/stage1.c"; then
     echo "fixpoint: the bootstrapper could not compile $ROOT into a compiler." >&2
     echo "  stage 1 is not finished. See docs/PLAN.md 'Stage 1 - self-host':" >&2
-    echo "  src/ needs lex, parse, sema, gen AND a src/zen.zen CLI that wires" >&2
+    echo "  src/ needs lex, parse (both under std/), sema, gen AND a src/zen.zen
+#  CLI that wires" >&2
     echo "  them together, because zen-1 is invoked as \`zen-1 build <root>\`." >&2
     exit 1
 fi

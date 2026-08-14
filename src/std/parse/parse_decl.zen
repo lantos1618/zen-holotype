@@ -1,4 +1,4 @@
-// src/parse/parse_decl.zen
+// src/std/parse/parse_decl.zen
 // Declarations, and the one question this parser really has to answer.
 //
 // `Name = <thing>` IS SEVEN DIFFERENT DECLARATIONS. A struct, an enum,
@@ -33,18 +33,18 @@
 // this parser being right about the language.
 
 Alloc, AllocError = std.mem
-Span, Pos, Ident, QualifiedName, no_trivia = ast.ast_span
-TypeId, ExprId, BlockId = ast.ast_id
-Decl, DeclKind, Struct, Enum, Alias, Function, Impl, Import, Const = ast.ast_node
-Member, Variant, ImportName, Param, TParam, Form, Module = ast.ast_node
-Token, TokenKind, same = parse.parse_token
-Parser, Mark = parse.parser
-expr = parse.parse_expr
-type, written_type = parse.parse_type
-ValueShape, value_shape, decl_head_ahead, delim_step, ret_ahead = parse.lookahead
-block, body_block = parse.parse_stmt
-qualified_name = parse.parse_pattern
-struct_members, record_body, params_list, type_params = parse.parse_member
+Span, Pos, Ident, QualifiedName, no_trivia = std.ast.ast_span
+TypeId, ExprId, BlockId = std.ast.ast_id
+Decl, DeclKind, Struct, Enum, Alias, Function, Impl, Import, Const = std.ast.ast_node
+Member, Variant, ImportName, Param, TParam, Form, Module = std.ast.ast_node
+Token, TokenKind, same = std.parse.parse_token
+Parser, Mark = std.parse.parser
+expr = std.parse.parse_expr
+type, written_type = std.parse.parse_type
+ValueShape, value_shape, decl_head_ahead, delim_step, ret_ahead = std.parse.parse_lookahead
+block, body_block = std.parse.parse_stmt
+qualified_name = std.parse.parse_pattern
+struct_members, record_body, params_list, type_params = std.parse.parse_member
 
 // -------------------------------------------------------------------
 // the file
@@ -131,13 +131,18 @@ impl_decl = (p :: Parser, m: Mark) Res<Decl, AllocError> {
     open = p.here_span();
     p.bump().try();
     bound = p.type().try();
-    p.expect(TokenKind.Comma, "expected `,` between an impl's bound and its body").try();
+    p.expect(
+        TokenKind.Comma,
+        "expected `,` between an impl's bound and its body").try();
     body_start = p.here();
     members ::= p.alloc.Vec<Member>();
     p.record_body(members).try();
     body_span = p.span_from(body_start);
     p.eat(TokenKind.Comma).try();
-    p.expect_close(TokenKind.ParenClose, "unclosed `(`: this impl is never closed", open).try();
+    p.expect_close(
+        TokenKind.ParenClose,
+        "unclosed `(`: this impl is never closed",
+        open).try();
     p.add_decl(DeclKind.Impl(Impl(
         target: target,
         bound: bound,
@@ -186,7 +191,8 @@ decl_names = (p :: Parser, names :: Vec<ImportName>, tparams :: Vec<TParam>) Res
 
 one_decl_name = (p :: Parser, tparams :: Vec<TParam>) Res<ImportName, AllocError> {
     m = p.open();
-    name = p.ident("expected `identifier`: a declaration begins with the name it declares").try();
+    name = p.ident(
+        "expected `identifier`: a declaration begins with the name it declares").try();
     exported = p.eat(TokenKind.Star).try();
     p.at_kind(TokenKind.Lt).match({
         true  => p.type_params(tparams),
@@ -276,7 +282,9 @@ enum_decl = (p :: Parser, m: Mark, head: ImportName, tparams: Vec<TParam>) Res<D
         another = p.at_kind(TokenKind.Ident);
         another.match({
             true  => { variants.add(p.one_variant().try()).try(); p.nothing() },
-            false => p.error_at("expected variant: a `|` promises another one", at_bar),
+            false => p.error_at(
+                "expected variant: a `|` promises another one",
+                at_bar),
         }).try();
         running = another && p.at_kind(TokenKind.Bar);
     });
@@ -319,7 +327,10 @@ variant_payload = (p :: Parser) Res<Res<TypeId>, AllocError> {
     open = p.here_span();
     p.bump().try();
     t = p.type().try();
-    p.expect_close(TokenKind.ParenClose, "unclosed `(`: this variant's payload is never closed", open).try();
+    p.expect_close(
+        TokenKind.ParenClose,
+        "unclosed `(`: this variant's payload is never closed",
+        open).try();
     Ok(Ok(t));
 }
 
@@ -388,7 +399,9 @@ typed_params = (p :: Parser, ps: Vec<Param>) Res<(), AllocError> {
     ps.loop((h, param) {
         param.type.match({
             Ok(_) => p.nothing(),
-            None  => p.error_at("a declaration's parameter needs a type: only a closure infers its parameter types", param.span),
+            None  => p.error_at(
+                "a declaration's parameter needs a type: only a closure infers its parameter types",
+                param.span),
         }).try();
     });
     Ok(());

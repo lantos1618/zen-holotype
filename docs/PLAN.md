@@ -44,12 +44,6 @@ zen/
 │   ├── zen/zen.zen                  # (1) thin cli: build / fmt / test / lsp
 │   ├── zen/zen_cli.zen              # (1) argv -> Cli. touches no capability.
 │   ├── zen/zen_build.zen            # (1) the build driver behind `zen build`
-│   ├── ast/ast.zen                  # (1) THE ast. compiler, @meta and gen_c share it.
-│   ├── lex/lex.zen                  # (1)
-│   ├── parse/parse.zen              # (1) the module surface: starred re-exports
-│   ├── parse/parse_decl.zen         # (1) siblings repeat the folder as a prefix
-│   ├── parse/parse_expr.zen         # (1)
-│   ├── parse/parse_match.zen        # (1)
 │   ├── sema/sema.zen                # (1)
 │   ├── sema/sema_type.zen           # (1) type checking, generic instantiation
 │   ├── sema/sema_match.zen          # (1) exhaustiveness
@@ -81,6 +75,10 @@ zen/
 │   │
 │   └── std/                         # (0.6) the floor. written BEFORE the compiler.
 │       ├── std.zen                  #       starred re-exports; the prelude assembles here
+│       ├── lex/lex.zen              # (1)   the compiler's lexer, importable as std.lex
+│       ├── parse/parse.zen          # (1)   the parser: parse_decl, parse_expr, parse_match
+│       │                            #       siblings repeat the folder as a prefix
+│       ├── ast/ast.zen              # (1)   THE ast. compiler, @meta and gen_c share it.
 │       ├── core/core.zen            #       prelude root
 │       ├── core/result.zen          #       Res<T>, Res<T,E>, .try()
 │       ├── core/bool.zen            #       then
@@ -122,11 +120,11 @@ zen/
 
 Three things about this tree that are decisions, not layout:
 
-- **`src/std/` is written before `src/lex/`.** The compiler is a Zen program; it needs `Vec`, `Map`, `String`, `Res`, and `Alloc` to exist before its first line. This is stage 0.6 below, and it is the piece most likely to be underestimated.
+- **`src/std/core/` is written before `src/std/lex/`.** The compiler is a Zen program; it needs `Vec`, `Map`, `String`, `Res`, and `Alloc` to exist before its first line. This is stage 0.6 below, and it is the piece most likely to be underestimated.
 - **`bootstrap/` and `src/` never share code.** Two implementations of the same language, deliberately, with the fixpoint test as the referee. Any "shared helper" between them is the beginning of the drift this plan exists to prevent.
 - **Two generated files, both with a gate.** `seed/zen.c` is proven fresh by the fixpoint; `grammar/src/parser.c` by `tree-sitter test`. If a third ever appears, ask what proves it fresh — an ungated generated file is a fork nobody is reading.
 
-File naming and the 500/800-line split rule are in `STYLE.md`. The short version, visible above: a folder's root file is its public surface and is nothing but starred re-exports; siblings repeat the folder as a prefix (`parse/parse_expr.zen`), so every filename is unique tree-wide and every editor tab says something.
+File naming and the 500/800-line split rule are in `STYLE.md`. The short version, visible above: a folder's root file is its public surface and is nothing but starred re-exports; siblings repeat the folder as a prefix (`std/parse/parse_expr.zen`), so every filename is unique tree-wide and every editor tab says something.
 
 ---
 
@@ -199,7 +197,7 @@ Checks required at stage 0:
 
 Emit traps for the failure model: overflow on `+ - *`, zero divisor on `/ %`, out-of-range fixed-array index. `+% -% *%` compile to wrapping. A trap prints `file:line:col` and aborts.
 
-**Name mangling is unspecified and has to be decided here.** C has one flat namespace; Zen lets two modules define the same top-level name. Joining path components with `_` is *provably* ambiguous, and `STYLE.md`'s own sibling-prefix convention (`parse/parse_expr`) triggers it in the compiler's own tree. Decide, in this order:
+**Name mangling is unspecified and has to be decided here.** C has one flat namespace; Zen lets two modules define the same top-level name. Joining path components with `_` is *provably* ambiguous, and `STYLE.md`'s own sibling-prefix convention (`std/parse/parse_expr`) triggers it in the compiler's own tree. Decide, in this order:
 
 1. **The scheme** — length-prefixed (Itanium-style), a separator no Zen identifier can contain, or escaping (`_` doubles). Not naive joining.
 2. **A reserved prefix** for compiler-generated names (temporaries, trap helpers, monomorphised instances, closure records, the comptime-derived actor message enums), unreachable by any mangled user name. The trap: `__zen_` and `_Zen_` are themselves reserved to the C implementation by C11 §7.1.3, and bare `zen_` collides with a user writing `zen_trap`.
@@ -261,15 +259,15 @@ Layout, per `DESIGN.md`:
 ```
 src/zen/zen.zen      // thin CLI: build / fmt / test / lsp
 src/zen/zen_build.zen // the build logic
-src/ast/ast.zen      // THE ast — @meta, DumpAst and gen_c all consume these nodes
-src/lex/lex.zen
-src/parse/parse.zen
+src/std/ast/ast.zen  // THE ast — @meta, DumpAst and gen_c all consume these nodes
+src/std/lex/lex.zen
+src/std/parse/parse.zen
 src/sema/sema.zen
 src/gen/gen.zen
 src/gen/gen_c/gen_c.zen
 ```
 
-`src/ast/ast.zen` is the keystone. One AST with three consumers — the compiler, `@meta`, and `gen_c` — and `@meta` returning these exact node types is what makes stage 5's metaprogramming free rather than a parallel universe.
+`src/std/ast/ast.zen` is the keystone. One AST with three consumers — the compiler, `@meta`, and `gen_c` — and `@meta` returning these exact node types is what makes stage 5's metaprogramming free rather than a parallel universe.
 
 Order: lexer → parser → sema → gen_c, each with its own tests, in one pass. Do not build a second frontend to "get started faster."
 
@@ -370,7 +368,7 @@ One correctness note that is now load-bearing for this stage as well: `type_of`'
 
 Orthogonal to everything above; it constrains nothing in the compiler.
 
-- `@meta` over `src/ast/ast.zen` nodes: builds and reads, memoized on (function, arguments), declared types stay nominal
+- `@meta` over `src/std/ast/ast.zen` nodes: builds and reads, memoized on (function, arguments), declared types stay nominal
 - the comptime evaluator: language minus io and actors, may allocate, **step-budgeted so a bad `@meta` fails the build rather than hanging**, no file reads in v1
 - actors: per-actor arena rooted in the runtime (not `main`'s), one message at a time, causal ordering, quiescence exit
 - `main` returning is not the program exiting

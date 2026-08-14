@@ -43,9 +43,9 @@
 // capability whose floor is the target language's (that file writes
 // it), or a declaration nothing defines — still a refusal here.
 
-Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = ast
-Function, Param, Access, Call, Arg, Span, Ident, TypeId, Impl = ast
-Lambda = ast
+Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = std.ast
+Function, Param, Access, Call, Arg, Span, Ident, TypeId, Impl = std.ast
+Lambda = std.ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -140,7 +140,11 @@ static_member_call = (be :: CBackend, id: ExprId, c: Call, a: Access,
                      Res<(), AllocError> {
     lower_assoc_call(be, id, c, a, ty, ctx, out).try().match({
         true  => Ok(()),
-        false => unsupported(be, id, "a call on a type that is not a variant", out),
+        false => unsupported(
+            be,
+            id,
+            "a call on a type that is not a variant",
+            out),
     })
 }
 
@@ -329,9 +333,12 @@ call_actuals = (be :: CBackend, c: Call, ctx: Ctx, out :: Vec<Actual>)
 arg_actual = (be :: CBackend, x: Arg, ctx: Ctx) Res<Actual, AllocError> {
     unknown = be.check.types.unknown().try();
     be.tree.expr_at(x.value).kind.match({
-        Lambda(l) => Ok(Actual(ty: unknown, is_lambda: true,
-                               arity: l.params.len, named: false,
-                               span: x.span)),
+        Lambda(l) => Ok(Actual(
+            ty: unknown,
+            is_lambda: true,
+            arity: l.params.len,
+            named: false,
+            span: x.span)),
         _         => typed_actual(be, x, ctx, unknown),
     })
 }
@@ -461,7 +468,10 @@ lower_written_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
                         rty: TyId, s: Site, f: Function, ctx: Ctx,
                         out :: String) Res<(), AllocError> {
     is_ptr_member(be, rty, a.name.text).match({
-        true  => lower_ptr_member(be, id, c, a, rty, ctx, want_of(be, id, ctx).try(), out),
+        true  => lower_ptr_member(be, id, c, a, rty, ctx, want_of(
+            be,
+            id,
+            ctx).try(), out),
         false => lower_declared_method(be, id, c, a, rty, s, f, ctx, out),
     })
 }
@@ -470,8 +480,16 @@ lower_declared_method = (be :: CBackend, id: ExprId, c: Call, a: Access,
                          rty: TyId, s: Site, f: Function, ctx: Ctx,
                          out :: String) Res<(), AllocError> {
     is_capability(be, rty, a.name.text).match({
-        true  => lower_capability(be, id, c, a, rty, s.decl.module.to_usize(),
-                                  f, ctx, out),
+        true  => lower_capability(
+            be,
+            id,
+            c,
+            a,
+            rty,
+            s.decl.module.to_usize(),
+            f,
+            ctx,
+            out),
         false => lower_bound_or_method(be, id, c, a, rty, s, f, ctx, out),
     })
 }
@@ -554,7 +572,11 @@ write_method_call = (be :: CBackend, id: ExprId, c: Call, a: Access,
     sig ::= be.alloc.Vec<TyId>();
     method_sig(be, rty, s.decl, f, mi, inst, sig).try();
     (inst_open(be, inst) || any_open(be, sig)).match({
-        true  => unsupported(be, id, "a method on a receiver whose type arguments nothing settles", out),
+        true  => unsupported(
+            be,
+            id,
+            "a method on a receiver whose type arguments nothing settles",
+            out),
         false => emit_method_call(be, c, a, rty, s, f, sig, inst, ctx, out),
     })
 }
@@ -571,8 +593,12 @@ member_symbol* = (be :: CBackend, ty: TyId, s: Site, name: str,
     join(qname, s.qname, name).try();
     sym ::= be.alloc.String().try();
     sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
-    be.need_method(MethodRef(self_ty: ty, decl: s.decl, name: name,
-                             sig: sig, qname: qname.view()),
+    be.need_method(MethodRef(
+        self_ty: ty,
+        decl: s.decl,
+        name: name,
+        sig: sig,
+        qname: qname.view()),
                    inst, sym.view()).try();
     Ok(sym);
 }

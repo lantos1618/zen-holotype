@@ -1,4 +1,4 @@
-// src/parse/parse_type.zen
+// src/std/parse/parse_type.zen
 // Written types.
 //
 // "`Type` is a WRITTEN type. What sema computes is sema's" — so
@@ -17,14 +17,14 @@
 // this file is ever entered.
 
 Alloc, AllocError = std.mem
-Span, Pos, Ident, no_trivia = ast.ast_span
-TypeId, ExprId = ast.ast_id
-Type, TypeKind, Named, Union, FnType, ArrayType, Param, TParam = ast.ast_node
-Token, TokenKind, same, WILDCARD = parse.parse_token
-Parser, Mark = parse.parser
-expr = parse.parse_expr
-params_list, type_params = parse.parse_member
-ret_ahead = parse.lookahead
+Span, Pos, Ident, no_trivia = std.ast.ast_span
+TypeId, ExprId = std.ast.ast_id
+Type, TypeKind, Named, Union, FnType, ArrayType, Param, TParam = std.ast.ast_node
+Token, TokenKind, same, WILDCARD = std.parse.parse_token
+Parser, Mark = std.parse.parser
+expr = std.parse.parse_expr
+params_list, type_params = std.parse.parse_member
+ret_ahead = std.parse.parse_lookahead
 
 // A type, unions and all. The one entry point; everything else in
 // this file is below it.
@@ -138,7 +138,10 @@ type_args* = (p :: Parser, out :: Vec<TypeId>) Res<(), AllocError> {
         p.bump().try();
         out.add(p.type().try()).try();
     });
-    p.expect_close(TokenKind.Gt, "unclosed `<`: this type argument list is never closed", open).try();
+    p.expect_close(
+        TokenKind.Gt,
+        "unclosed `<`: this type argument list is never closed",
+        open).try();
     Ok(());
 }
 
@@ -148,9 +151,14 @@ array_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     open = p.here_span();
     p.bump().try();
     elem = p.type().try();
-    p.expect(TokenKind.Comma, "expected `,` between a fixed array's element type and its length").try();
+    p.expect(
+        TokenKind.Comma,
+        "expected `,` between a fixed array's element type and its length").try();
     count = p.expr().try();
-    p.expect_close(TokenKind.BracketClose, "unclosed `[`: this fixed array type is never closed", open).try();
+    p.expect_close(
+        TokenKind.BracketClose,
+        "unclosed `[`: this fixed array type is never closed",
+        open).try();
     p.add_type(TypeKind.Array(ArrayType(elem: elem, count: count)), m);
 }
 
@@ -164,7 +172,7 @@ array_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
 //
 // `ret_ahead` and not `starts_type`, because the token after a `()` in
 // RETURN position is the next member's name and a name begins a type.
-// See lookahead.zen: this is the one call site that discovered it.
+// See parse_lookahead.zen: this is the one call site that discovered it.
 paren_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     ps ::= p.alloc.Vec<Param>();
     span = p.params_list(ps).try();
@@ -197,7 +205,9 @@ named_params = (p :: Parser, ps: Vec<Param>) Res<(), AllocError> {
     ps.loop((h, param) {
         param.type.match({
             Ok(_) => p.nothing(),
-            None  => p.error_at("expected a parameter name: a function type must name its parameters, and this is a type where the name belongs", param.span),
+            None  => p.error_at(
+                "expected a parameter name: a function type must name its parameters, and this is a type where the name belongs",
+                param.span),
         }).try();
     });
     Ok(());

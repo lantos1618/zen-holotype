@@ -1,4 +1,4 @@
-// src/parse/parse_expr.zen
+// src/std/parse/parse_expr.zen
 // Expressions: precedence, the postfix chain, and the three places one
 // `(` or one `[` has two readings.
 //
@@ -41,22 +41,22 @@
 // rule, mutually recursive through `expr`. `parse_expr1`/`parse_expr2`
 // would cut one subject in half, "worse than the file you started with,
 // because now neither name means anything". The bounded scans, the
-// second subject that WAS here, already left for lookahead.zen, which
+// second subject that WAS here, already left for parse_lookahead.zen, which
 // parse_decl.zen needed too.
 
 Alloc, AllocError = std.mem
-Span, Pos, Ident, no_trivia = ast.ast_span
-ExprId, TypeId, BlockId = ast.ast_id
-Expr, ExprKind, Name, Paren, ArrayLit, FixedArray, Lambda, Call, Arg = ast.ast_node
-Match, Arm, Try, Record, Access, Index, Unary, Binary, Consume, Meta = ast.ast_node
-Literal, LiteralKind, UnOp, BinOp, Param, TParam, Member = ast.ast_node
-Token, TokenKind, same, is_trivia = parse.parse_token
-Parser, Mark = parse.parser
-type, type_args, starts_type, written_type = parse.parse_type
-lambda_ahead, fixed_array_ahead, targs_ahead = parse.lookahead
-arms = parse.parse_match
-block, body_block = parse.parse_stmt
-record_body, params_list, type_params = parse.parse_member
+Span, Pos, Ident, no_trivia = std.ast.ast_span
+ExprId, TypeId, BlockId = std.ast.ast_id
+Expr, ExprKind, Name, Paren, ArrayLit, FixedArray, Lambda, Call, Arg = std.ast.ast_node
+Match, Arm, Try, Record, Access, Index, Unary, Binary, Consume, Meta = std.ast.ast_node
+Literal, LiteralKind, UnOp, BinOp, Param, TParam, Member = std.ast.ast_node
+Token, TokenKind, same, is_trivia = std.parse.parse_token
+Parser, Mark = std.parse.parser
+type, type_args, starts_type, written_type = std.parse.parse_type
+lambda_ahead, fixed_array_ahead, targs_ahead = std.parse.parse_lookahead
+arms = std.parse.parse_match
+block, body_block = std.parse.parse_stmt
+record_body, params_list, type_params = std.parse.parse_member
 
 // The lowest binding strength of all: `consume a + b` moves the sum,
 // not `a`. grammar.js D2.
@@ -194,7 +194,10 @@ unary_expr = (p :: Parser, m: Mark, op: UnOp) Res<ExprId, AllocError> {
     p.bump().try();
     inner_mark = p.open();
     operand = p.unary_operand(inner_mark).try();
-    p.add_expr(ExprKind.Unary(Unary(op: op, op_span: op_span, operand: operand)), m.bare());
+    p.add_expr(ExprKind.Unary(Unary(
+        op: op,
+        op_span: op_span,
+        operand: operand)), m.bare());
 }
 
 // `!!ok`, `--n`. The one recursion in the unary chain, and so the one
@@ -333,7 +336,9 @@ dot_target = (p :: Parser, m: Mark, base: ExprId, name: Ident) Res<ExprId, Alloc
         true  => p.match_expr(m, base, name.span),
         false => is_try.match({
             true  => p.try_expr(m, base, name.span),
-            false => p.add_expr(ExprKind.Access(Access(base: base, name: name)), m.bare()),
+            false => p.add_expr(ExprKind.Access(Access(
+                base: base,
+                name: name)), m.bare()),
         }),
     });
 }
@@ -346,7 +351,10 @@ match_expr = (p :: Parser, m: Mark, scrutinee: ExprId, name_span: Span) Res<Expr
     p.bump().try();
     list ::= p.alloc.Vec<Arm>();
     arms_span = p.arms(list).try();
-    p.expect_close(TokenKind.ParenClose, "unclosed `(`: this `.match` is never closed", open).try();
+    p.expect_close(
+        TokenKind.ParenClose,
+        "unclosed `(`: this `.match` is never closed",
+        open).try();
     p.add_expr(ExprKind.Match(Match(
         scrutinee: scrutinee,
         name_span: name_span,
@@ -361,16 +369,27 @@ match_expr = (p :: Parser, m: Mark, scrutinee: ExprId, name_span: Span) Res<Expr
 try_expr = (p :: Parser, m: Mark, operand: ExprId, name_span: Span) Res<ExprId, AllocError> {
     open = p.here_span();
     p.bump().try();
-    p.expect_close(TokenKind.ParenClose, "`.try()` takes no arguments", open).try();
-    p.add_expr(ExprKind.Try(Try(operand: operand, name_span: name_span)), m.bare());
+    p.expect_close(
+        TokenKind.ParenClose,
+        "`.try()` takes no arguments",
+        open).try();
+    p.add_expr(ExprKind.Try(Try(
+        operand: operand,
+        name_span: name_span)), m.bare());
 }
 
 index_expr = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
     open = p.here_span();
     p.bump().try();
     index = p.expr().try();
-    p.expect_close(TokenKind.BracketClose, "unclosed `[`: this index is never closed", open).try();
-    p.add_expr(ExprKind.Index(Index(base: base, index: index, op_span: open)), m.bare());
+    p.expect_close(
+        TokenKind.BracketClose,
+        "unclosed `[`: this index is never closed",
+        open).try();
+    p.add_expr(ExprKind.Index(Index(
+        base: base,
+        index: index,
+        op_span: open)), m.bare());
 }
 
 call_expr = (p :: Parser, m: Mark, callee: ExprId, targs: Vec<TypeId>) Res<ExprId, AllocError> {
@@ -397,7 +416,10 @@ args* = (p :: Parser, out :: Vec<Arg>) Res<Span, AllocError> {
         out.add(p.one_arg().try()).try();
         running = p.starts_expr() && !p.at_eof() && p.at > before;
     });
-    p.expect_close(TokenKind.ParenClose, "unclosed `(`: this argument list is never closed", open).try();
+    p.expect_close(
+        TokenKind.ParenClose,
+        "unclosed `(`: this argument list is never closed",
+        open).try();
     Ok(p.span_from(start));
 }
 
@@ -498,7 +520,10 @@ meta_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
         true  => p.typed_meta(m),
         false => p.value_meta(m),
     }).try();
-    p.expect_close(TokenKind.ParenClose, "unclosed `(`: this `@meta` is never closed", open).try();
+    p.expect_close(
+        TokenKind.ParenClose,
+        "unclosed `(`: this `@meta` is never closed",
+        open).try();
     Ok(node);
 }
 
@@ -506,12 +531,16 @@ typed_meta = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     name = p.ident("expected a name inside `@meta`").try();
     p.bump().try();
     t = p.type().try();
-    p.add_expr(ExprKind.Meta(Meta(value: None, name: Ok(name), type: Ok(t))), m);
+    p.add_expr(ExprKind.Meta(Meta(
+        value: None,
+        name: Ok(name),
+        type: Ok(t))), m);
 }
 
 value_meta = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     value = p.expr().try();
-    p.add_expr(ExprKind.Meta(Meta(value: Ok(value), name: None, type: None)), m);
+    p.add_expr(ExprKind.Meta(Meta(value: Ok(
+        value), name: None, type: None)), m);
 }
 
 // `()`, `(n == 0)`, `(a: i32, b: i32) i32 { a + b }`, `(h, v) { .. }`.
@@ -542,7 +571,10 @@ unit_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 // `(a + b) * c`.
 grouped_expr = (p :: Parser, m: Mark, open: Span) Res<ExprId, AllocError> {
     inner = p.expr().try();
-    p.expect_close(TokenKind.ParenClose, "unclosed `(`: this expression is never closed", open).try();
+    p.expect_close(
+        TokenKind.ParenClose,
+        "unclosed `(`: this expression is never closed",
+        open).try();
     p.add_expr(ExprKind.Paren(Paren(inner: inner)), m);
 }
 
@@ -583,7 +615,10 @@ bracket_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 fixed_array = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     t = p.type().try();
     elems ::= p.alloc.Vec<ExprId>();
-    span = p.elem_list(elems, TokenKind.ParenClose, "unclosed `(`: this fixed array's arguments are never closed").try();
+    span = p.elem_list(
+        elems,
+        TokenKind.ParenClose,
+        "unclosed `(`: this fixed array's arguments are never closed").try();
     p.add_expr(ExprKind.FixedArray(FixedArray(
         type: t,
         elems: elems,
@@ -593,7 +628,10 @@ fixed_array = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 
 array_lit = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     elems ::= p.alloc.Vec<ExprId>();
-    p.elem_list(elems, TokenKind.BracketClose, "unclosed `[`: this array literal is never closed").try();
+    p.elem_list(
+        elems,
+        TokenKind.BracketClose,
+        "unclosed `[`: this array literal is never closed").try();
     p.add_expr(ExprKind.Array(ArrayLit(elems: elems)), m);
 }
 

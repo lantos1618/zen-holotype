@@ -1,60 +1,47 @@
 // std.mem.mem_ptr
 // The raw floor. A Ptr<T> is one machine word — the address of a run of
-// T — and its members are the only way memory is ever touched;
-// everything else in the library is written in terms of them.
+// T — and its members are the only way memory is ever touched.
 //
-// `*` is the export marker, so Zen has no pointer sigil — a raw
-// pointer is spelled Ptr<T>, a name rather than punctuation.
-//
-// A Ptr IS A HANDLE, so every method takes `self: @Self`: writing
-// through a pointer changes the pointee, never the pointer's own word,
-// so a bitwise copy sees the write (DESIGN.md's `:` test, one level
-// below where Alloc answers it).
-//
-// The bodies belong to the backend: gen_c lowers Ptr<T> to `T*` and
-// these members to dereference/indexed-store/pointer-arithmetic/memcpy
-// — signatures only, since this is the one module in std that can't
-// implement itself.
+// `*` is the export marker, so Zen has no pointer sigil: a raw pointer
+// is spelled Ptr<T>, a name rather than punctuation. A Ptr IS A HANDLE,
+// so every method takes `self: @Self` — a bitwise copy sees the write
+// (DESIGN.md's `:` test, one level below where Alloc answers it). The
+// bodies belong to the backend: gen_c lowers Ptr<T> to `T*` — signatures
+// only, the one module in std that can't implement itself.
 
 Ptr*<T> = {
-    // the address, one machine word. NOT exported: nothing outside
-    // std.mem reads a raw address; every legal use goes through a
-    // method below
+    // the address. NOT exported: every legal use goes through a method
+    // below
     addr: usize,
 
-    // element access, INDEXED — `p.read(i)` is C's `p[i]`, scaling by
-    // T is the backend's. Vec.get/add call exactly these two.
+    // element access, INDEXED — `p.read(i)` is C's `p[i]`. Vec.get/add
+    // call exactly these two
     read* = (self: @Self, index: usize) T
     write* = (self: @Self, index: usize, value: T) ()
 
     // a new Ptr, `count` ELEMENTS along, forward and back — scaling by
     // the element type is the whole reason this is Ptr<T> not an
     // address. `back` exists because an allocator writes a run's
-    // length into the word ahead of it, and usize has no negative.
+    // length into the word ahead of it, and usize has no negative
     offset* = (self: @Self, count: usize) Ptr<T>
     back* = (self: @Self, count: usize) Ptr<T>
 
-    // byte size of `count` elements — the only way anything in std can
-    // ask how big a T is (no size_of in the language; @meta is stage 5)
+    // byte size of `count` elements — the only way std can ask how big
+    // a T is (no size_of in the language; @meta is stage 5)
     bytes* = (self: @Self, count: usize) usize
 
-    // copy `count` elements from src into self. Runs may not overlap:
-    // an allocator growing a run always has a fresh destination, the
-    // only caller in std
+    // copy `count` elements from src into self; runs may not overlap
     copy_from* = (self: @Self, src: Ptr<T>, count: usize) ()
 
-    // reinterpret the run as U. No `as` in Zen — conversion is a
-    // method, like .to_i64() — and this one is unchecked, which is
-    // what "raw floor" means
+    // reinterpret the run as U, unchecked — no `as` in Zen, so
+    // conversion is a method, like .to_i64()
     to* = <U>(self: @Self) Ptr<U>
 
-    // address is zero, nothing there. An empty collection's data field
-    // holds a null Ptr until the first grow; realloc checks this
-    // before reading a length
+    // address is zero, nothing there — an empty collection's data field
+    // holds a null Ptr until the first grow
     is_null* = (self: @Self) bool
 }
 
-// the null Ptr, for a collection that owns no memory yet. A function
-// not a constant: a constant on Ptr<T> would still need a T, and the
-// call site always has one — `null_ptr<i32>()`
+// the null Ptr. A function, not a constant: a constant would still need
+// a T, and the call site always has one — `null_ptr<i32>()`
 null_ptr* = <T>() Ptr<T>

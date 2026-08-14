@@ -20,15 +20,11 @@
 // every path here is built from an import's segments and ruled out
 // with a stat.
 //
-// THE PROGRAM IS ONE `Ast`: a `Parser` is built around the tree the
-// walk has filled so far and hands it back before the next module is
-// read, so one counter hands out every id and an id means the same
-// thing in every module. `Build.tree` says what that costs and when
-// the tree is finished.
+// THE PROGRAM IS ONE `Ast`: one counter hands out every id, so an id
+// means the same thing in every module. `Build.tree` says what that
+// costs and when the tree is finished.
 //
-// WHAT STOPS THIS FILE SHORT OF A COMPILER is written down at `deliver`
-// rather than hidden: emitting needs to write a file, which `Fs`
-// doesn't yet have.
+// WHAT STOPS THIS FILE SHORT OF A COMPILER is written down at `deliver`.
 //
 // OVER 500 LINES, JUSTIFIED BY STYLE.md: the subject is one build, and
 // its parts are the five phases of one, sharing the `Build` that holds
@@ -44,9 +40,9 @@ Vec, Map = std.collections
 Range = std.core
 FsError = std.env
 
-Ast = ast.ast_arena
-Module, Alias, Named = ast.ast_node
-Pos, Span, QualifiedName = ast.ast_span
+Ast = std.ast.ast_arena
+Module, Alias, Named = std.ast.ast_node
+Pos, Span, QualifiedName = std.ast.ast_span
 
 // THE `Diag` COLLISION: `lex`, `parse` and `sema` each export a type
 // called `Diag` plus a `message`, and `A, B = module` cannot rename, so
@@ -56,21 +52,20 @@ Pos, Span, QualifiedName = ast.ast_span
 // `tests/corpus/modules/module_alias_qualified`) was tried first and
 // DOES NOT WORK for a name two modules declare: `lexer = lex` then
 // `lexer.message(d.fault)` lowered to the wrong module's function, with
-// the alias passed as its receiver. An alias also binds a
-// single-segment RHS only, so only a folder root can be aliased at all.
+// the alias passed as its receiver.
 //
 // What works: a flat import of the ONE `message` this file wants —
 // answers the collision only because this driver never needs two at
 // once. A driver that did would need rename-on-import. Reported.
-message = lex.lex
+message = std.lex.lex
 
 // WHAT A DIAGNOSTIC IS ONCE IT LEAVES A PHASE — it's `parse`'s type,
 // per that file's own header: not a parser type, a compiler type that
 // `lex`/`sema`/`gen` will all want.
-Diag, diag, say = parse.parse_diag
+Diag, diag, say = std.parse.parse_diag
 
-scan, Source, Lexed = lex.lex
-Parser, module = parse.parse
+scan, Source, Lexed = std.lex.lex
+Parser, module = std.parse.parse
 Checker, check_all = sema.sema
 PRELUDE, last_segment = sema.sema
 check_module_graph = sema.sema
@@ -81,8 +76,8 @@ Job = zen.zen_cli
 
 // What a module PATH means is not a phase of a build, so it lives in
 // `zen_path.zen`. Only the ones called by BARE NAME are here —
-// `base_of`/`after_last_slash` take a `str` first, reached through the
-// value, so importing them by name would say nothing.
+// `base_of`/`after_last_slash` take a `str` first and are reached
+// through the value.
 slash_for = zen.zen_path
 unit_at, candidate, file_of, relative_to = zen.zen_path
 
@@ -91,8 +86,6 @@ unit_at, candidate, file_of, relative_to = zen.zen_path
 // `root_declares_main` demands, so the two cannot drift.
 ENTRY, entry_of = zen.zen_path
 
-// `Unit` went with them for the same reason — what a module is CALLED
-// and where its bytes ARE is a fact about a path, filled by `unit_at`.
 Unit* = zen.zen_path
 
 // What order the walk reaches modules in: arithmetic on an index.
@@ -112,12 +105,10 @@ Build* = {
     // EVERY LEX AND PARSE DIAGNOSTIC THIS BUILD FOUND, in order found;
     // `faults` is only the count.
     //
-    // A count was all there ever was: both phases handed diagnostics
-    // over intact, the driver printed and dropped them — a terminal was
-    // the only possible consumer. `publishDiagnostics` needs the span,
-    // sentence and location as VALUES (docs/design_lsp.md §5); a server
-    // re-lexing for positions the driver already had is the second
-    // implementation that document exists to prevent.
+    // `publishDiagnostics` needs the span, sentence and location as
+    // VALUES (docs/design_lsp.md §5); a server re-lexing for positions
+    // the driver already had is the second implementation that document
+    // exists to prevent.
     //
     // SEMA'S ARE NOT IN HERE: a `SemaFault` renders against the type
     // store that decided it, and the `Checker` holding both already
@@ -139,8 +130,7 @@ Build* = {
     // string `read` is handed. design_lsp.md §5 chose this over an
     // `Fs` the server writes: `Fs`'s members have no bodies (they ARE
     // the authority), so interposing there is a language feature and
-    // this is one field — the one place the "thin server over compiler
-    // internals" thesis bends.
+    // this is one field.
     //
     // EMPTY IN EVERY BUILD A COMMAND LINE ASKS FOR — a constraint, not
     // a hope: `run_once` never touches it, so `zen build` misses on the
@@ -151,11 +141,8 @@ Build* = {
     // WHETHER A DIAGNOSTIC IS SAID OUT LOUD as found. True for a
     // command line; false for `whole`, since a language server writes
     // JSON-RPC frames to stdout and NOTHING else (design_lsp.md §6),
-    // and a driver `println` would corrupt the protocol stream.
-    //
-    // NOT A CORNER CASE: a buffer being edited has an unclosed brace
-    // most of the time. `diags` fills either way — only the saying is
-    // off, leaving `publishDiagnostics` something to publish.
+    // and a driver `println` would corrupt the protocol stream. `diags`
+    // fills either way — only the saying is off.
     speaking* :: bool = true,
 
     // The entry's path relative to the root, kept for the one
@@ -165,8 +152,7 @@ Build* = {
 
     // THE PROGRAM'S TREE — exactly one. Every parser is built around it
     // and hands it back, so an `ExprId` from module 91 and one from
-    // module 1 are indices into the same arena, the only thing that
-    // lets a `Checker` holding this tree answer about either.
+    // module 1 are indices into the same arena.
     //
     // Must be FINISHED before `alloc.Checker(tree)`
     // (SEMA_BOOTSTRAP_FIXES.md §12): a `Checker` copies the `Ast` as a
@@ -200,11 +186,6 @@ Build* = {
     // module, so `Res`/`Ok`/`Vec`/`Map`/`str`/`Env` are in scope without
     // a line — and a walk that follows imports never follows the line
     // that isn't there.
-    //
-    // Law 2 makes `main = (env: Env) ..` the signature every program
-    // opens with, so the first program anyone writes names `Env`,
-    // writes no import, and had no prelude in its `World` at all —
-    // every prelude name was undefined, not just `Env`.
     //
     // PROBED, NOT REQUIRED: a root with no `std/` beside it is a
     // program with no prelude, which `World.prelude_index` already
@@ -279,12 +260,10 @@ Build* = {
     // is the whole file, so the span is its first position — the file IS
     // the subject ("nothing is at that path" says nothing without it).
     //
-    // HELD because a language server builds with `speaking` false — a
-    // `println` would corrupt the frame stream — and collecting is then
-    // the ONLY way a missing module reaches `publishDiagnostics`. An
-    // unreadable import surfaced only as the downstream `undefined name`
-    // faults, the cause nowhere among them: an editor rooted where `std`
-    // is unreachable showed phantom undefined names for every import.
+    // HELD because a language server builds with `speaking` false, and
+    // collecting is then the ONLY way a missing module reaches
+    // `publishDiagnostics` — an unreadable import otherwise surfaced
+    // only as phantom `undefined name` faults downstream.
     fs_fault = (self :: @Self, path: str, e: FsError) Res<str> {
         self.faults = self.faults + 1;
         self.speaking.then(() { println("{}: {}", path, fs_message(e)); });
@@ -293,9 +272,9 @@ Build* = {
             start: Pos(line: 1, col: 1),
             end: Pos(line: 1, col: 1),
         );
-        // An allocation failure DROPS the held copy rather than
-        // propagating — `Res<str>`'s `None` is already spoken for ("the
-        // read failed"), and the fault is counted and said either way.
+        // An allocation failure DROPS the held copy — `Res<str>`'s
+        // `None` already means "the read failed", and the fault is
+        // counted and said either way.
         self.diags.add(diag(fs_message(e), at)).match({
             Ok(_)  => (),
             Err(_) => (),
@@ -308,11 +287,8 @@ Build* = {
     // SAID OFF THE VEC, NOT OFF THE ARGUMENT — makes the collection
     // load-bearing, not a copy nobody reads: a `diags` that stopped
     // collecting would also go silent, and all 117 of `tests/must-fail`
-    // would say so. §5's own wording, taken literally: "collects
-    // diagnostics into a Vec and prints from it".
-    //
-    // Said HERE, not in a pass at the end — keeps stdout byte-identical,
-    // a failed READ prints as the walk reaches it.
+    // would say so. Said HERE, not in a pass at the end — keeps stdout
+    // byte-identical, a failed READ prints as the walk reaches it.
     report = (self :: @Self, d: Diag) Res<(), AllocError> {
         at = self.diags.len;
         self.faults = self.faults + 1;
@@ -353,10 +329,9 @@ Build* = {
 
     // ONE TREE, HANDED ALONG. The parser is built around the tree the
     // walk has filled so far and hands it back before the next module
-    // is lexed, so every module is in one arena and an id means the
-    // same thing everywhere. One parser alive at a time is what makes
-    // passing an `Ast` by value sound: a `Vec` is a header, and two
-    // owners would diverge the first time either grew.
+    // is lexed. One parser alive at a time is what makes passing an
+    // `Ast` by value sound: a `Vec` is a header, and two owners would
+    // diverge the first time either grew.
     //
     // The walk queues the entry first, so module 0 is the root — what
     // `emit_c` passes to the backend and what sema's `DefId.module`
@@ -378,11 +353,10 @@ Build* = {
     // declaration reaching outside the file — except the one below it,
     // why this matches two kinds and not one.
     //
-    // BY INDEX, NOT `loop`: this is the one place the walk's order is
-    // decided, and `walk_index` decides it. Per module, not over the
-    // finished worklist, since discovery and parsing interleave —
-    // parsing `seen[i]` appends its imports, so no whole list ever
-    // exists to shuffle.
+    // BY INDEX, NOT `loop`: `walk_index` decides the walk's order. Per
+    // module, not over the finished worklist, since discovery and
+    // parsing interleave — parsing `seen[i]` appends its imports, so no
+    // whole list ever exists to shuffle.
     imports_of = (self :: @Self, m: Module, seen :: Vec<Unit>)
                  Res<(), AllocError> {
         Range(0, m.decls.len).loop((h, i) {
@@ -410,30 +384,20 @@ Build* = {
     //
     // DESIGN.md's UFCS candidate set (members of `x`'s type, its
     // impls'/bounds' methods, every exported free function whose FIRST
-    // PARAMETER TYPE is `x`'s type) is a whole-program query
-    // (`World.exported_named`), so `c.type_of(id, ctx)` depended on
-    // which modules the walk happened to load — a program's MEANING
-    // isn't something a loader gets to decide.
-    //
-    // It bit exactly where the rule is written down: `sema_check.zen`
-    // does NOT import `sema_type.zen` on purpose, since `type_of`
-    // reaches a `Checker` BY UFCS. A file importing `sema.sema_check`
-    // and asking for `type_of` got an empty pool and no candidate — the
-    // four `tests/corpus/sema_zen/` LSP-query programs said so, as
-    // "codegen has no type for" (a call resolving to nothing types as
-    // nothing).
+    // PARAMETER TYPE is `x`'s type) is a whole-program query, so
+    // `c.type_of(id, ctx)` depended on which modules the walk happened
+    // to load — a program's MEANING isn't something a loader gets to
+    // decide. It bit exactly where the rule is written down:
+    // `sema_check.zen` does NOT import `sema_type.zen` on purpose,
+    // since `type_of` reaches a `Checker` BY UFCS — the four
+    // `tests/corpus/sema_zen/` LSP-query programs said so, as "codegen
+    // has no type for".
     //
     // THE FOLDER ROOT IS THE ANSWER, THE WHOLE TREE IS NOT. A folder
-    // root is a file of starred re-exports (sema/sema.zen's own header:
-    // "this file is the module's public surface and nothing else"), so
-    // queueing it pulls in exactly the siblings that complete the pool.
-    // This is DESIGN.md's "importing a type pulls its world along" as a
-    // load rule, not a comment.
-    //
-    // A MODULE THAT IS ITS OWN FOLDER ROOT queues nothing more: `std.mem`
-    // is `std/mem/mem.zen` and does NOT drag in `std/std.zen` and the
-    // whole of std. The walk climbs one level, never to the compilation
-    // root.
+    // root is a file of starred re-exports, so queueing it pulls in
+    // exactly the siblings that complete the pool. A MODULE THAT IS ITS
+    // OWN FOLDER ROOT queues nothing more: the walk climbs one level,
+    // never to the compilation root.
     folder_root = (self :: @Self, path: str, seen :: Vec<Unit>)
                   Res<(), AllocError> {
         cut = path.after_last_slash();
@@ -481,8 +445,7 @@ Build* = {
     // A bare single-segment target is a CANDIDATE: probed, queued only
     // when a file is actually there. The probe can't live in `enqueue`,
     // since a missing file behind a real import is a fault that must
-    // stay one — a `Shape` that's a type would otherwise report a
-    // module nobody asked for.
+    // stay one.
     alias_of = (self :: @Self, al: Alias, seen :: Vec<Unit>)
                Res<(), AllocError> {
         self.tree.type_at(al.target).kind.match({
@@ -517,12 +480,12 @@ Build* = {
     // build` ends at an exit code, and that was the only way in — so
     // the language server (wanting the tree, the Checker's memos, the
     // diagnostics) had no entry point and checked the open document as
-    // a lone module. Every imported name was poison, and hover (which
+    // a lone module: every imported name was poison, and hover (which
     // refuses poison) went silent on every real file.
     //
     // NO EMIT, NO SAYING: no program to produce, only a question to
-    // answer — `speaking` above is why nothing prints. `faults`/`diags`
-    // still hold what went wrong as values, for `publishDiagnostics`.
+    // answer. `faults`/`diags` still hold what went wrong as values,
+    // for `publishDiagnostics`.
     //
     // `run_once` is NOT written in terms of this, deliberately: a
     // command line's build reports as it goes and emits at the end;
@@ -538,9 +501,7 @@ Build* = {
     }
 
     // WHERE A `Checker` COMES FROM, now the only place. Was three lines
-    // inside `check_tree`, a local that died with the method — §5
-    // priced the overlay at "one field and one branch"; this is the
-    // line item that made that estimate wrong.
+    // inside `check_tree`, a local that died with the method.
     //
     // HANDED BACK, NOT STORED IN A FIELD: a `Checker`'s `Map`s are
     // headers, so a copy kept on `Build` would silently stop agreeing
@@ -555,15 +516,9 @@ Build* = {
     // `CBackend` takes the sema built, so a type is decided once and
     // the backend never re-derives it.
     //
-    // ANY NUMBER OF MODULES REACHES THEM: `alloc.Checker(tree)` takes
-    // ONE `Ast` and reads every module out of it (`World` walks
-    // `tree.module_count()`), and `parse_it` hands one tree from parser
-    // to parser, so the whole program is already in it.
-    //
     // NOTHING PARSED IS NOT AN ERROR HERE: the read or lex already said
     // why, and complaining about sema too would break "one mistake, one
-    // diagnostic". A tree with no modules is one `Checker` walks zero
-    // times anyway — the guard is about the diagnostic, not the crash.
+    // diagnostic".
     //
     // SYNTAX FAULTS DO NOT SKIP THE CHECK (this file's own header: the
     // second mistake is worth as much as the first). A poison node
@@ -590,11 +545,9 @@ Build* = {
         // TWO RULES ARE ABOUT THE MODULE GRAPH, not any node in it, so
         // `check_all`'s walk never asks them: a module importing itself,
         // and a top-level constant needing a value from a module whose
-        // own needs it back. Rendered into the same report and counted
-        // with everything else, keeping them ahead of `emit` — a
-        // constant cycle has no initialisation order, and the backend
-        // would only say so as a second sentence about a hole the first
-        // one made.
+        // own needs it back. Counted with everything else, keeping them
+        // ahead of `emit` — a constant cycle has no initialisation
+        // order.
         n = c.diag_count()
           + check_module_graph(self.alloc, self.tree, c.world, report).try();
         self.faults = self.faults + n;
@@ -619,10 +572,6 @@ Build* = {
     // `must-fail/lex/bom_mid_file` was once told its byte-order mark
     // was misplaced AND that it declared no program — two sentences,
     // one mistake.
-    //
-    // A CLEAN TREE WITH NO `main` IS STILL REPORTED — the whole point
-    // of the check, since nothing else in the pipeline notices (an
-    // empty file lexes clean).
     main_check = (self :: @Self, c :: Checker, job: Job)
                  Res<usize, AllocError> {
         (self.faults == 0).match({
@@ -640,15 +589,13 @@ Build* = {
     // exactly that.
     //
     // MODULE 0 AND `own_defs`, both deliberately: the walk queues the
-    // entry first (module 0 is the root), and `defs_of` would fall
-    // through to imports then the prelude — meaning a `main` ANYWHERE
-    // in the program would answer for the one the root owes.
+    // entry first, and `defs_of` would fall through to imports then the
+    // prelude — a `main` ANYWHERE in the program would answer for the
+    // one the root owes.
     //
-    // ASKED ONLY WHEN A PROGRAM IS BEING PRODUCED: `emit_c` separates
-    // "compile this into a program" from "walk this root and tell me
-    // what you found" — the second is real (`tests/corpus/cli/` points
-    // the driver at a library on purpose to measure the entry probe).
-    // Demanding `main` of a build that emits nothing would fail those.
+    // ASKED ONLY WHEN A PROGRAM IS BEING PRODUCED: `tests/corpus/cli/`
+    // points the driver at a library on purpose to measure the entry
+    // probe; demanding `main` of a build that emits nothing fails those.
     missing_main = (self :: @Self, c :: Checker, job: Job)
                    Res<usize, AllocError> {
         job.emit_c.match({
@@ -668,8 +615,10 @@ Build* = {
 
     // 1:1, because the mistake is the file and not a place in it.
     no_main = (self :: @Self) Res<usize, AllocError> {
-        println("{}:1:1: no `{}`: law 2 makes `main = (env: Env) Res<i32, E>` where a program starts, and this root declares none",
-                self.entry_rel, ENTRY);
+        println(
+            "{}:1:1: no `{}`: law 2 makes `main = (env: Env) Res<i32, E>` where a program starts, and this root declares none",
+            self.entry_rel,
+            ENTRY);
         Ok(1);
     }
 
@@ -705,10 +654,9 @@ Build* = {
     // WHERE THE BYTES GO. `-o <path>` writes the file; no `-o` sends C
     // to stdout (what `-o -` would mean anyway).
     //
-    // This used to be a FAULT: `std.env.Fs` had no `write`, so a
-    // compiler emitting C couldn't write one, and a build asked for a
-    // file that produced none had to say so rather than let the exit
-    // code lie. `Fs.write` closed it.
+    // This used to be a FAULT: `std.env.Fs` had no `write`, so a build
+    // asked for a file that produced none had to say so rather than let
+    // the exit code lie. `Fs.write` closed it.
     //
     // A write that fails is a fault, not a trap: a full disk or
     // unwritable path is a thing the caller acts on, and
@@ -740,7 +688,9 @@ Build* = {
     // diagnostics but not its count leaves that unmeasurable —
     // `tests/run.py` reads this line to enforce a `.count` sidecar.
     tally* = (self: @Self) () {
-        (self.faults > 0).then(() { println("zen: {} diagnostic(s)", self.faults); });
+        (self.faults > 0).then(() { println(
+            "zen: {} diagnostic(s)",
+            self.faults); });
     }
 
     // WHAT THIS BUILD FOUND, as values — deliberately the pair
@@ -762,8 +712,13 @@ Build* = {
 
 // `alloc.Build(env, root)` — ufcs constructor, like `Vec`/`Ast`/`Parser`.
 Build* = (a: Alloc, env: Env, root: str) Build {
-    Build(env: env, alloc: a, root: root, tree: a.Ast(),
-          diags: a.Vec<Diag>(), overlay: a.Map<str, str>())
+    Build(
+        env: env,
+        alloc: a,
+        root: root,
+        tree: a.Ast(),
+        diags: a.Vec<Diag>(),
+        overlay: a.Map<str, str>())
 }
 
 // What went wrong with a file, in the words the capability uses. Every

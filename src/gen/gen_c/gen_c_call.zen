@@ -28,11 +28,11 @@
 // place that already resolves callees can answer. The fallback stops
 // firing the moment sema types a call.
 
-Ast, Expr, ExprKind, ExprId, BlockId, Block, Stmt, StmtKind, Bind = ast
-Decl, DeclKind, Struct, Member, MemberKind, Function = ast
-Literal, LiteralKind, BinOp, UnOp, Binary, Unary, Match, Arm = ast
-Pattern, PatternKind, Access, Call, Arg, Span, Ident = ast
-Param, TypeId = ast
+Ast, Expr, ExprKind, ExprId, BlockId, Block, Stmt, StmtKind, Bind = std.ast
+Decl, DeclKind, Struct, Member, MemberKind, Function = std.ast
+Literal, LiteralKind, BinOp, UnOp, Binary, Unary, Match, Arm = std.ast
+Pattern, PatternKind, Access, Call, Arg, Span, Ident = std.ast
+Param, TypeId = std.ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -185,7 +185,11 @@ lower_indirect = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx,
     fty = ty_of(be, c.callee, ctx, unknown).try();
     be.check.types.at(fty).match({
         Fn(f) => write_indirect(be, c, f.params, ctx, out),
-        _     => unsupported(be, id, "a call through a value that is not a function", out),
+        _     => unsupported(
+            be,
+            id,
+            "a call through a value that is not a function",
+            out),
     })
 }
 
@@ -260,7 +264,15 @@ lower_res_arg = (be :: CBackend, id: ExprId, c: Call, name: str, r: TyRes,
     payload = name.eq("Ok").match({ true => r.value, false => r.error });
     c.args.get(0).match({
         None  => write_res_tagged(be, want, name, out),
-        Ok(a) => write_res_payload(be, id, want, name, a.value, payload, ctx, out),
+        Ok(a) => write_res_payload(
+            be,
+            id,
+            want,
+            name,
+            a.value,
+            payload,
+            ctx,
+            out),
     })
 }
 
@@ -410,7 +422,11 @@ call_kind = (be :: CBackend, id: ExprId, c: Call, d: Def, recv: Res<ExprId>,
     d.kind.match({
         FunctionDef => call_resolved(be, id, c, d, recv, ctx, out),
         StructDef   => construct(be, id, c, d, ctx, out),
-        _           => unsupported(be, id, "a call to something that is not a function", out),
+        _           => unsupported(
+            be,
+            id,
+            "a call to something that is not a function",
+            out),
     })
 }
 
@@ -422,7 +438,11 @@ call_resolved = (be :: CBackend, id: ExprId, c: Call, d: Def,
                  recv: Res<ExprId>, ctx: Ctx, out :: String)
                 Res<(), AllocError> {
     decl_at(be.tree, d.id).match({
-        None  => unsupported(be, id, "a call to something that is not a plain function", out),
+        None  => unsupported(
+            be,
+            id,
+            "a call to something that is not a plain function",
+            out),
         Ok(x) => call_decl(be, id, c, d, x, recv, ctx, out),
     })
 }
@@ -432,7 +452,11 @@ call_decl = (be :: CBackend, id: ExprId, c: Call, d: Def, x: Decl,
             Res<(), AllocError> {
     x.kind.match({
         Function(f) => call_fn(be, id, c, d, f, recv, ctx, out),
-        _           => unsupported(be, id, "a call to something that is not a plain function", out),
+        _           => unsupported(
+            be,
+            id,
+            "a call to something that is not a plain function",
+            out),
     })
 }
 
@@ -444,7 +468,10 @@ call_decl = (be :: CBackend, id: ExprId, c: Call, d: Def, x: Decl,
 call_fn = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
            recv: Res<ExprId>, ctx: Ctx, out :: String) Res<(), AllocError> {
     is_loop_shape(be, f).match({
-        true  => lower_loop(be, id, c, f, recv, ctx, want_of(be, id, ctx).try(), out),
+        true  => lower_loop(be, id, c, f, recv, ctx, want_of(
+            be,
+            id,
+            ctx).try(), out),
         false => call_or_inline(be, id, c, d, f, recv, ctx, out),
     })
 }
@@ -606,7 +633,11 @@ call_settled = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
                 sig: Vec<TyId>, inst: Inst, recv: Res<ExprId>, ctx: Ctx,
                 out :: String) Res<(), AllocError> {
     (inst_open(be, inst) || any_open(be, sig)).match({
-        true  => unsupported(be, id, "a generic call whose type arguments nothing settles", out),
+        true  => unsupported(
+            be,
+            id,
+            "a generic call whose type arguments nothing settles",
+            out),
         false => call_reachable(be, id, c, d, f, sig, inst, recv, ctx, out),
     })
 }
@@ -675,8 +706,12 @@ plain* = (f: Function) bool { f.tparams.len == 0 }
 
 collect_params = (be :: CBackend, d: Def, params: Vec<Param>, inst: Inst,
                   sig :: Vec<TyId>) Res<bool, AllocError> {
-    ctx = Ctx(module: d.id.module.to_usize(), ret: TyId(index: 0),
-              has_ret: false, self_ty: TyId(index: 0), has_self: false);
+    ctx = Ctx(
+        module: d.id.module.to_usize(),
+        ret: TyId(index: 0),
+        has_ret: false,
+        self_ty: TyId(index: 0),
+        has_self: false);
     params.loop((h, p) {
         p.type.match({
             Ok(t) => add_param(be, t, ctx, inst, sig),

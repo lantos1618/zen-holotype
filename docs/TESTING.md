@@ -50,7 +50,7 @@ Positions are 1-based line, 1-based **byte** column, and point at the first byte
 
 **A single-file test may write `line:col` and omit the path**, which resolves against the test's entry file. Four suites reached for this independently before it was allowed, which is the tell that the long form was asking for something nobody wanted to write. A right-line/wrong-file match is still a failure.
 
-**A test is compiled against the whole of `src/`, not just `src/std`.** From stage 1 the compiler's own modules — `lex`, `ast`, `parse`, `gen` — are siblings of `std` under one root, so staging only the prelude would mean no corpus test could ever import one and each subsystem would invent a private harness instead. The staged root *is* the compilation root, so `src/lex/lex.zen` is imported as `lex.lex`, exactly as `src/std/core/core.zen` is `std.core`.
+**A test is compiled against the whole of `src/`, not just `src/std`.** The compiler's own modules — `sema`, `gen`, `fmt`, `lsp` — are siblings of `std` under one root, and its frontend — `lex`, `parse`, `ast` — lives INSIDE `std` so an ordinary program can say `= std.parse`; staging only the prelude would mean no corpus test could ever import one and each subsystem would invent a private harness instead. The staged root *is* the compilation root, so `src/std/lex/lex.zen` is imported as `std.lex.lex`, exactly as `src/std/core/core.zen` is `std.core`. Because `std` is staged whole, the harness then prunes `std/lex`, `std/parse` and `std/ast` from the copy unless the test's import closure names one — the one-half-written-module law above, applied one level down.
 
 **A test's compilation root is its own directory.** Every asserted path is relative to that, and so is every path the compiler emits — which is what makes the determinism check comparing two copies of a tree at different absolute paths meaningful.
 
@@ -195,11 +195,13 @@ The third is the one everyone skips and the one that decays fastest. A correct d
 
 ## Performance is a test
 
-**Nothing runs the benches, and four places in the tree cite them as if something did.** `tests/bench/` holds the four files and `src/std/test/test.zen` declares `Bencher` and `BenchStats`, but there is no `make bench`: the budgets are enforced by `b.bench(..)` in a project's own `build.zen`, and executing a build file needs stage 1 further along than it is. Until then no gate compiles, parses, formats, or lints `tests/bench/`. So the two load-bearing claims below are currently **asserted and unmeasured** — which is the same shape as a gate that cannot fail. Worse, the claim that loops never allocate is already load-bearing in four implementation comments, each citing `bench_loop.zen`'s `allocs_op: 0` as its justification: `src/std/core/loop/loop_iter.zen:14` (how the loop family is typed), `src/std/core/range.zen:19` (a `Range` fold inlines to a C for-loop), `src/gen/gen_c/gen_c_inline.zen:16` (inliner behaviour), and `bootstrap/gen_c.py:4028` (lambda bodies are not boxed). All four rest on a bench nothing runs. This stays asserted-not-measured until `zen build` can execute a build file; the day it can, this is the first thing to point at it.
+**`make bench` runs the benches now — as drivers, not as `Bencher` calls.** `tests/bench/drivers/` holds one small program per bench, mirroring the bench body in a plain loop, because constructing a `Bencher` in user code needs trait dispatch gen_c does not have yet ("`Bencher.iter` is supplied by an impl; gen_c has no trait dispatch yet") and std has no clock. The clock lives outside the process: `scripts/bench.py` times whole runs, subtracts the `null.zen` driver's floor (same staging, same spawn, no loop), and divides by the loop count. The day `zen build` can execute a build file, the drivers retire and `b.bench(..)` takes over — the drivers' headers say each body is kept in sync by hand until then.
 
-Because all allocation goes through `Alloc`, `allocs_op` and `bytes_op` are free to measure and **identical on every machine** — so they are hard gates. `ns_op` and build wall clock go to a rolling median.
+First numbers, on this machine, and the first time the budgets below met a measurement: `vec_add` 40 ns/op against a budget of 40; `stored_field_read` and `computed_field_read` 0.8 ns/op each against 2 — they **agree**, which is the load-bearing claim, measured instead of believed; `fold_stack_array` 4.4 ns/op against 20. Budgets warn when exceeded and fail only past 10×, because they were written from the design and one slow machine must not redden the gate. What actually gates over time is the rolling median in `tests/bench/baseline.json`: `make bench` compares against it when present (warn past 1.5×, fail past 4×), and `scripts/bench.py --update-baseline` appends the run and trims to the last 20 samples. The same run also times one `make fmt` pass over the tree.
 
-Two budgets from `DESIGN.md` are load-bearing claims about the language, not micro-benchmarks:
+**`allocs_op` and `bytes_op` are still asserted, not measured.** They are deterministic and free to count *in a `Bencher`*, but no compiler instrumentation emits them yet, and none is planned by hand — `make bench` prints them as unmeasured rather than guessing. So the claim that loops never allocate, cited by `src/std/core/loop/loop_iter.zen:14`, `src/std/core/range.zen:19`, `src/gen/gen_c/gen_c_inline.zen:16`, and `bootstrap/gen_c.py:4028`, still rests on argument alone. That is the one gap this section opened with, and it stays open until the instrumentation lands.
+
+Two budgets from `DESIGN.md` remain the load-bearing claims about the language:
 
 ```groovy
 Budget(name: "stored_field_read",   ns_op: 2, allocs_op: 0),
@@ -207,6 +209,14 @@ Budget(name: "computed_field_read", ns_op: 2, allocs_op: 0),
 ```
 
 If those diverge, uniform access is not free and the design needs to know. Same shape for the claim that loops never allocate: a fold over a stack array must bench at `allocs_op: 0`, and if it ever doesn't, an inliner regressed.
+
+**The memory and profile gates beside it, all slow, none in `make test`:**
+
+- `make asan` builds the compiler as `zen-asan` (`-fsanitize=address,leak`, never clobbering `./zen`) and runs one representative compile through it. Two startup-prologue blocks leak *deliberately* — the argv rows (`bootstrap/gen_c.py:2052`) and the root arena state — both process-lifetime, both reclaimed by the OS. The first is suppressed by name in `tests/bench/lsan.supp`; the second cannot be (LSan matches any frame, and every frame is under `main`), so `tests/bench/asan.sh` allowlists it by *top* frame and fails on anything deeper.
+- `make leak` answers the same question with valgrind, definite leaks only, same two blocks suppressed by shape in `tests/bench/valgrind.supp`: only a `malloc` called directly from generated `main` qualifies, so a real leak one frame deeper still fails.
+- `make profile` builds a frame-pointer `zen-fp`, self-compiles under `perf record -g`, and leaves `report.txt` and `stacks.txt` in `tests/bench/out/` — plus `flamegraph.svg` when the FlameGraph scripts are already on PATH (never vendored). perf needs kernel permission; on refusal the script prints the `perf_event_paranoid` setting and exits 2, because a harness that cannot run is not a failed profile.
+
+**Race detection is N/A, plainly.** The toolchain is single-threaded by design; threads are stage 5 and unimplemented. There is nothing for TSan to observe, and adding it anyway would be theater — a gate that cannot fail guarding a property nothing can violate. When threads land, this paragraph becomes the shopping list.
 
 ---
 

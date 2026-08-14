@@ -67,6 +67,12 @@ DIAG_TOTAL = re.compile(r"(\d+) diagnostic\(s\)")
 # lowercase by convention, which is what keeps `= Package(..)` out.
 IMPORT_RHS = re.compile(r"=\s*([a-z][A-Za-z0-9_]*)\s*(?:\.|$)")
 
+# The compiler's own frontend lives INSIDE std (`std.lex`, `std.parse`,
+# `std.ast`), so IMPORT_RHS sees only `std`; the second segment takes its own
+# pattern. Used by `stage` to prune the sublayer a test never names.
+SUBLAYER = {"lex", "parse", "ast"}
+SUBLAYER_RHS = re.compile(r"=\s*std\.(lex|parse|ast)(?:\.|\s|$)")
+
 # A diagnostic position as it appears in compiler output: path:line:col, or a
 # bare line:col at the start of a line for a single-file compilation.
 POS_WITH_PATH = re.compile(r"(?<![\w./-])([\w./+-]+\.zen):(\d+):(\d+)")
@@ -627,7 +633,7 @@ def stage(test: Test, tool: Toolchain, work: Path) -> Path:
         shutil.copy2(test.source, root / test.source.name)
 
     # `std` always -- it is the prelude, and every program stands on it.
-    # Any OTHER top-level module under src/ (`lex`, `ast`, `parse`, ..) only
+    # Any OTHER top-level module under src/ (`sema`, `gen`, `fmt`, ..) only
     # if this test's own sources name it.
     #
     # Staging the whole of src/ was the first attempt, and it is wrong for a
@@ -652,8 +658,8 @@ def stage(test: Test, tool: Toolchain, work: Path) -> Path:
         available = {e.name: e for e in tool.src_root.iterdir()
                      if e.name not in mine}
         wanted = ({"std"} | _modules_named_in(root)) & set(available)
-        # TRANSITIVE. `parse` imports `lex`, so a test naming only `parse`
-        # needs `lex` staged too or it gets "module lex.lex not found". The
+        # TRANSITIVE. `lsp` imports `sema`, so a test naming only `lsp`
+        # needs `sema` staged too or it gets "module sema.sema not found". The
         # first version scanned only the test's own sources and stopped there;
         # that was fine while every stage-1 module stood alone and stopped
         # being fine the moment two of them were wired together.
@@ -673,6 +679,52 @@ def stage(test: Test, tool: Toolchain, work: Path) -> Path:
                 shutil.copytree(entry, root / entry.name, dirs_exist_ok=True)
             else:
                 shutil.copy2(entry, root / entry.name)
+        # PRUNE THE COMPILER SUBLAYER. `std` now also carries the compiler's
+        # own frontend -- `std/lex`, `std/parse`, `std/ast` -- and std is
+        # staged whole, so without pruning every test would compile the
+        # frontend and one half-written parser file would redden the suite:
+        # the exact coupling the staging comment above exists to prevent.
+        # `_modules_named_in` only sees the first dotted segment (`std` for
+        # `= std.parse`), so the second segment is scanned for directly. A
+        # kept sublayer may name another (`std.parse` imports `std.lex`), so
+        # the scan runs to a fixpoint; a pruned sublayer's own sources never
+        # vote. Plain std may not import the sublayer (scripts/style.py's
+        # layer rule), so nothing else can smuggle it in.
+        sublayer = root / "std"
+        if sublayer.is_dir():
+            def votes_in(path: Path) -> set[str]:
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    return set()
+                named: set[str] = set()
+                for line in text.splitlines():
+                    code = line.split("//", 1)[0]
+                    named |= set(SUBLAYER_RHS.findall(code))
+                return named
+
+            # Seed from everything OUTSIDE the sublayer: the test's own
+            # sources and any src module staged beside them (`sema`, ..).
+            kept: set[str] = set()
+            for path in root.rglob("*.zen"):
+                if sublayer in path.parents:
+                    continue
+                kept |= votes_in(path)
+            # Close over the sublayer: a kept member's own imports vote.
+            changed = True
+            while changed:
+                changed = False
+                for name in sorted(kept):
+                    member = sublayer / name
+                    if not member.is_dir():
+                        continue
+                    for path in member.rglob("*.zen"):
+                        for dep in sorted(votes_in(path)):
+                            if dep not in kept:
+                                kept.add(dep)
+                                changed = True
+            for name in sorted(SUBLAYER - kept):
+                shutil.rmtree(sublayer / name, ignore_errors=True)
     return root
 
 

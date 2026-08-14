@@ -4,14 +4,14 @@
 
 **Pipeline:** `mod_resolver -> lexer -> parser -> sema -> codegen`
 
-One stage per module, and modules are `<folder>/<folder>.zen` — a folder carries its root beside its children, so `src/gen/gen.zen` is module `gen` and `src/ast/ast.zen` is module `ast`.
+One stage per module, and modules are `<folder>/<folder>.zen` — a folder carries its root beside its children, so `src/gen/gen.zen` is module `gen` and `src/std/ast/ast.zen` is module `std.ast`.
 
 ```
 build.zen              // this project's own build file. stage 1; not in the tree
 src/zen/zen.zen        // thin cli: build / fmt / test / lsp
-src/ast/ast.zen        // THE ast. the compiler, @meta and gen_c all consume these nodes
-src/lex/lex.zen
-src/parse/parse.zen
+src/std/ast/ast.zen    // THE ast. the compiler, @meta and gen_c all consume these nodes
+src/std/lex/lex.zen
+src/std/parse/parse.zen
 src/sema/sema.zen
 src/gen/gen.zen        // backend-shared plumbing
 src/gen/gen_c/gen_c.zen  // the c backend
@@ -19,7 +19,7 @@ src/zen/zen_build.zen  // the build driver behind `zen build`
 src/std/...            // the stdlib specified below. ~34 modules.
 ```
 
-`src/ast/ast.zen` is the keystone: one AST with three consumers, which is what makes `@meta` a view onto the compiler's own nodes rather than a parallel universe.
+`src/std/ast/ast.zen` is the keystone: one AST with three consumers, which is what makes `@meta` a view onto the compiler's own nodes rather than a parallel universe.
 
 **The full tree — including the bootstrapper, the seed, the test corpora, and which stage each piece appears at — lives in `PLAN.md`.** It is the authority; this sketch shows only the shape.
 
@@ -62,7 +62,7 @@ So four decisions, all made in week one, all brutal to retrofit:
 
 **Ship the ownership *syntax* at stage 0** even though nothing checks it. `self :: @Self` and `consume` cost nothing to parse and ignore. Defer the syntax and every line of stdlib written before stage 3 has to be revised; defer only the enforcement and nothing is lost.
 
-**So read the Ownership section below as law, and check the tree before reading it as behaviour.** Stage 2 is there in part: `zen fmt` is `parse |> print` over this parser and this trivia, and it prints the FILE — declarations in source order, comments where they were written, a run of blank lines collapsed to one, exactly one final newline — while every declaration's own text passes through verbatim but for one gap: the spaces in front of a match arm's `=>`, which are set so that a list of arms lines up on its arrows. That rule went first because it moves no token, which is what the guard below can already check. The other three this document states about arms — short ones on a line, long ones wrapped, a trailing comma on the last — each move a token or add one, so each is still owed and a formatter that guessed at them would have reflowed the tree on its first run. What keeps that split honest is a guard rather than care: the output is re-lexed and its token stream compared to the input's, so a printing rule that changed the program cannot leave `src/fmt/`. Stage 3 is there in part — `sema_own.zen`, `sema_recv.zen`, `sema_drop.zen` and `sema_scope.zen` enforce the receiver rule, `consume` and use-after-move, the copy of a `Drop` value, the partial move that reaches a drop, and all three of `@scope`'s ways out. "Which closures escape" is read off the callee's signature and nothing else: a closure argument to a call that also takes an `Alloc` may be kept past the call, and every other one may not — so the reading is narrow where the signature is silent, and a free function taking an `Alloc` is not asked. One thing below is still law and not behaviour: `iso` at a behavior parameter is stage 5, along with actors. What is checked, refuses; what is not, still compiles.
+**So read the Ownership section below as law, and check the tree before reading it as behaviour.** Stage 2 is there in part: `zen fmt` is `parse |> print` over this parser and this trivia, and it prints the FILE — declarations in source order, comments where they were written, a run of blank lines collapsed to one, exactly one final newline — while every declaration's own text passes through verbatim but for whitespace: the spaces in front of a match arm's `=>`, set so that a list of arms lines up on its arrows, and the gaps inside an argument list or a union of variants whose packed line runs past 80 columns, set so each item or variant gets its own line at +4. Those rules went first because they move no token, which is what the guard below can already check. The three this document states about arms — short ones on a line, long ones wrapped, a trailing comma on the last — each move a token or add one, so each is still owed and a formatter that guessed at them would have reflowed the tree on its first run. What keeps that split honest is a guard rather than care: the output is re-lexed and its token stream compared to the input's, so a printing rule that changed the program cannot leave `src/fmt/`. Stage 3 is there in part — `sema_own.zen`, `sema_recv.zen`, `sema_drop.zen` and `sema_scope.zen` enforce the receiver rule, `consume` and use-after-move, the copy of a `Drop` value, the partial move that reaches a drop, and all three of `@scope`'s ways out. "Which closures escape" is read off the callee's signature and nothing else: a closure argument to a call that also takes an `Alloc` may be kept past the call, and every other one may not — so the reading is narrow where the signature is silent, and a free function taking an `Alloc` is not asked. One thing below is still law and not behaviour: `iso` at a behavior parameter is stage 5, along with actors. What is checked, refuses; what is not, still compiles.
 
 **Not needed, and traps if attempted early:** an optimizer (C is the backend), a second backend, a package manager, incremental codegen.
 
@@ -143,7 +143,7 @@ AllocError* = | OutOfMemory                     // one variant: the bar leads
 Alias = Shape                                   // no bar, so an alias. unambiguous.
 ```
 
-**A variant name that is also a type in scope must be reported, not silently reinterpreted.** What separates `Error = AllocError | IoError` (a union of existing types) from `Signal = Start | Stop` (a nominal enum) is whether every variant name *is* a type. That rule is what lets one syntax serve both, and it has a sharp edge: the answer depends on what else is in scope, so **adding an import to an unrelated module can change what a declaration in this one means.** Found by writing `DefKind = Struct | Enum | ..` in a module that imports `ast`, where every one of those names is a type — the declaration silently became a union of `ast`'s types rather than the enum it was written as.
+**A variant name that is also a type in scope must be reported, not silently reinterpreted.** What separates `Error = AllocError | IoError` (a union of existing types) from `Signal = Start | Stop` (a nominal enum) is whether every variant name *is* a type. That rule is what lets one syntax serve both, and it has a sharp edge: the answer depends on what else is in scope, so **adding an import to an unrelated module can change what a declaration in this one means.** Found by writing `DefKind = Struct | Enum | ..` in a module that imports `std.ast`, where every one of those names is a type — the declaration silently became a union of `std.ast`'s types rather than the enum it was written as.
 
 The rule stays, because the alternative is a second syntax for a distinction nobody wants to spell twice. The *silence* goes: when a variant name collides with a type in scope, the compiler says so and names both, exactly as it does for an impl collision. An author who meant the union renames nothing; an author who meant the enum renames the variant. Cost to accept knowingly: a nominal enum cannot use a name that is a type in scope without being told about it.
 
@@ -397,7 +397,7 @@ buf.add(2).try();              // ERROR: buf was consumed
 
 # Modules
 
-**Module paths are `<folder>/<folder>.zen`.** A bare `src/ast.zen` is module `ast`; a folder carries its root beside its children, so `src/gen/gen.zen` is module `gen`. Deliberately not Rust's `mod.rs` (twenty editor tabs all reading `mod.rs` is a real cost) and not Zig's raw path imports (no module concept at all).
+**Module paths are `<folder>/<folder>.zen`.** A bare `src/std/std.zen` is module `std`; a folder carries its root beside its children, so `src/gen/gen.zen` is module `gen`. Deliberately not Rust's `mod.rs` (twenty editor tabs all reading `mod.rs` is a real cost) and not Zig's raw path imports (no module concept at all).
 
 Names are qualified by path, imports bind locally, and two modules may define the same top-level name without colliding.
 
@@ -454,7 +454,7 @@ A folder root is then just a file of starred bindings, which is why re-export is
 
 **`@` is the compiler's namespace.** A leading `@` marks something the compiler supplies that no user code could have written — `@Self` (the type being declared), `@meta` (the ast node for a value or type), `@scope` (the enclosing block). It is not a sigil with meaning of its own and it is not a macro marker; it is one flat namespace, deliberately small, and everything in it is documented here. Anything without an `@` is an ordinary binding you could have written yourself.
 
-`@meta` **builds and reads**, and it does not get a parallel node type — it gets the compiler's own. `@meta(n)` hands back the same `Struct` / `Enum` / `Function` values from `src/ast.zen` that `DumpAst` walks and `gen_c.zen` consumes. One AST, three consumers. Building a type is constructing those nodes and returning them.
+`@meta` **builds and reads**, and it does not get a parallel node type — it gets the compiler's own. `@meta(n)` hands back the same `Struct` / `Enum` / `Function` values from `std.ast` that `DumpAst` walks and `gen_c.zen` consumes. One AST, three consumers. Building a type is constructing those nodes and returning them.
 
 **Identity: type-returning comptime calls are memoized on their arguments.**
 
@@ -811,9 +811,7 @@ Vec*<T> = {
     take* = (self :: @Self, i: usize) Res<T>
 
     get* = (self: @Self, i: usize) Res<T> {
-        (i < self.len).match({
-            true => Ok(self.data.read(i)),
-            false => None,
+        (i < self.len).then({Ok(self.data.read(i)),
         });
     }
 

@@ -1,7 +1,7 @@
 # The AST contract
 
 Frozen so the lexer, parser, sema and `gen_c` can be built against it in
-parallel, without reading `src/ast/`. `PLAN.md` calls `src/ast.zen` the keystone:
+parallel, without reading `src/std/ast/`. `PLAN.md` calls `src/std/ast/ast.zen` the keystone:
 one AST with three consumers — the compiler, `@meta` and `gen_c` — and `@meta`
 returning these exact node types is what makes stage 5 free rather than a
 parallel universe.
@@ -16,15 +16,15 @@ divergences from it are listed at the end.
 ## Layout
 
 ```
-src/ast/ast.zen         the module surface: starred re-exports, nothing else
-src/ast/ast_span.zen    where a node is: Pos, Span, Trivia, TriviaRun, Ident
-src/ast/ast_id.zen      how a node is named: ExprId, TypeId, PatternId, BlockId
-src/ast/ast_node.zen    what a node is: every form
-src/ast/ast_arena.zen   where nodes live: Ast
+src/std/ast/ast.zen         the module surface: starred re-exports, nothing else
+src/std/ast/ast_span.zen    where a node is: Pos, Span, Trivia, TriviaRun, Ident
+src/std/ast/ast_id.zen      how a node is named: ExprId, TypeId, PatternId, BlockId
+src/std/ast/ast_node.zen    what a node is: every form
+src/std/ast/ast_arena.zen   where nodes live: Ast
 ```
 
-`src/ast/ast.zen` is module `ast` — a folder carries its root beside its
-children, so this is the same module path `src/ast.zen` would have been, and
+`src/std/ast/ast.zen` is module `std.ast` — a folder carries its root beside its
+children, so this is the same module path `src/std/ast.zen` would have been, and
 every reference to it in `DESIGN.md` and `PLAN.md` still reads correctly.
 
 It is a folder because the node set alone is 650 lines and the whole is over
@@ -505,9 +505,10 @@ Not fixed here; `bootstrap/` belongs to another agent. Each is a reproducer.
 
 1. **A re-export through a folder root does not bind an enum or a plain
    function**, and loses names beside them in the same import list. This is why
-   the two corpus tests under `tests/corpus/ast/` import from `ast.ast_node`,
-   `ast.ast_span`, `ast.ast_id` and `ast.ast_arena` directly rather than from
-   `ast`. **Consumers should write `= ast` and will be able to once this is
+   the two corpus tests under `tests/corpus/ast/` import from `std.ast.ast_node`,
+   `std.ast.ast_span`, `std.ast.ast_id` and `std.ast.ast_arena` directly rather
+   than from `std.ast`. **Consumers should write `= std.ast` and will be able
+   to once this is
    fixed**; the leaf paths are a workaround, not the contract.
 
 2. **`type ...Eq is part of a by-value cycle`** — reported for `src/` as it

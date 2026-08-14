@@ -20,8 +20,8 @@
 // the sort be by name rather than dependency: C needs a declaration
 // before a call, not a definition.
 
-Ast, Module, Decl, DeclKind, Function, Param, Span, Ident = ast
-BlockId, TypeId, Struct, Member, MemberKind = ast
+Ast, Module, Decl, DeclKind, Function, Param, Span, Ident = std.ast
+BlockId, TypeId, Struct, Member, MemberKind = std.ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -233,7 +233,8 @@ report_overrun = (be :: CBackend, fi: usize, mi: usize) Res<(), AllocError> {
 overrun_at_fn = (be :: CBackend, fi: usize) Res<(), AllocError> {
     be.fn_queue.get(fi).match({
         None  => Ok(()),
-        Ok(d) => be.report(d.span.file, d.span, GenFault.Overrun(MAX_FUNCTIONS)),
+        Ok(d) => be.report(d.span.file, d.span, GenFault.Overrun(
+            MAX_FUNCTIONS)),
     }).try();
     Ok(());
 }
@@ -251,7 +252,8 @@ overrun_at_method = (be :: CBackend, mi: usize) Res<(), AllocError> {
 overrun_at_decl = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
     decl_at(be.tree, m.decl).match({
         None  => Ok(()),
-        Ok(x) => be.report(x.span.file, x.span, GenFault.Overrun(MAX_FUNCTIONS)),
+        Ok(x) => be.report(x.span.file, x.span, GenFault.Overrun(
+            MAX_FUNCTIONS)),
     }).try();
     Ok(());
 }
@@ -323,7 +325,16 @@ lower_body = (be :: CBackend, d: Def, x: Decl, f: Function, blk: BlockId)
     mi = d.id.module.to_usize();
     ctx = plain_ctx(be, mi);
     mark = enter_tparams(be, f.tparams, d.qname).try();
-    lower_shape(be, f, blk, d.qname, d.name, d.span, ctx, ctx.self_ty, mi).try();
+    lower_shape(
+        be,
+        f,
+        blk,
+        d.qname,
+        d.name,
+        d.span,
+        ctx,
+        ctx.self_ty,
+        mi).try();
     leave_tparams(be, mark).try();
     Ok(());
 }
@@ -427,8 +438,14 @@ keep_same_sig = (be :: CBackend, m: MethodRef, mem: Member,
 keep_if_same_sig = (be :: CBackend, m: MethodRef, mem: Member, f: Function,
                     kept :: Vec<Member>) Res<(), AllocError> {
     sig ::= be.alloc.Vec<TyId>();
-    method_sig(be, m.self_ty, m.decl, f, m.decl.module.to_usize(),
-               be.inst, sig).try();
+    method_sig(
+        be,
+        m.self_ty,
+        m.decl,
+        f,
+        m.decl.module.to_usize(),
+        be.inst,
+        sig).try();
     same_tys(sig, m.sig).match({
         true  => kept.add(mem),
         false => Ok(()),
@@ -535,16 +552,24 @@ return_type* = (be :: CBackend, f: Function, ctx: Ctx)
 // `Res`. The one a signature is read in, since a signature has no
 // enclosing function of its own.
 plain_ctx* = (be :: CBackend, mi: usize) Ctx {
-    Ctx(module: mi, ret: TyId(index: 0), has_ret: false,
-        self_ty: TyId(index: 0), has_self: false)
+    Ctx(
+        module: mi,
+        ret: TyId(index: 0),
+        has_ret: false,
+        self_ty: TyId(index: 0),
+        has_self: false)
 }
 
 // The context a BODY is lowered in. `ret` and `has_ret` are what
 // `.try()` answers to: "the enclosing function must return a
 // compatible Res".
 body_ctx* = (be :: CBackend, mi: usize, ret: TyId) Ctx {
-    Ctx(module: mi, ret: ret, has_ret: is_res(be, ret),
-        self_ty: TyId(index: 0), has_self: false)
+    Ctx(
+        module: mi,
+        ret: ret,
+        has_ret: is_res(be, ret),
+        self_ty: TyId(index: 0),
+        has_self: false)
 }
 
 // The same, for a member function: `@Self` stays bound while the body
@@ -552,8 +577,12 @@ body_ctx* = (be :: CBackend, mi: usize, ret: TyId) Ctx {
 // signature does.
 self_body_ctx* = (be :: CBackend, mi: usize, ret: TyId, self_ty: TyId,
                   has_self: bool) Ctx {
-    Ctx(module: mi, ret: ret, has_ret: is_res(be, ret),
-        self_ty: self_ty, has_self: has_self)
+    Ctx(
+        module: mi,
+        ret: ret,
+        has_ret: is_res(be, ret),
+        self_ty: self_ty,
+        has_self: has_self)
 }
 
 is_res* = (be :: CBackend, ret: TyId) bool {
