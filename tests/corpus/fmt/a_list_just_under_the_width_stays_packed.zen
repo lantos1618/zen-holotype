@@ -1,0 +1,72 @@
+// THE OTHER EDGE OF THE WIDTH RULE: a list whose packed line is exactly
+// 80 columns FITS, and stays on one line. The break fires past the
+// width, not at it — `>` not `>=` — and this pins which side of the
+// line 80 is on, for both forms (an enum's bars, a call's commas).
+//
+// Both sources below are 80 columns on the nose; both come through
+// untouched. One character more and the rule fires — the two break
+// tests are that character, several times over.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+scan, Source = std.lex.lex
+render = fmt.fmt
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    shows(
+        a,
+        "an enum at exactly the width stays packed",
+        "ValueShape* = StructValue | EnumValue | FnValue | PathValue | AliasV | ExprValue\n").try();
+
+    shows(
+        a,
+        "a call at exactly the width stays packed",
+        "x = combine(first, second, third, fourth, fifth, sixth, seventh, fourteenth_arg)\n").try();
+
+    Ok(0);
+}
+
+shows = (a: Alloc, what: str, text: str) Res<(), AllocError> {
+    first = formatted(a, text).try();
+    second = formatted(a, first.view()).try();
+    println("== {}", what);
+    println(
+        "faithful: {}, {}",
+        faithful_of(a, text).try(),
+        verdict(first.view().eq(second.view())));
+    show(first.view());
+    Ok(());
+}
+
+verdict = (settled: bool) str {
+    settled.match({
+        true  => "fixpoint",
+        false => "MOVED",
+    })
+}
+
+formatted = (a: Alloc, text: str) Res<String, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out = render(a, lexed).try();
+    Ok(out.text);
+}
+
+faithful_of = (a: Alloc, text: str) Res<bool, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out = render(a, lexed).try();
+    Ok(out.faithful);
+}
+
+show = (text: str) () {
+    line ::= 0;
+    from ::= 0;
+    Range(0, text.len).loop((h, i) {
+        (text.index(i) == '\n').then(() {
+            line = line + 1;
+            println("{} |{}|", line, text.slice(from, i));
+            from = i + 1;
+        });
+    });
+}

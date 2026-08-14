@@ -1,0 +1,77 @@
+// A UNION PACKED PAST 80 COLUMNS BREAKS ONE VARIANT PER LINE — the
+// width rule's second form (`fmt_break.zen`), pinned with the case it
+// was written against: `ValueShape` in `parse_lookahead.zen`, which at
+// 84 columns is the line that picked 80 over 100. The first variant
+// stays on the `=` line; every later one gets its own line with the bar
+// leading at +4.
+//
+// The same mechanic covers an anonymous union in type position, which
+// is the second case: `Io | Parse | Net | Usage` is a `Union` node, not
+// an enum, and its bars break the same way.
+//
+// `faithful` and `fixpoint` are printed per case for the reason
+// a_long_argument_list_breaks_one_per_line.zen gives.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+scan, Source = std.lex.lex
+render = fmt.fmt
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    shows(
+        a,
+        "a one-line enum past the width breaks one variant per line",
+        "ValueShape* = StructValue | EnumValue | FnValue | PathValue | AliasValue | ExprValue\n").try();
+
+    shows(
+        a,
+        "an anonymous union's bars break the same way",
+        "handle = (r: Req) Res<str, Io | Parse | Net | AddressInUse | ConnectionReset | TimedOut> {\n    r.run()\n}\n").try();
+
+    Ok(0);
+}
+
+shows = (a: Alloc, what: str, text: str) Res<(), AllocError> {
+    first = formatted(a, text).try();
+    second = formatted(a, first.view()).try();
+    println("== {}", what);
+    println(
+        "faithful: {}, {}",
+        faithful_of(a, text).try(),
+        verdict(first.view().eq(second.view())));
+    show(first.view());
+    Ok(());
+}
+
+verdict = (settled: bool) str {
+    settled.match({
+        true  => "fixpoint",
+        false => "MOVED",
+    })
+}
+
+formatted = (a: Alloc, text: str) Res<String, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out = render(a, lexed).try();
+    Ok(out.text);
+}
+
+faithful_of = (a: Alloc, text: str) Res<bool, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out = render(a, lexed).try();
+    Ok(out.faithful);
+}
+
+show = (text: str) () {
+    line ::= 0;
+    from ::= 0;
+    Range(0, text.len).loop((h, i) {
+        (text.index(i) == '\n').then(() {
+            line = line + 1;
+            println("{} |{}|", line, text.slice(from, i));
+            from = i + 1;
+        });
+    });
+}

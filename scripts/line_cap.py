@@ -35,7 +35,24 @@ SOFT, HARD = 500, 800
 EXEMPT_DIRS = ("seed", "tests", "grammar/src", ".fixpoint", ".fixloop")
 
 # path -> the sentence. No entry without one.
-EXCEPTIONS: dict[str, str] = {}
+EXCEPTIONS: dict[str, str] = {
+    "src/gen/gen_c/gen_c_member.zen":
+        "member access codegen, one lowering per base shape — the vertical "
+        "formatter stretched it past the cap; the subject is one.",
+    "src/gen/gen_c/gen_c_state.zen":
+        "the emitter's state and its constructors — one subject; the "
+        "formatter's vertical breaking, not a second subject, crossed 800.",
+    "src/sema/sema_call.zen":
+        "call checking, one question from candidate to memo — over the cap "
+        "only since the formatter broke long call sites one per line.",
+    "src/sema/sema_check.zen":
+        "the Checker and its memos — one subject; the reformat added the "
+        "lines, and splitting by size would name two files after nothing.",
+    "src/sema/sema_def.zen":
+        "visibility: defs_of and the walk behind it — one subject, pushed "
+        "over 800 by vertical breaking, a candidate for a subject split "
+        "only if a second query family ever lands here.",
+}
 
 
 def zen_files():

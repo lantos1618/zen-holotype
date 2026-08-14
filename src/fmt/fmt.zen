@@ -17,16 +17,21 @@
 //   - the WIDTH OF THE GAP before a match arm's `=>` (`fmt_decl.zen`,
 //     the one rule here that knows what it's looking at — DESIGN.md
 //     asks for aligned arms and the parser already locates every `=>`).
+//   - LISTS PACKED PAST 80 COLUMNS: argument lists and union bars break
+//     one item per line (`fmt_break.zen`), a pass of its own AFTER the
+//     pads — it re-lexes and re-parses what the pads wrote, because its
+//     edits change line counts and `fmt_decl.zen`'s table is keyed by
+//     line. Same parser, same tree, one file later.
 //
 // WHAT IT PASSES THROUGH VERBATIM: every declaration's own text, minus
-// that one gap — struct bodies, signatures, arm bodies, everything.
-// These forms could be rebuilt from the AST, but rebuilding means
-// layout decisions nobody has written down yet, and a printer
-// inventing them would silently reflow the whole corpus on its first
-// run. Remaining rules (short arms on one line, wrapping, trailing
-// commas) arrive in `fmt_decl.zen` one form at a time, against a
-// corpus — each one MOVES or ADDS a token, the line the guard below
-// draws, which is why `=>` alignment (which moves neither) went first.
+// that one gap and those line breaks — struct bodies, signatures, arm
+// bodies, everything. These forms could be rebuilt from the AST, but
+// rebuilding means layout decisions nobody has written down yet, and a
+// printer inventing them would silently reflow the whole corpus on its
+// first run. Remaining rules (short arms on one line, wrapping, trailing
+// commas) arrive one form at a time, against a corpus — each one MOVES
+// or ADDS a token, the line the guard below draws, which is why the
+// whitespace-only rules (`=>` alignment, list breaking) went first.
 //
 // WHAT IT REFUSES: a file with lexical or syntactic faults — a tree
 // with a hole no longer describes the source, and printing from one is
@@ -42,16 +47,17 @@ Alloc, AllocError = std.mem
 str, String = std.text
 Vec = std.collections
 Range = std.core
-Pos, TriviaRun = ast.ast_span
-Ast = ast.ast_arena
-Module, Decl = ast.ast_node
-scan, Source, Lexed, text_of = lex.lex
-Diag, Parser, module = parse.parse
-same = parse.parse_token
+Pos, TriviaRun = std.ast.ast_span
+Ast = std.ast.ast_arena
+Module, Decl = std.ast.ast_node
+scan, Source, Lexed, text_of = std.lex.lex
+Diag, Parser, module = std.parse.parse
+same = std.parse.parse_token
 
 Src* = fmt.fmt_src
 Out* = fmt.fmt_out
 Aligned* = fmt.fmt_decl
+break_lines = fmt.fmt_break
 
 // What formatting one file came to. Three fields, not a three-way enum:
 // a caller acts on all three at once (print diags, compare text, refuse
@@ -92,8 +98,9 @@ printed = (a: Alloc, src: Src, tree: Ast, m: Module, lexed: Lexed)
           Res<Render, AllocError> {
     out ::= a.Out().try();
     write_module(out, a, a.Aligned(src, tree).try(), src, tree, m).try();
-    ok = unchanged_tokens(a, lexed, out.view()).try();
-    Ok(Render(text: out.text, diags: a.Vec<Diag>(), faithful: ok));
+    text = break_lines(a, lexed.source.file, out.view()).try();
+    ok = unchanged_tokens(a, lexed, text.view()).try();
+    Ok(Render(text: text, diags: a.Vec<Diag>(), faithful: ok));
 }
 
 // -------------------------------------------------------------------
@@ -144,13 +151,19 @@ write_trivia = (out :: Out, tree: Ast, run: TriviaRun) Res<(), AllocError> {
 // WIDENED/NARROWED: the gap before a match arm's `=>` (`fmt_decl.zen`),
 // applied HERE inside the verbatim copy rather than by a rebuilding
 // printer — the bytes stay the author's, only that one gap's width is
-// set.
+// set. Over-wide lists are NOT broken here but in `fmt_break.zen`, a
+// later pass over what this writes: their edits change line counts,
+// which the pad table's per-line keys cannot survive.
 write_decl = (out :: Out, a: Alloc, al: Aligned, src: Src, tree: Ast,
               m: Module, i: usize, d: Decl) Res<(), AllocError> {
     from = src.offset(d.span.start);
     to = src.offset(next_start(tree, m, i));
-    text = al.padded(a, src, from, src.trim_back(from, to),
-                     d.span.start.line).try();
+    text = al.padded(
+        a,
+        src,
+        from,
+        src.trim_back(from, to),
+        d.span.start.line).try();
     out.say(text.view())
 }
 

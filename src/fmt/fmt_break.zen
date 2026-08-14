@@ -1,0 +1,536 @@
+// src/fmt/fmt_break.zen
+// The WIDTH rule: a line is 80 columns, and a list that does not fit
+// breaks vertically. The second rule that reaches inside a declaration
+// and the first that changes how many LINES one takes — which is why it
+// is a pass of its own (`fmt.zen` runs it after the pads, re-lexing
+// what that wrote) and not a table keyed by line like `fmt_decl.zen`'s:
+// this rule's own edits would move that table's keys.
+//
+// TWO FORMS, one mechanic — find the list's separators, set the
+// whitespace around each:
+//
+//   - ARGUMENTS. `f(a, b)` and construction `Sym(name: n, ..)` are one
+//     node (a Call's args), so one rule covers both. Packed past the
+//     width: one argument per line at +4, `)` hugging the last:
+//
+//         Function(f) => out.add(Sym(
+//             name: f.name.text,
+//             kind: FUNCTION,
+//             span: d.span,
+//             name_span: f.name.span)),
+//
+//   - UNION BARS. An enum's variants (and an anonymous union's members)
+//     packed past the width: one per line, the bar leading at +4:
+//
+//         ValueShape* = StructValue
+//             | EnumValue
+//             | FnValue
+//
+// THE JUDGMENT IS THE PACKED LINE: the list's own line, with the list
+// re-laid on it — every whitespace run in its span collapsed to one
+// space — over the width, and the list breaks. Lists are judged
+// innermost first, and a list holding a broken one KEEPS: the inner
+// break is what shortened the line (`out.add` hugs `Sym` above), and
+// an outer break on top of it would buy indent, not width. A list
+// SHARING its line with a disjoint one keeps too — `f(a) || g(b)` over
+// the width has no list whose break fixes the line, and breaking one
+// side of an operator chain is raggedness, not layout; that line is a
+// human's to re-shape (a hand layout that fits is stable — see never
+// joined, below). The pass runs rounds to a fixpoint, because a break
+// can grow a kept list's indent past the width after the fact — the
+// next round breaks that one where it landed. Rounds are also what
+// makes the pass idempotent: a broken list re-judged re-emits the bytes
+// it already has.
+//
+// MOVES NO TOKEN: every comma, bar and item byte is the author's; only
+// whitespace around a separator is set, so `fmt.zen`'s guard covers
+// this rule with the same three lines it always had.
+//
+// REFUSES:
+//   - a gap holding anything but whitespace and its separator — a
+//     comment there is a token, and overwriting one is the accident
+//     this folder exists to prevent.
+//   - a list with a multi-line ITEM (a closure body, a record literal):
+//     the item's inner lines carry their own indentation, which a break
+//     cannot re-lay-out. `.loop((h) { .. })` and its kin are the common
+//     case and stay as written.
+//   - a list already broken some other way. It is never JOINED — this
+//     rule only breaks — so a hand layout that fits is stable input.
+//
+// NOT LISTS FOR THIS RULE: records, array literals, parameter lists.
+// The mechanic would fit them; the demand is unwritten; the corpus
+// comes first.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Vec = std.collections
+Range = std.core
+Ast = std.ast.ast_arena
+ExprId, TypeId, BlockId = std.ast.ast_id
+Module, Decl, Type, Call, Union, Enum = std.ast.ast_node
+scan, Source, Lexed = std.lex.lex
+Parser, module = std.parse.parse
+Src = fmt.fmt_src
+
+// 80, because that is the width the tree already keeps: measured across
+// src/, 372 of 52092 lines exceed it (93 exceed 100), and this rule's
+// worked example — `ValueShape` in parse_lookahead.zen — sits at 84,
+// between the two candidates. `make cap` counts a FILE's lines; nothing
+// else in the tree names a column count, so it is written here, once.
+WIDTH*: usize = 80
+
+// One separator-bounded piece of a list, in bytes: an argument, a
+// variant, a union member. Half-open, like the spans it comes from.
+Item = {
+    lo: usize,
+    hi: usize,
+}
+
+// A list that COULD break: where it sits, what separates its items, and
+// whether brackets hug the ends (a call's parens) or nothing does (an
+// enum or union, whose first variant stays on the `=` line).
+Cand = {
+    lo: usize,
+    hi: usize,
+    line: usize,
+    end_line: usize,
+    sep: u8,
+    parens: bool,
+    items: Vec<Item>,
+}
+
+// One whitespace replacement: `[from, to)` becomes `text`.
+Edit = {
+    from: usize,
+    to: usize,
+    text: String,
+}
+
+// The pass `fmt.zen`'s `render` wires in after the pads: break every
+// over-wide list in `text`, then do it again until a round moves
+// nothing. `file` only names the source for diagnostics; the pass
+// speaks offsets throughout.
+break_lines* = (a: Alloc, file: str, text: str) Res<String, AllocError> {
+    cur ::= copy_of(a, text).try();
+    rounds ::= 0;
+    loop(() { rounds < 16 }, (h) {
+        next = one_round(a, file, cur.view()).try();
+        rounds = rounds + 1;
+        next.view().eq(cur.view()).match({
+            true  => h.break(),
+            false => { cur = next; },
+        });
+    });
+    Ok(cur);
+}
+
+// One round: re-lex and re-parse (the last round's edits moved every
+// offset), break what this text breaks, hand back the new bytes. The
+// 16-round cap in `break_lines` is a belt, not a budget: the fixpoint
+// argument in the header says a round that moves something broke a list
+// no earlier round had broken, and lists are finite.
+one_round = (a: Alloc, file: str, text: str) Res<String, AllocError> {
+    lexed = scan(a, Source(file: file, text: text)).try();
+    lexed.is_clean().match({
+        false => copy_of(a, text),
+        true  => round_clean(a, text, lexed),
+    })
+}
+
+// A clean re-lex should always parse — the input did, and the rounds in
+// between move no token — but a pass that falls back to its input can
+// never eat code, so the unlikely arm is a copy, not a trap.
+round_clean = (a: Alloc, text: str, lexed: Lexed) Res<String, AllocError> {
+    p ::= a.Parser(lexed);
+    m = p.module(lexed.source.file).try();
+    (p.diags.len == 0).match({
+        false => copy_of(a, text),
+        true  => {
+            src = a.Src(text).try();
+            edits ::= a.Vec<Edit>();
+            judge(a, src, collect(a, src, p.tree, m).try(), edits).try();
+            apply(a, text, edits)
+        },
+    })
+}
+
+copy_of = (a: Alloc, text: str) Res<String, AllocError> {
+    out ::= a.String().try();
+    out.add_bytes(text).try();
+    Ok(out);
+}
+
+// -------------------------------------------------------------------
+// finding the lists
+// -------------------------------------------------------------------
+
+// Every list in the file, sorted by (end, start): a nested list ends
+// before the list holding it and two disjoint ones come out left to
+// right, which is the order the judging below needs — inner first, so
+// the hug rule has the inner list's answer when the outer is asked.
+collect = (a: Alloc, src: Src, tree: Ast, m: Module)
+          Res<Vec<Cand>, AllocError> {
+    cands ::= a.Vec<Cand>();
+    id ::= ExprId(index: 0);
+    Range(0, tree.expr_ids()).loop((h, i) {
+        tree.expr_at(id).kind.match({
+            Call(c) => add_call(a, src, cands, c),
+            _       => no_list(),
+        }).try();
+        id = ExprId(index: id.index + 1);
+    });
+    tid ::= TypeId(index: 0);
+    Range(0, tree.type_ids()).loop((h, i) {
+        t = tree.type_at(tid);
+        t.kind.match({
+            Union(u) => add_union(a, src, tree, cands, t, u),
+            _        => no_list(),
+        }).try();
+        tid = TypeId(index: tid.index + 1);
+    });
+    m.decls.loop((h, i, d) {
+        d.kind.match({
+            Enum(e) => add_enum(a, src, cands, e),
+            _       => no_list(),
+        }).try();
+    });
+    bid ::= BlockId(index: 0);
+    Range(0, tree.block_ids()).loop((h, i) {
+        tree.block_at(bid).stmts.loop((g, j, s) {
+            s.kind.match({
+                Decl(d) => d.kind.match({
+                    Enum(e) => add_enum(a, src, cands, e),
+                    _       => no_list(),
+                }),
+                _       => no_list(),
+            }).try();
+        });
+        bid = BlockId(index: bid.index + 1);
+    });
+    in_order(cands);
+    Ok(cands);
+}
+
+// Nothing to collect here. Allocates nothing but still speaks
+// `Res<(), AllocError>` since its callers match it beside the `add_`
+// functions, and sibling arms must agree on a type (fmt_decl.zen's
+// `unaligned` is the same pattern).
+no_list = () Res<(), AllocError> { Ok(()) }
+
+// `f(a, b)`, `Point(x: 3, y: 4)`: the parens are the list's ends and
+// the commas its separators. Zero arguments is not a list.
+add_call = (a: Alloc, src: Src, cands :: Vec<Cand>, c: Call)
+           Res<(), AllocError> {
+    (c.args.len == 0).match({
+        true  => no_list(),
+        false => {
+            items ::= a.Vec<Item>();
+            c.args.loop((h, i, arg) {
+                items.add(Item(
+                    lo: src.offset(arg.span.start),
+                    hi: src.offset(arg.span.end))).try();
+            });
+            cands.add(Cand(
+                lo: src.offset(c.args_span.start),
+                hi: src.offset(c.args_span.end),
+                line: c.args_span.start.line,
+                end_line: c.args_span.end.line,
+                sep: ',',
+                parens: true,
+                items: items,
+            ))
+        },
+    })
+}
+
+// `A | B` in type position. The union's own span is first-member to
+// last-member (parse_type.zen gathers it flat), which is exactly the
+// region this rule re-lays-out.
+add_union = (a: Alloc, src: Src, tree: Ast, cands :: Vec<Cand>, t: Type,
+             u: Union) Res<(), AllocError> {
+    items ::= a.Vec<Item>();
+    u.members.loop((h, i, mid) {
+        s = tree.type_at(mid).span;
+        items.add(Item(lo: src.offset(s.start), hi: src.offset(s.end))).try();
+    });
+    cands.add(Cand(
+        lo: src.offset(t.span.start),
+        hi: src.offset(t.span.end),
+        line: t.span.start.line,
+        end_line: t.span.end.line,
+        sep: '|',
+        parens: false,
+        items: items,
+    ))
+}
+
+// `Shape = Circle(Circle) | Rect(Rect) | Unit`. One variant has no
+// separator, so it is not a list — `AllocError* = | OutOfMemory` keeps
+// its leading bar alone either way.
+add_enum = (a: Alloc, src: Src, cands :: Vec<Cand>, e: Enum)
+           Res<(), AllocError> {
+    (e.variants.len < 2).match({
+        true  => no_list(),
+        false => {
+            items ::= a.Vec<Item>();
+            e.variants.loop((h, i, v) {
+                items.add(Item(
+                    lo: src.offset(v.span.start),
+                    hi: src.offset(v.span.end))).try();
+            });
+            first = e.variants.ptr().read(0);
+            last = e.variants.ptr().read(e.variants.len - 1);
+            cands.add(Cand(
+                lo: src.offset(first.span.start),
+                hi: src.offset(last.span.end),
+                line: first.span.start.line,
+                end_line: last.span.end.line,
+                sep: '|',
+                parens: false,
+                items: items,
+            ))
+        },
+    })
+}
+
+// Insertion sort: a file holds a handful of lists, and the comparison
+// is two fields. (hi, lo) pairs are distinct per candidate — two parser
+// spans that share both ends would be the same node — so the order is
+// total and no stability question arises.
+in_order = (cands :: Vec<Cand>) () {
+    Range(1, cands.len).loop((h, i) {
+        j ::= i;
+        loop(() { j > 0 && before(
+            cands.ptr().read(j),
+            cands.ptr().read(j - 1)) }, (g) {
+            tmp = cands.ptr().read(j - 1);
+            cands.ptr().write(j - 1, cands.ptr().read(j));
+            cands.ptr().write(j, tmp);
+            j = j - 1;
+        });
+    });
+}
+
+before = (x: Cand, y: Cand) bool {
+    (x.hi < y.hi) || (x.hi == y.hi && x.lo < y.lo)
+}
+
+// -------------------------------------------------------------------
+// judging
+// -------------------------------------------------------------------
+
+// Every list, in sorted order: break the ones this round breaks, leave
+// the rest. `broken` is parallel to `cands` because a Cand carries a
+// Vec and copying one to mark it would copy the handle, not the mark.
+judge = (a: Alloc, src: Src, cands: Vec<Cand>, edits :: Vec<Edit>)
+        Res<(), AllocError> {
+    broken ::= a.Vec<bool>();
+    Range(0, cands.len).loop((h, i) { broken.add(false).try(); });
+    Range(0, cands.len).loop((h, i) {
+        c = cands.ptr().read(i);
+        keep = holds_broken(cands, broken, c)
+            || shares_line(src, cands, c)
+            || !too_wide(src, c)
+            || !may_break(src, c);
+        keep.match({
+            true  => no_list(),
+            false => {
+                broken.ptr().write(i, true);
+                emit(a, src, c, edits)
+            },
+        }).try();
+    });
+    Ok(());
+}
+
+// The hug rule: a list holding an already-broken one keeps. Sorted
+// order means every broken candidate was judged before this one, so the
+// marks below are the whole answer.
+holds_broken = (cands: Vec<Cand>, broken: Vec<bool>, c: Cand) bool {
+    found ::= false;
+    Range(0, cands.len).loop((h, j) {
+        other = cands.ptr().read(j);
+        inside = broken.ptr().read(j) && other.lo >= c.lo && other.hi <= c.hi;
+        inside.match({
+            true  => { found = true; h.break(); },
+            false => (),
+        });
+    });
+    found;
+}
+
+// The packed line, measured: what precedes the list on its line, the
+// list with every whitespace run collapsed to one space, what follows
+// it. The collapse is a JUDGMENT, not an edit — a multi-line item
+// (refused in `may_break`) never gets re-laid-out for real.
+too_wide = (src: Src, c: Cand) bool {
+    packed_width(src, c) > WIDTH
+}
+
+// A list SHARING its line with a disjoint one keeps: no list's break
+// fixes `f(a) || g(b)` (the over-wide part is the operator chain, which
+// is no list), and breaking one side of it reads worse than the long
+// line did. Nested lists don't count — a container is answered by the
+// hug rule, and an item is exactly who may inherit this line.
+shares_line = (src: Src, cands: Vec<Cand>, c: Cand) bool {
+    ls = src.line_at(c.line);
+    le = src.after_line(c.line);
+    found ::= false;
+    Range(0, cands.len).loop((h, j) {
+        d = cands.ptr().read(j);
+        disjoint = d.lo >= c.hi || d.hi <= c.lo;
+        (disjoint && d.lo < le && d.hi > ls).match({
+            true  => { found = true; h.break(); },
+            false => (),
+        });
+    });
+    found;
+}
+
+packed_width = (src: Src, c: Cand) usize {
+    prefix = c.lo - src.line_at(c.line);
+    suffix = src.trim_back(c.hi, src.after_line(c.end_line)) - c.hi;
+    prefix + collapsed(src, c.lo, c.hi) + suffix
+}
+
+collapsed = (src: Src, from: usize, to: usize) usize {
+    n ::= 0;
+    ws ::= false;
+    Range(from, to).loop((h, i) {
+        sp = src.text.index(i).is_space();
+        (sp && ws).match({
+            true  => (),
+            false => { n = n + 1; },
+        });
+        ws = sp;
+    });
+    n;
+}
+
+// May this rule rewrite this list's gaps? Every item on one line as
+// written, brackets hugging nothing but whitespace, and each gap
+// holding exactly its separator in whitespace (the header says why each
+// clause exists).
+may_break = (src: Src, c: Cand) bool {
+    first = c.items.ptr().read(0);
+    last = c.items.ptr().read(c.items.len - 1);
+    clear ::= c.parens.match({
+        true  => all_space(src, c.lo + 1, first.lo)
+              && all_space(src, last.hi, c.hi - 1),
+        false => true,
+    });
+    Range(0, c.items.len - 1).loop((h, i) {
+        item = c.items.ptr().read(i);
+        ok = one_line(src, item.lo, item.hi)
+          && clean_gap(src, item.hi, c.items.ptr().read(i + 1).lo, c.sep);
+        ok.match({
+            true  => (),
+            false => { clear = false; h.break(); },
+        });
+    });
+    clear && one_line(src, last.lo, last.hi);
+}
+
+one_line = (src: Src, from: usize, to: usize) bool {
+    flat ::= true;
+    Range(from, to).loop((h, i) {
+        (src.text.index(i) == '\n').match({
+            true  => { flat = false; h.break(); },
+            false => (),
+        });
+    });
+    flat;
+}
+
+// The gap between two items: whitespace, the separator, whitespace, and
+// nothing else. The separator is found by walking bytes — safe here and
+// nowhere else, because a gap holds only trivia and the one punctuator:
+// a comment shows up as a byte that is neither, and the gap is refused.
+clean_gap = (src: Src, from: usize, to: usize, sep: u8) bool {
+    mid = skip_space(src, from, to);
+    (mid < to && src.text.index(mid) == sep).match({
+        false => false,
+        true  => skip_space(src, mid + 1, to) == to,
+    })
+}
+
+all_space = (src: Src, from: usize, to: usize) bool {
+    skip_space(src, from, to) == to
+}
+
+skip_space = (src: Src, from: usize, to: usize) usize {
+    at ::= from;
+    loop(() { at < to && src.text.index(at).is_space() }, (h) {
+        at = at + 1;
+    });
+    at;
+}
+
+// -------------------------------------------------------------------
+// breaking
+// -------------------------------------------------------------------
+
+// The canonical broken form: head gap (a call's `(` to its first item)
+// becomes newline+indent, each inter-item gap becomes separator +
+// newline+indent — an enum's separator LEADS the next line, a call's
+// comma closes this one — and a call's tail gap goes away entirely, so
+// `)` hugs the last item. Idempotency lives here: a list already in
+// this form has exactly these gaps, so breaking it again writes the
+// same bytes.
+emit = (a: Alloc, src: Src, c: Cand, edits :: Vec<Edit>)
+       Res<(), AllocError> {
+    start = src.line_at(c.line);
+    indent ::= a.String().try();
+    indent.add_bytes(src.slice_at(start, skip_space(
+        src,
+        start,
+        src.after_line(c.line)))).try();
+    indent.add_bytes("    ").try();
+    nl ::= a.String().try();
+    nl.add_byte('\n').try();
+    nl.add_bytes(indent.view()).try();
+    first = c.items.ptr().read(0);
+    last = c.items.ptr().read(c.items.len - 1);
+    c.parens.match({
+        true  => edits.add(Edit(from: c.lo + 1, to: first.lo, text: nl)),
+        false => no_list(),
+    }).try();
+    Range(0, c.items.len - 1).loop((h, i) {
+        rep ::= a.String().try();
+        c.parens.match({
+            true  => { rep.add_byte(c.sep).try();
+                       rep.add_bytes(nl.view()).try(); },
+            false => { rep.add_bytes(nl.view()).try();
+                       rep.add_byte(c.sep).try();
+                       rep.add_byte(' ').try(); },
+        });
+        edits.add(Edit(
+            from: c.items.ptr().read(i).hi,
+            to: c.items.ptr().read(i + 1).lo,
+            text: rep)).try();
+    });
+    c.parens.match({
+        true  => edits.add(Edit(
+            from: last.hi,
+            to: c.hi - 1,
+            text: a.String().try())),
+        false => no_list(),
+    }).try();
+    Ok(());
+}
+
+// The edits, in byte order — broken lists are disjoint (a containing
+// list kept, per the hug rule) and arrive sorted, so no sort is owed
+// here — over the author's bytes.
+apply = (a: Alloc, text: str, edits: Vec<Edit>) Res<String, AllocError> {
+    out ::= a.String().try();
+    at ::= 0;
+    Range(0, edits.len).loop((h, i) {
+        e = edits.ptr().read(i);
+        out.add_bytes(text.slice(at, e.from)).try();
+        out.add_bytes(e.text.view()).try();
+        at = e.to;
+    });
+    out.add_bytes(text.slice(at, text.len)).try();
+    Ok(out);
+}

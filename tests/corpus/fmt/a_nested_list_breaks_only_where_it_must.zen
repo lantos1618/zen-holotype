@@ -1,0 +1,93 @@
+// NESTED LISTS: when a list breaks, only ITS top-level separators
+// break — a list inside an item rides along packed, and breaks only
+// when its own line is the one past the width.
+//
+// The first case is the common shape: the outer call's packed line is
+// 82 columns, but `inner_call(a, b)` sits on a 49-column line, so the
+// outer breaks and the inner stays exactly as written.
+//
+// The second is the same two lists written on ONE line. Now the
+// inner's line IS the over-wide one (there is no other), and the rule
+// works innermost first: `inner_call` breaks, `outer_call` hugs it —
+// the same hug a_long_argument_list_breaks_one_per_line.zen pins. The
+// shape is not pretty, but it is what "break the list whose packed
+// line is too wide, innermost first" says, and it is a fixpoint.
+//
+// The third is the line the rule DECLINES: three calls across one
+// over-wide `||` chain, none holding another. No list's break fixes
+// that line — the width lives in the operators — and breaking one side
+// reads worse than the long line did, so disjoint lists sharing a line
+// all keep. A hand re-shape of it is stable input: the rule never
+// joins.
+//
+// `faithful` and `fixpoint` are printed per case for the reason
+// a_long_argument_list_breaks_one_per_line.zen gives.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+scan, Source = std.lex.lex
+render = fmt.fmt
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    shows(
+        a,
+        "the outer list breaks and the inner stays packed",
+        "x = outer_call(inner_call(a, b), second_argument,\n               third_argument, fourth_argument)\n").try();
+
+    shows(
+        a,
+        "on one over-wide line the innermost list breaks first",
+        "x = outer_call(inner_call(a, b), second_argument, third_argument, fourth_argument)\n").try();
+
+    shows(
+        a,
+        "an operator chain of calls is a human's to re-shape",
+        "r = kind.same(TokenKind.BraceOpen) || kind.same(TokenKind.ParenOpen) || kind.ret_start()\n").try();
+
+    Ok(0);
+}
+
+shows = (a: Alloc, what: str, text: str) Res<(), AllocError> {
+    first = formatted(a, text).try();
+    second = formatted(a, first.view()).try();
+    println("== {}", what);
+    println(
+        "faithful: {}, {}",
+        faithful_of(a, text).try(),
+        verdict(first.view().eq(second.view())));
+    show(first.view());
+    Ok(());
+}
+
+verdict = (settled: bool) str {
+    settled.match({
+        true  => "fixpoint",
+        false => "MOVED",
+    })
+}
+
+formatted = (a: Alloc, text: str) Res<String, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out = render(a, lexed).try();
+    Ok(out.text);
+}
+
+faithful_of = (a: Alloc, text: str) Res<bool, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out = render(a, lexed).try();
+    Ok(out.faithful);
+}
+
+show = (text: str) () {
+    line ::= 0;
+    from ::= 0;
+    Range(0, text.len).loop((h, i) {
+        (text.index(i) == '\n').then(() {
+            line = line + 1;
+            println("{} |{}|", line, text.slice(from, i));
+            from = i + 1;
+        });
+    });
+}
