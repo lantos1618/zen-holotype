@@ -5,7 +5,7 @@ CFLAGS  ?= -O2 -std=c99
 PY      ?= python3
 ROOT    ?= src
 
-.PHONY: all build seed test test-zen lint parse design cap dupcomments faults refmap ufcs style fixpoint determinism grammar grammar-test fmt clean help
+.PHONY: all build seed test test-zen lint parse design cap dupcomments faults refmap ufcs style fixpoint determinism grammar grammar-test fmt bench asan leak profile clean help
 
 all: test
 
@@ -158,9 +158,39 @@ fmt: build
 	    -not -path 'tests/corpus/lex/*' -print0 \
 	  | xargs -0 --no-run-if-empty ./zen fmt --check
 
+## bench: the tests/bench gate. Drivers under tests/bench/drivers/ mirror
+## the bench bodies (constructing a Bencher needs trait dispatch gen_c does
+## not have yet), run under an external wall clock minus the null driver's
+## floor, and are reported against the budgets in bench_budgets.zen and the
+## rolling median in tests/bench/baseline.json. NOT in `test`: wall clocks
+## are slow and noisy, and a gate that reddens on a loaded machine teaches
+## people to read past red. Over budget warns; only an absurd miss fails.
+bench:
+	$(PY) scripts/bench.py
+
+## asan: the compiler under AddressSanitizer + LeakSanitizer, built as
+## zen-asan (./zen is never clobbered), running one representative compile.
+## The deliberate argv-rows allocation is suppressed BY NAME in
+## tests/bench/lsan.supp -- widen that file and real leaks go quiet.
+asan: seed/zen.c
+	$(CC) -std=c99 -O1 -g -fsanitize=address,leak seed/zen.c -o zen-asan
+	tests/bench/asan.sh ./zen-asan
+
+## leak: valgrind's answer to the same question. definite leaks only --
+## still-reachable memory is where the deliberate argv rows land, and
+## reporting them would fail every run on a known-non-bug.
+leak: zen
+	tests/bench/leak.sh ./zen
+
+## profile: a frame-pointer build (zen-fp) self-compiles under perf record
+## -g; report and stacks land in tests/bench/out/. flamegraph.svg only when
+## the FlameGraph scripts are already on PATH -- they are never vendored.
+profile: seed/zen.c
+	CC=$(CC) bash scripts/profile.sh
+
 clean:
-	rm -f zen zen-new grammar/zen.so
-	rm -rf build/
+	rm -f zen zen-new zen-asan zen-fp grammar/zen.so
+	rm -rf build/ tests/bench/out/
 
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/^## //'
