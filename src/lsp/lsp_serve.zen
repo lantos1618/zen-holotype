@@ -1,7 +1,7 @@
 // src/lsp/lsp_serve.zen
 // The server: lifecycle, a document overlay, and a dispatch table.
 //
-// It answers FIVE requests and handles THREE notifications, and refuses
+// It answers EIGHT requests and handles THREE notifications, and refuses
 // everything else BY NAME with `-32601` and the method spelled back —
 // `src/zen/zen_cli.zen`'s own rule one level down: a command that
 // silently does nothing is worse than one that says it is not written.
@@ -9,6 +9,13 @@
 //   initialize                 capabilities, and the gate opens
 //   shutdown                   `null`, and no more work is accepted
 //   textDocument/hover         lsp_hover.zen — the one sema-backed query
+//   textDocument/definition    lsp_def.zen — where a name was declared
+//   textDocument/documentSymbol
+//                              lsp_symbol.zen — a module's declarations,
+//                              flat, off the AST alone
+//   textDocument/completion    lsp_compl.zen — the candidate set at a
+//                              position, by backward scan and dummy
+//                              identifier, never a recovering parser
 //   textDocument/semanticTokens/full
 //                              lsp_colour.zen — the lexer's own tokens,
 //                              reclassified by what the diagnostics'
@@ -35,35 +42,49 @@
 //
 // OVER 500 LINES, per STYLE.md's justification: the subject is one
 // session (lifecycle, document store, the table that routes one
-// message) sharing the `Server` that holds all three. `publishDiagnostics`
-// moved its own subject to `lsp_diag.zen`, leaving here only the
-// trigger — a change marks, `settled` is where the transport says the
-// batch is over.
+// message, and the arena discipline of every answer) sharing the
+// `Server` that holds all four. `publishDiagnostics` moved its own
+// subject to `lsp_diag.zen`, and the build itself to `lsp_built.zen`,
+// leaving here the trigger and the routing — a change marks, `settled`
+// is where the transport says the batch is over.
 
 str, String = std.text
 Vec, Map = std.collections
 Alloc, AllocError = std.mem
-Jsons, JsonId, write_text, written = lsp.lsp_json
-read, JsonFault = lsp.lsp_json_read
+Checker = sema.sema_check
+Jsons, JsonId, written = lsp.lsp_json
+read = lsp.lsp_json_read
 FrameFault, frame_at, write_frame, write_decimal = lsp.lsp_frame
-Hover, hover_at, hover_in = lsp.lsp_hover
+Hover, hover_at, hover_in, hover_with = lsp.lsp_hover
+definition_at, definition_in, definition_with = lsp.lsp_def
+Sym, symbols_at, write_symbols = lsp.lsp_symbol
+Item, complete_at, complete_in, complete_shared = lsp.lsp_compl
+sort_items, write_items = lsp.lsp_compl
 // The colours, and the legend `initialize` has to advertise them under.
 // Both come from `lsp_colour.zen` so the index a token carries and the
 // list it indexes cannot be spelled in two files.
 write_legend, write_tokens = lsp.lsp_colour
-// The one message this server sends unprompted, and the policy that
-// decides when. `lsp_diag.zen` holds both; this file holds the trigger.
+// The one message this server sends unprompted, the policy that decides
+// when, and the one build the settle and the queries share
+// (`lsp_built.zen` — reached through `Diagnostics`, whose slot it is).
 Diagnostics = lsp.lsp_diag
-// A wire coordinate, written where it is converted. This file kept a
-// private copy while hover was the only answer with a range.
-write_wire = lsp.lsp_pos
+relative_to = zen.zen_path
+// The wire's shapes: a request's fields read, a reply built. Their own
+// file (`lsp_reply.zen`) since the session met STYLE.md's hard cap.
+method_of, params_of, param, string_at, number_at = lsp.lsp_reply
+result, failed, parse_error, write_hover, write_target = lsp.lsp_reply
+write_capabilities, SEMANTIC_TOKENS = lsp.lsp_reply
+METHOD_NOT_FOUND, INVALID_PARAMS, NOT_INITIALIZED = lsp.lsp_reply
 path_of = lsp.lsp_uri
 
 // The whole of the server's state.
 //
-// `docs` maps a URI to the open buffer's text, a `str` borrowed from the
-// decoded JSON string in `a`. Safe because `a` is an arena outliving the
-// session; a per-request arena would make this a copy.
+// `docs` maps a URI to the open buffer's text — SESSION-ARENA COPIES,
+// not borrows: the JSON tree a string decodes into lives in the
+// message's own arena (dropped once the reply is written — `one`), and
+// only a string without escapes is a slice of the request
+// (`lsp_json_read.zen`), so nothing held past the message may borrow
+// from either. The copies happen in `changed_to`, once per real change.
 Server* = {
     a: Alloc,
 
@@ -98,12 +119,21 @@ Server* = {
     stopped* = (self: @Self) bool { self.stopping }
 
     // One message: read it, route it, frame whatever it produced.
-    one* = (self :: @Self, body: str, out :: String) Res<(), AllocError> {
-        tree ::= self.a.Jsons();
-        msg ::= self.a.String().try();
-        read(self.a, tree, body).match({
+    //
+    // `t` IS THE MESSAGE'S OWN ARENA, dropped by the caller when the
+    // reply has been written: the JSON tree, the reply being built and
+    // every answer's scratch live there, so a request leaves nothing
+    // behind. What must outlive the message — the documents, the open
+    // list, what `initialize` learned — borrows the request's BYTES
+    // (which the transport holds for the session) or allocates from
+    // `self.a`, never from `t`.
+    one* = (self :: @Self, t: Alloc, body: str, out :: String)
+           Res<(), AllocError> {
+        tree ::= t.Jsons();
+        msg ::= t.String().try();
+        read(t, tree, body).match({
             Err(f)  => parse_error(f, msg),
-            Ok(req) => self.route(tree, req, msg),
+            Ok(req) => self.route(t, tree, req, msg),
         }).try();
         // AN EMPTY MESSAGE IS A NOTIFICATION AND GETS NO FRAME — the
         // protocol forbids replying to one.
@@ -113,7 +143,7 @@ Server* = {
         })
     }
 
-    route = (self :: @Self, tree: Jsons, req: JsonId, msg :: String)
+    route = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, msg :: String)
             Res<(), AllocError> {
         method = method_of(tree, req);
         // THE PRESENCE OF `id` IS WHAT MAKES A MESSAGE A REQUEST, not
@@ -121,32 +151,63 @@ Server* = {
         // second, divergent copy of the spec.
         tree.field(req, "id").match({
             None    => self.notified(tree, req, method),
-            Ok(rid) => self.requested(tree, req, method, rid, msg),
+            Ok(rid) => self.requested(t, tree, req, method, rid, msg),
         })
     }
 
     // BEFORE `initialize`, EVERY REQUEST IS REFUSED with `-32002` — the
     // one piece of lifecycle a server cannot skip.
-    requested = (self :: @Self, tree: Jsons, req: JsonId, method: str,
-                 rid: JsonId, msg :: String) Res<(), AllocError> {
+    requested = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
+                 method: str, rid: JsonId, msg :: String)
+                Res<(), AllocError> {
         (self.ready || method.eq("initialize")).match({
-            false => failed(tree, rid, NOT_INITIALIZED,
-                            "the server has not been initialized", msg),
-            true  => self.answered(tree, req, method, rid, msg),
+            false => failed(
+                tree,
+                rid,
+                NOT_INITIALIZED,
+                "the server has not been initialized",
+                msg),
+            true  => self.answered(t, tree, req, method, rid, msg),
         })
     }
 
-    answered = (self :: @Self, tree: Jsons, req: JsonId, method: str,
-                rid: JsonId, msg :: String) Res<(), AllocError> {
+    answered = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
+                method: str, rid: JsonId, msg :: String)
+               Res<(), AllocError> {
         method.eq("initialize").match({
-            true  => self.initialized(tree, req, rid, msg),
+            true  => self.initialized(t, tree, req, rid, msg),
             false => method.eq("shutdown").match({
-                true  => { self.stopping = true; result(tree, rid, "null", msg) },
+                true  => { self.stopping = true; result(
+                    tree,
+                    rid,
+                    "null",
+                    msg) },
                 false => method.eq("textDocument/hover").match({
-                    true  => self.hovered(tree, req, rid, msg),
-                    false => method.eq(SEMANTIC_TOKENS).match({
-                        true  => self.coloured(tree, req, rid, msg),
-                        false => self.unknown(tree, rid, method, msg),
+                    true  => self.hovered(t, tree, req, rid, msg),
+                    false => method.eq("textDocument/definition").match({
+                        true  => self.defined(t, tree, req, rid, msg),
+                        false => method.eq(
+                            "textDocument/documentSymbol").match({
+                            true  => self.outlined(t, tree, req, rid, msg),
+                            false => method.eq(
+                                "textDocument/completion").match({
+                                true  => self.completed(t, tree, req, rid, msg),
+                                false => method.eq(SEMANTIC_TOKENS).match({
+                                    true  => self.coloured(
+                                        t,
+                                        tree,
+                                        req,
+                                        rid,
+                                        msg),
+                                    false => self.unknown(
+                                        t,
+                                        tree,
+                                        rid,
+                                        method,
+                                        msg),
+                                }),
+                            }),
+                        }),
                     }),
                 }),
             }),
@@ -163,24 +224,27 @@ Server* = {
     // `rootPath` IS NOT READ — the deprecated spelling of the same
     // thing, and a second source for one fact can disagree with the
     // first.
-    initialized = (self :: @Self, tree: Jsons, req: JsonId, rid: JsonId,
-                   msg :: String) Res<(), AllocError> {
+    initialized = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
+                   rid: JsonId, msg :: String) Res<(), AllocError> {
         self.ready = true;
-        self.workspace = path_of(string_at(tree, params_of(tree, req),
-                                           "rootUri"));
-        caps ::= self.a.String().try();
+        self.workspace = own(self.a, path_of(string_at(
+            tree,
+            params_of(tree, req),
+            "rootUri"))).try();
+        caps ::= t.String().try();
         write_capabilities(caps).try();
         result(tree, rid, caps.view(), msg)
     }
 
     // REFUSED BY NAME: the method is echoed so a client's log says which
     // request is unimplemented, not that some request failed.
-    unknown = (self :: @Self, tree: Jsons, rid: JsonId, method: str,
+    unknown = (self :: @Self, t: Alloc, tree: Jsons, rid: JsonId, method: str,
                msg :: String) Res<(), AllocError> {
-        why ::= self.a.String().try();
+        why ::= t.String().try();
         why.add_bytes("no handler for ").try();
         why.add_bytes(method).try();
-        why.add_bytes(" - see docs/design_lsp.md for the stage it arrives at").try();
+        why.add_bytes(
+            " - see docs/design_lsp.md for the stage it arrives at").try();
         failed(tree, rid, METHOD_NOT_FOUND, why.view(), msg)
     }
 
@@ -239,9 +303,11 @@ Server* = {
     }
 
     changed_to = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
-        self.docs.set(uri, text).try();
-        self.listed(uri).try();
-        self.notes.owes(uri);
+        kept_uri = own(self.a, uri).try();
+        kept_text = own(self.a, text).try();
+        self.docs.set(kept_uri, kept_text).try();
+        self.listed(kept_uri).try();
+        self.notes.owes(kept_uri);
         Ok(());
     }
 
@@ -253,21 +319,29 @@ Server* = {
     }
 
     // THE SETTLE POINT: every message the transport was holding has been
-    // answered, so a build owed to the last of them happens now. Called
-    // by `serve` at buffer end and by `lsp_stdio.zen` after each drain.
+    // answered, so a build owed to the last of them happens now — or is
+    // FOUND, when a queued query already built this exact state (the
+    // slot's key is the documents' bytes; `lsp_diag.zen`'s `settled`
+    // ensures rather than builds). Called by `serve` at buffer end and
+    // by `lsp_stdio.zen` after each drain. `t` is the batch's scratch.
     //
     // NOTHING IS SENT AFTER `shutdown`: no work is accepted once it has
     // been answered, and an unprompted notification between `shutdown`
     // and `exit` is work the client has just said it does not want.
-    settled* = (self :: @Self, out :: String) Res<(), AllocError> {
+    settled* = (self :: @Self, t: Alloc, out :: String) Res<(), AllocError> {
         self.stopping.match({
             true  => written(),
-            false => self.notes.settled(self.env, self.workspace, self.open,
-                                        self.docs, out),
+            false => self.notes.settled(
+                self.env,
+                self.workspace,
+                self.open,
+                self.docs,
+                t,
+                out),
         })
     }
 
-    hovered = (self :: @Self, tree: Jsons, req: JsonId, rid: JsonId,
+    hovered = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
                msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
         where = param(tree, req, "position");
@@ -276,22 +350,37 @@ Server* = {
         self.docs.get(uri).match({
             // A client bug; `-32602` names it rather than answering
             // `null`, which would misleadingly read as "no type here".
-            None     => failed(tree, rid, INVALID_PARAMS,
-                               "no open document for that uri", msg),
-            Ok(text) => self.answer_hover(tree, rid, uri, text, line, character, msg),
+            None     => failed(
+                tree,
+                rid,
+                INVALID_PARAMS,
+                "no open document for that uri",
+                msg),
+            // THE WORKSPACE DECIDES, as for definition. Without one the
+            // lone module answers from the request's own arena; with one
+            // the answer comes off the SHARED build — the slot ensured
+            // for this exact document state, so a hover after a settle
+            // builds nothing.
+            Ok(text) => {
+                body ::= t.String().try();
+                self.workspace.is_empty().match({
+                    true  => {
+                        qa ::= self.env.mem.alloc();
+                        self.write_hovered(
+                            hover_at(qa, uri, text, line, character).try(),
+                            body)
+                    },
+                    false => self.shared_hover(
+                        t,
+                        uri,
+                        text,
+                        line,
+                        character,
+                        body),
+                }).try();
+                result(tree, rid, body.view(), msg)
+            },
         })
-    }
-
-    answer_hover = (self :: @Self, tree: Jsons, rid: JsonId, uri: str,
-                    text: str, line: usize, character: usize, msg :: String)
-                   Res<(), AllocError> {
-        h = self.hover(uri, text, line, character).try();
-        body ::= self.a.String().try();
-        h.found.match({
-            false => body.add_bytes("null").try(),
-            true  => write_hover(h, body).try(),
-        });
-        result(tree, rid, body.view(), msg)
     }
 
     // COLOUR READS WHAT THE DIAGNOSTICS' BUILD SETTLED. `classes_for`
@@ -299,42 +388,315 @@ Server* = {
     // any change until the next clean one — and an empty list IS the
     // lexical answer, so the fallback costs no branch. A DOCUMENT NEVER
     // OPENED IS `-32602`, the same refusal hover makes.
-    coloured = (self :: @Self, tree: Jsons, req: JsonId, rid: JsonId,
+    coloured = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
+                rid: JsonId, msg :: String) Res<(), AllocError> {
+        uri = string_at(tree, param(tree, req, "textDocument"), "uri");
+        self.docs.get(uri).match({
+            None     => failed(
+                tree,
+                rid,
+                INVALID_PARAMS,
+                "no open document for that uri",
+                msg),
+            Ok(text) => {
+                body ::= t.String().try();
+                names = self.notes.classes_for(t, uri).try();
+                write_tokens(t, uri, text, names, body).try();
+                result(tree, rid, body.view(), msg)
+            },
+        })
+    }
+
+    // HOVER OFF THE SHARED BUILD, the way `write_definition` below does
+    // it: the slot is ensured for the document being asked about —
+    // building once if the state is new — and its checker answers. The
+    // `None` arm is unreachable (`shared` ensured the slot) and falls
+    // back to the build this file made per request before the slot
+    // existed, never a guess.
+    shared_hover = (self :: @Self, t: Alloc, uri: str, text: str,
+                    line: usize, character: usize, body :: String)
+                   Res<(), AllocError> {
+        path = path_of(uri);
+        sh = self.notes.shared(
+            self.env,
+            self.workspace,
+            self.open,
+            self.docs,
+            path,
+            t).try();
+        sh.c.match({
+            None  => {
+                qa ::= self.env.mem.alloc();
+                self.write_hovered(
+                    hover_in(
+                        self.env,
+                        qa,
+                        self.workspace,
+                        path,
+                        text,
+                        line,
+                        character).try(),
+                    body)
+            },
+            Ok(c) => self.write_hovered(
+                hover_with(
+                    c,
+                    t,
+                    relative_to(sh.root, path),
+                    text,
+                    line,
+                    character).try(),
+                body),
+        })
+    }
+
+    // A hover, or the protocol's `null` when the position answered
+    // nothing — the two lines every hover answer shares, once.
+    write_hovered = (self :: @Self, h: Hover, body :: String)
+                    Res<(), AllocError> {
+        h.found.match({
+            false => body.add_bytes("null"),
+            true  => write_hover(h, body),
+        })
+    }
+
+    // DEFINITION and COMPLETION take the same two params as hover and
+    // make the same refusal for a document never opened.
+    //
+    // THE WORKSPACE DECIDES, as for hover. Without one the lone module
+    // answers from the request's own arena; with one the answer comes
+    // off the SHARED build — the slot ensured for this exact document
+    // state, so a definition after a settle builds nothing.
+    defined = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
+               msg :: String) Res<(), AllocError> {
+        uri = string_at(tree, param(tree, req, "textDocument"), "uri");
+        where = param(tree, req, "position");
+        line = number_at(tree, where, "line");
+        character = number_at(tree, where, "character");
+        self.docs.get(uri).match({
+            None     => failed(
+                tree,
+                rid,
+                INVALID_PARAMS,
+                "no open document for that uri",
+                msg),
+            Ok(text) => {
+                body ::= t.String().try();
+                self.workspace.is_empty().match({
+                    true  => {
+                        qa ::= self.env.mem.alloc();
+                        write_target(
+                            definition_at(
+                                qa,
+                                uri,
+                                text,
+                                line,
+                                character).try(), body)
+                    },
+                    false => self.write_definition(
+                        t,
+                        uri,
+                        text,
+                        line,
+                        character,
+                        body),
+                }).try();
+                result(tree, rid, body.view(), msg)
+            },
+        })
+    }
+
+    write_definition = (self :: @Self, t: Alloc, uri: str, text: str,
+                        line: usize, character: usize, body :: String)
+                       Res<(), AllocError> {
+        path = path_of(uri);
+        sh = self.notes.shared(
+            self.env,
+            self.workspace,
+            self.open,
+            self.docs,
+            path,
+            t).try();
+        sh.c.match({
+            // Unreachable — `shared` ensured the slot — and the fallback
+            // is the build this file made per request before the slot
+            // existed, never a guess.
+            None  => {
+                qa ::= self.env.mem.alloc();
+                write_target(
+                    definition_in(
+                        self.env,
+                        qa,
+                        self.workspace,
+                        path,
+                        uri,
+                        text,
+                        line,
+                        character).try(), body)
+            },
+            Ok(c) => write_target(
+                definition_with(
+                    self.env,
+                    c,
+                    t,
+                    sh.root,
+                    uri,
+                    text,
+                    relative_to(sh.root, path),
+                    line,
+                    character).try(), body),
+        })
+    }
+
+    // THE OUTLINE NEEDS NO BUILD AND NO WORKSPACE: a declaration's kind
+    // and spans are AST facts, so the buffer alone answers — the same
+    // economy colour's lexical half makes. Its scratch is the request's
+    // arena, like every other answer's.
+    outlined = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
                 msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
         self.docs.get(uri).match({
-            None     => failed(tree, rid, INVALID_PARAMS,
-                               "no open document for that uri", msg),
-            Ok(text) => self.answer_colour(tree, rid, uri, text, msg),
+            None     => failed(
+                tree,
+                rid,
+                INVALID_PARAMS,
+                "no open document for that uri",
+                msg),
+            Ok(text) => {
+                syms ::= t.Vec<Sym>();
+                symbols_at(t, text, syms).try();
+                body ::= t.String().try();
+                write_symbols(uri, text, syms, body).try();
+                result(tree, rid, body.view(), msg)
+            },
         })
     }
 
-    answer_colour = (self :: @Self, tree: Jsons, rid: JsonId, uri: str,
-                     text: str, msg :: String) Res<(), AllocError> {
-        body ::= self.a.String().try();
-        names = self.notes.classes_for(uri).try();
-        write_tokens(self.a, uri, text, names, body).try();
-        result(tree, rid, body.view(), msg)
+    // COMPLETION IN THREE PARTS, by where the build comes from. No
+    // workspace: the lone module, in the request's own arena. A workspace
+    // and a trigger that is not after a dot: the buffer parses as it
+    // stands, so the SHARED build's checker answers. After a dot the
+    // buffer does not parse — `complete_in` patches in a dummy identifier
+    // and builds THAT, a state the slot never holds by definition, so
+    // the patched build is the request's own and dies with `qa`.
+    completed = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
+                 rid: JsonId, msg :: String) Res<(), AllocError> {
+        uri = string_at(tree, param(tree, req, "textDocument"), "uri");
+        where = param(tree, req, "position");
+        line = number_at(tree, where, "line");
+        character = number_at(tree, where, "character");
+        self.docs.get(uri).match({
+            None     => failed(
+                tree,
+                rid,
+                INVALID_PARAMS,
+                "no open document for that uri",
+                msg),
+            Ok(text) => {
+                body ::= t.String().try();
+                self.workspace.is_empty().match({
+                    true  => {
+                        qa ::= self.env.mem.alloc();
+                        items ::= qa.Vec<Item>();
+                        complete_at(qa, text, line, character, items).try();
+                        sort_items(items).try();
+                        write_items(items, body)
+                    },
+                    false => self.write_completion(
+                        t,
+                        uri,
+                        text,
+                        line,
+                        character,
+                        body),
+                }).try();
+                result(tree, rid, body.view(), msg)
+            },
+        })
     }
 
-    // WHICH OF THE TWO HOVERS: the workspace is the whole decision. With
-    // one, the document is checked as part of a BUILD and an imported
-    // name has a type. Without one — no `rootUri`, or the two-file form
-    // of `zen lsp` — the single-module answer types what the file
-    // declares and answers `null`, never a guess, for what it imports.
-    hover = (self :: @Self, uri: str, text: str, line: usize,
-             character: usize) Res<Hover, AllocError> {
-        self.workspace.is_empty().match({
-            true  => hover_at(self.a, uri, text, line, character),
-            false => hover_in(self.env, self.a, self.workspace, path_of(uri),
-                              text, line, character),
+    write_completion = (self :: @Self, t: Alloc, uri: str, text: str,
+                        line: usize, character: usize, body :: String)
+                       Res<(), AllocError> {
+        path = path_of(uri);
+        sh = self.notes.shared(
+            self.env,
+            self.workspace,
+            self.open,
+            self.docs,
+            path,
+            t).try();
+        done = sh.c.match({
+            // Unreachable, as in `write_definition`; the patched build
+            // below answers instead.
+            None  => false,
+            Ok(c) => self.shared_completion(
+                c,
+                t,
+                sh.root,
+                path,
+                text,
+                line,
+                character,
+                body).try(),
+        });
+        done.match({
+            true  => written(),
+            false => self.patched_completion(path, text, line, character,
+                                             body),
         })
+    }
+
+    shared_completion = (self :: @Self, c: Checker, t: Alloc, root: str,
+                         path: str, text: str, line: usize, character: usize,
+                         body :: String) Res<bool, AllocError> {
+        items ::= t.Vec<Item>();
+        done = complete_shared(
+            c,
+            t,
+            relative_to(root, path),
+            text,
+            line,
+            character,
+            items).try();
+        done.match({
+            false => written(),
+            true  => {
+                sort_items(items).try();
+                write_items(items, body)
+            },
+        }).try();
+        Ok(done);
+    }
+
+    patched_completion = (self :: @Self, path: str, text: str, line: usize,
+                          character: usize, body :: String)
+                         Res<(), AllocError> {
+        qa ::= self.env.mem.alloc();
+        items ::= qa.Vec<Item>();
+        complete_in(
+            self.env,
+            qa,
+            self.workspace,
+            path,
+            text,
+            line,
+            character,
+            items).try();
+        sort_items(items).try();
+        write_items(items, body)
     }
 }
 
 Server* = (a: Alloc, env: Env) Server {
-    Server(a: a, env: env, docs: a.Map<str, str>(), open: a.Vec<str>(),
-           notes: a.Diagnostics(), ready: false, stopping: false)
+    Server(
+        a: a,
+        env: env,
+        docs: a.Map<str, str>(),
+        open: a.Vec<str>(),
+        notes: a.Diagnostics(env),
+        ready: false,
+        stopping: false)
 }
 
 // Every frame in `input`, answered into `out`.
@@ -343,18 +705,23 @@ Server* = (a: Alloc, env: Env) Server {
 // recovery is impossible — the header of this message is the only thing
 // that says where the next starts, so skipping forward would
 // resynchronise onto a byte inside somebody's document.
+//
+// THE BUFFER FORM ANSWERS FROM THE SESSION ARENA THROUGHOUT — `s.a`
+// stands in for the per-message scratch `lsp_stdio.zen` hands `one`,
+// since a file-driven session ends with the process and nothing is
+// reclaimed before then anyway.
 serve* = (s :: Server, input: str, out :: String) Res<(), AllocError> {
     at ::= 0;
     going ::= true;
     loop(() { going && at < input.len }, (h) {
         frame_at(input, at).match({
             Err(f) => { going = false; frame_fault(f, out).try(); },
-            Ok(fr) => { at = fr.next; s.one(fr.body, out).try(); },
+            Ok(fr) => { at = fr.next; s.one(s.a, fr.body, out).try(); },
         });
     });
     // THE END OF A BUFFER IS A SETTLE POINT — what makes a batch of
     // changes cost one build.
-    s.settled(out)
+    s.settled(s.a, out)
 }
 
 // A framing fault is reported to the caller's stream, not to a client
@@ -388,160 +755,14 @@ frame_why* = (f: FrameFault) str {
     })
 }
 
-// --- reading a request -----------------------------------------------
-//
-// Every one of these answers "" or 0 for a field it cannot find, and
-// none fails — refusal happens later, by name, where it can carry an id.
-
-method_of = (tree: Jsons, req: JsonId) str {
-    string_at(tree, req, "method")
+// A `str` copied into an arena — what the document store, the workspace
+// and the owed marker keep. The JSON tree a string decodes into lives in
+// the message's own arena and only a string without escapes is a slice
+// of the request (`lsp_json_read.zen`), so nothing held past the message
+// may borrow from either. `lsp_diag.zen`'s `owned_str` is the same five
+// lines for the same reason, private to its file.
+own = (a: Alloc, s: str) Res<str, AllocError> {
+    out ::= a.String().try();
+    out.add_bytes(s).try();
+    Ok(out.view());
 }
-
-// `params`, or the request itself when there are none — a malformed
-// message reads as one with every field absent.
-params_of = (tree: Jsons, req: JsonId) JsonId {
-    tree.field(req, "params").match({ None => req, Ok(ps) => ps })
-}
-
-// `params.<name>`, and the object itself when absent — same reading one
-// level down.
-param = (tree: Jsons, req: JsonId, name: str) JsonId {
-    ps = params_of(tree, req);
-    tree.field(ps, name).match({ None => ps, Ok(v) => v })
-}
-
-string_at = (tree: Jsons, obj: JsonId, name: str) str {
-    tree.field(obj, name).match({
-        None  => "",
-        Ok(v) => tree.text(v).match({ Ok(s) => s, None => "" }),
-    })
-}
-
-number_at = (tree: Jsons, obj: JsonId, name: str) usize {
-    tree.field(obj, name).match({
-        None  => 0,
-        Ok(v) => tree.whole(v).match({ Ok(n) => n, None => 0 }),
-    })
-}
-
-// --- the reply shapes ------------------------------------------------
-//
-// Built as TEXT and not through the arena: a reply is a fixed shape with
-// two holes, and an arena would mean building six nodes to print eight
-// bytes. Every quotable string goes through `write_text`,
-// `lsp_json.zen`'s escaper — one escaping rule in this folder.
-
-result = (tree: Jsons, rid: JsonId, body: str, msg :: String)
-         Res<(), AllocError> {
-    head(tree, rid, msg).try();
-    msg.add_bytes(",\"result\":").try();
-    msg.add_bytes(body).try();
-    msg.add_bytes("}")
-}
-
-failed = (tree: Jsons, rid: JsonId, code: usize, why: str, msg :: String)
-         Res<(), AllocError> {
-    head(tree, rid, msg).try();
-    msg.add_bytes(",\"error\":{\"code\":-").try();
-    write_decimal(code, msg).try();
-    msg.add_bytes(",\"message\":").try();
-    write_text(why, msg).try();
-    msg.add_bytes("}}")
-}
-
-// THE ID IS ECHOED VERBATIM, out of the arena it was read from — a
-// JSON-RPC id may be a number or a string, and re-emitting the node
-// matches either without a second representation of "an id".
-head = (tree: Jsons, rid: JsonId, msg :: String) Res<(), AllocError> {
-    msg.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
-    tree.write(rid, msg)
-}
-
-// A frame this server could not parse gets an error with a NULL id —
-// the id lives inside the document that failed to parse.
-parse_error = (f: JsonFault, msg :: String) Res<(), AllocError> {
-    msg.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-").try();
-    write_decimal(PARSE_ERROR, msg).try();
-    msg.add_bytes(",\"message\":").try();
-    write_fault(f, msg).try();
-    msg.add_bytes("}}")
-}
-
-// The fault, with its byte offset — `TESTING.md:17`: "a rejection with
-// the wrong span is a failure".
-write_fault = (f: JsonFault, msg :: String) Res<(), AllocError> {
-    msg.add_byte('"').try();
-    msg.add_bytes(fault_why(f)).try();
-    fault_byte(f).match({
-        None  => written(),
-        Ok(i) => { msg.add_bytes(" at byte ").try(); write_decimal(i, msg) },
-    }).try();
-    msg.add_byte('"')
-}
-
-fault_why = (f: JsonFault) str {
-    f.match({
-        Unexpected(_) => "unexpected byte",
-        Truncated(_)  => "the document ended inside a value",
-        BadEscape(_)  => "bad escape",
-        BadNumber(_)  => "not a JSON number",
-        TooDeep(_)    => "nested too deeply",
-        Trailing(_)   => "trailing bytes after the value",
-        NoMemory      => "out of memory",
-    })
-}
-
-fault_byte = (f: JsonFault) Res<usize> {
-    f.match({
-        Unexpected(i) => Ok(i),
-        Truncated(i)  => Ok(i),
-        BadEscape(i)  => Ok(i),
-        BadNumber(i)  => Ok(i),
-        TooDeep(i)    => Ok(i),
-        Trailing(i)   => Ok(i),
-        NoMemory      => None,
-    })
-}
-
-// A `Hover` as the protocol spells one. `plaintext` and not `markdown`:
-// rendering as markup would let a `*` inside a name become emphasis —
-// not hypothetical, since an exported name IS starred.
-write_hover = (h: Hover, out :: String) Res<(), AllocError> {
-    out.add_bytes("{\"contents\":{\"kind\":\"plaintext\",\"value\":").try();
-    write_text(h.shown, out).try();
-    out.add_bytes("},\"range\":{\"start\":").try();
-    write_wire(h.start, out).try();
-    out.add_bytes(",\"end\":").try();
-    write_wire(h.end, out).try();
-    out.add_bytes("}}")
-}
-
-// WHAT THIS SERVER SAYS IT CAN DO, and only what it does.
-//
-// WRITTEN, not a constant: the semantic-token legend belongs to
-// `lsp_colour.zen`, and the index a `tokenType` uses cannot be spelled
-// in two files without one day silently disagreeing.
-//
-// Sync kind 1 is Full — see this file's header for why not 2.
-//
-// `full: true` AND NOTHING ELSE. A client believes what it is told:
-// advertising `range` would make VS Code send
-// `textDocument/semanticTokens/range`, which this server refuses with
-// `-32601`, leaving the file with NO COLOUR AT ALL and no reason shown.
-// A capability is a promise; the only safe one is the one already kept.
-write_capabilities* = (out :: String) Res<(), AllocError> {
-    out.add_bytes("{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"semanticTokensProvider\":{\"legend\":").try();
-    write_legend(out).try();
-    out.add_bytes(",\"full\":true}},\"serverInfo\":{\"name\":\"zen\",\"version\":\"0\"}}")
-}
-
-// The one method `semanticTokensProvider` above promises, spelled once
-// beside the promise.
-SEMANTIC_TOKENS*: str = "textDocument/semanticTokens/full"
-
-// JSON-RPC's codes, as MAGNITUDES: negative on the wire, and the sign is
-// written by the one function that emits them.
-PARSE_ERROR*: usize = 32700
-METHOD_NOT_FOUND*: usize = 32601
-INVALID_PARAMS*: usize = 32602
-NOT_INITIALIZED*: usize = 32002

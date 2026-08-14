@@ -8,7 +8,9 @@ functions, `loop, find, filter, map, pairs, LoopHandle, Range, Eq, Hash, Hasher,
 Display, IoError, WriteError, Sink, Path, Duration`, plus the re-exported
 `str, String` (std.text), `Vec, Map` (std.collections),
 `Alloc, AllocError, Arena, Mem, Ptr, null_ptr` (std.mem) and `Env, ArgError`
-(std.env). `println` is compiler sugar, `bool` is a primitive. The name→module
+(std.env). `println` is compiler sugar. `bool` is a primitive AND a surface name:
+its prelude declaration (`bool* = {}`, std.core.bool) is what hover reads,
+so core.zen re-exports it like any other. The name→module
 map is src/std/std.zen:14-41.
 
 **Summary.** The first pass of this census found seven files with missing
@@ -116,7 +118,7 @@ file — no fix is claimed.
   resolution. The imports added there are verified by hand against
   src/std/std.zen and the sibling file, not by a compiler run.
 - **`Function` has no importable home.** example/build.zen:55,67 names it;
-  it is the compiler's AST node (src/ast/ast_node.zen:516), no std module
+  it is the compiler's AST node (src/std/ast/ast_node.zen:516), no std module
   exports it, and src/std/build/build.zen itself uses `Function` and
   `Module` bare (lines 100, 113, 156) with no import. Fixing that means
   editing src/, which was out of bounds for this pass.

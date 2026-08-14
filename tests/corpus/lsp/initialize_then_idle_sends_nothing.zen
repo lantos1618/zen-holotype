@@ -1,0 +1,84 @@
+// IDLE AFTER `initialize` SENDS NOTHING.
+//
+// The one message this server sends unprompted is
+// `textDocument/publishDiagnostics`, and it is owed to a CHANGE. A
+// session that has opened no document has changed nothing, so between
+// `initialize`'s reply and the first `didOpen` the wire must be silent
+// — an unsolicited notification here would be a build nobody asked for
+// (the workspace root, walked on spec), which is exactly the work the
+// shared slot (`lsp_built.zen`) exists to not do.
+//
+// THREE BATCHES: the handshake, then the two notifications that mean
+// "nothing to do" (`initialized`, and `$/cancelRequest` — dropped by
+// design, `lsp_serve.zen`'s header: no yield points), then a batch that
+// is not there at all. The settle point runs after each batch and owes
+// nothing, so even IT must be quiet.
+//
+// THE FRAMING IS UNWRAPPED AND NOT PRINTED — a `Content-Length` header
+// carries a CR and a `.expected` may not (docs/TESTING.md). Every byte
+// of the envelope is `a_session_is_answered_frame_by_frame`'s subject.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// No `rootUri` on purpose: even the workspace is absent, so any frame
+// here is unambiguously unsolicited.
+ROOT_URI*: str = "file://."
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    s ::= a.Server(env);
+
+    first ::= a.String().try();
+    open_session(a, first).try();
+    batch(s, a, "initialize", first.view()).try();
+
+    second ::= a.String().try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        second).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"$/cancelRequest\",\"params\":{\"id\":1}}",
+        second).try();
+    batch(s, a, "initialized, and a cancel", second.view()).try();
+
+    Ok(0);
+}
+
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":").try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+// One batch through the server, and every frame it produced.
+batch = (s :: Server, a: Alloc, what: str, input: str) Res<(), AllocError> {
+    out ::= a.String().try();
+    serve(s, input, out).try();
+    println("--- {}", what);
+    walk(out.view());
+    Ok(());
+}
+
+// Every frame's body, one per line, with silence said out loud: a count
+// that prints nothing for an empty batch is a count nothing can check.
+walk = (out: str) () {
+    from ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && from < out.len }, (h) {
+        frame_at(out, from).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { seen = seen + 1; println(
+                "    {}",
+                fr.body); from = fr.next; },
+        });
+    });
+    (seen == 0).then(() { println("    (no frames)"); });
+}

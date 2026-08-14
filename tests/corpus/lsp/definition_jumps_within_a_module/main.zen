@@ -1,0 +1,171 @@
+// DEFINITION JUMPS WITHIN A MODULE — one buffer, no workspace, and the
+// four resolution paths `lsp_def.zen` knows, each pinned at its span.
+//
+// This is `design_lsp.md` §7's L2 gate for definition: "a source file
+// with cursor positions and the expected answer — for definition a
+// `file:line:col`". It drives the SERVER, so every position goes
+// through the wire's coordinates and the dispatch table, and the reply
+// is asserted whole — a right declaration under the wrong range is red.
+//
+// The table covers, in source order:
+//
+//   - a CALL's callee, from `call_memo` (`double` at its use)
+//   - a MEMBER after a dot, from `members_of` (`x`, `y` of `p.x`, `p.y`)
+//   - a WRITTEN TYPE, from `type_memo` (`Point` in the parameter list)
+//   - the `null` rows, which are the point and not the padding: a local
+//     and a parameter (the L3 gap — a `Binding` carries no span), a
+//     builtin type (no declaration to jump to), and a struct's own name
+//     at its declaration site (no node covers it — the same gap hover
+//     documents)
+//
+// NO `rootUri` IS SENT, so this is the lone-module path: the buffer is
+// the whole program and nothing here needs an import.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, write_decimal, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// The program jumped around in.
+DOC*: str = "Point = { x*: i32, y*: i32 }\n\ndouble = (n: i32) i32 { n + n }\n\ntotal = (p: Point) i32 {\n    d = double(p.x);\n    d + p.y\n}\n"
+
+URI*: str = "file:///a.zen"
+
+// One probed position, in WIRE coordinates — 0-based line, 0-based
+// character — because that is what a client sends and this test is on
+// the client's side of `lsp_pos.zen`.
+Probe* = {
+    line*: usize,
+    character*: usize,
+    what*: str,
+}
+
+// The table, in source order: the decls first (the jump TARGETS), then
+// the uses that jump to them, then the rows that must stay `null`.
+probes = (a: Alloc) Res<Vec<Probe>, AllocError> {
+    all ::= a.Vec<Probe>();
+    all.add(Probe(
+        line: 0,
+        character: 1,
+        what: "Point at its own declaration: null")).try();
+    all.add(Probe(
+        line: 2,
+        character: 2,
+        what: "double at its own name: itself")).try();
+    all.add(Probe(
+        line: 4,
+        character: 12,
+        what: "Point a written type, to the struct")).try();
+    all.add(Probe(line: 4, character: 20, what: "i32  a builtin: null")).try();
+    all.add(Probe(
+        line: 5,
+        character: 10,
+        what: "double a call's callee, to the decl")).try();
+    all.add(Probe(
+        line: 5,
+        character: 17,
+        what: "x     a member, to the field")).try();
+    all.add(Probe(line: 6, character: 4,  what: "d     a local, used: null")).try();
+    all.add(Probe(
+        line: 6,
+        character: 10,
+        what: "y     a member, to the field")).try();
+    Ok(all);
+}
+
+// --- the requests ------------------------------------------------------
+
+open_doc = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(DOC, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+definition = (a: Alloc, id: usize, p: Probe, into :: String)
+             Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(
+        ",\"method\":\"textDocument/definition\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes("},\"position\":{\"line\":").try();
+    write_decimal(p.line, body).try();
+    body.add_bytes(",\"character\":").try();
+    write_decimal(p.character, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+// ONE `serve` CALL for the whole table, so a server that answered the
+// first request and then lost its place in the stream fails here.
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    table = probes(a).try();
+
+    input ::= a.String().try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
+        input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input).try();
+    open_doc(a, input).try();
+    table.loop((h, i, p) { definition(a, 10 + i, p, input).try(); });
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input).try();
+
+    s ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view(), table);
+    Ok(0);
+}
+
+// Every reply, labelled with the position that asked for it.
+//
+// THE FRAMING IS UNWRAPPED AND NOT PRINTED, because
+// `a_session_is_answered_frame_by_frame` already pins every byte of it.
+// What is printed is the reply's JSON, whole — uri AND range, since a
+// jump to the right name at the wrong span is still wrong.
+walk_replies = (out: str, table: Vec<Probe>) () {
+    at ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; labelled(
+                seen,
+                fr.body,
+                table); seen = seen + 1; },
+        });
+    });
+}
+
+// Reply 0 is `initialize` and the last is `shutdown`; the ones between
+// are the table, in order. The subtraction is guarded rather than let
+// to underflow, which on a usize is a trap and not a negative number.
+labelled = (i: usize, body: str, table: Vec<Probe>) () {
+    (i == 0).match({
+        true  => (),
+        false => table.get(i - 1).match({
+            None  => (),
+            Ok(p) => printed(p, body),
+        }),
+    });
+}
+
+printed = (p: Probe, body: str) () {
+    println("{}:{}  {}", p.line, p.character, p.what);
+    println("    {}", body);
+}

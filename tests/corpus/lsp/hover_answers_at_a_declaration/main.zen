@@ -29,6 +29,12 @@
 // A widening that starts answering those rows is a regression even
 // though it looks like more coverage. That is the failure mode this
 // half of the table is here to catch.
+//
+// THE `flag` ROWS PIN THE NO-PRELUDE FALLBACK. This session sends no
+// `rootUri`, so the document is checked as a lone module and there is
+// no prelude to consult: a written `bool` answers the bare name even
+// though `std.core.bool` now declares one. The richer answer is the
+// build's, and `hover_answers_a_primitive_type` holds it.
 
 str, String = std.text
 Alloc, AllocError = std.mem
@@ -38,8 +44,11 @@ write_text = lsp.lsp_json
 
 // The program hovered over. `add` is the one the measurement was taken
 // on; `bad` is the same shape written against a type that does not
-// exist, so the poison rows sit beside the answered ones.
-DOC*: str = "add = (a: i32, b: i32) i32 {\n    s = a + b;\n    s\n}\n\nbad = (x: Nope) Nope {\n    x\n}\n"
+// exist, so the poison rows sit beside the answered ones; `flag` is
+// typed by a primitive the prelude declares, and answers the bare name
+// anyway — this session has no workspace, so no prelude to read it
+// from.
+DOC*: str = "add = (a: i32, b: i32) i32 {\n    s = a + b;\n    s\n}\n\nbad = (x: Nope) Nope {\n    x\n}\n\nflag = (b: bool) bool {\n    b\n}\n"
 
 URI*: str = "file:///a.zen"
 
@@ -56,21 +65,63 @@ Probe* = {
 // document, and `what` says which of the two halves each row is in.
 probes = (a: Alloc) Res<Vec<Probe>, AllocError> {
     all ::= a.Vec<Probe>();
-    all.add(Probe(line: 0, character: 0,  what: "add  the function's own name")).try();
+    all.add(Probe(
+        line: 0,
+        character: 0,
+        what: "add  the function's own name")).try();
     all.add(Probe(line: 0, character: 3,  what: "     a space: null")).try();
-    all.add(Probe(line: 0, character: 7,  what: "a    a parameter at its declaration")).try();
-    all.add(Probe(line: 0, character: 10, what: "i32  a parameter's written type")).try();
-    all.add(Probe(line: 0, character: 15, what: "b    a parameter at its declaration")).try();
-    all.add(Probe(line: 0, character: 18, what: "i32  a parameter's written type")).try();
+    all.add(Probe(
+        line: 0,
+        character: 7,
+        what: "a    a parameter at its declaration")).try();
+    all.add(Probe(
+        line: 0,
+        character: 10,
+        what: "i32  a parameter's written type")).try();
+    all.add(Probe(
+        line: 0,
+        character: 15,
+        what: "b    a parameter at its declaration")).try();
+    all.add(Probe(
+        line: 0,
+        character: 18,
+        what: "i32  a parameter's written type")).try();
     all.add(Probe(line: 0, character: 23, what: "i32  the return type")).try();
-    all.add(Probe(line: 0, character: 27, what: "{    the body's brace: null")).try();
-    all.add(Probe(line: 1, character: 4,  what: "s    a local at its declaration")).try();
+    all.add(Probe(
+        line: 0,
+        character: 27,
+        what: "{    the body's brace: null")).try();
+    all.add(Probe(
+        line: 1,
+        character: 4,
+        what: "s    a local at its declaration")).try();
     all.add(Probe(line: 1, character: 8,  what: "a    a parameter, used")).try();
     all.add(Probe(line: 1, character: 12, what: "b    a parameter, used")).try();
     all.add(Probe(line: 2, character: 4,  what: "s    a local, used")).try();
-    all.add(Probe(line: 5, character: 0,  what: "bad  a signature with poison in it: null")).try();
-    all.add(Probe(line: 5, character: 7,  what: "x    a parameter typed by poison: null")).try();
-    all.add(Probe(line: 5, character: 10, what: "Nope a type that does not resolve: null")).try();
+    all.add(Probe(
+        line: 5,
+        character: 0,
+        what: "bad  a signature with poison in it: null")).try();
+    all.add(Probe(
+        line: 5,
+        character: 7,
+        what: "x    a parameter typed by poison: null")).try();
+    all.add(Probe(
+        line: 5,
+        character: 10,
+        what: "Nope a type that does not resolve: null")).try();
+    all.add(Probe(
+        line: 9,
+        character: 8,
+        what: "b    a bool parameter, no prelude: bare name")).try();
+    all.add(Probe(
+        line: 9,
+        character: 11,
+        what: "bool a written primitive, no prelude: bare name")).try();
+    all.add(Probe(
+        line: 9,
+        character: 17,
+        what: "bool the return type, no prelude: bare name")).try();
     Ok(all);
 }
 
@@ -78,7 +129,8 @@ probes = (a: Alloc) Res<Vec<Probe>, AllocError> {
 
 open_doc = (a: Alloc, into :: String) Res<(), AllocError> {
     body ::= a.String().try();
-    body.add_bytes("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
     write_text(URI, body).try();
     body.add_bytes(",\"text\":").try();
     write_text(DOC, body).try();
@@ -90,7 +142,8 @@ hover = (a: Alloc, id: usize, p: Probe, into :: String) Res<(), AllocError> {
     body ::= a.String().try();
     body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
     write_decimal(id, body).try();
-    body.add_bytes(",\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":").try();
+    body.add_bytes(
+        ",\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":").try();
     write_text(URI, body).try();
     body.add_bytes("},\"position\":{\"line\":").try();
     write_decimal(p.line, body).try();
@@ -109,11 +162,17 @@ main = (env: Env) Res<i32, AllocError> {
     table = probes(a).try();
 
     input ::= a.String().try();
-    write_frame("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}", input).try();
-    write_frame("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}", input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
+        input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input).try();
     open_doc(a, input).try();
     table.loop((h, i, p) { hover(a, 10 + i, p, input).try(); });
-    write_frame("{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}", input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input).try();
 
     s ::= a.Server(env);
     out ::= a.String().try();
@@ -137,7 +196,10 @@ walk_replies = (out: str, table: Vec<Probe>) () {
     loop(() { going && at < out.len }, (h) {
         frame_at(out, at).match({
             Err(_) => { going = false; },
-            Ok(fr) => { at = fr.next; labelled(seen, fr.body, table); seen = seen + 1; },
+            Ok(fr) => { at = fr.next; labelled(
+                seen,
+                fr.body,
+                table); seen = seen + 1; },
         });
     });
 }

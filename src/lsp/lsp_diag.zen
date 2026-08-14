@@ -5,7 +5,8 @@
 // `diag_count`/`diag_at` for lex and parse, the `Checker` `Build.whole`
 // hands back answers the same pair for sema. This file decides WHEN to
 // build, WHICH file each answer belongs to, and how an answer is taken
-// BACK.
+// BACK. The build itself — and the arena it lives and dies by — moved to
+// `lsp_built.zen`; what remains here is policy.
 //
 // WHEN, AND THE DEBOUNCE THAT IS NOT ONE. §5 asks for a debounce — build
 // after a quiet interval — but a quiet interval cannot be observed:
@@ -18,13 +19,22 @@
 // buffer, and is ORDERED (one build at a time, always the newest
 // document, so §5's race is absent by construction).
 //
+// AND THE BUILD ITSELF IS SHARED: `settled` does not build, it ENSURES —
+// `lsp_built.zen`'s single flight. A settle for a state a query already
+// built publishes from the held slot without rebuilding; a settle for a
+// new state builds once and the queries that follow reuse it. What a
+// settle still costs when nothing changed since the last settle: one key
+// comparison, no build at all.
+//
 // HONEST ABOUT THE PIPE: over `lsp_stdio.zen` a settle point is every
 // message, since `short_by` asks for exactly one message's bytes and a
 // blocking reader cannot look past it — so over a real editor this
-// coalesces nothing yet (the missing piece is a read that can say
-// "nothing more is waiting", or a second thread). The cheap mitigation
-// meanwhile: `lsp_serve.zen` marks nothing when a `didOpen`/`didChange`
-// carries text the document already holds.
+// coalesces nothing at the TRANSPORT (the missing piece is a read that
+// can say "nothing more is waiting", or a second thread; `Stdin` has
+// neither, and adding one is not this folder's call). What coalesces
+// instead is the BUILD: the slot above, the byte-identical `didChange`
+// skip in `lsp_serve.zen`'s `stored`, and the unchanged-notification
+// skip at `say_one` below.
 //
 // WHICH FILE, AND WHY CLEARING IS THE HARD HALF. A build reports across
 // the whole program, so diagnostics belong to many files though only one
@@ -38,6 +48,15 @@
 // errors, and every build publishes for three sets: the edited file
 // (always), every file this build found something in, and every file
 // `showing` holds that this build found nothing in (the clearing).
+//
+// AND NOTHING IS SAID TWICE. `say_one` compares the framed body against
+// the last one sent for that URI (`said`) and skips the write when they
+// match — the same byte comparison `lsp_serve.zen`'s `stored` applies
+// to incoming buffers, applied to outgoing notifications. The clearing
+// still works: a file that stops being wrong has a DIFFERENT body (the
+// empty list) than the one `said` holds, so the take-back always goes
+// out. `showing` updates whether or not a frame was written — the dedup
+// is about the wire, never about the state.
 //
 // SEVERITY, AND WHERE THE NOTE WENT. EVERY DIAGNOSTIC IS AN ERROR,
 // severity 1 — a fact about this compiler (one tally `Build.faults`, no
@@ -57,46 +76,38 @@
 str, String = std.text
 Vec, Map = std.collections
 Alloc, AllocError = std.mem
-Range = std.core
-Span = ast.ast_span
-// PARSE'S `Diag` AND SEMA'S both name `Diag` and `A, B = module` cannot
-// rename, so sema's diagnostic fields travel as parameters, its type
-// never named; only parse's `Note` is used as a value.
-Note = parse.parse_diag
+Span = std.ast.ast_span
+Note = std.parse.parse_diag
 Checker = sema.sema_check
-SemaFault, message, write_detail = sema.sema_diag
-// IMPORTED FOR ITS METHODS: without this line the bootstrapper resolves
-// `c.types`'s methods against another module (as `lsp_hover.zen` notes).
-Types = sema.sema_ty
-Build = zen.zen_build
 root_for, relative_to = zen.zen_path
 write_range = lsp.lsp_pos
 write_text, written = lsp.lsp_json
 write_frame, write_decimal = lsp.lsp_frame
-path_of, uri_at = lsp.lsp_uri
-// The semantic half of colour: what the build below settled about each
+path_of = lsp.lsp_uri
+// The one build the session keeps, and what it gathered. `Spot` is
+// RE-EXPORTED, not moved in spirit: a diagnostic already belonging to a
+// file is shaped where the build that produced it lives.
+Built, Spot* = lsp.lsp_built
+// The semantic half of colour: what the held build settled about each
 // name, gathered by `lsp_names.zen` off the SAME `Checker` the
 // diagnostics come from — a second build per keystroke is the cost
 // `design_lsp.md` §5 prices, and it is paid nowhere twice.
 Classed, sort_classes = lsp.lsp_colour
-classify = lsp.lsp_names
 
-// ONE DIAGNOSTIC, ALREADY BELONGING TO A FILE. `uri` is resolved at
-// gather time, not write time: a build knows its compilation root, a
-// writer does not. `message` IS TEXT AND NOT A FAULT: sema's sentence
-// needs the `Types` store that decided it, belonging to a `Checker` this
-// value must outlive, so it renders while the checker is in hand.
-Spot* = {
-    uri*: str,
-    message*: str,
-    span*: Span,
-    note*: Res<Note>,
+// What a query borrows from the held build: the checker (a header copy,
+// read-only — `lsp_built.zen`'s header is the doctrine) and the root it
+// ran against, which a definition needs to turn another module's span
+// into a URI. `c` is a `Res` because a successful `ensure` having left a
+// build in the slot is a fact the type system cannot see.
+Shared* = {
+    c*: Res<Checker>,
+    root*: str,
 }
 
-// The server's diagnostics half: which document owes a build, and which
-// files are showing errors right now. A TYPE OF ITS OWN rather than four
-// fields on `Server`: the server owns the documents, this owns what has
-// been said about them.
+// The server's diagnostics half: which document owes a build, which
+// files are showing errors right now, and the one build everything
+// shares. A TYPE OF ITS OWN rather than four fields on `Server`: the
+// server owns the documents, this owns what has been said about them.
 Diagnostics* = {
     a: Alloc,
 
@@ -106,50 +117,98 @@ Diagnostics* = {
     owed :: str = "",
 
     // Every URI currently carrying a non-empty list — the ONLY thing
-    // that makes clearing possible.
+    // that makes clearing possible. SESSION-ARENA COPIES: the spots they
+    // were read from die with the slot's next build, and this set must
+    // not.
     showing :: Vec<str>,
 
-    // WHAT THE LAST CLEAN BUILD KNEW ABOUT EACH NAME, for colour.
-    // Filled by `told` when the build found nothing wrong, EMPTIED by
-    // `owes` — one change stales everything, because the build is
-    // whole-program and what a name MEANS in an unchanged file can turn
-    // on an edit somewhere else. The fallback when this is empty is
-    // `lsp_colour.zen`'s lexical answer, which is never wrong.
-    classed :: Vec<Classed>,
+    // THE ONE BUILD, shared with every query. See `lsp_built.zen`.
+    built :: Built,
+
+    // May `classed` be served? A change stales it (`owes`): the rows
+    // describe the text the last SETTLE saw, not the text the buffer now
+    // holds. A query-driven rebuild does NOT set this — colour follows
+    // the settle, and the lexical fallback is never wrong.
+    fresh :: bool = false,
+
+    // THE LAST NOTIFICATION SENT, per URI — the dedup `say_one` applies.
+    // Keys and bodies are session-arena copies for the same reason
+    // `showing` is.
+    said :: Map<str, str>,
 
     // A document changed. Nothing is built here — see the header. The
-    // classifications go with the change: they describe the text the
-    // last build saw, not the text the buffer now holds.
+    // freshness goes with the change; the slot's own key notices the new
+    // bytes at the next `ensure`.
     owes* = (self :: @Self, uri: str) () {
         self.owed = uri;
-        self.classed = self.a.Vec<Classed>();
+        self.fresh = false;
     }
 
-    // The names the last clean build classified in `uri`, sorted for
+    // The names the last settle classified in `uri`, sorted for
     // `lsp_colour.zen`'s search. AN EMPTY VEC IS THE WHOLE FALLBACK:
     // no workspace, no build yet, a change not yet settled and a build
     // with faults all look alike here, and all mean "lexical colours".
-    classes_for* = (self :: @Self, uri: str) Res<Vec<Classed>, AllocError> {
-        found ::= self.a.Vec<Classed>();
-        self.classed.loop((h, cl) {
+    // Rows are COPIED OUT (`t`, the request's arena): the slot's pages
+    // are freed by the next build, so nothing may hold a row past it.
+    classes_for* = (self :: @Self, t: Alloc, uri: str)
+                   Res<Vec<Classed>, AllocError> {
+        found ::= t.Vec<Classed>();
+        self.fresh.match({
+            false => written(),
+            true  => self.gather(uri, found),
+        }).try();
+        sort_classes(found).try();
+        Ok(found);
+    }
+
+    gather = (self :: @Self, uri: str, found :: Vec<Classed>)
+             Res<(), AllocError> {
+        self.built.classed().match({
+            None        => written(),
+            Ok(classed) => self.each_of(classed, uri, found),
+        })
+    }
+
+    each_of = (self :: @Self, classed: Vec<Classed>, uri: str,
+               found :: Vec<Classed>) Res<(), AllocError> {
+        classed.loop((h, cl) {
             cl.uri.eq(uri).match({
                 true  => found.add(cl),
                 false => Ok(()),
             }).try();
         });
-        sort_classes(found).try();
-        Ok(found);
+        Ok(());
     }
 
-    // THE SETTLE POINT: if a build is owed, it happens here. `uris` and
-    // `docs` are the server's open documents; the overlay must carry
-    // EVERY unsaved buffer, not only the edited one — a build reading
-    // disk for the others would report errors already fixed on screen.
+    // WHAT A QUERY SHARES, with the caller having ruled out the
+    // lone-module case (an empty workspace is ITS branch, as it has
+    // always been). The slot is ensured for the document being asked
+    // about — building once if the state is new — and its checker
+    // answers. `c` is a `Res` because the type system cannot see that a
+    // successful `ensure` left a build in the slot; the `None` arm at
+    // the call site is unreachable and falls back to a build of its own.
+    shared* = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
+               docs: Map<str, str>, path: str, t: Alloc)
+              Res<Shared, AllocError> {
+        root = root_for(env, t, workspace, path);
+        self.built.ensure(env, root, relative_to(root, path), uris, docs).try();
+        Ok(Shared(c: self.built.checker(), root: self.built.root()));
+    }
+
+    // THE SETTLE POINT: if a build is owed, it happens here — or is
+    // FOUND here, when a query already built this exact state (the
+    // slot's key is the document bytes; a queued `didChange` followed by
+    // a query is one build, with the publish below reading its spots).
+    // `uris` and `docs` are the server's open documents; the overlay
+    // must carry EVERY unsaved buffer, not only the edited one — a build
+    // reading disk for the others would report errors already fixed on
+    // screen. `t` is scratch for this settle alone.
     settled* = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
-                docs: Map<str, str>, out :: String) Res<(), AllocError> {
+                docs: Map<str, str>, t: Alloc, out :: String)
+               Res<(), AllocError> {
         self.owed.is_empty().match({
             true  => written(),
-            false => self.build_owed(env, workspace, uris, docs, out),
+            false => self.build_owed(env, workspace, uris, docs, t, out),
         })
     }
 
@@ -161,65 +220,124 @@ Diagnostics* = {
     // so it does not degrade at all. A document not under the workspace
     // (`root_for` climbs to "") is treated the same way.
     build_owed = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
-                  docs: Map<str, str>, out :: String) Res<(), AllocError> {
+                  docs: Map<str, str>, t: Alloc, out :: String)
+                 Res<(), AllocError> {
         uri = self.owed;
         self.owed = "";
         path = path_of(uri);
-        root = root_for(env, self.a, workspace, path);
+        root = root_for(env, t, workspace, path);
         (workspace.is_empty() || root.is_empty()).match({
             true  => written(),
-            false => self.told(env, root, path, uri, uris, docs, out),
+            false => self.told(
+                env,
+                root,
+                relative_to(root, path),
+                uri,
+                uris,
+                docs,
+                t,
+                out),
         })
     }
 
-    told = (self :: @Self, env: Env, root: str, path: str, uri: str,
-            uris: Vec<str>, docs: Map<str, str>, out :: String)
+    told = (self :: @Self, env: Env, root: str, entry: str, uri: str,
+            uris: Vec<str>, docs: Map<str, str>, t: Alloc, out :: String)
            Res<(), AllocError> {
-        spots ::= self.a.Vec<Spot>();
-        classed ::= self.a.Vec<Classed>();
-        found_in(env, self.a, root, path, overlay_of(self.a, uris, docs).try(),
-                 spots, classed).try();
-        self.classed = classed;
-        self.say_all(env, uri, uris, docs, spots, out)
+        self.built.ensure(env, root, entry, uris, docs).try();
+        self.fresh = true;
+        // `ensure` just left the spots in the slot; `None` is
+        // unreachable and answered by publishing nothing, never by
+        // guessing.
+        self.built.spots().match({
+            None      => written(),
+            Ok(spots) => self.say_all(env, t, uri, uris, docs, spots, out),
+        })
     }
 
     // THE THREE SETS, in order: the edited document, then every other
     // file this build found something in, then every file that was
     // showing errors and is not in either.
-    say_all = (self :: @Self, env: Env, uri: str, uris: Vec<str>,
+    say_all = (self :: @Self, env: Env, t: Alloc, uri: str, uris: Vec<str>,
                docs: Map<str, str>, spots: Vec<Spot>, out :: String)
               Res<(), AllocError> {
-        now ::= self.a.Vec<str>();
+        now ::= t.Vec<str>();
         uris_of(spots, now).try();
-        say_one(env, self.a, uri, uris, docs, spots, out).try();
+        self.say_one(env, t, uri, uris, docs, spots, out).try();
         now.loop((h, u) {
             u.eq(uri).match({
                 true  => written(),
-                false => say_one(env, self.a, u, uris, docs, spots, out),
+                false => self.say_one(env, t, u, uris, docs, spots, out),
             }).try();
         });
-        self.take_back(env, uri, now, uris, docs, spots, out).try();
-        self.showing = now;
+        self.take_back(env, t, uri, now, uris, docs, spots, out).try();
+        self.remember_showing(now).try();
         Ok(());
+    }
+
+    // `showing` OUTLIVES the build the URIs were read from, so each is
+    // copied into the session arena — the slot's pages go back on the
+    // next build (`lsp_built.zen`), and a set that points into freed
+    // pages is a use-after-free, not a stale string.
+    remember_showing = (self :: @Self, now: Vec<str>) Res<(), AllocError> {
+        self.showing = self.a.Vec<str>();
+        now.loop((h, u) {
+            kept = owned_str(self.a, u).try();
+            self.showing.add(kept).try();
+        });
+        Ok(());
+    }
+
+    // ONE FILE'S LIST, SAID AT MOST ONCE PER CONTENT. The body is built,
+    // compared against the last one sent for this URI, and written only
+    // when different — an unchanged build's answer costs a comparison,
+    // not a frame.
+    say_one = (self :: @Self, env: Env, t: Alloc, uri: str, uris: Vec<str>,
+               docs: Map<str, str>, spots: Vec<Spot>, out :: String)
+              Res<(), AllocError> {
+        body ::= t.String().try();
+        write_notification(t, uri, text_of(
+            env,
+            t,
+            uri,
+            docs), spots, body).try();
+        self.said.get(uri).match({
+            None     => self.send(uri, body, out),
+            Ok(prev) => prev.eq(body.view()).match({
+                true  => written(),
+                false => self.send(uri, body, out),
+            }),
+        })
+    }
+
+    send = (self :: @Self, uri: str, body: String, out :: String)
+           Res<(), AllocError> {
+        kept_uri = owned_str(self.a, uri).try();
+        kept_body = owned_str(self.a, body.view()).try();
+        self.said.set(kept_uri, kept_body).try();
+        write_frame(body.view(), out)
     }
 
     // AN EMPTY LIST FOR EVERY FILE THAT HAS STOPPED BEING WRONG. The
     // edited document is excluded — already published once.
-    take_back = (self :: @Self, env: Env, uri: str, now: Vec<str>,
+    take_back = (self :: @Self, env: Env, t: Alloc, uri: str, now: Vec<str>,
                  uris: Vec<str>, docs: Map<str, str>, spots: Vec<Spot>,
                  out :: String) Res<(), AllocError> {
         self.showing.loop((h, u) {
             gone(u, uri, now).match({
                 false => written(),
-                true  => say_one(env, self.a, u, uris, docs, spots, out),
+                true  => self.say_one(env, t, u, uris, docs, spots, out),
             }).try();
         });
         Ok(());
     }
 }
 
-Diagnostics* = (a: Alloc) Diagnostics {
-    Diagnostics(a: a, showing: a.Vec<str>(), classed: a.Vec<Classed>())
+Diagnostics* = (a: Alloc, env: Env) Diagnostics {
+    Diagnostics(
+        a: a,
+        showing: a.Vec<str>(),
+        built: env.Built(),
+        said: a.Map<str, str>())
 }
 
 // Was this URI showing errors and is it not among the ones that have
@@ -227,95 +345,17 @@ Diagnostics* = (a: Alloc) Diagnostics {
 gone = (u: str, uri: str, now: Vec<str>) bool {
     u.eq(uri).match({
         true  => false,
-        false => now.find((n) { n.eq(u) }).match({ Ok(_) => false, None => true }),
+        false => now.find((n) { n.eq(
+            u) }).match({ Ok(_) => false, None => true }),
     })
 }
 
-// --- the build ---------------------------------------------------------
-
-// A WHOLE BUILD, AND EVERYTHING THREE PHASES FOUND. Shaped after
-// `lsp_hover.zen`'s `hover_in` deliberately (same `Build.whole`, overlay,
-// computed root); only which output is read differs — hover wants the
-// memos, this wants the diagnostics. Both halves matter so a server
-// never shows type errors while silently swallowing syntax errors.
-// `speaking` is already false under `whole` (stops the driver's
-// `println` landing mid frame-stream); this file relies on diagnostics
-// still being COLLECTED while not said.
-//
-// THE SECOND OUTPUT IS COLOUR'S. `classed` is filled from the same
-// `Checker` when — and only when — the build found NOTHING wrong: with
-// faults outstanding the memos hold poison, and both files' doctrine is
-// that no answer beats a wrong one. An empty `classed` is not a failure
-// here; it is the lexical fallback's trigger.
-found_in* = (env: Env, a: Alloc, root: str, path: str, docs: Map<str, str>,
-             spots :: Vec<Spot>, classed :: Vec<Classed>)
-            Res<(), AllocError> {
-    b ::= a.Build(env, root);
-    c = b.whole(relative_to(root, path), docs).try();
-    from_build(b, a, root, spots).try();
-    from_check(c, a, root, spots).try();
-    (b.diag_count() == 0 && c.diag_count() == 0).match({
-        true  => classify(a, c, root, classed),
-        false => written(),
-    })
-}
-
-// LEX AND PARSE, off the `Build`. `Diag.span.file` is the module's path
-// relative to the compilation root, exactly what a URI is built from.
-from_build = (b :: Build, a: Alloc, root: str, spots :: Vec<Spot>)
-             Res<(), AllocError> {
-    Range(0, b.diag_count()).loop((h, i) {
-        b.diag_at(i).match({
-            None  => written(),
-            Ok(d) => add_parse(a, root, d.message, d.span, d.note, spots),
-        }).try();
-    });
-    Ok(());
-}
-
-add_parse = (a: Alloc, root: str, said: str, span: Span, note: Res<Note>,
-             spots :: Vec<Spot>) Res<(), AllocError> {
-    spots.add(Spot(uri: uri_at(a, root, span.file).try(), message: said,
-                   span: span, note: note))
-}
-
-// SEMA, off the `Checker` `whole` handed back. THE SENTENCE IS RENDERED
-// HERE, while the store that decided it is in hand: `message` plus
-// `write_detail` rather than `render`, since `render` opens with
-// `file:line:col:` and a position already travelling beside a `range`
-// would be the same fact said twice, once in a form no client can click.
-from_check = (c :: Checker, a: Alloc, root: str, spots :: Vec<Spot>)
-             Res<(), AllocError> {
-    Range(0, c.diag_count()).loop((h, i) {
-        c.diag_at(i).match({
-            None  => written(),
-            Ok(d) => add_sema(c, a, root, d.file, d.span, d.fault, spots),
-        }).try();
-    });
-    Ok(());
-}
-
-add_sema = (c :: Checker, a: Alloc, root: str, file: str, span: Span,
-            fault: SemaFault, spots :: Vec<Spot>) Res<(), AllocError> {
-    said ::= a.String().try();
-    said.add_bytes(message(fault)).try();
-    write_detail(fault, c.types, said).try();
-    spots.add(Spot(uri: uri_at(a, root, file).try(), message: said.view(),
-                   span: span, note: None))
-}
-
-// Every open buffer, keyed the way `Build.read` looks one up: on the
-// path, what `Unit.path` holds and `path_of` produces.
-overlay_of = (a: Alloc, uris: Vec<str>, docs: Map<str, str>)
-             Res<Map<str, str>, AllocError> {
-    over ::= a.Map<str, str>();
-    uris.loop((h, u) {
-        docs.get(u).match({
-            None     => written(),
-            Ok(text) => over.set(path_of(u), text),
-        }).try();
-    });
-    Ok(over);
+// A `str` copied into an arena — what the session keeps may not borrow
+// the slot's pages.
+owned_str = (a: Alloc, s: str) Res<str, AllocError> {
+    out ::= a.String().try();
+    out.add_bytes(s).try();
+    Ok(out.view());
 }
 
 // The distinct URIs these spots name, in the order they were found.
@@ -331,47 +371,48 @@ uris_of = (spots: Vec<Spot>, into :: Vec<str>) Res<(), AllocError> {
 
 // --- the notification --------------------------------------------------
 
-// ONE FILE'S WHOLE LIST, framed — an empty `diagnostics` array is the
-// only way a client is told an error is gone. THE TEXT IS THE FILE'S
-// OWN: converting a span against another file's bytes would underline
-// the right file at the wrong position.
-say_one = (env: Env, a: Alloc, uri: str, uris: Vec<str>, docs: Map<str, str>,
-           spots: Vec<Spot>, out :: String) Res<(), AllocError> {
-    publish(a, uri, text_of(env, a, uri, docs), spots, out)
-}
-
 // The bytes the spans in `uri` were measured against: the open buffer if
 // there is one, disk otherwise, "" when neither answers. "" IS NOT A
 // SILENT FAILURE: `to_wire` clamps, so an unreadable file's positions
 // convert to 0:0 — the diagnostic still reaches the client and names the
 // file; only the underline is off. Worse to drop the diagnostic.
-text_of = (env: Env, a: Alloc, uri: str, docs: Map<str, str>) str {
+text_of = (env: Env, t: Alloc, uri: str, docs: Map<str, str>) str {
     docs.get(uri).match({
         Ok(text) => text,
-        None     => on_disk(env, a, path_of(uri)),
+        None     => on_disk(env, t, path_of(uri)),
     })
 }
 
-on_disk = (env: Env, a: Alloc, path: str) str {
-    env.fs.read(a, path).match({
+on_disk = (env: Env, t: Alloc, path: str) str {
+    env.fs.read(t, path).match({
         Ok(text) => text.view(),
         Err(_)   => "",
     })
 }
 
-// `textDocument/publishDiagnostics`, as the protocol spells it. A
-// NOTIFICATION AND NOT A REPLY: no `id`, the one message this server
-// sends unprompted.
+// ONE FILE'S WHOLE LIST, framed — an empty `diagnostics` array is the
+// only way a client is told an error is gone. THE TEXT IS THE FILE'S
+// OWN: converting a span against another file's bytes would underline
+// the right file at the wrong position.
 publish* = (a: Alloc, uri: str, text: str, spots: Vec<Spot>, out :: String)
            Res<(), AllocError> {
     body ::= a.String().try();
-    body.add_bytes("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":").try();
+    write_notification(a, uri, text, spots, body).try();
+    write_frame(body.view(), out)
+}
+
+// `textDocument/publishDiagnostics`, as the protocol spells it. A
+// NOTIFICATION AND NOT A REPLY: no `id`, the one message this server
+// sends unprompted.
+write_notification = (a: Alloc, uri: str, text: str, spots: Vec<Spot>,
+                      body :: String) Res<(), AllocError> {
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":").try();
     write_text(uri, body).try();
     body.add_bytes(",\"diagnostics\":[").try();
     n ::= 0;
     spots.loop((h, s) { n = one_of(s, uri, text, n, body).try(); });
-    body.add_bytes("]}}").try();
-    write_frame(body.view(), out)
+    body.add_bytes("]}}")
 }
 
 // This spot, if it belongs to this file, and the count so it can tell

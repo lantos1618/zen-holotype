@@ -1,0 +1,184 @@
+// HOVER ON A PRIMITIVE SAYS WHAT THE PRELUDE KNOWS, not just the name.
+//
+// Hovering a written `bool` used to answer exactly "bool" — the
+// resolved type and nothing else. But "a prelude declaration of a
+// primitive's name IS that primitive" (DESIGN.md:438), and that
+// declaration is where the language keeps what there is to SAY: `i32`
+// is a struct in `std.core.num` carrying MIN, MAX and BITS, `str` one
+// in `std.text` carrying len, get and friends, and `bool` one in
+// `std.core.bool` carrying nothing but its doc line — which is the
+// truth about bool. So a written primitive now answers with the name,
+// the declaration's first doc line, and its exported members.
+//
+// THE SESSION HAS A WORKSPACE, because the prelude is a build fact:
+// `hover_answers_at_a_declaration` beside this one asks the same
+// question of a lone module and pins the bare-name fallback. The two
+// value rows are the other boundary: an expression answers from
+// `expr_memo` (OfValue) and stays a bare name — the note belongs to
+// the written type (OfType), and a reprinted signature would be no
+// place for a doc comment either, so `note`'s own row keeps the short
+// form.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, write_decimal, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// The program hovered over: one function whose every type is a
+// primitive the prelude declares.
+DOC*: str = "note = (b: bool, s: str, n: i32) bool {\n    b\n}\n"
+
+// Staged and rooted exactly as `hover_answers_an_imported_name` says:
+// the work directory is the workspace, `src` the root it computes.
+URI*: str = "file://src/app/app.zen"
+ROOT_URI*: str = "file://."
+
+// One probed position, in WIRE coordinates — 0-based line, 0-based
+// character — because that is what a client sends.
+Probe* = {
+    line*: usize,
+    character*: usize,
+    what*: str,
+}
+
+// The table, in source order.
+probes = (a: Alloc) Res<Vec<Probe>, AllocError> {
+    all ::= a.Vec<Probe>();
+    all.add(Probe(
+        line: 0,
+        character: 0,
+        what: "note the function's own name: a bare signature")).try();
+    all.add(Probe(
+        line: 0,
+        character: 8,
+        what: "b    a bool parameter at its declaration")).try();
+    all.add(Probe(
+        line: 0,
+        character: 11,
+        what: "bool a written primitive: the doc line")).try();
+    all.add(Probe(
+        line: 0,
+        character: 17,
+        what: "s    a str parameter at its declaration")).try();
+    all.add(Probe(
+        line: 0,
+        character: 20,
+        what: "str  a written primitive: its members")).try();
+    all.add(Probe(
+        line: 0,
+        character: 25,
+        what: "n    an i32 parameter at its declaration")).try();
+    all.add(Probe(
+        line: 0,
+        character: 28,
+        what: "i32  a written primitive: its members")).try();
+    all.add(Probe(line: 0, character: 33, what: "bool the return type")).try();
+    all.add(Probe(
+        line: 1,
+        character: 4,
+        what: "b    a bool value, used: the bare name")).try();
+    Ok(all);
+}
+
+// --- the requests ------------------------------------------------------
+
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":").try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+open_doc = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(DOC, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+hover = (a: Alloc, id: usize, p: Probe, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(
+        ",\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes("},\"position\":{\"line\":").try();
+    write_decimal(p.line, body).try();
+    body.add_bytes(",\"character\":").try();
+    write_decimal(p.character, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+// ONE `serve` CALL for the whole table, so a server that answered the
+// first hover and then lost its place in the stream fails here.
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    table = probes(a).try();
+
+    input ::= a.String().try();
+    open_session(a, input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input).try();
+    open_doc(a, input).try();
+    table.loop((h, i, p) { hover(a, 10 + i, p, input).try(); });
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input).try();
+
+    s ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view(), table);
+    Ok(0);
+}
+
+// Every reply, labelled with the position that asked for it. The
+// framing is unwrapped and not printed, because
+// `a_session_is_answered_frame_by_frame` already pins every byte of
+// it; what is printed is the reply's JSON, whole — the `range`
+// included, since a right answer under the wrong underline is still
+// wrong.
+walk_replies = (out: str, table: Vec<Probe>) () {
+    at ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; labelled(
+                seen,
+                fr.body,
+                table); seen = seen + 1; },
+        });
+    });
+}
+
+// Reply 0 is `initialize` and the last is `shutdown`; the ones between
+// are the table, in order. The subtraction is guarded rather than let
+// to underflow, which on a usize is a trap and not a negative number.
+labelled = (i: usize, body: str, table: Vec<Probe>) () {
+    (i == 0).match({
+        true  => (),
+        false => table.get(i - 1).match({
+            None  => (),
+            Ok(p) => printed(p, body),
+        }),
+    });
+}
+
+printed = (p: Probe, body: str) () {
+    println("{}:{}  {}", p.line, p.character, p.what);
+    println("    {}", body);
+}

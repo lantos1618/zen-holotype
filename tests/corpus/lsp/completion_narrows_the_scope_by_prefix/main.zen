@@ -1,0 +1,148 @@
+// COMPLETION NARROWS THE SCOPE BY PREFIX — no dot, so the offers are
+// the names `defs_of` settles as visible, filtered by the typed word.
+//
+// The first probe sits at the start of a line with NOTHING typed: every
+// name in scope is offered — the module's three functions and the
+// language's three reserved words (`true`, `false`, `consume`, the
+// whole list per `lex_scan.zen`) — sorted by label, because collection
+// order is the world's table order and no client should see it. The
+// second probe is after `ta`, and only `tally` and `tangle` survive.
+//
+// WHAT IS NOT OFFERED IS THE OTHER HALF OF THE ASSERTION: no parameter
+// (`xs`, `n`), no local, and no name from a module this one never
+// imported. The first two are the L3 locals gap — a `Binding` leaves no
+// table behind — and the last is `defs_of`'s `*` gate doing the
+// filtering, not this folder.
+//
+// NO `rootUri` IS SENT: the lone-module path answers the module's own
+// names, which is all this buffer has.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, write_decimal, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// The program completed in. `ta` on the last line is a partial word —
+// an unresolved name the checker reports and moves on from, which is
+// what a buffer mid-keystroke looks like.
+DOC*: str = "tally = (xs: i32) i32 { xs }\n\ntangle = (n: i32) i32 { n }\n\ntop = (n: i32) i32 {\n    ta\n}\n"
+
+URI*: str = "file:///a.zen"
+
+// One probed position, in WIRE coordinates — 0-based line, 0-based
+// character — because that is what a client sends.
+Probe* = {
+    line*: usize,
+    character*: usize,
+    what*: str,
+}
+
+probes = (a: Alloc) Res<Vec<Probe>, AllocError> {
+    all ::= a.Vec<Probe>();
+    all.add(Probe(
+        line: 5,
+        character: 0,
+        what: "nothing typed: the whole scope")).try();
+    all.add(Probe(
+        line: 5,
+        character: 6,
+        what: "ta: narrowed to the two")).try();
+    Ok(all);
+}
+
+// --- the requests ------------------------------------------------------
+
+open_doc = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(DOC, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+completion = (a: Alloc, id: usize, p: Probe, into :: String)
+             Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(
+        ",\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes("},\"position\":{\"line\":").try();
+    write_decimal(p.line, body).try();
+    body.add_bytes(",\"character\":").try();
+    write_decimal(p.character, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+// ONE `serve` CALL for the whole table, so a server that answered the
+// first request and then lost its place in the stream fails here.
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    table = probes(a).try();
+
+    input ::= a.String().try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
+        input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input).try();
+    open_doc(a, input).try();
+    table.loop((h, i, p) { completion(a, 10 + i, p, input).try(); });
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input).try();
+
+    s ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view(), table);
+    Ok(0);
+}
+
+// Every reply, labelled with the position that asked for it.
+//
+// THE FRAMING IS UNWRAPPED AND NOT PRINTED, because
+// `a_session_is_answered_frame_by_frame` already pins every byte of it.
+// What is printed is the reply's JSON, whole — the kind numbers
+// included, since a right name under the wrong kind is still wrong.
+walk_replies = (out: str, table: Vec<Probe>) () {
+    at ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; labelled(
+                seen,
+                fr.body,
+                table); seen = seen + 1; },
+        });
+    });
+}
+
+// Reply 0 is `initialize` and the last is `shutdown`; the ones between
+// are the table, in order. The subtraction is guarded rather than let
+// to underflow, which on a usize is a trap and not a negative number.
+labelled = (i: usize, body: str, table: Vec<Probe>) () {
+    (i == 0).match({
+        true  => (),
+        false => table.get(i - 1).match({
+            None  => (),
+            Ok(p) => printed(p, body),
+        }),
+    });
+}
+
+printed = (p: Probe, body: str) () {
+    println("{}:{}  {}", p.line, p.character, p.what);
+    println("    {}", body);
+}

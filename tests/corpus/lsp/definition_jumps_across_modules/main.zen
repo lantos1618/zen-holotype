@@ -1,0 +1,178 @@
+// DEFINITION JUMPS ACROSS MODULES — the same table as
+// `definition_jumps_within_a_module`, but every answered row lands in
+// ANOTHER FILE, which is only possible through the build path.
+//
+// `app/app.zen` imports `Point` and `sum` from `app/shape.zen` beside
+// it, and the server is told where the workspace is — `rootUri` is the
+// whole of what makes this a build rather than a lone-module check, as
+// `hover_answers_an_imported_name` established for hover. The jump then
+// crosses: the target's URI is built from the compilation root
+// (`file://src/app/shape.zen`, the same spelling publishDiagnostics
+// uses) and its range is converted against THAT file's bytes, read from
+// the disk — a span measured against the open buffer would be the right
+// file underlined at the wrong position.
+//
+// The rows:
+//
+//   - a written IMPORTED TYPE, to the struct's name in the other module
+//   - an imported FUNCTION at a call site, through `call_memo`
+//   - an imported MEMBER after a dot, through `members_of`
+//   - the `null` rows: the import binding itself (the finder reads
+//     declarations, not imports) and a parameter use (the L3 locals
+//     gap, same as next door)
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, write_decimal, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// THE BUFFER, byte for byte the file on disk.
+DOC*: str = "Point, sum = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = sum(q) + q.x;\n    s\n}\n"
+
+// `tests/run.py` stages a directory test into `<work>/src` and runs the
+// program from `<work>`, so these are the paths the server will open.
+URI*: str = "file://src/app/app.zen"
+
+// THE WORKSPACE IS NOT THE COMPILATION ROOT: the work directory is the
+// workspace; the root the document is compiled against is `src`,
+// computed by `zen_path.root_for` climbing out of `src/app`, which
+// holds its own `app.zen`.
+ROOT_URI*: str = "file://."
+
+// One probed position, in WIRE coordinates — 0-based line, 0-based
+// character — because that is what a client sends.
+Probe* = {
+    line*: usize,
+    character*: usize,
+    what*: str,
+}
+
+// The table, in source order.
+probes = (a: Alloc) Res<Vec<Probe>, AllocError> {
+    all ::= a.Vec<Probe>();
+    all.add(Probe(
+        line: 0,
+        character: 1,
+        what: "Point the import binding itself: null")).try();
+    all.add(Probe(
+        line: 2,
+        character: 12,
+        what: "Point a written imported type, across")).try();
+    all.add(Probe(
+        line: 3,
+        character: 9,
+        what: "sum   an imported function, called")).try();
+    all.add(Probe(
+        line: 3,
+        character: 19,
+        what: "x     an imported member, after a dot")).try();
+    all.add(Probe(line: 4, character: 4,  what: "s     a local, used: null")).try();
+    Ok(all);
+}
+
+// --- the requests ------------------------------------------------------
+
+// `rootUri` IS THE WHOLE OF WHAT MAKES THIS A BUILD.
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":").try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+open_doc = (a: Alloc, uri: str, text: str, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+definition = (a: Alloc, id: usize, p: Probe, into :: String)
+             Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(
+        ",\"method\":\"textDocument/definition\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes("},\"position\":{\"line\":").try();
+    write_decimal(p.line, body).try();
+    body.add_bytes(",\"character\":").try();
+    write_decimal(p.character, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+// ONE `serve` CALL for the whole table, so a server that answered the
+// first request and then lost its place in the stream fails here.
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    table = probes(a).try();
+
+    input ::= a.String().try();
+    open_session(a, input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input).try();
+    open_doc(a, URI, DOC, input).try();
+    table.loop((h, i, p) { definition(a, 10 + i, p, input).try(); });
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input).try();
+
+    s ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view(), table);
+    Ok(0);
+}
+
+// Every reply, labelled with the position that asked for it.
+//
+// THE FRAMING IS UNWRAPPED AND NOT PRINTED, because
+// `a_session_is_answered_frame_by_frame` already pins every byte of it.
+// What is printed is the reply's JSON, whole — uri AND range, since a
+// jump to the right file at the wrong span is still wrong. The settle
+// point's publishDiagnostics frame trails the last reply and is not a
+// row here: it is `diagnostics_publish_and_clear`'s subject.
+walk_replies = (out: str, table: Vec<Probe>) () {
+    at ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; labelled(
+                seen,
+                fr.body,
+                table); seen = seen + 1; },
+        });
+    });
+}
+
+// Reply 0 is `initialize` and the last is `shutdown`; the ones between
+// are the table, in order. The subtraction is guarded rather than let
+// to underflow, which on a usize is a trap and not a negative number.
+labelled = (i: usize, body: str, table: Vec<Probe>) () {
+    (i == 0).match({
+        true  => (),
+        false => table.get(i - 1).match({
+            None  => (),
+            Ok(p) => printed(p, body),
+        }),
+    });
+}
+
+printed = (p: Probe, body: str) () {
+    println("{}:{}  {}", p.line, p.character, p.what);
+    println("    {}", body);
+}

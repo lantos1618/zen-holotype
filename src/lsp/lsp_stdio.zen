@@ -16,9 +16,14 @@
 // frame may not have one — the missing piece `design_lsp.md` section 4
 // named. `print` is the same write without the newline.
 //
-// THE INPUT BUFFER ONLY GROWS — the session's arena memory, exactly as
-// `Server.docs` is. Reclaiming it would need a shrinkable `Vec` and a
-// document map that copies.
+// TWO ARENAS, TWO LIFETIMES. `held` and the server's documents live in
+// the session arena `a` — `held` only grows (a `Vec` has no shrink, and
+// a grow abandons the old pages without touching them, so a borrow of a
+// frame stays valid for the session). Everything a message PRODUCES —
+// its JSON tree, its reply, the diagnostics a settle publishes — lives
+// in `batch`, an arena created per loop iteration and dropped at the
+// iteration's end, after the bytes have been printed. A session's RSS
+// no longer carries every reply it ever wrote.
 
 str, String, str_at = std.text
 Vec = std.collections
@@ -49,29 +54,37 @@ serve_stdio* = (env: Env, a: Alloc) Res<i32, AllocError> {
     loop(() { open && framed && !server.stopped() }, (h) {
         seen = str_at(held.ptr(), held.len);
         open = arrived(env, held, short_by(seen, at)).try();
-        d = drain(server, a, str_at(held.ptr(), held.len), at).try();
+        // The batch's scratch arena: a binding inside the loop body, so
+        // its drop runs at the iteration's end — replies, trees and
+        // settle scratch all go back at once (`mem_arena.zen`'s drop).
+        batch ::= env.mem.alloc();
+        d = drain(server, batch, str_at(held.ptr(), held.len), at).try();
         at = d.at;
         framed = d.framed;
-        after_drain(server, a).try();
+        after_drain(server, batch).try();
     });
     Ok(exit_code(server.stopped(), framed));
 }
 
 // THE SETTLE POINT OVER A PIPE: everything that had arrived has been
 // answered, so a build owed to a `didChange` happens here — a cheap
-// no-op when nothing is owed.
+// no-op when nothing is owed, and a key comparison when the state a
+// query already built is still current (`lsp_built.zen`'s single
+// flight).
 //
 // AND IT IS EVERY MESSAGE, NOT EVERY BATCH: `short_by` asks for exactly
 // one message's bytes and `Stdin.read` blocks until it has them, so this
 // reader cannot coalesce two keystrokes that both arrived (`lsp_diag.zen`'s
-// header is blunt about this; `serve` over a buffer can).
+// header is blunt about this; `serve` over a buffer can). What makes
+// that affordable is no longer the transport but the slot: the second
+// and later messages against one document state build nothing.
 //
 // NOT CALLED `settled`: `Server` has a method of that name and this
 // takes one as its first parameter, so the two would collide — this
 // folder's rule about a free function shadowing a method.
-after_drain = (server :: Server, a: Alloc) Res<(), AllocError> {
-    out ::= a.String().try();
-    server.settled(out).try();
+after_drain = (server :: Server, t: Alloc) Res<(), AllocError> {
+    out ::= t.String().try();
+    server.settled(t, out).try();
     print(out.view());
     Ok(());
 }
@@ -101,30 +114,30 @@ at_least_one = (n: usize) usize {
 // the first fault. A PARTIAL one is not a fault here — the next read
 // fixes it — and a real one ends the session, since only the header of
 // this message says where the next one starts.
-drain = (server :: Server, a: Alloc, held: str, at: usize)
+drain = (server :: Server, t: Alloc, held: str, at: usize)
         Res<Drain, AllocError> {
     from ::= at;
     more ::= true;
     framed ::= true;
     loop(() { more && from < held.len }, (h) {
         frame_at(held, from).match({
-            Ok(fr) => { from = fr.next; answered(server, a, fr.body).try(); },
+            Ok(fr) => { from = fr.next; answered(server, t, fr.body).try(); },
             Err(f) => { more = false; framed = partial(f); fault_line(f, framed); },
         });
     });
     Ok(Drain(at: from, framed: framed));
 }
 
-// One message in, its reply out. THE BODY IS COPIED FIRST — the one
-// line the transport cannot leave out: `held` is reallocated by the next
-// read, and the server keeps `str`s pointing into whatever it was
-// handed (the open documents are exactly that); a borrowed frame would
-// leave the document map pointing at freed pages.
-answered = (server :: Server, a: Alloc, body: str) Res<(), AllocError> {
-    kept ::= a.String().try();
-    kept.add_bytes(body).try();
-    out ::= a.String().try();
-    server.one(kept.view(), out).try();
+// One message in, its reply out. THE BODY IS NOT COPIED: it borrows
+// `held`, whose bytes are never reused — a `Vec` grow abandons the old
+// run in the arena without overwriting it, and a read appends past the
+// end — so the borrow outlives the message. What the server KEEPS from a
+// body (the open documents, the workspace) it copies itself, in
+// `lsp_serve.zen`'s `changed_to` — once per real change, not once per
+// message.
+answered = (server :: Server, t: Alloc, body: str) Res<(), AllocError> {
+    out ::= t.String().try();
+    server.one(t, body, out).try();
     // A NOTIFICATION PRODUCES NO BYTES and this prints none: the
     // protocol forbids replying to one.
     print(out.view());
@@ -150,8 +163,10 @@ partial = (f: FrameFault) bool {
 fault_line = (f: FrameFault, framed: bool) () {
     framed.match({
         true  => (),
-        false => println("lsp: bad frame at byte {} ({})",
-                         frame_byte(f), frame_why(f)),
+        false => println(
+            "lsp: bad frame at byte {} ({})",
+            frame_byte(f),
+            frame_why(f)),
     });
 }
 

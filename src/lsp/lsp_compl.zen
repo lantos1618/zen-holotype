@@ -1,0 +1,569 @@
+// src/lsp/lsp_compl.zen
+// `textDocument/completion` — the candidate set at a position.
+//
+// THE INCOMPLETE-INPUT PROBLEM, and this file's answer to it
+// (`design_lsp.md` §2): `x.` is not a parse, and this tree's parser
+// reports and does not recover — so completion NEVER asks the parser
+// about the incomplete part. The cursor's word and the trigger before
+// it come from a BACKWARD SCAN over the buffer's bytes, a lexical
+// heuristic living entirely in this folder. Then:
+//
+//   - AFTER A DOT: the partial word is replaced by a DUMMY identifier,
+//     which makes `q.` a parseable access again, and the base — which
+//     does parse — is found in the arena by the dummy's name. The base's
+//     type is what `base_of` memoized for it (a value), or what
+//     `defs_of` + `def_type` say (a type, as in `Shape.`). The offers
+//     are the type's cases (`cases_of`) and its members (`members_of`)
+//     — names COLLECTED from the declarations, each CONFIRMED through
+//     `members_of`, so visibility and substitution stay sema's and this
+//     file holds no second rule for what a dot reaches.
+//   - OTHERWISE: every name the world's tables mention, filtered to the
+//     ones `defs_of` settles as visible in the cursor's module, plus the
+//     language's three reserved words. `defs_of` takes an exact name and
+//     has no prefix form — collecting candidate STRINGS and letting
+//     `defs_of` judge each is the prefix form, without reimplementing
+//     the `*` gate.
+//
+// IT WILL BE WRONG SOMETIMES, and that is the design doc's sentence, not
+// an apology: a base the checker never memoized, a buffer too broken to
+// parse around the cursor, a dummy that collides with a user's own
+// `zen_wip` — each answers with an empty list, never a guess.
+//
+// WHAT IS NOT OFFERED: locals and parameters (their bindings leave no
+// spans or tables behind — the L3 gap `design_lsp.md` prices), UFCS
+// functions a dot could call (a third candidate source, `sema_cand`'s,
+// not yet read here), and a type parameter's bound members.
+//
+// TWO WAYS IN, decided by the workspace like every query in this folder:
+// `complete_in` asks a BUILD (an imported module's members exist only
+// there), `complete_at` a lone module, where imports resolve to nothing
+// and the answer is the module's own names.
+//
+// OVER 500 LINES, per STYLE.md's justification: the subject is one
+// request — the trigger scan, the two answers (members after a dot,
+// scope names without one), and the writer for the list both produce —
+// sharing the `Trigger` and `Item` vocabulary. The split the rule asks
+// for would put the scan in one file and the answers in another, and
+// the patched buffer is exactly what joins them.
+
+str, String = std.text
+Vec, Map = std.collections
+Alloc, AllocError = std.mem
+Range = std.core
+scan, Source = std.lex
+Parser = std.parse
+Ast, ExprId, Access, Member, Impl, Ident, Span, Pos = std.ast
+module_index_of = std.ast.ast_named
+Checker = sema.sema_check
+check_all = sema.sema_decl
+// `Types` IS IMPORTED FOR ITS METHODS, as `lsp_hover.zen` notes: without
+// the line the bootstrapper resolves `c.types.at` against another module.
+TyId, Ty, Types, TyNamed = sema.sema_ty
+World, Def, DefKind, ModuleTable, decl_at = sema.sema_def
+Found, members_of, first_hidden = sema.sema_member
+Case, cases_of = sema.sema_case
+def_type = sema.sema_type
+ImplId = sema.sema_id
+Build = zen.zen_build
+root_for, relative_to = zen.zen_path
+to_pos, run_of = lsp.lsp_pos
+write_text, written = lsp.lsp_json
+write_decimal = lsp.lsp_frame
+
+// One offer. `kind` is the protocol's CompletionItemKind number.
+Item* = {
+    label*: str,
+    kind*: usize,
+}
+
+// CompletionItemKind, spelled the protocol's way.
+METHOD*: usize = 2
+FUNCTION*: usize = 3
+FIELD*: usize = 5
+CLASS*: usize = 7        // an alias, the nearest thing to a type name
+ENUM*: usize = 13
+KEYWORD*: usize = 14
+ENUM_MEMBER*: usize = 20
+CONSTANT*: usize = 21
+STRUCT*: usize = 22
+
+// The stand-in that makes `q.` parse as an access. Chosen to be a name
+// nobody writes; a collision costs one empty answer, never a wrong one.
+DUMMY*: str = "zen_wip"
+
+// What the backward scan found: the buffer to actually parse (patched
+// when completing after a dot), the partial word to filter by, and which
+// of the two questions to ask.
+Trigger* = {
+    text*: str,
+    prefix*: str,
+    dot*: bool,
+}
+
+// THE LONE-MODULE QUESTION: no workspace, no disk, the buffer itself is
+// the whole program. The same four lines `hover_at` opens with.
+complete_at* = (a: Alloc, text: str, line: usize, character: usize,
+                out :: Vec<Item>) Res<(), AllocError> {
+    trig = trigger_at(a, text, line, character).try();
+    tree ::= a.Ast();
+    lexed = scan(a, Source(file: "doc", text: trig.text)).try();
+    p ::= a.Parser(lexed, tree);
+    m = p.module("doc").try();
+    p.tree.add_module(m).try();
+    c ::= a.Checker(p.tree).try();
+    check_all(c).try();
+    items_from(c, a, "doc", trig, out)
+}
+
+// THE BUILD-BACKED QUESTION. Shaped after `hover_in`: computed root,
+// the open document as the entry, the (possibly patched) buffer in the
+// overlay so the answer is about the text the editor shows.
+complete_in* = (env: Env, a: Alloc, workspace: str, path: str, text: str,
+                line: usize, character: usize, out :: Vec<Item>)
+               Res<(), AllocError> {
+    root = root_for(env, a, workspace, path);
+    rel = relative_to(root, path);
+    trig = trigger_at(a, text, line, character).try();
+    docs ::= a.Map<str, str>();
+    docs.set(path, trig.text).try();
+    b ::= a.Build(env, root);
+    c = b.whole(rel, docs).try();
+    items_from(c, a, rel, trig, out)
+}
+
+// THE SHARED-BUILD QUESTION. A trigger that is not after a dot leaves
+// the buffer parsing as it stands, so the slot's checker
+// (`lsp_built.zen`) — the build the settle already made for this exact
+// document state — answers, and nothing is rebuilt. `false` hands the
+// request back to `complete_in`: after a dot the buffer does not parse,
+// and the patched text is a state the slot never holds.
+complete_shared* = (c :: Checker, a: Alloc, rel: str, text: str,
+                    line: usize, character: usize, out :: Vec<Item>)
+                   Res<bool, AllocError> {
+    trig = trigger_at(a, text, line, character).try();
+    trig.dot.match({
+        true  => Ok(false),
+        false => { items_from(c, a, rel, trig, out).try(); Ok(true) },
+    })
+}
+
+items_from = (c :: Checker, a: Alloc, file: str, trig: Trigger,
+              out :: Vec<Item>) Res<(), AllocError> {
+    trig.dot.match({
+        true  => member_items(c, a, file, trig.prefix, out),
+        false => scope_items(c, a, file, trig.prefix, out),
+    })
+}
+
+// --- the backward scan ---------------------------------------------------
+//
+// Wire position to byte offset, then back over the word being typed. A
+// trigger scan knows three characters: an identifier byte, a dot, and
+// everything else.
+
+trigger_at = (a: Alloc, text: str, line: usize, character: usize)
+             Res<Trigger, AllocError> {
+    run = run_of(text, line);
+    pos = to_pos(text, line, character);
+    offset = run.start + pos.col - 1;
+    from ::= offset;
+    loop(() { from > 0 && text.index(from - 1).is_ident_cont() }, (h) {
+        from = from - 1;
+    });
+    upto ::= offset;
+    loop(() { upto < text.len && text.index(upto).is_ident_cont() }, (h) {
+        upto = upto + 1;
+    });
+    (from > 0 && text.index(from - 1) == '.').match({
+        true  => patched(a, text, from, offset, upto),
+        false => Ok(Trigger(
+            text: text,
+            prefix: text.slice(from, upto),
+            dot: false)),
+    })
+}
+
+// `q.` with the partial word replaced by the dummy — the access parses,
+// the checker types the base, and the dummy's name is how the access is
+// found back in the arena. The prefix stays the TYPED word, so the
+// filter never sees the dummy.
+patched = (a: Alloc, text: str, from: usize, offset: usize, upto: usize)
+          Res<Trigger, AllocError> {
+    s ::= a.String().try();
+    s.add_bytes(text.slice(0, from)).try();
+    s.add_bytes(DUMMY).try();
+    s.add_bytes(text.slice(upto, text.len)).try();
+    Ok(Trigger(text: s.view(), prefix: text.slice(from, offset), dot: true));
+}
+
+has_prefix = (name: str, prefix: str) bool {
+    (name.len < prefix.len).match({
+        true  => false,
+        false => name.slice(0, prefix.len).eq(prefix),
+    })
+}
+
+// --- after a dot: cases and members --------------------------------------
+
+member_items = (c :: Checker, a: Alloc, file: str, prefix: str,
+                out :: Vec<Item>) Res<(), AllocError> {
+    access_named(c, DUMMY).match({
+        None   => written(),
+        Ok(ac) => base_items(c, a, ac, file, prefix, out),
+    })
+}
+
+// The one access whose name is the dummy. A scan rather than a position
+// query: the patch moved every byte after the cursor, so the dummy's own
+// name is the reliable coordinate.
+access_named = (c :: Checker, name: str) Res<Access> {
+    eid ::= ExprId(index: 0);
+    hit ::= false;
+    best ::= no_access();
+    Range(0, c.tree.expr_ids()).loop((h, i) {
+        c.tree.expr_at(eid).kind.match({
+            Access(ac) => ac.name.text.eq(name).match({
+                true  => { best = ac; hit = true; },
+                false => (),
+            }),
+            _          => (),
+        });
+        eid = ExprId(index: eid.index + 1);
+    });
+    hit.match({ true => Ok(best), false => None })
+}
+
+no_access = () Access {
+    Access(base: ExprId(index: 0),
+           name: Ident(text: "", span: no_span()))
+}
+
+no_span = () Span {
+    Span(file: "", start: Pos(line: 0, col: 0), end: Pos(line: 0, col: 0))
+}
+
+base_items = (c :: Checker, a: Alloc, ac: Access, file: str, prefix: str,
+              out :: Vec<Item>) Res<(), AllocError> {
+    c.expr_memo.get(ac.base).match({
+        Ok(ty) => items_of_type(c, a, ty, file, prefix, out),
+        None   => c.tree.expr_at(ac.base).kind.match({
+            Name(n) => named_base_items(c, a, n.text, file, prefix, out),
+            _       => written(),
+        }),
+    })
+}
+
+// A TYPE base (`Shape.`, `i32.`): `base_of` memoizes value bases only,
+// so the name goes through `defs_of` and the type through `def_type` —
+// the same path `sema_static.zen`'s own access takes.
+named_base_items = (c :: Checker, a: Alloc, base: str, file: str,
+                    prefix: str, out :: Vec<Item>) Res<(), AllocError> {
+    module_index_of(c.tree, file).match({
+        None   => written(),
+        Ok(mi) => {
+            defs ::= a.Vec<Def>();
+            c.world.defs_of(mi, base, defs).try();
+            defs.get(0).match({
+                None  => written(),
+                Ok(d) => {
+                    ty = def_type(c, d).try();
+                    items_of_type(c, a, ty, file, prefix, out)
+                },
+            })
+        },
+    })
+}
+
+items_of_type = (c :: Checker, a: Alloc, ty: TyId, file: str, prefix: str,
+                 out :: Vec<Item>) Res<(), AllocError> {
+    c.is_unknown(ty).match({
+        true  => written(),
+        false => known_type_items(c, a, ty, file, prefix, out),
+    })
+}
+
+known_type_items = (c :: Checker, a: Alloc, ty: TyId, file: str,
+                    prefix: str, out :: Vec<Item>) Res<(), AllocError> {
+    cases ::= a.Vec<Case>();
+    cases_of(c, ty, cases).try();
+    cases.loop((h, cs) { offer(out, cs.name, ENUM_MEMBER, prefix).try() });
+    cands ::= a.Vec<Item>();
+    collect_members(c, a, ty, cands).try();
+    cands.loop((h, cand) {
+        offer_member(c, a, ty, file, cand, prefix, out).try();
+    });
+    Ok(());
+}
+
+// A candidate is offered only when `members_of` — the one rule for what
+// a dot reaches — finds it AND the cursor's module may see it. The names
+// come from declarations; the judgement comes from sema.
+offer_member = (c :: Checker, a: Alloc, ty: TyId, file: str, cand: Item,
+                prefix: str, out :: Vec<Item>) Res<(), AllocError> {
+    ok = visible(c, a, ty, cand.label, file).try();
+    ok.match({
+        false => written(),
+        true  => offer(out, cand.label, cand.kind, prefix),
+    })
+}
+
+visible = (c :: Checker, a: Alloc, ty: TyId, name: str, file: str)
+          Res<bool, AllocError> {
+    found ::= a.Vec<Found>();
+    members_of(c, ty, name, found).try();
+    (found.len == 0).match({
+        true  => Ok(false),
+        false => module_index_of(c.tree, file).match({
+            None   => Ok(true),
+            Ok(mi) => Ok(first_hidden(found, mi).match({
+                Ok(_) => false,
+                None  => true,
+            })),
+        }),
+    })
+}
+
+// --- collecting member NAMES (never their meaning) -----------------------
+
+collect_members = (c :: Checker, a: Alloc, ty: TyId, cands :: Vec<Item>)
+                  Res<(), AllocError> {
+    c.types.at(ty).match({
+        Named(n) => collect_named(c, a, n, cands),
+        Prim(p)  => collect_prim(c, a, p.name, cands),
+        _        => written(),
+    })
+}
+
+collect_named = (c :: Checker, a: Alloc, n: TyNamed, cands :: Vec<Item>)
+                Res<(), AllocError> {
+    decl_at(c.tree, n.decl).match({
+        None  => written(),
+        Ok(d) => d.kind.match({
+            Struct(s) => member_names(s.members, cands),
+            _         => written(),
+        }),
+    }).try();
+    collect_impls(c, a, n, cands)
+}
+
+// An impl lives in the module declaring its target, so that module's
+// table holds every impl that could supply a member here.
+collect_impls = (c :: Checker, a: Alloc, n: TyNamed, cands :: Vec<Item>)
+                Res<(), AllocError> {
+    c.world.table_at(n.decl.module.to_usize()).match({
+        None  => written(),
+        Ok(t) => {
+            t.impls.loop((h, iid) { collect_impl(
+                c,
+                n.name,
+                iid,
+                cands).try() });
+            Ok(())
+        },
+    })
+}
+
+collect_impl = (c :: Checker, name: str, iid: ImplId, cands :: Vec<Item>)
+               Res<(), AllocError> {
+    decl_at(c.tree, iid.decl).match({
+        None  => written(),
+        Ok(d) => d.kind.match({
+            Impl(im) => im.target.text.eq(name).match({
+                true  => member_names(im.members, cands),
+                false => written(),
+            }),
+            _        => written(),
+        }),
+    })
+}
+
+// A primitive's members are its prelude declaration's — `str` is a
+// struct in `std.text` carrying `len`, `get` and friends
+// (`sema_member.prim_members` is the resolution this collects for).
+collect_prim = (c :: Checker, a: Alloc, name: str, cands :: Vec<Item>)
+               Res<(), AllocError> {
+    defs ::= a.Vec<Def>();
+    c.world.prelude_of(name, defs).try();
+    defs.get(0).match({
+        None  => written(),
+        Ok(d) => decl_at(c.tree, d.id).match({
+            None   => written(),
+            Ok(dd) => dd.kind.match({
+                Struct(s) => member_names(s.members, cands),
+                _         => written(),
+            }),
+        }),
+    })
+}
+
+member_names = (ms: Vec<Member>, cands :: Vec<Item>) Res<(), AllocError> {
+    ms.loop((h, m) { member_name(m, cands).try(); });
+    Ok(());
+}
+
+member_name = (m: Member, cands :: Vec<Item>) Res<(), AllocError> {
+    m.kind.match({
+        Field(f)    => cands.add(Item(label: f.name.text, kind: FIELD)),
+        Const(k)    => cands.add(Item(label: k.name.text, kind: CONSTANT)),
+        Function(f) => cands.add(Item(label: f.name.text, kind: METHOD)),
+    })
+}
+
+// --- no dot: every visible name, and the three words ---------------------
+
+scope_items = (c :: Checker, a: Alloc, file: str, prefix: str,
+               out :: Vec<Item>) Res<(), AllocError> {
+    module_index_of(c.tree, file).match({
+        None   => written(),
+        Ok(mi) => {
+            Range(0, c.world.count()).loop((h, t) {
+                table_names(c, a, mi, t, prefix, out).try();
+            });
+            Ok(())
+        },
+    }).try();
+    keyword_items(prefix, out)
+}
+
+// Every name a module table MENTIONS — its own declarations and its
+// import bindings — is a candidate; `defs_of` decides each. A name in a
+// module nobody imported settles to nothing and is never offered, so
+// the collection may over-read and may never over-offer.
+table_names = (c :: Checker, a: Alloc, mi: usize, t: usize, prefix: str,
+               out :: Vec<Item>) Res<(), AllocError> {
+    c.world.table_at(t).match({
+        None   => written(),
+        Ok(tb) => {
+            tb.defs.loop((h, d) { offer_global(
+                c,
+                a,
+                mi,
+                d.name,
+                prefix,
+                out).try() });
+            tb.imports.loop((h, b) { offer_global(
+                c,
+                a,
+                mi,
+                b.name,
+                prefix,
+                out).try() });
+            Ok(())
+        },
+    })
+}
+
+offer_global = (c :: Checker, a: Alloc, mi: usize, name: str, prefix: str,
+                out :: Vec<Item>) Res<(), AllocError> {
+    (has_prefix(name, prefix) && !listed(out, name)).match({
+        false => written(),
+        true  => {
+            defs ::= a.Vec<Def>();
+            c.world.defs_of(mi, name, defs).try();
+            defs.get(0).match({
+                None  => written(),
+                Ok(d) => out.add(Item(label: name, kind: global_kind(d.kind))),
+            })
+        },
+    })
+}
+
+global_kind = (k: DefKind) usize {
+    k.match({
+        StructDef   => STRUCT,
+        EnumDef     => ENUM,
+        AliasDef    => CLASS,
+        FunctionDef => FUNCTION,
+        ConstDef    => CONSTANT,
+    })
+}
+
+// `true`, `false`, `consume` — the language's whole reserved-word list
+// (`lex_scan.zen`'s `word_kind`), offered as keywords.
+keyword_items = (prefix: str, out :: Vec<Item>) Res<(), AllocError> {
+    offer(out, "consume", KEYWORD, prefix).try();
+    offer(out, "false", KEYWORD, prefix).try();
+    offer(out, "true", KEYWORD, prefix).try();
+    Ok(())
+}
+
+// --- the list itself -------------------------------------------------------
+
+// Add, unless the prefix excludes it or it is already there. One offer
+// per name: a candidate reachable through two tables is one item.
+offer = (out :: Vec<Item>, label: str, kind: usize, prefix: str)
+        Res<(), AllocError> {
+    (has_prefix(label, prefix) && !listed(out, label)).match({
+        true  => out.add(Item(label: label, kind: kind)),
+        false => Ok(()),
+    })
+}
+
+listed = (out: Vec<Item>, label: str) bool {
+    out.find((it) { it.label.eq(label) }).match({
+        Ok(_) => true,
+        None  => false,
+    })
+}
+
+// Sorted by label: the collection order is the world's table order, an
+// artifact no client should ever see. Insertion sort, `lsp_colour.zen`'s
+// own shape — a completion list is short.
+sort_items* = (items :: Vec<Item>) Res<(), AllocError> {
+    Range(1, items.len).loop((h, i) { bubble(items, i).try(); });
+    Ok(());
+}
+
+bubble = (items :: Vec<Item>, at: usize) Res<(), AllocError> {
+    j ::= at;
+    loop(() { j > 0 && out_of_order(items, j) }, (h) {
+        swap_at(items, j).try();
+        j = j - 1;
+    });
+    Ok(());
+}
+
+out_of_order = (items: Vec<Item>, j: usize) bool {
+    items.get(j - 1).match({
+        None    => false,
+        Ok(lft) => items.get(j).match({
+            None    => false,
+            Ok(rgt) => rgt.label.before(lft.label),
+        }),
+    })
+}
+
+swap_at = (items :: Vec<Item>, j: usize) Res<(), AllocError> {
+    items.get(j).match({
+        None    => written(),
+        Ok(rgt) => items.get(j - 1).match({
+            None    => written(),
+            Ok(lft) => swap_pair(items, j, lft, rgt),
+        }),
+    })
+}
+
+swap_pair = (items :: Vec<Item>, j: usize, lft: Item, rgt: Item)
+            Res<(), AllocError> {
+    items.set(j - 1, rgt).match({ Ok(_) => (), None => () });
+    items.set(j, lft).match({ Ok(_) => (), None => () });
+    Ok(());
+}
+
+// A `CompletionList` as the protocol spells it.
+write_items* = (items: Vec<Item>, out :: String) Res<(), AllocError> {
+    out.add_bytes("{\"isIncomplete\":false,\"items\":[").try();
+    n ::= 0;
+    items.loop((h, it) { n = write_item(it, n, out).try(); });
+    out.add_bytes("]}")
+}
+
+write_item = (it: Item, n: usize, out :: String) Res<usize, AllocError> {
+    (n > 0).match({ true => out.add_bytes(","), false => written() }).try();
+    out.add_bytes("{\"label\":").try();
+    write_text(it.label, out).try();
+    out.add_bytes(",\"kind\":").try();
+    write_decimal(it.kind, out).try();
+    out.add_bytes("}").try();
+    Ok(n + 1);
+}

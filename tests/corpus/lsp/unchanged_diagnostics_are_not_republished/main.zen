@@ -1,0 +1,166 @@
+// UNCHANGED DIAGNOSTICS ARE NOT REPUBLISHED.
+//
+// A settle that builds has always published, even when the build found
+// exactly what the last one found — the same notification bytes, sent
+// again, for every file in the three sets `lsp_diag.zen` publishes.
+// Over a real editor that is one redundant frame per file per
+// keystroke. The dedup this pins: `say_one` compares the body against
+// the last one sent for that URI and skips the write when they match.
+//
+// FOUR BATCHES, one per way the policy can go wrong:
+//
+//   - TWO BUFFERS OPENED, ONE WRONG. The ordinary case, here so the
+//     dedup has something stored to compare against: the edited file's
+//     empty list, and the other file's sema fault, each in its own
+//     notification against its own URI.
+//
+//   - A REAL EDIT WITH NOTHING NEW TO SAY. `app.zen`'s bytes change (a
+//     comment), the program does not, so the build's answer is
+//     byte-identical for BOTH files — and no frames leave the server.
+//     Note the edit is real: `lsp_serve.zen`'s `stored` skip does not
+//     fire, a build happens, and only the publish is deduplicated.
+//
+//   - THE WRONG FILE FIXED. The take-back MUST NOT be deduplicated: an
+//     empty list differs from the error `said` holds, so the clearing
+//     frame goes out. A dedup that compared only "was this URI
+//     published" would leave the error on screen forever — the classic
+//     first-implementation bug, one gate over.
+//
+//   - THE CLEAN FILE BROKEN. One edit, exactly one publish, for the
+//     edited file — the count a client can hold the server to.
+//
+// THE FRAMING IS UNWRAPPED AND NOT PRINTED — a `Content-Length` header
+// carries a CR and a `.expected` may not (docs/TESTING.md). Every byte
+// of the envelope is `a_session_is_answered_frame_by_frame`'s subject.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// THE SECOND BUFFER, with a SEMA fault where the first has none:
+// `missing` is no name in scope. A buffer and not a file — see
+// `app/shape.zen`'s header for why.
+SHAPE_BROKEN*: str = "Point* = {\n    x*: i32,\n    y*: i32,\n}\n\narea* = (p: Point) i32 {\n    p.x * missing\n}\n"
+
+// The same module with the undefined name gone — identical bytes to the
+// file on disk, which is what makes the clearing verifiable by eye.
+SHAPE*: str = "Point* = {\n    x*: i32,\n    y*: i32,\n}\n"
+
+// THE FIRST BUFFER, byte for byte the file on disk, then with a comment
+// appended (a real change that changes nothing), then with an
+// undefined name of its own.
+APP*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = q.x + n;\n    s\n}\n"
+APP_EDITED*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = q.x + n;\n    s\n}\n// a comment changes the bytes, not the program\n"
+APP_BROKEN*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    absent\n}\n"
+
+// `tests/run.py` stages a directory test into `<work>/src` and runs the
+// program from `<work>`, so these are the paths the server will open.
+URI*: str = "file://src/app/app.zen"
+SHAPE_URI*: str = "file://src/app/shape.zen"
+
+// THE WORKSPACE IS NOT THE COMPILATION ROOT. The work directory is the
+// workspace; the root the documents are compiled against is `src`,
+// computed by `zen_path.root_for` climbing out of `src/app`, which holds
+// its own `app.zen`.
+ROOT_URI*: str = "file://."
+
+INITIALIZED*: str = "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}"
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    s ::= a.Server(env);
+
+    first ::= a.String().try();
+    open_session(a, first).try();
+    write_frame(INITIALIZED, first).try();
+    open_doc(a, SHAPE_URI, SHAPE_BROKEN, first).try();
+    open_doc(a, URI, APP, first).try();
+    batch(s, a, "two buffers opened, one wrong", first.view()).try();
+
+    second ::= a.String().try();
+    change_doc(a, URI, APP_EDITED, second).try();
+    batch(s, a, "a real edit, nothing new to say", second.view()).try();
+
+    third ::= a.String().try();
+    change_doc(a, SHAPE_URI, SHAPE, third).try();
+    batch(s, a, "the wrong file fixed", third.view()).try();
+
+    fourth ::= a.String().try();
+    change_doc(a, URI, APP_BROKEN, fourth).try();
+    batch(s, a, "the clean file broken", fourth.view()).try();
+
+    Ok(0);
+}
+
+// --- the requests ------------------------------------------------------
+
+// `rootUri` IS WHAT MAKES THIS A BUILD. Without it the server has no
+// workspace and publishes nothing at all, which is `lsp_diag.zen`'s
+// refusal rather than a gap.
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":").try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+// A `didOpen`'s text is a field OF the `textDocument`; a `didChange`'s
+// is `contentChanges[0].text` beside it.
+open_doc = (a: Alloc, uri: str, text: str, into :: String)
+           Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// FULL SYNC: `contentChanges[0].text` IS the whole new buffer, because
+// `initialize` advertised `textDocumentSync: 1`.
+change_doc = (a: Alloc, uri: str, text: str, into :: String)
+             Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes("},\"contentChanges\":[{\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}]}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+// One batch through the server, and every frame it produced.
+batch = (s :: Server, a: Alloc, what: str, input: str) Res<(), AllocError> {
+    out ::= a.String().try();
+    serve(s, input, out).try();
+    println("--- {}", what);
+    walk(out.view());
+    Ok(());
+}
+
+// Every frame's body, one per line. Nothing is filtered: the reply to
+// `initialize` is printed beside the notifications, because a count that
+// silently dropped a frame would be a count nothing could check.
+walk = (out: str) () {
+    from ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && from < out.len }, (h) {
+        frame_at(out, from).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { seen = seen + 1; println(
+                "    {}",
+                fr.body); from = fr.next; },
+        });
+    });
+    (seen == 0).then(() { println("    (no frames)"); });
+}

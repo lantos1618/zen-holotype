@@ -1,0 +1,436 @@
+// src/lsp/lsp_def.zen
+// `textDocument/definition` — where the name under the cursor was
+// declared.
+//
+// THE SAME SHAPE AS HOVER, because it is the same question asked of a
+// different memo: `ast_named.told_at` finds the name, and what the
+// checker already settled about it carries the declaration's span:
+//
+//   a call site        -> `call_memo` (which declaration the call meant)
+//   a module-level name -> `defs_of` (what the name means here)
+//   a member after a dot -> `expr_memo` on the base, then `members_of`
+//   a written type     -> `type_memo`, then the `Named` type's decl
+//                         (`Res<T>` routes through `defs_of` instead —
+//                         it interns as its own variant, not `Named`)
+//
+// NOTHING IS RESOLVED HERE — every arm reads a table `check_all` filled
+// or asks a query `src/sema/` owns (`design_lsp.md` §1: a second
+// resolution rule living in this folder would be a second, wrong
+// specification of the language). A miss anywhere is `null`, never a
+// guess.
+//
+// TWO WAYS IN, AND THE WORKSPACE DECIDES — `definition_in` checks the
+// document as part of a BUILD (the only way an imported name has ever
+// resolved), `definition_at` checks it as ONE module standing alone,
+// where an import resolves to nothing and the answer is `null`. Both
+// rebuild per request; `lsp_hover.zen`'s header says why there is no
+// cache.
+//
+// LOCALS AND PATTERN BINDERS ANSWER `null` ON PURPOSE: a `Binding`
+// carries no span and is released at scope exit (`sema_check.zen`), so
+// nothing survives `check_all` to point at. `design_lsp.md` §2 prices
+// the fix — a span on `Binding` — at L3, in `src/sema/`, not here.
+
+str, String = std.text
+Vec, Map = std.collections
+Alloc, AllocError = std.mem
+Range = std.core
+scan, Source = std.lex
+Parser = std.parse
+Ast, ExprId, TypeId, Span, Pos, Access, Decl, Function, in_span = std.ast
+Checker = sema.sema_check
+check_all = sema.sema_decl
+// `Types` IS IMPORTED FOR ITS METHODS: without this line the
+// bootstrapper resolves `c.types.at` against another module (as
+// `lsp_hover.zen` notes).
+TyId, Types, Ty = sema.sema_ty
+World, Def, decl_at = sema.sema_def
+def_type = sema.sema_type
+DeclId = sema.sema_id
+Found, members_of, first_found = sema.sema_member
+Build = zen.zen_build
+root_for, relative_to = zen.zen_path
+to_pos, to_wire, WirePos, write_wire = lsp.lsp_pos
+path_of, uri_at = lsp.lsp_uri
+Tell, told_at = lsp.lsp_decl
+module_index_of = std.ast.ast_named
+write_text, written = lsp.lsp_json
+
+// A definition, ready for the wire. `found` is false both for a position
+// covered by nothing and for one whose declaration the checker never
+// wrote down — a local, a pattern binder, a builtin.
+Target* = {
+    found*: bool,
+    uri*: str,
+    start*: WirePos,
+    end*: WirePos,
+}
+
+// What `sought` settles: the declaration's span, still in ZEN
+// coordinates and naming its own file — converting needs the file's
+// bytes and, for another module, its URI, both of which only the caller
+// with the workspace in hand can produce.
+Defn* = {
+    found*: bool,
+    span*: Span,
+}
+
+// The name at a wire position in a LONE module — no workspace, no disk.
+// `uri` is handed to `Source` verbatim, so every span in the tree names
+// it as its file (the convention `lsp_hover.zen`'s `hover_at` set).
+definition_at* = (a: Alloc, uri: str, text: str, line: usize,
+                  character: usize) Res<Target, AllocError> {
+    tree ::= a.Ast();
+    lexed = scan(a, Source(file: uri, text: text)).try();
+    p ::= a.Parser(lexed, tree);
+    m = p.module("doc").try();
+    p.tree.add_module(m).try();
+    c ::= a.Checker(p.tree).try();
+    check_all(c).try();
+    pos = to_pos(text, line, character);
+    d = sought(c, a, uri, pos).try();
+    // ONE MODULE, so the answer — when there is one — is always in the
+    // open buffer itself, and the client's own URI names it.
+    Ok(Target(
+        found: d.found,
+        uri: uri,
+        start: to_wire(text, d.span.start),
+        end: to_wire(text, d.span.end)));
+}
+
+// THE SAME QUESTION, ASKED OF A BUILD. Shaped after `hover_in`: the open
+// document is the entry, the root is computed rather than assumed, and
+// the overlay carries the unsaved buffer so the jump lands in the text
+// the editor shows. THE TARGET MAY BE ANOTHER MODULE: its URI is built
+// from the root and its range is converted against ITS bytes, read from
+// the disk — a span converted against the wrong file's text is the wrong
+// underline in the right file (`lsp_pos.zen`'s rule).
+definition_in* = (env: Env, a: Alloc, workspace: str, path: str, uri: str,
+                  text: str, line: usize, character: usize)
+                 Res<Target, AllocError> {
+    root = root_for(env, a, workspace, path);
+    rel = relative_to(root, path);
+    docs ::= a.Map<str, str>();
+    docs.set(path, text).try();
+    b ::= a.Build(env, root);
+    c = b.whole(rel, docs).try();
+    pos = to_pos(text, line, character);
+    d = sought(c, a, rel, pos).try();
+    placed(env, a, root, uri, text, rel, d)
+}
+
+// THE SAME QUESTION, ASKED OF A BUILD ALREADY MADE — the shared slot's
+// checker (`lsp_built.zen`), which the settle and every query against
+// one document state hold in common. The work below is exactly
+// `definition_in`'s second half; the build above it is what the slot
+// replaces. `a` is the REQUEST's arena: the URI another module's span
+// converts to is written into the reply and dies with the request, while
+// the spans it converts live in the slot and are only READ.
+definition_with* = (env: Env, c :: Checker, a: Alloc, root: str, uri: str,
+                    text: str, rel: str, line: usize, character: usize)
+                   Res<Target, AllocError> {
+    pos = to_pos(text, line, character);
+    d = sought(c, a, rel, pos).try();
+    placed(env, a, root, uri, text, rel, d)
+}
+
+// The span, carried to the wire. The open buffer's own text converts a
+// same-file span; anything else is read from the disk. AN UNREADABLE
+// TARGET STILL ANSWERS: `to_wire` clamps an empty text to 0:0, so the
+// jump names the right file at a degenerate range rather than failing —
+// the same refusal-to-drop `lsp_diag.zen` makes for a diagnostic.
+placed = (env: Env, a: Alloc, root: str, uri: str, text: str, rel: str,
+          d: Defn) Res<Target, AllocError> {
+    d.found.match({
+        false => Ok(no_target()),
+        true  => wired_target(env, a, root, uri, text, rel, d.span),
+    })
+}
+
+wired_target = (env: Env, a: Alloc, root: str, uri: str, text: str,
+                rel: str, span: Span) Res<Target, AllocError> {
+    same = span.file.eq(rel);
+    at = same.match({ true => uri, false => uri_at(a, root, span.file).try() });
+    bytes = same.match({ true => text, false => disk_text(env, a, path_of(
+        at)) });
+    Ok(Target(
+        found: true,
+        uri: at,
+        start: to_wire(bytes, span.start),
+        end: to_wire(bytes, span.end)));
+}
+
+// The bytes of a file the overlay does not hold. `lsp_diag.zen`'s
+// `on_disk` is this same five lines, private to its file; the second
+// caller is here.
+disk_text = (env: Env, a: Alloc, path: str) str {
+    env.fs.read(a, path).match({
+        Ok(text) => text.view(),
+        Err(_)   => "",
+    })
+}
+
+// --- the resolution order ----------------------------------------------
+//
+// call site, then module-level name, then member — the order the task's
+// table in `design_lsp.md` §2 lists the spans in. Each arm answers from
+// ONE source and a miss falls through to the next.
+
+sought = (c :: Checker, a: Alloc, file: str, p: Pos) Res<Defn, AllocError> {
+    told_at(c.tree, file, p).match({
+        Nothing    => no_defn(),
+        Sig(f)     => defn_of(f.name.span),
+        OfType(ta) => type_defn(c, a, ta.id, file),
+        OfValue(v) => value_defn(c, a, v.id, file, p),
+    })
+}
+
+// A WRITTEN TYPE: the memo says what it resolved to, and a `Named` type
+// knows its declaration. `Res<T>` interns as the dedicated `Res` variant,
+// not `Named`, and carries no decl — its name is asked of the visibility
+// query like any other (`Res = std.core.result` here, the prelude
+// elsewhere). Anything else — a primitive like `i32`, a poisoned name —
+// is `null`: a builtin has no declaration to jump to and an unresolved
+// name has none worth inventing.
+type_defn = (c :: Checker, a: Alloc, id: TypeId, file: str)
+            Res<Defn, AllocError> {
+    c.type_memo.get(id).match({
+        None     => no_defn(),
+        Ok(memo) => c.types.at(memo).match({
+            Named(n) => decl_defn(c, n.decl),
+            Res(_)   => global_defn(c, a, "Res", file),
+            _        => no_defn(),
+        }),
+    })
+}
+
+value_defn = (c :: Checker, a: Alloc, id: ExprId, file: str, p: Pos)
+             Res<Defn, AllocError> {
+    e = c.tree.expr_at(id);
+    // `told_at` answers a BIND TARGET with the VALUE's node (the span is
+    // the target's, the id the value's) — hover wants that type, a
+    // definition does not: the node not covering the cursor is how the
+    // substitution reads here, and a local's own span is the L3 gap this
+    // file deliberately does not close.
+    in_span(e.span, file, p).match({
+        false => no_defn(),
+        true  => e.kind.match({
+            Name(n)    => name_defn(c, a, id, n.text, file),
+            Access(ac) => access_defn(c, a, id, ac, file, p),
+            _          => no_defn(),
+        }),
+    })
+}
+
+// A BARE NAME: a call's callee first (resolution already chose the
+// declaration — asking `defs_of` again would re-run overload resolution
+// badly), then an ordinary module-level name. A name neither answers is
+// a local or a builtin: `null`.
+name_defn = (c :: Checker, a: Alloc, id: ExprId, text: str, file: str)
+            Res<Defn, AllocError> {
+    called_decl(c, id).match({
+        Ok(did) => decl_defn(c, did),
+        None    => global_defn(c, a, text, file),
+    })
+}
+
+// A MODULE-LEVEL NAME, resolved by the one query that owns visibility —
+// own declarations, then starred imports hop by hop, then the prelude.
+global_defn = (c :: Checker, a: Alloc, text: str, file: str)
+              Res<Defn, AllocError> {
+    module_index(c, file).match({
+        None   => no_defn(),
+        Ok(mi) => {
+            found ::= a.Vec<Def>();
+            c.world.defs_of(mi, text, found).try();
+            found.get(0).match({
+                None  => no_defn(),
+                Ok(d) => decl_defn(c, d.id),
+            })
+        },
+    })
+}
+
+// A MEMBER AFTER A DOT. The cursor must be on the name — a position on
+// the dot or the base is not a member use. A CALL through the access
+// (`x.f(..)`) resolved its member already; a bare read asks
+// `members_of` about the base's memoized type.
+access_defn = (c :: Checker, a: Alloc, id: ExprId, ac: Access, file: str,
+               p: Pos) Res<Defn, AllocError> {
+    in_span(ac.name.span, file, p).match({
+        false => no_defn(),
+        true  => called_decl(c, id).match({
+            Ok(did) => decl_defn(c, did),
+            None    => member_defn(c, a, ac, file),
+        }),
+    })
+}
+
+member_defn = (c :: Checker, a: Alloc, ac: Access, file: str)
+              Res<Defn, AllocError> {
+    c.expr_memo.get(ac.base).match({
+        Ok(ty) => found_defn(c, a, ty, ac.name.text),
+        None   => static_defn(c, a, ac, file),
+    })
+}
+
+// `base.name` where the base IS A TYPE — `Shape.Unit`, `i32.MAX` — so no
+// `expr_memo` entry exists for it (`sema_member.base_of` records value
+// bases only). A variant's span comes off the enum's declaration; a
+// static member goes through `members_of` like any other.
+static_defn = (c :: Checker, a: Alloc, ac: Access, file: str)
+              Res<Defn, AllocError> {
+    c.tree.expr_at(ac.base).kind.match({
+        Name(n) => typed_base_defn(c, a, n.text, ac.name.text, file),
+        _       => no_defn(),
+    })
+}
+
+typed_base_defn = (c :: Checker, a: Alloc, base: str, name: str, file: str)
+                  Res<Defn, AllocError> {
+    module_index(c, file).match({
+        None   => no_defn(),
+        Ok(mi) => {
+            defs ::= a.Vec<Def>();
+            c.world.defs_of(mi, base, defs).try();
+            defs.get(0).match({
+                None  => no_defn(),
+                Ok(d) => variant_or_member(c, a, d, name),
+            })
+        },
+    })
+}
+
+variant_or_member = (c :: Checker, a: Alloc, d: Def, name: str)
+                    Res<Defn, AllocError> {
+    variant_defn(c, d, name).match({
+        Ok(span) => defn_of(span),
+        None     => {
+            ty = def_type(c, d).try();
+            found_defn(c, a, ty, name)
+        },
+    })
+}
+
+// A variant's own span, read off the declaration — `cases_of` answers
+// what a value of the type can BE but carries no spans, so the AST is
+// the source here. Not a second resolution rule: which NAME denotes the
+// type is still `defs_of`'s answer above.
+variant_defn = (c :: Checker, d: Def, name: str) Res<Span> {
+    decl_at(c.tree, d.id).match({
+        None   => None,
+        Ok(dd) => dd.kind.match({
+            Enum(e) => Range(0, e.variants.len).find((i) {
+                e.variants.get(i).match({
+                    None  => false,
+                    Ok(v) => v.name.text.eq(name),
+                })
+            }).match({
+                None  => None,
+                Ok(i) => e.variants.get(i).match({
+                    None  => None,
+                    Ok(v) => Ok(v.name.span),
+                }),
+            }),
+            _       => None,
+        }),
+    })
+}
+
+// Every member of `ty` called `name`, first one wins — the set is what
+// resolution saw, and a hidden one is still where the jump goes (the
+// access site is where THAT mistake is reported, not here).
+found_defn = (c :: Checker, a: Alloc, ty: TyId, name: str)
+             Res<Defn, AllocError> {
+    found ::= a.Vec<Found>();
+    members_of(c, ty, name, found).try();
+    first_found(found).match({
+        None  => no_defn(),
+        Ok(f) => defn_of(f.span),
+    })
+}
+
+// THE CALL THIS NAME OR ACCESS WAS THE CALLEE OF, if any. `call_memo` is
+// keyed on the CALL and nothing links a child upward, so this is one
+// scan of the arena — the same fold `lsp_names.zen` makes for colour.
+called_decl = (c :: Checker, id: ExprId) Res<DeclId> {
+    eid ::= ExprId(index: 0);
+    hit ::= false;
+    did ::= DeclId(module: 0, decl: 0);
+    Range(0, c.tree.expr_ids()).loop((h, i) {
+        callee_of(c, eid, id).match({
+            None  => (),
+            Ok(d) => { hit = true; did = d; },
+        });
+        eid = ExprId(index: eid.index + 1);
+    });
+    hit.match({ true => Ok(did), false => None })
+}
+
+// This expression, when it is a resolved call through `id`.
+callee_of = (c :: Checker, eid: ExprId, id: ExprId) Res<DeclId> {
+    c.tree.expr_at(eid).kind.match({
+        Call(k) => (k.callee.index == id.index).match({
+            true  => c.call_memo.get(eid),
+            false => None,
+        }),
+        _       => None,
+    })
+}
+
+// The declaration, pointed at its NAME rather than its whole span: an
+// editor underlines the identifier, and every kind that binds one has
+// it in the same place. Impls and imports bind no name of their own.
+decl_defn = (c :: Checker, id: DeclId) Res<Defn, AllocError> {
+    decl_at(c.tree, id).match({
+        None  => no_defn(),
+        Ok(d) => d.kind.match({
+            Struct(s)   => defn_of(s.name.span),
+            Enum(e)     => defn_of(e.name.span),
+            Alias(x)    => defn_of(x.name.span),
+            Function(f) => defn_of(f.name.span),
+            Const(k)    => defn_of(k.name.span),
+            _           => no_defn(),
+        }),
+    })
+}
+
+// Which module the cursor is in, as a `World` index — the arena scan
+// lives in `ast_named.zen` (`module_index_of`), shared with completion.
+module_index = (c :: Checker, file: str) Res<usize> {
+    module_index_of(c.tree, file)
+}
+
+// --- the two constructors and the wire shape ----------------------------
+
+defn_of = (span: Span) Res<Defn, AllocError> {
+    Ok(Defn(found: true, span: span))
+}
+
+no_defn = () Res<Defn, AllocError> {
+    Ok(Defn(found: false, span: no_span()))
+}
+
+no_span = () Span {
+    Span(file: "", start: Pos(line: 0, col: 0), end: Pos(line: 0, col: 0))
+}
+
+no_target* = () Target {
+    Target(
+        found: false,
+        uri: "",
+        start: WirePos(line: 0, character: 0),
+        end: WirePos(line: 0, character: 0))
+}
+
+// A `Location` as the protocol spells one. The URI is TEXT-built, like
+// every reply in this folder — `write_text` escapes, one rule.
+write_location* = (t: Target, out :: String) Res<(), AllocError> {
+    out.add_bytes("{\"uri\":").try();
+    write_text(t.uri, out).try();
+    out.add_bytes(",\"range\":{\"start\":").try();
+    write_wire(t.start, out).try();
+    out.add_bytes(",\"end\":").try();
+    write_wire(t.end, out).try();
+    out.add_bytes("}}")
+}

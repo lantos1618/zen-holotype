@@ -1,0 +1,94 @@
+// THE OUTLINE IS THE MODULE'S DECLARATIONS — a const, an enum, an
+// alias, a struct and a function, in source order, flat.
+//
+// `documentSymbol` is the one query beside colour that needs NO build
+// and no checker: a declaration's kind, its span and its name's span
+// are AST facts, so this test sends no `rootUri` and the buffer alone
+// answers — the property that makes the outline work on an unsaved
+// file in a session with no workspace.
+//
+// The reply is the protocol's flat `SymbolInformation` and is asserted
+// WHOLE: `kind` numbers (the protocol's SymbolKind — 14 Constant, 10
+// Enum, 5 Class standing in for an alias, 23 Struct, 12 Function), the
+// declaration's whole span as `range`, and the name's own as
+// `selectionRange`. An import and an impl bind no name of their own and
+// are not rows; there is no hierarchical DocumentSymbol form.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// The module outlined. One of each named declaration form, in an order
+// that is not the kind order, so the reply's order is provably the
+// file's.
+DOC*: str = "MAX*: i32 = 4\n\nMode = Fast | Slow\n\nCount = i32\n\nConfig = { name*: str, size*: i32 }\n\nsize_of = (c: Config) i32 {\n    c.size\n}\n"
+
+URI*: str = "file:///a.zen"
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    input ::= a.String().try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
+        input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input).try();
+    open_doc(a, input).try();
+    ask(a, input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input).try();
+
+    s ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view());
+    Ok(0);
+}
+
+open_doc = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(DOC, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+ask = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/documentSymbol\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// Reply 0 is `initialize`, reply 1 is the outline, the last is
+// `shutdown`; only the middle one is this test's row. THE FRAMING IS
+// UNWRAPPED AND NOT PRINTED, because
+// `a_session_is_answered_frame_by_frame` already pins every byte of it.
+walk_replies = (out: str) () {
+    at ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; shown(seen, fr.body); seen = seen + 1; },
+        });
+    });
+}
+
+shown = (i: usize, body: str) () {
+    (i == 1).match({
+        true  => println("    {}", body),
+        false => (),
+    });
+}

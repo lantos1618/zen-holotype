@@ -6,7 +6,7 @@ Companion to `DESIGN.md`, `PLAN.md` and `TESTING.md`. Those say what the languag
 
 > LSP, formatter, and race checker are the visible goals, and **two of those three are not tools.** … Only the LSP is a genuinely separate program, and even it is a thin server over compiler internals.
 
-**Everything below is held to that.** A server is a transport, a coordinate conversion, and a table that maps a method name onto a query the compiler already answers. Where a query is missing, the fix belongs in `src/sema/` or `src/ast/`, not in `src/lsp/`. Where a query is *expensive*, `PLAN.md:345` already names the cause and the place the fix goes: "If this stage turns out to be expensive, the cause is stage 0.3 — a batch compiler recompiling the world per keystroke."
+**Everything below is held to that.** A server is a transport, a coordinate conversion, and a table that maps a method name onto a query the compiler already answers. Where a query is missing, the fix belongs in `src/sema/` or `src/std/ast/`, not in `src/lsp/`. Where a query is *expensive*, `PLAN.md:345` already names the cause and the place the fix goes: "If this stage turns out to be expensive, the cause is stage 0.3 — a batch compiler recompiling the world per keystroke."
 
 `STAGE` reads `4`, and `PLAN.md:74` puts the LSP at stage 4. This is not future work.
 
@@ -18,9 +18,9 @@ Companion to `DESIGN.md`, `PLAN.md` and `TESTING.md`. Those say what the languag
 
 | what | where |
 |---|---|
-| a cursor position finds its node | `src/ast/ast_find.zen:55` (`node_at`), `:106` (`expr_node_at`) |
-| every node carries a half-open span with a 1-based byte column | `src/ast/ast_span.zen:22` (`Pos`), `:30` (`Span`, carrying `file`) |
-| every **name** carries its own span | `src/ast/ast_span.zen:73` (`Ident`), `:82` (`QualifiedName`) |
+| a cursor position finds its node | `src/std/ast/ast_find.zen:55` (`node_at`), `:106` (`expr_node_at`) |
+| every node carries a half-open span with a 1-based byte column | `src/std/ast/ast_span.zen:22` (`Pos`), `:30` (`Span`, carrying `file`) |
+| every **name** carries its own span | `src/std/ast/ast_span.zen:73` (`Ident`), `:82` (`QualifiedName`) |
 | the type of an expression, memoized | `src/sema/sema_type.zen:338` (`type_of`), memo at `src/sema/sema_check.zen:101` |
 | the type a written type node denotes | `src/sema/sema_type.zen:73` (`type_from_ast`), memo at `src/sema/sema_check.zen:102` |
 | which declaration a call resolved to | `src/sema/sema_check.zen:124` (`call_memo`) |
@@ -29,10 +29,10 @@ Companion to `DESIGN.md`, `PLAN.md` and `TESTING.md`. Those say what the languag
 | what a value of a type can be | `src/sema/sema_case.zen:42` (`cases_of`) |
 | a diagnostic as a value with a position | `src/sema/sema_diag.zen:165` (`Diag`), `:177` (`message`), `:228` (`render`) |
 | printing a `TyId` as text | `src/sema/sema_ty.zen:448` (`Types.name_of`) |
-| tokens, with comments among them | `src/lex/lex_token.zen:96` (`Token`), `:75` (`LineComment`/`BlockComment`) |
+| tokens, with comments among them | `src/std/lex/lex_token.zen:96` (`Token`), `:75` (`LineComment`/`BlockComment`) |
 | the whole pipeline, wired | `src/zen/zen_run.zen:35` (`build`) |
 
-`PLAN.md:355` listed one precondition as **MISSING** — "a cursor position finds its node". It has since landed as `src/ast/ast_find.zen`, and that file's header says why it was the one absent: every other consumer walks downward from a root, and an editor arrives holding a position. **That table row is now green, and `PLAN.md` says so.**
+`PLAN.md:355` listed one precondition as **MISSING** — "a cursor position finds its node". It has since landed as `src/std/ast/ast_find.zen`, and that file's header says why it was the one absent: every other consumer walks downward from a root, and an editor arrives holding a position. **That table row is now green, and `PLAN.md` says so.**
 
 ### Genuinely new code
 
@@ -64,12 +64,12 @@ Four stages, named **L1–L4** so they are not confused with `PLAN.md`'s 0–5. 
 | `shutdown` / `exit` | none | **built** | L1 |
 | `textDocument/didOpen` / `didChange` / `didClose` | an overlay the driver reads before the disk | **built, both halves** (Full sync). The server holds the buffer; `Build.overlay` is what the driver reads before `env.fs.read`, so an UNSAVED buffer — and a file that is on no disk at all — is what gets checked | L1 |
 | `textDocument/publishDiagnostics` | diagnostics as values with spans | **built**, all three phases: `src/lsp/lsp_diag.zen`. Sema's come off the `Checker` `Build.whole` hands back (`src/sema/sema_check.zen:197,199`), lex's and parse's off the `Build`'s own `diag_count`/`diag_at`. Grouped by the URI each span names, one notification per file, and a file whose errors are gone gets an EMPTY list. The policy — when to send, and why it is not a timed debounce — is §5 | L1 |
-| `textDocument/documentSymbol` | a module's declarations in source order, each with a span and a name-span | **exists**, no new query: `module_count`/`module_at` at `src/ast/ast_arena.zen:139,141`; `Decl.span` and `Ident.span` are LSP's `range` and `selectionRange` exactly | L2 |
-| `textDocument/hover` | the type under the cursor, printed | **built, and widened** — `src/lsp/lsp_hover.zen` plus `src/lsp/lsp_decl.zen`, still no new sema. See the hover section below for what it answers, what it refuses, and the measurement | L2 |
-| `textDocument/definition` | the span a name was declared at | **mostly**: `defs_of` → `Def.span` (`src/sema/sema_def.zen:180`, `:64`) for a module-level name; `call_memo` (`src/sema/sema_check.zen:124`) for a call; `Found.span` (`src/sema/sema_member.zen:63`) for a member. **Missing for locals** — see below | L2 |
-| `textDocument/semanticTokens/full`, lexical | the token stream | **built**: `src/lsp/lsp_colour.zen`, over `scan` and `Token{kind, span}` (`src/lex/lex.zen:57`, `src/lex/lex_token.zen:96`) and nothing else. The one answer here that needs no build, no `Checker` and no workspace — see the colour section below | L2 |
+| `textDocument/documentSymbol` | a module's declarations in source order, each with a span and a name-span | **built** — `src/lsp/lsp_symbol.zen`, and it turned out to need no build at all: kind, `Decl.span` and `Ident.span` are AST facts, so the buffer alone answers, flat `SymbolInformation`, top-level only | L2 |
+| `textDocument/hover` | the type under the cursor, printed | **built, and widened** — `src/lsp/lsp_hover.zen` plus the name finder (now `src/std/ast/ast_named.zen`), still no new sema. See the hover section below for what it answers, what it refuses, and the measurement | L2 |
+| `textDocument/definition` | the span a name was declared at | **built** — `src/lsp/lsp_def.zen`: `call_memo` for a call site, `defs_of` → the declaration's name-span for a module-level name, `expr_memo` + `members_of` → `Found.span` for a member, `type_memo` → the `Named` type's decl for a written type. Cross-module through the same build path hover uses. **Locals and pattern binders answer `null`** — the gap below | L2 |
+| `textDocument/semanticTokens/full`, lexical | the token stream | **built**: `src/lsp/lsp_colour.zen`, over `scan` and `Token{kind, span}` (`src/std/lex/lex.zen:57`, `src/std/lex/lex_token.zen:96`) and nothing else. The one answer here that needs no build, no `Checker` and no workspace — see the colour section below | L2 |
 | `textDocument/references` | for a `DeclId`, every node that resolved to it | **missing**. `call_memo` is that map, forward and for calls only. Nothing records a resolved bare *name*, and nothing inverts | L3 |
-| `textDocument/completion` | the candidate set at a position | **partly**: after a dot, `members_of` (`src/sema/sema_member.zen:413`) and `cases_of` (`src/sema/sema_case.zen:42`) and `travelled_cands` (`src/sema/sema.zen:97`) are the three halves of `DESIGN.md:406`. **Missing**: `defs_of` takes an exact `name: str` and has no prefix form; and the incomplete-parse problem below | L3 |
+| `textDocument/completion` | the candidate set at a position | **built** — `src/lsp/lsp_compl.zen`: the backward scan below finds the trigger; after a dot a dummy identifier makes the access parse and `members_of`/`cases_of` answer, otherwise the in-scope names are collected from the world's tables and each is judged by `defs_of` (which still has no prefix form — the collection over-reads and `defs_of` filters), plus the three reserved words | L3 |
 | `textDocument/formatting` | `parse \|> print` | **the engine exists, the request does not**. `PLAN.md` stage 2 landed: `src/fmt/` formats a file, `zen fmt --check` gates the tree, and a re-lex guard requires an identical token stream before any edit is kept. What is missing is only the LSP request wired to it — and note the formatter models the FILE, not yet the DECLARATION, so `rangeFormatting` is not merely unimplemented, it is not yet expressible | L3 |
 | `textDocument/semanticTokens`, semantic | per-`Ident` resolution: is this a type, a function, a parameter? | ~~**missing**: `defs_of` per identifier in a file, and nothing memoizes on an `Ident`.~~ **LANDED** — and it turned out to need neither: `call_memo`, `type_memo` and the AST's own declaration kinds already answer type and function; the one genuinely new memo is `param_memo` (`src/sema/sema_check.zen`), keyed on the name EXPRESSION's `ExprId` since an `Ident` has no id. `src/lsp/lsp_names.zen` reads all of it off the diagnostics' build; `src/lsp/lsp_colour.zen` reclassifies only the `Ident`s it names | L4 |
 | `textDocument/semanticTokens/range` and `/full/delta` | a sub-range, or a diff against a previous result | **missing, and deliberately not advertised.** A client asks for either one only when the server said it has it, so the capability is `full: true` and nothing more. Advertising one unanswered is `-32601`, which in VS Code renders as no colour at all with nothing on screen to say why | L3 |
@@ -80,9 +80,9 @@ Four stages, named **L1–L4** so they are not confused with `PLAN.md`'s 0–5. 
 
 **Locals have no span, and it is not an oversight.** `Binding` is `{ name, ty, mutable }` (`src/sema/sema_check.zen:68`) and locals are released at scope exit (`detach_locals`, `:294`). Nothing about a local survives `check_all`. Go-to-definition on a parameter therefore does not work and cannot be made to work from outside sema: the fix is a `span` on `Binding` plus a per-function record of the bindings that were live, which is a change in `src/sema/` and is priced at L3, not at L2.
 
-**Incomplete input is the completion problem, not resolution.** `x.` is not a parse. `f(a, ` is not a parse. So at the moment completion and signature help are wanted, there is no `Access` node and no `Call` node to ask about. This tree's parser reports and does not recover — `src/zen/zen_build.zen:341` states the position for the lexer and the same holds one level up. **Do not answer this by writing an error-recovering second parser.** The cheap answer, and the one this document recommends: the server scans *backwards from the cursor over the buffer's bytes* to find the trigger character and the base expression's end, asks `expr_node_at` about the base — which does parse — and never asks the parser about the incomplete part at all. That is a lexical heuristic living entirely in `src/lsp/`, it is testable, and it does not put a second grammar in the tree. It will be wrong sometimes. Say so in its header.
+**Incomplete input is the completion problem, not resolution.** `x.` is not a parse. `f(a, ` is not a parse. So at the moment completion and signature help are wanted, there is no `Access` node and no `Call` node to ask about. This tree's parser reports and does not recover — `src/zen/zen_build.zen:341` states the position for the lexer and the same holds one level up. **Do not answer this by writing an error-recovering second parser.** The cheap answer, and the one this document recommended and completion now implements: the server scans *backwards from the cursor over the buffer's bytes* to find the trigger character and the base expression's end, asks `expr_node_at` about the base — which does parse — and never asks the parser about the incomplete part at all. `lsp_compl.zen` makes the base parseable with a dummy identifier rather than trimming, which is the same refusal said constructively. It is a lexical heuristic living entirely in `src/lsp/`, it is testable, and it does not put a second grammar in the tree. It will be wrong sometimes — its header says so.
 
-### Hover, in full — because it is the only query built and it was measured
+### Hover, in full — because it was the first query built and it was measured
 
 The first version of hover was one path: `expr_node_at` → `expr_memo` → `Types.name_of`. That is the type of an EXPRESSION, and it turned out to be half of what hovering is for. Probing every identifier position in
 
@@ -95,7 +95,7 @@ add = (a: i32, b: i32) i32 {
 
 against the shipped binary over a real pipe, **3 of 12 positions answered**: `a` and `b` where they are used in `a + b`, and `s` where it is used on the last line. The function's own name, both parameters at their declarations, the local at its declaration and all three `i32` returned `null`. The rule was "an identifier in expression position resolves; a binding site or a type name does not" — and a user hovers a declaration to ask what something IS at least as often as a use.
 
-It is now **10 of 12** on that program, the two remaining being a space and a brace, which must stay `null`. The widening cost no new sema. It cost one new query in `src/lsp/lsp_decl.zen` — *which name is the cursor inside* — because a name is not a node:
+It is now **10 of 12** on that program, the two remaining being a space and a brace, which must stay `null`. The widening cost no new sema. It cost one new query — *which name is the cursor inside* — because a name is not a node (the finder lived in `src/lsp/lsp_decl.zen` and moved to `src/std/ast/ast_named.zen` when `definition` became its second caller):
 
 | what a user hovers | where the answer comes from |
 |---|---|
@@ -111,7 +111,7 @@ Three decisions in that table are worth ratifying or overruling rather than inhe
 
 **A function's name answers with a reprinted declaration and not with its type.** `Types.write_fn` would produce `(i32, i32) i32`; `ast_node.zen` already argued why that is worse — "`(i32, i32) i32` says nothing about which `i32` is which" — and parameter names are correctly *not* in the type, since two signatures differing only in them are one type. So the names come from the AST and the types from the memo, and nothing in the string is invented. Type-parameter **bounds are dropped**: `<T: Eq + Hash>` reprints as `<T>`.
 
-**A type name answers with what it RESOLVES to, and for `i32` that is `i32`.** A type's own name is a weak answer and this is the weakest case of it. It was chosen over the alternatives — a description, a field list, a size — because those are `documentSymbol`'s and `definition`'s answers wearing hover's clothes, and both are already in the table above with the queries they need. What makes it more than a tautology is what it does in the two cases where the source and the answer differ: `Alias = Shape` hovers as `Shape`, `Res<Cfg, _>` hovers with the hole filled as the checker filled it — and a name that resolves to nothing answers `null`, so `i32` is also saying *this name is a type the checker knows*, which is exactly the question a typo raises.
+**A type name answers with what it RESOLVES to — and a PRIMITIVE also answers with what its prelude declaration says.** For an alias or a named type the answer is the resolved type (`Alias = Shape` hovers as `Shape`, `Res<Cfg, _>` with the hole filled as the checker filled it), and a name that resolves to nothing answers `null`, so even the plain cases say *this name is a type the checker knows*. A primitive has a second thing to say, because "a prelude declaration of a primitive's name IS that primitive" (DESIGN.md): the declaration is where the language keeps the description and the constants, so a written `i32` answers `i32 — members: MIN, MAX, BITS`, and `bool` — declared in `std.core.bool` with nothing but a doc line, which is the truth about bool — answers with that line. The enrichment is the build's: a lone-module check has no prelude to read, and there the bare name is the whole answer, as before. Richer still — a field list, a size — remains `documentSymbol`'s and `definition`'s answer wearing hover's clothes.
 
 **Poison is refused everywhere rather than printed.** `Ty.Unknown` is what sema interns for "a type I could not compute and have already reported", and `Types.write_name` spells it `<unknown>`. Hover checks any type it is about to print, recursively, and answers `null` if poison is anywhere inside it — so a function whose return type did not resolve has no hover at all rather than a signature with a hole in it. **This gate is what made the next paragraph a measurement rather than a surprise**: it is why an unbuilt import failed loudly-by-silence instead of printing `<unknown>` at every position in `src/`.
 
@@ -144,11 +144,11 @@ The gate is `tests/corpus/lsp/hover_answers_an_imported_name`, which ships the r
 - **An imported name, when there is no workspace.** With a `rootUri` this now answers, because the document is checked as part of a build (§5). Without one — a client that sends none, or the two-file form of `zen lsp` — the lone-module check is still what runs and an import still resolves to poison.
 - **A closure's parameter**, whose `Param.type` is absent by construction.
 
-**The gate is `tests/corpus/lsp/hover_answers_at_a_declaration`**, which is the 12-position probe plus three poison rows, driven through framed JSON-RPC, asserting the value AND the range — so a right type under the wrong underline is still red. Half its rows assert `null`; a widening that starts answering those is a regression even though it looks like more coverage.
+**The gate is `tests/corpus/lsp/hover_answers_at_a_declaration`**, which is the 12-position probe plus three poison rows and three no-prelude fallback rows, driven through framed JSON-RPC, asserting the value AND the range — so a right type under the wrong underline is still red. Half its rows assert `null`; a widening that starts answering those is a regression even though it looks like more coverage.
 
 ### Colour, in full — because it is the second query built, and it cost the least of anything here
 
-**`src/lsp/lsp_colour.zen`, and the lexical half of it is one `scan`.** No `Parser`, no `Checker`, no `Build`, nothing read from any disk. That is not an economy, it is the property that makes the answer worth having: hover and diagnostics both need a build and both go quiet without a workspace, and colour is the one thing a user notices the *instant* a file opens. It answers on an unsaved buffer, in a session with no `rootUri`, and in a file that does not parse — `src/lex/lex.zen`'s contract is that a file with lexical faults still yields tokens, so a half-typed string literal costs the colour of that literal and nothing else. **The semantic half rides the diagnostics' build** and is one paragraph below; it changes none of those properties, because where there is no clean build there is no semantic half and the lexical answer is what remains.
+**`src/lsp/lsp_colour.zen`, and the lexical half of it is one `scan`.** No `Parser`, no `Checker`, no `Build`, nothing read from any disk. That is not an economy, it is the property that makes the answer worth having: hover and diagnostics both need a build and both go quiet without a workspace, and colour is the one thing a user notices the *instant* a file opens. It answers on an unsaved buffer, in a session with no `rootUri`, and in a file that does not parse — `src/std/lex/lex.zen`'s contract is that a file with lexical faults still yields tokens, so a half-typed string literal costs the colour of that literal and nothing else. **The semantic half rides the diagnostics' build** and is one paragraph below; it changes none of those properties, because where there is no clean build there is no semantic half and the lexical answer is what remains.
 
 **Why this rather than a TextMate grammar** is `editors/README.md`'s argument and it stands unchanged: a second grammar is `PLAN.md:137`'s named failure, a generated one is `PLAN.md:127`'s ungated third artifact, and VS Code cannot load the tree-sitter grammar `grammar/` already holds. What this document said was the route that costs neither, and it was right; what it did not say is that the route is about two hundred lines.
 
@@ -185,7 +185,7 @@ Two coordinate systems:
 | LSP | **0-based** | **UTF-16 code units** into the line |
 | Zen | **1-based** | **1-based BYTE column** |
 
-Zen's side is fixed in four places and is not negotiable: `DESIGN.md:49` ("a `line:col` with a 1-based byte column, from the lexer up"), `DESIGN.md:314` (a trap's column is a 1-based byte offset), `TESTING.md:49` (every `must-fail` position is a 1-based byte column), and `src/ast/ast_span.zen:22`, which anticipated this document in one sentence:
+Zen's side is fixed in four places and is not negotiable: `DESIGN.md:49` ("a `line:col` with a 1-based byte column, from the lexer up"), `DESIGN.md:314` (a trap's column is a 1-based byte offset), `TESTING.md:49` (every `must-fail` position is a 1-based byte column), and `src/std/ast/ast_span.zen:22`, which anticipated this document in one sentence:
 
 > `col` counts BYTES, not codepoints and not UTF-16 units — `str` is bytes everywhere else in this language, and an LSP converting to UTF-16 at the wire is its own, testable, step.
 
@@ -202,7 +202,7 @@ to_pos*  = (text: str, line: usize, character: usize) Pos   // wire -> Zen
 to_wire* = (text: str, p: Pos) WirePos                      // Zen -> wire
 ```
 
-Both take the document text, because **neither `Pos` carries a byte offset.** `src/lex/lex_token.zen:26` has one and `src/ast/ast_span.zen:22` deliberately does not — the offset dies at the parser boundary. So converting a column requires the bytes of the line, which means **the document store is a precondition for positions, not merely for sync.** That is a real ordering constraint on L1.
+Both take the document text, because **neither `Pos` carries a byte offset.** `src/std/lex/lex_token.zen:26` has one and `src/std/ast/ast_span.zen:22` deliberately does not — the offset dies at the parser boundary. So converting a column requires the bytes of the line, which means **the document store is a precondition for positions, not merely for sync.** That is a real ordering constraint on L1.
 
 ### The algorithm, and the one arithmetic fact
 
@@ -407,10 +407,10 @@ The L1–L4 staging in §2 is about the SERVER. This is the same staging read fr
 | **colour** | **works**, tree-sitter, no server — and it does NOT come from `semanticTokens`, which changes nothing for Neovim | **works** — `semanticTokens`, from the compiler's own lexer and, on a clean build, its checker; the deviation below explains why it is not a TextMate grammar |
 | brackets, comment toggling, word selection | tree-sitter | **works now**, `language-configuration.json` |
 | **hover** | **works** — the transport landed, and so did the build behind it | **works** |
-| go-to-definition | L2 (module-level), L3 (locals) | same |
-| document symbols / outline | L2 | L2, plus the breadcrumb bar for free |
+| go-to-definition | **works** — module-level names, call sites, members, written types; locals and pattern binders answer `null` (the L3 gap) | same |
+| document symbols / outline | **works** — flat, top-level, off the buffer alone | same, plus the breadcrumb bar for free |
 | **diagnostics as you type** | **works** — all three phases, grouped per file, cleared when fixed; §5 has the trigger policy | **works** |
-| completion | L3 | L3 |
+| completion | **works** — members after a dot (via the backward scan and a dummy identifier), scope names and the three reserved words otherwise; no locals, no UFCS candidates | same |
 | format on save | L3 — engine exists, request does not | same |
 | references, rename, signature help | L4 | L4 |
 
@@ -532,15 +532,15 @@ Gates 1 and 2 are green (`json_round_trips_and_rejects`, `a_session_is_answered_
 
 **L1 is done when** an editor connected to `zen lsp` shows the same errors, at the same places, as `zen build`. The first half is true; the second half is exactly what gate 3 would measure.
 
-### L2 — the queries that already exist — **HOVER AND COLOUR DONE**
+### L2 — the queries that already exist — **DONE**
 
 Hover, definition, documentSymbol, lexical semanticTokens. No new sema.
 
-**Two of the four are built.** Hover, and `semanticTokens/full` in its lexical form (`src/lsp/lsp_colour.zen`, §2's colour section). `definition` and `documentSymbol` are what is left here, and neither needs sema either — `Def.span`, `call_memo` and `Found.span` for the first, `module_count`/`module_at` with `Decl.span` and `Ident.span` for the second.
+**All four are built.** Hover, and `semanticTokens/full` in its lexical form (`src/lsp/lsp_colour.zen`, §2's colour section), and now `definition` (`src/lsp/lsp_def.zen` — `call_memo`, `defs_of`, `Found.span`, exactly the queries the table above priced) and `documentSymbol` (`src/lsp/lsp_symbol.zen`, off the AST alone). The name finder hover introduced moved to `src/std/ast/ast_named.zen` on its second caller, as its own header had scheduled.
 
 **Gate:** a query corpus. Each test is a source file with cursor positions and the expected answer — for hover the type name `Types.name_of` produces, for definition a `file:line:col`, for documentSymbol the list. Same `.expected` format, same byte comparison. The positions are asserted in **Zen** coordinates in the fixture and converted at the wire, so a failure separates "the query is wrong" from "the conversion is wrong". Break it by returning the enclosing node instead of the smallest and watch hover go red.
 
-**Hover's half of that gate exists**: `tests/corpus/lsp/hover_answers_at_a_declaration`, a 15-row position table driven through framed JSON-RPC, asserting the value and the range together. It was mutation-verified against each of the three paths it guards — the name finder, the signature reprint and the poison refusal — and against the two `null` controls. See the hover section in §2.
+**Hover's half of that gate exists**: `tests/corpus/lsp/hover_answers_at_a_declaration`, an 18-row position table driven through framed JSON-RPC, asserting the value and the range together. It was mutation-verified against each of the three paths it guards — the name finder, the signature reprint and the poison refusal — and against the two `null` controls. See the hover section in §2.
 
 **Colour's half exists too**: `tests/corpus/lsp/colour_comes_from_the_lexer`, which drives the server and then decodes the delta encoding back through `to_pos` so every row prints the bytes it colours. Ten mutations, nine red, and the tenth is an equivalent mutant §3 wrongly predicted would fire — both facts are in §2's colour section. **Break it on purpose:** make `deltaLine` absolute and watch the file's colour slide down the page.
 
@@ -550,7 +550,7 @@ Plus the §3 conversion gate, which lands here at the latest and preferably in L
 
 ### L3 — the queries that need sema work
 
-References (a reverse index), completion (a prefix form of `defs_of`, and the backward scan), locals with spans, and formatting once `PLAN.md` stage 2 exists.
+References (a reverse index), locals with spans, and formatting once `PLAN.md` stage 2 exists. Completion was priced here for its two gaps and landed with neither: the backward scan closed the incomplete-parse half, and collecting candidate strings for `defs_of` to judge stood in for the prefix form.
 
 **Gate:** the same query corpus, extended. Plus, for references specifically, a property: **for every `Def` in `src/`, every reference the server reports must resolve back to that same `Def`.** Run it over the compiler's own tree — 90-odd modules is a better corpus than anything written by hand, and it is the corpus this tree already dogfoods.
 
@@ -568,9 +568,9 @@ Listed rather than guessed, per `PLAN.md:5`.
 
 1. ~~**Does `Console.impl(Sink, ..)` compile today?**~~ **Moot for L1.** The `print` sugar already writes exact bytes, so L0 needed no new writer at all. The `Sink` impl remains worth doing and is no longer on anyone's critical path.
 2. **Where does JSON live?** `STYLE.md`'s stranger test says `std.json`; `src/std/env/env.zen:83`'s rule about members the compiler must keep working forever says not in `std`. This document picks `src/lsp/lsp_json.zen` with a note. Someone should overrule it or ratify it.
-3. **Should `Pos` carry a byte offset?** `src/lex/lex_token.zen:26` has one and `src/ast/ast_span.zen:22` does not. Adding one to the AST's `Pos` makes the §3 conversion cheaper and slicing source off a span direct — and it is one more word on every position in the tree, which `src/AST_CONTRACT.md` was careful about for trivia. Not resolvable from the tree: it needs a measurement.
+3. **Should `Pos` carry a byte offset?** `src/std/lex/lex_token.zen:26` has one and `src/std/ast/ast_span.zen:22` does not. Adding one to the AST's `Pos` makes the §3 conversion cheaper and slicing source off a span direct — and it is one more word on every position in the tree, which `src/AST_CONTRACT.md` was careful about for trivia. Not resolvable from the tree: it needs a measurement.
 4. **What is the server's compilation root when `rootUri` is a directory with no entry?** `DESIGN.md:430` gives `zen build <root> --entry <file>` for exactly this, and `src/zen/zen_path.zen:249` probes `main`, then the root's basename, then `zen`. An editor opening a single file outside any root has none of those. Is that an error, a diagnostic, or a degraded mode that lexes and does not check?
 5. **Is `zen lsp` allowed a second thread?** `Threads` exists (`src/std/env/env.zen:134`) but `PLAN.md` puts actors and threads at stage 5 and the compiler is written in the seed subset (`PLAN.md:222`), which excludes them. A single-threaded server cannot answer `shutdown` during a build. This document assumes single-threaded and says cancellation is honoured between requests; whether that is acceptable is a call nobody has made.
 6. **Does `expr_memo` hold an answer for every expression after `check_all`?** Hover in L2 depends on it — the design is "run the check, then read the memo, and never reconstruct a `Ctx`". `compute_expr` writes a poison entry before computing, so *some* entry exists for anything walked. **The answer is no, and one instance is now closed and known:** a name in the base of a field access was typed by `sema_member.base_of` out of the scope, never reached `type_of`, and so was never recorded — `base_of` records it now. That is the shape of the question: not "does the walk reach it" but "does the path that types it go through the memo". Every path that does not is another such hole, and nothing enumerates them.
 7. **`PLAN.md:363`'s memo-key note.** "`type_of`'s memo key is the node id alone, which is sound only while a generic body is checked once… that key is on the critical path for hover being *correct* inside a generic." `src/sema/sema.zen:26` argues monomorphisation did not force a re-key because an instantiation changes the answer at a **call site**, which `ExprId` already separates. Those two statements are not obviously the same statement. Hover inside a generic body is where the difference shows, and no test asserts it.
-8. **Is trivia reachable from a position?** `Ast.trivia` is one list and a node names a run of it (`src/ast/ast_arena.zen:34`), but `node_at` deliberately answers `None` inside a comment (`src/ast/ast_find.zen:53`). Hover over a doc comment, and completion inside one, both need to know they are in trivia — and finding out costs a scan of a list nothing indexes by position.
+8. **Is trivia reachable from a position?** `Ast.trivia` is one list and a node names a run of it (`src/std/ast/ast_arena.zen:34`), but `node_at` deliberately answers `None` inside a comment (`src/std/ast/ast_find.zen:53`). Hover over a doc comment, and completion inside one, both need to know they are in trivia — and finding out costs a scan of a list nothing indexes by position.

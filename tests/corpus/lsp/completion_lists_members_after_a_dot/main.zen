@@ -1,0 +1,164 @@
+// COMPLETION LISTS MEMBERS AFTER A DOT — the incomplete-input case,
+// where `p.` is not a parse and the answer comes from the backward scan
+// plus a dummy identifier, never from a recovering parser
+// (`design_lsp.md` §2's recommended shape).
+//
+// THREE BUFFERS, one incomplete dot each — a buffer holds one half-typed
+// access at a time, so each probe gets the document mid-edit and nothing
+// else broken. The scan finds the dot, the partial word is replaced by
+// `zen_wip` so the access parses, and the base's settled type answers:
+//
+//   - `p.`   after nothing: both fields of `Point`, via `members_of`
+//   - `p.x`  after a partial word: the one field the prefix keeps
+//   - `Mode.` after a TYPE name: the enum's cases, via `cases_of`
+//
+// The kind numbers are asserted with the labels — 5 Field, 20
+// EnumMember, the protocol's CompletionItemKind — because a right name
+// under the wrong kind is still wrong. NO `rootUri` is sent: every type
+// here is declared in the buffer itself, so the lone-module path is the
+// whole story. The imported case is the next test over.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, write_decimal, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+URI*: str = "file:///a.zen"
+
+// The three buffers, each one edit behind the last. `p.` and `Mode.`
+// do not parse as written — that is the state this test exists for.
+DOT*: str = "Point = { x*: i32, y*: i32 }\n\nnorm = (p: Point) i32 {\n    p.\n}\n"
+PREFIXED*: str = "Point = { x*: i32, y*: i32 }\n\nnorm = (p: Point) i32 {\n    p.x\n}\n"
+ENUM*: str = "Mode = Fast | Slow\n\npick = () Mode {\n    Mode.\n}\n"
+
+// One probed position, in WIRE coordinates — 0-based line, 0-based
+// character — because that is what a client sends.
+Probe* = {
+    line*: usize,
+    character*: usize,
+    what*: str,
+}
+
+probes = (a: Alloc) Res<Vec<Probe>, AllocError> {
+    all ::= a.Vec<Probe>();
+    all.add(Probe(line: 3, character: 6, what: "p.: both fields")).try();
+    all.add(Probe(
+        line: 3,
+        character: 7,
+        what: "p.x: the one the prefix keeps")).try();
+    all.add(Probe(line: 3, character: 9, what: "Mode.: the cases")).try();
+    Ok(all);
+}
+
+// --- the requests ------------------------------------------------------
+
+open_doc = (a: Alloc, text: str, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// FULL SYNC: one change, carrying the whole next buffer and no range.
+change_doc = (a: Alloc, text: str, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes("},\"contentChanges\":[{\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}]}}").try();
+    write_frame(body.view(), into)
+}
+
+completion = (a: Alloc, id: usize, p: Probe, into :: String)
+             Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(
+        ",\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes("},\"position\":{\"line\":").try();
+    write_decimal(p.line, body).try();
+    body.add_bytes(",\"character\":").try();
+    write_decimal(p.character, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+// Open, probe, retype, probe — ONE `serve` CALL for the whole sequence,
+// so each completion is provably answered against the buffer that asked
+// for it.
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    table = probes(a).try();
+
+    input ::= a.String().try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
+        input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input).try();
+    open_doc(a, DOT, input).try();
+    table.get(0).match({ None => (), Ok(p) => completion(a, 10, p, input).try() });
+    change_doc(a, PREFIXED, input).try();
+    table.get(1).match({ None => (), Ok(p) => completion(a, 11, p, input).try() });
+    change_doc(a, ENUM, input).try();
+    table.get(2).match({ None => (), Ok(p) => completion(a, 12, p, input).try() });
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input).try();
+
+    s ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view(), table);
+    Ok(0);
+}
+
+// Every reply, labelled with the position that asked for it.
+//
+// THE FRAMING IS UNWRAPPED AND NOT PRINTED, because
+// `a_session_is_answered_frame_by_frame` already pins every byte of it.
+walk_replies = (out: str, table: Vec<Probe>) () {
+    at ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; labelled(
+                seen,
+                fr.body,
+                table); seen = seen + 1; },
+        });
+    });
+}
+
+// Reply 0 is `initialize` and the last is `shutdown`; the ones between
+// are the three probes, in order. The subtraction is guarded rather
+// than let to underflow, which on a usize is a trap and not a negative
+// number.
+labelled = (i: usize, body: str, table: Vec<Probe>) () {
+    (i == 0).match({
+        true  => (),
+        false => table.get(i - 1).match({
+            None  => (),
+            Ok(p) => printed(p, body),
+        }),
+    });
+}
+
+printed = (p: Probe, body: str) () {
+    println("{}:{}  {}", p.line, p.character, p.what);
+    println("    {}", body);
+}

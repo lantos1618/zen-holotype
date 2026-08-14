@@ -1,0 +1,111 @@
+// COMPLETION LISTS AN IMPORTED TYPE'S MEMBERS — the dot case that only
+// a build can answer, because only a build has ever resolved `Point`.
+//
+// `completion_lists_members_after_a_dot` covers the lone-module path;
+// this one sends a `rootUri`, so the buffer is checked as part of a
+// BUILD and `q: Point` names the struct in `app/shape.zen`. The buffer
+// is mid-edit — `q.` where the disk has `q.x` — which is the state
+// completion exists for: the backward scan finds the dot, the dummy
+// identifier makes the access parse, the overlay carries the unsaved
+// bytes, and `members_of` answers from the OTHER module's declaration.
+//
+// `y` arriving proves the cross-module half; `x` alone could have come
+// from the disk copy's own text. The unexported-member case is not
+// probed here: both fields are starred, and `first_hidden`'s gate is
+// sema's own, tested in `tests/must-fail/`.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// THE BUFFER, mid-edit: `q.` where the disk has `q.x`.
+DOC*: str = "Point = app.shape\n\nnear = (q: Point) i32 {\n    q.\n}\n"
+
+// `tests/run.py` stages a directory test into `<work>/src` and runs the
+// program from `<work>`, so these are the paths the server will open.
+URI*: str = "file://src/app/app.zen"
+
+// THE WORKSPACE IS NOT THE COMPILATION ROOT, as in every build-backed
+// test here: the work directory is the workspace, `src` is the root
+// `zen_path.root_for` computes.
+ROOT_URI*: str = "file://."
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    input ::= a.String().try();
+    open_session(a, input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input).try();
+    open_doc(a, input).try();
+    ask(a, input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input).try();
+
+    s ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view());
+    Ok(0);
+}
+
+// `rootUri` IS THE WHOLE OF WHAT MAKES THIS A BUILD.
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":").try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+open_doc = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(DOC, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// The position is one past the dot on the last line but one.
+ask = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes("},\"position\":{\"line\":3,\"character\":6}}}").try();
+    write_frame(body.view(), into)
+}
+
+// Reply 0 is `initialize`, reply 1 is the completion, the last is
+// `shutdown`; only the middle one is this test's row. The settle
+// point's publishDiagnostics frame — the unpatched buffer does not
+// parse, so it is not an empty list — trails the replies and is not
+// printed: it is `diagnostics_publish_and_clear`'s subject. THE FRAMING
+// IS UNWRAPPED AND NOT PRINTED, because
+// `a_session_is_answered_frame_by_frame` already pins every byte of it.
+walk_replies = (out: str) () {
+    at ::= 0;
+    seen ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; shown(seen, fr.body); seen = seen + 1; },
+        });
+    });
+}
+
+shown = (i: usize, body: str) () {
+    (i == 1).match({
+        true  => println("    {}", body),
+        false => (),
+    });
+}

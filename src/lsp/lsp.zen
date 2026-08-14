@@ -1,48 +1,47 @@
 // src/lsp/lsp.zen
-// The language server, and the folder's surface.
-//
-// Graded against `PLAN.md` stage 4 and `docs/design_lsp.md`. `DESIGN.md:45`:
-// the LSP is "a thin server over compiler internals" — nothing here may
-// answer a question about Zen itself; a missing query belongs in
-// `src/sema/` or `src/ast/`.
-//
-// A folder root is starred re-exports only; an absent name is
-// module-private.
+// The language server, and the folder's surface. `DESIGN.md:45`: "a thin
+// server over compiler internals" — nothing here answers a question about
+// Zen itself; a missing query belongs in `src/sema/` or `src/std/ast/`.
 //
 //   lsp_pos.zen        the wire's coordinates and this language's
 //   lsp_json.zen       JSON as a value, an arena, and the writer
 //   lsp_json_read.zen  JSON in
 //   lsp_frame.zen      Content-Length framing
-//   lsp_decl.zen       which declared name a position is inside
+//   lsp_decl.zen       which declared name a position is inside — a
+//                      re-export; the finder itself is std/ast/ast_named.zen
 //   lsp_uri.zen        a document URI, as a path the compiler can open
-//   lsp_hover.zen      the one query wired to sema
+//   lsp_hover.zen      hover: the type under the cursor
+//   lsp_def.zen        definition: where the name was declared
+//   lsp_symbol.zen     documentSymbol: a module's declarations, flat
+//   lsp_compl.zen      completion: the candidate set at a position
 //   lsp_colour.zen     semanticTokens: colour, from the lexer, and from
 //                      the checker where it settled a name
 //   lsp_names.zen      the semantic half: which names a clean build
 //                      settled, read off the checker's memos
-//   lsp_diag.zen       publishDiagnostics: the build, grouped by file
+//   lsp_built.zen      the one build a session keeps, and the arena it
+//                      dies by — shared by the settle and the queries
+//   lsp_diag.zen       publishDiagnostics: when to build, which file,
+//                      how an answer is taken back
+//   lsp_reply.zen      the wire's shapes: a request's fields read, a
+//                      reply built
 //   lsp_serve.zen      lifecycle, the overlay, and the dispatch table
 //   lsp_stdio.zen      the pipe: frames in on stdin, frames out on stdout
 //
-// BUILT: L1 whole (transport, lifecycle, sync, diagnostics) plus TWO
-// queries — hover and semanticTokens/full — over stdio via `zen lsp`.
-// Everything else in `design_lsp.md` §2's table is refused with `-32601`.
+// BUILT: L1 whole (transport, lifecycle, sync, diagnostics) plus hover,
+// definition, documentSymbol, completion and semanticTokens/full over
+// stdio via `zen lsp`; everything else in `design_lsp.md` §2 is refused
+// `-32601`. Hover, definition and build-backed completion need a build
+// (~1s) and go quiet without one; documentSymbol and colour's LEXICAL
+// half need only the buffer, so they answer on an unsaved buffer that
+// doesn't parse — why VS Code gets colour from this server at all. The
+// SEMANTIC half rides the diagnostics' build and degrades to lexical,
+// never grey. Diagnostics are all three phases or nothing: type errors
+// never show while syntax errors go unreported.
 //
-// Hover and diagnostics need a build (root, disk, a `Checker`, ~1s) and
-// go quiet without one. Colour's LEXICAL half needs only a `scan`, so it
-// answers on an unsaved buffer with no workspace, even on a file that
-// does not parse — why VS Code gets colour from this server at all. The
-// SEMANTIC half (L4) rides the diagnostics' build: with no workspace, a
-// change not yet settled, or a program with faults, the answer degrades
-// to lexical and never to grey.
-//
-// Diagnostics are all three phases or nothing: lex/parse (on `Build`) go
-// out beside sema (on `Checker`), so type errors never show while syntax
-// errors go unreported.
-//
-// NOT BUILT: documentSymbol, definition, references, completion,
-// formatting, signatureHelp, rename (L2-L4); semanticTokens' `range` and
-// `full/delta` shapes, deliberately not advertised (`design_lsp.md` §2).
+// NOT BUILT: references, formatting, signatureHelp, rename (L3-L4);
+// semanticTokens' `range` and `full/delta` shapes, deliberately not
+// advertised (`design_lsp.md` §2). Definition on a LOCAL or pattern
+// binder answers `null` — a `Binding` carries no span; the fix is sema's.
 
 WirePos*, LineRun*, Step*, to_pos*, to_wire*, run_of*, step_at* = lsp.lsp_pos
 write_wire*, write_range*, wire_at*, units_of* = lsp.lsp_pos
@@ -51,12 +50,19 @@ JsonFault*, Reader*, read*, push_utf8*, byte_of* = lsp.lsp_json_read
 Envelope*, FrameFault*, frame_at*, write_frame*, write_decimal* = lsp.lsp_frame
 short_by* = lsp.lsp_frame
 Tell*, TypeAt*, ValueAt*, told_at*, is_nothing* = lsp.lsp_decl
-Hover*, hover_at*, hover_in*, no_type* = lsp.lsp_hover
+Hover*, hover_at*, hover_in*, hover_with*, no_type* = lsp.lsp_hover
+Target*, Defn*, definition_at*, definition_in* = lsp.lsp_def
+definition_with*, no_target*, write_location* = lsp.lsp_def
+Sym*, symbols_at*, write_symbols* = lsp.lsp_symbol
+Item*, Trigger*, DUMMY*, complete_at*, complete_in* = lsp.lsp_compl
+complete_shared*, sort_items*, write_items* = lsp.lsp_compl
 FILE_SCHEME*, path_of*, uri_at* = lsp.lsp_uri
-Spot*, Diagnostics*, found_in*, publish*, ERROR* = lsp.lsp_diag
+Built* = lsp.lsp_built
+Spot*, Diagnostics*, Shared*, publish*, ERROR* = lsp.lsp_diag
+write_capabilities*, SEMANTIC_TOKENS* = lsp.lsp_reply
 Colour*, Classed*, index_of*, name_of*, colour_of* = lsp.lsp_colour
 write_legend*, write_tokens*, sort_classes* = lsp.lsp_colour
 classify* = lsp.lsp_names
-Server*, serve*, write_capabilities*, SEMANTIC_TOKENS* = lsp.lsp_serve
+Server*, serve* = lsp.lsp_serve
 frame_byte*, frame_why* = lsp.lsp_serve
 Drain*, serve_stdio* = lsp.lsp_stdio

@@ -1,0 +1,191 @@
+// src/lsp/lsp_reply.zen
+// The wire's shapes: reading a request's fields, and building a reply.
+//
+// Split out of `lsp_serve.zen` when the session file met STYLE.md's
+// hard cap — the split is on SUBJECT, not on size: what follows is the
+// JSON-RPC envelope's grammar (where `params` lives, how an id is
+// echoed, the exact byte shapes of `result` and `error`), while the
+// session that produces the values inside those shapes stays behind.
+// Nothing here knows what a document is.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Jsons, JsonId, write_text, written = lsp.lsp_json
+JsonFault = lsp.lsp_json_read
+write_decimal = lsp.lsp_frame
+Hover = lsp.lsp_hover
+Target, write_location = lsp.lsp_def
+write_wire = lsp.lsp_pos
+// The legend `initialize` advertises the colours under: the index a
+// token carries and the list it indexes cannot be spelled in two files.
+write_legend = lsp.lsp_colour
+
+// --- reading a request -----------------------------------------------
+//
+// Every one of these answers "" or 0 for a field it cannot find, and
+// none fails — refusal happens later, by name, where it can carry an id.
+
+method_of* = (tree: Jsons, req: JsonId) str {
+    string_at(tree, req, "method")
+}
+
+// `params`, or the request itself when there are none — a malformed
+// message reads as one with every field absent.
+params_of* = (tree: Jsons, req: JsonId) JsonId {
+    tree.field(req, "params").match({ None => req, Ok(ps) => ps })
+}
+
+// `params.<name>`, and the object itself when absent — same reading one
+// level down.
+param* = (tree: Jsons, req: JsonId, name: str) JsonId {
+    ps = params_of(tree, req);
+    tree.field(ps, name).match({ None => ps, Ok(v) => v })
+}
+
+string_at* = (tree: Jsons, obj: JsonId, name: str) str {
+    tree.field(obj, name).match({
+        None  => "",
+        Ok(v) => tree.text(v).match({ Ok(s) => s, None => "" }),
+    })
+}
+
+number_at* = (tree: Jsons, obj: JsonId, name: str) usize {
+    tree.field(obj, name).match({
+        None  => 0,
+        Ok(v) => tree.whole(v).match({ Ok(n) => n, None => 0 }),
+    })
+}
+
+// --- the reply shapes ------------------------------------------------
+//
+// Built as TEXT and not through the arena: a reply is a fixed shape with
+// two holes, and an arena would mean building six nodes to print eight
+// bytes. Every quotable string goes through `write_text`,
+// `lsp_json.zen`'s escaper — one escaping rule in this folder.
+
+result* = (tree: Jsons, rid: JsonId, body: str, msg :: String)
+          Res<(), AllocError> {
+    head(tree, rid, msg).try();
+    msg.add_bytes(",\"result\":").try();
+    msg.add_bytes(body).try();
+    msg.add_bytes("}")
+}
+
+failed* = (tree: Jsons, rid: JsonId, code: usize, why: str, msg :: String)
+          Res<(), AllocError> {
+    head(tree, rid, msg).try();
+    msg.add_bytes(",\"error\":{\"code\":-").try();
+    write_decimal(code, msg).try();
+    msg.add_bytes(",\"message\":").try();
+    write_text(why, msg).try();
+    msg.add_bytes("}}")
+}
+
+// THE ID IS ECHOED VERBATIM, out of the arena it was read from — a
+// JSON-RPC id may be a number or a string, and re-emitting the node
+// matches either without a second representation of "an id".
+head = (tree: Jsons, rid: JsonId, msg :: String) Res<(), AllocError> {
+    msg.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    tree.write(rid, msg)
+}
+
+// A frame this server could not parse gets an error with a NULL id —
+// the id lives inside the document that failed to parse.
+parse_error* = (f: JsonFault, msg :: String) Res<(), AllocError> {
+    msg.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-").try();
+    write_decimal(PARSE_ERROR, msg).try();
+    msg.add_bytes(",\"message\":").try();
+    write_fault(f, msg).try();
+    msg.add_bytes("}}")
+}
+
+// The fault, with its byte offset — `TESTING.md:17`: "a rejection with
+// the wrong span is a failure".
+write_fault = (f: JsonFault, msg :: String) Res<(), AllocError> {
+    msg.add_byte('"').try();
+    msg.add_bytes(fault_why(f)).try();
+    fault_byte(f).match({
+        None  => written(),
+        Ok(i) => { msg.add_bytes(" at byte ").try(); write_decimal(i, msg) },
+    }).try();
+    msg.add_byte('"')
+}
+
+fault_why = (f: JsonFault) str {
+    f.match({
+        Unexpected(_) => "unexpected byte",
+        Truncated(_)  => "the document ended inside a value",
+        BadEscape(_)  => "bad escape",
+        BadNumber(_)  => "not a JSON number",
+        TooDeep(_)    => "nested too deeply",
+        Trailing(_)   => "trailing bytes after the value",
+        NoMemory      => "out of memory",
+    })
+}
+
+fault_byte = (f: JsonFault) Res<usize> {
+    f.match({
+        Unexpected(i) => Ok(i),
+        Truncated(i)  => Ok(i),
+        BadEscape(i)  => Ok(i),
+        BadNumber(i)  => Ok(i),
+        TooDeep(i)    => Ok(i),
+        Trailing(i)   => Ok(i),
+        NoMemory      => None,
+    })
+}
+
+// A `Hover` as the protocol spells one. `plaintext` and not `markdown`:
+// rendering as markup would let a `*` inside a name become emphasis —
+// not hypothetical, since an exported name IS starred.
+write_hover* = (h: Hover, out :: String) Res<(), AllocError> {
+    out.add_bytes("{\"contents\":{\"kind\":\"plaintext\",\"value\":").try();
+    write_text(h.shown, out).try();
+    out.add_bytes("},\"range\":{\"start\":").try();
+    write_wire(h.start, out).try();
+    out.add_bytes(",\"end\":").try();
+    write_wire(h.end, out).try();
+    out.add_bytes("}}")
+}
+
+// A `Target` as the protocol spells it, `null` when there is none — the
+// two lines every definition answer shares, once.
+write_target* = (t: Target, body :: String) Res<(), AllocError> {
+    t.found.match({
+        false => body.add_bytes("null"),
+        true  => write_location(t, body),
+    })
+}
+
+// WHAT THIS SERVER SAYS IT CAN DO, and only what it does.
+//
+// WRITTEN, not a constant: the semantic-token legend belongs to
+// `lsp_colour.zen`, and the index a `tokenType` uses cannot be spelled
+// in two files without one day silently disagreeing.
+//
+// Sync kind 1 is Full — `lsp_serve.zen`'s header says why not 2.
+//
+// `full: true` AND NOTHING ELSE. A client believes what it is told:
+// advertising `range` would make VS Code send
+// `textDocument/semanticTokens/range`, which this server refuses with
+// `-32601`, leaving the file with NO COLOUR AT ALL and no reason shown.
+// A capability is a promise; the only safe one is the one already kept.
+write_capabilities* = (out :: String) Res<(), AllocError> {
+    out.add_bytes(
+        "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"definitionProvider\":true,\"documentSymbolProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]},\"semanticTokensProvider\":{\"legend\":").try();
+    write_legend(out).try();
+    out.add_bytes(
+        ",\"full\":true}},\"serverInfo\":{\"name\":\"zen\",\"version\":\"0\"}}")
+}
+
+// The one method `semanticTokensProvider` above promises, spelled once
+// beside the promise.
+SEMANTIC_TOKENS*: str = "textDocument/semanticTokens/full"
+
+// JSON-RPC's codes, as MAGNITUDES: negative on the wire, and the sign is
+// written by the one function that emits them.
+PARSE_ERROR*: usize = 32700
+METHOD_NOT_FOUND*: usize = 32601
+INVALID_PARAMS*: usize = 32602
+NOT_INITIALIZED*: usize = 32002

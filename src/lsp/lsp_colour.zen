@@ -18,7 +18,7 @@
 // WHAT THE LEXICAL HALF COSTS: one `scan`. No `Parser`, `Checker`,
 // `Build`, or disk read — unlike hover and diagnostics it answers on an
 // unsaved buffer with no workspace, even a file that does not parse. A
-// file with lexical faults still has tokens (`src/lex/lex.zen`'s
+// file with lexical faults still has tokens (`src/std/lex/lex.zen`'s
 // contract), all still coloured. The semantic half arrives already paid
 // for: it rides the one build diagnostics ran (`lsp_diag.zen`), and
 // where that build says nothing — no workspace, a change not yet
@@ -72,14 +72,14 @@
 // `operator`.
 //
 // EVERY VARIANT OF `TokenKind` IS LISTED IN `colour_of`, with no `_`
-// arm, so a token shape added to `src/lex/` fails this file to compile
+// arm, so a token shape added to `src/std/lex/` fails this file to compile
 // rather than arriving quietly uncoloured.
 
 str, String = std.text
 Vec = std.collections
 Alloc, AllocError = std.mem
 Range = std.core
-scan, Source, Token, TokenKind = lex
+scan, Source, Token, TokenKind = std.lex
 write_decimal = lsp.lsp_frame
 // `written()` is `Ok(())` with the writer's error type already on it, so
 // a match arm that writes nothing sits beside one that writes something.
@@ -96,8 +96,15 @@ wire_at, units_of = lsp.lsp_pos
 // so a theme is never told to prepare a colour it will never see. The
 // last three are sema's answers (`lsp_names.zen`), appended so the six
 // lexical indices did not move.
-Colour* = Keyword | Text | Number | Comment | Operator | Variable
-        | Type | Function | Parameter
+Colour* = Keyword
+    | Text
+    | Number
+    | Comment
+    | Operator
+    | Variable
+    | Type
+    | Function
+    | Parameter
 
 // A colour's index in the legend. THE NUMBERS THE WIRE CARRIES.
 index_of* = (colour: Colour) usize {
@@ -157,7 +164,7 @@ next_name = (colour: Colour, out :: String) Res<(), AllocError> {
 }
 
 // WHAT EACH TOKEN SHAPE IS COLOURED, and `None` for shapes this file
-// will not colour, in the order `src/lex/lex_token.zen` declares them.
+// will not colour, in the order `src/std/lex/lex_token.zen` declares them.
 //
 // `Ident` IS `variable` AND THAT IS THE LEXICAL ANSWER (item 5) — the
 // one the semantic half overrides name by name, never wholesale. `Char`
@@ -234,7 +241,8 @@ Painter = {
     // method, so nothing here converts twice.
     put = (self :: @Self, line: usize, character: usize, length: usize,
            colour: Colour, out :: String) Res<(), AllocError> {
-        self.said.match({ true => out.add_bytes(","), false => written() }).try();
+        self.said.match({ true => out.add_bytes(
+            ","), false => written() }).try();
         delta_line = line - self.line;
         // THE ONE BRANCH IN THE WHOLE ENCODING: a token on the same line
         // as its predecessor measures from that predecessor's start; one
@@ -267,8 +275,10 @@ Painter = {
         stop = token.span.end.offset;
         from ::= token.span.start.offset;
         line ::= zero_based(token.span.start.line);
-        character ::= wire_at(text, token.span.start.line,
-                              token.span.start.col).character;
+        character ::= wire_at(
+            text,
+            token.span.start.line,
+            token.span.start.col).character;
         loop(() { from < stop }, (h) {
             upto = break_in(text, from, stop);
             self.run(text, line, character, from, upto, colour, out).try();
@@ -288,8 +298,12 @@ Painter = {
            from: usize, upto: usize, colour: Colour, out :: String)
           Res<(), AllocError> {
         (upto > from).match({
-            true  => self.put(line, character, units_of(text, from, upto),
-                              colour, out),
+            true  => self.put(
+                line,
+                character,
+                units_of(text, from, upto),
+                colour,
+                out),
             false => written(),
         })
     }
@@ -421,8 +435,11 @@ write_tokens* = (a: Alloc, name: str, text: str, names: Vec<Classed>,
     lexed.tokens.loop((h, token) {
         colour_of(token.kind).match({
             None    => written(),
-            Ok(one) => painter.paint(text, token, settled(token, one, names),
-                                     out),
+            Ok(one) => painter.paint(
+                text,
+                token,
+                settled(token, one, names),
+                out),
         }).try();
     });
     out.add_bytes("]}")
@@ -433,8 +450,10 @@ write_tokens* = (a: Alloc, name: str, text: str, names: Vec<Classed>,
 // and an identifier sema said nothing about stays `variable`.
 settled = (token: Token, lexical: Colour, names: Vec<Classed>) Colour {
     token.kind.match({
-        Ident => classed_at(names, token.span.start.line,
-                            token.span.start.col).match({
+        Ident => classed_at(
+            names,
+            token.span.start.line,
+            token.span.start.col).match({
             None    => lexical,
             Ok(one) => one.colour,
         }),

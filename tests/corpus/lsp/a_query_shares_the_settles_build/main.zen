@@ -1,0 +1,185 @@
+// A QUERY ANSWERED FROM THE SHARED BUILD SAYS WHAT A BUILD OF ITS OWN
+// WOULD SAY — byte for byte.
+//
+// `lsp_built.zen` keeps ONE build per document state: the settle's and
+// every query's are the same `Checker` when nothing changed between
+// them. That is a performance invariant, and performance invariants are
+// invisible to a byte comparison — so what this test pins is the
+// CORRECTNESS obligation that comes with it: sharing may not change an
+// answer.
+//
+// THE SAME DEFINITION IS ASKED TWICE, on two different paths into the
+// build:
+//
+//   - BATCH ONE asks it in the SAME `serve` call as the `didOpen`.
+//     Queries are answered in order and the settle point is the end of
+//     the buffer, so this answer comes from a build the QUERY drove —
+//     the slot was empty, `ensure` built, and the trailing
+//     publishDiagnostics is the settle finding the slot already current
+//     and building nothing.
+//
+//   - BATCH TWO asks it again, against a slot the SETTLE filled. No
+//     build happens at all; the answer is read off the held checker.
+//
+// The two replies must be identical, and the test says so itself —
+// `identical: true` is computed, not written down. The position probed
+// is `sum` at its call site, whose answer crosses into `app/shape.zen`:
+// a jump only a whole-program build can make, so a slot answering from
+// a lone-module check or a stale state fails here.
+//
+// The fixture and the probe table's coordinate system are
+// `definition_jumps_across_modules`' — this test adds the session
+// shape, not a new position.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Range = std.core
+Server, serve = lsp.lsp_serve
+write_frame, write_decimal, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// THE BUFFER, byte for byte the file on disk.
+DOC*: str = "Point, sum = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = sum(q) + q.x;\n    s\n}\n"
+
+// `tests/run.py` stages a directory test into `<work>/src` and runs the
+// program from `<work>`, so these are the paths the server will open.
+URI*: str = "file://src/app/app.zen"
+
+// THE WORKSPACE IS NOT THE COMPILATION ROOT: the work directory is the
+// workspace; the root the document is compiled against is `src`,
+// computed by `zen_path.root_for` climbing out of `src/app`.
+ROOT_URI*: str = "file://."
+
+// `sum` at its call site, in wire coordinates — 0-based line, 0-based
+// character, because that is what a client sends.
+LINE*: usize = 3
+CHARACTER*: usize = 9
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    s ::= a.Server(env);
+
+    first ::= a.String().try();
+    open_session(a, first).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        first).try();
+    open_doc(a, URI, DOC, first).try();
+    definition(a, 10, first).try();
+    out1 ::= a.String().try();
+    serve(s, first.view(), out1).try();
+    println("--- asked with the didOpen, before the settle");
+    walk(out1.view());
+
+    second ::= a.String().try();
+    definition(a, 11, second).try();
+    out2 ::= a.String().try();
+    serve(s, second.view(), out2).try();
+    println("--- asked again, off the settle's build");
+    walk(out2.view());
+
+    println("identical: {}", replies_eq(out1.view(), out2.view()));
+    Ok(0);
+}
+
+// --- the requests ------------------------------------------------------
+
+// `rootUri` IS THE WHOLE OF WHAT MAKES THIS A BUILD.
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":").try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+open_doc = (a: Alloc, uri: str, text: str, into :: String)
+           Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+definition = (a: Alloc, id: usize, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(
+        ",\"method\":\"textDocument/definition\",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes("},\"position\":{\"line\":").try();
+    write_decimal(LINE, body).try();
+    body.add_bytes(",\"character\":").try();
+    write_decimal(CHARACTER, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the reading ---------------------------------------------------------
+
+// Every frame's body, one per line — framing unwrapped, since a
+// `.expected` may not carry the CR a `Content-Length` header does.
+walk = (out: str) () {
+    from ::= 0;
+    going ::= true;
+    loop(() { going && from < out.len }, (h) {
+        frame_at(out, from).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { println("    {}", fr.body); from = fr.next; },
+        });
+    });
+}
+
+// The two definition replies, compared. The ids differ (10, then 11),
+// so what is compared is everything from `,"result"` onward — the part
+// of the bytes the build is answerable for. 0 means "not found", which
+// fails the comparison rather than trapping on a slice.
+replies_eq = (one: str, two: str) bool {
+    r1 = nth_reply(one, 2);
+    r2 = nth_reply(two, 1);
+    from = find_result(r1);
+    (from == 0 || from >= r2.len).match({
+        true  => false,
+        false => r1.slice(from, r1.len).eq(r2.slice(from, r2.len)),
+    })
+}
+
+// The offset of `,"result"` — the field boundary after the id, the one
+// field the two replies legitimately disagree in.
+find_result = (body: str) usize {
+    mark = ",\"result\"";
+    at ::= 0;
+    Range(0, body.len).loop((h, i) {
+        fits = i + mark.len <= body.len;
+        (at == 0 && fits && body.slice(i, i + mark.len).eq(mark)).then(() {
+            at = i;
+        });
+    });
+    at
+}
+
+// The nth frame's body, "" when there are fewer — a missing reply then
+// fails the comparison rather than trapping on a slice.
+nth_reply = (out: str, n: usize) str {
+    at ::= 0;
+    seen ::= 0;
+    body ::= "";
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => {
+                seen = seen + 1;
+                (seen == n).then(() { body = fr.body; });
+                at = fr.next;
+            },
+        });
+    });
+    body
+}

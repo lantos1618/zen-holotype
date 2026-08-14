@@ -8,7 +8,7 @@
 //
 // (`tests/corpus/sema_zen/a_cursor_position_finds_its_node` is the same
 // round trip WITHOUT a server). Nothing here is a query; everything is a
-// call into `src/ast/` and `src/sema/` — `DESIGN.md:45`'s "a thin server
+// call into `src/std/ast/` and `src/sema/` — `DESIGN.md:45`'s "a thin server
 // over compiler internals" meant literally. Memos are READ and not
 // recomputed (`DESIGN.md` decision 3): `check_all` has already typed
 // every node, so this file never calls `type_of`.
@@ -17,12 +17,15 @@
 // probing every identifier in `add = (a: i32, b: i32) i32 { s = a + b; s }`
 // only three of twelve positions answered (`a`, `b`, `s` where USED),
 // missing the function's own name, every parameter/local at its
-// declaration, and every `i32`. `lsp_decl.zen` is the finder that made
-// the other three reachable; this file says each as:
+// declaration, and every `i32`. The finder that made the other three
+// reachable lived here as `lsp_decl.zen` and is now `ast_named.zen`
+// (moved on its second caller); this file says each as:
 //
 //   Sig      a function's name  -> its declaration, reprinted from the
 //                                  AST's names and the checker's types
-//   OfType   a written type     -> what `type_from_ast` resolved it to
+//   OfType   a written type     -> what `type_from_ast` resolved it to,
+//                                  and for a primitive what the prelude
+//                                  declares about it (doc line, members)
 //   OfValue  an expression      -> what `type_of` gave it
 //   Nothing  everything else    -> `null`, and see below
 //
@@ -37,18 +40,20 @@
 // of `zen lsp`) — there an import resolves to nothing and hover answers
 // `null` rather than guessing.
 //
-// AND IT REBUILDS PER HOVER. No cache across requests: `design_lsp.md`
-// §5 established there is no unit smaller than the program;
-// `PLAN.md:317` names the fix if too slow (stage 0.3, not here) —
-// caching a `Checker` keyed on nothing would trade correctness for
-// unmeasured speed.
+// THREE WAYS IN NOW: `hover_with` asks the question of a build ALREADY
+// MADE — the shared slot's checker (`lsp_built.zen`), which the settle
+// and every query against one document state hold in common, so a hover
+// after a settle builds nothing. `hover_in` and `hover_at` still rebuild
+// per request — the slot's `None` fallback and the no-workspace case —
+// and their pages die with the request's own arena.
 
 str, String = std.text
-Map = std.collections
+Vec, Map = std.collections
+Range = std.core
 Alloc, AllocError = std.mem
-scan, Source = lex
-Parser = parse
-Ast, ExprId, TypeId, Span, Function = ast
+scan, Source = std.lex
+Parser = std.parse
+Ast, Decl, ExprId, Member, TypeId, Span, Function, TriviaRun = std.ast
 Checker = sema.sema_check
 check_all = sema.sema_decl
 // THE DRIVER, REACHED FROM THE SERVER (`design_lsp.md` §5): the
@@ -58,7 +63,8 @@ root_for, relative_to = zen.zen_path
 // `Types` IS IMPORTED FOR ITS METHODS: without this line the
 // bootstrapper resolves `c.types.write_name` against `sema_diag` instead
 // and reports it as not exported there.
-Types, TyId = sema.sema_ty
+Types, TyId, Prim = sema.sema_ty
+Def, decl_at = sema.sema_def
 to_pos, to_wire, WirePos = lsp.lsp_pos
 Tell, told_at = lsp.lsp_decl
 
@@ -120,12 +126,26 @@ hover_in* = (env: Env, a: Alloc, workspace: str, path: str, text: str,
     said(c, a, text, told_at(c.tree, relative_to(root, path), pos))
 }
 
+// THE SAME QUESTION, ASKED OF A BUILD ALREADY MADE — the shared slot's
+// checker (`lsp_built.zen`), the way `definition_with` asks it. The work
+// is exactly `hover_in`'s second half; the build above it is what the
+// slot replaces. `a` is the REQUEST's arena: the answer is written into
+// the reply and dies with the request, while the tree and the memos it
+// reads live in the slot and are only READ.
+hover_with* = (c :: Checker, a: Alloc, rel: str, text: str, line: usize,
+               character: usize) Res<Hover, AllocError> {
+    pos = to_pos(text, line, character);
+    said(c, a, text, told_at(c.tree, rel, pos))
+}
+
 // A position in nothing is not a failure — hovering a comment or
 // whitespace gets exactly this, turned into `null` by the server.
 no_type* = () Hover {
-    Hover(found: false, shown: "",
-          start: WirePos(line: 0, character: 0),
-          end: WirePos(line: 0, character: 0))
+    Hover(
+        found: false,
+        shown: "",
+        start: WirePos(line: 0, character: 0),
+        end: WirePos(line: 0, character: 0))
 }
 
 // The `Tell`, said — one `String`, thrown away unread if the arm could
@@ -134,8 +154,14 @@ said = (c :: Checker, a: Alloc, text: str, t: Tell) Res<Hover, AllocError> {
     out ::= a.String().try();
     t.match({
         Nothing    => nothing_found(),
-        Sig(f)     => wired(text, f.name.span, write_decl_sig(c, f, out).try(), out),
-        OfType(ta) => wired(text, ta.span, write_ty(c, ta.id, out).try(), out),
+        Sig(f)     => wired(text, f.name.span, write_decl_sig(
+            c,
+            f,
+            out).try(), out),
+        OfType(ta) => wired(text, ta.span, write_written_ty(
+            c,
+            ta.id,
+            out).try(), out),
         OfValue(v) => wired(text, v.span, write_val(c, v.id, out).try(), out),
     })
 }
@@ -146,26 +172,156 @@ nothing_found = () Res<Hover, AllocError> { Ok(no_type()) }
 // coordinates, `lsp_pos.zen`'s rule obeyed from the outside.
 wired = (text: str, span: Span, known: bool, out :: String)
         Res<Hover, AllocError> {
-    Ok(Hover(found: known,
-             shown: out.view(),
-             start: to_wire(text, span.start),
-             end: to_wire(text, span.end)));
+    Ok(Hover(
+        found: known,
+        shown: out.view(),
+        start: to_wire(text, span.start),
+        end: to_wire(text, span.end)));
 }
 
 // --- the three answers -------------------------------------------------
 
-// A WRITTEN TYPE, resolved. `type_from_ast`'s memo is keyed on exactly
-// this `TypeId`, so `i32` costs a `Map` lookup. WHAT THIS ANSWERS FOR
-// `i32` IS `i32` — a weak but worthwhile answer: it is the RESOLVED type
-// (`Alias = Shape` hovers as `Shape`), and a NAME THAT RESOLVES TO
-// NOTHING ANSWERS `null`, so `i32` also confirms the name is a type the
-// checker knows. Anything richer belongs to `documentSymbol` or
-// `definition` (`design_lsp.md` §2).
+// A WRITTEN TYPE, resolved, and said in full. `type_from_ast`'s memo
+// is keyed on exactly this `TypeId`, so `i32` costs a `Map` lookup.
+// What a PRIMITIVE answers is more than its name: "a prelude
+// declaration of a primitive's name IS that primitive" (DESIGN.md:438),
+// and that declaration is the one place the language has anything to
+// SAY about `i32` — so the answer is the name, the declaration's first
+// doc line, and its exported members (`i32 — members: MIN, MAX, BITS`).
+// A primitive the prelude does not declare (and every type in
+// `hover_at`, where there is no prelude at all) still answers the bare
+// name, which is the RESOLVED type (`Alias = Shape` hovers as `Shape`)
+// and confirms the name is a type the checker knows — a name that
+// resolves to nothing answers `null`. Signatures keep the bare name:
+// they go through `write_ty` below, and a reprinted parameter list is
+// no place for a doc comment.
+write_written_ty = (c :: Checker, id: TypeId, out :: String) Res<bool, AllocError> {
+    c.type_memo.get(id).match({
+        None     => no_answer(),
+        Ok(memo) => write_ty_named(c, memo, out),
+    })
+}
+
 write_ty = (c :: Checker, id: TypeId, out :: String) Res<bool, AllocError> {
     c.type_memo.get(id).match({
         None     => no_answer(),
         Ok(memo) => write_ty_id(c, memo, out),
     })
+}
+
+// The OfType answer for a resolved type: the prim's prelude note when
+// there is one, the plain name otherwise.
+write_ty_named = (c :: Checker, id: TyId, out :: String) Res<bool, AllocError> {
+    poison_free(c, id).match({
+        false => no_answer(),
+        true  => c.types.at(id).match({
+            Prim(p) => write_prim(c, id, p, out),
+            _       => { c.types.write_name(id, out).try(); an_answer() },
+        }),
+    })
+}
+
+// The name first — it is the answer even when the prelude has nothing
+// to add — then the declaration's note. A miss is not a lookup failure
+// worth hiding the name over: `bool` answered exactly "bool" for
+// years, and lone-module hover still does.
+write_prim = (c :: Checker, id: TyId, p: Prim, out :: String)
+             Res<bool, AllocError> {
+    c.types.write_name(id, out).try();
+    defs ::= c.alloc.Vec<Def>();
+    c.world.prelude_of(p.name, defs).try();
+    defs.get(0).match({
+        None  => an_answer(),
+        Ok(d) => {
+            write_prelude_note(c, d, out).try();
+            an_answer()
+        },
+    })
+}
+
+// ` — `, the declaration's first doc line when it has one, and its
+// exported members — the starred ones, the surface a reader of the
+// hovered module can actually reach (`str`'s `data` is deliberately
+// absent). An unstarred member is the module's own business.
+write_prelude_note = (c :: Checker, d: Def, out :: String) Res<(), AllocError> {
+    decl_at(c.tree, d.id).match({
+        None   => Ok(()),
+        Ok(dd) => {
+            doc = first_doc_line(c.tree, dd.leading);
+            (doc.len > 0).then(() {
+                out.add_bytes(" — ").try();
+                out.add_bytes(doc).try();
+            });
+            write_members(c, dd, doc.len > 0, out)
+        },
+    })
+}
+
+write_members = (c :: Checker, dd: Decl, after_doc: bool, out :: String)
+                Res<(), AllocError> {
+    names ::= c.alloc.Vec<str>();
+    dd.kind.match({
+        Struct(s) => collect_names(s.members, names),
+        _         => Ok(()),
+    }).try();
+    (names.len > 0).then(() {
+        after_doc.match({
+            true  => out.add_bytes("; members: "),
+            false => out.add_bytes(" — members: "),
+        }).try();
+        names.loop((h, i, name) {
+            (i > 0).then(() { out.add_bytes(", ").try() });
+            out.add_bytes(name).try();
+        });
+    });
+    Ok(());
+}
+
+collect_names = (ms: Vec<Member>, names :: Vec<str>) Res<(), AllocError> {
+    ms.loop((h, m) { member_name(m, names).try(); });
+    Ok(());
+}
+
+member_name = (m: Member, names :: Vec<str>) Res<(), AllocError> {
+    m.kind.match({
+        Field(f)    => keep_exported(f.exported, f.name.text, names),
+        Const(k)    => keep_exported(k.exported, k.name.text, names),
+        Function(f) => keep_exported(f.exported, f.name.text, names),
+    })
+}
+
+keep_exported = (exported: bool, name: str, names :: Vec<str>)
+                Res<(), AllocError> {
+    exported.match({
+        true  => names.add(name),
+        false => Ok(()),
+    })
+}
+
+// The declaration's first line of prose: the leading run's first line
+// comment with its marker and margin stripped. A bare `//` spacer says
+// nothing, so the scan moves past it rather than settling for empty.
+first_doc_line = (tree: Ast, run: TriviaRun) str {
+    doc ::= "";
+    Range(0, run.len).loop((h, i) {
+        (doc.len == 0).then(() {
+            piece = tree.trivia_at(run, i);
+            piece.kind.match({
+                LineComment => { doc = comment_text(piece.text); },
+                _           => (),
+            });
+        });
+    });
+    doc;
+}
+
+comment_text = (text: str) str {
+    from ::= 0;
+    loop(() { from < text.len && text.index(
+        from) == '/' }, (h) { from = from + 1; });
+    loop(() { from < text.len && text.index(
+        from) == ' ' }, (h) { from = from + 1; });
+    text.slice(from, text.len);
 }
 
 // AN EXPRESSION, from the memo the checker filled while typing the body.
