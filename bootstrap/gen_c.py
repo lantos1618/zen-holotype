@@ -341,6 +341,18 @@ NUMERIC = frozenset(list(INT_VALUES) + ["f32", "f64", "bool"])
 UNIT = ("unit",)
 UNKNOWN = ("unknown",)
 
+
+def has_unknown(ty):
+    """Does this type still carry a hole anywhere inside it?
+
+    `UNKNOWN` itself is one; so is `Res<unknown>`, which is what an
+    `Ok(..)`/`None` arm peeks as before anything settles it."""
+    if ty == UNKNOWN:
+        return True
+    if not isinstance(ty, tuple):
+        return False
+    return any(has_unknown(x) for x in ty)
+
 # A `want` that says "I have no expected type, but I do want a value."  It is
 # not a type and never reaches C: `None` already means "no expected type", but
 # it also means "nothing is reading this", and a block has to tell those two
@@ -5586,6 +5598,19 @@ class FnCtx:
             if ty in (None, UNIT, UNKNOWN):
                 continue
             if kind(body) == "Literal":
+                fallback = fallback or ty
+                continue
+            if has_unknown(ty):
+                # AN ARM WITH A HOLE IN IT DOES NOT DECIDE, for the same
+                # reason a bare literal does not: `None` peeks as
+                # `Res<unknown>` -- it names the FORM and no payload -- and
+                # letting it win handed that hole back to every arm as
+                # `want`, so `Ok(v)` never inferred from its own payload and
+                # both arms failed with "cannot infer the type of". The
+                # match's type was therefore the ORDER its arms were
+                # written in: `Ok(v)` / `None` compiled and `None` / `Ok(v)`
+                # did not. Kept as a fallback, since a match whose every arm
+                # has a hole still has that type.
                 fallback = fallback or ty
                 continue
             best = ty if best is None else self.wider_arm(best, ty)

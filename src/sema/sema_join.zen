@@ -33,6 +33,25 @@ join* = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
 keep_or_settle = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     (open_res(c, a) && (c.is_unknown(b) == false)).match({
         true  => settled_res(c, a, b),
+        false => settle_reversed(c, a, b),
+    })
+}
+
+// THE SAME JOIN WITH THE ARMS THE OTHER WAY ROUND, because which arm is
+// open is the author's ordering and not a fact about the type.
+// `settled_res` reads the FORM off its second argument and the PAYLOAD
+// off its first, so an open `Res` in the SECOND arm settles by swapping
+// them — the fold reaches here with `a` the arms so far and `b` the one
+// being added, and only `a` had ever been asked.
+//
+// WITHOUT THIS THE JOIN WAS ORDER-DEPENDENT, and the example in this
+// file's own header only worked one way round. `Ok(v)` then `None`
+// typed; `None` then `Ok(v)` — the same match, arms swapped — took
+// `None`'s type whole and answered `Res<Infer>`, which is the `int`
+// where the payload goes that `settled_res` above exists to prevent.
+settle_reversed = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
+    (open_res(c, b) && (c.is_unknown(a) == false)).match({
+        true  => settled_res(c, b, a),
         false => merged_or_first(c, a, b),
     })
 }
