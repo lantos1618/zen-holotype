@@ -98,6 +98,24 @@ publishes diagnostics, and refuses everything else:**
   does not guess.** With no workspace, a change not yet built, or a file
   with errors, the answer is the lexer's: never grey, never wrong. The
   section below has the argument.
+- **There is one TextMate grammar, and it is not about colour.** VS Code
+  decides what is a BRACKET before it has ever spoken to the server, and
+  it decides it from TextMate scopes. With no grammar contributed at all
+  every byte was plain text, so the `(` in
+
+  ```zen
+  out.add_bytes("(zg_fs_kind(").try();
+  ```
+
+  matched as a real open bracket — three of them on that line. Semantic
+  tokens cannot fix it: they arrive asynchronously and bracket matching
+  never consults them, which is why colour looked right while brackets
+  did not. `syntaxes/zen.tmLanguage.json` therefore names exactly three
+  things — line and block comments, strings, and character literals —
+  and nothing else. Keywords, numbers, types, functions and parameters
+  are deliberately absent; the server colours those and it knows what
+  they mean. `make editors` fails if that file stops resolving, because
+  VS Code ignores a broken `grammars` entry silently.
 
 If the launch shape ever changes, exactly one setting moves:
 

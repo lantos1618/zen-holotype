@@ -5,7 +5,10 @@ CFLAGS  ?= -O2 -std=c99
 PY      ?= python3
 ROOT    ?= src
 
-.PHONY: all build seed test test-zen lint parse design cap dupcomments faults refmap ufcs style fixpoint determinism grammar grammar-test fmt bench asan leak profile clean help
+# `editors` IS IN THIS LIST BECAUSE `editors/` IS ALSO A DIRECTORY. Without
+# it make finds the directory, calls the target up to date, and runs the
+# script never — a gate that cannot fail because it cannot run.
+.PHONY: all build seed test test-zen lint parse design cap dupcomments faults refmap ufcs style editors fixpoint determinism grammar grammar-test fmt bench asan leak profile clean help
 
 all: test
 
@@ -38,7 +41,7 @@ seed: build
 ## was written to cure: a check outside `make test` is a check that goes
 ## stale unobserved. If either one makes this target too slow to run, split
 ## it out deliberately and say where it runs instead — do not just drop it.
-test: parse design cap dupcomments faults refmap ufcs style grammar-test
+test: parse design cap dupcomments faults refmap ufcs style grammar-test editors
 	$(PY) tests/run.py
 
 ## faults: every fault the compiler declares must have a site that raises
@@ -77,6 +80,18 @@ cap:
 ## judgement about where a reader needs it, and this gate does not overrule it.
 dupcomments:
 	$(PY) scripts/dup_comments.py
+
+## editors: the VS Code extension's contributions still resolve. EVERY
+## FAILURE HERE IS A SILENT ONE -- VS Code does not report a `grammars`
+## entry whose path is missing or whose `scopeName` disagrees with the
+## grammar file's own, it simply contributes nothing, and .zen falls back
+## to no tokenization at all. That fallback is what put the `(` inside
+## `add_bytes("(zg_fs_kind(")` into bracket matching, while colour kept
+## working because that comes from the server. Nothing else gates
+## editors/ (CENSUS.md said so), and a check nobody runs is a check that
+## goes stale.
+editors:
+	$(PY) scripts/editors_check.py
 
 ## style: the rest of STYLE.md — where a file lives, what it is named,
 ## which way its imports point, whether an impl sits with its type. The
