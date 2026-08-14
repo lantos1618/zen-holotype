@@ -201,6 +201,17 @@ with no separator is left alone so it is looked up on `PATH`. Both are
 resolved with the **extension host's** view of the filesystem — the remote
 one — via `vscode.workspace.fs`, never `node:fs`.
 
+If the default `./zen` is not there, `zen` is looked up on the extension
+host's `PATH` before anyone is told to go and build something. A
+`zen.server.path` you set yourself is reported as written if it misses —
+never silently replaced — so a stale setting cannot start a different
+binary than the one you asked for.
+
+A server that exits is not restarted on its own; *Zen: Restart Language
+Server* (`zen.restartServer`) stops what is left and starts a fresh one
+without reloading the window — which is also the way to pick up a binary
+you just rebuilt.
+
 Open a `.zen` file, hover over an expression. If anything goes wrong, the
 **Zen** output channel says what; set `zen.trace.server` to `verbose` to see
 the frames.
@@ -272,6 +283,26 @@ startup rather than leaving you to find it.
 selection from `language-configuration.json` (which is configuration, not
 a grammar; its `wordPattern` is copied from the one `identifier` rule in
 `grammar/grammar.js`).
+
+**Bracket-pair colorization and bracket-pair guides are defaulted off for
+Zen, because with no grammar they cannot be trusted.** Those two features
+match the `brackets` from `language-configuration.json` over the *raw
+buffer text* — they see every `{` in the file, including the one in a
+comment or a string, and paint it as structure. The server does not step
+in: `src/lsp/lsp_colour.zen` deliberately emits no semantic tokens for
+delimiters (a brace is structure, not an operator), so there is no
+colour-token answer to outrank the guess, and the guessing feature wins
+by being the only one on the field. Turning the guess *on* would colour a
+`{` inside `// {` or `"{"` exactly like a real one, which is a wrong
+answer about structure — and this server's position, everywhere else, is
+that a wrong answer is worse than none. So `package.json` ships
+`configurationDefaults` for `[zen]` setting
+`editor.bracketPairColorization.enabled` and `editor.guides.bracketPairs`
+to `false`. These are **defaults**, not walls: if you want the guessing
+back, set both to `true` in your own settings and the extension will not
+argue. The `brackets` in `language-configuration.json` stay — plain
+bracket matching and `Ctrl+Shift+\` do not highlight anything, so they
+can afford to guess.
 
 ---
 

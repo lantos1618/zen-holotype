@@ -3,8 +3,9 @@
 // Launch `zen lsp` and speak LSP to it.
 //
 // This file does one thing and refuses to do a second: it resolves the
-// server command, starts a LanguageClient over its stdio, and — the part
-// that earns its length — SAYS WHAT WENT WRONG WHEN THAT FAILS. The
+// server command, starts a LanguageClient over its stdio, restarts it on
+// demand, and — the part that earns its length — SAYS WHAT WENT WRONG WHEN
+// THAT FAILS. The
 // transport now exists, so the happy path is reachable; the failure path
 // keeps its length because the most likely failure left is a `zen` binary
 // older than the transport, which looks exactly like a crash from here.
@@ -45,8 +46,8 @@ const STARTUP_FAILED =
   "     Note `make build` alone is not enough if the seed predates it.\n" +
   "\n" +
   "  2. THE PATH IS WRONG. `zen.server.path` defaults to `./zen`, resolved\n" +
-  "     against the workspace folder. A checkout that has never been built\n" +
-  "     has no `zen` at all.\n" +
+  "     against the workspace folder, with a fallback to `zen` on PATH.\n" +
+  "     A checkout that has never been built has no `zen` at all.\n" +
   "\n" +
   "  3. A GENUINE SERVER FAILURE, in which case the trace above is the\n" +
   "     evidence — set `zen.trace.server` to `verbose` and reload.\n" +
@@ -79,11 +80,43 @@ export async function activate(context: vscode.ExtensionContext) {
   output = vscode.window.createOutputChannel("Zen");
   context.subscriptions.push(output);
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand("zen.restartServer", () => restartServer()),
+  );
+
+  await startClient();
+}
+
+// The server's `closed` handler returns `DoNotRestart` — crashing in a loop
+// is worse than lying still — so a dead server used to mean a window reload.
+// This command is the reload without the window: stop what is left, then go
+// through the whole lookup again, because the two reasons to reach for it
+// are "I rebuilt the binary" and "I changed the setting".
+async function restartServer(): Promise<void> {
+  output.appendLine("zen: restart requested.");
+  await stopClient();
+  await startClient();
+}
+
+async function stopClient(): Promise<void> {
+  const stopping = client;
+  client = undefined;
+  if (!stopping) return;
+  try {
+    await stopping.stop();
+  } catch (err) {
+    // Stopping a client whose server already exited throws from here. The
+    // exit was reported when it happened; the restart goes ahead anyway.
+    output.appendLine(`zen: stopping the old client failed: ${String(err)}`);
+  }
+}
+
+async function startClient(): Promise<void> {
   const config = vscode.workspace.getConfiguration("zen");
   const configured = config.get<string>("server.path", "./zen");
   const args = config.get<string[]>("server.args", ["lsp"]);
 
-  const command = resolveServerPath(configured);
+  const command = await resolveServerCommand(configured, isSet(config, "server.path"));
   output.appendLine(`zen: server command: ${command} ${args.join(" ")}`);
 
   // Stat it before starting. A LanguageClient handed a nonexistent command
@@ -132,7 +165,7 @@ export async function activate(context: vscode.ExtensionContext) {
         // The server exited. Do not let vscode-languageclient restart it
         // four times and then declare it broken — say the observation once,
         // and name the cause that is overwhelmingly likely without claiming
-        // to know it. Reload the window to try again.
+        // to know it. `zen.restartServer` is the way to try again.
         output.appendLine("zen: the server process exited.");
         output.appendLine(STARTUP_FAILED);
         void vscode.window
@@ -215,6 +248,60 @@ function warnIfSemanticHighlightingOff(): void {
       "zen: If .zen files stay grey, set `editor.semanticHighlighting.enabled` to true.",
     );
   }
+}
+
+// The configured path first. If it misses and it was the DEFAULT, `zen` is
+// looked up on the extension host's PATH before anyone is told to go and
+// build something — a remote host that has zen installed properly should
+// not need a setting at all. An EXPLICIT path that misses is reported as
+// written instead: silently starting a different binary than the one asked
+// for is how "why is it running the old compiler" afternoons begin.
+async function resolveServerCommand(configured: string, explicit: boolean): Promise<string> {
+  const resolved = resolveServerPath(configured);
+  if (await exists(resolved)) return resolved;
+  if (explicit) return resolved;
+  const onPath = await findOnPath("zen");
+  if (onPath) {
+    output.appendLine(`zen: ${resolved} is not there; using ${onPath} from PATH.`);
+    return onPath;
+  }
+  return resolved;
+}
+
+// Explicit means the value came from settings, not from the default. A user
+// who never touched `zen.server.path` gets the fallback; a user who wrote
+// one meant that one.
+function isSet(config: vscode.WorkspaceConfiguration, key: string): boolean {
+  const inspected = config.inspect(key);
+  return (
+    inspected?.globalValue !== undefined ||
+    inspected?.workspaceValue !== undefined ||
+    inspected?.workspaceFolderValue !== undefined
+  );
+}
+
+// A `which` over the extension host's PATH — which, like everything else
+// here, is the REMOTE one — asking `vscode.workspace.fs` and never
+// `node:fs`, for the reason at the top of this file. Existence is the whole
+// test; a PATH entry that holds a non-executable `zen` fails loudly at
+// spawn, which is a better report than a guess from here.
+async function findOnPath(name: string): Promise<string | undefined> {
+  const pathEnv = process.env.PATH;
+  if (!pathEnv) return undefined;
+  const candidates = process.platform === "win32" ? [name + ".exe", name] : [name];
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue;
+    for (const candidate of candidates) {
+      const full = path.join(dir, candidate);
+      try {
+        const stat = await vscode.workspace.fs.stat(vscode.Uri.file(full));
+        if (stat.type === vscode.FileType.File) return full;
+      } catch {
+        // Not in this entry; try the next.
+      }
+    }
+  }
+  return undefined;
 }
 
 // A relative `zen.server.path` — and the default `./zen` is one, because
