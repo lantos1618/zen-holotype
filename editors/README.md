@@ -125,10 +125,32 @@ publishes diagnostics, and refuses everything else:**
   counts only where the tokenizer says `StandardTokenType.Other`, in
   the bracket-pair AST (`tokenizer.ts`) and in the older matcher
   (`bracketPairsImpl.ts`, `ignoreBracketsInToken`) alike — so with the
-  grammar contributed both paths already skip `");"`. **If a `)` inside
-  a string still matches, the extension VS Code loaded predates the
-  grammar; reinstall it and reload the window.** Suppressing the
+  grammar contributed both paths already skip `");"`. Suppressing the
   colours again would only hide that.
+
+  **What decides is the extension VS Code loaded, not the one in this
+  checkout**, and the two are easy to keep apart for weeks. The grammar
+  landed on 2026-08-14; an extension installed before that ships no
+  `syntaxes/` directory and no `grammars` entry, which is the *whole*
+  untokenized case again — not just `(` but every `}` in `"}"`. So when
+  a bracket inside a string still matches, read what is installed
+  before reading this repository:
+
+  ```console
+  $ ls ~/.vscode-server/extensions/zen.zen-lsp-*/syntaxes/
+  ```
+
+  No such directory is the answer, and it was the answer on this
+  machine for the whole of the week the bug was reported in: the
+  extension VS Code had loaded was installed on 2026-08-10, four days
+  before the grammar existed. **"Reinstall it" was the right advice and
+  it did not work, which is the part worth writing down** — installing
+  over Remote-SSH takes minutes with no output, and a window that is
+  not reloaded afterwards goes on running the extension it started
+  with. The install section below has both. `package.json`'s `version`
+  is bumped whenever the contributed surface moves, so that
+  `code --list-extensions --show-versions` answers this question
+  without anyone having to list a directory.
 
 If the launch shape ever changes, exactly one setting moves:
 
@@ -208,8 +230,26 @@ $ cd editors/vscode
 $ npm install
 $ npm run compile
 $ npx @vscode/vsce package --allow-missing-repository -o zen.vsix
-$ code --install-extension zen.vsix
+$ code --install-extension zen.vsix --force
 ```
+
+Two things about that last line, both measured on a remote instance and
+both capable of leaving you with the old extension while believing you
+have the new one.
+
+**It takes minutes, and it prints nothing until it is done.** Over
+Remote-SSH `code --install-extension` took over three minutes to say
+`successfully installed`, with no output at all before that. It has not
+hung. Interrupting it is how you end up back where you started.
+
+**Then run *Developer: Reload Window*.** An extension replaced under a
+running window is not re-read until the window is, and a language
+contribution — the grammar above especially — is read exactly once at
+that point. `--force` is there so that a .vsix carrying a version you
+already have is still written out; the version in `package.json` is
+bumped whenever the contributed surface moves, so that
+`code --list-extensions --show-versions` can tell you which build the
+editor actually loaded rather than leaving you to guess.
 
 On a remote instance, run all of that **on the remote host** and install
 into the remote's extension host (`code --install-extension` over the
@@ -315,25 +355,37 @@ selection from `language-configuration.json` (which is configuration, not
 a grammar; its `wordPattern` is copied from the one `identifier` rule in
 `grammar/grammar.js`).
 
-**Bracket-pair colorization and bracket-pair guides are defaulted off for
-Zen, because with no grammar they cannot be trusted.** Those two features
-match the `brackets` from `language-configuration.json` over the *raw
-buffer text* — they see every `{` in the file, including the one in a
-comment or a string, and paint it as structure. The server does not step
-in: `src/lsp/lsp_colour.zen` deliberately emits no semantic tokens for
-delimiters (a brace is structure, not an operator), so there is no
-colour-token answer to outrank the guess, and the guessing feature wins
-by being the only one on the field. Turning the guess *on* would colour a
-`{` inside `// {` or `"{"` exactly like a real one, which is a wrong
-answer about structure — and this server's position, everywhere else, is
-that a wrong answer is worse than none. So `package.json` ships
-`configurationDefaults` for `[zen]` setting
-`editor.bracketPairColorization.enabled` and `editor.guides.bracketPairs`
-to `false`. These are **defaults**, not walls: if you want the guessing
-back, set both to `true` in your own settings and the extension will not
-argue. The `brackets` in `language-configuration.json` stay — plain
-bracket matching and `Ctrl+Shift+\` do not highlight anything, so they
-can afford to guess.
+**Bracket-pair colorization and bracket-pair guides are on, like every
+other language's, and this file used to say the opposite.** They were
+defaulted off through `configurationDefaults` for `[zen]` for as long as
+there was no grammar, because with no tokenization those two features do
+match `brackets` over the raw buffer text and paint the `{` in `// {` or
+in `"{"` as structure. The grammar removed the reason and the defaults
+went with it; the paragraph that described them outlived both, which is
+its own small lesson about documentation that argues.
+
+What is true now is one sentence, and it is the same sentence for every
+bracket subsystem: **a bracket counts only where the tokenizer answers
+`StandardTokenType.Other`.** Colorization and the guides ask through
+`bracketPairsTree/tokenizer.ts`, which searches for a bracket only when
+`isOther`; jump-to-bracket, `Ctrl+Shift+\` and the matching highlight
+ask through `bracketPairsImpl.ts`, whose every search site is guarded by
+`ignoreBracketsInToken` — `Comment | String | RegEx`. Neither consults
+semantic tokens and neither needs to, so `src/lsp/lsp_colour.zen` can go
+on emitting nothing for delimiters.
+
+The one subsystem that is token-aware only if asked is **auto-closing**.
+`StandardAutoClosingPairConditional` starts each pair with `_inString =
+true` and nothing but a `notIn` turns it off, so all five pairs in
+`language-configuration.json` carry `"notIn": ["string", "comment"]` —
+the three brackets used to carry none, and typing `(` inside a string
+closed it for you. `make editors` fails on a pair that loses one.
+
+`colorizedBracketPairs` is deliberately **not** declared. Left out, VS
+Code takes `brackets` minus a `<` … `>` pair
+(`languageBracketsConfiguration.ts`), and Zen has no such pair — so
+declaring it would restate `brackets` in a second place that could then
+disagree with the first. There is no third list here worth having.
 
 ---
 
