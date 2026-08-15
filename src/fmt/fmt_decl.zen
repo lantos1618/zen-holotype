@@ -1,45 +1,62 @@
 // src/fmt/fmt_decl.zen
-// The first rule that reaches INSIDE a declaration: `=>` alignment.
+// The rules that reach INSIDE a declaration and set the width of ONE
+// gap: `=>` alignment in a match, and operator alignment in a run of
+// bindings.
 //
 // DESIGN.md names four match rules (align `=>`, short arms on one
-// line, wrap long ones, trailing comma on the last); this is first
+// line, wrap long ones, trailing comma on the last); `=>` came first
 // because it's the only one that changes nothing but whitespace —
 // `fmt.zen`'s guard already covers that. The other three MOVE or ADD a
 // token and need their own argument for why the program still means
 // what it meant.
 //
-// NOT A PRINTER, DOESN'T REBUILD AN ARM: bytes stay the author's; this
-// only sets the WIDTH of the spaces between a pattern and its `=>`.
+// THE SECOND RULE IS THE FIRST ONE'S ARGUMENT APPLIED TO `=`. Ragged
+// arms came out aligned and ragged bindings came out ragged, but a
+// hand-aligned binding came out hand-aligned — so the column was
+// nobody's: the formatter neither made it nor unmade it, and a tree
+// drifts into a mix of both that no gate can see. Owned in both
+// directions now: a run's operators line up, and padding outside a run
+// (or wider than the run asks for) is set back to one space.
+//
+// NOT A PRINTER, DOESN'T REBUILD AN ARM OR A BINDING: bytes stay the
+// author's; this only sets the WIDTH of the spaces before a `=>` or
+// before a `=`/`::=`.
 //
 // REFUSES TO TOUCH:
 //   - an arm sharing a line with another (e.g. packed `Add => "+", Sub
 //     => "-"` in gen_c_op.zen) — it takes no pad and asks no column, so
 //     it neither moves nor drags neighbors. Invariant the whole file
-//     rests on: AT MOST ONE `=>` MOVES PER LINE, so the pad table is
-//     one entry per line and two pads can never collide.
-//   - an arm whose pattern and `=>` aren't on one line.
-//   - an arm with anything but spaces before its `=>` (a comment there
-//     is a token; replacing it with spaces is the exact accident this
-//     folder exists to prevent).
+//     rests on: AT MOST ONE THING MOVES PER LINE, so the pad table is
+//     one entry per line and two pads can never collide. A binding pad
+//     cannot collide with an arm pad for the same reason both are
+//     refused unless they BEGIN their line, and two things cannot.
+//   - an arm whose pattern and `=>` aren't on one line, or a binding
+//     whose name and operator aren't.
+//   - anything but spaces where the pad goes (a comment there is a
+//     token; replacing it with spaces is the exact accident this folder
+//     exists to prevent).
 //
-// CANNOT SEE A STRING LITERAL OR COMMENT AT ALL: every position read is
-// a `Span` the PARSER produced, so `=>` inside `"a => b"` or a
-// commented-out arm is never named by `Arm.arrow_span`. No scan for
-// the characters `=`/`>` — deliberate, not incidental.
+// CANNOT SEE A STRING LITERAL OR COMMENT AS AN OPERATOR: every position
+// read is a `Span` the PARSER produced, so `=>` inside `"a => b"` or a
+// commented-out arm is never named by `Arm.arrow_span`. The one byte
+// scan is `op_width` below, over the gap between a binding's name and
+// its operator, and `fmt_break.zen`'s `clean_gap` gives the argument
+// for why that gap and no other may be read as bytes.
 //
-// IDEMPOTENT: the column an arm asks for is one past the END of its
-// pattern, and a pad is written entirely AFTER that — so a run never
+// IDEMPOTENT: the column a member asks for is one past the END of its
+// own name, and a pad is written entirely AFTER that — so a run never
 // moves a byte the next run's answer depends on. The only way that
-// could break (a pad shifting a later arm on the same line) is refused
-// above.
+// could break (a pad shifting a later member on the same line) is
+// refused above.
 
 Alloc, AllocError = std.mem
 str, String = std.text
 Vec = std.collections
 Range = std.core
-ExprId = std.ast.ast_id
+Pos = std.ast.ast_span
+ExprId, BlockId = std.ast.ast_id
 Ast = std.ast.ast_arena
-Expr, Match, Arm = std.ast.ast_node
+Expr, Match, Arm, Block, Stmt, Bind = std.ast.ast_node
 Src = fmt.fmt_src
 
 // One `=>` that is going to move, and where to. Named in BYTES not a
@@ -90,11 +107,11 @@ Aligned* = {
     padded* = (self: @Self, a: Alloc, src: Src, from: usize, to: usize,
                line: usize) Res<String, AllocError> {
         out ::= a.String().try();
-        at ::= from;
-        ln ::= line;
+        at  ::= from;
+        ln  ::= line;
         loop(() { at < to }, (h) {
             stop = self.line_stop(src, ln, at, to);
-            p = self.pad_at(ln);
+            p    = self.pad_at(ln);
             (p.to > at && p.to <= stop && p.from >= at).then(() {
                 out.add_bytes(src.slice_at(at, p.from)).try();
                 Range(0, p.width).loop((g, k) { out.add_byte(' ').try() });
@@ -120,18 +137,23 @@ Aligned* = {
 }
 
 // `alloc.Aligned(src, tree)` — ufcs constructor, like `Src`/`Out`.
-// Scans the expression arena rather than walking from the module (see
-// ast_find.zen: one flat `Vec` needs no traversal or parent links).
-// One `Ast` holds one file (`render` builds a `Parser` per file), so
-// the scan sees only this file's arms.
+// Scans the expression and block arenas rather than walking from the
+// module (see ast_find.zen: one flat `Vec` needs no traversal or parent
+// links). One `Ast` holds one file (`render` builds a `Parser` per
+// file), so the scan sees only this file's arms and bindings.
 Aligned* = (a: Alloc, src: Src, tree: Ast) Res<Aligned, AllocError> {
     pads ::= a.Vec<Pad>();
     Range(0, src.lines() + 2).loop((h, i) { pads.add(no_pad()).try() });
     table ::= Aligned(pads: pads);
-    id ::= ExprId(index: 0);
+    id    ::= ExprId(index: 0);
     Range(0, tree.expr_ids()).loop((h, i) {
         table.align_expr(src, tree, tree.expr_at(id)).try();
         id = ExprId(index: id.index + 1);
+    });
+    bid ::= BlockId(index: 0);
+    Range(0, tree.block_ids()).loop((h, i) {
+        table.align_binds(src, tree, tree.block_at(bid)).try();
+        bid = BlockId(index: bid.index + 1);
     });
     Ok(table);
 }
@@ -225,7 +247,7 @@ arrow_col = (src: Src, tree: Ast, mt: Match, i: usize) usize {
 // carries its `=>` on that line, and has only spaces where the pad goes.
 movable = (src: Src, tree: Ast, mt: Match, i: usize, arm: Arm) bool {
     line = arm.arrow_span.start.line;
-    end = tree.pattern_at(arm.pattern).span.end;
+    end  = tree.pattern_at(arm.pattern).span.end;
     arm.span.start.line == line
         && end.line == line
         && alone(mt, i, arm)
@@ -243,4 +265,181 @@ alone = (mt: Match, i: usize, arm: Arm) bool {
         None     => mt.arms_span.end.line,
     });
     after > arm.span.end.line
+}
+
+// -------------------------------------------------------------------
+// binding operators
+// -------------------------------------------------------------------
+
+// One `=`/`::=` this rule could move: where its pad begins (one past
+// the name, or past the written type), the operator's first byte, and
+// how wide the operator is. `width` of 0 is the sentinel for "not one
+// of these", the same job `no_pad`'s `to` of 0 does above.
+Op = {
+    end: Pos,
+    at: usize,
+    width: usize,
+}
+
+no_op = () Op { Op(end: Pos(line: 0, col: 0), at: 0, width: 0) }
+
+// Every run of bindings in one block, aligned.
+//
+// A RUN is consecutive statements, each a binding this rule may move,
+// each beginning on the line after the one before it ended, all writing
+// an operator of the SAME WIDTH. Three clauses, three reasons:
+//
+//   - consecutive and adjacent, because anything between — a call, a
+//     blank line, a comment — makes two runs. A column with a hole in
+//     it is not a column, and padding across the hole asks a reader to
+//     see a group that isn't there.
+//   - same width, so `=` and `::=` are never one column. To line those
+//     two up something has to give: either the `=` moves three columns
+//     off its own name, or the names stop starting where the eye
+//     expects. Names are what a reader scans, so the pair simply forms
+//     two runs, and each is aligned within itself.
+//
+// A run of one is still a run, and that is how hand padding is UNMADE:
+// its column is one past its own name, so `rc   ::= x` is set back to
+// `rc ::= x` rather than passed through.
+align_binds = (al :: Aligned, src: Src, tree: Ast, b: Block)
+              Res<(), AllocError> {
+    from ::= 0;
+    Range(0, b.stmts.len).loop((h, i) {
+        (i > 0 && joins(src, tree, b, i)).match({
+            true  => (),
+            false => {
+                al.align_run(src, tree, b, from, i).try();
+                from = i;
+            },
+        });
+    });
+    al.align_run(src, tree, b, from, b.stmts.len)
+}
+
+// Does statement `i` continue the run that ends at `i - 1`?
+joins = (src: Src, tree: Ast, b: Block, i: usize) bool {
+    here = op_at(src, tree, b, i);
+    (here.width > 0 && here.width == op_at(src, tree, b, i - 1).width)
+        && stmt_line(b, i, true) == stmt_line(b, i - 1, false) + 1
+}
+
+// A statement's first or last line, or 0 when there is no such
+// statement — 0 can never make `joins` true, since a first line of 0 is
+// never one past anything.
+stmt_line = (b: Block, i: usize, first: bool) usize {
+    b.stmts.get(i).match({
+        None  => 0,
+        Ok(s) => first.match({
+            true  => s.span.start.line,
+            false => s.span.end.line,
+        }),
+    })
+}
+
+// One run, in two passes: the column the widest name asks for, then the
+// pad each binding needs to reach it — the same two passes, and the
+// same reason, as `align_arms`.
+align_run = (
+    al :: Aligned,
+    src: Src,
+    tree: Ast,
+    b: Block,
+    from: usize,
+    to: usize
+) Res<(), AllocError> {
+    col ::= 0;
+    Range(from, to).loop((h, i) {
+        op   = op_at(src, tree, b, i);
+        want = op.end.col + 1;
+        (op.width > 0 && want > col).then(() { col = want; });
+    });
+    (col > 0).then(() {
+        Range(from, to).loop((h, i) { al.pad_bind(src, tree, b, i, col).try() });
+    });
+    Ok(());
+}
+
+// `col` is the RUN's column; a shorter-named binding gets the
+// difference in spaces. Subtraction can't underflow: `col` is a max
+// over `end.col + 1` and a movable binding is one of the terms.
+pad_bind = (
+    al :: Aligned,
+    src: Src,
+    tree: Ast,
+    b: Block,
+    i: usize,
+    col: usize
+) Res<(), AllocError> {
+    op = op_at(src, tree, b, i);
+    (op.width == 0).match({
+        true  => unaligned(),
+        false => al.record(op.end.line, Pad(
+            from: src.offset(op.end),
+            to: op.at,
+            width: col - op.end.col,
+        )),
+    })
+}
+
+op_at = (src: Src, tree: Ast, b: Block, i: usize) Op {
+    b.stmts.get(i).match({
+        None  => no_op(),
+        Ok(s) => s.kind.match({
+            Bind(bd) => bind_op(src, tree, s, bd),
+            _        => no_op(),
+        }),
+    })
+}
+
+// May this rule set the width before this binding's operator? The
+// statement begins its line, its name (or its written type) ends on
+// that line, and an operator follows on it — the same questions
+// `movable` asks of an arm, and the gap being all spaces falls out of
+// how `at` is found rather than needing its own clause.
+bind_op = (src: Src, tree: Ast, s: Stmt, bd: Bind) Op {
+    line = s.span.start.line;
+    end  = name_end(tree, bd);
+    at   = past_spaces(src, src.offset(end), src.after_line(line));
+    w    = op_width(src, at, src.after_line(line));
+    (w > 0
+        && end.line == line
+        && src.all_spaces(src.line_at(line), src.offset(s.span.start))).match({
+        false => no_op(),
+        true  => Op(end: end, at: at, width: w),
+    })
+}
+
+// One past the name the pad sits behind: the WRITTEN TYPE when there is
+// one, since `x: T = e` lines up on `T` and not on `x` — the pad has to
+// go where the operator can be reached from.
+name_end = (tree: Ast, bd: Bind) Pos {
+    bd.type.match({
+        Ok(t) => tree.type_at(t).span.end,
+        None  => tree.expr_at(bd.target).span.end,
+    })
+}
+
+past_spaces = (src: Src, from: usize, to: usize) usize {
+    at ::= from;
+    loop(() { at < to && src.text.index(at) == ' ' }, (h) { at = at + 1; });
+    at;
+}
+
+// `=` is 1 and `::=` is 3; anything else is 0 and the statement is
+// declined — a comment in the gap shows up as a byte that is neither
+// `=` nor `:` and stops the count at 0. Reading bytes is safe HERE and
+// nowhere else, for the reason `fmt_break.zen`'s `clean_gap` gives:
+// between a binding's name and its operator the grammar allows trivia
+// and the one punctuator, and nothing else at all.
+op_width = (src: Src, at: usize, to: usize) usize {
+    n ::= 0;
+    Range(at, to).loop((h, i) {
+        byte = src.text.index(i);
+        (byte == '=' || byte == ':').match({
+            true  => { n = n + 1; },
+            false => h.break(),
+        });
+    });
+    n;
 }

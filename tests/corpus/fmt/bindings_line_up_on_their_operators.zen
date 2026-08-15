@@ -1,0 +1,124 @@
+// THE SAME RULE AS `=>` ALIGNMENT, APPLIED TO `=` AND `::=`. Ragged
+// arms came out aligned and ragged bindings came out ragged — but a
+// HAND-ALIGNED binding came out hand-aligned, so the column belonged to
+// nobody: `fmt_decl.zen` neither made it nor unmade it, and a tree
+// drifts into a mix of the two that no gate can see. Six cases, and
+// each is one clause of the rule:
+//
+//   - A RUN LINES UP on the widest name. Consecutive bindings only —
+//     that is what a run is.
+//   - HAND PADDING IS UNMADE. A binding standing alone is a run of one
+//     and its column is one past its own name, so `rc   ::=` is set
+//     back to `rc ::=` instead of being passed through. Owned in both
+//     directions or not owned at all.
+//   - A STATEMENT BETWEEN TWO BINDINGS MAKES TWO RUNS. Padding across
+//     the call would draw a column with a hole in it, which is a group
+//     a reader can see and the code does not have.
+//   - A BLANK LINE DOES THE SAME, for the same reason.
+//   - `=` AND `::=` ARE NEVER ONE COLUMN. Lining those two up means
+//     either the `=` moves three columns off its own name or the names
+//     stop starting where the eye expects; names are what a reader
+//     scans, so the two spellings simply form two runs.
+//   - A WRITTEN TYPE IS PART OF THE NAME. `x: i32 = e` lines up on
+//     `i32`, because the pad has to go where the operator is reached
+//     from.
+//
+// AND THE FIXPOINT on every case, for the reason
+// arms_line_up_on_their_arrows.zen gives: a rule that computes a column
+// from bytes it just moved is the classic way to fail it.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+scan, Source = std.lex.lex
+render = fmt.fmt
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    shows(
+        a,
+        "a run lines up on the widest name",
+        "f = () i32 {\n    path ::= 1;\n    rc ::= 2;\n    dst ::= 3;\n    4\n}\n"
+    ).try();
+
+    shows(
+        a,
+        "hand padding outside a run is unmade",
+        "f = () i32 {\n    only   ::= 1;\n    g();\n    other    ::= 2;\n    3\n}\n"
+    ).try();
+
+    shows(
+        a,
+        "a statement between two bindings makes two runs",
+        "f = () i32 {\n    short ::= 1;\n    much_longer ::= 2;\n    g();\n    a ::= 3;\n    bb ::= 4;\n    5\n}\n"
+    ).try();
+
+    shows(
+        a,
+        "a blank line makes two runs",
+        "f = () i32 {\n    short ::= 1;\n    much_longer ::= 2;\n\n    a ::= 3;\n    bb ::= 4;\n    5\n}\n"
+    ).try();
+
+    shows(
+        a,
+        "`=` and `::=` never share a column",
+        "f = () i32 {\n    first = 1;\n    second ::= 2;\n    third = 3;\n    4\n}\n"
+    ).try();
+
+    shows(
+        a,
+        "a written type is part of the name",
+        "f = () i32 {\n    x: i32 = 1;\n    neg_one: i32 = -1;\n    q = x / neg_one;\n    q\n}\n"
+    ).try();
+
+    Ok(0);
+}
+
+// Format, print the bytes, and format the bytes again to say whether
+// anything moved the second time.
+shows = (a: Alloc, what: str, text: str) Res<(), AllocError> {
+    first  = formatted(a, text).try();
+    second = formatted(a, first.view()).try();
+    println("== {}", what);
+    println(
+        "faithful: {}, {}",
+        faithful_of(a, text).try(),
+        verdict(first.view().eq(second.view()))
+    );
+    show(first.view());
+    Ok(());
+}
+
+verdict = (settled: bool) str {
+    settled.match({
+        true  => "fixpoint",
+        false => "MOVED",
+    })
+}
+
+formatted = (a: Alloc, text: str) Res<String, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out   = render(a, lexed).try();
+    Ok(out.text);
+}
+
+faithful_of = (a: Alloc, text: str) Res<bool, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out   = render(a, lexed).try();
+    Ok(out.faithful);
+}
+
+// The bytes, with the final newline shown as the end of the last line
+// rather than as a blank one, and a `|` at both ends so a trailing space
+// would be visible in the expectation.
+show = (text: str) () {
+    line ::= 0;
+    from ::= 0;
+    Range(0, text.len).loop((h, i) {
+        (text.index(i) == '\n').then(() {
+            line = line + 1;
+            println("{} |{}|", line, text.slice(from, i));
+            from = i + 1;
+        });
+    });
+}
