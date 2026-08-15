@@ -15,11 +15,23 @@ break was invisible to anyone reading the file rather than editing it.
 
 Not a colour check. The grammar names comments, strings and character
 literals and nothing else, on purpose — `editors/README.md` says why.
+
+AND NOT A TOKENIZATION CHECK, WHICH IS THE HALF THIS CANNOT DO. Running
+the grammar means an Oniguruma engine — `vscode-textmate` over node —
+and `editors/vscode/node_modules/` is untracked with no install step in
+`make test`, so such a gate would either make a Python-only checkout
+fail or skip itself when the dependency is absent, and a gate that
+skips is a gate that is green for the wrong reason. What holds the line
+instead is `tests/corpus/lex/string_containing_bracket_markers`, which
+pins the compiler's OWN answer for the same bytes: a bracket inside a
+literal is not a bracket. That is the answer the grammar has to agree
+with, and the file to check by hand when it is suspected of drifting.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -34,6 +46,18 @@ REQUIRED_SCOPES = (
     "string.quoted.double.zen",
     "string.quoted.single.zen",
 )
+
+# WHAT MAKES A SCOPE EXCLUDE A BRACKET, and it is not the scope being listed
+# above. VS Code reduces every TextMate scope to a `StandardTokenType` with
+# this regex (vscode-textmate, `BasicScopeAttributesProvider`), and a bracket
+# counts wherever the answer is `Other` -- in the bracket-pair AST
+# (`bracketPairsTree/tokenizer.ts`) and in the older matcher
+# (`bracketPairsImpl.ts`, `ignoreBracketsInToken`) alike. So a scope named
+# `literal.quoted.zen` is a perfectly valid TextMate scope that reads as
+# ordinary text, and renaming one of the four above to it would put every
+# bracket inside a Zen string back into matching -- silently, and with the
+# list above still satisfied if the two were edited together.
+STANDARD_TOKEN_TYPE = re.compile(r"\b(comment|string|regex)\b")
 
 
 def scopes_in(node) -> set[str]:
@@ -95,6 +119,10 @@ def main() -> int:
             if want not in found:
                 bad.append(f"{rel} names no {want} rule — brackets inside "
                            f"that construct would match as real brackets")
+            elif not STANDARD_TOKEN_TYPE.search(want):
+                bad.append(f"{want} reads as ordinary text to VS Code — a "
+                           f"scope excludes brackets only when its name "
+                           f"carries `comment`, `string` or `regex` as a word")
 
     # The language configuration is what declares brackets in the first place.
     cfg_rel = next((e.get("configuration") for e in

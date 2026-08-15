@@ -117,6 +117,19 @@ publishes diagnostics, and refuses everything else:**
   they mean. `make editors` fails if that file stops resolving, because
   VS Code ignores a broken `grammars` entry silently.
 
+  The extension used to turn `editor.bracketPairColorization.enabled`
+  and `editor.guides.bracketPairs` off for `[zen]`, and that is gone:
+  it was the workaround the grammar replaced, and all it did once the
+  grammar landed was deny Zen files the colours and guides every other
+  language gets. VS Code reads the same scope either way — a bracket
+  counts only where the tokenizer says `StandardTokenType.Other`, in
+  the bracket-pair AST (`tokenizer.ts`) and in the older matcher
+  (`bracketPairsImpl.ts`, `ignoreBracketsInToken`) alike — so with the
+  grammar contributed both paths already skip `");"`. **If a `)` inside
+  a string still matches, the extension VS Code loaded predates the
+  grammar; reinstall it and reload the window.** Suppressing the
+  colours again would only hide that.
+
 If the launch shape ever changes, exactly one setting moves:
 
 | editor | the setting | default |
