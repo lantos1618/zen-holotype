@@ -39,10 +39,12 @@ point: an unstated gap reads as coverage.
   "say what it is, not what it does to you"
         `get_`/`do_` are gateable and gated (`verb`). The rest of the rule
         needs to know what the function means.
-  "method chains over nested calls"
-        requires knowing the NATURAL receiver. `f(x, a)` is only wrong when
-        `x` is what the operation is about, and nothing in the source says
-        which parameter that is.
+  "method chains over nested calls", in general
+        requires knowing the NATURAL receiver, and nothing in the source
+        says which parameter that is. The ONE case where the source does
+        say is gated -- see `ufcs` below, which reads the receiver off the
+        callee's own first parameter and off its module's subject rather
+        than guessing.
   "no magic numbers"
         measured, not gated: zero `== <printable ascii int>` comparisons
         exist in src/ today. A gate would have to guess whether `n == 32`
@@ -68,12 +70,22 @@ point: an unstated gap reads as coverage.
   "smallest correct change"
         judgement, all of them.
 
-ONE RULE CARRIES A LEDGER because the tree violates it today. Same shape as
+TWO RULES CARRY A LEDGER because the tree violates them today. Same shape as
 `faults_reachable.py` and `ufcs_collisions.py`: an entry is a debt, not an
 exemption, deleting a line is how one closes, and a stale entry is an error --
 so the debt can shrink and cannot quietly grow. Fixing the 147 abbreviation
 sites touches files three other lanes hold open, which is why they are written
 down here instead of renamed.
+
+`UFCS_OWED` IS KEYED BY FILE AND VALUED WITH A COUNT, which the abbreviation
+ledger is not, and the difference is deliberate. A file-keyed ledger with no
+number exempts the file: `gen_c_expr.zen` could take a hundred more and the
+gate would say nothing. A count cannot go stale on an unrelated edit the way a
+LINE NUMBER does -- it moves only when someone adds or removes a violation,
+which is exactly when the ledger should have to be touched. So the debt here
+is monotone in the strong sense: not "no new dirty files" but "no new sites,
+anywhere", and paying one down is a one-character edit that shows up in the
+diff.
 """
 
 from __future__ import annotations
@@ -120,6 +132,98 @@ ABBREV_OWED: dict[str, str] = {
     "src/sema/sema_inst.zen:tp": "tparam",
 }
 
+# THE UFCS DEBT, keyed by file and valued with THE NUMBER OF SITES that file
+# still writes `f(be, ..)` where `be.f(..)` resolves to the same function.
+#
+# NOT an exemption list, and not a claim that these files are allowed to do
+# it: every entry is a mechanical edit nobody has made time for. The tree is
+# split cleanly in two here and the split is worth reading before touching
+# this. All of `src/std/` obeys the rule but for nine sites in `text_utf8.zen`
+# -- `Parser`, `Lexer`, `String` and `Cursor` are written on their receivers
+# throughout -- and `gen_c/` and `sema/` do not, which is two authoring eras
+# rather than two opinions. So this is a campaign, and not this lane's.
+#
+# THE NUMBER IS THE POINT. A bare file list would exempt the file, and
+# `gen_c_expr.zen` could take a hundred more without a word. Bring the number
+# down with the code; the gate fails either way round, on a file that grew and
+# on a number that overstates.
+UFCS_OWED: dict[str, int] = {
+    "src/gen/gen_c/gen_c_alloc.zen": 31,
+    "src/gen/gen_c/gen_c_array.zen": 22,
+    "src/gen/gen_c/gen_c_assoc.zen": 30,
+    "src/gen/gen_c/gen_c_bound.zen": 65,
+    "src/gen/gen_c/gen_c_build.zen": 52,
+    "src/gen/gen_c/gen_c_call.zen": 88,
+    "src/gen/gen_c/gen_c_cap.zen": 83,
+    "src/gen/gen_c/gen_c_const.zen": 23,
+    "src/gen/gen_c/gen_c_decl.zen": 74,
+    "src/gen/gen_c/gen_c_display.zen": 32,
+    "src/gen/gen_c/gen_c_expr.zen": 111,
+    "src/gen/gen_c/gen_c_fat.zen": 80,
+    "src/gen/gen_c/gen_c_flow.zen": 60,
+    "src/gen/gen_c/gen_c_fmt.zen": 23,
+    "src/gen/gen_c/gen_c_fold.zen": 25,
+    "src/gen/gen_c/gen_c_fs.zen": 68,
+    "src/gen/gen_c/gen_c_handle.zen": 18,
+    "src/gen/gen_c/gen_c_hoist.zen": 3,
+    "src/gen/gen_c/gen_c_impl.zen": 15,
+    "src/gen/gen_c/gen_c_index.zen": 36,
+    "src/gen/gen_c/gen_c_infer.zen": 27,
+    "src/gen/gen_c/gen_c_inline.zen": 62,
+    "src/gen/gen_c/gen_c_layout.zen": 90,
+    "src/gen/gen_c/gen_c_loop.zen": 64,
+    "src/gen/gen_c/gen_c_main.zen": 31,
+    "src/gen/gen_c/gen_c_member.zen": 98,
+    "src/gen/gen_c/gen_c_mono.zen": 16,
+    "src/gen/gen_c/gen_c_op.zen": 60,
+    "src/gen/gen_c/gen_c_own.zen": 58,
+    "src/gen/gen_c/gen_c_print.zen": 3,
+    "src/gen/gen_c/gen_c_ptr.zen": 48,
+    "src/gen/gen_c/gen_c_range.zen": 68,
+    "src/gen/gen_c/gen_c_read.zen": 47,
+    "src/gen/gen_c/gen_c_scope.zen": 73,
+    "src/gen/gen_c/gen_c_settle.zen": 58,
+    "src/gen/gen_c/gen_c_shape.zen": 23,
+    "src/gen/gen_c/gen_c_sink.zen": 53,
+    "src/gen/gen_c/gen_c_stdin.zen": 23,
+    "src/gen/gen_c/gen_c_stmt.zen": 57,
+    "src/gen/gen_c/gen_c_try.zen": 78,
+    "src/gen/gen_c/gen_c_type.zen": 50,
+    "src/gen/gen_c/gen_c_widen.zen": 17,
+    "src/lsp/lsp_compl.zen": 3,
+    "src/lsp/lsp_def.zen": 2,
+    "src/lsp/lsp_pos.zen": 1,
+    "src/lsp/lsp_serve.zen": 2,
+    "src/lsp/lsp_stdio.zen": 2,
+    "src/sema/sema_apply.zen": 46,
+    "src/sema/sema_bound.zen": 32,
+    "src/sema/sema_call.zen": 80,
+    "src/sema/sema_cand.zen": 20,
+    "src/sema/sema_case.zen": 14,
+    "src/sema/sema_decl.zen": 33,
+    "src/sema/sema_depth.zen": 46,
+    "src/sema/sema_drop.zen": 9,
+    "src/sema/sema_hoist.zen": 36,
+    "src/sema/sema_inst.zen": 34,
+    "src/sema/sema_join.zen": 15,
+    "src/sema/sema_layout.zen": 11,
+    "src/sema/sema_match.zen": 67,
+    "src/sema/sema_member.zen": 48,
+    "src/sema/sema_module.zen": 9,
+    "src/sema/sema_own.zen": 85,
+    "src/sema/sema_place.zen": 1,
+    "src/sema/sema_raise.zen": 15,
+    "src/sema/sema_recv.zen": 27,
+    "src/sema/sema_scope.zen": 15,
+    "src/sema/sema_spine.zen": 2,
+    "src/sema/sema_static.zen": 15,
+    "src/sema/sema_supply.zen": 29,
+    "src/sema/sema_trap.zen": 47,
+    "src/sema/sema_type.zen": 10,
+    "src/sema/sema_union.zen": 15,
+    "src/std/text/text_utf8.zen": 9,
+}
+
 # The abbreviations STYLE.md names. Not a general "short name" check -- `len`,
 # `cap`, `ptr`, `env`, `alloc` are words here and the document says so.
 ABBREVS = ("blk", "nd", "tp", "tps")
@@ -129,6 +233,11 @@ VAGUE = ("_utils", "_util", "_helpers", "_helper", "_common", "_misc")
 
 # The `// helpers` banner -- "the smell that catches all three" tests.
 BANNER = re.compile(r"^\s*//\s*(helpers?|utils?|misc|common)\s*[.:]?\s*$", re.I)
+
+
+def module_path(rel: str) -> str:
+    """The dotted form an import writes: `src/sema/sema_ty.zen` -> `sema.sema_ty`."""
+    return rel[len("src/"):-len(".zen")].replace("/", ".")
 
 
 def sources():
@@ -359,6 +468,222 @@ def rule_abbrev(files, parser):
     return checked, bad, seen
 
 
+def kind(node) -> str:
+    return type(node).__name__
+
+
+def ty_name(ty) -> str | None:
+    """The plain name a type writes, or None if it does not write one.
+
+    A union, an array, a function type and a `()` name no declaration, so
+    none of them can be a receiver. `Vec<str>` names `Vec`: the arguments
+    do not change which function a dot finds.
+    """
+    return getattr(ty, "name", None) if kind(ty) == "Named" else None
+
+
+def nodes(root):
+    """Every Node under `root`, the dataclass fields walked generically."""
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        for name in getattr(node, "__dataclass_fields__", {}):
+            value = getattr(node, name)
+            if hasattr(value, "__dataclass_fields__"):
+                stack.append(value)
+            elif isinstance(value, tuple):
+                stack.extend(v for v in value
+                             if hasattr(v, "__dataclass_fields__"))
+
+
+def with_body(module):
+    """(function, owning type name or None) for every body in the module."""
+    for decl in module.decls:
+        if kind(decl) == "Function" and decl.body:
+            yield decl, None
+        elif kind(decl) == "Struct":
+            for member in decl.fields:
+                if kind(member) == "Function" and member.body:
+                    yield member, decl.name
+        elif kind(decl) == "Impl":
+            for entry in decl.entries:
+                if kind(entry) == "Function" and entry.body:
+                    yield entry, decl.target
+
+
+def ufcs_world(files):
+    """What a dot can find: free functions, methods, and each module's subject.
+
+    `free` maps a name to every top-level function declaring it whose first
+    parameter names a declared type -- the definition of a UFCS candidate,
+    DESIGN.md:406. `methods` is consulted only to stay off `make ufcs`'s
+    ground: a name that is BOTH is that gate's finding, not this one's.
+
+    THE PRINCIPAL TYPE is the one thing here that is a judgement, so it is
+    made twice and both ways have to agree. A type is a module's principal
+    type when it is the first parameter of a strict majority of that
+    module's free functions AND some module in the same folder declares it
+    -- the folder's subject, in other words. Both halves earn their keep.
+    Without the majority, a module with one `Foo` helper claims `Foo`.
+    Without the folder, `zen_cli.zen`'s little classifiers over `str` make
+    `str` principal and the check asks for `name.not_written()`, which is
+    the natural-receiver mistake the header says this file does not make:
+    the operation is about the CLI, and the string is only its input.
+    """
+    free = collections.defaultdict(list)
+    methods = collections.defaultdict(set)
+    folder_of = {}
+    declared = collections.defaultdict(set)
+    firsts = collections.defaultdict(collections.Counter)
+
+    for rel, _, module in files:
+        folder_of[module_path(rel)] = Path(rel).parent.as_posix()
+        for decl in module.decls:
+            if kind(decl) in ("Struct", "Enum"):
+                declared[decl.name].add(Path(rel).parent.as_posix())
+
+    for rel, _, module in files:
+        mod = module_path(rel)
+        for decl in module.decls:
+            if kind(decl) == "Function" and decl.params:
+                tparams = {t.name for t in decl.tparams}
+                name = ty_name(decl.params[0].ty)
+                if name and name not in tparams:
+                    free[decl.name].append((mod, name, len(decl.params)))
+                    firsts[mod][name] += 1
+            elif kind(decl) == "Struct":
+                for member in decl.fields:
+                    if kind(member) == "Function" and member.params:
+                        if ty_name(member.params[0].ty) in ("@Self", decl.name):
+                            methods[decl.name].add(member.name)
+            elif kind(decl) == "Impl":
+                for entry in decl.entries:
+                    if kind(entry) == "Function" and entry.params:
+                        methods[decl.target].add(entry.name)
+
+    principal = {}
+    for mod, counted in firsts.items():
+        name, n = counted.most_common(1)[0]
+        if n * 2 > sum(counted.values()) and folder_of[mod] in declared.get(name, ()):
+            principal[mod] = name
+    return free, methods, principal
+
+
+def rule_ufcs(files):
+    """A free function on the module's principal type is CALLED on it.
+
+    `be.declare_temp(ty, name)`, not `declare_temp(be, ty, name)`. The
+    receiver column is what makes the order-critical sequence visible, and
+    a formatter may not produce it -- reordering statements is not a
+    formatter's to do, so this is the author's.
+
+    EVERY CONDITION BELOW EXISTS TO MISS RATHER THAN INVENT, because a hit
+    is an instruction to edit code and a wrong one costs a compile:
+
+      the argument is a PARAMETER, spelled bare, with a written type.
+            A `x ::= ..` local's type is inference, and this script does
+            not implement Zen's. A name rebound anywhere in the body --
+            by a `let`, a lambda parameter, a match binder, an assignment
+            -- is dropped from the frame entirely rather than scoped
+            properly, so a body that reuses the name is simply skipped.
+      the callee is REACHABLE through a dot from here.
+            Declared in this very module (`cands_of` in sema_call.zen:271
+            offers the calling module's own names, exported or not -- 209
+            calls in the tree already do this and bootstrap), or imported
+            by name from the module that declares it. An exported function
+            in a module this one never imported also travels with the type
+            and is NOT claimed: that is `travelled_cands`, and skipping it
+            is the largest deliberate miss here.
+      exactly ONE free function in the tree declares that name.
+            Two, and which one a dot picks is a resolution question this
+            script would be guessing at.
+      the arities match, and the call writes no type arguments and no name
+      on the first argument.
+            `f<T>(x)` and `f(x: v)` are shapes the rewrite is not obviously
+            total over, and neither is common enough to be worth the risk.
+      the receiver type has no method of that name.
+            That is `make ufcs`'s finding. One fact, one place.
+    """
+    free, methods, principal = ufcs_world(files)
+    checked, hits = 0, []
+
+    for rel, _, module in files:
+        mod = module_path(rel)
+        imported = {n: imp.path for imp in module.imports for n, _ in imp.names}
+        for fn, own in with_body(module):
+            tparams = {t.name for t in fn.tparams}
+            frame = {}
+            for p in fn.params:
+                name = ty_name(p.ty)
+                name = own if name == "@Self" else name
+                if name and name not in tparams:
+                    frame[p.name] = name
+            rebound = {p.name for p in fn.params if ty_name(p.ty) is None}
+            for node in nodes(fn.body):
+                if kind(node) == "Let":
+                    rebound.add(node.name)
+                elif kind(node) == "Lambda":
+                    rebound.update(p.name for p in node.params)
+                elif kind(node) == "PatVariant" and node.binder:
+                    rebound.add(node.binder)
+                elif kind(node) == "Binary" and node.op == "=" \
+                        and kind(node.lhs) == "Path":
+                    rebound.add(node.lhs.name)
+            for name in rebound:
+                frame.pop(name, None)
+            if not frame:
+                continue
+            for node in nodes(fn.body):
+                if kind(node) != "Call" or kind(node.callee) != "Path":
+                    continue
+                checked += 1
+                called = node.callee.name
+                if node.targs or not node.args or called in rebound:
+                    continue
+                first = node.args[0]
+                if first.name is not None or kind(first.value) != "Path":
+                    continue
+                recv = frame.get(first.value.name)
+                cands = free.get(called)
+                if recv is None or not cands or len(cands) != 1:
+                    continue
+                home, takes, count = cands[0]
+                if takes != recv or count != len(node.args):
+                    continue
+                if principal.get(home) != recv:
+                    continue
+                if not (home == mod or imported.get(called) == home):
+                    continue
+                if called in methods.get(recv, ()):
+                    continue
+                hits.append((rel, f"{node.span}", called, first.value.name))
+    return checked, hits
+
+
+def ufcs_debt(hits):
+    """The ledger, applied. Returns the lines to print.
+
+    A file over its number has grown the debt and every site in it is
+    reported; a file under it has paid some down and the number must come
+    with it, which is the same staleness rule every other ledger here runs.
+    """
+    counted = collections.Counter(rel for rel, _, _, _ in hits)
+    bad = []
+    for rel, where, called, recv in sorted(hits):
+        if counted[rel] > UFCS_OWED.get(rel, 0):
+            bad.append((where, f"`{called}({recv}, ..)` is `{recv}.{called}(..)`"
+                               f" — the receiver column is what makes the"
+                               f" order-critical sequence visible"))
+    for rel, owed in sorted(UFCS_OWED.items()):
+        now = counted.get(rel, 0)
+        if now < owed:
+            bad.append((rel, f"UFCS_OWED says {owed} and {now} are left."
+                             f" Bring the number down with the code —"
+                             f" a ledger that overstates is one nobody reads"))
+    return bad
+
+
 def stale(ledger, seen, label):
     """A ledger entry whose violation is gone is a fiction the next reader
     trusts. Same rule the OWED ledgers in faults_reachable.py and
@@ -383,6 +708,7 @@ def main() -> int:
     parser = cst.parser()
 
     abbrev_n, abbrev_bad, abbrev_seen = rule_abbrev(files, parser)
+    ufcs_n, ufcs_hits = rule_ufcs(files)
     results = [
         ("prefix   ", "a prefix names its own folder", *rule_prefix(files), 0),
         ("root     ", "a folder has its root file", *rule_root(files), 0),
@@ -393,6 +719,8 @@ def main() -> int:
         ("banner   ", "no `// helpers` section", *rule_banner(files), 0),
         ("abbrev   ", "abbreviations are words", abbrev_n, abbrev_bad,
          len(ABBREV_OWED)),
+        ("ufcs     ", "a free function on the principal type is called on it",
+         ufcs_n, ufcs_debt(ufcs_hits), sum(UFCS_OWED.values())),
     ]
 
     failed = 0
@@ -402,11 +730,13 @@ def main() -> int:
             failed += 1
     if failed:
         print(f"\nstyle: {failed} violation(s) of docs/STYLE.md."
-              f"\n  Fix it, or -- for `abbrev`, the one rule that carries a"
-              f"\n  ledger -- write it into ABBREV_OWED in"
-              f" {Path(__file__).name} with the"
-              f"\n  word it should be, so the debt can shrink and cannot"
-              f" quietly grow.")
+              f"\n  Fix it, or -- for the two rules that carry a ledger --"
+              f" write it into"
+              f"\n  ABBREV_OWED (with the word it should be) or UFCS_OWED"
+              f" (with the file's"
+              f"\n  new count) in {Path(__file__).name}, so the debt can"
+              f" shrink and cannot"
+              f"\n  quietly grow.")
         return 1
 
     if stale(ABBREV_OWED, abbrev_seen, "ABBREV_OWED"):

@@ -12,7 +12,7 @@ That claim was false for a year: `make cap` stood behind one rule of the nine an
 
 | rule | gate |
 |---|---|
-| a prefix names its own folder; a folder has its root file; a file name means something; std depends only on std; an impl goes with its type; no `get_*`/`do_*`; no `// helpers` section; abbreviations are words | `make style` — `scripts/style.py` |
+| a prefix names its own folder; a folder has its root file; a file name means something; std depends only on std; an impl goes with its type; no `get_*`/`do_*`; no `// helpers` section; abbreviations are words; a free function on the module's principal type is called on it | `make style` — `scripts/style.py` |
 | 500-line note, 800-line fail | `make cap` — `scripts/line_cap.py` |
 | no free function shadowing a method | `make ufcs` — `scripts/ufcs_collisions.py` |
 | a line is 80 columns; a list packed past it breaks one item per line; match arms align their `=>`; blank-line and comment placement | `make fmt` — the formatter owns the whole shape of a printed file, so it is the authority and this document does not restate its rules |
@@ -167,6 +167,28 @@ map*<T, U> = (range: Range, alloc: Alloc, body: ..) Res<Vec<U>>   // allocates, 
 
 **Method chains over nested calls.** `x.f(a).g(b)` reads left to right; `g(f(x, a), b)` reads inside out. Pick the natural receiver — the thing the operation is *about*.
 
+**And call a free function on its receiver.** A free function whose first parameter is the module's principal type is a method someone declined to write inside the braces; call it as one. This is the rule above applied to the flat statement case, where nothing is nested and reading order is not the argument.
+
+The argument is that the receiver column is the only visible record of an order. `gen_c_fs.zen`'s `lower_write` is eighteen statements and a tail. `be.next_tmp()` is a mutating counter, so the sequence of its consumptions fixes every C temporary the function emits — and of the four it consumes, two happen inside `path_args`, which is to say the order-critical subsequence is not in the source at all. Nothing marks those lines as unmovable. Written on the receiver they mark themselves: the lines that emit are exactly the lines that begin `be.`.
+
+```groovy
+// no
+declare_temp(be, i32_ty, rc.view()).try();
+open_rc_test(be, rc.view()).try();
+fs_chain(be, ret, rc.view(), dst.view(), 1).try();
+close_else(be).try();
+
+// yes
+be.declare_temp(i32_ty, rc.view()).try();
+be.open_rc_test(rc.view()).try();
+be.fs_chain(ret, rc.view(), dst.view(), 1).try();
+be.close_else().try();
+```
+
+**Group by operation, and let the order-critical sequence show.** A formatter may never reorder statements, so grouping is the author's and nothing but this rule holds it. Statements that only build values are free to move and may be packed together. Statements that advance mutable state are a sequence, and `lower_write`'s is the whole example: renumber the `next_tmp` calls and the emitted C changes. One blank line between the phase that builds and the phase that emits is the entire tool.
+
+**Alignment needs a contiguous run.** A declaration column interrupted by a statement that declares nothing pads into a column with a hole, which buys a reader nothing. Regroup, and the column appears. Whether to align is the formatter's; whether the lines sit close enough to *be* a column is yours.
+
 **A `.then` inside a loop is usually a missing loop word.**
 
 ```groovy
@@ -251,6 +273,8 @@ Before proposing one, answer: what ordinary binding would have to exist for this
 
 Measured, once, against all 162 files of `src/`. Every rule above was counted rather than assumed — the interesting result is how few were being broken, which is worth writing down because it is what makes the gate cheap to keep.
 
+**A free function called on its receiver — 2823 sites, 74 files, and the tree is split in two.** By a long way the largest debt on this page, and the least like a judgement: every site is a mechanical edit. `src/std/` obeys the rule already — 613 calls in the tree are written on their receiver, `Parser`, `Lexer`, `String` and `Cursor` throughout, and the only std file owing anything is `text_utf8.zen` at nine. `gen_c/` owes 2042 and `sema/` 767, which is two authoring eras rather than two opinions. 427 of the 613 reach a free function *private to its own module*, and that is the fact worth keeping: a dot finds the calling module's own names whether they are exported or not (`sema_call.zen:271`), so the rewrite is available for helpers that never leave the file. `UFCS_OWED` in `scripts/style.py` carries it, keyed by file and valued with a **count** rather than a bare name — a file list would exempt the file and let `gen_c_expr.zen` take a hundred more in silence, where a count cannot grow anywhere and shrinks in the diff. Unlike a line number it does not go stale on an unrelated edit; it moves only when someone adds or removes a site, which is when it should.
+
 **Abbreviations — 147 sites, 18 files.** `blk` (103), `tp` (34), `tps` (10). `nd` is already at zero. This is the only rule with a standing debt, so it is the only one carrying a ledger: `ABBREV_OWED` in `scripts/style.py`, keyed by file, valued with the word each should be. Deleting a line is how one closes, and a line that no longer describes a violation fails the build — the debt can shrink and cannot quietly grow. They live in `gen_c/`, `sema/`, `std/parse/` and `std/ast/`; renaming them is an ordinary edit that nobody has made time for, not a design question.
 
 **`.then` inside a `.loop` — 29 of the 141 `.then` calls.** "Usually a missing loop word", and *usually* is load-bearing, which is why this is a list to read and not a gate. Two of the 29 prove why: `std/core/loop/loop_find.zen:45` **is** the definition of `find` and cannot be written any other way, and `lsp/lsp_pos.zen:80` carries a comment arguing the case — "a break would buy a shorter walk and cost the one thing worth having here — a body with a single exit." A gate that reports a decision its author already defended is the gate people switch off. The two clearest genuine finds: `gen_c/gen_c_const.zen:181`, where `pure_args` hand-rolls `.all(..)` with an `every ::=` accumulator, and `sema/sema_def.zen:729`, where `keep_exported` hand-rolls `.filter(..)`.
@@ -259,4 +283,4 @@ Measured, once, against all 162 files of `src/`. Every rule above was counted ra
 
 **Rules that are real and at 100%, now guarded so they stay there:** every one of the 130 prefixed files names its own folder; all 18 folders have their root; all 260 imports written by a `std` module import `std`, and none of plain std's reach the compiler sublayer (`std.lex`, `std.parse`, `std.ast`); all 22 impls sit with their type; none of the 3628 functions is a `get_*` or a `do_*`; no file has a `// helpers` section; no comparison in the tree writes an ASCII code where a char literal exists.
 
-**Rules that cannot be checked, and are left to review.** The stranger test, the second-caller rule, and the direction test in general all ask what a function is *about* — only the std boundary is mechanical. "Method chains over nested calls" needs to know the natural receiver, which nothing in the source states. "No `Alloc` parameter, no allocation" needs a call graph: a crude version flags 2306 of 3628 functions, nearly all of them methods reaching an allocator through `self`. Comment density, "a name that needs a comment is the wrong name", "one behaviour per test", `::` versus `:` being the right marker, and "smallest correct change" are judgement, all of them. `scripts/style.py`'s header says the same thing in the same words, because a reader who opens the script deserves to find out there what it does not do.
+**Rules that cannot be checked, and are left to review.** The stranger test, the second-caller rule, and the direction test in general all ask what a function is *about* — only the std boundary is mechanical. "Method chains over nested calls" needs to know the natural receiver, which in general nothing in the source states — the one case where something does is the free function whose first parameter is its module's principal type, and that case is gated rather than left here. "No `Alloc` parameter, no allocation" needs a call graph: a crude version flags 2306 of 3628 functions, nearly all of them methods reaching an allocator through `self`. Comment density, "a name that needs a comment is the wrong name", "one behaviour per test", `::` versus `:` being the right marker, and "smallest correct change" are judgement, all of them. `scripts/style.py`'s header says the same thing in the same words, because a reader who opens the script deserves to find out there what it does not do.
