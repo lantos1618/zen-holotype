@@ -9,15 +9,32 @@
 // TWO FORMS, one mechanic — find the list's separators, set the
 // whitespace around each:
 //
-//   - ARGUMENTS. `f(a, b)` and construction `Sym(name: n, ..)` are one
-//     node (a Call's args), so one rule covers both. Packed past the
-//     width: one argument per line at +4, `)` hugging the last:
+//   - BRACKETED LISTS. `f(a, b)`, construction `Sym(name: n, ..)` and a
+//     function's `(a: A, b: B)` — a declaration's, a lambda's, a
+//     function type's. Packed past the width: one item per line at +4,
+//     `)` on a line of its own back at the opener's indent:
 //
 //         Function(f) => out.add(Sym(
 //             name: f.name.text,
 //             kind: FUNCTION,
 //             span: d.span,
-//             name_span: f.name.span)),
+//             name_span: f.name.span
+//         )),
+//
+//     ONE RULE FOR ARGUMENTS AND PARAMETERS, and that is the point.
+//     Parameters used to be nobody's: over the width an author wrapped
+//     them by hand under the `(`, and this rule — which breaks but never
+//     joins — then held that layout forever. Two lists a comma apart in
+//     kind cannot be allowed to disagree about what wrapping looks like.
+//
+//     THE `)` GETS ITS OWN LINE rather than hugging the last item.
+//     Hugging costs a line and reads fine for a call, but a parameter
+//     list closes into ` Res<..> {` and the body that follows is also at
+//     +4 — hugged, a signature's last parameter and the body's first
+//     statement are the same shape at the same column. A closer at the
+//     opener's indent is the line that separates them, and it is worth
+//     more than the line it costs; `AST_CONTRACT.md` records
+//     `params_span` for exactly this decision.
 //
 //   - UNION BARS. An enum's variants (and an anonymous union's members)
 //     packed past the width: one per line, the bar leading at +4:
@@ -57,17 +74,17 @@
 //   - a list already broken some other way. It is never JOINED — this
 //     rule only breaks — so a hand layout that fits is stable input.
 //
-// NOT LISTS FOR THIS RULE: records, array literals, parameter lists.
-// The mechanic would fit them; the demand is unwritten; the corpus
-// comes first.
+// NOT LISTS FOR THIS RULE: records and array literals. The mechanic
+// would fit them; the demand is unwritten; the corpus comes first.
 
 Alloc, AllocError = std.mem
 str, String = std.text
 Vec = std.collections
 Range = std.core
+Span = std.ast.ast_span
 Ast = std.ast.ast_arena
 ExprId, TypeId, BlockId = std.ast.ast_id
-Module, Decl, Type, Call, Union, Enum = std.ast.ast_node
+Module, Decl, Type, Call, Union, Enum, Param = std.ast.ast_node
 scan, Source, Lexed = std.lex.lex
 Parser, module = std.parse.parse
 Src = fmt.fmt_src
@@ -86,9 +103,19 @@ Item = {
     hi: usize,
 }
 
-// A list that COULD break: where it sits, what separates its items, and
-// whether brackets hug the ends (a call's parens) or nothing does (an
-// enum or union, whose first variant stays on the `=` line).
+// A list that COULD break: where it sits, what separates its items,
+// whether brackets close the ends (a call's or a signature's parens) or
+// nothing does (an enum or union, whose first variant stays on the `=`
+// line), and whether it may VETO a neighbour sharing its line.
+//
+// Only a parameter list may not. `shares_line` below refuses to break
+// either of two disjoint lists on one line because neither break fixes
+// `f(a) || g(b)`, and that argument is about SIBLINGS in an expression.
+// A signature's parens are not a sibling of anything: `handle = (r: Req)
+// Res<str, Io | Parse | ..> {` is one declaration whose return union is
+// the part worth breaking, and a veto here would have kept a line the
+// rule used to fix. So a parameter list still DEFERS to a neighbour —
+// it is asked the question — and simply never answers it for one.
 Cand = {
     lo: usize,
     hi: usize,
@@ -96,6 +123,7 @@ Cand = {
     end_line: usize,
     sep: u8,
     parens: bool,
+    vetoes: bool,
     items: Vec<Item>,
 }
 
@@ -174,8 +202,9 @@ collect = (a: Alloc, src: Src, tree: Ast, m: Module)
     id ::= ExprId(index: 0);
     Range(0, tree.expr_ids()).loop((h, i) {
         tree.expr_at(id).kind.match({
-            Call(c) => add_call(a, src, cands, c),
-            _       => no_list(),
+            Call(c)   => add_call(a, src, cands, c),
+            Lambda(l) => add_params(a, src, cands, l.params, l.params_span),
+            _         => no_list(),
         }).try();
         id = ExprId(index: id.index + 1);
     });
@@ -184,24 +213,19 @@ collect = (a: Alloc, src: Src, tree: Ast, m: Module)
         t = tree.type_at(tid);
         t.kind.match({
             Union(u) => add_union(a, src, tree, cands, t, u),
+            Fn(f)    => add_params(a, src, cands, f.params, f.params_span),
             _        => no_list(),
         }).try();
         tid = TypeId(index: tid.index + 1);
     });
     m.decls.loop((h, i, d) {
-        d.kind.match({
-            Enum(e) => add_enum(a, src, cands, e),
-            _       => no_list(),
-        }).try();
+        add_decl(a, src, cands, d).try();
     });
     bid ::= BlockId(index: 0);
     Range(0, tree.block_ids()).loop((h, i) {
         tree.block_at(bid).stmts.loop((g, j, s) {
             s.kind.match({
-                Decl(d) => d.kind.match({
-                    Enum(e) => add_enum(a, src, cands, e),
-                    _       => no_list(),
-                }),
+                Decl(d) => add_decl(a, src, cands, d),
                 _       => no_list(),
             }).try();
         });
@@ -228,7 +252,8 @@ add_call = (a: Alloc, src: Src, cands :: Vec<Cand>, c: Call)
             c.args.loop((h, i, arg) {
                 items.add(Item(
                     lo: src.offset(arg.span.start),
-                    hi: src.offset(arg.span.end))).try();
+                    hi: src.offset(arg.span.end)
+                )).try();
             });
             cands.add(Cand(
                 lo: src.offset(c.args_span.start),
@@ -237,6 +262,55 @@ add_call = (a: Alloc, src: Src, cands :: Vec<Cand>, c: Call)
                 end_line: c.args_span.end.line,
                 sep: ',',
                 parens: true,
+                vetoes: true,
+                items: items,
+            ))
+        },
+    })
+}
+
+// A declaration, wherever it stands: an enum's variants are a list, and
+// so are a function's parameters. Both, because a function declared
+// inside a block is still a declaration and `Enum` already had to be
+// reached at both levels.
+add_decl = (a: Alloc, src: Src, cands :: Vec<Cand>, d: Decl)
+           Res<(), AllocError> {
+    d.kind.match({
+        Enum(e)     => add_enum(a, src, cands, e),
+        Function(f) => add_params(a, src, cands, f.params, f.params_span),
+        _           => no_list(),
+    })
+}
+
+// `(a: A, b: B)`. The same shape as a call's arguments — `params_span`
+// is the parens and a `Param`'s span stops before its comma, exactly as
+// `args_span` and `Arg` do — so the two share every rule below and can
+// never drift apart. Zero parameters is not a list.
+add_params = (
+    a: Alloc,
+    src: Src,
+    cands :: Vec<Cand>,
+    ps: Vec<Param>,
+    span: Span
+) Res<(), AllocError> {
+    (ps.len == 0).match({
+        true  => no_list(),
+        false => {
+            items ::= a.Vec<Item>();
+            ps.loop((h, i, p) {
+                items.add(Item(
+                    lo: src.offset(p.span.start),
+                    hi: src.offset(p.span.end)
+                )).try();
+            });
+            cands.add(Cand(
+                lo: src.offset(span.start),
+                hi: src.offset(span.end),
+                line: span.start.line,
+                end_line: span.end.line,
+                sep: ',',
+                parens: true,
+                vetoes: false,
                 items: items,
             ))
         },
@@ -246,8 +320,14 @@ add_call = (a: Alloc, src: Src, cands :: Vec<Cand>, c: Call)
 // `A | B` in type position. The union's own span is first-member to
 // last-member (parse_type.zen gathers it flat), which is exactly the
 // region this rule re-lays-out.
-add_union = (a: Alloc, src: Src, tree: Ast, cands :: Vec<Cand>, t: Type,
-             u: Union) Res<(), AllocError> {
+add_union = (
+    a: Alloc,
+    src: Src,
+    tree: Ast,
+    cands :: Vec<Cand>,
+    t: Type,
+    u: Union
+) Res<(), AllocError> {
     items ::= a.Vec<Item>();
     u.members.loop((h, i, mid) {
         s = tree.type_at(mid).span;
@@ -260,6 +340,7 @@ add_union = (a: Alloc, src: Src, tree: Ast, cands :: Vec<Cand>, t: Type,
         end_line: t.span.end.line,
         sep: '|',
         parens: false,
+        vetoes: true,
         items: items,
     ))
 }
@@ -276,7 +357,8 @@ add_enum = (a: Alloc, src: Src, cands :: Vec<Cand>, e: Enum)
             e.variants.loop((h, i, v) {
                 items.add(Item(
                     lo: src.offset(v.span.start),
-                    hi: src.offset(v.span.end))).try();
+                    hi: src.offset(v.span.end)
+                )).try();
             });
             first = e.variants.ptr().read(0);
             last = e.variants.ptr().read(e.variants.len - 1);
@@ -287,6 +369,7 @@ add_enum = (a: Alloc, src: Src, cands :: Vec<Cand>, e: Enum)
                 end_line: last.span.end.line,
                 sep: '|',
                 parens: false,
+                vetoes: true,
                 items: items,
             ))
         },
@@ -302,7 +385,8 @@ in_order = (cands :: Vec<Cand>) () {
         j ::= i;
         loop(() { j > 0 && before(
             cands.ptr().read(j),
-            cands.ptr().read(j - 1)) }, (g) {
+            cands.ptr().read(j - 1)
+        ) }, (g) {
             tmp = cands.ptr().read(j - 1);
             cands.ptr().write(j - 1, cands.ptr().read(j));
             cands.ptr().write(j, tmp);
@@ -367,11 +451,14 @@ too_wide = (src: Src, c: Cand) bool {
     packed_width(src, c) > WIDTH
 }
 
-// A list SHARING its line with a disjoint one keeps: no list's break
-// fixes `f(a) || g(b)` (the over-wide part is the operator chain, which
-// is no list), and breaking one side of it reads worse than the long
-// line did. Nested lists don't count — a container is answered by the
-// hug rule, and an item is exactly who may inherit this line.
+// A list SHARING its line with a disjoint one that VETOES keeps: no
+// list's break fixes `f(a) || g(b)` (the over-wide part is the operator
+// chain, which is no list), and breaking one side of it reads worse
+// than the long line did. Nested lists don't count — a container is
+// answered by the hug rule, and an item is exactly who may inherit this
+// line. A parameter list does not veto (see `Cand`), so the return
+// union it sits beside still breaks and the parameters, asked next
+// round on a line that got shorter, no longer need to.
 shares_line = (src: Src, cands: Vec<Cand>, c: Cand) bool {
     ls = src.line_at(c.line);
     le = src.after_line(c.line);
@@ -379,7 +466,7 @@ shares_line = (src: Src, cands: Vec<Cand>, c: Cand) bool {
     Range(0, cands.len).loop((h, j) {
         d = cands.ptr().read(j);
         disjoint = d.lo >= c.hi || d.hi <= c.lo;
-        (disjoint && d.lo < le && d.hi > ls).match({
+        (d.vetoes && disjoint && d.lo < le && d.hi > ls).match({
             true  => { found = true; h.break(); },
             false => (),
         });
@@ -470,25 +557,26 @@ skip_space = (src: Src, from: usize, to: usize) usize {
 // breaking
 // -------------------------------------------------------------------
 
-// The canonical broken form: head gap (a call's `(` to its first item)
-// becomes newline+indent, each inter-item gap becomes separator +
-// newline+indent — an enum's separator LEADS the next line, a call's
-// comma closes this one — and a call's tail gap goes away entirely, so
-// `)` hugs the last item. Idempotency lives here: a list already in
-// this form has exactly these gaps, so breaking it again writes the
-// same bytes.
+// The canonical broken form: head gap (a bracketed list's `(` to its
+// first item) becomes newline+indent, each inter-item gap becomes
+// separator + newline+indent — an enum's separator LEADS the next line,
+// a call's comma closes this one — and the tail gap becomes a newline
+// back at the OPENER'S indent, so `)` stands alone. Idempotency lives
+// here: a list already in this form has exactly these gaps, so breaking
+// it again writes the same bytes.
 emit = (a: Alloc, src: Src, c: Cand, edits :: Vec<Edit>)
        Res<(), AllocError> {
     start = src.line_at(c.line);
-    indent ::= a.String().try();
-    indent.add_bytes(src.slice_at(start, skip_space(
+    close ::= a.String().try();
+    close.add_byte('\n').try();
+    close.add_bytes(src.slice_at(start, skip_space(
         src,
         start,
-        src.after_line(c.line)))).try();
-    indent.add_bytes("    ").try();
+        src.after_line(c.line)
+    ))).try();
     nl ::= a.String().try();
-    nl.add_byte('\n').try();
-    nl.add_bytes(indent.view()).try();
+    nl.add_bytes(close.view()).try();
+    nl.add_bytes("    ").try();
     first = c.items.ptr().read(0);
     last = c.items.ptr().read(c.items.len - 1);
     c.parens.match({
@@ -507,13 +595,11 @@ emit = (a: Alloc, src: Src, c: Cand, edits :: Vec<Edit>)
         edits.add(Edit(
             from: c.items.ptr().read(i).hi,
             to: c.items.ptr().read(i + 1).lo,
-            text: rep)).try();
+            text: rep
+        )).try();
     });
     c.parens.match({
-        true  => edits.add(Edit(
-            from: last.hi,
-            to: c.hi - 1,
-            text: a.String().try())),
+        true  => edits.add(Edit(from: last.hi, to: c.hi - 1, text: close)),
         false => no_list(),
     }).try();
     Ok(());

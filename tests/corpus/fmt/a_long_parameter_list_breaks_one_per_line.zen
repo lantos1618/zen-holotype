@@ -1,0 +1,116 @@
+// A SIGNATURE PACKED PAST 80 COLUMNS BREAKS ONE PARAMETER PER LINE —
+// the same rule, the same shape and the same file as a call's arguments
+// (`fmt_break.zen`). Parameters were nobody's decision until this test:
+// the rule broke arguments and passed signatures through, so an author
+// wrapped a long one by hand under the `(`, and a rule that breaks but
+// never joins then held that hand layout forever. Four cases:
+//
+//   - THE CANONICAL BREAK: one parameter per line at +4, `)` alone on a
+//     line at the declaration's indent, ` Res<..> {` riding on it. The
+//     closer gets its own line here and in a call alike; a signature is
+//     why. Hugged, the last parameter and the body's first statement
+//     are the same shape at the same column, and the closer's line is
+//     what tells a reader where the signature stopped.
+//
+//   - A HAND-WRAPPED SIGNATURE IS RE-LAID. `u: Union` aligned under the
+//     `(` is what this rule used to preserve; continuation alignment
+//     re-indents every wrapped line when the function is renamed, so it
+//     is now replaced by the canonical form rather than kept.
+//
+//   - A SIGNATURE THAT FITS IS LEFT ALONE. The judgment is the packed
+//     line over 80, exactly as for arguments.
+//
+//   - PARAMETERS DEFER TO A RETURN UNION on their line. Two disjoint
+//     lists on one line normally both keep (no break fixes `f(a) ||
+//     g(b)`), but that argument is about siblings in an expression: a
+//     signature's parens and its return union are one declaration, the
+//     union is the part worth breaking, and the parameters — asked
+//     again on a line that got shorter — no longer need to.
+//
+// `faithful` is the guard in `fmt.zen` and `fixpoint` is the second run
+// moving nothing, printed per case for the reason
+// a_long_argument_list_breaks_one_per_line.zen gives.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+scan, Source = std.lex.lex
+render = fmt.fmt
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    shows(
+        a,
+        "a signature past the width breaks one parameter per line",
+        "lower_write* = (be :: CBackend, id: ExprId, c: Call, ret: TyId, ctx: Ctx, out :: String) Res<(), AllocError> {\n    be.need_fs()\n}\n"
+    ).try();
+
+    shows(
+        a,
+        "a hand-wrapped signature is re-laid, not preserved",
+        "add_union = (a: Alloc, src: Src, tree: Ast, cands :: Vec<Cand>, t: Type,\n             u: Union) Res<(), AllocError> {\n    u.run()\n}\n"
+    ).try();
+
+    shows(
+        a,
+        "a signature under the width keeps its one line",
+        "break_lines* = (a: Alloc, file: str, text: str) Res<String, AllocError> {\n    a.run()\n}\n"
+    ).try();
+
+    shows(
+        a,
+        "parameters defer to the return union on their line",
+        "handle = (r: Req) Res<str, Io | Parse | Net | AddressInUse | ConnectionReset | TimedOut> {\n    r.run()\n}\n"
+    ).try();
+
+    Ok(0);
+}
+
+// Format, print the bytes, and format the bytes again to say whether
+// anything moved the second time.
+shows = (a: Alloc, what: str, text: str) Res<(), AllocError> {
+    first = formatted(a, text).try();
+    second = formatted(a, first.view()).try();
+    println("== {}", what);
+    println(
+        "faithful: {}, {}",
+        faithful_of(a, text).try(),
+        verdict(first.view().eq(second.view()))
+    );
+    show(first.view());
+    Ok(());
+}
+
+verdict = (settled: bool) str {
+    settled.match({
+        true  => "fixpoint",
+        false => "MOVED",
+    })
+}
+
+formatted = (a: Alloc, text: str) Res<String, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out = render(a, lexed).try();
+    Ok(out.text);
+}
+
+faithful_of = (a: Alloc, text: str) Res<bool, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out = render(a, lexed).try();
+    Ok(out.faithful);
+}
+
+// The bytes, with the final newline shown as the end of the last line
+// rather than as a blank one, and a `|` at both ends so a trailing space
+// would be visible in the expectation.
+show = (text: str) () {
+    line ::= 0;
+    from ::= 0;
+    Range(0, text.len).loop((h, i) {
+        (text.index(i) == '\n').then(() {
+            line = line + 1;
+            println("{} |{}|", line, text.slice(from, i));
+            from = i + 1;
+        });
+    });
+}

@@ -52,6 +52,49 @@ EXCEPTIONS: dict[str, str] = {
         "visibility: defs_of and the walk behind it — one subject, pushed "
         "over 800 by vertical breaking, a candidate for a subject split "
         "only if a second query family ever lands here.",
+    # ELEVEN AT ONCE, and they share one cause: `fmt_break.zen` learned
+    # parameter lists, so every signature past 80 columns went from a
+    # hand-wrapped two lines to one parameter per line. None of these
+    # files gained a subject; each gained 90-280 lines of the same one.
+    # That the cap now needs eleven excuses is the honest reading: a
+    # formatter that only ever grows a file makes a LINE COUNT a weaker
+    # proxy for "two subjects" than it was, and the next person to touch
+    # this list should ask whether the proxy still earns its place rather
+    # than write a twelfth sentence.
+    "src/gen/gen_c/gen_c_call.zen":
+        "lowering a call, from callee through arguments to the emitted "
+        "expression — one subject, and the longest signatures in the "
+        "backend are here, which is why the reformat cost it the most.",
+    "src/gen/gen_c/gen_c_decl.zen":
+        "emitting a declaration, one form per arm — one subject; the "
+        "reformat added the lines.",
+    "src/gen/gen_c/gen_c_expr.zen":
+        "the expression dispatch and its leaves — one subject; the "
+        "reformat added the lines.",
+    "src/gen/gen_c/gen_c_fat.zen":
+        "fat pointers: their layout, construction and every read through "
+        "one — one subject; the reformat added the lines.",
+    "src/gen/gen_c/gen_c_layout.zen":
+        "C layout of a Zen type, one question answered per shape — one "
+        "subject; the reformat added the lines.",
+    "src/gen/gen_c/gen_c_loop.zen":
+        "lowering the loop forms — one subject; the reformat added the "
+        "lines.",
+    "src/gen/gen_c/gen_c_op.zen":
+        "operators: one lowering per operator and operand shape — one "
+        "subject; the reformat added the lines.",
+    "src/gen/gen_c/gen_c_runtime.zen":
+        "the runtime surface the backend emits calls into — one subject; "
+        "the reformat added the lines.",
+    "src/gen/gen_c/gen_c_sink.zen":
+        "where a value lands: the sink protocol and its cases — one "
+        "subject; the reformat added the lines.",
+    "src/gen/gen_c/gen_c_try.zen":
+        "lowering `try` and the error paths it opens — one subject; the "
+        "reformat added the lines.",
+    "src/sema/sema_match.zen":
+        "checking a match: patterns, arms, exhaustiveness — one subject "
+        "with three questions about it; the reformat added the lines.",
 }
 
 

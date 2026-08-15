@@ -64,8 +64,13 @@ convert* = (be :: CBackend, code: str, src: TyId, dst: TyId, out :: String)
     })
 }
 
-convert_kind = (be :: CBackend, code: str, src: TyId, dst: TyId,
-                out :: String) Res<(), AllocError> {
+convert_kind = (
+    be :: CBackend,
+    code: str,
+    src: TyId,
+    dst: TyId,
+    out :: String
+) Res<(), AllocError> {
     be.types().at(dst).match({
         Named(n) => convert_named(be, code, dst, n, out),
         Res(r)   => convert_res(be, code, src, dst, r, out),
@@ -86,8 +91,13 @@ convert_kind = (be :: CBackend, code: str, src: TyId, dst: TyId,
 // the other side — a wrong error variant at runtime, from C that
 // compiles. `gen_c_try.write_retag` maps it member by member as a
 // switch statement, which a conversion in an expression buffer can't be.
-convert_set = (be :: CBackend, code: str, src: TyId, dst: TyId,
-               out :: String) Res<(), AllocError> {
+convert_set = (
+    be :: CBackend,
+    code: str,
+    src: TyId,
+    dst: TyId,
+    out :: String
+) Res<(), AllocError> {
     tags_as_member(be, src, dst).match({
         false => out.add_bytes(code),
         true  => write_set_value(be, code, src, dst, out),
@@ -101,8 +111,13 @@ tags_as_member = (be :: CBackend, src: TyId, dst: TyId) bool {
     })
 }
 
-convert_named = (be :: CBackend, code: str, dst: TyId, n: TyNamed,
-                 out :: String) Res<(), AllocError> {
+convert_named = (
+    be :: CBackend,
+    code: str,
+    dst: TyId,
+    n: TyNamed,
+    out :: String
+) Res<(), AllocError> {
     is_ptr_named(n).match({
         true  => write_cast(be, code, dst, out),
         false => out.add_bytes(code),
@@ -119,8 +134,14 @@ write_cast* = (be :: CBackend, code: str, dst: TyId, out :: String)
     Ok(());
 }
 
-convert_res = (be :: CBackend, code: str, src: TyId, dst: TyId, d: TyRes,
-               out :: String) Res<(), AllocError> {
+convert_res = (
+    be :: CBackend,
+    code: str,
+    src: TyId,
+    dst: TyId,
+    d: TyRes,
+    out :: String
+) Res<(), AllocError> {
     be.types().at(src).match({
         Res(s) => rebuild_res(be, code, src, s, dst, d, out),
         _      => out.add_bytes(code),
@@ -129,8 +150,15 @@ convert_res = (be :: CBackend, code: str, src: TyId, dst: TyId, d: TyRes,
 
 // The value is read three times — its tag and each payload — so it
 // lands in a temporary first.
-rebuild_res = (be :: CBackend, code: str, src: TyId, s: TyRes, dst: TyId,
-               d: TyRes, out :: String) Res<(), AllocError> {
+rebuild_res = (
+    be :: CBackend,
+    code: str,
+    src: TyId,
+    s: TyRes,
+    dst: TyId,
+    d: TyRes,
+    out :: String
+) Res<(), AllocError> {
     request_type(be, dst).try();
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "t", be.next_tmp()).try();
@@ -148,16 +176,29 @@ rebuild_res = (be :: CBackend, code: str, src: TyId, s: TyRes, dst: TyId,
     Ok(());
 }
 
-fail_arm = (be :: CBackend, tmp: str, s: TyRes, d: TyRes, dst: TyId,
-            out :: String) Res<(), AllocError> {
+fail_arm = (
+    be :: CBackend,
+    tmp: str,
+    s: TyRes,
+    d: TyRes,
+    dst: TyId,
+    out :: String
+) Res<(), AllocError> {
     is_failure(d.form).match({
         true  => res_arm(be, tmp, "Err", s.error, d.error, dst, out),
         false => bare_arm(be, "None", dst, out),
     })
 }
 
-res_arm = (be :: CBackend, tmp: str, v: str, sp: TyId, dp: TyId, dst: TyId,
-           out :: String) Res<(), AllocError> {
+res_arm = (
+    be :: CBackend,
+    tmp: str,
+    v: str,
+    sp: TyId,
+    dp: TyId,
+    dst: TyId,
+    out :: String
+) Res<(), AllocError> {
     is_unit(be, dp).match({
         true  => bare_arm(be, v, dst, out),
         false => payload_arm(be, tmp, v, sp, dp, dst, out),
@@ -171,8 +212,15 @@ bare_arm = (be :: CBackend, v: str, dst: TyId, out :: String)
     Ok(());
 }
 
-payload_arm = (be :: CBackend, tmp: str, v: str, sp: TyId, dp: TyId,
-               dst: TyId, out :: String) Res<(), AllocError> {
+payload_arm = (
+    be :: CBackend,
+    tmp: str,
+    v: str,
+    sp: TyId,
+    dp: TyId,
+    dst: TyId,
+    out :: String
+) Res<(), AllocError> {
     arm_head(be, v, dst, out).try();
     out.add_bytes(", .zg_data.").try();
     out.sym_member(v).try();
@@ -205,9 +253,17 @@ arm_head = (be :: CBackend, v: str, dst: TyId, out :: String)
 // monomorphised.
 // -----------------------------------------------------------------
 
-lower_fat_call* = (be :: CBackend, id: ExprId, c: Call, a: Access,
-                   rty: TyId, s: Site, f: Function, ctx: Ctx,
-                   out :: String) Res<(), AllocError> {
+lower_fat_call* = (
+    be :: CBackend,
+    id: ExprId,
+    c: Call,
+    a: Access,
+    rty: TyId,
+    s: Site,
+    f: Function,
+    ctx: Ctx,
+    out :: String
+) Res<(), AllocError> {
     slots ::= be.alloc.Vec<Slot>();
     slots_of(be, rty, slots).try();
     pick_slot(slots, a.name.text, c.args.len).match({
@@ -215,7 +271,8 @@ lower_fat_call* = (be :: CBackend, id: ExprId, c: Call, a: Access,
             be,
             id,
             "a call through a bound with no such member",
-            out),
+            out
+        ),
         Ok(slot) => settle_call(be, id, c, a, rty, s, slot, ctx, out),
     })
 }
@@ -232,8 +289,15 @@ lower_fat_call* = (be :: CBackend, id: ExprId, c: Call, a: Access,
 // caller knows what they are. A member with its own type parameters
 // isn't reachable this way and doesn't need to be: `raw` is bytes and
 // nothing more.
-slot_call* = (be :: CBackend, recv: str, tty: TyId, name: str, args: str,
-              argc: usize, out :: String) Res<Res<Slot>, AllocError> {
+slot_call* = (
+    be :: CBackend,
+    recv: str,
+    tty: TyId,
+    name: str,
+    args: str,
+    argc: usize,
+    out :: String
+) Res<Res<Slot>, AllocError> {
     slots ::= be.alloc.Vec<Slot>();
     slots_of(be, tty, slots).try();
     pick_slot(slots, name, argc).match({
@@ -242,8 +306,13 @@ slot_call* = (be :: CBackend, recv: str, tty: TyId, name: str, args: str,
     })
 }
 
-write_named_slot = (be :: CBackend, recv: str, slot: Slot, args: str,
-                    out :: String) Res<Res<Slot>, AllocError> {
+write_named_slot = (
+    be :: CBackend,
+    recv: str,
+    slot: Slot,
+    args: str,
+    out :: String
+) Res<Res<Slot>, AllocError> {
     request_type(be, slot.ret).try();
     out.add_bytes(recv).try();
     out.add_bytes(".").try();
@@ -274,8 +343,17 @@ pick_slot = (slots: Vec<Slot>, name: str, args: usize) Res<Slot> {
 // The slot is erased, so the element size the call hands it comes from
 // here — a parameter nothing settles is a refusal, not a `sizeof` of the
 // wrong thing.
-settle_call = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
-               s: Site, slot: Slot, ctx: Ctx, out :: String)
+settle_call = (
+    be :: CBackend,
+    id: ExprId,
+    c: Call,
+    a: Access,
+    rty: TyId,
+    s: Site,
+    slot: Slot,
+    ctx: Ctx,
+    out :: String
+)
               Res<(), AllocError> {
     declared ::= be.alloc.Vec<TyId>();
     targs ::= be.alloc.Inst();
@@ -285,7 +363,8 @@ settle_call = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
             be,
             id,
             "a call through a bound whose type arguments nothing settles",
-            out),
+            out
+        ),
         true  => emit_fat_call(
             be,
             c,
@@ -296,7 +375,8 @@ settle_call = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
             ret,
             targs,
             ctx,
-            out),
+            out
+        ),
     })
 }
 
@@ -306,8 +386,16 @@ settle_call = (be :: CBackend, id: ExprId, c: Call, a: Access, rty: TyId,
 // `fat_ret_type` answers with them, and the two must not disagree — the
 // temporary's declared type and the type the call rebuilds to must
 // match or the C is rejected.
-read_slot = (be :: CBackend, c: Call, rty: TyId, s: Site, slot: Slot,
-             ctx: Ctx, declared :: Vec<TyId>, targs :: Inst)
+read_slot = (
+    be :: CBackend,
+    c: Call,
+    rty: TyId,
+    s: Site,
+    slot: Slot,
+    ctx: Ctx,
+    declared :: Vec<TyId>,
+    targs :: Inst
+)
             Res<TyId, AllocError> {
     owner ::= be.alloc.String().try();
     join(owner, s.qname, slot.name).try();
@@ -360,8 +448,14 @@ slot_ret_type = (be :: CBackend, c: Call, rty: TyId, slot: Slot, ctx: Ctx)
 // `settle_call` makes one door along: the call it would describe is one
 // this backend goes on to refuse, so answering here would name a type
 // no call is ever written at.
-settled_ret_type = (be :: CBackend, c: Call, rty: TyId, s: Site, slot: Slot,
-                    ctx: Ctx) Res<Res<TyId>, AllocError> {
+settled_ret_type = (
+    be :: CBackend,
+    c: Call,
+    rty: TyId,
+    s: Site,
+    slot: Slot,
+    ctx: Ctx
+) Res<Res<TyId>, AllocError> {
     declared ::= be.alloc.Vec<TyId>();
     targs ::= be.alloc.Inst();
     ret = read_slot(be, c, rty, s, slot, ctx, declared, targs).try();
@@ -371,14 +465,23 @@ settled_ret_type = (be :: CBackend, c: Call, rty: TyId, s: Site, slot: Slot,
     })
 }
 
-declared_params = (be :: CBackend, f: Function, sctx: Ctx,
-                   out :: Vec<TyId>) Res<(), AllocError> {
+declared_params = (
+    be :: CBackend,
+    f: Function,
+    sctx: Ctx,
+    out :: Vec<TyId>
+) Res<(), AllocError> {
     f.params.loop((h, i, p) { declared_param(be, p, i, sctx, out).try() });
     Ok(());
 }
 
-declared_param = (be :: CBackend, p: Param, i: usize, sctx: Ctx,
-                  out :: Vec<TyId>) Res<(), AllocError> {
+declared_param = (
+    be :: CBackend,
+    p: Param,
+    i: usize,
+    sctx: Ctx,
+    out :: Vec<TyId>
+) Res<(), AllocError> {
     (i == 0).match({
         true  => Ok(()),
         false => add_declared(be, p, sctx, out),
@@ -390,16 +493,27 @@ add_declared = (be :: CBackend, p: Param, sctx: Ctx, out :: Vec<TyId>)
     out.add(be.check.param_type(p, sctx).try())
 }
 
-infer_targs = (be :: CBackend, c: Call, declared: Vec<TyId>, ctx: Ctx,
-               out :: Inst) Res<(), AllocError> {
+infer_targs = (
+    be :: CBackend,
+    c: Call,
+    declared: Vec<TyId>,
+    ctx: Ctx,
+    out :: Inst
+) Res<(), AllocError> {
     c.args.loop((h, i, arg) {
         infer_one(be, arg, i, declared, ctx, out).try();
     });
     Ok(());
 }
 
-infer_one = (be :: CBackend, arg: Arg, i: usize, declared: Vec<TyId>,
-             ctx: Ctx, out :: Inst) Res<(), AllocError> {
+infer_one = (
+    be :: CBackend,
+    arg: Arg,
+    i: usize,
+    declared: Vec<TyId>,
+    ctx: Ctx,
+    out :: Inst
+) Res<(), AllocError> {
     declared.get(i).match({
         None  => Ok(()),
         Ok(d) => infer_against(be, arg, d, ctx, out),
@@ -430,9 +544,18 @@ all_closed = (be: CBackend, targs: Inst) bool {
 // The receiver lands in a temporary because it is read twice — once for
 // the slot and once for the `void *` behind it — and an expression read
 // twice is an expression evaluated twice.
-emit_fat_call = (be :: CBackend, c: Call, a: Access, rty: TyId, slot: Slot,
-                 declared: Vec<TyId>, ret: TyId, targs: Inst, ctx: Ctx,
-                 out :: String) Res<(), AllocError> {
+emit_fat_call = (
+    be :: CBackend,
+    c: Call,
+    a: Access,
+    rty: TyId,
+    slot: Slot,
+    declared: Vec<TyId>,
+    ret: TyId,
+    targs: Inst,
+    ctx: Ctx,
+    out :: String
+) Res<(), AllocError> {
     recv ::= be.alloc.String().try();
     expr(be, a.base, ctx, rty, recv).try();
     r ::= be.alloc.String().try();
@@ -452,8 +575,15 @@ emit_fat_call = (be :: CBackend, c: Call, a: Access, rty: TyId, slot: Slot,
     fat_result(be, slot, ret, targs, call.view(), out)
 }
 
-fat_args = (be :: CBackend, c: Call, slot: Slot, declared: Vec<TyId>,
-            targs: Inst, ctx: Ctx, out :: String) Res<(), AllocError> {
+fat_args = (
+    be :: CBackend,
+    c: Call,
+    slot: Slot,
+    declared: Vec<TyId>,
+    targs: Inst,
+    ctx: Ctx,
+    out :: String
+) Res<(), AllocError> {
     c.args.loop((h, i, arg) {
         fat_arg(be, arg, i, slot, declared, targs, ctx, out).try();
     });
@@ -463,8 +593,16 @@ fat_args = (be :: CBackend, c: Call, slot: Slot, declared: Vec<TyId>,
 // The argument at the type the DECLARATION gives it — which is what
 // turns an `Arena` into an `Alloc` one level down — then converted to
 // the erased type the slot carries.
-fat_arg = (be :: CBackend, arg: Arg, i: usize, slot: Slot,
-           declared: Vec<TyId>, targs: Inst, ctx: Ctx, out :: String)
+fat_arg = (
+    be :: CBackend,
+    arg: Arg,
+    i: usize,
+    slot: Slot,
+    declared: Vec<TyId>,
+    targs: Inst,
+    ctx: Ctx,
+    out :: String
+)
           Res<(), AllocError> {
     want = sub_with(be, at_or_zero(declared, i), targs).try();
     text ::= be.alloc.String().try();
@@ -507,8 +645,14 @@ write_sizeof* = (be :: CBackend, t: TyId, out :: String)
 
 // The slot answers at the ERASED type; the caller asked at its own. A
 // void-returning slot has nothing to rebuild and still has to run.
-fat_result = (be :: CBackend, slot: Slot, ret: TyId, targs: Inst,
-              call: str, out :: String) Res<(), AllocError> {
+fat_result = (
+    be :: CBackend,
+    slot: Slot,
+    ret: TyId,
+    targs: Inst,
+    call: str,
+    out :: String
+) Res<(), AllocError> {
     real = sub_with(be, ret, targs).try();
     is_unit(be, slot.ret).match({
         true  => fat_effect(be, call, out),
@@ -525,8 +669,13 @@ fat_effect = (be :: CBackend, call: str, out :: String)
     out.add_bytes("0")
 }
 
-fat_value_back = (be :: CBackend, slot: Slot, real: TyId, call: str,
-                  out :: String) Res<(), AllocError> {
+fat_value_back = (
+    be :: CBackend,
+    slot: Slot,
+    real: TyId,
+    call: str,
+    out :: String
+) Res<(), AllocError> {
     request_type(be, slot.ret).try();
     request_type(be, real).try();
     tmp ::= be.alloc.String().try();

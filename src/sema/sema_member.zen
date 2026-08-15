@@ -186,8 +186,14 @@ is_type_def* = (k: DefKind) bool {
 // Poison and a hole have no members and no missing ones — reporting on
 // them cascades one mistake into many. SEMA_BOOTSTRAP_FIXES.md §7 records
 // twenty-two diagnostics naming unrelated modules for one missing import.
-value_access* = (c :: Checker, id: ExprId, node: Expr, ac: Access, ty: TyId,
-                 ctx: Ctx) Res<TyId, AllocError> {
+value_access* = (
+    c :: Checker,
+    id: ExprId,
+    node: Expr,
+    ac: Access,
+    ty: TyId,
+    ctx: Ctx
+) Res<TyId, AllocError> {
     opaque(c, ty).match({
         true  => c.types.unknown(),
         false => known_access(c, id, node, ac, ty, ctx),
@@ -234,8 +240,14 @@ in_scope_tvar = (c: Checker, name: str, ty: TyId) bool {
 // falsely claim the field doesn't exist. Compares against `Found.module`,
 // the DECLARING module, never the importing one, so an import can't
 // launder a name past the star by spelling (`zz = vec`, `Vec = vec.vec`).
-known_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ty: TyId,
-                ctx: Ctx) Res<TyId, AllocError> {
+known_access = (
+    c :: Checker,
+    id: ExprId,
+    node: Expr,
+    ac: Access,
+    ty: TyId,
+    ctx: Ctx
+) Res<TyId, AllocError> {
     found ::= c.alloc.Vec<Found>();
     members_of(c, ty, ac.name.text, found).try();
     first_hidden(found, ctx.module).match({
@@ -269,7 +281,8 @@ hidden_member* = (c :: Checker, ac: Access, f: Found) Res<TyId, AllocError> {
     c.report(ac.name.span.file, ac.name.span,
              SemaFault.NotExported(ExportFault(
                  name: ac.name.text,
-                 module: c.module_of(f)))).try();
+                 module: c.module_of(f)
+             ))).try();
     c.types.unknown()
 }
 
@@ -282,8 +295,15 @@ module_of = (c :: Checker, f: Found) str {
     })
 }
 
-pick = (c :: Checker, id: ExprId, node: Expr, ac: Access, ty: TyId,
-        found: Vec<Found>, ctx: Ctx) Res<TyId, AllocError> {
+pick = (
+    c :: Checker,
+    id: ExprId,
+    node: Expr,
+    ac: Access,
+    ty: TyId,
+    found: Vec<Found>,
+    ctx: Ctx
+) Res<TyId, AllocError> {
     found.len.match({
         0 => ufcs_or_missing(c, node, ac, ty, ctx),
         1 => first_type(c, id, ty, found),
@@ -314,8 +334,14 @@ settled = (c :: Checker, id: ExprId, ty: TyId, f: Found)
 
 // Two impls supply this name. The bound in scope selects; with none, it
 // is an error naming both, never file order.
-select = (c :: Checker, id: ExprId, node: Expr, ac: Access, ty: TyId,
-          found: Vec<Found>) Res<TyId, AllocError> {
+select = (
+    c :: Checker,
+    id: ExprId,
+    node: Expr,
+    ac: Access,
+    ty: TyId,
+    found: Vec<Found>
+) Res<TyId, AllocError> {
     kept ::= c.alloc.Vec<Found>();
     found.loop((h, f) { keep_bounded(c, f, kept).try() });
     kept.len.match({
@@ -339,7 +365,8 @@ ambiguous = (c :: Checker, node: Expr, ac: Access, found: Vec<Found>)
              SemaFault.AmbiguousMember(PairFault(
                  name: ac.name.text,
                  first: first,
-                 second: second))).try();
+                 second: second
+             ))).try();
     c.types.unknown()
 }
 
@@ -369,7 +396,8 @@ no_such_field = (c :: Checker, node: Expr, ac: Access, ty: TyId)
              SemaFault.NoSuchField(TypeFault(
                  name: ac.name.text,
                  expected: poison,
-                 found: ty))).try();
+                 found: ty
+             ))).try();
     c.types.unknown()
 }
 
@@ -414,7 +442,8 @@ not_writable = (c :: Checker, ac: Access, f: Found) Res<(), AllocError> {
     c.report(ac.name.span.file, ac.name.span,
              SemaFault.NotWritable(ExportFault(
                  name: ac.name.text,
-                 module: c.module_of(f))))
+                 module: c.module_of(f)
+             )))
 }
 
 // `found.get(0)` written here rather than inline: a `Vec.get` on a
@@ -449,8 +478,13 @@ members_of* = (c :: Checker, ty: TyId, name: str, out :: Vec<Found>)
 // prelude exports under the same spelling — impls included, which is how
 // `str`'s `Eq` reaches a literal. The receiver stays the primitive's own
 // `TyId`, not the prelude declaration's.
-prim_members = (c :: Checker, p: Prim, ty: TyId, name: str,
-                out :: Vec<Found>) Res<(), AllocError> {
+prim_members = (
+    c :: Checker,
+    p: Prim,
+    ty: TyId,
+    name: str,
+    out :: Vec<Found>
+) Res<(), AllocError> {
     defs ::= c.alloc.Vec<Def>();
     c.world.prelude_of(p.name, defs).try();
     defs.get(0).match({
@@ -460,22 +494,34 @@ prim_members = (c :: Checker, p: Prim, ty: TyId, name: str,
     Ok(());
 }
 
-prim_decl_members = (c :: Checker, d: Def, p: Prim, ty: TyId, name: str,
-                     out :: Vec<Found>) Res<(), AllocError> {
+prim_decl_members = (
+    c :: Checker,
+    d: Def,
+    p: Prim,
+    ty: TyId,
+    name: str,
+    out :: Vec<Found>
+) Res<(), AllocError> {
     args ::= c.alloc.Vec<TyId>();
     named_members(
         c,
         TyNamed(decl: d.id, name: p.name, args: args),
         ty,
         name,
-        out)
+        out
+    )
 }
 
 // A type parameter's members are the ones its BOUNDS promise, and
 // nothing else: inside `<T: Boxy>(t: T)`, `t.width` reads `Boxy`'s width
 // and the two impls on the concrete type never come into it.
-bound_reachable = (c :: Checker, tname: str, ty: TyId, name: str,
-                   out :: Vec<Found>) Res<(), AllocError> {
+bound_reachable = (
+    c :: Checker,
+    tname: str,
+    ty: TyId,
+    name: str,
+    out :: Vec<Found>
+) Res<(), AllocError> {
     bounds ::= c.alloc.Vec<TyId>();
     c.bounds_of(tname, bounds).try();
     bounds.loop((h, b) {
@@ -488,8 +534,13 @@ bound_reachable = (c :: Checker, tname: str, ty: TyId, name: str,
 // `supplied`: `<T: Display>(t: T)` reaches the same two `toString`s a
 // concrete receiver does, and a bound answering with one type would make
 // the generic case pick differently from the concrete one.
-bound_member = (c :: Checker, bound: TyId, ty: TyId, name: str,
-                out :: Vec<Found>) Res<(), AllocError> {
+bound_member = (
+    c :: Checker,
+    bound: TyId,
+    ty: TyId,
+    name: str,
+    out :: Vec<Found>
+) Res<(), AllocError> {
     tys ::= c.alloc.Vec<TyId>();
     bound_member_types(c, bound, name, ty, tys).try();
     span = bound_span(c, bound);
@@ -499,8 +550,13 @@ bound_member = (c :: Checker, bound: TyId, ty: TyId, name: str,
 
 // A named helper, not a `.then` in the loop body: a loop binding read
 // inside a nested closure doesn't resolve. docs/SEMA_BOOTSTRAP_FIXES.md §10.
-add_bound_member = (t: TyId, bound: TyId, name: str, span: Span,
-                    out :: Vec<Found>) Res<(), AllocError> {
+add_bound_member = (
+    t: TyId,
+    bound: TyId,
+    name: str,
+    span: Span,
+    out :: Vec<Found>
+) Res<(), AllocError> {
     out.add(Found(
         name: name,
         ty: t,
@@ -524,15 +580,25 @@ decl_span* = (c: Checker, id: DeclId) Span {
     decl_at(c.tree, id).match({ Ok(d) => d.span, None => nowhere() })
 }
 
-named_members = (c :: Checker, n: TyNamed, ty: TyId, name: str,
-                 out :: Vec<Found>) Res<(), AllocError> {
+named_members = (
+    c :: Checker,
+    n: TyNamed,
+    ty: TyId,
+    name: str,
+    out :: Vec<Found>
+) Res<(), AllocError> {
     own_members(c, n, ty, name, out).try();
     (out.len == 0).then(() { impl_members(c, n, ty, name, out).try() });
     Ok(());
 }
 
-own_members = (c :: Checker, n: TyNamed, ty: TyId, name: str,
-               out :: Vec<Found>) Res<(), AllocError> {
+own_members = (
+    c :: Checker,
+    n: TyNamed,
+    ty: TyId,
+    name: str,
+    out :: Vec<Found>
+) Res<(), AllocError> {
     decl_at(c.tree, n.decl).match({
         Ok(d) => own_in_decl(c, d, n, ty, name, out),
         None  => Ok(()),
@@ -540,8 +606,14 @@ own_members = (c :: Checker, n: TyNamed, ty: TyId, name: str,
     Ok(());
 }
 
-own_in_decl = (c :: Checker, d: Decl, n: TyNamed, ty: TyId, name: str,
-               out :: Vec<Found>) Res<(), AllocError> {
+own_in_decl = (
+    c :: Checker,
+    d: Decl,
+    n: TyNamed,
+    ty: TyId,
+    name: str,
+    out :: Vec<Found>
+) Res<(), AllocError> {
     d.kind.match({
         Struct(s) => struct_members(c, s, n, ty, name, out),
         _         => Ok(()),
@@ -552,8 +624,14 @@ own_in_decl = (c :: Checker, d: Decl, n: TyNamed, ty: TyId, name: str,
 // promised: `Vec`'s own `get* = (self: @Self, i: usize) Res<T>` resolves
 // to `Res<T>` with `T` a `Var`, so a `Vec<u8>` reaching it answers
 // `Res<u8>` — via the receiver's own `TyNamed.args`, no second mechanism.
-struct_members = (c :: Checker, s: Struct, n: TyNamed, ty: TyId, name: str,
-                  out :: Vec<Found>) Res<(), AllocError> {
+struct_members = (
+    c :: Checker,
+    s: Struct,
+    n: TyNamed,
+    ty: TyId,
+    name: str,
+    out :: Vec<Found>
+) Res<(), AllocError> {
     mi = n.decl.module.to_usize();
     poison = c.types.unknown().try();
     inst = inst_of_named(c, n).try();
@@ -581,8 +659,16 @@ enter_struct_tvars* = (c :: Checker, s: Struct, mi: usize)
 
 // A named helper, not a `.then` in the loop body: a loop binding read
 // inside a nested closure doesn't resolve. docs/SEMA_BOOTSTRAP_FIXES.md §10.
-own_member = (c :: Checker, m: Member, name: str, mi: usize, ty: TyId,
-              poison: TyId, inst: Inst, out :: Vec<Found>)
+own_member = (
+    c :: Checker,
+    m: Member,
+    name: str,
+    mi: usize,
+    ty: TyId,
+    poison: TyId,
+    inst: Inst,
+    out :: Vec<Found>
+)
              Res<(), AllocError> {
     member_named(m, name).match({
         false => Ok(()),
@@ -590,8 +676,16 @@ own_member = (c :: Checker, m: Member, name: str, mi: usize, ty: TyId,
     })
 }
 
-add_own = (c :: Checker, m: Member, name: str, mi: usize, ty: TyId,
-           poison: TyId, inst: Inst, out :: Vec<Found>)
+add_own = (
+    c :: Checker,
+    m: Member,
+    name: str,
+    mi: usize,
+    ty: TyId,
+    poison: TyId,
+    inst: Inst,
+    out :: Vec<Found>
+)
           Res<(), AllocError> {
     declared = member_type(c, m, mi, ty).try();
     out.add(Found(
@@ -653,7 +747,8 @@ self_ctx* = (c :: Checker, mi: usize, self_ty: TyId) Res<Ctx, AllocError> {
         ret: poison,
         has_ret: false,
         self_ty: self_ty,
-        has_self: true));
+        has_self: true
+    ));
 }
 
 opt_type = (c :: Checker, t: Res<TypeId>, ctx: Ctx) Res<TyId, AllocError> {

@@ -119,8 +119,14 @@ wants_value* = (dst: Dest) bool {
 // byte-for-byte where it was. Only a block with cleanup pending has to
 // care where its value is written, and it is the statements that have
 // just been lowered that say whether there is any.
-close_block = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId, dst: Dest,
-               tail: usize) Res<(), AllocError> {
+close_block = (
+    be :: CBackend,
+    blk: Block,
+    ctx: Ctx,
+    want: TyId,
+    dst: Dest,
+    tail: usize
+) Res<(), AllocError> {
     has_cleanup(be).match({
         false => plain_close(be, blk, ctx, want, dst, tail),
         true  => cleaned_close(be, blk, ctx, want, dst, tail),
@@ -141,8 +147,14 @@ frame_has_cleanup = (be :: CBackend) bool {
     })
 }
 
-plain_close = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId, dst: Dest,
-               tail: usize) Res<(), AllocError> {
+plain_close = (
+    be :: CBackend,
+    blk: Block,
+    ctx: Ctx,
+    want: TyId,
+    dst: Dest,
+    tail: usize
+) Res<(), AllocError> {
     close_value(be, blk, ctx, want, dst, tail).try();
     leave_block(be, keep_name(be, blk))
 }
@@ -151,8 +163,14 @@ plain_close = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId, dst: Dest,
 // block does not own, so both are already in the right order: the value
 // lands, then the cleanup runs. A `Return` is the one that is not —
 // control would have left before the cleanup was reached.
-cleaned_close = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId,
-                 dst: Dest, tail: usize) Res<(), AllocError> {
+cleaned_close = (
+    be :: CBackend,
+    blk: Block,
+    ctx: Ctx,
+    want: TyId,
+    dst: Dest,
+    tail: usize
+) Res<(), AllocError> {
     dst.match({
         Return => returning_close(be, blk, ctx, want, tail),
         _      => plain_close(be, blk, ctx, want, dst, tail),
@@ -162,23 +180,38 @@ cleaned_close = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId,
 // THE BLOCK'S VALUE IS READ BEFORE ITS BINDINGS DIE. It is spilled to a
 // temporary, the cleanup runs against that, and the temporary is what
 // returns.
-returning_close = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId,
-                   tail: usize) Res<(), AllocError> {
+returning_close = (
+    be :: CBackend,
+    blk: Block,
+    ctx: Ctx,
+    want: TyId,
+    tail: usize
+) Res<(), AllocError> {
     is_unit(be, want).match({
         true  => unit_return(be, blk, ctx, want, tail),
         false => spilled_return(be, blk, ctx, want, tail),
     })
 }
 
-unit_return = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId,
-               tail: usize) Res<(), AllocError> {
+unit_return = (
+    be :: CBackend,
+    blk: Block,
+    ctx: Ctx,
+    want: TyId,
+    tail: usize
+) Res<(), AllocError> {
     close_value(be, blk, ctx, want, Dest.Discard, tail).try();
     leave_block(be, "").try();
     be.writeln("return;")
 }
 
-spilled_return = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId,
-                  tail: usize) Res<(), AllocError> {
+spilled_return = (
+    be :: CBackend,
+    blk: Block,
+    ctx: Ctx,
+    want: TyId,
+    tail: usize
+) Res<(), AllocError> {
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "k", be.next_tmp()).try();
     decl ::= be.alloc.String().try();
@@ -213,32 +246,55 @@ bare_name* = (be :: CBackend, id: ExprId) str {
     })
 }
 
-close_value = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId, dst: Dest,
-               tail: usize) Res<(), AllocError> {
+close_value = (
+    be :: CBackend,
+    blk: Block,
+    ctx: Ctx,
+    want: TyId,
+    dst: Dest,
+    tail: usize
+) Res<(), AllocError> {
     blk.value.match({
         Ok(e) => deliver(be, e, ctx, want, dst),
         None  => close_tail(be, blk, ctx, want, dst, tail),
     })
 }
 
-close_tail = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId, dst: Dest,
-              tail: usize) Res<(), AllocError> {
+close_tail = (
+    be :: CBackend,
+    blk: Block,
+    ctx: Ctx,
+    want: TyId,
+    dst: Dest,
+    tail: usize
+) Res<(), AllocError> {
     (tail == blk.stmts.len).match({
         true  => close_valueless(be, dst),
         false => deliver_stmt(be, blk, ctx, want, dst, tail),
     })
 }
 
-deliver_stmt = (be :: CBackend, blk: Block, ctx: Ctx, want: TyId, dst: Dest,
-                tail: usize) Res<(), AllocError> {
+deliver_stmt = (
+    be :: CBackend,
+    blk: Block,
+    ctx: Ctx,
+    want: TyId,
+    dst: Dest,
+    tail: usize
+) Res<(), AllocError> {
     blk.stmts.get(tail).match({
         None  => Ok(()),
         Ok(s) => deliver_expr_stmt(be, s, ctx, want, dst),
     })
 }
 
-deliver_expr_stmt = (be :: CBackend, s: Stmt, ctx: Ctx, want: TyId,
-                     dst: Dest) Res<(), AllocError> {
+deliver_expr_stmt = (
+    be :: CBackend,
+    s: Stmt,
+    ctx: Ctx,
+    want: TyId,
+    dst: Dest
+) Res<(), AllocError> {
     s.kind.match({
         Expr(e) => deliver(be, e.expr, ctx, want, dst),
         _       => Ok(()),
@@ -270,8 +326,13 @@ deliver* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, dst: Dest)
 // A spilling form lowers STRAIGHT into the destination — no temporary,
 // because the destination is already one. That is what keeps a
 // `.match` in return position from allocating a variable per arm.
-deliver_spilling = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
-                    dst: Dest) Res<(), AllocError> {
+deliver_spilling = (
+    be :: CBackend,
+    id: ExprId,
+    ctx: Ctx,
+    want: TyId,
+    dst: Dest
+) Res<(), AllocError> {
     node = be.tree.expr_at(id);
     ty = destination_type(be, id, ctx, want).try();
     node.kind.match({
@@ -296,8 +357,13 @@ destination_type* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
     })
 }
 
-deliver_simple = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId,
-                  dst: Dest) Res<(), AllocError> {
+deliver_simple = (
+    be :: CBackend,
+    id: ExprId,
+    ctx: Ctx,
+    want: TyId,
+    dst: Dest
+) Res<(), AllocError> {
     text ::= be.alloc.String().try();
     expr(be, id, ctx, want, text).try();
     write_dest(be, dst, text.view())
@@ -337,7 +403,8 @@ stmt* = (be :: CBackend, s: Stmt, ctx: Ctx) Res<(), AllocError> {
         Block(b) => lower_nested(be, b, ctx),
         Decl(_)  => be.report(s.span.file, s.span,
                               GenFault.Unsupported(
-                                  "a declaration inside a body")),
+                                  "a declaration inside a body"
+                              )),
     })
 }
 

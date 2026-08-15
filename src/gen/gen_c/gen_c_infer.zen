@@ -32,8 +32,15 @@ sub_with, unify, arg_type = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 fat_ret_type = gen.gen_c.gen_c_bound
 
-complete_inst* = (be :: CBackend, c: Call, d: Def, f: Function,
-                 settled: Inst, recv: Res<ExprId>, ctx: Ctx)
+complete_inst* = (
+    be :: CBackend,
+    c: Call,
+    d: Def,
+    f: Function,
+    settled: Inst,
+    recv: Res<ExprId>,
+    ctx: Ctx
+)
                 Res<Inst, AllocError> {
     inst_open(be, settled).match({
         false => Ok(settled),
@@ -41,14 +48,21 @@ complete_inst* = (be :: CBackend, c: Call, d: Def, f: Function,
     })
 }
 
-inferred_inst = (be :: CBackend, c: Call, d: Def, f: Function,
-                 recv: Res<ExprId>, ctx: Ctx) Res<Inst, AllocError> {
+inferred_inst = (
+    be :: CBackend,
+    c: Call,
+    d: Def,
+    f: Function,
+    recv: Res<ExprId>,
+    ctx: Ctx
+) Res<Inst, AllocError> {
     dctx = Ctx(
         module: d.id.module.to_usize(),
         ret: TyId(index: 0),
         has_ret: false,
         self_ty: TyId(index: 0),
-        has_self: false);
+        has_self: false
+    );
     mark = enter_tparams(be, f.tparams, d.qname).try();
     declared ::= be.alloc.Vec<TyId>();
     written_params(be, f, dctx, declared).try();
@@ -64,8 +78,12 @@ inferred_inst = (be :: CBackend, c: Call, d: Def, f: Function,
 
 // Parameter types AS WRITTEN, not substituted — unification needs
 // `Vec<T>`, not what some other call made of it.
-written_params = (be :: CBackend, f: Function, dctx: Ctx,
-                  out :: Vec<TyId>) Res<(), AllocError> {
+written_params = (
+    be :: CBackend,
+    f: Function,
+    dctx: Ctx,
+    out :: Vec<TyId>
+) Res<(), AllocError> {
     f.params.loop((h, p) { written_param(be, p, dctx, out).try() });
     Ok(());
 }
@@ -80,24 +98,40 @@ written_param = (be :: CBackend, p: Param, dctx: Ctx, out :: Vec<TyId>)
 
 // A ufcs receiver is argument zero, which is the same rule the call
 // itself obeys one function down.
-unify_receiver = (be :: CBackend, recv: Res<ExprId>, declared: Vec<TyId>,
-                  ctx: Ctx, out :: Inst) Res<(), AllocError> {
+unify_receiver = (
+    be :: CBackend,
+    recv: Res<ExprId>,
+    declared: Vec<TyId>,
+    ctx: Ctx,
+    out :: Inst
+) Res<(), AllocError> {
     recv.match({
         None     => Ok(()),
         Ok(base) => unify_arg(be, base, 0, declared, ctx, out),
     })
 }
 
-unify_arg = (be :: CBackend, value: ExprId, i: usize, declared: Vec<TyId>,
-             ctx: Ctx, out :: Inst) Res<(), AllocError> {
+unify_arg = (
+    be :: CBackend,
+    value: ExprId,
+    i: usize,
+    declared: Vec<TyId>,
+    ctx: Ctx,
+    out :: Inst
+) Res<(), AllocError> {
     declared.get(i).match({
         None  => Ok(()),
         Ok(d) => unify_against(be, value, d, ctx, out),
     })
 }
 
-unify_against = (be :: CBackend, value: ExprId, d: TyId, ctx: Ctx,
-                 out :: Inst) Res<(), AllocError> {
+unify_against = (
+    be :: CBackend,
+    value: ExprId,
+    d: TyId,
+    ctx: Ctx,
+    out :: Inst
+) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     actual = arg_type(be, value, ctx, unknown).try();
     unify(be, d, actual, out)
@@ -112,8 +146,13 @@ unify_against = (be :: CBackend, value: ExprId, d: TyId, ctx: Ctx,
 //
 // Resolves the callee the way lowering does, using `complete_inst`'s
 // instantiation, so declared type and call symbol can't disagree.
-call_ret_type* = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx,
-                  want: TyId) Res<TyId, AllocError> {
+call_ret_type* = (
+    be :: CBackend,
+    id: ExprId,
+    c: Call,
+    ctx: Ctx,
+    want: TyId
+) Res<TyId, AllocError> {
     be.tree.expr_at(c.callee).kind.match({
         Name(n)   => named_ret_type(be, id, c, n.text, None, ctx, want),
         Access(a) => access_ret_type(be, id, c, a, ctx, want),
@@ -127,8 +166,14 @@ call_ret_type* = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx,
 // first since it only answers when the receiver's static type is a
 // bound with a matching member; a concrete receiver falls straight
 // through.
-access_ret_type = (be :: CBackend, id: ExprId, c: Call, a: Access, ctx: Ctx,
-                   want: TyId) Res<TyId, AllocError> {
+access_ret_type = (
+    be :: CBackend,
+    id: ExprId,
+    c: Call,
+    a: Access,
+    ctx: Ctx,
+    want: TyId
+) Res<TyId, AllocError> {
     fat_ret_type(be, c, a, ctx).try().match({
         Ok(t) => Ok(t),
         None  => named_ret_type(be, id, c, a.name.text, Ok(a.base), ctx, want),
@@ -138,8 +183,15 @@ access_ret_type = (be :: CBackend, id: ExprId, c: Call, a: Access, ctx: Ctx,
 // One candidate or nothing — overload resolution is sema's rule;
 // duplicating it here would be worse than just returning the type the
 // caller already had.
-named_ret_type = (be :: CBackend, id: ExprId, c: Call, name: str,
-                  recv: Res<ExprId>, ctx: Ctx, want: TyId)
+named_ret_type = (
+    be :: CBackend,
+    id: ExprId,
+    c: Call,
+    name: str,
+    recv: Res<ExprId>,
+    ctx: Ctx,
+    want: TyId
+)
                  Res<TyId, AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, name, found).try();
@@ -149,8 +201,15 @@ named_ret_type = (be :: CBackend, id: ExprId, c: Call, name: str,
     })
 }
 
-sole_ret_type = (be :: CBackend, id: ExprId, c: Call, found: Vec<Def>,
-                 recv: Res<ExprId>, ctx: Ctx, want: TyId)
+sole_ret_type = (
+    be :: CBackend,
+    id: ExprId,
+    c: Call,
+    found: Vec<Def>,
+    recv: Res<ExprId>,
+    ctx: Ctx,
+    want: TyId
+)
                 Res<TyId, AllocError> {
     found.get(0).match({
         None  => Ok(want),
@@ -158,8 +217,15 @@ sole_ret_type = (be :: CBackend, id: ExprId, c: Call, found: Vec<Def>,
     })
 }
 
-def_ret_type = (be :: CBackend, id: ExprId, c: Call, d: Def,
-                recv: Res<ExprId>, ctx: Ctx, want: TyId)
+def_ret_type = (
+    be :: CBackend,
+    id: ExprId,
+    c: Call,
+    d: Def,
+    recv: Res<ExprId>,
+    ctx: Ctx,
+    want: TyId
+)
                Res<TyId, AllocError> {
     decl_at(be.tree, d.id).match({
         None  => Ok(want),
@@ -167,8 +233,16 @@ def_ret_type = (be :: CBackend, id: ExprId, c: Call, d: Def,
     })
 }
 
-decl_ret_type = (be :: CBackend, id: ExprId, c: Call, d: Def, x: Decl,
-                 recv: Res<ExprId>, ctx: Ctx, want: TyId)
+decl_ret_type = (
+    be :: CBackend,
+    id: ExprId,
+    c: Call,
+    d: Def,
+    x: Decl,
+    recv: Res<ExprId>,
+    ctx: Ctx,
+    want: TyId
+)
                 Res<TyId, AllocError> {
     x.kind.match({
         Function(f) => fn_ret_type(be, id, c, d, f, recv, ctx, want),
@@ -176,8 +250,16 @@ decl_ret_type = (be :: CBackend, id: ExprId, c: Call, d: Def, x: Decl,
     })
 }
 
-fn_ret_type = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
-               recv: Res<ExprId>, ctx: Ctx, want: TyId)
+fn_ret_type = (
+    be :: CBackend,
+    id: ExprId,
+    c: Call,
+    d: Def,
+    f: Function,
+    recv: Res<ExprId>,
+    ctx: Ctx,
+    want: TyId
+)
               Res<TyId, AllocError> {
     raw = inst_at(be, id).try();
     settled = settled_inst(be, f.tparams, d.qname, raw).try();
@@ -187,7 +269,8 @@ fn_ret_type = (be :: CBackend, id: ExprId, c: Call, d: Def, f: Function,
         ret: TyId(index: 0),
         has_ret: false,
         self_ty: TyId(index: 0),
-        has_self: false);
+        has_self: false
+    );
     mark = enter_tparams(be, f.tparams, d.qname).try();
     declared = declared_ret(be, f, dctx).try();
     leave_tparams(be, mark).try();

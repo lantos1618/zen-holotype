@@ -55,7 +55,11 @@ record_body* = (p :: Parser, out :: Vec<Member>) Res<Span, AllocError> {
     p.member_list(out, false)
 }
 
-member_list = (p :: Parser, out :: Vec<Member>, typed: bool) Res<Span, AllocError> {
+member_list = (
+    p :: Parser,
+    out :: Vec<Member>,
+    typed: bool
+) Res<Span, AllocError> {
     start = p.here();
     open = p.here_span();
     p.expect(TokenKind.BraceOpen, "expected `{` to open a body").try();
@@ -64,12 +68,14 @@ member_list = (p :: Parser, out :: Vec<Member>, typed: bool) Res<Span, AllocErro
         before = p.at;
         out.add(p.one_member(typed).try()).try();
         running = !p.at_kind(
-            TokenKind.BraceClose) && !p.at_eof() && p.at > before;
+            TokenKind.BraceClose
+        ) && !p.at_eof() && p.at > before;
     });
     p.expect_close(
         TokenKind.BraceClose,
         "unclosed `{`: this body is never closed",
-        open).try();
+        open
+    ).try();
     Ok(p.span_from(start));
 }
 
@@ -94,7 +100,13 @@ one_member = (p :: Parser, typed: bool) Res<Member, AllocError> {
     ));
 }
 
-member_kind = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, typed: bool) Res<MemberKind, AllocError> {
+member_kind = (
+    p :: Parser,
+    name: Ident,
+    exported: bool,
+    tparams: Vec<TParam>,
+    typed: bool
+) Res<MemberKind, AllocError> {
     p.peek().kind.match({
         Colon        => p.after_colon(name, exported, tparams, typed, false),
         ColonColon   => p.after_colon(name, exported, tparams, typed, true),
@@ -102,7 +114,8 @@ member_kind = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, t
         ColonColonEq => p.after_assign(name, exported, tparams, true),
         _            => {
             p.error(
-                "expected `:`, `::`, `=` or `::=` after a member's name").try();
+                "expected `:`, `::`, `=` or `::=` after a member's name"
+            ).try();
             Ok(MemberKind.Field(Field(
                 name: name,
                 exported: exported,
@@ -117,7 +130,14 @@ member_kind = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, t
 // `x: i32`, `len :: usize = 0` in a struct body; `width: expr` in a
 // record. `typed` is which body we are in, and it is the only thing
 // that tells the two apart — the tokens are identical.
-after_colon = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, typed: bool, mutable: bool) Res<MemberKind, AllocError> {
+after_colon = (
+    p :: Parser,
+    name: Ident,
+    exported: bool,
+    tparams: Vec<TParam>,
+    typed: bool,
+    mutable: bool
+) Res<MemberKind, AllocError> {
     p.bump().try();
     typed.match({
         true  => p.typed_member(name, exported, mutable),
@@ -128,7 +148,12 @@ after_colon = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, t
 // A struct body's member: a type, and possibly a default. R4 decides
 // which node it becomes, and this is the one place that rule is
 // applied so nothing downstream has to remember it.
-typed_member = (p :: Parser, name: Ident, exported: bool, mutable: bool) Res<MemberKind, AllocError> {
+typed_member = (
+    p :: Parser,
+    name: Ident,
+    exported: bool,
+    mutable: bool
+) Res<MemberKind, AllocError> {
     t = p.type().try();
     value = p.eat(TokenKind.Eq).try().match({
         true  => p.member_value(),
@@ -137,7 +162,14 @@ typed_member = (p :: Parser, name: Ident, exported: bool, mutable: bool) Res<Mem
     p.split_r4(name, exported, mutable, t, value);
 }
 
-split_r4 = (p :: Parser, name: Ident, exported: bool, mutable: bool, t: TypeId, value: Res<ExprId>) Res<MemberKind, AllocError> {
+split_r4 = (
+    p :: Parser,
+    name: Ident,
+    exported: bool,
+    mutable: bool,
+    t: TypeId,
+    value: Res<ExprId>
+) Res<MemberKind, AllocError> {
     constant = !mutable && p.has_value(value);
     constant.match({
         true  => Ok(MemberKind.Const(Const(
@@ -161,7 +193,12 @@ split_r4 = (p :: Parser, name: Ident, exported: bool, mutable: bool, t: TypeId, 
 // ..`: the `:` and the `=` supply the same thing and read the same
 // way. There is no type, because the field being satisfied already
 // has one.
-supplied_member = (p :: Parser, name: Ident, exported: bool, mutable: bool) Res<MemberKind, AllocError> {
+supplied_member = (
+    p :: Parser,
+    name: Ident,
+    exported: bool,
+    mutable: bool
+) Res<MemberKind, AllocError> {
     value = p.expr().try();
     Ok(MemberKind.Field(Field(
         name: name,
@@ -174,7 +211,13 @@ supplied_member = (p :: Parser, name: Ident, exported: bool, mutable: bool) Res<
 
 // `name = sig {..}`, `name ::= sig`, and — in a record — `name = expr`
 // where the field being satisfied is not a function.
-after_assign = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, rebindable: bool) Res<MemberKind, AllocError> {
+after_assign = (
+    p :: Parser,
+    name: Ident,
+    exported: bool,
+    tparams: Vec<TParam>,
+    rebindable: bool
+) Res<MemberKind, AllocError> {
     p.bump().try();
     p.fn_member_ahead().match({
         true  => p.fn_member(name, exported, tparams, rebindable),
@@ -186,7 +229,13 @@ fn_member_ahead = (p :: Parser) bool {
     p.at_kind(TokenKind.Lt) || p.at_kind(TokenKind.ParenOpen)
 }
 
-fn_member = (p :: Parser, name: Ident, exported: bool, tparams: Vec<TParam>, rebindable: bool) Res<MemberKind, AllocError> {
+fn_member = (
+    p :: Parser,
+    name: Ident,
+    exported: bool,
+    tparams: Vec<TParam>,
+    rebindable: bool
+) Res<MemberKind, AllocError> {
     f = p.fn_value(name, exported, tparams, rebindable).try();
     Ok(MemberKind.Function(f));
 }
@@ -225,7 +274,8 @@ params_list* = (p :: Parser, out :: Vec<Param>) Res<Span, AllocError> {
     open = p.here_span();
     p.expect(
         TokenKind.ParenOpen,
-        "expected `(` to open a parameter list").try();
+        "expected `(` to open a parameter list"
+    ).try();
     // A PARAMETER IS A NAME, so a token that is not one ends the list
     // rather than being reported as a bad parameter. `(i + 1 < f.len;`
     // is an unclosed `(` and the diagnostic that says so points at the
@@ -241,7 +291,8 @@ params_list* = (p :: Parser, out :: Vec<Param>) Res<Span, AllocError> {
     p.expect_close(
         TokenKind.ParenClose,
         "unclosed `(`: this parameter list is never closed",
-        open).try();
+        open
+    ).try();
     Ok(p.span_from(start));
 }
 
@@ -300,7 +351,8 @@ type_params* = (p :: Parser, out :: Vec<TParam>) Res<(), AllocError> {
     p.expect_close(
         TokenKind.Gt,
         "unclosed `<`: this type parameter list is never closed",
-        open).try();
+        open
+    ).try();
     Ok(());
 }
 

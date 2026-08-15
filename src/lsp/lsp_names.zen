@@ -84,13 +84,19 @@ classify* = (a: Alloc, c: Checker, root: str, out :: Vec<Classed>)
 // One row. The URI is resolved HERE, at gather time, not at write time
 // — a build knows its compilation root and a writer does not, the same
 // seam `lsp_diag.zen`'s `Spot` crosses.
-class_as = (a: Alloc, root: str, span: Span, colour: Colour,
-            out :: Vec<Classed>) Res<(), AllocError> {
+class_as = (
+    a: Alloc,
+    root: str,
+    span: Span,
+    colour: Colour,
+    out :: Vec<Classed>
+) Res<(), AllocError> {
     out.add(Classed(
         uri: uri_at(a, root, span.file).try(),
         line: span.start.line,
         col: span.start.col,
-        colour: colour))
+        colour: colour
+    ))
 }
 
 // --- declaration sites -------------------------------------------------
@@ -199,16 +205,27 @@ written_types = (a: Alloc, c: Checker, root: str, out :: Vec<Classed>)
     Ok(());
 }
 
-written_type = (a: Alloc, c: Checker, root: str, tid: TypeId,
-                out :: Vec<Classed>) Res<(), AllocError> {
+written_type = (
+    a: Alloc,
+    c: Checker,
+    root: str,
+    tid: TypeId,
+    out :: Vec<Classed>
+) Res<(), AllocError> {
     c.tree.type_at(tid).kind.match({
         Named(n) => named_site(a, c, root, tid, n, out),
         _        => written(),
     })
 }
 
-named_site = (a: Alloc, c: Checker, root: str, tid: TypeId, n: Named,
-              out :: Vec<Classed>) Res<(), AllocError> {
+named_site = (
+    a: Alloc,
+    c: Checker,
+    root: str,
+    tid: TypeId,
+    n: Named,
+    out :: Vec<Classed>
+) Res<(), AllocError> {
     c.type_memo.get(tid).match({
         None   => written(),
         Ok(ty) => c.is_unknown(ty).match({
@@ -233,8 +250,13 @@ expr_sites = (a: Alloc, c: Checker, root: str, out :: Vec<Classed>)
     Ok(());
 }
 
-expr_site = (a: Alloc, c: Checker, root: str, id: ExprId,
-             out :: Vec<Classed>) Res<(), AllocError> {
+expr_site = (
+    a: Alloc,
+    c: Checker,
+    root: str,
+    id: ExprId,
+    out :: Vec<Classed>
+) Res<(), AllocError> {
     e = c.tree.expr_at(id);
     e.kind.match({
         Call(k)  => call_site(a, c, root, id, k, out),
@@ -247,16 +269,28 @@ expr_site = (a: Alloc, c: Checker, root: str, id: ExprId,
 
 // A bare name's span IS the expression's — `Name` carries no `Ident`,
 // "the enclosing `Expr` already has the span" (`ast_node.zen`).
-param_site = (a: Alloc, c: Checker, root: str, id: ExprId, span: Span,
-              out :: Vec<Classed>) Res<(), AllocError> {
+param_site = (
+    a: Alloc,
+    c: Checker,
+    root: str,
+    id: ExprId,
+    span: Span,
+    out :: Vec<Classed>
+) Res<(), AllocError> {
     c.param_memo.get(id).match({
         Ok(_) => class_as(a, root, span, Colour.Parameter, out),
         None  => written(),
     })
 }
 
-call_site = (a: Alloc, c: Checker, root: str, id: ExprId, k: Call,
-             out :: Vec<Classed>) Res<(), AllocError> {
+call_site = (
+    a: Alloc,
+    c: Checker,
+    root: str,
+    id: ExprId,
+    k: Call,
+    out :: Vec<Classed>
+) Res<(), AllocError> {
     c.resolved_call(id).match({
         None    => written(),
         Ok(did) => decl_at(c.tree, did).match({
@@ -266,8 +300,14 @@ call_site = (a: Alloc, c: Checker, root: str, id: ExprId, k: Call,
     })
 }
 
-callee_site = (a: Alloc, c: Checker, root: str, d: Decl, k: Call,
-               out :: Vec<Classed>) Res<(), AllocError> {
+callee_site = (
+    a: Alloc,
+    c: Checker,
+    root: str,
+    d: Decl,
+    k: Call,
+    out :: Vec<Classed>
+) Res<(), AllocError> {
     d.kind.match({
         Function(_) => fn_callee(a, c, root, k, out),
         Struct(s)   => type_callee(a, c, root, k, s.name.text, out),
@@ -282,8 +322,13 @@ callee_site = (a: Alloc, c: Checker, root: str, d: Decl, k: Call,
 // The name a resolved call was made THROUGH: bare (`add(a, b)`) or the
 // member of an access (`x.f(..)` — `call_memo` holds the declaration
 // either way, and resolution is one rule, `sema_cand.zen`).
-fn_callee = (a: Alloc, c: Checker, root: str, k: Call,
-             out :: Vec<Classed>) Res<(), AllocError> {
+fn_callee = (
+    a: Alloc,
+    c: Checker,
+    root: str,
+    k: Call,
+    out :: Vec<Classed>
+) Res<(), AllocError> {
     callee = c.tree.expr_at(k.callee);
     callee.kind.match({
         Name(_)   => class_as(a, root, callee.span, Colour.Function, out),
@@ -295,8 +340,14 @@ fn_callee = (a: Alloc, c: Checker, root: str, k: Call,
 // A CONSTRUCTION names the type only when it names it bare and by its
 // own name: `Point(x: 1)`. The same memo entry covers `Shape.Circle(c)`,
 // where the name written is the variant's, and a variant is not a type.
-type_callee = (a: Alloc, c: Checker, root: str, k: Call, decl: str,
-               out :: Vec<Classed>) Res<(), AllocError> {
+type_callee = (
+    a: Alloc,
+    c: Checker,
+    root: str,
+    k: Call,
+    decl: str,
+    out :: Vec<Classed>
+) Res<(), AllocError> {
     callee = c.tree.expr_at(k.callee);
     callee.kind.match({
         Name(n) => n.text.eq(decl).match({

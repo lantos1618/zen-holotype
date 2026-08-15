@@ -80,8 +80,16 @@ array_of, lower_array_walk = gen.gen_c.gen_c_array
 // `args` is the call's arguments with the receiver, if there was one,
 // already at the front: `range.loop(body)` and `loop(range, body)` are
 // one call written two ways, which is what UFCS means.
-lower_loop* = (be :: CBackend, id: ExprId, c: Call, f: Function,
-               recv: Res<ExprId>, ctx: Ctx, want: TyId, out :: String)
+lower_loop* = (
+    be :: CBackend,
+    id: ExprId,
+    c: Call,
+    f: Function,
+    recv: Res<ExprId>,
+    ctx: Ctx,
+    want: TyId,
+    out :: String
+)
               Res<(), AllocError> {
     args ::= be.alloc.Vec<ExprId>();
     recv.match({
@@ -95,15 +103,23 @@ lower_loop* = (be :: CBackend, id: ExprId, c: Call, f: Function,
     })
 }
 
-lower_with_body = (be :: CBackend, id: ExprId, f: Function,
-                   args: Vec<ExprId>, body: ExprId, ctx: Ctx, want: TyId,
-                   out :: String) Res<(), AllocError> {
+lower_with_body = (
+    be :: CBackend,
+    id: ExprId,
+    f: Function,
+    args: Vec<ExprId>,
+    body: ExprId,
+    ctx: Ctx,
+    want: TyId,
+    out :: String
+) Res<(), AllocError> {
     lambda_at(be, body).match({
         None    => unsupported(
             be,
             id,
             "a loop body written somewhere other than the call site",
-            out),
+            out
+        ),
         Ok(lam) => lower_shaped(be, id, f, args, lam, ctx, want, out),
     })
 }
@@ -115,14 +131,23 @@ lambda_at* = (be :: CBackend, id: ExprId) Res<Lambda> {
     })
 }
 
-lower_shaped = (be :: CBackend, id: ExprId, f: Function, args: Vec<ExprId>,
-                lam: Lambda, ctx: Ctx, want: TyId, out :: String)
+lower_shaped = (
+    be :: CBackend,
+    id: ExprId,
+    f: Function,
+    args: Vec<ExprId>,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    out :: String
+)
                Res<(), AllocError> {
     sh = shape_of(be, f).try();
     sh.wants_acc.match({
         true  => lower_fold(be, id, sh, args, lam, ctx, want, out),
         false => lower_walk(be, id, sh, args, lam, ctx, want, no_fold(
-            be).try(), out),
+            be
+        ).try(), out),
     })
 }
 
@@ -132,8 +157,17 @@ lower_shaped = (be :: CBackend, id: ExprId, f: Function, args: Vec<ExprId>,
 //   nothing        while true
 //   a `() bool`    while cond, tested BEFORE each pass
 //   anything else  a Range, walked half-open
-lower_walk* = (be :: CBackend, id: ExprId, sh: Shape, args: Vec<ExprId>,
-              lam: Lambda, ctx: Ctx, want: TyId, fold: Fold, out :: String)
+lower_walk* = (
+    be :: CBackend,
+    id: ExprId,
+    sh: Shape,
+    args: Vec<ExprId>,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    fold: Fold,
+    out :: String
+)
              Res<(), AllocError> {
     lead = first_lead(be, args);
     lead.match({
@@ -149,8 +183,17 @@ first_lead = (be :: CBackend, args: Vec<ExprId>) Res<ExprId> {
     })
 }
 
-lower_led = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
-             lam: Lambda, ctx: Ctx, want: TyId, fold: Fold, out :: String)
+lower_led = (
+    be :: CBackend,
+    id: ExprId,
+    sh: Shape,
+    one: ExprId,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    fold: Fold,
+    out :: String
+)
             Res<(), AllocError> {
     is_cond(be, one).match({
         true  => lower_forever(be, id, sh, Ok(one), lam, ctx, want, fold, out),
@@ -162,15 +205,25 @@ lower_led = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
 // it's refused BY NAME rather than walked: `gen_c_range.zen`'s own pass
 // would discard the body's value — a fold that compiles and returns its
 // seed, the one outcome a backend may not produce.
-lower_impl_walk = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
-                   rty: TyId, lam: Lambda, ctx: Ctx, want: TyId,
-                   fold: Fold, out :: String) Res<(), AllocError> {
+lower_impl_walk = (
+    be :: CBackend,
+    id: ExprId,
+    sh: Shape,
+    one: ExprId,
+    rty: TyId,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    fold: Fold,
+    out :: String
+) Res<(), AllocError> {
     fold.has.match({
         true  => unsupported(
             be,
             id,
             "a fold over a range whose bounds an impl supplies",
-            out),
+            out
+        ),
         false => lower_supplied(be, id, sh, one, rty, lam, ctx, want, out),
     })
 }
@@ -188,9 +241,17 @@ is_cond = (be :: CBackend, one: ExprId) bool {
 // while true, and while cond
 // -----------------------------------------------------------------
 
-lower_forever = (be :: CBackend, id: ExprId, sh: Shape, cond: Res<ExprId>,
-                 lam: Lambda, ctx: Ctx, want: TyId, fold: Fold,
-                 out :: String) Res<(), AllocError> {
+lower_forever = (
+    be :: CBackend,
+    id: ExprId,
+    sh: Shape,
+    cond: Res<ExprId>,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    fold: Fold,
+    out :: String
+) Res<(), AllocError> {
     st = open_result(be, want, out).try();
     counter ::= be.alloc.String().try();
     sh.wants_index.match({
@@ -213,7 +274,8 @@ lower_forever = (be :: CBackend, id: ExprId, sh: Shape, cond: Res<ExprId>,
         counter.view(),
         usize_ty,
         fold,
-        ctx).try();
+        ctx
+    ).try();
     close_pass(be, st, counter.view(), fold).try();
     Ok(());
 }
@@ -262,9 +324,17 @@ write_cond_body = (be :: CBackend, lam: Lambda, brk: usize, ctx: Ctx)
 // start at zero.
 // -----------------------------------------------------------------
 
-lower_range = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
-               lam: Lambda, ctx: Ctx, want: TyId, fold: Fold,
-               out :: String) Res<(), AllocError> {
+lower_range = (
+    be :: CBackend,
+    id: ExprId,
+    sh: Shape,
+    one: ExprId,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    fold: Fold,
+    out :: String
+) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     rty = ty_of(be, one, ctx, unknown).try();
     // A FIXED ARRAY IS ASKED ABOUT FIRST because it satisfies `Range`
@@ -283,7 +353,8 @@ lower_range = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
             ctx,
             want,
             fold,
-            out),
+            out
+        ),
         None  => lower_range_impl(
             be,
             id,
@@ -294,13 +365,23 @@ lower_range = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
             ctx,
             want,
             fold,
-            out),
+            out
+        ),
     })
 }
 
-lower_range_impl = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
-                    rty: TyId, lam: Lambda, ctx: Ctx, want: TyId,
-                    fold: Fold, out :: String) Res<(), AllocError> {
+lower_range_impl = (
+    be :: CBackend,
+    id: ExprId,
+    sh: Shape,
+    one: ExprId,
+    rty: TyId,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    fold: Fold,
+    out :: String
+) Res<(), AllocError> {
     supplies_bounds(be, rty).match({
         false => lower_impl_walk(
             be,
@@ -312,7 +393,8 @@ lower_range_impl = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
             ctx,
             want,
             fold,
-            out),
+            out
+        ),
         true  => lower_settled(be, id, sh, one, rty, lam, ctx, want, fold, out),
     })
 }
@@ -325,9 +407,18 @@ lower_range_impl = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
 // is how `h.break(v)` in one loop and another become one C type. A
 // range that supplies no `at` walks its own index space, so its element
 // is `usize` and the loop is `Res<usize>`.
-lower_settled = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
-                 rty: TyId, lam: Lambda, ctx: Ctx, want: TyId, fold: Fold,
-                 out :: String) Res<(), AllocError> {
+lower_settled = (
+    be :: CBackend,
+    id: ExprId,
+    sh: Shape,
+    one: ExprId,
+    rty: TyId,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    fold: Fold,
+    out :: String
+) Res<(), AllocError> {
     elem = be.check.types.prim("usize").try();
     settled = settle_res(be, want, elem).try();
     lower_bounded(be, id, sh, one, rty, lam, ctx, settled, fold, out)
@@ -344,9 +435,18 @@ settle_res* = (be :: CBackend, want: TyId, elem: TyId)
     })
 }
 
-lower_bounded = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
-                 rty: TyId, lam: Lambda, ctx: Ctx, want: TyId, fold: Fold,
-                 out :: String) Res<(), AllocError> {
+lower_bounded = (
+    be :: CBackend,
+    id: ExprId,
+    sh: Shape,
+    one: ExprId,
+    rty: TyId,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    fold: Fold,
+    out :: String
+) Res<(), AllocError> {
     rng = walk_temp(be, one, rty, ctx).try();
 
     st = open_result(be, want, out).try();
@@ -382,7 +482,8 @@ lower_bounded = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
         counter.view(),
         usize_ty,
         fold,
-        ctx).try();
+        ctx
+    ).try();
     close_pass(be, st, counter.view(), fold).try();
     Ok(());
 }
@@ -463,7 +564,8 @@ open_result* = (be :: CBackend, want: TyId, out :: String)
         result: result.view(),
         has_result: keep,
         ty: want,
-        depth: be.block_depth());
+        depth: be.block_depth()
+    );
     be.push_loop(frame).try();
     Ok(frame);
 }
@@ -495,8 +597,17 @@ open_result_temp = (be :: CBackend, want: TyId, result :: String)
 // the two threaded values are bound as ORDINARY LOCALS — `index` and
 // `value` are automatic storage, which is what "index and acc thread BY
 // VALUE, so no cell is heap-allocated" comes to in C.
-run_body* = (be :: CBackend, sh: Shape, lam: Lambda, counter: str,
-            base: str, value: str, ety: TyId, fold: Fold, ctx: Ctx)
+run_body* = (
+    be :: CBackend,
+    sh: Shape,
+    lam: Lambda,
+    counter: str,
+    base: str,
+    value: str,
+    ety: TyId,
+    fold: Fold,
+    ctx: Ctx
+)
            Res<(), AllocError> {
     cmark = be.check.mark();
     lmark = be.mark();
@@ -542,16 +653,30 @@ handle_name = (lam: Lambda) str {
 // note above). A range that supplies no `at` walks its own index
 // space, where the value IS the counter — what makes `Range(0, 5)` a
 // bare C for-loop.
-bind_threaded = (be :: CBackend, sh: Shape, lam: Lambda, counter: str,
-                 base: str, value: str, ety: TyId) Res<(), AllocError> {
+bind_threaded = (
+    be :: CBackend,
+    sh: Shape,
+    lam: Lambda,
+    counter: str,
+    base: str,
+    value: str,
+    ety: TyId
+) Res<(), AllocError> {
     (sh.wants_index || sh.wants_value).match({
         false => Ok(()),
         true  => bind_named(be, sh, lam, counter, base, value, ety),
     })
 }
 
-bind_named = (be :: CBackend, sh: Shape, lam: Lambda, counter: str,
-              base: str, value: str, ety: TyId) Res<(), AllocError> {
+bind_named = (
+    be :: CBackend,
+    sh: Shape,
+    lam: Lambda,
+    counter: str,
+    base: str,
+    value: str,
+    ety: TyId
+) Res<(), AllocError> {
     (sh.wants_index && sh.wants_value).match({
         true  => bind_pair(be, lam, counter, base, value, ety),
         false => bind_single(be, sh, lam, counter, base, value, ety),
@@ -560,15 +685,28 @@ bind_named = (be :: CBackend, sh: Shape, lam: Lambda, counter: str,
 
 // Both: `index` is parameter one and `value` is parameter two, in the
 // order `loop_iter.zen` writes them.
-bind_pair = (be :: CBackend, lam: Lambda, counter: str, base: str,
-             value: str, ety: TyId) Res<(), AllocError> {
+bind_pair = (
+    be :: CBackend,
+    lam: Lambda,
+    counter: str,
+    base: str,
+    value: str,
+    ety: TyId
+) Res<(), AllocError> {
     bind_index(be, lam, 1, counter, base).try();
     bind_element(be, lam, 2, value, ety).try();
     Ok(());
 }
 
-bind_single = (be :: CBackend, sh: Shape, lam: Lambda, counter: str,
-               base: str, value: str, ety: TyId) Res<(), AllocError> {
+bind_single = (
+    be :: CBackend,
+    sh: Shape,
+    lam: Lambda,
+    counter: str,
+    base: str,
+    value: str,
+    ety: TyId
+) Res<(), AllocError> {
     sh.wants_index.match({
         true  => bind_index(be, lam, 1, counter, base),
         false => bind_element(be, lam, 1, value, ety),
@@ -578,8 +716,13 @@ bind_single = (be :: CBackend, sh: Shape, lam: Lambda, counter: str,
 // `index` is the pass count, so it is measured from where the walk
 // started. A loop with no range has no base and counts from zero
 // already.
-bind_index = (be :: CBackend, lam: Lambda, i: usize, counter: str,
-              base: str) Res<(), AllocError> {
+bind_index = (
+    be :: CBackend,
+    lam: Lambda,
+    i: usize,
+    counter: str,
+    base: str
+) Res<(), AllocError> {
     lam.params.get(i).match({
         None  => Ok(()),
         Ok(p) => bind_offset(be, p, counter, base),
@@ -597,8 +740,13 @@ bind_offset = (be :: CBackend, p: Param, counter: str, base: str)
     bind_text(be, p.name.text, usize_ty, text.view())
 }
 
-bind_element* = (be :: CBackend, lam: Lambda, i: usize, value: str,
-                ety: TyId) Res<(), AllocError> {
+bind_element* = (
+    be :: CBackend,
+    lam: Lambda,
+    i: usize,
+    value: str,
+    ety: TyId
+) Res<(), AllocError> {
     lam.params.get(i).match({
         None  => Ok(()),
         Ok(p) => bind_text(be, p.name.text, ety, value),

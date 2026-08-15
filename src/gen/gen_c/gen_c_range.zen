@@ -148,24 +148,36 @@ named_range_impl = (be :: CBackend, n: TyNamed)
 
 // "An impl lives with the type, not with the trait", so only impls in
 // the module that declares the type are this type's.
-keep_range_impl = (be :: CBackend, n: TyNamed, i: ImplId,
-                   out :: Vec<RangeImpl>) Res<(), AllocError> {
+keep_range_impl = (
+    be :: CBackend,
+    n: TyNamed,
+    i: ImplId,
+    out :: Vec<RangeImpl>
+) Res<(), AllocError> {
     (n.decl.module == i.decl.module).match({
         false => Ok(()),
         true  => range_impl_at(be, n, i, out),
     })
 }
 
-range_impl_at = (be :: CBackend, n: TyNamed, i: ImplId,
-                 out :: Vec<RangeImpl>) Res<(), AllocError> {
+range_impl_at = (
+    be :: CBackend,
+    n: TyNamed,
+    i: ImplId,
+    out :: Vec<RangeImpl>
+) Res<(), AllocError> {
     be.check.world.impl_at(be.tree, i).match({
         Ok(im) => keep_if_range(be, n, im, out),
         None   => Ok(()),
     })
 }
 
-keep_if_range = (be :: CBackend, n: TyNamed, im: Impl,
-                 out :: Vec<RangeImpl>) Res<(), AllocError> {
+keep_if_range = (
+    be :: CBackend,
+    n: TyNamed,
+    im: Impl,
+    out :: Vec<RangeImpl>
+) Res<(), AllocError> {
     mi = n.decl.module.to_usize();
     bound = be.check.impl_bound_type(im, mi).try();
     supplies_bounds(be, bound).match({
@@ -177,8 +189,13 @@ keep_if_range = (be :: CBackend, n: TyNamed, im: Impl,
 // An impl that names the bound and supplies neither `start` nor `end`
 // is not one to walk: `impl_field` finds nothing and the search moves
 // on rather than emitting a bound nothing wrote.
-add_range_impl = (be :: CBackend, n: TyNamed, im: Impl, mi: usize,
-                  out :: Vec<RangeImpl>) Res<(), AllocError> {
+add_range_impl = (
+    be :: CBackend,
+    n: TyNamed,
+    im: Impl,
+    mi: usize,
+    out :: Vec<RangeImpl>
+) Res<(), AllocError> {
     lo = impl_field(be, im, "start").try();
     lo.match({
         None  => Ok(()),
@@ -186,8 +203,14 @@ add_range_impl = (be :: CBackend, n: TyNamed, im: Impl, mi: usize,
     })
 }
 
-add_from_start = (be :: CBackend, n: TyNamed, im: Impl, mi: usize,
-                  s: ExprId, out :: Vec<RangeImpl>) Res<(), AllocError> {
+add_from_start = (
+    be :: CBackend,
+    n: TyNamed,
+    im: Impl,
+    mi: usize,
+    s: ExprId,
+    out :: Vec<RangeImpl>
+) Res<(), AllocError> {
     hi = impl_field(be, im, "end").try();
     at = impl_fn(be, im, "at").try();
     hi.match({
@@ -197,7 +220,8 @@ add_from_start = (be :: CBackend, n: TyNamed, im: Impl, mi: usize,
             mi: mi,
             start: s,
             end: e,
-            at: at)),
+            at: at
+        )),
     })
 }
 
@@ -338,15 +362,24 @@ is_res* = (be :: CBackend, want: TyId) bool {
 
 // A range whose `start` and `end` an impl supplies — a `Vec`, which is
 // the other half of `Range`'s two impls.
-lower_supplied* = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
-                  rty: TyId, lam: Lambda, ctx: Ctx, want: TyId,
-                  out :: String) Res<(), AllocError> {
+lower_supplied* = (
+    be :: CBackend,
+    id: ExprId,
+    sh: Shape,
+    one: ExprId,
+    rty: TyId,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    out :: String
+) Res<(), AllocError> {
     range_impl(be, rty).try().match({
         None   => unsupported(
             be,
             id,
             "a loop over a range whose bounds an impl supplies",
-            out),
+            out
+        ),
         Ok(ri) => lower_impl_range(
             be,
             id,
@@ -357,19 +390,30 @@ lower_supplied* = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
             lam,
             ctx,
             want,
-            out),
+            out
+        ),
     })
 }
 
-lower_impl_range = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
-                    rty: TyId, ri: RangeImpl, lam: Lambda, ctx: Ctx,
-                    want: TyId, out :: String) Res<(), AllocError> {
+lower_impl_range = (
+    be :: CBackend,
+    id: ExprId,
+    sh: Shape,
+    one: ExprId,
+    rty: TyId,
+    ri: RangeImpl,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    out :: String
+) Res<(), AllocError> {
     range_pass_type(be, rty).try().match({
         None     => unsupported(
             be,
             id,
             "a loop over a range whose element nothing settles",
-            out),
+            out
+        ),
         Ok(pass) => lower_impl_walk(
             be,
             id,
@@ -381,7 +425,8 @@ lower_impl_range = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
             lam,
             ctx,
             want,
-            out),
+            out
+        ),
     })
 }
 
@@ -397,9 +442,19 @@ lower_impl_range = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
 // is not `Ok` leaves the walk through the same `brk` label `h.break`
 // uses — which is `range.zen`'s "a None ends the walk early", and what
 // keeps a container that shrank under the loop from reading past itself.
-lower_impl_walk = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
-                   rty: TyId, ri: RangeImpl, pass: TyId, lam: Lambda,
-                   ctx: Ctx, want: TyId, out :: String)
+lower_impl_walk = (
+    be :: CBackend,
+    id: ExprId,
+    sh: Shape,
+    one: ExprId,
+    rty: TyId,
+    ri: RangeImpl,
+    pass: TyId,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    out :: String
+)
                   Res<(), AllocError> {
     elem = res_value_of(be, pass).match({ Ok(t) => t, None => pass });
     settled = settle_res(be, want, elem).try();
@@ -438,7 +493,8 @@ lower_impl_walk = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
         counter.view(),
         st.brk,
         rng.view(),
-        value).try();
+        value
+    ).try();
     run_body(
         be,
         sh,
@@ -448,7 +504,8 @@ lower_impl_walk = (be :: CBackend, id: ExprId, sh: Shape, one: ExprId,
         value.view(),
         elem,
         no_fold(be).try(),
-        ctx).try();
+        ctx
+    ).try();
     close_pass(be, st, counter.view(), no_fold(be).try()).try();
     Ok(());
 }
@@ -507,8 +564,14 @@ bind_text* = (be :: CBackend, name: str, ty: TyId, text: str)
 // `start: 0` and `end: self.len`, evaluated in the module that wrote
 // the impl with `@Self` bound to the receiver and the receiver's own
 // type arguments in force.
-supplied_bound* = (be :: CBackend, ri: RangeImpl, rty: TyId, value: ExprId,
-                  target: str, rng: str) Res<(), AllocError> {
+supplied_bound* = (
+    be :: CBackend,
+    ri: RangeImpl,
+    rty: TyId,
+    value: ExprId,
+    target: str,
+    rng: str
+) Res<(), AllocError> {
     usize_ty = be.check.types.prim("usize").try();
     ictx = impl_ctx(be, ri, usize_ty, rty);
     inst = recv_inst(be, rty).try();
@@ -536,7 +599,8 @@ impl_ctx = (be :: CBackend, ri: RangeImpl, ret: TyId, self_ty: TyId) Ctx {
         ret: ret,
         has_ret: is_res(be, ret),
         self_ty: self_ty,
-        has_self: true)
+        has_self: true
+    )
 }
 
 // ONE PASS: `at(i)`, and the tag that ends the walk.
@@ -544,8 +608,16 @@ impl_ctx = (be :: CBackend, ri: RangeImpl, ret: TyId, self_ty: TyId) Ctx {
 // `value` is left holding the C text of the `Ok` payload, which is what
 // `run_body` binds the body's second parameter to. A range with no `at`
 // hands out its own index, and then the counter IS the payload.
-take_pass* = (be :: CBackend, ri: RangeImpl, rty: TyId, pass: TyId,
-             counter: str, brk: usize, rng: str, value :: String)
+take_pass* = (
+    be :: CBackend,
+    ri: RangeImpl,
+    rty: TyId,
+    pass: TyId,
+    counter: str,
+    brk: usize,
+    rng: str,
+    value :: String
+)
             Res<(), AllocError> {
     ri.at.match({
         None  => value.add_bytes(counter),
@@ -553,8 +625,17 @@ take_pass* = (be :: CBackend, ri: RangeImpl, rty: TyId, pass: TyId,
     })
 }
 
-run_at = (be :: CBackend, ri: RangeImpl, rty: TyId, pass: TyId, f: Function,
-          counter: str, brk: usize, rng: str, value :: String)
+run_at = (
+    be :: CBackend,
+    ri: RangeImpl,
+    rty: TyId,
+    pass: TyId,
+    f: Function,
+    counter: str,
+    brk: usize,
+    rng: str,
+    value :: String
+)
          Res<(), AllocError> {
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "a", be.next_tmp()).try();
@@ -574,8 +655,16 @@ run_at = (be :: CBackend, ri: RangeImpl, rty: TyId, pass: TyId, f: Function,
 // parameters are the range and the counter, and both are C text this
 // file already wrote — so they are bound directly rather than lowered
 // from arguments that do not exist.
-inline_at = (be :: CBackend, ri: RangeImpl, rty: TyId, pass: TyId,
-             f: Function, counter: str, rng: str, tmp: str)
+inline_at = (
+    be :: CBackend,
+    ri: RangeImpl,
+    rty: TyId,
+    pass: TyId,
+    f: Function,
+    counter: str,
+    rng: str,
+    tmp: str
+)
             Res<(), AllocError> {
     usize_ty = be.check.types.prim("usize").try();
     ictx = impl_ctx(be, ri, pass, rty);
@@ -599,8 +688,12 @@ inline_at = (be :: CBackend, ri: RangeImpl, rty: TyId, pass: TyId,
 
 // Parameter one of `at`. Parameter zero is the receiver and is already
 // bound for the whole walk.
-bind_index_param = (be :: CBackend, f: Function, usize_ty: TyId,
-                    counter: str) Res<(), AllocError> {
+bind_index_param = (
+    be :: CBackend,
+    f: Function,
+    usize_ty: TyId,
+    counter: str
+) Res<(), AllocError> {
     f.params.get(1).match({
         None  => Ok(()),
         Ok(p) => bind_text(be, p.name.text, usize_ty, counter),

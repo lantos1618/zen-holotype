@@ -53,16 +53,24 @@ check_layout* = (c :: Checker) Res<(), AllocError> {
     Ok(());
 }
 
-module_layout = (c :: Checker, mi: usize, path :: Vec<Frame>,
-                 done :: Vec<DeclId>) Res<(), AllocError> {
+module_layout = (
+    c :: Checker,
+    mi: usize,
+    path :: Vec<Frame>,
+    done :: Vec<DeclId>
+) Res<(), AllocError> {
     c.world.table_at(mi).match({
         None  => Ok(()),
         Ok(t) => table_layout(c, t, path, done),
     })
 }
 
-table_layout = (c :: Checker, t: ModuleTable, path :: Vec<Frame>,
-                done :: Vec<DeclId>) Res<(), AllocError> {
+table_layout = (
+    c :: Checker,
+    t: ModuleTable,
+    path :: Vec<Frame>,
+    done :: Vec<DeclId>
+) Res<(), AllocError> {
     t.defs.loop((h, d) { root_layout(c, d, path, done).try() });
     Ok(());
 }
@@ -70,24 +78,40 @@ table_layout = (c :: Checker, t: ModuleTable, path :: Vec<Frame>,
 // A struct already walked is skipped, which is what makes this linear
 // rather than a walk per path: if a struct sits on a cycle, the walk
 // that started at it found it, so arriving a second way adds nothing.
-root_layout = (c :: Checker, d: Def, path :: Vec<Frame>,
-               done :: Vec<DeclId>) Res<(), AllocError> {
+root_layout = (
+    c :: Checker,
+    d: Def,
+    path :: Vec<Frame>,
+    done :: Vec<DeclId>
+) Res<(), AllocError> {
     struct_of(c, d.id).match({
         None  => Ok(()),
         Ok(s) => enter(c, d.id, s, s.name, path, done),
     })
 }
 
-enter = (c :: Checker, id: DeclId, s: Struct, site: Ident,
-         path :: Vec<Frame>, done :: Vec<DeclId>) Res<(), AllocError> {
+enter = (
+    c :: Checker,
+    id: DeclId,
+    s: Struct,
+    site: Ident,
+    path :: Vec<Frame>,
+    done :: Vec<DeclId>
+) Res<(), AllocError> {
     contains(done, id).match({
         true  => Ok(()),
         false => walk(c, id, s, site, path, done),
     })
 }
 
-walk = (c :: Checker, id: DeclId, s: Struct, site: Ident,
-        path :: Vec<Frame>, done :: Vec<DeclId>) Res<(), AllocError> {
+walk = (
+    c :: Checker,
+    id: DeclId,
+    s: Struct,
+    site: Ident,
+    path :: Vec<Frame>,
+    done :: Vec<DeclId>
+) Res<(), AllocError> {
     path.add(Frame(id: id, site: site)).try();
     s.members.loop((h, m) { field_edge(c, m, path, done).try() });
     path.take(path.len - 1);
@@ -97,16 +121,24 @@ walk = (c :: Checker, id: DeclId, s: Struct, site: Ident,
 
 // Only a field: a struct-body constant is one value per type and a
 // function member is code, neither storage the layout must account for.
-field_edge = (c :: Checker, m: Member, path :: Vec<Frame>,
-              done :: Vec<DeclId>) Res<(), AllocError> {
+field_edge = (
+    c :: Checker,
+    m: Member,
+    path :: Vec<Frame>,
+    done :: Vec<DeclId>
+) Res<(), AllocError> {
     m.kind.match({
         Field(f) => typed_edge(c, f, path, done),
         _        => Ok(()),
     })
 }
 
-typed_edge = (c :: Checker, f: Field, path :: Vec<Frame>,
-              done :: Vec<DeclId>) Res<(), AllocError> {
+typed_edge = (
+    c :: Checker,
+    f: Field,
+    path :: Vec<Frame>,
+    done :: Vec<DeclId>
+) Res<(), AllocError> {
     f.type.match({
         None  => Ok(()),
         Ok(t) => edge_from_top(c, t, f.name, path, done),
@@ -115,8 +147,13 @@ typed_edge = (c :: Checker, f: Field, path :: Vec<Frame>,
 
 // A written type means what it means where it was written, so the
 // module used is the one the struct atop the path was declared in.
-edge_from_top = (c :: Checker, t: TypeId, site: Ident, path :: Vec<Frame>,
-                 done :: Vec<DeclId>) Res<(), AllocError> {
+edge_from_top = (
+    c :: Checker,
+    t: TypeId,
+    site: Ident,
+    path :: Vec<Frame>,
+    done :: Vec<DeclId>
+) Res<(), AllocError> {
     path.get(path.len - 1).match({
         None   => Ok(()),
         Ok(fr) => edge_from(c, fr, t, site, path, done),
@@ -126,8 +163,14 @@ edge_from_top = (c :: Checker, t: TypeId, site: Ident, path :: Vec<Frame>,
 // `type_from_ast` is the one reading of a written type, so a field
 // written `Ptr<Node>` answers `Ptr` here, never `Node` — the indirection
 // rule falls out of the type instead of being spelled a second time.
-edge_from = (c :: Checker, fr: Frame, t: TypeId, site: Ident,
-             path :: Vec<Frame>, done :: Vec<DeclId>) Res<(), AllocError> {
+edge_from = (
+    c :: Checker,
+    fr: Frame,
+    t: TypeId,
+    site: Ident,
+    path :: Vec<Frame>,
+    done :: Vec<DeclId>
+) Res<(), AllocError> {
     poison = c.types.unknown().try();
     ctx = Ctx(fr.id.module.to_usize(), poison);
     ty = c.type_from_ast(t, ctx).try();
@@ -144,16 +187,26 @@ named_decl = (c: Checker, ty: TyId) Res<DeclId> {
     })
 }
 
-step = (c :: Checker, next: DeclId, site: Ident, path :: Vec<Frame>,
-        done :: Vec<DeclId>) Res<(), AllocError> {
+step = (
+    c :: Checker,
+    next: DeclId,
+    site: Ident,
+    path :: Vec<Frame>,
+    done :: Vec<DeclId>
+) Res<(), AllocError> {
     index_on(path, next).match({
         Ok(k) => close(c, k, site, path, done),
         None  => descend(c, next, site, path, done),
     })
 }
 
-descend = (c :: Checker, next: DeclId, site: Ident, path :: Vec<Frame>,
-           done :: Vec<DeclId>) Res<(), AllocError> {
+descend = (
+    c :: Checker,
+    next: DeclId,
+    site: Ident,
+    path :: Vec<Frame>,
+    done :: Vec<DeclId>
+) Res<(), AllocError> {
     struct_of(c, next).match({
         None  => Ok(()),
         Ok(s) => enter(c, next, s, site, path, done),
@@ -168,8 +221,13 @@ descend = (c :: Checker, next: DeclId, site: Ident, path :: Vec<Frame>,
 // The cycle's edges are the frames after `k`, plus the one that closes
 // it. Frame `k` was entered by an edge from outside the cycle, so its
 // site is not part of it.
-close = (c :: Checker, k: usize, site: Ident, path :: Vec<Frame>,
-         done :: Vec<DeclId>) Res<(), AllocError> {
+close = (
+    c :: Checker,
+    k: usize,
+    site: Ident,
+    path :: Vec<Frame>,
+    done :: Vec<DeclId>
+) Res<(), AllocError> {
     blame ::= site;
     Range(k + 1, path.len).loop((h, i) {
         blame = earlier(blame, site_at(path, i, blame));
@@ -177,7 +235,8 @@ close = (c :: Checker, k: usize, site: Ident, path :: Vec<Frame>,
     c.report(
         blame.span.file,
         blame.span,
-        SemaFault.InfiniteSize(NameFault(name: blame.text))).try();
+        SemaFault.InfiniteSize(NameFault(name: blame.text))
+    ).try();
     seal(k, path, done).try();
     Ok(());
 }

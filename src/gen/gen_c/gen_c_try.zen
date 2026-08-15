@@ -77,19 +77,32 @@ write_set_value = gen.gen_c.gen_c_widen
 declare_temp = gen.gen_c.gen_c_flow
 unwind_to = gen.gen_c.gen_c_own
 
-lower_try* = (be :: CBackend, node: Expr, operand: ExprId, ctx: Ctx,
-              dst: Dest) Res<(), AllocError> {
+lower_try* = (
+    be :: CBackend,
+    node: Expr,
+    operand: ExprId,
+    ctx: Ctx,
+    dst: Dest
+) Res<(), AllocError> {
     rt = res_type_of(be, operand, ctx).try();
     be.check.types.at(rt).match({
         Res(r) => lower_try_res(be, node, operand, r, rt, ctx, dst),
         _      => be.report_expr(
             operand,
-            GenFault.Untyped("the operand of .try()")),
+            GenFault.Untyped("the operand of .try()")
+        ),
     })
 }
 
-lower_try_res = (be :: CBackend, node: Expr, operand: ExprId, r: TyRes,
-                 rt: TyId, ctx: Ctx, dst: Dest) Res<(), AllocError> {
+lower_try_res = (
+    be :: CBackend,
+    node: Expr,
+    operand: ExprId,
+    r: TyRes,
+    rt: TyId,
+    ctx: Ctx,
+    dst: Dest
+) Res<(), AllocError> {
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "t", be.next_tmp()).try();
     declare_temp(be, rt, tmp.view()).try();
@@ -131,15 +144,22 @@ propagate = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
         Res(want) => propagate_into(be, node, r, want, tmp, ctx),
         _         => be.report(node.span.file, node.span,
                                GenFault.Unsupported(
-                                   ".try() outside a Res function")),
+                                   ".try() outside a Res function"
+                               )),
     })
 }
 
 // The two forms must agree — an absence cannot become a failure and
 // sema has already said so — and then the error is either the caller's
 // own or one member of it.
-propagate_into = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
-                  tmp: str, ctx: Ctx) Res<(), AllocError> {
+propagate_into = (
+    be :: CBackend,
+    node: Expr,
+    r: TyRes,
+    want: TyRes,
+    tmp: str,
+    ctx: Ctx
+) Res<(), AllocError> {
     forms_agree(r.form, want.form).match({
         false => report_widening(be, node),
         true  => propagate_failure(be, node, r, want, tmp, ctx),
@@ -151,8 +171,14 @@ propagate_into = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
 // raises nothing — "its error set is an open `_` with nothing in it" —
 // so comparing that set to the caller's asks about a value neither one
 // will ever hold.
-propagate_failure = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
-                     tmp: str, ctx: Ctx) Res<(), AllocError> {
+propagate_failure = (
+    be :: CBackend,
+    node: Expr,
+    r: TyRes,
+    want: TyRes,
+    tmp: str,
+    ctx: Ctx
+) Res<(), AllocError> {
     is_failure(r.form).match({
         false => write_propagation(be, r, want, tmp, ctx, Carry.Same),
         true  => propagate_error(be, node, r, want, tmp, ctx),
@@ -162,8 +188,14 @@ propagate_failure = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
 // The same set carries straight across: one C type, one payload member,
 // nothing to build. A different one is a widening, and `into` says which
 // of the caller's members it widens through.
-propagate_error = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
-                   tmp: str, ctx: Ctx) Res<(), AllocError> {
+propagate_error = (
+    be :: CBackend,
+    node: Expr,
+    r: TyRes,
+    want: TyRes,
+    tmp: str,
+    ctx: Ctx
+) Res<(), AllocError> {
     r.error.eq(want.error).match({
         true  => write_propagation(be, r, want, tmp, ctx, Carry.Same),
         false => propagate_wider(be, node, r, want, tmp, ctx),
@@ -184,8 +216,14 @@ propagate_error = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
 // switch because the tags agree — `gen_c_layout.write_enum_tags`
 // numbers a union's members canonically, which is the layout rule the
 // same DESIGN.md paragraph states and the whole reason to state it.
-propagate_wider = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
-                   tmp: str, ctx: Ctx) Res<(), AllocError> {
+propagate_wider = (
+    be :: CBackend,
+    node: Expr,
+    r: TyRes,
+    want: TyRes,
+    tmp: str,
+    ctx: Ctx
+) Res<(), AllocError> {
     same_set(be, r.error, want.error).match({
         true  => write_propagation(be, r, want, tmp, ctx, Carry.Copy),
         false => widen_or_report(be, node, r, want, tmp, ctx),
@@ -201,16 +239,28 @@ same_set = (be :: CBackend, got: TyId, want: TyId) bool {
 // are not the same kind of thing: a declared enum widens through a
 // VARIANT, which has a name, and a structural set has no names at all —
 // its members are types, and the member type is the answer.
-widen_or_report = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
-                   tmp: str, ctx: Ctx) Res<(), AllocError> {
+widen_or_report = (
+    be :: CBackend,
+    node: Expr,
+    r: TyRes,
+    want: TyRes,
+    tmp: str,
+    ctx: Ctx
+) Res<(), AllocError> {
     be.check.types.at(want.error).match({
         Union(_) => widen_into_set(be, node, r, want, tmp, ctx),
         _        => widen_into_enum(be, node, r, want, tmp, ctx),
     })
 }
 
-widen_into_enum = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
-                   tmp: str, ctx: Ctx) Res<(), AllocError> {
+widen_into_enum = (
+    be :: CBackend,
+    node: Expr,
+    r: TyRes,
+    want: TyRes,
+    tmp: str,
+    ctx: Ctx
+) Res<(), AllocError> {
     carrier(be, want.error, r.error).match({
         None  => retag_or_report(be, node, r, want, tmp, ctx),
         Ok(v) => write_propagation(be, r, want, tmp, ctx, Carry.Variant(v)),
@@ -226,8 +276,14 @@ widen_into_enum = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
 // not a widening this backend has not got to yet; it is a widening that
 // does not exist, and the only way to reach it is for sema to have let
 // something past.
-widen_into_set = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
-                  tmp: str, ctx: Ctx) Res<(), AllocError> {
+widen_into_set = (
+    be :: CBackend,
+    node: Expr,
+    r: TyRes,
+    want: TyRes,
+    tmp: str,
+    ctx: Ctx
+) Res<(), AllocError> {
     be.check.types.set_has(want.error, r.error).match({
         false => retag_or_report(be, node, r, want, tmp, ctx),
         true  => write_propagation(
@@ -236,7 +292,8 @@ widen_into_set = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
             want,
             tmp,
             ctx,
-            Carry.Member(r.error)),
+            Carry.Member(r.error)
+        ),
     })
 }
 
@@ -259,8 +316,14 @@ widen_into_set = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
 // `gen_c_layout.variant_ranks`' reason: a half-built map leaves some tag
 // unmapped, and an unmapped tag is a wrong ERROR VARIANT at runtime with
 // no diagnostic and no C that fails to compile.
-retag_or_report = (be :: CBackend, node: Expr, r: TyRes, want: TyRes,
-                   tmp: str, ctx: Ctx) Res<(), AllocError> {
+retag_or_report = (
+    be :: CBackend,
+    node: Expr,
+    r: TyRes,
+    want: TyRes,
+    tmp: str,
+    ctx: Ctx
+) Res<(), AllocError> {
     retaggable(be, r.error, want.error).match({
         false => report_widening(be, node),
         true  => write_propagation(be, r, want, tmp, ctx, Carry.Retag),
@@ -292,16 +355,24 @@ all_tagged = (be :: CBackend, from_set: TyId, to_set: TyId) bool {
     })
 }
 
-no_member_untagged = (be :: CBackend, from_set: TyId, to_set: TyId,
-                      members: Vec<TyId>) bool {
+no_member_untagged = (
+    be :: CBackend,
+    from_set: TyId,
+    to_set: TyId,
+    members: Vec<TyId>
+) bool {
     untagged(be, from_set, to_set, members).match({
         Ok(_) => false,
         None  => true,
     })
 }
 
-untagged = (be :: CBackend, from_set: TyId, to_set: TyId,
-            members: Vec<TyId>) Res<usize> {
+untagged = (
+    be :: CBackend,
+    from_set: TyId,
+    to_set: TyId,
+    members: Vec<TyId>
+) Res<usize> {
     Range(0, members.len).find((i) {
         members.get(i).match({
             None  => true,
@@ -366,8 +437,12 @@ decl_carrier = (be :: CBackend, n: TyNamed, d: Decl, err: TyId) Res<str> {
 // The walk allocates and the answer is an absence, so the two are kept
 // apart the way `variant_payload` above keeps them apart: a lookup that
 // ran out of memory has not found a carrier.
-variant_carrying = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
-                    err: TyId) Res<str> {
+variant_carrying = (
+    be :: CBackend,
+    n: TyNamed,
+    variants: Vec<Variant>,
+    err: TyId
+) Res<str> {
     found ::= be.alloc.Vec<str>();
     collect_carrier(be, n, variants, err, found).match({
         Err(_) => None,
@@ -375,8 +450,13 @@ variant_carrying = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
     })
 }
 
-collect_carrier = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
-                   err: TyId, found :: Vec<str>) Res<(), AllocError> {
+collect_carrier = (
+    be :: CBackend,
+    n: TyNamed,
+    variants: Vec<Variant>,
+    err: TyId,
+    found :: Vec<str>
+) Res<(), AllocError> {
     ctx = decl_ctx(be, n);
     inst = decl_inst(be, n).try();
     mark = enter_struct_tparams(be, n.decl).try();
@@ -387,8 +467,15 @@ collect_carrier = (be :: CBackend, n: TyNamed, variants: Vec<Variant>,
     Ok(());
 }
 
-keep_carrier = (be :: CBackend, n: TyNamed, v: Variant, err: TyId,
-                ctx: Ctx, inst: Inst, found :: Vec<str>)
+keep_carrier = (
+    be :: CBackend,
+    n: TyNamed,
+    v: Variant,
+    err: TyId,
+    ctx: Ctx,
+    inst: Inst,
+    found :: Vec<str>
+)
                Res<(), AllocError> {
     carries(be, n, v, err, ctx, inst).match({
         false => Ok(()),
@@ -396,8 +483,14 @@ keep_carrier = (be :: CBackend, n: TyNamed, v: Variant, err: TyId,
     })
 }
 
-carries = (be :: CBackend, n: TyNamed, v: Variant, err: TyId, ctx: Ctx,
-           inst: Inst) bool {
+carries = (
+    be :: CBackend,
+    n: TyNamed,
+    v: Variant,
+    err: TyId,
+    ctx: Ctx,
+    inst: Inst
+) bool {
     variant_type(be, n, v, ctx, inst).match({
         None  => false,
         Ok(t) => t.eq(err),
@@ -414,7 +507,8 @@ forms_agree = (got: ResForm, want: ResForm) bool {
 report_widening = (be :: CBackend, node: Expr) Res<(), AllocError> {
     be.report(node.span.file, node.span,
               GenFault.Unsupported(
-                  "widening an error set through .try()")).try();
+                  "widening an error set through .try()"
+              )).try();
     Ok(());
 }
 
@@ -441,8 +535,14 @@ Carry = Same | Variant(str) | Member(TyId) | Copy | Retag
 
 // `into` says how the caller's error payload is built out of the
 // callee's — except for `Copy` and `Retag`, where it is not built.
-write_propagation = (be :: CBackend, r: TyRes, want: TyRes, tmp: str,
-                     ctx: Ctx, into: Carry) Res<(), AllocError> {
+write_propagation = (
+    be :: CBackend,
+    r: TyRes,
+    want: TyRes,
+    tmp: str,
+    ctx: Ctx,
+    into: Carry
+) Res<(), AllocError> {
     into.match({
         Copy  => write_copy(be, r, tmp, ctx),
         Retag => write_retag(be, r, want, tmp, ctx),
@@ -450,8 +550,14 @@ write_propagation = (be :: CBackend, r: TyRes, want: TyRes, tmp: str,
     })
 }
 
-write_built = (be :: CBackend, r: TyRes, want: TyRes, tmp: str,
-               ctx: Ctx, into: Carry) Res<(), AllocError> {
+write_built = (
+    be :: CBackend,
+    r: TyRes,
+    want: TyRes,
+    tmp: str,
+    ctx: Ctx,
+    into: Carry
+) Res<(), AllocError> {
     line ::= be.alloc.String().try();
     line.add_bytes("return (").try();
     ctype(be, ctx.ret, line).try();
@@ -553,8 +659,13 @@ read_tag = (v: str, out :: String) Res<(), AllocError> {
 // One case per member of the SOURCE set, which is the only tag values
 // this value can arrive with. `retaggable` has already established that
 // both sides can name every one of them.
-write_tag_map = (be :: CBackend, from_set: TyId, to_set: TyId, w: str,
-                 tmp: str) Res<(), AllocError> {
+write_tag_map = (
+    be :: CBackend,
+    from_set: TyId,
+    to_set: TyId,
+    w: str,
+    tmp: str
+) Res<(), AllocError> {
     members ::= be.alloc.Vec<TyId>();
     canon = be.check.set_of(from_set);
     be.check.types.members_of(canon, members).try();
@@ -577,8 +688,13 @@ open_switch = (be :: CBackend, tmp: str) Res<(), AllocError> {
     Ok(());
 }
 
-write_tag_case = (be :: CBackend, from_set: TyId, to_set: TyId, m: TyId,
-                  w: str) Res<(), AllocError> {
+write_tag_case = (
+    be :: CBackend,
+    from_set: TyId,
+    to_set: TyId,
+    m: TyId,
+    w: str
+) Res<(), AllocError> {
     line ::= be.alloc.String().try();
     line.add_bytes("case ").try();
     write_member_tag(be, from_set, m, line).try();
@@ -650,8 +766,13 @@ failure_tag = (be :: CBackend, r: TyRes, out :: String) Res<(), AllocError> {
     })
 }
 
-carry_error = (be :: CBackend, want: TyRes, tmp: str, into: Carry,
-               out :: String) Res<(), AllocError> {
+carry_error = (
+    be :: CBackend,
+    want: TyRes,
+    tmp: str,
+    into: Carry,
+    out :: String
+) Res<(), AllocError> {
     out.add_bytes(", .zg_data.").try();
     out.sym_member("Err").try();
     out.add_bytes(" = ").try();
@@ -680,8 +801,13 @@ read_error = (tmp: str, out :: String) Res<(), AllocError> {
 // unchanged. The two `Res`es are two C structs with two different
 // payload members, so there was never a copy that could have worked —
 // which is what the old report was telling the truth about.
-wrap_error = (be :: CBackend, set: TyId, variant: str, tmp: str,
-              out :: String) Res<(), AllocError> {
+wrap_error = (
+    be :: CBackend,
+    set: TyId,
+    variant: str,
+    tmp: str,
+    out :: String
+) Res<(), AllocError> {
     qname ::= be.alloc.String().try();
     set_qname(be, set, qname).try();
     out.add_bytes("(").try();
@@ -702,8 +828,13 @@ wrap_error = (be :: CBackend, set: TyId, variant: str, tmp: str,
 // temporary. `wrap_error` above is the declared-enum twin, and it is
 // separate because a declaration has a path and a variant name where a
 // set has neither.
-wrap_set_error = (be :: CBackend, set: TyId, member: TyId, tmp: str,
-                  out :: String) Res<(), AllocError> {
+wrap_set_error = (
+    be :: CBackend,
+    set: TyId,
+    member: TyId,
+    tmp: str,
+    out :: String
+) Res<(), AllocError> {
     code ::= be.alloc.String().try();
     read_error(tmp, code).try();
     write_set_value(be, code.view(), member, set, out)
