@@ -374,6 +374,37 @@ ask through `bracketPairsImpl.ts`, whose every search site is guarded by
 semantic tokens and neither needs to, so `src/lsp/lsp_colour.zen` can go
 on emitting nothing for delimiters.
 
+**And the sentence has an "only where the tokenizer answers" in it that
+is doing more work than it looks.** When there is no tokenizer at all,
+nothing answers, and colorization does not fall back to asking more
+carefully — it stops asking:
+
+```ts
+// bracketPairsTree.ts
+if (!textModel.tokenization.hasTokens) {
+    const tokenizer = new FastTokenizer(this.textModel.getValue(), brackets);
+    this.initialAstWithoutTokens = parseDocument(tokenizer, [], undefined, true);
+    this.astWithTokens = this.initialAstWithoutTokens;
+}
+```
+
+`FastTokenizer` takes `getValue()` — the raw document — and finds every
+bracket in it, in a string or not, and `astWithTokens` is then that tree
+and never gets a better one. This is the branch a `.zen` file takes with
+no grammar contributed, and it is why the symptom was always a *colour*:
+the `()` in `".try() outside a Res function"` came out blue, which is
+`editorBracketHighlight.foreground3`, a nesting depth. It was never the
+match highlight and never a semantic token.
+
+Two things follow, and both were guessed wrong at least once. Balanced or
+unbalanced makes no difference — `FastTokenizer` is not confused by
+`");"`, it simply sees it. And **declaring `colorizedBracketPairs` would
+not have changed anything**: `LanguageBracketsConfiguration` chooses a
+set of character pairs and holds no token logic whatsoever, so the
+configured and the fallback path reach the identical tokenizer. There is
+no filter for the fallback to lose. The only fix for this branch is to
+give the editor a grammar, which is the section above.
+
 The one subsystem that is token-aware only if asked is **auto-closing**.
 `StandardAutoClosingPairConditional` starts each pair with `_inString =
 true` and nothing but a `notIn` turns it off, so all five pairs in

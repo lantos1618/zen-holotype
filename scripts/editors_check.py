@@ -13,6 +13,15 @@ read as three real open brackets, because with no grammar every byte is
 plain text. Colour survived (the server sends semanticTokens), so the
 break was invisible to anyone reading the file rather than editing it.
 
+The precise branch is worth naming, because "the tokenization is
+correct" was verified three times while the bug was watched happening.
+`bracketPairsTree.ts` asks `textModel.tokenization.hasTokens` FIRST, and
+when the answer is no it builds the bracket tree with a `FastTokenizer`
+over `getValue()` — the raw document, every bracket in it, string or
+not — and assigns that tree to `astWithTokens`. There is no token filter
+on that path to get right. The grammar is not how the brackets in a
+string are excluded so much as how the editor is kept off that branch.
+
 Not a colour check. The grammar names comments, strings and character
 literals and nothing else, on purpose — `editors/README.md` says why.
 
