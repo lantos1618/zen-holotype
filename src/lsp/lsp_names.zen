@@ -12,7 +12,7 @@
 // `defs_of`, no scope walk; a name sema did not settle keeps the
 // lexer's `variable`.
 //
-// FOUR WALKS, one per place the answer is written down:
+// FIVE WALKS, one per place the answer is written down:
 //
 //   - DECLARATION SITES, from the AST alone: a `Function`'s name and
 //     its parameters, a `Struct`/`Enum`/`Alias` name, an `Impl`'s
@@ -30,6 +30,16 @@
 //     named BARE (`Point(x: 1)`). `Shape.Circle(c)` records the enum
 //     too, and the name written there is the variant's — a variant is
 //     not a type.
+//   - THE TWO INTRINSICS, from the AST alone: `.match` and `.try()`
+//     wear the shape of a method call and are not one, so they are
+//     `Match`/`Try` nodes and no memo will ever resolve them —
+//     "there's no `try` field on `Res` and no function of that name"
+//     (`ast_node.zen`). Without this walk they are the only words in a
+//     clean file that stay `variable` while the calls around them go
+//     `function`. `keyword` is what they are: `parse_expr.zen`'s
+//     `dot_target` recognises them once, by name, at a position no
+//     binding can take over — which is exactly what `consume` is, and
+//     `consume` is `keyword` from the lexer.
 //   - PARAMETER USES, from `param_memo`: the one fact neither the AST
 //     nor a type can say, recorded where resolution still had the scope
 //     (`sema_check.zen`'s `Binding.param`).
@@ -51,7 +61,7 @@ Alloc, AllocError = std.mem
 Vec = std.collections
 Range = std.core
 Ast, Module, Decl, Block = std.ast
-Struct, Enum, Alias, Impl, Member, Function, Named, Call = std.ast
+Struct, Enum, Alias, Impl, Member, Function, Named, Call, Match, Try = std.ast
 Span, ExprId, TypeId, BlockId = std.ast
 Checker = sema.sema_check
 decl_at = sema.sema_def
@@ -211,7 +221,8 @@ named_site = (a: Alloc, c: Checker, root: str, tid: TypeId, n: Named,
 // --- call sites and parameter uses -------------------------------------
 
 // One pass over every expression: a CALL asks `call_memo` what it
-// resolved to, a NAME asks `param_memo` whether it is a parameter.
+// resolved to, a NAME asks `param_memo` whether it is a parameter, and
+// an INTRINSIC asks nothing — the node kind IS the answer.
 expr_sites = (a: Alloc, c: Checker, root: str, out :: Vec<Classed>)
              Res<(), AllocError> {
     eid ::= ExprId(index: 0);
@@ -226,9 +237,11 @@ expr_site = (a: Alloc, c: Checker, root: str, id: ExprId,
              out :: Vec<Classed>) Res<(), AllocError> {
     e = c.tree.expr_at(id);
     e.kind.match({
-        Call(k) => call_site(a, c, root, id, k, out),
-        Name(_) => param_site(a, c, root, id, e.span, out),
-        _       => written(),
+        Call(k)  => call_site(a, c, root, id, k, out),
+        Match(m) => class_as(a, root, m.name_span, Colour.Keyword, out),
+        Try(t)   => class_as(a, root, t.name_span, Colour.Keyword, out),
+        Name(_)  => param_site(a, c, root, id, e.span, out),
+        _        => written(),
     })
 }
 
