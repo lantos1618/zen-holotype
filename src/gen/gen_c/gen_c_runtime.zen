@@ -28,7 +28,7 @@ Vec = std.collections
 str, String = std.text
 Emit, order = gen.gen_emit
 CBackend = gen.gen_c.gen_c_state
-c_prim, is_signed, pick = gen.gen_c.gen_c_type
+c_prim, is_signed = gen.gen_c.gen_c_type
 
 // The C standard this backend targets, stated in exactly one place.
 C_STANDARD* : str = "C99 (ISO/IEC 9899:1999)"
@@ -609,7 +609,11 @@ fallback = (out :: Emit, ct: str, prim: str, op: str) Res<(), AllocError> {
 }
 
 c_symbol* = (op: str) str {
-    pick(op, "add", "+", pick(op, "sub", "-", "*"))
+    op.match({
+        "add" => "+",
+        "sub" => "-",
+        _     => "*",
+    })
 }
 
 // `a + b` overflows a signed type at the top when b is positive and at
@@ -781,98 +785,39 @@ wrapping = (out :: Emit, ct: str, uct: str, prim: str, op: str, sym: str)
 }
 
 unsigned_of* = (ct: str) str {
-    pick(
-        ct,
-        "int8_t",
-        "uint8_t",
-        pick(
-            ct,
-            "int16_t",
-            "uint16_t",
-            pick(
-                ct,
-                "int32_t",
-                "uint32_t",
-                pick(
-                    ct,
-                    "int64_t",
-                    "uint64_t",
-                    pick(ct, "ptrdiff_t", "size_t", ct)
-                )
-            )
-        )
-    )
+    ct.match({
+        "int8_t"    => "uint8_t",
+        "int16_t"   => "uint16_t",
+        "int32_t"   => "uint32_t",
+        "int64_t"   => "uint64_t",
+        "ptrdiff_t" => "size_t",
+        _           => ct,
+    })
 }
 
 max_macro* = (prim: str) str {
-    pick(
-        prim,
-        "i8",
-        "INT8_MAX",
-        pick(
-            prim,
-            "i16",
-            "INT16_MAX",
-            pick(
-                prim,
-                "i32",
-                "INT32_MAX",
-                pick(
-                    prim,
-                    "i64",
-                    "INT64_MAX",
-                    pick(
-                        prim,
-                        "int",
-                        "INT64_MAX",
-                        pick(
-                            prim,
-                            "u8",
-                            "UINT8_MAX",
-                            pick(
-                                prim,
-                                "u16",
-                                "UINT16_MAX",
-                                pick(
-                                    prim,
-                                    "u32",
-                                    "UINT32_MAX",
-                                    pick(
-                                        prim,
-                                        "u64",
-                                        "UINT64_MAX",
-                                        pick(prim, "usize", "SIZE_MAX", "0")
-                                    )
-                                )
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    )
+    prim.match({
+        "i8"    => "INT8_MAX",
+        "i16"   => "INT16_MAX",
+        "i32"   => "INT32_MAX",
+        "i64"   => "INT64_MAX",
+        "int"   => "INT64_MAX",
+        "u8"    => "UINT8_MAX",
+        "u16"   => "UINT16_MAX",
+        "u32"   => "UINT32_MAX",
+        "u64"   => "UINT64_MAX",
+        "usize" => "SIZE_MAX",
+        _       => "0",
+    })
 }
 
 min_macro* = (prim: str) str {
-    pick(
-        prim,
-        "i8",
-        "INT8_MIN",
-        pick(
-            prim,
-            "i16",
-            "INT16_MIN",
-            pick(
-                prim,
-                "i32",
-                "INT32_MIN",
-                pick(
-                    prim,
-                    "i64",
-                    "INT64_MIN",
-                    pick(prim, "int", "INT64_MIN", "0")
-                )
-            )
-        )
-    )
+    prim.match({
+        "i8"  => "INT8_MIN",
+        "i16" => "INT16_MIN",
+        "i32" => "INT32_MIN",
+        "i64" => "INT64_MIN",
+        "int" => "INT64_MIN",
+        _     => "0",
+    })
 }

@@ -91,11 +91,7 @@ CBackend* = {
     // the types this program needs a C definition for
     type_names* :: Vec<String>,
     type_ids* :: Vec<TyId>,
-    // `Vec<usize>` and not `Vec<bool>`: a `Res<bool>` defeats the
-    // bootstrapper's inference of `Ok`, which is recorded with a
-    // reproducer in docs/GEN_BOOTSTRAP_FIXES.md. 0 is pending, 1 is
-    // written.
-    type_done* :: Vec<usize>,
+    type_done* :: Vec<bool>,
 
     // the integer types a checked `+ - * / %` was emitted for
     helper_types* :: Vec<String>,
@@ -250,7 +246,7 @@ CBackend* = {
                   Res<(), AllocError> {
         self.type_names.add(name).try();
         self.type_ids.add(id).try();
-        self.type_done.add(0).try();
+        self.type_done.add(false).try();
         Ok(());
     }
 
@@ -261,11 +257,11 @@ CBackend* = {
     type_id_at* = (self: @Self, i: usize) Res<TyId> { self.type_ids.get(i) }
 
     is_done* = (self: @Self, i: usize) bool {
-        self.type_done.get(i).match({ Ok(n) => n == 1, None => true })
+        self.type_done.get(i).match({ Ok(d) => d, None => true })
     }
 
     mark_done* = (self :: @Self, i: usize) Res<(), AllocError> {
-        self.type_done.set(i, 1).match({
+        self.type_done.set(i, true).match({
             None  => Err(AllocError.OutOfMemory),
             Ok(_) => Ok(()),
         })
@@ -780,7 +776,7 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         diags: a.Vec<GenDiag>(),
         type_names: a.Vec<String>(),
         type_ids: a.Vec<TyId>(),
-        type_done: a.Vec<usize>(),
+        type_done: a.Vec<bool>(),
         helper_types: a.Vec<String>(),
         print_used: false,
         fs_used: false,

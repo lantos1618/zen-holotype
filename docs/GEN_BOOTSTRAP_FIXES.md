@@ -247,6 +247,16 @@ bootstrapper (bootstrap/gen_c.py). */`). The fixpoint compares stage2 against
 stage3 — both from the Zen backend — so it is unaffected; it only means the two
 backends' C cannot be diffed directly.
 
+**Never here at all:** `gen_c_mono.zen` and `gen_c_ptr.zen` each carried a
+comment warning that `be.check.types.named(..)` DOES NOT INTERN when reached
+through TWO field hops, and each cited this file for the emitted C. No such
+entry has ever existed in this ledger, and the claim is false in the shipped
+compiler: `gen_c_display.zen:249` makes exactly that two-hop mutating call and
+emits `&((*zu_l2be).zu_m5check.zu_m5types)` — the address of the real nested
+store, with no temporary spilled. Both comments were deleted 2026-08-16. The
+`intern_*` forwarders they justified were kept: eight modules call them, and a
+named forwarder is worth having on its own.
+
 ---
 ---
 
@@ -771,17 +781,27 @@ In the order the work would pay off:
    `b`, `example/build.zen` does not compile through `bootstrap`, and no
    corpus test can be written in the shape the shipped compiler already gets
    right.
-3. **Put the four §B/§6 workarounds back into their natural form** — they are
-   load-bearing for nothing and each names this file in a comment that is now
-   wrong:
-   - `gen_c_type.zen:188` `c_prim` + `c_prim_wide` + `pick` → one
-     seventeen-arm `.match`, which the comment there already asks for;
-   - `gen_c_runtime.zen:585,647` `signed_guard` / `signed_sub_or_mul` /
-     `unsigned_guard` / `unsigned_sub_or_mul` → two `.match`es on `op`;
-   - `gen_diag.zen:95` `detail` → bind the payload to a local, one
-     `out.add_bytes`;
-   - `gen_diag.zen:66` `render_gen` → `GenDiag.render`, if
-     `scripts/ufcs_collisions.py` stays at 0.
+3. **Put the §B/§6 workarounds back into their natural form.** *Mostly done
+   2026-08-16*: `gen_c_type.zen`'s `c_prim` + `c_prim_wide` + `pick` are one
+   seventeen-arm `.match`, and `gen_c_runtime.zen`'s `unsigned_of` /
+   `max_macro` / `min_macro` / `c_symbol` are four more. Every comment naming
+   this file for a bug that is closed went with them, and the old and new
+   compilers emit byte-identical C for the same input. What is left:
+   - `gen_c_runtime.zen:623,708` `signed_guard` / `signed_sub_or_mul` /
+     `unsigned_guard` / `unsigned_sub_or_mul` → two `.match`es on `op`. Same
+     shape, same cause, and the only one of these still contorted — though it
+     carries no comment blaming this file, so it reads as a choice.
+   - `gen_diag.zen:86` `detail` → NOT REACHABLE as asked. Binding the payload
+     to one local needs the five `str` arms to share one arm body, and the
+     grammar has neither or-patterns nor a `return` inside an
+     expression-position arm; both were tried and both are parse errors. §6 is
+     genuinely closed — a bound `str` payload emits `zg_str zu_l4what;` and
+     runs — so the false comment is gone, but the six-arm dispatch stays and is
+     the shorter of the two anyway.
+   - `gen_diag.zen:62` `render_gen` → `GenDiag.render` is unblocked
+     (`scripts/ufcs_collisions.py` reads 0 ambiguous over 3210). The `GenDiag`
+     NAME stays regardless: STYLE.md's grep test asks for it on its own, with
+     no reference to §3.
 4. **Gate the no-`__builtin` arm of the checked helpers** (§A). It is correct
    today — 35 of 35 trap programs compile under `-std=c99 -pedantic` and trap
    as expected with the macro renamed — and nothing anywhere would notice if it
