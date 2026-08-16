@@ -1,0 +1,44 @@
+// tests/corpus/std/eq_is_in_over_primitives.zen
+// A primitive is an ordinary subject of `<T: Eq>`: every integer and
+// `bool` impls Eq beside its own declaration, so the run of `||` that
+// `b == ' ' || b == '\t' || ..` was spelling has an is_in form.
+//
+// THE SIBLING TEST is eq_is_in_asks_each_types_own_eq, which pins that
+// dispatch goes to the SUBJECT'S eq. This one pins that the subject may
+// be a primitive at all, across three families — a byte, a signed
+// integer and a bool — since the impls are written one per type and a
+// missing one is a `<T: Eq>` rejection at the call site, not an error at
+// the declaration that omitted it.
+//
+// `==` IS STILL THE C OPERATOR and that is asserted rather than assumed:
+// an Eq impl on a primitive that turned `a == b` into a call to `eq`
+// would be a regression across every comparison in the compiler, and it
+// would still print `true`. The two spellings are asked of the same pair
+// so a divergence is a wrong ANSWER and not a compile error.
+//
+// THE i32 LIST IS BUILT FROM BINDINGS AND NOT FROM `[1, 2, 3]`, which is
+// not fussiness: a bare integer-literal array types as `[int, N]` — the
+// literal family, not `i32` — and `int` implements nothing, so that
+// spelling fails in codegen with `cannot resolve eq`. That is a literal
+// -defaulting hole of its own and predates every Eq impl here; char
+// literals and `false` carry their types, which is why only this one
+// line needs the bindings.
+
+main = (env: Env) Res<i32, AllocError> {
+    b: u8 = '\t';
+    println("space {}", b.is_in([' ', '\t', '\n', '\r']));
+    println("not space {}", 'x'.is_in([' ', '\t', '\n', '\r']));
+
+    n: i32   = 3;
+    one: i32 = 1;
+    println("int hit {}", n.is_in([one, n]));
+    println("int miss {}", one.is_in([n, n]));
+
+    println("bool hit {}", false.is_in([false, false]));
+    println("bool miss {}", true.is_in([false, false]));
+
+    println("operator {}", b == '\t');
+    println("method {}", b.eq('\t'));
+    println("ne {}", b.ne('\t'));
+    Ok(0);
+}
