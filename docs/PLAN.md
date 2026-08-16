@@ -385,10 +385,10 @@ Only after this does the compiler start using `@meta` on itself.
 | fixpoint | `stage2.c != stage3.c` |
 | `zen fmt --check` | any file is unformatted |
 | `must-fail/` | anything that should be rejected compiles |
-| `allocs_op` / `bytes_op` budgets | **hard fail** — deterministic, so a regression is real |
-| `ns_op`, build wall clock | sustained shift past a rolling median — reported, not flaky-fatal |
+| `allocs_op` / `bytes_op` budgets | **hard fail** — deterministic, so a regression is real. `make bench-allocs`, inside `make test` |
+| `ns_op`, build wall clock | sustained shift past a rolling median — reported, not flaky-fatal. `make bench`, outside it |
 
-Benches take a `Bencher` and are discovered by `build.zen` walking the parsed module tree, the same way tests are. Because all allocation goes through `Alloc`, alloc counting is free.
+Benches take a `Bencher` and are discovered by `build.zen` walking the parsed module tree, the same way tests are. Because all allocation goes through `Alloc`, alloc counting is free — that is the end state. Until `build.zen` exists, `tests/bench/drivers/` mirrors each bench body as a plain program and `scripts/bench.py` counts at the libc boundary instead, through `ld --wrap`; the budgets are ceilings there rather than exact counts, and `docs/TESTING.md` says what the difference costs.
 
 ---
 

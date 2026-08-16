@@ -21,10 +21,11 @@ stage-5 import that cannot be written yet); `make grammar-test` is now a real
 gate (`scripts/grammar_test.py`) that asserts 23 parse-negatives fail and 391
 positive files parse, and its first run caught three misclassified fixtures,
 which moved to the suite where their rejection is actually asserted. Still
-open: nothing compiles `tests/bench/` or `example/`, `example/build.zen`'s
-`Function` has no importable home anywhere in std, and four implementation
-comments in src/ and bootstrap/ cite `bench_loop.zen`'s unrun `allocs_op: 0`
-budget as load-bearing justification.
+open: nothing compiles `example/`, and `example/build.zen`'s `Function` has
+no importable home anywhere in std. `tests/bench/` closed on 2026-08-16 —
+`make parse` reads it and `make bench-allocs` runs the drivers inside
+`make test` — so the four implementation comments citing `bench_loop.zen`'s
+`allocs_op: 0` are no longer citing an unrun budget.
 
 ---
 
@@ -109,10 +110,13 @@ file — no fix is claimed.
 
 ## What remains open
 
-- **tests/bench/ still compiles under nothing.** The import lines make the
-  files correct, not gated. No target compiles, parses, formats, or lints
-  the directory. This is the load-bearing one: see the four citing sites
-  above, now named in docs/TESTING.md.
+- ~~**tests/bench/ still compiles under nothing.**~~ **Closed 2026-08-16.**
+  `make parse` reads the directory, and `make bench-allocs` — a prerequisite
+  of `make test` — compiles and runs every driver and fails on `allocs_op` /
+  `bytes_op` over budget. The four citing sites named in docs/TESTING.md now
+  have a gate under them, at the libc boundary rather than the `Alloc` trait:
+  ceilings for the non-zero budgets, exact for the zero ones, which is the
+  half those four comments actually claim.
 - **example/ is never compiled.** Its only gates remain tree-sitter parse
   (`make parse`) and `zen fmt --check` — syntax and whitespace, never name
   resolution. The imports added there are verified by hand against
@@ -145,7 +149,7 @@ file — no fix is claimed.
 | tests/must-fail | yes (expecting rejection) | tests/run.py, same targets; 2 tests added this pass |
 | tests/determinism/fixture | yes | tests/determinism/check.sh (`make determinism`) |
 | tests/parse/errors (23 .zen) | parse-negative gate | `make grammar-test` → scripts/grammar_test.py (new this pass) |
-| tests/bench (4 .zen) | **no** | nothing — imports now correct, gate still absent |
+| tests/bench (9 .zen) | yes | `make parse`; the 5 drivers also compiled, run and gated on allocs by `make bench-allocs` (in `make test`) and timed by `make bench` |
 | example (3 .zen) | **no** | `make parse` + `zen fmt --check` only; never compiled |
 
 Outside tests/: editors/ (extension.ts, zen.lua) and Zen code blocks in

@@ -22,6 +22,16 @@ That claim was false for a year: `make cap` stood behind one rule of the nine an
 
 **Which is also the argument for parsing over grepping.** `if` occurs 101 times in `src/`, `as` 605 times, `?` 94 times — and the count in *code* is zero for all three. They are in comments and, for 52 of the `if`s, inside string literals: a grep would report the compiler's own diagnostic messages as style violations. `scripts/style.py` parses with `bootstrap/cst.py`, the real grammar, for the same reason `ufcs_collisions.py` does.
 
+**A pipeline reports the wrong exit status.** `make test 2>&1 | tail -40` exits with `tail`'s status, which is 0 whether the build passed or died on the first target — and the error it died on scrolled off the top of the window you kept. This is the cheapest way in the repo to manufacture a green gate, and it costs nothing to avoid: redirect, then read.
+
+```
+make test > /tmp/g.log 2>&1; echo "exit $?"; tail -5 /tmp/g.log
+```
+
+`;` and not `&&`, so the `echo` runs on failure — which is the run you needed the number for. The same trap inside the build is closed at the top of the `Makefile`: recipes run under `bash -o pipefail`, because `/bin/sh` here is dash and dash has no `pipefail` to set. A gate whose file list arrives through a pipe — `find … | xargs ./zen fmt --check` — otherwise reports the status of `xargs`.
+
+**And a check that scanned nothing must not exit 0.** Every gate in the table prints its own site count and fails when that count is zero: `0 violations over 3210 sites` and `0 violations over nothing at all` are the same sentence with a different number in it, and the second one is what a moved directory or a changed file shape produces. `scripts/fixpoint.sh` says it in one line — *a setup error must not be able to impersonate a result* — and every script here now follows it, with exit **2** reserved for "the harness could not run" and never counted as a pass.
+
 ---
 
 ## Where things live
@@ -218,6 +228,21 @@ Two exclusions, and both are why the rule says *equality against literals* and n
 - **Different questions about one subject are not a membership test.** `is_stdin_read(be, rty, name) || is_defer(be, rty, name)` (`gen_c_cap.zen`) shares a subject and asks two things about it.
 
 And one the rule cannot reach yet: **a primitive cannot be the subject.** `is_in` is bounded on `Eq`, no primitive implements `Eq`, so `b == ' ' || b == '\t' || b == '\n'` has no `is_in` form to be rewritten into. A `u8.impl(Eq, ..)` in `std/core/num.zen` gives it one and changes no emitted C — both measured — but whether primitives carry trait impls is a design decision and not a formatting one. Until it is made, `scripts/style.py` reads `.eq` and not `==`, so the gate cannot ask for a rewrite nobody can write.
+
+**A trailing comma says "this grouping is mine."** The formatter fills an array literal greedily to 80 columns, so a list of short names lands on one line and the order is the only thing left of what the author meant by it. When the items fall into groups the formatter cannot derive, a comma after the last item pins the layout exactly as written:
+
+```groovy
+name.is_in([
+    "i8", "i16", "i32", "i64", "int",
+    "u8", "u16", "u32", "u64", "usize",
+])
+```
+
+Signed on one line, unsigned on the next — a fact about the C type system, not about column 80. Drop the comma and the same list packs onto one line with the two families run together.
+
+Use it only where a *semantic* grouping is being recorded. It is not a general escape from the width rule: a list with no grouping in it and a trailing comma is a hand layout frozen forever, which is the thing the join pass was written to end.
+
+The mechanism is a refusal and not a special case, and `src/fmt/fmt_break.zen`'s header states it under REFUSES: the comma sits in the gap between the last item and the `]`, that gap is then not whitespace, and the pass declines the list rather than overwrite a token it did not put there. Read it there before leaning on the edges of this.
 
 **Guards close with a bare `_`.** Match is always exhaustive, in every position. If you find yourself wanting a partial match, you want `.then`, and it should be visible.
 

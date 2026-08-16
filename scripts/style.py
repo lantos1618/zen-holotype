@@ -814,6 +814,13 @@ def main() -> int:
     files = sources()
     if files is None:
         return 1
+    # Ten rules over zero files is ten rules reporting "0 violations". Every
+    # count printed below would be 0 and the gate would be green on nothing.
+    if not files:
+        print("style: found no .zen files under src/ -- every rule below would"
+              " report 0 sites and 0 violations. That is a setup error, not a"
+              " clean tree.", file=sys.stderr)
+        return 2
 
     from bootstrap import cst
     parser = cst.parser()

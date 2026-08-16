@@ -10,7 +10,7 @@ than no target -- it reads as coverage and guards nothing.
 The two halves of the real check already existed as files; nothing executed
 them:
 
-  NEGATIVE  tests/parse/errors/*.zen exist IN ORDER NOT TO PARSE (twenty-six
+  NEGATIVE  tests/parse/errors/*.zen exist IN ORDER NOT TO PARSE
             (docs/LEXER_BOOTSTRAP_FIXES.md:475). Each one is a syntax
             the language rejects. If the grammar accepts one, that is a real
             bug -- the parser now blesses what the language forbids -- and
@@ -42,7 +42,7 @@ them:
         up empty -- which would make this the empty-set gate again
 
 2 is NOT a pass. The file counts are printed on green for the same reason:
-`26 negative(s) rejected` dropping to a smaller number is how you find out
+`23 negative(s) rejected` dropping to a smaller number is how you find out
 the fixtures moved and the check quietly stopped reading them.
 """
 
