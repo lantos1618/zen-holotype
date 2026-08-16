@@ -18,6 +18,14 @@
 // tower and no common supertype, so two arms of genuinely different
 // types mean something the language cannot express — inventing a join
 // for it would hide the mistake rather than report it.
+//
+// AND IT IS REPORTED, which is what makes the paragraph above a rule
+// and not a shrug. Wherever a position writes a type down the arms owe
+// it (`sema_hoist.check_arms`); where nothing does, they owe the join
+// this file computes (`check_arms_agree`). So the answer below has to
+// be the type the arms actually settle on: a first-arm-wins that was
+// merely lenient would now refuse working programs, which is why
+// `settled_literal` exists.
 
 Alloc, AllocError = std.mem
 TyId, Ty, Types, TyRes, ResForm = sema.sema_ty
@@ -50,8 +58,49 @@ keep_or_settle = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
 settle_reversed = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     (open_res(c, b) && (c.is_unknown(a) == false)).match({
         true  => settled_res(c, b, a),
+        false => c.settled_literal(a, b),
+    })
+}
+
+// A LITERAL IS NOT A TYPE A MATCH CAN BE WORTH, so the arm that HAS a
+// type says which. `at_least_one = (n: usize) usize { (n == 0).match({
+// true => 1, false => n }) }` is `usize`: `1` is an `int` literal, and
+// "a literal's type comes from its context" (`sema_check.assignable`) —
+// the other arm IS the context, there being no other.
+//
+// First-arm-wins answered `int` here. Nothing downstream complained,
+// because `assignable` lets an `int` literal reach every integer type,
+// so the wrong answer was a lenient one — and it stayed invisible until
+// the arms were asked to agree, which refused twenty-eight matches in
+// `src/` that are not wrong.
+//
+// Not a supertype and not an invention: the collapse `coerce` and
+// `check_literal` already make at every typed slot, read sideways.
+settled_literal = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
+    (c.is_literal_ty(a) && c.concrete(b) && c.assignable(a, b)).match({
+        true  => Ok(b),
+        false => c.literal_reversed(a, b),
+    })
+}
+
+// The same question with the arms the other way round, for
+// `settle_reversed`'s reason: which arm carried the literal is the
+// author's ordering, not a fact about the type.
+literal_reversed = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
+    (c.is_literal_ty(b) && c.concrete(a) && c.assignable(b, a)).match({
+        true  => Ok(a),
         false => merged_or_first(c, a, b),
     })
+}
+
+// NEVER SETTLE A LITERAL INTO A SLOT NOBODY HAS COMPUTED — `sema_hoist`
+// states the standing rule as "never count an unsettled slot".
+// `assignable` says an `int` reaches an unsubstituted `T`, so without
+// this the arm `false => <T>` in a generic body took the whole join to
+// `T` and handed codegen a `>` between two things it has no scalar for
+// (`std/mem/mem_arena.zen:126`).
+concrete = (c: Checker, id: TyId) bool {
+    (unsettled(c, id) || c.is_var(id)) == false
 }
 
 // Settling an open `Res` takes the other arm's FORM and keeps its own

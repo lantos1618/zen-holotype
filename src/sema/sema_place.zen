@@ -25,7 +25,7 @@ Checker, Ctx = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
 computed_member, writable_member = sema.sema_member
 check_literal = sema.sema_trap
-check_arms = sema.sema_hoist
+check_arms, check_arms_agree = sema.sema_hoist
 type_of, type_from_ast = sema.sema_type
 
 // `x = e;`, `x: T ::= e;`.
@@ -79,14 +79,17 @@ check_assign* = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
 // true => 1, false => false })` puts both arms where `i32` is, and
 // `coerce` above only ever saw the first one's type.
 //
-// ONLY WHEN A TYPE WAS WRITTEN. `x := <match>` takes `want` FROM the
-// value, so the position has no word of its own — "expected" would
-// name whichever arm came first, and no arm is entitled to speak for
-// the rest.
+// WHICH WORD THE ARMS OWE, and never no word at all. `x := <match>`
+// takes `want` FROM the value, so the position has none of its own —
+// "expected" would name whichever arm came first, and no arm is
+// entitled to speak for the position. What is still true is that the
+// arms owe EACH OTHER, and `check_arms_agree` holds them to their own
+// join and says so in the arms' voice. Answering `Ok(())` here instead
+// is what let the mismatched-arm program through a binding.
 written_want = (c :: Checker, b: Bind, want: TyId) Res<(), AllocError> {
     b.type.match({
         Ok(_) => c.check_arms(b.value, want),
-        None  => Ok(()),
+        None  => c.check_arms_agree(b.value),
     })
 }
 

@@ -92,6 +92,7 @@ SemaFault* =
 
     // types
     | TypeMismatch(TypeFault)          // expected X, found Y
+    | ArmsDisagree(TypeFault)          // the arms of one match are not one type
     | DiscardedValue(TypeFault)        // a statement's value nothing reads
     | NotCallable(TypeFault)           // the callee is not a function
     | LiteralOutOfRange(TypeFault)     // the family fits, the value does not
@@ -181,6 +182,7 @@ message* = (fault: SemaFault) str {
         NoSuchField(_)            => "a member is resolved on the receiver's type, so a name declared on another type is not a candidate",
         MemberNeedsValue(_)       => "a union's member is the type it names, so the member alone is not a value",
         TypeMismatch(_)           => "type mismatch",
+        ArmsDisagree(_)           => "match arms disagree: every arm produces the match's value, and nothing here decides which type that is",
         DiscardedValue(_)         => "discarded value",
         NotCallable(_)            => "this is not a function, so it cannot be called",
         LiteralOutOfRange(_)      => "out of range: a literal's type comes from its context, and the context here cannot hold it",
@@ -290,6 +292,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         EqNeedsImpl(f)            => write_needs_eq(out, types, f),
         DiscardedValue(f)         => write_discarded(out, types, f),
         TypeMismatch(f)           => write_types(out, types, f),
+        ArmsDisagree(f)           => write_arms(out, types, f),
         NotCallable(f)            => write_types(out, types, f),
         BoundNotSatisfied(f)      => write_types(out, types, f),
         TryOutsideRes(f)          => write_types(out, types, f),
@@ -463,6 +466,22 @@ write_module = (out :: String, f: ExportFault) Res<(), AllocError> {
 // Both sides, always. `expected` first, because that is the order the
 // reader is thinking in: they wrote something, and the context wanted
 // something else.
+// NEITHER SIDE IS AN EXPECTATION, which is why this is not
+// `write_types`. At a slot with a written type the position is what the
+// arm owes and "expected" names it; at `x = b.match(..)` there is no
+// such word, and printing "expected int" would put the first arm's type
+// in the position's voice. So the sentence contrasts one arm with the
+// rest, and every noun in it is something the author wrote.
+write_arms = (out :: String, types: Types, f: TypeFault)
+             Res<(), AllocError> {
+    out.add_bytes(" — this arm is `").try();
+    types.write_name(f.found, out).try();
+    out.add_bytes("`, the arms above are `").try();
+    types.write_name(f.expected, out).try();
+    out.add_bytes("`").try();
+    Ok(());
+}
+
 write_types = (out :: String, types: Types, f: TypeFault)
               Res<(), AllocError> {
     quote(out, f.name).try();
