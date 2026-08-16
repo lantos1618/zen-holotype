@@ -27,9 +27,10 @@ collected and returned, never raised: one bad file must not stop the run.
 DECISIONS DESIGN.md DOES NOT STATE. Each one is settled here because a
 scanner cannot abstain, and each needs a sentence in `DESIGN.md`:
 
-  L1. The escape set is `\\n \\t \\r \\0 \\\\ \\' \\"` and nothing else. TESTING.md
-      names `\\'` and `\\\\`; the corpus uses `\\t \\n \\\\ \\"`. An unknown escape is
-      an error, never a silent literal character — `"\\q"` must not mean `q`.
+  L1. The escape set is `\\n \\t \\r \\v \\f \\0 \\\\ \\' \\"` and nothing else.
+      TESTING.md names `\\'` and `\\\\`; the corpus uses `\\t \\n \\\\ \\"`. An unknown
+      escape is an error, never a silent literal character — `"\\q"` must not
+      mean `q`.
   L2. Identifiers are ASCII, matching `grammar.js`'s
       `/[A-Za-z_][A-Za-z0-9_]*/`. Widening a charset later is compatible;
       narrowing it is not.
@@ -66,7 +67,7 @@ SLASH, STAR, DOT, AT, ZERO = 0x2F, 0x2A, 0x2E, 0x40, 0x30
 WHITESPACE = frozenset((TAB, LF, CR, SPACE, 0x0B, 0x0C))
 
 # L1
-ESCAPES = frozenset(b"ntr0\\'\"")
+ESCAPES = frozenset(b"ntrvf0\\'\"")
 
 # L10
 AT_NAMES = ("Self", "meta", "scope")
@@ -282,7 +283,7 @@ class _Scanner:
                 i,
                 i + 2,
                 "unknown escape sequence %s: the escapes are "
-                "\\n \\t \\r \\0 \\\\ \\' \\\"" % _show(self.src, i, i + 2),
+                "\\n \\t \\r \\v \\f \\0 \\\\ \\' \\\"" % _show(self.src, i, i + 2),
             )
         return i + 2
 

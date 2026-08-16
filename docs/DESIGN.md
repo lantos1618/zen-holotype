@@ -90,7 +90,7 @@ A scanner cannot abstain. Every one of these was going to be decided by whoever 
 
 The shape of every rule below is the same: **reject rather than reinterpret.** A scanner that silently picks a reading is how a language ends up with a specification nobody can write down, and the readings it picks are always the ones that hide the bug (`010` meaning 8, `"\q"` meaning `q`). Rejecting costs the author one keystroke. Reinterpreting costs a reader an afternoon.
 
-**Escapes.** The set is `\n \t \r \0 \\ \' \"` and nothing else. An unknown escape is an error, never a silent literal character: `"\q"` does not mean `q`.
+**Escapes.** The set is `\n \t \r \v \f \0 \\ \' \"` and nothing else. An unknown escape is an error, never a silent literal character: `"\q"` does not mean `q`.
 
 **A string or character literal does not span lines.** The newline is the error, and the diagnostic points at the **opening quote** — pointing at end-of-file names no useful location, because end-of-file is not where the mistake is.
 
