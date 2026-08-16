@@ -160,13 +160,13 @@ hover_at* = (a: Alloc, name: str, text: str, line: usize, character: usize)
 // its path relative to the root, so `told_at` gets the same string
 // `Source` was given.
 hover_in* = (
-    env: Env,
-    a: Alloc,
-    workspace: str,
-    path: str,
-    text: str,
-    line: usize,
-    character: usize
+    env       : Env,
+    a         : Alloc,
+    workspace : str,
+    path      : str,
+    text      : str,
+    line      : usize,
+    character : usize
 ) Res<Hover, AllocError> {
     root = root_for(env, a, workspace, path);
     docs ::= a.Map<str, str>();
@@ -184,12 +184,12 @@ hover_in* = (
 // the reply and dies with the request, while the tree and the memos it
 // reads live in the slot and are only READ.
 hover_with* = (
-    c :: Checker,
-    a: Alloc,
-    rel: str,
-    text: str,
-    line: usize,
-    character: usize
+    c         :: Checker,
+    a         : Alloc,
+    rel       : str,
+    text      : str,
+    line      : usize,
+    character : usize
 ) Res<Hover, AllocError> {
     pos = to_pos(text, line, character);
     said(c, a, text, told_at(c.tree, rel, pos))
@@ -212,16 +212,18 @@ said = (c :: Checker, a: Alloc, text: str, t: Tell) Res<Hover, AllocError> {
     out ::= a.String().try();
     t.match({
         Nothing    => nothing_found(),
-        Sig(f)     => wired(text, f.name.span, write_decl_sig(
-            c,
-            f,
+        Sig(f)     => wired(
+            text,
+            f.name.span,
+            write_decl_sig(c, f, out).try(),
             out
-        ).try(), out),
-        OfType(ta) => wired(text, ta.span, write_written_ty(
-            c,
-            ta.id,
+        ),
+        OfType(ta) => wired(
+            text,
+            ta.span,
+            write_written_ty(c, ta.id, out).try(),
             out
-        ).try(), out),
+        ),
         OfValue(v) => wired(text, v.span, write_val(c, v.id, out).try(), out),
     })
 }
@@ -257,8 +259,8 @@ wired = (text: str, span: Span, known: bool, out :: String)
 // they go through `write_ty` below, and a reprinted parameter list is
 // no place for a doc comment.
 write_written_ty = (
-    c :: Checker,
-    id: TypeId,
+    c   :: Checker,
+    id  : TypeId,
     out :: String
 ) Res<bool, AllocError> {
     c.type_memo.get(id).match({
@@ -382,12 +384,14 @@ first_doc_line = (tree: Ast, run: TriviaRun) str {
 
 comment_text = (text: str) str {
     from ::= 0;
-    loop(() { from < text.len && text.index(
-        from
-    ) == '/' }, (h) { from = from + 1; });
-    loop(() { from < text.len && text.index(
-        from
-    ) == ' ' }, (h) { from = from + 1; });
+    loop(
+        () { from < text.len && text.index(from) == '/' },
+        (h) { from = from + 1; }
+    );
+    loop(
+        () { from < text.len && text.index(from) == ' ' },
+        (h) { from = from + 1; }
+    );
     text.slice(from, text.len);
 }
 
@@ -452,8 +456,8 @@ all_poison_free = (c :: Checker, ids: Vec<TyId>) bool {
 // would double the length of the common case) — said here so a reader
 // does not assume `T` is unbounded.
 write_decl_sig = (
-    c :: Checker,
-    f: Function,
+    c   :: Checker,
+    f   : Function,
     out :: String
 ) Res<bool, AllocError> {
     out.add_bytes(f.name.text).try();
