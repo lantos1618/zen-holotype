@@ -95,6 +95,16 @@ EXCEPTIONS: dict[str, str] = {
     "src/sema/sema_match.zen":
         "checking a match: patterns, arms, exhaustiveness — one subject "
         "with three questions about it; the reformat added the lines.",
+    # A TWELFTH, and the paragraph above asked for it to be argued rather
+    # than written. The argument: this file's subject is WHAT SHAPE A
+    # LIST TAKES, and joining and breaking are the two directions of that
+    # one decision — a rule that only broke could ratify whatever a human
+    # typed, which is why the join is here and not elsewhere. Splitting
+    # them leaves two files neither of which can answer the question.
+    "src/fmt/fmt_break.zen":
+        "what shape a list takes: packed to one line, or broken one item "
+        "per line — one decision in two directions, and the second half "
+        "is what makes the first a rule rather than a ratification.",
 }
 
 

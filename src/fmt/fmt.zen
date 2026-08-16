@@ -14,14 +14,19 @@
 //     decl or after the last; file ends with exactly one newline
 //     (`fmt_out.zen`).
 //   - trailing whitespace after a declaration.
-//   - the WIDTH OF THE GAP before a match arm's `=>` (`fmt_decl.zen`,
+//   - the WIDTH OF THE GAP before a match arm's `=>`, a binding's
+//     `=`/`::=`, and a broken parameter list's `:`/`::` (`fmt_decl.zen`,
 //     the one rule here that knows what it's looking at — DESIGN.md
 //     asks for aligned arms and the parser already locates every `=>`).
-//   - LISTS PACKED PAST 80 COLUMNS: argument lists and union bars break
-//     one item per line (`fmt_break.zen`), a pass of its own AFTER the
-//     pads — it re-lexes and re-parses what the pads wrote, because its
+//   - LISTS PACKED PAST 80 COLUMNS: argument lists and union bars are
+//     joined onto one line and then broken one item per line if they do
+//     not fit (`fmt_break.zen`), a pass of its own BETWEEN two rounds of
+//     pads — it re-lexes and re-parses what the first wrote, because its
 //     edits change line counts and `fmt_decl.zen`'s table is keyed by
-//     line. Same parser, same tree, one file later.
+//     line. The pads run AGAIN after it because which parameters have a
+//     line of their own is that rule's answer, and a column worked out
+//     before it is a column one run stale. Same parser, same tree, one
+//     file later.
 //
 // WHAT IT PASSES THROUGH VERBATIM: every declaration's own text, minus
 // that one gap and those line breaks — struct bodies, signatures, arm
@@ -57,6 +62,7 @@ same = std.parse.parse_token
 Src* = fmt.fmt_src
 Out* = fmt.fmt_out
 Aligned* = fmt.fmt_decl
+align_columns = fmt.fmt_decl
 break_lines = fmt.fmt_break
 
 // What formatting one file came to. Three fields, not a three-way enum:
@@ -97,9 +103,10 @@ rejected = (a: Alloc, diags: Vec<Diag>) Res<Render, AllocError> {
 printed = (a: Alloc, src: Src, tree: Ast, m: Module, lexed: Lexed)
           Res<Render, AllocError> {
     out ::= a.Out().try();
-    write_module(out, a, a.Aligned(src, tree).try(), src, tree, m).try();
-    text = break_lines(a, lexed.source.file, out.view()).try();
-    ok   = unchanged_tokens(a, lexed, text.view()).try();
+    write_module(out, a, a.Aligned(src, tree, m).try(), src, tree, m).try();
+    broke = break_lines(a, lexed.source.file, out.view()).try();
+    text  = align_columns(a, lexed.source.file, broke.view()).try();
+    ok    = unchanged_tokens(a, lexed, text.view()).try();
     Ok(Render(text: text, diags: a.Vec<Diag>(), faithful: ok));
 }
 
@@ -111,12 +118,12 @@ printed = (a: Alloc, src: Src, tree: Ast, m: Module, lexed: Lexed)
 // belongs to each. `Module.decls` IS the file, imports included (see
 // ast_node.zen), so there's one loop here and no second pass.
 write_module* = (
-    out :: Out,
-    a: Alloc,
-    al: Aligned,
-    src: Src,
-    tree: Ast,
-    m: Module
+    out  :: Out,
+    a    : Alloc,
+    al   : Aligned,
+    src  : Src,
+    tree : Ast,
+    m    : Module
 ) Res<(), AllocError> {
     m.decls.loop((h, i, d) {
         write_trivia(out, tree, d.leading).try();
@@ -161,14 +168,14 @@ write_trivia = (out :: Out, tree: Ast, run: TriviaRun) Res<(), AllocError> {
 // later pass over what this writes: their edits change line counts,
 // which the pad table's per-line keys cannot survive.
 write_decl = (
-    out :: Out,
-    a: Alloc,
-    al: Aligned,
-    src: Src,
-    tree: Ast,
-    m: Module,
-    i: usize,
-    d: Decl
+    out  :: Out,
+    a    : Alloc,
+    al   : Aligned,
+    src  : Src,
+    tree : Ast,
+    m    : Module,
+    i    : usize,
+    d    : Decl
 ) Res<(), AllocError> {
     from = src.offset(d.span.start);
     to   = src.offset(next_start(tree, m, i));

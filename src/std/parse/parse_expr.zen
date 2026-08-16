@@ -160,10 +160,10 @@ binary_from = (p :: Parser, m: Mark, min: usize) Res<ExprId, AllocError> {
 // recursion is at `prec + 1`, which is what makes every operator
 // left-associative: `a - b - c` is `(a - b) - c`.
 binary_step = (
-    p :: Parser,
-    m: Mark,
-    prec: usize,
-    lhs: ExprId
+    p    :: Parser,
+    m    : Mark,
+    prec : usize,
+    lhs  : ExprId
 ) Res<ExprId, AllocError> {
     kind    = p.peek().kind;
     op_span = p.here_span();
@@ -199,11 +199,10 @@ unary_expr = (p :: Parser, m: Mark, op: UnOp) Res<ExprId, AllocError> {
     p.bump().try();
     inner_mark = p.open();
     operand    = p.unary_operand(inner_mark).try();
-    p.add_expr(ExprKind.Unary(Unary(
-        op: op,
-        op_span: op_span,
-        operand: operand
-    )), m.bare());
+    p.add_expr(
+        ExprKind.Unary(Unary(op: op, op_span: op_span, operand: operand)),
+        m.bare()
+    );
 }
 
 // `!!ok`, `--n`. The one recursion in the unary chain, and so the one
@@ -336,10 +335,10 @@ after_dot = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
 // Recognised by name HERE, once, which is precisely what stops the
 // name from having to be special-cased everywhere else.
 dot_target = (
-    p :: Parser,
-    m: Mark,
-    base: ExprId,
-    name: Ident
+    p    :: Parser,
+    m    : Mark,
+    base : ExprId,
+    name : Ident
 ) Res<ExprId, AllocError> {
     is_match = name.text == "match" && p.at_kind(TokenKind.ParenOpen);
     is_try   = name.text == "try" && p.at_kind(TokenKind.ParenOpen);
@@ -347,10 +346,10 @@ dot_target = (
         true  => p.match_expr(m, base, name.span),
         false => is_try.match({
             true  => p.try_expr(m, base, name.span),
-            false => p.add_expr(ExprKind.Access(Access(
-                base: base,
-                name: name
-            )), m.bare()),
+            false => p.add_expr(
+                ExprKind.Access(Access(base: base, name: name)),
+                m.bare()
+            ),
         }),
     });
 }
@@ -359,10 +358,10 @@ dot_target = (
 // argument is an arm list, which is not an expression and could not be
 // passed to anything else, and exhaustiveness is checked on it.
 match_expr = (
-    p :: Parser,
-    m: Mark,
-    scrutinee: ExprId,
-    name_span: Span
+    p         :: Parser,
+    m         : Mark,
+    scrutinee : ExprId,
+    name_span : Span
 ) Res<ExprId, AllocError> {
     open = p.here_span();
     p.bump().try();
@@ -385,10 +384,10 @@ match_expr = (
 // same reason `.match`'s is: the diagnostics are about the intrinsic,
 // and the node's own span starts at the operand.
 try_expr = (
-    p :: Parser,
-    m: Mark,
-    operand: ExprId,
-    name_span: Span
+    p         :: Parser,
+    m         : Mark,
+    operand   : ExprId,
+    name_span : Span
 ) Res<ExprId, AllocError> {
     open = p.here_span();
     p.bump().try();
@@ -397,10 +396,10 @@ try_expr = (
         "`.try()` takes no arguments",
         open
     ).try();
-    p.add_expr(ExprKind.Try(Try(
-        operand: operand,
-        name_span: name_span
-    )), m.bare());
+    p.add_expr(
+        ExprKind.Try(Try(operand: operand, name_span: name_span)),
+        m.bare()
+    );
 }
 
 index_expr = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
@@ -412,18 +411,17 @@ index_expr = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
         "unclosed `[`: this index is never closed",
         open
     ).try();
-    p.add_expr(ExprKind.Index(Index(
-        base: base,
-        index: index,
-        op_span: open
-    )), m.bare());
+    p.add_expr(
+        ExprKind.Index(Index(base: base, index: index, op_span: open)),
+        m.bare()
+    );
 }
 
 call_expr = (
-    p :: Parser,
-    m: Mark,
-    callee: ExprId,
-    targs: Vec<TypeId>
+    p      :: Parser,
+    m      : Mark,
+    callee : ExprId,
+    targs  : Vec<TypeId>
 ) Res<ExprId, AllocError> {
     list ::= p.alloc.Vec<Arg>();
     span = p.args(list).try();
@@ -532,9 +530,9 @@ name_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 }
 
 literal_expr = (
-    p :: Parser,
-    m: Mark,
-    kind: LiteralKind
+    p    :: Parser,
+    m    : Mark,
+    kind : LiteralKind
 ) Res<ExprId, AllocError> {
     token = p.bump().try();
     p.add_expr(ExprKind.Literal(Literal(kind: kind, text: p.text(token))), m);
@@ -569,18 +567,18 @@ typed_meta = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     name = p.ident("expected a name inside `@meta`").try();
     p.bump().try();
     t = p.type().try();
-    p.add_expr(ExprKind.Meta(Meta(
-        value: None,
-        name: Ok(name),
-        type: Ok(t)
-    )), m);
+    p.add_expr(
+        ExprKind.Meta(Meta(value: None, name: Ok(name), type: Ok(t))),
+        m
+    );
 }
 
 value_meta = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     value = p.expr().try();
-    p.add_expr(ExprKind.Meta(Meta(value: Ok(
-        value
-    ), name: None, type: None)), m);
+    p.add_expr(
+        ExprKind.Meta(Meta(value: Ok(value), name: None, type: None)),
+        m
+    );
 }
 
 // `()`, `(n == 0)`, `(a: i32, b: i32) i32 { a + b }`, `(h, v) { .. }`.
@@ -683,10 +681,10 @@ array_lit = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 // fixed array's arguments, which differ only in which bracket they
 // use.
 elem_list = (
-    p :: Parser,
-    out :: Vec<ExprId>,
-    close: TokenKind,
-    message: str
+    p       :: Parser,
+    out     :: Vec<ExprId>,
+    close   : TokenKind,
+    message : str
 ) Res<Span, AllocError> {
     start = p.here();
     open  = p.here_span();
