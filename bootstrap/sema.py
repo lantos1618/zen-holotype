@@ -3308,6 +3308,7 @@ class Sema:
                            "match is exhaustive in every position")
 
         result = None
+        seen = []
         for arm, p in norm:
             sc = ctx.scope.child()
             self._bind_pattern(p, sty, sc, ctx)
@@ -3338,7 +3339,49 @@ class Sema:
                 # variant. The self-hosted checker makes the same join in
                 # `sema_join.settle_reversed`, and the two must agree.
                 result = res_ty(t.args[0])
+            seen.append((body, t))
+        if expect is None:
+            self._arms_agree(seen, result)
         return result if result is not None else UNIT
+
+    # Every `Res` shape, open or settled. Neither side may be one here.
+    _ARMS_RES = ("res", "ok", "err", "none")
+
+    def _arms_agree(self, seen, result):
+        """The arms held to their OWN join, for the positions that write no
+        type down: `x = <match>`, a print argument, an operand of `+`. Every
+        other position hands `expect` down and the coerce above does it.
+
+        `src/sema/sema_hoist.check_arms_agree` is the same rule and this
+        sentence is its sentence -- a must-fail expectation is read by both
+        compilers, so a message only one of them writes is a red board.
+
+        DELIBERATELY WEAKER THAN THE SELF-HOSTED ONE, in the only direction
+        that is safe. `result` here is a plain first-arm-wins fold; the join
+        in `sema_join.zen` settles an open `Res` against its sibling and
+        merges two error sets, so `Ok(1)` / `Err(Fault.Bad)` and
+        `Res<(), Fault>` / `Res<(), Snag>` come out as ONE type there and as
+        two here. Reporting those would reject
+        `corpus/sema/match_arms_fit_without_agreeing_literally` and seventy
+        other valid programs. So every `Res` shape is skipped, and so is
+        anything assignable EITHER way: what is left is the case the join
+        calls "something the language cannot express" -- `1` beside `false`."""
+        if result is None or result.kind in ("any", "error", "var", "never"):
+            return
+        if result.kind in self._ARMS_RES:
+            return
+        for body, t in seen:
+            if t is None or t.kind in ("any", "error", "var", "never"):
+                continue
+            if t.kind in self._ARMS_RES:
+                continue
+            if assignable(t, result) or assignable(result, t):
+                continue
+            self.error(_span(body),
+                       "match arms disagree: every arm produces the match's "
+                       "value, and nothing here decides which type that is "
+                       "— this arm is `%s`, the arms above are `%s`"
+                       % (show(t), show(result)))
 
     # -- calls --------------------------------------------------------------
 

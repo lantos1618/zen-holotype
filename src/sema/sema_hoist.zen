@@ -328,25 +328,62 @@ last_stmt_of = (stmts: Vec<Stmt>) Res<ExprId> {
 // range, for the reason given there: "a match arm is walked here since
 // it has no caller of its own — the match settles its context".
 check_arms* = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
+    c.arms_owe(id, want, Blame.Position)
+}
+
+// THE ARMS' OWN AGREEMENT, asked where nothing decides their type.
+// `x = b.match({ true => 1, false => false })` takes its type FROM the
+// value, so `sema_place.written_want` had nothing to hold the arms to —
+// and four such positions (an untyped binding, an operand, a print
+// argument, a parameter declared `T`) went on accepting the very
+// program the `match_arms_disagree*` tests reject wherever a type IS
+// written. Each compiled, ran, and printed the 0 those tests exist to
+// stop.
+//
+// A TYPE PARAMETER IS THE INSTRUCTIVE ONE: it wrote a word down, and
+// `assignable` says every arm reaches an unsubstituted variable — so
+// the word decided nothing and the silence read as agreement.
+//
+// The word the arms owe is then their own join, read back from the memo
+// rather than recomputed for `arm_fits`'s reason. `Blame` is what keeps
+// that from being said in the position's voice.
+check_arms_agree* = (c :: Checker, id: ExprId) Res<(), AllocError> {
+    c.expr_memo.get(id).match({
+        None       => Ok(()),
+        Ok(joined) => c.arms_owe(id, joined, Blame.Arms),
+    })
+}
+
+// WHOSE WORD `want` IS, and the only thing the two callers above differ
+// by. A written type is the POSITION's word and a refusal names it —
+// "expected i32". A join is the ARMS' word, and the same refusal in the
+// position's voice would print "expected int", the first arm's literal
+// type, as though something had asked for it.
+Blame* = Position | Arms
+
+arms_owe = (c :: Checker, id: ExprId, want: TyId, blame: Blame)
+           Res<(), AllocError> {
     node = c.tree.expr_at(id);
     node.kind.match({
-        Match(m) => arms_within(c, m, want),
+        Match(m) => arms_within(c, m, want, blame),
         _        => Ok(()),
     })
 }
 
 // A nested match's arms are the values; the inner match is only how
 // they were chosen — same recursion, same reason as `literal_within`.
-arms_within = (c :: Checker, m: Match, want: TyId) Res<(), AllocError> {
-    m.arms.loop((h, a) { arm_within(c, a.body, want).try() });
+arms_within = (c :: Checker, m: Match, want: TyId, blame: Blame)
+              Res<(), AllocError> {
+    m.arms.loop((h, a) { arm_within(c, a.body, want, blame).try() });
     Ok(());
 }
 
-arm_within = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
+arm_within = (c :: Checker, id: ExprId, want: TyId, blame: Blame)
+             Res<(), AllocError> {
     node = c.tree.expr_at(id);
     node.kind.match({
-        Match(m) => arms_within(c, m, want),
-        _        => arm_fits(c, id, node, want),
+        Match(m) => arms_within(c, m, want, blame),
+        _        => arm_fits(c, id, node, want, blame),
     })
 }
 
@@ -354,11 +391,11 @@ arm_within = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
 // pattern binders left scope when the arm did, so re-typing `Ok(n) =>
 // n` here would report `n` undefined. A miss is silence — an arm the
 // match never typed is not an arm this rule knows anything about.
-arm_fits = (c :: Checker, id: ExprId, node: Expr, want: TyId)
+arm_fits = (c :: Checker, id: ExprId, node: Expr, want: TyId, blame: Blame)
            Res<(), AllocError> {
     c.expr_memo.get(id).match({
         None    => Ok(()),
-        Ok(got) => arm_agrees(c, node, got, want),
+        Ok(got) => arm_agrees(c, node, got, want, blame),
     })
 }
 
@@ -366,28 +403,51 @@ arm_fits = (c :: Checker, id: ExprId, node: Expr, want: TyId)
 // tail. So a `Res` want is hoisting's question and hoisting's alone
 // (`true => 1` still closes a `Res<i32, E>` match), and anything else
 // is the ordinary mismatch.
-arm_agrees = (c :: Checker, node: Expr, got: TyId, want: TyId)
+arm_agrees = (c :: Checker, node: Expr, got: TyId, want: TyId, blame: Blame)
              Res<(), AllocError> {
     c.assignable(got, want).match({
         true  => Ok(()),
-        false => refuse_arm(c, node, got, want),
+        false => refuse_arm(c, node, got, want, blame),
     })
 }
 
-refuse_arm = (c :: Checker, node: Expr, got: TyId, want: TyId)
+refuse_arm = (c :: Checker, node: Expr, got: TyId, want: TyId, blame: Blame)
              Res<(), AllocError> {
     c.types.at(want).match({
-        Res(r) => arm_into_res(c, node, got, want, r),
-        _      => c.coerce(node.span.file, node.span, got, want, ""),
+        Res(r) => arm_into_res(c, node, got, want, r, blame),
+        _      => c.arm_refused(node, got, want, blame),
     })
 }
 
-arm_into_res = (c :: Checker, node: Expr, got: TyId, want: TyId, r: TyRes)
-               Res<(), AllocError> {
+arm_into_res = (
+    c     :: Checker,
+    node  : Expr,
+    got   : TyId,
+    want  : TyId,
+    r     : TyRes,
+    blame : Blame
+) Res<(), AllocError> {
     c.types.at(got).match({
-        Res(_) => c.coerce(node.span.file, node.span, got, want, ""),
+        Res(_) => c.arm_refused(node, got, want, blame),
         _      => hoist_into_res(c, node.span.file, node.span, got, want, r),
     })
+}
+
+arm_refused = (c :: Checker, node: Expr, got: TyId, want: TyId, blame: Blame)
+              Res<(), AllocError> {
+    blame.match({
+        Position => c.coerce(node.span.file, node.span, got, want, ""),
+        Arms     => c.arms_disagree(node, got, want),
+    })
+}
+
+arms_disagree = (c :: Checker, node: Expr, got: TyId, want: TyId)
+                Res<(), AllocError> {
+    c.report(
+        node.span.file,
+        node.span,
+        SemaFault.ArmsDisagree(TypeFault(name: "", expected: want, found: got))
+    )
 }
 
 // `Row(n: 32)` on a field declared `Res<i32>`: construction is the

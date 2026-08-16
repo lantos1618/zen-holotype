@@ -60,7 +60,7 @@ static_access = sema.sema_static
 first_hidden, hidden_member = sema.sema_member
 satisfies_bound, check_bounds = sema.sema_bound
 check_literal = sema.sema_trap
-check_arms = sema.sema_hoist
+check_arms, check_arms_agree = sema.sema_hoist
 bound_declares = sema.sema_supply
 type_from_ast, type_of, param_type = sema.sema_type
 alias_module, module_not_a_value = sema.sema_module
@@ -223,9 +223,19 @@ print_or_call = (
 )
                 Res<TyId, AllocError> {
     is_print_sugar(name).match({
-        true  => c.types.prim("()"),
+        true  => c.print_type(call),
         false => local_or_decl_call(c, id, node, call, name, actuals, ctx),
     })
+}
+
+// A PRINT IS THE ONE CALL WHOSE ARGUMENTS HAVE NO PARAMETERS TO OWE.
+// No declaration resolves, so `param_literal` never walks them, and a
+// match written here had nothing at all holding its arms together:
+// `println("{}", b.match({ true => 1, false => false }))` compiled and
+// printed the 0 the `match_arms_disagree*` tests exist to stop.
+print_type = (c :: Checker, call: Call) Res<TyId, AllocError> {
+    call.args.loop((h, a) { c.check_arms_agree(a.value).try() });
+    c.types.prim("()")
 }
 
 is_print_sugar = (name: str) bool { name.eq("println") || name.eq("print") }
@@ -535,7 +545,7 @@ arg_literals* = (c :: Checker, args: Vec<Arg>, params: Vec<TyId>, off: usize)
 param_literal = (c :: Checker, id: ExprId, params: Vec<TyId>, i: usize)
                 Res<(), AllocError> {
     (i < params.len).match({
-        false => Ok(()),
+        false => c.check_arms_agree(id),
         true  => param_wants(c, id, ty_at(params, i)),
     })
 }
@@ -549,7 +559,25 @@ param_literal = (c :: Checker, id: ExprId, params: Vec<TyId>, i: usize)
 // `i32` parameter as a 0 nobody wrote.
 param_wants = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
     c.check_literal(id, want).try();
-    c.check_arms(id, want)
+    c.param_holds(id, want)
+}
+
+// A PARAMETER DECLARED `T` EXPECTS NOTHING YET, and `assignable` says
+// so — every type reaches an unsubstituted variable. So `id(b.match({
+// true => 1, false => false }))` had a `want` that agreed with both
+// arms, which is the same silence as having no parameter at all. In
+// both cases the arms are their own authority and owe their join, not
+// the declaration. Variadics arrive here through `param_literal`'s
+// other branch for the same reason.
+param_holds = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
+    c.settled_param(want).match({
+        true  => c.check_arms(id, want),
+        false => c.check_arms_agree(id),
+    })
+}
+
+settled_param = (c: Checker, want: TyId) bool {
+    (c.is_var(want) || c.is_infer(want) || c.is_unknown(want)) == false
 }
 
 // ---------------------------------------------------------------------
