@@ -6,7 +6,7 @@
 // what that wrote) and not a table keyed by line like `fmt_decl.zen`'s:
 // this rule's own edits would move that table's keys.
 //
-// TWO FORMS, one mechanic — find the list's separators, set the
+// THREE FORMS, one mechanic — find the list's separators, set the
 // whitespace around each:
 //
 //   - BRACKETED LISTS. `f(a, b)`, construction `Sym(name: n, ..)` and a
@@ -31,6 +31,30 @@
 //
 //   - UNION BARS. An enum's variants (and an anonymous union's members)
 //     packed past the width: one per line, the bar leading at +4.
+//
+//   - ARRAY LITERALS. `[a, b, c]`. The same brackets, the same +4, the
+//     same closer alone on its line — and the one place this rule
+//     disagrees with itself: the items FILL, as many to a line as fit
+//     under the width, instead of taking a line each.
+//
+//     A DIFFERENT KIND OF LIST, NOT A DISAGREEING ONE. An argument list
+//     and a parameter list are HETEROGENEOUS — each item is a distinct
+//     concept, each line means something different, and one per line is
+//     exactly what makes them readable, which is why those two, a comma
+//     apart in kind, may not answer this question differently. An array
+//     literal is a HOMOGENEOUS SEQUENCE, a table of one kind of thing:
+//     nothing tells item four from item five, so a line of its own says
+//     nothing about either, the vertical alignment carries no
+//     information because there is nothing to align, and ten lines go
+//     on saying what one line says better.
+//
+//     THE CORPUS SETTLED IT, not the symmetry. Every array literal in
+//     the tree that a break can reach is a closed set of short names —
+//     `is_c_integer`'s ten C integer types, `ptr_verb`'s eight `Ptr`
+//     methods, `is_integer`'s nine — and one per line turns each into a
+//     column of quoted words nobody reads down. Filled, all three land
+//     on a single line inside the brackets, and one of them (`sema_ty`'s
+//     `is_integer`, at 79) stops needing the break at all.
 //
 // JOIN FIRST, THEN BREAK, and the join is why a shape here is COMPUTED
 // rather than inherited. The rule used to only break, so a list a human
@@ -89,9 +113,16 @@
 //     align to. The two rules meet here and this is the seam; such a
 //     list is still BROKEN back to the canonical form when it is not in
 //     it, so nothing is frozen except the choice to stay vertical.
+//   - an array literal written with a TRAILING COMMA. That comma lies
+//     in the gap between the last item and the `]`, which is then not
+//     whitespace, so `may_relay` declines the list and it keeps the
+//     shape it was written in. This rule adds no comma of its own
+//     either, filled or not: `fmt.zen`'s `faithful` guard rests on the
+//     token stream being untouched, and a comma is a token.
 //
-// NOT LISTS FOR THIS RULE: records and array literals. The mechanic
-// would fit them; the demand is unwritten; the corpus comes first.
+// NOT LISTS FOR THIS RULE: `{ .. }` records and a fixed array's
+// arguments. The mechanic would fit them; the demand is unwritten; the
+// corpus comes first.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -100,7 +131,7 @@ Range = std.core
 Span = std.ast.ast_span
 Ast = std.ast.ast_arena
 ExprId, TypeId, BlockId = std.ast.ast_id
-Module, Decl, Type, Call, Union, Enum, Param = std.ast.ast_node
+Module, Decl, Type, Expr, Call, ArrayLit, Union, Enum, Param = std.ast.ast_node
 scan, Source, Lexed = std.lex.lex
 Parser, module = std.parse.parse
 Src = fmt.fmt_src
@@ -135,6 +166,12 @@ Item = {
 // `params` is separate from `vetoes` although only a parameter list has
 // either answer today: one says what this list does to a NEIGHBOUR, the
 // other what `fmt_decl.zen` writes INSIDE it.
+//
+// `fill` is the ONE field the two halves read differently: it changes
+// nothing about joining (a packed list is a packed list) and everything
+// about breaking — as many items to a line as fit, rather than one
+// each. Only an array literal answers true, and the header says why a
+// homogeneous sequence earns a different answer than an argument list.
 Cand = {
     lo: usize,
     hi: usize,
@@ -144,6 +181,7 @@ Cand = {
     parens: bool,
     vetoes: bool,
     params: bool,
+    fill: bool,
     items: Vec<Item>,
 }
 
@@ -232,8 +270,10 @@ collect = (a: Alloc, src: Src, tree: Ast, m: Module)
     cands ::= a.Vec<Cand>();
     id    ::= ExprId(index: 0);
     Range(0, tree.expr_ids()).loop((h, i) {
-        tree.expr_at(id).kind.match({
+        e = tree.expr_at(id);
+        e.kind.match({
             Call(c)   => add_call(a, src, cands, c),
+            Array(al) => add_array(a, src, tree, cands, e, al),
             Lambda(l) => add_params(a, src, cands, l.params, l.params_span),
             _         => no_list(),
         }).try();
@@ -295,6 +335,49 @@ add_call = (a: Alloc, src: Src, cands :: Vec<Cand>, c: Call)
                 parens: true,
                 vetoes: true,
                 params: false,
+                fill: false,
+                items: items,
+            ))
+        },
+    })
+}
+
+// `[a, b, c]`. The brackets are the list's ends and the commas its
+// separators — the same shape a call's arguments have, which is why
+// `parens` (bracketed at BOTH ends, one byte each) is true and only
+// `fill` sets this form apart. The literal's own `Expr` carries the
+// span, brackets included; an element's span is its own, stopping
+// before the comma, exactly as an `Arg`'s does. Zero elements is not a
+// list, and `[x]` is one whose gaps are only the brackets'.
+add_array = (
+    a     : Alloc,
+    src   : Src,
+    tree  : Ast,
+    cands :: Vec<Cand>,
+    e     : Expr,
+    al    : ArrayLit
+) Res<(), AllocError> {
+    (al.elems.len == 0).match({
+        true  => no_list(),
+        false => {
+            items ::= a.Vec<Item>();
+            al.elems.loop((h, i, eid) {
+                s = tree.expr_at(eid).span;
+                items.add(Item(
+                    lo: src.offset(s.start),
+                    hi: src.offset(s.end)
+                )).try();
+            });
+            cands.add(Cand(
+                lo: src.offset(e.span.start),
+                hi: src.offset(e.span.end),
+                line: e.span.start.line,
+                end_line: e.span.end.line,
+                sep: ',',
+                parens: true,
+                vetoes: true,
+                params: false,
+                fill: true,
                 items: items,
             ))
         },
@@ -344,6 +427,7 @@ add_params = (
                 parens: true,
                 vetoes: false,
                 params: true,
+                fill: false,
                 items: items,
             ))
         },
@@ -375,6 +459,7 @@ add_union = (
         parens: false,
         vetoes: true,
         params: false,
+        fill: false,
         items: items,
     ))
 }
@@ -405,6 +490,7 @@ add_enum = (a: Alloc, src: Src, cands :: Vec<Cand>, e: Enum)
                 parens: false,
                 vetoes: true,
                 params: false,
+                fill: false,
                 items: items,
             ))
         },
@@ -722,20 +808,24 @@ emit_join = (a: Alloc, c: Cand, edits :: Vec<Edit>) Res<(), AllocError> {
 // a call's comma closes this one — and the tail gap becomes a newline
 // back at the OPENER'S indent, so `)` stands alone.
 //
+// THE ENDS ARE THE SAME FOR BOTH FORMS and only the inter-item gaps
+// differ, which is the whole of `fill`: an array literal's `[` and `]`
+// land exactly where a call's `(` and `)` would, so the two shapes
+// agree on everything a reader can see except how many items share a
+// line.
+//
 // ANSWERS WHETHER THE LIST ACTUALLY MOVED, which is what makes the
 // rounds converge on more than the outermost break: a list already in
 // this form writes the bytes it has, claims nothing, and so the lists
 // inside it are judged this round where they really sit.
 emit_break = (a: Alloc, src: Src, c: Cand, edits :: Vec<Edit>)
              Res<bool, AllocError> {
-    was   = edits.len;
-    start = src.line_at(c.line);
+    was    = edits.len;
+    start  = src.line_at(c.line);
+    indent = skip_space(src, start, src.after_line(c.line)) - start;
     close ::= a.String().try();
     close.add_byte('\n').try();
-    close.add_bytes(src.slice_at(
-        start,
-        skip_space(src, start, src.after_line(c.line))
-    )).try();
+    close.add_bytes(src.slice_at(start, start + indent)).try();
     nl ::= a.String().try();
     nl.add_bytes(close.view()).try();
     nl.add_bytes("    ").try();
@@ -745,12 +835,26 @@ emit_break = (a: Alloc, src: Src, c: Cand, edits :: Vec<Edit>)
         true  => edits.add(Edit(from: c.lo + 1, to: first.lo, text: nl)),
         false => no_list(),
     }).try();
+    c.fill.match({
+        true  => filled_gaps(a, c, edits, nl.view(), indent + 4),
+        false => stacked_gaps(a, c, edits, nl.view()),
+    }).try();
+    c.parens.match({
+        true  => edits.add(Edit(from: last.hi, to: c.hi - 1, text: close)),
+        false => no_list(),
+    }).try();
+    Ok(rewrites(src, edits, was));
+}
+
+// One item per line: every gap is the separator and a new line at +4.
+stacked_gaps = (a: Alloc, c: Cand, edits :: Vec<Edit>, nl: str)
+               Res<(), AllocError> {
     Range(0, c.items.len - 1).loop((h, i) {
         rep ::= a.String().try();
         c.parens.match({
             true  => { rep.add_byte(c.sep).try();
-                       rep.add_bytes(nl.view()).try(); },
-            false => { rep.add_bytes(nl.view()).try();
+                       rep.add_bytes(nl).try(); },
+            false => { rep.add_bytes(nl).try();
                        rep.add_byte(c.sep).try();
                        rep.add_byte(' ').try(); },
         });
@@ -760,11 +864,58 @@ emit_break = (a: Alloc, src: Src, c: Cand, edits :: Vec<Edit>)
             text: rep
         )).try();
     });
-    c.parens.match({
-        true  => edits.add(Edit(from: last.hi, to: c.hi - 1, text: close)),
-        false => no_list(),
-    }).try();
-    Ok(rewrites(src, edits, was));
+    Ok(());
+}
+
+// AS MANY ITEMS TO A LINE AS FIT: a gap is the separator and one space
+// while the next item still lands under the width, and the separator
+// and a new line at `indent` when it does not. Greedy and left to
+// right, which is what makes it a function of the items alone and so
+// the same answer every round — the alternative, balancing the lines,
+// would have to see the whole list to place the first gap.
+//
+// A COMMA IS PART OF THE ITEM IT FOLLOWS for this measurement: it is
+// printed hard against the item and cannot be moved to the next line,
+// so an item that is not the last carries one more column than it
+// spans. An item too wide to fit even alone still gets its own line;
+// no gap can fix that, and the ones after it are not punished for it.
+filled_gaps = (
+    a      : Alloc,
+    c      : Cand,
+    edits  :: Vec<Edit>,
+    nl     : str,
+    indent : usize
+) Res<(), AllocError> {
+    col ::= indent + item_width(c, 0);
+    Range(0, c.items.len - 1).loop((h, i) {
+        next  = c.items.ptr().read(i + 1);
+        grown = col + 1 + item_width(c, i + 1);
+        rep ::= a.String().try();
+        rep.add_byte(c.sep).try();
+        (grown <= WIDTH).match({
+            true  => { rep.add_byte(' ').try();
+                       col = grown; },
+            false => { rep.add_bytes(nl).try();
+                       col = indent + item_width(c, i + 1); },
+        });
+        edits.add(Edit(
+            from: c.items.ptr().read(i).hi,
+            to: next.lo,
+            text: rep
+        )).try();
+    });
+    Ok(());
+}
+
+// The columns item `i` occupies on its line, its own comma included.
+// Every item is one line here — `may_relay` refused the list otherwise
+// — so its span's length IS its width.
+item_width = (c: Cand, i: usize) usize {
+    it = c.items.ptr().read(i);
+    (it.hi - it.lo) + (i + 1 < c.items.len).match({
+        true  => 1,
+        false => 0,
+    })
 }
 
 // Does any edit added since `was` say something the bytes don't already

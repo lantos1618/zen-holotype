@@ -102,9 +102,10 @@ EXCEPTIONS: dict[str, str] = {
     # typed, which is why the join is here and not elsewhere. Splitting
     # them leaves two files neither of which can answer the question.
     "src/fmt/fmt_break.zen":
-        "what shape a list takes: packed to one line, or broken one item "
-        "per line — one decision in two directions, and the second half "
-        "is what makes the first a rule rather than a ratification.",
+        "what shape a list takes: packed to one line, or broken — one "
+        "item per line for an argument list, filled for an array literal "
+        "— one decision in two directions, and the second half is what "
+        "makes the first a rule rather than a ratification.",
 }
 
 

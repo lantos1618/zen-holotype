@@ -1,0 +1,124 @@
+// AN ARRAY LITERAL PACKED PAST 80 COLUMNS FILLS — the width rule's
+// third form (`fmt_break.zen`), and the one place it answers a question
+// differently from the other two. An argument list and a parameter list
+// are heterogeneous, so each item earns a line; an array literal is a
+// homogeneous sequence, where a line of its own says nothing about item
+// four that it does not say about item five, and one per line spends
+// ten lines saying what one says better.
+//
+// EVERY INPUT HERE IS UNFORMATTED, which is the whole point of the
+// file. `make fmt --check` over a tree that is already formatted is a
+// fixpoint under a WEAKER rule too — it cannot tell a rule that fills
+// from a rule that has stopped filling — so the only load-bearing
+// fixture is one whose input is in a shape the rule has to move.
+//
+// Four cases, each pinning a different answer:
+//
+//   - THE MOTIVATING SHAPE. `gen_c_type.zen`'s `is_c_integer`, written
+//     the way an author wraps a list a formatter does not own: a
+//     continuation under the `[`. Filled, its ten C integer names land
+//     on one line inside the brackets.
+//   - A FILL THAT ACTUALLY WRAPS. Twelve words, fed as one long line,
+//     so the greedy walk has to start a second line — the case the
+//     three real sites in the tree do not reach, and the one a rule
+//     that quietly stopped filling would get wrong.
+//   - A SHORT ARRAY JOINS. Wrapped by hand but small enough to fit, it
+//     comes back to one line: this rule joins before it breaks, for an
+//     array exactly as for a call.
+//   - A TRAILING COMMA IS REFUSED. That comma sits in the gap between
+//     the last item and the `]`, so `may_relay` declines the list and
+//     it keeps the shape its author gave it. The rule adds no comma
+//     either — `fmt.zen`'s `faithful` guard rests on the token stream
+//     being untouched, and a comma is a token.
+//
+// `faithful` is the guard in `fmt.zen` — the output re-lexed and its
+// token stream compared to the input's — and `fixpoint` is the second
+// run moving nothing; both are printed per case because a golden output
+// that is not a fixpoint is a gate that goes red on its own second run.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+scan, Source = std.lex.lex
+render = fmt.fmt
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    shows(
+        a,
+        "a hand-wrapped array literal fills instead of keeping its layout",
+        "is_c_integer = (name: str) bool {\n    name.is_in([\"i8\", \"i16\", \"i32\", \"i64\", \"int\",\n                \"u8\", \"u16\", \"u32\", \"u64\", \"usize\"])\n}\n"
+    ).try();
+
+    shows(
+        a,
+        "a fill runs onto a second line only once the first is full",
+        "words = (w: str) bool {\n    w.is_in([\"alpha\", \"bravo\", \"charlie\", \"delta\", \"echo\", \"foxtrot\", \"golf\", \"hotel\", \"india\", \"juliett\", \"kilo\", \"lima\"])\n}\n"
+    ).try();
+
+    shows(
+        a,
+        "a short array literal joins back onto one line",
+        "is_signed = (name: str) bool {\n    name.is_in([\"i8\",\n        \"i16\", \"i32\"])\n}\n"
+    ).try();
+
+    shows(
+        a,
+        "an array literal with a trailing comma is left exactly as written",
+        "budgets = () i32 {\n    sum([\n        1,\n        2,\n    ])\n}\n"
+    ).try();
+
+    Ok(0);
+}
+
+// Format, print the bytes, and format the bytes again to say whether
+// anything moved the second time.
+shows = (a: Alloc, what: str, text: str) Res<(), AllocError> {
+    first  = formatted(a, text).try();
+    second = formatted(a, first.view()).try();
+    println("== {}", what);
+    println(
+        "faithful: {}, {}",
+        faithful_of(a, text).try(),
+        verdict(first.view().eq(second.view()))
+    );
+    show(first.view());
+    Ok(());
+}
+
+verdict = (settled: bool) str {
+    settled.match({
+        true  => "fixpoint",
+        false => "MOVED",
+    })
+}
+
+formatted = (a: Alloc, text: str) Res<String, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out   = render(a, lexed).try();
+    Ok(out.text);
+}
+
+faithful_of = (a: Alloc, text: str) Res<bool, AllocError> {
+    lexed = scan(a, Source(file: "in.zen", text: text)).try();
+    out   = render(a, lexed).try();
+    Ok(out.faithful);
+}
+
+// The bytes, with the final newline shown as the end of the last line
+// rather than as a blank one, and a `|` at both ends so a trailing space
+// would be visible in the expectation. The column count rides along:
+// the fill rule's whole claim is about where 80 falls, and a golden
+// output nobody can measure by eye pins the shape without pinning the
+// reason.
+show = (text: str) () {
+    line ::= 0;
+    from ::= 0;
+    Range(0, text.len).loop((h, i) {
+        (text.index(i) == '\n').then(() {
+            line = line + 1;
+            println("{} ({}) |{}|", line, i - from, text.slice(from, i));
+            from = i + 1;
+        });
+    });
+}
