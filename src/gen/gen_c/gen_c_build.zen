@@ -392,12 +392,18 @@ default_initialiser = (
         })
 }
 
-// The value a member declares, when it can be written here.
+// The value a member declares, written here.
 // `is_pure_value` is the same gate a constant read is held to, and for
 // the same reason: this expression is emitted at every construction
-// site. A default that fails it is left to the zeroing it already got —
-// `Vec`'s `data :: Ptr<T> = null_ptr<T>()` is the only shape that
-// reaches it, and a null pointer is what zeroing gives.
+// site, so it may name no function and read no frame.
+//
+// A DEFAULT THAT FAILS IT IS REPORTED, NOT DROPPED. It used to be
+// dropped, on the claim that `Vec`'s `data :: Ptr<T> = null_ptr<T>()`
+// was the only shape reaching it and zeroing gave the same answer. That
+// claim was about the tree as it stood, not about the rule: `a:: i64 =
+// five()` reaches it too, and the field then read back 0 with nothing
+// said. So `null_ptr<T>()` is now admitted by `is_pure_call` for what it
+// is — a null pointer constant — and every other call is a diagnostic.
 member_default = (
     be    :: CBackend,
     m     : Member,
@@ -411,25 +417,7 @@ member_default = (
 ) Res<usize, AllocError> {
     declared_value(m).match({
         None  => Ok(0),
-        Ok(v) => pure_default(be, v, name, s, ty, dinst, dctx, seen, out),
-    })
-}
-
-pure_default = (
-    be    :: CBackend,
-    v     : ExprId,
-    name  : str,
-    s     : Struct,
-    ty    : TyId,
-    dinst : Inst,
-    dctx  : Ctx,
-    seen  : usize,
-    out   :: String
-)
-               Res<usize, AllocError> {
-    is_pure_value(be, v, dctx).match({
-        false => Ok(0),
-        true  => write_default(be, v, name, s, ty, dinst, dctx, seen, out),
+        Ok(v) => write_default(be, v, name, s, ty, dinst, dctx, seen, out),
     })
 }
 
@@ -449,8 +437,33 @@ write_default = (
     out.add_bytes(".").try();
     designator(be, ty, name, out).try();
     out.add_bytes(" = ").try();
-    expr(be, v, dctx, storage_type(be, s, name, dinst, dctx), out).try();
+    be.default_value(v, name, s, ty, dinst, dctx, out).try();
     Ok(1);
+}
+
+// The designator is already written, so both arms must leave a value
+// behind it — `unsupported` writes the `0` that keeps the initialiser
+// list parsing around a diagnostic.
+default_value = (
+    be    :: CBackend,
+    v     : ExprId,
+    name  : str,
+    s     : Struct,
+    ty    : TyId,
+    dinst : Inst,
+    dctx  : Ctx,
+    out   :: String
+)
+                Res<(), AllocError> {
+    is_pure_value(be, v, dctx).match({
+        false => unsupported(
+            be,
+            v,
+            "a field default that names a function or reads a frame",
+            out
+        ),
+        true  => expr(be, v, dctx, storage_type(be, s, name, dinst, dctx), out),
+    })
 }
 
 // A member's written value, whichever of the two member forms holds

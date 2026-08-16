@@ -29,6 +29,7 @@ expr, ty_of = gen.gen_c.gen_c_expr
 base_decl, type_const, TypeConst = gen.gen_c.gen_c_read
 intern_named, write_variant_value = gen.gen_c.gen_c_read
 plain_ctx = gen.gen_c.gen_c_decl
+is_null_ptr = gen.gen_c.gen_c_ptr
 
 // A module-level constant, WRITTEN OUT AT EACH USE rather than emitted
 // as a C object. DESIGN.md's `name: T = value` is immutable with no
@@ -156,7 +157,7 @@ lower_const_value* = (
         false => unsupported(
             be,
             id,
-            "a constant whose value is not a literal",
+            "a constant whose value names a function or reads a frame",
             out
         ),
         true  => expr(be, k.value, dctx, ty, out),
@@ -174,7 +175,7 @@ is_pure_value* = (be :: CBackend, id: ExprId, ctx: Ctx) bool {
         Unit       => true,
         Unary(u)   => is_pure_value(be, u.operand, ctx),
         Binary(b)  => is_pure_pair(be, b, ctx),
-        Call(c)    => is_pure_construction(be, c, ctx),
+        Call(c)    => be.is_pure_call(c, ctx),
         Access(a)  => is_pure_access(be, a, ctx),
         _          => false,
     })
@@ -211,8 +212,25 @@ is_pure_pair = (be :: CBackend, b: Binary, ctx: Ctx) bool {
 // run. The question is asked of the declaration and not of the spelling,
 // which is the same question `gen_c_call.zen` asks to decide between the
 // two readings of one node.
-is_pure_construction = (be :: CBackend, c: Call, ctx: Ctx) bool {
-    names_a_struct(be, c.callee, ctx) && pure_args(be, c, ctx)
+//
+// `null_ptr<T>()` is the one call that is not one. It has no body —
+// `gen_c_ptr.zen` IS its body, and what that body writes is `((T *)NULL)`,
+// a constant naming nothing. So the licence is `is_null_ptr` asked of the
+// SAME resolved declaration `gen_c_call.call_or_floor` asks it of: one
+// spelling of "this call is a null pointer literal", so the gate and the
+// lowering cannot drift into disagreeing about which calls are constants.
+is_pure_call = (be :: CBackend, c: Call, ctx: Ctx) bool {
+    be.callee_def(c.callee, ctx).match({
+        None  => false,
+        Ok(d) => be.pure_callee(c, d, ctx),
+    })
+}
+
+pure_callee = (be :: CBackend, c: Call, d: Def, ctx: Ctx) bool {
+    is_struct_def(d).match({
+        true  => be.pure_args(c, ctx),
+        false => is_null_ptr(d.name),
+    })
 }
 
 pure_args = (be :: CBackend, c: Call, ctx: Ctx) bool {
@@ -224,25 +242,18 @@ pure_args = (be :: CBackend, c: Call, ctx: Ctx) bool {
     every
 }
 
-names_a_struct = (be :: CBackend, callee: ExprId, ctx: Ctx) bool {
+callee_def = (be :: CBackend, callee: ExprId, ctx: Ctx) Res<Def> {
     be.tree.expr_at(callee).kind.match({
-        Name(n) => struct_named(be, n.text, ctx),
-        _       => false,
+        Name(n) => be.def_named(n.text, ctx),
+        _       => None,
     })
 }
 
-struct_named = (be :: CBackend, text: str, ctx: Ctx) bool {
+def_named = (be :: CBackend, text: str, ctx: Ctx) Res<Def> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, text, found).match({
-        Err(_) => false,
-        Ok(_)  => sole_struct(found),
-    })
-}
-
-sole_struct = (found: Vec<Def>) bool {
-    found.get(0).match({
-        None  => false,
-        Ok(d) => is_struct_def(d),
+        Err(_) => None,
+        Ok(_)  => found.get(0),
     })
 }
 

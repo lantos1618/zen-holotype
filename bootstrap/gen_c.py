@@ -762,36 +762,6 @@ def _bound_names(node):
     return tuple(out)
 
 
-def _is_pure_default(node):
-    """Can this expression be written twice without anyone being able to tell?
-
-    A default is emitted at EVERY construction that omitted the field, so it
-    must name no function and read no frame.  A literal can; so can an
-    operator over things that can, and so can a construction of them -- a
-    compound literal names no function and reads nothing.  A call to anything
-    else cannot, and neither can a bare name, because a name is a local whose
-    frame the use site is not in.
-
-    `src/gen/gen_c/gen_c_const.zen:is_pure_value` is the same predicate on the
-    other side, and it is the same gate a constant read is held to.
-    """
-    k = kind(node)
-    if k in ("Literal", "Unit"):
-        return True
-    if k == "Unary":
-        return _is_pure_default(f(node, "operand"))
-    if k == "Binary":
-        return _is_pure_default(f(node, "lhs")) and _is_pure_default(f(node, "rhs"))
-    if k == "Member":
-        return True  # `Shape.Unit`, `i32.MAX`: a value of a DECLARATION
-    if k == "Call":
-        return all(
-            _is_pure_default(f(a, "value") if kind(a) == "Arg" else a)
-            for a in f(node, "args", ()) or ()
-        )
-    return False
-
-
 def _field_defaults(node):
     """`name :: T = value` -- the value a field takes when nobody supplies one.
 
@@ -802,9 +772,9 @@ def _field_defaults(node):
     in the tree could notice it was missing: every default in std is already
     a zero, which is exactly what C's `{0}` was giving instead.
 
-    A default that is not a pure value is left to that zeroing.  `Vec`'s
-    `data :: Ptr<T> = null_ptr<T>()` is the only shape in the tree that
-    reaches it, and a null pointer is what zeroing gives.
+    EVERY declared default is returned, including one that cannot be written
+    at a construction site.  Filtering here is what made `a :: i64 = five()`
+    read back 0 with nothing said; `FnCtx.default_value` decides, and reports.
     """
     out = {}
     for member in f(node, "fields", ()) or ():
@@ -813,7 +783,7 @@ def _field_defaults(node):
         value = f(member, "default")
         if value is None:
             value = f(member, "value")
-        if value is not None and _is_pure_default(value):
+        if value is not None:
             out[str(f(member, "name", ""))] = value
     return out
 
@@ -3384,12 +3354,78 @@ class FnCtx:
                 code = self.value(values[fname], fields.get(fname))
                 inits.append(".%s = %s" % (sym_member(fname), code))
             elif fname in defaults:
-                code = self.value(defaults[fname], fields.get(fname))
+                code = self.default_value(defaults[fname], fields.get(fname))
                 inits.append(".%s = %s" % (sym_member(fname), code))
         cname = self.e.ctype(ty)
         if not inits:
             return ("((%s){0})" % cname, ty)
         return ("((%s){ %s })" % (cname, ", ".join(inits)), ty)
+
+    def default_value(self, node, want):
+        """A field's declared default, written HERE.
+
+        The expression is emitted at every construction that omitted the
+        field, so it must name no function and read no frame.  One that
+        cannot is REPORTED and not dropped: dropping left the field reading
+        back 0, a wrong answer that compiles, runs, and exits 0.
+
+        The message is `src/gen/gen_c/gen_c_build.zen:default_value`'s, word
+        for word -- the differential compares diagnostics, so the two backends
+        refusing the same program for the same reason must say the same thing.
+        """
+        if self.pure_default(node):
+            return self.value(node, want)
+        self.e.error(node, "codegen does not lower this yet: "
+                           "`a field default that names a function or reads a frame`")
+        return "0"
+
+    def pure_default(self, node):
+        """Can this expression be written twice without anyone being able to tell?
+
+        A literal can; so can an operator over things that can, and so can a
+        construction of them -- a compound literal names no function and reads
+        nothing.  A call to anything else cannot, and neither can a bare name,
+        because a name is a local whose frame the use site is not in.
+
+        `src/gen/gen_c/gen_c_const.zen:is_pure_value` is the same predicate on
+        the other side, and it is the same gate a constant read is held to.
+        """
+        k = kind(node)
+        if k in ("Literal", "Unit"):
+            return True
+        if k == "Unary":
+            return self.pure_default(f(node, "operand"))
+        if k == "Binary":
+            return self.pure_default(f(node, "lhs")) and self.pure_default(f(node, "rhs"))
+        if k == "Member":
+            return True  # `Shape.Unit`, `i32.MAX`: a value of a DECLARATION
+        if k == "Call":
+            return self.pure_call(node)
+        return False
+
+    def pure_call(self, node):
+        """A call is pure only when its callee NAMES A TYPE -- `TyId(index: 0)`
+        is a compound literal, `five()` is a function this construction would
+        run.  The question is asked of the DECLARATION, not of the spelling.
+
+        `null_ptr<T>()` is the one call that is not one: it has no body, the
+        backend is its body, and what that body writes is `((T *)NULL)` -- a
+        constant naming nothing.  Recognised by the same name `intrinsic`
+        lowers it by, so the gate and the lowering cannot come to disagree.
+        """
+        callee = f(node, "callee")
+        if kind(callee) != "Path":
+            return False
+        name = str(f(callee, "name", ""))
+        if name == "null_ptr":
+            return True
+        tdecl = self.e.type_decl(name, self.parts)
+        if tdecl is None or kind(tdecl.node) == "Enum":
+            return False
+        return all(
+            self.pure_default(f(a, "value") if kind(a) == "Arg" else a)
+            for a in f(node, "args", ()) or ()
+        )
 
     def infer_targs(self, tdecl, args):
         """Type arguments from the argument types, positionally by field."""

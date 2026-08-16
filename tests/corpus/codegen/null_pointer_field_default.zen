@@ -1,0 +1,56 @@
+// `null_ptr<T>()` AS A FIELD DEFAULT — the one call a default may make.
+//
+// A default is written at EVERY construction that omitted the field, so
+// `gen_c_const.is_pure_value` admits only what can be written twice
+// without anyone being able to tell: literals, operators over them, and
+// constructions. A call is none of those and is refused — see
+// tests/must-fail/codegen/field_default_that_calls_a_function.zen.
+//
+// `null_ptr<T>()` is spelled like a call and is not one. `mem_ptr.zen`
+// gives it no body ("a function, not a constant: a constant would still
+// need a T, and the call site always has one"); `gen_c_ptr.zen` IS its
+// body, and what that body writes is `((T *)NULL)` — a constant naming
+// nothing and reading nothing. So it is admitted, and admitted for that
+// reason rather than by its spelling.
+//
+// THIS FILE IS THE COST OF THE REFUSAL BESIDE IT. Until that refusal was
+// written, an unwritable default was silently dropped and this shape
+// survived by accident: zeroing happens to give a null pointer. The
+// moment the drop became a diagnostic, `Vec`'s
+// `data :: Ptr<T> = null_ptr<T>()` — and therefore `String`, `str` and
+// every collection in the tree — depended on the exemption being real.
+// Nothing else in the corpus asserts it, so a later tightening of
+// `is_pure_call` would take the whole standard library down with a green
+// suite behind it.
+//
+// `Slot<T>` is written out here rather than reached through `Vec`
+// because the point is the DECLARATION FORM, and a test that goes
+// through Vec would still pass if the exemption were replaced by a
+// special case on `Vec` itself.
+
+Slot*<T> = {
+    data*:: Ptr<T> = null_ptr<T>(),
+    len*:: usize = 3,
+}
+
+// Supplied explicitly, so the default is not what is read: a default is
+// optional at construction, not mandatory.
+filled = (p: Ptr<u8>) Slot<u8> { Slot<u8>(data: p, len: 1) }
+
+main = (env: Env) Res<i32, AllocError> {
+    empty = Slot<u8>();
+    println("{}", empty.data.is_null());
+    println("{}", empty.len);
+
+    // a second element type: the default is emitted per instantiation,
+    // and each one has to be spelled with ITS OWN pointee type
+    wide = Slot<usize>();
+    println("{}", wide.data.is_null());
+
+    // the same field, supplied — a non-null pointer proves the field is
+    // really read and `is_null` is really answering about it
+    alloc ::= env.mem.alloc();
+    room = alloc.raw(8, 8).try();
+    println("{}", filled(room).data.is_null());
+    Ok(0);
+}
