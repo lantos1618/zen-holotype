@@ -189,6 +189,33 @@ write_wire* = (p: WirePos, out :: String) Res<(), AllocError> {
     out.add_bytes("}")
 }
 
+// THE WHOLE DOCUMENT, as a range — the protocol's spelling of "replace
+// everything", which `textDocument/formatting` answers with. The only
+// range in this folder not converted from a span, so it is built HERE
+// rather than by its caller, under this file's own rule.
+//
+// THE END IS A LINE PAST THE LAST ONE, character 0: a client clamps a
+// range past the end, and naming the last line's last character would
+// need its width in UTF-16 units for no gain.
+write_whole* = (text: str, out :: String) Res<(), AllocError> {
+    out.add_bytes("{\"start\":").try();
+    write_wire(WirePos(line: 0, character: 0), out).try();
+    out.add_bytes(",\"end\":").try();
+    write_wire(WirePos(line: past_last_line(text), character: 0), out).try();
+    out.add_bytes("}")
+}
+
+// The 0-based line index one past the document's last. A text with n
+// newlines has lines 0..n, so the answer is n + 1 — and 1 for an empty
+// document, which still has line 0.
+past_last_line = (text: str) usize {
+    n ::= 1;
+    Range(0, text.len).loop((h, i) {
+        (text.index(i) == '\n').then(() { n = n + 1; });
+    });
+    n;
+}
+
 // A Zen span, converted and written as the protocol's `range`. `text` IS
 // THE DOCUMENT THE SPAN IS INTO, passed rather than looked up — a span
 // converted against another file's bytes is the wrong underline in the

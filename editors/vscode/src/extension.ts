@@ -52,9 +52,10 @@ const STARTUP_FAILED =
   "  3. A GENUINE SERVER FAILURE, in which case the trace above is the\n" +
   "     evidence — set `zen.trace.server` to `verbose` and reload.\n" +
   "\n" +
-  "Worth knowing before you file anything: this server answers hover and\n" +
-  "semantic tokens, publishes diagnostics, and refuses everything else\n" +
-  "with `-32601`.\n" +
+  "Worth knowing before you file anything: this server answers hover,\n" +
+  "definition, completion, document symbols, semantic tokens and\n" +
+  "formatting, publishes diagnostics, and refuses everything else with\n" +
+  "`-32601`.\n" +
   "\n" +
   "Colour comes from `textDocument/semanticTokens`, which is why this\n" +
   "extension ships no TextMate grammar — see editors/README.md for that\n" +
@@ -188,13 +189,25 @@ async function startClient(): Promise<void> {
   try {
     await client.start();
     output.appendLine(
-      "zen: server started. It answers `hover` — a type, or a function's signature — and",
+      "zen: server started. It answers `hover` — a type, or a function's signature —",
     );
     output.appendLine(
-      "zen: `semanticTokens`, which is where colour comes from; definition, completion,",
+      "zen: `semanticTokens`, which is where colour comes from, definition, completion,",
     );
     output.appendLine(
-      "zen: symbols, formatting and rename are refused by name with -32601.",
+      "zen: document symbols, and `formatting`; references and rename are refused by",
+    );
+    output.appendLine(
+      "zen: name with -32601.",
+    );
+    output.appendLine(
+      "zen: Formatting is `zen fmt` itself, so `editor.formatOnSave` formats a .zen",
+    );
+    output.appendLine(
+      "zen: buffer exactly as the command line would. A buffer that does not parse is",
+    );
+    output.appendLine(
+      "zen: left alone silently — no edit, and deliberately no error to dismiss.",
     );
     warnIfSemanticHighlightingOff();
   } catch (err) {
@@ -217,6 +230,23 @@ export function deactivate(): Thenable<void> | undefined {
 // `full: {delta: true}` and for `range` only when it said `range: true`,
 // so advertising a bare `full: true` is what keeps it to the one request
 // this server answers.
+//
+// NOR DOES ANY CLIENT CODE REGISTER THE FORMATTER, for the same reason.
+// `registerBuiltinFeatures()` installs `DocumentFormattingFeature`, which
+// sends `textDocument.formatting` in the client capabilities and, on
+// seeing `documentFormattingProvider` come back from `initialize`, calls
+// `vscode.languages.registerDocumentFormattingEditProvider` with this
+// extension's own `documentSelector`. A bare `true` from the server is
+// enough; VS Code stamps the provider with this extension's identity
+// because the call is made from this extension host, so no manifest
+// contribution is involved and `contributes.formatters` does not exist.
+//
+// `contributes.configurationDefaults` sets `editor.defaultFormatter` for
+// `[zen]` anyway, and it is polish rather than plumbing. VS Code
+// short-circuits when exactly one formatter is registered for a
+// document, so the setting is dead weight until a second one competes —
+// at which point the alternative is a user whose global default is
+// Prettier being told, on every save, that Prettier cannot format .zen.
 //
 // WHAT CAN STILL LEAVE THE FILE GREY, silently, with a server answering
 // perfectly. VS Code applies semantic tokens only when semantic

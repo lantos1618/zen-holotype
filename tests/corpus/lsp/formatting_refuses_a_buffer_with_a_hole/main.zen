@@ -1,0 +1,138 @@
+// A BUFFER THAT DOES NOT PARSE IS ANSWERED `[]`, NEVER AN ERROR — the
+// case an editor with format-on-save hits constantly, and the reason
+// this is a test and not a comment.
+//
+// `src/fmt/` refuses a file with lexical or syntactic faults: "a tree
+// with a hole no longer describes the source, and printing from one is
+// how a formatter eats code". So the question is not whether formatting
+// is refused — it is what the refusal looks like on the wire. `-32602`
+// would be correct-looking and wrong: VS Code turns a failed
+// `textDocument/formatting` into a modal, so a file saved mid-keystroke
+// would raise one on every save until it parsed, and the user's fix for
+// that is to turn formatting off.
+//
+// THREE SHAPES, because they are refused in three different places and
+// a handler that checked only one would pass part of this test. The
+// syntactic one comes back on `Render.diags`. The lexical one is
+// `lex.zen`'s contract — a file with lexical faults is reported, not
+// parsed — which `lsp_fmt.zen` checks with `is_clean`, and it takes TWO
+// documents to pin: one that also fails to parse, and one that parses
+// perfectly well, where dropping `is_clean` is otherwise invisible.
+// That second one was found by deleting the guard and watching this
+// test stay green.
+//
+// THE FRAME BODY IS PRINTED WHOLE, so `"result":[]` is asserted and the
+// absence of `"error"` with it.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+write_text = lsp.lsp_json
+Server, serve = lsp.lsp_serve
+write_frame, frame_at, write_decimal = lsp.lsp_frame
+
+// Unterminated string literal: the lexer reports and the parser is never
+// reached.
+UNLEXED*: str = "GREETING*: str = \"hello\n"
+
+// LEXES WITH A FAULT AND PARSES ANYWAY, which is the only shape where
+// the lexical guard is the thing doing the work. `010` — a decimal
+// literal with a leading zero, and Zen has no octal — is one token, so
+// the parser takes the file, the printer copies it back token for token
+// and `Render.faithful` holds; the blank-line run is a real change, so
+// the answer would be a real edit. `zen fmt` REFUSES THIS FILE (exit 1,
+// "a decimal literal has no leading zero"), and a server that formatted
+// it would be a second formatter with a second opinion.
+UNCLEAN*: str = "MAX*: i32 = 010\n\n\nMIN*: i32 = 1\n"
+
+// Lexes cleanly, parses to a tree with a hole: the body is never closed.
+UNPARSED*: str = "name_of = (n: i32) str {\n    n.match({\n"
+
+// Well-formed and already formatted. An editor asks for formatting on
+// every save, including the saves that change nothing, and an edit that
+// replaces a document with itself still dirties the buffer and moves the
+// cursor — so this answers `[]` too, from the third of the three arms.
+SETTLED*: str = "MAX*: i32 = 4\n"
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    input ::= a.String().try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
+        input
+    ).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input
+    ).try();
+
+    open_doc(a, "file:///unlexed.zen", UNLEXED, input).try();
+    open_doc(a, "file:///unclean.zen", UNCLEAN, input).try();
+    open_doc(a, "file:///unparsed.zen", UNPARSED, input).try();
+    open_doc(a, "file:///settled.zen", SETTLED, input).try();
+    ask(a, 2, "file:///unlexed.zen", input).try();
+    ask(a, 3, "file:///unclean.zen", input).try();
+    ask(a, 4, "file:///unparsed.zen", input).try();
+    ask(a, 5, "file:///settled.zen", input).try();
+
+    // A document that was never opened is the one refusal that stays a
+    // refusal: it is a client bug, not a half-typed file.
+    ask(a, 6, "file:///never-opened.zen", input).try();
+
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input
+    ).try();
+
+    s   ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view());
+    Ok(0);
+}
+
+open_doc = (a: Alloc, uri: str, text: str, into :: String)
+           Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(uri, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+ask = (a: Alloc, id: usize, uri: str, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(
+        ",\"method\":\"textDocument/formatting\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(uri, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// Reply 0 is `initialize` and the last is `shutdown`; the five in
+// between are this test's rows.
+walk_replies = (out: str) () {
+    at    ::= 0;
+    seen  ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; shown(seen, fr.body); seen = seen + 1; },
+        });
+    });
+}
+
+shown = (i: usize, body: str) () {
+    (i > 0 && i < 6).match({
+        true  => println("{}", body),
+        false => (),
+    })
+}

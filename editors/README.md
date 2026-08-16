@@ -34,8 +34,9 @@ pipe: `initialize` answers with `hoverProvider: true`, `didOpen` is
 accepted, `textDocument/hover` on `s` in `s = a + b` answers `i32`,
 `shutdown` answers, and the process exits **0**.
 
-**Now the honest part — this server answers hover and semantic tokens,
-publishes diagnostics, and refuses everything else:**
+**Now the honest part — this server answers hover, definition, completion,
+document symbols, semantic tokens and formatting, publishes diagnostics,
+and refuses everything else:**
 
 - **Diagnostics work, and they are all three phases.** Open or edit a `.zen`
   file in a workspace and the server builds the root behind it and publishes
@@ -82,9 +83,27 @@ publishes diagnostics, and refuses everything else:**
   all answer null, and so does anything whose type did not resolve. Hover
   refuses to print sema's `<unknown>` poison rather than show you a type
   that does not exist.
-- **Everything else is refused by name** with `-32601`: definition,
-  completion, symbols, formatting, rename, references. Hover on a document
-  that was never opened is `-32602`, not null.
+- **Formatting is `zen fmt`, and it is the same formatter.** The server
+  advertises `documentFormattingProvider`, so `vscode-languageclient`
+  registers a formatter for `.zen` with no client code, and **Format
+  Document** and `editor.formatOnSave` both work. `src/lsp/lsp_fmt.zen`
+  hands the open buffer — unsaved bytes and all — to the same `render`
+  the command line calls, and replies with one edit spanning the whole
+  document. There is no second formatter behind the wire, and
+  `tests/corpus/lsp/formatting_is_one_whole_document_edit` is the test
+  that says so.
+- **A buffer that does not parse is left alone, silently.** `src/fmt/`
+  refuses a file with lexical or syntactic faults — printing from a tree
+  with a hole is how a formatter eats code — and the server turns that
+  refusal into an empty edit list, never an error. This is the case
+  format-on-save hits constantly, and the alternative is a modal on
+  every save of a half-typed file. A file already formatted answers `[]`
+  too, so nothing is dirtied for no change. **Range formatting and
+  format-on-type are not advertised**, because `src/fmt/` formats whole
+  files.
+- **Everything else is refused by name** with `-32601`: rename and
+  references. Hover on a document that was never opened is `-32602`, not
+  null — and so is formatting one.
 - **Colour comes from two different places, and only one of them is the
   server.** Neovim gets it from tree-sitter and always did; nothing about
   Neovim changed when `semanticTokens` landed, and nothing needs to. VS

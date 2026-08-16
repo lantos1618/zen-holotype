@@ -1,0 +1,75 @@
+// src/lsp/lsp_fmt.zen
+// `textDocument/formatting` — the open buffer, formatted, as one edit.
+//
+// NOT A SECOND FORMATTER. `src/fmt/` takes a `Lexed` and hands back
+// bytes, needing no capability (`zen_fmt.zen`'s header says why it was
+// split that way) — so this file lexes the buffer, calls the same
+// `render` the command line calls, and spells the answer on the wire.
+// PLAN.md rule 2 draws the line for the parser and the AST; a formatter
+// the editor reaches by a different path is the same mistake one layer
+// up, and the two would drift the first time a rule was added.
+//
+// AN EMPTY EDIT LIST IS THE ANSWER TO EVERY REFUSAL, and that is the
+// whole design of this file. `fmt.zen` refuses a file with lexical or
+// syntactic faults — "a tree with a hole no longer describes the source,
+// and printing from one is how a formatter eats code" — and a buffer
+// mid-keystroke is exactly that file. An editor with format-on-save asks
+// on every save, so the refusal must be `[]` and never `-32602`: an
+// error pops a modal, and a modal on every save of a file that does not
+// yet parse is how a user turns formatting off. `[]` leaves the bytes
+// alone, silently, which is what "not now" looks like.
+//
+// THE GUARD IS NOT ADVISORY HERE EITHER. `Render.faithful` false means
+// the printer would have changed the token stream — a bug in `src/fmt/`,
+// which `zen fmt` reports and refuses to write. There is no one to
+// report it to over the wire, so this answers `[]` for the same reason:
+// a formatter that hands back a whole-document replacement it does not
+// trust is an editor.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+scan, Source, Lexed = std.lex
+render = fmt.fmt
+write_whole = lsp.lsp_pos
+write_text = lsp.lsp_json
+
+// The `TextEdit[]` for one buffer: one whole-document replacement, or
+// none. `text` IS THE EDITOR'S BUFFER and not the file on disk — an
+// unsaved change is the thing being formatted.
+write_edits* = (a: Alloc, text: str, out :: String) Res<(), AllocError> {
+    lexed = scan(a, Source(file: "doc", text: text)).try();
+    lexed.is_clean().match({
+        false => no_edits(out),
+        true  => rendered(a, text, lexed, out),
+    })
+}
+
+// THREE WAYS TO ANSWER NOTHING, and they are one arm: the buffer did not
+// parse, the guard failed, or the file was already formatted. A client
+// applying an edit that changes no byte still moves the cursor and still
+// marks the document dirty, so "already formatted" has to be `[]` too.
+rendered = (a: Alloc, text: str, lexed: Lexed, out :: String)
+           Res<(), AllocError> {
+    shaped = render(a, lexed).try();
+    (shaped.diags.len == 0
+        && shaped.faithful
+        && !text.eq(shaped.text.view())).match({
+        false => no_edits(out),
+        true  => whole_edit(text, shaped.text.view(), out),
+    })
+}
+
+no_edits = (out :: String) Res<(), AllocError> {
+    out.add_bytes("[]")
+}
+
+// `text` IS THE BUFFER THE RANGE IS MEASURED AGAINST, as everywhere else
+// in this folder — the range says how much to delete, and it is the old
+// bytes that say how many lines that is.
+whole_edit = (text: str, shaped: str, out :: String) Res<(), AllocError> {
+    out.add_bytes("[{\"range\":").try();
+    write_whole(text, out).try();
+    out.add_bytes(",\"newText\":").try();
+    write_text(shaped, out).try();
+    out.add_bytes("}]")
+}

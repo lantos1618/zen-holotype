@@ -1,0 +1,150 @@
+// `textDocument/formatting` IS `zen fmt`, REACHED OVER THE WIRE, and
+// proving that is this test's whole job. The reply is asserted three
+// ways:
+//
+//   1. the frame body WHOLE, so the edit's shape is pinned — one edit,
+//      a range from line 0 character 0 to a line past the last, and the
+//      formatted bytes as `newText`.
+//   2. `newText` READ BACK AS JSON and compared to what `render` — the
+//      function `zen fmt` itself calls — makes of the same bytes. Read
+//      rather than string-matched, so the comparison is about the value
+//      and not about the escaping. A second formatter behind the wire
+//      would pass (1) and fail this.
+//   3. `newText` differs from the buffer. Without it a handler that
+//      echoed its input back would satisfy both of the above, since
+//      `render` of already-formatted bytes is those bytes.
+//
+// THE DOCUMENT IS WELL-FORMED AND NOT FORMATTED: a run of two blank
+// lines to collapse into one, and match arms whose `=>` do not line up.
+// Both are whitespace rules, so `Render.faithful` holds and the answer
+// is a real edit rather than a refusal — which is the OTHER test.
+//
+// No `rootUri` is sent. Formatting needs no build and no workspace, the
+// same economy the outline makes, and a session with neither is the one
+// that proves it.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+scan, Source = std.lex
+render = fmt.fmt
+Jsons, JsonId, write_text = lsp.lsp_json
+read = lsp.lsp_json_read
+Server, serve = lsp.lsp_serve
+write_frame, frame_at = lsp.lsp_frame
+
+DOC*: str = "MAX*: i32 = 4\n\n\nname_of = (n: i32) str {\n    n.match({\n        0 => \"none\",\n        22 => \"many\",\n        _ => \"some\",\n    })\n}\n"
+
+URI*: str = "file:///a.zen"
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    input ::= a.String().try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
+        input
+    ).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input
+    ).try();
+    open_doc(a, input).try();
+    ask(a, input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input
+    ).try();
+
+    s   ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+
+    body   = reply_at(out.view(), 1);
+    shaped = by_the_formatter(a).try();
+    edited = new_text(a, body);
+    println("{}", body);
+    println(
+        "newText is what zen fmt makes of the same bytes: {}",
+        edited.eq(shaped)
+    );
+    println("newText differs from the buffer: {}", !edited.eq(DOC));
+    Ok(0);
+}
+
+open_doc = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(URI, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(DOC, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+ask = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/formatting\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(URI, body).try();
+    body.add_bytes(
+        "},\"options\":{\"tabSize\":4,\"insertSpaces\":true}}}"
+    ).try();
+    write_frame(body.view(), into)
+}
+
+// `zen fmt`'s answer for the same bytes: `zen_fmt.zen` scans and then
+// calls exactly this, so this IS the command line's formatter and not a
+// stand-in for it. The file name deliberately differs from the one the
+// server scans under — formatting a buffer must not depend on it.
+by_the_formatter = (a: Alloc) Res<str, AllocError> {
+    lexed = scan(a, Source(file: "a.zen", text: DOC)).try();
+    out   = render(a, lexed).try();
+    Ok(out.text.view());
+}
+
+// Reply 0 is `initialize`, reply 1 is the formatting answer, reply 2 is
+// `shutdown`. THE FRAMING IS UNWRAPPED AND NOT PRINTED, because
+// `a_session_is_answered_frame_by_frame` already pins every byte of it.
+reply_at = (out: str, want: usize) str {
+    at    ::= 0;
+    seen  ::= 0;
+    found ::= "";
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => {
+                (seen == want).then(() { found = fr.body; });
+                at   = fr.next;
+                seen = seen + 1;
+            },
+        });
+    });
+    found;
+}
+
+// `result[0].newText`, or "" when the reply is not that shape — an empty
+// answer fails the two assertions above rather than passing them.
+new_text = (a: Alloc, body: str) str {
+    tree ::= a.Jsons();
+    read(a, tree, body).match({
+        Err(_) => "",
+        Ok(id) => edit_text(tree, id),
+    })
+}
+
+edit_text = (tree: Jsons, id: JsonId) str {
+    tree.field(id, "result").match({
+        None    => "",
+        Ok(res) => tree.item(res, 0).match({
+            None      => "",
+            Ok(first) => tree.field(first, "newText").match({
+                None  => "",
+                Ok(v) => tree.text(v).match({ Ok(s) => s, None => "" }),
+            }),
+        }),
+    })
+}

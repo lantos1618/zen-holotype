@@ -177,9 +177,15 @@ write_target* = (t: Target, body :: String) Res<(), AllocError> {
 // `textDocument/semanticTokens/range`, which this server refuses with
 // `-32601`, leaving the file with NO COLOUR AT ALL and no reason shown.
 // A capability is a promise; the only safe one is the one already kept.
+//
+// `documentFormattingProvider` AND NOT `documentRangeFormattingProvider`
+// NOR `documentOnTypeFormattingProvider`, for that same reason: this
+// server formats a whole document (`lsp_fmt.zen`), because `src/fmt/`
+// parses a whole file, and a range it cannot format is a range it must
+// not be asked for.
 write_capabilities* = (out :: String) Res<(), AllocError> {
     out.add_bytes(
-        "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"definitionProvider\":true,\"documentSymbolProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]},\"semanticTokensProvider\":{\"legend\":"
+        "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"definitionProvider\":true,\"documentSymbolProvider\":true,\"documentFormattingProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]},\"semanticTokensProvider\":{\"legend\":"
     ).try();
     write_legend(out).try();
     out.add_bytes(
@@ -207,6 +213,7 @@ Request* = Initialize
     | Outline
     | Completion
     | Colour
+    | Format
     | Unknown
 
 // The one place a method's spelling is compared. Ordered by how often a
@@ -246,7 +253,16 @@ request_after_outline = (method: str) Request {
     })
 }
 
+// FORMATTING IS LAST OF THE DOCUMENT METHODS: a buffer is coloured on
+// every keystroke and formatted on save.
 request_after_colour = (method: str) Request {
+    method.eq("textDocument/formatting").match({
+        true  => Request.Format,
+        false => request_after_format(method),
+    })
+}
+
+request_after_format = (method: str) Request {
     method.eq("initialize").match({
         true  => Request.Initialize,
         false => method.eq("shutdown").match({

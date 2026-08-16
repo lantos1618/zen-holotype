@@ -1,7 +1,7 @@
 // src/lsp/lsp_serve.zen
 // The server: lifecycle, a document overlay, and a dispatch table.
 //
-// It answers EIGHT requests and handles THREE notifications, and refuses
+// It answers NINE requests and handles THREE notifications, and refuses
 // everything else BY NAME with `-32601` and the method spelled back —
 // `src/zen/zen_cli.zen`'s own rule one level down: a command that
 // silently does nothing is worse than one that says it is not written.
@@ -22,6 +22,10 @@
 //                              build settled about each name
 //                              (lsp_names.zen), lexical alone when there
 //                              is no clean build
+//   textDocument/formatting    lsp_fmt.zen — the open buffer through
+//                              `src/fmt/`, as one whole-document edit,
+//                              and `[]` rather than an error whenever
+//                              that is refused
 //   everything else            -32601, with the method named
 //   initialized / exit / $/cancelRequest   notifications, no reply
 //   didOpen / didChange / didClose         the overlay, Full sync only
@@ -58,6 +62,7 @@ FrameFault, frame_at, write_frame, write_decimal = lsp.lsp_frame
 Hover, hover_at, hover_in, hover_with = lsp.lsp_hover
 definition_at, definition_in, definition_with = lsp.lsp_def
 Sym, symbols_at, write_symbols = lsp.lsp_symbol
+write_edits = lsp.lsp_fmt
 Item, complete_at, complete_in, complete_shared = lsp.lsp_compl
 sort_items, write_items = lsp.lsp_compl
 // The colours, and the legend `initialize` has to advertise them under.
@@ -190,6 +195,7 @@ Server* = {
             Outline    => self.outlined(t, tree, req, rid, msg),
             Completion => self.completed(t, tree, req, rid, msg),
             Colour     => self.coloured(t, tree, req, rid, msg),
+            Format     => self.formatted(t, tree, req, rid, msg),
             Unknown    => self.unknown(t, tree, rid, method, msg),
         })
     }
@@ -564,6 +570,28 @@ Server* = {
                 symbols_at(t, text, syms).try();
                 body ::= t.String().try();
                 write_symbols(uri, text, syms, body).try();
+                result(tree, rid, body.view(), msg)
+            },
+        })
+    }
+
+    // FORMATTING NEEDS NO BUILD AND NO WORKSPACE, the same economy the
+    // outline makes. Every refusal is `lsp_fmt.zen`'s and every one of
+    // them is `[]`, for the reason its header gives.
+    formatted = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
+                 rid: JsonId, msg :: String) Res<(), AllocError> {
+        uri = string_at(tree, param(tree, req, "textDocument"), "uri");
+        self.docs.get(uri).match({
+            None     => failed(
+                tree,
+                rid,
+                RpcFault.InvalidParams,
+                "no open document for that uri",
+                msg
+            ),
+            Ok(text) => {
+                body ::= t.String().try();
+                write_edits(t, text, body).try();
                 result(tree, rid, body.view(), msg)
             },
         })

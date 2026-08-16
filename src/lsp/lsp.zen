@@ -22,29 +22,35 @@
 //                      dies by — shared by the settle and the queries
 //   lsp_diag.zen       publishDiagnostics: when to build, which file,
 //                      how an answer is taken back
+//   lsp_fmt.zen        formatting: the buffer through `src/fmt/`, as one
+//                      whole-document edit — never a second formatter
 //   lsp_reply.zen      the wire's shapes: a request's fields read, a
 //                      reply built
 //   lsp_serve.zen      lifecycle, the overlay, and the dispatch table
 //   lsp_stdio.zen      the pipe: frames in on stdin, frames out on stdout
 //
 // BUILT: L1 whole (transport, lifecycle, sync, diagnostics) plus hover,
-// definition, documentSymbol, completion and semanticTokens/full over
-// stdio via `zen lsp`; everything else in `design_lsp.md` §2 is refused
-// `-32601`. Hover, definition and build-backed completion need a build
-// (~1s) and go quiet without one; documentSymbol and colour's LEXICAL
-// half need only the buffer, so they answer on an unsaved buffer that
-// doesn't parse — why VS Code gets colour from this server at all. The
+// definition, documentSymbol, completion, semanticTokens/full and
+// formatting over stdio via `zen lsp`; everything else in
+// `design_lsp.md` §2 is refused `-32601`. Hover, definition and
+// build-backed completion need a build (~1s) and go quiet without one;
+// documentSymbol, formatting and colour's LEXICAL half need only the
+// buffer, so they answer on one that has never been saved. The first
+// and the last also answer on a buffer that does not PARSE — why VS
+// Code gets colour from this server at all — while formatting is the
+// one that must not, and says so with `[]` rather than an error. The
 // SEMANTIC half rides the diagnostics' build and degrades to lexical,
 // never grey. Diagnostics are all three phases or nothing: type errors
 // never show while syntax errors go unreported.
 //
-// NOT BUILT: references, formatting, signatureHelp, rename (L3-L4);
-// semanticTokens' `range` and `full/delta` shapes, deliberately not
+// NOT BUILT: references, signatureHelp, rename (L3-L4); formatting's
+// `range` and `onType` shapes, and semanticTokens' `range` and
+// `full/delta` shapes, all deliberately not
 // advertised (`design_lsp.md` §2). Definition on a LOCAL or pattern
 // binder answers `null` — a `Binding` carries no span; the fix is sema's.
 
 WirePos*, LineRun*, Step*, to_pos*, to_wire*, run_of*, step_at* = lsp.lsp_pos
-write_wire*, write_range*, wire_at*, units_of* = lsp.lsp_pos
+write_wire*, write_range*, write_whole*, wire_at*, units_of* = lsp.lsp_pos
 JsonId*, Run*, Pair*, Json*, Jsons*, write_text*, whole_of* = lsp.lsp_json
 JsonFault*, Reader*, read*, push_utf8*, byte_of* = lsp.lsp_json_read
 Envelope*, FrameFault*, frame_at*, write_frame*, write_decimal* = lsp.lsp_frame
@@ -54,6 +60,7 @@ Hover*, hover_at*, hover_in*, hover_with*, no_type* = lsp.lsp_hover
 Target*, Defn*, definition_at*, definition_in* = lsp.lsp_def
 definition_with*, no_target*, write_location* = lsp.lsp_def
 Sym*, symbols_at*, write_symbols* = lsp.lsp_symbol
+write_edits* = lsp.lsp_fmt
 Item*, Trigger*, DUMMY*, complete_at*, complete_in* = lsp.lsp_compl
 complete_shared*, sort_items*, write_items* = lsp.lsp_compl
 FILE_SCHEME*, path_of*, uri_at* = lsp.lsp_uri
