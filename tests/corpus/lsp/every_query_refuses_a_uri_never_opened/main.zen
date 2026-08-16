@@ -1,0 +1,143 @@
+// ALL SIX DOCUMENT QUERIES MAKE THE SAME REFUSAL, and this test is what
+// says so on the wire rather than in a comment.
+//
+// `lsp_serve.zen` answers six requests that name a document: hover,
+// definition, documentSymbol, completion, semanticTokens/full and
+// formatting. Every one of them must answer `-32602` with
+// "no open document for that uri" when the uri was never opened — a
+// CLIENT BUG, and the one refusal that is an error rather than an empty
+// answer. `null`, `[]` or `{}` would each read as "there is nothing
+// here", which is a different and false statement: the server was not
+// asked about a place in a document, it was asked about a document it
+// has never seen.
+//
+// THREE OF THE SIX WERE COVERED BY NOTHING before this file. Hover's
+// refusal is pinned by `a_session_is_answered_frame_by_frame`, colour's
+// by `colour_comes_from_the_lexer` and formatting's by
+// `formatting_refuses_a_buffer_with_a_hole` — so definition, the outline
+// and completion could each have turned into a `null` and every LSP test
+// would have stayed green. That is exactly the shape of regression a
+// refactor of the shared refusal introduces, which is why the six are
+// asserted together and in one place.
+//
+// A DOCUMENT IS OPENED FIRST, at a different uri. An empty overlay would
+// refuse these six for the trivial reason, and then a lookup that always
+// missed would pass this test; with `file:///real.zen` in the store the
+// refusal has to be about the uri that was asked for.
+//
+// THE FRAME BODY IS PRINTED WHOLE, so the code, the message and the
+// echoed id are all asserted, and the absence of a `result` with them.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+write_text = lsp.lsp_json
+Server, serve = lsp.lsp_serve
+write_frame, frame_at, write_decimal = lsp.lsp_frame
+
+// A document that opens, parses and checks. It exists so that the store
+// is not empty; nothing is ever asked about it.
+REAL*: str = "add = (a: i32, b: i32) i32 { a + b }\n"
+
+// The uri no `didOpen` ever named.
+GONE*: str = "file:///never-opened.zen"
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    input ::= a.String().try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
+        input
+    ).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input
+    ).try();
+    open_doc(a, "file:///real.zen", REAL, input).try();
+
+    // The three that carry a position, and the three that do not — the
+    // params a real client sends, not one shape reused six times.
+    ask_at(a, 2, "textDocument/hover", GONE, input).try();
+    ask_at(a, 3, "textDocument/definition", GONE, input).try();
+    ask_at(a, 4, "textDocument/completion", GONE, input).try();
+    ask(a, 5, "textDocument/documentSymbol", GONE, input).try();
+    ask(a, 6, "textDocument/semanticTokens/full", GONE, input).try();
+    ask(a, 7, "textDocument/formatting", GONE, input).try();
+
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input
+    ).try();
+
+    s   ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view());
+    Ok(0);
+}
+
+open_doc = (a: Alloc, uri: str, text: str, into :: String)
+           Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(uri, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// A request naming only a document.
+ask = (a: Alloc, id: usize, method: str, uri: str, into :: String)
+      Res<(), AllocError> {
+    body ::= a.String().try();
+    opening(a, id, method, uri, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// The same, with the `position` hover, definition and completion take.
+// `0:0` is inside every non-empty document, so a handler that looked the
+// position up before the document would answer about the position — and
+// the two orders are told apart by the message, not by the code.
+ask_at = (a: Alloc, id: usize, method: str, uri: str, into :: String)
+         Res<(), AllocError> {
+    body ::= a.String().try();
+    opening(a, id, method, uri, body).try();
+    body.add_bytes("},\"position\":{\"line\":0,\"character\":0}}}").try();
+    write_frame(body.view(), into)
+}
+
+// Everything up to the close of `textDocument`, which both shapes share.
+opening = (a: Alloc, id: usize, method: str, uri: str, body :: String)
+          Res<(), AllocError> {
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(",\"method\":").try();
+    write_text(method, body).try();
+    body.add_bytes(",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(uri, body)
+}
+
+// Reply 0 is `initialize` and the last is `shutdown`; the six in
+// between are this test's rows.
+walk_replies = (out: str) () {
+    at    ::= 0;
+    seen  ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; shown(seen, fr.body); seen = seen + 1; },
+        });
+    });
+}
+
+shown = (i: usize, body: str) () {
+    (i > 0 && i < 7).match({
+        true  => println("{}", body),
+        false => (),
+    })
+}
