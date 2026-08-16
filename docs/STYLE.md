@@ -12,7 +12,7 @@ That claim was false for a year: `make cap` stood behind one rule of the nine an
 
 | rule | gate |
 |---|---|
-| a prefix names its own folder; a folder has its root file; a file name means something; std depends only on std; an impl goes with its type; no `get_*`/`do_*`; no `// helpers` section; abbreviations are words; a free function on the module's principal type is called on it | `make style` — `scripts/style.py` |
+| a prefix names its own folder; a folder has its root file; a file name means something; std depends only on std; an impl goes with its type; no `get_*`/`do_*`; no `// helpers` section; a run of `||` on one subject is a membership test; abbreviations are words; a free function on the module's principal type is called on it | `make style` — `scripts/style.py` |
 | 500-line note, 800-line fail | `make cap` — `scripts/line_cap.py` |
 | no free function shadowing a method | `make ufcs` — `scripts/ufcs_collisions.py` |
 | a line is 80 columns; a list packed past it breaks one item per line; match arms align their `=>`; blank-line and comment placement | `make fmt` — the formatter owns the whole shape of a printed file, so it is the authority and this document does not restate its rules |
@@ -199,6 +199,26 @@ items.loop((h, v) { v.is_ready().then(() { h.break(v) }) })
 items.find((v) { v.is_ready() })
 ```
 
+**Three `||` on one subject is a membership test.** A run of three or more `||` asking the same subject for equality against literals is one question with a list of answers. `x.is_in([..])` writes it that way — the subject once, the question once, the answers in a row. `is_in` is a prelude name and lives in `std.core.eq`, because membership is equality asked of a list.
+
+```groovy
+// no
+name.eq("i8") || name.eq("i16") || name.eq("i32") || name.eq("i64")
+    || name.eq("int")
+
+// yes
+name.is_in(["i8", "i16", "i32", "i64", "int"])
+```
+
+A *run*, not the whole expression: `is_c_integer(name) || name.eq("f32") || name.eq("f64")` is a predicate followed by a membership test, and the tail is still one.
+
+Two exclusions, and both are why the rule says *equality against literals* and not *three `||`*:
+
+- **A range is not a list.** `(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'` (`gen_name.zen`) written out is fifty-three characters, which is worse than what it replaced.
+- **Different questions about one subject are not a membership test.** `is_stdin_read(be, rty, name) || is_defer(be, rty, name)` (`gen_c_cap.zen`) shares a subject and asks two things about it.
+
+And one the rule cannot reach yet: **a primitive cannot be the subject.** `is_in` is bounded on `Eq`, no primitive implements `Eq`, so `b == ' ' || b == '\t' || b == '\n'` has no `is_in` form to be rewritten into. A `u8.impl(Eq, ..)` in `std/core/num.zen` gives it one and changes no emitted C — both measured — but whether primitives carry trait impls is a design decision and not a formatting one. Until it is made, `scripts/style.py` reads `.eq` and not `==`, so the gate cannot ask for a rewrite nobody can write.
+
 **Guards close with a bare `_`.** Match is always exhaustive, in every position. If you find yourself wanting a partial match, you want `.then`, and it should be visible.
 
 **Early return over a pyramid.** `.try()` exists so that failure does not indent. When the early exit carries a value rather than a failure, a one-shot `loop` is the breakable block: each guard is a `.then` whose closure calls `h.break(v)`, and the fall-through `h.break` is the default. Bind the loop to a typed variable before matching on it — a match on the call itself leaves `T` unresolved, which the bootstrapper lowers to garbage instead of rejecting.
@@ -282,5 +302,9 @@ Measured, once, against all 162 files of `src/`. Every rule above was counted ra
 **`add` for one, `add_all` for many — 18 sites named otherwise, and mostly defensible.** `push_method`, `push_loop`, `push_tvar`, `push_bound` and friends are stack pushes, where position *is* the point and the rule's own exception applies; `insert_ordered` says so in its name. Two are worth a second look: `collections_map.zen`'s `Map.append` — a map has no order, so `add` is the word — and `sema_supply.zen`'s `add_all_members`, where the rule spells the plural `add_all`. Against 78 correct `add*` names, the rule is alive, not dead.
 
 **Rules that are real and at 100%, now guarded so they stay there:** every one of the 130 prefixed files names its own folder; all 18 folders have their root; all 260 imports written by a `std` module import `std`, and none of plain std's reach the compiler sublayer (`std.lex`, `std.parse`, `std.ast`); all 22 impls sit with their type; none of the 3628 functions is a `get_*` or a `do_*`; no file has a `// helpers` section; no comparison in the tree writes an ASCII code where a char literal exists.
+
+**Membership — 10 runs, 6 files, all closed in the change that wrote the rule.** Measured over the tree's 131 `||` chains: ten were one subject asked for equality against three or more literals, the longest `is_c_integer`'s ten, and every one is now `is_in([..])`. Closed rather than written down, because unlike the abbreviations no other lane holds these files open — the whole debt was an afternoon, and a ledger nobody needs is a ledger that outlives its reason.
+
+Reading `==` as well as `.eq` finds four more, and all four compare BYTES: `std/core/byte.zen:49`, `std/lex/lex_byte.zen:33`, `lsp/lsp_json_read.zen:395`, and the punctuation tail of `gen/gen_c/gen_c_fat.zen:797`. They are blocked on `Eq` for primitives, not on anyone's time — which is why the number to watch is 10 and not 14.
 
 **Rules that cannot be checked, and are left to review.** The stranger test, the second-caller rule, and the direction test in general all ask what a function is *about* — only the std boundary is mechanical. "Method chains over nested calls" needs to know the natural receiver, which in general nothing in the source states — the one case where something does is the free function whose first parameter is its module's principal type, and that case is gated rather than left here. "No `Alloc` parameter, no allocation" needs a call graph: a crude version flags 2306 of 3628 functions, nearly all of them methods reaching an allocator through `self`. Comment density, "a name that needs a comment is the wrong name", "one behaviour per test", `::` versus `:` being the right marker, and "smallest correct change" are judgement, all of them. `scripts/style.py`'s header says the same thing in the same words, because a reader who opens the script deserves to find out there what it does not do.

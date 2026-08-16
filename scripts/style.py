@@ -50,6 +50,18 @@ point: an unstated gap reads as coverage.
         exist in src/ today. A gate would have to guess whether `n == 32`
         counts a bit width or an ASCII space, and guessing wrong on a rule
         this cheap to eyeball is how a gate gets deleted.
+  a membership run written with `==` on a PRIMITIVE
+        `member` below reads `.eq` and stops there. `b == ' ' || b == '\t'
+        || b == '\n'` is the same shape and cannot be rewritten: `is_in` is
+        bounded on Eq and no primitive implements Eq, which is a compile
+        error and not a style opinion. Four runs in src/ are out of reach
+        for that reason -- std/core/byte.zen, std/lex/lex_byte.zen,
+        lsp/lsp_json_read.zen, gen/gen_c/gen_c_fat.zen. Measured while
+        writing this: a `u8.impl(Eq, ..)` in std/core/num.zen satisfies the
+        bound and leaves every `==` in the emitted C exactly as it was, so
+        the block is a decision nobody has made rather than a hard one.
+        Reporting them meanwhile would be an instruction nobody can carry
+        out, which is how a gate gets switched off.
   "no `Alloc` parameter, no allocation"
         needs a call graph. A crude version flags 2306 of 3628 functions,
         nearly all of them methods reaching an allocator through `self`.
@@ -434,6 +446,95 @@ def rule_banner(files):
     return checked, bad
 
 
+def or_operands(node):
+    """`a || b || c` as a flat list. `||` is left-associative, so a chain
+    of n is one tree nested to the left with n leaves."""
+    if kind(node) == "Binary" and node.op == "||":
+        return or_operands(node.lhs) + or_operands(node.rhs)
+    return [node]
+
+
+def subject(node):
+    """The name an operand asks about — `name`, `n.name` — or None.
+
+    Only a path of members, because two operands are the SAME subject
+    exactly when they spell it the same way, and anything with a call or an
+    index in it is a repeated computation this rule has no opinion about.
+    """
+    if kind(node) == "Path":
+        return node.name
+    if kind(node) == "Member":
+        base = subject(node.base)
+        return None if base is None else f"{base}.{node.name}"
+    return None
+
+
+def eq_literal(node):
+    """The subject of `x.eq(<literal>)`, or None for anything else.
+
+    `.eq` and NOT `==`: `is_in` is bounded on Eq and no primitive
+    implements it, so a run of `b == ' ' || b == '\\t'` has no is_in form to
+    be rewritten into. Reporting it would be an instruction nobody can carry
+    out, which is how a gate gets switched off.
+    """
+    if kind(node) != "Call" or kind(node.callee) != "Member":
+        return None
+    if node.callee.name != "eq" or len(node.args) != 1:
+        return None
+    arg = node.args[0]
+    if arg.name is not None or kind(arg.value) != "Literal":
+        return None
+    return subject(node.callee.base)
+
+
+def longest_run(operands):
+    """The longest run of consecutive operands asking ONE subject for
+    equality against a literal, as (length, subject).
+
+    A RUN and not the whole chain, because `is_c_integer(name) ||
+    name.eq("f32") || ..` is a predicate followed by a membership test and
+    the tail is still one. Anything else ends the run — a range test, a
+    different question, a comparison against a value rather than a literal —
+    which is what keeps this off `gen_name.zen`'s letter ranges and
+    `sema_check.zen`'s eight different questions.
+    """
+    best, run, held = (0, None), 0, None
+    for operand in operands:
+        found = eq_literal(operand)
+        run = run + 1 if found is not None and found == held else 1
+        held = found
+        if held is not None and run > best[0]:
+            best = (run, held)
+    return best
+
+
+def rule_member(files):
+    """Three or more `||` asking one subject for equality is `x.is_in([..])`.
+
+    "A run of `||` spells the same question once per answer and repeats the
+    subject every time." The rewrite is mechanical and the reading is not a
+    judgement: the subject, the question and the answer set are each written
+    once.
+    """
+    checked, bad = 0, []
+    for rel, _, module in files:
+        inner = set()
+        for node in nodes(module):
+            if kind(node) == "Binary" and node.op == "||":
+                inner.add(id(node.lhs))
+        for node in nodes(module):
+            if kind(node) != "Binary" or node.op != "||" or id(node) in inner:
+                continue
+            checked += 1
+            run, held = longest_run(or_operands(node))
+            if run >= 3:
+                bad.append((f"{node.span}",
+                            f"{run} `||` asking `{held}` for equality against"
+                            f" a literal — that is a membership test, and it"
+                            f" is written `{held}.is_in([..])`"))
+    return checked, bad
+
+
 def identifiers(path, parser):
     """Every identifier TOKEN in the file, with its line.
 
@@ -717,6 +818,8 @@ def main() -> int:
         ("impl-home", "an impl goes with its type", *rule_impl_home(files), 0),
         ("verb     ", "no `get_*`, no `do_*`", *rule_verb(files), 0),
         ("banner   ", "no `// helpers` section", *rule_banner(files), 0),
+        ("member   ", "a run of `||` on one subject is `is_in([..])`",
+         *rule_member(files), 0),
         ("abbrev   ", "abbreviations are words", abbrev_n, abbrev_bad,
          len(ABBREV_OWED)),
         ("ufcs     ", "a free function on the principal type is called on it",
