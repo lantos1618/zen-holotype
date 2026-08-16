@@ -103,6 +103,12 @@ def main() -> int:
         print("    is deliberately shown out of context")
     print(f"design_examples: {checked} example(s) checked, {skipped} fragment(s) "
           f"skipped, {len(failures)} failed")
+    if not checked:
+        print("design_examples: read no complete examples out of docs/DESIGN.md."
+              " Every fence is a fragment, or the fences changed shape and this"
+              " check just stopped checking -- fix the script, do not delete it.",
+              file=sys.stderr)
+        return 2
     return 1 if failures else 0
 
 

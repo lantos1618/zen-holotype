@@ -1,5 +1,16 @@
 # Zen. See docs/PLAN.md for what each target gates.
 
+# BASH, AND `-o pipefail`, FOR EVERY RECIPE. A pipeline's exit status is its
+# LAST command's, so `find ... | xargs ./zen fmt --check` reports the status of
+# xargs and `$(PY) scripts/x.py | tail` reports the status of tail -- a failing
+# gate on the left of a pipe exits 0 and the build goes green on a red check.
+# /bin/sh here is dash, which has no `pipefail` at all, so this cannot be a
+# `set -o pipefail` line inside a recipe; it has to be the shell make invokes.
+# The same trap is waiting in every terminal an agent works in -- docs/STYLE.md,
+# "a pipeline reports the wrong exit status", has the incantation for that side.
+SHELL       := /bin/bash
+.SHELLFLAGS := -o pipefail -c
+
 CC      ?= cc
 CFLAGS  ?= -O2 -std=c99
 PY      ?= python3
@@ -8,7 +19,7 @@ ROOT    ?= src
 # `editors` IS IN THIS LIST BECAUSE `editors/` IS ALSO A DIRECTORY. Without
 # it make finds the directory, calls the target up to date, and runs the
 # script never — a gate that cannot fail because it cannot run.
-.PHONY: all build seed test test-zen lint parse design cap dupcomments faults refmap ufcs style editors fixpoint determinism grammar grammar-test fmt bench asan leak profile clean help
+.PHONY: all build seed test test-zen lint parse design cap dupcomments faults refmap ufcs style editors fixpoint determinism grammar grammar-test fmt bench bench-allocs asan leak profile clean help
 
 all: test
 
@@ -41,7 +52,11 @@ seed: build
 ## was written to cure: a check outside `make test` is a check that goes
 ## stale unobserved. If either one makes this target too slow to run, split
 ## it out deliberately and say where it runs instead — do not just drop it.
-test: parse design cap dupcomments faults refmap ufcs style grammar-test editors
+## `bench-allocs` joined it on 2026-08-16, for the third time the same
+## disease has been diagnosed here: tests/bench was run by no target in
+## `all`, so `allocs_op: 0` -- cited in src/ as a thing that fails the
+## build -- was a number nothing had ever computed.
+test: parse design cap dupcomments faults refmap ufcs style grammar-test editors bench-allocs
 	$(PY) tests/run.py
 
 ## faults: every fault the compiler declares must have a site that raises
@@ -111,13 +126,22 @@ design: grammar
 	$(PY) scripts/design_examples.py
 
 ## parse: every .zen the tree claims is valid must parse. cheap, and it
-## is the only thing standing behind example/ -- nothing else compiles
-## it, because it is written against stage 5. must-fail/ is excluded on
-## purpose: those files exist to NOT parse.
+## is the only thing standing behind example/ and tests/bench -- nothing
+## else compiles either one. example/ is written against stage 5;
+## tests/bench holds the bench bodies, which no target builds (bench.py
+## builds the DRIVERS that mirror them) and bench_budgets.zen, which is
+## read by a regex. must-fail/ and tests/parse/errors are excluded on
+## purpose: those files exist to NOT parse, and grammar-test owns them.
+##
+## THE FILE COUNT IS ASSERTED. A find that matches nothing leaves xargs
+## with no work and exits 0, which is this repo's own recorded shape for
+## a gate that cannot fail; one renamed directory would have retired
+## this check in silence.
 parse: grammar
-	@find src example tests/corpus -name '*.zen' -print0 \
-	  | xargs -0 -- sh -c 'cd grammar && npx tree-sitter parse --quiet --stat \
-	      $$(for f in "$$@"; do echo "../$$f"; done)' --
+	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tests/bench -name '*.zen' -print0); \
+	  test $${#files[@]} -gt 0 \
+	    || { echo "parse: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
+	  cd grammar && npx tree-sitter parse --quiet --stat "$${files[@]/#/../}"
 
 ## test-zen: the same suites, against a built zen binary
 test-zen: build
@@ -170,18 +194,36 @@ grammar-test: grammar
 ## refuses a file it cannot parse. tests/corpus/lex/ carries a BOM, a
 ## CRLF, a missing final newline and trailing whitespace on purpose --
 ## formatting those files would delete the seven tests in them.
+##
+## THE FILE COUNT IS ASSERTED, for the reason `parse` gives above, and
+## more sharply here: this recipe used to end `xargs --no-run-if-empty`,
+## which is an instruction to do nothing and succeed when the find comes
+## up empty.
 fmt: build
-	@find $(ROOT) example tests/corpus -name '*.zen' \
-	    -not -path 'tests/corpus/lex/*' -print0 \
-	  | xargs -0 --no-run-if-empty ./zen fmt --check
+	@mapfile -d '' files < <(find $(ROOT) example tests/corpus -name '*.zen' \
+	    -not -path 'tests/corpus/lex/*' -print0); \
+	  test $${#files[@]} -gt 0 \
+	    || { echo "fmt: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
+	  ./zen fmt --check "$${files[@]}"
 
-## bench: the tests/bench gate. Drivers under tests/bench/drivers/ mirror
-## the bench bodies (constructing a Bencher needs trait dispatch gen_c does
-## not have yet), run under an external wall clock minus the null driver's
-## floor, and are reported against the budgets in bench_budgets.zen and the
-## rolling median in tests/bench/baseline.json. NOT in `test`: wall clocks
-## are slow and noisy, and a gate that reddens on a loaded machine teaches
-## people to read past red. Over budget warns; only an absurd miss fails.
+## bench-allocs: the half of tests/bench that is not a stopwatch, and so
+## the half that belongs in `test`. Each driver is linked through
+## `ld --wrap=malloc` and compiled at N and 2N iterations; the slope is
+## allocations and bytes per op, the same integers on every machine, and
+## over the budgets in bench_budgets.zen FAILS. ~2 seconds. The budgets
+## are ceilings measured at libc, not at the Zen allocator -- bench.py's
+## header says exactly what that does and does not prove.
+bench-allocs:
+	$(PY) scripts/bench.py --allocs-only
+
+## bench: the same drivers with the wall clock as well, against the ns_op
+## budgets and the rolling median in tests/bench/baseline.json. Drivers
+## under tests/bench/drivers/ mirror the bench bodies (constructing a
+## Bencher needs trait dispatch gen_c does not have yet) and are timed
+## whole-process minus the null driver's floor. THE CLOCK IS WHAT KEEPS
+## THIS OUT OF `test`, not the drivers: wall clocks are slow and noisy,
+## and a gate that reddens on a loaded machine teaches people to read
+## past red. Over budget warns; only an absurd miss fails.
 bench:
 	$(PY) scripts/bench.py
 

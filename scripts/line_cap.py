@@ -118,8 +118,18 @@ def zen_files():
 
 
 def main() -> int:
+    files = list(zen_files())
+    # "0 over 500, 0 over 800" is what a tree with no long files prints and
+    # also what a tree this script can no longer find prints. The second one
+    # is a setup error wearing the first one's verdict.
+    if not files:
+        print(f"line_cap: found no .zen files under src/ -- this gate is"
+              f" checking nothing. Fix {Path(__file__).name}; do not read this"
+              f" as green.", file=sys.stderr)
+        return 2
+
     over_hard, over_soft = [], []
-    for rel, path in zen_files():
+    for rel, path in files:
         n = len(path.read_text(encoding="utf-8", errors="replace").splitlines())
         if n > HARD and rel not in EXCEPTIONS:
             over_hard.append((rel, n))

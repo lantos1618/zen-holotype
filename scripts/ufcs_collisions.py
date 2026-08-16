@@ -269,6 +269,19 @@ def main() -> int:
     if stale:
         return 1
 
+    # "0 ambiguous over 3210 sites" and "0 ambiguous over nothing at all" are
+    # the same verdict line with a different number in it, and the second one
+    # is what a moved src/, a renamed struct field on the CST, or a parse that
+    # yielded no functions produces. A setup error must not be able to
+    # impersonate a result -- scripts/fixpoint.sh says it in those words.
+    if not scanned or not methods:
+        print(f"ufcs: scanned {scanned} free function(s) against {len(methods)}"
+              f" type(s) with methods -- one of those is zero, so this gate"
+              f" checked nothing. src/ moved, or the parse stopped yielding"
+              f" declarations. Fix the script; do not read this as green.",
+              file=sys.stderr)
+        return 2
+
     print(f"ufcs: {scanned} ufcs free function(s) over {len(methods)} type(s)"
           f" with methods, {len(owed)} ambiguous and written down")
     return 0
