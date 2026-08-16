@@ -2001,12 +2001,45 @@ class Emitter:
 
     def self_type(self, decl, subst):
         """`@Self` for this declaration: the owning type, at the arguments
-        this instantiation was made with."""
+        this instantiation was made with.
+
+        A PRELUDE DECLARATION OF A PRIMITIVE'S NAME IS THAT PRIMITIVE.
+        `u8.impl(Eq, { eq = (self: @Self, ..) })` is written against the u8
+        every literal already has, never against a second nominal type that
+        happens to spell its name -- so `@Self` there is `prim("u8")` and the
+        emitted function takes a `uint8_t`.  DESIGN.md says why this is not a
+        small error, and the C compiler said it too: without this line the
+        impl was emitted taking the STRUCT `u8` declares its constants in,
+        and every call read "expected u8, but argument is of type int".
+
+        STORAGE IS WHAT TELLS THE TWO APART.  `str` declares `data` and
+        `len` -- its declaration IS its representation -- and its own members
+        read `self.data`, which is a member lookup that only the NAMED
+        spelling carries.  `u8` declares `MIN`, `MAX`, `BITS`: constants, one
+        value per type, no storage per value.  So a declaration with fields
+        keeps `@Self` named and one without becomes the scalar, and neither
+        primitive ends up with two types.
+        """
         if not decl.owner:
             return None
+        if decl.owner in PRIMS and not self.prim_storage(decl.owner):
+            return prim(decl.owner)
         base = tuple(decl.module.split(".")) if decl.module else ()
         return ("named", base + (decl.owner,),
                 tuple(subst.get(tp, UNKNOWN) for tp in decl.otparams))
+
+    def prim_storage(self, name):
+        """Does the prelude's declaration of this primitive declare fields?
+
+        Only `str` does. A field declares storage per value; a constant
+        declares one value per type (`std/core/num.zen` says it in those
+        words), and `MIN`/`MAX`/`BITS` are the second kind -- they are not
+        parsed as fields at all.
+        """
+        td = self.type_decl(name)
+        if td is None:
+            return False
+        return any(not _is_fn_field(m) for m in (f(td.node, "fields", ()) or ()))
 
     def sema_type(self, node, parts=(), subst=None):
         if self.sema is None:
@@ -3591,6 +3624,31 @@ class FnCtx:
                                       receiver=(rcode, rty))
         # a ufcs free function: the receiver is the first parameter
         cands = self.ufcs_decls(name, rty)
+        if not cands and rty is not None and rty[0] == "prim":
+            # ... or the primitive's OWN impl, which is where its method is
+            # written.  The `named` branch above asks `owned_decls` this same
+            # question -- "the type's own members AND its impls'" -- and a
+            # prim receiver never reaches it, so `b.eq(' ')` on a u8 fell
+            # through to the bound's bodyless declaration below and was
+            # reported as "gen_c has no trait dispatch yet".  That is true of
+            # the fat record and false of this call: the receiver's type is
+            # known, so the function `u8.impl(Eq, {eq = ..})` supplies is a
+            # direct call, exactly as it is for a named type.
+            #
+            # AND THE SEALED MEMBERS COME ALONG, same as they do up there:
+            # `Eq` declares `ne` as `!eq` and no impl writes one, so it is
+            # compiled once per receiver type -- which needs `self_ty`, or
+            # `@Self` stays the trait and the C reads "expected Eq, argument
+            # is uint8_t".
+            supplied = self.prim_impl_decls(rty, name)
+            inherited = self.trait_methods(rty, name)
+            pool = list(supplied) + [d for d in inherited if d not in supplied]
+            if pool:
+                decl = self.pick_overload(pool, argnodes, receiver=(rcode, rty))
+                own = any(d is decl for d in inherited)
+                return self.emit_call(decl, node, argnodes, targs, want,
+                                      receiver=(rcode, rty),
+                                      self_ty=rty if own else None)
         if not cands and rty is not None and rty[0] in ("named", "prim"):
             # ... or a bound's bodyless declaration, whose body is the backend.
             # a primitive's bound (`u8.impl(ToU32, ..)`) is reached the same
@@ -3672,6 +3730,31 @@ class FnCtx:
         code, _rty = self.emit_call(cands[0], node, [rhs], (), prim("bool"),
                                     receiver=lhs)
         return code
+
+    def prim_impl_decls(self, rty, name):
+        """The methods a primitive's impls supply, with bodies.
+
+        KEYED ON THE PRIMITIVE'S NAME and not on a declaration's parts, which
+        is the same key `satisfies` uses one screen down and for the same
+        reason: "a primitive's impls hang off the name itself -- there is no
+        declaration whose parts could carry them".  `owned_decls` cannot be
+        reused here because it reads `ty[1][-1]`, and a prim's `ty[1]` is the
+        string `"u8"`, whose last element is `"8"`.
+
+        BODIES ONLY.  A bodyless member owned by the primitive would be an
+        intrinsic (`to_u32`), and those are already the ufcs candidates tried
+        before this; letting one through here would shadow the intrinsic path
+        with a call to a function nobody defines.
+        """
+        out = []
+        for d in sorted(self.e.by_name.get(name, []), key=lambda d: d.parts):
+            if d.dkind != "fn" or d.owner != rty[1]:
+                continue
+            fnode = self.e.fn_node(d.node)
+            if fnode is None or f(fnode, "body") is None:
+                continue
+            out.append(d)
+        return out
 
     def trait_methods(self, rty, name, needs_body=True):
         """Methods the receiver's type satisfies but does not declare.

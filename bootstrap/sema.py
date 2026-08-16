@@ -2067,6 +2067,28 @@ class Sema:
         return all_eat(pa, pb, ta) or all_eat(pb, pa, tb)
 
     def _check_impl(self, im, base):
+        # AN IMPL LIVES IN THE MODULE THAT DECLARES ITS TARGET.  The impl
+        # table is keyed on that declaration's qname, so one written anywhere
+        # else is never consulted -- not a weaker impl, dead text.
+        #
+        # AND IT USED TO SAY NOTHING.  `u8.impl(Eq, ..)` outside
+        # `std.core.num` compiled clean here, and the only symptom was a
+        # `<T: Eq>` refusing a u8 somewhere else, or a `no member` about a
+        # method the author had just written.  Reported at the impl, where
+        # the mistake is.
+        #
+        # A TARGET THAT RESOLVES TO NOTHING IS AN UNDEFINED NAME and not a
+        # misplaced impl: `_qualify` marks those `@name`, and saying "move it"
+        # about a type that does not exist would send the reader nowhere.
+        if not im.target.startswith("@"):
+            home = im.target.rsplit("::", 1)[0]
+            if home != im.mod.dotted:
+                self.error(im.span,
+                           "an impl lives in the module that declares its "
+                           "target, so there are no orphan impls: one written "
+                           "anywhere else is never consulted: %s is declared "
+                           "in module %s, so the impl belongs there"
+                           % (im.target_name, home))
         trait = self.types.get(im.trait)
         if trait is None or trait.kind != "struct":
             return

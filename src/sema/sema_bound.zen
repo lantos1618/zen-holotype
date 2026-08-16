@@ -36,9 +36,9 @@ Vec = std.collections
 str, String = std.text
 Range = std.core
 DeclId, ImplId = sema.sema_id
-TyId, Ty, Types, TyNamed, Prim = sema.sema_ty
+TyId, Ty, Types, TyNamed, Prim, is_prim = sema.sema_ty
 World, Def, decl_at = sema.sema_def
-Diag, SemaFault, NameFault, TypeFault = sema.sema_diag
+Diag, SemaFault, NameFault, TypeFault, ExportFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 member_named, opaque, Found, members_of = sema.sema_member
 bound_members, has_member, impl_span, impl_bound_type = sema.sema_supply
@@ -46,16 +46,90 @@ type_from_ast = sema.sema_type
 Cand, TBound, Actual = sema.sema_call
 ty_at, is_tvar = sema.sema_cand
 
+// TWO THINGS ARE WRONG WITH AN IMPL, and they are asked in that order:
+// where it is written, and what it supplies.
+//
 // "`A.impl(B, {..})` supplies a value for every field `B` declares."
 // Every field, and every member the bound left to the impl — a sealed or
 // default member has a body already, and an optional hook is optional by
 // declaration.
 check_impl* = (c :: Checker, id: ImplId, mi: usize) Res<(), AllocError> {
     c.world.impl_at(c.tree, id).match({
-        Ok(im) => check_impl_body(c, im, id, mi),
+        Ok(im) => c.check_one_impl(im, id, mi),
         None   => Ok(()),
     }).try();
     Ok(());
+}
+
+check_one_impl = (c :: Checker, im: Impl, id: ImplId, mi: usize)
+                 Res<(), AllocError> {
+    c.check_home(im, id, mi).try();
+    check_impl_body(c, im, id, mi).try();
+    Ok(());
+}
+
+// AN IMPL IS ONLY EVER CONSULTED THROUGH THE MODULE THAT DECLARES ITS
+// TARGET. `World.impls_named` is whole-program, but every reader of it
+// — `local_bound_is` below, `sema_supply`, `sema_apply`, `sema_drop`
+// and five sites in `gen_c` — narrows the list with
+// `n.decl.module == id.decl.module`, which is DESIGN.md's "there are no
+// orphan impls" doing double duty as the disambiguator between two
+// same-named types. An impl written anywhere else is therefore not a
+// weaker impl, it is dead text.
+//
+// AND IT SAID NOTHING, which is the defect this check exists for.
+// `u8.impl(Eq, ..)` in any file but `std.core.num` compiled clean and
+// left `<T: Eq>` rejecting `u8` with nothing on screen naming the
+// reason — a wrong answer that looks like a working build.
+//
+// A TARGET THAT RESOLVES TO NOTHING IS SOMEBODY ELSE'S DIAGNOSTIC: it
+// is an undefined name, not a misplaced impl, and reporting it here
+// would say "move it" about a type that does not exist.
+check_home = (c :: Checker, im: Impl, id: ImplId, mi: usize)
+             Res<(), AllocError> {
+    defs ::= c.alloc.Vec<Def>();
+    c.target_defs(im.target.text, mi, defs).try();
+    defs.get(0).match({
+        None  => Ok(()),
+        Ok(d) => c.home_is(d, im, id, mi),
+    })
+}
+
+// THE SAME LOOKUP THE READERS MAKE, and it has to be the same one: a
+// primitive's impls hang off the PRELUDE declaration of its name
+// (`prim_impls_bound`), so asking the impl's own module instead would
+// bless an impl beside a locally-declared `u8` that no bound will ever
+// find.
+target_defs = (c :: Checker, name: str, mi: usize, out :: Vec<Def>)
+              Res<(), AllocError> {
+    is_prim(name).match({
+        true  => c.world.prelude_of(name, out),
+        false => c.world.defs_of(mi, name, out),
+    })
+}
+
+home_is = (c :: Checker, d: Def, im: Impl, id: ImplId, mi: usize)
+          Res<(), AllocError> {
+    (d.id.module.to_usize() == mi).match({
+        true  => Ok(()),
+        false => c.orphan(im, id, d),
+    })
+}
+
+orphan = (c :: Checker, im: Impl, id: ImplId, d: Def) Res<(), AllocError> {
+    span = c.impl_span(id);
+    c.report(
+        span.file,
+        span,
+        SemaFault.OrphanImpl(ExportFault(
+            name: im.target.text,
+            module: c.module_named(d.id.module.to_usize()),
+        ))
+    )
+}
+
+module_named = (c: Checker, mi: usize) str {
+    c.world.table_at(mi).match({ Ok(t) => t.name, None => "" })
 }
 
 check_impl_body = (c :: Checker, im: Impl, id: ImplId, mi: usize)

@@ -470,13 +470,23 @@ def subject(node):
 
 
 def eq_literal(node):
-    """The subject of `x.eq(<literal>)`, or None for anything else.
+    """The subject of `x.eq(<literal>)` or `x == <literal>`, or None.
 
-    `.eq` and NOT `==`: `is_in` is bounded on Eq and no primitive
-    implements it, so a run of `b == ' ' || b == '\\t'` has no is_in form to
-    be rewritten into. Reporting it would be an instruction nobody can carry
-    out, which is how a gate gets switched off.
+    `==` COUNTS, AND IT USED TO NOT. The reason it did not was that `is_in`
+    is bounded on Eq and no primitive implemented one, so a run of
+    `b == ' ' || b == '\\t'` had no is_in form to be rewritten into and
+    reporting it would have been an instruction nobody could carry out --
+    which is how a gate gets switched off. `std.core.num` and
+    `std.core.bool` impl Eq now, so the rewrite exists for every subject.
+
+    A RANGE IS STILL NOT MEMBERSHIP. `b >= 'a' && b <= 'z'` is an `&&`, so
+    it reaches this function whole and answers None, which BREAKS the run
+    rather than joining it -- `gen_name.zen`'s letter ranges and
+    `gen_c_fat.zen`'s `is_word_byte` stay unreported, as they must:
+    enumerating twenty-six characters is worse than the range.
     """
+    if kind(node) == "Binary" and node.op == "==":
+        return subject(node.lhs) if kind(node.rhs) == "Literal" else None
     if kind(node) != "Call" or kind(node.callee) != "Member":
         return None
     if node.callee.name != "eq" or len(node.args) != 1:

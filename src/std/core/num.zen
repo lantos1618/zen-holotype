@@ -15,6 +15,11 @@
 // for unsigned too: a u8 reaching 256 is the same bug an i8 reaching
 // 128 is.
 
+// `Eq` is imported and not inherited from the prelude: this file IS
+// part of the prelude, and the impls at the foot of it need the name.
+// std.core.eq imports nothing, so the graph still points down.
+Eq = std.core.eq
+
 // Negative extremes are plain literals: unary minus on a positive
 // that doesn't fit the type alone (classic; pinned by
 // tests/corpus/lex/number_i32_min_literal.zen). In C that token
@@ -172,3 +177,33 @@ i32.impl(ToI64, { widen_i64 = to_i64 })
 i32.impl(ToF64, { widen_f64 = to_f64 })
 
 f32.impl(ToF64, { widen_f64 = to_f64 })
+
+// EQUALITY, SO A PRIMITIVE CAN BE THE SUBJECT OF `<T: Eq>`. Every
+// integer already compares — `a == b` is C's own operator and stays
+// that way, because `scalar_eq` (sema_bound.zen) and the backend both
+// answer "every primitive but `str` and `()`" before any impl is
+// consulted. These impls add a `.eq` METHOD and change no `==` in the
+// emitted C; what they buy is `b.is_in([' ', '\t'])` and every other
+// `<T: Eq>` bound, which until now rejected `u8` outright.
+//
+// HERE AND NOT IN std.core.eq, and that is not a filing preference: an
+// impl is only ever consulted through the module that DECLARES its
+// target, so `u8.impl(Eq, ..)` is only real in the file that writes
+// `u8* = {..}`. Written next to the trait it would compile clean and be
+// invisible — the silence `SemaFault.OrphanImpl` now ends.
+//
+// NO FLOAT IMPL, deliberately. `NaN == NaN` is false, so an `f64` is
+// not equal to itself and `xs.is_in([x])` would answer "no" about a
+// value that IS in the list. That is the wrong-answer-that-compiles
+// shape, and a float wanting membership should say what it means about
+// NaN at the call site rather than inherit a silent law from here.
+i8.impl(Eq, { eq ::= (self: @Self, other: @Self) bool { self == other } })
+i16.impl(Eq, { eq ::= (self: @Self, other: @Self) bool { self == other } })
+i32.impl(Eq, { eq ::= (self: @Self, other: @Self) bool { self == other } })
+i64.impl(Eq, { eq ::= (self: @Self, other: @Self) bool { self == other } })
+
+u8.impl(Eq, { eq ::= (self: @Self, other: @Self) bool { self == other } })
+u16.impl(Eq, { eq ::= (self: @Self, other: @Self) bool { self == other } })
+u32.impl(Eq, { eq ::= (self: @Self, other: @Self) bool { self == other } })
+u64.impl(Eq, { eq ::= (self: @Self, other: @Self) bool { self == other } })
+usize.impl(Eq, { eq ::= (self: @Self, other: @Self) bool { self == other } })

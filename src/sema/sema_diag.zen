@@ -107,6 +107,7 @@ SemaFault* =
 
     // impls and bounds
     | ImplMissingField(NameFault)      // an impl supplies every field, or it is not one
+    | OrphanImpl(ExportFault)          // only the target's own module is ever consulted
     | AmbiguousMember(PairFault)       // two impls, no bound in scope to choose
     | BoundNotSatisfied(TypeFault)     // no impl of the bound
     | EqNeedsImpl(TypeFault)           // `==` dispatches to `Eq`, and there is none
@@ -191,6 +192,7 @@ message* = (fault: SemaFault) str {
         DuplicateSignature(_)     => "duplicate signature: parameter names are documentation, not identity",
         AmbiguousOverload(_)      => "ambiguous overload: a generic parameter swallows a concrete one, so these two can never be told apart at a call site",
         ImplMissingField(_)       => "impl is missing field",
+        OrphanImpl(_)             => "an impl lives in the module that declares its target, so there are no orphan impls: one written anywhere else is never consulted",
         AmbiguousMember(_)        => "ambiguous: two impls supply this name and no bound in scope selects one",
         BoundNotSatisfied(_)      => "bound not satisfied: this type has no impl of the bound, so it has none of the fields the bound promises",
         EqNeedsImpl(_)            => "`==` needs an `Eq`: equality dispatches to the impl, so write one or compare the parts",
@@ -249,6 +251,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         ModuleNotAValue(f)        => write_module(out, f),
         NoOverload(f)             => out.write_name(f),
         ImplMissingField(f)       => write_missing(out, f),
+        OrphanImpl(f)             => write_orphan(out, f),
         ComputedFieldAssign(f)    => out.write_name(f),
         ComputedFieldAddress(f)   => out.write_name(f),
         InferredSetExported(f)    => out.write_name(f),
@@ -321,6 +324,21 @@ write_missing = (out :: String, f: NameFault) Res<(), AllocError> {
     out.add_bytes(
         ": an impl supplies a value for every field the bound declares"
     ).try();
+    Ok(());
+}
+
+// WHICH MODULE THE IMPL HAS TO MOVE TO, which is the half a position
+// cannot give: told only that an impl is homeless, an author still has
+// to find out where `u8` is declared. The name is the target and the
+// module is its declaring one — an `ExportFault` and not a new shape,
+// since "a name, and the module it is about" is exactly what that
+// payload carries.
+write_orphan = (out :: String, f: ExportFault) Res<(), AllocError> {
+    out.add_bytes(": ").try();
+    out.add_bytes(f.name).try();
+    out.add_bytes(" is declared in module ").try();
+    out.add_bytes(f.module).try();
+    out.add_bytes(", so the impl belongs there").try();
     Ok(());
 }
 
