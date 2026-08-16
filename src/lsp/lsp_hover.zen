@@ -18,8 +18,7 @@
 // only three of twelve positions answered (`a`, `b`, `s` where USED),
 // missing the function's own name, every parameter/local at its
 // declaration, and every `i32`. The finder that made the other three
-// reachable lived here as `lsp_decl.zen` and is now `ast_named.zen`
-// (moved on its second caller); this file says each as:
+// reachable is `ast_named.zen`; this file says each as:
 //
 //   Sig      a function's name  -> its declaration, reprinted from the
 //                                  AST's names and the checker's types
@@ -34,18 +33,16 @@
 // unresolved, no return type) discards the whole answer rather than
 // shipping a partial one — costs listed at the bottom.
 //
-// TWO WAYS IN, AND THE WORKSPACE DECIDES. `hover_in` checks the document
-// as part of a BUILD; `hover_at` checks it AS ONE MODULE standing alone,
-// for when there is no root to build (no `rootUri`, or the two-file form
-// of `zen lsp`) — there an import resolves to nothing and hover answers
-// `null` rather than guessing.
-//
-// THREE WAYS IN NOW: `hover_with` asks the question of a build ALREADY
-// MADE — the shared slot's checker (`lsp_built.zen`), which the settle
+// THREE WAYS IN, AND THE WORKSPACE DECIDES — the shape every query in
+// this folder takes. `hover_with` asks the question of a build ALREADY
+// MADE: the shared slot's checker (`lsp_built.zen`), which the settle
 // and every query against one document state hold in common, so a hover
-// after a settle builds nothing. `hover_in` and `hover_at` still rebuild
-// per request — the slot's `None` fallback and the no-workspace case —
-// and their pages die with the request's own arena.
+// after a settle builds nothing. `hover_in` checks the document as part
+// of a BUILD of its own — the slot's `None` fallback. `hover_at` checks
+// it AS ONE MODULE standing alone, for when there is no root to build
+// (no `rootUri`, or the two-file form of `zen lsp`) — there an import
+// resolves to nothing and hover answers `null` rather than guessing.
+// Both rebuilds' pages die with the request's own arena.
 
 str, String = std.text
 Vec, Map = std.collections
@@ -147,14 +144,10 @@ hover_at* = (a: Alloc, name: str, text: str, line: usize, character: usize)
 // `str` and any real import resolve to nothing and sema interns poison;
 // `write_ty_id` correctly answers `null`.
 //
-// THE OPEN DOCUMENT IS THE ENTRY, not `main`: a file being edited is
-// usually not reachable from the program's entry, so walking from the
-// document reaches what it IMPORTS instead (`folder_root` pulls the
-// sibling modules that complete a UFCS pool).
-//
-// THE COMPILATION ROOT IS COMPUTED AND NOT THE WORKSPACE: `root_for`
-// accounts for an editor opening at the repository while this tree
-// builds as `zen build src`.
+// THE ROOT, THE ENTRY AND THE OVERLAY are `check_build`'s three
+// choices, made here inline — walking from the open document reaches
+// what it IMPORTS (`folder_root` pulls the sibling modules that
+// complete a UFCS pool).
 //
 // `rel` AND NOT THE URI IS WHAT SPANS CARRY: a build names a module by
 // its path relative to the root, so `told_at` gets the same string
@@ -244,20 +237,19 @@ wired = (text: str, span: Span, known: bool, out :: String)
 
 // --- the three answers -------------------------------------------------
 
-// A WRITTEN TYPE, resolved, and said in full. `type_from_ast`'s memo
-// is keyed on exactly this `TypeId`, so `i32` costs a `Map` lookup.
-// What a PRIMITIVE answers is more than its name: "a prelude
-// declaration of a primitive's name IS that primitive" (DESIGN.md:438),
-// and that declaration is the one place the language has anything to
-// SAY about `i32` — so the answer is the name, the declaration's first
-// doc line, and its exported members (`i32 — members: MIN, MAX, BITS`).
-// A primitive the prelude does not declare (and every type in
-// `hover_at`, where there is no prelude at all) still answers the bare
-// name, which is the RESOLVED type (`Alias = Shape` hovers as `Shape`)
-// and confirms the name is a type the checker knows — a name that
-// resolves to nothing answers `null`. Signatures keep the bare name:
-// they go through `write_ty` below, and a reprinted parameter list is
-// no place for a doc comment.
+// A WRITTEN TYPE, resolved, and said in full. `type_from_ast`'s memo is
+// keyed on exactly this `TypeId`, so `i32` costs a `Map` lookup. What a
+// PRIMITIVE answers is more than its name: "a prelude declaration of a
+// primitive's name IS that primitive" (DESIGN.md:438), and that
+// declaration is the one place the language has anything to SAY about
+// `i32` — so the answer is the name, its first doc line, and its
+// exported members (`i32 — members: MIN, MAX, BITS`). A primitive the
+// prelude does not declare — and every type in `hover_at`, where there
+// is no prelude at all — still answers the bare RESOLVED name
+// (`Alias = Shape` hovers as `Shape`), which confirms the checker knows
+// it; a name that resolves to nothing answers `null`. Signatures keep
+// the bare name, through `write_ty` below: a reprinted parameter list
+// is no place for a doc comment.
 write_written_ty = (
     c   :: Checker,
     id  : TypeId,
@@ -421,11 +413,11 @@ write_ty_id = (c :: Checker, id: TyId, out :: String) Res<bool, AllocError> {
     })
 }
 
-// Does this type, anywhere inside it, contain poison? STRUCTURAL AND NOT
-// TEXTUAL: checking the rendered name for `<unknown>` would put a second
-// spelling of sema's marker here. `Ty` is a closed nine-variant enum, so
-// the walk is total. `Infer` is NOT poison: `_` in `Res<Cfg, _>` is a
-// hole law 6 permits, honest to show a user who wrote one.
+// Poison anywhere inside this type — STRUCTURAL AND NOT TEXTUAL:
+// checking the rendered name for `<unknown>` would put a second spelling
+// of sema's marker here. `Ty` is a closed nine-variant enum, so the walk
+// is total. `Infer` is NOT poison: `_` in `Res<Cfg, _>` is a hole law 6
+// permits, honest to show a user who wrote one.
 poison_free = (c :: Checker, id: TyId) bool {
     c.types.at(id).match({
         Unknown   => false,

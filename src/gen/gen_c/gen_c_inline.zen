@@ -12,8 +12,8 @@
 // SO A LAMBDA IS NEVER A VALUE HERE. Passing one INLINES THE CALLEE,
 // and calling the parameter it was bound to INLINES THE LAMBDA. There is
 // no function pointer, no closure record and no C spelling for a `()
-// bool` parameter — which is the same sentence as the allocation budget
-// `tests/bench/bench_loop.zen` gates.
+// bool` parameter — the same sentence as the `allocs_op: 0` budget
+// `tests/bench/bench_loop.zen` declares.
 //
 // A CLOSURE'S FREE NAMES MEAN WHAT THEY MEANT WHERE IT WAS WRITTEN, and
 // this is the half that is easy to get wrong. Inlining puts the body
@@ -21,19 +21,17 @@
 // .. })` would capture a caller's `h` — silently, with a different value
 // rather than with an error. `Closure` carries the depth of BOTH scope
 // stacks at the point the lambda was written and `run_closure` rewinds
-// to them, which is what makes the capture hygienic. The bootstrapper
-// paid for this one and recorded it.
+// to them, which is what makes the capture hygienic.
 //
 // AND IT CARRIES THE CALLER'S `Ctx`, so a `.try()` inside a lambda body
 // returns from the function the lambda was WRITTEN in. That is what
 // `d.exported.then(() { out.add(d).try() })` means, and reading it any
 // other way would return the wrong error type from the wrong frame.
 //
-// WHAT IS REFUSED, BY NAME: a return type nothing settles. `then<T>`
-// reaches `T` only through the closure, and a closure infers FROM a
-// signature rather than into one — so `T` is read off the lambda's own
-// body, and where that can't be read the call is reported rather than
-// emitted at a guess.
+// WHAT IS REFUSED, BY NAME: a return type nothing settles — `then<T>`
+// reaches `T` only through the closure, which is `gen_c_settle.zen`'s
+// argument. Where the lambda's own body does not settle it, the call is
+// reported rather than emitted at a guess.
 //
 // WHAT A CALL EVALUATES TO IS `gen_c_settle.zen`'s SUBJECT, not this
 // one: a question about types, asked before anything is written and
@@ -79,8 +77,8 @@ INLINE_DEPTH* : usize = 12
 // recognising
 // -----------------------------------------------------------------
 
-// Is this callee one to inline? A body to inline, and a lambda written
-// at the call site to inline it for.
+// A body to inline, and a lambda written at the call site to inline it
+// for.
 inlines* = (be: CBackend, c: Call, f: Function) bool {
     has_body(f) && takes_lambda(be, c)
 }
@@ -97,11 +95,11 @@ is_lambda* = (be: CBackend, id: ExprId) bool {
     be.tree.expr_at(id).kind.match({ Lambda(_) => true, _ => false })
 }
 
-// Does this declaration take a body? Such a function is NEVER emitted:
-// a `(v: T) bool` parameter has no C spelling, so there is no symbol to
-// write and no way to pass one — it exists only inlined at its call
-// sites, which is what `loop_iter.zen`'s no-closure-record claim means
-// for a function that is not `loop`.
+// A function that takes a body is NEVER emitted: a `(v: T) bool`
+// parameter has no C spelling, so there is no symbol to write and no
+// way to pass one — it exists only inlined at its call sites, which is
+// what `loop_iter.zen`'s no-closure-record claim means for a function
+// that is not `loop`.
 takes_closure* = (be: CBackend, f: Function) bool {
     got ::= false;
     f.params.loop((h, p) { got = got || param_is_fn(be, p); });
@@ -116,8 +114,6 @@ type_is_fn = (be: CBackend, t: TypeId) bool {
     be.tree.type_at(t).kind.match({ Fn(_) => true, _ => false })
 }
 
-// The binding a name has when it is a closure, and nothing when it is
-// an ordinary local or nothing at all.
 closure_slot* = (be :: CBackend, name: str) Res<LocalSlot> {
     be.slot_of(name).match({
         Ok(s) => keep_closure(s),
@@ -249,10 +245,6 @@ inline_member = (
     leave_tparams(be, mark).try();
     Ok(());
 }
-
-// The receiver, if a ufcs call arrived through one, and then the
-// written arguments: `range.find(p)` and `find(range, p)` are one call
-// written two ways.
 
 // -----------------------------------------------------------------
 // the body, in the caller's frame
@@ -462,7 +454,6 @@ bind_closure = (
     )
 }
 
-// The parameter types and the return type a function TYPE carries.
 fn_parts = (be :: CBackend, pty: TyId, ptys :: Vec<TyId>)
            Res<TyId, AllocError> {
     be.check.types.at(pty).match({
@@ -506,8 +497,7 @@ bind_value = (be :: CBackend, p: Param, value: ExprId, pty: TyId, ctx: Ctx)
 //
 // The other half: a name bound to a lambda, called. The arguments are
 // written WHERE THE CALL IS, so they are lowered before the frame moves
-// — and then both scope stacks rewind to where the lambda was written,
-// which is what keeps a caller's `h` out of `find`'s reach.
+// and both scope stacks rewind (the hygiene the header argues for).
 // -----------------------------------------------------------------
 
 lower_closure_call* = (
@@ -749,13 +739,4 @@ declare_bound = (be :: CBackend, p: Param, ty: TyId, text: str)
     be.writeln(line.view())
 }
 
-// -----------------------------------------------------------------
-// what an inlined call evaluates to, asked BEFORE it is lowered
-//
-// `ty_of` must answer for a match scrutinee before it's written, and
-// sema's answer for `Range(0, n).find(p)` is `Res<T>` with nothing
-// bound — a temporary declared at that answer and filled by this
-// file's answer would be C that doesn't compile. Same computation as
-// `inline_free`, asked as a query: one implementation, two callers, so
-// they agree by construction rather than inspection.
-// -----------------------------------------------------------------
+// What an inlined call evaluates to: `gen_c_settle.zen`, `inline_ret`.

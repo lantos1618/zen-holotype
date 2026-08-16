@@ -72,12 +72,11 @@ serve_stdio* = (env: Env, a: Alloc) Res<i32, AllocError> {
 // query already built is still current (`lsp_built.zen`'s single
 // flight).
 //
-// AND IT IS EVERY MESSAGE, NOT EVERY BATCH: `short_by` asks for exactly
-// one message's bytes and `Stdin.read` blocks until it has them, so this
-// reader cannot coalesce two keystrokes that both arrived (`lsp_diag.zen`'s
-// header is blunt about this; `serve` over a buffer can). What makes
-// that affordable is no longer the transport but the slot: the second
-// and later messages against one document state build nothing.
+// AND IT IS EVERY MESSAGE, NOT EVERY BATCH — the coalescing
+// `lsp_diag.zen`'s header is blunt about not getting at the transport
+// (`serve` over a buffer can). What makes that affordable is the slot,
+// not the transport: the second and later messages against one document
+// state build nothing.
 //
 // NOT CALLED `settled`: `Server` has a method of that name and this
 // takes one as its first parameter, so the two would collide — this
@@ -129,10 +128,9 @@ drain = (server :: Server, t: Alloc, held: str, at: usize)
 }
 
 // One message in, its reply out. THE BODY IS NOT COPIED: it borrows
-// `held`, whose bytes are never reused — a `Vec` grow abandons the old
-// run in the arena without overwriting it, and a read appends past the
-// end — so the borrow outlives the message. What the server KEEPS from a
-// body (the open documents, the workspace) it copies itself, in
+// `held`, whose bytes the header's two-arenas rule says are never
+// reused, so the borrow outlives the message. What the server KEEPS from
+// a body (the open documents, the workspace) it copies itself, in
 // `lsp_serve.zen`'s `changed_to` — once per real change, not once per
 // message.
 answered = (server :: Server, t: Alloc, body: str) Res<(), AllocError> {
@@ -144,10 +142,9 @@ answered = (server :: Server, t: Alloc, body: str) Res<(), AllocError> {
     Ok(());
 }
 
-// Is this fault "the rest has not arrived yet"? Over a buffer `serve`
-// treats every fault as the end of the session; over a live stream two
-// are not faults — a header block not yet ended, and a short body. The
-// other two are a client speaking a protocol this is not.
+// The header's reading of `Short`/`NoBlank`: bytes still in flight, not
+// faults. Over a buffer `serve` treats every fault as the end of the
+// session; the other two are a client speaking a protocol this is not.
 partial = (f: FrameFault) bool {
     f.match({
         NoBlank(_)   => true,

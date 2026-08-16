@@ -12,14 +12,13 @@
 // what it meant.
 //
 // EVERY RULE HERE IS THE FIRST ONE'S ARGUMENT APPLIED TO ANOTHER
-// OPERATOR. Ragged arms came out aligned and ragged bindings came out
-// ragged, but a hand-aligned binding came out hand-aligned — so the
-// column was nobody's: the formatter neither made it nor unmade it, and
-// a tree drifts into a mix of both that no gate can see. A broken
-// parameter list had the same defect and it is the same answer. Owned
-// in all three directions now: a run's operators line up, and padding
-// outside a run (or wider than the run asks for) is set back to what
-// the run asks for.
+// OPERATOR. Ragged bindings came out ragged but a hand-aligned binding
+// came out hand-aligned, so the column was nobody's — the formatter
+// neither made it nor unmade it, and a tree drifts into a mix of both
+// that no gate can see. A broken parameter list had the same defect and
+// gets the same answer. Owned in all three directions now: a run's
+// operators line up, and padding outside a run (or wider than the run
+// asks for) is set back to what the run asks for.
 //
 // THE PARAMETER COLUMN IS LEFT-ALIGNED ON THE OPERATOR, so `::` and `:`
 // begin at the same column and the TYPES after them do not line up with
@@ -34,11 +33,10 @@
 //     ) Res<(), AllocError> {
 //
 // THE SEAM WITH `fmt_break.zen`: that rule packs a list onto one line
-// before it decides whether to break it, and packing a list whose
+// before deciding whether to break it, and packing a list whose
 // parameters carry this column would carry the column onto a line with
 // nothing to align to. So it declines to JOIN a parameter list written
-// one per line — the one exception to its one-rule-for-both — and this
-// file is why.
+// one per line, and this file is why.
 //
 // NOT A PRINTER, DOESN'T REBUILD AN ARM, A BINDING OR A PARAMETER:
 // bytes stay the author's; this only sets the WIDTH of the spaces
@@ -65,9 +63,9 @@
 // CANNOT SEE A STRING LITERAL OR COMMENT AS AN OPERATOR: every position
 // read is a `Span` the PARSER produced, so `=>` inside `"a => b"` or a
 // commented-out arm is never named by `Arm.arrow_span`. The byte scans
-// are `op_width` and `colon_width` below, over the gap between a name and
-// the operator that follows it, and `fmt_break.zen`'s `clean_gap` gives
-// the argument for why that gap and no other may be read as bytes.
+// (`op_width`, `colon_width`) run only over the gap between a name and
+// the operator after it — `fmt_break.zen`'s `clean_gap` argues why that
+// gap and no other may be read as bytes.
 //
 // IDEMPOTENT: the column a member asks for is one past the END of its
 // own name, and a pad is written entirely AFTER that — so a run never
@@ -89,10 +87,10 @@ Parser, module = std.parse.parse
 Src = fmt.fmt_src
 
 // One `=>` that is going to move, and where to. Named in BYTES not a
-// column: applying it is a copy of `[from, to)` replaced by `width`
-// spaces, and a column would need re-deriving against a line whose
-// earlier bytes might have moved (they never do, by the one-arm-per-line
-// rule above, so bytes are the terms the copy actually runs in).
+// column: applying it replaces `[from, to)` with `width` spaces, and a
+// column would need re-deriving against a line whose earlier bytes
+// might have moved. They never do, by the one-thing-per-line rule
+// above, so bytes are the terms the copy actually runs in.
 Pad = {
     from: usize,
     to: usize,
@@ -165,7 +163,6 @@ Aligned* = {
     }
 }
 
-// `alloc.Aligned(src, tree, m)` — ufcs constructor, like `Src`/`Out`.
 // Scans the expression, type and block arenas rather than walking from
 // the module (see ast_find.zen: one flat `Vec` needs no traversal or
 // parent links). `m` is here only for the DECLARATIONS, which no arena
@@ -244,9 +241,9 @@ align_block_decls = (al :: Aligned, src: Src, b: Block) Res<(), AllocError> {
 unaligned = () Res<(), AllocError> { Ok(()) }
 
 // One arm list, in two passes: the widest arm's column, then the pad
-// each arm needs to reach it. Two passes because alignment is a
-// property of the LIST, not an arm — the first arm's answer depends on
-// the last. `col` of 0 means nothing here is movable (the common case).
+// each arm needs to reach it. Two passes because alignment is a property
+// of the LIST, not an arm — the first arm's answer depends on the last.
+// `col` of 0 means nothing here is movable (the common case).
 align_arms = (al :: Aligned, src: Src, tree: Ast, mt: Match)
              Res<(), AllocError> {
     col ::= 0;
@@ -314,9 +311,9 @@ arrow_col = (src: Src, tree: Ast, mt: Match, i: usize) usize {
     })
 }
 
-// May this rule set the width before this arm's `=>`? (See header for
-// why each clause exists.) Together: the arm begins a line, ends it,
-// carries its `=>` on that line, and has only spaces where the pad goes.
+// The width before an arm's `=>` may be set only when the arm begins a
+// line, ends it, carries its `=>` on that line, and has only spaces
+// where the pad goes. The header says why each clause is there.
 movable = (src: Src, tree: Ast, mt: Match, i: usize, arm: Arm) bool {
     line = arm.arrow_span.start.line;
     end  = tree.pattern_at(arm.pattern).span.end;
@@ -359,17 +356,16 @@ no_op = () Op { Op(end: Pos(line: 0, col: 0), at: 0, width: 0) }
 //
 // A RUN is consecutive statements, each a binding this rule may move,
 // each beginning on the line after the one before it ended, all writing
-// an operator of the SAME WIDTH. Three clauses, three reasons:
+// an operator of the SAME WIDTH. Why those clauses:
 //
 //   - consecutive and adjacent, because anything between — a call, a
 //     blank line, a comment — makes two runs. A column with a hole in
 //     it is not a column, and padding across the hole asks a reader to
-//     see a group that isn't there.
-//   - same width, so `=` and `::=` are never one column. To line those
-//     two up something has to give: either the `=` moves three columns
-//     off its own name, or the names stop starting where the eye
-//     expects. Names are what a reader scans, so the pair simply forms
-//     two runs, and each is aligned within itself.
+//     see a group that is not there.
+//   - same width, so `=` and `::=` are never one column. Lining those
+//     two up means either the `=` moves three columns off its own name
+//     or the names stop starting where the eye expects. Names are what
+//     a reader scans, so the pair forms two runs instead.
 //
 // A run of one is still a run, and that is how hand padding is UNMADE:
 // its column is one past its own name, so `rc   ::= x` is set back to
@@ -389,7 +385,7 @@ align_binds = (al :: Aligned, src: Src, tree: Ast, b: Block)
     al.align_run(src, tree, b, from, b.stmts.len)
 }
 
-// Does statement `i` continue the run that ends at `i - 1`?
+// True when statement `i` continues the run that ends at `i - 1`.
 joins = (src: Src, tree: Ast, b: Block, i: usize) bool {
     here = op_at(src, tree, b, i);
     (here.width > 0 && here.width == op_at(src, tree, b, i - 1).width)
@@ -464,11 +460,10 @@ op_at = (src: Src, tree: Ast, b: Block, i: usize) Op {
     })
 }
 
-// May this rule set the width before this binding's operator? The
-// statement begins its line, its name (or its written type) ends on
-// that line, and an operator follows on it — the same questions
-// `movable` asks of an arm, and the gap being all spaces falls out of
-// how `at` is found rather than needing its own clause.
+// The same three conditions `movable` asks of an arm, asked of a
+// binding: the statement begins its line, its name (or its written
+// type) ends on that line, and an operator follows on it. The gap being
+// all spaces falls out of how `at` is found, so it needs no clause.
 bind_op = (src: Src, tree: Ast, s: Stmt, bd: Bind) Op {
     line = s.span.start.line;
     end  = name_end(tree, bd);
@@ -567,12 +562,10 @@ param_op = (src: Src, ps: Vec<Param>, i: usize) Op {
     })
 }
 
-// May this rule set the width before this parameter's operator? The
-// parameter begins its line, its name ends on that line, and a `:` or
-// `::` follows on it — the same three questions `bind_op` asks of a
-// binding, and the gap being all spaces falls out of how `at` is found
-// rather than needing its own clause. A closure's untyped `(h, v)` has
-// no operator and stops at width 0.
+// The same three conditions `bind_op` asks, asked of a parameter: it
+// begins its line, its name ends on that line, and a `:` or `::`
+// follows on it. A closure's untyped `(h, v)` has no operator and stops
+// at width 0.
 name_op = (src: Src, p: Param) Op {
     line = p.span.start.line;
     end  = p.name.span.end;

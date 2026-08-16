@@ -68,11 +68,11 @@ impl_field = gen.gen_c.gen_c_impl
 // a range that STORES its bounds
 // -----------------------------------------------------------------
 
-// Does the range's own declaration STORE `start` and `end`, rather than
-// supplying them through an impl? `Range(0, n)` does; a `Vec` does not,
-// and reading `v.zg_mstart` off one would name a member that is not
-// there. C would catch it, which is exactly the outcome a backend may
-// not produce — so it is a refusal with a position instead.
+// Whether the range's own declaration STORES `start` and `end` rather
+// than supplying them through an impl. `Range(0, n)` does; a `Vec` does
+// not, and reading `v.zg_mstart` off one would name a member that is
+// not there. C would catch it, which is exactly the outcome a backend
+// may not produce — so it is a refusal with a position instead.
 supplies_bounds* = (be :: CBackend, rty: TyId) bool {
     has_field(be, rty, "start") && has_field(be, rty, "end")
 }
@@ -105,20 +105,11 @@ struct_has_field = (s: Struct, name: str) bool {
 // -----------------------------------------------------------------
 // a range whose bounds an IMPL supplies
 //
-// `Vec.impl(Range<T>, { start: 0, end: self.len, at ::= .. })` is the
-// other of `range.zen`'s two impls, and what it supplies is COMPUTED
-// FIELDS: `start` and `end` are expressions read in the impl's own
+// The header's second reading, at the site. What the impl supplies is
+// COMPUTED FIELDS — `start` and `end` are expressions read in its own
 // scope with `self` bound to the range, not members to read off a
-// struct. `at` is the one thing the trait asks for — "walking is
-// at(start), at(start + 1), .. and a None ends the walk early, so a
-// container whose length moved under the loop stops rather than reading
-// past itself".
-//
-// THE BOUND IS RECOGNISED BY ITS SHAPE, not by its name. "A bound is
-// just which struct's shape do I need", so an impl satisfies `Range`
-// exactly when the struct it names declares `start` and `end` — the
-// same question `supplies_bounds` asks of a concrete range, asked of
-// the bound instead.
+// struct — plus `at`, the one thing the trait asks for: "walking is
+// at(start), at(start + 1), .. and a None ends the walk early".
 // -----------------------------------------------------------------
 
 RangeImpl* = {
@@ -262,10 +253,9 @@ add_if_bodied = (f: Function, out :: Vec<Function>) Res<(), AllocError> {
 // places disagree about is a C type mismatch nothing reports.
 // -----------------------------------------------------------------
 
-// The `Res<T>` a pass of this range produces. A range that stores its
-// own bounds walks its own index space, so a pass produces a `usize`
-// and cannot miss; one whose `at` an impl supplies produces whatever
-// `at` returns, including the `None` that ends the walk.
+// The `Res<T>` a pass of this range produces: a `usize` that cannot
+// miss for a range walking its own index space, and whatever `at`
+// returns — `None` included — for one an impl supplies.
 range_pass_type* = (be :: CBackend, rty: TyId) Res<Res<TyId>, AllocError> {
     array_of(be, rty).match({
         Ok(a) => array_pass(be, a),
@@ -353,15 +343,14 @@ res_value_of* = (be :: CBackend, t: TyId) Res<TyId> {
     })
 }
 
-// Is this a `Res`? `impl_ctx` needs it for `has_ret`, and it is the
-// same three-line question `gen_c_decl.zen` asks; it lives here so the
-// loop and the range read one answer.
+// `impl_ctx` needs this for `has_ret`, and it is the same three-line
+// question `gen_c_decl.zen` asks; it lives here so the loop and the
+// range read one answer.
 is_res* = (be :: CBackend, want: TyId) bool {
     be.check.types.at(want).match({ Res(_) => true, _ => false })
 }
 
-// A range whose `start` and `end` an impl supplies — a `Vec`, which is
-// the other half of `Range`'s two impls.
+// A range whose `start` and `end` an impl supplies — a `Vec`.
 lower_supplied* = (
     be   :: CBackend,
     id   : ExprId,
@@ -437,11 +426,9 @@ lower_impl_range = (
 // bound to the range temporary once and both are delivered into a
 // declared `usize` rather than written into a C loop head.
 //
-// `at` is INLINED and not called: there is no call node here to resolve,
-// and the impl supplies a body. Its `Res<T>` is the pass, and a tag that
-// is not `Ok` leaves the walk through the same `brk` label `h.break`
-// uses — which is `range.zen`'s "a None ends the walk early", and what
-// keeps a container that shrank under the loop from reading past itself.
+// `at`'s `Res<T>` is the pass, and a tag that is not `Ok` leaves the
+// walk through the same `brk` label `h.break` uses — the header's
+// `None` from `at` ending the walk.
 lower_impl_walk = (
     be   :: CBackend,
     id   : ExprId,
@@ -651,10 +638,9 @@ run_at = (
     Ok(());
 }
 
-// The `at` body, in the frame the loop is being written into. Its
-// parameters are the range and the counter, and both are C text this
-// file already wrote — so they are bound directly rather than lowered
-// from arguments that do not exist.
+// The `at` body, in the frame the loop is being written into. Its two
+// parameters are C text this file already wrote, so they are bound
+// directly rather than lowered from arguments that do not exist.
 inline_at = (
     be      :: CBackend,
     ri      : RangeImpl,
@@ -708,9 +694,9 @@ run_at_body = (be :: CBackend, f: Function, ictx: Ctx, pass: TyId, tmp: str)
     })
 }
 
-// A pass that missed ends the walk, and it leaves through `h.break`'s
-// own label so it lands after the closing brace rather than inside
-// whatever construct the body opened.
+// A pass that missed ends the walk, through `h.break`'s own label so it
+// lands after the closing brace and not inside whatever construct the
+// body opened.
 write_pass_guard = (be :: CBackend, tmp: str, brk: usize)
                    Res<(), AllocError> {
     be.write("if (").try();

@@ -5,33 +5,29 @@
 // LIST rather than a definition. That is not a hedge — it is what
 // overloading is: "resolution is on declared parameter types and arity",
 // so a name in scope denotes a candidate SET and choosing between them
-// is the call site's job, not resolution's. A `defs_of` that returned
-// one answer would have decided the thing overload resolution exists to
-// decide.
+// is the call site's job, not resolution's.
 //
 // THE `*` GATE, in one sentence: a name crosses a module boundary
 // exactly when it is starred, and re-export is an import whose bindings
 // are starred. So there is no second mechanism to implement — following
 // an import to the module that declares the name, and filtering by
 // `exported` at every hop, is the whole of it. A folder root is a file
-// of starred bindings, which means the chain is routinely two or three
-// hops deep and `std.core` reaches `std.core.result` through exactly
-// this walk.
+// of starred bindings, so the chain is routinely two or three hops deep
+// and `std.core` reaches `std.core.result` through exactly this walk.
 //
 // A MODULE TABLE IS A `Vec`, NOT A `Map`, and that is measured rather
-// than lazy: `Map.get` in this stdlib is `index_of`, which is a `find`
-// over every entry — a linear scan already. A `Map<str, Vec<Def>>` would
-// buy the same complexity for a nested generic and a second allocation
-// per name. The memo tables that DO key on an id use `Map`, because
-// there the key is a `u32` and the point is identity, not lookup speed.
+// than lazy: `Map.get` in this stdlib is `index_of`, a `find` over every
+// entry — a linear scan already. A `Map<str, Vec<Def>>` would buy the
+// same complexity for a nested generic and a second allocation per name.
+// The memo tables that DO key on an id use `Map`, because there the key
+// is a `u32` and the point is identity, not lookup speed.
 //
 // OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
 // is "what a name means", and every query below is that one question
 // asked of a different scope — a module's own table, the imports it
 // follows, the prelude it never wrote, which module a dotted path
-// denotes, and which import bindings the `*` gate refused. They all read
-// `tables`; a split would put the store in one file and its readers in
-// another.
+// denotes, which bindings the `*` gate refused. They all read `tables`;
+// a split would put the store in one file and its readers in another.
 
 Ast, Module, Decl, DeclKind, Ident, Span, QualifiedName = std.ast
 Import, Impl, Enum = std.ast
@@ -97,12 +93,10 @@ ModuleTable* = {
 // ambient or a program means different things to each.
 PRELUDE*: str = "std.core"
 
-// The same file, spelled the long way. A folder root is reachable as
-// the folder and as the file — `std.core` and `std.core.core` name
-// `std/core/core.zen` — and which spelling a module table ends up
-// under is decided by whichever import reached it first. That must
-// not decide whether a program has a prelude, so both are tried and
-// the short one wins.
+// The same file, spelled the long way (`index_of` gives the rule).
+// Which spelling a module table ends up under is decided by whichever
+// import reached it first, and that must not decide whether a program
+// has a prelude — so both are tried and the short one wins.
 PRELUDE_FILE*: str = "std.core.core"
 
 // The module graph, and every query over names.
@@ -119,7 +113,7 @@ World* = {
 
     table_at* = (self: @Self, i: usize) Res<ModuleTable> { self.tables.get(i) }
 
-    // Which module is spelled `std.core.result`? A module's identity is
+    // The module spelled `std.core.result`. A module's identity is
     // its full dotted path — "names are qualified by path", and
     // accepting a suffix would make two modules answer to one spelling.
     //
@@ -186,8 +180,8 @@ World* = {
         Ok(());
     }
 
-    // Did `mi` write an import binding this name? Starred or not: a star
-    // says whether the binding leaves again, not whether it exists.
+    // Whether `mi` wrote an import binding this name, starred or not: a
+    // star says whether the binding leaves again, not whether it exists.
     binds_name* = (self: @Self, mi: usize, name: str) bool {
         self.tables.get(mi).match({
             None  => false,
@@ -447,7 +441,7 @@ World* = {
         })
     }
 
-    // Does module `mi` let `name` out at all? `exported_defs` answers
+    // Whether module `mi` lets `name` out at all. `exported_defs` answers
     // with DEFS; this answers yes or no and knows one thing more, because
     // a VARIANT IS NOT A DECLARATION: `Res*<T> = Ok(T) | None` files one
     // `Def` and `Res*, Ok*, Err*, None* = std.core.result` names four off
@@ -513,10 +507,9 @@ World* = {
         Ok(());
     }
 
-    // The star and the name are asked INSIDE the helper, not in a
-    // `.then` around the call: a loop binding read from a closure nested
-    // in a `.loop` closure does not survive the bootstrapper, and a
-    // written parameter is SEMA_BOOTSTRAP_FIXES.md §10's workaround.
+    // The star and the name are asked INSIDE the helper, not in a `.then`
+    // around the call: SEMA_BOOTSTRAP_FIXES.md §10's workaround, and §10
+    // now records that gap CLOSED, to be re-tested before removal.
     variant_each = (self: @Self, tree: Ast, t: ModuleTable, name: str,
                     hits :: Vec<Def>, seen :: Vec<usize>, reexport: bool)
                    Res<(), AllocError> {
@@ -800,10 +793,9 @@ imports_name = (t: ModuleTable, name: str) bool {
 
 // The enums this module declares with a variant of this name.
 //
-// A VARIANT CARRIES NO STAR OF ITS OWN, so the enum's answers for it —
-// `Res*<T> = Ok(T) | None` files one `Def` and lets four names out. The
-// gate is asked only when `gated`, because a module reading its own file
-// has crossed no boundary and an unstarred enum there is still visible.
+// A VARIANT CARRIES NO STAR OF ITS OWN, as `exports_name` says. The gate
+// is asked only when `gated`, because a module reading its own file has
+// crossed no boundary and an unstarred enum there is still visible.
 collect_variant = (
     tree  : Ast,
     t     : ModuleTable,

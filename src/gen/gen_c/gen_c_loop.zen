@@ -16,11 +16,8 @@
 // between the six. `(h, i)` binds to `value` on the two-parameter form
 // and to `index` on the counted one; only the declaration knows which.
 //
-// `h.break(v)` AND `h.next()` ARE `goto`s, NOT C's `break`/`continue`.
-// An inlined body sits inside whatever the lowering of a `.match`
-// produced (an `if` chain today; the reference backend emits `switch`
-// in the same position), where a C `break` would leave that construct
-// rather than the loop.
+// `h.break(v)` AND `h.next()` ARE `goto`s, NOT C's `break`/`continue`
+// — `gen_c_handle.zen` argues why, and owns both verbs.
 //
 // WHAT IS BEING WALKED IS `gen_c_range.zen`'S SUBJECT, NOT THIS ONE:
 // whether a range stores its bounds or an impl supplies them, and what
@@ -32,9 +29,8 @@
 // nothing settles.
 //
 // LOOPS NEVER ALLOCATE — the signature, not a promise: no declaration
-// in `loop_iter.zen` takes an `Alloc`. The body is inlined into the
-// frame it was written in, so there's no closure record; `index`,
-// `value`, `acc` are plain automatic storage.
+// in `loop_iter.zen` takes an `Alloc`, and `index`, `value`, `acc` are
+// plain automatic storage.
 
 Ast, Expr, ExprKind, ExprId, BlockId, Block, Lambda, Type, TypeKind = std.ast
 Decl, DeclKind, Function, FnType, Param, TypeId, Ident, Span = std.ast
@@ -555,10 +551,8 @@ open_result* = (be :: CBackend, want: TyId, out :: String)
         false => Ok(()),
         true  => open_result_temp(be, want, result),
     }).try();
-    // A loop with no storage still has to write SOMETHING where the
-    // expression goes, or the `(void)(..)` a discarded statement wraps it
-    // in is `(void)()` and the C does not parse. `0` is what the four
-    // report helpers write for the same reason.
+    // A loop with no storage still writes `0` where the expression goes,
+    // for the reason `gen_c_inline.zen`'s `write_result` gives.
     keep.match({
         true  => out.add_bytes(result.view()),
         false => out.add_bytes("0"),
@@ -578,9 +572,8 @@ open_result* = (be :: CBackend, want: TyId, out :: String)
     Ok(frame);
 }
 
-// A loop whose value nothing asked for gets no temporary and writes `0`
-// where the expression goes (see note above) — keeps the emitted C
-// parsing around a discarded loop.
+// A loop whose value nothing asked for gets no temporary, and writes
+// `0` where the expression goes (see note above).
 wants_result = (be :: CBackend, want: TyId) bool {
     has_var(be.check, want).match({
         true  => false,
@@ -602,9 +595,8 @@ open_result_temp = (be :: CBackend, want: TyId, result :: String)
 }
 
 // The body, inlined into the frame it was written in. The handle and
-// the two threaded values are bound as ORDINARY LOCALS — `index` and
-// `value` are automatic storage, which is what "index and acc thread BY
-// VALUE, so no cell is heap-allocated" comes to in C.
+// the two threaded values are bound as ORDINARY LOCALS — "index and acc
+// thread BY VALUE, so no cell is heap-allocated".
 run_body* = (
     be      :: CBackend,
     sh      : Shape,
@@ -656,11 +648,10 @@ handle_name = (lam: Lambda) str {
 }
 
 // THE BODY'S PARAMETERS AFTER `h`, AND WHICH IS WHICH IS THE
-// DECLARATION'S ANSWER. `(h, index, value)` and `(h, value)` are two of
-// the six; `index`/`value` are not interchangeable (see the half-open
-// note above). A range that supplies no `at` walks its own index
-// space, where the value IS the counter — what makes `Range(0, 5)` a
-// bare C for-loop.
+// DECLARATION'S ANSWER (see header): `index`/`value` are not
+// interchangeable (see the half-open note above). A range that supplies
+// no `at` walks its own index space, where the value IS the counter —
+// what makes `Range(0, 5)` a bare C for-loop.
 bind_threaded = (
     be      :: CBackend,
     sh      : Shape,

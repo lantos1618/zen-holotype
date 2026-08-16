@@ -1,11 +1,11 @@
 // src/gen/gen_c/gen_c_build.zen
 // `Point(x: 3, y: 4)` — what a callee that names a TYPE is.
 //
-// `gen_c_call.zen` opens by saying the two are one node: "`Point(x: 3,
-// y: 4)` and `area(p)` are the same AST node. Which one it is depends
-// on what the callee NAMES." That question is asked there and answered
-// here — separate files because building a value and calling a function
-// share nothing past the node.
+// `gen_c_call.zen` owns the question — "`Point(x: 3, y: 4)` and
+// `area(p)` are the same AST node. Which one it is depends on what the
+// callee NAMES" — and this file is the answer when it names a type.
+// Two files because building a value and calling a function share
+// nothing past the node.
 //
 // A C COMPOUND LITERAL WITH ONE DESIGNATED INITIALISER PER ARGUMENT.
 // Designators, not positions: Zen's construction form is `name: value`
@@ -13,8 +13,7 @@
 // tie the two together for no gain.
 //
 // WHAT IS BEING BUILT IS SEMA'S ANSWER FOR THIS NODE, and the
-// declaration alone is the fallback: `Box<i32>(held: 7)` writes its
-// argument outright and only the node knows it.
+// declaration alone is only the fallback — `construct_type` argues it.
 
 Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = std.ast
 Function, Literal, LiteralKind, Access, Call, Arg, Span, Ident = std.ast
@@ -239,8 +238,7 @@ is_prim_ty = (be :: CBackend, ty: TyId) bool {
 // BACK IN SCOPE FOR THE READ: `Entry<K, V>` and `Map<K, V>` spell
 // parameters alike, and constructing one INSIDE the other once resolved
 // `K` to the enclosing declaration's `Var` — a different type of the
-// same name — so every `Map` in the language was refused. The
-// declaration that introduced the name is the one that binds it.
+// same name — so every `Map` in the language was refused.
 layout_open = (be :: CBackend, s: Struct, d: Def, ty: TyId)
               Res<bool, AllocError> {
     dctx  = decl_ctx_of(be, d);
@@ -257,10 +255,9 @@ layout_open = (be :: CBackend, s: Struct, d: Def, ty: TyId)
     Ok(got);
 }
 
-// A CONSTRUCTION WITH NO ARGUMENTS STILL HAS DEFAULTS TO WRITE, so there
-// is no shortcut for the empty argument list. `{0}` was that shortcut,
-// and it made `Cursor()` come back zeroed on a struct whose every field
-// declared a value.
+// A CONSTRUCTION WITH NO ARGUMENTS STILL HAS DEFAULTS TO WRITE, so
+// there is no shortcut for the empty argument list: the `{0}` the next
+// section names made `Cursor()` come back zeroed.
 write_literal = (
     be  :: CBackend,
     c   : Call,
@@ -396,12 +393,11 @@ default_initialiser = (
 }
 
 // The value a member declares, when it can be written here.
-// `is_pure_value` is the same gate a constant read is held to: this
-// expression is emitted at every construction site, so it must name no
-// function and read no frame. A default that fails the gate is left to
-// the zeroing it already got — `Vec`'s `data :: Ptr<T> = null_ptr<T>()`
-// is the only shape that reaches it, and a null pointer is what zeroing
-// gives.
+// `is_pure_value` is the same gate a constant read is held to, and for
+// the same reason: this expression is emitted at every construction
+// site. A default that fails it is left to the zeroing it already got —
+// `Vec`'s `data :: Ptr<T> = null_ptr<T>()` is the only shape that
+// reaches it, and a null pointer is what zeroing gives.
 member_default = (
     be    :: CBackend,
     m     : Member,
@@ -469,10 +465,8 @@ declared_value = (m: Member) Res<ExprId> {
     })
 }
 
-// Did the call supply this field? Under the SAME name rule the
-// argument walk used: a named argument names it, and a positional one
-// takes the i-th storage member. Asked here rather than remembered
-// from the walk because a `Vec<str>` cannot be read back.
+// Under `field_name`'s rule, asked again here rather than remembered
+// from the walk — `storage_name` says why a `Vec<str>` can't be.
 supplies = (
     be    :: CBackend,
     c     : Call,
@@ -508,12 +502,11 @@ arg_supplies = (
 // struct that doesn't declare one, so `Param(.., value: None)` against a
 // `Param` with no `value` came out as a C error naming a member the
 // author never wrote — or, for a bare `None`, as `codegen has no type
-// for None`, since the field lookup that would supply the expected type
-// found nothing. The bootstrapper walks DECLARED fields and never sees
-// the extra argument; this reaches the same answer from the other side.
+// for None`, the field lookup having found nothing to type it by.
 //
 // A field that doesn't exist is a diagnostic SEMA owes and neither
-// implementation raises. Until one does, the two must at least agree.
+// implementation raises. Until one does, the two must at least agree,
+// and the bootstrapper agrees by walking DECLARED fields.
 supplied_initialiser = (
     be    :: CBackend,
     a     : Arg,
@@ -572,8 +565,6 @@ is_storage_named = (
 // site the argument resolves to nothing, and since `type_from_ast`
 // memoizes on the node id, that answer becomes every later reader's: the
 // LAYOUT came out `Vec<q>` and `cc` rejected forty-four initialisers.
-// One reader with the wrong module poisons the declaration for the
-// whole program.
 decl_ctx_of = (be :: CBackend, d: Def) Ctx {
     Ctx(
         module: d.id.module.to_usize(),

@@ -30,12 +30,10 @@
 //
 // OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
 // is "which declaration does this call mean", and the declaration-site
-// rules are the same question asked without a call. `same_signature` and
-// `swallows` are the two halves of "can a call site tell these apart",
-// and `matches` is that same comparison against real arguments — three
-// readings of one predicate. Splitting them would leave the rule that
-// two candidates are indistinguishable in a module that cannot see what
-// distinguishing them means.
+// rules are the same question asked without a call. `same_signature`,
+// `swallows` and `matches` are three readings of one predicate — "can a
+// call site tell these apart" — and splitting them would leave that rule
+// in a module that cannot see what distinguishing them means.
 //
 // A LAMBDA ARGUMENT'S BODY IS NOT TYPED HERE. "A closure passed to a
 // function whose signature is already known infers its parameter types
@@ -110,8 +108,8 @@ Actual* = {
     ty*: TyId,
     is_lambda*: bool,
     arity*: usize,
-    // did the argument NAME a field? `Point(x: 3)` and `f(3)` are the
-    // same node and are not the same thing: AST_CONTRACT.md gives the
+    // whether the argument NAMED a field. `Point(x: 3)` and `f(3)` are
+    // the same node and not the same thing: AST_CONTRACT.md gives the
     // `name: value` form to construction and to an impl's supplied
     // field, and a call's arguments are positional. Recorded here
     // because resolution is the one place the difference decides
@@ -318,9 +316,9 @@ keep_matching = (
     Ok(());
 }
 
-// A named helper rather than a `.then` inside the loop body: a loop
-// binding read inside a nested closure does not resolve.
-// docs/SEMA_BOOTSTRAP_FIXES.md §10.
+// A named helper rather than a `.then` inside the loop body:
+// docs/SEMA_BOOTSTRAP_FIXES.md §10, which now records that gap CLOSED,
+// to be re-tested before removal.
 keep_one = (c :: Checker, k: Cand, actuals: Vec<Actual>, kept :: Vec<Cand>)
            Res<(), AllocError> {
     matches(c, k, actuals).try().match({
@@ -410,6 +408,11 @@ callee_name_span = (c: Checker, call: Call) Span {
     })
 }
 
+// CONSTRUCTING IS A RESOLUTION TOO, recorded by `construct` for the same
+// reason a call is: `Checker* = { .. }` beside `Checker* = (a: Alloc,
+// ..)` is two declarations of one name, and which of them a call site
+// meant is decided here and nowhere else.
+//
 // A MODULE IS NOT A CONSTRUCTOR. `is_type_def` answers about a `DefKind`
 // and an alias is a type declaration by kind — but `reseat = vec` aliases
 // a MODULE, and constructing it invented a nominal type of the alias's own
@@ -438,10 +441,6 @@ type_def_of = (defs: Vec<Def>) Res<Def> {
     })
 }
 
-// CONSTRUCTING IS A RESOLUTION TOO, and it is recorded for the same
-// reason a call is: `Checker* = { .. }` beside `Checker* = (a: Alloc,
-// ..)` is two declarations of one name, and which of them a call site
-// meant is decided here and nowhere else.
 // No candidate of that arity or those types. Silent when there were no
 // candidates at all: the name resolved to something that is not a
 // function, and that is somebody else's diagnostic.
@@ -701,9 +700,7 @@ pick_fitting = (c :: Checker, found: Vec<Found>, actuals: Vec<Actual>)
     Ok(first_found(kept));
 }
 
-// A named helper rather than a `.then` inside the loop body: a loop
-// binding read inside a nested closure does not resolve.
-// docs/SEMA_BOOTSTRAP_FIXES.md §10.
+// A named helper, as `keep_one`: docs/SEMA_BOOTSTRAP_FIXES.md §10.
 keep_fitting = (
     c       :: Checker,
     f       : Found,
@@ -885,8 +882,8 @@ maybe_swallow = (c :: Checker, name: str, a: Cand, b: Cand)
     })
 }
 
-// Does either candidate's generic accept everything the other's
-// concrete parameter does, position by position? Only a type parameter
+// Either candidate's generic accepts everything the other's concrete
+// parameter does, position by position. Only a type parameter
 // belonging to the candidate being tested is a wildcard — that is what
 // keeps `loop(range: R, ..)` and `loop(map: Map<K,V>, ..)` distinct.
 swallows* = (c: Checker, a: Cand, b: Cand) bool {

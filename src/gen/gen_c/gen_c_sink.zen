@@ -122,14 +122,13 @@ variadic_type = (be: CBackend, t: TypeId) bool {
 //
 // THE FREE DECLARATION IS WHAT IS LOWERED, NOT THE MEMBER'S OWN, and
 // that is load-bearing rather than a shortcut. Everything the expansion
-// reads comes out of the DOOR'S module: `Sink`, the type the record is
-// built at and whose `write` slot every literal run travels through,
-// and `add_i64`/`add_u64`/`add_bool`, the writers a scalar hole
-// reaches. `text_string.zen` imports `Sink` but declares no writer, and
-// its own first parameter is `@Self` — a String, which is where the
-// bytes END UP and not the thing a write goes through. Reading the
-// member's declaration would resolve the sink to the wrong type and
-// find no writers at all.
+// reads comes out of the DOOR'S module: `Sink`, whose `write` slot
+// every literal run travels through, and `add_i64`/`add_u64`/`add_bool`,
+// the writers a scalar hole reaches. `text_string.zen` imports `Sink`
+// but declares no writer, and its own first parameter is `@Self` — a
+// String, where the bytes END UP rather than the thing a write goes
+// through. Reading the member's declaration would resolve the sink to
+// the wrong type and find no writers at all.
 // -----------------------------------------------------------------
 
 lower_member_door* = (
@@ -216,8 +215,7 @@ decl_fn = (dec: Decl) Res<Function> {
 //
 // A STRING IS A SINK, which is the whole reason this works: the buffer
 // becomes the door's own record through `fat_value` — ONE call, not a
-// second copy of the rule — and every writer reachable from a `{}` is
-// then reached the one way this file reaches it.
+// second copy of the rule.
 //
 // A FAILING WRITE JUMPS TO A LABEL THE CALLER OWNS rather than leaving
 // an answer to inspect. The two doors declare different errors, so the
@@ -326,10 +324,9 @@ buffer_sink = (
 // -----------------------------------------------------------------
 // what one piece needs
 //
-// Six values travel together through every write, and threading them
-// one by one made a signature per helper that was mostly punctuation.
-// They are one thing — WHERE THE BYTES GO AND WHERE A FAILURE GOES —
-// so they are one record.
+// Six values travel together through every write, and they are one
+// thing — WHERE THE BYTES GO AND WHERE A FAILURE GOES — so they are
+// one record rather than a signature per helper.
 // -----------------------------------------------------------------
 
 Piece = {
@@ -346,8 +343,7 @@ Piece = {
 // -----------------------------------------------------------------
 
 // A temporary at the door's return type, `Ok` until a write says
-// otherwise, and a label every failing write jumps to. The temporary IS
-// the answer, and the last write leaves its own `Ok` in it.
+// otherwise, and a label every failing write jumps to.
 lower_sink_door* = (
     be   :: CBackend,
     id   : ExprId,
@@ -651,8 +647,7 @@ write_value = (be :: CBackend, a: ExprId, p: Piece, ctx: Ctx)
 }
 
 // A `str` is the sink's own `write` — bytes, verbatim, no format
-// meaning read into them. Everything else is a WRITER, and the writers
-// are `text_fmt.zen`'s own functions rather than C written here.
+// meaning read into them. Everything else goes through a WRITER.
 value_call = (be :: CBackend, p: Piece, ty: TyId, text: str, out :: String)
              Res<bool, AllocError> {
     prim = be.check.prim_name(ty);
@@ -678,8 +673,7 @@ scalar_call = (
 
 // Which of `text_fmt.zen`'s writers a primitive reaches. Empty means
 // none does, and the value goes through its own `toString` instead —
-// a float lands there and is reported, because no writer for one is
-// declared and this file will not invent a second number format.
+// a float lands there and is reported, no writer for one being declared.
 writer_of = (prim: str) str {
     prim.eq("bool").match({
         true  => "add_bool",
@@ -803,11 +797,10 @@ call_symbol* = (be :: CBackend, d: Def, out :: String)
 
 // `zg_tN = <the write>; if (zg_tN.zg_tag != Ok) { goto done; }`
 //
-// THE ANSWER AND THE GUARD ARE ONE TEMPORARY because every write
-// reachable from a `{}` answers with exactly the door's return type. A
-// failing write therefore leaves its own `Err` where the door's answer
-// goes, and carrying it is the jump and nothing else — no rebuild, no
-// re-tag, and no error set to widen.
+// THE ANSWER AND THE GUARD ARE ONE TEMPORARY, because of the one error
+// type the header names: a failing write leaves its own `Err` where the
+// door's answer goes, and carrying it is the jump and nothing else — no
+// rebuild, no re-tag, and no error set to widen.
 write_guarded = (be :: CBackend, call: str, p: Piece) Res<(), AllocError> {
     be.set_line(p.tmp, call).try();
     write_jump_unless_ok(be, p.tmp, p.done)

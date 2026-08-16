@@ -25,18 +25,16 @@
 //
 // WHERE THE `Alloc` IS. Law 1 says anything that needs memory takes an
 // `Alloc`, and a memo table needs memory. It is a FIELD, set at
-// construction through `alloc.Checker(tree)` — exactly as `Vec` stores
-// `alloc: Alloc`, as `Ast` does, and as DESIGN.md blesses when it says
-// "that is why `Vec` can store `alloc: Alloc` by value". The law is
-// satisfied where the allocator ENTERS, and every query still says it
-// can allocate the only way a signature can: `Res<_, AllocError>`. A
-// query taking a second `Alloc` parameter beside the one its memo table
-// already grows through would be two allocators for one table.
+// construction through `alloc.Checker(tree)` — as `Vec` and `Ast` do,
+// and as DESIGN.md blesses: "that is why `Vec` can store `alloc: Alloc`
+// by value". The law is satisfied where the allocator ENTERS, and every
+// query still says it can allocate the only way a signature can:
+// `Res<_, AllocError>`. A second `Alloc` parameter beside the one its
+// memo table already grows through would be two allocators for one table.
 //
-// A DIAGNOSTIC IS A VALUE. The only `Err` in this file is `AllocError`.
-// A program full of mistakes still analyses: it yields the types it
-// could compute and the diagnostics it owes, which is what lets an LSP
-// show four errors instead of the first one.
+// A DIAGNOSTIC IS A VALUE (`sema_diag.zen`): the only `Err` in this file
+// is `AllocError`, which is what lets an LSP show four errors instead of
+// the first one.
 //
 // POISON, NOT CASCADE. A query that reports returns `Ty.Unknown`, and
 // `Unknown` is assignable to and from everything. One mistake, one
@@ -101,7 +99,7 @@ Checker* = {
     types* :: Types,
     diags :: Vec<Diag>,
 
-    // the memo tables. All three key on a node id, which is the whole
+    // the memo tables. They key on a node id, which is the whole
     // reason ids exist rather than node values.
     expr_memo* :: Map<ExprId, TyId>,
     type_memo* :: Map<TypeId, TyId>,
@@ -395,17 +393,16 @@ Checker* = {
         Ok(());
     }
 
-    // Is this bound one a generic in scope declared? The question impl
-    // selection asks, and the only question it asks.
+    // A bound some generic in scope declared — the only question impl
+    // selection asks.
     has_bound* = (self: @Self, ty: TyId) bool {
         Range(0, self.bounds.len).find((i) {
             self.bounds.get(i).match({ Ok(b) => b.ty.eq(ty), None => false })
         }).match({ Ok(_) => true, None => false })
     }
 
-    // Does anything in scope say what this type parameter promises? The
-    // question `bounds_of` answers with a list, asked as a predicate so
-    // "does this parameter promise anything at all" costs no allocation.
+    // `bounds_of` asked as a predicate, so "does this parameter promise
+    // anything at all" costs no allocation.
     is_bounded* = (self: @Self, name: str) bool {
         Range(0, self.bounds.len).find((i) {
             self.bounds.get(i).match({ Ok(b) => b.name.eq(name), None => false })
@@ -417,8 +414,8 @@ Checker* = {
     bounds_of* = (self: @Self, name: str, out :: Vec<TyId>)
                  Res<(), AllocError> {
         self.bounds.loop((h, b) {
-            // hoisted: a field read of a loop binding inside a nested
-            // closure does not resolve. docs/SEMA_BOOTSTRAP_FIXES.md §10
+            // hoisted for docs/SEMA_BOOTSTRAP_FIXES.md §10, which now
+            // records that gap CLOSED, to be re-tested before removal.
             ty = b.ty;
             b.name.eq(name).then(() { out.add(ty).try() });
         });
@@ -445,12 +442,11 @@ Checker* = {
     // agreement
     // -----------------------------------------------------------------
 
-    // Is a value of type `got` acceptable where `want` is expected?
-    //
-    // One-way, and deliberately lenient in three places: poison agrees
-    // with everything (one mistake, one diagnostic), a hole agrees with
-    // everything (`_` is a hole), and a literal agrees with any type of
-    // its family (a literal's type comes from its context).
+    // Whether `got` is acceptable where `want` is expected. One-way, and
+    // deliberately lenient in three places: poison agrees with everything
+    // (one mistake, one diagnostic), a hole agrees with everything (`_`
+    // is a hole), and a literal agrees with any type of its family (a
+    // literal's type comes from its context).
     assignable* = (self: @Self, got: TyId, want: TyId) bool {
         got.eq(want)
             || self.is_unknown(got) || self.is_unknown(want)
@@ -494,13 +490,18 @@ Checker* = {
 
     // WHAT NOBODY HAS SUBSTITUTED YET AGREES WITH ANYTHING.
     //
-    // `sema.zen` says at the top of this folder that generic
-    // instantiation does not SUBSTITUTE, and this is where that costs
-    // something: `alloc.Vec<Member>()` answers `Vec<T>` — `Vec`'s own
-    // type parameter, untouched — and every `Vec<Member>` parameter in
-    // the program is written concretely. Comparing the two by id says no
-    // to every generic value there is, which is not a check, it is a
-    // blanket rejection, and "never invent a diagnostic out of missing
+    // THE CITATION HERE WENT STALE: this said `sema.zen` states that
+    // generic instantiation does not SUBSTITUTE, and that header now
+    // reads "INSTANTIATION SUBSTITUTES" — `sema_inst.zen` declares
+    // `subst`, called from `sema_apply.instantiated_ret` and
+    // `sema_member.add_own`. Which of the arms below that leaves
+    // load-bearing is a question this file does not answer.
+    //
+    // The argument it was written for: `alloc.Vec<Member>()` answers
+    // `Vec<T>` — untouched — while every `Vec<Member>` parameter in the
+    // program is written concretely. Comparing the two by id says no to
+    // every generic value there is, which is not a check, it is a blanket
+    // rejection, and "never invent a diagnostic out of missing
     // information" forbids it.
     //
     // So a `TyVar` agrees: it is a type nobody has computed. Two
@@ -509,9 +510,6 @@ Checker* = {
     // keeps `Vec<i32>` away from `Vec<str>`. An application against a
     // bare head — `Range`, from a constructor call that never carried
     // arguments — has nothing to compare, so the head decides alone.
-    //
-    // Every line of this deletes when substitution lands, and nothing
-    // else has to change when it does.
     uninstantiated = (self: @Self, got: TyId, want: TyId) bool {
         self.is_var(got) || self.is_var(want) || self.same_applied(got, want)
     }
@@ -695,8 +693,7 @@ Checker* = {
 // about its id traps in `ast_arena.zen`, which is correct for an id the
 // arena never handed out and says nothing about where the mistake was.
 // Holding a reference instead would not help: a `Vec` grows by
-// reallocating, so any handle taken before a growth points at freed
-// pages. Sema is a query over a finished tree.
+// reallocating, so any handle taken before a growth points at freed pages.
 Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
     c ::= Checker(
         tree: tree,

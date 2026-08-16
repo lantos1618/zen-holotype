@@ -146,9 +146,8 @@ Ty* = Prim(Prim)
 
 // The interning store: `kinds` and `keys` are parallel, indexed by a
 // `TyId`; `by_key` is the inverse. `count` shadows `kinds.len` as a u32
-// for the reason `Ast` keeps its own counters — a Vec's len is a usize
-// and there's deliberately no narrowing conversion back, since one can
-// fail.
+// for the reason `Ast` keeps its own counters — no narrowing conversion
+// goes back from a `usize`, as `TyId` says above.
 Types* = {
     kinds :: Vec<Ty>,
     keys :: Vec<String>,
@@ -384,14 +383,14 @@ Types* = {
         self.union_ty(both)
     }
 
-    // Is `member` one of `set`'s members? A set of one is its member,
-    // so a non-union answers by equality.
+    // A set of one is its member, so a non-union answers by equality.
     //
     // AN UNSUBSTITUTED TYPE PARAMETER IS NOT A SET (nor an empty one):
     // `ok_or<T, E>` answers with `E` untouched, so `.try()` asks whether
     // an uncomputed set is contained in the caller's — false there would
-    // spell "there is no From", a conversion never asked for. This arm
-    // goes when substitution lands.
+    // spell "there is no From", a conversion never asked for. Whether
+    // this arm is still needed depends on substitution, which this file
+    // does not decide.
     set_has* = (self: @Self, set: TyId, member: TyId) bool {
         self.at(set).match({
             Union(u) => self.vec_has(u.members, member),
@@ -400,8 +399,8 @@ Types* = {
         })
     }
 
-    // Is every member of `narrow` also a member of `wide`? This is the
-    // whole of "no implicit error conversion": `.try()` is legal when
+    // Every member of `narrow` must also be a member of `wide`, which is
+    // the whole of "no implicit error conversion": `.try()` is legal when
     // the callee's set is already contained in the caller's declared
     // one, and illegal otherwise. Nothing is converted either way.
     set_within* = (self: @Self, narrow: TyId, wide: TyId) bool {
@@ -574,10 +573,9 @@ Types* = {
     sort_unique_into = (self: @Self, out :: Vec<TyId>, src: Vec<TyId>)
                        Res<(), AllocError> {
         src.loop((h, id) {
-            // the arm whose type is WRITTEN leads: a match takes its
-            // type from its first arm, and a bare `Ok(())` there would
-            // type the whole match as `Res<()>` and drop the other arm's
-            // error set on the floor. See docs/SEMA_BOOTSTRAP_FIXES.md.
+            // the arm whose type is WRITTEN leads, as in `intern`: a
+            // bare `Ok(())` first would type the match as `Res<()>` and
+            // drop the other arm's error set. docs/SEMA_BOOTSTRAP_FIXES.md.
             self.vec_has(out, id).match({
                 false => self.insert_ordered(out, id),
                 true  => Ok(()),
@@ -586,9 +584,8 @@ Types* = {
         Ok(());
     }
 
-    // Append, then walk the new element down to its place. No break:
-    // the pass is over a set, and a set is small enough that the
-    // version with nothing to get wrong is the right one.
+    // Append, then walk the new element down to its place. No break,
+    // for the reason `sort_unique_into` gives.
     insert_ordered = (self: @Self, out :: Vec<TyId>, id: TyId)
                      Res<(), AllocError> {
         out.add(id).try();
@@ -656,11 +653,12 @@ put* = (out :: Vec<TyId>, i: usize, v: TyId) Res<(), AllocError> {
 
 // Lexicographic byte order on two strings.
 //
-// BY THE STRANGER TEST THIS IS NOT A SEMA FUNCTION: it belongs beside
-// `str`'s own `eq` in `std.text.text_str`, and is here only because
-// `std.text` doesn't declare one yet and `src/std/` isn't this
-// module's to edit (`docs/SEMA_BOOTSTRAP_FIXES.md` records the gap).
-// Delete this once text_str grows an ordering.
+// A DUPLICATE OF A CLOSED GAP: `str.before` now exists in
+// `std.text.text_str`, and its own comment names "sema's type-key
+// ordering" as one of the three copies it consolidated. Delete this and
+// the `sema.zen` re-export; import `str.before`.
+// (`docs/SEMA_BOOTSTRAP_FIXES.md` §4 still records the gap as open and
+// is itself stale.)
 key_before* = (a: str, b: str) bool {
     shorter = (a.len < b.len).match({ true => a.len, false => b.len });
     Range(0, shorter).find((i) { a[i] != b[i] }).match({

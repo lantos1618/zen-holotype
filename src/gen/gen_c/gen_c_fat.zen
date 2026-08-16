@@ -66,8 +66,6 @@ write_cast = gen.gen_c.gen_c_bound
 // which structs these are
 // -----------------------------------------------------------------
 
-// Is a value of this type a fat value?
-//
 // One question about shape and nothing else: a struct that declares at
 // least one function member and NO storage. A storage field has no
 // function pointer to carry, so a struct with one is a concrete type
@@ -128,10 +126,8 @@ is_storage = (m: Member) bool {
 // -----------------------------------------------------------------
 // the slots
 //
-// One slot per declared member, in declaration order — a pure function
-// of the declaration alone, not of which impls exist or the order they
-// were found. Determinism, and the ability to compile two programs'
-// records to the same shape.
+// One slot per declared member, in declaration order: determinism, and
+// two programs' records compiled to the same shape.
 // -----------------------------------------------------------------
 
 Slot* = {
@@ -175,8 +171,7 @@ add_slot = (be :: CBackend, ty: TyId, f: Function, out :: Vec<Slot>)
 
 // A MEMBER'S OWN TYPE PARAMETERS ARE WHAT ERASURE ERASES, so they are
 // resolved to the byte type here rather than left open: `Ptr<T>` in the
-// declaration IS `Ptr<u8>` in the slot, and the size travels beside the
-// pointer exactly as it does in Zig's `std.mem.Allocator`.
+// declaration IS `Ptr<u8>` in the slot.
 add_slot_at = (
     be  :: CBackend,
     ty  : TyId,
@@ -391,10 +386,9 @@ request_named_only = (be :: CBackend, t: TyId) Res<(), AllocError> {
 // building one
 // -----------------------------------------------------------------
 
-// `((Alloc){ .zg_self = (void *)&a, .zu_mraw = zg_v.., .. })` — two
-// words plus a function pointer per method, built on the stack and
-// copied by value. The receiver must outlive the record, which is the
-// ordinary rule for any pointer stored in anything.
+// `((Alloc){ .zg_self = (void *)&a, .zu_mraw = zg_v.., .. })` — the
+// header's record, built on the stack. The receiver must outlive it,
+// which is the ordinary rule for any pointer stored in anything.
 fat_value* = (
     be   :: CBackend,
     addr : str,
@@ -433,8 +427,8 @@ slot_init = (be :: CBackend, s: Slot, cty: TyId, out :: String)
 // the thunk
 // -----------------------------------------------------------------
 
-// One `void *`-receiving shim per (impl member, slot), or nothing when
-// the impl supplies no answer.
+// The shim the header names, or nothing when the impl supplies no
+// answer.
 thunk_for = (be :: CBackend, s: Slot, cty: TyId)
             Res<Res<String>, AllocError> {
     site_of(be, cty).try().match({
@@ -463,8 +457,6 @@ supplied_thunk = (be :: CBackend, s: Slot, cty: TyId, cs: Site)
     })
 }
 
-// THE IMPL IS COMPILED AT THE ERASED ELEMENT TYPE — one byte — so the
-// scaled count the shim hands it is already the byte count it wants.
 write_thunk = (be :: CBackend, s: Slot, cty: TyId, cs: Site, f: Function)
               Res<Res<String>, AllocError> {
     qname ::= be.alloc.String().try();
@@ -526,9 +518,9 @@ add_real = (
     out.add(sub_with(be, declared, inst).try())
 }
 
-// `zg_v` and the function's own symbol without its `zu_`: a shim is
-// named after the function it calls, so two requests for one shim are
-// one shim and the name is a pure function of the target.
+// `zg_v` and the function's own symbol without its `zu_`: the name is a
+// pure function of the target, which is what makes two requests for one
+// shim one shim.
 thunk_name = (out :: String, sym: str) Res<(), AllocError> {
     out.add_bytes(GEN).try();
     out.add_bytes("v").try();
@@ -708,10 +700,9 @@ cast_arg = (
 // a concrete value reaching a slot whose type is the bound
 // -----------------------------------------------------------------
 
-// Does this expression have to become a fat value to land where it is
-// going? Only where the DESTINATION's static type is a bound and the
-// value's own type is not — at an argument, at a field, at a return,
-// one rule and three sites.
+// Only where the DESTINATION's static type is a bound and the value's
+// own type is not — at an argument, at a field, at a return, one rule
+// and three sites.
 needs_fat* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
              Res<bool, AllocError> {
     is_fat(be, want).match({
@@ -776,10 +767,9 @@ spill_address = (be :: CBackend, code: str, cty: TyId, out :: String)
     Ok(());
 }
 
-// Is this emitted text a C place? A name, a field hop, a dereference or
-// an index — never a call, the one thing whose address may not be
-// taken. A call is recognised by an open paren following a name, which
-// `(*p).x` is not.
+// A C place is a name, a field hop, a dereference or an index — never a
+// call, the one thing whose address may not be taken. A call is
+// recognised by an open paren following a name, which `(*p).x` is not.
 //
 // Conservative in the safe direction: unrecognised text gets a
 // temporary, correct at the cost of one copy.

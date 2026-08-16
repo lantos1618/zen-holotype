@@ -56,20 +56,15 @@ LocalSlot, Closure, LoopFrame, DropEntry, BlockFrame = gen.gen_c.gen_c_frame
 // `World` never mints one for it. So the identity is written out —
 // `qname` is the TYPE's qualified name plus the member's, which is what
 // makes two types' `get` two symbols without a counter.
-// AND THE SIGNATURE, because a name is not an identity here either.
-// `Cursor` declares `peek()` and `peek(ahead)`, and a queue entry
-// carrying only the name lowered the FIRST of them twice — one C
-// symbol defined twice and the other defined never, which is a
-// redefinition and a link error from one missing field.
-//
-// AN ARITY WAS HERE AND AN ARITY IS A PROJECTION, not an identity: two
-// members of one name may take the same NUMBER of parameters and differ
-// in what those parameters are. `Display` declares a `toString` taking
-// a sink and a sealed one taking an allocator, both at arity two, so
-// the drainer could not tell the queue's two entries apart and lowered
-// the first body under both symbols. What separates them is exactly
-// what `sym_fn` mangles — the declared parameter types, receiver
-// included — so the queue carries that and not a count of it.
+// AND THE SIGNATURE, because neither a name nor an arity is an identity
+// here. A queue entry carrying only the NAME lowered `Cursor`'s `peek()`
+// and `peek(ahead)` as one — the first body under both symbols, so one C
+// symbol was defined twice and the other never. An ARITY is a projection
+// and fails the same way: `Display` declares a `toString` taking a sink
+// and a sealed one taking an allocator, both at arity two. What
+// separates them is exactly what `sym_fn` mangles — the declared
+// parameter types, receiver included — so the queue carries that and not
+// a count of it.
 MethodRef* = {
     self_ty*: TyId,
     decl*: DeclId,   // the declaration that owns the member
@@ -82,8 +77,7 @@ CBackend* = {
     tree*: Ast,
     check* :: Checker,
 
-    // where a body is lowered. Scratch, and one per function: the
-    // translation unit is assembled from the kept texts afterwards.
+    // where a body is lowered. Scratch, one per function.
     buf :: Emit,
 
     diags :: Vec<GenDiag>,
@@ -96,42 +90,34 @@ CBackend* = {
     // the integer types a checked `+ - * / %` was emitted for
     helper_types* :: Vec<String>,
 
-    // did anything reach `println`? The print floor is emitted only for
-    // a program that prints, exactly as the checked-arithmetic families
-    // are emitted only for the types a program computes on.
+    // The print floor is emitted only for a program that prints, exactly
+    // as the checked-arithmetic families are emitted only for the types a
+    // program computes on.
     print_used :: bool,
 
-    // did anything reach the filesystem? The two POSIX headers the FS
-    // floor needs are the one place the emitted C leaves C99, so a
-    // program that never opens a file must not pay for them.
+    // The two POSIX headers the FS floor needs are the one place the
+    // emitted C leaves C99, so a program that never opens a file must not
+    // pay for them.
     fs_used :: bool,
 
-    // did anything read standard input? Its own flag and not `fs_used`,
-    // because the stdin floor is plain C99 `fread` and the filesystem
-    // floor is the POSIX one — a program that reads a pipe must not be
-    // handed `<sys/stat.h>` for it.
+    // Its own flag and not `fs_used`: the stdin floor is plain C99
+    // `fread` and the filesystem floor is the POSIX one — a program that
+    // reads a pipe must not be handed `<sys/stat.h>` for it.
     stdin_used :: bool,
 
-    // the functions to lower, and the ones already lowered.
-    //
-    // REACHABILITY, NOT THE WHOLE TREE. A compilation stages the whole
-    // of `std` beside the program, and lowering every declaration in it
-    // would emit a translation unit nobody asked for and a diagnostic
-    // for every form this backend does not reach yet. So the walk is
-    // seeded with one module's functions and follows the calls that
-    // resolve — which is also what "compilation is whole-program" means
-    // in practice: one merged graph, walked from a root.
+    // the functions to lower, and the ones already lowered. A QUEUE
+    // rather than a list of every declaration because the walk is
+    // reachability-driven — `gen_c_decl.zen`'s header says why.
     fn_queue* :: Vec<Def>,
     // the member functions reached through a dot. A second queue and
     // not a second kind of `Def`: a member has no top-level declaration
     // to mint one from, and `World` is the wrong place to teach that.
     m_queue* :: Vec<MethodRef>,
     // WHAT EACH QUEUED THING IS INSTANTIATED AT, parallel to the queue
-    // beside it. A generic function is emitted once per distinct set of
-    // type arguments, so a queue entry is a `(declaration, instantiation)`
-    // pair — and the pair is carried rather than re-derived, because the
-    // symbol written at the call site and the symbol written above the
-    // body have to be the same bytes.
+    // beside it: a queue entry is a `(declaration, instantiation)` pair.
+    // Carried rather than re-derived, because the symbol written at the
+    // call site and the symbol written above the body have to be the
+    // same bytes.
     fn_insts :: Vec<Inst>,
     m_insts :: Vec<Inst>,
     // the instantiation the function CURRENTLY being lowered is at.
@@ -154,9 +140,8 @@ CBackend* = {
     // shape the local scope stack above already uses.
     blocks :: Vec<BlockFrame>,
     drops :: Vec<DropEntry>,
-    // did anything reach `@scope`? The block record and its runtime are
-    // emitted only for a program that defers, exactly as the print
-    // floor is emitted only for a program that prints.
+    // The block record and its runtime are emitted only for a program
+    // that defers, on the same rule as `print_used` above.
     scope_used :: bool,
     // one capture record per deferred closure that has captures, and
     // the count of closures lifted so far, which is what names them.
@@ -230,9 +215,8 @@ CBackend* = {
     // the type worklist
     // -----------------------------------------------------------------
 
-    // Is this type already queued? The name is the identity, because
-    // the name IS the type: `tcode` is injective, so two types share a
-    // name exactly when they are one type.
+    // The name is the identity, because the name IS the type: `tcode` is
+    // injective, so two types share a name exactly when they are one.
     type_index* = (self: @Self, name: str) Res<usize> {
         Range(0, self.type_names.len).find((i) {
             self.type_names.get(i).match({
@@ -271,11 +255,10 @@ CBackend* = {
     // the checked-arithmetic helpers
     // -----------------------------------------------------------------
 
-    // One family per integer type the program actually performs a
-    // trapping operation on. A family and not a single helper because
-    // the eight are written by one rule and splitting them would make
-    // the runtime depend on which operators a program happened to use,
-    // which is a lot of conditional emission to save a few lines.
+    // A FAMILY and not a single helper: the eight are written by one
+    // rule, and splitting them would make the runtime depend on which
+    // operators a program happened to use — a lot of conditional
+    // emission to save a few lines.
     need_helpers* = (self :: @Self, prim: str) Res<(), AllocError> {
         self.has_helpers(prim).match({
             false => self.add_helpers(prim),
@@ -568,10 +551,9 @@ CBackend* = {
     }
 
     // Introduce a binding, and answer with the number its C name
-    // carries. Counting DECLARATIONS rather than nesting depth is what
-    // makes the number unique inside the function: two sibling blocks
-    // each binding `x` get 1 and 2, and neither can collide with the
-    // other's C declaration.
+    // carries. Counting declarations rather than depth (header) is what
+    // makes it unique inside the function: two sibling blocks each
+    // binding `x` get 1 and 2.
     declare* = (self :: @Self, name: str, ty: TyId, by_ref: bool)
                Res<usize, AllocError> {
         n = self.declared_count(name) + 1;
@@ -718,9 +700,9 @@ CBackend* = {
         })
     }
 
-    // Is `name` bound in THE BODY BEING LOWERED? `slot_of` answers for
-    // the whole stack, which spans the caller of an inlined body — and
-    // the caller's bindings are another function's, whatever they are
+    // Bound in THE BODY BEING LOWERED. `slot_of` answers for the whole
+    // stack, which spans the caller of an inlined body — and the
+    // caller's bindings are another function's, whatever they are
     // spelled.
     bound_in_frame* = (self: @Self, name: str) bool {
         Range(self.floor, self.locals.len).find((k) {
@@ -732,8 +714,7 @@ CBackend* = {
     }
 
     // Everything a function's frame holds, dropped between functions.
-    // The temporary counter is reset here and nowhere else, so a
-    // function's temporaries are a function of its own body.
+    // The temporary counter is reset here and nowhere else.
     reset_frame* = (self :: @Self) Res<(), AllocError> {
         self.release(0).try();
         extra = self.declared.len;

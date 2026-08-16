@@ -22,11 +22,6 @@
 // more than one declaration and NO recorded answer is still reported: a
 // backend guessing would be a second, worse copy of sema's resolution
 // rule.
-//
-// THE TYPE FALLBACK LIVES HERE for the same reason: sema doesn't type a
-// call yet, so it doesn't type a `.try()` on one either, and only the
-// place that already resolves callees can answer. The fallback stops
-// firing the moment sema types a call.
 
 Ast, Expr, ExprKind, ExprId, BlockId, Block, Stmt, StmtKind, Bind = std.ast
 Decl, DeclKind, Struct, Member, MemberKind, Function = std.ast
@@ -378,9 +373,8 @@ lower_plain_call* = (
 }
 
 // THE FUNCTIONS THAT TRAVELLED WITH THE RECEIVER'S TYPE — THE SAME POOL
-// SEMA RESOLVED AGAINST. `sema_call.travelled_cands` is the other half;
-// the two must agree or `resolved_call` names a declaration this list
-// doesn't hold and the fallback re-decides it.
+// SEMA RESOLVED AGAINST. `sema_call.travelled_cands` is the other half,
+// and `first_is` below says what a narrower pool costs.
 //
 // Only a dot asks (`recv` is `None` for `f(a)`), and only a function
 // whose FIRST PARAMETER is the receiver's own type answers. Without it
@@ -431,8 +425,8 @@ add_receiving = (be :: CBackend, d: Def, rty: TyId, found :: Vec<Def>)
     })
 }
 
-// Is the receiver this declaration's first parameter? Read off the
-// DECLARED type, uninstantiated — so `(self: u32)` answers and
+// Whether the receiver is this declaration's first parameter, read off
+// the DECLARED type, uninstantiated — so `(self: u32)` answers and
 // `<T>(self: T)` does not, which is right: a bare parameter would
 // swallow every receiver in the program.
 receives = (be :: CBackend, d: Def, rty: TyId) Res<bool, AllocError> {
@@ -463,10 +457,8 @@ has_def = (found: Vec<Def>, id: DeclId) bool {
     }).match({ Ok(_) => true, None => false })
 }
 
-// SEMA ALREADY ANSWERED THIS: `resolved_call` is the declaration
-// overload resolution picked, keyed on this node, so six declarations
-// of `loop` are candidates sema already chose between, not an ambiguity
-// to re-discover.
+// SEMA ALREADY ANSWERED THIS (header): `resolved_call` is the
+// declaration overload resolution picked, keyed on this node.
 chosen_def = (
     be    :: CBackend,
     id    : ExprId,
@@ -534,8 +526,6 @@ call_def = (
     })
 }
 
-// Same node, decided by what the callee names — a struct is
-// constructed, a function is called.
 call_kind = (
     be   :: CBackend,
     id   : ExprId,
@@ -835,11 +825,9 @@ call_signature = (
     })
 }
 
-// A GENERIC CALL NOTHING SETTLED IS REFUSED, not emitted: a free
-// parameter mangles to one letter, so every instantiation would be one
-// C symbol and the linker would pick whichever body it saw last — a
-// wrong answer with no diagnostic, the one outcome a backend may not
-// produce.
+// A GENERIC CALL NOTHING SETTLED IS REFUSED, not emitted, for the
+// reason `gen_c_mono.zen`'s header gives: a free parameter mangles to
+// one letter, so every instantiation would be one C symbol.
 call_settled = (
     be   :: CBackend,
     id   : ExprId,
@@ -863,10 +851,10 @@ call_settled = (
     })
 }
 
-// THE WALK IS REACHABILITY-DRIVEN and this is the edge it follows: a
-// call that resolves queues the function it resolved to. Without it a
-// translation unit calls symbols nothing defines — `cc` catches it, but
-// a compiler shouldn't have emitted it.
+// THE EDGE THE REACHABILITY WALK FOLLOWS (`gen_c_decl.zen`): a call that
+// resolves queues the function it resolved to. Without it a translation
+// unit calls symbols nothing defines — `cc` catches it, but a compiler
+// shouldn't have emitted it.
 //
 // THE SYMBOL IS BUILT ONCE, USED TWICE — as the queue's identity and the
 // call's text — so "was this already emitted" and "what do I call" are
@@ -910,9 +898,8 @@ decl_fault = (x: Decl) str {
 // parameter has no written type to read.
 //
 // THE TYPE PARAMETERS GO BACK IN SCOPE around the read: `(v: T)` is a
-// written type and `T` means nothing unless bound. Sema bound it while
-// checking the declaration and let it go; this asks the same question
-// again, later.
+// written type and `T` means nothing unless bound — `gen_c_mono.zen`'s
+// `enter_tparams`, and its header says why.
 signature_of* = (be :: CBackend, d: Def, inst: Inst, sig :: Vec<TyId>)
                 Res<bool, AllocError> {
     decl_at(be.tree, d.id).match({

@@ -34,10 +34,6 @@ c_prim, is_signed = gen.gen_c.gen_c_type
 C_STANDARD* : str = "C99 (ISO/IEC 9899:1999)"
 
 // `/* text */` on its own line.
-//
-// An earlier version wrote the delimiters a byte at a time, to dodge a
-// grammar bug where a comment opener inside a string literal was read as a
-// real comment. Fixed now that a string is one token, so this writes plain.
 comment* = (out :: Emit, text: str) Res<(), AllocError> {
     out.bytes("/* ").try();
     out.bytes(text).try();
@@ -152,12 +148,11 @@ emit_index = (out :: Emit) Res<(), AllocError> {
 
 // What `println` lowers into, and only for a program that prints.
 //
-// DESIGN.md routes `println(..)` through the `Env` in scope — it is
-// sugar for `<the Env in scope>.out.println(..)` — and `Console`'s
-// members are DECLARED WITHOUT A BODY for the same reason `Fs`'s are:
-// there is nothing underneath to write them in. So the sugar bottoms
-// out here, in the writes the backend emits directly: decimal with no
-// separators, and exactly one newline per `println`.
+// DESIGN.md routes `println(..)` through the `Env` in scope — sugar for
+// `<the Env in scope>.out.println(..)` — and `Console`'s members are
+// DECLARED WITHOUT A BODY for the same reason `Fs`'s are: there is
+// nothing underneath to write them in. So the sugar bottoms out here:
+// decimal with no separators, one newline per `println`.
 //
 // `zg_print_str` takes a `zg_str` BY VALUE rather than a pointer and a
 // length, so printing a `str` needs no temporary and therefore no
@@ -197,12 +192,9 @@ write_print = (out :: Emit) Res<(), AllocError> {
 // -----------------------------------------------------------------
 // `@scope` — the block's own defer stack
 //
-// A `Scope` is a POINTER to the enclosing block's record, and the
-// record holds the deferred closures AND their captures. The closure
-// outlives the frame that registered it, and the block outlives the
-// closure by construction, so the block is the only storage certainly
-// still alive — which is exactly why `defer` needs no allocator and no
-// escaping-closure machinery.
+// A `Scope` is a POINTER to the enclosing block's record, which holds
+// the deferred closures AND their captures — `gen_c_scope.zen`'s header
+// argues why that is the one storage certainly still alive.
 //
 // A SLOT'S ENV IS A UNION OVER EVERY CAPTURE RECORD IN THE PROGRAM, so
 // it is exactly as large and as aligned as the largest one: no guessed
@@ -345,9 +337,8 @@ write_defer_run = (out :: Emit) Res<(), AllocError> {
 // the filesystem floor
 //
 // `Fs`'s members have no Zen body for the same reason `Console`'s have
-// none — there is nothing underneath to write them in — and this is
-// what they bottom out in. `gen_c_cap.zen` lowers the calls; these are
-// the four functions those calls name.
+// none, and this is what they bottom out in. `gen_c_cap.zen` lowers the
+// calls; these are the four functions those calls name.
 //
 // EMITTED ONLY FOR A PROGRAM THAT TOUCHES THE DISK, which is why the
 // two headers are here rather than at the top: this is the one place
@@ -358,9 +349,9 @@ write_defer_run = (out :: Emit) Res<(), AllocError> {
 // header did not.
 //
 // THE ORDINALS ARE A CONTRACT WITH `gen_c_cap.zen` AND WITH NOTHING
-// ELSE. The number never leaves the generated C: the backend turns it
-// back into a variant by NAME, so `env.zen` may rename or reorder its
-// own error set without either side agreeing to it in secret.
+// ELSE: the number never leaves the generated C, because the lowering
+// turns it back into a variant BY NAME, so `env.zen` may rename or
+// reorder its own error set without either side agreeing to it.
 // -----------------------------------------------------------------
 
 emit_fs* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
@@ -570,12 +561,10 @@ close_helper = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// The check happens BEFORE the operation, both ways round. A builtin
-// computes into a temporary and reports rather than overflowing; the
-// fallback tests the operands against the type's own limits. Neither
-// performs the operation and looks afterwards, because signed overflow
-// is undefined behaviour in C and an after-the-fact test is one the
-// optimizer is entitled to delete.
+// The check happens BEFORE the operation, both ways round, for the
+// reason the header gives. A builtin computes into a temporary and
+// reports rather than overflowing; the fallback tests the operands
+// against the type's own limits.
 checked = (out :: Emit, ct: str, prim: str, op: str, builtin: str)
           Res<(), AllocError> {
     open_helper(out, ct, prim, op, true).try();
@@ -595,10 +584,8 @@ checked = (out :: Emit, ct: str, prim: str, op: str, builtin: str)
     Ok(());
 }
 
-// The portable form: a range test on the operands, then the operation
-// through the unsigned type of the same width, where wrapping is
-// defined and the conversion back is the one every target this
-// compiles for makes two's complement.
+// The portable form: a range test on the operands, then the wrapping
+// operation `wrapped_return` writes.
 fallback = (out :: Emit, ct: str, prim: str, op: str) Res<(), AllocError> {
     is_signed(prim).match({
         true  => signed_guard(out, prim, op),

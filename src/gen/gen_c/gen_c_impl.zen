@@ -1,14 +1,10 @@
 // src/gen/gen_c/gen_c_impl.zen
 // Which function an IMPL supplies for a name, and at what arity.
 //
-// Split out of `gen_c_member.zen`, which reached 796 lines against an
-// 800-line hard cap after its comments had already been trimmed twice
-// — a file that pays for a line by deleting an explanation has
-// outgrown its subject.
-//
-// And the subject really is a second one: `gen_c_member.zen` answers
-// "what does a dot reach on this receiver", needing a `Site` (the
-// declaration that owns a type's members and its qualified-name
+// Split out of `gen_c_member.zen` at 796 lines against an 800-line hard
+// cap, and the subject really is a second one: `gen_c_member.zen`
+// answers "what does a dot reach on this receiver", needing a `Site`
+// (the declaration that owns a type's members and its qualified-name
 // symbols). Nothing here needs one — an impl is found by the
 // DECLARATION it targets, so every entry point below takes a `DeclId`.
 // This file imports nothing from `gen_c_member.zen`, so the dependency
@@ -60,9 +56,8 @@ by_arity* = (be: CBackend, found: Vec<Member>, arity: usize) Res<Member> {
 
 // THE FIRST THAT SURVIVED THE FILTER, and arity when none did. Two
 // filters narrow an overload set — a written signature (`by_sig`) and a
-// call's actual arguments (`member_that_fits`) — and both end the same
-// way, because arity is what a backend can still answer when the
-// narrower question has no answer at all.
+// call's actual arguments (`member_that_fits`) — and both end here,
+// because arity is what is left to answer with.
 kept_or_arity* = (
     be    : CBackend,
     kept  : Vec<Member>,
@@ -130,16 +125,13 @@ is_function = (m: Member) bool {
 // member is an ordinary function of the receiver, living beside the
 // type, reached under the TARGET's qualified name.
 //
-// And it is called statically: "can this struct be a bound" and "can
-// it be a fat value" are two questions, and only the second needs a
-// record of function pointers. Every call here has a receiver whose
+// And it is called statically: every call here has a receiver whose
 // CONCRETE type is known, so the impl's function is called directly
-// and monomorphised — a fat value is wanted only where a value's
-// STATIC type is the bound, which nothing in this tree writes.
+// and monomorphised. A fat value — a record of function pointers — is
+// wanted only where a value's STATIC type is the bound, which nothing
+// in this tree writes.
 // -----------------------------------------------------------------
 
-// The function an impl on this type supplies under `name`, when one
-// does.
 impl_member* = (be :: CBackend, decl: DeclId, name: str)
                Res<Res<Function>, AllocError> {
     found ::= be.alloc.Vec<Member>();
@@ -222,8 +214,8 @@ impl_member_at* = (
 }
 
 // The name a declaration's struct goes by — the key `impls_named` is
-// asked with. Exported because finding a type's impls starts here
-// whatever the caller wants them for.
+// asked with, and where finding a type's impls starts whatever the
+// caller wants them for.
 decl_name* = (be :: CBackend, decl: DeclId) str {
     decl_at(be.tree, decl).match({
         Ok(d) => struct_name(d),
@@ -289,8 +281,6 @@ keep_impl_fn = (
     keep_bound_default(be, i, im, name, out)
 }
 
-// A required member is still absent here — `keep_named_fn` keeps only
-// what has a body (see `impl_member_at` above).
 keep_bound_default = (
     be   :: CBackend,
     i    : ImplId,
@@ -347,10 +337,9 @@ has_body* = (f: Function) bool {
 // receiver at argument zero, so the two spellings cannot disagree.
 // -----------------------------------------------------------------
 
-// The function an impl on the type aliases `name` to, when one does.
-// "An impl lives with the type", so the search is over the impls
-// declared in the target's own module — the same rule impl_member_at
-// keeps for members with bodies.
+// The function an impl on the type aliases `name` to, when one does —
+// over the target's own module, the same search `impl_member_at` makes
+// for members with bodies.
 alias_of* = (
     be   :: CBackend,
     decl : DeclId,
@@ -390,8 +379,7 @@ impl_alias_at = (be :: CBackend, i: ImplId, name: str, out :: Vec<str>)
 }
 
 // A bare Name and nothing else: `widen_u32 = to_u32` aliases a function;
-// `start = 0` would be a value, and lowering it as a call would be the
-// old fault spelled a new way
+// `start = 0` is a value, not a function to call
 add_alias = (be :: CBackend, x: ExprId, out :: Vec<str>) Res<(), AllocError> {
     be.tree.expr_at(x).kind.match({
         Name(n) => out.add(n.text),

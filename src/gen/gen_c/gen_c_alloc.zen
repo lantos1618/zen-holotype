@@ -14,12 +14,11 @@
 // member surfacing as three errors, none naming it.
 //
 // NO NEW MACHINERY: the `raw` called is the receiver's OWN, under the
-// symbol `a.raw(..)` would produce. Its `Res<Ptr<u8>, E>` is rebuilt at
-// `Res<Ptr<T>, E>` by `gen_c_bound.zen`'s `convert` (erasure needs the
-// same rebuild), reading its operand out of a temporary — so `raw` is
-// called ONCE, not twice with the second allocation leaking. The
-// argument list is written as TEXT, since there's no call node for it:
-// the source wrote `create`, not `raw`.
+// symbol `raw_call` builds. Its `Res<Ptr<u8>, E>` is rebuilt at
+// `Res<Ptr<T>, E>` by `gen_c_bound.zen`'s `convert`, out of a temporary
+// — so `raw` is called ONCE, not twice with the second allocation
+// leaking. The argument list is written as TEXT, since there's no call
+// node for it: the source wrote `create`, not `raw`.
 //
 // 16 IS ALIGN_MAX, not a guess — `mem_arena.zen` re-requests every run
 // at the strictest alignment any Zen value needs, so this asks for what
@@ -64,9 +63,8 @@ RawFn* = {
     f*: Function,
 }
 
-// Is this `alloc.create<T>()`? Checks the name AND a receiver that
-// really allocates — a type with no `raw` has no `create` this file
-// could write.
+// The name AND a receiver that really allocates: a type with no `raw`
+// has no `create` this file could write.
 //
 // Asked LAST, after the receiver's own declaration and impls are
 // searched, so a type declaring its own `create` still wins.
@@ -178,10 +176,9 @@ created_ptr = (be :: CBackend, elem: TyId, rt: TyId, x: TyRes, n: TyNamed)
     Ok(Ok(Created(elem: elem, raw_ret: rt, ret: ret)));
 }
 
-// What `raw` answers, READ OFF ITS OWN DECLARATION with `@Self` bound to
-// this receiver. Read rather than built, so the temporary `convert`
-// declares carries the callee's own C type and not a second spelling of
-// it.
+// What `raw` answers, READ OFF ITS OWN DECLARATION with `@Self` bound
+// to this receiver — read and not built, so the temporary `convert`
+// declares carries the callee's own C type.
 raw_result = (be :: CBackend, rty: TyId, r: RawFn) Res<TyId, AllocError> {
     sctx = be.check.self_ctx(r.site.decl.module.to_usize(), rty).try();
     r.f.ret.match({

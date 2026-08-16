@@ -22,12 +22,8 @@
 // belongs at the consumer, which is what `has_var` is for and why the
 // backend asks it before it writes a symbol.
 //
-// A CONSTRUCTION IS APPLIED TOO, and for the same reason: `Box<i32>(held:
-// 7)` and `Vec(alloc: a)` are both a nominal type at some arguments, and
-// a bare `Box` with no arguments has no fields a backend could lay out.
-// The second form — no written arguments, inside the declaration's own
-// generic body — means the declaration's OWN parameters, which the
-// enclosing instantiation then substitutes.
+// A CONSTRUCTION IS APPLIED TOO, and for the same reason: a nominal type
+// at some arguments, never a bare head. `construct` gives the two forms.
 
 Ast, Expr, ExprId, Call, Arg, Access, Lambda, Ident, Span, Pos = std.ast
 Decl, DeclKind, Struct, Function, TParam, Param, TypeId, Impl = std.ast
@@ -78,10 +74,8 @@ construct* = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
 // variables, so `p.first` reached no member and the backend had no
 // layout to write.
 //
-// A PARAMETER NO ARGUMENT REACHES STAYS FREE, exactly as it does at a
-// call. `Range(0, 5)` names no `T` and nothing here is entitled to
-// guess one; the refusal belongs at the consumer, which is what
-// `has_var` is for.
+// A PARAMETER NO ARGUMENT REACHES STAYS FREE, exactly as at a call:
+// `Range(0, 5)` names no `T` and nothing here is entitled to guess one.
 // ---------------------------------------------------------------------
 
 settled_ctor_type = (
@@ -184,8 +178,8 @@ ctor_args = (c :: Checker, call: Call, d: Def, ctx: Ctx, out :: Vec<TyId>)
     })
 }
 
-// The written arguments mean what they mean AT THE CALL SITE, exactly as
-// a generic function's do.
+// Written arguments mean what they mean at the call site, as
+// `bind_written` says of a generic function's.
 written_ctor_args = (
     c     :: Checker,
     targs : Vec<TypeId>,
@@ -212,10 +206,9 @@ struct_tparams = (c :: Checker, d: Def, dec: Decl, out :: Vec<TyId>)
     })
 }
 
-// A GENERIC CANDIDATE IS INSTANTIATED, and this is the line `sema.zen`
-// used to say was missing: `<T>(x: T) T` called with an `i32` answers
-// `i32` and not `T`. The instantiation is recorded under the call's own
-// id beside the declaration, because everything downstream needs both —
+// A GENERIC CANDIDATE IS INSTANTIATED: `<T>(x: T) T` called with an
+// `i32` answers `i32` and not `T`. The instantiation is recorded under
+// the call's own id beside the declaration, because downstream needs both —
 // a backend that knew which function but not which `T` would be picking
 // one of the two answers out of the air.
 instantiate* = (
@@ -255,10 +248,8 @@ instantiated_ret = (
 // them are all in hand — and the walk runs once the whole program has
 // been checked.
 //
-// A parameter neither source of inference reached stays as its own
-// `Var`, exactly as it does in the type this returns. The walk stops on
-// a chain that still mentions one rather than guessing, which is the
-// same refusal `has_var` is for.
+// A free parameter stays its own `Var`, and the walk stops on a chain
+// that still mentions one rather than guessing.
 note_edge = (c :: Checker, id: ExprId, k: Cand, inst: Inst)
             Res<(), AllocError> {
     args ::= c.alloc.Vec<TyId>();
@@ -277,15 +268,9 @@ arg_for = (v: TyId, inst: Inst) TyId {
     inst.lookup(v).match({ Ok(t) => t, None => v })
 }
 
-// WHAT THE CALL SAID `T` IS. Two sources and the written one wins,
-// because `bind` keeps the first binding: `alloc.Vec<Unit>()` names its
-// argument outright, and `alloc.realloc(p, n)` says it only through
-// `p: Ptr<T>` against a `Ptr<u8>`.
-//
-// A parameter neither source reaches stays free. That is not an error
-// here — a candidate is TRIED before it is chosen, and reporting from
-// inside a trial would name an overload the program never used — so the
-// refusal belongs at the consumer, which is what `has_var` is for.
+// WHAT THE CALL SAID `T` IS. The header's two sources in precedence
+// order — written first, because `bind` keeps the first binding — and
+// then what a bound says. A parameter neither reaches stays free.
 call_inst = (
     c       :: Checker,
     call    : Call,

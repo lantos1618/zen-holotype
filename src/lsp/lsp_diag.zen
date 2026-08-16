@@ -19,12 +19,10 @@
 // buffer, and is ORDERED (one build at a time, always the newest
 // document, so §5's race is absent by construction).
 //
-// AND THE BUILD ITSELF IS SHARED: `settled` does not build, it ENSURES —
-// `lsp_built.zen`'s single flight. A settle for a state a query already
-// built publishes from the held slot without rebuilding; a settle for a
-// new state builds once and the queries that follow reuse it. What a
-// settle still costs when nothing changed since the last settle: one key
-// comparison, no build at all.
+// AND THE BUILD ITSELF IS SHARED: `settled` does not build, it ENSURES
+// — `lsp_built.zen`'s single flight, so a settle for a state a query
+// already built publishes from the held slot at the cost of one key
+// comparison and no build at all.
 //
 // HONEST ABOUT THE PIPE: over `lsp_stdio.zen` a settle point is every
 // message, since `short_by` asks for exactly one message's bytes and a
@@ -127,10 +125,10 @@ Diagnostics* = {
     // THE ONE BUILD, shared with every query. See `lsp_built.zen`.
     built :: Built,
 
-    // May `classed` be served? A change stales it (`owes`): the rows
-    // describe the text the last SETTLE saw, not the text the buffer now
-    // holds. A query-driven rebuild does NOT set this — colour follows
-    // the settle, and the lexical fallback is never wrong.
+    // Whether `classed` may be served. A change stales it (`owes`): the
+    // rows describe the text the last SETTLE saw, not the text the
+    // buffer now holds. A query-driven rebuild does NOT set this —
+    // colour follows the settle, and the lexical fallback is never wrong.
     fresh :: bool = false,
 
     // THE LAST NOTIFICATION SENT, per URI — the dedup `say_one` applies.
@@ -183,12 +181,10 @@ Diagnostics* = {
     }
 
     // WHAT A QUERY SHARES, with the caller having ruled out the
-    // lone-module case (an empty workspace is ITS branch, as it has
-    // always been). The slot is ensured for the document being asked
-    // about — building once if the state is new — and its checker
-    // answers. `c` is a `Res` because the type system cannot see that a
-    // successful `ensure` left a build in the slot; the `None` arm at
-    // the call site is unreachable and falls back to a build of its own.
+    // lone-module case (an empty workspace is ITS branch). The slot is
+    // ensured for the document being asked about — building once if the
+    // state is new — and its checker answers. The `None` arm at the call
+    // site is unreachable and falls back to a build of its own.
     shared* = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
                docs: Map<str, str>, path: str, t: Alloc)
               Res<Shared, AllocError> {
@@ -257,9 +253,7 @@ Diagnostics* = {
         })
     }
 
-    // THE THREE SETS, in order: the edited document, then every other
-    // file this build found something in, then every file that was
-    // showing errors and is not in either.
+    // THE THREE SETS the header names, in that order.
     say_all = (self :: @Self, env: Env, t: Alloc, uri: str, uris: Vec<str>,
                docs: Map<str, str>, spots: Vec<Spot>, out :: String)
               Res<(), AllocError> {
@@ -278,9 +272,8 @@ Diagnostics* = {
     }
 
     // `showing` OUTLIVES the build the URIs were read from, so each is
-    // copied into the session arena — the slot's pages go back on the
-    // next build (`lsp_built.zen`), and a set that points into freed
-    // pages is a use-after-free, not a stale string.
+    // copied into the session arena — a set pointing into the slot's
+    // freed pages is a use-after-free, not a stale string.
     remember_showing = (self :: @Self, now: Vec<str>) Res<(), AllocError> {
         self.showing = self.a.Vec<str>();
         now.loop((h, u) {
@@ -290,10 +283,9 @@ Diagnostics* = {
         Ok(());
     }
 
-    // ONE FILE'S LIST, SAID AT MOST ONCE PER CONTENT. The body is built,
-    // compared against the last one sent for this URI, and written only
-    // when different — an unchanged build's answer costs a comparison,
-    // not a frame.
+    // ONE FILE'S LIST, SAID AT MOST ONCE PER CONTENT — the header's
+    // dedup. The body is built, compared against the last one sent for
+    // this URI, and written only when different.
     say_one = (self :: @Self, env: Env, t: Alloc, uri: str, uris: Vec<str>,
                docs: Map<str, str>, spots: Vec<Spot>, out :: String)
               Res<(), AllocError> {
@@ -346,8 +338,8 @@ Diagnostics* = (a: Alloc, env: Env) Diagnostics {
     )
 }
 
-// Was this URI showing errors and is it not among the ones that have
-// them now?
+// This URI was showing errors and is not among the ones that have them
+// now.
 gone = (u: str, uri: str, now: Vec<str>) bool {
     u.eq(uri).match({
         true  => false,

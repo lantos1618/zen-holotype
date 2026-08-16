@@ -50,14 +50,10 @@ struct_members, record_body, params_list, type_params = std.parse.parse_member
 // the file
 // -------------------------------------------------------------------
 
-// A whole module. `name` is the dotted module path, which is the
-// module's identity; the file it came from is `span.file`, which every
-// node in it already carries.
-//
-// The module's span is the whole file — trivia included, because there
-// is nothing outside it for the trivia to be beside — and its trailing
-// run is whatever is left at end of file. A formatter that drops that
-// fails its own round trip.
+// A whole module (`Module` in ast_node.zen names its fields). Its span
+// is the whole file — trivia included, because there is nothing outside
+// it for the trivia to be beside — and its trailing run is whatever is
+// left at end of file.
 module* = (p :: Parser, name: str) Res<Module, AllocError> {
     start = Pos(line: 1, col: 1);
     p.drain().try();
@@ -120,10 +116,6 @@ declaration* = (p :: Parser, module_level: bool) Res<Decl, AllocError> {
 // declares. It is its own form and not a call because module level has
 // no expression statements at all, so giving it a rule costs no
 // ambiguity and gains a node the formatter and the LSP can match on.
-//
-// The target is an `Ident` and never qualified: an impl lives in the
-// module that declares its target, so there are no orphan impls and
-// there is no qualified form to write.
 impl_decl = (p :: Parser, m: Mark) Res<Decl, AllocError> {
     target = p.ident("expected the type an impl is for").try();
     p.bump().try();
@@ -280,10 +272,9 @@ struct_decl = (
 }
 
 // `Shape = Circle(Circle) | Rect(Rect) | Unit`, `AllocError* = | OutOfMemory`.
-//
-// The bar is stored rather than derived from `variants.len == 1`,
-// because the formatter reprints what was written and a one-variant
-// enum written with the bar must come back with it.
+// The bar is stored rather than derived from `variants.len == 1`: the
+// formatter reprints what was written, and a one-variant enum written
+// with the bar must come back with it.
 enum_decl = (
     p       :: Parser,
     m       : Mark,
@@ -331,9 +322,8 @@ bar_span = (p :: Parser) Res<Res<Span>, AllocError> {
     Ok(Ok(span));
 }
 
-// A payload is a TYPE — `Circle(Circle)`, `Failed(str)` — and never
-// `name: value`, which is what keeps `Package(url: "..")` a call and
-// not a variant. One payload, never a list.
+// One payload, never a list, and always a TYPE — never `name: value`,
+// which keeps `Package(url: "..")` a call and not a variant.
 one_variant = (p :: Parser) Res<Variant, AllocError> {
     m       = p.open();
     name    = p.ident("expected a variant name").try();
@@ -379,14 +369,9 @@ fn_decl = (
 // impl's method are one node — and reading them is one rule, not one
 // rule per caller.
 //
-// DESIGN.md's method table, verbatim: `form` records whether `=` or
-// `::=` was written and `body` whether a `{ .. }` followed, and the
-// two are not redundant.
-//
-//     = sig          Required   impl must provide it
-//     = sig {..}     Sealed     provided, cannot be overridden
-//     ::= sig {..}   Default    provided, impl may rebind it
-//     ::= sig        Hook       optional, impl may provide it
+// `form` records whether `=` or `::=` was written and `body` whether a
+// `{ .. }` followed, and the two are not redundant. DESIGN.md's method
+// table is at `Form` in ast_node.zen.
 fn_value* = (
     p          :: Parser,
     name       : Ident,
@@ -511,8 +496,7 @@ import_decl = (
 }
 
 // A module-level value binding, and — through `parse_member.zen` — a
-// struct-body constant, which is the same node meaning one value per
-// type rather than storage per value.
+// struct-body constant: one value per type, not storage per value.
 const_decl = (
     p       :: Parser,
     m       : Mark,

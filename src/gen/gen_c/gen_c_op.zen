@@ -237,8 +237,8 @@ is_comparison* = (op: BinOp) bool {
 }
 
 // `&&` and `||` short-circuit, so a right operand needing statements of
-// its own can't be lowered here: the statements would run whether or
-// not the left side held. Reported, not mis-lowered.
+// its own cannot be lowered as an infix operand: the statements would
+// run whether or not the left side held.
 //
 // THE QUESTION IS `spills_anywhere`, NOT `spills` — a wrong answer, not
 // just a refusal, hinges on it. `spills` asks whether the operand IS a
@@ -370,15 +370,13 @@ usable = (be :: CBackend, id: TyId) bool {
     })
 }
 
-// Comparison is C's on a scalar, an IMPL'S otherwise: "`==` through
-// `Eq` is the only operator that dispatches to an impl". Two values C
-// cannot compare are compared by the `eq` their own type supplies —
-// `s == "impl"` on a `str` is `str`'s `Eq`, impl'd by `std.text`.
+// Comparison is C's on a scalar, an IMPL'S otherwise — the header's
+// second rule. `s == "impl"` on a `str` is `str`'s `Eq`, impl'd by
+// `std.text`.
 //
 // ORDERING IS NOT COVERED, refused by name: "there is no `Ord`.
-// `std.core` has `Eq` and `Hash` and nothing that orders" — `<` on a
-// struct has nothing to dispatch to, and inventing one here would be
-// this backend deciding a language question.
+// `std.core` has `Eq` and `Hash` and nothing that orders" — inventing
+// one here would be this backend deciding a language question.
 lower_compare = (
     be      :: CBackend,
     b       : Binary,
@@ -393,11 +391,10 @@ lower_compare = (
     })
 }
 
-// A type that impls no `Eq`, and every ORDERING, keep the message they
-// have always had — `corpus/gen_zen/reports_what_it_cannot_lower` gates
-// it on a struct with no impl, and that program is refused for exactly
-// the reason it was: there is nothing to dispatch to. What changed is
-// the case the test does not cover.
+// A type that impls no `Eq`, and every ORDERING, are refused for the
+// same reason: there is nothing to dispatch to.
+// `corpus/gen_zen/reports_what_it_cannot_lower` gates it on a struct
+// with no impl.
 lower_dispatched = (
     be      :: CBackend,
     b       : Binary,
@@ -551,8 +548,7 @@ traps* = (op: BinOp) bool {
     })
 }
 
-// Arithmetic on an integer always goes through a helper: nothing here
-// emits `a + b` and checks afterwards — an after-the-fact test is one
+// The header's first rule, at the site: an after-the-fact test is one
 // the optimizer is entitled to delete.
 lower_arith = (
     be      :: CBackend,
@@ -745,10 +741,8 @@ level_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
     })
 }
 
-// The two that are not written as open-operand-operand-close: a
-// comparison of values C cannot compare goes through an `Eq` impl, and
-// a `&&` whose right side spills is written as a temporary and a
-// branch.
+// The two that are not written as open-operand-operand-close, named in
+// the spine banner above.
 infix_shaped = (be: CBackend, b: Binary, operand: TyId) bool {
     is_logical(b.op).match({
         true  => spills_anywhere(be, b.rhs) == false,

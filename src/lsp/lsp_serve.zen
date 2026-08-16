@@ -47,10 +47,9 @@
 // OVER 500 LINES, per STYLE.md's justification: the subject is one
 // session (lifecycle, document store, the table that routes one
 // message, and the arena discipline of every answer) sharing the
-// `Server` that holds all four. `publishDiagnostics` moved its own
-// subject to `lsp_diag.zen`, and the build itself to `lsp_built.zen`,
-// leaving here the trigger and the routing — a change marks, `settled`
-// is where the transport says the batch is over.
+// `Server` that holds all four. `publishDiagnostics`' own subject is
+// `lsp_diag.zen`'s and the build itself `lsp_built.zen`'s, leaving here
+// the trigger and the routing.
 
 str, String = std.text
 Vec, Map = std.collections
@@ -65,9 +64,8 @@ Sym, symbols_at, write_symbols = lsp.lsp_symbol
 write_edits = lsp.lsp_fmt
 Item, complete_at, complete_in, complete_shared = lsp.lsp_compl
 sort_items, write_items = lsp.lsp_compl
-// The colours, and the legend `initialize` has to advertise them under.
-// Both come from `lsp_colour.zen` so the index a token carries and the
-// list it indexes cannot be spelled in two files.
+// The colours, and the legend `initialize` advertises them under — one
+// file, for the reason `lsp_reply.zen` gives at its own import.
 write_legend, write_tokens = lsp.lsp_colour
 // The one message this server sends unprompted, the policy that decides
 // when, and the one build the settle and the queries share
@@ -86,11 +84,9 @@ path_of = lsp.lsp_uri
 // The whole of the server's state.
 //
 // `docs` maps a URI to the open buffer's text — SESSION-ARENA COPIES,
-// not borrows: the JSON tree a string decodes into lives in the
-// message's own arena (dropped once the reply is written — `one`), and
-// only a string without escapes is a slice of the request
-// (`lsp_json_read.zen`), so nothing held past the message may borrow
-// from either. The copies happen in `changed_to`, once per real change.
+// not borrows, for the reason `lsp_reply.zen`'s `own_str` states:
+// neither the message's arena nor the request's bytes outlive the
+// message. The copies happen in `changed_to`, once per real change.
 Server* = {
     a: Alloc,
 
@@ -120,8 +116,9 @@ Server* = {
     ready :: bool,        // `initialize` has been answered
     stopping :: bool,     // `shutdown` has been answered
 
-    // Has `shutdown` been answered? The FIELD stays unexported: nothing
-    // outside this file may decide when the server stops accepting work.
+    // Whether `shutdown` has been answered. The FIELD stays unexported:
+    // nothing outside this file may decide when the server stops
+    // accepting work.
     stopped* = (self: @Self) bool { self.stopping }
 
     // One message: read it, route it, frame whatever it produced.
@@ -306,11 +303,9 @@ Server* = {
     }
 
     // THE SETTLE POINT: every message the transport was holding has been
-    // answered, so a build owed to the last of them happens now — or is
-    // FOUND, when a queued query already built this exact state (the
-    // slot's key is the documents' bytes; `lsp_diag.zen`'s `settled`
-    // ensures rather than builds). Called by `serve` at buffer end and
-    // by `lsp_stdio.zen` after each drain. `t` is the batch's scratch.
+    // answered, so `lsp_diag.zen`'s `settled` — which ensures rather
+    // than builds — is called here, by `serve` at buffer end and by
+    // `lsp_stdio.zen` after each drain. `t` is the batch's scratch.
     //
     // NOTHING IS SENT AFTER `shutdown`: no work is accepted once it has
     // been answered, and an unprompted notification between `shutdown`
@@ -345,11 +340,10 @@ Server* = {
                 "no open document for that uri",
                 msg
             ),
-            // THE WORKSPACE DECIDES, as for definition. Without one the
-            // lone module answers from the request's own arena; with one
-            // the answer comes off the SHARED build — the slot ensured
-            // for this exact document state, so a hover after a settle
-            // builds nothing.
+            // THE WORKSPACE DECIDES, the way `lsp_hover.zen`'s header
+            // spells out: without one the lone module answers from the
+            // request's own arena, with one the SHARED build's checker
+            // does — so a hover after a settle builds nothing.
             Ok(text) => {
                 body ::= t.String().try();
                 self.workspace.is_empty().match({
@@ -374,11 +368,10 @@ Server* = {
         })
     }
 
-    // COLOUR READS WHAT THE DIAGNOSTICS' BUILD SETTLED. `classes_for`
-    // is empty without a workspace, before the first build, and from
-    // any change until the next clean one — and an empty list IS the
-    // lexical answer, so the fallback costs no branch. A DOCUMENT NEVER
-    // OPENED IS `-32602`, the same refusal hover makes.
+    // COLOUR READS WHAT THE DIAGNOSTICS' BUILD SETTLED, and an empty
+    // `classes_for` IS the lexical answer, so the fallback costs no
+    // branch. A DOCUMENT NEVER OPENED IS `-32602`, the same refusal
+    // hover makes.
     coloured = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                 rid: JsonId, msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -400,11 +393,9 @@ Server* = {
     }
 
     // HOVER OFF THE SHARED BUILD, the way `write_definition` below does
-    // it: the slot is ensured for the document being asked about —
-    // building once if the state is new — and its checker answers. The
-    // `None` arm is unreachable (`shared` ensured the slot) and falls
-    // back to the build this file made per request before the slot
-    // existed, never a guess.
+    // it — `lsp_diag.zen`'s `shared` is what ensures the slot, and its
+    // `None` arm is unreachable, falling back to a per-request build of
+    // its own rather than a guess.
     shared_hover = (self :: @Self, t: Alloc, uri: str, text: str,
                     line: usize, character: usize, body :: String)
                    Res<(), AllocError> {
@@ -457,13 +448,9 @@ Server* = {
         })
     }
 
-    // DEFINITION and COMPLETION take the same two params as hover and
-    // make the same refusal for a document never opened.
-    //
-    // THE WORKSPACE DECIDES, as for hover. Without one the lone module
-    // answers from the request's own arena; with one the answer comes
-    // off the SHARED build — the slot ensured for this exact document
-    // state, so a definition after a settle builds nothing.
+    // DEFINITION and COMPLETION take the same two params as hover, make
+    // the same refusal for a document never opened, and let THE
+    // WORKSPACE DECIDE the same way `hovered` above spells out.
     defined = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
                msg :: String) Res<(), AllocError> {
         uri       = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -515,9 +502,8 @@ Server* = {
             t
         ).try();
         sh.c.match({
-            // Unreachable — `shared` ensured the slot — and the fallback
-            // is the build this file made per request before the slot
-            // existed, never a guess.
+            // Unreachable, as in `shared_hover`; the per-request build
+            // answers instead.
             None  => {
                 qa ::= self.env.mem.alloc();
                 write_target(
@@ -787,9 +773,5 @@ frame_why* = (f: FrameFault) str {
     })
 }
 
-// A `str` copied into an arena — what the document store, the workspace
-// and the owed marker keep. The JSON tree a string decodes into lives in
-// the message's own arena and only a string without escapes is a slice
-// of the request (`lsp_json_read.zen`), so nothing held past the message
-// may borrow from either. `lsp_diag.zen`'s `owned_str` is the same five
-// lines for the same reason, private to its file.
+// The arena string-copy the document store and the workspace keep is
+// `lsp_reply.zen`'s `own_str` — the folder's only one.

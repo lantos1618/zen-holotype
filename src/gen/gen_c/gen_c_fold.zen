@@ -41,9 +41,7 @@ arg_value, recv_of = gen.gen_c.gen_c_shape
 has_var = sema.sema_inst
 
 // The accumulator a fold threads, nothing for the five shapes that do
-// not. `acc` threads BY VALUE — "no cell is heap-allocated" — one
-// automatic local written at the end of every pass to the body's own
-// value.
+// not — one automatic local, threaded by value; see the header.
 Fold* = {
     cell*: str,
     ty*: TyId,
@@ -55,10 +53,8 @@ no_fold* = (be :: CBackend) Res<Fold, AllocError> {
     Ok(Fold(cell: "", ty: unknown, has: false));
 }
 
-// The sixth shape: the accumulator is ONE LOCAL, seeded before the
-// first pass and assigned the body's own value at the end of every
-// one; the loop's result is `Ok(acc)`, written where a walk writes
-// nothing — see the file header for why.
+// The sixth shape, as the header states it: one local seeded before the
+// first pass, and a result a walk does not have.
 lower_fold* = (
     be   :: CBackend,
     id   : ExprId,
@@ -184,10 +180,10 @@ acc_slot = (sh: Shape) usize {
       + sh.wants_value.match({ true => 1, false => 0 })
 }
 
-// A FOLD EVALUATES TO ITS ACCUMULATOR, not to what it walked: `Res<A>`
-// and never `Res<T>`. The seed is what says which, and it is the
-// argument before the body — one place, so the type a temporary is
-// declared at and the type the loop assigns cannot disagree.
+// A FOLD EVALUATES TO ITS ACCUMULATOR: `Res<A>` and never `Res<T>`.
+// The seed says which, and it is the argument before the body — one
+// place, so the type a temporary is declared at and the type the loop
+// assigns cannot disagree.
 result_element* = (be :: CBackend, id: ExprId, ctx: Ctx)
                  Res<TyId, AllocError> {
     seed_arg(be, id).match({
@@ -239,8 +235,7 @@ call_seed = (be :: CBackend, c: Call) Res<ExprId> {
 
 // The result, written before the break label — see the file header.
 // The temporary was seeded `None` before the first pass; this is where
-// it becomes `Ok(acc)`, and `h.break(v)` jumps PAST this line so the
-// break's value wins.
+// it becomes `Ok(acc)`.
 write_fold_result* = (be :: CBackend, st: LoopFrame, fold: Fold)
                      Res<(), AllocError> {
     (fold.has && st.has_result).match({

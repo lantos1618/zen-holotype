@@ -40,9 +40,8 @@
 // the postfix chain and the primaries are three sections of one grammar
 // rule, mutually recursive through `expr`. `parse_expr1`/`parse_expr2`
 // would cut one subject in half, "worse than the file you started with,
-// because now neither name means anything". The bounded scans, the
-// second subject that WAS here, already left for parse_lookahead.zen, which
-// parse_decl.zen needed too.
+// because now neither name means anything". The bounded scans left for
+// parse_lookahead.zen, which parse_decl.zen needed too.
 
 Alloc, AllocError = std.mem
 Span, Pos, Ident, no_trivia = std.ast.ast_span
@@ -157,8 +156,7 @@ binary_from = (p :: Parser, m: Mark, min: usize) Res<ExprId, AllocError> {
 }
 
 // One operator and its right operand, folded onto the spine. The
-// recursion is at `prec + 1`, which is what makes every operator
-// left-associative: `a - b - c` is `(a - b) - c`.
+// recursion is at `prec + 1` — see `binary_from`.
 binary_step = (
     p    :: Parser,
     m    : Mark,
@@ -316,9 +314,7 @@ postfix_step = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
 }
 
 // `alloc.Vec<i32>()` — type arguments, but only if a `(` closes them.
-// `a < b` is the other reading and it is by far the commoner one, so
-// the scan is what decides: a `<` whose `>` is not followed by `(` is
-// a comparison, and the postfix loop stops.
+// `a < b` is the other and far commoner reading; the scan decides.
 targs_call = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
     targs ::= p.alloc.Vec<TypeId>();
     p.type_args(targs).try();
@@ -354,9 +350,8 @@ dot_target = (
     });
 }
 
-// `.match({ pattern => expr, .. })`. Its own node and not a call: its
-// argument is an arm list, which is not an expression and could not be
-// passed to anything else, and exhaustiveness is checked on it.
+// `.match({ pattern => expr, .. })`. Its own node and not a call: the
+// argument is an arm list, and exhaustiveness is checked on it.
 match_expr = (
     p         :: Parser,
     m         : Mark,
@@ -543,9 +538,9 @@ word_expr = (p :: Parser, m: Mark, kind: ExprKind) Res<ExprId, AllocError> {
     p.add_expr(kind, m);
 }
 
-// `@meta(n)` and `@meta(self: @Self)` — the second is the only place
-// in the language where an argument carries a type annotation, which
-// is why it has fields of its own rather than being bent into an Arg.
+// `@meta(n)` and `@meta(self: @Self)` — the second is the only place in
+// the language where an argument carries a type annotation, which is
+// why `Meta` has fields of its own rather than being bent into an Arg.
 meta_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     p.bump().try();
     open = p.here_span();
@@ -604,9 +599,8 @@ unit_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 }
 
 // `Paren` is a node of its own because POSITIONS.md asserts a span for
-// it, and because a formatter re-deriving parentheses from precedence
-// is a formatter that will eventually print `a + b * c` for
-// `(a + b) * c`.
+// it, and because a formatter re-deriving parens from precedence will
+// eventually print `a + b * c` for `(a + b) * c`.
 grouped_expr = (p :: Parser, m: Mark, open: Span) Res<ExprId, AllocError> {
     inner = p.expr().try();
     p.expect_close(

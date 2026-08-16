@@ -27,18 +27,17 @@
 //     every open buffer's bytes (`paths`/`texts`, the overlay, in open
 //     order). `ensure` builds only when the key disagrees — a change
 //     moves the bytes, so a stale slot cannot answer for a state it did
-//     not see, and a queued query arriving after a `didChange` builds
-//     once for the NEW state with the settle at batch end reusing it
-//     (the stale-state stamp `design_lsp.md` §5 asks for, as a content
-//     comparison rather than a version counter: a client that resends
+//     not see, and a query arriving after a `didChange` builds once for
+//     the NEW state with the settle at batch end reusing it. This is
+//     the stale-state stamp `design_lsp.md` §5 asks for, as a CONTENT
+//     comparison rather than a version counter — a client that resends
 //     the same bytes has changed nothing, which `lsp_serve.zen`'s
-//     `stored` already relies on).
+//     `stored` already relies on.
 //
 // WHAT A QUERY TAKES FROM THE SLOT is the `Checker` BY VALUE — a header
 // copy (`zen_build.zen`'s `checked` hands it back the same way), read
-// only through memos `check_all` already filled. Nothing mutates it:
-// hover reads, definition reads, completion reads, and a query that
-// types nothing new is the doctrine `lsp_hover.zen`'s header states.
+// only through memos `check_all` already filled and never mutated: a
+// query that types nothing new is `lsp_hover.zen`'s doctrine.
 //
 // WHAT A QUERY MAY NOT KEEP is anything ALLOCATED FROM THE SLOT past
 // the next `ensure`: eviction frees the pages. The answers are written
@@ -60,8 +59,7 @@ Span = std.ast.ast_span
 Note = std.parse.parse_diag
 Checker = sema.sema_check
 SemaFault, message, write_detail = sema.sema_diag
-// IMPORTED FOR ITS METHODS: without this line the bootstrapper resolves
-// `c.types`'s methods against another module (as `lsp_hover.zen` notes).
+// IMPORTED FOR ITS METHODS, as `lsp_hover.zen` explains.
 Types = sema.sema_ty
 Build = zen.zen_build
 Classed = lsp.lsp_colour
@@ -108,9 +106,8 @@ Built* = {
     // flag beside loose fields: no build and no key arrive together.
     cur :: Res<Inner>,
 
-    // Is the held build one for exactly this state? The key is CONTENT,
-    // not versions: equal bytes are the same state however a client
-    // numbers them.
+    // The key is CONTENT, not versions: equal bytes are the same state
+    // however a client numbers them.
     matches* = (self: @Self, root: str, entry: str, uris: Vec<str>,
                 docs: Map<str, str>) bool {
         self.cur.match({
@@ -173,7 +170,7 @@ Built* = {
         // COLOUR'S HALF, off the same `Checker`, only when the build
         // found nothing wrong — with faults outstanding the memos hold
         // poison, and an empty `classed` is the lexical fallback's
-        // trigger (`lsp_names.zen`'s doctrine, moved with the code).
+        // trigger (`lsp_names.zen`'s doctrine).
         classed ::= self.arena.Vec<Classed>();
         (b.diag_count() == 0 && c.diag_count() == 0).match({
             true  => classify(self.arena, c, kept_root, classed),
@@ -220,7 +217,7 @@ Built* = (env: Env) Built {
     Built(arena: env.mem.alloc(), cur: None)
 }
 
-// Does the held overlay read exactly what the documents hold now? Same
+// The held overlay reads exactly what the documents hold now: same
 // count, same order (`open` is insertion-ordered), same bytes. NOTHING
 // HERE ALLOCATES — a comparison, not a build — so no arm is a `Res`.
 same_overlay = (i: Inner, uris: Vec<str>, docs: Map<str, str>) bool {
@@ -248,8 +245,8 @@ same_overlay = (i: Inner, uris: Vec<str>, docs: Map<str, str>) bool {
 
 // --- what a build found -------------------------------------------------
 //
-// Moved from `lsp_diag.zen` unchanged in shape: the gather belongs with
-// the arena that owns what it gathers, and this is that arena.
+// The gather belongs with the arena that owns what it gathers, and this
+// is that arena.
 
 // LEX AND PARSE, off the `Build`. `Diag.span.file` is the module's path
 // relative to the compilation root, exactly what a URI is built from.

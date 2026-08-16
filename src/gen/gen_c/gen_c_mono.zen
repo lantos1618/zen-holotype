@@ -50,9 +50,8 @@ intern_var* = (c :: Checker, name: str, owner: str) Res<TyId, AllocError> {
     c.types.var(name, owner)
 }
 
-// `Res<T>` — the one-argument form every loop word returns. Kept here
-// rather than at the call site for the same one-hop interning reason
-// as above.
+// `Res<T>` — the one-argument form every loop word returns. Interned
+// here, like the two above, so a caller makes one hop.
 intern_res_open* = (c :: Checker, value: TyId) Res<TyId, AllocError> {
     c.types.res_open(value)
 }
@@ -98,8 +97,7 @@ decl_vars_of = (c :: Checker, d: Def, x: Decl, out :: Vec<TyId>)
 // caught by `cc`, but wouldn't be for two types of one width.
 //
 // So a generic body is read GENERICALLY and `sub` turns every answer
-// into the one this emission is at, making true what `ty_of`'s header
-// promises.
+// into the one this emission is at.
 open_named* = (be :: CBackend, decl: DeclId) Res<Res<TyId>, AllocError> {
     decl_at(be.tree, decl).match({
         None  => Ok(None),
@@ -137,9 +135,8 @@ named_at = (
 // reading the answer back
 // ---------------------------------------------------------------------
 
-// What this call instantiated its callee at. The empty instantiation
-// when sema recorded nothing, which is what every non-generic call is —
-// so a caller never has to ask whether the callee was generic first.
+// What this call instantiated its callee at — the header's first
+// bullet, at the site.
 inst_at* = (be :: CBackend, id: ExprId) Res<Inst, AllocError> {
     be.check.resolved_inst(id).match({
         Ok(i) => Ok(i),
@@ -159,9 +156,8 @@ recv_inst* = (be :: CBackend, rty: TyId) Res<Inst, AllocError> {
 
 // A method of `Vec<T>` is generic in `T` whether or not it declares
 // parameters of its own — so the receiver's instantiation IS the
-// method's. A method that ALSO declares its own parameters would need
-// the two concatenated; that half is unwritten (nothing in this tree
-// declares one), and `refuse_method` names it rather than guessing.
+// method's. One declaring parameters of its own would need the two
+// concatenated; `gen_c_member.refuse_method` refuses it instead.
 
 // ---------------------------------------------------------------------
 // substituting
@@ -169,10 +165,9 @@ recv_inst* = (be :: CBackend, rty: TyId) Res<Inst, AllocError> {
 
 // A type read out of sema, in terms of the instantiation being lowered.
 //
-// EVERY TYPE THE BACKEND READS GOES THROUGH HERE. Sema checks a generic
-// body exactly once, generically ("one mistake, one diagnostic"), so
-// every answer inside `Vec<T>.add` is about `T` — the backend is the
-// one that knows this emission is the `i32` one.
+// EVERY TYPE THE BACKEND READS GOES THROUGH HERE: sema checks a generic
+// body exactly once, generically (`open_named` above), so the backend
+// is the one that knows this emission is the `i32` one.
 sub* = (be :: CBackend, ty: TyId) Res<TyId, AllocError> {
     subst(be.check, ty, be.inst)
 }
@@ -185,9 +180,7 @@ sub_with* = (be :: CBackend, ty: TyId, inst: Inst) Res<TyId, AllocError> {
 }
 
 // "IS THIS TYPE STILL OPEN", ASKED OF EVERY EMPTY SLOT AND NOT ONLY OF
-// A FREE PARAMETER. (It read "THE SAME QUESTION" while `has_var`'s
-// one-line wrapper stood here; the wrapper went, and `sub_with` above
-// asks nothing.)
+// A FREE PARAMETER.
 //
 // `gen_name.tcode` writes ONE letter — `q` — for a `Var`, `Infer`, and
 // `Unknown` alike, since none of the three names a type C could be
@@ -197,9 +190,9 @@ sub_with* = (be :: CBackend, ty: TyId, inst: Inst) Res<TyId, AllocError> {
 // `has_var` says settled, but a temporary declared at it is a C struct
 // with an unresolved element `cc` rejects.
 //
-// The walk is `sema_inst.has_var`'s, one variant wider; kept here
-// rather than beside it because the reason is a BACKEND one (what has a
-// C spelling), and sema has no stake in it.
+// The walk is `sema_inst.has_var`'s, one variant wider; here and not
+// beside it because the reason is a BACKEND one — what has a C
+// spelling — and sema has no stake in it.
 unsettled* = (be: CBackend, ty: TyId) bool {
     be.types().at(ty).match({
         Var(_)   => true,
@@ -220,17 +213,17 @@ any_unsettled = (be: CBackend, list: Vec<TyId>) bool {
     }).match({ Ok(_) => true, None => false })
 }
 
-// Is any of these types still open? `find` and not a loop, because the
-// answer is a `bool` and the first one is enough.
+// `find` and not a loop: the answer is a `bool`, and the first open
+// type is enough.
 any_open* = (be: CBackend, sig: Vec<TyId>) bool {
     Range(0, sig.len).find((i) {
         sig.get(i).match({ Ok(t) => has_var(be.check, t), None => false })
     }).match({ Ok(_) => true, None => false })
 }
 
-// Did this instantiation leave a parameter free? A free argument mangles
-// to `q`, so two instantiations would be one symbol — the fault the
-// header names, asked where there is a call to point at.
+// A free argument mangles to `q`, so two instantiations would be one
+// symbol — the fault the header names, asked where there is a call to
+// point at.
 inst_open* = (be: CBackend, inst: Inst) bool {
     Range(0, inst.len()).find((i) {
         inst.arg_at(i).match({ Ok(t) => has_var(be.check, t), None => true })
@@ -381,10 +374,9 @@ slot_ty = (be :: CBackend, name: str) Res<TyId> {
 // ---------------------------------------------------------------------
 // putting the parameters back in scope
 //
-// `type_from_ast` reads a WRITTEN type, meaningless unless `T` is bound.
-// Sema binds it while checking the declaration then releases it; the
-// backend asks the same nodes again later and must rebind it — always
-// as a pair, around the smallest span that reads a written type.
+// The header's second bullet, at the site: `type_from_ast` reads a
+// WRITTEN type, meaningless unless `T` is bound — so the pair goes
+// around the smallest span that reads one.
 // ---------------------------------------------------------------------
 
 enter_tparams* = (be :: CBackend, tparams: Vec<TParam>, owner: str)

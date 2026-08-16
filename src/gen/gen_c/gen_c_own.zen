@@ -14,12 +14,10 @@
 // an earlier one built; destroying the foundation first is a
 // use-after-free).
 //
-// `@scope` IS THE BLOCK, AS A VALUE: a `Scope` is a pointer to the
-// enclosing block's record, which holds both registered closures and
-// their captures. The block outlives every frame that registers on
-// it, so the record is the one storage certainly still alive when the
-// closure runs — no allocator, no heap record. This is not
-// escaping-closure support and must not grow into it.
+// `@scope` IS THE BLOCK, AS A VALUE — `gen_c_scope.zen` says why the
+// enclosing block's record is the one storage certainly still alive
+// when the closure runs. This is not escaping-closure support and must
+// not grow into it.
 //
 // ⚠ A LIFTED DEFER THUNK NEEDS NO NAME REMAPPING. The obvious design
 // gives the capture record fields of its own and rewrites every free
@@ -108,8 +106,7 @@ open_record = (be :: CBackend) Res<usize, AllocError> {
 }
 
 // A block leaving by its own closing brace. `keep` is a binding the
-// block is handing OUT — dropping it here would free what the caller
-// is about to read — and "" when it is handing out nothing.
+// block is handing OUT, and "" when it is handing out nothing.
 leave_block* = (be :: CBackend, keep: str) Res<(), AllocError> {
     (be.block_depth() == 0).match({
         true  => Ok(()),
@@ -119,8 +116,7 @@ leave_block* = (be :: CBackend, keep: str) Res<(), AllocError> {
 }
 
 // Every block from the innermost out to `depth`: what a NON-LOCAL exit
-// leaves behind. `.try()`, `h.break()` and `h.next()` jump over closing
-// braces, so the cleanup they stood for is written here, before the jump.
+// leaves behind, written before the jump that skips the closing braces.
 //
 // Frames are NOT popped: lowering still stands inside those blocks with
 // statements left to write, and the `}` will run this again for the
@@ -176,8 +172,7 @@ run_defers = (be :: CBackend, rec: usize) Res<(), AllocError> {
     Ok(());
 }
 
-// REVERSE DECLARATION ORDER: destroying the foundation before what
-// depends on it is a use-after-free (see file header).
+// REVERSE DECLARATION ORDER, for the reason the file header gives.
 unwind_drops = (be :: CBackend, mark: usize, end: usize, keep: str)
                Res<(), AllocError> {
     (end > mark).match({
@@ -198,8 +193,7 @@ drop_range = (be :: CBackend, mark: usize, end: usize, keep: str)
 }
 
 // A binding the block is handing out is left alone: undropped leaks,
-// but dropping it is a use-after-free of what the caller is about to
-// read — only one of those two is recoverable.
+// but dropping it is a use-after-free — only one is recoverable.
 drop_unless_kept = (be :: CBackend, e: DropEntry, keep: str)
                    Res<(), AllocError> {
     e.name.eq(keep).match({
@@ -446,7 +440,7 @@ add_if_bodied = (f: Function, found :: Vec<Function>)
 }
 
 // -----------------------------------------------------------------
-// does this block write `@scope`?
+// a block that writes `@scope`
 //
 // A nested block and a lambda body are blocks of their own, so the
 // search stops at each — why DESIGN.md's own example runs its inner

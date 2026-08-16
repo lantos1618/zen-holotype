@@ -14,8 +14,7 @@
 // inside it, which short-circuiting needs since a hoisted `.try()` runs
 // regardless of the left side — `gen_c_op.zen` owns that rule.
 //
-// Operators are `gen_c_op.zen`'s subject (`a + b` decides trap helper,
-// `Eq` impl, or plain C) and left when this file outgrew its cap.
+// Operators are `gen_c_op.zen`'s subject.
 //
 // Sema is the only source of a type: where `type_of` answers, its
 // answer is used; where it does not (call, match, record), the
@@ -77,9 +76,8 @@ lower_global_value = gen.gen_c.gen_c_const
 // expressions
 // -----------------------------------------------------------------
 
-// Does this form need statements of its own? A spilling form may not
-// appear where C wants a pure expression — the right operand of `&&`/`||`
-// and an argument ask this first.
+// A spilling form may not appear where C wants a pure expression — the
+// right operand of `&&`/`||` and an argument ask this first.
 spills* = (be: CBackend, id: ExprId) bool {
     be.tree.expr_at(id).kind.match({
         Match(_) => true,
@@ -90,11 +88,10 @@ spills* = (be: CBackend, id: ExprId) bool {
     })
 }
 
-// Does lowering this expression need statements of its own ANYWHERE
-// inside it? `spills` asks about the form ITSELF (`deliver`'s
-// question); short-circuit needs this one, since a `.try()` three
-// parens deep still lowers to an `if`/`return` that `expr` hoists out
-// to where the operand was written.
+// Whether a spill hides ANYWHERE inside, which is the half of the
+// header's distinction short-circuiting needs: a `.try()` three parens
+// deep still lowers to an `if`/`return` that `expr` hoists out to where
+// the operand was written.
 //
 // An unrecognised form answers YES: wrong in this direction is a
 // refusal with a position, wrong the other way is a program computing
@@ -125,11 +122,9 @@ call_spills = (be: CBackend, c: Call) bool {
 // The type of an expression.
 //
 // Sema first, always: where `type_of` answers, that answer is used.
-// Where it does not yet (sema doesn't type a call, so not a `.try()` on
-// one either), the callee's own declaration is read instead — the same
-// "degrade to your own resolution when absent" the bootstrapper's
-// backend documents. The fallback stops firing the moment sema types a
-// call.
+// Where its answer is `Unknown`, the callee's own declaration is read
+// instead — the same "degrade to your own resolution when absent" the
+// bootstrapper's backend documents.
 //
 // The instantiation is applied HERE, once, so no lowering rule has to
 // remember to: sema types a generic body once, generically, so every
@@ -417,9 +412,8 @@ declared_call_type = (be :: CBackend, name: str, ctx: Ctx, want: TyId)
 // exists to stop. With unit as the answer the lift fires instead, and
 // `write_res_payload` runs the print for effect before building `Ok`.
 //
-// A module declaring its own `println` means its own —
-// `gen_c_call.is_sugar`'s rule, why this sits under the zero-def arm
-// rather than in front of the walk.
+// Under the zero-def arm rather than in front of the walk, because a
+// module declaring its own `println` means its own (`gen_c_call.is_sugar`).
 sugar_call_type = (be :: CBackend, name: str, want: TyId)
                   Res<TyId, AllocError> {
     is_print(name).match({
@@ -494,14 +488,10 @@ res_type_of* = (be :: CBackend, id: ExprId, ctx: Ctx)
     ty_of(be, id, ctx, unknown)
 }
 
-// A spilling form where C wants an expression is spilled into a
-// temporary — that's the whole of it. `.try()` is an `if` and a
-// `return`, with no C expression for it; `deliver` hands a spill
-// straight to its destination (already a place), but an argument is
-// not one, so `spill_temp` makes one here, declared and filled BEFORE
-// the statement being built — same place every other spill lands,
-// since `deliver_simple` builds the expression text first and writes
-// the line after.
+// The header's spill rule, applied: `spill_temp` makes the temporary
+// here, declared and filled BEFORE the statement being built — the same
+// place every other spill lands, since `deliver_simple` builds the
+// expression text first and writes the line after.
 //
 // Four conversions funnel through this same three-door path (argument,
 // field, return), each owned by whichever file builds it:

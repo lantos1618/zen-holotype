@@ -19,17 +19,15 @@
 //     the one rule here that knows what it's looking at — DESIGN.md
 //     asks for aligned arms and the parser already locates every `=>`).
 //   - LISTS PACKED PAST 80 COLUMNS: argument lists, union bars and
-//     array literals are joined onto one line and then broken if they
-//     do not fit — one item per line for the first two, as many to a
-//     line as fit for an array literal, which is a homogeneous sequence
-//     and not a list of distinct concepts (`fmt_break.zen` argues it) —
-//     a pass of its own BETWEEN two rounds of
-//     pads — it re-lexes and re-parses what the first wrote, because its
-//     edits change line counts and `fmt_decl.zen`'s table is keyed by
-//     line. The pads run AGAIN after it because which parameters have a
-//     line of their own is that rule's answer, and a column worked out
-//     before it is a column one run stale. Same parser, same tree, one
-//     file later.
+//     array literals, joined onto one line and then broken if they do
+//     not fit (`fmt_break.zen` owns the rule and argues it).
+//
+//     A PASS OF ITS OWN, BETWEEN TWO ROUNDS OF PADS. It re-lexes and
+//     re-parses what the first wrote, because its edits change line
+//     counts and `fmt_decl.zen`'s table is keyed by line. The pads run
+//     AGAIN after it because which parameters have a line of their own
+//     is that rule's answer, and a column worked out before it is one
+//     run stale.
 //
 // WHAT IT PASSES THROUGH VERBATIM: every declaration's own text, minus
 // that one gap and those line breaks — struct bodies, signatures, arm
@@ -37,19 +35,18 @@
 // rebuilding means layout decisions nobody has written down yet, and a
 // printer inventing them would silently reflow the whole corpus on its
 // first run. Remaining rules (short arms on one line, wrapping, trailing
-// commas) arrive one form at a time, against a corpus — each one MOVES
-// or ADDS a token, the line the guard below draws, which is why the
-// whitespace-only rules (`=>` alignment, list breaking) went first.
+// commas) each MOVE or ADD a token — the line the guard below draws,
+// and why the whitespace-only rules went first.
 //
 // WHAT IT REFUSES: a file with lexical or syntactic faults — a tree
 // with a hole no longer describes the source, and printing from one is
 // how a formatter eats code.
 //
-// THE GUARD — `faithful` below: formatting moves whitespace and
-// nothing else, so the output's token stream must equal the input's,
-// one for one, comments included. Checkable in one extra `scan`; turns
-// "silently reflowed something unmodeled" from a shipped bug into an
-// outcome that cannot leave this function.
+// THE GUARD — `faithful` below: formatting moves whitespace and nothing
+// else, so the output's token stream must equal the input's, one for
+// one, comments included. One extra `scan` turns "silently reflowed
+// something unmodeled" from a shipped bug into an outcome that cannot
+// leave this function.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -70,8 +67,8 @@ break_lines = fmt.fmt_break
 
 // What formatting one file came to. Three fields, not a three-way enum:
 // a caller acts on all three at once (print diags, compare text, refuse
-// to write when the guard fails), which an enum would force into a
-// match over things that are never in conflict.
+// to write when the guard fails), which an enum would force into a match
+// over things never in conflict.
 Render* = {
     // Meaningful only when `diags` is empty and `faithful` is true;
     // empty otherwise.
@@ -87,8 +84,8 @@ Render* = {
 }
 
 // Format one already-lexed file. Takes `Lexed` not bytes so LEXICAL
-// faults stay with the caller: `lex.zen`'s contract is that a file with
-// them is reported, not parsed — the same split `zen_build.zen` makes.
+// faults stay with the caller — `lex.zen`'s contract, and the same
+// split `zen_build.zen` makes.
 render* = (a: Alloc, lexed: Lexed) Res<Render, AllocError> {
     src = a.Src(lexed.source.text).try();
     p ::= a.Parser(lexed);
@@ -154,12 +151,11 @@ write_trivia = (out :: Out, tree: Ast, run: TriviaRun) Res<(), AllocError> {
 // start of the next printed thing, trailing whitespace trimmed.
 //
 // BOUNDED BY THE NEXT PRINTED ITEM, NOT THE DECLARATION'S OWN SPAN —
-// the difference between a formatter and one that eats comments. E.g.
-// in `Cli* = Build(Job) | Missing(str)   // a flag ..`, the trailing
-// comment belongs to the last VARIANT, not the declaration, so
-// `Decl.span`/`Decl.trailing` stop short and a slice cut to either
-// would drop it. Copying the whole gap between printed items also
-// preserves the comment's alignment column.
+// the difference between a formatter and one that eats comments. In
+// `Cli* = Build(Job) | Missing(str)   // a flag ..` the trailing comment
+// belongs to the last VARIANT, not the declaration, so `Decl.span`/
+// `Decl.trailing` stop short and a slice cut to either would drop it.
+// Copying the whole gap also preserves the comment's alignment column.
 //
 // DELETED: trailing whitespace (not a token, per the guard) and blank
 // lines (they live as `Blank` trivia in the NEXT item's leading run).
@@ -167,9 +163,7 @@ write_trivia = (out :: Out, tree: Ast, run: TriviaRun) Res<(), AllocError> {
 // WIDENED/NARROWED: the gap before a match arm's `=>` (`fmt_decl.zen`),
 // applied HERE inside the verbatim copy rather than by a rebuilding
 // printer — the bytes stay the author's, only that one gap's width is
-// set. Over-wide lists are NOT broken here but in `fmt_break.zen`, a
-// later pass over what this writes: their edits change line counts,
-// which the pad table's per-line keys cannot survive.
+// set. Over-wide lists are broken later, in `fmt_break.zen`.
 write_decl = (
     out  :: Out,
     a    : Alloc,
@@ -224,11 +218,9 @@ run_start = (tree: Ast, run: TriviaRun) Res<Pos> {
 // Whitespace is not a token, a comment IS one — everything this stage
 // may change is invisible to the lexer, everything it may not is a
 // token. So the streams must match one for one (count, kind, bytes),
-// and any rule added later is checked by the same three lines. Costs
-// one extra scan, the price of proving a subset formatter untouched
-// the rest.
+// and any rule added later is checked by the same three lines.
 //
-// Not named `faithful` (that's `Render`'s field): a free function and
+// Not named `faithful` (that is `Render`'s field): a free function and
 // a field of one name would collide for the resolver.
 unchanged_tokens = (a: Alloc, before: Lexed, text: str) Res<bool, AllocError> {
     after = scan(a, Source(file: before.source.file, text: text)).try();
@@ -250,9 +242,9 @@ every_token_same = (before: Lexed, after: Lexed) bool {
     ok;
 }
 
-// Kind AND bytes: kind alone would let one identifier become another;
-// bytes alone would suffice only if the lexer is context-free — asking
-// for both costs one comparison and removes the need to be sure of that.
+// Kind AND bytes: kind alone would let one identifier become another,
+// and bytes alone would suffice only if the lexer is context-free.
+// Asking both removes the need to be sure of that.
 token_same = (before: Lexed, after: Lexed, i: usize) bool {
     before.tokens.get(i).match({
         None  => false,

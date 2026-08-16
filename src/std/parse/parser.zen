@@ -2,37 +2,31 @@
 // The machine: where the parser is in the token stream, what it has
 // built, and what it has to complain about.
 //
-// `parse.zen` is the folder's surface and every other sibling is one
-// grammatical subject. This file is none of those — it is the state
-// the subjects share and the six primitives they are all written in
-// terms of (`peek`, `at`, `eat`, `expect`, `error`, `bump`). A subject
-// file never touches `p.at` or `p.tree` directly.
+// `parse.zen` is the folder's surface and every sibling is one
+// grammatical subject. This file is the state they share and the six
+// primitives they are all written in terms of (`peek`, `at`, `eat`,
+// `expect`, `error`, `bump`). A subject file never touches `p.at` or
+// `p.tree` directly.
 //
 // OVER 500 LINES, JUSTIFIED: the cursor, the trivia pump and the depth
-// guard look like three subjects and are one — they all read the same
-// token stream in the same order, and splitting them would mean three
-// modules agreeing about an index. Everything that could leave has: the
-// alphabet is parse_token.zen, the diagnostic is parse_diag.zen, the
-// lookahead is parse_lookahead.zen.
+// guard all read the same token stream in the same order, and
+// splitting them would mean three modules agreeing about an index.
+// Everything that could leave has: parse_token.zen, parse_diag.zen,
+// parse_lookahead.zen.
 //
-// THE FAILURE MODEL, and it is the reason every signature below reads
+// THE FAILURE MODEL, and the reason every signature below reads
 // `Res<X, AllocError>` rather than `Res<X, ParseError>`:
 //
 //   A SYNTAX ERROR IS NOT A RETURNED FAILURE. It is a `Diag` appended
 //   to `p.diags` and a poison node put in the tree, so parsing
 //   continues and the second mistake is found on the first run.
 //   TESTING.md's "one syntax error must not cascade into fifty" is
-//   unachievable otherwise: returning on the first error reports one
-//   diagnostic per run, and returning the error up the stack has to
-//   invent a node at every level anyway.
+//   unachievable otherwise.
 //
-//   RUNNING OUT OF MEMORY IS. It's the one thing a parse function
-//   can't carry on through — `AllocError` because that's what
+//   RUNNING OUT OF MEMORY IS — `AllocError` because that is what
 //   `Ast.add_expr` and `Vec.add` return, and the seed subset has no
 //   error unions and no conversion, so `Res<X, ParseError>` would make
-//   `.try()` illegal on every node the parser builds. Naming the type
-//   after the phase costs a match at every call site and buys nothing:
-//   there is no second error to tell it from.
+//   `.try()` illegal on every node the parser builds.
 
 Alloc, AllocError = std.mem
 Ast = std.ast.ast_arena
@@ -45,55 +39,40 @@ Diag, diag, diag_at, truncated = std.parse.parse_diag
 // recursive-descent parser stack-overflows and this is a crash, not a
 // diagnostic. Decide the depth limit and emit an error at it."
 //
-// THE NUMBER IS NOT THE PARSER'S TO CHOOSE ALONE — the reasoning that
-// picked 256 got that wrong: it counted this parser's own frames
-// (`type`, `expression`, `pattern`, `block`, a few hundred bytes each)
-// and concluded 256 levels was tens of kilobytes of an eight-megabyte
-// stack, "two orders of margin". But nothing downstream has a bound of
-// its own — sema walks the same nesting through `type_of`, gen_c
-// through `expr`, with frames two orders larger. This is the ONLY bound
-// the pipeline has, so it must hold for the hungriest phase, not the
-// thinnest.
-//
-// MEASURED, one nesting level at a time until it segfaulted, at the
-// default eight-megabyte stack:
+// THE BOUND IS THE PIPELINE'S, NOT THE PARSER'S: sema walks the same
+// nesting through `type_of` and gen_c through `expr`, with frames two
+// orders larger and no bound of their own, so this one must hold for
+// the hungriest phase. MEASURED, one nesting level at a time until it
+// segfaulted, at the default eight-megabyte stack:
 //
 //     parentheses      ~1,150 levels     ~7KB  per level
 //     nested calls       ~313 levels    ~24KB  per level
 //     nested `.match`     ~255 levels    ~32KB  per level
 //
-// So the old 256 had ONE level of margin on the hungriest construct,
-// not two orders — and it was margin by luck, since nothing connects
-// the two numbers.
+// The old 256 had ONE level of margin on the hungriest construct, not
+// the two orders its reasoning claimed — that counted only this
+// parser's own frames.
 //
 // 304 IS WHAT `tests/corpus/codegen/nesting_expr.zen` NEEDS, NOT A BYTE
 // MORE: that file writes 300 parentheses, and the enclosing block and
 // statement cost two more levels, so it needs 302. Refusing it is a
-// false refusal — as bad as a crash and easier to ship — so the bound
-// rises to exactly 302 + 2 and stops.
+// false refusal — as bad as a crash and easier to ship.
 //
-// THE WINDOW THAT WAS HERE IS CLOSED — closed by counting, not by
-// moving this number. The old note said no single value both admits
-// 302 parentheses and refuses a 256-deep `.match`, since cost varies
-// 4.6x by construct while the counter charges every construct 1, and
-// that the parser couldn't weight it because `.match` is POSTFIX,
-// recognised on the way back out.
-//
-// Recognised on the way out, but CHARGED on the way in: the postfix
-// loop takes a level per link before it takes the step
-// (`parse_expr.zen`), so a `.match` costs its scrutinee's level plus
-// its own, same as a nested call. Measured against this same 304, by
-// bisection, the deepest program now accepted per shape:
+// A `.match` is POSTFIX, recognised on the way back out but CHARGED on
+// the way in: the postfix loop takes a level per link before it takes
+// the step (`parse_expr.zen`), so a `.match` costs its scrutinee's
+// level plus its own, same as a nested call. That is why cost varying
+// 4.6x by construct does not reopen the window it once seemed to.
+// Measured against this same 304, by bisection, the deepest program
+// accepted per shape:
 //
 //     parentheses         302        `.match`     151
 //     nested calls        151        `x.a.a..`    302
 //     `f(1)(1)..`         301        `x[0][0]..`  301
 //
-// Each is comfortably under its measured segfault depth above, and 302
-// parentheses is still exactly what `tests/corpus/codegen/nesting_expr`
-// asks for. The cost is that a 200-deep nested call is now refused
-// where it used to compile — nine levels short of the crash, which is
-// not margin worth keeping.
+// Each is comfortably under its measured segfault depth above. The
+// cost is that a 200-deep nested call is now refused where it used to
+// compile — nine levels short of the crash.
 //
 // WHAT IS STILL NOT BOUNDED HERE: the binary spine. `1 + 1 + ..` builds
 // a left-nested `Binary` chain in a loop and charges nothing, so its
@@ -104,12 +83,9 @@ MAX_DEPTH*: usize = 304
 
 // A node, opened. The two facts that are true at a node's first token
 // and false one token later: where it begins, and what trivia stood
-// before it.
-//
-// It is one value and not two parameters because they are always taken
-// together and always in that order — and because a parse function
-// that takes a `Pos` and a `TriviaRun` separately is a parse function
-// someone will one day hand the wrong pair.
+// before it. One value and not two parameters, because a parse
+// function taking a `Pos` and a `TriviaRun` separately is one someone
+// will one day hand the wrong pair.
 Mark* = {
     start*: Pos,
     leading*: TriviaRun,
@@ -118,14 +94,13 @@ Mark* = {
     // AROUND another one — a `Binary` over its left operand, a `Call`
     // over its callee — starts at the same token, and only one of them
     // may own the run or the formatter prints the comment twice. The
-    // inner node has it, and this is how the outer one says so.
+    // inner node has it; this is how the outer one says so.
     //
-    // Which is the right way round: an expression is never the
-    // outermost node at its own first token — a statement, an
-    // argument, an arm or a field always opened before it — so the run
-    // is empty in every case where the distinction is visible, and
-    // where it is NOT empty (an array element, which has no wrapper
-    // node) the innermost IS the element.
+    // That is the right way round: an expression is never the outermost
+    // node at its own first token (a statement, argument, arm or field
+    // always opened before it), so the run is empty wherever the
+    // distinction is visible, and where it is not empty — an array
+    // element, which has no wrapper node — the innermost IS the element.
     bare* = (self: @Self) Mark {
         Mark(start: self.start, leading: no_trivia())
     }
@@ -134,11 +109,11 @@ Mark* = {
 Parser* = {
     tokens: Vec<Token>,
 
-    // The bytes the tokens were cut from. A token is a kind and a
-    // span and carries no text — `lex_token.zen` is right that a `str`
-    // on every token of a ten-megabyte file holds something both ends
-    // of the span already name — so the parser holds the Source and
-    // slices it where a name or a literal needs its bytes.
+    // The bytes the tokens were cut from. A token is a kind and a span
+    // and carries no text (`lex_token.zen`: a `str` on every token of a
+    // ten-megabyte file holds what both ends of the span already name),
+    // so the parser holds the Source and slices it where a name or a
+    // literal needs its bytes.
     source*: Source,
 
     // Always the index of a NON-trivia token. Everything between the
@@ -146,23 +121,21 @@ Parser* = {
     // `tree.trivia` and named by `pending`.
     at* :: usize = 0,
 
-    // The tree being built, and the reason a caller constructs a
-    // Parser rather than calling a parse function with an `Ast`: a Vec
-    // is a header of its own, so a copy of an `Ast` diverges from the
-    // original the first time either grows. The tree the caller wants
-    // is `p.tree`, read back after parsing.
+    // The tree being built, and the reason a caller constructs a Parser
+    // rather than calling a parse function with an `Ast`: a Vec is a
+    // header of its own, so a copy of an `Ast` diverges from the
+    // original the first time either grows. Read back as `p.tree`.
     tree* :: Ast,
 
     diags* :: Vec<Diag>,
 
-    // Where the last token consumed ended. A node's span is
-    // `start_of(first token) .. end_of(last token)`, and this is the
-    // second half — half-open, so it is one past the last byte.
+    // Where the last token consumed ended: the second half of a node's
+    // `start_of(first) .. end_of(last)` span, half-open.
     prev_end* :: Pos = Pos(line: 1, col: 1),
 
-    // The line the last token the cursor passed ended on. A blank line
-    // is a gap between two spans and nothing else, so this is the whole
-    // of the state that measuring one needs.
+    // The line the last token passed ended on. A blank line is a gap
+    // between two spans and nothing else, so this is the whole of the
+    // state that measuring one needs.
     gap_line :: usize = 1,
 
     // The trivia gathered before `at`, unclaimed. A node beginning at
@@ -173,16 +146,15 @@ Parser* = {
 
     // The depth guard. `anchor` is the outermost construct of the
     // current run — set as depth leaves `run_base` — because a
-    // diagnostic that points at level 257 of a 10,000-deep file names
-    // the one place the author cannot see the problem from.
+    // diagnostic pointing at level 257 of a 10,000-deep file names the
+    // one place the author cannot see the problem from.
     //
-    // A RUN STARTS INSIDE A BODY AND NOT AT IT. A function's body is
+    // A RUN STARTS INSIDE A BODY AND NOT AT IT: a function's body is
     // the function, not a level within it, so the outermost bracket of
     // `main = () { {{{{ .. }}}} }` is the first `{` on the statement
-    // and not `main`'s own. `run_base` is the depth a run counts from
-    // and a body is the only thing that moves it; an ordinary nested
-    // block is a level like any other, which is what keeps the anchor
-    // on the first of ten thousand braces rather than the second.
+    // and not `main`'s own. A body is the only thing that moves
+    // `run_base`; an ordinary nested block is a level like any other,
+    // which keeps the anchor on the first of ten thousand braces.
     depth :: usize = 0,
     run_base :: usize = 0,
     anchor :: Span,
@@ -199,8 +171,7 @@ Parser* = {
     // -----------------------------------------------------------------
 
     // The token under the cursor. Past the end this is the `Eof` the
-    // lexer promised, forever, so no loop below needs a length check
-    // to be safe.
+    // lexer promised, forever, so no loop below needs a length check.
     peek* = (self: @Self) Token {
         self.tokens.get(self.at).match({
             Ok(t) => t,
@@ -208,17 +179,16 @@ Parser* = {
         });
     }
 
-    // The text under the cursor, which two questions need: is this
+    // The text under the cursor. Two questions need it: is this
     // identifier the wildcard `_`, and is this method call `.impl(`.
     at_text* = (self: @Self, want: str) bool {
         self.at_kind(TokenKind.Ident) && self.text(self.peek()) == want
     }
 
     // What a cursor past the end reads. `scan` promises exactly one
-    // `Eof`, last, so this is that token — but a parser that traps on
-    // an empty stream is a parser that crashes on a bug somewhere
-    // else, so an empty one reads position zero and gets a `None` the
-    // caller below turns into `Eof` anyway.
+    // `Eof`, last, so this is that token — but trapping on an empty
+    // stream would crash on a bug somewhere else, so an empty one
+    // reads position zero and gets a `None` turned into `Eof`.
     eof_token = (self: @Self) Token {
         (self.tokens.len == 0).match({
             true  => empty_eof(),
@@ -235,9 +205,9 @@ Parser* = {
 
     // The lexer's `Span` carries no `file` and its `Pos` carries a byte
     // `offset`; an AST node's `Span` carries the file and no offset.
-    // Both are right where they are — a token belongs to one Source and
-    // a node outlives it — so the conversion happens HERE, once, and
-    // nothing downstream sees two span types.
+    // Both are right — a token belongs to one Source and a node
+    // outlives it — so the conversion happens HERE, once, and nothing
+    // downstream sees two span types.
     span_of* = (self: @Self, t: Token) Span {
         Span(
             file: self.source.file,
@@ -252,8 +222,8 @@ Parser* = {
     text* = (self: @Self, t: Token) str { text_of(self.source, t) }
 
     // One non-trivia token further on. Two grammatical decisions need
-    // it and only two: `name:` versus `name =` inside a record body,
-    // and `Name` versus `Name(` in a pattern.
+    // it: `name:` versus `name =` inside a record body, and `Name`
+    // versus `Name(` in a pattern.
     peek_next* = (self: @Self) Token { self.peek_n(1) }
 
     // The `n`th non-trivia token from the cursor, `0` being the cursor
@@ -276,9 +246,9 @@ Parser* = {
         found;
     }
 
-    // The stream, by index, for the bounded scans that decide the
-    // three ambiguities. They look at kinds and never at the cursor,
-    // so they are the one thing here that reads past `at`.
+    // The stream, by index, for the bounded scans that decide the three
+    // ambiguities. They look at kinds and never at the cursor, so they
+    // are the one thing here that reads past `at`.
     tokens_len* = (self: @Self) usize { self.tokens.len }
 
     token_kind_at* = (self: @Self, k: usize) TokenKind {
@@ -294,8 +264,6 @@ Parser* = {
 
     at_eof* = (self: @Self) bool { self.at_kind(TokenKind.Eof) }
 
-    // The span of the token under the cursor: what an "unexpected"
-    // diagnostic points at when the mistake really is here.
     here_span* = (self: @Self) Span { self.span_of(self.peek()) }
 
     here* = (self: @Self) Pos { self.here_span().start }
@@ -306,19 +274,17 @@ Parser* = {
         Span(file: self.source.file, start: start, end: self.prev_end)
     }
 
-    // Open a node: where it starts, and the trivia that came before
-    // it. Taken together and taken FIRST, because both are facts about
-    // the token the node begins at and both are destroyed by consuming
-    // it. Every node in this folder is opened with one of these and
-    // closed with the matching `add_*`.
+    // Open a node: where it starts, and the trivia that came before it.
+    // Taken FIRST — both are facts about the token the node begins at,
+    // and consuming it destroys them. Every node in this folder is
+    // opened with one of these and closed with the matching `add_*`.
     open* = (self :: @Self) Mark {
         Mark(start: self.here(), leading: self.claim_leading())
     }
 
-    // The identifier under the cursor, or a diagnostic and an empty
-    // one. Empty rather than absent: a declaration with no readable
-    // name is still a declaration, and dropping it would lose every
-    // node inside it.
+    // The identifier under the cursor, or a diagnostic and an empty one.
+    // Empty rather than absent: a declaration with no readable name is
+    // still a declaration, and dropping it loses every node inside it.
     ident* = (self :: @Self, message: str) Res<Ident, AllocError> {
         self.at_kind(TokenKind.Ident).match({
             true  => self.ident_here(),
@@ -345,16 +311,13 @@ Parser* = {
 
     // Success, spelled with its error type.
     //
-    // `Ok(())` alone is a `Res<()>`, which is a DIFFERENT TYPE from
-    // `Res<(), AllocError>` — absence rather than failure — and a
-    // `.match` whose every arm is a bare `Ok(())` is therefore typed
-    // without an error channel. `.try()`ing that inside a function
-    // that has one emits C reading an `Err` field off a struct with no
-    // such field, and nothing says so until `cc` does.
-    //
-    // So every arm that means "nothing to do here" says which `Res` it
-    // is. That is a workaround for a real bootstrapper bug — reported
-    // with a reproducer — and it is also just the honest spelling.
+    // BOOTSTRAPPER BUG, reported with a reproducer: `Ok(())` alone is a
+    // `Res<()>`, a DIFFERENT TYPE from `Res<(), AllocError>`, so a
+    // `.match` whose every arm is a bare `Ok(())` is typed without an
+    // error channel. `.try()`ing that inside a function that has one
+    // emits C reading an `Err` field off a struct with no such field,
+    // and nothing says so until `cc` does. So every arm meaning
+    // "nothing to do here" says which `Res` it is.
     nothing* = (self: @Self) Res<(), AllocError> { Ok(()) }
 
     // An empty span at the cursor, for a poison node: it stands where
@@ -367,13 +330,12 @@ Parser* = {
 
     // WHERE A MISSING TOKEN GOES, which is not where the parser found
     // out it was missing. `(x == 0).then(() { x = 1 })` wants a `;`
-    // after the `1`; a caret on the `}` names the one token in the
-    // line that is fine, and the author has to work backwards to the
-    // gap. This is the same rule `expect_close` already follows for
-    // the other direction — anchor on a position someone can put a
-    // cursor on and type the fix — and it matters most at the end of a
-    // line, where the next token is on the NEXT one: a trailing `|` on
-    // line 15 reported at 16:1 names a line the author did not write.
+    // after the `1`; a caret on the `}` names the one token on the line
+    // that is fine. Same rule as `expect_close` in the other direction:
+    // anchor on a position someone can put a cursor on and type the
+    // fix. It matters most at the end of a line, where the next token
+    // is on the NEXT one — a trailing `|` on line 15 reported at 16:1
+    // names a line the author did not write.
     gap_span* = (self: @Self) Span {
         Span(file: self.source.file, start: self.prev_end, end: self.prev_end)
     }
@@ -383,7 +345,6 @@ Parser* = {
     // -----------------------------------------------------------------
 
     // Consume the current token and drain the trivia behind it.
-    //
     // Draining EAGERLY is what makes trailing trivia expressible: a
     // node that has just finished needs to know whether a comment
     // follows it on the same line, and it cannot ask about tokens it
@@ -398,7 +359,7 @@ Parser* = {
     }
 
     // Move onto the next non-trivia token, recording everything passed
-    // over. Called after every bump and once before the first.
+    // over. Called after every bump, and once before the first.
     drain* = (self :: @Self) Res<(), AllocError> {
         mark = self.tree.trivia_mark();
         stop ::= self.tokens.len;
@@ -432,17 +393,15 @@ Parser* = {
         ));
     }
 
-    // A BLANK LINE IS DERIVED, NOT LEXED, and that is the lexer being
-    // right rather than the parser making do: whitespace "is
-    // recoverable exactly from the gap between two spans, and 'was
-    // there a blank line here' is `next.start.line > prev.end.line + 1`
-    // rather than a stored fact that can go stale."
+    // A BLANK LINE IS DERIVED, NOT LEXED: whitespace "is recoverable
+    // exactly from the gap between two spans, and 'was there a blank
+    // line here' is `next.start.line > prev.end.line + 1` rather than a
+    // stored fact that can go stale."
     //
-    // So the gap is measured here, once, at the only place that cares:
-    // the formatter must not silently delete a blank line the author
-    // wrote, and `TriviaKind.Blank` is where it survives. One `Blank`
-    // stands for a run however long — collapsing them is a formatting
-    // rule, and a rule needs somewhere to apply.
+    // Measured here, once, at the only place that cares: the formatter
+    // must not silently delete a blank line the author wrote, and
+    // `TriviaKind.Blank` is where it survives. One `Blank` stands for a
+    // run however long — collapsing them is a formatting rule.
     blank_before = (self :: @Self, t: Token) Res<(), AllocError> {
         (t.span.start.line > self.gap_line + 1).match({
             true  => self.keep_blank(t),
@@ -462,8 +421,8 @@ Parser* = {
         ));
     }
 
-    // Consume `kind` if it is here. The predicate half of the parser:
-    // an optional comma, an optional `*`, an optional return type.
+    // Consume `kind` if it is here — an optional comma, an optional
+    // `*`, an optional return type.
     eat* = (self :: @Self, kind: TokenKind) Res<bool, AllocError> {
         self.at_kind(kind).match({
             true  => { self.bump().try(); Ok(true) },
@@ -471,10 +430,9 @@ Parser* = {
         });
     }
 
-    // Consume `kind` or say so, once, in the caller's words. `message`
-    // is the caller's because only the caller knows what was being
-    // built: "expected `=>` after this arm's pattern" is a sentence
-    // "expected FatArrow" can never become.
+    // Consume `kind` or say so, once, in the caller's words — only the
+    // caller knows what was being built: "expected `=>` after this
+    // arm's pattern" is a sentence "expected FatArrow" cannot become.
     expect* = (self :: @Self, kind: TokenKind, message: str) Res<bool, AllocError> {
         self.at_kind(kind).match({
             true  => self.took(),
@@ -482,16 +440,10 @@ Parser* = {
         });
     }
 
-    // The two halves of `expect`, as functions rather than as blocks
-    // in the arms. That is a workaround and it says so.
-    //
-    // A `.match` in which EVERY arm's value is a bare `Ok(..)` is
-    // typed `Res<T>` — no error channel — and `.try()`ing it inside a
-    // `Res<T, E>` function then emits C that reads an `Err` field off
-    // a struct that has none. No diagnostic; it fails at `cc`. One arm
-    // returning a typed `Res<T, E>` pins the whole match, which is
-    // what these two do. Reported with a reproducer; when it is fixed
-    // they fold back into their caller.
+    // The two halves of `expect`, as functions rather than blocks in
+    // the arms — the same bootstrapper bug `nothing` names. One arm
+    // returning a typed `Res<T, E>` pins the whole match, which is what
+    // these two do; when it is fixed they fold back into their caller.
     took = (self :: @Self) Res<bool, AllocError> {
         self.bump().try();
         Ok(true);
@@ -505,10 +457,8 @@ Parser* = {
     // `expect`, anchored where the missing token GOES rather than on
     // the token that arrived instead. Not every `expect` wants this: a
     // missing `=>` is best reported on the expression that turned up
-    // where the arrow belonged, because that IS the thing the reader
-    // has to look at. A missing `;` is the other case — it belongs
-    // after the value it ends, and a caret on the `}` names the one
-    // token on the line that is fine.
+    // where the arrow belonged, because that IS what the reader has to
+    // look at. A missing `;` is the other case.
     expect_after* = (self :: @Self, kind: TokenKind, message: str) Res<bool, AllocError> {
         self.at_kind(kind).match({
             true  => self.took(),
@@ -521,13 +471,11 @@ Parser* = {
         Ok(false);
     }
 
-    // Consume a closing delimiter, or point at the OPENING one.
-    //
-    // This is the rule the whole diagnostics section exists for. The
+    // Consume a closing delimiter, or point at the OPENING one. The
     // author's mistake is the `(` they never closed; the end of the
     // file is merely where the parser found out. Anchoring on the
-    // opener is what turns "unexpected end of file" into a position
-    // someone can put a cursor on.
+    // opener turns "unexpected end of file" into a position someone can
+    // put a cursor on.
     expect_close* = (self :: @Self, kind: TokenKind, message: str, open: Span) Res<bool, AllocError> {
         self.at_kind(kind).match({
             true  => self.took(),
@@ -552,10 +500,9 @@ Parser* = {
     // complaining
     // -----------------------------------------------------------------
 
-    // One diagnostic, at the cursor. Every syntax error in this parser
-    // goes through here or through `expect_close`, so "how many
-    // diagnostics did one mistake produce" is a question about the
-    // recovery in this file and nowhere else.
+    // One diagnostic, at the cursor. Every syntax error goes through
+    // here or through `expect_close`, so "how many diagnostics did one
+    // mistake produce" is a question about this file and nowhere else.
     error* = (self :: @Self, message: str) Res<(), AllocError> {
         self.error_at(message, self.here_span())
     }
@@ -567,11 +514,10 @@ Parser* = {
         });
     }
 
-    // WHICH SENTENCE a rejection carries is `parse_diag.zen`'s and not
-    // this file's, including the one case where the caller's is
-    // overridden — a file that simply stopped. `truncated` is the whole
-    // of that rule; the two facts it needs about the cursor are the two
-    // passed in.
+    // WHICH SENTENCE a rejection carries is `parse_diag.zen`'s, not
+    // this file's — including the one case where the caller's is
+    // overridden, a file that simply stopped. `truncated` is that whole
+    // rule.
     say = (self :: @Self, message: str, span: Span) Res<(), AllocError> {
         self.said = true;
         self.diags.add(diag(
@@ -581,22 +527,21 @@ Parser* = {
     }
 
     // SILENT UNTIL THE PARSER BELIEVES WHAT IT READS AGAIN. Two things
-    // stop it saying anything, and both are "one mistake, one
-    // diagnostic" (TESTING.md) rather than politeness.
+    // stop it saying anything, both "one mistake, one diagnostic"
+    // (TESTING.md) rather than politeness.
     //
     // `too_deep`: past the limit the parser stops descending, so every
     // frame it unwinds through finds a delimiter it cannot close and
-    // would say so — 256 sentences for one mistake and the real one
-    // buried at the top.
+    // would say so — 256 sentences for one mistake, the real one at the
+    // top.
     //
     // `said`: everything after a syntax error inside one statement is a
     // CONSEQUENCE of it. `(i + 1 < f.len;` was read as a lambda's
     // parameter list because a `<` followed the `)` the author never
-    // typed, and that one wrong fork unwound into seven sentences —
+    // typed, and that one wrong fork unwound into SEVEN sentences —
     // a missing `{`, a missing expression, a missing `;`, an unclosed
-    // block — none of which the author can act on. The statement is the
-    // unit this file's header says a mistake is contained in; `resume`
-    // is where the containment ends.
+    // block — none of which the author can act on. `resume` is where
+    // the containment ends.
     hushed = (self: @Self) bool { self.too_deep || self.said }
 
     // A statement or a declaration boundary: whatever the parser reads
@@ -607,8 +552,7 @@ Parser* = {
     // trivia
     //
     // The parser decides ownership once; everything downstream reads
-    // it. AST_CONTRACT.md fixes both rules and this is the whole
-    // implementation of them.
+    // it. AST_CONTRACT.md fixes both rules; this implements them.
     // -----------------------------------------------------------------
 
     // The run gathered before the current token, claimed by the first
@@ -617,22 +561,22 @@ Parser* = {
     // why a file's opening comments belong to the declaration and not
     // to its name.
     //
-    // Call it at ENTRY, before consuming anything. A node that claims
-    // after consuming a token claims the wrong run.
+    // PRECONDITION: call at ENTRY, before consuming anything. A node
+    // that claims after consuming a token claims the wrong run.
     claim_leading* = (self :: @Self) TriviaRun {
         run          = self.pending;
         self.pending = no_trivia();
         run;
     }
 
-    // The comment that follows a node on its own line. Only the nodes
-    // a list or a body separates — a field, a parameter, a variant, an
-    // arm, a statement, a declaration — ask for this, which is
-    // AST_CONTRACT.md's "the outermost node whose span ends before it
-    // on that line" made decidable: those are exactly the nodes that
-    // finish last on their line.
+    // The comment that follows a node on its own line. Only the nodes a
+    // list or a body separates — field, parameter, variant, arm,
+    // statement, declaration — ask for this, which is AST_CONTRACT.md's
+    // "the outermost node whose span ends before it on that line" made
+    // decidable: those are exactly the nodes that finish last on their
+    // line.
     //
-    // It takes ONE piece off the front of the pending run, so the run
+    // Takes ONE piece off the front of the pending run, so the run
     // stays contiguous and the next node's leading trivia begins where
     // this left off.
     claim_trailing* = (self :: @Self, end: Pos) TriviaRun {
@@ -670,9 +614,9 @@ Parser* = {
     // depth
     //
     // A crash is not a diagnostic. Every recursive entry point in this
-    // folder brackets itself with these two, and checks `too_deep`
-    // before recursing again — which is what unwinds a 10,000-deep
-    // file instead of riding it into the stack guard.
+    // folder brackets itself with these two and checks `too_deep`
+    // before recursing again, which unwinds a 10,000-deep file instead
+    // of riding it into the stack guard.
     //
     // THE COUNT IS THE TREE'S AND NOT THIS PARSER'S — that distinction
     // cost a segfault: the postfix chain is a LOOP, so `a.b.c` is one
@@ -706,8 +650,8 @@ Parser* = {
 
     // A body opened, and the depth a run inside it counts from. The
     // pair is a caller's to hold because a body is recognised by its
-    // CALLER — `fn_body`, a lambda's — and nowhere else:
-    // to `block` every brace looks alike.
+    // CALLER — `fn_body`, a lambda's — and nowhere else: to `block`
+    // every brace looks alike.
     run_from* = (self :: @Self) usize {
         was           = self.run_base;
         self.run_base = self.depth + 1;
@@ -721,39 +665,33 @@ Parser* = {
     // `leave`, once per link, for a loop that charged its levels one at
     // a time. The links of a chain are all open until the chain ends —
     // each node is built AROUND the last — so they are released
-    // together and not as the loop goes round.
+    // together, not as the loop goes round.
     unwind* = (self :: @Self, links: usize) () { self.depth = self.depth - links; }
 }
 
-// `alloc.Parser(lexed)` — a ufcs function whose first parameter is an
-// Alloc, beside the type it builds, exactly as `Vec`, `Ast` and
-// `Lexer` are. A bare value: nothing here owns a page yet.
+// `alloc.Parser(lexed)`. It takes what `scan` RETURNS, tokens and
+// source together, because the two are useless apart: a token is a
+// span into bytes it does not carry. `lexed.diags` stays the caller's
+// — a file that did not lex is reported and not parsed, and deciding
+// that is the driver's job.
 //
-// It takes what `scan` RETURNS, tokens and source together, because
-// the two are useless apart: a token is a span into bytes it does not
-// carry. `lexed.diags` stays the caller's — a file that did not lex is
-// reported and not parsed, and deciding that is the driver's job, not
-// this one's.
-//
-// The cursor is NOT primed here. Priming drains trivia, which
-// allocates, and a constructor that can fail is a constructor every
-// caller has to `.try()`. `module` primes it as its first act.
+// The cursor is NOT primed here: priming drains trivia, which
+// allocates, and a constructor that can fail is one every caller has
+// to `.try()`. `module` primes it as its first act.
 Parser* = (a: Alloc, lexed: Lexed) Parser {
     a.Parser(lexed, a.Ast())
 }
 
-// `alloc.Parser(lexed, tree)` — the same constructor, handed a tree that
-// is already holding modules.
+// `alloc.Parser(lexed, tree)` — the same constructor, handed a tree
+// that is already holding modules.
 //
-// A WHOLE PROGRAM IS ONE `Ast`, and this is the whole of how. An id is
-// an index into its arena, so ninety-one parsers with ninety-one trees
-// are ninety-one id spaces and an `ExprId` from one means nothing to a
-// `Checker` holding another. There is one counter, so there must be one
-// tree, and a parser has to be handed it rather than make it.
+// A WHOLE PROGRAM IS ONE `Ast`. An id is an index into its arena, so
+// ninety-one parsers with ninety-one trees are ninety-one id spaces and
+// an `ExprId` from one means nothing to a `Checker` holding another.
 //
-// It is a VALUE and not a reference — the protocol, not a compromise:
-// the driver hands the tree in, the parser adds this module's nodes to
-// its copy, and the driver reads `p.tree` back before building the next
+// It is a VALUE and not a reference, and that is the protocol: the
+// driver hands the tree in, the parser adds this module's nodes to its
+// copy, and the driver reads `p.tree` back before building the next
 // parser. One owner at a time, in sequence — the same fact `Checker`
 // relies on when it takes the finished tree by value
 // (SEMA_BOOTSTRAP_FIXES.md §12). Two parsers alive at once over one
@@ -775,8 +713,7 @@ Parser* = (a: Alloc, lexed: Lexed, tree: Ast) Parser {
     );
 }
 
-// What a trivia token is, as trivia. The two alphabets overlap by
-// three entries and nothing else, so this is the whole translation.
+// What a trivia token is, as trivia.
 trivia_kind* = (self: TokenKind) TriviaKind {
     self.match({
         BlockComment => TriviaKind.BlockComment,

@@ -4,10 +4,8 @@
 // DESIGN.md: "there are no traits, only structs. A struct whose fields
 // happen to be functions, used as a bound, is what other languages call
 // a trait." So one member lookup serves a field, a constant and a method
-// alike. "Can this be a bound" and "can it be a fat value" are different
-// questions — DESIGN.md's own `Rect` impl is nothing but storage (two
-// `f64` fields, one method), so a rule limiting bounds to
-// structs-of-functions would reject the design doc's own code.
+// alike, and a rule limiting bounds to structs-of-functions would reject
+// DESIGN.md's own `Rect` impl — two `f64` fields and one method.
 //
 // YOU SATISFY REQUIREMENTS; YOU NEVER IMPL STORAGE. A field the type
 // declares is storage; a field an impl supplies is COMPUTED — re-evaluated
@@ -184,8 +182,8 @@ is_type_def* = (k: DefKind) bool {
 // ---------------------------------------------------------------------
 
 // Poison and a hole have no members and no missing ones — reporting on
-// them cascades one mistake into many. SEMA_BOOTSTRAP_FIXES.md §7 records
-// twenty-two diagnostics naming unrelated modules for one missing import.
+// them cascades one mistake into many. SEMA_BOOTSTRAP_FIXES.md §8 records
+// twenty-three of them from four missing names on one import line.
 value_access* = (
     c    :: Checker,
     id   : ExprId,
@@ -353,8 +351,9 @@ select = (
     })
 }
 
-// A named helper, not a `.then` in the loop body: a loop binding read
-// inside a nested closure doesn't resolve. docs/SEMA_BOOTSTRAP_FIXES.md §10.
+// A named helper, not a `.then` in the loop body: the workaround
+// docs/SEMA_BOOTSTRAP_FIXES.md §10 asks for — and §10 now records that
+// gap CLOSED, to be re-tested before this and its two siblings go.
 keep_bounded = (c: Checker, f: Found, kept :: Vec<Found>)
                Res<(), AllocError> {
     c.has_bound(f.bound).match({ true => kept.add(f), false => Ok(()) })
@@ -410,8 +409,8 @@ no_such_field = (c :: Checker, node: Expr, ac: Access, ty: TyId)
     c.types.unknown()
 }
 
-// Is `base.name` supplied by an impl — "read-only and non-addressable,
-// no storage, nothing to assign into." One question, asked by both
+// Whether `base.name` is supplied by an impl — "read-only and
+// non-addressable, no storage, nothing to assign into." Asked by both
 // rules, so they can never disagree about which fields they are.
 computed_member* = (c :: Checker, ac: Access, ctx: Ctx)
                    Res<bool, AllocError> {
@@ -481,15 +480,13 @@ members_of* = (c :: Checker, ty: TyId, name: str, out :: Vec<Found>)
     Ok(());
 }
 
-// "A prelude declaration of a primitive's name IS that primitive." `str`
-// is an ordinary struct in `std.text.text_str` carrying `len`, `get`,
-// `index` and `slice` — these belong to the primitive the compiler
-// already knows, NOT a second nominal type beside it (DESIGN.md: getting
-// that wrong "mints a `str` beside the `str` every literal has"). So a
-// `Prim` gets the same lookup a `Named` gets, over the declaration the
-// prelude exports under the same spelling — impls included, which is how
-// `str`'s `Eq` reaches a literal. The receiver stays the primitive's own
-// `TyId`, not the prelude declaration's.
+// "A prelude declaration of a primitive's name IS that primitive"
+// (`sema_ty.named` records what minting a second one cost). `str` is an
+// ordinary struct in `std.text.text_str` carrying `len`, `get`, `index`
+// and `slice`, so a `Prim` gets the same lookup a `Named` gets, over the
+// declaration the prelude exports under the same spelling — impls
+// included, which is how `str`'s `Eq` reaches a literal. The receiver
+// stays the primitive's own `TyId`, not the prelude declaration's.
 prim_members = (
     c    :: Checker,
     p    : Prim,
@@ -560,8 +557,7 @@ bound_member = (
     Ok(());
 }
 
-// A named helper, not a `.then` in the loop body: a loop binding read
-// inside a nested closure doesn't resolve. docs/SEMA_BOOTSTRAP_FIXES.md §10.
+// A named helper, as `keep_bounded`: SEMA_BOOTSTRAP_FIXES.md §10.
 add_bound_member = (
     t     : TyId,
     bound : TyId,
@@ -669,8 +665,7 @@ enter_struct_tvars* = (c :: Checker, s: Struct, mi: usize)
     push_tparams(c, s.tparams, owner)
 }
 
-// A named helper, not a `.then` in the loop body: a loop binding read
-// inside a nested closure doesn't resolve. docs/SEMA_BOOTSTRAP_FIXES.md §10.
+// A named helper, as `keep_bounded`: SEMA_BOOTSTRAP_FIXES.md §10.
 own_member = (
     c      :: Checker,
     m      : Member,

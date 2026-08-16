@@ -1,12 +1,12 @@
 // src/gen/gen_c/gen_c_cap.zen
 // The members whose BODY IS THE BACKEND.
 //
-// `Mem.alloc`, `Mem.page`, `Mem.release`, `Fs.exists`, `Fs.is_dir` and
-// `Fs.write` are declared in std with a signature and no body — env.zen
-// says why: they are the authority itself. "A capability's floor is the
-// target language's", and for C that floor is `malloc`, `free`, `stat`,
-// `fopen`. `gen_c_print.zen` says the same about `Console.println`; this
-// file is the other four.
+// `Mem.alloc`, `Mem.page`, `Mem.release` and the four `Fs` declares are
+// written in std with a signature and no body — env.zen says why: they
+// are the authority itself. "A capability's floor is the target
+// language's", and for C that floor is `malloc`, `free`, `stat`,
+// `fopen`. `gen_c_print.zen` says the same about `Console.println`;
+// this file writes the memory three, `gen_c_fs.zen` the other four.
 //
 // NOT A SPECIAL CASE BOLTED ONTO MEMBER DISPATCH — the SAME rule
 // `println` obeys, one level lower: a bodiless member is either a
@@ -19,16 +19,7 @@
 // of what an arena is"), yet this file writes three of its fields
 // anyway — licensed by one thing: the memory ENTERS THE PROGRAM here.
 // `Mem.alloc` is the only door; the alternative is a second, hidden,
-// hand-written C arena std would have to agree with. One place knows
-// the shape: the place the value is born.
-//
-// WHAT IS STILL REFUSED, AND WHY IT'S THE INTERESTING ONE. `Fs.read`
-// takes an `Alloc` and allocates the buffer through it. An `Alloc` is a
-// BOUND ("an ordinary struct whose fields happen to be functions"), so
-// a value of static type `Alloc` is a fat value this backend doesn't
-// build yet. The refusal names that, not the member — EVERY allocation
-// in the language goes through the same door, and `Fs.read` is simply
-// the first capability that walks through it.
+// hand-written C arena std would have to agree with.
 
 Ast, Expr, ExprKind, ExprId, Decl, DeclKind, Struct, Member, MemberKind = std.ast
 Function, Access, Call, Arg, Span, Ident, TypeId = std.ast
@@ -66,7 +57,7 @@ is_defer, lower_defer = gen.gen_c.gen_c_scope
 // A capability is recognised by the RECEIVER'S TYPE and the member's
 // name together, not by "has no body" alone — that's `gen_c_member.zen`'s
 // question, and answering it again here would make any bodiless member
-// anywhere silently become one of these six.
+// anywhere silently become one of these.
 is_capability* = (be :: CBackend, rty: TyId, name: str) bool {
     owner_of(be, rty).eq("Mem").match({
         true  => mem_verb(name),
@@ -89,7 +80,7 @@ is_fs_capability = (be :: CBackend, rty: TyId, name: str) bool {
 // C spelling, so the slot's parameter came out as `ctype`'s `int`
 // fallback and `cc` rejected every argument handed to it.
 //
-// `Scope.defer` IS THE LAST LINK, NOT A PEER of the other five — a
+// `Scope.defer` IS THE LAST LINK, NOT A PEER of the ones above — a
 // capability by the same test, but its receiver is a value the program
 // made rather than one `Env` handed it, so owner alone can't recognise
 // it and `is_defer` asks its own question.
@@ -118,9 +109,9 @@ mem_verb = (name: str) bool {
     name.is_in(["alloc", "page", "release"])
 }
 
-// `read` is in the set so that it reaches THIS file's refusal, which
-// names the bound, rather than `gen_c_member.zen`'s, which would name
-// the missing body — and the missing body is not what stops it.
+// `read` is in the set so that it reaches `gen_c_fs.lower_read`, which
+// allocates its buffer through the `Alloc` it was handed, rather than
+// `gen_c_member.zen`'s refusal for a member with no body.
 fs_verb = (name: str) bool {
     name.is_in(["exists", "is_dir", "write", "read"])
 }
@@ -129,12 +120,10 @@ fs_verb = (name: str) bool {
 // the entry point
 // -----------------------------------------------------------------
 
-// `Scope.defer` IS ONE OF THESE, same reason: `scope.zen` declares it
-// `= sig` with no body ("the compiler supplies the block"), floor is
-// the target language's, like `Mem.alloc`'s and `Fs.write`'s. Takes the
-// short path because its whole lowering is about the CLOSURE it was
-// handed — the declared types the four below need say nothing about
-// that.
+// `Scope.defer` takes the short path because its whole lowering is
+// about the CLOSURE it was handed — the declared types the four below
+// need say nothing about that. `scope.zen` declares it `= sig` with no
+// body: "the compiler supplies the block".
 lower_capability* = (
     be  :: CBackend,
     id  : ExprId,
@@ -182,10 +171,9 @@ cap_param = (be :: CBackend, rty: TyId, mi: usize, f: Function)
     })
 }
 
-// `Stdin.read` IS TESTED BEFORE THE NAME CHAIN and not inside it, because
-// the chain below asks names only and `read` is a name two capabilities
-// answer to. The owner is what tells them apart, so the owner has to be
-// asked first.
+// `Stdin.read` IS TESTED BEFORE THE NAME CHAIN and not inside it: the
+// chain below asks names only, and `read` is a name two capabilities
+// answer to.
 verb = (
     be  :: CBackend,
     id  : ExprId,

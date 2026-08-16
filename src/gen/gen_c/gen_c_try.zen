@@ -18,8 +18,7 @@
 // used to demand the two be the same type — which made every merge
 // DESIGN.md promises a report. The caller's error value is built:
 // tagged with the member the callee's error IS, carrying it unchanged.
-// Nothing converts, and there is still no From; the value moves one box
-// out.
+// The value moves one box out.
 //
 // A DECLARED SET AND A STRUCTURAL ONE ARE TWO CONSTRUCTIONS. A declared
 // enum widens through a VARIANT, which has a path and a name. `A | B`
@@ -203,20 +202,16 @@ propagate_error = (
     })
 }
 
-// ONE SET IN TWO SPELLINGS IS NOT A WIDENING AT ALL.
-//
-// DESIGN.md: "A union is its members. Order and spelling are not part
-// of its identity" — `WriteError = IoError | AllocError`, `Error =
-// AllocError | IoError` and the structural `IoError | AllocError` an
-// inferred set arrives at with no declaration behind it are ONE type,
-// and `set_of` is the question that says so. Two ids reach here for one
-// type, so the ids are the wrong thing to compare.
+// ONE SET IN TWO SPELLINGS IS NOT A WIDENING AT ALL (header). DESIGN.md:
+// "A union is its members. Order and spelling are not part of its
+// identity", and `set_of` is the question that says so — an inferred set
+// with no declaration behind it included. Two ids reach here for one
+// type, so the IDS are the wrong thing to compare.
 //
 // Which leaves only C's own nominal typing: one layout under two struct
 // tags. `Carry.Copy` is that, and it is a COPY rather than a re-tagging
-// switch because the tags agree — `gen_c_layout.write_enum_tags`
-// numbers a union's members canonically, which is the layout rule the
-// same DESIGN.md paragraph states and the whole reason to state it.
+// switch because the tags agree — `gen_c_layout.write_enum_tags` numbers
+// a union's members canonically.
 propagate_wider = (
     be   :: CBackend,
     node : Expr,
@@ -235,11 +230,9 @@ same_set = (be :: CBackend, got: TyId, want: TyId) bool {
     be.check.set_of(got).eq(be.check.set_of(want))
 }
 
-// A DECLARED SET AND A STRUCTURAL ONE ARE WIDENED INTO DIFFERENTLY, and
-// the fork is here rather than inside `carrier` because the two answers
-// are not the same kind of thing: a declared enum widens through a
-// VARIANT, which has a name, and a structural set has no names at all —
-// its members are types, and the member type is the answer.
+// The two constructions the header names, forked here rather than
+// inside `carrier` because the two answers are not the same kind of
+// thing: a variant name, or a member type.
 widen_or_report = (
     be   :: CBackend,
     node : Expr,
@@ -299,12 +292,11 @@ widen_into_set = (
 }
 
 // A STRICT WIDENING IS THE ONE CASE CANONICAL NUMBERING DOES NOT
-// COLLAPSE, and DESIGN.md never claimed it did: it says two spellings of
-// ONE set agree tag for tag. `Res<T, A|B>` into `Res<T, A|B|C>` is two
-// genuinely different sets — a member the destination adds anywhere but
-// last shifts every rank after it — so the tag really does have to be
-// mapped, member by member, and this is the "per-member switch" that
-// paragraph names as the price of getting the numbering wrong.
+// COLLAPSE (header): `Res<T, A|B>` into `Res<T, A|B|C>` is two genuinely
+// different sets — a member the destination adds anywhere but last
+// shifts every rank after it — so the tag has to be mapped member by
+// member, the "per-member switch" DESIGN.md names as the price of
+// getting the numbering wrong.
 //
 // Only the TAG is mapped. A member's payload field is named after the
 // member's own TYPE and carries a value of it, in a declared enum and a
@@ -338,9 +330,7 @@ retaggable = (be :: CBackend, from_set: TyId, to_set: TyId) bool {
 // CONTAINMENT IS ASKED OF THE SETS, NOT OF THE SPELLINGS. `set_within`
 // walks the destination's member list, so a destination written as a
 // declared NAME has to be resolved to the union it stands for first —
-// the same `set_of` question `same_set` above asks, and asking it is
-// what keeps a widening this backend writes from disagreeing with the
-// containment sema admitted the `.try()` on.
+// the same `set_of` question `same_set` above asks.
 within = (be :: CBackend, from_set: TyId, to_set: TyId) bool {
     narrow = be.check.set_of(from_set);
     wide   = be.check.set_of(to_set);
@@ -386,15 +376,14 @@ both_tagged = (be :: CBackend, from_set: TyId, to_set: TyId, m: TyId) bool {
     tagged(be, from_set, m) && tagged(be, to_set, m)
 }
 
-// Has this set a tag constant for `m`? A structural set composes one out
-// of the two type codes and always has one. A declared enum names it
-// through the VARIANT that carries the member's type, so it has one only
-// when such a variant exists — which `Error = WriteError | FsError` does
-// NOT, because `union_ty` flattened `WriteError` into four members and
-// no variant names any one of them. That is the same shape
-// `gen_c_layout.variant_ranks` refuses to rank, and it must be refused
-// in both places or the tags this writes are not the tags that file
-// emitted.
+// A structural set composes a tag constant out of the two type codes and
+// always has one. A declared enum names it through the VARIANT that
+// carries the member's type, so it has one only when such a variant
+// exists — which `Error = WriteError | FsError` does NOT, because
+// `union_ty` flattened `WriteError` into four members and no variant
+// names any one of them. Same shape `gen_c_layout.variant_ranks` refuses
+// to rank, refused in both places or the tags this writes are not the
+// tags that file emitted.
 tagged = (be :: CBackend, set: TyId, m: TyId) bool {
     be.check.types.at(set).match({
         Union(_) => true,
@@ -518,17 +507,14 @@ report_widening = (be :: CBackend, node: Expr) Res<(), AllocError> {
 //
 // `Same` is one C type and a copy. `Variant` widens into a DECLARED
 // enum, through the variant that names the callee's error type.
-// `Member` widens into a STRUCTURAL set, which has no variant names —
-// the member type is its own name, so the type is what is carried.
-//
-// `Copy` is the caller's set and the callee's being ONE set spelled two
-// ways, where nothing is built and nothing is tagged: the bytes already
-// say which member they are.
-//
-// `Retag` is the caller's set being STRICTLY LARGER, where the payload
-// is copied like `Copy` but the tag cannot be: the two sets number the
-// same member differently and only a runtime map says which is which.
-// It carries nothing because the two sets are already in hand.
+// `Member` widens into a STRUCTURAL set, whose member type is its own
+// name, so the type is what is carried. `Copy` is one set spelled two
+// ways: nothing built and nothing tagged, the bytes already say which
+// member they are. `Retag` is the caller's set being STRICTLY LARGER,
+// where the payload is copied like `Copy` but the tag cannot be — the
+// two sets number the same member differently and only a runtime map
+// says which is which — and it carries nothing because the two sets are
+// already in hand.
 //
 // Five cases and not a `Res<str>` with a convention: a variant name and
 // a member type are two different things, and the C written for each is
@@ -574,12 +560,11 @@ write_built = (
 
 // The same set, carried across the two struct tags C insists on.
 //
-// THE TWO LAYOUTS ARE IDENTICAL BY CONSTRUCTION and that is what makes
+// THE TWO LAYOUTS ARE IDENTICAL BY CONSTRUCTION, which is what makes
 // this three lines rather than a per-member switch: same members, so
 // the same payload union; canonical tags, so the same numbering; and
-// `sym_union_member` gives a member its own name on both sides. Bytes
-// are the whole of the meaning, which is DESIGN.md's "Canonical
-// numbering makes the widening a copy."
+// `sym_union_member` gives a member its own name on both sides.
+// DESIGN.md: "Canonical numbering makes the widening a copy."
 //
 // `memcpy` and not an assignment because C's struct types are nominal:
 // there is no operator that spells "these two layouts are one". The
@@ -801,8 +786,7 @@ read_error = (tmp: str, out :: String) Res<(), AllocError> {
 // The caller's set, built around the callee's error: tagged with the
 // variant that names the callee's error TYPE, carrying the value
 // unchanged. The two `Res`es are two C structs with two different
-// payload members, so there was never a copy that could have worked —
-// which is what the old report was telling the truth about.
+// payload members, so there was never a copy that could have worked.
 wrap_error = (
     be      :: CBackend,
     set     : TyId,
