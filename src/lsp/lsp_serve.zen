@@ -70,7 +70,7 @@ write_legend, write_tokens = lsp.lsp_colour
 // The one message this server sends unprompted, the policy that decides
 // when, and the one build the settle and the queries share
 // (`lsp_built.zen` — reached through `Diagnostics`, whose slot it is).
-Diagnostics = lsp.lsp_diag
+Diagnostics, Shared = lsp.lsp_diag
 relative_to = zen.zen_path
 // The wire's shapes: a request's fields read, a reply built. Their own
 // file (`lsp_reply.zen`) since the session met STYLE.md's hard cap.
@@ -324,6 +324,26 @@ Server* = {
         })
     }
 
+    // THE ONE REFUSAL ALL SIX DOCUMENT QUERIES MAKE, written once: a uri
+    // no `didOpen` ever named. A CLIENT BUG, so `-32602` names it rather
+    // than answering `null`, `[]` or `{}` — each of those reads as
+    // "there is nothing here", which is a different and false statement
+    // about a document the server has never seen.
+    //
+    // `tests/corpus/lsp/every_query_refuses_a_uri_never_opened` asserts
+    // all six on the wire, because three of them were covered by nothing
+    // and a shared refusal is exactly what turns silently into a `null`.
+    unopened = (self :: @Self, tree: Jsons, rid: JsonId, msg :: String)
+               Res<(), AllocError> {
+        failed(
+            tree,
+            rid,
+            RpcFault.InvalidParams,
+            "no open document for that uri",
+            msg
+        )
+    }
+
     hovered = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
                msg :: String) Res<(), AllocError> {
         uri       = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -331,15 +351,7 @@ Server* = {
         line      = number_at(tree, where, "line");
         character = number_at(tree, where, "character");
         self.docs.get(uri).match({
-            // A client bug; `-32602` names it rather than answering
-            // `null`, which would misleadingly read as "no type here".
-            None     => failed(
-                tree,
-                rid,
-                RpcFault.InvalidParams,
-                "no open document for that uri",
-                msg
-            ),
+            None     => self.unopened(tree, rid, msg),
             // THE WORKSPACE DECIDES, the way `lsp_hover.zen`'s header
             // spells out: without one the lone module answers from the
             // request's own arena, with one the SHARED build's checker
@@ -370,19 +382,12 @@ Server* = {
 
     // COLOUR READS WHAT THE DIAGNOSTICS' BUILD SETTLED, and an empty
     // `classes_for` IS the lexical answer, so the fallback costs no
-    // branch. A DOCUMENT NEVER OPENED IS `-32602`, the same refusal
-    // hover makes.
+    // branch.
     coloured = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                 rid: JsonId, msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
         self.docs.get(uri).match({
-            None     => failed(
-                tree,
-                rid,
-                RpcFault.InvalidParams,
-                "no open document for that uri",
-                msg
-            ),
+            None     => self.unopened(tree, rid, msg),
             Ok(text) => {
                 body ::= t.String().try();
                 names = self.notes.classes_for(t, uri).try();
@@ -390,6 +395,21 @@ Server* = {
                 result(tree, rid, body.view(), msg)
             },
         })
+    }
+
+    // THE SESSION, HANDED TO THE BUILD. `lsp_diag.zen`'s `shared` wants
+    // four fields off this server alongside the document's path, and all
+    // three workspace-backed queries below want the same five — so they
+    // are named once here rather than at each call.
+    build_for = (self :: @Self, path: str, t: Alloc) Res<Shared, AllocError> {
+        self.notes.shared(
+            self.env,
+            self.workspace,
+            self.open,
+            self.docs,
+            path,
+            t
+        )
     }
 
     // HOVER OFF THE SHARED BUILD, the way `write_definition` below does
@@ -400,14 +420,7 @@ Server* = {
                     line: usize, character: usize, body :: String)
                    Res<(), AllocError> {
         path = path_of(uri);
-        sh   = self.notes.shared(
-            self.env,
-            self.workspace,
-            self.open,
-            self.docs,
-            path,
-            t
-        ).try();
+        sh   = self.build_for(path, t).try();
         sh.c.match({
             None  => {
                 qa ::= self.env.mem.alloc();
@@ -448,9 +461,8 @@ Server* = {
         })
     }
 
-    // DEFINITION and COMPLETION take the same two params as hover, make
-    // the same refusal for a document never opened, and let THE
-    // WORKSPACE DECIDE the same way `hovered` above spells out.
+    // DEFINITION and COMPLETION take the same two params as hover and
+    // let THE WORKSPACE DECIDE the same way `hovered` above spells out.
     defined = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
                msg :: String) Res<(), AllocError> {
         uri       = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -458,13 +470,7 @@ Server* = {
         line      = number_at(tree, where, "line");
         character = number_at(tree, where, "character");
         self.docs.get(uri).match({
-            None     => failed(
-                tree,
-                rid,
-                RpcFault.InvalidParams,
-                "no open document for that uri",
-                msg
-            ),
+            None     => self.unopened(tree, rid, msg),
             Ok(text) => {
                 body ::= t.String().try();
                 self.workspace.is_empty().match({
@@ -493,14 +499,7 @@ Server* = {
                         line: usize, character: usize, body :: String)
                        Res<(), AllocError> {
         path = path_of(uri);
-        sh   = self.notes.shared(
-            self.env,
-            self.workspace,
-            self.open,
-            self.docs,
-            path,
-            t
-        ).try();
+        sh   = self.build_for(path, t).try();
         sh.c.match({
             // Unreachable, as in `shared_hover`; the per-request build
             // answers instead.
@@ -545,13 +544,7 @@ Server* = {
                 msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
         self.docs.get(uri).match({
-            None     => failed(
-                tree,
-                rid,
-                RpcFault.InvalidParams,
-                "no open document for that uri",
-                msg
-            ),
+            None     => self.unopened(tree, rid, msg),
             Ok(text) => {
                 syms ::= t.Vec<Sym>();
                 symbols_at(t, text, syms).try();
@@ -569,13 +562,7 @@ Server* = {
                  rid: JsonId, msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
         self.docs.get(uri).match({
-            None     => failed(
-                tree,
-                rid,
-                RpcFault.InvalidParams,
-                "no open document for that uri",
-                msg
-            ),
+            None     => self.unopened(tree, rid, msg),
             Ok(text) => {
                 body ::= t.String().try();
                 write_edits(t, text, body).try();
@@ -598,13 +585,7 @@ Server* = {
         line      = number_at(tree, where, "line");
         character = number_at(tree, where, "character");
         self.docs.get(uri).match({
-            None     => failed(
-                tree,
-                rid,
-                RpcFault.InvalidParams,
-                "no open document for that uri",
-                msg
-            ),
+            None     => self.unopened(tree, rid, msg),
             Ok(text) => {
                 body ::= t.String().try();
                 self.workspace.is_empty().match({
@@ -633,14 +614,7 @@ Server* = {
                         line: usize, character: usize, body :: String)
                        Res<(), AllocError> {
         path = path_of(uri);
-        sh   = self.notes.shared(
-            self.env,
-            self.workspace,
-            self.open,
-            self.docs,
-            path,
-            t
-        ).try();
+        sh   = self.build_for(path, t).try();
         done = sh.c.match({
             // Unreachable, as in `write_definition`; the patched build
             // below answers instead.
