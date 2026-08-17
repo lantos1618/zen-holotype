@@ -2,28 +2,21 @@
 // What hoisting is in C.
 //
 // DESIGN.md: "a bare T lifts into Res<T> wherever a Res is expected —
-// `0;` closes a `Res<i32, E>` function like `Ok(0);` does." In C that
-// is not a conversion: a `Res` is a tagged struct, an `i32` is four
-// bytes, and `return 7;` from a function returning the struct is a
-// program `cc` rejects. The value has to be BUILT, like a written
-// `Ok(7)` is.
+// `0;` closes a `Res<i32, E>` function like `Ok(0);` does." In C that is
+// no conversion at all — a `Res` is a tagged struct and `return 7;` from
+// a function returning one is a program `cc` rejects — so the value is
+// BUILT the way a written `Ok(7)` is, by the same code:
+// `gen_c_call.zen`'s `write_res_payload`. Two copies of that layout
+// would be two places to fix, and both forms are the SAME VALUE.
 //
-// So it's built by the same code: `write_res_payload`, exported from
-// `gen_c_call.zen`, writes the tag and the payload under the member
-// `Ok` names — two copies of that layout would be two places to fix,
-// and the point of hoisting is that both forms are the SAME VALUE.
-//
-// Only success, and only where the value does not already fit.
-// Whether the lift is LEGAL is not decided here — `sema_hoist.zen` owns
-// the "exactly one variant carries the type" count and the refusal
-// that failure never lifts, reporting before a backend runs. So the
-// predicate is narrow on purpose: a value already at the wanted type
-// is a copy, one that fits nothing is a mismatch named elsewhere.
-//
-// A type nobody has computed is not hoisted: `assignable` waves poison
-// and an unsubstituted parameter through, so `Unknown` answers "already
-// fits" and skips wrapping — wrong the other way wraps a value that was
-// already a `Res`.
+// WHETHER THE LIFT IS LEGAL IS NOT DECIDED HERE. `sema_hoist.zen` owns
+// the "exactly one variant carries the type" count and the refusal that
+// failure never lifts, reporting before a backend runs — so the
+// predicate below is narrow on purpose: a value already at the wanted
+// type is a copy, one that fits nothing is a mismatch named elsewhere.
+// `Unknown` answers "already fits" and skips the wrap, since
+// `assignable` waves poison and an unsubstituted parameter through;
+// the other way round would wrap a value that was already a `Res`.
 
 ExprId = std.ast
 AllocError = std.mem
