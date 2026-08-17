@@ -18,6 +18,26 @@ how a gate that cannot fail happens to a list.
 
 ## OPEN — being worked
 
+**Goto-definition answers `null` on an enum variant's payload type.**
+`ExprKind = Name(Name) | Literal(Literal) | ..` — asking for the definition of
+the inner `Name` gets nothing. **The cause is in sema, not the LSP**, and not
+where it looks: `told_at` DOES find the payload, via the arena's type-node
+fallback. What is missing is the memo. Measured with a server-free probe
+(reproducer at `/home/ubuntu/.claude/jobs/22ff9ad8/tmp/enum-payload-repro`):
+
+    1:17 -> a written type -> NOT IN THE MEMO      <- Point, inside Circle(Point)
+    1:15 -> a written type -> i32                  <- control, a struct field
+
+So `check_all` never routes a variant payload through `type_from_ast`, nothing
+lands in `type_memo`, and `lsp_def.zen` correctly reads the memo, finds
+nothing, and answers `null`. Hover has the same hole for the same reason.
+
+⚠️ **The obvious fix is wrong.** Adding an `Enum(en) =>` arm to `ast_named.zen`'s
+`decl_told` (it is `Tell.Nothing` today) does NOT fix this and makes clicking a
+variant's NAME report its payload's type, which is misleading. Verified: with
+that arm reverted, the payload position still answers. The fix belongs where
+enum declarations are checked.
+
 **The LSP hand-writes JSON; it should have structs with a derived `to_json`.**
 Measured: ~97 `add_bytes` calls spelling JSON punctuation across 12 files, and
 **34 `write_*` functions each spelling one protocol object by hand**, inside
