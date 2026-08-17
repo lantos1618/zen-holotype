@@ -161,7 +161,7 @@ ABBREV_OWED: dict[str, str] = {
 # on a number that overstates.
 UFCS_OWED: dict[str, int] = {
     "src/gen/gen_c/gen_c_alloc.zen": 31,
-    "src/gen/gen_c/gen_c_array.zen": 22,
+    "src/gen/gen_c/gen_c_array.zen": 21,
     "src/gen/gen_c/gen_c_assoc.zen": 30,
     "src/gen/gen_c/gen_c_bound.zen": 65,
     "src/gen/gen_c/gen_c_build.zen": 52,
@@ -198,7 +198,7 @@ UFCS_OWED: dict[str, int] = {
     "src/gen/gen_c/gen_c_shape.zen": 23,
     "src/gen/gen_c/gen_c_sink.zen": 53,
     "src/gen/gen_c/gen_c_stdin.zen": 23,
-    "src/gen/gen_c/gen_c_stmt.zen": 57,
+    "src/gen/gen_c/gen_c_stmt.zen": 56,
     "src/gen/gen_c/gen_c_try.zen": 78,
     "src/gen/gen_c/gen_c_type.zen": 50,
     "src/gen/gen_c/gen_c_widen.zen": 17,

@@ -48,7 +48,7 @@ Vec, Map = std.collections
 str, String = std.text
 Range = std.core
 DeclId = sema.sema_id
-TyId, Ty, Types, ResForm, TyRes, TyNamed = sema.sema_ty
+TyId, Ty, Types, ResForm, TyRes, TyNamed, TyArray = sema.sema_ty
 is_integer, is_float = sema.sema_ty
 World, Def, DefKind, ImportBinding = sema.sema_def
 module_display = sema.sema_def
@@ -454,7 +454,31 @@ Checker* = {
             || self.literal_fits(got, want)
             || self.set_assignable(got, want)
             || self.res_assignable(got, want)
+            || self.array_assignable(got, want)
             || self.uninstantiated(got, want)
+    }
+
+    // TWO ARRAYS AGREE WHEN THEIR ELEMENTS DO, AT ONE LENGTH — the
+    // leniency the line above grants a literal, read one level down.
+    // `[1, 2, 3]` is `[int, 3]`, and a position that writes `[u8, 3]`
+    // is the context those elements' type comes from, exactly as a
+    // parameter is for a bare `1`. Without this a written array type
+    // refused every literal ever written at it.
+    //
+    // The elements go back through `assignable`, so `[i32, 3]` still
+    // does not reach `[u8, 3]` and `[u8, 3]` does not reach `[u8, 4]`.
+    array_assignable = (self: @Self, got: TyId, want: TyId) bool {
+        self.types.at(got).match({
+            Array(g) => self.array_fits(g, want),
+            _        => false,
+        })
+    }
+
+    array_fits = (self: @Self, g: TyArray, want: TyId) bool {
+        self.types.at(want).match({
+            Array(w) => (g.count == w.count) && self.assignable(g.elem, w.elem),
+            _        => false,
+        })
     }
 
     // TWO `Res` AGREE WHEN THEIR PARTS DO, and this is the one place

@@ -1,0 +1,51 @@
+// AN ARRAY LITERAL'S ELEMENT TYPE COMES FROM ITS POSITION, and where
+// no position says, it settles the way a type argument does.
+//
+// `[1, 2, 3]` is `[int, 3]` asked on its own — the same unsettled
+// literal type a bare `1` has. A scalar can stay there forever, because
+// C converts an `int64_t` into every integer position; an array cannot,
+// because `[i32, 3]` is a STRUCT and `zg_a3_b3int` is not `zg_a3_b3i32`
+// at any call. So there are two halves to this rule and the file asserts
+// both.
+//
+// WHERE A TYPE IS WRITTEN, IT IS THE ELEMENTS' CONTEXT — `xs: [u8, 3] =
+// [1, 2, 3]` holds `u8`s, and `takes([4, 5, 6])` fills the parameter's
+// element type — which is `sema_check.array_fits` granting an array the
+// leniency `literal_fits` grants a scalar, one level down. Before it,
+// every written array type refused every literal ever written at it.
+//
+// WHERE NOTHING IS WRITTEN, THE ELEMENT SETTLES to `i32` (or `f64`),
+// `sema_apply.settled_arg_ty`'s rule at `sema_place.settled_array`: a
+// literal settles before it is minted into another type. `pair` below is
+// the whole point — the binding has no annotation and still reaches a
+// `[i32, 2]` parameter, which a `[int, 2]` local never could.
+//
+// AN ELEMENT IS STILL A LITERAL'S POSITION: `must-fail/traps/
+// literal_too_large_in_an_array_element` is this file's other half,
+// where the 300 the `u8` cannot hold is refused rather than wrapped.
+
+takes_u8s = (xs: [u8, 3]) u32 {
+    total: u32 ::= 0;
+    xs.loop((h, v) { total = total + v.to_u32(); });
+    total;
+}
+
+takes_i32s = (xs: [i32, 2]) i32 { xs[0] + xs[1] }
+
+main = (env: Env) Res<i32, AllocError> {
+    written: [u8, 3] = [1, 2, 3];
+    println("{}", takes_u8s(written));
+    println("{}", takes_u8s([4, 5, 6]));
+
+    pair = [7, 8];
+    println("{}", takes_i32s(pair));
+    println("{}", takes_i32s([9, 10]));
+
+    halves: [f64, 2] = [1.5, 2.5];
+    println("{}", halves[1]);
+
+    bare = [11, 12, 13];
+    bare.loop((h, v) { println("{}", v) });
+    println("{}", bare[2]);
+    Ok(0);
+}

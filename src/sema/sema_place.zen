@@ -20,7 +20,7 @@
 
 Expr, ExprId, Bind, Access, Span, Ast = std.ast
 AllocError = std.mem
-TyId, Types = sema.sema_ty
+TyId, Types, TyArray, literal_default = sema.sema_ty
 Checker, Ctx = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
 computed_member, writable_member = sema.sema_member
@@ -57,8 +57,39 @@ bind_want* = (c :: Checker, b: Bind, got: TyId, ctx: Ctx)
 place_want* = (c :: Checker, id: ExprId, got: TyId, ctx: Ctx)
               Res<TyId, AllocError> {
     c.tree.expr_at(id).kind.match({
-        Name(_) => Ok(got),
+        Name(_) => c.settled_array(got),
         _       => c.type_of(id, ctx),
+    })
+}
+
+// A DECLARATION WITH NOTHING WRITTEN ON IT FREEZES WHAT THE VALUE IS
+// WORTH, and an array's element cannot be left unsettled there the way
+// a scalar's can. `n = 1` may stay `int` — C converts an `int64_t` into
+// every integer position — but `[i32, 3]` is a STRUCT, and a local
+// declared `[int, 3]` reaches no `[i32, 3]` in the program.
+// `sema_apply.settled_arg_ty` settles a type argument for this reason
+// and in these words: a literal settles before it is minted into
+// another type. `gen_c_stmt.settled_value_type` is the same call at the
+// same statement.
+//
+// ONLY WHERE NOTHING SAYS OTHERWISE. A written `[u8, 3]` IS the
+// elements' context and reaches them through `assignable`, so it never
+// arrives here — settling ahead of it would refuse what it accepts.
+settled_array* = (c :: Checker, ty: TyId) Res<TyId, AllocError> {
+    c.types.at(ty).match({
+        Array(a) => c.settled_elem(ty, a),
+        _        => Ok(ty),
+    })
+}
+
+settled_elem = (c :: Checker, ty: TyId, a: TyArray) Res<TyId, AllocError> {
+    elem = c.is_literal_ty(a.elem).match({
+        true  => c.types.prim(literal_default(c.prim_name(a.elem))),
+        false => c.settled_array(a.elem),
+    }).try();
+    elem.eq(a.elem).match({
+        true  => Ok(ty),
+        false => c.types.array(elem, a.count),
     })
 }
 

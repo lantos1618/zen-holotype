@@ -104,8 +104,23 @@ lower_array_lit* = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    ty = ty_of(be, id, ctx, want).try();
+    ty = be.literal_ty(id, ctx, want).try();
     write_elems(be, id, a.elems, ty, ctx, out)
+}
+
+// THE POSITION'S ARRAY TYPE WINS, which is the only difference between
+// the two forms. `[1, 2, 3]` is `[int, 3]` asked on its own and `[u8,
+// 3]` where one is written — `sema_check.array_fits` accepts it there
+// for the reason a bare `1` reaches a `u8` parameter — so sema's answer
+// put an `int64_t` compound literal in a slot holding `uint8_t`, which
+// `cc` refused. The written form carries its type beside its values and
+// has nothing to take from the position.
+literal_ty = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+             Res<TyId, AllocError> {
+    be.array_of(want).match({
+        Ok(_) => Ok(want),
+        None  => be.ty_of(id, ctx, want),
+    })
 }
 
 lower_fixed_array* = (
