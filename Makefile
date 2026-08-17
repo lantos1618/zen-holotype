@@ -61,8 +61,10 @@ test: parse design cap dupcomments faults refmap ufcs style grammar-test editors
 
 ## faults: every fault the compiler declares must have a site that raises
 ## it. Green here does NOT mean every diagnostic works — it means none is
-## silently absent. The seven that are absent are written down in the
-## script's OWED ledger, so the debt can shrink and cannot quietly grow.
+## silently absent. Any that are absent are written down in the script's
+## OWED ledger, so the debt can shrink and cannot quietly grow; the
+## ledger is empty today, and a name in it that gains a raise site is an
+## error too, so it cannot drift back into fiction.
 faults:
 	$(PY) scripts/faults_reachable.py
 
@@ -206,13 +208,16 @@ fmt: build
 	    || { echo "fmt: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
 	  ./zen fmt --check "$${files[@]}"
 
-## ## emit-runs: consecutive writes into one buffer that a single `fmt` would
+## emit-runs: consecutive writes into one buffer that a single `fmt` would
 ## collapse. A LEDGER, not a rule: scripts/emit_runs_owed.txt records the
 ## backlog per file and this fails if any file EXCEEDS its number, so a
 ## conversion lane ratchets it down and nothing puts it back. Undercounts a
 ## statement wrapped over several lines -- scripts/emit-runs.awk says why.
 emit-runs:
-	@find src -name '*.zen' | sort \
+	@n=$$(find src -name '*.zen' | wc -l); \
+	  test "$$n" -gt 0 \
+	    || { echo "emit-runs: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
+	  find src -name '*.zen' | sort \
 	  | xargs awk -f scripts/emit-runs.awk -v mode=ledger \
 	  | sed 's/^    "//; s/": /|/; s/,$$//' | sort > $@.now; \
 	  awk -F'|' 'NR==FNR { owed[$$1]=$$2; next } \

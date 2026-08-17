@@ -326,9 +326,7 @@ same_named = (out: Vec<Slot>, name: str) usize {
 slot_field* = (be :: CBackend, s: Slot, out :: String)
               Res<(), AllocError> {
     ctype(be, s.ret, out).try();
-    out.add_bytes(" (*").try();
-    out.add_bytes(s.sym.view()).try();
-    out.add_bytes(")(void *").try();
+    out.fmt(" (*{})(void *", s.sym.view()).try();
     s.params.loop((h, p) { slot_param(be, p, out).try() });
     Range(0, s.elems).loop((h, i) { out.add_bytes(", size_t").try() });
     out.add_bytes(");").try();
@@ -397,10 +395,9 @@ fat_value* = (
     request_type(be, tty).try();
     slots ::= be.alloc.Vec<Slot>();
     slots_of(be, tty, slots).try();
-    out.add_bytes("((").try();
-    ctype(be, tty, out).try();
-    out.add_bytes("){ .zg_self = (void *)").try();
-    out.add_bytes(addr).try();
+    rec ::= be.alloc.String().try();
+    ctype(be, tty, rec).try();
+    out.fmt("(({}){ .zg_self = (void *){addr}", rec.view()).try();
     slots.loop((h, s) { slot_init(be, s, cty, out).try() });
     out.add_bytes(" })").try();
     Ok(());
@@ -412,9 +409,7 @@ fat_value* = (
 // name would not link.
 slot_init = (be :: CBackend, s: Slot, cty: TyId, out :: String)
             Res<(), AllocError> {
-    out.add_bytes(", .").try();
-    out.add_bytes(s.sym.view()).try();
-    out.add_bytes(" = ").try();
+    out.fmt(", .{} = ", s.sym.view()).try();
     thunk_for(be, s, cty).try().match({
         None     => out.add_bytes("NULL"),
         Ok(name) => out.add_bytes(name.view()),
@@ -520,10 +515,7 @@ add_real = (
 // pure function of the target, which is what makes two requests for one
 // shim one shim.
 thunk_name = (out :: String, sym: str) Res<(), AllocError> {
-    out.add_bytes(GEN).try();
-    out.add_bytes("v").try();
-    out.add_bytes(sym.slice(USR.len, sym.len)).try();
-    Ok(());
+    out.fmt("{}v{}", GEN, sym.slice(USR.len, sym.len))
 }
 
 // A lowered function is held as a head with no punctuation and a body
@@ -550,11 +542,9 @@ emit_thunk = (
 
 thunk_head = (be :: CBackend, s: Slot, name: str, out :: String)
              Res<(), AllocError> {
-    out.add_bytes("static ").try();
-    ctype(be, s.ret, out).try();
-    out.add_bytes(" ").try();
-    out.add_bytes(name).try();
-    out.add_bytes("(void *zg_self").try();
+    ret ::= be.alloc.String().try();
+    ctype(be, s.ret, ret).try();
+    out.fmt("static {} {name}(void *zg_self", ret.view()).try();
     s.params.loop((h, i, p) { thunk_param(be, p, "a", i, out).try() });
     Range(0, s.elems).loop((h, i) { thunk_param(be, size_ty(be), "e", i, out).try() });
     out.add_bytes(")").try();
@@ -590,8 +580,7 @@ thunk_body = (
 )
              Res<(), AllocError> {
     call ::= be.alloc.String().try();
-    call.add_bytes(sym).try();
-    call.add_bytes("(").try();
+    call.fmt("{sym}(").try();
     thunk_recv(be, cty, f, call).try();
     s.params.loop((h, i, p) { thunk_arg(be, s, sig, i, call).try() });
     call.add_bytes(")").try();
@@ -600,9 +589,7 @@ thunk_body = (
         true  => Ok(()),
         false => out.add_bytes("return "),
     }).try();
-    out.add_bytes(call.view()).try();
-    out.add_bytes(";\n").try();
-    Ok(());
+    out.fmt("{};\n", call.view())
 }
 
 thunk_recv = (be :: CBackend, cty: TyId, f: Function, out :: String)
@@ -665,14 +652,9 @@ is_pointer* = (be: CBackend, t: TyId) bool {
 }
 
 scaled_arg = (be :: CBackend, nm: str, out :: String) Res<(), AllocError> {
-    out.add_bytes("(").try();
-    out.add_bytes(nm).try();
-    out.add_bytes(" * ").try();
     e0 ::= be.alloc.String().try();
     sym_gen(e0, "e", 0).try();
-    out.add_bytes(e0.view()).try();
-    out.add_bytes(")").try();
-    Ok(());
+    out.fmt("({nm} * {})", e0.view())
 }
 
 // The impl was compiled at the byte type, so its parameter is normally
@@ -748,10 +730,7 @@ address_of = (be :: CBackend, code: str, cty: TyId, out :: String)
 }
 
 write_amp = (code: str, out :: String) Res<(), AllocError> {
-    out.add_bytes("&(").try();
-    out.add_bytes(code).try();
-    out.add_bytes(")").try();
-    Ok(());
+    out.fmt("&({code})")
 }
 
 spill_address = (be :: CBackend, code: str, cty: TyId, out :: String)
@@ -760,9 +739,7 @@ spill_address = (be :: CBackend, code: str, cty: TyId, out :: String)
     sym_gen(tmp, "t", be.next_tmp()).try();
     declare_temp(be, cty, tmp.view()).try();
     be.set_line(tmp.view(), code).try();
-    out.add_bytes("&").try();
-    out.add_bytes(tmp.view()).try();
-    Ok(());
+    out.fmt("&{}", tmp.view())
 }
 
 // A C place is a name, a field hop, a dereference or an index — never a

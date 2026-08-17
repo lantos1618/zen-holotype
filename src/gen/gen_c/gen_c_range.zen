@@ -454,16 +454,9 @@ lower_impl_walk = (
     declare_usize(be, limit.view()).try();
     supplied_bound(be, ri, rty, ri.start, counter.view(), rng.view()).try();
     supplied_bound(be, ri, rty, ri.end, limit.view(), rng.view()).try();
-    be.write(base.view()).try();
-    be.write(" = ").try();
-    be.write(counter.view()).try();
-    be.writeln(";").try();
+    be.fmt("{} = {};\n", base.view(), counter.view()).try();
 
-    be.write("while (").try();
-    be.write(counter.view()).try();
-    be.write(" < ").try();
-    be.write(limit.view()).try();
-    be.writeln(") {").try();
+    be.fmt("while ({} < {}) {\n", counter.view(), limit.view()).try();
     be.indent();
     value ::= be.alloc.String().try();
     take_pass(
@@ -534,12 +527,9 @@ bind_text* = (be :: CBackend, name: str, ty: TyId, text: str)
     be.check.bind(name, ty, false, false).try();
     cname ::= be.alloc.String().try();
     sym_local(cname, name, n).try();
-    line ::= be.alloc.String().try();
-    declarator(be, ty, cname.view(), line).try();
-    line.add_bytes(" = ").try();
-    line.add_bytes(text).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view())
+    decl ::= be.alloc.String().try();
+    declarator(be, ty, cname.view(), decl).try();
+    be.fmt("{} = {text};\n", decl.view())
 }
 
 // `start: 0` and `end: self.len`, evaluated in the module that wrote
@@ -620,16 +610,13 @@ run_at = (
          Res<(), AllocError> {
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "a", be.next_tmp()).try();
-    line ::= be.alloc.String().try();
-    declarator(be, pass, tmp.view(), line).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view()).try();
+    decl ::= be.alloc.String().try();
+    declarator(be, pass, tmp.view(), decl).try();
+    be.fmt("{};\n", decl.view()).try();
     inline_at(be, ri, rty, pass, f, counter, rng, tmp.view()).try();
     write_pass_guard(be, tmp.view(), brk).try();
-    value.add_bytes(tmp.view()).try();
-    value.add_bytes(".zg_data.").try();
-    sym_member(value, "Ok").try();
-    Ok(());
+    value.fmt("{}.zg_data.", tmp.view()).try();
+    sym_member(value, "Ok")
 }
 
 // The `at` body, in the frame the loop is being written into. Its two
@@ -693,14 +680,9 @@ run_at_body = (be :: CBackend, f: Function, ictx: Ctx, pass: TyId, tmp: str)
 // body opened.
 write_pass_guard = (be :: CBackend, tmp: str, brk: usize)
                    Res<(), AllocError> {
-    be.write("if (").try();
-    be.write(tmp).try();
-    be.write(".zg_tag != ").try();
     tag ::= be.alloc.String().try();
     sym_variant(tag, RES_PATH, "Ok").try();
-    be.write(tag.view()).try();
-    be.write(") { goto ").try();
+    be.fmt("if ({tmp}.zg_tag != {}) { goto ", tag.view()).try();
     write_label(be, "brk", brk).try();
-    be.writeln("; }").try();
-    Ok(());
+    be.writeln("; }")
 }

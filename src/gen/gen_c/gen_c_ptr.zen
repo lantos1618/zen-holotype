@@ -369,14 +369,13 @@ write_at = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    run(be, et, base, line).try();
-    line.add_bytes("[").try();
-    index_arg(be, c, 0, ctx, line).try();
-    line.add_bytes("] = ").try();
-    value_arg(be, c, 1, et, ctx, line).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view()).try();
+    ptr ::= be.alloc.String().try();
+    run(be, et, base, ptr).try();
+    idx ::= be.alloc.String().try();
+    index_arg(be, c, 0, ctx, idx).try();
+    val ::= be.alloc.String().try();
+    value_arg(be, c, 1, et, ctx, val).try();
+    be.fmt("{}[{}] = {};\n", ptr.view(), idx.view(), val.view()).try();
     out.add_bytes("0")
 }
 
@@ -402,25 +401,20 @@ shift = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    out.add_bytes("(").try();
-    out.add_bytes(base).try();
-    out.add_bytes(op).try();
-    out.add_bytes("(").try();
-    index_arg(be, c, 0, ctx, out).try();
-    out.add_bytes("))").try();
-    Ok(());
+    count ::= be.alloc.String().try();
+    index_arg(be, c, 0, ctx, count).try();
+    out.fmt("({base}{op}({}))", count.view())
 }
 
 // `count` elements, in bytes — the header's `sizeof` rule.
 byte_size = (be :: CBackend, c: Call, et: TyId, ctx: Ctx, out :: String)
             Res<(), AllocError> {
     request_type(be, et).try();
-    out.add_bytes("((").try();
-    index_arg(be, c, 0, ctx, out).try();
-    out.add_bytes(") * sizeof(").try();
-    ctype(be, et, out).try();
-    out.add_bytes("))").try();
-    Ok(());
+    count ::= be.alloc.String().try();
+    index_arg(be, c, 0, ctx, count).try();
+    cty ::= be.alloc.String().try();
+    ctype(be, et, cty).try();
+    out.fmt("(({}) * sizeof({}))", count.view(), cty.view())
 }
 
 // The runs may not overlap — "an allocator growing a run always has a
@@ -435,33 +429,29 @@ copy_run = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("memcpy((void *)").try();
-    line.add_bytes(base).try();
-    line.add_bytes(", (const void *)(").try();
-    value_arg(be, c, 0, rty, ctx, line).try();
-    line.add_bytes("), ").try();
-    count_bytes(be, c, et, ctx, line).try();
-    line.add_bytes(");").try();
-    be.writeln(line.view()).try();
+    from ::= be.alloc.String().try();
+    value_arg(be, c, 0, rty, ctx, from).try();
+    n ::= be.alloc.String().try();
+    count_bytes(be, c, et, ctx, n).try();
+    be.fmt(
+        "memcpy((void *){base}, (const void *)({}), {});\n",
+        from.view(),
+        n.view()
+    ).try();
     out.add_bytes("0")
 }
 
 count_bytes = (be :: CBackend, c: Call, et: TyId, ctx: Ctx, out :: String)
               Res<(), AllocError> {
-    out.add_bytes("((").try();
-    index_arg(be, c, 1, ctx, out).try();
-    out.add_bytes(") * sizeof(").try();
-    ctype(be, et, out).try();
-    out.add_bytes("))").try();
-    Ok(());
+    count ::= be.alloc.String().try();
+    index_arg(be, c, 1, ctx, count).try();
+    cty ::= be.alloc.String().try();
+    ctype(be, et, cty).try();
+    out.fmt("(({}) * sizeof({}))", count.view(), cty.view())
 }
 
 null_test = (base: str, out :: String) Res<(), AllocError> {
-    out.add_bytes("(").try();
-    out.add_bytes(base).try();
-    out.add_bytes(" == NULL)").try();
-    Ok(());
+    out.fmt("({base} == NULL)")
 }
 
 // `to<U>()`: the same address, a different element type. The WRITTEN
@@ -530,12 +520,9 @@ intern_ptr = (c :: Checker, n: TyNamed, qname: str, args: Vec<TyId>)
 write_reinterpret = (be :: CBackend, pt: TyId, base: str, out :: String)
                     Res<(), AllocError> {
     request_type(be, pt).try();
-    out.add_bytes("((").try();
-    ctype(be, pt, out).try();
-    out.add_bytes(")").try();
-    out.add_bytes(base).try();
-    out.add_bytes(")").try();
-    Ok(());
+    cty ::= be.alloc.String().try();
+    ctype(be, pt, cty).try();
+    out.fmt("(({}){base})", cty.view())
 }
 
 // -----------------------------------------------------------------
@@ -585,8 +572,7 @@ lower_null_ptr* = (be :: CBackend, id: ExprId, want: TyId, out :: String)
 write_null = (be :: CBackend, want: TyId, out :: String)
              Res<(), AllocError> {
     request_type(be, want).try();
-    out.add_bytes("((").try();
-    ctype(be, want, out).try();
-    out.add_bytes(")NULL)").try();
-    Ok(());
+    cty ::= be.alloc.String().try();
+    ctype(be, want, cty).try();
+    out.fmt("(({})NULL)", cty.view())
 }
