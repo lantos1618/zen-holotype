@@ -1,6 +1,6 @@
 # A map of `bootstrap/gen_c.py`
 
-`bootstrap/gen_c.py` is 6977 lines, and this document points into it by line number several hundred times.
+`bootstrap/gen_c.py` is 7167 lines, and this document points into it by line number several hundred times.
 
 Those numbers are checked, not asserted: **`make refmap`** reads every `symbol (line)` and `file:line` claim below and verifies it against the file on disk, so a stale coordinate fails the build instead of misleading a reader. Run it after any edit to either file.
 
@@ -23,7 +23,7 @@ Corpus that pins its behavior: `/home/ubuntu/zenc/tests/corpus/codegen/` (`c_key
 ## 1.1 Entry point
 
 ```python
-def generate(program, sema=None, root=None, sources=None):      # gen_c.py:6955-6973
+def generate(program, sema=None, root=None, sources=None):      # gen_c.py:7145-7163
     emitter = Emitter(program, sema=sema, root=root, sources=sources)
     text = emitter.emit()
     seen = []; out = []
@@ -33,29 +33,29 @@ def generate(program, sema=None, root=None, sources=None):      # gen_c.py:6955-
         seen.append(key); out.append(diag)
     return text, tuple(out)
 
-emit = generate                                                  # gen_c.py:6977
+emit = generate                                                  # gen_c.py:7167
 ```
 
-Returns `(C source text: str, diagnostics: tuple)`. Diagnostics are de-duplicated on `(span, message)` — "a type resolved for a prototype and again for a body is one bug" (6963). Never raises; `Emitter.error` (1755) appends `ast.Diag`.
+Returns `(C source text: str, diagnostics: tuple)`. Diagnostics are de-duplicated on `(span, message)` — "a type resolved for a prototype and again for a body is one bug" (7153). Never raises; `Emitter.error` (1795-1796) appends `ast.Diag`.
 
-`program` is duck-typed: `modules_of` (600) accepts a `modules.ModuleGraph` (has `.modules` dict + `.lookup`), a dict, a list, or a bare `ast.Module`. `self.graph` is set only when the object has both `.modules` and `.lookup` (974-1001).
+`program` is duck-typed: `modules_of` (615-644) accepts a `modules.ModuleGraph` (has `.modules` dict + `.lookup`), a dict, a list, or a bare `ast.Module`. `self.graph` is set only when the object has both `.modules` and `.lookup` (1014-1041).
 
 ## 1.2 Top-level names
 
-Constants/tables: `C_STANDARD` (157), `USR="zu_"` / `GEN="zg_"` (159-160), `MAX_INSTANCES=8192`, `MAX_FUNCTIONS=8192`, `MAX_EXPR_DEPTH=24`, `INLINE_DEPTH=32` (162-170), `ENVMARK="\x01env\x01"` (175), `PRIMS` (291), `INT_LIMITS` (310), `INT_VALUES` (325), `NUMERIC` (339), `UNIT`/`UNKNOWN`/`INFER` (360), `ARITH`/`WRAPPING`/`COMPARE` (6424), `_LVALUE` (removed -- the lvalue test is now the `_is_lvalue` function, 6408-6420), `_IDENT` (206), `_ESCAPES` (6485).
+Constants/tables: `C_STANDARD` (157), `USR="zu_"` / `GEN="zg_"` (159-160), `MAX_INSTANCES=8192`, `MAX_FUNCTIONS=8192`, `MAX_EXPR_DEPTH=24`, `INLINE_DEPTH=32` (175), `ENVMARK="\x01env\x01"` (180), `PRIMS` (306-323), `INT_LIMITS` (325-338), `INT_VALUES` (340-352), `NUMERIC` (354), `UNIT`/`UNKNOWN`/`INFER` (375), `ARITH`/`WRAPPING`/`COMPARE` (6614), `_LVALUE` (removed -- the lvalue test is now the `_is_lvalue` function, 6598-6610), `_IDENT` (211), `_ESCAPES` (6675-6685).
 
-Free functions: `_sibling` (117), `kind` (187), `f` (191), `_diag` (195), mangling `comp/clist/path_code/sym_type/tcode_named/sym_fn/sym_variant/sym_member/sym_local/sym_value` (209-271), `has_unknown` (345), `prim` (376), `tcode` (380), `is_int` (402), `int_info` (428), `union_of` (454), `_skip_trivia` (526), `modules_of` (600), `module_parts` (632), `_tparam_names` (681), `_is_variadic` (685), `_bare_name` (691), `_type_args` (696), `_block_value` (705), `_bound_apps` (720), `_bound_names` (741), `_is_fn_field` (791), `is_loop_shape` (6301), `erase` (6323), `refine` (6343), `is_handle` (6361), `_writes_scope` (6365), `paren` (6432), `parse_int` (6438), `int_literal` (6454), `float_literal` (6476), `decode_str` (6472-6499), `decode_char` (6528-6533), `c_string` (6536-6552), `_checked_helpers` (6784-6886), `generate` (6955-6973).
+Free functions: `_sibling` (117), `kind` (192-193), `f` (196-197), `_diag` (200-204), mangling `comp/clist/path_code/sym_type/tcode_named/sym_fn/sym_variant/sym_member/sym_local/sym_value` (209-271), `has_unknown` (360-369), `prim` (391-392), `tcode` (395-414), `is_int` (417-418), `int_info` (443-444), `union_of` (469-483), `_skip_trivia` (541-559), `modules_of` (615-644), `module_parts` (647-658), `_tparam_names` (696-697), `_is_variadic` (700-703), `_bare_name` (731-733), `_type_args` (736-742), `_block_value` (745-757), `_bound_apps` (760-778), `_bound_names` (781-802), `_is_fn_field` (831-850), `is_loop_shape` (6491-6510), `erase` (6513-6530), `refine` (6533-6548), `is_handle` (6551-6552), `_writes_scope` (6555-6569), `paren` (6622-6625), `parse_int` (6628-6641), `int_literal` (6644-6663), `float_literal` (6666-6672), `decode_str` (6688-6715), `decode_char` (6718-6723), `c_string` (6726-6742), `_checked_helpers` (7032-7134), `generate` (7145-7163).
 
-Classes: `SourceMap` (483), `Positions` (547), `Decl` (646), `Emitter` (843), `FnCtx` (2358).
+Classes: `SourceMap` (498-538), `Positions` (562-607), `Decl` (661-693), `Emitter` (883-2394), `FnCtx` (2407-6487).
 
-Runtime string constants: `BANNER` (6559-6576), `INCLUDES` (6578-6586), `PRELUDE_TYPES` (6588-6600), `PRELUDE_TRAP` (6576-6615), `PRELUDE_SCOPE` (6643-6653), `DEFER_RUNTIME` (6629-6662), `PRELUDE_PRINT` (6690-6701), `HELPERS = _checked_helpers()` (6947).
+Runtime string constants: `BANNER` (6749-6766), `INCLUDES` (6768-6776), `PRELUDE_TYPES` (6778-6790), `PRELUDE_TRAP` (6792-6831), `PRELUDE_SCOPE` (6833-6843), `DEFER_RUNTIME` (6845-6878), `PRELUDE_PRINT` (6880-6891), `HELPERS = _checked_helpers()` (7137).
 
 ## 1.3 The two-phase pipeline
 
-`Emitter.__init__` (844-880) builds the declaration tables via `_collect()` (889); then:
+`Emitter.__init__` (884-920) builds the declaration tables via `_collect()` (929-941); then:
 
 ```python
-def emit(self):                                                  # gen_c.py:1760
+def emit(self):                                                  # gen_c.py:1809
     roots = [d for d in self.by_name.get("main", []) if d.dkind == "fn"]
     if not roots:
         roots = [d for ds in self.by_name.values() for d in ds if d.dkind == "fn"]
@@ -67,19 +67,19 @@ def emit(self):                                                  # gen_c.py:1760
     return self.assemble()
 ```
 
-Whole-program, demand-driven from `main` only (1762-1766) — an unreachable std member never has to compile. `drain` (1776) pops a **sorted** worklist:
+Whole-program, demand-driven from `main` only (1811-1815) — an unreachable std member never has to compile. `drain` (1825-1846) pops a **sorted** worklist:
 
 ```python
 self.worklist.sort(key=lambda item: item[0])   # by mangled cname
 cname, decl, targs, self_ty = self.worklist.pop(0)
 self.emit_fn(cname, decl, targs, self_ty)
 ```
-with a `MAX_FUNCTIONS` guard that reports "gen_c reached its bound on the functions one program may lower" (1792). That guard counts FUNCTIONS EMITTED and shared its constant with `MAX_INSTANCES`, which counts generic TYPE instantiations in a different loop; the two are separate now, and the message names the bound rather than whichever std function sorted first.
+with a `MAX_FUNCTIONS` guard that reports "gen_c reached its bound on the functions one program may lower" (1841). That guard counts FUNCTIONS EMITTED and shared its constant with `MAX_INSTANCES`, which counts generic TYPE instantiations in a different loop; the two are separate now, and the message names the bound rather than whichever std function sorted first.
 
 ## 1.4 Output section order — exact
 
 ```python
-def assemble(self):                                              # gen_c.py:2062
+def assemble(self):                                              # gen_c.py:2111-2129
     entry = self.entry_point()      # FIRST: main can register one last type
     types = self.emit_types()
     out = []
@@ -100,24 +100,24 @@ def assemble(self):                                              # gen_c.py:2062
 
 So the physical file is:
 
-1. `BANNER` comment (6557-6574)
-2. `INCLUDES` — 6 headers (6576-6584)
-3. `prelude()` (2116-2128): `PRELUDE_TYPES` + `PRELUDE_TRAP`, then `PRELUDE_SCOPE` iff `"scope" in self.needs`, then `PRELUDE_PRINT` iff `"print" in self.needs`, then `HELPERS[name] for name in sorted(self.helpers)`
-4. `emit_types()` (2152-2175): `/* ---- types ---- */`, then **all** `typedef struct X X;` forward decls (`for cname in sorted(self.types)`), blank line, then one program-wide `enum { ... }` of variant tags (`for name in sorted(self.consts)`), then struct/union bodies in `topo()` order
-5. `defer_section()` (2130-2150): capture structs `zg_envN`, the `zg_defer_env` union, then `DEFER_RUNTIME` — emitted only if `"scope" in self.needs`
+1. `BANNER` comment (6749-6766)
+2. `INCLUDES` — 6 headers (6768-6776)
+3. `prelude()` (2165-2177): `PRELUDE_TYPES` + `PRELUDE_TRAP`, then `PRELUDE_SCOPE` iff `"scope" in self.needs`, then `PRELUDE_PRINT` iff `"print" in self.needs`, then `HELPERS[name] for name in sorted(self.helpers)`
+4. `emit_types()` (2201-2224): `/* ---- types ---- */`, then **all** `typedef struct X X;` forward decls (`for cname in sorted(self.types)`), blank line, then one program-wide `enum { ... }` of variant tags (`for name in sorted(self.consts)`), then struct/union bodies in `topo()` order
+5. `defer_section()` (2179-2199): capture structs `zg_envN`, the `zg_defer_env` union, then `DEFER_RUNTIME` — emitted only if `"scope" in self.needs`
 6. `/* ---- prototypes ---- */` + every `self.protos[cname]` sorted by cname
 7. `/* ---- definitions ---- */` + every `self.bodies[cname]` sorted by cname
 8. `entry_point()` — the `int main(int, char**)` shim
 
-Note the ordering subtlety at `assemble` 2062-2080: `entry_point()` is *computed* before `emit_types()` (it can `request_type`) but *appended last*.
+Note the ordering subtlety at `assemble` 2111-2129: `entry_point()` is *computed* before `emit_types()` (it can `request_type`) but *appended last*.
 
 ## 1.5 The declaration model
 
-`Decl` (646-678) `__slots__ = ("parts","node","dkind","name","tparams","module","owner","otparams")`. `dkind ∈ {"type","fn","value","variant"}`. Owner type params come **first**: `tparams = self.otparams + tuple(tparams)` (658) — "a method of `Vec<T>` is generic in T whether or not it declares any type parameters of its own, so ... an instantiation is (receiver args + call args)". `key` = `(module, owner or "", name)` (654). `scope_parts` = module parts + `(owner,)` and for an impl entry that is the **target** type, not the trait (`scope_parts` 672-678).
+`Decl` (646-678) `__slots__ = ("parts","node","dkind","name","tparams","module","owner","otparams")`. `dkind ∈ {"type","fn","value","variant"}`. Owner type params come **first**: `tparams = self.otparams + tuple(tparams)` (673) — "a method of `Vec<T>` is generic in T whether or not it declares any type parameters of its own, so ... an instantiation is (receiver args + call args)". `key` = `(module, owner or "", name)` (669). `scope_parts` = module parts + `(owner,)` and for an impl entry that is the **target** type, not the trait (`scope_parts` 687-693).
 
-`_collect` (889) does impls **last** (889-901). `_collect_decl` (903) registers: Struct/Enum/Alias as `"type"`; every enum variant as its own `"variant"` decl (`Ok`, `Err`, `None` are importable names — `_collect_decl` 910-919); struct fn-fields as `"fn"` with `otparams=_tparam_names(node)`; struct fields with a default and no type, and `consts`, as `"value"`; `Function` as `"fn"`; `Impl` entries as `base + (target, trait, ename)` with `dk = "fn" if kind(entry) in ("Function","Lambda") else "value"` (962-964) — the trait component in `parts[-2]` is how `drop_impl`/`impl_entry`/`trait_methods` tell an impl entry from a type's own method; `Let`/`Const` as `"value"`.
+`_collect` (929-941) does impls **last** (929-941). `_collect_decl` (943-1010) registers: Struct/Enum/Alias as `"type"`; every enum variant as its own `"variant"` decl (`Ok`, `Err`, `None` are importable names — `_collect_decl` 943-1010); struct fn-fields as `"fn"` with `otparams=_tparam_names(node)`; struct fields with a default and no type, and `consts`, as `"value"`; `Function` as `"fn"`; `Impl` entries as `base + (target, trait, ename)` with `dk = "fn" if kind(entry) in ("Function","Lambda") else "value"` (1002-1004) — the trait component in `parts[-2]` is how `drop_impl`/`impl_entry`/`trait_methods` tell an impl entry from a type's own method; `Let`/`Const` as `"value"`.
 
-Three indexes: `self.decls[(scope_parts, name)]`, `self.by_key[(module, owner, name)]`, `self.by_name[name]` (853-855). `lookup` (974) asks the module graph first (visibility is `modules.py`'s job), then the local table walking `parts` outward, then `by_name` module-agnostically.
+Three indexes: `self.decls[(scope_parts, name)]`, `self.by_key[(module, owner, name)]`, `self.by_name[name]` (853-855). `lookup` (1014-1041) asks the module graph first (visibility is `modules.py`'s job), then the local table walking `parts` outward, then `by_name` module-agnostically.
 
 ---
 
@@ -200,9 +200,9 @@ def sym_value(parts) -> str:
     return USR + "v" + path_code(parts)
 ```
 
-Note `sym_value` is declared but **never called** — module-level bindings are inlined at their use site (`ex_Path` 2853-2894), which is exactly what the docstring at 58-61 reserves it for.
+Note `sym_value` is declared but **never called** — module-level bindings are inlined at their use site (`ex_Path` 2935-2976), which is exactly what the docstring at 58-61 reserves it for.
 
-## 2.3 Type encoding — `tcode` (364-383)
+## 2.3 Type encoding — `tcode` (395-414)
 
 ```python
 def tcode(t) -> str:
@@ -233,18 +233,18 @@ Tag letters lowercase, `I`/`O`/`S` uppercase — no tag can be mistaken for the 
 
 | site | producer | call site |
 |---|---|---|
-| named type / monomorphised instance | `USR + tcode(t)` | `request_type` 1244-1261 |
-| structural type (array/union/fn) | `GEN + tcode(t)` | `request_type` 1249 |
-| function / method / instantiation | `sym_fn(decl.parts, sig, targs, self_ty)` | `request_fn` 1806; `entry_point` 2265-2313 |
-| enum constant (tag) | `sym_variant(parts + (vname,))` | `_request_named` 1264, `make_variant` 4168-4183, `pat_conds` 5880-5923/5880-5923, `match_enum` 5934-6005, `ex_Try` 6091-6113 |
-| struct member / enum payload member | `sym_member(name)` | `emit_type` 2170-2225/2202, field read in `ex_Member` 2897-2937, `construct_type` 3323-3362, `make_variant` 4168-4183 |
-| trait slot | `sym_member(name) + ("" if seen[name]==1 else "_%d" % seen[name])` | `trait_slots` 1432 |
-| local / parameter | `sym_local(name, n)` with a **per-function** counter | `FnCtx.declare` 2430-2437 |
-| struct tag | the *same string* as the typedef | `emit_types` 2152-2175 `typedef struct %s %s;` |
-| label | `GEN + stem + tmpcounter` | `FnCtx.label` 4275-4277 |
-| temporary | `"%st%d" % (GEN, self.tmp)` | `new_tmp` 2415-2420 |
+| named type / monomorphised instance | `USR + tcode(t)` | `request_type` 1284-1301 |
+| structural type (array/union/fn) | `GEN + tcode(t)` | `request_type` 1284-1301 |
+| function / method / instantiation | `sym_fn(decl.parts, sig, targs, self_ty)` | `request_fn` 1848-1863; `entry_point` 2346-2394 |
+| enum constant (tag) | `sym_variant(parts + (vname,))` | `_request_named` 1303-1382, `make_variant` 4218-4233, `pat_conds` 6096-6139/6096-6139, `match_enum` 6182-6253, `ex_Try` 6281-6303 |
+| struct member / enum payload member | `sym_member(name)` | `emit_type` 2251-2306/2251-2306, field read in `ex_Member` 2978-3018, `construct_type` 3404-3443, `make_variant` 4218-4233 |
+| trait slot | `sym_member(name) + ("" if seen[name]==1 else "_%d" % seen[name])` | `trait_slots` 1452-1497 |
+| local / parameter | `sym_local(name, n)` with a **per-function** counter | `FnCtx.declare` 2479-2486 |
+| struct tag | the *same string* as the typedef | `emit_types` 2201-2224 `typedef struct %s %s;` |
+| label | `GEN + stem + tmpcounter` | `FnCtx.label` 4373-4375 |
+| temporary | `"%st%d" % (GEN, self.tmp)` | `new_tmp` 2464-2469 |
 
-`FnCtx.declare` (2430-2437):
+`FnCtx.declare` (2479-2486):
 ```python
 def declare(self, name, ty, byref=False):
     n = self.counts.get(name, 0) + 1
@@ -253,9 +253,9 @@ def declare(self, name, ty, byref=False):
     self.scopes[-1][name] = ("(*%s)" % cname if byref else cname, ty)
     return cname
 ```
-`self.counts` is per-`FnCtx`, not per-scope, so the *second* `x` anywhere in a function body becomes `zu_l1x_2`. A `::` (mutable) parameter is stored as `(*zu_l4self)` so every reader downstream is oblivious (`declare` 2430-2437).
+`self.counts` is per-`FnCtx`, not per-scope, so the *second* `x` anywhere in a function body becomes `zu_l1x_2`. A `::` (mutable) parameter is stored as `(*zu_l4self)` so every reader downstream is oblivious (`declare` 2479-2486).
 
-Generated identifiers (all `zg_`): `zg_t<N>` temporaries; `zg_brk<N>`/`zg_cnt<N>` loop labels; `zg_fmt<N>` format-done label; `zg_blk<N>` scope record; `zg_cap<N>` capture instance; `zg_live<N>` drop flag; `zg_d<N>` defer thunk, `zg_env<N>` its capture struct, `zg_u<N>` its member in the `zg_defer_env` union, `zg_c<i>` capture fields; `zg_v<mangled-fn-minus-zu_>` trait thunk (`cname = GEN + "v" + target[len(USR):]`, 1638); `zg_console_write`/`zg_console_write_byte`, composed rather than written (`console_thunk` 1683-1712); `zg_a<i>` thunk params; `zg_self`, `zg_tag`, `zg_data`, `zg_pad`, `zg_elems`, `zg_m<tcode>`, `zg_tag<tcode>`, `zg_n`, `zg_slot`, `zg_fn`, `zg_env`, `zg_none`, `zg_argc`, `zg_argv`.
+Generated identifiers (all `zg_`): `zg_t<N>` temporaries; `zg_brk<N>`/`zg_cnt<N>` loop labels; `zg_fmt<N>` format-done label; `zg_blk<N>` scope record; `zg_cap<N>` capture instance; `zg_live<N>` drop flag; `zg_d<N>` defer thunk, `zg_env<N>` its capture struct, `zg_u<N>` its member in the `zg_defer_env` union, `zg_c<i>` capture fields; `zg_v<mangled-fn-minus-zu_>` trait thunk (`cname = GEN + "v" + target[len(USR):]`, 1678); `zg_console_write`/`zg_console_write_byte`, composed rather than written (`console_thunk` 1723-1752); `zg_a<i>` thunk params; `zg_self`, `zg_tag`, `zg_data`, `zg_pad`, `zg_elems`, `zg_m<tcode>`, `zg_tag<tcode>`, `zg_n`, `zg_slot`, `zg_fn`, `zg_env`, `zg_none`, `zg_argc`, `zg_argv`.
 
 ## 2.5 C reserved words / reserved identifier classes
 
@@ -267,7 +267,7 @@ Evidence corpus: `tests/corpus/codegen/c_keywords_c89.zen`, `c_keywords_c99_c11.
 
 # 3. Trap emission — exact
 
-## 3.1 Trap runtime (`PRELUDE_TRAP`, gen_c.py:6625-6581) — verbatim
+## 3.1 Trap runtime (`PRELUDE_TRAP`, gen_c.py:6792-6831) — verbatim
 
 ```c
 /* A trap is for a bug (DESIGN.md).  It prints file:line:col and aborts with
@@ -311,9 +311,9 @@ static size_t zg_idx_s(int64_t i, size_t len, const char *file,
 
 `zg_trap` is `fflush(stdout)` **before** the stderr write and after — so stdout ordering is deterministic in the `.stderr` corpus. Exit code 134 (SIGABRT-equivalent), via `exit`, not `abort()`.
 
-Trap message strings, complete set: `"integer overflow"`, `"divide by zero"`, `"index out of bounds"`, `"unreachable match arm"` (via `zg_unreachable`), `"too many deferred closures on one block"` (`DEFER_RUNTIME` 6627-6660).
+Trap message strings, complete set: `"integer overflow"`, `"divide by zero"`, `"index out of bounds"`, `"unreachable match arm"` (via `zg_unreachable`), `"too many deferred closures on one block"` (`DEFER_RUNTIME` 6845-6878).
 
-## 3.2 The checked-helper generator (`_checked_helpers` 6757-6859) — verbatim
+## 3.2 The checked-helper generator (`_checked_helpers` 7032-7134) — verbatim
 
 ```python
 def _checked_helpers():
@@ -455,11 +455,11 @@ static int32_t zg_wsub_i32(int32_t a, int32_t b) { return (int32_t)((uint32_t)a 
 static int32_t zg_wmul_i32(int32_t a, int32_t b) { return (int32_t)((uint32_t)a * (uint32_t)b); }
 ```
 
-**`__builtin_*_overflow` is used only for add/sub/mul, for all ten integer types** (`i8 i16 i32 i64 isize u8 u16 u32 u64 usize`, `INT_LIMITS` 309-321), and only under `ZG_HAS_OVERFLOW_BUILTINS`. Division/modulo never use a builtin. Wrapping ops never trap and take no position argument; signed wrapping goes through the unsigned type to avoid UB (`isize` maps to `size_t`).
+**`__builtin_*_overflow` is used only for add/sub/mul, for all ten integer types** (`i8 i16 i32 i64 isize u8 u16 u32 u64 usize`, `INT_LIMITS` 325-338), and only under `ZG_HAS_OVERFLOW_BUILTINS`. Division/modulo never use a builtin. Wrapping ops never trap and take no position argument; signed wrapping goes through the unsigned type to avoid UB (`isize` maps to `size_t`).
 
 ## 3.3 Call sites
 
-**Binary arithmetic** — `fold_binary` (3223-3262). Note that the checked result is **always spilled into a temporary**:
+**Binary arithmetic** — `fold_binary` (3305-3344). Note that the checked result is **always spilled into a temporary**:
 
 ```python
 if op in ARITH:
@@ -494,7 +494,7 @@ if op in WRAPPING:
 ```
 Not spilled — it cannot trap. Non-int falls back to `op[0]`, i.e. `+%` becomes `+`.
 
-**Unary minus** — `ex_Unary` (3157-3181). Negative literals are folded (no trap); a runtime negation is `0 - x`:
+**Unary minus** — `ex_Unary` (3206-3230). Negative literals are folded (no trap); a runtime negation is `0 - x`:
 ```python
 if is_int(ty):
     file, line, col = self.e.pos.of(node)
@@ -505,7 +505,7 @@ if is_int(ty):
 ```
 Position here is `pos.of(node)` (node start), **not** the operator-gap scan.
 
-**Fixed-array bounds check** — `ex_Index` (3124-3155):
+**Fixed-array bounds check** — `ex_Index` (3173-3204):
 ```python
 if bty is not None and bty[0] == "array":
     file, line, col = self.e.pos.operator(node, base, index)
@@ -515,11 +515,11 @@ if bty is not None and bty[0] == "array":
         GEN, helper, icode, bty[1], c_string(file.encode("utf-8")), line, col)
     return ("%s.%selems[%s]" % (paren(bcode), GEN, checked), bty[2])
 ```
-i.e. `arr.zg_elems[zg_idx_u(i, 8, "m.zen", 3, 9)]`. A **`Ptr<T>` index is unchecked** — `("%s[%s]" % (paren(bcode), icode), bty[1])` (3042-3044) — "a raw pointer carries no length ... and `Vec.get` returns a Res instead". A named type's `s[i]` becomes a call to its own `index` method (3126).
+i.e. `arr.zg_elems[zg_idx_u(i, 8, "m.zen", 3, 9)]`. A **`Ptr<T>` index is unchecked** — `("%s[%s]" % (paren(bcode), icode), bty[1])` (3042-3044) — "a raw pointer carries no length ... and `Vec.get` returns a Res instead". A named type's `s[i]` becomes a call to its own `index` method (3175).
 
-`self.e.helpers` is a `set`, drained sorted at `prelude()` 1870. `HELPERS["idx_u"]`/`["idx_s"]` are `""` because those two live in `PRELUDE_TRAP` unconditionally (6574-6613).
+`self.e.helpers` is a `set`, drained sorted at `prelude()` 1870. `HELPERS["idx_u"]`/`["idx_s"]` are `""` because those two live in `PRELUDE_TRAP` unconditionally (6792-6831).
 
-**Unreachable match arm** — `match_enum` (5934-6005) when there is no wildcard arm:
+**Unreachable match arm** — `match_enum` (6182-6253) when there is no wildcard arm:
 ```python
 file, line, col = self.e.pos.of(node)
 self.line("default: %sunreachable(%s, %d, %d);" % (GEN, c_string(file.encode("utf-8")), line, col))
@@ -527,7 +527,7 @@ self.line("default: %sunreachable(%s, %d, %d);" % (GEN, c_string(file.encode("ut
 
 ## 3.4 The operator position
 
-`Positions.operator` (571-592): if the node has an `op_span`, use it; otherwise scan the source text **between** the left operand's end and the right operand's start, skipping whitespace, `//` and `/* */` (`_skip_trivia`, 526-544), and take the first real byte's `(line, col)`. Fallback is `self.of(node)`. Source text comes from `SourceMap` (483-523), which reads from `root` on disk or from the `sources` dict. File names are made relative to `root` and `\`-normalised to `/` (`relfile`, 554-562), so no absolute path reaches the output. `__FILE__` is never emitted.
+`Positions.operator` (571-592): if the node has an `op_span`, use it; otherwise scan the source text **between** the left operand's end and the right operand's start, skipping whitespace, `//` and `/* */` (`_skip_trivia`, 526-544), and take the first real byte's `(line, col)`. Fallback is `self.of(node)`. Source text comes from `SourceMap` (483-523), which reads from `root` on disk or from the `sources` dict. File names are made relative to `root` and `\`-normalised to `/` (`relfile`, 569-577), so no absolute path reaches the output. `__FILE__` is never emitted.
 
 ---
 
@@ -541,7 +541,7 @@ Types are plain hashable tuples:
 ("array", count, T) | ("fn", ret, (params...)) | ("union", (members sorted by tcode))
 ("unit",) | ("unknown",) | ("variadic",) | ("lambda", ...) | ("loop", n)
 ```
-The last two are FnCtx-internal binding markers, never types (`bind_closure` 4279-4306, `lower_loop` 4413-4530).
+The last two are FnCtx-internal binding markers, never types (`bind_closure` 4377-4404, `lower_loop` 4543-4660).
 
 ## 4.2 Primitives (`PRIMS`, 291-307)
 
@@ -555,9 +555,9 @@ PRIMS = {
 }
 ```
 
-`resolve_type` (1064) special-cases: `Ptr`/`RawPtr` → `("ptr", arg or u8)`; `...` → `("variadic",)`; any name in `NUMERIC` → `prim(name)` **even though std declares `i32` etc. as struct bodies** carrying `MIN`/`MAX`/`BITS` (1082-1088); `@Self` → `self_ty` or the enclosing type; `Alias` transparently resolves to its target.
+`resolve_type` (1104-1165) special-cases: `Ptr`/`RawPtr` → `("ptr", arg or u8)`; `...` → `("variadic",)`; any name in `NUMERIC` → `prim(name)` **even though std declares `i32` etc. as struct bodies** carrying `MIN`/`MAX`/`BITS` (1122-1128); `@Self` → `self_ty` or the enclosing type; `Alias` transparently resolves to its target.
 
-## 4.3 `ctype` (1202-1225)
+## 4.3 `ctype` (1242-1265)
 
 ```python
 def ctype(self, t):
@@ -584,21 +584,21 @@ def ctype(self, t):
     return "int"
 ```
 
-- **`str`** — `zg_str` (`typedef struct zg_str { unsigned char *data; size_t len; }`, 6283) *unless* std declares a `str` type, in which case the user's struct wins and its members are read through `sym_member` (`str_names`/`str_literal` 2872-2884). `str_names` hardcodes the member names `"data"` and `"len"`.
-- **Function type** → `zg_closure` (`{ void *fn; void *env; }`, 6595). This is essentially vestigial: closures are inlined, never materialised (`ex_Lambda` 6251-6261 errors).
+- **`str`** — `zg_str` (`typedef struct zg_str { unsigned char *data; size_t len; }`, 6283) *unless* std declares a `str` type, in which case the user's struct wins and its members are read through `sym_member` (`str_names`/`str_literal` 2921-2933). `str_names` hardcodes the member names `"data"` and `"len"`.
+- **Function type** → `zg_closure` (`{ void *fn; void *env; }`, 6785). This is essentially vestigial: closures are inlined, never materialised (`ex_Lambda` 6441-6451 errors).
 - **`Scope`** → `zg_scope *` (pointer to the enclosing block's record).
 - **`()`** → `void`.
 - Everything nominal/array/union → `request_type` mangled name.
 
-`declarator(t, name)` (1235): pointer spellings bind to the name (`int32_t *x`), everything else gets a space. `fnptr(ret, params, name)` (1227): `ret (*name)(void *, params..)` — the receiver is always erased to `void *`, one slot per method serves every impl.
+`declarator(t, name)` (1275-1280): pointer spellings bind to the name (`int32_t *x`), everything else gets a space. `fnptr(ret, params, name)` (1267-1273): `ret (*name)(void *, params..)` — the receiver is always erased to `void *`, one slot per method serves every impl.
 
-## 4.4 Emitted layouts (`emit_type`, 2170-2225)
+## 4.4 Emitted layouts (`emit_type`, 2251-2306)
 
 **struct**:
 ```c
 struct zu_t...Point { int32_t zu_m1x; int32_t zu_m1y; };
 ```
-An empty struct gets `char zg_pad;` (C11 6.7.2.1p1 requires a member) — "one byte, in exactly one place, so a bare Empty and an Empty field agree" (2210). Function-typed fields are **skipped** — "a method is a function, not storage" (1306).
+An empty struct gets `char zg_pad;` (C11 6.7.2.1p1 requires a member) — "one byte, in exactly one place, so a bare Empty and an Empty field agree" (2259). Function-typed fields are **skipped** — "a method is a function, not storage" (1346).
 
 **enum — tag + union**:
 ```python
@@ -621,9 +621,9 @@ struct zu_t..ResI2_b3i323Err {
     } zg_data;
 };
 ```
-The union is omitted entirely when no variant carries a payload. Payload member is named after the **variant**, `sym_member(vname)`. A `()` payload becomes `None` — "`Ok(())` carries nothing; a void member is illegal C" (1328).
+The union is omitted entirely when no variant carries a payload. Payload member is named after the **variant**, `sym_member(vname)`. A `()` payload becomes `None` — "`Ok(())` carries nothing; a void member is illegal C" (1368).
 
-Tag constants are one **program-wide** C enum, emitted at `emit_types` 2152-2175, keyed by declaration not instantiation (`_request_named` 1193-1272):
+Tag constants are one **program-wide** C enum, emitted at `emit_types` 2201-2224, keyed by declaration not instantiation (`_request_named` 1303-1382):
 ```python
 for i, (vname, _p) in enumerate(variants):
     # Res<i32, E> and Res<i32, F> share `Ok`, and emitting the constant per
@@ -632,14 +632,14 @@ for i, (vname, _p) in enumerate(variants):
 ```
 so the tag value is the variant's **declaration index**.
 
-**trait (fat value)** — a struct that declares fn-fields and **no storage** (`trait_decl`, 1380-1390):
+**trait (fat value)** — a struct that declares fn-fields and **no storage** (`trait_decl`, 1420-1430):
 ```c
 struct zu_t..Display {
     void *zg_self;
     zg_str (*zu_m8toString)(void *, ...);
 };
 ```
-Slot order is declaration order (`trait_slots`, 1374-1419); duplicate names get `_2`, `_3`. Slot parameter/return types are **erased** (`erase`, 6323-6340: `Ptr<T>` → `Ptr<u8>`, named type args erased recursively), and **one trailing `size_t` per erased type parameter of the member** is appended (1406-1407) — the element size the erasure dropped, Zig-`std.mem.Allocator` style.
+Slot order is declaration order (`trait_slots`, 1452-1497); duplicate names get `_2`, `_3`. Slot parameter/return types are **erased** (`erase`, 6513-6530: `Ptr<T>` → `Ptr<u8>`, named type args erased recursively), and **one trailing `size_t` per erased type parameter of the member** is appended (1406-1407) — the element size the erasure dropped, Zig-`std.mem.Allocator` style.
 
 **array** (`[T, N]`):
 ```c
@@ -655,7 +655,7 @@ struct zg_u2_... {
     union { A zg_m<tcodeA>; B zg_m<tcodeB>; } zg_data;
 };
 ```
-Members `sorted(t[1], key=tcode)` (2247), so `A|B` and `B|A` are the same C type and the same name.
+Members `sorted(t[1], key=tcode)` (2296), so `A|B` and `B|A` are the same C type and the same name.
 
 **opaque** (unknown decl or a non-union Alias): `struct X { char zg_pad; };` (2124).
 
@@ -663,15 +663,15 @@ Members `sorted(t[1], key=tcode)` (2247), so `A|B` and `B|A` are the same C type
 
 Both are ordinary enums; they are two *different declarations sharing a name*, disambiguated by arity everywhere:
 
-- `type_decl(name, parts, arity)` (1019-1038) picks by `len(d.tparams) == arity`, falling back to an `Alias`, then to `got[0]`.
-- `_request_named` (1193-1272) picks the candidate whose `len(d.tparams) == len(args)`.
-- `filled_ret` (1851-1879) rewrites a declared `Res<T, _>` into `Res<T, <inferred set>>` by asking `sema.error_set_ast(fnode)`, memoised on `id(fnode)` — "the one funnel every caller reads a return type through, so a caller and a callee can never disagree about what `_` turned out to be".
+- `type_decl(name, parts, arity)` (1059-1078) picks by `len(d.tparams) == arity`, falling back to an `Alias`, then to `got[0]`.
+- `_request_named` (1303-1382) picks the candidate whose `len(d.tparams) == len(args)`.
+- `filled_ret` (1900-1928) rewrites a declared `Res<T, _>` into `Res<T, <inferred set>>` by asking `sema.error_set_ast(fnode)`, memoised on `id(fnode)` — "the one funnel every caller reads a return type through, so a caller and a callee can never disagree about what `_` turned out to be".
 
 Their C names differ because `tcode` includes the argument list: `zu_t3_3std4core6result3ResI1_b3i32` vs `...ResI2_b3i32<E>`.
 
-`Vec`/`Map`/`String` are **not** special-cased: they are ordinary std structs, monomorphised through `request_type`. The only container the compiler knows intrinsically is the fixed array `[T, N]` (which "satisfies Range intrinsically" — `range_bounds` 5267-5289).
+`Vec`/`Map`/`String` are **not** special-cased: they are ordinary std structs, monomorphised through `request_type`. The only container the compiler knows intrinsically is the fixed array `[T, N]` (which "satisfies Range intrinsically" — `range_bounds` 5431-5453).
 
-Coercion `T` → `Res<T>` happens in `coerce` (2636-2660) and fires **only when exactly one variant carries that payload type**:
+Coercion `T` → `Res<T>` happens in `coerce` (2685-2709) and fires **only when exactly one variant carries that payload type**:
 ```python
 carriers = [v for v, p in info[2] if p is not None and p == ty]
 if len(carriers) != 1:
@@ -680,16 +680,16 @@ return self.make_variant(want, carriers[0], code)
 ```
 "Only success lifts: `Err` and `None` are always written."
 
-## 4.6 Building a fat value (`fat_value`, 1682-1719)
+## 4.6 Building a fat value (`fat_value`, 1754-1791)
 
 ```python
 inits = [".%sself = (void *)%s" % (GEN, code)]
 inits += [".%s = %s" % (slot, fn) for slot, fn in slots]
 return "((%s){ %s })" % (self.ctype(trait), ", ".join(inits))
 ```
-Each slot is a `thunk` (1598-1649): a `static` shim `zg_v<mangled>(void *zg_self, ...)` that casts the receiver (`(T *)zg_self` if the impl declared `self :: @Self`, else `(*(T *)zg_self)`), `convert`s each argument from the erased type to the real one, calls the real function, and `convert`s the result back. A missing impl member gives a `NULL` slot (1740). Un-implemented slots are never a cast of a function pointer — "a cast of the function pointer would be undefined; a shim is a call".
+Each slot is a `thunk` (1638-1689): a `static` shim `zg_v<mangled>(void *zg_self, ...)` that casts the receiver (`(T *)zg_self` if the impl declared `self :: @Self`, else `(*(T *)zg_self)`), `convert`s each argument from the erased type to the real one, calls the real function, and `convert`s the result back. A missing impl member gives a `NULL` slot (1780). Un-implemented slots are never a cast of a function pointer — "a cast of the function pointer would be undefined; a shim is a call".
 
-`convert` (1556-1588) **rebuilds** — pointers are cast, tagged unions are reconstructed variant by variant as a nested conditional; nothing reinterprets.
+`convert` (1628-1660) **rebuilds** — pointers are cast, tagged unions are reconstructed variant by variant as a nested conditional; nothing reinterprets.
 
 ---
 
@@ -700,38 +700,38 @@ The module docstring 7-24 is the binding contract. Every emission site sorts. Co
 | line | what | key |
 |---|---|---|
 | 396 | union `tcode` members | `sorted(tcode(m) for m in t[1])` — string sort of member codes |
-| 468 | `union_of` normalisation | `key=tcode` |
+| 469-483 | `union_of` normalisation | `key=tcode` |
 | 629 | `modules_of` | `key=lambda pair: pair[0]` (module path tuple) |
-| — | trait deps — **this sort is gone**: a trait's slots are function pointers, so `type_order` is now `()` and nothing is sorted (`_request_named` 1254-1263 says why) |
-| 1354 | `_deps` | `sorted(set(out))` |
-| 1769 | `emit()` roots | `key=lambda d: d.parts` |
-| 1794 | `drain()` worklist | `key=lambda item: item[0]` (mangled cname) |
-| 2062-2080 | `assemble` prototypes | `sorted(self.protos)` (cname) |
-| 2062-2080 | `assemble` definitions | `sorted(self.bodies)` (cname) |
-| 2116-2128 | `prelude` arithmetic helpers | `sorted(self.helpers)` (helper name) |
-| 2130-2150, 2130-2150 | `defer_section` capture structs and union members | `sorted(self.defer_envs)` (site number) |
-| 2152-2175 | `emit_types` todo | `sorted(self.types)` |
-| 2152-2175 | `emit_types` forward typedefs | `sorted(self.types)` |
-| 2152-2175 | `emit_types` enum tag constants | `sorted(self.consts)` (mangled constant name) |
-| 2152-2175 | `emit_types` type bodies | `self.topo(sorted(bodies))` |
-| 2177-2200, 2177-2200 | `topo` ready set / cycle break | `sorted(...)` by name |
-| 2214 | `emit_type` union members | `key=tcode` |
-| 2265-2313 | `entry_point` main pick | `key=lambda d: d.parts` |
-| 3827-3856 | `trait_methods` | `key=lambda d: d.parts` |
-| 3963-4010 | `pick_overload` candidates | `key=lambda d: d.parts` |
-| 4611-4623 | `free_fn` | `key=lambda d: d.parts` |
-| 4625-4643 | `sink_door` | `key=lambda d: d.parts` |
-| 5636-5663 | `console_sink` Sink lookup | `key=lambda d: d.parts` |
-| 6782-6884 | `_checked_helpers` table build | `sorted(INT_LIMITS.items())` |
+| — | trait deps — **this sort is gone**: a trait's slots are function pointers, so `type_order` is now `()` and nothing is sorted (`_request_named` 1303-1382 says why) |
+| 1384-1394 | `_deps` | `sorted(set(out))` |
+| 1818 | `emit()` roots | `key=lambda d: d.parts` |
+| 1825-1846 | `drain()` worklist | `key=lambda item: item[0]` (mangled cname) |
+| 2111-2129 | `assemble` prototypes | `sorted(self.protos)` (cname) |
+| 2111-2129 | `assemble` definitions | `sorted(self.bodies)` (cname) |
+| 2165-2177 | `prelude` arithmetic helpers | `sorted(self.helpers)` (helper name) |
+| 2179-2199, 2179-2199 | `defer_section` capture structs and union members | `sorted(self.defer_envs)` (site number) |
+| 2201-2224 | `emit_types` todo | `sorted(self.types)` |
+| 2201-2224 | `emit_types` forward typedefs | `sorted(self.types)` |
+| 2201-2224 | `emit_types` enum tag constants | `sorted(self.consts)` (mangled constant name) |
+| 2201-2224 | `emit_types` type bodies | `self.topo(sorted(bodies))` |
+| 2226-2249, 2226-2249 | `topo` ready set / cycle break | `sorted(...)` by name |
+| 2251-2306 | `emit_type` union members | `key=tcode` |
+| 2346-2394 | `entry_point` main pick | `key=lambda d: d.parts` |
+| 3876-3905 | `trait_methods` | `key=lambda d: d.parts` |
+| 4044-4092 | `pick_overload` candidates | `key=lambda d: d.parts` |
+| 4765-4777 | `free_fn` | `key=lambda d: d.parts` |
+| 4779-4797 | `sink_door` | `key=lambda d: d.parts` |
+| 5852-5879 | `console_sink` Sink lookup | `key=lambda d: d.parts` |
+| 7032-7134 | `_checked_helpers` table build | `sorted(INT_LIMITS.items())` |
 
 Other determinism mechanisms:
 
 - **No counter takes part in a name.** A monomorphised instance's name is `tcode` of the type, a pure function of the type (docstring 20-23) — "two instantiations of the same type from different modules produce one name regardless of which was seen first". `mangle_generic_instantiation.zen` and `mangle_module_collision/` gate this.
-- **Temporaries are per function**, numbered by the deterministic emission traversal; `FnCtx.tmp` starts at 0 for every function (2297). `peek`/`peek_block` **restore** `self.tmp` after a speculative lowering (3489-3510, 3411-3430), so a discarded lowering does not perturb numbering.
-- **No pointer, `id()`, timestamp, env var, locale or absolute path** reaches the output. `id()` *is* used, but only as a memo key for `_rets` (1865-1867) — never emitted.
+- **Temporaries are per function**, numbered by the deterministic emission traversal; `FnCtx.tmp` starts at 0 for every function (2346). `peek`/`peek_block` **restore** `self.tmp` after a speculative lowering (3538-3559, 3460-3479), so a discarded lowering does not perturb numbering.
+- **No pointer, `id()`, timestamp, env var, locale or absolute path** reaches the output. `id()` *is* used, but only as a memo key for `_rets` (1914-1916) — never emitted.
 - **Nothing is emitted from a `set`.** `self.helpers` and `self.needs` are sets, consumed sorted / by membership test.
-- `c_string` (6534-6550) emits **octal** escapes, not hex — "which also keeps the determinism scanner's pointer-shaped-hex check quiet" (6538).
-- `defer_thunk` caches on `(body text, capture layout)` (1985-1987, 906), so two lowerings of one closure become one function and a *discarded* speculative lowering does not leave an unreferenced static behind (`defer_thunk` 1962-1965).
+- `c_string` (6726-6742) emits **octal** escapes, not hex — "which also keeps the determinism scanner's pointer-shaped-hex check quiet" (6728).
+- `defer_thunk` caches on `(body text, capture layout)` (1985-1987, 906), so two lowerings of one closure become one function and a *discarded* speculative lowering does not leave an unreferenced static behind (`defer_thunk` 2004-2051).
 - Dicts (`self.types`, `self.protos`, `self.bodies`, `self.decls`, `self.by_name`, ...) are lookup structures only.
 
 `Makefile:52-56` documents the harness: byte-identical C, five checks that gen_c is a pure function of input; `bootstrap.py:384` raises "bootstrap: gen_c is nondeterministic" if a double run differs.
@@ -743,7 +743,7 @@ Other determinism mechanisms:
 ## 6.1 The core contract
 
 ```python
-def expr(self, node, want=None):                                # gen_c.py:2809
+def expr(self, node, want=None):                                # gen_c.py:2858-2873
     """-> (C expression text, resolved type).  May emit statements."""
     if node is None:
         return ("0", UNKNOWN)
@@ -763,16 +763,16 @@ def expr(self, node, want=None):                                # gen_c.py:2809
 
 Every lowering returns `(code, type)` **and is allowed to have already appended statements to `ctx.lines`**. That is the whole answer to "C has no block expressions": anything that needs statements emits them, declares a `zg_tN` result temporary, and hands back the temporary's name. Header comment at 2270-2273: "gen_c may not assume its output nesting is bounded by its input nesting, so a match, a block-as-value and any operation that traps all spill, and an expression deeper than MAX_EXPR_DEPTH spills too." (`tests/corpus/codegen/nesting_*.zen`.)
 
-`_expr` dispatches by class **name** via `getattr(self, "ex_" + kind(node))` (2833); an unknown node is a diagnostic, never a crash.
+`_expr` dispatches by class **name** via `getattr(self, "ex_" + kind(node))` (2882); an unknown node is a diagnostic, never a crash.
 
-`new_tmp` (2415-2420) declares at the current indent and returns the name; it declares **nothing** for `UNIT`/`None` types but still burns a counter value.
+`new_tmp` (2464-2469) declares at the current indent and returns the name; it declares **nothing** for `UNIT`/`None` types but still burns a counter value.
 
-`line` / `open` / `close` (2408-2410) manage an indent level; `self.text()` joins.
+`line` / `open` / `close` (2457-2459) manage an indent level; `self.text()` joins.
 
 ## 6.2 Blocks as values
 
 ```python
-def ex_Block(self, node, want=None):                            # gen_c.py:5693
+def ex_Block(self, node, want=None):                            # gen_c.py:5883-5908
     if want in (None, UNKNOWN):
         # ... lower speculatively, then lower again with the answer as `want`.
         # Without this a block has no type to report, and a `.match` whose arms
@@ -795,7 +795,7 @@ def ex_Block(self, node, want=None):                            # gen_c.py:5693
     return (result if result is not None else "0", want or UNIT)
 ```
 
-So a block-as-value becomes `T zg_tN; { ...stmts...; zg_tN = <tail>; }` and the expression text is `zg_tN`. A block is lowered **twice** when its type is unknown — `peek_block` (3512-3531) lowers into a buffer that is discarded:
+So a block-as-value becomes `T zg_tN; { ...stmts...; zg_tN = <tail>; }` and the expression text is `zg_tN`. A block is lowered **twice** when its type is unknown — `peek_block` (3561-3580) lowers into a buffer that is discarded:
 ```python
 saved = (list(self.lines), self.tmp, self.indent, len(self.e.diags))
 self.push()
@@ -807,9 +807,9 @@ finally:
     self.lines, self.tmp, self.indent = saved[0], saved[1], saved[2]
     del self.e.diags[saved[3]:]
 ```
-`INFER` (360) is the third state alongside `None` (no expectation, nothing reading) and a real type: "a block has to tell those two apart to report the type of its own tail".
+`INFER` (375) is the third state alongside `None` (no expectation, nothing reading) and a real type: "a block has to tell those two apart to report the type of its own tail".
 
-`_block_body` (2537-2602) is where the tail rules live:
+`_block_body` (2618-2683) is where the tail rules live:
 
 ```python
 stmts = list(f(block, "stmts", ()) or ())
@@ -854,12 +854,12 @@ self.exit_scope(here, code)
 return tmp
 ```
 
-`block_value` (2538-2551) wraps it with the RAII/defer scope stacks (`dscopes`, `sscopes`) and returns the value expression or `None`.
+`block_value` (2587-2600) wraps it with the RAII/defer scope stacks (`dscopes`, `sscopes`) and returns the value expression or `None`.
 
 ## 6.3 `.match` in value position
 
 ```python
-def ex_Match(self, node, want=None):                            # gen_c.py:5720
+def ex_Match(self, node, want=None):                            # gen_c.py:5910-5935
     scrut = f(node, "scrutinee")
     arms = list(f(node, "arms", ()) or ())
     scode, sty = self.expr(scrut)
@@ -883,22 +883,22 @@ def ex_Match(self, node, want=None):                            # gen_c.py:5720
     return (result if result is not None else "0", ty or UNIT)
 ```
 
-The scrutinee is **always** spilled to a temporary first (so it is evaluated once). The result is a temporary; each arm assigns it (`arm_body` 5820-5848). Three lowerings:
+The scrutinee is **always** spilled to a temporary first (so it is evaluated once). The result is a temporary; each arm assigns it (`arm_body` 6036-6064). Three lowerings:
 
-- **bool** → `if (s) { ... } else { ... }`, arms matched by `PatLit`/`PatVariant` text `"true"`/`"false"`, `PatWild` as the default for both sides (5878-5896).
-- **enum** → a C `switch (s.zg_tag)`. Arms are **grouped by outer variant** because two `case` labels for one tag is not legal C; everything below the tag is an `if/else` chain inside the case (`match_enum` 5934-6005). Payload is `s.zg_data.zu_m<Variant>`. No wildcard ⇒ `default: zg_unreachable(...)`.
+- **bool** → `if (s) { ... } else { ... }`, arms matched by `PatLit`/`PatVariant` text `"true"`/`"false"`, `PatWild` as the default for both sides (6068-6086).
+- **enum** → a C `switch (s.zg_tag)`. Arms are **grouped by outer variant** because two `case` labels for one tag is not legal C; everything below the tag is an `if/else` chain inside the case (`match_enum` 6182-6253). Payload is `s.zg_data.zu_m<Variant>`. No wildcard ⇒ `default: zg_unreachable(...)`.
 - **scalar** → an `if / else if / else` chain on `s == <literal text>` (5792-5815).
 
-`arm_body` (5820-5848) handles the void case: `elif result is None and value and value not in ("", "0"): self.line("(void)(%s);" % value)` — "an arm whose body is a call returning `()` still has to RUN".
+`arm_body` (6036-6064) handles the void case: `elif result is None and value and value not in ("", "0"): self.line("(void)(%s);" % value)` — "an arm whose body is a call returning `()` still has to RUN".
 
-`arm_type` (5721-5768) computes the match's type when nothing expected one: every arm is peeked (`peek_block` for a Block, `peek` otherwise); **literal arms only contribute a fallback**; non-literal arms are merged with `wider_arm`. `wider_arm` (5823-5844) implements the *only* widening: `Res<T>` vs `Res<T,E>` → the two-arg one; `Res<T,E1>` vs `Res<T,E2>` → `Res<T, union_of([E1, E2])>`.
+`arm_type` (5937-5984) computes the match's type when nothing expected one: every arm is peeked (`peek_block` for a Block, `peek` otherwise); **literal arms only contribute a fallback**; non-literal arms are merged with `wider_arm`. `wider_arm` (6013-6034) implements the *only* widening: `Res<T>` vs `Res<T,E>` → the two-arg one; `Res<T,E1>` vs `Res<T,E2>` → `Res<T, union_of([E1, E2])>`.
 
-Pattern matching itself: `pat_conds` (5880-5923) recurses to arbitrary depth, producing a `conds` list and a `binds` list. A bare string payload name is a **variant test** if the payload type declares such a variant and a **binding** otherwise (`Left(Blank)` vs `Left(cell)`, 5915-5918).
+Pattern matching itself: `pat_conds` (6096-6139) recurses to arbitrary depth, producing a `conds` list and a `binds` list. A bare string payload name is a **variant test** if the payload type declares such a variant and a **binding** otherwise (`Left(Blank)` vs `Left(cell)`, 6105-6108).
 
 ## 6.4 `.try()`
 
 ```python
-def ex_Try(self, node, want=None):                              # gen_c.py:6091
+def ex_Try(self, node, want=None):                              # gen_c.py:6281-6303
     operand = f(node, "operand")
     code, ty = self.expr(operand)
     info = self.e.enum_info(ty) if ty is not None and ty[0] == "named" else None
@@ -933,14 +933,14 @@ if (zg_t5.zg_tag != zu_e..Ok) {
 ```
 and the expression value is `zg_t5.zg_data.zu_m2Ok`.
 
-`emit_propagate` (6089-6126) first `self.unwind_to(0)` — "every early exit is a scope exit", and the error lives in a *temporary*, which is never dropped, so the whole frame can unwind before the return is built. Then it picks the target variant (`Err`, then `None`, then any non-Ok name), and widens the payload with `widen_error`. When widening returns `None`:
+`emit_propagate` (6305-6342) first `self.unwind_to(0)` — "every early exit is a scope exit", and the error lives in a *temporary*, which is never dropped, so the whole frame can unwind before the return is built. Then it picks the target variant (`Err`, then `None`, then any non-Ok name), and widens the payload with `widen_error`. When widening returns `None`:
 ```python
 self.e.error(node, "no implicit error conversion: this error is not "
                    "part of the set this function returns -- widen the "
                    "declared set, there is no From")
 ```
 
-Error-set widening (`widen_error` 6136-6172) is four cases: into a structural `("union", ...)` via `into_union` (a `zg_tag<tcode>` / `zg_m<tcode>` assignment), into a named union-of-types enum by variant name, `spread_set` (one nested `?:` arm per member of a named set, recursively, with a `seen` cycle guard), and `per_member` (one arm per structural union member). All produce **pure conditional expressions**, no statements, and the arm order is the declaration's / the sorted union's, so the text is a pure function of the two types.
+Error-set widening (`widen_error` 6352-6388) is four cases: into a structural `("union", ...)` via `into_union` (a `zg_tag<tcode>` / `zg_m<tcode>` assignment), into a named union-of-types enum by variant name, `spread_set` (one nested `?:` arm per member of a named set, recursively, with a `seen` cycle guard), and `per_member` (one arm per structural union member). All produce **pure conditional expressions**, no statements, and the arm order is the declaration's / the sorted union's, so the text is a pure function of the two types.
 
 ## 6.5 `bool.then` — not special-cased
 
@@ -948,27 +948,27 @@ There is **no** `then` handling in gen_c. `src/std/core/bool.zen:21` declares
 ```
 then* = <T>(b: bool, f: () T) Res<T> { ... }
 ```
-an ordinary generic function with a body and a closure parameter. It reaches `emit_call` (4153-4231), which at 4153-4231 routes it to inlining:
+an ordinary generic function with a body and a closure parameter. It reaches `emit_call` (4235-4321), which at 4235-4321 routes it to inlining:
 ```python
 if any(kind(v) == "Lambda" for v in argnodes) and f(fnode, "body") is not None:
     return self.inline_call(decl, fnode, node, argnodes, targs, want, receiver)
 ```
-`refine(ty, want)` (6343-6358) is what fills `then`'s `T` from the call site when the closure body says nothing — its docstring names `then<T>` explicitly.
+`refine(ty, want)` (6533-6548) is what fills `then`'s `T` from the call site when the closure body says nothing — its docstring names `then<T>` explicitly.
 
 ## 6.6 Lambdas and closures
 
 Header comment 4038-4043: "a lambda is never a value here: passing one inlines the callee, and calling the parameter it was bound to inlines the lambda."
 
-- `ex_Lambda` (6251-6261) is a hard error: "a closure here would have to escape its frame; an escaping closure needs an Alloc (DESIGN.md)".
-- `bind_closure` (4279-4306) binds a parameter name to a marker, **carrying the frame it was written in**:
+- `ex_Lambda` (6441-6451) is a hard error: "a closure here would have to escape its frame; an escaping closure needs an Alloc (DESIGN.md)".
+- `bind_closure` (4377-4404) binds a parameter name to a marker, **carrying the frame it was written in**:
 ```python
 self.scopes[-1][name] = (name, ("lambda", lam, pty, home,
                                 (self.subst, self.parts, self.self_ty),
                                 self.floor))
 ```
   `home` is the caller's depth, taken by `inline_call` **before** it pushes the callee's frame. `self.floor` beside it is where the WRITING function's own body begins, which is not `home`: `home` is where the lambda was written and the floor is where the body it was written in started. `inline_lambda` restores both, so a lambda's `x = ..` on a name its own writer had already bound stays that writer's store. It used to be `len(self.scopes)` read inside `bind_closure`, i.e. after the push, so the rewind below kept the callee's frame and every name the callee bound — its parameters, the receiver bound under the first parameter's name, and its own locals, which `block_value` puts in that same frame — was in scope for a closure written at the call site. `(b > 0).then(() { println("{}", b) })` printed `true`, because `bool.then`'s first parameter is spelled `b`. Pinned by `tests/corpus/std/bool_then_closure_keeps_its_own_names.zen`.
-- `inline_call` (4276-4343): resolves type args, `result = new_tmp(ret)`, pushes a scope, binds the receiver to `params[0]`'s name, evaluates non-lambda arguments into declared locals (with `coerce`, so an Arena reaching an `alloc: Alloc` parameter builds the fat record), binds lambda arguments via `bind_closure`, swaps `(subst, parts, self_ty)` to the callee's, emits `{ ... }` around `block_value(body, ret)`, assigns `result`, restores. Guarded by `INLINE_DEPTH` (170-170).
-- `inline_lambda` (4345-4409): the arguments are lowered **at the call site** *before* the frame moves; then
+- `inline_call` (4406-4473): resolves type args, `result = new_tmp(ret)`, pushes a scope, binds the receiver to `params[0]`'s name, evaluates non-lambda arguments into declared locals (with `coerce`, so an Arena reaching an `alloc: Alloc` parameter builds the fat record), binds lambda arguments via `bind_closure`, swaps `(subst, parts, self_ty)` to the callee's, emits `{ ... }` around `block_value(body, ret)`, assigns `result`, restores. Guarded by `INLINE_DEPTH` (175).
+- `inline_lambda` (4475-4539): the arguments are lowered **at the call site** *before* the frame moves; then
 ```python
 home = None
 if len(marker) > 4:
@@ -978,18 +978,18 @@ if len(marker) > 4:
     self.floor = marker[5]
 ```
 — the scope stack is truncated back to the depth the closure was *written* at, so `find`'s own `range.loop((h, value){..})` cannot shadow the caller's `h`. Then params are declared and assigned, `{ ... }` is emitted around `block_value(lam.body, ret)`, result assigned, and the frame restored. Handle/`("loop",…)`-typed params are aliased rather than copied (4196-4197).
-- The **one** closure that becomes a real C function is a `defer` closure: `Emitter.defer_thunk` (1923-1970). Its body is lowered *before* its capture struct is named, using the `ENVMARK = "\x01env\x01"` placeholder, so two lowerings of one closure compare equal and dedupe through `_defer_cache`; the name is patched in with `.replace(ENVMARK, env or "void")` at 1999-2018. Captures are computed by `captures` (5411-5445) walking the lambda for `Path` nodes that resolve in this frame, excluding names bound inside it, and excluding `lambda`/`loop`/`fn`-typed bindings.
+- The **one** closure that becomes a real C function is a `defer` closure: `Emitter.defer_thunk` (2004-2051). Its body is lowered *before* its capture struct is named, using the `ENVMARK = "\x01env\x01"` placeholder, so two lowerings of one closure compare equal and dedupe through `_defer_cache`; the name is patched in with `.replace(ENVMARK, env or "void")` at 2048-2067. Captures are computed by `captures` (5601-5635) walking the lambda for `Path` nodes that resolve in this frame, excluding names bound inside it, and excluding `lambda`/`loop`/`fn`-typed bindings.
 
 ## 6.7 The loop family
 
-`is_loop_shape` (6301-6320) recognises a loop **by shape**, not by module/name: a bodyless function whose last parameter is an `FnType` whose first inner parameter's type is `Named("LoopHandle")`. `emit_call` 4153-4231 routes those to `lower_loop`.
+`is_loop_shape` (6491-6510) recognises a loop **by shape**, not by module/name: a bodyless function whose last parameter is an `FnType` whose first inner parameter's type is `Named("LoopHandle")`. `emit_call` 4235-4321 routes those to `lower_loop`.
 
-`lower_loop` (4413-4530) — full lowering:
+`lower_loop` (4543-4660) — full lowering:
 
-- Inner parameter *names* decide the shape: `wants_index = "index" in names[1:]`, `wants_value`, `wants_acc` (4465).
-- Labels `brk`, `cnt` (4468). Non-local exits are `goto`, **not** C `break`/`continue`: "an inlined body can sit inside a `switch` that a match produced, where a C `break` would leave the switch and not the loop" (4449).
-- The result type, when nothing asked: `Res<elem>` built from `type_decl("Res", parts, 1)` (1019-1038) — "a loop whose value nothing asked for still HAS one, and the `.match` on it needs its type". `result` is pre-set to `none_of(ret)`.
-- Ranged form: three `size_t` temporaries `counter`, `limit`, `base`, then `while (counter < limit) {`. `index` is `(counter - base)` and `value` is the range's element — "on `Range(10, 13)` they are 0,1,2 and 10,11,12" (4510).
+- Inner parameter *names* decide the shape: `wants_index = "index" in names[1:]`, `wants_value`, `wants_acc` (4563).
+- Labels `brk`, `cnt` (4566). Non-local exits are `goto`, **not** C `break`/`continue`: "an inlined body can sit inside a `switch` that a match produced, where a C `break` would leave the switch and not the loop" (4547).
+- The result type, when nothing asked: `Res<elem>` built from `type_decl("Res", parts, 1)` (1059-1078) — "a loop whose value nothing asked for still HAS one, and the `.match` on it needs its type". `result` is pre-set to `none_of(ret)`.
+- Ranged form: three `size_t` temporaries `counter`, `limit`, `base`, then `while (counter < limit) {`. `index` is `(counter - base)` and `value` is the range's element — "on `Range(10, 13)` they are 0,1,2 and 10,11,12" (4608).
 - `wants_index` without a range: `counter = 0` then `for (;;)`.
 - A parameterless leading lambda is a `while cond`: `for (;;) { <cond inlined>; if (!c) { goto brk; } ...` (3936-3942).
 - Otherwise `for (;;)`.
@@ -997,7 +997,7 @@ if len(marker) > 4:
 - The body is inlined via `inline_lambda` at the accumulator's type; `acc` is re-assigned from the body's value.
 - Tail: `cnt: ;`, `counter = counter + 1;`, `}`, `brk: ;`, then `result = ok_of(ret, acc)`.
 
-`lower_handle` (5353-5380) lowers `h.next()` / `h.break(v)`:
+`lower_handle` (5543-5570) lowers `h.next()` / `h.break(v)`:
 ```python
 if name == "next":
     self.unwind_to(ddepth)
@@ -1011,7 +1011,7 @@ if name == "break":
 ```
 Both unwind the RAII/defer scopes down to the loop's own depth first.
 
-`range_value` (5302-5333): an array walks `base.zg_elems[counter]`; a named Range with no `at` walks its own index space (`counter` as `usize`) — "which is what makes `Range(0, 5)` a bare C for-loop"; otherwise `at(counter)` is called and a non-`Ok` result `goto`s the break label.
+`range_value` (5492-5523): an array walks `base.zg_elems[counter]`; a named Range with no `at` walks its own index space (`counter` as `usize`) — "which is what makes `Range(0, 5)` a bare C for-loop"; otherwise `at(counter)` is called and a non-`Ok` result `goto`s the break label.
 
 ## 6.8 Other expression forms worth pinning
 
@@ -1026,19 +1026,19 @@ self.line("%s = %s;" % (tmp, rcode))
 self.close()
 return (tmp, prim("bool"))
 ```
-- **Assignment as expression** (`ex_Binary` 3159-3211) emits the store and returns the target.
+- **Assignment as expression** (`ex_Binary` 3240-3292) emits the store and returns the target.
 - **Binary spine** (3107-3141) is walked with an explicit loop, not recursion — "`a + b + c + ..` is LEFT-nested, so one python frame per term turns a long line into a RecursionError -- and 'a crash is not a diagnostic'". The type hint propagates down the spine only through `ARITH`/`WRAPPING` ops; at the base, an unannotated int literal on the left takes its width from a peek of the right operand (3115-3119).
-- **`==` on a named type** becomes the `Eq` impl's `eq` call, statically resolved (`eq_call`, 3786-3800); `!=` wraps it in `(!...)`. "a C `==` on a struct is not even legal C."
-- **`consume x`** (`ex_Consume`, 3183-3189) is a no-op on the value; it calls `kill_drop` to clear the drop flag.
-- **Struct literal** (`construct_type`, 3322-3361): `((T){ .zu_mx = ..., .zu_my = ... })`, in **declared field order**, positional args filled by index, `((T){0})` when nothing is supplied.
-- **Fixed array / array literal** (`ex_FixedArray`/`ex_ArrayLit` 6270-6280): `((T){ { e0, e1 } })` — note the doubled brace for the `zg_elems` member.
-- **`ex_Record`** (6282-6286) and **`ex_MetaCall`** (6295-6297) are errors.
-- `paren` (6432-6435) only wraps when the code is neither an identifier nor already fully parenthesised.
-- `int_literal` (6454-6473): unsigned always `((uint32_t)5ULL)`; `INT_MIN` spelled `((int32_t)(-2147483647LL - 1LL))`; otherwise `((int32_t)5LL)`. Gated by `tests/corpus/codegen/literal_boundaries_{signed,unsigned}.zen`.
+- **`==` on a named type** becomes the `Eq` impl's `eq` call, statically resolved (`eq_call`, 3835-3849); `!=` wraps it in `(!...)`. "a C `==` on a struct is not even legal C."
+- **`consume x`** (`ex_Consume`, 3232-3238) is a no-op on the value; it calls `kill_drop` to clear the drop flag.
+- **Struct literal** (`construct_type`, 3404-3443): `((T){ .zu_mx = ..., .zu_my = ... })`, in **declared field order**, positional args filled by index, `((T){0})` when nothing is supplied.
+- **Fixed array / array literal** (`ex_FixedArray`/`ex_ArrayLit` 6460-6470): `((T){ { e0, e1 } })` — note the doubled brace for the `zg_elems` member.
+- **`ex_Record`** (6472-6476) and **`ex_MetaCall`** (6485-6487) are errors.
+- `paren` (6622-6625) only wraps when the code is neither an identifier nor already fully parenthesised.
+- `int_literal` (6644-6663): unsigned always `((uint32_t)5ULL)`; `INT_MIN` spelled `((int32_t)(-2147483647LL - 1LL))`; otherwise `((int32_t)5LL)`. Gated by `tests/corpus/codegen/literal_boundaries_{signed,unsigned}.zen`.
 
 ## 6.9 RAII / drop / defer interleaving
 
-`FnCtx.dscopes` / `sscopes` (2388-2391) follow the **emitted braces**, not `self.scopes` (which `inline_lambda` rewinds). `track_drop` (2475-2483) registers only `let` bindings whose type has a direct `Drop` impl; a name `consume`d anywhere program-wide gets an `int zg_liveN = 1;` flag (`track_drop` 2475-2483, `consumed_names` 1502-1519 is deliberately a program-wide over-approximation: "Over-approximating costs an unread `int` on a frame; under-approximating costs a double free"). `exit_scope` (2521-2528) runs `zg_scope_run(&rec)` **before** any drop, then `unwind` walks the block's entries in reverse declaration order, skipping any binding whose C name appears in the block's value expression:
+`FnCtx.dscopes` / `sscopes` (2437-2440) follow the **emitted braces**, not `self.scopes` (which `inline_lambda` rewinds). `track_drop` (2524-2532) registers only `let` bindings whose type has a direct `Drop` impl; a name `consume`d anywhere program-wide gets an `int zg_liveN = 1;` flag (`track_drop` 2524-2532, `consumed_names` 1542-1559 is deliberately a program-wide over-approximation: "Over-approximating costs an unread `int` on a frame; under-approximating costs a double free"). `exit_scope` (2570-2577) runs `zg_scope_run(&rec)` **before** any drop, then `unwind` walks the block's entries in reverse declaration order, skipping any binding whose C name appears in the block's value expression:
 ```python
 for cname, ty, flag in reversed(entries):
     if keep and re.search(r"\b%s\b" % re.escape(cname), keep):
@@ -1050,7 +1050,7 @@ for cname, ty, flag in reversed(entries):
 
 # 7. The runtime prologue — literal
 
-`BANNER` (6557-6574), formatted with `C_STANDARD`:
+`BANNER` (6749-6766), formatted with `C_STANDARD`:
 ```c
 /* Generated by the Zen bootstrapper (bootstrap/gen_c.py).  Do not edit.
  *
@@ -1069,7 +1069,7 @@ for cname, ty, flag in reversed(entries):
  */
 ```
 
-`INCLUDES` (6576-6584) — exactly six, always:
+`INCLUDES` (6768-6776) — exactly six, always:
 ```c
 #include <stdbool.h>
 #include <stddef.h>
@@ -1079,7 +1079,7 @@ for cname, ty, flag in reversed(entries):
 #include <string.h>
 ```
 
-`PRELUDE_TYPES` (6586-6598) — always:
+`PRELUDE_TYPES` (6778-6790) — always:
 ```c
 /* ---- runtime ---- */
 
@@ -1095,7 +1095,7 @@ static char **zg_argv;
 
 `PRELUDE_TRAP` — always (quoted in full in §3.1).
 
-`PRELUDE_SCOPE` (6641-6651) — only when `"scope" in self.needs`:
+`PRELUDE_SCOPE` (6833-6843) — only when `"scope" in self.needs`:
 ```c
 /* `@scope` is the enclosing block as a value (DESIGN.md), so a Scope is a
  * pointer to the block's own record.  The record holds the deferred closures
@@ -1107,7 +1107,7 @@ typedef struct zg_scope zg_scope;
 #define ZG_DEFER_MAX 32
 ```
 
-`DEFER_RUNTIME` (6627-6660) — emitted at the end of `defer_section()`, *after* the per-site `zg_envN` structs and the `zg_defer_env` union:
+`DEFER_RUNTIME` (6845-6878) — emitted at the end of `defer_section()`, *after* the per-site `zg_envN` structs and the `zg_defer_env` union:
 ```c
 typedef struct zg_defer_slot {
     void (*zg_fn)(void *);
@@ -1141,7 +1141,7 @@ static void zg_scope_run(zg_scope *s) {
     }
 }
 ```
-The union header (`defer_section` 2130-2150):
+The union header (`defer_section` 2179-2199):
 ```python
 out.append("typedef union %sdefer_env {\n    char %snone;\n" % (GEN, GEN))
 for n in sorted(self.defer_envs):
@@ -1150,7 +1150,7 @@ out.append("} %sdefer_env;\n\n" % GEN)
 ```
 — "A slot's env is a union over every capture record in the program, so it is exactly as large and as aligned as the largest one -- no guessed byte count".
 
-`PRELUDE_PRINT` (6688-6699) — only when `"print" in self.needs`:
+`PRELUDE_PRINT` (6880-6891) — only when `"print" in self.needs`:
 ```c
 /* println: std owns this once it exists (DESIGN.md routes it through the Env
  * in scope).  Until then these are the writes gen_c lowers `{}` into: decimal
@@ -1165,14 +1165,14 @@ static void zg_print_nl(void) { fputc('\n', stdout); }
 
 ## Allocation
 
-There is **no allocator in the prelude**. `malloc`/`free` appear only in `lower_mem` (4826-4893), the lowering of the three bodyless `Mem` members:
+There is **no allocator in the prelude**. `malloc`/`free` appear only in `lower_mem` (5048-5115), the lowering of the three bodyless `Mem` members:
 - `Mem.alloc` → `malloc(sizeof(State))`, initialise `mem`/`head`/`next`, return `((Arena){ .zu_mstate = p })`.
 - `Mem.page` → `malloc(sizeof(Page) + size)`, `Err(<first payloadless variant of Err's type>)` on NULL, else fill `prev`/`base`/`size` and return `Ok((Page *)raw)`.
 - `Mem.release` → `free((void *)p);`.
 
-Everything above that (Arena, Vec, String, Map) is ordinary Zen. `alloc.create<T>()` is lowered to `raw(sizeof(T), 16)` + `Ptr.to` (`lower_create` 4775-4802; the `16` is hardcoded ALIGN_MAX). `Ptr<T>`'s members are lowered to C directly (`ptr_method` 3910-3961): `read`→`p[i]`, `write`→`p[i] = v;`, `offset`→`(p + n)`, `back`→`(p - n)`, `bytes`→`(sizeof(T) * (size_t)n)`, `copy_from`→`memcpy(...)`, `is_null`→`(p == NULL)`, `to<U>`→`((U *)p)`.
+Everything above that (Arena, Vec, String, Map) is ordinary Zen. `alloc.create<T>()` is lowered to `raw(sizeof(T), 16)` + `Ptr.to` (`lower_create` 4947-4974; the `16` is hardcoded ALIGN_MAX). `Ptr<T>`'s members are lowered to C directly (`ptr_method` 3991-4042): `read`→`p[i]`, `write`→`p[i] = v;`, `offset`→`(p + n)`, `back`→`(p - n)`, `bytes`→`(sizeof(T) * (size_t)n)`, `copy_from`→`memcpy(...)`, `is_null`→`(p == NULL)`, `to<U>`→`((U *)p)`.
 
-## The `main` shim (`entry_point`, 2265-2313)
+## The `main` shim (`entry_point`, 2346-2394)
 
 ```python
 body = ["int main(int argc, char **argv) {\n"]
@@ -1205,42 +1205,42 @@ Ranked roughly by how load-bearing they are for a reimplementation:
 
 1. **`_sibling` import shim** (117-149). `bootstrap/ast.py` shadows stdlib `ast`, and `dataclasses`→`inspect`→`ast`, so the shadowing is an *import error at startup*, not a style issue. Package import first, file-path load as fallback.
 2. **Binary spine walked with a loop** (3107-3141). Explicitly: "one python frame per term turns a long line into a RecursionError -- and 'a crash is not a diagnostic' (TESTING.md). Raising the interpreter's limit only moves the number."
-3. **`MAX_EXPR_DEPTH = 24` spilling** (169-169) plus `spill` along a folded spine (3245-3254). "per TESTING.md"; `tests/corpus/codegen/nesting_expr.zen`.
-4. **`ex_Block` double-lowering** (5693-5718). The comment names the failure exactly: "a `.match` whose arms are ALL blocks therefore types as `()`: no result temporary is allocated and every arm's value is dropped, with no diagnostic and a zero in its place."
-5. **`arm_type` consults every arm, not the first informative one** (`arm_type` 5721-5768): "`true => Ok(())` beside `false => report(n)` types the match `Res<()>`, and the second arm's `Res<(), AllocError>` then has nowhere to go".
-6. **`by_param_types` overload scoring** (4012-4065): "`digit(d: u64)` beside `digit(d: i64)` ... Resolving them by file order picks the wrong one half the time, and on `0 - (v % 10)` that is a spurious trap." Score is `(-bad, hits)`; numeric literals and lambdas contribute `None`.
+3. **`MAX_EXPR_DEPTH = 24` spilling** (174) plus `spill` along a folded spine (3294-3303). "per TESTING.md"; `tests/corpus/codegen/nesting_expr.zen`.
+4. **`ex_Block` double-lowering** (5883-5908). The comment names the failure exactly: "a `.match` whose arms are ALL blocks therefore types as `()`: no result temporary is allocated and every arm's value is dropped, with no diagnostic and a zero in its place."
+5. **`arm_type` consults every arm, not the first informative one** (`arm_type` 5937-5984): "`true => Ok(())` beside `false => report(n)` types the match `Res<()>`, and the second arm's `Res<(), AllocError>` then has nowhere to go".
+6. **`by_param_types` overload scoring** (4094-4147): "`digit(d: u64)` beside `digit(d: i64)` ... Resolving them by file order picks the wrong one half the time, and on `0 - (v % 10)` that is a spurious trap." Score is `(-bad, hits)`; numeric literals and lambdas contribute `None`.
 7. **The literal-width hint from the *other* operand** (3115-3119): "`0 - (v % 10)` on an i64 stays an i64 instead of being narrowed to the literal's default and trapping."
 8. **`type_member` reads a constant at its declared type** (2902-2917): "`MAX*: i64 = 9223372036854775807` ... Lowering it at the literal's default width truncates the value and, worse, makes the arithmetic that follows unable to overflow -- the trap silently stops existing."
-9. **`Ptr.to<U>` must change the element type** (`ptr_method` 3910-3961) — the longest bug postmortem in the file: "Arena.realloc reads its usize header through `.to<usize>()`, so as a no-op that read is ONE BYTE, and every Vec whose buffer reaches 256 bytes silently loses the rows written before each grow -- `512 & 0xFF == 0`, so `keep` is 0 and copy_from copies nothing."
-10. **`_LVALUE` accepting `(*p).f.g`** (`_LVALUE` is gone -- commit 0109bc2a replaced the regex with `_is_lvalue` (6408-6420), whose comment above it now carries this postmortem): "Missing it copies the field into a temporary, so `self.entries.add(..)` grows a copy and the caller keeps the old one -- a silent wrong answer rather than a compile error."
-11. **`ENVMARK` (175) + `_defer_cache` (876, 1987-2001)**: "a thunk registered by a discarded lowering would otherwise sit in the output as an unreferenced static."
-12. **`peek` (3489-3510) / `peek_block` (3512-3531) roll back diagnostics** — plus seven other ad-hoc `mark = len(self.diags)` / `del self.diags[mark:]` pairs at 1424/1454, 1547/1555, 3644/3647, 3928/3930, 5062/5065, 5143/5147, 5319/5309. Speculative work must report nothing.
-13. **`bind_closure` carries the scope depth and the `(subst, parts, self_ty)` triple** (`bind_closure` 4279-4306), restored by `inline_call` (4276-4343): "`find`'s own `range.loop((h, value) { .. })` would otherwise shadow a caller's `h` -- silently, with a different value rather than with an error."
-14. **`h.break`/`h.next` are `goto`, not `break`/`continue`** (4448-4451): an inlined body can sit inside a match's `switch`.
+9. **`Ptr.to<U>` must change the element type** (`ptr_method` 3991-4042) — the longest bug postmortem in the file: "Arena.realloc reads its usize header through `.to<usize>()`, so as a no-op that read is ONE BYTE, and every Vec whose buffer reaches 256 bytes silently loses the rows written before each grow -- `512 & 0xFF == 0`, so `keep` is 0 and copy_from copies nothing."
+10. **`_LVALUE` accepting `(*p).f.g`** (`_LVALUE` is gone -- commit 0109bc2a replaced the regex with `_is_lvalue` (6598-6610), whose comment above it now carries this postmortem): "Missing it copies the field into a temporary, so `self.entries.add(..)` grows a copy and the caller keeps the old one -- a silent wrong answer rather than a compile error."
+11. **`ENVMARK` (180) + `_defer_cache` (916, 2036-2050)**: "a thunk registered by a discarded lowering would otherwise sit in the output as an unreferenced static."
+12. **`peek` (3538-3559) / `peek_block` (3561-3580) roll back diagnostics** — plus seven other ad-hoc `mark = len(self.diags)` / `del self.diags[mark:]` pairs at 1424/1454, 1547/1555, 3644/3647, 3928/3930, 5062/5065, 5143/5147, 5319/5309. Speculative work must report nothing.
+13. **`bind_closure` carries the scope depth and the `(subst, parts, self_ty)` triple** (`bind_closure` 4377-4404), restored by `inline_call` (4406-4473): "`find`'s own `range.loop((h, value) { .. })` would otherwise shadow a caller's `h` -- silently, with a different value rather than with an error."
+14. **`h.break`/`h.next` are `goto`, not `break`/`continue`** (4546-4549): an inlined body can sit inside a match's `switch`.
 15. **Enum tag constants keyed on the declaration, not the instance** (1294): "Res<i32, E> and Res<i32, F> share `Ok`, and emitting the constant per instance is a C redefinition."
 16. **Empty struct gets `char zg_pad;`** (composed, never written: 2124, 2129-2131) and zero-length array becomes `[1]` (2162) — `tests/corpus/codegen/struct_return_zero_field.zen`.
-17. **`Ok(())` drops its payload** (1328, 4173): "a void member is illegal C".
-18. **`_block_body`'s trailing-`ExprStmt`-as-value rule** (2586) and the `rty == UNIT` → `(void)(...)` rule (2581-2586): "`() { cleanup(x) }` emitting nothing at all."
-19. **`emit_types` loops up to 8 times** (2152-2175) because emitting a definition can register a new type; `topo` (2177-2200) breaks a by-value cycle by name *and* reports a diagnostic, so emission still terminates.
-20. **`entry_point()` computed before `emit_types()`** (2152-2175): "`main` first: it can register one last type."
-21. **`emit()` seeds from `main` only** (1762-1766): "keeps an unused std member -- one supplied by an impl gen_c cannot dispatch yet -- from failing a program that never calls it."
-22. **`consumed_names` is program-wide** (1502-1519), not per-function, because bodies arrive inlined into their callers.
-23. **`unwind(keep=...)` regex-scans the block's value expression** (`unwind` 2508-2519): "Leaving it undropped leaks; dropping it is a use-after-free, and only one of those two is recoverable."
-24. **`c_string` uses octal, never hex** (6534-6550) — partly to keep the determinism scanner's pointer-shaped-hex check quiet.
-25. **`is_tparam` heuristic fallback** (3548-3556): `len(name) <= 2 and name[0].isupper()`. Explicitly acknowledged as insufficient — "`signed = <unsigned>(typedef: unsigned) unsigned` is generic in `unsigned`, and a shape heuristic cannot know that" — hence the `tparams` argument threaded through `unify`.
-26. **`emit_call`'s bodyless-with-owner path** (4153-4231) emits `memset(&tmp, 0, sizeof tmp);` alongside the diagnostic "gen_c has no trait dispatch yet" — a placeholder value so the surrounding C still compiles.
-27. **`full_of` picks `IoError.Full`** (4650): two error sets meet at `add`, DESIGN.md has no conversion, so the reason is *named* rather than invented.
-28. **`console_sink` with `self = NULL`** (4805-4832) and `console_thunk` (1683-1712): the runtime *is* the Sink impl; printing a Display allocates nothing.
-29. **`lower_print`'s hole/argument mismatch tolerance** (`lower_print` 5538-5574): a `{}` with no argument prints the literal `"{}"`; extra arguments are appended.
-30. **`fmt_pieces`** (4596-4609): the *entire* format language — `{}` is a hole, "every other byte -- including a lone `{` and every `}` -- is literal."
-31. **`module_named` three-tier search** (3022-3045): last path component, then a one-hop alias whose target names a module, then any component — "so a type never loses to a module".
+17. **`Ok(())` drops its payload** (1368, 4223): "a void member is illegal C".
+18. **`_block_body`'s trailing-`ExprStmt`-as-value rule** (2635) and the `rty == UNIT` → `(void)(...)` rule (2630-2635): "`() { cleanup(x) }` emitting nothing at all."
+19. **`emit_types` loops up to 8 times** (2201-2224) because emitting a definition can register a new type; `topo` (2226-2249) breaks a by-value cycle by name *and* reports a diagnostic, so emission still terminates.
+20. **`entry_point()` computed before `emit_types()`** (2201-2224): "`main` first: it can register one last type."
+21. **`emit()` seeds from `main` only** (1811-1815): "keeps an unused std member -- one supplied by an impl gen_c cannot dispatch yet -- from failing a program that never calls it."
+22. **`consumed_names` is program-wide** (1542-1559), not per-function, because bodies arrive inlined into their callers.
+23. **`unwind(keep=...)` regex-scans the block's value expression** (`unwind` 2557-2568): "Leaving it undropped leaks; dropping it is a use-after-free, and only one of those two is recoverable."
+24. **`c_string` uses octal, never hex** (6726-6742) — partly to keep the determinism scanner's pointer-shaped-hex check quiet.
+25. **`is_tparam` heuristic fallback** (3597-3605): `len(name) <= 2 and name[0].isupper()`. Explicitly acknowledged as insufficient — "`signed = <unsigned>(typedef: unsigned) unsigned` is generic in `unsigned`, and a shape heuristic cannot know that" — hence the `tparams` argument threaded through `unify`.
+26. **`emit_call`'s bodyless-with-owner path** (4235-4321) emits `memset(&tmp, 0, sizeof tmp);` alongside the diagnostic "gen_c has no trait dispatch yet" — a placeholder value so the surrounding C still compiles.
+27. **`full_of` picks `IoError.Full`** (4804): two error sets meet at `add`, DESIGN.md has no conversion, so the reason is *named* rather than invented.
+28. **`console_sink` with `self = NULL`** (4805-4832) and `console_thunk` (1723-1752): the runtime *is* the Sink impl; printing a Display allocates nothing.
+29. **`lower_print`'s hole/argument mismatch tolerance** (`lower_print` 5741-5788): a `{}` with no argument prints the literal `"{}"`; extra arguments are appended.
+30. **`fmt_pieces`** (4694-4738): the *entire* format language — `{}` is a hole, "every other byte -- including a lone `{` and every `}` -- is literal."
+31. **`module_named` three-tier search** (3071-3094): last path component, then a one-hop alias whose target names a module, then any component — "so a type never loses to a module".
 
 ### Code-quality oddities you should not replicate
 
-- **`_lower_intrinsic` (5190-5239)**: the `if decl.owner == "Mem"` block sits *above* the triple-quoted string, so that string is not a docstring at all — it is a no-op expression statement in the middle of the function.
-- **`lower_mem` line 4826-4893**: `self.e.convert(value, None, mt) if False else value` — a permanently-dead conditional.
-- **`lower_loop` line 4413-4530**: `values = [(handle[0] and "0", handle)]` — `handle[0]` is the constant string `"loop"`, so this is an obfuscated `("0", handle)`.
-- **`emit_fn` line 1901**: `"return (%s){0};" % self.ctype(ret) if ret[0] != "prim" else "return 0;"` — the `%` binds tighter than the ternary, so the format applies to the first branch only; it works, but it reads as a bug.
-- **`range_bounds` line 5267-5289** returns `("0", str(ty[1]))` — the array length as a *decimal string*, not a C expression, relying on the caller only interpolating it.
-- **`sym_value`** (270) is dead code.
-- **`Emitter.thunk`'s `slot` parameter** (1630) is unused; same for `console_thunk`'s `slot` (1683).
+- **`_lower_intrinsic` (5380-5429)**: the `if decl.owner == "Mem"` block sits *above* the triple-quoted string, so that string is not a docstring at all — it is a no-op expression statement in the middle of the function.
+- **`lower_mem` line 5048-5115**: `self.e.convert(value, None, mt) if False else value` — a permanently-dead conditional.
+- **`lower_loop` line 4543-4660**: `values = [(handle[0] and "0", handle)]` — `handle[0]` is the constant string `"loop"`, so this is an obfuscated `("0", handle)`.
+- **`emit_fn` line 1950-2002**: `"return (%s){0};" % self.ctype(ret) if ret[0] != "prim" else "return 0;"` — the `%` binds tighter than the ternary, so the format applies to the first branch only; it works, but it reads as a bug.
+- **`range_bounds` line 5431-5453** returns `("0", str(ty[1]))` — the array length as a *decimal string*, not a C expression, relying on the caller only interpolating it.
+- **`sym_value`** (285-286) is dead code.
+- **`Emitter.thunk`'s `slot` parameter** (1670) is unused; same for `console_thunk`'s `slot` (1723).

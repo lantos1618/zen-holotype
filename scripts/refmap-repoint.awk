@@ -25,21 +25,33 @@
 # objection refmap states when it refuses. Measured on a 7-line synthetic
 # insertion: 107 stale -> 23, and all 23 residual were of that kind.
 #
-# Repair those BY HAND, and ask a different question -- not "where is this
-# symbol" but "where did line N go":
+# Repair those by asking a DIFFERENT question -- not "where is this symbol" but
+# "where did line N go" -- which a diff answers and the report cannot.
 #
-#   diff <(git show <old-ref>:bootstrap/gen_c.py) bootstrap/gen_c.py
+# THE ORDER IS THE WHOLE TRICK, and getting it wrong is why a first attempt
+# oscillated 23 -> 14 -> 12 without converging. A doc line can hold one
+# ambiguous claim beside one this script already fixed correctly; shift that
+# line and you undo the good coordinate. So shift ONLY the lines refmap still
+# calls stale AFTER this script has run, then run this script once more.
 #
-# A shift tool driven by that diff was written and DELETED rather than shipped:
-# a doc line can hold one ambiguous claim beside one this script already fixed,
-# so the two tools rewrite the same line and oscillate. One sound tool plus a
-# handful of judged edits beats two that fight. If the residual ever grows past
-# a handful, the fix is for `refmap.py` to emit a disambiguating anchor, not for
-# a second rewriter to guess.
+# USAGE -- three steps, and it converges to 0 stale
 #
-# USAGE
 #   python3 scripts/refmap.py | awk -f scripts/refmap-repoint.awk
-#   make refmap        # then judge whatever it still names, by the diff above
+#
+#   STALE=$(python3 scripts/refmap.py | grep -oE '^docs/[^:]+:[0-9]+' \
+#             | cut -d: -f2 | sort -un | paste -sd,)
+#   diff <(git show <old-ref>:bootstrap/gen_c.py) bootstrap/gen_c.py \
+#     | awk -v stale="$STALE" -f - ...   # shift only those lines by the hunks
+#
+#   python3 scripts/refmap.py | awk -f scripts/refmap-repoint.awk
+#   make refmap        # 0 stale
+#
+# The middle step is left as an invocation rather than a committed script on
+# purpose: it needs a ref to diff against, which only the person doing the merge
+# knows. Measured on the real 2026-08-17 merge: 259 coordinates repointed here,
+# 78 shifted, 16 repointed on the second pass, 0 stale. If the ambiguous
+# residual ever grows past a couple of dozen, the fix is for `refmap.py` to emit
+# a disambiguating anchor -- not for a rewriter to guess.
 
 BEGIN {
     doc = "docs/GENC_REFERENCE_MAP.md"
