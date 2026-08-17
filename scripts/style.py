@@ -238,108 +238,53 @@ UFCS_OWED: dict[str, int] = {
 }
 
 # THE UNUSED-IMPORT DEBT, keyed by file and valued with THE NUMBER OF NAMES
-# that file imports and never writes again. 1208 of the 5191 imported names in
-# src/, across 89 files, on the day the rule was written -- nearly a quarter of
-# the module graph is fiction, and nothing had ever looked.
+# that file imports and never writes again. It opened at 1208 of the 5191
+# imported names in src/, across 89 files -- nearly a quarter of the module
+# graph was fiction and nothing had ever looked. 1195 went in the change that
+# wrote the rule; these 13 are the residue, and they are all ONE THING.
 #
-# ONE ENTRY IN THIS LEDGER IS NOT LIKE THE OTHERS, and it is the reason to cull
-# in gated batches rather than in one pass. A method reached through a FIELD can
-# need the FIELD'S TYPE imported by name -- for the BOOTSTRAP compiler only, not
-# for the self-hosted one -- so `be.alloc.grow(..)` can hold `Alloc` on the
-# import line while the name appears nowhere else. `make build` cannot see it;
-# `make test` and `make fixpoint` can, because both compile src/ with
-# bootstrap/. A number here that will not come down is that, and the fix is a
-# bootstrap resolution fix rather than an edit to the .zen file.
+# EVERY ENTRY BELOW IS A BOOTSTRAP RESOLUTION DEFECT, not an unpaid edit, and
+# the shape is narrower than it has been written down as before. A method
+# reached through a FIELD is resolved by the bootstrapper against the FIELD'S
+# TYPE NAME as the importing file spells it -- but only when the method name has
+# a COMPETITOR reachable in the same compilation. `c.types.at(..)` needs nothing
+# (`lsp_def.zen` and `lsp_compl.zen` write it with no `Types` in sight, and both
+# carried a comment claiming otherwise that this change deleted). `c.types.
+# write_name(..)` needs `Types`, because `sema_diag.zen:336` declares a FREE
+# FUNCTION of that name and the bootstrapper picks it: `write_name is not
+# exported by module sema_diag`. Every one of the six method names below has such
+# a twin -- `bind` in parse_stmt.zen, `count` in gen_name.zen, `index_of` in
+# collections_map, `bump` in mem_arena, `fn_ty` and `count` again in the corpus
+# tests' own main.zen.
+#
+# SO WHICH NAMES ARE LOAD-BEARING DEPENDS ON THE COMPILATION, and that is why
+# these 13 were found by running gates and not by reading code. Three (`Checker`
+# in gen_c_loop.zen and gen_c_range.zen, `Types` in lsp_hover.zen) fail only
+# under `make fixpoint`, whose stage 1 bootstraps the whole of src/; eight fail
+# only under the `corpus/sema_zen` and `corpus/gen_zen` suites, because the
+# competitor is in the test program's own main. `make build` is BLIND to all of
+# it -- the self-hosted compiler resolves every one correctly -- so the only
+# gates that can see this are the two that compile src/ WITH bootstrap/.
+#
+# The mechanical form of the rule -- restore the type of every intermediate
+# field receiver in a dot chain -- keeps 145, which is 132 import edges no gate
+# can justify. These 13 are the demonstrated ones, each carrying its receiver
+# chain on its own import line, and the gate that catches a fourteenth already
+# exists. They close when bootstrap resolves a field receiver by its declared
+# type instead of by an imported name.
 IMPORT_OWED: dict[str, int] = {
-    "src/gen/gen_c/gen_c_alloc.zen": 7,
-    "src/gen/gen_c/gen_c_assoc.zen": 14,
-    "src/gen/gen_c/gen_c_bound.zen": 22,
-    "src/gen/gen_c/gen_c_build.zen": 29,
-    "src/gen/gen_c/gen_c_call.zen": 56,
-    "src/gen/gen_c/gen_c_cap.zen": 20,
-    "src/gen/gen_c/gen_c_const.zen": 17,
-    "src/gen/gen_c/gen_c_decl.zen": 17,
-    "src/gen/gen_c/gen_c_display.zen": 4,
-    "src/gen/gen_c/gen_c_expr.zen": 58,
-    "src/gen/gen_c/gen_c_fat.zen": 22,
-    "src/gen/gen_c/gen_c_flow.zen": 20,
-    "src/gen/gen_c/gen_c_fmt.zen": 3,
-    "src/gen/gen_c/gen_c_fold.zen": 9,
-    "src/gen/gen_c/gen_c_frame.zen": 12,
-    "src/gen/gen_c/gen_c_fs.zen": 25,
-    "src/gen/gen_c/gen_c_handle.zen": 12,
-    "src/gen/gen_c/gen_c_hoist.zen": 6,
-    "src/gen/gen_c/gen_c_impl.zen": 2,
-    "src/gen/gen_c/gen_c_index.zen": 9,
-    "src/gen/gen_c/gen_c_infer.zen": 15,
-    "src/gen/gen_c/gen_c_inline.zen": 22,
-    "src/gen/gen_c/gen_c_layout.zen": 21,
-    "src/gen/gen_c/gen_c_loop.zen": 61,
-    "src/gen/gen_c/gen_c_main.zen": 11,
-    "src/gen/gen_c/gen_c_member.zen": 24,
-    "src/gen/gen_c/gen_c_mono.zen": 10,
-    "src/gen/gen_c/gen_c_op.zen": 20,
-    "src/gen/gen_c/gen_c_own.zen": 23,
-    "src/gen/gen_c/gen_c_print.zen": 7,
-    "src/gen/gen_c/gen_c_ptr.zen": 10,
-    "src/gen/gen_c/gen_c_range.zen": 37,
-    "src/gen/gen_c/gen_c_read.zen": 19,
-    "src/gen/gen_c/gen_c_runtime.zen": 2,
-    "src/gen/gen_c/gen_c_scope.zen": 14,
-    "src/gen/gen_c/gen_c_settle.zen": 41,
-    "src/gen/gen_c/gen_c_shape.zen": 20,
-    "src/gen/gen_c/gen_c_sink.zen": 8,
-    "src/gen/gen_c/gen_c_state.zen": 2,
-    "src/gen/gen_c/gen_c_stdin.zen": 21,
-    "src/gen/gen_c/gen_c_stmt.zen": 59,
-    "src/gen/gen_c/gen_c_try.zen": 11,
-    "src/gen/gen_c/gen_c_type.zen": 22,
-    "src/gen/gen_c/gen_c_widen.zen": 7,
-    "src/gen/gen_diag.zen": 1,
-    "src/gen/gen_name.zen": 2,
-    "src/lsp/lsp_built.zen": 1,
-    "src/lsp/lsp_compl.zen": 6,
-    "src/lsp/lsp_def.zen": 6,
-    "src/lsp/lsp_diag.zen": 1,
-    "src/lsp/lsp_hover.zen": 2,
-    "src/lsp/lsp_serve.zen": 3,
-    "src/sema/sema_apply.zen": 22,
-    "src/sema/sema_bound.zen": 14,
-    "src/sema/sema_call.zen": 25,
-    "src/sema/sema_cand.zen": 25,
-    "src/sema/sema_case.zen": 6,
-    "src/sema/sema_check.zen": 20,
-    "src/sema/sema_decl.zen": 5,
-    "src/sema/sema_def.zen": 2,
-    "src/sema/sema_diag.zen": 2,
-    "src/sema/sema_effect.zen": 2,
-    "src/sema/sema_hoist.zen": 8,
-    "src/sema/sema_inst.zen": 10,
-    "src/sema/sema_join.zen": 4,
-    "src/sema/sema_layout.zen": 7,
-    "src/sema/sema_match.zen": 12,
-    "src/sema/sema_member.zen": 20,
-    "src/sema/sema_module.zen": 11,
-    "src/sema/sema_own.zen": 15,
-    "src/sema/sema_place.zen": 3,
-    "src/sema/sema_raise.zen": 3,
-    "src/sema/sema_recv.zen": 9,
-    "src/sema/sema_scope.zen": 6,
-    "src/sema/sema_spine.zen": 2,
+    "src/gen/gen_c/gen_c_loop.zen": 1,
+    "src/gen/gen_c/gen_c_range.zen": 1,
+    "src/lsp/lsp_hover.zen": 1,
+    "src/sema/sema_decl.zen": 1,
+    "src/sema/sema_inst.zen": 1,
+    "src/sema/sema_layout.zen": 1,
+    "src/sema/sema_member.zen": 1,
+    "src/sema/sema_module.zen": 2,
     "src/sema/sema_static.zen": 1,
-    "src/sema/sema_supply.zen": 24,
-    "src/sema/sema_trap.zen": 11,
-    "src/sema/sema_type.zen": 20,
+    "src/sema/sema_type.zen": 1,
     "src/std/lex/lex_literal.zen": 1,
     "src/std/lex/lex_scan.zen": 1,
-    "src/std/parse/parse_decl.zen": 7,
-    "src/std/parse/parse_expr.zen": 6,
-    "src/std/parse/parse_lookahead.zen": 3,
-    "src/std/parse/parse_match.zen": 7,
-    "src/std/parse/parse_member.zen": 6,
-    "src/std/parse/parse_pattern.zen": 5,
-    "src/std/parse/parse_stmt.zen": 5,
-    "src/std/parse/parse_type.zen": 5,
 }
 
 # The abbreviations STYLE.md names. Not a general "short name" check -- `len`,
