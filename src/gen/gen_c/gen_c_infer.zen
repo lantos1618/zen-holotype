@@ -25,6 +25,7 @@ World, Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 Inst = sema.sema_inst
 type_from_ast = sema.sema_type
+pack_slot, pack_elem = sema.sema_vararg
 CBackend = gen.gen_c.gen_c_state
 declared_ret = gen.gen_c.gen_c_type
 inst_at, inst_open, settled_inst = gen.gen_c.gen_c_mono
@@ -119,9 +120,71 @@ unify_arg = (
     ctx      : Ctx,
     out      :: Inst
 ) Res<(), AllocError> {
+    pack_slot(be.types(), declared).match({
+        None     => be.unify_declared(value, i, declared, ctx, out),
+        Ok(slot) => be.unify_packed(value, i, slot, declared, ctx, out),
+    })
+}
+
+unify_declared = (
+    be       :: CBackend,
+    value    : ExprId,
+    i        : usize,
+    declared : Vec<TyId>,
+    ctx      : Ctx,
+    out      :: Inst
+) Res<(), AllocError> {
     declared.get(i).match({
         None  => Ok(()),
         Ok(d) => unify_against(be, value, d, ctx, out),
+    })
+}
+
+// AN ARGUMENT THE PACK SWALLOWS IS UNIFIED AGAINST THE PACK'S ELEMENT,
+// which is what lets `count = <T>(v: vararg<T>)` learn `T` from
+// `count(1, 2, 3)`. Without it every swallowed argument is past the end
+// of the declared list, nothing solves `T`, and the call is refused as
+// "a generic call whose type arguments nothing settles".
+//
+// A FORWARDED pack is unified against the pack ITSELF, and `unify`
+// already reads that structurally: `vararg<T>` against `vararg<i32>`
+// solves `T` with no case of its own here.
+unify_packed = (
+    be       :: CBackend,
+    value    : ExprId,
+    i        : usize,
+    slot     : usize,
+    declared : Vec<TyId>,
+    ctx      : Ctx,
+    out      :: Inst
+) Res<(), AllocError> {
+    (i < slot).match({
+        true  => be.unify_declared(value, i, declared, ctx, out),
+        false => be.unify_swallowed(value, slot, declared, ctx, out),
+    })
+}
+
+unify_swallowed = (
+    be       :: CBackend,
+    value    : ExprId,
+    slot     : usize,
+    declared : Vec<TyId>,
+    ctx      : Ctx,
+    out      :: Inst
+) Res<(), AllocError> {
+    pack    = declared.get(slot).match({ Ok(t) => t, None => TyId(index: 0) });
+    unknown = be.check.types.unknown().try();
+    actual  = be.arg_type(value, ctx, unknown).try();
+    unify(be, be.against_pack(pack, actual), actual, out)
+}
+
+against_pack = (be: CBackend, pack: TyId, actual: TyId) TyId {
+    pack_elem(be.types(), actual).match({
+        Ok(_) => pack,
+        None  => pack_elem(be.types(), pack).match({
+            Ok(e) => e,
+            None  => pack,
+        }),
     })
 }
 

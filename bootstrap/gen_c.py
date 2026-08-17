@@ -159,6 +159,11 @@ C_STANDARD = "C99 (ISO/IEC 9899:1999)"
 USR = "zu_"
 GEN = "zg_"
 
+# `vararg<T>`'s declaration name. Not a keyword and not a `TypeKind`: a call
+# whose last parameter is one takes ONE argument for the whole tail, and that is
+# the only thing about it this backend knows (`_pack_elem`, `Fn.pack_value`).
+VARARG = "vararg"
+
 MAX_INSTANCES = 8192  # generic TYPE instantiations; a divergence stops here
 # Functions emitted, which is a different thing counted in a different loop and
 # was the same constant until the two diagnostics had to say different words.
@@ -686,6 +691,31 @@ def _is_variadic(param):
     """`args: ...` — the zero-or-more tail (ast.py spells it `Named("...")`)."""
     ty = f(param, "ty")
     return ty is not None and f(ty, "name", None) == "..."
+
+
+def _written_pack(param):
+    """`v: vararg<T>` — the TYPED tail, spelled as an ordinary generic type.
+
+    Beside `_is_variadic` and deliberately not folded into it. That one is the
+    FORMAT DOOR's shape — `lower_format_call`, and the bodyless three-parameter
+    `add` — which must stay exactly `...`, or a bodyless `add` ending in a typed
+    pack would be lowered as that door. This one is the ARITY question, which
+    both spellings answer the same way: the last parameter swallows the rest.
+    """
+    ty = f(param, "ty")
+    return ty is not None and f(ty, "name", None) == VARARG
+
+
+def _pack_elem(ty):
+    """The `T` of a resolved `vararg<T>`, and None for anything else.
+
+    `vararg<T>` is an ORDINARY DECLARED STRUCT in std, so it is spelled, laid
+    out and copied here like `Vec<T>` with no case of its own. Only the CALL
+    is special: N arguments become one pack value (`Fn.pack_value`).
+    """
+    if not ty or ty[0] != "named" or not ty[1] or ty[1][-1] != VARARG:
+        return None
+    return ty[2][0] if len(ty[2]) == 1 else None
 
 
 def _bare_name(name):
@@ -3979,10 +4009,11 @@ class FnCtx:
             fnode = self.e.fn_node(d.node)
             params = self.e.params_of(fnode) if fnode else ()
             n = len(params) if fnode else -1
-            # `args: ...` is zero-or-more, so a variadic declares a MINIMUM
-            # arity -- and a fixed arity that fits is the more specific
-            # candidate, exactly as a concrete parameter beats a generic one.
-            if params and _is_variadic(params[-1]):
+            # `args: ...` and `v: vararg<T>` are both zero-or-more, so either
+            # declares a MINIMUM arity -- and a fixed arity that fits is the
+            # more specific candidate, exactly as a concrete parameter beats a
+            # generic one.
+            if params and (_is_variadic(params[-1]) or _written_pack(params[-1])):
                 if want >= n - 1:
                     variadic.append(d)
                 continue
@@ -4212,8 +4243,14 @@ class FnCtx:
                                             fallback=receiver[1]))
             else:
                 codes.append(self.coerce(receiver[0], receiver[1], rwant))
+        offset = 1 if receiver is not None else 0
+        # A `vararg<T>` LAST PARAMETER TAKES ONE C ARGUMENT, NOT N.  `slot` is a
+        # signature index, so a ufcs receiver at position zero does not shift it.
+        slot, pack = self.pack_param(params, subst, decl, self_ty)
         for i, value in enumerate(values):
-            idx = i + (1 if receiver is not None else 0)
+            idx = i + offset
+            if slot is not None and idx >= slot:
+                break
             pty = (
                 self.e.resolve_type(f(params[idx], "ty"), subst, decl.scope_parts,
                                     self_ty or self.e.self_type(decl, subst))
@@ -4225,11 +4262,53 @@ class FnCtx:
                 codes.append(self.by_ref_as(code, aty, pty, fallback=pty or aty))
             else:
                 codes.append(self.value(value, pty))
+        if slot is not None:
+            codes.append(self.pack_value(values[slot - offset:], pack))
         cname = self.e.request_fn(decl, targ_tys, self_ty)
         ret = self.e.resolve_type(self.e.ret_of(fnode), subst, decl.scope_parts,
                                   self_ty or self.e.self_type(decl, subst))
         return ("%s(%s)" % (cname, ", ".join(codes)), ret)
 
+    def pack_param(self, params, subst, decl, self_ty):
+        """The signature index of the `vararg<T>` that ends this signature, and
+        the pack's own type.  `(None, None)` when the last parameter is not one.
+        """
+        if not params or not _written_pack(params[-1]):
+            return (None, None)
+        pack = self.e.resolve_type(f(params[-1], "ty"), subst, decl.scope_parts,
+                                   self_ty or self.e.self_type(decl, subst))
+        if _pack_elem(pack) is None:
+            return (None, None)
+        return (len(params) - 1, pack)
+
+    def pack_value(self, rest, pack):
+        """The swallowed arguments as ONE `vararg<T>` value.
+
+        A COMPOUND LITERAL INSIDE A COMPOUND LITERAL: the run, and the two words
+        that describe it.  Both have automatic storage in the CALLING block,
+        which is exactly as long as the call and no longer -- which is why
+        `sema_vararg.zen` refuses a `vararg` anywhere it could outlive one.
+        Nothing is allocated, so the alloc budgets are untouched.
+
+        FORWARDING is a NAME and nothing else, and that is not a shortcut: the
+        position rule means a `vararg<T>` value can only ever be a parameter
+        binding, so recognising it needs no typing and emits nothing.
+
+        An empty pack is `{0}` -- a null run of length zero.  A zero-length array
+        initialiser is a GNU extension and this file is C99.
+        """
+        cname = self.e.ctype(pack)
+        if len(rest) == 1 and kind(rest[0]) == "Path":
+            local = self.find(str(f(rest[0], "name", "")))
+            if local and local[1] == pack:
+                return local[0]
+        if not rest:
+            return "((%s){0})" % cname
+        elem = _pack_elem(pack)
+        run = ", ".join(self.value(v, elem) for v in rest)
+        return "((%s){ .%s = (%s[]){ %s }, .%s = %du })" % (
+            cname, sym_member("data"), self.e.ctype(elem), run,
+            sym_member("len"), len(rest))
 
     # ---- closures ------------------------------------------------------
     #
@@ -5444,8 +5523,21 @@ class FnCtx:
         offset = 1 if receiver is not None else 0
         if receiver is not None and params:
             self.unify(f(params[0], "ty"), receiver[1], found, decl.tparams)
+        # A SWALLOWED ARGUMENT SETTLES THE PACK'S ELEMENT, not the pack, which is
+        # what lets `count = <T>(v: vararg<T>)` learn `T` from `count(1, 2, 3)`.
+        # Without it every argument past the first is beyond the declared list,
+        # nothing solves `T`, and the emitted run has an unresolved element type.
+        # A FORWARDED pack settles it structurally against the pack itself.
+        pslot = len(params) - 1 if params and _written_pack(params[-1]) else None
         for i, value in enumerate(values):
             idx = i + offset
+            if pslot is not None and idx >= pslot:
+                _c, aty = self.peek(value)
+                pty = f(params[pslot], "ty")
+                if _pack_elem(aty) is None:
+                    pty = (f(pty, "args", ()) or (None,))[0]
+                self.unify(pty, aty, found, decl.tparams)
+                continue
             if idx >= len(params):
                 break
             pty = f(params[idx], "ty")

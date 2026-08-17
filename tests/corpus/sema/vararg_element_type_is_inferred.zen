@@ -1,0 +1,37 @@
+// A pack's element type is a type parameter like any other, and it is
+// solved from the arguments the pack SWALLOWS — which are past the end of
+// the declared parameter list, so nothing solves them by accident.
+//
+// Both spellings of "generic" are here because they are solved in two
+// different places: `T` from the RECEIVER (`Bag<i32>` says so, and the
+// pack's element follows) and `T` from the ARGUMENTS (`count(1, 2, 3)` is
+// the only thing that could say). Before `unify_swallowed` the second was
+// refused as "a generic call whose type arguments nothing settles".
+//
+// The two instantiations of `count` also pin that a pack monomorphises:
+// one `T` per call, not one erased symbol for both.
+
+Bag*<T> = {
+    n :: usize = 0,
+
+    take* = (self :: @Self, vs: vararg<T>) usize {
+        vs.loop((h, v) { self.n = self.n + 1; });
+        self.n;
+    }
+}
+
+count = <T>(v: vararg<T>) usize { v.len }
+
+// a fixed generic parameter BEFORE the pack: `T` has two witnesses, and the
+// prefix is where a wrong offset in the unification would show
+after = <T>(first: T, rest: vararg<T>) usize { rest.len }
+
+main = (env: Env) Res<i32, AllocError> {
+    b ::= Bag<i32>();
+    println("{}", b.take(1, 2, 3));
+    println("{}", b.take());
+    println("{}", count(1, 2, 3));
+    println("{}", count("a", "b"));
+    println("{}", after(1, 2, 3));
+    Ok(0);
+}

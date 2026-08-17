@@ -40,6 +40,7 @@ Inst = sema.sema_inst
 type_of, type_from_ast, stmt_type = sema.sema_type
 satisfies_bound = sema.sema_bound
 write_usize = sema.sema_diag
+pack_slot, pack_elem = sema.sema_vararg
 Emit = gen.gen_emit
 sym_local, sym_member, sym_variant, sym_gen, sym_fn = gen.gen_name
 RES_PATH, is_failure = gen.gen_name
@@ -979,11 +980,215 @@ write_call = (
     out.add_bytes(sym).try();
     out.add_bytes("(").try();
     first = write_receiver(be, recv, f, sig, ctx, out).try();
+    be.write_call_args(c, first, f, sig, ctx, out).try();
+    out.add_bytes(")").try();
+    Ok(());
+}
+
+// The arguments, from signature position `first` on: as written, or with
+// the tail gathered into one `vararg<T>` value. ONE dispatch, read here
+// and by the METHOD path (`gen_c_member.zen`'s `write_rest`) — a pack is
+// built the same way whichever spelling reached it, which is the same
+// reason `pack_sig_fits` is one function in sema.
+write_call_args* = (
+    be    :: CBackend,
+    c     : Call,
+    first : usize,
+    f     : Function,
+    sig   : Vec<TyId>,
+    ctx   : Ctx,
+    out   :: String
+) Res<(), AllocError> {
+    pack_slot(be.types(), sig).match({
+        None     => be.write_written_args(c, first, f, sig, ctx, out),
+        Ok(slot) => be.write_to_pack(c, first, slot, f, sig, ctx, out),
+    })
+}
+
+write_written_args = (
+    be    :: CBackend,
+    c     : Call,
+    first : usize,
+    f     : Function,
+    sig   : Vec<TyId>,
+    ctx   : Ctx,
+    out   :: String
+) Res<(), AllocError> {
     c.args.loop((h, i, a) {
         (i + first > 0).then(() { out.add_bytes(", ").try() });
-        write_arg(be, a.value, i + first, f, sig, ctx, out).try();
+        be.write_arg(a.value, i + first, f, sig, ctx, out).try();
     });
+    Ok(());
+}
+
+// A `vararg<T>` PARAMETER TAKES ONE C ARGUMENT, NOT N. The fixed prefix
+// is written as it always was; everything from `slot` on becomes a single
+// pack value, built here.
+//
+// `slot` is a SIGNATURE index and so is `i + first`, which is what lets a
+// ufcs receiver occupy position zero without shifting the pack.
+write_to_pack = (
+    be    :: CBackend,
+    c     : Call,
+    first : usize,
+    slot  : usize,
+    f     : Function,
+    sig   : Vec<TyId>,
+    ctx   : Ctx,
+    out   :: String
+) Res<(), AllocError> {
+    c.args.loop((h, i, a) {
+        ((i + first) < slot).then(() {
+            (i + first > 0).then(() { out.add_bytes(", ").try() });
+            be.write_arg(a.value, i + first, f, sig, ctx, out).try();
+        });
+    });
+    (slot > 0).then(() { out.add_bytes(", ").try() });
+    pack = sig.get(slot).match({ Ok(t) => t, None => TyId(index: 0) });
+    be.write_pack(c, first, slot, pack, ctx, out);
+}
+
+// THE PACK IS A C COMPOUND LITERAL OVER A COMPOUND LITERAL: a run of the
+// swallowed arguments, and the two words that describe it. Both have
+// automatic storage in the CALLING block, which is exactly long enough
+// for the call and no longer — so the pack borrows and never owns, and
+// `sema_vararg.zen` refuses every position it could outlive the call from.
+//
+// No allocation, so `make bench-allocs` is untouched by a vararg call.
+write_pack = (
+    be    :: CBackend,
+    c     : Call,
+    first : usize,
+    slot  : usize,
+    pack  : TyId,
+    ctx   : Ctx,
+    out   :: String
+) Res<(), AllocError> {
+    be.is_forwarded_pack(c, first, slot, pack, ctx).try().match({
+        true  => be.write_forwarded(c, first, slot, pack, ctx, out),
+        false => be.write_spread(c, first, slot, pack, ctx, out),
+    })
+}
+
+// FORWARDING: one swallowed argument that is ALREADY the pack, passed
+// straight through. This is the whole point of `vararg<T>` over `...` —
+// a marker carrying no element type has no C value to hand on — and it
+// is a struct copy, not a rebuild.
+//
+// The two readings of one slot cannot collide because `vararg` does not
+// nest: an argument of the pack's own type is never also one of its
+// elements.
+is_forwarded_pack = (
+    be    :: CBackend,
+    c     : Call,
+    first : usize,
+    slot  : usize,
+    pack  : TyId,
+    ctx   : Ctx
+) Res<bool, AllocError> {
+    ((c.args.len + first) == (slot + 1)).match({
+        false => Ok(false),
+        true  => be.pack_typed_arg(c, first, slot, pack, ctx),
+    })
+}
+
+pack_typed_arg = (
+    be    :: CBackend,
+    c     : Call,
+    first : usize,
+    slot  : usize,
+    pack  : TyId,
+    ctx   : Ctx
+) Res<bool, AllocError> {
+    arg_value(c, slot - first).match({
+        None  => Ok(false),
+        Ok(v) => be.same_as_pack(v, pack, ctx),
+    })
+}
+
+same_as_pack = (be :: CBackend, v: ExprId, pack: TyId, ctx: Ctx)
+               Res<bool, AllocError> {
+    got = be.ty_of(v, ctx, pack).try();
+    Ok(got.eq(pack));
+}
+
+write_forwarded = (
+    be    :: CBackend,
+    c     : Call,
+    first : usize,
+    slot  : usize,
+    pack  : TyId,
+    ctx   : Ctx,
+    out   :: String
+) Res<(), AllocError> {
+    arg_value(c, slot - first).match({
+        None  => Ok(()),
+        Ok(v) => expr(be, v, ctx, pack, out),
+    })
+}
+
+// `(<pack>){ .data = (<elem>[]){ a, b, c }, .len = 3u }`, and `{ 0 }` for
+// an empty pack — a zero-length array initialiser is a GNU extension, and
+// `{ 0 }` says the same thing in C99: a null run of length zero.
+write_spread = (
+    be    :: CBackend,
+    c     : Call,
+    first : usize,
+    slot  : usize,
+    pack  : TyId,
+    ctx   : Ctx,
+    out   :: String
+) Res<(), AllocError> {
+    out.add_bytes("(").try();
+    be.ctype(pack, out).try();
     out.add_bytes(")").try();
+    ((c.args.len + first) == slot).match({
+        true  => out.add_bytes("{ 0 }"),
+        false => be.write_run(c, first, slot, pack, ctx, out),
+    })
+}
+
+write_run = (
+    be    :: CBackend,
+    c     : Call,
+    first : usize,
+    slot  : usize,
+    pack  : TyId,
+    ctx   : Ctx,
+    out   :: String
+) Res<(), AllocError> {
+    elem = pack_elem(be.types(), pack).match({ Ok(t) => t, None => pack });
+    out.add_bytes("{ .").try();
+    sym_member(out, "data").try();
+    out.add_bytes(" = (").try();
+    be.ctype(elem, out).try();
+    out.add_bytes("[]){ ").try();
+    be.write_pack_elems(c, first, slot, elem, ctx, out).try();
+    out.add_bytes(" }, .").try();
+    sym_member(out, "len").try();
+    out.add_bytes(" = ").try();
+    out.write_usize(c.args.len + first - slot).try();
+    out.add_bytes("u }").try();
+    Ok(());
+}
+
+// Each swallowed argument at the pack's ELEMENT type, so a literal takes
+// its width from `T` exactly as it would in a fixed array literal.
+write_pack_elems = (
+    be    :: CBackend,
+    c     : Call,
+    first : usize,
+    slot  : usize,
+    elem  : TyId,
+    ctx   : Ctx,
+    out   :: String
+) Res<(), AllocError> {
+    c.args.loop((h, i, a) {
+        ((i + first) >= slot).then(() {
+            ((i + first) > slot).then(() { out.add_bytes(", ").try() });
+            expr(be, a.value, ctx, elem, out).try();
+        });
+    });
     Ok(());
 }
 
