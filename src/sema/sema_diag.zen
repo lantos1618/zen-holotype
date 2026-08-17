@@ -243,15 +243,13 @@ message* = (fault: SemaFault) str {
 // The whole diagnostic, on one line: `file:line:col: <sentence>`,
 // followed by whatever the fault carries.
 //
-// This is the only thing in this module that allocates, and it takes
-// the `Types` store because a `TyId` is not a name — printing one is
-// `Types.write_name`'s job and not a second copy of it here.
+// Rendering is the only thing in this module that allocates, and it
+// takes the `Types` store because a `TyId` is not a name — spelling one
+// is `Types.name_of`'s job and not a second copy of it here.
 render* = (self: Diag, types: Types, out :: String) Res<(), AllocError> {
-    out.add_bytes(self.file).try();
-    out.add_bytes(":").try();
+    out.fmt("{}:", self.file).try();
     write_pos(out, self.span.start.line, self.span.start.col).try();
-    out.add_bytes(": ").try();
-    out.add_bytes(message(self.fault)).try();
+    out.fmt(": {}", message(self.fault)).try();
     write_detail(self.fault, types, out).try();
     Ok(());
 }
@@ -357,10 +355,9 @@ write_missing = (out :: String, f: NameFault) Res<(), AllocError> {
 // constant is what turns it back into one mistake, and `==` is the
 // spelling that does compare.
 write_const_pattern = (out :: String, f: NameFault) Res<(), AllocError> {
-    out.add_bytes(" — `").try();
-    out.add_bytes(f.name).try();
-    out.add_bytes(
-        "` names a constant in scope: compare it with `==`, or rename the binder"
+    out.fmt(
+        " — `{}` names a constant in scope: compare it with `==`, or rename the binder",
+        f.name
     ).try();
     Ok(());
 }
@@ -372,11 +369,11 @@ write_const_pattern = (out :: String, f: NameFault) Res<(), AllocError> {
 // since "a name, and the module it is about" is exactly what that
 // payload carries.
 write_orphan = (out :: String, f: ExportFault) Res<(), AllocError> {
-    out.add_bytes(": ").try();
-    out.add_bytes(f.name).try();
-    out.add_bytes(" is declared in module ").try();
-    out.add_bytes(f.module).try();
-    out.add_bytes(", so the impl belongs there").try();
+    out.fmt(
+        ": {} is declared in module {}, so the impl belongs there",
+        f.name,
+        f.module
+    ).try();
     Ok(());
 }
 
@@ -388,11 +385,8 @@ write_orphan = (out :: String, f: ExportFault) Res<(), AllocError> {
 // member lookup, and a poison id rendered as one said so twice.
 write_member = (out :: String, types: Types, f: TypeFault)
                Res<(), AllocError> {
-    out.add_bytes(": no `").try();
-    out.add_bytes(f.name).try();
-    out.add_bytes("` on `").try();
-    types.write_name(f.found, out).try();
-    out.add_bytes("`").try();
+    found ::= types.name_of(f.found).try();
+    out.fmt(": no `{}` on `{}`", f.name, found.view()).try();
     Ok(());
 }
 
@@ -409,17 +403,16 @@ write_member = (out :: String, types: Types, f: TypeFault)
 // same pair under a new name.
 write_needs_value = (out :: String, types: Types, f: TypeFault)
                     Res<(), AllocError> {
-    out.add_bytes(" — `").try();
-    types.write_name(f.found, out).try();
-    out.add_bytes(".").try();
-    out.add_bytes(f.name).try();
-    out.add_bytes("` carries a value of type `").try();
-    types.write_name(f.expected, out).try();
-    out.add_bytes("`: write `").try();
-    types.write_name(f.found, out).try();
-    out.add_bytes(".").try();
-    out.add_bytes(f.name).try();
-    out.add_bytes("(e)`").try();
+    found   ::= types.name_of(f.found).try();
+    carried ::= types.name_of(f.expected).try();
+    out.fmt(
+        " — `{}.{}` carries a value of type `{}`: write `{}.{}(e)`",
+        found.view(),
+        f.name,
+        carried.view(),
+        found.view(),
+        f.name
+    ).try();
     Ok(());
 }
 
@@ -428,9 +421,8 @@ write_needs_value = (out :: String, types: Types, f: TypeFault)
 // names one and not two.
 write_needs_eq = (out :: String, types: Types, f: TypeFault)
                  Res<(), AllocError> {
-    out.add_bytes(" — `").try();
-    types.write_name(f.found, out).try();
-    out.add_bytes("` has none").try();
+    found ::= types.name_of(f.found).try();
+    out.fmt(" — `{}` has none", found.view()).try();
     Ok(());
 }
 
@@ -439,10 +431,10 @@ write_needs_eq = (out :: String, types: Types, f: TypeFault)
 // computed, as it does in `write_missing`.
 write_discarded = (out :: String, types: Types, f: TypeFault)
                   Res<(), AllocError> {
-    out.add_bytes(": `").try();
-    types.write_name(f.found, out).try();
-    out.add_bytes(
-        "` is computed and read by nothing — bind it, or delete the statement"
+    found ::= types.name_of(f.found).try();
+    out.fmt(
+        ": `{}` is computed and read by nothing — bind it, or delete the statement",
+        found.view()
     ).try();
     Ok(());
 }
@@ -457,9 +449,7 @@ write_discarded = (out :: String, types: Types, f: TypeFault)
 // in `message` because `message` has already said the law — repeating it
 // here would print the rule twice and the place never.
 write_place = (out :: String, f: NameFault, tail: str) Res<(), AllocError> {
-    out.add_bytes(" ").try();
-    out.add_bytes(f.name).try();
-    out.add_bytes(tail).try();
+    out.fmt(" {}{}", f.name, tail).try();
     Ok(());
 }
 
@@ -468,10 +458,7 @@ write_place = (out :: String, f: NameFault, tail: str) Res<(), AllocError> {
 // a reader told only `hex_digit` still has to find which of the file's
 // imports was the one that refused.
 write_export = (out :: String, f: ExportFault) Res<(), AllocError> {
-    out.add_bytes(": ").try();
-    out.add_bytes(f.name).try();
-    out.add_bytes(" is not exported by module ").try();
-    out.add_bytes(f.module).try();
+    out.fmt(": {} is not exported by module {}", f.name, f.module).try();
     Ok(());
 }
 
@@ -480,10 +467,7 @@ write_export = (out :: String, f: ExportFault) Res<(), AllocError> {
 // starred. `*` grants reading; the sentence has to say which half was
 // refused.
 write_unwritable = (out :: String, f: ExportFault) Res<(), AllocError> {
-    out.add_bytes(": ").try();
-    out.add_bytes(f.name).try();
-    out.add_bytes(" is not writable outside module ").try();
-    out.add_bytes(f.module).try();
+    out.fmt(": {} is not writable outside module {}", f.name, f.module).try();
     Ok(());
 }
 
@@ -492,13 +476,12 @@ write_unwritable = (out :: String, f: ExportFault) Res<(), AllocError> {
 // a value leaves the author looking at a line that reads like a type
 // alias. Naming `vec` is what turns it back into one mistake.
 write_module = (out :: String, f: ExportFault) Res<(), AllocError> {
-    out.add_bytes(": `").try();
-    out.add_bytes(f.name).try();
-    out.add_bytes("` names module `").try();
-    out.add_bytes(f.module).try();
-    out.add_bytes("`, so write `").try();
-    out.add_bytes(f.name).try();
-    out.add_bytes(".<name>`").try();
+    out.fmt(
+        ": `{}` names module `{}`, so write `{}.<name>`",
+        f.name,
+        f.module,
+        f.name
+    ).try();
     Ok(());
 }
 
@@ -513,21 +496,22 @@ write_module = (out :: String, f: ExportFault) Res<(), AllocError> {
 // rest, and every noun in it is something the author wrote.
 write_arms = (out :: String, types: Types, f: TypeFault)
              Res<(), AllocError> {
-    out.add_bytes(" — this arm is `").try();
-    types.write_name(f.found, out).try();
-    out.add_bytes("`, the arms above are `").try();
-    types.write_name(f.expected, out).try();
-    out.add_bytes("`").try();
+    found ::= types.name_of(f.found).try();
+    above ::= types.name_of(f.expected).try();
+    out.fmt(
+        " — this arm is `{}`, the arms above are `{}`",
+        found.view(),
+        above.view()
+    ).try();
     Ok(());
 }
 
 write_types = (out :: String, types: Types, f: TypeFault)
               Res<(), AllocError> {
+    expected ::= types.name_of(f.expected).try();
+    found    ::= types.name_of(f.found).try();
     quote(out, f.name).try();
-    out.add_bytes(": expected ").try();
-    types.write_name(f.expected, out).try();
-    out.add_bytes(", found ").try();
-    types.write_name(f.found, out).try();
+    out.fmt(": expected {}, found {}", expected.view(), found.view()).try();
     Ok(());
 }
 
@@ -546,12 +530,9 @@ write_literal = (out :: String, types: Types, f: TypeFault)
                 Res<(), AllocError> {
     text = f.name;
     out.add_bytes(": literal").try();
-    (text.len > 0).then(() {
-        out.add_bytes(" ").try();
-        out.add_bytes(text).try();
-    });
-    out.add_bytes(" does not fit ").try();
-    types.write_name(f.expected, out).try();
+    (text.len > 0).then(() { out.fmt(" {}", text).try() });
+    expected ::= types.name_of(f.expected).try();
+    out.fmt(" does not fit {}", expected.view()).try();
     Ok(());
 }
 
@@ -577,17 +558,12 @@ write_pair = (out :: String, f: PairFault) Res<(), AllocError> {
 }
 
 write_at = (out :: String, span: Span) Res<(), AllocError> {
-    out.add_bytes(span.file).try();
-    out.add_bytes(":").try();
+    out.fmt("{}:", span.file).try();
     write_pos(out, span.start.line, span.start.col)
 }
 
 quote = (out :: String, name: str) Res<(), AllocError> {
-    (name.len > 0).then(() {
-        out.add_bytes(" `").try();
-        out.add_bytes(name).try();
-        out.add_bytes("`").try();
-    });
+    (name.len > 0).then(() { out.fmt(" `{}`", name).try() });
     Ok(());
 }
 
