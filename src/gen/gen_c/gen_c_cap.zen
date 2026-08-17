@@ -376,25 +376,15 @@ write_arena = (
     ctype(be, ret, out).try();
     out.add_bytes("){ .").try();
     out.sym_member("state").try();
-    out.add_bytes(" = ").try();
-    out.add_bytes(tmp.view()).try();
-    out.add_bytes(" })").try();
+    out.fmt(" = {} })", tmp.view()).try();
     Ok(());
 }
 
-// `<tmp> = (<cell> *)malloc(sizeof(<cell>)<extra>);`
 write_malloc = (be :: CBackend, tmp: str, cell: TyId, extra: str)
                Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(tmp).try();
-    line.add_bytes(" = (").try();
-    ctype(be, cell, line).try();
-    line.add_bytes(" *)malloc(sizeof(").try();
-    ctype(be, cell, line).try();
-    line.add_bytes(")").try();
-    line.add_bytes(extra).try();
-    line.add_bytes(");").try();
-    be.writeln(line.view())
+    cty ::= be.alloc.String().try();
+    ctype(be, cell, cty).try();
+    be.fmt("{tmp} = ({} *)malloc(sizeof({}){extra});\n", cty.view(), cty.view())
 }
 
 // One field of the freshly-made state, and nothing at all when the
@@ -410,14 +400,9 @@ set_field = (be :: CBackend, tmp: str, cell: TyId, name: str, value: str)
 
 write_arrow_set = (be :: CBackend, tmp: str, name: str, value: str)
                   Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(tmp).try();
-    line.add_bytes("->").try();
-    sym_member(line, name).try();
-    line.add_bytes(" = ").try();
-    line.add_bytes(value).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view())
+    sym ::= be.alloc.String().try();
+    sym_member(sym, name).try();
+    be.fmt("{tmp}->{} = {value};\n", sym.view())
 }
 
 // -----------------------------------------------------------------
@@ -488,9 +473,7 @@ write_page = (
     dst ::= be.alloc.String().try();
     sym_gen(dst, "t", be.next_tmp()).try();
     declare_temp(be, usize_ty, szt.view()).try();
-    be.write("unsigned char *").try();
-    be.write(raw.view()).try();
-    be.writeln(";").try();
+    be.fmt("unsigned char *{};\n", raw.view()).try();
     declare_temp(be, ret, dst.view()).try();
     be.set_line(szt.view(), size.view()).try();
     write_page_malloc(be, raw.view(), cell, szt.view()).try();
@@ -505,14 +488,9 @@ write_page = (
 
 write_page_malloc = (be :: CBackend, raw: str, cell: TyId, szt: str)
                     Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(raw).try();
-    line.add_bytes(" = (unsigned char *)malloc(sizeof(").try();
-    ctype(be, cell, line).try();
-    line.add_bytes(") + ").try();
-    line.add_bytes(szt).try();
-    line.add_bytes(");").try();
-    be.writeln(line.view())
+    cty ::= be.alloc.String().try();
+    ctype(be, cell, cty).try();
+    be.fmt("{raw} = (unsigned char *)malloc(sizeof({}) + {szt});\n", cty.view())
 }
 
 // The three fields of the header, written THROUGH the raw pointer:
@@ -525,18 +503,12 @@ write_page_header = (
     szt  : str,
     prev : str
 ) Res<(), AllocError> {
+    cty ::= be.alloc.String().try();
+    ctype(be, cell, cty).try();
     cast ::= be.alloc.String().try();
-    cast.add_bytes("((").try();
-    ctype(be, cell, cast).try();
-    cast.add_bytes(" *)").try();
-    cast.add_bytes(raw).try();
-    cast.add_bytes(")").try();
+    cast.fmt("(({} *){raw})", cty.view()).try();
     base ::= be.alloc.String().try();
-    base.add_bytes("(").try();
-    base.add_bytes(raw).try();
-    base.add_bytes(" + sizeof(").try();
-    ctype(be, cell, base).try();
-    base.add_bytes("))").try();
+    base.fmt("({raw} + sizeof({}))", cty.view()).try();
     set_field(be, cast.view(), cell, "prev", prev).try();
     set_field(be, cast.view(), cell, "base", base.view()).try();
     set_field(be, cast.view(), cell, "size", szt).try();
@@ -548,8 +520,7 @@ write_page_ok = (be :: CBackend, ret: TyId, cell: TyId, raw: str, dst: str)
     value ::= be.alloc.String().try();
     value.add_bytes("(").try();
     ctype(be, cell, value).try();
-    value.add_bytes(" *)").try();
-    value.add_bytes(raw).try();
+    value.fmt(" *){raw}").try();
     write_assign_ok(be, ret, value.view(), dst).try();
     Ok(());
 }
@@ -561,11 +532,7 @@ lower_release = (be :: CBackend, c: Call, ctx: Ctx, out :: String)
     unknown = be.check.types.unknown().try();
     page ::= be.alloc.String().try();
     arg_text(be, c, 0, unknown, ctx, page).try();
-    line ::= be.alloc.String().try();
-    line.add_bytes("free((void *)(").try();
-    line.add_bytes(page.view()).try();
-    line.add_bytes("));").try();
-    be.writeln(line.view()).try();
+    be.fmt("free((void *)({}));\n", page.view()).try();
     out.add_bytes("0")
 }
 
@@ -597,9 +564,7 @@ write_assign_ok* = (be :: CBackend, ret: TyId, payload: str, dst: str)
     write_res_head(be, ret, "Ok", value).try();
     value.add_bytes(", .zg_data.").try();
     sym_member(value, "Ok").try();
-    value.add_bytes(" = ").try();
-    value.add_bytes(payload).try();
-    value.add_bytes(" })").try();
+    value.fmt(" = {payload} })").try();
     be.set_line(dst, value.view())
 }
 
