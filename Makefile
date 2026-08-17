@@ -19,7 +19,7 @@ ROOT    ?= src
 # `editors` IS IN THIS LIST BECAUSE `editors/` IS ALSO A DIRECTORY. Without
 # it make finds the directory, calls the target up to date, and runs the
 # script never — a gate that cannot fail because it cannot run.
-.PHONY: all build seed test test-zen lint parse design cap dupcomments faults refmap ufcs style editors fixpoint determinism grammar grammar-test fmt bench bench-allocs asan leak profile clean help
+.PHONY: all build seed test test-zen lint parse design cap dupcomments faults refmap ufcs style editors fixpoint determinism grammar grammar-test fmt bench bench-allocs emit-runs asan leak profile clean help
 
 all: test
 
@@ -206,7 +206,26 @@ fmt: build
 	    || { echo "fmt: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
 	  ./zen fmt --check "$${files[@]}"
 
-## bench-allocs: the half of tests/bench that is not a stopwatch, and so
+## ## emit-runs: consecutive writes into one buffer that a single `fmt` would
+## collapse. A LEDGER, not a rule: scripts/emit_runs_owed.txt records the
+## backlog per file and this fails if any file EXCEEDS its number, so a
+## conversion lane ratchets it down and nothing puts it back. Undercounts a
+## statement wrapped over several lines -- scripts/emit-runs.awk says why.
+emit-runs:
+	@find src -name '*.zen' | sort \
+	  | xargs awk -f scripts/emit-runs.awk -v mode=ledger \
+	  | sed 's/^    "//; s/": /|/; s/,$$//' | sort > $@.now; \
+	  awk -F'|' 'NR==FNR { owed[$$1]=$$2; next } \
+	    { if ($$2 > owed[$$1]) { \
+	        printf "%s: %d collapsible writes, ledger says %d\n", $$1, $$2, owed[$$1]; \
+	        bad=1 } } \
+	    END { if (bad) exit 1 }' scripts/emit_runs_owed.txt $@.now \
+	  || { rm -f $@.now; echo "emit-runs: a file grew -- collapse the run or update scripts/emit_runs_owed.txt" >&2; exit 1; }; \
+	  printf "emit-runs: %d file(s), %d call(s) owed\n" \
+	    "$$(wc -l < $@.now)" "$$(awk -F'|' '{s+=$$2} END {print s+0}' $@.now)"; \
+	  rm -f $@.now
+
+bench-allocs: the half of tests/bench that is not a stopwatch, and so
 ## the half that belongs in `test`. Each driver is linked through
 ## `ld --wrap=malloc` and compiled at N and 2N iterations; the slope is
 ## allocations and bytes per op, the same integers on every machine, and
