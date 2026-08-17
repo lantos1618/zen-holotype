@@ -114,11 +114,9 @@ emit_display = (
     text : str,
     sink : str
 ) Res<bool, AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("(void)").try();
-    display_call(be, ty, s, f, text, sink, line).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view()).try();
+    call ::= be.alloc.String().try();
+    display_call(be, ty, s, f, text, sink, call).try();
+    be.fmt("(void){};\n", call.view()).try();
     Ok(true);
 }
 
@@ -196,13 +194,9 @@ display_call = (
     sig ::= be.alloc.Vec<TyId>();
     method_sig(be, ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
     sym = member_symbol(be, ty, s, "toString", sig, inst).try();
-    out.add_bytes(sym.view()).try();
-    out.add_bytes("(").try();
-    out.add_bytes(text).try();
-    out.add_bytes(", ").try();
+    out.fmt("{}({text}, ", sym.view()).try();
     write_sink_arg(f, sink, out).try();
-    out.add_bytes(")").try();
-    Ok(());
+    out.add_bytes(")")
 }
 
 // `out :: Sink` takes the record BY ADDRESS, and a C compound literal is
@@ -270,11 +264,9 @@ write_console = (be :: CBackend, ty: TyId, out :: String)
 
 finish_console = (be :: CBackend, ty: TyId, inits: str, out :: String)
                  Res<bool, AllocError> {
-    out.add_bytes("((").try();
-    ctype(be, ty, out).try();
-    out.add_bytes("){ .zg_self = NULL").try();
-    out.add_bytes(inits).try();
-    out.add_bytes(" })").try();
+    rec ::= be.alloc.String().try();
+    ctype(be, ty, rec).try();
+    out.fmt("(({}){ .zg_self = NULL{inits} })", rec.view()).try();
     Ok(true);
 }
 
@@ -292,19 +284,14 @@ write_slot_init = (be :: CBackend, s: Slot, out :: String)
     name ::= be.alloc.String().try();
     console_name(name, s.name).try();
     need_console_fn(be, s, name.view()).try();
-    out.add_bytes(", .").try();
-    out.add_bytes(s.sym.view()).try();
-    out.add_bytes(" = ").try();
-    out.add_bytes(name.view()).try();
+    out.fmt(", .{} = {}", s.sym.view(), name.view()).try();
     Ok(false);
 }
 
 // Named after the member it answers, so two requests for one slot share
 // one function — the same rule `gen_c_fat.zen`'s thunks follow.
 console_name = (out :: String, member: str) Res<(), AllocError> {
-    out.add_bytes("zg_console_").try();
-    out.add_bytes(member).try();
-    Ok(());
+    out.fmt("zg_console_{member}")
 }
 
 // The one statement a console slot is. Empty means this backend has no
@@ -341,14 +328,13 @@ emit_console_fn = (be :: CBackend, s: Slot, name: str)
                   Res<(), AllocError> {
     head ::= be.alloc.String().try();
     console_head(be, s, name, head).try();
+    ok ::= be.alloc.String().try();
+    sym_variant(ok, RES_PATH, "Ok").try();
+    line = console_body(s.name);
     body ::= be.alloc.String().try();
-    body.add_bytes("    (void)zg_self;\n    ").try();
-    body.add_bytes(console_body(s.name)).try();
-    body.add_bytes("\n    return (").try();
+    body.fmt("    (void)zg_self;\n    {line}\n    return (").try();
     ctype(be, s.ret, body).try();
-    body.add_bytes("){ .zg_tag = ").try();
-    sym_variant(body, RES_PATH, "Ok").try();
-    body.add_bytes(" };\n").try();
+    body.fmt("){ .zg_tag = {} };\n", ok.view()).try();
     owned ::= be.alloc.String().try();
     owned.add_bytes(name).try();
     be.add_function(owned, head, body)
@@ -356,11 +342,9 @@ emit_console_fn = (be :: CBackend, s: Slot, name: str)
 
 console_head = (be :: CBackend, s: Slot, name: str, out :: String)
                Res<(), AllocError> {
-    out.add_bytes("static ").try();
-    ctype(be, s.ret, out).try();
-    out.add_bytes(" ").try();
-    out.add_bytes(name).try();
-    out.add_bytes("(void *zg_self").try();
+    ret ::= be.alloc.String().try();
+    ctype(be, s.ret, ret).try();
+    out.fmt("static {} {name}(void *zg_self", ret.view()).try();
     s.params.loop((h, i, p) { thunk_param(be, p, "a", i, out).try() });
     out.add_bytes(")").try();
     Ok(());

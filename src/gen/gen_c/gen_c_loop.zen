@@ -292,16 +292,13 @@ write_cond_body = (be :: CBackend, lam: Lambda, brk: usize, ctx: Ctx)
     sym_gen(tmp, "c", be.next_tmp()).try();
     decl ::= be.alloc.String().try();
     declarator(be, bool_ty, tmp.view(), decl).try();
-    decl.add_bytes(";").try();
-    be.writeln(decl.view()).try();
+    be.fmt("{};\n", decl.view()).try();
     cmark = be.check.mark();
     lmark = be.mark();
     block(be, lam.body, ctx, bool_ty, Dest.Into(tmp.view())).try();
     be.release(lmark).try();
     be.check.release(cmark).try();
-    be.write("if (!").try();
-    be.write(tmp.view()).try();
-    be.writeln(") { goto ").try();
+    be.fmt("if (!{}) { goto \n", tmp.view()).try();
     write_label(be, "brk", brk).try();
     be.writeln("; }").try();
     Ok(());
@@ -455,16 +452,9 @@ lower_bounded = (
     declare_usize(be, limit.view()).try();
     assign_member(be, counter.view(), rng.view(), "start").try();
     assign_member(be, limit.view(), rng.view(), "end").try();
-    be.write(base.view()).try();
-    be.write(" = ").try();
-    be.write(counter.view()).try();
-    be.writeln(";").try();
+    be.fmt("{} = {};\n", base.view(), counter.view()).try();
 
-    be.write("while (").try();
-    be.write(counter.view()).try();
-    be.write(" < ").try();
-    be.write(limit.view()).try();
-    be.writeln(") {").try();
+    be.fmt("while ({} < {}) {\n", counter.view(), limit.view()).try();
     be.indent();
     run_body(
         be,
@@ -492,10 +482,9 @@ walk_temp* = (be :: CBackend, one: ExprId, rty: TyId, ctx: Ctx)
     sym_gen(rng, "r", be.next_tmp()).try();
     decl ::= be.alloc.String().try();
     declarator(be, rty, rng.view(), decl).try();
-    decl.add_bytes(" = ").try();
-    expr(be, one, ctx, rty, decl).try();
-    decl.add_bytes(";").try();
-    be.writeln(decl.view()).try();
+    init ::= be.alloc.String().try();
+    expr(be, one, ctx, rty, init).try();
+    be.fmt("{} = {};\n", decl.view(), init.view()).try();
     Ok(rng);
 }
 
@@ -503,20 +492,14 @@ declare_usize* = (be :: CBackend, name: str) Res<(), AllocError> {
     usize_ty = be.check.types.prim("usize").try();
     decl ::= be.alloc.String().try();
     declarator(be, usize_ty, name, decl).try();
-    decl.add_bytes(";").try();
-    be.writeln(decl.view())
+    be.fmt("{};\n", decl.view())
 }
 
 assign_member = (be :: CBackend, target: str, base: str, member: str)
                 Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(target).try();
-    line.add_bytes(" = ").try();
-    line.add_bytes(base).try();
-    line.add_bytes(".").try();
-    sym_member(line, member).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view())
+    sym ::= be.alloc.String().try();
+    sym_member(sym, member).try();
+    be.fmt("{target} = {base}.{};\n", sym.view())
 }
 
 // -----------------------------------------------------------------
@@ -575,12 +558,11 @@ open_result_temp = (be :: CBackend, want: TyId, result :: String)
     sym_gen(result, "v", be.next_tmp()).try();
     decl ::= be.alloc.String().try();
     declarator(be, want, result.view(), decl).try();
-    decl.add_bytes(" = (").try();
-    ctype(be, want, decl).try();
-    decl.add_bytes("){ .zg_tag = ").try();
-    sym_variant(decl, RES_PATH, "None").try();
-    decl.add_bytes(" };").try();
-    be.writeln(decl.view())
+    cty ::= be.alloc.String().try();
+    ctype(be, want, cty).try();
+    none ::= be.alloc.String().try();
+    sym_variant(none, RES_PATH, "None").try();
+    be.fmt("{} = ({}){ .zg_tag = {} };\n", decl.view(), cty.view(), none.view())
 }
 
 // The body, inlined into the frame it was written in. The handle and
@@ -743,12 +725,7 @@ bind_element* = (
 
 write_offset = (counter: str, base: str, out :: String)
                Res<(), AllocError> {
-    out.add_bytes("(").try();
-    out.add_bytes(counter).try();
-    out.add_bytes(" - ").try();
-    out.add_bytes(base).try();
-    out.add_bytes(")").try();
-    Ok(());
+    out.fmt("({counter} - {base})")
 }
 
 // The `index` a counted `for (;;)` needs when there is no range to take
@@ -756,9 +733,7 @@ write_offset = (counter: str, base: str, out :: String)
 open_counter = (be :: CBackend, counter :: String) Res<(), AllocError> {
     sym_gen(counter, "i", be.next_tmp()).try();
     declare_usize(be, counter.view()).try();
-    be.write(counter.view()).try();
-    be.writeln(" = 0;").try();
-    Ok(());
+    be.fmt("{} = 0;\n", counter.view())
 }
 
 // The tail of a pass: where `h.next()` lands, the step, and the `}`.
@@ -786,11 +761,7 @@ close_pass* = (be :: CBackend, st: LoopFrame, counter: str, fold: Fold)
 }
 
 step_counter = (be :: CBackend, counter: str) Res<(), AllocError> {
-    be.write(counter).try();
-    be.write(" = ").try();
-    be.write(counter).try();
-    be.writeln(" + 1;").try();
-    Ok(());
+    be.fmt("{counter} = {counter} + 1;\n")
 }
 
 write_label* = (be :: CBackend, stem: str, n: usize) Res<(), AllocError> {

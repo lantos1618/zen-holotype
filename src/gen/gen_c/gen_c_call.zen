@@ -80,12 +80,11 @@ res_value* = (
 
 write_res_tagged = (be :: CBackend, want: TyId, variant: str, out :: String)
                    Res<(), AllocError> {
-    out.add_bytes("(").try();
-    ctype(be, want, out).try();
-    out.add_bytes("){ .zg_tag = ").try();
-    out.sym_variant(RES_PATH, variant).try();
-    out.add_bytes(" }").try();
-    Ok(());
+    cty ::= be.alloc.String().try();
+    ctype(be, want, cty).try();
+    tag ::= be.alloc.String().try();
+    tag.sym_variant(RES_PATH, variant).try();
+    out.fmt("({}){ .zg_tag = {} }", cty.view(), tag.view())
 }
 
 // `Ok(x)` / `Err(e)`: the tag, and the payload under the member the
@@ -115,9 +114,9 @@ write_res_payload* = (
         false => Ok(()),
         true  => run_for_effect(be, value, payload, ctx),
     }).try();
-    out.add_bytes("(").try();
-    ctype(be, want, out).try();
-    out.add_bytes("){ .zg_tag = ").try();
+    cty ::= be.alloc.String().try();
+    ctype(be, want, cty).try();
+    out.fmt("({}){ .zg_tag = ", cty.view()).try();
     out.sym_variant(RES_PATH, variant).try();
     is_unit(be, payload).match({
         true  => Ok(()),
@@ -786,12 +785,9 @@ write_convert = (
     signature_of(be, d, inst, sig).try();
     unknown = be.check.types.unknown().try();
     src     = sig.get(0).match({ Ok(t) => t, None => unknown });
-    out.add_bytes("(").try();
-    out.add_bytes(c_prim(target)).try();
-    out.add_bytes(")(").try();
+    out.fmt("({})(", c_prim(target)).try();
     expr(be, v, ctx, src, out).try();
-    out.add_bytes(")").try();
-    Ok(());
+    out.add_bytes(")")
 }
 
 call_signature = (
@@ -967,8 +963,7 @@ write_call = (
     out  :: String
 )
              Res<(), AllocError> {
-    out.add_bytes(sym).try();
-    out.add_bytes("(").try();
+    out.fmt("{sym}(").try();
     first = write_receiver(be, recv, f, sig, ctx, out).try();
     be.write_call_args(c, first, f, sig, ctx, out).try();
     out.add_bytes(")").try();

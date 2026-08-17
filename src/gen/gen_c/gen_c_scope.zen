@@ -263,14 +263,12 @@ write_env_type = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
 
 write_env_struct = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
                    Res<(), AllocError> {
+    env ::= be.alloc.String().try();
+    env_name(be, n, env).try();
     text ::= be.alloc.String().try();
-    text.add_bytes("typedef struct ").try();
-    env_name(be, n, text).try();
-    text.add_bytes(" {\n").try();
+    text.fmt("typedef struct {} {\n", env.view()).try();
     caps.loop((h, s) { write_env_field(be, s, text).try() });
-    text.add_bytes("} ").try();
-    env_name(be, n, text).try();
-    text.add_bytes(";").try();
+    text.fmt("} {};", env.view()).try();
     be.add_defer_env(text, n)
 }
 
@@ -293,9 +291,7 @@ write_env_field = (be :: CBackend, s: LocalSlot, text :: String)
 ref_field = (be :: CBackend, ty: TyId, name: str, text :: String)
             Res<(), AllocError> {
     ctype(be, ty, text).try();
-    text.add_bytes(" *").try();
-    text.add_bytes(name).try();
-    Ok(());
+    text.fmt(" *{name}")
 }
 
 env_name = (be :: CBackend, n: usize, out :: String) Res<(), AllocError> {
@@ -354,12 +350,9 @@ write_prologue = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
 
 write_unpack = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
                Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    env_name(be, n, line).try();
-    line.add_bytes(" *zg_e = (").try();
-    env_name(be, n, line).try();
-    line.add_bytes(" *)zg_p;").try();
-    be.writeln(line.view()).try();
+    env ::= be.alloc.String().try();
+    env_name(be, n, env).try();
+    be.fmt("{} *zg_e = ({} *)zg_p;\n", env.view(), env.view()).try();
     caps.loop((h, s) { write_unpack_one(be, s).try() });
     Ok(());
 }
@@ -372,10 +365,7 @@ write_unpack_one = (be :: CBackend, s: LocalSlot) Res<(), AllocError> {
         false => declarator(be, s.ty, cname.view(), line),
         true  => ref_field(be, s.ty, cname.view(), line),
     }).try();
-    line.add_bytes(" = zg_e->").try();
-    line.add_bytes(cname.view()).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view())
+    be.fmt("{} = zg_e->{};\n", line.view(), cname.view())
 }
 
 // -----------------------------------------------------------------
@@ -405,28 +395,18 @@ fill_record = (
     cell :: String
 ) Res<(), AllocError> {
     sym_gen(cell, "c", be.next_tmp()).try();
-    decl ::= be.alloc.String().try();
-    env_name(be, n, decl).try();
-    decl.add_bytes(" ").try();
-    decl.add_bytes(cell.view()).try();
-    decl.add_bytes(";").try();
-    be.writeln(decl.view()).try();
+    env ::= be.alloc.String().try();
+    env_name(be, n, env).try();
+    be.fmt("{} {};\n", env.view(), cell.view()).try();
     caps.loop((h, s) { copy_capture(be, s, cell.view()).try() });
     Ok(());
 }
 
 copy_capture = (be :: CBackend, s: LocalSlot, cell: str)
                Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(cell).try();
-    line.add_bytes(".").try();
     cname ::= be.alloc.String().try();
     sym_local(cname, s.name, s.index).try();
-    line.add_bytes(cname.view()).try();
-    line.add_bytes(" = ").try();
-    line.add_bytes(cname.view()).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view())
+    be.fmt("{cell}.{} = {};\n", cname.view(), cname.view())
 }
 
 // The position travels with the registration because the two things
@@ -442,15 +422,12 @@ write_defer_call = (
 ) Res<(), AllocError> {
     node = be.tree.expr_at(id);
     line ::= be.alloc.String().try();
-    line.add_bytes("zg_defer(").try();
-    line.add_bytes(recv).try();
-    line.add_bytes(", ").try();
+    line.fmt("zg_defer({recv}, ").try();
     sym_gen(line, "d", n).try();
     write_defer_env_args(be, cell, line).try();
     line.add_bytes(", ").try();
     write_position(be, node.span.file, node.span, line).try();
-    line.add_bytes(");").try();
-    be.writeln(line.view())
+    be.fmt("{});\n", line.view())
 }
 
 write_defer_env_args = (be :: CBackend, cell: str, line :: String)
@@ -462,11 +439,7 @@ write_defer_env_args = (be :: CBackend, cell: str, line :: String)
 }
 
 write_env_args = (cell: str, line :: String) Res<(), AllocError> {
-    line.add_bytes(", &").try();
-    line.add_bytes(cell).try();
-    line.add_bytes(", sizeof ").try();
-    line.add_bytes(cell).try();
-    Ok(());
+    line.fmt(", &{cell}, sizeof {cell}")
 }
 
 // -----------------------------------------------------------------
