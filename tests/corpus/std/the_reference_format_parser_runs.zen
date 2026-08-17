@@ -1,0 +1,56 @@
+// tests/corpus/std/the_reference_format_parser_runs.zen
+// `text_fmt.fmt_next` is called THE reference parser for the format
+// language, and until this file nothing called it at all.
+//
+// That is the gate-that-cannot-fail shape: a reference implementation with
+// no caller is prose, and prose drifts. Both backends expand a format at
+// the call site and never step this function, so `{name}` could have been
+// added to them while this one still read `{n}` as literal bytes -- a
+// reference to a language nobody implements -- and every test in the tree
+// would have stayed green.
+//
+// So the steps are printed, and the shapes printed here are exactly the
+// ones `a_doubled_brace_writes_one` and `a_named_hole_reads_the_scope`
+// pin in the backends. Read the three files together: same inputs, one
+// grammar, and this is the half a human can check by eye.
+//
+// A FORMAT HERE IS AN ARGUMENT, not a format. `walk("{}")` passes bytes,
+// and `tests/corpus/lex/string_literal_braces` is the same distinction
+// from the other side.
+
+FmtStep, fmt_next = std.text
+
+Error = AllocError | IoError
+
+// every step of `f`, one line each. Spent when `next` reaches the end --
+// `hole` false is not the terminator, since a doubled brace ends a run
+// without being a hole
+walk = (label: str, f: str) Res<(), Error> {
+    println("{label}");
+    at ::= 0;
+    loop(() { at < f.len }, (h) {
+        s = f.fmt_next(at);
+        println(
+            "  run [{}] hole {} name [{}] bad {}",
+            s.literal,
+            s.hole,
+            s.name,
+            s.bad
+        );
+        at = s.next;
+    });
+    Ok(());
+}
+
+main = (env: Env) Res<i32, Error> {
+    walk("a positional hole", "{}").try();
+    walk("a run either side", "x{}y").try();
+    walk("a doubled brace, both ways", "{{}}").try();
+    walk("a lone brace is a byte", "a { b } c").try();
+    walk("the hole is seen first", "{}}").try();
+    walk("a named hole", "a{name}b").try();
+    walk("named and positional mix", "{a} {} {b}").try();
+    walk("a doubled brace is not a name", "{{name}}").try();
+    walk("refused: not an identifier", "{p.x}").try();
+    Ok(0);
+}

@@ -117,20 +117,86 @@ the same reason.
 
 ---
 
-## 3. Gap two — `{name}`, and why it is the interesting one
+## 3. Gap two — CLOSED 2026-08-17: `{name}` reads the scope
 
-Repetition is the symptom:
+Repetition was the symptom:
 
     be.fmt("zg_scope {};\n{}.zg_n = 0;\n", name.view(), name.view())
-    be.fmt("zg_scope {name};\n{name}.zg_n = 0;\n")               // wanted
+    be.fmt("zg_scope {name};\n{name}.zg_n = 0;\n")               // now legal
 
-**This is a compile-time feature, not a runtime one.** The compiler already steps
-the format string at the call site, so a `{name}` hole is resolved by looking
-`name` up in scope exactly as any other identifier is typed, emitting the same
-writer call a positional hole would. No allocation, no runtime scan, no boxing.
+**It is a compile-time feature and nothing about it is runtime.** The compiler
+already steps the format at the call site, so the walk reaches `{name}`, looks
+`name` up in the frame it is standing in exactly as it resolves a bare
+identifier, and emits the write a positional hole would have emitted. Proved by
+reading the emitted C rather than asserted — `println("{name} is {n}")` becomes
 
-It also composes with §2 — both are decisions inside the same twenty-line
-parser.
+    zg_print_str((zu_l4name));
+    zg_print_bytes(" is ", 4u);
+    zg_print_i64((int64_t)(zu_l1n));
+
+three calls, no allocation, no format state, no scan. `make bench-allocs` is
+unchanged to the digit.
+
+### The three decisions, and what each one buys
+
+**Positional and named holes mix freely, and a named hole consumes no
+positional argument.** `add("{a} of {}", n)` passes the one argument its one
+positional hole wants. Counting a named hole would make that call claim two, and
+the arity diagnostic would then be a lie about which of the two spellings was
+wrong. `gen_c_print.arguments_taken` and the bootstrapper's `holes` sum are the
+one place this is decided in each compiler.
+
+**A name not in scope is `codegen cannot resolve \`total\`` at the hole's own
+column** — not "wrong argument count", which is silent about which of the two
+things is wrong. The column is exact rather than approximate because **a string
+literal cannot span source lines** (a raw newline inside one is
+`LexFault.UnterminatedString`), so a byte offset into the literal's raw text
+*is* a column offset. Both compilers compute it that way —
+`gen_c_print.report_in_format` and `bootstrap/gen_c.py`'s `fmt_span` — and
+`must-fail/codegen/format_hole_names_nothing` holds them to the same answer,
+since a must-fail expectation names the position and is read by whichever
+compiler ran.
+
+**A name is the identifier grammar, and `{p.x}` / `{f()}` are REFUSED.** A hole
+is not an expression language: a field read or a call would give a format string
+a second parser with its own precedence and diagnostics, bought for nothing. The
+rule that makes the refusal statable instead of a special case is that **a `{`
+followed by an identifier character always meant a hole** — so a near miss
+cannot fall back to printing itself, which is the wrong answer nobody reads
+twice, since `{p.x}` appearing verbatim in the output looks like the author's own
+text. `{{p.x}` is the fix, and §2's escape is why the refusal costs nothing.
+
+*Measured before adopting it, because it widens what a `{` can mean:* across
+every `.zen` file in the tree, **four** string literals contain a `{` followed by
+an identifier character, and **none is in a format position** — `"a{b}c"` and
+`"<.. {k:null}..>"` are arguments, and two are the new tests' own `{{ok}}` /
+`{{f}}`. Note what the last two show: a doubled brace is classified *before* a
+name is looked for, so `{{name}}` is a `{`, the bytes `name`, and a `}`. The
+identifier grammar itself is `std.core.byte`'s `is_ident_start` /
+`is_ident_cont`, not a second spelling of it.
+
+### One walk, four readers, and the reference parser made honest
+
+The classification lives in **one** function per compiler —
+`gen_c_print.fmt_at`, returning a `FmtAt` that carries `keep` (where the run
+before it ends) and `next` (where the walk resumes), and `fmt_pieces` in the
+bootstrapper. `println` and every sink door read it, so they cannot drift on what
+a position means; what each still owns is only *where the bytes go*.
+
+The bootstrapper's walk moved from the decoded bytes to the **raw source text**
+for the diagnostic's sake: an offset into decoded bytes is not a column. That is
+the one structural change on that side, and it makes the two walks the same
+shape as well as the same rules.
+
+**`text_fmt.fmt_next` had no caller, and a reference implementation nobody runs
+is prose.** Both backends expand at the call site and never step it, so `{name}`
+could have been added to both while the reference still read `{n}` as literal
+bytes and every test would have stayed green — the gate-that-cannot-fail shape.
+It now carries `name` and `bad`, and
+`tests/corpus/std/the_reference_format_parser_runs` prints every step of nine
+inputs, the same shapes the backend tests pin. Its `FmtStep.hole` no longer
+implies "last step": a doubled brace ends a run without being a hole, so **the
+walk is spent when `next == f.len`.**
 
 ### Why the runtime shape does not work
 
@@ -297,9 +363,21 @@ The judgement cases are worth naming, because they are traps:
   now ends a line on `\n`. For a `String` sink a `\n` is correctly just a byte —
   only `Emit` has indentation to re-arm.
 
-**Sequencing.** The escape and `{name}` land first, in the parser and both
-backends, with the LSP's ten `}}` literals handled in the same change. The
-`add`/`fmt` collapse decides the final spelling. Only then do the conversion
-lanes fan out — six units with no shared files, since two agents in one file read
-each other's edits as their own bugs. `@meta`-driven dispatch is Stage 5 and
-independent of all of it.
+**Sequencing.** The escape and `{name}` have landed (§2, §3), in the reference
+parser and both backends, with the LSP's `}}` literals proved pinned by mutation
+rather than commented. **What a conversion lane owes now is two lines, not a
+list:** escape a doubled brace in any bytes it converts that are *not* under a
+corpus expectation, and read `text_fmt.zen`'s header for the grammar rather than
+this file. A lane will also find `{p.x}` refused where it was previously literal
+— loudly, at the hole's column, with `{{p.x}` as the fix; the tree contains zero
+such sites today.
+
+`{c}`-style holes are still owed and are what the `add_byte` judgement cases in
+this section need — a `u8` hole printing a *number* is the trap named above.
+`{name}` did not open that door: a hole holds an identifier, and a format spec is
+a separate grammar decision.
+
+The `add`/`fmt` collapse (§4) decides the final spelling. Only then do the
+conversion lanes fan out — six units with no shared files, since two agents in
+one file read each other's edits as their own bugs. `@meta`-driven dispatch is
+Stage 5 and independent of all of it.

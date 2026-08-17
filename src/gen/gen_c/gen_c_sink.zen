@@ -44,11 +44,12 @@ CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 ctype = gen.gen_c.gen_c_type
 is_c_integer, is_signed = gen.gen_c.gen_c_type
-expr, ty_of = gen.gen_c.gen_c_expr
+expr, ty_of, named_hole = gen.gen_c.gen_c_expr
 declare_temp = gen.gen_c.gen_c_flow
 signature_of, recv_arg, arg_value, by_ref = gen.gen_c.gen_c_call
-body_end, is_hole, advance, decoded_bytes, cast_of = gen.gen_c.gen_c_print
-is_doubled_brace = gen.gen_c.gen_c_print
+body_end, decoded_bytes, cast_of = gen.gen_c.gen_c_print
+FmtAt, FmtWhat, fmt_at, ends_run, arguments_taken = gen.gen_c.gen_c_print
+report_in_format, NOT_A_HOLE = gen.gen_c.gen_c_print
 slot_call = gen.gen_c.gen_c_bound
 fat_value = gen.gen_c.gen_c_fat
 sink_display = gen.gen_c.gen_c_display
@@ -521,7 +522,7 @@ write_pieces* = (
     raw = format_of(be, first);
     (raw.len == 0).match({
         true  => write_values(be, c, first, used0, p, ctx),
-        false => walk_format(be, c, raw, used0, p, ctx),
+        false => walk_format(be, c, first, raw, used0, p, ctx),
     })
 }
 
@@ -557,6 +558,7 @@ literal_format = (l: Literal) str {
 walk_format = (
     be    :: CBackend,
     c     : Call,
+    id    : ExprId,
     raw   : str,
     used0 : usize,
     p     : Piece,
@@ -567,24 +569,56 @@ walk_format = (
     used  ::= used0;
     i     ::= 1;
     loop(() { i < end }, (h) {
-        hole = is_hole(raw, i, end);
-        pair = is_doubled_brace(raw, i, end);
-        hole.then(() {
-            write_chunk(be, raw, start, i, p).try();
-            write_hole(be, c, used, p, ctx).try();
-            used  = used + 1;
-            start = i + 2;
+        at = fmt_at(raw, i, end);
+        at.ends_run().then(() {
+            write_chunk(be, raw, start, at.keep, p).try();
+            write_what(be, c, id, at, used, p, ctx).try();
+            used  = used + at.what.arguments_taken();
+            start = at.next;
         });
-        // A doubled brace writes ONE — the run keeps the first of the pair.
-        pair.then(() {
-            write_chunk(be, raw, start, i + 1, p).try();
-            start = i + 2;
-        });
-        i = i + advance(raw, i, hole || pair);
+        i = at.next;
     });
     write_chunk(be, raw, start, end, p).try();
     write_rest(be, c, used, p, ctx).try();
     Ok(());
+}
+
+// What one position turned out to be, written into the sink. `gen_c_print`
+// has the same four arms with the console under them; what differs is
+// only where the bytes go, which is why the CLASSIFICATION is shared and
+// this is not.
+write_what = (
+    be   :: CBackend,
+    c    : Call,
+    id   : ExprId,
+    at   : FmtAt,
+    used : usize,
+    p    : Piece,
+    ctx  : Ctx
+) Res<(), AllocError> {
+    at.what.match({
+        Hole     => write_hole(be, c, used, p, ctx),
+        Named(n) => write_named(be, id, at, n, p),
+        NoName   => report_in_format(
+            be,
+            id,
+            at,
+            GenFault.Unsupported(NOT_A_HOLE)
+        ),
+        _        => Ok(()),
+    })
+}
+
+// `{name}` into the sink, through the writer its type picks. Every
+// decision after "what is it" is `write_value`'s, reached with the C text
+// and the type read off the binding's own slot.
+write_named = (be :: CBackend, id: ExprId, at: FmtAt, name: str, p: Piece)
+              Res<(), AllocError> {
+    text ::= be.alloc.String().try();
+    be.named_hole(name, text).try().match({
+        None  => report_in_format(be, id, at, GenFault.Unresolved(name)),
+        Ok(t) => be.write_typed_into(id, t, text.view(), p),
+    })
 }
 
 // A hole with no argument left writes itself, which is what `println`
@@ -654,8 +688,17 @@ write_value = (be :: CBackend, a: ExprId, p: Piece, ctx: Ctx)
     ty      = ty_of(be, a, ctx, unknown).try();
     text ::= be.alloc.String().try();
     expr(be, a, ctx, ty, text).try();
+    be.write_typed_into(a, ty, text.view(), p)
+}
+
+// The write a value becomes once its C text and its type are in hand. A
+// `{name}` hole arrives here with both read off its own slot, so the two
+// hole spellings share every decision after "where did the value come
+// from" — including the floor door's refusal of a non-`str`.
+write_typed_into = (be :: CBackend, a: ExprId, ty: TyId, text: str, p: Piece)
+                   Res<(), AllocError> {
     call ::= be.alloc.String().try();
-    value_call(be, p, ty, text.view(), call).try().match({
+    value_call(be, p, ty, text, call).try().match({
         false => unsupported_piece(be, a, hole_fault(p)),
         true  => write_guarded(be, call.view(), p),
     })

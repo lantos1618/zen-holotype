@@ -205,6 +205,16 @@ def _diag(span, message, notes=()):
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# The name a `{name}` format hole may hold: the identifier grammar, unanchored
+# so it can be matched at an offset.  `\w` is deliberately not used -- it is
+# unicode-aware in Python and Zen identifiers are ASCII by the grammar.
+_FMT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# What a `{` that opened nothing is told. Paired with `gen_c_print.NOT_A_HOLE`
+# WORD FOR WORD, because a must-fail expectation matches a substring of the
+# message and is read by whichever of the two compilers ran.
+NOT_A_HOLE = "a format hole is {} or {name}, and this is neither"
+
 
 def comp(name: str) -> str:
     """One length-prefixed component."""
@@ -1721,7 +1731,16 @@ class Emitter:
     # -- diagnostics -------------------------------------------------------
 
     def error(self, node, message, notes=()):
-        self.diags.append(_diag(f(node, "span"), message, notes))
+        self.error_at(f(node, "span"), message, notes)
+
+    def error_at(self, span, message, notes=()):
+        """A diagnostic at a span the caller BUILT, not at a node's own.
+
+        Only the format walk needs one: a `{name}` hole lives inside a string
+        literal and has no node, and pointing at the literal would leave the
+        reader counting bytes into a forty-byte format.  See `fmt_span`.
+        """
+        self.diags.append(_diag(span, message, notes))
 
     # ------------------------------------------------------------------ API
 
@@ -4561,29 +4580,76 @@ class FnCtx:
     # that expansion; the rules it implements are text_fmt.zen's.
 
     @staticmethod
-    def fmt_pieces(raw):
-        """text_fmt.zen's format language, in full: `{}` is a hole, `{{` and
-        `}}` are a doubled brace writing ONE, and every other byte --
-        including a lone `{` and a lone `}` -- is literal.
+    def fmt_pieces(text):
+        """text_fmt.zen's format language, in full: `{}` is a hole, `{name}` is
+        that binding, `{{` and `}}` are a doubled brace writing ONE, and every
+        other byte -- including a lone `{` and a lone `}` -- is literal.
 
-        Left to right and never backing up, which is what decides the two
-        shapes that could read either way: `{}}` is a hole then a literal `}`,
-        and `{{}` is a literal `{` then a literal `}`.
+        Left to right and never backing up, which decides the two shapes that
+        could read either way: `{}}` is a hole then a literal `}`, and `{{}` is
+        a literal `{` then a literal `}`.  A `{` FOLLOWED BY AN IDENTIFIER
+        CHARACTER always meant a hole, so `{p.x}` is refused and not printed.
+
+        WALKED OVER THE RAW SOURCE TEXT and not over the decoded bytes, for one
+        reason: a diagnostic has to point at the HOLE, and a byte offset into
+        the raw text IS a column offset (a string literal cannot span lines)
+        while an offset into the decoded bytes is not.  `gen_c_print.fmt_at`
+        walks raw for the same reason, and the two must agree on the column or
+        a must-fail expectation passes under one compiler and not the other.
+
+        Yields `(decoded run before it, what, name, raw offset of the `{`)`.
+        The offset counts the OPENING QUOTE as byte 0, as the self-hosted walk
+        does, so it adds to the literal's own column unchanged.
         """
-        out, run, i = [], bytearray(), 0
-        while i < len(raw):
-            if raw[i:i + 2] == b"{}":
-                out.append((bytes(run), True))
-                run = bytearray()
-                i += 2
-            elif raw[i:i + 2] in (b"{{", b"}}"):
-                run.append(raw[i])
-                i += 2
+        s = str(text)
+        body = s[1:-1] if len(s) >= 2 and s[0] == '"' and s[-1] == '"' else s
+        out, run, i = [], "", 0
+        while i < len(body):
+            two = body[i:i + 2]
+            named = _FMT_NAME.match(body, i + 1) if body[i] == "{" else None
+            if two == "{}":
+                out.append((decode_str(run), "hole", "", i + 1))
+                run, i = "", i + 2
+            elif two in ("{{", "}}"):
+                run, i = run + body[i], i + 2
+            elif named and named.end() < len(body) and body[named.end()] == "}":
+                out.append((decode_str(run), "named", named.group(0), i + 1))
+                run, i = "", named.end() + 1
+            elif named:
+                out.append((decode_str(run), "bad", "", i + 1))
+                run, i = "", i + 1
+            elif body[i] == "\\":
+                # an escape travels whole, so a backslash cannot open a hole
+                run, i = run + body[i:i + 2], i + 2
             else:
-                run.append(raw[i])
-                i += 1
-        out.append((bytes(run), False))
+                run, i = run + body[i], i + 1
+        out.append((decode_str(run), "", "", len(body) + 1))
         return out
+
+    @staticmethod
+    def fmt_span(fmt_node, off, width):
+        """The span of one hole inside a format string. `error_at`'s reason."""
+        span = f(fmt_node, "span")
+        line, col = span.start
+        # `type(span)` rather than `zast.Span`: the sibling module is loaded
+        # optionally and is None in one harness, and the span in hand already
+        # knows its own class.
+        return type(span)(file=span.file, start=(line, col + off),
+                          end=(line, col + off + width))
+
+    def fmt_named(self, fmt_node, name, off):
+        """The binding a `{name}` hole names, as `(code, type)`, or None.
+
+        Resolved in THE FRAME BEING LOWERED, which is what makes `{name}` a
+        compile-time feature: `self.find` is the same lookup a bare identifier
+        gets, so the hole means what the identifier would have meant there.
+        `gen_c_expr.named_hole` is the self-hosted half.
+        """
+        got = self.find(name)
+        if got is None:
+            self.e.error_at(self.fmt_span(fmt_node, off, len(name) + 2),
+                            "cannot resolve `%s` in a format hole" % name)
+        return got
 
     def free_fn(self, name, arity):
         """A writer text_fmt declares, by name: this expansion is the
@@ -4718,21 +4784,31 @@ class FnCtx:
             self.e.error(node, "a format string is read at compile time, so it "
                                "must be written at the call site")
             return
-        pieces = self.fmt_pieces(decode_str(str(f(fmt_node, "text", ""))))
-        holes = sum(1 for _r, h in pieces if h)
+        pieces = self.fmt_pieces(f(fmt_node, "text", ""))
+        # ONLY A POSITIONAL HOLE CONSUMES AN ARGUMENT, so only those are
+        # counted: a named hole carries its own value, and counting it would
+        # make `add("{a} {}", x)` claim two arguments while one was written.
+        holes = sum(1 for _r, w, _n, _o in pieces if w == "hole")
         if holes != len(rest):
             self.e.error(node, "the format string has %d hole(s) and the call "
                                "passes %d argument(s)" % (holes, len(rest)))
         n = 0
-        for run, hole in pieces:
+        for run, what, name, off in pieces:
             if run:
                 self.write_piece(self.write_bytes(sb, (self.str_literal(run),
                                                        self.str_type()), node),
                                  result, ret, done, node)
-            if hole and n < len(rest):
+            if what == "hole" and n < len(rest):
                 self.write_piece(self.write_hole(sb, rest[n], node, floor),
                                  result, ret, done, node)
                 n += 1
+            elif what == "named":
+                got = self.fmt_named(fmt_node, name, off)
+                if got is not None:
+                    self.write_piece(self.write_hole(sb, got, node, floor),
+                                     result, ret, done, node)
+            elif what == "bad":
+                self.e.error_at(self.fmt_span(fmt_node, off, 1), NOT_A_HOLE)
 
     def call_method(self, recv, name, args, node):
         """A method call gen_c writes for itself, resolved the way a written
@@ -5556,21 +5632,27 @@ class FnCtx:
         if kind(fmt_node) == "Literal" and f(fmt_node, "kind") == "str":
             # ONE WALK, `fmt_pieces`.  This used to be its own `split(b"{}")`,
             # which agreed with the door only because the language had a single
-            # rule; the brace escape gave it two, and a second copy of two
-            # rules is a divergence waiting for someone to write `{{`.
-            pieces = self.fmt_pieces(decode_str(str(f(fmt_node, "text", ""))))
+            # rule; the brace escape and `{name}` gave it four, and a second
+            # copy of four rules is a divergence waiting to be written.
+            pieces = self.fmt_pieces(f(fmt_node, "text", ""))
             n = 0
-            for run, hole in pieces:
+            for run, what, name, off in pieces:
                 if run:
                     self.line(
                         "%sprint_bytes(%s, %d);" % (GEN, c_string(run), len(run))
                     )
-                if hole:
+                if what == "hole":
                     if n < len(rest):
                         self.print_value(rest[n])
                     else:
                         self.line("%sprint_bytes(\"{}\", 2);" % GEN)
                     n += 1
+                elif what == "named":
+                    got = self.fmt_named(fmt_node, name, off)
+                    if got is not None:
+                        self.print_value(got)
+                elif what == "bad":
+                    self.e.error_at(self.fmt_span(fmt_node, off, 1), NOT_A_HOLE)
             for extra in rest[n:]:
                 self.print_value(extra)
         else:
@@ -5582,7 +5664,9 @@ class FnCtx:
         return ("0", UNIT)
 
     def print_value(self, node):
-        code, ty = self.expr(node)
+        # A `(code, type)` PAIR, not only a node: a `{name}` hole has no node
+        # to lower, and `write_hole` takes either for the same reason.
+        code, ty = (node if isinstance(node, tuple) else self.expr(node))
         if ty is not None and ty[0] == "prim":
             name = ty[1]
             if name == "bool":
