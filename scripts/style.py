@@ -82,15 +82,16 @@ point: an unstated gap reads as coverage.
   "smallest correct change"
         judgement, all of them.
 
-TWO RULES CARRY A LEDGER because the tree violates them today. Same shape as
+THREE RULES CARRY A LEDGER because the tree violates them today. Same shape as
 `faults_reachable.py` and `ufcs_collisions.py`: an entry is a debt, not an
 exemption, deleting a line is how one closes, and a stale entry is an error --
 so the debt can shrink and cannot quietly grow. Fixing the 147 abbreviation
 sites touches files three other lanes hold open, which is why they are written
 down here instead of renamed.
 
-`UFCS_OWED` IS KEYED BY FILE AND VALUED WITH A COUNT, which the abbreviation
-ledger is not, and the difference is deliberate. A file-keyed ledger with no
+`UFCS_OWED` AND `IMPORT_OWED` ARE KEYED BY FILE AND VALUED WITH A COUNT, which
+the abbreviation ledger is not, and the difference is deliberate. A file-keyed
+ledger with no
 number exempts the file: `gen_c_expr.zen` could take a hundred more and the
 gate would say nothing. A count cannot go stale on an unrelated edit the way a
 LINE NUMBER does -- it moves only when someone adds or removes a violation,
@@ -234,6 +235,111 @@ UFCS_OWED: dict[str, int] = {
     "src/sema/sema_type.zen": 9,
     "src/sema/sema_union.zen": 15,
     "src/std/text/text_utf8.zen": 9,
+}
+
+# THE UNUSED-IMPORT DEBT, keyed by file and valued with THE NUMBER OF NAMES
+# that file imports and never writes again. 1208 of the 5191 imported names in
+# src/, across 89 files, on the day the rule was written -- nearly a quarter of
+# the module graph is fiction, and nothing had ever looked.
+#
+# ONE ENTRY IN THIS LEDGER IS NOT LIKE THE OTHERS, and it is the reason to cull
+# in gated batches rather than in one pass. A method reached through a FIELD can
+# need the FIELD'S TYPE imported by name -- for the BOOTSTRAP compiler only, not
+# for the self-hosted one -- so `be.alloc.grow(..)` can hold `Alloc` on the
+# import line while the name appears nowhere else. `make build` cannot see it;
+# `make test` and `make fixpoint` can, because both compile src/ with
+# bootstrap/. A number here that will not come down is that, and the fix is a
+# bootstrap resolution fix rather than an edit to the .zen file.
+IMPORT_OWED: dict[str, int] = {
+    "src/gen/gen_c/gen_c_alloc.zen": 7,
+    "src/gen/gen_c/gen_c_assoc.zen": 14,
+    "src/gen/gen_c/gen_c_bound.zen": 22,
+    "src/gen/gen_c/gen_c_build.zen": 29,
+    "src/gen/gen_c/gen_c_call.zen": 56,
+    "src/gen/gen_c/gen_c_cap.zen": 20,
+    "src/gen/gen_c/gen_c_const.zen": 17,
+    "src/gen/gen_c/gen_c_decl.zen": 17,
+    "src/gen/gen_c/gen_c_display.zen": 4,
+    "src/gen/gen_c/gen_c_expr.zen": 58,
+    "src/gen/gen_c/gen_c_fat.zen": 22,
+    "src/gen/gen_c/gen_c_flow.zen": 20,
+    "src/gen/gen_c/gen_c_fmt.zen": 3,
+    "src/gen/gen_c/gen_c_fold.zen": 9,
+    "src/gen/gen_c/gen_c_frame.zen": 12,
+    "src/gen/gen_c/gen_c_fs.zen": 25,
+    "src/gen/gen_c/gen_c_handle.zen": 12,
+    "src/gen/gen_c/gen_c_hoist.zen": 6,
+    "src/gen/gen_c/gen_c_impl.zen": 2,
+    "src/gen/gen_c/gen_c_index.zen": 9,
+    "src/gen/gen_c/gen_c_infer.zen": 15,
+    "src/gen/gen_c/gen_c_inline.zen": 22,
+    "src/gen/gen_c/gen_c_layout.zen": 21,
+    "src/gen/gen_c/gen_c_loop.zen": 61,
+    "src/gen/gen_c/gen_c_main.zen": 11,
+    "src/gen/gen_c/gen_c_member.zen": 24,
+    "src/gen/gen_c/gen_c_mono.zen": 10,
+    "src/gen/gen_c/gen_c_op.zen": 20,
+    "src/gen/gen_c/gen_c_own.zen": 23,
+    "src/gen/gen_c/gen_c_print.zen": 7,
+    "src/gen/gen_c/gen_c_ptr.zen": 10,
+    "src/gen/gen_c/gen_c_range.zen": 37,
+    "src/gen/gen_c/gen_c_read.zen": 19,
+    "src/gen/gen_c/gen_c_runtime.zen": 2,
+    "src/gen/gen_c/gen_c_scope.zen": 14,
+    "src/gen/gen_c/gen_c_settle.zen": 41,
+    "src/gen/gen_c/gen_c_shape.zen": 20,
+    "src/gen/gen_c/gen_c_sink.zen": 8,
+    "src/gen/gen_c/gen_c_state.zen": 2,
+    "src/gen/gen_c/gen_c_stdin.zen": 21,
+    "src/gen/gen_c/gen_c_stmt.zen": 59,
+    "src/gen/gen_c/gen_c_try.zen": 11,
+    "src/gen/gen_c/gen_c_type.zen": 22,
+    "src/gen/gen_c/gen_c_widen.zen": 7,
+    "src/gen/gen_diag.zen": 1,
+    "src/gen/gen_name.zen": 2,
+    "src/lsp/lsp_built.zen": 1,
+    "src/lsp/lsp_compl.zen": 6,
+    "src/lsp/lsp_def.zen": 6,
+    "src/lsp/lsp_diag.zen": 1,
+    "src/lsp/lsp_hover.zen": 2,
+    "src/lsp/lsp_serve.zen": 3,
+    "src/sema/sema_apply.zen": 22,
+    "src/sema/sema_bound.zen": 14,
+    "src/sema/sema_call.zen": 25,
+    "src/sema/sema_cand.zen": 25,
+    "src/sema/sema_case.zen": 6,
+    "src/sema/sema_check.zen": 20,
+    "src/sema/sema_decl.zen": 5,
+    "src/sema/sema_def.zen": 2,
+    "src/sema/sema_diag.zen": 2,
+    "src/sema/sema_effect.zen": 2,
+    "src/sema/sema_hoist.zen": 8,
+    "src/sema/sema_inst.zen": 10,
+    "src/sema/sema_join.zen": 4,
+    "src/sema/sema_layout.zen": 7,
+    "src/sema/sema_match.zen": 12,
+    "src/sema/sema_member.zen": 20,
+    "src/sema/sema_module.zen": 11,
+    "src/sema/sema_own.zen": 15,
+    "src/sema/sema_place.zen": 3,
+    "src/sema/sema_raise.zen": 3,
+    "src/sema/sema_recv.zen": 9,
+    "src/sema/sema_scope.zen": 6,
+    "src/sema/sema_spine.zen": 2,
+    "src/sema/sema_static.zen": 1,
+    "src/sema/sema_supply.zen": 24,
+    "src/sema/sema_trap.zen": 11,
+    "src/sema/sema_type.zen": 20,
+    "src/std/lex/lex_literal.zen": 1,
+    "src/std/lex/lex_scan.zen": 1,
+    "src/std/parse/parse_decl.zen": 7,
+    "src/std/parse/parse_expr.zen": 6,
+    "src/std/parse/parse_lookahead.zen": 3,
+    "src/std/parse/parse_match.zen": 7,
+    "src/std/parse/parse_member.zen": 6,
+    "src/std/parse/parse_pattern.zen": 5,
+    "src/std/parse/parse_stmt.zen": 5,
+    "src/std/parse/parse_type.zen": 5,
 }
 
 # The abbreviations STYLE.md names. Not a general "short name" check -- `len`,
@@ -681,6 +787,46 @@ def ufcs_world(files):
     return free, methods, principal
 
 
+def rule_import(files, parser):
+    """An imported name the file never writes again.
+
+    `A, B, C = some.module.path` binds three names, and a name that appears
+    nowhere else in the file is a dependency the file does not have. It reads
+    as one, though, which is the cost: `gen_c_loop.zen` declared nine and used
+    two, so eight of its nine module edges were fiction to anyone tracing the
+    graph by eye.
+
+    IDENTIFIER TOKENS, not a grep. A name surviving only in a comment or in a
+    diagnostic string literal is exactly the case being hunted, and a grep
+    counts both as uses.
+
+    A `*` NAME IS EXPORTED ONWARD, so the file's own surface uses it. That is
+    what a folder root is for, and `lsp/lsp_decl.zen` and
+    `std/parse/parse_token.zen` re-export the same way without being roots.
+    Skipping starred names subsumes the root-file exemption exactly: measured
+    while writing this, no root file imports an unused name unstarred, so the
+    two readings agree on 647 names and only this one also covers the nine
+    re-exports that are not in a root.
+    """
+    checked, hits = 0, []
+    for rel, path, module in files:
+        on_import = set()
+        for imp in module.imports:
+            on_import.update(range(imp.span.start[0], imp.span.end[0] + 1))
+        used = {name for name, line in identifiers(path, parser)
+                if line not in on_import}
+        for imp in module.imports:
+            for name, exported in imp.names:
+                checked += 1
+                if exported or name in used:
+                    continue
+                hits.append((rel, f"{rel}:{imp.span.start[0]}",
+                             f"`{name}` is imported from `{imp.path}` and never"
+                             f" written again — the file does not have that"
+                             f" dependency"))
+    return checked, hits
+
+
 def rule_ufcs(files):
     """A free function on the module's principal type is CALLED on it.
 
@@ -768,28 +914,28 @@ def rule_ufcs(files):
                     continue
                 if called in methods.get(recv, ()):
                     continue
-                hits.append((rel, f"{node.span}", called, first.value.name))
+                recv = first.value.name
+                hits.append((rel, f"{node.span}",
+                             f"`{called}({recv}, ..)` is `{recv}.{called}(..)`"
+                             f" — the receiver column is what makes the"
+                             f" order-critical sequence visible"))
     return checked, hits
 
 
-def ufcs_debt(hits):
-    """The ledger, applied. Returns the lines to print.
+def debt(hits, ledger, label):
+    """A count-keyed ledger, applied. Returns the lines to print.
 
     A file over its number has grown the debt and every site in it is
     reported; a file under it has paid some down and the number must come
     with it, which is the same staleness rule every other ledger here runs.
     """
-    counted = collections.Counter(rel for rel, _, _, _ in hits)
-    bad = []
-    for rel, where, called, recv in sorted(hits):
-        if counted[rel] > UFCS_OWED.get(rel, 0):
-            bad.append((where, f"`{called}({recv}, ..)` is `{recv}.{called}(..)`"
-                               f" — the receiver column is what makes the"
-                               f" order-critical sequence visible"))
-    for rel, owed in sorted(UFCS_OWED.items()):
+    counted = collections.Counter(rel for rel, _, _ in hits)
+    bad = [(where, why) for rel, where, why in sorted(hits)
+           if counted[rel] > ledger.get(rel, 0)]
+    for rel, owed in sorted(ledger.items()):
         now = counted.get(rel, 0)
         if now < owed:
-            bad.append((rel, f"UFCS_OWED says {owed} and {now} are left."
+            bad.append((rel, f"{label} says {owed} and {now} are left."
                              f" Bring the number down with the code —"
                              f" a ledger that overstates is one nobody reads"))
     return bad
@@ -814,7 +960,7 @@ def main() -> int:
     files = sources()
     if files is None:
         return 1
-    # Ten rules over zero files is ten rules reporting "0 violations". Every
+    # Eleven rules over zero files is eleven rules reporting "0 violations". Every
     # count printed below would be 0 and the gate would be green on nothing.
     if not files:
         print("style: found no .zen files under src/ -- every rule below would"
@@ -827,6 +973,7 @@ def main() -> int:
 
     abbrev_n, abbrev_bad, abbrev_seen = rule_abbrev(files, parser)
     ufcs_n, ufcs_hits = rule_ufcs(files)
+    import_n, import_hits = rule_import(files, parser)
     results = [
         ("prefix   ", "a prefix names its own folder", *rule_prefix(files), 0),
         ("root     ", "a folder has its root file", *rule_root(files), 0),
@@ -840,7 +987,11 @@ def main() -> int:
         ("abbrev   ", "abbreviations are words", abbrev_n, abbrev_bad,
          len(ABBREV_OWED)),
         ("ufcs     ", "a free function on the principal type is called on it",
-         ufcs_n, ufcs_debt(ufcs_hits), sum(UFCS_OWED.values())),
+         ufcs_n, debt(ufcs_hits, UFCS_OWED, "UFCS_OWED"),
+         sum(UFCS_OWED.values())),
+        ("import   ", "an imported name is used by the file that imports it",
+         import_n, debt(import_hits, IMPORT_OWED, "IMPORT_OWED"),
+         sum(IMPORT_OWED.values())),
     ]
 
     failed = 0
@@ -850,13 +1001,13 @@ def main() -> int:
             failed += 1
     if failed:
         print(f"\nstyle: {failed} violation(s) of docs/STYLE.md."
-              f"\n  Fix it, or -- for the two rules that carry a ledger --"
+              f"\n  Fix it, or -- for the three rules that carry a ledger --"
               f" write it into"
-              f"\n  ABBREV_OWED (with the word it should be) or UFCS_OWED"
-              f" (with the file's"
-              f"\n  new count) in {Path(__file__).name}, so the debt can"
-              f" shrink and cannot"
-              f"\n  quietly grow.")
+              f"\n  ABBREV_OWED (with the word it should be), UFCS_OWED or"
+              f" IMPORT_OWED (with"
+              f"\n  the file's new count) in {Path(__file__).name}, so the debt"
+              f" can shrink and"
+              f"\n  cannot quietly grow.")
         return 1
 
     if stale(ABBREV_OWED, abbrev_seen, "ABBREV_OWED"):

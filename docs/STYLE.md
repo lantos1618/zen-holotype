@@ -59,6 +59,8 @@ Three tests, in order of how often you will need them:
 
 **Flat namespaces are what makes this cheap.** Modules are `<folder>/<folder>.zen`, names are qualified by path, and two modules may define the same top-level name without colliding. So moving a function between modules costs an import line, and nothing else. There is no reason to hoard.
 
+**An import line is a claim about what the file depends on, so every name on it is used.** `A, B, C = some.module.path` binds three names; a name the file never writes again is a dependency it does not have, and the three tests above are read off exactly these lines. A file importing nine names and using two is not a small untidiness — it is eight false edges in the module graph, and the direction test cannot be applied to a graph that overstates. A `*` name is exported onward, which is a use: that is what a folder root is. `import` in `scripts/style.py` gates this, and reads identifier tokens rather than grepping, because a name surviving only in a comment or a diagnostic string is precisely the case.
+
 ---
 
 ## How files are named and split
