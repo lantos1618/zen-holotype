@@ -18,6 +18,30 @@ how a gate that cannot fail happens to a list.
 
 ## OPEN — being worked
 
+**⚠️ A must-fail test is HELD BACK, and that is a debt, not a resolution.**
+`variant_payload_names_nothing` asserts that `Expr = Unit | Array(ArrayLit)`
+with an undefined payload type is REJECTED. The self-hosted compiler rejects it
+(`undefined name`, 9:21) since `19b29864`; **`bootstrap/` still accepts it
+silently**, so the test reddened `make test` while passing `make test-zen`.
+`docs/TESTING.md:13` is unambiguous — *"any disagreement is a bug in one of
+them"* — so the honest fix is to port the check, not to keep the test out.
+Files parked at `/home/ubuntu/.claude/jobs/22ff9ad8/tmp/held/`.
+
+**What I tried and why it was not enough**, so the next lane does not repeat it:
+`bootstrap/sema.py:_check_module_decls` skips every `td.kind != "struct"`,
+mirroring the self-hosted hole exactly. Adding an `enum` branch that calls
+`self.resolve_type(payload, inner)` for each variant — the same call
+`_variant_cases` and the `Type.NAME` path already use — **resolves without
+reporting**: bootstrap still accepted the program. So `resolve_type` is not the
+reporting path; `sema.py:3024` (`undefined name`) is reached from name
+resolution, and bootstrap's type vocabulary says `unknown type` rather than
+`undefined name` besides. A port has to answer BOTH: report at all, and report
+in the sentence both compilers share, since a must-fail expectation is read by
+both.
+
+Until it lands, `make test` and `make test-zen` are both green at 528/0/4 and
+**the enum-payload rejection is checked by neither.**
+
 **Goto-definition answers `null` on an enum variant's payload type.**
 `ExprKind = Name(Name) | Literal(Literal) | ..` — asking for the definition of
 the inner `Name` gets nothing. **The cause is in sema, not the LSP**, and not
