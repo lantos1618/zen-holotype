@@ -229,7 +229,81 @@ All of the following run identically under both toolchains
 
 ---
 
-## 7. What tier 2 will need
+## 7. The first `src/` use, verified and held for a staged seed
+
+The feature landed without `src/` using it, **deliberately**, and the reason is
+mechanical rather than cautious: `make build` compiles the committed
+`seed/zen.c`, and that compiler predates the pack's call convention. Measured,
+not assumed — with the use applied and the committed seed in place:
+
+    gen/gen_c/gen_c_runtime.zen:536:5: codegen cannot resolve `bytes`
+    gen/gen_c/gen_c_runtime.zen:537:5: codegen cannot resolve `bytes`
+
+So the first `src/` use needs a **staged bootstrap**: land the feature (done),
+regenerate the seed, then land the use. Nothing about the use itself is
+uncertain — the whole of it was built and gated against a locally staged seed:
+`zen` from the feature commit compiled the modified tree, that binary compiled
+it again **byte-identically** (the fixpoint property), and both suites came back
+**517 passed / 0 failed / 4 deferred**, `fmt` and `style` clean.
+
+### The use
+
+`Emit.bytes` and `Emit.say` (`src/gen/gen_emit.zen`) take a `vararg<str>`
+instead of one `str`. Two signature lines, and **no call site in the tree
+changes**, because a pack's arity is a minimum — every existing one-piece call
+still means exactly what it meant.
+
+    bytes* = (self :: @Self, pieces: vararg<str>) Res<(), AllocError> {
+        pieces.loop((h, s) { self.piece(s).try() });
+        Ok(());
+    }
+
+    say* = (self :: @Self, pieces: vararg<str>) Res<(), AllocError> {
+        self.bytes(pieces).try();       // FORWARDED — a struct copy
+        self.line()
+    }
+
+`say` forwards its own pack to `bytes` rather than looping again, which is the
+feature's acceptance test appearing in the compiler's own code.
+
+### Before / after
+
+`gen_c_runtime.open_helper`, which emits one C function header:
+
+    // before — eleven calls, one token each
+    out.bytes("static ").try();
+    out.bytes(ct).try();
+    out.bytes(" zg_").try();
+    out.bytes(op).try();
+    out.bytes("_").try();
+    out.bytes(prim).try();
+    out.bytes("(").try();
+    out.bytes(ct).try();
+    out.bytes(" a, ").try();
+    out.bytes(ct).try();
+    out.bytes(" b").try();
+
+    // after — two
+    out.bytes("static ", ct, " zg_", op, "_", prim, "(").try();
+    out.bytes(ct, " a, ", ct, " b").try();
+
+### Why this one, and what it unblocks
+
+Measured over `src/gen` and `src/lsp`: **257 runs of consecutive one-piece emit
+calls, 798 source lines**, plus about fourteen places that allocate a whole
+throwaway `String` purely to join two to four known pieces and hand the view to
+`writeln`. Both shapes exist because the sink took exactly one `str`. This
+change removes the reason, without a heap allocation and without touching a
+single caller — which is the strongest available evidence that `vararg<T>`
+carries weight rather than only compiling.
+
+It is also the honest scope for one lane. Converting the 257 runs is a
+mechanical campaign over files two agents must not share, and it should follow
+the seed regeneration, not ride it.
+
+---
+
+## 8. What tier 2 will need
 
 `f = (v: vararg<A | B | C>)` — a heterogeneous pack — is now "the same thing where
 `T` happens to be a union", and that is the point of doing tier 1 first.
