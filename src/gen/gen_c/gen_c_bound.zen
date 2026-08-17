@@ -121,10 +121,9 @@ convert_named = (
 
 write_cast* = (be :: CBackend, code: str, dst: TyId, out :: String)
              Res<(), AllocError> {
-    out.add_bytes("((").try();
-    ctype(be, dst, out).try();
-    out.fmt("){code})").try();
-    Ok(());
+    cty ::= be.alloc.String().try();
+    ctype(be, dst, cty).try();
+    out.fmt("(({}){code})", cty.view())
 }
 
 convert_res = (
@@ -159,12 +158,11 @@ rebuild_res = (
     be.set_line(tmp.view(), code).try();
     out.fmt("({}.zg_tag == ", tmp.view()).try();
     out.sym_variant(RES_PATH, "Ok").try();
-    out.add_bytes(" ? ").try();
-    res_arm(be, tmp.view(), "Ok", s.value, d.value, dst, out).try();
-    out.add_bytes(" : ").try();
-    fail_arm(be, tmp.view(), s, d, dst, out).try();
-    out.add_bytes(")").try();
-    Ok(());
+    ok ::= be.alloc.String().try();
+    res_arm(be, tmp.view(), "Ok", s.value, d.value, dst, ok).try();
+    bad ::= be.alloc.String().try();
+    fail_arm(be, tmp.view(), s, d, dst, bad).try();
+    out.fmt(" ? {} : {})", ok.view(), bad.view())
 }
 
 fail_arm = (
@@ -213,22 +211,21 @@ payload_arm = (
     out :: String
 ) Res<(), AllocError> {
     arm_head(be, v, dst, out).try();
-    out.add_bytes(", .zg_data.").try();
-    out.sym_member(v).try();
-    out.add_bytes(" = ").try();
+    mem ::= be.alloc.String().try();
+    mem.sym_member(v).try();
     read ::= be.alloc.String().try();
     read.fmt("{tmp}.zg_data.").try();
     sym_member(read, v).try();
-    convert(be, read.view(), sp, dp, out).try();
-    out.add_bytes(" })").try();
-    Ok(());
+    val ::= be.alloc.String().try();
+    convert(be, read.view(), sp, dp, val).try();
+    out.fmt(", .zg_data.{} = {} })", mem.view(), val.view())
 }
 
 arm_head = (be :: CBackend, v: str, dst: TyId, out :: String)
            Res<(), AllocError> {
-    out.add_bytes("((").try();
-    ctype(be, dst, out).try();
-    out.add_bytes("){ .zg_tag = ").try();
+    cty ::= be.alloc.String().try();
+    ctype(be, dst, cty).try();
+    out.fmt("(({}){ .zg_tag = ", cty.view()).try();
     out.sym_variant(RES_PATH, v).try();
     Ok(());
 }
@@ -612,10 +609,9 @@ fat_size = (be :: CBackend, targs: Inst, i: usize, out :: String)
 write_sizeof* = (be :: CBackend, t: TyId, out :: String)
                Res<(), AllocError> {
     request_type(be, t).try();
-    out.add_bytes(", sizeof(").try();
-    ctype(be, t, out).try();
-    out.add_bytes(")").try();
-    Ok(());
+    cty ::= be.alloc.String().try();
+    ctype(be, t, cty).try();
+    out.fmt(", sizeof({})", cty.view())
 }
 
 // The slot answers at the ERASED type; the caller asked at its own. A

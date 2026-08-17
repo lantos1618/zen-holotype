@@ -169,20 +169,17 @@ lower_stdin_read* = (
 // because a POINTER to a Zen type is not itself a Zen type here.
 declare_pointer = (be :: CBackend, ty: TyId, name: str)
                   Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    ctype(be, ty, line).try();
-    line.add_bytes(" *").try();
-    line.add_bytes(name).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view())
+    cty ::= be.alloc.String().try();
+    ctype(be, ty, cty).try();
+    be.fmt("{} *{name};\n", cty.view())
 }
 
 hold_buffer = (be :: CBackend, c: Call, aty: TyId, ctx: Ctx, buf: str)
               Res<(), AllocError> {
+    arg ::= be.alloc.String().try();
+    arg_text(be, c, 0, aty, ctx, arg).try();
     value ::= be.alloc.String().try();
-    value.add_bytes("&(").try();
-    arg_text(be, c, 0, aty, ctx, value).try();
-    value.add_bytes(")").try();
+    value.fmt("&({})", arg.view()).try();
     be.set_line(buf, value.view())
 }
 
@@ -195,40 +192,32 @@ hold_count = (be :: CBackend, c: Call, usize_ty: TyId, ctx: Ctx, want: str)
 
 write_stdin_call = (be :: CBackend, rc: str, buf: str, want: str, got: str)
                    Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(rc).try();
-    line.add_bytes(" = zg_stdin_read((unsigned char *)").try();
-    arrow(buf, "data", line).try();
-    line.add_bytes(", ").try();
-    arrow(buf, "len", line).try();
-    line.add_bytes(", ").try();
-    arrow(buf, "capacity", line).try();
-    line.add_bytes(", ").try();
-    line.add_bytes(want).try();
-    line.add_bytes(", &").try();
-    line.add_bytes(got).try();
-    line.add_bytes(");").try();
-    be.writeln(line.view())
+    data ::= be.alloc.String().try();
+    arrow(buf, "data", data).try();
+    len ::= be.alloc.String().try();
+    arrow(buf, "len", len).try();
+    cap ::= be.alloc.String().try();
+    arrow(buf, "capacity", cap).try();
+    be.fmt(
+        "{rc} = zg_stdin_read((unsigned char *){}, {}, {}, {want}, &{got});\n",
+        data.view(),
+        len.view(),
+        cap.view()
+    )
 }
 
 // The bytes that arrived are now part of the buffer, and this is the one
 // field the floor does not write: a `len` bumped inside the C would be a
 // second place that knows what a `Vec` is.
 advance_len = (be :: CBackend, buf: str, got: str) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    arrow(buf, "len", line).try();
-    line.add_bytes(" = ").try();
-    arrow(buf, "len", line).try();
-    line.add_bytes(" + ").try();
-    line.add_bytes(got).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view())
+    len ::= be.alloc.String().try();
+    arrow(buf, "len", len).try();
+    be.fmt("{} = {} + {got};\n", len.view(), len.view())
 }
 
 // `<ptr>-><field>`, with the member spelled the mangler's way.
 arrow = (ptr: str, name: str, out :: String) Res<(), AllocError> {
-    out.add_bytes(ptr).try();
-    out.add_bytes("->").try();
+    out.fmt("{ptr}->").try();
     out.sym_member(name)
 }
 
@@ -247,11 +236,7 @@ io_chain = (be :: CBackend, ret: TyId, rc: str, dst: str)
 }
 
 open_full_test = (be :: CBackend, rc: str) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("if (").try();
-    line.add_bytes(rc).try();
-    line.add_bytes(" == ZG_IO_FULL) {").try();
-    be.writeln(line.view()).try();
+    be.fmt("if ({rc} == ZG_IO_FULL) {\n").try();
     be.indent();
     Ok(());
 }

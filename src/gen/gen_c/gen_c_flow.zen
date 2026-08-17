@@ -71,8 +71,7 @@ lower_match* = (
 declare_temp* = (be :: CBackend, ty: TyId, name: str) Res<(), AllocError> {
     decl ::= be.alloc.String().try();
     declarator(be, ty, name, decl).try();
-    decl.add_bytes(";").try();
-    be.writeln(decl.view())
+    be.fmt("{};\n", decl.view())
 }
 
 // `if (..) {` for the first arm, `} else if (..) {` for the rest. The
@@ -97,18 +96,14 @@ open_arm = (
 }
 
 first_arm = (be :: CBackend, cond: str) Res<(), AllocError> {
-    be.write("if (").try();
-    be.write(cond).try();
-    be.writeln(") {").try();
+    be.fmt("if ({cond}) {\n").try();
     be.indent();
     Ok(());
 }
 
 chain_arm = (be :: CBackend, cond: str) Res<(), AllocError> {
     be.dedent();
-    be.write("} else if (").try();
-    be.write(cond).try();
-    be.writeln(") {").try();
+    be.fmt("} else if ({cond}) {\n").try();
     be.indent();
     Ok(());
 }
@@ -136,9 +131,7 @@ write_unreachable = (be :: CBackend, node: Expr, m: Match)
                     Res<(), AllocError> {
     pos ::= be.alloc.String().try();
     write_position(be, node.span.file, m.name_span, pos).try();
-    be.write("zg_unreachable(").try();
-    be.write(pos.view()).try();
-    be.writeln(");").try();
+    be.fmt("zg_unreachable({});\n", pos.view()).try();
     Ok(());
 }
 
@@ -249,8 +242,7 @@ narrows = (be :: CBackend, pid: PatternId, st: TyId) bool {
 // the test and the binding reach it, and they must spell it the same.
 payload_place = (be :: CBackend, variant: str, scrut: str, out :: String)
                 Res<(), AllocError> {
-    out.add_bytes(scrut).try();
-    out.add_bytes(".zg_data.").try();
+    out.fmt("{scrut}.zg_data.").try();
     sym_member(out, variant)
 }
 
@@ -290,18 +282,11 @@ bool_cond = (text: str, scrut: str, out :: String) Res<(), AllocError> {
 }
 
 negate = (scrut: str, out :: String) Res<(), AllocError> {
-    out.add_bytes("!").try();
-    out.add_bytes(scrut).try();
-    Ok(());
+    out.fmt("!{scrut}")
 }
 
 equality = (scrut: str, text: str, out :: String) Res<(), AllocError> {
-    out.add_bytes("(").try();
-    out.add_bytes(scrut).try();
-    out.add_bytes(" == ").try();
-    out.add_bytes(text).try();
-    out.add_bytes(")").try();
-    Ok(());
+    out.fmt("({scrut} == {text})")
 }
 
 // A `str` is a pointer and a length, so `==` would compare a STRUCT
@@ -329,9 +314,7 @@ str_cond = (
 write_str_cond = (l: Literal, scrut: str, out :: String)
                  Res<(), AllocError> {
     n = decoded_len(l.text);
-    out.add_bytes("(").try();
-    out.add_bytes(scrut).try();
-    out.add_bytes(".len == ").try();
+    out.fmt("({scrut}.len == ").try();
     out.write_usize(n).try();
     out.add_bytes("u").try();
     (n > 0).match({
@@ -347,11 +330,7 @@ write_str_cond = (l: Literal, scrut: str, out :: String)
 // handed even for zero bytes.
 str_bytes_cond = (l: Literal, scrut: str, n: usize, out :: String)
                  Res<(), AllocError> {
-    out.add_bytes(" && memcmp(").try();
-    out.add_bytes(scrut).try();
-    out.add_bytes(".data, ").try();
-    out.add_bytes(l.text).try();
-    out.add_bytes(", ").try();
+    out.fmt(" && memcmp({scrut}.data, {}, ", l.text).try();
     out.write_usize(n).try();
     out.add_bytes("u) == 0").try();
     Ok(());
@@ -396,12 +375,9 @@ tag_cond = (
 ) Res<(), AllocError> {
     qname ::= be.alloc.String().try();
     enum_path(be, st, qname).try();
-    out.add_bytes("(").try();
-    out.add_bytes(scrut).try();
-    out.add_bytes(".zg_tag == ").try();
-    out.sym_variant(qname.view(), last_segment(q)).try();
-    out.add_bytes(")").try();
-    Ok(());
+    tag ::= be.alloc.String().try();
+    tag.sym_variant(qname.view(), last_segment(q)).try();
+    out.fmt("({scrut}.zg_tag == {})", tag.view())
 }
 
 // The bindings a pattern introduces, declared inside the branch that
@@ -464,10 +440,7 @@ bind_local = (be :: CBackend, name: str, ty: TyId, init: str)
     sym_local(cname, name, n).try();
     decl ::= be.alloc.String().try();
     declarator(be, ty, cname.view(), decl).try();
-    decl.add_bytes(" = ").try();
-    decl.add_bytes(init).try();
-    decl.add_bytes(";").try();
-    be.writeln(decl.view())
+    be.fmt("{} = {init};\n", decl.view())
 }
 
 // -----------------------------------------------------------------

@@ -170,9 +170,9 @@ write_compound = (
     out   :: String
 ) Res<(), AllocError> {
     request_type(be, ty).try();
-    out.add_bytes("((").try();
-    ctype(be, ty, out).try();
-    out.add_bytes("){ { ").try();
+    cty ::= be.alloc.String().try();
+    ctype(be, ty, cty).try();
+    out.fmt("(({}){ { ", cty.view()).try();
     // an empty literal still needs an initialiser, and `0` is the one
     // that is legal for every element type the storage could have
     (elems.len == 0).match({
@@ -216,14 +216,11 @@ write_array_index* = (
     ctx     : Ctx,
     out     :: String
 ) Res<(), AllocError> {
-    out.add_bytes("(").try();
-    expr(be, ix.base, ctx, base_ty, out).try();
-    out.add_bytes(").").try();
-    out.add_bytes(ELEMS).try();
-    out.add_bytes("[").try();
-    write_checked(be, ix, a, ctx, out).try();
-    out.add_bytes("]").try();
-    Ok(());
+    base ::= be.alloc.String().try();
+    expr(be, ix.base, ctx, base_ty, base).try();
+    idx ::= be.alloc.String().try();
+    write_checked(be, ix, a, ctx, idx).try();
+    out.fmt("({}).{}[{}]", base.view(), ELEMS, idx.view())
 }
 
 write_checked = (
@@ -236,21 +233,25 @@ write_checked = (
     unknown = be.check.types.unknown().try();
     ity     = ty_of(be, ix.index, ctx, unknown).try();
     counter = be.check.types.prim("usize").try();
-    out.add_bytes(GEN).try();
-    out.add_bytes(helper_of(be, ity)).try();
-    out.add_bytes("(").try();
-    expr(be, ix.index, ctx, counter, out).try();
-    out.add_bytes(", ").try();
-    out.write_usize(a.count).try();
-    out.add_bytes(", ").try();
+    idx ::= be.alloc.String().try();
+    expr(be, ix.index, ctx, counter, idx).try();
+    n ::= be.alloc.String().try();
+    n.write_usize(a.count).try();
+    pos ::= be.alloc.String().try();
     write_position(
         be,
         be.tree.expr_at(ix.base).span.file,
         ix.op_span,
-        out
+        pos
     ).try();
-    out.add_bytes(")").try();
-    Ok(());
+    out.fmt(
+        "{}{}({}, {}, {})",
+        GEN,
+        helper_of(be, ity),
+        idx.view(),
+        n.view(),
+        pos.view()
+    )
 }
 
 helper_of = (be :: CBackend, ity: TyId) str {
@@ -290,14 +291,11 @@ lower_array_walk* = (
     counter ::= be.alloc.String().try();
     sym_gen(counter, "i", be.next_tmp()).try();
     declare_usize(be, counter.view()).try();
-    be.write(counter.view()).try();
-    be.writeln(" = 0;").try();
+    be.fmt("{} = 0;\n", counter.view()).try();
 
-    be.write("while (").try();
-    be.write(counter.view()).try();
-    be.write(" < ").try();
-    write_count(be, a).try();
-    be.writeln(") {").try();
+    n ::= be.alloc.String().try();
+    n.write_usize(a.count).try();
+    be.fmt("while ({} < {}) {\n", counter.view(), n.view()).try();
     be.indent();
     value ::= be.alloc.String().try();
     write_pass_value(be, rng.view(), counter.view(), value).try();
@@ -318,21 +316,9 @@ lower_array_walk* = (
     Ok(());
 }
 
-write_count = (be :: CBackend, a: TyArray) Res<(), AllocError> {
-    text ::= be.alloc.String().try();
-    text.write_usize(a.count).try();
-    be.write(text.view())
-}
-
 // The element at the counter, read straight through the member — no
 // helper call, since the walk never leaves the range being checked.
 write_pass_value = (be :: CBackend, rng: str, counter: str, out :: String)
                    Res<(), AllocError> {
-    out.add_bytes(rng).try();
-    out.add_bytes(".").try();
-    out.add_bytes(ELEMS).try();
-    out.add_bytes("[").try();
-    out.add_bytes(counter).try();
-    out.add_bytes("]").try();
-    Ok(());
+    out.fmt("{rng}.{}[{counter}]", ELEMS)
 }
