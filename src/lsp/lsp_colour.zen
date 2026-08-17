@@ -2,69 +2,42 @@
 // `textDocument/semanticTokens/full` — the colours, from the compiler's
 // own lexer, and from its checker when a clean build is in hand.
 //
-// NAMED FOR WHAT IT PRODUCES AND NOT FOR THE REQUEST: the lexical half
-// of every answer comes from `scan` and a `TokenKind`, with no
-// `Checker`, no build and no import resolved (`editors/README.md`'s
-// header argues the other half). The semantic half reclassifies
-// `Ident` tokens only, and only the ones `lsp_names.zen` marked from
-// sema's own memos — the two halves can never disagree about what a
-// token IS, because the tokens are the lexer's either way.
+// NAMED FOR WHAT IT PRODUCES AND NOT FOR THE REQUEST: the lexical half of
+// every answer comes from `scan` and a `TokenKind`, with no `Checker`, no
+// build, no disk read and no import resolved; the semantic half
+// reclassifies `Ident` tokens only, and only the ones `lsp_names.zen`
+// marked from sema's own memos. The two halves can never disagree about
+// what a token IS, because the tokens are the lexer's either way — which
+// is also the whole answer to "why not a TextMate grammar"
+// (`docs/design_lsp.md` §2 and §6, `editors/README.md`).
 //
-// WHY THIS AND NOT A TEXTMATE GRAMMAR. `docs/PLAN.md:137` names a second
-// grammar as the failure the plan exists to prevent. `docs/design_lsp.md`
-// §2: colours come from the lexer the compiler itself runs, which CANNOT
-// disagree with it about what a token is.
+// SO THE LEXICAL HALF ANSWERS WHERE NOTHING ELSE DOES: an unsaved buffer,
+// no workspace, even a file that does not parse — one with lexical faults
+// still has tokens (`src/std/lex/lex.zen`'s contract) and they are all
+// still coloured. The semantic half rides the one build diagnostics ran
+// (`lsp_diag.zen`); where that build says nothing — no workspace, a
+// change not yet settled, a program with faults — the lexical answer is
+// what remains, so a file that does not compile never goes grey.
 //
-// WHAT THE LEXICAL HALF COSTS: one `scan`. No `Parser`, `Checker`,
-// `Build`, or disk read — unlike hover and diagnostics it answers on an
-// unsaved buffer with no workspace, even a file that does not parse. A
-// file with lexical faults still has tokens (`src/std/lex/lex.zen`'s
-// contract), all still coloured. The semantic half arrives already paid
-// for: it rides the one build diagnostics ran (`lsp_diag.zen`), and
-// where that build says nothing — no workspace, a change not yet
-// settled, a program with faults — the answer is the lexical one, so a
-// file that does not compile never goes grey.
+// THE FIVE THINGS A SEMANTIC-TOKENS SERVER GETS WRONG, each argued in
+// `design_lsp.md` §2 and each a line of code below:
 //
-// ---------------------------------------------------------------------
-// THE FIVE THINGS A SEMANTIC-TOKENS SERVER GETS WRONG, and what this
-// file does about each.
-//
-// 1. THE ENCODING IS DELTAS, FROM THE PREVIOUS TOKEN. Five integers per
-//    token — `deltaLine, deltaStartChar, length, tokenType,
-//    tokenModifier` — where `deltaStartChar` is relative to the previous
-//    token's start ONLY when the two share a line, absolute otherwise.
-//    `Painter` below is exactly those two numbers. Getting it wrong
-//    tints a file that drifts further off the further down you read.
-//
-// 2. THE NUMBERS ARE UTF-16, ON BOTH AXES THAT HAVE ONE. `character` and
-//    `length` are UTF-16 code units into the line, not bytes and not
-//    codepoints; `lsp_pos.zen` is the only file that converts. A 4-byte
-//    emoji is 2 units/4 bytes, an `é` is 1 unit/2 bytes, so
-//    `end.offset - start.offset` is right only for ASCII.
-//
-// 3. A MULTI-LINE TOKEN IS SPLIT, ONE RUN PER LINE. The standard
-//    encoding cannot express a token crossing a newline unless the
-//    client advertised `multilineTokenSupport`, which most do not.
-//    SPLITTING IS CHOSEN OVER OMITTING: a block comment is the one token
-//    here that spans lines and the one a reader most wants greyed out.
-//    A zero-length run (a blank line inside a block comment) is not
-//    emitted — colours nothing, only confuses a client.
-//
-// 4. THE LEGEND IS DECLARED IN `initialize` AND INDEXED HERE. `tokenType`
-//    is an INDEX into the advertised `tokenTypes` array, so `index_of`
-//    and `write_legend` are one fact said twice and must agree — both
-//    below, same order, and the corpus test prints both halves.
-//
-// 5. `Ident` IS ONE KIND AND COLOUR WANTS SEVERAL — AND THIS FILE DOES
-//    NOT GUESS. A lexer cannot tell a type from a function from a
-//    variable, sharper in Zen since a type is a bare identifier
-//    (`DESIGN.md`) with no keyword in front. Colouring by capitalisation
-//    would be a SECOND, WRONG specification of what a name means. So the
-//    lexer's answer is `variable`, and the sharper one is sema's or it
-//    is nothing: `lsp_names.zen` reads what a clean build's memos
-//    settled each name to be (`design_lsp.md` §2, L4), which is a
-//    recorded fact and not a guess. Hover refuses sema's poison for the
-//    same reason: a wrong answer is worse than none.
+//   1. THE ENCODING IS DELTAS FROM THE PREVIOUS TOKEN, and
+//      `deltaStartChar` is relative only when the two share a line —
+//      `Painter` below is exactly those two numbers.
+//   2. `character` AND `length` ARE UTF-16 CODE UNITS, not bytes and not
+//      codepoints; `lsp_pos.zen` is the only file that converts.
+//   3. A MULTI-LINE TOKEN IS SPLIT, ONE RUN PER LINE, since the encoding
+//      cannot express one otherwise; a zero-length run (a blank line in a
+//      block comment) is not emitted at all.
+//   4. `tokenType` IS AN INDEX INTO THE ADVERTISED LEGEND, so `index_of`
+//      and `write_legend` are one fact said twice and must agree — both
+//      below, same order, and the corpus test prints both halves.
+//   5. `Ident` IS ONE KIND AND COLOUR WANTS SEVERAL — AND THIS FILE DOES
+//      NOT GUESS. Colouring by capitalisation would be a SECOND, WRONG
+//      specification of what a name means, so the lexer's answer is
+//      `variable` and the sharper one is sema's (`lsp_names.zen`, off a
+//      clean build's memos) or it is nothing.
 //
 // DELIMITERS ARE NOT COLOURED — the same refusal one step down: `(`,
 // `)`, `[`, `]`, `{`, `}`, `,`, `;`, `.`, `:` are structure, not meaning.

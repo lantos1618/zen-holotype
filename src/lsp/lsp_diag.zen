@@ -1,75 +1,43 @@
 // src/lsp/lsp_diag.zen
 // `textDocument/publishDiagnostics`: what a build found, said to a client.
 //
-// `design_lsp.md` §5: the queries are somebody else's — `Build` answers
-// `diag_count`/`diag_at` for lex and parse, the `Checker` `Build.whole`
-// hands back answers the same pair for sema. This file decides WHEN to
-// build, WHICH file each answer belongs to, and how an answer is taken
-// BACK. The build itself — and the arena it lives and dies by — moved to
-// `lsp_built.zen`; what remains here is policy.
+// The queries are somebody else's — `Build` answers `diag_count`/`diag_at`
+// for lex and parse, the `Checker` `Build.whole` hands back answers the
+// same pair for sema; the build itself, and the arena it dies by, are
+// `lsp_built.zen`'s. What is left here is POLICY, and the argument behind
+// every line of it is `docs/design_lsp.md` §5.
 //
-// WHEN, AND THE DEBOUNCE THAT IS NOT ONE. §5 asks for a debounce — build
-// after a quiet interval — but a quiet interval cannot be observed:
-// `Stdin.read` blocks until it has exactly the bytes asked for
-// (`src/std/env/env.zen`), there is no clock, and threads arrive at
-// stage 5 (`PLAN.md`). So instead: A CHANGE MARKS, A SETTLE POINT
-// BUILDS. `didOpen`/`didChange` record which document is owed a build;
-// the transport calls `settled` once it has answered everything it
-// currently holds. This COALESCES a batch to ONE build of the LAST
-// buffer, and is ORDERED (one build at a time, always the newest
-// document, so §5's race is absent by construction).
+// WHEN — A CHANGE MARKS, A SETTLE POINT BUILDS. `didOpen`/`didChange`
+// record which document is owed a build; the transport calls `settled`
+// once it has answered everything it currently holds, so a batch
+// coalesces to ONE build of the LAST buffer. Not a timed debounce: a
+// quiet interval cannot be observed from here (§5). And `settled` does
+// not build, it ENSURES — `lsp_built.zen`'s single flight — so a settle
+// for a state a query already built costs one key comparison. Over
+// `lsp_stdio.zen` a settle point is every message, since `short_by` asks
+// for exactly one message's bytes, so what coalesces for a real editor is
+// the BUILD: that slot, `lsp_serve.zen`'s byte-identical `didChange`
+// skip, and `say_one` below.
 //
-// AND THE BUILD ITSELF IS SHARED: `settled` does not build, it ENSURES
-// — `lsp_built.zen`'s single flight, so a settle for a state a query
-// already built publishes from the held slot at the cost of one key
-// comparison and no build at all.
+// WHICH FILE — a build reports across the whole program, so every
+// diagnostic is grouped by the URI its own span names, one notification
+// per URI.
 //
-// HONEST ABOUT THE PIPE: over `lsp_stdio.zen` a settle point is every
-// message, since `short_by` asks for exactly one message's bytes and a
-// blocking reader cannot look past it — so over a real editor this
-// coalesces nothing at the TRANSPORT (the missing piece is a read that
-// can say "nothing more is waiting", or a second thread; `Stdin` has
-// neither, and adding one is not this folder's call). What coalesces
-// instead is the BUILD: the slot above, the byte-identical `didChange`
-// skip in `lsp_serve.zen`'s `stored`, and the unchanged-notification
-// skip at `say_one` below.
+// CLEARING IS THE HARD HALF. The protocol has no "remove" — a
+// notification REPLACES a file's list — so every build publishes for
+// three sets: the edited file (always), every file this build found
+// something in, and every file `showing` (the URIs currently carrying
+// errors) holds that this build found nothing in.
 //
-// WHICH FILE, AND WHY CLEARING IS THE HARD HALF. A build reports across
-// the whole program, so diagnostics belong to many files though only one
-// is open; every diagnostic is grouped by the URI its own span names,
-// one notification per URI.
+// AND NOTHING IS SAID TWICE: `say_one` skips a body byte-identical to the
+// last one sent for that URI (`said`). The clearing still works — a file
+// that stops being wrong has a DIFFERENT body, the empty list — and
+// `showing` updates whether or not a frame was written, because the dedup
+// is about the wire and never about the state.
 //
-// THE PROTOCOL HAS NO "REMOVE". A notification REPLACES a file's list,
-// so taking an error back means publishing an EMPTY list for that file
-// — a server publishing only what it found would leave stale errors on
-// screen forever. So `showing` is the set of URIs currently carrying
-// errors, and every build publishes for three sets: the edited file
-// (always), every file this build found something in, and every file
-// `showing` holds that this build found nothing in (the clearing).
-//
-// AND NOTHING IS SAID TWICE. `say_one` compares the framed body against
-// the last one sent for that URI (`said`) and skips the write when they
-// match — the same byte comparison `lsp_serve.zen`'s `stored` applies
-// to incoming buffers, applied to outgoing notifications. The clearing
-// still works: a file that stops being wrong has a DIFFERENT body (the
-// empty list) than the one `said` holds, so the take-back always goes
-// out. `showing` updates whether or not a frame was written — the dedup
-// is about the wire, never about the state.
-//
-// SEVERITY, AND WHERE THE NOTE WENT. EVERY DIAGNOSTIC IS AN ERROR,
-// severity 1 — a fact about this compiler (one tally `Build.faults`, no
-// phase survives a build), not a simplification; changes the day a
-// warning exists.
-//
-// THE NOTE BECOMES `relatedInformation`, NOT PART OF THE MESSAGE. A
-// `parse.parse_diag.Note` is a sentence AND A SPAN — folding it into the
-// message would throw the span away; `relatedInformation` is the
-// protocol's field for exactly that pair, rendered by a client as
-// somewhere to jump to.
-//
-// SEMA'S SECOND POSITION IS ALREADY IN ITS SENTENCE and stays there: a
-// `PairFault` names two declarations and `write_detail` writes both —
-// `sema_diag.zen` owns that wording.
+// SEVERITY IS 1, ERROR, FOR EVERYTHING, and `Diag.note` becomes
+// `relatedInformation` rather than part of the message; a `PairFault`'s
+// second position stays inside `sema_diag.zen`'s own sentence.
 
 str, String = std.text
 Vec, Map = std.collections

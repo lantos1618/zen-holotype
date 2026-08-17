@@ -19,36 +19,29 @@
 // `{p.x}` and `{f()}` are REFUSED and not printed. A hole is not an
 // expression language; the escape is the fix at such a site.
 //
-// NO TWO RULES COLLIDE AT ONE POSITION: `{{` is not `{}`, and neither
-// `}` nor `{` begins an identifier, so which is tested first cannot
-// change what a format means. The walk is LEFT TO RIGHT and never backs
-// up, so `{}}` is a hole then a literal `}` — the hole is seen first —
-// `{{}` is a literal `{` then a literal `}`, and `{{name}}` is a `{`,
-// the bytes `name` and a `}` rather than a named hole.
+// NO TWO RULES COLLIDE AT ONE POSITION, and the walk is LEFT TO RIGHT
+// and never backs up, so which rule is tested first cannot change what a
+// format means: `{}}` is a hole then a literal `}`, `{{}` is two literal
+// braces, and `{{name}}` is a `{`, the bytes `name` and a `}` rather than
+// a named hole (`docs/design_fmt.md` §2 argues it;
+// `corpus/std/a_doubled_brace_writes_one` pins it).
 //
-// THE COST, stated not hidden: A BYTE WRITER READS NO FORMAT MEANING, so
-// `add_bytes("]}}")` writes two braces and `add("]}}")` writes one. That
-// is not a wart of the escape, it is what "expanded at the call site"
-// means — but it makes CONVERTING A BYTE WRITER INTO A FORMAT CALL a
-// silent change of output wherever the bytes hold a doubled brace. Six
-// such literals are in `src/lsp/`; each was mutated on 2026-08-17 and
-// each reddened between 1 and 9 corpus tests, so the expectations pin
-// them and a conversion cannot make this mistake quietly. A conversion
-// lane reaching bytes NOT under a corpus expectation owes the escape.
+// THE COST A CONVERSION LANE OWES: a byte writer reads no format
+// meaning, so `add_bytes("]}}")` writes two braces and `add("]}}")`
+// writes one — what "expanded at the call site" means, and a silent
+// change of output for anyone turning one into the other. Every doubled
+// brace in `src/lsp/` is under a corpus expectation (§2 holds the
+// mutation table), so a lane reaching bytes that are NOT pinned that way
+// owes the escape at that site.
 //
-// WHERE THE PARSE HAPPENS: `{}` routes through the argument's
-// type-directed toString, so `add` is expanded where it's WRITTEN — the
-// compiler steps `fmt_next` over the format string, emitting a literal
-// write per step and `arg.toString(out)` per hole. One implementation
-// of the rules above, no runtime format state, and a format string
-// mismatched on holes/arguments is a compile error, not a `?`.
-//
-// `{name}` IS THE SAME EXPANSION AND THAT IS THE WHOLE OF IT: the walk
-// reaches the hole, the compiler looks `name` up in the frame it is
-// standing in exactly as it would a bare identifier, and emits the write
-// a positional hole would have emitted. So it costs no allocation and no
-// runtime scan either, and a name with no binding is a compile error at
-// THE HOLE'S OWN POSITION — a column, not "wrong argument count".
+// WHERE THE PARSE HAPPENS: nowhere at runtime. `add` is expanded where
+// it is WRITTEN — the compiler steps `fmt_next` over the format string,
+// emitting a literal write per run, `arg.toString(out)` per positional
+// hole, and for a named one the write it would have emitted after
+// looking `name` up in the frame it is standing in. So there is no
+// runtime format state, no allocation, and a format mismatched on
+// holes/arguments is a compile error rather than a `?` — a missing
+// binding reported at THE HOLE'S OWN POSITION (`design_fmt.md` §3).
 //
 // THE STEPS BELOW CARRY THE NAME BUT NEVER RESOLVE IT. That needs a
 // scope, and a `str` has none; the two backend walks
