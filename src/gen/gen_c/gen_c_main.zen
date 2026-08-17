@@ -61,9 +61,9 @@ write_entry = (be :: CBackend, d: Def, f: Function, out :: Emit)
     call  ::= be.alloc.String().try();
     empty ::= be.alloc.Inst();
     sym_fn(call, be.check.types, be.check.world, d.qname, sig, empty).try();
-    call.add_bytes("(").try();
-    write_entry_args(be, sig, call).try();
-    call.add_bytes(")").try();
+    args ::= be.alloc.String().try();
+    write_entry_args(be, sig, args).try();
+    call.fmt("({})", args.view()).try();
     rows.get(0).match({
         None  => Ok(()),
         Ok(v) => emit_argv_vec(be, v, out),
@@ -127,12 +127,11 @@ write_entry_arg = (be :: CBackend, t: TyId, out :: String)
 
 write_env_value = (be :: CBackend, t: TyId, out :: String)
                   Res<(), AllocError> {
-    out.add_bytes("((").try();
-    ctype(be, t, out).try();
-    out.add_bytes("){ .").try();
-    out.sym_member("argv").try();
-    out.add_bytes(" = zg_argv_vec(argc, argv) })").try();
-    Ok(());
+    cty ::= be.alloc.String().try();
+    ctype(be, t, cty).try();
+    mem ::= be.alloc.String().try();
+    mem.sym_member("argv").try();
+    out.fmt("(({}){ .{} = zg_argv_vec(argc, argv) })", cty.view(), mem.view())
 }
 
 // The `Vec<str>` an `argv` field holds, when the parameter has one.
@@ -168,10 +167,13 @@ argv_rows = (be :: CBackend, sig: Vec<TyId>, out :: Vec<TyId>)
 
 emit_argv_vec = (be :: CBackend, v: TyId, out :: Emit)
                 Res<(), AllocError> {
+    cty ::= be.alloc.String().try();
+    ctype(be, v, cty).try();
     head ::= be.alloc.String().try();
-    head.add_bytes("static ").try();
-    ctype(be, v, head).try();
-    head.add_bytes(" zg_argv_vec(int argc, char **argv) {").try();
+    head.fmt(
+        "static {} zg_argv_vec(int argc, char **argv) {",
+        cty.view()
+    ).try();
     out.say(head.view()).try();
     out.indent();
     write_empty_rows(be, v, out).try();
@@ -194,28 +196,28 @@ emit_argv_vec = (be :: CBackend, v: TyId, out :: Emit)
 
 write_empty_rows = (be :: CBackend, v: TyId, out :: Emit)
                    Res<(), AllocError> {
+    lit ::= be.alloc.String().try();
+    write_vec_literal(be, v, "0", "0", lit).try();
     line ::= be.alloc.String().try();
-    line.add_bytes("if (argc <= 0) return ").try();
-    write_vec_literal(be, v, "0", "0", line).try();
-    line.add_bytes(";").try();
+    line.fmt("if (argc <= 0) return {};", lit.view()).try();
     out.say(line.view())
 }
 
 write_rows_guard = (be :: CBackend, v: TyId, out :: Emit)
                    Res<(), AllocError> {
+    lit ::= be.alloc.String().try();
+    write_vec_literal(be, v, "0", "0", lit).try();
     line ::= be.alloc.String().try();
-    line.add_bytes("if (!rows) return ").try();
-    write_vec_literal(be, v, "0", "0", line).try();
-    line.add_bytes(";").try();
+    line.fmt("if (!rows) return {};", lit.view()).try();
     out.say(line.view())
 }
 
 write_filled_rows = (be :: CBackend, v: TyId, out :: Emit)
                     Res<(), AllocError> {
+    lit ::= be.alloc.String().try();
+    write_vec_literal(be, v, "rows", "(size_t)argc", lit).try();
     line ::= be.alloc.String().try();
-    line.add_bytes("return ").try();
-    write_vec_literal(be, v, "rows", "(size_t)argc", line).try();
-    line.add_bytes(";").try();
+    line.fmt("return {};", lit.view()).try();
     out.say(line.view())
 }
 
@@ -228,22 +230,21 @@ write_vec_literal = (
     n    : str,
     out  :: String
 ) Res<(), AllocError> {
-    out.add_bytes("(").try();
-    ctype(be, v, out).try();
-    out.add_bytes("){ .").try();
-    out.sym_member("data").try();
-    out.add_bytes(" = ").try();
-    out.add_bytes(data).try();
-    out.add_bytes(", .").try();
-    out.sym_member("len").try();
-    out.add_bytes(" = ").try();
-    out.add_bytes(n).try();
-    out.add_bytes(", .").try();
-    out.sym_member("capacity").try();
-    out.add_bytes(" = ").try();
-    out.add_bytes(n).try();
-    out.add_bytes(" }").try();
-    Ok(());
+    cty ::= be.alloc.String().try();
+    ctype(be, v, cty).try();
+    d ::= be.alloc.String().try();
+    d.sym_member("data").try();
+    l ::= be.alloc.String().try();
+    l.sym_member("len").try();
+    c ::= be.alloc.String().try();
+    c.sym_member("capacity").try();
+    out.fmt(
+        "({}){ .{} = {data}, .{} = {n}, .{} = {n} }",
+        cty.view(),
+        d.view(),
+        l.view(),
+        c.view()
+    )
 }
 
 write_zero = (be :: CBackend, t: TyId, out :: String) Res<(), AllocError> {
@@ -255,10 +256,9 @@ write_zero = (be :: CBackend, t: TyId, out :: String) Res<(), AllocError> {
 
 write_zero_struct = (be :: CBackend, t: TyId, out :: String)
                     Res<(), AllocError> {
-    out.add_bytes("(").try();
-    ctype(be, t, out).try();
-    out.add_bytes("){0}").try();
-    Ok(());
+    cty ::= be.alloc.String().try();
+    ctype(be, t, cty).try();
+    out.fmt("({}){0}", cty.view())
 }
 
 // `Ok(0)` from main exits 0 — the corpus rests on it. A `Res` whose Ok
@@ -278,18 +278,21 @@ write_res_exit = (
     call : str,
     out  :: Emit
 ) Res<(), AllocError> {
+    cty ::= be.alloc.String().try();
+    ctype(be, ret, cty).try();
     line ::= be.alloc.String().try();
-    ctype(be, ret, line).try();
-    line.add_bytes(" zg_r = ").try();
-    line.add_bytes(call).try();
-    line.add_bytes(";").try();
+    line.fmt("{} zg_r = {call};", cty.view()).try();
     out.say(line.view()).try();
+    tag ::= be.alloc.String().try();
+    sym_variant(tag, RES_PATH, "Ok").try();
+    code ::= be.alloc.String().try();
+    write_ok_value(be, r, code).try();
     guard ::= be.alloc.String().try();
-    guard.add_bytes("if (zg_r.zg_tag == ").try();
-    sym_variant(guard, RES_PATH, "Ok").try();
-    guard.add_bytes(") return ").try();
-    write_ok_value(be, r, guard).try();
-    guard.add_bytes(";").try();
+    guard.fmt(
+        "if (zg_r.zg_tag == {}) return {};",
+        tag.view(),
+        code.view()
+    ).try();
     out.say(guard.view()).try();
     out.say("return 1;").try();
     Ok(());

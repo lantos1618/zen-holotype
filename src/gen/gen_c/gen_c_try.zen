@@ -112,13 +112,9 @@ lower_try_res = (
 
 write_guard = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
               Res<(), AllocError> {
-    be.write("if (").try();
-    be.write(tmp).try();
-    be.write(".zg_tag != ").try();
     tag ::= be.alloc.String().try();
     sym_variant(tag, RES_PATH, "Ok").try();
-    be.write(tag.view()).try();
-    be.writeln(") {").try();
+    be.fmt("if ({tmp}.zg_tag != {}) {\n", tag.view()).try();
     be.indent();
     // EVERY EARLY EXIT IS A SCOPE EXIT, and `.try()` is the common one:
     // it is "a jump out through a frame boundary", so every block from
@@ -595,11 +591,7 @@ write_retag = (be :: CBackend, r: TyRes, want: TyRes, tmp: str, ctx: Ctx)
 }
 
 write_return = (be :: CBackend, w: str) Res<(), AllocError> {
-    ret ::= be.alloc.String().try();
-    ret.add_bytes("return ").try();
-    ret.add_bytes(w).try();
-    ret.add_bytes(";").try();
-    be.writeln(ret.view())
+    be.fmt("return {w};\n")
 }
 
 // THE PAYLOAD ONLY, AND AT THE SOURCE'S SIZE. `write_carrier_copy` above
@@ -614,15 +606,16 @@ write_return = (be :: CBackend, w: str) Res<(), AllocError> {
 // there are never too many of them, because every source member is a
 // destination member and a union is at least as large as its largest.
 write_payload_copy = (be :: CBackend, w: str, tmp: str) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("memcpy(&").try();
-    read_payload(w, line).try();
-    line.add_bytes(", &").try();
-    read_payload(tmp, line).try();
-    line.add_bytes(", sizeof(").try();
-    read_payload(tmp, line).try();
-    line.add_bytes("));").try();
-    be.writeln(line.view())
+    dst ::= be.alloc.String().try();
+    read_payload(w, dst).try();
+    src ::= be.alloc.String().try();
+    read_payload(tmp, src).try();
+    be.fmt(
+        "memcpy(&{}, &{}, sizeof({}));\n",
+        dst.view(),
+        src.view(),
+        src.view()
+    )
 }
 
 // A set of two or more members always HAS a payload union: there is one
@@ -665,11 +658,9 @@ write_tag_map = (
 }
 
 open_switch = (be :: CBackend, tmp: str) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("switch (").try();
-    read_tag(tmp, line).try();
-    line.add_bytes(") {").try();
-    be.writeln(line.view()).try();
+    tag ::= be.alloc.String().try();
+    read_tag(tmp, tag).try();
+    be.fmt("switch ({}) {\n", tag.view()).try();
     be.indent();
     Ok(());
 }
@@ -681,15 +672,13 @@ write_tag_case = (
     m        : TyId,
     w        : str
 ) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("case ").try();
-    write_member_tag(be, from_set, m, line).try();
-    line.add_bytes(": ").try();
-    read_tag(w, line).try();
-    line.add_bytes(" = ").try();
-    write_member_tag(be, to_set, m, line).try();
-    line.add_bytes("; break;").try();
-    be.writeln(line.view())
+    from ::= be.alloc.String().try();
+    write_member_tag(be, from_set, m, from).try();
+    to ::= be.alloc.String().try();
+    write_member_tag(be, to_set, m, to).try();
+    tag ::= be.alloc.String().try();
+    read_tag(w, tag).try();
+    be.fmt("case {}: {} = {}; break;\n", from.view(), tag.view(), to.view())
 }
 
 // The tag constant a set gives one of its members, whichever way the set
@@ -722,27 +711,25 @@ write_named_tag = (be :: CBackend, set: TyId, v: str, out :: String)
 
 write_carrier_decl = (be :: CBackend, r: TyRes, w: str, ctx: Ctx)
                      Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    ctype(be, ctx.ret, line).try();
-    line.add_bytes(" ").try();
-    line.add_bytes(w).try();
-    line.add_bytes(" = { .zg_tag = ").try();
-    failure_tag(be, r, line).try();
-    line.add_bytes(" };").try();
-    be.writeln(line.view())
+    cty ::= be.alloc.String().try();
+    ctype(be, ctx.ret, cty).try();
+    tag ::= be.alloc.String().try();
+    failure_tag(be, r, tag).try();
+    be.fmt("{} {w} = { .zg_tag = {} };\n", cty.view(), tag.view())
 }
 
 write_carrier_copy = (be :: CBackend, w: str, tmp: str)
                      Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("memcpy(&").try();
-    read_error(w, line).try();
-    line.add_bytes(", &").try();
-    read_error(tmp, line).try();
-    line.add_bytes(", sizeof(").try();
-    read_error(w, line).try();
-    line.add_bytes("));").try();
-    be.writeln(line.view())
+    dst ::= be.alloc.String().try();
+    read_error(w, dst).try();
+    src ::= be.alloc.String().try();
+    read_error(tmp, src).try();
+    be.fmt(
+        "memcpy(&{}, &{}, sizeof({}));\n",
+        dst.view(),
+        src.view(),
+        dst.view()
+    )
 }
 
 failure_tag = (be :: CBackend, r: TyRes, out :: String) Res<(), AllocError> {
@@ -776,8 +763,7 @@ carry_error = (
 }
 
 read_error = (tmp: str, out :: String) Res<(), AllocError> {
-    out.add_bytes(tmp).try();
-    out.add_bytes(".zg_data.").try();
+    out.fmt("{tmp}.zg_data.").try();
     out.sym_member("Err").try();
     Ok(());
 }
@@ -795,15 +781,15 @@ wrap_error = (
 ) Res<(), AllocError> {
     qname ::= be.alloc.String().try();
     set_qname(be, set, qname).try();
-    out.add_bytes("(").try();
-    ctype(be, set, out).try();
-    out.add_bytes("){ .zg_tag = ").try();
+    cty ::= be.alloc.String().try();
+    ctype(be, set, cty).try();
+    err ::= be.alloc.String().try();
+    read_error(tmp, err).try();
+    out.fmt("({}){ .zg_tag = ", cty.view()).try();
     out.sym_variant(qname.view(), variant).try();
     out.add_bytes(", .zg_data.").try();
     out.sym_member(variant).try();
-    out.add_bytes(" = ").try();
-    read_error(tmp, out).try();
-    out.add_bytes(" }").try();
+    out.fmt(" = {} }", err.view()).try();
     Ok(());
 }
 
@@ -845,8 +831,7 @@ unwrap = (be :: CBackend, r: TyRes, tmp: str, dst: Dest)
 
 write_unwrap = (be :: CBackend, tmp: str, dst: Dest) Res<(), AllocError> {
     place ::= be.alloc.String().try();
-    place.add_bytes(tmp).try();
-    place.add_bytes(".zg_data.").try();
+    place.fmt("{tmp}.zg_data.").try();
     sym_member(place, "Ok").try();
     write_dest(be, dst, place.view())
 }

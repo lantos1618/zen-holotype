@@ -146,8 +146,7 @@ lower_with_acc = (
     sym_gen(cell, "a", be.next_tmp()).try();
     decl ::= be.alloc.String().try();
     declarator(be, aty, cell.view(), decl).try();
-    decl.add_bytes(";").try();
-    be.writeln(decl.view()).try();
+    be.fmt("{};\n", decl.view()).try();
     deliver(be, seed, ctx, aty, Dest.Into(cell.view())).try();
     settled = settle_res(be, want, aty).try();
     lower_walk(
@@ -245,16 +244,18 @@ write_fold_result* = (be :: CBackend, st: LoopFrame, fold: Fold)
 
 write_ok_acc = (be :: CBackend, st: LoopFrame, fold: Fold)
                Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(st.result).try();
-    line.add_bytes(" = (").try();
-    ctype(be, st.ty, line).try();
-    line.add_bytes("){ .zg_tag = ").try();
-    sym_variant(line, RES_PATH, "Ok").try();
-    line.add_bytes(", .zg_data.").try();
-    sym_member(line, "Ok").try();
-    line.add_bytes(" = ").try();
-    line.add_bytes(fold.cell).try();
-    line.add_bytes(" };").try();
-    be.writeln(line.view())
+    cty ::= be.alloc.String().try();
+    ctype(be, st.ty, cty).try();
+    tag ::= be.alloc.String().try();
+    sym_variant(tag, RES_PATH, "Ok").try();
+    mem ::= be.alloc.String().try();
+    sym_member(mem, "Ok").try();
+    be.fmt(
+        "{} = ({}){ .zg_tag = {}, .zg_data.{} = {} };\n",
+        st.result,
+        cty.view(),
+        tag.view(),
+        mem.view(),
+        fold.cell
+    )
 }

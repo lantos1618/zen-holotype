@@ -485,12 +485,12 @@ write_door = (
 // write gives, written first so that falling off the end is `Ok` and
 // only a failure has to say anything.
 write_ok* = (be :: CBackend, ret: TyId, tmp: str) Res<(), AllocError> {
+    cty ::= be.alloc.String().try();
+    ctype(be, ret, cty).try();
+    tag ::= be.alloc.String().try();
+    sym_variant(tag, RES_PATH, "Ok").try();
     value ::= be.alloc.String().try();
-    value.add_bytes("(").try();
-    ctype(be, ret, value).try();
-    value.add_bytes("){ .zg_tag = ").try();
-    sym_variant(value, RES_PATH, "Ok").try();
-    value.add_bytes(" }").try();
+    value.fmt("({}){ .zg_tag = {} }", cty.view(), tag.view()).try();
     be.set_line(tmp, value.view())
 }
 
@@ -662,9 +662,7 @@ write_chunk = (
 write_literal = (be :: CBackend, piece: str, p: Piece)
                 Res<(), AllocError> {
     text ::= be.alloc.String().try();
-    text.add_bytes("(zg_str){ (unsigned char *)\"").try();
-    text.add_bytes(piece).try();
-    text.add_bytes("\", ").try();
+    text.fmt("(zg_str){ (unsigned char *)\"{piece}\", ").try();
     write_usize(text, decoded_bytes(piece)).try();
     text.add_bytes("u }").try();
     call ::= be.alloc.String().try();
@@ -800,8 +798,7 @@ floor_write = (p: Piece, text: str, out :: String) Res<bool, AllocError> {
 slot_write = (be :: CBackend, p: Piece, text: str, out :: String)
              Res<bool, AllocError> {
     args ::= be.alloc.String().try();
-    args.add_bytes(", ").try();
-    args.add_bytes(text).try();
+    args.fmt(", {text}").try();
     slot_call(be, p.sink, p.sty, "write", args.view(), 1, out).try().match({
         None  => Ok(false),
         Ok(_) => Ok(true),
@@ -834,8 +831,9 @@ write_writer_call = (
     text : str,
     out  :: String
 ) Res<bool, AllocError> {
-    call_symbol(be, w, out).try();
-    out.fmt("(&{}, {}({}))", p.sink, cast, text).try();
+    sym ::= be.alloc.String().try();
+    call_symbol(be, w, sym).try();
+    out.fmt("{}(&{}, {}({}))", sym.view(), p.sink, cast, text).try();
     Ok(true);
 }
 
@@ -913,13 +911,9 @@ unsupported_piece = (be :: CBackend, id: ExprId, what: str)
 // `if (zg_tN.zg_tag != Ok) { goto done; }`
 write_jump_unless_ok* = (be :: CBackend, tmp: str, done: usize)
                         Res<(), AllocError> {
-    be.write("if (").try();
-    be.write(tmp).try();
-    be.write(".zg_tag != ").try();
     tag ::= be.alloc.String().try();
     sym_variant(tag, RES_PATH, "Ok").try();
-    be.write(tag.view()).try();
-    be.writeln(") {").try();
+    be.fmt("if ({tmp}.zg_tag != {}) {\n", tag.view()).try();
     be.indent();
     write_goto(be, done).try();
     be.dedent();

@@ -175,12 +175,17 @@ write_break_value = (be :: CBackend, c: Call, fr: LoopFrame, ctx: Ctx)
 assign_ok = (be :: CBackend, value: ExprId, fr: LoopFrame, ctx: Ctx)
             Res<(), AllocError> {
     payload = ok_payload(be, fr.ty).try();
+    cty ::= be.alloc.String().try();
+    ctype(be, fr.ty, cty).try();
+    tag ::= be.alloc.String().try();
+    sym_variant(tag, RES_PATH, "Ok").try();
     line ::= be.alloc.String().try();
-    line.add_bytes(fr.result).try();
-    line.add_bytes(" = (").try();
-    ctype(be, fr.ty, line).try();
-    line.add_bytes("){ .zg_tag = ").try();
-    sym_variant(line, RES_PATH, "Ok").try();
+    line.fmt(
+        "{} = ({}){ .zg_tag = {}",
+        fr.result,
+        cty.view(),
+        tag.view()
+    ).try();
     is_unit(be, payload).match({
         true  => Ok(()),
         false => write_ok_payload(be, value, payload, ctx, line),
@@ -196,9 +201,9 @@ write_ok_payload = (
     ctx     : Ctx,
     line    :: String
 ) Res<(), AllocError> {
-    line.add_bytes(", .zg_data.").try();
-    sym_member(line, "Ok").try();
-    line.add_bytes(" = ").try();
+    mem ::= be.alloc.String().try();
+    sym_member(mem, "Ok").try();
+    line.fmt(", .zg_data.{} = ", mem.view()).try();
     expr(be, value, ctx, payload, line).try();
     Ok(());
 }
