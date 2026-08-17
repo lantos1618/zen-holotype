@@ -6217,7 +6217,7 @@ class FnCtx:
             code, ety = self.expr(e, elem_ty)
             elem_ty = elem_ty or ety
             codes.append(code)
-        ty = ("array", len(elems), elem_ty or prim("i32"))
+        ty = ("array", len(elems), prim("i32") if elem_ty in (None, UNSETTLED_INT) else elem_ty)
         cname = self.e.ctype(ty)
         return ("((%s){ { %s } })" % (cname, ", ".join(codes) or "0"), ty)
 

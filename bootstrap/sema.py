@@ -3177,9 +3177,18 @@ class Sema:
         ety = ANY
         for e in elems:
             t = self.type_of(e, ctx, expect=want)
+            # an element is a literal's position, as `_t_FixedArray` says
+            # of the form that writes the type beside the values
+            self._check_literal_fits(e, t, want, _span(e))
             if ety.kind == "any":
                 ety = t
-        if ety.kind == "intlit":
+        # A WRITTEN ELEMENT TYPE IS THE ELEMENTS' CONTEXT; the default is
+        # for where nothing writes one. Settling to `i32` regardless made
+        # `xs: [u8, 3] = [1, 2, 3]` an error, since an array is a struct
+        # and `[i32, 3]` is not `[u8, 3]`.
+        if ety.kind in ("intlit", "floatlit") and want is not None and want.kind == "prim":
+            ety = want
+        elif ety.kind == "intlit":
             ety = prim("i32")
         return arr_ty(ety, len(elems))
 

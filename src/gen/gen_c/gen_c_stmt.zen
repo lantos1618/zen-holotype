@@ -33,6 +33,7 @@ TyId, Ty, Types, TyNamed, TyRes, ResForm = sema.sema_ty
 World, Def, DefKind, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 type_of, type_from_ast, stmt_type = sema.sema_type
+settled_array = sema.sema_place
 write_usize = sema.sema_diag
 Emit = gen.gen_emit
 sym_local, sym_member, sym_variant, sym_gen, sym_fn = gen.gen_name
@@ -478,8 +479,18 @@ inferred_type = (be :: CBackend, b: Bind, ctx: Ctx, unknown: TyId)
                 Res<TyId, AllocError> {
     slot_type(be, b).match({
         Ok(t) => Ok(t),
-        None  => ty_of(be, b.value, ctx, unknown),
+        None  => be.settled_value_type(b, ctx, unknown),
     })
+}
+
+// `sema_place.place_want`'s rule, at the statement it is about: a
+// binding with no written type freezes what the value is worth, and
+// `zg_a3_b3int` is a different struct from `zg_a3_b3i32`. One function,
+// called from the two places that answer what a binding's type is.
+settled_value_type = (be :: CBackend, b: Bind, ctx: Ctx, unknown: TyId)
+                     Res<TyId, AllocError> {
+    got = be.ty_of(b.value, ctx, unknown).try();
+    be.check.settled_array(got)
 }
 
 slot_type = (be :: CBackend, b: Bind) Res<TyId> {

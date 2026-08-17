@@ -20,7 +20,7 @@
 // `[i32, 4]` both halves of the comparison at one node.
 
 Ast, Expr, ExprId, Binary, BinOp, Literal, LiteralKind, Span = std.ast
-Unary, UnOp, Access, Paren, Name, Index, Match, Arm = std.ast
+Unary, UnOp, Access, Paren, Name, Index, Match, Arm, ArrayLit = std.ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -179,9 +179,36 @@ overflow = (c :: Checker, b: Binary, name: str) Res<(), AllocError> {
 check_literal* = (c :: Checker, id: ExprId, want: TyId)
                  Res<(), AllocError> {
     is_integer(c.prim_name(want)).match({
-        false => Ok(()),
         true  => literal_within(c, id, want),
+        false => c.elements_within(id, want),
     })
+}
+
+// AN ELEMENT SITS WHERE THE ARRAY SITS. `xs: [u8, 3] = [1, 2, 300]`
+// writes `u8` nowhere an element can see, and `[int, 3]` now reaches
+// `[u8, 3]` by the same family rule this file exists to correct — so
+// without this the 300 would wrap to 44 unreported. `fixed_array_type`
+// asks the same question of `[u8, 3](1, 2, 300)`, where the type is
+// written beside the values instead of at the position.
+elements_within = (c :: Checker, id: ExprId, want: TyId)
+                  Res<(), AllocError> {
+    c.types.at(want).match({
+        Array(a) => c.array_elements(id, a),
+        _        => Ok(()),
+    })
+}
+
+array_elements = (c :: Checker, id: ExprId, a: TyArray) Res<(), AllocError> {
+    c.tree.expr_at(id).kind.match({
+        Array(lit) => c.elem_literals(lit, a.elem),
+        _          => Ok(()),
+    })
+}
+
+elem_literals = (c :: Checker, lit: ArrayLit, elem: TyId)
+                Res<(), AllocError> {
+    lit.elems.loop((h, e) { c.check_literal(e, elem).try(); });
+    Ok(());
 }
 
 // An arm's value sits in the match's own position: `m: i32 =
