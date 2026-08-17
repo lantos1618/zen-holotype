@@ -80,6 +80,40 @@
    # is invisible to a differential harness -- being wrong in only one
    # implementation is not enough, something has to ASK.
    #
+   # A PATTERN NAMING A CONSTANT SWALLOWED EVERY VALUE, closed
+   # 2026-08-17. A bare name in a pattern is a fresh binding, so an arm
+   # naming a constant in scope is irrefutable:
+   #
+   #     LIMIT = 3
+   #     n = 99
+   #     n.match({ LIMIT => "hit the limit", _ => "other" })
+   #
+   # answered "hit the limit". The only symptom was a diagnostic on the
+   # NEXT arm -- `_` reported unreachable -- so the compiler knew the
+   # consequence and never named the cause; drop the `_` and there was
+   # no diagnostic at all. `SemaFault.ConstPattern` fires during
+   # normalisation, above the usefulness checks, so cause is reported
+   # before effect and both still fire.
+   #
+   # BINDING WAS KEPT, COMPARING WAS REFUSED, and the reason is scope.
+   # Resolving a bare pattern name against a type's case list is safe
+   # because that list is declared and fixed; resolving it against the
+   # ambient VALUE namespace would mean a new unrelated constant could
+   # silently turn an existing binder into a comparison. Reporting is
+   # also the reversible half -- comparing can still be adopted later,
+   # a silent flip cannot be taken back.
+   #
+   # ZERO SITES IN src/, WHICH IS THE LEAST INTERESTING ANSWER A NEW
+   # RULE CAN GIVE, so it was not taken on the first reading. The check
+   # was mutated three ways to prove it was not vacuous: an arm naming
+   # an IMPORTED constant was added to gen_c_handle.zen and reported
+   # (so the cross-module path is live, not only the same-file one);
+   # the rule was temporarily widened to fire on ANY module-level
+   # declaration and still found nothing across 60k lines; and the
+   # local-shadow gate was removed with the same result. A gate that
+   # cannot fail reads exactly like a clean tree -- the difference is
+   # only ever established by making it go red on purpose.
+   #
    # Read the green board as "nothing we thought to check is broken",
    # never as "stage 4 is done", because the gap between those two
    # sentences is where every silent bug in this tree has lived.
