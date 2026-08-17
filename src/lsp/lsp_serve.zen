@@ -1,43 +1,29 @@
 // src/lsp/lsp_serve.zen
 // The server: lifecycle, a document overlay, and a dispatch table.
 //
-// It answers NINE requests and handles THREE notifications, and refuses
-// everything else BY NAME with `-32601` and the method spelled back —
-// `src/zen/zen_cli.zen`'s own rule one level down: a command that
-// silently does nothing is worse than one that says it is not written.
+// It answers EIGHT requests — `lsp_reply.zen`'s `Request` union is that
+// list — and refuses everything else BY NAME with `-32601` and the method
+// spelled back, `src/zen/zen_cli.zen`'s own rule one level down: a
+// command that silently does nothing is worse than one that says it is
+// not written.
 //
 //   initialize                 capabilities, and the gate opens
 //   shutdown                   `null`, and no more work is accepted
-//   textDocument/hover         lsp_hover.zen — the one sema-backed query
-//   textDocument/definition    lsp_def.zen — where a name was declared
-//   textDocument/documentSymbol
-//                              lsp_symbol.zen — a module's declarations,
-//                              flat, off the AST alone
-//   textDocument/completion    lsp_compl.zen — the candidate set at a
-//                              position, by backward scan and dummy
-//                              identifier, never a recovering parser
-//   textDocument/semanticTokens/full
-//                              lsp_colour.zen — the lexer's own tokens,
-//                              reclassified by what the diagnostics'
-//                              build settled about each name
-//                              (lsp_names.zen), lexical alone when there
-//                              is no clean build
-//   textDocument/formatting    lsp_fmt.zen — the open buffer through
-//                              `src/fmt/`, as one whole-document edit,
-//                              and `[]` rather than an error whenever
-//                              that is refused
+//   textDocument/hover                 lsp_hover.zen
+//   textDocument/definition            lsp_def.zen
+//   textDocument/documentSymbol        lsp_symbol.zen
+//   textDocument/completion            lsp_compl.zen
+//   textDocument/semanticTokens/full   lsp_colour.zen
+//   textDocument/formatting            lsp_fmt.zen
+//   didOpen / didChange        the overlay, Full sync only
+//   initialized / exit / didClose / $/cancelRequest
+//                              notifications, no reply and nothing to do
 //   everything else            -32601, with the method named
-//   initialized / exit / $/cancelRequest   notifications, no reply
-//   didOpen / didChange / didClose         the overlay, Full sync only
 //
-// SYNC IS FULL AND CANNOT USEFULLY BE INCREMENTAL. `design_lsp.md` §5:
-// ids are indices in creation order, a `Checker` copies a finished
-// `Ast`, compilation is whole-program — so a range edit followed by
-// handing the whole buffer to a whole-program compiler buys nothing.
-//
-// `$/cancelRequest` IS DROPPED, not honoured: there is no yield point in
-// `check_all`, and this server is single-threaded (`PLAN.md:194`: the
-// seed subset has no threads).
+// SYNC IS FULL AND CANNOT USEFULLY BE INCREMENTAL — `design_lsp.md` §5
+// holds the three structural reasons. `$/cancelRequest` is DROPPED and
+// not recorded: there is no yield point in `check_all`, and this server
+// is single-threaded (threads are outside `PLAN.md`'s seed subset).
 //
 // THIS FILE HOLDS NO TRANSPORT. `one` takes request bytes and appends
 // reply bytes; `serve` walks a buffer of frames the same way — so

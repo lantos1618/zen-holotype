@@ -225,7 +225,7 @@ emit-runs:
 	    "$$(wc -l < $@.now)" "$$(awk -F'|' '{s+=$$2} END {print s+0}' $@.now)"; \
 	  rm -f $@.now
 
-bench-allocs: the half of tests/bench that is not a stopwatch, and so
+## bench-allocs: the half of tests/bench that is not a stopwatch, and so
 ## the half that belongs in `test`. Each driver is linked through
 ## `ld --wrap=malloc` and compiled at N and 2N iterations; the slope is
 ## allocations and bytes per op, the same integers on every machine, and

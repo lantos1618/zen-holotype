@@ -283,13 +283,13 @@ Nothing in the tree parses or emits JSON. Concretely:
 | before `initialize` | every request answered `-32002 ServerNotInitialized`; every notification except `exit` dropped |
 | `initialize` → result | server capabilities and `serverInfo`. Sync kind is **Full** (§5) |
 | `initialized` | notification; work may begin |
-| running | requests dispatched; `$/cancelRequest` recorded |
+| running | requests dispatched; `$/cancelRequest` **dropped**, see below |
 | `shutdown` | reply `null`, stop accepting work, do not exit |
 | `exit` | exit **0** if `shutdown` was received, **1** otherwise |
 
 Those exit codes fit what is already there: `main` returns `Res<i32, AllocError>` (`src/zen/zen.zen:33`) and `usage` deliberately returns 2 rather than 1 (`src/zen/zen.zen:154`) because "this build found problems" and "I could not tell what you asked for" are different answers. The LSP adds a third pair and no new mechanism.
 
-**`$/cancelRequest` is honoured between requests and not inside one.** A build is a build (§5); there is no yield point in `check_all`. Saying this out loud beats a server that advertises cancellation it cannot perform.
+**`$/cancelRequest` is DROPPED, and this document used to say "recorded" and "honoured between requests" — as built it is neither.** A build is a build (§5); there is no yield point in `check_all`, the server is single-threaded, and a request is answered before the next message is read — so a cancel that arrives can only ever refer to work that is already finished, and recording it would be a field nothing reads. `lsp_serve.zen` drops it with `initialized`, `exit` and `didClose`, in the arm that names all four rather than leaving four empty branches. Saying this out loud beats a server that advertises cancellation it cannot perform.
 
 ### The CLI
 
@@ -362,6 +362,19 @@ An earlier agent refused to land the field on its own and priced the rest. It na
 **And one that is not about this feature at all**: `bootstrap/gen_c.py`'s `MAX_INSTANCES` was 4096, and `corpus/cli/build_walks_a_root_it_is_given` — which stages the whole driver — already emitted 4086 functions. Ten of headroom. The `src/lsp` → `src/zen` import this section *ratifies* took it to 4099 and **eleven tests in two suites went red**, with a diagnostic naming an arbitrary `std` function rather than the size. A guard on divergence is unaffected by the number; a guard on a program's size is what 4096 had quietly become. It is 8192 now.
 
 **The lesson generalises past this section, and it generalised twice.** The estimate counted the code at the seam and not the code that makes the seam reachable — and then the *revised* estimate did the same thing one level up, counting the seam's neighbours and not the file's line cap, the root discovery, the printing, or a constant in the other compiler. Any estimate in this document that names a line count should be read as "the edit", never "the change".
+
+### What a build COSTS a session, which nothing above priced — BUILT
+
+Every estimate in this section counted a build in *seconds*. The number that ended up mattering is megabytes, and it is the one failure mode a corpus test cannot see: a server that answers every request correctly and grows until the machine swaps.
+
+A build of this tree is **~10 MB of arena pages** — the walk, the tree, the `Checker`'s memos. Before `src/lsp/lsp_built.zen` existed, every one of them — the settle's *and* each query's own — allocated from the **session** arena, which reclaims nothing before the process exits. So RSS grew by a whole-program build **per request**: a keystroke that also hovered is a settle, a hover and a completion, three builds, ~30 MB, permanent.
+
+Two rules fix it, and `lsp_built.zen`'s header is where they are written because a caller has to obey the second one:
+
+1. **A build's pages die with its replacement.** One arena per build, holding everything that build produced, dropped as a whole when the next build replaces it. The drop is EXPLICIT — a struct field carries no drop glue in this language — and forgetting the call leaks exactly as the session arena did.
+2. **One build per document state, single-flight.** The settle and every query against the same state share one build, keyed on what a build READS: the root, the entry, and every open buffer's bytes. This is the stale-state stamp this section asks for, as a **content comparison rather than a version counter** — which is the same fact `lsp_serve.zen`'s unchanged-buffer skip already relies on, so there is one notion of "changed" in the server and not two.
+
+**The constraint that falls out, and it binds every query in the folder:** nothing allocated from the slot may be kept past the next `ensure`, because eviction frees those pages. An answer is written into the *caller's* arena within the request; anything the server keeps across requests (the URIs currently showing errors) is copied into the session arena deliberately.
 
 ### Diagnostics have to escape the driver — **DONE**
 
