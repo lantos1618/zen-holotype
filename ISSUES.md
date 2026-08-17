@@ -18,6 +18,30 @@ how a gate that cannot fail happens to a list.
 
 ## OPEN — being worked
 
+**The LSP hand-writes JSON; it should have structs with a derived `to_json`.**
+Measured: ~97 `add_bytes` calls spelling JSON punctuation across 12 files, and
+**34 `write_*` functions each spelling one protocol object by hand**, inside
+2,562 lines. The structs already exist (`WirePos`, `Item`, `Classed`,
+`Envelope`, `Spot`) — they sit BESIDE the writers instead of being the source
+of them. `parse_error` in `lsp_reply.zen` is the type case: it spells
+`{"jsonrpc":"2.0","id":null,"error":{"code":-` a byte-run at a time.
+
+**Two steps, and the first is NOT blocked:**
+
+1. **Now** — define the protocol structs and a `ToJson` trait with HAND-WRITTEN
+   impls, the way `Display` declares `toString` today. Collapses 34 scattered
+   writers into one impl per type, next to the type. Also kills the `}}`-escape
+   hazard outright: punctuation stops being string literals sprinkled through
+   12 files, so no conversion lane can turn `"}}"` into one brace.
+2. **After `@meta`** — each impl is DELETED, not rewritten; the derived
+   field-wise walk drops into the same slot. That is why step 1 is a migration
+   and not throwaway work.
+
+Blocked on the `@meta` fork below, for step 2 only: `src/lsp/` is inside `src/`,
+which `bootstrap/` compiles as fixpoint stage 1. This is the THIRD payoff
+riding on that one decision, alongside the six `std` consumers and `fmt`'s
+writer-picking.
+
 **The UTF-8 encoding table exists TWICE, in two folders, under two names.**
 `src/std/text/text_utf8.zen` owns the DECODER; `src/lsp/lsp_json_read.zen:467`
 owns the ENCODER (`push_utf8` + `two_wide`/`three_wide`/`four_wide`/`byte_of`,
