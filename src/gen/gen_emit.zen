@@ -168,6 +168,16 @@ order* = (a: Alloc, keys: Vec<String>) Res<Vec<usize>, AllocError> {
     Ok(out);
 }
 
+// THE WALK STOPS WHERE THE ELEMENT LANDS, and that is not a micro
+// optimisation. Without the break this ran all n-1 comparisons on every
+// insertion, settled or not — Theta(n^2) unconditionally rather than
+// adaptively — and the keys being compared are mangled symbols over 100
+// characters long. Measured self-compiling `src/`: 10,032 insertions
+// drove 20,727,600 full `str.before` compares and 787 of the build's 860
+// million `str.index` calls, 29.63% of self time at -O2.
+//
+// The header above says why nobody looked: "hundreds of top-level names
+// per unit, never millions". It is ten thousand.
 insert_ordered = (out :: Vec<usize>, keys: Vec<String>, i: usize)
                  Res<(), AllocError> {
     out.add(i).try();
@@ -176,9 +186,12 @@ insert_ordered = (out :: Vec<usize>, keys: Vec<String>, i: usize)
         j    = n - k;
         prev = index_at(out, j - 1);
         cur  = index_at(out, j);
-        earlier(keys, cur, prev).then(() {
-            put(out, j - 1, cur).try();
-            put(out, j, prev).try();
+        earlier(keys, cur, prev).match({
+            false => h.break(),
+            true  => {
+                put(out, j - 1, cur).try();
+                put(out, j, prev).try();
+            },
         });
     });
     Ok(());
