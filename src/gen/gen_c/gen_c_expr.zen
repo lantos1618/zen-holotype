@@ -822,6 +822,39 @@ lower_name = (
     })
 }
 
+// `{name}` in a format string: the C text of the binding that name has
+// WHERE THE HOLE IS WRITTEN, and its type.
+//
+// ONE ANSWER FOR BOTH FORMAT WALKS. `println("{n}")` and `out.add("{n}")`
+// must resolve `n` to the same binding, and the reason it is here rather
+// than in either walk is that resolving a bare identifier is already
+// this file's job — `lower_name` below is the same lookup, reached from a
+// node instead of from a name.
+//
+// THIS IS WHAT MAKES `{name}` A COMPILE-TIME FEATURE: the frame being
+// lowered is asked, the type comes off the slot, and the write emitted is
+// the one a positional hole would emit. No runtime format state and no
+// allocation, which is the property `make bench-allocs` gates.
+//
+// `None` is every way a name can fail to be a value here — no binding, a
+// loop handle, a closure, a type not yet known — because a hole has one
+// thing to say about all four and `value_slot` already draws the line.
+named_hole* = (be :: CBackend, name: str, out :: String)
+              Res<Res<TyId>, AllocError> {
+    be.slot_of(name).match({
+        None  => Ok(None),
+        Ok(s) => be.hole_text(name, s, out),
+    })
+}
+
+hole_text = (be :: CBackend, name: str, s: LocalSlot, out :: String)
+            Res<Res<TyId>, AllocError> {
+    be.value_slot(s).match({
+        None  => Ok(None),
+        Ok(t) => { be.write_local(name, s, out).try(); Ok(Ok(t)) },
+    })
+}
+
 // A `::` parameter holds the ADDRESS of its argument, so reading it is
 // a dereference. Parenthesised, because every use of it is a use of the
 // value: `(*p).x` and `*p.x` are different C.

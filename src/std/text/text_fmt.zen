@@ -2,18 +2,39 @@
 // the {} format machinery: the parser that reads a format string, and the
 // writers for the primitives a {} can land on.
 //
-// THE FORMAT LANGUAGE, IN FULL — no width, no precision, no index, no
-// name, exactly one placeholder (DESIGN.md):
+// THE FORMAT LANGUAGE, IN FULL — no width, no precision, no index
+// (DESIGN.md):
 //
-//   {}    a hole. The next argument, written through its toString.
-//   {     NOT followed by `}` is a LITERAL brace (DESIGN.md never
-//         escapes one; Display.dump writes `sb.add("{} {", ..)`
-//         expecting that trailing `{` to print).
-//   }     always a literal byte.
+//   {}      a hole. The next argument, written through its toString.
+//   {name}  a hole too. The binding `name` has WHERE THE HOLE IS
+//           WRITTEN, resolved as any other identifier is. It consumes no
+//           positional argument, so the two spellings MIX FREELY.
+//   {{      a literal `{`. `}}` is a literal `}`, so `{{}}` writes `{}`.
+//   {       NOT followed by `}`, `{` or an IDENTIFIER CHARACTER is a
+//           LITERAL brace (Display.dump writes `sb.add("{} {", ..)`
+//           expecting that trailing `{` to print), and a lone `}` is a
+//           literal byte.
 //
-// THE COST, stated not hidden: THERE IS NO WAY TO WRITE A LITERAL `{}`.
-// `"{}"` is always a hole. Adding an escape (`{{}}`, `\{`) is a design
-// change for DESIGN.md, not this parser — see the report's AMBIGUITIES.
+// A `{` FOLLOWED BY AN IDENTIFIER CHARACTER ALWAYS MEANT A HOLE, so
+// `{p.x}` and `{f()}` are REFUSED and not printed. A hole is not an
+// expression language; the escape is the fix at such a site.
+//
+// NO TWO RULES COLLIDE AT ONE POSITION: `{{` is not `{}`, and neither
+// `}` nor `{` begins an identifier, so which is tested first cannot
+// change what a format means. The walk is LEFT TO RIGHT and never backs
+// up, so `{}}` is a hole then a literal `}` — the hole is seen first —
+// `{{}` is a literal `{` then a literal `}`, and `{{name}}` is a `{`,
+// the bytes `name` and a `}` rather than a named hole.
+//
+// THE COST, stated not hidden: A BYTE WRITER READS NO FORMAT MEANING, so
+// `add_bytes("]}}")` writes two braces and `add("]}}")` writes one. That
+// is not a wart of the escape, it is what "expanded at the call site"
+// means — but it makes CONVERTING A BYTE WRITER INTO A FORMAT CALL a
+// silent change of output wherever the bytes hold a doubled brace. Six
+// such literals are in `src/lsp/`; each was mutated on 2026-08-17 and
+// each reddened between 1 and 9 corpus tests, so the expectations pin
+// them and a conversion cannot make this mistake quietly. A conversion
+// lane reaching bytes NOT under a corpus expectation owes the escape.
 //
 // WHERE THE PARSE HAPPENS: `{}` routes through the argument's
 // type-directed toString, so `add` is expanded where it's WRITTEN — the
@@ -21,37 +42,145 @@
 // write per step and `arg.toString(out)` per hole. One implementation
 // of the rules above, no runtime format state, and a format string
 // mismatched on holes/arguments is a compile error, not a `?`.
+//
+// `{name}` IS THE SAME EXPANSION AND THAT IS THE WHOLE OF IT: the walk
+// reaches the hole, the compiler looks `name` up in the frame it is
+// standing in exactly as it would a bare identifier, and emits the write
+// a positional hole would have emitted. So it costs no allocation and no
+// runtime scan either, and a name with no binding is a compile error at
+// THE HOLE'S OWN POSITION — a column, not "wrong argument count".
+//
+// THE STEPS BELOW CARRY THE NAME BUT NEVER RESOLVE IT. That needs a
+// scope, and a `str` has none; the two backend walks
+// (`gen_c_print.fmt_at`, `bootstrap/gen_c.py`'s `fmt_pieces`) are where
+// that half lives. What this file is the reference for is WHERE THE RUNS
+// AND HOLES ARE and which spelling each hole is — and it has to carry the
+// name to say that at all, or a reference parser that reported `{n}` as
+// literal bytes would be a reference to a language nobody implements.
 
 str = std.text.text_str
 Sink, WriteError = std.core.io
+is_ident_start, is_ident_cont = std.core
 
 // one step of a format string: the literal run before the next hole, and
 // where to resume. `literal` is a SLICE of the format string — no copy
 FmtStep* = {
     literal*: str,     // bytes to write verbatim. May be empty
-    hole*: bool,       // does a {} follow the run?
+    hole*: bool,       // does a hole follow the run?
+    name*: str,        // the hole's name; empty when the hole is `{}`
+    bad*: bool,        // the run stopped at a `{` that opened NO hole
     next*: usize,      // where the next step starts. == f.len when spent
 }
 
-// the first `{` at or after `from` that OPENS a hole. A `{` with
-// anything else behind it is an ordinary byte, and the scan walks past
-// it, keeping it inside the literal run
-hole_at = (f: str, from: usize) Res<usize> {
-    Range(from, f.len).find((i) { f[i] == '{' && (i + 1) < f.len && f[i + 1] == '}' })
+// -----------------------------------------------------------------
+// the three things that can start at a `{`
+//
+// EACH DEMANDS A DIFFERENT SECOND BYTE — `}`, another `{`, an identifier
+// start — and those three sets are disjoint, so at most one holds at any
+// index. That is what lets the scan below find the next INTERESTING
+// index once and classify it afterwards, instead of comparing three
+// candidate positions and hoping the tie-break is right.
+// -----------------------------------------------------------------
+
+opens_hole = (f: str, i: usize) bool {
+    f[i] == '{' && (i + 1) < f.len && f[i + 1] == '}'
+}
+
+opens_pair = (f: str, i: usize) bool {
+    (f[i] == '{' || f[i] == '}') && (i + 1) < f.len && f[i + 1] == f[i]
+}
+
+opens_name = (f: str, i: usize) bool {
+    f[i] == '{' && (i + 1) < f.len && f[i + 1].is_ident_start()
+}
+
+// the first index at or after `from` where the literal run ENDS. A `{`
+// with anything else behind it is an ordinary byte, and the scan walks
+// past it, keeping it inside the run
+break_at = (f: str, from: usize) Res<usize> {
+    Range(from, f.len).find((i) {
+        f.opens_hole(i) || f.opens_pair(i) || f.opens_name(i)
+    })
+}
+
+// one past the last identifier byte at or after `from`
+ident_end = (f: str, from: usize) usize {
+    Range(from, f.len).find((i) { f[i].is_ident_cont() == false }).match({
+        Ok(j) => j,
+        None  => f.len,
+    })
 }
 
 // step the parser once: fmt_next(f, 0), then fmt_next(f, step.next), and
-// so on. `hole` false is always the last step (its run is the rest of
-// the string).
+// so on. THE WALK IS SPENT WHEN `next == f.len` — `hole` false is not the
+// terminator, because a doubled brace ends a run without being a hole and
+// there may be more string behind it.
 fmt_next* = (f: str, from: usize) FmtStep {
-    f.hole_at(from).match({
-        Ok(i) => FmtStep(literal: f.slice(from, i), hole: true, next: i + 2),
-        None  => FmtStep(
-            literal: f.slice(from, f.len),
+    f.break_at(from).match({
+        None  => f.rest_step(from),
+        Ok(i) => f.step_at(from, i),
+    });
+}
+
+step_at = (f: str, from: usize, i: usize) FmtStep {
+    f.opens_hole(i).match({
+        true  => FmtStep(
+            literal: f.slice(from, i),
+            hole: true,
+            name: "",
+            bad: false,
+            next: i + 2
+        ),
+        false => f.step_not_hole(from, i),
+    });
+}
+
+// the run up to and INCLUDING the first of a doubled brace, resuming past
+// the second: one brace written, and it is a slice of `f` like every
+// other run rather than a copy with a byte removed
+step_not_hole = (f: str, from: usize, i: usize) FmtStep {
+    f.opens_pair(i).match({
+        true  => FmtStep(
+            literal: f.slice(from, i + 1),
             hole: false,
-            next: f.len
+            name: "",
+            bad: false,
+            next: i + 2
+        ),
+        false => f.step_named(from, i, f.ident_end(i + 1)),
+    });
+}
+
+// `{name}` when the identifier runs straight into a `}`, and REFUSED
+// when it does not: a `{` followed by an identifier character always
+// meant a hole, so `{p.x}` cannot fall back to printing itself
+step_named = (f: str, from: usize, i: usize, j: usize) FmtStep {
+    ((j < f.len) && f[j] == '}').match({
+        true  => FmtStep(
+            literal: f.slice(from, i),
+            hole: true,
+            name: f.slice(i + 1, j),
+            bad: false,
+            next: j + 1
+        ),
+        false => FmtStep(
+            literal: f.slice(from, i),
+            hole: false,
+            name: "",
+            bad: true,
+            next: i + 1
         ),
     });
+}
+
+rest_step = (f: str, from: usize) FmtStep {
+    FmtStep(
+        literal: f.slice(from, f.len),
+        hole: false,
+        name: "",
+        bad: false,
+        next: f.len
+    )
 }
 
 // ---------------------------------------------------------------------------

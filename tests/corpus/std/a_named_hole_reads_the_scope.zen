@@ -1,0 +1,52 @@
+// tests/corpus/std/a_named_hole_reads_the_scope.zen
+// `{name}` is filled by the binding that name has WHERE THE HOLE IS
+// WRITTEN. It is resolved at expansion time, exactly as a bare
+// identifier is, so the write emitted is the one a positional hole
+// would emit -- no runtime format state and no allocation.
+//
+// THE TWO SPELLINGS MIX FREELY and a named hole consumes no positional
+// argument: `"{name} then {} and {n}"` passes ONE argument, which the
+// single `{}` takes.
+//
+// A DOUBLED BRACE WINS AT A POSITION IT SHARES: `{{name}}` is a literal
+// `{`, the bytes `name`, and a literal `}` -- not a hole -- because the
+// walk classifies `{{` before it ever looks for an identifier.
+
+Error = AllocError | IoError
+
+show = (a: Alloc, tag: str, depth: usize) Res<(), Error> {
+    // a parameter is a binding like any other, and so is a `::` one
+    println("{tag} at {depth}");
+    Ok(());
+}
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    name = "ada";
+    n    = 42;
+    flag = true;
+
+    println("{name} is {n}, {flag}");
+    println("{name} then {} and {n}", "mid");
+    println("{{name}}");
+    println("{name}{name}");
+
+    show(alloc, "root", 3).try();
+
+    // a hole may name a binding made inside a loop, and it means that
+    // one -- the frame being lowered is what answers
+    Range(0, 2).loop((h, i) {
+        println("row {i}");
+    });
+
+    // every door reads one grammar
+    s = alloc.String("<{name}/{n}>").try();
+    println("{}", s.view());
+
+    out ::= alloc.String().try();
+    out.add("[{name}]").try();
+    out.fmt("({name})").try();
+    println("{}", out.view());
+
+    Ok(0);
+}

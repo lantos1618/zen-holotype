@@ -32,11 +32,12 @@
 // temporary, so an argument stays a pure C expression.
 
 Ast, Expr, ExprKind, ExprId, Literal, LiteralKind = std.ast
-Call, Arg, Span = std.ast
+Call, Arg, Span, Pos = std.ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
+is_ident_start, is_ident_cont = std.core
 TyId, is_float = sema.sema_ty
 write_usize = sema.sema_diag
 Checker, Ctx = sema.sema_check
@@ -44,7 +45,7 @@ GenFault = gen.gen_diag
 sym_variant, RES_PATH = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 is_c_integer, is_signed, ctype = gen.gen_c.gen_c_type
-expr, ty_of = gen.gen_c.gen_c_expr
+expr, ty_of, named_hole = gen.gen_c.gen_c_expr
 console_display = gen.gen_c.gen_c_display
 
 // The two spellings, and the only two. `print` is `println` without the
@@ -120,7 +121,7 @@ write_args = (be :: CBackend, c: Call, ctx: Ctx) Res<(), AllocError> {
 write_from = (be :: CBackend, c: Call, first: Arg, ctx: Ctx)
              Res<(), AllocError> {
     format_of(be, first.value).match({
-        Ok(raw) => write_format(be, c, raw, ctx),
+        Ok(raw) => write_format(be, c, first.value, raw, ctx),
         None    => write_values(be, c, 0, ctx),
     })
 }
@@ -169,27 +170,144 @@ write_value_at = (be :: CBackend, c: Call, i: usize, ctx: Ctx)
 // `lower_str_literal` makes, for the same reason — and it is why a `\\`
 // is stepped over two bytes at a time here: a backslash that escapes a
 // brace must not open a hole.
+//
+// A DOUBLED BRACE IS THE ONE PLACE A CHUNK IS NOT THE RAW SLICE, and it
+// still is: `{{` ends the run ON THE FIRST BRACE and resumes past the
+// second, so the emitted C carries one `{` because the slice handed to
+// it holds one. No decoded copy, no second escape table.
 // -----------------------------------------------------------------
 
-write_format = (be :: CBackend, c: Call, raw: str, ctx: Ctx)
+write_format = (be :: CBackend, c: Call, id: ExprId, raw: str, ctx: Ctx)
                Res<(), AllocError> {
     end = body_end(raw);
     start ::= 1;
     used  ::= 1;
     i     ::= 1;
     loop(() { i < end }, (h) {
-        hole = is_hole(raw, i, end);
-        hole.then(() {
-            write_piece(be, raw, start, i).try();
-            write_hole(be, c, used, ctx).try();
-            used  = used + 1;
-            start = i + 2;
+        at = fmt_at(raw, i, end);
+        at.ends_run().then(() {
+            write_piece(be, raw, start, at.keep).try();
+            write_what(be, c, id, at, used, ctx).try();
+            used  = used + at.what.arguments_taken();
+            start = at.next;
         });
-        i = i + advance(raw, i, hole);
+        i = at.next;
     });
     write_piece(be, raw, start, end).try();
     write_values(be, c, used, ctx).try();
     Ok(());
+}
+
+// What one position turned out to be, written into the console.
+write_what = (
+    be   :: CBackend,
+    c    : Call,
+    id   : ExprId,
+    at   : FmtAt,
+    used : usize,
+    ctx  : Ctx
+) Res<(), AllocError> {
+    at.what.match({
+        Hole     => write_hole(be, c, used, ctx),
+        Named(n) => write_named(be, id, at, n),
+        NoName   => report_in_format(
+            be,
+            id,
+            at,
+            GenFault.Unsupported(NOT_A_HOLE)
+        ),
+        _        => Ok(()),
+    })
+}
+
+// `{name}`, written into the console through the printer its type picks —
+// the same choice a positional hole makes, because the two spellings
+// differ in where the value came FROM and in nothing after that.
+write_named = (be :: CBackend, id: ExprId, at: FmtAt, name: str)
+              Res<(), AllocError> {
+    text ::= be.alloc.String().try();
+    be.named_hole(name, text).try().match({
+        None  => report_in_format(be, id, at, GenFault.Unresolved(name)),
+        Ok(t) => write_typed(be, id, t, be.check.prim_name(t), text.view()),
+    })
+}
+
+// -----------------------------------------------------------------
+// one position in a format string, classified
+//
+// FOUR THINGS CAN BE AT A `{` and ONE function decides which, so that
+// `println` and every sink door cannot drift apart on the answer. The
+// arithmetic is here too: `keep` is where the run BEFORE this position
+// ends and `next` is where the walk resumes. They differ only for a
+// doubled brace, whose run ends inside the pair — the one case that was
+// easy to get wrong once per walk.
+// -----------------------------------------------------------------
+
+FmtWhat* = Byte           // an ordinary byte: the literal run goes on
+         | Hole           // `{}`, filled by the next argument
+         | Pair           // `{{` or `}}`: the run keeps ONE of the two
+         | Named(str)     // `{name}`, filled by that name's binding
+         | NoName         // a `{` that meant a hole and closed on nothing
+
+FmtAt* = {
+    what*: FmtWhat,
+    keep*: usize,     // one past the last byte the run before this keeps
+    next*: usize,     // where the walk resumes
+}
+
+// A `Byte` is the run continuing, and every other answer ends it.
+ends_run* = (at: FmtAt) bool {
+    at.what.match({ Byte => false, _ => true })
+}
+
+// ONLY A POSITIONAL HOLE CONSUMES AN ARGUMENT. A named one carries its
+// own value, so there is nothing for it to take, and counting it would
+// make `add("{a} {}", x)` claim two arguments while one was written. THE
+// TWO SPELLINGS THEREFORE MIX FREELY, in any order.
+arguments_taken* = (what: FmtWhat) usize {
+    what.match({ Hole => 1, _ => 0 })
+}
+
+fmt_at* = (raw: str, i: usize, end: usize) FmtAt {
+    is_hole(raw, i, end).match({
+        true  => FmtAt(what: FmtWhat.Hole, keep: i, next: i + 2),
+        false => at_no_hole(raw, i, end),
+    })
+}
+
+// `{{` and `}}`, the escapes. Asked AFTER `is_hole` and it makes no
+// difference: the two cannot both hold at one position — `{{` is not
+// `{}` — so the order they are tested in cannot change what a format
+// means.
+at_no_hole = (raw: str, i: usize, end: usize) FmtAt {
+    is_doubled_brace(raw, i, end).match({
+        true  => FmtAt(what: FmtWhat.Pair, keep: i + 1, next: i + 2),
+        false => at_no_pair(raw, i, end),
+    })
+}
+
+// A `{` FOLLOWED BY AN IDENTIFIER CHARACTER always meant a hole, so
+// `{p.x}` and `{f()}` are REFUSED and not printed. A format hole is not
+// an expression language, and the cost of assuming otherwise is not a
+// missing feature but a near miss that prints itself — the class of
+// wrong answer nobody reads twice. `{{p.x}` is the escape at such a
+// site and the diagnostic says so.
+at_no_pair = (raw: str, i: usize, end: usize) FmtAt {
+    opens_name(raw, i, end).match({
+        false => FmtAt(what: FmtWhat.Byte, keep: i, next: i + step_of(raw, i)),
+        true  => at_ident(raw, i, end, ident_end(raw, i + 1, end)),
+    })
+}
+
+at_ident = (raw: str, i: usize, end: usize, j: usize) FmtAt {
+    ((j < end) && raw.index(j) == '}').match({
+        true  => FmtAt(
+            what: FmtWhat.Named(raw.slice(i + 1, j)),
+            keep: i,
+            next: j + 1
+        ),
+        false => FmtAt(what: FmtWhat.NoName, keep: i, next: i + 1),
+    })
 }
 
 // The index one past the last byte of a literal's body: its raw slice
@@ -198,12 +316,67 @@ body_end* = (raw: str) usize {
     (raw.len > 1).match({ true => raw.len - 1, false => 1 })
 }
 
-is_hole* = (raw: str, i: usize, end: usize) bool {
+is_hole = (raw: str, i: usize, end: usize) bool {
     (i + 1 < end) && raw.index(i) == '{' && raw.index(i + 1) == '}'
 }
 
-advance* = (raw: str, i: usize, hole: bool) usize {
-    hole.match({ true => 2, false => step_of(raw, i) })
+is_doubled_brace = (raw: str, i: usize, end: usize) bool {
+    (i + 1 < end) && raw.index(i) == raw.index(i + 1)
+        && (raw.index(i) == '{' || raw.index(i) == '}')
+}
+
+opens_name = (raw: str, i: usize, end: usize) bool {
+    (i + 1 < end) && raw.index(i) == '{'
+        && raw.index(i + 1).is_ident_start()
+}
+
+// One past the last identifier byte at or after `from`. THE IDENTIFIER
+// GRAMMAR IS `std.core.byte`'S and is not restated: a name in a format
+// hole is a name, and two spellings of "what a name is" is exactly the
+// drift this file avoids everywhere else.
+ident_end = (raw: str, from: usize, end: usize) usize {
+    j ::= from;
+    loop(() { (j < end) && raw.index(j).is_ident_cont() }, (h) {
+        j = j + 1;
+    });
+    j
+}
+
+// The sentence a `{` that opened nothing gets. Named once because both
+// walks raise it and a must-fail expectation reads whichever compiler ran.
+NOT_A_HOLE* : str = "a format hole is {} or {name}, and this is neither"
+
+// -----------------------------------------------------------------
+// a fault at the HOLE'S own position
+//
+// Not at the format string's, which is where every other backend fault
+// about a format lands — and for a hole that is not good enough: a
+// diagnostic pointing at the opening quote of a forty-byte format leaves
+// the reader to count bytes.
+//
+// A STRING LITERAL CANNOT SPAN SOURCE LINES — a raw newline inside one is
+// `LexFault.UnterminatedString` — so a byte offset into the raw slice IS
+// a column offset, exactly, and the line never moves. The raw slice
+// counts the opening quote as byte 0 and `span.start.col` is that quote's
+// column, so the two indexes already agree.
+// -----------------------------------------------------------------
+
+report_in_format* = (
+    be    :: CBackend,
+    id    : ExprId,
+    at    : FmtAt,
+    fault : GenFault
+) Res<(), AllocError> {
+    lit = be.tree.expr_at(id).span;
+    be.report(lit.file, at_span(lit, at.keep, at.next), fault)
+}
+
+at_span = (lit: Span, from: usize, to: usize) Span {
+    Span(
+        file: lit.file,
+        start: Pos(line: lit.start.line, col: lit.start.col + from),
+        end:   Pos(line: lit.start.line, col: lit.start.col + to)
+    )
 }
 
 step_of = (raw: str, i: usize) usize {
