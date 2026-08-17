@@ -20,7 +20,7 @@
 // would resynchronise onto a non-boundary and surface the failure three
 // requests later as an unrelated one.
 
-str, String = std.text
+str, String, push_utf8 = std.text
 Vec = std.collections
 Alloc, AllocError = std.mem
 Range = std.core
@@ -461,60 +461,6 @@ control_char = (b: u8) Res<u8> {
     })
 }
 
-// A codepoint, as UTF-8, appended — the inverse of
-// `std.text.text_utf8`'s decoder, same idiom: no bitwise operators, so a
-// 6-bit shift is division by 64 and a mask is a remainder.
-push_utf8* = (v: u32, out :: String) Res<(), AllocError> {
-    (v < ONE_BYTE_MAX).match({
-        true  => out.add_byte(byte_of(v)),
-        false => (v < TWO_BYTE_MAX).match({
-            true  => two_wide(v, out),
-            false => (v < FOUR_BYTE_MIN).match({
-                true  => three_wide(v, out),
-                false => four_wide(v, out),
-            }),
-        }),
-    })
-}
-
-two_wide = (v: u32, out :: String) Res<(), AllocError> {
-    out.add_byte(byte_of(LEAD_2 + v / CONT_SCALE)).try();
-    out.add_byte(byte_of(CONT + v % CONT_SCALE))
-}
-
-three_wide = (v: u32, out :: String) Res<(), AllocError> {
-    out.add_byte(byte_of(LEAD_3 + v / (CONT_SCALE * CONT_SCALE))).try();
-    out.add_byte(byte_of(CONT + (v / CONT_SCALE) % CONT_SCALE)).try();
-    out.add_byte(byte_of(CONT + v % CONT_SCALE))
-}
-
-four_wide = (v: u32, out :: String) Res<(), AllocError> {
-    out.add_byte(byte_of(
-        LEAD_4 + v / (CONT_SCALE * CONT_SCALE * CONT_SCALE)
-    )).try();
-    out.add_byte(byte_of(
-        CONT + (v / (CONT_SCALE * CONT_SCALE)) % CONT_SCALE
-    )).try();
-    out.add_byte(byte_of(CONT + (v / CONT_SCALE) % CONT_SCALE)).try();
-    out.add_byte(byte_of(CONT + v % CONT_SCALE))
-}
-
-// A u32 known to be a byte, AS a byte. THIS IS A NARROWING CONVERSION
-// AND THIS LANGUAGE HAS NONE (`src/std/core/num.zen:124`: "a narrowing
-// conversion can fail, so it belongs in a Res-returning function someone
-// writes on purpose"). This COUNTS rather than narrows: at most 256
-// passes, paid only on an escape, the rarest byte this server reads. It
-// traps rather than returning `Res` because every caller above has
-// already established the range by construction. THE RIGHT FIX IS A
-// PRIMITIVE: `to_u8* = (self: u32) Res<u8>` in `std.core.num` would
-// delete this, once it has a second caller.
-byte_of* = (v: u32) u8 {
-    BYTE_MAX_U32 - v;
-    b ::= ZERO_BYTE;
-    loop(() { b.to_u32() < v }, (h) { b = b + 1; });
-    b;
-}
-
 // `Ok(())` with its error side NAMED: a bare `Ok(())` in one match arm
 // whose sibling is `Res<(), JsonFault>` infers the one-parameter `Res`
 // instead, and the two do not join.
@@ -542,10 +488,8 @@ faulted_ok* = (r: Res<(), AllocError>) Res<(), JsonFault> {
 
 BACKSPACE*: u8 = 8
 FORM_FEED*: u8 = 12
-ZERO_BYTE*: u8 = 0
 ZERO_U32*: u32 = 0
 HEX_BASE_U32*: u32 = 16
-BYTE_MAX_U32*: u32 = 255
 
 // UTF-16's surrogate halves: a pair encodes a codepoint at or above
 // 65536, the high half carrying the top ten bits and the low half the
@@ -557,12 +501,9 @@ SURROGATE_LO_MAX*: u32 = 57343     // DFFF
 SURROGATE_SPAN*: u32 = 1024
 ASTRAL_BASE*: u32 = 65536
 
-// UTF-8's own boundaries, as this file needs them written.
-ONE_BYTE_MAX*: u32 = 128
-TWO_BYTE_MAX*: u32 = 2048
-FOUR_BYTE_MIN*: u32 = 65536
-CONT_SCALE*: u32 = 64
-CONT*: u32 = 128
-LEAD_2*: u32 = 192
-LEAD_3*: u32 = 224
-LEAD_4*: u32 = 240
+// UTF-8's OWN boundaries are NOT written here. They were once — eight
+// constants under this file's own spellings, beside the encoder that used
+// them — and they were the same eight numbers `std.text.text_utf8`
+// already declared for its decoder. A fix to either set could not reach
+// the other, so the encoder moved next to its inverse and the numbers are
+// declared once. `push_utf8` above comes from `std.text`.
