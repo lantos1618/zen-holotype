@@ -309,16 +309,13 @@ Types* = {
 
     res_form = (self :: @Self, value: TyId, error: TyId, form: ResForm)
                Res<TyId, AllocError> {
-        key ::= self.alloc.String().try();
-        key.add_bytes("Res").try();
-        key.add_bytes(form.match({
+        mark = form.match({
             Absence => "?",
             Failure => "!",
             Open    => "~",
-        })).try();
-        key.add_bytes(self.key_at(value)).try();
-        key.add_bytes(",").try();
-        key.add_bytes(self.key_at(error)).try();
+        });
+        key ::= self.alloc.String().try();
+        key.fmt("Res{mark}{},{}", self.key_at(value), self.key_at(error)).try();
         self.intern(
             key.view(),
             Ty.Res(TyRes(value: value, error: error, form: form))
@@ -329,22 +326,17 @@ Types* = {
     // intern as two ids.
     array* = (self :: @Self, elem: TyId, count: usize)
              Res<TyId, AllocError> {
+        n ::= self.alloc.String().try();
+        n.write_usize(count).try();
         key ::= self.alloc.String().try();
-        key.add_bytes("[").try();
-        key.add_bytes(self.key_at(elem)).try();
-        key.add_bytes(";").try();
-        key.write_usize(count).try();
-        key.add_bytes("]").try();
+        key.fmt("[{};{}]", self.key_at(elem), n.view()).try();
         self.intern(key.view(), Ty.Array(TyArray(elem: elem, count: count)))
     }
 
     // A type variable, nominal on its owner as well as its name.
     var* = (self :: @Self, name: str, owner: str) Res<TyId, AllocError> {
         key ::= self.alloc.String().try();
-        key.add_bytes("%").try();
-        key.add_bytes(name).try();
-        key.add_bytes("@").try();
-        key.add_bytes(owner).try();
+        key.fmt("%{name}@{owner}").try();
         self.intern(key.view(), Ty.Var(TyVar(name: name, owner: owner)))
     }
 
@@ -353,12 +345,8 @@ Types* = {
     fn_ty* = (self :: @Self, params: Vec<TyId>, ret: TyId) Res<TyId, AllocError> {
         key ::= self.alloc.String().try();
         key.add_bytes("(").try();
-        params.loop((h, p) {
-            key.add_bytes(self.key_at(p)).try();
-            key.add_bytes(",").try();
-        });
-        key.add_bytes(")->").try();
-        key.add_bytes(self.key_at(ret)).try();
+        params.loop((h, p) { key.fmt("{},", self.key_at(p)).try() });
+        key.fmt(")->{}", self.key_at(ret)).try();
         self.intern(key.view(), Ty.Fn(TyFn(params: params, ret: ret)))
     }
 
@@ -546,20 +534,14 @@ Types* = {
     write_args_run = (self: @Self, key :: String, args: Vec<TyId>)
                      Res<(), AllocError> {
         key.add_bytes("<").try();
-        args.loop((h, a) {
-            key.add_bytes(self.key_at(a)).try();
-            key.add_bytes(",").try();
-        });
+        args.loop((h, a) { key.fmt("{},", self.key_at(a)).try() });
         key.add_bytes(">").try();
         Ok(());
     }
 
     build_union = (self :: @Self, canon: Vec<TyId>) Res<TyId, AllocError> {
         key ::= self.alloc.String().try();
-        canon.loop((h, m) {
-            key.add_bytes(self.key_at(m)).try();
-            key.add_bytes("|").try();
-        });
+        canon.loop((h, m) { key.fmt("{}|", self.key_at(m)).try() });
         self.intern(key.view(), Ty.Union(TyUnion(members: canon)))
     }
 
