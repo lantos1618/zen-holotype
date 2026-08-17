@@ -2,18 +2,30 @@
 // the {} format machinery: the parser that reads a format string, and the
 // writers for the primitives a {} can land on.
 //
-// THE FORMAT LANGUAGE, IN FULL — no width, no precision, no index, no
-// name, exactly one placeholder (DESIGN.md):
+// THE FORMAT LANGUAGE, IN FULL — no width, no precision, no index
+// (DESIGN.md):
 //
-//   {}    a hole. The next argument, written through its toString.
-//   {     NOT followed by `}` is a LITERAL brace (DESIGN.md never
-//         escapes one; Display.dump writes `sb.add("{} {", ..)`
-//         expecting that trailing `{` to print).
-//   }     always a literal byte.
+//   {}      a hole. The next argument, written through its toString.
+//   {{      a literal `{`. `}}` is a literal `}`, so `{{}}` writes `{}`.
+//   {       NOT followed by `}` or `{` is a LITERAL brace (Display.dump
+//           writes `sb.add("{} {", ..)` expecting that trailing `{` to
+//           print), and a lone `}` is a literal byte.
 //
-// THE COST, stated not hidden: THERE IS NO WAY TO WRITE A LITERAL `{}`.
-// `"{}"` is always a hole. Adding an escape (`{{}}`, `\{`) is a design
-// change for DESIGN.md, not this parser — see the report's AMBIGUITIES.
+// THE TWO RULES AT ONE POSITION CANNOT COLLIDE: `{{` is not `{}`, so
+// which is tested first cannot change what a format means. The walk is
+// LEFT TO RIGHT and never backs up, so `{}}` is a hole then a literal
+// `}` — the hole is seen first — and `{{}` is a literal `{` then a
+// literal `}`.
+//
+// THE COST, stated not hidden: A BYTE WRITER READS NO FORMAT MEANING, so
+// `add_bytes("]}}")` writes two braces and `add("]}}")` writes one. That
+// is not a wart of the escape, it is what "expanded at the call site"
+// means — but it makes CONVERTING A BYTE WRITER INTO A FORMAT CALL a
+// silent change of output wherever the bytes hold a doubled brace. Six
+// such literals are in `src/lsp/`; each was mutated on 2026-08-17 and
+// each reddened between 1 and 9 corpus tests, so the expectations pin
+// them and a conversion cannot make this mistake quietly. A conversion
+// lane reaching bytes NOT under a corpus expectation owes the escape.
 //
 // WHERE THE PARSE HAPPENS: `{}` routes through the argument's
 // type-directed toString, so `add` is expanded where it's WRITTEN — the
@@ -40,18 +52,59 @@ hole_at = (f: str, from: usize) Res<usize> {
     Range(from, f.len).find((i) { f[i] == '{' && (i + 1) < f.len && f[i + 1] == '}' })
 }
 
+// the first doubled brace at or after `from`
+pair_at = (f: str, from: usize) Res<usize> {
+    Range(from, f.len).find((i) {
+        (f[i] == '{' || f[i] == '}') && (i + 1) < f.len && f[i + 1] == f[i]
+    })
+}
+
 // step the parser once: fmt_next(f, 0), then fmt_next(f, step.next), and
-// so on. `hole` false is always the last step (its run is the rest of
-// the string).
+// so on. THE WALK IS SPENT WHEN `next == f.len` — `hole` false is no
+// longer the terminator, because a doubled brace ends a run without
+// being one and there may be more string behind it.
+//
+// WHICHEVER COMES FIRST WINS, which is what makes the walk left to right:
+// a hole and a doubled brace cannot start at one index, so comparing the
+// two positions decides without either rule knowing about the other.
 fmt_next* = (f: str, from: usize) FmtStep {
     f.hole_at(from).match({
-        Ok(i) => FmtStep(literal: f.slice(from, i), hole: true, next: i + 2),
-        None  => FmtStep(
-            literal: f.slice(from, f.len),
-            hole: false,
-            next: f.len
-        ),
+        Ok(h) => f.hole_or_pair(from, h),
+        None  => f.pair_or_rest(from),
     });
+}
+
+// a hole waits at `h`; a doubled brace BEFORE it is taken first
+hole_or_pair = (f: str, from: usize, h: usize) FmtStep {
+    f.pair_at(from).match({
+        None  => f.hole_step(from, h),
+        Ok(i) => (i < h).match({
+            true  => f.pair_step(from, i),
+            false => f.hole_step(from, h),
+        }),
+    });
+}
+
+pair_or_rest = (f: str, from: usize) FmtStep {
+    f.pair_at(from).match({
+        Ok(i) => f.pair_step(from, i),
+        None  => f.rest_step(from),
+    });
+}
+
+hole_step = (f: str, from: usize, h: usize) FmtStep {
+    FmtStep(literal: f.slice(from, h), hole: true, next: h + 2)
+}
+
+// the run up to and INCLUDING the first of the pair, resuming past the
+// second: one brace written, and it is a slice of `f` like every other
+// run rather than a copy with a byte removed
+pair_step = (f: str, from: usize, i: usize) FmtStep {
+    FmtStep(literal: f.slice(from, i + 1), hole: false, next: i + 2)
+}
+
+rest_step = (f: str, from: usize) FmtStep {
+    FmtStep(literal: f.slice(from, f.len), hole: false, next: f.len)
 }
 
 // ---------------------------------------------------------------------------

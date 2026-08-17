@@ -48,6 +48,7 @@ expr, ty_of = gen.gen_c.gen_c_expr
 declare_temp = gen.gen_c.gen_c_flow
 signature_of, recv_arg, arg_value, by_ref = gen.gen_c.gen_c_call
 body_end, is_hole, advance, decoded_bytes, cast_of = gen.gen_c.gen_c_print
+is_doubled_brace = gen.gen_c.gen_c_print
 slot_call = gen.gen_c.gen_c_bound
 fat_value = gen.gen_c.gen_c_fat
 sink_display = gen.gen_c.gen_c_display
@@ -567,13 +568,19 @@ walk_format = (
     i     ::= 1;
     loop(() { i < end }, (h) {
         hole = is_hole(raw, i, end);
+        pair = is_doubled_brace(raw, i, end);
         hole.then(() {
             write_chunk(be, raw, start, i, p).try();
             write_hole(be, c, used, p, ctx).try();
             used  = used + 1;
             start = i + 2;
         });
-        i = i + advance(raw, i, hole);
+        // A doubled brace writes ONE — the run keeps the first of the pair.
+        pair.then(() {
+            write_chunk(be, raw, start, i + 1, p).try();
+            start = i + 2;
+        });
+        i = i + advance(raw, i, hole || pair);
     });
     write_chunk(be, raw, start, end, p).try();
     write_rest(be, c, used, p, ctx).try();

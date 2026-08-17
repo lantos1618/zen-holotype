@@ -4562,13 +4562,22 @@ class FnCtx:
 
     @staticmethod
     def fmt_pieces(raw):
-        """text_fmt.zen's format language, in full: `{}` is a hole, every
-        other byte -- including a lone `{` and every `}` -- is literal."""
+        """text_fmt.zen's format language, in full: `{}` is a hole, `{{` and
+        `}}` are a doubled brace writing ONE, and every other byte --
+        including a lone `{` and a lone `}` -- is literal.
+
+        Left to right and never backing up, which is what decides the two
+        shapes that could read either way: `{}}` is a hole then a literal `}`,
+        and `{{}` is a literal `{` then a literal `}`.
+        """
         out, run, i = [], bytearray(), 0
         while i < len(raw):
             if raw[i:i + 2] == b"{}":
                 out.append((bytes(run), True))
                 run = bytearray()
+                i += 2
+            elif raw[i:i + 2] in (b"{{", b"}}"):
+                run.append(raw[i])
                 i += 2
             else:
                 run.append(raw[i])
@@ -5545,19 +5554,24 @@ class FnCtx:
         fmt_node = argnodes[0]
         rest = argnodes[1:]
         if kind(fmt_node) == "Literal" and f(fmt_node, "kind") == "str":
-            raw = decode_str(str(f(fmt_node, "text", "")))
-            pieces = raw.split(b"{}")
-            for i, piece in enumerate(pieces):
-                if piece:
+            # ONE WALK, `fmt_pieces`.  This used to be its own `split(b"{}")`,
+            # which agreed with the door only because the language had a single
+            # rule; the brace escape gave it two, and a second copy of two
+            # rules is a divergence waiting for someone to write `{{`.
+            pieces = self.fmt_pieces(decode_str(str(f(fmt_node, "text", ""))))
+            n = 0
+            for run, hole in pieces:
+                if run:
                     self.line(
-                        "%sprint_bytes(%s, %d);" % (GEN, c_string(piece), len(piece))
+                        "%sprint_bytes(%s, %d);" % (GEN, c_string(run), len(run))
                     )
-                if i < len(pieces) - 1:
-                    if i < len(rest):
-                        self.print_value(rest[i])
+                if hole:
+                    if n < len(rest):
+                        self.print_value(rest[n])
                     else:
                         self.line("%sprint_bytes(\"{}\", 2);" % GEN)
-            for extra in rest[len(pieces) - 1 :]:
+                    n += 1
+            for extra in rest[n:]:
                 self.print_value(extra)
         else:
             self.print_value(fmt_node)

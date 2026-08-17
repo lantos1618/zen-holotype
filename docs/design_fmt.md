@@ -50,33 +50,70 @@ lying about it.
 
 ---
 
-## 2. Gap one — there is no way to write a literal `{}`
+## 2. Gap one — CLOSED 2026-08-17: `{{` writes `{`
 
-`text_fmt.zen:14` states the cost rather than hiding it: *"THERE IS NO WAY TO
-WRITE A LITERAL `{}`. `"{}"` is always a hole."* It is a deferred decision, not a
-considered no.
+`text_fmt.zen` used to state the cost rather than hide it: *"THERE IS NO WAY TO
+WRITE A LITERAL `{}`."* It was a deferred decision, not a considered no, and it
+is now closed with the conventional doubling: **`{{` writes `{`, `}}` writes
+`}`, so `{{}}` writes `{}`.** `DESIGN.md`'s "The format language, in full"
+paragraph is the rule's home; `text_fmt.zen`'s header is the parser's.
 
-**It is cheap to close.** Adopt the conventional `{{` → `{`, `}}` → `}`.
+**The two rules at one position cannot collide,** which is what makes the
+grammar decidable without lookahead or backtracking: `{{` is not `{}`, so which
+is tested first cannot change what a format means. The walk is left to right and
+never backs up, which settles the only two shapes that read either way — `{}}`
+is a hole then a literal `}`, and `{{}` is a literal `{` then a literal `}`.
+Both are pinned by `tests/corpus/std/a_doubled_brace_writes_one`.
 
-    grep -rn '{{' src --include='*.zen'      # 3 hits, ALL comments
-    grep -rn '{{' tests --include='*.zen'    # 2 hits
+**How it is implemented, in one sentence, because it is the reason it cost
+nothing:** a doubled brace ends the literal run **on the first brace of the
+pair** and resumes past the second, so the run stays a *slice* of the format
+string and the emitted C still copies it verbatim — no decoded copy, no second
+escape table. Four walks carry it: `text_fmt.fmt_next` (the reference),
+`gen_c_print.is_doubled_brace` (shared by `println` and every sink door), and
+`bootstrap/gen_c.py`'s `fmt_pieces`. The bootstrapper's `println` used to keep
+its own `split(b"{}")`, which agreed only while the language had a single rule;
+it now goes through `fmt_pieces`, so there is one implementation of two rules
+rather than two of them.
 
-The three `src/` hits are prose — `parse_stmt.zen:92` and `parser.zen:154`
-illustrating parser nesting, and `text_fmt.zen:15` documenting the absence.
-**Zero format strings in the tree change meaning.**
+**Compatibility, measured:** `grep -rn '{{' src --include='*.zen'` is 3 hits and
+all three are prose — `parse_stmt.zen:92` and `parser.zen:154` illustrating
+parser nesting, and `text_fmt.zen` documenting the absence. **Zero format
+strings in the tree changed meaning**, and both compilers agree at
+512 passed / 0 failed / 4 deferred.
 
-**One trap, and it is the plausible-wrong-answer class.** Ten string literals in
-the LSP contain `}}` — JSON closers such as `"]}}"` and
-`",\"full\":true}},\"serverInfo\":.."` in `lsp_reply.zen` and `lsp_diag.zen`.
-They are safe *today* because they are `add_bytes` calls, which write bytes and
-read no format meaning. The moment those sites become `fmt` calls, `"}}"`
-silently becomes `}` — malformed JSON, no diagnostic. **The escape and the LSP
-conversion must be sequenced deliberately**, or the conversion must escape them
-in the same commit.
+### The trap, and why it is guarded rather than commented
 
-**Cost:** `text_fmt.fmt_next`, `bootstrap/gen_c.py:4558`'s own copy of the walk,
-and a `DESIGN.md` sentence. Two implementations must agree, because a must-fail
-expectation is read by both compilers.
+**A byte writer reads no format meaning.** So `add_bytes("]}}")` writes two
+braces and `add("]}}")` writes one — not a wart of the escape but what
+"expanded at the call site" means. That makes **converting a byte writer into a
+format call a silent change of output wherever the bytes hold a doubled brace**,
+which is the plausible-wrong-answer class: no diagnostic, no crash, malformed
+JSON.
+
+Escaping those literals *now* would be wrong — they are `add_bytes` calls, so
+`"}}}}"` would immediately write four braces. Commenting ~100 sites would be a
+guard a conversion lane can walk past. So the question asked instead was
+**whether anything would notice**, and it was answered by mutation rather than by
+reading: each of the six `}}` literals in `src/lsp/` was replaced with a single
+`}`, one at a time, and the LSP corpus re-run.
+
+| site | corpus tests reddened |
+|---|---|
+| `lsp_reply.zen:86` (`failed`) | 4 |
+| `lsp_reply.zen:106` (`parse_error`) | 1 |
+| `lsp_reply.zen:155` (`write_hover`) | 5 |
+| `lsp_reply.zen:192` (`write_capabilities`) | 9 |
+| `lsp_diag.zen:412` | 7 |
+| `lsp_def.zen:477` | 3 |
+
+Every site is pinned; none is silent. The `.expected` files hold the exact reply
+bytes, `}}` included, so a conversion lane that changed them would go red on the
+same run that made the change. **The rule a conversion lane owes** is therefore
+narrow and stated in `text_fmt.zen`'s header: a lane converting bytes that are
+*not* under a corpus expectation owes the escape at that site. The corpus in
+`tests/corpus/lsp/` holds ~100 further `}}` literals and is self-guarding for
+the same reason.
 
 ---
 

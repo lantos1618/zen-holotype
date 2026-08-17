@@ -228,6 +228,10 @@ A `Sink` dissolves it. A console is a sink, a `String` is a sink, and `println` 
 
 `Sink.write` returns `WriteError`, the union, and that is the part worth arguing about. Writing to a console fails with `IoError` and writing to a growable `String` fails with `AllocError`; there is no `From`, so a single sink type cannot pretend those are one error. The union is the honest type — which is exactly the reason `WriteError` was introduced. **Cost to accept knowingly:** a caller writing into a `String` must handle an `IoError` that a `String` can never produce, and a caller writing to a console must handle an `AllocError` it can never produce. `.try()` merges either into the caller's set for free, so the cost is paid only where someone actually matches on the error.
 
+**The format language, in full.** `{}` is a hole, filled by the next argument through its `toString`. `{{` writes a literal `{` and `}}` writes a literal `}`, so `{{}}` writes `{}` — the conventional doubling, and the only escape. A `{` followed by neither `}` nor `{` is a literal brace, and so is a lone `}`; `Display.dump` relies on that, writing `sb.add("{} {", ..)` and expecting the trailing `{` to print. There is no width, no precision and no argument index. The walk is left to right and never backs up, which is what settles the two shapes that could read either way: `{}}` is a hole then a literal `}`, and `{{}` is a literal `{` then a literal `}`.
+
+**A format string is read at compile time.** The hole is expanded where it is *written* — the compiler steps the format at the call site and emits one byte write per literal run and one writer call per hole — so a computed format is not a format at all, and a hole count that disagrees with the argument count is a compile error rather than a `?` in the output. This is also why the escape has a cost worth stating: a plain byte writer such as `add_bytes` reads no format meaning, so `add_bytes("]}}")` writes two braces where `add("]}}")` writes one. Converting a byte writer into a format call is therefore a change of output wherever the bytes hold a doubled brace.
+
 ---
 
 # Control flow

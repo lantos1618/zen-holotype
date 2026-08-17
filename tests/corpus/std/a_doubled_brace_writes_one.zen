@@ -1,0 +1,42 @@
+// tests/corpus/std/a_doubled_brace_writes_one.zen
+// `{{` writes one `{` and `}}` writes one `}`, so `{{}}` writes `{}` --
+// the thing the format language had no way to say. A LONE brace is
+// unchanged by that: `{` not followed by `}` or `{` is still a literal
+// byte, and so is a lone `}`.
+//
+// Every door is asked, because there is one grammar and four readers of
+// it: `println`, `alloc.String`, `<sink>.add` and the floor `fmt`.
+//
+// THE TWO SHAPES THAT COULD READ EITHER WAY are the point of the last
+// group: the walk is left to right and never backs up, so in `{}}` the
+// hole is seen first and the trailing `}` is a byte, while in `{{}` the
+// pair is seen first and the trailing `}` is a byte as well.
+
+Error = AllocError | IoError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+
+    println("{{}}");
+    println("{{ }} {{}}");
+    println("a { b } c");
+    println("{{{}}}", 3);
+    println("{{{}}} and {}", 4, 5);
+
+    // left to right: `{}` first in one, `{{` first in the other
+    println("{}}", 1);
+    println("{{}");
+
+    // the allocating door reads the same grammar
+    s = alloc.String("{{{}}}", 6).try();
+    println("{}", s.view());
+
+    // the sink door, and the floor door beside it
+    out ::= alloc.String().try();
+    out.add("{{ok}}").try();
+    out.add("{{{}}}", 7).try();
+    out.fmt("{{f}}").try();
+    println("{}", out.view());
+
+    Ok(0);
+}
