@@ -131,6 +131,143 @@ a fragile test.
 the shared format classifier. A split is owed, and it carries the bootstrap
 import hazard, so it needs its own fixpoint cycle.
 
+**~30% of a build is `gen_emit.order`'s insertion sort, which has no early
+exit.** `insert_ordered` (`gen_emit.zen:171-185`) runs `Range(1, n).loop` — ALL
+n−1 iterations — on every insertion, settled or not, so it is Θ(n²)
+unconditionally rather than adaptively. Measured with `make profile` and a
+`-O1 -pg` build, self-compiling `src/` (2.5s baseline):
+
+    10,032 calls to insert_ordered
+       ->  20,727,600 full `str.before` compares of 100+ char mangled symbols
+       ->  787,380,320 of the build's 860,436,866 `str.index` calls
+    -O2 self time: str.before 23.70% + view_at 4.33% + order 1.60% = 29.63%
+
+**The comment above it is why nobody saw this** (`gen_emit.zen:161-162`):
+"Hundreds of top-level names per unit, never millions — the simplest-to-verify
+version is the right one." It is ten thousand, and an insertion sort WITH an
+early exit is no harder to verify than one without. ~10 lines.
+
+Same family, both O(n²) over long mangled names and both top `str.eq` callers:
+`CBackend.seen_function` (`gen_c_state.zen:456-463`, 20.6M calls) and
+`CBackend.type_index` (`gen_c_state.zen:220-227`, 9.8M).
+
+**No bench would have caught it.** `tests/bench/` measures `vec_add`, two field
+reads and a stack-array fold — nothing on a compiler hot path. `Bencher.iter`,
+`BenchStats` and `Builder.budget` are bodiless declarations wired to nothing
+(`DESIGN.md:3` says so). Compile time is reported only as the un-baselined
+informational `fmt_tree` line.
+
+**A name is resolved by a linear scan over strings, defended by a comment that
+is false.** `sema_def.zen:19-23` says "A MODULE TABLE IS A `Vec`, NOT A `Map`,
+and that is measured rather than lazy: `Map.get` in this stdlib is `index_of`, a
+`find` over every entry — a linear scan already." **That is no longer true of
+this `Map`.** `collections_map.zen` is two Vecs, open-addressed with linear
+probing — `get:78` → `index_of:104` → `settle:117` → `walk:128`, which starts at
+`h.to_usize() % n` and steps — grown at a 3/4 load factor whose own comment
+(`:41-43`) calls the spare quarter a guard against "the linear scan this file
+exists to delete". So the premise the `Vec` was chosen on is backwards.
+
+Measured cost: **`str.eq` is called 63,701,481 times per self-compile**, and
+every caller is a linear scan, not one a hash lookup —
+
+    20,577,719  gen_c_state.CBackend.seen_function
+    11,226,859  sema_def.World.exact_index:136      one str.eq per module, x91
+     9,782,641  gen_c_state.CBackend.type_index
+     6,527,313  sema_def.collect_exported
+     3,334,813  sema_def.collect_named:762          one str.eq per decl, per name
+     2,246,379  sema_member.member_named
+       217,419  sema_check.Checker.lookup:427       the local-scope stack walk
+
+At -O2 the by-name scans sum to **16.9% of self time**. `str.eq` is a
+hand-written byte loop over `data.read(i)` (`text_str.zen:80-91`) and never
+reaches `memcmp`; the emitted C uses `memcmp` only for a `str` literal pattern
+in a match arm (`gen_c_flow.zen:333`).
+
+Two fixes, and they compose. Keying the tables on the `Map` that already ships
+turns each scan into a probe; interning identifiers to a `u32` atom (types are
+ALREADY interned — `sema_ty.zen:5-18`, every type comparison is an integer
+compare) makes each surviving comparison an integer one. The population is
+5,685 distinct identifiers over 137,828 code-only occurrences, 24:1 — a
+favourable atom table. The `Map` is the smaller change and should go first.
+Delete or correct the comment regardless; a false comment with live code shaped
+around it is what `COMMENT_AUDIT.md` calls the highest-value find.
+
+**`group_end_at` rescans the rest of the file for every `(` after an unclosed
+one.** `parse_lookahead.zen:144-152` walks `Range(from, p.tokens_len())`
+counting depth and stops only when depth returns to 0. Its sibling
+`angles_end_at` (`:158-172`) gives up properly — `angle_stop:226` includes
+`Eof => true` and a statement terminator. This one has neither. It cannot run
+past the array (`token_kind_at:254` answers `Eof` out of range), so it is not a
+termination bug; it is quadratic time on a half-typed buffer, from six call
+sites (`lambda_ahead:91`, `fixed_array_ahead:127`, `paren_shape:261`,
+`variant_ahead:296`, `declares_fn:425`, `bar_after:440`). The LSP re-parses per
+keystroke and an unclosed `(` is the commonest state a buffer is ever in.
+
+Three neighbours found in the same read, same file family:
+
+- **`enter`/`leave` are not failure-safe.** `parse_expr.zen:63-66` calls
+  `p.leave()` after a `.try()`, so an `AllocError` leaks a depth level forever.
+  Same shape at `parse_stmt.zen:32`, `parse_type.zen:31`, `parse_pattern.zen:28`
+  and `unwind` at `parse_expr.zen:257`. `depth` is a `usize` and `leave` is
+  `self.depth - 1`, so an unbalanced count underflows rather than traps.
+- **`too_deep` is sticky, file-global, and aborts the module.**
+  `parse_decl.zen:70`: `running = !p.at_eof() && !p.too_deep`. One over-deep
+  construct on line 1 stops the rest of the file being parsed, and `hushed`
+  (`parser.zen:545`) silences every later diagnostic.
+- **`recover()`'s body is reached by no test.**
+  `tests/corpus/parse/parser_error_recovery.zen` feeds four declarations that
+  each begin with an identifier, so `p.at` always advances and the
+  `p.at == before` branch at `parse_decl.zen:66` is never taken. No
+  module-level input starting with `;`, `}` or `+` exists anywhere in `tests/`.
+
+**There is no AST dump, and `PLAN.md:268` reads as if there is.** `DumpAst`
+appears only in prose — `DESIGN.md:1301`, `PLAN.md:268`, `tests/parse/
+constructs.md:1323` — always as an example of overload syntax. `grep -rn
+'DumpAst\|dump_ast' src/` is empty and `./zen ast` answers `unknown argument`.
+Everything it needs is there: the node set is closed, every node carries a span,
+`Display` already declares `toString`. Wanted by `@meta`, by every parser bug
+report, and by anyone feeding a tree to a model — which is what asked for it.
+Mark that `PLAN.md` line NOT WRITTEN in the same change; `PLAN.md:125` is
+explicit that a path naming a file that does not exist is worse than listing
+nothing.
+
+**The CLI has no machine-readable diagnostics.** `--json-diags` or similar. The
+LSP already publishes JSON from the same `Diag` values (`lsp_diag.zen:355-380`),
+and every phase already produces a `Diag` carrying a position. **This is step 3
+of the `to_json` entry above, not a separate job** — adding a second
+hand-written JSON writer for the CLI before that entry lands means writing the
+thing it exists to delete. The seven flags the CLI accepts today are
+`--emit-c`, `-o`, `--entry`, `--repeat`, `--permute`, `--check`, `--stdio`
+(`zen_cli.zen:250-277`); there is no `--help` and no `--version` either.
+
+**A declared union used as an ordinary value type does not survive `gen_c`.**
+Sema admits it and `cc` rejects it, which is the shape the differential oracle
+is blind to:
+
+    Ea = | Boom
+    Eb = | Bang
+    Both = Ea | Eb
+    b: Both = Eb.Bang;      // -> zu_l1b = (zu_t2_4main2Eb){ .zg_tag = .. };
+                            // error: incompatible types when assigning to
+                            // type 'zu_t2_4main4Both' from 'zu_t2_4main2Eb'
+
+`gen_c_widen.zen` widens a member into a set for a `Res` error set and nothing
+widens one into a plain declared union. The only union test in the corpus,
+`tests/corpus/sema/match_union_member_carries_its_type.zen`, reaches unions only
+through `Res<T, E>` propagation and its own header says so — "the values arrive
+by propagation rather than by writing `Error.Torn(..)` at the call site". So the
+direct form is untested rather than merely unlucky, and `DESIGN.md:137-164`
+spends five paragraphs specifying it.
+
+**`make fmt` is in no gate, and there is no CI.** `PLAN.md:321` requires
+"`zen fmt --check` over the whole tree, in CI, failing the build". `Makefile:59`
+is `test: parse design cap dupcomments faults refmap ufcs style grammar-test
+editors bench-allocs` — no `fmt` — and the repository has no `.github/`, no
+`.gitlab-ci.yml`, no CI configuration at all. The per-file guard inside
+`fmt.zen` still runs on every invocation, so losslessness is protected; what is
+not protected is the tree staying formatted. `Makefile:48-58` has diagnosed this
+exact disease three times about three other targets.
+
 ## DECIDE — needs a call
 
 **The format door's final name.** `String.add` and `String.fmt` are one door
