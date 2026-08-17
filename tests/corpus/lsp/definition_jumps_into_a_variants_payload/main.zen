@@ -1,0 +1,224 @@
+// A VARIANT'S PAYLOAD IS A WRITTEN TYPE, and all three queries that read
+// one answer at it: definition, hover and colour.
+//
+// `Expr = Unit | Array(ArrayLit)` — the cursor inside the parentheses.
+// The payload is a `TypeId` in the arena like any other written type, so
+// `ast_find.zen` finds it and `ast_named.zen` calls it an `OfType`; what
+// nothing did was RESOLVE it. `sema_case.zen`'s `cases_of` was the only
+// caller that ever handed a payload to `type_from_ast`, and it runs when
+// something MATCHES on the enum. Nothing here matches on `Expr`, so
+// `type_memo` had no entry for `ArrayLit` and all three queries read the
+// same miss: `null`, `null`, and the lexer's `variable`.
+//
+// The three are pinned together BECAUSE they share that table —
+// `lsp_def.zen`'s `type_defn`, `lsp_hover.zen`'s type arm and
+// `lsp_names.zen`'s `named_site` are three readers of `type_memo`, and a
+// fix that reached one of them and not the others would be a fix in the
+// wrong file.
+//
+// `rootUri` IS SENT, because colour has a lexical fallback and answers
+// it whenever no build has settled — without a workspace this test would
+// pass on the fallback and prove nothing. The tokens are asked in a
+// SECOND batch, off the build batch one settled, exactly as
+// `colour_comes_from_the_build` does; its decoder is this file's.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, write_decimal, frame_at = lsp.lsp_frame
+write_text, Jsons, JsonId = lsp.lsp_json
+read = lsp.lsp_json_read
+to_pos, run_of = lsp.lsp_pos
+
+// The buffer. `ArrayLit` is declared above and named as a payload below,
+// and NOTHING MATCHES ON `Expr` — a match would resolve the payload as a
+// side effect and the test would pass without the fix.
+DOC*: str = "ArrayLit = {\n    n*: i32,\n}\n\nExpr = Unit | Array(ArrayLit)\n"
+
+// `tests/run.py` stages a directory test into `<work>/src` and runs the
+// program from `<work>`, so this is the path the server will open.
+URI*: str = "file://src/app/app.zen"
+ROOT_URI*: str = "file://."
+
+INITIALIZED*: str = "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}"
+
+// The cursor: line 4, character 22 — inside `ArrayLit`, the payload of
+// `Array`, not on the variant name beside it.
+LINE*: usize = 4
+CHARACTER*: usize = 22
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    s ::= a.Server(env);
+
+    first ::= a.String().try();
+    open_session(a, first).try();
+    write_frame(INITIALIZED, first).try();
+    open_doc(a, URI, DOC, first).try();
+    batch(s, a, "the build settles", first.view()).try();
+
+    second ::= a.String().try();
+    ask(a, 2, "textDocument/definition", second).try();
+    ask(a, 3, "textDocument/hover", second).try();
+    colours(a, 4, second).try();
+    batch(s, a, "definition, hover and colour at the payload", second.view())
+        .try();
+
+    Ok(0);
+}
+
+// --- the requests ------------------------------------------------------
+
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":"
+    ).try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+open_doc = (a: Alloc, uri: str, text: str, into :: String)
+           Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(uri, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// Definition and hover take the same parameters, so they are one writer
+// — the METHOD is the only thing that differs between them.
+ask = (a: Alloc, id: usize, method: str, into :: String)
+      Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(",\"method\":").try();
+    write_text(method, body).try();
+    body.add_bytes(",\"params\":{\"textDocument\":{\"uri\":").try();
+    write_text(URI, body).try();
+    body.add_bytes("},\"position\":{\"line\":").try();
+    write_decimal(LINE, body).try();
+    body.add_bytes(",\"character\":").try();
+    write_decimal(CHARACTER, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+colours = (a: Alloc, id: usize, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(
+        ",\"method\":\"textDocument/semanticTokens/full\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(URI, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// --- the session -------------------------------------------------------
+
+batch = (s :: Server, a: Alloc, what: str, input: str) Res<(), AllocError> {
+    out ::= a.String().try();
+    serve(s, input, out).try();
+    println("--- {}", what);
+    walk(a, out.view())
+}
+
+walk = (a: Alloc, out: str) Res<(), AllocError> {
+    from  ::= 0;
+    going ::= true;
+    loop(() { going && from < out.len }, (h) {
+        frame_at(out, from).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { frame(a, fr.body).try(); from = fr.next; },
+        });
+    });
+    Ok(());
+}
+
+frame = (a: Alloc, body: str) Res<(), AllocError> {
+    tree ::= a.Jsons();
+    read(a, tree, body).match({
+        Err(_)  => Ok(()),
+        Ok(msg) => frame_body(a, tree, msg, body),
+    })
+}
+
+frame_body = (a: Alloc, tree: Jsons, msg: JsonId, body: str)
+             Res<(), AllocError> {
+    data_of(tree, msg).match({
+        None      => { println("    {}", body); Ok(()); },
+        Ok(array) => walk_groups(a, tree, array),
+    })
+}
+
+data_of = (tree: Jsons, msg: JsonId) Res<JsonId> {
+    tree.field(msg, "result").match({
+        None    => None,
+        Ok(res) => tree.field(res, "data"),
+    })
+}
+
+// --- undoing the encoding ----------------------------------------------
+//
+// `colour_comes_from_the_build`'s decoder: the running totals ARE the
+// encoding, so adding them back up is the whole of it.
+
+walk_groups = (a: Alloc, tree: Jsons, array: JsonId) Res<(), AllocError> {
+    line      ::= 0;
+    character ::= 0;
+    at        ::= 0;
+    going     ::= true;
+    loop(() { going }, (h) {
+        tree.item(array, at).match({
+            None  => { going = false; },
+            Ok(_) => {
+                delta_line      = whole_at(tree, array, at);
+                delta_character = whole_at(tree, array, at + 1);
+                line            = line + delta_line;
+                character       = (delta_line == 0).match({
+                    true  => character + delta_character,
+                    false => delta_character,
+                });
+                shown(
+                    line,
+                    character,
+                    whole_at(tree, array, at + 2),
+                    whole_at(tree, array, at + 3)
+                );
+                at = at + 5;
+            },
+        });
+    });
+    Ok(());
+}
+
+whole_at = (tree: Jsons, array: JsonId, at: usize) usize {
+    tree.item(array, at).match({
+        None  => 0,
+        Ok(v) => tree.whole(v).match({ Ok(n) => n, None => 0 }),
+    })
+}
+
+// One decoded token, and THE BYTES IT COVERS — the slice comes back
+// through `to_pos`, the conversion this file did not make.
+shown = (line: usize, character: usize, length: usize, colour: usize) () {
+    run  = run_of(DOC, line);
+    from = run.start + to_pos(DOC, line, character).col - 1;
+    upto = run.start + to_pos(DOC, line, character + length).col - 1;
+    println(
+        "    line {} char {} type {}  [{}]",
+        line,
+        character,
+        colour,
+        DOC.slice(from, upto)
+    );
+}

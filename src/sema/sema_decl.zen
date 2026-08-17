@@ -20,7 +20,7 @@
 // already memoize it.
 
 Module, Decl, Function, TParam, BlockId = std.ast
-Struct, Impl, Member = std.ast
+Struct, Impl, Member, Enum = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -35,6 +35,8 @@ check_varargs = sema.sema_vararg
 check_layout = sema.sema_layout
 type_from_ast, param_type, block_type, decl_as_type = sema.sema_type
 enter_struct_tvars = sema.sema_member
+variant_payload = sema.sema_case
+owner_of, push_tparams = sema.sema_inst
 settle_raised = sema.sema_raise
 check_return = sema.sema_hoist
 check_own = sema.sema_own
@@ -140,9 +142,30 @@ check_decl = (c :: Checker, d: Decl, m: Module, mi: usize)
     d.kind.match({
         Function(f) => check_function(c, f, m, mi),
         Struct(s)   => struct_bodies(c, s, m, mi),
+        Enum(e)     => c.enum_payloads(e, mi),
         Impl(im)    => impl_bodies(c, im, m, mi),
         _           => Ok(()),
     })
+}
+
+// A VARIANT'S PAYLOAD IS A WRITTEN TYPE, and until now the only thing
+// that resolved one was `cases_of`, which runs when something MATCHES on
+// the enum. An enum nobody matches on had no resolved payload at all:
+// `Expr = Array(ArrayLit)` left `type_memo` with no entry for
+// `ArrayLit`, so a payload naming nothing drew no diagnostic and the LSP
+// had nothing to hover or jump to inside the parentheses. The same rule
+// as a body nobody calls, one line up.
+//
+// THE TYPE PARAMETERS ARE THE ENUM'S, as a struct's are its members' —
+// `Opt<T> = Some(T)` writes `T` in a payload and the declaration that
+// binds it is `Opt`.
+enum_payloads = (c :: Checker, e: Enum, mi: usize) Res<(), AllocError> {
+    tmark = c.tvar_mark();
+    owner = c.owner_of(mi, e.name.text).try();
+    c.push_tparams(e.tparams, owner).try();
+    ctx = Ctx(mi, c.types.unknown().try());
+    e.variants.loop((h, v) { c.variant_payload(v, ctx).try() });
+    c.release_tvars(tmark)
 }
 
 // A MEMBER'S BODY IS A BODY. It runs the queries, because a query's
