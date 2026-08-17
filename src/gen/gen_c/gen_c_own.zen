@@ -97,11 +97,7 @@ open_record = (be :: CBackend) Res<usize, AllocError> {
     n = be.next_tmp();
     name ::= be.alloc.String().try();
     sym_gen(name, "b", n).try();
-    be.write("zg_scope ").try();
-    be.write(name.view()).try();
-    be.writeln(";").try();
-    be.write(name.view()).try();
-    be.writeln(".zg_n = 0;").try();
+    be.fmt("zg_scope {};\n{}.zg_n = 0;\n", name.view(), name.view()).try();
     Ok(n);
 }
 
@@ -166,10 +162,7 @@ frame_end = (be :: CBackend, i: usize) usize {
 run_defers = (be :: CBackend, rec: usize) Res<(), AllocError> {
     name ::= be.alloc.String().try();
     sym_gen(name, "b", rec).try();
-    be.write("zg_scope_run(&").try();
-    be.write(name.view()).try();
-    be.writeln(");").try();
-    Ok(());
+    be.fmt("zg_scope_run(&{});\n", name.view())
 }
 
 // REVERSE DECLARATION ORDER, for the reason the file header gives.
@@ -238,9 +231,7 @@ open_live_flag = (be :: CBackend) Res<usize, AllocError> {
     n = be.next_tmp();
     name ::= be.alloc.String().try();
     sym_gen(name, "o", n).try();
-    be.write("int ").try();
-    be.write(name.view()).try();
-    be.writeln(" = 1;").try();
+    be.fmt("int {} = 1;\n", name.view()).try();
     Ok(n);
 }
 
@@ -269,9 +260,7 @@ clear_if_named = (be :: CBackend, e: DropEntry, name: str)
 write_clear = (be :: CBackend, live: usize) Res<(), AllocError> {
     name ::= be.alloc.String().try();
     sym_gen(name, "o", live).try();
-    be.write(name.view()).try();
-    be.writeln(" = 0;").try();
-    Ok(());
+    be.fmt("{} = 0;\n", name.view())
 }
 
 has_drop* = (be :: CBackend, ty: TyId) Res<bool, AllocError> {
@@ -317,9 +306,7 @@ flagged_drop = (be :: CBackend, e: DropEntry, s: Site, f: Function)
                Res<(), AllocError> {
     flag ::= be.alloc.String().try();
     sym_gen(flag, "o", e.live).try();
-    be.write("if (").try();
-    be.write(flag.view()).try();
-    be.writeln(") {").try();
+    be.fmt("if ({}) {\n", flag.view()).try();
     be.indent();
     call_drop(be, e, s, f).try();
     be.dedent();
@@ -350,13 +337,13 @@ by_address = (f: Function) bool {
 
 write_drop_call = (be :: CBackend, e: DropEntry, sym: str, addr: bool)
                   Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(sym).try();
-    line.add_bytes("(").try();
-    addr.then(() { line.add_bytes("&").try() });
-    sym_local(line, e.name, e.index).try();
-    line.add_bytes(");").try();
-    be.writeln(line.view())
+    name ::= be.alloc.String().try();
+    sym_local(name, e.name, e.index).try();
+    be.fmt("{}({}{});\n", sym, ampersand(addr), name.view())
+}
+
+ampersand = (addr: bool) str {
+    addr.match({ true => "&", false => "" })
 }
 
 // The `drop` a `T.impl(Drop, { .. })` supplies, or nothing.
