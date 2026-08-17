@@ -3,8 +3,16 @@
 // file that pays for the character guarantee. Two assumptions beyond
 // DESIGN.md: `b.to_u32()` only widens, never narrows; Zen has no bitwise
 // ops, so a 6-bit shift is exact multiplication by UTF8_CONT_SCALE.
+//
+// BOTH DIRECTIONS LIVE HERE, decoder first and encoder last, over ONE set
+// of boundary constants. They were two files once — `src/lsp/` held the
+// encoder under its own spellings of the same eight numbers — and a fix to
+// either could not reach the other. The boundaries are declared once now,
+// so the two halves cannot disagree about where a sequence widens.
 
 str = std.text.text_str
+String = std.text.text_string
+AllocError = std.mem.mem
 
 // the offset of the byte where the sequence stops making sense
 Utf8Error* = | Invalid(usize)
@@ -158,3 +166,80 @@ four_byte = (s: str, at: usize, lead: u8) Res<Codepoint, Utf8Error> {
         false => Err(Utf8Error.Invalid(at)),
     });
 }
+
+// ---------------------------------------------------------------------------
+// the other direction: a codepoint, as bytes
+// ---------------------------------------------------------------------------
+
+// A codepoint, as UTF-8, appended — the inverse of the decoder above,
+// same idiom: no bitwise operators, so a 6-bit shift is division by
+// UTF8_CONT_SCALE and a mask is a remainder.
+//
+// THE SAME BOUNDARIES READ FROM THE OTHER SIDE: the decoder asks whether a
+// value is too small for the width it arrived in (`value >= UTF8_MIN_3`,
+// or the sequence was overlong); the encoder asks which width a value
+// needs (`v < UTF8_MIN_3`, so two bytes suffice). One number, one
+// meaning. The lead and continuation tags are `u8` because the decoder
+// compares them against BYTES, while this half computes in `u32` and
+// narrows only at the very end — hence the `.to_u32()` at each use.
+push_utf8* = (v: u32, out :: String) Res<(), AllocError> {
+    (v < UTF8_ASCII_MAX.to_u32()).match({
+        true  => out.add_byte(byte_of(v)),
+        false => (v < UTF8_MIN_3).match({
+            true  => two_wide(v, out),
+            false => (v < UTF8_MIN_4).match({
+                true  => three_wide(v, out),
+                false => four_wide(v, out),
+            }),
+        }),
+    })
+}
+
+two_wide = (v: u32, out :: String) Res<(), AllocError> {
+    cont = UTF8_CONT_MIN.to_u32();
+    out.add_byte(byte_of(UTF8_LEAD_MIN.to_u32() + v / UTF8_CONT_SCALE)).try();
+    out.add_byte(byte_of(cont + v % UTF8_CONT_SCALE))
+}
+
+three_wide = (v: u32, out :: String) Res<(), AllocError> {
+    cont = UTF8_CONT_MIN.to_u32();
+    out.add_byte(byte_of(
+        UTF8_LEAD_3_MIN.to_u32() + v / (UTF8_CONT_SCALE * UTF8_CONT_SCALE)
+    )).try();
+    out.add_byte(byte_of(cont + (v / UTF8_CONT_SCALE) % UTF8_CONT_SCALE)).try();
+    out.add_byte(byte_of(cont + v % UTF8_CONT_SCALE))
+}
+
+four_wide = (v: u32, out :: String) Res<(), AllocError> {
+    cont = UTF8_CONT_MIN.to_u32();
+    out.add_byte(byte_of(
+        UTF8_LEAD_4_MIN.to_u32()
+            + v / (UTF8_CONT_SCALE * UTF8_CONT_SCALE * UTF8_CONT_SCALE)
+    )).try();
+    out.add_byte(byte_of(
+        cont + (v / (UTF8_CONT_SCALE * UTF8_CONT_SCALE)) % UTF8_CONT_SCALE
+    )).try();
+    out.add_byte(byte_of(cont + (v / UTF8_CONT_SCALE) % UTF8_CONT_SCALE)).try();
+    out.add_byte(byte_of(cont + v % UTF8_CONT_SCALE))
+}
+
+// A u32 known to be a byte, AS a byte. THIS IS A NARROWING CONVERSION
+// AND THIS LANGUAGE HAS NONE (`src/std/core/num.zen:124`: "a narrowing
+// conversion can fail, so it belongs in a Res-returning function someone
+// writes on purpose"). This COUNTS rather than narrows: at most 256
+// passes, paid only on an escape, the rarest byte a JSON reader sees. It
+// traps rather than returning `Res` because every caller above has
+// already established the range by construction. UNEXPORTED for that
+// reason — it is safe only where the range is already known, and its
+// generic name would be poor surface for `std.text`. THE RIGHT FIX IS A
+// PRIMITIVE: `to_u8* = (self: u32) Res<u8>` in `std.core.num` would
+// delete this, once it has a second caller.
+byte_of = (v: u32) u8 {
+    UTF8_NARROW_MAX - v;
+    b ::= UTF8_ZERO_BYTE;
+    loop(() { b.to_u32() < v }, (h) { b = b + 1; });
+    b;
+}
+
+UTF8_ZERO_BYTE: u8 = 0
+UTF8_NARROW_MAX: u32 = 255      // the trap: `byte_of` of anything wider
