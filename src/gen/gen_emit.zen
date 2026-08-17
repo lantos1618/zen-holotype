@@ -43,12 +43,44 @@ Emit* = {
     // writing
     // -----------------------------------------------------------------
 
+    // A `\n` ENDS A LINE WHEREVER IT ARRIVES. `fresh` was set in `line`
+    // alone, so a run carrying its own newline left everything after it
+    // hard against the margin — nothing in the tree wrote one until a
+    // format door began handing whole multi-line runs through here.
     bytes* = (self :: @Self, s: str) Res<(), AllocError> {
+        start ::= 0;
+        Range(0, s.len).loop((h, i) {
+            (s[i] == '\n').then(() {
+                self.run(s.slice(start, i)).try();
+                self.line().try();
+                start = i + 1;
+            });
+        });
+        self.run(s.slice(start, s.len))
+    }
+
+    // A run with no line ending in it: one indent, one append. Empty
+    // writes nothing, so a blank line stays blank.
+    run = (self :: @Self, s: str) Res<(), AllocError> {
+        (s.len == 0).match({
+            true  => Ok(()),
+            false => self.open_run(s),
+        })
+    }
+
+    open_run = (self :: @Self, s: str) Res<(), AllocError> {
         self.open_line().try();
         self.text.add_bytes(s)
     }
 
     byte* = (self :: @Self, b: u8) Res<(), AllocError> {
+        (b == '\n').match({
+            true  => self.line(),
+            false => self.open_byte(b),
+        })
+    }
+
+    open_byte = (self :: @Self, b: u8) Res<(), AllocError> {
         self.open_line().try();
         self.text.add_byte(b)
     }

@@ -292,6 +292,7 @@ pieces_into_buffer = (
     p = Piece(
         sink: sink.view(),
         sty: sty,
+        floor: "",
         tmp: tmp.view(),
         done: fail,
         id: id,
@@ -329,11 +330,17 @@ buffer_sink = (
 // one record rather than a signature per helper.
 // -----------------------------------------------------------------
 
-Piece = {
+Piece* = {
     sink: str,        // the C name of the Sink record, a place
     sty: TyId,        // Sink itself, for its slots
-    tmp: str,         // the temporary the door answers with
-    done: usize,      // the label a failing write jumps to
+    // THE RECEIVER'S OWN BYTE WRITER, mangled, or "" when the writes go
+    // through the Sink record above. A floor answers exactly what the
+    // door answers, so `sink` is then the receiver ARGUMENT — address
+    // included — and `sty` is not read at all. `gen_c_floor.zen` says
+    // why that is a second door and not this one narrowed.
+    floor: str,
+    tmp*: str,        // the temporary the door answers with
+    done*: usize,     // the label a failing write jumps to
     id: ExprId,       // the door call, for a diagnostic with a position
     module: usize,    // the door's own module: where the writers live
 }
@@ -455,6 +462,7 @@ write_door = (
     p = Piece(
         sink: sink,
         sty: sty,
+        floor: "",
         tmp: tmp.view(),
         done: be.next_tmp(),
         id: id,
@@ -474,7 +482,7 @@ write_door = (
 // `zg_tN = (Res){ .zg_tag = Ok };` — the answer a door with no failing
 // write gives, written first so that falling off the end is `Ok` and
 // only a failure has to say anything.
-write_ok = (be :: CBackend, ret: TyId, tmp: str) Res<(), AllocError> {
+write_ok* = (be :: CBackend, ret: TyId, tmp: str) Res<(), AllocError> {
     value ::= be.alloc.String().try();
     value.add_bytes("(").try();
     ctype(be, ret, value).try();
@@ -501,7 +509,7 @@ fmt_index = (recv: Res<ExprId>) usize {
 // `out.add("{}", x)` differ only in where the bytes end up.
 // -----------------------------------------------------------------
 
-write_pieces = (
+write_pieces* = (
     be    :: CBackend,
     c     : Call,
     first : ExprId,
@@ -641,7 +649,7 @@ write_value = (be :: CBackend, a: ExprId, p: Piece, ctx: Ctx)
     expr(be, a, ctx, ty, text).try();
     call ::= be.alloc.String().try();
     value_call(be, p, ty, text.view(), call).try().match({
-        false => unsupported_piece(be, a, "formatting a value of this type"),
+        false => unsupported_piece(be, a, hole_fault(p)),
         true  => write_guarded(be, call.view(), p),
     })
 }
@@ -653,7 +661,34 @@ value_call = (be :: CBackend, p: Piece, ty: TyId, text: str, out :: String)
     prim = be.check.prim_name(ty);
     prim.eq("str").match({
         true  => sink_write(be, p, text, out),
-        false => scalar_call(be, p, ty, prim, text, out),
+        false => wider_call(be, p, ty, prim, text, out),
+    })
+}
+
+// A HOLE ON A FLOOR DOOR IS A `str` AND NOTHING ELSE. Every writer a
+// wider hole reaches — the scalars in this door's module, and any
+// `toString` — answers `WriteError`, which a door answering the floor's
+// own error can neither carry nor honestly relabel. Refused by name at
+// the call site, so a `u8` meant as a character can never come out as a
+// number.
+wider_call = (
+    be   :: CBackend,
+    p    : Piece,
+    ty   : TyId,
+    prim : str,
+    text : str,
+    out  :: String
+) Res<bool, AllocError> {
+    p.floor.is_empty().match({
+        true  => be.scalar_call(p, ty, prim, text, out),
+        false => Ok(false),
+    })
+}
+
+hole_fault = (p: Piece) str {
+    p.floor.is_empty().match({
+        true  => "formatting a value of this type",
+        false => "a format hole on this door that is not a str",
     })
 }
 
@@ -692,10 +727,32 @@ signed_writer = (prim: str) str {
     is_signed(prim).match({ true => "add_i64", false => "add_u64" })
 }
 
+// Bytes into whichever floor this door was opened on.
+sink_write = (be :: CBackend, p: Piece, text: str, out :: String)
+             Res<bool, AllocError> {
+    p.floor.is_empty().match({
+        true  => be.slot_write(p, text, out),
+        false => floor_write(p, text, out),
+    })
+}
+
+// `<floor>(<receiver>, <bytes>)` — a direct call to the receiver's own
+// writer. No record: the receiver's type is concrete, so which function
+// runs is known here.
+floor_write = (p: Piece, text: str, out :: String) Res<bool, AllocError> {
+    out.add_bytes(p.floor).try();
+    out.add_bytes("(").try();
+    out.add_bytes(p.sink).try();
+    out.add_bytes(", ").try();
+    out.add_bytes(text).try();
+    out.add_bytes(")").try();
+    Ok(true);
+}
+
 // `<sink>.write(<sink>.zg_self, <bytes>)` — the one member of `Sink`
 // that takes bytes, reached through the record because a sink's whole
 // point is that the writer does not know which one it holds.
-sink_write = (be :: CBackend, p: Piece, text: str, out :: String)
+slot_write = (be :: CBackend, p: Piece, text: str, out :: String)
              Res<bool, AllocError> {
     args ::= be.alloc.String().try();
     args.add_bytes(", ").try();

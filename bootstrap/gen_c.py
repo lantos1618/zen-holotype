@@ -4647,9 +4647,16 @@ class FnCtx:
         self.line("goto %s;" % done)
         self.close()
 
-    def write_hole(self, sb, value, node):
+    def write_hole(self, sb, value, node, floor=False):
         """`{}` on one argument: type-directed, resolved here."""
         code, ty = (value if isinstance(value, tuple) else self.expr(value))
+        if floor and ty != self.str_type():
+            # A HOLE ON A FLOOR DOOR IS A `str` AND NOTHING ELSE: every
+            # wider writer answers WriteError, which a door answering the
+            # floor's own error can neither carry nor honestly relabel.
+            # src/gen/gen_c/gen_c_floor.zen states the same rule.
+            self.e.error(node, "cannot format a value of this type")
+            return None
         if ty is not None and ty[0] == "prim" and ty[1] in INT_VALUES:
             name = "add_i64" if INT_VALUES[ty[1]][0] < 0 else "add_u64"
             wide = prim("i64" if name == "add_i64" else "u64")
@@ -4696,7 +4703,8 @@ class FnCtx:
         self.e.error(node, "this sink has no `write` to write through")
         return None
 
-    def lower_format(self, sb, fmt_node, rest, result, ret, done, node):
+    def lower_format(self, sb, fmt_node, rest, result, ret, done, node,
+                     floor=False):
         if not (kind(fmt_node) == "Literal" and f(fmt_node, "kind") == "str"):
             self.e.error(node, "a format string is read at compile time, so it "
                                "must be written at the call site")
@@ -4713,7 +4721,7 @@ class FnCtx:
                                                        self.str_type()), node),
                                  result, ret, done, node)
             if hole and n < len(rest):
-                self.write_piece(self.write_hole(sb, rest[n], node),
+                self.write_piece(self.write_hole(sb, rest[n], node, floor),
                                  result, ret, done, node)
                 n += 1
 
@@ -4787,6 +4795,24 @@ class FnCtx:
             if args:
                 self.lower_format(receiver, args[0], args[1:], result, ret,
                                   done, node)
+            self.line("%s: ;" % done)
+            return (result, ret)
+        # `sb.fmt(fmt, ..)` -- the same door on the receiver's OWN byte
+        # writer, `add_bytes` or `write`, so it answers exactly what that
+        # writer answers and converts nothing.  That is what lets a
+        # function declaring AllocError call it where it cannot call
+        # `add`; the cost is that a hole must be a str, since every wider
+        # writer speaks WriteError.  src/gen/gen_c/gen_c_floor.zen holds
+        # the contract this mirrors.
+        if decl.name == "fmt" and receiver is not None:
+            ret = self.e.resolve_type(self.e.ret_of(fnode), {}, decl.scope_parts,
+                                      self.e.self_type(decl, {}))
+            result = self.new_tmp(ret)
+            done = self.label("fmt")
+            self.line("%s = %s;" % (result, self.ok_of(ret, None, node)))
+            if args:
+                self.lower_format(receiver, args[0], args[1:], result, ret,
+                                  done, node, floor=True)
             self.line("%s: ;" % done)
             return (result, ret)
         if decl.owner is None and decl.name == "String" and receiver is not None:

@@ -1,0 +1,30 @@
+// tests/corpus/std/string_fmt_answers_the_buffer_floor.zen
+// `sb.fmt("{}", s)` is the format door written through `add_bytes`, so
+// it answers `AllocError` and NOT `WriteError` -- which is the whole
+// point of it. `main` here declares `Res<i32, AllocError>` and calls it
+// with `.try()`; the same line written `sb.add(..)` does not compile,
+// because the merge only runs narrow-to-wide.
+//
+// A `\n` INSIDE the format is an ordinary byte to a String. It is the
+// backend's `Emit` that gives one meaning, and that is the sink's rule
+// rather than the door's.
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    sb    ::= alloc.String().try();
+
+    sb.fmt("{} is {}\n", "ada", "first").try();
+
+    // no holes at all, and no format at all: one write of the whole
+    // string, and nothing written
+    sb.fmt("plain\n").try();
+    sb.fmt("").try();
+
+    // `{` with nothing behind it is a literal byte, which is the format
+    // rule text_fmt.zen states
+    sb.fmt("{ {}\n", "brace").try();
+
+    println("{}", sb.view());
+    println("len {}", sb.view().len);
+    Ok(0);
+}

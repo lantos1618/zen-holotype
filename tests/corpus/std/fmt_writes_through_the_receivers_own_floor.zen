@@ -1,0 +1,40 @@
+// tests/corpus/std/fmt_writes_through_the_receivers_own_floor.zen
+// The door is not String's. A type declaring `fmt` bodyless with a
+// `write(self :: @Self, s: str)` beside it gets the same expansion,
+// through its OWN writer -- which is what the C backend's `be.fmt` is,
+// and what makes this a primitive rather than a special case.
+//
+// The floor here answers `AllocError` and so does the door: nothing is
+// converted, so a failing write leaves its own Err where the door's
+// answer goes. The counter pins that ONE call is SEVERAL writes -- a
+// literal run, a hole, a literal run.
+
+Log = {
+    text :: String,
+    writes :: usize,
+
+    fmt* = (self :: @Self, fmt: str, args: ...) Res<(), AllocError>
+
+    write* = (self :: @Self, s: str) Res<(), AllocError> {
+        self.writes = self.writes + 1;
+        self.text.add_bytes(s)
+    }
+
+    view* = (self: @Self) str { self.text.view() }
+}
+
+Log* = (a: Alloc) Res<Log, AllocError> {
+    Ok(Log(text: a.String().try(), writes: 0));
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    log   ::= alloc.Log().try();
+
+    log.fmt("one {} three\n", "two").try();
+    log.fmt("{}\n", "tail").try();
+
+    println("{}", log.view());
+    println("writes {}", log.writes);
+    Ok(0);
+}

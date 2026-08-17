@@ -1,0 +1,280 @@
+// src/gen/gen_c/gen_c_floor.zen
+// `be.fmt("zg_scope {};\n{}.zg_n = 0;\n", v, v)` — the format door on a
+// type's OWN byte writer, and the one door an `AllocError` function can
+// call.
+//
+// THE CONTRACT, because six conversion lanes read it:
+//
+//   - It is `fmt`, declared bodyless with `gen_c_sink.zen`'s door shape:
+//     a `::` receiver, a `str` format, a variadic tail. Bodyless for
+//     that door's reason — a variadic has no C spelling and `{}` is
+//     resolved by the argument's type, so the call is expanded where it
+//     is WRITTEN.
+//   - It answers exactly what the receiver's byte writer answers, and
+//     the writer is the receiver's own member `add_bytes` or `write`
+//     taking `(self :: @Self, s: str)`. `String.fmt` reaches
+//     `String.add_bytes`, `CBackend.fmt` reaches `CBackend.write`; both
+//     answer `Res<(), AllocError>` and so does the door.
+//   - NOTHING IS CONVERTED, which is the whole reason this is sound. A
+//     failing write leaves its own `Err` in the door's own temporary and
+//     the guard jumps; there is no second error set to widen and no
+//     reason to rename. `gen_c_fmt.zen`'s allocating door DOES rename —
+//     it has to, its writes are a Sink's — and that is exactly the
+//     bargain not repeated here.
+//   - A HOLE MUST BE A `str`. Every wider writer — the scalars in
+//     `text_fmt.zen`, and any `toString` — answers `WriteError`, so a
+//     `{}` on anything else is refused at the call site by name rather
+//     than relabelled. A `u8` meant as a character must not be able to
+//     come out as a number. Widening this means a writer BESIDE THE
+//     FLOOR answering the floor's error, not a conversion here.
+//   - NO IMPLICIT NEWLINE, unlike `writeln`: a line ends where the
+//     format says `\n`. Indentation still happens, because `Emit.bytes`
+//     treats a `\n` as the end of a line wherever it arrives.
+//   - NO ALLOCATION PER CALL. The pieces go straight through the floor,
+//     the way the sink door's do.
+//
+// THE WALK IS NOT HERE. `gen_c_sink.zen` owns what a format string means
+// and what a failing write does; this file owns only WHICH WRITER the
+// pieces go through — the two doors held two walks once and drifted.
+
+ExprId, Function, Param, Member, MemberKind, Call, Access = std.ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+TyId = sema.sema_ty
+Ctx = sema.sema_check
+Inst = sema.sema_inst
+self_ctx = sema.sema_member
+type_from_ast, param_type = sema.sema_type
+sym_gen = gen.gen_name
+CBackend = gen.gen_c.gen_c_state
+unsupported = gen.gen_c.gen_c_report
+declare_temp = gen.gen_c.gen_c_flow
+arg_value, write_arg, by_ref = gen.gen_c.gen_c_call
+Site, member_at, method_sig, member_symbol = gen.gen_c.gen_c_member
+recv_inst, inst_open, any_open = gen.gen_c.gen_c_mono
+Piece, write_pieces, write_ok, write_label = gen.gen_c.gen_c_sink
+bodyless, sink_door_shape = gen.gen_c.gen_c_sink
+
+// -----------------------------------------------------------------
+// recognising the door
+// -----------------------------------------------------------------
+
+// The name is read off the ACCESS, as the member form of the sink door
+// is: a member has no `Def` to carry one. The shape is that door's, so
+// the two cannot drift into recognising different declarations.
+is_floor_door* = (be: CBackend, name: str, f: Function) bool {
+    name.eq("fmt") && be.sink_door_shape(f)
+}
+
+// -----------------------------------------------------------------
+// the floor
+// -----------------------------------------------------------------
+
+// The receiver's own byte writer: which member, and its declaration.
+Floor = {
+    name: str,
+    fn: Function,
+}
+
+lower_floor_door* = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    rty : TyId,
+    s   : Site,
+    f   : Function,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    sctx = be.check.self_ctx(s.decl.module.to_usize(), rty).try();
+    ret  = be.answer_of(f, sctx).try();
+    be.floor_of(s, sctx, ret).try().match({
+        None  => be.unsupported(id, "a format door with no byte floor", out),
+        Ok(w) => be.open_floor(id, c, a, rty, s, w, ret, ctx, out),
+    })
+}
+
+// `add_bytes` FIRST, then `write`. Both names exist for one job and a
+// type may declare both: a String's `add_bytes` answers `AllocError` and
+// its `write` is the `Sink` impl's, answering `WriteError` — so the
+// order matters, and the answer test below is what makes it safe either
+// way.
+floor_of = (be :: CBackend, s: Site, sctx: Ctx, ret: TyId)
+           Res<Res<Floor>, AllocError> {
+    be.named_floor(s, sctx, ret, "add_bytes").try().match({
+        Ok(w) => Ok(Ok(w)),
+        None  => be.named_floor(s, sctx, ret, "write"),
+    })
+}
+
+named_floor = (be :: CBackend, s: Site, sctx: Ctx, ret: TyId, name: str)
+              Res<Res<Floor>, AllocError> {
+    found ::= be.alloc.Vec<Member>();
+    member_at(be, s, name, found).try();
+    kept ::= be.alloc.Vec<Floor>();
+    found.loop((h, m) { be.keep_floor(sctx, ret, name, m, kept).try() });
+    Ok(kept.get(0));
+}
+
+keep_floor = (
+    be   :: CBackend,
+    sctx : Ctx,
+    ret  : TyId,
+    name : str,
+    m    : Member,
+    out  :: Vec<Floor>
+) Res<(), AllocError> {
+    m.kind.match({
+        Function(g) => be.keep_floor_fn(sctx, ret, name, g, out),
+        _           => Ok(()),
+    })
+}
+
+// `(self :: @Self, s: str)`, with a body, ANSWERING WHAT THE DOOR
+// ANSWERS. The last test is the sound one: a writer answering anything
+// else would have to be converted, and this door converts nothing.
+keep_floor_fn = (
+    be   :: CBackend,
+    sctx : Ctx,
+    ret  : TyId,
+    name : str,
+    g    : Function,
+    out  :: Vec<Floor>
+) Res<(), AllocError> {
+    be.floor_shape(g, sctx).try().match({
+        false => Ok(()),
+        true  => be.keep_if_answers(sctx, ret, name, g, out),
+    })
+}
+
+floor_shape = (be :: CBackend, g: Function, sctx: Ctx)
+              Res<bool, AllocError> {
+    ((bodyless(g) == false) && (g.params.len == 2) && by_ref(g, 0)).match({
+        false => Ok(false),
+        true  => be.takes_str(g, sctx),
+    })
+}
+
+takes_str = (be :: CBackend, g: Function, sctx: Ctx) Res<bool, AllocError> {
+    g.params.get(1).match({
+        None  => Ok(false),
+        Ok(p) => be.param_is_str(p, sctx),
+    })
+}
+
+param_is_str = (be :: CBackend, p: Param, sctx: Ctx) Res<bool, AllocError> {
+    ty = be.check.param_type(p, sctx).try();
+    Ok(be.check.prim_name(ty).eq("str"));
+}
+
+keep_if_answers = (
+    be   :: CBackend,
+    sctx : Ctx,
+    ret  : TyId,
+    name : str,
+    g    : Function,
+    out  :: Vec<Floor>
+) Res<(), AllocError> {
+    got = be.answer_of(g, sctx).try();
+    (got.index == ret.index).match({
+        false => Ok(()),
+        true  => out.add(Floor(name: name, fn: g)),
+    })
+}
+
+// A member's declared return, resolved with `@Self` bound to the
+// receiver — the door's and the floor's are read the same way, so
+// comparing them compares two answers and not two spellings.
+answer_of = (be :: CBackend, g: Function, sctx: Ctx) Res<TyId, AllocError> {
+    g.ret.match({
+        Ok(t) => be.check.type_from_ast(t, sctx),
+        None  => be.check.types.unknown(),
+    })
+}
+
+// -----------------------------------------------------------------
+// the expansion
+// -----------------------------------------------------------------
+
+// A temporary at the door's own answer, `Ok` until a write says
+// otherwise, and a label every failing write jumps to — the sink door's
+// shape, with the floor's symbol where the record's slot would be.
+open_floor = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    rty : TyId,
+    s   : Site,
+    w   : Floor,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    inst = be.recv_inst(rty).try();
+    sig ::= be.alloc.Vec<TyId>();
+    be.method_sig(rty, s.decl, w.fn, s.decl.module.to_usize(), inst, sig).try();
+    (be.inst_open(inst) || be.any_open(sig)).match({
+        true  => be.unsupported(
+            id,
+            "a format door on a receiver whose type arguments nothing settles",
+            out
+        ),
+        false => be.write_floor_door(
+            id,
+            c,
+            a,
+            rty,
+            s,
+            w,
+            ret,
+            sig,
+            inst,
+            ctx,
+            out
+        ),
+    })
+}
+
+write_floor_door = (
+    be   :: CBackend,
+    id   : ExprId,
+    c    : Call,
+    a    : Access,
+    rty  : TyId,
+    s    : Site,
+    w    : Floor,
+    ret  : TyId,
+    sig  : Vec<TyId>,
+    inst : Inst,
+    ctx  : Ctx,
+    out  :: String
+) Res<(), AllocError> {
+    sym = be.member_symbol(rty, s, w.name, sig, inst).try();
+    recv ::= be.alloc.String().try();
+    be.write_arg(a.base, 0, w.fn, sig, ctx, recv).try();
+    tmp ::= be.alloc.String().try();
+    sym_gen(tmp, "t", be.next_tmp()).try();
+    be.declare_temp(ret, tmp.view()).try();
+    be.write_ok(ret, tmp.view()).try();
+    p = Piece(
+        sink: recv.view(),
+        sty: ret,
+        floor: sym.view(),
+        tmp: tmp.view(),
+        done: be.next_tmp(),
+        id: id,
+        module: s.decl.module.to_usize()
+    );
+    // THE RECEIVER IS NOT AN ARGUMENT HERE, so the format is argument
+    // zero and the values start at one — the member form of the sink
+    // door counts the same way.
+    arg_value(c, 0).match({
+        None      => Ok(()),
+        Ok(first) => write_pieces(be, c, first, 1, p, ctx),
+    }).try();
+    write_label(be, p.done).try();
+    out.add_bytes(p.tmp)
+}
