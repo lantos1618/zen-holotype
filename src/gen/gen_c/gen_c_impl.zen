@@ -22,6 +22,7 @@ Range = std.core
 DeclId, ImplId = sema.sema_id
 decl_at = sema.sema_def
 member_named = sema.sema_member
+tail_is_pack = sema.sema_vararg
 CBackend = gen.gen_c.gen_c_state
 last_is_variadic = gen.gen_c.gen_c_sink
 
@@ -88,8 +89,13 @@ member_takes = (be: CBackend, m: Member, arity: usize) bool {
 // whether its last one is variadic used to trap on `0 - 1` (a `usize`
 // underflow inside `last_is_variadic`). That guard now lives where the
 // arithmetic is.
+//
+// A `vararg<T>` TAIL IS THE SAME MINIMUM, asked separately because
+// `last_is_variadic` is the FORMAT DOOR's shape and must stay exactly
+// `...`: widening it would let a bodyless three-parameter `add` with a
+// typed pack be lowered as that door.
 fn_takes = (be: CBackend, f: Function, arity: usize) bool {
-    last_is_variadic(be, f).match({
+    (last_is_variadic(be, f) || tail_is_pack(be.tree, f)).match({
         true  => (arity + 1) >= f.params.len,
         false => f.params.len == arity,
     })

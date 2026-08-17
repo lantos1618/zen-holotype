@@ -249,6 +249,12 @@ prices it, which is what this file asked for.
 | `Infer` | | the `_` of `Res<Cfg, _>` |
 | `Variadic` | | the `...` of `args: ...` |
 
+**`vararg<T>` IS NOT A `TypeKind`, and that is the design.** It is an ordinary
+`Named` applied to one argument, resolving to an ordinary declared struct
+(`std/collections/collections_vararg.zen`), so the parser, the type store and
+the layout have no case for it at all — only a CALL does. `sema_vararg.zen` owns
+what it may be written next to; `docs/design_vararg.md` owns why.
+
 `Union` is **flat**: `A | B | C` is one `Union` of three members, never a
 `Union` of a `Union`. Error-set merging is then a concatenation and set equality
 is not a tree walk.

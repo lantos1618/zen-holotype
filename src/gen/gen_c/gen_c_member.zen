@@ -54,7 +54,7 @@ Checker, Ctx = sema.sema_check
 Inst = sema.sema_inst
 Base, Found, base_of, members_of, member_named, self_ctx = sema.sema_member
 Actual = sema.sema_call
-recv_sig_fits, ty_at = sema.sema_cand
+recv_sig_fits, ty_at, tail_swallows = sema.sema_cand
 Case, cases_of, find_case = sema.sema_case
 impl_bound_type, bound_members = sema.sema_supply
 is_case = sema.sema_match
@@ -66,7 +66,7 @@ sub, sub_with, any_open, recv_inst, inst_open = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 ctype, is_unit, decl_ctx = gen.gen_c.gen_c_type
 expr, ty_of, want_of = gen.gen_c.gen_c_expr
-lower_plain_call, write_arg = gen.gen_c.gen_c_call
+lower_plain_call, write_arg, write_call_args = gen.gen_c.gen_c_call
 handle_depth, lower_handle_call = gen.gen_c.gen_c_handle
 inlines, inline_method = gen.gen_c.gen_c_inline
 is_ptr_member, lower_ptr_member = gen.gen_c.gen_c_ptr
@@ -873,6 +873,10 @@ add_method_param = (
     sig.add(sub_with(be, declared, inst).try())
 }
 
+// THE RECEIVER IS ALREADY WRITTEN, so this is the free-function path with
+// the offset that says so — `write_call_args` and not a second loop,
+// because a member may end in a `vararg<T>` and a pack built two ways is
+// a pack built one way wrongly.
 write_rest = (
     be  :: CBackend,
     c   : Call,
@@ -881,11 +885,7 @@ write_rest = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    c.args.loop((h, i, arg) {
-        out.add_bytes(", ").try();
-        write_arg(be, arg.value, i + 1, f, sig, ctx, out).try();
-    });
-    Ok(());
+    write_call_args(be, c, 1, f, sig, ctx, out)
 }
 
 // -----------------------------------------------------------------
@@ -1110,6 +1110,6 @@ fn_takes_args = (be: CBackend, ty: TyId, arity: usize) bool {
 
 variadic_takes = (be: CBackend, f: TyFn, arity: usize) bool {
     (f.params.len > 0)
-        && be.check.prim_name(ty_at(f.params, f.params.len - 1)).eq("...")
+        && be.check.tail_swallows(ty_at(f.params, f.params.len - 1))
         && ((arity + 1) >= f.params.len)
 }

@@ -274,6 +274,16 @@ and `Hash` defaults (`hash.zen:31`), `Env`'s typed-args schema fill
 
 ### Varargs as a type — the same feature from the other side
 
+**SUPERSEDED THE SAME DAY, and the pricing below is what was wrong.**
+`docs/design_vararg.md` owns this subject now: `vararg<T>` landed as an
+**ordinary declared struct** (a borrowed run of `T` and its length, packed at
+the call site as a C compound literal), which is neither of the two paths priced
+below. It is forwardable, it needs no tuple, no boxing and no comptime
+evaluator, and it does not touch the `...` doors — they coexist, because a
+homogeneous pack cannot type a heterogeneous format call. The paragraphs below
+are kept as the record of what was believed before the code existed; the
+sentence they got wrong is that a runtime-representable pack must be structural.
+
 **`...` is already a type syntactically.** `Variadic` is a `TypeKind` variant
 (`ast_node.zen:107`) and sema types it as `c.types.prim("...")`
 (`sema_type.zen:106`). But it is a **marker, not a description**: it says a

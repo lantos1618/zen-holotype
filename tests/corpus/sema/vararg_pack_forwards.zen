@@ -1,0 +1,51 @@
+// `vararg<T>` is a variadic that FORWARDS, which is the whole difference
+// between it and `args: ...`: a marker carrying no element type has no C
+// type to spell, so a function taking one cannot pass it on. A pack is a
+// borrowed run of T and its length, so passing it on is a struct copy.
+//
+// One rule read from four sides, deliberately (docs/design_vararg.md §3):
+// a free function, a method, a fixed prefix before the pack, and an empty
+// pack. Sema checks the arity in one place (`pack_sig_fits`) and codegen
+// builds the pack in one place (`write_call_args`), so if the two ever
+// disagree about where the pack begins, one of these five lines moves.
+
+Box = {
+    w: i32,
+
+    widest = (self: @Self, vs: vararg<i32>) i32 {
+        best ::= self.w;
+        vs.loop((h, v) { (v > best).then(() { best = v; }); });
+        best;
+    }
+}
+
+sum = (v: vararg<i32>) i32 {
+    total ::= 0;
+    v.loop((h, x) { total = total + x; });
+    total;
+}
+
+// the acceptance test: `v` is already a pack, and goes on as one
+forward = (v: vararg<i32>) i32 { sum(v) }
+
+label = (tag: str, parts: vararg<str>) usize {
+    n ::= tag.len;
+    parts.loop((h, p) { n = n + p.len; });
+    n;
+}
+
+// forwarded from behind a fixed prefix, which is where a wrong offset shows
+relay = (tag: str, parts: vararg<str>) usize { label(tag, parts) }
+
+main = (env: Env) Res<i32, AllocError> {
+    b = Box(w: 3);
+    println("{}", sum(1, 2, 3));
+    println("{}", sum());
+    println("{}", forward(4, 5, 6));
+    println("{}", b.widest(1, 9, 4));
+    println("{}", b.widest());
+    println("{}", label("ab", "cde", "f"));
+    println("{}", relay("ab", "cde", "f"));
+    println("{}", label("ab"));
+    Ok(0);
+}

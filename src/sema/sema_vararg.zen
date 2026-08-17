@@ -1,0 +1,266 @@
+// src/sema/sema_vararg.zen
+// `vararg<T>` — the one position it may be written, and the two
+// questions a call site asks about it.
+//
+// A vararg is an ORDINARY DECLARED STRUCT (`collections_vararg.zen`), so
+// nothing here is about what it MEANS: it means what `Vec<i32>` means,
+// resolved by `lookup_named` and interned as a `Ty.Named` like any other
+// nominal. That is the whole design, and it is why this file is short.
+// Two things about it are not ordinary.
+//
+// WHERE IT MAY BE WRITTEN: only as the whole type of a function's LAST
+// parameter. That is not a simplification for later — it is what makes
+// the pack sound with no lifetime machinery at all. A pack BORROWS the
+// caller's frame (`gen_c_call.zen` writes the run as a compound literal
+// in the calling block), so a vararg in a return type, in a field, or
+// inside a type argument would be a borrow outliving what it borrows
+// from. `g = () vararg<i32> { f(1, 2, 3) }` is the shape, and it dangles.
+// Refusing every other position costs one scan and is exact, where an
+// escape analysis would be neither.
+//
+// WHAT A CALL SITE ASKS: does the last parameter swallow the rest
+// (`pack_slot`), and what must each swallowed argument be (`pack_elem`).
+// Both are answered on the INTERNED type, so `sema_cand.zen` and
+// `gen_c_call.zen` read ONE implementation — the arity a call is checked
+// against and the arity it is emitted at cannot drift.
+//
+// `...` IS NOT THIS AND IS NOT TOUCHED. It stays the bare marker the
+// three format doors are declared with, because those doors are
+// heterogeneous and a homogeneous pack cannot type them
+// (`docs/design_vararg.md`).
+
+Ast, Module, Decl, Function, Struct, Impl, Member, Type, TypeId = std.ast
+AllocError = std.mem
+Vec = std.collections
+str = std.text
+Range = std.core
+TyId, Types, TyNamed = sema.sema_ty
+Checker = sema.sema_check
+SemaFault, NameFault = sema.sema_diag
+
+// The name, in one place. A name compare and not a declaration compare,
+// for the reason `Res` is recognised by its spelling and the backend
+// knows `Ptr` by its: there is one declaration of it, the prelude
+// exports it, and a program declaring a second `vararg` has shadowed the
+// prelude on purpose.
+VARARG*: str = "vararg"
+
+// ---------------------------------------------------------------------
+// what a call site asks
+// ---------------------------------------------------------------------
+
+// The `T` of a resolved `vararg<T>`, and `None` for every other type.
+pack_elem* = (types: Types, t: TyId) Res<TyId> {
+    types.at(t).match({
+        Named(n) => named_pack_elem(n),
+        _        => None,
+    })
+}
+
+named_pack_elem = (n: TyNamed) Res<TyId> {
+    n.name.eq(VARARG).match({
+        true  => n.args.get(0),
+        false => None,
+    })
+}
+
+// Where the pack begins, when the last parameter is one. Callers ask
+// "is this variadic" and "where do the swallowed arguments start" at the
+// same moment, so it is one answer and not two.
+pack_slot* = (types: Types, params: Vec<TyId>) Res<usize> {
+    (params.len == 0).match({
+        true  => None,
+        false => tail_slot(types, params, params.len - 1),
+    })
+}
+
+tail_slot = (types: Types, params: Vec<TyId>, i: usize) Res<usize> {
+    params.get(i).match({
+        None  => None,
+        Ok(t) => slot_of(types, t, i),
+    })
+}
+
+slot_of = (types: Types, t: TyId, i: usize) Res<usize> {
+    pack_elem(types, t).match({
+        Ok(_) => Ok(i),
+        None  => None,
+    })
+}
+
+// The same question asked of a WRITTEN signature, before anything is
+// resolved: `gen_c_impl.zen` picks a member out of an overload set by
+// arity off the declaration, so it has a `Function` and no `Types`.
+tail_is_pack* = (tree: Ast, f: Function) bool {
+    (f.params.len == 0).match({
+        true  => false,
+        false => param_is_pack(tree, f, f.params.len - 1),
+    })
+}
+
+param_is_pack = (tree: Ast, f: Function, i: usize) bool {
+    f.params.get(i).match({
+        None  => false,
+        Ok(p) => p.type.match({
+            None  => false,
+            Ok(t) => written_pack(tree.type_at(t)),
+        }),
+    })
+}
+
+// ---------------------------------------------------------------------
+// where it may be written
+//
+// A WHOLE-PROGRAM SCAN, and it has to be: the rule is about a written
+// type's position, and a node carries its span but not its parent. So
+// every `vararg` the compilation wrote is gathered first — the scan
+// costs one match per type node and finds nothing in a tree with no
+// varargs — and then the positions that are allowed name themselves.
+// ---------------------------------------------------------------------
+
+check_varargs* = (c :: Checker) Res<(), AllocError> {
+    found ::= c.alloc.Vec<TypeId>();
+    c.tree.types_where((node) { written_pack(node) }, found).try();
+    (found.len == 0).match({
+        true  => Ok(()),
+        false => check_mentions(c, found),
+    })
+}
+
+// The written form, before anything resolves it: `vararg` applied to
+// arguments, whatever they turn out to be. Asked of every type node in
+// the compilation, so it reads one field and compares one name.
+written_pack* = (node: Type) bool {
+    node.kind.match({
+        Named(n) => n.name.text.eq(VARARG),
+        _        => false,
+    })
+}
+
+check_mentions = (c :: Checker, found: Vec<TypeId>) Res<(), AllocError> {
+    tails ::= c.alloc.Vec<TypeId>();
+    collect_tails(c, tails).try();
+    found.loop((h, t) { check_mention(c, t, tails).try() });
+    Ok(());
+}
+
+// A mention in the one allowed position owes the element rule; a mention
+// anywhere else owes nothing, because the position is already wrong.
+//
+// `vararg<vararg<i32>>` in a last parameter reports TWICE and that is
+// right: the outer says the element may not be a pack, the inner says a
+// pack is a last parameter's type. Both sentences are true of it, and
+// the reader has to delete both halves either way.
+check_mention = (c :: Checker, t: TypeId, tails: Vec<TypeId>)
+                Res<(), AllocError> {
+    has_id(tails, t).match({
+        true  => check_element(c, t),
+        false => report_pack(
+            c,
+            t,
+            SemaFault.VarargNotLast(NameFault(name: VARARG))
+        ),
+    })
+}
+
+// EXACTLY ONE ARGUMENT, AND NOT ITSELF A PACK. Zero arguments leaves the
+// element type a free parameter, so no call site could say what its
+// arguments must be; two says nothing at all. A pack of packs has no
+// call site that could build the inner runs.
+check_element = (c :: Checker, t: TypeId) Res<(), AllocError> {
+    element_ok(c, t).match({
+        true  => Ok(()),
+        false => report_pack(
+            c,
+            t,
+            SemaFault.VarargElement(NameFault(name: VARARG))
+        ),
+    })
+}
+
+element_ok = (c: Checker, t: TypeId) bool {
+    c.tree.type_at(t).kind.match({
+        Named(n) => (n.args.len == 1) && !element_is_pack(c, n.args),
+        _        => false,
+    })
+}
+
+element_is_pack = (c: Checker, args: Vec<TypeId>) bool {
+    args.get(0).match({
+        None  => false,
+        Ok(a) => written_pack(c.tree.type_at(a)),
+    })
+}
+
+report_pack = (c :: Checker, t: TypeId, fault: SemaFault) Res<(), AllocError> {
+    node = c.tree.type_at(t);
+    c.report(node.span.file, node.span, fault)
+}
+
+// ---------------------------------------------------------------------
+// the allowed positions
+//
+// Every function's last parameter, wherever a function is declared: at
+// module level, in a struct body, in an impl. A bodyless declaration
+// counts — the three format doors are bodyless and a trait slot may be
+// too, and a signature is a signature.
+// ---------------------------------------------------------------------
+
+collect_tails = (c :: Checker, out :: Vec<TypeId>) Res<(), AllocError> {
+    Range(0, c.tree.module_count()).loop((h, mi) {
+        c.tree.module_at(mi).match({
+            Ok(m) => module_tails(m, out),
+            None  => Ok(()),
+        }).try();
+    });
+    Ok(());
+}
+
+module_tails = (m: Module, out :: Vec<TypeId>) Res<(), AllocError> {
+    m.decls.loop((h, d) { decl_tails(d, out).try() });
+    Ok(());
+}
+
+decl_tails = (d: Decl, out :: Vec<TypeId>) Res<(), AllocError> {
+    d.kind.match({
+        Function(f) => fn_tail(f, out),
+        Struct(s)   => member_tails(s.members, out),
+        Impl(im)    => member_tails(im.members, out),
+        _           => Ok(()),
+    })
+}
+
+member_tails = (members: Vec<Member>, out :: Vec<TypeId>)
+               Res<(), AllocError> {
+    members.loop((h, mem) {
+        mem.kind.match({
+            Function(f) => fn_tail(f, out),
+            _           => Ok(()),
+        }).try();
+    });
+    Ok(());
+}
+
+fn_tail = (f: Function, out :: Vec<TypeId>) Res<(), AllocError> {
+    (f.params.len == 0).match({
+        true  => Ok(()),
+        false => tail_param(f, f.params.len - 1, out),
+    })
+}
+
+tail_param = (f: Function, i: usize, out :: Vec<TypeId>)
+             Res<(), AllocError> {
+    f.params.get(i).match({
+        None  => Ok(()),
+        Ok(p) => p.type.match({
+            None  => Ok(()),
+            Ok(t) => out.add(t),
+        }),
+    })
+}
+
+has_id = (ids: Vec<TypeId>, want: TypeId) bool {
+    Range(0, ids.len).find((i) {
+        ids.get(i).match({ Ok(t) => t.index == want.index, None => false })
+    }).match({ Ok(_) => true, None => false })
+}

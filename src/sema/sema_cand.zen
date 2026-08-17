@@ -38,6 +38,7 @@ Inst, tparam_vars = sema.sema_inst
 Cand, TBound, Actual = sema.sema_call
 satisfies_bound = sema.sema_bound
 type_from_ast, type_of, param_type = sema.sema_type
+pack_elem, pack_slot = sema.sema_vararg
 
 // ---------------------------------------------------------------------
 // candidates
@@ -262,12 +263,24 @@ fixed_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
 // every `.try()` on it lost its operand's type and every `.view()` on
 // the result was unresolvable.
 //
-// Only the FIXED PREFIX is checked. What the rest may be is
-// type-directed — `text_string.zen` says the call is expanded where it
-// is written — and a check on arguments whose types the language has
-// not settled would be inventing a rule.
+// Only the FIXED PREFIX is checked when the tail is the bare `...`. What
+// the rest may be is type-directed — `text_string.zen` says the call is
+// expanded where it is written — and a check on arguments whose types the
+// language has not settled would be inventing a rule.
+//
+// A `vararg<T>` TAIL DOES SAY WHAT THE REST MAY BE, which is the whole
+// difference between the two spellings, so its swallowed arguments go
+// through `pack_sig_fits` and are checked against `T`.
 variadic_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
                    Res<bool, AllocError> {
+    pack_slot(c.types, cand.params).match({
+        None     => c.marker_matches(cand, actuals),
+        Ok(slot) => c.pack_sig_fits(cand.params, actuals, 0, slot),
+    })
+}
+
+marker_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
+                 Res<bool, AllocError> {
     fixed = cand.params.len - 1;
     (actuals.len >= fixed).match({
         false => Ok(false),
@@ -275,14 +288,124 @@ variadic_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
     })
 }
 
-// Whether the last parameter says the list does not end. `sema_type.zen`
-// interns `...` as a primitive, so this is a name compare and not a
-// new kind of `Ty`.
+// THE ONE IMPLEMENTATION OF "THESE ACTUALS AGAINST A SIGNATURE THAT ENDS
+// IN A PACK", read by both entry points. `off` is the signature index of
+// actual zero — 0 for a free function, 1 for a member whose parameter
+// zero is the receiver, which is `sema_call.zen`'s `recv_off` by the same
+// name. Without one implementation the two would drift, and a call the
+// checker accepted at one arity would be emitted at another.
+//
+// `slot < off` is an associated function whose only parameter is a pack,
+// reached through the receiver path: there is no receiver to occupy
+// position zero, so no argument list fits.
+pack_sig_fits* = (
+    c       :: Checker,
+    ps      : Vec<TyId>,
+    actuals : Vec<Actual>,
+    off     : usize,
+    slot    : usize
+) Res<bool, AllocError> {
+    (slot < off).match({
+        true  => Ok(false),
+        false => c.pack_arity_fits(ps, actuals, off, slot - off),
+    })
+}
+
+pack_arity_fits = (
+    c       :: Checker,
+    ps      : Vec<TyId>,
+    actuals : Vec<Actual>,
+    off     : usize,
+    fixed   : usize
+) Res<bool, AllocError> {
+    (actuals.len >= fixed).match({
+        false => Ok(false),
+        true  => c.prefix_then_pack(ps, actuals, off, fixed),
+    })
+}
+
+prefix_then_pack = (
+    c       :: Checker,
+    ps      : Vec<TyId>,
+    actuals : Vec<Actual>,
+    off     : usize,
+    fixed   : usize
+) Res<bool, AllocError> {
+    ok ::= true;
+    Range(0, fixed).loop((h, i) {
+        got = c.fits_at_ty(actuals, i, ty_at(ps, i + off)).try();
+        ok  = ok && got;
+    });
+    tail = c.pack_tail_fits(actuals, fixed, ty_at(ps, fixed + off)).try();
+    Ok(ok && tail);
+}
+
+// TWO READINGS OF ONE SLOT, and `vararg` not nesting (`sema_vararg.zen`)
+// is what keeps them apart: a run of `T` values, or exactly ONE value
+// that is already a `vararg<T>` being FORWARDED. Forwarding is what a
+// bare `...` cannot do at all — it carries no type to pass on — and here
+// it is ordinary assignability, not a case of its own.
+pack_tail_fits = (
+    c       :: Checker,
+    actuals : Vec<Actual>,
+    fixed   : usize,
+    pack    : TyId
+) Res<bool, AllocError> {
+    c.pack_forwarded(actuals, fixed, pack).try().match({
+        true  => Ok(true),
+        false => c.spread_fits(actuals, fixed, c.pack_element_of(pack)),
+    })
+}
+
+pack_forwarded = (c :: Checker, actuals: Vec<Actual>, fixed: usize, pack: TyId)
+            Res<bool, AllocError> {
+    (actuals.len == fixed + 1).match({
+        false => Ok(false),
+        true  => c.fits_at_ty(actuals, fixed, pack),
+    })
+}
+
+spread_fits = (c :: Checker, actuals: Vec<Actual>, fixed: usize, elem: TyId)
+              Res<bool, AllocError> {
+    ok ::= true;
+    Range(fixed, actuals.len).loop((h, i) {
+        got = c.fits_at_ty(actuals, i, elem).try();
+        ok  = ok && got;
+    });
+    Ok(ok);
+}
+
+// A pack whose element type nothing says is its own poison: the type is
+// already reported, and answering with it keeps the arity question
+// truthful instead of accepting everything.
+pack_element_of = (c: Checker, pack: TyId) TyId {
+    pack_elem(c.types, pack).match({ Ok(e) => e, None => pack })
+}
+
+fits_at_ty = (c :: Checker, actuals: Vec<Actual>, i: usize, want: TyId)
+             Res<bool, AllocError> {
+    actuals.get(i).match({
+        Ok(a) => fits(c, a, want),
+        None  => Ok(false),
+    })
+}
+
+// Whether the last parameter says the list does not end — the bare `...`
+// marker, which `sema_type.zen` interns as a primitive so this is a name
+// compare, or a `vararg<T>`, which is an ordinary nominal.
 is_variadic = (c: Checker, cand: Cand) bool {
     (cand.params.len > 0).match({
         false => false,
-        true  => c.prim_name(ty_at(cand.params, cand.params.len - 1)).eq("..."),
+        true  => c.tail_swallows(ty_at(cand.params, cand.params.len - 1)),
     })
+}
+
+// THE ANSWER THE BACKEND READS BACK. `gen_c_member.zen` asks it of a
+// resolved member signature, so the arity a call is emitted at is the
+// arity the checker accepted it at.
+tail_swallows* = (c: Checker, tail: TyId) bool {
+    c.prim_name(tail).eq("...")
+        || pack_elem(c.types, tail).match({ Ok(_) => true, None => false })
 }
 
 // The first `n` arguments, and no early exit — `find` takes a closure
@@ -352,8 +475,20 @@ value_fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
 // the comparison starts at one. The receiver is not re-checked here
 // because the member table is what found it — it is already known to be
 // a member of that type.
+//
+// A MEMBER MAY END IN A PACK, and then the arity is a minimum here too —
+// `pack_sig_fits` with the offset the paragraph above names, so `b.widest(1,
+// 9, 4)` and `sum(1, 9, 4)` are one rule read twice rather than two.
 recv_sig_fits* = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>)
                  Res<bool, AllocError> {
+    pack_slot(c.types, ps).match({
+        None     => c.recv_fixed_fits(ps, actuals),
+        Ok(slot) => c.pack_sig_fits(ps, actuals, 1, slot),
+    })
+}
+
+recv_fixed_fits = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>)
+                  Res<bool, AllocError> {
     (ps.len == actuals.len + 1).match({
         false => Ok(false),
         true  => args_fit(c, ps, actuals),

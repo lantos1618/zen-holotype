@@ -120,6 +120,10 @@ SemaFault* =
     | HoistAmbiguous(TypeFault)        // two variants carry the type
     | HoistNotSuccess(NameFault)       // only success lifts
 
+    // vararg — the pack's one legal position, and its one type argument
+    | VarargNotLast(NameFault)         // a pack borrows the caller's frame, so it may not outlive the call
+    | VarargElement(NameFault)         // a run of T, and never a run of runs
+
     // match
     | NotExhaustive(NameFault)         // names the first case left uncovered
     | UnreachableArm(NameFault)        // every value it matches is covered above
@@ -213,6 +217,8 @@ message* = (fault: SemaFault) str {
         InferredSetExported(_)    => "inferred error set on an exported function: `*` means this name crosses a module boundary, so its type is written, not inferred",
         HoistAmbiguous(_)         => "cannot be hoisted: hoisting fires only when exactly one variant carries the type, so write the variant out",
         HoistNotSuccess(_)        => "only success lifts into Res: failure stays visible, so this must be written out",
+        VarargNotLast(_)          => "a vararg is only ever a function's last parameter: the pack borrows the caller's frame, so anywhere it could outlive the call it would dangle",
+        VarargElement(_)          => "a vararg writes exactly one element type, and it is never itself a vararg: `vararg<T>` is a run of T, and no call site could build a run of runs",
         NotExhaustive(_)          => "match is not exhaustive: cover every case or write `_` — match is exhaustive in every position",
         UnreachableArm(_)         => "unreachable match arm: every value it could match is already covered above",
         ConstPattern(_)           => "a pattern binds, it never compares: a bare name in a pattern is a fresh binding, so this arm matches every value",
@@ -266,6 +272,8 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         ComputedFieldAddress(f)   => out.write_name(f),
         InferredSetExported(f)    => out.write_name(f),
         HoistNotSuccess(f)        => out.write_name(f),
+        VarargNotLast(f)          => out.write_name(f),
+        VarargElement(f)          => out.write_name(f),
         NotExhaustive(f)          => out.write_name(f),
         UnreachableArm(f)         => out.write_name(f),
         ConstPattern(f)           => write_const_pattern(out, f),

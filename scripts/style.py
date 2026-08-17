@@ -165,7 +165,7 @@ UFCS_OWED: dict[str, int] = {
     "src/gen/gen_c/gen_c_assoc.zen": 30,
     "src/gen/gen_c/gen_c_bound.zen": 65,
     "src/gen/gen_c/gen_c_build.zen": 52,
-    "src/gen/gen_c/gen_c_call.zen": 88,
+    "src/gen/gen_c/gen_c_call.zen": 87,
     "src/gen/gen_c/gen_c_cap.zen": 83,
     "src/gen/gen_c/gen_c_const.zen": 19,
     "src/gen/gen_c/gen_c_decl.zen": 74,

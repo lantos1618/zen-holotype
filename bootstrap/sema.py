@@ -268,6 +268,7 @@ ERR = Ty("error")        # poison: a diagnostic was already reported here
 UNIT = Ty("unit")
 NEVER = Ty("never")      # the empty error set
 VARIADIC = Ty("variadic")  # the `args: ...` tail: zero or more of anything
+VARARG = "vararg"          # `vararg<T>`: zero or more of T, and a real type
 INTLIT = Ty("intlit")
 FLOATLIT = Ty("floatlit")
 BOOL = Ty("prim", "bool")
@@ -439,6 +440,24 @@ _TRAIT_COERCION = None
 
 def _impls_trait(a, b):
     return bool(_TRAIT_COERCION) and _TRAIT_COERCION(a, b)
+
+
+def pack_elem(ty):
+    """The `T` of a `vararg<T>`, and None for anything else.
+
+    `vararg<T>` is an ORDINARY DECLARED STRUCT in std, so nothing else about it
+    needs a case here: it resolves, unifies and lays out like `Vec<T>`. Only the
+    ARITY of a call to a function ending in one is special — the pack swallows
+    the rest — which is what `_is_variadic` and `_spread` below read this for.
+    A name compare, as the self-hosted `sema_vararg.pack_elem` is.
+    """
+    if ty is None or ty.kind != "named":
+        return None
+    # a qname is `std.collections.collections_vararg::vararg` — the module path
+    # dotted, the declaration after a `::`, so the last component needs both
+    if str(ty.name).replace("::", ".").rsplit(".", 1)[-1] != VARARG:
+        return None
+    return ty.args[0] if len(ty.args) == 1 else None
 
 
 def assignable(a, b):
@@ -1018,6 +1037,8 @@ class Sema:
         self._ufcs_index = None
         self._muted = 0
         self._resolving = set()
+        self._pack_ok = None     # id(type node) -> a vararg may be written here
+        self._pack_seen = set()  # one diagnostic per mention, not per resolution
 
         # accepts an ast.Module, a modules.ModuleInfo, or the whole Graph —
         # `bootstrap.py` hands sema whatever `modules.py` built.
@@ -1519,6 +1540,8 @@ class Sema:
             return ANY
         if name == "...":
             return VARIADIC
+        if name == VARARG:
+            self._check_pack(node, args)
         sub = dict(ctx.subst)
         if name in sub:
             return sub[name]
@@ -1533,6 +1556,74 @@ class Sema:
         if name in ctx.mod.imports:
             return ERR      # modules.py owns the unexported/unknown import diag
         return ANY
+
+    # -- vararg's one legal position ----------------------------------------
+    #
+    # A pack BORROWS the calling frame — gen_c writes the run as a compound
+    # literal in the calling block — so a `vararg` in a return type, a field, or
+    # a type argument would be a borrow outliving what it borrows from.
+    # `g = () vararg<i32> { f(1, 2, 3) }` is the shape, and it dangles.
+    #
+    # Checked HERE, where every type node the compilation resolves passes,
+    # rather than by a walk of its own: the node carries no parent, so the
+    # positions that PERMIT a pack name themselves instead (`_pack_positions`).
+    # `sema_vararg.zen` states the rule and reaches it the same way, keyed on a
+    # `TypeId` where this is keyed on `id(node)`.
+
+    def _check_pack(self, node, args):
+        if node is None or id(node) in self._pack_seen:
+            return
+        self._pack_seen.add(id(node))
+        if id(node) not in self._pack_positions():
+            self.error(_span(node), "a vararg is only ever a function's last "
+                             "parameter: the pack borrows the caller's frame, "
+                             "so anywhere it could outlive the call it would "
+                             "dangle")
+        elif len(args) != 1 or pack_elem(args[0]) is not None:
+            self.error(_span(node), "a vararg writes exactly one element type, and it "
+                             "is never itself a vararg: `vararg<T>` is a run of "
+                             "T, and no call site could build a run of runs")
+
+    def _pack_positions(self):
+        """`id()` of every type node a pack may be written at: each function's
+        last parameter, wherever a function is declared. A bodyless declaration
+        counts — a signature is a signature."""
+        if self._pack_ok is None:
+            self._pack_ok = set()
+            for mi in self.mods:
+                for d in mi.decls:
+                    self._pack_decl(d)
+        return self._pack_ok
+
+    def _pack_decl(self, d):
+        k = _k(d)
+        if k == "Function":
+            self._pack_tail(d)
+        elif k == "Struct":
+            for mem in _tup(_g(d, "fields")) + _tup(_g(d, "members")):
+                self._pack_member(mem)
+        elif k == "Impl":
+            for mem in _tup(_g(d, "entries")) + _tup(_g(d, "members")):
+                self._pack_member(mem)
+
+    def _pack_member(self, mem):
+        """"A method is a function-typed FIELD" (ast.py), so its parameters live
+        on the written type — and the body beside it writes them again. Both
+        spellings are recorded, because either may be the node a signature is
+        resolved from."""
+        for cand in (mem, _g(mem, "ty", "type"), _g(mem, "default"),
+                     _g(mem, "value")):
+            if cand is not None and _k(cand) in ("Function", "Lambda", "FnType"):
+                self._pack_tail(cand)
+
+    def _pack_tail(self, fnode):
+        params = _tup(_g(fnode, "params"))
+        if not params:
+            return
+        tail = _g(params[-1], "ty", "type")
+        if tail is not None:
+            self._pack_ok.add(id(tail))
+            self._keep.append(tail)
 
     def type_from_def(self, td, args, ctx):
         # The prelude DECLARES the builtins: `i32` is a struct in
@@ -3557,7 +3648,8 @@ class Sema:
             if mty is not None and mty.kind == "fn":
                 mty = self._apply_call_targs(mty, targs)
                 # the receiver is the first parameter; the rest line up
-                ps = self._spread(list(mty.args[1:]) if mty.args else [], len(vals))
+                ps = self._spread(list(mty.args[1:]) if mty.args else [],
+                                  len(vals), self._arg_tys(vals, ctx))
                 for v, p in zip(vals, ps):
                     t = self.type_of(v, ctx, expect=p)
                     self.coerce(t, p, _span(v), v)
@@ -3665,7 +3757,7 @@ class Sema:
             ps = list(t.args[1:])
             if not self._fits_arity(ps, len(vals)):
                 continue
-            ps = self._spread(ps, len(vals))
+            ps = self._spread(ps, len(vals), self._arg_tys(vals, ctx))
             self._muted += 1
             try:
                 ok = all(assignable(self.type_of(v, ctx, expect=p), p)
@@ -3710,7 +3802,8 @@ class Sema:
                 continue
             sub = {}
             ok = True
-            for want, got, n in zip(self._spread(ptys, n_args), arg_types, arg_nodes):
+            for want, got, n in zip(self._spread(ptys, n_args, arg_types),
+                                    arg_types, arg_nodes):
                 if not self._unify(want, got, sub, n, ctx):
                     ok = False
                     break
@@ -3726,7 +3819,8 @@ class Sema:
                 # overload matches". The re-check below reports it precisely.
                 fd, ptys = same_arity[0]
                 sub = {}
-                for want, got, n in zip(self._spread(ptys, n_args), arg_types, arg_nodes):
+                for want, got, n in zip(self._spread(ptys, n_args, arg_types),
+                                    arg_types, arg_nodes):
                     self._unify(want, got, sub, n, ctx)
                 viable = [(0, fd, ptys, sub)]
             elif not cands:
@@ -3756,7 +3850,7 @@ class Sema:
 
         # re-check the arguments against the substituted parameter types, so a
         # closure gets its parameter types from the signature it is passed to
-        for want, n in zip(self._spread(ptys, n_args), arg_nodes):
+        for want, n in zip(self._spread(ptys, n_args, arg_types), arg_nodes):
             w = subst_ty(want, sub)
             if n is None:
                 continue
@@ -3774,9 +3868,23 @@ class Sema:
             self.check_function(fd, {}, ctx.frame)
         return self.fn_ret(fd, fctx)
 
+    def _arg_tys(self, vals, ctx):
+        """The argument types, computed without reporting. Only `_spread` asks,
+        and only to tell a forwarded pack from a run of its elements — a
+        question the answer to must not itself produce a diagnostic, since the
+        candidate it is being asked about may lose."""
+        self._muted += 1
+        try:
+            return tuple(self.type_of(v, ctx) for v in vals)
+        finally:
+            self._muted -= 1
+
     @staticmethod
     def _is_variadic(ptys):
-        return bool(ptys) and ptys[-1].kind == "variadic"
+        """Whether the last parameter says the list does not end: the bare `...`
+        marker, or a `vararg<T>`."""
+        return bool(ptys) and (ptys[-1].kind == "variadic"
+                               or pack_elem(ptys[-1]) is not None)
 
     @classmethod
     def _fits_arity(cls, ptys, n):
@@ -3789,13 +3897,27 @@ class Sema:
         return n == len(ptys)
 
     @classmethod
-    def _spread(cls, ptys, n):
+    def _spread(cls, ptys, n, argtys=()):
         """The parameter types laid out against `n` arguments, the variadic
-        tail repeated for each argument it swallows."""
+        tail repeated for each argument it swallows.
+
+        A `...` tail swallows arguments whose types the language has not settled,
+        so each slot is `VARIADIC` and fits anything. A `vararg<T>` tail DOES say
+        what the rest may be, so each slot is `T` — except for the one reading
+        that makes a pack forwardable: a single trailing argument that is ALREADY
+        the pack is passed straight through. `argtys` is what tells them apart,
+        and `vararg` not nesting is what keeps them from colliding.
+        """
         if not cls._is_variadic(ptys):
             return list(ptys)
         fixed = list(ptys[:-1])
-        return fixed + [VARIADIC] * max(0, n - len(fixed))
+        tail = ptys[-1]
+        elem = pack_elem(tail)
+        if elem is None:
+            return fixed + [VARIADIC] * max(0, n - len(fixed))
+        if n == len(fixed) + 1 and len(argtys) == n and argtys[-1] == tail:
+            return fixed + [tail]
+        return fixed + [elem] * max(0, n - len(fixed))
 
     @classmethod
     def _arity_text(cls, ptys):
