@@ -126,9 +126,7 @@ write_cast* = (be :: CBackend, code: str, dst: TyId, out :: String)
              Res<(), AllocError> {
     out.add_bytes("((").try();
     ctype(be, dst, out).try();
-    out.add_bytes(")").try();
-    out.add_bytes(code).try();
-    out.add_bytes(")").try();
+    out.fmt("){code})").try();
     Ok(());
 }
 
@@ -162,9 +160,7 @@ rebuild_res = (
     sym_gen(tmp, "t", be.next_tmp()).try();
     declare_temp(be, src, tmp.view()).try();
     be.set_line(tmp.view(), code).try();
-    out.add_bytes("(").try();
-    out.add_bytes(tmp.view()).try();
-    out.add_bytes(".zg_tag == ").try();
+    out.fmt("({}.zg_tag == ", tmp.view()).try();
     out.sym_variant(RES_PATH, "Ok").try();
     out.add_bytes(" ? ").try();
     res_arm(be, tmp.view(), "Ok", s.value, d.value, dst, out).try();
@@ -224,8 +220,7 @@ payload_arm = (
     out.sym_member(v).try();
     out.add_bytes(" = ").try();
     read ::= be.alloc.String().try();
-    read.add_bytes(tmp).try();
-    read.add_bytes(".zg_data.").try();
+    read.fmt("{tmp}.zg_data.").try();
     sym_member(read, v).try();
     convert(be, read.view(), sp, dp, out).try();
     out.add_bytes(" })").try();
@@ -310,14 +305,7 @@ write_named_slot = (
     out  :: String
 ) Res<Res<Slot>, AllocError> {
     request_type(be, slot.ret).try();
-    out.add_bytes(recv).try();
-    out.add_bytes(".").try();
-    out.add_bytes(slot.sym.view()).try();
-    out.add_bytes("(").try();
-    out.add_bytes(recv).try();
-    out.add_bytes(".zg_self").try();
-    out.add_bytes(args).try();
-    out.add_bytes(")").try();
+    out.fmt("{recv}.{}({recv}.zg_self{args})", slot.sym.view()).try();
     Ok(Ok(slot));
 }
 
@@ -558,12 +546,7 @@ emit_fat_call = (
     declare_temp(be, rty, r.view()).try();
     be.set_line(r.view(), recv.view()).try();
     call ::= be.alloc.String().try();
-    call.add_bytes(r.view()).try();
-    call.add_bytes(".").try();
-    call.add_bytes(slot.sym.view()).try();
-    call.add_bytes("(").try();
-    call.add_bytes(r.view()).try();
-    call.add_bytes(".zg_self").try();
+    call.fmt("{}.{}({}.zg_self", r.view(), slot.sym.view(), r.view()).try();
     fat_args(be, c, slot, declared, targs, ctx, call).try();
     fat_sizes(be, targs, call).try();
     call.add_bytes(")").try();
@@ -657,10 +640,7 @@ fat_result = (
 
 fat_effect = (be :: CBackend, call: str, out :: String)
              Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(call).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view()).try();
+    be.fmt("{call};\n").try();
     out.add_bytes("0")
 }
 

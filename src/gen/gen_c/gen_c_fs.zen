@@ -59,11 +59,7 @@ lower_probe* = (be :: CBackend, c: Call, name: str, ctx: Ctx, out :: String)
     be.need_fs();
     path ::= be.alloc.String().try();
     path_args(be, c, 0, ctx, path).try();
-    out.add_bytes("(zg_fs_kind(").try();
-    out.add_bytes(path.view()).try();
-    out.add_bytes(")").try();
-    out.add_bytes(probe_test(name)).try();
-    out.add_bytes(")").try();
+    out.fmt("(zg_fs_kind({}){})", path.view(), probe_test(name)).try();
     Ok(());
 }
 
@@ -111,15 +107,7 @@ lower_write* = (
 
 write_fs_call = (be :: CBackend, rc: str, fn: str, first: str, second: str)
                 Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(rc).try();
-    line.add_bytes(" = ").try();
-    line.add_bytes(fn).try();
-    line.add_bytes(first).try();
-    line.add_bytes(", ").try();
-    line.add_bytes(second).try();
-    line.add_bytes(");").try();
-    be.writeln(line.view())
+    be.fmt("{rc} = {fn}{first}, {second});\n")
 }
 
 // `(const unsigned char *)<tmp>.data, <tmp>.len` — the two halves of a
@@ -135,11 +123,11 @@ path_args* = (be :: CBackend, c: Call, i: usize, ctx: Ctx, out :: String)
     value ::= be.alloc.String().try();
     arg_text(be, c, i, sty, ctx, value).try();
     be.set_line(tmp.view(), value.view()).try();
-    out.add_bytes("(const unsigned char *)").try();
-    out.add_bytes(tmp.view()).try();
-    out.add_bytes(".data, ").try();
-    out.add_bytes(tmp.view()).try();
-    out.add_bytes(".len").try();
+    out.fmt(
+        "(const unsigned char *){}.data, {}.len",
+        tmp.view(),
+        tmp.view()
+    ).try();
     Ok(());
 }
 
@@ -272,14 +260,7 @@ hold_alloc = (
 
 write_size_call = (be :: CBackend, rc: str, path: str, want: str)
                   Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(rc).try();
-    line.add_bytes(" = zg_fs_size(").try();
-    line.add_bytes(path).try();
-    line.add_bytes(", &").try();
-    line.add_bytes(want).try();
-    line.add_bytes(");").try();
-    be.writeln(line.view())
+    be.fmt("{rc} = zg_fs_size({path}, &{want});\n")
 }
 
 // ALIGN_MAX, exactly as `create` asks for: it is what the arena would
@@ -302,9 +283,7 @@ read_body = (
 ) Res<(), AllocError> {
     call ::= be.alloc.String().try();
     args ::= be.alloc.String().try();
-    args.add_bytes(", ").try();
-    args.add_bytes(want).try();
-    args.add_bytes(", 16").try();
+    args.fmt(", {want}, 16").try();
     slot_call(be, al, aty, "raw", args.view(), 2, call).try().match({
         None     => unsupported_line(be, id, "Fs.read needs an Alloc"),
         Ok(slot) => run_and_read(
@@ -368,31 +347,21 @@ run_and_read = (
 }
 
 declare_ptr = (be :: CBackend, name: str) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("unsigned char *").try();
-    line.add_bytes(name).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view())
+    be.fmt("unsigned char *{name};\n")
 }
 
 read_ok_payload = (be :: CBackend, run: str, buf: str)
                   Res<(), AllocError> {
     value ::= be.alloc.String().try();
-    value.add_bytes("(unsigned char *)").try();
-    value.add_bytes(run).try();
-    value.add_bytes(".zg_data.").try();
+    value.fmt("(unsigned char *){run}.zg_data.").try();
     sym_member(value, "Ok").try();
     be.set_line(buf, value.view())
 }
 
 open_not_ok = (be :: CBackend, run: str) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("if (").try();
-    line.add_bytes(run).try();
-    line.add_bytes(".zg_tag != ").try();
-    sym_variant(line, RES_PATH, "Ok").try();
-    line.add_bytes(") {").try();
-    be.writeln(line.view()).try();
+    tag ::= be.alloc.String().try();
+    sym_variant(tag, RES_PATH, "Ok").try();
+    be.fmt("if ({run}.zg_tag != {}) {\n", tag.view()).try();
     be.indent();
     Ok(());
 }
@@ -405,18 +374,7 @@ write_read_call = (
     want : str,
     got  : str
 ) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes(rc).try();
-    line.add_bytes(" = zg_fs_read(").try();
-    line.add_bytes(path).try();
-    line.add_bytes(", ").try();
-    line.add_bytes(buf).try();
-    line.add_bytes(", ").try();
-    line.add_bytes(want).try();
-    line.add_bytes(", &").try();
-    line.add_bytes(got).try();
-    line.add_bytes(");").try();
-    be.writeln(line.view())
+    be.fmt("{rc} = zg_fs_read({path}, {buf}, {want}, &{got});\n")
 }
 
 write_string_ok = (
@@ -489,8 +447,7 @@ write_named_init = (
     first.match({ true => Ok(()), false => out.add_bytes(", ") }).try();
     out.add_bytes(".").try();
     out.sym_member(name).try();
-    out.add_bytes(" = ").try();
-    out.add_bytes(value).try();
+    out.fmt(" = {value}").try();
     Ok(());
 }
 
@@ -535,35 +492,23 @@ fs_branch = (be :: CBackend, ret: TyId, rc: str, dst: str, n: usize)
 
 open_ordinal_test = (be :: CBackend, rc: str, n: usize)
                     Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("if (").try();
-    line.add_bytes(rc).try();
-    line.add_bytes(" == ").try();
-    write_usize(line, n).try();
-    line.add_bytes(") {").try();
-    be.writeln(line.view()).try();
+    ord ::= be.alloc.String().try();
+    write_usize(ord, n).try();
+    be.fmt("if ({rc} == {}) {\n", ord.view()).try();
     be.indent();
     Ok(());
 }
 
 open_rc_test* = (be :: CBackend, rc: str) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("if (").try();
-    line.add_bytes(rc).try();
-    line.add_bytes(" != 0) {").try();
-    be.writeln(line.view()).try();
+    be.fmt("if ({rc} != 0) {\n").try();
     be.indent();
     Ok(());
 }
 
-// `if (<p> == NULL) {` — the one failure any C call answering with a
-// pointer has, whether it opened a file or asked for a page.
+// The one failure any C call answering with a pointer has, whether it
+// opened a file or asked for a page.
 open_null_test* = (be :: CBackend, raw: str) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("if (").try();
-    line.add_bytes(raw).try();
-    line.add_bytes(" == NULL) {").try();
-    be.writeln(line.view()).try();
+    be.fmt("if ({raw} == NULL) {\n").try();
     be.indent();
     Ok(());
 }
