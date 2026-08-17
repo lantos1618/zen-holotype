@@ -194,18 +194,25 @@ The sketch was: evaluator, then `@meta` READ, then `@meta` BUILD, then the consu
 
 An evaluator with no caller is a gate that cannot fail, so the instinct is to give it a caller that is not `@meta`. The obvious candidate looks perfect and is a trap.
 
-`DESIGN.md:313` makes an array's count part of its type, and `sema_type.zen:151` says what that costs: "The count is an EXPRESSION because it's comptime, not literal: `[u8, i32.BITS]` folds like `i32.MAX + 1`." So the language already has a position that promises comptime evaluation and is not `@meta`. It is also genuinely broken today, in this tree's favourite way — **silently**:
+`DESIGN.md:313` makes an array's count part of its type, and `sema_type.zen` says what that costs: "The count is an EXPRESSION because it's comptime, not literal: `[u8, i32.BITS]` folds like `i32.MAX + 1`." So the language already has a position that promises comptime evaluation and is not `@meta`. It was also genuinely broken, in this tree's favourite way — **silently**:
 
 ```groovy
 SIZE: usize = 4
-b: [u8, SIZE] = [1, 2, 3, 4];   // reports: expected [u8, 0], found [int, 4]
+b: [u8, SIZE] = [1, 2, 3, 4];   // reported: expected [u8, 0], found [int, 4]
 ```
 
-`const_count` (`sema_trap.zen:356`) declines on a named constant and the count becomes **0**, so the type is `[u8, 0]`, every index into it is out of range, and the diagnostic blames the literal instead of saying the count did not fold. The bootstrapper declines too and answers `None` rather than `0` (`bootstrap/sema.py:1501`) — the two implementations already disagree here, and no test asks.
+`const_count` declined on a named constant and the count became **0**, so the type was `[u8, 0]`, every index into it out of range, and both diagnostics blamed something other than the count. The bootstrapper declined too and answered `None` rather than `0` — the two implementations disagreed, and no test asked.
 
-**But the array-count position is INSIDE the seed subset.** A corpus test for it must pass under `make test`, so fixing it properly means teaching the bootstrapper to evaluate too — which is `PLAN.md:228`'s bill, arriving through a side door, for a feature that was supposed to cost bootstrap nothing.
+**And the array-count position is INSIDE the seed subset.** A corpus test for it must pass under `make test`, so anything that needs *evaluation* here needs it in `bootstrap/` too — `PLAN.md:228`'s bill, arriving through a side door, for a feature that was supposed to cost bootstrap nothing. That is why M2 cannot hide behind this position.
 
-So: **the comptime evaluator's only legitimate entry point is `@meta`.** M2 lands under M3's gate, in one lane with it, and the array-count defect is a separate, smaller, seed-subset bug that should be fixed in both implementations on its own ticket — not smuggled in as the evaluator's test harness.
+**Fixed 2026-08-17, on its own ticket, and NOT by an evaluator.** The split is what let the fix land inside the seed subset for nothing:
+
+- **A NAME IS A LOOKUP.** `sema_trap.counted_array` resolves the count's name to its `ConstDef` — the same `const_def` the const-pattern rule reads — and hands the constant's declared value back to the ordinary folder. `bootstrap.array_count` is the same three steps over `_const_decl`. **The bill above is the EVALUATOR's, and a lookup is not one**, so bootstrap paid a dozen lines and no design.
+- **ANYTHING FURTHER IS REFUSED BY NAME.** `SIZE * 2` and `count()` are evaluator territory and say so at the count's own position — `SemaFault.CountNotComptime`, worded identically in both toolchains, pointing here. The refused count poisons the whole array type, so the two downstream lies cannot fire: `must-fail/sema/array_count_is_not_comptime` carries a `.count` of 1 to hold that closed.
+
+`corpus/sema/array_count_from_a_constant` is the other half, and it asserts what sema alone cannot: `[u8, SIZE]` and `[u8, 4]` must reach `cc` as ONE mangled struct.
+
+So: **the comptime evaluator's only legitimate entry point is still `@meta`.** M2 lands under M3's gate, in one lane with it. What the array-count position promises beyond a constant's name is the evaluator's to deliver, and until it does, the position says so out loud.
 
 ---
 

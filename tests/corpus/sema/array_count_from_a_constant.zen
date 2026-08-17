@@ -1,0 +1,47 @@
+// AN ARRAY'S COUNT IS A COMPTIME EXPRESSION, AND A CONSTANT IS ONE.
+// `sema_type.array_type`: "the count is an EXPRESSION because it's
+// comptime, not literal". A named constant is the smallest thing that
+// promise has to cover, and until 2026-08-17 it folded to ZERO — so
+// `[u8, SIZE]` reported "expected [u8, 0], found [int, 4]" at the
+// initialiser and then a provable out-of-bounds at an index of 0, two
+// sentences neither of which named the count. `must-fail/sema/
+// array_count_is_not_comptime` is the other half of this rule, where a
+// count no lookup can answer is refused instead of guessed.
+//
+// ONE TYPE, NOT TWO. `[u8, SIZE]` and `[u8, 4]` are the same interned
+// type, which matters at the backend and not only in sema: a fixed array
+// is a C struct under a mangled name (`gen_c_array.zen`), so two counts
+// that fold alike must reach `cc` as one `struct zg_a4_b2u8`.
+// `takes_four` below is that assertion — it is written with the digit and
+// handed the constant-counted array, which does not compile at all if the
+// two mint different symbols.
+//
+// WHAT FOLDS IS A LOOKUP, NEVER AN EVALUATION (`docs/design_meta.md`
+// §7.2): the constant's own declared value goes back to the same folder
+// that reads a literal, so `PAIR` answers through `1 + 1`, and
+// arithmetic ON the name — `SIZE * 2` — does not. That line is the one
+// the must-fail file pins.
+
+SIZE: usize = 4
+PAIR: usize = 1 + 1
+
+takes_four = (xs: [u8, 4]) u32 {
+    total: u32 ::= 0;
+    xs.loop((h, v) { total = total + v.to_u32(); });
+    total;
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    named: [u8, SIZE] = [1, 2, 3, 4];
+    digits: [u8, 4]   = [5, 6, 7, 8];
+    println("{}", named[3]);
+    println("{}", digits[3]);
+
+    // the same C struct, or this call has nothing to pass
+    println("{}", takes_four(named));
+    println("{}", takes_four(digits));
+
+    both: [u8, PAIR] = [9, 10];
+    println("{}", both[1]);
+    Ok(0);
+}
