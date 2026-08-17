@@ -82,15 +82,16 @@ point: an unstated gap reads as coverage.
   "smallest correct change"
         judgement, all of them.
 
-TWO RULES CARRY A LEDGER because the tree violates them today. Same shape as
+THREE RULES CARRY A LEDGER because the tree violates them today. Same shape as
 `faults_reachable.py` and `ufcs_collisions.py`: an entry is a debt, not an
 exemption, deleting a line is how one closes, and a stale entry is an error --
 so the debt can shrink and cannot quietly grow. Fixing the 147 abbreviation
 sites touches files three other lanes hold open, which is why they are written
 down here instead of renamed.
 
-`UFCS_OWED` IS KEYED BY FILE AND VALUED WITH A COUNT, which the abbreviation
-ledger is not, and the difference is deliberate. A file-keyed ledger with no
+`UFCS_OWED` AND `IMPORT_OWED` ARE KEYED BY FILE AND VALUED WITH A COUNT, which
+the abbreviation ledger is not, and the difference is deliberate. A file-keyed
+ledger with no
 number exempts the file: `gen_c_expr.zen` could take a hundred more and the
 gate would say nothing. A count cannot go stale on an unrelated edit the way a
 LINE NUMBER does -- it moves only when someone adds or removes a violation,
@@ -234,6 +235,56 @@ UFCS_OWED: dict[str, int] = {
     "src/sema/sema_type.zen": 9,
     "src/sema/sema_union.zen": 15,
     "src/std/text/text_utf8.zen": 9,
+}
+
+# THE UNUSED-IMPORT DEBT, keyed by file and valued with THE NUMBER OF NAMES
+# that file imports and never writes again. It opened at 1208 of the 5191
+# imported names in src/, across 89 files -- nearly a quarter of the module
+# graph was fiction and nothing had ever looked. 1195 went in the change that
+# wrote the rule; these 13 are the residue, and they are all ONE THING.
+#
+# EVERY ENTRY BELOW IS A BOOTSTRAP RESOLUTION DEFECT, not an unpaid edit, and
+# the shape is narrower than it has been written down as before. A method
+# reached through a FIELD is resolved by the bootstrapper against the FIELD'S
+# TYPE NAME as the importing file spells it -- but only when the method name has
+# a COMPETITOR reachable in the same compilation. `c.types.at(..)` needs nothing
+# (`lsp_def.zen` and `lsp_compl.zen` write it with no `Types` in sight, and both
+# carried a comment claiming otherwise that this change deleted). `c.types.
+# write_name(..)` needs `Types`, because `sema_diag.zen:336` declares a FREE
+# FUNCTION of that name and the bootstrapper picks it: `write_name is not
+# exported by module sema_diag`. Every one of the six method names below has such
+# a twin -- `bind` in parse_stmt.zen, `count` in gen_name.zen, `index_of` in
+# collections_map, `bump` in mem_arena, `fn_ty` and `count` again in the corpus
+# tests' own main.zen.
+#
+# SO WHICH NAMES ARE LOAD-BEARING DEPENDS ON THE COMPILATION, and that is why
+# these 13 were found by running gates and not by reading code. Three (`Checker`
+# in gen_c_loop.zen and gen_c_range.zen, `Types` in lsp_hover.zen) fail only
+# under `make fixpoint`, whose stage 1 bootstraps the whole of src/; eight fail
+# only under the `corpus/sema_zen` and `corpus/gen_zen` suites, because the
+# competitor is in the test program's own main. `make build` is BLIND to all of
+# it -- the self-hosted compiler resolves every one correctly -- so the only
+# gates that can see this are the two that compile src/ WITH bootstrap/.
+#
+# The mechanical form of the rule -- restore the type of every intermediate
+# field receiver in a dot chain -- keeps 145, which is 132 import edges no gate
+# can justify. These 13 are the demonstrated ones, each carrying its receiver
+# chain on its own import line, and the gate that catches a fourteenth already
+# exists. They close when bootstrap resolves a field receiver by its declared
+# type instead of by an imported name.
+IMPORT_OWED: dict[str, int] = {
+    "src/gen/gen_c/gen_c_loop.zen": 1,
+    "src/gen/gen_c/gen_c_range.zen": 1,
+    "src/lsp/lsp_hover.zen": 1,
+    "src/sema/sema_decl.zen": 1,
+    "src/sema/sema_inst.zen": 1,
+    "src/sema/sema_layout.zen": 1,
+    "src/sema/sema_member.zen": 1,
+    "src/sema/sema_module.zen": 2,
+    "src/sema/sema_static.zen": 1,
+    "src/sema/sema_type.zen": 1,
+    "src/std/lex/lex_literal.zen": 1,
+    "src/std/lex/lex_scan.zen": 1,
 }
 
 # The abbreviations STYLE.md names. Not a general "short name" check -- `len`,
@@ -681,6 +732,46 @@ def ufcs_world(files):
     return free, methods, principal
 
 
+def rule_import(files, parser):
+    """An imported name the file never writes again.
+
+    `A, B, C = some.module.path` binds three names, and a name that appears
+    nowhere else in the file is a dependency the file does not have. It reads
+    as one, though, which is the cost: `gen_c_loop.zen` declared nine and used
+    two, so eight of its nine module edges were fiction to anyone tracing the
+    graph by eye.
+
+    IDENTIFIER TOKENS, not a grep. A name surviving only in a comment or in a
+    diagnostic string literal is exactly the case being hunted, and a grep
+    counts both as uses.
+
+    A `*` NAME IS EXPORTED ONWARD, so the file's own surface uses it. That is
+    what a folder root is for, and `lsp/lsp_decl.zen` and
+    `std/parse/parse_token.zen` re-export the same way without being roots.
+    Skipping starred names subsumes the root-file exemption exactly: measured
+    while writing this, no root file imports an unused name unstarred, so the
+    two readings agree on 647 names and only this one also covers the nine
+    re-exports that are not in a root.
+    """
+    checked, hits = 0, []
+    for rel, path, module in files:
+        on_import = set()
+        for imp in module.imports:
+            on_import.update(range(imp.span.start[0], imp.span.end[0] + 1))
+        used = {name for name, line in identifiers(path, parser)
+                if line not in on_import}
+        for imp in module.imports:
+            for name, exported in imp.names:
+                checked += 1
+                if exported or name in used:
+                    continue
+                hits.append((rel, f"{rel}:{imp.span.start[0]}",
+                             f"`{name}` is imported from `{imp.path}` and never"
+                             f" written again — the file does not have that"
+                             f" dependency"))
+    return checked, hits
+
+
 def rule_ufcs(files):
     """A free function on the module's principal type is CALLED on it.
 
@@ -768,28 +859,28 @@ def rule_ufcs(files):
                     continue
                 if called in methods.get(recv, ()):
                     continue
-                hits.append((rel, f"{node.span}", called, first.value.name))
+                recv = first.value.name
+                hits.append((rel, f"{node.span}",
+                             f"`{called}({recv}, ..)` is `{recv}.{called}(..)`"
+                             f" — the receiver column is what makes the"
+                             f" order-critical sequence visible"))
     return checked, hits
 
 
-def ufcs_debt(hits):
-    """The ledger, applied. Returns the lines to print.
+def debt(hits, ledger, label):
+    """A count-keyed ledger, applied. Returns the lines to print.
 
     A file over its number has grown the debt and every site in it is
     reported; a file under it has paid some down and the number must come
     with it, which is the same staleness rule every other ledger here runs.
     """
-    counted = collections.Counter(rel for rel, _, _, _ in hits)
-    bad = []
-    for rel, where, called, recv in sorted(hits):
-        if counted[rel] > UFCS_OWED.get(rel, 0):
-            bad.append((where, f"`{called}({recv}, ..)` is `{recv}.{called}(..)`"
-                               f" — the receiver column is what makes the"
-                               f" order-critical sequence visible"))
-    for rel, owed in sorted(UFCS_OWED.items()):
+    counted = collections.Counter(rel for rel, _, _ in hits)
+    bad = [(where, why) for rel, where, why in sorted(hits)
+           if counted[rel] > ledger.get(rel, 0)]
+    for rel, owed in sorted(ledger.items()):
         now = counted.get(rel, 0)
         if now < owed:
-            bad.append((rel, f"UFCS_OWED says {owed} and {now} are left."
+            bad.append((rel, f"{label} says {owed} and {now} are left."
                              f" Bring the number down with the code —"
                              f" a ledger that overstates is one nobody reads"))
     return bad
@@ -814,7 +905,7 @@ def main() -> int:
     files = sources()
     if files is None:
         return 1
-    # Ten rules over zero files is ten rules reporting "0 violations". Every
+    # Eleven rules over zero files is eleven rules reporting "0 violations". Every
     # count printed below would be 0 and the gate would be green on nothing.
     if not files:
         print("style: found no .zen files under src/ -- every rule below would"
@@ -827,6 +918,7 @@ def main() -> int:
 
     abbrev_n, abbrev_bad, abbrev_seen = rule_abbrev(files, parser)
     ufcs_n, ufcs_hits = rule_ufcs(files)
+    import_n, import_hits = rule_import(files, parser)
     results = [
         ("prefix   ", "a prefix names its own folder", *rule_prefix(files), 0),
         ("root     ", "a folder has its root file", *rule_root(files), 0),
@@ -840,7 +932,11 @@ def main() -> int:
         ("abbrev   ", "abbreviations are words", abbrev_n, abbrev_bad,
          len(ABBREV_OWED)),
         ("ufcs     ", "a free function on the principal type is called on it",
-         ufcs_n, ufcs_debt(ufcs_hits), sum(UFCS_OWED.values())),
+         ufcs_n, debt(ufcs_hits, UFCS_OWED, "UFCS_OWED"),
+         sum(UFCS_OWED.values())),
+        ("import   ", "an imported name is used by the file that imports it",
+         import_n, debt(import_hits, IMPORT_OWED, "IMPORT_OWED"),
+         sum(IMPORT_OWED.values())),
     ]
 
     failed = 0
@@ -850,13 +946,13 @@ def main() -> int:
             failed += 1
     if failed:
         print(f"\nstyle: {failed} violation(s) of docs/STYLE.md."
-              f"\n  Fix it, or -- for the two rules that carry a ledger --"
+              f"\n  Fix it, or -- for the three rules that carry a ledger --"
               f" write it into"
-              f"\n  ABBREV_OWED (with the word it should be) or UFCS_OWED"
-              f" (with the file's"
-              f"\n  new count) in {Path(__file__).name}, so the debt can"
-              f" shrink and cannot"
-              f"\n  quietly grow.")
+              f"\n  ABBREV_OWED (with the word it should be), UFCS_OWED or"
+              f" IMPORT_OWED (with"
+              f"\n  the file's new count) in {Path(__file__).name}, so the debt"
+              f" can shrink and"
+              f"\n  cannot quietly grow.")
         return 1
 
     if stale(ABBREV_OWED, abbrev_seen, "ABBREV_OWED"):
