@@ -44,6 +44,7 @@ str, String = std.text
 Range = std.core
 TyId, Ty, Types, TyRes, ResForm = sema.sema_ty
 Diag, SemaFault, NameFault = sema.sema_diag
+Def, DefKind = sema.sema_def
 Checker, Ctx, UNRESOLVED = sema.sema_check
 Case, cases_of, case_payload, case_arity = sema.sema_case
 find_case = sema.sema_case
@@ -168,7 +169,7 @@ norm_pattern* = (c :: Checker, ps :: Pats, pid: PatternId, ty: TyId, ctx: Ctx)
     node = c.tree.pattern_at(pid);
     node.kind.match({
         Destructure(d) => norm_destructure(c, ps, node, d, ty, ctx),
-        Name(pn)       => norm_name(c, ps, node, pn, ty),
+        Name(pn)       => norm_name(c, ps, node, pn, ty, ctx),
         Literal(l)     => norm_literal(ps, node, l),
         Wild           => ps.wild(node.span),
     })
@@ -191,13 +192,59 @@ norm_destructure = (
 }
 
 // A nullary case if the type declares one by that name, a binder otherwise.
-norm_name = (c :: Checker, ps :: Pats, node: Pattern, pn: PatName, ty: TyId)
-            Res<usize, AllocError> {
+norm_name = (
+    c    :: Checker,
+    ps   :: Pats,
+    node : Pattern,
+    pn   : PatName,
+    ty   : TyId,
+    ctx  : Ctx
+) Res<usize, AllocError> {
     text = last_segment(pn.name);
     is_case(c, ty, text).try().match({
         true  => ps.add(ctor_pat(text, node.span)),
-        false => ps.add(binder_pat(text, node.span)),
+        false => c.norm_binder(ps, node, text, ctx),
     })
+}
+
+// A BINDER SPELLED LIKE A CONSTANT IS REPORTED, NOT REINTERPRETED.
+// `LIMIT => ..` where `LIMIT = 3` is in scope reads as a comparison and
+// is a wildcard wearing the constant's spelling: it matches every value,
+// the constant is never read, and the only trace is that a LATER arm
+// goes unreachable — which names the consequence and never the cause.
+//
+// Giving it the meaning the author meant is the tempting fix and the
+// wrong one: a pattern's meaning would then depend on what names happen
+// to be in scope, so a new top-level constant could silently turn an
+// existing binder into a comparison. `sema_join.zen`'s header states the
+// rule this follows — inventing a meaning "would hide the mistake rather
+// than report it".
+//
+// A LOCAL WINS FIRST, exactly as `name_type` resolves a bare name: a
+// binder shadowing a local is ordinary shadowing, and the constant is
+// not what that name means there.
+norm_binder = (c :: Checker, ps :: Pats, node: Pattern, text: str, ctx: Ctx)
+              Res<usize, AllocError> {
+    c.names_const(text, ctx).try().then(() {
+        c.report(
+            node.span.file,
+            node.span,
+            SemaFault.ConstPattern(NameFault(name: text))
+        ).try();
+    });
+    ps.add(binder_pat(text, node.span));
+}
+
+names_const = (c :: Checker, text: str, ctx: Ctx) Res<bool, AllocError> {
+    found ::= c.alloc.Vec<Def>();
+    c.lookup(text).match({
+        Ok(_) => (),
+        None  => c.world.defs_of(ctx.module, text, found).try(),
+    });
+    Ok(found.get(0).match({
+        None  => false,
+        Ok(d) => d.kind.match({ ConstDef => true, _ => false }),
+    }));
 }
 
 // `true` and `false` are the two cases of `bool`, so a boolean literal

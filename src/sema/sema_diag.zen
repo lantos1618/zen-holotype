@@ -123,6 +123,7 @@ SemaFault* =
     // match
     | NotExhaustive(NameFault)         // names the first case left uncovered
     | UnreachableArm(NameFault)        // every value it matches is covered above
+    | ConstPattern(NameFault)          // a binder spelled like a constant matches everything
 
     // the failure model, proved
     | ProvenOverflow(NameFault)        // a trap the compiler can prove will fire
@@ -205,6 +206,7 @@ message* = (fault: SemaFault) str {
         HoistNotSuccess(_)        => "only success lifts into Res: failure stays visible, so this must be written out",
         NotExhaustive(_)          => "match is not exhaustive: cover every case or write `_` — match is exhaustive in every position",
         UnreachableArm(_)         => "unreachable match arm: every value it could match is already covered above",
+        ConstPattern(_)           => "a pattern binds, it never compares: a bare name in a pattern is a fresh binding, so this arm matches every value",
         ProvenOverflow(_)         => "integer overflow: a trap the compiler can prove will fire is a compile error",
         ProvenDivideByZero(_)     => "divide by zero: a trap the compiler can prove will fire is a compile error",
         ProvenIndexOutOfBounds(_) => "index out of bounds: a trap the compiler can prove will fire is a compile error",
@@ -256,6 +258,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         HoistNotSuccess(f)        => out.write_name(f),
         NotExhaustive(f)          => out.write_name(f),
         UnreachableArm(f)         => out.write_name(f),
+        ConstPattern(f)           => write_const_pattern(out, f),
         ProvenOverflow(f)         => out.write_name(f),
         ProvenDivideByZero(f)     => out.write_name(f),
         ProvenIndexOutOfBounds(f) => out.write_name(f),
@@ -322,6 +325,21 @@ write_missing = (out :: String, f: NameFault) Res<(), AllocError> {
     quote(out, f.name).try();
     out.add_bytes(
         ": an impl supplies a value for every field the bound declares"
+    ).try();
+    Ok(());
+}
+
+// WHAT THE NAME ALREADY MEANS, because that is the half the position
+// cannot give: an author who wrote `LIMIT =>` believes they wrote a
+// comparison, and being told the arm binds leaves them looking at a
+// line that reads exactly like the comparison they meant. Naming the
+// constant is what turns it back into one mistake, and `==` is the
+// spelling that does compare.
+write_const_pattern = (out :: String, f: NameFault) Res<(), AllocError> {
+    out.add_bytes(" — `").try();
+    out.add_bytes(f.name).try();
+    out.add_bytes(
+        "` names a constant in scope: compare it with `==`, or rename the binder"
     ).try();
     Ok(());
 }
