@@ -274,6 +274,15 @@ BOOL = Ty("prim", "bool")
 STR = Ty("prim", "str")
 USIZE = Ty("prim", "usize")
 
+# Verbatim `src/sema/sema_diag.message`'s CountNotComptime. Both toolchains
+# say it because a must-fail expectation is read by both, and a sentence only
+# one writes is a red board.
+_COUNT_NOT_COMPTIME = (
+    "an array's count is part of its type, so it is known at compile time: "
+    "a literal, or a name declared as one. Folding anything further needs the "
+    "comptime evaluator, which arrives at PLAN.md stage 5 — docs/design_meta.md"
+)
+
 _INT_PRIMS = {
     "i8": (8, True), "i16": (16, True), "i32": (32, True), "i64": (64, True),
     "isize": (64, True),
@@ -1499,7 +1508,10 @@ class Sema:
                          self.resolve_type(_g(tnode, "ret"), ctx),
                          tuple(_name_of(_g(p, "name")) or "_" for p in ps))
         if k == "ArrayType":
-            cnt = self.const_value(_g(tnode, "count", "length"), ctx)
+            count = _g(tnode, "count", "length")
+            cnt = self.array_count(count, ctx)
+            if cnt is None:
+                return self.count_refused(count) if want_error else ANY
             return arr_ty(self.resolve_type(_g(tnode, "elem", "element"), ctx), cnt)
         if k in ("Named", "Path", "Identifier", "SelfType"):
             name = _g(tnode, "name", default=None)
@@ -2571,8 +2583,50 @@ class Sema:
                 return None
         return None
 
-    def const_value(self, node, ctx=None):
-        return self.const_int(node, ctx)
+    def array_count(self, node, ctx=None):
+        """An array's count, or None for `count_refused` to report.
+
+        `const_int` above is a PROVER and declining costs it nothing; a count
+        is a REQUIREMENT, since `[u8, 4]` and `[u8, 5]` are two types. So this
+        takes the one step the prover deliberately will not: a name that
+        denotes a module-level constant is read through to the expression it
+        was declared with, and that expression folded by the same prover.
+
+        A LOOKUP, NOT AN EVALUATOR (docs/design_meta.md 7.2), and the same
+        lookup `_names_const` reads for the const-pattern rule -- so `SIZE`
+        answers and `SIZE * 2` does not. `src/sema/sema_trap.counted_array` is
+        this function, and the refusal below is worded to share a substring
+        with `sema_diag.CountNotComptime`: a must-fail expectation is read by
+        both toolchains.
+        """
+        v = self.const_int(node, ctx)
+        if v is not None:
+            return v
+        if ctx is None or node is None or _k(node) not in ("Path", "Identifier"):
+            return None
+        name = _g(node, "name", default=None)
+        if not isinstance(name, str) or ctx.scope.get(name) is not None:
+            return None    # a local wins first, as name resolution reads a name
+        decl = self._const_decl(name, ctx.mod, set())
+        return None if decl is None else self.const_int(_g(decl, "value"), ctx)
+
+    def count_refused(self, node):
+        """One diagnostic at the count's own position, and poison.
+
+        `ANY` agrees with everything and is not an array, so neither the
+        initialiser's type mismatch nor the bounds rule fires behind it -- one
+        mistake, one sentence. Taking 0 instead cost two, and named the count
+        in neither.
+        """
+        span = _span(node)
+        # `_muted` is tested BEFORE `_once`, or an external query (the LSP,
+        # gen_c) would consume the tag and silence the real report later.
+        if not self._muted and self._once(("arraycount", _start(span))):
+            self._keep.append(node)
+            quoted = _g(node, "name", default=None) if _k(node) in ("Path", "Identifier") else None
+            self.error(span, _COUNT_NOT_COMPTIME + (
+                " `%s`" % quoted if isinstance(quoted, str) and quoted else ""))
+        return ANY
 
     # ======================================================================
     # type_of

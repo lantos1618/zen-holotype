@@ -1125,7 +1125,16 @@ class Emitter:
         return UNKNOWN
 
     def const_int(self, expr, parts=()):
-        """Comptime integer, for an array length.  Literals and Type.NAME."""
+        """Comptime integer, for an array length.  Literals and Type.NAME.
+
+        IT FOLDS WHAT `sema.const_int` FOLDS, and that is not a nicety: the
+        count this answers is the one minted into `struct zg_aN_...`, while the
+        count sema answered is what the initialiser was checked against. When
+        they disagreed the C did not compile -- `[u8, 2 + 2]` emitted a
+        `zg_a0_b2u8` holding a `zg_a4_b2u8`, invalid initializer, no
+        diagnostic. Arithmetic is here for that reason and not for a new
+        feature.
+        """
         if expr is None:
             return None
         k = kind(expr)
@@ -1134,6 +1143,10 @@ class Emitter:
         if k == "Unary" and f(expr, "op") == "-":
             inner = self.const_int(f(expr, "operand"), parts)
             return None if inner is None else -inner
+        if k == "Binary":
+            return self.const_fold(f(expr, "op"),
+                                   self.const_int(f(expr, "lhs"), parts),
+                                   self.const_int(f(expr, "rhs"), parts))
         if k == "Member":
             base = f(expr, "base")
             if kind(base) == "Path":
@@ -1150,6 +1163,25 @@ class Emitter:
                     return self.const_int(f(got[0].node, "value"), got[0].scope_parts)
                 finally:
                     self.expanding.pop()
+        return None
+
+    @staticmethod
+    def const_fold(op, a, b):
+        """`sema.const_int`'s arithmetic, to the digit -- integer division
+        truncates toward zero and a zero divisor abstains rather than raising,
+        because the folder may not trap itself."""
+        if a is None or b is None:
+            return None
+        if op == "+":
+            return a + b
+        if op == "-":
+            return a - b
+        if op == "*":
+            return a * b
+        if op == "/":
+            return None if b == 0 else int(a / b)
+        if op == "%":
+            return None if b == 0 else a - int(a / b) * b
         return None
 
     def builtin_type_const(self, tyname, member):

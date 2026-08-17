@@ -230,8 +230,8 @@ UFCS_OWED: dict[str, int] = {
     "src/sema/sema_spine.zen": 2,
     "src/sema/sema_static.zen": 15,
     "src/sema/sema_supply.zen": 29,
-    "src/sema/sema_trap.zen": 47,
-    "src/sema/sema_type.zen": 10,
+    "src/sema/sema_trap.zen": 46,
+    "src/sema/sema_type.zen": 9,
     "src/sema/sema_union.zen": 15,
     "src/std/text/text_utf8.zen": 9,
 }
