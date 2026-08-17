@@ -6261,7 +6261,7 @@ class FnCtx:
         return ("&" + rec, self.e.scope_type())
 
     def ex_MetaCall(self, node, want=None):
-        self.e.error(node, "`@meta` is not in the seed subset (PLAN.md 0.5)")
+        self.e.error(node, "`@meta` is not implemented yet: it is not in the seed subset (PLAN.md 0.5) — src/sema/sema_meta.zen says why both toolchains share this sentence")
         return ("0", UNKNOWN)
 
 

@@ -70,8 +70,14 @@ zen/
 │   │                                #     diagnostics, lexical semanticTokens.
 │   │                                #     Everything else refused by name; the stdio
 │   │                                #     transport, over std.env.Stdin
-│   ├── meta/meta.zen                # (5) @meta over ast nodes — NOT WRITTEN
-│   ├── comptime/comptime.zen        # (5) the step-budgeted evaluator — NOT WRITTEN
+│   ├── sema/sema_meta.zen           # (5) @meta over ast nodes — THE REFUSAL ONLY.
+│   │                                #     docs/design_meta.md is the decomposition;
+│   │                                #     M0 (named, one diagnostic, both toolchains)
+│   │                                #     is landed and nothing else is
+│   ├── comptime/comptime.zen        # (5) the step-budgeted evaluator — NOT WRITTEN.
+│   │                                #     design_meta.md §5 argues it belongs beside
+│   │                                #     sema rather than here: its output is AST,
+│   │                                #     and the residue has to be type-checked
 │   │
 │   └── std/                         # (0.6) the floor. written BEFORE the compiler.
 │       ├── std.zen                  #       starred re-exports; the prelude assembles here
@@ -368,12 +374,11 @@ One correctness note that is now load-bearing for this stage as well: `type_of`'
 
 Orthogonal to everything above; it constrains nothing in the compiler.
 
-- `@meta` over `src/std/ast/ast.zen` nodes: builds and reads, memoized on (function, arguments), declared types stay nominal
-- the comptime evaluator: language minus io and actors, may allocate, **step-budgeted so a bad `@meta` fails the build rather than hanging**, no file reads in v1
+- **`@meta` and the comptime evaluator: `docs/design_meta.md`.** The decomposition, its milestones in dependency order, and the two decisions that have to be taken before code can be written live there and are not repeated here. Started: the refusal is landed (`src/sema/sema_meta.zen`, M0), so a program using `@meta` is told so by name, once, by both toolchains.
 - actors: per-actor arena rooted in the runtime (not `main`'s), one message at a time, causal ordering, quiescence exit
 - `main` returning is not the program exiting
 
-Only after this does the compiler start using `@meta` on itself.
+Only after this does the compiler start using `@meta` on itself — and until then it may not, which is what keeps the bill `0.5` prices off the bootstrapper (`design_meta.md` §1).
 
 ---
 
