@@ -3948,7 +3948,7 @@ class Sema:
             if name not in table:
                 if not subs_nodes:
                     # a bare name that is not a case of this type: a binder
-                    return P("wild", binder=name, span=span)
+                    return self._binder_pat(name, span, ctx)
                 return P("ctor", name, tuple(
                     self.norm_pattern(s, ANY, ctx) for s in subs_nodes), span=span)
             payload = table[name]
@@ -3970,7 +3970,7 @@ class Sema:
             ctors = {c[0] for c in (self.ctors_of(ty) or [])}
             if name in ctors:
                 return P("ctor", name, (), span=span)
-            return P("wild", binder=name, span=span)
+            return self._binder_pat(name, span, ctx)
         if k == "Literal":
             kind = _g(pnode, "kind", default="")
             text = str(_g(pnode, "text", default=""))
@@ -3978,6 +3978,40 @@ class Sema:
                 return P("ctor", text, (), span=span)
             return P("lit", text, span=span)
         return P("wild", span=span)
+
+    def _binder_pat(self, name, span, ctx):
+        """A binder, and the one spelling of one that is almost certainly a
+        mistake: `LIMIT => ..` where `LIMIT` names a constant reads as a
+        comparison and is a wildcard wearing the constant's spelling. Same
+        rule and same sentence as `src/sema/sema_match.norm_binder` — a
+        must-fail expectation is read by both compilers."""
+        if self._names_const(name, ctx):
+            self.error(span,
+                       "a pattern binds, it never compares: a bare name in a "
+                       "pattern is a fresh binding, so this arm matches every "
+                       "value — `%s` names a constant in scope: compare it "
+                       "with `==`, or rename the binder" % name)
+        return P("wild", binder=name, span=span)
+
+    def _names_const(self, name, ctx):
+        # a local wins first, exactly as name resolution reads a bare name
+        if not name or ctx.scope.get(name) is not None:
+            return False
+        return self._const_decl(name, ctx.mod, set()) is not None
+
+    def _const_decl(self, name, mi, seen):
+        if mi is None or id(mi) in seen:
+            return None
+        seen.add(id(mi))
+        if name in mi.fns or mi.type_all.get(name):
+            return None
+        if name in mi.consts:
+            return mi.consts[name]
+        if name in mi.imports:
+            tgt = self.by_dotted.get(mi.imports[name][0])
+            if tgt is not mi:
+                return self._const_decl(name, tgt, seen)
+        return None
 
     def _norm_raw(self, raw, ty, ctx):
         name = str(raw.name).rsplit(".", 1)[-1]
