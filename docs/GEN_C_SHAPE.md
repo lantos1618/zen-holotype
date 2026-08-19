@@ -136,7 +136,7 @@ shape being collapsed. `their lines` is what those functions occupy today.
 | ☐ | file | before | code | param-lines | chain fns | their lines | after | commit |
 |---|---|---:|---:|---:|---:|---:|---:|---|
 | ☑ | `gen_c_member.zen` | 1110 | 787 | 87 | 6 | 77 | **1083** | `1d732fc7` |
-| ☐ | `gen_c_op.zen` | 817 | 567 | 128 | 14 | 171 | | |
+| ☑ | `gen_c_op.zen` | 816 | 567 | 131 | 7 | 171 | **767** | `9a3c3838` |
 | ☑ | `gen_c_expr.zen` | 878 | 597 | 84 | 6 | 118 | **865** | `1f147841` |
 | ☐ | `gen_c_call.zen` | 1250 | 869 | 106 | 12+ | ~130 | | |
 | ☐ | `gen_c_stmt.zen` | 519 | 378 | 66 | 10 | 112 | | |
@@ -175,6 +175,8 @@ read by hand instead. Trust the file, not the number.
 `gen_c_member.zen` 1110 → 1083 (**−27**, −2.4%). `gen_c_expr.zen` 878 → 865
 (**−13**, −1.5%), with its parameter lines 84 → 63.
 
+`gen_c_op.zen` 816 → 767 (**−49**, −6.0%), parameter lines 131 → 95.
+
 **That is far less than the 2,000–2,500 lines this campaign was pitched at,
 and the pitch was wrong, not the work.** The enum, the classifier and the
 preserved reasoning cost most of what the deleted signatures save. Extrapolated
@@ -190,6 +192,30 @@ claimed otherwise.
 
 **The lines are in Phase B.** `be`/`ctx`/`out` are 1,251 parameter lines and
 they do not come back as anything.
+
+### What the chains were HIDING, which is the better argument for Phase A
+
+`gen_c_op.zen`'s lane found three things that a line count does not show and
+that were invisible for as long as the chain existed:
+
+- **Two parameters threaded and never read.** `node: Expr` into
+  `lower_logical` and `prim: str` into `lower_compare` — each computed by a
+  caller and carried one or two frames to nothing. The threading habit does
+  not only cost verbosity, it costs dead work, and a chain hides it because
+  no single link looks wrong.
+- **The same precedence written a THIRD time.** `infix_shaped` and
+  `helper_shaped` in the spine walk restated the operator precedence the
+  chain already encoded. Proven equivalent case by case, `helper_shaped`
+  deleted; the list now exists once in the tree. A duplicated rule is a rule
+  that can drift, and nothing was comparing the two copies.
+- **A predicate that already existed.** `literal_or` was
+  `is_literal_ty(lhs)==false && is_unknown(lhs)==false`, which is exactly the
+  neighbouring `usable(be, lhs)`.
+
+So Phase A's real return is: the precedence stated once, in one readable
+list, with the dead parameters and duplicate predicates that were hiding
+behind it removed. Budget it as a correctness pass that happens to shrink
+files, never as a line-count campaign.
 
 ### A better shape than the one the first lanes produced
 
