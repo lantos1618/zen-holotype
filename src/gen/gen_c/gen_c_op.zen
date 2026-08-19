@@ -77,6 +77,9 @@ wrap_unary = (
     Ok(());
 }
 
+// WHAT A `-` WRITES, in the order `negate_kind` asks for them.
+NegKind = Float | Folded(str) | Checked
+
 // Negation on an integer is `0 - x`, and it TRAPS: `-i32.MIN` is an
 // overflow like any other. On a float it is the C operator, which
 // cannot overflow.
@@ -90,9 +93,10 @@ lower_negate = (
 ) Res<(), AllocError> {
     ty   = ty_of(be, u.operand, ctx, want).try();
     prim = be.check.prim_name(ty);
-    is_c_integer(prim).match({
-        false => wrap_unary(be, "-", u.operand, ctx, want, out),
-        true  => negate_integer(be, node, u, prim, ctx, ty, out),
+    negate_kind(be, u, prim).match({
+        Float     => wrap_unary(be, "-", u.operand, ctx, want, out),
+        Folded(d) => write_negative_literal(d, out),
+        Checked   => negate_checked(be, node, u, prim, ctx, ty, out),
     })
 }
 
@@ -107,18 +111,13 @@ lower_negate = (
 // the CONSTANT's own initialiser aborted first, carrying num.zen's
 // position. A trap must name where the program went wrong, so a
 // declaration merely read may not be where it points.
-negate_integer = (
-    be   :: CBackend,
-    node : Expr,
-    u    : Unary,
-    prim : str,
-    ctx  : Ctx,
-    ty   : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    int_digits(be, u.operand).match({
-        Ok(digits) => write_negative_literal(digits, out),
-        None       => negate_checked(be, node, u, prim, ctx, ty, out),
+negate_kind = (be: CBackend, u: Unary, prim: str) NegKind {
+    is_c_integer(prim).match({
+        false => NegKind.Float,
+        true  => int_digits(be, u.operand).match({
+            Ok(digits) => NegKind.Folded(digits),
+            None       => NegKind.Checked,
+        }),
     })
 }
 
@@ -183,9 +182,18 @@ lower_binary* = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    is_logical(b.op).match({
-        true  => lower_logical(be, node, b, ctx, out),
-        false => lower_value_op(be, node, b, ctx, want, out),
+    operand = level_type(be, b, ctx, want).try();
+    op_kind(be, b, operand).match({
+        ShortCircuit => write_short_circuit(be, b, operand, ctx, out),
+        Infix        => write_infix(be, b, c_op(b.op), ctx, operand, out),
+        Helper(prim) => call_helper(be, node, b, prim, ctx, operand, out),
+        Dispatched   => lower_eq_op(be, b, ctx, operand, out),
+        Refused      => unsupported(
+            be,
+            b.lhs,
+            "comparing values that are not scalars",
+            out
+        ),
     })
 }
 
@@ -229,6 +237,11 @@ is_comparison* = (op: BinOp) bool {
     })
 }
 
+// EVERY WAY A BINARY OPERATOR IS WRITTEN. The order `op_kind` asks
+// these in is the language's rule and not an implementation detail, so
+// it is one list here rather than the shape of a five-link call chain.
+OpKind = ShortCircuit | Infix | Helper(str) | Dispatched | Refused
+
 // `&&` and `||` short-circuit, so a right operand needing statements of
 // its own cannot be lowered as an infix operand: the statements would
 // run whether or not the left side held.
@@ -250,17 +263,47 @@ is_comparison* = (op: BinOp) bool {
 // The infix form stays for the common case: `a && b` on two pure
 // operands is `a && b`, not three statements and a temporary in front
 // of the C compiler on every comparison in the tree.
-lower_logical = (
-    be   :: CBackend,
-    node : Expr,
-    b    : Binary,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError> {
-    bool_ty = be.check.types.bool_ty().try();
-    spills_anywhere(be, b.rhs).match({
-        true  => write_short_circuit(be, b, bool_ty, ctx, out),
-        false => write_infix(be, b, c_op(b.op), ctx, bool_ty, out),
+//
+// Comparison is C's on a scalar, an IMPL'S otherwise — the header's
+// second rule. `s == "impl"` on a `str` is `str`'s `Eq`, impl'd by
+// `std.text`.
+//
+// ORDERING IS NOT COVERED, refused by name: "there is no `Ord`.
+// `std.core` has `Eq` and `Hash` and nothing that orders" — inventing
+// one here would be this backend deciding a language question.
+//
+// A type that impls no `Eq`, and every ORDERING, are refused for the
+// same reason: there is nothing to dispatch to.
+// `corpus/gen_zen/reports_what_it_cannot_lower` gates it on a struct
+// with no impl.
+op_kind = (be: CBackend, b: Binary, operand: TyId) OpKind {
+    is_logical(b.op).match({
+        true  => spills_anywhere(be, b.rhs).match({
+            true  => OpKind.ShortCircuit,
+            false => OpKind.Infix,
+        }),
+        false => is_comparison(b.op).match({
+            true  => scalar(be, operand).match({
+                true  => OpKind.Infix,
+                false => is_equality(b.op).match({
+                    true  => OpKind.Dispatched,
+                    false => OpKind.Refused,
+                }),
+            }),
+            false => arith_kind(be.check.prim_name(operand)),
+        }),
+    })
+}
+
+// The header's first rule, at the site: an after-the-fact test is one
+// the optimizer is entitled to delete. Only integer arithmetic goes
+// through a trap helper, which the spine reads off a level rather than
+// reaching through `lower_binary` — so this answers a kind and writes
+// nothing.
+arith_kind = (prim: str) OpKind {
+    is_c_integer(prim).match({
+        true  => OpKind.Helper(prim),
+        false => OpKind.Infix,
     })
 }
 
@@ -307,38 +350,14 @@ negation = (op: BinOp) str {
     op.match({ Or => "!", _ => "" })
 }
 
-lower_value_op = (
-    be   :: CBackend,
-    node : Expr,
-    b    : Binary,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    operand = operand_type(be, b, ctx, want).try();
-    prim    = be.check.prim_name(operand);
-    is_comparison(b.op).match({
-        true  => lower_compare(be, b, prim, ctx, operand, out),
-        false => lower_arith(be, node, b, prim, ctx, operand, out),
-    })
-}
-
 // The operands' type, which is not the expression's when the operator
 // is a comparison: `a == b` is `bool` whatever it compares.
 operand_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
                Res<TyId, AllocError> {
     lhs = sub(be, be.check.type_of(b.lhs, ctx).try()).try();
-    be.check.is_literal_ty(lhs).match({
-        false => literal_or(be, lhs, b, ctx, want),
-        true  => rhs_type(be, b, ctx, want),
-    })
-}
-
-literal_or = (be :: CBackend, lhs: TyId, b: Binary, ctx: Ctx, want: TyId)
-             Res<TyId, AllocError> {
-    be.check.is_unknown(lhs).match({
-        false => Ok(lhs),
-        true  => rhs_type(be, b, ctx, want),
+    usable(be, lhs).match({
+        true  => Ok(lhs),
+        false => rhs_type(be, b, ctx, want),
     })
 }
 
@@ -355,49 +374,6 @@ usable = (be :: CBackend, id: TyId) bool {
     be.check.is_unknown(id).match({
         true  => false,
         false => be.check.is_literal_ty(id) == false,
-    })
-}
-
-// Comparison is C's on a scalar, an IMPL'S otherwise — the header's
-// second rule. `s == "impl"` on a `str` is `str`'s `Eq`, impl'd by
-// `std.text`.
-//
-// ORDERING IS NOT COVERED, refused by name: "there is no `Ord`.
-// `std.core` has `Eq` and `Hash` and nothing that orders" — inventing
-// one here would be this backend deciding a language question.
-lower_compare = (
-    be      :: CBackend,
-    b       : Binary,
-    prim    : str,
-    ctx     : Ctx,
-    operand : TyId,
-    out     :: String
-) Res<(), AllocError> {
-    scalar(be, operand).match({
-        true  => write_infix(be, b, c_op(b.op), ctx, operand, out),
-        false => lower_dispatched(be, b, ctx, operand, out),
-    })
-}
-
-// A type that impls no `Eq`, and every ORDERING, are refused for the
-// same reason: there is nothing to dispatch to.
-// `corpus/gen_zen/reports_what_it_cannot_lower` gates it on a struct
-// with no impl.
-lower_dispatched = (
-    be      :: CBackend,
-    b       : Binary,
-    ctx     : Ctx,
-    operand : TyId,
-    out     :: String
-) Res<(), AllocError> {
-    is_equality(b.op).match({
-        false => unsupported(
-            be,
-            b.lhs,
-            "comparing values that are not scalars",
-            out
-        ),
-        true  => lower_eq_op(be, b, ctx, operand, out),
     })
 }
 
@@ -529,23 +505,6 @@ traps* = (op: BinOp) bool {
     op.match({
         AddWrap => false, SubWrap => false, MulWrap => false,
         _ => true,
-    })
-}
-
-// The header's first rule, at the site: an after-the-fact test is one
-// the optimizer is entitled to delete.
-lower_arith = (
-    be      :: CBackend,
-    node    : Expr,
-    b       : Binary,
-    prim    : str,
-    ctx     : Ctx,
-    operand : TyId,
-    out     :: String
-) Res<(), AllocError> {
-    is_c_integer(prim).match({
-        true  => call_helper(be, node, b, prim, ctx, operand, out),
-        false => write_infix(be, b, c_op(b.op), ctx, operand, out),
     })
 }
 
@@ -724,9 +683,10 @@ level_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
 // The two that are not written as open-operand-operand-close, named in
 // the spine banner above.
 infix_shaped = (be: CBackend, b: Binary, operand: TyId) bool {
-    is_logical(b.op).match({
-        true  => spills_anywhere(be, b.rhs) == false,
-        false => (is_comparison(b.op) == false) || scalar(be, operand),
+    op_kind(be, b, operand).match({
+        Infix     => true,
+        Helper(_) => true,
+        _         => false,
     })
 }
 
@@ -773,10 +733,9 @@ close_node = (
 
 open_op = (be :: CBackend, b: Binary, operand: TyId, out :: String)
           Res<(), AllocError> {
-    prim = be.check.prim_name(operand);
-    helper_shaped(b, prim).match({
-        true  => open_helper(be, b, prim, out),
-        false => out.add_bytes("("),
+    op_kind(be, b, operand).match({
+        Helper(prim) => open_helper(be, b, prim, out),
+        _            => out.add_bytes("("),
     })
 }
 
@@ -788,18 +747,10 @@ close_op = (
     ctx     : Ctx,
     out     :: String
 ) Res<(), AllocError> {
-    prim = be.check.prim_name(operand);
-    helper_shaped(b, prim).match({
-        true  => close_helper(be, node, b, ctx, operand, out),
-        false => close_infix(be, b, c_op(b.op), ctx, operand, out),
+    op_kind(be, b, operand).match({
+        Helper(_) => close_helper(be, node, b, ctx, operand, out),
+        _         => close_infix(be, b, c_op(b.op), ctx, operand, out),
     })
-}
-
-// `lower_arith`'s rule, read off the level rather than reached through
-// it: only integer arithmetic goes through a trap helper.
-helper_shaped = (b: Binary, prim: str) bool {
-    (is_logical(b.op) == false) && (is_comparison(b.op) == false)
-        && is_c_integer(prim)
 }
 
 // `"file", line, col` — the three arguments every trap takes. The
