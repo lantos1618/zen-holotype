@@ -80,15 +80,33 @@ Non-negotiable, in this order. A row is not done until all four are green.
 
 1. `make test` — **529 passed, 0 failed, 4 deferred**. Any other number is a red.
 2. `make fixpoint` — `stage2.c == stage3.c`.
-3. **`cmp` THE EMITTED C, with `file:line:col` triples erased.** This is the
-   gate that makes the campaign safe: a pure reshaping must move no C.
+3. **THE FROZEN DIFFERENTIAL — two compilers, one frozen input.** This is
+   the gate that makes the campaign safe: a pure reshaping must be a
+   byte-identical translator.
    ```sh
-   ./zen build src --emit-c -o /tmp/after.c
-   sed -E 's/"[^"]*\.zen", [0-9]+, [0-9]+/"F", 0, 0/g' /tmp/before.c > /tmp/b.n
-   sed -E 's/"[^"]*\.zen", [0-9]+, [0-9]+/"F", 0, 0/g' /tmp/after.c  > /tmp/a.n
-   cmp /tmp/b.n /tmp/a.n        # MUST be identical
+   S=/tmp/purity; mkdir -p $S/frozen
+   #   ./zen built from the PRE-change tree, copied aside as $S/zen-old
+   #   ./zen built from your CHANGED tree,   copied aside as $S/zen-new
+   git archive HEAD | tar -x -C $S/frozen        # ONE input both compilers read
+   $S/zen-old build $S/frozen/src --emit-c -o $S/old.c
+   $S/zen-new build $S/frozen/src --emit-c -o $S/new.c
+   cmp $S/old.c $S/new.c        # MUST be byte-identical
    ```
-   Line numbers must not move at all. If they do, the change was not pure.
+   No `sed`, no erasing of position triples: byte-exact, all 108,020 lines.
+
+   ⚠ **THE OBVIOUS VERSION OF THIS GATE IS ILL-POSED AND THIS DOCUMENT
+   SHIPPED IT WRONG.** `./zen build src --emit-c` compiles `src` AS ITS
+   INPUT, so reshaping a `src` file necessarily moves the C emitted for that
+   file's own functions — before/after over a moving input is not a purity
+   test. Lanes 1 and 3 both hit the false red (215 and 409 diff lines) and
+   both independently ran the frozen version above and got byte-identical.
+   The repo already recorded this lesson under "byte-identical C needs two
+   compilers"; it was set up wrong here anyway. **That is the third time.**
+
+   If you see a diff from the ill-posed form, it is expected. Attribute each
+   changed line to its enclosing C definition before concluding anything: the
+   owners must all be symbols from your own file, plus pure insertions into
+   the shared tag `enum {}` for any new enum you introduced.
 4. `make fmt` and `python3 scripts/style.py`.
 
 **Do NOT gate on `make build`.** It is blind to every resolution-shaped
@@ -96,6 +114,16 @@ defect this tree has ever had; a 1,195-name cull passed `make build` and then
 failed fixpoint with 5 diagnostics and the corpus with 16 more.
 
 **Do not regenerate the seed.** The integrator does that once, at the end.
+
+**`scripts/style.py` is the ONE file outside your lane you must touch.** It
+holds `UFCS_OWED[<your file>] = <count>`; removing chain links removes free
+function call sites, and `debt()` FAILS on a ledger that overstates, so the
+number must come down with the code. Every one of the 27 lanes edits this one
+dict — the integrator resolves the conflict by RE-MEASURING with
+`python3 scripts/style.py`, never by picking a side.
+
+**Do not edit your own row in this table.** 27 lanes editing one table is 27
+conflicts. Report `after` and the commit sha; the integrator fills it in.
 
 ---
 
@@ -107,9 +135,9 @@ shape being collapsed. `their lines` is what those functions occupy today.
 
 | ☐ | file | before | code | param-lines | chain fns | their lines | after | commit |
 |---|---|---:|---:|---:|---:|---:|---:|---|
-| ☐ | `gen_c_member.zen` | 1111 | 787 | 87 | 7+ | ~77 | | |
+| ☑ | `gen_c_member.zen` | 1110 | 787 | 87 | 6 | 77 | **1083** | `1d732fc7` |
 | ☐ | `gen_c_op.zen` | 817 | 567 | 128 | 14 | 171 | | |
-| ☐ | `gen_c_expr.zen` | 879 | 597 | 84 | 11 | 118 | | |
+| ☑ | `gen_c_expr.zen` | 878 | 597 | 84 | 6 | 118 | **865** | `1f147841` |
 | ☐ | `gen_c_call.zen` | 1250 | 869 | 106 | 12+ | ~130 | | |
 | ☐ | `gen_c_stmt.zen` | 519 | 378 | 66 | 10 | 112 | | |
 | ☐ | `gen_c_flow.zen` | 619 | 475 | 85 | 9 | 100 | | |
@@ -141,6 +169,46 @@ string literal (`be.fmt("if (..) {\n")`) throws it off. Their chains were
 read by hand instead. Trust the file, not the number.
 
 **Phase A total: ~113 functions, ~1,328 lines, over 27 files.**
+
+### What the first two rows actually yielded, and the correction it forces
+
+`gen_c_member.zen` 1110 → 1083 (**−27**, −2.4%). `gen_c_expr.zen` 878 → 865
+(**−13**, −1.5%), with its parameter lines 84 → 63.
+
+**That is far less than the 2,000–2,500 lines this campaign was pitched at,
+and the pitch was wrong, not the work.** The enum, the classifier and the
+preserved reasoning cost most of what the deleted signatures save. Extrapolated
+over 27 files, Phase A is worth **roughly 500 lines, not 2,000.**
+
+**So Phase A's value is not size — it is that the precedence becomes
+readable.** `gen_c_member.zen`'s six method kinds, whose order was previously
+recoverable only by following a call chain through six files' worth of header
+comments, are now one commented list above one enum. `gen_c_expr.zen` did the
+same for four conversion doors and for the type-authority precedence. That is
+worth having; it is not a line-count win, and this document should not have
+claimed otherwise.
+
+**The lines are in Phase B.** `be`/`ctx`/`out` are 1,251 parameter lines and
+they do not come back as anything.
+
+### A better shape than the one the first lanes produced
+
+Both lanes turned the chain into a NESTED `.match` staircase — seven deep in
+`gen_c_member.zen`, four in `gen_c_expr.zen`. That is fewer lines than the
+chain but it is still a pyramid, and `STYLE.md` already names the fix:
+
+> **Early return over a pyramid.** [..] When the early exit carries a value
+> rather than a failure, a one-shot `loop` is the breakable block: each guard
+> is a `.then` whose closure calls `h.break(v)`, and the fall-through
+> `h.break` is the default. Bind the loop to a typed variable before matching
+> on it.
+
+A classifier written that way is a FLAT list of guards, one line each, in
+precedence order — which is exactly what a classifier should look like. The
+idiom is live in the tree (`parser.zen`, `parse_lookahead.zen`,
+`collections_map.zen`, `zen_cli.zen`, `fmt.zen`). **Later lanes should write
+the classifier as a breakable block, and the first two rows are owed a
+follow-up pass.**
 
 ---
 
