@@ -124,20 +124,23 @@ lower_static_call = (be :: CBackend, d: Dot, ty: TyId, ctx: Ctx, out :: String)
                     Res<(), AllocError> {
     be.check.is_case(ty, d.a.name.text).try().match({
         true  => write_variant_call(be, d, ty, ctx, out),
-        false => static_member_call(be, d, ty, ctx, out),
-    })
-}
-
-static_member_call = (be :: CBackend, d: Dot, ty: TyId, ctx: Ctx, out :: String)
-                     Res<(), AllocError> {
-    lower_assoc_call(be, d.id, d.c, d.a, ty, ctx, out).try().match({
-        true  => Ok(()),
-        false => unsupported(
+        false => lower_assoc_call(
             be,
             d.id,
-            "a call on a type that is not a variant",
+            d.c,
+            d.a,
+            ty,
+            ctx,
             out
-        ),
+        ).try().match({
+            true  => Ok(()),
+            false => unsupported(
+                be,
+                d.id,
+                "a call on a type that is not a variant",
+                out
+            ),
+        }),
     })
 }
 
@@ -364,14 +367,14 @@ arg_actual = (be :: CBackend, x: Arg, ctx: Ctx) Res<Actual, AllocError> {
             named: false,
             span: x.span
         )),
-        _         => typed_actual(be, x, ctx, unknown),
+        _         => Ok(Actual(
+            ty: ty_of(be, x.value, ctx, unknown).try(),
+            is_lambda: false,
+            arity: 0,
+            named: false,
+            span: x.span
+        )),
     })
-}
-
-typed_actual = (be :: CBackend, x: Arg, ctx: Ctx, unknown: TyId)
-               Res<Actual, AllocError> {
-    ty = ty_of(be, x.value, ctx, unknown).try();
-    Ok(Actual(ty: ty, is_lambda: false, arity: 0, named: false, span: x.span));
 }
 
 // -----------------------------------------------------------------
@@ -777,21 +780,10 @@ lower_eq_call* = (
 ) Res<bool, AllocError> {
     site_of(be, rty).try().match({
         None  => Ok(false),
-        Ok(s) => eq_through_site(be, lhs, rhs, s, ctx, out),
-    })
-}
-
-eq_through_site = (
-    be  :: CBackend,
-    lhs : ExprId,
-    rhs : ExprId,
-    s   : Site,
-    ctx : Ctx,
-    out :: String
-) Res<bool, AllocError> {
-    eq_fn(be, s).try().match({
-        None  => Ok(false),
-        Ok(f) => write_eq(be, lhs, rhs, s, f, ctx, out),
+        Ok(s) => eq_fn(be, s).try().match({
+            None  => Ok(false),
+            Ok(f) => write_eq(be, lhs, rhs, s, f, ctx, out),
+        }),
     })
 }
 
@@ -893,21 +885,16 @@ impl_alias = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, out :: String)
             "a call to an impl-supplied member",
             out
         ),
-        Ok(s) => alias_target(be, d, s, ctx, out),
+        Ok(s) => alias_of(be, s.decl, d.a.name.text).try().match({
+            Ok(t) => lower_plain_call(be, d.id, d.c, t, Ok(d.a.base), ctx, out),
+            None  => unsupported(
+                be,
+                d.id,
+                "a call to an impl-supplied member",
+                out
+            ),
+        }),
     });
-}
-
-alias_target = (be :: CBackend, d: Dot, s: Site, ctx: Ctx, out :: String)
-               Res<(), AllocError> {
-    alias_of(be, s.decl, d.a.name.text).try().match({
-        Ok(t) => lower_plain_call(be, d.id, d.c, t, Ok(d.a.base), ctx, out),
-        None  => unsupported(
-            be,
-            d.id,
-            "a call to an impl-supplied member",
-            out
-        ),
-    })
 }
 
 // AT THIS CALL'S ARITY, and not the name alone: `Box` declares
