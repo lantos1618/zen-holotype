@@ -9,7 +9,7 @@
 # the staging directory and never the filesystem.
 #
 # KNOWN-DELIBERATE LEAKS, two of them, both in the startup prologue and both
-# process-lifetime by design: the argv rows (bootstrap/gen_c.py:2052,
+# process-lifetime by design: the argv rows (src/gen/gen_c/gen_c_main.zen:156,
 # suppressed by name in tests/bench/lsan.supp) and the root arena state (the
 # first `env.mem.alloc()` in src/zen/zen.zen, reported with its top frame in
 # generated main). LSan suppressions match ANY frame, and every allocation

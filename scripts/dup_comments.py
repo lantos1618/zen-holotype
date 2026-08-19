@@ -38,8 +38,8 @@ different blocks and this stops firing, which is correct -- two paragraphs that
 differ are no longer a duplicate, they are a contradiction, and that is a
 check nothing here can do.
 
-Scope is src/ only. bootstrap/ is throwaway and docs/GENC_REFERENCE_MAP.md
-pins line coordinates inside it, so a sweep there would break a live gate.
+Scope is src/ only: it is the tree that ships, and the one whose comments
+a reader is asked to trust.
 
     0   no file repeats a comment block
     1   at least one does; every occurrence is named with both line numbers

@@ -30,7 +30,7 @@ column 0; they are never duplicate top-level names. The collision only exists
 because UFCS makes `be.f()` and `f(be)` the same call, so finding it means
 knowing which parameter is the receiver -- a parse, not a scan.
 
-HOW IT PARSES. `bootstrap/cst.py`, the real grammar, not a regex over source
+HOW IT PARSES. `tools/parse/cst.py`, the real grammar, not a regex over source
 text. What stays heuristic is the step after: matching a first parameter's
 type name to a struct declaration. That is name resolution, and this script
 does not implement Zen's. It resolves through the file's own imports where it
@@ -91,7 +91,7 @@ def modules():
     The module path is the dotted form an import writes: `src/sema/sema_ty.zen`
     is `sema.sema_ty`, matching DESIGN.md's `<folder>/<folder>.zen` layout.
     """
-    from bootstrap import cst
+    from tools.parse import cst
 
     out = []
     for path in sorted(ROOT.glob("src/**/*.zen")):

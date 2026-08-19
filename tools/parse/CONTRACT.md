@@ -1,27 +1,24 @@
-# Bootstrapper contract
+# Lint-parser contract
 
-Frozen before any code, so five agents can work at once without merge hell. `PLAN.md` §0 says the bootstrapper is one Python codebase, one AST flowing through it — this file is that AST.
+This was the Python bootstrapper's AST, frozen before any of it was written. The bootstrapper is gone — `src/` compiles itself, and the corpus, the must-fail suite and the fixpoint all run against `./zen`. What survives is the FRONT of it: a tree-sitter parse lowered to these nodes, which is how the lint gates read `src/` with the real grammar instead of a regex.
 
-**Nothing here is Zen's design.** `docs/DESIGN.md` is the law; this is one throwaway implementation of it. When they disagree, the design wins and this file is the bug.
+**Nothing here is Zen's design.** `docs/DESIGN.md` is the law and `src/AST_CONTRACT.md` is the AST that ships; this is a reader, and where it disagrees with either, it is the bug.
 
 ---
 
 ## Module boundaries
 
 ```
-bootstrap/cst.py      grammar/ parse tree  ->  AST nodes      (owns tree-sitter node names)
-bootstrap/ast.py      the node definitions below              (owns the dataclasses)
-bootstrap/modules.py  file tree -> Module graph, * gate, re-export
-bootstrap/sema.py     memoized queries over the graph
-bootstrap/gen_c.py    graph -> deterministic C
-bootstrap/bootstrap.py  CLI: bootstrap.py <root> --emit-c -o out.c [--repeat N]
+tools/parse/cst.py    grammar/ parse tree  ->  AST nodes  (owns tree-sitter node names)
+tools/parse/ast.py    the node definitions below          (owns the dataclasses)
+tools/parse/lex.py    the scanner, for diagnostics only
 ```
 
-Each module imports only the ones above it. `gen_c.py` never imports `cst.py`.
+`cst.py` imports the other two; neither imports it. The consumers are `scripts/style.py`, `scripts/ufcs_collisions.py` and `scripts/signatures.py`.
 
 ---
 
-## AST — `bootstrap/ast.py`
+## AST — `tools/parse/ast.py`
 
 Every node is a frozen dataclass with a `span`. **No node is ever mutated**; transformations return new nodes.
 

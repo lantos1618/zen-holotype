@@ -16,11 +16,11 @@ guards on purpose and watch it go red").
 
 Usage:
 
-    tests/run.py                          # everything, via bootstrap/bootstrap.py
+    tests/run.py                          # everything, via ./zen
     tests/run.py --list                   # names only, no compiler needed
     tests/run.py --filter 'corpus/lex/*'  # a glob over the test id
     tests/run.py --jobs 8
-    tests/run.py --toolchain zen --zen ./zen
+    tests/run.py --zen build/zen          # some other build of the compiler
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ DIR_COUNT_NAMES = (".count", "{name}.count", "main.count")
 DIR_STAGE_NAMES = (".stage", "{name}.stage", "main.stage")
 DIR_STDIN_NAMES = (".stdin", "{name}.stdin", "main.stdin")
 
-# What the compiler prints once it is done: `bootstrap: 3 diagnostic(s)`.
+# What the compiler prints once it is done: `zen: 3 diagnostic(s)`.
 # `.count` is the only assertion that needs it, and it is the only one that
 # cannot fall back to reading the diagnostics themselves -- two diagnostics
 # on one position are two, and the position list cannot tell.
@@ -397,12 +397,11 @@ def select(tests: Iterable[Test], patterns: Sequence[str]) -> list[Test]:
 
 @dataclass
 class Toolchain:
-    """How to turn Zen source into C. Both back ends honour the CLI contract in
-    bootstrap/CONTRACT.md and tests/determinism/README.md: --emit-c -o <path>."""
+    """How to turn Zen source into C, per tests/determinism/README.md's CLI
+    contract: --emit-c -o <path>."""
 
     name: str
-    emit_argv: list[str]  # command prefix; source and -o are appended
-    style: str  # "bootstrap" (source first) | "zen" (source last)
+    emit_argv: list[str]  # command prefix; the build arguments are appended
 
     src_root: Path | None = None  # the tree every test is compiled against
 
@@ -410,34 +409,16 @@ class Toolchain:
                 entry: str | None = None) -> list[str]:
         # A test is a program, and a program stands on std: `Res`, `Ok`, `Env`
         # and `println` are prelude names. Compiling a corpus file alone would
-        # fail on every one of them and say nothing about the test.
+        # fail on every one of them and say nothing about the test -- so what
+        # is passed is the staged ROOT, positionally, because a build IS a root.
         #
-        # `--root` is not optional. The compilation root defaults to the
-        # inputs' common ancestor, so a test under /tmp plus a std under
-        # /home/... makes the root `/` and the compiler walks the filesystem.
-        if self.style == "bootstrap":
-            return [*self.emit_argv, str(source), "--root", str(root),
-                    "--emit-c", "-o", str(out_c)]
-        # The two CLIs disagree about how a build is named, and both spellings
-        # are deliberate.
-        #
-        # The self-hosted CLI takes the root POSITIONALLY -- `zen build <root>
-        # --emit-c -o <file>` -- and knows no `--root`, because a build is a
-        # root. Passing the bootstrapper's spelling made every differential run
-        # fail with `unknown argument --root`, which reads as 33 compiler bugs
-        # and is one harness bug.
-        #
-        # It takes no source argument either; where to START inside the root is
-        # `--entry`, and that is the other half of the same disagreement. The
-        # bootstrapper is handed the entry as a positional and the root as a
-        # flag; the self-hosted compiler is handed the root as a positional and
-        # the entry as a flag. Without `--entry` the driver probes `main.zen`,
-        # the root's own basename, and `zen.zen` -- which finds every directory
-        # test and NO single-file one, because `stage` copies `foo.zen` in
-        # under its own name. It cannot be renamed to `main.zen`: every
-        # must-fail position assertion names the file it was written in, so
-        # renaming reddens hundreds of expectations to paper over a missing
-        # flag. That gap scored the whole self-hosted corpus 38/393.
+        # `--entry` is where to START inside it, and it is not optional.
+        # Without it the driver probes `main.zen`, the root's own basename and
+        # `zen.zen` -- which finds every directory test and NO single-file one,
+        # because `stage` copies `foo.zen` in under its own name. It cannot be
+        # renamed to `main.zen`: every must-fail position assertion names the
+        # file it was written in, so renaming reddens hundreds of expectations
+        # to paper over a missing flag. That gap scored the corpus 38/393.
         argv = [*self.emit_argv, "build", str(root)]
         if entry:
             argv += ["--entry", entry]
@@ -445,31 +426,12 @@ class Toolchain:
 
 
 def make_toolchain(args: argparse.Namespace) -> Toolchain:
-    if args.toolchain == "bootstrap":
-        script = Path(args.bootstrap)
-        if not script.is_absolute():
-            script = REPO_ROOT / script
-        if not script.is_file():
-            raise HarnessError(
-                f"no bootstrapper at {script}. It is written at stage 0 "
-                f"(PLAN.md §0); pass --bootstrap PATH or --toolchain zen."
-            )
-        # `-m`, never the script path: bootstrap/ast.py shadows the stdlib `ast`
-        # that dataclasses imports, and the script form puts bootstrap/ on
-        # sys.path[0], so the interpreter dies before the first line of ours.
-        return Toolchain(
-            "bootstrap",
-            [args.python, "-m", "bootstrap.bootstrap"],
-            "bootstrap",
-            src_root=REPO_ROOT / "src",
-        )
-
     binary = Path(args.zen)
     if not binary.is_absolute():
         binary = REPO_ROOT / binary
     if not (binary.is_file() and os.access(binary, os.X_OK)):
         raise HarnessError(f"no executable zen compiler at {binary}. Build one (`make build`).")
-    return Toolchain("zen", [str(binary)], "zen", src_root=REPO_ROOT / "src")
+    return Toolchain("zen", [str(binary)], src_root=REPO_ROOT / "src")
 
 
 # ------------------------------------------------------------------- running
@@ -930,12 +892,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         prog="tests/run.py",
         description="run the tests/corpus and tests/must-fail gates",
     )
-    p.add_argument("--toolchain", choices=("bootstrap", "zen"), default="bootstrap",
-                   help="which implementation compiles the tests (default: bootstrap)")
-    p.add_argument("--bootstrap", default="bootstrap/bootstrap.py",
-                   help="path to the Python bootstrapper")
-    p.add_argument("--python", default=sys.executable, help="interpreter for the bootstrapper")
-    p.add_argument("--zen", default="zen", help="path to the zen binary (--toolchain zen)")
+    p.add_argument("--zen", default="zen", help="path to the zen binary")
     p.add_argument("--cc", default=os.environ.get("CC", "cc"), help="C compiler")
     p.add_argument("--cc-flags", default=os.environ.get("CFLAGS", "-std=c11 -O0 -g"),
                    help="flags passed to the C compiler")

@@ -132,9 +132,9 @@ file — no fix is claimed.
 - **docs/LEXER_BOOTSTRAP_FIXES.md:475 says "twenty-five files"** for
   tests/parse/errors/; it now holds 23. Left alone as a dated fix log.
 - **The must-fail migrations were verified against the bootstrap toolchain
-  only** (the default for `make test`). Whether the self-hosted `./zen`
-  rejects them identically is unverified — `make test-zen` needs a build
-  from the in-flux src/ tree, so it was not run.
+  only**, which was the default for `make test` at the time. That toolchain
+  is gone and `make test` now runs `./zen` alone, so this note is closed by
+  the deletion rather than by a second run.
 - **`make grammar-test` going red on a real grammar regression** was
   verified only in its failure reporting (its first run failed correctly
   with named files and exit 1). The end-to-end check — mutate grammar.js,
@@ -145,7 +145,7 @@ file — no fix is claimed.
 
 | directory | compiled? | mechanism |
 |---|---|---|
-| tests/corpus | yes | tests/run.py (`make test`, `make test-zen`); also `make parse`, `make fmt` |
+| tests/corpus | yes | tests/run.py (`make test`); also `make parse`, `make fmt` |
 | tests/must-fail | yes (expecting rejection) | tests/run.py, same targets; 2 tests added this pass |
 | tests/determinism/fixture | yes | tests/determinism/check.sh (`make determinism`) |
 | tests/parse/errors (23 .zen) | parse-negative gate | `make grammar-test` → scripts/grammar_test.py (new this pass) |

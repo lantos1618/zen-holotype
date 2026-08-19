@@ -59,7 +59,8 @@ Read them in this order. They are the specification, not commentary on it.
 
 ```
 grammar/     tree-sitter grammar. written before any other code.
-bootstrap/   throwaway Python compiler. deleted once Zen self-hosts.
+tools/parse/ what is left of the throwaway Python bootstrapper: a
+             tree-sitter reader, for the lint gates only.
 seed/        the checked-in generated C. regenerate, THEN commit.
 src/         the real compiler and the standard library, in Zen
 example/     a project that uses the language

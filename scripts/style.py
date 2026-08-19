@@ -21,7 +21,7 @@ One fact, one place; a second copy is the stale one.
         error messages as style violations. That is the whole argument for
         parsing over grepping, restated.
   every parameter has a name AND a type
-        the grammar requires the name; `bootstrap/cst.py` requires the type
+        the grammar requires the name; `tools/parse/cst.py` requires the type
         and reports which half is missing (`(i32, i32) i32` is missing NAMES,
         `(a, b) i32` is missing types). `make ufcs` parses all of src/ with
         cst.py, so the check runs tree-wide already.
@@ -305,7 +305,7 @@ def module_path(rel: str) -> str:
 
 def sources():
     """(relative path, Path, parsed module) for every file under src/."""
-    from bootstrap import cst
+    from tools.parse import cst
 
     out = []
     for path in sorted(ROOT.glob("src/**/*.zen")):
@@ -913,7 +913,7 @@ def main() -> int:
               " clean tree.", file=sys.stderr)
         return 2
 
-    from bootstrap import cst
+    from tools.parse import cst
     parser = cst.parser()
 
     abbrev_n, abbrev_bad, abbrev_seen = rule_abbrev(files, parser)

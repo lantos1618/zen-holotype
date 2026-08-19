@@ -16,11 +16,11 @@
 // and no unnecessary ones — every entry in `conflicts` below was named by the
 // generator, and every entry it called unnecessary is gone. The parser was
 // then built and driven over tests/, tests/parse/errors/ and every Zen block
-// in DESIGN.md. bootstrap/cst.py keeps every node name it depends on in ONE
+// in DESIGN.md. tools/parse/cst.py keeps every node name it depends on in ONE
 // table at the top of the file, so a rename is a one-file, one-table edit.
 //
 // ---------------------------------------------------------------------------
-// THE FOUR DECISIONS (settled after the first draft; bootstrap/CONTRACT.md
+// THE FOUR DECISIONS (settled after the first draft; tools/parse/CONTRACT.md
 // carries the same list, and it is binding)
 // ---------------------------------------------------------------------------
 //
@@ -42,7 +42,7 @@
 //     and is deleted.
 //
 //     R1a. What is left of `Name = <thing>` is decided by the SHAPE of
-//     <thing>, in bootstrap/cst.py, not by more grammar:
+//     <thing>, in tools/parse/cst.py, not by more grammar:
 //       `{ .. }`            struct
 //       variants with `|`   enum
 //       `(..) T { .. }`     function, with a body
@@ -140,14 +140,14 @@
 // D12. A function with a body and a function signature are two rules,
 //      `function` and `function_signature`, because R2 makes the body the
 //      thing that decides whether a `;` may follow. They still collapse to ONE
-//      ast node with an optional body (bootstrap/CONTRACT.md `Function.form`),
+//      ast node with an optional body (tools/parse/CONTRACT.md `Function.form`),
 //      which is DESIGN.md's method table — `= sig` vs `= sig {..}` differ only
 //      by the body. Per R3 there is no capability syntax on either.
 //
 // D13. Parameter types are OPTIONAL in the grammar, because a closure infers
 //      them from the call (DESIGN.md:254) and `(h, field)` must parse. A
 //      DECLARATION and a function TYPE must still write every type
-//      (DESIGN.md:223, 329); that is checked in bootstrap/cst.py, which is
+//      (DESIGN.md:223, 329); that is checked in tools/parse/cst.py, which is
 //      where the position is known, and it is a diagnostic rather than a parse
 //      error. Fixtures for that rule therefore belong in tests/must-fail/,
 //      where the compiler's diagnostic is asserted, and NOT in
@@ -163,7 +163,7 @@
 //      open, this grammar accepts both.
 //
 // D15. An enum variant carries AT MOST ONE payload type, per
-//      bootstrap/CONTRACT.md `Variant(name, payload)`. DESIGN.md never writes
+//      tools/parse/CONTRACT.md `Variant(name, payload)`. DESIGN.md never writes
 //      two.
 //
 // D15a. A signature ALWAYS writes its return type; only a function WITH a
@@ -268,7 +268,7 @@ module.exports = grammar({
     // declarations
     //
     // ONE rule for every module-level declaration. What it declares is read
-    // off the shape of the value (R1a) in bootstrap/cst.py, which is the
+    // off the shape of the value (R1a) in tools/parse/cst.py, which is the
     // only place that knowledge lives:
     //
     //   Vec*<T> = { .. }                     struct

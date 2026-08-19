@@ -9,7 +9,7 @@ a hand check of every finding that survived.
 ## The digest
 
 `python3 scripts/signatures.py --out sigs.txt` walks `src/**/*.zen`, parses
-each file with `bootstrap/cst.py` — the real grammar, never a regex, for the
+each file with `tools/parse/cst.py` — the real grammar, never a regex, for the
 reason `docs/STYLE.md:23` gives — and prints one line per declaration under a
 `### <path>` header: functions with parameter names, types, `::` vs `:`, and
 return type; structs with every field, default and const; enums with variant
@@ -79,7 +79,7 @@ instances of one shape, then measuring that shape across the tree.
 
 **What.** Zen has no `else if`; a multi-way test is written as a run of
 functions each testing one thing and tail-calling the next. Measured over the
-whole tree with `bootstrap/cst.py`: **340 such arms in 80 files, 2,416 lines
+whole tree with `tools/parse/cst.py`: **340 such arms in 80 files, 2,416 lines
 of source**, of which **18 are maximal chains of 3+ links: 72 functions,
 506 lines**. Each link re-declares the full parameter list — up to ten
 parameters, threaded unchanged — to express one comparison.

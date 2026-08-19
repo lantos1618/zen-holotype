@@ -239,8 +239,10 @@ not assumed — with the use applied and the committed seed in place:
     gen/gen_c/gen_c_runtime.zen:536:5: codegen cannot resolve `bytes`
     gen/gen_c/gen_c_runtime.zen:537:5: codegen cannot resolve `bytes`
 
-So the first `src/` use needs a **staged bootstrap**: land the feature (done),
-regenerate the seed, then land the use. Nothing about the use itself is
+So the first `src/` use needs a **staged seed**: land the feature (done),
+regenerate the seed, then land the use. (It was called a staged *bootstrap*
+when the Python implementation still existed; the constraint was always the
+committed seed, and now it is only that.) Nothing about the use itself is
 uncertain — the whole of it was built and gated against a locally staged seed:
 `zen` from the feature commit compiled the modified tree, that binary compiled
 it again **byte-identically** (the fixpoint property), and both suites came back

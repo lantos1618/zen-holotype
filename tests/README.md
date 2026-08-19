@@ -88,13 +88,13 @@ the trailing newline.
 ## Running
 
 ```sh
-tests/run.py                            # everything, through bootstrap/bootstrap.py
+tests/run.py                            # everything, through ./zen
 tests/run.py --list                     # names only; needs no compiler
 tests/run.py --filter 'corpus/traps/*'  # glob over the test id
 tests/run.py --filter consume           # a plain word is a substring match
 tests/run.py -j 8 -v
-tests/run.py --toolchain zen --zen ./zen        # after stage 1
-tests/run.py --keep                             # keep the generated C
+tests/run.py --zen build/zen            # some other build of the compiler
+tests/run.py --keep                     # keep the generated C
 ```
 
 A test id is its path under `tests/` without the extension:
@@ -109,8 +109,8 @@ A test id is its path under `tests/` without the extension:
 **2 is not a pass.** A missing compiler is a setup error, never a skip. The same
 rule as `tests/determinism/check.sh`, for the same reason.
 
-Both toolchains are driven through one CLI contract — `--emit-c -o <path>`,
-from `bootstrap/CONTRACT.md` — and the emitted C is then compiled with `cc`. A
+The compiler is driven through one CLI contract — `zen build <root> --emit-c
+-o <path>` — and the emitted C is then compiled with `cc`. A
 C compiler rejecting the generated C is a **codegen failure**, reported as a
 red test with the C diagnostic attached, not as infrastructure noise.
 

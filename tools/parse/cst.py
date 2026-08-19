@@ -1,4 +1,4 @@
-"""tree-sitter parse tree -> the AST of `bootstrap/CONTRACT.md`.
+"""tree-sitter parse tree -> the AST of `tools/parse/CONTRACT.md`.
 
 This module owns the mapping from grammar node names to AST classes, which is
 why it owns `grammar/grammar.js` too: they are one decision written twice.
@@ -74,56 +74,11 @@ Diagnostics are collected, never raised: one bad file must not stop the run.
 from __future__ import annotations
 
 import bisect
-import importlib
-import importlib.util
 import os
 import sys
 
-# --- sibling import --------------------------------------------------------
-# `bootstrap/ast.py` shares its name with the standard library, so how it is
-# reached depends on how the bootstrapper was started. Try the package form
-# first (`python3 -m bootstrap.bootstrap`, the recommended one), then the
-# script form, then the file itself.
-def _load_ast():
-    try:
-        from . import ast as module  # type: ignore[attr-defined]
-
-        return module
-    except (ImportError, ValueError):
-        pass
-    try:
-        module = importlib.import_module("ast")
-        if hasattr(module, "Module") and hasattr(module, "PatVariant"):
-            return module
-    except ImportError:
-        pass
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ast.py")
-    spec = importlib.util.spec_from_file_location("zen_bootstrap_ast", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault("zen_bootstrap_ast", module)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_lex():
-    """`bootstrap/lex.py`, reached however this process was started — same
-    three-way dance as `_load_ast`, and for the same reason."""
-    try:
-        from . import lex as module  # type: ignore[attr-defined]
-
-        return module
-    except (ImportError, ValueError):
-        pass
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lex.py")
-    spec = importlib.util.spec_from_file_location("zen_bootstrap_lex", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault("zen_bootstrap_lex", module)
-    spec.loader.exec_module(module)
-    return module
-
-
-A = _load_ast()
-L = _load_lex()
+from . import ast as A
+from . import lex as L
 
 Span = A.Span
 Trivia = A.Trivia
@@ -305,7 +260,7 @@ EXPRESSION_HOLES = frozenset(
 # ===========================================================================
 
 _TREE_SITTER_HELP = (
-    "bootstrap/cst.py needs the `tree_sitter` python package and a compiled "
+    "tools/parse/cst.py needs the `tree_sitter` python package and a compiled "
     "Zen grammar.\n"
     "  pip install tree_sitter\n"
     "  cd grammar && npx tree-sitter generate && npx tree-sitter build -o zen.so\n"
@@ -316,9 +271,8 @@ _TREE_SITTER_HELP = (
 _LANGUAGE = None
 _PARSER = None
 
-GRAMMAR_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "grammar"
-)
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+GRAMMAR_DIR = os.path.join(REPO_ROOT, "grammar")
 
 
 def load_language():

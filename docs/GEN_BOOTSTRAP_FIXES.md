@@ -1,5 +1,10 @@
 # Backend findings, and one ruling
 
+> **The bootstrapper is deleted.** This document is a record, not a map:
+> every `bootstrap/*.py` coordinate below resolves only in git history
+> (`git show 4d05320a:bootstrap/gen_c.py`), and no gate can re-verify one.
+> What is still worth reading is the Zen behaviour each entry describes.
+
 Written by the orchestrator from a read-only audit of `src/gen/`, because two
 agents converged on that folder and the one that stood down produced the more
 useful artifact: a verification of the other's work against the reference.

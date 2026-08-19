@@ -28,13 +28,10 @@ zen/
 │   ├── package.json                 #       which here is the Zen compiler.
 │   └── src/parser.c                 #       generated; second generated file in the tree
 │
-├── bootstrap/                       # (0) python. throwaway. never shipped.
-│   ├── bootstrap.py                 #     cli: bootstrap.py src/ -o out.c
-│   ├── cst.py                       #     tree-sitter parse -> raw tree
-│   ├── ast.py                       #     -> ast nodes, positions + trivia attached
-│   ├── modules.py                   #     <folder>/<folder>.zen resolution, * gate
-│   ├── sema.py                      #     memoized queries: type_of, defs_of
-│   └── gen_c.py                     #     deterministic c emission
+├── tools/parse/                     # (0) what is LEFT of the python bootstrapper:
+│   ├── cst.py                       #     tree-sitter parse -> ast nodes, for the
+│   ├── ast.py                       #     lint gates only. its back half — modules,
+│   └── lex.py                       #     sema, gen_c, the cli — is deleted.
 │
 ├── seed/
 │   └── zen.c                        # (1) the committed generated c. THE artifact.
@@ -127,7 +124,7 @@ zen/
 Three things about this tree that are decisions, not layout:
 
 - **`src/std/core/` is written before `src/std/lex/`.** The compiler is a Zen program; it needs `Vec`, `Map`, `String`, `Res`, and `Alloc` to exist before its first line. This is stage 0.6 below, and it is the piece most likely to be underestimated.
-- **`bootstrap/` and `src/` never share code.** Two implementations of the same language, deliberately, with the fixpoint test as the referee. Any "shared helper" between them is the beginning of the drift this plan exists to prevent.
+- **`bootstrap/` and `src/` never shared code.** Two implementations of the same language, deliberately, with the fixpoint test as the referee — until `src` carried the whole corpus alone and the second one was deleted (below, "Retiring the bootstrapper"). `tools/parse/` is what stayed, and it compiles nothing.
 - **Two generated files, both with a gate.** `seed/zen.c` is proven fresh by the fixpoint; `grammar/src/parser.c` by `tree-sitter test`. If a third ever appears, ask what proves it fresh — an ungated generated file is a fork nobody is reading.
 
 File naming and the 500/800-line split rule are in `STYLE.md`. The short version, visible above: a folder's root file is its public surface and is nothing but starred re-exports; siblings repeat the folder as a prefix (`std/parse/parse_expr.zen`), so every filename is unique tree-wide and every editor tab says something.
@@ -145,6 +142,8 @@ File naming and the 500/800-line split rule are in `STYLE.md`. The short version
 ## Stage 0 — the bootstrapper
 
 **Goal:** a throwaway Python program that compiles one Zen program (the real compiler) to C. It is a developer dependency, never shipped, and it is deleted after stage 1 is self-sustaining.
+
+**Done, and deleted.** Everything below is the record of a stage that is over. Only `tools/parse/{cst,ast,lex}.py` survives, as the lint gates' parser. **Every `bootstrap/*.py` citation still standing in this tree resolves in git history** — `git show 4d05320a:bootstrap/gen_c.py` — and none of them can be re-verified by any gate, so read one as evidence about what a second implementation once did, never as a coordinate.
 
 ### 0.1 The grammar
 
@@ -306,7 +305,9 @@ fixpoint:                # the gate
 
 Commit-then-regenerate ships a seed one change stale, and only a full feature test catches it — never `cmp`. This is a mistake that gets made twice if the two steps are ever two commands.
 
-**Retiring the bootstrapper: not yet.** The instinct is to delete it the moment the fixpoint is green, and that is one stage too early — until stage 2's format gate is running and seed regeneration is routine, the Python implementation is the only thing that can rebuild the world if the seed goes bad. Delete it at the end of stage 2, and delete it properly: out of the tree, into git history, with no CI job keeping it alive. A second implementation that still builds is a second implementation that drifts.
+**Retiring the bootstrapper: done.** The instinct was to delete it the moment the fixpoint went green, and that would have been one stage too early — until stage 2's format gate was running and seed regeneration was routine, the Python implementation was the only thing that could rebuild the world if the seed went bad. Both are true now: `make fmt` checks the whole tree and `make seed` is one target. `tests/run.py --toolchain zen` carried the corpus at 528/528, so the toolchain switch stopped being a switch, and the back half went out of the tree with no job keeping it alive.
+
+**What that cost, stated plainly.** The chain no longer starts from a second implementation. `scripts/fixpoint.sh` roots at `seed/zen.c` instead, so a bug `src` and the seed share is now invisible to it, and if the seed ever goes bad the rebuild path is git history rather than a program in the tree. What is bought back is that every rule is written once. A second implementation that still builds is a second implementation that drifts — and this one had: it accepted a union match `src` rejects with a diagnostic, accepted `() == ()` with no `Eq`, and its stage-1 output miscompiled `src`'s own range check and healed at stage 2.
 
 ---
 

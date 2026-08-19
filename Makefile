@@ -19,7 +19,7 @@ ROOT    ?= src
 # `editors` IS IN THIS LIST BECAUSE `editors/` IS ALSO A DIRECTORY. Without
 # it make finds the directory, calls the target up to date, and runs the
 # script never — a gate that cannot fail because it cannot run.
-.PHONY: all build seed test test-zen lint parse design cap dupcomments faults refmap ufcs style editors fixpoint determinism grammar grammar-test fmt bench bench-allocs emit-runs asan leak profile clean help
+.PHONY: all build seed test lint parse design cap dupcomments faults ufcs style editors fixpoint determinism grammar grammar-test fmt bench bench-allocs emit-runs asan leak profile clean help
 
 all: test
 
@@ -30,7 +30,7 @@ all: test
 ## src/zen/zen_cli.zen). This target used to say `-o zen-new` with no
 ## --emit-c, which the driver accepts, writes nothing for, and exits 0
 ## on -- so `build` produced no binary and every target standing on it
-## (test-zen, fmt, determinism) could not run at all.
+## (test, fmt, determinism) could not run at all.
 build: seed/zen.c
 	$(CC) $(CFLAGS) seed/zen.c -o zen
 	./zen build $(ROOT) --emit-c -o zen-new.c
@@ -45,7 +45,12 @@ seed: build
 	./zen build $(ROOT) --emit-c -o seed/zen.c
 	git add seed/zen.c
 
-## test: the corpus and must-fail suites, against the bootstrapper.
+## test: the corpus and must-fail suites, against the built ./zen.
+##
+## It depends on `build` because there is no second implementation any more:
+## the Python bootstrapper was deleted once `--toolchain zen` carried the whole
+## corpus (528/528), and with it went `refmap`, whose only job was to keep
+## docs/GENC_REFERENCE_MAP.md pointing into bootstrap/gen_c.py.
 ##
 ## `grammar-test` and `dupcomments` joined this list on 2026-08-10. Both
 ## existed as targets nobody ran, which is the same disease `grammar-test`
@@ -56,7 +61,7 @@ seed: build
 ## disease has been diagnosed here: tests/bench was run by no target in
 ## `all`, so `allocs_op: 0` -- cited in src/ as a thing that fails the
 ## build -- was a number nothing had ever computed.
-test: parse design cap dupcomments faults refmap ufcs style grammar-test editors bench-allocs
+test: build parse design cap dupcomments faults ufcs style grammar-test editors bench-allocs
 	$(PY) tests/run.py
 
 ## faults: every fault the compiler declares must have a site that raises
@@ -67,14 +72,6 @@ test: parse design cap dupcomments faults refmap ufcs style grammar-test editors
 ## error too, so it cannot drift back into fiction.
 faults:
 	$(PY) scripts/faults_reachable.py
-
-## refmap: docs/GENC_REFERENCE_MAP.md points at gen_c.py by line number,
-## hundreds of times. gen_c.py grew 845 lines under it and every claim
-## below the first insertion moved -- a map with shifted coordinates
-## sends a reader confidently to the wrong function. Green means the
-## coordinates resolve; it does NOT mean the prose is true.
-refmap:
-	$(PY) scripts/refmap.py
 
 ## ufcs: no `x.f(..)` may have two answers. a method on T and a free
 ## function taking T as its first parameter are the same call under UFCS,
@@ -113,7 +110,7 @@ editors:
 ## style: the rest of STYLE.md — where a file lives, what it is named,
 ## which way its imports point, whether an impl sits with its type. The
 ## document said "most of these are one rule with a test attached" and
-## `cap` was the only rule that had one. Parses with bootstrap/cst.py
+## `cap` was the only rule that had one. Parses with tools/parse/cst.py
 ## rather than grepping: every `if` and every `as` in src/ is inside a
 ## comment, so a regex finds only prose. The syntax laws — no if, no
 ## while, no ternary, no `as`, no fourth `@` entry — are the GRAMMAR's,
@@ -145,17 +142,15 @@ parse: grammar
 	    || { echo "parse: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
 	  cd grammar && npx tree-sitter parse --quiet --stat "$${files[@]/#/../}"
 
-## test-zen: the same suites, against a built zen binary
-test-zen: build
-	$(PY) tests/run.py --toolchain zen
-
 ## lint: every test conforms to the format in docs/TESTING.md
 lint:
 	$(PY) tests/lint.py
 
 ## fixpoint: the strongest oracle. zen-1 and zen-2 must emit
-## byte-identical C. worthless unless gen_c is deterministic.
-fixpoint: grammar build
+## byte-identical C. worthless unless gen_c is deterministic. Stands on
+## seed/zen.c alone now that the Python stage 0 is gone, so it needs
+## neither the grammar nor ./zen.
+fixpoint:
 	./scripts/fixpoint.sh
 
 ## determinism: five checks that gen_c is a pure function of input
@@ -237,7 +232,7 @@ emit-runs:
 ## over the budgets in bench_budgets.zen FAILS. ~2 seconds. The budgets
 ## are ceilings measured at libc, not at the Zen allocator -- bench.py's
 ## header says exactly what that does and does not prove.
-bench-allocs:
+bench-allocs: build
 	$(PY) scripts/bench.py --allocs-only
 
 ## bench: the same drivers with the wall clock as well, against the ns_op
@@ -248,7 +243,7 @@ bench-allocs:
 ## THIS OUT OF `test`, not the drivers: wall clocks are slow and noisy,
 ## and a gate that reddens on a loaded machine teaches people to read
 ## past red. Over budget warns; only an absurd miss fails.
-bench:
+bench: build
 	$(PY) scripts/bench.py
 
 ## asan: the compiler under AddressSanitizer + LeakSanitizer, built as

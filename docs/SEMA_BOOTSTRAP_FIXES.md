@@ -1,5 +1,10 @@
 # Bootstrapper and `std` gaps found while writing `src/sema/`
 
+> **The bootstrapper is deleted.** This document is a record, not a map:
+> every `bootstrap/*.py` coordinate below resolves only in git history
+> (`git show 4d05320a:bootstrap/gen_c.py`), and no gate can re-verify one.
+> What is still worth reading is the Zen behaviour each entry describes.
+
 Most-blocking first. Every reproducer is a complete program, run the way
 `tests/run.py` runs one: a compilation root holding the program as
 `main.zen` with `src/` beside it.

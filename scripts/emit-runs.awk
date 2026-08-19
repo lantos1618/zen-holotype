@@ -31,7 +31,7 @@
 # HONEST LIMITS, so nobody reads the number as gospel:
 #   - LINE ORIENTED. A statement wrapped over several lines is counted at its
 #     first line only, so runs containing wrapped calls are undercounted. This
-#     is a lead generator; `bootstrap/cst.py` is the parser if it ever needs to
+#     is a lead generator; `tools/parse/cst.py` is the parser if it ever needs to
 #     be exact (STYLE.md:23, "parse, don't grep").
 #   - It does not know a hole must be a `str`. A run holding a `usize` write
 #     still collapses, but around a writer that needs its own buffer -- see

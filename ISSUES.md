@@ -18,30 +18,6 @@ how a gate that cannot fail happens to a list.
 
 ## OPEN — being worked
 
-**⚠️ A must-fail test is HELD BACK, and that is a debt, not a resolution.**
-`variant_payload_names_nothing` asserts that `Expr = Unit | Array(ArrayLit)`
-with an undefined payload type is REJECTED. The self-hosted compiler rejects it
-(`undefined name`, 9:21) since `19b29864`; **`bootstrap/` still accepts it
-silently**, so the test reddened `make test` while passing `make test-zen`.
-`docs/TESTING.md:13` is unambiguous — *"any disagreement is a bug in one of
-them"* — so the honest fix is to port the check, not to keep the test out.
-Files parked at `/home/ubuntu/.claude/jobs/22ff9ad8/tmp/held/`.
-
-**What I tried and why it was not enough**, so the next lane does not repeat it:
-`bootstrap/sema.py:_check_module_decls` skips every `td.kind != "struct"`,
-mirroring the self-hosted hole exactly. Adding an `enum` branch that calls
-`self.resolve_type(payload, inner)` for each variant — the same call
-`_variant_cases` and the `Type.NAME` path already use — **resolves without
-reporting**: bootstrap still accepted the program. So `resolve_type` is not the
-reporting path; `sema.py:3024` (`undefined name`) is reached from name
-resolution, and bootstrap's type vocabulary says `unknown type` rather than
-`undefined name` besides. A port has to answer BOTH: report at all, and report
-in the sentence both compilers share, since a must-fail expectation is read by
-both.
-
-Until it lands, `make test` and `make test-zen` are both green at 528/0/4 and
-**the enum-payload rejection is checked by neither.**
-
 **Goto-definition answers `null` on an enum variant's payload type.**
 `ExprKind = Name(Name) | Literal(Literal) | ..` — asking for the definition of
 the inner `Name` gets nothing. **The cause is in sema, not the LSP**, and not
@@ -81,10 +57,9 @@ of them. `parse_error` in `lsp_reply.zen` is the type case: it spells
    field-wise walk drops into the same slot. That is why step 1 is a migration
    and not throwaway work.
 
-Blocked on the `@meta` fork below, for step 2 only: `src/lsp/` is inside `src/`,
-which `bootstrap/` compiles as fixpoint stage 1. This is the THIRD payoff
-riding on that one decision, alongside the six `std` consumers and `fmt`'s
-writer-picking.
+Unblocked: `src/lsp/` is inside `src/`, which used to mean the Python
+bootstrapper had to compile any `@meta` it adopted. Fixpoint is rooted at
+`seed/zen.c` now, so step 2 waits on `@meta` itself and on nothing else.
 
 **The UTF-8 encoding table exists TWICE, in two folders, under two names.**
 `src/std/text/text_utf8.zen` owns the DECODER; `src/lsp/lsp_json_read.zen:467`
@@ -147,12 +122,8 @@ imports in non-root files total; the other 58 genuinely exceed 80.
 **`[u8, -1]` silently floors to `[u8, 0]`.** Same family as the array count that
 was just fixed, wrong sentence for it.
 
-**`corpus/lex/long_single_line` has 2x timeout headroom** — ~60s against 120s on
-the Python toolchain, so it flakes whenever the box is busy. Not a regression;
-a fragile test.
-
 **`gen_c_print.zen` holds two subjects** at 543 lines — `println`'s lowering and
-the shared format classifier. A split is owed, and it carries the bootstrap
+the shared format classifier. A split is owed, and it carries the UFCS
 import hazard, so it needs its own fixpoint cycle.
 
 **~30% of a build is `gen_emit.order`'s insertion sort, which has no early
@@ -284,12 +255,12 @@ direct form is untested rather than merely unlucky, and `DESIGN.md:137-164`
 spends five paragraphs specifying it.
 
 **`make fmt` is in no gate, and there is no CI.** `PLAN.md:321` requires
-"`zen fmt --check` over the whole tree, in CI, failing the build". `Makefile:59`
-is `test: parse design cap dupcomments faults refmap ufcs style grammar-test
+"`zen fmt --check` over the whole tree, in CI, failing the build". `Makefile:64`
+is `test: build parse design cap dupcomments faults ufcs style grammar-test
 editors bench-allocs` — no `fmt` — and the repository has no `.github/`, no
 `.gitlab-ci.yml`, no CI configuration at all. The per-file guard inside
 `fmt.zen` still runs on every invocation, so losslessness is protected; what is
-not protected is the tree staying formatted. `Makefile:48-58` has diagnosed this
+not protected is the tree staying formatted. `Makefile:53-63` has diagnosed this
 exact disease three times about three other targets.
 
 ## DECIDE — needs a call
@@ -307,12 +278,12 @@ verified. (a) widen the door to `WriteError`, 112 corpus mains must then match;
 handed a `String` sink that cannot produce one; (c) document and leave.
 Recommendation: (b). (c) is a band-aid.
 
-**`@meta` in `src/std`.** All six waiting consumers (`Display.dump`, the `Eq`
-and `Hash` defaults, `Env`'s typed args, `build.zen`'s nodes) live in `src/std`,
-which `bootstrap/` compiles as fixpoint stage 1 — so adopting `@meta` there
-takes `make fixpoint` off the board for every unrelated change. (a) teach
-bootstrap `@meta`; (b) re-root fixpoint at the committed seed, losing the
-independent second implementation; (c) leave the six waiting.
+**`@meta` in `src/std`.** ~~All six waiting consumers live in `src/std`, which
+`bootstrap/` compiles as fixpoint stage 1.~~ **Answered by (b):** fixpoint is
+re-rooted at `seed/zen.c` and the bootstrapper is deleted, so adopting `@meta`
+in `src/std` no longer takes `make fixpoint` off the board. The six consumers
+(`Display.dump`, the `Eq` and `Hash` defaults, `Env`'s typed args, `build.zen`'s
+nodes) now wait on `@meta` being implemented and on nothing else.
 See `docs/design_meta.md`.
 
 ## CLOSED

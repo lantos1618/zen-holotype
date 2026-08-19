@@ -1,5 +1,10 @@
 # Bootstrapper bugs found while writing `src/lex/`
 
+> **The bootstrapper is deleted.** This document is a record, not a map:
+> every `bootstrap/*.py` coordinate below resolves only in git history
+> (`git show 4d05320a:bootstrap/gen_c.py`), and no gate can re-verify one.
+> What is still worth reading is the Zen behaviour each entry describes.
+
 Ten bugs, most-blocking first. Every reproducer is a complete program, run
 the way `tests/run.py` runs one: a compilation root holding the program as
 `main.zen` plus the whole of `src/` beside it.

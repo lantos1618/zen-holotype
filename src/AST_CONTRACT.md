@@ -7,9 +7,9 @@ returning these exact node types is what makes stage 5 free rather than a
 parallel universe.
 
 **Nothing here is Zen's design.** `docs/DESIGN.md` is the law. Where they
-disagree, the design wins and this file is the bug. `bootstrap/CONTRACT.md` is
-the Python bootstrapper's AST — prior art, not a spec, and the deliberate
-divergences from it are listed at the end.
+disagree, the design wins and this file is the bug. `tools/parse/CONTRACT.md` is
+what is left of the deleted Python bootstrapper's AST — prior art, not a spec,
+and the deliberate divergences from it are listed at the end.
 
 ---
 
@@ -431,7 +431,7 @@ discovery — "change the filter, change what a test is".
 
 ---
 
-## Divergences from `bootstrap/CONTRACT.md`
+## Divergences from `tools/parse/CONTRACT.md`
 
 `gen_c` eventually consumes both, so each of these is deliberate and named.
 
@@ -505,9 +505,12 @@ place the decision is written down.
 
 ---
 
-## Known bootstrapper bugs this AST runs into
+## Known bootstrapper bugs this AST ran into
 
-Not fixed here; `bootstrap/` belongs to another agent. Each is a reproducer.
+**Historical.** The bootstrapper is deleted, so none of these can be reproduced
+against it any more, and each entry is kept only for the workaround in `src/`
+that it explains — a workaround nothing now justifies is a workaround to
+remove. Verify against `./zen` before believing one.
 
 1. **A re-export through a folder root does not bind an enum or a plain
    function**, and loses names beside them in the same import list. This is why

@@ -1,6 +1,6 @@
-"""The Zen bootstrapper's AST.
+"""The Zen lint-parser's AST.
 
-`bootstrap/CONTRACT.md` is frozen and this file is that contract as code. Five
+`tools/parse/CONTRACT.md` is frozen and this file is that contract as code. Five
 agents work against these names at once, so:
 
     * the content fields of every node are EXACTLY the ones CONTRACT.md lists,
@@ -10,7 +10,7 @@ agents work against these names at once, so:
     * every node is frozen. Nothing is ever mutated. `replace(node, **kw)`
       returns a new one.
 
-Positions and trivia are attached by `bootstrap/cst.py` at parse time or never
+Positions and trivia are attached by `tools/parse/cst.py` at parse time or never
 (`PLAN.md` 0.2). The formatter is `parse |> print` over `leading` / `trailing`,
 so nothing downstream may drop them.
 
@@ -49,12 +49,12 @@ import sys
 
 # --- stdlib shield ---------------------------------------------------------
 # CONTRACT.md fixes this file's name and `ast` is also a standard-library
-# module. Run as `python3 bootstrap/bootstrap.py`, bootstrap/ lands on
-# sys.path[0] and THIS file answers every `import ast` in the process —
-# including the one `inspect`, and therefore `dataclasses`, performs. So when
-# we are the one answering to that name, load the real module first, under its
-# real name, then take the name back. `python3 -m bootstrap.bootstrap` from the
-# repository root avoids the question entirely and is the recommended form.
+# module. Put `tools/parse/` itself on sys.path[0] and THIS file answers every
+# `import ast` in the process — including the one `inspect`, and therefore
+# `dataclasses`, performs. So when we are the one answering to that name, load
+# the real module first, under its real name, then take the name back.
+# Importing as `from tools.parse import cst` from the repository root, which is
+# what every consumer does, avoids the question entirely.
 if __name__ == "ast" and sys.modules.get("ast") is sys.modules.get(__name__):
     _self = sys.modules.pop("ast")
     _here = os.path.dirname(os.path.abspath(__file__))

@@ -13,7 +13,7 @@ something. So a signature's placement is part of the signature -- a `Span`
 helper sitting in `gen_c_emit.zen` is a finding even when the signature
 itself is fine -- and the grouping is what makes that legible.
 
-IT PARSES, IT DOES NOT GREP. `bootstrap/cst.py`, the real grammar. STYLE.md:23
+IT PARSES, IT DOES NOT GREP. `tools/parse/cst.py`, the real grammar. STYLE.md:23
 records why: `if` occurs 101 times in src/ and zero of them are code, 52 being
 inside string literals. A regex over declarations would report the compiler's
 own diagnostics as functions.
@@ -217,7 +217,7 @@ def main() -> int:
         print("signatures: run `make grammar` first", file=sys.stderr)
         return 2
 
-    from bootstrap import cst
+    from tools.parse import cst
 
     out: list[str] = []
     files = 0

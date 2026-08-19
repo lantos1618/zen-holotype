@@ -1,4 +1,4 @@
-"""bootstrap/lex.py — the scanner, which exists to produce diagnostics.
+"""tools/parse/lex.py — the scanner, which exists to produce diagnostics.
 
 tree-sitter parses; it does not diagnose. An `ERROR` node carries no message,
 often no useful span, and nothing at all about *why* — so every lexical bug
@@ -7,7 +7,7 @@ byte, a `'` with nothing after it) reaches the user as "syntax error near
 `~~`" or as silence. This scanner runs first, over the same bytes, and says
 what is wrong and where.
 
-**It is not the parser's token source.** `bootstrap/cst.py` still walks the
+**It is not the parser's token source.** `tools/parse/cst.py` still walks the
 tree-sitter tree; this file only rejects — but it rejects FIRST, and its
 verdict is final: `parse_source` returns these diagnostics and never walks a
 file that did not lex, because tree-sitter's opinion of the wreckage is a

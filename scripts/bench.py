@@ -51,9 +51,8 @@ over budget is a failure and not a weather report.
 
 Usage:
 
-    scripts/bench.py                        # everything, via the bootstrapper
+    scripts/bench.py                        # everything, via ./zen
     scripts/bench.py --allocs-only          # the deterministic half; no clock
-    scripts/bench.py --toolchain zen        # against the built ./zen
     scripts/bench.py --update-baseline      # fold this run into baseline.json
     scripts/bench.py --runs 9 --jobs 8
 
@@ -236,19 +235,12 @@ def _read_budgets(path: Path) -> dict[str, Budget]:
 
 
 def make_toolchain(args: argparse.Namespace) -> runner.Toolchain:
-    if args.toolchain == "bootstrap":
-        return runner.Toolchain(
-            "bootstrap",
-            [args.python, "-m", "bootstrap.bootstrap"],
-            "bootstrap",
-            src_root=REPO_ROOT / "src",
-        )
     binary = Path(args.zen)
     if not binary.is_absolute():
         binary = REPO_ROOT / binary
     if not (binary.is_file() and binary.stat().st_mode & 0o111):
         raise HarnessError(f"no executable zen compiler at {binary}. Build one (`make build`).")
-    return runner.Toolchain("zen", [str(binary)], "zen", src_root=REPO_ROOT / "src")
+    return runner.Toolchain("zen", [str(binary)], src_root=REPO_ROOT / "src")
 
 
 def stage_driver(driver: Path, work: Path, source: str) -> Path:
@@ -478,10 +470,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         prog="scripts/bench.py",
         description="run the tests/bench drivers against budgets and baseline",
     )
-    p.add_argument("--toolchain", choices=("bootstrap", "zen"), default="bootstrap",
-                   help="which implementation compiles the drivers (default: bootstrap)")
-    p.add_argument("--python", default=sys.executable, help="interpreter for the bootstrapper")
-    p.add_argument("--zen", default="zen", help="path to the zen binary (--toolchain zen)")
+    p.add_argument("--zen", default="zen", help="path to the zen binary")
     p.add_argument("--cc", default=os.environ.get("CC", "cc"), help="C compiler")
     p.add_argument("--cc-flags", default=os.environ.get("CFLAGS", "-std=c11 -O2"),
                    help="flags for the C compiler (optimized: benches measure -O2, "

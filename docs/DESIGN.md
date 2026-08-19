@@ -21,13 +21,13 @@ src/std/...            // the stdlib specified below. ~34 modules.
 
 `src/std/ast/ast.zen` is the keystone: one AST with three consumers, which is what makes `@meta` a view onto the compiler's own nodes rather than a parallel universe.
 
-**The full tree — including the bootstrapper, the seed, the test corpora, and which stage each piece appears at — lives in `PLAN.md`.** It is the authority; this sketch shows only the shape.
+**The full tree — including the seed, the test corpora, and which stage each piece appears at — lives in `PLAN.md`.** It is the authority; this sketch shows only the shape.
 
 ---
 
 # How the compiler gets built
 
-The bootstrap is a throwaway: **Python + a tree-sitter grammar → the real compiler → `gen_c` → the generated C ships as stage 0.** From then on a user needs only a C compiler to build Zen. The bootstrapper is a developer dependency for regenerating the seed, never a shipped artifact — which is why it is written in Python and not in C. The tree-sitter grammar outlives the bootstrap as the editor and LSP grammar.
+The bootstrap was a throwaway: **Python + a tree-sitter grammar → the real compiler → `gen_c` → the generated C ships as stage 0.** It has done its job and is deleted; a user needs only a C compiler to build Zen, and a developer regenerating the seed needs the seed. The tree-sitter grammar outlived the bootstrap, as planned, as the editor and LSP grammar — and as the lint gates' parser (`tools/parse/`).
 
 **The grammar is written first, not extracted later.** It is the stage-0 artifact anyway, and writing the rules rather than more examples is what surfaces the ambiguities — the first one already found is that `Alias = Shape` is indistinguishable from a one-variant enum unless the grammar says which.
 
@@ -36,7 +36,7 @@ Two properties designed in rather than discovered:
 - **`gen_c` is deterministic.** Same input, byte-identical output. Otherwise every seed regeneration is a noisy diff nobody reviews, and the fixpoint test below is worthless.
 - **Regenerate, then commit.** Commit-then-regenerate ships a seed one change stale, and nothing but a full feature test catches it.
 
-**The seed subset is the real constraint.** The bootstrapper must implement every feature the compiler itself uses, so the compiler is written in a subset that avoids `@meta`. `@meta` is a feature user code gets from day one; the compiler adopts it only after self-hosting.
+**The seed subset was the real constraint.** The bootstrapper had to implement every feature the compiler itself used, so the compiler is written in a subset that avoids `@meta`. `@meta` is a feature user code gets from day one; the compiler may adopt it now that the bootstrapper is gone.
 
 **The cheapest strong oracle:** because `gen_c` is deterministic, "the compiler compiles itself to byte-identical C" is a fixpoint test that catches an enormous class of bugs and costs one script. Pair it with a corpus of programs with expected output.
 
@@ -53,7 +53,7 @@ So four decisions, all made in week one, all brutal to retrofit:
 
 | stage | what | why here |
 |---|---|---|
-| 0 | Python bootstrapper, minimal subset | the grammar exists first |
+| 0 | Python bootstrapper, minimal subset | the grammar exists first; deleted after stage 2 |
 | 1 | **self-host** | everything after this is cheaper; nothing before it matters |
 | 2 | formatter + CI gate | do it *at* self-host, before the tree grows, or you get a flag day |
 | 3 | ownership / sendability checker | `self :: @Self`, `consume`, `iso` |
@@ -422,7 +422,7 @@ The two halves fit together because they answer different questions. A bare name
 *And this document does not say what `a + b` MEANS when `a` and `b` have different types.* That silence is not harmless, because both implementations have an answer and nobody chose it. **Measured 2026-08-08, both toolchains:**
 
 ```groovy
-f = (a: i32, b: str) i32 { a + b }        // ACCEPTED by ./zen AND by bootstrap/
+f = (a: i32, b: str) i32 { a + b }        // ACCEPTED by ./zen (and by bootstrap/, then)
 ```
 
 The emitted C then fails to compile — `incompatible type for argument 2 of 'zg_add_i32'` — so the user's first news of a type error in the most common expression in any language is a C diagnostic naming a mangled internal function.
