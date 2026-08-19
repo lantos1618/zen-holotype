@@ -194,9 +194,8 @@ write_payload_arg = (be :: CBackend, c: Call, cs: Case, ctx: Ctx, out :: String)
 // `x.f(a)` — a value receiver
 //
 // The receiver's OWN declaration first, then what an impl supplies,
-// then a free function reached through the dot. Both of the first two
-// are overload sets, so both go through `pick_member` and neither
-// through arity alone.
+// then a free function reached through the dot. The first two are
+// overload sets, resolved on types and not arity alone.
 // -----------------------------------------------------------------
 
 lower_receiver_call = (be :: CBackend, d: Dot, ctx: Ctx, out :: String)
@@ -326,10 +325,8 @@ keep_fits = (
     })
 }
 
-// `method_sig` and not the member's written types: `@Self` and the
-// type's own parameters have to be bound before a declared parameter
-// means anything, and the signature this builds is the one
-// `emit_method_call` will mangle into the symbol.
+// `method_sig` and not the member's written types — the signature this
+// builds is the one `emit_method_call` mangles into the symbol.
 keep_if_fits = (
     be      :: CBackend,
     m       : Member,
@@ -479,10 +476,9 @@ keep_named = (st: Struct, name: str, out :: Vec<Member>) Res<(), AllocError> {
 // a member the type declares
 // -----------------------------------------------------------------
 
-// WHICH OF SEVEN KINDS A METHOD CALL IS, decided once. A variant
-// carries what deciding it computed — the `want` a ptr member is
-// lowered against, the module a capability resolves in — so that value
-// is built in the branch that needs it and threaded nowhere else.
+// WHICH OF SEVEN KINDS A METHOD CALL IS, decided once. A variant carries
+// what deciding it computed, so that value is built in the branch that
+// needs it and threaded nowhere else.
 MethodKind = Inlined
     | PtrMember(TyId)
     | Capability(usize)
@@ -636,11 +632,9 @@ lower_ordinary_method = (
 // a member declaring type parameters OF ITS OWN (instantiating one needs
 // the receiver's arguments plus the call's, and nothing in this tree
 // declares one), and a member with no body that `gen_c_cap.zen` did not
-// claim — a symbol nothing would define.
-//
-// THE REASON AND THE REFUSAL ARE ONE FUNCTION because as two they asked
-// the same two questions twice, and the third answer the wording carried
-// could not be reached from the predicate that guarded it.
+// claim — a symbol nothing would define. ONE FUNCTION AND NOT TWO: as a
+// predicate beside a wording they asked the same questions twice, and
+// could answer them differently.
 method_fault = (f: Function) Res<str> {
     (f.tparams.len > 0).match({
         true  => Ok("a generic method"),
@@ -697,11 +691,9 @@ emit_method_call = (
     out.fmt("{}({})", sym.view(), args.view())
 }
 
-// THE CALLEE OF A CALL REACHED BY MEMBER NAME: its qualified name, the
-// symbol mangled from it, and the queue entry that makes the compiler
-// emit the body that symbol names. Seven lowerings reach a member this
-// way, and a queue entry built differently from the symbol written
-// beside it is a call to a function nothing defines.
+// THE SYMBOL AND THE QUEUE ENTRY ARE WRITTEN TOGETHER. Seven lowerings
+// reach a member by name, and an entry built differently from the symbol
+// written beside it is a call to a function nothing defines.
 member_symbol* = (
     be   :: CBackend,
     ty   : TyId,
@@ -857,8 +849,7 @@ emit_eq = (
 //
 // "A free function whose first param is the type is callable as a
 // method." The receiver becomes argument zero and there is no second
-// mechanism: `gen_c_call.zen`'s ordinary call with one more argument,
-// which is why `lower_plain_call` takes a receiver at all.
+// mechanism — which is why `lower_plain_call` takes a receiver at all.
 // -----------------------------------------------------------------
 
 // `alloc.create<T>()` IS ASKED ABOUT FIRST, and only here at the end:
@@ -891,9 +882,8 @@ ufcs_or_impl = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, out :: String)
 }
 
 // An impl member that IS another function — `widen_u32 = to_u32` in
-// std.core.num — lowers as that function with the receiver as argument
-// zero, the very call the alias names, so the two spellings cannot
-// disagree. A member supplied any other way still meets the refusal.
+// std.core.num — lowers as the very call the alias names, so the two
+// spellings cannot disagree. Anything else meets the refusal.
 impl_alias = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, out :: String)
              Res<(), AllocError> {
     site_of(be, rty).try().match({
@@ -920,17 +910,9 @@ alias_target = (be :: CBackend, d: Dot, s: Site, ctx: Ctx, out :: String)
     })
 }
 
-// Whether the dot reaches this name through an IMPL rather than the
-// declaration's own body. `members_of` answers over both and the caller
-// already found nothing in the body, so a hit here is an impl —
-// `s.eq(t)`, where `str` declares no `eq` and `std.text` impls `Eq` on
-// it. Naming that distinguishes "no impls yet" from "no such function".
-//
-// AT THIS CALL'S ARITY: a name reached at another arity isn't this
-// call's name. `Box` declares `grow(self)` and a free `grow(b, by)`
-// travels with the type; asking only whether the NAME is reached once
-// refused `b.grow(10)` as unimplemented, when DESIGN.md makes the two
-// one overload set.
+// AT THIS CALL'S ARITY, and not the name alone: `Box` declares
+// `grow(self)` while a free `grow(b, by)` travels with the type, and
+// matching on the name refused `b.grow(10)` as unimplemented.
 reaches = (be :: CBackend, rty: TyId, name: str, arity: usize)
           Res<bool, AllocError> {
     found ::= be.alloc.Vec<Found>();
