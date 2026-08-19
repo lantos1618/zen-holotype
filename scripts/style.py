@@ -241,51 +241,23 @@ UFCS_OWED: dict[str, int] = {
 # that file imports and never writes again. It opened at 1208 of the 5191
 # imported names in src/, across 89 files -- nearly a quarter of the module
 # graph was fiction and nothing had ever looked. 1195 went in the change that
-# wrote the rule; these 13 are the residue, and they are all ONE THING.
+# wrote the rule, and the residue of 13 went with the Python bootstrapper.
 #
-# EVERY ENTRY BELOW IS A BOOTSTRAP RESOLUTION DEFECT, not an unpaid edit, and
-# the shape is narrower than it has been written down as before. A method
-# reached through a FIELD is resolved by the bootstrapper against the FIELD'S
-# TYPE NAME as the importing file spells it -- but only when the method name has
-# a COMPETITOR reachable in the same compilation. `c.types.at(..)` needs nothing
-# (`lsp_def.zen` and `lsp_compl.zen` write it with no `Types` in sight, and both
-# carried a comment claiming otherwise that this change deleted). `c.types.
-# write_name(..)` needs `Types`, because `sema_diag.zen:336` declares a FREE
-# FUNCTION of that name and the bootstrapper picks it: `write_name is not
-# exported by module sema_diag`. Every one of the six method names below has such
-# a twin -- `bind` in parse_stmt.zen, `count` in gen_name.zen, `index_of` in
-# collections_map, `bump` in mem_arena, `fn_ty` and `count` again in the corpus
-# tests' own main.zen.
+# THE LEDGER IS EMPTY, AND THAT IS THE WHOLE POINT OF THE ENTRY. Every one of
+# the 13 was a BOOTSTRAP RESOLUTION DEFECT: a method reached through a FIELD was
+# resolved by the bootstrapper against the FIELD'S TYPE NAME as the importing
+# file spelled it, but only when that method name had a COMPETITOR reachable in
+# the same compilation -- `c.types.write_name(..)` needed `Types` because
+# `sema_diag.zen:336` declares a FREE FUNCTION of that name and the bootstrapper
+# picked it. The self-hosted compiler always resolved all 13 correctly. So when
+# the bootstrapper was deleted the imports became dead, and were removed and
+# measured rather than assumed: `make test` 529/0/4 and `make fixpoint` green
+# with every one of them gone.
 #
-# SO WHICH NAMES ARE LOAD-BEARING DEPENDS ON THE COMPILATION, and that is why
-# these 13 were found by running gates and not by reading code. Three (`Checker`
-# in gen_c_loop.zen and gen_c_range.zen, `Types` in lsp_hover.zen) fail only
-# under `make fixpoint`, whose stage 1 bootstraps the whole of src/; eight fail
-# only under the `corpus/sema_zen` and `corpus/gen_zen` suites, because the
-# competitor is in the test program's own main. `make build` is BLIND to all of
-# it -- the self-hosted compiler resolves every one correctly -- so the only
-# gates that can see this are the two that compile src/ WITH bootstrap/.
-#
-# The mechanical form of the rule -- restore the type of every intermediate
-# field receiver in a dot chain -- keeps 145, which is 132 import edges no gate
-# can justify. These 13 are the demonstrated ones, each carrying its receiver
-# chain on its own import line, and the gate that catches a fourteenth already
-# exists. They close when bootstrap resolves a field receiver by its declared
-# type instead of by an imported name.
-IMPORT_OWED: dict[str, int] = {
-    "src/gen/gen_c/gen_c_loop.zen": 1,
-    "src/gen/gen_c/gen_c_range.zen": 1,
-    "src/lsp/lsp_hover.zen": 1,
-    "src/sema/sema_decl.zen": 1,
-    "src/sema/sema_inst.zen": 1,
-    "src/sema/sema_layout.zen": 1,
-    "src/sema/sema_member.zen": 1,
-    "src/sema/sema_module.zen": 2,
-    "src/sema/sema_static.zen": 1,
-    "src/sema/sema_type.zen": 1,
-    "src/std/lex/lex_literal.zen": 1,
-    "src/std/lex/lex_scan.zen": 1,
-}
+# KEEP THE LEDGER, EMPTY. `debt()` errors on an entry whose file no longer has
+# that many violations, so an empty dict is not a disabled gate -- it is a gate
+# that now fails on the FIRST new unused import anywhere in src/.
+IMPORT_OWED: dict[str, int] = {}
 
 # The abbreviations STYLE.md names. Not a general "short name" check -- `len`,
 # `cap`, `ptr`, `env`, `alloc` are words here and the document says so.

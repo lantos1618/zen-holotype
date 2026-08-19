@@ -18,9 +18,11 @@
 # and healed at stage 2, so stage 1 was never a compiler you could trust.
 # What still holds is the assertion below, which is about src alone.
 #
-# stage1 == stage2 additionally means the committed seed is current. It is
-# reported, not asserted: regenerating the seed is `make seed`, and a stale
-# seed is a chore, not a compiler bug.
+# seed/zen.c == stage1.c additionally means the committed seed is current --
+# what zen-0 emits for today's src IS what is checked in. It is reported, not
+# asserted: regenerating the seed is `make seed`, and a stale seed is a chore,
+# not a compiler bug. NOT stage1 vs stage2: those are two compilers reading the
+# same src, so they agree whenever zen-0 is a fixed point, whatever src does.
 set -eu
 ROOT=${ROOT:-src}
 OUT=${OUT:-.fixpoint}
@@ -51,7 +53,7 @@ if ! cmp -s "$OUT/stage2.c" "$OUT/stage3.c"; then
     exit 1
 fi
 
-if cmp -s "$OUT/stage1.c" "$OUT/stage2.c"; then
+if cmp -s seed/zen.c "$OUT/stage1.c"; then
     echo "fixpoint: OK  (stage2.c == stage3.c; seed is current)"
 else
     echo "fixpoint: OK  (stage2.c == stage3.c; seed/zen.c is stale — \`make seed\`)"
