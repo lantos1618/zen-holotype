@@ -135,7 +135,7 @@ shape being collapsed. `their lines` is what those functions occupy today.
 
 | ☐ | file | before | code | param-lines | chain fns | their lines | after | commit |
 |---|---|---:|---:|---:|---:|---:|---:|---|
-| ☑ | `gen_c_member.zen` | 1110 | 787 | 87 | 6 | 77 | **1083** | `1d732fc7` |
+| ☑ | `gen_c_member.zen` | 1110 | 787 | 87 | 6 | 77 | **964** | `1d732fc7` +B |
 | ☑ | `gen_c_op.zen` | 816 | 567 | 131 | 7 | 171 | **767** | `9a3c3838` |
 | ☑ | `gen_c_expr.zen` | 878 | 597 | 84 | 6 | 118 | **865** | `1f147841` |
 | ☐ | `gen_c_call.zen` | 1250 | 869 | 106 | 12+ | ~130 | | |
@@ -235,6 +235,83 @@ idiom is live in the tree (`parser.zen`, `parse_lookahead.zen`,
 `collections_map.zen`, `zen_cli.zen`, `fmt.zen`). **Later lanes should write
 the classifier as a breakable block, and the first two rows are owed a
 follow-up pass.**
+
+---
+
+## The follow-up pass on `gen_c_member.zen`, and the two levers it found
+
+The row above was re-done as the ledger's own note asked — classifier as a
+breakable block, not a nested staircase — and then kept going. **1083 → 964
+(−119), code 772 → 681 (−11.8%), and the parameter lines 250 → 115 (−54%).**
+That is four times what Phase A's first three rows yielded per file, and none
+of it came from the move Phase A is about.
+
+| | before | after |
+|---|---:|---:|
+| total lines | 1081 | 964 |
+| code lines | 772 | 681 |
+| **parameter lines** | **250 (32% of code)** | **115 (17%)** |
+| functions | 56 | 52 |
+| comment lines | 241 | 219 |
+
+### Lever 1 — the CALL SITE is one value, not three
+
+`id: ExprId`, `c: Call` and `a: Access` are produced together by the parser,
+read by every lowering in the file, and written by none. They were three
+parameters on twenty signatures. As one `Dot` they are one, and the whole
+receiver path drops from nine parameters to six.
+
+**This is not the struct-with-nine-fields Phase A rejected.** The rejected
+shape bundles the accumulated pile — inputs, derived values and the output
+sink together — and hides what a function actually reads. `Dot` bundles
+exactly the values that are *the identity of the call being lowered*, all
+three immutable, and it is FILE-PRIVATE: `lower_dot_call*` still takes them
+apart, so no other file changed. That property is what makes this
+parallelisable the way Phase A is, and Phase B is not.
+
+The same shape is waiting in `gen_c_call.zen`, `gen_c_try.zen` and
+`gen_c_flow.zen`, all of which thread the identical triple.
+
+### Lever 2 — a derived value threaded beside the thing it was derived from
+
+`Site` is found by `site_of(be, rty)` — and then almost every function took
+`(rty, s)` as two parameters. Putting `ty` in `Site` deleted a parameter from
+fifteen signatures. **A pair that can be threaded apart is a pair that can be
+threaded wrong**; this one could not disagree because the two values had a
+single source, but nothing said so.
+
+### And the defect the two levers uncovered: DEAD PARAMETERS
+
+Phase A found two in `gen_c_op.zen`. A mechanical scan finds **92 in `src/`,
+59 of them in `src/gen`** — a parameter declared, threaded through a call
+chain, and never read in the body. `gen_c_member.zen` had eight, including
+`want` on the file's own EXPORTED entry point, computed by `gen_c_call.zen`
+and carried two frames to nothing.
+
+They are invisible for exactly the reason the ledger already names: no single
+link in a chain looks wrong. Worth its own sweep, and worth a `style.py` rule
+beside the Phase C one — the scan is ~30 lines and has no false positives on
+this tree.
+
+### One duplicated predicate, and the dead answer behind it
+
+`refuse_method` and `method_fault` asked the same two questions — one for the
+verdict, one for the wording. The third wording, "a call to a member this
+backend does not lower", **could not be reached from the predicate guarding
+it**. One function returning `Res<str>` states the rule once and the dead
+string is gone.
+
+### What was NOT done, and why
+
+An outside review of this file proposed recording a `MemberId` in sema so the
+backend stops re-deriving overload resolution, and costed it at ~180 lines.
+The direction is right and the file's own header has said so for months. The
+number is not: the resolution block is ~60 code lines, and the change is a
+cross-file sema change, not a `gen` one. It also deletes the property that
+makes the current code safe — `pick_member` calls `recv_sig_fits`, the
+checker's own predicate, so the two cannot disagree about the rule. Do it
+deliberately, in sema, with the seam closed in one commit; do not do it as
+part of a shape campaign.
 
 ---
 
