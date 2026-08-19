@@ -131,25 +131,42 @@ call_spills = (be: CBackend, c: Call) bool {
 // use of `inner` is a name with no receiver.
 ty_of* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
          Res<TyId, AllocError> {
+    ty_source(be, id, ctx, want).try().match({
+        ScopeRef   => scope_type(be, ctx),
+        Frame(t)   => Ok(t),
+        Backend(t) => Ok(t),
+        Sema(got)  => settled_answer(be, id, ctx, got),
+        Unanswered => fallback_type(be, id, ctx, want),
+    })
+}
+
+// WHICH AUTHORITY ANSWERED, and the order they are asked in. The order
+// is the whole rule, and this list is the only statement of it: the
+// frame before the backend, the backend before sema, sema before the
+// context's expectation. Each variant carries the type its own source
+// computed, so nothing below asks a second time.
+TySource = ScopeRef | Frame(TyId) | Backend(TyId) | Sema(TyId) | Unanswered
+
+ty_source = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+            Res<TySource, AllocError> {
     is_scope_ref(be, id).match({
-        true  => scope_type(be, ctx),
-        false => settled_ty_of(be, id, ctx, want),
+        true  => Ok(TySource.ScopeRef),
+        false => local_answer(be, id).try().match({
+            Ok(t) => Ok(TySource.Frame(t)),
+            None  => ptr_answer(be, id, ctx, want).try().match({
+                Ok(t) => Ok(TySource.Backend(t)),
+                None  => sema_source(be, id, ctx),
+            }),
+        }),
     })
 }
 
-settled_ty_of = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
-                Res<TyId, AllocError> {
-    local_answer(be, id).try().match({
-        Ok(t) => Ok(t),
-        None  => derived_answer(be, id, ctx, want),
-    })
-}
-
-derived_answer = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
-                 Res<TyId, AllocError> {
-    ptr_answer(be, id, ctx, want).try().match({
-        Ok(t) => Ok(t),
-        None  => sema_answer(be, id, ctx, want),
+sema_source = (be :: CBackend, id: ExprId, ctx: Ctx)
+              Res<TySource, AllocError> {
+    got = sub(be, be.check.type_of(id, ctx).try()).try();
+    be.check.is_unknown(got).match({
+        false => Ok(TySource.Sema(got)),
+        true  => Ok(TySource.Unanswered),
     })
 }
 
@@ -216,15 +233,6 @@ keep_known = (be :: CBackend, ty: TyId) Res<TyId> {
     })
 }
 
-sema_answer = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
-              Res<TyId, AllocError> {
-    got = sub(be, be.check.type_of(id, ctx).try()).try();
-    be.check.is_unknown(got).match({
-        false => settled_answer(be, id, ctx, got),
-        true  => fallback_type(be, id, ctx, want),
-    })
-}
-
 // `Ptr`'s members ARE the backend, so sema has no body to check and
 // answers `p.to<u8>()` with a `Ptr` whose element nothing settled — not
 // unknown, carries no `Var`, so nothing downstream questions it. A
@@ -257,19 +265,8 @@ ptr_dot_answer = (be :: CBackend, c: Call, a: Access, ctx: Ctx, want: TyId)
     rty     = ty_of(be, a.base, ctx, unknown).try();
     is_ptr_member(be, rty, a.name.text).match({
         false => create_type(be, c, a, rty, ctx),
-        true  => ptr_answer_of(be, c, a, rty, ctx, want),
+        true  => Ok(Ok(ptr_member_type(be, c, a, rty, ctx, want).try())),
     })
-}
-
-ptr_answer_of = (
-    be   :: CBackend,
-    c    : Call,
-    a    : Access,
-    rty  : TyId,
-    ctx  : Ctx,
-    want : TyId
-) Res<Res<TyId>, AllocError> {
-    Ok(Ok(ptr_member_type(be, c, a, rty, ctx, want).try()));
 }
 
 // An open type is not an answer. Sema types `range.loop(body)` as
@@ -498,53 +495,40 @@ res_type_of* = (be :: CBackend, id: ExprId, ctx: Ctx)
 //     `gen_c_hoist.zen`.
 expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, out :: String)
         Res<(), AllocError> {
-    needs_set(be, id, ctx, want).try().match({
-        true  => set_expr(be, id, ctx, want, out),
-        false => hoist_or_value(be, id, ctx, want, out),
+    door_of(be, id, ctx, want).try().match({
+        Set   => set_expr(be, id, ctx, want, out),
+        Hoist => hoist_expr(be, id, ctx, want, out),
+        Widen => widen_expr(be, id, ctx, want, out),
+        Fat   => fat_expr(be, id, ctx, want, out),
+        Plain => value_expr(be, id, ctx, want, out),
     })
 }
 
-hoist_or_value = (
-    be   :: CBackend,
-    id   : ExprId,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    needs_hoist(be, id, ctx, want).try().match({
-        true  => hoist_expr(be, id, ctx, want, out),
-        false => widen_or_value(be, id, ctx, want, out),
-    })
-}
-
+// WHICH DOOR A VALUE GOES THROUGH on its way to `want`, and the order
+// they are asked in. The order is load-bearing and this list is the
+// only statement of it.
+//
 // A `Res` reaching a `Res` with a wider error set arrives through the
-// same three doors as the other conversions. Asked AFTER hoist (the two
-// are disjoint by construction — a lifted value is not already a `Res`)
-// and BEFORE the fat reading (a `Res` is never a bound). `gen_c_widen.zen`
-// says what is claimed.
-widen_or_value = (
-    be   :: CBackend,
-    id   : ExprId,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    needs_widen(be, id, ctx, want).try().match({
-        true  => widen_expr(be, id, ctx, want, out),
-        false => fat_or_value(be, id, ctx, want, out),
-    })
-}
+// same three doors as the other conversions. It is asked AFTER hoist
+// (the two are disjoint by construction — a lifted value is not already
+// a `Res`) and BEFORE the fat reading (a `Res` is never a bound).
+// `gen_c_widen.zen` says what is claimed.
+Door = Set | Hoist | Widen | Fat | Plain
 
-fat_or_value = (
-    be   :: CBackend,
-    id   : ExprId,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    needs_fat(be, id, ctx, want).try().match({
-        true  => fat_expr(be, id, ctx, want, out),
-        false => value_expr(be, id, ctx, want, out),
+door_of = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+          Res<Door, AllocError> {
+    needs_set(be, id, ctx, want).try().match({
+        true  => Ok(Door.Set),
+        false => needs_hoist(be, id, ctx, want).try().match({
+            true  => Ok(Door.Hoist),
+            false => needs_widen(be, id, ctx, want).try().match({
+                true  => Ok(Door.Widen),
+                false => needs_fat(be, id, ctx, want).try().match({
+                    true  => Ok(Door.Fat),
+                    false => Ok(Door.Plain),
+                }),
+            }),
+        }),
     })
 }
 
@@ -585,14 +569,30 @@ spill_temp = (
     out  :: String
 ) Res<(), AllocError> {
     ty = destination_type(be, id, ctx, want).try();
-    settled_place(be, ty).match({
-        false => unsupported(
+    spill_of(be, ty).match({
+        Unsettled => unsupported(
             be,
             id,
             "a spilling form whose type nothing settles",
             out
         ),
-        true  => spill_settled(be, id, ctx, ty, out),
+        Effect    => spill_effect(be, id, ctx, ty, out),
+        Valued    => spill_valued(be, id, ctx, ty, out),
+    })
+}
+
+// WHAT A SPILLED VALUE CAN BE HELD IN, in the order asked: a type
+// nothing settled has no C declaration to make, and a `()` has no
+// storage to make one in.
+Spill = Unsettled | Effect | Valued
+
+spill_of = (be :: CBackend, ty: TyId) Spill {
+    settled_place(be, ty).match({
+        false => Spill.Unsettled,
+        true  => is_unit(be, ty).match({
+            true  => Spill.Effect,
+            false => Spill.Valued,
+        }),
     })
 }
 
@@ -616,19 +616,6 @@ settled_place = (be :: CBackend, ty: TyId) bool {
 // temporary is illegal C — and it still RUNS: dropping it would drop
 // the `.try()` that was the reason for writing it. `0` goes where the
 // expression went, which is what the four report helpers write.
-spill_settled = (
-    be  :: CBackend,
-    id  : ExprId,
-    ctx : Ctx,
-    ty  : TyId,
-    out :: String
-) Res<(), AllocError> {
-    is_unit(be, ty).match({
-        true  => spill_effect(be, id, ctx, ty, out),
-        false => spill_valued(be, id, ctx, ty, out),
-    })
-}
-
 spill_effect = (
     be  :: CBackend,
     id  : ExprId,
