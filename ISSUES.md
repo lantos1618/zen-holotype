@@ -371,34 +371,23 @@ writes — a real case, but it is about EXISTENCE, and the signature is right
 there to check the call against. The wrong-arity spelling gets a codegen
 message that names resolution, at the wrong place, for an arity error.
 
-**3. Struct construction checks nothing — not the field types, and not
-whether the fields are there at all.**
+**3. ~~Struct construction checks nothing~~ — CLOSED by `e173ceea`.** Both
+halves: a required field left out and a value that does not fit the field it
+names are compile-time errors. The impl path's own check (`sema_bound.zen`,
+"an impl supplies a value for every field the bound declares") is where the
+constructor's now lives, because it is the same question asked of the other
+form. Three narrowings are in the code and each is a form a construction
+cannot supply — a function member, a `Res` field, and a positional argument.
 
-    Holder = { n*: i32 }
-    ..  Holder(n: "definitely not an i32")   // silent, cc rejects the C
-
-    Plain = { n*: i32, m*: i32 }
-    ..  p = Plain(n: 7); println("m={}", p.m)   // silent, prints m=0
-
-The second is the worse one, and it is the shape
-`what-the-compiler-doesnt-eat` is about: a required field left out is not a
-crash, it is a zero, and it emits `(Plain){ .n = 7 }` with `cc` perfectly
-happy. DESIGN.md:1394 already states the rule — "no default and no Res means
-required" — and `Env`'s typed args enforce it at RUNTIME
-(`ArgError.Missing(str)`, DESIGN.md:659). Construction in source does not.
-
-**THE RULE IS ENFORCED ONE PLACE AND IT PROVES THE POINT.** An impl is
-checked for completeness, by name:
-
-    Shower = { show* = (..) i32
-               other* = (..) i32 }
-    Thing.impl(Shower, { show = .. })
-    -> impl is missing field `other`: an impl supplies a value for every
-       field the bound declares                                    ✅
-
-Same question — "did you supply every required member" — asked of an impl and
-answered, asked of a constructor and not asked at all. Whatever `sema_supply`
-does for the impl path is what the constructor wants.
+**A NOTE THE NEXT PERSON WANTS.** The type half looks like it belongs in
+`sema_hoist.zen`'s `hoist_into`, whose `_` arm swallowed exactly this. It does
+not: importing `sema_bound` there closes
+`sema_hoist -> sema_bound -> sema_call -> sema_hoist`, and the cost is not a
+diagnostic — the backend stops emitting whole instantiations and corpus
+programs come out calling `Vec<Diag>(alloc)` in C that never declares it.
+Asking `members_of` during `construct` does the same, for the same reason: it
+walks impls and instantiates, in the middle of the resolution that is queueing
+the construction.
 
 **4. `==` does not check its two sides against each other.** A missing `Eq` IS
 caught (`5 == Tester` → "`Tester` has none"), so the rule exists and stops one
@@ -457,3 +446,23 @@ See `docs/design_meta.md`.
 - unused imports: gate + 1195 culled — `03d1b597`
 - a pattern naming a constant is reported, not silently irrefutable — `76dd2fe7`
 - array literal element type comes from its position — `d3bd7e9f`
+
+**`make build` fails intermittently, and the failure is a resolution error in
+a file you did not touch.** Seen three times in one session:
+
+    gen/gen_c/gen_c_main.zen:19:1: a name crosses a module boundary only with
+      `*`: DeclId is not exported by module sema.sema_def
+    gen/gen_c/gen_c_runtime.zen:161:8: no `uses_print` on `CBackend`
+
+Both names exist and are exported. **The identical build succeeded on the very
+next invocation, three times in a row.** The recipe overwrites `./zen` twice
+in place (`cc seed/zen.c -o zen`, then `mv zen-new zen`), so a `./zen` still
+held by a previous step is the obvious suspect — a `Permission denied:
+'/home/ubuntu/zenc/zen'` from `tests/run.py` in the same session is the same
+shape.
+
+**THIS IS EXPENSIVE OUT OF PROPORTION TO ITS SIZE.** A flaky build reads as a
+broken change: one run of the corpus reported 107 failures against a change
+that, rebuilt, reported 3. Every bisect done through `make build` is
+untrustworthy until this is fixed. Build to a temporary name and rename once,
+or refuse to overwrite a binary that is in use.
