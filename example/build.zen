@@ -25,33 +25,39 @@ build = (b :: Builder) Res<(), BuildError> {
         Windows => ["C:/sodium/lib"],
     });
 
-    json = b.add("json", json_pkg);
+    // EVERY TARGET CALL IS `.try()`d. b.add/lib/extern hand back a
+    // `Res<Dep, BuildError>` and the `deps` lists below want a `Dep`,
+    // so dropping the `.try()` puts the Result itself in the graph;
+    // b.exe/test/bench return `Res<(), BuildError>`, and a build
+    // whose fetch failed has to stop rather than carry on wiring
+    json = b.add("json", json_pkg).try();
 
+    // Lib.src is the ZEN-SIDE BINDING, not the C: `libs` names what
+    // to link and `paths` where to find it, so the .c never appears
     libsodium = b.lib("libsodium", {
-        src: Path("src/extern.c"),
+        src: Path("src/sodium.zen"),
         libs: ["sodium"],
         paths: lib_paths,
-    });
+    }).try();
 
+    // Extern is the other answer to "where's the code from" — c
+    // sources compiled alongside the tree. extern_add.c IS `add`, so
+    // there is no system library to find and no path to search
     extern_add = b.extern("extern_add", {
         src: Path("src/extern_add.c"),
-        libs: ["add"],
-        paths: lib_paths,
-    });
-
-    ext = b.os.match({
-        Windows => ".exe",
-        _       => "",
-    });
+        libs: [],
+        paths: [],
+    }).try();
 
     // deps are wired per target: main.zen may import from pkg only
-    // what this list declares. out defaults to
-    // build/{os}-{arch}/{name}; .gitignore covers build/
+    // what this list declares. `out` is left to its default,
+    // build/{os}-{arch}/{name} — spelling it needs a formatted Path,
+    // which takes b.alloc and fails with AllocError, and AllocError
+    // is not a BuildError. .gitignore covers build/
     b.exe("example", {
         src: Path("src/main.zen"),
         deps: [json, libsodium, extern_add],
-        out: Path("build/{}-{}/example{}", b.os, b.arch, ext),
-    });
+    }).try();
 
     // test discovery is code, not compiler magic: walk the parsed
     // module tree and keep every function whose single parameter
@@ -68,7 +74,7 @@ build = (b :: Builder) Res<(), BuildError> {
     b.test("example_tests", {
         tests: tests,
         deps: [json, libsodium, extern_add],
-    });
+    }).try();
 
     // benches: same walk, different filter
     benches ::= b.alloc.Vec<Function>();
@@ -90,7 +96,7 @@ build = (b :: Builder) Res<(), BuildError> {
                 bytes_op: 64
             ),
         ],
-    });
+    }).try();
 
     // and the build budgets itself, so it never quietly grows.
     // UFCS spelling: Duration.seconds is a type lookup and seconds

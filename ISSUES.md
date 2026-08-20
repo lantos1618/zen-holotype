@@ -293,7 +293,55 @@ guaranteed by byte-copying, with the trivia doing the boundary work — stronger
 than printing, but a different claim from the one "trivia on AST nodes makes
 `zen fmt` lossless" suggests.
 
+**A call through a bound's declared member is not checked against that
+declaration — not its types, not even its arity.** `cc` is the type checker.
+Found by compiling `example/build.zen`, which reported 2 errors where there
+were 8. Minimal reproducer, no std involved:
+
+    Shower = { show* = (self: @Self, a: i32, b: i32) i32 }
+    Thing  = { n*: i32 }
+    Thing.impl(Shower, { show = (self: @Self, a: i32, b: i32) i32 { a + b } })
+
+    use = <T: Shower>(t: T) i32 { t.show("a", "b") }   // silent, emits C
+    use = <T: Shower>(t: T) i32 { t.show(1) }          // "codegen cannot resolve `show`"
+    plain = (a: i32, b: i32) i32 { a + b }
+    ..    plain(1)                                     // "no overload matches" ✅
+
+The free function is checked and the bound member is not. The wrong-type call
+emits `zu_..show(t, (zg_str){"a",1}, (zg_str){"b",1})` against an `int32_t`
+parameter and `zen build` exits 0; the wrong-arity call gets a codegen message
+that names resolution, at the wrong place, for what is an arity error.
+
+**The cause is `sema_call.zen:no_such_method`.** When no candidate matched it
+asks `bound_declares`, and a `true` returns `unknown()` in silence. The comment
+above it justifies the silence with `alloc.create<Node>()`, which reaches
+nothing here because `gen_c_alloc.zen` writes that body — a real case, but it
+is about EXISTENCE, and the signature is right there to check the call against.
+"A name a bound declared is not a name the type never heard of" is correct; it
+does not follow that the arguments are nobody's business.
+
+**Struct construction does not check field types either**, same shape:
+
+    Holder = { n*: i32 }
+    Holder(n: "definitely not an i32")   // silent, exit 0, cc rejects the C
+
+Both are `what the compiler doesn't eat`: a green build standing on the C
+compiler. Neither is caught by `make test` — the corpus has no case that
+miscalls a bound.
+
 ## DECIDE — needs a call
+
+**A list literal in a `Vec<T>` field: which side moves?** `docs/DESIGN.md:1147`
+writes `libs: ["sodium"]`, `deps: [json, ..]`, `budgets: [Budget(..)]` into the
+build file, and `src/std/build/build.zen` declares every one of those fields
+`Vec<T>`. They are not the same thing — the emitted C initialises a `zg_str *`
+with a `zg_a1_b3str` and `cc` rejects it — and nothing caught the drift because
+struct construction does not check field types (above). Affects `Lib.libs`,
+`Lib.paths`, `Exe.deps`, `Test.deps`, `Bench.budgets`. (a) the fields become
+slices, and a build file stays readable; (b) the example becomes
+`b.alloc.Vec<str>()` plus `.add()`, which is a grim thing to write for a
+one-element list; (c) a list literal is allowed to construct a `Vec`, which is
+hidden allocation and the standing rule forbids it. Recommendation: (a).
 
 **The format door's final name.** `String.add` and `String.fmt` are one door
 twice, differing only in error set; the floor mechanism now derives the error
