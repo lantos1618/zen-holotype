@@ -102,7 +102,7 @@ dupcomments:
 ## to no tokenization at all. That fallback is what put the `(` inside
 ## `add_bytes("(zg_fs_kind(")` into bracket matching, while colour kept
 ## working because that comes from the server. Nothing else gates
-## editors/ (CENSUS.md said so), and a check nobody runs is a check that
+## editors/, and a check nobody runs is a check that
 ## goes stale.
 editors:
 	$(PY) scripts/editors_check.py

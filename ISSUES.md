@@ -185,7 +185,7 @@ compare) makes each surviving comparison an integer one. The population is
 5,685 distinct identifiers over 137,828 code-only occurrences, 24:1 — a
 favourable atom table. The `Map` is the smaller change and should go first.
 Delete or correct the comment regardless; a false comment with live code shaped
-around it is what `COMMENT_AUDIT.md` calls the highest-value find.
+around it is the highest-value find a comment audit can make.
 
 **`group_end_at` rescans the rest of the file for every `(` after an unclosed
 one.** `parse_lookahead.zen:144-152` walks `Range(from, p.tokens_len())`
@@ -262,6 +262,36 @@ editors bench-allocs` — no `fmt` — and the repository has no `.github/`, no
 `fmt.zen` still runs on every invocation, so losslessness is protected; what is
 not protected is the tree staying formatted. `Makefile:53-63` has diagnosed this
 exact disease three times about three other targets.
+
+**A diagnostic naming a rule the code stopped enforcing.**
+`gen_c_const.zen:158` refuses with *"a constant whose value is not a literal"*,
+but the gate actually applied is `is_pure_value` (`:170`), which admits
+operators, constructions, nullary variants and type constants. Rejected
+constants are told the wrong reason, and it is user-facing.
+
+**`lsp_def.disk_text` and `lsp_diag.on_disk` are the same five lines**
+(`lsp_def.zen:203`, `lsp_diag.zen:344`), both private — a STYLE.md
+second-caller violation. `lsp_def.zen:201`'s comment describes it accurately;
+the code is the problem.
+
+**A garbled sentence in a file header.** `gen_c_try.zen:18` — *"which made
+every merge / DESIGN.md promises a report"* is not a sentence; a word was
+dropped. Probable reading: "which made every merge DESIGN.md promises **into**
+a report." Left alone rather than guessed at.
+
+**`DESIGN.md:164` claims the leading bar means "a parser needs no lookahead".**
+It removes *backtracking*, not lookahead: the `Name = <thing>` fork is still
+classified by bounded lookahead (`parse_lookahead.zen:240-243`,
+`variant_ahead:293`), and `grammar.js:218-220` still declares a GLR conflict
+`[$.enum_variant, $._callee]` for the same fork. The bar closes the
+alias-versus-one-variant-enum fork specifically. One word too many in the law.
+
+**The formatter does not print declarations from the AST.** It uses trivia for
+the material *between* declarations and copies each declaration's own bytes
+verbatim from source (`fmt.zen:150-159`, `fmt_src.zen`). Losslessness today is
+guaranteed by byte-copying, with the trivia doing the boundary work — stronger
+than printing, but a different claim from the one "trivia on AST nodes makes
+`zen fmt` lossless" suggests.
 
 ## DECIDE — needs a call
 

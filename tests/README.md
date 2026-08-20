@@ -8,7 +8,7 @@ Two programs live here and neither is a test:
 | file | what it is |
 |---|---|
 | `run.py` | the gate. Compiles and runs `corpus/`, compiles and rejects `must-fail/`. |
-| `lint.py` | the format checker. Validates every test against `TESTING.md`, and writes `FORMAT-VIOLATIONS.md`. |
+| `lint.py` | the format checker. Validates every test against `TESTING.md`; `--markdown` writes the report. |
 
 ---
 
@@ -122,8 +122,9 @@ tests/lint.py --errors-only
 tests/lint.py --markdown > tests/FORMAT-VIOLATIONS.md
 ```
 
-Exit 0 clean, 1 on any ERROR, 2 if the tree cannot be read. `FORMAT-VIOLATIONS.md`
-is the current report: what does not conform, grouped by suite, with the fix.
+Exit 0 clean, 1 on any ERROR, 2 if the tree cannot be read. The report is
+generated on demand and is not checked in — the tree is at 0 errors and 0
+warnings, so a stored copy would only record a state that no longer holds.
 
 ---
 
