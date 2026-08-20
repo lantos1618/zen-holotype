@@ -51,13 +51,14 @@ Alloc, AllocError = std.mem
 scan, Source = std.lex
 Parser = std.parse
 Ast, Decl, ExprId, Member, TypeId, Span, Function, TriviaRun = std.ast
+Variant = std.ast
 Checker = sema.sema_check
 check_all = sema.sema_decl
 // THE DRIVER, REACHED FROM THE SERVER (`design_lsp.md` §5): the
 // alternative is a private copy of `walk` in this folder.
 Build = zen.zen_build
 root_for, relative_to = zen.zen_path
-TyId, Prim = sema.sema_ty
+TyId, TyNamed, Prim = sema.sema_ty
 Def, decl_at = sema.sema_def
 to_pos, to_wire, WirePos = lsp.lsp_pos
 Tell, told_at = lsp.lsp_decl
@@ -266,14 +267,56 @@ write_ty = (c :: Checker, id: TypeId, out :: String) Res<bool, AllocError> {
 }
 
 // The OfType answer for a resolved type: the prim's prelude note when
-// there is one, the plain name otherwise.
+// there is one, the declared type's shape when it has one, the plain
+// name otherwise.
 write_ty_named = (c :: Checker, id: TyId, out :: String) Res<bool, AllocError> {
     poison_free(c, id).match({
         false => no_answer(),
         true  => c.types.at(id).match({
-            Prim(p) => write_prim(c, id, p, out),
-            _       => { c.types.write_name(id, out).try(); an_answer() },
+            Prim(p)  => write_prim(c, id, p, out),
+            Named(n) => write_named(c, id, n, out),
+            _        => { c.types.write_name(id, out).try(); an_answer() },
         }),
+    })
+}
+
+// THE SAME ANSWER FOR A VALUE, MINUS THE PRIMITIVE'S NOTE. A written
+// `i32` is a reader asking about `i32`, and the prelude's `MIN, MAX,
+// BITS` answers them; a local that HAPPENS to be an `i32` is not that
+// question, and hovering `s` to be told about MIN and MAX is noise on
+// the most common hover there is. A declared type expands either way:
+// "what is in this" is the same question whichever position asked it.
+write_ty_value = (c :: Checker, id: TyId, out :: String) Res<bool, AllocError> {
+    poison_free(c, id).match({
+        false => no_answer(),
+        true  => c.types.at(id).match({
+            Named(n) => write_named(c, id, n, out),
+            _        => { c.types.write_name(id, out).try(); an_answer() },
+        }),
+    })
+}
+
+// A DECLARED TYPE ANSWERS WITH ITS SHAPE, not with its name. `MyStruct`
+// alone tells a reader what they already typed; what they hovered to
+// find out is what is IN it, and the declaration is right there —
+// `decl_at` off the `TyNamed`'s own `DeclId`, no memo and no second
+// lookup. Same note a primitive gets, for the same reason: the
+// declaration is the one place the language has anything to SAY.
+//
+// THE NAME IS WRITTEN FIRST AND KEPT WHATEVER FOLLOWS. A declaration
+// that cannot be reached is not a reason to answer `null` — the type
+// resolved, which is what the hover was asked.
+write_named = (c :: Checker, id: TyId, n: TyNamed, out :: String)
+              Res<bool, AllocError> {
+    c.types.write_name(id, out).try();
+    decl_at(c.tree, n.decl).match({
+        None   => an_answer(),
+        Ok(dd) => { write_decl_note(
+            c,
+            dd,
+            WHOLE_SHAPE,
+            out
+        ).try(); an_answer() },
     })
 }
 
@@ -302,73 +345,281 @@ write_prim = (c :: Checker, id: TyId, p: Prim, out :: String)
 write_prelude_note = (c :: Checker, d: Def, out :: String) Res<(), AllocError> {
     decl_at(c.tree, d.id).match({
         None   => Ok(()),
-        Ok(dd) => {
-            doc = first_doc_line(c.tree, dd.leading);
-            (doc.len > 0).then(() {
-                out.add_bytes(" — ").try();
-                out.add_bytes(doc).try();
-            });
-            write_members(c, dd, doc.len > 0, out)
+        Ok(dd) => write_decl_note(c, dd, EXPORTED_ONLY, out),
+    })
+}
+
+// THE NOTE ITSELF, shared by the two ways in — a prelude primitive's
+// declaration and a named type's own. Reached from a `Decl` rather than
+// from a `Def` because that is the half both have.
+write_decl_note = (c :: Checker, dd: Decl, all: bool, out :: String)
+                  Res<(), AllocError> {
+    doc = doc_block(c.alloc, c.tree, dd.leading).try();
+    (doc.len > 0).then(() {
+        out.add_bytes(" — ").try();
+        out.add_bytes(doc).try();
+    });
+    write_members(c, dd, Shown(joined: joiner(doc), all: all), out)
+}
+
+// WHO THE MEMBER LIST IS FOR, and it is two different readers. A
+// PRIMITIVE'S note documents a public surface — `str`'s `data` is
+// deliberately absent, an unstarred member being the module's own
+// business. A NAMED TYPE'S note answers "what is in this", asked from
+// inside the module that usually declares it, where the starred half
+// alone is an empty popup for the common struct: nothing in
+// `MyStruct = { a: i32 }` is starred, and `MyStruct — ` with nothing
+// after it is worse than no note.
+EXPORTED_ONLY: bool = false
+
+WHOLE_SHAPE: bool = true
+
+// What the member list needs from the note above it: the bytes that
+// join the two, and whether unexported members count. Bundled because
+// they are decided together at one call and neither means anything
+// alone.
+Shown = {
+    joined: str,
+    all: bool,
+}
+
+// ` — ` opens a note, `; ` continues one, and a SENTENCE THAT ALREADY
+// ENDED gets a space: `…the test one directory up.; members: x: i32`
+// puts a semicolon after a full stop.
+joiner = (doc: str) str {
+    (doc.len == 0).match({
+        true  => " — ",
+        false => ended(doc).match({ true => " ", false => "; " }),
+    })
+}
+
+write_members = (c :: Checker, dd: Decl, shown: Shown, out :: String)
+                Res<(), AllocError> {
+    body ::= c.alloc.String().try();
+    dd.kind.match({
+        Struct(s) => write_member_run(c, s.members, shown.all, body),
+        Enum(e)   => write_variant_run(c, e.variants, body),
+        _         => Ok(()),
+    }).try();
+    (body.len() > 0).then(() {
+        out.add_bytes(shown.joined).try();
+        out.add_bytes(body.view()).try();
+    });
+    Ok(());
+}
+
+// `members: ` labels a struct's list and NOT an enum's: `Fast | Slow`
+// is what the variants ARE, written the way the declaration writes them,
+// and a label in front of it would be describing the punctuation.
+MEMBERS: str = "members: "
+
+// EACH MEMBER WITH ITS TYPE, which is the whole reason to list them:
+// `a, b` names what a reader already sees in the file they are hovering
+// FROM, and `a: i32, b = () i32` is what they opened the popup for.
+//
+// A MEMBER WHOSE TYPE DID NOT RESOLVE KEEPS ITS NAME. The whole-answer
+// rule this file is written against — one unresolved part discards the
+// answer — belongs to a SIGNATURE, where a missing type changes what
+// the signature means. A note is decoration: dropping the hover because
+// one member of nine is poisoned would answer `null` at a position that
+// resolved fine.
+write_member_run = (c :: Checker, ms: Vec<Member>, all: bool, body :: String)
+                   Res<(), AllocError> {
+    list ::= c.alloc.String().try();
+    ms.loop((h, m) { write_one_member(c, m, all, list).try(); });
+    (list.len() > 0).then(() {
+        body.add_bytes(MEMBERS).try();
+        body.add_bytes(list.view()).try();
+    });
+    Ok(());
+}
+
+write_one_member = (c :: Checker, m: Member, all: bool, body :: String)
+                   Res<(), AllocError> {
+    m.kind.match({
+        Field(f)    => write_typed(
+            c,
+            all || f.exported,
+            f.name.text,
+            f.type,
+            body
+        ),
+        Const(k)    => write_typed(
+            c,
+            all || k.exported,
+            k.name.text,
+            k.type,
+            body
+        ),
+        Function(f) => write_fn_member(c, f, all, body),
+    })
+}
+
+write_typed = (
+    c    :: Checker,
+    show : bool,
+    name : str,
+    ty   : Res<TypeId>,
+    body :: String
+) Res<(), AllocError> {
+    show.match({
+        false => Ok(()),
+        true  => {
+            separate(body).try();
+            body.add_bytes(name).try();
+            write_type_suffix(c, ty, body)
         },
     })
 }
 
-write_members = (c :: Checker, dd: Decl, after_doc: bool, out :: String)
-                Res<(), AllocError> {
-    names ::= c.alloc.Vec<str>();
-    dd.kind.match({
-        Struct(s) => collect_names(s.members, names),
-        _         => Ok(()),
-    }).try();
-    (names.len > 0).then(() {
-        after_doc.match({
-            true  => out.add_bytes("; members: "),
-            false => out.add_bytes(" — members: "),
-        }).try();
-        names.loop((h, i, name) {
-            (i > 0).then(() { out.add_bytes(", ").try() });
-            out.add_bytes(name).try();
-        });
-    });
-    Ok(());
-}
-
-collect_names = (ms: Vec<Member>, names :: Vec<str>) Res<(), AllocError> {
-    ms.loop((h, m) { member_name(m, names).try(); });
-    Ok(());
-}
-
-member_name = (m: Member, names :: Vec<str>) Res<(), AllocError> {
-    m.kind.match({
-        Field(f)    => keep_exported(f.exported, f.name.text, names),
-        Const(k)    => keep_exported(k.exported, k.name.text, names),
-        Function(f) => keep_exported(f.exported, f.name.text, names),
-    })
-}
-
-keep_exported = (exported: bool, name: str, names :: Vec<str>)
-                Res<(), AllocError> {
-    exported.match({
-        true  => names.add(name),
-        false => Ok(()),
-    })
-}
-
-// The declaration's first line of prose: the leading run's first line
-// comment with its marker and margin stripped. A bare `//` spacer says
-// nothing, so the scan moves past it rather than settling for empty.
-first_doc_line = (tree: Ast, run: TriviaRun) str {
-    doc ::= "";
-    Range(0, run.len).loop((h, i) {
-        (doc.len == 0).then(() {
-            piece = tree.trivia_at(run, i);
-            piece.kind.match({
-                LineComment => { doc = comment_text(piece.text); },
-                _           => (),
+// `: i32` when the type resolves, nothing when it does not — written
+// into a scratch first so a half-written suffix never reaches the note.
+write_type_suffix = (c :: Checker, ty: Res<TypeId>, body :: String)
+                    Res<(), AllocError> {
+    ty.match({
+        None   => Ok(()),
+        Ok(id) => {
+            scratch ::= c.alloc.String().try();
+            write_ty(c, id, scratch).try().then(() {
+                body.add_bytes(": ").try();
+                body.add_bytes(scratch.view()).try();
             });
+            Ok(());
+        },
+    })
+}
+
+// A function member is its DECLARATION, the same reprint a hover on the
+// name itself answers with — `write_decl_sig` and not a second spelling
+// of it.
+//
+// A SIGNATURE THAT WILL NOT REPRINT FALLS BACK TO THE NAME, which is
+// where the whole-answer rule stops applying. `str`'s members take
+// `@Self`, which has no `type_memo` entry, so the strict reading listed
+// one member of five and silently dropped `is_empty`, `get`, `index`
+// and `slice` — a note that says less than the four-word one it
+// replaced. The name alone is not a guess about a type; it is the
+// member, which is what the list is of.
+write_fn_member = (c :: Checker, f: Function, all: bool, body :: String)
+                  Res<(), AllocError> {
+    (all || f.exported).match({
+        false => Ok(()),
+        true  => {
+            scratch ::= c.alloc.String().try();
+            whole = write_decl_sig(c, f, scratch).try();
+            separate(body).try();
+            whole.match({
+                true  => body.add_bytes(scratch.view()),
+                false => body.add_bytes(f.name.text),
+            })
+        },
+    })
+}
+
+// A VARIANT IS ITS PAYLOAD, and an enum with no payloads is still worth
+// listing: `Fast | Slow` is the answer to "what can this be".
+// Unexported is not a question an enum has — a variant carries the
+// declaration's own visibility.
+write_variant_run = (c :: Checker, vs: Vec<Variant>, body :: String)
+                    Res<(), AllocError> {
+    vs.loop((h, i, v) {
+        (i > 0).then(() { body.add_bytes(" | ").try() });
+        body.add_bytes(v.name.text).try();
+        write_payload(c, v.payload, body).try();
+    });
+    Ok(());
+}
+
+write_payload = (c :: Checker, payload: Res<TypeId>, body :: String)
+                Res<(), AllocError> {
+    payload.match({
+        None   => Ok(()),
+        Ok(id) => {
+            scratch ::= c.alloc.String().try();
+            write_ty(c, id, scratch).try().then(() {
+                body.add_bytes("(").try();
+                body.add_bytes(scratch.view()).try();
+                body.add_bytes(")").try();
+            });
+            Ok(());
+        },
+    })
+}
+
+separate = (body :: String) Res<(), AllocError> {
+    (body.len() > 0).match({ true => body.add_bytes(", "), false => Ok(()) })
+}
+
+// The declaration's prose, and TWO RULES DECIDE WHICH PROSE IT IS.
+//
+// THE BLANK LINE MAKES IT THE DECLARATION'S. A leading run holds
+// everything back to the previous declaration, so the first comment in
+// it is the FILE HEADER whenever the declaration is the first in its
+// module. A `Blank` piece clears what came before it, because a blank
+// line is how this tree already separates a header from what follows.
+//
+// THE FIRST SENTENCE, WHICH IS NOT THE FIRST LINE. Prose wraps, so one
+// line of it answered "The OTHER module. Nothing here is ever hovered;
+// it exists so that" — cut mid-clause, which reads as a broken hover
+// rather than as a short one. But the whole block is not the answer
+// either: `bool`'s prelude comment goes on to explain DESIGN.md:438 to
+// a compiler maintainer, and 400 characters of that is not what a
+// reader hovering `bool` asked.
+//
+// So lines are joined until one ENDS A SENTENCE. `bool`'s first line
+// does and is unchanged; `Point`'s does not and gains the rest of its
+// clause. A block that never terminates gives all of itself, which is
+// the honest reading of a comment with no sentence in it.
+//
+// A bare `//` spacer says nothing and contributes nothing, rather than
+// putting a double space in the middle of a sentence.
+doc_block = (a: Alloc, tree: Ast, run: TriviaRun) Res<str, AllocError> {
+    doc ::= a.String().try();
+    Range(after_last_blank(tree, run), run.len).loop((h, i) {
+        piece = tree.trivia_at(run, i);
+        ended(doc.view()).match({
+            true  => (),
+            false => piece.kind.match({
+                LineComment => add_doc_line(
+                    comment_text(piece.text),
+                    doc
+                ).try(),
+                _           => (),
+            }),
         });
     });
-    doc;
+    Ok(doc.view());
+}
+
+// Whether the prose so far closes a sentence. Empty is not ended — a
+// block has to say something before it can stop.
+ended = (doc: str) bool {
+    (doc.len > 0) && terminal(doc.index(doc.len - 1))
+}
+
+terminal = (b: u8) bool { b.is_in(['.', '!', '?']) }
+
+// Where the declaration's own block starts: one past the last `Blank`,
+// or the beginning when the run has none. Found in its own pass because
+// a `String` here has no `clear` and building the answer twice is
+// cheaper than inventing one.
+after_last_blank = (tree: Ast, run: TriviaRun) usize {
+    from ::= 0;
+    Range(0, run.len).loop((h, i) {
+        tree.trivia_at(run, i).kind.match({
+            Blank => { from = i + 1; },
+            _     => (),
+        });
+    });
+    from;
+}
+
+add_doc_line = (line: str, doc :: String) Res<(), AllocError> {
+    (line.len > 0).then(() {
+        (doc.len() > 0).then(() { doc.add_bytes(" ").try() });
+        doc.add_bytes(line).try();
+    });
+    Ok(());
 }
 
 comment_text = (text: str) str {
@@ -391,7 +642,7 @@ comment_text = (text: str) str {
 write_val = (c :: Checker, e: ExprId, out :: String) Res<bool, AllocError> {
     c.expr_memo.get(e).match({
         None     => no_answer(),
-        Ok(memo) => write_ty_id(c, memo, out),
+        Ok(memo) => write_ty_value(c, memo, out),
     })
 }
 
