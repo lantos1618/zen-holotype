@@ -70,8 +70,20 @@ test: build parse design cap dupcomments faults ufcs style grammar-test editors 
 ## OWED ledger, so the debt can shrink and cannot quietly grow; the
 ## ledger is empty today, and a name in it that gains a raise site is an
 ## error too, so it cannot drift back into fiction.
-faults:
-	$(PY) scripts/faults_reachable.py
+##
+## A Zen gate — tools/gates/faults_reachable.zen; see `gate` above. It reads
+## the variant list off `std.parse`, where the python it replaced matched a
+## regex demanding a leading `|`: that missed the FIRST variant of every enum,
+## so `SemaFault.UndefinedName` and `GenFault.Unsupported` were exempt from
+## this check for its whole life. Proved by mutation -- delete every
+## construction of `UndefinedName` and the python stays green.
+faults: build
+	@mkdir -p build/gates
+	@$(call gate,faults_reachable)
+	@mapfile -d '' files < <(find $(ROOT) -name '*.zen' -print0 | LC_ALL=C sort -z); \
+	  test $${#files[@]} -gt 0 \
+	    || { echo "faults: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
+	  build/gates/faults_reachable "$${files[@]}"
 
 ## ufcs: no `x.f(..)` may have two answers. a method on T and a free
 ## function taking T as its first parameter are the same call under UFCS,
@@ -81,10 +93,40 @@ faults:
 ufcs: grammar
 	$(PY) scripts/ufcs_collisions.py
 
+## A GATE IS A ZEN PROGRAM. `$(call gate,name)` compiles
+## tools/gates/<name>.zen with ./zen and leaves the binary in build/gates/.
+## The compilation root is tools/gates, whose `std` is a SYMLINK to src/std:
+## a module path is COMPUTED (`<folder>/<folder>.zen`), never searched for, so
+## a program importing `std.lex` needs `std` under its own root and the
+## symlink is what puts it there without copying the tree.
+##
+## THE COMPILER NOW GATES ITSELF, and the trade is deliberate. A gate written
+## in Zen cannot run until ./zen builds, so a broken compiler takes its own
+## style checks down with it -- where `scripts/*.py` would still have run.
+## What it buys is ONE implementation of "what is a Zen file" instead of two,
+## which is the same trade PLAN.md records for deleting the bootstrapper: a
+## second implementation that still builds is one that drifts. ~0.3s a gate,
+## so they are rebuilt every run rather than carrying a staleness rule.
+gate = ./zen build tools/gates --entry $(1).zen --emit-c -o build/gates/$(1).c \
+	&& $(CC) $(CFLAGS) build/gates/$(1).c -o build/gates/$(1)
+
 ## cap: STYLE.md's line caps. Over 500 prints a note; over 800 fails,
-## unless the path carries a written reason in scripts/line_cap.py.
-cap:
-	$(PY) scripts/line_cap.py
+## unless the path carries a written reason in tools/gates/line_cap.zen.
+##
+## THE FILE LIST COMES FROM `find` AND NOT FROM THE GATE. `std.env.Fs` has no
+## listing, on purpose ("no open handle, seek, listing, or permission
+## surface"), so a gate over a file SET cannot compute its own inputs. Same
+## shape as `fmt` and `parse` below, and the same assertion for the same
+## reason: an empty list must not read as "0 over 800". `LC_ALL=C` because the
+## report is ordered by path and a locale-dependent order is a diff nobody
+## asked for.
+cap: build
+	@mkdir -p build/gates
+	@$(call gate,line_cap)
+	@mapfile -d '' files < <(find $(ROOT) -name '*.zen' -print0 | LC_ALL=C sort -z); \
+	  test $${#files[@]} -gt 0 \
+	    || { echo "cap: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
+	  build/gates/line_cap "$${files[@]}"
 
 ## dupcomments: no comment block may sit immediately above a copy of itself.
 ## A merge or a bad paste leaves that behind and it survives review, because
@@ -92,8 +134,14 @@ cap:
 ## again — gen_c_inline.zen held twelve such pairs and gen_c_settle.zen six.
 ## ADJACENT only: the same explanation above two sibling helpers is somebody's
 ## judgement about where a reader needs it, and this gate does not overrule it.
-dupcomments:
-	$(PY) scripts/dup_comments.py
+## A Zen gate — tools/gates/dup_comments.zen; see `gate` above.
+dupcomments: build
+	@mkdir -p build/gates
+	@$(call gate,dup_comments)
+	@mapfile -d '' files < <(find $(ROOT) -name '*.zen' -print0 | LC_ALL=C sort -z); \
+	  test $${#files[@]} -gt 0 \
+	    || { echo "dupcomments: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
+	  build/gates/dup_comments "$${files[@]}"
 
 ## editors: the VS Code extension's contributions still resolve. EVERY
 ## FAILURE HERE IS A SILENT ONE -- VS Code does not report a `grammars`

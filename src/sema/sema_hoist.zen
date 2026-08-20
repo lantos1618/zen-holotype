@@ -53,6 +53,19 @@ hoist_check* = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
     })
 }
 
+// A VALUE THAT DOES NOT FIT AND HAS NOWHERE TO LIFT IS NOT THIS FILE'S
+// TO REPORT, and the arm below is `Ok(())` for that reason and not by
+// oversight. `hoist_at` has one caller — `field_fits` — and the mismatch
+// it used to swallow is now raised by `check_ctor_shape` in
+// `sema_bound.zen`, which is where the answer needs `satisfies_bound`:
+// `Buf(alloc: alloc)` hands an `Arena` to an `alloc: Alloc` field, and a
+// bound is a promise kept by an impl, not a type `assignable` compares.
+//
+// IT LIVES THERE AND NOT HERE BECAUSE OF THE MODULE GRAPH. Importing
+// `sema_bound` into this file closes a cycle — sema_hoist -> sema_bound
+// -> sema_call -> sema_hoist — and the cost is not a diagnostic: the
+// backend stopped emitting whole instantiations, and 96 corpus programs
+// compiled to C that named functions nothing declared.
 hoist_into = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
              Res<(), AllocError> {
     c.types.at(want).match({

@@ -1,0 +1,267 @@
+// tools/gates/line_cap.zen
+// STYLE.md's line caps, enforced. The Zen port of `scripts/line_cap.py`.
+//
+//     over 500 lines: justify or split   -- a prompt, printed, never a failure
+//     over 800 lines: fails the build    -- unless excused below with a reason
+//
+// The rule said "fails the build" and nothing failed. A file crossed 800
+// during an ordinary change and the only reason anyone noticed was that its
+// author happened to read the rule and split by hand. That is the gate-that-
+// guards-nothing pattern: the sentence in STYLE.md read as coverage while
+// asserting nothing at all.
+//
+// WHY THE FILE LIST ARRIVES ON ARGV. `std.env.Fs` has no listing, on purpose
+// (env.zen: "No open handle, seek, listing, or permission surface" — a module
+// path is COMPUTED, not discovered). A gate over a file SET therefore cannot
+// compute its own inputs, and `make cap` feeds it the same `find` the `fmt`
+// and `parse` recipes use. That makes an empty argv the shape this repository
+// keeps rediscovering — a gate that cannot fail because it cannot run — so an
+// empty list exits 2 and says so, rather than printing "0 over 800".
+//
+// WHY THE EXCEPTIONS LIVE HERE and not in a `build.zen`. STYLE.md named
+// `build.zen`, and there is no project-level one — `src/std/build/build.zen`
+// is the Builder API a project's own build file is handed, not this repo's.
+// An exception you have to type a sentence for is an exception someone will
+// read, and that property is what matters. When this repo grows a real
+// build.zen, move them and update STYLE.md.
+//
+// The caps are about a file having two subjects. The line count is only how
+// you notice.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Vec, Map = std.collections
+Range = std.core
+FsError = std.env
+
+// One finding. `excuse` is "" for a file that has none, which is also how a
+// soft note decides whether it has a sentence to print.
+Over = {
+    rel*: str,
+    lines*: usize,
+    excuse*: str,
+}
+
+SOFT: usize = 500
+HARD: usize = 800
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    (env.argv.len < 2).match({
+        true  => no_files(),
+        false => run(env, alloc),
+    })
+}
+
+// "0 over 500, 0 over 800" is what a tree with no long files prints and also
+// what a gate handed nothing prints. The second is a setup error wearing the
+// first one's verdict, so it is exit 2 and a sentence naming the cause.
+no_files = () Res<i32, AllocError> {
+    println("line_cap: no files given — this gate is checking nothing.");
+    println("    `make cap` feeds it `find src -name '*.zen'`; a find that");
+    println("    matches nothing must not read as green.");
+    Ok(2);
+}
+
+run = (env: Env, alloc: Alloc) Res<i32, AllocError> {
+    excused ::= excuses(alloc).try();
+    soft    ::= alloc.Vec<Over>();
+    hard    ::= alloc.Vec<Over>();
+    unread  ::= 0;
+
+    Range(1, env.argv.len).loop((h, i) {
+        rel = arg(env, i);
+        env.fs.read(alloc, rel).match({
+            Err(e) => {
+                unread = unread + 1;
+                println("line_cap: {}: {}", rel, fs_word(e));
+            },
+            Ok(text) => {
+                n       = lines_in(text.view());
+                excuse  = excuse_of(excused, rel);
+                failing = n > HARD && excuse.is_empty();
+                failing.then(() {
+                    hard.add(Over(rel: rel, lines: n, excuse: excuse)).try();
+                });
+                (n > SOFT && !failing).then(() {
+                    soft.add(Over(rel: rel, lines: n, excuse: excuse)).try();
+                });
+            },
+        });
+    });
+
+    // NOTES FIRST, THEN FAILURES, then the count — so the thing that reddens
+    // the build is the last thing before the verdict, which is the part of a
+    // build log anyone actually reads.
+    soft.loop((h, o) { over_soft(o); });
+    hard.loop((h, o) { over_hard(o); });
+
+    println("line_cap: {} over {}, {} over {}", soft.len, SOFT, hard.len, HARD);
+    verdict(hard.len, unread)
+}
+
+// A file that could not be read is not a file under the cap: the gate did not
+// run on it. Exit 2 outranks exit 1 — "I could not check" is a different
+// answer from "I checked and it is too long".
+verdict = (hard: usize, unread: usize) Res<i32, AllocError> {
+    (unread > 0).match({
+        true  => Ok(2),
+        false => (hard > 0).match({ true => Ok(1), false => Ok(0) }),
+    })
+}
+
+over_hard = (o: Over) () {
+    println("{}: {} lines, over the {}-line cap", o.rel, o.lines, HARD);
+    println("    split it by SUBJECT — never by size, because two halves of one");
+    println("    subject leave two names that mean nothing. If it is genuinely one");
+    println("    subject, add it to `excuses` in tools/gates/line_cap.zen with the");
+    println("    sentence saying why.");
+}
+
+over_soft = (o: Over) () {
+    o.excuse.is_empty().match({
+        true  => println(
+            "note: {}: {} lines, over {} — name its subjects out loud",
+            o.rel,
+            o.lines,
+            SOFT
+        ),
+        false => println(
+            "note: {}: {} lines, over {} — name its subjects out loud  (excused past {}: {})",
+            o.rel,
+            o.lines,
+            SOFT,
+            HARD,
+            o.excuse
+        ),
+    });
+}
+
+lines_in = (text: str) usize {
+    n ::= 0;
+    Range(0, text.len).loop((h, i) {
+        (text.index(i) == '\n').then(() { n = n + 1; });
+    });
+    // a final line with no newline of its own is still a line; an empty file
+    // is zero, which is why the guard is on the last byte and not on `len`.
+    ends_open(text).match({
+        true  => n + 1,
+        false => n,
+    })
+}
+
+ends_open = (text: str) bool {
+    (text.len == 0).match({
+        true  => false,
+        false => !(text.index(text.len - 1) == '\n'),
+    })
+}
+
+arg = (env: Env, i: usize) str {
+    env.argv.get(i).match({ Ok(s) => s, None => "" })
+}
+
+excuse_of = (excused: Map<str, str>, rel: str) str {
+    excused.get(rel).match({ Ok(s) => s, None => "" })
+}
+
+fs_word = (e: FsError) str {
+    e.match({
+        NotFound    => "not found",
+        Denied      => "denied",
+        IsDir       => "is a directory",
+        Failed      => "could not be read",
+        OutOfMemory => "out of memory",
+    })
+}
+
+// THE LEDGER. path -> the sentence; no entry without one.
+//
+// ELEVEN OF THESE LANDED AT ONCE, and they share one cause: `fmt_break.zen`
+// learned parameter lists, so every signature past 80 columns went from a
+// hand-wrapped two lines to one parameter per line. None of these files gained
+// a subject; each gained 90-280 lines of the same one. That the cap now needs
+// this many excuses is the honest reading: a formatter that only ever grows a
+// file makes a LINE COUNT a weaker proxy for "two subjects" than it was, and
+// the next person to touch this list should ask whether the proxy still earns
+// its place rather than write another sentence.
+excuses = (a: Alloc) Res<Map<str, str>, AllocError> {
+    m ::= a.Map<str, str>();
+
+    m.set(
+        "src/gen/gen_c/gen_c_member.zen",
+        "member access codegen, one lowering per base shape — the vertical formatter stretched it past the cap; the subject is one."
+    ).try();
+    m.set(
+        "src/gen/gen_c/gen_c_state.zen",
+        "the emitter's state and its constructors — one subject; the formatter's vertical breaking, not a second subject, crossed 800."
+    ).try();
+    m.set(
+        "src/sema/sema_call.zen",
+        "call checking, one question from candidate to memo — over the cap only since the formatter broke long call sites one per line."
+    ).try();
+    m.set(
+        "src/sema/sema_check.zen",
+        "the Checker and its memos — one subject; the reformat added the lines, and splitting by size would name two files after nothing."
+    ).try();
+    m.set(
+        "src/sema/sema_def.zen",
+        "visibility: defs_of and the walk behind it — one subject, pushed over 800 by vertical breaking, a candidate for a subject split only if a second query family ever lands here."
+    ).try();
+    m.set(
+        "src/gen/gen_c/gen_c_call.zen",
+        "lowering a call, from callee through arguments to the emitted expression — one subject, and the longest signatures in the backend are here, which is why the reformat cost it the most."
+    ).try();
+    m.set(
+        "src/gen/gen_c/gen_c_decl.zen",
+        "emitting a declaration, one form per arm — one subject; the reformat added the lines."
+    ).try();
+    m.set(
+        "src/gen/gen_c/gen_c_expr.zen",
+        "the expression dispatch and its leaves — one subject; the reformat added the lines."
+    ).try();
+    m.set(
+        "src/gen/gen_c/gen_c_fat.zen",
+        "fat pointers: their layout, construction and every read through one — one subject; the reformat added the lines."
+    ).try();
+    m.set(
+        "src/gen/gen_c/gen_c_layout.zen",
+        "C layout of a Zen type, one question answered per shape — one subject; the reformat added the lines."
+    ).try();
+    m.set(
+        "src/gen/gen_c/gen_c_loop.zen",
+        "lowering the loop forms — one subject; the reformat added the lines."
+    ).try();
+    m.set(
+        "src/gen/gen_c/gen_c_op.zen",
+        "operators: one lowering per operator and operand shape — one subject; the reformat added the lines."
+    ).try();
+    m.set(
+        "src/gen/gen_c/gen_c_runtime.zen",
+        "the runtime surface the backend emits calls into — one subject; the reformat added the lines."
+    ).try();
+    m.set(
+        "src/gen/gen_c/gen_c_sink.zen",
+        "where a value lands: the sink protocol and its cases — one subject; the reformat added the lines."
+    ).try();
+    m.set(
+        "src/gen/gen_c/gen_c_try.zen",
+        "lowering `try` and the error paths it opens — one subject; the reformat added the lines."
+    ).try();
+    m.set(
+        "src/sema/sema_match.zen",
+        "checking a match: patterns, arms, exhaustiveness — one subject with three questions about it; the reformat added the lines."
+    ).try();
+    // The paragraph above asked for this one to be argued rather than written.
+    // The argument: this file's subject is WHAT SHAPE A LIST TAKES, and joining
+    // and breaking are the two directions of that one decision — a rule that
+    // only broke could ratify whatever a human typed, which is why the join is
+    // here and not elsewhere. Splitting them leaves two files neither of which
+    // can answer the question.
+    m.set(
+        "src/fmt/fmt_break.zen",
+        "what shape a list takes: packed to one line, or broken — one item per line for an argument list, filled for an array literal — one decision in two directions, and the second half is what makes the first a rule rather than a ratification."
+    ).try();
+
+    Ok(m);
+}

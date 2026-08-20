@@ -103,6 +103,7 @@ SemaFault* =
 
     // impls and bounds
     | ImplMissingField(NameFault)      // an impl supplies every field, or it is not one
+    | CtorMissingField(NameFault)      // a required field the construction never named
     | OrphanImpl(ExportFault)          // only the target's own module is ever consulted
     | AmbiguousMember(PairFault)       // two impls, no bound in scope to choose
     | BoundNotSatisfied(TypeFault)     // no impl of the bound
@@ -204,6 +205,7 @@ message* = (fault: SemaFault) str {
         DuplicateSignature(_)     => "duplicate signature: parameter names are documentation, not identity",
         AmbiguousOverload(_)      => "ambiguous overload: a generic parameter swallows a concrete one, so these two can never be told apart at a call site",
         ImplMissingField(_)       => "impl is missing field",
+        CtorMissingField(_)       => "construction is missing a required field",
         OrphanImpl(_)             => "an impl lives in the module that declares its target, so there are no orphan impls: one written anywhere else is never consulted",
         AmbiguousMember(_)        => "ambiguous: two impls supply this name and no bound in scope selects one",
         BoundNotSatisfied(_)      => "bound not satisfied: this type has no impl of the bound, so it has none of the fields the bound promises",
@@ -266,6 +268,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         ModuleNotAValue(f)        => write_module(out, f),
         NoOverload(f)             => out.write_name(f),
         ImplMissingField(f)       => write_missing(out, f),
+        CtorMissingField(f)       => write_ctor_missing(out, f),
         OrphanImpl(f)             => write_orphan(out, f),
         ComputedFieldAssign(f)    => out.write_name(f),
         ComputedFieldAddress(f)   => out.write_name(f),
@@ -340,6 +343,17 @@ write_name = (out :: String, f: NameFault) Res<(), AllocError> {
 // law between the two halves of one noun phrase — and the article was
 // the only thing keeping them apart. The law still leads; it just
 // follows the name it is about.
+// The construction's own note. NOT `write_missing`'s: that one ends "an
+// impl supplies a value for every field the bound declares", which is
+// the right sentence for the other half of this rule and the wrong one
+// here — a constructor supplies fields, not an impl.
+write_ctor_missing = (out :: String, f: NameFault) Res<(), AllocError> {
+    quote(out, f.name).try();
+    out.add_bytes(
+        ": a field with no default and no Res is required, and one left out is a zero nobody wrote"
+    )
+}
+
 write_missing = (out :: String, f: NameFault) Res<(), AllocError> {
     quote(out, f.name).try();
     out.add_bytes(

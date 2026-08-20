@@ -261,7 +261,7 @@ def main() -> int:
         return 1
 
     # A ledger entry whose collision is gone is a fiction the next reader
-    # trusts. Same rule the OWED ledger in faults_reachable.py runs.
+    # trusts. Same rule the ledger in tools/gates/faults_reachable.zen runs.
     stale = sorted(set(OWED) - set(owed))
     for key in stale:
         print(f"ufcs: {key} is in OWED and no longer collides."

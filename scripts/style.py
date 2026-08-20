@@ -26,7 +26,7 @@ One fact, one place; a second copy is the stale one.
         `(a, b) i32` is missing types). `make ufcs` parses all of src/ with
         cst.py, so the check runs tree-wide already.
   match arms align their `=>`      the formatter, `make fmt`.
-  500/800-line caps               `scripts/line_cap.py`, `make cap`.
+  500/800-line caps               `tools/gates/line_cap.zen`, `make cap`.
   no free fn shadowing a method   `scripts/ufcs_collisions.py`, `make ufcs`.
 
 WHAT THIS FILE CANNOT CHECK, and so leaves to review. Naming them is the
@@ -83,7 +83,7 @@ point: an unstated gap reads as coverage.
         judgement, all of them.
 
 THREE RULES CARRY A LEDGER because the tree violates them today. Same shape as
-`faults_reachable.py` and `ufcs_collisions.py`: an entry is a debt, not an
+`tools/gates/faults_reachable.zen` and `ufcs_collisions.py`: an entry is a debt, not an
 exemption, deleting a line is how one closes, and a stale entry is an error --
 so the debt can shrink and cannot quietly grow. Fixing the 147 abbreviation
 sites touches files three other lanes hold open, which is why they are written
@@ -860,7 +860,7 @@ def debt(hits, ledger, label):
 
 def stale(ledger, seen, label):
     """A ledger entry whose violation is gone is a fiction the next reader
-    trusts. Same rule the OWED ledgers in faults_reachable.py and
+    trusts. Same rule the ledgers in tools/gates/faults_reachable.zen and
     ufcs_collisions.py run."""
     gone = sorted(set(ledger) - seen)
     for key in gone:
