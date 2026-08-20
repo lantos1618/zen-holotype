@@ -371,9 +371,34 @@ writes — a real case, but it is about EXISTENCE, and the signature is right
 there to check the call against. The wrong-arity spelling gets a codegen
 message that names resolution, at the wrong place, for an arity error.
 
-**3. Struct construction does not check field types.**
+**3. Struct construction checks nothing — not the field types, and not
+whether the fields are there at all.**
 
-    Holder = { n*: i32 } ..  Holder(n: "definitely not an i32")   // silent
+    Holder = { n*: i32 }
+    ..  Holder(n: "definitely not an i32")   // silent, cc rejects the C
+
+    Plain = { n*: i32, m*: i32 }
+    ..  p = Plain(n: 7); println("m={}", p.m)   // silent, prints m=0
+
+The second is the worse one, and it is the shape
+`what-the-compiler-doesnt-eat` is about: a required field left out is not a
+crash, it is a zero, and it emits `(Plain){ .n = 7 }` with `cc` perfectly
+happy. DESIGN.md:1394 already states the rule — "no default and no Res means
+required" — and `Env`'s typed args enforce it at RUNTIME
+(`ArgError.Missing(str)`, DESIGN.md:659). Construction in source does not.
+
+**THE RULE IS ENFORCED ONE PLACE AND IT PROVES THE POINT.** An impl is
+checked for completeness, by name:
+
+    Shower = { show* = (..) i32
+               other* = (..) i32 }
+    Thing.impl(Shower, { show = .. })
+    -> impl is missing field `other`: an impl supplies a value for every
+       field the bound declares                                    ✅
+
+Same question — "did you supply every required member" — asked of an impl and
+answered, asked of a constructor and not asked at all. Whatever `sema_supply`
+does for the impl path is what the constructor wants.
 
 **4. `==` does not check its two sides against each other.** A missing `Eq` IS
 caught (`5 == Tester` → "`Tester` has none"), so the rule exists and stops one
