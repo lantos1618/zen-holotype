@@ -293,41 +293,99 @@ guaranteed by byte-copying, with the trivia doing the boundary work — stronger
 than printing, but a different claim from the one "trivia on AST nodes makes
 `zen fmt` lossless" suggests.
 
-**A call through a bound's declared member is not checked against that
-declaration — not its types, not even its arity.** `cc` is the type checker.
-Found by compiling `example/build.zen`, which reported 2 errors where there
-were 8. Minimal reproducer, no std involved:
+**Three cleanups carried out of `SIGNATURE_REVIEW.md`, which is deleted.** All
+re-verified against this tree; the review's method write-up is in
+`scripts/signatures.py`'s own docstring and the model-calibration numbers were
+the point of the exercise, not of the file.
+
+1. **Fall-through chains that are one `match` on a literal — ~150 lines.** No
+   `else if`, so a multi-way test on ONE scrutinee becomes a run of functions
+   each re-declaring the whole parameter list to express one comparison. Across
+   the tree: 340 such arms in 80 files, 2,416 lines; 18 are maximal chains of
+   3+ links. Only the one-scrutinee-many-literals class collapses — a run of
+   DIFFERENT predicates (`gen_c_call.zen:468`) has nothing to match on and is
+   not counted. Six sites, verified present today:
+
+   | site | now | saved |
+   |---|---:|---:|
+   | `gen_c_ptr.zen:196` `verb`→`verb_7`, 7 links on `name` | 61 | 40 |
+   | `gen_c_cap.zen:190` `console_verb`→`verb_5`, 6 links on `a.name.text` | 52 | 34 |
+   | `sema_trap.zen:714` four literal tables, 15 functions on `name` | 61 | 31 |
+   | `lsp_reply.zen:221` `request_of`→`request_after_colour`, 6 links | 42 | 30 |
+   | `gen_c_ptr.zen:89` `ptr_member_type`→`ptr_type_5`, 5 links | 40 | 22 |
+   | `gen_c_fs.zen:453` `fs_name`/`_2`/`_3`, number literals | 11 | 5 |
+
+   Expressible today: `grammar.js:709` admits literal patterns, `lex_scan.zen:157`
+   runs one in production, `gen_c_flow.zen str_cond` lowers it. **`UFCS_OWED` must
+   come down in the same commit** or `make style` goes red. One wrinkle:
+   `lsp_reply.zen` tests a const, and a pattern must be a literal.
+
+2. **A whole insertion sort duplicated across two LSP files — ~55 lines.**
+   `lsp_colour.zen:348` `sort_classes` and `lsp_compl.zen:573` `sort_items`,
+   with `bubble`/`out_of_order`/`swap_at`/`swap_pair` line-for-line identical,
+   differing in the element type and one comparison. `lsp_compl.zen` says so in
+   a comment. One `sort*<T>(v :: Vec<T>, before: (l: T, r: T) bool)` in
+   `std.core.loop` beside `find`/`filter`/`map` — `loop_find.zen:35` proves the
+   closure-taking generic builds. Must land under `std.core.loop`, not as a
+   free function, or `make ufcs` finds a second answer for `v.sort(..)`. These
+   are the only two hand-rolled sorts in `src/`.
+
+3. **Four parallel node arenas — ~90 lines, REPORTED AND NOT RECOMMENDED.**
+   `ast_arena.zen` add/at/ids/each ×4, `ast_id.zen`'s four `{index*: u32}` with
+   eight character-identical Eq/Hash, plus `sema_ty.zen`'s `TyId` as a fifth. A
+   phantom-tagged `Id<T>` answers the objection both files state in comments
+   ("passing a TypeId where an ExprId belongs, made unrepresentable for free"),
+   so the premise is refutable — but that is a design argument, not a cleanup,
+   and it is 218 call sites. `sema_id.zen`'s DeclId/MemberId/ImplId are NOT part
+   of it; their bodies genuinely differ. **Ask before doing it.**
+
+**Sema has whole unchecked regions, and `cc` is the type checker there.** Five,
+found by compiling `example/build.zen`, which reported 2 errors where there
+were 8. Each is a two-line reproducer and each exits 0 from `zen build`.
+
+**1. A lambda body is not type-checked at all.** The biggest one, because
+`.loop` and `.then` ARE this language's control flow:
+
+    plain = (a: i32, b: i32) i32 { a + b }
+    ..  plain(1); s: str = 42;                  // 2 sema errors ✅
+    ..  Range(0, 3).loop((h, x) { plain(1); s: str = 42; })   // 0 errors
+    ..  true.then(() { plain(1); s: str = 42; })              // 0 errors
+
+The same two statements, in and out of a lambda. The emitted C is
+`zg_str zu_l1s; zu_l1s = 42;` and `cc` is what rejects it.
+
+**2. A call through a bound's declared member is not checked against that
+declaration — not its types, not even its arity.** Names in the arguments ARE
+resolved; only the signature match is skipped.
 
     Shower = { show* = (self: @Self, a: i32, b: i32) i32 }
-    Thing  = { n*: i32 }
     Thing.impl(Shower, { show = (self: @Self, a: i32, b: i32) i32 { a + b } })
-
     use = <T: Shower>(t: T) i32 { t.show("a", "b") }   // silent, emits C
     use = <T: Shower>(t: T) i32 { t.show(1) }          // "codegen cannot resolve `show`"
-    plain = (a: i32, b: i32) i32 { a + b }
-    ..    plain(1)                                     // "no overload matches" ✅
+    plain = (a: i32, b: i32) i32 { a + b } ..  plain(1)   // "no overload matches" ✅
 
-The free function is checked and the bound member is not. The wrong-type call
-emits `zu_..show(t, (zg_str){"a",1}, (zg_str){"b",1})` against an `int32_t`
-parameter and `zen build` exits 0; the wrong-arity call gets a codegen message
-that names resolution, at the wrong place, for what is an arity error.
+Cause is `sema_call.zen:no_such_method`: when no candidate matched it asks
+`bound_declares`, and `true` returns `unknown()` in silence. The comment above
+it justifies that with `alloc.create<Node>()`, whose body `gen_c_alloc.zen`
+writes — a real case, but it is about EXISTENCE, and the signature is right
+there to check the call against. The wrong-arity spelling gets a codegen
+message that names resolution, at the wrong place, for an arity error.
 
-**The cause is `sema_call.zen:no_such_method`.** When no candidate matched it
-asks `bound_declares`, and a `true` returns `unknown()` in silence. The comment
-above it justifies the silence with `alloc.create<Node>()`, which reaches
-nothing here because `gen_c_alloc.zen` writes that body — a real case, but it
-is about EXISTENCE, and the signature is right there to check the call against.
-"A name a bound declared is not a name the type never heard of" is correct; it
-does not follow that the arguments are nobody's business.
+**3. Struct construction does not check field types.**
 
-**Struct construction does not check field types either**, same shape:
+    Holder = { n*: i32 } ..  Holder(n: "definitely not an i32")   // silent
 
-    Holder = { n*: i32 }
-    Holder(n: "definitely not an i32")   // silent, exit 0, cc rejects the C
+**4. `==` does not check its two sides against each other.** A missing `Eq` IS
+caught (`5 == Tester` → "`Tester` has none"), so the rule exists and stops one
+step short: `5 == "five"` is silent.
 
-Both are `what the compiler doesn't eat`: a green build standing on the C
-compiler. Neither is caught by `make test` — the corpus has no case that
-miscalls a bound.
+**5. A misleading diagnostic falls out of (2).** `b.module(p).functions` reports
+"no `functions` on `Module`" when `functions` exists on `Module` at a different
+arity (`ast_node.zen:613`). It should say the arity.
+
+None of these is caught by `make test` — the corpus has no case that miscalls a
+bound, and a lambda body with a type error has never been written on purpose.
+Fixing (1) is the one that would find the others' instances in `src/` itself.
 
 ## DECIDE — needs a call
 
