@@ -71,15 +71,18 @@ build = (b :: Builder) Res<(), BuildError> {
     // module tree and keep every function whose single parameter
     // is a Tester. change the filter, change what a test is.
     //
-    // THE TWO ERRORS THIS FILE STILL REPORTS ARE THESE TWO LINES, and
-    // they are the design working. `Module` and `Function` are opaque
-    // stand-ins in std.build because plain std may not import the
-    // compiler sublayer (style.py enforces it), so `functions` is not
-    // on `Module` until @meta hands the driver std/ast's real nodes.
-    // The call is written against the REAL signature all the same —
-    // `functions(self: Module, a: Alloc) Res<Vec<Function>,
-    // AllocError>`, ast_node.zen:613, body and all — so that day
-    // deletes two lines of std and changes nothing here.
+    // `functions` TAKES THE ALLOCATOR: gathering the walk into a Vec
+    // allocates, and nothing here allocates without being handed an
+    // Alloc. Its AllocError is one of the two reasons BuildError is
+    // `BuildFault | AllocError`. std.build declares the signature and
+    // the build driver supplies it; std/ast has the body already
+    // (ast_node.zen:613), so @meta deletes a declaration rather than
+    // changing this line.
+    //
+    // The FILTER is still stage 5. `f.params` is not on the stand-in
+    // `Function`, and `p.type == Tester` wants a type as a value —
+    // both wait on @meta, and both are quiet today only because a
+    // lambda body is not type-checked (ISSUES.md).
     tests ::= b.alloc.Vec<Function>();
     b.module(Path("src")).functions(b.alloc).try().loop((h, f) {
         (f.params.len == 1 && f.params.get(0).try().type == Tester)

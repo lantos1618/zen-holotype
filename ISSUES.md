@@ -379,9 +379,10 @@ message that names resolution, at the wrong place, for an arity error.
 caught (`5 == Tester` → "`Tester` has none"), so the rule exists and stops one
 step short: `5 == "five"` is silent.
 
-**5. A misleading diagnostic falls out of (2).** `b.module(p).functions` reports
-"no `functions` on `Module`" when `functions` exists on `Module` at a different
-arity (`ast_node.zen:613`). It should say the arity.
+**5. A misleading diagnostic falls out of (2).** A call at the wrong arity to a
+name the receiver DOES have reports "no `<name>` on `<Type>`" — the sentence for
+a name that is not there at all. It should say the arity. Met while fixing
+`b.module(p).functions(a)`, where `functions` was declared at a different arity.
 
 None of these is caught by `make test` — the corpus has no case that miscalls a
 bound, and a lambda body with a type error has never been written on purpose.

@@ -35,17 +35,28 @@ str = std.text
 // plain std importing it would drag the parser into every program
 // that only wanted to name a build target.
 //
-// These stand-ins are opaque ON PURPOSE: the api below compiles at
-// stage 4 and a build file may hold a Vec<Function>; the day @meta
-// hands the driver the real nodes, these two lines go away and
-// nothing else moves. What a stand-in refuses is the WALK —
-// `b.module(p).functions(a)` is stage-5 code and fails sema until
-// then, by name, not at a linker. The real one is
-// `ast_node.zen:613`, body and all, waiting: `functions(self:
-// Module, a: Alloc) Res<Vec<Function>, AllocError>`. example/build.zen
-// is written to THAT signature so the day is a deletion, not a
-// rewrite.
-Module* = {}
+// SO THE STAND-IN DECLARES THE MEMBER RATHER THAN BEING EMPTY, which
+// is the same thing `Builder` does twelve lines at a time below: a
+// bodiless signature the build driver supplies. The signature is
+// copied from the real one — `ast_node.zen:613`, body and all,
+// waiting — so the day @meta hands the driver std/ast's nodes these
+// declarations are DELETED, not edited, and no build file moves.
+//
+// Empty was the previous answer and it cost the walk: `Module* = {}`
+// made `b.module(p).functions(a)` "no `functions` on `Module`", which
+// reads as a mistake in the build file rather than a stage that has
+// not arrived. An api whose central example does not resolve is not
+// an api yet.
+//
+// `Function` STAYS EMPTY and that is the honest edge: the filter body
+// reads `f.params`, and declaring `params` here means declaring
+// `Param`, then `TypeId`, then std/ast — the import this whole
+// comment is about. It is quiet today only because a lambda body is
+// not type-checked (ISSUES.md), and it goes real with @meta.
+Module* = {
+    functions* = (self: @Self, a: Alloc) Res<Vec<Function>, AllocError>
+}
+
 Function* = {}
 
 // WHAT A BUILD CAN FAIL AT. Split in two because `A | B` is a union of
