@@ -457,16 +457,28 @@ the point of the exercise, not of the file.
 found by compiling `example/build.zen`, which reported 2 errors where there
 were 8. Each is a two-line reproducer and each exits 0 from `zen build`.
 
-**1. A lambda body is not type-checked at all.** The biggest one, because
-`.loop` and `.then` ARE this language's control flow:
+**1. ~~A lambda body is not type-checked at all~~ — CLOSED.** The biggest one,
+because `.loop` and `.then` ARE this language's control flow. `sema_call.zen`
+now walks a lambda argument's body (`arg_lambdas`, `lambda_body`) at every
+place resolution ENDS — the chosen candidate, a member the table answered
+with, a local holding a function, a variant constructor, an indirect callee —
+so the parameters get their types from the signature and every statement
+inside is typed exactly as one outside is.
 
-    plain = (a: i32, b: i32) i32 { a + b }
-    ..  plain(1); s: str = 42;                  // 2 sema errors ✅
-    ..  Range(0, 3).loop((h, x) { plain(1); s: str = 42; })   // 0 errors
-    ..  true.then(() { plain(1); s: str = 42; })              // 0 errors
-
-The same two statements, in and out of a lambda. The emitted C is
-`zg_str zu_l1s; zu_l1s = 42;` and `cc` is what rejects it.
+**AFTER RESOLUTION, AND INSTANTIATED, OR IT BREAKS CODEGEN.** Walking at
+`lambda_actual` with the parameters bound at holes — the crude form, and the
+only position that runs before a candidate is picked — reports nothing wrong
+and still cost 28 codegen diagnostics across `src/`. The reason is that
+`Checker.expr_memo` is keyed by `ExprId`: whatever the walk types into it is
+what `gen_c_op.operand_type` READS BACK at lowering time, because the backend
+asks sema for an operand's type rather than deriving it. A hole memoized there
+made `i > 0` on a loop index "comparing values that are not scalars".
+`k.params` unsubstituted has the same shape — a `Var` owned by `loop` means
+nothing to the frame the closure was written in — so `settled_params` reads
+what `instantiate` settled, and `settled_or_poison` binds POISON wherever the
+call settled nothing at all (`loop<R: Range<T>, T>` never settles `T`).
+Poison is the one answer the backend knows to step around. With that, `src/`
+reports zero.
 
 **2. A call through a bound's declared member is not checked against that
 declaration — not its types, not even its arity.** Names in the arguments ARE
@@ -512,9 +524,11 @@ name the receiver DOES have reports "no `<name>` on `<Type>`" — the sentence f
 a name that is not there at all. It should say the arity. Met while fixing
 `b.module(p).functions(a)`, where `functions` was declared at a different arity.
 
-None of these is caught by `make test` — the corpus has no case that miscalls a
-bound, and a lambda body with a type error has never been written on purpose.
-Fixing (1) is the one that would find the others' instances in `src/` itself.
+None of the open ones is caught by `make test` — the corpus has no case that
+miscalls a bound. (1) was expected to find the others' instances in `src/`
+itself; it found none, which is its own answer: `src/` has no wrong-typed
+statement inside a closure, only the unchecked region that could have hidden
+one.
 
 ## DECIDE — needs a call
 

@@ -35,13 +35,16 @@
 // call site tell these apart" — and splitting them would leave that rule
 // in a module that cannot see what distinguishing them means.
 //
-// A LAMBDA ARGUMENT'S BODY IS NOT TYPED HERE. "A closure passed to a
-// function whose signature is already known infers its parameter types
-// from that signature" — so typing the body before resolution has picked
-// a candidate would type it against parameters that do not exist yet.
-// The arity is what resolution needs and the arity is what it reads.
+// A LAMBDA ARGUMENT'S BODY IS TYPED AFTER RESOLUTION AND NOT BEFORE IT.
+// "A closure passed to a function whose signature is already known
+// infers its parameter types from that signature" — so the arity is all
+// resolution reads, and the body is walked once the candidate is picked
+// and its parameters are known (`arg_lambdas`, `lambda_body`). Walked at
+// all only since then: `own_lambda` had entered `l.body` from the day it
+// was written and the type walk had no equivalent, so every statement
+// inside every closure in the language was checked by nothing.
 
-Expr, ExprId, Call, Arg, Access, Lambda, Span, nowhere = std.ast
+Expr, ExprId, Call, Arg, Access, Lambda, Param, Span, nowhere = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -52,6 +55,7 @@ Def = sema.sema_def
 SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 construct, instantiate = sema.sema_apply
+subst_list = sema.sema_inst
 Found, Base, base_of, members_of = sema.sema_member
 is_type_def, opaque, first_found = sema.sema_member
 static_access = sema.sema_static
@@ -60,7 +64,7 @@ check_bounds = sema.sema_bound
 check_literal = sema.sema_trap
 check_arms, check_arms_agree = sema.sema_hoist
 bound_declares = sema.sema_supply
-type_of = sema.sema_type
+type_of, param_type, block_type = sema.sema_type
 alias_module, module_not_a_value = sema.sema_module
 cands_of, travelled_cands, matches = sema.sema_cand
 ty_at, is_tvar, recv_sig_fits = sema.sema_cand
@@ -279,7 +283,7 @@ local_or_decl_call = (
                      Res<TyId, AllocError> {
     c.lookup(name).match({
         None  => c.decl_call(id, node, call, name, None, actuals, ctx),
-        Ok(b) => c.fn_ret(node, b.ty),
+        Ok(b) => c.sig_ret(node, call, b.ty, 0, ctx),
     })
 }
 
@@ -495,7 +499,115 @@ chosen_ret = (
     c.resolve_call(id, k.id).try();
     c.check_bounds(k, actuals, node.span).try();
     c.arg_literals(call.args, k.params, recv_off(call, actuals)).try();
-    c.instantiate(id, call, k, actuals, ctx)
+    ret = c.instantiate(id, call, k, actuals, ctx).try();
+    params ::= c.alloc.Vec<TyId>();
+    c.settled_params(id, k, params).try();
+    c.arg_lambdas(call.args, params, recv_off(call, actuals), ctx).try();
+    Ok(ret);
+}
+
+// `k.params` STILL NAMES THE CALLEE'S OWN `T`, and the caller's body is
+// the one that will be lowered — a `Var` owned by `loop` means nothing
+// to the frame the closure was written in. So the walk reads back what
+// `instantiate` settled and asks about THOSE types.
+settled_params = (c :: Checker, id: ExprId, k: Cand, out :: Vec<TyId>)
+                 Res<(), AllocError> {
+    c.resolved_inst(id).match({
+        None    => copy_tys(k.params, out),
+        Ok(ins) => c.subst_list(k.params, ins, out),
+    })
+}
+
+// A LAMBDA ARGUMENT'S BODY IS STATEMENTS, AND STATEMENTS ARE TYPED.
+// `sema_own.own_lambda` has walked `l.body` since the day it was
+// written; the type walk had no equivalent, so `(h, v) { x: i32 = true;
+// }` was checked by nothing at all while the identical bind one line
+// out was refused.
+//
+// AFTER RESOLUTION, for the reason `arg_literals` is above it: only the
+// chosen candidate knows what `(h, v)` ARE, and typing the body before
+// it is picked would type it against parameters that do not exist yet.
+//
+// ONCE PER LAMBDA, which is why this hangs off the places resolution
+// ENDS rather than off `actual_of`: a second walk is a second copy of
+// every diagnostic in the body.
+arg_lambdas = (
+    c      :: Checker,
+    args   : Vec<Arg>,
+    params : Vec<TyId>,
+    off    : usize,
+    ctx    : Ctx
+) Res<(), AllocError> {
+    i ::= off;
+    args.loop((h, a) {
+        c.arg_lambda(a.value, params, i, ctx).try();
+        i = i + 1;
+    });
+    Ok(());
+}
+
+arg_lambda = (c :: Checker, id: ExprId, params: Vec<TyId>, i: usize, ctx: Ctx)
+             Res<(), AllocError> {
+    c.tree.expr_at(id).kind.match({
+        Lambda(l) => c.lambda_body(l, ty_at(params, i), ctx),
+        _         => Ok(()),
+    })
+}
+
+// The same shape as `check_body`: mark the scope, bind the parameters,
+// walk, release. What is NOT the same is `ctx` — it is passed through
+// untouched, because a `.try()` in a closure body propagates out through
+// the call and answers to the enclosing `ret`; what the closure itself
+// returns is decided by nothing here.
+lambda_body = (c :: Checker, l: Lambda, sig: TyId, ctx: Ctx)
+              Res<(), AllocError> {
+    ptys ::= c.alloc.Vec<TyId>();
+    c.fn_params(sig, ptys).try();
+    smark = c.mark();
+    l.params.loop((h, i, p) {
+        ty = c.lambda_param(p, ptys, i, ctx).try();
+        c.bind(p.name.text, ty, p.mutable, true).try();
+    });
+    c.block_type(l.body, ctx).try();
+    c.release(smark).try();
+    Ok(());
+}
+
+// "A closure passed to a function whose signature is already known
+// infers its parameter types FROM that signature" — and a written
+// annotation still wins over it, which is what `param_type` answers.
+// Where the signature says nothing the hole is bound: it agrees with
+// everything, so the parameter reports nothing rather than nonsense.
+lambda_param = (c :: Checker, p: Param, ptys: Vec<TyId>, i: usize, ctx: Ctx)
+               Res<TyId, AllocError> {
+    p.type.match({
+        Ok(_) => c.param_type(p, ctx),
+        None  => c.sig_param(ptys, i),
+    })
+}
+
+sig_param = (c :: Checker, ptys: Vec<TyId>, i: usize) Res<TyId, AllocError> {
+    (i < ptys.len).match({
+        true  => c.settled_or_poison(ty_at(ptys, i)),
+        false => c.types.unknown(),
+    })
+}
+
+// A PARAMETER THE CALL DID NOT SETTLE IS POISON, NOT ITS OWN `Var`.
+// `settled_param` is the predicate `param_holds` asks a few lines above,
+// for the same reason: an unsubstituted variable expects nothing of the
+// value, so nothing is checked either way.
+//
+// AND `Checker.expr_memo` IS KEYED BY NODE, so whatever this binds is
+// what `gen_c_op.operand_type` reads back at lowering time — the backend
+// asks sema for the type of an operand rather than deriving it. A `Var`
+// or a hole memoized there is not "no answer", it is an answer the
+// backend cannot lower: `loop<R: Range<T>, T>` settles no `T`, and
+// `(v == 3)` inside its body became "comparing values that are not
+// scalars" for a comparison that lowers perfectly well from the
+// backend's own reading. Poison is the one type it knows to step around.
+settled_or_poison = (c :: Checker, ty: TyId) Res<TyId, AllocError> {
+    c.settled_param(ty).match({ true => Ok(ty), false => c.types.unknown() })
 }
 
 // WHETHER PARAMETER ZERO HAS AN ARGUMENT, derived and not plumbed:
@@ -608,7 +720,7 @@ static_call = (
     ctx  : Ctx
 ) Res<TyId, AllocError> {
     got = c.static_access(call.callee, node, ac, ty, ctx).try();
-    c.fn_ret(node, got)
+    c.sig_ret(node, call, got, 0, ctx)
 }
 
 receiver_call = (
@@ -666,7 +778,7 @@ reachable_call = (
     ctx     : Ctx
 ) Res<TyId, AllocError> {
     (found.len > 0).match({
-        true  => c.method_call(node, found, actuals),
+        true  => c.method_call(node, call, found, actuals, ctx),
         false => c.ufcs_call(id, node, call, ac, b, actuals, ctx),
     })
 }
@@ -693,24 +805,28 @@ reachable_call = (
 method_call = (
     c       :: Checker,
     node    : Expr,
+    call    : Call,
     found   : Vec<Found>,
-    actuals : Vec<Actual>
+    actuals : Vec<Actual>,
+    ctx     : Ctx
 ) Res<TyId, AllocError> {
     c.pick_fitting(found, actuals).try().match({
-        Ok(f) => c.fn_ret(node, f.ty),
-        None  => c.by_arity_ret(node, found, actuals),
+        Ok(f) => c.sig_ret(node, call, f.ty, 1, ctx),
+        None  => c.by_arity_ret(node, call, found, actuals, ctx),
     })
 }
 
 by_arity_ret = (
     c       :: Checker,
     node    : Expr,
+    call    : Call,
     found   : Vec<Found>,
-    actuals : Vec<Actual>
+    actuals : Vec<Actual>,
+    ctx     : Ctx
 ) Res<TyId, AllocError> {
     c.pick_arity(found, actuals.len + 1).match({
-        None  => c.first_found_ret(node, found),
-        Ok(f) => c.fn_ret(node, f.ty),
+        None  => c.first_found_ret(node, call, found, ctx),
+        Ok(f) => c.sig_ret(node, call, f.ty, 1, ctx),
     })
 }
 
@@ -772,11 +888,16 @@ fn_arity_is = (c: Checker, ty: TyId, want: usize) bool {
     c.types.at(ty).match({ Fn(f) => f.params.len == want, _ => false })
 }
 
-first_found_ret = (c :: Checker, node: Expr, found: Vec<Found>)
-                  Res<TyId, AllocError> {
+first_found_ret = (
+    c     :: Checker,
+    node  : Expr,
+    call  : Call,
+    found : Vec<Found>,
+    ctx   : Ctx
+) Res<TyId, AllocError> {
     found.get(0).match({
         None  => c.types.unknown(),
-        Ok(f) => c.fn_ret(node, f.ty),
+        Ok(f) => c.sig_ret(node, call, f.ty, 1, ctx),
     })
 }
 
@@ -809,6 +930,29 @@ ufcs_call = (
 indirect_call = (c :: Checker, node: Expr, call: Call, ctx: Ctx)
                 Res<TyId, AllocError> {
     ty = c.type_of(call.callee, ctx).try();
+    c.sig_ret(node, call, ty, 0, ctx)
+}
+
+// A CALL THROUGH A SIGNATURE THAT IS ALREADY A TYPE — a member the
+// table answered with, a local holding a function, a variant
+// constructor, a callee that is an expression. `off` IS THE RECEIVER,
+// as `recv_off` decides it for the resolved-candidate path: a member's
+// first parameter is its `self` and the written arguments start at one.
+//
+// Nothing is instantiated here, so a generic member's own `T` reaches
+// the closure as itself. That is the same type the member's body is
+// checked at, and no worse an answer than the one its declaration gives.
+sig_ret = (
+    c    :: Checker,
+    node : Expr,
+    call : Call,
+    ty   : TyId,
+    off  : usize,
+    ctx  : Ctx
+) Res<TyId, AllocError> {
+    params ::= c.alloc.Vec<TyId>();
+    c.fn_params(ty, params).try();
+    c.arg_lambdas(call.args, params, off, ctx).try();
     c.fn_ret(node, ty)
 }
 
