@@ -304,7 +304,7 @@ arm_literals = (c :: Checker, m: Match, want: TyId) Res<(), AllocError> {
 folded_within = (c :: Checker, id: ExprId, node: Expr, want: TyId)
                 Res<(), AllocError> {
     c.literal_int(node).match({
-        None  => c.value_beyond(node, want),
+        None  => c.value_beyond(id, node, want),
         Ok(v) => c.value_within(id, want, v),
     })
 }
@@ -326,11 +326,15 @@ value_within = (c :: Checker, id: ExprId, want: TyId, v: i64)
 //
 // A leaf typed wider than a literal means the expression is not the
 // literal's own `int` any more — its operator already judged it — so
-// the question is only asked while every leaf folds.
-value_beyond = (c :: Checker, node: Expr, want: TyId) Res<(), AllocError> {
+// the question is only asked while every leaf folds. The report is
+// `out_of_range`'s own: the position is the whole expression, which is
+// what has to shrink, and nothing is quoted for the same reason `-1`
+// quotes nothing.
+value_beyond = (c :: Checker, id: ExprId, node: Expr, want: TyId)
+               Res<(), AllocError> {
     (is_widest(c.prim_name(want)) || (concrete_leaf(c, node))).match({
         true  => Ok(()),
-        false => c.out_of_range_id(node, want),
+        false => c.out_of_range(id, want),
     })
 }
 
@@ -365,24 +369,6 @@ out_of_range = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
         node.span,
         SemaFault.LiteralOutOfRange(TypeFault(
             name: c.written_literal(node),
-            expected: want,
-            found: found
-        ))
-    )
-}
-
-// Same sentence where there is no single literal to point at — an
-// arithmetic value or a constant read through `i32.MAX`. The position is
-// the whole expression, which is what has to shrink; nothing is quoted,
-// for the same reason `-1` quotes nothing.
-out_of_range_id = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
-    node  = c.tree.expr_at(id);
-    found = c.types.prim("int").try();
-    c.report(
-        node.span.file,
-        node.span,
-        SemaFault.LiteralOutOfRange(TypeFault(
-            name: "",
             expected: want,
             found: found
         ))
