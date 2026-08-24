@@ -116,8 +116,23 @@ escape* = (lx :: Lexer) Res<(), AllocError> {
         // and would name `\<newline>` an unknown escape, which is a rule the
         // author did not break at a byte that is not the fix. Left where it
         // is, the caller reads it and says the true thing at the opening
-        // quote
+        // quote.
+        //
+        // THE ENDING CAN ARRIVE AS TWO BYTES. CRLF is input this tree ships
+        // and reads (`tests/corpus/lex/crlf_line_endings.zen`), and a
+        // backslash before it is the same mistake at the same opening quote —
+        // so the CR travels with its LF and the caller answers the pair
+        // exactly as it answers the LF alone. The cursor's model is
+        // untouched: this is not a second opinion about what ends a line
+        // (`lex_cursor.zen` keeps that, LF only) — it is the escape set
+        // declining to read the ending's first half as the byte it escaped.
+        // A CR anywhere else is ordinary whitespace and falls through to the
+        // arm below, where every unescapable byte lands
         Ok('\n') => Ok(()),
+        Ok('\r') => lx.cur.at_byte(1, '\n').match({
+            true  => Ok(()),
+            false => { lx.cur.bump(); lx.report(LexFault.UnknownEscape, from) },
+        }),
         Ok(b)    => {
             lx.cur.bump();
             is_escape(b).match({
