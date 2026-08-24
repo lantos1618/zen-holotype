@@ -60,9 +60,16 @@ lower_match* = (
     sym_gen(scrut, "s", be.next_tmp()).try();
     be.declare_temp(st, scrut.view()).try();
     be.deliver(m.scrutinee, ctx, st, Dest.Into(scrut.view())).try();
+    // Each arm's pattern bindings live only while the arm's body is
+    // lowered: the C declarations sit inside the branch's braces, so the
+    // scope must not outlive them either — or a binder shadowing an
+    // outer local keeps its renamed slot on top of the stack and every
+    // later use of the name reads a variable declared in a closed block.
     m.arms.loop((h, i, arm) {
+        lmark = be.mark();
         be.open_arm(arm, i, st, scrut.view(), ctx).try();
         be.deliver(arm.body, ctx, ty, dst).try();
+        be.release(lmark).try();
     });
     be.close_arms(node, m).try();
     Ok(());

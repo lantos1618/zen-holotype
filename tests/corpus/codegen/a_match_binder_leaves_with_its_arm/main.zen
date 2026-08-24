@@ -1,0 +1,24 @@
+// A match arm's binder is scoped to the ARM, and gen_c has to mirror that.
+//
+// `Ok(d)` shadows the outer `d`. gen_c renames the binder to avoid the
+// collision and declares it INSIDE the branch's braces — correct. What it
+// also has to do is pop that binding when the arm ends: `slot_of` walks the
+// local-scope stack from the top down, so a slot left behind makes every
+// later use of the name resolve to a variable declared in a block that has
+// already closed. The symptom is not a wrong answer, it is C that does not
+// compile — `'zu_l1d_2' undeclared` — which is the loudest a scope bug gets.
+//
+// Sema already scopes this per arm (sema_match.zen: mark / bind_pattern /
+// release); this pins that gen_c does too.
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    d: i32 = 7;
+    got ::= alloc.Vec<i32>();
+    got.add(41).try();
+    got.get(0).match({
+        Ok(d) => println("{}", d),
+        None  => println("none"),
+    });
+    println("{}", d);
+    Ok(0);
+}
