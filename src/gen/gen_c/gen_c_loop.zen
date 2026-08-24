@@ -34,7 +34,7 @@
 
 ExprId, Lambda = std.ast
 Function, Param = std.ast
-Call = std.ast
+Call, Stmt, Match, Block = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -52,6 +52,7 @@ ctype, declarator = gen.gen_c.gen_c_type
 intern_res_open = gen.gen_c.gen_c_mono
 has_var = sema.sema_inst
 expr, ty_of = gen.gen_c.gen_c_expr
+range_arg, lambda_at = gen.gen_c.gen_c_shape
 Dest, block = gen.gen_c.gen_c_stmt
 supplies_bounds = gen.gen_c.gen_c_range
 bind_text, is_res = gen.gen_c.gen_c_range
@@ -388,9 +389,9 @@ lower_range_impl = (
 // reachable only through the closure, and a closure infers FROM a
 // signature rather than into one. Sema hands back `Res<q>` (the
 // mangler's word for an undecided type argument); emitting that as-is
-// is how `h.break(v)` in one loop and another become one C type. A
-// range that supplies no `at` walks its own index space, so its element
-// is `usize` and the loop is `Res<usize>`.
+// is how `h.break(v)` in one loop and another become one C type. A range
+// that supplies no `at` walks its own index space, so its element is
+// `usize` — which settles a loop whose body breaks with nothing.
 lower_settled = (
     be   :: CBackend,
     id   : ExprId,
@@ -404,19 +405,176 @@ lower_settled = (
     out  :: String
 ) Res<(), AllocError> {
     elem    = be.check.types.prim("usize").try();
-    settled = be.settle_res(want, elem).try();
+    settled = be.settled_from_body(want, elem, lam, ctx).try();
     be.lower_bounded(id, sh, one, rty, lam, ctx, settled, fold, out)
+}
+
+// The value's own type, asked where the break was written: the same
+// question `break_value_fits` asks at the jump, so the slot the loop
+// opens and the value the body writes are typed by one rule. `want` is
+// the context a literal is read AT — "a literal's type comes from its
+// context" — and an unanswered name stays `unknown`, which agrees with
+// everything.
+break_type_at = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+                Res<TyId, AllocError> {
+    unknown = be.check.types.unknown().try();
+    be.ty_of(id, ctx, want)
+}
+
+// One walk over the lambda's statements and arms for the first
+// `h.break(value)` call. A handle is recognised at the NAME (`handle_depth`),
+// never resolved through a type, so the callee shape is the whole answer;
+// `h.next()` carries no value and neither does a bare `h.break()`.
+find_break = (
+    be   :: CBackend,
+    blk  : BlockId,
+    ctx  : Ctx,
+    out  :: Vec<ExprId>
+) Res<(), AllocError> {
+    node = be.tree.block_at(blk);
+    node.stmts.loop((h, s) { be.stmt_breaks(s, ctx, out).try(); });
+    node.value.match({
+        None  => Ok(()),
+        Ok(v) => be.expr_breaks(v, ctx, out),
+    })
+}
+
+stmt_breaks = (be :: CBackend, s: Stmt, ctx: Ctx, out: Vec<ExprId>)
+              Res<(), AllocError> {
+    s.kind.match({
+        Expr(e) => be.expr_breaks(e.expr, ctx, out),
+        Bind(_) => Ok(()),
+        Block(b) => be.find_break(b, ctx, out),
+        Decl(_)  => Ok(()),
+    })
+}
+
+expr_breaks = (be :: CBackend, id: ExprId, ctx: Ctx, out: Vec<ExprId>)
+              Res<bool, AllocError> {
+    be.tree.expr_at(id).kind.match({
+        Call(c)  => be.break_call(c, out),
+        Match(m) => be.match_breaks(m, ctx, out),
+        Paren(p) => be.expr_breaks(p.inner, ctx, out),
+        _        => Ok(false),
+    })
+}
+
+match_breaks = (be :: CBackend, m: Match, ctx: Ctx, out: Vec<ExprId>)
+               Res<bool, AllocError> {
+    found ::= false;
+    m.arms.loop((h, a) {
+        be.arm_breaks(a.body, ctx, out).match({
+            Ok(hit) => hit.then(() { found = true; }),
+            None    => Ok(()),
+        }).try();
+    });
+    Ok(found)
+}
+
+arm_breaks = (be :: CBackend, id: ExprId, ctx: Ctx, out: Vec<ExprId>)
+             Res<bool, AllocError> {
+    be.tree.expr_at(id).kind.match({
+        Block(b) => be.block_breaks(b, ctx, out),
+        _        => be.expr_breaks(id, ctx, out),
+    })
+}
+
+block_breaks = (be :: CBackend, b: BlockId, ctx: Ctx, out: Vec<ExprId>)
+               Res<bool, AllocError> {
+    before = out.len;
+    be.find_break(b, ctx, out).try();
+    Ok(out.len > before)
+}
+
+// The callee is `h.break` spelled as an access of `break`: anything else
+// is not the verb this file owns.
+break_call = (c: Call, out: Vec<ExprId>) Res<bool, AllocError> {
+    be.tree.expr_at(c.callee).kind.match({
+        Access(a) => a.name.text.eq("break").match({
+            false => Ok(false),
+            true  => c.args.get(0).match({
+                None  => Ok(false),
+                Ok(a) => out.add(a.value).match({ _ => Ok(true) }),
+            }),
+        }),
+        _         => Ok(false),
+    })
 }
 
 // The loop's `Res<T>` at a `T` the backend worked out, or the written
 // expectation when there was one — an expectation is a decision already
-// made and outranks a reconstruction.
+// made and outranks a reconstruction. The reconstruction reads the BREAK
+// before it reads the walk: an iterating loop's value is whatever was
+// broken with, the one thing in the program that says what the loop
+// evaluates to. A body that breaks with nothing still needs an answer,
+// and there the walked element stands in — exact for `find` and for a
+// fold's accumulator, which is what it always answered for.
+settled_from_body = (
+    be   :: CBackend,
+    want : TyId,
+    elem : TyId,
+    lam  : Lambda,
+    ctx  : Ctx
+) Res<TyId, AllocError> {
+    found ::= be.alloc.Vec<ExprId>();
+    be.find_break(lam.body, ctx, found).try();
+    found.get(0).match({
+        None  => be.fallback(elem),
+        Ok(b) => be.break_type_at(b, ctx, want).match({
+            Ok(t) => intern_res_open(be.check, t),
+            None  => be.fallback(elem),
+        }),
+    })
+}
+
+// The same settlement from the CALL side, where only the call node is
+// in hand. The body is the argument after the range — `loop(range,
+// body)` writes two, `range.loop(body)` carries one and a fold's seed
+// makes three, so the range's position says which slot is left.
+settled_from_call = (
+    be   :: CBackend,
+    want : TyId,
+    elem : TyId,
+    id   : ExprId,
+    ctx  : Ctx
+) Res<TyId, AllocError> {
+    body = be.range_arg(id).match({
+        None  => be.arg_at(id, 0),
+        Ok(_) => be.arg_at(id, 1),
+    });
+    body.match({
+        None    => be.settle_res(want, elem),
+        Some(b) => be.lambda_at(b).match({
+            None => be.settle_res(want, elem),
+            Ok(lam) => be.settled_from_body(want, elem, lam, ctx),
+        }),
+    })
+}
+
+arg_at = (be :: CBackend, id: ExprId, i: usize) Res<ExprId> {
+    be.tree.expr_at(id).kind.match({
+        Call(c)  => c.args.get(i).match({
+            Ok(a) => Ok(a.value),
+            None  => None,
+        }),
+        _        => None,
+    })
+}
+
 settle_res* = (be :: CBackend, want: TyId, elem: TyId)
              Res<TyId, AllocError> {
     has_var(be.check, want).match({
         false => Ok(want),
         true  => intern_res_open(be.check, elem),
     })
+}
+
+// The reconstruction's answer when no break names a type of its own.
+// A fold threads its accumulator and `find` breaks with the element, so
+// the walked element stays the fallback; only the walk it answers for is
+// one whose body never broke with anything.
+fallback = (be :: CBackend, elem: TyId) Res<TyId, AllocError> {
+    intern_res_open(be.check, elem)
 }
 
 lower_bounded = (
