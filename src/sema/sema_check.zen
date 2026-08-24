@@ -42,7 +42,7 @@
 
 Ast, ExprId, TypeId, Span = std.ast
 nowhere = std.ast
-BinOp, Unary = std.ast
+BinOp, Unary, Binary = std.ast
 Alloc, AllocError = std.mem
 Vec, Map = std.collections
 str, String = std.text
@@ -754,6 +754,36 @@ Checker* = {
         Ok(want);
     }
 
+    // The operand-side half of being a logical operator, and the same
+    // rule `check_not` states for `!`: `&&` and `||` short-circuit, and
+    // short-circuiting is deciding whether the RIGHT side runs off the
+    // left side's truth — which only a bool has. Every other predicate
+    // (`<`, `==`) takes whatever scalar it is given, so the comparison
+    // rule never covered these two.
+    //
+    // EACH SIDE ASKED ON ITS OWN, through the same `coerce`: a single
+    // question about the pair would have to name one type as `found`,
+    // and `true && 1` would then report the left one — a sentence about
+    // the operand that is fine. Poison and holes stay silent there, so
+    // one wrong operand is still one diagnostic.
+    check_logical* = (self :: @Self, b: Binary, lhs: TyId, rhs: TyId)
+                     Res<(), AllocError> {
+        is_logical(b.op).match({
+            false => Ok(()),
+            true  => self.logical_operands(b, lhs, rhs),
+        })
+    }
+
+    // The position is the operator token for both sides, as `check_not`
+    // puts it on the `!`: the operator is what demanded a bool.
+    logical_operands = (self :: @Self, b: Binary, lhs: TyId, rhs: TyId)
+                       Res<(), AllocError> {
+        want = self.types.bool_ty().try();
+        self.coerce(b.op_span.file, b.op_span, lhs, want, "").try();
+        self.coerce(b.op_span.file, b.op_span, rhs, want, "").try();
+        Ok(());
+    }
+
     // -----------------------------------------------------------------
     // asking a type what it is
     // -----------------------------------------------------------------
@@ -875,8 +905,10 @@ Ctx* = (module: usize, none: TyId) Ctx {
 // error path immediately replaces.
 UNRESOLVED* : TyId = TyId(index: 0)
 
-// `==`, `!=`, `<`, `&&` and their kin are `bool` whatever they compare;
-// everything else in `BinOp` yields its operands' type.
+// `==`, `!=`, `<` and their kin are `bool` whatever they compare;
+// everything else in `BinOp` yields its operands' type. `&&`/`||` come
+// out `bool` through this too — but unlike a comparison they also
+// demand bool operands, which `check_logical` asks.
 is_predicate* = (op: BinOp) bool {
     op.match({
         Equal => true, NotEqual => true,
@@ -884,6 +916,19 @@ is_predicate* = (op: BinOp) bool {
         And => true, Or => true,
         _ => false,
     })
+}
+
+// The two predicates whose operands a comparison's rule never covered:
+// `&&` and `||` short-circuit, and a truth that decides whether the
+// right side runs is a bool's alone — there is no `if`, no cast, no
+// conversion anywhere in the design that gives another type one.
+//
+// THE ONE DEFINITION. `gen_c_op.zen` had an identical copy and imports
+// this one now: what a `BinOp` IS belongs beside `is_predicate`, and
+// two free functions over one receiver are a pick the flat namespace
+// makes unspecified — which is what `make ufcs` says.
+is_logical* = (op: BinOp) bool {
+    op.match({ And => true, Or => true, _ => false })
 }
 
 // Which `Res` a value is, when one of the two has not been decided.
