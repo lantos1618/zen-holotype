@@ -197,6 +197,31 @@ check_literal* = (c :: Checker, id: ExprId, want: TyId)
     })
 }
 
+// AN ELEMENT IS A TYPED SLOT TOO, and the range half above is not all
+// it owes. `[0, v]` with `v: i16` reaches a `[u8, 2]` because
+// `sema_type.array_lit_type` mints the literal's type from its FIRST
+// element — `[int, 2]` — and `array_assignable` grants that every array
+// of its length, the same family leniency that keeps `[1, 2, 3]` legal
+// at a `[u8, 3]`. So every other element's type was computed and thrown
+// away, and the `i16` stood in a `u8` slot unasked until the store
+// narrowed it to 255. The scalar twin `a: u8 = v` was always refused.
+//
+// THE MEMO'S ANSWER AND NEVER A FRESH ONE, for the reason
+// `sema_hoist.arm_fits` gives: every caller types the element before
+// asking, so a miss is an element nothing typed and this rule has
+// nothing to say about one. An int LITERAL is still `int` here and
+// still agrees with every integer type, so only a non-literal of
+// another type is refused — and `coerce` is what says so, since the
+// range fault above can name neither side.
+element_agrees* = (c :: Checker, id: ExprId, elem: TyId)
+                  Res<(), AllocError> {
+    node = c.tree.expr_at(id);
+    c.expr_memo.get(id).match({
+        None    => Ok(()),
+        Ok(got) => c.coerce(node.span.file, node.span, got, elem, ""),
+    })
+}
+
 // AN ELEMENT SITS WHERE THE ARRAY SITS. `xs: [u8, 3] = [1, 2, 300]`
 // writes `u8` nowhere an element can see, and `[int, 3]` now reaches
 // `[u8, 3]` by the same family rule this file exists to correct — so
@@ -214,13 +239,39 @@ elements_within = (c :: Checker, id: ExprId, want: TyId)
 array_elements = (c :: Checker, id: ExprId, a: TyArray) Res<(), AllocError> {
     c.tree.expr_at(id).kind.match({
         Array(lit) => c.elem_literals(lit, a.elem),
+        Match(m)   => c.arm_arrays(m, a),
         _          => Ok(()),
     })
 }
 
+// AN ARM PRODUCING AN ARRAY STANDS WHERE THE ARRAY STANDS — the same
+// recursion `literal_within` makes for a scalar one position down, and
+// `sema_hoist.arm_fits` cannot make it instead: it asks the arm about
+// its own type, and `[int, 2]` reaching a `[u8, 2]` is precisely the
+// family leniency this file exists to look through. So `e: [u8, 2] =
+// b.match({ true => [0, 300], .. })` wrapped to 44 unreported, and
+// `[0, v]` in the same arm narrowed an `i16` unreported — the whole
+// rule missing at one position rather than half of it.
+arm_arrays = (c :: Checker, m: Match, a: TyArray) Res<(), AllocError> {
+    m.arms.loop((h, arm) { c.array_elements(arm.body, a).try() });
+    Ok(());
+}
+
+// ELEMENT ZERO IS THE ARRAY'S OWN WORD: the literal's type was minted
+// from it, so whoever coerced the literal into this position has
+// already asked whether it fits and already reported it. Asking again
+// here would be one mistake said twice. `sema_type.fixed_array_type`
+// writes the type beside the values with no coercion in front of it,
+// and so asks about all of them.
 elem_literals = (c :: Checker, lit: ArrayLit, elem: TyId)
                 Res<(), AllocError> {
-    lit.elems.loop((h, e) { c.check_literal(e, elem).try(); });
+    lit.elems.loop((h, i, e) {
+        (i > 0).match({
+            true  => c.element_agrees(e, elem),
+            false => Ok(()),
+        }).try();
+        c.check_literal(e, elem).try();
+    });
     Ok(());
 }
 
