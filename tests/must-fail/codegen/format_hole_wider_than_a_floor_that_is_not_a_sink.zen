@@ -1,0 +1,35 @@
+// A wider hole on a floor door is written through a Sink record over
+// the receiver, so a receiver that never promised `Sink` cannot take
+// one: the record's `write` slot would be NULL and the call through it
+// a crash. Refused by name instead, which is what `String.fmt` did for
+// every wider hole before #755 and what a type like this one still
+// gets.
+//
+// `Log` has the floor -- a bodied `write(self :: @Self, s: str)`
+// answering exactly what the door answers -- so a `str` hole compiles
+// and is pinned green in corpus/std/fmt_writes_through_the_receivers_own_floor.
+// What it does not have is an `impl(Sink, ..)`, and that is the whole
+// difference between the two files.
+
+Log = {
+    text :: String,
+
+    fmt* = (self :: @Self, fmt: str, args: ...) Res<(), AllocError>
+
+    write* = (self :: @Self, s: str) Res<(), AllocError> {
+        self.text.add_bytes(s)
+    }
+}
+
+Log* = (a: Alloc) Res<Log, AllocError> { Ok(Log(text: a.String().try())) }
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    log   ::= alloc.Log().try();
+
+    n ::= u64.MAX;
+    n = 7;
+    log.fmt("n={}\n", n).try();
+
+    Ok(0);
+}

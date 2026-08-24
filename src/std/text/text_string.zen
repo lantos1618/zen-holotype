@@ -16,8 +16,13 @@
 //
 // WHICH IS WHY A FUNCTION DECLARING `AllocError` CANNOT CALL `add`: the
 // merge only runs narrow-to-wide. Such a caller writes `fmt` instead —
-// the same `{}` through `add_bytes`, so it answers the buffer floor's
-// own error and converts nothing, at the cost of a `str` in every hole.
+// the same `{}`, the same holes. A `str` hole and every literal run go
+// through `add_bytes`, so they answer the buffer floor's own error and
+// convert nothing. A WIDER HOLE IS THE EXCEPTION and was refused
+// outright until #755: its writers speak WriteError, so it is written
+// through this buffer's own `Sink` and a failing one is reported as
+// `OutOfMemory` — the allocating door's bargain, and
+// `docs/design_fmt.md` §6 is the open fork about it.
 // It may also append with `add_bytes`, or build a fresh buffer with
 // `alloc.String(fmt, ..)` below, the allocating door.
 
@@ -36,11 +41,13 @@ String* = {
     // (including `{` not followed by `}` being literal) live in text_fmt.zen
     add* = (self :: @Self, fmt: str, args: ...) Res<(), WriteError>
 
-    // the same door on the buffer's OWN floor: every piece goes through
-    // `add_bytes` below and answers exactly what it answers, so nothing
-    // is converted and a function declaring `AllocError` can call this
-    // where it cannot call `add`. A hole must be a `str` — every wider
-    // writer speaks WriteError. Declared not defined, for `add`'s reason
+    // the same door on the buffer's OWN floor: a `str` hole and every
+    // literal run go through `add_bytes` below and answer exactly what
+    // it answers, so nothing is converted and a function declaring
+    // `AllocError` can call this where it cannot call `add`. A wider
+    // hole reaches the writers `add` reaches, through this buffer's own
+    // Sink, and pays that door's error for it — see the header.
+    // Declared not defined, for `add`'s reason
     fmt* = (self :: @Self, fmt: str, args: ...) Res<(), AllocError>
 
     // borrows the buffer; see THE BORROW RULE above

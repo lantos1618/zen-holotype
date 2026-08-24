@@ -48,6 +48,23 @@ This matters because a `Sink`-typed receiver cannot narrow: `Sink.write` is a
 trait slot fixed at `WriteError`. The floor door sidesteps the slot rather than
 lying about it.
 
+**Except for a hole that is not a `str`** — closed 2026-08-24 (#755). The floor
+has no `add_bytes` for a number, so a wider hole was refused outright: the same
+format string wrote `n=7` through `alloc.String(..)` and was a diagnostic through
+`buf.fmt(..)`. It now goes through a `Sink` record over *the same receiver*, with
+`gen_c_sink.value_call` picking the writer exactly as it does for the sink door,
+and a failing wider write reported as `OutOfMemory` — §6's bargain, now shared by
+two doors. A receiver that is **not** a `Sink` still gets the refusal by name,
+because a record over one has a NULL `write` slot. Nothing else moved: a `str`
+hole and every literal run still go straight through the floor and still carry
+their own `Err`, and the emitted C for an existing floor-door site is unchanged
+byte for byte.
+
+Why it was the keystone: **nothing in `src/` implements `Display`** (0 types),
+because every writer there appends into a `String` it was handed — 591 sites —
+which is exactly this door. `out.fmt("Res<{}, {}>", v, e)` did not lower, so 378
+hand-rolled `add_bytes` runs stand where one format would.
+
 ---
 
 ## 2. Gap one — CLOSED 2026-08-17: `{{` writes `{`
@@ -343,8 +360,18 @@ Three options, none obviously right:
   appearing is the user's `Display` inventing it, i.e. a program error.
 - **(c) document and leave.** The lie stays.
 
-**The floor door (§1) does not have this bug** — it is sound by construction, not
-by relabelling. Do not copy `write_failure_arm`'s pattern into new doors.
+**The floor door (§1) had the bug only by not compiling.** Since #755 it shares
+the bargain, on exactly one path: a hole that is not a `str`. Everything else it
+writes still carries its own `Err`, so the fork's blast radius on that door is a
+wider hole whose `Display` invents an `IoError`, and not every failure. Two doors
+now wait on one decision instead of one door waiting alone — which is an argument
+for settling it, not for copying `write_failure_arm` a third time.
+
+Worth stating precisely, because it is easy to over-read: `AllocError` has
+exactly ONE variant, so on the arm that actually occurs — the buffer failing to
+grow — "carry the error across" and "name `OutOfMemory`" build the *same value*.
+The lie is only ever on the `IoError` arm, which for a `String` sink can come
+from nowhere but a user's `toString`.
 
 This fork also gates a separate cleanup: collapsing consecutive `add_bytes` runs
 would **double this bug's blast radius**, from doors that own their buffer to
@@ -363,10 +390,12 @@ The judgement cases are worth naming, because they are traps:
 
 - **`add_byte` writing a character** — 5 runs, and 21 further sites outside runs.
   `{}` on a `u8` prints a **number**, so a mechanical conversion silently
-  corrupts output. The floor door currently **refuses every non-`str` hole**
-  (`a format hole on this door that is not a str`), so these sites will not
-  compile rather than misbehave. A `{c}` hole is the eventual fix and is a
-  grammar change, i.e. §2's decision.
+  corrupts output. **This trap is now live.** The floor door used to refuse every
+  non-`str` hole (`a format hole on this door that is not a str`) and those sites
+  would not compile; since #755 a `u8` hole compiles and writes a number. A `{c}`
+  hole is the fix and is a grammar change, i.e. §2's decision — until it lands,
+  a conversion lane owes `add_byte` at every one of those 26 sites, and the
+  refusal is no longer the thing that catches it.
 - **Embedded newlines and indentation.** `Emit.fresh` is set true in exactly one
   place (`gen_emit.zen:69`, inside `line()`), so a `\n` pushed through as bytes
   would drop indentation on every subsequent line. Fixed at the sink: `Emit.bytes`
