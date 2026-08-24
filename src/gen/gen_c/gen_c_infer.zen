@@ -16,6 +16,7 @@
 
 ExprId, Decl, Function, Param = std.ast
 Access, Call = std.ast
+Member = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -31,6 +32,10 @@ inst_at, inst_open, settled_inst = gen.gen_c.gen_c_mono
 sub_with, unify, arg_type = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 fat_ret_type = gen.gen_c.gen_c_bound
+impl_member_at, bodied_fn = gen.gen_c.gen_c_impl
+site_of, method_sig = gen.gen_c.gen_c_member
+Site = gen.gen_c.gen_c_member
+recv_inst = gen.gen_c.gen_c_mono
 
 complete_inst* = (
     be      :: CBackend,
@@ -236,8 +241,82 @@ access_ret_type = (
 ) Res<TyId, AllocError> {
     be.fat_ret_type(c, a, ctx).try().match({
         Ok(t) => Ok(t),
-        None  => be.named_ret_type(id, c, a.name.text, Ok(a.base), ctx, want),
+        None  => be.impl_ret_type(a, ctx).try().match({
+            Ok(t) => Ok(t),
+            None  => be.named_ret_type(
+                id,
+                c,
+                a.name.text,
+                Ok(a.base),
+                ctx,
+                want
+            ),
+        }),
     })
+}
+
+// THE IMPL-SUPPLIED MEMBER SEMA LEFT OPEN. Sema types an impl member's
+// call in the BOUND's scope (`sema_supply.zen`'s `member_types`), so
+// `Vec<i32>.at(0)` is typed `Res<Var>` while the very line's lowering —
+// `supplied_or_ufcs` → `write_method_call` → `method_sig` — emits the
+// concrete symbol; a scrutinee temp declared at the open answer then
+// disagrees with the symbol beside it and `cc` refuses the pair. The
+// answer here is `method_sig`'s OWN computation of that return, at the
+// receiver's instantiation: one rule for what this call evaluates to,
+// so a temp declared from it cannot disagree with the emitted call.
+// `None` falls through — a name no impl supplies was never this case.
+impl_ret_type = (
+    be  :: CBackend,
+    a   : Access,
+    ctx : Ctx
+) Res<Res<TyId>, AllocError> {
+    unknown = be.check.types.unknown().try();
+    rty     = be.ty_of(a.base, ctx, unknown).try();
+    be.site_of(rty).try().match({
+        None  => Ok(None),
+        Ok(s) => be.supplied_ret_type(a.name.text, s, rty),
+    })
+}
+
+supplied_ret_type = (
+    be   :: CBackend,
+    name : str,
+    s    : Site,
+    rty  : TyId
+) Res<Res<TyId>, AllocError> {
+    found ::= be.alloc.Vec<Member>();
+    be.impl_member_at(s.decl, name, found).try();
+    bodied_fn(found).match({
+        None  => Ok(None),
+        Ok(f) => be.settled_member_ret(f, s, rty),
+    })
+}
+
+// The declared return with the type's parameters in scope, substituted
+// by the RECEIVER'S instantiation — the same enter/read/substitute
+// `write_method_call` runs before it mangles the symbol.
+settled_member_ret = (
+    be  :: CBackend,
+    f   : Function,
+    s   : Site,
+    rty : TyId
+) Res<Res<TyId>, AllocError> {
+    inst = be.recv_inst(rty).try();
+    sig ::= be.alloc.Vec<TyId>();
+    be.method_sig(rty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
+    (be.inst_open(inst) || be.any_open(sig)).match({
+        true  => Ok(None),
+        false => Ok(Ok(be.member_ret(f, s, inst).try())),
+    })
+}
+
+member_ret = (be :: CBackend, f: Function, s: Site, inst: Inst)
+             Res<TyId, AllocError> {
+    sctx = be.check.self_ctx(s.decl.module.to_usize(), s.ty).try();
+    mark = be.enter_struct_tparams(s.decl).try();
+    ret  = be.declared_ret(f, sctx).try();
+    be.leave_tparams(mark).try();
+    be.sub_with(ret, inst)
 }
 
 // One candidate or nothing — overload resolution is sema's rule, and
