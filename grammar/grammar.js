@@ -697,7 +697,18 @@ module.exports = grammar({
     // form, so exhaustiveness is sema's job and not the grammar's.
     // ------------------------------------------------------------------
 
-    match_block: ($) => seq('{', comma_sep1($.match_arm), optional(','), '}'),
+    // The comma BETWEEN arms is OPTIONAL, exactly as it is between struct
+    // members (D6): the compiler's arm parser eats each arm's separator with
+    // `p.eat` (src/std/parse/parse_match.zen) and `zen fmt`'s re-lex guard
+    // forbids inserting one, so a block-bodied arm followed by another arm is
+    // legal without the comma. Issue #770 was this rule demanding what the
+    // compiler never did. A trailing comma is still allowed (D5).
+    //
+    // At least ONE arm stays required, as it was here before: an empty `{}` is
+    // rejected by sema as non-exhaustive either way, and dropping the minimum
+    // would make `{}` ambiguous against `record` inside `arguments`.
+    match_block: ($) =>
+      seq('{', repeat1(seq($.match_arm, optional(','))), '}'),
 
     match_arm: ($) =>
       seq(
