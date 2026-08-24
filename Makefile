@@ -35,7 +35,7 @@ ZCC      = $(CACHE) $(CC)
 # `editors` IS IN THIS LIST BECAUSE `editors/` IS ALSO A DIRECTORY. Without
 # it make finds the directory, calls the target up to date, and runs the
 # script never — a gate that cannot fail because it cannot run.
-.PHONY: all build seed test lint parse design cap dupcomments faults lextile ufcs style editors fixpoint determinism grammar grammar-test fmt bench bench-allocs emit-runs asan leak profile clean help
+.PHONY: all build seed test lint parse design cap dupcomments fleet faults lextile ufcs style editors fixpoint determinism grammar grammar-test fmt bench bench-allocs emit-runs asan leak profile clean help
 
 all: test
 
@@ -89,7 +89,7 @@ seed: build
 ## disease has been diagnosed here: tests/bench was run by no target in
 ## `all`, so `allocs_op: 0` -- cited in src/ as a thing that fails the
 ## build -- was a number nothing had ever computed.
-test: build parse design cap dupcomments faults lextile ufcs style grammar-test editors bench-allocs
+test: build parse design cap dupcomments faults lextile ufcs style grammar-test editors bench-allocs fleet
 	$(PY) tests/run.py
 
 ## faults: every fault the compiler declares must have a site that raises
@@ -137,6 +137,23 @@ ufcs: grammar
 ## so they are rebuilt every run rather than carrying a staleness rule.
 gate = ./zen build tools/gates --entry $(1).zen --emit-c -o build/gates/$(1).c \
 	&& $(CC) $(CFLAGS) build/gates/$(1).c -o build/gates/$(1)
+
+## fleet: tools/fleet/fleet.zen, the policy half of an agent-fleet runner --
+## the work list, the success PREDICATE, the retry counters and the report.
+## `tools/fleet/fleet.sh` is the other half: fork/exec, timeout and flock,
+## which Zen has no way to say (#748, #749, #750, #751, #752).
+##
+## IT IS IN `test` BECAUSE A PROGRAM NOTHING BUILDS ROTS. This is not a gate
+## and asserts nothing about the tree; it asserts that the tree's own
+## dogfood still compiles, which is the only thing standing behind it --
+## `tools/fleet` has no corpus test, for the same reason `example/` has
+## none: the interesting half is not runnable without an agent fleet.
+## ~0.4s, same trade as the four gates above.
+fleet: build
+	@mkdir -p build/fleet
+	@./zen build tools/fleet --entry fleet.zen --emit-c -o build/fleet/fleet.c \
+	  && $(CC) $(CFLAGS) build/fleet/fleet.c -o build/fleet/fleet \
+	  && echo "fleet: built build/fleet/fleet"
 
 ## cap: STYLE.md's line caps. Over 500 prints a note; over 800 fails,
 ## unless the path carries a written reason in tools/gates/line_cap.zen.
@@ -194,7 +211,7 @@ dupcomments: build
 lextile: build
 	@mkdir -p build/gates
 	@$(call gate,lex_tiling)
-	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tests/bench tools/gates -name '*.zen' -print0 | LC_ALL=C sort -z); \
+	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tests/bench tools/gates tools/fleet -name '*.zen' -print0 | LC_ALL=C sort -z); \
 	  test $${#files[@]} -gt 0 \
 	    || { echo "lextile: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
 	  build/gates/lex_tiling "$${files[@]}"
@@ -307,7 +324,7 @@ grammar-test: grammar
 ## which is an instruction to do nothing and succeed when the find comes
 ## up empty.
 fmt: build
-	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tools/gates -name '*.zen' \
+	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tools/gates tools/fleet -name '*.zen' \
 	    -not -path 'tests/corpus/lex/*' -print0); \
 	  test $${#files[@]} -gt 0 \
 	    || { echo "fmt: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \

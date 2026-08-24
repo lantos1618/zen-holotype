@@ -1,0 +1,72 @@
+// tools/fleet/fleet_text.zen
+// Reading a work list is reading BYTES, and this is the whole of it: a
+// text into lines, a line into fields, a field into a number. No
+// allocation past the line vector — every field is a slice of the line
+// the caller already holds.
+//
+// It is a separate file because it is a separate subject: nothing here
+// knows what a job, a lane or a verdict is, and `fleet.zen` is where
+// every decision lives. Split for that reason and not for size, though
+// the two halves together were over STYLE.md's 500-line note.
+
+Alloc, AllocError = std.mem
+str = std.text
+Vec = std.collections
+Range = std.core
+
+lines_of* = (a: Alloc, text: str) Res<Vec<str>, AllocError> {
+    out  ::= a.Vec<str>();
+    from ::= 0;
+    Range(0, text.len).loop((h, i) {
+        (text.index(i) == '\n').then(() {
+            out.add(text.slice(from, i)).try();
+            from = i + 1;
+        });
+    });
+    (from < text.len).then(() { out.add(text.slice(from, text.len)).try() });
+    Ok(out)
+}
+
+// The k-th whitespace-separated field, empty past the end. One pass, no
+// allocation: every field is a slice of the line the caller already holds.
+field* = (line: str, k: usize) str {
+    from ::= line.len;
+    to   ::= line.len;
+    seen ::= 0;
+    run  ::= false;
+    tok  ::= 0;
+    Range(0, line.len).loop((h, p) {
+        space = is_space(line.index(p));
+        (!space && !run).then(() { run = true; tok = p; });
+        (space && run).then(() {
+            run = false;
+            (seen == k).then(() { from = tok; to = p; });
+            seen = seen + 1;
+        });
+    });
+    run.then(() { (seen == k).then(() { from = tok; to = line.len; }); });
+    line.slice(from, to)
+}
+
+is_space* = (b: u8) bool { b == ' ' || b == '\t' || b == '\r' }
+
+// Decimal, ignoring everything else — the counters this reads are files
+// this program wrote, and a trailing newline is not an error.
+//
+// IT ANSWERS u64 AND NOT usize, and that is not a preference. `std.core.num`
+// widens u8/u16/u32 upward and stops: there is no `usize.to_u64` and no
+// `u64.to_usize` (#756), so a count that has to reach a u64 API — here
+// `Duration(ns:)` — can never have been a usize. Every counter in this file
+// is a u64 for that one reason, and `Vec.len` (a usize) can only be printed.
+digits* = (s: str) u64 {
+    // `0` is untyped and `0.to_u64()` will not parse — a literal carries
+    // no member (num.zen) — so a u64 zero has to arrive from a named value.
+    n ::= u64.MIN;
+    Range(0, s.len).loop((h, i) {
+        b = s.index(i);
+        (b >= '0' && b <= '9').then(() {
+            n = n * 10 + (b - '0').to_u64();
+        });
+    });
+    n
+}
