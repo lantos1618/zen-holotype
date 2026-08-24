@@ -98,15 +98,6 @@ yet." It exists now and it is red. Decide whether Zen specifies an order (then
 gen_c must emit temporaries) or does not (then it must be written down, and
 `println`'s left-to-right walk is inconsistent with it).
 
-**`env.vars` is always empty: every environment variable reads as absent.**
-`env.vars.get("HOME")` answers `None` in a shell where HOME is exported.
-`Env.vars*: Map<str, str>` (env.zen:140) is never filled: gen_c_main.zen:122
-matches `argv_field` and writes `be.write_zero(t, out)` for EVERY other
-member, so `vars` reaches `main` as a zeroed Map -- and a zeroed Map answers
-None for every key. Found independently by three hunt lanes. This is the
-field-defaults-zeros class the STAGE file names: an empty environment is a
-PLAUSIBLE answer, so nothing ever looked.
-
 **A match binder shadowing an outer local emits an undeclared C variable.**
 `d: i32 = 7; got.get(0).match({ Ok(d) => println("{}", d), .. })` -- gen_c
 renames the binder to `zu_l1d_2` to dodge the collision with the outer `zu_l1d`

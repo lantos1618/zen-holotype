@@ -699,12 +699,23 @@ Fs* = {
 
 Env* = {
     argv: Vec<str>,       // raw argv; argv.get(0) is the program path
-    vars: Map<str, str>,  // raw environment variables
     out: Console,         // stdout / stderr
     mem: Mem,             // page authority: env.mem.alloc() makes an arena
     fs: Fs,               // the disk. `read` is the whole file at once
     net: Net,             // named and empty until something needs it
     threads: Threads,     // the thread escape hatch, no longer ambient
+
+    // one environment variable, by name. NOT a `vars: Map<str, str>`
+    // field, which is what this said until it was tried: the Env is
+    // built before `main` is entered and the only allocator door is
+    // `env.mem.alloc()` inside it, so the map could only ever be the
+    // zeroed one — and a zeroed map answers None for every key that IS
+    // exported, which is a wrong answer that looks like a right one.
+    // A capability instead, floored on `getenv`. No Alloc: the bytes
+    // are the process's environment block, borrowed for its lifetime
+    // exactly as an argv row is. Res<str> because unset is an absence
+    // and not a failure with a reason
+    var* = (self: @Self, name: str) Res<str>
 
     // typed args: declare a schema struct, @meta walks its
     // fields and fills them. each field maps to --flag and its

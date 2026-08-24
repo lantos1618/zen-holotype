@@ -1,0 +1,135 @@
+// src/gen/gen_c/gen_c_env.zen
+// The environment capability in C — lowering and floor in one file, the
+// shape `gen_c_stdin.zen` set, so the call site and the C it names
+// cannot drift apart.
+//
+// `Env.var` is bodiless in `std/env/env.zen`: the authority itself, and
+// its floor is `getenv`. WHY IT IS A CALL AND NOT A FIELD: the `Env`
+// handed to `main` is a C compound literal written by `gen_c_main.zen`
+// BEFORE `main` runs, and a `Map<str, str>` field there could only be
+// the zeroed one C's rule leaves behind — `slots.len == 0`, so `get`
+// answers None for every key the shell really did export. Filling it
+// is not a matter of writing more initialiser: a `Map.set` allocates
+// and the only allocator door is `env.mem.alloc()` INSIDE `main`;
+// `emit_main` runs after `emit_bodies`, so the backend cannot even ask
+// for the `Map<str, str>.set` instantiation the call would name.
+//
+// The bytes are BORROWED, process-lifetime, exactly like an `argv` row:
+// `getenv` hands back a pointer into the environment block, nothing is
+// copied and nothing is freed. That is what lets this capability have
+// no `Alloc` in its signature and therefore, by law 1, no memory.
+//
+// `getenv` needs a NUL and a `str` has none, so the name is copied into
+// a fixed buffer in the C floor — the same trick and the same reason as
+// `zg_fs_path`: a probe with no `Alloc` cannot make room for one.
+// `<stdlib.h>` is already unconditional in the banner.
+
+Call = std.ast
+AllocError = std.mem
+str, String = std.text
+TyId = sema.sema_ty
+Ctx = sema.sema_check
+sym_gen = gen.gen_name
+Emit = gen.gen_emit
+CBackend = gen.gen_c.gen_c_state
+declare_temp = gen.gen_c.gen_c_flow
+comment = gen.gen_c.gen_c_runtime
+close_else, close_brace, path_args = gen.gen_c.gen_c_fs
+write_assign_ok, write_assign_none = gen.gen_c.gen_c_cap
+
+// -----------------------------------------------------------------
+// THE FLOOR: `getenv`, emitted only for a program that asks — an
+// uncalled `static` is a warning.
+//
+// ABSENCE IS A NULL `data`, not a second return value: a variable that
+// is set to the empty string is present, and `len == 0` alone cannot
+// tell the two apart. The `zg_str` this answers with is the same one
+// every other borrowed run in the program is, so the lowering has
+// nothing left to build.
+// -----------------------------------------------------------------
+
+emit_env* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    be.uses_env().match({
+        false => Ok(()),
+        true  => write_env(out),
+    })
+}
+
+write_env = (out :: Emit) Res<(), AllocError> {
+    comment(
+        out,
+        "a borrowed str is not NUL-terminated and getenv wants a NUL"
+    ).try();
+    out.say("#define ZG_ENV_MAX 4096").try();
+    out.line().try();
+    comment(out, "a NULL data is the variable that is not set").try();
+    out.say(
+        "static zg_str zg_env_var(const unsigned char *p, size_t n) {"
+    ).try();
+    out.indent();
+    out.say("char buf[ZG_ENV_MAX];").try();
+    out.say("zg_str got;").try();
+    out.say("char *v;").try();
+    out.say("got.data = NULL;").try();
+    out.say("got.len = 0;").try();
+    out.say("if (n >= (size_t)ZG_ENV_MAX) return got;").try();
+    out.say("if (n) memcpy(buf, p, n);").try();
+    out.say("buf[n] = '\\0';").try();
+    out.say("v = getenv(buf);").try();
+    out.say("if (v) {").try();
+    out.indent();
+    out.say("got.data = (unsigned char *)v;").try();
+    out.say("got.len = strlen(v);").try();
+    out.dedent();
+    out.say("}").try();
+    out.say("return got;").try();
+    out.dedent();
+    out.say("}").try();
+    out.line().try();
+    Ok(());
+}
+
+// -----------------------------------------------------------------
+// THE LOWERING: `env.var("HOME")`
+//
+// The name is spilled into a temporary first, by the same `path_args`
+// the filesystem probes use: a `str` is a pointer and a count, both
+// read, so an argument that is a call would otherwise be made twice.
+// -----------------------------------------------------------------
+
+lower_env_var* = (
+    be  :: CBackend,
+    c   : Call,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.need_env();
+    sty = be.check.types.prim("str").try();
+    name ::= be.alloc.String().try();
+    be.path_args(c, 0, ctx, name).try();
+    got ::= be.alloc.String().try();
+    sym_gen(got, "t", be.next_tmp()).try();
+    dst ::= be.alloc.String().try();
+    sym_gen(dst, "t", be.next_tmp()).try();
+    be.declare_temp(sty, got.view()).try();
+    be.declare_temp(ret, dst.view()).try();
+    be.write_getenv_call(got.view(), name.view()).try();
+    be.open_absent_test(got.view()).try();
+    be.write_assign_none(ret, dst.view()).try();
+    be.close_else().try();
+    be.write_assign_ok(ret, got.view(), dst.view()).try();
+    be.close_brace().try();
+    out.add_bytes(dst.view())
+}
+
+write_getenv_call = (be :: CBackend, got: str, name: str)
+                    Res<(), AllocError> {
+    be.fmt("{got} = zg_env_var({name});\n")
+}
+
+open_absent_test = (be :: CBackend, got: str) Res<(), AllocError> {
+    be.fmt("if ({got}.data == NULL) {\n").try();
+    be.indent();
+    Ok(());
+}

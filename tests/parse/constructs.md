@@ -617,9 +617,9 @@ Several are never declared anywhere in `DESIGN.md`.
 ### C073 — generic type application
 ```groovy
     argv: Vec<str>,       // raw argv; argv.get(0) is the program path
-    vars: Map<str, str>,  // raw environment variables
 ```
-`DESIGN.md:460-461`.
+`DESIGN.md:701`. The `vars: Map<str, str>` that stood beside it is gone —
+`Env.var(name) Res<str>` replaced a field that could never be filled.
 
 ### C074 — nested generic application
 ```groovy

@@ -42,6 +42,7 @@ declare_temp, enum_path, payload_type, is_variant = gen.gen_c.gen_c_flow
 lower_probe, lower_write, lower_read = gen.gen_c.gen_c_fs
 close_else, close_brace, open_null_test = gen.gen_c.gen_c_fs
 lower_stdin_read = gen.gen_c.gen_c_stdin
+lower_env_var = gen.gen_c.gen_c_env
 lower_console_print = gen.gen_c.gen_c_print
 is_defer, lower_defer = gen.gen_c.gen_c_scope
 
@@ -63,8 +64,24 @@ is_capability* = (be :: CBackend, rty: TyId, name: str) bool {
 is_fs_capability = (be :: CBackend, rty: TyId, name: str) bool {
     owner_of(be, rty).eq("Fs").match({
         true  => fs_verb(name),
-        false => be.is_console_capability(rty, name),
+        false => be.is_env_capability(rty, name),
     })
+}
+
+// `Env.var`, and the NAME is half the test: `Env` declares `args` and
+// `spawn` bodiless too, and those are stage-5 signatures with no floor
+// — claiming the owner alone would turn a "not implemented yet" into a
+// call to C that does not exist.
+is_env_var = (be :: CBackend, rty: TyId, name: str) bool {
+    owner_of(be, rty).eq("Env") && name.eq("var")
+}
+
+// AND THE CHAIN CONTINUES: `Console.println`, `Stdin.read` and
+// `Scope.defer` are capabilities too, so a receiver that is not `Env`
+// must still be offered to them. Answering `is_env_var` alone here
+// dropped all three out of `MethodKind.Capability`.
+is_env_capability = (be :: CBackend, rty: TyId, name: str) bool {
+    be.is_env_var(rty, name) || be.is_console_capability(rty, name)
 }
 
 // `Console.println` IS ONE OF THESE: floor is `fwrite`, bodiless for
@@ -182,6 +199,26 @@ verb = (
 ) Res<(), AllocError> {
     be.is_stdin_read(rty, a.name.text).match({
         true  => be.lower_stdin_read(id, c, ret, aty, ctx, out),
+        false => be.env_verb(id, c, a, rty, ret, aty, ctx, out),
+    })
+}
+
+// `Env.var` IS TESTED BY OWNER AND NAME TOGETHER, beside `Stdin.read`
+// and for the same reason: the chain below asks names only, and `var`
+// on anything else is not this.
+env_verb = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    rty : TyId,
+    ret : TyId,
+    aty : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.is_env_var(rty, a.name.text).match({
+        true  => be.lower_env_var(c, ret, ctx, out),
         false => be.console_verb(id, c, a, rty, ret, aty, ctx, out),
     })
 }
@@ -540,6 +577,17 @@ prev_text = (be :: CBackend, c: Call, ctx: Ctx, out :: String)
 // -----------------------------------------------------------------
 // the values these lowerings assign
 // -----------------------------------------------------------------
+
+// `None` — the absence half of a `Res<T>`, which has no payload to
+// write and no reason to name. `Err` is the other enum's word and
+// `write_assign_err` is where it is spelled.
+write_assign_none* = (be :: CBackend, ret: TyId, dst: str)
+                    Res<(), AllocError> {
+    value ::= be.alloc.String().try();
+    be.write_res_head(ret, "None", value).try();
+    value.add_bytes(" })").try();
+    be.set_line(dst, value.view())
+}
 
 write_assign_ok_unit* = (be :: CBackend, ret: TyId, dst: str)
                        Res<(), AllocError> {

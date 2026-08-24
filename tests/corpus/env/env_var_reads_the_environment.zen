@@ -1,0 +1,28 @@
+// `Env` used to carry `vars: Map<str, str>`, and it was never filled: the
+// Env is a C compound literal written before `main` is entered, so C's
+// rule zeroed the map, and a zeroed map has no slots — `get` answered
+// None for every key the shell really had exported. Filling it in place
+// is not possible: `Map.set` allocates and the only allocator door is
+// `env.mem.alloc()` INSIDE main. So the field is gone and the authority
+// is a capability, `env.var(name)`, floored on `getenv` — borrowed
+// process-lifetime bytes, exactly like an argv row.
+//
+// The runner passes no environment of its own, so the child inherits the
+// harness's. Only two things are true of every shell that can run this
+// harness at all: PATH is exported and non-empty, and a name nobody
+// would ever export is absent. A specific value would assert on whoever
+// is running the tests.
+main = (env: Env) Res<i32, ArgError> {
+    env.var("PATH").match({
+        Ok(p) => (p.len > 0).match({
+            true  => println("PATH is set"),
+            false => println("PATH is empty"),
+        }),
+        None  => println("PATH MISSING"),
+    });
+    env.var("ZEN_NO_SUCH_VARIABLE_EXISTS_ANYWHERE").match({
+        Ok(_) => println("the absent name is somehow set"),
+        None  => println("the absent name is absent"),
+    });
+    Ok(0);
+}
