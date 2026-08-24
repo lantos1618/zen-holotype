@@ -1,0 +1,72 @@
+// A MODULE CONSTANT'S VALUE OWES ITS WRITTEN TYPE, AND THESE PAY IT.
+// `sema_decl.const_body` walks every module-level `Const` that writes a
+// type and runs the local binding's two checks over the value beside it
+// -- `coerce` for the family, then `check_literal` for the value. Until
+// 2026-08-24 a `Const` fell through `check_decl`'s wildcard and nothing
+// asked at all, so `UMINUS: u32 = -1` compiled clean and printed
+// 18446744073709551615; `must-fail/sema/module_constant_value_must_fit`
+// is that half of the rule.
+//
+// THIS IS THE OTHER HALF, AND THE ONE CARRYING THE BLAST RADIUS. The
+// walk is new and it runs over src/, src/std/ and every test at once,
+// so the failure to fear is not a bad constant slipping through -- it
+// is a GOOD one being refused. A rule a shade too strict reddens the
+// tree in places no diagnostic of its own would name, and nothing else
+// in the suite says a legal module constant still compiles. THE FIRST
+// ASSERTION HERE IS THAT THIS FILE COMPILES AT ALL; if it stops, the
+// module-constant rule has grown stricter than the local binding whose
+// two checks it borrowed, and that is the regression it exists to
+// catch.
+//
+// EACH TYPE STANDS AT AN EDGE, because a value in the middle of a range
+// cannot tell a narrowing from a correct answer. `assignable` grants an
+// int literal every integer type and `literal_fits` is the half that
+// says which VALUES: `TINY` is past i8, `WIDE` is past i32, and `FULL`
+// is the u64 ceiling -- the must-fail's wrong answer standing here as a
+// right one, which no signed reading of the literal accepts. `NEG` is
+// the must-fail's own sentence at a type that does hold it. `SUM` is a
+// value that is not a bare literal, so the fold must reach the operator
+// and not only the digits.
+//
+// THE ARRAY CONSTANT IS DECLARED AND NOT READ, which is the rule's
+// reach and not this file's laziness: `sema_check.array_fits` types
+// `XS` where it stands, unused -- change a 250 to a 300 and the file
+// stops compiling, which is how the declaration was proved load-bearing
+// -- but `gen_c` refuses to lower a constant of array type as a VALUE
+// (`a constant whose value names a function or reads a frame`), so
+// there is nothing it can print. `takes(..)` is the printed twin at the
+// position gen_c does lower, and every element is above 127 so a signed
+// byte would not carry it.
+//
+// THE NUMBERS ARE PRINTED, not merely compiled. This project has
+// shipped field defaults that silently produced zeros for weeks, so a
+// constant that compiles is not a constant that arrived: no truncation,
+// no sign flip and no zero prints any line below the way it stands.
+
+NEG:  i32 = -1234567
+WIDE: i64 = 9000000000
+TINY: u8  = 250
+FULL: u64 = 18446744073709551615
+SUM:  i32 = 1000 + 234
+HALF: f64 = 2.5
+S:    str = "ok"
+XS:   [u8, 3] = [200, 100, 250]
+
+takes = (xs: [u8, 3]) u32 {
+    total: u32 ::= 0;
+    xs.loop((h, v) { total = total + v.to_u32(); });
+    total;
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", NEG);
+    println("{}", WIDE);
+    println("{}", TINY);
+    println("{}", FULL);
+    println("{}", SUM);
+    println("{}", HALF);
+    println("{}", S);
+    println("{}", S.len);
+    println("{}", takes([200, 100, 250]));
+    Ok(0);
+}
