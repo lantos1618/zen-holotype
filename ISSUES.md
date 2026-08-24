@@ -63,6 +63,69 @@ reporting one. `block` is the same shape but benign: `parse_stmt.zen:31` on
 Nothing gates duplicate free-function names; `ufcs_collisions.py` only checks
 a free function shadowing a METHOD.
 
+**A second `x = ..` in one block: sema says shadowing, gen_c says assignment,
+and nobody type-checks it.** Found by a bug-hunt lane, reproduced three ways.
+sema permits the rebinding AT A DIFFERENT TYPE (shadowing "falls out for free"
+because `lookup` walks top-down, sema_check.zen:286); gen_c reuses ONE C slot
+and ONE live flag per NAME. Three symptoms, one cause:
+- `x = Noisy(id: 1); x = Noisy(id: 2)` prints `drop 2` and never `drop 1` --
+  the shadowed value's Drop never runs. An arena, file or lock held by the
+  first binding leaks, at exit 0.
+- `x = 1; x = "str"` emits `zg_str` into an `int64_t`. Only `cc` rejects it;
+  Zen reports nothing. `cc` is the type checker again.
+- `n = 42; n = 3.5` prints **3**. The emitted C is `int64_t zu_l1n; zu_l1n =
+  42; zu_l1n = 3.5;` -- C truncates, no Zen diagnostic, no cc warning, exit 0.
+  Zen has no cast keyword and conversions are methods, so an implicit
+  float->int here is exactly the silent wrong answer the gates cannot see.
+Repros (NOT added to tests/corpus -- a red board is the project's loudest
+signal and landing one is a decision, not a side effect): the three programs
+are in the session scratchpad under repros/. Decide the semantics first: if a
+rebinding is a new binding, both values must drop and the types may differ; if
+it is assignment, the old value must drop at the rebind and the type must
+match. Today it is neither.
+
+**Call arguments evaluate RIGHT-TO-LEFT, and the tree predicted it.**
+`three(d.tick(), d.tick(), d.tick())` over a counter prints `210`, not `012`;
+`pick(c.tick(), c.tick())` answers 10 instead of 01. The same three ticks
+written as statements run in order, so the corruption is specific to arguments
+inside one call. Cause: `write_written_args` (gen_c_call.zen) emits every
+argument inline into ONE C call expression, which hands the ordering decision
+to C, where it is unspecified -- gcc happens to go right-to-left.
+tests/corpus/codegen/nesting_calls.zen SAYS SO IN ITS HEADER: "any lowering
+that turns one Zen call into several C calls in an argument list has silently
+handed the ordering decision to the C compiler ... that test does not exist
+yet." It exists now and it is red. Decide whether Zen specifies an order (then
+gen_c must emit temporaries) or does not (then it must be written down, and
+`println`'s left-to-right walk is inconsistent with it).
+
+**`env.vars` is always empty: every environment variable reads as absent.**
+`env.vars.get("HOME")` answers `None` in a shell where HOME is exported.
+`Env.vars*: Map<str, str>` (env.zen:140) is never filled: gen_c_main.zen:122
+matches `argv_field` and writes `be.write_zero(t, out)` for EVERY other
+member, so `vars` reaches `main` as a zeroed Map -- and a zeroed Map answers
+None for every key. Found independently by three hunt lanes. This is the
+field-defaults-zeros class the STAGE file names: an empty environment is a
+PLAUSIBLE answer, so nothing ever looked.
+
+**A match binder shadowing an outer local emits an undeclared C variable.**
+`d: i32 = 7; got.get(0).match({ Ok(d) => println("{}", d), .. })` -- gen_c
+renames the binder to `zu_l1d_2` to dodge the collision with the outer `zu_l1d`
+and then never DECLARES it. cc: "'zu_l1d_2' undeclared (first use in this
+function); did you mean 'zu_l1d'?". 20-line repro; found by four independent
+hunt lanes. Shadowing is legal by design, so this is gen_c's bookkeeping, not
+a sema question.
+
+**92 programs where sema said yes and gen_c emitted C that cc rejects.**
+From 1232 hunt programs, mechanically triaged. Clustered by cc's message the
+population is dominated by TYPE errors -- 17 "incompatible types when
+returning", 16 "incompatible types when assigning", 14 more across
+initialising and argument passing -- which is the "cc is the type checker"
+shape again: sema is not checking what gen_c faithfully emits. 47 more
+programs compile with cc WARNINGS. Each is either gen_c emitting invalid C for
+a valid program or sema accepting a program it should reject; both are
+defects. The full triage is reproducible: run every program, bucket by
+ZEN_REJECTED / CC_REJECTED / CC_WARNING / RAN_OK / NONZERO_EXIT.
+
 <!-- paste snippets here. -->
 
 ---
