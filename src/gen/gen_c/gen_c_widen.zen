@@ -45,6 +45,7 @@ CBackend = gen.gen_c.gen_c_state
 
 expr, ty_of, value_expr = gen.gen_c.gen_c_expr
 convert = gen.gen_c.gen_c_bound
+carrier, wrap_error = gen.gen_c.gen_c_try
 ctype = gen.gen_c.gen_c_type
 sym_union_variant, sym_union_member = gen.gen_name
 has_var = sema.sema_inst
@@ -151,29 +152,59 @@ widen_expr* = (
 
 // A value whose own type is a MEMBER of the wanted set, not the set
 // itself — a value already at the set's type is a copy and needs
-// nothing.
+// nothing. THE SET IS ASKED FOR AT ITS RESOLVED SPELLING (`set_of`) —
+// the slot usually carries the declaration's NAME, `Trouble` and not
+// `AllocError | ParseError`, and the raw name is no union, so asking
+// the question of the name alone answered false for every DECLARED set
+// and left the member to fall through as a bare assignment cc refuses
+// (#736). The structural reading was reached either way; only the
+// declared one ever arrived here and was turned away.
 needs_set* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
             Res<bool, AllocError> {
-    be.check.types.at(want).match({
-        Union(_) => member_reaches_set(be, id, ctx, want),
+    wide = be.check.set_of(want);
+    be.check.types.at(wide).match({
+        Union(_) => member_reaches_set(be, id, ctx, want, wide),
         _        => Ok(false),
     })
 }
 
-member_reaches_set = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
-                     Res<bool, AllocError> {
+member_reaches_set = (
+    be   :: CBackend,
+    id   : ExprId,
+    ctx  : Ctx,
+    want : TyId,
+    wide : TyId
+) Res<bool, AllocError> {
     unknown = be.check.types.unknown().try();
     cty     = be.ty_of(id, ctx, unknown).try();
-    Ok(be.settled_member(cty, want));
+    Ok(be.settled_member(cty, want, wide));
 }
 
 // `set_has` answers TRUE for an unsubstituted type parameter (`sema_ty`:
 // a set nobody has computed cannot be said to be absent) — right for a
 // containment CHECK, wrong here since there is no C value to tag, so
-// it's asked past.
-settled_member = (be: CBackend, cty: TyId, want: TyId) bool {
-    (be.check.is_unknown(cty) == false) && (cty.eq(want) == false)
-        && be.is_named_or_res(cty) && be.check.types.set_has(want, cty)
+// it's asked past. Membership is asked of the RESOLVED set, for the
+// reason `needs_set` resolves; and where the wanted spelling is a
+// DECLARATION, some variant of it must carry the member or there is no
+// tag constant to build with — `Error = WriteError | FsError` contains
+// every member of `IoError` once the sets are flattened while naming
+// none of them, and claiming that here would emit a tag nothing
+// defines. A structural set composes its tag instead of declaring one,
+// so there the answer is always yes.
+settled_member = (be: CBackend, cty: TyId, want: TyId, wide: TyId) bool {
+    (be.check.is_unknown(cty) == false) && (cty.eq(wide) == false)
+        && be.is_named_or_res(cty) && be.check.types.set_has(wide, cty)
+        && be.variant_carries(want, cty)
+}
+
+variant_carries = (be: CBackend, want: TyId, member: TyId) bool {
+    be.check.types.at(want).match({
+        Named(_) => be.carrier(want, member).match({
+            None  => false,
+            Ok(_) => true,
+        }),
+        _        => true,
+    })
 }
 
 is_named_or_res = (be: CBackend, cty: TyId) bool {
@@ -185,7 +216,13 @@ is_named_or_res = (be: CBackend, cty: TyId) bool {
 }
 
 // The value at ITS OWN type, then the set built around it — lowering it
-// at the set would ask for the member to already be one.
+// at the set would ask for the member to already be one. The two
+// spellings of one set take two tag namings and so two builders: a
+// STRUCTURAL set composes its constant out of type codes, a DECLARED
+// one names it through the variant carrying the member, and each has
+// its own definition emitted. The declared path reuses `.try()`'s
+// carrier lookup and `wrap_error` rather than spelling either again —
+// one layout decision, not two (#736).
 set_expr* = (
     be   :: CBackend,
     id   : ExprId,
@@ -197,7 +234,13 @@ set_expr* = (
     cty     = be.ty_of(id, ctx, unknown).try();
     code ::= be.alloc.String().try();
     be.value_expr(id, ctx, cty, code).try();
-    be.write_set_value(code.view(), cty, want, out)
+    be.check.types.at(want).match({
+        Named(_) => be.carrier(want, cty).match({
+            None  => be.write_set_value(code.view(), cty, want, out),
+            Ok(v) => be.wrap_error(want, v, code.view(), out),
+        }),
+        _        => be.write_set_value(code.view(), cty, want, out),
+    })
 }
 
 // The set, tagged with the member the value IS and carrying it

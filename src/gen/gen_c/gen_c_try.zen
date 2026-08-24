@@ -353,7 +353,7 @@ named_tagged = (be :: CBackend, set: TyId, m: TyId) bool {
 // Compared by TYPE and not by name: two modules may each declare an
 // `AllocError` and they are two types, so a name match would tag the
 // wrong variant and the payload would be read as the wrong struct.
-carrier = (be :: CBackend, set: TyId, err: TyId) Res<str> {
+carrier* = (be :: CBackend, set: TyId, err: TyId) Res<str> {
     be.check.types.at(set).match({
         Named(n) => named_carrier(be, n, err),
         _        => None,
@@ -678,8 +678,10 @@ carry_error = (
     out.add_bytes(", .zg_data.").try();
     out.sym_member("Err").try();
     out.add_bytes(" = ").try();
+    err ::= be.alloc.String().try();
+    read_error(tmp, err).try();
     into.match({
-        Variant(v) => be.wrap_error(want.error, v, tmp, out),
+        Variant(v) => be.wrap_error(want.error, v, err.view(), out),
         Member(m)  => be.wrap_set_error(want.error, m, tmp, out),
         // `Same` carries the value across untouched. `Copy` and `Retag`
         // would too, and never arrive: `write_propagation` sends them to
@@ -701,25 +703,28 @@ read_error = (tmp: str, out :: String) Res<(), AllocError> {
 // variant that names the callee's error TYPE, carrying the value
 // unchanged. The two `Res`es are two C structs with two different
 // payload members, so there was never a copy that could have worked.
-wrap_error = (
+//
+// THE PAYLOAD ARRIVES AS AN EXPRESSION, not as the temporary it is read
+// off: `.try()` hands `{tmp}.zg_data.Err`, and the direct widen (#736)
+// hands the member value itself, which has no Res around it to read
+// through. What is shared is the BUILD — tag naming, payload field,
+// braces — so that is all this owns.
+wrap_error* = (
     be      :: CBackend,
     set     : TyId,
     variant : str,
-    tmp     : str,
+    payload : str,
     out     :: String
 ) Res<(), AllocError> {
     qname ::= be.alloc.String().try();
     be.set_qname(set, qname).try();
     cty ::= be.alloc.String().try();
     be.ctype(set, cty).try();
-    err ::= be.alloc.String().try();
-    read_error(tmp, err).try();
     out.fmt("({}){ .zg_tag = ", cty.view()).try();
     out.sym_variant(qname.view(), variant).try();
     out.add_bytes(", .zg_data.").try();
     out.sym_member(variant).try();
-    out.fmt(" = {} }", err.view()).try();
-    Ok(());
+    out.fmt(" = {payload} }")
 }
 
 // A STRUCTURAL SET IS BUILT THE SAME WAY WHEREVER IT IS BUILT, so the

@@ -1,0 +1,47 @@
+// A MEMBER written where its UNION is declared arrives TAGGED AS THE
+// MEMBER -- at the declared set's own type, through every door a value
+// goes through: a binding, an argument, a return, a field.
+//
+// What this pins is not "it compiles". The broken state failed in cc --
+// "incompatible types when assigning to type 'zu_t2_4main7Trouble' from
+// type 'zu_t2_4main10ParseError'" -- and that error was never the danger.
+// Those two structs merely HAPPENED to differ. A union whose members
+// lower to a layout-compatible struct would compile, run, and answer
+// with the WRONG TAG in silence, and no oracle in the tree would notice:
+// the match below would take whichever member's arm the un-tagged bytes
+// happened to resemble. So every door prints WHICH member the widened
+// value really is, and `ParseError` is deliberately not the first member
+// of `Trouble` -- a mis-widen that keeps the raw member's own numbering
+// instead of the set's canonical one lands on the other arm.
+//
+// Sema admitted these programs all along ("a union target accepts any of
+// its members"); it was the C backend's widen that never fired when the
+// destination carried the set under its DECLARED name -- the gate asked
+// the bare name whether it was a union, heard no, and lowered the member
+// unwrapped. The gate asks the resolved set now, and builds the declared
+// spelling the way `.try()` propagation always built one: tagged with
+// the variant that carries the member.
+IoError = | IsADirectory
+ParseError = | NotANumber
+Trouble = IoError | ParseError
+
+say = (door: str, t: Trouble) () {
+    t.match({
+        ParseError(_) => println("{} parse", door),
+        IoError(_)    => println("{} WRONG-TAG", door),
+    })
+}
+
+give = () Trouble { ParseError.NotANumber }
+
+Box = { item: Trouble }
+
+main = (env: Env) Res<i32, AllocError> {
+    t: Trouble = ParseError.NotANumber;
+    say("assign", t);
+    say("arg", ParseError.NotANumber);
+    say("ret", give());
+    b ::= Box(item: ParseError.NotANumber);
+    say("field", b.item);
+    Ok(0);
+}
