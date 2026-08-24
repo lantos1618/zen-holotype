@@ -65,7 +65,7 @@ ImplId = sema.sema_id
 Build = zen.zen_build
 root_for, relative_to = zen.zen_path
 to_pos, run_of = lsp.lsp_pos
-write_text, written = lsp.lsp_json
+obj, arr, Nest, write_text, written = lsp.lsp_json
 write_decimal = lsp.lsp_frame
 
 // One offer. `kind` is the protocol's CompletionItemKind number.
@@ -579,20 +579,25 @@ sort_items* = (items :: Vec<Item>) Res<(), AllocError> {
     items.sort()
 }
 
-// A `CompletionList` as the protocol spells it.
+// A `CompletionList` as the protocol spells it. The list is an object
+// whose `items` is an array — each its own `Nest`, so the commas, the
+// keys and the two closers belong to the containers, not to counters.
 write_items* = (items: Vec<Item>, out :: String) Res<(), AllocError> {
-    out.add_bytes("{\"isIncomplete\":false,\"items\":[").try();
-    n ::= 0;
-    items.loop((h, it) { n = write_item(it, n, out).try(); });
-    out.add_bytes("]}")
+    list ::= obj(out).try();
+    list.key("isIncomplete", out).try();
+    out.add_bytes("false").try();
+    list.key("items", out).try();
+    offers ::= arr(out).try();
+    items.loop((h, it) { write_item(it, offers, out).try(); });
+    offers.close(out).try();
+    list.close(out)
 }
 
-write_item = (it: Item, n: usize, out :: String) Res<usize, AllocError> {
-    (n > 0).match({ true => out.add_bytes(","), false => written() }).try();
-    out.add_bytes("{\"label\":").try();
-    write_text(it.label, out).try();
-    out.add_bytes(",\"kind\":").try();
+write_item = (it: Item, offers :: Nest, out :: String) Res<(), AllocError> {
+    offers.next(out).try();
+    item ::= obj(out).try();
+    item.text("label", it.label, out).try();
+    item.key("kind", out).try();
     write_decimal(it.kind, out).try();
-    out.add_bytes("}").try();
-    Ok(n + 1);
+    item.close(out)
 }

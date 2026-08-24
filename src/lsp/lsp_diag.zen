@@ -46,7 +46,7 @@ Note = std.parse.parse_diag
 Checker = sema.sema_check
 root_for, relative_to = zen.zen_path
 write_range = lsp.lsp_pos
-write_text, written = lsp.lsp_json
+obj, arr, Nest, write_text, written = lsp.lsp_json
 write_frame, write_decimal = lsp.lsp_frame
 path_of = lsp.lsp_uri
 // The one arena string-copy, exported (`lsp_reply.zen`).
@@ -369,46 +369,45 @@ write_notification = (
     spots : Vec<Spot>,
     body  :: String
 ) Res<(), AllocError> {
-    body.add_bytes(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":"
-    ).try();
-    write_text(uri, body).try();
-    body.add_bytes(",\"diagnostics\":[").try();
-    n ::= 0;
-    spots.loop((h, s) { n = one_of(s, uri, text, n, body).try(); });
-    body.add_bytes("]}}")
+    top ::= obj(body).try();
+    top.text("jsonrpc", "2.0", body).try();
+    top.text("method", "textDocument/publishDiagnostics", body).try();
+    top.key("params", body).try();
+    params ::= obj(body).try();
+    params.text("uri", uri, body).try();
+    params.key("diagnostics", body).try();
+    items ::= arr(body).try();
+    spots.loop((h, s) { one_of(s, uri, text, items, body).try(); });
+    items.close(body).try();
+    params.close(body).try();
+    top.close(body)
 }
 
-// This spot, if it belongs to this file, and the count so it can tell
-// whether a comma comes first.
-one_of = (s: Spot, uri: str, text: str, n: usize, out :: String)
-         Res<usize, AllocError> {
+// This spot, if it belongs to this file.
+one_of = (s: Spot, uri: str, text: str, items :: Nest, out :: String)
+         Res<(), AllocError> {
     s.uri.eq(uri).match({
-        false => Ok(n),
-        true  => written_at(s, text, n, out),
+        false => written(),
+        true  => written_at(s, text, items, out),
     })
 }
 
-written_at = (s: Spot, text: str, n: usize, out :: String)
-             Res<usize, AllocError> {
-    comma(n, out).try();
-    write_spot(s, text, out).try();
-    Ok(n + 1);
-}
-
-comma = (n: usize, out :: String) Res<(), AllocError> {
-    (n > 0).match({ true  => out.add_bytes(","), false => written() })
+written_at = (s: Spot, text: str, items :: Nest, out :: String)
+             Res<(), AllocError> {
+    items.next(out).try();
+    write_spot(s, text, out)
 }
 
 write_spot = (s: Spot, text: str, out :: String) Res<(), AllocError> {
-    out.add_bytes("{\"range\":").try();
+    spot ::= obj(out).try();
+    spot.key("range", out).try();
     write_range(text, s.span, out).try();
-    out.add_bytes(",\"severity\":").try();
+    spot.key("severity", out).try();
     write_decimal(ERROR, out).try();
-    out.add_bytes(",\"source\":\"zen\",\"message\":").try();
-    write_text(s.message, out).try();
-    write_note(s, text, out).try();
-    out.add_bytes("}")
+    spot.text("source", "zen", out).try();
+    spot.text("message", s.message, out).try();
+    write_note(s, text, spot, out).try();
+    spot.close(out)
 }
 
 // THE NOTE, AS THE SECOND PLACE TO LOOK. THE NOTE'S URI IS THE
@@ -416,22 +415,36 @@ write_spot = (s: Spot, text: str, out :: String) Res<(), AllocError> {
 // `expect_close`, anchors on the opening delimiter of the same file it
 // is reading — reusing the URI already in hand avoids a second
 // path-to-URI conversion that could disagree.
-write_note = (s: Spot, text: str, out :: String) Res<(), AllocError> {
+write_note = (
+    s    : Spot,
+    text : str,
+    spot :: Nest,
+    out  :: String
+) Res<(), AllocError> {
     s.note.match({
         None  => written(),
-        Ok(n) => write_related(s.uri, n, text, out),
+        Ok(n) => write_related(s.uri, n, text, spot, out),
     })
 }
 
-write_related = (uri: str, n: Note, text: str, out :: String)
+// ONE ENTRY, AND `next` IS STILL CALLED FOR IT: the separator belongs to
+// the array whether or not this list has ever held two, and an entry
+// added without it is a missing comma nothing would catch.
+write_related = (uri: str, n: Note, text: str, spot :: Nest, out :: String)
                 Res<(), AllocError> {
-    out.add_bytes(",\"relatedInformation\":[{\"location\":{\"uri\":").try();
-    write_text(uri, out).try();
-    out.add_bytes(",\"range\":").try();
+    spot.key("relatedInformation", out).try();
+    notes ::= arr(out).try();
+    notes.next(out).try();
+    note ::= obj(out).try();
+    note.key("location", out).try();
+    at ::= obj(out).try();
+    at.text("uri", uri, out).try();
+    at.key("range", out).try();
     write_range(text, n.span, out).try();
-    out.add_bytes("},\"message\":").try();
-    write_text(n.message, out).try();
-    out.add_bytes("}]")
+    at.close(out).try();
+    note.text("message", n.message, out).try();
+    note.close(out).try();
+    notes.close(out)
 }
 
 // `DiagnosticSeverity.Error` — the constant that changes the day there

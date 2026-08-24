@@ -56,7 +56,7 @@ scan, Source, Token, TokenKind = std.lex
 write_decimal = lsp.lsp_frame
 // `written()` is `Ok(())` with the writer's error type already on it, so
 // a match arm that writes nothing sits beside one that writes something.
-written = lsp.lsp_json
+write_text, written, obj, arr, Nest = lsp.lsp_json
 wire_at, units_of = lsp.lsp_pos
 
 // The legend, in order. A `tokenType` on the wire is a position in this
@@ -118,22 +118,32 @@ name_of* = (colour: Colour) str {
 // facts about what a name MEANS beyond its kind, which neither the
 // lexer nor the memos `lsp_names.zen` reads record.
 write_legend* = (out :: String) Res<(), AllocError> {
-    out.add_bytes("{\"tokenTypes\":[\"").try();
-    out.add_bytes(name_of(Colour.Keyword)).try();
-    next_name(Colour.Text, out).try();
-    next_name(Colour.Number, out).try();
-    next_name(Colour.Comment, out).try();
-    next_name(Colour.Operator, out).try();
-    next_name(Colour.Variable, out).try();
-    next_name(Colour.Type, out).try();
-    next_name(Colour.Function, out).try();
-    next_name(Colour.Parameter, out).try();
-    out.add_bytes("\"],\"tokenModifiers\":[]}")
+    legend ::= obj(out).try();
+    legend.key("tokenTypes", out).try();
+    types ::= arr(out).try();
+    listed(Colour.Keyword, types, out).try();
+    listed(Colour.Text, types, out).try();
+    listed(Colour.Number, types, out).try();
+    listed(Colour.Comment, types, out).try();
+    listed(Colour.Operator, types, out).try();
+    listed(Colour.Variable, types, out).try();
+    listed(Colour.Type, types, out).try();
+    listed(Colour.Function, types, out).try();
+    listed(Colour.Parameter, types, out).try();
+    types.close(out).try();
+    legend.key("tokenModifiers", out).try();
+    modifiers ::= arr(out).try();
+    modifiers.close(out).try();
+    legend.close(out)
 }
 
-next_name = (colour: Colour, out :: String) Res<(), AllocError> {
-    out.add_bytes("\",\"").try();
-    out.add_bytes(name_of(colour))
+// One name in the legend, in the order this file declares. The index a
+// `tokenType` carries IS this position, so the nine calls above are the
+// order and there is no second list to keep in step with them.
+listed = (colour: Colour, types :: Nest, out :: String)
+         Res<(), AllocError> {
+    types.next(out).try();
+    write_text(name_of(colour), out)
 }
 
 // WHAT EACH TOKEN SHAPE IS COLOURED, and `None` for shapes this file
@@ -200,23 +210,22 @@ colour_of* = (kind: TokenKind) Res<Colour> {
 // --- the encoding ------------------------------------------------------
 
 // WHERE THE PREVIOUS TOKEN STARTED — the entire state the encoding
-// needs — plus whether a comma is owed. Begins at line 0, character 0
-// rather than "nothing yet": the protocol measures the first token's
-// deltas from the origin, so the same subtraction handles the first
-// token with no special case.
+// needs. Begins at line 0, character 0 rather than "nothing yet": the
+// protocol measures the first token's deltas from the origin, so the
+// same subtraction handles the first token with no special case. The
+// separator between runs is the data array's own `Nest`, passed down to
+// `put`, so the painter counts nothing itself.
 Painter = {
     line :: usize,
     character :: usize,
-    said :: bool,
 
     // One run, as five integers. `length` is already in UTF-16 units and
     // `colour` is already an index — both conversions happen before this
-    // method, so nothing here converts twice.
+    // method, so nothing here converts twice. The comma before all but
+    // the first run is `runs.next`'s to place.
     put = (self :: @Self, line: usize, character: usize, length: usize,
-           colour: Colour, out :: String) Res<(), AllocError> {
-        self.said.match({ true => out.add_bytes(
-            ","
-        ), false => written() }).try();
+           colour: Colour, runs :: Nest, out :: String) Res<(), AllocError> {
+        runs.next(out).try();
         delta_line = line - self.line;
         // THE ONE BRANCH IN THE WHOLE ENCODING: a token on the same line
         // as its predecessor measures from that predecessor's start; one
@@ -236,7 +245,6 @@ Painter = {
         out.add_bytes(",0").try();
         self.line      = line;
         self.character = character;
-        self.said      = true;
         Ok(());
     }
 
@@ -245,7 +253,7 @@ Painter = {
     // a newline ended the last one starts at the first byte of its line
     // — paid once per token, not once per line.
     paint = (self :: @Self, text: str, token: Token, colour: Colour,
-             out :: String) Res<(), AllocError> {
+             runs :: Nest, out :: String) Res<(), AllocError> {
         stop = token.span.end.offset;
         from      ::= token.span.start.offset;
         line      ::= zero_based(token.span.start.line);
@@ -256,7 +264,8 @@ Painter = {
         ).character;
         loop(() { from < stop }, (h) {
             upto = break_in(text, from, stop);
-            self.run(text, line, character, from, upto, colour, out).try();
+            self.run(text, line, character, from, upto, colour, runs, out)
+                .try();
             // Past the `\n`, which belongs to neither run: it is inside
             // the token's bytes and colours nothing.
             from      = upto + 1;
@@ -270,7 +279,8 @@ Painter = {
     // comment is a real run of zero units, not worth the client's
     // trouble.
     run = (self :: @Self, text: str, line: usize, character: usize,
-           from: usize, upto: usize, colour: Colour, out :: String)
+           from: usize, upto: usize, colour: Colour, runs :: Nest,
+           out :: String)
           Res<(), AllocError> {
         (upto > from).match({
             true  => self.put(
@@ -278,6 +288,7 @@ Painter = {
                 character,
                 units_of(text, from, upto),
                 colour,
+                runs,
                 out
             ),
             false => written(),
@@ -381,8 +392,10 @@ write_tokens* = (
     out   :: String
 ) Res<(), AllocError> {
     lexed = scan(a, Source(file: name, text: text)).try();
-    painter ::= Painter(line: 0, character: 0, said: false);
-    out.add_bytes("{\"data\":[").try();
+    painter ::= Painter(line: 0, character: 0);
+    answer  ::= obj(out).try();
+    answer.key("data", out).try();
+    data ::= arr(out).try();
     lexed.tokens.loop((h, token) {
         colour_of(token.kind).match({
             None    => written(),
@@ -390,11 +403,13 @@ write_tokens* = (
                 text,
                 token,
                 settled(token, one, names),
+                data,
                 out
             ),
         }).try();
     });
-    out.add_bytes("]}")
+    data.close(out).try();
+    answer.close(out)
 }
 
 // The lexer's answer, with sema's where sema spoke. ONLY AN `Ident` IS

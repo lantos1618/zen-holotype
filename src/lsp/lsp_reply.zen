@@ -10,7 +10,7 @@
 
 str, String = std.text
 Alloc, AllocError = std.mem
-Jsons, JsonId, write_text, written = lsp.lsp_json
+Jsons, JsonId, write_text, written, obj, arr, Nest = lsp.lsp_json
 JsonFault = lsp.lsp_json_read
 write_decimal = lsp.lsp_frame
 Hover = lsp.lsp_hover
@@ -65,10 +65,10 @@ number_at* = (tree: Jsons, obj: JsonId, name: str) usize {
 
 result* = (tree: Jsons, rid: JsonId, body: str, msg :: String)
           Res<(), AllocError> {
-    head(tree, rid, msg).try();
-    msg.add_bytes(",\"result\":").try();
+    reply ::= head(tree, rid, msg).try();
+    reply.key("result", msg).try();
     msg.add_bytes(body).try();
-    msg.add_bytes("}")
+    reply.close(msg)
 }
 
 failed* = (
@@ -78,32 +78,46 @@ failed* = (
     why  : str,
     msg  :: String
 ) Res<(), AllocError> {
-    head(tree, rid, msg).try();
-    msg.add_bytes(",\"error\":{\"code\":-").try();
+    reply ::= head(tree, rid, msg).try();
+    reply.key("error", msg).try();
+    fault ::= obj(msg).try();
+    fault.key("code", msg).try();
+    msg.add_byte('-').try();
     write_decimal(rpc_code(code), msg).try();
-    msg.add_bytes(",\"message\":").try();
+    fault.key("message", msg).try();
     write_text(why, msg).try();
-    msg.add_bytes("}}")
+    fault.close(msg).try();
+    reply.close(msg)
 }
 
 // THE ID IS ECHOED VERBATIM, out of the arena it was read from — a
 // JSON-RPC id may be a number or a string, and re-emitting the node
-// matches either without a second representation of "an id".
-head = (tree: Jsons, rid: JsonId, msg :: String) Res<(), AllocError> {
-    msg.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
-    tree.write(rid, msg)
+// matches either without a second representation of "an id". The open
+// envelope comes back, since both replies put one more member in it.
+head = (tree: Jsons, rid: JsonId, msg :: String) Res<Nest, AllocError> {
+    reply ::= obj(msg).try();
+    reply.text("jsonrpc", "2.0", msg).try();
+    reply.key("id", msg).try();
+    tree.write(rid, msg).try();
+    Ok(reply)
 }
 
 // A frame this server could not parse gets an error with a NULL id —
 // the id lives inside the document that failed to parse.
 parse_error* = (f: JsonFault, msg :: String) Res<(), AllocError> {
-    msg.add_bytes(
-        "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-"
-    ).try();
+    reply ::= obj(msg).try();
+    reply.text("jsonrpc", "2.0", msg).try();
+    reply.key("id", msg).try();
+    msg.add_bytes("null").try();
+    reply.key("error", msg).try();
+    why ::= obj(msg).try();
+    why.key("code", msg).try();
+    msg.add_byte('-').try();
     write_decimal(rpc_code(RpcFault.ParseError), msg).try();
-    msg.add_bytes(",\"message\":").try();
+    why.key("message", msg).try();
     write_fault(f, msg).try();
-    msg.add_bytes("}}")
+    why.close(msg).try();
+    reply.close(msg)
 }
 
 // The fault, with its byte offset — `TESTING.md:17`: "a rejection with
@@ -146,13 +160,21 @@ fault_text = (f: JsonFault) FaultText {
 // rendering as markup would let a `*` inside a name become emphasis —
 // not hypothetical, since an exported name IS starred.
 write_hover* = (h: Hover, out :: String) Res<(), AllocError> {
-    out.add_bytes("{\"contents\":{\"kind\":\"plaintext\",\"value\":").try();
+    answer ::= obj(out).try();
+    answer.key("contents", out).try();
+    contents ::= obj(out).try();
+    contents.text("kind", "plaintext", out).try();
+    contents.key("value", out).try();
     write_text(h.shown, out).try();
-    out.add_bytes("},\"range\":{\"start\":").try();
+    contents.close(out).try();
+    answer.key("range", out).try();
+    range ::= obj(out).try();
+    range.key("start", out).try();
     write_wire(h.start, out).try();
-    out.add_bytes(",\"end\":").try();
+    range.key("end", out).try();
     write_wire(h.end, out).try();
-    out.add_bytes("}}")
+    range.close(out).try();
+    answer.close(out)
 }
 
 // A `Target` as the protocol spells it, `null` when there is none — the
