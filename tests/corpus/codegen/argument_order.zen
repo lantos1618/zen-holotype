@@ -13,6 +13,17 @@
 // The four shapes are the four places arguments are written:
 // a plain call, a call nested in a call, a method's receiver against its
 // own arguments, and an argument list that mixes a call with a value.
+//
+// The `method` case cannot see the receiver bug at all: its receiver and
+// its ticked counter are DIFFERENT objects, so no evaluation order can
+// make one's read depend on the other's write. The aliased case below is
+// where it shows — the receiver is by VALUE (`self: @Self`) and the SAME
+// object as the counter the ticks go through, so the read of the
+// receiver has to be taken before anything to its right runs. Issue #763.
+// The `::` case pins the line that must not be crossed: a by-reference
+// receiver is never copied into a temporary (the callee would write the
+// copy and the caller would never see the mutation), so it keeps passing
+// the address of the object itself.
 
 Counter = {
     n :: i32,
@@ -29,6 +40,8 @@ Counter = {
             false => "REORDERED",
         });
     }
+
+    show = (self: @Self, a: i32, b: i32) i32 { self.n * 100 + a * 10 + b; }
 }
 
 three = (a: i32, b: i32, c: i32) str {
@@ -54,6 +67,18 @@ main = (env: Env) Res<i32, AllocError> {
     c ::= Counter(n: 0);
     r ::= Counter(n: 0);
     println("method {}", r.join(c.tick(), c.tick()));
+
+    // an ALIASED by-value receiver: the same object as the ticks to its
+    // right, so the receiver's VALUE has to be taken first
+    e ::= Counter(n: 0);
+    println("aliased {}", e.show(e.tick(), e.tick()));
+
+    // a :: receiver MUTATED by its callee stays the caller's own object:
+    // never a copy, whatever holding happens around it — the read after
+    // the call answers 7 only if both ticks landed on f
+    f ::= Counter(n: 5);
+    println("bymut {}", f.join(f.tick(), f.tick()));
+    println("seen {}", f.n);
 
     // a call beside a plain value: the value is read where it is
     // written, so the tick that comes first is the one on the left

@@ -230,8 +230,10 @@ has_call* = (be: CBackend, id: ExprId) bool {
 // WHAT A TEMPORARY CAN HOLD WITHOUT CHANGING WHAT IT MEANS. A `Consume`
 // moves and a `Lambda` is inlined into the call it was written for, so
 // neither survives being copied into one; an array literal's storage is
-// the frame's. A `Name` and a `Literal` need no temporary at all — they
-// run nothing, so no order over them is observable.
+// the frame's. A `Literal` runs nothing, so its value cannot move under
+// it. A `Name` also runs nothing, but its VALUE is observable: a call to
+// its right can change it through a `::` parameter, so it is held
+// whenever one is still to run — the caller of `holdable` asks that.
 holdable* = (be: CBackend, id: ExprId) bool {
     be.tree.expr_at(id).kind.match({
         Call(_)   => true,
@@ -239,6 +241,7 @@ holdable* = (be: CBackend, id: ExprId) bool {
         Index(_)  => true,
         Unary(_)  => true,
         Binary(_) => true,
+        Name(_)   => true,
         Paren(p)  => be.holdable(p.inner),
         _         => false,
     })
