@@ -677,12 +677,59 @@ operand_rung = (be :: CBackend, id: ExprId, b: Binary, ctx: Ctx, want: TyId)
 
 // What `lower_binary` will lower this level's OPERANDS at: `bool` for
 // the two short-circuiting operators, which take their type from the
-// operator and not from what they were given.
+// operator and not from what they were given; a comparison's operands'
+// own reading (`comparison_level` below); everything else the operands'
+// joined type with `want` as the last resort.
 level_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
              Res<TyId, AllocError> {
     is_logical(b.op).match({
         true  => be.check.types.bool_ty(),
+        false => be.plain_level(b, ctx, want),
+    })
+}
+
+plain_level = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
+              Res<TyId, AllocError> {
+    is_comparison(b.op).match({
+        true  => be.comparison_level(b, ctx, want),
         false => be.operand_type(b, ctx, want),
+    })
+}
+
+// A COMPARISON'S OPERANDS LOWER AT THEIR OWN TYPES, never at `want`.
+// Up here a comparison's `want` is the bool the comparison PRODUCES --
+// the print sugar's argument type, a binding's slot type -- and an
+// operand handed it declared its spill temporary at `bool`. So
+// `true.match({ true => 300, false => 102 }) > 299` stored both arms
+// into one byte, read 1 back, and answered 1 > 299 (issue #724): exit
+// 0, a plausible false, every branch such a comparison picks chosen
+// wrongly. Arithmetic never met this because its result type IS its
+// operand type; a comparison's is not.
+//
+// Sema has already agreed the whole program by the time gen_c runs, so
+// an operand's own reading wins -- taken verbatim, literal spelling
+// included: two unsuffixed literals are `int` (`c_prim` spells it
+// int64_t), the same answer `sema_join.arith_type` gives the pair when
+// nothing settles it, and C's usual conversions settle the rest at the
+// operator itself. Only when SEMA ANSWERED NOTHING (`Unknown`, a call
+// result through std) is `want` still the hint -- and a spilling form
+// standing there is refused as unsettled rather than lowered at it, so
+// this fallback cannot pick a wrong width silently.
+comparison_level = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
+                   Res<TyId, AllocError> {
+    lhs = sub(be, be.check.type_of(b.lhs, ctx).try()).try();
+    be.usable(lhs).match({
+        true  => Ok(lhs),
+        false => be.comparison_rhs(b, ctx, want),
+    })
+}
+
+comparison_rhs = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
+                 Res<TyId, AllocError> {
+    rhs = sub(be, be.check.type_of(b.rhs, ctx).try()).try();
+    be.check.is_unknown(rhs).match({
+        true  => Ok(want),
+        false => Ok(rhs),
     })
 }
 

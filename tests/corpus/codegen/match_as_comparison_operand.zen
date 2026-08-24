@@ -1,0 +1,29 @@
+// A `.match` AS AN OPERAND OF A COMPARISON, the shape issue #724 broke.
+//
+// The arms are i32 and sema types the match as their join -- both
+// unsuffixed literals, so `int`, the spelling nothing settled. gen_c
+// then picked the type to lower the OPERAND at from `want` when neither
+// operand's own reading was usable, and for a comparison that `want` is
+// the bool the comparison PRODUCES (the print sugar's argument type, a
+// binding's slot type). The spill temporary was declared bool, both
+// arms were stored into it, and C read 1 back: every comparison over a
+// spilled value answered 1 > n, exit 0, a plausible false.
+//
+// Bound to a local the same match was always correct, which is what kept
+// this invisible; the three lines here differ only in position.
+//
+// The scrutinees cover both spellings of "the match is not its
+// scrutinee": a bool scrutinee whose result is an i32, and an i32
+// comparison scrutinee. Values are chosen so the wrong answers are
+// plausible-looking, not zeros: 300 > 299 must be true, and a bool
+// temporary holding 300 would have read exactly 1.
+
+main = (env: Env) Res<i32, AllocError> {
+    a = true.match({ true => 2, false => 102 });
+    println("bound {}", a);
+    println("operand {}", true.match({ true => 2, false => 102 }) > 1);
+    println("sharp {}", true.match({ true => 300, false => 102 }) > 299);
+    println("int-scrutinee {}", (1 == 1).match({ true => 7, false => 9 }) > 1);
+    println("rhs {}", 1 < true.match({ true => 90, false => 1 }));
+    Ok(0);
+}
