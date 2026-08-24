@@ -84,6 +84,90 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # written again for the new case, which is the point.
 OWED: dict[str, str] = {}
 
+# THE SECOND DEBT (issue #722): two FREE functions sharing a NAME and a
+# RECEIVER TYPE, in two different modules. A different class from the one
+# above -- there is no method anywhere in these pairs -- and still a coin
+# flip, because Zen resolves a plain `f(be, ..)` against ONE flat namespace
+# of exported names and both sides are in it. No overloading decides by
+# arity (several pairs differ in arity and are still listed), no receiver
+# dot disambiguates, and which definition answers depends on an order
+# nothing specifies. Seventeen pairs stood when this check was written;
+# eight had BOTH sides exported, including the worst: two `write_label`s
+# on CBackend in the SAME folder, one writing a loop's break label from
+# (stem, n), the other writing a done-label `f<n>: ;`.
+#
+# THE RECEIVER IS THE SPELLING, NOT A RESOLVED DECLARATION. `before(Pos)`
+# is ledgered even though three modules declare a `Pos`, because the import
+# namespace is flat per spelling: a file importing two of them cannot spell
+# the call at all. gen_c mangles symbols out of qname + signature
+# (`gen_name.zen` sym_fn), so the emitted C links while the source does
+# not -- which is exactly what makes the class quiet.
+#
+# Keyed "<name>(<Receiver>)" -- the COLLISION, not a site -- and valued
+# with THE NUMBER OF MODULES still defining a side of it, so the debt can
+# shrink but cannot grow -- same monotone rule as the ledgers in
+# scripts/style.py. Paying one down is renaming/deleting a side and editing
+# the number (or deleting the line) in the same commit; an entry BELOW what
+# the tree holds is an error, and so is an entry whose group is gone.
+# Every entry carries the reason the pair still stands.
+#
+# Only groups with an EXPORTED side are counted, and this is not a shortcut:
+# an unexported function is invisible past its own module, so two private
+# twins are two local scopes and not (yet) one flat-namespace coin flip.
+# Export either one and the gate owns it. Groups whose receiver carries
+# type arguments (`put(Vec<T>)`) stay out too -- the arguments are part of
+# the identity a reader sees.
+DUP_OWED: dict[str, int] = {
+    # Byte-identical twins (`c.args.get(i) => a.value`). Kept because the
+    # merge wants a home decision between gen_c_call (call lowering) and
+    # gen_c_shape (loop shapes) -- neither may import the other's subject.
+    "arg_value(Call)": 2,
+    # Identical `f.body` match. gen_c_sink owns the sink-door grammar,
+    # gen_c_call the conversion grammar; merging wants a shared predicate
+    # module, which is a refactor beyond a rename.
+    "bodyless(Function)": 2,
+    # Different questions wearing one name: sema_bound asks a NAMED decl's
+    # members; sema_supply asks impls AND prims AND promises Var.
+    "bound_declares(Checker)": 2,
+    # Different contracts: sema_trap folds i64 with a -1 miss; std.core.byte
+    # answers Res<u8> and is library surface.
+    "digit_value(u8)": 2,
+    # Same fold shape, different widths and answers: i64 with overflow guard
+    # vs u64 into a Digits record.
+    "digits_of(str)": 2,
+    # Byte-identical (`types.at(t) => Res(_)`). Kept because the merge is
+    # part of the wider settle-family cleanup across gen_c_decl/range.
+    "is_res(CBackend)": 2,
+    # Identical one-liner. sema_call's copy predates the export; the
+    # mechanical half of the merge (drop the duplicate, import std's) has
+    # no lane.
+    "is_res_ctor(str)": 2,
+    # Different signatures AND subjects: sema_member reads a Member node
+    # through @Self context; sema_union reads DeclId+str out of a union.
+    "member_type(Checker)": 2,
+    # One returns the raw table name, the other routes through
+    # module_display for diagnostics. Which one keeps the plain name is
+    # undecided -- renaming needs a caller survey this lane did not do.
+    "module_name(Checker)": 2,
+    # Load-bearing fallback difference: gen_c_fold answers Ok(want) on a
+    # non-Res, gen_c_range answers None. Merging changes behaviour at a
+    # call site either way.
+    "res_value_of(CBackend)": 2,
+    # Two meanings left, one word: these ask whether a TyId is computed
+    # (gen_c_settle's exported answer, gen_c_widen's private twin). The
+    # third -- gen_c_bound's INSTANTIATION question -- was renamed
+    # targs_settled and paid.
+    "settled(CBackend)": 2,
+    # Different domains: lsp_pos decodes a text STEP at an offset;
+    # text_fmt computes a format step.
+    "step_at(str)": 2,
+    # Same walk, different destinations -- console printing (newline
+    # decision inside) vs sink writes with a Piece callback. The comment
+    # on the sink side says the sharing is deliberate; the merge is the
+    # print/sink unification nobody has scoped.
+    "write_pieces(CBackend)": 2,
+}
+
 
 def modules():
     """(module path, Module) for every source file, or None on a parse error.
@@ -210,6 +294,58 @@ def resolves(name: str, module, where: dict[str, list[str]]) -> bool:
     return len(homes) == 1
 
 
+def dup_groups(files) -> tuple[dict[str, int], dict[str, list]]:
+    """Exported free functions grouped `(name, receiver spelling)`.
+
+    Returns ({key: module count}, {key: [spans]}) for every group spread
+    over TWO OR MORE modules with AT LEAST ONE EXPORTED member -- the shape
+    both the report and the staleness check read.
+
+    The receiver is taken as the WRITTEN spelling of a plain type name. A
+    generic receiver (`Vec<..>`, whose `ty` node carries type arguments)
+    stays out: the arguments are part of the identity a reader sees, and
+    `put(Vec<usize>)` against `put(Vec<TyId>)` is a different question. A
+    receiver naming NO struct in the tree joins anyway -- a prelude
+    primitive (`str`, `u8`, `usize`) is identical everywhere, which is the
+    point.
+
+    Why an unexported side does not make the group on its own: an
+    unexported function is invisible past its own module, so two private
+    twins are two local scopes and not (yet) one flat-namespace coin flip.
+    Export either one and this gate owns it.
+    """
+    counts: dict[str, dict[str, int]] = {}
+    exported: dict[str, bool] = {}
+    spans: dict[str, dict[str, list]] = {}
+    for mod, module in files:
+        for decl in module.decls:
+            if type(decl).__name__ != "Function":
+                continue
+            if not decl.params:
+                continue
+            ty_node = decl.params[0].ty
+            recv = getattr(ty_node, "name", None)
+            if recv is None or recv in {t.name for t in decl.tparams}:
+                continue
+            if getattr(ty_node, "args", None):
+                continue
+            key = f"{decl.name}({recv})"
+            counts.setdefault(key, {})
+            spans.setdefault(key, {})
+            counts[key][mod] = counts[key].get(mod, 0) + 1
+            spans[key].setdefault(mod, []).append(decl.span)
+            if decl.exported:
+                exported[key] = True
+    out_counts, out_spans = {}, {}
+    for key, by_mod in sorted(counts.items()):
+        if len(by_mod) < 2 or not exported.get(key):
+            continue
+        out_counts[key] = len(by_mod)
+        flat = [span for mod in sorted(by_mod) for span in spans[key][mod]]
+        out_spans[key] = flat
+    return out_counts, out_spans
+
+
 def main() -> int:
     if not (ROOT / "grammar" / "zen.so").exists():
         print("ufcs: run `make grammar` first", file=sys.stderr)
@@ -260,12 +396,51 @@ def main() -> int:
               f"\n  why, so the debt can shrink and cannot quietly grow.")
         return 1
 
-    # A ledger entry whose collision is gone is a fiction the next reader
-    # trusts. Same rule the ledger in tools/gates/faults_reachable.zen runs.
-    stale = sorted(set(OWED) - set(owed))
-    for key in stale:
-        print(f"ufcs: {key} is in OWED and no longer collides."
-              f" Delete its line from {Path(__file__).name} — the debt is paid.")
+    # ------------------------------------------------------------------
+    # THE SECOND CHECK: two free functions, one name, one receiver
+    # spelling, different modules. See DUP_OWED above for why the
+    # receiver is the spelling and why only an exported side makes the
+    # group.
+    # ------------------------------------------------------------------
+    groups, group_spans = dup_groups(files)
+
+    dups = []
+    for key, held in groups.items():
+        want = DUP_OWED.get(key)
+        if want is not None and held <= want:
+            continue
+        dups.append((key, group_spans[key]))
+
+    for key, spans in dups:
+        for span in spans:
+            print(f"{span}: `{key}` has a second definition in another"
+                  f" module — same name, same first-parameter type")
+        print(f"    Zen has no overloading and the import namespace is flat per"
+              f"\n    name: which of the two answers is an unspecified pick.")
+
+    if dups:
+        print(f"\nufcs: {sum(len(s) for _, s in dups)} duplicated"
+              f" free-function definition(s) over one receiver."
+              f"\n  Rename one side to what it actually means, or write the pair"
+              f"\n  into DUP_OWED in {Path(__file__).name} with the reason why it"
+              f"\n  stands. An entry is a COUNT OF MODULES: it can shrink, never grow.")
+        return 1
+
+    # A ledger entry whose group is gone is fiction, and a count that
+    # disagrees with the tree either way breaks the ratchet: a number
+    # BELOW what the tree holds hides a third definition, and one ABOVE
+    # leaves slack a future definition can grow back into without an
+    # edit. The entry must say exactly what the tree holds.
+    stale = [k for k in sorted(DUP_OWED)
+             if k not in groups or DUP_OWED[k] != groups[k]]
+    for k in stale:
+        if k not in groups:
+            print(f"ufcs: {k} is in DUP_OWED and no longer duplicates."
+                  f" Delete its line — the debt is paid.")
+        else:
+            print(f"ufcs: {k} owes {DUP_OWED[k]} but the tree holds"
+                  f" {groups[k]} definitions. Edit the number to match"
+                  f" — the ledger is not the truth, the tree is.")
     if stale:
         return 1
 
@@ -283,7 +458,8 @@ def main() -> int:
         return 2
 
     print(f"ufcs: {scanned} ufcs free function(s) over {len(methods)} type(s)"
-          f" with methods, {len(owed)} ambiguous and written down")
+          f" with methods, {len(owed)} ambiguous and written down;"
+          f" {len(DUP_OWED)} duplicate-name group(s) ledgered")
     return 0
 
 
