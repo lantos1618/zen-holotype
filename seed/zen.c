@@ -41987,7 +41987,7 @@ static zg_str zu_f3_4sema9sema_diag7messageO1_t3_4sema9sema_diag9SemaFault(zu_t3
     } else if ((zg_s1.zg_tag == zu_e4_4sema9sema_diag9SemaFault14ImmutableWrite)) {
         return (zg_str){ (unsigned char *)"cannot write through an immutable binding:", 42u };
     } else if ((zg_s1.zg_tag == zu_e4_4sema9sema_diag9SemaFault7Rebound)) {
-        return (zg_str){ (unsigned char *)"a name is bound once per block: the first binding is still live here, and `=` on it is neither a fresh binding nor a write — declare it `::=` to assign to it, write a nested block to shadow it, or give the second one its own name", 231u };
+        return (zg_str){ (unsigned char *)"a name is bound once per block: the first binding is still live here, and `=` on it is neither a fresh binding nor a write — declare it `::=` to assign to it, or give the second one its own name", 196u };
     } else if ((zg_s1.zg_tag == zu_e4_4sema9sema_diag9SemaFault14PartiallyMoved)) {
         return (zg_str){ (unsigned char *)"a partial move reaches the drop:", 32u };
     } else if ((zg_s1.zg_tag == zu_e4_4sema9sema_diag9SemaFault16ConsumeNotAPlace)) {
