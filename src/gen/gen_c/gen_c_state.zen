@@ -563,10 +563,28 @@ CBackend* = {
     // binding `x` get 1 and 2.
     declare* = (self :: @Self, name: str, ty: TyId, by_ref: bool)
                Res<usize, AllocError> {
+        n = self.reserve(name).try();
+        self.publish(name, n, ty, by_ref).try();
+        Ok(n);
+    }
+
+    // A NAME IS NOT IN SCOPE UNTIL ITS INITIALISER HAS BEEN LOWERED, so
+    // the two halves of `declare` are separable: `reserve` takes the
+    // number the C name carries, `publish` is what makes the name
+    // RESOLVE to that slot. `gen_c_stmt.declare_local` is the one caller
+    // that needs them apart, because `k: i32 ::= k + 1` shadowing an
+    // outer `k` read the slot it was declaring — the initialiser's `k`
+    // must still mean the binding it is shadowing.
+    reserve* = (self :: @Self, name: str) Res<usize, AllocError> {
         n = self.declared_count(name) + 1;
         owned ::= self.alloc.String().try();
         owned.add_bytes(name).try();
         self.declared.add(owned).try();
+        Ok(n);
+    }
+
+    publish* = (self :: @Self, name: str, n: usize, ty: TyId, by_ref: bool)
+               Res<(), AllocError> {
         self.locals.add(LocalSlot(
             name: name,
             index: n,
@@ -575,7 +593,7 @@ CBackend* = {
             handle: 0,
             closure: 0
         )).try();
-        Ok(n);
+        Ok(());
     }
 
     // Bind a name to a lambda. Like a handle, it has no C storage: what

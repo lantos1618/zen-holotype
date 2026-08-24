@@ -496,15 +496,25 @@ named_slot_type = (be :: CBackend, target: ExprId) Res<TyId> {
 //
 // AFTER the value has landed, because the drop list is walked backwards
 // and a binding built from an earlier one has to die first.
+//
+// AND THE NAME COMES INTO SCOPE AFTER THE VALUE TOO, which is why this
+// reserves the C name and publishes the slot separately instead of
+// calling `declare`. `k: i32 ::= k + 1` shadowing an outer `k` had the
+// new slot in scope while its own initialiser was lowered, so the `k`
+// in `k + 1` read the storage being declared — `zg_add_i32(zu_l1k_2,
+// 1, ..)` on a variable nothing had assigned, answering stack garbage
+// that differed run to run. The storage is still emitted first: C wants
+// the declarator above the assignment, and only RESOLUTION had to wait.
 declare_local = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
                 Res<(), AllocError> {
-    n = be.declare(name, ty, false).try();
+    n = be.reserve(name).try();
     cname ::= be.alloc.String().try();
     sym_local(cname, name, n).try();
     decl ::= be.alloc.String().try();
     be.declarator(ty, cname.view(), decl).try();
     be.fmt("{};\n", decl.view()).try();
     be.deliver(b.value, ctx, ty, Dest.Into(cname.view())).try();
+    be.publish(name, n, ty, false).try();
     be.note_drop(name, n, ty).try();
     Ok(());
 }
