@@ -31,6 +31,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -898,6 +899,118 @@ def run_one(test: Test, tool: Toolchain, workroot: Path, args: argparse.Namespac
     return run_must_fail(test, tool, work, args)
 
 
+# ------------------------------------------------------------- self-check
+
+
+SELF_CHECK_CASES: list[tuple[str, str, str, int | None, bool, str]] = [
+    # (name, `.expected`, what the compiler prints, `.count` or None,
+    #  verdict wanted, a substring some reason must carry when red)
+    #
+    # The harness auditing ITSELF, without a compiler. Issue #746 sat
+    # unnoticed for the suite's whole life because nothing here could fail
+    # in the dimension it existed for: these are the assertions that make
+    # the bound falsifiable. Break one on purpose before trusting it again.
+    (
+        "surplus-diagnostic-goes-red",
+        "f was consumed\n24:12\n",
+        "prog.zen:24:12: use after move: f was consumed\n"
+        "prog.zen:27:5: a partial move reaches the drop\n"
+        "zen: 2 diagnostic(s)\n",
+        None, False, "at most 1 allowed",
+    ),
+    (
+        "exactly-the-asserted-diagnostic-stays-green",
+        "f was consumed\n24:12\n",
+        "prog.zen:24:12: use after move: f was consumed\n"
+        "zen: 1 diagnostic(s)\n",
+        None, True, "",
+    ),
+    (
+        "two-asserted-positions-bound-two",
+        "an impl collision\n3:1\n7:2\n",
+        "prog.zen:3:1: an impl collision\nprog.zen:7:2: a duplicate signature\n"
+        "zen: 2 diagnostic(s)\n",
+        None, True, "",
+    ),
+    (
+        "count-file-overrides-the-default",
+        "f was consumed\n24:12\n",
+        "prog.zen:24:12: use after move: f was consumed\n"
+        "prog.zen:27:5: a partial move reaches the drop\n"
+        "zen: 2 diagnostic(s)\n",
+        2, True, "",
+    ),
+    (
+        "a-missing-total-fails-rather-than-passes",
+        "f was consumed\n24:12\n",
+        "prog.zen:24:12: use after move: f was consumed\n",
+        None, False, "printed no",
+    ),
+]
+
+
+def _self_check_toolchain(work: Path) -> Toolchain:
+    """A stub compiler: prints a scripted diagnostic and exits 1.
+
+    Real enough for `run_must_fail`, which asks three things of a process --
+    non-zero exit, no crash markers, printable diagnostics -- and nothing
+    about Zen. `src_root` stays None: `stage` then copies the lone source
+    and stages no std, which no assertion below reads.
+    """
+    stub = work / "stub-zen"
+    stub.write_text("#!/bin/sh\ncat \"$STUB_DIAG\"\nexit 1\n", encoding="utf-8")
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    return Toolchain("stub-zen", [str(stub)], src_root=None)
+
+
+def self_check(args: argparse.Namespace) -> int:
+    """Assert the must-fail gate goes red exactly when TESTING.md says it must."""
+    failures: list[str] = []
+    os.environ.pop("STUB_DIAG", None)
+    try:
+        workroot = Path(tempfile.mkdtemp(prefix="zen-selfcheck."))
+        tool = _self_check_toolchain(workroot)
+        source = workroot / "prog.zen"
+        source.write_text("main = (env: Env) Res<i32, AllocError> { Ok(0) }\n",
+                          encoding="utf-8")
+        for name, expected_text, output, count_max, want_ok, want_reason \
+                in SELF_CHECK_CASES:
+            diag = workroot / "diag.txt"
+            diag.write_text(output, encoding="utf-8")
+            os.environ["STUB_DIAG"] = str(diag)
+            test = Test(
+                tid="self-check/probe",
+                kind=MUST_FAIL,
+                suite="self-check",
+                source=source,
+                entry=source,
+                expected_path=workroot / "prog.expected",
+                expected=expected_text.encode("utf-8"),
+                count_max=count_max,
+                count_path=workroot / ".count" if count_max is not None else None,
+            )
+            result = run_must_fail(test, tool, workroot / "case", args)
+            if result.ok != want_ok:
+                failures.append(
+                    f"{name}: {'passed' if result.ok else 'failed'}, "
+                    f"wanted {'pass' if want_ok else 'fail'} -- {result.reasons}"
+                )
+            elif not result.ok and want_reason and \
+                    want_reason not in " ".join(result.reasons):
+                failures.append(f"{name}: no reason names {want_reason!r}: "
+                                f"{result.reasons}")
+        shutil.rmtree(workroot, ignore_errors=True)
+    finally:
+        os.environ.pop("STUB_DIAG", None)
+    if failures:
+        for line in failures:
+            print(f"self-check FAIL {line}", file=sys.stderr)
+        return 1
+    print(f"self-check: {len(SELF_CHECK_CASES)} assertion(s) about the "
+          "harness itself hold")
+    return 0
+
+
 # ---------------------------------------------------------------------- main
 
 
@@ -921,6 +1034,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--timeout", type=float, default=120.0, help="seconds for one compile")
     p.add_argument("--run-timeout", type=float, default=20.0, help="seconds for one program")
     p.add_argument("--keep", action="store_true", help="keep the work directory")
+    p.add_argument("--self-check", action="store_true",
+                   help="assert the must-fail gate itself goes red exactly "
+                        "when it must; needs no compiler")
     p.add_argument("--verbose", "-v", action="store_true", help="print a line per passing test")
     p.add_argument("--allow-uncollected", action="store_true",
                    help="do not fail when a .zen file belongs to no test")
@@ -929,6 +1045,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
+
+    if args.self_check:
+        return self_check(args)
+
     tests_dir = Path(args.tests).resolve()
 
     try:
