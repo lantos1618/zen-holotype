@@ -69,7 +69,13 @@ character* = (lx :: Lexer) Res<(), AllocError> {
         None     => lx.report(LexFault.UnterminatedChar, from),
         Ok('\n') => lx.report(LexFault.CharSpansLine, from),
         Ok('\'') => { lx.cur.bump(); lx.report(LexFault.EmptyChar, from) },
-        Ok('\\') => { lx.escape().try(); lx.close_char(from) },
+        // as in `string` above: an escape that ran off the end has already
+        // reported the truncation, and "and the literal never closed" is a
+        // second diagnostic for the same missing bytes
+        Ok('\\') => { lx.escape().try(); lx.cur.is_done().match({
+            true  => Ok(()),
+            false => lx.close_char(from),
+        }) },
         Ok(_)    => { lx.cur.bump(); lx.close_char(from) },
     });
 }
@@ -103,8 +109,16 @@ escape* = (lx :: Lexer) Res<(), AllocError> {
     from = lx.cur.pos();
     lx.cur.bump();
     lx.cur.peek().match({
-        None  => lx.report(LexFault.UnterminatedEscape, from),
-        Ok(b) => {
+        None     => lx.report(LexFault.UnterminatedEscape, from),
+        // A NEWLINE IS NOT AN ESCAPABLE BYTE, and Zen has no line
+        // continuation. Stepping over it here would carry the literal onto
+        // the next line — the one thing DESIGN.md says a literal may not do —
+        // and would name `\<newline>` an unknown escape, which is a rule the
+        // author did not break at a byte that is not the fix. Left where it
+        // is, the caller reads it and says the true thing at the opening
+        // quote
+        Ok('\n') => Ok(()),
+        Ok(b)    => {
             lx.cur.bump();
             is_escape(b).match({
                 false => lx.report(LexFault.UnknownEscape, from),

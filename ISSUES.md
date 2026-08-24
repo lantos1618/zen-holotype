@@ -370,8 +370,8 @@ spends five paragraphs specifying it.
 
 **`make fmt` is in no gate, and there is no CI.** `PLAN.md:321` requires
 "`zen fmt --check` over the whole tree, in CI, failing the build". `Makefile:64`
-is `test: build parse design cap dupcomments faults ufcs style grammar-test
-editors bench-allocs` — no `fmt` — and the repository has no `.github/`, no
+is `test: build parse design cap dupcomments faults lextile ufcs style
+grammar-test editors bench-allocs` — no `fmt` — and the repository has no `.github/`, no
 `.gitlab-ci.yml`, no CI configuration at all. The per-file guard inside
 `fmt.zen` still runs on every invocation, so losslessness is protected; what is
 not protected is the tree staying formatted. `Makefile:53-63` has diagnosed this

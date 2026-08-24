@@ -19,7 +19,7 @@ ROOT    ?= src
 # `editors` IS IN THIS LIST BECAUSE `editors/` IS ALSO A DIRECTORY. Without
 # it make finds the directory, calls the target up to date, and runs the
 # script never — a gate that cannot fail because it cannot run.
-.PHONY: all build seed test lint parse design cap dupcomments faults ufcs style editors fixpoint determinism grammar grammar-test fmt bench bench-allocs emit-runs asan leak profile clean help
+.PHONY: all build seed test lint parse design cap dupcomments faults lextile ufcs style editors fixpoint determinism grammar grammar-test fmt bench bench-allocs emit-runs asan leak profile clean help
 
 all: test
 
@@ -61,7 +61,7 @@ seed: build
 ## disease has been diagnosed here: tests/bench was run by no target in
 ## `all`, so `allocs_op: 0` -- cited in src/ as a thing that fails the
 ## build -- was a number nothing had ever computed.
-test: build parse design cap dupcomments faults ufcs style grammar-test editors bench-allocs
+test: build parse design cap dupcomments faults lextile ufcs style grammar-test editors bench-allocs
 	$(PY) tests/run.py
 
 ## faults: every fault the compiler declares must have a site that raises
@@ -142,6 +142,34 @@ dupcomments: build
 	  test $${#files[@]} -gt 0 \
 	    || { echo "dupcomments: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
 	  build/gates/dup_comments "$${files[@]}"
+
+## lextile: the tokens tile the file, and every line:col in them is right.
+##
+## THE ONE PROPERTY NOTHING ELSE CHECKS. `make fmt` proves the formatter
+## reprints a file, but the formatter reads the TEXT a span slices — so a span
+## whose line:col is wrong reprints perfectly and points the editor's squiggle
+## at the wrong character. Positions were unmeasured in this tree until this
+## gate: 664 files, both ends of every token, against a second walk over the
+## bytes that shares no line with lex_cursor.zen.
+##
+## It also proves the token stream RECONSTRUCTS the file: tokens in order,
+## never overlapping, nothing but whitespace between two of them, and the last
+## one ending at the last byte. A dropped byte has nowhere to hide.
+##
+## must-fail/ and tests/parse/errors are excluded for the reason `parse`
+## excludes them: those files exist NOT to lex, and their faults are the
+## must-fail suite's assertion, not this one's.
+##
+## Proved non-vacuous by mutation — stop `bump` counting the newline and the
+## position check goes red on the first file with two lines in it.
+## A Zen gate — tools/gates/lex_tiling.zen; see `gate` above.
+lextile: build
+	@mkdir -p build/gates
+	@$(call gate,lex_tiling)
+	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tests/bench tools/gates -name '*.zen' -print0 | LC_ALL=C sort -z); \
+	  test $${#files[@]} -gt 0 \
+	    || { echo "lextile: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
+	  build/gates/lex_tiling "$${files[@]}"
 
 ## editors: the VS Code extension's contributions still resolve. EVERY
 ## FAILURE HERE IS A SILENT ONE -- VS Code does not report a `grammars`
