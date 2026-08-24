@@ -57,9 +57,10 @@ DIR_STAGE_NAMES = (".stage", "{name}.stage", "main.stage")
 DIR_STDIN_NAMES = (".stdin", "{name}.stdin", "main.stdin")
 
 # What the compiler prints once it is done: `zen: 3 diagnostic(s)`.
-# `.count` is the only assertion that needs it, and it is the only one that
-# cannot fall back to reading the diagnostics themselves -- two diagnostics
-# on one position are two, and the position list cannot tell.
+# Every must-fail test asserts against it -- the bound defaults to the number
+# of positions `.expected` asserts, and `.count` overrides it -- and it is
+# the one fact that cannot fall back to reading the diagnostics themselves:
+# two diagnostics on one position are two, and the position list cannot tell.
 DIAG_TOTAL = re.compile(r"(\d+) diagnostic\(s\)")
 
 # The module named by an import's right-hand side: `Res* = std.core.result`
@@ -216,9 +217,10 @@ def _read_stage(path: Path) -> int:
 
 
 def _read_count(path: Path) -> int:
-    """`.count` bounds the number of diagnostics; TESTING.md says only write
-    one where the count is the property under test. Zero would assert the
-    program is accepted, which is what a corpus test is for."""
+    """`.count` states the diagnostic count where it differs from the number
+    of positions `.expected` asserts, which bounds every must-fail test by
+    default. Zero would assert the program is accepted, which is what a
+    corpus test is for."""
     try:
         raw = path.read_text(encoding="utf-8").strip()
     except OSError as exc:
@@ -832,22 +834,34 @@ def run_must_fail(test: Test, tool: Toolchain, work: Path, args: argparse.Namesp
             "TESTING.md requires the diagnostic's position, exact"
         )
 
+    # THE BOUND. A rejection asserts a NUMBER of diagnostics: the complaints
+    # its `.expected` names positions for, and nothing more -- one mistake,
+    # one diagnostic, the property `parse/one_error_no_cascade` exists to
+    # police. `.count` states the number where it genuinely differs; absent
+    # one, the positions ARE the number, which is the natural reading of a
+    # file whose author wrote one complaint down. Before issue #746 the
+    # default was no bound at all, and a test asserting one diagnostic passed
+    # identically against one-plus-nine -- the surplus invisible, because the
+    # captured text below was discarded on a pass.
     if test.count_max is not None:
-        total = DIAG_TOTAL.search(text)
-        if total is None:
-            # The bound cannot be checked, so the test does not pass. A count
-            # gate that silently gives up when it cannot count is the exact
-            # thing this assertion exists to prevent.
-            reasons.append(
-                f"{test.count_path.name} bounds the diagnostic count at "
-                f"{test.count_max}, but the compiler printed no "
-                f"`N diagnostic(s)` total to compare against"
-            )
-        elif int(total.group(1)) > test.count_max:
-            reasons.append(
-                f"{total.group(1)} diagnostics, at most {test.count_max} allowed "
-                f"[{test.count_path.name}]: one mistake must not cascade"
-            )
+        bound, bound_src = test.count_max, test.count_path.name
+    else:
+        bound = len(test.positions)
+        bound_src = f"{len(test.positions)} asserted position(s)"
+    total = DIAG_TOTAL.search(text)
+    if total is None:
+        # The bound cannot be checked, so the test does not pass. A count
+        # gate that silently gives up when it cannot count is the exact
+        # thing this assertion exists to prevent.
+        reasons.append(
+            f"{bound_src} bounds the diagnostic count at {bound}, but the "
+            f"compiler printed no `N diagnostic(s)` total to compare against"
+        )
+    elif int(total.group(1)) > bound:
+        reasons.append(
+            f"{total.group(1)} diagnostics, at most {bound} allowed "
+            f"[{bound_src}]: one mistake must not cascade"
+        )
 
     return Result(test, not reasons, reasons, clip(text) if reasons else "")
 
