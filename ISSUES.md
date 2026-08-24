@@ -391,6 +391,15 @@ classified by bounded lookahead (`parse_lookahead.zen:240-243`,
 `[$.enum_variant, $._callee]` for the same fork. The bar closes the
 alias-versus-one-variant-enum fork specifically. One word too many in the law.
 
+**A comment that is a block's only content is attached to nothing.** Neither
+attachment rule names an owner for it -- no node begins at it and none ends
+before it on its line -- so it reaches the trivia arena and no node claims it.
+DESIGN.md says trivia is attached to nodes and not discarded; TESTING.md says
+no comment is lost. `tests/corpus/parse/trivia_attachment_corners` records the
+loss as two zeros beside an arena listing that contradicts them, so THAT FILE
+GOES RED the day a block claims its sole comment. The loss is silent today
+because `fmt.zen` copies declaration bodies verbatim.
+
 **The formatter does not print declarations from the AST.** It uses trivia for
 the material *between* declarations and copies each declaration's own bytes
 verbatim from source (`fmt.zen:150-159`, `fmt_src.zen`). Losslessness today is
