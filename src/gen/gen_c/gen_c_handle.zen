@@ -28,6 +28,7 @@ sym_member, sym_variant = gen.gen_name
 RES_PATH = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 LoopFrame = gen.gen_c.gen_c_frame
+GenFault = gen.gen_diag
 unsupported = gen.gen_c.gen_c_report
 ctype, is_unit = gen.gen_c.gen_c_type
 expr = gen.gen_c.gen_c_expr
@@ -140,6 +141,21 @@ write_break = (
         ),
         false => Ok(()),
     }).try();
+    // THE VALUE BROKEN WITH IS NOT FREE TO CHOOSE ITS TYPE. `loop_handle.zen`
+    // states the rule — break's `T` "is the enclosing loop's own T, fixed by
+    // the loop this handle names, never by the call" — and the frame's
+    // settled type is that answer: the walked element, or a fold's
+    // accumulator (`settle_res`, `gen_c_loop.zen`). Sema never sees either
+    // side of the question: `h` is bound at `unknown` (`bind_handle`) and
+    // sema does not walk lambda bodies at all, so this is the one place the
+    // two types meet. Without the check, a disagreement is a compound
+    // literal in the wrong slot for cc to catch — and two integers of
+    // different widths convert silently, compiling clean and answering
+    // garbage.
+    ((c.args.len > 0) && (fr.has_result)).match({
+        false => Ok(()),
+        true  => be.break_fits(id, c, fr, ctx),
+    }).try();
     (fr.has_result && (c.args.len > 0)).match({
         false => Ok(()),
         true  => be.write_break_value(c, fr, ctx),
@@ -158,6 +174,74 @@ break_keep = (be :: CBackend, c: Call) str {
     c.args.get(0).match({
         None  => "",
         Ok(a) => be.bare_name(a.value),
+    })
+}
+
+// The break argument against the loop's own payload, the rule
+// `write_break`'s comment states. `assignable` is the one gate a value
+// passes at every other position a type is expected — literals fit their
+// family, poison and holes agree with everything, and an unsubstituted
+// parameter reaches any instantiation — so a legal break cannot fail it
+// (`find`'s `h.break(value)` breaks with the element itself; std's
+// `text_utf8` breaks with `usize` literals over a `usize` walk). What
+// fails it is exactly what the slot could not hold.
+break_fits = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    fr  : LoopFrame,
+    ctx : Ctx
+) Res<(), AllocError> {
+    c.args.get(0).match({
+        None  => Ok(()),
+        Ok(a) => be.break_value_fits(a.value, fr, ctx, id),
+    })
+}
+
+break_value_fits = (
+    be    :: CBackend,
+    value : ExprId,
+    fr    : LoopFrame,
+    ctx   : Ctx,
+    id    : ExprId
+) Res<(), AllocError> {
+    payload = ok_payload(be, fr.ty).try();
+    unknown = be.check.types.unknown().try();
+    got     = be.ty_of(value, ctx, unknown).try();
+    be.check.assignable(got, payload).match({
+        true  => Ok(()),
+        false => be.break_type_fault(id, got, payload),
+    })
+}
+
+// One sentence, both types named. `name_of` spells a type as the
+// program wrote it; the sentence goes out through `Unsupported` because
+// that fault IS "this position cannot hold what was handed to it" —
+// there is deliberately no second copy of sema's TypeMismatch here.
+break_type_fault = (
+    be      :: CBackend,
+    id      : ExprId,
+    got     : TyId,
+    payload : TyId
+) Res<(), AllocError> {
+    want  ::= be.name_of_or(payload).try();
+    found ::= be.name_of_or(got).try();
+    what  ::= be.alloc.String(
+        "h.break(v) is not free to choose its type: the loop's own T is "
+    ).try();
+    what.add_bytes(want.view()).try();
+    what.add_bytes(", broken with ").try();
+    what.add_bytes(found.view()).try();
+    be.report_expr(id, GenFault.Unsupported(what.view()))
+}
+
+// A type nobody can name yet reads as `?`, never as an empty string:
+// the diagnostic still has to say something stood where the payload
+// belongs.
+name_of_or = (be :: CBackend, ty: TyId) Res<String, AllocError> {
+    be.check.types.name_of(ty).match({
+        Ok(n) => Ok(n),
+        None  => be.alloc.String("?"),
     })
 }
 
