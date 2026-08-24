@@ -141,10 +141,10 @@ decl_site = (a: Alloc, root: str, d: Decl, out :: Vec<Classed>)
             Res<(), AllocError> {
     d.kind.match({
         Function(f) => fn_site(a, root, f, out),
-        Struct(s)   => struct_site(a, root, s, out),
+        Struct(s)   => member_sites(a, root, s.name.span, s.members, out),
         Enum(e)     => class_as(a, root, e.name.span, Colour.Type, out),
         Alias(x)    => class_as(a, root, x.name.span, Colour.Type, out),
-        Impl(im)    => impl_site(a, root, im, out),
+        Impl(im)    => member_sites(a, root, im.target.span, im.members, out),
         Const(_)    => written(),
         Import(_)   => written(),
     })
@@ -159,17 +159,18 @@ fn_site = (a: Alloc, root: str, f: Function, out :: Vec<Classed>)
     Ok(());
 }
 
-struct_site = (a: Alloc, root: str, s: Struct, out :: Vec<Classed>)
-              Res<(), AllocError> {
-    class_as(a, root, s.name.span, Colour.Type, out).try();
-    s.members.loop((h, m) { member_site(a, root, m, out).try(); });
-    Ok(());
-}
-
-impl_site = (a: Alloc, root: str, im: Impl, out :: Vec<Classed>)
-            Res<(), AllocError> {
-    class_as(a, root, im.target.span, Colour.Type, out).try();
-    im.members.loop((h, m) { member_site(a, root, m, out).try(); });
+// A struct and an impl write their names the same way — the type word,
+// then the members beneath it — so one walk serves both; only the
+// caller names the difference (`s.name` against `im.target`).
+member_sites = (
+    a       : Alloc,
+    root    : str,
+    name    : Span,
+    members : Vec<Member>,
+    out     :: Vec<Classed>
+) Res<(), AllocError> {
+    class_as(a, root, name, Colour.Type, out).try();
+    members.loop((h, m) { member_site(a, root, m, out).try(); });
     Ok(());
 }
 

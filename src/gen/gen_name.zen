@@ -201,15 +201,8 @@ sym_fn* = (
 ) Res<(), AllocError> {
     out.fmt("{}f", USR).try();
     path(out, qname).try();
-    (sig.len > 0).then(() { write_sig(out, types, world, sig).try() });
+    (sig.len > 0).then(() { tcode_section(out, types, world, "O", sig).try() });
     (inst.len() > 0).then(() { write_targs(out, types, world, inst).try() });
-    Ok(());
-}
-
-write_sig = (out :: String, types: Types, world: World, sig: Vec<TyId>)
-            Res<(), AllocError> {
-    out.add_bytes("O").try();
-    tcode_list(out, types, world, sig).try();
     Ok(());
 }
 
@@ -369,7 +362,7 @@ tcode* = (out :: String, types: Types, world: World, id: TyId)
         Named(n) => tcode_of_named(out, types, world, n),
         Res(r)   => tcode_res(out, types, world, r),
         Fn(f)    => tcode_fn(out, types, world, f.params, f.ret),
-        Union(u) => tcode_union(out, types, world, u.members),
+        Union(u) => tcode_section(out, types, world, "u", u.members),
         Array(a) => tcode_array(out, types, world, a),
         Var(_)   => out.add_bytes("q"),
         Infer    => out.add_bytes("q"),
@@ -404,14 +397,8 @@ tcode_of_named = (out :: String, types: Types, world: World, n: TyNamed)
     count(out, segments(module_of(world, n.decl)) + 1).try();
     write_module_segments(out, world, n.decl).try();
     comp(out, n.name).try();
-    (n.args.len > 0).then(() { write_args(out, types, world, n.args).try() });
-    Ok(());
-}
-
-write_args = (out :: String, types: Types, world: World, args: Vec<TyId>)
-             Res<(), AllocError> {
-    out.add_bytes("I").try();
-    tcode_list(out, types, world, args).try();
+    (n.args.len > 0)
+        .then(() { tcode_section(out, types, world, "I", n.args).try() });
     Ok(());
 }
 
@@ -463,25 +450,31 @@ tcode_fn = (
     Ok(());
 }
 
-// A union's members are already canonical — flat, sorted, deduped by
-// the intern store — so `A | B` and `B | A` reach this in one order and
-// produce one name. Sorting is the store's, not repeated here: two
-// places that sort are two places that can disagree.
-tcode_union = (
-    out     :: String,
-    types   : Types,
-    world   : World,
-    members : Vec<TyId>
-) Res<(), AllocError> {
-    out.add_bytes("u").try();
-    tcode_list(out, types, world, members).try();
-    Ok(());
-}
-
 tcode_list = (out :: String, types: Types, world: World, items: Vec<TyId>)
              Res<(), AllocError> {
     count(out, items.len).try();
     items.loop((h, t) { tcode(out, types, world, t).try() });
+    Ok(());
+}
+
+// A section: a tag letter opening a counted run of type codes — `O` for
+// an overload set, `I` for a named type's arguments, `u` for a union.
+// One writer, because the encoding states the shape once: a section is
+// self-delimiting the same way whichever letter opens it.
+//
+// A union's members are already canonical — flat, sorted, deduped by
+// the intern store — so `A | B` and `B | A` reach this in one order and
+// produce one name. Sorting is the store's, not repeated here: two
+// places that sort are two places that can disagree.
+tcode_section = (
+    out   :: String,
+    types : Types,
+    world : World,
+    tag   : str,
+    items : Vec<TyId>
+) Res<(), AllocError> {
+    out.add_bytes(tag).try();
+    tcode_list(out, types, world, items).try();
     Ok(());
 }
 
