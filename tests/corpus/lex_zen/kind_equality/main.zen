@@ -1,0 +1,41 @@
+// TWO KINDS COMPARED FROM SOMEWHERE THAT IS NOT THE LEXER, which is the
+// only interesting place to compare them. `TokenKind.impl(Eq, ..)` is
+// written in `std/lex/lex_token.zen`; every consumer — the parser, the
+// formatter — asks from another module, and an impl that answered only
+// inside its own file would compile clean everywhere and simply not
+// dispatch. That failure has a precedent: `u8.impl(Eq, ..)` written
+// anywhere but `std.core.num` left `<T: Eq>` rejecting `u8` with nothing
+// on screen (sema_bound.check_home). So this program runs from outside.
+//
+// BOTH SPELLINGS, because they resolve differently. `==` is checked by
+// `sema_bound.check_eq`, which looks for an `eq` member on the operand;
+// `.is_in([..])` passes the type to a `<T: Eq>` BOUND, which is the
+// lookup that failed for `u8`. One of them working proves nothing about
+// the other.
+//
+// `Int` IS THE ONLY VARIANT WITH A PAYLOAD and it is the reason the two
+// wrong answers here are wrong in opposite directions: an equality that
+// ignored the payload says `Int(5) == Int(6)`, and one that compared the
+// payload without the tag says `Int(5) == Float`. Both print `true`
+// where this expects `false`, and neither is a compile error.
+
+TokenKind = std.lex.lex
+
+main = (env: Env) Res<i32, IoError> {
+    println("same {}", TokenKind.BraceOpen == TokenKind.BraceOpen);
+    println("diff {}", TokenKind.BraceOpen == TokenKind.ParenOpen);
+    println("first {}", TokenKind.Ident == TokenKind.Ident);
+    println("last {}", TokenKind.Eof == TokenKind.Eof);
+    println("across {}", TokenKind.Eof == TokenKind.Ident);
+    println("payload same {}", TokenKind.Int(5) == TokenKind.Int(5));
+    println("payload diff {}", TokenKind.Int(5) == TokenKind.Int(6));
+    println("payload vs tag {}", TokenKind.Int(5) == TokenKind.Float);
+    println("ne {}", TokenKind.Comma.ne(TokenKind.Dot));
+
+    println("in hit {}", TokenKind.Lt.is_in([TokenKind.Ident, TokenKind.Lt, TokenKind.ParenOpen]));
+    println("in miss {}", TokenKind.Lt.is_in([TokenKind.Ident, TokenKind.ParenOpen]));
+    println("in first {}", TokenKind.Ident.is_in([TokenKind.Ident, TokenKind.Lt]));
+    println("in one {}", TokenKind.Eof.is_in([TokenKind.Eof]));
+    println("in none {}", TokenKind.Eof.is_in([TokenKind.Ident, TokenKind.Lt]));
+    Ok(0);
+}
