@@ -47,7 +47,7 @@
 // the patched buffer is exactly what joins them.
 
 str, String = std.text
-Vec, Map = std.collections
+Vec, Map, Ordered = std.collections
 Alloc, AllocError = std.mem
 Range = std.core
 scan, Source = std.lex
@@ -73,6 +73,12 @@ Item* = {
     label*: str,
     kind*: usize,
 }
+
+// An item sorts before another by label — the whole of the order
+// `sort_items` below puts a completion list in.
+Item.impl(Ordered, {
+    before = (self: @Self, other: @Self) bool { self.label.before(other.label) }
+})
 
 // CompletionItemKind, spelled the protocol's way.
 METHOD*: usize = 2
@@ -567,47 +573,10 @@ listed = (out: Vec<Item>, label: str) bool {
 }
 
 // Sorted by label: the collection order is the world's table order, an
-// artifact no client should ever see. Insertion sort, `lsp_colour.zen`'s
-// own shape — a completion list is short.
+// artifact no client should ever see. `std.collections`' sort, in place —
+// a completion list is short.
 sort_items* = (items :: Vec<Item>) Res<(), AllocError> {
-    Range(1, items.len).loop((h, i) { bubble(items, i).try(); });
-    Ok(());
-}
-
-bubble = (items :: Vec<Item>, at: usize) Res<(), AllocError> {
-    j ::= at;
-    loop(() { j > 0 && out_of_order(items, j) }, (h) {
-        swap_at(items, j).try();
-        j = j - 1;
-    });
-    Ok(());
-}
-
-out_of_order = (items: Vec<Item>, j: usize) bool {
-    items.get(j - 1).match({
-        None    => false,
-        Ok(lft) => items.get(j).match({
-            None    => false,
-            Ok(rgt) => rgt.label.before(lft.label),
-        }),
-    })
-}
-
-swap_at = (items :: Vec<Item>, j: usize) Res<(), AllocError> {
-    items.get(j).match({
-        None    => written(),
-        Ok(rgt) => items.get(j - 1).match({
-            None    => written(),
-            Ok(lft) => swap_pair(items, j, lft, rgt),
-        }),
-    })
-}
-
-swap_pair = (items :: Vec<Item>, j: usize, lft: Item, rgt: Item)
-            Res<(), AllocError> {
-    items.set(j - 1, rgt).match({ Ok(_) => (), None => () });
-    items.set(j, lft).match({ Ok(_) => (), None => () });
-    Ok(());
+    items.sort()
 }
 
 // A `CompletionList` as the protocol spells it.

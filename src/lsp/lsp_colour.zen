@@ -49,7 +49,7 @@
 // rather than arriving quietly uncoloured.
 
 str, String = std.text
-Vec = std.collections
+Vec, Ordered = std.collections
 Alloc, AllocError = std.mem
 Range = std.core
 scan, Source, Token, TokenKind = std.lex
@@ -309,6 +309,15 @@ Classed* = {
     colour*: Colour,
 }
 
+// A row sorts before another by its start — the whole of the order
+// `sort_classes` below puts the semantic-token list in.
+Classed.impl(Ordered, {
+    before = (self: @Self, other: @Self) bool {
+        self.line < other.line
+            || (self.line == other.line && self.col < other.col)
+    }
+})
+
 // What sema said about the name starting at `line:col`, or nothing.
 // `names` MUST BE SORTED on that pair — `sort_classes` below is the
 // sort, and `lsp_diag.zen`'s `classes_for` is the one caller of both,
@@ -343,48 +352,10 @@ is_start = (cl: Classed, line: usize, col: usize) bool {
     cl.line == line && cl.col == col
 }
 
-// Insertion, in place, and not a library call: std has no sort, and a
-// file carries hundreds of classified names, not millions.
+// In place, by (line, col) — a file carries hundreds of classified
+// names, not millions, which is why the order is std's one sort.
 sort_classes* = (names :: Vec<Classed>) Res<(), AllocError> {
-    Range(1, names.len).loop((h, i) { bubble(names, i).try(); });
-    Ok(());
-}
-
-// Swap `names[at]` left past every predecessor that sorts after it.
-bubble = (names :: Vec<Classed>, at: usize) Res<(), AllocError> {
-    j ::= at;
-    loop(() { j > 0 && out_of_order(names, j) }, (h) {
-        swap_at(names, j).try();
-        j = j - 1;
-    });
-    Ok(());
-}
-
-out_of_order = (names: Vec<Classed>, j: usize) bool {
-    names.get(j - 1).match({
-        None    => false,
-        Ok(lft) => names.get(j).match({
-            None    => false,
-            Ok(rgt) => before_start(rgt, lft.line, lft.col),
-        }),
-    })
-}
-
-swap_at = (names :: Vec<Classed>, j: usize) Res<(), AllocError> {
-    names.get(j).match({
-        None    => written(),
-        Ok(rgt) => names.get(j - 1).match({
-            None    => written(),
-            Ok(lft) => swap_pair(names, j, lft, rgt),
-        }),
-    })
-}
-
-swap_pair = (names :: Vec<Classed>, j: usize, lft: Classed, rgt: Classed)
-            Res<(), AllocError> {
-    names.set(j - 1, rgt).match({ Ok(_) => (), None => () });
-    names.set(j, lft).match({ Ok(_) => (), None => () });
-    Ok(());
+    names.sort()
 }
 
 // --- the answer --------------------------------------------------------
