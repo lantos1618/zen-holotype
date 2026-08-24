@@ -12,14 +12,14 @@
 // noticed. Every field below is constructed with a distinctive value and
 // read back.
 //
-// `Exe` IS THE ONE TYPE NOT CONSTRUCTED HERE, and not by choice: its
+// `Exe` WAS THE ONE TYPE NOT CONSTRUCTED HERE, and not by choice: its
 // `out* :: Res<Path> = None` default is a BARE nullary variant, which codegen
-// refuses ("a field default that names a function or reads a frame") though
-// it lowers the qualified `Res.None` spelling fine -- issue #734. So the
-// central target type of the build api cannot be constructed by any program
-// today. Add the `Exe(..)` lines back the day that closes; until then this
-// comment is the record, because a name imported and never used is exactly
-// how the previous rot stayed invisible.
+// refused ("a field default that names a function or reads a frame") though
+// it lowered the qualified `Res.None` spelling fine -- issue #734. That is
+// closed, so the construction is back, and this file is what holds it closed:
+// the central target type of the build api is MADE, and its defaulted `out`
+// is read back as the None it was written as rather than as a zero. A name
+// imported and never used is exactly how the previous rot stayed invisible.
 
 Builder, Module, Function = std.build
 Budget, Package, Dep, Exe, Os, Arch, BuildFault, BuildError = std.build
@@ -60,6 +60,17 @@ main = (env: Env) Res<i32, BuildError> {
         FetchFailed     => println("fetch failed"),
         VersionConflict => println("version conflict"),
         HashMismatch    => println("hash mismatch"),
+    });
+
+    // `Path(text: ..)`, not `Path(..)`: the positional spelling names
+    // the declared ufcs overload, whose body arrives with the stage-1
+    // build driver — the keyword spelling is the implicit member-wise
+    // constructor, which exists today.
+    e = Exe(src: Path(text: "app/main.zen"), deps: alloc.Vec<Dep>());
+    println("exe {}", e.src.text);
+    e.out.match({
+        Ok(o) => println("out {}", o.text),
+        None  => println("out absent"),
     });
 
     Ok(0);

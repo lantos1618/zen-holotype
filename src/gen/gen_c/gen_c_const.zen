@@ -14,7 +14,7 @@
 // justification in another.
 
 ExprId, Decl, Const = std.ast
-Literal, Binary, Unary, Access, Call = std.ast
+Literal, Binary, Unary, Access, Call, Name = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -163,9 +163,16 @@ lower_const_value* = (
 
 // Written twice without anyone being able to tell: a literal can; so
 // can an operator over things that can, and so can a CONSTRUCTION of
-// them — a compound literal names no function and reads nothing. A call
-// to anything else cannot, and neither can a name, because a name is a
-// local whose frame the use site is not in.
+// them — a compound literal names no function and reads nothing. A
+// call to anything else cannot.
+//
+// A NAME is asked exactly what `lower_name` asks, in the order it asks
+// it: a frame slot first (refused — the use site this default is
+// emitted at is not in that frame), then `None` (admitted — `Res` is
+// structural and its constructors answer to no declaration walk), then
+// the module-level question `lower_global_value` runs. The gate and the
+// lowering are one question asked twice; that they cannot drift is the
+// whole reason this arm reads as it does.
 is_pure_value* = (be :: CBackend, id: ExprId, ctx: Ctx) bool {
     be.tree.expr_at(id).kind.match({
         Literal(_) => true,
@@ -174,7 +181,37 @@ is_pure_value* = (be :: CBackend, id: ExprId, ctx: Ctx) bool {
         Binary(b)  => be.is_pure_pair(b, ctx),
         Call(c)    => be.is_pure_call(c, ctx),
         Access(a)  => be.is_pure_access(a, ctx),
+        Name(n)    => be.is_pure_name(n.text, ctx),
         _          => false,
+    })
+}
+
+is_pure_name = (be :: CBackend, text: str, ctx: Ctx) bool {
+    text.eq("None").match({
+        true  => true,
+        false => be.slot_of(text).match({
+            Ok(_) => false,
+            None  => be.global_is_pure_name(text, ctx),
+        }),
+    })
+}
+
+global_is_pure_name = (be :: CBackend, text: str, ctx: Ctx) bool {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.defs_of(ctx.module, text, found).match({
+        Err(_) => false,
+        Ok(_)  => found.get(0).match({
+            Ok(d) => d.kind.match({ ConstDef => true, _ => false }),
+            None  => be.variant_is_pure_name(text, ctx),
+        }),
+    })
+}
+
+variant_is_pure_name = (be :: CBackend, text: str, ctx: Ctx) bool {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.variant_defs(be.tree, ctx.module, text, found).match({
+        Err(_) => false,
+        Ok(_)  => found.get(0).match({ Ok(_) => true, None => false }),
     })
 }
 
