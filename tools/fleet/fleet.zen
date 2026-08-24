@@ -66,6 +66,7 @@ FsError = std.env
 lines_of, field, is_space, digits = fleet_text
 state_path, count_of, set_count = fleet_state
 set_done, done_at, write_lanes = fleet_state
+Mark, mark_at = fleet_state
 note_fs, fs_word = fleet_state
 
 // One row of the work list. `name` is the state-file stem and the
@@ -399,26 +400,34 @@ report_run = (env: Env, alloc: Alloc, list: str, state: str)
     })
 }
 
+// THREE OUTCOMES, BECAUSE `judge` HAS THREE. This asked `done_at` and
+// counted every `false` as a failure, so a job with no marker -- one
+// this program never looked at -- was reported as one that ran and
+// failed, and the run exited 1. That is the setup error reading as a
+// verdict that `verdict` above exists to prevent, in the one function
+// that was not calling it.
 report_jobs = (env: Env, alloc: Alloc, state: str, jobs: Vec<Job>)
               Res<i32, AllocError> {
     t ::= Tally();
     jobs.loop((h, j) {
         n = count_of(env, alloc, state, j.name).try();
         (n > 1).then(() { t.retried = t.retried + 1; });
-        done_at(env, alloc, state, j.name).try().match({
-            true  => { t.done = t.done + 1; },
-            false => { t.spent = t.spent + 1; },
+        mark_at(env, alloc, state, j.name).try().match({
+            Passed   => { t.done = t.done + 1; },
+            Failed   => { t.spent = t.spent + 1; },
+            Unmarked => { t.unknown = t.unknown + 1; },
         });
     });
     println(
-        "fleet: {} job(s): {} succeeded, {} failed, {} retried",
+        "fleet: {} job(s): {} succeeded, {} failed, {} unchecked, {} retried",
         jobs.len,
         t.done,
         t.spent,
+        t.unknown,
         t.retried
     );
     wall(env, alloc, state);
-    (t.spent > 0).match({ true => Ok(1), false => Ok(0) })
+    verdict(t)
 }
 
 // THE WALL TIME IS TWO INTEGERS THE DRIVER WROTE DOWN. `Env` has no clock

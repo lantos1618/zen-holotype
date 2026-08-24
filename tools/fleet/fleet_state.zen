@@ -60,17 +60,40 @@ set_done* = (env: Env, alloc: Alloc, state: str, name: str, yes: bool)
     Ok(());
 }
 
-done_at* = (env: Env, alloc: Alloc, state: str, name: str)
-          Res<bool, AllocError> {
-    p   ::= state_path(alloc, state, name, "done").try();
-    yes ::= false;
+// WHAT THE MARKER SAYS, IN THREE ANSWERS AND NOT TWO. A marker that
+// cannot be read is not a `false`. `plan` writes a `0` for every job it
+// takes a baseline of, so an ABSENT marker means this program never
+// looked at that job at all -- a work list edited mid-fleet, or a state
+// directory that is not the one the fleet ran in. Reporting that as a
+// failure makes a setup error read as a verdict, which is the rule
+// `fleet.zen` states for `judge`'s exit code and then broke in `report`.
+Mark* = Passed | Failed | Unmarked
+
+mark_at* = (env: Env, alloc: Alloc, state: str, name: str)
+          Res<Mark, AllocError> {
+    p ::= state_path(alloc, state, name, "done").try();
+    m ::= Mark.Unmarked;
     env.fs.read(alloc, p.view()).match({
         Err(_)   => {},
         Ok(text) => {
-            yes = text.view().eq("1\n");
+            m = text.view().eq("1\n").match({
+                true  => Mark.Passed,
+                false => Mark.Failed,
+            });
         },
     });
-    Ok(yes)
+    Ok(m)
+}
+
+// "Did this job pass?" -- the question `judge` asks, where an unmarked
+// job and a failed one are the same answer because both mean "run it".
+// One reader of the byte, so the two questions cannot drift apart.
+done_at* = (env: Env, alloc: Alloc, state: str, name: str)
+          Res<bool, AllocError> {
+    Ok(mark_at(env, alloc, state, name).try().match({
+        Passed => true,
+        _      => false,
+    }))
 }
 
 // The lane list, and the reason it is a file: see the header. Truncated
