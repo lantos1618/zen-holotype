@@ -199,9 +199,25 @@ norm_destructure = (
 ) Res<usize, AllocError> {
     text = last_segment(d.name);
     variant_member(c, ty, text).match({
-        Ok(t)  => c.norm_set_ctor(ps, node, d, text, t, ctx),
-        None   => c.norm_plain_ctor(ps, node, d, ty, text, ctx),
+        Ok(t)  => norm_set_ctor(c, ps, node, d, text, t, ctx),
+        None   => plain_ctor(c, ps, node, d, ty, text, ctx),
     })
+}
+
+// The shape every destructure on a non-set type has always had: the
+// payload's type from the case list, the binder normalised against it.
+plain_ctor = (
+    c    :: Checker,
+    ps   :: Pats,
+    node : Pattern,
+    d    : Destructure,
+    ty   : TyId,
+    text : str,
+    ctx  : Ctx
+) Res<usize, AllocError> {
+    payload = c.case_payload(ty, text).try();
+    sub     = c.norm_pattern(ps, d.binder, payload, ctx).try();
+    ps.add(sub_pat(text, sub, node.span))
 }
 
 norm_set_ctor = (
@@ -213,8 +229,8 @@ norm_set_ctor = (
     mty    : TyId,
     ctx    : Ctx
 ) Res<usize, AllocError> {
-    leaf = c.leaf_text(mty, d.binder).try();
-    sub  = c.set_ctor_sub(ps, d.binder, leaf, mty, ctx).try();
+    leaf = leaf_text(c, mty, d.binder).try();
+    sub  = set_ctor_sub(c, ps, d.binder, leaf, mty, ctx).try();
     ps.add(sub_pat(member, sub, node.span))
 }
 
@@ -238,7 +254,7 @@ set_ctor_sub = (
 // asks one level down, so the two readings cannot drift.
 leaf_text = (c :: Checker, mty: TyId, pid: PatternId) Res<str, AllocError> {
     c.tree.pattern_at(pid).kind.match({
-        Name(pn)  => c.leaf_name(mty, pn),
+        Name(pn)  => leaf_name(c, mty, pn),
         _         => Ok(""),
     })
 }

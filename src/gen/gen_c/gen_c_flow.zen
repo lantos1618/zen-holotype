@@ -24,7 +24,8 @@ AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
-TyId, TyNamed, TyRes = sema.sema_ty
+TyId, TyNamed, TyRes, Types = sema.sema_ty
+World = sema.sema_def
 decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
@@ -199,7 +200,7 @@ plain_ctor_cond = (
     scrut : str,
     out   :: String
 ) Res<(), AllocError> {
-    be.tag_cond(last_segment(d.name), st, scrut, out).try();
+    be.tag_name(st, last_segment(d.name), scrut, out).try();
     be.payload_cond(d, st, scrut, out)
 }
 
@@ -216,7 +217,7 @@ member_ctor_cond = (
     out    :: String
 ) Res<(), AllocError> {
     member = last_segment(d.name);
-    be.tag_cond(member, st, scrut, out).try();
+    be.tag_name(st, member, scrut, out).try();
     place ::= be.alloc.String().try();
     set_member_place(be.types(), be.world(), mty, scrut, place.view()).try();
     leaf_cond(be, d.binder, mty, place.view(), out)
@@ -492,10 +493,22 @@ tag_cond = (
     scrut : str,
     out   :: String
 ) Res<(), AllocError> {
+    be.tag_name(st, last_segment(q), scrut, out)
+}
+
+// The tag test from a bare case NAME — `Member.Leaf`'s outer half has a
+// member name and no qualified pattern to spell it with.
+tag_name = (
+    be    :: CBackend,
+    st    : TyId,
+    name  : str,
+    scrut : str,
+    out   :: String
+) Res<(), AllocError> {
     qname ::= be.alloc.String().try();
     be.enum_path(st, qname).try();
     tag ::= be.alloc.String().try();
-    tag.sym_variant(qname.view(), last_segment(q)).try();
+    tag.sym_variant(qname.view(), name).try();
     out.fmt("({scrut}.zg_tag == {})", tag.view())
 }
 

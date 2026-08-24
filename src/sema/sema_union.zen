@@ -30,7 +30,7 @@ Vec = std.collections
 str = std.text
 Range = std.core
 DeclId = sema.sema_id
-TyId, TyNamed = sema.sema_ty
+TyId, TyNamed, TyUnion = sema.sema_ty
 Def, decl_at = sema.sema_def
 Checker = sema.sema_check
 
@@ -202,12 +202,13 @@ variant_member* = (c :: Checker, ty: TyId, variant: str) Res<TyId> {
 // declaring one leaf name would make `Member.Leaf` ambiguous; every
 // current declaration names distinct leaves, so the first hit stands
 // and ambiguity stays unrepresentable until a rule exists for it.
+//
+// The hit is `Ok(member)` — a set-of-one flattens to its member, so a
+// bare member id is the answer a match arm needs.
 union_variant_member = (c :: Checker, u: TyUnion, variant: str) Res<TyId> {
-    hit ::= None;
     u.members.loop((h, i, m) {
-        c.member_declares(m, variant).then(() { hit = Some(c.set_of(m)); });
-    });
-    Ok(hit)
+        c.member_declares(m, variant).then(() { h.break(c.set_of(m)) });
+    })
 }
 
 // A NAME read as a union answers for the set it stands for, so
