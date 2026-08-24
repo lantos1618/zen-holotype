@@ -65,6 +65,7 @@ by_arity, bodied_fn, impl_member, kept_or_arity = gen.gen_c.gen_c_impl
 has_body = gen.gen_c.gen_c_impl
 impl_member_at = gen.gen_c.gen_c_impl
 alias_of = gen.gen_c.gen_c_impl
+generic_enum = gen.gen_c.gen_c_impl
 
 // -----------------------------------------------------------------
 // the entry point
@@ -217,8 +218,29 @@ supplied_or_ufcs = (be :: CBackend, d: Dot, s: Site, ctx: Ctx, out :: String)
     found ::= be.alloc.Vec<Member>();
     be.impl_member_at(s.decl, d.a.name.text, found).try();
     be.pick_member(d.c, s, found, ctx).try().match({
-        Ok(m) => supplied_member(be, d, s, m, ctx, out),
+        Ok(m) => be.supplied_or_refused(d, s, m, ctx, out),
         None  => be.lower_ufcs(d, s.ty, ctx, out),
+    })
+}
+
+// The member is there and resolved; whether it can be EMITTED is a
+// second question, and a generic enum target is the one target the mono
+// path cannot carry — see `gen_c_impl.generic_enum`.
+supplied_or_refused = (
+    be  :: CBackend,
+    d   : Dot,
+    s   : Site,
+    m   : Member,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.generic_enum(s.decl).match({
+        true  => be.unsupported(
+            d.id,
+            "a call to a member an impl supplies on a generic enum",
+            out
+        ),
+        false => supplied_member(be, d, s, m, ctx, out),
     })
 }
 

@@ -1,0 +1,37 @@
+// A MEMBER SUPPLIED BY AN IMPL ON A GENERIC ENUM — REFUSED, because the
+// backend cannot mangle it apart.
+//
+// A non-generic enum's impl members lower fine
+// (`corpus/codegen/an_enum_impl_member_with_a_body_lowers.zen`). A
+// GENERIC one cannot: `gen_c_mono.zen` reads a declaration's type
+// parameters off `Struct` alone — `decl_vars_of`, `open_named_decl` and
+// `enter_decl_tparams` each fall through for any other kind — so
+// `Boxed<i64>.size` and `Boxed<u8>.size` would mangle to one symbol and
+// the second instantiation would silently answer with the first's body.
+//
+// That is this tree's documented failure mode, so `supplied_or_refused`
+// (gen_c_member.zen) says so out loud instead. The refusal is a gate,
+// not a diagnosis of the program: the day the mono path grows the three
+// branches, this test is what says the refusal must go.
+//
+// position: each call to the supplied member.
+
+Boxed<T> = Empty | Full(T)
+
+Sized* = { size* = (self: @Self) i64 }
+
+Boxed.impl(Sized, {
+    size = (self: @Self) i64 {
+        self.match({
+            Empty   => 0,
+            Full(_) => 1,
+        })
+    }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    a: Boxed<i64> = Full(7);
+    b: Boxed<u8>  = Empty;
+    println("a={} b={}", a.size(), b.size());
+    Ok(0);
+}
