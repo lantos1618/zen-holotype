@@ -1,0 +1,30 @@
+// AN ARRAY LITERAL IN A MATCH ARM STANDS WHERE THE ARRAY STANDS. `e:
+// [u8, 2]` writes `u8` nowhere an arm can see, and `sema_hoist.arm_fits`
+// cannot supply it: it asks the arm about its own type, and the minted
+// `[int, 2]` reaches a `[u8, 2]` by the same family leniency that keeps
+// `[1, 2, 3]` legal at a `[u8, 3]`. `sema_trap.arm_arrays` is the one
+// line that walks an arm's body back into `array_elements`, and this
+// file is what holds it there. Replace that line with `Ok(())` and
+// rebuild, and this program compiles at exit 0 with no Zen diagnostic
+// and prints 44 -- the whole of what is left saying anything is a cc
+// `-Woverflow` that no gate reads.
+//
+// the OTHER arm fits, so nothing about the match's own type is in
+// question: the one thing wrong here is one element of one arm, and a
+// rejection that named the arms disagreeing would be the wrong gate
+// wearing this file's name.
+//
+// the scrutinee comes from the environment so no arm can be folded away
+// before it is asked.
+//
+// position: the literal, because the literal is what does not fit.
+
+main = (env: Env) Res<i32, AllocError> {
+    b: bool = env.var("ZEN_NEVER_SET").match({
+        Ok(_) => true,
+        None  => false,
+    });
+    e: [u8, 2] = b.match({ true => [0, 300], false => [0, 0] });
+    println("{}", e[1].to_i64());
+    Ok(0);
+}
