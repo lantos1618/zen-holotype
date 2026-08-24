@@ -128,16 +128,16 @@ call_type* = (c :: Checker, id: ExprId, node: Expr, call: Call, ctx: Ctx)
              Res<TyId, AllocError> {
     callee = c.tree.expr_at(call.callee);
     callee.kind.match({
-        Access(a) => member_call(c, id, node, call, a, ctx),
-        Name(n)   => named_call(c, id, node, call, n.text, ctx),
-        _         => indirect_call(c, node, call, ctx),
+        Access(a) => c.member_call(id, node, call, a, ctx),
+        Name(n)   => c.named_call(id, node, call, n.text, ctx),
+        _         => c.indirect_call(node, call, ctx),
     })
 }
 
 actuals_of = (c :: Checker, args: Vec<Arg>, ctx: Ctx, out :: Vec<Actual>)
              Res<(), AllocError> {
     args.loop((h, a) {
-        out.add(actual_of(c, a, ctx).try()).try();
+        out.add(c.actual_of(a, ctx).try()).try();
     });
     Ok(());
 }
@@ -145,8 +145,8 @@ actuals_of = (c :: Checker, args: Vec<Arg>, ctx: Ctx, out :: Vec<Actual>)
 actual_of = (c :: Checker, a: Arg, ctx: Ctx) Res<Actual, AllocError> {
     node = c.tree.expr_at(a.value);
     node.kind.match({
-        Lambda(l) => lambda_actual(c, l, a),
-        _         => value_actual(c, a, ctx),
+        Lambda(l) => c.lambda_actual(l, a),
+        _         => c.value_actual(a, ctx),
     })
 }
 
@@ -187,10 +187,10 @@ named_call = (
     ctx  : Ctx
 ) Res<TyId, AllocError> {
     actuals ::= c.alloc.Vec<Actual>();
-    actuals_of(c, call.args, ctx, actuals).try();
+    c.actuals_of(call.args, ctx, actuals).try();
     is_res_ctor(name).match({
-        true  => res_ctor_type(c, name, actuals),
-        false => print_or_call(c, id, node, call, name, actuals, ctx),
+        true  => c.res_ctor_type(name, actuals),
+        false => c.print_or_call(id, node, call, name, actuals, ctx),
     })
 }
 
@@ -222,7 +222,7 @@ print_or_call = (
                 Res<TyId, AllocError> {
     is_print_sugar(name).match({
         true  => c.print_type(call),
-        false => local_or_decl_call(c, id, node, call, name, actuals, ctx),
+        false => c.local_or_decl_call(id, node, call, name, actuals, ctx),
     })
 }
 
@@ -247,10 +247,10 @@ is_res_ctor = (name: str) bool { name.eq("Ok") || name.eq("Err") }
 
 res_ctor_type = (c :: Checker, name: str, actuals: Vec<Actual>)
                 Res<TyId, AllocError> {
-    payload = first_ty(c, actuals).try();
+    payload = c.first_ty(actuals).try();
     name.eq("Ok").match({
         true  => c.types.res_open(payload),
-        false => err_res(c, payload),
+        false => c.err_res(payload),
     })
 }
 
@@ -278,8 +278,8 @@ local_or_decl_call = (
 )
                      Res<TyId, AllocError> {
     c.lookup(name).match({
-        None  => decl_call(c, id, node, call, name, None, actuals, ctx),
-        Ok(b) => fn_ret(c, node, b.ty),
+        None  => c.decl_call(id, node, call, name, None, actuals, ctx),
+        Ok(b) => c.fn_ret(node, b.ty),
     })
 }
 
@@ -304,13 +304,13 @@ decl_call = (
 )
             Res<TyId, AllocError> {
     cands ::= c.alloc.Vec<Cand>();
-    cands_of(c, ctx.module, name, cands).try();
-    travelled_cands(c, name, recv, cands).try();
+    c.cands_of(ctx.module, name, cands).try();
+    c.travelled_cands(name, recv, cands).try();
     kept ::= c.alloc.Vec<Cand>();
-    keep_matching(c, cands, actuals, kept).try();
+    c.keep_matching(cands, actuals, kept).try();
     (kept.len > 0).match({
-        true  => chosen(c, id, node, call, kept, actuals, ctx),
-        false => construct_or_fail(c, id, node, call, name, recv, cands, ctx),
+        true  => c.chosen(id, node, call, kept, actuals, ctx),
+        false => c.construct_or_fail(id, node, call, name, recv, cands, ctx),
     })
 }
 
@@ -320,7 +320,7 @@ keep_matching = (
     actuals : Vec<Actual>,
     kept    :: Vec<Cand>
 ) Res<(), AllocError> {
-    cands.loop((h, k) { keep_one(c, k, actuals, kept).try() });
+    cands.loop((h, k) { c.keep_one(k, actuals, kept).try() });
     Ok(());
 }
 
@@ -329,7 +329,7 @@ keep_matching = (
 // to be re-tested before removal.
 keep_one = (c :: Checker, k: Cand, actuals: Vec<Actual>, kept :: Vec<Cand>)
            Res<(), AllocError> {
-    matches(c, k, actuals).try().match({
+    c.matches(k, actuals).try().match({
         true  => kept.add(k),
         false => Ok(()),
     })
@@ -350,7 +350,7 @@ construct_or_fail = (
     c.world.defs_of(ctx.module, name, defs).try();
     type_def_of(defs).match({
         None  => unresolved(c, node, call, name, recv, cands),
-        Ok(d) => construct_def(c, id, node, call, d, ctx),
+        Ok(d) => c.construct_def(id, node, call, d, ctx),
     })
 }
 
@@ -371,8 +371,8 @@ unresolved = (
     cands : Vec<Cand>
 ) Res<TyId, AllocError> {
     recv.match({
-        Ok(ty) => no_such_method(c, call, name, ty),
-        None   => no_overload(c, node, name, cands),
+        Ok(ty) => c.no_such_method(call, name, ty),
+        None   => c.no_overload(node, name, cands),
     })
 }
 
@@ -385,14 +385,14 @@ no_such_method = (c :: Checker, call: Call, name: str, ty: TyId)
                  Res<TyId, AllocError> {
     bound_declares(c, ty, name).try().match({
         true  => c.types.unknown(),
-        false => report_no_method(c, call, name, ty),
+        false => c.report_no_method(call, name, ty),
     })
 }
 
 report_no_method = (c :: Checker, call: Call, name: str, ty: TyId)
                    Res<TyId, AllocError> {
     poison = c.types.unknown().try();
-    at     = callee_name_span(c, call);
+    at     = c.callee_name_span(call);
     c.report(
         at.file,
         at,
@@ -479,7 +479,7 @@ chosen = (
 ) Res<TyId, AllocError> {
     kept.get(0).match({
         None  => c.types.unknown(),
-        Ok(k) => chosen_ret(c, id, node, call, k, actuals, ctx),
+        Ok(k) => c.chosen_ret(id, node, call, k, actuals, ctx),
     })
 }
 
@@ -493,9 +493,9 @@ chosen_ret = (
     ctx     : Ctx
 ) Res<TyId, AllocError> {
     c.resolve_call(id, k.id).try();
-    check_bounds(c, k, actuals, node.span).try();
-    arg_literals(c, call.args, k.params, recv_off(call, actuals)).try();
-    instantiate(c, id, call, k, actuals, ctx)
+    c.check_bounds(k, actuals, node.span).try();
+    c.arg_literals(call.args, k.params, recv_off(call, actuals)).try();
+    c.instantiate(id, call, k, actuals, ctx)
 }
 
 // WHETHER PARAMETER ZERO HAS AN ARGUMENT, derived and not plumbed:
@@ -530,7 +530,7 @@ arg_literals* = (c :: Checker, args: Vec<Arg>, params: Vec<TyId>, off: usize)
                Res<(), AllocError> {
     i ::= off;
     args.loop((h, a) {
-        param_literal(c, a.value, params, i).try();
+        c.param_literal(a.value, params, i).try();
         i = i + 1;
     });
     Ok(());
@@ -544,7 +544,7 @@ param_literal = (c :: Checker, id: ExprId, params: Vec<TyId>, i: usize)
                 Res<(), AllocError> {
     (i < params.len).match({
         false => c.check_arms_agree(id),
-        true  => param_wants(c, id, ty_at(params, i)),
+        true  => c.param_wants(id, ty_at(params, i)),
     })
 }
 
@@ -592,8 +592,8 @@ member_call = (
 ) Res<TyId, AllocError> {
     b = base_of(c, ac.base, ctx).try();
     b.is_type.match({
-        true  => static_call(c, node, call, ac, b.ty, ctx),
-        false => receiver_call(c, id, node, call, ac, b, ctx),
+        true  => c.static_call(node, call, ac, b.ty, ctx),
+        false => c.receiver_call(id, node, call, ac, b, ctx),
     })
 }
 
@@ -608,7 +608,7 @@ static_call = (
     ctx  : Ctx
 ) Res<TyId, AllocError> {
     got = c.static_access(call.callee, node, ac, ty, ctx).try();
-    fn_ret(c, node, got)
+    c.fn_ret(node, got)
 }
 
 receiver_call = (
@@ -620,9 +620,9 @@ receiver_call = (
     b    : Base,
     ctx  : Ctx
 ) Res<TyId, AllocError> {
-    opaque(c, b.ty).match({
+    c.opaque(b.ty).match({
         true  => c.types.unknown(),
-        false => known_receiver_call(c, id, node, call, ac, b, ctx),
+        false => c.known_receiver_call(id, node, call, ac, b, ctx),
     })
 }
 
@@ -645,12 +645,12 @@ known_receiver_call = (
 )
                       Res<TyId, AllocError> {
     actuals ::= c.alloc.Vec<Actual>();
-    actuals_of(c, call.args, ctx, actuals).try();
+    c.actuals_of(call.args, ctx, actuals).try();
     found ::= c.alloc.Vec<Found>();
-    members_of(c, b.ty, ac.name.text, found).try();
+    c.members_of(b.ty, ac.name.text, found).try();
     first_hidden(found, ctx.module).match({
-        Ok(f) => hidden_member(c, ac, f),
-        None  => reachable_call(c, id, node, call, ac, b, found, actuals, ctx),
+        Ok(f) => c.hidden_member(ac, f),
+        None  => c.reachable_call(id, node, call, ac, b, found, actuals, ctx),
     })
 }
 
@@ -666,8 +666,8 @@ reachable_call = (
     ctx     : Ctx
 ) Res<TyId, AllocError> {
     (found.len > 0).match({
-        true  => method_call(c, node, found, actuals),
-        false => ufcs_call(c, id, node, call, ac, b, actuals, ctx),
+        true  => c.method_call(node, found, actuals),
+        false => c.ufcs_call(id, node, call, ac, b, actuals, ctx),
     })
 }
 
@@ -696,9 +696,9 @@ method_call = (
     found   : Vec<Found>,
     actuals : Vec<Actual>
 ) Res<TyId, AllocError> {
-    pick_fitting(c, found, actuals).try().match({
-        Ok(f) => fn_ret(c, node, f.ty),
-        None  => by_arity_ret(c, node, found, actuals),
+    c.pick_fitting(found, actuals).try().match({
+        Ok(f) => c.fn_ret(node, f.ty),
+        None  => c.by_arity_ret(node, found, actuals),
     })
 }
 
@@ -708,9 +708,9 @@ by_arity_ret = (
     found   : Vec<Found>,
     actuals : Vec<Actual>
 ) Res<TyId, AllocError> {
-    pick_arity(c, found, actuals.len + 1).match({
-        None  => first_found_ret(c, node, found),
-        Ok(f) => fn_ret(c, node, f.ty),
+    c.pick_arity(found, actuals.len + 1).match({
+        None  => c.first_found_ret(node, found),
+        Ok(f) => c.fn_ret(node, f.ty),
     })
 }
 
@@ -722,7 +722,7 @@ by_arity_ret = (
 pick_fitting = (c :: Checker, found: Vec<Found>, actuals: Vec<Actual>)
                Res<Res<Found>, AllocError> {
     kept ::= c.alloc.Vec<Found>();
-    found.loop((h, f) { keep_fitting(c, f, actuals, kept).try() });
+    found.loop((h, f) { c.keep_fitting(f, actuals, kept).try() });
     Ok(first_found(kept));
 }
 
@@ -734,8 +734,8 @@ keep_fitting = (
     kept    :: Vec<Found>
 ) Res<(), AllocError> {
     params ::= c.alloc.Vec<TyId>();
-    fn_params(c, f.ty, params).try();
-    recv_sig_fits(c, params, actuals).try().match({
+    c.fn_params(f.ty, params).try();
+    c.recv_sig_fits(params, actuals).try().match({
         true  => kept.add(f),
         false => Ok(()),
     })
@@ -759,7 +759,7 @@ copy_tys = (xs: Vec<TyId>, out :: Vec<TyId>) Res<(), AllocError> {
 pick_arity = (c: Checker, found: Vec<Found>, want: usize) Res<Found> {
     Range(0, found.len).find((i) {
         found.get(i).match({
-            Ok(f) => fn_arity_is(c, f.ty, want),
+            Ok(f) => c.fn_arity_is(f.ty, want),
             None  => false,
         })
     }).match({
@@ -776,7 +776,7 @@ first_found_ret = (c :: Checker, node: Expr, found: Vec<Found>)
                   Res<TyId, AllocError> {
     found.get(0).match({
         None  => c.types.unknown(),
-        Ok(f) => fn_ret(c, node, f.ty),
+        Ok(f) => c.fn_ret(node, f.ty),
     })
 }
 
@@ -803,13 +803,13 @@ ufcs_call = (
         span: node.span
     )).try();
     actuals.loop((h, a) { all.add(a).try() });
-    decl_call(c, id, node, call, ac.name.text, Ok(b.ty), all, ctx)
+    c.decl_call(id, node, call, ac.name.text, Ok(b.ty), all, ctx)
 }
 
 indirect_call = (c :: Checker, node: Expr, call: Call, ctx: Ctx)
                 Res<TyId, AllocError> {
     ty = c.type_of(call.callee, ctx).try();
-    fn_ret(c, node, ty)
+    c.fn_ret(node, ty)
 }
 
 fn_ret = (c :: Checker, node: Expr, ty: TyId) Res<TyId, AllocError> {
@@ -817,7 +817,7 @@ fn_ret = (c :: Checker, node: Expr, ty: TyId) Res<TyId, AllocError> {
         Fn(f)   => Ok(f.ret),
         Unknown => Ok(ty),
         Infer   => Ok(ty),
-        _       => not_callable(c, node, ty),
+        _       => c.not_callable(node, ty),
     })
 }
 
@@ -841,10 +841,10 @@ not_callable = (c :: Checker, node: Expr, ty: TyId) Res<TyId, AllocError> {
 check_overloads* = (c :: Checker, mi: usize, name: str)
                    Res<(), AllocError> {
     cands ::= c.alloc.Vec<Cand>();
-    cands_of(c, mi, name, cands).try();
+    c.cands_of(mi, name, cands).try();
     Range(0, cands.len).loop((h, i) {
         Range(i + 1, cands.len).loop((h2, j) {
-            check_pair(c, name, cands, i, j).try();
+            c.check_pair(name, cands, i, j).try();
         });
     });
     Ok(());
@@ -854,7 +854,7 @@ check_pair = (c :: Checker, name: str, cands: Vec<Cand>, i: usize, j: usize)
              Res<(), AllocError> {
     cands.get(i).match({
         None  => Ok(()),
-        Ok(a) => check_against(c, name, a, cands, j),
+        Ok(a) => c.check_against(name, a, cands, j),
     })
 }
 
@@ -867,22 +867,22 @@ check_against = (
 ) Res<(), AllocError> {
     cands.get(j).match({
         None  => Ok(()),
-        Ok(b) => compare(c, name, a, b),
+        Ok(b) => c.compare(name, a, b),
     })
 }
 
 compare = (c :: Checker, name: str, a: Cand, b: Cand) Res<(), AllocError> {
     (a.params.len == b.params.len).match({
-        true  => compare_same_arity(c, name, a, b),
+        true  => c.compare_same_arity(name, a, b),
         false => Ok(()),
     })
 }
 
 compare_same_arity = (c :: Checker, name: str, a: Cand, b: Cand)
                      Res<(), AllocError> {
-    same_signature(c, a, b).match({
-        true  => duplicate(c, name, a, b),
-        false => maybe_swallow(c, name, a, b),
+    c.same_signature(a, b).match({
+        true  => c.duplicate(name, a, b),
+        false => c.maybe_swallow(name, a, b),
     })
 }
 
@@ -892,17 +892,17 @@ compare_same_arity = (c :: Checker, name: str, a: Cand, b: Cand)
 // `<U>(a: U)` differ in nothing a call site can see.
 same_signature* = (c: Checker, a: Cand, b: Cand) bool {
     Range(0, a.params.len).find((i) {
-        same_param(c, ty_at(a.params, i), ty_at(b.params, i)) == false
+        c.same_param(ty_at(a.params, i), ty_at(b.params, i)) == false
     }).match({ Ok(_) => false, None => true })
 }
 
 same_param = (c: Checker, x: TyId, y: TyId) bool {
-    x.eq(y) || (is_tvar(c, x) && is_tvar(c, y))
+    x.eq(y) || (c.is_tvar(x) && c.is_tvar(y))
 }
 
 maybe_swallow = (c :: Checker, name: str, a: Cand, b: Cand)
                 Res<(), AllocError> {
-    ((a.generic || b.generic) && swallows(c, a, b)).match({
+    ((a.generic || b.generic) && c.swallows(a, b)).match({
         true  => ambiguous(c, name, a, b),
         false => Ok(()),
     })
@@ -913,17 +913,17 @@ maybe_swallow = (c :: Checker, name: str, a: Cand, b: Cand)
 // belonging to the candidate being tested is a wildcard — that is what
 // keeps `loop(range: R, ..)` and `loop(map: Map<K,V>, ..)` distinct.
 swallows* = (c: Checker, a: Cand, b: Cand) bool {
-    all_eat(c, a, b) || all_eat(c, b, a)
+    c.all_eat(a, b) || c.all_eat(b, a)
 }
 
 all_eat = (c: Checker, g: Cand, k: Cand) bool {
     g.generic && Range(0, g.params.len).find((i) {
-        eats(c, ty_at(g.params, i), ty_at(k.params, i), g.owner) == false
+        c.eats(ty_at(g.params, i), ty_at(k.params, i), g.owner) == false
     }).match({ Ok(_) => false, None => true })
 }
 
 eats = (c: Checker, x: TyId, y: TyId, owner: str) bool {
-    var_of(c, x, owner) || x.eq(y) || structural_eats(c, x, y, owner)
+    c.var_of(x, owner) || x.eq(y) || c.structural_eats(x, y, owner)
 }
 
 var_of = (c: Checker, x: TyId, owner: str) bool {
@@ -932,8 +932,8 @@ var_of = (c: Checker, x: TyId, owner: str) bool {
 
 structural_eats = (c: Checker, x: TyId, y: TyId, owner: str) bool {
     c.types.at(x).match({
-        Fn(f)    => fn_eats(c, f, y, owner),
-        Named(n) => named_eats(c, n, y, owner),
+        Fn(f)    => c.fn_eats(f, y, owner),
+        Named(n) => c.named_eats(n, y, owner),
         _        => false,
     })
 }
@@ -941,8 +941,8 @@ structural_eats = (c: Checker, x: TyId, y: TyId, owner: str) bool {
 fn_eats = (c: Checker, f: TyFn, y: TyId, owner: str) bool {
     c.types.at(y).match({
         Fn(g) => (f.params.len == g.params.len)
-                     && all_eats(c, f.params, g.params, owner)
-                     && eats(c, f.ret, g.ret, owner),
+                     && c.all_eats(f.params, g.params, owner)
+                     && c.eats(f.ret, g.ret, owner),
         _     => false,
     })
 }
@@ -950,14 +950,14 @@ fn_eats = (c: Checker, f: TyFn, y: TyId, owner: str) bool {
 named_eats = (c: Checker, n: TyNamed, y: TyId, owner: str) bool {
     c.types.at(y).match({
         Named(m) => n.decl.eq(m.decl) && (n.args.len == m.args.len)
-                        && all_eats(c, n.args, m.args, owner),
+                        && c.all_eats(n.args, m.args, owner),
         _        => false,
     })
 }
 
 all_eats = (c: Checker, xs: Vec<TyId>, ys: Vec<TyId>, owner: str) bool {
     Range(0, xs.len).find((i) {
-        eats(c, ty_at(xs, i), ty_at(ys, i), owner) == false
+        c.eats(ty_at(xs, i), ty_at(ys, i), owner) == false
     }).match({ Ok(_) => false, None => true })
 }
 

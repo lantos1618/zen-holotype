@@ -25,12 +25,11 @@
 // BOTH impls, not just one side.
 
 Expr, ExprId, Access, Span, TypeId, nowhere = std.ast
-Decl, Struct, Member = std.ast
+Struct, Member = std.ast
 Field, Const, Function = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
-Range = std.core
 DeclId = sema.sema_id
 TyId, TyNamed, Prim = sema.sema_ty
 Def, DefKind, decl_at, module_display = sema.sema_def
@@ -43,6 +42,7 @@ impl_members, bound_member_types = sema.sema_supply
 type_from_ast, type_of, param_type = sema.sema_type
 global_name_type, def_type = sema.sema_type
 static_value = sema.sema_static
+meta_access = sema.sema_meta
 
 // One thing a dot could reach. `computed`: false means the type declares
 // it (has an address); true means an impl supplies it (does not).
@@ -72,8 +72,20 @@ Base* = {
 // QUERY: the type of `base.name`
 // ---------------------------------------------------------------------
 
+// A `@meta` target is no member lookup: the whole access is the
+// comptime evaluator's question (`sema_meta.zen`), answered under the
+// access's own id. Intercepted here rather than in `expr_kind` because
+// the fold is keyed on the ACCESS node, and this is where it is typed.
 access_type* = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
                Res<TyId, AllocError> {
+    c.tree.expr_at(ac.base).kind.match({
+        Meta(_) => c.meta_access(id, ac, ctx),
+        _       => c.member_access(id, node, ac, ctx),
+    })
+}
+
+member_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
+                Res<TyId, AllocError> {
     b = base_of(c, ac.base, ctx).try();
     b.is_type.match({
         true  => static_value(c, id, node, ac, b.ty, ctx),
@@ -87,9 +99,14 @@ access_type* = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
 base_of* = (c :: Checker, id: ExprId, ctx: Ctx) Res<Base, AllocError> {
     node = c.tree.expr_at(id);
     node.kind.match({
-        Name(n) => recorded_base(c, id, node, n.text, ctx),
+        Name(n) => named_base(c, id, node, n.text, ctx),
         _       => value_base(c, id, ctx),
     })
+}
+
+value_base = (c :: Checker, id: ExprId, ctx: Ctx) Res<Base, AllocError> {
+    ty = c.type_of(id, ctx).try();
+    Ok(Base(ty: ty, is_type: false));
 }
 
 // A name base is typed here because it's the one base `type_of` never
@@ -98,27 +115,17 @@ base_of* = (c :: Checker, id: ExprId, ctx: Ctx) Res<Base, AllocError> {
 // field access with no answer for a node sema knew the type of. A type
 // name still gets no entry — `i32` in `i32.MAX` denotes no value, and a
 // wrong answer is worse than no answer (same rule `write_val` states).
-recorded_base = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
-                Res<Base, AllocError> {
-    b = named_base(c, id, node, text, ctx).try();
+named_base = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
+             Res<Base, AllocError> {
+    b = c.lookup(text).match({
+        None  => global_base(c, node, text, ctx),
+        Ok(l) => bound_base(c, id, l),
+    }).try();
     b.is_type.match({
         false => c.expr_memo.set(id, b.ty),
         true  => Ok(()),
     }).try();
     Ok(b);
-}
-
-value_base = (c :: Checker, id: ExprId, ctx: Ctx) Res<Base, AllocError> {
-    ty = c.type_of(id, ctx).try();
-    Ok(Base(ty: ty, is_type: false));
-}
-
-named_base = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
-             Res<Base, AllocError> {
-    c.lookup(text).match({
-        None  => global_base(c, node, text, ctx),
-        Ok(b) => bound_base(c, id, b),
-    })
 }
 
 // A base answered out of the scope stack — `p` in `p.left`. Same
@@ -135,14 +142,12 @@ bound_base = (c :: Checker, id: ExprId, b: Binding) Res<Base, AllocError> {
 global_base = (c :: Checker, node: Expr, text: str, ctx: Ctx)
               Res<Base, AllocError> {
     is_prim(text).match({
-        true  => prim_base(c, text),
+        true  => {
+            ty = c.types.prim(text).try();
+            Ok(Base(ty: ty, is_type: true));
+        },
         false => decl_base(c, node, text, ctx),
     })
-}
-
-prim_base = (c :: Checker, text: str) Res<Base, AllocError> {
-    ty = c.types.prim(text).try();
-    Ok(Base(ty: ty, is_type: true));
 }
 
 decl_base = (c :: Checker, node: Expr, text: str, ctx: Ctx)
@@ -150,26 +155,22 @@ decl_base = (c :: Checker, node: Expr, text: str, ctx: Ctx)
     found ::= c.alloc.Vec<Def>();
     c.world.defs_of(ctx.module, text, found).try();
     found.get(0).match({
-        Ok(d) => def_base(c, d),
-        None  => value_base_of(c, node, text, ctx),
+        // Through `def_type` and not `named` directly, so a constant
+        // used as a base reads its DECLARED type: `PATH.len` is a
+        // `str`'s `len`, and a nominal type called `PATH` has no
+        // members at all.
+        Ok(d) => {
+            ty = c.def_type(d).try();
+            Ok(Base(ty: ty, is_type: is_type_def(d.kind)));
+        },
+        // A name that resolves to nothing at all is left to `type_of`,
+        // the one place "undefined name" is raised. Two places raising
+        // it is two diagnostics for one mistake.
+        None  => {
+            ty = c.global_name_type(node, text, ctx).try();
+            Ok(Base(ty: ty, is_type: false));
+        },
     })
-}
-
-// A name that resolves to nothing at all is left to `type_of`, which is
-// the one place "undefined name" is raised. Two places raising it is two
-// diagnostics for one mistake.
-value_base_of = (c :: Checker, node: Expr, text: str, ctx: Ctx)
-                Res<Base, AllocError> {
-    ty = c.global_name_type(node, text, ctx).try();
-    Ok(Base(ty: ty, is_type: false));
-}
-
-// Through `def_type` and not `named` directly, so a constant used as a
-// base reads its DECLARED type: `PATH.len` is a `str`'s `len`, and a
-// nominal type called `PATH` has no members at all.
-def_base = (c :: Checker, d: Def) Res<Base, AllocError> {
-    ty = c.def_type(d).try();
-    Ok(Base(ty: ty, is_type: is_type_def(d.kind)));
 }
 
 is_type_def* = (k: DefKind) bool {
@@ -209,15 +210,9 @@ opaque* = (c: Checker, ty: TyId) bool {
 // pushed — that case is `bound_reachable`'s.
 foreign_tvar = (c: Checker, ty: TyId) bool {
     c.types.at(ty).match({
-        Var(v) => unowned_tvar(c, v.name, ty),
+        Var(v) => in_scope_tvar(c, v.name, ty) == false,
         _      => false,
     })
-}
-
-// `in_scope_tvar` already asks about the bound as its first disjunct, so
-// asking again here answered nothing: `!(B || L) && !B` is `!B && !L`.
-unowned_tvar = (c: Checker, name: str, ty: TyId) bool {
-    in_scope_tvar(c, name, ty) == false
 }
 
 // Declared as a type parameter, or declared with a bound — either puts
@@ -260,12 +255,7 @@ known_access = (
 // call resolves its own callee in `sema_call.zen` — and gating only the
 // one this file owns once made `v.grow` a mistake and `v.grow()` legal.
 first_hidden* = (found: Vec<Found>, mi: usize) Res<Found> {
-    Range(0, found.len).find((i) {
-        found.get(i).match({ Ok(f) => hidden_from(f, mi), None => false })
-    }).match({
-        Ok(i) => found.get(i),
-        None  => None,
-    })
+    found.find((f) { hidden_from(f, mi) })
 }
 
 // Inside the declaring module every member is reachable — that is what
@@ -343,19 +333,13 @@ select = (
     found : Vec<Found>
 ) Res<TyId, AllocError> {
     kept ::= c.alloc.Vec<Found>();
-    found.loop((h, f) { keep_bounded(c, f, kept).try() });
+    found.loop((h, f) {
+        c.has_bound(f.bound).match({ true => kept.add(f), false => Ok(()) }).try();
+    });
     kept.len.match({
         1 => first_type(c, id, ty, kept),
         _ => ambiguous(c, node, ac, found),
     })
-}
-
-// A named helper, not a `.then` in the loop body: the workaround
-// docs/SEMA_BOOTSTRAP_FIXES.md §10 asks for — and §10 now records that
-// gap CLOSED, to be re-tested before this and its two siblings go.
-keep_bounded = (c: Checker, f: Found, kept :: Vec<Found>)
-               Res<(), AllocError> {
-    c.has_bound(f.bound).match({ true => kept.add(f), false => Ok(()) })
 }
 
 ambiguous = (c :: Checker, node: Expr, ac: Access, found: Vec<Found>)
@@ -408,15 +392,22 @@ no_such_field = (c :: Checker, node: Expr, ac: Access, ty: TyId)
     c.types.unknown()
 }
 
-// Whether `base.name` is supplied by an impl — "read-only and
-// non-addressable, no storage, nothing to assign into." Asked by both
-// rules, so they can never disagree about which fields they are.
-computed_member* = (c :: Checker, ac: Access, ctx: Ctx)
-                   Res<bool, AllocError> {
+// The member `ac` names on its base's type, when there is one — the one
+// lookup both member rules share, so they can never disagree about which
+// fields they judge.
+found_of = (c :: Checker, ac: Access, ctx: Ctx) Res<Res<Found>, AllocError> {
     b = base_of(c, ac.base, ctx).try();
     found ::= c.alloc.Vec<Found>();
     members_of(c, b.ty, ac.name.text, found).try();
-    Ok(first_found(found).match({ Ok(f) => f.computed, None => false }));
+    Ok(first_found(found));
+}
+
+// Whether `base.name` is supplied by an impl — "read-only and
+// non-addressable, no storage, nothing to assign into."
+computed_member* = (c :: Checker, ac: Access, ctx: Ctx)
+                   Res<bool, AllocError> {
+    f = found_of(c, ac, ctx).try();
+    Ok(f.match({ Ok(m) => m.computed, None => false }));
 }
 
 // TWO RULES, NOT ONE (`field_write_outside` is the test that says so):
@@ -428,10 +419,7 @@ computed_member* = (c :: Checker, ac: Access, ctx: Ctx)
 // are skipped: no storage, no declaring module to compare against.
 writable_member* = (c :: Checker, ac: Access, ctx: Ctx)
                    Res<(), AllocError> {
-    b = base_of(c, ac.base, ctx).try();
-    found ::= c.alloc.Vec<Found>();
-    members_of(c, b.ty, ac.name.text, found).try();
-    first_found(found).match({
+    found_of(c, ac, ctx).try().match({
         Ok(f) => written_from(c, ac, f, ctx),
         None  => Ok(()),
     })
@@ -497,27 +485,17 @@ prim_members = (
     c.world.prelude_of(p.name, defs).try();
     defs.get(0).match({
         None  => Ok(()),
-        Ok(d) => prim_decl_members(c, d, p, ty, name, out),
-    }).try();
-    Ok(());
-}
-
-prim_decl_members = (
-    c    :: Checker,
-    d    : Def,
-    p    : Prim,
-    ty   : TyId,
-    name : str,
-    out  :: Vec<Found>
-) Res<(), AllocError> {
-    args ::= c.alloc.Vec<TyId>();
-    named_members(
-        c,
-        TyNamed(decl: d.id, name: p.name, args: args),
-        ty,
-        name,
-        out
-    )
+        Ok(d) => {
+            args ::= c.alloc.Vec<TyId>();
+            named_members(
+                c,
+                TyNamed(decl: d.id, name: p.name, args: args),
+                ty,
+                name,
+                out
+            )
+        },
+    })
 }
 
 // A type parameter's members are the ones its BOUNDS promise, and
@@ -552,28 +530,19 @@ bound_member = (
     tys ::= c.alloc.Vec<TyId>();
     bound_member_types(c, bound, name, ty, tys).try();
     span = bound_span(c, bound);
-    tys.loop((h, t) { add_bound_member(t, bound, name, span, out).try() });
+    tys.loop((h, t) {
+        out.add(Found(
+            name: name,
+            ty: t,
+            computed: true,
+            mutable: false,
+            exported: true,
+            module: 0,
+            bound: bound,
+            span: span,
+        )).try();
+    });
     Ok(());
-}
-
-// A named helper, as `keep_bounded`: SEMA_BOOTSTRAP_FIXES.md §10.
-add_bound_member = (
-    t     : TyId,
-    bound : TyId,
-    name  : str,
-    span  : Span,
-    out   :: Vec<Found>
-) Res<(), AllocError> {
-    out.add(Found(
-        name: name,
-        ty: t,
-        computed: true,
-        mutable: false,
-        exported: true,
-        module: 0,
-        bound: bound,
-        span: span,
-    ))
 }
 
 bound_span = (c: Checker, bound: TyId) Span {
@@ -594,37 +563,15 @@ named_members = (
     name : str,
     out  :: Vec<Found>
 ) Res<(), AllocError> {
-    own_members(c, n, ty, name, out).try();
-    (out.len == 0).then(() { impl_members(c, n, ty, name, out).try() });
-    Ok(());
-}
-
-own_members = (
-    c    :: Checker,
-    n    : TyNamed,
-    ty   : TyId,
-    name : str,
-    out  :: Vec<Found>
-) Res<(), AllocError> {
     decl_at(c.tree, n.decl).match({
-        Ok(d) => own_in_decl(c, d, n, ty, name, out),
+        Ok(d) => d.kind.match({
+            Struct(s) => struct_members(c, s, n, ty, name, out),
+            _         => Ok(()),
+        }),
         None  => Ok(()),
     }).try();
+    (out.len == 0).then(() { impl_members(c, n, ty, name, out).try() });
     Ok(());
-}
-
-own_in_decl = (
-    c    :: Checker,
-    d    : Decl,
-    n    : TyNamed,
-    ty   : TyId,
-    name : str,
-    out  :: Vec<Found>
-) Res<(), AllocError> {
-    d.kind.match({
-        Struct(s) => struct_members(c, s, n, ty, name, out),
-        _         => Ok(()),
-    })
 }
 
 // The receiver's arguments are substituted into what the declaration
@@ -645,7 +592,10 @@ struct_members = (
     tmark  = c.tvar_mark();
     enter_struct_tvars(c, s, mi).try();
     s.members.loop((h, m) {
-        own_member(c, m, name, mi, ty, poison, inst, out).try();
+        m.named(name).match({
+            false => Ok(()),
+            true  => add_own(c, m, name, mi, ty, poison, inst, out),
+        }).try();
     });
     c.release_tvars(tmark).try();
     Ok(());
@@ -664,24 +614,6 @@ enter_struct_tvars* = (c :: Checker, s: Struct, mi: usize)
     push_tparams(c, s.tparams, owner)
 }
 
-// A named helper, as `keep_bounded`: SEMA_BOOTSTRAP_FIXES.md §10.
-own_member = (
-    c      :: Checker,
-    m      : Member,
-    name   : str,
-    mi     : usize,
-    ty     : TyId,
-    poison : TyId,
-    inst   : Inst,
-    out    :: Vec<Found>
-)
-             Res<(), AllocError> {
-    member_named(m, name).match({
-        false => Ok(()),
-        true  => add_own(c, m, name, mi, ty, poison, inst, out),
-    })
-}
-
 add_own = (
     c      :: Checker,
     m      : Member,
@@ -698,39 +630,12 @@ add_own = (
         name: name,
         ty: subst(c, declared, inst).try(),
         computed: false,
-        mutable: member_mutable(m),
-        exported: member_exported(m),
+        mutable: m.mutable(),
+        exported: m.exported(),
         module: mi,
         bound: poison,
         span: m.span,
     ))
-}
-
-member_named* = (m: Member, name: str) bool {
-    m.kind.match({
-        Field(f)    => f.name.text.eq(name),
-        Const(k)    => k.name.text.eq(name),
-        Function(f) => f.name.text.eq(name),
-    })
-}
-
-member_mutable = (m: Member) bool {
-    m.kind.match({
-        Field(f)    => f.mutable,
-        Const(k)    => k.mutable,
-        Function(_) => false,
-    })
-}
-
-// The same star, read off whichever of the three a member is (DESIGN.md
-// puts `*` at "module level and struct members only"); each kind carries
-// its own `exported` because the parser reads one grammar for all three.
-member_exported* = (m: Member) bool {
-    m.kind.match({
-        Field(f)    => f.exported,
-        Const(k)    => k.exported,
-        Function(f) => f.exported,
-    })
 }
 
 // Resolved in the module that DECLARES the member, with `@Self` bound to

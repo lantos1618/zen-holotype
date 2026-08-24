@@ -70,7 +70,7 @@ Job = zen.zen_cli
 // `base_of`/`after_last_slash` take a `str` first and are reached
 // through the value.
 slash_for = zen.zen_path
-unit_at, candidate, file_of, relative_to = zen.zen_path
+unit_at, candidate, joined, relative_to = zen.zen_path
 
 // WHERE A PROGRAM STARTS is a fact about a path too: `ENTRY` is the
 // module name the probe looks for AND the declaration
@@ -240,9 +240,12 @@ Build* = {
         })
     }
 
-    // COUNTED, SAID AND HELD. The mistake is the whole file, so the
-    // span is its first position — the file IS the subject ("nothing is
-    // at that path" says nothing without it).
+    // COUNTED, SAID AND HELD. Reached by the ENTRY and by a read that
+    // fails after the probe (the file left between `import_path` and
+    // `read`, or the failure is not absence at all) — for those the
+    // file itself IS the subject, so the span is its first position.
+    // An import whose target is absent never gets here: `missing_import`
+    // anchors that fault at the import, where the fix goes.
     //
     // HELD because a language server builds with `speaking` false, and
     // collecting is then the ONLY way a missing module reaches
@@ -358,9 +361,71 @@ Build* = {
 
     enqueue = (self :: @Self, q: QualifiedName, seen :: Vec<Unit>)
               Res<(), AllocError> {
-        path = file_of(self.env, self.alloc, self.root, q).try();
-        self.queue(path, seen).try();
-        self.folder_root(path, seen)
+        // A parse-broken import recovers with an EMPTY segment
+        // (`parser.zen`'s `ident_missing` reports the real fault and
+        // returns `Ident(text: "")` so parsing can carry on). Walking
+        // that name would probe `<root>//.zen` and report a second fault
+        // against a file nobody wrote — the parse fault beside it is the
+        // whole story, so the walk stops here.
+        q.segments.find((s) { s.text.is_empty() }).match({
+            Ok(_) => Ok(()),
+            None  => {
+                flat   = joined(self.alloc, self.root, q, false).try();
+                folder = joined(self.alloc, self.root, q, true).try();
+                self.import_path(flat, folder).match({
+                    Ok(path) => {
+                        self.queue(path, seen).try();
+                        self.folder_root(path, seen)
+                    },
+                    None     => self.missing_import(q),
+                })
+            },
+        })
+    }
+
+    // WHERE THE BYTES AN IMPORT NAMES ARE, OR NOWHERE. `file_of` cannot
+    // answer this: it picks the folder form the moment the flat probe
+    // misses, and it asks the DISK only — a module that exists so far
+    // only as an editor buffer is in the overlay, and a probe that
+    // skipped it would fault a file the user is looking at. The order
+    // here is `read`'s order, per shape: overlay first, disk second.
+    import_path = (self :: @Self, flat: str, folder: str) Res<str> {
+        self.overlay.get(flat).match({
+            Ok(_) => Ok(flat),
+            None  => self.import_path_disk(flat, folder),
+        })
+    }
+
+    import_path_disk = (self :: @Self, flat: str, folder: str) Res<str> {
+        self.env.fs.exists(flat).match({
+            true  => Ok(flat),
+            false => self.import_path_folder(folder),
+        })
+    }
+
+    import_path_folder = (self :: @Self, folder: str) Res<str> {
+        self.overlay.get(folder).match({
+            Ok(_) => Ok(folder),
+            None  => self.env.fs.exists(folder).match({
+                true  => Ok(folder),
+                false => None,
+            }),
+        })
+    }
+
+    // A MISSING IMPORT IS ANCHORED AT THE IMPORT, never at the absent
+    // file: `q.span` covers the whole dotted name in the module that
+    // WROTE it, which is where the fix goes. Pinning the fault on the
+    // missing path instead (what `fs_fault` must do for the entry, whose
+    // own absence is the subject) handed the language server a
+    // diagnostic under a URI that exists nowhere — an unopenable
+    // problem-panel entry for `add_expr/add_expr.zen` and every name
+    // like it. "One mistake, one diagnostic, anchored where the fix
+    // goes." Two imports of the same absent module are two diagnostics,
+    // one per site — two places to fix.
+    missing_import = (self :: @Self, q: QualifiedName)
+                     Res<(), AllocError> {
+        self.report(diag(fs_message(FsError.NotFound), q.span))
     }
 
     // A NESTED MODULE TRAVELS WITH ITS FOLDER — the one place an

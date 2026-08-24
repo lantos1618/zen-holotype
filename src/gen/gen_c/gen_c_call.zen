@@ -73,15 +73,15 @@ res_value* = (
     out     :: String
 ) Res<(), AllocError> {
     be.check.types.at(want).match({
-        Res(_) => write_res_tagged(be, want, variant, out),
-        _      => untyped(be, id, variant, out),
+        Res(_) => be.write_res_tagged(want, variant, out),
+        _      => be.untyped(id, variant, out),
     })
 }
 
 write_res_tagged = (be :: CBackend, want: TyId, variant: str, out :: String)
                    Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, want, cty).try();
+    be.ctype(want, cty).try();
     tag ::= be.alloc.String().try();
     tag.sym_variant(RES_PATH, variant).try();
     out.fmt("({}){ .zg_tag = {} }", cty.view(), tag.view())
@@ -110,17 +110,17 @@ write_res_payload* = (
     out     :: String
 )
                      Res<(), AllocError> {
-    is_unit(be, payload).match({
+    be.is_unit(payload).match({
         false => Ok(()),
-        true  => run_for_effect(be, value, payload, ctx),
+        true  => be.run_for_effect(value, payload, ctx),
     }).try();
     cty ::= be.alloc.String().try();
-    ctype(be, want, cty).try();
+    be.ctype(want, cty).try();
     out.fmt("({}){ .zg_tag = ", cty.view()).try();
     out.sym_variant(RES_PATH, variant).try();
-    is_unit(be, payload).match({
+    be.is_unit(payload).match({
         true  => Ok(()),
-        false => write_payload_init(be, variant, value, payload, ctx, out),
+        false => be.write_payload_init(variant, value, payload, ctx, out),
     }).try();
     out.add_bytes(" }").try();
     Ok(());
@@ -128,9 +128,9 @@ write_res_payload* = (
 
 run_for_effect = (be :: CBackend, value: ExprId, payload: TyId, ctx: Ctx)
                  Res<(), AllocError> {
-    writes_nothing(be, value).match({
+    be.writes_nothing(value).match({
         true  => Ok(()),
-        false => deliver(be, value, ctx, payload, Dest.Discard),
+        false => be.deliver(value, ctx, payload, Dest.Discard),
     })
 }
 
@@ -166,9 +166,9 @@ lower_call* = (
     out  :: String
 ) Res<(), AllocError> {
     be.tree.expr_at(c.callee).kind.match({
-        Name(n)   => lower_name_callee(be, id, c, n.text, ctx, want, out),
-        Access(a) => lower_dot_call(be, id, c, a, ctx, out),
-        _         => lower_indirect(be, id, c, ctx, out),
+        Name(n)   => be.lower_name_callee(id, c, n.text, ctx, want, out),
+        Access(a) => be.lower_dot_call(id, c, a, ctx, out),
+        _         => be.lower_indirect(id, c, ctx, out),
     })
 }
 
@@ -186,9 +186,9 @@ lower_name_callee = (
     out  :: String
 )
                     Res<(), AllocError> {
-    closure_slot(be, name).match({
-        Ok(s) => lower_closure_call(be, id, c, s, ctx, want, out),
-        None  => lower_named_call(be, id, c, name, ctx, want, out),
+    be.closure_slot(name).match({
+        Ok(s) => be.lower_closure_call(id, c, s, ctx, want, out),
+        None  => be.lower_named_call(id, c, name, ctx, want, out),
     })
 }
 
@@ -204,11 +204,10 @@ lower_indirect = (
     out :: String
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    fty     = ty_of(be, c.callee, ctx, unknown).try();
+    fty     = be.ty_of(c.callee, ctx, unknown).try();
     be.check.types.at(fty).match({
-        Fn(f) => write_indirect(be, c, f.params, ctx, out),
-        _     => unsupported(
-            be,
+        Fn(f) => be.write_indirect(c, f.params, ctx, out),
+        _     => be.unsupported(
             id,
             "a call through a value that is not a function",
             out
@@ -229,7 +228,7 @@ write_indirect = (
     out.add_bytes(")(").try();
     c.args.loop((h, i, a) {
         (i > 0).then(() { out.add_bytes(", ").try() });
-        write_indirect_arg(be, a, i, params, ctx, out).try();
+        be.write_indirect_arg(a, i, params, ctx, out).try();
     });
     out.add_bytes(")").try();
     Ok(());
@@ -260,8 +259,8 @@ lower_named_call = (
     out  :: String
 ) Res<(), AllocError> {
     is_res_ctor(name).match({
-        true  => lower_res_ctor(be, id, c, name, ctx, want, out),
-        false => lower_sugar_or_plain(be, id, c, name, ctx, out),
+        true  => be.lower_res_ctor(id, c, name, ctx, want, out),
+        false => be.lower_sugar_or_plain(id, c, name, ctx, out),
     })
 }
 
@@ -277,16 +276,16 @@ lower_sugar_or_plain = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    is_sugar(be, name, ctx).try().match({
+    be.is_sugar(name, ctx).try().match({
         true  => lower_print(be, c, name, ctx, out),
-        false => lower_plain_call(be, id, c, name, None, ctx, out),
+        false => be.lower_plain_call(id, c, name, None, ctx, out),
     })
 }
 
 is_sugar = (be :: CBackend, name: str, ctx: Ctx) Res<bool, AllocError> {
     is_print(name).match({
         false => Ok(false),
-        true  => undeclared(be, name, ctx),
+        true  => be.undeclared(name, ctx),
     })
 }
 
@@ -308,8 +307,8 @@ lower_res_ctor = (
     out  :: String
 ) Res<(), AllocError> {
     be.check.types.at(want).match({
-        Res(r) => lower_res_arg(be, id, c, name, r, ctx, want, out),
-        _      => untyped(be, id, name, out),
+        Res(r) => be.lower_res_arg(id, c, name, r, ctx, want, out),
+        _      => be.untyped(id, name, out),
     })
 }
 
@@ -325,9 +324,8 @@ lower_res_arg = (
 ) Res<(), AllocError> {
     payload = name.eq("Ok").match({ true => r.value, false => r.error });
     c.args.get(0).match({
-        None  => write_res_tagged(be, want, name, out),
-        Ok(a) => write_res_payload(
-            be,
+        None  => be.write_res_tagged(want, name, out),
+        Ok(a) => be.write_res_payload(
             id,
             want,
             name,
@@ -355,10 +353,10 @@ lower_plain_call* = (
                     Res<(), AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, name, found).try();
-    travelled_defs(be, name, recv, ctx, found).try();
+    be.travelled_defs(name, recv, ctx, found).try();
     be.check.resolved_call(id).match({
-        Ok(d) => chosen_def(be, id, c, name, found, d, recv, ctx, out),
-        None  => sole_def(be, id, c, name, found, recv, ctx, out),
+        Ok(d) => be.chosen_def(id, c, name, found, d, recv, ctx, out),
+        None  => be.sole_def(id, c, name, found, recv, ctx, out),
     })
 }
 
@@ -378,7 +376,7 @@ travelled_defs = (
     found :: Vec<Def>
 ) Res<(), AllocError> {
     recv.match({
-        Ok(r) => travelled_for(be, name, r, ctx, found),
+        Ok(r) => be.travelled_for(name, r, ctx, found),
         None  => Ok(()),
     })
 }
@@ -391,7 +389,7 @@ travelled_for = (
     found :: Vec<Def>
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    rty     = ty_of(be, r, ctx, unknown).try();
+    rty     = be.ty_of(r, ctx, unknown).try();
     defs ::= be.alloc.Vec<Def>();
     be.check.world.exported_named(name, defs).try();
     defs.loop((h, d) { keep_travelled(be, d, rty, found).try() });
@@ -403,13 +401,13 @@ keep_travelled = (be :: CBackend, d: Def, rty: TyId, found :: Vec<Def>)
     dup = has_def(found, d.id);
     dup.match({
         true  => Ok(()),
-        false => add_receiving(be, d, rty, found),
+        false => be.add_receiving(d, rty, found),
     })
 }
 
 add_receiving = (be :: CBackend, d: Def, rty: TyId, found :: Vec<Def>)
                 Res<(), AllocError> {
-    receives(be, d, rty).try().match({
+    be.receives(d, rty).try().match({
         true  => found.add(d),
         false => Ok(()),
     })
@@ -422,8 +420,8 @@ add_receiving = (be :: CBackend, d: Def, rty: TyId, found :: Vec<Def>)
 receives = (be :: CBackend, d: Def, rty: TyId) Res<bool, AllocError> {
     inst ::= be.alloc.Inst();
     sig  ::= be.alloc.Vec<TyId>();
-    ok = signature_of(be, d, inst, sig).try();
-    ok.match({ false => Ok(false), true => first_is(be, sig, rty) })
+    ok = be.signature_of(d, inst, sig).try();
+    ok.match({ false => Ok(false), true => be.first_is(sig, rty) })
 }
 
 // `satisfies_bound` — an impl of the declared type, or the same type —
@@ -461,8 +459,8 @@ chosen_def = (
     out   :: String
 ) Res<(), AllocError> {
     def_with_id(found, want).match({
-        Ok(d) => call_kind(be, id, c, d, recv, ctx, out),
-        None  => sole_def(be, id, c, name, found, recv, ctx, out),
+        Ok(d) => be.call_kind(id, c, d, recv, ctx, out),
+        None  => be.sole_def(id, c, name, found, recv, ctx, out),
     })
 }
 
@@ -494,7 +492,7 @@ sole_def = (
            Res<(), AllocError> {
     found.len.match({
         0 => unresolved(be, id, name, out),
-        1 => call_def(be, id, c, name, found, recv, ctx, out),
+        1 => be.call_def(id, c, name, found, recv, ctx, out),
         _ => ambiguous(be, id, name, out),
     })
 }
@@ -512,7 +510,7 @@ call_def = (
            Res<(), AllocError> {
     found.get(0).match({
         None  => unresolved(be, id, name, out),
-        Ok(d) => call_kind(be, id, c, d, recv, ctx, out),
+        Ok(d) => be.call_kind(id, c, d, recv, ctx, out),
     })
 }
 
@@ -526,10 +524,9 @@ call_kind = (
     out  :: String
 ) Res<(), AllocError> {
     d.kind.match({
-        FunctionDef => call_resolved(be, id, c, d, recv, ctx, out),
+        FunctionDef => be.call_resolved(id, c, d, recv, ctx, out),
         StructDef   => construct(be, id, c, d, ctx, out),
-        _           => unsupported(
-            be,
+        _           => be.unsupported(
             id,
             "a call to something that is not a function",
             out
@@ -552,13 +549,12 @@ call_resolved = (
 )
                 Res<(), AllocError> {
     decl_at(be.tree, d.id).match({
-        None  => unsupported(
-            be,
+        None  => be.unsupported(
             id,
             "a call to something that is not a plain function",
             out
         ),
-        Ok(x) => call_decl(be, id, c, d, x, recv, ctx, out),
+        Ok(x) => be.call_decl(id, c, d, x, recv, ctx, out),
     })
 }
 
@@ -574,9 +570,8 @@ call_decl = (
 )
             Res<(), AllocError> {
     x.kind.match({
-        Function(f) => call_fn(be, id, c, d, f, recv, ctx, out),
-        _           => unsupported(
-            be,
+        Function(f) => be.call_fn(id, c, d, f, recv, ctx, out),
+        _           => be.unsupported(
             id,
             "a call to something that is not a plain function",
             out
@@ -599,18 +594,17 @@ call_fn = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    is_loop_shape(be, f).match({
-        true  => lower_loop(
-            be,
+    be.is_loop_shape(f).match({
+        true  => be.lower_loop(
             id,
             c,
             f,
             recv,
             ctx,
-            want_of(be, id, ctx).try(),
+            be.want_of(id, ctx).try(),
             out
         ),
-        false => call_or_inline(be, id, c, d, f, recv, ctx, out),
+        false => be.call_or_inline(id, c, d, f, recv, ctx, out),
     })
 }
 
@@ -629,9 +623,9 @@ call_or_inline = (
     out  :: String
 )
                  Res<(), AllocError> {
-    inlines(be, c, f).match({
-        true  => inline_call(be, id, c, d, f, recv, ctx, out),
-        false => call_or_floor(be, id, c, d, f, recv, ctx, out),
+    be.inlines(c, f).match({
+        true  => be.inline_call(id, c, d, f, recv, ctx, out),
+        false => be.call_or_floor(id, c, d, f, recv, ctx, out),
     })
 }
 
@@ -650,8 +644,8 @@ call_or_floor = (
 )
                 Res<(), AllocError> {
     is_null_ptr(d.name).match({
-        true  => lower_null_ptr(be, id, want_of(be, id, ctx).try(), out),
-        false => call_or_format(be, id, c, d, f, recv, ctx, out),
+        true  => be.lower_null_ptr(id, be.want_of(id, ctx).try(), out),
+        false => be.call_or_format(id, c, d, f, recv, ctx, out),
     })
 }
 
@@ -670,9 +664,9 @@ call_or_format = (
     out  :: String
 )
                  Res<(), AllocError> {
-    is_format_door(be, d, f).match({
-        true  => lower_format_door(be, id, c, d, f, recv, ctx, out),
-        false => call_or_convert(be, id, c, d, f, recv, ctx, out),
+    be.is_format_door(d, f).match({
+        true  => be.lower_format_door(id, c, d, f, recv, ctx, out),
+        false => be.call_or_convert(id, c, d, f, recv, ctx, out),
     })
 }
 
@@ -702,8 +696,8 @@ call_or_convert = (
 )
                   Res<(), AllocError> {
     convert_target(d, f).match({
-        Ok(t) => lower_convert(be, c, d, t, recv, ctx, out),
-        None  => call_signature(be, id, c, d, f, recv, ctx, out),
+        Ok(t) => be.lower_convert(c, d, t, recv, ctx, out),
+        None  => be.call_signature(id, c, d, f, recv, ctx, out),
     })
 }
 
@@ -750,7 +744,7 @@ lower_convert = (
                 Res<(), AllocError> {
     recv_arg(c, recv).match({
         None  => out.add_bytes("0"),
-        Ok(v) => write_convert(be, d, v, target, ctx, out),
+        Ok(v) => be.write_convert(d, v, target, ctx, out),
     })
 }
 
@@ -782,7 +776,7 @@ write_convert = (
 ) Res<(), AllocError> {
     inst ::= be.alloc.Inst();
     sig  ::= be.alloc.Vec<TyId>();
-    signature_of(be, d, inst, sig).try();
+    be.signature_of(d, inst, sig).try();
     unknown = be.check.types.unknown().try();
     src     = sig.get(0).match({ Ok(t) => t, None => unknown });
     out.fmt("({})(", c_prim(target)).try();
@@ -801,14 +795,14 @@ call_signature = (
     out  :: String
 )
                  Res<(), AllocError> {
-    raw     = inst_at(be, id).try();
-    settled = settled_inst(be, f.tparams, d.qname, raw).try();
-    inst    = complete_inst(be, c, d, f, settled, recv, ctx).try();
+    raw     = be.inst_at(id).try();
+    settled = be.settled_inst(f.tparams, d.qname, raw).try();
+    inst    = be.complete_inst(c, d, f, settled, recv, ctx).try();
     sig ::= be.alloc.Vec<TyId>();
-    ok = signature_of(be, d, inst, sig).try();
+    ok = be.signature_of(d, inst, sig).try();
     ok.match({
-        false => unsupported(be, id, plain_fault(be, d), out),
-        true  => call_settled(be, id, c, d, f, sig, inst, recv, ctx, out),
+        false => be.unsupported(id, be.plain_fault(d), out),
+        true  => be.call_settled(id, c, d, f, sig, inst, recv, ctx, out),
     })
 }
 
@@ -827,14 +821,13 @@ call_settled = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    (inst_open(be, inst) || any_open(be, sig)).match({
-        true  => unsupported(
-            be,
+    (be.inst_open(inst) || be.any_open(sig)).match({
+        true  => be.unsupported(
             id,
             "a generic call whose type arguments nothing settles",
             out
         ),
-        false => call_reachable(be, id, c, d, f, sig, inst, recv, ctx, out),
+        false => be.call_reachable(id, c, d, f, sig, inst, recv, ctx, out),
     })
 }
 
@@ -862,7 +855,7 @@ call_reachable = (
     sym ::= be.alloc.String().try();
     sym_fn(sym, be.check.types, be.check.world, d.qname, sig, inst).try();
     be.need_function(d, inst, sym.view()).try();
-    write_call(be, c, d, f, sig, sym.view(), recv, ctx, out)
+    be.write_call(c, d, f, sig, sym.view(), recv, ctx, out)
 }
 
 // Which of the things a callee can be that this backend does not lower.
@@ -892,7 +885,7 @@ signature_of* = (be :: CBackend, d: Def, inst: Inst, sig :: Vec<TyId>)
     decl_at(be.tree, d.id).match({
         None  => Ok(false),
         Ok(x) => x.kind.match({
-            Function(f) => params_into(be, d, f, inst, sig),
+            Function(f) => be.params_into(d, f, inst, sig),
             _           => Ok(false),
         }),
     })
@@ -905,9 +898,9 @@ params_into = (
     inst : Inst,
     sig  :: Vec<TyId>
 ) Res<bool, AllocError> {
-    mark = enter_tparams(be, f.tparams, d.qname).try();
-    ok   = collect_params(be, d, f.params, inst, sig).try();
-    leave_tparams(be, mark).try();
+    mark = be.enter_tparams(f.tparams, d.qname).try();
+    ok   = be.collect_params(d, f.params, inst, sig).try();
+    be.leave_tparams(mark).try();
     Ok(ok);
 }
 
@@ -929,7 +922,7 @@ collect_params = (
     );
     params.loop((h, p) {
         p.type.match({
-            Ok(t) => add_param(be, t, ctx, inst, sig),
+            Ok(t) => be.add_param(t, ctx, inst, sig),
             None  => Ok(()),
         }).try();
     });
@@ -948,7 +941,7 @@ add_param = (
     sig  :: Vec<TyId>
 ) Res<(), AllocError> {
     declared = be.check.type_from_ast(t, ctx).try();
-    sig.add(sub_with(be, declared, inst).try())
+    sig.add(be.sub_with(declared, inst).try())
 }
 
 write_call = (
@@ -964,7 +957,7 @@ write_call = (
 )
              Res<(), AllocError> {
     out.fmt("{sym}(").try();
-    first = write_receiver(be, recv, f, sig, ctx, out).try();
+    first = be.write_receiver(recv, f, sig, ctx, out).try();
     be.write_call_args(c, first, f, sig, ctx, out).try();
     out.add_bytes(")").try();
     Ok(());
@@ -1191,7 +1184,7 @@ write_receiver = (
                  Res<usize, AllocError> {
     recv.match({
         None     => Ok(0),
-        Ok(base) => write_recv_expr(be, base, f, sig, ctx, out),
+        Ok(base) => be.write_recv_expr(base, f, sig, ctx, out),
     })
 }
 
@@ -1204,7 +1197,7 @@ write_recv_expr = (
     out  :: String
 )
                   Res<usize, AllocError> {
-    write_arg(be, base, 0, f, sig, ctx, out).try();
+    be.write_arg(base, 0, f, sig, ctx, out).try();
     Ok(1);
 }
 
@@ -1225,7 +1218,7 @@ write_arg* = (
     want = sig.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
     by_ref(f, i).match({
         false => expr(be, value, ctx, want, out),
-        true  => write_address(be, value, ctx, want, out),
+        true  => be.write_address(value, ctx, want, out),
     })
 }
 

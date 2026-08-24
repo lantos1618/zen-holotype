@@ -69,10 +69,10 @@ MAX_TYPE_PASSES* : usize = 8
 ctype* = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
     be.types().at(id).match({
         Prim(p)  => out.add_bytes(c_prim(p.name)),
-        Named(n) => maybe_ptr(be, id, n, out),
-        Res(_)   => named_ctype(be, id, out),
-        Union(_) => named_ctype(be, id, out),
-        Array(_) => named_ctype(be, id, out),
+        Named(n) => be.maybe_ptr(id, n, out),
+        Res(_)   => be.named_ctype(id, out),
+        Union(_) => be.named_ctype(id, out),
+        Array(_) => be.named_ctype(id, out),
         _        => out.add_bytes("int"),
     }).try();
     Ok(());
@@ -91,8 +91,8 @@ ctype* = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
 maybe_ptr = (be :: CBackend, id: TyId, n: TyNamed, out :: String)
             Res<(), AllocError> {
     is_ptr_named(n).match({
-        true  => ptr_ctype(be, n, out),
-        false => maybe_scope(be, id, n, out),
+        true  => be.ptr_ctype(n, out),
+        false => be.maybe_scope(id, n, out),
     })
 }
 
@@ -106,7 +106,7 @@ maybe_scope = (be :: CBackend, id: TyId, n: TyNamed, out :: String)
               Res<(), AllocError> {
     is_scope_named(n).match({
         true  => out.add_bytes("zg_scope *"),
-        false => named_ctype(be, id, out),
+        false => be.named_ctype(id, out),
     })
 }
 
@@ -119,20 +119,20 @@ is_scope_named* = (n: TyNamed) bool { n.name.eq("Scope") }
 ptr_ctype = (be :: CBackend, n: TyNamed, out :: String)
             Res<(), AllocError> {
     n.args.get(0).match({
-        Ok(t) => elem_ctype(be, t, out),
+        Ok(t) => be.elem_ctype(t, out),
         None  => out.add_bytes("void *"),
     })
 }
 
 elem_ctype = (be :: CBackend, t: TyId, out :: String) Res<(), AllocError> {
-    request_type(be, t).try();
-    ctype(be, t, out).try();
+    be.request_type(t).try();
+    be.ctype(t, out).try();
     out.add_bytes(" *").try();
     Ok(());
 }
 
 named_ctype = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
-    request_type(be, id).try();
+    be.request_type(id).try();
     sym_type(out, be.types(), be.world(), id)
 }
 
@@ -141,7 +141,7 @@ named_ctype = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
 declarator* = (be :: CBackend, id: TyId, name: str, out :: String)
               Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, id, cty).try();
+    be.ctype(id, cty).try();
     out.fmt("{} {name}", cty.view())
 }
 
@@ -223,8 +223,8 @@ is_signed* = (name: str) bool {
 // its identity (see the header).
 request_type* = (be :: CBackend, id: TyId) Res<(), AllocError> {
     ptr_element(be, id).match({
-        Ok(et) => request_type(be, et),
-        None   => request_defined(be, id),
+        Ok(et) => be.request_type(et),
+        None   => be.request_defined(id),
     })
 }
 
@@ -232,9 +232,9 @@ request_type* = (be :: CBackend, id: TyId) Res<(), AllocError> {
 // is the runtime's, and queueing the declaration would emit the `defer`
 // FIELD `maybe_scope` refuses to spell.
 request_defined = (be :: CBackend, id: TyId) Res<(), AllocError> {
-    is_scope_type(be, id).match({
+    be.is_scope_type(id).match({
         true  => Ok(()),
-        false => queue_definition(be, id),
+        false => be.queue_definition(id),
     })
 }
 
@@ -277,7 +277,7 @@ queue_definition = (be :: CBackend, id: TyId) Res<(), AllocError> {
 close_types* = (be :: CBackend) Res<(), AllocError> {
     Range(0, MAX_TYPE_PASSES).loop((h, pass) {
         n = be.type_names.len;
-        Range(0, n).loop((hh, i) { request_children(be, i).try() });
+        Range(0, n).loop((hh, i) { be.request_children(i).try() });
     });
     Ok(());
 }
@@ -285,17 +285,17 @@ close_types* = (be :: CBackend) Res<(), AllocError> {
 request_children = (be :: CBackend, i: usize) Res<(), AllocError> {
     be.type_id_at(i).match({
         None   => Ok(()),
-        Ok(id) => request_members(be, id),
+        Ok(id) => be.request_members(id),
     }).try();
     Ok(());
 }
 
 request_members = (be :: CBackend, id: TyId) Res<(), AllocError> {
     be.types().at(id).match({
-        Named(n) => request_named_members(be, n, id),
-        Res(r)   => request_res_members(be, r),
-        Union(u) => request_union_members(be, u.members),
-        Array(a) => request_if_composite(be, a.elem),
+        Named(n) => be.request_named_members(n, id),
+        Res(r)   => be.request_res_members(r),
+        Union(u) => be.request_union_members(u.members),
+        Array(a) => be.request_if_composite(a.elem),
         _        => Ok(()),
     }).try();
     Ok(());
@@ -303,7 +303,7 @@ request_members = (be :: CBackend, id: TyId) Res<(), AllocError> {
 
 request_union_members = (be :: CBackend, members: Vec<TyId>)
                         Res<(), AllocError> {
-    members.loop((h, m) { request_if_composite(be, m).try() });
+    members.loop((h, m) { be.request_if_composite(m).try() });
     Ok(());
 }
 
@@ -314,30 +314,30 @@ request_union_members = (be :: CBackend, members: Vec<TyId>)
 // report a cycle that is not there.
 request_named_members = (be :: CBackend, n: TyNamed, id: TyId)
                         Res<(), AllocError> {
-    request_decl_members(be, n).try();
-    request_slots(be, id).try();
+    be.request_decl_members(n).try();
+    be.request_slots(id).try();
     Ok(());
 }
 
 request_res_members = (be :: CBackend, r: TyRes) Res<(), AllocError> {
-    request_if_composite(be, r.value).try();
-    is_failure(r.form).then(() { request_if_composite(be, r.error).try() });
+    be.request_if_composite(r.value).try();
+    is_failure(r.form).then(() { be.request_if_composite(r.error).try() });
     Ok(());
 }
 
 request_if_composite = (be :: CBackend, id: TyId) Res<(), AllocError> {
-    is_unit(be, id).match({
+    be.is_unit(id).match({
         true  => Ok(()),
-        false => request_if_named(be, id),
+        false => be.request_if_named(id),
     })
 }
 
 request_if_named = (be :: CBackend, id: TyId) Res<(), AllocError> {
     be.types().at(id).match({
-        Named(_) => request_type(be, id),
-        Res(_)   => request_type(be, id),
-        Union(_) => request_type(be, id),
-        Array(_) => request_type(be, id),
+        Named(_) => be.request_type(id),
+        Res(_)   => be.request_type(id),
+        Union(_) => be.request_type(id),
+        Array(_) => be.request_type(id),
         _        => Ok(()),
     })
 }
@@ -345,7 +345,7 @@ request_if_named = (be :: CBackend, id: TyId) Res<(), AllocError> {
 request_decl_members = (be :: CBackend, n: TyNamed) Res<(), AllocError> {
     decl_at(be.tree, n.decl).match({
         None  => Ok(()),
-        Ok(d) => request_from_decl(be, n, d),
+        Ok(d) => be.request_from_decl(n, d),
     }).try();
     Ok(());
 }
@@ -357,15 +357,15 @@ request_decl_members = (be :: CBackend, n: TyNamed) Res<(), AllocError> {
 // declaration takes, and `decl_inst` is the second one.
 request_from_decl = (be :: CBackend, n: TyNamed, d: Decl)
                     Res<(), AllocError> {
-    ctx  = decl_ctx(be, n);
-    inst = decl_inst(be, n).try();
-    mark = enter_struct_tparams(be, n.decl).try();
+    ctx  = be.decl_ctx(n);
+    inst = be.decl_inst(n).try();
+    mark = be.enter_struct_tparams(n.decl).try();
     d.kind.match({
-        Struct(s) => request_fields(be, s.members, ctx, inst),
-        Enum(e)   => request_variants(be, n, e.variants, ctx, inst),
+        Struct(s) => be.request_fields(s.members, ctx, inst),
+        Enum(e)   => be.request_variants(n, e.variants, ctx, inst),
         _         => Ok(()),
     }).try();
-    leave_tparams(be, mark).try();
+    be.leave_tparams(mark).try();
     Ok(());
 }
 
@@ -381,9 +381,9 @@ request_fields = (
     inst    : Inst
 ) Res<(), AllocError> {
     members.loop((h, m) {
-        field_type(be, m, ctx, inst).match({
+        be.field_type(m, ctx, inst).match({
             None  => Ok(()),
-            Ok(t) => request_if_composite(be, t),
+            Ok(t) => be.request_if_composite(t),
         }).try();
     });
     Ok(());
@@ -399,7 +399,7 @@ request_variants = (
     variants.loop((h, v) {
         variant_type(be, n, v, ctx, inst).match({
             None  => Ok(()),
-            Ok(t) => request_if_composite(be, t),
+            Ok(t) => be.request_if_composite(t),
         }).try();
     });
     Ok(());
@@ -448,7 +448,7 @@ field_type* = (be :: CBackend, m: Member, ctx: Ctx, inst: Inst)
     m.kind.match({
         Field(fld) => fld.type.match({
             None  => None,
-            Ok(t) => resolved(be, t, ctx, inst),
+            Ok(t) => be.resolved(t, ctx, inst),
         }),
         _          => None,
     })
@@ -470,8 +470,8 @@ variant_type* = (
     inst : Inst
 ) Res<TyId> {
     v.payload.match({
-        Ok(t) => resolved(be, t, ctx, inst),
-        None  => union_member_type(be, n, v),
+        Ok(t) => be.resolved(t, ctx, inst),
+        None  => be.union_member_type(n, v),
     })
 }
 
@@ -507,14 +507,14 @@ bare_variant_type = (be :: CBackend, n: TyNamed, v: Variant) Res<TyId> {
     found ::= be.alloc.Vec<Def>();
     be.world().defs_of(n.decl.module.to_usize(), v.name.text, found).match({
         Err(_) => None,
-        Ok(_)  => named_of(be, found),
+        Ok(_)  => be.named_of(found),
     })
 }
 
 named_of = (be :: CBackend, found: Vec<Def>) Res<TyId> {
     found.get(0).match({
         None  => None,
-        Ok(d) => interned_named(be, d),
+        Ok(d) => be.interned_named(d),
     })
 }
 
@@ -529,12 +529,12 @@ interned_named = (be :: CBackend, d: Def) Res<TyId> {
 resolved = (be :: CBackend, t: TypeId, ctx: Ctx, inst: Inst) Res<TyId> {
     be.check.type_from_ast(t, ctx).match({
         Err(_) => None,
-        Ok(id) => substituted(be, id, inst),
+        Ok(id) => be.substituted(id, inst),
     })
 }
 
 substituted = (be :: CBackend, id: TyId, inst: Inst) Res<TyId> {
-    sub_with(be, id, inst).match({
+    be.sub_with(id, inst).match({
         Err(_) => None,
         Ok(t)  => Ok(t),
     })

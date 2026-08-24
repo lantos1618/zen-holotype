@@ -1507,9 +1507,19 @@ C119. `&c.width` at `DESIGN.md:107` is the sole `&`. The comment marks it an err
 an unrelated reason (computed field), implying `&` parses. Nothing else says so, and
 `DESIGN.md:340` says raw pointers are `Ptr<T>`.
 
-### A-META-ARG — `@meta(self: @Self)`
+### A-META-ARG — `@meta(self: @Self)`  *(settled — M1, `docs/design_meta.md`)*
 C147. A `name: Type` pair as a call argument, occurring twice (`365`, `366`) and
 nowhere else in any argument list except construction (where the RHS is a *value*).
+
+Settled as part of milestone M1 of `docs/design_meta.md`: `name: Type` inside
+`@meta(...)` is a **labelled binding** — `@meta`-specific syntax, not a call
+argument. In a call argument the RHS of `name: ...` is a value; here it is a TYPE.
+The pair binds the name the reflection is about — the receiver that runtime
+projections like `self.at(field)` read from — to the type whose declaration node
+is returned. The parser already reflects this structurally: `Meta` carries its own
+`name` and `type` fields rather than reusing an `Arg`
+(`src/std/parse/parse_expr.zen:541-576`). That it occurs nowhere else in any
+argument list is now the point, not a smell.
 
 ### A-VARIADIC — `args: ...`
 C048. Two occurrences (`356`, `517`), never defined. Interacts with A-ELIDE.

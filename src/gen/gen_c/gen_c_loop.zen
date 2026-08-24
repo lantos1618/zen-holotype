@@ -83,8 +83,8 @@ lower_loop* = (
     }).try();
     c.args.loop((h, a) { args.add(a.value).try(); });
     args.get(args.len - 1).match({
-        None  => unsupported(be, id, "a loop with no body", out),
-        Ok(b) => lower_with_body(be, id, f, args, b, ctx, want, out),
+        None  => be.unsupported(id, "a loop with no body", out),
+        Ok(b) => be.lower_with_body(id, f, args, b, ctx, want, out),
     })
 }
 
@@ -98,14 +98,13 @@ lower_with_body = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    lambda_at(be, body).match({
-        None    => unsupported(
-            be,
+    be.lambda_at(body).match({
+        None    => be.unsupported(
             id,
             "a loop body written somewhere other than the call site",
             out
         ),
-        Ok(lam) => lower_shaped(be, id, f, args, lam, ctx, want, out),
+        Ok(lam) => be.lower_shaped(id, f, args, lam, ctx, want, out),
     })
 }
 
@@ -127,18 +126,17 @@ lower_shaped = (
     out  :: String
 )
                Res<(), AllocError> {
-    sh = shape_of(be, f).try();
+    sh = be.shape_of(f).try();
     sh.wants_acc.match({
-        true  => lower_fold(be, id, sh, args, lam, ctx, want, out),
-        false => lower_walk(
-            be,
+        true  => be.lower_fold(id, sh, args, lam, ctx, want, out),
+        false => be.lower_walk(
             id,
             sh,
             args,
             lam,
             ctx,
             want,
-            no_fold(be).try(),
+            be.no_fold().try(),
             out
         ),
     })
@@ -162,10 +160,10 @@ lower_walk* = (
     out  :: String
 )
              Res<(), AllocError> {
-    lead = first_lead(be, args);
+    lead = be.first_lead(args);
     lead.match({
-        None    => lower_forever(be, id, sh, None, lam, ctx, want, fold, out),
-        Ok(one) => lower_led(be, id, sh, one, lam, ctx, want, fold, out),
+        None    => be.lower_forever(id, sh, None, lam, ctx, want, fold, out),
+        Ok(one) => be.lower_led(id, sh, one, lam, ctx, want, fold, out),
     })
 }
 
@@ -188,9 +186,9 @@ lower_led = (
     out  :: String
 )
             Res<(), AllocError> {
-    is_cond(be, one).match({
-        true  => lower_forever(be, id, sh, Ok(one), lam, ctx, want, fold, out),
-        false => lower_range(be, id, sh, one, lam, ctx, want, fold, out),
+    be.is_cond(one).match({
+        true  => be.lower_forever(id, sh, Ok(one), lam, ctx, want, fold, out),
+        false => be.lower_range(id, sh, one, lam, ctx, want, fold, out),
     })
 }
 
@@ -211,20 +209,19 @@ lower_impl_walk = (
     out  :: String
 ) Res<(), AllocError> {
     fold.has.match({
-        true  => unsupported(
-            be,
+        true  => be.unsupported(
             id,
             "a fold over a range whose bounds an impl supplies",
             out
         ),
-        false => lower_supplied(be, id, sh, one, rty, lam, ctx, want, out),
+        false => be.lower_supplied(id, sh, one, rty, lam, ctx, want, out),
     })
 }
 
 // The condition form's first argument is `() bool` — a lambda taking no
 // parameters. A range never is.
 is_cond = (be :: CBackend, one: ExprId) bool {
-    lambda_at(be, one).match({
+    be.lambda_at(one).match({
         None    => false,
         Ok(lam) => lam.params.len == 0,
     })
@@ -245,17 +242,17 @@ lower_forever = (
     fold : Fold,
     out  :: String
 ) Res<(), AllocError> {
-    st = open_result(be, want, out).try();
+    st = be.open_result(want, out).try();
     counter ::= be.alloc.String().try();
     sh.wants_index.match({
-        true  => open_counter(be, counter),
+        true  => be.open_counter(counter),
         false => Ok(()),
     }).try();
     be.writeln("for (;;) {").try();
     be.indent();
     cond.match({
         None    => Ok(()),
-        Ok(one) => write_cond_guard(be, one, st.brk, ctx),
+        Ok(one) => be.write_cond_guard(one, st.brk, ctx),
     }).try();
     usize_ty = be.check.types.prim("usize").try();
     run_body(
@@ -269,7 +266,7 @@ lower_forever = (
         fold,
         ctx
     ).try();
-    close_pass(be, st, counter.view(), fold).try();
+    be.close_pass(st, counter.view(), fold).try();
     Ok(());
 }
 
@@ -279,9 +276,9 @@ lower_forever = (
 // loop, where a `for (;;)` puts what a `while` would have in its head.
 write_cond_guard = (be :: CBackend, one: ExprId, brk: usize, ctx: Ctx)
                    Res<(), AllocError> {
-    lambda_at(be, one).match({
+    be.lambda_at(one).match({
         None    => Ok(()),
-        Ok(lam) => write_cond_body(be, lam, brk, ctx),
+        Ok(lam) => be.write_cond_body(lam, brk, ctx),
     })
 }
 
@@ -291,7 +288,7 @@ write_cond_body = (be :: CBackend, lam: Lambda, brk: usize, ctx: Ctx)
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "c", be.next_tmp()).try();
     decl ::= be.alloc.String().try();
-    declarator(be, bool_ty, tmp.view(), decl).try();
+    be.declarator(bool_ty, tmp.view(), decl).try();
     be.fmt("{};\n", decl.view()).try();
     cmark = be.check.mark();
     lmark = be.mark();
@@ -326,15 +323,14 @@ lower_range = (
     out  :: String
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    rty     = ty_of(be, one, ctx, unknown).try();
+    rty     = be.ty_of(one, ctx, unknown).try();
     // A FIXED ARRAY IS ASKED ABOUT FIRST because it satisfies `Range`
     // intrinsically: it stores no `start` and no `end`, and it has no
     // declaration for an impl to live on, so neither of the two readings
     // below would find it. `gen_c_array.zen` says why that is the only
     // way `[T, N]` can satisfy anything.
-    array_of(be, rty).match({
-        Ok(a) => lower_array_walk(
-            be,
+    be.array_of(rty).match({
+        Ok(a) => be.lower_array_walk(
             sh,
             one,
             rty,
@@ -345,8 +341,7 @@ lower_range = (
             fold,
             out
         ),
-        None  => lower_range_impl(
-            be,
+        None  => be.lower_range_impl(
             id,
             sh,
             one,
@@ -372,7 +367,7 @@ lower_range_impl = (
     fold : Fold,
     out  :: String
 ) Res<(), AllocError> {
-    supplies_bounds(be, rty).match({
+    be.supplies_bounds(rty).match({
         false => lower_impl_walk(
             be,
             id,
@@ -385,7 +380,7 @@ lower_range_impl = (
             fold,
             out
         ),
-        true  => lower_settled(be, id, sh, one, rty, lam, ctx, want, fold, out),
+        true  => be.lower_settled(id, sh, one, rty, lam, ctx, want, fold, out),
     })
 }
 
@@ -410,8 +405,8 @@ lower_settled = (
     out  :: String
 ) Res<(), AllocError> {
     elem    = be.check.types.prim("usize").try();
-    settled = settle_res(be, want, elem).try();
-    lower_bounded(be, id, sh, one, rty, lam, ctx, settled, fold, out)
+    settled = be.settle_res(want, elem).try();
+    be.lower_bounded(id, sh, one, rty, lam, ctx, settled, fold, out)
 }
 
 // The loop's `Res<T>` at a `T` the backend worked out, or the written
@@ -437,21 +432,21 @@ lower_bounded = (
     fold : Fold,
     out  :: String
 ) Res<(), AllocError> {
-    rng = walk_temp(be, one, rty, ctx).try();
+    rng = be.walk_temp(one, rty, ctx).try();
 
-    st       = open_result(be, want, out).try();
+    st       = be.open_result(want, out).try();
     usize_ty = be.check.types.prim("usize").try();
     counter ::= be.alloc.String().try();
     sym_gen(counter, "i", be.next_tmp()).try();
     base ::= be.alloc.String().try();
     sym_gen(base, "b", be.next_tmp()).try();
-    declare_usize(be, counter.view()).try();
-    declare_usize(be, base.view()).try();
+    be.declare_usize(counter.view()).try();
+    be.declare_usize(base.view()).try();
     limit ::= be.alloc.String().try();
     sym_gen(limit, "n", be.next_tmp()).try();
-    declare_usize(be, limit.view()).try();
-    assign_member(be, counter.view(), rng.view(), "start").try();
-    assign_member(be, limit.view(), rng.view(), "end").try();
+    be.declare_usize(limit.view()).try();
+    be.assign_member(counter.view(), rng.view(), "start").try();
+    be.assign_member(limit.view(), rng.view(), "end").try();
     be.fmt("{} = {};\n", base.view(), counter.view()).try();
 
     be.fmt("while ({} < {}) {\n", counter.view(), limit.view()).try();
@@ -467,7 +462,7 @@ lower_bounded = (
         fold,
         ctx
     ).try();
-    close_pass(be, st, counter.view(), fold).try();
+    be.close_pass(st, counter.view(), fold).try();
     Ok(());
 }
 
@@ -481,7 +476,7 @@ walk_temp* = (be :: CBackend, one: ExprId, rty: TyId, ctx: Ctx)
     rng ::= be.alloc.String().try();
     sym_gen(rng, "r", be.next_tmp()).try();
     decl ::= be.alloc.String().try();
-    declarator(be, rty, rng.view(), decl).try();
+    be.declarator(rty, rng.view(), decl).try();
     init ::= be.alloc.String().try();
     expr(be, one, ctx, rty, init).try();
     be.fmt("{} = {};\n", decl.view(), init.view()).try();
@@ -491,7 +486,7 @@ walk_temp* = (be :: CBackend, one: ExprId, rty: TyId, ctx: Ctx)
 declare_usize* = (be :: CBackend, name: str) Res<(), AllocError> {
     usize_ty = be.check.types.prim("usize").try();
     decl ::= be.alloc.String().try();
-    declarator(be, usize_ty, name, decl).try();
+    be.declarator(usize_ty, name, decl).try();
     be.fmt("{};\n", decl.view())
 }
 
@@ -518,10 +513,10 @@ open_result* = (be :: CBackend, want: TyId, out :: String)
     brk = be.next_tmp();
     cnt = be.next_tmp();
     result ::= be.alloc.String().try();
-    keep = wants_result(be, want);
+    keep = be.wants_result(want);
     keep.match({
         false => Ok(()),
-        true  => open_result_temp(be, want, result),
+        true  => be.open_result_temp(want, result),
     }).try();
     // A loop with no storage still writes `0` where the expression goes,
     // for the reason `gen_c_inline.zen`'s `write_result` gives.
@@ -557,9 +552,9 @@ open_result_temp = (be :: CBackend, want: TyId, result :: String)
                    Res<(), AllocError> {
     sym_gen(result, "v", be.next_tmp()).try();
     decl ::= be.alloc.String().try();
-    declarator(be, want, result.view(), decl).try();
+    be.declarator(want, result.view(), decl).try();
     cty ::= be.alloc.String().try();
-    ctype(be, want, cty).try();
+    be.ctype(want, cty).try();
     none ::= be.alloc.String().try();
     sym_variant(none, RES_PATH, "None").try();
     be.fmt("{} = ({}){ .zg_tag = {} };\n", decl.view(), cty.view(), none.view())
@@ -582,15 +577,15 @@ run_body* = (
            Res<(), AllocError> {
     cmark = be.check.mark();
     lmark = be.mark();
-    bind_handle(be, lam).try();
-    bind_threaded(be, sh, lam, counter, base, value, ety).try();
-    bind_acc(be, sh, lam, fold).try();
+    be.bind_handle(lam).try();
+    be.bind_threaded(sh, lam, counter, base, value, ety).try();
+    be.bind_acc(sh, lam, fold).try();
     // A FOLD'S BODY IS ITS OWN VALUE: the pass computes the next
     // accumulator and the assignment is the thread. Every other shape
     // discards, which is what makes `()` its body's declared type.
     fold.has.match({
         true  => block(be, lam.body, ctx, fold.ty, Dest.Into(fold.cell)),
-        false => discard_body(be, lam, ctx),
+        false => be.discard_body(lam, ctx),
     }).try();
     be.release(lmark).try();
     be.check.release(cmark).try();
@@ -634,7 +629,7 @@ bind_threaded = (
 ) Res<(), AllocError> {
     (sh.wants_index || sh.wants_value).match({
         false => Ok(()),
-        true  => bind_named(be, sh, lam, counter, base, value, ety),
+        true  => be.bind_named(sh, lam, counter, base, value, ety),
     })
 }
 
@@ -648,8 +643,8 @@ bind_named = (
     ety     : TyId
 ) Res<(), AllocError> {
     (sh.wants_index && sh.wants_value).match({
-        true  => bind_pair(be, lam, counter, base, value, ety),
-        false => bind_single(be, sh, lam, counter, base, value, ety),
+        true  => be.bind_pair(lam, counter, base, value, ety),
+        false => be.bind_single(sh, lam, counter, base, value, ety),
     })
 }
 
@@ -663,8 +658,8 @@ bind_pair = (
     value   : str,
     ety     : TyId
 ) Res<(), AllocError> {
-    bind_index(be, lam, 1, counter, base).try();
-    bind_element(be, lam, 2, value, ety).try();
+    be.bind_index(lam, 1, counter, base).try();
+    be.bind_element(lam, 2, value, ety).try();
     Ok(());
 }
 
@@ -678,8 +673,8 @@ bind_single = (
     ety     : TyId
 ) Res<(), AllocError> {
     sh.wants_index.match({
-        true  => bind_index(be, lam, 1, counter, base),
-        false => bind_element(be, lam, 1, value, ety),
+        true  => be.bind_index(lam, 1, counter, base),
+        false => be.bind_element(lam, 1, value, ety),
     })
 }
 
@@ -695,7 +690,7 @@ bind_index = (
 ) Res<(), AllocError> {
     lam.params.get(i).match({
         None  => Ok(()),
-        Ok(p) => bind_offset(be, p, counter, base),
+        Ok(p) => be.bind_offset(p, counter, base),
     })
 }
 
@@ -707,7 +702,7 @@ bind_offset = (be :: CBackend, p: Param, counter: str, base: str)
         true  => write_offset(counter, base, text),
         false => text.add_bytes(counter),
     }).try();
-    bind_text(be, p.name.text, usize_ty, text.view())
+    be.bind_text(p.name.text, usize_ty, text.view())
 }
 
 bind_element* = (
@@ -719,7 +714,7 @@ bind_element* = (
 ) Res<(), AllocError> {
     lam.params.get(i).match({
         None  => Ok(()),
-        Ok(p) => bind_text(be, p.name.text, ety, value),
+        Ok(p) => be.bind_text(p.name.text, ety, value),
     })
 }
 
@@ -732,7 +727,7 @@ write_offset = (counter: str, base: str, out :: String)
 // one from.
 open_counter = (be :: CBackend, counter :: String) Res<(), AllocError> {
     sym_gen(counter, "i", be.next_tmp()).try();
-    declare_usize(be, counter.view()).try();
+    be.declare_usize(counter.view()).try();
     be.fmt("{} = 0;\n", counter.view())
 }
 
@@ -745,7 +740,7 @@ close_pass* = (be :: CBackend, st: LoopFrame, counter: str, fold: Fold)
     be.writeln(": ;").try();
     (counter.len > 0).match({
         false => Ok(()),
-        true  => step_counter(be, counter),
+        true  => be.step_counter(counter),
     }).try();
     be.dedent();
     be.writeln("}").try();
@@ -753,7 +748,7 @@ close_pass* = (be :: CBackend, st: LoopFrame, counter: str, fold: Fold)
     // result was seeded `None` before the first pass, and this is the
     // one place it becomes `Ok(acc)`. It is written BEFORE the break
     // label, so `h.break(v)` — which jumps past it — still wins.
-    write_fold_result(be, st, fold).try();
+    be.write_fold_result(st, fold).try();
     write_label(be, "brk", st.brk).try();
     be.writeln(": ;").try();
     be.pop_loop().try();

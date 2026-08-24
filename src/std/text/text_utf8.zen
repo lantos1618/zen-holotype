@@ -47,9 +47,9 @@ codepoint_at* = (s: str, at: usize) Res<Codepoint, Utf8Error> {
     lead = s.get(at).ok_or(Utf8Error.Invalid(at)).try();
     sequence_len(lead).match({
         1 => Ok(Codepoint(value: lead.to_u32(), len: 1)),
-        2 => two_byte(s, at, lead),
-        3 => three_byte(s, at, lead),
-        4 => four_byte(s, at, lead),
+        2 => s.two_byte(at, lead),
+        3 => s.three_byte(at, lead),
+        4 => s.four_byte(at, lead),
         _ => Err(Utf8Error.Invalid(at)),
     });
 }
@@ -132,14 +132,14 @@ continuation = (s: str, at: usize) Res<u32, Utf8Error> {
 // no value check: UTF8_LEAD_2_MIN already excludes the only two overlong
 // leads a 2-byte sequence has
 two_byte = (s: str, at: usize, lead: u8) Res<Codepoint, Utf8Error> {
-    c1    = continuation(s, at + 1).try();
+    c1    = s.continuation(at + 1).try();
     value = (lead - UTF8_LEAD_MIN).to_u32() * UTF8_CONT_SCALE + c1;
     Ok(Codepoint(value: value, len: 2));
 }
 
 three_byte = (s: str, at: usize, lead: u8) Res<Codepoint, Utf8Error> {
-    c1    = continuation(s, at + 1).try();
-    c2    = continuation(s, at + 2).try();
+    c1    = s.continuation(at + 1).try();
+    c2    = s.continuation(at + 2).try();
     value = (lead - UTF8_LEAD_3_MIN).to_u32() * UTF8_CONT_SCALE * UTF8_CONT_SCALE
         + c1 * UTF8_CONT_SCALE
         + c2;
@@ -153,9 +153,9 @@ three_byte = (s: str, at: usize, lead: u8) Res<Codepoint, Utf8Error> {
 }
 
 four_byte = (s: str, at: usize, lead: u8) Res<Codepoint, Utf8Error> {
-    c1    = continuation(s, at + 1).try();
-    c2    = continuation(s, at + 2).try();
-    c3    = continuation(s, at + 3).try();
+    c1    = s.continuation(at + 1).try();
+    c2    = s.continuation(at + 2).try();
+    c3    = s.continuation(at + 3).try();
     value = (lead - UTF8_LEAD_4_MIN).to_u32()
             * UTF8_CONT_SCALE * UTF8_CONT_SCALE * UTF8_CONT_SCALE
         + c1 * UTF8_CONT_SCALE * UTF8_CONT_SCALE

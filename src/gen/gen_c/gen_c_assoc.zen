@@ -61,8 +61,8 @@ lower_assoc_call* = (
 )
                     Res<bool, AllocError> {
     be.check.module_named_by(ty).match({
-        Ok(mi) => lower_module_call(be, id, c, a, mi, ctx, out),
-        None   => lower_type_assoc(be, id, c, a, ty, ctx, out),
+        Ok(mi) => be.lower_module_call(id, c, a, mi, ctx, out),
+        None   => be.lower_type_assoc(id, c, a, ty, ctx, out),
     })
 }
 
@@ -78,7 +78,7 @@ lower_type_assoc = (
                    Res<bool, AllocError> {
     site_of(be, ty).try().match({
         None  => Ok(false),
-        Ok(s) => assoc_at_site(be, id, c, a, ty, s, ctx, out),
+        Ok(s) => be.assoc_at_site(id, c, a, ty, s, ctx, out),
     })
 }
 
@@ -107,7 +107,7 @@ lower_module_call = (
     be.check.world.exported_defs(mi, a.name.text, found).try();
     found.get(0).match({
         None  => Ok(false),
-        Ok(d) => lower_module_def(be, id, c, d, ctx, out),
+        Ok(d) => be.lower_module_def(id, c, d, ctx, out),
     })
 }
 
@@ -120,8 +120,8 @@ lower_module_def = (
     out :: String
 ) Res<bool, AllocError> {
     d.kind.match({
-        FunctionDef => lower_module_fn(be, id, c, d, ctx, out),
-        StructDef   => module_construct(be, id, c, d, ctx, out),
+        FunctionDef => be.lower_module_fn(id, c, d, ctx, out),
+        StructDef   => be.module_construct(id, c, d, ctx, out),
         _           => Ok(false),
     })
 }
@@ -149,7 +149,7 @@ lower_module_fn = (
     decl_at(be.tree, d.id).match({
         None  => Ok(false),
         Ok(x) => x.kind.match({
-            Function(f) => module_fn_decl(be, id, c, d, f, ctx, out),
+            Function(f) => be.module_fn_decl(id, c, d, f, ctx, out),
             _           => Ok(false),
         }),
     })
@@ -174,17 +174,16 @@ module_fn_decl = (
 ) Res<bool, AllocError> {
     inst ::= be.alloc.Inst();
     sig  ::= be.alloc.Vec<TyId>();
-    read = signature_of(be, d, inst, sig).try();
+    read = be.signature_of(d, inst, sig).try();
     (read && plain(f) && has_body(f)).match({
-        false => refuse_module_fn(be, id, out),
-        true  => write_module_call(be, c, d, f, sig, inst, ctx, out),
+        false => be.refuse_module_fn(id, out),
+        true  => be.write_module_call(c, d, f, sig, inst, ctx, out),
     })
 }
 
 refuse_module_fn = (be :: CBackend, id: ExprId, out :: String)
                    Res<bool, AllocError> {
-    unsupported(
-        be,
+    be.unsupported(
         id,
         "a generic or bodiless function reached through a module",
         out
@@ -210,7 +209,7 @@ write_module_call = (
     be.need_function(d, inst, sym.view()).try();
     out.fmt("{}(", sym.view()).try();
     c.args.loop((h, i, arg) {
-        write_assoc_arg(be, arg, i, f, sig, ctx, out).try();
+        be.write_assoc_arg(arg, i, f, sig, ctx, out).try();
     });
     out.add_bytes(")").try();
     Ok(true);
@@ -229,13 +228,13 @@ assoc_at_site = (
     found ::= be.alloc.Vec<Member>();
     member_at(be, s, a.name.text, found).try();
     kept ::= be.alloc.Vec<Member>();
-    keep_assoc(be, found, ty, s, kept).try();
+    be.keep_assoc(found, ty, s, kept).try();
     // AT THE ARITY WRITTEN — the rule a method call reads two members
     // of one name by, minus the receiver: every argument is one of the
     // declaration's own.
     by_arity(be, kept, c.args.len).match({
         None  => Ok(false),
-        Ok(m) => assoc_member(be, id, c, a, ty, s, m, ctx, out),
+        Ok(m) => be.assoc_member(id, c, a, ty, s, m, ctx, out),
     })
 }
 
@@ -252,7 +251,7 @@ assoc_member = (
 )
                Res<bool, AllocError> {
     m.kind.match({
-        Function(f) => write_assoc_call(be, id, c, a, ty, s, f, ctx, out),
+        Function(f) => be.write_assoc_call(id, c, a, ty, s, f, ctx, out),
         _           => Ok(false),
     })
 }
@@ -264,7 +263,7 @@ keep_assoc = (
     s     : Site,
     out   :: Vec<Member>
 ) Res<(), AllocError> {
-    found.loop((h, m) { keep_if_assoc(be, m, ty, s, out).try() });
+    found.loop((h, m) { be.keep_if_assoc(m, ty, s, out).try() });
     Ok(());
 }
 
@@ -276,7 +275,7 @@ keep_if_assoc = (
     out :: Vec<Member>
 ) Res<(), AllocError> {
     m.kind.match({
-        Function(f) => keep_receiverless(be, m, f, ty, s, out),
+        Function(f) => be.keep_receiverless(m, f, ty, s, out),
         _           => Ok(()),
     })
 }
@@ -301,16 +300,16 @@ takes_receiver = (be :: CBackend, f: Function, ty: TyId, s: Site)
                  Res<bool, AllocError> {
     f.params.get(0).match({
         None  => Ok(false),
-        Ok(p) => first_is_self(be, p, ty, s),
+        Ok(p) => be.first_is_self(p, ty, s),
     })
 }
 
 first_is_self = (be :: CBackend, p: Param, ty: TyId, s: Site)
                 Res<bool, AllocError> {
     sctx     = be.check.self_ctx(s.decl.module.to_usize(), ty).try();
-    mark     = enter_struct_tparams(be, s.decl).try();
+    mark     = be.enter_struct_tparams(s.decl).try();
     declared = be.check.param_type(p, sctx).try();
-    leave_tparams(be, mark).try();
+    be.leave_tparams(mark).try();
     Ok(declared.eq(ty));
 }
 
@@ -329,12 +328,12 @@ write_assoc_call = (
     out :: String
 )
                    Res<bool, AllocError> {
-    inst = recv_inst(be, ty).try();
+    inst = be.recv_inst(ty).try();
     sig ::= be.alloc.Vec<TyId>();
-    method_sig(be, ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
-    (inst_open(be, inst) || any_open(be, sig)).match({
-        true  => refuse_open(be, id, out),
-        false => emit_assoc_call(be, c, a, ty, s, f, sig, inst, ctx, out),
+    be.method_sig(ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
+    (be.inst_open(inst) || be.any_open(sig)).match({
+        true  => be.refuse_open(id, out),
+        false => be.emit_assoc_call(c, a, ty, s, f, sig, inst, ctx, out),
     })
 }
 
@@ -343,8 +342,7 @@ write_assoc_call = (
 // would be a different function.
 refuse_open = (be :: CBackend, id: ExprId, out :: String)
               Res<bool, AllocError> {
-    unsupported(
-        be,
+    be.unsupported(
         id,
         "an associated function whose type arguments nothing settles",
         out
@@ -364,10 +362,10 @@ emit_assoc_call = (
     ctx  : Ctx,
     out  :: String
 ) Res<bool, AllocError> {
-    sym = member_symbol(be, ty, s, a.name.text, sig, inst).try();
+    sym = be.member_symbol(ty, s, a.name.text, sig, inst).try();
     out.fmt("{}(", sym.view()).try();
     c.args.loop((h, i, arg) {
-        write_assoc_arg(be, arg, i, f, sig, ctx, out).try();
+        be.write_assoc_arg(arg, i, f, sig, ctx, out).try();
     });
     out.add_bytes(")").try();
     Ok(true);
@@ -390,5 +388,5 @@ write_assoc_arg = (
         true  => out.add_bytes(", "),
         false => Ok(()),
     }).try();
-    write_arg(be, arg.value, i, f, sig, ctx, out)
+    be.write_arg(arg.value, i, f, sig, ctx, out)
 }

@@ -34,14 +34,14 @@ Checker = sema.sema_check
 join* = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     c.is_unknown(a).match({
         true  => Ok(b),
-        false => keep_or_settle(c, a, b),
+        false => c.keep_or_settle(a, b),
     })
 }
 
 keep_or_settle = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
-    (open_res(c, a) && (c.is_unknown(b) == false)).match({
-        true  => settled_res(c, a, b),
-        false => settle_reversed(c, a, b),
+    (c.open_res(a) && (c.is_unknown(b) == false)).match({
+        true  => c.settled_res(a, b),
+        false => c.settle_reversed(a, b),
     })
 }
 
@@ -56,8 +56,8 @@ keep_or_settle = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
 // `None`'s type whole and answered `Res<Infer>`, which is the `int`
 // where the payload goes that `settled_res` above exists to prevent.
 settle_reversed = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
-    (open_res(c, b) && (c.is_unknown(a) == false)).match({
-        true  => settled_res(c, b, a),
+    (c.open_res(b) && (c.is_unknown(a) == false)).match({
+        true  => c.settled_res(b, a),
         false => c.settled_literal(a, b),
     })
 }
@@ -89,7 +89,7 @@ settled_literal = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
 literal_reversed = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     (c.is_literal_ty(b) && c.concrete(a) && c.assignable(b, a)).match({
         true  => Ok(a),
-        false => merged_or_first(c, a, b),
+        false => c.merged_or_first(a, b),
     })
 }
 
@@ -111,7 +111,7 @@ concrete = (c: Checker, id: TyId) bool {
 // `int` where `UnOp` goes.
 settled_res = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     c.types.at(b).match({
-        Res(rb) => settled_form(c, a, b, rb),
+        Res(rb) => c.settled_form(a, b, rb),
         _       => Ok(b),
     })
 }
@@ -120,15 +120,15 @@ settled_form = (c :: Checker, a: TyId, b: TyId, rb: TyRes)
                Res<TyId, AllocError> {
     unsettled(c, rb.value).match({
         false => Ok(b),
-        true  => carried_value(c, a, b, rb),
+        true  => c.carried_value(a, b, rb),
     })
 }
 
 carried_value = (c :: Checker, a: TyId, b: TyId, rb: TyRes)
                 Res<TyId, AllocError> {
-    open_value(c, a).match({
+    c.open_value(a).match({
         None  => Ok(b),
-        Ok(v) => at_form(c, v, rb),
+        Ok(v) => c.at_form(v, rb),
     })
 }
 
@@ -153,7 +153,7 @@ at_form = (c :: Checker, value: TyId, rb: TyRes) Res<TyId, AllocError> {
 // never been asked.
 merged_or_first = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     c.types.at(a).match({
-        Res(ra) => merge_against(c, a, b, ra),
+        Res(ra) => c.merge_against(a, b, ra),
         _       => Ok(a),
     })
 }
@@ -161,7 +161,7 @@ merged_or_first = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
 merge_against = (c :: Checker, a: TyId, b: TyId, ra: TyRes)
                 Res<TyId, AllocError> {
     c.types.at(b).match({
-        Res(rb) => merge_failures(c, a, ra, rb),
+        Res(rb) => c.merge_failures(a, ra, rb),
         _       => Ok(a),
     })
 }
@@ -178,7 +178,7 @@ merge_failures = (c :: Checker, a: TyId, ra: TyRes, rb: TyRes)
      && (unsettled(c, ra.error) == false)
      && (unsettled(c, rb.error) == false)).match({
         false => Ok(a),
-        true  => merged_failure(c, ra, rb),
+        true  => c.merged_failure(ra, rb),
     })
 }
 
@@ -194,7 +194,7 @@ is_failure = (r: TyRes) bool {
 // The payload an open `Res` carries, when it carries a settled one.
 open_value = (c: Checker, id: TyId) Res<TyId> {
     c.types.at(id).match({
-        Res(r) => keep_settled(c, r.value),
+        Res(r) => c.keep_settled(r.value),
         _      => None,
     })
 }

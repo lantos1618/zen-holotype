@@ -16,7 +16,7 @@
 // declaration alone is only the fallback — `construct_type` argues it.
 
 ExprId, Decl, Struct, Member = std.ast
-Function, Call, Arg = std.ast
+Call, Arg = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -45,11 +45,11 @@ construct* = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    ty = construct_type(be, id, d, ctx).try();
-    request_type(be, ty).try();
+    ty = be.construct_type(id, d, ctx).try();
+    be.request_type(ty).try();
     decl_at(be.tree, d.id).match({
-        None  => unsupported(be, id, "a construction of an unknown type", out),
-        Ok(x) => construct_decl(be, id, c, x, d, ty, ctx, out),
+        None  => be.unsupported(id, "a construction of an unknown type", out),
+        Ok(x) => be.construct_decl(id, c, x, d, ty, ctx, out),
     })
 }
 
@@ -62,10 +62,10 @@ construct* = (
 construct_type = (be :: CBackend, id: ExprId, d: Def, ctx: Ctx)
                  Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
-    got     = ty_of(be, id, ctx, unknown).try();
+    got     = be.ty_of(id, ctx, unknown).try();
     be.check.is_unknown(got).match({
         false => Ok(got),
-        true  => constructed(be, d),
+        true  => be.constructed(d),
     })
 }
 
@@ -80,8 +80,8 @@ construct_decl = (
     out :: String
 ) Res<(), AllocError> {
     x.kind.match({
-        Struct(s) => construct_struct(be, id, c, s, d, ty, ctx, out),
-        _         => unsupported(be, id, "a construction of a non-struct", out),
+        Struct(s) => be.construct_struct(id, c, s, d, ty, ctx, out),
+        _         => be.unsupported(id, "a construction of a non-struct", out),
     })
 }
 
@@ -100,11 +100,10 @@ construct_struct = (
     out :: String
 )
                    Res<(), AllocError> {
-    named = prim_named(be, s, ty).try();
-    built = settle_construction(be, c, s, d, named, ctx).try();
-    layout_open(be, s, d, built).try().match({
-        true  => unsupported(
-            be,
+    named = be.prim_named(s, ty).try();
+    built = be.settle_construction(c, s, d, named, ctx).try();
+    be.layout_open(s, d, built).try().match({
+        true  => be.unsupported(
             id,
             "a construction whose type arguments nothing settles",
             out
@@ -131,7 +130,7 @@ settle_construction = (
 ) Res<TyId, AllocError> {
     has_var(be.check, ty).match({
         false => Ok(ty),
-        true  => inferred_construction(be, c, s, d, ty, ctx),
+        true  => be.inferred_construction(c, s, d, ty, ctx),
     })
 }
 
@@ -143,15 +142,15 @@ inferred_construction = (
     ty  : TyId,
     ctx : Ctx
 ) Res<TyId, AllocError> {
-    dctx = decl_ctx_of(be, d);
-    mark = enter_tparams(be, s.tparams, d.qname).try();
+    dctx = be.decl_ctx_of(d);
+    mark = be.enter_tparams(s.tparams, d.qname).try();
     empty ::= be.alloc.Inst();
     found ::= be.alloc.Inst();
     c.args.loop((h, i, a) {
-        unify_field(be, a, i, s, empty, dctx, ctx, found).try();
+        be.unify_field(a, i, s, empty, dctx, ctx, found).try();
     });
-    leave_tparams(be, mark).try();
-    rebuilt_type(be, d, s, found, ty)
+    be.leave_tparams(mark).try();
+    be.rebuilt_type(d, s, found, ty)
 }
 
 unify_field = (
@@ -165,9 +164,9 @@ unify_field = (
     out   :: Inst
 ) Res<(), AllocError> {
     name     = field_name(be, a, i, s, empty, dctx).try();
-    declared = storage_type(be, s, name, empty, dctx);
+    declared = be.storage_type(s, name, empty, dctx);
     unknown  = be.check.types.unknown().try();
-    actual   = arg_type(be, a.value, ctx, unknown).try();
+    actual   = be.arg_type(a.value, ctx, unknown).try();
     unify(be, declared, actual, out)
 }
 
@@ -211,7 +210,7 @@ prim_named = (be :: CBackend, s: Struct, ty: TyId) Res<TyId, AllocError> {
 // field back through.
 designator = (be :: CBackend, ty: TyId, name: str, out :: String)
              Res<(), AllocError> {
-    is_prim_ty(be, ty).match({
+    be.is_prim_ty(ty).match({
         true  => out.add_bytes(name),
         false => out.sym_member(name),
     })
@@ -236,17 +235,17 @@ is_prim_ty = (be :: CBackend, ty: TyId) bool {
 // same name — so every `Map` in the language was refused.
 layout_open = (be :: CBackend, s: Struct, d: Def, ty: TyId)
               Res<bool, AllocError> {
-    dctx  = decl_ctx_of(be, d);
-    dinst = recv_inst(be, ty).try();
-    mark  = enter_tparams(be, s.tparams, d.qname).try();
+    dctx  = be.decl_ctx_of(d);
+    dinst = be.recv_inst(ty).try();
+    mark  = be.enter_tparams(s.tparams, d.qname).try();
     got ::= false;
     s.members.loop((h, m) {
-        field_type(be, m, dctx, dinst).match({
+        be.field_type(m, dctx, dinst).match({
             None    => (),
             Ok(fty) => has_var(be.check, fty).then(() { got = true; }),
         });
     });
-    leave_tparams(be, mark).try();
+    be.leave_tparams(mark).try();
     Ok(got);
 }
 
@@ -263,9 +262,9 @@ write_literal = (
     out :: String
 ) Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, ty, cty).try();
+    be.ctype(ty, cty).try();
     out.fmt("({})", cty.view()).try();
-    write_initialisers(be, c, s, d, ty, ctx, out).try();
+    be.write_initialisers(c, s, d, ty, ctx, out).try();
     Ok(());
 }
 
@@ -279,20 +278,19 @@ write_initialisers = (
     out :: String
 )
                      Res<(), AllocError> {
-    dctx = decl_ctx_of(be, d);
-    mark = enter_tparams(be, s.tparams, d.qname).try();
+    dctx = be.decl_ctx_of(d);
+    mark = be.enter_tparams(s.tparams, d.qname).try();
     // the CONSTRUCTED type's own arguments: `Box<i32>(held: 7)` supplies
     // an `i32`, and reading the field's declared `T` without them would
     // give the literal no width to take.
-    dinst = recv_inst(be, ty).try();
+    dinst = be.recv_inst(ty).try();
     out.add_bytes("{ ").try();
     // The count of initialisers WRITTEN, not the argument index, because
     // an argument that supplies no field writes none and a comma keyed
     // to `i` would then open or close the list on nothing.
     seen ::= 0;
     c.args.loop((h, i, a) {
-        seen = seen + supplied_initialiser(
-            be,
+        seen = seen + be.supplied_initialiser(
             a,
             i,
             s,
@@ -304,8 +302,7 @@ write_initialisers = (
             out
         ).try();
     });
-    seen = seen + defaulted_initialisers(
-        be,
+    seen = seen + be.defaulted_initialisers(
         c,
         s,
         ty,
@@ -318,7 +315,7 @@ write_initialisers = (
     // was written — and an EMPTY brace list is a GNU extension, not C99.
     (seen == 0).then(() { out.add_bytes("0").try() });
     out.add_bytes(" }").try();
-    leave_tparams(be, mark).try();
+    be.leave_tparams(mark).try();
     Ok(());
 }
 
@@ -353,8 +350,7 @@ defaulted_initialisers = (
 ) Res<usize, AllocError> {
     wrote ::= 0;
     s.members.loop((h, m) {
-        wrote = wrote + default_initialiser(
-            be,
+        wrote = wrote + be.default_initialiser(
             c,
             m,
             s,
@@ -379,11 +375,11 @@ default_initialiser = (
     seen  : usize,
     out   :: String
 ) Res<usize, AllocError> {
-    name = member_text(m);
-    (is_storage(be, m, dinst, dctx) && !supplies(be, c, s, name, dinst, dctx))
+    name = m.name().text;
+    (is_storage(be, m, dinst, dctx) && !be.supplies(c, s, name, dinst, dctx))
         .match({
             false => Ok(0),
-            true  => member_default(be, m, name, s, ty, dinst, dctx, seen, out),
+            true  => be.member_default(m, name, s, ty, dinst, dctx, seen, out),
         })
 }
 
@@ -412,7 +408,7 @@ member_default = (
 ) Res<usize, AllocError> {
     declared_value(m).match({
         None  => Ok(0),
-        Ok(v) => write_default(be, v, name, s, ty, dinst, dctx, seen, out),
+        Ok(v) => be.write_default(v, name, s, ty, dinst, dctx, seen, out),
     })
 }
 
@@ -430,7 +426,7 @@ write_default = (
                 Res<usize, AllocError> {
     (seen > 0).then(() { out.add_bytes(", ").try() });
     des ::= be.alloc.String().try();
-    designator(be, ty, name, des).try();
+    be.designator(ty, name, des).try();
     out.fmt(".{} = ", des.view()).try();
     be.default_value(v, name, s, ty, dinst, dctx, out).try();
     Ok(1);
@@ -450,14 +446,13 @@ default_value = (
     out   :: String
 )
                 Res<(), AllocError> {
-    is_pure_value(be, v, dctx).match({
-        false => unsupported(
-            be,
+    be.is_pure_value(v, dctx).match({
+        false => be.unsupported(
             v,
             "a field default that names a function or reads a frame",
             out
         ),
-        true  => expr(be, v, dctx, storage_type(be, s, name, dinst, dctx), out),
+        true  => expr(be, v, dctx, be.storage_type(s, name, dinst, dctx), out),
     })
 }
 
@@ -485,7 +480,7 @@ supplies = (
 ) bool {
     got ::= false;
     c.args.loop((h, i, a) {
-        arg_supplies(be, a, i, s, name, dinst, dctx).then(() { got = true; });
+        be.arg_supplies(a, i, s, name, dinst, dctx).then(() { got = true; });
     });
     got
 }
@@ -528,9 +523,9 @@ supplied_initialiser = (
     out   :: String
 ) Res<usize, AllocError> {
     name = field_name(be, a, i, s, dinst, dctx).try();
-    is_storage_named(be, s, name, dinst, dctx).match({
+    be.is_storage_named(s, name, dinst, dctx).match({
         false => Ok(0),
-        true  => designated(be, a, name, s, ty, dinst, dctx, ctx, seen, out),
+        true  => be.designated(a, name, s, ty, dinst, dctx, ctx, seen, out),
     })
 }
 
@@ -548,7 +543,7 @@ designated = (
 )
              Res<usize, AllocError> {
     (seen > 0).then(() { out.add_bytes(", ").try() });
-    write_initialiser(be, a, name, s, ty, dinst, dctx, ctx, out).try();
+    be.write_initialiser(a, name, s, ty, dinst, dctx, ctx, out).try();
     Ok(1);
 }
 
@@ -561,7 +556,7 @@ is_storage_named = (
 ) bool {
     got ::= false;
     s.members.loop((h, m) {
-        (member_text(m).eq(name) && is_storage(be, m, dinst, dctx))
+        (m.named(name) && is_storage(be, m, dinst, dctx))
             .then(() { got = true; });
     });
     got
@@ -595,9 +590,9 @@ write_initialiser = (
     out   :: String
 ) Res<(), AllocError> {
     des ::= be.alloc.String().try();
-    designator(be, ty, name, des).try();
+    be.designator(ty, name, des).try();
     out.fmt(".{} = ", des.view()).try();
-    want = storage_type(be, s, name, dinst, dctx);
+    want = be.storage_type(s, name, dinst, dctx);
     expr(be, a.value, ctx, want, out)
 }
 
@@ -612,7 +607,7 @@ field_name = (
     dctx  : Ctx
 ) Res<str, AllocError> {
     a.name.match({
-        None  => storage_name(be, s, i, dinst, dctx),
+        None  => be.storage_name(s, i, dinst, dctx),
         Ok(n) => Ok(n.text),
     })
 }
@@ -632,7 +627,7 @@ storage_name = (
     seen ::= 0;
     s.members.loop((h, m) {
         is_storage(be, m, dinst, dctx).then(() {
-            (seen == i).then(() { name = member_text(m); });
+            (seen == i).then(() { name = m.name().text; });
             seen = seen + 1;
         });
     });
@@ -640,15 +635,7 @@ storage_name = (
 }
 
 is_storage = (be :: CBackend, m: Member, dinst: Inst, dctx: Ctx) bool {
-    field_type(be, m, dctx, dinst).match({ Ok(_) => true, None => false })
-}
-
-member_text = (m: Member) str {
-    m.kind.match({
-        Field(f)    => f.name.text,
-        Const(c)    => c.name.text,
-        Function(f) => f.name.text,
-    })
+    be.field_type(m, dctx, dinst).match({ Ok(_) => true, None => false })
 }
 
 // The declared type of the field an argument supplies, so a literal
@@ -667,15 +654,15 @@ storage_type = (
 ) TyId {
     found ::= TyId(index: 0);
     s.members.loop((h, m) {
-        member_text(m).eq(name).then(() {
-            found = named_field(be, m, dinst, dctx);
+        m.named(name).then(() {
+            found = be.named_field(m, dinst, dctx);
         });
     });
     found
 }
 
 named_field = (be :: CBackend, m: Member, dinst: Inst, dctx: Ctx) TyId {
-    field_type(be, m, dctx, dinst).match({
+    be.field_type(m, dctx, dinst).match({
         Ok(t) => t,
         None  => TyId(index: 0),
     })

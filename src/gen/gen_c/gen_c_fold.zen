@@ -66,8 +66,8 @@ lower_fold* = (
 )
              Res<(), AllocError> {
     args.get(args.len - 2).match({
-        None  => unsupported(be, id, "a fold with no seed", out),
-        Ok(s) => lower_seeded(be, id, sh, args, s, lam, ctx, want, out),
+        None  => be.unsupported(id, "a fold with no seed", out),
+        Ok(s) => be.lower_seeded(id, sh, args, s, lam, ctx, want, out),
     })
 }
 
@@ -82,16 +82,14 @@ lower_seeded = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    aty = acc_type(be, seed, ctx, want).try();
+    aty = be.acc_type(seed, ctx, want).try();
     has_var(be.check, aty).match({
-        true  => unsupported(
-            be,
+        true  => be.unsupported(
             id,
             "a fold whose accumulator type nothing settles",
             out
         ),
-        false => lower_with_acc(
-            be,
+        false => be.lower_with_acc(
             id,
             sh,
             args,
@@ -111,8 +109,8 @@ lower_seeded = (
 acc_type = (be :: CBackend, seed: ExprId, ctx: Ctx, want: TyId)
            Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
-    got     = ty_of(be, seed, ctx, unknown).try();
-    settled_acc(be, got, want)
+    got     = be.ty_of(seed, ctx, unknown).try();
+    be.settled_acc(got, want)
 }
 
 settled_acc = (be :: CBackend, got: TyId, want: TyId)
@@ -145,12 +143,11 @@ lower_with_acc = (
     cell ::= be.alloc.String().try();
     sym_gen(cell, "a", be.next_tmp()).try();
     decl ::= be.alloc.String().try();
-    declarator(be, aty, cell.view(), decl).try();
+    be.declarator(aty, cell.view(), decl).try();
     be.fmt("{};\n", decl.view()).try();
-    deliver(be, seed, ctx, aty, Dest.Into(cell.view())).try();
-    settled = settle_res(be, want, aty).try();
-    lower_walk(
-        be,
+    be.deliver(seed, ctx, aty, Dest.Into(cell.view())).try();
+    settled = be.settle_res(want, aty).try();
+    be.lower_walk(
         id,
         sh,
         args,
@@ -169,7 +166,7 @@ bind_acc* = (be :: CBackend, sh: Shape, lam: Lambda, fold: Fold)
            Res<(), AllocError> {
     fold.has.match({
         false => Ok(()),
-        true  => bind_element(be, lam, acc_slot(sh), fold.cell, fold.ty),
+        true  => be.bind_element(lam, acc_slot(sh), fold.cell, fold.ty),
     })
 }
 
@@ -184,48 +181,48 @@ acc_slot = (sh: Shape) usize {
 // assigns cannot disagree.
 result_element* = (be :: CBackend, id: ExprId, ctx: Ctx)
                  Res<TyId, AllocError> {
-    seed_arg(be, id).match({
-        None  => loop_element(be, id, ctx),
-        Ok(s) => seed_element(be, s, ctx),
+    be.seed_arg(id).match({
+        None  => be.loop_element(id, ctx),
+        Ok(s) => be.seed_element(s, ctx),
     })
 }
 
 seed_element = (be :: CBackend, seed: ExprId, ctx: Ctx)
                Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
-    ty_of(be, seed, ctx, unknown)
+    be.ty_of(seed, ctx, unknown)
 }
 
 // The seed of the one shape that has one, read off the DECLARATION the
 // call resolved to rather than off the argument count: `loop(cond,
 // body)` also has two arguments and no seed at all.
 seed_arg = (be :: CBackend, id: ExprId) Res<ExprId> {
-    loop_fn_at(be, id).match({
+    be.loop_fn_at(id).match({
         None  => None,
-        Ok(f) => fold_seed(be, id, f),
+        Ok(f) => be.fold_seed(id, f),
     })
 }
 
 fold_seed = (be :: CBackend, id: ExprId, f: Function) Res<ExprId> {
-    is_fold(be, f).match({
+    be.is_fold(f).match({
         false => None,
-        true  => seed_before_body(be, id),
+        true  => be.seed_before_body(id),
     })
 }
 
 is_fold = (be :: CBackend, f: Function) bool {
-    shape_of(be, f).match({ Ok(sh) => sh.wants_acc, Err(_) => false })
+    be.shape_of(f).match({ Ok(sh) => sh.wants_acc, Err(_) => false })
 }
 
 seed_before_body = (be :: CBackend, id: ExprId) Res<ExprId> {
     be.tree.expr_at(id).kind.match({
-        Call(c) => call_seed(be, c),
+        Call(c) => be.call_seed(c),
         _       => None,
     })
 }
 
 call_seed = (be :: CBackend, c: Call) Res<ExprId> {
-    recv_of(be, c.callee).match({
+    be.recv_of(c.callee).match({
         Ok(_) => arg_value(c, c.args.len - 2),
         None  => arg_value(c, c.args.len - 2),
     })
@@ -238,14 +235,14 @@ write_fold_result* = (be :: CBackend, st: LoopFrame, fold: Fold)
                      Res<(), AllocError> {
     (fold.has && st.has_result).match({
         false => Ok(()),
-        true  => write_ok_acc(be, st, fold),
+        true  => be.write_ok_acc(st, fold),
     })
 }
 
 write_ok_acc = (be :: CBackend, st: LoopFrame, fold: Fold)
                Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, st.ty, cty).try();
+    be.ctype(st.ty, cty).try();
     tag ::= be.alloc.String().try();
     sym_variant(tag, RES_PATH, "Ok").try();
     mem ::= be.alloc.String().try();

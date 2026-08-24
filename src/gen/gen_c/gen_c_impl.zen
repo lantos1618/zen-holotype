@@ -21,7 +21,6 @@ str = std.text
 Range = std.core
 DeclId, ImplId = sema.sema_id
 decl_at = sema.sema_def
-member_named = sema.sema_member
 tail_is_pack = sema.sema_vararg
 CBackend = gen.gen_c.gen_c_state
 last_is_variadic = gen.gen_c.gen_c_sink
@@ -46,7 +45,7 @@ last_is_variadic = gen.gen_c.gen_c_sink
 by_arity* = (be: CBackend, found: Vec<Member>, arity: usize) Res<Member> {
     Range(0, found.len).find((i) {
         found.get(i).match({
-            Ok(m) => member_takes(be, m, arity),
+            Ok(m) => be.member_takes(m, arity),
             None  => false,
         })
     }).match({
@@ -73,7 +72,7 @@ kept_or_arity* = (
 
 member_takes = (be: CBackend, m: Member, arity: usize) bool {
     m.kind.match({
-        Function(f) => fn_takes(be, f, arity),
+        Function(f) => be.fn_takes(f, arity),
         _           => false,
     })
 }
@@ -95,7 +94,7 @@ member_takes = (be: CBackend, m: Member, arity: usize) bool {
 // `...`: widening it would let a bodyless three-parameter `add` with a
 // typed pack be lowered as that door.
 fn_takes = (be: CBackend, f: Function, arity: usize) bool {
-    (last_is_variadic(be, f) || tail_is_pack(be.tree, f)).match({
+    (be.last_is_variadic(f) || tail_is_pack(be.tree, f)).match({
         true  => (arity + 1) >= f.params.len,
         false => f.params.len == arity,
     })
@@ -141,7 +140,7 @@ is_function = (m: Member) bool {
 impl_member* = (be :: CBackend, decl: DeclId, name: str)
                Res<Res<Function>, AllocError> {
     found ::= be.alloc.Vec<Member>();
-    impl_member_at(be, decl, name, found).try();
+    be.impl_member_at(decl, name, found).try();
     Ok(bodied_fn(found));
 }
 
@@ -149,7 +148,7 @@ impl_member* = (be :: CBackend, decl: DeclId, name: str)
 impl_member_of* = (be :: CBackend, decl: DeclId, name: str, arity: usize)
                   Res<Res<Function>, AllocError> {
     found ::= be.alloc.Vec<Member>();
-    impl_member_at(be, decl, name, found).try();
+    be.impl_member_at(decl, name, found).try();
     Ok(member_fn_of(by_arity(be, found, arity)));
 }
 
@@ -183,7 +182,7 @@ impl_field* = (be :: CBackend, im: Impl, name: str)
 
 keep_field_value = (m: Member, name: str, out :: Vec<ExprId>)
                    Res<(), AllocError> {
-    member_named(m, name).match({
+    m.named(name).match({
         false => Ok(()),
         true  => add_field_value(m, out),
     })
@@ -214,8 +213,8 @@ impl_member_at* = (
     out  :: Vec<Member>
 ) Res<(), AllocError> {
     ids ::= be.alloc.Vec<ImplId>();
-    be.check.world.impls_named(be.tree, decl_name(be, decl), ids).try();
-    ids.loop((h, i) { collect_impl_fn(be, decl, i, name, out).try() });
+    be.check.world.impls_named(be.tree, be.decl_name(decl), ids).try();
+    ids.loop((h, i) { be.collect_impl_fn(decl, i, name, out).try() });
     Ok(());
 }
 
@@ -245,14 +244,14 @@ collect_impl_fn = (
 ) Res<(), AllocError> {
     (decl.module == i.decl.module).match({
         false => Ok(()),
-        true  => impl_fn_at(be, i, name, out),
+        true  => be.impl_fn_at(i, name, out),
     })
 }
 
 impl_fn_at = (be :: CBackend, i: ImplId, name: str, out :: Vec<Member>)
              Res<(), AllocError> {
     be.check.world.impl_at(be.tree, i).match({
-        Ok(im) => keep_impl_fn(be, i, im, name, out),
+        Ok(im) => be.keep_impl_fn(i, im, name, out),
         None   => Ok(()),
     })
 }
@@ -284,7 +283,7 @@ keep_impl_fn = (
     out  :: Vec<Member>
 ) Res<(), AllocError> {
     im.members.loop((h, m) { keep_named_fn(m, name, out).try() });
-    keep_bound_default(be, i, im, name, out)
+    be.keep_bound_default(i, im, name, out)
 }
 
 keep_bound_default = (
@@ -303,7 +302,7 @@ keep_bound_default = (
 
 keep_named_fn = (m: Member, name: str, out :: Vec<Member>)
                 Res<(), AllocError> {
-    member_named(m, name).match({
+    m.named(name).match({
         false => Ok(()),
         true  => add_bodied(m, out),
     })
@@ -352,9 +351,9 @@ alias_of* = (
     name : str
 ) Res<Res<str>, AllocError> {
     ids ::= be.alloc.Vec<ImplId>();
-    be.check.world.impls_named(be.tree, decl_name(be, decl), ids).try();
+    be.check.world.impls_named(be.tree, be.decl_name(decl), ids).try();
     found ::= be.alloc.Vec<str>();
-    ids.loop((h, i) { keep_alias(be, i, decl, name, found).try() });
+    ids.loop((h, i) { be.keep_alias(i, decl, name, found).try() });
     Ok(found.get(0));
 }
 
@@ -367,7 +366,7 @@ keep_alias = (
 ) Res<(), AllocError> {
     (i.decl.module == decl.module).match({
         false => Ok(()),
-        true  => impl_alias_at(be, i, name, out),
+        true  => be.impl_alias_at(i, name, out),
     })
 }
 
@@ -376,9 +375,9 @@ impl_alias_at = (be :: CBackend, i: ImplId, name: str, out :: Vec<str>)
     be.check.world.impl_at(be.tree, i).match({
         None   => Ok(()),
         Ok(im) => {
-            impl_field(be, im, name).try().match({
+            be.impl_field(im, name).try().match({
                 None  => Ok(()),
-                Ok(x) => add_alias(be, x, out),
+                Ok(x) => be.add_alias(x, out),
             })
         },
     })

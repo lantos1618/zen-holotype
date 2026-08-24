@@ -12,6 +12,45 @@ how a gate that cannot fail happens to a list.
 
 ## INBOX — paste below this line
 
+**UFCS gate blind spots (2026-08-23 spot check; STYLE.md now documents them):**
+- `src/fmt/` is structurally invisible to `rule_ufcs` — no fmt module has a
+  principal type (receivers split across `Alloc`/`Src`/`Out`). ~60 sites a
+  reader would flag: `write_module(out, ..)` fmt.zen:106, `arrow_col(src, ..)`
+  fmt_decl.zen:251, the `fmt_break.zen` Alloc/Src-first machinery. Closing them
+  means widening the rule or paying them down unledgered.
+- `sema_own.zen` declares 9 free functions on `o :: Own` (`find_var`, `kill`,
+  `revive`, `is_dead`, `take_dead`, ..) called function-style ~19 times —
+  uncounted, and candidates for struct-body methods on `Own` (the dividing
+  rule), which retires rather than re-spells them.
+- `sema_match.zen`: ~6 `f(ps, ..)` sites on `ps :: Pats`, same shape.
+
+**"A gap is only spaces" — one fact, four homes, two definitions.**
+`past_spaces` (fmt_decl.zen:490, `== ' '`) vs `skip_space` (fmt_break.zen:736,
+`.is_space()`) vs `all_space` (fmt_break.zen:732) vs `Src.all_spaces`
+(fmt_src.zen:75). Belongs once, on `Src`. Also `verbatim` (fmt_decl.zen:627)
+and `copy_of` (fmt_break.zen:237) are identical twins.
+
+**`FrameFault`'s facts live in three files.** The type is lsp_frame.zen:36;
+`frame_byte`/`frame_why` are starred free functions in lsp_serve.zen:778,787
+(with a comment explaining why they're starred); `partial` sits in
+lsp_stdio.zen:148. As struct-body methods (`f.byte()`, `f.why()`) the exports
+and the justifying comment disappear.
+
+**Hand-copied insertion sort, twice.** lsp_compl.zen:572-611 and
+lsp_colour.zen:348-388 — same five functions line-for-line; only the element
+type and comparator differ. Zen has generics; std has no sort at all.
+
+**Wrapper chain:** lsp_reply.zen:227-287 — `request_of` delegates through
+eight 5-7-line functions each wrapping one `method.eq(..)` test; ~60 lines
+where one nested match would be ~25.
+
+**Possibly-orphaned workarounds.** parser.zen's `nothing` (:321) and
+`took`/`missed`/`missed_after` (:447-472) say "fold back when the seed's
+`Ok(())` match-arm typing is fixed" — no entry tracked that bug. Same question
+for stale bootstrapper framings: gen_c_expr.zen:118-119 (`ty_of`'s fallback
+justified by "the bootstrapper's backend") and gen_c_type.zen:52
+(`MAX_TYPE_PASSES` = "what the bootstrapper allows").
+
 <!-- paste snippets here. -->
 
 ---

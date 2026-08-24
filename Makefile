@@ -240,12 +240,18 @@ grammar-test: grammar
 ## CRLF, a missing final newline and trailing whitespace on purpose --
 ## formatting those files would delete the seven tests in them.
 ##
+## `tools/gates` IS IN THE LIST because the gates are Zen programs now and
+## a gate nothing formats drifts like any other file -- all three landed
+## unformatted the day they were written. `find` does not follow symlinks,
+## so `tools/gates/std` (the symlink `gate` compiles against) contributes
+## nothing here and src/std is not counted twice.
+##
 ## THE FILE COUNT IS ASSERTED, for the reason `parse` gives above, and
 ## more sharply here: this recipe used to end `xargs --no-run-if-empty`,
 ## which is an instruction to do nothing and succeed when the find comes
 ## up empty.
 fmt: build
-	@mapfile -d '' files < <(find $(ROOT) example tests/corpus -name '*.zen' \
+	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tools/gates -name '*.zen' \
 	    -not -path 'tests/corpus/lex/*' -print0); \
 	  test $${#files[@]} -gt 0 \
 	    || { echo "fmt: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \

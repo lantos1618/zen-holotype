@@ -1,9 +1,9 @@
-// ALL SIX DOCUMENT QUERIES MAKE THE SAME REFUSAL, and this test is what
+// ALL SEVEN DOCUMENT QUERIES MAKE THE SAME REFUSAL, and this test is what
 // says so on the wire rather than in a comment.
 //
-// `lsp_serve.zen` answers six requests that name a document: hover,
-// definition, documentSymbol, completion, semanticTokens/full and
-// formatting. Every one of them must answer `-32602` with
+// `lsp_serve.zen` answers seven requests that name a document: hover,
+// definition, documentSymbol, completion, semanticTokens/full, formatting
+// and codeAction. Every one of them must answer `-32602` with
 // "no open document for that uri" when the uri was never opened — a
 // CLIENT BUG, and the one refusal that is an error rather than an empty
 // answer. `null`, `[]` or `{}` would each read as "there is nothing
@@ -11,17 +11,17 @@
 // asked about a place in a document, it was asked about a document it
 // has never seen.
 //
-// THREE OF THE SIX WERE COVERED BY NOTHING before this file. Hover's
+// THREE OF THE SEVEN WERE COVERED BY NOTHING before this file. Hover's
 // refusal is pinned by `a_session_is_answered_frame_by_frame`, colour's
 // by `colour_comes_from_the_lexer` and formatting's by
 // `formatting_refuses_a_buffer_with_a_hole` — so definition, the outline
 // and completion could each have turned into a `null` and every LSP test
 // would have stayed green. That is exactly the shape of regression a
-// refactor of the shared refusal introduces, which is why the six are
+// refactor of the shared refusal introduces, which is why the seven are
 // asserted together and in one place.
 //
 // A DOCUMENT IS OPENED FIRST, at a different uri. An empty overlay would
-// refuse these six for the trivial reason, and then a lookup that always
+// refuse these seven for the trivial reason, and then a lookup that always
 // missed would pass this test; with `file:///real.zen` in the store the
 // refusal has to be about the uri that was asked for.
 //
@@ -55,14 +55,16 @@ main = (env: Env) Res<i32, AllocError> {
     ).try();
     open_doc(a, "file:///real.zen", REAL, input).try();
 
-    // The three that carry a position, and the three that do not — the
-    // params a real client sends, not one shape reused six times.
+    // The three that carry a position, the three that do not, and the one
+    // that carries a range — the params a real client sends, not one
+    // shape reused seven times.
     ask_at(a, 2, "textDocument/hover", GONE, input).try();
     ask_at(a, 3, "textDocument/definition", GONE, input).try();
     ask_at(a, 4, "textDocument/completion", GONE, input).try();
     ask(a, 5, "textDocument/documentSymbol", GONE, input).try();
     ask(a, 6, "textDocument/semanticTokens/full", GONE, input).try();
     ask(a, 7, "textDocument/formatting", GONE, input).try();
+    ask_range(a, 8, "textDocument/codeAction", GONE, input).try();
 
     write_frame(
         "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
@@ -110,6 +112,17 @@ ask_at = (a: Alloc, id: usize, method: str, uri: str, into :: String)
     write_frame(body.view(), into)
 }
 
+// And the same, with the `range` and `context` a codeAction carries.
+ask_range = (a: Alloc, id: usize, method: str, uri: str, into :: String)
+            Res<(), AllocError> {
+    body ::= a.String().try();
+    opening(a, id, method, uri, body).try();
+    body.add_bytes(
+        "},\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"context\":{\"diagnostics\":[]}}}"
+    ).try();
+    write_frame(body.view(), into)
+}
+
 // Everything up to the close of `textDocument`, which both shapes share.
 opening = (a: Alloc, id: usize, method: str, uri: str, body :: String)
           Res<(), AllocError> {
@@ -121,7 +134,7 @@ opening = (a: Alloc, id: usize, method: str, uri: str, body :: String)
     write_text(uri, body)
 }
 
-// Reply 0 is `initialize` and the last is `shutdown`; the six in
+// Reply 0 is `initialize` and the last is `shutdown`; the seven in
 // between are this test's rows.
 walk_replies = (out: str) () {
     at    ::= 0;
@@ -136,7 +149,7 @@ walk_replies = (out: str) () {
 }
 
 shown = (i: usize, body: str) () {
-    (i > 0 && i < 7).match({
+    (i > 0 && i < 8).match({
         true  => println("{}", body),
         false => (),
     })

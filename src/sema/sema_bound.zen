@@ -36,7 +36,7 @@ TyId, TyNamed, Prim, is_prim = sema.sema_ty
 Def, decl_at = sema.sema_def
 SemaFault, NameFault, TypeFault, ExportFault = sema.sema_diag
 Checker = sema.sema_check
-member_named, opaque, Found, members_of = sema.sema_member
+opaque, Found, members_of = sema.sema_member
 bound_members, has_member, impl_span, impl_bound_type = sema.sema_supply
 Cand, TBound, Actual = sema.sema_call
 ty_at, is_tvar = sema.sema_cand
@@ -59,7 +59,7 @@ check_impl* = (c :: Checker, id: ImplId, mi: usize) Res<(), AllocError> {
 check_one_impl = (c :: Checker, im: Impl, id: ImplId, mi: usize)
                  Res<(), AllocError> {
     c.check_home(im, id, mi).try();
-    check_impl_body(c, im, id, mi).try();
+    c.check_impl_body(im, id, mi).try();
     Ok(());
 }
 
@@ -129,17 +129,17 @@ module_named = (c: Checker, mi: usize) str {
 
 check_impl_body = (c :: Checker, im: Impl, id: ImplId, mi: usize)
                   Res<(), AllocError> {
-    bound = impl_bound_type(c, im, mi).try();
+    bound = c.impl_bound_type(im, mi).try();
     members ::= c.alloc.Vec<Member>();
-    bound_members(c, bound, members).try();
-    span = impl_span(c, id);
-    members.loop((h, m) { owed(c, im, m, span).try() });
+    c.bound_members(bound, members).try();
+    span = c.impl_span(id);
+    members.loop((h, m) { c.owed(im, m, span).try() });
     Ok(());
 }
 
 owed = (c :: Checker, im: Impl, m: Member, span: Span) Res<(), AllocError> {
-    (required(m) && (has_member(im.members, member_name(m)) == false)).match({
-        true  => missing(c, span, member_name(m)),
+    (required(m) && (has_member(im.members, m.name().text) == false)).match({
+        true  => missing(c, span, m.name().text),
         false => Ok(()),
     })
 }
@@ -153,14 +153,6 @@ required* = (m: Member) bool {
         Field(f)    => f.value.match({ Ok(_) => false, None => true }),
         Function(f) => f.form.match({ Required => true, _ => false }),
         Const(_)    => false,
-    })
-}
-
-member_name* = (m: Member) str {
-    m.kind.match({
-        Field(f)    => f.name.text,
-        Const(k)    => k.name.text,
-        Function(f) => f.name.text,
     })
 }
 
@@ -311,7 +303,7 @@ Owed = {
 
 absent_field = (c :: Checker, call: Call, ty: TyId, at: Owed)
                Res<(), AllocError> {
-    name = member_name(at.m);
+    name = at.m.name().text;
     (c.ctor_required(at.m) && (named_arg(call, name) == false)).match({
         true  => c.ctor_missing(at.span, name),
         false => Ok(()),
@@ -378,15 +370,15 @@ satisfies_bound* = (c :: Checker, ty: TyId, bound: TyId)
                    Res<bool, AllocError> {
     c.same_type(ty, bound).match({
         true  => Ok(true),
-        false => impls_bound(c, ty, bound),
+        false => c.impls_bound(ty, bound),
     })
 }
 
 impls_bound = (c :: Checker, ty: TyId, bound: TyId) Res<bool, AllocError> {
     c.types.at(ty).match({
-        Named(n) => named_impls_bound(c, n, bound),
-        Prim(p)  => prim_impls_bound(c, p, bound),
-        Array(_) => Ok(array_satisfies(c, bound)),
+        Named(n) => c.named_impls_bound(n, bound),
+        Prim(p)  => c.prim_impls_bound(p, bound),
+        Array(_) => Ok(c.array_satisfies(bound)),
         _        => Ok(false),
     })
 }
@@ -404,8 +396,7 @@ prim_impls_bound = (c :: Checker, p: Prim, bound: TyId) Res<bool, AllocError> {
         None  => Ok(false),
         Ok(d) => {
             args ::= c.alloc.Vec<TyId>();
-            named_impls_bound(
-                c,
+            c.named_impls_bound(
                 TyNamed(decl: d.id, name: p.name, args: args),
                 bound
             )
@@ -430,7 +421,7 @@ array_satisfies = (c: Checker, bound: TyId) bool {
 
 bound_declares = (c: Checker, bound: TyId, name: str) bool {
     c.types.at(bound).match({
-        Named(n) => decl_declares(c, n, name),
+        Named(n) => c.decl_declares(n, name),
         _        => false,
     })
 }
@@ -446,7 +437,7 @@ struct_declares = (d: Decl, name: str) bool {
     got ::= false;
     d.kind.match({
         Struct(st) => st.members.loop((h, m) {
-            (member_named(m, name) && is_field(m)).then(() { got = true; });
+            (m.named(name) && is_field(m)).then(() { got = true; });
         }),
         _          => (),
     });
@@ -463,7 +454,7 @@ named_impls_bound = (c :: Checker, n: TyNamed, bound: TyId)
     c.world.impls_named(c.tree, n.name, ids).try();
     hit ::= false;
     ids.loop((h, id) {
-        got = local_bound_is(c, id, n, bound).try();
+        got = c.local_bound_is(id, n, bound).try();
         hit = hit || got;
     });
     Ok(hit);
@@ -472,7 +463,7 @@ named_impls_bound = (c :: Checker, n: TyNamed, bound: TyId)
 local_bound_is = (c :: Checker, id: ImplId, n: TyNamed, bound: TyId)
                  Res<bool, AllocError> {
     (n.decl.module == id.decl.module).match({
-        true  => impl_bound_is(c, id, n, bound),
+        true  => c.impl_bound_is(id, n, bound),
         false => Ok(false),
     })
 }

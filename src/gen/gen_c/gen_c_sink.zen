@@ -65,7 +65,7 @@ sink_display = gen.gen_c.gen_c_display
 // THE RECEIVER MUST BE `::`: a sink is written into, so it is taken by
 // address; a first argument taken by value is not this door.
 is_sink_door* = (be: CBackend, d: Def, f: Function) bool {
-    d.name.eq("add") && sink_door_shape(be, f)
+    d.name.eq("add") && be.sink_door_shape(f)
 }
 
 // The door's shape with the name held out, because the MEMBER form has
@@ -74,7 +74,7 @@ is_sink_door* = (be: CBackend, d: Def, f: Function) bool {
 // different declarations.
 sink_door_shape* = (be: CBackend, f: Function) bool {
     bodyless(f) && (f.params.len == 3) && by_ref(f, 0)
-        && last_is_variadic(be, f)
+        && be.last_is_variadic(f)
 }
 
 bodyless* = (f: Function) bool {
@@ -89,21 +89,21 @@ bodyless* = (f: Function) bool {
 last_is_variadic* = (be: CBackend, f: Function) bool {
     (f.params.len == 0).match({
         true  => false,
-        false => tail_is_variadic(be, f, f.params.len - 1),
+        false => be.tail_is_variadic(f, f.params.len - 1),
     })
 }
 
 tail_is_variadic = (be: CBackend, f: Function, i: usize) bool {
     f.params.get(i).match({
         None  => false,
-        Ok(p) => variadic_param(be, p),
+        Ok(p) => be.variadic_param(p),
     })
 }
 
 variadic_param = (be: CBackend, p: Param) bool {
     p.type.match({
         None  => false,
-        Ok(t) => variadic_type(be, t),
+        Ok(t) => be.variadic_type(t),
     })
 }
 
@@ -141,9 +141,9 @@ lower_member_door* = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    door_decl(be).try().match({
-        None  => unsupported(be, id, "a format door with no declaration", out),
-        Ok(d) => lower_at_decl(be, id, c, d, recv, ctx, out),
+    be.door_decl().try().match({
+        None  => be.unsupported(id, "a format door with no declaration", out),
+        Ok(d) => be.lower_at_decl(id, c, d, recv, ctx, out),
     })
 }
 
@@ -156,9 +156,9 @@ lower_at_decl = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    door_fn(be, d).match({
-        None  => unsupported(be, id, "a format door with no declaration", out),
-        Ok(g) => lower_sink_door(be, id, c, d, g, Ok(recv), ctx, out),
+    be.door_fn(d).match({
+        None  => be.unsupported(id, "a format door with no declaration", out),
+        Ok(g) => be.lower_sink_door(id, c, d, g, Ok(recv), ctx, out),
     })
 }
 
@@ -173,20 +173,20 @@ door_decl = (be :: CBackend) Res<Res<Def>, AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.exported_named("add", found).try();
     kept ::= be.alloc.Vec<Def>();
-    found.loop((h, x) { keep_door(be, x, kept).try() });
+    found.loop((h, x) { be.keep_door(x, kept).try() });
     Ok(kept.get(0));
 }
 
 keep_door = (be :: CBackend, x: Def, out :: Vec<Def>) Res<(), AllocError> {
-    door_fn(be, x).match({
+    be.door_fn(x).match({
         None  => Ok(()),
-        Ok(g) => keep_shaped(be, g, x, out),
+        Ok(g) => be.keep_shaped(g, x, out),
     })
 }
 
 keep_shaped = (be :: CBackend, g: Function, x: Def, out :: Vec<Def>)
               Res<(), AllocError> {
-    sink_door_shape(be, g).match({
+    be.sink_door_shape(g).match({
         true  => out.add(x),
         false => Ok(()),
     })
@@ -236,9 +236,9 @@ lower_pieces_into* = (
     ctx  : Ctx
 )
                      Res<bool, AllocError> {
-    door_decl(be).try().match({
+    be.door_decl().try().match({
         None  => Ok(false),
-        Ok(d) => pieces_at_decl(be, id, c, addr, cty, fail, d, recv, ctx),
+        Ok(d) => be.pieces_at_decl(id, c, addr, cty, fail, d, recv, ctx),
     })
 }
 
@@ -254,20 +254,9 @@ pieces_at_decl = (
     ctx  : Ctx
 )
                  Res<bool, AllocError> {
-    door_fn(be, d).match({
+    be.door_fn(d).match({
         None  => Ok(false),
-        Ok(f) => pieces_into_buffer(
-            be,
-            id,
-            c,
-            addr,
-            cty,
-            fail,
-            d,
-            f,
-            recv,
-            ctx
-        ),
+        Ok(f) => be.pieces_into_buffer(id, c, addr, cty, fail, d, f, recv, ctx),
     })
 }
 
@@ -284,13 +273,13 @@ pieces_into_buffer = (
     ctx  : Ctx
 ) Res<bool, AllocError> {
     ret = declared_type(be, d, f.ret).try();
-    sty = sink_type(be, d, f).try();
+    sty = be.sink_type(d, f).try();
     sink ::= be.alloc.String().try();
-    buffer_sink(be, addr, cty, sty, sink).try();
+    be.buffer_sink(addr, cty, sty, sink).try();
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "t", be.next_tmp()).try();
-    declare_temp(be, ret, tmp.view()).try();
-    write_ok(be, ret, tmp.view()).try();
+    be.declare_temp(ret, tmp.view()).try();
+    be.write_ok(ret, tmp.view()).try();
     p = Piece(
         sink: sink.view(),
         sty: sty,
@@ -318,9 +307,9 @@ buffer_sink = (
     out  :: String
 ) Res<(), AllocError> {
     value ::= be.alloc.String().try();
-    fat_value(be, addr, cty, sty, value).try();
+    be.fat_value(addr, cty, sty, value).try();
     sym_gen(out, "t", be.next_tmp()).try();
-    declare_temp(be, sty, out.view()).try();
+    be.declare_temp(sty, out.view()).try();
     be.set_line(out.view(), value.view())
 }
 
@@ -364,10 +353,10 @@ lower_sink_door* = (
     out  :: String
 ) Res<(), AllocError> {
     ret = declared_type(be, d, f.ret).try();
-    sty = sink_type(be, d, f).try();
+    sty = be.sink_type(d, f).try();
     sink ::= be.alloc.String().try();
-    write_sink_temp(be, c, recv, sty, ctx, sink).try().match({
-        false => unsupported(be, id, "a format door with no sink", out),
+    be.write_sink_temp(c, recv, sty, ctx, sink).try().match({
+        false => be.unsupported(id, "a format door with no sink", out),
         true  => write_door(
             be,
             id,
@@ -426,7 +415,7 @@ write_sink_temp = (
 ) Res<bool, AllocError> {
     recv_arg(c, recv).match({
         None  => Ok(false),
-        Ok(a) => spill_sink(be, a, sty, ctx, out),
+        Ok(a) => be.spill_sink(a, sty, ctx, out),
     })
 }
 
@@ -440,7 +429,7 @@ spill_sink = (
     code ::= be.alloc.String().try();
     expr(be, a, ctx, sty, code).try();
     sym_gen(out, "t", be.next_tmp()).try();
-    declare_temp(be, sty, out.view()).try();
+    be.declare_temp(sty, out.view()).try();
     be.set_line(out.view(), code.view()).try();
     Ok(true);
 }
@@ -459,8 +448,8 @@ write_door = (
 ) Res<(), AllocError> {
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "t", be.next_tmp()).try();
-    declare_temp(be, ret, tmp.view()).try();
-    write_ok(be, ret, tmp.view()).try();
+    be.declare_temp(ret, tmp.view()).try();
+    be.write_ok(ret, tmp.view()).try();
     p = Piece(
         sink: sink,
         sty: sty,
@@ -486,7 +475,7 @@ write_door = (
 // only a failure has to say anything.
 write_ok* = (be :: CBackend, ret: TyId, tmp: str) Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, ret, cty).try();
+    be.ctype(ret, cty).try();
     tag ::= be.alloc.String().try();
     sym_variant(tag, RES_PATH, "Ok").try();
     value ::= be.alloc.String().try();
@@ -522,7 +511,7 @@ write_pieces* = (
     raw = format_of(be, first);
     (raw.len == 0).match({
         true  => write_values(be, c, first, used0, p, ctx),
-        false => walk_format(be, c, first, raw, used0, p, ctx),
+        false => be.walk_format(c, first, raw, used0, p, ctx),
     })
 }
 
@@ -666,9 +655,9 @@ write_literal = (be :: CBackend, piece: str, p: Piece)
     write_usize(text, decoded_bytes(piece)).try();
     text.add_bytes("u }").try();
     call ::= be.alloc.String().try();
-    sink_write(be, p, text.view(), call).try().match({
-        false => unsupported_piece(be, p.id, "a sink with no write"),
-        true  => write_guarded(be, call.view(), p),
+    be.sink_write(p, text.view(), call).try().match({
+        false => be.unsupported_piece(p.id, "a sink with no write"),
+        true  => be.write_guarded(call.view(), p),
     })
 }
 
@@ -683,7 +672,7 @@ write_literal = (be :: CBackend, piece: str, p: Piece)
 write_value = (be :: CBackend, a: ExprId, p: Piece, ctx: Ctx)
               Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    ty      = ty_of(be, a, ctx, unknown).try();
+    ty      = be.ty_of(a, ctx, unknown).try();
     text ::= be.alloc.String().try();
     expr(be, a, ctx, ty, text).try();
     be.write_typed_into(a, ty, text.view(), p)
@@ -696,9 +685,9 @@ write_value = (be :: CBackend, a: ExprId, p: Piece, ctx: Ctx)
 write_typed_into = (be :: CBackend, a: ExprId, ty: TyId, text: str, p: Piece)
                    Res<(), AllocError> {
     call ::= be.alloc.String().try();
-    value_call(be, p, ty, text, call).try().match({
-        false => unsupported_piece(be, a, hole_fault(p)),
-        true  => write_guarded(be, call.view(), p),
+    be.value_call(p, ty, text, call).try().match({
+        false => be.unsupported_piece(a, hole_fault(p)),
+        true  => be.write_guarded(call.view(), p),
     })
 }
 
@@ -708,8 +697,8 @@ value_call = (be :: CBackend, p: Piece, ty: TyId, text: str, out :: String)
              Res<bool, AllocError> {
     prim = be.check.prim_name(ty);
     prim.eq("str").match({
-        true  => sink_write(be, p, text, out),
-        false => wider_call(be, p, ty, prim, text, out),
+        true  => be.sink_write(p, text, out),
+        false => be.wider_call(p, ty, prim, text, out),
     })
 }
 
@@ -749,8 +738,8 @@ scalar_call = (
     out  :: String
 ) Res<bool, AllocError> {
     writer_of(prim).is_empty().match({
-        true  => sink_display(be, ty, text, p.sink, out),
-        false => writer_call(be, p, writer_of(prim), cast_of(prim), text, out),
+        true  => be.sink_display(ty, text, p.sink, out),
+        false => be.writer_call(p, writer_of(prim), cast_of(prim), text, out),
     })
 }
 
@@ -799,7 +788,7 @@ slot_write = (be :: CBackend, p: Piece, text: str, out :: String)
              Res<bool, AllocError> {
     args ::= be.alloc.String().try();
     args.fmt(", {text}").try();
-    slot_call(be, p.sink, p.sty, "write", args.view(), 1, out).try().match({
+    be.slot_call(p.sink, p.sty, "write", args.view(), 1, out).try().match({
         None  => Ok(false),
         Ok(_) => Ok(true),
     })
@@ -817,9 +806,9 @@ writer_call = (
     text : str,
     out  :: String
 ) Res<bool, AllocError> {
-    module_fn(be, p.module, name).try().match({
+    be.module_fn(p.module, name).try().match({
         None  => Ok(false),
-        Ok(w) => write_writer_call(be, w, p, cast, text, out),
+        Ok(w) => be.write_writer_call(w, p, cast, text, out),
     })
 }
 
@@ -832,7 +821,7 @@ write_writer_call = (
     out  :: String
 ) Res<bool, AllocError> {
     sym ::= be.alloc.String().try();
-    call_symbol(be, w, sym).try();
+    be.call_symbol(w, sym).try();
     out.fmt("{}(&{}, {}({}))", sym.view(), p.sink, cast, text).try();
     Ok(true);
 }
@@ -843,7 +832,7 @@ module_fn = (be :: CBackend, mi: usize, name: str)
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(mi, name, found).try();
     kept ::= be.alloc.Vec<Def>();
-    found.loop((h, x) { keep_bodied(be, x, kept).try() });
+    found.loop((h, x) { be.keep_bodied(x, kept).try() });
     Ok(kept.get(0));
 }
 
@@ -882,7 +871,7 @@ call_symbol* = (be :: CBackend, d: Def, out :: String)
                Res<(), AllocError> {
     sig  ::= be.alloc.Vec<TyId>();
     inst ::= be.alloc.Inst();
-    signature_of(be, d, inst, sig).try();
+    be.signature_of(d, inst, sig).try();
     sym ::= be.alloc.String().try();
     sym_fn(sym, be.check.types, be.check.world, d.qname, sig, inst).try();
     be.need_function(d, inst, sym.view()).try();
@@ -897,7 +886,7 @@ call_symbol* = (be :: CBackend, d: Def, out :: String)
 // rebuild, no re-tag, and no error set to widen.
 write_guarded = (be :: CBackend, call: str, p: Piece) Res<(), AllocError> {
     be.set_line(p.tmp, call).try();
-    write_jump_unless_ok(be, p.tmp, p.done)
+    be.write_jump_unless_ok(p.tmp, p.done)
 }
 
 // A piece this backend cannot write. Reported at the node rather than
@@ -915,7 +904,7 @@ write_jump_unless_ok* = (be :: CBackend, tmp: str, done: usize)
     sym_variant(tag, RES_PATH, "Ok").try();
     be.fmt("if ({tmp}.zg_tag != {}) {\n", tag.view()).try();
     be.indent();
-    write_goto(be, done).try();
+    be.write_goto(done).try();
     be.dedent();
     be.writeln("}").try();
     Ok(());

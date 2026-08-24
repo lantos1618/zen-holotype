@@ -1,0 +1,206 @@
+// src/lsp/lsp_action.zen
+// `textDocument/codeAction` — the auto-import quickfix, the only action.
+//
+// ONE KIND, and it is sema's answer wearing the protocol's clothes: an
+// undefined name squiggles, and the fix is the import line that would
+// have bound it. The QUESTION — which modules export this name — is
+// `World.exported_named`, asked of the same shared `Checker` the
+// diagnostics came from. `context.diagnostics` IS NOT READ: what the
+// client was told and what the checker says cannot disagree when there
+// is one source, so the handler re-walks the checker's own diags and
+// offers one action per (undefined name, exporting module).
+//
+// `[]` IS THE ANSWER TO EVERY REFUSAL — no workspace, no build in the
+// slot, a module the tree cannot place — for `lsp_fmt.zen`'s reason: a
+// client asks on every cursor pause, and an error is a modal.
+//
+// THE EDIT IS TEXT, NOT AST: one line, `Name = dotted.module\n`, spelled
+// UNSTARRED — a star on an import is re-export (`sema_def.zen`), and
+// this fix imports to use. It lands after the file's last import decl,
+// or at the top of a file that has none. Insertion is a zero-length
+// range; the client moves nothing it was not told to.
+//
+// NOT OFFERED, and named so nobody thinks it lost: an enum VARIANT
+// (`Ok`, `None`) is not a `Def` — it rides its enum's star — so an
+// undefined variant name offers nothing yet. That is the `variant_defs`
+// walk, a follow-up, and `docs/design_lsp.md`'s table says so.
+
+str, String = std.text
+Vec = std.collections
+Alloc, AllocError = std.mem
+Range = std.core
+Pos, Span = std.ast.ast_span
+module_index_of = std.ast.ast_named
+Checker = sema.sema_check
+Diag = sema.sema_diag
+Def, module_display = sema.sema_def
+to_pos, to_wire, write_wire, WirePos = lsp.lsp_pos
+write_text, written = lsp.lsp_json
+
+// One offer: the name to bind and the module to bind it from. Kept as
+// DATA until the writer pass, because the comma rule wants an index and
+// the diag walk does not have one.
+Action = { name: str, module: str }
+
+// The `CodeAction[]` for one range: an action per (undefined name under
+// the range, module exporting it). `text` IS THE EDITOR'S BUFFER — the
+// insertion point is read off the built tree, but the wire position is
+// measured against these bytes, as everywhere in this folder.
+write_actions* = (
+    c    : Checker,
+    t    : Alloc,
+    file : str,
+    text : str,
+    uri  : str,
+    sl   : usize,
+    sc   : usize,
+    el   : usize,
+    ec   : usize,
+    out  :: String
+) Res<(), AllocError> {
+    found ::= t.Vec<Action>();
+    from = to_pos(text, sl, sc);
+    upto = to_pos(text, el, ec);
+    Range(0, c.diag_count()).loop((h, i) {
+        c.diag_at(i).match({
+            None  => written(),
+            Ok(d) => offer(c, t, file, d, from, upto, found),
+        }).try();
+    });
+    write_offerings(c, t, file, text, uri, found, out)
+}
+
+// A diag earns offers when it is THIS FILE's, it covers the asked range,
+// and it is the one fault an import line answers. Every other fault is
+// not this server's action to offer — there is no "add the missing
+// field" here, and a kitchen-sink menu is how a quickfix stops being
+// quick.
+offer = (
+    c     : Checker,
+    t     : Alloc,
+    file  : str,
+    d     : Diag,
+    from  : Pos,
+    upto  : Pos,
+    found :: Vec<Action>
+) Res<(), AllocError> {
+    (d.file.eq(file) && covers(d.span, from, upto)).match({
+        false => written(),
+        true  => d.fault.match({
+            UndefinedName(nf) => offer_name(c, t, nf.name, found),
+            _                 => written(),
+        }),
+    })
+}
+
+// ONE OFFER PER NAME PER REQUEST: a file that writes `Vec` twice has two
+// diags and one missing import, so the second diag for a name already
+// collected adds nothing.
+offer_name = (c: Checker, t: Alloc, name: str, found :: Vec<Action>)
+             Res<(), AllocError> {
+    found.find((a) { a.name.eq(name) }).match({
+        Ok(_) => written(),
+        None  => {
+            defs ::= t.Vec<Def>();
+            c.world.exported_named(name, defs).try();
+            defs.loop((h, d) { offer_def(c, name, d, found).try(); });
+            Ok(())
+        },
+    })
+}
+
+// The module a def came from, NAMED AS A PERSON WRITES IT:
+// `module_display` collapses `std.core.core` to the `std.core` an import
+// line spells.
+offer_def = (c: Checker, name: str, d: Def, found :: Vec<Action>)
+            Res<(), AllocError> {
+    c.world.table_at(d.id.module.to_usize()).match({
+        None   => written(),
+        Ok(t2) => found.add(Action(
+            name: name,
+            module: module_display(t2.name)
+        )),
+    })
+}
+
+// A diag's span against the request's range, INCLUSIVE at both ends: a
+// client sends the squiggle's own range or an empty cursor range, and
+// both must select it.
+covers = (span: Span, from: Pos, upto: Pos) bool {
+    !after(span.start, upto) && !after(from, span.end)
+}
+
+after = (a: Pos, b: Pos) bool {
+    a.line > b.line || (a.line == b.line && a.col > b.col)
+}
+
+// WHERE THE LINE GOES: after the file's last import decl, read off the
+// BUILT tree — the buffer mid-keystroke may not parse, and the decls
+// that describe it are the settle's. No imports yet: the top of the
+// file. `Pos` is 1-based, so the line AFTER the import's last is
+// `end.line + 1`, which `to_wire` shifts onto the wire's 0-based axis.
+insert_at = (c: Checker, file: str, text: str) WirePos {
+    line ::= 1;
+    module_index_of(c.tree, file).match({
+        None   => {},
+        Ok(mi) => c.tree.module_at(mi).match({
+            None  => {},
+            Ok(m) => m.decls.loop((h, d) {
+                d.kind.match({
+                    Import(_) => { line = d.span.end.line + 1; },
+                    _         => {},
+                });
+            }),
+        }),
+    });
+    to_wire(text, Pos(line: line, col: 1))
+}
+
+// The wire shape. The title is plain text a person reads; the URI and the
+// new line go through `write_text` — a module path is dots and letters
+// today, and the day one is not, the escaping is already right.
+write_offerings = (
+    c     : Checker,
+    t     : Alloc,
+    file  : str,
+    text  : str,
+    uri   : str,
+    found : Vec<Action>,
+    out   :: String
+) Res<(), AllocError> {
+    at = insert_at(c, file, text);
+    out.add_byte('[').try();
+    n ::= 0;
+    found.loop((h, a) { n = write_action(t, a, at, uri, n, out).try(); });
+    out.add_byte(']')
+}
+
+write_action = (
+    t   : Alloc,
+    a   : Action,
+    at  : WirePos,
+    uri : str,
+    n   : usize,
+    out :: String
+) Res<usize, AllocError> {
+    (n > 0).match({ true => out.add_byte(','), false => written() }).try();
+    out.add_bytes("{\"title\":\"Import ").try();
+    out.add_bytes(a.name).try();
+    out.add_bytes(" = ").try();
+    out.add_bytes(a.module).try();
+    out.add_bytes("\",\"kind\":\"quickfix\",\"edit\":{\"changes\":{").try();
+    write_text(uri, out).try();
+    out.add_bytes(":[{\"range\":{\"start\":").try();
+    write_wire(at, out).try();
+    out.add_bytes(",\"end\":").try();
+    write_wire(at, out).try();
+    out.add_bytes("},\"newText\":").try();
+    line ::= t.String().try();
+    line.add_bytes(a.name).try();
+    line.add_bytes(" = ").try();
+    line.add_bytes(a.module).try();
+    line.add_bytes("\n").try();
+    write_text(line.view(), out).try();
+    out.add_bytes("}]}}}").try();
+    Ok(n + 1);
+}

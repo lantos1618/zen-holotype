@@ -1,40 +1,186 @@
 // src/sema/sema_meta.zen
-// `@meta`, and the wall in front of it.
+// The comptime evaluator's entry point — and, today, its whole
+// instruction set.
 //
-// The feature is fully designed (`docs/DESIGN.md:453`), lexed, parsed in
-// both of its forms, given a node and coloured by the editor — and
-// implemented by nothing at all. `docs/design_meta.md` is the
-// decomposition, and its §3 is this wall: why the refusal belongs to sema
-// and not to the backend (`@scope`, the sibling entry in the same closed
-// namespace, is refused in `sema_scope.zen` and this is that rule's
-// shape), what the cascade looked like before it, and the three must-fail
-// tests both toolchains share. This file is M0 and will be the feature's
-// home.
+// `docs/design_meta.md` is the decomposition and its §7 the milestones.
+// M0 was the wall — every `@meta` refused by name, pinned by three
+// must-fail tests — and the refusal is still the answer for everything
+// but one shape. M2 is the skeleton below: an entry point, and a step
+// budget that REPORTS from the first commit, because a prover may
+// decline (`sema_trap.zen`) and an evaluator may not. M3 is the one
+// rule the skeleton runs: `@meta(name: Type).name` folds at sema time
+// to the declared type's name as a `str`, recorded in
+// `Checker.meta_memo` under the ACCESS node's id — the backend reads
+// it back through `Checker.meta_str` and lowers an ordinary string
+// literal, having learned nothing new.
 //
-// THE ARGUMENT IS NOT VISITED, deliberately. Descending would report the
-// undefined name inside `@meta(bogus)` — a second sentence about a
-// program whose first sentence is already "this form does not compile" —
-// and it is work the next milestone deletes rather than reuses: once
-// `@meta` evaluates, its argument is a comptime term looked up in a
-// comptime environment, not an ordinary expression walked by
-// `type_of`.
+// EVERYTHING ELSE IS STILL THE WALL. The value form `@meta(v)`, a
+// typed form asked for a member that is not `.name`, a type with no
+// declaration payload to read, and a `@meta` standing anywhere an
+// access target isn't all report `MetaNotImplemented` at the `@meta`
+// token and poison, exactly as M0 did — the refused set shrank by one
+// shape and the refusal tests pin the rest of it.
 //
-// WHY IT IS WORTH ITS OWN FILE at eight lines of code: this refusal is
-// the ONLY part of `@meta` the differential oracle will ever be able to
-// see, since everything after it is zen-only by construction — `@meta` is
-// not in the seed subset. `design_meta.md` §6 says what stands in for the
-// oracle there.
+// THE ARGUMENT IS STILL NOT VISITED, with one exception that is the
+// rule itself: the typed form's `type` resolves through the ordinary
+// type path with the caller's `ctx`, so `@Self` inside an impl means
+// the enclosing type. Nothing descends into the argument as an
+// EXPRESSION — it is a comptime term, and `type_of` walking it would
+// spend a second diagnostic on a program whose first sentence is
+// already written.
 
-Expr = std.ast
+Expr, ExprId, TypeId, Access, Meta, Decl = std.ast
 AllocError = std.mem
+str = std.text
 TyId = sema.sema_ty
-Checker = sema.sema_check
+Checker, Ctx = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
+decl_at = sema.sema_def
+type_from_ast = sema.sema_type
 
-// The whole of `@meta` today: one diagnostic at the `@meta` token, then
-// poison, so nothing downstream invents a second answer about a form
-// that has none.
-meta_type* = (c :: Checker, node: Expr) Res<TyId, AllocError> {
+// THE FUEL. A spent budget FAILS THE BUILD — it never hangs and it
+// never answers by default. 4096 is a setting, not a measurement
+// (`design_meta.md` §8 keeps the number open): the one rule that
+// exists spends three steps and cannot loop, so anything past a
+// handful is equally right, and the day the evaluator CAN loop the
+// counter is already here. The count is per `@meta` evaluation rather
+// than per compilation, for the reason `DEPTH_BUDGET`
+// (`sema_depth.zen`) is per chain: a budget is a fact about one term,
+// not about the program that holds it.
+META_STEPS: usize = 4096
+
+// A `@meta` standing anywhere an access target isn't: one diagnostic
+// at the `@meta` token, then poison, so nothing downstream invents a
+// second answer about a form that has none. `ctx` travels in as it
+// does to every arm of `expr_kind`; the refusal itself needs nothing
+// but the node.
+meta_type* = (c :: Checker, node: Expr, ctx: Ctx) Res<TyId, AllocError> {
+    c.meta_refused(node)
+}
+
+// The intercept `sema_member.access_type` makes when the access target
+// is a Meta node: the whole access is the evaluator's question. `id`
+// is the ACCESS node's own — the fold is recorded under it, because
+// the folded string is a fact about this expression, and the backend
+// asks for it by this id.
+meta_access* = (c :: Checker, id: ExprId, ac: Access, ctx: Ctx)
+               Res<TyId, AllocError> {
+    target = c.tree.expr_at(ac.base);
+    c.spend(META_STEPS, target).try().match({
+        None     => c.types.unknown(),
+        Ok(left) => target.kind.match({
+            Meta(m) => c.meta_form(id, target, m, ac, left, ctx),
+            _       => c.types.unknown(),
+        }),
+    })
+}
+
+// THE ONE SHAPE THAT FOLDS: the typed form — `name: Type` written, no
+// value — asked for its `name`. Every other shape is the wall.
+meta_form = (
+    c      :: Checker,
+    id     : ExprId,
+    target : Expr,
+    m      : Meta,
+    ac     : Access,
+    left   : usize,
+    ctx    : Ctx
+) Res<TyId, AllocError> {
+    m.value.match({
+        Ok(_) => c.meta_refused(target),
+        None  => ac.name.text.eq("name").match({
+            false => c.meta_refused(target),
+            true  => m.type.match({
+                None  => c.meta_refused(target),
+                Ok(t) => c.meta_fold(id, target, t, left, ctx),
+            }),
+        }),
+    })
+}
+
+// The written type resolves WITH the caller's `ctx`, so `@Self` is the
+// enclosing type (`sema_type.self_type`) and a name means what it
+// means at this site. The form's `name` binds nothing this rule reads
+// — it is the receiver the field walk will project through (M4).
+meta_fold = (
+    c      :: Checker,
+    id     : ExprId,
+    target : Expr,
+    t      : TypeId,
+    left   : usize,
+    ctx    : Ctx
+) Res<TyId, AllocError> {
+    c.spend(left, target).try().match({
+        None     => c.types.unknown(),
+        Ok(left) => {
+            ty = c.type_from_ast(t, ctx).try();
+            c.meta_decl(id, target, ty, left)
+        },
+    })
+}
+
+// The name lives on the declaration's payload node. A type with no
+// declaration behind it — a primitive, a parameter, a union, a
+// function — has no node to read and stays refused; a poisoned one was
+// reported on the way in and says nothing twice.
+meta_decl = (c :: Checker, id: ExprId, target: Expr, ty: TyId, left: usize)
+            Res<TyId, AllocError> {
+    c.is_unknown(ty).match({
+        true  => c.types.unknown(),
+        false => c.types.at(ty).match({
+            Named(n) => decl_at(c.tree, n.decl).match({
+                None  => c.meta_refused(target),
+                Ok(d) => c.meta_name(id, target, d, left),
+            }),
+            _        => c.meta_refused(target),
+        }),
+    })
+}
+
+// `.name` is equally real on a struct, an enum and an alias — each
+// payload node carries it. The arms left over are declarations no type
+// resolves to here, and they are the wall anyway.
+meta_name = (c :: Checker, id: ExprId, target: Expr, d: Decl, left: usize)
+            Res<TyId, AllocError> {
+    c.spend(left, target).try().match({
+        None  => c.types.unknown(),
+        Ok(_) => d.kind.match({
+            Struct(s) => c.meta_record(id, s.name.text),
+            Enum(e)   => c.meta_record(id, e.name.text),
+            Alias(a)  => c.meta_record(id, a.name.text),
+            _         => c.meta_refused(target),
+        }),
+    })
+}
+
+// The fold lands: the text under the ACCESS id — `meta_str` reads it
+// back — and the type is `str`.
+meta_record = (c :: Checker, id: ExprId, name: str) Res<TyId, AllocError> {
+    c.meta_memo.set(id, name).try();
+    c.types.str_ty()
+}
+
+// One step of fuel. Running out is a sentence and poison, never a hang
+// and never a guess — and the counter exists from the first commit,
+// because adding it after the evaluator would be adding it after the
+// hang.
+spend = (c :: Checker, left: usize, node: Expr) Res<Res<usize>, AllocError> {
+    (left == 0).match({
+        true  => c.meta_out_of_steps(node),
+        false => Ok(Ok(left - 1)),
+    })
+}
+
+meta_out_of_steps = (c :: Checker, node: Expr) Res<Res<usize>, AllocError> {
+    c.report(
+        node.span.file,
+        node.span,
+        SemaFault.ComptimeBudget(NameFault(name: ""))
+    ).try();
+    Ok(None);
+}
+
+meta_refused = (c :: Checker, node: Expr) Res<TyId, AllocError> {
     c.report(
         node.span.file,
         node.span,

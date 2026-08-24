@@ -1,0 +1,150 @@
+// THE AUTO-IMPORT QUICKFIX: an undefined name under the cursor, and
+// `textDocument/codeAction` offers the import line that would bind it.
+//
+// The shape of the answer is the design, and each row pins one part:
+//
+//   - THE NAME COMES FROM THE CHECKER'S OWN DIAGNOSTIC, not from the
+//     request's `context.diagnostics` (which the handler never reads —
+//     `lsp_action.zen`'s header says why). `Bag` is undefined in the
+//     buffer, and the offer exists because sema said so.
+//   - THE MODULE NAMED IS THE DECLARING ONE. The world holds `Bag`
+//     because `app/shape.zen` imports `app/kit.zen` — a walk follows
+//     imports and nothing else — but the fix spells `Bag = app.kit`,
+//     where the declaration lives, never a path through a neighbour.
+//   - THE LINE LANDS AFTER THE LAST EXISTING IMPORT. The buffer has one
+//     import on line 0, so the insertion point is the start of line 1 —
+//     a zero-length range, and `newText` carries the `\n`.
+//   - A NAME THAT RESOLVES OFFERS NOTHING. `Point` is bound on line 0;
+//     asking over it must be `[]` and not an offer to import what is
+//     already in scope.
+//
+// THE SECOND ROW IS THE SAME QUESTION WITH AN EMPTY RANGE: a client
+// sends the squiggle's range OR a zero-width cursor range inside it, and
+// both must select the diagnostic (`covers` is inclusive for exactly
+// this reason).
+//
+// STAGED LAYOUT, per `tests/run.py`: this directory lands as `<work>/src`
+// and the program runs from `<work>`, so the URIs below are the same
+// `file://src/...` form `hover_answers_an_imported_name` next door
+// explains.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, write_decimal, frame_at = lsp.lsp_frame
+write_text = lsp.lsp_json
+
+// THE BUFFER, not the file on disk: one good import, one name nobody
+// bound. `Bag` sits at line 2, characters 21-23.
+DOC*: str = "Point = app.shape\n\nnear = (p: Point, b: Bag) i32 {\n    p.x\n}\n"
+
+URI*: str = "file://src/app/app.zen"
+ROOT_URI*: str = "file://."
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    input ::= a.String().try();
+    open_session(a, input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input
+    ).try();
+    open_doc(a, URI, DOC, input).try();
+
+    // The squiggle's own range.
+    ask(a, 10, URI, 2, 21, 2, 24, input).try();
+    // A zero-width cursor INSIDE the name.
+    ask(a, 11, URI, 2, 22, 2, 22, input).try();
+    // A name that is already bound.
+    ask(a, 12, URI, 2, 11, 2, 16, input).try();
+
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input
+    ).try();
+
+    s   ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view());
+    Ok(0);
+}
+
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":"
+    ).try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+open_doc = (a: Alloc, uri: str, text: str, into :: String)
+           Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(uri, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+// A `codeAction` request as a client spells one: the document, the
+// range, and a `context` this server deliberately never reads.
+ask = (
+    a    : Alloc,
+    id   : usize,
+    uri  : str,
+    sl   : usize,
+    sc   : usize,
+    el   : usize,
+    ec   : usize,
+    into :: String
+) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes("{\"jsonrpc\":\"2.0\",\"id\":").try();
+    write_decimal(id, body).try();
+    body.add_bytes(
+        ",\"method\":\"textDocument/codeAction\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(uri, body).try();
+    body.add_bytes("},\"range\":{\"start\":{\"line\":").try();
+    write_decimal(sl, body).try();
+    body.add_bytes(",\"character\":").try();
+    write_decimal(sc, body).try();
+    body.add_bytes("},\"end\":{\"line\":").try();
+    write_decimal(el, body).try();
+    body.add_bytes(",\"character\":").try();
+    write_decimal(ec, body).try();
+    body.add_bytes("}},\"context\":{\"diagnostics\":[]}}}").try();
+    write_frame(body.view(), into)
+}
+
+// Reply 0 is `initialize`; rows 1-3 are the three asks. What comes
+// after — `shutdown`, then the settle's diagnostics notifications — is
+// another test's subject.
+walk_replies = (out: str) () {
+    at    ::= 0;
+    seen  ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; shown(seen, fr.body); seen = seen + 1; },
+        });
+    });
+}
+
+shown = (i: usize, body: str) () {
+    (i == 1).match({ true => println("over the name         {}", body), false => () });
+    (i == 2).match({ true => println("cursor inside        {}", body), false => () });
+    (i == 3).match({ true => println(
+        "a name that resolves {}",
+        body
+    ), false => () });
+}

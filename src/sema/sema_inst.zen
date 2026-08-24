@@ -119,17 +119,17 @@ Inst* = (a: Alloc) Inst {
 subst* = (c :: Checker, ty: TyId, inst: Inst) Res<TyId, AllocError> {
     (inst.len() == 0).match({
         true  => Ok(ty),
-        false => subst_kind(c, ty, inst),
+        false => c.subst_kind(ty, inst),
     })
 }
 
 subst_kind = (c :: Checker, ty: TyId, inst: Inst) Res<TyId, AllocError> {
     c.types.at(ty).match({
         Var(_)   => Ok(inst.lookup(ty).match({ Ok(t) => t, None => ty })),
-        Named(n) => subst_named(c, n, ty, inst),
-        Res(r)   => subst_res(c, r, ty, inst),
-        Fn(f)    => subst_fn(c, f, ty, inst),
-        Union(u) => subst_union(c, u.members, ty, inst),
+        Named(n) => c.subst_named(n, ty, inst),
+        Res(r)   => c.subst_res(r, ty, inst),
+        Fn(f)    => c.subst_fn(f, ty, inst),
+        Union(u) => c.subst_union(u.members, ty, inst),
         _        => Ok(ty),
     })
 }
@@ -141,7 +141,7 @@ subst_named = (c :: Checker, n: TyNamed, ty: TyId, inst: Inst)
               Res<TyId, AllocError> {
     (n.args.len == 0).match({
         true  => Ok(ty),
-        false => rebuild_named(c, n, inst),
+        false => c.rebuild_named(n, inst),
     })
 }
 
@@ -152,15 +152,15 @@ subst_named = (c :: Checker, n: TyNamed, ty: TyId, inst: Inst)
 rebuild_named = (c :: Checker, n: TyNamed, inst: Inst)
                 Res<TyId, AllocError> {
     args ::= c.alloc.Vec<TyId>();
-    subst_list(c, n.args, inst, args).try();
+    c.subst_list(n.args, inst, args).try();
     qname = owner_of(c, n.decl.module.to_usize(), n.name).try();
     c.types.named(n.decl, qname, n.name, args)
 }
 
 subst_res = (c :: Checker, r: TyRes, ty: TyId, inst: Inst)
             Res<TyId, AllocError> {
-    value = subst(c, r.value, inst).try();
-    error = subst(c, r.error, inst).try();
+    value = c.subst(r.value, inst).try();
+    error = c.subst(r.error, inst).try();
     unchanged(value, r.value, error, r.error).match({
         true  => Ok(ty),
         false => rebuild_res(c, value, error, r.form),
@@ -185,8 +185,8 @@ rebuild_res = (c :: Checker, value: TyId, error: TyId, form: ResForm)
 subst_fn = (c :: Checker, f: TyFn, ty: TyId, inst: Inst)
            Res<TyId, AllocError> {
     params ::= c.alloc.Vec<TyId>();
-    subst_list(c, f.params, inst, params).try();
-    ret = subst(c, f.ret, inst).try();
+    c.subst_list(f.params, inst, params).try();
+    ret = c.subst(f.ret, inst).try();
     c.types.fn_ty(params, ret)
 }
 
@@ -195,7 +195,7 @@ subst_fn = (c :: Checker, f: TyFn, ty: TyId, inst: Inst)
 subst_union = (c :: Checker, members: Vec<TyId>, ty: TyId, inst: Inst)
               Res<TyId, AllocError> {
     parts ::= c.alloc.Vec<TyId>();
-    subst_list(c, members, inst, parts).try();
+    c.subst_list(members, inst, parts).try();
     c.types.union_ty(parts)
 }
 

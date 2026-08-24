@@ -53,7 +53,7 @@ expr = gen.gen_c.gen_c_expr
 // function, and a member of `Ptr` this file does not know is a refusal
 // with a position rather than silence.
 is_ptr_member* = (be :: CBackend, rty: TyId, name: str) bool {
-    named_ptr(be, rty) && ptr_verb(name)
+    be.named_ptr(rty) && ptr_verb(name)
 }
 
 named_ptr = (be :: CBackend, rty: TyId) bool {
@@ -94,10 +94,10 @@ ptr_member_type* = (
     ctx  : Ctx,
     want : TyId
 ) Res<TyId, AllocError> {
-    et = elem_of(be, rty).try();
+    et = be.elem_of(rty).try();
     a.name.text.eq("read").match({
         true  => Ok(et),
-        false => ptr_type_2(be, c, a, rty, ctx, want),
+        false => be.ptr_type_2(c, a, rty, ctx, want),
     })
 }
 
@@ -113,7 +113,7 @@ ptr_type_2 = (
 ) Res<TyId, AllocError> {
     (a.name.text.eq("offset") || a.name.text.eq("back")).match({
         true  => Ok(rty),
-        false => ptr_type_3(be, c, a, rty, ctx, want),
+        false => be.ptr_type_3(c, a, rty, ctx, want),
     })
 }
 
@@ -127,7 +127,7 @@ ptr_type_3 = (
 ) Res<TyId, AllocError> {
     a.name.text.eq("bytes").match({
         true  => be.check.types.prim("usize"),
-        false => ptr_type_4(be, c, a, rty, ctx, want),
+        false => be.ptr_type_4(c, a, rty, ctx, want),
     })
 }
 
@@ -141,7 +141,7 @@ ptr_type_4 = (
 ) Res<TyId, AllocError> {
     a.name.text.eq("is_null").match({
         true  => be.check.types.prim("bool"),
-        false => ptr_type_5(be, c, a, rty, ctx, want),
+        false => be.ptr_type_5(c, a, rty, ctx, want),
     })
 }
 
@@ -155,7 +155,7 @@ ptr_type_5 = (
 ) Res<TyId, AllocError> {
     a.name.text.eq("to").match({
         false => be.check.types.prim("()"),
-        true  => ptr_target_type(be, c, rty, ctx, want),
+        true  => be.ptr_target_type(c, rty, ctx, want),
     })
 }
 
@@ -166,7 +166,7 @@ ptr_target_type = (
     ctx  : Ctx,
     want : TyId
 ) Res<TyId, AllocError> {
-    target_ptr(be, c, rty, ctx, want).try().match({
+    be.target_ptr(c, rty, ctx, want).try().match({
         Ok(pt) => Ok(pt),
         None   => Ok(want),
     })
@@ -187,9 +187,9 @@ lower_ptr_member* = (
     out  :: String
 )
                     Res<(), AllocError> {
-    et = elem_of(be, rty).try();
+    et = be.elem_of(rty).try();
     base ::= be.alloc.String().try();
-    address(be, a.base, rty, ctx, base).try();
+    be.address(a.base, rty, ctx, base).try();
     verb(be, id, c, a.name.text, rty, et, base.view(), ctx, want, out)
 }
 
@@ -207,7 +207,7 @@ verb = (
 )
        Res<(), AllocError> {
     name.eq("read").match({
-        true  => read_at(be, c, et, base, ctx, out),
+        true  => be.read_at(c, et, base, ctx, out),
         false => verb_2(be, id, c, name, rty, et, base, ctx, want, out),
     })
 }
@@ -245,7 +245,7 @@ verb_3 = (
 )
          Res<(), AllocError> {
     name.eq("offset").match({
-        true  => shift(be, c, rty, et, base, " + ", ctx, out),
+        true  => be.shift(c, rty, et, base, " + ", ctx, out),
         false => verb_4(be, id, c, name, rty, et, base, ctx, want, out),
     })
 }
@@ -264,7 +264,7 @@ verb_4 = (
 )
          Res<(), AllocError> {
     name.eq("back").match({
-        true  => shift(be, c, rty, et, base, " - ", ctx, out),
+        true  => be.shift(c, rty, et, base, " - ", ctx, out),
         false => verb_5(be, id, c, name, rty, et, base, ctx, want, out),
     })
 }
@@ -283,8 +283,8 @@ verb_5 = (
 )
          Res<(), AllocError> {
     name.eq("bytes").match({
-        true  => byte_size(be, c, et, ctx, out),
-        false => verb_6(be, id, c, name, rty, et, base, ctx, want, out),
+        true  => be.byte_size(c, et, ctx, out),
+        false => be.verb_6(id, c, name, rty, et, base, ctx, want, out),
     })
 }
 
@@ -302,8 +302,8 @@ verb_6 = (
 )
          Res<(), AllocError> {
     name.eq("copy_from").match({
-        true  => copy_run(be, c, rty, et, base, ctx, out),
-        false => verb_7(be, id, c, name, rty, et, base, ctx, want, out),
+        true  => be.copy_run(c, rty, et, base, ctx, out),
+        false => be.verb_7(id, c, name, rty, et, base, ctx, want, out),
     })
 }
 
@@ -322,7 +322,7 @@ verb_7 = (
          Res<(), AllocError> {
     name.eq("is_null").match({
         true  => null_test(base, out),
-        false => reinterpret(be, id, c, rty, base, ctx, want, out),
+        false => be.reinterpret(id, c, rty, base, ctx, want, out),
     })
 }
 
@@ -350,9 +350,9 @@ read_at = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    run(be, et, base, out).try();
+    be.run(et, base, out).try();
     out.add_bytes("[").try();
-    index_arg(be, c, 0, ctx, out).try();
+    be.index_arg(c, 0, ctx, out).try();
     out.add_bytes("]").try();
     Ok(());
 }
@@ -370,11 +370,11 @@ write_at = (
     out  :: String
 ) Res<(), AllocError> {
     ptr ::= be.alloc.String().try();
-    run(be, et, base, ptr).try();
+    be.run(et, base, ptr).try();
     idx ::= be.alloc.String().try();
-    index_arg(be, c, 0, ctx, idx).try();
+    be.index_arg(c, 0, ctx, idx).try();
     val ::= be.alloc.String().try();
-    value_arg(be, c, 1, et, ctx, val).try();
+    be.value_arg(c, 1, et, ctx, val).try();
     be.fmt("{}[{}] = {};\n", ptr.view(), idx.view(), val.view()).try();
     out.add_bytes("0")
 }
@@ -382,7 +382,7 @@ write_at = (
 // The run, ready to index. Already a `T *`, so there is nothing to cast.
 run = (be :: CBackend, et: TyId, base: str, out :: String)
       Res<(), AllocError> {
-    request_type(be, et).try();
+    be.request_type(et).try();
     out.add_bytes(base).try();
     Ok(());
 }
@@ -402,18 +402,18 @@ shift = (
     out  :: String
 ) Res<(), AllocError> {
     count ::= be.alloc.String().try();
-    index_arg(be, c, 0, ctx, count).try();
+    be.index_arg(c, 0, ctx, count).try();
     out.fmt("({base}{op}({}))", count.view())
 }
 
 // `count` elements, in bytes — the header's `sizeof` rule.
 byte_size = (be :: CBackend, c: Call, et: TyId, ctx: Ctx, out :: String)
             Res<(), AllocError> {
-    request_type(be, et).try();
+    be.request_type(et).try();
     count ::= be.alloc.String().try();
-    index_arg(be, c, 0, ctx, count).try();
+    be.index_arg(c, 0, ctx, count).try();
     cty ::= be.alloc.String().try();
-    ctype(be, et, cty).try();
+    be.ctype(et, cty).try();
     out.fmt("(({}) * sizeof({}))", count.view(), cty.view())
 }
 
@@ -430,9 +430,9 @@ copy_run = (
     out  :: String
 ) Res<(), AllocError> {
     from ::= be.alloc.String().try();
-    value_arg(be, c, 0, rty, ctx, from).try();
+    be.value_arg(c, 0, rty, ctx, from).try();
     n ::= be.alloc.String().try();
-    count_bytes(be, c, et, ctx, n).try();
+    be.count_bytes(c, et, ctx, n).try();
     be.fmt(
         "memcpy((void *){base}, (const void *)({}), {});\n",
         from.view(),
@@ -444,9 +444,9 @@ copy_run = (
 count_bytes = (be :: CBackend, c: Call, et: TyId, ctx: Ctx, out :: String)
               Res<(), AllocError> {
     count ::= be.alloc.String().try();
-    index_arg(be, c, 1, ctx, count).try();
+    be.index_arg(c, 1, ctx, count).try();
     cty ::= be.alloc.String().try();
-    ctype(be, et, cty).try();
+    be.ctype(et, cty).try();
     out.fmt("(({}) * sizeof({}))", count.view(), cty.view())
 }
 
@@ -467,9 +467,9 @@ reinterpret = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    target_ptr(be, c, rty, ctx, want).try().match({
-        Ok(pt) => write_reinterpret(be, pt, base, out),
-        None   => untyped(be, id, "to", out),
+    be.target_ptr(c, rty, ctx, want).try().match({
+        Ok(pt) => be.write_reinterpret(pt, base, out),
+        None   => be.untyped(id, "to", out),
     })
 }
 
@@ -478,8 +478,8 @@ reinterpret = (
 target_ptr = (be :: CBackend, c: Call, rty: TyId, ctx: Ctx, want: TyId)
              Res<Res<TyId>, AllocError> {
     c.targs.get(0).match({
-        Ok(t) => ptr_of_written(be, t, rty, ctx),
-        None  => Ok(keep_ptr(be, want)),
+        Ok(t) => be.ptr_of_written(t, rty, ctx),
+        None  => Ok(be.keep_ptr(want)),
     })
 }
 
@@ -487,14 +487,14 @@ target_ptr = (be :: CBackend, c: Call, rty: TyId, ctx: Ctx, want: TyId)
 // only when that expectation is a `Ptr` — anything else is a type the
 // backend would be inventing.
 keep_ptr = (be :: CBackend, want: TyId) Res<TyId> {
-    named_ptr(be, want).match({ true => Ok(want), false => None })
+    be.named_ptr(want).match({ true => Ok(want), false => None })
 }
 
 ptr_of_written = (be :: CBackend, t: TypeId, rty: TyId, ctx: Ctx)
                  Res<Res<TyId>, AllocError> {
     u = sub(be, be.check.type_from_ast(t, ctx).try()).try();
     be.check.types.at(rty).match({
-        Named(n) => Ok(Ok(ptr_at(be, n, u).try())),
+        Named(n) => Ok(Ok(be.ptr_at(n, u).try())),
         _        => Ok(None),
     })
 }
@@ -508,7 +508,7 @@ ptr_at* = (be :: CBackend, n: TyNamed, elem: TyId) Res<TyId, AllocError> {
     args ::= be.alloc.Vec<TyId>();
     args.add(elem).try();
     qname ::= be.alloc.String().try();
-    write_qname(be, qname, n).try();
+    be.write_qname(qname, n).try();
     intern_ptr(be.check, n, qname.view(), args)
 }
 
@@ -519,9 +519,9 @@ intern_ptr = (c :: Checker, n: TyNamed, qname: str, args: Vec<TyId>)
 
 write_reinterpret = (be :: CBackend, pt: TyId, base: str, out :: String)
                     Res<(), AllocError> {
-    request_type(be, pt).try();
+    be.request_type(pt).try();
     cty ::= be.alloc.String().try();
-    ctype(be, pt, cty).try();
+    be.ctype(pt, cty).try();
     out.fmt("(({}){base})", cty.view())
 }
 
@@ -532,7 +532,7 @@ write_reinterpret = (be :: CBackend, pt: TyId, base: str, out :: String)
 index_arg = (be :: CBackend, c: Call, i: usize, ctx: Ctx, out :: String)
             Res<(), AllocError> {
     usize_ty = be.check.types.prim("usize").try();
-    value_arg(be, c, i, usize_ty, ctx, out)
+    be.value_arg(c, i, usize_ty, ctx, out)
 }
 
 value_arg = (
@@ -563,16 +563,16 @@ is_null_ptr* = (name: str) bool { name.eq("null_ptr") }
 
 lower_null_ptr* = (be :: CBackend, id: ExprId, want: TyId, out :: String)
                   Res<(), AllocError> {
-    named_ptr(be, want).match({
-        false => untyped(be, id, "null_ptr", out),
-        true  => write_null(be, want, out),
+    be.named_ptr(want).match({
+        false => be.untyped(id, "null_ptr", out),
+        true  => be.write_null(want, out),
     })
 }
 
 write_null = (be :: CBackend, want: TyId, out :: String)
              Res<(), AllocError> {
-    request_type(be, want).try();
+    be.request_type(want).try();
     cty ::= be.alloc.String().try();
-    ctype(be, want, cty).try();
+    be.ctype(want, cty).try();
     out.fmt("(({})NULL)", cty.view())
 }

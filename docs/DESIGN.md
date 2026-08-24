@@ -415,6 +415,8 @@ Names are qualified by path, imports bind locally, and two modules may define th
 
 The two halves fit together because they answer different questions. A bare name asks "what is `Vec` here", which two modules can disagree about, so it needs an import. `x.get(0)` asks "what can this value do", which only `x`'s type can answer.
 
+**Where behavior lives follows from that rule, and there is no third form.** A fact every consumer asks of a type — a member's name, its exportedness — is a struct-body method, written once, in the type's file. An operation one consumer owns is a free function in that consumer's file, *called on* its receiver: the dot finds the calling module's own names whether they are exported or not, so the call reads `c.check_args(..)` while the declaration never leaves the module that owns the operation. There is deliberately **no out-of-line `impl Member { .. }`** — no block that adds methods to a type from another file, the mechanism Rust scatters a type's surface across a crate with — because the dot already gives the call its method shape without moving the declaration, and `A.impl(B, {..})` exists only to satisfy a bound and lives with `A`. The dividing rule: a fact two modules would both write belongs on the type; an operation one module owns stays in that module and is dot-called. **Cost to accept knowingly:** a type's full callable surface is not readable from its file — what `x` can do depends on what the calling module has in scope — which is the same scatter Rust has, resolved by import rather than aggregated crate-wide, and without a second declaration form to learn.
+
 **Three gaps a `time` module makes unavoidable, named here so they are decided rather than worked around.**
 
 *There is no operator overloading.* `==` through `Eq` is the only operator that dispatches to an impl, so `a + b` on a `Duration` is not writable and a module that wants it writes `add`. Whether arithmetic operators should dispatch is a real question — it is the difference between a `Duration` reading like a number and reading like a record — but it is a language decision, and until it is made, a comment promising `+ - * /` on a struct is describing a language this is not.
@@ -462,7 +464,7 @@ A folder root is then just a file of starred bindings, which is why re-export is
 
 **`@` is the compiler's namespace.** A leading `@` marks something the compiler supplies that no user code could have written — `@Self` (the type being declared), `@meta` (the ast node for a value or type), `@scope` (the enclosing block). It is not a sigil with meaning of its own and it is not a macro marker; it is one flat namespace, deliberately small, and everything in it is documented here. Anything without an `@` is an ordinary binding you could have written yourself.
 
-`@meta` **builds and reads**, and it does not get a parallel node type — it gets the compiler's own. `@meta(n)` hands back the same `Struct` / `Enum` / `Function` values from `std.ast` that `DumpAst` walks and `gen_c.zen` consumes. One AST, three consumers. Building a type is constructing those nodes and returning them.
+`@meta` **builds and reads**, and it does not get a parallel node type — it gets the compiler's own. It has two forms, and both reflect a value's TYPE, never its expression. `@meta(name: Type)` — a labelled binding, `@meta`-specific syntax rather than a call argument, because the right side is a type and the whole thing binds a name — yields Type's declaration payload: the `Struct` value itself for a struct type, which is why `.name` and `.fields()` are real members, and it binds `name` as the runtime receiver that projections like `name.at(field)` read from. `@meta(v)` yields the `Decl` of v's type; `.kind` is its `DeclKind`, and matching it is a comptime typecase whose arms bind v with its type refined per arm. Either way what comes back is the same `Struct` / `Enum` / `Function` values from `std.ast` that `DumpAst` walks and `gen_c.zen` consumes. One AST, three consumers. Building a type is constructing those nodes and returning them.
 
 **Identity: type-returning comptime calls are memoized on their arguments.**
 
@@ -567,11 +569,14 @@ String.impl(Sink, {
 Display* = {
     // sealed (=): the mechanical debug dump. @meta walk over
     // the fields, "Name { field: value, .. }". always there,
-    // for every type, never overridden
+    // for every type, never overridden. fields() is the
+    // member-filtered view of members; self.at(field) is the
+    // comptime-substituted projection — this instance's value
+    // for that field
     dump* = (self: @Self, out :: Sink) Res<(), WriteError> {
         out.add("{} {", @meta(self: @Self).name);
-        @meta(self: @Self).fields.loop((h, field) {
-            out.add(" {}: {},", field.name, field.value);
+        @meta(self: @Self).fields().loop((h, field) {
+            out.add(" {}: {},", field.name, self.at(field));
         });
         out.add(" }");
         Ok(());
@@ -1300,14 +1305,14 @@ Shape.impl(Display, {
 
 DumpAst = (sb :: String, n: Enum) Res<(), IoError> {
     sb.add("Enum {}", n.name);
-    n.fields.loop((h, field) {
-        sb.add("{}: {}", field.name, field.value);
+    n.variants.loop((h, variant) {
+        sb.add("{}: {}", variant.name, variant.payload);
     });
 }
 
 DumpAst = (sb :: String, n: Struct) Res<(), IoError> {
     sb.add("Struct {}", n.name);
-    n.fields.loop((h, field) {
+    n.fields().loop((h, field) {
         sb.add("{}: {}", field.name, field.value);
     });
 }
@@ -1323,27 +1328,32 @@ DumpAst = (sb :: String, n: Other) Res<(), IoError> {
     sb.add("Other {}", n.name);
 }
 
-// generic entry: comptime match on the node kind. the kind is
-// an ordinary enum carrying the node as payload, so the arm
-// BINDS the typed node and overload resolution just works,
-// no casts, no as_* anything. these are ast.zen's own nodes —
-// the same ones gen_c consumes
+// generic entry: comptime match on the declaration of n's type.
+// @meta(n) is that Decl; kind is DeclKind — an ordinary enum —
+// so the arm BINDS n with its type refined, and overload
+// resolution just works, no casts, no as_* anything. these are
+// ast.zen's own nodes — the same ones gen_c consumes
 DumpAst<T> = (sb :: String, n: T) Res<(), IoError> {
-    @meta(n).type.match({
+    @meta(n).kind.match({
         Enum(e) => DumpAst(sb, e),
         Struct(s) => DumpAst(sb, s),
         Function(f) => DumpAst(sb, f),
-        Other(o) => DumpAst(sb, o),
+        _ => (),
     });
 }
 
 // @meta BUILDS as well as reads: this returns a new ast node.
+// building is arena calls — add_expr makes the default's ExprId,
+// then a real Field (name an Ident, value the id) goes on
+// members, the Vec a Struct actually has; fields() is the read
+// view. the builder helpers land with the build milestone.
 // two calls to AddFoo(Circle) are ONE type, memoized on the
 // call and its arguments
-AddFoo<T> = (n: T) Res<T, Error> {
-    @meta(n).type.match({
+AddFoo<T> = (a :: Ast, n: T) Res<T, Error> {
+    @meta(n).kind.match({
         Struct(s) => {
-            s.fields.add(Field(name: "foo", value: 1));
+            one = a.add_expr(int_expr(a, 1)).try();
+            s.members.add(field_member(a, "foo", one));
         },
         _ => Err(Error("Invalid node type")),
     });

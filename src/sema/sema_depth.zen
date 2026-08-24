@@ -101,8 +101,8 @@ Walk* = (a: Alloc) Walk {
 // belongs to is not knowable until every body has been walked.
 check_depth* = (c :: Checker) Res<(), AllocError> {
     w ::= c.alloc.Walk();
-    fn_roots(c, w).try();
-    type_roots(c, w).try();
+    c.fn_roots(w).try();
+    c.type_roots(w).try();
     Ok(());
 }
 
@@ -113,14 +113,14 @@ check_depth* = (c :: Checker) Res<(), AllocError> {
 // A root is a call that already knows what it instantiates: no type
 // parameter of the caller reaches its arguments.
 fn_roots = (c :: Checker, w :: Walk) Res<(), AllocError> {
-    Range(0, c.edge_count()).loop((h, i) { fn_root_at(c, i, w).try() });
+    Range(0, c.edge_count()).loop((h, i) { c.fn_root_at(i, w).try() });
     Ok(());
 }
 
 fn_root_at = (c :: Checker, i: usize, w :: Walk) Res<(), AllocError> {
     c.edge_at(i).match({
         None  => Ok(()),
-        Ok(e) => root_if_settled(c, e, w),
+        Ok(e) => c.root_if_settled(e, w),
     })
 }
 
@@ -146,7 +146,7 @@ enter = (
         Res<(), AllocError> {
     w.done.match({
         true  => Ok(()),
-        false => enter_now(c, name, span, owner, tvars, args, w),
+        false => c.enter_now(name, span, owner, tvars, args, w),
     })
 }
 
@@ -160,10 +160,10 @@ enter_now = (
     w     :: Walk
 )
             Res<(), AllocError> {
-    w.frames.add(Frame(name: name, span: span, size: args_size(c, args))).try();
+    w.frames.add(Frame(name: name, span: span, size: c.args_size(args))).try();
     over_budget(w).match({
-        true  => blame(c, w),
-        false => expand(c, owner, tvars, args, w),
+        true  => c.blame(w),
+        false => c.expand(owner, tvars, args, w),
     }).try();
     w.frames.take(w.frames.len - 1);
     Ok(());
@@ -181,10 +181,10 @@ expand = (
     args  : Vec<TyId>,
     w     :: Walk
 ) Res<(), AllocError> {
-    key = node_key(c, owner, args).try();
+    key = c.node_key(owner, args).try();
     w.visited.get(key).match({
         Ok(_) => Ok(()),
-        None  => expand_fresh(c, owner, tvars, args, key, w),
+        None  => c.expand_fresh(owner, tvars, args, key, w),
     })
 }
 
@@ -199,9 +199,9 @@ expand_fresh = (
                Res<(), AllocError> {
     w.visited.set(key, true).try();
     inst ::= c.alloc.Inst();
-    zip(c, tvars, args, inst).try();
+    c.zip(tvars, args, inst).try();
     Range(0, c.edge_count()).loop((h, i) {
-        out_edge(c, owner, i, inst, w).try();
+        c.out_edge(owner, i, inst, w).try();
     });
     Ok(());
 }
@@ -210,7 +210,7 @@ out_edge = (c :: Checker, owner: str, i: usize, inst: Inst, w :: Walk)
            Res<(), AllocError> {
     c.edge_at(i).match({
         None  => Ok(()),
-        Ok(e) => follow(c, owner, e, inst, w),
+        Ok(e) => c.follow(owner, e, inst, w),
     })
 }
 
@@ -222,7 +222,7 @@ follow = (c :: Checker, owner: str, e: InstEdge, inst: Inst, w :: Walk)
          Res<(), AllocError> {
     (e.from_owner.eq(owner) && (settled(c, e.args) == false)).match({
         false => Ok(()),
-        true  => follow_subst(c, e, inst, w),
+        true  => c.follow_subst(e, inst, w),
     })
 }
 
@@ -232,7 +232,7 @@ follow = (c :: Checker, owner: str, e: InstEdge, inst: Inst, w :: Walk)
 follow_subst = (c :: Checker, e: InstEdge, inst: Inst, w :: Walk)
                Res<(), AllocError> {
     args ::= c.alloc.Vec<TyId>();
-    subst_list(c, e.args, inst, args).try();
+    c.subst_list(e.args, inst, args).try();
     settled(c, args).match({
         false => Ok(()),
         true  => enter(c, e.to_name, e.span, e.to_owner, e.to_tvars, args, w),
@@ -256,13 +256,13 @@ follow_subst = (c :: Checker, e: InstEdge, inst: Inst, w :: Walk)
 // declarations to write, and a struct nothing ever names costs nothing.
 type_roots = (c :: Checker, w :: Walk) Res<(), AllocError> {
     n = c.types.count_of().to_usize();
-    Range(0, n).loop((h, i) { type_root_at(c, i, w).try() });
+    Range(0, n).loop((h, i) { c.type_root_at(i, w).try() });
     Ok(());
 }
 
 type_root_at = (c :: Checker, i: usize, w :: Walk) Res<(), AllocError> {
     c.types.kind_at(i).match({
-        Named(n) => type_root(c, n, w),
+        Named(n) => c.type_root(n, w),
         _        => Ok(()),
     })
 }
@@ -270,7 +270,7 @@ type_root_at = (c :: Checker, i: usize, w :: Walk) Res<(), AllocError> {
 type_root = (c :: Checker, n: TyNamed, w :: Walk) Res<(), AllocError> {
     ((n.args.len > 0) && settled(c, n.args)).match({
         false => Ok(()),
-        true  => enter_type(c, n.name, nowhere(), n.decl, n.args, w),
+        true  => c.enter_type(n.name, nowhere(), n.decl, n.args, w),
     })
 }
 
@@ -286,7 +286,7 @@ enter_type = (
 ) Res<(), AllocError> {
     w.done.match({
         true  => Ok(()),
-        false => enter_type_now(c, name, span, id, args, w),
+        false => c.enter_type_now(name, span, id, args, w),
     })
 }
 

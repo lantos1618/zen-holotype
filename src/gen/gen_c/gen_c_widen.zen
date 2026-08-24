@@ -53,7 +53,7 @@ has_var = sema.sema_inst
 needs_widen* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
                Res<bool, AllocError> {
     be.check.types.at(want).match({
-        Res(w) => widens_into(be, id, ctx, want, w),
+        Res(w) => be.widens_into(id, ctx, want, w),
         _      => Ok(false),
     })
 }
@@ -64,10 +64,10 @@ needs_widen* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
 widens_into = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, w: TyRes)
               Res<bool, AllocError> {
     unknown = be.check.types.unknown().try();
-    cty     = ty_of(be, id, ctx, unknown).try();
+    cty     = be.ty_of(id, ctx, unknown).try();
     settled(be, cty).match({
         false => Ok(false),
-        true  => Ok(res_widens(be, cty, want, w)),
+        true  => Ok(be.res_widens(cty, want, w)),
     })
 }
 
@@ -78,13 +78,13 @@ settled = (be :: CBackend, cty: TyId) bool {
 res_widens = (be :: CBackend, cty: TyId, want: TyId, w: TyRes) bool {
     cty.eq(want).match({
         true  => false,
-        false => res_parts_widen(be, cty, w),
+        false => be.res_parts_widen(cty, w),
     })
 }
 
 res_parts_widen = (be :: CBackend, cty: TyId, w: TyRes) bool {
     be.check.types.at(cty).match({
-        Res(g) => parts_widen(be, g, w),
+        Res(g) => be.parts_widen(g, w),
         _      => false,
     })
 }
@@ -95,7 +95,7 @@ res_parts_widen = (be :: CBackend, cty: TyId, w: TyRes) bool {
 // none, so the two success payloads must already be one type.
 parts_widen = (be :: CBackend, g: TyRes, w: TyRes) bool {
     (is_failure(g.form) == is_failure(w.form)) && g.value.eq(w.value)
-        && error_widens(be, g, w)
+        && be.error_widens(g, w)
 }
 
 // An absence carries no error, so its `error` slot is the unit type and
@@ -112,8 +112,8 @@ error_widens = (be :: CBackend, g: TyRes, w: TyRes) bool {
 // header). `set_has` is sema's own containment test — the one that
 // admitted the program — so asking it again cannot disagree.
 member_reaches_set = (be :: CBackend, got: TyId, want: TyId) bool {
-    (got.eq(want) == false) && (is_set(be, got) == false)
-        && is_set(be, want) && be.check.types.set_has(want, got)
+    (got.eq(want) == false) && (be.is_set(got) == false)
+        && be.is_set(want) && be.check.types.set_has(want, got)
 }
 
 is_set = (be :: CBackend, ty: TyId) bool {
@@ -133,10 +133,10 @@ widen_expr* = (
     out  :: String
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    cty     = ty_of(be, id, ctx, unknown).try();
+    cty     = be.ty_of(id, ctx, unknown).try();
     code ::= be.alloc.String().try();
     expr(be, id, ctx, cty, code).try();
-    convert(be, code.view(), cty, want, out)
+    be.convert(code.view(), cty, want, out)
 }
 
 // ---------------------------------------------------------------------
@@ -163,8 +163,8 @@ needs_set* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
 member_reaches_set = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
                      Res<bool, AllocError> {
     unknown = be.check.types.unknown().try();
-    cty     = ty_of(be, id, ctx, unknown).try();
-    Ok(settled_member(be, cty, want));
+    cty     = be.ty_of(id, ctx, unknown).try();
+    Ok(be.settled_member(cty, want));
 }
 
 // `set_has` answers TRUE for an unsubstituted type parameter (`sema_ty`:
@@ -173,7 +173,7 @@ member_reaches_set = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
 // it's asked past.
 settled_member = (be: CBackend, cty: TyId, want: TyId) bool {
     (be.check.is_unknown(cty) == false) && (cty.eq(want) == false)
-        && is_named_or_res(be, cty) && be.check.types.set_has(want, cty)
+        && be.is_named_or_res(cty) && be.check.types.set_has(want, cty)
 }
 
 is_named_or_res = (be: CBackend, cty: TyId) bool {
@@ -194,10 +194,10 @@ set_expr* = (
     out  :: String
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    cty     = ty_of(be, id, ctx, unknown).try();
+    cty     = be.ty_of(id, ctx, unknown).try();
     code ::= be.alloc.String().try();
-    value_expr(be, id, ctx, cty, code).try();
-    write_set_value(be, code.view(), cty, want, out)
+    be.value_expr(id, ctx, cty, code).try();
+    be.write_set_value(code.view(), cty, want, out)
 }
 
 // The set, tagged with the member the value IS and carrying it
@@ -212,7 +212,7 @@ write_set_value* = (
     out    :: String
 ) Res<(), AllocError> {
     out.add_bytes("(").try();
-    ctype(be, set, out).try();
+    be.ctype(set, out).try();
     out.add_bytes("){ .zg_tag = ").try();
     sym_union_variant(out, be.types(), be.world(), set, member).try();
     out.add_bytes(", .zg_data.").try();

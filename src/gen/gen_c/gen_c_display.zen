@@ -40,15 +40,15 @@ console_display* = (be :: CBackend, ty: TyId, text: str)
                    Res<bool, AllocError> {
     site_of(be, ty).try().match({
         None  => Ok(false),
-        Ok(s) => display_at_site(be, ty, s, text),
+        Ok(s) => be.display_at_site(ty, s, text),
     })
 }
 
 display_at_site = (be :: CBackend, ty: TyId, s: Site, text: str)
                   Res<bool, AllocError> {
-    display_fn(be, s).try().match({
+    be.display_fn(s).try().match({
         None  => Ok(false),
-        Ok(f) => write_display_call(be, ty, s, f, text),
+        Ok(f) => be.write_display_call(ty, s, f, text),
     })
 }
 
@@ -58,9 +58,9 @@ display_at_site = (be :: CBackend, ty: TyId, s: Site, text: str)
 display_fn = (be :: CBackend, s: Site) Res<Res<Function>, AllocError> {
     found ::= be.alloc.Vec<Member>();
     member_at(be, s, "toString", found).try();
-    sink_form(be, found).match({
+    be.sink_form(found).match({
         Ok(f) => Ok(Ok(f)),
-        None  => impl_member_of(be, s.decl, "toString", 2),
+        None  => be.impl_member_of(s.decl, "toString", 2),
     })
 }
 
@@ -90,16 +90,16 @@ write_display_call = (
 ) Res<bool, AllocError> {
     by_ref(f, 0).match({
         true  => Ok(false),
-        false => with_console(be, ty, s, f, text),
+        false => be.with_console(ty, s, f, text),
     })
 }
 
 with_console = (be :: CBackend, ty: TyId, s: Site, f: Function, text: str)
                Res<bool, AllocError> {
     sink ::= be.alloc.String().try();
-    console_sink(be, sink).try().match({
+    be.console_sink(sink).try().match({
         false => Ok(false),
-        true  => emit_display(be, ty, s, f, text, sink.view()),
+        true  => be.emit_display(ty, s, f, text, sink.view()),
     })
 }
 
@@ -115,7 +115,7 @@ emit_display = (
     sink : str
 ) Res<bool, AllocError> {
     call ::= be.alloc.String().try();
-    display_call(be, ty, s, f, text, sink, call).try();
+    be.display_call(ty, s, f, text, sink, call).try();
     be.fmt("(void){};\n", call.view()).try();
     Ok(true);
 }
@@ -132,7 +132,7 @@ sink_display* = (
 ) Res<bool, AllocError> {
     site_of(be, ty).try().match({
         None  => Ok(false),
-        Ok(s) => sink_display_at(be, ty, s, text, sink, out),
+        Ok(s) => be.sink_display_at(ty, s, text, sink, out),
     })
 }
 
@@ -144,9 +144,9 @@ sink_display_at = (
     sink : str,
     out  :: String
 ) Res<bool, AllocError> {
-    display_fn(be, s).try().match({
+    be.display_fn(s).try().match({
         None  => Ok(false),
-        Ok(f) => sink_display_fn(be, ty, s, f, text, sink, out),
+        Ok(f) => be.sink_display_fn(ty, s, f, text, sink, out),
     })
 }
 
@@ -162,7 +162,7 @@ sink_display_fn = (
                   Res<bool, AllocError> {
     by_ref(f, 0).match({
         true  => Ok(false),
-        false => wrote_display(be, ty, s, f, text, sink, out),
+        false => be.wrote_display(ty, s, f, text, sink, out),
     })
 }
 
@@ -175,7 +175,7 @@ wrote_display = (
     sink : str,
     out  :: String
 ) Res<bool, AllocError> {
-    display_call(be, ty, s, f, text, sink, out).try();
+    be.display_call(ty, s, f, text, sink, out).try();
     Ok(true);
 }
 
@@ -190,10 +190,10 @@ display_call = (
     sink : str,
     out  :: String
 ) Res<(), AllocError> {
-    inst = recv_inst(be, ty).try();
+    inst = be.recv_inst(ty).try();
     sig ::= be.alloc.Vec<TyId>();
-    method_sig(be, ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
-    sym = member_symbol(be, ty, s, "toString", sig, inst).try();
+    be.method_sig(ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
+    sym = be.member_symbol(ty, s, "toString", sig, inst).try();
     out.fmt("{}({text}, ", sym.view()).try();
     write_sink_arg(f, sink, out).try();
     out.add_bytes(")")
@@ -218,9 +218,9 @@ write_sink_arg = (f: Function, sink: str, out :: String)
 // -----------------------------------------------------------------
 
 console_sink* = (be :: CBackend, out :: String) Res<bool, AllocError> {
-    sink_ty(be).try().match({
+    be.sink_ty().try().match({
         None   => Ok(false),
-        Ok(ty) => write_console(be, ty, out),
+        Ok(ty) => be.write_console(ty, out),
     })
 }
 
@@ -232,7 +232,7 @@ sink_ty = (be :: CBackend) Res<Res<TyId>, AllocError> {
     be.check.world.prelude_of("Sink", defs).try();
     defs.get(0).match({
         None  => Ok(None),
-        Ok(d) => sink_named(be, d),
+        Ok(d) => be.sink_named(d),
     })
 }
 
@@ -248,24 +248,24 @@ sink_named = (be :: CBackend, d: Def) Res<Res<TyId>, AllocError> {
 write_console = (be :: CBackend, ty: TyId, out :: String)
                 Res<bool, AllocError> {
     be.need_print();
-    request_type(be, ty).try();
+    be.request_type(ty).try();
     slots ::= be.alloc.Vec<Slot>();
-    slots_of(be, ty, slots).try();
+    be.slots_of(ty, slots).try();
     body  ::= be.alloc.String().try();
     known ::= slots.len > 0;
     slots.loop((h, s) {
-        console_slot(be, s, body).try().then(() { known = false; });
+        be.console_slot(s, body).try().then(() { known = false; });
     });
     known.match({
         false => Ok(false),
-        true  => finish_console(be, ty, body.view(), out),
+        true  => be.finish_console(ty, body.view(), out),
     })
 }
 
 finish_console = (be :: CBackend, ty: TyId, inits: str, out :: String)
                  Res<bool, AllocError> {
     rec ::= be.alloc.String().try();
-    ctype(be, ty, rec).try();
+    be.ctype(ty, rec).try();
     out.fmt("(({}){ .zg_self = NULL{inits} })", rec.view()).try();
     Ok(true);
 }
@@ -275,7 +275,7 @@ console_slot = (be :: CBackend, s: Slot, out :: String)
                Res<bool, AllocError> {
     console_body(s.name).is_empty().match({
         true  => Ok(true),
-        false => write_slot_init(be, s, out),
+        false => be.write_slot_init(s, out),
     })
 }
 
@@ -283,7 +283,7 @@ write_slot_init = (be :: CBackend, s: Slot, out :: String)
                   Res<bool, AllocError> {
     name ::= be.alloc.String().try();
     console_name(name, s.name).try();
-    need_console_fn(be, s, name.view()).try();
+    be.need_console_fn(s, name.view()).try();
     out.fmt(", .{} = {}", s.sym.view(), name.view()).try();
     Ok(false);
 }
@@ -317,7 +317,7 @@ need_console_fn = (be :: CBackend, s: Slot, name: str)
                   Res<(), AllocError> {
     be.need_thunk(name).try().match({
         false => Ok(()),
-        true  => emit_console_fn(be, s, name),
+        true  => be.emit_console_fn(s, name),
     })
 }
 
@@ -327,13 +327,13 @@ need_console_fn = (be :: CBackend, s: Slot, name: str)
 emit_console_fn = (be :: CBackend, s: Slot, name: str)
                   Res<(), AllocError> {
     head ::= be.alloc.String().try();
-    console_head(be, s, name, head).try();
+    be.console_head(s, name, head).try();
     ok ::= be.alloc.String().try();
     sym_variant(ok, RES_PATH, "Ok").try();
     line = console_body(s.name);
     body ::= be.alloc.String().try();
     body.fmt("    (void)zg_self;\n    {line}\n    return (").try();
-    ctype(be, s.ret, body).try();
+    be.ctype(s.ret, body).try();
     body.fmt("){ .zg_tag = {} };\n", ok.view()).try();
     owned ::= be.alloc.String().try();
     owned.add_bytes(name).try();
@@ -343,9 +343,9 @@ emit_console_fn = (be :: CBackend, s: Slot, name: str)
 console_head = (be :: CBackend, s: Slot, name: str, out :: String)
                Res<(), AllocError> {
     ret ::= be.alloc.String().try();
-    ctype(be, s.ret, ret).try();
+    be.ctype(s.ret, ret).try();
     out.fmt("static {} {name}(void *zg_self", ret.view()).try();
-    s.params.loop((h, i, p) { thunk_param(be, p, "a", i, out).try() });
+    s.params.loop((h, i, p) { be.thunk_param(p, "a", i, out).try() });
     out.add_bytes(")").try();
     Ok(());
 }

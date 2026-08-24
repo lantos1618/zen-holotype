@@ -1,27 +1,13 @@
 // src/gen/gen_c/gen_c_stdin.zen
-// THE STDIN CAPABILITY, in C — the lowering AND the floor.
+// The stdin capability in C — lowering and floor in one file, so the
+// call site and the C it names cannot drift apart.
 //
-// `gen_c_fs.zen` is this file's sibling and holds only half of its own
-// subject: the filesystem lowering is there and the C it bottoms out in
-// is in `gen_c_runtime.zen`. One capability is ONE subject, so this one
-// is written in one place — the call site and the C it names cannot
-// drift apart when they are eighty lines apart instead of in two files.
-//
-// WHAT THE CAPABILITY IS. `Stdin.read` is declared in `std/env/env.zen`
-// with a signature and no body, and that file says why: it is the
-// authority itself, reached only as `env.in`. "A capability's floor is
-// the target language's", and for C that floor is `fread` on `stdin`.
-//
-// IT IS PLAIN C99 AND THE FILESYSTEM FLOOR IS NOT, which is the other
-// reason these are separate: `fread` needs no POSIX header, so a program
-// reading a pipe must not be handed `<sys/stat.h>` for it. Its `needs`
-// flag is its own for exactly that reason.
-//
-// THE ORDINALS ARE A CONTRACT BETWEEN THE TWO HALVES OF THIS FILE and
-// with nothing else. The number never leaves the generated C: the
-// lowering turns it back into an `IoError` variant by NAME, so
-// `std/core/io.zen` may rename or reorder its own set without either
-// side agreeing to it in secret.
+// `Stdin.read` is bodiless in `std/env/env.zen`: the authority itself,
+// reached only as `env.in`, and its floor is `fread` on `stdin`. That
+// floor is plain C99, unlike the filesystem one, so its `needs` flag is
+// its own and no POSIX header is emitted for it. The ZG_IO_* ordinals
+// never leave the generated C: the lowering maps them back to `IoError`
+// variants by NAME, so `std/core/io.zen` may reorder its set freely.
 
 ExprId = std.ast
 Call = std.ast
@@ -40,34 +26,16 @@ arg_text = gen.gen_c.gen_c_cap
 write_assign_ok, write_assign_err = gen.gen_c.gen_c_cap
 
 // -----------------------------------------------------------------
-// THE FLOOR: `fread` on `stdin`
+// THE FLOOR: `fread` on `stdin`, emitted only when a program reads one —
+// an uncalled `static` is a warning.
 //
-// Emitted only for a program that reads one, exactly as the filesystem
-// floor is: this costs no header, but a `static` nothing calls is a
-// warning in every build that turns them on.
-//
-// IT ALLOCATES NOTHING. `Stdin.read` has no `Alloc` in its signature, so
-// by law 1 it may not have any memory either — it fills the SPARE
-// CAPACITY of a run the caller already owns, and `Vec.reserve` is what
-// makes that room. Asking for more than the room is `Full` and not a
-// short read: silently truncating would be indistinguishable from end of
-// input at the one place a caller must be able to tell them apart.
-//
-// ZERO IS END OF INPUT AND NOT A FAILURE. `fread` answers 0 for both a
-// closed stream and an error, so `ferror` is what separates them, and
-// only the error becomes an `Err`.
-//
-// IT READS EXACTLY `n` BYTES because `fread` does, and `env.zen` states
-// that as the capability's contract rather than hiding it: C offers no
-// way to ask how many bytes a stream has, so "up to n" is not a floor
-// this language can stand on.
-//
-// IT FLUSHES STDOUT BEFORE IT BLOCKS, and that one line is what makes a
-// request/response server over two PIPES work at all. C block-buffers a
-// stdout that is not a terminal, so a program that answers and then waits
-// is holding its own answer while the peer waits for it — a deadlock
-// neither side can see. C99 permits an implementation to do this for
-// interactive streams; doing it here makes it true for a pipe too.
+// It allocates NOTHING (`Stdin.read` has no `Alloc`): it fills spare
+// capacity the caller reserved, asking for more than the room is `Full`,
+// and it reads exactly `n` bytes because C cannot ask a stream its
+// length. `fread` answers 0 for both end of input and error, so
+// `ferror` separates them and only the error becomes an `Err`. The
+// `fflush` before blocking keeps a request/response server over two
+// pipes from deadlocking on a block-buffered stdout.
 emit_stdin* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.uses_stdin().match({
         false => Ok(()),
@@ -109,19 +77,13 @@ write_stdin = (out :: Emit) Res<(), AllocError> {
 // -----------------------------------------------------------------
 // THE LOWERING: `env.in.read(buf, n)`
 //
-// THE BUFFER ARRIVES BY ADDRESS because the parameter is written `::`,
-// and `gen_c_call.write_arg` says why: "what `::` says is that the callee
-// writes the caller's own bytes — so there has to be an address to write
-// through". Here the callee is the C floor, so this file takes the
-// address itself.
-//
-// IT WRITES A `Vec`'S FIELDS, and it is the same licence `lower_alloc`
-// takes with an `ArenaState`: the bytes ENTER THE PROGRAM here, so the
-// one place that knows the shape is the place they are born. Everything
-// the floor is told — where the run starts, how much of it is written,
-// how wide it is — is read off those three fields, and `len` is the one
-// it writes back. Nothing is allocated, for the reason the floor above
-// gives.
+// THE BUFFER ARRIVES BY ADDRESS: the parameter is written `::` — the
+// callee writes the caller's own bytes — and here the callee is the C
+// floor, so this file takes the address itself. It also writes a
+// `Vec`'s fields, the same licence `lower_alloc` takes with an
+// `ArenaState`: the bytes ENTER THE PROGRAM here, so the one place
+// that knows the shape is the place they are born. `len` is the one
+// field written back; nothing is allocated, as the floor says why.
 // -----------------------------------------------------------------
 
 lower_stdin_read* = (
@@ -138,16 +100,11 @@ lower_stdin_read* = (
     request_type(be, aty).try();
     usize_ty = be.check.types.prim("usize").try();
     i32_ty   = be.check.types.prim("i32").try();
-    buf ::= be.alloc.String().try();
-    sym_gen(buf, "t", be.next_tmp()).try();
-    want ::= be.alloc.String().try();
-    sym_gen(want, "t", be.next_tmp()).try();
-    got ::= be.alloc.String().try();
-    sym_gen(got, "t", be.next_tmp()).try();
-    rc ::= be.alloc.String().try();
-    sym_gen(rc, "t", be.next_tmp()).try();
-    dst ::= be.alloc.String().try();
-    sym_gen(dst, "t", be.next_tmp()).try();
+    buf  ::= be.fresh_tmp().try();
+    want ::= be.fresh_tmp().try();
+    got  ::= be.fresh_tmp().try();
+    rc   ::= be.fresh_tmp().try();
+    dst  ::= be.fresh_tmp().try();
     declare_pointer(be, aty, buf.view()).try();
     declare_temp(be, usize_ty, want.view()).try();
     declare_temp(be, usize_ty, got.view()).try();
@@ -163,6 +120,12 @@ lower_stdin_read* = (
     write_assign_ok(be, ret, got.view(), dst.view()).try();
     close_brace(be).try();
     out.add_bytes(dst.view())
+}
+
+fresh_tmp = (be :: CBackend) Res<String, AllocError> {
+    s ::= be.alloc.String().try();
+    sym_gen(s, "t", be.next_tmp()).try();
+    Ok(s);
 }
 
 // `<ctype> *<name>;` — a temporary the ordinary declarer cannot write,
@@ -215,7 +178,6 @@ advance_len = (be :: CBackend, buf: str, got: str) Res<(), AllocError> {
     be.fmt("{} = {} + {got};\n", len.view(), len.view())
 }
 
-// `<ptr>-><field>`, with the member spelled the mangler's way.
 arrow = (ptr: str, name: str, out :: String) Res<(), AllocError> {
     out.fmt("{ptr}->").try();
     out.sym_member(name)

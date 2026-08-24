@@ -1,7 +1,7 @@
 // src/lsp/lsp_serve.zen
 // The server: lifecycle, a document overlay, and a dispatch table.
 //
-// It answers EIGHT requests — `lsp_reply.zen`'s `Request` union is that
+// It answers NINE requests — `lsp_reply.zen`'s `Request` union is that
 // list — and refuses everything else BY NAME with `-32601` and the method
 // spelled back, `src/zen/zen_cli.zen`'s own rule one level down: a
 // command that silently does nothing is worse than one that says it is
@@ -15,6 +15,7 @@
 //   textDocument/completion            lsp_compl.zen
 //   textDocument/semanticTokens/full   lsp_colour.zen
 //   textDocument/formatting            lsp_fmt.zen
+//   textDocument/codeAction            lsp_action.zen
 //   didOpen / didChange        the overlay, Full sync only
 //   initialized / exit / didClose / $/cancelRequest
 //                              notifications, no reply and nothing to do
@@ -57,6 +58,9 @@ write_tokens = lsp.lsp_colour
 // when, and the one build the settle and the queries share
 // (`lsp_built.zen` — reached through `Diagnostics`, whose slot it is).
 Diagnostics, Shared = lsp.lsp_diag
+// The one quickfix: an import line for an undefined name, read off the
+// SAME shared build the diagnostics came from.
+write_actions = lsp.lsp_action
 relative_to = zen.zen_path
 // The wire's shapes: a request's fields read, a reply built. Their own
 // file (`lsp_reply.zen`) since the session met STYLE.md's hard cap.
@@ -179,6 +183,7 @@ Server* = {
             Completion => self.completed(t, tree, req, rid, msg),
             Colour     => self.coloured(t, tree, req, rid, msg),
             Format     => self.formatted(t, tree, req, rid, msg),
+            Action     => self.acted(t, tree, req, rid, msg),
             Unknown    => self.unknown(t, tree, rid, method, msg),
         })
     }
@@ -310,14 +315,14 @@ Server* = {
         })
     }
 
-    // THE ONE REFUSAL ALL SIX DOCUMENT QUERIES MAKE, written once: a uri
+    // THE ONE REFUSAL ALL SEVEN DOCUMENT QUERIES MAKE, written once: a uri
     // no `didOpen` ever named. A CLIENT BUG, so `-32602` names it rather
     // than answering `null`, `[]` or `{}` — each of those reads as
     // "there is nothing here", which is a different and false statement
     // about a document the server has never seen.
     //
     // `tests/corpus/lsp/every_query_refuses_a_uri_never_opened` asserts
-    // all six on the wire, because three of them were covered by nothing
+    // all seven on the wire, because three of them were covered by nothing
     // and a shared refusal is exactly what turns silently into a `null`.
     unopened = (self :: @Self, tree: Jsons, rid: JsonId, msg :: String)
                Res<(), AllocError> {
@@ -554,6 +559,61 @@ Server* = {
                 write_edits(t, text, body).try();
                 result(tree, rid, body.view(), msg)
             },
+        })
+    }
+
+    // CODE ACTION IS A QUERY ON THE SETTLED BUILD, the way definition is:
+    // the names it offers imports for come from the checker's OWN diags,
+    // so no workspace or no build in the slot means `[]` — never a guess
+    // (`lsp_action.zen's` header), never a per-request rebuild (the settle
+    // at batch end holds the state a quickfix asks about).
+    acted = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
+             msg :: String) Res<(), AllocError> {
+        uri   = string_at(tree, param(tree, req, "textDocument"), "uri");
+        range = param(tree, req, "range");
+        first = param(tree, range, "start");
+        last  = param(tree, range, "end");
+        self.docs.get(uri).match({
+            None     => self.unopened(tree, rid, msg),
+            Ok(text) => {
+                body ::= t.String().try();
+                self.workspace.is_empty().match({
+                    true  => body.add_bytes("[]"),
+                    false => self.shared_actions(
+                        t,
+                        uri,
+                        text,
+                        number_at(tree, first, "line"),
+                        number_at(tree, first, "character"),
+                        number_at(tree, last, "line"),
+                        number_at(tree, last, "character"),
+                        body
+                    ),
+                }).try();
+                result(tree, rid, body.view(), msg)
+            },
+        })
+    }
+
+    shared_actions = (self :: @Self, t: Alloc, uri: str, text: str,
+                      sl: usize, sc: usize, el: usize, ec: usize,
+                      body :: String) Res<(), AllocError> {
+        path = path_of(uri);
+        sh   = self.build_for(path, t).try();
+        sh.c.match({
+            None  => body.add_bytes("[]"),
+            Ok(c) => write_actions(
+                c,
+                t,
+                relative_to(sh.root, path),
+                text,
+                uri,
+                sl,
+                sc,
+                el,
+                ec,
+                body
+            ),
         })
     }
 

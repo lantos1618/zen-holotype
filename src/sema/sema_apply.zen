@@ -57,10 +57,10 @@ construct* = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
             Res<TyId, AllocError> {
     c.resolve_call(id, d.id).try();
     args ::= c.alloc.Vec<TyId>();
-    ctor_args(c, call, d, ctx, args).try();
+    c.ctor_args(call, d, ctx, args).try();
     applied = c.types.named(d.id, d.qname, d.name, args).try();
-    ty      = settled_ctor_type(c, call, d, ctx, args, applied).try();
-    check_ctor_fields(c, call, ty, ctx).try();
+    ty      = c.settled_ctor_type(call, d, ctx, args, applied).try();
+    c.check_ctor_fields(call, ty, ctx).try();
     c.check_ctor_shape(call, ty, c.tree.expr_at(id).span).try();
     Ok(ty);
 }
@@ -91,7 +91,7 @@ settled_ctor_type = (
                     Res<TyId, AllocError> {
     ((vars.len == 0) || (call.targs.len > 0)).match({
         true  => Ok(applied),
-        false => ctor_type_from_args(c, call, d, ctx, vars, applied),
+        false => c.ctor_type_from_args(call, d, ctx, vars, applied),
     })
 }
 
@@ -105,10 +105,10 @@ ctor_type_from_args = (
 )
                       Res<TyId, AllocError> {
     inst ::= c.alloc.Inst();
-    call.args.loop((h, a) { unify_ctor_arg(c, a, applied, ctx, inst).try() });
+    call.args.loop((h, a) { c.unify_ctor_arg(a, applied, ctx, inst).try() });
     (inst.len() == 0).match({
         true  => Ok(applied),
-        false => rebuilt_ctor_type(c, d, vars, inst),
+        false => c.rebuilt_ctor_type(d, vars, inst),
     })
 }
 
@@ -131,7 +131,7 @@ unify_ctor_arg = (
 ) Res<(), AllocError> {
     a.name.match({
         None   => Ok(()),
-        Ok(nm) => unify_ctor_field(c, a, nm.text, applied, ctx, inst),
+        Ok(nm) => c.unify_ctor_field(a, nm.text, applied, ctx, inst),
     })
 }
 
@@ -147,10 +147,10 @@ unify_ctor_field = (
     inst    :: Inst
 ) Res<(), AllocError> {
     found ::= c.alloc.Vec<Found>();
-    members_of(c, applied, name, found).try();
+    c.members_of(applied, name, found).try();
     found.get(0).match({
         None  => Ok(()),
-        Ok(f) => unify(c, f.ty, settled_arg_ty(c, a, ctx).try(), inst),
+        Ok(f) => unify(c, f.ty, c.settled_arg_ty(a, ctx).try(), inst),
     })
 }
 
@@ -171,8 +171,8 @@ settled_arg_ty = (c :: Checker, a: Arg, ctx: Ctx) Res<TyId, AllocError> {
 ctor_args = (c :: Checker, call: Call, d: Def, ctx: Ctx, out :: Vec<TyId>)
             Res<(), AllocError> {
     (call.targs.len == 0).match({
-        true  => decl_tparams(c, d, out),
-        false => written_ctor_args(c, call.targs, ctx, out),
+        true  => c.decl_tparams(d, out),
+        false => c.written_ctor_args(call.targs, ctx, out),
     })
 }
 
@@ -192,14 +192,14 @@ decl_tparams = (c :: Checker, d: Def, out :: Vec<TyId>)
                Res<(), AllocError> {
     decl_at(c.tree, d.id).match({
         None    => Ok(()),
-        Ok(dec) => struct_tparams(c, d, dec, out),
+        Ok(dec) => c.struct_tparams(d, dec, out),
     })
 }
 
 struct_tparams = (c :: Checker, d: Def, dec: Decl, out :: Vec<TyId>)
                  Res<(), AllocError> {
     dec.kind.match({
-        Struct(s) => tparam_vars(c, s.tparams, d.qname, out),
+        Struct(s) => c.tparam_vars(s.tparams, d.qname, out),
         _         => Ok(()),
     })
 }
@@ -219,7 +219,7 @@ instantiate* = (
 ) Res<TyId, AllocError> {
     k.generic.match({
         false => Ok(k.ret),
-        true  => instantiated_ret(c, id, call, k, actuals, ctx),
+        true  => c.instantiated_ret(id, call, k, actuals, ctx),
     })
 }
 
@@ -232,10 +232,10 @@ instantiated_ret = (
     ctx     : Ctx
 )
                    Res<TyId, AllocError> {
-    inst = call_inst(c, call, k, actuals, ctx).try();
+    inst = c.call_inst(call, k, actuals, ctx).try();
     c.resolve_inst(id, inst).try();
     note_edge(c, id, k, inst).try();
-    subst(c, k.ret, inst)
+    c.subst(k.ret, inst)
 }
 
 // THE EDGE THE TERMINATION CHECK FOLLOWS. `sema_depth.zen` asks whether
@@ -277,9 +277,9 @@ call_inst = (
     ctx     : Ctx
 ) Res<Inst, AllocError> {
     inst ::= c.alloc.Inst();
-    written_targs(c, call, k, inst, ctx).try();
+    c.written_targs(call, k, inst, ctx).try();
     infer_targs(c, k, actuals, inst).try();
-    infer_from_bounds(c, k, inst).try();
+    c.infer_from_bounds(k, inst).try();
     Ok(inst);
 }
 
@@ -287,7 +287,7 @@ written_targs = (c :: Checker, call: Call, k: Cand, inst :: Inst, ctx: Ctx)
                 Res<(), AllocError> {
     (call.targs.len == 0).match({
         true  => Ok(()),
-        false => bind_written(c, call.targs, k, inst, ctx),
+        false => c.bind_written(call.targs, k, inst, ctx),
     })
 }
 

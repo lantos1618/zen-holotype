@@ -69,13 +69,13 @@ write_cast = gen.gen_c.gen_c_bound
 // function pointer to carry, so a struct with one is a concrete type
 // even when an impl supplies fields for it.
 is_fat* = (be: CBackend, ty: TyId) bool {
-    fat_decl(be, ty).match({ Ok(_) => true, None => false })
+    be.fat_decl(ty).match({ Ok(_) => true, None => false })
 }
 
 // The declaration behind a fat type, when it is one.
 fat_decl* = (be: CBackend, ty: TyId) Res<Struct> {
     be.types().at(ty).match({
-        Named(n) => fat_named(be, n),
+        Named(n) => be.fat_named(n),
         _        => None,
     })
 }
@@ -139,22 +139,22 @@ Slot* = {
 
 slots_of* = (be :: CBackend, ty: TyId, out :: Vec<Slot>)
             Res<(), AllocError> {
-    fat_decl(be, ty).match({
+    be.fat_decl(ty).match({
         None  => Ok(()),
-        Ok(s) => collect_slots(be, ty, s, out),
+        Ok(s) => be.collect_slots(ty, s, out),
     })
 }
 
 collect_slots = (be :: CBackend, ty: TyId, s: Struct, out :: Vec<Slot>)
                 Res<(), AllocError> {
-    s.members.loop((h, m) { collect_slot(be, ty, m, out).try() });
+    s.members.loop((h, m) { be.collect_slot(ty, m, out).try() });
     Ok(());
 }
 
 collect_slot = (be :: CBackend, ty: TyId, m: Member, out :: Vec<Slot>)
                Res<(), AllocError> {
     m.kind.match({
-        Function(f) => add_slot(be, ty, f, out),
+        Function(f) => be.add_slot(ty, f, out),
         _           => Ok(()),
     })
 }
@@ -163,7 +163,7 @@ add_slot = (be :: CBackend, ty: TyId, f: Function, out :: Vec<Slot>)
            Res<(), AllocError> {
     site_of(be, ty).try().match({
         None  => Ok(()),
-        Ok(s) => add_slot_at(be, ty, s, f, out),
+        Ok(s) => be.add_slot_at(ty, s, f, out),
     })
 }
 
@@ -180,16 +180,16 @@ add_slot_at = (
     owner ::= be.alloc.String().try();
     join(owner, s.qname, f.name.text).try();
     sctx = be.check.self_ctx(s.decl.module.to_usize(), ty).try();
-    mark = enter_struct_tparams(be, s.decl).try();
-    enter_tparams(be, f.tparams, owner.view()).try();
+    mark = be.enter_struct_tparams(s.decl).try();
+    be.enter_tparams(f.tparams, owner.view()).try();
     erase ::= be.alloc.Inst();
-    erase_tparams(be, f, owner.view(), erase).try();
-    carry_inst(recv_inst(be, ty).try(), erase).try();
+    be.erase_tparams(f, owner.view(), erase).try();
+    carry_inst(be.recv_inst(ty).try(), erase).try();
     params ::= be.alloc.Vec<TyId>();
-    erased_params(be, f, sctx, erase, params).try();
-    ret = erased_ret(be, f, sctx, erase).try();
-    leave_tparams(be, mark).try();
-    sym = slot_sym(be, f, out).try();
+    be.erased_params(f, sctx, erase, params).try();
+    ret = be.erased_ret(f, sctx, erase).try();
+    be.leave_tparams(mark).try();
+    sym = be.slot_sym(f, out).try();
     out.add(Slot(
         name: f.name.text,
         f: f,
@@ -227,7 +227,7 @@ carry_bound = (from: Inst, i: usize, v: TyId, out :: Inst)
 erase_tparams = (be :: CBackend, f: Function, owner: str, out :: Inst)
                 Res<(), AllocError> {
     byte = be.check.types.prim("u8").try();
-    f.tparams.loop((h, tp) { erase_one(be, tp, owner, byte, out).try() });
+    f.tparams.loop((h, tp) { be.erase_one(tp, owner, byte, out).try() });
     Ok(());
 }
 
@@ -249,7 +249,7 @@ erased_params = (
     out   :: Vec<TyId>
 ) Res<(), AllocError> {
     f.params.loop((h, i, p) {
-        erased_param(be, p, i, sctx, erase, out).try();
+        be.erased_param(p, i, sctx, erase, out).try();
     });
     Ok(());
 }
@@ -266,7 +266,7 @@ erased_param = (
 ) Res<(), AllocError> {
     (i == 0).match({
         true  => Ok(()),
-        false => add_erased(be, p, sctx, erase, out),
+        false => be.add_erased(p, sctx, erase, out),
     })
 }
 
@@ -278,13 +278,13 @@ add_erased = (
     out   :: Vec<TyId>
 ) Res<(), AllocError> {
     declared = be.check.param_type(p, sctx).try();
-    out.add(sub_with(be, declared, erase).try())
+    out.add(be.sub_with(declared, erase).try())
 }
 
 erased_ret = (be :: CBackend, f: Function, sctx: Ctx, erase: Inst)
              Res<TyId, AllocError> {
-    declared = declared_ret(be, f, sctx).try();
-    sub_with(be, declared, erase)
+    declared = be.declared_ret(f, sctx).try();
+    be.sub_with(declared, erase)
 }
 
 // A bound may declare two members of one name — resolution is on
@@ -325,9 +325,9 @@ same_named = (out: Vec<Slot>, name: str) usize {
 // serves every impl at once.
 slot_field* = (be :: CBackend, s: Slot, out :: String)
               Res<(), AllocError> {
-    ctype(be, s.ret, out).try();
+    be.ctype(s.ret, out).try();
     out.fmt(" (*{})(void *", s.sym.view()).try();
-    s.params.loop((h, p) { slot_param(be, p, out).try() });
+    s.params.loop((h, p) { be.slot_param(p, out).try() });
     Range(0, s.elems).loop((h, i) { out.add_bytes(", size_t").try() });
     out.add_bytes(");").try();
     Ok(());
@@ -335,7 +335,7 @@ slot_field* = (be :: CBackend, s: Slot, out :: String)
 
 slot_param = (be :: CBackend, p: TyId, out :: String) Res<(), AllocError> {
     out.add_bytes(", ").try();
-    ctype(be, p, out).try();
+    be.ctype(p, out).try();
     Ok(());
 }
 
@@ -344,36 +344,36 @@ slot_param = (be :: CBackend, p: TyId, out :: String) Res<(), AllocError> {
 // containment. Feeding these to the dependency walk would make `Eq`
 // depend on `Eq` and report a by-value cycle that is not there.
 request_slots* = (be :: CBackend, ty: TyId) Res<(), AllocError> {
-    is_fat(be, ty).match({
+    be.is_fat(ty).match({
         false => Ok(()),
-        true  => request_slot_types(be, ty),
+        true  => be.request_slot_types(ty),
     })
 }
 
 request_slot_types = (be :: CBackend, ty: TyId) Res<(), AllocError> {
     slots ::= be.alloc.Vec<Slot>();
-    slots_of(be, ty, slots).try();
-    slots.loop((h, s) { request_slot(be, s).try() });
+    be.slots_of(ty, slots).try();
+    slots.loop((h, s) { be.request_slot(s).try() });
     Ok(());
 }
 
 request_slot = (be :: CBackend, s: Slot) Res<(), AllocError> {
-    s.params.loop((h, p) { request_if_real(be, p).try() });
-    request_if_real(be, s.ret).try();
+    s.params.loop((h, p) { be.request_if_real(p).try() });
+    be.request_if_real(s.ret).try();
     Ok(());
 }
 
 request_if_real = (be :: CBackend, t: TyId) Res<(), AllocError> {
-    (is_unit(be, t) || has_var(be.check, t)).match({
+    (be.is_unit(t) || has_var(be.check, t)).match({
         true  => Ok(()),
-        false => request_named_only(be, t),
+        false => be.request_named_only(t),
     })
 }
 
 request_named_only = (be :: CBackend, t: TyId) Res<(), AllocError> {
     be.types().at(t).match({
-        Named(_) => request_type(be, t),
-        Res(_)   => request_type(be, t),
+        Named(_) => be.request_type(t),
+        Res(_)   => be.request_type(t),
         _        => Ok(()),
     })
 }
@@ -392,13 +392,13 @@ fat_value* = (
     tty  : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    request_type(be, tty).try();
+    be.request_type(tty).try();
     slots ::= be.alloc.Vec<Slot>();
-    slots_of(be, tty, slots).try();
+    be.slots_of(tty, slots).try();
     rec ::= be.alloc.String().try();
-    ctype(be, tty, rec).try();
+    be.ctype(tty, rec).try();
     out.fmt("(({}){ .zg_self = (void *){addr}", rec.view()).try();
-    slots.loop((h, s) { slot_init(be, s, cty, out).try() });
+    slots.loop((h, s) { be.slot_init(s, cty, out).try() });
     out.add_bytes(" })").try();
     Ok(());
 }
@@ -410,7 +410,7 @@ fat_value* = (
 slot_init = (be :: CBackend, s: Slot, cty: TyId, out :: String)
             Res<(), AllocError> {
     out.fmt(", .{} = ", s.sym.view()).try();
-    thunk_for(be, s, cty).try().match({
+    be.thunk_for(s, cty).try().match({
         None     => out.add_bytes("NULL"),
         Ok(name) => out.add_bytes(name.view()),
     })
@@ -426,7 +426,7 @@ thunk_for = (be :: CBackend, s: Slot, cty: TyId)
             Res<Res<String>, AllocError> {
     site_of(be, cty).try().match({
         None   => Ok(None),
-        Ok(cs) => thunk_at_site(be, s, cty, cs),
+        Ok(cs) => be.thunk_at_site(s, cty, cs),
     })
 }
 
@@ -438,13 +438,13 @@ thunk_at_site = (be :: CBackend, s: Slot, cty: TyId, cs: Site)
     member_at(be, cs, s.name, found).try();
     bodied_fn(found).match({
         Ok(f) => write_thunk(be, s, cty, cs, f),
-        None  => supplied_thunk(be, s, cty, cs),
+        None  => be.supplied_thunk(s, cty, cs),
     })
 }
 
 supplied_thunk = (be :: CBackend, s: Slot, cty: TyId, cs: Site)
                  Res<Res<String>, AllocError> {
-    impl_member(be, cs.decl, s.name).try().match({
+    be.impl_member(cs.decl, s.name).try().match({
         None  => Ok(None),
         Ok(f) => write_thunk(be, s, cty, cs, f),
     })
@@ -455,10 +455,10 @@ write_thunk = (be :: CBackend, s: Slot, cty: TyId, cs: Site, f: Function)
     qname ::= be.alloc.String().try();
     join(qname, cs.qname, s.name).try();
     inst ::= be.alloc.Inst();
-    erase_tparams(be, f, qname.view(), inst).try();
-    carry_inst(recv_inst(be, cty).try(), inst).try();
+    be.erase_tparams(f, qname.view(), inst).try();
+    carry_inst(be.recv_inst(cty).try(), inst).try();
     sig ::= be.alloc.Vec<TyId>();
-    real_sig(be, cty, cs, f, qname.view(), inst, sig).try();
+    be.real_sig(cty, cs, f, qname.view(), inst, sig).try();
     sym ::= be.alloc.String().try();
     sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
     be.need_method(
@@ -476,7 +476,7 @@ write_thunk = (be :: CBackend, s: Slot, cty: TyId, cs: Site, f: Function)
     thunk_name(name, sym.view()).try();
     be.need_thunk(name.view()).try().match({
         false => Ok(()),
-        true  => emit_thunk(be, s, cty, f, sig, sym.view(), name.view()),
+        true  => be.emit_thunk(s, cty, f, sig, sym.view(), name.view()),
     }).try();
     Ok(Ok(name));
 }
@@ -493,10 +493,10 @@ real_sig = (
     out   :: Vec<TyId>
 ) Res<(), AllocError> {
     sctx = be.check.self_ctx(cs.decl.module.to_usize(), cty).try();
-    mark = enter_struct_tparams(be, cs.decl).try();
-    enter_tparams(be, f.tparams, owner).try();
-    f.params.loop((h, p) { add_real(be, p, sctx, inst, out).try() });
-    leave_tparams(be, mark).try();
+    mark = be.enter_struct_tparams(cs.decl).try();
+    be.enter_tparams(f.tparams, owner).try();
+    f.params.loop((h, p) { be.add_real(p, sctx, inst, out).try() });
+    be.leave_tparams(mark).try();
     Ok(());
 }
 
@@ -508,7 +508,7 @@ add_real = (
     out  :: Vec<TyId>
 ) Res<(), AllocError> {
     declared = be.check.param_type(p, sctx).try();
-    out.add(sub_with(be, declared, inst).try())
+    out.add(be.sub_with(declared, inst).try())
 }
 
 // `zg_v` and the function's own symbol without its `zu_`: the name is a
@@ -532,9 +532,9 @@ emit_thunk = (
     name : str
 ) Res<(), AllocError> {
     head ::= be.alloc.String().try();
-    thunk_head(be, s, name, head).try();
+    be.thunk_head(s, name, head).try();
     body ::= be.alloc.String().try();
-    thunk_body(be, s, cty, f, sig, sym, body).try();
+    be.thunk_body(s, cty, f, sig, sym, body).try();
     owned ::= be.alloc.String().try();
     owned.add_bytes(name).try();
     be.add_function(owned, head, body)
@@ -543,10 +543,10 @@ emit_thunk = (
 thunk_head = (be :: CBackend, s: Slot, name: str, out :: String)
              Res<(), AllocError> {
     ret ::= be.alloc.String().try();
-    ctype(be, s.ret, ret).try();
+    be.ctype(s.ret, ret).try();
     out.fmt("static {} {name}(void *zg_self", ret.view()).try();
-    s.params.loop((h, i, p) { thunk_param(be, p, "a", i, out).try() });
-    Range(0, s.elems).loop((h, i) { thunk_param(be, size_ty(be), "e", i, out).try() });
+    s.params.loop((h, i, p) { be.thunk_param(p, "a", i, out).try() });
+    Range(0, s.elems).loop((h, i) { be.thunk_param(be.size_ty(), "e", i, out).try() });
     out.add_bytes(")").try();
     Ok(());
 }
@@ -560,7 +560,7 @@ thunk_param* = (be :: CBackend, p: TyId, stem: str, i: usize, out :: String)
     out.add_bytes(", ").try();
     nm ::= be.alloc.String().try();
     sym_gen(nm, stem, i).try();
-    declarator(be, p, nm.view(), out).try();
+    be.declarator(p, nm.view(), out).try();
     Ok(());
 }
 
@@ -581,11 +581,11 @@ thunk_body = (
              Res<(), AllocError> {
     call ::= be.alloc.String().try();
     call.fmt("{sym}(").try();
-    thunk_recv(be, cty, f, call).try();
-    s.params.loop((h, i, p) { thunk_arg(be, s, sig, i, call).try() });
+    be.thunk_recv(cty, f, call).try();
+    s.params.loop((h, i, p) { be.thunk_arg(s, sig, i, call).try() });
     call.add_bytes(")").try();
     out.add_bytes("    ").try();
-    is_unit(be, s.ret).match({
+    be.is_unit(s.ret).match({
         true  => Ok(()),
         false => out.add_bytes("return "),
     }).try();
@@ -598,7 +598,7 @@ thunk_recv = (be :: CBackend, cty: TyId, f: Function, out :: String)
         true  => out.add_bytes("("),
         false => out.add_bytes("(*("),
     }).try();
-    ctype(be, cty, out).try();
+    be.ctype(cty, out).try();
     out.add_bytes(" *)zg_self").try();
     recv_by_ref(f).match({
         true  => Ok(()),
@@ -625,18 +625,18 @@ thunk_arg = (
     out.add_bytes(", ").try();
     nm ::= be.alloc.String().try();
     sym_gen(nm, "a", i).try();
-    scales(be, s, i).match({
-        true  => scaled_arg(be, nm.view(), out),
-        false => cast_arg(be, s, sig, i, nm.view(), out),
+    be.scales(s, i).match({
+        true  => be.scaled_arg(nm.view(), out),
+        false => be.cast_arg(s, sig, i, nm.view(), out),
     })
 }
 
 scales = (be: CBackend, s: Slot, i: usize) bool {
-    (s.elems > 0) && (i > 0) && is_count(be, s, i) && is_run(be, s, i - 1)
+    (s.elems > 0) && (i > 0) && be.is_count(s, i) && be.is_run(s, i - 1)
 }
 
 is_count = (be: CBackend, s: Slot, i: usize) bool {
-    s.params.get(i).match({ Ok(t) => is_usize(be, t), None => false })
+    s.params.get(i).match({ Ok(t) => be.is_usize(t), None => false })
 }
 
 is_usize = (be: CBackend, t: TyId) bool {
@@ -644,7 +644,7 @@ is_usize = (be: CBackend, t: TyId) bool {
 }
 
 is_run = (be: CBackend, s: Slot, i: usize) bool {
-    s.params.get(i).match({ Ok(t) => is_pointer(be, t), None => false })
+    s.params.get(i).match({ Ok(t) => be.is_pointer(t), None => false })
 }
 
 is_pointer* = (be: CBackend, t: TyId) bool {
@@ -670,9 +670,9 @@ cast_arg = (
 ) Res<(), AllocError> {
     want = sig.get(i + 1).match({ Ok(t) => t, None => TyId(index: 0) });
     got  = s.params.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
-    (want.eq(got) || (is_pointer(be, want) == false)).match({
+    (want.eq(got) || (be.is_pointer(want) == false)).match({
         true  => out.add_bytes(nm),
-        false => write_cast(be, nm, want, out),
+        false => be.write_cast(nm, want, out),
     })
 }
 
@@ -685,21 +685,21 @@ cast_arg = (
 // and three sites.
 needs_fat* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
              Res<bool, AllocError> {
-    is_fat(be, want).match({
+    be.is_fat(want).match({
         false => Ok(false),
-        true  => value_is_concrete(be, id, ctx, want),
+        true  => be.value_is_concrete(id, ctx, want),
     })
 }
 
 value_is_concrete = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
                     Res<bool, AllocError> {
     unknown = be.check.types.unknown().try();
-    got     = ty_of(be, id, ctx, unknown).try();
-    Ok(is_concrete(be, got) && (got.eq(want) == false));
+    got     = be.ty_of(id, ctx, unknown).try();
+    Ok(be.is_concrete(got) && (got.eq(want) == false));
 }
 
 is_concrete = (be: CBackend, ty: TyId) bool {
-    is_named(be, ty) && (is_fat(be, ty) == false) && (has_var(be.check, ty) == false)
+    is_named(be, ty) && (be.is_fat(ty) == false) && (has_var(be.check, ty) == false)
 }
 
 is_named = (be: CBackend, ty: TyId) bool {
@@ -715,8 +715,8 @@ write_fat_value* = (
     out  :: String
 ) Res<(), AllocError> {
     addr ::= be.alloc.String().try();
-    address_of(be, code, cty, addr).try();
-    fat_value(be, addr.view(), cty, want, out)
+    be.address_of(code, cty, addr).try();
+    be.fat_value(addr.view(), cty, want, out)
 }
 
 // The receiver's address, without copying it where that would move the
@@ -725,7 +725,7 @@ address_of = (be :: CBackend, code: str, cty: TyId, out :: String)
              Res<(), AllocError> {
     is_place(code).match({
         true  => write_amp(code, out),
-        false => spill_address(be, code, cty, out),
+        false => be.spill_address(code, cty, out),
     })
 }
 
@@ -737,7 +737,7 @@ spill_address = (be :: CBackend, code: str, cty: TyId, out :: String)
                 Res<(), AllocError> {
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "t", be.next_tmp()).try();
-    declare_temp(be, cty, tmp.view()).try();
+    be.declare_temp(cty, tmp.view()).try();
     be.set_line(tmp.view(), code).try();
     out.fmt("&{}", tmp.view())
 }

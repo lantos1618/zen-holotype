@@ -540,6 +540,44 @@ Member* = {
     span*: Span,
     leading*: TriviaRun,
     trailing*: TriviaRun,
+
+    // The head every member shares, read off whichever of the three
+    // kinds it is. Methods, not free functions: no consumer writes this
+    // match (five copies of the name one had grown — sema twice, gen_c
+    // twice, lsp once) and nothing imports a name the type already
+    // carries. The fields stay on the payloads: `Const` and `Function`
+    // also live as `DeclKind` payloads, where no Member is there to
+    // carry the head.
+    name* = (self: @Self) Ident {
+        self.kind.match({
+            Field(f)    => f.name,
+            Const(c)    => c.name,
+            Function(f) => f.name,
+        })
+    }
+
+    named* = (self: @Self, n: str) bool {
+        self.name().text.eq(n)
+    }
+
+    exported* = (self: @Self) bool {
+        self.kind.match({
+            Field(f)    => f.exported,
+            Const(c)    => c.exported,
+            Function(f) => f.exported,
+        })
+    }
+
+    // Storage talk: a Function member answers false. (Ownership asks a
+    // different question — `sema_recv.zen`'s `member_is_mutable`, where
+    // a Function answers true — and keeps its own function for it.)
+    mutable* = (self: @Self) bool {
+        self.kind.match({
+            Field(f)    => f.mutable,
+            Const(c)    => c.mutable,
+            Function(_) => false,
+        })
+    }
 }
 
 // The Field/Const split is SYNTACTIC (grammar's R4): in a struct body,

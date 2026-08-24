@@ -55,22 +55,22 @@ lower_match* = (
     ty   : TyId,
     dst  : Dest
 ) Res<(), AllocError> {
-    st = res_type_of(be, m.scrutinee, ctx).try();
+    st = be.res_type_of(m.scrutinee, ctx).try();
     scrut ::= be.alloc.String().try();
     sym_gen(scrut, "s", be.next_tmp()).try();
-    declare_temp(be, st, scrut.view()).try();
-    deliver(be, m.scrutinee, ctx, st, Dest.Into(scrut.view())).try();
+    be.declare_temp(st, scrut.view()).try();
+    be.deliver(m.scrutinee, ctx, st, Dest.Into(scrut.view())).try();
     m.arms.loop((h, i, arm) {
-        open_arm(be, arm, i, st, scrut.view(), ctx).try();
-        deliver(be, arm.body, ctx, ty, dst).try();
+        be.open_arm(arm, i, st, scrut.view(), ctx).try();
+        be.deliver(arm.body, ctx, ty, dst).try();
     });
-    close_arms(be, node, m).try();
+    be.close_arms(node, m).try();
     Ok(());
 }
 
 declare_temp* = (be :: CBackend, ty: TyId, name: str) Res<(), AllocError> {
     decl ::= be.alloc.String().try();
-    declarator(be, ty, name, decl).try();
+    be.declarator(ty, name, decl).try();
     be.fmt("{};\n", decl.view())
 }
 
@@ -86,12 +86,12 @@ open_arm = (
     ctx   : Ctx
 ) Res<(), AllocError> {
     cond ::= be.alloc.String().try();
-    arm_cond(be, arm.pattern, st, scrut, cond).try();
+    be.arm_cond(arm.pattern, st, scrut, cond).try();
     (i > 0).match({
-        true  => chain_arm(be, cond.view()),
-        false => first_arm(be, cond.view()),
+        true  => be.chain_arm(cond.view()),
+        false => be.first_arm(cond.view()),
     }).try();
-    arm_bind(be, arm.pattern, st, scrut, ctx).try();
+    be.arm_bind(arm.pattern, st, scrut, ctx).try();
     Ok(());
 }
 
@@ -112,8 +112,8 @@ chain_arm = (be :: CBackend, cond: str) Res<(), AllocError> {
 // token rather than leaving the destination uninitialised.
 close_arms = (be :: CBackend, node: Expr, m: Match) Res<(), AllocError> {
     (m.arms.len == 0).match({
-        true  => write_unreachable(be, node, m),
-        false => close_chain(be, node, m),
+        true  => be.write_unreachable(node, m),
+        false => be.close_chain(node, m),
     })
 }
 
@@ -121,7 +121,7 @@ close_chain = (be :: CBackend, node: Expr, m: Match) Res<(), AllocError> {
     be.dedent();
     be.writeln("} else {").try();
     be.indent();
-    write_unreachable(be, node, m).try();
+    be.write_unreachable(node, m).try();
     be.dedent();
     be.writeln("}").try();
     Ok(());
@@ -130,7 +130,7 @@ close_chain = (be :: CBackend, node: Expr, m: Match) Res<(), AllocError> {
 write_unreachable = (be :: CBackend, node: Expr, m: Match)
                     Res<(), AllocError> {
     pos ::= be.alloc.String().try();
-    write_position(be, node.span.file, m.name_span, pos).try();
+    be.write_position(node.span.file, m.name_span, pos).try();
     be.fmt("zg_unreachable({});\n", pos.view()).try();
     Ok(());
 }
@@ -149,9 +149,9 @@ arm_cond = (
     pat = be.tree.pattern_at(pid);
     pat.kind.match({
         Wild           => out.add_bytes("1"),
-        Literal(l)     => literal_cond(be, pat, l, st, scrut, out),
-        Name(p)        => name_cond(be, p.name, st, scrut, out),
-        Destructure(d) => destructure_cond(be, d, st, scrut, out),
+        Literal(l)     => be.literal_cond(pat, l, st, scrut, out),
+        Name(p)        => be.name_cond(p.name, st, scrut, out),
+        Destructure(d) => be.destructure_cond(d, st, scrut, out),
     }).try();
     Ok(());
 }
@@ -168,8 +168,8 @@ destructure_cond = (
     scrut : str,
     out   :: String
 ) Res<(), AllocError> {
-    tag_cond(be, d.name, st, scrut, out).try();
-    payload_cond(be, d, st, scrut, out)
+    be.tag_cond(d.name, st, scrut, out).try();
+    be.payload_cond(d, st, scrut, out)
 }
 
 // The payload's test is `arm_cond` again, one level down, against the
@@ -183,9 +183,9 @@ payload_cond = (
     scrut : str,
     out   :: String
 ) Res<(), AllocError> {
-    payload_type(be, st, last_segment(d.name)).match({
-        None  => bare_payload(be, d),
-        Ok(t) => nested_cond(be, d, t, scrut, out),
+    be.payload_type(st, last_segment(d.name)).match({
+        None  => be.bare_payload(d),
+        Ok(t) => be.nested_cond(d, t, scrut, out),
     })
 }
 
@@ -196,7 +196,7 @@ payload_cond = (
 bare_payload = (be :: CBackend, d: Destructure) Res<(), AllocError> {
     inner = be.tree.pattern_at(d.binder);
     inner.kind.match({
-        Literal(_) => report_nested(be, inner),
+        Literal(_) => be.report_nested(inner),
         _          => Ok(()),
     })
 }
@@ -208,9 +208,9 @@ nested_cond = (
     scrut : str,
     out   :: String
 ) Res<(), AllocError> {
-    narrows(be, d.binder, t).match({
+    be.narrows(d.binder, t).match({
         false => Ok(()),
-        true  => write_nested_cond(be, d, t, scrut, out),
+        true  => be.write_nested_cond(d, t, scrut, out),
     })
 }
 
@@ -222,9 +222,9 @@ write_nested_cond = (
     out   :: String
 ) Res<(), AllocError> {
     place ::= be.alloc.String().try();
-    payload_place(be, last_segment(d.name), scrut, place).try();
+    be.payload_place(last_segment(d.name), scrut, place).try();
     out.add_bytes(" && ").try();
-    arm_cond(be, d.binder, t, place.view(), out)
+    be.arm_cond(d.binder, t, place.view(), out)
 }
 
 // Whether a pattern tests anything at all. A wildcard and a binder match
@@ -233,7 +233,7 @@ write_nested_cond = (
 narrows = (be :: CBackend, pid: PatternId, st: TyId) bool {
     be.tree.pattern_at(pid).kind.match({
         Wild    => false,
-        Name(p) => is_variant(be, st, last_segment(p.name)),
+        Name(p) => be.is_variant(st, last_segment(p.name)),
         _       => true,
     })
 }
@@ -270,7 +270,7 @@ literal_cond = (
         Int   => equality(scrut, l.text, out),
         Char  => equality(scrut, l.text, out),
         Float => equality(scrut, l.text, out),
-        Str   => str_cond(be, pat, l, st, scrut, out),
+        Str   => be.str_cond(pat, l, st, scrut, out),
     })
 }
 
@@ -305,8 +305,8 @@ str_cond = (
     scrut : str,
     out   :: String
 ) Res<(), AllocError> {
-    is_str(be, st).match({
-        false => unsupported_cond(be, pat, out),
+    be.is_str(st).match({
+        false => be.unsupported_cond(pat, out),
         true  => write_str_cond(l, scrut, out),
     })
 }
@@ -360,8 +360,8 @@ name_cond = (
     scrut : str,
     out   :: String
 ) Res<(), AllocError> {
-    is_variant(be, st, last_segment(q)).match({
-        true  => tag_cond(be, q, st, scrut, out),
+    be.is_variant(st, last_segment(q)).match({
+        true  => be.tag_cond(q, st, scrut, out),
         false => out.add_bytes("1"),
     })
 }
@@ -374,7 +374,7 @@ tag_cond = (
     out   :: String
 ) Res<(), AllocError> {
     qname ::= be.alloc.String().try();
-    enum_path(be, st, qname).try();
+    be.enum_path(st, qname).try();
     tag ::= be.alloc.String().try();
     tag.sym_variant(qname.view(), last_segment(q)).try();
     out.fmt("({scrut}.zg_tag == {})", tag.view())
@@ -399,9 +399,9 @@ bind_name = (
     ctx   : Ctx
 ) Res<(), AllocError> {
     name = last_segment(q);
-    is_variant(be, st, name).match({
+    be.is_variant(st, name).match({
         true  => Ok(()),
-        false => bind_local(be, name, st, scrut),
+        false => be.bind_local(name, st, scrut),
     })
 }
 
@@ -417,17 +417,17 @@ bind_payload = (
     scrut : str,
     ctx   : Ctx
 ) Res<(), AllocError> {
-    payload_type(be, st, last_segment(d.name)).match({
+    be.payload_type(st, last_segment(d.name)).match({
         None  => Ok(()),
-        Ok(t) => bind_inner(be, d, t, scrut, ctx),
+        Ok(t) => be.bind_inner(d, t, scrut, ctx),
     })
 }
 
 bind_inner = (be :: CBackend, d: Destructure, t: TyId, scrut: str, ctx: Ctx)
              Res<(), AllocError> {
     place ::= be.alloc.String().try();
-    payload_place(be, last_segment(d.name), scrut, place).try();
-    arm_bind(be, d.binder, t, place.view(), ctx)
+    be.payload_place(last_segment(d.name), scrut, place).try();
+    be.arm_bind(d.binder, t, place.view(), ctx)
 }
 
 // A C declaration for a pattern binding, plus the same binding in
@@ -439,7 +439,7 @@ bind_local = (be :: CBackend, name: str, ty: TyId, init: str)
     cname ::= be.alloc.String().try();
     sym_local(cname, name, n).try();
     decl ::= be.alloc.String().try();
-    declarator(be, ty, cname.view(), decl).try();
+    be.declarator(ty, cname.view(), decl).try();
     be.fmt("{} = {init};\n", decl.view())
 }
 
@@ -454,7 +454,7 @@ bind_local = (be :: CBackend, name: str, ty: TyId, init: str)
 is_variant* = (be :: CBackend, st: TyId, name: str) bool {
     be.check.types.at(st).match({
         Res(r)   => res_has(r, name),
-        Named(n) => enum_has(be, n, name),
+        Named(n) => be.enum_has(n, name),
         _        => false,
     })
 }
@@ -497,7 +497,7 @@ variants_have = (variants: Vec<Variant>, name: str) bool {
 enum_path* = (be :: CBackend, st: TyId, out :: String) Res<(), AllocError> {
     be.check.types.at(st).match({
         Res(_)   => out.add_bytes(RES_PATH),
-        Named(n) => write_qname(be, out, n),
+        Named(n) => be.write_qname(out, n),
         _        => Ok(()),
     })
 }
@@ -505,28 +505,28 @@ enum_path* = (be :: CBackend, st: TyId, out :: String) Res<(), AllocError> {
 // The type a variant's payload has, or nothing when it carries none.
 payload_type* = (be :: CBackend, st: TyId, variant: str) Res<TyId> {
     be.check.types.at(st).match({
-        Res(r)   => res_payload(be, r, variant),
-        Named(n) => enum_payload(be, n, variant),
+        Res(r)   => be.res_payload(r, variant),
+        Named(n) => be.enum_payload(n, variant),
         _        => None,
     })
 }
 
 res_payload = (be :: CBackend, r: TyRes, variant: str) Res<TyId> {
     variant.eq("Ok").match({
-        true  => non_unit(be, r.value),
-        false => res_error_payload(be, r, variant),
+        true  => be.non_unit(r.value),
+        false => be.res_error_payload(r, variant),
     })
 }
 
 res_error_payload = (be :: CBackend, r: TyRes, variant: str) Res<TyId> {
     is_failure(r.form).match({
-        true  => non_unit(be, r.error),
+        true  => be.non_unit(r.error),
         false => None,
     })
 }
 
 non_unit = (be :: CBackend, id: TyId) Res<TyId> {
-    is_unit(be, id).match({
+    be.is_unit(id).match({
         true  => None,
         false => Ok(id),
     })
@@ -535,7 +535,7 @@ non_unit = (be :: CBackend, id: TyId) Res<TyId> {
 enum_payload = (be :: CBackend, n: TyNamed, variant: str) Res<TyId> {
     decl_at(be.tree, n.decl).match({
         None  => None,
-        Ok(d) => decl_payload(be, n, d, variant),
+        Ok(d) => be.decl_payload(n, d, variant),
     })
 }
 
@@ -554,9 +554,9 @@ variant_payload = (
     variant  : str
 ) Res<TyId> {
     found ::= be.alloc.Vec<TyId>();
-    collect_payload(be, n, variants, variant, found).match({
+    be.collect_payload(n, variants, variant, found).match({
         Err(_) => None,
-        Ok(_)  => first_payload(be, found),
+        Ok(_)  => be.first_payload(found),
     })
 }
 
@@ -570,13 +570,13 @@ collect_payload = (
     variant  : str,
     found    :: Vec<TyId>
 ) Res<(), AllocError> {
-    ctx  = decl_ctx(be, n);
-    inst = decl_inst(be, n).try();
-    mark = enter_struct_tparams(be, n.decl).try();
+    ctx  = be.decl_ctx(n);
+    inst = be.decl_inst(n).try();
+    mark = be.enter_struct_tparams(n.decl).try();
     variants.loop((h, v) {
-        keep_payload(be, n, v, variant, ctx, inst, found).try();
+        be.keep_payload(n, v, variant, ctx, inst, found).try();
     });
-    leave_tparams(be, mark).try();
+    be.leave_tparams(mark).try();
     Ok(());
 }
 
@@ -592,7 +592,7 @@ keep_payload = (
                Res<(), AllocError> {
     v.name.text.eq(variant).match({
         false => Ok(()),
-        true  => add_payload_type(be, n, v, ctx, inst, found),
+        true  => be.add_payload_type(n, v, ctx, inst, found),
     })
 }
 
@@ -613,6 +613,6 @@ add_payload_type = (
 first_payload = (be :: CBackend, found: Vec<TyId>) Res<TyId> {
     found.get(0).match({
         None  => None,
-        Ok(t) => non_unit(be, t),
+        Ok(t) => be.non_unit(t),
     })
 }

@@ -44,7 +44,7 @@ check_own = sema.sema_own
 // Every declaration rule, for one module.
 check_module* = (c :: Checker, mi: usize) Res<(), AllocError> {
     c.world.table_at(mi).match({
-        Ok(t) => check_table(c, t, mi),
+        Ok(t) => c.check_table(t, mi),
         None  => Ok(()),
     })
 }
@@ -58,7 +58,7 @@ check_module* = (c :: Checker, mi: usize) Res<(), AllocError> {
 // been walked.
 check_all* = (c :: Checker) Res<(), AllocError> {
     Range(0, c.world.count()).loop((h, mi) {
-        check_module(c, mi).try();
+        c.check_module(mi).try();
     });
     // these two are whole-program and both run LAST, for the same
     // reason: a struct nobody mentions still has to have a size, and
@@ -68,8 +68,8 @@ check_all* = (c :: Checker) Res<(), AllocError> {
     // A THIRD USED TO RUN HERE — the untyped `:`-self walk
     // `sema_recv.zen` records removing. Member bodies are walked now, so
     // it only doubled every diagnostic it raised.
-    check_layout(c).try();
-    check_depth(c).try();
+    c.check_layout().try();
+    c.check_depth().try();
     // A THIRD WHOLE-PROGRAM RULE, and whole-program for a different
     // reason: a `vararg` is legal in exactly one POSITION, and a type
     // node carries its span but not its parent — so the mentions and the
@@ -80,9 +80,9 @@ check_all* = (c :: Checker) Res<(), AllocError> {
 
 check_table = (c :: Checker, t: ModuleTable, mi: usize)
               Res<(), AllocError> {
-    check_overload_sets(c, t, mi).try();
-    t.impls.loop((h, id) { check_impl(c, id, mi).try() });
-    check_bodies(c, mi).try();
+    c.check_overload_sets(t, mi).try();
+    t.impls.loop((h, id) { c.check_impl(id, mi).try() });
+    c.check_bodies(mi).try();
     Ok(());
 }
 
@@ -92,14 +92,14 @@ check_table = (c :: Checker, t: ModuleTable, mi: usize)
 check_overload_sets = (c :: Checker, t: ModuleTable, mi: usize)
                       Res<(), AllocError> {
     seen ::= c.alloc.Vec<str>();
-    t.defs.loop((h, d) { one_set(c, d, mi, seen).try() });
+    t.defs.loop((h, d) { c.one_set(d, mi, seen).try() });
     Ok(());
 }
 
 one_set = (c :: Checker, d: Def, mi: usize, seen :: Vec<str>)
           Res<(), AllocError> {
     (is_fn_def(d.kind) && (has_name(seen, d.name) == false)).match({
-        true  => new_set(c, d.name, mi, seen),
+        true  => c.new_set(d.name, mi, seen),
         false => Ok(()),
     })
 }
@@ -127,7 +127,7 @@ has_name = (seen: Vec<str>, name: str) bool {
 
 check_bodies = (c :: Checker, mi: usize) Res<(), AllocError> {
     c.tree.module_at(mi).match({
-        Ok(m) => check_decls(c, m, mi),
+        Ok(m) => c.check_decls(m, mi),
         None  => Ok(()),
     })
 }

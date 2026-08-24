@@ -49,7 +49,6 @@ TyId, TyNamed = sema.sema_ty
 decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
-member_named = sema.sema_member
 Own, var_mutable, path_root = sema.sema_own
 place_type, refuse = sema.sema_own
 
@@ -66,35 +65,34 @@ place_type, refuse = sema.sema_own
 check_receiver* = (c :: Checker, o :: Own, k: Call, ctx: Ctx)
                   Res<(), AllocError> {
     c.tree.expr_at(k.callee).kind.match({
-        Access(a) => check_method_call(c, o, a, ctx),
+        Access(a) => c.check_method_call(o, a, ctx),
         _         => Ok(()),
     })
 }
 
 check_method_call = (c :: Checker, o :: Own, a: Access, ctx: Ctx)
                     Res<(), AllocError> {
-    path_root(c, o, a.base).match({
+    c.path_root(o, a.base).match({
         None  => Ok(()),
-        Ok(_) => check_receiver_path(c, o, a, ctx),
+        Ok(_) => c.check_receiver_path(o, a, ctx),
     })
 }
 
 check_receiver_path = (c :: Checker, o :: Own, a: Access, ctx: Ctx)
                       Res<(), AllocError> {
-    ty = place_type(c, o, a.base);
-    wants_mutable(c, ty, a.name.text).match({
+    ty = c.place_type(o, a.base);
+    c.wants_mutable(ty, a.name.text).match({
         false => Ok(()),
-        true  => require_mutable(c, o, a),
+        true  => c.require_mutable(o, a),
     })
 }
 
 // The receiver is what is wrong, so the diagnostic points at the base
 // of the dot, never at the correctly-declared method name.
 require_mutable = (c :: Checker, o :: Own, a: Access) Res<(), AllocError> {
-    place_mutable(c, o, a.base).match({
+    c.place_mutable(o, a.base).match({
         true  => Ok(()),
-        false => refuse(
-            c,
+        false => c.refuse(
             c.tree.expr_at(a.base).span,
             SemaFault.NeedsMutableReceiver(NameFault(name: a.name.text))
         ),
@@ -108,15 +106,15 @@ place_mutable = (c :: Checker, o :: Own, id: ExprId) bool {
     node = c.tree.expr_at(id);
     node.kind.match({
         Name(n)   => var_mutable(o, n.text),
-        Paren(p)  => place_mutable(c, o, p.inner),
-        Access(a) => link_mutable(c, o, a),
+        Paren(p)  => c.place_mutable(o, p.inner),
+        Access(a) => c.link_mutable(o, a),
         _         => true,
     })
 }
 
 link_mutable = (c :: Checker, o :: Own, a: Access) bool {
-    place_mutable(c, o, a.base)
-        && field_mutable(c, place_type(c, o, a.base), a.name.text)
+    c.place_mutable(o, a.base)
+        && c.field_mutable(c.place_type(o, a.base), a.name.text)
 }
 
 // ---------------------------------------------------------------------
@@ -134,8 +132,8 @@ check_write_place* = (c :: Checker, o :: Own, id: ExprId)
                      Res<(), AllocError> {
     node = c.tree.expr_at(id);
     node.kind.match({
-        Access(_) => refuse_immutable_link(c, o, node, id),
-        Index(_)  => refuse_immutable_link(c, o, node, id),
+        Access(_) => c.refuse_immutable_link(o, node, id),
+        Index(_)  => c.refuse_immutable_link(o, node, id),
         _         => Ok(()),
     })
 }
@@ -146,9 +144,9 @@ check_write_place* = (c :: Checker, o :: Own, id: ExprId)
 // send the reader to the marker that is already right.
 refuse_immutable_link = (c :: Checker, o :: Own, node: Expr, id: ExprId)
                         Res<(), AllocError> {
-    immutable_link(c, o, id).match({
+    c.immutable_link(o, id).match({
         None   => Ok(()),
-        Ok(nm) => refuse_link(c, o, node, nm),
+        Ok(nm) => c.refuse_link(o, node, nm),
     })
 }
 
@@ -160,13 +158,11 @@ refuse_immutable_link = (c :: Checker, o :: Own, node: Expr, id: ExprId)
 refuse_link = (c :: Checker, o :: Own, node: Expr, nm: str)
               Res<(), AllocError> {
     (nm.eq("self") && (o.method.len > 0)).match({
-        true  => refuse(
-            c,
+        true  => c.refuse(
             node.span,
             SemaFault.NeedsMutableReceiver(NameFault(name: o.method))
         ),
-        false => refuse(
-            c,
+        false => c.refuse(
             node.span,
             SemaFault.ImmutableWrite(NameFault(name: nm))
         ),
@@ -180,9 +176,9 @@ immutable_link = (c :: Checker, o :: Own, id: ExprId) Res<str> {
     node = c.tree.expr_at(id);
     node.kind.match({
         Name(n)   => name_link(o, n.text),
-        Paren(p)  => immutable_link(c, o, p.inner),
-        Index(x)  => immutable_link(c, o, x.base),
-        Access(a) => access_link(c, o, a),
+        Paren(p)  => c.immutable_link(o, p.inner),
+        Index(x)  => c.immutable_link(o, x.base),
+        Access(a) => c.access_link(o, a),
         _         => None,
     })
 }
@@ -192,14 +188,14 @@ name_link = (o: Own, text: str) Res<str> {
 }
 
 access_link = (c :: Checker, o :: Own, a: Access) Res<str> {
-    immutable_link(c, o, a.base).match({
+    c.immutable_link(o, a.base).match({
         Ok(nm) => Ok(nm),
-        None   => field_link(c, place_type(c, o, a.base), a.name.text),
+        None   => c.field_link(c.place_type(o, a.base), a.name.text),
     })
 }
 
 field_link = (c: Checker, ty: TyId, name: str) Res<str> {
-    field_mutable(c, ty, name).match({ true => None, false => Ok(name) })
+    c.field_mutable(ty, name).match({ true => None, false => Ok(name) })
 }
 
 // ---------------------------------------------------------------------
@@ -214,7 +210,7 @@ field_link = (c: Checker, ty: TyId, name: str) Res<str> {
 // ---------------------------------------------------------------------
 
 wants_mutable = (c: Checker, ty: TyId, name: str) bool {
-    own_member(c, ty, name).match({
+    c.own_member(ty, name).match({
         None  => false,
         Ok(m) => receiver_is_mutable(m),
     })
@@ -239,12 +235,15 @@ first_param_mutable = (f: Function) bool {
 }
 
 field_mutable = (c: Checker, ty: TyId, name: str) bool {
-    own_member(c, ty, name).match({
+    c.own_member(ty, name).match({
         None  => true,
         Ok(m) => member_is_mutable(m),
     })
 }
 
+// NOT `Member.mutable`: that is the data convention (Function
+// answers false); ownership asks whether the member may write its
+// receiver, and a method may, so Function answers true here.
 member_is_mutable = (m: Member) bool {
     m.kind.match({
         Field(f)    => f.mutable,
@@ -262,7 +261,7 @@ member_is_mutable = (m: Member) bool {
 // allocator, so every caller above stays a plain `bool`.
 own_member* = (c: Checker, ty: TyId, name: str) Res<Member> {
     c.types.at(ty).match({
-        Named(n) => named_member(c, n, name),
+        Named(n) => c.named_member(n, name),
         _        => None,
     })
 }
@@ -284,7 +283,7 @@ decl_member = (d: Decl, name: str) Res<Member> {
 find_member = (members: Vec<Member>, name: str) Res<Member> {
     Range(0, members.len).find((i) {
         members.get(i).match({
-            Ok(m) => member_named(m, name),
+            Ok(m) => m.named(name),
             None  => false,
         })
     }).match({

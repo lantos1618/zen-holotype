@@ -66,7 +66,7 @@ scope_type* = (be :: CBackend, ctx: Ctx) Res<TyId, AllocError> {
     be.check.world.defs_of(ctx.module, "Scope", found).try();
     found.get(0).match({
         None  => be.check.types.unknown(),
-        Ok(d) => scope_named(be, d),
+        Ok(d) => be.scope_named(d),
     })
 }
 
@@ -84,17 +84,17 @@ scope_named = (be :: CBackend, d: Def) Res<TyId, AllocError> {
 // answer from an enclosing block would be the wrong block, quietly.
 lower_scope_ref* = (be :: CBackend, id: ExprId, out :: String)
                    Res<(), AllocError> {
-    rec = innermost_record(be);
+    rec = be.innermost_record();
     (rec == 0).match({
-        true  => unsupported(be, id, "`@scope` where no block is open", out),
-        false => write_record_ref(be, rec, out),
+        true  => be.unsupported(id, "`@scope` where no block is open", out),
+        false => be.write_record_ref(rec, out),
     })
 }
 
 innermost_record = (be :: CBackend) usize {
     (be.block_depth() == 0).match({
         true  => 0,
-        false => record_of(be, be.block_depth() - 1),
+        false => be.record_of(be.block_depth() - 1),
     })
 }
 
@@ -116,7 +116,7 @@ write_record_ref = (be :: CBackend, rec: usize, out :: String)
 // -----------------------------------------------------------------
 
 is_defer* = (be :: CBackend, rty: TyId, name: str) bool {
-    name.eq("defer") && scope_receiver(be, rty)
+    name.eq("defer") && be.scope_receiver(rty)
 }
 
 scope_receiver = (be :: CBackend, rty: TyId) bool {
@@ -141,10 +141,10 @@ lower_defer* = (
     out :: String
 ) Res<(), AllocError> {
     recv ::= be.alloc.String().try();
-    scope_operand(be, a.base, ctx, recv).try();
+    be.scope_operand(a.base, ctx, recv).try();
     c.args.get(0).match({
-        None  => unsupported(be, id, "`defer` with no closure", out),
-        Ok(g) => defer_arg(be, id, g, recv.view(), ctx, out),
+        None  => be.unsupported(id, "`defer` with no closure", out),
+        Ok(g) => be.defer_arg(id, g, recv.view(), ctx, out),
     })
 }
 
@@ -153,29 +153,28 @@ lower_defer* = (
 // spellings arrive here as the same C value.
 scope_operand = (be :: CBackend, base: ExprId, ctx: Ctx, out :: String)
                 Res<(), AllocError> {
-    is_scope_ref(be, base).match({
-        true  => lower_scope_ref(be, base, out),
-        false => write_scope_value(be, base, ctx, out),
+    be.is_scope_ref(base).match({
+        true  => be.lower_scope_ref(base, out),
+        false => be.write_scope_value(base, ctx, out),
     })
 }
 
 write_scope_value = (be :: CBackend, base: ExprId, ctx: Ctx, out :: String)
                     Res<(), AllocError> {
-    slot_name(be, base).match({
-        None   => unsupported(
-            be,
+    be.slot_name(base).match({
+        None   => be.unsupported(
             base,
             "a `Scope` reached through something other than a binding",
             out
         ),
-        Ok(nm) => write_scope_local(be, nm, out),
+        Ok(nm) => be.write_scope_local(nm, out),
     })
 }
 
 slot_name = (be :: CBackend, id: ExprId) Res<str> {
     be.tree.expr_at(id).kind.match({
         Name(n)  => Ok(n.text),
-        Paren(p) => slot_name(be, p.inner),
+        Paren(p) => be.slot_name(p.inner),
         _        => None,
     })
 }
@@ -201,9 +200,8 @@ defer_arg = (
     out  :: String
 ) Res<(), AllocError> {
     be.tree.expr_at(g.value).kind.match({
-        Lambda(l) => defer_lambda(be, id, l, recv, ctx, out),
-        _         => unsupported(
-            be,
+        Lambda(l) => be.defer_lambda(id, l, recv, ctx, out),
+        _         => be.unsupported(
             id,
             "`defer` given something other than a closure written at the call site",
             out
@@ -220,13 +218,12 @@ defer_lambda = (
     out  :: String
 ) Res<(), AllocError> {
     (l.params.len > 0).match({
-        true  => unsupported(
-            be,
+        true  => be.unsupported(
             id,
             "a deferred closure that takes parameters",
             out
         ),
-        false => register_closure(be, id, l, recv, ctx, out),
+        false => be.register_closure(id, l, recv, ctx, out),
     })
 }
 
@@ -240,11 +237,11 @@ register_closure = (
 ) Res<(), AllocError> {
     be.need_scope();
     caps ::= be.alloc.Vec<LocalSlot>();
-    captures(be, l.body, caps).try();
+    be.captures(l.body, caps).try();
     n = be.next_defer();
-    write_env_type(be, n, caps).try();
+    be.write_env_type(n, caps).try();
     write_thunk(be, n, l, caps, ctx).try();
-    write_registration(be, id, n, caps, recv).try();
+    be.write_registration(id, n, caps, recv).try();
     out.add_bytes("0")
 }
 
@@ -257,17 +254,17 @@ write_env_type = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
                  Res<(), AllocError> {
     (caps.len == 0).match({
         true  => Ok(()),
-        false => write_env_struct(be, n, caps),
+        false => be.write_env_struct(n, caps),
     })
 }
 
 write_env_struct = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
                    Res<(), AllocError> {
     env ::= be.alloc.String().try();
-    env_name(be, n, env).try();
+    be.env_name(n, env).try();
     text ::= be.alloc.String().try();
     text.fmt("typedef struct {} {\n", env.view()).try();
-    caps.loop((h, s) { write_env_field(be, s, text).try() });
+    caps.loop((h, s) { be.write_env_field(s, text).try() });
     text.fmt("} {};", env.view()).try();
     be.add_defer_env(text, n)
 }
@@ -278,8 +275,8 @@ write_env_field = (be :: CBackend, s: LocalSlot, text :: String)
     cname ::= be.alloc.String().try();
     sym_local(cname, s.name, s.index).try();
     s.by_ref.match({
-        false => declarator(be, s.ty, cname.view(), text),
-        true  => ref_field(be, s.ty, cname.view(), text),
+        false => be.declarator(s.ty, cname.view(), text),
+        true  => be.ref_field(s.ty, cname.view(), text),
     }).try();
     text.add_bytes(";\n").try();
     Ok(());
@@ -290,7 +287,7 @@ write_env_field = (be :: CBackend, s: LocalSlot, text :: String)
 // same name — which is what keeps `(*p)` reading the same storage.
 ref_field = (be :: CBackend, ty: TyId, name: str, text :: String)
             Res<(), AllocError> {
-    ctype(be, ty, text).try();
+    be.ctype(ty, text).try();
     text.fmt(" *{name}")
 }
 
@@ -315,10 +312,10 @@ write_thunk = (
     ctx  : Ctx
 ) Res<(), AllocError> {
     proto ::= be.alloc.String().try();
-    thunk_proto(be, n, proto).try();
+    be.thunk_proto(n, proto).try();
     held = be.take_buf().try();
     be.indent();
-    write_prologue(be, n, caps).try();
+    be.write_prologue(n, caps).try();
     unit = be.check.types.prim("()").try();
     block(be, l.body, ctx, unit, Dest.Discard).try();
     text ::= be.alloc.String().try();
@@ -344,16 +341,16 @@ write_prologue = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
                  Res<(), AllocError> {
     (caps.len == 0).match({
         true  => be.writeln("(void)zg_p;"),
-        false => write_unpack(be, n, caps),
+        false => be.write_unpack(n, caps),
     })
 }
 
 write_unpack = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
                Res<(), AllocError> {
     env ::= be.alloc.String().try();
-    env_name(be, n, env).try();
+    be.env_name(n, env).try();
     be.fmt("{} *zg_e = ({} *)zg_p;\n", env.view(), env.view()).try();
-    caps.loop((h, s) { write_unpack_one(be, s).try() });
+    caps.loop((h, s) { be.write_unpack_one(s).try() });
     Ok(());
 }
 
@@ -362,8 +359,8 @@ write_unpack_one = (be :: CBackend, s: LocalSlot) Res<(), AllocError> {
     cname ::= be.alloc.String().try();
     sym_local(cname, s.name, s.index).try();
     s.by_ref.match({
-        false => declarator(be, s.ty, cname.view(), line),
-        true  => ref_field(be, s.ty, cname.view(), line),
+        false => be.declarator(s.ty, cname.view(), line),
+        true  => be.ref_field(s.ty, cname.view(), line),
     }).try();
     be.fmt("{} = zg_e->{};\n", line.view(), cname.view())
 }
@@ -383,9 +380,9 @@ write_registration = (
     cell ::= be.alloc.String().try();
     (caps.len == 0).match({
         true  => Ok(()),
-        false => fill_record(be, n, caps, cell),
+        false => be.fill_record(n, caps, cell),
     }).try();
-    write_defer_call(be, id, n, cell.view(), recv)
+    be.write_defer_call(id, n, cell.view(), recv)
 }
 
 fill_record = (
@@ -396,9 +393,9 @@ fill_record = (
 ) Res<(), AllocError> {
     sym_gen(cell, "c", be.next_tmp()).try();
     env ::= be.alloc.String().try();
-    env_name(be, n, env).try();
+    be.env_name(n, env).try();
     be.fmt("{} {};\n", env.view(), cell.view()).try();
-    caps.loop((h, s) { copy_capture(be, s, cell.view()).try() });
+    caps.loop((h, s) { be.copy_capture(s, cell.view()).try() });
     Ok(());
 }
 
@@ -424,9 +421,9 @@ write_defer_call = (
     line ::= be.alloc.String().try();
     line.fmt("zg_defer({recv}, ").try();
     sym_gen(line, "d", n).try();
-    write_defer_env_args(be, cell, line).try();
+    be.write_defer_env_args(cell, line).try();
     line.add_bytes(", ").try();
-    write_position(be, node.span.file, node.span, line).try();
+    be.write_position(node.span.file, node.span, line).try();
     be.fmt("{});\n", line.view())
 }
 
@@ -462,9 +459,9 @@ write_env_args = (cell: str, line :: String) Res<(), AllocError> {
 captures* = (be :: CBackend, id: BlockId, out :: Vec<LocalSlot>)
             Res<(), AllocError> {
     blk = be.tree.block_at(id);
-    blk.stmts.loop((h, s) { stmt_captures(be, s, out).try() });
+    blk.stmts.loop((h, s) { be.stmt_captures(s, out).try() });
     blk.value.match({
-        Ok(e) => expr_captures(be, e, out),
+        Ok(e) => be.expr_captures(e, out),
         None  => Ok(()),
     })
 }
@@ -472,36 +469,36 @@ captures* = (be :: CBackend, id: BlockId, out :: Vec<LocalSlot>)
 stmt_captures = (be :: CBackend, s: Stmt, out :: Vec<LocalSlot>)
                 Res<(), AllocError> {
     s.kind.match({
-        Expr(e)  => expr_captures(be, e.expr, out),
-        Bind(b)  => bind_captures(be, b, out),
-        Block(k) => captures(be, k, out),
+        Expr(e)  => be.expr_captures(e.expr, out),
+        Bind(b)  => be.bind_captures(b, out),
+        Block(k) => be.captures(k, out),
         Decl(_)  => Ok(()),
     })
 }
 
 bind_captures = (be :: CBackend, b: Bind, out :: Vec<LocalSlot>)
                 Res<(), AllocError> {
-    expr_captures(be, b.value, out).try();
-    expr_captures(be, b.target, out)
+    be.expr_captures(b.value, out).try();
+    be.expr_captures(b.target, out)
 }
 
 expr_captures = (be :: CBackend, id: ExprId, out :: Vec<LocalSlot>)
                 Res<(), AllocError> {
     be.tree.expr_at(id).kind.match({
-        Name(n)       => keep_capture(be, n.text, out),
-        Paren(p)      => expr_captures(be, p.inner, out),
-        Unary(u)      => expr_captures(be, u.operand, out),
-        Binary(b)     => pair_captures(be, b.lhs, b.rhs, out),
-        Access(a)     => expr_captures(be, a.base, out),
-        Index(x)      => pair_captures(be, x.base, x.index, out),
-        Try(t)        => expr_captures(be, t.operand, out),
-        Consume(x)    => expr_captures(be, x.operand, out),
-        Block(k)      => captures(be, k, out),
-        Lambda(l)     => captures(be, l.body, out),
-        Call(c)       => call_captures(be, c, out),
-        Match(m)      => match_captures(be, m, out),
-        Array(a)      => elem_captures(be, a.elems, out),
-        FixedArray(a) => elem_captures(be, a.elems, out),
+        Name(n)       => be.keep_capture(n.text, out),
+        Paren(p)      => be.expr_captures(p.inner, out),
+        Unary(u)      => be.expr_captures(u.operand, out),
+        Binary(b)     => be.pair_captures(b.lhs, b.rhs, out),
+        Access(a)     => be.expr_captures(a.base, out),
+        Index(x)      => be.pair_captures(x.base, x.index, out),
+        Try(t)        => be.expr_captures(t.operand, out),
+        Consume(x)    => be.expr_captures(x.operand, out),
+        Block(k)      => be.captures(k, out),
+        Lambda(l)     => be.captures(l.body, out),
+        Call(c)       => be.call_captures(c, out),
+        Match(m)      => be.match_captures(m, out),
+        Array(a)      => be.elem_captures(a.elems, out),
+        FixedArray(a) => be.elem_captures(a.elems, out),
         _             => Ok(()),
     })
 }
@@ -512,27 +509,27 @@ pair_captures = (
     b   : ExprId,
     out :: Vec<LocalSlot>
 ) Res<(), AllocError> {
-    expr_captures(be, a, out).try();
-    expr_captures(be, b, out)
+    be.expr_captures(a, out).try();
+    be.expr_captures(b, out)
 }
 
 call_captures = (be :: CBackend, c: Call, out :: Vec<LocalSlot>)
                 Res<(), AllocError> {
-    expr_captures(be, c.callee, out).try();
-    c.args.loop((h, a) { expr_captures(be, a.value, out).try() });
+    be.expr_captures(c.callee, out).try();
+    c.args.loop((h, a) { be.expr_captures(a.value, out).try() });
     Ok(());
 }
 
 match_captures = (be :: CBackend, m: Match, out :: Vec<LocalSlot>)
                  Res<(), AllocError> {
-    expr_captures(be, m.scrutinee, out).try();
-    m.arms.loop((h, a) { expr_captures(be, a.body, out).try() });
+    be.expr_captures(m.scrutinee, out).try();
+    m.arms.loop((h, a) { be.expr_captures(a.body, out).try() });
     Ok(());
 }
 
 elem_captures = (be :: CBackend, elems: Vec<ExprId>, out :: Vec<LocalSlot>)
                 Res<(), AllocError> {
-    elems.loop((h, e) { expr_captures(be, e, out).try() });
+    elems.loop((h, e) { be.expr_captures(e, out).try() });
     Ok(());
 }
 
@@ -544,7 +541,7 @@ keep_capture = (be :: CBackend, name: str, out :: Vec<LocalSlot>)
                Res<(), AllocError> {
     be.slot_of(name).match({
         None  => Ok(()),
-        Ok(s) => keep_value_slot(be, s, out),
+        Ok(s) => be.keep_value_slot(s, out),
     })
 }
 

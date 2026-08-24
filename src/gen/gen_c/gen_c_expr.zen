@@ -75,7 +75,7 @@ spills* = (be: CBackend, id: ExprId) bool {
         Match(_) => true,
         Try(_)   => true,
         Block(_) => true,
-        Paren(p) => spills(be, p.inner),
+        Paren(p) => be.spills(p.inner),
         _        => false,
     })
 }
@@ -94,20 +94,20 @@ spills_anywhere* = (be: CBackend, id: ExprId) bool {
         Name(_)    => false,
         Unit       => false,
         Scope      => false,
-        Consume(x) => spills_anywhere(be, x.operand),
-        Paren(p)   => spills_anywhere(be, p.inner),
-        Unary(u)   => spills_anywhere(be, u.operand),
-        Binary(b)  => spills_anywhere(be, b.lhs) || spills_anywhere(be, b.rhs),
-        Access(a)  => spills_anywhere(be, a.base),
-        Index(x)   => spills_anywhere(be, x.base) || spills_anywhere(be, x.index),
-        Call(c)    => call_spills(be, c),
+        Consume(x) => be.spills_anywhere(x.operand),
+        Paren(p)   => be.spills_anywhere(p.inner),
+        Unary(u)   => be.spills_anywhere(u.operand),
+        Binary(b)  => be.spills_anywhere(b.lhs) || be.spills_anywhere(b.rhs),
+        Access(a)  => be.spills_anywhere(a.base),
+        Index(x)   => be.spills_anywhere(x.base) || be.spills_anywhere(x.index),
+        Call(c)    => be.call_spills(c),
         _          => true,
     })
 }
 
 call_spills = (be: CBackend, c: Call) bool {
-    got ::= spills_anywhere(be, c.callee);
-    c.args.loop((h, a) { got = got || spills_anywhere(be, a.value); });
+    got ::= be.spills_anywhere(c.callee);
+    c.args.loop((h, a) { got = got || be.spills_anywhere(a.value); });
     got
 }
 
@@ -131,12 +131,12 @@ call_spills = (be: CBackend, c: Call) bool {
 // use of `inner` is a name with no receiver.
 ty_of* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
          Res<TyId, AllocError> {
-    ty_source(be, id, ctx, want).try().match({
-        ScopeRef   => scope_type(be, ctx),
+    be.ty_source(id, ctx, want).try().match({
+        ScopeRef   => be.scope_type(ctx),
         Frame(t)   => Ok(t),
         Backend(t) => Ok(t),
-        Sema(got)  => settled_answer(be, id, ctx, got),
-        Unanswered => fallback_type(be, id, ctx, want),
+        Sema(got)  => be.settled_answer(id, ctx, got),
+        Unanswered => be.fallback_type(id, ctx, want),
     })
 }
 
@@ -149,13 +149,13 @@ TySource = ScopeRef | Frame(TyId) | Backend(TyId) | Sema(TyId) | Unanswered
 
 ty_source = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
             Res<TySource, AllocError> {
-    is_scope_ref(be, id).match({
+    be.is_scope_ref(id).match({
         true  => Ok(TySource.ScopeRef),
-        false => local_answer(be, id).try().match({
+        false => be.local_answer(id).try().match({
             Ok(t) => Ok(TySource.Frame(t)),
-            None  => ptr_answer(be, id, ctx, want).try().match({
+            None  => be.ptr_answer(id, ctx, want).try().match({
                 Ok(t) => Ok(TySource.Backend(t)),
-                None  => sema_source(be, id, ctx),
+                None  => be.sema_source(id, ctx),
             }),
         }),
     })
@@ -188,8 +188,8 @@ sema_source = (be :: CBackend, id: ExprId, ctx: Ctx)
 // `eq` every one of them called.
 local_answer = (be :: CBackend, id: ExprId) Res<Res<TyId>, AllocError> {
     be.tree.expr_at(id).kind.match({
-        Name(n)   => Ok(named_slot(be, n.text)),
-        Access(a) => field_slot(be, a),
+        Name(n)   => Ok(be.named_slot(n.text)),
+        Access(a) => be.field_slot(a),
         _         => Ok(None),
     })
 }
@@ -658,7 +658,7 @@ write_expr = (
         Paren(p)      => lower_paren(be, p.inner, ctx, want, out),
         Unary(u)      => lower_unary(be, node, u, ctx, want, out),
         Binary(b)     => lower_binary(be, node, b, ctx, want, out),
-        Access(a)     => lower_access(be, id, a, ctx, want, out),
+        Access(a)     => lower_meta_or_access(be, id, a, ctx, want, out),
         Call(c)       => lower_call(be, id, c, ctx, want, out),
         Index(x)      => lower_index(be, id, x, ctx, out),
         Array(a)      => lower_array_lit(be, id, a, ctx, want, out),
@@ -779,6 +779,38 @@ decoded_len* = (raw: str) usize {
         esc = (esc == false) && (raw.index(i) == '\\');
     });
     n
+}
+
+// `@meta(self: @Self).name` FOLDED AT SEMA: `meta_str` remembers the
+// comptime string the access stands for, and the residue is an
+// ordinary literal — the backend lowers it having learned nothing new
+// (docs/design_meta.md, M3). `None` is every other dot, which takes
+// the field path.
+lower_meta_or_access = (
+    be   :: CBackend,
+    id   : ExprId,
+    a    : Access,
+    ctx  : Ctx,
+    want : TyId,
+    out  :: String
+) Res<(), AllocError> {
+    be.check.meta_str(id).match({
+        Ok(text) => lower_meta_name(text, out),
+        None     => be.lower_access(id, a, ctx, want, out),
+    })
+}
+
+// The folded text is a type's DECLARED NAME — identifier bytes, which
+// no escaping can be needed for: Zen's escapes are introduced by `\`
+// and a literal is closed by `"`, and neither byte can appear in an
+// identifier the lexer accepted. So the quotes are added around the
+// text and the length is `text.len` — no `decoded_len`, there is
+// nothing to decode.
+lower_meta_name = (text: str, out :: String) Res<(), AllocError> {
+    out.fmt("(zg_str){ (unsigned char *)\"{}\", ", text).try();
+    out.write_usize(text.len).try();
+    out.add_bytes("u }").try();
+    Ok(());
 }
 
 // A bare identifier: a local, or a name the module declares. `None` is

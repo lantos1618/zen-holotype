@@ -80,7 +80,7 @@ decl_vars = (c :: Checker, d: Def, out :: Vec<TyId>) Res<(), AllocError> {
 decl_vars_of = (c :: Checker, d: Def, x: Decl, out :: Vec<TyId>)
                Res<(), AllocError> {
     x.kind.match({
-        Struct(s) => tparam_vars(c, s.tparams, d.qname, out),
+        Struct(s) => c.tparam_vars(s.tparams, d.qname, out),
         _         => Ok(()),
     })
 }
@@ -101,14 +101,14 @@ decl_vars_of = (c :: Checker, d: Def, x: Decl, out :: Vec<TyId>)
 open_named* = (be :: CBackend, decl: DeclId) Res<Res<TyId>, AllocError> {
     decl_at(be.tree, decl).match({
         None  => Ok(None),
-        Ok(x) => open_named_decl(be, decl, x),
+        Ok(x) => be.open_named_decl(decl, x),
     })
 }
 
 open_named_decl = (be :: CBackend, decl: DeclId, x: Decl)
                   Res<Res<TyId>, AllocError> {
     x.kind.match({
-        Struct(s) => open_struct_named(be, decl, s),
+        Struct(s) => be.open_struct_named(decl, s),
         _         => Ok(None),
     })
 }
@@ -198,10 +198,10 @@ unsettled* = (be: CBackend, ty: TyId) bool {
         Var(_)   => true,
         Infer    => true,
         Unknown  => true,
-        Named(n) => any_unsettled(be, n.args),
+        Named(n) => be.any_unsettled(n.args),
         Res(r)   => unsettled(be, r.value) || unsettled(be, r.error),
-        Fn(f)    => any_unsettled(be, f.params) || unsettled(be, f.ret),
-        Union(u) => any_unsettled(be, u.members),
+        Fn(f)    => be.any_unsettled(f.params) || unsettled(be, f.ret),
+        Union(u) => be.any_unsettled(u.members),
         Array(a) => unsettled(be, a.elem),
         _        => false,
     })
@@ -250,7 +250,7 @@ settled_inst* = (
     inst    : Inst
 ) Res<Inst, AllocError> {
     out ::= be.alloc.Inst();
-    tparams.loop((h, tp) { settle_one(be, tp, owner, inst, out).try() });
+    tparams.loop((h, tp) { be.settle_one(tp, owner, inst, out).try() });
     Ok(out);
 }
 
@@ -264,7 +264,7 @@ settle_one = (
     v = intern_var(be.check, tp.name.text, owner).try();
     inst.lookup(v).match({
         None  => out.bind(v, v),
-        Ok(t) => settle_bound(be, v, t, out),
+        Ok(t) => be.settle_bound(v, t, out),
     })
 }
 
@@ -312,7 +312,7 @@ unify_args = (be :: CBackend, ds: Vec<TyId>, ts: Vec<TyId>, out :: Inst)
              Res<(), AllocError> {
     (ds.len == ts.len).match({
         false => Ok(()),
-        true  => unify_each(be, ds, ts, out),
+        true  => be.unify_each(ds, ts, out),
     })
 }
 
@@ -351,15 +351,15 @@ unify_res_parts = (be :: CBackend, r: TyRes, q: TyRes, out :: Inst)
 // the frame that declared it, and everything else from `ty_of`.
 arg_type* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
             Res<TyId, AllocError> {
-    local_type(be, id).match({
+    be.local_type(id).match({
         Ok(t) => Ok(t),
-        None  => ty_of(be, id, ctx, want),
+        None  => be.ty_of(id, ctx, want),
     })
 }
 
 local_type = (be :: CBackend, id: ExprId) Res<TyId> {
     be.tree.expr_at(id).kind.match({
-        Name(n) => slot_ty(be, n.text),
+        Name(n) => be.slot_ty(n.text),
         _       => None,
     })
 }
@@ -382,7 +382,7 @@ slot_ty = (be :: CBackend, name: str) Res<TyId> {
 enter_tparams* = (be :: CBackend, tparams: Vec<TParam>, owner: str)
                  Res<usize, AllocError> {
     mark = be.check.tvar_mark();
-    tparams.loop((h, tp) { enter_one(be, tp, owner).try() });
+    tparams.loop((h, tp) { be.enter_one(tp, owner).try() });
     Ok(mark);
 }
 
@@ -403,7 +403,7 @@ enter_struct_tparams* = (be :: CBackend, decl: DeclId)
     mark = be.check.tvar_mark();
     decl_at(be.tree, decl).match({
         None  => Ok(()),
-        Ok(d) => enter_decl_tparams(be, decl, d),
+        Ok(d) => be.enter_decl_tparams(decl, d),
     }).try();
     Ok(mark);
 }
@@ -411,7 +411,7 @@ enter_struct_tparams* = (be :: CBackend, decl: DeclId)
 enter_decl_tparams = (be :: CBackend, decl: DeclId, d: Decl)
                      Res<(), AllocError> {
     d.kind.match({
-        Struct(s) => enter_struct_of(be, decl, s),
+        Struct(s) => be.enter_struct_of(decl, s),
         _         => Ok(()),
     })
 }
@@ -419,6 +419,6 @@ enter_decl_tparams = (be :: CBackend, decl: DeclId, d: Decl)
 enter_struct_of = (be :: CBackend, decl: DeclId, s: Struct)
                   Res<(), AllocError> {
     owner = owner_of(be.check, decl.module.to_usize(), s.name.text).try();
-    s.tparams.loop((h, tp) { enter_one(be, tp, owner).try() });
+    s.tparams.loop((h, tp) { be.enter_one(tp, owner).try() });
     Ok(());
 }

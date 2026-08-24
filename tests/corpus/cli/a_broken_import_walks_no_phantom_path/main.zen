@@ -1,0 +1,45 @@
+// A parse-broken import must NOT walk a phantom path.
+//
+// THE BROKEN FILE IS WRITTEN AT RUNTIME, below, and this is why: the
+// `fmt` gate formats every `.zen` under tests/corpus, and a file whose
+// whole point is that it does not parse cannot be formatted. So
+// `broken/broken.zen` ships parseable (a comment) and this program
+// replaces it with the broken bytes before building.
+//
+// The broken line is `A, B = 42`: two names on the left make the
+// declaration an import (`parse_decl.zen`'s fork), the right side has
+// no name, and `parser.zen`'s `ident_missing` recovers with an
+// `Ident(text: "")` — the parse faults are the whole story of that
+// line. What the WALK did with it was the bug: the empty segment became
+// `<root>//.zen`, and the build reported "nothing is at that path"
+// against a file nobody wrote, beside the two real faults. Over the
+// LSP that phantom is a diagnostic pinned to a nonsense URI, which is
+// where it was found.
+//
+// `enqueue` now declines a module name with an empty segment, and this
+// test's `.expected` pins the answer: the two parse faults, the count,
+// the exit code — and no third line naming a `.zen` path.
+
+Alloc, AllocError = std.mem
+str = std.text
+FsError = std.env
+Debug, Job, build = zen
+
+BROKEN*: str = "A, B = 42\n"
+
+main = (env: Env) Res<i32, AllocError | FsError> {
+    env.fs.write("src/broken/broken.zen", BROKEN).try();
+    a ::= env.mem.alloc();
+    code = build(
+        env,
+        a,
+        Job(
+            root: "src/broken",
+            out: "",
+            emit_c: false,
+            debug: Debug(repeat: 1, permute: "")
+        )
+    ).try();
+    println("src/broken -> {}", code);
+    Ok(0);
+}

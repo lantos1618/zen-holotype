@@ -56,27 +56,27 @@ FOLD_LIMIT* : i64 = 2147483647
 // stay silent by design.
 check_binary* = (c :: Checker, b: Binary, ty: TyId) Res<(), AllocError> {
     b.op.match({
-        Div => check_divisor(c, b, ty),
-        Rem => check_divisor(c, b, ty),
-        Add => check_overflow(c, b, ty),
-        Sub => check_overflow(c, b, ty),
-        Mul => check_overflow(c, b, ty),
+        Div => c.check_divisor(b, ty),
+        Rem => c.check_divisor(b, ty),
+        Add => c.check_overflow(b, ty),
+        Sub => c.check_overflow(b, ty),
+        Mul => c.check_overflow(b, ty),
         _   => Ok(()),
     })
 }
 
 check_divisor = (c :: Checker, b: Binary, ty: TyId) Res<(), AllocError> {
-    const_int(c, b.rhs).match({
+    c.const_int(b.rhs).match({
         None  => Ok(()),
-        Ok(d) => divisor_is(c, b, ty, d),
+        Ok(d) => c.divisor_is(b, ty, d),
     })
 }
 
 divisor_is = (c :: Checker, b: Binary, ty: TyId, d: i64)
              Res<(), AllocError> {
     (d == 0).match({
-        true  => divide_by_zero(c, b),
-        false => min_over_minus_one(c, b, ty, d),
+        true  => c.divide_by_zero(b),
+        false => c.min_over_minus_one(b, ty, d),
     })
 }
 
@@ -94,16 +94,16 @@ divide_by_zero = (c :: Checker, b: Binary) Res<(), AllocError> {
 min_over_minus_one = (c :: Checker, b: Binary, ty: TyId, d: i64)
                      Res<(), AllocError> {
     (d == 0 - 1).match({
-        true  => check_min_numerator(c, b, ty),
+        true  => c.check_min_numerator(b, ty),
         false => Ok(()),
     })
 }
 
 check_min_numerator = (c :: Checker, b: Binary, ty: TyId)
                       Res<(), AllocError> {
-    const_int(c, b.lhs).match({
+    c.const_int(b.lhs).match({
         None  => Ok(()),
-        Ok(n) => numerator_is_min(c, b, ty, n),
+        Ok(n) => c.numerator_is_min(b, ty, n),
     })
 }
 
@@ -111,22 +111,22 @@ numerator_is_min = (c :: Checker, b: Binary, ty: TyId, n: i64)
                    Res<(), AllocError> {
     name = c.prim_name(ty);
     (is_integer(name) && (n == min_of(name))).match({
-        true  => overflow(c, b, name),
+        true  => c.overflow(b, name),
         false => Ok(()),
     })
 }
 
 check_overflow = (c :: Checker, b: Binary, ty: TyId) Res<(), AllocError> {
-    const_int(c, b.lhs).match({
+    c.const_int(b.lhs).match({
         None  => Ok(()),
-        Ok(x) => with_lhs(c, b, ty, x),
+        Ok(x) => c.with_lhs(b, ty, x),
     })
 }
 
 with_lhs = (c :: Checker, b: Binary, ty: TyId, x: i64) Res<(), AllocError> {
-    const_int(c, b.rhs).match({
+    c.const_int(b.rhs).match({
         None  => Ok(()),
-        Ok(y) => with_both(c, b, ty, x, y),
+        Ok(y) => c.with_both(b, ty, x, y),
     })
 }
 
@@ -134,7 +134,7 @@ with_both = (c :: Checker, b: Binary, ty: TyId, x: i64, y: i64)
             Res<(), AllocError> {
     fold(b.op, x, y).match({
         None  => Ok(()),
-        Ok(v) => check_fits(c, b, ty, v),
+        Ok(v) => c.check_fits(b, ty, v),
     })
 }
 
@@ -144,7 +144,7 @@ check_fits = (c :: Checker, b: Binary, ty: TyId, v: i64)
              Res<(), AllocError> {
     name = c.prim_name(ty);
     (is_integer(name) && (fits(v, name) == false)).match({
-        true  => overflow(c, b, name),
+        true  => c.overflow(b, name),
         false => Ok(()),
     })
 }
@@ -188,7 +188,7 @@ overflow = (c :: Checker, b: Binary, name: str) Res<(), AllocError> {
 check_literal* = (c :: Checker, id: ExprId, want: TyId)
                  Res<(), AllocError> {
     is_integer(c.prim_name(want)).match({
-        true  => literal_within(c, id, want),
+        true  => c.literal_within(id, want),
         false => c.elements_within(id, want),
     })
 }
@@ -227,21 +227,21 @@ literal_within = (c :: Checker, id: ExprId, want: TyId)
                  Res<(), AllocError> {
     node = c.tree.expr_at(id);
     node.kind.match({
-        Match(m) => arm_literals(c, m, want),
-        _        => folded_within(c, id, node, want),
+        Match(m) => c.arm_literals(m, want),
+        _        => c.folded_within(id, node, want),
     })
 }
 
 arm_literals = (c :: Checker, m: Match, want: TyId) Res<(), AllocError> {
-    m.arms.loop((h, a) { literal_within(c, a.body, want).try(); });
+    m.arms.loop((h, a) { c.literal_within(a.body, want).try(); });
     Ok(());
 }
 
 folded_within = (c :: Checker, id: ExprId, node: Expr, want: TyId)
                 Res<(), AllocError> {
-    literal_int(c, node).match({
+    c.literal_int(node).match({
         None  => Ok(()),
-        Ok(v) => value_within(c, id, want, v),
+        Ok(v) => c.value_within(id, want, v),
     })
 }
 

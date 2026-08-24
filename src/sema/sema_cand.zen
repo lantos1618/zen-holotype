@@ -62,7 +62,7 @@ travelled_cands* = (
     out  :: Vec<Cand>
 ) Res<(), AllocError> {
     recv.match({
-        Ok(rty) => travelled_of(c, name, rty, out),
+        Ok(rty) => c.travelled_of(name, rty, out),
         None    => Ok(()),
     })
 }
@@ -72,7 +72,7 @@ travelled_of = (c :: Checker, name: str, rty: TyId, out :: Vec<Cand>)
     defs ::= c.alloc.Vec<Def>();
     c.world.exported_named(name, defs).try();
     pool ::= c.alloc.Vec<Cand>();
-    defs.loop((h, d) { cand_of(c, d, pool).try() });
+    defs.loop((h, d) { c.cand_of(d, pool).try() });
     pool.loop((h, k) { keep_travelled(c, k, rty, out).try() });
     Ok(());
 }
@@ -114,7 +114,7 @@ keep_travelled = (c :: Checker, k: Cand, rty: TyId, out :: Vec<Cand>)
 takes_receiver = (c :: Checker, k: Cand, rty: TyId) Res<bool, AllocError> {
     k.params.get(0).match({
         None  => Ok(false),
-        Ok(t) => satisfies_bound(c, rty, t),
+        Ok(t) => c.satisfies_bound(rty, t),
     })
 }
 
@@ -128,13 +128,13 @@ cands_of* = (c :: Checker, mi: usize, name: str, out :: Vec<Cand>)
             Res<(), AllocError> {
     defs ::= c.alloc.Vec<Def>();
     c.world.defs_of(mi, name, defs).try();
-    defs.loop((h, d) { cand_of(c, d, out).try() });
+    defs.loop((h, d) { c.cand_of(d, out).try() });
     Ok(());
 }
 
 cand_of = (c :: Checker, d: Def, out :: Vec<Cand>) Res<(), AllocError> {
     decl_at(c.tree, d.id).match({
-        Ok(dec) => cand_from_decl(c, d, dec, out),
+        Ok(dec) => c.cand_from_decl(d, dec, out),
         None    => Ok(()),
     }).try();
     Ok(());
@@ -143,7 +143,7 @@ cand_of = (c :: Checker, d: Def, out :: Vec<Cand>) Res<(), AllocError> {
 cand_from_decl = (c :: Checker, d: Def, dec: Decl, out :: Vec<Cand>)
                  Res<(), AllocError> {
     dec.kind.match({
-        Function(f) => add_cand(c, d, dec, f, out),
+        Function(f) => c.add_cand(d, dec, f, out),
         _           => Ok(()),
     })
 }
@@ -156,7 +156,7 @@ add_cand = (c :: Checker, d: Def, dec: Decl, f: Function, out :: Vec<Cand>)
     ctx    = Ctx(d.id.module.to_usize(), poison);
     push_tparams(c, f, d.qname).try();
     tvs ::= c.alloc.Vec<TyId>();
-    tparam_vars(c, f.tparams, d.qname, tvs).try();
+    c.tparam_vars(f.tparams, d.qname, tvs).try();
     ptys ::= c.alloc.Vec<TyId>();
     f.params.loop((h, p) { ptys.add(c.param_type(p, ctx).try()).try() });
     rty = f.ret.match({
@@ -164,7 +164,7 @@ add_cand = (c :: Checker, d: Def, dec: Decl, f: Function, out :: Vec<Cand>)
         None  => c.types.prim("()"),
     }).try();
     tbs ::= c.alloc.Vec<TBound>();
-    collect_bounds(c, f, ctx, tbs).try();
+    c.collect_bounds(f, ctx, tbs).try();
     c.release_tvars(mark).try();
     out.add(Cand(
         id: d.id,
@@ -189,7 +189,7 @@ push_tparams = (c :: Checker, f: Function, owner: str) Res<(), AllocError> {
 
 collect_bounds = (c :: Checker, f: Function, ctx: Ctx, out :: Vec<TBound>)
                  Res<(), AllocError> {
-    f.tparams.loop((h, tp) { tparam_bounds(c, tp, ctx, out).try() });
+    f.tparams.loop((h, tp) { c.tparam_bounds(tp, ctx, out).try() });
     Ok(());
 }
 
@@ -235,9 +235,9 @@ any_named = (actuals: Vec<Actual>) bool {
 
 by_arity = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
            Res<bool, AllocError> {
-    is_variadic(c, cand).match({
-        true  => variadic_matches(c, cand, actuals),
-        false => fixed_matches(c, cand, actuals),
+    c.is_variadic(cand).match({
+        true  => c.variadic_matches(cand, actuals),
+        false => c.fixed_matches(cand, actuals),
     })
 }
 
@@ -245,7 +245,7 @@ fixed_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
                 Res<bool, AllocError> {
     (cand.params.len == actuals.len).match({
         false => Ok(false),
-        true  => all_fit(c, cand, actuals, actuals.len),
+        true  => c.all_fit(cand, actuals, actuals.len),
     })
 }
 
@@ -283,7 +283,7 @@ marker_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
     fixed = cand.params.len - 1;
     (actuals.len >= fixed).match({
         false => Ok(false),
-        true  => all_fit(c, cand, actuals, fixed),
+        true  => c.all_fit(cand, actuals, fixed),
     })
 }
 
@@ -415,7 +415,7 @@ all_fit = (c :: Checker, cand: Cand, actuals: Vec<Actual>, n: usize)
           Res<bool, AllocError> {
     ok ::= true;
     Range(0, n).loop((h, i) {
-        got = fits_at(c, cand, actuals, i).try();
+        got = c.fits_at(cand, actuals, i).try();
         ok  = ok && got;
     });
     Ok(ok);
@@ -434,8 +434,8 @@ fits_at = (c :: Checker, cand: Cand, actuals: Vec<Actual>, i: usize)
 // call site can see without inferring anything.
 fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
     a.is_lambda.match({
-        true  => Ok(closure_fits(c, p, a.arity)),
-        false => value_fits(c, a, p),
+        true  => Ok(c.closure_fits(p, a.arity)),
+        false => c.value_fits(a, p),
     })
 }
 
@@ -454,7 +454,7 @@ fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
 value_fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
     c.assignable(a.ty, p).match({
         true  => Ok(true),
-        false => satisfies_bound(c, a.ty, p),
+        false => c.satisfies_bound(a.ty, p),
     })
 }
 
@@ -490,7 +490,7 @@ recv_fixed_fits = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>)
                   Res<bool, AllocError> {
     (ps.len == actuals.len + 1).match({
         false => Ok(false),
-        true  => args_fit(c, ps, actuals),
+        true  => c.args_fit(ps, actuals),
     })
 }
 
@@ -499,7 +499,7 @@ args_fit = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>)
            Res<bool, AllocError> {
     ok ::= true;
     Range(0, actuals.len).loop((h, i) {
-        got = arg_fits_at(c, ps, actuals, i).try();
+        got = c.arg_fits_at(ps, actuals, i).try();
         ok  = ok && got;
     });
     Ok(ok);

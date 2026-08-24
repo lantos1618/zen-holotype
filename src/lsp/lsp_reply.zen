@@ -183,9 +183,14 @@ write_target* = (t: Target, body :: String) Res<(), AllocError> {
 // server formats a whole document (`lsp_fmt.zen`), because `src/fmt/`
 // parses a whole file, and a range it cannot format is a range it must
 // not be asked for.
+//
+// `codeActionProvider` names `quickfix` AND NOTHING ELSE: the one action
+// this server offers is the auto-import on an undefined name
+// (`lsp_action.zen`). No `resolveProvider` — every action carries its
+// edit up front, so there is nothing to resolve later.
 write_capabilities* = (out :: String) Res<(), AllocError> {
     out.add_bytes(
-        "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"definitionProvider\":true,\"documentSymbolProvider\":true,\"documentFormattingProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]},\"semanticTokensProvider\":{\"legend\":"
+        "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"definitionProvider\":true,\"documentSymbolProvider\":true,\"documentFormattingProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]},\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"]},\"semanticTokensProvider\":{\"legend\":"
     ).try();
     write_legend(out).try();
     out.add_bytes(
@@ -214,6 +219,7 @@ Request* = Initialize
     | Completion
     | Colour
     | Format
+    | Action
     | Unknown
 
 // The one place a method's spelling is compared. Ordered by how often a
@@ -253,8 +259,9 @@ request_after_outline = (method: str) Request {
     })
 }
 
-// FORMATTING IS LAST OF THE DOCUMENT METHODS: a buffer is coloured on
-// every keystroke and formatted on save.
+// FORMATTING AND CODE ACTIONS ARE LAST OF THE DOCUMENT METHODS: a buffer
+// is coloured on every keystroke, formatted on save, and asked for
+// quickfixes only when the cursor pauses on a squiggle.
 request_after_colour = (method: str) Request {
     method.eq("textDocument/formatting").match({
         true  => Request.Format,
@@ -263,6 +270,13 @@ request_after_colour = (method: str) Request {
 }
 
 request_after_format = (method: str) Request {
+    method.eq("textDocument/codeAction").match({
+        true  => Request.Action,
+        false => request_after_action(method),
+    })
+}
+
+request_after_action = (method: str) Request {
     method.eq("initialize").match({
         true  => Request.Initialize,
         false => method.eq("shutdown").match({

@@ -41,9 +41,9 @@ Case* = {
 // and no exhaustiveness question may be asked of it.
 cases_of* = (c :: Checker, ty: TyId, out :: Vec<Case>) Res<bool, AllocError> {
     c.types.at(ty).match({
-        Prim(p)  => bool_cases(c, p.name, out),
-        Res(r)   => res_cases(c, r, out),
-        Named(n) => named_cases(c, n, out),
+        Prim(p)  => c.bool_cases(p.name, out),
+        Res(r)   => c.res_cases(r, out),
+        Named(n) => c.named_cases(n, out),
         _        => Ok(false),
     })
 }
@@ -67,7 +67,7 @@ cases_of* = (c :: Checker, ty: TyId, out :: Vec<Case>) Res<bool, AllocError> {
 // normalised, and this is the second ask.
 case_payload* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
     cases ::= c.alloc.Vec<Case>();
-    cases_of(c, ty, cases).try();
+    c.cases_of(ty, cases).try();
     // the arm whose type is WRITTEN leads: a match takes its type from
     // its first arm. See docs/SEMA_BOOTSTRAP_FIXES.md.
     find_case(cases, name).match({
@@ -83,7 +83,7 @@ case_payload* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
 case_arity* = (c :: Checker, ty: TyId, name: str, wrote_sub: bool)
               Res<usize, AllocError> {
     cases ::= c.alloc.Vec<Case>();
-    cases_of(c, ty, cases).try();
+    c.cases_of(ty, cases).try();
     Ok(find_case(cases, name).match({
         Ok(cs) => bool_to_arity(cs.has_payload),
         None   => bool_to_arity(wrote_sub),
@@ -128,9 +128,9 @@ add_bool = (c :: Checker, out :: Vec<Case>) Res<bool, AllocError> {
 res_cases = (c :: Checker, r: TyRes, out :: Vec<Case>) Res<bool, AllocError> {
     out.add(Case(name: "Ok", payload: r.value, has_payload: true)).try();
     r.form.match({
-        Failure => add_err(c, r, out),
-        Absence => add_none(c, out),
-        Open    => add_none(c, out),
+        Failure => c.add_err(r, out),
+        Absence => c.add_none(out),
+        Open    => c.add_none(out),
     }).try();
     Ok(true);
 }
@@ -149,7 +149,7 @@ add_none = (c :: Checker, out :: Vec<Case>) Res<(), AllocError> {
 named_cases = (c :: Checker, n: TyNamed, out :: Vec<Case>)
               Res<bool, AllocError> {
     decl_at(c.tree, n.decl).match({
-        Ok(d) => enum_cases(c, d, n, out),
+        Ok(d) => c.enum_cases(d, n, out),
         None  => Ok(false),
     })
 }
@@ -157,7 +157,7 @@ named_cases = (c :: Checker, n: TyNamed, out :: Vec<Case>)
 enum_cases = (c :: Checker, d: Decl, n: TyNamed, out :: Vec<Case>)
              Res<bool, AllocError> {
     d.kind.match({
-        Enum(e) => variant_cases(c, e, n, out),
+        Enum(e) => c.variant_cases(e, n, out),
         _       => Ok(false),
     })
 }
@@ -167,9 +167,9 @@ enum_cases = (c :: Checker, d: Decl, n: TyNamed, out :: Vec<Case>)
 // written payload; a union's variant IS a type and always carries one.
 variant_cases = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
                 Res<bool, AllocError> {
-    union_reading(c, n.decl).match({
-        true  => add_members(c, e, n, out),
-        false => add_variants(c, e, n, out),
+    c.union_reading(n.decl).match({
+        true  => c.add_members(e, n, out),
+        false => c.add_variants(e, n, out),
     })
 }
 
@@ -191,7 +191,7 @@ add_members = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
     e.variants.loop((h, v) {
         out.add(Case(
             name: v.name.text,
-            payload: union_member(c, n.decl, v.name.text).try(),
+            payload: c.union_member(n.decl, v.name.text).try(),
             has_payload: true,
         )).try();
     });

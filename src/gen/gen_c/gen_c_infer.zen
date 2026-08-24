@@ -42,9 +42,9 @@ complete_inst* = (
     ctx     : Ctx
 )
                 Res<Inst, AllocError> {
-    inst_open(be, settled).match({
+    be.inst_open(settled).match({
         false => Ok(settled),
-        true  => inferred_inst(be, c, d, f, recv, ctx),
+        true  => be.inferred_inst(c, d, f, recv, ctx),
     })
 }
 
@@ -63,17 +63,17 @@ inferred_inst = (
         self_ty: TyId(index: 0),
         has_self: false
     );
-    mark = enter_tparams(be, f.tparams, d.qname).try();
+    mark = be.enter_tparams(f.tparams, d.qname).try();
     declared ::= be.alloc.Vec<TyId>();
-    written_params(be, f, dctx, declared).try();
+    be.written_params(f, dctx, declared).try();
     found ::= be.alloc.Inst();
-    unify_receiver(be, recv, declared, ctx, found).try();
+    be.unify_receiver(recv, declared, ctx, found).try();
     first = recv.match({ Ok(_) => 1, None => 0 });
     c.args.loop((h, i, a) {
-        unify_arg(be, a.value, i + first, declared, ctx, found).try();
+        be.unify_arg(a.value, i + first, declared, ctx, found).try();
     });
-    leave_tparams(be, mark).try();
-    settled_inst(be, f.tparams, d.qname, found)
+    be.leave_tparams(mark).try();
+    be.settled_inst(f.tparams, d.qname, found)
 }
 
 // Parameter types AS WRITTEN, not substituted — unification needs
@@ -84,7 +84,7 @@ written_params = (
     dctx : Ctx,
     out  :: Vec<TyId>
 ) Res<(), AllocError> {
-    f.params.loop((h, p) { written_param(be, p, dctx, out).try() });
+    f.params.loop((h, p) { be.written_param(p, dctx, out).try() });
     Ok(());
 }
 
@@ -107,7 +107,7 @@ unify_receiver = (
 ) Res<(), AllocError> {
     recv.match({
         None     => Ok(()),
-        Ok(base) => unify_arg(be, base, 0, declared, ctx, out),
+        Ok(base) => be.unify_arg(base, 0, declared, ctx, out),
     })
 }
 
@@ -135,7 +135,7 @@ unify_declared = (
 ) Res<(), AllocError> {
     declared.get(i).match({
         None  => Ok(()),
-        Ok(d) => unify_against(be, value, d, ctx, out),
+        Ok(d) => be.unify_against(value, d, ctx, out),
     })
 }
 
@@ -195,7 +195,7 @@ unify_against = (
     out   :: Inst
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    actual  = arg_type(be, value, ctx, unknown).try();
+    actual  = be.arg_type(value, ctx, unknown).try();
     unify(be, d, actual, out)
 }
 
@@ -214,8 +214,8 @@ call_ret_type* = (
     want : TyId
 ) Res<TyId, AllocError> {
     be.tree.expr_at(c.callee).kind.match({
-        Name(n)   => named_ret_type(be, id, c, n.text, None, ctx, want),
-        Access(a) => access_ret_type(be, id, c, a, ctx, want),
+        Name(n)   => be.named_ret_type(id, c, n.text, None, ctx, want),
+        Access(a) => be.access_ret_type(id, c, a, ctx, want),
         _         => Ok(want),
     })
 }
@@ -234,9 +234,9 @@ access_ret_type = (
     ctx  : Ctx,
     want : TyId
 ) Res<TyId, AllocError> {
-    fat_ret_type(be, c, a, ctx).try().match({
+    be.fat_ret_type(c, a, ctx).try().match({
         Ok(t) => Ok(t),
-        None  => named_ret_type(be, id, c, a.name.text, Ok(a.base), ctx, want),
+        None  => be.named_ret_type(id, c, a.name.text, Ok(a.base), ctx, want),
     })
 }
 
@@ -255,7 +255,7 @@ named_ret_type = (
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, name, found).try();
     found.len.match({
-        1 => sole_ret_type(be, id, c, found, recv, ctx, want),
+        1 => be.sole_ret_type(id, c, found, recv, ctx, want),
         _ => Ok(want),
     })
 }
@@ -272,7 +272,7 @@ sole_ret_type = (
                 Res<TyId, AllocError> {
     found.get(0).match({
         None  => Ok(want),
-        Ok(d) => def_ret_type(be, id, c, d, recv, ctx, want),
+        Ok(d) => be.def_ret_type(id, c, d, recv, ctx, want),
     })
 }
 
@@ -288,7 +288,7 @@ def_ret_type = (
                Res<TyId, AllocError> {
     decl_at(be.tree, d.id).match({
         None  => Ok(want),
-        Ok(x) => decl_ret_type(be, id, c, d, x, recv, ctx, want),
+        Ok(x) => be.decl_ret_type(id, c, d, x, recv, ctx, want),
     })
 }
 
@@ -304,7 +304,7 @@ decl_ret_type = (
 )
                 Res<TyId, AllocError> {
     x.kind.match({
-        Function(f) => fn_ret_type(be, id, c, d, f, recv, ctx, want),
+        Function(f) => be.fn_ret_type(id, c, d, f, recv, ctx, want),
         _           => Ok(want),
     })
 }
@@ -320,9 +320,9 @@ fn_ret_type = (
     want : TyId
 )
               Res<TyId, AllocError> {
-    raw      = inst_at(be, id).try();
-    settled  = settled_inst(be, f.tparams, d.qname, raw).try();
-    inst     = complete_inst(be, c, d, f, settled, recv, ctx).try();
+    raw      = be.inst_at(id).try();
+    settled  = be.settled_inst(f.tparams, d.qname, raw).try();
+    inst     = be.complete_inst(c, d, f, settled, recv, ctx).try();
     dctx     = Ctx(
         module: d.id.module.to_usize(),
         ret: TyId(index: 0),
@@ -330,8 +330,8 @@ fn_ret_type = (
         self_ty: TyId(index: 0),
         has_self: false
     );
-    mark     = enter_tparams(be, f.tparams, d.qname).try();
-    declared = declared_ret(be, f, dctx).try();
-    leave_tparams(be, mark).try();
-    sub_with(be, declared, inst)
+    mark     = be.enter_tparams(f.tparams, d.qname).try();
+    declared = be.declared_ret(f, dctx).try();
+    be.leave_tparams(mark).try();
+    be.sub_with(declared, inst)
 }

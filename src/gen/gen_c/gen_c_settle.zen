@@ -72,7 +72,7 @@ param_types* = (
     inst : Inst,
     ptys :: Vec<TyId>
 ) Res<(), AllocError> {
-    f.params.loop((h, p) { add_param_type(be, p, dctx, inst, ptys).try() });
+    f.params.loop((h, p) { be.add_param_type(p, dctx, inst, ptys).try() });
     Ok(());
 }
 
@@ -84,7 +84,7 @@ add_param_type = (
     ptys :: Vec<TyId>
 ) Res<(), AllocError> {
     declared = be.check.param_type(p, dctx).try();
-    ptys.add(sub_with(be, declared, inst).try())
+    ptys.add(be.sub_with(declared, inst).try())
 }
 
 // -----------------------------------------------------------------
@@ -101,11 +101,11 @@ inline_ret* = (
     ctx   : Ctx
 )
              Res<TyId, AllocError> {
-    declared = declared_ret(be, f, dctx).try();
-    got      = sub_with(be, sub_with(be, declared, inst).try(), extra).try();
+    declared = be.declared_ret(f, dctx).try();
+    got      = be.sub_with(be.sub_with(declared, inst).try(), extra).try();
     has_var(be.check, got).match({
         false => Ok(got),
-        true  => range_element(be, got, argv, ctx, extra),
+        true  => be.range_element(got, argv, ctx, extra),
     })
 }
 
@@ -120,7 +120,7 @@ call_bindings* = (
     extra :: Inst
 ) Res<(), AllocError> {
     Range(0, argv.len).loop((h, i) {
-        settle_from_arg_at(be, i, argv, ptys, ctx, extra).try();
+        be.settle_from_arg_at(i, argv, ptys, ctx, extra).try();
     });
     Ok(());
 }
@@ -135,7 +135,7 @@ settle_from_arg_at = (
 )
                      Res<(), AllocError> {
     argv.get(i).match({
-        Ok(v) => settle_from_arg(be, v, i, ptys, ctx, extra),
+        Ok(v) => be.settle_from_arg(v, i, ptys, ctx, extra),
         None  => Ok(()),
     })
 }
@@ -150,8 +150,8 @@ settle_from_arg = (
 )
                   Res<(), AllocError> {
     be.tree.expr_at(value).kind.match({
-        Lambda(l) => settle_from_body(be, l, i, ptys, ctx, extra),
-        _         => settle_from_value(be, value, i, ptys, ctx, extra),
+        Lambda(l) => be.settle_from_body(l, i, ptys, ctx, extra),
+        _         => be.settle_from_value(value, i, ptys, ctx, extra),
     })
 }
 
@@ -168,7 +168,7 @@ settle_from_value = (
 )
                     Res<(), AllocError> {
     ptys.get(i).match({
-        Ok(t) => settle_bare(be, value, t, ctx, extra),
+        Ok(t) => be.settle_bare(value, t, ctx, extra),
         None  => Ok(()),
     })
 }
@@ -180,8 +180,8 @@ settle_bare = (
     ctx   : Ctx,
     extra :: Inst
 ) Res<(), AllocError> {
-    keep_var(be, t).match({
-        Ok(v) => bind_arg_type(be, value, v, ctx, extra),
+    be.keep_var(t).match({
+        Ok(v) => be.bind_arg_type(value, v, ctx, extra),
         None  => Ok(()),
     })
 }
@@ -200,7 +200,7 @@ bind_arg_type = (
     extra :: Inst
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    got     = ty_of(be, value, ctx, unknown).try();
+    got     = be.ty_of(value, ctx, unknown).try();
     be.check.is_unknown(got).match({
         true  => Ok(()),
         false => extra.bind(v, got),
@@ -214,7 +214,7 @@ settle_params* = (
     extra : Inst,
     ptys  :: Vec<TyId>
 ) Res<(), AllocError> {
-    raws.loop((h, t) { ptys.add(sub_with(be, t, extra).try()).try() });
+    raws.loop((h, t) { ptys.add(be.sub_with(t, extra).try()).try() });
     Ok(());
 }
 
@@ -225,7 +225,7 @@ settle_params* = (
 // reads goes through `sub` against exactly this.
 compose* = (be :: CBackend, inst: Inst, extra: Inst) Res<Inst, AllocError> {
     full ::= be.alloc.Inst();
-    Range(0, inst.len()).loop((h, i) { carry(be, inst, extra, i, full).try() });
+    Range(0, inst.len()).loop((h, i) { be.carry(inst, extra, i, full).try() });
     Range(0, extra.len()).loop((h, i) { carry_extra(extra, i, full).try() });
     Ok(full);
 }
@@ -233,7 +233,7 @@ compose* = (be :: CBackend, inst: Inst, extra: Inst) Res<Inst, AllocError> {
 carry = (be :: CBackend, inst: Inst, extra: Inst, i: usize, full :: Inst)
         Res<(), AllocError> {
     inst.var_at(i).match({
-        Ok(v) => carry_arg(be, inst, extra, i, v, full),
+        Ok(v) => be.carry_arg(inst, extra, i, v, full),
         None  => Ok(()),
     })
 }
@@ -247,7 +247,7 @@ carry_arg = (
     full  :: Inst
 ) Res<(), AllocError> {
     inst.arg_at(i).match({
-        Ok(a) => full.bind(v, sub_with(be, a, extra).try()),
+        Ok(a) => full.bind(v, be.sub_with(a, extra).try()),
         None  => Ok(()),
     })
 }
@@ -280,8 +280,8 @@ settle_from_body = (
     ctx   : Ctx,
     extra :: Inst
 ) Res<(), AllocError> {
-    ret_var(be, i, ptys).match({
-        Ok(v) => bind_body_type(be, l, v, i, ptys, ctx, extra),
+    be.ret_var(i, ptys).match({
+        Ok(v) => be.bind_body_type(l, v, i, ptys, ctx, extra),
         None  => Ok(()),
     })
 }
@@ -291,14 +291,14 @@ settle_from_body = (
 // nothing in this tree writes it.
 ret_var = (be :: CBackend, i: usize, ptys: Vec<TyId>) Res<TyId> {
     ptys.get(i).match({
-        Ok(t) => fn_ret_var(be, t),
+        Ok(t) => be.fn_ret_var(t),
         None  => None,
     })
 }
 
 fn_ret_var = (be :: CBackend, t: TyId) Res<TyId> {
     be.check.types.at(t).match({
-        Fn(ft) => keep_var(be, ft.ret),
+        Fn(ft) => be.keep_var(ft.ret),
         _      => None,
     })
 }
@@ -333,8 +333,8 @@ bind_body_type = (
                  Res<(), AllocError> {
     cmark = be.check.mark();
     lmark = be.mark();
-    peek_params(be, l, i, ptys).try();
-    got = lambda_value_type(be, l, ctx).try();
+    be.peek_params(l, i, ptys).try();
+    got = be.lambda_value_type(l, ctx).try();
     be.release(lmark).try();
     be.check.release(cmark).try();
     extra.bind(v, got)
@@ -344,13 +344,13 @@ peek_params = (be :: CBackend, l: Lambda, i: usize, ptys: Vec<TyId>)
               Res<(), AllocError> {
     ptys.get(i).match({
         None  => Ok(()),
-        Ok(t) => peek_fn_params(be, l, t),
+        Ok(t) => be.peek_fn_params(l, t),
     })
 }
 
 peek_fn_params = (be :: CBackend, l: Lambda, t: TyId) Res<(), AllocError> {
     be.check.types.at(t).match({
-        Fn(ft) => peek_each_param(be, l, ft.params),
+        Fn(ft) => be.peek_each_param(l, ft.params),
         _      => Ok(()),
     })
 }
@@ -358,7 +358,7 @@ peek_fn_params = (be :: CBackend, l: Lambda, t: TyId) Res<(), AllocError> {
 peek_each_param = (be :: CBackend, l: Lambda, params: Vec<TyId>)
                   Res<(), AllocError> {
     Range(0, l.params.len).loop((h, i) {
-        peek_param_at(be, l, params, i).try();
+        be.peek_param_at(l, params, i).try();
     });
     Ok(());
 }
@@ -367,7 +367,7 @@ peek_param_at = (be :: CBackend, l: Lambda, params: Vec<TyId>, i: usize)
                 Res<(), AllocError> {
     l.params.get(i).match({
         None  => Ok(()),
-        Ok(p) => peek_param_named(be, p, params, i),
+        Ok(p) => be.peek_param_named(p, params, i),
     })
 }
 
@@ -378,14 +378,14 @@ peek_param_named = (be :: CBackend, p: Param, params: Vec<TyId>, i: usize)
                    Res<(), AllocError> {
     params.get(i).match({
         None  => Ok(()),
-        Ok(t) => peek_declare(be, p.name.text, t),
+        Ok(t) => be.peek_declare(p.name.text, t),
     })
 }
 
 peek_declare = (be :: CBackend, name: str, ty: TyId) Res<(), AllocError> {
     settled(be, ty).match({
         false => Ok(()),
-        true  => declare_peek_slot(be, name, ty),
+        true  => be.declare_peek_slot(name, ty),
     })
 }
 
@@ -408,7 +408,7 @@ lambda_value_type = (be :: CBackend, l: Lambda, ctx: Ctx)
     unit = be.check.types.prim("()").try();
     blk  = be.tree.block_at(l.body);
     blk.value.match({
-        Ok(e) => value_or_unit(be, e, ctx, unit),
+        Ok(e) => be.value_or_unit(e, ctx, unit),
         None  => Ok(unit),
     })
 }
@@ -416,7 +416,7 @@ lambda_value_type = (be :: CBackend, l: Lambda, ctx: Ctx)
 value_or_unit = (be :: CBackend, e: ExprId, ctx: Ctx, unit: TyId)
                 Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
-    got     = ty_of(be, e, ctx, unknown).try();
+    got     = be.ty_of(e, ctx, unknown).try();
     settled(be, got).match({ true => Ok(got), false => Ok(unit) })
 }
 
@@ -446,10 +446,10 @@ range_element = (
 element_of = (be :: CBackend, got: TyId, r: ExprId, ctx: Ctx, extra :: Inst)
              Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
-    rty     = ty_of(be, r, ctx, unknown).try();
-    elem    = range_element_type(be, rty).try();
+    rty     = be.ty_of(r, ctx, unknown).try();
+    elem    = be.range_element_type(rty).try();
     elem.match({
-        Ok(t) => walk_elements(be, got, t, extra),
+        Ok(t) => be.walk_elements(got, t, extra),
         None  => Ok(got),
     })
 }
@@ -457,15 +457,15 @@ element_of = (be :: CBackend, got: TyId, r: ExprId, ctx: Ctx, extra :: Inst)
 walk_elements = (be :: CBackend, got: TyId, elem: TyId, extra :: Inst)
                 Res<TyId, AllocError> {
     be.check.types.at(got).match({
-        Res(rs) => index_res(be, got, rs, elem, extra),
+        Res(rs) => be.index_res(got, rs, elem, extra),
         _       => Ok(got),
     })
 }
 
 index_res = (be :: CBackend, got: TyId, rs: TyRes, elem: TyId, extra :: Inst)
             Res<TyId, AllocError> {
-    keep_var(be, rs.value).match({
-        Ok(v) => usize_bound(be, got, v, elem, extra),
+    be.keep_var(rs.value).match({
+        Ok(v) => be.usize_bound(got, v, elem, extra),
         None  => Ok(got),
     })
 }
@@ -478,7 +478,7 @@ usize_bound = (
     extra :: Inst
 ) Res<TyId, AllocError> {
     extra.bind(v, elem).try();
-    sub_with(be, got, extra)
+    be.sub_with(got, extra)
 }
 
 // -----------------------------------------------------------------
@@ -497,15 +497,15 @@ usize_bound = (
 inline_result_type* = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                       Res<TyId, AllocError> {
     be.tree.expr_at(id).kind.match({
-        Call(c) => call_result(be, id, c, ctx, got),
+        Call(c) => be.call_result(id, c, ctx, got),
         _       => Ok(got),
     })
 }
 
 call_result = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx, got: TyId)
               Res<TyId, AllocError> {
-    callee_name(be, c).match({
-        Ok(n) => named_result(be, id, c, n, ctx, got),
+    be.callee_name(c).match({
+        Ok(n) => be.named_result(id, c, n, ctx, got),
         None  => Ok(got),
     })
 }
@@ -531,8 +531,8 @@ named_result = (
 ) Res<TyId, AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, name, found).try();
-    pick_def(be, id, found).match({
-        Ok(d) => def_result(be, id, c, d, ctx, got),
+    be.pick_def(id, found).match({
+        Ok(d) => be.def_result(id, c, d, ctx, got),
         None  => Ok(got),
     })
 }
@@ -561,7 +561,7 @@ def_result = (
     got : TyId
 ) Res<TyId, AllocError> {
     decl_at(be.tree, d.id).match({
-        Ok(x) => decl_result(be, id, c, d, x, ctx, got),
+        Ok(x) => be.decl_result(id, c, d, x, ctx, got),
         None  => Ok(got),
     })
 }
@@ -576,7 +576,7 @@ decl_result = (
     got : TyId
 ) Res<TyId, AllocError> {
     x.kind.match({
-        Function(f) => fn_result(be, id, c, d, f, ctx, got),
+        Function(f) => be.fn_result(id, c, d, f, ctx, got),
         _           => Ok(got),
     })
 }
@@ -590,9 +590,9 @@ fn_result = (
     ctx : Ctx,
     got : TyId
 ) Res<TyId, AllocError> {
-    inlines(be, c, f).match({
+    be.inlines(c, f).match({
         false => Ok(got),
-        true  => computed_result(be, id, c, d, f, ctx),
+        true  => be.computed_result(id, c, d, f, ctx),
     })
 }
 
@@ -605,17 +605,17 @@ computed_result = (
     ctx : Ctx
 ) Res<TyId, AllocError> {
     mi   = d.id.module.to_usize();
-    dctx = plain_ctx(be, mi);
-    raw  = inst_at(be, id).try();
-    inst = settled_inst(be, f.tparams, d.qname, raw).try();
-    mark = enter_tparams(be, f.tparams, d.qname).try();
+    dctx = be.plain_ctx(mi);
+    raw  = be.inst_at(id).try();
+    inst = be.settled_inst(f.tparams, d.qname, raw).try();
+    mark = be.enter_tparams(f.tparams, d.qname).try();
     argv ::= be.alloc.Vec<ExprId>();
-    arguments(be, c, recv_of(be, c.callee), argv).try();
+    be.arguments(c, be.recv_of(c.callee), argv).try();
     raws ::= be.alloc.Vec<TyId>();
-    param_types(be, f, dctx, inst, raws).try();
+    be.param_types(f, dctx, inst, raws).try();
     extra ::= be.alloc.Inst();
-    call_bindings(be, argv, raws, ctx, extra).try();
-    ret = inline_ret(be, f, dctx, inst, extra, argv, ctx).try();
-    leave_tparams(be, mark).try();
+    be.call_bindings(argv, raws, ctx, extra).try();
+    ret = be.inline_ret(f, dctx, inst, extra, argv, ctx).try();
+    be.leave_tparams(mark).try();
     Ok(ret);
 }

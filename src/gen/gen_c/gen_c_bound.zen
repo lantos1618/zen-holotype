@@ -55,7 +55,7 @@ convert* = (be :: CBackend, code: str, src: TyId, dst: TyId, out :: String)
            Res<(), AllocError> {
     src.eq(dst).match({
         true  => out.add_bytes(code),
-        false => convert_kind(be, code, src, dst, out),
+        false => be.convert_kind(code, src, dst, out),
     })
 }
 
@@ -67,9 +67,9 @@ convert_kind = (
     out  :: String
 ) Res<(), AllocError> {
     be.types().at(dst).match({
-        Named(n) => convert_named(be, code, dst, n, out),
-        Res(r)   => convert_res(be, code, src, dst, r, out),
-        Union(_) => convert_set(be, code, src, dst, out),
+        Named(n) => be.convert_named(code, dst, n, out),
+        Res(r)   => be.convert_res(code, src, dst, r, out),
+        Union(_) => be.convert_set(code, src, dst, out),
         _        => out.add_bytes(code),
     })
 }
@@ -93,9 +93,9 @@ convert_set = (
     dst  : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    tags_as_member(be, src, dst).match({
+    be.tags_as_member(src, dst).match({
         false => out.add_bytes(code),
-        true  => write_set_value(be, code, src, dst, out),
+        true  => be.write_set_value(code, src, dst, out),
     })
 }
 
@@ -114,7 +114,7 @@ convert_named = (
     out  :: String
 ) Res<(), AllocError> {
     is_ptr_named(n).match({
-        true  => write_cast(be, code, dst, out),
+        true  => be.write_cast(code, dst, out),
         false => out.add_bytes(code),
     })
 }
@@ -122,7 +122,7 @@ convert_named = (
 write_cast* = (be :: CBackend, code: str, dst: TyId, out :: String)
              Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, dst, cty).try();
+    be.ctype(dst, cty).try();
     out.fmt("(({}){code})", cty.view())
 }
 
@@ -151,10 +151,10 @@ rebuild_res = (
     d    : TyRes,
     out  :: String
 ) Res<(), AllocError> {
-    request_type(be, dst).try();
+    be.request_type(dst).try();
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "t", be.next_tmp()).try();
-    declare_temp(be, src, tmp.view()).try();
+    be.declare_temp(src, tmp.view()).try();
     be.set_line(tmp.view(), code).try();
     out.fmt("({}.zg_tag == ", tmp.view()).try();
     out.sym_variant(RES_PATH, "Ok").try();

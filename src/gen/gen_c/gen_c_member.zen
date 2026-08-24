@@ -38,7 +38,7 @@ TyId, TyNamed, TyFn, Prim = sema.sema_ty
 Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
-Found, base_of, members_of, member_named, self_ctx = sema.sema_member
+Found, base_of, members_of, self_ctx = sema.sema_member
 Actual = sema.sema_call
 recv_sig_fits, ty_at, tail_swallows = sema.sema_cand
 Case, cases_of, find_case = sema.sema_case
@@ -90,10 +90,10 @@ lower_dot_call* = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    depth = handle_depth(be, a.base);
+    depth = be.handle_depth(a.base);
     (depth > 0).match({
-        true  => lower_handle_call(be, id, c, a, depth, ctx, out),
-        false => lower_resolved_dot(be, Dot(id: id, c: c, a: a), ctx, out),
+        true  => be.lower_handle_call(id, c, a, depth, ctx, out),
+        false => be.lower_resolved_dot(Dot(id: id, c: c, a: a), ctx, out),
     })
 }
 
@@ -101,8 +101,8 @@ lower_resolved_dot = (be :: CBackend, d: Dot, ctx: Ctx, out :: String)
                      Res<(), AllocError> {
     b = be.check.base_of(d.a.base, ctx).try();
     b.is_type.match({
-        true  => lower_static_call(be, d, b.ty, ctx, out),
-        false => lower_receiver_call(be, d, ctx, out),
+        true  => be.lower_static_call(d, b.ty, ctx, out),
+        false => be.lower_receiver_call(d, ctx, out),
     })
 }
 
@@ -123,19 +123,10 @@ lower_resolved_dot = (be :: CBackend, d: Dot, ctx: Ctx, out :: String)
 lower_static_call = (be :: CBackend, d: Dot, ty: TyId, ctx: Ctx, out :: String)
                     Res<(), AllocError> {
     be.check.is_case(ty, d.a.name.text).try().match({
-        true  => write_variant_call(be, d, ty, ctx, out),
-        false => lower_assoc_call(
-            be,
-            d.id,
-            d.c,
-            d.a,
-            ty,
-            ctx,
-            out
-        ).try().match({
+        true  => be.write_variant_call(d, ty, ctx, out),
+        false => be.lower_assoc_call(d.id, d.c, d.a, ty, ctx, out).try().match({
             true  => Ok(()),
-            false => unsupported(
-                be,
+            false => be.unsupported(
                 d.id,
                 "a call on a type that is not a variant",
                 out
@@ -150,7 +141,7 @@ write_variant_call = (be :: CBackend, d: Dot, ty: TyId, ctx: Ctx, out :: String)
     be.check.cases_of(ty, cases).try();
     find_case(cases, d.a.name.text).match({
         None   => unresolved(be, d.id, d.a.name.text, out),
-        Ok(cs) => write_case_value(be, d.c, ty, cs, ctx, out),
+        Ok(cs) => be.write_case_value(d.c, ty, cs, ctx, out),
     })
 }
 
@@ -165,21 +156,21 @@ write_case_value = (
     out :: String
 ) Res<(), AllocError> {
     qname ::= be.alloc.String().try();
-    type_qname(be, ty, qname).try();
+    be.type_qname(ty, qname).try();
     cty ::= be.alloc.String().try();
-    ctype(be, ty, cty).try();
+    be.ctype(ty, cty).try();
     out.fmt("({}){ .zg_tag = ", cty.view()).try();
     out.sym_variant(qname.view(), cs.name).try();
-    no_payload(be, c, cs).match({
+    be.no_payload(c, cs).match({
         true  => Ok(()),
-        false => write_payload_arg(be, c, cs, ctx, out),
+        false => be.write_payload_arg(c, cs, ctx, out),
     }).try();
     out.add_bytes(" }").try();
     Ok(());
 }
 
 no_payload = (be :: CBackend, c: Call, cs: Case) bool {
-    (cs.has_payload == false) || is_unit(be, cs.payload) || (c.args.len == 0)
+    (cs.has_payload == false) || be.is_unit(cs.payload) || (c.args.len == 0)
 }
 
 write_payload_arg = (be :: CBackend, c: Call, cs: Case, ctx: Ctx, out :: String)
@@ -204,10 +195,10 @@ write_payload_arg = (be :: CBackend, c: Call, cs: Case, ctx: Ctx, out :: String)
 lower_receiver_call = (be :: CBackend, d: Dot, ctx: Ctx, out :: String)
                       Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    rty     = ty_of(be, d.a.base, ctx, unknown).try();
+    rty     = be.ty_of(d.a.base, ctx, unknown).try();
     site_of(be, rty).try().match({
-        None  => lower_ufcs(be, d, rty, ctx, out),
-        Ok(s) => with_site(be, d, s, ctx, out),
+        None  => be.lower_ufcs(d, rty, ctx, out),
+        Ok(s) => be.with_site(d, s, ctx, out),
     })
 }
 
@@ -215,19 +206,19 @@ with_site = (be :: CBackend, d: Dot, s: Site, ctx: Ctx, out :: String)
             Res<(), AllocError> {
     own ::= be.alloc.Vec<Member>();
     member_at(be, s, d.a.name.text, own).try();
-    pick_member(be, d.c, s, own, ctx).try().match({
-        Ok(m) => declared_member(be, d, s, m, ctx, out),
-        None  => supplied_or_ufcs(be, d, s, ctx, out),
+    be.pick_member(d.c, s, own, ctx).try().match({
+        Ok(m) => be.declared_member(d, s, m, ctx, out),
+        None  => be.supplied_or_ufcs(d, s, ctx, out),
     })
 }
 
 supplied_or_ufcs = (be :: CBackend, d: Dot, s: Site, ctx: Ctx, out :: String)
                    Res<(), AllocError> {
     found ::= be.alloc.Vec<Member>();
-    impl_member_at(be, s.decl, d.a.name.text, found).try();
-    pick_member(be, d.c, s, found, ctx).try().match({
+    be.impl_member_at(s.decl, d.a.name.text, found).try();
+    be.pick_member(d.c, s, found, ctx).try().match({
         Ok(m) => supplied_member(be, d, s, m, ctx, out),
-        None  => lower_ufcs(be, d, s.ty, ctx, out),
+        None  => be.lower_ufcs(d, s.ty, ctx, out),
     })
 }
 
@@ -243,9 +234,8 @@ declared_member = (
     out :: String
 ) Res<(), AllocError> {
     m.kind.match({
-        Function(f) => lower_method(be, d, s, f, ctx, out),
-        _           => unsupported(
-            be,
+        Function(f) => be.lower_method(d, s, f, ctx, out),
+        _           => be.unsupported(
             d.id,
             "a call through a function-valued field",
             out
@@ -264,8 +254,8 @@ supplied_member = (
     out :: String
 ) Res<(), AllocError> {
     m.kind.match({
-        Function(f) => lower_method(be, d, s, f, ctx, out),
-        _           => lower_ufcs(be, d, s.ty, ctx, out),
+        Function(f) => be.lower_method(d, s, f, ctx, out),
+        _           => be.lower_ufcs(d, s.ty, ctx, out),
     })
 }
 
@@ -289,7 +279,7 @@ pick_member = (be :: CBackend, c: Call, s: Site, found: Vec<Member>, ctx: Ctx)
               Res<Res<Member>, AllocError> {
     (found.len < 2).match({
         true  => Ok(by_arity(be, found, c.args.len + 1)),
-        false => member_that_fits(be, c, s, found, ctx),
+        false => be.member_that_fits(c, s, found, ctx),
     })
 }
 
@@ -307,10 +297,10 @@ member_that_fits = (
 )
                    Res<Res<Member>, AllocError> {
     actuals ::= be.alloc.Vec<Actual>();
-    call_actuals(be, c, ctx, actuals).try();
+    be.call_actuals(c, ctx, actuals).try();
     kept ::= be.alloc.Vec<Member>();
-    found.loop((h, m) { keep_fits(be, m, s, actuals, kept).try() });
-    Ok(kept_or_arity(be, kept, found, c.args.len + 1));
+    found.loop((h, m) { be.keep_fits(m, s, actuals, kept).try() });
+    Ok(be.kept_or_arity(kept, found, c.args.len + 1));
 }
 
 // A named helper rather than a `.then` inside the loop body: a loop
@@ -323,7 +313,7 @@ keep_fits = (
     kept    :: Vec<Member>
 ) Res<(), AllocError> {
     m.kind.match({
-        Function(f) => keep_if_fits(be, m, f, s, actuals, kept),
+        Function(f) => be.keep_if_fits(m, f, s, actuals, kept),
         _           => Ok(()),
     })
 }
@@ -338,9 +328,9 @@ keep_if_fits = (
     actuals : Vec<Actual>,
     kept    :: Vec<Member>
 ) Res<(), AllocError> {
-    inst = recv_inst(be, s.ty).try();
+    inst = be.recv_inst(s.ty).try();
     sig ::= be.alloc.Vec<TyId>();
-    method_sig(be, s.ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
+    be.method_sig(s.ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
     be.check.recv_sig_fits(sig, actuals).try().match({
         true  => kept.add(m),
         false => Ok(()),
@@ -349,7 +339,7 @@ keep_if_fits = (
 
 call_actuals = (be :: CBackend, c: Call, ctx: Ctx, out :: Vec<Actual>)
                Res<(), AllocError> {
-    c.args.loop((h, x) { out.add(arg_actual(be, x, ctx).try()).try() });
+    c.args.loop((h, x) { out.add(be.arg_actual(x, ctx).try()).try() });
     Ok(());
 }
 
@@ -368,7 +358,7 @@ arg_actual = (be :: CBackend, x: Arg, ctx: Ctx) Res<Actual, AllocError> {
             span: x.span
         )),
         _         => Ok(Actual(
-            ty: ty_of(be, x.value, ctx, unknown).try(),
+            ty: be.ty_of(x.value, ctx, unknown).try(),
             is_lambda: false,
             arity: 0,
             named: false,
@@ -402,7 +392,7 @@ Site* = {
 site_of* = (be :: CBackend, rty: TyId) Res<Res<Site>, AllocError> {
     be.check.types.at(rty).match({
         Named(n) => named_site(be, rty, n),
-        Prim(p)  => prim_site(be, rty, p.name),
+        Prim(p)  => be.prim_site(rty, p.name),
         _        => Ok(None),
     })
 }
@@ -470,7 +460,7 @@ struct_member = (d: Decl, name: str, out :: Vec<Member>) Res<(), AllocError> {
 
 keep_named = (st: Struct, name: str, out :: Vec<Member>) Res<(), AllocError> {
     st.members.loop((h, m) {
-        member_named(m, name).then(() { out.add(m).try() });
+        m.named(name).then(() { out.add(m).try() });
     });
     Ok(());
 }
@@ -522,11 +512,11 @@ method_kind = (be :: CBackend, d: Dot, s: Site, f: Function, ctx: Ctx)
               Res<MethodKind, AllocError> {
     name                   = d.a.name.text;
     found: Res<MethodKind> = loop<MethodKind>((h) {
-        inlines(be, d.c, f).then(() { h.break(MethodKind.Inlined) });
-        is_ptr_member(be, s.ty, name).then(() {
-            h.break(MethodKind.PtrMember(want_of(be, d.id, ctx).try()))
+        be.inlines(d.c, f).then(() { h.break(MethodKind.Inlined) });
+        be.is_ptr_member(s.ty, name).then(() {
+            h.break(MethodKind.PtrMember(be.want_of(d.id, ctx).try()))
         });
-        is_capability(be, s.ty, name).then(() {
+        be.is_capability(s.ty, name).then(() {
             h.break(MethodKind.Capability(s.decl.module.to_usize()))
         });
         be.is_member_door(d.a, f).then(() { h.break(MethodKind.SinkDoor) });
@@ -541,11 +531,11 @@ method_kind = (be :: CBackend, d: Dot, s: Site, f: Function, ctx: Ctx)
 }
 
 is_member_door = (be: CBackend, a: Access, f: Function) bool {
-    a.name.text.eq("add") && sink_door_shape(be, f)
+    a.name.text.eq("add") && be.sink_door_shape(f)
 }
 
 is_fat_slot = (be: CBackend, rty: TyId, f: Function) bool {
-    is_fat(be, rty) && (has_body(f) == false)
+    be.is_fat(rty) && (has_body(f) == false)
 }
 
 lower_method = (
@@ -558,8 +548,7 @@ lower_method = (
 )
                Res<(), AllocError> {
     be.method_kind(d, s, f, ctx).try().match({
-        Inlined       => inline_method(
-            be,
+        Inlined       => be.inline_method(
             d.id,
             d.c,
             d.a,
@@ -569,18 +558,8 @@ lower_method = (
             ctx,
             out
         ),
-        PtrMember(w)  => lower_ptr_member(
-            be,
-            d.id,
-            d.c,
-            d.a,
-            s.ty,
-            ctx,
-            w,
-            out
-        ),
-        Capability(m) => lower_capability(
-            be,
+        PtrMember(w)  => be.lower_ptr_member(d.id, d.c, d.a, s.ty, ctx, w, out),
+        Capability(m) => be.lower_capability(
             d.id,
             d.c,
             d.a,
@@ -590,7 +569,7 @@ lower_method = (
             ctx,
             out
         ),
-        SinkDoor      => lower_member_door(be, d.id, d.c, d.a.base, ctx, out),
+        SinkDoor      => be.lower_member_door(d.id, d.c, d.a.base, ctx, out),
         FloorDoor     => be.lower_floor_door(
             d.id,
             d.c,
@@ -601,8 +580,7 @@ lower_method = (
             ctx,
             out
         ),
-        FatSlot       => lower_fat_call(
-            be,
+        FatSlot       => be.lower_fat_call(
             d.id,
             d.c,
             d.a,
@@ -612,7 +590,7 @@ lower_method = (
             ctx,
             out
         ),
-        Ordinary      => lower_ordinary_method(be, d, s, f, ctx, out),
+        Ordinary      => be.lower_ordinary_method(d, s, f, ctx, out),
     })
 }
 
@@ -625,8 +603,8 @@ lower_ordinary_method = (
     out :: String
 ) Res<(), AllocError> {
     method_fault(f).match({
-        Ok(why) => unsupported(be, d.id, why, out),
-        None    => write_method_call(be, d, s, f, ctx, out),
+        Ok(why) => be.unsupported(d.id, why, out),
+        None    => be.write_method_call(d, s, f, ctx, out),
     })
 }
 
@@ -659,17 +637,16 @@ write_method_call = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    inst = recv_inst(be, s.ty).try();
+    inst = be.recv_inst(s.ty).try();
     sig ::= be.alloc.Vec<TyId>();
-    method_sig(be, s.ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
-    (inst_open(be, inst) || any_open(be, sig)).match({
-        true  => unsupported(
-            be,
+    be.method_sig(s.ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
+    (be.inst_open(inst) || be.any_open(sig)).match({
+        true  => be.unsupported(
             d.id,
             "a method on a receiver whose type arguments nothing settles",
             out
         ),
-        false => emit_method_call(be, d, s, f, sig, inst, ctx, out),
+        false => be.emit_method_call(d, s, f, sig, inst, ctx, out),
     })
 }
 
@@ -687,10 +664,10 @@ emit_method_call = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    sym = member_symbol(be, s.ty, s, d.a.name.text, sig, inst).try();
+    sym = be.member_symbol(s.ty, s, d.a.name.text, sig, inst).try();
     args ::= be.alloc.String().try();
-    write_arg(be, d.a.base, 0, f, sig, ctx, args).try();
-    write_call_args(be, d.c, 1, f, sig, ctx, args).try();
+    be.write_arg(d.a.base, 0, f, sig, ctx, args).try();
+    be.write_call_args(d.c, 1, f, sig, ctx, args).try();
     out.fmt("{}({})", sym.view(), args.view())
 }
 
@@ -739,9 +716,9 @@ method_sig* = (
     sig  :: Vec<TyId>
 ) Res<(), AllocError> {
     sctx = be.check.self_ctx(mi, rty).try();
-    mark = enter_struct_tparams(be, decl).try();
-    f.params.loop((h, p) { add_method_param(be, p, sctx, inst, sig).try() });
-    leave_tparams(be, mark).try();
+    mark = be.enter_struct_tparams(decl).try();
+    f.params.loop((h, p) { be.add_method_param(p, sctx, inst, sig).try() });
+    be.leave_tparams(mark).try();
     Ok(());
 }
 
@@ -753,7 +730,7 @@ add_method_param = (
     sig  :: Vec<TyId>
 ) Res<(), AllocError> {
     declared = be.check.param_type(p, sctx).try();
-    sig.add(sub_with(be, declared, inst).try())
+    sig.add(be.sub_with(declared, inst).try())
 }
 
 // -----------------------------------------------------------------
@@ -780,9 +757,9 @@ lower_eq_call* = (
 ) Res<bool, AllocError> {
     site_of(be, rty).try().match({
         None  => Ok(false),
-        Ok(s) => eq_fn(be, s).try().match({
+        Ok(s) => be.eq_fn(s).try().match({
             None  => Ok(false),
-            Ok(f) => write_eq(be, lhs, rhs, s, f, ctx, out),
+            Ok(f) => be.write_eq(lhs, rhs, s, f, ctx, out),
         }),
     })
 }
@@ -794,7 +771,7 @@ eq_fn = (be :: CBackend, s: Site) Res<Res<Function>, AllocError> {
     member_at(be, s, "eq", found).try();
     bodied_fn(found).match({
         Ok(f) => Ok(Ok(f)),
-        None  => impl_member(be, s.decl, "eq"),
+        None  => be.impl_member(s.decl, "eq"),
     })
 }
 
@@ -807,12 +784,12 @@ write_eq = (
     ctx : Ctx,
     out :: String
 ) Res<bool, AllocError> {
-    inst = recv_inst(be, s.ty).try();
+    inst = be.recv_inst(s.ty).try();
     sig ::= be.alloc.Vec<TyId>();
-    method_sig(be, s.ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
-    (inst_open(be, inst) || any_open(be, sig)).match({
+    be.method_sig(s.ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
+    (be.inst_open(inst) || be.any_open(sig)).match({
         true  => Ok(false),
-        false => emit_eq(be, lhs, rhs, s, f, sig, inst, ctx, out),
+        false => be.emit_eq(lhs, rhs, s, f, sig, inst, ctx, out),
     })
 }
 
@@ -827,11 +804,11 @@ emit_eq = (
     ctx  : Ctx,
     out  :: String
 ) Res<bool, AllocError> {
-    sym = member_symbol(be, s.ty, s, "eq", sig, inst).try();
+    sym = be.member_symbol(s.ty, s, "eq", sig, inst).try();
     l ::= be.alloc.String().try();
-    write_arg(be, lhs, 0, f, sig, ctx, l).try();
+    be.write_arg(lhs, 0, f, sig, ctx, l).try();
     r ::= be.alloc.String().try();
-    write_arg(be, rhs, 1, f, sig, ctx, r).try();
+    be.write_arg(rhs, 1, f, sig, ctx, r).try();
     out.fmt("{}({}, {})", sym.view(), l.view(), r.view()).try();
     Ok(true);
 }
@@ -851,18 +828,17 @@ emit_eq = (
 // its own still win.
 lower_ufcs = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, out :: String)
              Res<(), AllocError> {
-    lower_create(be, d.id, d.c, d.a, rty, ctx, out).try().match({
+    be.lower_create(d.id, d.c, d.a, rty, ctx, out).try().match({
         true  => Ok(()),
-        false => ufcs_or_impl(be, d, rty, ctx, out),
+        false => be.ufcs_or_impl(d, rty, ctx, out),
     })
 }
 
 ufcs_or_impl = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, out :: String)
                Res<(), AllocError> {
-    reaches(be, rty, d.a.name.text, d.c.args.len + 1).try().match({
-        true  => impl_alias(be, d, rty, ctx, out),
-        false => lower_plain_call(
-            be,
+    be.reaches(rty, d.a.name.text, d.c.args.len + 1).try().match({
+        true  => be.impl_alias(d, rty, ctx, out),
+        false => be.lower_plain_call(
             d.id,
             d.c,
             d.a.name.text,
@@ -879,16 +855,10 @@ ufcs_or_impl = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, out :: String)
 impl_alias = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, out :: String)
              Res<(), AllocError> {
     site_of(be, rty).try().match({
-        None  => unsupported(
-            be,
-            d.id,
-            "a call to an impl-supplied member",
-            out
-        ),
-        Ok(s) => alias_of(be, s.decl, d.a.name.text).try().match({
-            Ok(t) => lower_plain_call(be, d.id, d.c, t, Ok(d.a.base), ctx, out),
-            None  => unsupported(
-                be,
+        None  => be.unsupported(d.id, "a call to an impl-supplied member", out),
+        Ok(s) => be.alias_of(s.decl, d.a.name.text).try().match({
+            Ok(t) => be.lower_plain_call(d.id, d.c, t, Ok(d.a.base), ctx, out),
+            None  => be.unsupported(
                 d.id,
                 "a call to an impl-supplied member",
                 out
@@ -904,13 +874,13 @@ reaches = (be :: CBackend, rty: TyId, name: str, arity: usize)
           Res<bool, AllocError> {
     found ::= be.alloc.Vec<Found>();
     be.check.members_of(rty, name, found).try();
-    Ok(any_at_arity(be, found, arity));
+    Ok(be.any_at_arity(found, arity));
 }
 
 any_at_arity = (be: CBackend, found: Vec<Found>, arity: usize) bool {
     Range(0, found.len).find((i) {
         found.get(i).match({
-            Ok(f) => fn_takes_args(be, f.ty, arity),
+            Ok(f) => be.fn_takes_args(f.ty, arity),
             None  => false,
         })
     }).match({ Ok(_) => true, None => false })
@@ -921,7 +891,7 @@ any_at_arity = (be: CBackend, found: Vec<Found>, arity: usize) bool {
 // `gen_c_impl.zen`'s `fn_takes` gives.
 fn_takes_args = (be: CBackend, ty: TyId, arity: usize) bool {
     be.check.types.at(ty).match({
-        Fn(f) => (f.params.len == arity) || variadic_takes(be, f, arity),
+        Fn(f) => (f.params.len == arity) || be.variadic_takes(f, arity),
         _     => false,
     })
 }

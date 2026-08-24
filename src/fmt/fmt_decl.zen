@@ -85,6 +85,7 @@ Module, Decl, Type, Param = std.ast.ast_node
 scan, Source, Lexed = std.lex.lex
 Parser, module = std.parse.parse
 Src = fmt.fmt_src
+copy_of = fmt.fmt_break
 
 // One `=>` that is going to move, and where to. Named in BYTES not a
 // column: applying it replaces `[from, to)` with `width` spaces, and a
@@ -248,7 +249,7 @@ align_arms = (al :: Aligned, src: Src, tree: Ast, mt: Match)
              Res<(), AllocError> {
     col ::= 0;
     Range(0, mt.arms.len).loop((h, i) {
-        want = arrow_col(src, tree, mt, i);
+        want = src.arrow_col(tree, mt, i);
         (want > col).then(() { col = want; });
     });
     (col > 0).then(() {
@@ -285,7 +286,7 @@ pad_one = (
     arm  : Arm,
     col  : usize
 ) Res<(), AllocError> {
-    movable(src, tree, mt, i, arm).match({
+    src.movable(tree, mt, i, arm).match({
         false => unaligned(),
         true  => {
             end = tree.pattern_at(arm.pattern).span.end;
@@ -304,7 +305,7 @@ pad_one = (
 arrow_col = (src: Src, tree: Ast, mt: Match, i: usize) usize {
     mt.arms.get(i).match({
         None    => 0,
-        Ok(arm) => movable(src, tree, mt, i, arm).match({
+        Ok(arm) => src.movable(tree, mt, i, arm).match({
             false => 0,
             true  => tree.pattern_at(arm.pattern).span.end.col + 1,
         }),
@@ -374,7 +375,7 @@ align_binds = (al :: Aligned, src: Src, tree: Ast, b: Block)
               Res<(), AllocError> {
     from ::= 0;
     Range(0, b.stmts.len).loop((h, i) {
-        (i > 0 && joins(src, tree, b, i)).match({
+        (i > 0 && src.joins(tree, b, i)).match({
             true  => (),
             false => {
                 al.align_run(src, tree, b, from, i).try();
@@ -387,8 +388,8 @@ align_binds = (al :: Aligned, src: Src, tree: Ast, b: Block)
 
 // True when statement `i` continues the run that ends at `i - 1`.
 joins = (src: Src, tree: Ast, b: Block, i: usize) bool {
-    here = op_at(src, tree, b, i);
-    (here.width > 0 && here.width == op_at(src, tree, b, i - 1).width)
+    here = src.op_at(tree, b, i);
+    (here.width > 0 && here.width == src.op_at(tree, b, i - 1).width)
         && stmt_line(b, i, true) == stmt_line(b, i - 1, false) + 1
 }
 
@@ -418,7 +419,7 @@ align_run = (
 ) Res<(), AllocError> {
     col ::= 0;
     Range(from, to).loop((h, i) {
-        op   = op_at(src, tree, b, i);
+        op   = src.op_at(tree, b, i);
         want = op.end.col + 1;
         (op.width > 0 && want > col).then(() { col = want; });
     });
@@ -439,7 +440,7 @@ pad_bind = (
     i    : usize,
     col  : usize
 ) Res<(), AllocError> {
-    op = op_at(src, tree, b, i);
+    op = src.op_at(tree, b, i);
     (op.width == 0).match({
         true  => unaligned(),
         false => al.record(op.end.line, Pad(
@@ -454,7 +455,7 @@ op_at = (src: Src, tree: Ast, b: Block, i: usize) Op {
     b.stmts.get(i).match({
         None  => no_op(),
         Ok(s) => s.kind.match({
-            Bind(bd) => bind_op(src, tree, s, bd),
+            Bind(bd) => src.bind_op(tree, s, bd),
             _        => no_op(),
         }),
     })
@@ -467,8 +468,8 @@ op_at = (src: Src, tree: Ast, b: Block, i: usize) Op {
 bind_op = (src: Src, tree: Ast, s: Stmt, bd: Bind) Op {
     line = s.span.start.line;
     end  = name_end(tree, bd);
-    at   = past_spaces(src, src.offset(end), src.after_line(line));
-    w    = op_width(src, at, src.after_line(line));
+    at   = src.past_spaces(src.offset(end), src.after_line(line));
+    w    = src.op_width(at, src.after_line(line));
     (w > 0
         && end.line == line
         && src.all_spaces(src.line_at(line), src.offset(s.span.start))).match({
@@ -485,12 +486,6 @@ name_end = (tree: Ast, bd: Bind) Pos {
         Ok(t) => tree.type_at(t).span.end,
         None  => tree.expr_at(bd.target).span.end,
     })
-}
-
-past_spaces = (src: Src, from: usize, to: usize) usize {
-    at ::= from;
-    loop(() { at < to && src.text.index(at) == ' ' }, (h) { at = at + 1; });
-    at;
 }
 
 // `=` is 1 and `::=` is 3; anything else is 0 and the statement is
@@ -529,7 +524,7 @@ align_params = (al :: Aligned, src: Src, ps: Vec<Param>)
                Res<(), AllocError> {
     col ::= 0;
     Range(0, ps.len).loop((h, i) {
-        op   = param_op(src, ps, i);
+        op   = src.param_op(ps, i);
         want = op.end.col + 1;
         (op.width > 0 && want > col).then(() { col = want; });
     });
@@ -544,7 +539,7 @@ align_params = (al :: Aligned, src: Src, ps: Vec<Param>)
 // over `end.col + 1` and a movable parameter is one of the terms.
 pad_param = (al :: Aligned, src: Src, ps: Vec<Param>, i: usize, col: usize)
             Res<(), AllocError> {
-    op = param_op(src, ps, i);
+    op = src.param_op(ps, i);
     (op.width == 0).match({
         true  => unaligned(),
         false => al.record(op.end.line, Pad(
@@ -558,7 +553,7 @@ pad_param = (al :: Aligned, src: Src, ps: Vec<Param>, i: usize, col: usize)
 param_op = (src: Src, ps: Vec<Param>, i: usize) Op {
     ps.get(i).match({
         None  => no_op(),
-        Ok(p) => name_op(src, p),
+        Ok(p) => src.name_op(p),
     })
 }
 
@@ -569,8 +564,8 @@ param_op = (src: Src, ps: Vec<Param>, i: usize) Op {
 name_op = (src: Src, p: Param) Op {
     line = p.span.start.line;
     end  = p.name.span.end;
-    at   = past_spaces(src, src.offset(end), src.after_line(line));
-    w    = colon_width(src, at, src.after_line(line));
+    at   = src.past_spaces(src.offset(end), src.after_line(line));
+    w    = src.colon_width(at, src.after_line(line));
     (w > 0
         && end.line == line
         && src.all_spaces(src.line_at(line), src.offset(p.span.start))).match({
@@ -606,7 +601,7 @@ name_op = (src: Src, p: Param) Op {
 align_columns* = (a: Alloc, file: str, text: str) Res<String, AllocError> {
     lexed = scan(a, Source(file: file, text: text)).try();
     lexed.is_clean().match({
-        false => verbatim(a, text),
+        false => copy_of(a, text),
         true  => columns_clean(a, text, lexed),
     })
 }
@@ -615,19 +610,13 @@ columns_clean = (a: Alloc, text: str, lexed: Lexed) Res<String, AllocError> {
     p ::= a.Parser(lexed);
     m = p.module(lexed.source.file).try();
     (p.diags.len == 0).match({
-        false => verbatim(a, text),
+        false => copy_of(a, text),
         true  => {
             src = a.Src(text).try();
             al  = a.Aligned(src, p.tree, m).try();
             al.padded(a, src, 0, text.len, 1)
         },
     })
-}
-
-verbatim = (a: Alloc, text: str) Res<String, AllocError> {
-    out ::= a.String().try();
-    out.add_bytes(text).try();
-    Ok(out);
 }
 
 // `:` is 1 and `::` is 2; anything else is 0 and the parameter is

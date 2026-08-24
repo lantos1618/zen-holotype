@@ -31,21 +31,21 @@ emit_main* = (be :: CBackend, mi: usize, out :: Emit) Res<(), AllocError> {
     be.check.world.own_defs(mi, "main", found).try();
     found.get(0).match({
         None  => Ok(()),
-        Ok(d) => write_main(be, d, out),
+        Ok(d) => be.write_main(d, out),
     })
 }
 
 write_main = (be :: CBackend, d: Def, out :: Emit) Res<(), AllocError> {
     decl_at(be.tree, d.id).match({
         None  => Ok(()),
-        Ok(x) => write_main_call(be, d, x, out),
+        Ok(x) => be.write_main_call(d, x, out),
     })
 }
 
 write_main_call = (be :: CBackend, d: Def, x: Decl, out :: Emit)
                   Res<(), AllocError> {
     x.kind.match({
-        Function(f) => write_entry(be, d, f, out),
+        Function(f) => be.write_entry(d, f, out),
         _           => Ok(()),
     })
 }
@@ -53,24 +53,24 @@ write_main_call = (be :: CBackend, d: Def, x: Decl, out :: Emit)
 write_entry = (be :: CBackend, d: Def, f: Function, out :: Emit)
               Res<(), AllocError> {
     mi  = d.id.module.to_usize();
-    ret = return_type(be, f, plain_ctx(be, mi)).try();
+    ret = be.return_type(f, be.plain_ctx(mi)).try();
     sig ::= be.alloc.Vec<TyId>();
-    signature(be, f, mi, sig).try();
+    be.signature(f, mi, sig).try();
     rows ::= be.alloc.Vec<TyId>();
-    argv_rows(be, sig, rows).try();
+    be.argv_rows(sig, rows).try();
     call  ::= be.alloc.String().try();
     empty ::= be.alloc.Inst();
     sym_fn(call, be.check.types, be.check.world, d.qname, sig, empty).try();
     args ::= be.alloc.String().try();
-    write_entry_args(be, sig, args).try();
+    be.write_entry_args(sig, args).try();
     call.fmt("({})", args.view()).try();
     rows.get(0).match({
         None  => Ok(()),
-        Ok(v) => emit_argv_vec(be, v, out),
+        Ok(v) => be.emit_argv_vec(v, out),
     }).try();
     out.say(main_head(rows.len > 0)).try();
     out.indent();
-    write_exit(be, ret, call.view(), out).try();
+    be.write_exit(ret, call.view(), out).try();
     out.dedent();
     out.say("}").try();
     Ok(());
@@ -89,10 +89,10 @@ main_head = (wants_argv: bool) str {
 // every frame is reset, and the symbol must match the prototype's.
 signature = (be :: CBackend, f: Function, mi: usize, sig :: Vec<TyId>)
             Res<(), AllocError> {
-    ctx = plain_ctx(be, mi);
+    ctx = be.plain_ctx(mi);
     f.params.loop((h, p) {
         p.type.match({
-            Ok(t) => add_sig(be, t, ctx, sig),
+            Ok(t) => be.add_sig(t, ctx, sig),
             None  => Ok(()),
         }).try();
     });
@@ -112,23 +112,23 @@ write_entry_args = (be :: CBackend, sig: Vec<TyId>, out :: String)
                    Res<(), AllocError> {
     sig.loop((h, i, t) {
         (i > 0).then(() { out.add_bytes(", ").try() });
-        write_entry_arg(be, t, out).try();
+        be.write_entry_arg(t, out).try();
     });
     Ok(());
 }
 
 write_entry_arg = (be :: CBackend, t: TyId, out :: String)
                   Res<(), AllocError> {
-    argv_field(be, t).try().match({
-        None  => write_zero(be, t, out),
-        Ok(_) => write_env_value(be, t, out),
+    be.argv_field(t).try().match({
+        None  => be.write_zero(t, out),
+        Ok(_) => be.write_env_value(t, out),
     })
 }
 
 write_env_value = (be :: CBackend, t: TyId, out :: String)
                   Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, t, cty).try();
+    be.ctype(t, cty).try();
     mem ::= be.alloc.String().try();
     mem.sym_member("argv").try();
     out.fmt("(({}){ .{} = zg_argv_vec(argc, argv) })", cty.view(), mem.view())
@@ -138,13 +138,13 @@ write_env_value = (be :: CBackend, t: TyId, out :: String)
 // Asked of the TYPE, not the name: a struct qualifies by carrying the
 // rows, and a program with no `Env` simply has no such parameter.
 argv_field = (be :: CBackend, t: TyId) Res<Res<TyId>, AllocError> {
-    field_of(be, t, "argv")
+    be.field_of(t, "argv")
 }
 
 argv_rows = (be :: CBackend, sig: Vec<TyId>, out :: Vec<TyId>)
             Res<(), AllocError> {
     sig.loop((h, t) {
-        argv_field(be, t).try().match({
+        be.argv_field(t).try().match({
             None  => Ok(()),
             Ok(v) => out.add(v),
         }).try();
@@ -168,7 +168,7 @@ argv_rows = (be :: CBackend, sig: Vec<TyId>, out :: Vec<TyId>)
 emit_argv_vec = (be :: CBackend, v: TyId, out :: Emit)
                 Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, v, cty).try();
+    be.ctype(v, cty).try();
     head ::= be.alloc.String().try();
     head.fmt(
         "static {} zg_argv_vec(int argc, char **argv) {",
@@ -176,18 +176,18 @@ emit_argv_vec = (be :: CBackend, v: TyId, out :: Emit)
     ).try();
     out.say(head.view()).try();
     out.indent();
-    write_empty_rows(be, v, out).try();
+    be.write_empty_rows(v, out).try();
     out.say(
         "zg_str *rows = (zg_str *)malloc((size_t)argc * sizeof *rows);"
     ).try();
-    write_rows_guard(be, v, out).try();
+    be.write_rows_guard(v, out).try();
     out.say("for (int i = 0; i < argc; i++) {").try();
     out.indent();
     out.say("rows[i].data = (unsigned char *)argv[i];").try();
     out.say("rows[i].len = strlen(argv[i]);").try();
     out.dedent();
     out.say("}").try();
-    write_filled_rows(be, v, out).try();
+    be.write_filled_rows(v, out).try();
     out.dedent();
     out.say("}").try();
     out.line().try();
@@ -231,7 +231,7 @@ write_vec_literal = (
     out  :: String
 ) Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, v, cty).try();
+    be.ctype(v, cty).try();
     d ::= be.alloc.String().try();
     d.sym_member("data").try();
     l ::= be.alloc.String().try();
@@ -250,14 +250,14 @@ write_vec_literal = (
 write_zero = (be :: CBackend, t: TyId, out :: String) Res<(), AllocError> {
     be.check.types.at(t).match({
         Prim(_) => out.add_bytes("0"),
-        _       => write_zero_struct(be, t, out),
+        _       => be.write_zero_struct(t, out),
     })
 }
 
 write_zero_struct = (be :: CBackend, t: TyId, out :: String)
                     Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, t, cty).try();
+    be.ctype(t, cty).try();
     out.fmt("({}){0}", cty.view())
 }
 
@@ -266,8 +266,8 @@ write_zero_struct = (be :: CBackend, t: TyId, out :: String)
 write_exit = (be :: CBackend, ret: TyId, call: str, out :: Emit)
              Res<(), AllocError> {
     be.check.types.at(ret).match({
-        Res(r) => write_res_exit(be, r, ret, call, out),
-        _      => write_plain_exit(be, ret, call, out),
+        Res(r) => be.write_res_exit(r, ret, call, out),
+        _      => be.write_plain_exit(ret, call, out),
     })
 }
 
@@ -279,14 +279,14 @@ write_res_exit = (
     out  :: Emit
 ) Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, ret, cty).try();
+    be.ctype(ret, cty).try();
     line ::= be.alloc.String().try();
     line.fmt("{} zg_r = {call};", cty.view()).try();
     out.say(line.view()).try();
     tag ::= be.alloc.String().try();
     sym_variant(tag, RES_PATH, "Ok").try();
     code ::= be.alloc.String().try();
-    write_ok_value(be, r, code).try();
+    be.write_ok_value(r, code).try();
     guard ::= be.alloc.String().try();
     guard.fmt(
         "if (zg_r.zg_tag == {}) return {};",
@@ -316,7 +316,7 @@ write_plain_exit = (be :: CBackend, ret: TyId, call: str, out :: Emit)
                    Res<(), AllocError> {
     is_c_integer(be.check.prim_name(ret)).match({
         true  => write_int_exit(call, out),
-        false => write_void_exit(be, ret, call, out),
+        false => be.write_void_exit(ret, call, out),
     })
 }
 

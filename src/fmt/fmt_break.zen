@@ -234,7 +234,9 @@ round_clean = (a: Alloc, text: str, lexed: Lexed, join: bool)
     })
 }
 
-copy_of = (a: Alloc, text: str) Res<String, AllocError> {
+// The input, unchanged: a round's starting text, and the fault arm of a
+// pass that cannot eat code. `fmt_decl.zen`'s fault arms are this copy.
+copy_of* = (a: Alloc, text: str) Res<String, AllocError> {
     out ::= a.String().try();
     out.add_bytes(text).try();
     Ok(out);
@@ -690,8 +692,8 @@ may_relay = (src: Src, c: Cand) bool {
     first = c.items.ptr().read(0);
     last  = c.items.ptr().read(c.items.len - 1);
     clear ::= c.parens.match({
-        true  => all_space(src, c.lo + 1, first.lo)
-              && all_space(src, last.hi, c.hi - 1),
+        true  => src.all_space(c.lo + 1, first.lo)
+              && src.all_space(last.hi, c.hi - 1),
         false => true,
     });
     Range(0, c.items.len - 1).loop((h, i) {
@@ -722,23 +724,11 @@ one_line = (src: Src, from: usize, to: usize) bool {
 // nowhere else, because a gap holds only trivia and the one punctuator:
 // a comment shows up as a byte that is neither, and the gap is refused.
 clean_gap = (src: Src, from: usize, to: usize, sep: u8) bool {
-    mid = skip_space(src, from, to);
+    mid = src.skip_space(from, to);
     (mid < to && src.text.index(mid) == sep).match({
         false => false,
-        true  => skip_space(src, mid + 1, to) == to,
+        true  => src.skip_space(mid + 1, to) == to,
     })
-}
-
-all_space = (src: Src, from: usize, to: usize) bool {
-    skip_space(src, from, to) == to
-}
-
-skip_space = (src: Src, from: usize, to: usize) usize {
-    at ::= from;
-    loop(() { at < to && src.text.index(at).is_space() }, (h) {
-        at = at + 1;
-    });
-    at;
 }
 
 // -------------------------------------------------------------------
@@ -797,7 +787,7 @@ emit_break = (a: Alloc, src: Src, c: Cand, edits :: Vec<Edit>)
              Res<bool, AllocError> {
     was    = edits.len;
     start  = src.line_at(c.line);
-    indent = skip_space(src, start, src.after_line(c.line)) - start;
+    indent = src.skip_space(start, src.after_line(c.line)) - start;
     close ::= a.String().try();
     close.fmt("\n{}", src.slice_at(start, start + indent)).try();
     nl ::= a.String().try();

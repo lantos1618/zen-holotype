@@ -31,7 +31,7 @@ Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
 param_type = sema.sema_type
-member_named, self_ctx = sema.sema_member
+self_ctx = sema.sema_member
 ty_at = sema.sema_cand
 Emit, order = gen.gen_emit
 sym_fn, sym_local = gen.gen_name
@@ -74,22 +74,22 @@ MAX_FUNCTIONS* : usize = 8192
 // The whole translation unit for the program rooted at module `mi`.
 emit_program* = (be :: CBackend, mi: usize, out :: Emit)
                 Res<(), AllocError> {
-    seed(be, mi).try();
+    be.seed(mi).try();
     drain(be).try();
     emit_banner(out).try();
     emit_floor(out).try();
     emit_scope_floor(be, out).try();
     emit_fs(be, out).try();
-    emit_stdin(be, out).try();
+    be.emit_stdin(out).try();
     emit_print(be, out).try();
     emit_helpers(be, out).try();
-    emit_types(be, out).try();
+    be.emit_types(out).try();
     // AFTER the types, because a capture record names them, and before
     // the prototypes, because a `Scope` parameter is a `zg_scope *`.
     emit_scope(be, out).try();
-    emit_protos(be, out).try();
-    emit_bodies(be, out).try();
-    emit_main(be, mi, out).try();
+    be.emit_protos(out).try();
+    be.emit_bodies(out).try();
+    be.emit_main(mi, out).try();
     Ok(());
 }
 
@@ -98,14 +98,14 @@ emit_program* = (be :: CBackend, mi: usize, out :: Emit)
 seed = (be :: CBackend, mi: usize) Res<(), AllocError> {
     be.tree.module_at(mi).match({
         None  => Ok(()),
-        Ok(m) => seed_module(be, m, mi),
+        Ok(m) => be.seed_module(m, mi),
     }).try();
     Ok(());
 }
 
 seed_module = (be :: CBackend, m: Module, mi: usize) Res<(), AllocError> {
     Range(0, m.decls.len).loop((h, di) {
-        seed_decl(be, m, mi, di).try();
+        be.seed_decl(m, mi, di).try();
     });
     Ok(());
 }
@@ -114,7 +114,7 @@ seed_decl = (be :: CBackend, m: Module, mi: usize, di: usize)
             Res<(), AllocError> {
     m.decls.get(di).match({
         None  => Ok(()),
-        Ok(d) => seed_function(be, m, mi, d),
+        Ok(d) => be.seed_function(m, mi, d),
     }).try();
     Ok(());
 }
@@ -122,7 +122,7 @@ seed_decl = (be :: CBackend, m: Module, mi: usize, di: usize)
 seed_function = (be :: CBackend, m: Module, mi: usize, d: Decl)
                 Res<(), AllocError> {
     d.kind.match({
-        Function(f) => seed_named(be, m, mi, f),
+        Function(f) => be.seed_named(m, mi, f),
         _           => Ok(()),
     })
 }
@@ -140,23 +140,23 @@ seed_function = (be :: CBackend, m: Module, mi: usize, d: Decl)
 // at its call sites, like the six loop declarations.
 seed_named = (be :: CBackend, m: Module, mi: usize, f: Function)
              Res<(), AllocError> {
-    ((f.tparams.len > 0) || takes_closure(be, f)).match({
+    ((f.tparams.len > 0) || be.takes_closure(f)).match({
         true  => Ok(()),
-        false => seed_defs(be, mi, f),
+        false => be.seed_defs(mi, f),
     })
 }
 
 seed_defs = (be :: CBackend, mi: usize, f: Function) Res<(), AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.own_defs(mi, f.name.text, found).try();
-    found.loop((h, d) { seed_def(be, d).try() });
+    found.loop((h, d) { be.seed_def(d).try() });
     Ok(());
 }
 
 seed_def = (be :: CBackend, d: Def) Res<(), AllocError> {
     is_function(d).match({
         false => Ok(()),
-        true  => seed_root(be, d),
+        true  => be.seed_root(d),
     })
 }
 
@@ -166,7 +166,7 @@ seed_def = (be :: CBackend, d: Def) Res<(), AllocError> {
 seed_root = (be :: CBackend, d: Def) Res<(), AllocError> {
     inst ::= be.alloc.Inst();
     sig  ::= be.alloc.Vec<TyId>();
-    signature_of(be, d, inst, sig).try();
+    be.signature_of(d, inst, sig).try();
     sym ::= be.alloc.String().try();
     sym_fn(sym, be.check.types, be.check.world, d.qname, sig, inst).try();
     be.need_function(d, inst, sym.view())
@@ -189,17 +189,17 @@ is_function = (d: Def) bool {
 drain = (be :: CBackend) Res<(), AllocError> {
     fi ::= 0;
     mi ::= 0;
-    loop(() { more(be, fi, mi) }, (h) {
+    loop(() { be.more(fi, mi) }, (h) {
         (fi < be.fn_queue.len).then(() {
-            lower_queued(be, fi).try();
+            be.lower_queued(fi).try();
             fi = fi + 1;
         });
         (mi < be.m_queue.len).then(() {
-            lower_queued_method(be, mi).try();
+            be.lower_queued_method(mi).try();
             mi = mi + 1;
         });
     });
-    report_overrun(be, fi, mi).try();
+    be.report_overrun(fi, mi).try();
     Ok(());
 }
 
@@ -215,9 +215,9 @@ more = (be :: CBackend, fi: usize, mi: usize) bool {
 // bug in a program that has none. Silent truncation is the worst
 // failure mode this compiler has.
 report_overrun = (be :: CBackend, fi: usize, mi: usize) Res<(), AllocError> {
-    (fi < be.fn_queue.len).then(() { overrun_at_fn(be, fi).try() });
+    (fi < be.fn_queue.len).then(() { be.overrun_at_fn(fi).try() });
     ((fi >= be.fn_queue.len) && (mi < be.m_queue.len)).then(() {
-        overrun_at_method(be, mi).try()
+        be.overrun_at_method(mi).try()
     });
     Ok(());
 }
@@ -239,7 +239,7 @@ overrun_at_fn = (be :: CBackend, fi: usize) Res<(), AllocError> {
 overrun_at_method = (be :: CBackend, mi: usize) Res<(), AllocError> {
     be.m_queue.get(mi).match({
         None  => Ok(()),
-        Ok(m) => overrun_at_decl(be, m),
+        Ok(m) => be.overrun_at_decl(m),
     }).try();
     Ok(());
 }
@@ -270,7 +270,7 @@ lower_queued = (be :: CBackend, i: usize) Res<(), AllocError> {
     }));
     be.fn_queue.get(i).match({
         None  => Ok(()),
-        Ok(d) => lower_def(be, d),
+        Ok(d) => be.lower_def(d),
     }).try();
     Ok(());
 }
@@ -282,7 +282,7 @@ lower_queued_method = (be :: CBackend, i: usize) Res<(), AllocError> {
     }));
     be.m_queue.get(i).match({
         None  => Ok(()),
-        Ok(m) => lower_method_ref(be, m),
+        Ok(m) => be.lower_method_ref(m),
     }).try();
     Ok(());
 }
@@ -290,14 +290,14 @@ lower_queued_method = (be :: CBackend, i: usize) Res<(), AllocError> {
 lower_def = (be :: CBackend, d: Def) Res<(), AllocError> {
     decl_at(be.tree, d.id).match({
         None  => Ok(()),
-        Ok(x) => lower_decl(be, d, x),
+        Ok(x) => be.lower_decl(d, x),
     }).try();
     Ok(());
 }
 
 lower_decl = (be :: CBackend, d: Def, x: Decl) Res<(), AllocError> {
     x.kind.match({
-        Function(f) => lower_function(be, d, x, f),
+        Function(f) => be.lower_function(d, x, f),
         _           => Ok(()),
     })
 }
@@ -312,7 +312,7 @@ lower_function = (be :: CBackend, d: Def, x: Decl, f: Function)
                  Res<(), AllocError> {
     f.body.match({
         None    => Ok(()),
-        Ok(blk) => lower_body(be, d, x, f, blk),
+        Ok(blk) => be.lower_body(d, x, f, blk),
     })
 }
 
@@ -323,20 +323,10 @@ lower_function = (be :: CBackend, d: Def, x: Decl, f: Function)
 lower_body = (be :: CBackend, d: Def, x: Decl, f: Function, blk: BlockId)
              Res<(), AllocError> {
     mi   = d.id.module.to_usize();
-    ctx  = plain_ctx(be, mi);
-    mark = enter_tparams(be, f.tparams, d.qname).try();
-    lower_shape(
-        be,
-        f,
-        blk,
-        d.qname,
-        d.name,
-        d.span,
-        ctx,
-        ctx.self_ty,
-        mi
-    ).try();
-    leave_tparams(be, mark).try();
+    ctx  = be.plain_ctx(mi);
+    mark = be.enter_tparams(f.tparams, d.qname).try();
+    be.lower_shape(f, blk, d.qname, d.name, d.span, ctx, ctx.self_ty, mi).try();
+    be.leave_tparams(mark).try();
     Ok(());
 }
 
@@ -351,14 +341,14 @@ lower_body = (be :: CBackend, d: Def, x: Decl, f: Function, blk: BlockId)
 lower_method_ref = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
     decl_at(be.tree, m.decl).match({
         None  => Ok(()),
-        Ok(x) => method_in_decl(be, m, x),
+        Ok(x) => be.method_in_decl(m, x),
     })
 }
 
 method_in_decl = (be :: CBackend, m: MethodRef, x: Decl)
                  Res<(), AllocError> {
     x.kind.match({
-        Struct(s) => method_member(be, m, s),
+        Struct(s) => be.method_member(m, s),
         _         => Ok(()),
     })
 }
@@ -373,20 +363,20 @@ method_member = (be :: CBackend, m: MethodRef, s: Struct)
                 Res<(), AllocError> {
     found ::= be.alloc.Vec<Member>();
     s.members.loop((h, mem) {
-        member_named(mem, m.name).then(() { found.add(mem).try() });
+        mem.named(m.name).then(() { found.add(mem).try() });
     });
-    by_sig(be, m, found).try().match({
+    be.by_sig(m, found).try().match({
         None    => supplied_member(be, m),
-        Ok(mem) => method_body(be, m, mem),
+        Ok(mem) => be.method_body(m, mem),
     })
 }
 
 supplied_member = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
     found ::= be.alloc.Vec<Member>();
-    impl_member_at(be, m.decl, m.name, found).try();
-    by_sig(be, m, found).try().match({
+    be.impl_member_at(m.decl, m.name, found).try();
+    be.by_sig(m, found).try().match({
         None    => Ok(()),
-        Ok(mem) => method_body(be, m, mem),
+        Ok(mem) => be.method_body(m, mem),
     })
 }
 
@@ -405,7 +395,7 @@ by_sig = (be :: CBackend, m: MethodRef, found: Vec<Member>)
          Res<Res<Member>, AllocError> {
     (found.len < 2).match({
         true  => Ok(by_arity(be, found, m.sig.len)),
-        false => member_with_sig(be, m, found),
+        false => be.member_with_sig(m, found),
     })
 }
 
@@ -417,8 +407,8 @@ by_sig = (be :: CBackend, m: MethodRef, found: Vec<Member>)
 member_with_sig = (be :: CBackend, m: MethodRef, found: Vec<Member>)
                   Res<Res<Member>, AllocError> {
     kept ::= be.alloc.Vec<Member>();
-    found.loop((h, mem) { keep_same_sig(be, m, mem, kept).try() });
-    Ok(kept_or_arity(be, kept, found, m.sig.len));
+    found.loop((h, mem) { be.keep_same_sig(m, mem, kept).try() });
+    Ok(be.kept_or_arity(kept, found, m.sig.len));
 }
 
 // A named helper rather than a `.then` inside the loop body: a loop
@@ -430,7 +420,7 @@ keep_same_sig = (
     kept :: Vec<Member>
 ) Res<(), AllocError> {
     mem.kind.match({
-        Function(f) => keep_if_same_sig(be, m, mem, f, kept),
+        Function(f) => be.keep_if_same_sig(m, mem, f, kept),
         _           => Ok(()),
     })
 }
@@ -446,8 +436,7 @@ keep_if_same_sig = (
     kept :: Vec<Member>
 ) Res<(), AllocError> {
     sig ::= be.alloc.Vec<TyId>();
-    method_sig(
-        be,
+    be.method_sig(
         m.self_ty,
         m.decl,
         f,
@@ -470,7 +459,7 @@ same_tys = (a: Vec<TyId>, b: Vec<TyId>) bool {
 method_body = (be :: CBackend, m: MethodRef, mem: Member)
               Res<(), AllocError> {
     mem.kind.match({
-        Function(f) => method_fn(be, m, mem, f),
+        Function(f) => be.method_fn(m, mem, f),
         _           => Ok(()),
     })
 }
@@ -479,7 +468,7 @@ method_fn = (be :: CBackend, m: MethodRef, mem: Member, f: Function)
             Res<(), AllocError> {
     f.body.match({
         None    => Ok(()),
-        Ok(blk) => method_shape(be, m, mem, f, blk),
+        Ok(blk) => be.method_shape(m, mem, f, blk),
     })
 }
 
@@ -494,16 +483,16 @@ method_shape = (
     blk : BlockId
 ) Res<(), AllocError> {
     mi      = m.decl.module.to_usize();
-    self_ty = method_self(be, m).try();
+    self_ty = be.method_self(m).try();
     ctx     = be.check.self_ctx(mi, self_ty).try();
-    mark    = enter_struct_tparams(be, m.decl).try();
+    mark    = be.enter_struct_tparams(m.decl).try();
     // AND THE MEMBER'S OWN, under the member's qualified name: an impl
     // reached through a bound's erased slot is emitted at the byte type,
     // and `T` in its body means nothing unless the same owner that bound
     // it in the queue entry binds it again here.
-    enter_tparams(be, f.tparams, m.qname).try();
-    lower_shape(be, f, blk, m.qname, m.name, mem.span, ctx, self_ty, mi).try();
-    leave_tparams(be, mark).try();
+    be.enter_tparams(f.tparams, m.qname).try();
+    be.lower_shape(f, blk, m.qname, m.name, mem.span, ctx, self_ty, mi).try();
+    be.leave_tparams(mark).try();
     Ok(());
 }
 
@@ -513,9 +502,9 @@ method_shape = (
 // no arguments has one emission and nothing to confuse, and `str`'s
 // receiver is a PRIMITIVE no declaration's name interns to.
 method_self = (be :: CBackend, m: MethodRef) Res<TyId, AllocError> {
-    generic_recv(be, m.self_ty).match({
+    be.generic_recv(m.self_ty).match({
         false => Ok(m.self_ty),
-        true  => open_self(be, m),
+        true  => be.open_self(m),
     })
 }
 
@@ -524,7 +513,7 @@ generic_recv = (be: CBackend, ty: TyId) bool {
 }
 
 open_self = (be :: CBackend, m: MethodRef) Res<TyId, AllocError> {
-    open_named(be, m.decl).try().match({
+    be.open_named(m.decl).try().match({
         None  => Ok(m.self_ty),
         Ok(t) => Ok(t),
     })
@@ -550,16 +539,16 @@ lower_shape = (
     mi      : usize
 )
               Res<(), AllocError> {
-    ret = return_type(be, f, sctx).try();
+    ret = be.return_type(f, sctx).try();
     be.reset_frame().try();
     be.check.release(0).try();
     sig   ::= be.alloc.Vec<TyId>();
     proto ::= be.alloc.String().try();
     bind_params(be, f, sctx, sig).try();
-    write_proto(be, qname, name, span, f, ret, sig, proto).try();
+    be.write_proto(qname, name, span, f, ret, sig, proto).try();
     be.open_buf().try();
-    write_body(be, blk, mi, ret, self_ty, sctx.has_self).try();
-    keep(be, qname, sig, proto).try();
+    be.write_body(blk, mi, ret, self_ty, sctx.has_self).try();
+    be.keep(qname, sig, proto).try();
     Ok(());
 }
 
@@ -567,7 +556,7 @@ lower_shape = (
 // emission is the one that knows which `T`.
 return_type* = (be :: CBackend, f: Function, ctx: Ctx)
               Res<TyId, AllocError> {
-    declared = declared_ret(be, f, ctx).try();
+    declared = be.declared_ret(f, ctx).try();
     sub(be, declared)
 }
 
@@ -667,13 +656,13 @@ write_proto = (
     out   :: String
 )
               Res<(), AllocError> {
-    check_spellable(be, name, span, ret, sig).try();
+    be.check_spellable(name, span, ret, sig).try();
     out.add_bytes("static ").try();
-    ctype(be, ret, out).try();
+    be.ctype(ret, out).try();
     out.add_bytes(" ").try();
     sym_fn(out, be.check.types, be.check.world, qname, sig, be.inst).try();
     out.add_bytes("(").try();
-    write_params(be, f, sig, out).try();
+    be.write_params(f, sig, out).try();
     out.add_bytes(")").try();
     Ok(());
 }
@@ -682,7 +671,7 @@ write_params = (be :: CBackend, f: Function, sig: Vec<TyId>, out :: String)
                Res<(), AllocError> {
     (f.params.len == 0).match({
         true  => out.add_bytes("void"),
-        false => write_param_list(be, f, sig, out),
+        false => be.write_param_list(f, sig, out),
     })
 }
 
@@ -694,7 +683,7 @@ write_param_list = (
 ) Res<(), AllocError> {
     f.params.loop((h, i, p) {
         (i > 0).then(() { out.add_bytes(", ").try() });
-        write_param(be, p, i, sig, out).try();
+        be.write_param(p, i, sig, out).try();
     });
     Ok(());
 }
@@ -709,10 +698,10 @@ write_param = (
 ) Res<(), AllocError> {
     ty = sig.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
     name ::= be.alloc.String().try();
-    slot_index(be, p.name.text, name).try();
+    be.slot_index(p.name.text, name).try();
     p.mutable.match({
-        false => declarator(be, ty, name.view(), out),
-        true  => ref_declarator(be, ty, name.view(), out),
+        false => be.declarator(ty, name.view(), out),
+        true  => be.ref_declarator(ty, name.view(), out),
     })
 }
 
@@ -721,7 +710,7 @@ write_param = (
 // a dereference, which is what `LocalSlot.by_ref` records.
 ref_declarator* = (be :: CBackend, ty: TyId, name: str, out :: String)
                   Res<(), AllocError> {
-    ctype(be, ty, out).try();
+    be.ctype(ty, out).try();
     out.fmt(" *{name}")
 }
 
@@ -740,14 +729,14 @@ check_spellable = (
     ret  : TyId,
     sig  : Vec<TyId>
 ) Res<(), AllocError> {
-    report_unspellable(be, name, span, ret).try();
-    sig.loop((h, t) { report_unspellable(be, name, span, t).try() });
+    be.report_unspellable(name, span, ret).try();
+    sig.loop((h, t) { be.report_unspellable(name, span, t).try() });
     Ok(());
 }
 
 report_unspellable = (be :: CBackend, name: str, span: Span, t: TyId)
                      Res<(), AllocError> {
-    spellable(be, t).match({
+    be.spellable(t).match({
         true  => Ok(()),
         false => be.report(span.file, span, GenFault.Unspellable(name)),
     })
@@ -765,14 +754,14 @@ write_body = (
     self_ty  : TyId,
     has_self : bool
 ) Res<(), AllocError> {
-    ctx = self_body_ctx(be, mi, ret, self_ty, has_self);
+    ctx = be.self_body_ctx(mi, ret, self_ty, has_self);
     be.indent();
-    block(be, blk, ctx, ret, destination(be, ret)).try();
+    block(be, blk, ctx, ret, be.destination(ret)).try();
     Ok(());
 }
 
 destination = (be :: CBackend, ret: TyId) Dest {
-    is_unit(be, ret).match({
+    be.is_unit(ret).match({
         true  => Dest.Discard,
         false => Dest.Return,
     })
@@ -812,7 +801,7 @@ write_proto_line = (out :: Emit, proto: String) Res<(), AllocError> {
 emit_bodies = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     seq = order(be.alloc, be.fn_names).try();
     seq.loop((h, i) {
-        write_body_at(be, out, i).try();
+        be.write_body_at(out, i).try();
     });
     Ok(());
 }

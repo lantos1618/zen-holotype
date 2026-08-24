@@ -49,10 +49,10 @@ Companion to `DESIGN.md`, `PLAN.md` and `TESTING.md`. Those say what the languag
 | **one AST, and it is already the target** | `src/std/ast/ast_arena.zen:56` — `Ast.add_expr` is exported and appends; a comptime-built node has an arena to live in |
 | **hygienic inlining of a lambda at a call site** | `src/gen/gen_c/gen_c_inline.zen` — `Closure` records both scope depths and `run_closure` rewinds to them. This is the field-walk's unroll, already written |
 | **one body per instantiation** | `src/gen/gen_c/gen_c_mono.zen`, reading `sema_inst.zen`'s answer back |
-| a step-budgeted expression folder, with the argument for the budget | `src/sema/sema_trap.zen:392` (`FOLD_DEPTH`), `:396` (`const_int`) |
+| a step-budgeted expression folder, with the argument for the budget | `src/sema/sema_trap.zen:505` (`FOLD_DEPTH`), `:509` (`const_int`) |
 | the refusal | `src/sema/sema_meta.zen` — §3, M0 |
 
-`sema_trap.zen:386` is worth quoting because it draws the line this document has to cross:
+`sema_trap.zen:498` is worth quoting because it draws the line this document has to cross:
 
 > A budget is right here (elsewhere a bound must REPORT) because this is a **prover**: declining to prove is already what this file does for values reached through a binding.
 
@@ -85,9 +85,9 @@ After: one diagnostic at the `@meta` token, naming `@meta` and pointing here. A 
 
 ---
 
-## 4. The surface is under-specified, and that is M1
+## 4. The surface was under-specified, and that was M1 — RESOLVED
 
-`DESIGN.md`'s three `@meta` examples do not type-check against `src/std/ast/ast_node.zen`. This is not pedantry: "it gets the compiler's own nodes" is the entire thesis, and three of the names in the worked examples are not the compiler's.
+`DESIGN.md`'s three `@meta` examples did not type-check against `src/std/ast/ast_node.zen`. This was not pedantry: "it gets the compiler's own nodes" is the entire thesis, and three of the names in the worked examples were not the compiler's. The table below is kept as the record of what was wrong; the rulings after it are what `DESIGN.md` now writes.
 
 | written in `DESIGN.md` | what `src/std/ast/` actually has | the collision |
 |---|---|---|
@@ -96,16 +96,18 @@ After: one diagnostic at the `@meta` token, naming `@meta` and pointing here. A 
 | `@meta(n).type` (`:1324`) | `Decl.kind*: DeclKind` | `type` is not a member of any node; and the example's `Other(o)` arm is not one of `DeclKind`'s seven variants, so as written it is also not exhaustive (`SemaFault.NotExhaustive`) |
 | `Field(name: "foo", value: 1)` (`:1338`) | `Field.name*: Ident`, `Field.value*: Res<ExprId>` | a `str` where an `Ident` goes and an `i64` where an id goes. Building a node needs a **builder** over an `Ast`, which exists (`ast_arena.zen:56`) but is not what the example writes |
 
-There is a further ambiguity `tests/parse/constructs.md` already flags as **A-META-ARG** and does not settle: in `@meta(self: @Self)`, is `self: @Self` a labelled argument, a type ascription, or `@meta`-specific syntax? The parser has answered structurally — `Meta` carries `name` + `type` as its own fields — but the *meaning* is unrecorded, and the bootstrapper has already answered differently (§1).
+There was a further ambiguity `tests/parse/constructs.md` flagged as **A-META-ARG**: in `@meta(self: @Self)`, is `self: @Self` a labelled argument, a type ascription, or `@meta`-specific syntax? The parser had answered structurally — `Meta` carries `name` + `type` as its own fields — but the *meaning* was unrecorded, and the bootstrapper had already answered differently (§1). Settled by R5 below.
 
-**So M1 is a decision, not code**, and it is the user's: `DESIGN.md` is the constitution and three of its sentences have to move. The cheapest resolution that keeps the thesis intact:
+**M1 was a decision, not code**, and it has been made. The rulings, numbered so later milestones can cite them:
 
-- `.fields` becomes a **method on `ast.Struct`** returning its `Field` members. A helper on the real node is not a parallel node type; a struct with friendlier copies of the same data is.
-- `field.value` cannot mean two things. The instance projection needs its own spelling — `self.at(field)` or `field.read(self)` — and the default keeps `value`. Naming is a judgement; the collision is not.
-- `.type` becomes `.kind`, and the example gains a `_` arm or names all seven variants.
-- the build example is rewritten against a builder.
+- **R1 — `.type` becomes `.kind`.** `kind` is `DeclKind` (`ast_node.zen:421`, seven variants); the DumpAst example's bogus `Other(o)` arm became `_`, so the match is exhaustive against the real enum.
+- **R2 — `.fields` becomes `.fields()`**, a ratified helper over `Struct.members` filtering `MemberKind.Field`; the helper itself lands in std/ast with M4 (the field-walk milestone). `fields()` is the READ view; building goes through `members`. A helper on the real node is not a parallel node type; a struct with friendlier copies of the same data is.
+- **R3 — the instance projection is spelled `self.at(field)`**, a comptime-substituted access the expander rewrites to `self.<field name>`. `Field.value` keeps its real meaning: the default expression. The name could not mean two things.
+- **R4 — building is arena calls** (`ast_arena.zen:56`) **plus a builder surface of helpers over `Ast`** (`int_expr`, `field_member`, ...) landing with M6; the AddFoo example was rewritten against it.
+- **R5 — A-META-ARG settled:** `name: Type` inside `@meta(...)` is a labelled binding, `@meta`-specific syntax, not a call argument.
+- **R6 — the two forms.** The typed form `@meta(name: Type)` yields Type's declaration PAYLOAD node (the `Struct` itself for a struct type — hence `.name`, `.fields()`), with `name` bound as the runtime receiver projections read from. The value form `@meta(v)` yields the `Decl` of v's type, `.kind` the comptime typecase whose arms bind v refined. The value form reflects the value's TYPE, never its expression.
 
-**Gate:** `make design` — every complete example in `DESIGN.md` must parse — plus the table above going to zero rows. **Risk:** ratifying the wrong names here is the one mistake in this whole plan that is expensive to undo, because `Display.dump`'s body is quoted verbatim in `src/std/core/display.zen` and in `DESIGN.md`, and every later milestone is written against it.
+**Gate: met.** `make design` — every complete example in `DESIGN.md` must parse — and the table above went to zero rows: R1–R4 answer the four rows, R5 settles A-META-ARG, R6 settles the two forms. **Risk, now retired:** ratifying the wrong names here was the one mistake in this whole plan that was expensive to undo, because `Display.dump`'s body is quoted verbatim in `src/std/core/display.zen` and in `DESIGN.md`, and every later milestone is written against it.
 
 ---
 
@@ -115,18 +117,18 @@ Read `DESIGN.md:564` closely:
 
 ```groovy
 out.add("{} {", @meta(self: @Self).name);
-@meta(self: @Self).fields.loop((h, field) {
-    out.add(" {}: {},", field.name, field.value);
+@meta(self: @Self).fields().loop((h, field) {
+    out.add(" {}: {},", field.name, self.at(field));
 });
 ```
 
-`field.name` is known at compile time. `field.value` is a **runtime** value, of a **different type at each iteration**. And `out` is a runtime sink. So this loop is not evaluated at comptime and it is not compiled as a loop either: it is **unrolled**, once per field, and each copy of the body is ordinary runtime code with one comptime-known name substituted.
+`field.name` is known at compile time. `self.at(field)` is a **runtime** value, of a **different type at each iteration**. And `out` is a runtime sink. So this loop is not evaluated at comptime and it is not compiled as a loop either: it is **unrolled**, once per field, and each copy of the body is ordinary runtime code with one comptime-known name substituted.
 
 That is partial evaluation over two stages, and it means the evaluator's output is not a value — it is **program text**. Anyone who builds "an interpreter that returns a comptime value" will get `.name` working and discover that the canonical example of the feature does not fit through it.
 
 Consequences, and they are the load-bearing paragraphs of this document:
 
-1. **The evaluator's answer domain has two kinds of thing**: known values, and *residual* expressions standing for something only the running program will know. `self` is residual from the start. `@meta(self: @Self)` is known. `field.value` is residual, derived from a known field name and a residual receiver.
+1. **The evaluator's answer domain has two kinds of thing**: known values, and *residual* expressions standing for something only the running program will know. `self` is residual from the start. `@meta(self: @Self)` is known. `self.at(field)` is residual, derived from a known field name and a residual receiver.
 2. **Expansion happens per instantiation, not once.** `Display.dump` means something different for every implementing type. `sema_inst.zen:10` says a generic body is deliberately checked exactly **once**, generically — and `sema.zen` already records that `type_of`'s memo key must become `(ExprId, instantiation)` before hover is correct inside a generic. **A body containing `@meta` is the first body for which "check once" is wrong, and it is wrong for a reason the memo comment does not cover:** the objection there is that re-checking would *duplicate* the diagnostics a body owes, and an `@meta` body's diagnostics are not duplicates — they are different sentences about different instantiations.
 3. **The residue must be type-checked.** This tree's worst bugs are unchecked plausible answers: match arms that were never typed, a join that answered `int` at 28 sites, field defaults that silently produced zeros. Code the compiler *generated* is the last place to relax that.
 
@@ -140,7 +142,7 @@ Rejected. The residue would never be type-checked; `genJs` would need a second c
 
 **Recommended: (b).** Its two prerequisites are real and should be measured before M2 starts:
 
-- **`Checker.tree` is immutable** (`sema_check.zen:97`, `tree*: Ast`), and an expander appends. Making it `::` has a blast radius nobody has measured, and `Ast` is held **by value**, which is a question about shallow copies of its `Vec`s before it is a question about mutability.
+- **`Checker.tree` is immutable** (`sema_check.zen:96`, `tree*: Ast`), and an expander appends. Making it `::` has a blast radius nobody has measured, and `Ast` is held **by value**, which is a question about shallow copies of its `Vec`s before it is a question about mutability.
 - **Nothing may see the expansion but sema and the backend.** `zen fmt` reprints what the parser produced and `make fmt` asserts the token stream is unchanged (`fmt.zen:45`, `faithful`); expanded nodes must never reach it.
 
 ---
@@ -165,17 +167,19 @@ So `@meta` is tested by the two oracles that remain — must-fail and mutation �
 
 M0 is landed. Each of the rest names what it unblocks, its gate, and its risk. The numbering differs from the sketch this lane was handed, and §7.1 says why.
 
-### M1 — the surface, ratified
-§4. A decision and a `DESIGN.md` edit; no compiler code. **Unblocks:** every milestone below, all of which are written against these names. **Gate:** `make design`, plus §4's table at zero rows. **Risk:** it is a constitutional change and the wrong names are expensive to withdraw.
+### M1 — the surface, ratified. LANDED
+§4. A decision and a `DESIGN.md` edit; no compiler code. **Decided:** the four table rows (R1–R4), A-META-ARG (R5), and the two forms (R6) — the rulings live in §4. **Unblocks:** every milestone below, all of which are written against these names. **Gate:** `make design`, plus §4's table at zero rows. **Risk:** it was a constitutional change and the wrong names would have been expensive to withdraw.
 
 ### M2 — the comptime evaluator
-The language minus io and actors (`DESIGN.md:472`), may allocate, may loop, **step-budgeted from the first commit, and the budget REPORTS** — `sema_trap.zen:386` explains why a prover may decline and an evaluator may not. Two value kinds, known and residual (§5). **Unblocks:** M3 onward. **Gate:** none of its own — see §7.2. **Risks:** (i) a hanging build is the failure mode that makes the feature unusable, so the budget is not deferrable; (ii) recursion in the evaluator over deeply-nested input is a segfault, not a diagnostic — `sema_trap.zen:382` records that this tree has already been bitten there; (iii) allocation at comptime needs an `Alloc`, and whose it is (the `Checker`'s? the `Ast`'s?) is a design question, not a lookup.
+The language minus io and actors (`DESIGN.md:472`), may allocate, may loop, **step-budgeted from the first commit, and the budget REPORTS** — `sema_trap.zen:498` explains why a prover may decline and an evaluator may not. Two value kinds, known and residual (§5). **Unblocks:** M3 onward. **Gate:** none of its own — see §7.2. **Risks:** (i) a hanging build is the failure mode that makes the feature unusable, so the budget is not deferrable; (ii) recursion in the evaluator over deeply-nested input is a segfault, not a diagnostic — `sema_trap.zen:495-496` records that this tree has already been bitten there; (iii) allocation at comptime needs an `Alloc`, and whose it is (the `Checker`'s? the `Ast`'s?) is a design question, not a lookup.
 
-### M3 — READ, one member deep
-`@meta(self: @Self).name` becomes a `str` in the residue. **The first green line of the feature**, and the whole point of making it a milestone is that it is the smallest thing that exercises the entire path: sema types `Meta`, the evaluator answers, the residue is an ordinary literal, the backend lowers it having learned nothing new. **Also lands the zen-only sidecar and the hand-written-twin pairing (§6).** **Gate:** a `corpus/meta/` pair — `type_name_via_meta` (zen-only) and `type_name_by_hand` — with one shared `.expected`. **Risk:** the temptation to special-case this in the backend and call the feature started. A `.name` that works with no evaluator behind it is a demo and a lie in the tree; `sema_meta.zen` is where it goes instead.
+**Skeleton landed under M3, as §7.2 said it would** — and the skeleton is what landed, not the evaluator. The budget exists from the first commit and REPORTS: `META_STEPS: usize = 4096` (`sema_meta.zen:50`), threaded as remaining fuel, raising `SemaFault.ComptimeBudget` (`sema_diag.zen:150`; the message names the budget and points here). The number is documented in code as a setting, not a measurement — the one rule that exists spends 3 steps and cannot loop. Still M2's, all of it: comptime loops, allocation, and the known/residual value domain — `.name` needed none of §5's machinery, and staging arrives with `self.at(field)` and `fields()` in M4.
+
+### M3 — READ, one member deep. LANDED
+`@meta(name: Type).name` folds at sema to the type's declared name, a real `str` — the typed form with `@Self` inside a struct/impl body, and with any named type (`@meta(s: Shape).name`); Struct, Enum and Alias payloads fold their `name.text` (an alias mostly folds to its TARGET's name — a known wrinkle). The fold is recorded on the ACCESS node's `ExprId` in `Checker.meta_memo :: Map<ExprId, str>` (`sema_check.zen:111`); `gen_c` reads it back through `meta_str` and emits the ordinary string-literal shape, `(zg_str){ (unsigned char *)"Point", 5u }` — the backend learned nothing new (`gen_c_expr.zen:789-814`). Everything else still refuses with `MetaNotImplemented`, one diagnostic at the `@meta` token: value form, bare typed form, unknown member, primitives. **Also landed:** the M2 skeleton and its budget (M2's entry); the zen-only sidecar is gone — one toolchain now, the sidecar was struck in §6.2 — and the hand-written-twin pairing (§6.3) is the gate below. **Gate:** the `corpus/meta/` pair `type_name_via_meta` + `type_name_by_hand`, one shared `.expected`. **Risk retired:** the fold went through `sema_meta.zen` and the `Checker`'s memo, not a backend special-case — there is a budget behind the `.name`, thin but real.
 
 ### M4 — STAGING: the field walk
-`.fields.loop((h, field) { .. })` unrolled once per field, `field.name` known, the instance projection residual (§4, §5). **Unblocks all five waiting consumers**, one lane each: `Display.dump` (`std/core/display.zen:33`), the `Eq` default (`std/core/eq.zen:10`), the `Hash` default (`std/core/hash.zen:31`), `Tester.expect_eq` (`std/test/test.zen:37`), `Env.args`' schema fill (`std/env/env.zen:153`). **Gate:** hand-written twins, plus an expectation that names every field with a distinct non-default value and asserts the count (§6.4). **Risk:** this is the keystone and the largest single piece. A skipped field prints plausibly; a nested struct recurses into `dump` and is where a step budget first earns its keep; and hygiene — `gen_c_inline.zen`'s header is the record of how a captured `h` goes silently wrong rather than loudly.
+`.fields().loop((h, field) { .. })` unrolled once per field, `field.name` known, the instance projection residual (§4, §5). **Unblocks all five waiting consumers**, one lane each: `Display.dump` (`std/core/display.zen:33`), the `Eq` default (`std/core/eq.zen:10`), the `Hash` default (`std/core/hash.zen:31`), `Tester.expect_eq` (`std/test/test.zen:37`), `Env.args`' schema fill (`std/env/env.zen:153`). **Gate:** hand-written twins, plus an expectation that names every field with a distinct non-default value and asserts the count (§6.4). **Risk:** this is the keystone and the largest single piece. A skipped field prints plausibly; a nested struct recurses into `dump` and is where a step budget first earns its keep; and hygiene — `gen_c_inline.zen`'s header is the record of how a captured `h` goes silently wrong rather than loudly.
 
 ### M5 — comptime dispatch on a node's kind
 `@meta(n).kind.match({ .. })` — `DumpAst`'s shape (`DESIGN.md:1329`), and what lets `std/build/build.zen`'s `Module` and `Function` stand-ins (`:38`) be deleted in favour of the real nodes. **Gate:** `corpus/std/build_api_resolves` extended to walk a real `Function`. **Risk:** it is a *type* switch, which touches the same ground as the type-sets feature; keep it to matching on `DeclKind` and do not let a general type-switch in through this door.
@@ -222,7 +226,7 @@ So: **the comptime evaluator's only legitimate entry point is still `@meta`.** M
 Named rather than left to be discovered:
 
 - **Whose allocator does comptime code use**, and what happens to what it allocated once expansion is over (M2).
-- **What the step budget's number is**, and whether it is per `@meta` call or per compilation. `FOLD_DEPTH: usize = 256` is a depth, not a step count, and it is a prover's budget (§2).
-- **Whether `@meta(v)` on an ordinary value reflects the value's TYPE or its expression.** `DESIGN.md:455` says "the ast node for a value or a type"; `:1324` reads it as the type. `@meta(p)` on a `Point` has no settled meaning today, which is why M0's fixtures assert only that it is refused.
+- **How to MEASURE the step budget's number.** It has an answer in code — `META_STEPS: usize = 4096` (`sema_meta.zen:50`), documented there as a setting, not a measurement — and nothing can test it yet: the one rule spends 3 steps and cannot loop. The number earns its justification, and the per-`@meta`-call vs per-compilation question gets a real answer, with the first rule that can loop (M2, or M4's nested-struct recursion).
+- **The budget must-fail test is owed but cannot exist yet.** §6.1's rule — write the budget test the same day the budget lands — is acknowledged, and the budget landed with M3's skeleton. But no program can exceed `META_STEPS` today: the single fold spends 3 steps and cannot loop, so the test would have nothing to red it. The debt is recorded here; the test lands with the first rule that can spend the budget down.
 - **What `@meta` does inside a generic body with an unbound `T`.** `gen_c_mono.zen` refuses an open type at the backend; the expander needs the same rule earlier, and the diagnostic is easier to write than to place.
 - **Whether `@meta` may appear in a type position.** Nothing in `DESIGN.md` writes it there; `M6` returning a type implies something does.
