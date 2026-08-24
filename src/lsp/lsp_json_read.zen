@@ -423,41 +423,23 @@ read* = (a: Alloc, tree :: Jsons, text: str) Res<JsonId, JsonFault> {
     })
 }
 
-// The escapes that stand for one byte. `/` is in the set — JSON allows
-// it, though nothing here ever writes it that way.
+// The escapes that stand for one byte, as ONE match on the byte rather
+// than a pyramid of `==`. `/` is in the set — JSON allows it, though
+// nothing here ever writes it that way. `\b` and `\f` have no character
+// literal in this language (the lexer takes `\n \t \r \0 \\ \' \"` and no
+// more), so their RESULTS are named by codepoint; `\u` is not here at all
+// because it is four more bytes and its own reader.
 simple = (b: u8) Res<u8> {
-    (b == '"').match({
-        true  => Ok(b),
-        false => two_char(b),
-    })
-}
-
-two_char = (b: u8) Res<u8> {
-    (b == '\\').match({
-        true  => Ok('\\'),
-        false => (b == '/').match({
-            true  => Ok('/'),
-            false => (b == 'n').match({
-                true  => Ok('\n'),
-                false => (b == 'r').match({
-                    true  => Ok('\r'),
-                    false => (b == 't').match({
-                        true  => Ok('\t'),
-                        false => control_char(b),
-                    }),
-                }),
-            }),
-        }),
-    })
-}
-
-// `\b` and `\f` have no character literal in this language (the lexer
-// takes `\n \t \r \0 \\ \' \"` and no more), so they are named by
-// codepoint.
-control_char = (b: u8) Res<u8> {
-    (b == 'b').match({
-        true  => Ok(BACKSPACE),
-        false => (b == 'f').match({ true => Ok(FORM_FEED), false => None }),
+    b.match({
+        '"'  => Ok('"'),
+        '\\' => Ok('\\'),
+        '/'  => Ok('/'),
+        'n'  => Ok('\n'),
+        'r'  => Ok('\r'),
+        't'  => Ok('\t'),
+        'b'  => Ok(BACKSPACE),
+        'f'  => Ok(FORM_FEED),
+        _    => None,
     })
 }
 

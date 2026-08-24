@@ -235,31 +235,22 @@ write_text* = (s: str, out :: String) Res<(), AllocError> {
     out.add_byte('"')
 }
 
+// ONE MATCH ON THE BYTE, not a pyramid of `==`: the five bytes with a
+// name of their own are arms, and the only test left is the range one —
+// everything below 32 must be escaped somehow, and `\u00XX` is how. The
+// three control NAMES are worth having because a newline inside a
+// diagnostic message is common, and a hex escape there would make
+// expected files unreadable.
 escaped = (b: u8, out :: String) Res<(), AllocError> {
-    (b == '"').match({
-        true  => out.add_bytes("\\\""),
-        false => (b == '\\').match({
-            true  => out.add_bytes("\\\\"),
-            false => (b < SPACE).match({
-                true  => control(b, out),
-                false => out.add_byte(b),
-            }),
-        }),
-    })
-}
-
-// The three JSON names worth having for a control byte, `\u00XX` for the
-// rest — a newline inside a diagnostic message is common, and a hex
-// escape there would make expected files unreadable.
-control = (b: u8, out :: String) Res<(), AllocError> {
-    (b == '\n').match({
-        true  => out.add_bytes("\\n"),
-        false => (b == '\r').match({
-            true  => out.add_bytes("\\r"),
-            false => (b == '\t').match({
-                true  => out.add_bytes("\\t"),
-                false => hex_escape(b, out),
-            }),
+    b.match({
+        '"'  => out.add_bytes("\\\""),
+        '\\' => out.add_bytes("\\\\"),
+        '\n' => out.add_bytes("\\n"),
+        '\r' => out.add_bytes("\\r"),
+        '\t' => out.add_bytes("\\t"),
+        _    => (b < SPACE).match({
+            true  => hex_escape(b, out),
+            false => out.add_byte(b),
         }),
     })
 }

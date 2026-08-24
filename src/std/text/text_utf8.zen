@@ -178,21 +178,32 @@ four_byte = (s: str, at: usize, lead: u8) Res<Codepoint, Utf8Error> {
 // THE SAME BOUNDARIES READ FROM THE OTHER SIDE: the decoder asks whether a
 // value is too small for the width it arrived in (`value >= UTF8_MIN_3`,
 // or the sequence was overlong); the encoder asks which width a value
-// needs (`v < UTF8_MIN_3`, so two bytes suffice). One number, one
+// needs (`v >= UTF8_MIN_3`, so two bytes are not enough). One number, one
 // meaning. The lead and continuation tags are `u8` because the decoder
 // compares them against BYTES, while this half computes in `u32` and
 // narrows only at the very end — hence the `.to_u32()` at each use.
 push_utf8* = (v: u32, out :: String) Res<(), AllocError> {
-    (v < UTF8_ASCII_MAX.to_u32()).match({
-        true  => out.add_byte(byte_of(v)),
-        false => (v < UTF8_MIN_3).match({
-            true  => two_wide(v, out),
-            false => (v < UTF8_MIN_4).match({
-                true  => three_wide(v, out),
-                false => four_wide(v, out),
-            }),
-        }),
+    encoded_len(v).match({
+        1 => out.add_byte(byte_of(v)),
+        2 => two_wide(v, out),
+        3 => three_wide(v, out),
+        _ => four_wide(v, out),
     })
+}
+
+// `sequence_len` READ FROM THE VALUE SIDE, and the reason `push_utf8` is one
+// flat match rather than a pyramid: the decoder asks a lead byte how wide it
+// claims to be, this asks a value how wide it needs to be, and both then
+// dispatch on that one width. Counting boundaries rather than nesting
+// comparisons is exact because the three boundaries only increase — every
+// value is past a prefix of them and no others, so the sum IS the width.
+encoded_len = (v: u32) usize {
+    1 + past(v, UTF8_ASCII_MAX.to_u32()) + past(v, UTF8_MIN_3) + past(v, UTF8_MIN_4)
+}
+
+// one more byte, or not
+past = (v: u32, bound: u32) usize {
+    (v >= bound).match({ true => 1, false => 0 })
 }
 
 two_wide = (v: u32, out :: String) Res<(), AllocError> {
