@@ -38,6 +38,7 @@ Ctx = sema.sema_check
 Inst = sema.sema_inst
 write_usize = sema.sema_diag
 param_type = sema.sema_type
+satisfies_bound = sema.sema_bound
 sym_fn, sym_gen, sym_variant, RES_PATH = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
@@ -45,7 +46,8 @@ unsupported = gen.gen_c.gen_c_report
 ctype = gen.gen_c.gen_c_type
 is_c_integer, is_signed = gen.gen_c.gen_c_type
 expr, ty_of, named_hole = gen.gen_c.gen_c_expr
-declare_temp = gen.gen_c.gen_c_flow
+declare_temp, is_variant, payload_type = gen.gen_c.gen_c_flow
+write_assign_err = gen.gen_c.gen_c_cap
 signature_of, recv_arg, arg_value, by_ref = gen.gen_c.gen_c_call
 body_end, decoded_bytes, cast_of = gen.gen_c.gen_c_print
 FmtAt, fmt_at, ends_run, arguments_taken = gen.gen_c.gen_c_print
@@ -287,7 +289,9 @@ pieces_into_buffer = (
         tmp: tmp.view(),
         done: fail,
         id: id,
-        module: d.id.module.to_usize()
+        module: d.id.module.to_usize(),
+        rty: cty,
+        ret: ret
     );
     fmt_arg(c, recv).match({
         None      => Ok(()),
@@ -334,6 +338,14 @@ Piece* = {
     done*: usize,     // the label a failing write jumps to
     id: ExprId,       // the door call, for a diagnostic with a position
     module: usize,    // the door's own module: where the writers live
+    // THE DOOR'S OWN DECLARED ANSWER, and the RECEIVER'S OWN TYPE. Read
+    // only where a floor door meets a hole its floor cannot take: the
+    // receiver's type is what a `Sink` record is built over, and the
+    // answer is what the `Err` a failing wider write leaves is spelled
+    // in. A sink door reads neither -- its writes already answer what it
+    // answers -- so `rty` there is the sink type again.
+    rty: TyId,
+    ret: TyId,
 }
 
 // -----------------------------------------------------------------
@@ -457,7 +469,9 @@ write_door = (
         tmp: tmp.view(),
         done: be.next_tmp(),
         id: id,
-        module: d.id.module.to_usize()
+        module: d.id.module.to_usize(),
+        rty: sty,
+        ret: ret
     );
     // `out.add("")` is one write of nothing and `out.add(s)` is one
     // write of `s`, so a door with no format argument is not an error —
@@ -681,13 +695,13 @@ write_value = (be :: CBackend, a: ExprId, p: Piece, ctx: Ctx)
 // The write a value becomes once its C text and its type are in hand. A
 // `{name}` hole arrives here with both read off its own slot, so the two
 // hole spellings share every decision after "where did the value come
-// from" — including the floor door's refusal of a non-`str`.
+// from" — the second door below included.
 write_typed_into = (be :: CBackend, a: ExprId, ty: TyId, text: str, p: Piece)
                    Res<(), AllocError> {
     call ::= be.alloc.String().try();
     be.value_call(p, ty, text, call).try().match({
-        false => be.unsupported_piece(a, hole_fault(p)),
         true  => be.write_guarded(call.view(), p),
+        false => be.write_wider(a, ty, text, p),
     })
 }
 
@@ -702,12 +716,11 @@ value_call = (be :: CBackend, p: Piece, ty: TyId, text: str, out :: String)
     })
 }
 
-// A HOLE ON A FLOOR DOOR IS A `str` AND NOTHING ELSE. Every writer a
-// wider hole reaches — the scalars in this door's module, and any
-// `toString` — answers `WriteError`, which a door answering the floor's
-// own error can neither carry nor honestly relabel. Refused by name at
-// the call site, so a `u8` meant as a character can never come out as a
-// number.
+// A FLOOR DOOR'S OWN WRITER TAKES A `str` AND NOTHING ELSE, so a wider
+// hole is not this call — `sink_write`'s floor arm is a direct call to
+// `add_bytes`, and there is no `add_bytes` for a number. It is not a
+// refusal either: `write_wider` below opens the sink the value's writer
+// wants, over the same receiver.
 wider_call = (
     be   :: CBackend,
     p    : Piece,
@@ -720,6 +733,157 @@ wider_call = (
         true  => be.scalar_call(p, ty, prim, text, out),
         false => Ok(false),
     })
+}
+
+// -----------------------------------------------------------------
+// a hole the floor cannot take
+//
+// `two.fmt("n={}", n)` and `a.String("n={}", n)` are ONE format string
+// through two doors, and they used to give two answers: the allocating
+// door wrote the number and this one reported `a format hole on this
+// door that is not a str` (#755). That gap is why nothing in `src/`
+// implements `Display` — every writer there appends into a String it was
+// handed, which is exactly this door, so `out.fmt("Res<{}, {}>", v, e)`
+// could not be written and 378 hand-rolled `add_bytes` runs stand where
+// one format would.
+//
+// THE RECEIVER IS A SINK, which is what makes the second answer
+// reachable at all: the writers a wider hole needs take a `Sink`, and a
+// String is one. So the value's write goes through a record over THE
+// SAME RECEIVER the floor writes to, picked by `value_call` — the same
+// function, one line up — rather than through a second set of writers.
+//
+// WHAT THAT COSTS IS THE ERROR, and it is the allocating door's bargain
+// and not a new one: a Sink write answers `WriteError`, this door
+// answers its floor's, and the two do not convert. So a failing wider
+// write leaves `OutOfMemory` — `docs/design_fmt.md` §6 holds the open
+// fork, which this widens from one door to two and does not settle.
+// NOTHING ELSE MOVES: a `str` hole and every literal run still go
+// straight through the floor and still carry their own `Err`, so what a
+// floor door already compiled emits the same bytes it emitted before.
+write_wider = (be :: CBackend, a: ExprId, ty: TyId, text: str, p: Piece)
+              Res<(), AllocError> {
+    p.floor.is_empty().match({
+        true  => be.unsupported_piece(a, hole_fault(p)),
+        false => be.through_sink(a, ty, text, p),
+    })
+}
+
+through_sink = (be :: CBackend, a: ExprId, ty: TyId, text: str, p: Piece)
+               Res<(), AllocError> {
+    be.door_decl().try().match({
+        None  => be.unsupported_piece(a, hole_fault(p)),
+        Ok(d) => be.sink_at_door(a, ty, text, p, d),
+    })
+}
+
+sink_at_door = (
+    be   :: CBackend,
+    a    : ExprId,
+    ty   : TyId,
+    text : str,
+    p    : Piece,
+    d    : Def
+) Res<(), AllocError> {
+    be.door_fn(d).match({
+        None  => be.unsupported_piece(a, hole_fault(p)),
+        Ok(f) => be.sink_over_receiver(a, ty, text, p, d, f),
+    })
+}
+
+sink_over_receiver = (
+    be   :: CBackend,
+    a  : ExprId,
+    ty : TyId,
+    text : str,
+    p  : Piece,
+    d  : Def,
+    f  : Function
+) Res<(), AllocError> {
+    sty  = be.sink_type(d, f).try();
+    wret = declared_type(be, d, f.ret).try();
+    be.wider_is_sound(p, sty).try().match({
+        false => be.unsupported_piece(a, hole_fault(p)),
+        true  => be.write_through_sink(a, ty, text, p, d, sty, wret),
+    })
+}
+
+// TWO THINGS MUST HOLD, and a hole is refused by name exactly as before
+// when either does not. The receiver must BE a Sink: `fat_value` writes
+// NULL for a slot no impl answers, so a record over a type that never
+// promised `write` is a null call where the diagnostic used to be. And
+// the door's own error set must name `OutOfMemory`, because that is what
+// a failing wider write is reported as — a set with no such variant
+// would get a bare `Err` carrying nothing.
+wider_is_sound = (be :: CBackend, p: Piece, sty: TyId) Res<bool, AllocError> {
+    be.check.satisfies_bound(p.rty, sty).try().match({
+        false => Ok(false),
+        true  => Ok(be.names_out_of_memory(p.ret)),
+    })
+}
+
+names_out_of_memory = (be :: CBackend, ret: TyId) bool {
+    be.payload_type(ret, "Err").match({
+        None    => false,
+        Ok(ety) => be.is_variant(ety, "OutOfMemory"),
+    })
+}
+
+// The record, a temporary at the SINK door's answer for the write to
+// land in, and then `value_call` again — with a piece that is the sink
+// door's in every field, so a `u8` reaches `add_u64` and a `Display`
+// reaches its `toString` by the one set of rules.
+write_through_sink = (
+    be   :: CBackend,
+    a    : ExprId,
+    ty   : TyId,
+    text : str,
+    p    : Piece,
+    d    : Def,
+    sty  : TyId,
+    wret : TyId
+) Res<(), AllocError> {
+    rec ::= be.alloc.String().try();
+    be.buffer_sink(p.sink, p.rty, sty, rec).try();
+    wtmp ::= be.alloc.String().try();
+    sym_gen(wtmp, "t", be.next_tmp()).try();
+    be.declare_temp(wret, wtmp.view()).try();
+    q = Piece(
+        sink: rec.view(),
+        sty: sty,
+        floor: "",
+        tmp: wtmp.view(),
+        done: p.done,
+        id: p.id,
+        module: d.id.module.to_usize(),
+        rty: sty,
+        ret: wret
+    );
+    call ::= be.alloc.String().try();
+    be.value_call(q, ty, text, call).try().match({
+        false => be.unsupported_piece(a, hole_fault(p)),
+        true  => be.wider_guarded(call.view(), wtmp.view(), p),
+    })
+}
+
+// `zg_tW = <the write>; if (zg_tW.zg_tag != Ok) { <answer> = Err(OutOfMemory); goto done; }`
+//
+// The guard `write_guarded` writes with the two error sets named where
+// they meet. It is one `if` and not a label of its own because the
+// answer is BUILT here rather than carried: there is nothing to jump
+// past, so a wider hole costs nothing a floor door did not already pay.
+wider_guarded = (be :: CBackend, call: str, wtmp: str, p: Piece)
+                Res<(), AllocError> {
+    be.set_line(wtmp, call).try();
+    tag ::= be.alloc.String().try();
+    sym_variant(tag, RES_PATH, "Ok").try();
+    be.fmt("if ({wtmp}.zg_tag != {}) {\n", tag.view()).try();
+    be.indent();
+    be.write_assign_err(p.ret, "OutOfMemory", p.tmp).try();
+    be.write_goto(p.done).try();
+    be.dedent();
+    be.writeln("}").try();
+    Ok(());
 }
 
 hole_fault = (p: Piece) str {
