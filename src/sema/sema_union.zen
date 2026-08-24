@@ -192,35 +192,31 @@ variant_named = (c :: Checker, decl: DeclId, name: str) bool {
 // this compiler's worst failure class.
 variant_member* = (c :: Checker, ty: TyId, variant: str) Res<TyId> {
     c.types.at(ty).match({
-        Union(u) => union_variant_member(c, u, variant),
+        Union(u) => c.union_variant_member(u, variant),
         Named(n) => c.named_variant_member(ty, n, variant),
-        _        => Ok(None),
+        _        => None,
     })
 }
 
-union_variant_member = (
-    c       :: Checker,
-    u       : TyUnion,
-    variant : str
-) Res<TyId> {
+// A set answers over its members in canonical order. Two members
+// declaring one leaf name would make `Member.Leaf` ambiguous; every
+// current declaration names distinct leaves, so the first hit stands
+// and ambiguity stays unrepresentable until a rule exists for it.
+union_variant_member = (c :: Checker, u: TyUnion, variant: str) Res<TyId> {
     hit ::= None;
     u.members.loop((h, i, m) {
-        c.member_declares(m, variant).try().match({
-            true  => { hit = Some(c.set_of(m)); },
-            false => {},
-        });
+        c.member_declares(m, variant).then(() { hit = Some(c.set_of(m)); });
     });
     Ok(hit)
 }
 
-named_variant_member = (
-    c       :: Checker,
-    ty      : TyId,
-    n       : TyNamed,
-    variant : str
-) Res<TyId> {
+// A NAME read as a union answers for the set it stands for, so
+// `ParseError.NotANumber` works against `Trouble` however the scrutinee
+// was spelled. A nominal enum has no members and answers nothing.
+named_variant_member = (c :: Checker, ty: TyId, n: TyNamed, variant: str)
+                       Res<TyId> {
     c.union_reading(n.decl).match({
-        false => Ok(None),
+        false => None,
         true  => c.variant_member(ty, variant),
     })
 }
@@ -229,10 +225,10 @@ named_variant_member = (
 // ITS OWN declaration — `decl_has_variant` walks the variants of what it
 // names — so an alias or a same-named type elsewhere cannot answer for
 // it.
-member_declares = (c :: Checker, m: TyId, variant: str) Res<bool, AllocError> {
+member_declares = (c :: Checker, m: TyId, variant: str) bool {
     c.types.at(m).match({
-        Named(n) => Ok(c.decl_has_variant(n.decl, variant)),
-        _        => Ok(false),
+        Named(n) => c.decl_has_variant(n.decl, variant),
+        _        => false,
     })
 }
 

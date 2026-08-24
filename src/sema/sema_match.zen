@@ -199,7 +199,7 @@ norm_destructure = (
 ) Res<usize, AllocError> {
     text = last_segment(d.name);
     c.variant_member(ty, text).try().match({
-        Ok(t)  => c.norm_set_ctor(ps, node, d, ty, text, t, ctx),
+        Ok(t)  => c.norm_set_ctor(ps, node, d, text, t, ctx),
         None   => c.norm_plain_ctor(ps, node, d, ty, text, ctx),
     })
 }
@@ -284,25 +284,29 @@ norm_qualified = (
     ctx  : Ctx
 ) Res<usize, AllocError> {
     (pn.name.segments.len == 2).match({
-        true  => c.norm_member_dot(ps, node, pn, ty, text),
+        true  => c.norm_member_dot(ps, node, pn, ty, text, ctx),
         false => c.norm_binder(ps, node, text, ctx),
     })
 }
 
+// Exactly two segments: `Member.Leaf`. The member must name a member of
+// the set and the leaf a case of that member — anything else falls
+// through to a binder with its report, unchanged.
 norm_member_dot = (
-    c     :: Checker,
-    ps    :: Pats,
-    node  : Pattern,
-    pn    : PatName,
-    ty    : TyId,
-    leaf  : str
+    c    :: Checker,
+    ps   :: Pats,
+    node : Pattern,
+    pn   : PatName,
+    ty   : TyId,
+    leaf : str,
+    ctx  : Ctx
 ) Res<usize, AllocError> {
-    member = segment_at(pn.name, 0).try();
+    member = segment_at(pn.name, 0);
     c.variant_member(ty, member).try().match({
-        None  => c.norm_binder(ps, node, text, ctx),
-        Ok(t) => c.is_case(t, leaf).try().match({
+        None  => c.norm_binder(ps, node, leaf, ctx),
+        Ok(mty) => c.is_case(mty, leaf).try().match({
             true  => ps.add(dot_pat(member, leaf, node.span)),
-            false => c.norm_binder(ps, node, text, ctx),
+            false => c.norm_binder(ps, node, leaf, ctx),
         }),
     })
 }
