@@ -174,24 +174,22 @@ Jsons* = {
     }
 
     write_items = (self: @Self, run: Run, out :: String) Res<(), AllocError> {
-        out.add_bytes("[").try();
+        items ::= arr(out).try();
         Range(0, run.len).loop((h, i) {
-            comma(i, out).try();
+            items.next(out).try();
             self.write(id_or_zero(self.items.get(run.at + i)), out).try();
         });
-        out.add_bytes("]")
+        items.close(out)
     }
 
     write_pairs = (self: @Self, run: Run, out :: String) Res<(), AllocError> {
-        out.add_bytes("{").try();
+        pairs ::= obj(out).try();
         Range(0, run.len).loop((h, i) {
-            comma(i, out).try();
             p = pair_or_empty(self.pairs.get(run.at + i));
-            write_text(p.key, out).try();
-            out.add_bytes(":").try();
+            pairs.key(p.key, out).try();
             self.write(p.value, out).try();
         });
-        out.add_bytes("}")
+        pairs.close(out)
     }
 }
 
@@ -199,13 +197,82 @@ Jsons* = (a: Alloc) Jsons {
     Jsons(nodes: a.Vec<Json>(), items: a.Vec<JsonId>(), pairs: a.Vec<Pair>())
 }
 
-// The separator before element `i`, which is nothing before the first.
-comma = (i: usize, out :: String) Res<(), AllocError> {
-    (i > 0).match({ true => out.add_bytes(","), false => written() })
-}
-
 // `Ok(())` with its error side named — see `lsp_json_read.zen`'s `fine`.
 written* = () Res<(), AllocError> { Ok(()) }
+
+// --- a container being written ----------------------------------------
+//
+// A REPLY IS ASSEMBLED AS TEXT AND NOT THROUGH THE ARENA — the reason is
+// `lsp_reply.zen`'s and it is a measured one: `semanticTokens` runs on
+// every keystroke and puts five integers on the wire per token, 4,448
+// tokens for one 31KB file. Through the arena each of those integers is
+// a `Num` carrying an allocated lexeme, so a tree would trade the
+// current ZERO allocations on that path for twenty thousand of them.
+//
+// So the punctuation is written straight out — and this type owns it.
+// `Nest` is what an open `{` or `[` knows: whether anything is inside it
+// yet, which is the whole of the comma rule, and WHICH BRACKET CLOSES
+// IT, remembered from the opener rather than typed again at the end. A
+// value of two bytes, on the stack; it allocates nothing and it makes
+// three mistakes unwritable.
+//
+// THE THREE. A missing or doubled comma, because no caller writes one.
+// An unescaped key, because `key` is the only way to name a member and
+// it goes through `write_text`. And a closer that does not match its
+// opener — `"}]}}}"` was a real line in `lsp_action.zen`, five brackets
+// counted by eye.
+//
+// WHAT IT DOES NOT OWN is nesting depth: a nested container is its own
+// `Nest`, opened after `key` and closed by name, so the two are as
+// visible as the values between them. A caller that forgets to close is
+// the one error left, and it is one an eye can see because the opener
+// and the closer are the same word.
+Nest* = {
+    said :: bool,
+    ends: u8,
+
+    // The separator this container owes before its next member, which is
+    // nothing before the first — an ARRAY element calls this directly,
+    // an object member gets it from `key`.
+    next* = (self :: @Self, out :: String) Res<(), AllocError> {
+        owed      = self.said;
+        self.said = true;
+        owed.match({ true => out.add_byte(','), false => written() })
+    }
+
+    // `"name":`, with the comma before it and the escaping inside it.
+    key* = (self :: @Self, name: str, out :: String) Res<(), AllocError> {
+        self.next(out).try();
+        write_text(name, out).try();
+        out.add_byte(':')
+    }
+
+    // A member whose value is a string — the common case, and the one
+    // where forgetting to escape is a malformed reply rather than a
+    // wrong number.
+    text* = (self :: @Self, name: str, v: str, out :: String)
+            Res<(), AllocError> {
+        self.key(name, out).try();
+        write_text(v, out)
+    }
+
+    // The bracket this container opened with, whichever it was.
+    close* = (self: @Self, out :: String) Res<(), AllocError> {
+        out.add_byte(self.ends)
+    }
+}
+
+// `{`, and the `}` that will close it.
+obj* = (out :: String) Res<Nest, AllocError> {
+    out.add_byte('{').try();
+    Ok(Nest(said: false, ends: '}'));
+}
+
+// `[`, and the `]` that will close it.
+arr* = (out :: String) Res<Nest, AllocError> {
+    out.add_byte('[').try();
+    Ok(Nest(said: false, ends: ']'));
+}
 
 // An in-range `get`, bounds-checked by construction — `Res` has no `or`,
 // and writing the match five times would bury what matters.
