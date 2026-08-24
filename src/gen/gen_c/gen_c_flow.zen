@@ -170,6 +170,12 @@ arm_cond = (
 // compile to the same (valid) condition, the first swallowing every
 // `Ok`. So the tag and the payload's own test (`literal_cond`, one
 // level down) are written together.
+//
+// AGAINST A SET there is one reading before that: when the ctor's name
+// is a MEMBER whose own enum declares what the binder spells, the arm
+// is two tag tests — the set's for `Member`, then the member struct's
+// for the leaf. Sema normalised this arm to `Member(wild)`; this
+// function is why the spelling still narrows anyway (issue #735).
 destructure_cond = (
     be    :: CBackend,
     d     : Destructure,
@@ -178,9 +184,9 @@ destructure_cond = (
     out   :: String
 ) Res<(), AllocError> {
     member = last_segment(d.name);
-    be.variant_member(st, member).try().match({
+    variant_member(be.check, st, member).match({
         None  => be.plain_ctor_cond(d, st, scrut, out),
-        Ok(t) => be.member_ctor_cond(d, st, scrut, out),
+        Ok(t) => be.member_ctor_cond(d, t, st, scrut, out),
     })
 }
 
@@ -197,30 +203,28 @@ plain_ctor_cond = (
     be.payload_cond(d, st, scrut, out)
 }
 
-// `Member.Leaf` against a set: the leaf is a case of the MEMBER, so the
-// arm tests the set's own tag for `Member` and — where a payload would
-// be read — the member struct's tag for `Leaf`. Sema normalised this
-// arm to `Member(wild)`; this function is why the spelling still
-// narrows anyway (issue #735). `Member(pe)` lands here too and its
-// binder arm adds no test of its own, so the two spellings lower alike.
+// `Member(leaf)` against a set: the set's tag test, then — where the
+// payload would be read — the member struct's own tag test.
+// `Member(pe)` lands here too and its binder arm adds no test of its
+// own, so the two spellings lower alike.
 member_ctor_cond = (
-    be    :: CBackend,
-    d     : Destructure,
-    st    : TyId,
-    scrut : str,
-    out   :: String
+    be     :: CBackend,
+    d      : Destructure,
+    mty    : TyId,
+    st     : TyId,
+    scrut  : str,
+    out    :: String
 ) Res<(), AllocError> {
     member = last_segment(d.name);
-    mty    = be.variant_member(st, member).try().try();
     be.tag_cond(member, st, scrut, out).try();
     place ::= be.alloc.String().try();
-    be.set_member_place(st, mty, scrut, place.view()).try();
-    be.leaf_cond(d.binder, mty, place.view(), out)
+    set_member_place(be.types(), be.world(), mty, scrut, place.view()).try();
+    leaf_cond(be, d.binder, mty, place.view(), out)
 }
 
 // The inner pattern's test against the member's type. A name that is a
-// case of it tests the member's tag; anything else (`pe`, `_`) matches
-// without narrowing — the binding side decides what those mean.
+// case of it appends the member's tag test; anything else (`pe`, `_`)
+// narrows nothing — the binding side decides what those mean.
 leaf_cond = (
     be    :: CBackend,
     pid   : PatternId,
@@ -235,7 +239,7 @@ leaf_cond = (
     });
     narrows.match({
         false => Ok(()),
-        true  => be.leaf_tag_cond(pat, mty, place, out),
+        true  => leaf_tag_cond(be, pat, mty, place, out),
     })
 }
 
@@ -250,27 +254,26 @@ leaf_tag_cond = (
     place : str,
     out   :: String
 ) Res<(), AllocError> {
-    leaf = leaf_of(pat).try();
     qname ::= be.alloc.String().try();
     be.enum_path(mty, qname).try();
     tag ::= be.alloc.String().try();
-    tag.sym_variant(qname.view(), leaf).try();
+    tag.sym_variant(qname.view(), leaf_of(pat)).try();
     out.fmt(" && ({place}.zg_tag == {})", tag.view())
-}
-
-// What a narrowing inner name spells. Only a Name pattern reaches here —
-// `narrows` answered true for one — so the last segment is the case.
-leaf_of = (be :: CBackend, pat: Pattern) Res<str> {
-    pat.kind.match({
-        Name(p)  => Ok(last_segment(p.name)),
-        _        => None,
-    })
 }
 
 // The payload's test is `arm_cond` again, one level down, against the
 // payload's place and type. Depth is not a special form: `Left(Full(n))`
 // is two tag tests for the same reason `Ok(3)` is a tag test and a
 // comparison.
+
+// What a narrowing inner name spells. Only a Name pattern reaches
+// `leaf_cond` with `narrows` true, so the last segment IS the case.
+leaf_of = (pat: Pattern) str {
+    pat.kind.match({
+        Name(p)  => last_segment(p.name),
+        _        => "",
+    })
+}
 payload_cond = (
     be    :: CBackend,
     d     : Destructure,
@@ -345,20 +348,20 @@ payload_place = (
     sym_member(out, variant)
 }
 
-// The same, spelled for a MEMBER of a set: the C member symbol is a
-// function of the MEMBER's type (`sym_union_member`), which for a
-// declared member is simply its name — `zu_m10ParseError` under
-// `Trouble`, the same field `payload_place` spells for a declared enum.
+// Where a MEMBER of a set lives: the set's payload struct, spelled by
+// `sym_union_member` at the member's type — which for a declared member
+// is simply its name, `zu_m10ParseError` under `Trouble`, the same field
+// `payload_place` spells for a declared enum.
 set_member_place = (
-    be      :: CBackend,
-    st      : TyId,
-    member  : TyId,
-    scrut   : str,
-    out     :: String
+    types  : Types,
+    world  : World,
+    member : TyId,
+    scrut  : str,
+    out    :: String
 ) Res<(), AllocError> {
     out.add_bytes(scrut).try();
     out.add_bytes(".zg_data.").try();
-    sym_union_member(out, be.types(), be.world(), member).try();
+    sym_union_member(out, types, world, member).try();
     Ok(())
 }
 
@@ -539,9 +542,9 @@ bind_payload = (
     ctx   : Ctx
 ) Res<(), AllocError> {
     member = last_segment(d.name);
-    be.variant_member(st, member).try().match({
+    variant_member(be.check, st, member).match({
         None  => be.enum_bind_payload(d, st, scrut, ctx),
-        Ok(mty) => be.set_bind_payload(d, st, member, mty, scrut, ctx),
+        Ok(mty) => set_bind_payload(be, d, st, mty, scrut, ctx),
     })
 }
 
@@ -562,13 +565,12 @@ set_bind_payload = (
     be     :: CBackend,
     d      : Destructure,
     st     : TyId,
-    member : str,
     mty    : TyId,
     scrut  : str,
     ctx    : Ctx
 ) Res<(), AllocError> {
     place ::= be.alloc.String().try();
-    be.set_member_place(st, mty, scrut, place.view()).try();
+    set_member_place(be.types(), be.world(), mty, scrut, place.view()).try();
     be.arm_bind(d.binder, mty, place.view(), ctx)
 }
 
