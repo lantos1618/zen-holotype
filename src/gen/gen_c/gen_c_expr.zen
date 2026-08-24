@@ -14,6 +14,12 @@
 // inside it, which short-circuiting needs since a hoisted `.try()` runs
 // regardless of the left side — `gen_c_op.zen` owns that rule.
 //
+// This file also answers WHICH ARGUMENTS RUN WHEN: Zen orders a call's
+// arguments left to right and C does not, so `holds` names the positions
+// that have to be put in a temporary to keep that promise, and
+// `value_held` puts them there. The `argument order` block below is the
+// whole rule.
+//
 // Operators are `gen_c_op.zen`'s subject.
 //
 // Sema is the only source of a type: where `type_of` answers, its
@@ -105,10 +111,137 @@ spills_anywhere* = (be: CBackend, id: ExprId) bool {
     })
 }
 
+// A call whose arguments will be HELD spills too, and this is where
+// short-circuiting learns it: `gen_c_op.zen` refuses to lower a `&&`
+// whose right operand spills as C's own `&&`, and a held argument is a
+// statement written in front of the operand exactly as a hoisted
+// `.try()` is. `may_reorder`, below, asks the same question the emitter
+// will, one receiver more conservatively, and says why.
 call_spills = (be: CBackend, c: Call) bool {
-    got ::= be.spills_anywhere(c.callee);
+    got ::= be.may_reorder(c) || be.spills_anywhere(c.callee);
     c.args.loop((h, a) { got = got || be.spills_anywhere(a.value); });
     got
+}
+
+// -----------------------------------------------------------------
+// argument order
+//
+// ZEN EVALUATES ARGUMENTS LEFT TO RIGHT. C LEAVES THE ORDER OF A CALL'S
+// ARGUMENTS UNSPECIFIED, so every argument written straight into one C
+// call expression hands the decision to the C compiler — and gcc takes
+// it right to left. `three(d.tick(), d.tick(), d.tick())` answered 210.
+//
+// THE FIX IS A TEMPORARY, NOT A REWRITE. A HELD argument is written as a
+// declaration and an assignment ahead of the call and appears in the call
+// as its own name — the transform `spill_temp` already performs for a
+// `.try()` in argument position, through the same door.
+//
+// IT IS NOT DONE EVERYWHERE. Spilling every argument of every call costs
+// a sixth of the emitted C and `make build` pays for that twice. Three
+// questions narrow it to the shapes where the difference can be seen:
+//   - the call must have TWO OR MORE argument positions, a receiver
+//     counting as one: with a single position there is nothing to
+//     reorder against;
+//   - some argument must CONTAIN A CALL, because nothing else in an
+//     argument runs;
+//   - a position is held only while a call is still to its RIGHT. The
+//     rightmost may stay inline: by the time it runs everything else
+//     already has.
+// On this tree that is a few hundred of 8,389 call sites.
+//
+// WHAT IS NOT COVERED, said out loud rather than left to be discovered:
+// the operands of `+` and of every other infix operator are unordered in
+// C for exactly the same reason and are not held here.
+// -----------------------------------------------------------------
+
+// Whether the position at signature index `pos` must be held. `first` is
+// how many positions the receiver took, so an argument at argument-index
+// `i` asks with `i + first`, and a receiver asks with `0` and `1`.
+holds* = (be: CBackend, c: Call, pos: usize, first: usize) bool {
+    be.reorderable(c, first) && (pos < (be.last_call_arg(c) + first))
+}
+
+// The arity question and the something-runs question together: the only
+// shape where C's freedom over the order is observable.
+reorderable* = (be: CBackend, c: Call, first: usize) bool {
+    ((c.args.len + first) > 1) && be.any_arg_calls(c)
+}
+
+// `first` is not known until a call has been lowered, so the question a
+// `&&` asks about its right operand is asked at the arity the CALLEE'S
+// SPELLING implies: a call written through a `.` may put a receiver in
+// front of its arguments. Wrong this way costs a lowering shape; wrong
+// the other way is a `&&` that stopped short-circuiting.
+may_reorder* = (be: CBackend, c: Call) bool {
+    be.reorderable(c, be.recv_slots(c))
+}
+
+recv_slots = (be: CBackend, c: Call) usize {
+    be.tree.expr_at(c.callee).kind.match({ Access(_) => 1, _ => 0 })
+}
+
+any_arg_calls = (be: CBackend, c: Call) bool {
+    got ::= false;
+    c.args.loop((h, a) { got = got || be.has_call(a.value); });
+    got
+}
+
+// The index of the LAST argument containing a call — the position after
+// which nothing is left to run.
+//
+// `later` is a named helper and not a `.then` in the loop body: a loop
+// binding read inside a nested closure does not resolve,
+// docs/SEMA_BOOTSTRAP_FIXES.md §10.
+last_call_arg = (be: CBackend, c: Call) usize {
+    at ::= 0;
+    c.args.loop((h, i, a) { at = later(at, i, be.has_call(a.value)); });
+    at
+}
+
+later = (at: usize, i: usize, yes: bool) usize {
+    yes.match({ true => i, false => at })
+}
+
+// Whether a CALL hides anywhere inside. Not the spilling question and
+// not a weaker form of it: `d.tick()` spills nothing, and it is the
+// whole reason argument order is observable at all.
+//
+// An unrecognised form answers YES, for `spills_anywhere`'s reason read
+// one step on: wrong in this direction costs a temporary, wrong the
+// other way is a program running its effects in whatever order the C
+// compiler felt like.
+has_call* = (be: CBackend, id: ExprId) bool {
+    be.tree.expr_at(id).kind.match({
+        Literal(_) => false,
+        Name(_)    => false,
+        Unit       => false,
+        Scope      => false,
+        SelfType   => false,
+        Paren(p)   => be.has_call(p.inner),
+        Unary(u)   => be.has_call(u.operand),
+        Binary(b)  => be.has_call(b.lhs) || be.has_call(b.rhs),
+        Access(a)  => be.has_call(a.base),
+        Index(x)   => be.has_call(x.base) || be.has_call(x.index),
+        Consume(x) => be.has_call(x.operand),
+        _          => true,
+    })
+}
+
+// WHAT A TEMPORARY CAN HOLD WITHOUT CHANGING WHAT IT MEANS. A `Consume`
+// moves and a `Lambda` is inlined into the call it was written for, so
+// neither survives being copied into one; an array literal's storage is
+// the frame's. A `Name` and a `Literal` need no temporary at all — they
+// run nothing, so no order over them is observable.
+holdable* = (be: CBackend, id: ExprId) bool {
+    be.tree.expr_at(id).kind.match({
+        Call(_)   => true,
+        Access(_) => true,
+        Index(_)  => true,
+        Unary(_)  => true,
+        Binary(_) => true,
+        Paren(p)  => be.holdable(p.inner),
+        _         => false,
+    })
 }
 
 // The type of an expression.
@@ -647,6 +780,45 @@ spill_valued = (
     be.fmt("{};\n", line.view()).try();
     be.deliver(id, ctx, ty, Dest.Into(tmp.view())).try();
     out.add_bytes(tmp.view())
+}
+
+// A value put in a temporary WHERE IT WAS WRITTEN, so that what it does
+// happens there rather than wherever the C compiler decides to evaluate
+// the argument it was written into. The `argument order` block above owns
+// which arguments ask for this; the temporary itself is `spill_valued`'s,
+// the same one a `.try()` in argument position already gets.
+//
+// A type nothing settles, and a `()` with no storage to hold it, stay
+// inline: a refusal here would turn a working program into an error over
+// an order nothing could observe. That is the one direction this degrades
+// in and it is the safe one.
+value_held* = (
+    be   :: CBackend,
+    id   : ExprId,
+    ctx  : Ctx,
+    want : TyId,
+    hold : bool,
+    out  :: String
+) Res<(), AllocError> {
+    (hold && be.holdable(id)).match({
+        true  => be.hold_value(id, ctx, want, out),
+        false => be.expr(id, ctx, want, out),
+    })
+}
+
+hold_value = (
+    be   :: CBackend,
+    id   : ExprId,
+    ctx  : Ctx,
+    want : TyId,
+    out  :: String
+) Res<(), AllocError> {
+    ty = be.destination_type(id, ctx, want).try();
+    be.spill_of(ty).match({
+        Valued    => be.spill_valued(id, ctx, ty, out),
+        Effect    => be.expr(id, ctx, want, out),
+        Unsettled => be.expr(id, ctx, want, out),
+    })
 }
 
 write_expr = (

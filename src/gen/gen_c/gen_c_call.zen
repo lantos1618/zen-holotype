@@ -50,6 +50,7 @@ complete_inst = gen.gen_c.gen_c_infer
 ctype, is_unit, c_prim = gen.gen_c.gen_c_type
 c_prim_known = gen.gen_c.gen_c_type
 expr, ty_of, want_of = gen.gen_c.gen_c_expr
+value_held, holds = gen.gen_c.gen_c_expr
 Dest, deliver = gen.gen_c.gen_c_stmt
 is_print, lower_print = gen.gen_c.gen_c_print
 lower_dot_call = gen.gen_c.gen_c_member
@@ -229,7 +230,8 @@ write_indirect = (
     out.add_bytes(")(").try();
     c.args.loop((h, i, a) {
         (i > 0).then(() { out.add_bytes(", ").try() });
-        be.write_indirect_arg(a, i, params, ctx, out).try();
+        hold = be.holds(c, i, 0);
+        be.write_indirect_arg(a, i, hold, params, ctx, out).try();
     });
     out.add_bytes(")").try();
     Ok(());
@@ -242,12 +244,13 @@ write_indirect_arg = (
     be     :: CBackend,
     a      : Arg,
     i      : usize,
+    hold   : bool,
     params : Vec<TyId>,
     ctx    : Ctx,
     out    :: String
 ) Res<(), AllocError> {
     want = params.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
-    expr(be, a.value, ctx, want, out)
+    be.value_held(a.value, ctx, want, hold, out)
 }
 
 lower_named_call = (
@@ -960,7 +963,7 @@ write_call = (
 )
              Res<(), AllocError> {
     out.fmt("{sym}(").try();
-    first = be.write_receiver(recv, f, sig, ctx, out).try();
+    first = be.write_receiver(recv, c, f, sig, ctx, out).try();
     be.write_call_args(c, first, f, sig, ctx, out).try();
     out.add_bytes(")").try();
     Ok(());
@@ -997,7 +1000,8 @@ write_written_args = (
 ) Res<(), AllocError> {
     c.args.loop((h, i, a) {
         (i + first > 0).then(() { out.add_bytes(", ").try() });
-        be.write_arg(a.value, i + first, f, sig, ctx, out).try();
+        hold = be.holds(c, i + first, first);
+        be.write_arg_at(a.value, i + first, hold, f, sig, ctx, out).try();
     });
     Ok(());
 }
@@ -1021,7 +1025,8 @@ write_to_pack = (
     c.args.loop((h, i, a) {
         ((i + first) < slot).then(() {
             (i + first > 0).then(() { out.add_bytes(", ").try() });
-            be.write_arg(a.value, i + first, f, sig, ctx, out).try();
+            hold = be.holds(c, i + first, first);
+            be.write_arg_at(a.value, i + first, hold, f, sig, ctx, out).try();
         });
     });
     (slot > 0).then(() { out.add_bytes(", ").try() });
@@ -1167,7 +1172,8 @@ write_pack_elems = (
     c.args.loop((h, i, a) {
         ((i + first) >= slot).then(() {
             ((i + first) > slot).then(() { out.add_bytes(", ").try() });
-            expr(be, a.value, ctx, elem, out).try();
+            hold = be.holds(c, i + first, first);
+            be.value_held(a.value, ctx, elem, hold, out).try();
         });
     });
     Ok(());
@@ -1179,6 +1185,7 @@ write_pack_elems = (
 write_receiver = (
     be   :: CBackend,
     recv : Res<ExprId>,
+    c    : Call,
     f    : Function,
     sig  : Vec<TyId>,
     ctx  : Ctx,
@@ -1187,20 +1194,24 @@ write_receiver = (
                  Res<usize, AllocError> {
     recv.match({
         None     => Ok(0),
-        Ok(base) => be.write_recv_expr(base, f, sig, ctx, out),
+        Ok(base) => be.write_recv_expr(base, c, f, sig, ctx, out),
     })
 }
 
+// A receiver stands before every argument, so it is held whenever any of
+// them still has a call to run.
 write_recv_expr = (
     be   :: CBackend,
     base : ExprId,
+    c    : Call,
     f    : Function,
     sig  : Vec<TyId>,
     ctx  : Ctx,
     out  :: String
 )
                   Res<usize, AllocError> {
-    be.write_arg(base, 0, f, sig, ctx, out).try();
+    hold = be.holds(c, 0, 1);
+    be.write_arg_at(base, 0, hold, f, sig, ctx, out).try();
     Ok(1);
 }
 
@@ -1220,9 +1231,27 @@ write_arg* = (
     out   :: String
 )
              Res<(), AllocError> {
+    be.write_arg_at(value, i, false, f, sig, ctx, out)
+}
+
+// The argument, HELD or not. A `::` parameter is never held: it is handed
+// the address of its argument, and the address of a copy is a different
+// variable — the callee would write the temporary and the caller would
+// never see it. It does not need to be: `write_address` takes `&` of a
+// place, and a place runs nothing.
+write_arg_at* = (
+    be    :: CBackend,
+    value : ExprId,
+    i     : usize,
+    hold  : bool,
+    f     : Function,
+    sig   : Vec<TyId>,
+    ctx   : Ctx,
+    out   :: String
+) Res<(), AllocError> {
     want = sig.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
     by_ref(f, i).match({
-        false => expr(be, value, ctx, want, out),
+        false => be.value_held(value, ctx, want, hold, out),
         true  => be.write_address(value, ctx, want, out),
     })
 }

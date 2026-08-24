@@ -1,0 +1,63 @@
+// THE SIDE-EFFECTING ORDERING TEST `nesting_calls.zen` said did not
+// exist. Zen evaluates a call's arguments LEFT TO RIGHT; C leaves the
+// order unspecified, and gcc takes it right to left — so a backend that
+// writes every argument straight into one C call expression answers
+// `three(d.tick(), d.tick(), d.tick())` with 210. Issue #717.
+//
+// `tick` is the whole point: it ANSWERS a different value each time, so
+// a wrong order is a wrong number and not merely a wrong print order.
+// Every line below is a `.` between two digits rather than one integer,
+// because 012 and 12 are the same integer and the leading tick would go
+// unread.
+//
+// The four shapes are the four places arguments are written:
+// a plain call, a call nested in a call, a method's receiver against its
+// own arguments, and an argument list that mixes a call with a value.
+
+Counter = {
+    n :: i32,
+
+    tick = (self :: @Self) i32 {
+        was    = self.n;
+        self.n = self.n + 1;
+        was;
+    }
+
+    join = (self :: @Self, a: i32, b: i32) str {
+        (a == 0).match({
+            true  => (b == 1).match({ true => "ok", false => "REORDERED" }),
+            false => "REORDERED",
+        });
+    }
+}
+
+three = (a: i32, b: i32, c: i32) str {
+    ((a == 0) && (b == 1) && (c == 2)).match({
+        true  => "ok",
+        false => "REORDERED",
+    });
+}
+
+two = (a: i32, b: i32) i32 { a * 10 + b; }
+
+main = (env: Env) Res<i32, AllocError> {
+    // a plain call: three ticks, in the order they are written
+    a ::= Counter(n: 0);
+    println("plain {}", three(a.tick(), a.tick(), a.tick()));
+
+    // a call nested in a call: the inner one is still an argument, and
+    // the arguments around it keep their places
+    b ::= Counter(n: 0);
+    println("nested {}", two(two(b.tick(), b.tick()), b.tick()));
+
+    // a RECEIVER runs before the arguments written after it
+    c ::= Counter(n: 0);
+    r ::= Counter(n: 0);
+    println("method {}", r.join(c.tick(), c.tick()));
+
+    // a call beside a plain value: the value is read where it is
+    // written, so the tick that comes first is the one on the left
+    d ::= Counter(n: 0);
+    println("mixed {}", two(d.tick(), d.tick()));
+    Ok(0);
+}

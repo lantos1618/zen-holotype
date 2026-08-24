@@ -38,7 +38,7 @@ sub_with, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 unify, arg_type = gen.gen_c.gen_c_mono
 enter_struct_tparams = gen.gen_c.gen_c_mono
 ctype, is_unit, request_type, is_ptr_named, declared_ret = gen.gen_c.gen_c_type
-expr, ty_of = gen.gen_c.gen_c_expr
+expr, ty_of, value_held, holds = gen.gen_c.gen_c_expr
 write_set_value = gen.gen_c.gen_c_widen
 declare_temp = gen.gen_c.gen_c_flow
 Site, site_of, join = gen.gen_c.gen_c_member
@@ -554,7 +554,8 @@ fat_args = (
     out      :: String
 ) Res<(), AllocError> {
     c.args.loop((h, i, arg) {
-        be.fat_arg(arg, i, slot, declared, targs, ctx, out).try();
+        hold = be.holds(c, i + 1, 1);
+        be.fat_arg(arg, i, hold, slot, declared, targs, ctx, out).try();
     });
     Ok(());
 }
@@ -566,6 +567,7 @@ fat_arg = (
     be       :: CBackend,
     arg      : Arg,
     i        : usize,
+    hold     : bool,
     slot     : Slot,
     declared : Vec<TyId>,
     targs    : Inst,
@@ -575,7 +577,7 @@ fat_arg = (
           Res<(), AllocError> {
     want = be.sub_with(at_or_zero(declared, i), targs).try();
     text ::= be.alloc.String().try();
-    expr(be, arg.value, ctx, want, text).try();
+    be.value_held(arg.value, ctx, want, hold, text).try();
     out.add_bytes(", ").try();
     be.convert(text.view(), want, at_or_zero(slot.params, i), out).try();
     Ok(());

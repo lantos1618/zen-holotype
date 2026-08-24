@@ -1,0 +1,46 @@
+// HOLDING AN ARGUMENT IN A TEMPORARY MUST NOT MOVE IT OUT OF A BRANCH
+// THAT MIGHT NOT RUN. `gen_c_call.zen` writes a call's arguments into
+// temporaries ahead of the call so they run left to right (#717), and a
+// temporary is a STATEMENT: put one in front of `x && f(g(), h())` and
+// `g` runs whether or not `x` held.
+//
+// `gen_c_op.zen` already refuses to lower a `&&` whose right operand
+// spills as C's own `&&`, writing an `if` instead — a held argument
+// makes a call spill for exactly that rule's purposes, which is what
+// this file pins. The tick counter is the witness: it reads zero if the
+// right side never ran and two if it ran once.
+//
+// The sibling `argument_order.zen` pins the ordering these temporaries
+// exist for. Neither file is worth anything without the other: one
+// alone can be passed by doing nothing, or by hoisting everything.
+
+Counter = {
+    n :: i32,
+
+    tick = (self :: @Self) i32 {
+        was    = self.n;
+        self.n = self.n + 1;
+        was;
+    }
+}
+
+both = (a: i32, b: i32) bool { (a + b) >= 0; }
+
+main = (env: Env) Res<i32, AllocError> {
+    // false && ..  — the right side must not run at all
+    a ::= Counter(n: 0);
+    println("and-skips {} {}", false && both(a.tick(), a.tick()), a.n);
+
+    // true && ..   — it must run, once, and in order
+    b ::= Counter(n: 0);
+    println("and-runs {} {}", true && both(b.tick(), b.tick()), b.n);
+
+    // true || ..   — the right side must not run
+    c ::= Counter(n: 0);
+    println("or-skips {} {}", true || both(c.tick(), c.tick()), c.n);
+
+    // false || ..  — it must run, once
+    d ::= Counter(n: 0);
+    println("or-runs {} {}", false || both(d.tick(), d.tick()), d.n);
+    Ok(0);
+}

@@ -40,7 +40,8 @@ CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 any_open, recv_inst, inst_open = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
-write_arg, signature_of, plain = gen.gen_c.gen_c_call
+write_arg_at, signature_of, plain = gen.gen_c.gen_c_call
+holds = gen.gen_c.gen_c_expr
 construct = gen.gen_c.gen_c_build
 Site, site_of, member_at, method_sig = gen.gen_c.gen_c_member
 member_symbol = gen.gen_c.gen_c_member
@@ -209,7 +210,7 @@ write_module_call = (
     be.need_function(d, inst, sym.view()).try();
     out.fmt("{}(", sym.view()).try();
     c.args.loop((h, i, arg) {
-        be.write_assoc_arg(arg, i, f, sig, ctx, out).try();
+        be.write_assoc_arg(arg, i, be.holds(c, i, 0), f, sig, ctx, out).try();
     });
     out.add_bytes(")").try();
     Ok(true);
@@ -365,7 +366,7 @@ emit_assoc_call = (
     sym = be.member_symbol(ty, s, a.name.text, sig, inst).try();
     out.fmt("{}(", sym.view()).try();
     c.args.loop((h, i, arg) {
-        be.write_assoc_arg(arg, i, f, sig, ctx, out).try();
+        be.write_assoc_arg(arg, i, be.holds(c, i, 0), f, sig, ctx, out).try();
     });
     out.add_bytes(")").try();
     Ok(true);
@@ -375,18 +376,19 @@ emit_assoc_call = (
 // binding read inside a nested closure does not resolve.
 // docs/SEMA_BOOTSTRAP_FIXES.md §10.
 write_assoc_arg = (
-    be  :: CBackend,
-    arg : Arg,
-    i   : usize,
-    f   : Function,
-    sig : Vec<TyId>,
-    ctx : Ctx,
-    out :: String
+    be   :: CBackend,
+    arg  : Arg,
+    i    : usize,
+    hold : bool,
+    f    : Function,
+    sig  : Vec<TyId>,
+    ctx  : Ctx,
+    out  :: String
 )
-                  Res<(), AllocError> {
+                   Res<(), AllocError> {
     (i > 0).match({
         true  => out.add_bytes(", "),
         false => Ok(()),
     }).try();
-    be.write_arg(arg.value, i, f, sig, ctx, out)
+    be.write_arg_at(arg.value, i, hold, f, sig, ctx, out)
 }
