@@ -46,20 +46,23 @@ ctype, is_unit, variant_type, decl_ctx, decl_inst = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
 Dest, write_dest, deliver = gen.gen_c.gen_c_stmt
 res_type_of = gen.gen_c.gen_c_expr
+needs_hoist = gen.gen_c.gen_c_hoist
 write_set_value = gen.gen_c.gen_c_widen
 declare_temp = gen.gen_c.gen_c_flow
 unwind_to = gen.gen_c.gen_c_own
 
 lower_try* = (
     be      :: CBackend,
+    id      : ExprId,
     node    : Expr,
     operand : ExprId,
     ctx     : Ctx,
+    want    : TyId,
     dst     : Dest
 ) Res<(), AllocError> {
     rt = be.res_type_of(operand, ctx).try();
     be.check.types.at(rt).match({
-        Res(r) => be.lower_try_res(node, operand, r, rt, ctx, dst),
+        Res(r) => be.lower_try_res(id, node, operand, r, rt, ctx, want, dst),
         _      => be.report_expr(
             operand,
             GenFault.Untyped("the operand of .try()")
@@ -69,18 +72,20 @@ lower_try* = (
 
 lower_try_res = (
     be      :: CBackend,
+    id      : ExprId,
     node    : Expr,
     operand : ExprId,
     r       : TyRes,
     rt      : TyId,
     ctx     : Ctx,
+    want    : TyId,
     dst     : Dest
 ) Res<(), AllocError> {
     tmp ::= be.fresh_tmp("t").try();
     be.declare_temp(rt, tmp.view()).try();
     be.deliver(operand, ctx, rt, Dest.Into(tmp.view())).try();
     be.write_guard(node, r, tmp.view(), ctx).try();
-    be.unwrap(r, tmp.view(), dst).try();
+    be.unwrap(id, r, want, tmp.view(), ctx, dst).try();
     Ok(());
 }
 
@@ -743,11 +748,32 @@ set_qname = (be :: CBackend, set: TyId, out :: String) Res<(), AllocError> {
 // `.try()` evaluates to the Ok payload. A unit payload has no member
 // to read, so the destination gets nothing — which is right: `()` is
 // not a value C can hold.
-unwrap = (be :: CBackend, r: TyRes, tmp: str, dst: Dest)
-         Res<(), AllocError> {
+//
+// THE PAYLOAD IS NOT ALWAYS THE VALUE THE DESTINATION TAKES. In tail
+// position the destination is `Dest.Return`, and the function returns
+// its own `Res` — a bare payload there is the `return int32_t` cc
+// rejects. This is the lift DESIGN.md states and sema admits, so the
+// same predicate the literal tail answers (`gen_c_hoist.needs_hoist`)
+// is asked here too, and when it fires the Ok variant is BUILT the way
+// `gen_c_call.write_res_payload` builds a written `Ok(..)` — same tag,
+// same member, at the destination's type. The payload is READ out of
+// `tmp` rather than lowered again: the operand has already run once,
+// and running it twice is not a lift.
+unwrap = (
+    be   :: CBackend,
+    id   : ExprId,
+    r    : TyRes,
+    want : TyId,
+    tmp  : str,
+    ctx  : Ctx,
+    dst  : Dest
+) Res<(), AllocError> {
     be.is_unit(r.value).match({
         true  => Ok(()),
-        false => be.write_unwrap(tmp, dst),
+        false => be.needs_hoist(id, ctx, want).try().match({
+            true  => be.write_hoisted_unwrap(want, tmp, dst),
+            false => be.write_unwrap(tmp, dst),
+        }),
     })
 }
 
@@ -755,5 +781,30 @@ write_unwrap = (be :: CBackend, tmp: str, dst: Dest) Res<(), AllocError> {
     place ::= be.alloc.String().try();
     place.fmt("{tmp}.zg_data.").try();
     sym_member(place, "Ok").try();
+    be.write_dest(dst, place.view())
+}
+
+// `(Want){ .zg_tag = OK, .zg_data.Ok = tmp.zg_data.Ok }`, handed to the
+// destination. Assembled by pieces, `write_built`'s way: the braces are
+// literals and belong to nobody's placeholder.
+write_hoisted_unwrap = (
+    be   :: CBackend,
+    want : TyId,
+    tmp  : str,
+    dst  : Dest
+) Res<(), AllocError> {
+    cty ::= be.alloc.String().try();
+    be.ctype(want, cty).try();
+    place ::= be.alloc.String().try();
+    place.add_bytes("(").try();
+    place.add_bytes(cty.view()).try();
+    place.add_bytes("){ .zg_tag = ").try();
+    sym_variant(place, RES_PATH, "Ok").try();
+    place.add_bytes(", .zg_data.").try();
+    sym_member(place, "Ok").try();
+    place.add_bytes(" = ").try();
+    place.fmt("{tmp}.zg_data.").try();
+    sym_member(place, "Ok").try();
+    place.add_bytes(" }").try();
     be.write_dest(dst, place.view())
 }

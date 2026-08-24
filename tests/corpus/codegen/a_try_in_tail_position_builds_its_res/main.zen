@@ -1,0 +1,23 @@
+// A `.try()` in TAIL position of a `Res`-returning function.
+//
+// DESIGN.md's hoisting rule lifts a bare `T` into `Res<T>` wherever a `Res` is
+// expected, so `inner().try()` -- whose value is an `i32` -- closes a function
+// declared `Res<i32, E>` exactly as `Ok(1)` would. gen_c has to BUILD that
+// `Res`, because in C there is no conversion: returning the payload from a
+// function whose return type is the struct is a program cc rejects. The Err
+// path was already built correctly; only the Ok path returned the bare payload.
+//
+// A literal tail (`5`) always worked, which is what made this specific to
+// `.try()` -- and the symptom was C that would not compile, never a wrong
+// answer, so the corpus never noticed.
+inner = () Res<i32, AllocError> { Ok(1) }
+
+pick = (n: i32) Res<i32, AllocError> { inner().try() }
+
+main = (env: Env) Res<i32, AllocError> {
+    pick(0).match({
+        Ok(v)  => println("pick {}", v),
+        Err(_) => println("err"),
+    });
+    Ok(0);
+}
