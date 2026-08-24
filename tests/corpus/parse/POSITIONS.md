@@ -1,5 +1,20 @@
 # Exact spans for `positions.zen`
 
+**These conventions are executed by
+`tests/corpus/parse_zen/positions_are_exact/`.** That test embeds a source
+string of its own -- a struct with two fields, a one-line enum, and a function
+whose body is a call around a binary expression -- parses it, and asserts
+thirty-two spans against the values counted by hand off those bytes. It is the
+gate for the rules stated below: 1-based lines, 1-based *byte* columns,
+half-open `start..end`, a span covering a node's children and its own
+delimiters but not the separator after it or the trivia before it. Three of its
+rows (`module`, `struct.body`, `fn.block`) start on one line and end on
+another, and most of the rest end more than one column past their start, so a
+tree carrying only a start point cannot pass it. `parser_spans.zen` in this
+folder asserts the same conventions on a smaller file and from the struct/bind
+side; this table remains the specification both were written from, and the rows
+below still name `positions.zen`, which nothing checks.
+
 `TESTING.md` calls position accuracy "the one everyone skips and the one that
 decays fastest". This is that test, written out: every row is a node in
 `positions.zen` and the exact span the parser must report for it.

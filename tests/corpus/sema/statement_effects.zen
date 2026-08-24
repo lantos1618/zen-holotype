@@ -8,19 +8,55 @@
 //   - arithmetic can trap — the subtraction is a range guard, not a
 //     value gone missing;
 //   - a match whose arms do the work is Zen's conditional statement.
+//
+// EACH EFFECT IS NOW OBSERVED, not merely permitted. The old file proved
+// only that these four shapes compile, so a sema that wrongly flagged a
+// pure statement and one that dropped the shape's semantics outright were
+// both green. Now: the effectful call writes into a buffer that is printed
+// afterwards, so a call lowered away is a shorter string; the statement
+// `.try()` is given a failing input and the Err has to arrive at the
+// caller; and the range guard runs at n=9, one below the value that
+// underflows, so the subtraction is live arithmetic rather than dead code.
 
 guard = (n: usize) Res<usize, AllocError> {
-    10 - n - 1;    // underflows for n > 8: unsigned underflow IS the trap
+    10 - n - 1;    // underflows for n > 9: unsigned underflow IS the trap
     n
 }
 
-main = (env: Env) Res<i32, AllocError> {
-    println("called");
+Fault = | TooBig
+
+checked = (n: usize) Res<usize, Fault> {
+    (n < 100).then(() { n }).ok_or(Fault.TooBig).try();    // for propagation
+    Ok(n * 2);
+}
+
+Error = AllocError | Fault | IoError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    sb    ::= alloc.String("").try();
+
+    sb.add("one").try();        // a call, run for its effect
+    sb.add(" two {}", 3).try();
+    println("{} {}", sb.view(), sb.view().len);
+
     println("{}", guard(3).try());
+    println("{}", guard(9).try());
+
+    println("{}", checked(21).try());
+    checked(500).match({
+        Ok(n)  => println("no fault {}", n),
+        Err(_) => println("too big"),
+    });
+
     b = true;
     b.match({
         true  => println("arm"),
         false => (),
+    });
+    (1 > 2).match({
+        true  => println("wrong arm"),
+        false => println("other arm"),
     });
     Ok(0);
 }

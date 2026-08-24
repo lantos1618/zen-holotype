@@ -1,0 +1,47 @@
+// AN INFERRED ERROR SET IS THE UNION, AND EVERY MEMBER OF IT IS LOAD-BEARING.
+//
+// `build_label`'s set is written `_`, so it is whatever its three `.try()`
+// calls can raise: AllocError from String(), IoError from add, ParseError
+// from ok_or. corpus/std/res_try_error_sets_merge proves a caller declaring
+// all three compiles -- but a merge that DROPPED a member would compile there
+// too, because a set is allowed to be narrower than what the caller declared.
+//
+// So the three callers below each declare a set missing exactly ONE member,
+// and each must be rejected naming it. `.count 3` allows no fourth
+// diagnostic and no fewer, which is what turns "some member is missing" into
+// "these three and no others".
+//
+// This is the compile-time half of the property. The RUNTIME half -- telling
+// the merged set's members apart in a match -- cannot be written today: every
+// arm naming a member of a union-of-enums is a catch-all (issue #735), so
+// `Err(_)` is the only arm a caller can spell.
+
+ParseError = | NotANumber
+
+build_label = (alloc: Alloc, ok: bool) Res<String, _> {
+    sb ::= alloc.String("").try();
+    ok.then(() { 1 }).ok_or(ParseError.NotANumber).try();
+    sb.add("label {}", 1).try();
+    Ok(sb);
+}
+
+no_alloc = (alloc: Alloc) Res<i32, IoError | ParseError> {
+    build_label(alloc, true).try();
+    Ok(1);
+}
+
+no_io = (alloc: Alloc) Res<i32, AllocError | ParseError> {
+    build_label(alloc, true).try();
+    Ok(2);
+}
+
+no_parse = (alloc: Alloc) Res<i32, AllocError | IoError> {
+    build_label(alloc, true).try();
+    Ok(3);
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    println("{} {} {}", no_alloc(alloc), no_io(alloc), no_parse(alloc));
+    Ok(0);
+}

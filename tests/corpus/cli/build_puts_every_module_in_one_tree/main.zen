@@ -1,5 +1,5 @@
-// A program of MORE THAN ONE MODULE is checked, and that is the whole
-// assertion.
+// A program of MORE THAN ONE MODULE is checked, and EVERY module it
+// reaches is in the one tree that gets checked.
 //
 // A `Parser` used to build its own `Ast`, so N files were N unrelated id
 // spaces and a `Checker` — which is built from ONE tree and answers
@@ -7,28 +7,30 @@
 // now hands the tree from parser to parser and reads it back, so one
 // counter names every node in the compilation.
 //
-// `pair/` is two modules and the second is reached only by following an
-// import, which is what makes this different from the one-module root
-// beside it. Before the tree was threaded this printed "2 modules
-// parsed; sema needs them in one Ast" and exited 1, so a `0` here is the
-// whole of the change.
+// TWO DATA, because the exit code alone is not one: a `build` that did
+// nothing at all would also print `-> 0`. `units` is how many modules
+// the walk actually parsed, so a driver that never followed the import
+// prints `units=1` and this goes red on a number rather than on a
+// diagnostic it might not have produced.
 //
-// WHAT IT DOES NOT PIN, said rather than implied: that EVERY module
-// reached the tree. A driver that kept only the last parser's tree would
-// check `pair.zen` alone, and `pair.zen` alone is a clean module — so
-// this test would still be green. Pinning that needs the LAST module
-// parsed to be the one that cannot stand alone, and the walk parses the
-// entry first; the module that depends on another is therefore always
-// the one a broken driver drops. `zen build src` is the test that
-// catches it, and it is not a corpus test yet.
+// AND THE DEPENDENCY UNDER `pair/` IS MUTUAL. It used to run one way —
+// `main.zen` naming `pair.zen` — and a driver keeping only the LAST
+// parser's tree would then check `pair.zen` alone, which stood alone
+// cleanly, so this test stayed green through exactly the defect it is
+// named for. Now `pair.zen` names a type declared in `main.zen` as well:
+// whichever single tree such a driver kept, the module in it references
+// ids from the module it dropped, and no one-module check can come back
+// clean.
 //
-// `build` is called directly rather than through `main` because
-// `env.argv` is empty in the generated C — see the report — so a real
-// command line cannot reach it yet.
+// The phases are driven here rather than through `build` because the
+// tally lives on `Build` and `build` answers only the code; `zen_run.zen`
+// runs exactly these five lines. `env.argv` is empty in the generated C
+// — see the report — so a real command line cannot reach either.
 
 Alloc, AllocError = std.mem
 str = std.text
-Debug, Job, build = zen
+Build, Debug, Job = zen
+entry_of = zen.zen_path
 
 main = (env: Env) Res<i32, AllocError> {
     a ::= env.mem.alloc();
@@ -37,16 +39,17 @@ main = (env: Env) Res<i32, AllocError> {
 }
 
 run = (env: Env, a: Alloc, root: str) Res<(), AllocError> {
-    code = build(
-        env,
-        a,
-        Job(
-            root: root,
-            out: "",
-            emit_c: false,
-            debug: Debug(repeat: 1, permute: "")
-        )
-    ).try();
-    println("{} -> {}", root, code);
+    job = Job(
+        root: root,
+        out: "",
+        emit_c: false,
+        debug: Debug(repeat: 1, permute: "")
+    );
+    b ::= a.Build(env, root);
+    entry = entry_of(env, a, root, job.entry).try();
+    b.walk(entry).try();
+    b.back_end(job).try();
+    b.tally();
+    println("{} -> {} units={}", root, b.code(), b.units);
     Ok(());
 }

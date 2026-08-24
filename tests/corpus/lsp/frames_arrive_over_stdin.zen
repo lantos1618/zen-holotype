@@ -36,15 +36,44 @@ Pass = {
     seen*: usize,
 }
 
+// How the bytes ARRIVED, which is the half the counts above cannot see.
+//
+// THE FRAME NUMBERS ARE PROPERTIES OF THE FIXTURE, NOT OF `short_by`. A
+// reader that slurped the whole pipe in one call and then parsed the buffer
+// prints exactly the same `60 bytes, 1 CR` and the same `197 byte(s) read`,
+// so the numbers above pin `frame_at` over a pipe and say nothing about the
+// incremental read this file is named for. These two do: `reads` is how many
+// times the capability was asked, and `widest` is the largest single ask,
+// which is only ever bigger than one when `short_by` has read a
+// `Content-Length` and computed what is still missing. One slurp is
+// `reads 1`; a reader that never uses the length and crawls a byte at a time
+// is `widest 1`.
+//
+// 107 IS DERIVED, NOT OBSERVED. The fixture is 79 bytes of header, 60 of
+// body, 25 of second header, 33 of second body = 197. The reader crawls each
+// header one byte at a time because `short_by` has no length yet (79 + 25 =
+// 104 reads), then asks for the whole body once it does (2 reads), then one
+// last read that comes back empty and ends the loop: 107.
+Reads = {
+    calls*: usize,
+    widest*: usize,
+}
+
 main = (env: Env) Res<i32, AllocError> {
     a    ::= env.mem.alloc();
     held ::= a.Vec<u8>();
     p    ::= Pass(at: 0, seen: 0);
     open ::= true;
+    r    ::= Reads(calls: 0, widest: 0);
     loop(() { open }, (h) {
-        want = short_by(str_at(held.ptr(), held.len), p.at);
-        open = arrived(env, held, want).try();
-        p    = drained(str_at(held.ptr(), held.len), p);
+        want  = short_by(str_at(held.ptr(), held.len), p.at);
+        asked = (want == 0).match({ true => 1, false => want });
+        r     = Reads(
+            calls: r.calls + 1,
+            widest: (asked > r.widest).match({ true => asked, false => r.widest })
+        );
+        open  = arrived(env, held, want).try();
+        p     = drained(str_at(held.ptr(), held.len), p);
     });
     println(
         "{} frame(s), {} byte(s) read, {} consumed",
@@ -52,6 +81,7 @@ main = (env: Env) Res<i32, AllocError> {
         held.len,
         p.at
     );
+    println("{} read(s), widest ask {}", r.calls, r.widest);
     Ok(0);
 }
 
@@ -78,22 +108,38 @@ drained = (held: str, p: Pass) Pass {
             Err(_) => { more = false; },
             Ok(fr) => {
                 seen = seen + 1;
-                // the LENGTH and the CR COUNT, not the body: a reader
-                // that cut the message at the first `\r\n` gets a
-                // shorter body, and one that stripped the CR gets the
-                // same length with a different count. Neither can
-                // survive both numbers.
+                // the LENGTH, the CR COUNT and the BODY'S OWN BYTES,
+                // never the body itself: a `Content-Length` header
+                // carries a CR and a `.expected` may not
+                // (docs/TESTING.md). A reader that cut the message at
+                // the first `\r\n` gets a shorter body, one that
+                // stripped the CR gets the same length with a different
+                // count, and one off by a byte at either end moves
+                // `first`, `last` or `sum`. The sum is what makes the
+                // pair of lengths stop being the fixture's own
+                // properties: it is a function of every byte delivered.
                 println(
-                    "frame {}: {} bytes, {} CR",
+                    "frame {}: {} bytes, {} CR, first {}, last {}, sum {}",
                     seen,
                     fr.body.len,
-                    carriage_returns(fr.body)
+                    carriage_returns(fr.body),
+                    fr.body.index(0),
+                    fr.body.index(fr.body.len - 1),
+                    byte_sum(fr.body)
                 );
                 from = fr.next;
             },
         });
     });
     Pass(at: from, seen: seen);
+}
+
+byte_sum = (s: str) u64 {
+    n: u64 ::= 0;
+    Range(0, s.len).loop((h, i) {
+        n = n + s.index(i).to_u64();
+    });
+    n;
 }
 
 carriage_returns = (s: str) usize {

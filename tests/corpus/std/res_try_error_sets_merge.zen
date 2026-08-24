@@ -2,6 +2,19 @@
 // propagation merges error sets. build_label's set is inferred
 // (internal, so `_`) and is the union of what its .try() calls can
 // raise; main writes the union out, because main is a boundary
+//
+// THE MEMBERSHIP OF THAT UNION IS PINNED NEXT DOOR, in
+// must-fail/std/error_set_merge_omits_a_member: three callers each
+// declaring a set missing exactly one member, each rejected naming it.
+// It has to live there because `Err(_) => println("err")` -- all this file
+// can say about the failure -- prints "err" for ANY member, so a merge that
+// dropped ParseError or mis-tagged one passed here unseen. Telling the
+// members apart at RUNTIME is not writable today: every arm naming a member
+// of a union-of-enums is a catch-all (issue #735).
+//
+// What this file owns is the successful path, and the value it prints is
+// built from three arguments in two `add` calls so a fill that lost an
+// argument or reordered the pair cannot print it by accident.
 
 ParseError = | NotANumber
 
@@ -10,7 +23,8 @@ ParseError = | NotANumber
 build_label = (alloc: Alloc, ok: bool) Res<String, _> {
     sb ::= alloc.String("").try();
     ok.then(() { 1 }).ok_or(ParseError.NotANumber).try();
-    sb.add("label {}", 1).try();
+    sb.add("label {} of {}", 7, 12).try();
+    sb.add(" rev {}", 3).try();
     Ok(sb);
 }
 
@@ -21,6 +35,7 @@ main = (env: Env) Res<i32, Error> {
 
     s = build_label(alloc, true).try();
     println("{}", s.view());
+    println("len {}", s.view().len);
 
     build_label(alloc, false).match({
         Ok(_)  => println("built"),

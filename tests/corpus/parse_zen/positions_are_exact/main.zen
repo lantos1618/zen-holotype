@@ -1,0 +1,197 @@
+// POSITIONS ARE EXACT, AND THIS IS WHERE THAT IS EXECUTED.
+//
+// `tests/corpus/parse/POSITIONS.md` is a hand-written table of exact
+// spans and a set of conventions to read them by. Until this file, no
+// gate read either: `positions.zen` beside the table prints `25` and
+// says nothing about a position, so deleting every end-position in the
+// tree left the corpus green. A convention nothing executes is a
+// comment.
+//
+// THE CONVENTIONS, asserted below rather than described:
+//   - lines are 1-based, columns are 1-based and count BYTES
+//   - a span is half-open: `end` is one past the last byte, so `Point`
+//     on line 1 is 1:1..1:6
+//   - a node's span covers its children and its own delimiters, and
+//     stops before the separator that follows it: `x: i32` on line 2 is
+//     2:5..2:11 and the comma at 2:11 belongs to the member list
+//   - a node's span does NOT include its leading trivia
+//   - the module's span is the whole file
+//
+// IT CANNOT BE PASSED BY A POINT. `struct.body`, `fn.block` and
+// `module` each start on one line and end on another, and half the
+// rows below have an `end` column more than one past their `start`, so
+// a tree that carried only a start position -- which is all `DESIGN.md`
+// actually requires -- fails here instead of silently costing `fmt` the
+// ability to reprint a node.
+//
+// EVERY SPAN BELOW WAS COUNTED BY HAND off `SRC` before it was compared
+// to the parser's answer, column by column. The expectation is the
+// source, not the output.
+
+scan, Source = std.lex
+Parser = std.parse
+Ast, Span, Decl, Block, Expr = std.ast
+Alloc, AllocError = std.mem
+str = std.text
+
+// The file being parsed, and the columns it is asserted at:
+//
+//    1  Point = {
+//    2      x: i32,
+//    3      y: i32,
+//    4  }
+//    5
+//    6  Sign = Neg | Pos
+//    7
+//    8  dist = (p: Point) i32 {
+//    9      add(p.x + p.y, 1)
+//   10  }
+//   11  (end of file)
+SRC: str = "Point = {\n    x: i32,\n    y: i32,\n}\n\nSign = Neg | Pos\n\ndist = (p: Point) i32 {\n    add(p.x + p.y, 1)\n}\n"
+
+sp = (label: str, s: Span) () {
+    println(
+        "{} {}:{}..{}:{}",
+        label,
+        s.start.line,
+        s.start.col,
+        s.end.line,
+        s.end.col
+    );
+}
+
+// decl 0: a struct, its brace-delimited body, and both of its fields.
+// `struct.body` is the crossing-lines row.
+show_struct = (tree: Ast, d: Decl) () {
+    sp("decl0", d.span);
+    d.kind.match({
+        Struct(s) => {
+            sp("struct.name", s.name.span);
+            sp("struct.body", s.body_span);
+            s.members.loop((h, mem) {
+                sp("member", mem.span);
+                mem.kind.match({
+                    Field(f) => {
+                        sp("field.name", f.name.span);
+                        f.type.match({
+                            Ok(t) => sp("field.type", tree.type_at(t).span),
+                            None  => println("field.type absent"),
+                        });
+                    },
+                    _        => println("member is not a field"),
+                });
+            });
+        },
+        _         => println("decl 0 is not a struct"),
+    });
+}
+
+// decl 1: an enum on one line. Each variant is its own span, and the
+// bars between them belong to the enum, not to either neighbour.
+show_enum = (d: Decl) () {
+    sp("decl1", d.span);
+    d.kind.match({
+        Enum(e) => {
+            sp("enum.name", e.name.span);
+            e.variants.loop((h, v) { sp("variant", v.span); });
+        },
+        _       => println("decl 1 is not an enum"),
+    });
+}
+
+// decl 2: a function. `fn.params` is the parenthesised list INCLUDING
+// its parens; `param` is the parameter alone, inside them.
+show_fn = (tree: Ast, d: Decl) () {
+    sp("decl2", d.span);
+    d.kind.match({
+        Function(f) => {
+            sp("fn.name", f.name.span);
+            sp("fn.params", f.params_span);
+            f.params.loop((h, prm) {
+                sp("param", prm.span);
+                sp("param.name", prm.name.span);
+                prm.type.match({
+                    Ok(t) => sp("param.type", tree.type_at(t).span),
+                    None  => println("param.type absent"),
+                });
+            });
+            f.ret.match({
+                Ok(t) => sp("fn.ret", tree.type_at(t).span),
+                None  => println("fn.ret absent"),
+            });
+            f.body.match({
+                Ok(b) => show_body(tree, tree.block_at(b)),
+                None  => println("fn.body absent"),
+            });
+        },
+        _           => println("decl 2 is not a function"),
+    });
+}
+
+show_body = (tree: Ast, b: Block) () {
+    sp("fn.block", b.span);
+    println("stmts {}", b.stmts.len);
+    b.value.match({
+        Ok(v) => show_call(tree, tree.expr_at(v)),
+        None  => println("block.value absent"),
+    });
+}
+
+// the call's own span runs from the callee to the `)`; `call.args` is
+// the argument list's parens and everything between them.
+show_call = (tree: Ast, e: Expr) () {
+    sp("call", e.span);
+    e.kind.match({
+        Call(c) => {
+            sp("call.callee", tree.expr_at(c.callee).span);
+            sp("call.args", c.args_span);
+            c.args.loop((h, a) {
+                sp("arg", a.span);
+                show_arg(tree, tree.expr_at(a.value));
+            });
+        },
+        _       => println("block.value is not a call"),
+    });
+}
+
+// `p.x + p.y` is the row that proves an operator carries a span of its
+// own: `binary.op` is the `+` and nothing else.
+show_arg = (tree: Ast, e: Expr) () {
+    sp("arg.value", e.span);
+    e.kind.match({
+        Binary(b) => {
+            sp("binary.op", b.op_span);
+            sp("binary.lhs", tree.expr_at(b.lhs).span);
+            sp("binary.rhs", tree.expr_at(b.rhs).span);
+        },
+        _         => println("    (argument is not a binary)"),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    tree  ::= alloc.Ast();
+
+    lexed = scan(alloc, Source(file: "p.zen", text: SRC)).try();
+    p ::= alloc.Parser(lexed, tree);
+    m = p.module("p").try();
+    p.tree.add_module(m).try();
+
+    println("lex {} parse {}", lexed.diags.len, p.diags.len);
+    sp("module", m.span);
+    println("decls {}", m.decls.len);
+
+    m.decls.get(0).match({
+        Ok(d) => show_struct(p.tree, d),
+        None  => println("no decl 0"),
+    });
+    m.decls.get(1).match({
+        Ok(d) => show_enum(d),
+        None  => println("no decl 1"),
+    });
+    m.decls.get(2).match({
+        Ok(d) => show_fn(p.tree, d),
+        None  => println("no decl 2"),
+    });
+    Ok(0);
+}

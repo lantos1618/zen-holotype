@@ -2,10 +2,25 @@
 //   receive_msg = (self :: @Self, ctx: Context, data: str) { .. }
 // env is threaded explicitly because println resolves an Env BY TYPE
 // and a function without one has no console.
+//
+// THE BODY COMPUTES. The old expectation was the argument echoed straight
+// back, so the only thing that could fail was outright rejection of the
+// spelling; a return type wrongly inferred as something other than unit
+// would still have printed 7. Here the values are derived, one such function
+// calls another, and the last one is used where a unit-valued STATEMENT is
+// the only thing that fits -- inside a `.match` arm, which has no value to
+// give the arms unless the call really is unit.
 
-shout = (env: Env, n: i32) { println("{}", n) }
+shout = (env: Env, n: i32) { println("{}", n * 6 + 4) }
+
+twice = (env: Env, n: i32) { shout(env, n); shout(env, n + 1) }
 
 main = (env: Env) Res<i32, ArgError> {
     shout(env, 7);
+    twice(env, 10);
+    (1 < 2).match({
+        true  => shout(env, 100),
+        false => shout(env, 200),
+    });
     Ok(0);
 }

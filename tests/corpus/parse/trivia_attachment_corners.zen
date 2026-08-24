@@ -1,0 +1,324 @@
+// tests/corpus/parse/trivia_attachment_corners.zen
+// Where a comment lands when no node obviously owns it.
+//
+// Four corpus tests in this directory carry comments in interesting
+// places and then assert only that the program still RUNS:
+// `trivia_after_decl.zen`, `trivia_between_arms.zen`,
+// `trivia_in_arm.zen` and `trivia_only_comment_block.zen`. Delete
+// trivia attachment from the parser outright and all four stay green,
+// because a dropped comment changes no value. They are fixtures for
+// the LEXER. THIS file is where the attachment property they imply is
+// actually gated: it drives `std.lex` + `std.parse` directly and
+// prints every trivia item with its kind, line and text, so a comment
+// on the wrong node — or on no node at all — changes the output.
+//
+// `parser_trivia.zen` gates the five placements TESTING.md names. The
+// three corners below are the ones it does not reach:
+//
+//   (a) a comment that is the ONLY content of a block, both a bare
+//       `{ .. }` and a closure body. No node begins at it and no node
+//       ends before it on its line, so neither attachment rule names
+//       an owner -- AND TODAY NOBODY DOES. The expectation below
+//       records `bare.block.trailing 0` and `closure.block.trailing 0`
+//       while `arena` lists both comments, which is this file's own
+//       definition of a comment that was parsed and then LOST. That is
+//       a defect against DESIGN.md ("trivia is attached to nodes, not
+//       discarded") and TESTING.md ("no comment is lost"); the day a
+//       block claims its sole comment, THIS FILE GOES RED and the two
+//       zeros become ones. It is written down here rather than left to
+//       a bare must-fail because the loss is silent: the formatter
+//       copies declaration bodies verbatim today, so nothing else in
+//       the tree can see it.
+//   (b) a comment after a DECLARATION's closing brace, as distinct
+//       from one after a field, which `parser_trivia.zen` covers. The
+//       outermost node whose span ends before it on that line is the
+//       declaration.
+//   (c) a comment between a match arm body's `{` and its first
+//       statement. A node DOES begin after it, so the leading rule
+//       applies and the statement owns it.
+//
+// THE LISTING BELOW IS EXHAUSTIVE AND THAT IS THE POINT. Every run of
+// every node this source builds is printed, zero-length ones included,
+// and then `arena` prints every piece the lexer handed over. The two
+// lists are a checklist against each other: an item that appears in
+// `arena` and under no owner above was parsed and then LOST. A test
+// that printed only the runs it expected to be interesting could not
+// tell "attached somewhere I did not look" from "attached nowhere",
+// and that distinction is the whole content of this file.
+//
+// WHY A `zen fmt` ROUND TRIP CANNOT SETTLE THIS, since it is the first
+// thing anyone reaches for: `fmt.zen` walks the AST for the file's
+// SHAPE only — `write_module` calls `write_trivia` for each `d.leading`
+// and for `m.trailing`, and nothing else — and passes every
+// declaration's own text through VERBATIM from the original bytes
+// (`fmt_src.zen`). No run below declaration level is read at all, so a
+// byte-identical round trip is silent about member, statement, arm and
+// block trivia alike, including every run `parser_trivia.zen` asserts.
+// The formatter will only start reading them when stage 2 stops
+// copying bodies, which is exactly when a dropped comment becomes a
+// deleted comment. That is what this file is here to catch first.
+
+scan, Source = std.lex.lex
+Parser = std.parse.parser
+module = std.parse.parse_decl
+Ast = std.ast.ast_arena
+TriviaRun = std.ast.ast_span
+Decl, Block, Stmt = std.ast.ast_node
+ExprId = std.ast.ast_id
+
+//   1  Point = {
+//   2      x: i32,
+//   3  }   // trailing on the closing brace
+//   4
+//   5  main = (env: Env) Res<i32, ArgError> {
+//   6      {
+//   7          // the only content of a bare block
+//   8      }
+//   9      run(() {
+//  10          // the only content of a closure body
+//  11      });
+//  12      n.match({
+//  13          true  => {
+//  14              // first inside the arm body
+//  15              y();
+//  16          },
+//  17          false => (),
+//  18      });
+//  19  }
+SOURCE: str = "Point = {\n    x: i32,\n}   // trailing on the closing brace\n\nmain = (env: Env) Res<i32, ArgError> {\n    {\n        // the only content of a bare block\n    }\n    run(() {\n        // the only content of a closure body\n    });\n    n.match({\n        true  => {\n            // first inside the arm body\n            y();\n        },\n        false => (),\n    });\n}\n"
+
+// Every piece of a run, in order. A count alone would pass while the
+// parser attached the wrong comment, which is the failure this test
+// exists to catch.
+show_run = (env: Env, tree: Ast, label: str, run: TriviaRun) () {
+    println("{} {}", label, run.len);
+    Range(0, run.len).loop((h, i) {
+        show_item(env, tree, run, i);
+    });
+}
+
+show_item = (env: Env, tree: Ast, run: TriviaRun, i: usize) () {
+    t = tree.trivia_at(run, i);
+    t.kind.match({
+        LineComment  => println("  line {} {}", t.span.start.line, t.text),
+        BlockComment => println("  block {} {}", t.span.start.line, t.text),
+        Blank        => println(
+            "  blank {}..{}",
+            t.span.start.line,
+            t.span.end.line
+        ),
+    });
+}
+
+// An expression's own two runs. Printed for every expression on the
+// path to a corner, so "the comment is on the call, not the block" is
+// a visible answer rather than an untested guess.
+show_expr = (env: Env, tree: Ast, lead: str, tail: str, id: ExprId) () {
+    e = tree.expr_at(id);
+    show_run(env, tree, lead, e.leading);
+    show_run(env, tree, tail, e.trailing);
+}
+
+show_stmt_runs = (env: Env, tree: Ast, lead: str, tail: str, s: Stmt) () {
+    show_run(env, tree, lead, s.leading);
+    show_run(env, tree, tail, s.trailing);
+}
+
+// ---------------------------------------------------------------------
+// (b) the declaration and its member
+// ---------------------------------------------------------------------
+
+show_struct = (env: Env, tree: Ast, d: Decl) () {
+    show_run(env, tree, "decl0.leading", d.leading);
+    show_run(env, tree, "decl0.trailing", d.trailing);
+    d.kind.match({
+        Struct(s) => s.members.loop((h, mem) {
+            show_run(env, tree, "member.leading", mem.leading);
+            show_run(env, tree, "member.trailing", mem.trailing);
+        }),
+        _         => println("decl0 is not a struct"),
+    });
+}
+
+// ---------------------------------------------------------------------
+// the function, statement by statement
+// ---------------------------------------------------------------------
+
+show_fn = (env: Env, tree: Ast, d: Decl) () {
+    show_run(env, tree, "decl1.leading", d.leading);
+    show_run(env, tree, "decl1.trailing", d.trailing);
+    d.kind.match({
+        Function(f) => f.body.match({
+            Ok(b) => show_fn_body(env, tree, tree.block_at(b)),
+            None  => println("no body"),
+        }),
+        _           => println("decl1 is not a function"),
+    });
+}
+
+show_fn_body = (env: Env, tree: Ast, b: Block) () {
+    show_run(env, tree, "main.body.leading", b.leading);
+    show_run(env, tree, "main.body.trailing", b.trailing);
+    b.stmts.get(0).match({
+        Ok(s) => show_stmt0(env, tree, s),
+        None  => println("no statement 0"),
+    });
+    b.stmts.get(1).match({
+        Ok(s) => show_stmt1(env, tree, s),
+        None  => println("no statement 1"),
+    });
+    b.stmts.get(2).match({
+        Ok(s) => show_stmt2(env, tree, s),
+        None  => println("no statement 2"),
+    });
+}
+
+// (a) first half: the bare block whose only content is a comment.
+show_stmt0 = (env: Env, tree: Ast, s: Stmt) () {
+    show_stmt_runs(env, tree, "stmt0.leading", "stmt0.trailing", s);
+    s.kind.match({
+        Block(bid) => show_bare(env, tree, tree.block_at(bid)),
+        _          => println("statement 0 is not a bare block"),
+    });
+}
+
+show_bare = (env: Env, tree: Ast, b: Block) () {
+    println("bare.block stmts {}", b.stmts.len);
+    show_run(env, tree, "bare.block.leading", b.leading);
+    show_run(env, tree, "bare.block.trailing", b.trailing);
+}
+
+// (a) second half: the closure body whose only content is a comment.
+// The call, its callee and its argument are all printed, because they
+// are where the comment would be if it were merely misfiled.
+show_stmt1 = (env: Env, tree: Ast, s: Stmt) () {
+    show_stmt_runs(env, tree, "stmt1.leading", "stmt1.trailing", s);
+    s.kind.match({
+        Expr(es) => {
+            show_expr(env, tree, "call.leading", "call.trailing", es.expr);
+            show_call(env, tree, es.expr);
+        },
+        _        => println("statement 1 is not an expression"),
+    });
+}
+
+show_call = (env: Env, tree: Ast, id: ExprId) () {
+    tree.expr_at(id).kind.match({
+        Call(c) => {
+            show_expr(
+                env,
+                tree,
+                "call.callee.leading",
+                "call.callee.trailing",
+                c.callee
+            );
+            c.args.loop((h, a) {
+                show_run(env, tree, "call.arg.leading", a.leading);
+                show_run(env, tree, "call.arg.trailing", a.trailing);
+                show_expr(
+                    env,
+                    tree,
+                    "call.arg.expr.leading",
+                    "call.arg.expr.trailing",
+                    a.value
+                );
+                show_closure(env, tree, a.value);
+            });
+        },
+        _       => println("statement 1 is not a call"),
+    });
+}
+
+show_closure = (env: Env, tree: Ast, id: ExprId) () {
+    tree.expr_at(id).kind.match({
+        Lambda(l) => show_closure_body(env, tree, tree.block_at(l.body)),
+        _         => println("the argument is not a lambda"),
+    });
+}
+
+show_closure_body = (env: Env, tree: Ast, b: Block) () {
+    println("closure.block stmts {}", b.stmts.len);
+    show_run(env, tree, "closure.block.leading", b.leading);
+    show_run(env, tree, "closure.block.trailing", b.trailing);
+}
+
+// (c) the comment between an arm body's `{` and its first statement.
+show_stmt2 = (env: Env, tree: Ast, s: Stmt) () {
+    show_stmt_runs(env, tree, "stmt2.leading", "stmt2.trailing", s);
+    s.kind.match({
+        Expr(es) => {
+            show_expr(env, tree, "match.leading", "match.trailing", es.expr);
+            show_match(env, tree, es.expr);
+        },
+        _        => println("statement 2 is not an expression"),
+    });
+}
+
+show_match = (env: Env, tree: Ast, id: ExprId) () {
+    tree.expr_at(id).kind.match({
+        Match(mt) => {
+            show_expr(
+                env,
+                tree,
+                "match.scrut.leading",
+                "match.scrut.trailing",
+                mt.scrutinee
+            );
+            mt.arms.loop((h, a) {
+                show_run(env, tree, "arm.leading", a.leading);
+                show_run(env, tree, "arm.trailing", a.trailing);
+                show_arm_body(env, tree, a.body);
+            });
+        },
+        _         => println("statement 2 is not a match"),
+    });
+}
+
+show_arm_body = (env: Env, tree: Ast, id: ExprId) () {
+    show_expr(env, tree, "arm.body.leading", "arm.body.trailing", id);
+    tree.expr_at(id).kind.match({
+        Block(bid) => show_arm_block(env, tree, tree.block_at(bid)),
+        _          => println("arm body is not a block"),
+    });
+}
+
+show_arm_block = (env: Env, tree: Ast, b: Block) () {
+    println("arm.block stmts {}", b.stmts.len);
+    show_run(env, tree, "arm.block.leading", b.leading);
+    show_run(env, tree, "arm.block.trailing", b.trailing);
+    b.stmts.loop((h, s) {
+        show_stmt_runs(env, tree, "arm.stmt.leading", "arm.stmt.trailing", s);
+    });
+}
+
+// Everything the lexer handed over, whether or not a node claims it.
+// `trivia_mark` is the arena's current length, so this is the whole
+// list in source order — the checklist the listing above is read
+// against.
+show_arena = (env: Env, tree: Ast) () {
+    show_run(env, tree, "arena", TriviaRun(at: 0, len: tree.trivia_mark()));
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    lexed = scan(alloc, Source(file: "t.zen", text: SOURCE)).try();
+    p ::= alloc.Parser(lexed);
+    m = p.module("t").try();
+    println("lex {} parse {}", lexed.diags.len, p.diags.len);
+
+    show_run(env, p.tree, "module.leading", m.leading);
+
+    m.decls.get(0).match({
+        Ok(d) => show_struct(env, p.tree, d),
+        None  => println("no decl 0"),
+    });
+
+    m.decls.get(1).match({
+        Ok(d) => show_fn(env, p.tree, d),
+        None  => println("no decl 1"),
+    });
+
+    show_run(env, p.tree, "module.trailing", m.trailing);
+    show_arena(env, p.tree);
+    Ok(0);
+}

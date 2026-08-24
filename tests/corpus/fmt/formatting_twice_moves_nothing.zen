@@ -12,6 +12,14 @@
 // its fixpoint is the one that matters: a broken list re-judged must
 // re-emit the bytes it already has.
 //
+// AND THE FIRST PASS IS PINNED TOO, for five of the twelve. Identity is a
+// fixpoint: a `render` miscompiled to hand its input straight back settles
+// on every case above, so twelve `fixpoint` lines cannot see a formatter
+// that does nothing. The `renders` rows below name the exact bytes the first
+// pass must produce -- a run of blank lines collapsed to one, trailing
+// whitespace gone, a final newline supplied, and the two lists the width
+// rule has to break -- so a no-op formatter is red on the first row.
+//
 // It drives `render` and not the `zen fmt` command, for the reason
 // `tests/corpus/cli/` drives `cli`: `src/fmt/` takes a `Lexed` and hands
 // back bytes, so it touches no capability and a test can hand it source
@@ -24,6 +32,31 @@ render = fmt.fmt
 
 main = (env: Env) Res<i32, AllocError> {
     a ::= env.mem.alloc();
+    renders(
+        a,
+        "a run of blank lines",
+        "a = 1\n\n\n\n\nb = 2\n",
+        "a = 1\n\nb = 2\n"
+    ).try();
+    renders(
+        a,
+        "space behind a declaration",
+        "a = 1   \nb = 2\t\n",
+        "a = 1\nb = 2\n"
+    ).try();
+    renders(a, "no final newline", "a = 1", "a = 1\n").try();
+    renders(
+        a,
+        "a long argument list, packed",
+        "x = outer_call(inner_call(a, b), second_argument, third_argument, fourth_argument)\n",
+        "x = outer_call(\n    inner_call(a, b),\n    second_argument,\n    third_argument,\n    fourth_argument\n)\n"
+    ).try();
+    renders(
+        a,
+        "a long union, packed",
+        "ValueShape* = StructValue | EnumValue | FnValue | PathValue | AliasValue | ExprValue\n",
+        "ValueShape* = StructValue\n    | EnumValue\n    | FnValue\n    | PathValue\n    | AliasValue\n    | ExprValue\n"
+    ).try();
     settles(a, "a run of blank lines", "a = 1\n\n\n\n\nb = 2\n").try();
     settles(a, "a blank first line", "\n\na = 1\n").try();
     settles(a, "a blank last line", "a = 1\n\n\n").try();
@@ -63,6 +96,26 @@ settles = (a: Alloc, what: str, text: str) Res<(), AllocError> {
     second = formatted(a, first.view()).try();
     println("{}: {}", what, verdict(first.view().eq(second.view())));
     Ok(());
+}
+
+// The FIRST pass, byte for byte. `settles` above cannot see a formatter that
+// returns its input, because identity settles; this can.
+renders = (a: Alloc, what: str, text: str, want: str) Res<(), AllocError> {
+    got = formatted(a, text).try();
+    println(
+        "{}: {} {} bytes",
+        what,
+        rendered(got.view().eq(want)),
+        got.view().len
+    );
+    Ok(());
+}
+
+rendered = (right: bool) str {
+    right.match({
+        true  => "as written",
+        false => "WRONG BYTES",
+    })
 }
 
 verdict = (settled: bool) str {

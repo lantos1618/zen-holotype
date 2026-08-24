@@ -4,10 +4,63 @@
 // sat undefined in build.zen while every gate stayed green. The
 // stand-ins are opaque on purpose; what this pins is that the api a
 // build file is handed RESOLVES, walk or no walk.
+//
+// AND THAT ITS PLAIN-DATA TYPES CARRY VALUES. The four names used to be
+// imported and never used, so the only rot this caught was a name
+// disappearing outright: misdeclare a field's type, reorder Os's variants,
+// or let `Exe.out`'s default fall to a zero instead of None, and nothing
+// noticed. Every field below is constructed with a distinctive value and
+// read back.
+//
+// `Exe` IS THE ONE TYPE NOT CONSTRUCTED HERE, and not by choice: its
+// `out* :: Res<Path> = None` default is a BARE nullary variant, which codegen
+// refuses ("a field default that names a function or reads a frame") though
+// it lowers the qualified `Res.None` spelling fine -- issue #734. So the
+// central target type of the build api cannot be constructed by any program
+// today. Add the `Exe(..)` lines back the day that closes; until then this
+// comment is the record, because a name imported and never used is exactly
+// how the previous rot stayed invisible.
 
-Builder, Module, Function, Budget = std.build
+Builder, Module, Function = std.build
+Budget, Package, Dep, Exe, Os, Arch, BuildFault, BuildError = std.build
+Vec = std.collections
 
-main = (env: Env) Res<i32> {
-    println("build api resolves");
+main = (env: Env) Res<i32, BuildError> {
+    alloc ::= env.mem.alloc();
+
+    p = Package(
+        url: "https://example.test/json",
+        version: "1.4.2",
+        hash: "b7c9"
+    );
+    println("{} {} {}", p.url, p.version, p.hash);
+
+    bud = Budget(name: "parse", ns_op: 125000, allocs_op: 3, bytes_op: 4096);
+    println("{} {} {} {}", bud.name, bud.ns_op, bud.allocs_op, bud.bytes_op);
+
+    deps ::= alloc.Vec<Dep>();
+    deps.add(Dep(name: "json")).try();
+    deps.add(Dep(name: "http")).try();
+    deps.get(1).match({
+        Ok(d) => println("deps {} {}", deps.len, d.name),
+        None  => println("deps {} missing", deps.len),
+    });
+
+    Os.Linux.match({
+        Macos   => println("macos"),
+        Linux   => println("linux"),
+        Windows => println("windows"),
+    });
+    Arch.Arm64.match({
+        X86_64 => println("x86_64"),
+        Arm64  => println("arm64"),
+    });
+    BuildFault.HashMismatch.match({
+        NotFound        => println("not found"),
+        FetchFailed     => println("fetch failed"),
+        VersionConflict => println("version conflict"),
+        HashMismatch    => println("hash mismatch"),
+    });
+
     Ok(0);
 }

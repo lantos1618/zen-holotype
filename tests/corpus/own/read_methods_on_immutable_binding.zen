@@ -5,8 +5,31 @@
 // `w` is a `:` Vec — legal, and read-only forever. `v` is `::` and
 // calls both. if a checker ever ties method choice to the binding
 // marker in both directions, this file goes red.
+//
+// AND `w` NOW HOLDS SOMETHING. It used to be an empty Vec and the branch
+// expected the word `empty` -- the exact zeroed output this tree's
+// documented failure mode produces, so the whole runtime half of the
+// immutable path asserted nothing about contents. It is filled by a helper
+// (it cannot fill itself: it is `:`), and three distinct values are read back
+// through the read-only receiver, plus the miss past the end so the None arm
+// is still exercised beside a hit rather than instead of one.
 
 Error = AllocError | IoError
+
+filled = (alloc: Alloc) Res<Vec<i32>, AllocError> {
+    v ::= alloc.Vec<i32>();
+    v.add(31).try();
+    v.add(41).try();
+    v.add(59).try();
+    Ok(v);
+}
+
+show = (v: Vec<i32>, i: usize) () {
+    v.get(i).match({
+        Ok(n) => println("{}", n),
+        None  => println("past the end"),
+    });
+}
 
 main = (env: Env) Res<i32, Error> {
     alloc ::= env.mem.alloc();
@@ -17,12 +40,14 @@ main = (env: Env) Res<i32, Error> {
         Ok(n) => println("{}", n),
         None  => println("empty"),
     });
+    println("mutable len {}", v.len);
 
-    w = alloc.Vec<i32>();
-    w.get(0).match({
-        Ok(n) => println("{}", n),
-        None  => println("empty"),
-    });
+    w = filled(alloc).try();
+    println("immutable len {}", w.len);
+    show(w, 0);
+    show(w, 1);
+    show(w, 2);
+    show(w, 3);
 
     Ok(0);
 }
