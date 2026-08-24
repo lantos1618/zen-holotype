@@ -21,7 +21,7 @@
 // emitting, since a `Var` reaching a backend mangles to one letter,
 // colliding two instantiations into one symbol.
 
-Decl, Struct, TParam, Span = std.ast
+Decl, Struct, Enum, TParam, Span = std.ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -292,6 +292,7 @@ fill_from_struct = (c :: Checker, n: TyNamed, d: Decl, inst :: Inst)
                    Res<(), AllocError> {
     d.kind.match({
         Struct(s) => c.fill_tparams(n, s, inst),
+        Enum(e)   => c.fill_enum_tparams(n, e, inst),
         _         => Ok(()),
     })
 }
@@ -301,6 +302,19 @@ fill_tparams = (c :: Checker, n: TyNamed, s: Struct, inst :: Inst)
     owner = owner_of(c, n.decl.module.to_usize(), s.name.text).try();
     vars ::= c.alloc.Vec<TyId>();
     c.tparam_vars(s.tparams, owner, vars).try();
+    c.zip(vars, n.args, inst).try();
+    Ok(());
+}
+
+// An enum's own arguments bind its parameters exactly as a struct's do:
+// `Hold<Wide>` must answer `Has : Wide`, or the layout writes the
+// payload as the bare parameter and the match arm reads it back as a
+// structure. Same two steps as `fill_tparams`, over `e.tparams`.
+fill_enum_tparams = (c :: Checker, n: TyNamed, e: Enum, inst :: Inst)
+                    Res<(), AllocError> {
+    owner = owner_of(c, n.decl.module.to_usize(), e.name.text).try();
+    vars ::= c.alloc.Vec<TyId>();
+    c.tparam_vars(e.tparams, owner, vars).try();
     c.zip(vars, n.args, inst).try();
     Ok(());
 }
