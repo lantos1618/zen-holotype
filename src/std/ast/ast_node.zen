@@ -435,6 +435,27 @@ Struct* = {
     tparams*: Vec<TParam>,
     members*: Vec<Member>,
     body_span*: Span,
+
+    // THE READ VIEW `@meta(x: T).fields()` NAMES (design_meta.md R2).
+    // A struct body holds three kinds of member and a field walk wants
+    // one of them, so the filter lives on the node that owns the list
+    // rather than in each of the walkers — the expander
+    // (`sema_expand.zen`) is the first, and it is not going to be the
+    // last. A HELPER ON THE REAL NODE, not a friendlier copy of it:
+    // `Field` here is `ast_node`'s own, which is the whole of
+    // DESIGN.md's "it gets the compiler's own nodes".
+    //
+    // An out parameter rather than a returned `Vec` because the caller
+    // owns the allocation and this file does not take an `Alloc`.
+    fields* = (self: @Self, out :: Vec<Field>) Res<(), AllocError> {
+        self.members.loop((h, m) {
+            m.kind.match({
+                Field(f) => out.add(f),
+                _        => Ok(()),
+            }).try();
+        });
+        Ok(());
+    }
 }
 
 // `Shape = Circle(Circle) | Rect(Rect) | Unit`, `AllocError* = | OutOfMemory`.

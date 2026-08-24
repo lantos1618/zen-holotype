@@ -14,12 +14,26 @@
 // it back through `Checker.meta_str` and lowers an ordinary string
 // literal, having learned nothing new.
 //
+// M4 IS THE SECOND SHAPE, and it is the one §5 calls staging rather
+// than evaluation: `@meta(recv: T).fields().loop((h, field) { .. })`,
+// written as a STATEMENT, is UNROLLED once per field. `field.name` is
+// KNOWN and folds through M3's door; `recv.at(field)` is RESIDUAL and
+// becomes `recv.<field>`, an ordinary access with a different type at
+// every iteration. The unrolled residue is ordinary nodes appended to
+// `Checker.tree` — the expander is `std.ast`'s fourth consumer and the
+// only one that writes (`sema_expand.zen`) — recorded in
+// `Checker.meta_block` under the loop CALL's id, and `gen_c` lowers a
+// nested block, having learned nothing new for the second time.
+//
 // EVERYTHING ELSE IS STILL THE WALL. The value form `@meta(v)`, a
-// typed form asked for a member that is not `.name`, a type with no
-// declaration payload to read, and a `@meta` standing anywhere an
-// access target isn't all report `MetaNotImplemented` at the `@meta`
-// token and poison, exactly as M0 did — the refused set shrank by one
-// shape and the refusal tests pin the rest of it.
+// typed form asked for a member that is not `.name` or `.fields()`, a
+// field walk over anything but a struct declaration, a walk whose type
+// is still open (a trait DEFAULT body's `@Self` — §5's "check once is
+// wrong", which M4 does not fix), a walk anywhere but a statement, and
+// a `@meta` standing anywhere an access target isn't all report
+// `MetaNotImplemented` at the `@meta` token and poison, exactly as M0
+// did — the refused set shrank by one more shape and the refusal tests
+// pin the rest of it.
 //
 // THE ARGUMENT IS STILL NOT VISITED, with one exception that is the
 // rule itself: the typed form's `type` resolves through the ordinary
@@ -29,12 +43,18 @@
 // spend a second diagnostic on a program whose first sentence is
 // already written.
 
-Expr, ExprId, TypeId, Access, Meta, Decl = std.ast
+Expr, ExprId, TypeId, BlockId, Access, Meta, Decl = std.ast
+Block, Stmt, StmtKind, Call, Struct, Field, Span = std.ast
+Lambda, Type = std.ast
+no_trivia = std.ast
+Vec = std.collections
 AllocError = std.mem
 str = std.text
 TyId = sema.sema_ty
 Checker, Ctx = sema.sema_check
-SemaFault, NameFault = sema.sema_diag
+Subst, copy_block = sema.sema_expand
+has_var = sema.sema_inst
+block_type, type_of = sema.sema_type
 decl_at = sema.sema_def
 type_from_ast = sema.sema_type
 
@@ -65,11 +85,19 @@ meta_type* = (c :: Checker, node: Expr, ctx: Ctx) Res<TyId, AllocError> {
 // asks for it by this id.
 meta_access* = (c :: Checker, id: ExprId, ac: Access, ctx: Ctx)
                Res<TyId, AllocError> {
+    c.meta_enter(META_STEPS);
+    got = c.meta_fold_access(id, ac, ctx);
+    c.meta_leave();
+    got
+}
+
+meta_fold_access = (c :: Checker, id: ExprId, ac: Access, ctx: Ctx)
+                   Res<TyId, AllocError> {
     target = c.tree.expr_at(ac.base);
-    c.spend(META_STEPS, target).try().match({
-        None     => c.types.unknown(),
-        Ok(left) => target.kind.match({
-            Meta(m) => c.meta_form(id, target, m, ac, left, ctx),
+    c.spend(target).try().match({
+        false => c.types.unknown(),
+        true  => target.kind.match({
+            Meta(m) => c.meta_form(id, target, m, ac, ctx),
             _       => c.types.unknown(),
         }),
     })
@@ -83,7 +111,6 @@ meta_form = (
     target : Expr,
     m      : Meta,
     ac     : Access,
-    left   : usize,
     ctx    : Ctx
 ) Res<TyId, AllocError> {
     m.value.match({
@@ -92,7 +119,7 @@ meta_form = (
             false => c.meta_refused(target),
             true  => m.type.match({
                 None  => c.meta_refused(target),
-                Ok(t) => c.meta_fold(id, target, t, left, ctx),
+                Ok(t) => c.meta_fold(id, target, t, ctx),
             }),
         }),
     })
@@ -107,30 +134,32 @@ meta_fold = (
     id     : ExprId,
     target : Expr,
     t      : TypeId,
-    left   : usize,
     ctx    : Ctx
 ) Res<TyId, AllocError> {
-    c.spend(left, target).try().match({
-        None     => c.types.unknown(),
-        Ok(left) => {
-            ty = c.type_from_ast(t, ctx).try();
-            c.meta_decl(id, target, ty, left)
-        },
+    c.spend(target).try().match({
+        false => c.types.unknown(),
+        true  => c.meta_named_decl(id, target, t, ctx),
     })
+}
+
+meta_named_decl = (c :: Checker, id: ExprId, target: Expr, t: TypeId, ctx: Ctx)
+                  Res<TyId, AllocError> {
+    ty = c.type_from_ast(t, ctx).try();
+    c.meta_decl(id, target, ty)
 }
 
 // The name lives on the declaration's payload node. A type with no
 // declaration behind it — a primitive, a parameter, a union, a
 // function — has no node to read and stays refused; a poisoned one was
 // reported on the way in and says nothing twice.
-meta_decl = (c :: Checker, id: ExprId, target: Expr, ty: TyId, left: usize)
+meta_decl = (c :: Checker, id: ExprId, target: Expr, ty: TyId)
             Res<TyId, AllocError> {
     c.is_unknown(ty).match({
         true  => c.types.unknown(),
         false => c.types.at(ty).match({
             Named(n) => decl_at(c.tree, n.decl).match({
                 None  => c.meta_refused(target),
-                Ok(d) => c.meta_name(id, target, d, left),
+                Ok(d) => c.meta_name(id, target, d),
             }),
             _        => c.meta_refused(target),
         }),
@@ -140,11 +169,11 @@ meta_decl = (c :: Checker, id: ExprId, target: Expr, ty: TyId, left: usize)
 // `.name` is equally real on a struct, an enum and an alias — each
 // payload node carries it. The arms left over are declarations no type
 // resolves to here, and they are the wall anyway.
-meta_name = (c :: Checker, id: ExprId, target: Expr, d: Decl, left: usize)
+meta_name = (c :: Checker, id: ExprId, target: Expr, d: Decl)
             Res<TyId, AllocError> {
-    c.spend(left, target).try().match({
-        None  => c.types.unknown(),
-        Ok(_) => d.kind.match({
+    c.spend(target).try().match({
+        false => c.types.unknown(),
+        true  => d.kind.match({
             Struct(s) => c.meta_record(id, s.name.text),
             Enum(e)   => c.meta_record(id, e.name.text),
             Alias(a)  => c.meta_record(id, a.name.text),
@@ -160,31 +189,385 @@ meta_record = (c :: Checker, id: ExprId, name: str) Res<TyId, AllocError> {
     c.types.str_ty()
 }
 
-// One step of fuel. Running out is a sentence and poison, never a hang
-// and never a guess — and the counter exists from the first commit,
-// because adding it after the evaluator would be adding it after the
-// hang.
-spend = (c :: Checker, left: usize, node: Expr) Res<Res<usize>, AllocError> {
-    (left == 0).match({
-        true  => c.meta_out_of_steps(node),
-        false => Ok(Ok(left - 1)),
+meta_refused = (c :: Checker, node: Expr) Res<TyId, AllocError> {
+    c.meta_refuse(node).try();
+    c.types.unknown()
+}
+
+// -----------------------------------------------------------------
+// M4 — STAGING: the field walk
+//
+// The hook `sema_type.stmt_type` makes for every expression statement.
+// A statement, and only a statement, because that is the position all
+// six waiting consumers write the walk in and because a nested block
+// is what the residue IS: `StmtKind.Block` already means "these
+// statements, in their own scope" to sema and to the backend alike, so
+// one iteration per field is one nested block per field and the
+// hygiene `gen_c_inline.zen`'s header warns about falls out of the
+// node rather than out of a rule somebody has to keep.
+// -----------------------------------------------------------------
+
+// Recognised, resolved and unrolled — or handed straight back to the
+// ordinary expression path, which is what happens to every statement
+// in the tree that is not this one shape.
+meta_stmt* = (c :: Checker, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
+    c.walk_of(id).match({
+        None     => c.type_of(id, ctx),
+        Ok(walk) => c.meta_expand(id, walk, ctx),
     })
 }
 
-meta_out_of_steps = (c :: Checker, node: Expr) Res<Res<usize>, AllocError> {
-    c.report(
-        node.span.file,
-        node.span,
-        SemaFault.ComptimeBudget(NameFault(name: ""))
-    ).try();
-    Ok(None);
+// WHAT ONE WALK IS, in one value: the `@meta` node to point a
+// diagnostic at, the type written inside it, the three names the
+// substitution needs, and the body to copy. Bundled rather than
+// threaded, because eight of them would otherwise travel through every
+// function below and `docs/STYLE.md` counts parameters.
+Walk* = {
+    at*: ExprId,
+    type*: TypeId,
+    recv*: str,
+    handle*: str,
+    binder*: str,
+    body*: BlockId,
+    span*: Span,
 }
 
-meta_refused = (c :: Checker, node: Expr) Res<TyId, AllocError> {
-    c.report(
-        node.span.file,
-        node.span,
-        SemaFault.MetaNotImplemented(NameFault(name: ""))
-    ).try();
-    c.types.unknown()
+walk_of = (c :: Checker, id: ExprId) Res<Walk> {
+    c.tree.expr_at(id).kind.match({
+        Call(cl) => c.walk_loop(cl),
+        _        => None,
+    })
+}
+
+walk_loop = (c :: Checker, cl: Call) Res<Walk> {
+    c.dotted(cl.callee, "loop").match({
+        None  => None,
+        Ok(a) => c.walk_fields(cl, a.base),
+    })
+}
+
+// `@meta(recv: T).fields()` — the READ view R2 ratified, and it takes
+// no arguments, so a `fields(x)` is not this.
+walk_fields = (c :: Checker, cl: Call, base: ExprId) Res<Walk> {
+    c.tree.expr_at(base).kind.match({
+        Call(inner) => c.walk_meta(cl, inner),
+        _           => None,
+    })
+}
+
+walk_meta = (c :: Checker, cl: Call, inner: Call) Res<Walk> {
+    (inner.args.len == 0).match({
+        false => None,
+        true  => c.dotted(inner.callee, "fields").match({
+            None  => None,
+            Ok(a) => c.walk_body(cl, a.base),
+        }),
+    })
+}
+
+// The typed form and nothing else: a name bound, a type written, no
+// value. `@meta(v).fields()` reflects a value and is M5's question.
+walk_body = (c :: Checker, cl: Call, at: ExprId) Res<Walk> {
+    c.tree.expr_at(at).kind.match({
+        Meta(m) => c.walk_typed(cl, at, m),
+        _       => None,
+    })
+}
+
+walk_typed = (c :: Checker, cl: Call, at: ExprId, m: Meta) Res<Walk> {
+    m.value.match({
+        Ok(_) => None,
+        None  => m.name.match({
+            None  => None,
+            Ok(n) => m.type.match({
+                None  => None,
+                Ok(t) => c.walk_lambda(cl, at, n.text, t),
+            }),
+        }),
+    })
+}
+
+// `(h, field) { .. }`, written at the call site. Two parameters, both
+// named by the author — this milestone reads their spellings off the
+// lambda rather than imposing `h` and `field`.
+walk_lambda = (c :: Checker, cl: Call, at: ExprId, recv: str, t: TypeId)
+              Res<Walk> {
+    (cl.args.len == 1).match({
+        false => None,
+        true  => cl.args.get(0).match({
+            None    => None,
+            Ok(arg) => c.walk_params(at, recv, t, arg.value),
+        }),
+    })
+}
+
+walk_params = (c :: Checker, at: ExprId, recv: str, t: TypeId, id: ExprId)
+              Res<Walk> {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Lambda(l) => two_params(l).match({
+            false => None,
+            true  => Ok(Walk(
+                at: at,
+                type: t,
+                recv: recv,
+                handle: param_name(l, 0),
+                binder: param_name(l, 1),
+                body: l.body,
+                span: node.span,
+            )),
+        }),
+        _         => None,
+    })
+}
+
+two_params = (l: Lambda) bool { l.params.len == 2 }
+
+param_name = (l: Lambda, i: usize) str {
+    l.params.get(i).match({
+        None  => "",
+        Ok(p) => p.name.text,
+    })
+}
+
+// `x.<name>`, when that is what the node is.
+dotted = (c :: Checker, id: ExprId, name: str) Res<Access> {
+    c.tree.expr_at(id).kind.match({
+        Access(a) => a.name.text.eq(name).match({
+            true  => Ok(a),
+            false => None,
+        }),
+        _         => None,
+    })
+}
+
+// -----------------------------------------------------------------
+// unrolling
+// -----------------------------------------------------------------
+
+// ONCE PER STATEMENT, not once per visit: the residue is nodes, and
+// expanding twice would append a second copy of every one of them.
+meta_expand = (c :: Checker, id: ExprId, walk: Walk, ctx: Ctx)
+              Res<TyId, AllocError> {
+    c.meta_block.get(id).match({
+        Ok(_) => c.types.prim("()"),
+        None  => c.meta_fresh(id, walk, ctx),
+    })
+}
+
+meta_fresh = (c :: Checker, id: ExprId, walk: Walk, ctx: Ctx)
+             Res<TyId, AllocError> {
+    c.meta_sealed.match({
+        true  => c.types.prim("()"),
+        false => c.meta_unroll(id, walk, ctx),
+    })
+}
+
+meta_unroll = (c :: Checker, id: ExprId, walk: Walk, ctx: Ctx)
+              Res<TyId, AllocError> {
+    c.meta_enter(META_STEPS);
+    got = c.meta_target(id, walk, ctx);
+    c.meta_leave();
+    got
+}
+
+// A STRUCT DECLARATION, AND NOTHING OPEN. A type parameter, or the
+// `@Self` of a trait DEFAULT body — which is one body shared by every
+// implementor, so expanding it would expand it for whoever was checked
+// first and silently mean that for all the rest (§5, "check once is
+// wrong") — carries a type variable and is refused by name here. M4
+// walks a concrete type; making the default body work is the
+// per-instantiation re-check M4 still owes.
+meta_target = (c :: Checker, id: ExprId, walk: Walk, ctx: Ctx)
+              Res<TyId, AllocError> {
+    at = c.tree.expr_at(walk.at);
+    c.shared_self(walk.type).match({
+        true  => c.meta_walk_refused(at),
+        false => c.meta_settled(id, walk, at, ctx),
+    })
+}
+
+// `@Self` WRITTEN AMONG A STRUCT'S OWN MEMBERS IS NOT ONE TYPE. It is
+// the bound, and the body it is written in is a DEFAULT that every
+// implementor gets a copy of — §5's "expansion happens per
+// instantiation, not once", which M4 does not do. Unrolled anyway, the
+// walk reads the BOUND's members: `Display.dump` has none that are
+// fields, so it printed nothing, for every type, silently. Refused at
+// the `@meta` token instead, and this is the one thing standing between
+// M4 and the six waiting consumers. `@meta(self: Point)` — a named type
+// — is unaffected, and so is `@Self` inside an impl body, where it is
+// one concrete type.
+shared_self = (c :: Checker, t: TypeId) bool {
+    c.meta_self_shared && written_self(c.tree.type_at(t))
+}
+
+written_self = (t: Type) bool {
+    t.kind.match({ SelfType => true, _ => false })
+}
+
+meta_settled = (c :: Checker, id: ExprId, walk: Walk, at: Expr, ctx: Ctx)
+               Res<TyId, AllocError> {
+    ty = c.type_from_ast(walk.type, ctx).try();
+    (c.is_unknown(ty) || c.has_var(ty)).match({
+        true  => c.meta_walk_refused(at),
+        false => c.meta_struct(id, walk, at, ty, ctx),
+    })
+}
+
+meta_struct = (
+    c    :: Checker,
+    id   : ExprId,
+    walk : Walk,
+    at   : Expr,
+    ty   : TyId,
+    ctx  : Ctx
+) Res<TyId, AllocError> {
+    c.types.at(ty).match({
+        Named(n) => decl_at(c.tree, n.decl).match({
+            None  => c.meta_walk_refused(at),
+            Ok(d) => d.kind.match({
+                Struct(s) => c.meta_copies(id, walk, at, s, ctx),
+                _         => c.meta_walk_refused(at),
+            }),
+        }),
+        _        => c.meta_walk_refused(at),
+    })
+}
+
+// ONE NESTED BLOCK PER FIELD. `fields()` is `ast_node`'s own helper —
+// the READ view over `members`, filtered to `MemberKind.Field` — so
+// the order is declaration order and a member that is a constant or a
+// method is not a field and is not walked.
+meta_copies = (
+    c    :: Checker,
+    id   : ExprId,
+    walk : Walk,
+    at   : Expr,
+    s    : Struct,
+    ctx  : Ctx
+) Res<TyId, AllocError> {
+    fields ::= c.alloc.Vec<Field>();
+    s.fields(fields).try();
+    (fields.len == 0).match({
+        true  => c.meta_walk_refused(at),
+        false => c.meta_unrolled(id, walk, at, fields, ctx),
+    })
+}
+
+// A WALK OVER NO FIELDS PRINTS NOTHING, and nothing is the answer this
+// feature must never give quietly (§6.4: "a walk that silently skips a
+// field prints something plausible" — skipping ALL of them is the same
+// failure with the volume turned down). A struct of methods is a bound,
+// not a record; a struct with no members at all has nothing to reflect.
+// Either way the walk is a mistake and says so.
+meta_unrolled = (
+    c      :: Checker,
+    id     : ExprId,
+    walk   : Walk,
+    at     : Expr,
+    fields : Vec<Field>,
+    ctx    : Ctx
+) Res<TyId, AllocError> {
+    stmts ::= c.alloc.Vec<Stmt>();
+    before = c.diag_count();
+    fields.loop((h, f) { c.meta_one(walk, f, before, stmts).try(); });
+    c.meta_settle(id, walk, stmts, before, ctx)
+}
+
+// STOPS AT THE FIRST MISTAKE. Every field copies the SAME body, so a
+// body this walk cannot copy is one mistake — reporting it once per
+// field would turn one sentence into one per field, which is exactly
+// what `sema_meta.zen`'s M0 header exists to prevent.
+meta_one = (
+    c      :: Checker,
+    walk   : Walk,
+    f      : Field,
+    before : usize,
+    out    :: Vec<Stmt>
+) Res<(), AllocError> {
+    c.meta_intact(before).match({
+        false => Ok(()),
+        true  => c.meta_copy(walk, f, out),
+    })
+}
+
+// IS THE RESIDUE WHOLE? Two questions, and both have to be asked. A
+// diagnostic since the walk began means a body this milestone cannot
+// copy. A DRY TANK means a body it stopped copying — and that one is
+// the dangerous half: `copy_expr` hands the ORIGINAL id back when the
+// fuel is gone, so a truncated copy still LOOKS like an expression,
+// and type-checking it reported thirty-three sentences about
+// substitutions that never happened. The budget says one thing, once;
+// everything downstream of it stays quiet.
+meta_intact = (c :: Checker, before: usize) bool {
+    (c.diag_count() == before) && (c.meta_dry == false)
+}
+
+meta_copy = (c :: Checker, walk: Walk, f: Field, out :: Vec<Stmt>)
+            Res<(), AllocError> {
+    body = c.copy_block(walk.body, Subst(
+        handle: walk.handle,
+        binder: walk.binder,
+        recv: walk.recv,
+        name: f.name.text,
+    )).try();
+    out.add(Stmt(
+        kind: StmtKind.Block(body),
+        span: walk.span,
+        leading: no_trivia(),
+        trailing: no_trivia(),
+    ))
+}
+
+// NOTHING IS RECORDED IF ANYTHING WENT WRONG. A half-copied residue
+// type-checked would report the SAME mistake a second time in a
+// sentence about code nobody wrote.
+meta_settle = (
+    c      :: Checker,
+    id     : ExprId,
+    walk   : Walk,
+    stmts  : Vec<Stmt>,
+    before : usize,
+    ctx    : Ctx
+)
+              Res<TyId, AllocError> {
+    c.meta_intact(before).match({
+        false => c.meta_hush(),
+        true  => c.meta_residue(id, walk, stmts, ctx),
+    })
+}
+
+// AND THE RESIDUE IS TYPE-CHECKED, which §5 calls the third
+// load-bearing consequence: "code the compiler generated is the last
+// place to relax that". `block_type` is the ordinary walk — the same
+// one every hand-written block goes through — so a field the body
+// cannot in fact print is a diagnostic and not a plausible answer.
+meta_residue = (
+    c     :: Checker,
+    id    : ExprId,
+    walk  : Walk,
+    stmts : Vec<Stmt>,
+    ctx   : Ctx
+) Res<TyId, AllocError> {
+    b = c.tree.add_block(Block(
+        stmts: stmts,
+        value: None,
+        span: walk.span,
+        leading: no_trivia(),
+        trailing: no_trivia(),
+    )).try();
+    c.meta_block.set(id, b).try();
+    c.block_type(b, ctx).try();
+    c.types.prim("()")
+}
+
+// A walk that produced nothing types as `()` and says nothing more:
+// whatever stopped it has already spoken once.
+meta_hush = (c :: Checker) Res<TyId, AllocError> {
+    c.types.prim("()")
+}
+
+meta_walk_refused = (c :: Checker, at: Expr) Res<TyId, AllocError> {
+    c.meta_refuse(at).try();
+    c.types.prim("()")
 }

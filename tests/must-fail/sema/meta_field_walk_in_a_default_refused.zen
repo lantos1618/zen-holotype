@@ -1,0 +1,44 @@
+// THE ONE THING STANDING BETWEEN M4 AND ITS SIX CONSUMERS, refused out
+// loud rather than answered quietly (`docs/design_meta.md` §5, §7 M4).
+//
+// A TRAIT IS A STRUCT (`DESIGN.md`: "a struct whose fields happen to be
+// functions, used as a bound"), so `Display.dump`'s body is written
+// among `Display`'s own members and every implementor gets a copy of
+// it. `@Self` there is the BOUND, not the implementor — sema binds it
+// once, because §5 says a body is checked once and an `@meta` body is
+// the first for which that is wrong.
+//
+// SO THE WALK, UNROLLED ANYWAY, READS THE BOUND'S OWN MEMBERS. Measured
+// before this refusal existed: `Dumpy` declares one field and one
+// method, `P` declares two fields, and `P(a: 1, b: "x").show()` printed
+// `tally` — the trait's field, for a type that has no such field. The
+// version with no fields on the trait printed NOTHING AT ALL, compiled
+// clean, and exited 0. That is the failure §6.4 names — "a walk that
+// silently skips a field prints something plausible" — arriving with
+// every field skipped.
+//
+// WHAT MAKES IT LEGAL AGAIN is expansion PER INSTANTIATION rather than
+// once, which M4 does not build and M4's report names as its debt. A
+// walk over a NAMED type is unaffected, and so is `@Self` inside an
+// `impl` body, where it is one concrete type.
+//
+// position: the `@meta` token.
+
+Dumpy = {
+    tally*: i64,
+
+    show* = (self: @Self) () {
+        @meta(self: @Self).fields().loop((h, field) {
+            println("{}", field.name);
+        });
+    }
+}
+
+P = { a*: i64, b*: str }
+
+P.impl(Dumpy, { tally: 9 })
+
+main = (env: Env) Res<i32, AllocError> {
+    P(a: 1, b: "x").show();
+    Ok(0);
+}

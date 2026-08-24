@@ -40,7 +40,7 @@
 // `Unknown` is assignable to and from everything. One mistake, one
 // diagnostic.
 
-Ast, ExprId, TypeId, Span = std.ast
+Ast, Expr, ExprId, TypeId, BlockId, Span = std.ast
 nowhere = std.ast
 BinOp, Unary = std.ast
 Alloc, AllocError = std.mem
@@ -52,7 +52,7 @@ TyId, Types, ResForm, TyRes, TyNamed, TyArray = sema.sema_ty
 is_integer, is_float = sema.sema_ty
 World, ImportBinding = sema.sema_def
 module_display = sema.sema_def
-Diag, SemaFault, TypeFault = sema.sema_diag
+Diag, SemaFault, TypeFault, NameFault = sema.sema_diag
 ExportFault = sema.sema_diag
 Inst, InstEdge = sema.sema_inst
 
@@ -100,7 +100,15 @@ Ctx* = {
 }
 
 Checker* = {
-    tree*: Ast,
+    // MUTABLE, AND THE ONE THING THAT APPENDS TO IT IS THE EXPANDER.
+    // `@meta`'s field walk is an AST -> AST rewrite (design_meta.md
+    // §5): it builds the unrolled residue as ordinary nodes in THIS
+    // arena and hands the tree back to `Build` afterwards, exactly as
+    // `Parser` does — one owner alive at a time, because a `Vec` is a
+    // header and growing one behind another owner's back leaves that
+    // owner pointing at freed pages. Everything else here still only
+    // reads.
+    tree* :: Ast,
     world* :: World,
     types* :: Types,
     diags :: Vec<Diag>,
@@ -116,6 +124,45 @@ Checker* = {
     // success, so a miss means "not a fold", never "folded to nothing".
     // The backend reads it back through `meta_str`.
     meta_memo* :: Map<ExprId, str>,
+
+    // WHAT A `@meta(..).fields().loop(..)` STATEMENT UNROLLED INTO,
+    // keyed on the loop CALL's id: one nested block per field, each
+    // holding a copy of the lambda's body with `field.name` folded to
+    // a literal and `recv.at(field)` rewritten to `recv.<field>`
+    // (design_meta.md M4). The residue is ordinary nodes, so the
+    // backend lowers a nested block and learns nothing new.
+    meta_block* :: Map<ExprId, BlockId>,
+
+    // THE COMPTIME FUEL, and it is ONE budget for a whole outermost
+    // `@meta` evaluation — the nested walks an unrolled body contains
+    // spend the SAME tank, because what the budget bounds is the size
+    // of the program the expander produces, and nesting is how that
+    // size explodes. `meta_depth` is what tells an outermost
+    // evaluation from a re-entrant one; only the outermost refills.
+    // Running dry REPORTS (`SemaFault.ComptimeBudget`) — a prover may
+    // decline, an evaluator may not (`sema_trap.zen`).
+    meta_fuel* :: usize,
+    meta_depth* :: usize,
+    meta_dry* :: bool,
+
+    // THE EXPANDER RUNS DURING CHECK AND NEVER DURING EMIT. The
+    // backend re-asks `stmt_type` for every statement it lowers, and
+    // an append at that point would grow the `Ast` behind
+    // `CBackend.tree`'s back — the freed-pages failure `Build.tree`'s
+    // header describes. Sealed the moment `check_all` returns, so the
+    // rule is an invariant rather than a thing to remember.
+    meta_sealed* :: bool,
+
+    // IS `@Self` HERE ONE TYPE OR MANY? True while a STRUCT's own
+    // member bodies are walked, because a struct used as a bound is
+    // what this language calls a trait (`DESIGN.md`) and a default
+    // body written there is checked ONCE and emitted at every
+    // implementor — with `@Self` bound to the BOUND, not to the
+    // implementor. `Display.dump`'s `@meta(self: @Self).fields()`
+    // walked `Display`'s own members and printed nothing at all, which
+    // is precisely the plausible-looking silence §6.4 is about. False
+    // in an impl body, where `@Self` is one concrete type.
+    meta_self_shared* :: bool,
 
     // WHICH TYPE SUPPLIED THIS FIELD READ — the bound that promised it,
     // or the receiver's own declaration. "The bound in scope selects
@@ -245,6 +292,12 @@ Checker* = {
         self.meta_memo.get(id)
     }
 
+    // The unrolled residue this statement's `@meta` field walk stands
+    // for. A miss means the ordinary lowering applies.
+    meta_stmts* = (self: @Self, id: ExprId) Res<BlockId> {
+        self.meta_block.get(id)
+    }
+
     // What this call instantiated its callee's type parameters with.
     // A miss means "the callee is not generic, or resolution could not
     // settle it" — never "it instantiated at nothing".
@@ -289,6 +342,97 @@ Checker* = {
     report* = (self :: @Self, file: str, span: Span, fault: SemaFault)
               Res<(), AllocError> {
         self.diags.add(Diag(file: file, span: span, fault: fault))
+    }
+
+    // -----------------------------------------------------------------
+    // the comptime fuel
+    //
+    // Here rather than in `sema_meta.zen` because BOTH the evaluator
+    // and the expander (`sema_expand.zen`) spend it, and a budget that
+    // lived in one of them would have to be imported by the other —
+    // which is the import cycle this folder has already been bitten by.
+    // The tank is the `Checker`'s for the same reason the memos are:
+    // it is state a whole evaluation shares.
+    // -----------------------------------------------------------------
+
+    // A tank per OUTERMOST evaluation. A `@meta` an unrolled body
+    // contains re-enters this and does NOT refill — what the budget
+    // bounds is the size of the program the expander produces, and
+    // nesting is how that size explodes.
+    meta_enter* = (self :: @Self, budget: usize) () {
+        (self.meta_depth == 0).match({
+            false => (),
+            true  => {
+                self.meta_fuel = budget;
+                self.meta_dry  = false;
+            },
+        });
+        self.meta_depth = self.meta_depth + 1;
+    }
+
+    meta_leave* = (self :: @Self) () {
+        self.meta_depth = self.meta_depth - 1;
+    }
+
+    // No more nodes. Everything already unrolled is read back from
+    // `meta_block`; a walk that never was is a walk sema refused, and
+    // a refused build never reaches the backend to ask.
+    seal_meta* = (self :: @Self) () {
+        self.meta_sealed = true;
+    }
+
+    meta_shared_self* = (self :: @Self, shared: bool) () {
+        self.meta_self_shared = shared;
+    }
+
+    // ONE STEP, and `false` means the tank is dry. Running dry is a
+    // SENTENCE, never a hang and never a truncated answer — a prover
+    // may decline (`sema_trap.zen`), an evaluator may not. Said once:
+    // `meta_dry` is what keeps one exhausted budget from becoming one
+    // diagnostic per remaining node.
+    spend* = (self :: @Self, node: Expr) Res<bool, AllocError> {
+        (self.meta_fuel == 0).match({
+            true  => self.out_of_steps(node),
+            false => self.burn(),
+        })
+    }
+
+    burn = (self :: @Self) Res<bool, AllocError> {
+        self.meta_fuel = self.meta_fuel - 1;
+        Ok(true);
+    }
+
+    out_of_steps = (self :: @Self, node: Expr) Res<bool, AllocError> {
+        self.meta_dry.match({
+            true  => Ok(false),
+            false => self.say_dry(node),
+        })
+    }
+
+    say_dry = (self :: @Self, node: Expr) Res<bool, AllocError> {
+        self.meta_dry = true;
+        self.report(
+            node.span.file,
+            node.span,
+            SemaFault.ComptimeBudget(NameFault(name: ""))
+        ).try();
+        Ok(false);
+    }
+
+    // The wall, at one node. Callers shape their own answer around it:
+    // a type query poisons, a copy hands the original shape back.
+    meta_refuse* = (self :: @Self, node: Expr) Res<(), AllocError> {
+        self.meta_refuse_at(node.span)
+    }
+
+    // The same wall, for a statement — which is a place in a file and
+    // not an expression, and so has no `Expr` to hand over.
+    meta_refuse_at* = (self :: @Self, span: Span) Res<(), AllocError> {
+        self.report(
+            span.file,
+            span,
+            SemaFault.MetaNotImplemented(NameFault(name: ""))
+        )
     }
 
     // -----------------------------------------------------------------
@@ -809,6 +953,12 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         expr_memo: a.Map<ExprId, TyId>(),
         type_memo: a.Map<TypeId, TyId>(),
         meta_memo: a.Map<ExprId, str>(),
+        meta_block: a.Map<ExprId, BlockId>(),
+        meta_fuel: 0,
+        meta_depth: 0,
+        meta_dry: false,
+        meta_sealed: false,
+        meta_self_shared: false,
         supply_memo: a.Map<ExprId, TyId>(),
         call_memo: a.Map<ExprId, DeclId>(),
         param_memo: a.Map<ExprId, bool>(),

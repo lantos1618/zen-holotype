@@ -1,0 +1,51 @@
+// M4'S GATE, THE VIA-META HALF (`docs/design_meta.md` §7, M4):
+// `@meta(r: Rec).fields().loop((h, field) { .. })` is UNROLLED once per
+// field. `field.name` is KNOWN at compile time and folds to a string
+// literal; `r.at(field)` is RESIDUAL — an ordinary field read with a
+// DIFFERENT TYPE at every iteration, which is the whole of §5's
+// known-versus-residual distinction and the reason this is staging
+// rather than evaluation.
+//
+// THE TWIN IS THE ORACLE (§6.3): `field_walk_by_hand` writes the five
+// lines out by hand, with no `@meta` anywhere, and must print
+// byte-identical stdout. With one toolchain the pair disagreeing is the
+// only differential signal `@meta` can get.
+//
+// MUTATION RESISTANCE, AND IT IS THE POINT OF THE FIXTURE (§6.4): "a
+// walk that silently skips a field prints something plausible" is this
+// feature's worst failure, so
+//   - every field has a DISTINCT NON-DEFAULT value — 71, "quince",
+//     true, 3.25, 199 — and no two of them are confusable. An
+//     expectation full of zeros would pass against a walk that read
+//     uninitialised storage, which is exactly how this tree lost weeks
+//     to struct field defaults;
+//   - every field has a DISTINCT TYPE, so a walk that projected the
+//     wrong field would not type-check rather than print a plausible
+//     number;
+//   - the COUNT IS ASSERTED OUT LOUD. `fields 5` is the assertion a
+//     skipped field fails and a printed line cannot make on its own.
+
+Rec = {
+    alpha*: i64,
+    beta*: str,
+    gamma*: bool,
+    delta*: f64,
+    epsilon*: u8,
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    r = Rec(
+        alpha: 71,
+        beta: "quince",
+        gamma: true,
+        delta: 3.25,
+        epsilon: 199,
+    );
+    n ::= 0;
+    @meta(r: Rec).fields().loop((h, field) {
+        println("{} = {}", field.name, r.at(field));
+        n = n + 1;
+    });
+    println("fields {}", n);
+    Ok(0);
+}

@@ -1,0 +1,588 @@
+// src/sema/sema_expand.zen
+// The expander's hands: one copy of a body, with two names substituted.
+//
+// `docs/design_meta.md` §5 is the argument this file exists for. A
+// `@meta` field walk is not evaluated and it is not compiled as a loop
+// — it is UNROLLED, once per field, and each copy is ordinary runtime
+// code with one comptime-known name folded into it. So the evaluator's
+// output is not a value, it is program text, and producing program
+// text means producing NODES: this is the fourth consumer of
+// `std.ast`, and the only one that also writes.
+//
+// A COPY, NOT AN ALIAS, AND THAT IS THE WHOLE REASON THIS FILE IS
+// LONG. Every memo in the compiler keys on a node id — `expr_memo`,
+// `supply_memo`, `call_memo`, `inst_memo`, and the backend's frame —
+// and each iteration of the walk types DIFFERENTLY: `self.at(field)`
+// is an `i64` for one field and a `str` for the next. Sharing one node
+// between two iterations would let the first iteration's answer be
+// read back for the second, which is the failure `gen_c_expr.zen`'s
+// `local_answer` header already records happening once, with a call
+// emitted against the wrong receiver. So the body is deep-copied and
+// every copy gets its own ids.
+//
+// WHAT IS SHARED ON PURPOSE: `TypeId` and `PatternId`. A written type
+// annotation inside the body cannot mention the field, so it means the
+// same thing in every copy and `type_memo` cannot collide; nothing in
+// sema memoizes on a `PatternId` at all. Ids only need splitting where
+// an answer is recorded under them.
+//
+// TRIVIA IS DROPPED. `no_trivia()` on every copy, deliberately: the
+// residue must never reach `zen fmt`, which asserts the token stream it
+// reprints is the one the parser produced (`fmt.zen`, `faithful`), and
+// a comment copied twenty times would be twenty comments. SPANS ARE
+// KEPT — a mistake in the residue is a mistake the author wrote, at the
+// place they wrote it, and a diagnostic that points at nowhere is a
+// diagnostic nobody can act on.
+//
+// THE TWO SUBSTITUTIONS ARE `Subst`'s whole subject, and both are R3's:
+//   `field.name`      -> the field's name, comptime-known, folded the
+//                        way M3 folds `@meta(T).name` — the answer goes
+//                        in `meta_memo` under the new node's id and the
+//                        type in `expr_memo`, so sema never walks it and
+//                        `gen_c_expr.lower_meta_or_access` emits the
+//                        ordinary literal it already knows how to emit.
+//                        The backend learns nothing new here either.
+//   `recv.at(field)`  -> `recv.<field name>`, an ORDINARY access node.
+//                        Residual: only the running program knows it.
+//
+// AND WHAT IS REFUSED, BY NAME, rather than quietly got wrong:
+//   - the loop HANDLE. `h.break()` in an unrolled loop has no meaning
+//     this milestone has decided, and `gen_c_inline.zen`'s header is
+//     the record of how a captured handle goes silently wrong instead
+//     of loudly. Naming `h` at all is refused.
+//   - the field binder anywhere but the two spellings above. `field`
+//     is a comptime value; passing it to a function would need the
+//     value domain M2 still owes.
+//   - a declaration inside the body, which would be declared N times.
+// A refusal reports at the node that caused it and hands the ORIGINAL
+// id back, so the copy still has a shape; the build is already failing
+// by then, and `sema_meta.zen` stops after the first field so one
+// mistake stays one diagnostic rather than becoming one per field.
+
+Expr, ExprKind, ExprId, BlockId, Block, Stmt, StmtKind = std.ast
+Bind, ExprStmt, Access, Call, Arg, Ident, Paren = std.ast
+Index, Unary, Binary, Consume, Try, ArrayLit, FixedArray = std.ast
+Lambda, Match, Arm, Record, Member, MemberKind = std.ast
+Field, Const, Function, Literal, Name = std.ast
+no_trivia = std.ast
+AllocError = std.mem
+Vec = std.collections
+str = std.text
+Checker = sema.sema_check
+
+// EVERYTHING ONE ITERATION NEEDS TO KNOW, in one value rather than
+// five parameters threaded through twenty functions. `handle` and
+// `binder` are the lambda's two parameter names as WRITTEN — the walk
+// does not impose spellings — and `recv` is the name `@meta(recv: T)`
+// bound, which is what `recv.at(field)` projects through.
+Subst* = {
+    handle*: str,
+    binder*: str,
+    recv*: str,
+    name*: str,
+}
+
+// -----------------------------------------------------------------
+// blocks and statements
+// -----------------------------------------------------------------
+
+copy_block* = (c :: Checker, id: BlockId, sub: Subst)
+              Res<BlockId, AllocError> {
+    old = c.tree.block_at(id);
+    stmts ::= c.alloc.Vec<Stmt>();
+    old.stmts.loop((h, s) { c.copy_stmt(s, sub, stmts).try(); });
+    value = c.copy_opt(old.value, sub).try();
+    c.tree.add_block(Block(
+        stmts: stmts,
+        value: value,
+        span: old.span,
+        leading: no_trivia(),
+        trailing: no_trivia(),
+    ))
+}
+
+// An absent expression stays absent; a present one is copied. Its own
+// function because `.try()` inside a match arm would be widening an
+// error set the arm does not have.
+copy_opt = (c :: Checker, o: Res<ExprId>, sub: Subst)
+           Res<Res<ExprId>, AllocError> {
+    o.match({
+        None  => Ok(None),
+        Ok(e) => c.copy_present(e, sub),
+    })
+}
+
+copy_present = (c :: Checker, e: ExprId, sub: Subst)
+               Res<Res<ExprId>, AllocError> {
+    Ok(Ok(c.copy_expr(e, sub).try()));
+}
+
+copy_opt_block = (c :: Checker, o: Res<BlockId>, sub: Subst)
+                 Res<Res<BlockId>, AllocError> {
+    o.match({
+        None  => Ok(None),
+        Ok(b) => c.copy_present_block(b, sub),
+    })
+}
+
+copy_present_block = (c :: Checker, b: BlockId, sub: Subst)
+                     Res<Res<BlockId>, AllocError> {
+    Ok(Ok(c.copy_block(b, sub).try()));
+}
+
+copy_stmt = (c :: Checker, s: Stmt, sub: Subst, out :: Vec<Stmt>)
+            Res<(), AllocError> {
+    kind = c.copy_stmt_kind(s, sub).try();
+    out.add(Stmt(
+        kind: kind,
+        span: s.span,
+        leading: no_trivia(),
+        trailing: no_trivia(),
+    ))
+}
+
+copy_stmt_kind = (c :: Checker, s: Stmt, sub: Subst)
+                 Res<StmtKind, AllocError> {
+    s.kind.match({
+        Expr(e)  => c.copy_expr_stmt(e, sub),
+        Bind(b)  => c.copy_bind(b, sub),
+        Block(b) => c.copy_nested(b, sub),
+        Decl(_)  => c.copy_decl_refused(s),
+    })
+}
+
+copy_expr_stmt = (c :: Checker, e: ExprStmt, sub: Subst)
+                 Res<StmtKind, AllocError> {
+    Ok(StmtKind.Expr(ExprStmt(expr: c.copy_expr(e.expr, sub).try())))
+}
+
+copy_bind = (c :: Checker, b: Bind, sub: Subst) Res<StmtKind, AllocError> {
+    Ok(StmtKind.Bind(Bind(
+        target: c.copy_expr(b.target, sub).try(),
+        type: b.type,
+        mutable: b.mutable,
+        value: c.copy_expr(b.value, sub).try(),
+    )))
+}
+
+copy_nested = (c :: Checker, b: BlockId, sub: Subst)
+              Res<StmtKind, AllocError> {
+    Ok(StmtKind.Block(c.copy_block(b, sub).try()))
+}
+
+// A struct, a function or an impl written inside the body would be
+// DECLARED once per field, under one name, in one module. Refused
+// where it is written rather than emitted N times and left to `cc`.
+copy_decl_refused = (c :: Checker, s: Stmt) Res<StmtKind, AllocError> {
+    c.meta_refuse_at(s.span).try();
+    Ok(s.kind);
+}
+
+// -----------------------------------------------------------------
+// expressions
+// -----------------------------------------------------------------
+
+// ONE STEP OF FUEL PER NODE COPIED, which is what makes the budget a
+// bound on the size of the program the expander produces rather than
+// on anything else. A dry tank reports through `spend` and the copy
+// stops descending — the id handed back is the original's, which is
+// shaped like an expression and is never emitted, because a reported
+// build does not reach the backend.
+copy_expr* = (c :: Checker, id: ExprId, sub: Subst)
+             Res<ExprId, AllocError> {
+    c.spend(c.tree.expr_at(id)).try().match({
+        false => Ok(id),
+        true  => c.copy_node(id, sub),
+    })
+}
+
+copy_node = (c :: Checker, id: ExprId, sub: Subst)
+            Res<ExprId, AllocError> {
+    old = c.tree.expr_at(id);
+    c.staged(id, old, sub).try().match({
+        Ok(done) => Ok(done),
+        None     => c.plain_copy(old, sub),
+    })
+}
+
+plain_copy = (c :: Checker, old: Expr, sub: Subst) Res<ExprId, AllocError> {
+    kind = c.copy_kind(old, sub).try();
+    c.fresh(old, kind)
+}
+
+// THE TWO SPELLINGS R3 RATIFIED, and the only two nodes in a body that
+// mean something other than what they say. Caught here, one node ABOVE
+// the binder, which is why the bare-name refusal in `copy_name` never
+// fires for a well-formed body.
+staged = (c :: Checker, id: ExprId, old: Expr, sub: Subst)
+         Res<Res<ExprId>, AllocError> {
+    c.meta_str(id).match({
+        Ok(text) => c.carry_fold(old, text),
+        None     => c.staged_shape(old, sub),
+    })
+}
+
+// A NODE THAT ALREADY FOLDED KEEPS ITS ANSWER. An unrolled body may
+// itself contain a walk, and the inner walk copies the outer's residue
+// — where `f.name` has already become a comptime string under a
+// different binder's name. Re-deciding it by shape would ask "is this
+// `g.name`?", get `false`, and hand back an access to a binder no
+// runtime scope has: the outer fold would be silently undone once per
+// inner field. So the fold is carried, not re-derived.
+carry_fold = (c :: Checker, old: Expr, text: str)
+             Res<Res<ExprId>, AllocError> {
+    id = c.fresh(old, old.kind).try();
+    ty = c.types.str_ty().try();
+    c.expr_memo.set(id, ty).try();
+    c.meta_memo.set(id, text).try();
+    Ok(Ok(id));
+}
+
+staged_shape = (c :: Checker, old: Expr, sub: Subst)
+               Res<Res<ExprId>, AllocError> {
+    old.kind.match({
+        Access(a) => c.staged_name(old, a, sub),
+        Call(cl)  => c.staged_at(old, cl, sub),
+        _         => Ok(None),
+    })
+}
+
+// `field.name` — KNOWN. Folded through M3's door: the text goes in
+// `meta_memo` under the new node's id and `str` in `expr_memo`, so
+// `type_of` memo-hits instead of walking a base that names a binder no
+// runtime scope has, and `gen_c_expr.lower_meta_or_access` writes the
+// literal it already writes for `@meta(T).name`.
+staged_name = (c :: Checker, old: Expr, a: Access, sub: Subst)
+              Res<Res<ExprId>, AllocError> {
+    (a.name.text.eq("name") && c.names(a.base, sub.binder)).match({
+        false => Ok(None),
+        true  => c.fold_field_name(old, sub),
+    })
+}
+
+fold_field_name = (c :: Checker, old: Expr, sub: Subst)
+                  Res<Res<ExprId>, AllocError> {
+    c.carry_fold(old, sub.name)
+}
+
+// `recv.at(field)` — RESIDUAL. It becomes `recv.<field name>`, an
+// ordinary access node with a different type at every iteration, which
+// is exactly what §5 means by "residual, derived from a known field
+// name and a residual receiver". Nothing is memoized for it: sema
+// types it like any other field read and the backend lowers it like
+// any other field read.
+staged_at = (c :: Checker, old: Expr, cl: Call, sub: Subst)
+            Res<Res<ExprId>, AllocError> {
+    c.tree.expr_at(cl.callee).kind.match({
+        Access(a) => c.staged_projection(old, cl, a, sub),
+        _         => Ok(None),
+    })
+}
+
+staged_projection = (c :: Checker, old: Expr, cl: Call, a: Access, sub: Subst)
+                    Res<Res<ExprId>, AllocError> {
+    take = a.name.text.eq("at")
+        && c.names(a.base, sub.recv)
+        && c.one_binder_arg(cl, sub);
+    take.match({
+        false => Ok(None),
+        true  => c.project(old, a, sub),
+    })
+}
+
+one_binder_arg = (c :: Checker, cl: Call, sub: Subst) bool {
+    cl.args.get(0).match({
+        None    => false,
+        Ok(arg) => (cl.args.len == 1) && c.names(arg.value, sub.binder),
+    })
+}
+
+project = (c :: Checker, old: Expr, a: Access, sub: Subst)
+          Res<Res<ExprId>, AllocError> {
+    was  = c.tree.expr_at(a.base);
+    base = c.fresh(was, was.kind).try();
+    id   = c.fresh(old, ExprKind.Access(Access(
+        base: base,
+        name: Ident(text: sub.name, span: a.name.span),
+    ))).try();
+    Ok(Ok(id));
+}
+
+names = (c :: Checker, id: ExprId, want: str) bool {
+    c.tree.expr_at(id).kind.match({
+        Name(n) => n.text.eq(want),
+        _       => false,
+    })
+}
+
+// A node with the copy's shape and the original's span. Every
+// constructor below hands its `ExprKind` here, so "keep the span, drop
+// the trivia" is written once.
+fresh* = (c :: Checker, old: Expr, kind: ExprKind) Res<ExprId, AllocError> {
+    c.tree.add_expr(Expr(
+        kind: kind,
+        span: old.span,
+        leading: no_trivia(),
+        trailing: no_trivia(),
+    ))
+}
+
+copy_kind = (c :: Checker, old: Expr, sub: Subst)
+            Res<ExprKind, AllocError> {
+    old.kind.match({
+        Name(n)       => c.copy_name(old, n, sub),
+        Literal(_)    => Ok(old.kind),
+        Unit          => Ok(old.kind),
+        SelfType      => Ok(old.kind),
+        Scope         => Ok(old.kind),
+        Meta(_)       => Ok(old.kind),
+        Paren(p)      => c.copy_paren(p, sub),
+        Access(a)     => c.copy_access(a, sub),
+        Call(cl)      => c.copy_call(cl, sub),
+        Index(x)      => c.copy_index(x, sub),
+        Unary(u)      => c.copy_unary(u, sub),
+        Binary(b)     => c.copy_binary(b, sub),
+        Consume(x)    => c.copy_consume(x, sub),
+        Try(t)        => c.copy_try(t, sub),
+        Array(a)      => c.copy_array(a, sub),
+        FixedArray(f) => c.copy_fixed(f, sub),
+        Lambda(l)     => c.copy_lambda(l, sub),
+        Match(m)      => c.copy_match(m, sub),
+        Record(r)     => c.copy_record(r, sub),
+        Block(b)      => c.copy_block_expr(b, sub),
+    })
+}
+
+// THE TWO NAMES A BODY MAY NOT SPEAK. The handle is refused because an
+// unrolled loop has no handle; the binder is refused because it is a
+// comptime value and the only two things this milestone can do with
+// one are `field.name` and `recv.at(field)`, both of which are caught
+// one node up before they ever reach the bare name.
+copy_name = (c :: Checker, old: Expr, n: Name, sub: Subst)
+            Res<ExprKind, AllocError> {
+    (n.text.eq(sub.handle) || n.text.eq(sub.binder)).match({
+        true  => c.name_refused(old),
+        false => Ok(old.kind),
+    })
+}
+
+name_refused = (c :: Checker, old: Expr) Res<ExprKind, AllocError> {
+    c.meta_refuse(old).try();
+    Ok(old.kind);
+}
+
+copy_paren = (c :: Checker, p: Paren, sub: Subst)
+             Res<ExprKind, AllocError> {
+    Ok(ExprKind.Paren(Paren(inner: c.copy_expr(p.inner, sub).try())))
+}
+
+// `field.name` FOLDS HERE, and it folds through M3's door: the answer
+// goes in `meta_memo` under the new node's id and its type in
+// `expr_memo`, so `type_of` memo-hits and never walks a base that
+// names a binder no runtime scope has. `gen_c` reads it back through
+// `meta_str` and writes the same string literal it already writes for
+// `@meta(T).name`.
+copy_access = (c :: Checker, a: Access, sub: Subst)
+              Res<ExprKind, AllocError> {
+    Ok(ExprKind.Access(Access(
+        base: c.copy_expr(a.base, sub).try(),
+        name: a.name,
+    )))
+}
+
+// A call that is not `recv.at(field)` — `staged` has already taken
+// that one. Type arguments are shared: a `<T>` written in the body
+// cannot mention the binder, so it means the same thing in every copy.
+copy_call = (c :: Checker, cl: Call, sub: Subst) Res<ExprKind, AllocError> {
+    args ::= c.alloc.Vec<Arg>();
+    cl.args.loop((h, a) { c.copy_arg(a, sub, args).try(); });
+    Ok(ExprKind.Call(Call(
+        callee: c.copy_expr(cl.callee, sub).try(),
+        targs: cl.targs,
+        args: args,
+        args_span: cl.args_span,
+    )));
+}
+
+copy_arg = (c :: Checker, a: Arg, sub: Subst, out :: Vec<Arg>)
+           Res<(), AllocError> {
+    out.add(Arg(
+        name: a.name,
+        value: c.copy_expr(a.value, sub).try(),
+        span: a.span,
+        leading: no_trivia(),
+        trailing: no_trivia(),
+    ))
+}
+
+copy_index = (c :: Checker, x: Index, sub: Subst)
+             Res<ExprKind, AllocError> {
+    Ok(ExprKind.Index(Index(
+        base: c.copy_expr(x.base, sub).try(),
+        index: c.copy_expr(x.index, sub).try(),
+        op_span: x.op_span,
+    )))
+}
+
+copy_unary = (c :: Checker, u: Unary, sub: Subst)
+             Res<ExprKind, AllocError> {
+    Ok(ExprKind.Unary(Unary(
+        op: u.op,
+        op_span: u.op_span,
+        operand: c.copy_expr(u.operand, sub).try(),
+    )))
+}
+
+copy_binary = (c :: Checker, b: Binary, sub: Subst)
+              Res<ExprKind, AllocError> {
+    Ok(ExprKind.Binary(Binary(
+        op: b.op,
+        op_span: b.op_span,
+        lhs: c.copy_expr(b.lhs, sub).try(),
+        rhs: c.copy_expr(b.rhs, sub).try(),
+    )))
+}
+
+copy_consume = (c :: Checker, x: Consume, sub: Subst)
+               Res<ExprKind, AllocError> {
+    Ok(ExprKind.Consume(Consume(operand: c.copy_expr(x.operand, sub).try())))
+}
+
+copy_try = (c :: Checker, t: Try, sub: Subst) Res<ExprKind, AllocError> {
+    Ok(ExprKind.Try(Try(
+        operand: c.copy_expr(t.operand, sub).try(),
+        name_span: t.name_span,
+    )))
+}
+
+copy_array = (c :: Checker, a: ArrayLit, sub: Subst)
+             Res<ExprKind, AllocError> {
+    Ok(ExprKind.Array(ArrayLit(elems: c.copy_ids(a.elems, sub).try())))
+}
+
+copy_fixed = (c :: Checker, f: FixedArray, sub: Subst)
+             Res<ExprKind, AllocError> {
+    Ok(ExprKind.FixedArray(FixedArray(
+        type: f.type,
+        elems: c.copy_ids(f.elems, sub).try(),
+        args_span: f.args_span,
+    )))
+}
+
+copy_ids = (c :: Checker, ids: Vec<ExprId>, sub: Subst)
+           Res<Vec<ExprId>, AllocError> {
+    out ::= c.alloc.Vec<ExprId>();
+    ids.loop((h, e) { out.add(c.copy_expr(e, sub).try()).try(); });
+    Ok(out);
+}
+
+// A lambda's PARAMETERS are not copied: they are names and types, and
+// a name is not memoized on. Its BODY is, for the same reason every
+// other body is.
+copy_lambda = (c :: Checker, l: Lambda, sub: Subst)
+              Res<ExprKind, AllocError> {
+    Ok(ExprKind.Lambda(Lambda(
+        tparams: l.tparams,
+        params: l.params,
+        params_span: l.params_span,
+        ret: l.ret,
+        body: c.copy_block(l.body, sub).try(),
+    )))
+}
+
+// The PATTERN is shared: nothing in sema keys a memo on a `PatternId`,
+// and a pattern cannot mention the binder. The arm BODIES are copied,
+// because they are expressions and they type per iteration.
+copy_match = (c :: Checker, m: Match, sub: Subst)
+             Res<ExprKind, AllocError> {
+    arms ::= c.alloc.Vec<Arm>();
+    m.arms.loop((h, a) { c.copy_arm(a, sub, arms).try(); });
+    Ok(ExprKind.Match(Match(
+        scrutinee: c.copy_expr(m.scrutinee, sub).try(),
+        name_span: m.name_span,
+        arms: arms,
+        arms_span: m.arms_span,
+    )));
+}
+
+copy_arm = (c :: Checker, a: Arm, sub: Subst, out :: Vec<Arm>)
+           Res<(), AllocError> {
+    out.add(Arm(
+        pattern: a.pattern,
+        arrow_span: a.arrow_span,
+        body: c.copy_expr(a.body, sub).try(),
+        span: a.span,
+        leading: no_trivia(),
+        trailing: no_trivia(),
+    ))
+}
+
+copy_record = (c :: Checker, r: Record, sub: Subst)
+              Res<ExprKind, AllocError> {
+    entries ::= c.alloc.Vec<Member>();
+    r.entries.loop((h, m) { c.copy_member(m, sub, entries).try(); });
+    Ok(ExprKind.Record(Record(entries: entries)));
+}
+
+copy_member = (c :: Checker, m: Member, sub: Subst, out :: Vec<Member>)
+              Res<(), AllocError> {
+    kind = c.copy_member_kind(m, sub).try();
+    out.add(Member(
+        kind: kind,
+        span: m.span,
+        leading: no_trivia(),
+        trailing: no_trivia(),
+    ))
+}
+
+copy_member_kind = (c :: Checker, m: Member, sub: Subst)
+                   Res<MemberKind, AllocError> {
+    m.kind.match({
+        Field(f)    => c.copy_field(f, sub),
+        Const(k)    => c.copy_const(k, sub),
+        Function(f) => c.copy_function(f, sub),
+    })
+}
+
+copy_field = (c :: Checker, f: Field, sub: Subst)
+             Res<MemberKind, AllocError> {
+    value = c.copy_opt(f.value, sub).try();
+    Ok(MemberKind.Field(Field(
+        name: f.name,
+        exported: f.exported,
+        mutable: f.mutable,
+        type: f.type,
+        value: value,
+    )));
+}
+
+copy_const = (c :: Checker, k: Const, sub: Subst)
+             Res<MemberKind, AllocError> {
+    Ok(MemberKind.Const(Const(
+        name: k.name,
+        exported: k.exported,
+        mutable: k.mutable,
+        type: k.type,
+        value: c.copy_expr(k.value, sub).try(),
+    )))
+}
+
+copy_function = (c :: Checker, f: Function, sub: Subst)
+                Res<MemberKind, AllocError> {
+    body = c.copy_opt_block(f.body, sub).try();
+    Ok(MemberKind.Function(Function(
+        name: f.name,
+        exported: f.exported,
+        form: f.form,
+        tparams: f.tparams,
+        params: f.params,
+        params_span: f.params_span,
+        ret: f.ret,
+        body: body,
+    )));
+}
+
+copy_block_expr = (c :: Checker, b: BlockId, sub: Subst)
+                  Res<ExprKind, AllocError> {
+    Ok(ExprKind.Block(c.copy_block(b, sub).try()))
+}

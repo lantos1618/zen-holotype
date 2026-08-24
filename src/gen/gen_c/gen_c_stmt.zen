@@ -395,10 +395,24 @@ lower_nested = (be :: CBackend, id: BlockId, ctx: Ctx) Res<(), AllocError> {
     Ok(());
 }
 
+// A `@meta` FIELD WALK IS ALREADY ORDINARY NODES by the time it gets
+// here: sema unrolled it into one nested block per field and recorded
+// it under this statement's expression id (`sema_meta.zen`, M4). So
+// the backend lowers a nested block — the same one `StmtKind.Block`
+// takes — and has learned nothing new, exactly as it learned nothing
+// new for `@meta(T).name` in M3.
 lower_expr_stmt = (be :: CBackend, s: Stmt, id: ExprId, ctx: Ctx)
                   Res<(), AllocError> {
     be.check.stmt_type(s, ctx).try();
-    be.deliver(id, ctx, be.check.types.unknown().try(), Dest.Discard)
+    be.check.meta_stmts(id).match({
+        Ok(b) => be.lower_nested(b, ctx),
+        None  => be.deliver(
+            id,
+            ctx,
+            be.check.types.unknown().try(),
+            Dest.Discard
+        ),
+    })
 }
 
 // `x = e;`, `x: T ::= e;`, `self.len = ..;`. Only a bare name

@@ -1,0 +1,49 @@
+// THE PROVING CONSUMER (`docs/design_meta.md` §7, M4): `Display.dump`'s
+// body, verbatim from `DESIGN.md:564` and from
+// `src/std/core/display.zen:33`, written at a CONCRETE impl instead of
+// as the trait default it wants to be one day. This is the shape all
+// six waiting consumers have, so it is the shape M4 has to produce —
+// `out.add(" {}: {},", field.name, self.at(field))` is the line every
+// one of them is written against.
+//
+// `@Self` INSIDE AN IMPL IS ONE CONCRETE TYPE, which is what makes this
+// legal while the trait DEFAULT is refused: the default body is checked
+// once and emitted at every implementor, and expanding it there walks
+// the BOUND's members (`must-fail/sema/meta_field_walk_in_a_default_refused`).
+//
+// THE TWIN IS THE ORACLE (§6.3): `dump_by_hand` writes the four field
+// lines out and must print byte-identical stdout.
+//
+// MUTATION RESISTANCE (§6.4): four fields, four DIFFERENT types, four
+// distinct non-default values, and the rendered length printed after
+// the record — a number no skipped field can still produce.
+
+Error = AllocError | WriteError
+
+Rec = {
+    alpha: i64,
+    beta: str,
+    gamma: bool,
+    delta: u8,
+}
+
+Rec.impl(Display, {
+    toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
+        out.add("{} {", @meta(self: @Self).name).try();
+        @meta(self: @Self).fields().loop((h, field) {
+            out.add(" {}: {},", field.name, self.at(field)).try();
+        });
+        out.add(" }").try();
+        Ok(());
+    }
+})
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    sb    ::= alloc.String("").try();
+    r = Rec(alpha: 71, beta: "quince", gamma: true, delta: 199);
+    r.toString(sb).try();
+    println("{}", sb.view());
+    println("len {}", sb.view().len);
+    Ok(0);
+}
