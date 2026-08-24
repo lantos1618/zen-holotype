@@ -1,0 +1,27 @@
+// tests/corpus/loop-nested/next_in_inner_break_in_outer_same_nest.zen
+// both exits from inside ONE inner body: `h_inner.next()` skips the
+// rest of the pass, a later `h_outer.break()` leaves the whole nest,
+// and each handle keeps answering to its own loop for the whole body.
+//
+// A single-exit test cannot catch the lowering that resolves handles
+// once at the top of the BODY and reuses that binding for every exit
+// in it: with two different handles live in the same closure, the
+// binding has to be per-handle, not per-body. Get this wrong and one
+// of the two exits lands in the other loop — "inner 2" and "inner 3"
+// disappear (next bound to outer), or "outer done" prints early
+// (break bound to inner). The interleaving below is the assertion:
+// every line is present, in this order, with these counts.
+
+main = (env: Env) Res<i32, AllocError> {
+    Range(0, 3).loop((h_outer, o) {
+        println("outer {}", o);
+        Range(0, 5).loop((h_inner, i) {
+            (i == 1).then(() { h_inner.next() });
+            (i == 3).then(() { h_outer.break() });
+            println("  inner {} {}", o, i);
+        });
+        println("unreachable tail");
+    });
+    println("done");
+    Ok(0);
+}

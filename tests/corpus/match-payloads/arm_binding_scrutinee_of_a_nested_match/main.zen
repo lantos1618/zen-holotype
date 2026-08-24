@@ -1,0 +1,37 @@
+// AN ARM BINDING IS THE SCRUTINEE OF A NESTED MATCH, and the same binder
+// name `n` is bound at both depths: outer `n: u64`, inner `Ok(v)`/`None`.
+// The nested match's scrutinee is the OUTER arm's binding, so the outer
+// arm's scope must be live exactly while the inner match lowers -- and
+// released before the next statement, or the trailing println reads a
+// branch-local slot (the loud version) or the last arm's value (the quiet
+// one).
+//
+// This is the shadowing pair from the 2026-08 hunt (F1: a binder left on
+// the checker's scope stack made every later use resolve into a closed
+// branch), one level deeper: the stale binding here would be found by the
+// INNER match first. Wrap carries TWO variants so it stays a nominal enum
+// -- with one variant the declaration reads as something else entirely.
+
+Wrap = Wrap(Res<i64>) | Empty
+
+main = (env: Env) Res<i32, AllocError> {
+    n: u64 = 99;
+    w1: Wrap = Wrap.Wrap(Ok(1234567890));
+    w2: Wrap = Wrap.Wrap(None);
+    w1.match({
+        Wrap(r) => r.match({
+            Ok(v) => println("inner {}", v),
+            None  => println("inner none"),
+        }),
+        Empty   => println("wrapped none"),
+    });
+    w2.match({
+        Wrap(r) => r.match({
+            Ok(v) => println("inner {}", v),
+            None  => println("inner none"),
+        }),
+        Empty   => println("wrapped none"),
+    });
+    println("outer {}", n);
+    Ok(0);
+}

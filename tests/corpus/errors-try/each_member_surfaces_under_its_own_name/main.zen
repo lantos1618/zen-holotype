@@ -1,0 +1,50 @@
+// TWO MEMBERS WIDEN THROUGH THE SAME `.try()` SITES, and each comes out
+// still saying its own name.
+//
+// `deep` fails with `Inner`, `wide` fails with `Outer`, and `top` pulls
+// both through the SAME two propagation sites into ONE set -- so the
+// member identity cannot be laid down once at compile time; it has to be
+// carried per execution. `res_try_error_set_keeps_the_variant` asks this
+// of one error crossing many SPELLINGS; this asks it of two errors
+// crossing the same LAYERS, because that is the shape a real call tree
+// makes: siblings failing differently into one ancestor.
+//
+// A widening that numbered members by declaration order of the SOURCE
+// spelling -- instead of matching them by identity -- hands back the
+// wrong arm below, and `top(-9)` prints "said inner": a perfectly
+// readable lie. A payload crossed with a tag prints 32 instead of 42.
+// Neither fails to compile, which is why the printed words are the
+// assertion.
+
+Inner = | InnerBoom
+Outer = | OuterBoom
+Any = Inner | Outer
+
+deep = () Res<i32, Inner> {
+    Ok(41)
+}
+
+wide = (n: i32) Res<i32, Outer> {
+    (n < 0).match({
+        true  => Err(Outer.OuterBoom),
+        false => Ok(n),
+    });
+}
+
+top = (n: i32) Res<i32, Any> {
+    d = deep().try();
+    w = wide(n).try();
+    Ok(d + w)
+}
+
+main = (env: Env) Res<i32, Any> {
+    println("{}", top(1).try());
+    top(-9).match({
+        Ok(v)  => println("ok {}", v),
+        Err(e) => e.match({
+            Inner(_) => println("said inner"),
+            Outer(_) => println("said outer"),
+        }),
+    });
+    Ok(0);
+}

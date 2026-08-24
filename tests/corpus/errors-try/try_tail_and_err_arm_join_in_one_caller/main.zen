@@ -1,0 +1,55 @@
+// THE OK EDGE OF A `.try()` CHAIN AND ITS ERR EDGE SHARE ONE JOIN, and
+// the join must take the value from whichever edge actually ran.
+//
+// `pick` propagates a callee's Ok into its own tail (the value path).
+// The caller reaches a sibling of that function through `.try()` inside
+// `boom`, whose whole tail raises -- so one call to the SAME caller-side
+// match unwraps twice and lands on Ok, and the other builds an Err once.
+// Both results arrive at main as `Res<i64, Any>` and both are read by
+// name and value below.
+//
+// A backend that reuses one temp for "the propagated value" across the
+// two paths prints "ok 42" for the failed run too; a join that assumes
+// the Ok edge ran prints "total 42". The Err arm naming Outer is what
+// proves the second run actually failed.
+
+Inner = | InnerBoom
+Outer = | OuterBoom
+Any = Inner | Outer
+
+source = (n: i64) Res<i64, Outer> {
+    (n < 0).match({
+        true  => Err(Outer.OuterBoom),
+        false => Ok(n + 40),
+    });
+}
+
+pick = (n: i64) Res<i64, Any> {
+    source(n).try()
+}
+
+boom = () Res<i64, Any> {
+    Ok(source(0 - 1).try())
+}
+
+main = (env: Env) Res<i32, Any> {
+    pick(2).match({
+        Ok(v)  => println("ok {}", v),
+        Err(e) => e.match({
+            Inner(_) => println("inner"),
+            Outer(_) => println("outer"),
+        }),
+    });
+    joined: Res<i64, Any> = (2 > 3).match({
+        true  => pick(9),
+        false => boom(),
+    });
+    joined.match({
+        Ok(v)  => println("ok {}", v),
+        Err(e) => e.match({
+            Inner(_) => println("inner"),
+            Outer(_) => println("outer"),
+        }),
+    });
+    Ok(0);
+}

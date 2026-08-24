@@ -1,0 +1,25 @@
+// CONSUME A NON-DROP HANDLE: Alloc is a fat handle that "copies
+// freely" (std/core/drop.zen) -- only the ARENA is Drop -- so
+// `h = consume alloc` must compile, and the copy must keep working:
+// the Vec built through the moved-in handle answers with len 2.
+// This pins BOTH halves of the rule. The move still kills the SOURCE
+// name (use-after-move fires even for non-Drop types -- see the
+// reject in LANE.md), and no drop may run for the handle: a backend
+// that registers a drop for `h` or `alloc` frees an arena someone
+// else still points at.
+//
+// consume here is documentation, not mechanics: it says "nobody else
+// uses this name again", which for a handle is a promise about
+// INTENT rather than bytes.
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    h = consume alloc;
+    v ::= h.Vec<i32>();
+    v.add(41).try();
+    v.add(1).try();
+    println("len {}", v.len);
+    Ok(0);
+}
+
+Error = AllocError | IoError

@@ -1,0 +1,39 @@
+// AN OVERLOAD IS CHOSEN BY THE RECEIVER'S WIDTH, AND THE TARGET NAMES
+// THE WIDTH ARRIVED AT.
+//
+// `std.core.num` declares `to_i32` three times over — on i8, on i16,
+// on u8 — and resolution has two ways to get that wrong. Pick by NAME
+// alone and every `.to_i32(..)` in the program is one function; pick
+// by the TARGET and a `.to_i32()` written on an i8 emits an i32 cast
+// wherever an i8 was declared. Both stay green until one call site
+// uses the answer AS WELL AS printing it — which is what the second
+// half of this file does.
+//
+// the arithmetic rows are the discriminator. `a.to_i64()` on an i8
+// holding -100 must arrive at i64 as -100; if the overload chosen was
+// the u8 receiver's (the only other declaration whose name ends in
+// the same target), the operand reads as 156 and `-100 * 3` prints
+// 468. `c.to_u64()` on a u32 holding 3000000000 times three must be
+// nine billion — computed at u64, past anything i32 holds — so an
+// overload picked at the WRONG SOURCE WIDTH truncates before the
+// multiply and wraps mod 2^32 — 410065408 here — still a number.
+//
+// `widen_*` impl fields are named to keep these method names single-
+// answered (`num.zen`: "a field named `to_u32` would give
+// `x.to_u32()` two answers"); this file pins the free functions'
+// side of that bargain.
+
+main = (env: Env) Res<i32, AllocError> {
+    a: i8 = -100;
+    b: i16 = 30000;
+    c: u32 = 3000000000;
+    d: u8 = 200;
+
+    // the same METHOD NAME on four different receivers
+    println("{} {} {} {}", a.to_i32(), b.to_i32(), d.to_i32(), c.to_i64());
+
+    // the answer used, not just printed
+    println("{}", a.to_i64() * 3);
+    println("{}", c.to_u64() * 3);
+    Ok(0);
+}

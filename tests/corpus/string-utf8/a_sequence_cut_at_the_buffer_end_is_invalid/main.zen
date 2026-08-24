@@ -1,0 +1,39 @@
+// Three truncated sequences, each cut by the END of the buffer rather
+// than by a bad byte: a lone 2-byte lead, a 3-byte lead with only its
+// first continuation, and a lone 4-byte lead. The decoder reaches for
+// s.get(at+n), misses, and must report Invalid -- in the emitted C the
+// alternative is reading past the length, which is silent garbage or a
+// segfault, not an error. `len` prints prove each buffer really is
+// shorter than the sequence wants to be.
+String = std.text.text_string
+Utf8Error, codepoint_at, validate_utf8 = std.text.text_utf8
+
+verdict = (s: str) i64 {
+    s.validate_utf8().match({
+        Ok(_) => 1,
+        Err(_) => 0,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    lead2 ::= alloc.String("").try();
+    lead2.add_byte(194).try();
+    v1 ::= lead2.view();
+    println("lead2 len {}", v1.len);
+    println("lead2 valid {}", verdict(v1));
+
+    lead3 ::= alloc.String("").try();
+    lead3.add_byte(226).try(); lead3.add_byte(129).try();
+    v2 ::= lead3.view();
+    println("lead3 len {}", v2.len);
+    println("lead3 valid {}", verdict(v2));
+
+    lead4 ::= alloc.String("").try();
+    lead4.add_byte(244).try();
+    v3 ::= lead4.view();
+    println("lead4 len {}", v3.len);
+    println("lead4 valid {}", verdict(v3));
+    Ok(0);
+}

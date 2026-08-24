@@ -1,0 +1,43 @@
+// Seven arms, two levels deep, no wildcard anywhere: every (outer, inner)
+// path is named, in an order that interleaves the outer cases.
+//
+// Coverage over nested patterns is a COLUMN operation (sema_match.zen):
+// specialising Left turns its payload into the inner column, and the inner
+// cases complete it. The runtime twin of that guarantee is sharper -- the
+// inner comparison must run against the PAYLOAD of whichever outer case
+// matched, not one shared slot. Left and Right carry the same inner type,
+// so a lowering that reads a single payload word for both produces valid C
+// that dispatches Left's inner tag on Right's value and answers Left's
+// numbers. Same input, both sides: Full(21) must come out 42 through Left
+// and 3021 through Right; Mark(5) is 505 against 90005; Blank is 17
+// against 101.
+//
+// Breaks if: the inner dispatch reads a fixed payload slot shared across
+// the outer cases -- Right's three answers come out as Left's.
+
+Cell = Full(i64) | Blank | Mark(i64)
+
+Slot = Left(Cell) | Right(Cell) | Gone
+
+route = (s: Slot) i64 {
+    s.match({
+        Right(Blank)   => 101,
+        Left(Full(n))  => n * 2,
+        Gone           => 7,
+        Left(Mark(n))  => n + 500,
+        Right(Full(n)) => n + 3000,
+        Left(Blank)    => 17,
+        Right(Mark(n)) => n + 90000,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", route(Slot.Left(Cell.Full(21))));
+    println("{}", route(Slot.Left(Cell.Blank)));
+    println("{}", route(Slot.Left(Cell.Mark(5))));
+    println("{}", route(Slot.Right(Cell.Full(21))));
+    println("{}", route(Slot.Right(Cell.Blank)));
+    println("{}", route(Slot.Right(Cell.Mark(5))));
+    println("{}", route(Slot.Gone));
+    Ok(0);
+}

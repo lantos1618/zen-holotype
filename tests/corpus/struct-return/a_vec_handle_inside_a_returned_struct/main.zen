@@ -1,0 +1,51 @@
+// A STRUCT WHOSE FIELD IS A Vec HANDLE RETURNS THE HANDLE, NOT THE
+// BUFFER — and the buffer keeps working after the crossing.
+//
+// `Vec<T>` is a three-word handle: a data pointer, a len, a capacity,
+// with the bytes in arena pages that outlive any frame. So this struct
+// is 56 bytes of MEMORY-class aggregate whose interesting word is the
+// pointer inside it. The failure modes it separates:
+//
+//   - returning the struct but copying only SOME of the handle's words
+//     (a truncated field-wise copy stops at, say, two of three) leaves
+//     a len that lies about the data: `get(4)` then answers None or
+//     reads garbage. The element values below are squares — 0, 1, 4,
+//     9, 16 — so a wrong read prints a wrong NUMBER, not an absence.
+//   - re-zeroing the handle on the way out ("moved") drops len and
+//     capacity to 0 while the label still arrives fine; `len` is the
+//     second line and says 5.
+//   - double-freeing or reallocating through BOTH copies would corrupt
+//     the arena before exit; the program simply has to reach its clean
+//     `Ok(0)` for the shape to be right.
+//
+// `fill` returns `Res<Buf, AllocError>` rather than Buf because `add`
+// can grow, which also parks the whole 56-byte struct INSIDE the tagged
+// union payload of the returned Res — the layout question the large
+// test names, with a live pointer inside it.
+
+Buf = {
+    items :: Vec<i64>,
+    label: str,
+}
+
+fill = (alloc: Alloc, label: str, n: usize) Res<Buf, AllocError> {
+    v ::= alloc.Vec<i64>();
+    Range(0, n).loop((h, k) { v.add(k * k).try(); });
+    Ok(Buf(items: v, label: label))
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    b = fill(alloc, "squares", 5).try();
+    println("{} {}", b.label, b.items.len);
+
+    b.items.get(0).match({ Ok(v) => println("0 {}", v), None => println("0 none") });
+    b.items.get(4).match({ Ok(v) => println("4 {}", v), None => println("4 none") });
+
+    // past len is None exactly as get always answers: the handle's len
+    // crossed intact, and nothing reallocated under it
+    b.items.get(5).match({ Ok(v) => println("5 {}", v), None => println("5 none") });
+
+    Ok(0);
+}

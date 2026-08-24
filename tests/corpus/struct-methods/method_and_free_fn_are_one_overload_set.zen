@@ -1,0 +1,33 @@
+// A CANARY, NOT A PASSING TEST: this file documents the shadowing bug in
+// LANE.md and goes red the day it is fixed.
+//
+// Same name + same arity + same receiver type, one method one free
+// function. DESIGN.md says the pair cannot exist ("Zen has no overloading
+// -- one name, one function, always") and ufcs_collisions.py refuses it in
+// src/ -- but the compiler accepts it silently. Today BOTH call spellings
+// answer the METHOD's body:
+//
+//     w.scale(7)   prints 14  (the method -- plausibly correct)
+//     scale(w, 2)  prints 14  (must be the free function's 21)
+//
+// The `.expected` beside this file records today's output so the bug is
+// pinned from the correct side: when resolution stops shadowing the free
+// function, `scale(w, 2)` answers 21, this expectation fails, and the fix
+// is to change line two of main.expected -- not to revert anything.
+//
+// Until then, no test in this lane may rely on which body a shadowed name
+// answers; every other file here keeps at most one candidate per call.
+
+W = {
+    v: i32,
+    scale = (self: @Self, k: i32) i32 { self.v + k }
+}
+
+scale = (w: W, k: i32) i32 { w.v * k }
+
+main = (env: Env) Res<i32, AllocError> {
+    w = W(v: 7);
+    println("dot    {}", w.scale(7));
+    println("direct {}", scale(w, 2));
+    Ok(0);
+}

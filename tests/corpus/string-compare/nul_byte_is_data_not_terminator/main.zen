@@ -1,0 +1,31 @@
+// A NUL byte inside a str is DATA: str carries its own length and `==`
+// walks exactly len bytes, so equality does not stop where C's strcmp
+// would. Every pair below differs first at a position strcmp would never
+// reach or reports equal at a byte C calls terminator.
+//
+//   "a\0b" vs "a\0c"   differ INSIDE, past the NUL -- strcmp says EQUAL,
+//                      having stopped at position 1
+//   "a"     vs "a\0"   same visible prefix, different lengths -- strcmp
+//                      also says EQUAL
+//
+// Both wrong answers are plausible booleans from real implementations:
+// lowering `==` to C's strcmp, or memcmp'ing only the shorter length.
+// The embedded-NUL row is the one this tree could plausibly get wrong,
+// because the emitted C hands literals around as `(unsigned char *)`
+// arrays and nothing in the generated code remembers they are not C
+// strings.
+//
+// Breaks it: emit `(strcmp(a.data, b.data) == 0)` instead of the Eq call
+// -- row 3 turns true; or memcmp over min(len) -- row 5 turns false.
+
+main = (env: Env) Res<i32, AllocError> {
+    nul = "a\0b";
+    println("{}", nul.len);
+    println("{}", "a" == "a");
+    println("{}", "a\0b" == "a\0c");
+    println("{}", "a" == "a\0");
+    println("{}", nul == "a\0b");
+    println("{}", "\0" == "");
+    println("{}", "\0".len);
+    Ok(0);
+}

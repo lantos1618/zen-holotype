@@ -1,0 +1,52 @@
+// `.try()` RETURNS THROUGH THE FRAME IT IS IN -- the enclosing function,
+// not the nearest block. DESIGN.md: "`.try()` and `h.break()` are both
+// this", a jump out through a frame boundary.
+//
+// The failing call sits inside a match ARM, and the arm is a block with
+// its own local and its own println. A propagation that unwinds to the
+// block instead of the function prints the block's line and keeps going;
+// one that unwinds to the function prints nothing from the block and the
+// caller's Err arm answers. Both are silent, plausible outputs, which is
+// why the printed words are what this pins.
+//
+// The Ok path runs the SAME code with a passing callee, so the guard is
+// exercised in both directions: the arm must run to its end, print, and
+// close with the payload -- not fall into the error path because the
+// tag was read once and never cleared.
+
+Inner = | InnerBoom
+Outer = | OuterBoom
+Any = Inner | Outer
+
+leaf = (n: i64) Res<i64, Outer> {
+    (n < 0).match({
+        true  => Err(Outer.OuterBoom),
+        false => Ok(n * 2),
+    });
+}
+
+arm = (n: i64) Res<i64, Any> {
+    (n > 0).match({
+        true  => {
+            v = leaf(n).try();
+            println("in arm {}", v);
+            Ok(v)
+        }
+        false => Ok(0 - 1),
+    });
+}
+
+main = (env: Env) Res<i32, Any> {
+    arm(21).match({
+        Ok(v)  => println("ok {}", v),
+        Err(_) => println("err"),
+    });
+    arm(0 - 4).match({
+        Ok(v)  => println("ok {}", v),
+        Err(e) => e.match({
+            Inner(_) => println("inner err"),
+            Outer(_) => println("outer err"),
+        }),
+    });
+    Ok(0);
+}

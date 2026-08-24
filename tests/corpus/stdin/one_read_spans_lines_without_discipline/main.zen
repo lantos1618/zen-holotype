@@ -1,0 +1,48 @@
+// tests/corpus/stdin/one_read_spans_lines_without_discipline/main.zen
+// NO LINE DISCIPLINE: ONE read CROSSES THREE LINES. "alpha\nbeta\ngamma"
+// arrives as its raw 16 bytes, newlines included and split freely across
+// what a text layer would call line boundaries — the \n at offsets 5
+// and 10 are ORDINARY BYTES here, and the byte AT the boundary (offset
+// 9, beta's second 'a') is the one a line-aware reader misplaces.
+// There is no read_line on Stdin and never will be: line discipline is
+// the caller's question, asked over bytes already held.
+//
+// main.stdin holds exactly those 16 bytes.
+
+Vec    = std.collections
+
+Error = AllocError | IoError
+
+byte_is = (b :: Vec<u8>, i: usize, want: u8) bool {
+    b.get(i).match({
+        Ok(got) => got == want,
+        None    => false,
+    });
+}
+
+main = (env: Env) Res<i32, Error> {
+    a ::= env.mem.alloc();
+    b ::= a.Vec<u8>();
+
+    b.reserve(64).try();
+    got ::= env.in.read(b, 64).try();
+
+    println("got {}", got);
+
+    // both newlines survived as themselves, in place
+    nl5  ::= byte_is(b, 5, '\n');
+    nl10 ::= byte_is(b, 10, '\n');
+    println("newlines {} {}", nl5, nl10);
+
+    // the bytes a line discipline would have moved or dropped
+    mid  ::= byte_is(b, 9, 'a');
+    last ::= byte_is(b, 15, 'a');
+    println("boundary {} last {}", mid, last);
+
+    // every byte in arrival order: a line-aware reader cannot get
+    // this list right — it drops or moves the two 10s (the \n bytes)
+    Range(0, b.len).loop((h, i) {
+        b.get(i).match({ Ok(byte) => println("{} {}", i, byte), None => {} });
+    });
+    Ok(0);
+}

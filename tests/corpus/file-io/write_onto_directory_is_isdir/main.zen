@@ -1,0 +1,30 @@
+// tests/corpus/file-io/write_onto_directory_is_isdir/main.zen
+// A directory is not bytes, and the interesting part is WHERE the floor
+// has to notice: glibc's fopen on a directory SUCCEEDS and only the
+// first fwrite fails, so a backend that trusts fopen's return reports
+// this as Failed -- or worse, Ok -- instead of IsDir. The size probe
+// rules the directory out BEFORE opening for exactly that reason; this
+// test pins that the rule holds on the write path too. `src` names the
+// staged tree itself, so the target provably exists: an implementation
+// whose errno mapping degrades to NotFound fails here loudly.
+//
+// The file written FIRST also proves the capability worked a moment
+// earlier -- without it a floor refusing every write would still print
+// one matching line.
+
+FsError = std.env
+
+main = (env: Env) Res<i32, FsError> {
+    env.fs.write("writable.txt", "ok").try();
+    println("plain write ok");
+
+    env.fs.write("src", "x").match({
+        Ok(_)            => println("into the directory"),
+        Err(NotFound)    => println("not found"),
+        Err(Denied)      => println("denied"),
+        Err(IsDir)       => println("is a directory"),
+        Err(Failed)      => println("failed"),
+        Err(OutOfMemory) => println("oom"),
+    });
+    Ok(0);
+}

@@ -1,0 +1,41 @@
+// THE FLOAT FIELD'S DEFAULT IS PART OF THE EQUALITY QUESTION: a struct
+// built by omitting a defaulted f64 must compare equal to one built by
+// naming the same value, and unequal to one that named anything else.
+//
+// This is the field_defaults bug aimed at equality. When defaults were
+// dropped, both back ends built initialisers out of the ARGUMENTS alone
+// and let C's {0} fill the holes -- every default in the tree was zero,
+// so nothing could see it. Equality makes the silence LOUD instead of
+// quiet: the omitted-default line compares a struct whose rate came
+// from the declaration against one whose rate came from an argument.
+//
+//   defaults applied correctly    -> same  true, zero false, half false
+//   defaults silently dropped     -> `same` compares 7.5 against 0.0 and
+//                                    prints FALSE while everything else
+//                                    still looks plausible
+//
+// The default is non-zero (7.5), the override is a DIFFERENT non-zero
+// value (2.25), and the third pair overrides only ONE of the two fields
+// so a default that jumps slots cannot land on a matching value.
+
+Rate = {
+    gain*:: f64 = 7.5,
+    bias*:: f64 = 0.25,
+
+    eq* = (self: @Self, other: @Self) bool {
+        (self.gain == other.gain) && (self.bias == other.bias)
+    }
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    omitted = Rate();
+    spelled = Rate(gain: 7.5, bias: 0.25);
+
+    zeroed = Rate(gain: 0.0, bias: 0.0);
+    halved = Rate(bias: 0.25);          // gain takes the default
+
+    println("same {}", omitted == spelled);
+    println("zero {}", omitted != zeroed);
+    println("half {}", omitted == halved);
+    Ok(0);
+}

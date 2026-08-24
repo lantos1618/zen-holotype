@@ -1,0 +1,33 @@
+// a name the closure BINDS FOR ITSELF is not a capture -- "over-captures"
+// is the rule (gen_c_scope.zen), and a shadowing `v ::= ..` at the head of
+// the body is the case that decides whether the record field and the
+// prologue's re-declaration are the SAME thing or two.
+//
+// the failure mode is silent in BOTH directions. Shadow the capture and
+// let the prologue's copy win: the body reads 22, the outer stays 22 --
+// indistinguishable from a correct run unless the inner value differs.
+// So the inner bind is 999, not 22: "shadow 1021" proves the body read
+// its OWN binding, and "body 11 22" proves the outer frame never moved
+// and was never captured-by-write. A compiler that drops the shadow and
+// reuses the record slot prints 999 twice; one that captures nothing
+// prints garbage C, which cc refuses.
+//
+// `w` is read and `v` is shadowed, and the pair is the point: `w * 10 + 1`
+// proves the plain read put w IN the record, and `v ::= 999` proves a
+// shadowing bind takes its own storage rather than writing through the
+// record field back into main's frame -- which "body 11 22" confirms from
+// the outside. (The walk over-captures bind targets, so v is in the record
+// anyway; the prologue's copy is simply never read. That is "over-capture
+// costs a word" doing exactly what it promises.)
+
+main = (env: Env) Res<i32, IoError> {
+    v ::= 11;
+    w ::= 22;
+    @scope.defer(() {
+        println("read first {}", w * 10 + 1);
+        v ::= 999;
+        println("shadow {}", v);
+    });
+    println("body {} {}", v, w);
+    Ok(0);
+}

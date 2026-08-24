@@ -1,0 +1,78 @@
+// tests/corpus/printing/every_width_prints_in_full/main.zen
+// `{}` on an integer prints EVERY width in full decimal, and the value
+// that reaches the writer is the ARGUMENT'S OWN, not a C-promoted or
+// C-truncated copy of it.
+//
+// The printer is two runtime functions, `zg_print_i64`/`zg_print_u64`,
+// and every narrower type arrives through a cast — so the whole
+// question is WHICH value the cast starts from. A `(int)` inserted
+// where the argument's own width belongs draws no word from cc: the
+// call still takes an integer, digits still come out, and only the
+// NUMBER says what happened. Each row is chosen so the classic wrong
+// road prints a different plausible decimal:
+//
+//   - u32 4000000000 through a signed 32-bit step is negative;
+//     through i64 it is itself.
+//   - u64 at 2^63 and past i64.MAX through a signed writer print as
+//     negative extremes (-9223372036854775808, -1) — still numbers,
+//     still plausible, wrong by construction.
+//   - i8 -100 zero-extended prints 156; i16 -30000 read unsigned
+//     first wraps to 35536.
+//   - i64.MIN reaches the printer from a VARIABLE here: its digits
+//     cannot be produced by negate-then-print-u64 (text_fmt's own
+//     comment names this trap), and `negated_literal_i64_boundary.zen`
+//     already pins the constant path — this pins the runtime one.
+//
+// `literal_boundaries_unsigned.zen` asks the adjacent question about
+// LITERALS surviving compilation; this asks it about values on their
+// way out of the printer. usize is absent on purpose: its width is the
+// target's (num.zen), so its extremes are not a fixed expectation.
+
+Error = AllocError | IoError
+
+main = (env: Env) Res<i32, Error> {
+    a: u8    = 200;
+    b: u16   = 65530;
+    c: u32   = 4000000000;
+    d: u64   = 18000000000000000000;
+    n: i8    = -100;
+    m: i16   = -30000;
+    p: i32   = -2000000000;
+    q: i64   = -5000000000;
+    lo: i64  = -9223372036854775808;
+    two63: u64 = 9223372036854775808;
+    umax: u64  = 18446744073709551615;
+
+    println("{} {} {} {}", a, b, c, d);
+    println("{} {} {} {}", n, m, p, q);
+    println("min {}", lo);
+    println("2^63 {}", two63);
+    println("umax {}", umax);
+
+    // the same extremes again through a Display impl's field write:
+    // a second door over the same writers, same answer required
+    w = Wide(v: umax);
+    g = Tiny(v: n);
+    println("impl {} {}", w, g);
+    Ok(0);
+}
+
+Wide = {
+    v: u64,
+}
+
+Wide.impl(Display, {
+    toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
+        out.add("w={}", self.v)
+    }
+})
+
+Tiny = {
+    v: i8,
+}
+
+Tiny.impl(Display, {
+    toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
+        out.add("t={}", self.v)
+    }
+})

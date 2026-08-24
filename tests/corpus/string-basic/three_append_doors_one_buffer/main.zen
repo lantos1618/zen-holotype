@@ -1,0 +1,47 @@
+// tests/corpus/string-basic/three_append_doors_one_buffer/main.zen
+// THREE append doors, ONE buffer, in order: `add` (the format door,
+// WriteError, expanded at the call site), `fmt` (the same door on the
+// buffer's OWN floor — AllocError, every piece through add_bytes), and
+// the two raw writers `add_bytes`/`add_byte` underneath both.
+//
+// What makes this worth pinning: the doors must assemble the bytes in
+// WRITTEN ORDER through different lowering paths. `add` emits a literal
+// write per run and a typed writer call per hole; `fmt` goes through
+// add_bytes for everything including its holes' strs; the raw pair
+// bypasses formatting entirely. A backend that lowered one door to a
+// copy, or appended at the wrong end of the buffer, prints bytes that
+// are plausible-looking text in the wrong order — which no zero-value
+// expectation can catch.
+//
+// The floor's contract is also here: `fmt` takes only str holes ("a
+// hole must be a str"), so its arguments below are strs, while `add`
+// formats i64s. Both land in one buffer and len() counts every byte.
+
+Error = AllocError | WriteError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String().try();
+
+    println("empty {} {}", sb.len(), sb.is_empty());
+
+    // the format door: literal runs and holes interleaved
+    sb.add("one={} ", 1).try();
+    println("after-add {} [{}]", sb.len(), sb.view());
+
+    // the floor door: same expansion shape, the buffer's own error set
+    sb.fmt("two={} three={}", "2", "3").try();
+    println("after-fmt {} [{}]", sb.len(), sb.view());
+
+    // the raw writers under both: bytes verbatim, no format meaning
+    sb.add_bytes("+4").try();
+    sb.add_byte('!').try();
+    println("after-raw {} [{}]", sb.len(), sb.view());
+
+    // an empty append is legal and changes nothing but proves the
+    // loop-over-zero-bytes path runs
+    sb.add_bytes("").try();
+    println("still {} {}", sb.len(), sb.is_empty());
+
+    Ok(0);
+}

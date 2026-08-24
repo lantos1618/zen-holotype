@@ -1,0 +1,57 @@
+// NESTED EQUALITY IS RECURSION THROUGH `.eq`, AND EACH LEVEL MUST ASK
+// ITS OWN TYPE'S LAW.
+//
+// Outer.eq consults Inner.eq for the nested slot and plain scalar `==`
+// for its own two scalars. Three lowerings all look like "struct
+// equality" and only one of them is right:
+//
+//   - comparing the nested slot BYTES or by first-word would make the
+//     alias line print true whenever the pointers happened to agree --
+//     plausible-looking, silently wrong, exactly the shape that survives
+//     review;
+//   - flattening one level deep makes the inner-differs line print
+//     true;
+//   - recursing but calling OUTER's eq at the inner site makes the
+//     program loop forever instead of printing anything (a stack
+//     overflow is also a red, just a louder one).
+//
+// The pairs are ordered so the three answers read as a sentence about
+// WHERE the difference sat: nowhere / innermost / middle.
+
+Inner = {
+    depth*: i32,
+    label*: u8,
+
+    eq* = (self: @Self, other: @Self) bool {
+        (self.depth == other.depth) && (self.label == other.label)
+    }
+}
+
+Outer = {
+    head*: i32,
+    inner*: Inner,
+    tail*: i32,
+
+    eq* = (self: @Self, other: @Self) bool {
+        (self.head == other.head)
+            && self.inner.eq(other.inner)
+            && (self.tail == other.tail)
+    }
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    base = Outer(
+        head: 3,
+        inner: Inner(depth: 7, label: 4),
+        tail: 8,
+    );
+
+    twin      = Outer(head: 3, inner: Inner(depth: 7, label: 4), tail: 8);
+    inner_dif = Outer(head: 3, inner: Inner(depth: 7, label: 9), tail: 8);
+    mid_dif   = Outer(head: 3, inner: Inner(depth: 12, label: 4), tail: 8);
+
+    println("twin {}", base == twin);
+    println("label {}", base == inner_dif);
+    println("depth {}", base == mid_dif);
+    Ok(0);
+}

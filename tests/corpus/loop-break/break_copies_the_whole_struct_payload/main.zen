@@ -1,0 +1,41 @@
+// THE BREAK ARGUMENT IS COPIED WHOLE -- every byte of a struct payload,
+// in field order, not just its first word.
+//
+// `break_keep` (gen_c_handle.zen) hands the break a bare name because
+// "anything larger has been copied into the result by now" -- which makes
+// struct payloads the case where the copy is load-bearing. Both fields
+// below are far past 32 bits and DIFFER from each other, so a backend
+// that copies only the first machine word prints the right first field
+// and a zero second field; one that copies fields in the wrong order
+// swaps them; one that aliases the payload into a per-pass slot prints
+// whatever happened to the slot afterwards.
+//
+// the walk is over a fixed [Point, 3] so the loop's Res<Point> has a type
+// source (the array's element); a while-true loop breaking with a struct
+// has none and does not compile today (see LANE.md). If the break never
+// lands the loop ends naturally and `none` prints, which fails the
+// expected file just as loudly.
+//
+// breaks this: copying less than the full payload (or aliasing it) when
+// h.break(x) hands a struct out of the loop.
+
+Point = {
+    x*:: i64,
+    y*:: i64,
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    ps: [Point, 3] = [
+        Point(x: 11111111111, y: 22222222222),
+        Point(x: 33333333333, y: 44444444444),
+        Point(x: 55555555555, y: 66666666666),
+    ];
+    found: Res<Point> = ps.loop((h, p) {
+        (p.x > 40000000000).then(() { h.break(p) });
+    });
+    found.match({
+        Ok(p) => println("{} {}", p.x, p.y),
+        None  => println("none"),
+    });
+    Ok(0);
+}

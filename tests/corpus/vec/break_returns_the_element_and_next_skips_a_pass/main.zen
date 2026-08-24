@@ -1,0 +1,54 @@
+// h.break CARRIES THE ELEMENT (NOT THE INDEX), AND h.next SKIPS ONE PASS.
+//
+// Over a Vec the loop family's two non-local exits meet the container's
+// own values, and each exit can be built the wrong way round:
+//
+//   - `h.break(x)` must deliver the ELEMENT. The indexed body hands a
+//     backend both `i` and `x`, and a lowering that passes the counter
+//     to the break slot compiles fine and answers a plausible small
+//     number -- here 400 instead of 2.
+//   - `h.next()` leaves THIS pass, not the loop: everything after it in
+//     the body is skipped for that element only, and later elements
+//     still run. Lowering it to the loop's break label ends the walk at
+//     the first skip and drops every remaining element.
+//
+// Both exits are exercised through the same vec, with the un-broken
+// remainder counted, so "next broke out" and "break carried i" are two
+// different wrong programs and neither prints this output.
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    // break with the element: the answer is x, and x is not i
+    v ::= alloc.Vec<i32>();
+    Range(0, 5).loop((h, n) { v.add(n * 100 + 200).try(); });
+    out = v.loop((h, i, x) {
+        (x == 400).match({ true => h.break(x), false => () });
+    });
+    out.match({
+        Ok(x)   => println("broke {}", x),
+        None    => println("no break"),
+    });
+
+    // break with NO value from an element walk: the Res carries nothing
+    count ::= 0;
+    v.loop((h, x) {
+        (x == 400).match({ true => h.break(), false => () });
+        count = count + 1;
+    });
+    println("count {}", count);
+
+    // next skips the rest of one pass; the walk still reaches the end
+    seen ::= 0;
+    w ::= alloc.Vec<str>();
+    w.add("a").try();
+    w.add("b").try();
+    w.add("c").try();
+    w.loop((h, s) {
+        s.eq("b").then(() { h.next() });
+        println("saw {}", s);
+        seen = seen + 1;
+    });
+    println("seen {}", seen);
+    Ok(0);
+}

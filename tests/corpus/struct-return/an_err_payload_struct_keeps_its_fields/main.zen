@@ -1,0 +1,51 @@
+// AN Err RETURN CARRIES ITS STRUCT PAYLOAD INTACT — the failure side of
+// the ABI, which the success-side tests never exercise.
+//
+// `Res<T, E>` is a tagged union, and gen_c has two chances to lose an
+// aggregate payload: build it in the wrong arm's slot, or re-tag on the
+// way out and leave the fields behind. Every Res test in the tree
+// returns a primitive or a handle as its payload; this one returns a
+// 16-byte struct with a str in it as the ERROR type, and reads both
+// fields off the far side:
+//
+//   - code is computed (n * -7), not stored: a payload that failed to
+//     cross prints 0, and 0 is the value the field-default bug taught
+//     this tree never to trust.
+//   - note is "negative", read through `.slice`-free `{}` formatting
+//     AND compared against describe()'s own verdict below. A lost str
+//     prints empty; a pointer printed as a number prints garbage.
+//
+// The match arms are also the point: `Err(e)` binds the STRUCT, and the
+// same call site runs both arms across the two calls, so neither arm's
+// payload path is dead code.
+
+Fail = {
+    code: i64,
+    note: str,
+}
+
+attempt = (n: i64) Res<i64, Fail> {
+    (n < 0).match({
+        true  => Err(Fail(code: n * -7, note: "negative")),
+        false => Ok(n * 3),
+    });
+}
+
+describe = (r: Res<i64, Fail>) str {
+    r.match({
+        Ok(_)  => "ok",
+        Err(_) => "bad",
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("ok-path {}", describe(attempt(5)));
+
+    attempt(-4).match({
+        Ok(v)   => println("ok {}", v),
+        Err(e)  => println("code {} note |{}|", e.code, e.note),
+    });
+    println("second {}", describe(attempt(-4)));
+
+    Ok(0);
+}

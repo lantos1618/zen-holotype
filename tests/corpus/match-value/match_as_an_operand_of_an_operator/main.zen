@@ -1,0 +1,34 @@
+// A MATCH AS AN OPERAND OF AN OPERATOR, INCLUDING UNDER UNARY MINUS.
+//
+// `.match` lowers to an if/else chain over a result temporary; the
+// operator cases below are where that chain has to behave as ONE
+// expression with ONE value:
+//
+//   - `-c.match(..)`: unary minus must wrap the WHOLE lowered chain.
+//     Emitting `-(cond ? ..)` wrong -- negating only the condition, or
+//     skipping the wrap because the operand "is a call" -- prints
+//     9/-18 instead of -9. The plausible failure is a valid C program
+//     printing a positive number.
+//   - `100 / c.match(..)`: the match is the LEFT operand and the
+//     divisor, mid-expression; a statement-lowering or an operand read
+//     from the scrutinee divides by the wrong number.
+//
+//   correct    -9   -2   4
+//   cond-neg    9   -2   4   <- only the negated operand flips sign
+//
+// The `_` arm values are deliberately distinct from the matched ones so
+// a backend that always takes the LAST arm written still fails.
+
+main = (env: Env) Res<i32, AllocError> {
+    c ::= 3;
+
+    neg = -c.match({ 3 => 9, _ => 90 });
+    println("{}", neg);
+
+    sub = c.match({ 3 => 10, _ => 1 }) - 12;
+    println("{}", sub);
+
+    div = 100 / c.match({ 0 => 25, 3 => 25, _ => 50 });
+    println("{}", div);
+    Ok(0);
+}

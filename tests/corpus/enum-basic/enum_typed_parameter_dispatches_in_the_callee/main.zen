@@ -1,0 +1,45 @@
+// AN ENUM-TYPED PARAMETER, MATCHED INSIDE THE CALLEE, PLUS THE PARAMETER
+// RETURNED AS ITSELF. Construction at the CALL SITE, dispatch on the
+// CALLEE'S slot: the argument crosses as an aggregate by value, and a hop
+// that copies only part of it -- or reads the parameter back at the wrong
+// width -- hands the inner match a garbage tag, which lands somewhere
+// valid and prints a plausible word.
+//
+// Returning `w` unchanged through the false arm pins the other direction:
+// the parameter must survive to be re-emitted as a value, not merely be
+// readable. Three distinct arguments stop any single misdispatch from
+// looking like consistency.
+
+Word = Zebra | Yonder | Apple
+
+name_of = (w: Word) str {
+    w.match({
+        Zebra  => "stripes",
+        Yonder => "far",
+        Apple  => "fruit",
+    })
+}
+
+echo_or_flip = (w: Word, flip: bool) Word {
+    flip.match({
+        true  => Word.Apple,
+        false => w,
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", name_of(Word.Zebra));
+    println("{}", name_of(Word.Yonder));
+    println("{}", name_of(Word.Apple));
+    echo_or_flip(Word.Yonder, false).match({
+        Zebra  => println("kept zebra"),
+        Yonder => println("kept yonder"),
+        Apple  => println("kept apple"),
+    });
+    echo_or_flip(Word.Yonder, true).match({
+        Zebra  => println("flipped zebra"),
+        Yonder => println("flipped yonder"),
+        Apple  => println("flipped apple"),
+    });
+    Ok(0);
+}

@@ -1,0 +1,36 @@
+// CONSUME IS A BYTE MOVE, NOT A RENAME: after the swap, name `a`
+// holds the value tagged "b" and name `b` the one tagged "a", so the
+// println prints them SWAPPED -- and the scope-exit drops run in
+// reverse DECLARATION order (drop a, drop b) under the tags of the
+// VALUES the bindings now hold: still "drop a" then "drop b" here,
+// but attached to the other bytes. A backend that lowers consume as a
+// reference rename keeps each drop glued to its original binding and
+// prints the body line un-swapped; a copy-based swap drops four times.
+// `a = consume b` onto an already-consumed binding is also the legal
+// face of write-after-move: the write IS the resurrection sema's
+// `revive` models.
+//
+// NOTE: this program avoids `m = consume v` where m ALREADY HELD a
+// Drop value -- that overwrite loses the displaced value's drop
+// today (see LANE.md), so the swap starts from fresh bindings.
+
+Noisy = {
+    env: Env,
+    tag: str,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.tag) }
+})
+
+main = (env: Env) Res<i32, IoError> {
+    a ::= Noisy(env: env, tag: "a");
+    b ::= Noisy(env: env, tag: "b");
+
+    t = consume a;
+    a = consume b;
+    b = consume t;
+
+    println("{} {}", a.tag, b.tag);
+    Ok(0);
+}

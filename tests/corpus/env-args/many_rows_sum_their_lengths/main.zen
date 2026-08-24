@@ -1,0 +1,45 @@
+// EVERY ROW IS VISITED EXACTLY ONCE — THE FOLD OVER ARGV IS A REAL WALK.
+//
+// The row array is one `malloc` of argc slots, filled by a C loop. The
+// failure shapes that hide here: the loop writing every slot from
+// argv[0] (rows all equal), writing only the first few and leaving the
+// rest zeroed (a zero-length str prints as 0 — plausible!), or the Vec
+// literal claiming `.len = (size_t)argc` while only part of rows[] is
+// filled. Summing per-row lengths catches all three at once, because a
+// duplicated or zeroed row changes the SUM even when the count is right.
+//
+// The runner passes no arguments so the rows are built in-program: six
+// rows of known byte lengths (the multibyte ones are where a codepoint/
+// byte mix-up moves the sum), walked twice — forward for the sum, then
+// by index for each length on its own line.
+
+count_codepoints, Utf8Error = std.text
+
+main = (env: Env) Res<i32, AllocError | Utf8Error> {
+    a ::= env.mem.alloc();
+    rows ::= a.Vec<str>();
+    rows.add("a").try();        // 1
+    rows.add("bb").try();       // 2
+    rows.add("ccc").try();      // 3
+    rows.add("é").try();        // 2 bytes, 1 char
+    rows.add("日本").try();      // 6 bytes, 2 chars
+    rows.add("🌸").try();       // 4 bytes, 1 char
+
+    total ::= 0;
+    Range(0, rows.len).loop((h, i) {
+        p ::= rows.get(i).ok_or(Utf8Error.Invalid(i)).try();
+        total = total + p.len;
+    });
+    println("rows {}", rows.len);
+    println("total {}", total);
+
+    // and each row's own length, in order: a row written from the wrong
+    // source still sums correctly only if another row is wrong the other
+    // way — this line makes that coincidence impossible
+    Range(0, rows.len).loop((h, i) {
+        p ::= rows.get(i).ok_or(Utf8Error.Invalid(i)).try();
+        n ::= count_codepoints(p).try();
+        println("{} {} {}", i, p.len, n);
+    });
+    Ok(0);
+}

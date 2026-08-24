@@ -1,0 +1,42 @@
+// tests/corpus/file-io/missing_path_names_not_found_on_both_doors/main.zen
+// A missing file is the single most common thing a compiler meets, and
+// both directions of `Fs` must name it: read AND write go through
+// separate floors (stat-then-fread vs fopen "wb"), so a fix to one can
+// leave the other lying. The plausible wrong answers are each worse than
+// an error: mapping every miss to Failed makes "not there"
+// indistinguishable from "broke halfway", and a floor that reports OK
+// with zero bytes turns a typo'd path into an empty file. The variant is
+// matched BY NAME against the ordinal the C floor returns, so reordering
+// FsError's variants in env.zen without updating the one place the
+// ordinals are written down shows up here as the wrong name.
+//
+// `src` names the staged test directory itself (the harness runs the
+// binary beside the staged tree), and stat'ing it proves the path exists
+// -- the miss below is a missing FILE, not a missing parent.
+
+FsError = std.env
+
+main = (env: Env) Res<i32, FsError> {
+    alloc ::= env.mem.alloc();
+
+    println("dir {} file {}", env.fs.is_dir("src"), env.fs.exists("absent.bin"));
+
+    env.fs.read(alloc, "absent.bin").match({
+        Ok(text)         => println("read {} bytes", text.len()),
+        Err(NotFound)    => println("read: not found"),
+        Err(Denied)      => println("read: denied"),
+        Err(IsDir)       => println("read: dir"),
+        Err(Failed)      => println("read: failed"),
+        Err(OutOfMemory) => println("read: oom"),
+    });
+
+    env.fs.write("absent/deep.bin", "x").match({
+        Ok(_)            => println("write: wrote"),
+        Err(NotFound)    => println("write: not found"),
+        Err(Denied)      => println("write: denied"),
+        Err(IsDir)       => println("write: dir"),
+        Err(Failed)      => println("write: failed"),
+        Err(OutOfMemory) => println("write: oom"),
+    });
+    Ok(0);
+}

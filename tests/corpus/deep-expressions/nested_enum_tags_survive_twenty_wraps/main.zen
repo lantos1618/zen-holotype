@@ -1,0 +1,105 @@
+// A SUM-TYPE TREE TWENTY PAYLOADS DEEP, MATCHED AT EVERY LEVEL:
+// Node(T) wraps T twenty times around Leaf(i64) through Ptr (a variant
+// cannot hold its own enum by value -- the C type would be incomplete),
+// and one match arm per wrap peels exactly one layer. The interesting
+// failure is not depth -- it is TAG CONFUSION at depth: two enums
+// (Node, Vine) share the same payload shape, both have a wrapping
+// variant carrying a pointer, and both carry a Leaf at the bottom, so
+// a backend that reads the wrong enum's tag -- or offsets past the tag
+// into the payload -- walks the WRONG TREE and lands on a wrong-but-
+// plausible number. Each peel must consult the tag belonging to ITS
+// OWN level.
+//
+//   node: twenty More wraps over End(Leaf(40)); unwind_node returns
+//   the leaf untouched => 40. Every hop is one tag test plus one
+//   pointer deref; a single misread tag answers 0 or traps.
+//
+//   vine: five Crawl wraps over Tip(Leaf(27)), unwound as x - k for
+//   k = 6..10 => 27 - 40 = -13. The arithmetic makes every level's
+//   visit observable IN ORDER.
+//
+// plausible wrong answers: 0 (More/Crawl arm taken on a Tip/End), a
+// neighbour's leaf value, or a trap from dereferencing the payload as
+// a pointer.
+
+Leaf = { v: i64 }
+Node = End(Leaf) | More(Ptr<Node>)
+Vine = Tip(Leaf) | Crawl(Ptr<Vine>)
+
+unwind_node = (n: Node) i64 {
+    n.match({
+        End(leaf) => leaf.v,
+        More(p)   => unwind_node(p.read(0)),
+    })
+}
+
+peel = (w: Vine, k: i64) i64 {
+    w.match({
+        Tip(leaf) => leaf.v,
+        Crawl(p)  => peel(p.read(0), k + 1) - k,
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    np1 ::= alloc.create<Node>().try();
+    np1.write(0, Node.End(Leaf(v: 40)));
+    np2 ::= alloc.create<Node>().try();
+    np2.write(0, Node.More(np1));
+    np3 ::= alloc.create<Node>().try();
+    np3.write(0, Node.More(np2));
+    np4 ::= alloc.create<Node>().try();
+    np4.write(0, Node.More(np3));
+    np5 ::= alloc.create<Node>().try();
+    np5.write(0, Node.More(np4));
+    np6 ::= alloc.create<Node>().try();
+    np6.write(0, Node.More(np5));
+    np7 ::= alloc.create<Node>().try();
+    np7.write(0, Node.More(np6));
+    np8 ::= alloc.create<Node>().try();
+    np8.write(0, Node.More(np7));
+    np9 ::= alloc.create<Node>().try();
+    np9.write(0, Node.More(np8));
+    np10 ::= alloc.create<Node>().try();
+    np10.write(0, Node.More(np9));
+    np11 ::= alloc.create<Node>().try();
+    np11.write(0, Node.More(np10));
+    np12 ::= alloc.create<Node>().try();
+    np12.write(0, Node.More(np11));
+    np13 ::= alloc.create<Node>().try();
+    np13.write(0, Node.More(np12));
+    np14 ::= alloc.create<Node>().try();
+    np14.write(0, Node.More(np13));
+    np15 ::= alloc.create<Node>().try();
+    np15.write(0, Node.More(np14));
+    np16 ::= alloc.create<Node>().try();
+    np16.write(0, Node.More(np15));
+    np17 ::= alloc.create<Node>().try();
+    np17.write(0, Node.More(np16));
+    np18 ::= alloc.create<Node>().try();
+    np18.write(0, Node.More(np17));
+    np19 ::= alloc.create<Node>().try();
+    np19.write(0, Node.More(np18));
+    np20 ::= alloc.create<Node>().try();
+    np20.write(0, Node.More(np19));
+    vp1 ::= alloc.create<Vine>().try();
+    vp1.write(0, Vine.Tip(Leaf(v: 27)));
+    vp2 ::= alloc.create<Vine>().try();
+    vp2.write(0, Vine.Crawl(vp1));
+    vp3 ::= alloc.create<Vine>().try();
+    vp3.write(0, Vine.Crawl(vp2));
+    vp4 ::= alloc.create<Vine>().try();
+    vp4.write(0, Vine.Crawl(vp3));
+    vp5 ::= alloc.create<Vine>().try();
+    vp5.write(0, Vine.Crawl(vp4));
+    vhead ::= Vine.Crawl(vp5);
+
+    nhead ::= Node.More(np20);
+
+    got ::= unwind_node(nhead);
+    vgot ::= peel(vhead, 6);
+
+    println("node {}", got);
+    println("vine {}", vgot);
+    Ok(0);
+}

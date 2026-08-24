@@ -1,0 +1,43 @@
+// THE OPERAND OF A CONVERSION IS WRITTEN AT THE WIDTH CONVERTED FROM,
+// AND THE RESULT COMPUTES AT THE WIDTH CONVERTED TO.
+//
+// `write_convert` (`gen_c_call.zen`) is careful about one thing a
+// lazier lowering gets wrong: "the operand takes the DECLARED
+// parameter's type, not the target's". The declaration
+// `to_i64* = (self: i8) i64` says the operand is an i8; emit the
+// operand at the TARGET's width and the value never had a chance to
+// be small — the literal `7` becomes 7i64 BEFORE the cast, which is
+// invisible, but a receiver expression with its own width (-100 as
+// an i8) silently stops being that value first. This file makes the
+// difference observable both ways.
+//
+//   - `small.to_i64()` on an i8 holding -100: right by sign-extension,
+//     wrong (156) if the operand was re-typed before converting.
+//   - `h.to_u64() * 3` on a u32 holding 4000000000: the multiply must
+//     happen AFTER conversion, at u64 — 12000000000 needs the target's
+//     bits. Compute first and convert after and it wraps at u32.
+//   - `n.to_i64() * 100000000` on an i8 holding -100: the same question
+//     in the signed direction — -10000000000 fits only because the
+//     -100 arrived intact at 64 bits before the multiply.
+//
+// the chain rows pin that `.to_i16().to_i32().to_i64()` agrees with
+// the direct jump from the same start, at every stop including
+// i8.MIN — where any link that truncates instead of extending turns
+// -128 into +128 mid-chain and the two answers diverge.
+
+main = (env: Env) Res<i32, AllocError> {
+    small: i8 = -100;
+    println("{}", small.to_i64());
+
+    h: u32 = 4000000000;
+    println("{}", h.to_u64() * 3);
+
+    n: i8 = -100;
+    println("{}", n.to_i64() * 100000000);
+
+    m: i8 = i8.MIN;
+    direct: i64 = m.to_i64();
+    chain: i64 = m.to_i16().to_i32().to_i64();
+    println("{} {}", direct, chain);
+    Ok(0);
+}

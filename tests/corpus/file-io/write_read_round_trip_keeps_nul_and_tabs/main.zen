@@ -1,0 +1,29 @@
+// tests/corpus/file-io/write_read_round_trip_keeps_nul_and_tabs/main.zen
+// A file holds BYTES, and the escapes a literal can spell are exactly the
+// bytes a format or a wire protocol splits on: NUL terminates a C string,
+// \n ends a line, \t pads a column. A floor that copies with strcpy, or
+// truncates at the first zero byte, still "round trips" plain text -- so
+// the payload below puts the dangerous bytes IN THE MIDDLE and asks for
+// the length and the byte AFTER the NUL back. The hash pins all twenty
+// bytes at once through str's own Hash impl (the one Map<str,V> keys by),
+// so a single flipped bit cannot pass unnoticed.
+//
+// The escapes spelled are the language's whole set (DESIGN.md: nine, and
+// \x is not one of them) -- \\ and \" among them, so the writer cannot
+// eat a backslash or a quote on the way down either.
+
+FsError = std.env
+
+main = (env: Env) Res<i32, FsError> {
+    alloc ::= env.mem.alloc();
+
+    payload = "tab\tnul\0nl\nbs\\dq\"end";
+    env.fs.write("roundtrip.bin", payload).try();
+
+    back = env.fs.read(alloc, "roundtrip.bin").try();
+    println("len {}", back.len());
+    println("eq {}", back.view().eq(payload));
+    println("nul {} next {}", back.view()[7], back.view()[8]);
+    println("hash {}", back.view().hash(Hasher()));
+    Ok(0);
+}

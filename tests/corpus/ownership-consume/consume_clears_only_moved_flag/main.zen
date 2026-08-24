@@ -1,0 +1,28 @@
+// A CONSUMED BINDING'S FLAG IS CLEARED, AND ONLY ITS OWN: three
+// Noisys, the middle one consumed into `m`. At scope exit the drops
+// run c, a -- b's live flag was cleared by the move and b is skipped,
+// while its neighbours still drop. Clearing EVERY entry on a consume
+// (or clearing none) fails this: the first prints drop b too (a leak
+// would print nothing for b), the second double-frees m.
+//
+// `m` also proves the move leaves the VALUE alive exactly once: it
+// answers to its construction tag "b" even though the name `b` is
+// dead from the move onwards.
+
+Noisy = {
+    env: Env,
+    tag: str,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.tag) }
+})
+
+main = (env: Env) Res<i32, IoError> {
+    a = Noisy(env: env, tag: "a");
+    b = Noisy(env: env, tag: "b");
+    c = Noisy(env: env, tag: "c");
+    m = consume b;
+    println("body {}", m.tag);
+    Ok(0);
+}

@@ -1,0 +1,39 @@
+// A BREAK THREE CLOSURES DEEP must deliver ITS OWN value through the
+// loop-expression chain: inner h2.break(..) answers the INNER loop,
+// whose join feeds an arithmetic fold, whose result the OUTER h.break
+// delivers as the outer loop's value. Every hop is a different join
+// slot, so a backend that routes an inner break to the outer loop's
+// slot -- or lets the outer loop complete after an inner one broke --
+// prints a different specific number, never garbage.
+//
+//   inner: Range(1,4).loop((h2, m) { h2.break(m * 100 + n * 2) })
+//     breaks on m = 1 with 1*100 + 2*2 = 104 => Ok(104)
+//   outer arm: inner.join + n * 10 = 104 + 20 = 124
+//     delivered by h.break(..) on n = 2 => outer join Ok(124)
+//   second loop never breaks: joins as None => 999
+//
+// plausible wrong answers are all distinct: 24 (lost m*100),
+// 104 (lost the outer n*10), 120 (lost the inner n*2), 40 (outer ran
+// to completion after the inner break), 77 (took the None arm), 0.
+
+main = (env: Env) Res<i32, AllocError> {
+    broke_with ::= Range(1, 5).loop((h, n) {
+        (n == 2).then(() {
+            inner ::= Range(1, 4).loop((h2, m) {
+                h2.break(m * 100 + n * 2);
+            });
+            h.break(inner.match({ Ok(v) => v + n * 10, None => 77 }));
+        });
+        n * 10;
+    });
+    a ::= broke_with.match({ Ok(v) => v, None => 999 });
+
+    ran_out ::= Range(1, 4).loop((h, n) {
+        n * 30;
+    });
+    b ::= ran_out.match({ Ok(v) => v, None => 999 });
+
+    println("broke {}", a);
+    println("ran {}", b);
+    Ok(0);
+}

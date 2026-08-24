@@ -1,0 +1,45 @@
+// A STRUCT WHOSE ONLY FIELD IS `str` COMPARES BYTES, NOT THE POINTER --
+// and the operands are built so no literal pooling can rescue a wrong
+// lowering.
+//
+// str is an ordinary struct in the prelude (data: Ptr<u8>, len: usize)
+// and it is ON THE NON-SCALAR SIDE of scalar_eq's line, so `Tag == Tag`
+// dispatches to std.text's impl: lengths first, then bytes. Two
+// lowerings fail here while passing every literal-vs-literal test in
+// the tree:
+//
+//   - comparing the AGGREGATES with C's == (the classic silent emit,
+//     see match_on_str_literals) compares the two struct addresses;
+//   - comparing just the data POINTERS assumes equal text implies one
+//     shared constant.
+//
+// Both wrong answers are TRUE for pooled literals, which is why the
+// pairs below are assembled at runtime into fresh heap buffers. Equal
+// values now live at different addresses (same must hold), and unequal
+// same-length text shares neither bytes nor address (different must
+// hold -- this is also the prefix bug, "ab" vs "ac", caught by length-
+// FIRST comparison rather than by luck).
+
+Tag = {
+    name*: str,
+
+    eq* = (self: @Self, other: @Self) bool { self.name.eq(other.name) }
+}
+
+word = (env: Env, letters: str) Res<Tag, AllocError> {
+    alloc ::= env.mem.alloc();
+    buf   ::= alloc.String().try();
+    buf.add_bytes(letters).try();
+    Ok(Tag(name: buf.view()));
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    ab1 = word(env, "ab").try();
+    ab2 = word(env, "ab").try();
+    ac  = word(env, "ac").try();
+
+    println("same {}", ab1 == ab2);
+    println("diff {}", ab1 != ac);
+    println("swap {}", ab2 != ac);
+    Ok(0);
+}

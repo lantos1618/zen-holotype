@@ -1,0 +1,44 @@
+// a bound may declare a member TWO ways -- required (`=`, no body) and
+// defaulted (`::=`, with one) -- and an impl satisfies each differently:
+// the impl that writes `label` gets its own, the impl that stays silent
+// inherits the bound's. the interesting failure is inheritance by file
+// order: a backend that lowered the bound's default once per impl would
+// still print two different strings if it mixed up WHICH impl overrode.
+//
+// `.len` pins which string each call answered with even if `{}` itself
+// were broken: 3 is "hot", 5 is "plain", and no plausible mix-up of the
+// two bodies produces that pair in this order.
+
+Grade = {
+    heat* = (self: @Self) i32
+
+    label* ::= (self: @Self) str { "plain" }
+}
+
+Furnace = {
+    deg: i32,
+}
+
+Furnace.impl(Grade, {
+    heat = (self: @Self) i32 { self.deg }
+    label = (self: @Self) str { "hot" }
+})
+
+Iceberg = {
+    deg: i32,
+}
+
+// supplies only what Grade REQUIRES; label stays the bound's own default
+Iceberg.impl(Grade, {
+    heat = (self: @Self) i32 { 0 - self.deg }
+})
+
+report = <T: Grade>(t: T) str { t.label() }
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", report(Furnace(deg: 900)));
+    println("{}", report(Iceberg(deg: 40)));
+    println("{}", report(Furnace(deg: 900)).len);
+    println("{}", report(Iceberg(deg: 40)).len);
+    Ok(0);
+}

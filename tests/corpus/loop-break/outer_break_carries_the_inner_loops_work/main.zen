@@ -1,0 +1,30 @@
+// A BREAK OUT OF THE OUTER LOOP CARRIES THE INNER LOOP'S WORK WITH IT --
+// the payload is assembled from a loop that already ended.
+//
+// `h.break(v)` copies the argument into storage OUTSIDE the outer loop
+// before the jump (gen_c_handle.zen: value, then cleanup, then goto), so
+// the value may be anything the body computed -- here the accumulator of
+// an inner loop that ran to completion inside the very pass that is now
+// breaking. Two ways to get this wrong and still compile: read the result
+// slot AFTER the per-pass cleanup has torn it down (garbage or 0), or keep
+// the frame's slots per-pass instead of per-loop (the inner total never
+// reaches the outside). 600 is reachable only if pass o=3 folds its inner
+// range (0+100+200+300) and hands the whole sum out at break time. The
+// payload is usize because a ranged loop's Res is its ELEMENT type
+// (gen_c_loop.zen lower_settled) -- a designed rule this file also pins.
+//
+// breaks this: tearing down (or reusing) the loop's result slot before
+// the break's jump lands.
+
+main = (env: Env) Res<i32, AllocError> {
+    total: Res<usize> = Range(0, 4).loop((ho, o) {
+        // one inner loop's full work, folded in this pass alone
+        part: usize = 0;
+        Range(0, o + 1).loop((hi, i) {
+            part = part + i * 100;
+        });
+        (o == 3).then(() { ho.break(part) });
+    });
+    println("{}", total.match({ Ok(v) => v, None => 9999 }));
+    Ok(0);
+}

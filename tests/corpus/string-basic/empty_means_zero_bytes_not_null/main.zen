@@ -1,0 +1,41 @@
+// tests/corpus/string-basic/empty_means_zero_bytes_not_null/main.zen
+// EMPTY, twice over: a fresh `alloc.String()`, an empty literal, and a
+// zero-width slice are all len 0 / is_empty — but the STRING side owns
+// no pages while still being a real buffer (null data + zero capacity
+// ARE the empty state, per collections_vec.zen), so one more add must
+// bring it to life. An implementation whose empty state was "whatever
+// C's {0} left behind" passes every zero assertion and fails only at
+// the append — which is why the zeros here are the SETUP and the last
+// line is the payoff.
+//
+// The str-side empties pin that `is_empty` on a borrowed view answers
+// the same question as len == 0 (it is defined as exactly that), and
+// that an empty slice of a non-empty string does not inherit the
+// source's length.
+
+Error = AllocError | WriteError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+
+    // the fresh buffer: zero everything, legally
+    sb ::= alloc.String().try();
+    println("fresh {} {}", sb.len(), sb.is_empty());
+
+    // appending nothing changes nothing
+    sb.add_bytes("").try();
+    sb.add("").try();
+    println("still {} {}", sb.len(), sb.is_empty());
+
+    // str-side empties: the empty literal, and a zero-width slice of
+    // a NON-empty string
+    println("lit {} {}", "".len, "".is_empty());
+    e = "abc".slice(1, 1);
+    println("slice {} {}", e.len, e.is_empty());
+
+    // the payoff: from this zero state, one byte makes it a string
+    sb.add_byte('!').try();
+    println("alive {} {} {}", sb.len(), sb.view(), sb.is_empty());
+
+    Ok(0);
+}

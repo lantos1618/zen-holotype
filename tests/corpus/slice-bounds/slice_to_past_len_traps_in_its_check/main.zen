@@ -1,0 +1,26 @@
+// slice'S BOUNDS CHECK IS ITS ARITHMETIC. text_str.slice computes
+// `tail = self.len - to` BEFORE anything else, so `to > len` underflows
+// and traps before one byte moves; `from` is caught by the second
+// subtraction, `len - from - tail`. There is no branch to misplace --
+// the silent failure is the subtractions reordered or dropped, which
+// hands back a view claiming a length past the buffer and defers the
+// crash to whichever innocent read follows it.
+//
+// to = 9 on a length of 6 therefore dies INSIDE slice, and stdout keeps
+// only the legitimate middle view -- bcd, length 3 -- plus nothing from
+// the line after. The good call runs first so a build whose slicing
+// vanished entirely cannot pass by printing nothing.
+
+// a trap never lifts into Res: it aborts the process
+Error = Overflow | DivideByZero | OutOfBounds
+
+cut = (s: str, from: usize, to: usize) str { s.slice(from, to) }
+
+main = (env: Env) Res<i32, Error> {
+    s = "abcdef";
+    mid = cut(s, 1, 4);
+    println("{} {}", mid, mid.len);
+    cut(s, 2, 9);
+    println("unreachable");
+    Ok(0);
+}

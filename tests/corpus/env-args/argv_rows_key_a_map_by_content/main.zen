@@ -1,0 +1,47 @@
+// ARGV ROWS WORK AS MAP KEYS — THE HASH IS OVER BYTES, NEVER POINTERS.
+//
+// `Map<str, V>` needs Eq and Hash; str's hash walks the BYTES with a
+// fixed, unseeded multiplier (std.core.hash explains why unseeded:
+// byte-identical output across runs is a gate here). The classic rot is
+// a field-wise default hashing `data` — an ADDRESS — so every lookup
+// misses and every insert is a new row. This tree lost weeks to exactly
+// that shape of silent zero/default; a Map keyed by argv rows is where
+// it shows up as behaviour and not as a number nobody can check.
+//
+// Two rows with EQUAL BYTES ("alpha" twice) must land on ONE entry:
+// set overwrites in place, so a pointer-hashing map reports the second
+// insert while a byte-hashing one answers true for get and false for a
+// key never inserted. The runner passes no arguments, so the rows are
+// seeded from literals through a Vec<str> — the same shape env.argv has.
+
+count_codepoints, Utf8Error = std.text
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    rows ::= a.Vec<str>();
+    rows.add("alpha").try();
+    rows.add("beta").try();
+    rows.add("alpha").try();
+
+    m ::= a.Map<str, str>();
+    Range(0, rows.len).loop((h, i) {
+        rows.get(i).match({
+            Ok(p) => m.set(p, p),
+            None  => Ok(()),
+        });
+    });
+
+    m.get("alpha").match({
+        Ok(_)  => println("alpha found"),
+        None   => println("alpha MISSED"),
+    });
+    m.get("beta").match({
+        Ok(_)  => println("beta found"),
+        None   => println("beta MISSED"),
+    });
+    m.get("gamma").match({
+        Ok(_)  => println("gamma LEAKED"),
+        None   => println("gamma absent"),
+    });
+    Ok(0);
+}

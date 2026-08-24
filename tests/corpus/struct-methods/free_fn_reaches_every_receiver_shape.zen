@@ -1,0 +1,49 @@
+// A FREE FUNCTION ON THE TYPE COMPOSES WITH EVERY RECEIVER SHAPE A METHOD
+// WOULD: on a construction (a temporary), on a match join, inside a loop
+// closure over a Vec element, and through a nested field projection. Four
+// receivers, one function, one answer shape.
+//
+// Each position is a place a resolver or backend can quietly lose the
+// receiver: a temporary has no binding to hang the call on, the match
+// join is a synthesized value, the closure parameter is typed by the
+// loop's signature rather than by anything in this file, and the field
+// chain must project before dispatching. Any of the four losing its
+// receiver prints a plausible number instead of failing -- the values are
+// distinct and prime-heavy so no two misreadings agree.
+//
+// Breaks if: dot-dispatch requires a named local receiver -- whichever
+// line corresponds to the dropped shape changes.
+
+W = {
+    v: i32,
+}
+
+scale = (w: W, k: i32) i32 { w.v * k }
+
+pick = (b: bool) W {
+    b.match({
+        true  => W(v: 5),
+        false => W(v: 50),
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    // a temporary
+    println("temp  {}", W(v: 3).scale(6));
+
+    // a match join
+    println("match {}", pick(true).scale(2));
+
+    // a closure parameter typed by .loop's signature
+    alloc ::= env.mem.alloc();
+    ws ::= alloc.Vec<W>();
+    ws.add(W(v: 3)).try();
+    ws.add(W(v: 4)).try();
+    total ::= 0;
+    ws.loop((h, w) {
+        total = total + w.scale(1);
+    });
+    println("loop  {}", total);
+
+    Ok(0);
+}

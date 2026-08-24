@@ -1,0 +1,32 @@
+// tests/corpus/string-basic/two_buffers_grow_without_touching/main.zen
+// TWO Strings growing side by side: each realloc must move only its OWN
+// bytes. The failure this watches for is a buffer whose growth writes
+// through a stale or shared handle — a second String that picks up the
+// first's bytes, loses its own, or ends at a length borrowed from its
+// neighbour. Every wrong answer here is plausible text.
+//
+// The interleaving is deliberate: A grows by one byte, then B appends
+// a literal run, alternating twelve times, so B crosses 8 and 16 while
+// A crosses 8 — each grow lands between two appends to the other. The
+// final views must be exactly "0123456789:;" (twelve bytes, cycling
+// '0'-to-';' as the digit arithmetic wraps past '9') and
+// "seed" + twelve dots = sixteen.
+
+Error = AllocError | WriteError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    a ::= alloc.String().try();
+    b ::= alloc.String("seed").try();
+
+    Range(0, 12).loop((h, i) {
+        a.add_byte('0' + i).try();
+        b.add_bytes(".").try();
+    });
+
+    println("a {} {}", a.view(), a.len());
+    println("b {} {}", b.view(), b.len());
+    println("a empty {}", a.is_empty());
+
+    Ok(0);
+}

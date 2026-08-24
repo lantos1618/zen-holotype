@@ -1,0 +1,27 @@
+// THE NEGATIVE HALF OF THE CHECK IS A SEPARATE TEST FROM `>=`. A
+// signed index needs its own negativity test: an unsigned comparison
+// alone lets -1 wrap into a huge index that sails past the length --
+// and on a 64-bit machine the wrapped address still lands inside the
+// array's own struct, so the read succeeds and prints a plausible
+// number instead of crashing. zg_idx_s exists to make exactly this
+// split (`sema_trap.zen`: "-1 would arrive as 0 and pass"), and
+// helper_of picks it from the index's own type -- usize routes to
+// zg_idx_u, so a backend keying on the wrong type never runs the
+// negativity test at all.
+//
+// 0 - 1 is not folded by the literals-only prover, so the check has to
+// reach runtime; the in-range load before it proves the trap belongs to
+// THIS subscript.
+
+// a trap never lifts into Res: it aborts the process
+Error = Overflow | DivideByZero | OutOfBounds
+
+at = (a: [i32, 4], i: i64) i32 { a[i] }
+
+main = (env: Env) Res<i32, Error> {
+    primes = [i32, 4](2, 3, 5, 7);
+    println("{}", primes[0]);
+    println("{}", at(primes, 0 - 1));
+    println("unreachable");
+    Ok(0);
+}

@@ -1,0 +1,30 @@
+// THE STR HASH SEED IS 14695981039346656037, AND THE MULTIPLIER IS
+// APPLIED BEFORE THE FIRST BYTE TOO.
+//
+// This is the hash-seed story from the field-default bug, pinned where
+// it can never silently rot again: `STR_HASH_SEED` was a struct-style
+// default in a tree where every expectation was already zero, so a seed
+// of 0 multiplied by nothing still hashed — every Map simply probed in
+// a different order and nothing failed. The number only shows up in the
+// VALUE, so the value is what this asserts: hash("prog") through the
+// std impl is 1787684418322129931, computed by hand from the two
+// constants (seed *% mult +% byte per byte) and checked against them.
+//
+// An empty row hashes to the SEED ITSELF — 14695981039346656037 — which
+// is the one input where "multiplier applied before the first byte"
+// versus after differ, and the case a wrong-order fix gets backwards.
+
+count_codepoints, Utf8Error = std.text
+Hasher = std.core
+
+main = (env: Env) Res<i32, AllocError | Utf8Error> {
+    // an argv-shaped row: the program's own name tail, hashed
+    p ::= env.argv.get(0).ok_or(Utf8Error.Invalid(0)).try();
+    tail ::= p.slice(p.len - 4, p.len);
+    println("hash {}", tail.hash(Hasher()));
+
+    // the empty string hashes to the bare seed
+    empty ::= "";
+    println("empty-hash {}", empty.hash(Hasher()));
+    Ok(0);
+}

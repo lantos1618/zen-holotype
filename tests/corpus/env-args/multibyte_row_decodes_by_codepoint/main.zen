@@ -1,0 +1,40 @@
+// A MULTIBYTE ARGV ROW DECODES BY CODEPOINT, AND THE DECODER IS THE
+// PROGRAM'S, NOT THE RUNTIME'S.
+//
+// The byte test above pins transport; this one pins MEANING. "日本" is
+// 6 bytes and 2 codepoints (U+65E5 = 26085, U+672C = 26412); the emoji
+// is 4 bytes and 1 codepoint (U+1F338 = 127800). A row truncated at the
+// first high bit, a decoder that counted LEAD bytes, or one that
+// mis-assembled continuation payloads all still print numbers — wrong
+// ones, each naming its own bug: 6-and-3 means lead-byte counting,
+// 3-and-1-per-char means truncation at the first 0xE6.
+//
+// The rows come from LITERALS here, not argv, because the runner passes
+// no arguments; what makes this an env-args test and not a text test is
+// the seam under it — the same `str` shape argv hands over is what the
+// decoder walks, so the two must agree about where one character ends.
+
+count_codepoints, Utf8Error = std.text
+
+main = (env: Env) Res<i32, AllocError | Utf8Error> {
+    nihon ::= "日本";
+    println("nihon {} {}", nihon.len, count_codepoints(nihon).try());
+
+    flower ::= "🌸";
+    println("flower {} {}", flower.len, count_codepoints(flower).try());
+
+    // decode and print the codepoint VALUES: assembly order matters,
+    // and a decoder that adds the continuation bits in backwards gets
+    // different numbers with the same counts
+    walk ::= nihon.codepoints();
+    loop(() { !walk.is_done() }, (h) {
+        c = walk.next().try();
+        println("u {}", c);
+    });
+    w2 ::= flower.codepoints();
+    loop(() { !w2.is_done() }, (h) {
+        c = w2.next().try();
+        println("u {}", c);
+    });
+    Ok(0);
+}

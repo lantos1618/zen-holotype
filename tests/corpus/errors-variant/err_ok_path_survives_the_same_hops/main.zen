@@ -1,0 +1,40 @@
+// The Ok path through the SAME hops the Err path takes: `.try()` has
+// two halves, and a propagation that re-tags Err but clobbers Ok's
+// payload -- or widens Ok into a set -- breaks only the success side,
+// which is exactly the half a raise-focused test never runs.
+//
+// Both hops here are between flipped spellings of one set, so the Err
+// half genuinely re-numbers; the i64 payload (40e9, past any 32-bit
+// truncation) and the negative Err payload both have to arrive intact.
+// One call each way, same code path, different halves exercised.
+
+A = | Miss(i64)
+Set = A | AllocError
+
+deep = (ok: bool) Res<i64, Set> {
+    ok.match({
+        true  => Ok(4000000000),
+        false => Err(Set.A(A.Miss(0 - 21))),
+    });
+}
+
+mid = (ok: bool) Res<i64, Set> { deep(ok).try() }
+top = (ok: bool) Res<i64, Set> { mid(ok).try() }
+
+main = (env: Env) Res<i32, AllocError> {
+    top(true).match({
+        Ok(v) => println("ok {}", v / 100000),
+        Err(e) => e.match({
+            A(a) => a.match({ Miss(n) => println("miss {}", n) }),
+            _    => println("alloc"),
+        }),
+    });
+    top(false).match({
+        Ok(v) => println("ok {}", v / 100000),
+        Err(e) => e.match({
+            A(a) => a.match({ Miss(n) => println("miss {}", n + 30) }),
+            _    => println("alloc"),
+        }),
+    });
+    Ok(0);
+}

@@ -1,0 +1,40 @@
+// tests/corpus/string-basic/the_allocating_constructor_formats/main.zen
+// The second constructor spelling: `alloc.String(fmt, ..)` builds AND
+// formats in one call. It is DERIVED — declared bodyless in
+// text_string.zen and expanded where written into the empty form plus
+// `add`'s own expansion — so it must read the same format grammar as
+// every other door: positional holes, named holes reading the frame,
+// doubled braces, a lone brace as a literal byte.
+//
+// What makes this worth its own program: a backend that special-cased
+// only `add` (or only `println`) would leave THIS door emitting the
+// format string verbatim — which still looks like ordinary text in an
+// expectation file nobody compared closely. The len() beside each view
+// catches the subtler cousin: braces dropped instead of written.
+
+Error = AllocError | WriteError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+
+    // plain positional formatting at construction
+    s = alloc.String("{}-{}", 10, 20).try();
+    println("s {} {}", s.view(), s.len());
+
+    // named hole reads main's binding; doubled braces write singles;
+    // the trailing lone `{` stays literal per the format language
+    who = "ada";
+    t = alloc.String("<{who}> {{{}}} {", who, 7).try();
+    println("t [{}] {}", t.view(), t.len());
+
+    // the empty-literal spelling is legal too and equals the bare form
+    e ::= alloc.String("").try();
+    b ::= alloc.String().try();
+    println("e {} {} / b {} {}", e.len(), e.is_empty(), b.len(), b.is_empty());
+
+    // then grows on like any buffer
+    e.add_byte('!').try();
+    println("e now {}", e.view());
+
+    Ok(0);
+}

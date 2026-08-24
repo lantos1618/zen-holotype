@@ -1,0 +1,38 @@
+// tests/corpus/loop-nested/try_inside_nested_loop_returns_past_both.zen
+// `.try()` inside an inner loop's body leaves the whole FUNCTION, not
+// either loop — break names a LOOP, .try() names the FUNCTION, and a
+// nest holding both must send each exit to its own target.
+//
+// The failure worth catching is the lowering that reuses one jump
+// mechanism with one unwound frame count: get the count wrong and the
+// Err stops at the inner loop (the function keeps running and prints
+// a plausible "after"), or the loop swallows it as its own Res. The
+// error is matched BY THE CALLER so the value had to travel all the
+// way out — not just control flow.
+//
+// The trip point is 137 on purpose: two digits deep in both loops, so
+// an off-by-one frame count lands it one pass early or late and the
+// "at" lines move.
+
+LoopError = | NoHit
+
+go = (env2: Env) Res<i32, LoopError> {
+    Range(0, 5).loop((ho, outer) {
+        Range(0, 100).loop((hi, inner) {
+            (outer * 100 + inner == 137).then(() {
+                Err(LoopError.NoHit).try()
+            });
+            println("  at {} {}", outer, inner);
+        });
+    });
+    Ok(0)
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    go(env).match({
+        Ok(n)  => println("ok {}", n),
+        Err(_) => println("caught the no-hit"),
+    });
+    println("after");
+    Ok(0);
+}

@@ -1,0 +1,29 @@
+// i16 division traps on a zero divisor. i8 and u8 pin the two narrow
+// widths against a skipped or mis-aimed zero-test; this adds the
+// SIGNED 16-bit case, where the classic wrong lowering is testing the
+// widened value's low half only -- a divisor whose high bytes hold
+// garbage passes the check and faults in silicon instead.
+//
+// the prints before the trap pin signed 16-bit truncating division:
+// -32768/7 = -4681 remainder -1 (both signs matter; a floor lowering
+// prints -4682 +6).
+//
+// the divisor comes from the environment, so no constant folder can
+// turn this into the compile-time error a visible zero would be
+// (DESIGN.md: a provable trap is a compile error, not a runtime one).
+
+Error = Overflow | DivideByZero | OutOfBounds
+
+main = (env: Env) Res<i32, Error> {
+    a: i16 = i16.MIN;
+    println("{} {}", a / 7, a % 7);
+
+    // a zero the compiler cannot see: it comes from the environment
+    zero: i16 = env.vars.get("ZEN_TRAP_NEVER_SET").match({
+        Ok(_) => 1,
+        None  => 0,
+    });
+    q = a / zero;
+    println("{}", q);
+    Ok(0);
+}

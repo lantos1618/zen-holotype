@@ -1,0 +1,62 @@
+// tests/corpus/string-basic/a_named_hole_reads_the_writing_frame/main.zen
+// `{name}` is resolved WHERE THE HOLE IS WRITTEN — a scope lookup at the
+// expansion site, exactly like a bare identifier — and this is the one
+// behaviour that differs per door and per frame:
+//
+//   - main's locals, a callee's PARAMETERS, and a loop closure's own
+//     binding must each resolve in THEIR frame, not the caller's.
+//   - named and positional holes MIX, and the named one consumes no
+//     argument: "{a} {} {b}" with two arguments takes both positionals.
+//   - a block's OWN binding shadows the outer name for holes written
+//     inside it; after the block closes, the outer binding is what the
+//     same spelling reads. (A fresh `x ::=` in the block, so this is
+//     shadowing and not mutation — `main` still sees 1 afterwards, and
+//     the hole written after the block must read 1 with it.)
+//
+// The plausible wrong answers are all silent: resolving everything in
+// module scope prints the right names with the wrong values; consuming
+// an argument per named hole shifts every later positional by one and
+// prints a plausible permutation of the true values. Only exact values
+// per frame tell the three resolutions apart.
+
+Error = AllocError | WriteError
+
+line = (a: Alloc, label: str, depth: usize) Res<(), WriteError> {
+    sb ::= a.String().try();
+    sb.add("{label}:{depth}").try();
+    println("callee [{}]", sb.view());
+    Ok(());
+}
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+
+    // locals through the sink door, mixed with one positional
+    who  = "ada";
+    n    = 36;
+    sb ::= alloc.String().try();
+    sb.add("{who} then {} and {n}", "counting").try();
+    println("mixed [{}]", sb.view());
+    println("len {}", sb.len());
+
+    // the callee's parameters, not main's same-named locals
+    line(alloc, "root", 2).try();
+
+    // a loop body's own `i`, one value per iteration, into ONE buffer
+    Range(1, 4).loop((h, i) { sb.add("|{i}").try(); });
+    println("loop {}", sb.view());
+
+    // a block-local x shadows for holes inside it only
+    x = 1;
+    t ::= alloc.String().try();
+    t.add("outer {x}").try();
+    {
+        x ::= 2;
+        t.add(" inner {x}").try();
+    }
+    println("main still {}", x);
+    t.add(" back {x}").try();
+    println("shadow {}", t.view());
+
+    Ok(0);
+}

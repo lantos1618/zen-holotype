@@ -1,0 +1,26 @@
+// two defers over ONE binding, registered at two different values of it.
+// each must freeze its OWN read: the first sees 5, the second sees 6 --
+// LIFO order puts the later registration first, and its number is the one
+// that was current when IT was called, not when the block ends.
+//
+// this is the test for "copied per registration" rather than "copied once
+// per block": one shared cell filled at exit would print 6 twice, and one
+// filled at the FIRST registration would print 5 twice -- plausible numbers
+// both. Only per-registration copies give 6 then 50.
+//
+// B also WRITES its capture (its own record field, so it dies with B), and
+// B runs BEFORE A under LIFO -- so a pair of closures sharing one record
+// would hand A the written 46 and print 460. Independent fields are what
+// keep A at 50, which is why the write is here at all.
+
+main = (env: Env) Res<i32, IoError> {
+    n ::= 5;
+    @scope.defer(() { println("A {}", n * 10) });
+    n = 6;
+    @scope.defer(() {
+        println("B {}", n);
+        n = n + 40;
+    });
+    println("body");
+    Ok(0);
+}

@@ -1,0 +1,52 @@
+// THE FLOAT FIELD IS THE ONE A BYTEWISE OR WORDWISE COMPARE GETS WRONG.
+//
+// An f64 field rules out every tempting shortcut in the same program:
+//
+//   - a `memcmp`-style bytewise eq would pass the 0.5/0.25 lines and
+//     FAIL the -0.0 line, because IEEE 754 gives -0.0 and 0.0 different
+//     bit patterns while `==` calls them equal;
+//   - an eq that skips float fields entirely (the easy way to dodge
+//     "how do I compare a double?") fails the 0.25 line outright --
+//     which is why the float is not decoration but the deciding field
+//     of its own line;
+//   - a compare routed through C's integer path (`(long)a == (long)b`)
+//     truncates both halves to zero and fails the 2.5/1.5 line.
+//
+// Zen gives floats no Eq impl on purpose -- NaN != NaN would make
+// xs.is_in([x]) answer "no" about a value that IS in the list
+// (std.core.num) -- so the type below writes the law itself, and what
+// the corpus pins is that the OPERATOR reaches it with both f64s whole.
+//
+// The values are dyadic fractions (0.5, 0.25, 2.5, 1.5): exact in
+// binary, so no printing-rounding question can mask a miscompare.
+
+Reading = {
+    gain*: f64,
+    bias*: f64,
+
+    // IEEE equality per field: +0.0 == -0.0, NaN decides nothing here
+    // because no NaN is ever constructed
+    eq* = (self: @Self, other: @Self) bool {
+        (self.gain == other.gain) && (self.bias == other.bias)
+    }
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a   = Reading(gain: 2.5, bias: 1.5);
+    b   = Reading(gain: 2.5, bias: 1.5);
+    c   = Reading(gain: 2.5, bias: 0.25);
+    d   = Reading(gain: 0.5, bias: 1.5);
+
+    println("same {}", a == b);
+    println("bias {}", a == c);
+    println("gain {}", a == d);
+    println("ne {}", (a != c));
+
+    // the sign-of-zero law: equal as numbers, distinct as bytes. If this
+    // prints true, the compare went through the bits; if it prints
+    // false, through the doubles. The spec says the doubles.
+    z  = Reading(gain: 0.0, bias: 0.25);
+    zn = Reading(gain: -0.0, bias: 0.25);
+    println("zero {}", z == zn);
+    Ok(0);
+}

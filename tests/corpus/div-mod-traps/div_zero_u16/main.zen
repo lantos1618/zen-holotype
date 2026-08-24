@@ -1,0 +1,29 @@
+// u16 division traps on a zero divisor. the interesting width: gen_c
+// widens sub-int operands to C ints, so if a check is emitted at all
+// for this width, the natural mistake is testing the WIDENED value
+// while the divide runs narrowed (or vice versa) -- and the trap
+// message must still say `divide by zero`, not overflow.
+//
+// the prints before the trap pin unsigned 16-bit arithmetic itself:
+// 65535/97 = 675 with remainder 60 -- values only exact u16 math
+// produces. a lowering that truncates to i8 moves both lines.
+//
+// the divisor comes from the environment, so no constant folder can
+// turn this into the compile-time error a visible zero would be
+// (DESIGN.md: a provable trap is a compile error, not a runtime one).
+
+Error = Overflow | DivideByZero | OutOfBounds
+
+main = (env: Env) Res<i32, Error> {
+    a: u16 = 65535;
+    println("{} {}", a / 97, a % 97);
+
+    // a zero the compiler cannot see: it comes from the environment
+    zero: u16 = env.vars.get("ZEN_TRAP_NEVER_SET").match({
+        Ok(_) => 1,
+        None  => 0,
+    });
+    q = a / zero;
+    println("{}", q);
+    Ok(0);
+}

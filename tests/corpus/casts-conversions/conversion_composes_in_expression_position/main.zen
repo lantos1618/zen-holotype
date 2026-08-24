@@ -1,0 +1,38 @@
+// A CONVERSION IS AN EXPRESSION, NOT A STATEMENT: it must compose in
+// operand position — as an argument, on a chain, inside arithmetic — and
+// the VALUE it delivers must be the converted one, not the receiver's
+// spilled temporary read back at the wrong moment.
+//
+// the classic failure here is sequencing: write_convert builds its cast
+// around `expr(...)`, and if any pass ever lowers that through a
+// statement-shaped buffer (the way a `.match` must be hoisted) or reads
+// the operand after emitting it, chained calls evaluate out of order and
+// the printed number drifts from C's own answer while still being A
+// number. Arithmetic around each conversion makes the drift observable:
+// every line below has exactly one right answer, computed by hand, and
+// none of them is zero.
+//
+// the chain line is the discriminating one: u8 -> i32 -> i64 crosses two
+// different overloads with no binding between them, so a backend that
+// caches "the conversion result" per source expression reuses the FIRST
+// width for the second hop.
+//
+// one-line break: emit the cast through a hoisted temporary whose slot
+// is reused across both hops of the chain and 4294967295 becomes -1.
+main = (env: Env) Res<i32, AllocError> {
+    s: i8  = -128;
+    w: u16 = 65535;
+    b: u32 = 4000000000;
+
+    // operand of an operator
+    println("{}", b.to_i64() + 1);
+    println("{}", s.to_i64() * 3);
+
+    // argument to a call
+    println("{}", b.to_i64() - w.to_i64());
+
+    // chained through two overloads, no intermediate binding
+    println("{}", w.to_u32().to_u64());
+
+    Ok(0);
+}

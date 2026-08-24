@@ -1,0 +1,51 @@
+// RESERVE CREATES THE ROOM BEFORE THE WRITES, AND A DRAIN ENDS AT ZERO.
+//
+// `reserve` exists so the room is real BEFORE anyone writes into it:
+// std.env's Stdin.read fills a caller's spare capacity directly, and a
+// Vec whose `reserve` lied (allocated less than asked, or asked for `n`
+// when it meant len+n) shows up as bytes landing past the buffer -- not
+// as an error. The observable contract, without reaching capacity:
+//
+//   - after `reserve(n)` on a fresh vec, n adds succeed with no error
+//     and every element reads back at its own index
+//   - `reserve(0)` asks for nothing (`want = len + 0 <= capacity`) and
+//     still leaves a working vec
+//   - draining from the front with take() walks the vec down to len 0
+//     in insertion order -- len bookkeeping under repeated shifts
+//   - refilling AFTER the drain reuses the same vec correctly
+//
+// The fill values are i64 at odd offsets so any mis-scaled write inside
+// the reserved room reads back shifted rather than merely wrong.
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    v ::= alloc.Vec<i64>();
+
+    // room first, writes second -- the Stdin.read shape
+    v.reserve(16).try();
+    Range(0, 16).loop((h, n) { v.add(n * 1000000007).try(); });
+    println("len {}", v.len);
+    a = v.get(0).ok_or(AllocError.OutOfMemory).try();
+    b = v.get(15).ok_or(AllocError.OutOfMemory).try();
+    println("ends {} {}", a, b);
+
+    // reserve(0) promises nothing and must break nothing
+    v.reserve(0).try();
+    c = v.get(15).ok_or(AllocError.OutOfMemory).try();
+    println("after r0 {}", c);
+
+    // drain to empty from the front; order survives the shifts
+    sum ::= 0;
+    loop(() { v.len > 0 }, (h) {
+        x = v.take(0).ok_or(AllocError.OutOfMemory).try();
+        sum = sum + x;
+    });
+    println("drained len {}", v.len);
+    println("sum {}", sum);
+
+    // refill after the drain
+    v.add(-1234567890123).try();
+    d = v.get(0).ok_or(AllocError.OutOfMemory).try();
+    println("refill {}", d);
+    Ok(0);
+}

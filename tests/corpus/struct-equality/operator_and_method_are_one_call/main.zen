@@ -1,0 +1,44 @@
+// `==` IS THE IMPL-SUPPLIED `eq`, NOT A SECOND MECHANISM: the operator
+// spelling and the method spelling must answer identically, because
+// lower_eq_call emits "the very member call the source could have
+// written" (gen_c_member.zen) -- same symbol, same instantiation, same
+// queue entry. A backend with two paths (operator inlines something,
+// method calls the fn) can pass every test that uses only one spelling.
+//
+// The law is deliberately order-sensitive: equal iff x agrees AND
+// self's y is one past other's -- eq(self,other) = (self.x == other.x)
+// && (self.y == other.y + 1). The asymmetry is REAL, not accidental:
+// swapping the operands flips half of every answer. So an operator path
+// that passes its arguments in the wrong slots -- or lowers `(a == b)`
+// as `b.eq(a)` -- prints a different score than the method path on the
+// SAME line. Both spellings are evaluated in both orders and folded
+// into one weighted number; any disagreement anywhere moves it.
+
+Pair = {
+    x*: i32,
+    y*: i32,
+
+    // not symmetric ON PURPOSE: operand order must survive dispatch
+    eq* = (self: @Self, other: @Self) bool {
+        (self.x == other.x) && (self.y == other.y + 1)
+    }
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a = Pair(x: 4, y: 7);
+    b = Pair(x: 4, y: 6);
+
+    op_ab   = (a == b);
+    op_ba   = (b == a);
+    call_ab = a.eq(b);
+    call_ba = b.eq(a);
+
+    println("op {} {} call {} {}", op_ab, op_ba, call_ab, call_ba);
+
+    score ::= (op_ab.match({ true => 8, false => 0 }))
+        + (op_ba.match({ true => 4, false => 0 }))
+        + (call_ab.match({ true => 2, false => 0 }))
+        + (call_ba.match({ true => 1, false => 0 }));
+    println("score {}", score);
+    Ok(0);
+}

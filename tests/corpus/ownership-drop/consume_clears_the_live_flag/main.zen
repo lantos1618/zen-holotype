@@ -1,0 +1,30 @@
+// a moved-from binding must NOT be dropped again — the compiler clears a
+// live flag at `consume` and tests it at every exit. the ids are the trap:
+// `g = consume a;` leaves g holding 1, so an implementation that forgot to
+// clear a's flag prints "drop 1" TWICE (a double free), and one that
+// dropped the dead name instead of the live value prints 3 before that.
+// both are plausible-looking numbers; only g, c, b in that order is right.
+//
+// the subtler half: g is the LAST binding declared, so in reverse order it
+// drops FIRST — its drop sits at g's declaration position, not where its
+// value was born (first). a backend that tracked drops by value identity
+// instead of by live binding would print 3, 2, then 1 last.
+
+Noisy = {
+    env: Env,
+    id: i32,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.id) }
+})
+
+main = (env: Env) Res<i32, IoError> {
+    a = Noisy(env: env, id: 1);
+    b = Noisy(env: env, id: 2);
+    c = Noisy(env: env, id: 3);
+    g = consume a;
+    println("moved {}", g.id);
+    println("body");
+    Ok(0);
+}

@@ -1,0 +1,66 @@
+// tests/corpus/stdin/a_long_line_reassembles_from_chunks/main.zen
+// A CHUNKED READER REASSEMBLES THE STREAM IN ORDER, ACROSS PASSES. The
+// input is 86 bytes with no newline at all, read 7 at a time: twelve
+// full chunks plus a final 2, and every boundary lands MID-WORD. The
+// interesting failures are all quiet ones — a floor that answers the
+// FIRST chunk forever, a len bump dropped between passes (later chunks
+// overwrite earlier ones), chunks reassembled out of order — each
+// leaves a plausible-looking string behind. Head, one mid-stream byte,
+// and tail pin all three together.
+//
+// main.stdin holds exactly those 86 bytes.
+
+Vec    = std.collections
+
+CHUNK: usize = 7
+
+byte_is = (b :: Vec<u8>, i: usize, want: u8) bool {
+    b.get(i).match({
+        Ok(got) => got == want,
+        None    => false,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a       ::= env.mem.alloc();
+    held    ::= a.Vec<u8>();
+    reading ::= true;
+    passes  ::= 0;
+
+    loop(() { reading }, (h) {
+        // a safety net that must never be the reason we stopped: a
+        // stream that never answered end of input would spin forever
+        (passes > 100).then(() { reading = false; });
+
+        // the room is the CALLER'S to make: Stdin.read has no Alloc,
+        // so it can only fill capacity that already exists
+        held.reserve(CHUNK).try();
+        env.in.read(held, CHUNK).match({
+            Err(_)  => { reading = false; },
+            Ok(got) => {
+                passes = passes + 1;
+                reading = got > 0;
+            },
+        });
+    });
+
+    println("passes {}", passes);
+    println("len {}", held.len);
+
+    // order preserved end to end: the payload is HEAD, 78 letters, TAIL
+    Range(0, 4).loop((h, i) { held.get(i).match({ Ok(c) => println("{} {}", i, c), None => {} }) });
+    println("mid {}", byte_is(held, 50, 'u'));
+    println("tail {}", byte_is(held, 82, 'T'));
+
+    // the checksum a duplicated, dropped or overwritten chunk misses:
+    // every byte of the stream, added up
+    total ::= 0;
+    Range(0, held.len).loop((h, i) {
+        held.get(i).match({
+            Ok(byte) => { total = total + byte.to_u64(); },
+            None     => {},
+        });
+    });
+    println("total {}", total);
+    Ok(0);
+}

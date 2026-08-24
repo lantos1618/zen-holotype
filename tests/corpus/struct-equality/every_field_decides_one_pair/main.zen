@@ -1,0 +1,63 @@
+// FIELD-BY-FIELD MEANS EVERY FIELD DECIDES SOMEWHERE, and the pairings
+// below are arranged so omitting any ONE field flips exactly one answer.
+//
+// The eq here is ordinary Zen and boring on purpose: four fields, four
+// `==`, `&&`ed. What is under test is everything AROUND that body --
+// write_arg (gen_c_member.zen) handing BOTH whole aggregates to the call
+// at slots 0 and 1, and the bool coming back. A backend that passes the
+// struct through the wrong ABI size class, or truncates it to its first
+// word, does not fail loudly: distant fields simply READ AS GARBAGE
+// inside the callee, and garbage decides these lines. Every field value
+// is non-zero, because a zero default sitting in an unread slot is
+// invisible -- and that silence is weeks of this tree's history.
+//
+//   twin    differs in NOTHING  -> the one `true`; hangs a constant-false eq
+//   no_id   differs in id       -> hangs an eq that skips id
+//   no_x    differs in x        -> hangs an eq that skips x
+//   no_flag differs in flag     -> hangs an eq that skips flag
+//   no_tag  differs in tag      -> hangs an eq that skips tag
+//
+// The last line folds the five into one 1-2-4-8-16 weighted number, so a
+// single flipped answer MOVES THE NUMBER instead of hiding among four
+// bools. The right answer is 16 and nothing else.
+
+Row = {
+    id*: i32,
+    x*: i64,
+    flag*: bool,
+    tag*: u8,
+
+    eq* = (self: @Self, other: @Self) bool {
+        (self.id == other.id)
+            && (self.x == other.x)
+            && (self.flag == other.flag)
+            && (self.tag == other.tag)
+    }
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    base = Row(id: 1001, x: 77, flag: true, tag: 9);
+
+    twin    = Row(id: 1001, x: 77, flag: true, tag: 9);
+    no_id   = Row(id: 1002, x: 77, flag: true, tag: 9);
+    no_x    = Row(id: 1001, x: 78, flag: true, tag: 9);
+    no_flag = Row(id: 1001, x: 77, flag: false, tag: 9);
+    no_tag  = Row(id: 1001, x: 77, flag: true, tag: 10);
+
+    r_twin = (base == twin);
+    r_id   = (base == no_id);
+    r_x    = (base == no_x);
+    r_flag = (base == no_flag);
+    r_tag  = (base == no_tag);
+
+    println("twin {}", r_twin);
+    println("diff id {} x {} flag {} tag {}", r_id, r_x, r_flag, r_tag);
+
+    score ::= (r_twin.match({ true => 16, false => 0 }))
+        + (r_id.match({ true => 1, false => 0 }))
+        + (r_x.match({ true => 2, false => 0 }))
+        + (r_flag.match({ true => 4, false => 0 }))
+        + (r_tag.match({ true => 8, false => 0 }));
+    println("score {}", score);
+    Ok(0);
+}

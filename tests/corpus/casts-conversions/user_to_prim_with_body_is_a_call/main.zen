@@ -1,0 +1,38 @@
+// THE CONVERSION MUST NOT FIRE FOR A FUNCTION THAT MERELY LOOKS LIKE ONE.
+//
+// convert_target (gen_c_call.zen) recognises a backend intrinsic by
+// SHAPE: bodiless, one parameter, no type parameters, name `to_<prim>`
+// where the prim is a known C scalar. A module's OWN `to_u64` with a body
+// is an ordinary function and must be CALLED — gen_c_call.zen says so in
+// so many words ("a module's own `to_thing` with a body is its own
+// function"). If the shape check loses its `bodyless` half — or the name
+// alone decides — the emitter substitutes `(uint64_t)(...)` for the call:
+// the program still compiles, the user's logic never runs, and the output
+// looks like a plausible number. The silent-wrong-answer shape.
+//
+// so this file declares a real, called conversion of its own whose answer
+// CANNOT be confused with any cast of the operand: it multiplies past
+// u32 range entirely. A bare-cast substitution prints the operand back;
+// the real function prints 5000000005.
+//
+// one-line break: drop `bodyless(f)` from convert_shape and 5000000005
+// collapses to 5.
+main = (env: Env) Res<i32, AllocError> {
+    n: u64 = 5;
+    println("{}", to_u64(n));
+
+    // the same call through UFCS, so the user function is exercised on
+    // both spellings that reach convert_target's door
+    println("{}", n.to_u64());
+
+    Ok(0);
+}
+
+// not in num.zen's matrix -- but num.zen DOES declare `to_u64`, on
+// u8/u16/u32, so this file shares its NAME with three backend
+// intrinsics and wins on receiver width alone: the overload set must
+// keep reading types after the name matched, and must not let a
+// bodiless sibling anywhere in the program turn this call into a cast.
+// The point is that ONE parameter and the NAME are not enough to make
+// something the backend's body.
+to_u64 = (self: u64) u64 { self *% 1000000000 +% 5 }

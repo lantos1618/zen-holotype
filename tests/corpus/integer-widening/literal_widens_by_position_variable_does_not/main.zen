@@ -1,0 +1,47 @@
+// A LITERAL WIDENS BY POSITION; A VARIABLE DOES NOT.
+//
+// `assignable` is deliberately lenient in exactly one integer place:
+// `literal_fits` — "a literal agrees with any type of its family (a
+// literal's type comes from its context)". That leniency is what lets
+// `takes(7)` fill an `i64` parameter and `5000000000` fill one at all —
+// the literal's own type, `int`, is 64 bits wide but a bare `7` is not
+// an `i64` by identity. The rule must stop AT THE LITERAL: delete
+// `is_literal_ty`'s guard and every typed slot starts accepting any
+// variable of the same family, and C accepts the resulting assignment
+// silently at every width — so the only trace of the missing rule is
+// that `b: i8 = -5; w: i64 = b;` compiles. This file prints nothing
+// from THAT shape because it must not compile; it prints from the
+// shapes that must.
+//
+// THREE POSITIONS, one per place a literal settles where a variable
+// cannot:
+//
+//   1. a PARAMETER — `takes_i64(-7)` fits by position while `s.to_i64()`
+//      shows the legal route for the value a variable carries.
+//   2. a FIELD — `Box(v: -5000000000)`; construction_infers_its_type_
+//      arguments owns inference here, this file owns the width.
+//   3. an ARRAY ELEMENT — `[-5000000000, 9000000000]`, where the sum
+//      can only be right if BOTH elements settled as full 64-bit
+//      values rather than wrapping at some narrower shared width.
+//
+// every value below needs more than 32 bits, so an implementation that
+// settled literals to `i32` before consulting the position cannot pass
+// it by luck.
+
+takes_i64 = (w: i64) i64 { w }
+
+Box = { v: i64 }
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", takes_i64(-7));
+    println("{}", takes_i64(5000000000));
+    s: i32 = -70;
+    println("{}", takes_i64(s.to_i64()));
+
+    b = Box(v: -5000000000);
+    println("{}", b.v);
+
+    xs: [i64, 2] = [-5000000000, 9000000000];
+    println("{}", xs[0] + xs[1]);
+    Ok(0);
+}

@@ -1,0 +1,46 @@
+// A STRUCT RETURNED FROM A METHOD FEEDS THE NEXT METHOD — the receiver
+// slot and the return slot meet in one call chain.
+//
+// struct_return_large.zen notes the method case as a header comment:
+// "the receiver already occupies the first argument slot, and an sret
+// pointer takes the slot before it". One method returning a struct is
+// where that is easiest to get right by accident. A CHAIN is where it
+// shows: `a.add(10).add(20).grow(100)` asks the backend to take a
+// struct IN as the receiver, build a NEW struct from its fields, hand
+// that OUT, and feed it straight back IN as the next receiver — three
+// times, with the intermediate values never named.
+//
+//   - sum 330 n 4: each add bumps both counters once; grow adds scale
+//     twice (100 + 200) through two returns inside one expression. A
+//     backend that reuses the RECEIVER's storage for the return writes
+//     over the value still being read (`self.sum + v`), and the numbers
+//     go wrong in the middle link, not the first.
+//   - b stays 5 9 after c = b.add(1): the receiver of a method that
+//     returns a fresh struct is borrowed, not consumed. Aliasing the
+//     return onto the receiver moves b too, printing c's values twice.
+//
+// The methods live in the struct body because a free function cannot
+// bind `@Self`-returning UFCS (codegen cannot spell that type — tried),
+// and because the receiver-slot question only exists on methods.
+
+Acc = {
+    sum: i64,
+    n: i64,
+    tag: str,
+
+    add = (self: @Self, v: i64) Acc {
+        Acc(sum: self.sum + v, n: self.n + 1, tag: self.tag)
+    }
+
+    grow = (self: @Self, scale: i64) Acc { self.add(scale).add(scale * 2) }
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a = Acc(sum: 0, n: 0, tag: "chain").add(10).add(20).grow(100);
+    println("{} {} {}", a.tag, a.sum, a.n);
+
+    b = Acc(sum: 5, n: 9, tag: "z");
+    c = b.add(1);
+    println("b {} {} / c {} {}", b.sum, b.n, c.sum, c.n);
+    Ok(0);
+}

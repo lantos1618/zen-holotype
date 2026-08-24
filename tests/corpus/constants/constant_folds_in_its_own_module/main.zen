@@ -1,0 +1,35 @@
+// A CONSTANT FOLDS IN THE MODULE THAT DECLARED IT, NOT WHERE IT LANDS.
+//
+// helper declares `WIDTH = 20`, `HEIGHT = 3`, and a function combining
+// them; main declares its OWN module-level `WIDTH = 100`. If any const
+// table answered by NAME alone -- or if get_total's body resolved WIDTH
+// against the CALLER's module -- total would come out 103 while every
+// number still prints as a number.
+//
+// This is the value side of the rule `gen_c_read.zen` states for a
+// member's value ("names what that module can see and never what the
+// reader can"), which its own test pins through an impl. Nothing else
+// pins it for MODULE-LEVEL constants crossing modules, the path every
+// real program's configuration constants take.
+//
+// Import spelling note, learned the hard way: a binding names the
+// export it imports (`WIDTH, get_total = helper.helper`), renames
+// nothing, and cannot be dotted into.
+
+get_total, WIDTH = helper.helper
+
+WIDTH*: i64 = 100
+
+main = (env: Env) Res<i32, AllocError> {
+    // main's own WIDTH, declared AFTER the import on purpose so nothing
+    // about source order decides
+    println("width {}", WIDTH);
+
+    // the fold that happened abroad
+    println("total {}", get_total());
+
+    // the imported spelling beside the local one: 23 and 100 in one
+    // line is the pair no name-keyed table can produce
+    println("pair {} {}", get_total(), WIDTH);
+    Ok(0);
+}

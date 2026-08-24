@@ -1,0 +1,25 @@
+// tests/corpus/file-io/rewrite_replaces_instead_of_appending/main.zen
+// `write` has no append, no mode, no handle -- one file, written once,
+// whole. So a second write to the same path is a REPLACE, and the
+// plausible failure is the one fopen gets wrong by default: opening for
+// append and leaving the first payload's tail under the new one. The
+// shrink below is deliberate (19 bytes down to 5): an appended floor
+// leaves `short!es the whole` behind, a correct one leaves five bytes.
+// Reading back through a FRESH read also catches a buffer that kept the
+// old length across the rewrite.
+
+FsError = std.env
+
+main = (env: Env) Res<i32, FsError> {
+    alloc ::= env.mem.alloc();
+
+    env.fs.write("shrink.txt", "overwrites the whole").try();
+    before = env.fs.read(alloc, "shrink.txt").try();
+    println("before {}", before.len());
+
+    env.fs.write("shrink.txt", "short!").try();
+    after = env.fs.read(alloc, "shrink.txt").try();
+    println("after {} {}", after.len(), after.is_empty());
+    println("eq {}", after.view().eq("short!"));
+    Ok(0);
+}

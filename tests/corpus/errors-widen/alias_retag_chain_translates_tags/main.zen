@@ -1,0 +1,50 @@
+// ONE MEMBER THROUGH TWO NAMED ALIASES IN A ROW: `Narrow` widens into
+// `Mid = Narrow | Other`, then `Mid` into `All = Big | Other | Narrow`,
+// both hops by `.try()`, both targets NAMED sets whose member order
+// does not start with the one travelling.
+//
+// Each hop re-tags the error for its target's own numbering — All's tag
+// for Narrow is not Mid's, and neither is Narrow's own — so a hop that
+// copied the previous tag instead of translating it lands in the wrong
+// arm of the final match. The Ok line proves the value survived both
+// hops; the Err line proves the identity did too.
+
+Narrow = | Nope
+Other  = | Also
+Big    = | Boom
+Mid    = Narrow | Other
+All    = Big | Other | Narrow
+
+inner = (n: i32) Res<i32, Narrow> {
+    (n < 0).match({
+        true  => Err(Narrow.Nope),
+        false => Ok(n),
+    });
+}
+
+middle = (n: i32) Res<i32, Mid> {
+    v = inner(n).try();
+    Ok(v);
+}
+
+outer = (n: i32) Res<i32, All> {
+    v = middle(n).try();
+    Ok(v);
+}
+
+describe = (env: Env, r: Res<i32, All>) () {
+    r.match({
+        Ok(v)     => println("ok {}", v),
+        Err(e)    => e.match({
+            Narrow(_) => println("narrow"),
+            Other(_)  => println("other"),
+            Big(_)    => println("big"),
+        }),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    describe(env, outer(3));
+    describe(env, outer(-3));
+    Ok(0);
+}

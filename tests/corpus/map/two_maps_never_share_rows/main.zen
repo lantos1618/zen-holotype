@@ -1,0 +1,37 @@
+// TWO MAPS ARE TWO TABLES: NOTHING LEAKS ACROSS.
+//
+// Two Maps of the same K/V type, one key spelled the same in both. A
+// compiler that hoists the table into a shared static (or a set that
+// writes through a stale handle to the last-created map) answers 45
+// for the first map -- the SECOND map's value, the plausible answer
+// because it is the most recently written row anywhere. The values are
+// swapped on purpose: each map's value is the other map's KEY, so any
+// cross-talk between the tables produces exactly the number this test
+// forbids.
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    left   ::= alloc.Map<str, i32>();
+    right  ::= alloc.Map<str, i32>();
+
+    left.set("ada", 36).try();
+    right.set("grace", 45).try();
+
+    left.get("ada").match({
+        Ok(n) => println("left {}", n),
+        None  => println("left missing"),
+    });
+    right.get("grace").match({
+        Ok(n) => println("right {}", n),
+        None  => println("right missing"),
+    });
+    // the key each map does NOT hold
+    left.get("grace").match({
+        Ok(n) => println("left-grace {}", n),
+        None  => println("left-grace none"),
+    });
+    right.get("ada").match({
+        Ok(n) => println("right-ada {}", n),
+        None  => println("right-ada none"),
+    });
+    Ok(0);
+}

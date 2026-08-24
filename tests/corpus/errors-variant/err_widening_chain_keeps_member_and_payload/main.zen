@@ -1,0 +1,37 @@
+// Strict widening is a re-tagging and NOT a copy: `Narrow = A | C`
+// calls a CErr 1, but `Wide = B | A | C` calls it 2, because B sits
+// before it in the canonical order and pushes it along. A widening that
+// copies the raw tag prints A -- silently, with no diagnostic and no C
+// that fails to compile.
+//
+// The hop chain walks the value up through a flipped re-spelling (a
+// genuine copy) and THEN into the strictly larger set (a genuine
+// re-number), so both halves of the rule are exercised: if the copy
+// path re-tags, or the widening path copies, the member that arrives
+// changes. Each member carries its own number as payload, so the arm
+// taken and the value read identify exactly which member survived.
+
+A = | AOnly(i64)
+B = | BOnly(i64)
+C = | COnly(i64)
+
+Narrow = A | C
+Mid    = C | A            // same members, opposite order: a copy
+Wide   = B | A | C        // superset: a re-tagging
+
+raise = () Res<i32, C>    { Err(C.COnly(300)); }
+h1    = () Res<i32, Narrow> { raise().try(); Ok(-1); }
+h2    = () Res<i32, Mid>    { h1().try();     Ok(-2); }
+h3    = () Res<i32, Wide>   { h2().try();     Ok(-3); }
+
+main = (env: Env) Res<i32, AllocError> {
+    h3().match({
+        Ok(v) => println("ok {}", v),
+        Err(e) => e.match({
+            A(a) => a.match({ AOnly(n) => println("a {}", n) }),
+            B(b) => b.match({ BOnly(n) => println("b {}", n) }),
+            C(c) => c.match({ COnly(n) => println("c {}", n / 100 + 1) }),
+        }),
+    });
+    Ok(0);
+}

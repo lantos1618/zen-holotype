@@ -1,0 +1,37 @@
+// TWO MEMBERS OF ONE NAMED SET SHARE A VARIANT NAME: both `FaultA` and
+// `SnagB` declare `Hit`, and after either widens into `Wide2 = FaultA |
+// SnagB` the tag must say WHICH Hit arrived.
+//
+// The tag constants are minted per declaring enum, so nothing forces
+// them apart except the widening writing the right one — a renumbering
+// that keyed on variant NAME, or a copy that kept the source enum's
+// number, still compiles and still runs. The two members carry distinct
+// payload types so the binder types check out only when the member is
+// read correctly too.
+
+FaultA = | Hit | Miss
+SnagB  = | Hit
+
+Wide2 = FaultA | SnagB
+
+raise_a = () Res<i32, FaultA> { Err(FaultA.Hit); }
+raise_b = () Res<i32, SnagB> { Err(SnagB.Hit); }
+
+widen_a = () Res<i32, Wide2> { raise_a().try(); Ok(0); }
+widen_b = () Res<i32, Wide2> { raise_b().try(); Ok(0); }
+
+describe = (env: Env, r: Res<i32, Wide2>) () {
+    r.match({
+        Ok(n)     => println("ok {}", n),
+        Err(e)    => e.match({
+            FaultA(_) => println("fault hit"),
+            SnagB(_)  => println("snag hit"),
+        }),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    describe(env, widen_a());
+    describe(env, widen_b());
+    Ok(0);
+}

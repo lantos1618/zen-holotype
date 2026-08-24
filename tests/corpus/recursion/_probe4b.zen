@@ -1,0 +1,35 @@
+Link = {
+    value: i64,
+    next: Ptr<Link>,
+}
+
+// build a chain of n nodes; each pass allocates one cell through the
+// arena and hangs the recursive result off it. create is unwrapped by a
+// hand-written match because .try() needs a Res-returning frame.
+build = (alloc: Alloc, n: i64) Link {
+    (n <= 0).match({
+        true  => Link(value: 1000, next: null_ptr<Link>()),
+        false => {
+            unwrapped = alloc.create<Link>().match({
+                Ok(p)  => p,
+                Err(_) => null_ptr<Link>(),
+            });
+            rest = build(alloc, n - 1);
+            unwrapped.write(0, rest);
+            Link(value: n * 10, next: unwrapped);
+        },
+    });
+}
+
+sum = (node: Link) i64 {
+    node.next.is_null().match({
+        true  => node.value,
+        false => node.value + sum(node.next.read(0)),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    println("{}", sum(build(alloc, 5)));
+    Ok(0);
+}

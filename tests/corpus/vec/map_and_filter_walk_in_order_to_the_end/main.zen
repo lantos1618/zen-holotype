@@ -1,0 +1,45 @@
+// map AND FILTER WALK IN ORDER, TO THE END, INTO FRESH VEC'S.
+//
+// Both words are written in Zen over the loop primitive
+// (std/core/loop/loop_find.zen), but their CONTRACT is what the corpus
+// pins, because two lowerings could satisfy "right answer, wrong shape":
+//
+//   - ORDER. A walk that visits backwards or re-homes kept elements on
+//     a grow produces a Vec of the right multiset -- and `filter`'s
+//     count alone cannot see it. The kept values print IN SEQUENCE.
+//   - THE INDEX PARAMETER. map's body takes `(h, i, value)`; a backend
+//     that hands the counter twice answers `0 1 2` where `10 21 32`
+//     belongs (value + index over 10,20,30).
+//
+// filter also keeps NOTHING as an empty vec rather than None ("the walk
+// succeeded, it kept nothing") -- asserted by len 0 with no Err path,
+// which is the case a `Res<Vec>`-vs-`Res<None>` confusion flips silently.
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    v ::= alloc.Vec<i32>();
+    Range(0, 12).loop((h, n) { v.add(n).try(); });
+
+    // filter keeps every third element, in order
+    kept = v.filter(alloc, (x) { (x % 3) == 0 }).ok_or(AllocError.OutOfMemory).try();
+    println("kept {}", kept.len);
+    kept.loop((h, x) { println("k {}", x) });
+
+    // map adds value to its own position: only value+index does this.
+    // Read back through a walk -- the get() form does not lower here.
+    shifted = v.map(alloc, (h, i, x) { x + i * 1000 }).ok_or(AllocError.OutOfMemory).try();
+    println("map len {}", shifted.len);
+    shifted.loop((h2, i, x) {
+        (i == 0).then(() { println("shifted first {}", x) });
+        (i == 11).then(() { println("shifted last {}", x) });
+    });
+
+    // filter keeping nothing is an empty VEC, not a failure
+    none_kept = v.filter(alloc, (x) { x > 9999 }).ok_or(AllocError.OutOfMemory).try();
+    println("none kept {}", none_kept.len);
+    passes ::= 0;
+    none_kept.loop((h2, x) { passes = passes + 1; });
+    println("passes {}", passes);
+    Ok(0);
+}

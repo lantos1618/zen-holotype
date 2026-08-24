@@ -1,0 +1,34 @@
+// a `::` parameter captured by a deferred closure is an ADDRESS, not a
+// copy: "`::` means the method writes the receiver's own bytes", so the
+// record holds a pointer (`ref_field` emits `T *`) and the prologue puts
+// back a pointer of the same name ("what the record copies is the
+// address"). the write inside the deferred body therefore lands in the
+// CALLER'S binding -- the one place a deferred closure can reach back out.
+//
+// the two registrations alias the same caller local, so the writes chain:
+// adder runs first (LIFO), takes 5 to 2505; printer runs second through
+// the SAME address and prints 2505. by-value here gives 5 -- plausible,
+// quiet, and wrong. `body 5` proves the frame itself was never touched;
+// the effect exists exactly between registration and block exit.
+//
+// the sibling test own/defer_captures_at_registration pins the `:` half
+// of this rule (a plain binding snapshots); this pins the `::` half, and
+// the pair together are what "captures keep their kind" means.
+
+adder = (s: Scope, total :: i64) () {
+    s.defer(() {
+        total = total + 2500;
+    })
+}
+
+printer = (s: Scope, total :: i64) () {
+    s.defer(() { println("at exit {}", total) })
+}
+
+main = (env: Env) Res<i32, IoError> {
+    n ::= 5;
+    printer(@scope, n);
+    adder(@scope, n);
+    println("body {}", n);
+    Ok(0);
+}

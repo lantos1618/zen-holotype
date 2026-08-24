@@ -1,0 +1,28 @@
+// THE POSITION'S ARRAY TYPE IS WHAT THE ELEMENTS LAND IN, NOT [int, N].
+//
+// Zen spells a fixed-array literal two ways: `[i32, 4](..)` carries its
+// element type beside its values, and `[a, b, c]` borrows the type from
+// where it sits. Both lower to one C compound literal, so the only thing
+// keeping them honest is `literal_ty` (gen_c/gen_c_array.zen): where the
+// position holds an array type, THAT type wins. Emit the bare form at its
+// unsettled `[int, N]` instead and the emitted C puts an int64 compound
+// literal in a uint8 slot — the exact refusal this file hunts.
+//
+// The `bytes` row is why it must be caught rather than shrugged off: the
+// values sit just past where i8 flips sign, so a backend that stored them
+// 8-bit-signed still links, still runs, and prints plausible NEGATIVES.
+// The count is checked too — it comes from the interned TYPE, never from
+// how many expressions were written, so the last index is N-1 by type and
+// not by counting.
+
+main = (env: Env) Res<i32, AllocError> {
+    // the self-describing form: type rides in the literal
+    primes = [i32, 4](2, 3, 5, 7);
+    println("primes {} {}", primes[0], primes[3]);
+
+    // the borrowed form: the annotation says u8, so these are BYTES,
+    // and 200..203 only print as themselves if they were stored unsigned
+    bytes: [u8, 4] = [200, 201, 202, 203];
+    println("bytes {} {}", bytes[0], bytes[3]);
+    Ok(0);
+}

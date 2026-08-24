@@ -1,0 +1,43 @@
+// A MAP IS ADDRESSED BY ITS KEY, NOT BY WHERE THE KEY SITS.
+//
+// Every key reads back its own value, and the values are chosen so a
+// swap between any two rows is visible: 100/200/300 are pairwise
+// distinct, and none is zero, so "the row is there but holds the wrong
+// value" fails as loudly as "the row is missing". The keys go in out of
+// numeric order on purpose -- an implementation keyed by insertion slot
+// (entries[i] addressed with the probe index) answers 100 for key 2.
+// The empty-string key pins that hashing nothing still lands somewhere
+// addressable: a hash of just the seed must not collide with or shadow
+// a real row. And the absent probe walks PAST an occupied bucket to an
+// empty one, which is the path a get that stops at the first entry
+// never takes.
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    m     ::= alloc.Map<str, i32>();
+
+    m.set("ada",   100).try();
+    m.set("",      300).try();
+    m.set("grace", 200).try();
+
+    m.get("ada").match({
+        Ok(v) => println("ada {}", v),
+        None  => println("ada missing"),
+    });
+    m.get("grace").match({
+        Ok(v) => println("grace {}", v),
+        None  => println("grace missing"),
+    });
+    m.get("").match({
+        Ok(v) => println("empty {}", v),
+        None  => println("empty missing"),
+    });
+
+    // present but unequal to both stored keys: the walk has to pass
+    // their rows and stop at an EMPTY slot, not answer from the first
+    // occupied one
+    m.get("alan").match({
+        Ok(v) => println("absent {}", v),
+        None  => println("absent none"),
+    });
+    Ok(0);
+}

@@ -1,0 +1,52 @@
+// tests/corpus/string-basic/a_display_hole_writes_through_the_buffer/main.zen
+// A `{}` landing on a type with a Display impl routes through ITS
+// toString, which writes into the very buffer the format is growing —
+// nested writes into one sink. Two things can silently go wrong and
+// both print plausible text:
+//
+//   - the impl's own writes landing in a FRESH buffer (the value
+//     formatted but its bytes never joined the outer string);
+//   - the impl's bytes overwriting the outer run instead of appending.
+//
+// The negative through a Display hole is deliberate: `P(12,-3)` means
+// the impl's OWN `{}` holes went through the signed writer inside the
+// caller's buffer — one nesting level driving another. And the loop at
+// the end appends a Display value per iteration with a trailing ", "
+// each time, so the final len counts every separator: an impl whose
+// output bypassed len would still print the right TEXT here but the
+// wrong count next to it.
+
+Error = AllocError | WriteError
+
+P = {
+    v*: i32,
+}
+
+P.impl(Display, {
+    toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
+        out.add("<{}>", self.v)
+    }
+})
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String().try();
+
+    // two Display holes in one call, one of them negative
+    p = P(v: 12);
+    q = P(v: 0 - 3);
+    sb.add("{} / {}", p, q).try();
+    println("[{}] {}", sb.view(), sb.len());
+
+    // a Display value nested mid-format between literal runs
+    t ::= alloc.String().try();
+    t.add("x{}y", P(v: 7)).try();
+    println("{}", t.view());
+
+    // one Display append per iteration into a shared buffer
+    acc ::= alloc.String().try();
+    Range(1, 4).loop((h, i) { acc.add("{}, ", P(v: i)).try(); });
+    println("{} len {}", acc.view(), acc.len());
+
+    Ok(0);
+}

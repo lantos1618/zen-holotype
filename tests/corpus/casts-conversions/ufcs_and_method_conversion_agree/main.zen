@@ -1,0 +1,41 @@
+// THE OPERAND ARRIVES TWICE, AND MUST BE LOWERED WELL BOTH TIMES.
+//
+// One mechanism, two doors: `x.f()` hands the callee the receiver
+// (recv = Ok), `f(x)` hands it argument zero (recv = None) — gen_c_call
+// keeps ONE lowering over both, `recv_arg` shifting the operand back to
+// parameter zero. Sema pins the law with mid-range numbers
+// (ufcs_and_method_are_one_overload_set); this file repeats it at
+// boundary values, where picking the wrong door stops being invisible.
+// Every operand sits ON a boundary: i8.MIN coming UP off it (+1), u32
+// arithmetic past i32.MAX's reach (-1), so a door that mis-types the
+// operand or drops the shift prints a plausible number from the wrong
+// width rather than nothing.
+//
+// widen_plus's body IS a conversion — the intrinsic reached from inside
+// a called body, through both spellings. The bare spelling of a num.zen
+// intrinsic does not resolve today at all (sema answers the name with
+// poison, codegen reports `cannot resolve`; see LANE.md) — so the free
+// door here is proven with declarations carrying bodies, which is the
+// half the backend can reach.
+//
+// one-line break: type the no-receiver door's operand at the result
+// width instead of the declared parameter and the two columns diverge.
+main = (env: Env) Res<i32, AllocError> {
+    n: i8 = -128;
+    u: u32 = 4000000000;
+
+    println("{} {}", n.widen_plus(), widen_plus(n));
+    println("{} {}", n.bump(), bump(n));
+    println("{} {}", n.bump(2), bump(n, 2));
+    println("{} {}", u.shrink(), shrink(u));
+
+    Ok(0);
+}
+
+widen_plus = (self: i8) i64 { self.to_i64() +% 1 }
+
+bump = (self: i8) i8 { self +% 1 }
+
+bump = (self: i8, by: i8) i8 { self +% by }
+
+shrink = (self: u32) u32 { self -% 1 }

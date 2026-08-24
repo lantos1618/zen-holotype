@@ -1,0 +1,32 @@
+// THE SAME BINDER NAME IN EVERY ARM, EACH TO A DIFFERENT PAYLOAD TYPE,
+// with an outer `n` all of them shadow. The checker walks arms in order
+// and binds as it lowers each one, so the failure this pins is an arm's
+// binding LEAKING into its siblings' scope: arm 2's `n` resolves to
+// arm 1's i64, and "late" prints as a number -- or the match stops
+// compiling, which is the loud version.
+//
+// The trailing println is the release half: after three matches bound and
+// dropped `n` four times, the name must resolve to the OUTER binding
+// again. A slot left on top of the scope stack makes every later use of
+// the name read a variable declared inside a closed branch.
+
+main = (env: Env) Res<i32, AllocError> {
+    n: i64 = 7;
+    r: Res<i64> = Ok(3000000000);
+    r.match({
+        Ok(n)  => println("ok {}", n),
+        None   => println("none"),
+    });
+    e: Res<u8, str> = Err("late");
+    e.match({
+        Ok(n)  => println("was ok"),
+        Err(n) => println("err {}", n),
+    });
+    w: Res<f64> = Ok(2.5);
+    w.match({
+        Ok(n) => println("wide {}", n),
+        None  => println("wide none"),
+    });
+    println("outer {}", n);
+    Ok(0);
+}

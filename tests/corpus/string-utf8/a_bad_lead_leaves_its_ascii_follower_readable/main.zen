@@ -1,0 +1,36 @@
+// A 0xC2 lead whose follower is the letter 'A' -- not a continuation
+// byte. The sequence at offset 0 must be rejected, and the failure must
+// cost exactly ONE byte: 'A' stays readable at offset 1, as its own
+// codepoint of value 65 with len 1. A recovery that skipped two bytes
+// (or that "fixed" the pair by decoding 0xC2 as if well-formed) loses a
+// real character from the middle of text -- validate says invalid either
+// way, so the second probe is what pins resynchronisation.
+String = std.text.text_string
+Utf8Error, codepoint_at, validate_utf8 = std.text.text_utf8
+
+verdict = (s: str) i64 {
+    s.validate_utf8().match({
+        Ok(_) => 1,
+        Err(_) => 0,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String("").try();
+    sb.add_byte(194).try(); sb.add_byte(65).try(); sb.add_byte(66).try();
+    v ::= sb.view();
+    println("valid {}", verdict(v));
+    v.codepoint_at(0).match({
+        Ok(c) => println("decoded {}", c.value),
+        Err(_) => println("Invalid"),
+    });
+    v.codepoint_at(1).match({
+        Ok(c) => {
+            println("at 1 is A {}", c.value == 65);
+            println("l {}", c.len);
+        }
+        Err(_) => println("Invalid at 1"),
+    });
+    Ok(0);
+}

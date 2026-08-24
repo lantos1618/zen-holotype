@@ -1,0 +1,83 @@
+// tests/corpus/printing/each_display_hole_picks_the_right_impl/main.zen
+// A `{}` landing on a type with a Display impl routes to THAT impl's
+// toString — by the ARGUMENT'S type and nothing else. Three shapes,
+// one failure mode: a toString symbol resolved across impls by name
+// alone lets whichever impl the symbol table kept serve every hole.
+// It compiles cleanly (every toString has the same signature) and it
+// prints plausible text from the wrong record, which is why the two
+// impls below print their fields in DIFFERENT orders with DIFFERENT
+// punctuation: a crossed route shows as `S<12x-34>`, the right shape
+// built out of the wrong struct. The negative field doubles as a sign
+// check inside the nesting.
+//
+//   1. two impls in one format, one hole each
+//   2. a FIELD read (`held.inner`) — the route reads the value's type,
+//      not where the value came from
+//   3. NESTING: Line's toString calls Point's explicitly, three levels
+//     down from main's format, with literal runs on both sides. The
+//     inner writes must land in the caller's console at the caller's
+//     position; a fresh buffer per call loses or transposes fragments.
+//
+// Line's u64 tag pins that a Display body's own holes still pick
+// writers by type: 2^63 must survive the inner signed/unsigned choice
+// mid-sentence.
+
+Error = AllocError | IoError
+
+Point = {
+    x: i32,
+    y: i32,
+}
+
+Point.impl(Display, {
+    toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
+        out.add("P<{}:{}>", self.x, self.y)
+    }
+})
+
+Size = {
+    w: i32,
+    h: i32,
+}
+
+Size.impl(Display, {
+    toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
+        out.add("S<{}x{}>", self.w, self.h)
+    }
+})
+
+Line = {
+    a: Point,
+    b: Point,
+    tag: u64,
+}
+
+Line.impl(Display, {
+    toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
+        out.add("L[{} .. {}]#{}", self.a, self.b, self.tag)
+    }
+})
+
+Held = {
+    inner: Point,
+}
+
+main = (env: Env) Res<i32, Error> {
+    // 1. one hole per impl, side by side
+    p = Point(x: 12, y: -34);
+    s = Size(w: 3, h: 4);
+    println("{} and {}", p, s);
+
+    // 2. reached through a field read of its holder
+    held = Held(inner: Point(x: 5, y: 6));
+    println("held {}", held.inner);
+
+    // 3. nesting, with an unsigned extreme inside the innermost level
+    l = Line(
+        a: Point(x: 1, y: 2),
+        b: Point(x: 30, y: 40),
+        tag: 9223372036854775808,
+    );
+    println("line {}", l);
+    Ok(0);
+}

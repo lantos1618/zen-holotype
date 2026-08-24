@@ -1,0 +1,39 @@
+// THE NEGATIVE EXTREMES MUST SIGN-EXTEND ON WIDENING, and i32.MIN is
+// where a silent wrong answer is cheapest to buy.
+//
+// `to_i64` is a bodiless declaration (std/core/num.zen) whose body IS the
+// backend: gen_c emits a C cast, `(int64_t)x`. The whole contract lives in
+// the signedness of that cast's operand. Cast through an UNSIGNED
+// intermediate — `(int64_t)(uint32_t)x`, the spelling a generator reaches
+// for when it normalises every operand through a widest-unsigned type —
+// and the program still compiles, still runs, still prints a number:
+//
+//   i8.MIN   -128 -> 18446744073709551488  (or 128, if only the low byte
+//   i32.MIN    ...                          is read before extending)
+//
+// which is the worst kind of wrong: plausible-looking and green. The three
+// widths below are the three places the C promotion rules actually change
+// behaviour (below int, at int, above int), so one cast-width bug cannot
+// hide behind another width being right.
+//
+// the source values come from the `iN.MIN` constants, not literals — the
+// literal path is pinned by codegen/negated_literal_i64_boundary.zen, and
+// this test must fail on a CONVERSION bug, not ride along with a lexer
+// one.
+//
+// one-line break: emit the C cast with an unsigned intermediate
+// (`(int64_t)(uint32_t)v`) and the first and third number flip sign.
+main = (env: Env) Res<i32, AllocError> {
+    a: i8  = i8.MIN;
+    b: i16 = i16.MIN;
+    c: i32 = i32.MIN;
+    println("{} {} {}", a.to_i64(), b.to_i64(), c.to_i64());
+
+    // the neighbours, so an off-by-one in the boundary constant itself
+    // shows as a changed digit rather than a flipped sign
+    a1: i8  = -127;
+    c1: i32 = 2147483647;
+    println("{} {}", a1.to_i64(), c1.to_i64());
+
+    Ok(0);
+}

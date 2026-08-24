@@ -1,0 +1,44 @@
+// The error variant that arrives is the one that was raised: one
+// function, two raise sites, two different error types, and the arm is
+// chosen by an argument at runtime. A caller-side match can only be
+// right if the tag the callee wrote survives the trip.
+//
+// A hop that copies raw bytes instead of re-numbering -- or that tags
+// every Err with member 0 of the set -- makes BOTH raises read as the
+// same member here. That compiles, runs, and prints a plausible name,
+// which is why the printed member and not a diagnostic is what this
+// pins: NotFound and Denied are separate types, so nothing but the tag
+// says which one crossed.
+
+NotFound = | NotFound
+Denied   = | Denied
+Set      = Denied | NotFound
+
+raise = (n: i32) Res<i32, Set> {
+    (n == 0).match({
+        true  => Err(Set.NotFound(NotFound.NotFound)),
+        false => Ok(0),
+    }).try();
+    (n == 1).match({
+        true  => Err(Set.Denied(Denied.Denied)),
+        false => Ok(0),
+    }).try();
+    Ok(0 - 1);
+}
+
+show = (n: i32) Res<(), AllocError> {
+    raise(n).match({
+        Ok(v)       => println("{}: ok {}", n, v),
+        Err(e)      => e.match({
+            NotFound(nf) => nf.match({ NotFound => println("{}: not found", n) }),
+            Denied(d)    => d.match({ Denied   => println("{}: denied", n) }),
+        }),
+    });
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    show(0);
+    show(1);
+    Ok(0);
+}

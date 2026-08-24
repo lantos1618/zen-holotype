@@ -1,0 +1,47 @@
+// tests/corpus/string-basic/a_string_grows_through_three_reallocs/main.zen
+// THE BUFFER, not the value: `add`/`add_byte` must move `len` forward and
+// the bytes must survive every realloc that growth forces.
+//
+// The interesting case is the CAPACITY BOUNDARY. An empty Vec owns no
+// pages (data = null, capacity = 0), so the FIRST grow asks for 8, and
+// every one after doubles: 8, 16, 32. Twenty-six bytes therefore cross
+// three reallocations — including the two a lazy implementation gets
+// wrong in different ways:
+//
+//   - a first grow that skips the 8 and goes straight to some default
+//     still prints all 26 bytes but is caught by nothing here UNLESS
+//     len tracks it; `len` is printed between runs for exactly that.
+//   - a doubling written as `capacity + capacity` vs `capacity * 2`
+//     cannot differ, but an off-by-one in "grow when len == capacity"
+//     writes byte 9 over unallocated storage — which at -O0 usually
+//     still PRINTS correctly and only the later view betrays it.
+//
+// So the program interleaves: fill to exactly 8 (the boundary case),
+// read back, cross to 9 (first grow), read back, run to 26 (third
+// allocation), read back. A wrong capacity policy shows up as a
+// truncated or shifted string, never as a zero.
+
+Error = AllocError | WriteError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String().try();
+
+    // exactly fills the first allocation: the last add lands on the
+    // boundary itself, where "grow before" and "grow after" disagree
+    Range(0, 8).loop((h, i) { sb.add_byte('a' + i).try(); });
+    println("at-8 {} {}", sb.len(), sb.view());
+
+    // the first forced grow: null-data-to-8 was already taken, this is
+    // the 8-to-16 doubling, and the old eight bytes must move with it
+    sb.add_byte('i').try();
+    println("at-9 {} {}", sb.len(), sb.view());
+
+    // across two more doublings: 16 bytes more, ending at 26 in a
+    // capacity-32 buffer with room to spare
+    Range(9, 26).loop((h, i) { sb.add_byte('A' + i - 9).try(); });
+    println("at-26 {} {}", sb.len(), sb.view());
+    println("not-empty {}", sb.is_empty());
+
+    Ok(0);
+}

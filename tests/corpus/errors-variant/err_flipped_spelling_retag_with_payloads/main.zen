@@ -1,0 +1,31 @@
+// "A union is its members. Order and spelling are not part of its
+// identity" (DESIGN.md, Errors) -- so `S2 = B | A` is the same set as
+// `S1 = A | B`, and a propagation between them must be a re-numbering,
+// never a copy of the tag slot.
+//
+// Both members carry the SAME payload type (i32), which is what makes
+// this sharp: a raw copy moves A's payload into B's arm with the number
+// intact, so the wrong member still prints a plausible number. Only the
+// NAME discriminates -- `hit` and not `miss`, 45 and not 4005.
+//
+// The two spellings are written in opposite orders on purpose; numbered
+// by declaration, A is 0 in one set and 1 in the other.
+
+A = | Hit(i32)
+B = | Miss(i32)
+S1 = A | B
+S2 = B | A
+
+deep = () Res<i32, S1> { Err(S1.A(A.Hit(5))); }
+top  = () Res<i32, S2> { deep().try(); Ok(0 - 1); }
+
+main = (env: Env) Res<i32, AllocError> {
+    top().match({
+        Ok(v)  => println("ok {}", v),
+        Err(e) => e.match({
+            A(a) => a.match({ Hit(n)  => println("hit {}", n + 40) }),
+            B(b) => b.match({ Miss(n) => println("miss {}", n + 4000) }),
+        }),
+    });
+    Ok(0);
+}

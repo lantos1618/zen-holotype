@@ -1,0 +1,61 @@
+// ONE MEMBER, TWO TARGETS: the same call's result widens into two
+// different sets in one program. The second widening is where a MEMO
+// keyed on the source type alone — "Narrow already widened, reuse the
+// answer" — emits Narrow tagged for the FIRST target's member numbering
+// into the second target's slot, where it reads as the wrong member.
+//
+// The two targets are deliberately built so no member number coincides:
+// Mid orders [Narrow, Other], Wide3 orders [Other, Big, Narrow], and the
+// Err arm of each read names the member that arrived.
+
+Narrow = | Nope
+Other  = | Also
+Big    = | Boom
+Mid    = Narrow | Other
+Wide3  = Other | Big | Narrow
+
+make = (n: i32) Res<i32, Narrow> {
+    (n < 0).match({
+        true  => Err(Narrow.Nope),
+        false => Ok(n),
+    });
+}
+
+into_mid = (n: i32) Res<i32, Mid> {
+    make(n).try();
+    Ok(0);
+}
+
+into_wide = (n: i32) Res<i32, Wide3> {
+    make(n).try();
+    Ok(0);
+}
+
+read_mid = (env: Env, r: Res<i32, Mid>) () {
+    r.match({
+        Ok(v)     => println("mid ok {}", v),
+        Err(e)    => e.match({
+            Narrow(_) => println("mid narrow"),
+            Other(_)  => println("mid other"),
+        }),
+    });
+}
+
+read_wide = (env: Env, r: Res<i32, Wide3>) () {
+    r.match({
+        Ok(v)     => println("wide ok {}", v),
+        Err(e)    => e.match({
+            Narrow(_) => println("wide narrow"),
+            Other(_)  => println("wide other"),
+            Big(_)    => println("wide big"),
+        }),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    read_mid(env, into_mid(1));
+    read_mid(env, into_mid(-1));
+    read_wide(env, into_wide(2));
+    read_wide(env, into_wide(-2));
+    Ok(0);
+}

@@ -1,0 +1,38 @@
+// tests/corpus/loop-basic/next_skips_the_rest_of_one_pass_only/
+// h.next() must leave THIS pass and no more: the tail is skipped once,
+// the loop finishes every remaining pass, and on the LAST pass the
+// skip still happens even though nothing follows it. a next lowered to
+// a jump to the back edge from the wrong depth, or one that skips to
+// the loop's end instead of its increment, eats passes; each shape
+// here names how many tails printed, so a eaten pass moves a count
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    // 0 1 3 4 - two is gone, exactly once
+    Range(0, 5).loop((h, v) {
+        (v == 2).then(() { h.next() });
+        println("skip {}", v);
+    });
+
+    // the guard true on EVERY pass including the last: zero tails,
+    // and the loop still ends - a next aimed at the wrong label hangs
+    // here or runs forever below
+    Range(0, 4).loop((h, v) {
+        h.next();
+        println("never");
+    });
+    println("all skipped");
+
+    // nested: the inner handle skips only the inner pass. if the
+    // handle re-binds at the wrong depth the outer tail vanishes too
+    // and "outer 1" never prints
+    Range(0, 2).loop((h, outer) {
+        [10, 20, 30].loop((h2, inner) {
+            (inner == 20).then(() { h2.next() });
+            println("inner {}", inner);
+        });
+        println("outer {}", outer);
+    });
+    Ok(0);
+}

@@ -1,0 +1,30 @@
+// A METHOD'S RECEIVER PROJECTION RUNS BEFORE DISPATCH: `b.inner.scale(3)`
+// projects field `inner` (type Inner) and only then picks `scale` -- a free
+// function whose first parameter is INNER. The intermediate type decides;
+// skipping the projection dispatches against B and fails or fabricates.
+//
+// This is the seam between field access and member lookup: a backend that
+// emits the receiver as the OUTER value (`b`) while calling Inner's
+// function reads the wrong offset. The outer type is deliberately wider
+// than the inner (two fields to its one) so reading through the wrong
+// base produces a plausible but different number.
+//
+// Breaks if: the receiver is not re-based onto `inner` before the call --
+// the line stops answering 12.
+
+Inner = {
+    v: i32,
+}
+
+B = {
+    inner: Inner,
+    pad: i32,
+}
+
+scale = (i: Inner, k: i32) i32 { i.v * k }
+
+main = (env: Env) Res<i32, AllocError> {
+    b = B(inner: Inner(v: 4), pad: 999);
+    println("{}", b.inner.scale(3));
+    Ok(0);
+}

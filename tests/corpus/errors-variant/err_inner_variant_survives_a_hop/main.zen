@@ -1,0 +1,55 @@
+// WHICH VARIANT INSIDE THE MEMBER was raised is a second tag one level
+// down, and a frame boundary can get it wrong independently of the
+// member tag: code that rebuilds the union but renumbers the inner enum
+// by declaration order turns `Short(14)` into `Corrupt(..)` -- or into
+// whichever variant now holds slot 1 -- silently. The two variants
+// carry different payload types (i32 vs str), so the arm taken AND the
+// value read name which inner variant arrived.
+//
+// Each raise crosses a function boundary before main reads it, and all
+// three members take a turn, so nothing here can pass by matching only
+// the first-raised case.
+
+NotFound = | NotFound
+Denied   = | Denied
+Corrupt  = Corrupt(str) | Short(i32)
+Set      = Denied | Corrupt | NotFound
+
+probe = (n: i32) Res<i32, Set> {
+    (n == 0).match({
+        true  => Err(Set.Corrupt(Corrupt.Short(0 - 14))),
+        false => Ok(0),
+    }).try();
+    (n == 1).match({
+        true  => Err(Set.NotFound(NotFound.NotFound)),
+        false => Ok(0),
+    }).try();
+    (n == 2).match({
+        true  => Err(Set.Denied(Denied.Denied)),
+        false => Ok(0),
+    }).try();
+    Ok(n * 10);
+}
+
+show = (n: i32) Res<(), AllocError> {
+    probe(n).match({
+        Ok(v)        => println("{}: ok {}", n, v),
+        Err(e)       => e.match({
+            NotFound(nf) => nf.match({ NotFound  => println("{}: not found", n) }),
+            Denied(d)    => d.match({ Denied     => println("{}: denied", n) }),
+            Corrupt(c)   => c.match({
+                Corrupt(what) => println("{}: corrupt {}", n, what),
+                Short(k)      => println("{}: short {}", n, 0 - k),
+            }),
+        }),
+    });
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    show(0);
+    show(1);
+    show(2);
+    show(3);
+    Ok(0);
+}

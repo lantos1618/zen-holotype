@@ -1,0 +1,46 @@
+// `==` ON A STRUCT IS A CALL, AND THE CALL GOES TO THE TYPE'S OWN `eq`.
+//
+// op_kind (gen_c_op.zen) sorts every operator into ShortCircuit / Infix /
+// Helper / Dispatched / Refused. Equality on a non-scalar lands in
+// Dispatched, and lower_eq_call (gen_c_member.zen) emits the very member
+// call the source could have written: `a == b` becomes `Box_eq(a, b)` --
+// the same symbol, instantiation and queue entry `a.eq(b)` produces, so
+// the operator and the method cannot disagree about which function they
+// mean. `!=` is THE SAME CALL NEGATED -- DESIGN.md names `Eq` and one
+// method, there is no `ne` to look up, and a backend that goes looking
+// for one is a backend that fails this file.
+//
+// What makes the answers a specification and not a restatement of the
+// obvious: Box's eq is NOT fieldwise. It is the orientation rule a rect
+// library actually writes -- equal iff the areas agree, either rotation.
+// So every wrong lowering answers differently:
+//
+//   C `==` on the aggregate     cc rejects the file (invalid operands)
+//   first-field-only compare    (2,3) == (3,2) prints false, spec says true
+//   a `ne` lookup               the != half of every line does not compile
+//   constant-true dispatch      the second line prints true, spec says false
+//
+// The true line needs the call to happen with both operands whole; the
+// false line needs MORE than the first field consulted. Between them,
+// no truncated lowering survives.
+
+Box = {
+    w*: i32,
+    h*: i32,
+
+    // equal iff interchangeable as rectangles: same area, any rotation
+    eq* = (self: @Self, other: @Self) bool {
+        self.w * self.h == other.w * other.h
+    }
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a    = Box(w: 2, h: 3);
+    rot  = Box(w: 3, h: 2);
+    tall = Box(w: 2, h: 4);
+
+    println("rot {} {}", a == rot, a != rot);
+    println("tall {} {}", a == tall, a != tall);
+    println("self {} {}", a == a, rot != rot);
+    Ok(0);
+}

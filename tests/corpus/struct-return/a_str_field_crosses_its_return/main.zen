@@ -1,0 +1,52 @@
+// A STRUCT CARRYING A str RETURNS WITH ITS POINTER STILL POINTING AT
+// THE CALLEE'S BUFFER — and the length travels beside it, not behind it.
+//
+// `str` is the one slice Zen has: a two-word view, `{ data, len }`, and
+// text_str.zen builds every literal and every String view out of it. So a
+// struct that carries a str across a by-value return carries THREE words
+// through the ABI — the struct's own fields plus the slice's two inside
+// them — and each can be lost independently:
+//
+//   - drop `data` and the length still prints correctly, which is why
+//     the assertions below read BYTES (`slice`), not just `.len`: a
+//     truncated value that prints as a number proves nothing.
+//   - drop `len` (or copy the pointer alone, or zero it) and the bytes
+//     print short, empty, or garbage while everything else looks fine.
+//   - confuse the field order — data where len belongs — and both move,
+//     because "abcdef" is 6 long and a pointer is 8 bytes: no plausible
+//     number survives the swap on either line.
+//
+// The builder also pins the borrow rule from the RETURN side. `view`
+// borrows the String's Vec storage, so the str in the returned struct is
+// valid only because the arena owns those pages past `make_carry`'s
+// frame — the same rule std/text documents as "take the view after the
+// last write", here taken after the last write AND returned.
+
+Carry = {
+    text: str,
+    n: usize,
+}
+
+make_carry = (alloc: Alloc, base: str, tag: str, reps: usize) Res<Carry, AllocError> {
+    sb ::= alloc.String(base).try();
+    Range(0, reps).loop((h, k) {
+        sb.fmt("{},", tag).try();
+    });
+    Ok(Carry(text: sb.view(), n: sb.len()))
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    c1 = make_carry(alloc, "abcdef", "xy", 3).try();
+    println("len {} n {}", c1.text.len, c1.n);
+    println("head |{}|", c1.text.slice(0, 6));
+    println("tail |{}|", c1.text.slice(7, c1.text.len));
+
+    // the empty base: len 0 crossing the return must stay 0, and the
+    // zero-length slice must print nothing between the bars
+    c2 = make_carry(alloc, "", "q", 2).try();
+    println("empty |{}| {}", c2.text.slice(0, 0), c2.text.len);
+
+    Ok(0);
+}

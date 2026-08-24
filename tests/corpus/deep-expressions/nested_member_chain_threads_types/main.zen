@@ -1,0 +1,60 @@
+// A MEMBER CHAIN EIGHT HOPS DEEP: every link must be resolved against
+// the type the PREVIOUS link produced -- Leaf -> Mid -> Inner -> Wrap
+// -> Node -> Holder -> Pair -- and the chain runs inside a method
+// receiver (p.left.right.inner), a generic function parameter, and an
+// array element, all in one program.
+//
+// a backend that resolves any link against the wrong declaration
+// prints that field's default or a neighbouring value; one that
+// reuses ONE C slot for the whole chain (the same name bound twice)
+// collapses distinct offsets. The expected line folds every level:
+//
+//   p = { left: {right: {inner: {v: 33}}}, right: {right: {inner: {v: 44}}}}
+//   total = 11 + 22 + 33 + 44 + (55 + 66) + 33 + 44
+//         + depth(pair.first)=1 * 4900  =  5208
+//
+// each printed number names its own path, so any single mis-resolved
+// link is visible as the WRONG NUMBER rather than a crash.
+
+Leaf    = { v: i64 }
+Inner   = { v: i64 }
+Mid     = { inner: Inner }
+Wrap    = { right: Mid }
+Node    = { left: Wrap, right: Wrap }
+
+Holder  = {
+    head*: Node,
+    get* = (self: @Self, k: usize) i64 {
+        (k == 0).match({
+            true  => self.head.left.right.inner.v,
+            false => self.head.right.right.inner.v,
+        })
+    }
+}
+
+Pair = {
+    first: Leaf,
+    second: Leaf,
+}
+
+depth = <T>(t: T) usize { 1 }
+
+main = (env: Env) Res<i32, AllocError> {
+    node ::= Node(
+        left:  Wrap(right: Mid(inner: Inner(v: 33))),
+        right: Wrap(right: Mid(inner: Inner(v: 44))),
+    );
+    holder ::= Holder(head: node);
+    h0 ::= holder.get(0);
+    h1 ::= holder.get(1);
+
+    pair ::= Pair(first: Leaf(v: 55), second: Leaf(v: 66));
+    both ::= pair.first.v + pair.second.v;
+
+    arr ::= [holder.head.left.right.inner.v, holder.head.right.right.inner.v];
+
+    total ::= 11 + 22 + h0 + h1 + both + arr[0] + arr[1] + depth(pair.first) * 4900;
+    println("sum {}", total);
+    println("h {} {}", h0, h1);
+    Ok(0);
+}

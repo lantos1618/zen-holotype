@@ -1,0 +1,36 @@
+// PER-TYPE DISPATCH THROUGH A BOUND, at values where a wrong pick
+// still prints a plausible number. Two types satisfy Weighed; the
+// bound's required `weigh` must multiply by EACH type's OWN supplied
+// factor, both on the concrete receiver and through <T: Weighed>.
+//
+// one-line break: resolve `t.weigh(..)` to whichever impl was hoisted
+// first (or to a single shared function) and 3000000 arrives as 2 --
+// or both rows arrive as one of the two.
+//
+// The factors are chosen so the generic row is not just the direct
+// row re-printed: weigh_of adds x + t.factor before multiplying,
+// exercising argument passing AND the field read inside the impl's
+// body, where a receiver passed in the wrong register shows up as a
+// plausible-looking swap (6/900 vs 900/6).
+Weighed = {
+    factor: i64,
+
+    weigh* = (self: @Self, x: i64) i64 { self.factor * x },
+}
+
+Light = { pad: i64 }
+Heavy = { pad: i64 }
+
+Light.impl(Weighed, { factor: 2 })
+Heavy.impl(Weighed, { factor: 3000000 })
+
+weigh_of = <T: Weighed>(t: T, x: i64) i64 { t.weigh(x + t.factor) }
+
+main = (env: Env) Res<i32, AllocError> {
+    l = Light(pad: 9);
+    h = Heavy(pad: 9);
+    println("{} {}", l.pad, h.pad);
+    println("{} {}", l.weigh(5), h.weigh(5));
+    println("{} {}", weigh_of(l, 100), weigh_of(h, 100));
+    Ok(0);
+}

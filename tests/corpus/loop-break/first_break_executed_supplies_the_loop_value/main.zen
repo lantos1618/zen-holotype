@@ -1,0 +1,28 @@
+// THE FIRST BREAK EXECUTED SUPPLIES THE LOOP'S VALUE -- not the last one
+// written, and not the fall-through.
+//
+// `h.break(v)` makes the loop evaluate to `Ok(v)` (std/core/loop/
+// loop_handle.zen), and the lowerer records "some break site wrote the
+// result" statically while the CHOICE among sites is made at runtime by
+// whichever `goto` lands first. Those are different things, and only the
+// runtime answer is Zen's: a backend that initialises the result slot from
+// the LAST break site textually -- or lets the fall-through `h.break(44)`
+// win because it is the one that always executes -- still compiles, still
+// exits 0, and prints a different one of these four numbers.
+//
+// every guard is arranged so exactly one arm fires: 22 is reachable only
+// by executing arms in order and stopping at the first true one.
+//
+// breaks this: taking the last written break site (or the always-taken
+// fall-through) instead of the first executed one.
+
+main = (env: Env) Res<i32, AllocError> {
+    pick: Res<usize> = loop((h) {
+        (1 > 2).then(() { h.break(11) });
+        (2 < 3).then(() { h.break(22) });
+        (3 < 4).then(() { h.break(33) });
+        h.break(44);
+    });
+    println("{}", pick.match({ Ok(v) => v, None => 0 }));
+    Ok(0);
+}

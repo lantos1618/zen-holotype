@@ -1,0 +1,43 @@
+// `.try()` is a non-local exit that cuts through frame boundaries --
+// and a loop body is a closure, so an Err raised inside `[..].loop`
+// has to cross the loop's own frame on its way out. A propagation that
+// stops at the loop boundary, or that lets the loop's `()` return type
+// swallow the error, lands in main as `Ok(-1)` instead: the loop ran to
+// completion and nothing was raised.
+//
+// The payload is computed INSIDE the loop (`i * 11`), so a raise that
+// escapes with the wrong index -- or with a stale slot -- still prints
+// a number. 22 - 20 pins both that `Over` arrived (not `Miss`, not Ok)
+// and that it carried the iteration it was raised in.
+
+A = | Miss(i64)
+B = | Over(i64)
+Set = B | A
+
+scan = (limit: i64) Res<i64, Set> {
+    [0, 1, 2, 3].loop((h, i) {
+        (i == limit).match({
+            true  => { Err(B.Over(i * 11)).try(); },
+            false => (),
+        });
+    });
+    Ok(0 - 1);
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    scan(2).match({
+        Ok(v) => println("ok {}", v),
+        Err(e) => e.match({
+            A(a) => a.match({ Miss(n) => println("miss {}", n) }),
+            B(b) => b.match({ Over(n) => println("over {}", n - 20) }),
+        }),
+    });
+    scan(9).match({
+        Ok(v) => println("ok {}", v),
+        Err(e) => e.match({
+            A(_) => println("a"),
+            B(_) => println("b"),
+        }),
+    });
+    Ok(0);
+}

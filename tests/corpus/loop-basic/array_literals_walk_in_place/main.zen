@@ -1,0 +1,37 @@
+// tests/corpus/loop-basic/array_literals_walk_in_place/
+// an array literal is the one collection whose walk needs no Alloc and
+// no impl the user can see - [T, N] satisfies Range intrinsically
+// (range.zen: "the one place the compiler supplies what no module
+// could write"). a lowering that instead builds a Vec, or walks the
+// literal's TEMPORARY after its frame dies, shows here as a wrong
+// count, a stale element, or a str that prints as garbage. the str
+// elements are the trap: three different lengths means no slot size
+// is ever accidentally right
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    // elements in order with their pass counts
+    ["ab", "c", "dddd"].loop((h, index, s) {
+        println("{} {}", index, s);
+    });
+
+    // i64: 9000000000 does not survive a word-wide element slot,
+    // and it is not any of its own indexes
+    [9000000000, 5, 9000000001].loop((h, index, v) {
+        println("{} {}", index, v);
+    });
+
+    // walked twice: the second walk must see the same values, so a
+    // lowering that consumed the temporary cannot sneak through
+    arr ::= [40, 50, 60];
+    arr.loop((h, v) { println("first {}", v); });
+    arr.loop((h, v) { println("second {}", v); });
+
+    // one-element literal: the off-by-one that runs two passes
+    // prints 7 twice
+    [7].loop((h, index, v) {
+        println("solo {} {}", index, v);
+    });
+    Ok(0);
+}

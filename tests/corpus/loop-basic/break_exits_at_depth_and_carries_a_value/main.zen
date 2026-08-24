@@ -1,0 +1,43 @@
+// tests/corpus/loop-basic/break_exits_at_depth_and_carries_a_value/
+// break is the general non-local exit: it leaves the loop the HANDLE
+// names, at whatever depth the body sits, and with a value of the
+// loop's own element type - not the index type, not (). three ways to
+// lose: bind the handle one level in and the wrong loop dies; carry
+// the pass counter out and a plausible 3 prints where "found" should;
+// drop the payload and None prints. the miss arm is asserted too, so
+// the fix cannot be "always answer something"
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    // break with a value out of a plain walk
+    Range(0, 100).loop((h, v) {
+        (v == 41).then(() { h.break(v * 10 + 1) });
+    }).match({
+        Ok(n) => println("broke {}", n),
+        None  => println("missed"),
+    });
+
+    // break with nothing: None, from inside nested bodies. the outer
+    // must survive its inner's exit and finish its own passes
+    Range(0, 3).loop((h, outer) {
+        println("outer {}", outer);
+        [10, 20, 30].loop((h2, inner) {
+            (inner == 20).then(() { h2.break() });
+            println("inner {}", inner);
+        });
+    });
+
+    // the payload is the ELEMENT type (str), not i32, not the index.
+    // found by value so the match itself proves which element died
+    words ::= alloc.Vec<str>();
+    words.add("ada").try();
+    words.add("grace").try();
+    words.loop((h, w) {
+        (w == "ada").then(() { h.break(w) });
+    }).match({
+        Ok(hit) => println("found {}", hit),
+        None    => println("none"),
+    });
+    Ok(0);
+}

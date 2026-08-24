@@ -1,0 +1,45 @@
+// AN INFERRED MIDDLE SET (`Res<i32, _>`) IS A LAYER THE WIDENING MUST
+// SEE THROUGH: two callees raise two different members into one `_`
+// callee, and the caller's declared set has to contain both — arrived
+// at by flattening what `middle` actually raises, not by reading any
+// name off it.
+//
+// A middle layer typed as its FIRST arm's set would refuse or misroute
+// the second; a middle layer that forgot it was a set of TWO members
+// leaves one of the caller's lines unreachable. The order (true first,
+// then false) pins which member each arm contributed.
+
+Small = | Tiny
+Big   = | Huge
+Both  = Small | Big
+
+small_fail = () Res<i32, Small> { Err(Small.Tiny); }
+big_fail   = () Res<i32, Big> { Err(Big.Huge); }
+
+middle = (pick: bool) Res<i32, _> {
+    pick.match({
+        true  => small_fail().try(),
+        false => big_fail().try(),
+    });
+}
+
+widen_both = (pick: bool) Res<i32, Both> {
+    v = middle(pick).try();
+    Ok(v);
+}
+
+describe = (env: Env, r: Res<i32, Both>) () {
+    r.match({
+        Ok(n)     => println("ok {}", n),
+        Err(e)    => e.match({
+            Small(_) => println("small tiny"),
+            Big(_)   => println("big huge"),
+        }),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    describe(env, widen_both(true));
+    describe(env, widen_both(false));
+    Ok(0);
+}

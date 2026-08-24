@@ -1,0 +1,43 @@
+// A STRUCT BUILT INSIDE A FUNCTION AND RETURNED BY VALUE, READ AT THE
+// CALL SITE.
+//
+// struct_return_large.zen pins the ABI size classes with one-word fields
+// (a: 1, b: 2, ...) where a slot mix-up still sums to something. Here
+// every field is i64 and the values are chosen so each field is
+// distinguishable: a swap of the two words prints `200 100` instead of
+// `100 200`, and a truncation to 32 bits turns 5000000000 into a
+// different number while still printing as a number.
+//
+// The nested return is the half the flat one cannot see: `make_outer()`
+// constructs its Inner in ITS OWN frame and returns it by value into the
+// Outer's initialiser. A backend that returns the inner struct through a
+// pointer into the dead callee frame compiles and prints whatever the
+// reused stack now holds -- often the right answer at -O0, which is what
+// makes this worth pinning beside struct_return_large.zen rather than
+// inside it.
+
+Inner = {
+    lo :: i64 = 100,
+    hi :: i64 = 200,
+}
+
+Outer = {
+    inner :: Inner = Inner(),
+    stamp :: i64 = 7,
+}
+
+make_inner = () Inner { Inner(lo: 3, hi: 4) }
+
+make_outer = () Outer { Outer(inner: make_inner(), stamp: 9) }
+
+main = (env: Env) Res<i32, AllocError> {
+    wide = Inner(hi: 5000000000);
+    println("wide {} {}", wide.lo, wide.hi);
+
+    swapped = Inner(lo: 200, hi: 100);
+    println("swap {} {}", swapped.hi, swapped.lo);
+
+    o = make_outer();
+    println("nested {} {} {}", o.inner.lo, o.inner.hi, o.stamp);
+    Ok(0);
+}

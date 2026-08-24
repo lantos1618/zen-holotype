@@ -1,0 +1,39 @@
+// A PAYLOAD CROSSES EVERY LAYER OF A `.try()` CHAIN UNCHANGED, and each
+// layer may grow the set around it while it travels.
+//
+// Three frames, each one `.try()` deeper than the last, each widening the
+// error set a step -- `Inner`, then `Inner | Outer`, then `Any` -- with
+// arithmetic done to the payload BETWEEN the hops. The number that comes
+// out is the proof that what travelled was the payload and not a tag, a
+// stale temp or the Res struct itself: 2^30 + 5, doubled, minus 1, which
+// lands exactly on 2^31 - 1.
+//
+// The value is chosen so the classic wrong answers are still numbers,
+// and plausible ones. A try temp declared as C `int` truncates 2^31 to
+// `-2147483648` and the program prints a negative; a layer that forwards
+// its temp instead of unwrapping prints a heap-ish giant; a layer that
+// drops the payload prints 0 or garbage. Only the right unwrap prints
+// 2147483647.
+
+Inner = | InnerBoom
+Outer = | OuterBoom
+Any = Inner | Outer
+
+leaf = (n: i64) Res<i64, Inner> {
+    Ok(n + 5)
+}
+
+mid = (n: i64) Res<i64, Inner | Outer> {
+    v = leaf(n).try();
+    Ok(v * 2)
+}
+
+top = (n: i64) Res<i64, Any> {
+    v = mid(n).try();
+    Ok(v - 1)
+}
+
+main = (env: Env) Res<i32, Any> {
+    println("{}", top(1073741819).try());
+    Ok(0);
+}

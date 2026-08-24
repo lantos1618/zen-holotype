@@ -1,0 +1,39 @@
+// A PAYLOAD BINDER IS THE VARIANT VALUE, AND IT SURVIVES OPERAND
+// POSITION -- including the LEFT operand of a division.
+//
+// The binder `n` inside `Big(n)` is a projection out of the union; the
+// arm uses it as an OPERAND, not as the match's whole value. A lowering
+// that binds or reads the union WHOLE (tag and payload together) still
+// compiles and still prints numbers -- just not these:
+//
+//   correct           25 16 9
+//   union whole       tag-dependent garbage in range
+//
+// The three arms are ordered so the matching one is first, middle, and
+// last across the three calls: no single "which arm did I emit last"
+// bug can pass all three. The division form is written on purpose:
+// `100 / n.match(..)` is where a lowering that treats an if/else chain
+// as a statement (not an expression) fails to compile at all, and
+// `100 / <binder>` is where reading the union whole instead of `b`
+// silently divides by the wrong number.
+
+Cell = Big(i32) | Mid(i32) | Tiny
+
+scale = (c: Cell) i32 {
+    c.match({
+        Big(b)   => b * b,
+        Mid(m)   => m * m,
+        Tiny     => 9,
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", scale(Cell.Big(5)));
+    println("{}", scale(Cell.Mid(4)));
+    println("{}", scale(Cell.Tiny));
+
+    // binder as the LEFT operand of a division, mid-arm
+    half = Cell.Mid(8).match({ Mid(m) => 100 / m, _ => 0 });
+    println("{}", half);
+    Ok(0);
+}

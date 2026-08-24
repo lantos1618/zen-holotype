@@ -1,0 +1,42 @@
+// PARENTHESES ARE A WALL, NOT ANOTHER TIER — inside `(e)` the tree is
+// exactly e's tree, and no rule outside the wall may reassociate across
+// it, however convenient the fold.
+//
+// Every wrong way to "simplify" parens prints a plausible number here,
+// which is why the file exists: an implementation that treats `(e)` as
+// bare syntax and lets the enclosing Pratt loop reassociate through it
+// (the classic shortcut in a hand-rolled AST->IR rewrite, and in every
+// "flatten single-child groups during parse" cleanup) turns
+// `(2 + 3) * (4 - 1)` into 13 -- the flat reading -- while a version that
+// hoists groups as if they ADDED a level of looseness gets 19. The truth
+// is 15, and both wrong worlds run clean. The `%` line catches the same
+// bug from the other side: `(2 + 3) % 4` is 1, ignoring the wall gives
+// 2 + (3 % 4) = 5.
+//
+// `10 - (2 -% 3)` pins the wall against a SAME-TIER left fold: without
+// parens that spelling is (10-2)-%3 = 5; the wall forces the right
+// operand first and prints 11. And the last two lines are the honesty
+// check: where parens AGREE with the tiers they must be invisible --
+// redundancy may not move a value either.
+//
+// THE ONE-LINE BREAK: make parenthesized_expression splice its child
+// into the parent instead of standing as a barrier (or mark the group
+// with the enclosing precedence so the loop can reassociate across it).
+// `p1` flips 15 -> 13, `p3` flips 1 -> 5, `wallsub` flips 11 -> 5;
+// nothing rejects.
+
+main = (env: Env) Res<i32, AllocError> {
+    println("p1 {}", (2 + 3) * (4 - 1));
+    println("p2 {}", 2 * (3 + 4) - 5);
+    println("p3 {}", (2 + 3) % 4);
+
+    // the wall against a same-tier chain: right operand first, wrap op
+    // inside.
+    println("wallsub {}", 10 - (2 -% 3));
+
+    // redundant walls: these agree with the tiers and must change
+    // nothing.
+    println("redundant {}", ((2)) + (3 * (4)));
+    println("deep {}", ((((1 + 1)) * ((2 + 2)))));
+    Ok(0);
+}

@@ -1,0 +1,25 @@
+// THE BREAK ARGUMENT SETS THE PAYLOAD -- a bool handed to h.break comes
+// back a bool, not folded into an integer word.
+//
+// The array's element type settles Res<bool>, so the loop's result is a
+// real tagged union whose payload is one byte wide. The match reads the
+// payload AS a bool in every branch -- a backend that spilled it through
+// an int-sized slot prints a number here instead of true/false, and a
+// backend that conflated "payload false" with "nothing was carried"
+// prints the None fallback's 2. Both faces are pinned: the first element
+// exercises Ok(true) without breaking, then Ok(false) breaks.
+//
+// breaks this: collapsing the break's payload into a numeric slot, or
+// the tag and the payload into one word.
+
+main = (env: Env) Res<i32, AllocError> {
+    fs: [bool, 3] = [true, true, false];
+    w: Res<bool> = fs.loop((h, b) {
+        (!b).then(() { h.break(b) });
+    });
+    println("{}", w.match({
+        Ok(b) => b,
+        None  => 2 == 0,
+    }));
+    Ok(0);
+}

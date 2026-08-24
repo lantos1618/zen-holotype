@@ -1,0 +1,45 @@
+// a bound is a struct of FIELD requirements too, not only methods: an
+// impl supplies expressions, the type stores nothing for them, and every
+// read re-evaluates against the receiver's CURRENT storage.
+//
+// `height` is computed from `side` -- so after `a.side = 5` the next
+// read must answer 16, not the 7 construction would have frozen in.
+// A backend that evaluated a supplied field once at construction prints
+// plausible numbers forever after; only the re-read tells.
+//
+// `width` is the other half of the rule: Square declares it FOR ITSELF,
+// so it stays storage and wins over the impl's supply outright (DESIGN.md:
+// "you satisfy requirements; you never impl storage" -- and layout never
+// depends on which impls are linked). If the impl's `width: self.side`
+// ever shadowed the type's own field, line 3 would print 2, not 40 --
+// and 40 survives mutation while a shadowed read does not.
+
+Boxy = {
+    width: i32,
+    height: i32,
+
+    area* ::= (self: @Self) i32 { self.width * self.height }
+}
+
+Square = {
+    side :: i32,
+    width: i32,
+}
+
+Square.impl(Boxy, {
+    width: self.side,
+    height: self.side * 3 + 1,
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= Square(side: 2, width: 40);
+    println("{}", a.height);
+    println("{}", a.area());
+    println("{}", a.width);
+
+    a.side = 5;
+    println("{}", a.height);
+    println("{}", a.area());
+    println("{}", a.width);
+    Ok(0);
+}

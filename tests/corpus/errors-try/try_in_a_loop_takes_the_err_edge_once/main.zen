@@ -1,0 +1,46 @@
+// A `.try()` GUARD INSIDE A LOOP BODY FIRES ON THE EXACT FAILING PASS,
+// AND NOT BEFORE: per-execution state machine, not per-line wiring.
+//
+// The helper is Ok on passes 0 and 1 and raises on pass 2; the body
+// unwraps, PRINTS THE UNWRAPPED VALUE, and accumulates it. The expected
+// output needs three things of one lowering: the two Ok passes run to
+// their println (the guard did not fire early or skip the body), each
+// unwrap yields that pass's own payload (0 then 10 -- not a stale temp),
+// and pass 2's Err leaves `count` entirely, so nothing after it prints
+// and the caller's Err arm answers.
+//
+// A guard wired off a stale temp prints a repeated payload or exits a
+// pass early; an escape aimed at the loop instead of the frame prints
+// "total 10" and keeps looping. All silent, all plausible.
+
+Inner = | InnerBoom
+Outer = | OuterBoom
+Any = Inner | Outer
+
+bad = (n: i64) Res<i64, Outer> {
+    (n == 2).match({
+        true  => Err(Outer.OuterBoom),
+        false => Ok(n * 10),
+    });
+}
+
+count = () Res<i64, Any> {
+    total ::= 0;
+    Range(0, 4).loop((h, i) {
+        v = bad(i).try();
+        println("pass {} unwrapped {}", i, v);
+        total = total + v;
+    });
+    Ok(total)
+}
+
+main = (env: Env) Res<i32, Any> {
+    count().match({
+        Ok(t)  => println("total {}", t),
+        Err(e) => e.match({
+            Inner(_) => println("inner"),
+            Outer(_) => println("outer"),
+        }),
+    });
+    Ok(0);
+}

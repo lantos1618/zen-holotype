@@ -1,0 +1,37 @@
+// BOTH narrow widths trap on a zero divisor, in one file because they
+// fail together: gen_c widens sub-int operands to C ints for
+// arithmetic, so a zero-test can be emitted against the wrong copy
+// (narrowed i8/u8 vs widened int), or skipped below 32 bits on the
+// theory the silicon faults anyway -- which dies as a raw SIGFPE
+// (exit 136, silent) instead of Zen's trap line + 134. the signed
+// half and the unsigned half need separate lines because their wrong
+// answers differ: an i8 lowering that truncates prints floor values,
+// a u8 one prints negative garbage.
+//
+// the prints before the trap pin narrow division itself, both signs
+// of truncation: -119/13 = -9 remainder -2 (toward ZERO, not floor's
+// -10/+11), and 255/13 = 19 remainder 8 (an i8-truncating lowering
+// prints -10 11 here).
+//
+// the divisor comes from the environment, so no constant folder can
+// turn this into the compile-time error a visible zero would be
+// (DESIGN.md: a provable trap is a compile error, not a runtime one).
+
+Error = Overflow | DivideByZero | OutOfBounds
+
+main = (env: Env) Res<i32, Error> {
+    s: i8 = -119;
+    println("{} {}", s / 13, s % 13);
+
+    u: u8 = 255;
+    println("{} {}", u / 13, u % 13);
+
+    // a zero the compiler cannot see: it comes from the environment
+    zero: i8 = env.vars.get("ZEN_TRAP_NEVER_SET").match({
+        Ok(_) => 1,
+        None  => 0,
+    });
+    q = s / zero;
+    println("{}", q);
+    Ok(0);
+}

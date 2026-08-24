@@ -1,0 +1,39 @@
+// A WIDE PAYLOAD CROSSES A CALL, THEN IS READ OUT AND REWRAPPED INTO THE
+// OTHER VARIANT OF THE SAME ENUM. 4294967297 = 2^32 + 1 dies at any 32-bit
+// hop (prints 1); the rewrap -- binder `v` out of Modest, arithmetic on it,
+// Vast(v + 2^32) built INSIDE the arm -- must retag to Last's index and
+// store into Vast's member, or the inner match reads back the old tag
+// ("still modest") or the old bytes.
+//
+// The x3 multiply is there because a truncated value that still prints is
+// this lane's most plausible wrong answer: 12884901891 cannot be reached
+// from a 32-bit payload by luck.
+
+Wide = Vast(i64) | Modest(i64)
+
+loud = (n: i64) Wide {
+    (n == 0).match({
+        true  => Wide.Vast(4294967297),
+        false => Wide.Modest(9000000009),
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    w1: Wide = loud(0);
+    w1.match({
+        Vast(v)   => println("vast {} x3 {}", v, v * 3),
+        Modest(v) => println("modest {}", v),
+    });
+    w2: Wide = loud(1);
+    w2.match({
+        Vast(v)   => println("vast {} x3 {}", v, v * 3),
+        Modest(v) => {
+            bigger: Wide = Wide.Vast(v + 4294967296);
+            bigger.match({
+                Vast(x)   => println("rewrapped vast {}", x),
+                Modest(x) => println("still modest {}", x),
+            });
+        },
+    });
+    Ok(0);
+}

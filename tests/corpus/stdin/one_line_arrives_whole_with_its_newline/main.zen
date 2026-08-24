@@ -1,0 +1,29 @@
+// tests/corpus/stdin/one_line_arrives_whole_with_its_newline/main.zen
+// A READ IS BYTE-COUNTED AND THE BYTES ARE EXACTLY WHAT THE PEER SENT:
+// 'gandalf the grey\n' is 17 bytes, newline included, because there is
+// NO line discipline on this capability. The classic reader bug —
+// stripping the newline, or stopping at it like a text layer would —
+// leaves 16 here and fails. The count also pins WHICH 17: a read off by
+// one at either end still prints a plausible word.
+//
+// main.stdin holds exactly those 17 bytes.
+
+Vec    = std.collections
+str_at = std.text
+
+Error = AllocError | IoError
+
+main = (env: Env) Res<i32, Error> {
+    a ::= env.mem.alloc();
+    b ::= a.Vec<u8>();
+
+    // room for more than the peer sends: what arrives is bounded by the
+    // STREAM, not by the reservation
+    b.reserve(64).try();
+    env.in.read(b, 32).try();
+
+    println("got {}", b.len);
+    println("{} bytes", "{} the grey".len + 7);
+    print(str_at(b.ptr(), b.len));
+    Ok(0);
+}

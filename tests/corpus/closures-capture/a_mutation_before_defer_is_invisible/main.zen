@@ -1,0 +1,21 @@
+// a deferred closure reads the binding AS IT WAS when `defer` ran, not
+// as it is when the block exits. gen_c copies every capture into the
+// block's record AT REGISTRATION (`gen_c_scope.zen`, "the captures are
+// copied here, at registration") -- so a write AFTER the defer call must
+// be invisible to it, and a write INSIDE it must start from the old value.
+//
+// the wrong answers are both plausible numbers: capture-by-name (reading
+// the frame's slot at run time) prints 99 here; capturing at the LAST
+// write instead of the first also prints 99. only copy-at-registration
+// prints 7, and 7 is what lands in the record field.
+//
+// the arithmetic is deliberately non-round: 7 * 11 + 2 = 79 would become
+// 1091 under by-reference and 79 under snapshot -- no zero, no default.
+
+main = (env: Env) Res<i32, IoError> {
+    n ::= 7;
+    @scope.defer(() { println("snapshot {}", n * 11 + 2) });
+    n = 99;
+    println("body {}", n);
+    Ok(0);
+}

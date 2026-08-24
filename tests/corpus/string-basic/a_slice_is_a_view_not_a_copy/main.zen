@@ -1,0 +1,50 @@
+// tests/corpus/string-basic/a_slice_is_a_view_not_a_copy/main.zen
+// `slice` builds a str over the SAME bytes — offset the pointer, narrow
+// the count, allocate nothing. Three properties in one program:
+//
+//   1. The slice's len is `to - from`, whatever the source length was.
+//      An off-by-one at either end (the two subtractions in text_str
+//      ARE the bounds check) shows up as a one-byte-plausible string.
+//   2. Adjacent slices partition without overlapping: slicing [0,3)
+//      and [3,6) of "abcdef" yields exactly "abc" and "def". A slice
+//      computed with a stale or shared offset prints shifted bytes,
+//      which reads as ordinary text.
+//   3. A zero-width slice is a legal str of len 0 and is_empty — the
+//      empty case that must be true empty, not null-backed default.
+//
+// The final pair pins byte-level reads through views: index(0) is 'a'
+// as a NUMBER (97) and the last index is len-1, not len.
+
+Error = AllocError | WriteError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String("abcdefghij").try();
+    v = sb.view();
+
+    // widths are the slice's own, not the source's
+    head = v.slice(0, 4);
+    println("head {} {}", head, head.len);
+
+    // adjacent halves meet but do not overlap
+    left  = v.slice(0, 5);
+    right = v.slice(5, 10);
+    println("split {}|{}", left, right);
+
+    // interior
+    mid = v.slice(3, 7);
+    println("mid {} {}", mid, mid.len);
+
+    // zero width is still a str: len 0, empty, no crash
+    z = v.slice(4, 4);
+    println("zero {} {}", z.len, z.is_empty());
+
+    // full range round-trips the whole buffer
+    whole = v.slice(0, v.len);
+    println("whole {} {}", whole, whole.len);
+
+    // bytes through the view, first and last
+    println("bytes {} {}", v.index(0), v.index(v.len - 1));
+
+    Ok(0);
+}

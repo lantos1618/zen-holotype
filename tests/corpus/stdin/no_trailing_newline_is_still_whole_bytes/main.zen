@@ -1,0 +1,39 @@
+// tests/corpus/stdin/no_trailing_newline_is_still_whole_bytes/main.zen
+// A STREAM THAT ENDS WITHOUT A NEWLINE ENDS ALL THE SAME. The input is
+// 13 bytes ending mid-word ('d'), no \n; a reader with any line
+// discipline drops or pads the tail, and a short read treated as an
+// error loses it entirely. The bytes must come back verbatim and the
+// SECOND read must answer Ok(0) — the same end-of-input signal an
+// empty stream gives, not an error and not a repeat of old bytes.
+//
+// main.stdin holds exactly those 13 bytes.
+
+Vec    = std.collections
+str_at = std.text
+
+Error = AllocError | IoError
+
+byte_is = (b :: Vec<u8>, i: usize, want: u8) bool {
+    b.get(i).match({
+        Ok(got) => got == want,
+        None    => false,
+    });
+}
+
+main = (env: Env) Res<i32, Error> {
+    a ::= env.mem.alloc();
+    b ::= a.Vec<u8>();
+
+    // ask for far more than there is: the answer is what EXISTS (13),
+    // then end of input
+    b.reserve(64).try();
+    first ::= env.in.read(b, 100).try();
+
+    second ::= env.in.read(b, 100).try();
+
+    println("first {} second {}", first, second);
+    println("len {}", b.len);
+    println("last is d {}", byte_is(b, 12, 'd'));
+    print(str_at(b.ptr(), b.len));
+    Ok(0);
+}

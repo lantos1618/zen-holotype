@@ -1,0 +1,34 @@
+// UNSIGNED MAXIMA WIDENED MUST STAY UNSIGNED — including into a SIGNED
+// target.
+//
+// `to_i64` on a u32 is the line that punishes the classic codegen slip.
+// Widening u32 -> i64 on x86-64 is one move instruction, and the tempting
+// one is `movslq` — the SIGN-EXTENDING move, right register, right width,
+// wrong bit-fill. In C terms the bug is one token: `(int64_t)(int32_t)x`
+// instead of `(int64_t)x`. The program compiles clean and prints
+//
+//   4294967295  as  -1
+//
+// — a number, not a crash, and small enough to scroll past. Every row
+// below crosses a C type boundary (u8 and u16 promote to int before any
+// cast sees them; u32 does not), so the three source widths exercise
+// three different promotion paths on the way into the same cast.
+//
+// the u64 column is the control: u32.MAX reaching u64 has no signedness
+// question, so if IT is wrong the bug is width, not signedness, and
+// belongs to a different test.
+//
+// one-line break: spell the i64-row cast with a signed intermediate and
+// the last number on that row becomes -1 while everything else holds.
+main = (env: Env) Res<i32, AllocError> {
+    a: u8  = 255;
+    b: u16 = 65535;
+    c: u32 = 4294967295;
+
+    println("u64 {} {} {}", a.to_u64(), b.to_u64(), c.to_u64());
+    println("i64 {} {} {}", a.to_i64(), b.to_i64(), c.to_i64());
+
+    // u32.MAX is past i32.MAX by exactly one: the value that makes the
+    // signed/unsigned choice visible rather than academic
+    Ok(0);
+}

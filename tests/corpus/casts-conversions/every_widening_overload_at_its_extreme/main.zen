@@ -1,0 +1,43 @@
+// THE OPERAND IS LOWERED AT ITS OWN WIDTH, NOT THE TARGET'S.
+//
+// write_convert (gen_c_call.zen) asks the DECLARED parameter's type for
+// the operand — "the width the declaration chose the overload on" — and
+// only then wraps it in the target cast. The failure mode worth owning is
+// the shortcut: type the operand at the RESULT type and emit
+// `(int64_t)((u32_t_expr)x)` where the inner spelling is already 64-bit.
+// On x86-64 C that happens to print the same number; the bug shows when
+// the source is NEGATIVE and the inner cast is spelled unsigned, or when
+// any later pass assumes operand and result widths agree.
+//
+// so this file pins the observable half: every overload in num.zen's
+// matrix, fed its extreme, still answers with its own correct value. The
+// matrix rows are deliberately interleaved signed/unsigned — u8.to_i32
+// next to i8.to_i16 — because a table-driven fix that shifts a row by one
+// produces plausible numbers from the WRONG row (a u16 answering with the
+// u32 row's behaviour), and only extremes make the shift visible:
+// mid-range values survive most row confusions unchanged.
+//
+// one-line break: index the conversion table by target width instead of
+// by (source, target) pair and the -128 / 255 columns stop agreeing.
+main = (env: Env) Res<i32, AllocError> {
+    s8:  i8  = -128;
+    u8v: u8  = 255;
+    s16: i16 = -32768;
+    u16v: u16 = 65535;
+
+    println("{} {}", s8.to_i16(), s8.to_i32());
+    println("{} {}", s8.to_i64(), u8v.to_u16());
+    println("{} {}", u8v.to_u32(), u8v.to_u64());
+    println("{} {}", u8v.to_i32(), u8v.to_i64());
+    println("{} {}", s16.to_i32(), s16.to_i64());
+    println("{} {}", u16v.to_u32(), u16v.to_u64());
+    println("{} {}", u16v.to_i64(), s8.to_i64());
+
+    // the pointer-width target: to_usize exists ONLY on u32 (num.zen),
+    // and its body was once closed without its resolution -- the fault
+    // moved to a linker error instead of going away
+    big: u32 = 4294967295;
+    println("{} {}", big.to_u64(), big.to_usize());
+
+    Ok(0);
+}

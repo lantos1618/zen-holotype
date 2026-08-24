@@ -1,0 +1,29 @@
+// a NON-deferred closure -- one handed to a function-typed parameter and
+// inlined at the call site -- reads the CALLER'S LIVE binding, the exact
+// opposite of what `defer` does with the same syntax. The two halves sit
+// side by side so the difference is one word long:
+//
+//   - `apply((x..) { x + n }, ..)` runs NOW: the body lowers in the
+//     writer's frame (`enter_frame(cl.floor)`), so it sees 45 and the
+//     later `n = 50` has not happened yet;
+//   - the `defer` registered at the SAME value of `n` still says 45 at
+//     block exit, because its copy was made back then too -- but for the
+//     opposite reason, and only the pair shows which mechanism produced
+//     which number.
+//
+// the third line moves `n` and calls apply AGAIN: now the inlined body
+// sees 50. If gen_c rebound the lambda's free names to a stale copy --
+// treating every closure like the deferred one -- the second call would
+// print 45 twice and the frame write would be silently lost.
+
+apply = (f: (a: i64) i64, v: i64) i64 { f(v) }
+
+main = (env: Env) Res<i32, IoError> {
+    n ::= 40;
+    first = apply((x: i64) i64 { x + n }, 5);
+    @scope.defer(() { println("deferred {}", n + 1) });
+    n = 50;
+    second = apply((x: i64) i64 { x + n }, 5);
+    println("live {} {}", first, second);
+    Ok(0);
+}

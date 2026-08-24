@@ -1,0 +1,53 @@
+// tests/corpus/string-basic/str_eq_is_bytes_and_length/main.zen
+// `==` on str dispatches to text_str's Eq impl, and its contract has a
+// shape a lazy comparison gets wrong in one of TWO plausible ways:
+//
+//   - comparing only over the shorter length makes "abc" == "abcd"
+//     true — the prefix bug, called out by name in the impl's comment.
+//     The LENGTH decides first; a prefix is not the whole.
+//   - comparing POINTERS instead of bytes makes two equal texts unequal
+//     whenever they live at different addresses. Here one side is
+//     always an owned String's view or an offset slice, the other a
+//     literal, so pointer equality could never work — byte equality is
+//     the only thing that prints `true` below.
+//
+// The growth interleaving sharpens it: `v5` is taken at length 5, the
+// buffer then grows and moves, and `v6` is fresh — so the true/false
+// pattern below can only come out right if eq reads through both
+// pointers byte-wise AND checks both lengths.
+
+Error = AllocError | WriteError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String("hello").try();
+
+    // owned buffer against literals: same bytes, same length
+    v5 = sb.view();
+    println("eq {}", v5 == "hello");
+    println("ne {}", v5 == "hellp");
+
+    // THE PREFIX CASE: equal over five bytes, longer by one.
+    println("prefix {}", v5 == "hello!");
+
+    // grow past the borrowed view, then compare the OLD str again:
+    // still five bytes against "hello" — true even though the buffer
+    // it aliased has moved and now holds six
+    sb.add_byte('!').try();
+    println("stale-eq {}", v5 == "hello");
+
+    // and the fresh view carries all six bytes
+    v6 = sb.view();
+    println("grown {}", v6 == "hello!");
+    println("grown-prefix {}", v6 == "hello");
+
+    // slices compared against literals of the same bytes: "banana"
+    // sliced at [0,3) is ban, at [3,6) is ana
+    s = "banana";
+    left = s.slice(0, 3);
+    right = s.slice(3, 6);
+    println("halves {} {}", left == "ban", right == "ana");
+    println("cross {}", left == right);
+
+    Ok(0);
+}

@@ -1,0 +1,44 @@
+// `.try()` returning through TWO frames must run each frame's whole
+// cleanup — defers LIFO first, then drops in reverse — before jumping.
+// the one-frame version of this is already pinned (corpus/own/
+// defer_runs_at_every_exit.zen); what is new here is the ORDER ACROSS
+// frames: per-frame processing predicts inner defer, drop 2, outer
+// defer, drop 1. a backend that ran ALL defers then ALL drops across
+// every frame — the other natural reading of "defers before drops" —
+// prints the same four lines in a different order, which is exactly
+// what makes this worth an expectation.
+
+Fail = | Boom
+
+Noisy = {
+    env: Env,
+    id: i32,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.id) }
+})
+
+fails = () Res<i32, Fail> {
+    Err(Fail.Boom);
+}
+
+propagates = (env: Env) Res<i32, Fail> {
+    @scope.defer(() { println("outer defer") });
+    o = Noisy(env: env, id: 1);
+    {
+        @scope.defer(() { println("inner defer") });
+        p = Noisy(env: env, id: 2);
+        fails().try();
+        println("unreachable");
+    }
+    Ok(0);
+}
+
+main = (env: Env) Res<i32, IoError> {
+    propagates(env).match({
+        Ok(_)  => println("got ok"),
+        Err(_) => println("propagated"),
+    });
+    Ok(0);
+}

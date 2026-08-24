@@ -1,0 +1,40 @@
+// std's own `WriteError = IoError | AllocError` is a union whose member
+// is itself a union, and this walks an IoError.Full two hops through
+// it. WHICH VARIANT INSIDE the member is a second tag one level down,
+// and a hop that rebuilds the member but renumbers the inner enum --
+// by declaration order, or as a fresh set of one -- turns Full into
+// Closed (or Invalid) with no diagnostic and no C that fails.
+//
+// AllocError rides in the same set so the match has to name both
+// levels: a hop that mistags the member prints "out of memory", and a
+// hop that re-numbers IoError prints one of its other three variants.
+// Only "full" is the value the bottom of the program raised.
+
+IoError = std.core
+WriteError = std.core
+
+S_a = WriteError | AllocError
+
+raise = () Res<i32, S_a> { Err(S_a.WriteError(WriteError.IoError(IoError.Full))); }
+
+mid = () Res<i32, S_a> { raise().try(); Ok(0 - 1); }
+top = () Res<i32, S_a> { mid().try(); Ok(0 - 2); }
+
+main = (env: Env) Res<i32, AllocError> {
+    top().match({
+        Ok(v)         => println("ok {}", v),
+        Err(e)        => e.match({
+            AllocError(_)  => println("out of memory"),
+            WriteError(w)  => w.match({
+                AllocError(_)   => println("write: out of memory"),
+                IoError(io)     => io.match({
+                    Closed      => println("closed"),
+                    Full        => println("full"),
+                    Invalid     => println("invalid"),
+                    Interrupted => println("interrupted"),
+                }),
+            }),
+        }),
+    });
+    Ok(0);
+}

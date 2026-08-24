@@ -1,0 +1,57 @@
+// TWELVE CALLS DEEP, EACH PROPAGATING WITH .try(): level_1 -> .. ->
+// level_11 -> level_12. The DEEPEST call fails with a payload that
+// names it (tag = 12), and every intermediate .try() must forward
+// THAT Err untouched -- not Ok of anything, not a re-wrapped error.
+//
+// a backend that loses one hop's propagation prints 0 or a wrong
+// depth; one that reorders the chain fails at the wrong tag. The
+// success path folds 1..=11 = 66 through the same twelve frames, so
+// BOTH routes of Res are exercised through identical nesting and any
+// join-slot mix-up shows up as an arithmetic mismatch, not a crash.
+
+ChainError = { tag: i32 }
+
+level_12 = (n: i32) Res<i32, ChainError> {
+    Err(ChainError(tag: n));
+}
+
+mk = <N: i32>(k: i32) () {} // (unused; keeps the generic path warm)
+
+level_11 = (n: i32) Res<i32, ChainError> { level_12(n).try() }
+level_10 = (n: i32) Res<i32, ChainError> { level_11(n).try() }
+level_9  = (n: i32) Res<i32, ChainError> { level_10(n).try() }
+level_8  = (n: i32) Res<i32, ChainError> { level_9(n).try() }
+level_7  = (n: i32) Res<i32, ChainError> { level_8(n).try() }
+level_6  = (n: i32) Res<i32, ChainError> { level_7(n).try() }
+level_5  = (n: i32) Res<i32, ChainError> { level_6(n).try() }
+level_4  = (n: i32) Res<i32, ChainError> { level_5(n).try() }
+level_3  = (n: i32) Res<i32, ChainError> { level_4(n).try() }
+level_2  = (n: i32) Res<i32, ChainError> { level_3(n).try() }
+level_1  = (n: i32) Res<i32, ChainError> { level_2(n).try() }
+
+ok_12 = (v: i32) Res<i32, ChainError> { Ok(v) }
+ok_11 = (v: i32) Res<i32, ChainError> { ok_12(v).try() }
+ok_10 = (v: i32) Res<i32, ChainError> { ok_11(v).try() }
+ok_9  = (v: i32) Res<i32, ChainError> { ok_10(v).try() }
+ok_8  = (v: i32) Res<i32, ChainError> { ok_9(v).try() }
+ok_7  = (v: i32) Res<i32, ChainError> { ok_8(v).try() }
+ok_6  = (v: i32) Res<i32, ChainError> { ok_7(v).try() }
+ok_5  = (v: i32) Res<i32, ChainError> { ok_6(v).try() }
+ok_4  = (v: i32) Res<i32, ChainError> { ok_5(v).try() }
+ok_3  = (v: i32) Res<i32, ChainError> { ok_4(v).try() }
+ok_2  = (v: i32) Res<i32, ChainError> { ok_3(v).try() }
+ok_1  = (v: i32) Res<i32, ChainError> { ok_2(v).try() }
+
+main = (env: Env) Res<i32, AllocError> {
+    failed ::= level_1(12).match({
+        Ok(v) => v,
+        Err(e) => e.tag,
+    });
+    good ::= ok_1(66).match({
+        Ok(v) => v,
+        Err(e) => -1,
+    });
+    println("failed {}", failed);
+    println("good {}", good);
+    Ok(0);
+}

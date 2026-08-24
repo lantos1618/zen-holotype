@@ -1,0 +1,45 @@
+// An error set may be written `_` and inferred from the body (DESIGN.md,
+// Errors: `read_cfg = (p: Path) Res<Cfg, _>`). The inferred set is a
+// structural union of whatever the body raises -- here two DIFFERENT
+// enums, one chosen at runtime -- and the caller consuming it with
+// `.try()` widens that union into its own named set.
+//
+// Nothing but the tag says which member the inferred set handed over:
+// a propagation that drops the inferred union to its first member, or
+// re-numbers it by declaration order instead of canonically, turns an
+// A into a B (or loses B entirely) on the way into `Set`. Both members
+// carry payloads of different types so the arm taken AND the value read
+// identify what arrived.
+
+A = | A1(i64)
+B = | B1(str)
+
+Set = B | A
+
+raiser = (n: i32) Res<i64, _> {
+    (n > 0).match({
+        true  => Err(A.A1(9000000001)),
+        false => Err(B.B1("bee")),
+    });
+}
+
+carry  = (n: i32) Res<i64, Set> { raiser(n).try() }
+carry2 = (n: i32) Res<i64, Set> { carry(n).try() }
+
+main = (env: Env) Res<i32, AllocError> {
+    carry2(1).match({
+        Ok(v) => println("ok {}", v / 1000000000),
+        Err(e) => e.match({
+            A(a) => a.match({ A1(n) => println("a1 {}", n - 9000000000) }),
+            B(b) => b.match({ B1(s) => println("b1 {}", s) }),
+        }),
+    });
+    carry2(0 - 1).match({
+        Ok(v) => println("ok {}", v),
+        Err(e) => e.match({
+            A(a) => a.match({ A1(n) => println("a1 {}", n - 9000000000) }),
+            B(b) => b.match({ B1(s) => println("b1 {}", s) }),
+        }),
+    });
+    Ok(0);
+}

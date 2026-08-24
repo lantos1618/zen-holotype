@@ -1,0 +1,39 @@
+// AN ARGV ROW IS RAW BYTES — UTF-8 SEQUENCES PASS THROUGH UNMOLESTED,
+// AND `len` IS A BYTE COUNT.
+//
+// C's argv is `char **`: bytes with no encoding. Zen stores the rows as
+// `str` (a pointer and a length), so nothing between execve and
+// `env.argv` may transcode, validate, or truncate at a non-ASCII byte.
+// The classic failure is a row copied through `char` (signed, narrows a
+// 0xC3 lead to a negative index) or a length counted in codepoints
+// where bytes were asked: both still print SOMETHING numeric here, just
+// the wrong one.
+//
+// The runner hands us no arguments, so the multibyte content is built
+// in-program from literals — what makes this an env-args test is that
+// argv[0] is read through the same plumbing and its byte facts are
+// pinned alongside. Its absolute path is pure ASCII everywhere mktemp
+// makes paths, which makes the assertions stable WITHOUT pinning the
+// harness layout: first byte 47 ('/'), last byte 103 ('g'), and the
+// codepoint count equals the byte count because every byte is below
+// 128 — the equality itself is the ASCII claim.
+
+count_codepoints, Utf8Error = std.text
+
+main = (env: Env) Res<i32, AllocError | Utf8Error> {
+    // the literals: two-byte, three-byte, four-byte sequences
+    nihon ::= "日本";          // 6 bytes, 2 chars
+    println("nihon {} {}", nihon.len, count_codepoints(nihon).try());
+
+    flower ::= "🌸";           // 4 bytes, 1 char
+    println("flower {} {}", flower.len, count_codepoints(flower).try());
+
+    // argv[0] through the same pipe: bytes == chars ONLY if no byte of
+    // the path was mangled or widened on the way through
+    p ::= env.argv.get(0).ok_or(Utf8Error.Invalid(0)).try();
+    n ::= count_codepoints(p).try();
+    println("ascii-path bytes-eq-chars {}", p.len == n);
+    println("first {}", p[0]);
+    println("last {}", p[p.len - 1]);
+    Ok(0);
+}

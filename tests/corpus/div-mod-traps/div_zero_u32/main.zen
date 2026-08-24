@@ -1,0 +1,31 @@
+// u32 division traps on a zero divisor. the middle width, and the one
+// where a signed/unsigned mix-up in the emitted check is invisible:
+// an `int`-typed zero-test on an unsigned divisor still fires on zero,
+// so this test does not separate that bug -- what it separates is the
+// WIDTH below it (u16) and above it (u64), and it pins unsigned
+// 32-bit arithmetic itself.
+//
+// the prints before the trap: 4294967295 / 998244353 = 4 remainder
+// 301989883. a lowering that computes in i32 overflows the quotient's
+// intermediate or prints negative garbage; only real u32 division
+// prints these two lines.
+//
+// the divisor comes from the environment, so no constant folder can
+// turn this into the compile-time error a visible zero would be
+// (DESIGN.md: a provable trap is a compile error, not a runtime one).
+
+Error = Overflow | DivideByZero | OutOfBounds
+
+main = (env: Env) Res<i32, Error> {
+    a: u32 = u32.MAX;
+    println("{} {}", a / 998244353, a % 998244353);
+
+    // a zero the compiler cannot see: it comes from the environment
+    zero: u32 = env.vars.get("ZEN_TRAP_NEVER_SET").match({
+        Ok(_) => 1,
+        None  => 0,
+    });
+    q = a / zero;
+    println("{}", q);
+    Ok(0);
+}

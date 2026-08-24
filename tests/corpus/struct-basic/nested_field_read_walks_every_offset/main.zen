@@ -1,0 +1,47 @@
+// A FIELD READ THROUGH TWO LEVELS OF NESTING, WITH SIBLINGS THAT SHARE
+// THE SAME TYPE.
+//
+// `outer.inner.value` is two member offsets off one base, and the
+// plausible failure is not a crash but a SHORT CHAIN: the backend folds
+// the second projection back onto the first (emitting `outer.value`'s
+// slot), which C compiles happily when the types agree. So Inner and
+// Outer both carry i64 fields with the same names -- `value` exists at
+// BOTH levels -- and the two constructions differ only in which copy
+// they make non-zero. A flattened read prints outer's 40 for
+// `deep.inner.value`; a chain that stops one level early prints inner's
+// 5; only the full chain prints 6.
+//
+// `sibling.value == deep.inner.value` closes the loop: if nesting were
+// emitted as the sibling's offset by accident, the two lines would
+// print the same number.
+
+Inner = {
+    value :: i64 = 5,
+    tag :: i64 = 50,
+}
+
+Outer = {
+    value :: i64 = 40,
+    inner :: Inner = Inner(),
+    after :: i64 = 7,
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    deep = Outer();
+    println("deep {} {}", deep.inner.value, deep.after);
+
+    // the sibling with the same name and type, one level up
+    println("sibling {}", deep.value);
+
+    // every field written at construction, so the reads cannot be
+    // answered by defaults alone
+    made = Outer(value: 1, inner: Inner(value: 2, tag: 3), after: 4);
+    println(
+        "made {} {} {}",
+        made.inner.value,
+        made.inner.tag,
+        made.value,
+    );
+
+    Ok(0);
+}

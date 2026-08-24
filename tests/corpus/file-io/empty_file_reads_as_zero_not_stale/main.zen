@@ -1,0 +1,27 @@
+// tests/corpus/file-io/empty_file_reads_as_zero_not_stale/main.zen
+// The empty file is where "read short" and "read nothing" must agree
+// with the truth: zero bytes, Ok, not an error -- a module with nothing
+// in it is still a module. It is also the case a length cached at open
+// (or left in the buffer from a previous read) gets silently wrong, so
+// this asks about the same path TWICE: full first, then emptied by a
+// zero-length write. `wb` truncates on fopen, so the second read owes
+// its zero to the truncate actually happening; a floor that skips the
+// truncate for empty writes leaves the old 19 bytes behind and prints
+// them here. is_empty is asked too because it reads the SAME length
+// through a different door.
+
+FsError = std.env
+
+main = (env: Env) Res<i32, FsError> {
+    alloc ::= env.mem.alloc();
+
+    env.fs.write("drain.txt", "nineteen bytes here").try();
+    full = env.fs.read(alloc, "drain.txt").try();
+    println("full {} {}", full.len(), full.is_empty());
+
+    env.fs.write("drain.txt", "").try();
+    gone = env.fs.read(alloc, "drain.txt").try();
+    println("gone {} {}", gone.len(), gone.is_empty());
+    println("still there {}", env.fs.exists("drain.txt"));
+    Ok(0);
+}

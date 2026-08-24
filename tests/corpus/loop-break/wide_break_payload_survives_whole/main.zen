@@ -1,0 +1,22 @@
+// THE BREAK ARGUMENT SETS THE PAYLOAD -- a 64-bit value handed to
+// h.break comes back 64-bit, not truncated into some default word.
+//
+// Nothing outside the closure ever names T for this loop: the array's
+// element type settles Res<i64>, and the only thing that picks WHICH i64
+// is the argument at the break site. A backend that spills the payload
+// through an `int` (or any 32-bit slot) still compiles and still prints
+// A number -- just the wrong one: 7000001234 does not survive 32 bits.
+// The guard walks past values that would fit, so only the intended
+// element can be the answer; a natural-end fallback would print -999.
+//
+// breaks this: sizing the loop's result slot (or spilling its break
+// argument) through anything narrower than the break argument's type.
+
+main = (env: Env) Res<i32, AllocError> {
+    xs: [i64, 3] = [5000001234, 6, 7000001234];
+    w: Res<i64> = xs.loop((h, v) {
+        (v > 6000000000).then(() { h.break(v) });
+    });
+    println("{}", w.match({ Ok(v) => v, None => -999 }));
+    Ok(0);
+}

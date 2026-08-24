@@ -1,0 +1,41 @@
+// A 17-BYTE STRUCT AND A STRUCT INSIDE A Res PAYLOAD, BOTH THROUGH THE
+// MEMORY CLASS — the sizes the register classes stop covering.
+//
+// Three is 17 bytes: past every "small struct returns in a register or
+// pair" shortcut, so it must come back through memory, and its last
+// field is a u8, so a copy that rounds fields up to words still fits —
+// but a copy that stops at 16 bytes drops exactly the u8. That is why
+// c is asserted beside the sum on line one: it is the byte at the
+// truncation edge, and `t.a + t.b` next to it proves the two i64s
+// crossed whole.
+//
+// Pack rides inside a Res as an ARGUMENT and as a RETURN (`swap`), so
+// the tagged union's payload alignment matters in both directions. The
+// swap makes any lo/hi confusion loud rather than absent: 12 in, 12000
+// out, and a backend that returns the argument unchanged prints them
+// backwards while looking like a successful run.
+
+Three = { a: i64, b: i64, c: u8 }
+
+Pack = {
+    lo: i64,
+    hi: i64,
+    flag: bool,
+}
+
+pick = (which: i64) Res<Three, AllocError> {
+    Ok(Three(a: which * 2, b: which * 3, c: 7))
+}
+
+make_pack = (lo: i64) Pack { Pack(lo: lo, hi: lo * 1000, flag: true) }
+
+swap = (p: Pack) Pack { Pack(lo: p.hi, hi: p.lo, flag: p.flag) }
+
+main = (env: Env) Res<i32, AllocError> {
+    t = pick(5).try();
+    println("three {} {}", t.a + t.b, t.c);
+
+    p = swap(make_pack(12));
+    println("pack {} {} {}", p.lo, p.hi, p.flag);
+    Ok(0);
+}

@@ -1,0 +1,49 @@
+// THE EMPTY VEC IS NULL DATA AND ZERO LEN, AND NOTHING ANSWERS A VALUE.
+//
+// `Vec`'s declaration says the whole story: `data = null_ptr<T>()`,
+// `len = 0`, `capacity = 0` -- "an empty Vec owns no pages". That is an
+// INVARIANT, not an implementation detail, because the first add runs
+// realloc on a null pointer as a fresh allocation: if any code path
+// assumed data was non-null (or that len 0 meant capacity 0), the empty
+// state would diverge from the grown state and only one of them would be
+// exercised by every other test.
+//
+// Asserted here, per line:
+//   - len is 0, ptr() IS null -- the zero state really owns no pages
+//   - get/take past the empty end are None, not traps and not garbage:
+//     the bounds test must work when len is zero, where `<` and `<=`
+//     differ by nothing at all
+//   - a loop over it makes zero passes: the walk ends before the first
+//     `at` call rather than reading element 0 of nothing
+//   - after ONE add, ptr() stops being null: growth really did run,
+//     through the same call every later grow uses
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    v ::= alloc.Vec<i64>();
+
+    println("len {}", v.len);
+    p = v.ptr();
+    println("null {}", p.is_null());
+
+    v.get(0).match({
+        Ok(_) => println("get bad"),
+        None  => println("get none"),
+    });
+    v.take(0).match({
+        Ok(_) => println("take bad"),
+        None  => println("take none"),
+    });
+
+    passes ::= 0;
+    v.loop((h, x) { passes = passes + 1; });
+    println("passes {}", passes);
+
+    // the first add allocates through the null-data path
+    v.add(9000000000000).try();
+    p2 = v.ptr();
+    println("after add {} {}", v.len, p2.is_null());
+    head = v.get(0).ok_or(AllocError.OutOfMemory).try();
+    println("head {}", head);
+    Ok(0);
+}

@@ -1,0 +1,37 @@
+// BINARY OPERATORS ARE LEFT-ASSOCIATIVE — same-tier operators group to the
+// LEFT, so `a - b - c` is `(a-b)-c` and never `a-(b-c)`.
+//
+// Subtraction is the operator that can hide this: every wrong grouping of
+// `10 + 4 - 3` still lands on 11, because + and - agree under commutation
+// more often than they should. Division does not: `40 / 5 / 2` is 4 read
+// left-to-right, but right-associated it is 16 — and 16 is not an edge
+// case, it is exactly the value a Pratt loop that recurses instead of
+// iterating produces. The mixed line `20 - 5 - 3` is the human-readable
+// half (12, not 18); the division chain is the one that actually catches
+// the parser.
+//
+// The same rule must hold INSIDE the multiplicative tier, not just across
+// tiers: `20 / 3 * 3` is 18 only if `/` and `*` are one row grouped left;
+// a compiler that gives `*` its own tier above `/` prints 20 there while
+// getting every pure-additive line right, which is why that line lives in
+// additive_binds_looser_than_multiplicative and this file stays on
+// single-tier chains.
+//
+// THE ONE-LINE BREAK: flip `prec.left` to `prec.right` for the binary
+// expression rule (or make the Pratt loop recurse on its rhs at equal
+// precedence) — `divchain` flips from 4 to 16 and `mixed` from 12 to 18,
+// with no diagnostic anywhere.
+
+main = (env: Env) Res<i32, AllocError> {
+    println("mixed {}", 20 - 5 - 3);
+    println("divchain {}", 40 / 5 / 2);
+    println("addsub {}", 100 - 10 + 5);
+
+    // parens do NOT change the answer here on purpose: `20 - (5 - 3)` is
+    // the explicit-paren twin of `mixed`. A test whose expected output
+    // already matches the parenthesised reading cannot tell a correct
+    // compiler from a right-associative one; this pair is what makes the
+    // comparison meaningful rather than decorative.
+    println("explicit {}", 20 - (5 - 3));
+    Ok(0);
+}

@@ -1,0 +1,59 @@
+// AN OUTER REALLOC MOVES WHOLE VEC ROWS, AND THE ROWS KEEP THEIR BYTES.
+//
+// `Vec<Vec<i32>>` is the deepest generic layout in the corpus: each row
+// is a four-word struct (data pointer, allocator, len, capacity) that a
+// grow of the OUTER vec must memcpy verbatim to new pages. Two bugs hide
+// here that no flat-element test can see:
+//
+//   - the outer copy sized per ELEMENT instead of per ROW (or stopping
+//     at the first word): rows after the first read another row's data
+//     pointer or len, and the lens below stop matching their contents --
+//     while still printing plausible numbers
+//   - the copy re-homing rows in the WRONG order: every row answers a
+//     neighbour's cells, which for identical-shaped rows is invisible
+//     unless each row's contents identify it -- so cell values encode
+//     (row, col) and every read-back names its own row
+//
+// Three seed rows, then twenty filler rows push the outer buffer past 8
+// and past 16: two reallocs move all three seed rows before anything is
+// read back through a fresh get().
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    grid ::= alloc.Vec<Vec<i32>>();
+
+    // three seed rows, values unique per (row, col)
+    Range(0, 3).loop((h, r) {
+        row ::= alloc.Vec<i32>();
+        Range(0, 3).loop((h2, c) { row.add(r * 10 + c).try(); });
+        grid.add(row).try();
+    });
+
+    // twenty filler rows push the outer buffer past 8, then past 16:
+    // two reallocs move all three seed rows
+    Range(0, 20).loop((h, r) {
+        row ::= alloc.Vec<i32>();
+        Range(0, 3).loop((h2, c) { row.add(1000 + r * 10 + c).try(); });
+        grid.add(row).try();
+    });
+    println("rows {}", grid.len);
+
+    // read row 0 back through a fresh get(): its cells are the ones
+    // written before the moves, not another row's bytes
+    head ::= grid.get(0).ok_or(AllocError.OutOfMemory).try();
+    println("head len {}", head.len);
+    c0 = head.get(0).ok_or(AllocError.OutOfMemory).try();
+    c2 = head.get(2).ok_or(AllocError.OutOfMemory).try();
+    println("row0 {} {}", c0, c2);
+
+    // the last filler row identifies itself too
+    tail ::= grid.get(22).ok_or(AllocError.OutOfMemory).try();
+    t0 = tail.get(0).ok_or(AllocError.OutOfMemory).try();
+    println("row22 {}", t0);
+
+    // a middle seed row still answers ITS cell, not a neighbour's
+    mid ::= grid.get(1).ok_or(AllocError.OutOfMemory).try();
+    m = mid.get(1).ok_or(AllocError.OutOfMemory).try();
+    println("mid {}", m);
+    Ok(0);
+}

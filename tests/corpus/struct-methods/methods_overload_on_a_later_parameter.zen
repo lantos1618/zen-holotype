@@ -1,0 +1,29 @@
+// THE OVERLOAD SET SPLITS ON A LATER PARAMETER'S TYPE, NOT JUST ARITY:
+// two `twice` methods on one type, same arity, differing at parameter 2 --
+// i64 against str. Each call must reach its own body.
+//
+// This is where the backend can no longer hide behind C: i64 and i32
+// convert silently, so the sibling test (overload_pick_is_observable,
+// sema) uses exactly this trick to catch resolution picking by C type.
+// Here the pair is chosen so BOTH wrong answers compile: keying by the
+// first parameter alone sends both calls to one body; keying by C type
+// collapses str onto an integer form. The answers 300 and 4 share no
+// plausible confusion -- neither body can produce the other line under a
+// single misreading.
+//
+// Breaks if: overload matching stops at the receiver or at C-visible
+// types -- one line changes.
+
+W = {
+    v: i32,
+    twice = (self: @Self, k: i64) i32 { self.v * 100 }
+    twice = (self: @Self, s: str) i32 { self.v + 1 }
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    w = W(v: 3);
+    big: i64 = 5;
+    println("i64 {}", w.twice(big));
+    println("str {}", w.twice("s"));
+    Ok(0);
+}

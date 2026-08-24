@@ -1,0 +1,31 @@
+// A BREAK FIRED FROM INSIDE GUARDS STILL REACHES THE LOOP'S LABEL --
+// `.then` closures are frames on the way out, not places a break stops.
+//
+// The idiom the tree itself uses for classifiers (`gen_c_expr.zen`'s
+// needs_set/needs_hoist chain) is `(guard).then(() { h.break(v) })`, and
+// it rests on two rules meeting: a non-escaping closure may return
+// through its caller, and the handle names the loop by DEPTH, not by the
+// closure it was fired from. This file stacks TWO non-loop frames between
+// the break and its label -- a `.then` closure containing a `.match`
+// whose arm fires the break -- while the loop keeps counting passes with
+// its index. If any intermediate frame swallowed the exit (the break
+// returning from the closure only, or the match arm's value being taken
+// as the result), the later passes would print too: the output is exactly
+// one `survived` line, then the snapshot taken at index 1.
+//
+// breaks this: lowering h.break as "return from the enclosing closure"
+// instead of a labelled goto to the handle's own loop.
+
+main = (env: Env) Res<i32, AllocError> {
+    hit: Res<usize> = Range(0, 9).loop((h, n) {
+        (n == 1).then(() {
+            n.match({
+                1 => h.break(n * 200),
+                _ => println("wrong arm {}", n),
+            });
+        });
+        println("survived {}", n);
+    });
+    println("got {}", hit.match({ Ok(v) => v, None => 999 }));
+    Ok(0);
+}

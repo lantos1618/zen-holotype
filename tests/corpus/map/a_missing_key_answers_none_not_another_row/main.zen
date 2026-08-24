@@ -1,0 +1,45 @@
+// A MISSING KEY ANSWERS NONE -- AND THE MAP STAYS WHOLE AFTERWARDS.
+//
+// The sharpest miss: the absent key hashes into an OCCUPIED bucket, so
+// a get that stops at `hash == h` answers Ok with somebody else's
+// value instead of None. The constant hash makes every key share one
+// bucket, so this is guaranteed, not probabilistic. Then the map is
+// asked for a PRESENT key again: a lookup that walked off the end of
+// its probe path (or clobbered a row while missing) breaks the reads
+// that follow. 500 is deliberately not any stored value.
+Key = {
+    id: i32,
+}
+
+Key.impl(Hash, {
+    hash ::= (self: @Self, hasher :: Hasher) u64 { 7 }
+})
+
+Key.impl(Eq, {
+    eq ::= (self: @Self, other: @Self) bool { self.id == other.id }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    m     ::= alloc.Map<Key, i32>();
+
+    m.set(Key(id: 1), 100).try();
+    m.set(Key(id: 2), 200).try();
+
+    // same bucket as both rows, equal to neither
+    m.get(Key(id: 9)).match({
+        Ok(v) => println("absent {}", v),
+        None  => println("absent none"),
+    });
+
+    // and the walk left the map usable for the keys it holds
+    m.get(Key(id: 1)).match({
+        Ok(v) => println("one {}", v),
+        None  => println("one missing"),
+    });
+    m.get(Key(id: 2)).match({
+        Ok(v) => println("two {}", v),
+        None  => println("two missing"),
+    });
+    Ok(0);
+}

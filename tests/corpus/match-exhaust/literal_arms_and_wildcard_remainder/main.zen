@@ -1,0 +1,34 @@
+// An integer scrutinee has NO case list -- it cannot be enumerated -- so the
+// named arms pick out individual values and `_` must carry everything else.
+// The named values sit exactly where an over-narrow compare starts lying:
+//
+//   2147483648          narrowed to i32 becomes i32 MIN -- never equal again
+//   4294967297          narrowed to i32 becomes 1 -- answers the WRONG arm
+//   9223372036854775807 narrowed to i32 becomes -1 -- never equal again
+//
+// Every arm typechecks whatever width the comparison is emitted at, so
+// nothing is rejected; the C runs and prints numbers either way. Emit any
+// constant through 32 bits and three lines move at once: 20 -> 99,
+// 40 -> 10 (a value the author never named, answering arm `1`), 50 -> 99.
+//
+// Breaks if: the literal comparison is emitted at the wrong width --
+// lines two, three or four answer 99/10/99 instead of 20/40/50.
+
+bucket = (v: i64) i32 {
+    v.match({
+        1                    => 10,
+        2147483648           => 20,
+        4294967297           => 40,
+        9223372036854775807  => 50,
+        _                    => 99,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", bucket(1));
+    println("{}", bucket(2147483648));
+    println("{}", bucket(4294967297));
+    println("{}", bucket(9223372036854775807));
+    println("{}", bucket(0));
+    Ok(0);
+}

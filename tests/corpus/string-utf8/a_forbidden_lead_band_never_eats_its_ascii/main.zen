@@ -1,0 +1,44 @@
+// Every byte 0x80..0xBF is a continuation, and 0xC0/0xC1 lead only
+// overlong forms -- the whole band must be rejected as a lead. Each of
+// the 66 bytes is planted right before an 'A': a decoder that accepts
+// ANY of them (or one that reads a fixed 2 bytes instead of failing)
+// swallows the 'A' with it. The counts at the end are the proof:
+// rejected 66 AND ascii 66, both sides of the contract.
+String = std.text.text_string
+Utf8Error, codepoint_at = std.text.text_utf8
+
+probe = (s: str, at: usize) bool {
+    codepoint_at(s, at).match({
+        Ok(_) => true,
+        Err(_) => false,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String("").try();
+    b: u32 = 128;
+    loop(() { b < 194 }, (h) {
+        sb.add_byte(b).try();
+        sb.add_byte(65).try();
+        b = b + 1;
+    });
+    v ::= sb.view();
+    println("len {}", v.len);
+    bad ::= 0;
+    good ::= 0;
+    i: usize = 0;
+    loop(() { i < 132 }, (h) {
+        probe(v, i).match({
+            true  => println("accepted a forbidden lead"),
+            false => { bad = bad + 1; }
+        });
+        probe(v, i + 1).match({
+            true  => { good = good + 1; }
+            false => println("lost an ascii byte"),
+        });
+        i = i + 2;
+    });
+    println("rejected {} ascii {}", bad, good);
+    Ok(0);
+}

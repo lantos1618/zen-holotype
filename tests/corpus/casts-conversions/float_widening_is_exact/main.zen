@@ -1,0 +1,62 @@
+// THE FLOAT WIDENINGS ARE EXACTNESS CONTRACTS, NOT FORMAT ONES.
+//
+// num.zen declares exactly two: i32 -> f64 and f32 -> f64, both
+// lossless by definition (every i32 fits a double's 53-bit mantissa;
+// every f32 IS a subset of f64). Two wrong backends still print
+// numbers:
+//
+//   - spelling the integer cast `(float)v` instead of `(double)v`:
+//     i32.MAX does not fit a float's 24-bit mantissa, rounds up to
+//     2^31, and every later comparison is off by one while looking
+//     fine at smaller values;
+//
+//   - storing an f32 binding as a C `double` (the literal needs no
+//     narrowing, so the temptation is real): then 0.1f32 widened
+//     arrives EQUAL to 0.1f64 -- precisely the equality a correct
+//     backend must REFUSE, because 0.1 is not representable in 24
+//     bits and the widened value keeps the f32 error. That is the
+//     double-rounding trap, and it is why the fourth line expects
+//     "no": the interesting answer here is a refusal.
+//
+// {}'s float digit count is deliberately unspecified
+// (lex/number_float_basics.zen; widening_conversions_are_bounds.zen
+// compares rather than prints for the same reason), so every line
+// pins a COMPARISON and prints its verdict -- the discriminating
+// power survives, the formatting dependence does not.
+//
+// one-line break: emit `(float)` for the integer cast and the first
+// two verdicts flip; store f32 as double and the last one flips.
+main = (env: Env) Res<i32, AllocError> {
+    imax:    i32 = 2147483647;
+    imin:    i32 = -2147483648;
+    tenth_f: f32 = 0.1;
+    tenth_d: f64 = 0.1;
+    half:    f32 = 0.5;
+
+    // exact integers survive the round trip bit-for-bit
+    println("{}", (imax.to_f64() == 2147483647.0).match({
+        true  => "exact",
+        false => "rounded",
+    }));
+    println("{}", (imin.to_f64() == -2147483648.0).match({
+        true  => "exact",
+        false => "rounded",
+    }));
+
+    // dyadic rationals are exact in BOTH precisions, so this one must
+    // say yes -- it catches a widen that reinterprets bits instead of
+    // converting, which no mantissa-width probe separates
+    println("{}", (half.to_f64() == 0.5).match({
+        true  => "exact",
+        false => "rounded",
+    }));
+
+    // and the widened f32 keeps its own error: NOT the same number as
+    // the decimal written beside it
+    println("{}", (tenth_f.to_f64() == tenth_d).match({
+        true  => "yes",
+        false => "no",
+    }));
+
+    Ok(0);
+}

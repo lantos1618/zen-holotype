@@ -1,0 +1,37 @@
+// probeC: recursive struct through Ptr, arena allocated, walk + sum
+Alloc = std.mem
+
+Cell = {
+    value: i64,
+    next: Ptr<Cell>,
+}
+
+build = (alloc: Alloc, n: i64) Res<Ptr<Cell>, AllocError> {
+    (n <= 0).match({
+        true  => Ok(null_ptr<Cell>()),
+        false => {
+            rest = build(alloc, n - 1).try();
+            cell = alloc.create<Cell>().try();
+            cell.write(0, Cell(value: n * 7, next: rest));
+            Ok(cell);
+        },
+    });
+}
+
+walk = (p: Ptr<Cell>, acc: i64) i64 {
+    p.is_null().match({
+        true  => acc,
+        false => {
+            c = p.read(0);
+            walk(c.next, acc + c.value);
+        },
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    head = build(a, 6).try();
+    println("sum {}", walk(head, 0));
+    println("head {}", head.read(0).value);
+    Ok(0);
+}

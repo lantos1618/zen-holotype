@@ -1,0 +1,33 @@
+// MODULE-LEVEL CONSTANTS AT THE WIDTHS THAT CAN'T SURVIVE A WRONG C TYPE.
+//
+// A constant is inlined at each use (`gen_c_const.zen`: "a use IS its
+// value"), so the hazard is not storage but the C literal's own type:
+// `4294967296` pasted into a context typed `int` truncates to 0, and
+// `14695981039346656037` -- std's own FNV-1a hash seed, the largest
+// constant the tree carries -- does not even fit i64. The declared type
+// must win over the use site's ("the constant's DECLARED type wins",
+// the same file), and every value here is chosen so the wrong width is
+// VISIBLE as a number rather than as a compile error: truncated, it
+// still prints.
+//
+// SEED / 2 is the runtime discriminator: 7347990519673328018 over the
+// FULL unsigned value. A seed that was sign-flipped on its way to C
+// answers some other number entirely while both small lines still
+// print true. (A comptime `HALF = BIG / 2` was tried first and refused
+// by the backend for a different reason -- see LANE.md.)
+
+BIG: i64 = 4294967296
+
+SEED: u64 = 14695981039346656037
+
+WEIGHT: i64 = 2147483648
+
+main = (env: Env) Res<i32, AllocError> {
+    println("big {}", BIG);
+    println("seed {}", SEED);
+
+    // delivered through a runtime division: a constant that reached the
+    // backend as the WRONG VALUE still answers wrong here
+    println("shrink {}", SEED / 2);
+    Ok(0);
+}

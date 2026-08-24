@@ -1,0 +1,32 @@
+// tests/corpus/loop-basic/single_element_collections_walk_exactly_once/
+// one element is where the off-by-ones hide in plain sight: a body-tested
+// condition runs the body twice, a do-while never tests at all, an
+// inclusive end runs two passes. the vec element is i64 and 9000000000
+// does not fit an i32 - a pass that hands elements through a word-wide
+// slot prints a truncated value that still looks like a number
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    // exactly one pass, index and value both named
+    Range(7, 8).loop((h, index, value) {
+        println("range {} {}", index, value);
+    });
+
+    // one element, walked without its index
+    solo ::= alloc.Vec<i64>();
+    solo.add(9000000000).try();
+    solo.loop((h, v) {
+        println("vec {}", v);
+    });
+
+    // same single walk as a fold: acc must be the element once,
+    // not zero (skipped body) or twice it (double pass)
+    Range(7, 8).loop(0, (h, index, value, acc: i32) {
+        acc + value
+    }).match({
+        Ok(n) => println("fold {}", n),
+        None  => println("fold none"),
+    });
+    Ok(0);
+}

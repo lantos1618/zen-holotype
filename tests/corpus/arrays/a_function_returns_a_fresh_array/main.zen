@@ -1,0 +1,28 @@
+// RETURNING AN ARRAY BUILDS A NEW ONE AT THE CALL SITE.
+//
+// The struct wrapper makes an array returnable as well as passable, and
+// gen_c does NOT have to emit `return s;` — if it starts returning big
+// values through hidden pointers it has taken over a job the C compiler
+// was doing correctly (the same argument codegen/struct_return_large.zen
+// makes for plain structs). This pins the case with no dedicated test
+// there: the returned type is `[T, N]` itself, written in the signature.
+//
+// A backend that returns a pointer to the CALLEE'S stack frame compiles
+// without a diagnostic and answers either garbage or, worse, exactly the
+// stale-but-recognisable numbers of a previous call — which is why the
+// two calls interleave below. `first()`'s array is fully consumed BEFORE
+// `second()` runs, so a shared static slot or an un-copied sret buffer
+// makes second()'s answer depend on first()'s having existed.
+
+make = (base: i64) [i64, 3] {
+    [i64, 3](base + 1000000007, base * 2, base - 998244353)
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    first ::= make(0);
+    first.loop((h, i, v) { println("{} {}", i, v); });
+
+    second ::= make(4);
+    second.loop((h, v) { println("+ {}", v); });
+    Ok(0);
+}

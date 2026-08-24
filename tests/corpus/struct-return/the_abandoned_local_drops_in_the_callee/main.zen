@@ -1,0 +1,46 @@
+// THE LOCAL THE RETURN ABANDONS DROPS IN THE CALLEE, AND ONLY IT.
+//
+// `make` builds two Noisy values and returns the second. The first is
+// dead the moment the return expression is chosen, so the drop order —
+// and which frame runs it in — is the whole test:
+//
+//   drop 1     the abandoned local, in make's frame, BEFORE control
+//              returns (reverse declaration order: y outlives x)
+//   got 2      main's copy carries y's field, not x's
+//   drop 2     the returned value drops in MAIN, at scope exit
+//
+// A backend that materialises a return by pointer INTO THE CALLEE'S
+// FRAME gets "got 2" right and still prints this wrong: it must decide
+// that the returned slot is main's memory, so `x` dies in `make` while
+// `y`'s destructor belongs to whoever holds the result. Emitting both
+// drops in the callee prints "drop 1 / drop 2 / got 2"; skipping the
+// abandoned one prints no "drop 1" at all; hoisting everything to
+// main prints "drop 1" last. Three plausible outputs, one right one.
+//
+// The tag travels in the struct because `drop` cannot use the println
+// sugar — the sugar resolves the Env in scope by type, and inside drop
+// the only binding is self (drop_order_reverse.zen says this too).
+
+Noisy = {
+    env: Env,
+    id: i64,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () {
+        env = self.env;
+        println("drop {}", self.id);
+    }
+})
+
+make = (env: Env, a: i64, b: i64) Noisy {
+    x = Noisy(env: env, id: a);
+    y = Noisy(env: env, id: b);
+    y
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    n = make(env, 1, 2);
+    println("got {}", n.id);
+    Ok(0);
+}

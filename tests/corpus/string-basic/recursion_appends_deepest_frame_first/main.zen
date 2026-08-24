@@ -1,0 +1,40 @@
+// tests/corpus/string-basic/recursion_appends_deepest_frame_first/main.zen
+// Appends ordered by RECURSION, not by a loop: each frame appends one
+// byte AFTER its recursive call returns, so the deepest frame's byte
+// lands first and the printed order 12345 is the unwind order, not the
+// call order (which would print 54321). A backend that reordered the
+// two statements of the arm — or that ran the append before the call
+// because it lowered `.match` arms into straight-line code — produces
+// the mirror-image string, which is exactly as plausible as the truth.
+//
+// The byte arithmetic is load-bearing too: '0' + depth with depth
+// running 1..5 must yield u8 values 49..53. A char-typed receiver or a
+// widening to i32 that stayed i32 would print something else entirely.
+
+Error = AllocError | WriteError
+
+build = (a: Alloc, sb :: String, depth: usize) Res<(), AllocError> {
+    (depth == 0).match({
+        true  => Ok(()),
+        false => {
+            build(a, sb, depth - 1).try();
+            sb.add_byte('0' + depth).try();
+            Ok(());
+        },
+    })
+}
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String().try();
+    build(alloc, sb, 5).try();
+    println("up {}", sb.view());
+    println("len {} empty {}", sb.len(), sb.is_empty());
+
+    // and once more into a FRESH buffer, depth 9: single digits hold
+    deep ::= alloc.String().try();
+    build(alloc, deep, 9).try();
+    println("deep {} {}", deep.view(), deep.len());
+
+    Ok(0);
+}

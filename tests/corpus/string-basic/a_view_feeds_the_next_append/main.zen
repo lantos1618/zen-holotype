@@ -1,0 +1,44 @@
+// tests/corpus/string-basic/a_view_feeds_the_next_append/main.zen
+// A str taken from a buffer flows back IN as data: as an `add_bytes`
+// argument, as a `{}` hole's str, and as a slice of itself. This is
+// the composition String exists for — build, borrow, append what you
+// borrowed — and it breaks quietly if the view is a copy that dangles,
+// or if appending from a view of the SAME buffer reads bytes that the
+// append is concurrently moving.
+//
+// The self-append is the sharp edge: `v` aliases the two bytes "ab",
+// then `- {}` appends USING that alias while the buffer may grow. The
+// documented result to pin: the hole's bytes are read from where v
+// pointed when the call began, so the output is ab-ab (five bytes) —
+// not ab-- (the alias seeing its own write) and not a repeat of the
+// whole grown buffer. Whichever way the backend actually orders the
+// read against the realloc, this line pins it.
+
+Error = AllocError | WriteError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+
+    // one buffer's view feeds another buffer, three ways at once:
+    // whole-view hole, add_bytes of a slice, byte count printed after
+    src ::= alloc.String("gather").try();
+    dst ::= alloc.String().try();
+    dst.add("[{}]", src.view()).try();
+    v = src.view();
+    dst.add_bytes(v.slice(2, 4)).try();
+    println("dst {} {}", dst.view(), dst.len());
+
+    // a slice hole: pointer-and-len arguments, not literals
+    base = "wxyz";
+    t ::= alloc.String().try();
+    t.add("[{}|{}]", base.slice(0, 2), base.slice(2, 4)).try();
+    println("t {}", t.view());
+
+    // SELF-append through an alias taken before the write
+    sb ::= alloc.String("ab").try();
+    alias = sb.view();
+    sb.add("-{}", alias).try();
+    println("self {} {}", sb.view(), sb.len());
+
+    Ok(0);
+}

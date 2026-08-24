@@ -1,0 +1,26 @@
+// loop-body bindings are fresh storage every pass and drop at the END of
+// that pass, in reverse — so the drops interleave with the iterations:
+// iter, drop q, drop p, iter... a backend that reused one slot per pass
+// without dropping it, or that hoisted the bindings out of the loop and
+// dropped them once at function exit, prints three `iter` lines in a row
+// first. both look like working output until you read closely; the exact
+// interleaving is what this pins.
+
+Noisy = {
+    env: Env,
+    id: i32,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.id) }
+})
+
+main = (env: Env) Res<i32, IoError> {
+    Range(0, 3).loop((h, v: i32) {
+        p = Noisy(env: env, id: v * 10);
+        q = Noisy(env: env, id: v * 10 + 1);
+        println("iter {}", v);
+    });
+    println("after");
+    Ok(0);
+}

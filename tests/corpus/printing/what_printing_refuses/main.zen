@@ -1,0 +1,44 @@
+// tests/corpus/printing/what_printing_refuses/main.zen
+// The printer is type-directed, and its table of writers is FINITE —
+// `gen_c_print`'s chain ends in a refusal, reported at the ARGUMENT,
+// when the type has neither a primitive writer nor a Display toString.
+// This program is the boundary of that table, written as a positive
+// test: every hole below must COMPILE and print, because each one sits
+// exactly one step from the refusal.
+//
+//   - str: the sink's own write (bytes verbatim)
+//   - bool / every integer width: the scalar writers
+//   - f32/f64: the promoted float writer
+//   - a Display impl: routed to its toString
+//   - Box<T> with T itself printable: the monomorphised toString — a
+//     generic impl instantiated per argument, where "one shared symbol"
+//     would print both boxes with the same field
+//
+// A compiler whose writer table loses an entry (or routes a whole
+// family to the fault) turns any line below into
+// `printing a value of this type` — the corpus gate reddens on the
+// compile, not on output. That is the pin: these shapes must keep
+// being REACHABLE, not merely non-crashing.
+
+Error = AllocError | IoError
+
+Box<T> = {
+    v: T,
+}
+
+Box.impl(Display, {
+    toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
+        out.add("B({})", self.v)
+    }
+})
+
+main = (env: Env) Res<i32, Error> {
+    bi = Box(v: 41);
+    bs = Box(v: "text");
+    println("{} {}", bi, bs);
+
+    u: usize = 4000000000;
+    println("usize {}", u);
+    println("str {}", "lit");
+    Ok(0);
+}

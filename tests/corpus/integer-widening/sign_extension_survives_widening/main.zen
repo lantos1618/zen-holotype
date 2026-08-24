@@ -1,0 +1,43 @@
+// WIDENING A SIGNED INTEGER MUST SIGN-EXTEND, at every width, and the
+// conversion is a METHOD because there is no cast keyword.
+//
+// `std.core.num` declares the lossless widenings as bodies-less
+// signatures — `to_i64* = (self: i8) i64` — and `gen_c_call.zen` says
+// why the backend is the body: "a cast can't be written in terms of
+// anything below it". The obvious lowering is a C cast, and a C cast is
+// exactly where the bug lives: `(int64_t)x` on an `int8_t` is fine, but
+// routing the operand through an UNSIGNED intermediate — `(int64_t)
+// (uint8_t)x`, the shape a `c_prim` table keyed on the TARGET rather
+// than the declared parameter produces — reads the two's-complement
+// bits as magnitude first. `-5` arrives as 251. Assignment alone would
+// also do it silently: C converts `int8_t` to `int64_t` correctly, so
+// deleting `write_convert`'s cast and leaning on the binding looks
+// green until a NEGATIVE reaches it inside a larger expression.
+//
+// every row below therefore starts NEGATIVE, and three rows sit at
+// iN.MIN — the value whose high bit is the sign bit alone, where a
+// zero-extension is off by exactly 2^(N-1) and still prints as a
+// number. `i8.MIN` is asked at ALL THREE targets, so a link that
+// widens correctly to i16 but truncates again on the way to i64
+// cannot hide behind the smallest one being right.
+//
+// the values themselves come from the `iN.MIN` constants, not
+// literals: negated_literal_i64_boundary owns the literal path.
+
+main = (env: Env) Res<i32, AllocError> {
+    a: i8 = -5;
+    println("{}", a.to_i64());
+
+    b: i8 = i8.MIN;
+    println("{}", b.to_i16());
+    println("{}", b.to_i32());
+    println("{}", b.to_i64());
+
+    c: i16 = i16.MIN;
+    println("{}", c.to_i32());
+    println("{}", c.to_i64());
+
+    d: i32 = i32.MIN;
+    println("{}", d.to_i64());
+    Ok(0);
+}

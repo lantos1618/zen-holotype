@@ -1,0 +1,45 @@
+// A MATCH FEEDS A CALL ARGUMENT -- AND ARGUMENTS EVALUATE IN ORDER.
+//
+// Two plain matches as two arguments of one call. The callee stores
+// what it was handed and main prints it back, so a lowering that reads
+// the SCRUTINEE slot (or the wrong arm's value) for either argument is
+// visible in the stored pair -- `0 5` instead of `40 50`, with valid C
+// and exit 0.
+//
+// `ordered` pins the same position against evaluation ORDER. Its FIRST
+// argument pushes into a vec; its SECOND is a match on that vec's len,
+// so its arm depends on the first argument having run:
+//
+//   correct        21   (left-to-right: len is 1 when matched -> y = 3)
+//   right-to-left  210  (len still 0 -> `_` arm -> y = 30)
+//
+// A right-to-left backend does not reject the program: it silently
+// takes a different arm. That is exactly the class of bug a corpus
+// test exists to catch, and value position is where it hides --
+// statement position would force the two halves apart.
+
+push = (env: Env, v :: Vec<i32>, n: i32) Res<i32, AllocError> {
+    v.add(n).try();
+    Ok(n)
+}
+
+ordered = (x: i32, y: i32) i32 { x * y }
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    v ::= alloc.Vec<i32>();
+
+    code ::= 5;
+    v.add(code.match({ 5 => 40, _ => 41 })).try();
+    v.add(code.match({ 0 => 4, _ => 50 })).try();
+
+    // the read-backs are themselves matches in value position: each Ok
+    // binder becomes the local the println prints.
+    a = v.get(0).match({ Ok(x) => x, None => 0 });
+    b = v.get(1).match({ Ok(x) => x, None => 0 });
+    println("{} {}", a, b);
+
+    t ::= alloc.Vec<i32>();
+    println("{}", ordered(push(env, t, 7).try(), t.len.match({ 1 => 3, _ => 30 })));
+    Ok(0);
+}

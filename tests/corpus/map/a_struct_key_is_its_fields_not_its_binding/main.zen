@@ -1,0 +1,50 @@
+// A STRUCT KEY IS ITS FIELD VALUES, NOT ITS BINDING -- AND EQ READS
+// EVERY FIELD.
+//
+// Two separately constructed Key values with equal fields must be ONE
+// map key: set under one binding, read back through another that never
+// touched the map. A key stored by pointer identity (or a field-wise
+// hash that hashed the struct's ADDRESS instead of its fields) answers
+// None here. The near-miss shares the FIRST field and differs in the
+// second, so an eq that stops after one matching field -- or a probe
+// that settles on a hash match alone -- hands back somebody else's
+// value instead of None. The two fields hash together, so the near-miss
+// also lands in a different bucket: the miss cannot be excused as
+// "found the row, compared wrong"; the whole walk must fail.
+Key = {
+    lo: u64,
+    hi: u64,
+}
+
+Key.impl(Hash, {
+    hash ::= (self: @Self, hasher :: Hasher) u64 {
+        self.lo *% 1000003 +% self.hi
+    }
+})
+
+Key.impl(Eq, {
+    eq ::= (self: @Self, other: @Self) bool {
+        (self.lo == other.lo) && (self.hi == other.hi)
+    }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    m     ::= alloc.Map<Key, str>();
+
+    // written under this binding...
+    m.set(Key(lo: 7, hi: 11), "seven").try();
+
+    // ...read back through a DIFFERENT one: same fields, fresh struct
+    m.get(Key(lo: 7, hi: 11)).match({
+        Ok(v) => println("found {}", v),
+        None  => println("found missing"),
+    });
+
+    // same lo, different hi: neither a hit nor another row's value
+    m.get(Key(lo: 7, hi: 13)).match({
+        Ok(v) => println("near {}", v),
+        None  => println("near none"),
+    });
+    Ok(0);
+}

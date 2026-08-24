@@ -1,0 +1,37 @@
+// SHIFT BY width VANISHES IN THAT TYPE — AND THE SAME SHIFT ONE WIDTH UP
+// SURVIVES.
+//
+// `3 *% 16 *% 16` on a u8 shifts the low 1 out of an 8-bit value: 0, and
+// nothing else. The trap-shaped bug here is not a crash but a WIDER
+// ANSWER: computing in a promoted slot (C's own rule for u8) and storing
+// back without the truncation prints 768 — a plausible number that
+// happens to be the right answer to a different question. The twin lines
+// make the distinction observable instead of arguable:
+//
+//   u8:   3 << 8 = 0        (the shift happened at 8 bits)
+//   u32:  3 << 8 = 768      (the same count, more room)
+//
+// A backend that lowers every sub-int operand through C's integer
+// promotion gets the first line wrong and the second right; one that
+// honours the declared type gets both. Both columns are printed in the
+// same run so the disagreement is local, not across files.
+//
+// one-line break: drop the truncating store-back on sub-int types (emit
+// `(u8)(x * y)` as plain int arithmetic) and "vanish" prints 768 while
+// its wider twin stays correct.
+
+main = (env: Env) Res<i32, AllocError> {
+    b8:  u8  = 3;
+    b32: u32 = 3;
+
+    println("vanish {}", b8 *% 16 *% 16);
+    println("wider {}", b32 *% 16 *% 16);
+
+    // 5 << 16 vanishes at u32 but survives at u64: the same wall one
+    // store-width up, so a fix keyed to "width 8" does not pass by luck.
+    b64: u64 = 5;
+    println("wide-vanish {}", b32.to_u64() *% 65536 *% 65536);
+    println("wide-survive {}", b64 *% 65536 *% 65536);
+
+    Ok(0);
+}

@@ -1,0 +1,41 @@
+// A LOOP THAT ENDS WITHOUT BREAKING IS `None`, NOT `Ok(0)` -- and a break
+// that carries 0 is `Ok(0)`, NOT `None`.
+//
+// Both faces in one file, because they fail in opposite directions and a
+// test with only one face still passes after the tags are swapped. The
+// result temporary opens pre-initialised to the `None` variant
+// (gen_c_loop.zen `open_result_temp`) precisely so a natural end cannot
+// inherit whatever the frame held; the zero-payload break then proves the
+// tag and the payload travel separately -- a backend that conflates
+// "payload 0" with "nothing was carried" prints `none` on the second half,
+// and one that skipped the `None` init prints `ok` with a garbage payload
+// on the first.
+//
+// usize throughout, on both sides of every binding, so neither face can
+// hide behind an int/usize slot mismatch: the payloads are small, exact,
+// and unsigned.
+//
+// breaks this: initialising the loop result to `Ok(zeroed)` (or to tag 0)
+// instead of `None`, or folding a 0 payload into the None tag.
+
+main = (env: Env) Res<i32, AllocError> {
+    // runs out of range with no break at all: absence, not zero.
+    gone: Res<usize> = Range(0, 3).loop((h, v) {
+        println("pass {}", v);
+    });
+    gone.match({
+        Ok(v) => println("ok {}", v),
+        None  => println("none"),
+    });
+
+    // breaks with the value 0: presence, carrying a zero.
+    z: usize = 0;
+    zero: Res<usize> = loop((h) {
+        h.break(z);
+    });
+    zero.match({
+        Ok(v) => println("ok {}", v),
+        None  => println("none"),
+    });
+    Ok(0);
+}

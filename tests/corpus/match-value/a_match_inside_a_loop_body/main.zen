@@ -1,0 +1,33 @@
+// A MATCH IN VALUE POSITION INSIDE A LOOP BODY, FED BY THE LOOP'S OWN
+// BINDING.
+//
+// The scrutinee is `r` -- the value `.loop` handed this iteration -- so
+// the match must lower fresh EACH iteration: the condition re-tested on
+// the current binding and the result temporary REASSIGNED from the arm
+// that was taken. A backend that hoists the chain out of the loop, or
+// allocates one temporary and never writes it on later iterations,
+// still compiles and prints a plausible number:
+//
+//   correct        300   (100 + 200, iteration values 100 then 200)
+//   stale temp     200   (first iteration's answer reused)
+//   scrutinee      11    (3 + 8: the raw rows summed)
+//
+// The accumulator is printed once after the loop because a per-
+// iteration println cannot tell "wrong every time" from "right twice".
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    rows ::= alloc.Vec<i32>();
+    rows.add(3).try();
+    rows.add(8).try();
+
+    total ::= 0;
+    rows.loop((h, r) {
+        total = total + r.match({
+            3 => 100,
+            _ => 200,
+        });
+    });
+    println("{}", total);
+    Ok(0);
+}

@@ -1,0 +1,31 @@
+// TWO blocks, ONE binding: the inner block registers against ITS OWN
+// record while capturing main's `n`, and the inner defer runs when the
+// INNER brace closes -- before main's later write to `n`, but AFTER the
+// earlier one. So the inner snapshot holds 6, the outer one 5, and the
+// pair of prints is the whole storage model in four lines:
+//
+//   - each block gets its own record ("it nests, each block gets its
+//     own") -- one shared record would make both prints agree;
+//   - a capture freezes at ITS registration -- reading the live frame
+//     makes both prints say 7;
+//   - the inner block's exit runs between the two writes, so the ORDER
+//     of the writes decides which number each record holds.
+//
+// swap the two registrations' answers and you have rebinding-to-nearest
+// instead of own-record; make them equal and you have one shared cell.
+// Both wrong shapes compile and print plausible numbers.
+
+main = (env: Env) Res<i32, IoError> {
+    n ::= 5;
+    @scope.defer(() { println("outer {}", n * 100) });
+    {
+        m ::= 70;
+        @scope.defer(() { println("inner {} {}", n, m + 30) });
+        n = 6;
+        m = 700;
+        println("mid {} {}", n, m);
+    }
+    n = 7;
+    println("end {}", n);
+    Ok(0);
+}

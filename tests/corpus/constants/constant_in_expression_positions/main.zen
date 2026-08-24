@@ -1,0 +1,36 @@
+// A CONSTANT IN EXPRESSION POSITIONS IS ITS VALUE, NOT ITS NAME.
+//
+// Inlining at each use means the constant must survive being CONSUMED,
+// not just printed: handed to a match as the scrutinee, divided by,
+// added where an i64 is wanted. The plausible failure is
+// position-specific and quiet -- a backend that inlines correctly for
+// `println("{}", K)` but re-reads a dead slot when the same node is an
+// operand answers 0 or garbage only there, while every plain use still
+// prints true.
+//
+// Each expected value leaves exactly one way to be wrong: the match arm
+// tags disagree by one (42 vs anything else), the division is EXACT so
+// truncation of a mis-inlined operand would show as 11 or 13 rather
+// than 12, and the sum is even but past the square, so no single
+// off-by-one in one operand can fake it.
+
+K: i64 = 300
+
+FACTOR: i64 = 5
+
+share = (total: i64, parts: i64) i64 { total / parts }
+
+main = (env: Env) Res<i32, AllocError> {
+    // scrutinee: the arm that fires names the value
+    K.match({
+        42 => println("match forty-two"),
+        _  => println("match other"),
+    });
+
+    // both operands constants through a helper call: exact division
+    println("div {}", share(K, FACTOR * FACTOR));
+
+    // both operands constants
+    println("sum {}", K + FACTOR);
+    Ok(0);
+}

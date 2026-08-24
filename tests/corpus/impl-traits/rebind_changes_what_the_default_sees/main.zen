@@ -1,0 +1,36 @@
+// A DEFAULT (`::=`) IS THE BOUND'S OWN BODY; a rebind in an impl is
+// what the caller sees -- and the DEFAULT CALLING ANOTHER MEMBER must
+// observe the rebinding per type. `twice` has no supplied body
+// anywhere: Plain runs the default's hello (n*1), Fancy's twice sees
+// Fancy's rebound hello (n*1000). DESIGN.md, Declarations: on methods
+// `::=` means "impls may rebind".
+//
+// one-line break: lower the default ONCE against the bound and call
+// it for every impl (no per-impl specialisation of the default body)
+// and f.twice() prints 42 instead of 21000 -- plausible, still wrong.
+Greet = {
+    n: i64,
+
+    hello* ::= (self: @Self) i64 { self.n * 1 },
+    twice* ::= (self: @Self) i64 { self.hello() * 2 },
+}
+
+Plain = { n: i64 }
+Fancy = { n: i64 }
+
+Plain.impl(Greet, { n: 21 })
+Fancy.impl(Greet, {
+    n: 21,
+    hello = (self: @Self) i64 { self.n * 1000 },
+})
+
+twice_of = <T: Greet>(g: T) i64 { g.twice() }
+
+main = (env: Env) Res<i32, AllocError> {
+    p = Plain(n: 21);
+    f = Fancy(n: 21);
+    println("{} {}", p.hello(), f.hello());
+    println("{} {}", p.twice(), f.twice());
+    println("{} {}", twice_of(p), twice_of(f));
+    Ok(0);
+}

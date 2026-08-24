@@ -1,0 +1,31 @@
+// u64 division traps on a zero divisor. u64.MAX fits no signed C
+// type -- gen_c suffixes the literal (codegen/literal_boundaries_unsigned)
+// -- so a trap check emitted through a signed intermediate (`long`,
+// `int`) reads 65535 or -1 and never fires: raw SIGFPE, exit 136, no
+// Zen trap line. only an unsigned 64-bit compare survives this test.
+//
+// the prints before the trap pin unsigned full-width arithmetic:
+// 18446744073709551615 / 7 = 2635249153387078802 remainder 1, and
+// 4294967295 % 998244353 = 301989883 -- a lowering that narrows to a
+// signed type prints garbage on every line.
+//
+// the divisor comes from the environment, so no constant folder can
+// turn this into the compile-time error a visible zero would be
+// (DESIGN.md: a provable trap is a compile error, not a runtime one).
+
+Error = Overflow | DivideByZero | OutOfBounds
+
+main = (env: Env) Res<i32, Error> {
+    a: u64 = u64.MAX;
+    println("{} {}", a / 7, a % 7);
+    println("{}", u32.MAX.to_u64() % 998244353);
+
+    // a zero the compiler cannot see: it comes from the environment
+    zero: u64 = env.vars.get("ZEN_TRAP_NEVER_SET").match({
+        Ok(_) => 1,
+        None  => 0,
+    });
+    q = a / zero;
+    println("{}", q);
+    Ok(0);
+}

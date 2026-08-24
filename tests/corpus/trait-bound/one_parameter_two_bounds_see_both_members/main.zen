@@ -1,0 +1,40 @@
+// one parameter, TWO bounds -- `T: Meter + Weigh`, Map's `K: Eq + Hash`
+// spelled out. each bound must put its own members in view at the same
+// call site, and neither may shadow the other.
+//
+// this is also the test that survives the method-name collision bug in
+// LANE.md only because the two impls supply DIFFERENT names: read a
+// member both bounds supplied and file order would pick. if that defect
+// is ever fixed by making selection real, this file must stay green --
+// it pins that adding a second bound ADDS members, never removes or
+// rewrites them: read=3*10=30 and mass=3+500=503, so the fold of both
+// into one answer is 30*1000 + 503 = 30503, and line 2 is the zero-tag
+// that shows each member reading the SAME receiver (0*1000 + 500).
+
+Meter = {
+    read* = (self: @Self) i32
+}
+
+Weigh = {
+    mass* = (self: @Self) i32
+}
+
+Gadget = {
+    tag: i32,
+}
+
+Gadget.impl(Meter, {
+    read = (self: @Self) i32 { self.tag * 10 }
+})
+
+Gadget.impl(Weigh, {
+    mass = (self: @Self) i32 { self.tag + 500 }
+})
+
+audit = <T: Meter + Weigh>(t: T) i32 { t.read() * 1000 + t.mass() }
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", audit(Gadget(tag: 3)));
+    println("{}", audit(Gadget(tag: 0)));
+    Ok(0);
+}

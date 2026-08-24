@@ -1,0 +1,42 @@
+// Four sequences whose LEAD bytes are all perfectly in-band and whose
+// continuation bytes are all well-formed. Only the decoded VALUE makes
+// them illegal:
+//
+//   E0 80 80    overlong 3-byte U+0000   (value < 0x800)
+//   ED A0 80    surrogate U+D800         (D800..DFFF)
+//   F0 80 80 80 overlong 4-byte U+0000   (value < 0x10000)
+//   F4 90 80 80 one PAST U+10FFFF        (value > max)
+//
+// A decoder that only checks lead bands and continuation shapes accepts
+// every one of these -- the bug is invisible until a surrogate or an
+// overlong zero reaches output. Each verdict must be 0.
+String = std.text.text_string
+Utf8Error, codepoint_at, validate_utf8 = std.text.text_utf8
+
+verdict = (s: str) i64 {
+    s.validate_utf8().match({
+        Ok(_) => 1,
+        Err(_) => 0,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    sb1 ::= alloc.String("").try();
+    sb1.add_byte(224).try(); sb1.add_byte(128).try(); sb1.add_byte(128).try();
+    println("overlong3 {}", verdict(sb1.view()));
+
+    sb2 ::= alloc.String("").try();
+    sb2.add_byte(237).try(); sb2.add_byte(160).try(); sb2.add_byte(128).try();
+    println("surrogate {}", verdict(sb2.view()));
+
+    sb3 ::= alloc.String("").try();
+    sb3.add_byte(240).try(); sb3.add_byte(128).try(); sb3.add_byte(128).try(); sb3.add_byte(128).try();
+    println("overlong4 {}", verdict(sb3.view()));
+
+    sb4 ::= alloc.String("").try();
+    sb4.add_byte(244).try(); sb4.add_byte(144).try(); sb4.add_byte(128).try(); sb4.add_byte(128).try();
+    println("past_max {}", verdict(sb4.view()));
+    Ok(0);
+}

@@ -1,0 +1,28 @@
+// `h.break()` is a NON-LOCAL exit and must run the current pass's frame
+// on the way out — but ONLY that frame: earlier passes already dropped
+// their own bindings at their own pass end, and nothing may drop them
+// twice. pass 1 breaks after printing, so its two drops land between the
+// prints; an implementation that forgot to unwind on break prints
+// nothing for pass 1 (leak), one that unwound every pass's leftovers
+// double-drops. ids are per-pass so a double free cannot masquerade as
+// correct output.
+
+Noisy = {
+    env: Env,
+    id: i32,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.id) }
+})
+
+main = (env: Env) Res<i32, IoError> {
+    [0, 1, 2].loop((h, i: i32) {
+        p = Noisy(env: env, id: i * 10);
+        q = Noisy(env: env, id: i * 10 + 1);
+        (i == 1).then(() { h.break() });
+        println("iter {}", i);
+    });
+    println("after");
+    Ok(0);
+}

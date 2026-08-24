@@ -1,0 +1,31 @@
+// A STR CONSTANT IS INLINED AT EACH USE, SO EVERY USE MUST BE THE SAME BYTES.
+//
+// `gen_c_const.zen` refuses to emit a str constant as a C object ("a
+// second spelling of the same literal for no gain") and writes the value
+// out at each use instead. Two ways that goes wrong, both silent:
+//
+//   1. ONE USE GETS STALE OR EMPTY BYTES -- an interned-but-unwritten
+//      slot reads as "" at the use site while another prints fine. The
+//      tree lost weeks to zeros that were already expected; a test with
+//      a single use cannot see this split, so WHO is printed twice,
+//      compared against its own literal, and measured for length --
+//      four independent uses of one declaration.
+//   2. THE DECLARED TYPE LOSES TO THE USE SITE'S, so the literal is
+//      laid out at one width and read at another. `len` is a byte
+//      count (a FIELD here, not a call), and 7 is what the declared
+//      "gandalf" lays out; a half-written slot reads short.
+
+WHO*: str = "gandalf"
+
+main = (env: Env) Res<i32, AllocError> {
+    println("who {}", WHO);
+    println("who-again {}", WHO);
+
+    eq = (WHO == "gandalf").match({
+        true  => 1,
+        false => 0,
+    });
+    println("eq {}", eq);
+    println("len {}", WHO.len);
+    Ok(0);
+}

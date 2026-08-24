@@ -1,0 +1,40 @@
+// UNARY MINUS BINDS TIGHTER THAN ANY BINARY OPERATOR — `-2 + 3` is
+// `(-2)+3` = 1, never `-(2+3)` = -5.
+//
+// This is the tier line where the wrong answer is most plausible: a parser
+// that lets the operand of prefix `-` swallow the additive expression to
+// its right still compiles, still runs, and prints -5 — a perfectly
+// ordinary negative number. The discriminating half of the file is the
+// SUBTRACTION line: `10 - 3` must parse as `10 - (3)` with the literal as
+// the right operand, not as `-(3)` with 10 lost — the failure mode of an
+// implementation that rewrites every leading `-x` into a negation node and
+// then mis-hangs it on its left neighbour. That mis-hanging prints -13 or
+// rejects, never 7.
+//
+// `-sq(4)` pins PREFIX-ABOVE-POSTFIX: unary applies AFTER call/index bind,
+// so the operand is the whole postfix expression, not just the head. A
+// compiler that binds `-` tighter than calls negates 4 and then tries to
+// call something that no longer exists; one that folds the negation into
+// the literal inside a call argument prints 16 instead of -16.
+//
+// THE ONE-LINE BREAK: in unary_expression's rule, change field('operand')
+// from $._expression-at-unary-level down to the full binary expression (or
+// raise PREC.unary above PREC.call). `neg` flips 1 -> -5 and `negcall`
+// flips -16 -> 16 while nothing errors.
+
+sq = (x: i64) i64 { x * x }
+
+main = (env: Env) Res<i32, AllocError> {
+    println("neg {}", -2 + 3);
+
+    // the parenthesised twin: explicit grouping IS -(2+3), and this is the
+    // only spelling that produces -5.
+    println("paren {}", -(2 + 3));
+    println("suboperand {}", 10 - 3);
+    println("negcall {}", -sq(4));
+
+    // two prefixes stack RIGHT-nested (--3 is -(-3) = 3), the one place
+    // prefix associativity shows without parens.
+    println("dbl {}", --3);
+    Ok(0);
+}

@@ -1,0 +1,45 @@
+// tests/corpus/stdin/a_refused_read_consumes_nothing/main.zen
+// THE ROOM CHECK RUNS BEFORE ANY BYTE MOVES. Asking for more than the
+// spare capacity answers Err(Full) — and a floor that fread FIRST and
+// checked the room AFTER would have consumed the stream, so the retry
+// below would find end of input instead of the data. Full must also be
+// the variant NAMED: Closed is what end of input may never become, and
+// the four IoError names are one word apart in this program.
+//
+// main.stdin holds "abcdefg\nhij" (11 bytes), none of it consumed by
+// the refused read.
+
+Vec    = std.collections
+
+Error = AllocError | IoError
+
+main = (env: Env) Res<i32, Error> {
+    a ::= env.mem.alloc();
+
+    // no reserve first — there is NO room, and that must be refused
+    tight ::= a.Vec<u8>();
+    env.in.read(tight, 1).match({
+        Ok(_)   => println("a read with no room was allowed"),
+        Err(io) =>
+            io.match({
+                Full        => println("refused full"),
+                Closed      => println("refused closed"),
+                Invalid     => println("refused invalid"),
+                Interrupted => println("refused interrupted"),
+            }),
+    });
+    println("tight len {}", tight.len);
+
+    // the same Vec, now with room: the retry sees exactly what the
+    // refusal left behind
+    tight.reserve(16).try();
+    got ::= env.in.read(tight, 16).try();
+    println("retry got {}", got);
+
+    // every surviving byte, numbered: 'a'..'g', \n, 'h','i','j' —
+    // proof the refused read ate none of the front
+    Range(0, tight.len).loop((h, i) {
+        tight.get(i).match({ Ok(byte) => println("{} {}", i, byte), None => {} });
+    });
+    Ok(0);
+}

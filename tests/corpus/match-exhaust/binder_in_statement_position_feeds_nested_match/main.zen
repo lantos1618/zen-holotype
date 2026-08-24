@@ -1,0 +1,38 @@
+// A binder arm in statement position whose bound value feeds a nested
+// match, with `_` closing BOTH levels.
+//
+// This is `a_match_binder_leaves_with_its_arm`'s scope story continued into
+// dispatch: the inner match runs on a name that exists only inside the
+// outer arm, and the outer chain keeps testing tags AFTER the arm that
+// binds. An emission that ended the chain at the first binder (a binder
+// looks like "matches everything", which to a lazy lowering is license to
+// stop) sends Left's values to the Right/`_` arms: 1 becomes 3000 and the
+// blank becomes 400 instead of 10.
+//
+// Breaks if: a binder arm terminates the arm chain instead of carrying a
+// guard -- Left's two lines read "3000"/"400" instead of "1"/"10".
+
+Cell = Full(i64) | Blank
+
+Slot = Left(Cell) | Right(Cell) | Gone
+
+score = (s: Slot) i64 {
+    s.match({
+        Left(cell) => {
+            cell.match({
+                Full(n) => n,
+                _       => 10,
+            })
+        },
+        Right(_) => 3000,
+        _        => 400,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", score(Slot.Left(Cell.Full(1))));
+    println("{}", score(Slot.Left(Cell.Blank)));
+    println("{}", score(Slot.Right(Cell.Full(2))));
+    println("{}", score(Slot.Gone));
+    Ok(0);
+}

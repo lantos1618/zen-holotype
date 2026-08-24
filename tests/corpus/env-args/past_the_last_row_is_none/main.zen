@@ -1,0 +1,46 @@
+// GET PAST THE LAST ROW IS None, AND THE LAST ROW IS AT len - 1.
+//
+// `Vec.get` answers None off the end and `env.argv` is a Vec<str> like
+// any other — but its length arrives from C's argc through generated
+// code (`(size_t)argc` in the Vec literal), so this pins the SEAM: a
+// backend that wrote the literal's `.len = 0` (the `(Env){0}` bug) or
+// `len = argc - 1` makes the last row unreadable or the boundary move.
+//
+// The wrong answers here look plausible: index len-1 reading as None
+// with argc=1 reads exactly like "no arguments", which is what the
+// zeroed-Env bug printed for years. So the test separates the two:
+// row 0 must EXIST while row 1 must NOT, and the count must be exactly
+// one. A missing argv[0] and an argv[1] that leaks through are both red.
+//
+// The one existing row is pinned by its last five bytes ("/prog") and
+// NOT by its absolute length: under the runner the path embeds this
+// test's own directory name, so a length in .expected would pin the
+// harness layout rather than the compiler.
+
+count_codepoints, Utf8Error = std.text
+
+main = (env: Env) Res<i32, AllocError | Utf8Error> {
+    println("count {}", env.argv.len);
+
+    // the one row every process has, named by its tail
+    env.argv.get(env.argv.len - 1).match({
+        Ok(p)  => {
+            t ::= p.slice(p.len - 5, p.len);
+            println("last tail {}", t);
+        },
+        None   => println("last MISSING"),
+    });
+
+    // one past it: None, not a read of foreign memory, not a trap
+    env.argv.get(env.argv.len).match({
+        Ok(_) => println("past-the-end LEAKED"),
+        None  => println("past the end is none"),
+    });
+
+    // far past it, same answer — no wraparound at some small modulus
+    env.argv.get(env.argv.len + 99).match({
+        Ok(_) => println("far past LEAKED"),
+        None  => println("far past is none"),
+    });
+    Ok(0);
+}

@@ -1,0 +1,33 @@
+// A STRUCT CONSTRUCTED IN A LOOP BODY IS FRESH EVERY PASS, AND ITS
+// DEFAULTS STAND EVERY PASS.
+//
+// own/consume_fresh_value_each_iteration.zen pins that a Drop value
+// constructed in the body may be consumed there; this pins the VALUE
+// side for plain structs: each iteration constructs from the defaults
+// and accumulates one field through an outer binding. The total is only
+// right if every pass started from the DECLARED default and not from
+// the previous pass's storage -- or from a single hoisted object that
+// one construction was supposed to fill. A backend that hoists the
+// construction out of the loop prints 40, 44 or another plausible
+// number instead of 44; one that reuses the object without re-defaulting
+// drifts upward every pass.
+//
+// `step` is written each pass BEFORE the read to prove the write dies
+// with the pass: the next iteration's `k.base * k.step` must see the
+// default 1 again, not the 5 the previous pass left.
+
+Tick = {
+    step :: i64 = 1,
+    base :: i64 = 10,
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    total ::= 0;
+    Range(0, 4).loop((h, i) {
+        k ::= Tick();
+        k.step = 5;
+        total = total + k.base * k.step + i;
+    });
+    println("total {}", total);
+    Ok(0);
+}

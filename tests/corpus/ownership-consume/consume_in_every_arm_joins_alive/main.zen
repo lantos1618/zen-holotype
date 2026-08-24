@@ -1,0 +1,33 @@
+// CONSUME IN EVERY ARM, JOIN INTO ONE BINDING: both arms move `f`,
+// each through its own local, and the match evaluates to whichever
+// local ran -- the value is alive exactly once at the join, held by
+// `kept`. Walk the arms as sequential statements and the second
+// `consume f` looks like a double move; arms are alternative paths,
+// so this must keep compiling. This is consume's own version of
+// own/consume_in_every_match_arm.zen, with the moves made EXPLICIT:
+// a checker that only special-cases bare `=> consume f` tail
+// expressions misses the block form, and a checker that rejects it
+// makes every arm-local-then-join program unwritable.
+//
+// the reject side is must-fail/own/consume_in_one_match_arm.zen --
+// consumed on one path and used after the join is still an error.
+
+Noisy = {
+    env: Env,
+    tag: str,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.tag) }
+})
+
+main = (env: Env) Res<i32, IoError> {
+    f = Noisy(env: env, tag: "v");
+    n ::= 1;
+    kept = (n == 1).match({
+        true  => { t = consume f; println("took {}", t.tag); t },
+        false => { u = consume f; println("took {}", u.tag); u },
+    });
+    println("after {}", kept.tag);
+    Ok(0);
+}

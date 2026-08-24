@@ -1,0 +1,44 @@
+// Three levels of pattern, every leaf named, no wildcard anywhere -- and
+// Left and Right share the SAME middle and inner types, so nothing but
+// following the tags all the way down can tell the sides apart.
+//
+// Usefulness descends one COLUMN per level: specialising Left replaces its
+// column with Mid's, specialising Wrap replaces that with Inner's, and only
+// the third column binds n (sema_match.zen useful_ctor -> specialise,
+// recursively). Two ways to cheat both produce VALID C: stop descending
+// early and compare a shallow prefix, or keep one payload slot shared
+// across the outer cases and read the inner tag from the wrong level. Both
+// conflate the sides -- Num(9) would answer 901 through Right, Flag would
+// answer 22 -- while every arm still typechecks and every println runs.
+//
+// Breaks if: specialisation loses or misreads a column below depth two --
+// Right's three answers collapse onto Left's, or Gone's 77 drifts too.
+
+Inner = Num(i64) | Flag
+
+Mid = Wrap(Inner) | Empty
+
+Slot = Left(Mid) | Right(Mid) | Gone
+
+depth3 = (s: Slot) i64 {
+    s.match({
+        Right(Wrap(Num(n))) => n * 100 + 4,
+        Left(Wrap(Flag))    => 22,
+        Gone                => 77,
+        Left(Wrap(Num(n)))  => n * 100 + 1,
+        Right(Empty)        => 66,
+        Left(Empty)         => 33,
+        Right(Wrap(Flag))   => 55,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", depth3(Slot.Left(Mid.Wrap(Inner.Num(9)))));
+    println("{}", depth3(Slot.Left(Mid.Wrap(Inner.Flag))));
+    println("{}", depth3(Slot.Left(Mid.Empty)));
+    println("{}", depth3(Slot.Right(Mid.Wrap(Inner.Num(9)))));
+    println("{}", depth3(Slot.Right(Mid.Wrap(Inner.Flag))));
+    println("{}", depth3(Slot.Right(Mid.Empty)));
+    println("{}", depth3(Slot.Gone));
+    Ok(0);
+}

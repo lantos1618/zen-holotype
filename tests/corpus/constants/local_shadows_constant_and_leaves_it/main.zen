@@ -1,0 +1,34 @@
+// A LOCAL SHADOWING A CONSTANT IS ORDINARY SHADOWING, IN BOTH DIRECTIONS.
+//
+// `sema_trap.const_def` resolves a bare name "frame first": a binding
+// wins before any module-level declaration is consulted, because "a
+// binding shadowing a constant is ordinary shadowing". Two ways to get
+// this wrong, each with its own symptom below:
+//
+//   1. THE CONSTANT WINS. Every use of the shadowed name inside main
+//      prints 1111 and `shadowed` looks dead; nothing errors. This is
+//      the direction a fold-happy backend takes -- gen_c resolves a
+//      bare name against the frame FIRST, and a frame that is consulted
+//      second (or never) makes every shadow unreachable.
+//   2. THE SHADOW LEAKS OUTWARD, or the collision corrupts the
+//      constant. Then the use AFTER main prints whatever a local or a
+//      parameter held last instead of 1111.
+//
+// The parameter form is the second copy of rule 1 with a different
+// frame entry: a parameter is just a binding the caller initialised,
+// and the lookup cannot tell it from a local -- nor should it. It lives
+// at module level because a function-typed local inside a body is not
+// spellable; the shadow it tests needs only to be a binding in a frame
+// BELOW main's, which its parameter provides.
+
+SHADOWED: i64 = 1111
+
+twice = (shadowed: i64) i64 { shadowed * 2 }
+
+main = (env: Env) Res<i32, AllocError> {
+    shadowed: i64 = 7;
+    println("local {}", shadowed);
+    println("param {}", twice(40));
+    println("after {}", SHADOWED);
+    Ok(0);
+}

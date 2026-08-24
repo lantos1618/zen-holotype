@@ -1,0 +1,40 @@
+// the bound has to survive one more frame than the obvious test walks:
+// a generic whose body calls ANOTHER generic through its own `T: Meter`
+// parameter. each instantiation must carry its impl's dispatch with it --
+// `twice(Wheel)` runs Wheel's read inside twice, `twice(Gauge)` Gauge's.
+//
+// std.core.eq's is_in records why this shape matters: a generic reaching
+// another generic through a lambda once dropped type parameters on the
+// floor. this is the same pressure applied to plain calls -- if the
+// inner instantiation loses the bound and falls back to "first impl
+// emitted", line 2 answers 95 instead of -39, plausible and silent.
+
+Meter = {
+    read* = (self: @Self) i32
+}
+
+Wheel = {
+    psi: i32,
+}
+
+Gauge = {
+    ticks: i32,
+}
+
+Wheel.impl(Meter, {
+    read = (self: @Self) i32 { self.psi * 10 + 7 }
+})
+
+Gauge.impl(Meter, {
+    read = (self: @Self) i32 { 0 - self.ticks }
+})
+
+twice = <T: Meter>(m: T) i32 { m.read() * 2 }
+around = <T: Meter>(m: T) i32 { twice(m) + 1 }
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", around(Wheel(psi: 4)));
+    println("{}", around(Gauge(ticks: 20)));
+    println("{}", twice(Gauge(ticks: 20)));
+    Ok(0);
+}

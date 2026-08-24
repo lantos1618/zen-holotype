@@ -1,0 +1,34 @@
+// A GENERIC THROUGH A BOUND crosses the erasure boundary (gen_c_bound
+// is its lowering): the argument travels DOWN into the slot as bytes,
+// the answer comes BACK UP, and the element count erasure dropped rides
+// beside the pointer. num.zen wires every widening through ToI64/ToU64
+// for exactly this shape; widening_conversions_are_bounds.zen (sema)
+// pins that each type picks its OWN impl — at small values, where a
+// wrong pick still prints a plausible number.
+//
+// this file repeats that choice at BOUNDARY VALUES, where it stops
+// being academic: u32.MAX is past i32.MAX, so if the generic's i64 came
+// back through a signed slot — or the up-conversion after the dynamic
+// call sign-filled — the number arrives negative while compiling clean.
+// The i8 row is the other half: -128 must come back -128, which catches
+// a bound path zero-filling on the way up.
+//
+// one-line break: lower the erased argument at the slot width instead
+// of the real type's (or re-widen at the slot after the call) and
+// 4294967295 stops being 4294967295.
+main = (env: Env) Res<i32, AllocError> {
+    s: i8  = -128;
+    u: u32 = 4294967295;
+    n: u16 = 65535;
+
+    println("{}", to_wide(s));
+    println("{}", to_wide(u));
+    println("{}", to_wide(n));
+    println("{}", as_u64(u));
+
+    Ok(0);
+}
+
+to_wide = <T: ToI64>(x: T) i64 { x.widen_i64() }
+
+as_u64 = <T: ToU64>(x: T) u64 { x.widen_u64() }

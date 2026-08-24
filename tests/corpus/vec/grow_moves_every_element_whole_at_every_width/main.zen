@@ -1,0 +1,81 @@
+// EVERY ELEMENT CROSSES EVERY REALLOC, AT EVERY ELEMENT WIDTH.
+//
+// `Vec.add` writes through `self.data.write(self.len, value)` and grow
+// replaces `self.data` wholesale, so two independent things can be wrong
+// and neither has a diagnostic: a `Ptr.write` that scales its index by the
+// wrong element size (a 2-byte element landing every other slot), and a
+// realloc path that copies fewer BYTES than the buffer holds (the tail of
+// every row reading as whatever the new pages held). Both compile, both run,
+// and both produce plausible numbers -- so the values are chosen so no wrong
+// answer can collide with the right one:
+//
+//   - four element widths (i16, i32, i64, f64) with values that fill their
+//     width's low bytes: an i16 stored into a 4-byte slot reads back shifted
+//   - indices at BOTH sides of each growth boundary (8->9th add, 16->17th,
+//     32->33rd): the elements written just before a realloc are the ones a
+//     short copy loses, and the ones just after are the ones a mis-scaled
+//     write lands on top of
+//
+// The loop words are avoided on purpose for the f64 row: `println` takes the
+// value from `get`, so what is asserted is storage, not a copy made by the
+// walk.
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    // i16: 2-byte elements. Values straddle zero, so a sign-extension bug
+    // and a truncation bug read differently.
+    narrow ::= alloc.Vec<i16>();
+    Range(0, 33).loop((h, n) {
+        m: i32 = n;
+        v: i32 = (n % 2).match({ true => 0 - (m * 500 + 7), false => m * 500 + 7 });
+        narrow.add(v).try();
+    });
+    n0 = narrow.get(0).ok_or(AllocError.OutOfMemory).try();
+    n1 = narrow.get(1).ok_or(AllocError.OutOfMemory).try();
+    n15 = narrow.get(15).ok_or(AllocError.OutOfMemory).try();
+    n16 = narrow.get(16).ok_or(AllocError.OutOfMemory).try();
+    n31 = narrow.get(31).ok_or(AllocError.OutOfMemory).try();
+    n32 = narrow.get(32).ok_or(AllocError.OutOfMemory).try();
+    println("i16 {} {} {} {} {} {}", n0, n1, n15, n16, n31, n32);
+
+    // i32: 4-byte elements, negative extremes included. The loop's `n` is a
+    // usize, so every arithmetic step below is typed through the i32 binding.
+    mid ::= alloc.Vec<i32>();
+    Range(0, 33).loop((h, n) {
+        m: i32 = n;
+        v: i32 = (n % 2).match({ true => 0 - (2000000000 - m), false => 2000000000 - m });
+        mid.add(v).try();
+    });
+    m0 = mid.get(0).ok_or(AllocError.OutOfMemory).try();
+    m1 = mid.get(1).ok_or(AllocError.OutOfMemory).try();
+    m32 = mid.get(32).ok_or(AllocError.OutOfMemory).try();
+    println("i32 {} {} {}", m0, m1, m32);
+
+    // i64: 8-byte elements, at the signed extremes
+    wide ::= alloc.Vec<i64>();
+    wide.add(i64.MIN).try();
+    wide.add(i64.MAX).try();
+    Range(0, 32).loop((h, n) { wide.add(n * 1000000000000).try(); });
+    w0 = wide.get(0).ok_or(AllocError.OutOfMemory).try();
+    w1 = wide.get(1).ok_or(AllocError.OutOfMemory).try();
+    w32 = wide.get(32).ok_or(AllocError.OutOfMemory).try();
+    println("i64 {} {} {}", w0, w1, w32);
+
+    // f64: SSE moves, not integer ones; fractions pin precision. The value
+    // is picked by a match on the index because mixed int/float arithmetic
+    // inside a loop closure computes in the wrong type (see LANE.md).
+    reals ::= alloc.Vec<f64>();
+    reals.add(-2.25).try();
+    reals.add(1023.75).try();
+    Range(0, 32).loop((h, n) {
+        v: f64 = n.match({ 1 => 0.5, 2 => 2.5, _ => 7.5 });
+        reals.add(v).try();
+    });
+    r0 = reals.get(0).ok_or(AllocError.OutOfMemory).try();
+    r1 = reals.get(1).ok_or(AllocError.OutOfMemory).try();
+    r16 = reals.get(16).ok_or(AllocError.OutOfMemory).try();
+    r32 = reals.get(32).ok_or(AllocError.OutOfMemory).try();
+    println("f64 {} {} {} {}", r0, r1, r16, r32);
+    Ok(0);
+}

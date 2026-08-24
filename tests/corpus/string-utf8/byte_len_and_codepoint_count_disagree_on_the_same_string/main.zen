@@ -1,0 +1,31 @@
+// The two lengths side by side on one string: "héllo" is 6 bytes and 5
+// codepoints. `len` is O(1) and wrong as a character count;
+// `count_codepoints` is a walk and correct -- the std corpus pins
+// `len`'s half (str_len_is_bytes), this pins that the WALK answers 5
+// against the same literal, plus the encoder's view: push_utf8 of
+// U+00E9 must produce exactly the 2 bytes that make len 6 possible.
+String = std.text.text_string
+Utf8Error, push_utf8, count_codepoints = std.text.text_utf8
+
+Error = Utf8Error | AllocError
+
+cps_of = (s: str) Res<usize, Utf8Error> { s.count_codepoints() }
+
+push = (v: u32, out :: String) Res<(), AllocError> {
+    push_utf8(v, out).match({
+        Ok(_) => Ok(()),
+        Err(_) => Err(AllocError.OutOfMemory),
+    });
+}
+
+main = (env: Env) Res<i32, Error> {
+    s = "héllo";
+    println("bytes {}", s.len);
+    println("cps {}", cps_of(s).try());
+
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String("").try();
+    push(233, sb).try();
+    println("encoded {}", sb.view().len);
+    Ok(0);
+}

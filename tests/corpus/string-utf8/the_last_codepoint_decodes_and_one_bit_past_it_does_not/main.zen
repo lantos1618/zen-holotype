@@ -1,0 +1,41 @@
+// F4 8F BF BF is U+10FFFF, the last codepoint there is. F4 90 80 80 is
+// ONE CONTINUATION BIT more and encodes nothing at all. Same lead byte
+// (0xF4, in-band), same sequence width -- only the value check at the
+// top of the range separates them, so a decoder that skips that check
+// accepts values no encoder may produce. The valid side pins len 4 and
+// the exact value; the invalid side must be rejected.
+String = std.text.text_string
+Utf8Error, codepoint_at, validate_utf8 = std.text.text_utf8
+
+verdict = (s: str) i64 {
+    s.validate_utf8().match({
+        Ok(_) => 1,
+        Err(_) => 0,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    ok ::= alloc.String("").try();
+    ok.add_byte(244).try(); ok.add_byte(143).try(); ok.add_byte(191).try(); ok.add_byte(191).try();
+    vo ::= ok.view();
+    println("max valid {}", verdict(vo));
+    vo.codepoint_at(0).match({
+        Ok(c) => {
+            println("l {}", c.len);
+            println("is max {}", c.value == 1114111);
+        }
+        Err(_) => println("Invalid"),
+    });
+
+    bad ::= alloc.String("").try();
+    bad.add_byte(244).try(); bad.add_byte(144).try(); bad.add_byte(128).try(); bad.add_byte(128).try();
+    vb ::= bad.view();
+    println("past valid {}", verdict(vb));
+    vb.codepoint_at(0).match({
+        Ok(c) => println("decoded {}", c.value),
+        Err(_) => println("Invalid"),
+    });
+    Ok(0);
+}

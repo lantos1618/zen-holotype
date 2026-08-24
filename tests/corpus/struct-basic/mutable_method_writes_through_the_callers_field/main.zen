@@ -1,0 +1,48 @@
+// A STRUCT PASSED AS AN ARGUMENT, MUTATED THROUGH A `::` METHOD, AND
+// SEEN CHANGED BY THE CALLER.
+//
+// The dot-call takes the receiver BY REFERENCE when the method's self is
+// `::` -- that is the whole mechanism mutable methods rest on -- and a
+// backend that instead passes a copy compiles and runs cleanly: the
+// callee's own read-back prints the new value (it mutated its copy), the
+// caller's re-read prints the old one, and nothing traps. So the test
+// prints from BOTH sides of every call, and only true by-reference
+// passing makes both sides agree.
+//
+// The nested case is the reason this lives in struct-basic beside the
+// flat ones: `b.inner.grow()` must take a reference INTO the argument's
+// field -- the address computed two levels down -- while
+// `shift(b.inner)` must pass the same sub-struct by value. One wrong
+// level of indirection in either direction flips exactly one line.
+//
+// own/mutable_field_takes_mutable_method.zen pins the ACCEPT side of
+// this rule through Vec; this pins the VALUE FLOW with plain structs,
+// where every printed number is chosen and none comes from std.
+
+P = {
+    n :: i64 = 1,
+}
+
+Bag = {
+    inner :: P = P(),
+    tag :: i64 = 5,
+
+    bump* = (self :: @Self, k: i64) () { self.inner.n = self.inner.n + k; }
+}
+
+grow = (p :: P, k: i64) () { p.n = p.n + k; }
+
+main = (env: Env) Res<i32, AllocError> {
+    b ::= Bag();
+    println("before {} {}", b.inner.n, b.tag);
+
+    b.bump(40);
+    println("after {} {}", b.inner.n, b.tag);
+
+    // the same field passed INWARD by value: the callee writes its copy,
+    // the caller keeps 41 -- the mirror image of the method call above
+    grow(b.inner, 1000);
+    println("copied {}", b.inner.n);
+
+    Ok(0);
+}

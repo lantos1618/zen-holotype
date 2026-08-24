@@ -1,0 +1,55 @@
+// set() WRITES ONE WHOLE ELEMENT THROUGH THE RAW POINTER, AND NOTHING ELSE.
+//
+// `Vec.set` is the write side of `get`: in range it is
+// `self.data.write(i, value); Ok(())`, out of range it is None. Three ways
+// to be subtly wrong, each pinned below:
+//
+//   - the bounds test written `<` as `<=` (or dropped): a set AT len
+//     would grow the visible vec by one without len moving -- invisible
+//     until the next add overwrites it, then a duplicate appears
+//   - the write scaled by 1 instead of sizeof(T): with str elements
+//     (two words) slot 2's write lands inside slot 1, and the printed
+//     len/pointer pairs stop matching their contents
+//   - the Ok/None arms swapped or the value written before the check:
+//     the "miss" line below would still have mutated the buffer
+//
+// The overwrite happens at the LAST index and the miss AT len, which are
+// the two places an off-by-one lives; both neighbours of the boundary are
+// read back so the assertion cannot pass by coincidence.
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    v ::= alloc.Vec<str>();
+    v.add("one").try();          // len 3
+    v.add("two-by-four").try();  // len 11
+    v.add("three").try();        // len 5
+
+    // overwrite the tail: same len, new element, neighbours untouched
+    v.set(2, "replaced-with-a-much-longer-tail").match({
+        Ok(_)  => println("set ok"),
+        None   => println("set none"),
+    });
+    println("len {}", v.len);
+    v.loop((h, s) { println("{}|{}", s.len, s) });
+
+    // a set AT len is a miss: nothing is written, nothing grows
+    v.set(3, "smuggled").match({
+        Ok(_)  => println("bad ok"),
+        None   => println("at len none"),
+    });
+    println("len after {}", v.len);
+
+    // and a set PAST capacity is the same None -- the answer comes from
+    // the length test, not from whether memory happens to be there
+    v.set(1000, "far").match({
+        Ok(_)  => println("bad ok far"),
+        None   => println("past cap none"),
+    });
+
+    // the buffer really did keep three elements: all three read back
+    a = v.get(0).ok_or(AllocError.OutOfMemory).try();
+    b = v.get(1).ok_or(AllocError.OutOfMemory).try();
+    c = v.get(2).ok_or(AllocError.OutOfMemory).try();
+    println("reads {} {} {}", a, b, c);
+    Ok(0);
+}

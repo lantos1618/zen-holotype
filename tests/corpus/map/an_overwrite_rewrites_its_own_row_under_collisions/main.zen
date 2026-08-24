@@ -1,0 +1,49 @@
+// AN OVERWRITE REWRITES ITS OWN ROW -- EVEN WHEN EVERY KEY COLLIDES.
+//
+// All four keys hash to the same bucket on purpose, so the probe path
+// runs through every earlier row before settling. The plausible bugs:
+// a set that stops at the first hash match overwrites the WRONG row
+// (key 1's 111 lands on key 3's row, and key 1 then reads as its old
+// 100); a set that appends a second row for an existing key makes the
+// map answer whichever copy the probe meets first. Each overwrite
+// writes a value that cannot be confused with any other: after both
+// passes every read must name the LATEST write for that key and only
+// that one.
+Key = {
+    id: i32,
+}
+
+Key.impl(Hash, {
+    hash ::= (self: @Self, hasher :: Hasher) u64 { 7 }
+})
+
+Key.impl(Eq, {
+    eq ::= (self: @Self, other: @Self) bool { self.id == other.id }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    m     ::= alloc.Map<Key, i32>();
+
+    m.set(Key(id: 1), 100).try();
+    m.set(Key(id: 2), 200).try();
+    m.set(Key(id: 3), 300).try();
+
+    // overwrite two of the three, in reverse order to the inserts
+    m.set(Key(id: 3), 333).try();
+    m.set(Key(id: 1), 111).try();
+
+    m.get(Key(id: 1)).match({
+        Ok(v) => println("one {}", v),
+        None  => println("one missing"),
+    });
+    m.get(Key(id: 2)).match({
+        Ok(v) => println("two {}", v),
+        None  => println("two missing"),
+    });
+    m.get(Key(id: 3)).match({
+        Ok(v) => println("three {}", v),
+        None  => println("three missing"),
+    });
+    Ok(0);
+}

@@ -1,0 +1,43 @@
+// tests/corpus/loop-nested/inner_break_value_not_outer_type.zen
+// a nested fold's break answers with the INNER loop's own T, and no
+// other loop's element type may stand in for it.
+//
+// The two loops iterate different element types on purpose — i32
+// outside, u8 inside — so "the item type instead of the break type"
+// and "the outer loop's T instead of the inner's" are two DIFFERENT
+// wrong answers, both of which compile when one type is wide enough
+// to swallow the other. The carried value is 255 on purpose: it
+// survives an i64 round-trip but not one through i8, so a compiler
+// that widened or truncated with the wrong loop's type in hand moves
+// this line while still printing a plausible number.
+//
+// Half two breaks with a large literal from two folds down, pinning
+// that the value is what the body wrote and that depth does not
+// truncate it — answered through a byte-wide slot, 123456789 would
+// come back as 21, still a number, quietly wrong.
+
+main = (env: Env) Res<i32, AllocError> {
+    Range(0, 2).loop((ho, outer) {
+        n = Range(0, 10).loop(0, (hi, idx, val: u8, acc: i64) {
+            (idx == 4).then(() { hi.break(255) });
+            acc + val
+        }).match({
+            Ok(n) => n,
+            None  => 0,
+        });
+        println("outer {} broke {}", outer, n);
+    });
+
+    m = Range(0, 1).loop(0, (hi2, idx2, v2: u8, acc2: i64) {
+        Range(0, 3).loop(0, (hi3, idx3, v3: u8, acc3: i64) {
+            (idx3 == 1).then(() { hi2.break(123456789) });
+            acc3 + v3
+        });
+        acc2 + v2
+    }).match({
+        Ok(n) => n,
+        None  => 0,
+    });
+    println("carried {}", m);
+    Ok(0);
+}

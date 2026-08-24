@@ -1,0 +1,53 @@
+// EVERY FRAME OF A RECURSION GUARDS ITS OWN `.try()`, and the payload
+// climbs back through each of them.
+//
+// `sum_to` recurses to zero and, on the way out, unwraps the deeper
+// call and adds n -- once PER FRAME, so ten guards and ten unwraps sit
+// between the base case's `Ok(0)` and the answer. One frame whose guard
+// fired twice, whose unwrap took a stale temp, or whose add used the
+// loop index instead of the unwrapped payload shifts the total; a guard
+// lowered as "already checked" lets the failing twin sail through.
+//
+// `sink_to` is that twin: same shape, but its base case raises -- into
+// an `Ok(..)` wrapper, because a raised error travels by `.try()` and
+// never by assignment (see LANE.md) -- so its Err crosses every frame's
+// guard in sequence and surfaces at the top still naming `Outer`. The
+// twins share one body shape, so a lowering that special-cased whichever
+// edge it met first fails the other.
+//
+// 55 and "outer" are exact; 54, 45, "total 0" and "ok 0" are all things
+// a near-miss lowering prints without complaint.
+
+Inner = | InnerBoom
+Outer = | OuterBoom
+Any = Inner | Outer
+
+boom = () Res<i64, Outer> {
+    Err(Outer.OuterBoom);
+}
+
+sum_to = (n: i64) Res<i64, Outer> {
+    (n == 0).match({
+        true  => Ok(0),
+        false => Ok(sum_to(n - 1).try() + n),
+    });
+}
+
+sink_to = (n: i64) Res<i64, Any> {
+    (n == 0).match({
+        true  => Ok(boom().try()),
+        false => Ok(sink_to(n - 1).try()),
+    });
+}
+
+main = (env: Env) Res<i32, Any> {
+    println("{}", sum_to(10).try());
+    sink_to(3).match({
+        Ok(v)  => println("total {}", v),
+        Err(e) => e.match({
+            Inner(_) => println("inner"),
+            Outer(_) => println("outer"),
+        }),
+    });
+    Ok(0);
+}

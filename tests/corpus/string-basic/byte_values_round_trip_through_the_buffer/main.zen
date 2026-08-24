@@ -1,0 +1,42 @@
+// tests/corpus/string-basic/byte_values_round_trip_through_the_buffer/main.zen
+// str is BYTES, never characters: what goes in as a byte value comes
+// back out as that value, and `len` counts bytes — including the two
+// bytes of a two-byte UTF-8 sequence, which a char-oriented string
+// would count as one. The plausible wrong answers are all quiet: a
+// signed-char backend prints -55 for 201; a codepoint-counting len
+// prints 1 for "é"; a writer that formats the byte instead of writing
+// it raw turns 'A' into "65".
+//
+// Every number below was read off the actual bytes: 'A' is 65, the
+// escape '\n' is 10, and é is 195,169 (0xC3,0xA9). A one-line change
+// anywhere between add_byte's u8 parameter and view()'s pointer-and-
+// length moves at least one of these digits.
+
+Error = AllocError | WriteError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+
+    // raw byte values, not their digit spellings
+    sb ::= alloc.String().try();
+    sb.add_byte(65).try();
+    sb.add_byte(66).try();
+    sb.add_bytes("c").try();
+    v = sb.view();
+    println("bytes {} {} {}", v.index(0), v.index(1), v.index(2));
+    println("len {}", v.len);
+
+    // escapes are single bytes; the view reads back their values
+    e ::= alloc.String().try();
+    e.add_byte('\n').try();
+    e.add_byte('\\').try();
+    println("esc {} {}", e.view().len, e.view().index(1));
+
+    // a multi-byte literal is stored as its two bytes
+    m ::= alloc.String().try();
+    m.add("é").try();
+    mv = m.view();
+    println("utf8 {} {} {}", m.len(), mv.index(0), mv.index(1));
+
+    Ok(0);
+}

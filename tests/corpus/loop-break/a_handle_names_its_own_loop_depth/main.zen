@@ -1,0 +1,45 @@
+// A HANDLE NAMES ITS OWN LOOP AND NOTHING ELSE -- the depth the binding
+// carries decides which `brk` label the goto targets.
+//
+// A LoopHandle is not a value: the binding stores the DEPTH of the loop it
+// came from (gen_c_handle.zen), so `hi.break` and `ho.break` must resolve
+// to different labels even though both spell `break`. Part (a) breaks the
+// inner handle on every outer pass and the outer loop must survive all
+// three; part (b) breaks the OUTER handle from inside the inner body and
+// BOTH loops must stop mid-pass, mid-count. If the two frames collapse --
+// one shared label, or depth always read as 0 -- (a) tears a hole in the
+// outer pass count and (b) runs the inner range to its end: the pair
+// prints anything but 3/6 and 2/8.
+//
+// the counters thread through the bodies by ordinary mutable capture, so
+// a wrong jump target is visible as a wrong count, not a crash.
+//
+// breaks this: resolving a handle to the wrong loop (depth 0, nearest
+// frame, or one shared brk label per function).
+
+main = (env: Env) Res<i32, AllocError> {
+    // (a) the INNER handle: three outer passes, inner dies at 2 each time.
+    outer_passes ::= 0;
+    inner_survived ::= 0;
+    Range(0, 3).loop((ho, o) {
+        outer_passes = outer_passes + 1;
+        Range(0, 5).loop((hi, i) {
+            (i == 2).then(() { hi.break() });
+            inner_survived = inner_survived + 1;
+        });
+    });
+    println("a {} {}", outer_passes, inner_survived);
+
+    // (b) the OUTER handle, fired from inside the inner body: both die.
+    outer_b ::= 0;
+    counted ::= 0;
+    Range(0, 3).loop((ho, o) {
+        outer_b = outer_b + 1;
+        Range(0, 5).loop((hi, i) {
+            counted = counted + 1;
+            ((o == 1) && (i == 2)).then(() { ho.break() });
+        });
+    });
+    println("b {} {}", outer_b, counted);
+    Ok(0);
+}

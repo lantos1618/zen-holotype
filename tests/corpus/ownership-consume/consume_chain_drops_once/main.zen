@@ -1,0 +1,29 @@
+// ONE VALUE, MANY NAMES: a -> b -> c moves the same bytes twice, so
+// exactly ONE Noisy is alive at main's end and `drop v` runs ONCE --
+// after `drop keep`, which was declared before it. This is consume's
+// reason to exist (DESIGN.md: "the compiler calls drop exactly once"):
+// a checker that treats `consume x` as copy-plus-forget, or a backend
+// that drops per-BINDING instead of per-live-value, prints three
+// drops. The tag travels WITH the value, so the drop says "v" and not
+// "c" -- the name it last answered to is dead by then.
+//
+// the reject side is must-fail/own/double_consume.zen: moving twice
+// from one name is an error; moving THROUGH two names is the point.
+
+Noisy = {
+    env: Env,
+    tag: str,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.tag) }
+})
+
+main = (env: Env) Res<i32, IoError> {
+    keep = Noisy(env: env, tag: "keep");
+    a    = Noisy(env: env, tag: "v");
+    b    = consume a;
+    c    = consume b;
+    println("body {}", c.tag);
+    Ok(0);
+}

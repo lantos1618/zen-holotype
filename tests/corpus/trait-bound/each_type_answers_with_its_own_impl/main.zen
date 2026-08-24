@@ -1,0 +1,53 @@
+// three types, one bound, three impls: a generic call must run the
+// RECEIVER'S OWN impl, not the first one the compiler happened to emit.
+//
+// the wrong answer is plausible and silent -- 37 for every line, say --
+// because dispatch that picked one impl globally still type-checks,
+// still calls a real function, and still prints a number. the ids are
+// built so each read is distinct and non-zero, and the last two lines
+// pin the direct `wheel.read()` spelling to the same answers, so the
+// fix cannot be "the generic path only".
+//
+// the sibling risk (two impls supplying the SAME method NAME) is not
+// here on purpose: see LANE.md, the backend mangles those two bodies
+// into one symbol and file order picks -- a bug this suite reports
+// rather than encodes.
+
+Meter = {
+    read* = (self: @Self) i32
+}
+
+Wheel = {
+    psi: i32,
+}
+
+Gauge = {
+    ticks: i32,
+}
+
+Cell = {
+    volts: i32,
+}
+
+Wheel.impl(Meter, {
+    read = (self: @Self) i32 { self.psi * 10 + 7 }
+})
+
+Gauge.impl(Meter, {
+    read = (self: @Self) i32 { 0 - self.ticks }
+})
+
+Cell.impl(Meter, {
+    read = (self: @Self) i32 { self.volts * 1000 + 5 }
+})
+
+pressure = <T: Meter>(m: T) i32 { m.read() }
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", pressure(Wheel(psi: 3)));
+    println("{}", pressure(Gauge(ticks: 9)));
+    println("{}", pressure(Cell(volts: 12)));
+    println("{}", Wheel(psi: 3).read());
+    println("{}", Cell(volts: 12).read());
+    Ok(0);
+}

@@ -1,0 +1,56 @@
+// take() SHIFTS THE TAIL LEFT, ONE SLOT PER ELEMENT, IN ELEMENT-SIZED STEPS.
+//
+// `take` is the one Vec member that both reads a value out and moves the
+// ones after it down (`Range(i + 1, self.len).loop(..)` writing `j - 1`
+// from `j`), so it is where three plausible one-line bugs all show:
+//
+//   - the shift reading `j` and writing `j - 1` swapped: every element
+//     between the hole and the end becomes its LEFT neighbour's copy,
+//     and the last slot keeps a stale duplicate
+//   - the range starting at `i` instead of `i + 1`: `data[i]` is
+//     overwritten with itself and the taken value survives by luck at
+//     index i but the element AFTER the hole is lost
+//   - the length decremented before the shift: the final element is read
+//     past `len` (or, with an unsigned underflow, traps) and never moves
+//
+// The elements are str-typed deliberately. A str is two machine words, so
+// "shift by sizeof(T)" is exercised at 16 bytes where a wrong scale shows
+// as a len/pointer mismatch rather than garbage the eye forgives; each
+// survivor prints BOTH words so a half-copied element cannot pass.
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    v ::= alloc.Vec<str>();
+    v.add("alpha-two-words").try();     // len 15
+    v.add("beta").try();                // len 4
+    v.add("gamma-longer").try();        // len 12
+    v.add("d").try();                   // len 1
+    v.add("epsilon-five").try();        // len 12
+
+    // take from the middle: everything after index 2 moves down one
+    gone = v.take(2).ok_or(AllocError.OutOfMemory).try();
+    println("gone {} {}", gone.len, gone);
+    println("len {}", v.len);
+    v.loop((h, s) { println("{}|{}", s.len, s) });
+
+    // take from the head twice in a row: the FIFO order must survive,
+    // and len bookkeeping has to agree with what get answers
+    first = v.take(0).ok_or(AllocError.OutOfMemory).try();
+    second = v.take(0).ok_or(AllocError.OutOfMemory).try();
+    println("drained {} then {}", first, second);
+    println("len {}", v.len);
+
+    // take the LAST element: the shift loop runs zero passes, so a bug
+    // that writes through the old tail shows only here
+    last = v.take(v.len - 1).ok_or(AllocError.OutOfMemory).try();
+    println("last {}", last);
+    println("len {}", v.len);
+
+    // taking past the end is None, exactly as get is -- not a trap and
+    // not an Ok carrying garbage from beyond the buffer
+    v.take(9).match({
+        Ok(_) => println("bad ok"),
+        None  => println("past end none"),
+    });
+    Ok(0);
+}

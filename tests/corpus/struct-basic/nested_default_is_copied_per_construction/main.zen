@@ -1,0 +1,42 @@
+// A NESTED CONSTRUCTION AS A FIELD'S DEFAULT, EVALUATED PER CONSTRUCTION.
+//
+// field_defaults.zen's `Cursor` already carries `at*:: Pos =
+// Pos(line: 1, col: 1)`, but every Cursor in that file is read before any
+// second one exists. The failure this file hunts is a default lowered to
+// ONE shared object: two constructions of the same type must each get
+// their own copy of the nested value, and mutating one through a `::`
+// binding must not move the other's. That is invisible while nothing
+// writes -- and it is exactly the shape of a static initialiser or a
+// struct-literal hoisted out of the call.
+//
+// So: two Cursors built bare, the first's nested fields rewritten through
+// its own storage (`::` on both levels), then both read again. The
+// plausible wrong answers are `9 9 1 1` (shared sub-object -- the second
+// cursor moved with the first) or `1 1 1 1` (the write landed nowhere --
+// a copy made at read time). Only per-construction defaults give
+// `9 8 1 1`.
+
+Pos = {
+    x :: i64 = 1,
+    y :: i64 = 2,
+}
+
+Cursor = {
+    at :: Pos = Pos(),
+    id :: i64 = 100,
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= Cursor();
+    b ::= Cursor();
+    println("fresh {} {} {} {}", a.at.x, a.at.y, b.at.x, b.at.y);
+
+    a.at.x = 9;
+    a.at.y = 8;
+    println("moved {} {} {} {}", a.at.x, a.at.y, b.at.x, b.at.y);
+
+    // the untouched third field proves only what was written moved
+    println("id {} {}", a.id, b.id);
+
+    Ok(0);
+}

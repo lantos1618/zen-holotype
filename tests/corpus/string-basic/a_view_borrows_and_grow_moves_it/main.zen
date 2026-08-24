@@ -1,0 +1,51 @@
+// tests/corpus/string-basic/a_view_borrows_and_grow_moves_it/main.zen
+// THE BORROW RULE from text_string.zen, demonstrated rather than
+// claimed: `view` returns a str pointing INTO the buffer (a pointer and
+// a byte count, no copy), so a later growth MOVES the bytes and the old
+// view's length is the length of a buffer that is no longer there.
+//
+// The trap a wrong implementation falls into: making `view` return
+// something that keeps working across growth — a copy, or a live
+// re-lookup. Both print plausible strings. What discriminates here is
+// the STALE view's `len`: it must still read 8, the length captured at
+// borrow time, because the str is a value of two words frozen at the
+// moment of the call. A view that re-reads the Vec prints 9; a view
+// that copies prints its own story; only a real borrowed pointer pair
+// prints exactly the old count while the re-taken view reads the new.
+//
+// The second half pins the same rule through a CALLEE's growth: the
+// realloc happens in a frame that cannot see `before` at all.
+
+Error = AllocError | WriteError
+
+grow = (sb :: String) Res<(), AllocError> {
+    Range(0, 20).loop((h, i) { sb.add_byte('g').try(); });
+    Ok(());
+}
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String().try();
+
+    // fill capacity-8 exactly, then take the view: same allocation,
+    // zero bytes of headroom
+    Range(0, 8).loop((h, i) { sb.add_byte('x').try(); });
+    before = sb.view();
+    println("borrowed {} {}", before.len, before.is_empty());
+
+    // one more byte forces the 8-to-16 move; `before` was taken first
+    sb.add_byte('y').try();
+    println("stale-len {}", before.len);
+
+    // re-taken after the write: the honest view of the moved bytes
+    fresh = sb.view();
+    println("fresh {} {}", fresh.len, fresh.is_empty());
+
+    // and growth in a callee the view never saw
+    grow(sb).try();
+    println("stale-still {}", before.len);
+    again = sb.view();
+    println("again {} {}", again.len, again.is_empty());
+
+    Ok(0);
+}

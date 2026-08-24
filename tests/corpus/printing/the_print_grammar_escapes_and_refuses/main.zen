@@ -1,0 +1,42 @@
+// tests/corpus/printing/the_print_grammar_escapes_and_refuses/main.zen
+// `println` reads ONE format grammar, shared with every sink door
+// (`text_fmt.zen` states it in full): `{}` a hole, `{{`/`}}` literal
+// braces, `{name}` filled from the writing frame — and the walk is
+// left-to-right, never backing up, so which rule is tested FIRST at a
+// shared position decides what the format means. The rows below are
+// those positions:
+//
+//   - `{}}`: hole seen first, trailing `}` is a byte -> `1}`, and a
+//     printer that paired backwards prints bare `1`.
+//   - `{{}`: pair seen first, trailing `}` is a byte.
+//   - `{{name}}` is `{`, the bytes, `}` — NOT a named hole: a grammar
+//     that rescans after an escape prints 9 there.
+//   - escapes decode before printing; `\t` in the source must not land
+//     as backslash-t (the escape set is exactly C's seven, which is why
+//     the raw slice can pass through untouched).
+//
+// The named holes read DIFFERENT frames on purpose: main's local, then
+// a callee's PARAMETER through the same spelling — a resolver with one
+// global answer prints the right name with the wrong value.
+
+Error = AllocError | IoError
+
+show = (n: i64) Res<(), IoError> {
+    println("callee n={n}");
+    Ok(());
+}
+
+main = (env: Env) Res<i32, Error> {
+    n = 9;
+    println("{{}}");
+    println("{{{}}}", 3);
+    println("{}}", 1);
+    println("{{}");
+    println("{{n}}");
+    println("tab:\tend");
+
+    // named holes, two frames
+    println("{n} and {}", 7);
+    show(99).try();
+    Ok(0);
+}

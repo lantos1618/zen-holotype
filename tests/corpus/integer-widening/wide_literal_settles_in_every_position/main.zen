@@ -1,0 +1,42 @@
+// A LITERAL AT AN i64/u64 SLOT SETTLES PAST 32 BITS, in every
+// position a value can stand — and the NEGATIVE half is the one a
+// lazy implementation gets wrong, because the natural bug (a literal
+// folded to i32 first) is invisible on positive values that happen to
+// fit and loud only on ones that cannot.
+//
+// `literal_fits` grants an integer literal any type of its family,
+// and `check_literal` (`sema_trap.zen`) is what turns "fits" into a
+// real range question — "`n: i32 = 2147483648` is an `int` literal,
+// and `literal_fits` says every one fits every integer type, so
+// `coerce` alone said nothing". The same guard read at a WIDE slot is
+// this file: settle the literal at the slot's width or fold it at
+// i32's, and only the values below tell the difference. They are
+// chosen so every wrong answer is still printable:
+//
+//   - 5000000000 / -5000000000 wrap mod 2^32 into plausible numbers.
+//   - -5000000000 through a SIGNED-then-unsigned detour reads as
+//     4294967296 less than itself.
+//   - 9000000000 needs all 34 of its bits; the sum row can only print
+//     4000000000 if BOTH elements kept them (-5e9 + 9e9 = +4e9).
+//
+// positions covered: parameter (literal_widens_by_position owns the
+// variable-there contrast), match ARMS typed by their position, a
+// struct field, and array elements. The arms are the case
+// `check_arms` exists for — each arm stands where the binding stands,
+// so each must settle wide INDEPENDENTLY, and a checker that typed
+// arms against the FIRST arm's settled width passes the true-arm row
+// while printing garbage for the false one.
+
+Box = { v: i64 }
+
+main = (env: Env) Res<i32, AllocError> {
+    m: i64 = (true).match({ true => 5000000000, false => -5000000000 });
+    println("arm {}", m);
+
+    b = Box(v: -5000000000);
+    println("field {}", b.v);
+
+    xs: [i64, 2] = [-5000000000, 9000000000];
+    println("sum {}", xs[0] + xs[1]);
+    Ok(0);
+}

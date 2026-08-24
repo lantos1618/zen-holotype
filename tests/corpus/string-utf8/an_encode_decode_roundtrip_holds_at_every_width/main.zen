@@ -1,0 +1,34 @@
+// push_utf8 then codepoint_at, at the minimum value of each width plus
+// the absolute maximum. The widths must come out exactly 1 2 3 4 -- the
+// whole point of having four encoders -- and each decoded value must
+// equal what went in (the last pinned as a bool: 1114111 prints fine,
+// but a truncated u32 that still printed would fool nobody twice).
+// U+0000 is included on purpose: it is the ONE value where an overlong
+// encoder and the real thing disagree.
+String = std.text.text_string
+Utf8Error, push_utf8, codepoint_at = std.text.text_utf8
+
+push = (v: u32, out :: String) Res<(), AllocError> {
+    push_utf8(v, out).match({
+        Ok(_) => Ok(()),
+        Err(_) => Err(AllocError.OutOfMemory),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    sb ::= alloc.String("").try();
+    push(0, sb).try();
+    push(128, sb).try();
+    push(2048, sb).try();
+    push(65536, sb).try();
+    push(1114111, sb).try();
+    v ::= sb.view();
+    println("len {}", v.len);
+    v.codepoint_at(0).match({ Ok(c) => println("l{} zero {}", c.len, c.value == 0), Err(_) => println("Invalid") });
+    v.codepoint_at(1).match({ Ok(c) => println("l{} {}", c.len, c.value), Err(_) => println("Invalid") });
+    v.codepoint_at(3).match({ Ok(c) => println("l{} {}", c.len, c.value), Err(_) => println("Invalid") });
+    v.codepoint_at(6).match({ Ok(c) => println("l{} {}", c.len, c.value), Err(_) => println("Invalid") });
+    v.codepoint_at(10).match({ Ok(c) => println("l{} max {}", c.len, c.value == 1114111), Err(_) => println("Invalid") });
+    Ok(0);
+}

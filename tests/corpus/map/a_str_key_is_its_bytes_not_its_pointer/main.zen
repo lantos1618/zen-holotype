@@ -1,0 +1,39 @@
+// A STR KEY IS ITS BYTES, NOT ITS POINTER.
+//
+// str is two words (pointer, len), so the plausible wrong map keys it
+// by ADDRESS. Here the stored key and the lookup key are different
+// literals with equal bytes -- different static storage, same content --
+// so only a bytewise key finds the row: a pointer-keyed map answers
+// None, and a hash that mixed the pointer in misses the bucket too.
+// The prefix pair pins eq's LENGTH-FIRST rule inside the map: "ada" is
+// a strict prefix of "adaline", so comparing over the shorter length
+// makes one an alias for the other and both rows collapse into the
+// first -- the second set would then overwrite ada's value and
+// "adaline 45" comes out as 36.
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    ages   ::= alloc.Map<str, i32>();
+
+    // stored under this literal...
+    ages.set("ada", 36).try();
+
+    // ...read back through another with the SAME BYTES
+    ages.get("ada").match({
+        Ok(n) => println("ada {}", n),
+        None  => println("ada missing"),
+    });
+
+    // distinct bytes that share a prefix stay distinct keys
+    ages.set("grace", 45).try();
+    ages.set("adaline", 45).try();
+    ages.set("adam", 21).try();
+    ages.get("adaline").match({
+        Ok(n) => println("adaline {}", n),
+        None  => println("adaline missing"),
+    });
+    ages.get("ada").match({
+        Ok(n) => println("ada-again {}", n),
+        None  => println("ada-again missing"),
+    });
+    Ok(0);
+}

@@ -1,0 +1,45 @@
+// tests/corpus/loop-basic/fold_threads_acc_by_value_through_the_passes/
+// fold has four live values and the two threads must not cross: acc
+// accumulates, index counts passes. over a zero-based range a body
+// that adds `index` where it meant the element can still produce an
+// ascending number, so every case here walks from 10 or folds
+// elements that are not their positions - and the empty range pins
+// init as the answer with nothing to thread
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    // 10 + 11 + 12 = 33: swap acc for index and 0 + 1 + 2 prints,
+    // which still reads like a sum
+    Range(10, 13).loop(0, (h, index, value, acc: i32) {
+        acc + value
+    }).match({
+        Ok(n) => println("sum {}", n),
+        None  => println("sum none"),
+    });
+
+    // the index thread is real: 0*100+10, 1*100+11, 2*100+12 -> 333
+    Range(10, 13).loop(0, (h, index, value, acc: usize) {
+        acc + index * 100 + value
+    }).match({
+        Ok(n) => println("threaded {}", n),
+        None  => println("threaded none"),
+    });
+
+    // elements that are not their indexes: 0+1+2+3 of VALUES is 1000
+    [250, 250, 250, 250].loop(0, (h, index, value, acc: usize) {
+        acc + value
+    }).match({
+        Ok(n) => println("array {}", n),
+        None  => println("array none"),
+    });
+
+    // nothing to fold: init comes back untouched
+    Range(5, 5).loop(41, (h, index, value, acc: i32) {
+        acc + value
+    }).match({
+        Ok(n) => println("empty {}", n),
+        None  => println("empty none"),
+    });
+    Ok(0);
+}

@@ -1,0 +1,40 @@
+// std.text.before is the ONLY ordering Zen has for str -- byte order,
+// first differing byte decides, shorter wins a prefix tie (text_str.zen:
+// "Bytes not collation"). It is not an operator: `<` on str has no impl
+// to dispatch to, and that is by design, so ordering is exercised as a
+// plain function call over the same borrowed bytes `==` walks.
+//
+// The pairs are chosen where a plausible wrong rule gives a DIFFERENT
+// boolean than the right one, not merely a different number:
+//   "Z" < "a"        raw BYTE order: 0x5A < 0x61. A collation-aware
+//                    comparison answers false; so does one comparing
+//                    case-folded or codepoint-normalised bytes.
+//   "abc" < "abcd"   prefix tie -> shorter wins. A memcmp of the common
+//                    prefix finds no difference and must NOT conclude
+//                    equal-or-greater from it.
+//   ""    < "x"      the empty string is before everything nonempty;
+//                    its data pointer is never read.
+//   "b"   < "ab"     first byte already decides; a walk that starts at
+//                    index 1 (off-by-one) misses the difference and
+//                    falls into the length tiebreak, answering true.
+// The mirror rows pin that the arguments were not swapped somewhere in
+// the walk.
+//
+// Breaks it: swap the two operands at before's final comparison
+// (`other.index(i) < self.index(i)`), or compare lengths with `<=` --
+// either single edit flips exactly half these rows.
+
+before = std.text
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{}", "Z".before("a"));
+    println("{}", "a".before("Z"));
+    println("{}", "abc".before("abcd"));
+    println("{}", "".before("x"));
+    println("{}", "b".before("ab"));
+    println("{}", "ab".before("b"));
+    println("{}", "same".before("same"));
+    println("{}", "ac".before("ad"));
+    println("{}", "ad".before("ac"));
+    Ok(0);
+}

@@ -1,0 +1,25 @@
+// a loop body is a closure written at the call site, and its writes to an
+// OUTER mutable binding are stores into THAT binding -- the same rule
+// codegen/inlined_callee_keeps_its_own_local pins one level down, here
+// across the loop's back edge where a wrong lowering compiles to an
+// infinite loop or to six unrelated locals.
+//
+// the accumulation is quadratic on purpose: sum of squares 1..4 = 30, and
+// each pass READS the value the last pass wrote. Declare-fresh-per-pass
+// prints 16 (the last term alone); capture-the-loop-variable prints 4;
+// store-into-a-copy prints 4 or 0 depending on where the copy lives. 30
+// is the only answer four real additions through one shared slot produce.
+//
+// the deferred print then proves the loop's writes went to main's frame
+// and NOT into any per-pass storage the defers could see: every snapshot
+// froze at registration, before the first pass ran.
+
+main = (env: Env) Res<i32, IoError> {
+    sum ::= 0;
+    @scope.defer(() { println("frozen {}", sum) });
+    [1, 2, 3, 4].loop((h, v: i64) {
+        sum = sum + v * v;
+    });
+    println("sum {}", sum);
+    Ok(0);
+}

@@ -1,0 +1,28 @@
+// tests/corpus/file-io/read_returns_whole_file_in_order/main.zen
+// `read` is ONE question -- the whole file at once -- and its answers are
+// a length and an order. A floor that reads short (one fread where the
+// file spans refills) or that hands back the buffer without the bytes
+// still answers with SOME length; only the right one plus spot checks
+// deep in the middle and at both ends separates "read it all" from
+// "read some". The second read is the repeat-read rule: two opens of one
+// path must agree byte for byte, which catches a floor that reuses a
+// cursor or serves the second open from a stale descriptor.
+
+FsError = std.env
+
+main = (env: Env) Res<i32, FsError> {
+    alloc ::= env.mem.alloc();
+
+    body = "alpha-beta-gamma-delta-epsilon-zeta";
+    env.fs.write("whole.txt", body).try();
+
+    first = env.fs.read(alloc, "whole.txt").try();
+    println("len {}", first.len());
+    println("head {} mid {}", first.view()[0], first.view()[17]);
+    println("tail {}", first.view()[first.len() - 1]);
+    println("eq {}", first.view().eq(body));
+
+    second = env.fs.read(alloc, "whole.txt").try();
+    println("again eq {}", second.view().eq(first.view()));
+    Ok(0);
+}

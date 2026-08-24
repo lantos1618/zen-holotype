@@ -1,0 +1,40 @@
+// A PAYLOAD RIDES THE WIDENED Err UNCHANGED — the set grows, and the
+// bytes inside the member do not move. `Big` carries an i64 chosen so
+// its low bits are zero: 1234567890123 * 4 has three trailing zeros, so
+// a widening that copied only the tag word, or shifted the payload to
+// make room for one, prints a different number here.
+//
+// The two members are shaped differently on purpose (a bare tag vs a
+// struct with a field), so the union's data slot is a real C union with
+// members of different sizes, and the read goes through the member's
+// own field — reachable only when the tag said Big.
+
+Small = | Tiny
+Big   = {
+    n: i64,
+}
+
+Wide = Small | Big
+
+small_fail = () Res<i32, Small> { Err(Small.Tiny); }
+big_fail   = (k: i64) Res<i32, Big> { Err(Big(n: k)); }
+
+widen_small = () Res<i32, Wide> { small_fail().try(); Ok(0); }
+widen_big   = (k: i64) Res<i32, Wide> { big_fail(k).try(); Ok(0); }
+
+describe = (env: Env, r: Res<i32, Wide>) () {
+    r.match({
+        Ok(n)     => println("ok {}", n),
+        Err(e)    => e.match({
+            Small(_) => println("small tiny"),
+            Big(b)   => println("big {}", b.n),
+        }),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    describe(env, widen_big(4938271560492));
+    describe(env, widen_small());
+    describe(env, widen_big(0));
+    Ok(0);
+}

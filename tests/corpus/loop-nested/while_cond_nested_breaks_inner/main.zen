@@ -1,0 +1,30 @@
+// tests/corpus/loop-nested/while_cond_nested_breaks_inner.zen
+// a cond-form loop nested inside a ranged loop: the break must stop
+// the WHILE loop only, and the ranged loop must keep counting.
+//
+// The cond form is the one overload whose body is guarded by a
+// condition re-tested BEFORE every pass, so it has a second way to
+// stop besides break — and the interesting failure is the two being
+// conflated: lower break as "skip to the condition test" and an
+// always-true guard never lets go, or as "run the condition once and
+// fall out" and the wrong frame unwinds. Both wrong lowerings print
+// numbers; only WHICH numbers tells them apart.
+//
+// The inner while is written so its condition alone would never stop
+// it — `() bool { true }` — which makes the break, not the guard,
+// the only thing this test observes. The counter proves the body ran
+// four times per outer pass, and the outer tail line proves the exit
+// stopped at the right depth.
+
+main = (env: Env) Res<i32, AllocError> {
+    Range(0, 3).loop((h_outer, outer) {
+        count ::= 0;
+        loop(() bool { true }, (h_while) {
+            count = count + 1;
+            (count == 4).then(() { h_while.break() });
+            println("  while {} {}", outer, count);
+        });
+        println("outer {}", outer);
+    });
+    Ok(0);
+}

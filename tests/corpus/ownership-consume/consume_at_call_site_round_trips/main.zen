@@ -1,0 +1,35 @@
+// CONSUME AT THE CALL SITE, ROUND TRIP: the callee prints what it was
+// handed ("mid v"), returns the SAME value untouched, and main reads
+// it back and drops it ONCE at scope exit. The caller's binding is
+// dead from the move onwards; the parameter never registers its own
+// drop; the return hands the bytes back out. Every wrong lowering
+// shows: a copy into the argument double-drops or leaks; a backend
+// that drops per-pass locals while spilling a returned value loses
+// the drop entirely (drop v vanishes); one that clears the caller's
+// flag and forgets the return path leaks. Exactly `mid v / back v /
+// drop v`, in that order.
+//
+// the dual is consume_into_argument_leaks (LANE.md): the same call
+// with the callee KEEPING the value must leak today -- this test
+// pins the round trip so the fix cannot regress it.
+
+Noisy = {
+    env: Env,
+    tag: str,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.tag) }
+})
+
+passthrough = (env: Env, n :: Noisy) Noisy {
+    env.out.println("mid {}", n.tag);
+    n
+}
+
+main = (env: Env) Res<i32, IoError> {
+    s = Noisy(env: env, tag: "v");
+    r = passthrough(env, consume s);
+    println("back {}", r.tag);
+    Ok(0);
+}

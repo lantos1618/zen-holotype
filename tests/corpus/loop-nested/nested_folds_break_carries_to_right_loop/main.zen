@@ -1,0 +1,55 @@
+// tests/corpus/loop-nested/nested_folds_break_carries_to_right_loop.zen
+// `h.break(v)` answers THE LOOP THE HANDLE NAMES, not the nearest one,
+// and a fold makes depth observable twice over: which fold stops, and
+// which value comes out.
+//
+// Half one breaks the OUTER handle from inside the inner fold's body:
+// the exit must jump past both frames, so the outer fold itself
+// evaluates to the carried value and nothing else ever prints. Bind
+// that handle one level too deep — loop-map_body_can_break_early
+// .zen's mutation — and the answer flips: four "inner ran through"
+// lines and the outer accumulator instead, all plausible numbers.
+//
+// Half two breaks the INNER handle: the inner fold answers with its
+// own accumulator at the moment of the break and the outer fold must
+// keep folding past it. A shared result slot for the two loops — the
+// tempting lowering, one variable instead of two — answers half two's
+// outer fold with the inner break's value, so "outer sum" moves even
+// though every line still prints.
+
+main = (env: Env) Res<i32, AllocError> {
+    // break the OUTER fold from the INNER body: one line, the carried
+    // value, and silence — the exit jumped out of both loops at once
+    Range(0, 4).loop(0, (h_outer, o_idx, o_val, acc_outer: i32) {
+        Range(0, 10).loop(acc_outer, (h_inner, i_idx, i_val,
+                                      acc_inner: i32) {
+            (i_idx == 2).then(() { h_outer.break(999 + acc_inner) });
+            acc_inner + i_val
+        }).match({
+            Ok(n) => println("inner folded to {}", n),
+            None  => println("inner ran through"),
+        });
+        acc_outer + o_val
+    }).match({
+        Ok(n) => println("outer {}", n),
+        None  => println("outer none"),
+    });
+
+    // break the INNER fold twice over: it answers with its accumulator
+    // (0+1+2, the value at the moment of the break), and the outer fold
+    // keeps running and answers with its OWN accumulator — 1, not 3
+    Range(0, 2).loop(0, (ho, oi, ov, ao: i32) {
+        Range(0, 10).loop(ao, (hi, ii, iv, ai: i32) {
+            (ii == 3).then(() { hi.break(ai) });
+            ai + iv
+        }).match({
+            Ok(n) => println("pass {} inner {}", ov, n),
+            None  => println("pass {} inner through", ov),
+        });
+        ao + ov
+    }).match({
+        Ok(n) => println("outer sum {}", n),
+        None  => println("outer none"),
+    });
+    Ok(0);
+}

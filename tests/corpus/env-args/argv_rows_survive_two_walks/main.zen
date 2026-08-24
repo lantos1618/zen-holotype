@@ -1,0 +1,36 @@
+// THE ARGV VEC IS RE-READABLE, not a one-shot cursor, and the row
+// answers with its own BYTES on the second pass too.
+//
+// `zg_argv_vec` mallocs one row array and points each row into C's
+// process-lifetime argv storage — nothing is consumed by reading it. A
+// backend that built `env.argv` as a cursor over the rows (or reset the
+// row array when main's first read ended) compiles this fine and drops
+// or mangles the second pass: exactly the failure shape that hides from
+// a test which walks argv once.
+//
+// The runner passes no arguments, so the walk is one row long — but the
+// property under test (rows survive a completed pass) is about TIME on
+// the Vec, not COUNT of arguments, and one row served twice is still
+// only true when reads never consume.
+//
+// The bytes are pinned WITHOUT pinning the harness's temp path: argv[0]
+// ends in "/prog", so the LAST FIVE BYTES are the same on every machine
+// and every run. (The absolute length is NOT — under tests/run.py it is
+// a function of this test's own directory name — so no expectation here
+// states it.) A builder that serves a stale or zeroed row after the
+// first pass fails; so does one that hands back a shared static row.
+
+count_codepoints, Utf8Error = std.text
+
+main = (env: Env) Res<i32, AllocError | Utf8Error> {
+    pass ::= 0;
+    loop(() { pass < 2 }, (h) {
+        println("-- pass {}", pass);
+        Range(0, env.argv.len).loop((h2, i) {
+            p ::= env.argv.get(i).ok_or(Utf8Error.Invalid(i)).try();
+            println("[{}] tail {}", i, p.slice(p.len - 5, p.len));
+        });
+        pass = pass + 1;
+    });
+    Ok(0);
+}

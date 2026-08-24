@@ -1,0 +1,42 @@
+// argv[0] NAMES THE PROGRAM: it ends in "/prog", starts with '/', and
+// its length is exactly the position of that last '/' plus five.
+//
+// `argv_is_populated` (tests/corpus/env/) can only assert that argv[0]
+// EXISTS, because the runner passes no arguments it could count. This
+// test goes one step further on the same ground: the C runtime hands
+// every process a path, so the row's CONTENT is pinned — the last five
+// bytes must spell "/prog" and a '/' must lead the row. That catches
+// the argv plumbing lying about bytes while still getting a count
+// right: a builder that handed back one shared static row for every
+// index, or wrote rows[i].len from strlen of the WRONG pointer (say,
+// always argv[0] where argv[i] was asked), still prints numbers here —
+// just the wrong name with them.
+//
+// What is deliberately NOT asserted is the absolute length: under the
+// runner the binary lives at <mktemp>/<mangled-test-id>/prog, so the
+// full path's byte count is a property of THIS TEST'S OWN NAME, not of
+// the compiler — an expectation written from runzen.sh would fail the
+// moment anyone renamed the directory. The length is still checked for
+// SELF-CONSISTENCY (last '/' sits at len-5), which any truncation or
+// off-by-one in rows[i].len breaks.
+//
+// The first byte is asserted as 47 ('/'): paths are absolute here, and
+// a signed-char copy turns nothing at 47 but would corrupt bytes past
+// 127 in the multibyte tests beside this one.
+
+count_codepoints, Utf8Error = std.text
+
+main = (env: Env) Res<i32, AllocError | Utf8Error> {
+    p ::= env.argv.get(0).ok_or(Utf8Error.Invalid(0)).try();
+    println("first byte {}", p[0]);
+    println("tail {}", p.slice(p.len - 5, p.len));
+
+    // self-consistency: find the last '/', assert it sits at len - 5,
+    // i.e. the row is exactly <something>/prog and len counts ALL of it
+    last ::= 0;
+    Range(0, p.len).loop((h, i) {
+        (p[i] == 47).then(() { last = i; });
+    });
+    println("slash-at-len-minus-5 {}", last == p.len - 5);
+    Ok(0);
+}

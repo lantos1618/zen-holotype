@@ -1,0 +1,37 @@
+// THE CAPTURE WALK DESCENDS EVERYTHING. `captures()` in gen_c_scope.zen
+// recurses into nested blocks, lambdas and match arms on purpose ("a name
+// read two blocks down is still read from this frame") -- and the walk is
+// what decides whether the record HAS a field at all. Miss one shape and
+// the thunk reads an undeclared C name (loud), or worse, captures nothing
+// and reads an unrelated variable of the same mangled name (silent).
+//
+// four shapes, one program, all behind ONE defer:
+//   - a nested `{ }` BLOCK statement inside the thunk body
+//   - `.then`, whose closure is INLINED at its call site inside the thunk
+//   - a `.match` ARM whose body names the capture
+//   - a lambda ARGUMENT (`apply`) whose body reads it one frame deeper,
+//     through a function-typed parameter -- the shape gen_c_inline.zen
+//     rewinds scopes for, now running inside lifted code
+//
+// each line carries its own non-zero arithmetic so a truncated or
+// misplaced read cannot pass for another line's answer.
+
+apply = (f: () i64) i64 { f() }
+
+main = (env: Env) Res<i32, IoError> {
+    n ::= 900;
+    @scope.defer(() {
+        apply(() { println("arg {}", n - 800) });
+        n.match({
+            900 => { println("arm {}", n / 9) },
+            _   => println("arm miss"),
+        });
+        {
+            println("block {}", n % 97);
+        }
+        (n == 900).then(() { println("then {}", n - 890) });
+    });
+    n = 1;
+    println("body");
+    Ok(0);
+}

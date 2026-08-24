@@ -1,0 +1,47 @@
+// A WIDENED VALUE IS AN ORDINARY VALUE OF ITS NEW TYPE: it crosses a
+// CLOSURE BOUNDARY, ACCUMULATES past the narrow type's ceiling, and
+// still compares equal to the literal that names it.
+//
+// the accumulator is the shape this exists for. `total: u64 = 0;
+// xs.loop((h, v) { total = total + v.to_u64(); })` over `[u8]` values
+// 200, 250, 5 must print 455 — above u8's 255, so a sum computed at
+// the ELEMENT's width and widened at the end prints 199 and looks
+// plausible. The closure is load-bearing twice over: `v` arrives as a
+// u8, the conversion happens INSIDE the body, and the result crosses
+// back out through gen_c_loop's capture machinery. A backend that
+// materialises loop variables at their element type inside the body —
+// or one whose conversions do not survive the closure boundary at all
+// — fails here while every flat test stays green.
+//
+// the product row doubles as a magnitude check: 200*250*5 = 250000
+// needs more than 16 bits, so it discriminates against an accumulate-
+// at-u16 answer too, not just u8.
+//
+// the equality row pins what "lossless" means operationally: the
+// converted usize must compare `==` to the literal written at the
+// comparison's position. scalar equality goes through C's own
+// operator (`num.zen`: "every integer already compares"), so this
+// line holds only if the conversion produced the value the words
+// name — a zero-extended 3000000000, not the negative number a
+// signed intermediate would have minted.
+
+takes_sz = (m: usize) usize { m }
+
+main = (env: Env) Res<i32, AllocError> {
+    xs: [u8, 3] ::= [200, 250, 5];
+    total: u64 ::= 0;
+    prod: u64 ::= 1;
+    xs.loop((h, v) {
+        w: u64 = v.to_u64();
+        total = total + w;
+        prod = prod * w;
+    });
+    println("sum {} prod {}", total, prod);
+
+    n: u32 = 3000000000;
+    sz: usize = n.to_usize();
+    println("{}", takes_sz(sz));
+    same = (sz == 3000000000).match({ true => 1, false => 0 });
+    println("eq {}", same);
+    Ok(0);
+}

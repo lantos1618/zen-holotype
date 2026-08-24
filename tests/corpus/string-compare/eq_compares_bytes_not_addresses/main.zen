@@ -1,0 +1,29 @@
+// Equality runs over the BYTES a str denotes, never the address it lives
+// at. A slice is a view: same backing storage as its source, pointer
+// moved forward, and NOT the same address as the literal it happens to
+// equal byte-for-byte.
+//
+// An eq that compared `data` fields -- the field-wise default that
+// str.impl(Hash, ..)'s comment warns the hash must never take, since a
+// map keyed on addresses misses every lookup -- answers false for every
+// true row below and stays green on the false ones. That split is the
+// point: a test of only equal literals passes under BOTH implementations,
+// so a view beside a literal with equal bytes has to be in the file.
+//
+// Breaks it: make str.eq look at the pointer (e.g. return
+// `self.data == other.data && ..`) -- row 2 flips while rows 3-5 stay
+// exactly as they are, so the failure names the broken half by itself.
+
+main = (env: Env) Res<i32, AllocError> {
+    s    = "abcdef";
+    head = s.slice(0, 3);      // "abc", borrowed out of the front
+    twin = s.slice(0, 3);      // the same three bytes, a second view
+    mid  = s.slice(2, 5);      // "cde", same source, different window
+
+    println("{}", head.len);
+    println("{}", head == "abc");
+    println("{}", head == twin);
+    println("{}", head == "abd");
+    println("{}", head == mid);
+    Ok(0);
+}

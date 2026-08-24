@@ -1,0 +1,42 @@
+// AN ENUM MATCH IN VALUE POSITION YIELDS THE ARM PAYLOAD, NOT THE TAG.
+//
+// The scrutinee is a union, so its runtime representation is a tag plus
+// a payload; the match's value is the PAYLOAD the taken arm binds. A
+// lowering that forgets which half of the union it is holding emits the
+// tag (or the whole struct) where `r` goes -- and a tag happens to be a
+// small number that prints fine:
+//
+//   correct          3136 49
+//                   63
+//   enum tag leaks   small ints in place of 3136/49 -- zeros that look
+//                    like defaults, the exact failure this corpus exists
+//                    to make visible
+//
+// `Square(side)` sits in the MIDDLE of the declaration with `Unit`
+// after it, so "last variant wins" also fails here. The multiply keeps
+// the payload flowing into real arithmetic rather than a straight copy,
+// and the two bindings at the bottom read the payloads back out of the
+// SAME variants through different arm positions (first arm and `_`
+// fallback respectively).
+
+Shape = Circle(i32) | Square(i32) | Unit
+
+area = (s: Shape) i32 {
+    s.match({
+        Circle(r)    => r * r,
+        Square(side) => side * side,
+        Unit         => 1,
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    c ::= Shape.Circle(56);
+    s ::= Shape.Square(7);
+
+    r = c.match({ Circle(r) => r, _ => 0 });
+    d = s.match({ Square(d) => d, _ => 0 });
+
+    println("{} {}", area(c), area(s));
+    println("{}", r + d);
+    Ok(0);
+}

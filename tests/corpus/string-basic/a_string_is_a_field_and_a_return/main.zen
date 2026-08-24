@@ -1,0 +1,71 @@
+// tests/corpus/string-basic/a_string_is_a_field_and_a_return/main.zen
+// A String is an ORDINARY VALUE: it sits in a struct field, crosses a
+// return, and keeps growing through a `::` parameter — and the buffer
+// bytes must survive each of those moves. This is where "String IS the
+// Vec, nothing added on top" meets codegen: the struct embeds the Vec
+// by value (data pointer, len, capacity, Alloc), so a constructor that
+// dropped or zeroed one field — the exact bug class this tree lost
+// weeks to — prints either nothing or a trap instead of text.
+//
+// Three shapes, one buffer each:
+//   - a struct field built through its own ufcs constructor, appended
+//     to through the FIELD (mutability composes down the path: `name`
+//     is `::`, so the write is legal while the Tag binding stays
+//     immutable);
+//   - a function returning Res<String, ..>, whose Ok payload carries a
+//     grown heap buffer out of the callee's frame;
+//   - mutation through a `::` String parameter across two calls, so
+//     both appends must land in the caller's original allocation.
+//
+// The len()s are printed beside every view: a truncated copy that
+// still prints would disagree with its own count.
+
+Error = AllocError | WriteError
+
+Tag = {
+    name :: String,
+    n*: usize,
+}
+
+Tag* = (a: Alloc, s: str, n: usize) Res<Tag, AllocError> {
+    t ::= Tag(name: a.String().try(), n: n);
+    t.name.add_bytes(s).try();
+    Ok(t);
+}
+
+render = (a: Alloc, base: str, k: i32) Res<String, WriteError> {
+    out ::= a.String().try();
+    out.add("{}={}", base, k).try();
+    Ok(out);
+}
+
+grow = (sb :: String, tail: str) Res<(), AllocError> {
+    sb.add_bytes(tail).try();
+    Ok(());
+}
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+
+    // struct field: constructed empty, filled through the field
+    t = Tag(alloc, "wheel", 4).try();
+    println("tag {} {}", t.name.view(), t.n);
+
+    // a mutable binding so the second append through the field is legal
+    t2 ::= Tag(alloc, "rim", 8).try();
+    t2.name.add_byte('!').try();
+    println("tag {} {} {}", t2.name.view(), t2.name.len(), t2.name.is_empty());
+
+    // returned from a callee, grown after arrival
+    r ::= render(alloc, "answer", 42).try();
+    r.add("??").try();
+    println("r {} {}", r.view(), r.len());
+
+    // two calls appending into main's own buffer through `::`
+    mine ::= alloc.String().try();
+    grow(mine, "one").try();
+    grow(mine, "-two").try();
+    println("mine {} {}", mine.view(), mine.len());
+
+    Ok(0);
+}

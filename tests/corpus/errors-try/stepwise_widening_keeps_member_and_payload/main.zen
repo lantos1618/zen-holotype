@@ -1,0 +1,51 @@
+// THE SET GROWS STEPWISE AND THE MEMBER STAYS WHOLE ACROSS EVERY HOP.
+//
+// `res_try_error_set_widens_strictly` re-tags ONE hop from `CErr` into a
+// strictly larger set; this walks the member up a LADDER of sets --
+// `Leaf`, then `Grove = Leaf | Stem`, then `Forest = Grove | Tree` --
+// and asks for the leaf back at the top, its field still holding what
+// the bottom put in it.
+//
+// Every rung is a strict widening (the destination adds a member), so
+// canonical numbering collapses none of them into a copy: two
+// independent tag maps must both agree, and one off-by-one rank anywhere
+// on the ladder lands in the wrong arm below. The wrong arm prints fine
+// -- that is the point. The member is a STRUCT, not a bare tag, so a
+// ladder that re-tagged correctly but clobbered the member's bytes
+// prints "leaf age 0" -- a readable lie, which is why the printed field
+// is part of the assertion.
+
+Leaf = { age: i64 }
+Stem = { snapped: bool }
+Tree = { rooted: bool }
+
+Grove = Leaf | Stem
+Forest = Grove | Tree
+
+grow = () Res<i64, Leaf> {
+    Err(Leaf(age: 41));
+}
+
+climb = () Res<i64, Grove> {
+    grow().try();
+    Ok(0);
+}
+
+reach = () Res<i64, Forest> {
+    climb().try();
+    Ok(0);
+}
+
+main = (env: Env) Res<i32, Forest> {
+    reach().match({
+        Ok(_)   => println("no error"),
+        Err(e) => e.match({
+            Grove(g) => g.match({
+                Leaf(l)  => println("leaf age {}", l.age),
+                Stem(s)  => println("stem"),
+            }),
+            Tree(t) => println("tree"),
+        }),
+    });
+    Ok(0);
+}

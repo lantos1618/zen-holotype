@@ -1,0 +1,29 @@
+// THE PAYLOAD IS A STRUCT, AND THE BINDER'S FIELD IS READ IN THE ARM.
+// `At(p)` binds a Pos; `p.line` must load through the union member into
+// the struct -- two lookups, and the failure this pins is EITHER spelled
+// from the wrong enum. Found.At and Mark.At share their name; if the
+// member is emitted from Mark's table while matching a Found (or the
+// field offset comes off the wrong struct), line and col swap or read
+// garbage: valid C, plausible numbers.
+//
+// Both enums are matched in one program on purpose -- with one enum the
+// bug cannot be expressed, which is exactly how it stayed invisible.
+
+Pos = { line: i64, col: u8 }
+
+Found = At(Pos) | Nowhere
+Mark  = At(u64) | Gone
+
+main = (env: Env) Res<i32, AllocError> {
+    f: Found = Found.At(Pos(line: 12, col: 34));
+    f.match({
+        At(p)     => println("at {}.{}", p.line, p.col),
+        Nowhere   => println("nowhere"),
+    });
+    m: Mark = Mark.At(7);
+    m.match({
+        At(n)  => println("mark {}", n),
+        Gone   => println("gone"),
+    });
+    Ok(0);
+}

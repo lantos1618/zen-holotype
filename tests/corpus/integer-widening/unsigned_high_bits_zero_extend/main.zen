@@ -1,0 +1,44 @@
+// WIDENING AN UNSIGNED INTEGER MUST ZERO-EXTEND, and the interesting
+// half of that rule is the CROSS-SIGN one: `u8 -> i32`, `u16 -> i64`,
+// `u32 -> i64` are declared in `std.core.num` beside the unsigned
+// targets precisely because a small unsigned value is non-negative in
+// every wider SIGNED type too.
+//
+// the C hazard is the mirror of the signed case: an operand pushed
+// through a SIGNED intermediate — `(int64_t)(int32_t)x` on a `uint32_t`,
+// one swapped letter in the cast — reads the high bit as a sign.
+// `4000000000` is 0xEE6B2800; through `int32_t` it is `-294967296`,
+// which prints as a perfectly plausible number. The same wrongness
+// arrives more quietly from C's usual arithmetic conversions: in any
+// expression mixing the u32 with signed ints BEFORE the cast, the u32
+// becomes signed and the damage is done upstream of `write_convert`.
+//
+// so every operand below sits at or near its type's top: 255 and
+// 65535 are all-ones, 4000000000 has the bit 31 set that a signed
+// reading calls minus, and `u32.MAX` is the last stop before the
+// value stops fitting a signed 32-bit anything. Each is asked at a
+// signed target AS WELL AS the unsigned one, because a backend that
+// special-cased "unsigned to unsigned" would pass the rows its bug
+// does not reach.
+//
+// the range guard on the other side — `300` refusing a u8 slot — is
+// `must-fail/traps/literal_too_large_in_an_array_element`'s owner;
+// this file only pins that legal values arrive whole.
+
+main = (env: Env) Res<i32, AllocError> {
+    a: u8 = 255;
+    println("{}", a.to_u16());
+    println("{}", a.to_u32());
+    println("{}", a.to_u64());
+    println("{}", a.to_i32());
+    println("{}", a.to_i64());
+
+    b: u16 = 65535;
+    println("{}", b.to_u64());
+    println("{}", b.to_i64());
+
+    c: u32 = 4000000000;
+    println("{}", c.to_u64());
+    println("{}", c.to_i64());
+    Ok(0);
+}

@@ -1,0 +1,48 @@
+// tests/corpus/string-basic/a_hole_picks_its_writer_by_type/main.zen
+// `{}` is TYPE-DIRECTED: the same spelling lowers to add_bool, add_i64
+// or add_u64 depending on the argument's type — and which writer it
+// picks is OBSERVABLE on exactly the values where the writers disagree.
+//
+// The classic failure this pins: every hole going through ONE signed
+// path. A u64 above i64.MAX printed through add_i64 comes out negative
+// (`-1` for UINT64_MAX) and still looks like plausible output; usize
+// 4000000000 through an i32-ish path truncates into a different
+// plausible number. So the values below are chosen so each wrong
+// writer produces a DIFFERENT string than the right one:
+//
+//   - 18446744073709551615 as u64 must not print -1 (the signed trap)
+//   - 9223372036854775808 as u64 must not print -9223372036854775808
+//   - 0 - 2147483648 as i64 must keep its sign through a printer whose
+//     digits are generated from a NON-POSITIVE value (text_fmt's own
+//     comment: negating first traps on exactly this input)
+//
+// The bool arm pins that true/false are spelled out, not printed as 1/0
+// by whatever integer path a lazy dispatch would fall into.
+
+Error = AllocError | WriteError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+
+    // unsigned at and past the signed boundary
+    u ::= alloc.String().try();
+    big: u64 = 18446744073709551615;
+    edge: u64 = 9223372036854775808;
+    u.add("{} {}", big, edge).try();
+    println("u [{}] {}", u.view(), u.len());
+
+    // signed at both ends of i32 and the i64 minimum, whose digits
+    // cannot be produced by negate-then-print-u64
+    n ::= alloc.String().try();
+    lo: i64 = 0 - 2147483648;
+    min: i64 = 0 - 9223372036854775807 - 1;
+    n.add("{} {} {}", lo, min, 2147483647).try();
+    println("i [{}]", n.view());
+
+    // the boolean spelling
+    t ::= alloc.String().try();
+    t.add("{}={} {}", true, false, true).try();
+    println("b [{}]", t.view());
+
+    Ok(0);
+}

@@ -1,0 +1,30 @@
+// i64 division traps on a zero divisor. the 64-bit case is where a
+// check written in the wrong C integer type silently passes: `long`
+// on LP64 holds an i64, but an `(int)`-narrowed test or a 32-bit
+// branch instruction misses nothing here and everything at u64 -- so
+// this pins the signed half of the pair.
+//
+// the prints before the trap pin 64-bit signed arithmetic itself:
+// -9223372036854775808 / 3 = -3074457345618258602 with remainder
+// -2 -- the full-width value only a non-truncating lowering prints;
+// a 32-bit divide truncates both lines.
+//
+// the divisor comes from the environment, so no constant folder can
+// turn this into the compile-time error a visible zero would be
+// (DESIGN.md: a provable trap is a compile error, not a runtime one).
+
+Error = Overflow | DivideByZero | OutOfBounds
+
+main = (env: Env) Res<i32, Error> {
+    a: i64 = i64.MIN;
+    println("{} {}", a / 3, a % 3);
+
+    // a zero the compiler cannot see: it comes from the environment
+    zero: i64 = env.vars.get("ZEN_TRAP_NEVER_SET").match({
+        Ok(_) => 1,
+        None  => 0,
+    });
+    q = a / zero;
+    println("{}", q);
+    Ok(0);
+}

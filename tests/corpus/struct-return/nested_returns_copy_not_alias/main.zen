@@ -1,0 +1,60 @@
+// A STRUCT RETURNED FROM INSIDE A CONSTRUCTOR ARGUMENT IS COPIED, NOT
+// ALIASED — three returns deep, then one `snap` away.
+//
+// The existing struct_return_large.zen pins that a nested constructor
+// argument (`Nest(big: big(), two: two())`) arrives intact. It cannot
+// see the failure mode this test exists for: a backend that lowers the
+// return as a POINTER into the callee's frame compiles, runs, and
+// prints plausible numbers — right up until the frame is written again
+// or read twice. So the nesting here is arranged to be read at two
+// depths and through two values of the same object:
+//
+//   - `build_outer` calls `build_mid`, which calls `build_inner`: the
+//     innermost result crosses TWO by-value returns inside another
+//     construction before anything reads it. A returned pointer into
+//     `build_inner`'s frame is re-read as `o.mid.in` AND as `snap.mid.in`
+//     below; both must still say 3 after `o` is written to 100.
+//   - `snap = o` takes the value BEFORE the write, so value semantics —
+//     copy on assignment, copy on return — is what keeps it at 3. A
+//     backend that aliased struct assignment (or aliased the returns
+//     both came from) moves all four numbers together, and "snap 100
+//     orig 100" looks like success if you expect aliasing.
+//
+// Every field has a distinct prime-ish value for the same reason the
+// tree's other ABI tests use distinct sizes: a swapped field order
+// must move something.
+
+Inner = {
+    v*:: i64,
+    w*: i64,
+}
+
+Mid = {
+    in*:: Inner,
+    k*: i64,
+}
+
+Outer = {
+    mid*:: Mid,
+    tag*: i64,
+}
+
+build_inner = () Inner { Inner(v: 3, w: 5) }
+
+build_mid = () Mid { Mid(in: build_inner(), k: 7) }
+
+build_outer = () Outer { Outer(mid: build_mid(), tag: 11) }
+
+deep_sum = (o: Outer) i64 { o.mid.in.v + o.mid.in.w + o.mid.k + o.tag }
+
+main = (env: Env) Res<i32, AllocError> {
+    o ::= build_outer();
+    println("deep {} {}", o.mid.in.v, o.mid.in.w);
+    println("mid {} tag {}", o.mid.k, o.tag);
+    println("sum {}", deep_sum(o));
+
+    snap = o;
+    o.mid.in.v = 100;
+    println("snap {} orig {}", snap.mid.in.v, o.mid.in.v);
+    Ok(0);
+}

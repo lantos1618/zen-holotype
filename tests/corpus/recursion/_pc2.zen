@@ -1,0 +1,33 @@
+// probeC2: recursive struct through Ptr, arena allocated; alloc passed as a
+// plain value parameter (like Vec's ufcs constructor does)
+Cell = {
+    value: i64,
+    next: Ptr<Cell>,
+}
+
+build = (a: Alloc, n: i64) Res<Ptr<Cell>, AllocError> {
+    (n <= 0).match({
+        true  => Ok(null_ptr<Cell>()),
+        false => {
+            rest = build(a, n - 1).try();
+            cell = a.create<Cell>().try();
+            cell.write(0, Cell(value: n * 7, next: rest));
+            Ok(cell);
+        },
+    });
+}
+
+walk = (p: Ptr<Cell>, acc: i64) i64 {
+    p.is_null().match({
+        true  => acc,
+        false => walk(p.read(0).next, acc + p.read(0).value),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    head = build(a, 6).try();
+    println("sum {}", walk(head, 0));
+    println("head {}", head.read(0).value);
+    Ok(0);
+}
