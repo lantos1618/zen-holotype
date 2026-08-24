@@ -24,8 +24,9 @@
 // holds the tree, tally and authority — splitting the walk from the
 // check would put the `Ast` in one file and the thing that finishes it
 // in another. What is NOT about a build has left: what a module is
-// CALLED and where its bytes ARE is `zen_path.zen`, free functions, so
-// a second driver reads one rule.
+// CALLED and where its bytes ARE is `zen_path.zen`, and WHICH FILES the
+// emission lands in is `zen_write.zen` — free functions both, so a
+// second driver reads one rule.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -62,7 +63,6 @@ PRELUDE, last_segment = sema.sema
 check_module_graph = sema.sema
 Def = sema.sema
 Emit, CBackend, emit_program = gen.gen
-lower_program, emit_header, emit_unit, unit_used = gen.gen
 
 Job = zen.zen_cli
 
@@ -79,6 +79,9 @@ unit_at, candidate, joined, relative_to = zen.zen_path
 ENTRY, entry_of = zen.zen_path
 
 Unit* = zen.zen_path
+
+// where the bytes go, and why one would not
+emit_units, fs_message = zen.zen_write
 
 // What order the walk reaches modules in: arithmetic on an index.
 walk_index = zen.zen_order
@@ -706,81 +709,19 @@ Build* = {
         Ok(());
     }
 
-    // THE DIAGNOSTICS ARE READ BEFORE ONE BYTE IS WRITTEN, exactly as
-    // above: the header is assembled first because assembling it is
-    // what emits the type definitions, and everything a unit adds after
-    // that is bytes already lowered.
+    // ONE `.c` PER MODULE is `zen_write.zen`'s: which files the
+    // emission lands in and what each is called are about the disk, not
+    // about a build. It answers how many faults it added, because the
+    // tally is this one's.
     emit_many = (self :: @Self, c :: Checker, job: Job) Res<(), AllocError> {
-        be ::= self.alloc.CBackend(self.tree, c).try();
-        be.use_externs();
-        lower_program(be, 0).try();
-        hdr ::= self.alloc.Emit().try();
-        emit_header(be, hdr).try();
-        report ::= self.alloc.String("").try();
-        be.render_diags(report).try();
-        n           = be.diag_count();
+        n           = emit_units(
+            self.alloc,
+            self.env,
+            self.tree,
+            c,
+            job.dir
+        ).try();
         self.faults = self.faults + n;
-        (n > 0).then(() { println("{}", report.view()); });
-        (n == 0).then(() { self.write_units(be, job, hdr).try(); });
-        Ok(());
-    }
-
-    write_units = (self :: @Self, be :: CBackend, job: Job, hdr: Emit)
-                  Res<(), AllocError> {
-        self.write_at(job.dir, "zen.h", hdr.view()).try();
-        Range(0, self.tree.module_count()).loop((h, u) {
-            self.write_unit(be, job, u).try();
-        });
-        Ok(());
-    }
-
-    // MODULE 0 IS WRITTEN WHATEVER IT HOLDS: it is the root, and `main`
-    // is emitted into it. Every other module with no body of its own
-    // contributes no file, because an empty one still costs a process.
-    write_unit = (self :: @Self, be :: CBackend, job: Job, u: usize)
-                 Res<(), AllocError> {
-        ((u == 0) || unit_used(be, u)).match({
-            false => Ok(()),
-            true  => self.write_unit_at(be, job, u),
-        })
-    }
-
-    write_unit_at = (self :: @Self, be :: CBackend, job: Job, u: usize)
-                    Res<(), AllocError> {
-        out ::= self.alloc.Emit().try();
-        emit_unit(be, 0, u, out).try();
-        name ::= self.alloc.String().try();
-        self.unit_file(be, u, name).try();
-        self.write_at(job.dir, name.view(), out.view())
-    }
-
-    // THE FILE IS NAMED FOR THE MODULE, dots and all, because the
-    // module path is already the one name no two modules share — a
-    // counter would renumber every file when one module was added, and
-    // a renamed file is a compiler-cache miss.
-    unit_file = (self :: @Self, be :: CBackend, u: usize, out :: String)
-                Res<(), AllocError> {
-        self.tree.module_at(u).match({
-            None  => out.add_bytes("zg_unit"),
-            Ok(m) => out.add_bytes(m.name),
-        }).try();
-        out.add_bytes(".c")
-    }
-
-    write_at = (self :: @Self, dir: str, name: str, bytes: str)
-               Res<(), AllocError> {
-        path ::= self.alloc.String().try();
-        path.fmt("{dir}/{name}").try();
-        self.env.fs.write(path.view(), bytes).match({
-            Ok(_)  => Ok(()),
-            Err(e) => self.unit_write_failed(path.view(), e),
-        })
-    }
-
-    unit_write_failed = (self :: @Self, path: str, e: FsError)
-                        Res<(), AllocError> {
-        self.faults = self.faults + 1;
-        println("--emit-c-dir {}: {}", path, fs_message(e));
         Ok(());
     }
 
@@ -848,17 +789,4 @@ Build* = (a: Alloc, env: Env, root: str) Build {
         diags: a.Vec<Diag>(),
         overlay: a.Map<str, str>()
     )
-}
-
-// What went wrong with a file. Every one of these names what actually
-// happened, because "bad arguments" is not a reason and neither is
-// "io error".
-fs_message* = (e: FsError) str {
-    e.match({
-        NotFound    => "nothing is at that path",
-        Denied      => "this process may not read it",
-        IsDir       => "the path names a directory, and a directory is not bytes",
-        Failed      => "the read started and did not finish",
-        OutOfMemory => "the buffer could not be obtained",
-    })
 }

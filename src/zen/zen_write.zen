@@ -1,0 +1,147 @@
+// src/zen/zen_write.zen
+// The program as one C file per module, and what to say when a write
+// will not go.
+//
+// A SUBJECT THAT LEFT `zen_build.zen` THE WAY `zen_path.zen` DID. That
+// file's five phases are read -> lex -> parse -> check -> emit, and it
+// says so; WHICH FILES the emission lands in, what each is CALLED, and
+// why a write failed are about the disk, not about a build. Left as
+// free functions for the same reason: a second driver reads one rule.
+//
+// ONE TRANSLATION UNIT IS 110,451 LINES, and `cc -O2` is superlinear in
+// a unit's size — the same code emitted one file per module and
+// compiled with `-j16` measured 8.4x faster, and only a per-module `-c`
+// compile is a shape a compiler cache can serve at all. `emit_units` is
+// that shape; `--emit-c -o <file.c>` stays `zen_build.zen`'s, because
+// the committed seed is one file and `make seed` writes it.
+//
+// NOTHING HERE RE-LOWERS. `lower_program` walks the program once and a
+// unit is a selection from the one sorted list of functions, so which
+// file a body lands in never changes the body's bytes.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Range = std.core
+FsError = std.env
+
+Ast = std.ast.ast_arena
+
+Checker = sema.sema
+Emit, CBackend = gen.gen
+lower_program, emit_header, emit_unit, unit_used = gen.gen
+
+// One `.c` per module beside the one `zen.h` they all include, written
+// into `dir`, which must already exist (`std.env.Fs` writes files, and
+// nothing else). Answers HOW MANY FAULTS it added, because the caller
+// owns the tally and a fault here is a value like any other.
+//
+// THE DIAGNOSTICS ARE READ BEFORE ONE BYTE IS WRITTEN, exactly as the
+// single-file path does it: the header is assembled first because
+// assembling it is what emits the type definitions, and everything a
+// unit adds after that is bytes already lowered.
+emit_units* = (a: Alloc, env: Env, tree: Ast, c :: Checker, dir: str)
+              Res<usize, AllocError> {
+    be ::= a.CBackend(tree, c).try();
+    be.use_externs();
+    lower_program(be, 0).try();
+    hdr ::= a.Emit().try();
+    emit_header(be, hdr).try();
+    report ::= a.String("").try();
+    be.render_diags(report).try();
+    n = be.diag_count();
+    (n > 0).then(() { println("{}", report.view()); });
+    (n == 0).match({
+        false => Ok(n),
+        true  => write_units(a, env, tree, be, dir, hdr),
+    })
+}
+
+write_units = (
+    a    : Alloc,
+    env  : Env,
+    tree : Ast,
+    be   :: CBackend,
+    dir  : str,
+    hdr  : Emit
+) Res<usize, AllocError> {
+    bad ::= write_at(a, env, dir, "zen.h", hdr.view()).try();
+    Range(0, tree.module_count()).loop((h, u) {
+        bad = bad + write_unit(a, env, tree, be, dir, u).try();
+    });
+    Ok(bad);
+}
+
+// MODULE 0 IS WRITTEN WHATEVER IT HOLDS: it is the root, and `main` is
+// emitted into it. Every other module with no body of its own
+// contributes no file, because an empty one still costs a process.
+write_unit = (
+    a    : Alloc,
+    env  : Env,
+    tree : Ast,
+    be   :: CBackend,
+    dir  : str,
+    u    : usize
+) Res<usize, AllocError> {
+    ((u == 0) || unit_used(be, u)).match({
+        false => Ok(0),
+        true  => write_unit_at(a, env, tree, be, dir, u),
+    })
+}
+
+write_unit_at = (
+    a    : Alloc,
+    env  : Env,
+    tree : Ast,
+    be   :: CBackend,
+    dir  : str,
+    u    : usize
+) Res<usize, AllocError> {
+    out ::= a.Emit().try();
+    emit_unit(be, 0, u, out).try();
+    name ::= a.String().try();
+    unit_file(tree, u, name).try();
+    write_at(a, env, dir, name.view(), out.view())
+}
+
+// THE FILE IS NAMED FOR THE MODULE, dots and all, because the module
+// path is already the one name no two modules share — a counter would
+// renumber every file when one module was added, and a renamed file is
+// a compiler-cache miss.
+unit_file* = (tree: Ast, u: usize, out :: String) Res<(), AllocError> {
+    tree.module_at(u).match({
+        None  => out.add_bytes("zg_unit"),
+        Ok(m) => out.add_bytes(m.name),
+    }).try();
+    out.add_bytes(".c")
+}
+
+// A write that fails is a fault, not a trap: a full disk or unwritable
+// path is a thing the caller acts on, and one refused unit must not
+// hide the next one.
+write_at = (a: Alloc, env: Env, dir: str, name: str, bytes: str)
+           Res<usize, AllocError> {
+    path ::= a.String().try();
+    path.fmt("{dir}/{name}").try();
+    env.fs.write(path.view(), bytes).match({
+        Ok(_)  => Ok(0),
+        Err(e) => unit_write_failed(path.view(), e),
+    })
+}
+
+unit_write_failed = (path: str, e: FsError) Res<usize, AllocError> {
+    println("--emit-c-dir {}: {}", path, fs_message(e));
+    Ok(1);
+}
+
+// What went wrong with a file. Every one of these names what actually
+// happened, because "bad arguments" is not a reason and neither is
+// "io error".
+fs_message* = (e: FsError) str {
+    e.match({
+        NotFound    => "nothing is at that path",
+        Denied      => "this process may not read it",
+        IsDir       => "the path names a directory, and a directory is not bytes",
+        Failed      => "the read started and did not finish",
+        OutOfMemory => "the buffer could not be obtained",
+    })
+}
