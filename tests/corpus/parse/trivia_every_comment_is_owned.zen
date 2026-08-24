@@ -1,0 +1,358 @@
+// tests/corpus/parse/trivia_every_comment_is_owned.zen
+// Every comment and blank this file lexes is named by EXACTLY ONE
+// trivia run of the tree the parser builds — checked against the
+// arena, zero-length runs included.
+//
+// This is the walk that found issue #740, kept as a gate. A comment
+// that is the only content of a bare block — or of a closure body —
+// sat in no run at all: `block_here` built every `Block` with
+// `trailing: no_trivia()` unconditionally, nothing claimed
+// `p.pending` while the block's statements were read, and bumping the
+// closing `}` overwrote the pending run with one starting PAST the
+// comment. The formatter cannot catch this and never will be able to
+// on its own: `fmt.zen` reads only each declaration's leading run and
+// the module's trailing run, and copies every declaration BODY
+// verbatim from the original bytes, so its round trip stays
+// byte-identical even when a comment below declaration level is
+// dropped. The round trip is a vacuous oracle for this property; the
+// walk over the arena is not.
+//
+// The file below carries one comment per placement the contract
+// names an owner for — including the two this gate exists to keep,
+// marked HERE in the numbered sketch:
+//
+//    1  // before the declaration              -> Point.leading
+//    2  Point = {
+//    3      x: i32,
+//    4  }
+//    5                                         -> blank, name.leading
+//    6  name = (s: Shape) str {
+//    7      s.match({
+//    8          // first inside the arm body   -> arm.leading
+//    9          Circle => "c",
+//   10      });
+//   11  } // trailing on the closing brace     -> name.trailing
+//   12                                         -> blank, f.leading
+//   13  f = () {
+//   14      // the only content of a closure body
+//   15                                        ->>> f.body.trailing
+//   16      g = (h: i32) i32 { h };
+//   17      g;
+//   18  }
+//   19                                        -> blank, main.leading
+//   20  main = () {
+//   21      {
+//   22          // the only content of a bare block
+//   23                                        ->>> bare-block.trailing
+//   24      }
+//   25  }
+//   26  // at end of file                     -> Module.trailing
+
+scan, Source = std.lex.lex
+Parser = std.parse.parser
+Ast = std.ast.ast_arena
+TriviaRun = std.ast.ast_span
+ExprId, TypeId, PatternId, BlockId = std.ast.ast_id
+Decl, Struct, Enum, Alias, Function, Impl, Import, Const = std.ast.ast_node
+Module, Block, Stmt, Bind, ExprStmt = std.ast.ast_node
+Expr, Name, Literal, Paren, ArrayLit, FixedArray = std.ast.ast_node
+Lambda, Call, Match, Try, Record, Access, Index = std.ast.ast_node
+Unary, Binary, Consume, Meta, Arg, Arm = std.ast.ast_node
+Type, Named, Union, FnType, ArrayType = std.ast.ast_node
+Pattern, PatName, Destructure = std.ast.ast_node
+Member, Field, Param, TParam, ImportName = std.ast.ast_node
+
+SOURCE: str = "// before the declaration\nPoint = {\n    x: i32,\n}\n\nname = (s: Shape) str {\n    s.match({\n        // first inside the arm body\n        Circle => \"c\",\n    });\n} // trailing on the closing brace\n\nf = () {\n    // the only content of a closure body\n    g = (h: i32) i32 { h };\n    g;\n}\n\nmain = () {\n    {\n        // the only content of a bare block\n    }\n}\n// at end of file\n"
+
+// The walk's state. `last` and `started` make the whole audit one
+// comparison per piece: the arena keeps trivia in source order and
+// every run is a contiguous window of it, so pieces met through well-
+// formed runs form a strictly increasing sequence. A repeat or a step
+// back is two runs naming one piece; a piece skipped forever shows up
+// at the end as `claimed` short of the arena's own count.
+Walk = {
+    tree*: Ast,
+    claimed* :: usize = 0,
+    bad* :: usize = 0,
+    started* :: bool = false,
+    last* :: usize = 0,
+}
+
+// How many pieces of trivia the compilation holds. The one number the
+// runs in the tree have to add up to.
+count_of* = (tree: Ast) usize { tree.trivia_count }
+
+add = (w :: Walk, run: TriviaRun, label: str) Res<(), AllocError> {
+    w.claimed = w.claimed + run.len;
+    Range(0, run.len).loop((h, i) {
+        piece = w.tree.trivia_at(run, i);
+        (w.started && piece_index(w) <= w.last).match({
+            true  => {
+                w.bad = w.bad + 1;
+                println(
+                    "  {} names piece {} again or out of order (last was {})",
+                    label,
+                    piece.span.start.line,
+                    w.last
+                );
+            },
+            false => { w.last = piece_index_at(w, run, i); w.started = true; },
+        });
+    });
+    Ok(());
+}
+
+// The absolute arena index of the i-th piece of a run. `trivia_at`
+// hands back the Trivia alone, so the index is rebuilt from the run's
+// base — the same arithmetic the reader does.
+piece_index = (w: Walk) usize { w.last + 1 }
+
+piece_index_at = (w: Walk, run: TriviaRun, i: usize) usize { run.at + i }
+
+// -------------------------------------------------------------------
+// one walk per node family
+//
+// Each adds the runs its nodes carry — both of them, the empty ones
+// costing nothing — around walking the children, so the order pieces
+// are met in is their source order. A family without trivia runs
+// (Ident, QualifiedName, spans) has no case here.
+// -------------------------------------------------------------------
+
+walk_module = (w :: Walk, m: Module) Res<(), AllocError> {
+    add(w, m.leading, "module.leading");
+    Range(0, m.decls.len).loop((h, i) {
+        m.decls.get(i).match({
+            Ok(d) => walk_decl(w, d),
+            None  => println("  module.decls.get({}) was None", i),
+        });
+    });
+    add(w, m.trailing, "module.trailing");
+    Ok(());
+}
+
+walk_decl = (w :: Walk, d: Decl) Res<(), AllocError> {
+    add(w, d.leading, "decl.leading");
+    d.kind.match({
+        Struct(s)   => s.members.loop((h, mem) { walk_member(w, mem) }),
+        Enum(e)     => e.variants.loop((h, v) {
+            add(w, v.leading, "variant.leading");
+            add(w, v.trailing, "variant.trailing");
+        }),
+        Alias(a)    => walk_type(w, a.target),
+        Function(f) => f.body.match({
+            Ok(b) => walk_block(w, block_of(w, b)),
+            None  => (),
+        }),
+        Impl(im)    => im.members.loop((h, mem) { walk_member(w, mem) }),
+        Import(im)  => im.names.loop((h, n) {
+            add(w, n.leading, "import-name.leading");
+            add(w, n.trailing, "import-name.trailing");
+        }),
+        Const(c)    => walk_expr(w, c.value),
+    });
+    add(w, d.trailing, "decl.trailing");
+    Ok(());
+}
+
+walk_member = (w :: Walk, mem: Member) Res<(), AllocError> {
+    add(w, mem.leading, "member.leading");
+    mem.kind.match({
+        Field(f)    => f.value.match({
+            Ok(v) => walk_expr(w, v),
+            None  => (),
+        }),
+        Const(c)    => walk_expr(w, c.value),
+        Function(f) => f.body.match({
+            Ok(b) => walk_block(w, block_of(w, b)),
+            None  => (),
+        }),
+    });
+    add(w, mem.trailing, "member.trailing");
+    Ok(());
+}
+
+walk_block = (w :: Walk, b: Block) Res<(), AllocError> {
+    add(w, b.leading, "block.leading");
+    b.stmts.loop((h, s) { walk_stmt(w, s) });
+    b.value.match({
+        Ok(v) => walk_expr(w, v),
+        None  => (),
+    });
+    add(w, b.trailing, "block.trailing");
+    Ok(());
+}
+
+walk_stmt = (w :: Walk, s: Stmt) Res<(), AllocError> {
+    add(w, s.leading, "stmt.leading");
+    s.kind.match({
+        Bind(bd)   => {
+            walk_expr(w, bd.target);
+            bd.type.match({
+                Ok(t) => walk_type(w, t),
+                None  => (),
+            });
+            walk_expr(w, bd.value);
+        },
+        Expr(es)   => walk_expr(w, es.expr),
+        Decl(d)    => walk_decl(w, d),
+        Block(bid) => walk_block(w, block_of(w, bid)),
+    });
+    add(w, s.trailing, "stmt.trailing");
+    Ok(());
+}
+
+walk_expr = (w :: Walk, id: ExprId) Res<(), AllocError> {
+    e = w.tree.expr_at(id);
+    add(w, e.leading, "expr.leading");
+    e.kind.match({
+        Name(_)        => (),
+        Literal(_)     => (),
+        Unit           => (),
+        SelfType       => (),
+        Scope          => (),
+        Meta(mt)       => mt.value.match({
+            Ok(v) => walk_expr(w, v),
+            None  => (),
+        }),
+        Paren(pa)      => walk_expr(w, pa.inner),
+        Array(arr)     => arr.elems.loop((h, el) { walk_expr(w, el) }),
+        FixedArray(fa) => {
+            walk_type(w, fa.type);
+            fa.elems.loop((h, el) { walk_expr(w, el) });
+        },
+        Lambda(l)      => {
+            l.params.loop((h, pm) { walk_param(w, pm) });
+            l.ret.match({
+                Ok(t) => walk_type(w, t),
+                None  => (),
+            });
+            walk_block(w, block_of(w, l.body));
+        },
+        Call(c)        => {
+            walk_expr(w, c.callee);
+            c.targs.loop((h, t) { walk_type(w, t) });
+            c.args.loop((h, arg) { walk_arg(w, arg) });
+        },
+        Match(mt)      => {
+            walk_expr(w, mt.scrutinee);
+            mt.arms.loop((h, arm) {
+                add(w, arm.leading, "arm.leading");
+                walk_pattern(w, arm.pattern);
+                walk_expr(w, arm.body);
+                add(w, arm.trailing, "arm.trailing");
+            });
+        },
+        Try(ty)        => walk_expr(w, ty.operand),
+        Record(r)      => r.entries.loop((h, mem) { walk_member(w, mem) }),
+        Access(a)      => walk_expr(w, a.base),
+        Index(ix)      => {
+            walk_expr(w, ix.base);
+            walk_expr(w, ix.index);
+        },
+        Unary(u)       => walk_expr(w, u.operand),
+        Binary(bn)     => {
+            walk_expr(w, bn.lhs);
+            walk_expr(w, bn.rhs);
+        },
+        Consume(cn)    => walk_expr(w, cn.operand),
+        Block(bid)     => walk_block(w, block_of(w, bid)),
+    });
+    add(w, e.trailing, "expr.trailing");
+    Ok(());
+}
+
+walk_arg = (w :: Walk, arg: Arg) Res<(), AllocError> {
+    add(w, arg.leading, "arg.leading");
+    walk_expr(w, arg.value);
+    add(w, arg.trailing, "arg.trailing");
+    Ok(());
+}
+
+walk_pattern = (w :: Walk, id: PatternId) Res<(), AllocError> {
+    pt = w.tree.pattern_at(id);
+    add(w, pt.leading, "pattern.leading");
+    pt.kind.match({
+        Name(_)         => (),
+        Wild            => (),
+        Literal(_)      => (),
+        Destructure(ds) => walk_pattern(w, ds.binder),
+    });
+    add(w, pt.trailing, "pattern.trailing");
+    Ok(());
+}
+
+walk_param = (w :: Walk, pm: Param) Res<(), AllocError> {
+    add(w, pm.leading, "param.leading");
+    pm.type.match({
+        Ok(t) => walk_type(w, t),
+        None  => (),
+    });
+    add(w, pm.trailing, "param.trailing");
+    Ok(());
+}
+
+walk_tparam = (w :: Walk, tp: TParam) Res<(), AllocError> {
+    add(w, tp.leading, "tparam.leading");
+    tp.bounds.loop((h, b) { walk_type(w, b) });
+    add(w, tp.trailing, "tparam.trailing");
+    Ok(());
+}
+
+walk_type = (w :: Walk, id: TypeId) Res<(), AllocError> {
+    t = w.tree.type_at(id);
+    add(w, t.leading, "type.leading");
+    t.kind.match({
+        Named(n)  => n.args.loop((h, arg) { walk_type(w, arg) }),
+        Union(u)  => u.members.loop((h, m) { walk_type(w, m) }),
+        Fn(ft)    => {
+            ft.tparams.loop((h, tp) { walk_tparam(w, tp) });
+            ft.params.loop((h, pm) { walk_param(w, pm) });
+            walk_type(w, ft.ret);
+        },
+        Array(at) => {
+            walk_type(w, at.elem);
+            walk_expr(w, at.count);
+        },
+        Unit      => (),
+        SelfType  => (),
+        Infer     => (),
+        Variadic  => (),
+    });
+    add(w, t.trailing, "type.trailing");
+    Ok(());
+}
+
+block_of = (w: Walk, id: BlockId) Block { w.tree.block_at(id) }
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    lexed = scan(alloc, Source(file: "t.zen", text: SOURCE)).try();
+    p ::= alloc.Parser(lexed);
+    m = p.module("t").try();
+    println("lex {} parse {}", lexed.diags.len, p.diags.len);
+
+    w ::= Walk(tree: p.tree);
+    walk_module(w, m).try();
+
+    total = count_of(p.tree);
+    println("trivia pieces {} claimed by runs {}", total, w.claimed);
+    (w.claimed == total).match({
+        true  => println(
+            "every comment is named by exactly one trivia run"
+        ),
+        false => {
+            println(
+                "{} of {} pieces of trivia are named by no run at all",
+                total - w.claimed,
+                total
+            );
+            w.bad = w.bad + 1;
+        },
+    });
+
+    failed ::= w.bad > 0 || p.diags.len > 0;
+    failed.match({
+        true  => Ok(1),
+        false => Ok(0),
+    });
+}
