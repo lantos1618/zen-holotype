@@ -25,7 +25,7 @@ scan, Source = std.lex
 Parser = std.parse
 Ast, Module, Decl, Span, Ident = std.ast
 write_range = lsp.lsp_pos
-write_text, written = lsp.lsp_json
+write_text, written, obj, arr, Nest = lsp.lsp_json
 write_decimal = lsp.lsp_frame
 
 // One outline entry: the name, its kind, the declaration's whole span
@@ -96,25 +96,27 @@ add_sym = (out :: Vec<Sym>, id: Ident, kind: usize, span: Span)
 // parse answers about nothing else.
 write_symbols* = (uri: str, text: str, syms: Vec<Sym>, out :: String)
                  Res<(), AllocError> {
-    out.add_bytes("[").try();
-    n ::= 0;
-    syms.loop((h, s) { n = write_sym(s, uri, text, n, out).try(); });
-    out.add_bytes("]")
+    list ::= arr(out).try();
+    syms.loop((h, s) { write_sym(s, uri, text, list, out).try(); });
+    list.close(out)
 }
 
-write_sym = (s: Sym, uri: str, text: str, n: usize, out :: String)
-            Res<usize, AllocError> {
-    (n > 0).match({ true => out.add_bytes(","), false => written() }).try();
-    out.add_bytes("{\"name\":").try();
-    write_text(s.name, out).try();
-    out.add_bytes(",\"kind\":").try();
+// THE LIST IS PASSED, NOT A COUNT: the separator between two entries
+// belongs to the array that holds them, and `Nest` is what holds it.
+write_sym = (s: Sym, uri: str, text: str, list :: Nest, out :: String)
+            Res<(), AllocError> {
+    list.next(out).try();
+    sym ::= obj(out).try();
+    sym.text("name", s.name, out).try();
+    sym.key("kind", out).try();
     write_decimal(s.kind, out).try();
-    out.add_bytes(",\"location\":{\"uri\":").try();
-    write_text(uri, out).try();
-    out.add_bytes(",\"range\":").try();
+    sym.key("location", out).try();
+    at ::= obj(out).try();
+    at.text("uri", uri, out).try();
+    at.key("range", out).try();
     write_range(text, s.span, out).try();
-    out.add_bytes("},\"selectionRange\":").try();
+    at.close(out).try();
+    sym.key("selectionRange", out).try();
     write_range(text, s.name_span, out).try();
-    out.add_bytes("}").try();
-    Ok(n + 1);
+    sym.close(out)
 }

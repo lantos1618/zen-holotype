@@ -35,7 +35,7 @@ Checker = sema.sema_check
 Diag = sema.sema_diag
 Def, module_display = sema.sema_def
 to_pos, to_wire, write_wire, WirePos = lsp.lsp_pos
-write_text, written = lsp.lsp_json
+write_text, written, obj, arr, Nest = lsp.lsp_json
 
 // One offer: the name to bind and the module to bind it from. Kept as
 // DATA until the writer pass, because the comma rule wants an index and
@@ -169,38 +169,63 @@ write_offerings = (
     out   :: String
 ) Res<(), AllocError> {
     at = insert_at(c, file, text);
-    out.add_byte('[').try();
-    n ::= 0;
-    found.loop((h, a) { n = write_action(t, a, at, uri, n, out).try(); });
-    out.add_byte(']')
+    list ::= arr(out).try();
+    found.loop((h, a) { write_action(t, a, at, uri, list, out).try(); });
+    list.close(out)
 }
 
+// THE TITLE IS THE LINE, SAID OUT LOUD, and it is built from the line
+// rather than beside it — two spellings of `Name = dotted.module` is two
+// places for the offer and the edit to disagree.
+//
+// AND IT GOES THROUGH `write_text` LIKE EVERY OTHER STRING HERE. It used
+// to be concatenated between hand-written quotes, the one place in this
+// folder where caller data reached the wire unescaped. A Zen identifier
+// holds no quote today, so nothing was wrong on any input the lexer can
+// produce — which is exactly why it would have stayed wrong.
 write_action = (
-    t   : Alloc,
-    a   : Action,
-    at  : WirePos,
-    uri : str,
-    n   : usize,
-    out :: String
-) Res<usize, AllocError> {
-    (n > 0).match({ true => out.add_byte(','), false => written() }).try();
-    out.add_bytes("{\"title\":\"Import ").try();
-    out.add_bytes(a.name).try();
-    out.add_bytes(" = ").try();
-    out.add_bytes(a.module).try();
-    out.add_bytes("\",\"kind\":\"quickfix\",\"edit\":{\"changes\":{").try();
-    write_text(uri, out).try();
-    out.add_bytes(":[{\"range\":{\"start\":").try();
-    write_wire(at, out).try();
-    out.add_bytes(",\"end\":").try();
-    write_wire(at, out).try();
-    out.add_bytes("},\"newText\":").try();
+    t    : Alloc,
+    a    : Action,
+    at   : WirePos,
+    uri  : str,
+    list :: Nest,
+    out  :: String
+) Res<(), AllocError> {
     line ::= t.String().try();
     line.add_bytes(a.name).try();
     line.add_bytes(" = ").try();
     line.add_bytes(a.module).try();
     line.add_bytes("\n").try();
-    write_text(line.view(), out).try();
-    out.add_bytes("}]}}}").try();
-    Ok(n + 1);
+    // The line is finished before its bytes are read, so the view cannot
+    // outlive a growth of the buffer behind it.
+    said = line.view();
+    title ::= t.String().try();
+    title.add_bytes("Import ").try();
+    title.add_bytes(said.slice(0, said.len - 1)).try();
+
+    list.next(out).try();
+    fix ::= obj(out).try();
+    fix.text("title", title.view(), out).try();
+    fix.text("kind", "quickfix", out).try();
+    fix.key("edit", out).try();
+    edit ::= obj(out).try();
+    edit.key("changes", out).try();
+    changes ::= obj(out).try();
+    changes.key(uri, out).try();
+    edits ::= arr(out).try();
+    edits.next(out).try();
+    one ::= obj(out).try();
+    one.key("range", out).try();
+    range ::= obj(out).try();
+    range.key("start", out).try();
+    write_wire(at, out).try();
+    range.key("end", out).try();
+    write_wire(at, out).try();
+    range.close(out).try();
+    one.text("newText", said, out).try();
+    one.close(out).try();
+    edits.close(out).try();
+    changes.close(out).try();
+    edit.close(out).try();
+    fix.close(out)
 }

@@ -31,6 +31,9 @@ codepoint_at, UTF8_MIN_4 = std.text.text_utf8
 // `Content-Length`. One direction only — `lsp_frame.zen` reads
 // `lsp_json.zen` and neither reads this file.
 write_decimal = lsp.lsp_frame
+// The container writer: a `range` is two members and a `position` two
+// more, and the comma between each pair is not this file's to spell.
+obj = lsp.lsp_json
 
 // A position as the wire spells it: 0-based line, UTF-16 units. A
 // distinct type from `Pos` on purpose — the cheapest check against the
@@ -180,11 +183,12 @@ target_of = (run: LineRun, col: usize) usize {
 // pair assembled in two files is a pair whose halves can disagree.
 
 write_wire* = (p: WirePos, out :: String) Res<(), AllocError> {
-    out.add_bytes("{\"line\":").try();
+    at ::= obj(out).try();
+    at.key("line", out).try();
     write_decimal(p.line, out).try();
-    out.add_bytes(",\"character\":").try();
+    at.key("character", out).try();
     write_decimal(p.character, out).try();
-    out.add_bytes("}")
+    at.close(out)
 }
 
 // THE WHOLE DOCUMENT, as a range — the protocol's spelling of "replace
@@ -196,11 +200,12 @@ write_wire* = (p: WirePos, out :: String) Res<(), AllocError> {
 // range past the end, and naming the last line's last character would
 // need its width in UTF-16 units for no gain.
 write_whole* = (text: str, out :: String) Res<(), AllocError> {
-    out.add_bytes("{\"start\":").try();
+    span ::= obj(out).try();
+    span.key("start", out).try();
     write_wire(WirePos(line: 0, character: 0), out).try();
-    out.add_bytes(",\"end\":").try();
+    span.key("end", out).try();
     write_wire(WirePos(line: past_last_line(text), character: 0), out).try();
-    out.add_bytes("}")
+    span.close(out)
 }
 
 // The 0-based line index one past the document's last. A text with n
@@ -219,9 +224,10 @@ past_last_line = (text: str) usize {
 // converted against another file's bytes is the wrong underline in the
 // right file.
 write_range* = (text: str, span: Span, out :: String) Res<(), AllocError> {
-    out.add_bytes("{\"start\":").try();
+    range ::= obj(out).try();
+    range.key("start", out).try();
     write_wire(to_wire(text, span.start), out).try();
-    out.add_bytes(",\"end\":").try();
+    range.key("end", out).try();
     write_wire(to_wire(text, span.end), out).try();
-    out.add_bytes("}")
+    range.close(out)
 }
