@@ -224,66 +224,31 @@ Request* = Initialize
 
 // The one place a method's spelling is compared. Ordered by how often a
 // session sends each: a document is hovered far more than it is opened.
+// Early return over a chain: the one-shot loop is a breakable block,
+// each guard a `.then` naming the one request it spells, the last break
+// the answer to everything else — `sequence_len` in `std/text` is the
+// same idiom, and the typed binding is load-bearing for the reason its
+// own comment states.
 request_of* = (method: str) Request {
-    method.eq("textDocument/hover").match({
-        true  => Request.Hover,
-        false => request_after_hover(method),
-    })
-}
-
-request_after_hover = (method: str) Request {
-    method.eq("textDocument/definition").match({
-        true  => Request.Definition,
-        false => request_after_definition(method),
-    })
-}
-
-request_after_definition = (method: str) Request {
-    method.eq("textDocument/completion").match({
-        true  => Request.Completion,
-        false => request_after_completion(method),
-    })
-}
-
-request_after_completion = (method: str) Request {
-    method.eq("textDocument/documentSymbol").match({
-        true  => Request.Outline,
-        false => request_after_outline(method),
-    })
-}
-
-request_after_outline = (method: str) Request {
-    method.eq(SEMANTIC_TOKENS).match({
-        true  => Request.Colour,
-        false => request_after_colour(method),
-    })
-}
-
-// FORMATTING AND CODE ACTIONS ARE LAST OF THE DOCUMENT METHODS: a buffer
-// is coloured on every keystroke, formatted on save, and asked for
-// quickfixes only when the cursor pauses on a squiggle.
-request_after_colour = (method: str) Request {
-    method.eq("textDocument/formatting").match({
-        true  => Request.Format,
-        false => request_after_format(method),
-    })
-}
-
-request_after_format = (method: str) Request {
-    method.eq("textDocument/codeAction").match({
-        true  => Request.Action,
-        false => request_after_action(method),
-    })
-}
-
-request_after_action = (method: str) Request {
-    method.eq("initialize").match({
-        true  => Request.Initialize,
-        false => method.eq("shutdown").match({
-            true  => Request.Shutdown,
-            false => Request.Unknown,
-        }),
-    })
+    found: Res<Request> = loop<Request>((h) {
+        method.eq("textDocument/hover").then(() { h.break(Request.Hover) });
+        method.eq("textDocument/definition").then(() { h.break(Request.Definition) });
+        method.eq("textDocument/completion").then(() { h.break(Request.Completion) });
+        method.eq("textDocument/documentSymbol").then(() { h.break(Request.Outline) });
+        method.eq(SEMANTIC_TOKENS).then(() { h.break(Request.Colour) });
+        // FORMATTING AND CODE ACTIONS ARE LAST OF THE DOCUMENT METHODS: a buffer
+        // is coloured on every keystroke, formatted on save, and asked for
+        // quickfixes only when the cursor pauses on a squiggle.
+        method.eq("textDocument/formatting").then(() { h.break(Request.Format) });
+        method.eq("textDocument/codeAction").then(() { h.break(Request.Action) });
+        method.eq("initialize").then(() { h.break(Request.Initialize) });
+        method.eq("shutdown").then(() { h.break(Request.Shutdown) });
+        h.break(Request.Unknown);
+    });
+    found.match({
+        Ok(one) => one,
+        None    => Request.Unknown,
+    });
 }
 
 // JSON-RPC's codes as a UNION: a call site names a fault, never a
