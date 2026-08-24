@@ -1,0 +1,33 @@
+// A NAME IS BOUND ONCE PER BLOCK. `n = 42` then `n = 3.5` in one block
+// was neither a binding nor a write, and nobody type-checked it: sema
+// called the second one a fresh binding, because `lookup` walks from the
+// top down and shadowing "falls out for free" (`sema_check.zen`), while
+// the backend called it a store — `gen_c_stmt.is_store` answers yes to a
+// plain `=` on a name already bound in the body. Two answers to one
+// question, so the emitted C was `int64_t zu_l1n; zu_l1n = 42;
+// zu_l1n = 3.5;` and the program printed 3 at exit 0. Zen has no cast
+// keyword; an implicit float-to-int is exactly the wrong answer that
+// looks plausible.
+//
+// The fix the message names is the DECLARATION's, not the write's: the
+// two statements read identically, so only the first can say whether the
+// name may be written again. `::=` says it.
+//
+// SHADOWING IS NOT WHAT IS REFUSED. A nested block still shadows and a
+// match binder still shadows — `lookup_here` asks about THIS block, and
+// `corpus/codegen/inlined_callee_keeps_its_own_local` is the case where
+// two frames legitimately bind one name.
+//
+// ONE MISTAKE, ONE DIAGNOSTIC: the refused statement types as poison, so
+// there is no second complaint about `3.5` not being an integer.
+//
+// positions: the second binding, then BOTH — a diagnostic that reports a
+// collision and shows one side of it sends the reader hunting.
+
+main = (env: Env) Res<i32, IoError> {
+    n = 42;
+    println("n starts as {}", n);
+    n = 3.5;
+    println("n is now {}", n);
+    Ok(0);
+}

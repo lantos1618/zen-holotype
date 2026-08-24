@@ -88,6 +88,7 @@ SemaFault* =
     | ModuleNotAValue(ExportFault)     // a module is a namespace, not a value
     | NoSuchField(TypeFault)           // the type has no member of that name
     | MemberNeedsValue(TypeFault)      // a union's member IS a type, so naming it alone writes no value
+    | Rebound(PairFault)               // a second `=` binding of one name in one block
 
     // types
     | TypeMismatch(TypeFault)          // expected X, found Y
@@ -236,6 +237,7 @@ message* = (fault: SemaFault) str {
         ConsumedUse(_)            => "use after move:",
         NeedsMutableReceiver(_)   => "the receiver is immutable:",
         ImmutableWrite(_)         => "cannot write through an immutable binding:",
+        Rebound(_)                => "a name is bound once per block: the first binding is still live here, and `=` on it is neither a fresh binding nor a write — declare it `::=` to assign to it, write a nested block to shadow it, or give the second one its own name",
         PartiallyMoved(_)         => "a partial move reaches the drop:",
         ConsumeNotAPlace(_)       => "cannot consume an array element: the index is a runtime value, so which element is dead is not a fact the compiler holds",
         ConsumeThroughHandle(_)   => "cannot consume through a handle: you may only move what this frame owns, and a bitwise copy of a handle would be left pointing at a dead value",
@@ -272,6 +274,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         ImplMissingField(f)       => write_missing(out, f),
         CtorMissingField(f)       => write_ctor_missing(out, f),
         OrphanImpl(f)             => write_orphan(out, f),
+        Rebound(f)                => write_pair(out, f),
         ComputedFieldAssign(f)    => out.write_name(f),
         ComputedFieldAddress(f)   => out.write_name(f),
         InferredSetExported(f)    => out.write_name(f),

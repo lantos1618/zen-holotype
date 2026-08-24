@@ -20,26 +20,116 @@
 
 Expr, ExprId, Bind, Access = std.ast
 AllocError = std.mem
+str = std.text
 TyId, TyArray, literal_default = sema.sema_ty
-Checker, Ctx = sema.sema_check
-SemaFault, NameFault = sema.sema_diag
+Checker, Ctx, Binding = sema.sema_check
+SemaFault, NameFault, PairFault = sema.sema_diag
 computed_member, writable_member = sema.sema_member
 check_literal = sema.sema_trap
 check_arms, check_arms_agree = sema.sema_hoist
 type_of, type_from_ast = sema.sema_type
 
 // `x = e;`, `x: T ::= e;`.
+//
+// ONE MISTAKE, ONE DIAGNOSTIC: a refused rebinding types as poison, so
+// the value's own type is never contrasted against a binding the
+// statement was not allowed to make.
 bind_stmt* = (c :: Checker, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
     got  = c.type_of(b.value, ctx).try();
-    want = c.bind_want(b, got, ctx).try();
+    want = c.check_rebound(b).try().match({
+        true  => c.types.unknown(),
+        false => c.bind_want(b, got, ctx),
+    }).try();
     c.check_assign(b, got, want, ctx).try();
     c.bind_target(b, want, ctx).try();
     c.types.prim("()")
 }
 
-// What the value has to fit. A written type wins; with none, a bare
-// name takes the value's own type, a path takes the storage's. BUG this
-// replaced: answering `got` for both asked whether the value fits
+// A PLAIN `=` WITH NO TYPE WRITTEN, which is the only spelling that can
+// mean a write. `x: T ::= e` and `x ::= e` both DECLARE, whatever else
+// is in scope, and the backend agrees: `gen_c_stmt.is_store` asks these
+// same two questions before it asks the third.
+plain_write = (b: Bind) bool {
+    written = b.type.match({ Ok(_) => true, None => false });
+    (b.mutable == false) && (written == false)
+}
+
+// WHICH BINDING A BARE NAME WRITES TO, when it writes to one at all.
+//
+// WORD FOR WORD `gen_c_stmt.is_store`, which is the point: the backend
+// has always decided this question, and decided it this way — a plain
+// `=`, no type written, a name already bound in the body. Sema answered
+// "a fresh binding" to all three, so a rebinding was typed at the
+// VALUE's type while the emitted C stored into the SLOT's, and
+// `n ::= 42; n = 3.5;` became `zu_l1n = 3.5;` inside an `int64_t` with
+// nothing but C to object. Two answers to one question is the defect;
+// this deletes the second copy rather than adding a rule.
+assign_binding = (c :: Checker, b: Bind) Res<Binding> {
+    plain_write(b).match({
+        false => None,
+        true  => c.tree.expr_at(b.target).kind.match({
+            Name(n) => c.lookup(n.text),
+            _       => None,
+        }),
+    })
+}
+
+// A SECOND `=` BINDING OF ONE NAME IN ONE BLOCK, refused, naming both.
+// Answers whether it fired.
+//
+// The first binding is `=` too, so it is set once and never written;
+// and it is still live, so the block holds two bindings of one name
+// with one C slot between them. Sema accepted that AT ANOTHER TYPE,
+// because `lookup` walks from the top down and shadowing "falls out for
+// free" (`sema_check.zen`) — freedom that is right for a nested block
+// and wrong here, where nothing was nested.
+//
+// `lookup_here` and not `lookup`: a nested block IS how shadowing is
+// spelled, and a match binder shadows legally.
+check_rebound* = (c :: Checker, b: Bind) Res<bool, AllocError> {
+    c.rebound_of(b).match({
+        None    => Ok(false),
+        Ok(old) => c.report_rebound(b, old),
+    })
+}
+
+rebound_of = (c :: Checker, b: Bind) Res<Binding> {
+    plain_write(b).match({
+        false => None,
+        true  => c.tree.expr_at(b.target).kind.match({
+            Name(n) => settled_binding(c.lookup_here(n.text)),
+            _       => None,
+        }),
+    })
+}
+
+// A MUTABLE FIRST BINDING IS NOT A MISTAKE: `::=` is exactly the
+// permission to be written again, which is the fix this fault names.
+settled_binding = (found: Res<Binding>) Res<Binding> {
+    found.match({
+        Ok(old) => old.mutable.match({ true => None, false => Ok(old) }),
+        None    => None,
+    })
+}
+
+report_rebound = (c :: Checker, b: Bind, old: Binding)
+                 Res<bool, AllocError> {
+    target = c.tree.expr_at(b.target);
+    c.report(
+        target.span.file,
+        target.span,
+        SemaFault.Rebound(PairFault(
+            name: old.name,
+            first: old.span,
+            second: target.span,
+        ))
+    ).try();
+    Ok(true);
+}
+
+// What the value has to fit. A written type wins; with none, a WRITE
+// takes the storage's type and a fresh binding takes the value's. BUG
+// this replaced: answering `got` for both asked whether the value fits
 // itself, a check no value can fail — `self.n = "not an int"` on an
 // `n :: i32` compiled clean. Value is typed BEFORE this is asked, since
 // asking the place first would type a target that may not exist.
@@ -47,7 +137,28 @@ bind_want* = (c :: Checker, b: Bind, got: TyId, ctx: Ctx)
              Res<TyId, AllocError> {
     b.type.match({
         Ok(t) => c.type_from_ast(t, ctx),
-        None  => c.place_want(b.target, got, ctx),
+        None  => c.assign_binding(b).match({
+            Ok(old) => c.store_want(old.ty, got),
+            None    => c.place_want(b.target, got, ctx),
+        }),
+    })
+}
+
+// A WRITE TAKES THE STORAGE'S TYPE, whatever the value's is — the
+// bare-name half of `place_want`'s rule, and the half that was missing:
+// `n ::= 42; n = 3.5;` emitted `zu_l1n = 3.5;` into an `int64_t`, and
+// nothing but C had an opinion.
+//
+// EXCEPT THAT AN UNSETTLED SLOT HAS NOT CHOSEN A WIDTH. `n ::= 0`
+// freezes the FAMILY and nothing more — `int` is the literal's own
+// type, the slot it emits is an `int64_t`, and every integer reaches
+// one — so `fields ::= 0; fields = fields + m.NULL` stores an `i32`
+// exactly, while `n = 3.5` still has no integer to be. A settled slot
+// has chosen, and then the choice is the answer.
+store_want = (c :: Checker, old: TyId, got: TyId) Res<TyId, AllocError> {
+    (c.is_literal_ty(old) && c.assignable(old, got)).match({
+        true  => Ok(got),
+        false => Ok(old),
     })
 }
 
@@ -131,11 +242,23 @@ bind_target* = (c :: Checker, b: Bind, ty: TyId, ctx: Ctx)
               Res<(), AllocError> {
     target = c.tree.expr_at(b.target);
     target.kind.match({
-        Name(n)   => c.bind(n.text, ty, b.mutable, false),
+        Name(n)   => c.bind_name(b, n.text, target, ty),
         Access(a) => c.assign_access(target, a, ctx),
         _         => Ok(()),
     }).try();
     Ok(());
+}
+
+// A WRITE INTRODUCES NOTHING. Binding the name a second time would put
+// two rows on the scope stack for one C slot, and the second row's type
+// is what every later read would answer with — which is how `n = 3.5`
+// came to read back as an `f64` from an `int64_t`.
+bind_name = (c :: Checker, b: Bind, name: str, target: Expr, ty: TyId)
+            Res<(), AllocError> {
+    c.assign_binding(b).match({
+        Ok(_) => Ok(()),
+        None  => c.bind_at(name, ty, b.mutable, false, target.span),
+    })
 }
 
 // `c.width = 5` on an impl-supplied field: there is nothing to assign

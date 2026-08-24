@@ -41,6 +41,7 @@
 // diagnostic.
 
 Ast, ExprId, TypeId, Span = std.ast
+nowhere = std.ast
 BinOp, Unary = std.ast
 Alloc, AllocError = std.mem
 Vec, Map = std.collections
@@ -66,11 +67,17 @@ Inst, InstEdge = sema.sema_inst
 // `param` is the same shape of fact for the LSP: a formal parameter and
 // a `let`-style local paint two colours (`design_lsp.md` §2, L4), and a
 // use site cannot re-derive which it was once the scope is gone.
+//
+// `span` is WHERE THE NAME WAS WRITTEN, and it is here because a
+// diagnostic about two bindings of one name has to name both of them.
+// The declaration is gone by the time the second one is read — the
+// scope stack is the only thing that still remembers it.
 Binding* = {
     name*: str,
     ty*: TyId,
     mutable*: bool,
     param*: bool,
+    span*: Span,
 }
 
 // What a query needs to know that its key does not carry.
@@ -190,6 +197,12 @@ Checker* = {
     // stack needs a `usize` and `release` is what pops it.
     locals :: Vec<Binding>,
 
+    // WHERE THE INNERMOST BLOCK STARTS in that stack. `release` needs
+    // only a mark passed down the call chain; deciding whether a name
+    // is bound in THIS block needs the mark to be readable from
+    // anywhere the block's statements reach, which a local cannot be.
+    block_base :: usize,
+
     // the type parameters in scope, and the bounds on them. Two stacks
     // with marks, the same shape and for the same reason.
     //
@@ -289,14 +302,57 @@ Checker* = {
 
     mark* = (self: @Self) usize { self.locals.len }
 
+    // A BLOCK IS A SCOPE OF ITS OWN, and this is the pair that says so.
+    // `enter_block` hands back the enclosing block's base for
+    // `leave_block` to restore, the same shape as `mark`/`release` —
+    // and for the same reason, since blocks nest.
+    enter_block* = (self :: @Self) usize {
+        was             = self.block_base;
+        self.block_base = self.locals.len;
+        was
+    }
+
+    leave_block* = (self :: @Self, was: usize) () { self.block_base = was; }
+
+    // The binding of `name` DECLARED IN THE INNERMOST BLOCK, or
+    // nothing. `lookup` walks the whole stack, which is what a use site
+    // wants; a second declaration is only a mistake when the first one
+    // is a statement of the same block, because a nested block is how
+    // shadowing is spelled.
+    // Forward, where `lookup` walks backward: a block holds at most one
+    // binding of a name once this is enforced, so there is no innermost
+    // to find. `gen_c_state.bound_in_frame` is the same walk over the
+    // same shape, asking the backend's version of the question.
+    lookup_here* = (self: @Self, name: str) Res<Binding> {
+        Range(self.block_base, self.locals.len).find((k) {
+            self.locals.get(k).match({
+                Ok(b) => b.name.eq(name),
+                None  => false,
+            })
+        }).match({
+            None  => None,
+            Ok(k) => self.locals.get(k),
+        })
+    }
+
     // `param` marks a formal parameter; `param_memo` is why it is recorded.
     bind* = (self :: @Self, name: str, ty: TyId, mutable: bool, param: bool)
             Res<(), AllocError> {
+        self.bind_at(name, ty, mutable, param, nowhere())
+    }
+
+    // The same binding, with the position the name was written at. A
+    // backend re-walking a body has no position to give and does not
+    // need one; a declaration in source does, because `sema_place.zen`
+    // reports a second binding of the name by pointing at both.
+    bind_at* = (self :: @Self, name: str, ty: TyId, mutable: bool,
+                param: bool, span: Span) Res<(), AllocError> {
         self.locals.add(Binding(
             name: name,
             ty: ty,
             mutable: mutable,
-            param: param
+            param: param,
+            span: span
         ))
     }
 
@@ -358,7 +414,8 @@ Checker* = {
             name: name,
             ty: ty,
             mutable: false,
-            param: false
+            param: false,
+            span: nowhere()
         ))
     }
 
@@ -393,7 +450,8 @@ Checker* = {
             name: name,
             ty: ty,
             mutable: false,
-            param: false
+            param: false,
+            span: nowhere()
         ))
     }
 
@@ -759,6 +817,7 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         set_memo: a.Map<TyId, TyId>(),
         raised: a.Vec<TyId>(),
         locals: a.Vec<Binding>(),
+        block_base: 0,
         tvars: a.Vec<Binding>(),
         bounds: a.Vec<Binding>(),
         alloc: a,
