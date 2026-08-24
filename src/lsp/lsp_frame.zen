@@ -38,6 +38,41 @@ FrameFault* = NoBlank(usize)     // headers that never ended
             | BadLength(usize)   // a Content-Length that is not a number
             | Short(usize)       // fewer bytes than the length promises
 
+// Where the fault sits. Every variant carries it, so there is nothing
+// to decide.
+byte* = (f: FrameFault) usize {
+    f.match({
+        NoBlank(i)   => i,
+        NoLength(i)  => i,
+        BadLength(i) => i,
+        Short(i)     => i,
+    })
+}
+
+// The fault, said for a person. `lsp_serve.zen`'s `frame_fault` reports
+// it to a caller's stream and this folder's `fault_line` to a console;
+// both say this sentence.
+why* = (f: FrameFault) str {
+    f.match({
+        NoBlank(_)   => "the headers never ended",
+        NoLength(_)  => "no Content-Length",
+        BadLength(_) => "Content-Length is not a number",
+        Short(_)     => "fewer bytes than Content-Length promised",
+    })
+}
+
+// Whether the framing still made sense at `f`. Over a live transport
+// `NoBlank` and `Short` are bytes still in flight, not faults; over a
+// buffer `serve` ends the session at any of the four.
+partial* = (f: FrameFault) bool {
+    f.match({
+        NoBlank(_)   => true,
+        Short(_)     => true,
+        NoLength(_)  => false,
+        BadLength(_) => false,
+    })
+}
+
 // The frame beginning at `at`.
 frame_at* = (bytes: str, at: usize) Res<Envelope, FrameFault> {
     blank = blank_at(bytes, at).try();

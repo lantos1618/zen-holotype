@@ -28,8 +28,8 @@
 str, String, str_at = std.text
 Vec = std.collections
 Alloc, AllocError = std.mem
-FrameFault, frame_at, short_by = lsp.lsp_frame
-Server, frame_byte, frame_why = lsp.lsp_serve
+Server = lsp.lsp_serve
+FrameFault, frame_at, short_by, partial = lsp.lsp_frame
 
 // How far a drain got, and whether the framing still made sense.
 Drain* = {
@@ -142,29 +142,13 @@ answered = (server :: Server, t: Alloc, body: str) Res<(), AllocError> {
     Ok(());
 }
 
-// The header's reading of `Short`/`NoBlank`: bytes still in flight, not
-// faults. Over a buffer `serve` treats every fault as the end of the
-// session; the other two are a client speaking a protocol this is not.
-partial = (f: FrameFault) bool {
-    f.match({
-        NoBlank(_)   => true,
-        Short(_)     => true,
-        NoLength(_)  => false,
-        BadLength(_) => false,
-    })
-}
-
 // A real framing fault, said once, to the same stream the replies went
 // to. `println` here (vs `print` above) is correct: this is a line of
 // text, not a frame.
 fault_line = (f: FrameFault, framed: bool) () {
     framed.match({
         true  => (),
-        false => println(
-            "lsp: bad frame at byte {} ({})",
-            f.frame_byte(),
-            f.frame_why()
-        ),
+        false => println("lsp: bad frame at byte {} ({})", f.byte(), f.why()),
     });
 }
 
