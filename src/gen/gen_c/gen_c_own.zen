@@ -81,9 +81,9 @@ enter_block* = (be :: CBackend, id: BlockId) Res<(), AllocError> {
 // Giving the match a function body removes the join: each arm checks
 // against a declared return type instead of its sibling.
 block_record = (be :: CBackend, id: BlockId) Res<usize, AllocError> {
-    writes_scope(be, id).match({
+    be.writes_scope(id).match({
         false => Ok(0),
-        true  => open_record(be),
+        true  => be.open_record(),
     })
 }
 
@@ -101,7 +101,7 @@ open_record = (be :: CBackend) Res<usize, AllocError> {
 leave_block* = (be :: CBackend, keep: str) Res<(), AllocError> {
     (be.block_depth() == 0).match({
         true  => Ok(()),
-        false => run_frame(be, be.block_depth() - 1, keep),
+        false => be.run_frame(be.block_depth() - 1, keep),
     }).try();
     be.close_block()
 }
@@ -117,14 +117,14 @@ unwind_to* = (be :: CBackend, depth: usize, keep: str)
     n = be.block_depth();
     (n > depth).match({
         false => Ok(()),
-        true  => unwind_frames(be, depth, n, keep),
+        true  => be.unwind_frames(depth, n, keep),
     })
 }
 
 unwind_frames = (be :: CBackend, depth: usize, n: usize, keep: str)
                 Res<(), AllocError> {
     Range(0, n - depth).loop((h, k) {
-        run_frame(be, n - 1 - k, keep).try();
+        be.run_frame(n - 1 - k, keep).try();
     });
     Ok(());
 }
@@ -133,7 +133,7 @@ unwind_frames = (be :: CBackend, depth: usize, n: usize, keep: str)
 run_frame = (be :: CBackend, i: usize, keep: str) Res<(), AllocError> {
     be.block_at(i).match({
         None  => Ok(()),
-        Ok(f) => run_cleanup(be, f, i, keep),
+        Ok(f) => be.run_cleanup(f, i, keep),
     })
 }
 
@@ -141,9 +141,9 @@ run_cleanup = (be :: CBackend, f: BlockFrame, i: usize, keep: str)
               Res<(), AllocError> {
     (f.rec > 0).match({
         false => Ok(()),
-        true  => run_defers(be, f.rec),
+        true  => be.run_defers(f.rec),
     }).try();
-    unwind_drops(be, f.mark, frame_end(be, i), keep)
+    be.unwind_drops(f.mark, be.frame_end(i), keep)
 }
 
 // Where this block's drops stop: the next block's mark, or the end.
@@ -165,7 +165,7 @@ unwind_drops = (be :: CBackend, mark: usize, end: usize, keep: str)
                Res<(), AllocError> {
     (end > mark).match({
         false => Ok(()),
-        true  => drop_range(be, mark, end, keep),
+        true  => be.drop_range(mark, end, keep),
     })
 }
 
@@ -174,7 +174,7 @@ drop_range = (be :: CBackend, mark: usize, end: usize, keep: str)
     Range(0, end - mark).loop((h, k) {
         be.drop_at(end - 1 - k).match({
             None  => Ok(()),
-            Ok(e) => drop_unless_kept(be, e, keep),
+            Ok(e) => be.drop_unless_kept(e, keep),
         }).try();
     });
     Ok(());
@@ -186,7 +186,7 @@ drop_unless_kept = (be :: CBackend, e: DropEntry, keep: str)
                    Res<(), AllocError> {
     e.name.eq(keep).match({
         true  => Ok(()),
-        false => write_drop(be, e),
+        false => be.write_drop(e),
     })
 }
 
@@ -202,7 +202,7 @@ drop_unless_kept = (be :: CBackend, e: DropEntry, keep: str)
 // else still owns.
 note_drop* = (be :: CBackend, name: str, index: usize, ty: TyId)
              Res<(), AllocError> {
-    has_drop(be, ty).try().match({
+    be.has_drop(ty).try().match({
         false => Ok(()),
         true  => own_binding(be, name, index, ty),
     })
@@ -210,7 +210,7 @@ note_drop* = (be :: CBackend, name: str, index: usize, ty: TyId)
 
 own_binding = (be :: CBackend, name: str, index: usize, ty: TyId)
               Res<(), AllocError> {
-    live = open_live_flag(be).try();
+    live = be.open_live_flag().try();
     be.own_binding(DropEntry(name: name, index: index, ty: ty, live: live))
 }
 
@@ -238,7 +238,7 @@ release_binding* = (be :: CBackend, name: str) Res<(), AllocError> {
     Range(0, n).loop((h, k) {
         be.drop_at(n - 1 - k).match({
             None  => Ok(()),
-            Ok(e) => clear_if_named(be, e, name),
+            Ok(e) => be.clear_if_named(e, name),
         }).try();
     });
     Ok(());
@@ -248,7 +248,7 @@ clear_if_named = (be :: CBackend, e: DropEntry, name: str)
                  Res<(), AllocError> {
     (e.name.eq(name) && (e.live > 0)).match({
         false => Ok(()),
-        true  => write_clear(be, e.live),
+        true  => be.write_clear(e.live),
     })
 }
 
@@ -261,12 +261,12 @@ write_clear = (be :: CBackend, live: usize) Res<(), AllocError> {
 has_drop* = (be :: CBackend, ty: TyId) Res<bool, AllocError> {
     site_of(be, ty).try().match({
         None  => Ok(false),
-        Ok(s) => site_has_drop(be, s),
+        Ok(s) => be.site_has_drop(s),
     })
 }
 
 site_has_drop = (be :: CBackend, s: Site) Res<bool, AllocError> {
-    drop_fn(be, s.decl).try().match({
+    be.drop_fn(s.decl).try().match({
         None  => Ok(false),
         Ok(_) => Ok(true),
     })
@@ -275,15 +275,15 @@ site_has_drop = (be :: CBackend, s: Site) Res<bool, AllocError> {
 write_drop = (be :: CBackend, e: DropEntry) Res<(), AllocError> {
     site_of(be, e.ty).try().match({
         None  => Ok(()),
-        Ok(s) => drop_through(be, e, s),
+        Ok(s) => be.drop_through(e, s),
     })
 }
 
 drop_through = (be :: CBackend, e: DropEntry, s: Site)
                Res<(), AllocError> {
-    drop_fn(be, s.decl).try().match({
+    be.drop_fn(s.decl).try().match({
         None  => Ok(()),
-        Ok(f) => guarded_drop(be, e, s, f),
+        Ok(f) => be.guarded_drop(e, s, f),
     })
 }
 
@@ -292,8 +292,8 @@ drop_through = (be :: CBackend, e: DropEntry, s: Site)
 guarded_drop = (be :: CBackend, e: DropEntry, s: Site, f: Function)
                Res<(), AllocError> {
     (e.live == 0).match({
-        true  => call_drop(be, e, s, f),
-        false => flagged_drop(be, e, s, f),
+        true  => be.call_drop(e, s, f),
+        false => be.flagged_drop(e, s, f),
     })
 }
 
@@ -303,7 +303,7 @@ flagged_drop = (be :: CBackend, e: DropEntry, s: Site, f: Function)
     sym_gen(flag, "o", e.live).try();
     be.fmt("if ({}) {\n", flag.view()).try();
     be.indent();
-    call_drop(be, e, s, f).try();
+    be.call_drop(e, s, f).try();
     be.dedent();
     be.writeln("}").try();
     Ok(());
@@ -316,11 +316,11 @@ flagged_drop = (be :: CBackend, e: DropEntry, s: Site, f: Function)
 // as.
 call_drop = (be :: CBackend, e: DropEntry, s: Site, f: Function)
             Res<(), AllocError> {
-    inst = recv_inst(be, e.ty).try();
+    inst = be.recv_inst(e.ty).try();
     sig ::= be.alloc.Vec<TyId>();
-    method_sig(be, e.ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
-    sym = member_symbol(be, e.ty, s, "drop", sig, inst).try();
-    write_drop_call(be, e, sym.view(), by_address(f))
+    be.method_sig(e.ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
+    sym = be.member_symbol(e.ty, s, "drop", sig, inst).try();
+    be.write_drop_call(e, sym.view(), by_address(f))
 }
 
 by_address = (f: Function) bool {
@@ -349,9 +349,9 @@ ampersand = (addr: bool) str {
 // an impl OF Drop counts — the same test the reference backend makes.
 drop_fn* = (be :: CBackend, decl: DeclId) Res<Res<Function>, AllocError> {
     ids ::= be.alloc.Vec<ImplId>();
-    be.check.world.impls_named(be.tree, decl_name(be, decl), ids).try();
+    be.check.world.impls_named(be.tree, be.decl_name(decl), ids).try();
     found ::= be.alloc.Vec<Function>();
-    ids.loop((h, i) { collect_drop(be, decl, i, found).try() });
+    ids.loop((h, i) { be.collect_drop(decl, i, found).try() });
     Ok(found.get(0));
 }
 
@@ -365,7 +365,7 @@ collect_drop = (
 ) Res<(), AllocError> {
     (decl.module == i.decl.module).match({
         false => Ok(()),
-        true  => drop_in_impl(be, i, found),
+        true  => be.drop_in_impl(i, found),
     })
 }
 
@@ -373,13 +373,13 @@ drop_in_impl = (be :: CBackend, i: ImplId, found :: Vec<Function>)
                Res<(), AllocError> {
     be.check.world.impl_at(be.tree, i).match({
         None   => Ok(()),
-        Ok(im) => keep_drop_member(be, im, found),
+        Ok(im) => be.keep_drop_member(im, found),
     })
 }
 
 keep_drop_member = (be :: CBackend, im: Impl, found :: Vec<Function>)
                    Res<(), AllocError> {
-    bounds_drop(be, im).match({
+    be.bounds_drop(im).match({
         false => Ok(()),
         true  => scan_drop_members(im, found),
     })
@@ -432,17 +432,17 @@ add_if_bodied = (f: Function, found :: Vec<Function>)
 writes_scope* = (be :: CBackend, id: BlockId) bool {
     blk = be.tree.block_at(id);
     got ::= blk.value.match({
-        Ok(e) => expr_writes_scope(be, e),
+        Ok(e) => be.expr_writes_scope(e),
         None  => false,
     });
-    blk.stmts.loop((h, s) { got = got || stmt_writes_scope(be, s); });
+    blk.stmts.loop((h, s) { got = got || be.stmt_writes_scope(s); });
     got
 }
 
 stmt_writes_scope = (be :: CBackend, s: Stmt) bool {
     s.kind.match({
-        Expr(e)  => expr_writes_scope(be, e.expr),
-        Bind(b)  => expr_writes_scope(be, b.value),
+        Expr(e)  => be.expr_writes_scope(e.expr),
+        Bind(b)  => be.expr_writes_scope(b.value),
         Block(_) => false,
         Decl(_)  => false,
     })
@@ -451,18 +451,18 @@ stmt_writes_scope = (be :: CBackend, s: Stmt) bool {
 expr_writes_scope = (be :: CBackend, id: ExprId) bool {
     be.tree.expr_at(id).kind.match({
         Scope         => true,
-        Paren(p)      => expr_writes_scope(be, p.inner),
-        Unary(u)      => expr_writes_scope(be, u.operand),
-        Binary(b)     => binary_writes_scope(be, b),
-        Access(a)     => expr_writes_scope(be, a.base),
-        Index(x)      => expr_writes_scope(be, x.base)
-                             || expr_writes_scope(be, x.index),
-        Try(t)        => expr_writes_scope(be, t.operand),
-        Consume(x)    => expr_writes_scope(be, x.operand),
-        Call(c)       => call_writes_scope(be, c),
-        Match(m)      => match_writes_scope(be, m),
-        Array(a)      => elems_write_scope(be, a.elems),
-        FixedArray(a) => elems_write_scope(be, a.elems),
+        Paren(p)      => be.expr_writes_scope(p.inner),
+        Unary(u)      => be.expr_writes_scope(u.operand),
+        Binary(b)     => be.binary_writes_scope(b),
+        Access(a)     => be.expr_writes_scope(a.base),
+        Index(x)      => be.expr_writes_scope(x.base)
+                             || be.expr_writes_scope(x.index),
+        Try(t)        => be.expr_writes_scope(t.operand),
+        Consume(x)    => be.expr_writes_scope(x.operand),
+        Call(c)       => be.call_writes_scope(c),
+        Match(m)      => be.match_writes_scope(m),
+        Array(a)      => be.elems_write_scope(a.elems),
+        FixedArray(a) => be.elems_write_scope(a.elems),
         _             => false,
     })
 }
@@ -476,12 +476,12 @@ binary_writes_scope = (be :: CBackend, b: Binary) bool {
     down  ::= b;
     going ::= true;
     loop(() { going }, (h) {
-        got   = got || expr_writes_scope(be, down.rhs);
-        next  = binary_below(be, down.lhs);
+        got   = got || be.expr_writes_scope(down.rhs);
+        next  = be.binary_below(down.lhs);
         going = next.match({ None => false, Ok(_) => true });
         down  = next.match({ None => down, Ok(inner) => inner });
     });
-    got || expr_writes_scope(be, down.lhs)
+    got || be.expr_writes_scope(down.lhs)
 }
 
 binary_below = (be :: CBackend, id: ExprId) Res<Binary> {
@@ -492,19 +492,19 @@ binary_below = (be :: CBackend, id: ExprId) Res<Binary> {
 }
 
 call_writes_scope = (be :: CBackend, c: Call) bool {
-    got ::= expr_writes_scope(be, c.callee);
-    c.args.loop((h, a) { got = got || expr_writes_scope(be, a.value); });
+    got ::= be.expr_writes_scope(c.callee);
+    c.args.loop((h, a) { got = got || be.expr_writes_scope(a.value); });
     got
 }
 
 match_writes_scope = (be :: CBackend, m: Match) bool {
-    got ::= expr_writes_scope(be, m.scrutinee);
-    m.arms.loop((h, a) { got = got || expr_writes_scope(be, a.body); });
+    got ::= be.expr_writes_scope(m.scrutinee);
+    m.arms.loop((h, a) { got = got || be.expr_writes_scope(a.body); });
     got
 }
 
 elems_write_scope = (be :: CBackend, elems: Vec<ExprId>) bool {
     got ::= false;
-    elems.loop((h, e) { got = got || expr_writes_scope(be, e); });
+    elems.loop((h, e) { got = got || be.expr_writes_scope(e); });
     got
 }

@@ -150,14 +150,13 @@ write_elems = (
     ctx   : Ctx,
     out   :: String
 ) Res<(), AllocError> {
-    array_of(be, ty).match({
-        None  => unsupported(
-            be,
+    be.array_of(ty).match({
+        None  => be.unsupported(
             id,
             "an array literal whose element type nothing settles",
             out
         ),
-        Ok(a) => write_compound(be, elems, ty, a, ctx, out),
+        Ok(a) => be.write_compound(elems, ty, a, ctx, out),
     })
 }
 
@@ -169,15 +168,15 @@ write_compound = (
     ctx   : Ctx,
     out   :: String
 ) Res<(), AllocError> {
-    request_type(be, ty).try();
+    be.request_type(ty).try();
     cty ::= be.alloc.String().try();
-    ctype(be, ty, cty).try();
+    be.ctype(ty, cty).try();
     out.fmt("(({}){ { ", cty.view()).try();
     // an empty literal still needs an initialiser, and `0` is the one
     // that is legal for every element type the storage could have
     (elems.len == 0).match({
         true  => out.add_bytes("0"),
-        false => write_elem_list(be, elems, a, ctx, out),
+        false => be.write_elem_list(elems, a, ctx, out),
     }).try();
     out.add_bytes(" } })").try();
     Ok(());
@@ -219,7 +218,7 @@ write_array_index* = (
     base ::= be.alloc.String().try();
     expr(be, ix.base, ctx, base_ty, base).try();
     idx ::= be.alloc.String().try();
-    write_checked(be, ix, a, ctx, idx).try();
+    be.write_checked(ix, a, ctx, idx).try();
     out.fmt("({}).{}[{}]", base.view(), ELEMS, idx.view())
 }
 
@@ -231,15 +230,14 @@ write_checked = (
     out :: String
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    ity     = ty_of(be, ix.index, ctx, unknown).try();
+    ity     = be.ty_of(ix.index, ctx, unknown).try();
     counter = be.check.types.prim("usize").try();
     idx ::= be.alloc.String().try();
     expr(be, ix.index, ctx, counter, idx).try();
     n ::= be.alloc.String().try();
     n.write_usize(a.count).try();
     pos ::= be.alloc.String().try();
-    write_position(
-        be,
+    be.write_position(
         be.tree.expr_at(ix.base).span.file,
         ix.op_span,
         pos
@@ -247,7 +245,7 @@ write_checked = (
     out.fmt(
         "{}{}({}, {}, {})",
         GEN,
-        helper_of(be, ity),
+        be.helper_of(ity),
         idx.view(),
         n.view(),
         pos.view()
@@ -283,14 +281,14 @@ lower_array_walk* = (
     fold : Fold,
     out  :: String
 ) Res<(), AllocError> {
-    settled = settle_res(be, want, a.elem).try();
+    settled = be.settle_res(want, a.elem).try();
 
-    rng = walk_temp(be, one, rty, ctx).try();
+    rng = be.walk_temp(one, rty, ctx).try();
 
-    st = open_result(be, settled, out).try();
+    st = be.open_result(settled, out).try();
     counter ::= be.alloc.String().try();
     sym_gen(counter, "i", be.next_tmp()).try();
-    declare_usize(be, counter.view()).try();
+    be.declare_usize(counter.view()).try();
     be.fmt("{} = 0;\n", counter.view()).try();
 
     n ::= be.alloc.String().try();
@@ -298,7 +296,7 @@ lower_array_walk* = (
     be.fmt("while ({} < {}) {\n", counter.view(), n.view()).try();
     be.indent();
     value ::= be.alloc.String().try();
-    write_pass_value(be, rng.view(), counter.view(), value).try();
+    be.write_pass_value(rng.view(), counter.view(), value).try();
     // an array always starts at zero, so `index` and the counter are
     // the same number and there is nothing to subtract
     run_body(
@@ -312,7 +310,7 @@ lower_array_walk* = (
         fold,
         ctx
     ).try();
-    close_pass(be, st, counter.view(), fold).try();
+    be.close_pass(st, counter.view(), fold).try();
     Ok(());
 }
 

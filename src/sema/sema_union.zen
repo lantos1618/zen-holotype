@@ -56,9 +56,9 @@ record_set = (c :: Checker, id: TyId, decl: DeclId) Res<(), AllocError> {
 
 record_if_union = (c :: Checker, id: TyId, decl: DeclId)
                   Res<(), AllocError> {
-    union_reading(c, decl).match({
+    c.union_reading(decl).match({
         false => Ok(()),
-        true  => compute_set(c, id, decl),
+        true  => c.compute_set(id, decl),
     })
 }
 
@@ -80,14 +80,14 @@ collect_members = (c :: Checker, decl: DeclId, out :: Vec<TyId>)
                   Res<(), AllocError> {
     decl_at(c.tree, decl).match({
         None  => Ok(()),
-        Ok(d) => decl_members(c, decl, d, out),
+        Ok(d) => c.decl_members(decl, d, out),
     })
 }
 
 decl_members = (c :: Checker, decl: DeclId, d: Decl, out :: Vec<TyId>)
                Res<(), AllocError> {
     d.kind.match({
-        Enum(e) => enum_members(c, decl, e, out),
+        Enum(e) => c.enum_members(decl, e, out),
         _       => Ok(()),
     })
 }
@@ -127,11 +127,11 @@ union_member* = (c :: Checker, decl: DeclId, name: str)
 
 member_named = (c :: Checker, d: Def) Res<TyId, AllocError> {
     empty ::= c.alloc.Vec<TyId>();
-    named_or_union(c, d, empty)
+    c.named_or_union(d, empty)
 }
 
 member_type = (c :: Checker, decl: DeclId, name: str) Res<TyId, AllocError> {
-    Ok(c.set_of(union_member(c, decl, name).try()));
+    Ok(c.set_of(c.union_member(decl, name).try()));
 }
 
 // The value `Type.NAME` leaves unwritten: what a union's member carries,
@@ -151,8 +151,8 @@ union_carrier* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
 }
 
 named_carrier = (c :: Checker, n: TyNamed, name: str) Res<TyId, AllocError> {
-    (union_reading(c, n.decl) && variant_named(c, n.decl, name)).match({
-        true  => union_member(c, n.decl, name),
+    (c.union_reading(n.decl) && c.variant_named(n.decl, name)).match({
+        true  => c.union_member(n.decl, name),
         false => c.types.unknown(),
     })
 }
@@ -198,13 +198,13 @@ enum_names_variant = (e: Enum, name: str) bool {
 union_reading* = (c :: Checker, decl: DeclId) bool {
     decl_at(c.tree, decl).match({
         None  => false,
-        Ok(d) => enum_union_reading(c, decl, d),
+        Ok(d) => c.enum_union_reading(decl, d),
     })
 }
 
 enum_union_reading = (c :: Checker, decl: DeclId, d: Decl) bool {
     d.kind.match({
-        Enum(e) => no_nominal_variant(c, decl, e),
+        Enum(e) => c.no_nominal_variant(decl, e),
         _       => false,
     })
 }
@@ -215,7 +215,7 @@ enum_union_reading = (c :: Checker, decl: DeclId, d: Decl) bool {
 no_nominal_variant = (c :: Checker, decl: DeclId, e: Enum) bool {
     (e.variants.len < 2).match({
         true  => false,
-        false => every_variant_named(c, decl, e),
+        false => c.every_variant_named(decl, e),
     })
 }
 
@@ -237,7 +237,7 @@ every_variant_named = (c :: Checker, decl: DeclId, e: Enum) bool {
 names_a_type = (c :: Checker, decl: DeclId, v: Variant) bool {
     v.payload.match({
         Ok(_) => false,
-        None  => defs_named(c, decl, v.name.text),
+        None  => c.defs_named(decl, v.name.text),
     })
 }
 

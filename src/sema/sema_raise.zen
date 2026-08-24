@@ -74,10 +74,10 @@ settle_signature = (
     got    : TyId,
     raised :: Vec<TyId>
 ) Res<(), AllocError> {
-    report_if_exported(c, f).try();
-    body_error(c, got, raised).try();
+    c.report_if_exported(f).try();
+    c.body_error(got, raised).try();
     set = c.types.union_ty(raised).try();
-    write_ret(c, f, ctx, set)
+    c.write_ret(f, ctx, set)
 }
 
 // `*` means this name crosses a module boundary, and a crossing type is
@@ -86,7 +86,7 @@ settle_signature = (
 report_if_exported = (c :: Checker, f: Function) Res<(), AllocError> {
     f.exported.match({
         false => Ok(()),
-        true  => report_hole(c, f),
+        true  => c.report_hole(f),
     })
 }
 
@@ -94,7 +94,7 @@ report_if_exported = (c :: Checker, f: Function) Res<(), AllocError> {
 // naming the function instead would point at the one token already
 // correct.
 report_hole = (c :: Checker, f: Function) Res<(), AllocError> {
-    span = hole_span(c, f).match({ None => f.name.span, Ok(s) => s });
+    span = c.hole_span(f).match({ None => f.name.span, Ok(s) => s });
     c.report(
         span.file,
         span,
@@ -105,13 +105,13 @@ report_hole = (c :: Checker, f: Function) Res<(), AllocError> {
 hole_span = (c :: Checker, f: Function) Res<Span> {
     f.ret.match({
         None   => None,
-        Ok(id) => res_hole_span(c, id),
+        Ok(id) => c.res_hole_span(id),
     })
 }
 
 res_hole_span = (c :: Checker, id: TypeId) Res<Span> {
     c.tree.type_at(id).kind.match({
-        Named(n) => arg_span(c, n.args, 1),
+        Named(n) => c.arg_span(n.args, 1),
         _        => None,
     })
 }
@@ -129,14 +129,14 @@ arg_span = (c :: Checker, args: Vec<TypeId>, i: usize) Res<Span> {
 body_error = (c :: Checker, got: TyId, raised :: Vec<TyId>)
              Res<(), AllocError> {
     c.types.at(got).match({
-        Res(r) => keep_error(c, r, raised),
+        Res(r) => c.keep_error(r, raised),
         _      => Ok(()),
     })
 }
 
 keep_error = (c :: Checker, r: TyRes, raised :: Vec<TyId>)
              Res<(), AllocError> {
-    carries_error(c, r).match({
+    c.carries_error(r).match({
         false => Ok(()),
         true  => raised.add(r.error),
     })
@@ -148,7 +148,7 @@ keep_error = (c :: Checker, r: TyRes, raised :: Vec<TyId>)
 carries_error = (c :: Checker, r: TyRes) bool {
     c.is_infer(r.error).match({
         true  => false,
-        false => real_error(c, r),
+        false => c.real_error(r),
     })
 }
 
@@ -165,14 +165,14 @@ write_ret = (c :: Checker, f: Function, ctx: Ctx, set: TyId)
             Res<(), AllocError> {
     f.ret.match({
         None   => Ok(()),
-        Ok(id) => write_ret_memo(c, id, ctx, set),
+        Ok(id) => c.write_ret_memo(id, ctx, set),
     })
 }
 
 write_ret_memo = (c :: Checker, id: TypeId, ctx: Ctx, set: TyId)
                  Res<(), AllocError> {
     c.types.at(ctx.ret).match({
-        Res(r) => write_settled(c, id, r, set),
+        Res(r) => c.write_settled(id, r, set),
         _      => Ok(()),
     })
 }

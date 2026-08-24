@@ -441,7 +441,7 @@ arm_into_res = (
 ) Res<(), AllocError> {
     c.types.at(got).match({
         Res(_) => c.arm_refused(node, got, want, blame),
-        _      => hoist_into_res(c, node.span.file, node.span, got, want, r),
+        _      => c.hoist_into_res(node.span.file, node.span, got, want, r),
     })
 }
 
@@ -470,7 +470,7 @@ arms_disagree = (c :: Checker, node: Expr, got: TyId, want: TyId)
 // different resolution, not this rule's to interpret.
 check_ctor_fields* = (c :: Checker, call: Call, ty: TyId, ctx: Ctx)
                      Res<(), AllocError> {
-    call.args.loop((h, a) { check_ctor_field(c, a, ty, ctx).try() });
+    call.args.loop((h, a) { c.check_ctor_field(a, ty, ctx).try() });
     Ok(());
 }
 
@@ -478,17 +478,17 @@ check_ctor_field = (c :: Checker, a: Arg, ty: TyId, ctx: Ctx)
                    Res<(), AllocError> {
     a.name.match({
         None   => Ok(()),
-        Ok(nm) => check_named_field(c, a, nm.text, ty, ctx),
+        Ok(nm) => c.check_named_field(a, nm.text, ty, ctx),
     })
 }
 
 check_named_field = (c :: Checker, a: Arg, name: str, ty: TyId, ctx: Ctx)
                     Res<(), AllocError> {
     found ::= c.alloc.Vec<Found>();
-    members_of(c, ty, name, found).try();
+    c.members_of(ty, name, found).try();
     found.get(0).match({
         None  => Ok(()),
-        Ok(f) => field_fits(c, a, f.ty, ctx),
+        Ok(f) => c.field_fits(a, f.ty, ctx),
     })
 }
 
@@ -501,7 +501,7 @@ check_named_field = (c :: Checker, a: Arg, name: str, ty: TyId, ctx: Ctx)
 // stops being one expression's mistake and gets STORED.
 field_fits = (c :: Checker, a: Arg, want: TyId, ctx: Ctx)
              Res<(), AllocError> {
-    hoist_at(c, a.value, c.type_of(a.value, ctx).try(), want).try();
+    c.hoist_at(a.value, c.type_of(a.value, ctx).try(), want).try();
     c.check_literal(a.value, want).try();
-    check_arms(c, a.value, want)
+    c.check_arms(a.value, want)
 }

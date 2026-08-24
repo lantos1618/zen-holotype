@@ -53,7 +53,7 @@ lower_probe* = (be :: CBackend, c: Call, name: str, ctx: Ctx, out :: String)
               Res<(), AllocError> {
     be.need_fs();
     path ::= be.alloc.String().try();
-    path_args(be, c, 0, ctx, path).try();
+    be.path_args(c, 0, ctx, path).try();
     out.fmt("(zg_fs_kind({}){})", path.view(), probe_test(name)).try();
     Ok(());
 }
@@ -76,27 +76,21 @@ lower_write* = (
     be.need_fs();
     i32_ty = be.check.types.prim("i32").try();
     path ::= be.alloc.String().try();
-    path_args(be, c, 0, ctx, path).try();
+    be.path_args(c, 0, ctx, path).try();
     data ::= be.alloc.String().try();
-    path_args(be, c, 1, ctx, data).try();
+    be.path_args(c, 1, ctx, data).try();
     rc ::= be.alloc.String().try();
     sym_gen(rc, "t", be.next_tmp()).try();
     dst ::= be.alloc.String().try();
     sym_gen(dst, "t", be.next_tmp()).try();
-    declare_temp(be, i32_ty, rc.view()).try();
-    declare_temp(be, ret, dst.view()).try();
-    write_fs_call(
-        be,
-        rc.view(),
-        "zg_fs_write(",
-        path.view(),
-        data.view()
-    ).try();
-    open_rc_test(be, rc.view()).try();
-    fs_chain(be, ret, rc.view(), dst.view(), 1).try();
-    close_else(be).try();
-    write_assign_ok_unit(be, ret, dst.view()).try();
-    close_brace(be).try();
+    be.declare_temp(i32_ty, rc.view()).try();
+    be.declare_temp(ret, dst.view()).try();
+    be.write_fs_call(rc.view(), "zg_fs_write(", path.view(), data.view()).try();
+    be.open_rc_test(rc.view()).try();
+    be.fs_chain(ret, rc.view(), dst.view(), 1).try();
+    be.close_else().try();
+    be.write_assign_ok_unit(ret, dst.view()).try();
+    be.close_brace().try();
     out.add_bytes(dst.view())
 }
 
@@ -114,9 +108,9 @@ path_args* = (be :: CBackend, c: Call, i: usize, ctx: Ctx, out :: String)
     sty = be.check.types.prim("str").try();
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "t", be.next_tmp()).try();
-    declare_temp(be, sty, tmp.view()).try();
+    be.declare_temp(sty, tmp.view()).try();
     value ::= be.alloc.String().try();
-    arg_text(be, c, i, sty, ctx, value).try();
+    be.arg_text(c, i, sty, ctx, value).try();
     be.set_line(tmp.view(), value.view()).try();
     out.fmt(
         "(const unsigned char *){}.data, {}.len",
@@ -147,14 +141,13 @@ lower_read* = (
     out :: String
 ) Res<(), AllocError> {
     be.need_fs();
-    payload_type(be, ret, "Ok").match({
-        None    => unsupported(
-            be,
+    be.payload_type(ret, "Ok").match({
+        None    => be.unsupported(
             id,
             "Fs.read must return a Res<String, FsError>",
             out
         ),
-        Ok(sty) => read_string(be, id, c, ret, sty, aty, ctx, out),
+        Ok(sty) => be.read_string(id, c, ret, sty, aty, ctx, out),
     })
 }
 
@@ -168,14 +161,13 @@ read_string = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    field_of(be, sty, "data").try().match({
-        None    => unsupported(
-            be,
+    be.field_of(sty, "data").try().match({
+        None    => be.unsupported(
             id,
             "Fs.read must return a Res<String, FsError>",
             out
         ),
-        Ok(vty) => read_run(be, id, c, ret, sty, vty, aty, ctx, out),
+        Ok(vty) => be.read_run(id, c, ret, sty, vty, aty, ctx, out),
     })
 }
 
@@ -193,12 +185,12 @@ read_run = (
            Res<(), AllocError> {
     usize_ty = be.check.types.prim("usize").try();
     i32_ty   = be.check.types.prim("i32").try();
-    request_type(be, sty).try();
-    request_type(be, vty).try();
+    be.request_type(sty).try();
+    be.request_type(vty).try();
     path ::= be.alloc.String().try();
-    path_args(be, c, 1, ctx, path).try();
+    be.path_args(c, 1, ctx, path).try();
     al ::= be.alloc.String().try();
-    hold_alloc(be, c, aty, ctx, al).try();
+    be.hold_alloc(c, aty, ctx, al).try();
     want ::= be.alloc.String().try();
     sym_gen(want, "t", be.next_tmp()).try();
     got ::= be.alloc.String().try();
@@ -207,18 +199,17 @@ read_run = (
     sym_gen(rc, "t", be.next_tmp()).try();
     dst ::= be.alloc.String().try();
     sym_gen(dst, "t", be.next_tmp()).try();
-    declare_temp(be, usize_ty, want.view()).try();
-    declare_temp(be, usize_ty, got.view()).try();
-    declare_temp(be, i32_ty, rc.view()).try();
-    declare_temp(be, ret, dst.view()).try();
+    be.declare_temp(usize_ty, want.view()).try();
+    be.declare_temp(usize_ty, got.view()).try();
+    be.declare_temp(i32_ty, rc.view()).try();
+    be.declare_temp(ret, dst.view()).try();
     be.set_line(want.view(), "0").try();
     be.set_line(got.view(), "0").try();
-    write_size_call(be, rc.view(), path.view(), want.view()).try();
-    open_rc_test(be, rc.view()).try();
-    fs_chain(be, ret, rc.view(), dst.view(), 1).try();
-    close_else(be).try();
-    read_body(
-        be,
+    be.write_size_call(rc.view(), path.view(), want.view()).try();
+    be.open_rc_test(rc.view()).try();
+    be.fs_chain(ret, rc.view(), dst.view(), 1).try();
+    be.close_else().try();
+    be.read_body(
         id,
         ret,
         sty,
@@ -231,7 +222,7 @@ read_run = (
         rc.view(),
         dst.view()
     ).try();
-    close_brace(be).try();
+    be.close_brace().try();
     out.add_bytes(dst.view())
 }
 
@@ -247,8 +238,8 @@ hold_alloc = (
 ) Res<(), AllocError> {
     sym_gen(out, "t", be.next_tmp()).try();
     value ::= be.alloc.String().try();
-    arg_text(be, c, 0, aty, ctx, value).try();
-    declare_temp(be, aty, out.view()).try();
+    be.arg_text(c, 0, aty, ctx, value).try();
+    be.declare_temp(aty, out.view()).try();
     be.set_line(out.view(), value.view()).try();
     Ok(());
 }
@@ -279,10 +270,9 @@ read_body = (
     call ::= be.alloc.String().try();
     args ::= be.alloc.String().try();
     args.fmt(", {want}, 16").try();
-    slot_call(be, al, aty, "raw", args.view(), 2, call).try().match({
-        None     => unsupported_line(be, id, "Fs.read needs an Alloc"),
-        Ok(slot) => run_and_read(
-            be,
+    be.slot_call(al, aty, "raw", args.view(), 2, call).try().match({
+        None     => be.unsupported_line(id, "Fs.read needs an Alloc"),
+        Ok(slot) => be.run_and_read(
             ret,
             sty,
             vty,
@@ -302,7 +292,7 @@ read_body = (
 unsupported_line = (be :: CBackend, id: ExprId, what: str)
                    Res<(), AllocError> {
     sink ::= be.alloc.String().try();
-    unsupported(be, id, what, sink)
+    be.unsupported(id, what, sink)
 }
 
 run_and_read = (
@@ -322,22 +312,22 @@ run_and_read = (
 ) Res<(), AllocError> {
     run ::= be.alloc.String().try();
     sym_gen(run, "t", be.next_tmp()).try();
-    declare_temp(be, slot.ret, run.view()).try();
+    be.declare_temp(slot.ret, run.view()).try();
     be.set_line(run.view(), call).try();
-    open_not_ok(be, run.view()).try();
-    write_assign_err(be, ret, "OutOfMemory", dst).try();
-    close_else(be).try();
+    be.open_not_ok(run.view()).try();
+    be.write_assign_err(ret, "OutOfMemory", dst).try();
+    be.close_else().try();
     buf ::= be.alloc.String().try();
     sym_gen(buf, "t", be.next_tmp()).try();
-    declare_ptr(be, buf.view()).try();
-    read_ok_payload(be, run.view(), buf.view()).try();
-    write_read_call(be, rc, path, buf.view(), want, got).try();
-    open_rc_test(be, rc).try();
-    fs_chain(be, ret, rc, dst, 1).try();
-    close_else(be).try();
-    write_string_ok(be, ret, sty, vty, al, buf.view(), got, want, dst).try();
-    close_brace(be).try();
-    close_brace(be).try();
+    be.declare_ptr(buf.view()).try();
+    be.read_ok_payload(run.view(), buf.view()).try();
+    be.write_read_call(rc, path, buf.view(), want, got).try();
+    be.open_rc_test(rc).try();
+    be.fs_chain(ret, rc, dst, 1).try();
+    be.close_else().try();
+    be.write_string_ok(ret, sty, vty, al, buf.view(), got, want, dst).try();
+    be.close_brace().try();
+    be.close_brace().try();
     Ok(());
 }
 
@@ -386,13 +376,13 @@ write_string_ok = (
                   Res<(), AllocError> {
     value ::= be.alloc.String().try();
     value.add_bytes("(").try();
-    ctype(be, sty, value).try();
+    be.ctype(sty, value).try();
     value.add_bytes("){ .").try();
     sym_member(value, "data").try();
     value.add_bytes(" = ").try();
     write_vec_literal(be, vty, al, buf, got, want, value).try();
     value.add_bytes(" }").try();
-    write_assign_ok(be, ret, value.view(), dst)
+    be.write_assign_ok(ret, value.view(), dst)
 }
 
 write_vec_literal = (
@@ -406,12 +396,12 @@ write_vec_literal = (
 )
                     Res<(), AllocError> {
     out.add_bytes("(").try();
-    ctype(be, vty, out).try();
+    be.ctype(vty, out).try();
     out.add_bytes("){ ").try();
-    write_vec_field(be, vty, "data", buf, out, true).try();
-    write_vec_field(be, vty, "len", got, out, false).try();
-    write_vec_field(be, vty, "capacity", want, out, false).try();
-    write_vec_field(be, vty, "alloc", al, out, false).try();
+    be.write_vec_field(vty, "data", buf, out, true).try();
+    be.write_vec_field(vty, "len", got, out, false).try();
+    be.write_vec_field(vty, "capacity", want, out, false).try();
+    be.write_vec_field(vty, "alloc", al, out, false).try();
     out.add_bytes(" }").try();
     Ok(());
 }
@@ -426,9 +416,9 @@ write_vec_field = (
     out   :: String,
     first : bool
 ) Res<(), AllocError> {
-    field_of(be, vty, name).try().match({
+    be.field_of(vty, name).try().match({
         None  => Ok(()),
-        Ok(_) => write_named_init(be, name, value, out, first),
+        Ok(_) => be.write_named_init(name, value, out, first),
     })
 }
 
@@ -470,18 +460,18 @@ fs_name_3 = (n: usize) str {
 fs_chain* = (be :: CBackend, ret: TyId, rc: str, dst: str, n: usize)
            Res<(), AllocError> {
     (n > 3).match({
-        true  => write_assign_err(be, ret, fs_name(n), dst),
-        false => fs_branch(be, ret, rc, dst, n),
+        true  => be.write_assign_err(ret, fs_name(n), dst),
+        false => be.fs_branch(ret, rc, dst, n),
     })
 }
 
 fs_branch = (be :: CBackend, ret: TyId, rc: str, dst: str, n: usize)
             Res<(), AllocError> {
-    open_ordinal_test(be, rc, n).try();
-    write_assign_err(be, ret, fs_name(n), dst).try();
-    close_else(be).try();
-    fs_chain(be, ret, rc, dst, n + 1).try();
-    close_brace(be).try();
+    be.open_ordinal_test(rc, n).try();
+    be.write_assign_err(ret, fs_name(n), dst).try();
+    be.close_else().try();
+    be.fs_chain(ret, rc, dst, n + 1).try();
+    be.close_brace().try();
     Ok(());
 }
 

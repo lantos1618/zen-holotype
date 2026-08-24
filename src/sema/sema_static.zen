@@ -111,9 +111,9 @@ type_access = (
     ty   : TyId,
     ctx  : Ctx
 ) Res<TyId, AllocError> {
-    is_case(c, ty, ac.name.text).try().match({
+    c.is_case(ty, ac.name.text).try().match({
         true  => variant_type(c, ty, ac.name.text),
-        false => static_member(c, id, node, ac, ty, ctx),
+        false => c.static_member(id, node, ac, ty, ctx),
     })
 }
 
@@ -122,16 +122,16 @@ type_access = (
 // ordinary call, not a second construction form.
 variant_type* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
     cases ::= c.alloc.Vec<Case>();
-    cases_of(c, ty, cases).try();
+    c.cases_of(ty, cases).try();
     find_case(cases, name).match({
         None   => c.types.unknown(),
-        Ok(cs) => variant_value(c, ty, cs),
+        Ok(cs) => c.variant_value(ty, cs),
     })
 }
 
 variant_value = (c :: Checker, ty: TyId, cs: Case) Res<TyId, AllocError> {
     cs.has_payload.match({
-        true  => variant_ctor(c, ty, cs),
+        true  => c.variant_ctor(ty, cs),
         false => Ok(ty),
     })
 }
@@ -152,16 +152,16 @@ static_member = (
     ty   : TyId,
     ctx  : Ctx
 ) Res<TyId, AllocError> {
-    has_prim_const(c, ty, ac.name.text).match({
-        true  => prim_const_type(c, ty, ac.name.text),
-        false => value_access(c, id, node, ac, ty, ctx),
+    c.has_prim_const(ty, ac.name.text).match({
+        true  => c.prim_const_type(ty, ac.name.text),
+        false => c.value_access(id, node, ac, ty, ctx),
     })
 }
 
 // Every primitive numeric type carries MIN, MAX, and BITS from the
 // prelude. MIN and MAX are of the type; BITS is a count, so `usize`.
 has_prim_const = (c: Checker, ty: TyId, name: str) bool {
-    numeric_prim(c, ty) && name.is_in(["MIN", "MAX", "BITS"])
+    c.numeric_prim(ty) && name.is_in(["MIN", "MAX", "BITS"])
 }
 
 prim_const_type = (c :: Checker, ty: TyId, name: str)

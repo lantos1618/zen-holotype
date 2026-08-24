@@ -45,8 +45,7 @@ check_scope_returned* = (c :: Checker, body: BlockId) Res<(), AllocError> {
 refuse_if_scope* = (c :: Checker, id: ExprId) Res<(), AllocError> {
     node = c.tree.expr_at(id);
     node.kind.match({
-        Scope    => refuse(
-            c,
+        Scope    => c.refuse(
             node.span,
             SemaFault.ScopeEscapes(NameFault(name: ""))
         ),
@@ -61,16 +60,16 @@ refuse_if_scope* = (c :: Checker, id: ExprId) Res<(), AllocError> {
 // what `call_memo` exists for.
 check_scope_stored* = (c :: Checker, id: ExprId, k: Call)
                       Res<(), AllocError> {
-    is_construction(c, id).match({
+    c.is_construction(id).match({
         false => Ok(()),
-        true  => refuse_scope_args(c, k),
+        true  => c.refuse_scope_args(k),
     })
 }
 
 is_construction = (c :: Checker, id: ExprId) bool {
     c.resolved_call(id).match({
         None  => false,
-        Ok(d) => decl_is_struct(c, d),
+        Ok(d) => c.decl_is_struct(d),
     })
 }
 
@@ -82,7 +81,7 @@ decl_is_struct = (c :: Checker, d: DeclId) bool {
 }
 
 refuse_scope_args = (c :: Checker, k: Call) Res<(), AllocError> {
-    k.args.loop((h, a) { refuse_if_scope(c, a.value).try() });
+    k.args.loop((h, a) { c.refuse_if_scope(a.value).try() });
     Ok(());
 }
 
@@ -95,7 +94,7 @@ check_scope_captured* = (c :: Checker, o :: Own, span: Span, text: str)
                         Res<(), AllocError> {
     captures_scope(o, text).match({
         false => Ok(()),
-        true  => refuse(c, span, SemaFault.ScopeEscapes(NameFault(name: text))),
+        true  => c.refuse(span, SemaFault.ScopeEscapes(NameFault(name: text))),
     })
 }
 
@@ -106,7 +105,7 @@ check_scope_captured* = (c :: Checker, o :: Own, span: Span, text: str)
 is_scope_value* = (c :: Checker, id: ExprId) bool {
     c.tree.expr_at(id).kind.match({
         Scope    => true,
-        Paren(p) => is_scope_value(c, p.inner),
+        Paren(p) => c.is_scope_value(p.inner),
         _        => false,
     })
 }
@@ -133,21 +132,21 @@ is_scope_value* = (c :: Checker, id: ExprId) bool {
 
 call_escapes* = (c :: Checker, o :: Own, k: Call) bool {
     c.tree.expr_at(k.callee).kind.match({
-        Access(a) => member_escapes(c, o, a),
+        Access(a) => c.member_escapes(o, a),
         _         => false,
     })
 }
 
 member_escapes = (c :: Checker, o :: Own, a: Access) bool {
-    c.own_member(place_type(c, o, a.base), a.name.text).match({
+    c.own_member(c.place_type(o, a.base), a.name.text).match({
         None  => false,
-        Ok(m) => member_takes_alloc(c, m),
+        Ok(m) => c.member_takes_alloc(m),
     })
 }
 
 member_takes_alloc = (c :: Checker, m: Member) bool {
     m.kind.match({
-        Function(f) => takes_alloc(c, f),
+        Function(f) => c.takes_alloc(f),
         _           => false,
     })
 }
@@ -156,7 +155,7 @@ takes_alloc = (c :: Checker, f: Function) bool {
     Range(0, f.params.len).find((i) {
         f.params.get(i).match({
             None  => false,
-            Ok(p) => param_is_alloc(c, p),
+            Ok(p) => c.param_is_alloc(p),
         })
     }).match({ Ok(_) => true, None => false })
 }
@@ -167,7 +166,7 @@ takes_alloc = (c :: Checker, f: Function) bool {
 param_is_alloc = (c :: Checker, p: Param) bool {
     p.type.match({
         None    => false,
-        Ok(tid) => type_is_alloc(c, tid),
+        Ok(tid) => c.type_is_alloc(tid),
     })
 }
 

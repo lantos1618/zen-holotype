@@ -57,9 +57,9 @@ lower_unary* = (
     out  :: String
 ) Res<(), AllocError> {
     u.op.match({
-        Not  => wrap_unary(be, "!", u.operand, ctx, want, out),
-        Neg  => lower_negate(be, node, u, ctx, want, out),
-        Addr => unsupported(be, u.operand, "the address-of operator", out),
+        Not  => be.wrap_unary("!", u.operand, ctx, want, out),
+        Neg  => be.lower_negate(node, u, ctx, want, out),
+        Addr => be.unsupported(u.operand, "the address-of operator", out),
     })
 }
 
@@ -91,12 +91,12 @@ lower_negate = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    ty   = ty_of(be, u.operand, ctx, want).try();
+    ty   = be.ty_of(u.operand, ctx, want).try();
     prim = be.check.prim_name(ty);
-    negate_kind(be, u, prim).match({
-        Float     => wrap_unary(be, "-", u.operand, ctx, want, out),
+    be.negate_kind(u, prim).match({
+        Float     => be.wrap_unary("-", u.operand, ctx, want, out),
         Folded(d) => write_negative_literal(d, out),
-        Checked   => negate_checked(be, node, u, prim, ctx, ty, out),
+        Checked   => be.negate_checked(node, u, prim, ctx, ty, out),
     })
 }
 
@@ -114,7 +114,7 @@ lower_negate = (
 negate_kind = (be: CBackend, u: Unary, prim: str) NegKind {
     is_c_integer(prim).match({
         false => NegKind.Float,
-        true  => int_digits(be, u.operand).match({
+        true  => be.int_digits(u.operand).match({
             Ok(digits) => NegKind.Folded(digits),
             None       => NegKind.Checked,
         }),
@@ -166,7 +166,7 @@ negate_checked = (
     out  :: String
 ) Res<(), AllocError> {
     pos ::= be.alloc.String().try();
-    write_position(be, node.span.file, u.op_span, pos).try();
+    be.write_position(node.span.file, u.op_span, pos).try();
     be.need_helpers(prim).try();
     out.fmt("zg_sub_{prim}(0, ").try();
     expr(be, u.operand, ctx, ty, out).try();
@@ -182,14 +182,13 @@ lower_binary* = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    operand = level_type(be, b, ctx, want).try();
-    op_kind(be, b, operand).match({
-        ShortCircuit => write_short_circuit(be, b, operand, ctx, out),
-        Infix        => write_infix(be, b, c_op(b.op), ctx, operand, out),
-        Helper(prim) => call_helper(be, node, b, prim, ctx, operand, out),
-        Dispatched   => lower_eq_op(be, b, ctx, operand, out),
-        Refused      => unsupported(
-            be,
+    operand = be.level_type(b, ctx, want).try();
+    be.op_kind(b, operand).match({
+        ShortCircuit => be.write_short_circuit(b, operand, ctx, out),
+        Infix        => be.write_infix(b, c_op(b.op), ctx, operand, out),
+        Helper(prim) => be.call_helper(node, b, prim, ctx, operand, out),
+        Dispatched   => be.lower_eq_op(b, ctx, operand, out),
+        Refused      => be.unsupported(
             b.lhs,
             "comparing values that are not scalars",
             out
@@ -210,7 +209,7 @@ binary_type* = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
                Res<TyId, AllocError> {
     (is_logical(b.op) || is_comparison(b.op)).match({
         true  => be.check.types.bool_ty(),
-        false => operand_answer(be, b, ctx, want),
+        false => be.operand_answer(b, ctx, want),
     })
 }
 
@@ -218,10 +217,10 @@ binary_type* = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
 // are one type, so either may be the one this backend can answer.
 operand_answer = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
                  Res<TyId, AllocError> {
-    lhs = ty_of(be, b.lhs, ctx, want).try();
-    usable(be, lhs).match({
+    lhs = be.ty_of(b.lhs, ctx, want).try();
+    be.usable(lhs).match({
         true  => Ok(lhs),
-        false => ty_of(be, b.rhs, ctx, want),
+        false => be.ty_of(b.rhs, ctx, want),
     })
 }
 
@@ -278,12 +277,12 @@ OpKind = ShortCircuit | Infix | Helper(str) | Dispatched | Refused
 // with no impl.
 op_kind = (be: CBackend, b: Binary, operand: TyId) OpKind {
     is_logical(b.op).match({
-        true  => spills_anywhere(be, b.rhs).match({
+        true  => be.spills_anywhere(b.rhs).match({
             true  => OpKind.ShortCircuit,
             false => OpKind.Infix,
         }),
         false => is_comparison(b.op).match({
-            true  => scalar(be, operand).match({
+            true  => be.scalar(operand).match({
                 true  => OpKind.Infix,
                 false => is_equality(b.op).match({
                     true  => OpKind.Dispatched,
@@ -328,9 +327,9 @@ write_short_circuit = (
     expr(be, b.lhs, ctx, bool_ty, lhs).try();
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "b", be.next_tmp()).try();
-    declare_temp(be, bool_ty, tmp.view()).try();
+    be.declare_temp(bool_ty, tmp.view()).try();
     be.set_line(tmp.view(), lhs.view()).try();
-    open_guard(be, b.op, tmp.view()).try();
+    be.open_guard(b.op, tmp.view()).try();
     rhs ::= be.alloc.String().try();
     expr(be, b.rhs, ctx, bool_ty, rhs).try();
     be.set_line(tmp.view(), rhs.view()).try();
@@ -355,16 +354,16 @@ negation = (op: BinOp) str {
 operand_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
                Res<TyId, AllocError> {
     lhs = sub(be, be.check.type_of(b.lhs, ctx).try()).try();
-    usable(be, lhs).match({
+    be.usable(lhs).match({
         true  => Ok(lhs),
-        false => rhs_type(be, b, ctx, want),
+        false => be.rhs_type(b, ctx, want),
     })
 }
 
 rhs_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
            Res<TyId, AllocError> {
     rhs = sub(be, be.check.type_of(b.rhs, ctx).try()).try();
-    usable(be, rhs).match({
+    be.usable(rhs).match({
         true  => Ok(rhs),
         false => Ok(want),
     })
@@ -388,15 +387,14 @@ lower_eq_op = (
     out     :: String
 ) Res<(), AllocError> {
     text ::= be.alloc.String().try();
-    wrote = lower_eq_call(be, b.lhs, b.rhs, operand, ctx, text).try();
+    wrote = be.lower_eq_call(b.lhs, b.rhs, operand, ctx, text).try();
     wrote.match({
-        false => unsupported(
-            be,
+        false => be.unsupported(
             b.lhs,
             "comparing values that are not scalars",
             out
         ),
-        true  => write_equality(be, b.op, text.view(), out),
+        true  => be.write_equality(b.op, text.view(), out),
     })
 }
 
@@ -431,8 +429,8 @@ write_infix = (
     out     :: String
 ) Res<(), AllocError> {
     out.add_bytes("(").try();
-    lower_lhs(be, b.lhs, ctx, operand, out).try();
-    close_infix(be, b, op, ctx, operand, out)
+    be.lower_lhs(b.lhs, ctx, operand, out).try();
+    be.close_infix(b, op, ctx, operand, out)
 }
 
 // The left operand, walked as a spine only when there IS one.
@@ -452,7 +450,7 @@ lower_lhs = (
 ) Res<(), AllocError> {
     spine_ahead(be, id).match({
         false => expr(be, id, ctx, want, out),
-        true  => spine_lhs(be, id, ctx, want, out),
+        true  => be.spine_lhs(id, ctx, want, out),
     })
 }
 
@@ -518,7 +516,7 @@ call_helper = (
     out     :: String
 ) Res<(), AllocError> {
     open_helper(be, b, prim, out).try();
-    lower_lhs(be, b.lhs, ctx, operand, out).try();
+    be.lower_lhs(b.lhs, ctx, operand, out).try();
     close_helper(be, node, b, ctx, operand, out)
 }
 
@@ -543,7 +541,7 @@ close_helper = (
     // substituted into the wrong argument slot, which `cc` catches and
     // docs/GEN_BOOTSTRAP_FIXES.md records.
     traps(b.op).match({
-        true  => write_trap_args(be, node, b, out),
+        true  => be.write_trap_args(node, b, out),
         false => Ok(()),
     }).try();
     out.add_bytes(")").try();
@@ -553,7 +551,7 @@ close_helper = (
 write_trap_args = (be :: CBackend, node: Expr, b: Binary, out :: String)
                   Res<(), AllocError> {
     out.add_bytes(", ").try();
-    write_position(be, node.span.file, b.op_span, out).try();
+    be.write_position(node.span.file, b.op_span, out).try();
     Ok(());
 }
 
@@ -615,17 +613,17 @@ spine_lhs = (
     // The rung that does NOT fold is pushed too, and is what leaves
     // `down` and `hint` naming the base and the type it is wanted at.
     loop(() { going }, (h) {
-        rung = rung_at(be, down, ctx, hint).try();
+        rung = be.rung_at(down, ctx, hint).try();
         rungs.add(rung).try();
         going = rung.folds;
         down  = rung.lhs;
         hint  = rung.operand;
     });
     folded = rungs.len - 1;
-    Range(0, folded).loop((h, i) { open_rung(be, rungs, i, out).try(); });
+    Range(0, folded).loop((h, i) { be.open_rung(rungs, i, out).try(); });
     expr(be, down, ctx, hint, out).try();
     Range(0, folded).loop((h, i) {
-        close_rung(be, rungs, folded - 1 - i, ctx, out).try();
+        be.close_rung(rungs, folded - 1 - i, ctx, out).try();
     });
     Ok(());
 }
@@ -637,7 +635,7 @@ spine_lhs = (
 rung_at = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
           Res<Rung, AllocError> {
     be.tree.expr_at(id).kind.match({
-        Binary(b) => binary_rung(be, id, b, ctx, want),
+        Binary(b) => be.binary_rung(id, b, ctx, want),
         _         => Ok(base_rung(id, want)),
     })
 }
@@ -651,19 +649,19 @@ base_rung = (id: ExprId, want: TyId) Rung {
 // bound. `spills` is not asked because no `Binary` is a spill.
 binary_rung = (be :: CBackend, id: ExprId, b: Binary, ctx: Ctx, want: TyId)
               Res<Rung, AllocError> {
-    plain = (needs_set(be, id, ctx, want).try() == false)
-        && (needs_hoist(be, id, ctx, want).try() == false)
-        && (needs_fat(be, id, ctx, want).try() == false);
+    plain = (be.needs_set(id, ctx, want).try() == false)
+        && (be.needs_hoist(id, ctx, want).try() == false)
+        && (be.needs_fat(id, ctx, want).try() == false);
     plain.match({
         false => Ok(base_rung(id, want)),
-        true  => operand_rung(be, id, b, ctx, want),
+        true  => be.operand_rung(id, b, ctx, want),
     })
 }
 
 operand_rung = (be :: CBackend, id: ExprId, b: Binary, ctx: Ctx, want: TyId)
                Res<Rung, AllocError> {
-    operand = level_type(be, b, ctx, want).try();
-    infix_shaped(be, b, operand).match({
+    operand = be.level_type(b, ctx, want).try();
+    be.infix_shaped(b, operand).match({
         false => Ok(base_rung(id, want)),
         true  => Ok(Rung(id: id, lhs: b.lhs, operand: operand, folds: true)),
     })
@@ -676,14 +674,14 @@ level_type = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
              Res<TyId, AllocError> {
     is_logical(b.op).match({
         true  => be.check.types.bool_ty(),
-        false => operand_type(be, b, ctx, want),
+        false => be.operand_type(b, ctx, want),
     })
 }
 
 // The two that are not written as open-operand-operand-close, named in
 // the spine banner above.
 infix_shaped = (be: CBackend, b: Binary, operand: TyId) bool {
-    op_kind(be, b, operand).match({
+    be.op_kind(b, operand).match({
         Infix     => true,
         Helper(_) => true,
         _         => false,
@@ -699,7 +697,7 @@ open_rung = (be :: CBackend, rungs: Vec<Rung>, at: usize, out :: String)
     rungs.get(at).match({
         None     => Ok(()),
         Ok(rung) => be.tree.expr_at(rung.id).kind.match({
-            Binary(b) => open_op(be, b, rung.operand, out),
+            Binary(b) => be.open_op(b, rung.operand, out),
             _         => Ok(()),
         }),
     })
@@ -714,7 +712,7 @@ close_rung = (
 ) Res<(), AllocError> {
     rungs.get(at).match({
         None     => Ok(()),
-        Ok(rung) => close_node(be, be.tree.expr_at(rung.id), rung, ctx, out),
+        Ok(rung) => be.close_node(be.tree.expr_at(rung.id), rung, ctx, out),
     })
 }
 
@@ -726,14 +724,14 @@ close_node = (
     out  :: String
 ) Res<(), AllocError> {
     node.kind.match({
-        Binary(b) => close_op(be, node, b, rung.operand, ctx, out),
+        Binary(b) => be.close_op(node, b, rung.operand, ctx, out),
         _         => Ok(()),
     })
 }
 
 open_op = (be :: CBackend, b: Binary, operand: TyId, out :: String)
           Res<(), AllocError> {
-    op_kind(be, b, operand).match({
+    be.op_kind(b, operand).match({
         Helper(prim) => open_helper(be, b, prim, out),
         _            => out.add_bytes("("),
     })
@@ -747,9 +745,9 @@ close_op = (
     ctx     : Ctx,
     out     :: String
 ) Res<(), AllocError> {
-    op_kind(be, b, operand).match({
+    be.op_kind(b, operand).match({
         Helper(_) => close_helper(be, node, b, ctx, operand, out),
-        _         => close_infix(be, b, c_op(b.op), ctx, operand, out),
+        _         => be.close_infix(b, c_op(b.op), ctx, operand, out),
     })
 }
 

@@ -249,7 +249,7 @@ value_within = (c :: Checker, id: ExprId, want: TyId, v: i64)
                Res<(), AllocError> {
     fits(v, c.prim_name(want)).match({
         true  => Ok(()),
-        false => out_of_range(c, id, want),
+        false => c.out_of_range(id, want),
     })
 }
 
@@ -262,7 +262,7 @@ out_of_range = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
         node.span.file,
         node.span,
         SemaFault.LiteralOutOfRange(TypeFault(
-            name: written_literal(c, node),
+            name: c.written_literal(node),
             expected: want,
             found: found
         ))
@@ -275,7 +275,7 @@ out_of_range = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
 written_literal = (c: Checker, node: Expr) str {
     node.kind.match({
         Literal(l) => l.text,
-        Paren(p)   => written_literal(c, c.tree.expr_at(p.inner)),
+        Paren(p)   => c.written_literal(c.tree.expr_at(p.inner)),
         _          => "",
     })
 }
@@ -285,21 +285,21 @@ written_literal = (c: Checker, node: Expr) str {
 literal_int = (c: Checker, node: Expr) Res<i64> {
     node.kind.match({
         Literal(l) => const_literal(l),
-        Paren(p)   => literal_int(c, c.tree.expr_at(p.inner)),
-        Unary(u)   => literal_neg(c, u),
+        Paren(p)   => c.literal_int(c.tree.expr_at(p.inner)),
+        Unary(u)   => c.literal_neg(u),
         _          => None,
     })
 }
 
 literal_neg = (c: Checker, u: Unary) Res<i64> {
     u.op.match({
-        Neg => negate_literal(c, u.operand),
+        Neg => c.negate_literal(u.operand),
         _   => None,
     })
 }
 
 negate_literal = (c: Checker, id: ExprId) Res<i64> {
-    literal_int(c, c.tree.expr_at(id)).match({
+    c.literal_int(c.tree.expr_at(id)).match({
         None  => None,
         Ok(v) => Ok(0 - v),
     })
@@ -316,9 +316,9 @@ negate_literal = (c: Checker, id: ExprId) Res<i64> {
 
 check_index* = (c :: Checker, node: Expr, x: Index, a: TyArray)
                Res<(), AllocError> {
-    const_int(c, x.index).match({
+    c.const_int(x.index).match({
         None  => Ok(()),
-        Ok(i) => index_within(c, node, x, i, a.count),
+        Ok(i) => c.index_within(node, x, i, a.count),
     })
 }
 
@@ -328,7 +328,7 @@ index_within = (c :: Checker, node: Expr, x: Index, i: i64, count: usize)
                Res<(), AllocError> {
     ((i < 0) || (len_of(i) >= count)).match({
         false => Ok(()),
-        true  => out_of_bounds(c, node, x),
+        true  => c.out_of_bounds(node, x),
     })
 }
 
@@ -338,7 +338,7 @@ out_of_bounds = (c :: Checker, node: Expr, x: Index) Res<(), AllocError> {
     c.report(
         node.span.file,
         node.span,
-        SemaFault.ProvenIndexOutOfBounds(NameFault(name: written_index(c, x)))
+        SemaFault.ProvenIndexOutOfBounds(NameFault(name: c.written_index(x)))
     )
 }
 
@@ -507,23 +507,23 @@ FOLD_DEPTH: usize = 256
 // What this expression is, when a literal integer the compiler can see.
 // Absence means "not provably anything" — the answer for every binding.
 const_int* = (c: Checker, id: ExprId) Res<i64> {
-    const_within(c, id, FOLD_DEPTH)
+    c.const_within(id, FOLD_DEPTH)
 }
 
 const_within = (c: Checker, id: ExprId, left: usize) Res<i64> {
     (left == 0).match({
         true  => None,
-        false => const_node(c, c.tree.expr_at(id), left - 1),
+        false => c.const_node(c.tree.expr_at(id), left - 1),
     })
 }
 
 const_node = (c: Checker, node: Expr, left: usize) Res<i64> {
     node.kind.match({
         Literal(l) => const_literal(l),
-        Paren(p)   => const_within(c, p.inner, left),
-        Unary(u)   => const_unary(c, u, left),
-        Binary(b)  => const_binary(c, b, left),
-        Access(a)  => const_prim_const(c, a),
+        Paren(p)   => c.const_within(p.inner, left),
+        Unary(u)   => c.const_unary(u, left),
+        Binary(b)  => c.const_binary(b, left),
+        Access(a)  => c.const_prim_const(a),
         _          => None,
     })
 }
@@ -543,21 +543,21 @@ const_unary = (c: Checker, u: Unary, left: usize) Res<i64> {
 }
 
 negate = (c: Checker, id: ExprId, left: usize) Res<i64> {
-    const_within(c, id, left).match({
+    c.const_within(id, left).match({
         None  => None,
         Ok(v) => Ok(0 - v),
     })
 }
 
 const_binary = (c: Checker, b: Binary, left: usize) Res<i64> {
-    const_within(c, b.lhs, left).match({
+    c.const_within(b.lhs, left).match({
         None  => None,
-        Ok(x) => const_rhs(c, b, x, left),
+        Ok(x) => c.const_rhs(b, x, left),
     })
 }
 
 const_rhs = (c: Checker, b: Binary, x: i64, left: usize) Res<i64> {
-    const_within(c, b.rhs, left).match({
+    c.const_within(b.rhs, left).match({
         None  => None,
         Ok(y) => fold(b.op, x, y),
     })

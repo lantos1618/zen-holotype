@@ -88,8 +88,8 @@ member_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
                 Res<TyId, AllocError> {
     b = base_of(c, ac.base, ctx).try();
     b.is_type.match({
-        true  => static_value(c, id, node, ac, b.ty, ctx),
-        false => value_access(c, id, node, ac, b.ty, ctx),
+        true  => c.static_value(id, node, ac, b.ty, ctx),
+        false => c.value_access(id, node, ac, b.ty, ctx),
     })
 }
 
@@ -99,8 +99,8 @@ member_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
 base_of* = (c :: Checker, id: ExprId, ctx: Ctx) Res<Base, AllocError> {
     node = c.tree.expr_at(id);
     node.kind.match({
-        Name(n) => named_base(c, id, node, n.text, ctx),
-        _       => value_base(c, id, ctx),
+        Name(n) => c.named_base(id, node, n.text, ctx),
+        _       => c.value_base(id, ctx),
     })
 }
 
@@ -118,8 +118,8 @@ value_base = (c :: Checker, id: ExprId, ctx: Ctx) Res<Base, AllocError> {
 named_base = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
              Res<Base, AllocError> {
     b = c.lookup(text).match({
-        None  => global_base(c, node, text, ctx),
-        Ok(l) => bound_base(c, id, l),
+        None  => c.global_base(node, text, ctx),
+        Ok(l) => c.bound_base(id, l),
     }).try();
     b.is_type.match({
         false => c.expr_memo.set(id, b.ty),
@@ -146,7 +146,7 @@ global_base = (c :: Checker, node: Expr, text: str, ctx: Ctx)
             ty = c.types.prim(text).try();
             Ok(Base(ty: ty, is_type: true));
         },
-        false => decl_base(c, node, text, ctx),
+        false => c.decl_base(node, text, ctx),
     })
 }
 
@@ -192,14 +192,14 @@ value_access* = (
     ty   : TyId,
     ctx  : Ctx
 ) Res<TyId, AllocError> {
-    opaque(c, ty).match({
+    c.opaque(ty).match({
         true  => c.types.unknown(),
-        false => known_access(c, id, node, ac, ty, ctx),
+        false => c.known_access(id, node, ac, ty, ctx),
     })
 }
 
 opaque* = (c: Checker, ty: TyId) bool {
-    c.is_unknown(ty) || c.is_infer(ty) || foreign_tvar(c, ty)
+    c.is_unknown(ty) || c.is_infer(ty) || c.foreign_tvar(ty)
 }
 
 // A type parameter that is nobody's here: `Vec`'s own `T`, arriving on a
@@ -210,7 +210,7 @@ opaque* = (c: Checker, ty: TyId) bool {
 // pushed — that case is `bound_reachable`'s.
 foreign_tvar = (c: Checker, ty: TyId) bool {
     c.types.at(ty).match({
-        Var(v) => in_scope_tvar(c, v.name, ty) == false,
+        Var(v) => c.in_scope_tvar(v.name, ty) == false,
         _      => false,
     })
 }
@@ -241,9 +241,9 @@ known_access = (
     ctx  : Ctx
 ) Res<TyId, AllocError> {
     found ::= c.alloc.Vec<Found>();
-    members_of(c, ty, ac.name.text, found).try();
+    c.members_of(ty, ac.name.text, found).try();
     first_hidden(found, ctx.module).match({
-        Ok(f) => hidden_member(c, ac, f),
+        Ok(f) => c.hidden_member(ac, f),
         None  => pick(c, id, node, ac, ty, found, ctx),
     })
 }
@@ -295,9 +295,9 @@ pick = (
     ctx   : Ctx
 ) Res<TyId, AllocError> {
     found.len.match({
-        0 => ufcs_or_missing(c, node, ac, ty, ctx),
-        1 => first_type(c, id, ty, found),
-        _ => select(c, id, node, ac, ty, found),
+        0 => c.ufcs_or_missing(node, ac, ty, ctx),
+        1 => c.first_type(id, ty, found),
+        _ => c.select(id, node, ac, ty, found),
     })
 }
 
@@ -337,7 +337,7 @@ select = (
         c.has_bound(f.bound).match({ true => kept.add(f), false => Ok(()) }).try();
     });
     kept.len.match({
-        1 => first_type(c, id, ty, kept),
+        1 => c.first_type(id, ty, kept),
         _ => ambiguous(c, node, ac, found),
     })
 }
@@ -373,7 +373,7 @@ ufcs_or_missing = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
     c.world.defs_of(ctx.module, ac.name.text, defs).try();
     (defs.len > 0).match({
         true  => c.types.unknown(),
-        false => no_such_field(c, node, ac, ty),
+        false => c.no_such_field(node, ac, ty),
     })
 }
 
@@ -398,7 +398,7 @@ no_such_field = (c :: Checker, node: Expr, ac: Access, ty: TyId)
 found_of = (c :: Checker, ac: Access, ctx: Ctx) Res<Res<Found>, AllocError> {
     b = base_of(c, ac.base, ctx).try();
     found ::= c.alloc.Vec<Found>();
-    members_of(c, b.ty, ac.name.text, found).try();
+    c.members_of(b.ty, ac.name.text, found).try();
     Ok(first_found(found));
 }
 
@@ -406,7 +406,7 @@ found_of = (c :: Checker, ac: Access, ctx: Ctx) Res<Res<Found>, AllocError> {
 // non-addressable, no storage, nothing to assign into."
 computed_member* = (c :: Checker, ac: Access, ctx: Ctx)
                    Res<bool, AllocError> {
-    f = found_of(c, ac, ctx).try();
+    f = c.found_of(ac, ctx).try();
     Ok(f.match({ Ok(m) => m.computed, None => false }));
 }
 
@@ -419,8 +419,8 @@ computed_member* = (c :: Checker, ac: Access, ctx: Ctx)
 // are skipped: no storage, no declaring module to compare against.
 writable_member* = (c :: Checker, ac: Access, ctx: Ctx)
                    Res<(), AllocError> {
-    found_of(c, ac, ctx).try().match({
-        Ok(f) => written_from(c, ac, f, ctx),
+    c.found_of(ac, ctx).try().match({
+        Ok(f) => c.written_from(ac, f, ctx),
         None  => Ok(()),
     })
 }
@@ -428,7 +428,7 @@ writable_member* = (c :: Checker, ac: Access, ctx: Ctx)
 written_from = (c :: Checker, ac: Access, f: Found, ctx: Ctx)
                Res<(), AllocError> {
     ((f.computed == false) && (f.module != ctx.module)).match({
-        true  => not_writable(c, ac, f),
+        true  => c.not_writable(ac, f),
         false => Ok(()),
     })
 }
@@ -459,9 +459,9 @@ first_found* = (found: Vec<Found>) Res<Found> { found.get(0) }
 members_of* = (c :: Checker, ty: TyId, name: str, out :: Vec<Found>)
               Res<(), AllocError> {
     c.types.at(ty).match({
-        Named(n) => named_members(c, n, ty, name, out),
-        Prim(p)  => prim_members(c, p, ty, name, out),
-        Var(v)   => bound_reachable(c, v.name, ty, name, out),
+        Named(n) => c.named_members(n, ty, name, out),
+        Prim(p)  => c.prim_members(p, ty, name, out),
+        Var(v)   => c.bound_reachable(v.name, ty, name, out),
         _        => Ok(()),
     }).try();
     Ok(());
@@ -487,8 +487,7 @@ prim_members = (
         None  => Ok(()),
         Ok(d) => {
             args ::= c.alloc.Vec<TyId>();
-            named_members(
-                c,
+            c.named_members(
                 TyNamed(decl: d.id, name: p.name, args: args),
                 ty,
                 name,
@@ -511,7 +510,7 @@ bound_reachable = (
     bounds ::= c.alloc.Vec<TyId>();
     c.bounds_of(tname, bounds).try();
     bounds.loop((h, b) {
-        bound_member(c, b, ty, name, out).try();
+        c.bound_member(b, ty, name, out).try();
     });
     Ok(());
 }
@@ -528,8 +527,8 @@ bound_member = (
     out   :: Vec<Found>
 ) Res<(), AllocError> {
     tys ::= c.alloc.Vec<TyId>();
-    bound_member_types(c, bound, name, ty, tys).try();
-    span = bound_span(c, bound);
+    c.bound_member_types(bound, name, ty, tys).try();
+    span = c.bound_span(bound);
     tys.loop((h, t) {
         out.add(Found(
             name: name,
@@ -547,7 +546,7 @@ bound_member = (
 
 bound_span = (c: Checker, bound: TyId) Span {
     c.types.at(bound).match({
-        Named(n) => decl_span(c, n.decl),
+        Named(n) => c.decl_span(n.decl),
         _        => nowhere(),
     })
 }
@@ -570,7 +569,7 @@ named_members = (
         }),
         None  => Ok(()),
     }).try();
-    (out.len == 0).then(() { impl_members(c, n, ty, name, out).try() });
+    (out.len == 0).then(() { c.impl_members(n, ty, name, out).try() });
     Ok(());
 }
 
@@ -588,13 +587,13 @@ struct_members = (
 ) Res<(), AllocError> {
     mi     = n.decl.module.to_usize();
     poison = c.types.unknown().try();
-    inst   = inst_of_named(c, n).try();
+    inst   = c.inst_of_named(n).try();
     tmark  = c.tvar_mark();
-    enter_struct_tvars(c, s, mi).try();
+    c.enter_struct_tvars(s, mi).try();
     s.members.loop((h, m) {
         m.named(name).match({
             false => Ok(()),
-            true  => add_own(c, m, name, mi, ty, poison, inst, out),
+            true  => c.add_own(m, name, mi, ty, poison, inst, out),
         }).try();
     });
     c.release_tvars(tmark).try();
@@ -628,7 +627,7 @@ add_own = (
     declared = member_type(c, m, mi, ty).try();
     out.add(Found(
         name: name,
-        ty: subst(c, declared, inst).try(),
+        ty: c.subst(declared, inst).try(),
         computed: false,
         mutable: m.mutable(),
         exported: m.exported(),
@@ -643,11 +642,11 @@ add_own = (
 // function of the receiver.
 member_type* = (c :: Checker, m: Member, mi: usize, self_ty: TyId)
                Res<TyId, AllocError> {
-    ctx = self_ctx(c, mi, self_ty).try();
+    ctx = c.self_ctx(mi, self_ty).try();
     m.kind.match({
-        Field(f)    => opt_type(c, f.type, ctx),
-        Const(k)    => opt_type(c, k.type, ctx),
-        Function(f) => fn_member_type(c, f, ctx),
+        Field(f)    => c.opt_type(f.type, ctx),
+        Const(k)    => c.opt_type(k.type, ctx),
+        Function(f) => c.fn_member_type(f, ctx),
     })
 }
 

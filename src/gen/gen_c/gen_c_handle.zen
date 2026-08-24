@@ -43,7 +43,7 @@ unwind_to = gen.gen_c.gen_c_own
 // value, so there is nothing else it could be reached through.
 handle_depth* = (be :: CBackend, base: ExprId) usize {
     be.tree.expr_at(base).kind.match({
-        Name(n) => slot_handle(be, n.text),
+        Name(n) => be.slot_handle(n.text),
         _       => 0,
     })
 }
@@ -66,13 +66,12 @@ lower_handle_call* = (
 )
                      Res<(), AllocError> {
     be.loop_frame(depth).match({
-        None   => unsupported(
-            be,
+        None   => be.unsupported(
             id,
             "a loop handle used outside its loop",
             out
         ),
-        Ok(fr) => handle_verb(be, id, c, a.name.text, fr, ctx, out),
+        Ok(fr) => be.handle_verb(id, c, a.name.text, fr, ctx, out),
     })
 }
 
@@ -87,8 +86,8 @@ handle_verb = (
 )
               Res<(), AllocError> {
     name.eq("next").match({
-        true  => leave_pass(be, fr, out),
-        false => handle_break(be, id, c, name, fr, ctx, out),
+        true  => be.leave_pass(fr, out),
+        false => be.handle_break(id, c, name, fr, ctx, out),
     })
 }
 
@@ -98,8 +97,8 @@ handle_verb = (
 // handed out of a pass that ends this way, so there is nothing to keep.
 leave_pass = (be :: CBackend, fr: LoopFrame, out :: String)
              Res<(), AllocError> {
-    unwind_to(be, fr.depth, "").try();
-    jump_to(be, "cnt", fr.cnt, out)
+    be.unwind_to(fr.depth, "").try();
+    be.jump_to("cnt", fr.cnt, out)
 }
 
 handle_break = (
@@ -113,13 +112,12 @@ handle_break = (
 )
                Res<(), AllocError> {
     name.eq("break").match({
-        false => unsupported(
-            be,
+        false => be.unsupported(
             id,
             "a loop handle has only `break` and `next`",
             out
         ),
-        true  => write_break(be, id, c, fr, ctx, out),
+        true  => be.write_break(id, c, fr, ctx, out),
     })
 }
 
@@ -135,8 +133,7 @@ write_break = (
     out :: String
 ) Res<(), AllocError> {
     ((c.args.len > 0) && (fr.has_result == false)).match({
-        true  => unsupported(
-            be,
+        true  => be.unsupported(
             id,
             "a loop whose value type nothing settles, broken with a value",
             out
@@ -145,13 +142,13 @@ write_break = (
     }).try();
     (fr.has_result && (c.args.len > 0)).match({
         false => Ok(()),
-        true  => write_break_value(be, c, fr, ctx),
+        true  => be.write_break_value(c, fr, ctx),
     }).try();
     // The value is written before the cleanup, and the cleanup before
     // the jump: the result lands in storage outside the loop, so it
     // survives the drops.
-    unwind_to(be, fr.depth, break_keep(be, c)).try();
-    jump_to(be, "brk", fr.brk, out)
+    be.unwind_to(fr.depth, be.break_keep(c)).try();
+    be.jump_to("brk", fr.brk, out)
 }
 
 // A binding handed OUT of the loop by `h.break(x)` is not this pass's
@@ -160,7 +157,7 @@ write_break = (
 break_keep = (be :: CBackend, c: Call) str {
     c.args.get(0).match({
         None  => "",
-        Ok(a) => bare_name(be, a.value),
+        Ok(a) => be.bare_name(a.value),
     })
 }
 
@@ -168,7 +165,7 @@ write_break_value = (be :: CBackend, c: Call, fr: LoopFrame, ctx: Ctx)
                     Res<(), AllocError> {
     c.args.get(0).match({
         None  => Ok(()),
-        Ok(a) => assign_ok(be, a.value, fr, ctx),
+        Ok(a) => be.assign_ok(a.value, fr, ctx),
     })
 }
 
@@ -176,7 +173,7 @@ assign_ok = (be :: CBackend, value: ExprId, fr: LoopFrame, ctx: Ctx)
             Res<(), AllocError> {
     payload = ok_payload(be, fr.ty).try();
     cty ::= be.alloc.String().try();
-    ctype(be, fr.ty, cty).try();
+    be.ctype(fr.ty, cty).try();
     tag ::= be.alloc.String().try();
     sym_variant(tag, RES_PATH, "Ok").try();
     line ::= be.alloc.String().try();
@@ -186,7 +183,7 @@ assign_ok = (be :: CBackend, value: ExprId, fr: LoopFrame, ctx: Ctx)
         cty.view(),
         tag.view()
     ).try();
-    is_unit(be, payload).match({
+    be.is_unit(payload).match({
         true  => Ok(()),
         false => write_ok_payload(be, value, payload, ctx, line),
     }).try();

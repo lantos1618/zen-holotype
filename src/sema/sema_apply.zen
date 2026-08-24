@@ -302,14 +302,14 @@ bind_written = (
 ) Res<(), AllocError> {
     tys ::= c.alloc.Vec<TyId>();
     targs.loop((h, t) { tys.add(c.type_from_ast(t, ctx).try()).try() });
-    zip(c, k.tvars, tys, inst).try();
+    c.zip(k.tvars, tys, inst).try();
     Ok(());
 }
 
 infer_targs = (c :: Checker, k: Cand, actuals: Vec<Actual>, inst :: Inst)
               Res<(), AllocError> {
     Range(0, k.params.len).loop((h, i) {
-        infer_at(c, k, actuals, i, inst).try();
+        c.infer_at(k, actuals, i, inst).try();
     });
     Ok(());
 }
@@ -323,7 +323,7 @@ infer_at = (
 ) Res<(), AllocError> {
     actuals.get(i).match({
         None  => Ok(()),
-        Ok(a) => infer_from(c, ty_at(k.params, i), a, inst),
+        Ok(a) => c.infer_from(ty_at(k.params, i), a, inst),
     })
 }
 
@@ -359,7 +359,7 @@ infer_from = (c :: Checker, param: TyId, a: Actual, inst :: Inst)
 
 infer_from_bounds = (c :: Checker, k: Cand, inst :: Inst)
                     Res<(), AllocError> {
-    k.tbounds.loop((h, tb) { infer_one_bound(c, k, tb, inst).try() });
+    k.tbounds.loop((h, tb) { c.infer_one_bound(k, tb, inst).try() });
     Ok(());
 }
 
@@ -368,21 +368,21 @@ infer_one_bound = (c :: Checker, k: Cand, tb: TBound, inst :: Inst)
     v = c.types.var(tb.name, k.owner).try();
     inst.lookup(v).match({
         None  => Ok(()),
-        Ok(g) => infer_through_bound(c, tb.bound, g, inst),
+        Ok(g) => c.infer_through_bound(tb.bound, g, inst),
     })
 }
 
 infer_through_bound = (c :: Checker, bound: TyId, g: TyId, inst :: Inst)
                       Res<(), AllocError> {
-    same_head(c, bound, g).match({
-        true  => infer_own_bound(c, bound, g, inst),
-        false => infer_impl_bound(c, bound, g, inst),
+    c.same_head(bound, g).match({
+        true  => c.infer_own_bound(bound, g, inst),
+        false => c.infer_impl_bound(bound, g, inst),
     })
 }
 
 same_head = (c: Checker, a: TyId, b: TyId) bool {
     c.types.at(a).match({
-        Named(x) => head_is(c, x, b),
+        Named(x) => c.head_is(x, b),
         _        => false,
     })
 }
@@ -407,11 +407,11 @@ infer_own_bound = (c :: Checker, bound: TyId, g: TyId, inst :: Inst)
     usize_ty = c.types.prim("usize").try();
     bs ::= c.alloc.Vec<TyId>();
     gs ::= c.alloc.Vec<TyId>();
-    named_args(c, bound, bs).try();
-    named_args(c, g, gs).try();
+    c.named_args(bound, bs).try();
+    c.named_args(g, gs).try();
     (bs.len == gs.len).match({
         false => Ok(()),
-        true  => unify_index_space(c, bs, gs, usize_ty, inst),
+        true  => c.unify_index_space(bs, gs, usize_ty, inst),
     })
 }
 
@@ -423,13 +423,13 @@ unify_index_space = (
     inst     :: Inst
 ) Res<(), AllocError> {
     bs.loop((h, i, b) {
-        unify(c, b, settled_or_index(c, ty_at(gs, i), usize_ty), inst).try();
+        unify(c, b, c.settled_or_index(ty_at(gs, i), usize_ty), inst).try();
     });
     Ok(());
 }
 
 settled_or_index = (c: Checker, t: TyId, usize_ty: TyId) TyId {
-    has_var(c, t).match({ true => usize_ty, false => t })
+    c.has_var(t).match({ true => usize_ty, false => t })
 }
 
 named_args = (c :: Checker, ty: TyId, out :: Vec<TyId>)
@@ -451,14 +451,14 @@ named_args = (c :: Checker, ty: TyId, out :: Vec<TyId>)
 infer_impl_bound = (c :: Checker, bound: TyId, g: TyId, inst :: Inst)
                    Res<(), AllocError> {
     c.types.at(g).match({
-        Named(n) => infer_named_impl(c, bound, n, inst),
+        Named(n) => c.infer_named_impl(bound, n, inst),
         _        => Ok(()),
     })
 }
 
 infer_named_impl = (c :: Checker, bound: TyId, n: TyNamed, inst :: Inst)
                    Res<(), AllocError> {
-    impl_bound_at(c, bound, n).try().match({
+    c.impl_bound_at(bound, n).try().match({
         None   => Ok(()),
         Ok(gb) => unify(c, bound, gb, inst),
     })
@@ -468,7 +468,7 @@ impl_bound_at = (c :: Checker, bound: TyId, n: TyNamed)
                 Res<Res<TyId>, AllocError> {
     ids ::= c.alloc.Vec<ImplId>();
     c.world.impls_named(c.tree, n.name, ids).try();
-    impl_bound_from(c, ids, 0, bound, n)
+    c.impl_bound_from(ids, 0, bound, n)
 }
 
 // The first impl of that bound. Written as a walk rather than a loop
@@ -483,7 +483,7 @@ impl_bound_from = (
 ) Res<Res<TyId>, AllocError> {
     ids.get(i).match({
         None   => Ok(None),
-        Ok(id) => impl_bound_or_next(c, ids, i, id, bound, n),
+        Ok(id) => c.impl_bound_or_next(ids, i, id, bound, n),
     })
 }
 
@@ -495,9 +495,9 @@ impl_bound_or_next = (
     bound : TyId,
     n     : TyNamed
 ) Res<Res<TyId>, AllocError> {
-    impl_applied(c, id, bound, n).try().match({
+    c.impl_applied(id, bound, n).try().match({
         Ok(t) => Ok(Ok(t)),
-        None  => impl_bound_from(c, ids, i + 1, bound, n),
+        None  => c.impl_bound_from(ids, i + 1, bound, n),
     })
 }
 
@@ -505,7 +505,7 @@ impl_applied = (c :: Checker, id: ImplId, bound: TyId, n: TyNamed)
                Res<Res<TyId>, AllocError> {
     (n.decl.module == id.decl.module).match({
         false => Ok(None),
-        true  => impl_applied_local(c, id, bound, n),
+        true  => c.impl_applied_local(id, bound, n),
     })
 }
 
@@ -513,22 +513,22 @@ impl_applied_local = (c :: Checker, id: ImplId, bound: TyId, n: TyNamed)
                      Res<Res<TyId>, AllocError> {
     c.world.impl_at(c.tree, id).match({
         None   => Ok(None),
-        Ok(im) => impl_applied_of(c, im, bound, n),
+        Ok(im) => c.impl_applied_of(im, bound, n),
     })
 }
 
 impl_applied_of = (c :: Checker, im: Impl, bound: TyId, n: TyNamed)
                   Res<Res<TyId>, AllocError> {
     mi  = n.decl.module.to_usize();
-    got = impl_bound_type(c, im, mi).try();
-    same_head(c, got, bound).match({
+    got = c.impl_bound_type(im, mi).try();
+    c.same_head(got, bound).match({
         false => Ok(None),
-        true  => applied_at_recv(c, got, n),
+        true  => c.applied_at_recv(got, n),
     })
 }
 
 applied_at_recv = (c :: Checker, got: TyId, n: TyNamed)
                   Res<Res<TyId>, AllocError> {
-    recv = inst_of_named(c, n).try();
-    Ok(Ok(subst(c, got, recv).try()));
+    recv = c.inst_of_named(n).try();
+    Ok(Ok(c.subst(got, recv).try()));
 }

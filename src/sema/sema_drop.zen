@@ -29,7 +29,7 @@ check_drop_copy* = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
                    Res<(), AllocError> {
     node = c.tree.expr_at(b.value);
     node.kind.match({
-        Name(n) => drop_copy_of_name(c, o, node, n.text),
+        Name(n) => c.drop_copy_of_name(o, node, n.text),
         _       => Ok(()),
     })
 }
@@ -40,17 +40,16 @@ drop_copy_of_name = (c :: Checker, o :: Own, node: Expr, text: str)
                     Res<(), AllocError> {
     find_var(o, text).match({
         None  => Ok(()),
-        Ok(_) => refuse_if_drop(c, node.span, var_type(o, text), text),
+        Ok(_) => c.refuse_if_drop(node.span, var_type(o, text), text),
     })
 }
 
 refuse_if_drop = (c :: Checker, span: Span, ty: TyId, text: str)
                  Res<(), AllocError> {
-    drops = is_drop_type(c, ty).try();
+    drops = c.is_drop_type(ty).try();
     drops.match({
         false => Ok(()),
-        true  => refuse(
-            c,
+        true  => c.refuse(
             span,
             SemaFault.CopyOfDropValue(NameFault(name: text))
         ),
@@ -60,7 +59,7 @@ refuse_if_drop = (c :: Checker, span: Span, ty: TyId, text: str)
 // Whether an impl OF Drop exists for this type.
 is_drop_type* = (c :: Checker, ty: TyId) Res<bool, AllocError> {
     c.types.at(ty).match({
-        Named(n) => named_is_drop(c, n),
+        Named(n) => c.named_is_drop(n),
         _        => Ok(false),
     })
 }
@@ -69,7 +68,7 @@ named_is_drop = (c :: Checker, n: TyNamed) Res<bool, AllocError> {
     ids ::= c.alloc.Vec<ImplId>();
     c.world.impls_named(c.tree, n.name, ids).try();
     hits ::= c.alloc.Vec<bool>();
-    ids.loop((h, id) { keep_drop_impl(c, n, id, hits).try() });
+    ids.loop((h, id) { c.keep_drop_impl(n, id, hits).try() });
     Ok(hits.len > 0);
 }
 
@@ -77,7 +76,7 @@ keep_drop_impl = (c :: Checker, n: TyNamed, id: ImplId, hits :: Vec<bool>)
                  Res<(), AllocError> {
     (n.decl.module == id.decl.module).match({
         false => Ok(()),
-        true  => note_drop_impl(c, id, hits),
+        true  => c.note_drop_impl(id, hits),
     })
 }
 
@@ -85,13 +84,13 @@ note_drop_impl = (c :: Checker, id: ImplId, hits :: Vec<bool>)
                  Res<(), AllocError> {
     c.world.impl_at(c.tree, id).match({
         None   => Ok(()),
-        Ok(im) => add_if_drop(c, im, hits),
+        Ok(im) => c.add_if_drop(im, hits),
     })
 }
 
 add_if_drop = (c :: Checker, im: Impl, hits :: Vec<bool>)
               Res<(), AllocError> {
-    bound_named_drop(c, im).match({
+    c.bound_named_drop(im).match({
         false => Ok(()),
         true  => hits.add(true),
     })

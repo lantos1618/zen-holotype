@@ -201,7 +201,7 @@ subst_union = (c :: Checker, members: Vec<TyId>, ty: TyId, inst: Inst)
 
 subst_list* = (c :: Checker, src: Vec<TyId>, inst: Inst, out :: Vec<TyId>)
               Res<(), AllocError> {
-    src.loop((h, t) { out.add(subst(c, t, inst).try()).try() });
+    src.loop((h, t) { out.add(c.subst(t, inst).try()).try() });
     Ok(());
 }
 
@@ -212,17 +212,17 @@ subst_list* = (c :: Checker, src: Vec<TyId>, inst: Inst, out :: Vec<TyId>)
 has_var* = (c: Checker, ty: TyId) bool {
     c.types.at(ty).match({
         Var(_)   => true,
-        Named(n) => any_has_var(c, n.args),
-        Res(r)   => has_var(c, r.value) || has_var(c, r.error),
-        Fn(f)    => any_has_var(c, f.params) || has_var(c, f.ret),
-        Union(u) => any_has_var(c, u.members),
+        Named(n) => c.any_has_var(n.args),
+        Res(r)   => c.has_var(r.value) || c.has_var(r.error),
+        Fn(f)    => c.any_has_var(f.params) || c.has_var(f.ret),
+        Union(u) => c.any_has_var(u.members),
         _        => false,
     })
 }
 
 any_has_var = (c: Checker, list: Vec<TyId>) bool {
     Range(0, list.len).find((i) {
-        list.get(i).match({ Ok(t) => has_var(c, t), None => false })
+        list.get(i).match({ Ok(t) => c.has_var(t), None => false })
     }).match({ Ok(_) => true, None => false })
 }
 
@@ -275,7 +275,7 @@ inst_of_named* = (c :: Checker, n: TyNamed) Res<Inst, AllocError> {
     inst ::= c.alloc.Inst();
     (n.args.len > 0).match({
         false => Ok(()),
-        true  => fill_from_decl(c, n, inst),
+        true  => c.fill_from_decl(n, inst),
     }).try();
     Ok(inst);
 }
@@ -284,14 +284,14 @@ fill_from_decl = (c :: Checker, n: TyNamed, inst :: Inst)
                  Res<(), AllocError> {
     decl_at(c.tree, n.decl).match({
         None  => Ok(()),
-        Ok(d) => fill_from_struct(c, n, d, inst),
+        Ok(d) => c.fill_from_struct(n, d, inst),
     })
 }
 
 fill_from_struct = (c :: Checker, n: TyNamed, d: Decl, inst :: Inst)
                    Res<(), AllocError> {
     d.kind.match({
-        Struct(s) => fill_tparams(c, n, s, inst),
+        Struct(s) => c.fill_tparams(n, s, inst),
         _         => Ok(()),
     })
 }
@@ -300,8 +300,8 @@ fill_tparams = (c :: Checker, n: TyNamed, s: Struct, inst :: Inst)
                Res<(), AllocError> {
     owner = owner_of(c, n.decl.module.to_usize(), s.name.text).try();
     vars ::= c.alloc.Vec<TyId>();
-    tparam_vars(c, s.tparams, owner, vars).try();
-    zip(c, vars, n.args, inst).try();
+    c.tparam_vars(s.tparams, owner, vars).try();
+    c.zip(vars, n.args, inst).try();
     Ok(());
 }
 
@@ -310,7 +310,7 @@ fill_tparams = (c :: Checker, n: TyNamed, s: Struct, inst :: Inst)
 zip* = (c :: Checker, vars: Vec<TyId>, args: Vec<TyId>, inst :: Inst)
        Res<(), AllocError> {
     Range(0, vars.len).loop((h, i) {
-        zip_one(c, vars, args, i, inst).try();
+        c.zip_one(vars, args, i, inst).try();
     });
     Ok(());
 }
@@ -324,7 +324,7 @@ zip_one = (
 ) Res<(), AllocError> {
     vars.get(i).match({
         None  => Ok(()),
-        Ok(v) => zip_arg(c, v, args, i, inst),
+        Ok(v) => c.zip_arg(v, args, i, inst),
     })
 }
 
@@ -351,10 +351,10 @@ zip_arg = (c :: Checker, v: TyId, args: Vec<TyId>, i: usize, inst :: Inst)
 unify* = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
          Res<(), AllocError> {
     c.types.at(param).match({
-        Var(_)   => bind_actual(c, param, actual, inst),
+        Var(_)   => c.bind_actual(param, actual, inst),
         Named(n) => unify_named(c, n, actual, inst),
         Res(r)   => unify_res(c, r, actual, inst),
-        Fn(f)    => unify_fn(c, f, actual, inst),
+        Fn(f)    => c.unify_fn(f, actual, inst),
         _        => Ok(()),
     })
 }
@@ -376,7 +376,7 @@ unify* = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
 // for it already lives at the consumer via `has_var`.
 bind_actual = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
               Res<(), AllocError> {
-    usable_actual(c, actual).match({
+    c.usable_actual(actual).match({
         false => Ok(()),
         true  => inst.bind(param, actual),
     })
@@ -400,7 +400,7 @@ unify_args = (c :: Checker, n: TyNamed, m: TyNamed, inst :: Inst)
              Res<(), AllocError> {
     n.decl.eq(m.decl).match({
         false => Ok(()),
-        true  => unify_list(c, n.args, m.args, inst),
+        true  => c.unify_list(n.args, m.args, inst),
     })
 }
 
@@ -422,14 +422,14 @@ unify_res_parts = (c :: Checker, r: TyRes, s: TyRes, inst :: Inst)
 unify_fn = (c :: Checker, f: TyFn, actual: TyId, inst :: Inst)
            Res<(), AllocError> {
     c.types.at(actual).match({
-        Fn(g) => unify_fn_parts(c, f, g, inst),
+        Fn(g) => c.unify_fn_parts(f, g, inst),
         _     => Ok(()),
     })
 }
 
 unify_fn_parts = (c :: Checker, f: TyFn, g: TyFn, inst :: Inst)
                  Res<(), AllocError> {
-    unify_list(c, f.params, g.params, inst).try();
+    c.unify_list(f.params, g.params, inst).try();
     unify(c, f.ret, g.ret, inst).try();
     Ok(());
 }
@@ -455,7 +455,7 @@ unify_at = (
 ) Res<(), AllocError> {
     params.get(i).match({
         None  => Ok(()),
-        Ok(p) => unify_actual_at(c, p, actuals, i, inst),
+        Ok(p) => c.unify_actual_at(p, actuals, i, inst),
     })
 }
 

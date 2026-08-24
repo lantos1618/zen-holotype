@@ -104,9 +104,9 @@ check_own* = (c :: Checker, f: Function, body: BlockId, ctx: Ctx)
              Res<(), AllocError> {
     o ::= c.alloc.Own().try();
     o.method = receiver_method(f, ctx);
-    own_params(c, o, f).try();
-    own_block(c, o, body, ctx).try();
-    check_scope_returned(c, body).try();
+    c.own_params(o, f).try();
+    c.own_block(o, body, ctx).try();
+    c.check_scope_returned(body).try();
     Ok(());
 }
 
@@ -132,7 +132,7 @@ first_param_is_self = (f: Function) bool {
 // `scoped: false` even for `s: Scope` — the one shape the capture rule
 // does not see, see `sema_scope.zen`.
 own_params = (c :: Checker, o :: Own, f: Function) Res<(), AllocError> {
-    f.params.loop((h, p) { own_param(c, o, p).try() });
+    f.params.loop((h, p) { c.own_param(o, p).try() });
     Ok(());
 }
 
@@ -157,21 +157,21 @@ own_block = (c :: Checker, o :: Own, id: BlockId, ctx: Ctx)
             Res<(), AllocError> {
     b    = c.tree.block_at(id);
     mark = o.vars.len;
-    b.stmts.loop((h, s) { own_stmt(c, o, s, ctx).try() });
+    b.stmts.loop((h, s) { c.own_stmt(o, s, ctx).try() });
     b.value.match({
-        Ok(v) => own_expr(c, o, v, ctx),
+        Ok(v) => c.own_expr(o, v, ctx),
         None  => Ok(()),
     }).try();
-    check_partial_moves(c, o, mark).try();
+    c.check_partial_moves(o, mark).try();
     own_release(o, mark).try();
     Ok(());
 }
 
 own_stmt = (c :: Checker, o :: Own, s: Stmt, ctx: Ctx) Res<(), AllocError> {
     s.kind.match({
-        Bind(b)  => own_bind(c, o, b, ctx),
-        Expr(e)  => own_expr(c, o, e.expr, ctx),
-        Block(x) => own_block(c, o, x, ctx),
+        Bind(b)  => c.own_bind(o, b, ctx),
+        Expr(e)  => c.own_expr(o, e.expr, ctx),
+        Block(x) => c.own_block(o, x, ctx),
         Decl(_)  => Ok(()),
     })
 }
@@ -179,9 +179,9 @@ own_stmt = (c :: Checker, o :: Own, s: Stmt, ctx: Ctx) Res<(), AllocError> {
 // The value is read before the target is written: `f = consume f` reads
 // a live `f` and leaves a dead one.
 own_bind = (c :: Checker, o :: Own, b: Bind, ctx: Ctx) Res<(), AllocError> {
-    own_expr(c, o, b.value, ctx).try();
-    check_drop_copy(c, o, b, ctx).try();
-    own_target(c, o, b, ctx).try();
+    c.own_expr(o, b.value, ctx).try();
+    c.check_drop_copy(o, b, ctx).try();
+    c.own_target(o, b, ctx).try();
     Ok(());
 }
 
@@ -194,11 +194,11 @@ own_bind = (c :: Checker, o :: Own, b: Bind, ctx: Ctx) Res<(), AllocError> {
 own_target = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
              Res<(), AllocError> {
     node = c.tree.expr_at(b.target);
-    check_write_place(c, o, b.target).try();
+    c.check_write_place(o, b.target).try();
     node.kind.match({
         Name(n)   => bind_name(c, o, b, n.text, node.span, ctx),
-        Access(a) => revive_field(c, o, a, ctx),
-        _         => own_expr(c, o, b.target, ctx),
+        Access(a) => c.revive_field(o, a, ctx),
+        _         => c.own_expr(o, b.target, ctx),
     })
 }
 
@@ -215,7 +215,7 @@ bind_name = (
 ) Res<(), AllocError> {
     find_var(o, text).match({
         Ok(i) => revive(o, i, ""),
-        None  => declare_var(c, o, b, text, span, ctx),
+        None  => c.declare_var(o, b, text, span, ctx),
     })
 }
 
@@ -229,21 +229,21 @@ declare_var = (
 ) Res<(), AllocError> {
     o.vars.add(OwnVar(
         name: text,
-        ty: memo_type(c, b.value),
+        ty: c.memo_type(b.value),
         mutable: b.mutable,
         owned: true,
-        scoped: is_scope_value(c, b.value),
+        scoped: c.is_scope_value(b.value),
         span: span
     ))
 }
 
 revive_field = (c :: Checker, o :: Own, a: Access, ctx: Ctx)
                Res<(), AllocError> {
-    path_root(c, o, a.base).match({
+    c.path_root(o, a.base).match({
         None  => Ok(()),
         Ok(i) => revive(o, i, a.name.text),
     }).try();
-    own_expr(c, o, a.base, ctx).try();
+    c.own_expr(o, a.base, ctx).try();
     Ok(());
 }
 
@@ -251,56 +251,56 @@ own_expr = (c :: Checker, o :: Own, id: ExprId, ctx: Ctx)
            Res<(), AllocError> {
     node = c.tree.expr_at(id);
     node.kind.match({
-        Name(n)       => use_name(c, o, node, n.text),
-        Access(a)     => use_access(c, o, node, a, ctx),
-        Consume(x)    => own_consume(c, o, x, ctx),
-        Call(k)       => own_call(c, o, id, k, ctx),
-        Match(m)      => own_match(c, o, m, ctx),
-        Lambda(l)     => own_lambda(c, o, l, ctx, false, false),
-        Block(b)      => own_block(c, o, b, ctx),
-        Paren(p)      => own_expr(c, o, p.inner, ctx),
-        Try(t)        => own_expr(c, o, t.operand, ctx),
-        Unary(u)      => own_expr(c, o, u.operand, ctx),
-        Binary(bi)    => own_pair(c, o, bi.lhs, bi.rhs, ctx),
-        Index(x)      => own_pair(c, o, x.base, x.index, ctx),
-        Array(a)      => own_elems(c, o, a.elems, ctx),
-        FixedArray(a) => own_elems(c, o, a.elems, ctx),
-        Record(r)     => own_record(c, o, r.entries, ctx),
+        Name(n)       => c.use_name(o, node, n.text),
+        Access(a)     => c.use_access(o, node, a, ctx),
+        Consume(x)    => c.own_consume(o, x, ctx),
+        Call(k)       => c.own_call(o, id, k, ctx),
+        Match(m)      => c.own_match(o, m, ctx),
+        Lambda(l)     => c.own_lambda(o, l, ctx, false, false),
+        Block(b)      => c.own_block(o, b, ctx),
+        Paren(p)      => c.own_expr(o, p.inner, ctx),
+        Try(t)        => c.own_expr(o, t.operand, ctx),
+        Unary(u)      => c.own_expr(o, u.operand, ctx),
+        Binary(bi)    => c.own_pair(o, bi.lhs, bi.rhs, ctx),
+        Index(x)      => c.own_pair(o, x.base, x.index, ctx),
+        Array(a)      => c.own_elems(o, a.elems, ctx),
+        FixedArray(a) => c.own_elems(o, a.elems, ctx),
+        Record(r)     => c.own_record(o, r.entries, ctx),
         _             => Ok(()),
     })
 }
 
 own_pair = (c :: Checker, o :: Own, a: ExprId, b: ExprId, ctx: Ctx)
            Res<(), AllocError> {
-    own_expr(c, o, a, ctx).try();
-    own_expr(c, o, b, ctx).try();
+    c.own_expr(o, a, ctx).try();
+    c.own_expr(o, b, ctx).try();
     Ok(());
 }
 
 own_elems = (c :: Checker, o :: Own, elems: Vec<ExprId>, ctx: Ctx)
             Res<(), AllocError> {
-    elems.loop((h, e) { own_expr(c, o, e, ctx).try() });
+    elems.loop((h, e) { c.own_expr(o, e, ctx).try() });
     Ok(());
 }
 
 own_record = (c :: Checker, o :: Own, entries: Vec<Member>, ctx: Ctx)
              Res<(), AllocError> {
-    entries.loop((h, m) { own_member_value(c, o, m, ctx).try() });
+    entries.loop((h, m) { c.own_member_value(o, m, ctx).try() });
     Ok(());
 }
 
 own_member_value = (c :: Checker, o :: Own, m: Member, ctx: Ctx)
                    Res<(), AllocError> {
     m.kind.match({
-        Field(f)    => opt_expr(c, o, f.value, ctx),
-        Const(k)    => own_expr(c, o, k.value, ctx),
+        Field(f)    => c.opt_expr(o, f.value, ctx),
+        Const(k)    => c.own_expr(o, k.value, ctx),
         Function(_) => Ok(()),
     })
 }
 
 opt_expr = (c :: Checker, o :: Own, e: Res<ExprId>, ctx: Ctx)
            Res<(), AllocError> {
-    e.match({ Ok(x) => own_expr(c, o, x, ctx), None => Ok(()) })
+    e.match({ Ok(x) => c.own_expr(o, x, ctx), None => Ok(()) })
 }
 
 // ---------------------------------------------------------------------
@@ -309,10 +309,10 @@ opt_expr = (c :: Checker, o :: Own, e: Res<ExprId>, ctx: Ctx)
 
 use_name = (c :: Checker, o :: Own, node: Expr, text: str)
            Res<(), AllocError> {
-    check_scope_captured(c, o, node.span, text).try();
+    c.check_scope_captured(o, node.span, text).try();
     find_var(o, text).match({
         None  => Ok(()),
-        Ok(i) => report_if_dead(c, o, node.span, i, ""),
+        Ok(i) => c.report_if_dead(o, node.span, i, ""),
     })
 }
 
@@ -321,11 +321,11 @@ use_name = (c :: Checker, o :: Own, node: Expr, text: str)
 // makes `f.id` report `f` after `consume f`.
 use_access = (c :: Checker, o :: Own, node: Expr, a: Access, ctx: Ctx)
              Res<(), AllocError> {
-    path_root(c, o, a.base).match({
+    c.path_root(o, a.base).match({
         None  => Ok(()),
-        Ok(i) => report_if_dead(c, o, node.span, i, a.name.text),
+        Ok(i) => c.report_if_dead(o, node.span, i, a.name.text),
     }).try();
-    own_expr(c, o, a.base, ctx).try();
+    c.own_expr(o, a.base, ctx).try();
     Ok(());
 }
 
@@ -338,7 +338,7 @@ report_if_dead = (
 ) Res<(), AllocError> {
     is_dead(o, root, field).match({
         false => Ok(()),
-        true  => report_consumed(c, o, span, root, field),
+        true  => c.report_consumed(o, span, root, field),
     })
 }
 
@@ -349,7 +349,7 @@ report_consumed = (
     root  : usize,
     field : str
 ) Res<(), AllocError> {
-    name = place_name(c, o, root, field).try();
+    name = c.place_name(o, root, field).try();
     c.report(span.file, span, SemaFault.ConsumedUse(NameFault(name: name)))
 }
 
@@ -361,14 +361,13 @@ own_consume = (c :: Checker, o :: Own, x: Consume, ctx: Ctx)
               Res<(), AllocError> {
     node = c.tree.expr_at(x.operand);
     node.kind.match({
-        Index(_)  => refuse(
-            c,
+        Index(_)  => c.refuse(
             node.span,
             SemaFault.ConsumeNotAPlace(NameFault(name: ""))
         ),
-        Name(n)   => consume_name(c, o, node, n.text),
-        Access(a) => consume_field(c, o, node, a, ctx),
-        _         => own_expr(c, o, x.operand, ctx),
+        Name(n)   => c.consume_name(o, node, n.text),
+        Access(a) => c.consume_field(o, node, a, ctx),
+        _         => c.own_expr(o, x.operand, ctx),
     })
 }
 
@@ -376,7 +375,7 @@ own_consume = (c :: Checker, o :: Own, x: Consume, ctx: Ctx)
 // another use of a dead name, and it reports where it is written.
 consume_name = (c :: Checker, o :: Own, node: Expr, text: str)
                Res<(), AllocError> {
-    use_name(c, o, node, text).try();
+    c.use_name(o, node, text).try();
     find_var(o, text).match({
         None  => Ok(()),
         Ok(i) => kill(o, i, "", node.span),
@@ -386,9 +385,9 @@ consume_name = (c :: Checker, o :: Own, node: Expr, text: str)
 
 consume_field = (c :: Checker, o :: Own, node: Expr, a: Access, ctx: Ctx)
                 Res<(), AllocError> {
-    path_root(c, o, a.base).match({
-        None  => own_expr(c, o, a.base, ctx),
-        Ok(i) => consume_field_of(c, o, node, a, i),
+    c.path_root(o, a.base).match({
+        None  => c.own_expr(o, a.base, ctx),
+        Ok(i) => c.consume_field_of(o, node, a, i),
     })
 }
 
@@ -403,18 +402,17 @@ consume_field_of = (
     root : usize
 ) Res<(), AllocError> {
     owned_at(o, root).match({
-        false => refuse(
-            c,
+        false => c.refuse(
             node.span,
             SemaFault.ConsumeThroughHandle(NameFault(name: a.name.text))
         ),
-        true  => kill_field(c, o, node, a, root),
+        true  => c.kill_field(o, node, a, root),
     })
 }
 
 kill_field = (c :: Checker, o :: Own, node: Expr, a: Access, root: usize)
              Res<(), AllocError> {
-    report_if_dead(c, o, node.span, root, a.name.text).try();
+    c.report_if_dead(o, node.span, root, a.name.text).try();
     kill(o, root, a.name.text, node.span).try();
     Ok(());
 }
@@ -430,7 +428,7 @@ kill_field = (c :: Checker, o :: Own, node: Expr, a: Access, root: usize)
 check_partial_moves = (c :: Checker, o :: Own, mark: usize)
                       Res<(), AllocError> {
     Range(mark, o.vars.len).loop((h, i) {
-        check_partial_move(c, o, i).try();
+        c.check_partial_move(o, i).try();
     });
     Ok(());
 }
@@ -439,7 +437,7 @@ check_partial_move = (c :: Checker, o :: Own, i: usize)
                      Res<(), AllocError> {
     (has_dead_field(o, i) && (is_dead(o, i, "") == false)).match({
         false => Ok(()),
-        true  => report_partial(c, o, i),
+        true  => c.report_partial(o, i),
     })
 }
 
@@ -469,10 +467,10 @@ has_dead_field = (o: Own, root: usize) bool {
 
 own_call = (c :: Checker, o :: Own, id: ExprId, k: Call, ctx: Ctx)
            Res<(), AllocError> {
-    check_receiver(c, o, k, ctx).try();
-    check_scope_stored(c, id, k).try();
-    own_expr(c, o, k.callee, ctx).try();
-    own_args(c, o, k, ctx).try();
+    c.check_receiver(o, k, ctx).try();
+    c.check_scope_stored(id, k).try();
+    c.own_expr(o, k.callee, ctx).try();
+    c.own_args(o, k, ctx).try();
     Ok(());
 }
 
@@ -483,9 +481,9 @@ own_call = (c :: Checker, o :: Own, id: ExprId, k: Call, ctx: Ctx)
 // per `call_escapes`.
 own_args = (c :: Checker, o :: Own, k: Call, ctx: Ctx)
            Res<(), AllocError> {
-    repeats = repeating_body(c, k);
-    escapes = call_escapes(c, o, k);
-    k.args.loop((h, a) { own_arg(c, o, a, repeats, escapes, ctx).try() });
+    repeats = c.repeating_body(k);
+    escapes = c.call_escapes(o, k);
+    k.args.loop((h, a) { c.own_arg(o, a, repeats, escapes, ctx).try() });
     Ok(());
 }
 
@@ -499,8 +497,8 @@ own_arg = (
 ) Res<(), AllocError> {
     node = c.tree.expr_at(a.value);
     node.kind.match({
-        Lambda(l) => own_lambda(c, o, l, ctx, repeats, escapes),
-        _         => own_expr(c, o, a.value, ctx),
+        Lambda(l) => c.own_lambda(o, l, ctx, repeats, escapes),
+        _         => c.own_expr(o, a.value, ctx),
     })
 }
 
@@ -532,11 +530,11 @@ own_lambda = (
         false => outer,
         true  => vmark,
     });
-    l.params.loop((h, p) { own_param(c, o, p).try() });
-    own_block(c, o, l.body, ctx).try();
+    l.params.loop((h, p) { c.own_param(o, p).try() });
+    c.own_block(o, l.body, ctx).try();
     o.escaped = outer;
     own_release(o, vmark).try();
-    repeats.then(() { report_back_edge(c, o, dmark).try() });
+    repeats.then(() { c.report_back_edge(o, dmark).try() });
     Ok(());
 }
 
@@ -545,7 +543,7 @@ own_lambda = (
 report_back_edge = (c :: Checker, o :: Own, dmark: usize)
                    Res<(), AllocError> {
     Range(dmark, o.dead.len).loop((h, i) {
-        report_moved_again(c, o, i).try();
+        c.report_moved_again(o, i).try();
     });
     Ok(());
 }
@@ -554,7 +552,7 @@ report_moved_again = (c :: Checker, o :: Own, i: usize)
                      Res<(), AllocError> {
     o.dead.get(i).match({
         None  => Ok(()),
-        Ok(p) => report_consumed(c, o, p.span, p.root, p.field),
+        Ok(p) => c.report_consumed(o, p.span, p.root, p.field),
     })
 }
 
@@ -564,10 +562,10 @@ report_moved_again = (c :: Checker, o :: Own, i: usize)
 
 own_match = (c :: Checker, o :: Own, m: Match, ctx: Ctx)
             Res<(), AllocError> {
-    own_expr(c, o, m.scrutinee, ctx).try();
+    c.own_expr(o, m.scrutinee, ctx).try();
     dmark = o.dead.len;
     joined ::= c.alloc.Vec<Place>();
-    m.arms.loop((h, a) { own_arm(c, o, a, dmark, joined, ctx).try() });
+    m.arms.loop((h, a) { c.own_arm(o, a, dmark, joined, ctx).try() });
     joined.loop((h, p) { o.dead.add(p).try() });
     Ok(());
 }
@@ -583,7 +581,7 @@ own_arm = (
     joined :: Vec<Place>,
     ctx    : Ctx
 ) Res<(), AllocError> {
-    own_expr(c, o, a.body, ctx).try();
+    c.own_expr(o, a.body, ctx).try();
     take_dead(o, dmark, joined).try();
     Ok(());
 }
@@ -625,8 +623,8 @@ path_root* = (c :: Checker, o :: Own, id: ExprId) Res<usize> {
     node = c.tree.expr_at(id);
     node.kind.match({
         Name(n)   => find_var(o, n.text),
-        Paren(p)  => path_root(c, o, p.inner),
-        Access(a) => path_root(c, o, a.base),
+        Paren(p)  => c.path_root(o, p.inner),
+        Access(a) => c.path_root(o, a.base),
         _         => None,
     })
 }
@@ -724,7 +722,7 @@ place_name = (c :: Checker, o :: Own, root: usize, field: str)
     base = o.vars.get(root).match({ Ok(v) => v.name, None => "" });
     (field.len == 0).match({
         true  => Ok(base),
-        false => dotted_name(c, base, field),
+        false => c.dotted_name(base, field),
     })
 }
 
@@ -745,8 +743,8 @@ place_type* = (c :: Checker, o :: Own, id: ExprId) TyId {
     node = c.tree.expr_at(id);
     node.kind.match({
         Name(n)  => var_type(o, n.text),
-        Paren(p) => place_type(c, o, p.inner),
-        _        => memo_type(c, id),
+        Paren(p) => c.place_type(o, p.inner),
+        _        => c.memo_type(id),
     })
 }
 

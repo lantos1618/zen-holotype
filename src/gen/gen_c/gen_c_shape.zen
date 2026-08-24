@@ -52,7 +52,7 @@ settle_res = gen.gen_c.gen_c_loop
 is_loop_shape* = (be :: CBackend, f: Function) bool {
     f.body.match({
         Ok(_) => false,
-        None  => takes_handle(be, f.params),
+        None  => be.takes_handle(f.params),
     })
 }
 
@@ -66,20 +66,20 @@ is_loop_shape* = (be :: CBackend, f: Function) bool {
 takes_handle = (be :: CBackend, params: Vec<Param>) bool {
     params.get(params.len -% 1).match({
         None  => false,
-        Ok(p) => param_is_handle_body(be, p),
+        Ok(p) => be.param_is_handle_body(p),
     })
 }
 
 param_is_handle_body = (be :: CBackend, p: Param) bool {
     p.type.match({
         None    => false,
-        Ok(tid) => type_is_handle_body(be, tid),
+        Ok(tid) => be.type_is_handle_body(tid),
     })
 }
 
 type_is_handle_body = (be :: CBackend, tid: TypeId) bool {
     be.tree.type_at(tid).kind.match({
-        Fn(ft) => first_is_handle(be, ft.params),
+        Fn(ft) => be.first_is_handle(ft.params),
         _      => false,
     })
 }
@@ -87,14 +87,14 @@ type_is_handle_body = (be :: CBackend, tid: TypeId) bool {
 first_is_handle = (be :: CBackend, params: Vec<Param>) bool {
     params.get(0).match({
         None  => false,
-        Ok(p) => param_names_handle(be, p),
+        Ok(p) => be.param_names_handle(p),
     })
 }
 
 param_names_handle = (be :: CBackend, p: Param) bool {
     p.type.match({
         None    => false,
-        Ok(tid) => type_named(be, tid).eq("LoopHandle"),
+        Ok(tid) => be.type_named(tid).eq("LoopHandle"),
     })
 }
 
@@ -114,9 +114,9 @@ type_named = (be :: CBackend, tid: TypeId) str {
 // out what `at` returns.
 loop_result_type* = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                     Res<TyId, AllocError> {
-    loop_fn_at(be, id).match({
+    be.loop_fn_at(id).match({
         None  => Ok(got),
-        Ok(f) => settled_loop_type(be, id, ctx, got),
+        Ok(f) => be.settled_loop_type(id, ctx, got),
     })
 }
 
@@ -126,26 +126,26 @@ loop_result_type* = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
 loop_fn_at* = (be :: CBackend, id: ExprId) Res<Function> {
     be.check.resolved_call(id).match({
         None    => None,
-        Ok(did) => loop_fn_of(be, did),
+        Ok(did) => be.loop_fn_of(did),
     })
 }
 
 loop_fn_of = (be :: CBackend, did: DeclId) Res<Function> {
     decl_at(be.tree, did).match({
         None  => None,
-        Ok(x) => loop_fn_decl(be, x),
+        Ok(x) => be.loop_fn_decl(x),
     })
 }
 
 loop_fn_decl = (be :: CBackend, x: Decl) Res<Function> {
     x.kind.match({
-        Function(f) => keep_loop(be, f),
+        Function(f) => be.keep_loop(f),
         _           => None,
     })
 }
 
 keep_loop = (be :: CBackend, f: Function) Res<Function> {
-    is_loop_shape(be, f).match({
+    be.is_loop_shape(f).match({
         true  => Ok(f),
         false => None,
     })
@@ -153,8 +153,8 @@ keep_loop = (be :: CBackend, f: Function) Res<Function> {
 
 settled_loop_type = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                     Res<TyId, AllocError> {
-    elem = result_element(be, id, ctx).try();
-    settle_res(be, got, elem)
+    elem = be.result_element(id, ctx).try();
+    be.settle_res(got, elem)
 }
 
 // The element the loop walks. Three of the six shapes take no range at
@@ -163,17 +163,17 @@ settled_loop_type = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
 loop_element* = (be :: CBackend, id: ExprId, ctx: Ctx)
                Res<TyId, AllocError> {
     usize_ty = be.check.types.prim("usize").try();
-    range_arg(be, id).match({
+    be.range_arg(id).match({
         None  => Ok(usize_ty),
-        Ok(r) => arg_element(be, r, ctx, usize_ty),
+        Ok(r) => be.arg_element(r, ctx, usize_ty),
     })
 }
 
 arg_element = (be :: CBackend, r: ExprId, ctx: Ctx, usize_ty: TyId)
               Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
-    rty     = ty_of(be, r, ctx, unknown).try();
-    got     = range_element_type(be, rty).try();
+    rty     = be.ty_of(r, ctx, unknown).try();
+    got     = be.range_element_type(rty).try();
     Ok(got.match({ Ok(t) => t, None => usize_ty }));
 }
 
@@ -183,13 +183,13 @@ arg_element = (be :: CBackend, r: ExprId, ctx: Ctx, usize_ty: TyId)
 // bodyless-range form and has none.
 range_arg* = (be :: CBackend, id: ExprId) Res<ExprId> {
     be.tree.expr_at(id).kind.match({
-        Call(c) => call_range_arg(be, c),
+        Call(c) => be.call_range_arg(c),
         _       => None,
     })
 }
 
 call_range_arg = (be :: CBackend, c: Call) Res<ExprId> {
-    recv_of(be, c.callee).match({
+    be.recv_of(c.callee).match({
         Ok(r) => Ok(r),
         None  => leading_arg(c),
     })
@@ -231,7 +231,7 @@ Shape* = {
 
 shape_of* = (be :: CBackend, f: Function) Res<Shape, AllocError> {
     inner ::= be.alloc.Vec<Param>();
-    body_params(be, f, inner).try();
+    be.body_params(f, inner).try();
     Ok(Shape(
         wants_index: names_after_first(inner, "index"),
         wants_value: names_after_first(inner, "value"),
@@ -244,7 +244,7 @@ body_params = (be :: CBackend, f: Function, out :: Vec<Param>)
               Res<(), AllocError> {
     f.params.get(f.params.len - 1).match({
         None  => Ok(()),
-        Ok(p) => collect_fn_params(be, p, out),
+        Ok(p) => be.collect_fn_params(p, out),
     })
 }
 
@@ -252,7 +252,7 @@ collect_fn_params = (be :: CBackend, p: Param, out :: Vec<Param>)
                     Res<(), AllocError> {
     p.type.match({
         None    => Ok(()),
-        Ok(tid) => copy_fn_params(be, tid, out),
+        Ok(tid) => be.copy_fn_params(tid, out),
     })
 }
 

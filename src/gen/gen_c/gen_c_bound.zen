@@ -159,9 +159,9 @@ rebuild_res = (
     out.fmt("({}.zg_tag == ", tmp.view()).try();
     out.sym_variant(RES_PATH, "Ok").try();
     ok ::= be.alloc.String().try();
-    res_arm(be, tmp.view(), "Ok", s.value, d.value, dst, ok).try();
+    be.res_arm(tmp.view(), "Ok", s.value, d.value, dst, ok).try();
     bad ::= be.alloc.String().try();
-    fail_arm(be, tmp.view(), s, d, dst, bad).try();
+    be.fail_arm(tmp.view(), s, d, dst, bad).try();
     out.fmt(" ? {} : {})", ok.view(), bad.view())
 }
 
@@ -174,8 +174,8 @@ fail_arm = (
     out :: String
 ) Res<(), AllocError> {
     is_failure(d.form).match({
-        true  => res_arm(be, tmp, "Err", s.error, d.error, dst, out),
-        false => bare_arm(be, "None", dst, out),
+        true  => be.res_arm(tmp, "Err", s.error, d.error, dst, out),
+        false => be.bare_arm("None", dst, out),
     })
 }
 
@@ -188,15 +188,15 @@ res_arm = (
     dst : TyId,
     out :: String
 ) Res<(), AllocError> {
-    is_unit(be, dp).match({
-        true  => bare_arm(be, v, dst, out),
-        false => payload_arm(be, tmp, v, sp, dp, dst, out),
+    be.is_unit(dp).match({
+        true  => be.bare_arm(v, dst, out),
+        false => be.payload_arm(tmp, v, sp, dp, dst, out),
     })
 }
 
 bare_arm = (be :: CBackend, v: str, dst: TyId, out :: String)
            Res<(), AllocError> {
-    arm_head(be, v, dst, out).try();
+    be.arm_head(v, dst, out).try();
     out.add_bytes(" })").try();
     Ok(());
 }
@@ -210,21 +210,21 @@ payload_arm = (
     dst : TyId,
     out :: String
 ) Res<(), AllocError> {
-    arm_head(be, v, dst, out).try();
+    be.arm_head(v, dst, out).try();
     mem ::= be.alloc.String().try();
     mem.sym_member(v).try();
     read ::= be.alloc.String().try();
     read.fmt("{tmp}.zg_data.").try();
     sym_member(read, v).try();
     val ::= be.alloc.String().try();
-    convert(be, read.view(), sp, dp, val).try();
+    be.convert(read.view(), sp, dp, val).try();
     out.fmt(", .zg_data.{} = {} })", mem.view(), val.view())
 }
 
 arm_head = (be :: CBackend, v: str, dst: TyId, out :: String)
            Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, dst, cty).try();
+    be.ctype(dst, cty).try();
     out.fmt("(({}){ .zg_tag = ", cty.view()).try();
     out.sym_variant(RES_PATH, v).try();
     Ok(());
@@ -251,10 +251,9 @@ lower_fat_call* = (
     out :: String
 ) Res<(), AllocError> {
     slots ::= be.alloc.Vec<Slot>();
-    slots_of(be, rty, slots).try();
+    be.slots_of(rty, slots).try();
     pick_slot(slots, a.name.text, c.args.len).match({
-        None     => unsupported(
-            be,
+        None     => be.unsupported(
             id,
             "a call through a bound with no such member",
             out
@@ -284,10 +283,10 @@ slot_call* = (
     out  :: String
 ) Res<Res<Slot>, AllocError> {
     slots ::= be.alloc.Vec<Slot>();
-    slots_of(be, tty, slots).try();
+    be.slots_of(tty, slots).try();
     pick_slot(slots, name, argc).match({
         None     => Ok(None),
-        Ok(slot) => write_named_slot(be, recv, slot, args, out),
+        Ok(slot) => be.write_named_slot(recv, slot, args, out),
     })
 }
 
@@ -298,7 +297,7 @@ write_named_slot = (
     args : str,
     out  :: String
 ) Res<Res<Slot>, AllocError> {
-    request_type(be, slot.ret).try();
+    be.request_type(slot.ret).try();
     out.fmt("{recv}.{}({recv}.zg_self{args})", slot.sym.view()).try();
     Ok(Ok(slot));
 }
@@ -335,16 +334,14 @@ settle_call = (
               Res<(), AllocError> {
     declared ::= be.alloc.Vec<TyId>();
     targs    ::= be.alloc.Inst();
-    ret = read_slot(be, c, rty, s, slot, ctx, declared, targs).try();
+    ret = be.read_slot(c, rty, s, slot, ctx, declared, targs).try();
     settled(be, slot, targs).match({
-        false => unsupported(
-            be,
+        false => be.unsupported(
             id,
             "a call through a bound whose type arguments nothing settles",
             out
         ),
-        true  => emit_fat_call(
-            be,
+        true  => be.emit_fat_call(
             c,
             a,
             rty,
@@ -378,12 +375,12 @@ read_slot = (
     owner ::= be.alloc.String().try();
     join(owner, s.qname, slot.name).try();
     sctx = be.check.self_ctx(s.decl.module.to_usize(), rty).try();
-    mark = enter_struct_tparams(be, s.decl).try();
-    enter_tparams(be, slot.f.tparams, owner.view()).try();
-    declared_params(be, slot.f, sctx, declared).try();
-    ret = declared_ret(be, slot.f, sctx).try();
+    mark = be.enter_struct_tparams(s.decl).try();
+    be.enter_tparams(slot.f.tparams, owner.view()).try();
+    be.declared_params(slot.f, sctx, declared).try();
+    ret = be.declared_ret(slot.f, sctx).try();
     infer_targs(be, c, declared, ctx, targs).try();
-    leave_tparams(be, mark).try();
+    be.leave_tparams(mark).try();
     Ok(ret);
 }
 
@@ -405,12 +402,12 @@ read_slot = (
 fat_ret_type* = (be :: CBackend, c: Call, a: Access, ctx: Ctx)
                 Res<Res<TyId>, AllocError> {
     unknown = be.check.types.unknown().try();
-    rty     = ty_of(be, a.base, ctx, unknown).try();
+    rty     = be.ty_of(a.base, ctx, unknown).try();
     slots ::= be.alloc.Vec<Slot>();
-    slots_of(be, rty, slots).try();
+    be.slots_of(rty, slots).try();
     pick_slot(slots, a.name.text, c.args.len).match({
         None     => Ok(None),
-        Ok(slot) => slot_ret_type(be, c, rty, slot, ctx),
+        Ok(slot) => be.slot_ret_type(c, rty, slot, ctx),
     })
 }
 
@@ -418,7 +415,7 @@ slot_ret_type = (be :: CBackend, c: Call, rty: TyId, slot: Slot, ctx: Ctx)
                 Res<Res<TyId>, AllocError> {
     site_of(be, rty).try().match({
         None  => Ok(None),
-        Ok(s) => settled_ret_type(be, c, rty, s, slot, ctx),
+        Ok(s) => be.settled_ret_type(c, rty, s, slot, ctx),
     })
 }
 
@@ -436,10 +433,10 @@ settled_ret_type = (
 ) Res<Res<TyId>, AllocError> {
     declared ::= be.alloc.Vec<TyId>();
     targs    ::= be.alloc.Inst();
-    ret = read_slot(be, c, rty, s, slot, ctx, declared, targs).try();
+    ret = be.read_slot(c, rty, s, slot, ctx, declared, targs).try();
     settled(be, slot, targs).match({
         false => Ok(None),
-        true  => Ok(Ok(sub_with(be, ret, targs).try())),
+        true  => Ok(Ok(be.sub_with(ret, targs).try())),
     })
 }
 
@@ -449,7 +446,7 @@ declared_params = (
     sctx : Ctx,
     out  :: Vec<TyId>
 ) Res<(), AllocError> {
-    f.params.loop((h, i, p) { declared_param(be, p, i, sctx, out).try() });
+    f.params.loop((h, i, p) { be.declared_param(p, i, sctx, out).try() });
     Ok(());
 }
 
@@ -462,7 +459,7 @@ declared_param = (
 ) Res<(), AllocError> {
     (i == 0).match({
         true  => Ok(()),
-        false => add_declared(be, p, sctx, out),
+        false => be.add_declared(p, sctx, out),
     })
 }
 
@@ -479,7 +476,7 @@ infer_targs = (
     out      :: Inst
 ) Res<(), AllocError> {
     c.args.loop((h, i, arg) {
-        infer_one(be, arg, i, declared, ctx, out).try();
+        be.infer_one(arg, i, declared, ctx, out).try();
     });
     Ok(());
 }
@@ -494,21 +491,21 @@ infer_one = (
 ) Res<(), AllocError> {
     declared.get(i).match({
         None  => Ok(()),
-        Ok(d) => infer_against(be, arg, d, ctx, out),
+        Ok(d) => be.infer_against(arg, d, ctx, out),
     })
 }
 
 infer_against = (be :: CBackend, arg: Arg, d: TyId, ctx: Ctx, out :: Inst)
                 Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    actual  = arg_type(be, arg.value, ctx, unknown).try();
+    actual  = be.arg_type(arg.value, ctx, unknown).try();
     unify(be, d, actual, out)
 }
 
 // Every parameter bound, and bound to something closed. A free argument
 // would become a `sizeof` of a type C has no name for.
 settled = (be: CBackend, slot: Slot, targs: Inst) bool {
-    (targs.len() == slot.elems) && all_closed(be, targs)
+    (targs.len() == slot.elems) && be.all_closed(targs)
 }
 
 all_closed = (be: CBackend, targs: Inst) bool {
@@ -537,14 +534,14 @@ emit_fat_call = (
     expr(be, a.base, ctx, rty, recv).try();
     r ::= be.alloc.String().try();
     sym_gen(r, "t", be.next_tmp()).try();
-    declare_temp(be, rty, r.view()).try();
+    be.declare_temp(rty, r.view()).try();
     be.set_line(r.view(), recv.view()).try();
     call ::= be.alloc.String().try();
     call.fmt("{}.{}({}.zg_self", r.view(), slot.sym.view(), r.view()).try();
-    fat_args(be, c, slot, declared, targs, ctx, call).try();
-    fat_sizes(be, targs, call).try();
+    be.fat_args(c, slot, declared, targs, ctx, call).try();
+    be.fat_sizes(targs, call).try();
     call.add_bytes(")").try();
-    fat_result(be, slot, ret, targs, call.view(), out)
+    be.fat_result(slot, ret, targs, call.view(), out)
 }
 
 fat_args = (
@@ -557,7 +554,7 @@ fat_args = (
     out      :: String
 ) Res<(), AllocError> {
     c.args.loop((h, i, arg) {
-        fat_arg(be, arg, i, slot, declared, targs, ctx, out).try();
+        be.fat_arg(arg, i, slot, declared, targs, ctx, out).try();
     });
     Ok(());
 }
@@ -576,11 +573,11 @@ fat_arg = (
     out      :: String
 )
           Res<(), AllocError> {
-    want = sub_with(be, at_or_zero(declared, i), targs).try();
+    want = be.sub_with(at_or_zero(declared, i), targs).try();
     text ::= be.alloc.String().try();
     expr(be, arg.value, ctx, want, text).try();
     out.add_bytes(", ").try();
-    convert(be, text.view(), want, at_or_zero(slot.params, i), out).try();
+    be.convert(text.view(), want, at_or_zero(slot.params, i), out).try();
     Ok(());
 }
 
@@ -592,7 +589,7 @@ at_or_zero = (v: Vec<TyId>, i: usize) TyId {
 // declaration order.
 fat_sizes = (be :: CBackend, targs: Inst, out :: String)
             Res<(), AllocError> {
-    Range(0, targs.len()).loop((h, i) { fat_size(be, targs, i, out).try() });
+    Range(0, targs.len()).loop((h, i) { be.fat_size(targs, i, out).try() });
     Ok(());
 }
 
@@ -600,7 +597,7 @@ fat_size = (be :: CBackend, targs: Inst, i: usize, out :: String)
            Res<(), AllocError> {
     targs.arg_at(i).match({
         None  => out.add_bytes(", 1"),
-        Ok(t) => write_sizeof(be, t, out),
+        Ok(t) => be.write_sizeof(t, out),
     })
 }
 
@@ -608,9 +605,9 @@ fat_size = (be :: CBackend, targs: Inst, i: usize, out :: String)
 // this backend never modelled cannot disagree with the one `cc` chose.
 write_sizeof* = (be :: CBackend, t: TyId, out :: String)
                Res<(), AllocError> {
-    request_type(be, t).try();
+    be.request_type(t).try();
     cty ::= be.alloc.String().try();
-    ctype(be, t, cty).try();
+    be.ctype(t, cty).try();
     out.fmt(", sizeof({})", cty.view())
 }
 
@@ -624,10 +621,10 @@ fat_result = (
     call  : str,
     out   :: String
 ) Res<(), AllocError> {
-    real = sub_with(be, ret, targs).try();
-    is_unit(be, slot.ret).match({
-        true  => fat_effect(be, call, out),
-        false => fat_value_back(be, slot, real, call, out),
+    real = be.sub_with(ret, targs).try();
+    be.is_unit(slot.ret).match({
+        true  => be.fat_effect(call, out),
+        false => be.fat_value_back(slot, real, call, out),
     })
 }
 
@@ -644,11 +641,11 @@ fat_value_back = (
     call : str,
     out  :: String
 ) Res<(), AllocError> {
-    request_type(be, slot.ret).try();
-    request_type(be, real).try();
+    be.request_type(slot.ret).try();
+    be.request_type(real).try();
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "t", be.next_tmp()).try();
-    declare_temp(be, slot.ret, tmp.view()).try();
+    be.declare_temp(slot.ret, tmp.view()).try();
     be.set_line(tmp.view(), call).try();
-    convert(be, tmp.view(), slot.ret, real, out)
+    be.convert(tmp.view(), slot.ret, real, out)
 }

@@ -123,11 +123,11 @@ site_index_type = (be :: CBackend, rty: TyId, s: Site, want: TyId)
 index_ret = (be :: CBackend, rty: TyId, s: Site, f: Function)
             Res<TyId, AllocError> {
     sctx     = be.check.self_ctx(s.decl.module.to_usize(), rty).try();
-    mark     = enter_struct_tparams(be, s.decl).try();
-    declared = declared_ret(be, f, sctx).try();
-    leave_tparams(be, mark).try();
-    inst = recv_inst(be, rty).try();
-    sub_with(be, declared, inst)
+    mark     = be.enter_struct_tparams(s.decl).try();
+    declared = be.declared_ret(f, sctx).try();
+    be.leave_tparams(mark).try();
+    inst = be.recv_inst(rty).try();
+    be.sub_with(declared, inst)
 }
 
 is_raw_ptr = (be :: CBackend, rty: TyId) bool {
@@ -157,8 +157,8 @@ index_through_member = (
     out :: String
 ) Res<(), AllocError> {
     site_of(be, rty).try().match({
-        None  => no_index(be, id, out),
-        Ok(s) => index_member(be, id, ix, rty, s, ctx, out),
+        None  => be.no_index(id, out),
+        Ok(s) => be.index_member(id, ix, rty, s, ctx, out),
     })
 }
 
@@ -176,8 +176,8 @@ index_member = (
     found ::= be.alloc.Vec<Member>();
     member_at(be, s, "index", found).try();
     bodied_fn(found).match({
-        Ok(f) => write_index_call(be, id, ix, rty, s, f, ctx, out),
-        None  => supplied_index(be, id, ix, rty, s, ctx, out),
+        Ok(f) => be.write_index_call(id, ix, rty, s, f, ctx, out),
+        None  => be.supplied_index(id, ix, rty, s, ctx, out),
     })
 }
 
@@ -190,15 +190,15 @@ supplied_index = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    impl_member(be, s.decl, "index").try().match({
-        Ok(f) => write_index_call(be, id, ix, rty, s, f, ctx, out),
-        None  => no_index(be, id, out),
+    be.impl_member(s.decl, "index").try().match({
+        Ok(f) => be.write_index_call(id, ix, rty, s, f, ctx, out),
+        None  => be.no_index(id, out),
     })
 }
 
 no_index = (be :: CBackend, id: ExprId, out :: String)
            Res<(), AllocError> {
-    unsupported(be, id, "an index on a type that declares no `index`", out)
+    be.unsupported(id, "an index on a type that declares no `index`", out)
 }
 
 write_index_call = (
@@ -212,18 +212,17 @@ write_index_call = (
     out :: String
 )
                    Res<(), AllocError> {
-    inst = recv_inst(be, rty).try();
+    inst = be.recv_inst(rty).try();
     mi   = s.decl.module.to_usize();
     sig ::= be.alloc.Vec<TyId>();
-    method_sig(be, rty, s.decl, f, mi, inst, sig).try();
-    (inst_open(be, inst) || any_open(be, sig)).match({
-        true  => unsupported(
-            be,
+    be.method_sig(rty, s.decl, f, mi, inst, sig).try();
+    (be.inst_open(inst) || be.any_open(sig)).match({
+        true  => be.unsupported(
             id,
             "an index on a receiver whose type arguments nothing settles",
             out
         ),
-        false => emit_index_call(be, ix, rty, s, f, sig, inst, ctx, out),
+        false => be.emit_index_call(ix, rty, s, f, sig, inst, ctx, out),
     })
 }
 
@@ -238,10 +237,10 @@ emit_index_call = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    sym = member_symbol(be, rty, s, "index", sig, inst).try();
+    sym = be.member_symbol(rty, s, "index", sig, inst).try();
     base ::= be.alloc.String().try();
-    write_arg(be, ix.base, 0, f, sig, ctx, base).try();
+    be.write_arg(ix.base, 0, f, sig, ctx, base).try();
     idx ::= be.alloc.String().try();
-    write_arg(be, ix.index, 1, f, sig, ctx, idx).try();
+    be.write_arg(ix.index, 1, f, sig, ctx, idx).try();
     out.fmt("{}({}, {})", sym.view(), base.view(), idx.view())
 }

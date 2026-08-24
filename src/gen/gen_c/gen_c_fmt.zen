@@ -53,7 +53,7 @@ write_jump_unless_ok, write_goto, write_label = gen.gen_c.gen_c_sink
 // asks it once: `alloc.String(fmt, args)` is this file's, `out.add(fmt,
 // args)` is `gen_c_sink.zen`'s.
 is_format_door* = (be: CBackend, d: Def, f: Function) bool {
-    is_alloc_door(be, d, f) || is_sink_door(be, d, f)
+    be.is_alloc_door(d, f) || be.is_sink_door(d, f)
 }
 
 // The bodyless `String(a: Alloc, fmt: str, args: ...)` and nothing
@@ -62,7 +62,7 @@ is_format_door* = (be: CBackend, d: Def, f: Function) bool {
 // is called like one.
 is_alloc_door = (be: CBackend, d: Def, f: Function) bool {
     d.name.eq("String") && bodyless(f) && (f.params.len == 3)
-        && last_is_variadic(be, f)
+        && be.last_is_variadic(f)
 }
 
 // -----------------------------------------------------------------
@@ -79,9 +79,9 @@ lower_format_door* = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    is_sink_door(be, d, f).match({
-        true  => lower_sink_door(be, id, c, d, f, recv, ctx, out),
-        false => lower_alloc_door(be, id, c, d, f, recv, ctx, out),
+    be.is_sink_door(d, f).match({
+        true  => be.lower_sink_door(id, c, d, f, recv, ctx, out),
+        false => be.lower_alloc_door(id, c, d, f, recv, ctx, out),
     })
 }
 
@@ -99,9 +99,9 @@ lower_alloc_door = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    empty_form(be, d).try().match({
-        None  => unsupported(be, id, "a format door with no empty form", out),
-        Ok(e) => lower_with_empty(be, id, c, d, f, e, recv, ctx, out),
+    be.empty_form(d).try().match({
+        None  => be.unsupported(id, "a format door with no empty form", out),
+        Ok(e) => be.lower_with_empty(id, c, d, f, e, recv, ctx, out),
     })
 }
 
@@ -113,7 +113,7 @@ empty_form = (be :: CBackend, d: Def) Res<Res<Def>, AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(d.id.module.to_usize(), "String", found).try();
     kept ::= be.alloc.Vec<Def>();
-    found.loop((h, x) { keep_empty(be, x, kept).try() });
+    found.loop((h, x) { be.keep_empty(x, kept).try() });
     Ok(kept.get(0));
 }
 
@@ -152,11 +152,10 @@ lower_with_empty = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    ret = door_return(be, d, f).try();
+    ret = be.door_return(d, f).try();
     be.check.types.at(ret).match({
         Res(r) => write_door(be, id, c, d, e, r, ret, recv, ctx, out),
-        _      => unsupported(
-            be,
+        _      => be.unsupported(
             id,
             "a format door that does not return a Res",
             out
@@ -194,11 +193,11 @@ write_door = (
 ) Res<(), AllocError> {
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "t", be.next_tmp()).try();
-    declare_temp(be, ret, tmp.view()).try();
+    be.declare_temp(ret, tmp.view()).try();
     done = be.next_tmp();
-    write_empty_call(be, e, ret, c, recv, ctx, tmp.view()).try();
-    write_jump_unless_ok(be, tmp.view(), done).try();
-    write_buffer_pieces(be, id, c, r, ret, tmp.view(), done, recv, ctx).try();
+    be.write_empty_call(e, ret, c, recv, ctx, tmp.view()).try();
+    be.write_jump_unless_ok(tmp.view(), done).try();
+    be.write_buffer_pieces(id, c, r, ret, tmp.view(), done, recv, ctx).try();
     write_label(be, done).try();
     out.add_bytes(tmp.view())
 }
@@ -215,12 +214,12 @@ write_empty_call = (
 )
                    Res<(), AllocError> {
     sym ::= be.alloc.String().try();
-    call_symbol(be, e, sym).try();
+    be.call_symbol(e, sym).try();
     line ::= be.alloc.String().try();
     line.fmt("{tmp} = {}(", sym.view()).try();
     recv_arg(c, recv).match({
         None  => Ok(()),
-        Ok(a) => write_alloc(be, e, a, ctx, line),
+        Ok(a) => be.write_alloc(e, a, ctx, line),
     }).try();
     be.fmt("{});\n", line.view())
 }
@@ -229,7 +228,7 @@ write_alloc = (be :: CBackend, e: Def, a: ExprId, ctx: Ctx, out :: String)
               Res<(), AllocError> {
     sig  ::= be.alloc.Vec<TyId>();
     inst ::= be.alloc.Inst();
-    signature_of(be, e, inst, sig).try();
+    be.signature_of(e, inst, sig).try();
     unknown = be.check.types.unknown().try();
     want    = sig.get(0).match({ Ok(t) => t, None => unknown });
     expr(be, a, ctx, want, out)
@@ -258,8 +257,7 @@ write_buffer_pieces = (
     addr ::= be.alloc.String().try();
     ok_payload(be, tmp, addr).try();
     fail  = be.next_tmp();
-    wrote = lower_pieces_into(
-        be,
+    wrote = be.lower_pieces_into(
         id,
         c,
         addr.view(),
@@ -273,7 +271,7 @@ write_buffer_pieces = (
             id,
             GenFault.Unsupported("a format door with no sink")
         ),
-        true  => write_failure_arm(be, ret, tmp, fail, done),
+        true  => be.write_failure_arm(ret, tmp, fail, done),
     })
 }
 
@@ -308,7 +306,7 @@ write_failure_arm = (
     fail : usize,
     done : usize
 ) Res<(), AllocError> {
-    write_goto(be, done).try();
+    be.write_goto(done).try();
     write_label(be, fail).try();
-    write_assign_err(be, ret, "OutOfMemory", tmp)
+    be.write_assign_err(ret, "OutOfMemory", tmp)
 }

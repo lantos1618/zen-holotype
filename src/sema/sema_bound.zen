@@ -472,7 +472,7 @@ impl_bound_is = (c :: Checker, id: ImplId, n: TyNamed, bound: TyId)
                 Res<bool, AllocError> {
     mi = n.decl.module.to_usize();
     c.world.impl_at(c.tree, id).match({
-        Ok(im) => bound_matches(c, im, mi, bound),
+        Ok(im) => c.bound_matches(im, mi, bound),
         None   => Ok(false),
     })
 }
@@ -483,7 +483,7 @@ impl_bound_is = (c :: Checker, id: ImplId, n: TyNamed, bound: TyId)
 // find.
 bound_matches = (c :: Checker, im: Impl, mi: usize, bound: TyId)
                 Res<bool, AllocError> {
-    got = impl_bound_type(c, im, mi).try();
+    got = c.impl_bound_type(im, mi).try();
     Ok(c.same_type(got, bound));
 }
 
@@ -503,7 +503,7 @@ bound_matches = (c :: Checker, im: Impl, mi: usize, bound: TyId)
 check_bounds* = (c :: Checker, cand: Cand, actuals: Vec<Actual>, at: Span)
                 Res<(), AllocError> {
     cand.tbounds.loop((h, tb) {
-        check_one_bound(c, cand, tb, actuals, at).try();
+        c.check_one_bound(cand, tb, actuals, at).try();
     });
     Ok(());
 }
@@ -515,9 +515,9 @@ check_one_bound = (
     actuals : Vec<Actual>,
     at      : Span
 ) Res<(), AllocError> {
-    param_of_var(c, cand, tb.name).match({
+    c.param_of_var(cand, tb.name).match({
         None  => Ok(()),
-        Ok(i) => bound_at(c, tb, actuals, i, at),
+        Ok(i) => c.bound_at(tb, actuals, i, at),
     })
 }
 
@@ -526,7 +526,7 @@ check_one_bound = (
 // position the language has not settled is inventing a reason.
 param_of_var = (c: Checker, cand: Cand, name: str) Res<usize> {
     Range(0, cand.params.len).find((i) {
-        var_named(c, ty_at(cand.params, i), name, cand.owner)
+        c.var_named(ty_at(cand.params, i), name, cand.owner)
     })
 }
 
@@ -546,29 +546,29 @@ bound_at = (
 ) Res<(), AllocError> {
     actuals.get(i).match({
         None  => Ok(()),
-        Ok(a) => check_actual_bound(c, tb, a, at),
+        Ok(a) => c.check_actual_bound(tb, a, at),
     })
 }
 
 check_actual_bound = (c :: Checker, tb: TBound, a: Actual, at: Span)
                      Res<(), AllocError> {
-    unbounded(c, a.ty).match({
+    c.unbounded(a.ty).match({
         true  => Ok(()),
-        false => prove_bound(c, tb, a, at),
+        false => c.prove_bound(tb, a, at),
     })
 }
 
 // Poison, a hole and another type parameter carry no answer, and
 // "never invent a diagnostic out of missing information".
 unbounded = (c: Checker, ty: TyId) bool {
-    opaque(c, ty) || is_tvar(c, ty)
+    c.opaque(ty) || c.is_tvar(ty)
 }
 
 prove_bound = (c :: Checker, tb: TBound, a: Actual, at: Span)
               Res<(), AllocError> {
-    satisfies_bound(c, a.ty, tb.bound).try().match({
+    c.satisfies_bound(a.ty, tb.bound).try().match({
         true  => Ok(()),
-        false => bound_not_satisfied(c, tb, a, at),
+        false => c.bound_not_satisfied(tb, a, at),
     })
 }
 
@@ -605,9 +605,9 @@ bound_not_satisfied = (c :: Checker, tb: TBound, a: Actual, at: Span)
 // ---------------------------------------------------------------------
 
 check_eq* = (c :: Checker, b: Binary, operand: TyId) Res<(), AllocError> {
-    (is_eq_op(b.op) && dispatches_eq(c, operand)).match({
+    (is_eq_op(b.op) && c.dispatches_eq(operand)).match({
         false => Ok(()),
-        true  => prove_eq(c, b, operand),
+        true  => c.prove_eq(b, operand),
     })
 }
 
@@ -619,7 +619,7 @@ is_eq_op = (op: BinOp) bool {
 // rest: an unsubstituted `T` reaches the backend as the type it was
 // instantiated with, where the same question is asked again.
 dispatches_eq = (c: Checker, ty: TyId) bool {
-    (scalar_eq(c, ty) || unbounded(c, ty)) == false
+    (c.scalar_eq(ty) || c.unbounded(ty)) == false
 }
 
 // The backend's rule, asked one layer up: every primitive but `str` and
@@ -635,10 +635,10 @@ scalar_eq = (c: Checker, ty: TyId) bool {
 
 prove_eq = (c :: Checker, b: Binary, operand: TyId) Res<(), AllocError> {
     found ::= c.alloc.Vec<Found>();
-    members_of(c, operand, "eq", found).try();
+    c.members_of(operand, "eq", found).try();
     (found.len > 0).match({
         true  => Ok(()),
-        false => eq_needs_impl(c, b, operand),
+        false => c.eq_needs_impl(b, operand),
     })
 }
 

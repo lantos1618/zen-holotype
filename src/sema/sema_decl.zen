@@ -133,17 +133,17 @@ check_bodies = (c :: Checker, mi: usize) Res<(), AllocError> {
 }
 
 check_decls = (c :: Checker, m: Module, mi: usize) Res<(), AllocError> {
-    m.decls.loop((h, d) { check_decl(c, d, m, mi).try() });
+    m.decls.loop((h, d) { c.check_decl(d, m, mi).try() });
     Ok(());
 }
 
 check_decl = (c :: Checker, d: Decl, m: Module, mi: usize)
              Res<(), AllocError> {
     d.kind.match({
-        Function(f) => check_function(c, f, m, mi),
-        Struct(s)   => struct_bodies(c, s, m, mi),
+        Function(f) => c.check_function(f, m, mi),
+        Struct(s)   => c.struct_bodies(s, m, mi),
         Enum(e)     => c.enum_payloads(e, mi),
-        Impl(im)    => impl_bodies(c, im, m, mi),
+        Impl(im)    => c.impl_bodies(im, m, mi),
         _           => Ok(()),
     })
 }
@@ -184,10 +184,10 @@ enum_payloads = (c :: Checker, e: Enum, mi: usize) Res<(), AllocError> {
 // signature promised an `i32` compiled clean — even when it was called.
 struct_bodies = (c :: Checker, s: Struct, m: Module, mi: usize)
                 Res<(), AllocError> {
-    self_ty = named_self(c, s.name.text, mi).try();
+    self_ty = c.named_self(s.name.text, mi).try();
     tmark   = c.tvar_mark();
-    enter_struct_tvars(c, s, mi).try();
-    s.members.loop((h, mem) { member_body(c, mem, self_ty, m, mi).try() });
+    c.enter_struct_tvars(s, mi).try();
+    s.members.loop((h, mem) { c.member_body(mem, self_ty, m, mi).try() });
     c.release_tvars(tmark).try();
     Ok(());
 }
@@ -205,10 +205,10 @@ struct_bodies = (c :: Checker, s: Struct, m: Module, mi: usize)
 impl_bodies = (c :: Checker, im: Impl, m: Module, mi: usize)
               Res<(), AllocError> {
     name    = im.target.text;
-    self_ty = named_self(c, name, mi).try();
+    self_ty = c.named_self(name, mi).try();
     tmark   = c.tvar_mark();
     enter_target_tvars(c, name, mi).try();
-    im.members.loop((h, mem) { member_body(c, mem, self_ty, m, mi).try() });
+    im.members.loop((h, mem) { c.member_body(mem, self_ty, m, mi).try() });
     c.release_tvars(tmark).try();
     Ok(());
 }
@@ -218,7 +218,7 @@ impl_bodies = (c :: Checker, im: Impl, m: Module, mi: usize)
 // receiver a call site reaches is a different question asked at the call
 // site.
 named_self = (c :: Checker, name: str, mi: usize) Res<TyId, AllocError> {
-    target_decl(c, name, mi).try().match({
+    c.target_decl(name, mi).try().match({
         Ok(d) => c.decl_as_type(d),
         None  => c.types.unknown(),
     })
@@ -226,8 +226,8 @@ named_self = (c :: Checker, name: str, mi: usize) Res<TyId, AllocError> {
 
 enter_target_tvars = (c :: Checker, name: str, mi: usize)
                      Res<(), AllocError> {
-    target_decl(c, name, mi).try().match({
-        Ok(d) => target_tvars(c, d, mi),
+    c.target_decl(name, mi).try().match({
+        Ok(d) => c.target_tvars(d, mi),
         None  => Ok(()),
     })
 }
@@ -241,7 +241,7 @@ target_decl = (c :: Checker, name: str, mi: usize)
 
 target_tvars = (c :: Checker, d: Def, mi: usize) Res<(), AllocError> {
     decl_at(c.tree, d.id).match({
-        Ok(x) => target_decl_tvars(c, x, mi),
+        Ok(x) => c.target_decl_tvars(x, mi),
         None  => Ok(()),
     })
 }
@@ -249,7 +249,7 @@ target_tvars = (c :: Checker, d: Def, mi: usize) Res<(), AllocError> {
 target_decl_tvars = (c :: Checker, d: Decl, mi: usize)
                     Res<(), AllocError> {
     d.kind.match({
-        Struct(s) => enter_struct_tvars(c, s, mi),
+        Struct(s) => c.enter_struct_tvars(s, mi),
         _         => Ok(()),
     })
 }
@@ -262,7 +262,7 @@ member_body = (
     mi      : usize
 ) Res<(), AllocError> {
     mem.kind.match({
-        Function(f) => member_fn_body(c, f, self_ty, m, mi),
+        Function(f) => c.member_fn_body(f, self_ty, m, mi),
         _           => Ok(()),
     })
 }
@@ -275,7 +275,7 @@ member_fn_body = (
     mi      : usize
 ) Res<(), AllocError> {
     f.body.match({
-        Ok(b) => check_body(c, f, b, Ok(self_ty), m, mi),
+        Ok(b) => c.check_body(f, b, Ok(self_ty), m, mi),
         None  => Ok(()),
     })
 }
@@ -285,7 +285,7 @@ member_fn_body = (
 check_function* = (c :: Checker, f: Function, m: Module, mi: usize)
                   Res<(), AllocError> {
     f.body.match({
-        Ok(b) => check_body(c, f, b, None, m, mi),
+        Ok(b) => c.check_body(f, b, None, m, mi),
         None  => Ok(()),
     })
 }
@@ -306,22 +306,22 @@ check_body = (
     smark = c.mark();
     tmark = c.tvar_mark();
     bmark = c.bound_mark();
-    owner = qualified(c, m, f).try();
-    enter_generics(c, f, owner, mi).try();
+    owner = c.qualified(m, f).try();
+    c.enter_generics(f, owner, mi).try();
     ctx = body_ctx(c, f, mi, self_ty).try();
     bind_params(c, f, ctx).try();
     rmark = c.raised_mark();
     c.enter_owner(owner);
     got = c.block_type(body, ctx).try();
     c.enter_owner("");
-    check_return(c, body, ctx, got).try();
-    settle_raised(c, f, ctx, got, rmark).try();
+    c.check_return(body, ctx, got).try();
+    c.settle_raised(f, ctx, got, rmark).try();
     // AFTER typing and BEFORE the scope is released. Ownership is a fact
     // about the path to a node rather than about the node, so it is a
     // walk and not a query; and it reads the types typing decided rather
     // than computing any, so the parameters have to still be bound when
     // it runs.
-    check_own(c, f, body, ctx).try();
+    c.check_own(f, body, ctx).try();
     c.release_bounds(bmark).try();
     c.release_tvars(tmark).try();
     c.release(smark).try();
@@ -375,7 +375,7 @@ enter_generics = (c :: Checker, f: Function, owner: str, mi: usize)
     });
     poison = c.types.unknown().try();
     ctx    = Ctx(mi, poison);
-    f.tparams.loop((h, tp) { push_bounds(c, tp, ctx).try() });
+    f.tparams.loop((h, tp) { c.push_bounds(tp, ctx).try() });
     Ok(());
 }
 

@@ -56,14 +56,14 @@ is_defer, lower_defer = gen.gen_c.gen_c_scope
 is_capability* = (be :: CBackend, rty: TyId, name: str) bool {
     owner_of(be, rty).eq("Mem").match({
         true  => mem_verb(name),
-        false => is_fs_capability(be, rty, name),
+        false => be.is_fs_capability(rty, name),
     })
 }
 
 is_fs_capability = (be :: CBackend, rty: TyId, name: str) bool {
     owner_of(be, rty).eq("Fs").match({
         true  => fs_verb(name),
-        false => is_console_capability(be, rty, name),
+        false => be.is_console_capability(rty, name),
     })
 }
 
@@ -81,8 +81,8 @@ is_fs_capability = (be :: CBackend, rty: TyId, name: str) bool {
 // it and `is_defer` asks its own question.
 is_console_capability = (be :: CBackend, rty: TyId, name: str) bool {
     (owner_of(be, rty).eq("Console") && name.eq("println"))
-        || is_stdin_read(be, rty, name)
-        || is_defer(be, rty, name)
+        || be.is_stdin_read(rty, name)
+        || be.is_defer(rty, name)
 }
 
 // `Stdin.read`, and the owner is the whole of the test: `Fs` declares a
@@ -130,9 +130,9 @@ lower_capability* = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    is_defer(be, rty, a.name.text).match({
-        true  => lower_defer(be, id, c, a, ctx, out),
-        false => lower_env_capability(be, id, c, a, rty, mi, f, ctx, out),
+    be.is_defer(rty, a.name.text).match({
+        true  => be.lower_defer(id, c, a, ctx, out),
+        false => be.lower_env_capability(id, c, a, rty, mi, f, ctx, out),
     })
 }
 
@@ -147,13 +147,13 @@ lower_env_capability = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    ret = cap_ret(be, rty, mi, f).try();
-    request_type(be, ret).try();
+    ret = be.cap_ret(rty, mi, f).try();
+    be.request_type(ret).try();
     // `Fs.read`'s FIRST written parameter is an `Alloc` per its
     // DECLARED type — the argument arrives as an Arena, and lowering it
     // at its own type would hand the buffer's owner an arena where the
     // two-word handle belongs. Law 7: the declaration decides.
-    aty = cap_param(be, rty, mi, f).try();
+    aty = be.cap_param(rty, mi, f).try();
     verb(be, id, c, a, rty, ret, aty, ctx, out)
 }
 
@@ -180,9 +180,9 @@ verb = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    is_stdin_read(be, rty, a.name.text).match({
-        true  => lower_stdin_read(be, id, c, ret, aty, ctx, out),
-        false => console_verb(be, id, c, a, rty, ret, aty, ctx, out),
+    be.is_stdin_read(rty, a.name.text).match({
+        true  => be.lower_stdin_read(id, c, ret, aty, ctx, out),
+        false => be.console_verb(id, c, a, rty, ret, aty, ctx, out),
     })
 }
 
@@ -200,7 +200,7 @@ console_verb = (
                Res<(), AllocError> {
     a.name.text.eq("println").match({
         true  => lower_console_print(be, c, a.name.text, ret, ctx, out),
-        false => verb_1(be, id, c, a, rty, ret, aty, ctx, out),
+        false => be.verb_1(id, c, a, rty, ret, aty, ctx, out),
     })
 }
 
@@ -217,7 +217,7 @@ verb_1 = (
 )
          Res<(), AllocError> {
     a.name.text.eq("alloc").match({
-        true  => lower_alloc(be, id, a, rty, ret, ctx, out),
+        true  => be.lower_alloc(id, a, rty, ret, ctx, out),
         false => verb_2(be, id, c, a, rty, ret, aty, ctx, out),
     })
 }
@@ -235,7 +235,7 @@ verb_2 = (
 )
          Res<(), AllocError> {
     a.name.text.eq("page").match({
-        true  => lower_page(be, id, c, ret, ctx, out),
+        true  => be.lower_page(id, c, ret, ctx, out),
         false => verb_3(be, id, c, a, rty, ret, aty, ctx, out),
     })
 }
@@ -253,7 +253,7 @@ verb_3 = (
 )
          Res<(), AllocError> {
     a.name.text.eq("release").match({
-        true  => lower_release(be, c, ctx, out),
+        true  => be.lower_release(c, ctx, out),
         false => verb_4(be, id, c, a, rty, ret, aty, ctx, out),
     })
 }
@@ -271,7 +271,7 @@ verb_4 = (
 )
          Res<(), AllocError> {
     a.name.text.eq("write").match({
-        true  => lower_write(be, id, c, ret, ctx, out),
+        true  => be.lower_write(id, c, ret, ctx, out),
         false => verb_5(be, id, c, a, ret, aty, ctx, out),
     })
 }
@@ -287,8 +287,8 @@ verb_5 = (
     out :: String
 ) Res<(), AllocError> {
     a.name.text.eq("read").match({
-        true  => lower_read(be, id, c, ret, aty, ctx, out),
-        false => lower_probe(be, c, a.name.text, ctx, out),
+        true  => be.lower_read(id, c, ret, aty, ctx, out),
+        false => be.lower_probe(c, a.name.text, ctx, out),
     })
 }
 
@@ -299,7 +299,7 @@ verb_5 = (
 cap_ret = (be :: CBackend, rty: TyId, mi: usize, f: Function)
           Res<TyId, AllocError> {
     sctx     = be.check.self_ctx(mi, rty).try();
-    declared = declared_ret(be, f, sctx).try();
+    declared = be.declared_ret(f, sctx).try();
     sub(be, declared)
 }
 
@@ -321,9 +321,9 @@ lower_alloc = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    field_of(be, ret, "state").try().match({
-        None    => unsupported(be, id, "an Arena with no state field", out),
-        Ok(pty) => with_state(be, id, a, rty, ret, pty, ctx, out),
+    be.field_of(ret, "state").try().match({
+        None    => be.unsupported(id, "an Arena with no state field", out),
+        Ok(pty) => be.with_state(id, a, rty, ret, pty, ctx, out),
     })
 }
 
@@ -337,14 +337,13 @@ with_state = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    pointee(be, pty).match({
-        None     => unsupported(
-            be,
+    be.pointee(pty).match({
+        None     => be.unsupported(
             id,
             "an Arena whose state is not a pointer",
             out
         ),
-        Ok(cell) => write_arena(be, a, rty, ret, pty, cell, ctx, out),
+        Ok(cell) => be.write_arena(a, rty, ret, pty, cell, ctx, out),
     })
 }
 
@@ -362,13 +361,13 @@ write_arena = (
     expr(be, a.base, ctx, rty, recv).try();
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "t", be.next_tmp()).try();
-    declare_temp(be, pty, tmp.view()).try();
-    write_malloc(be, tmp.view(), cell, "").try();
-    set_field(be, tmp.view(), cell, "mem", recv.view()).try();
-    set_field(be, tmp.view(), cell, "head", "NULL").try();
-    set_field(be, tmp.view(), cell, "next", "0").try();
+    be.declare_temp(pty, tmp.view()).try();
+    be.write_malloc(tmp.view(), cell, "").try();
+    be.set_field(tmp.view(), cell, "mem", recv.view()).try();
+    be.set_field(tmp.view(), cell, "head", "NULL").try();
+    be.set_field(tmp.view(), cell, "next", "0").try();
     cty ::= be.alloc.String().try();
-    ctype(be, ret, cty).try();
+    be.ctype(ret, cty).try();
     state ::= be.alloc.String().try();
     state.sym_member("state").try();
     out.fmt("(({}){ .{} = {} })", cty.view(), state.view(), tmp.view())
@@ -377,7 +376,7 @@ write_arena = (
 write_malloc = (be :: CBackend, tmp: str, cell: TyId, extra: str)
                Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, cell, cty).try();
+    be.ctype(cell, cty).try();
     be.fmt("{tmp} = ({} *)malloc(sizeof({}){extra});\n", cty.view(), cty.view())
 }
 
@@ -386,9 +385,9 @@ write_malloc = (be :: CBackend, tmp: str, cell: TyId, extra: str)
 // drops is a line this file stops writing rather than a diagnostic.
 set_field = (be :: CBackend, tmp: str, cell: TyId, name: str, value: str)
             Res<(), AllocError> {
-    field_of(be, cell, name).try().match({
+    be.field_of(cell, name).try().match({
         None  => Ok(()),
-        Ok(_) => write_arrow_set(be, tmp, name, value),
+        Ok(_) => be.write_arrow_set(tmp, name, value),
     })
 }
 
@@ -416,14 +415,13 @@ lower_page = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    payload_type(be, ret, "Ok").match({
-        None    => unsupported(
-            be,
+    be.payload_type(ret, "Ok").match({
+        None    => be.unsupported(
             id,
             "Mem.page must return a Res<Ptr<Page>, E>",
             out
         ),
-        Ok(pty) => page_cell(be, id, c, ret, pty, ctx, out),
+        Ok(pty) => be.page_cell(id, c, ret, pty, ctx, out),
     })
 }
 
@@ -436,14 +434,13 @@ page_cell = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    pointee(be, pty).match({
-        None     => unsupported(
-            be,
+    be.pointee(pty).match({
+        None     => be.unsupported(
             id,
             "Mem.page must return a Res<Ptr<Page>, E>",
             out
         ),
-        Ok(cell) => write_page(be, c, ret, cell, ctx, out),
+        Ok(cell) => be.write_page(c, ret, cell, ctx, out),
     })
 }
 
@@ -457,33 +454,33 @@ write_page = (
 ) Res<(), AllocError> {
     usize_ty = be.check.types.prim("usize").try();
     size ::= be.alloc.String().try();
-    arg_text(be, c, 0, usize_ty, ctx, size).try();
+    be.arg_text(c, 0, usize_ty, ctx, size).try();
     prev ::= be.alloc.String().try();
-    prev_text(be, c, ctx, prev).try();
+    be.prev_text(c, ctx, prev).try();
     szt ::= be.alloc.String().try();
     sym_gen(szt, "t", be.next_tmp()).try();
     raw ::= be.alloc.String().try();
     sym_gen(raw, "t", be.next_tmp()).try();
     dst ::= be.alloc.String().try();
     sym_gen(dst, "t", be.next_tmp()).try();
-    declare_temp(be, usize_ty, szt.view()).try();
+    be.declare_temp(usize_ty, szt.view()).try();
     be.fmt("unsigned char *{};\n", raw.view()).try();
-    declare_temp(be, ret, dst.view()).try();
+    be.declare_temp(ret, dst.view()).try();
     be.set_line(szt.view(), size.view()).try();
-    write_page_malloc(be, raw.view(), cell, szt.view()).try();
-    open_null_test(be, raw.view()).try();
-    write_assign_err(be, ret, "OutOfMemory", dst.view()).try();
-    close_else(be).try();
-    write_page_header(be, raw.view(), cell, szt.view(), prev.view()).try();
-    write_page_ok(be, ret, cell, raw.view(), dst.view()).try();
-    close_brace(be).try();
+    be.write_page_malloc(raw.view(), cell, szt.view()).try();
+    be.open_null_test(raw.view()).try();
+    be.write_assign_err(ret, "OutOfMemory", dst.view()).try();
+    be.close_else().try();
+    be.write_page_header(raw.view(), cell, szt.view(), prev.view()).try();
+    be.write_page_ok(ret, cell, raw.view(), dst.view()).try();
+    be.close_brace().try();
     out.add_bytes(dst.view())
 }
 
 write_page_malloc = (be :: CBackend, raw: str, cell: TyId, szt: str)
                     Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, cell, cty).try();
+    be.ctype(cell, cty).try();
     be.fmt("{raw} = (unsigned char *)malloc(sizeof({}) + {szt});\n", cty.view())
 }
 
@@ -498,14 +495,14 @@ write_page_header = (
     prev : str
 ) Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, cell, cty).try();
+    be.ctype(cell, cty).try();
     cast ::= be.alloc.String().try();
     cast.fmt("(({} *){raw})", cty.view()).try();
     base ::= be.alloc.String().try();
     base.fmt("({raw} + sizeof({}))", cty.view()).try();
-    set_field(be, cast.view(), cell, "prev", prev).try();
-    set_field(be, cast.view(), cell, "base", base.view()).try();
-    set_field(be, cast.view(), cell, "size", szt).try();
+    be.set_field(cast.view(), cell, "prev", prev).try();
+    be.set_field(cast.view(), cell, "base", base.view()).try();
+    be.set_field(cast.view(), cell, "size", szt).try();
     Ok(());
 }
 
@@ -513,9 +510,9 @@ write_page_ok = (be :: CBackend, ret: TyId, cell: TyId, raw: str, dst: str)
                 Res<(), AllocError> {
     value ::= be.alloc.String().try();
     value.add_bytes("(").try();
-    ctype(be, cell, value).try();
+    be.ctype(cell, value).try();
     value.fmt(" *){raw}").try();
-    write_assign_ok(be, ret, value.view(), dst).try();
+    be.write_assign_ok(ret, value.view(), dst).try();
     Ok(());
 }
 
@@ -525,7 +522,7 @@ lower_release = (be :: CBackend, c: Call, ctx: Ctx, out :: String)
                 Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     page ::= be.alloc.String().try();
-    arg_text(be, c, 0, unknown, ctx, page).try();
+    be.arg_text(c, 0, unknown, ctx, page).try();
     be.fmt("free((void *)({}));\n", page.view()).try();
     out.add_bytes("0")
 }
@@ -547,7 +544,7 @@ prev_text = (be :: CBackend, c: Call, ctx: Ctx, out :: String)
 write_assign_ok_unit* = (be :: CBackend, ret: TyId, dst: str)
                        Res<(), AllocError> {
     value ::= be.alloc.String().try();
-    write_res_head(be, ret, "Ok", value).try();
+    be.write_res_head(ret, "Ok", value).try();
     value.add_bytes(" })").try();
     be.set_line(dst, value.view())
 }
@@ -555,7 +552,7 @@ write_assign_ok_unit* = (be :: CBackend, ret: TyId, dst: str)
 write_assign_ok* = (be :: CBackend, ret: TyId, payload: str, dst: str)
                   Res<(), AllocError> {
     value ::= be.alloc.String().try();
-    write_res_head(be, ret, "Ok", value).try();
+    be.write_res_head(ret, "Ok", value).try();
     value.add_bytes(", .zg_data.").try();
     sym_member(value, "Ok").try();
     value.fmt(" = {payload} })").try();
@@ -569,10 +566,10 @@ write_assign_ok* = (be :: CBackend, ret: TyId, payload: str, dst: str)
 write_assign_err* = (be :: CBackend, ret: TyId, name: str, dst: str)
                    Res<(), AllocError> {
     value ::= be.alloc.String().try();
-    write_res_head(be, ret, "Err", value).try();
-    payload_type(be, ret, "Err").match({
+    be.write_res_head(ret, "Err", value).try();
+    be.payload_type(ret, "Err").match({
         None    => Ok(()),
-        Ok(ety) => write_err_payload(be, ety, name, value),
+        Ok(ety) => be.write_err_payload(ety, name, value),
     }).try();
     value.add_bytes(" })").try();
     be.set_line(dst, value.view())
@@ -580,20 +577,20 @@ write_assign_err* = (be :: CBackend, ret: TyId, name: str, dst: str)
 
 write_err_payload = (be :: CBackend, ety: TyId, name: str, out :: String)
                     Res<(), AllocError> {
-    is_variant(be, ety, name).match({
+    be.is_variant(ety, name).match({
         false => Ok(()),
-        true  => write_err_variant(be, ety, name, out),
+        true  => be.write_err_variant(ety, name, out),
     })
 }
 
 write_err_variant = (be :: CBackend, ety: TyId, name: str, out :: String)
                     Res<(), AllocError> {
     path ::= be.alloc.String().try();
-    enum_path(be, ety, path).try();
+    be.enum_path(ety, path).try();
     out.add_bytes(", .zg_data.").try();
     out.sym_member("Err").try();
     out.add_bytes(" = ((").try();
-    ctype(be, ety, out).try();
+    be.ctype(ety, out).try();
     out.add_bytes("){ .zg_tag = ").try();
     out.sym_variant(path.view(), name).try();
     out.add_bytes(" })").try();
@@ -603,7 +600,7 @@ write_err_variant = (be :: CBackend, ety: TyId, name: str, out :: String)
 write_res_head = (be :: CBackend, ret: TyId, variant: str, out :: String)
                  Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, ret, cty).try();
+    be.ctype(ret, cty).try();
     out.fmt("(({}){ .zg_tag = ", cty.view()).try();
     out.sym_variant(RES_PATH, variant)
 }
@@ -618,22 +615,22 @@ write_res_head = (be :: CBackend, ret: TyId, variant: str, out :: String)
 field_of* = (be :: CBackend, ty: TyId, name: str)
             Res<Res<TyId>, AllocError> {
     be.check.types.at(ty).match({
-        Named(n) => named_field_of(be, n, name),
+        Named(n) => be.named_field_of(n, name),
         _        => Ok(None),
     })
 }
 
 named_field_of = (be :: CBackend, n: TyNamed, name: str)
                  Res<Res<TyId>, AllocError> {
-    inst = decl_inst(be, n).try();
-    ctx  = decl_ctx(be, n);
-    mark = enter_struct_tparams(be, n.decl).try();
+    inst = be.decl_inst(n).try();
+    ctx  = be.decl_ctx(n);
+    mark = be.enter_struct_tparams(n.decl).try();
     found ::= be.alloc.Vec<TyId>();
     decl_at(be.tree, n.decl).match({
         None  => Ok(()),
-        Ok(d) => collect_field(be, d, name, ctx, inst, found),
+        Ok(d) => be.collect_field(d, name, ctx, inst, found),
     }).try();
-    leave_tparams(be, mark).try();
+    be.leave_tparams(mark).try();
     Ok(found.get(0));
 }
 
@@ -646,7 +643,7 @@ collect_field = (
     out  :: Vec<TyId>
 ) Res<(), AllocError> {
     d.kind.match({
-        Struct(s) => keep_fields(be, s, name, ctx, inst, out),
+        Struct(s) => be.keep_fields(s, name, ctx, inst, out),
         _         => Ok(()),
     })
 }
@@ -660,7 +657,7 @@ keep_fields = (
     out  :: Vec<TyId>
 ) Res<(), AllocError> {
     s.members.loop((h, m) {
-        keep_named_field(be, m, name, ctx, inst, out).try();
+        be.keep_named_field(m, name, ctx, inst, out).try();
     });
     Ok(());
 }
@@ -675,7 +672,7 @@ keep_named_field = (
 ) Res<(), AllocError> {
     m.named(name).match({
         false => Ok(()),
-        true  => add_field_type(be, m, ctx, inst, out),
+        true  => be.add_field_type(m, ctx, inst, out),
     })
 }
 
@@ -686,7 +683,7 @@ add_field_type = (
     inst : Inst,
     out  :: Vec<TyId>
 ) Res<(), AllocError> {
-    field_type(be, m, ctx, inst).match({
+    be.field_type(m, ctx, inst).match({
         None  => Ok(()),
         Ok(t) => out.add(t),
     })

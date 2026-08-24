@@ -68,12 +68,12 @@ impl_field = gen.gen_c.gen_c_impl
 // not there. C would catch it, which is exactly the outcome a backend
 // may not produce — so it is a refusal with a position instead.
 supplies_bounds* = (be :: CBackend, rty: TyId) bool {
-    has_field(be, rty, "start") && has_field(be, rty, "end")
+    be.has_field(rty, "start") && be.has_field(rty, "end")
 }
 
 has_field = (be :: CBackend, rty: TyId, name: str) bool {
     be.check.types.at(rty).match({
-        Named(n) => decl_has_field(be, n.decl, name),
+        Named(n) => be.decl_has_field(n.decl, name),
         _        => false,
     })
 }
@@ -120,7 +120,7 @@ RangeImpl* = {
 
 range_impl* = (be :: CBackend, rty: TyId) Res<Res<RangeImpl>, AllocError> {
     be.check.types.at(rty).match({
-        Named(n) => named_range_impl(be, n),
+        Named(n) => be.named_range_impl(n),
         _        => Ok(None),
     })
 }
@@ -130,7 +130,7 @@ named_range_impl = (be :: CBackend, n: TyNamed)
     ids ::= be.alloc.Vec<ImplId>();
     be.check.world.impls_named(be.tree, n.name, ids).try();
     found ::= be.alloc.Vec<RangeImpl>();
-    ids.loop((h, i) { keep_range_impl(be, n, i, found).try() });
+    ids.loop((h, i) { be.keep_range_impl(n, i, found).try() });
     Ok(found.get(0));
 }
 
@@ -144,7 +144,7 @@ keep_range_impl = (
 ) Res<(), AllocError> {
     (n.decl.module == i.decl.module).match({
         false => Ok(()),
-        true  => range_impl_at(be, n, i, out),
+        true  => be.range_impl_at(n, i, out),
     })
 }
 
@@ -155,7 +155,7 @@ range_impl_at = (
     out :: Vec<RangeImpl>
 ) Res<(), AllocError> {
     be.check.world.impl_at(be.tree, i).match({
-        Ok(im) => keep_if_range(be, n, im, out),
+        Ok(im) => be.keep_if_range(n, im, out),
         None   => Ok(()),
     })
 }
@@ -168,9 +168,9 @@ keep_if_range = (
 ) Res<(), AllocError> {
     mi    = n.decl.module.to_usize();
     bound = be.check.impl_bound_type(im, mi).try();
-    supplies_bounds(be, bound).match({
+    be.supplies_bounds(bound).match({
         false => Ok(()),
-        true  => add_range_impl(be, n, im, mi, out),
+        true  => be.add_range_impl(n, im, mi, out),
     })
 }
 
@@ -184,10 +184,10 @@ add_range_impl = (
     mi  : usize,
     out :: Vec<RangeImpl>
 ) Res<(), AllocError> {
-    lo = impl_field(be, im, "start").try();
+    lo = be.impl_field(im, "start").try();
     lo.match({
         None  => Ok(()),
-        Ok(s) => add_from_start(be, n, im, mi, s, out),
+        Ok(s) => be.add_from_start(n, im, mi, s, out),
     })
 }
 
@@ -199,8 +199,8 @@ add_from_start = (
     s   : ExprId,
     out :: Vec<RangeImpl>
 ) Res<(), AllocError> {
-    hi = impl_field(be, im, "end").try();
-    at = impl_fn(be, im, "at").try();
+    hi = be.impl_field(im, "end").try();
+    at = be.impl_fn(im, "at").try();
     hi.match({
         None  => Ok(()),
         Ok(e) => out.add(RangeImpl(
@@ -254,9 +254,9 @@ add_if_bodied = (f: Function, out :: Vec<Function>) Res<(), AllocError> {
 // miss for a range walking its own index space, and whatever `at`
 // returns — `None` included — for one an impl supplies.
 range_pass_type* = (be :: CBackend, rty: TyId) Res<Res<TyId>, AllocError> {
-    array_of(be, rty).match({
-        Ok(a) => array_pass(be, a),
-        None  => stored_or_supplied_pass(be, rty),
+    be.array_of(rty).match({
+        Ok(a) => be.array_pass(a),
+        None  => be.stored_or_supplied_pass(rty),
     })
 }
 
@@ -272,9 +272,9 @@ array_pass = (be :: CBackend, a: TyArray) Res<Res<TyId>, AllocError> {
 
 stored_or_supplied_pass = (be :: CBackend, rty: TyId)
                           Res<Res<TyId>, AllocError> {
-    supplies_bounds(be, rty).match({
-        true  => index_pass(be),
-        false => impl_pass(be, rty),
+    be.supplies_bounds(rty).match({
+        true  => be.index_pass(),
+        false => be.impl_pass(rty),
     })
 }
 
@@ -285,9 +285,9 @@ index_pass = (be :: CBackend) Res<Res<TyId>, AllocError> {
 }
 
 impl_pass = (be :: CBackend, rty: TyId) Res<Res<TyId>, AllocError> {
-    range_impl(be, rty).try().match({
+    be.range_impl(rty).try().match({
         None   => Ok(None),
-        Ok(ri) => at_pass(be, rty, ri),
+        Ok(ri) => be.at_pass(rty, ri),
     })
 }
 
@@ -296,8 +296,8 @@ impl_pass = (be :: CBackend, rty: TyId) Res<Res<TyId>, AllocError> {
 at_pass = (be :: CBackend, rty: TyId, ri: RangeImpl)
           Res<Res<TyId>, AllocError> {
     ri.at.match({
-        None  => index_pass(be),
-        Ok(f) => at_ret(be, rty, ri, f),
+        None  => be.index_pass(),
+        Ok(f) => be.at_ret(rty, ri, f),
     })
 }
 
@@ -308,12 +308,12 @@ at_pass = (be :: CBackend, rty: TyId, ri: RangeImpl)
 at_ret = (be :: CBackend, rty: TyId, ri: RangeImpl, f: Function)
          Res<Res<TyId>, AllocError> {
     sctx     = be.check.self_ctx(ri.mi, rty).try();
-    inst     = recv_inst(be, rty).try();
-    mark     = enter_struct_tparams(be, ri.decl).try();
-    declared = declared_ret(be, f, sctx).try();
-    leave_tparams(be, mark).try();
-    got = sub_with(be, declared, inst).try();
-    Ok(keep_res(be, got));
+    inst     = be.recv_inst(rty).try();
+    mark     = be.enter_struct_tparams(ri.decl).try();
+    declared = be.declared_ret(f, sctx).try();
+    be.leave_tparams(mark).try();
+    got = be.sub_with(declared, inst).try();
+    Ok(be.keep_res(got));
 }
 
 keep_res = (be :: CBackend, got: TyId) Res<TyId> {
@@ -326,7 +326,7 @@ keep_res = (be :: CBackend, got: TyId) Res<TyId> {
 // The element itself — the `Ok` payload of what a pass produces.
 range_element_type* = (be :: CBackend, rty: TyId)
                       Res<Res<TyId>, AllocError> {
-    got = range_pass_type(be, rty).try();
+    got = be.range_pass_type(rty).try();
     Ok(got.match({
         Ok(t) => res_value_of(be, t),
         None  => None,
@@ -359,15 +359,13 @@ lower_supplied* = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    range_impl(be, rty).try().match({
-        None   => unsupported(
-            be,
+    be.range_impl(rty).try().match({
+        None   => be.unsupported(
             id,
             "a loop over a range whose bounds an impl supplies",
             out
         ),
-        Ok(ri) => lower_impl_range(
-            be,
+        Ok(ri) => be.lower_impl_range(
             id,
             sh,
             one,
@@ -393,9 +391,8 @@ lower_impl_range = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    range_pass_type(be, rty).try().match({
-        None     => unsupported(
-            be,
+    be.range_pass_type(rty).try().match({
+        None     => be.unsupported(
             id,
             "a loop over a range whose element nothing settles",
             out
@@ -441,29 +438,28 @@ lower_impl_walk = (
 )
                   Res<(), AllocError> {
     elem    = res_value_of(be, pass).match({ Ok(t) => t, None => pass });
-    settled = settle_res(be, want, elem).try();
+    settled = be.settle_res(want, elem).try();
 
-    rng = walk_temp(be, one, rty, ctx).try();
+    rng = be.walk_temp(one, rty, ctx).try();
 
-    st = open_result(be, settled, out).try();
+    st = be.open_result(settled, out).try();
     counter ::= be.alloc.String().try();
     sym_gen(counter, "i", be.next_tmp()).try();
     base ::= be.alloc.String().try();
     sym_gen(base, "b", be.next_tmp()).try();
     limit ::= be.alloc.String().try();
     sym_gen(limit, "n", be.next_tmp()).try();
-    declare_usize(be, counter.view()).try();
-    declare_usize(be, base.view()).try();
-    declare_usize(be, limit.view()).try();
-    supplied_bound(be, ri, rty, ri.start, counter.view(), rng.view()).try();
-    supplied_bound(be, ri, rty, ri.end, limit.view(), rng.view()).try();
+    be.declare_usize(counter.view()).try();
+    be.declare_usize(base.view()).try();
+    be.declare_usize(limit.view()).try();
+    be.supplied_bound(ri, rty, ri.start, counter.view(), rng.view()).try();
+    be.supplied_bound(ri, rty, ri.end, limit.view(), rng.view()).try();
     be.fmt("{} = {};\n", base.view(), counter.view()).try();
 
     be.fmt("while ({} < {}) {\n", counter.view(), limit.view()).try();
     be.indent();
     value ::= be.alloc.String().try();
-    take_pass(
-        be,
+    be.take_pass(
         ri,
         rty,
         pass,
@@ -480,10 +476,10 @@ lower_impl_walk = (
         base.view(),
         value.view(),
         elem,
-        no_fold(be).try(),
+        be.no_fold().try(),
         ctx
     ).try();
-    close_pass(be, st, counter.view(), no_fold(be).try()).try();
+    be.close_pass(st, counter.view(), be.no_fold().try()).try();
     Ok(());
 }
 
@@ -506,7 +502,7 @@ lower_impl_walk = (
 // not the loop.
 bind_self = (be :: CBackend, ri: RangeImpl, rty: TyId, rng: str)
             Res<(), AllocError> {
-    bind_text(be, self_name(be, ri), rty, rng)
+    be.bind_text(be.self_name(ri), rty, rng)
 }
 
 // What the impl calls its receiver. Read off `at`'s own first parameter
@@ -531,7 +527,7 @@ bind_text* = (be :: CBackend, name: str, ty: TyId, text: str)
     cname ::= be.alloc.String().try();
     sym_local(cname, name, n).try();
     decl ::= be.alloc.String().try();
-    declarator(be, ty, cname.view(), decl).try();
+    be.declarator(ty, cname.view(), decl).try();
     be.fmt("{} = {text};\n", decl.view())
 }
 
@@ -547,18 +543,18 @@ supplied_bound* = (
     rng    : str
 ) Res<(), AllocError> {
     usize_ty = be.check.types.prim("usize").try();
-    ictx     = impl_ctx(be, ri, usize_ty, rty);
-    inst     = recv_inst(be, rty).try();
+    ictx     = be.impl_ctx(ri, usize_ty, rty);
+    inst     = be.recv_inst(rty).try();
     held     = be.inst;
     be.enter_inst(inst);
-    mark  = enter_struct_tparams(be, ri.decl).try();
+    mark  = be.enter_struct_tparams(ri.decl).try();
     cmark = be.check.mark();
     lmark = be.mark();
-    bind_self(be, ri, rty, rng).try();
-    deliver(be, value, ictx, usize_ty, Dest.Into(target)).try();
+    be.bind_self(ri, rty, rng).try();
+    be.deliver(value, ictx, usize_ty, Dest.Into(target)).try();
     be.release(lmark).try();
     be.check.release(cmark).try();
-    leave_tparams(be, mark).try();
+    be.leave_tparams(mark).try();
     be.enter_inst(held);
     Ok(());
 }
@@ -595,7 +591,7 @@ take_pass* = (
             Res<(), AllocError> {
     ri.at.match({
         None  => value.add_bytes(counter),
-        Ok(f) => run_at(be, ri, rty, pass, f, counter, brk, rng, value),
+        Ok(f) => be.run_at(ri, rty, pass, f, counter, brk, rng, value),
     })
 }
 
@@ -614,10 +610,10 @@ run_at = (
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "a", be.next_tmp()).try();
     decl ::= be.alloc.String().try();
-    declarator(be, pass, tmp.view(), decl).try();
+    be.declarator(pass, tmp.view(), decl).try();
     be.fmt("{};\n", decl.view()).try();
-    inline_at(be, ri, rty, pass, f, counter, rng, tmp.view()).try();
-    write_pass_guard(be, tmp.view(), brk).try();
+    be.inline_at(ri, rty, pass, f, counter, rng, tmp.view()).try();
+    be.write_pass_guard(tmp.view(), brk).try();
     value.fmt("{}.zg_data.", tmp.view()).try();
     sym_member(value, "Ok")
 }
@@ -637,21 +633,21 @@ inline_at = (
 )
             Res<(), AllocError> {
     usize_ty = be.check.types.prim("usize").try();
-    ictx     = impl_ctx(be, ri, pass, rty);
-    inst     = recv_inst(be, rty).try();
+    ictx     = be.impl_ctx(ri, pass, rty);
+    inst     = be.recv_inst(rty).try();
     held     = be.inst;
     be.enter_inst(inst);
-    mark  = enter_struct_tparams(be, ri.decl).try();
+    mark  = be.enter_struct_tparams(ri.decl).try();
     cmark = be.check.mark();
     lmark = be.mark();
-    bind_self(be, ri, rty, rng).try();
-    bind_index_param(be, f, usize_ty, counter).try();
+    be.bind_self(ri, rty, rng).try();
+    be.bind_index_param(f, usize_ty, counter).try();
     be.enter_call();
-    run_at_body(be, f, ictx, pass, tmp).try();
+    be.run_at_body(f, ictx, pass, tmp).try();
     be.leave_call();
     be.release(lmark).try();
     be.check.release(cmark).try();
-    leave_tparams(be, mark).try();
+    be.leave_tparams(mark).try();
     be.enter_inst(held);
     Ok(());
 }
@@ -666,7 +662,7 @@ bind_index_param = (
 ) Res<(), AllocError> {
     f.params.get(1).match({
         None  => Ok(()),
-        Ok(p) => bind_text(be, p.name.text, usize_ty, counter),
+        Ok(p) => be.bind_text(p.name.text, usize_ty, counter),
     })
 }
 

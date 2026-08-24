@@ -72,7 +72,7 @@ alias_target_type = (c :: Checker, t: TypeId, id: DeclId) Res<usize> {
 module_for_target = (c :: Checker, n: Named, id: DeclId) Res<usize> {
     names_a_type(c, n.name.text, id.module.to_usize()).match({
         true  => None,
-        false => target_module(c, n),
+        false => c.target_module(n),
     })
 }
 
@@ -117,8 +117,8 @@ module_access* = (c :: Checker, node: Expr, ac: Access, mi: usize)
     found ::= c.alloc.Vec<Def>();
     c.world.exported_defs(mi, ac.name.text, found).try();
     found.get(0).match({
-        None  => not_exported(c, ac, mi),
-        Ok(d) => module_def_type(c, d),
+        None  => c.not_exported(ac, mi),
+        Ok(d) => c.module_def_type(d),
     })
 }
 
@@ -133,8 +133,8 @@ module_access* = (c :: Checker, node: Expr, ac: Access, mi: usize)
 // doesn't reach that yet.
 module_def_type = (c :: Checker, d: Def) Res<TyId, AllocError> {
     d.kind.match({
-        FunctionDef => module_fn_type(c, d),
-        StructDef   => module_ctor_type(c, d),
+        FunctionDef => c.module_fn_type(d),
+        StructDef   => c.module_ctor_type(d),
         _           => c.def_type(d),
     })
 }
@@ -149,7 +149,7 @@ module_fn_type = (c :: Checker, d: Def) Res<TyId, AllocError> {
     decl_at(c.tree, d.id).match({
         None  => c.types.unknown(),
         Ok(x) => x.kind.match({
-            Function(f) => decl_fn_type(c, d, f),
+            Function(f) => c.decl_fn_type(d, f),
             _           => c.types.unknown(),
         }),
     })
@@ -163,7 +163,7 @@ decl_fn_type = (c :: Checker, d: Def, f: Function) Res<TyId, AllocError> {
     ctx    = Ctx(d.id.module.to_usize(), poison);
     ptys ::= c.alloc.Vec<TyId>();
     f.params.loop((h, p) { ptys.add(c.param_type(p, ctx).try()).try() });
-    rty = ret_type(c, f, ctx).try();
+    rty = c.ret_type(f, ctx).try();
     c.types.fn_ty(ptys, rty)
 }
 

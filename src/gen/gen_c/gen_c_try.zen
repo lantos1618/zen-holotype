@@ -115,7 +115,7 @@ write_guard = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
 propagate = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
             Res<(), AllocError> {
     be.check.types.at(ctx.ret).match({
-        Res(want) => propagate_into(be, node, r, want, tmp, ctx),
+        Res(want) => be.propagate_into(node, r, want, tmp, ctx),
         _         => be.report(
             node.span.file,
             node.span,
@@ -136,8 +136,8 @@ propagate_into = (
     ctx  : Ctx
 ) Res<(), AllocError> {
     forms_agree(r.form, want.form).match({
-        false => report_widening(be, node),
-        true  => propagate_failure(be, node, r, want, tmp, ctx),
+        false => be.report_widening(node),
+        true  => be.propagate_failure(node, r, want, tmp, ctx),
     })
 }
 
@@ -155,8 +155,8 @@ propagate_failure = (
     ctx  : Ctx
 ) Res<(), AllocError> {
     is_failure(r.form).match({
-        false => write_propagation(be, r, want, tmp, ctx, Carry.Same),
-        true  => propagate_error(be, node, r, want, tmp, ctx),
+        false => be.write_propagation(r, want, tmp, ctx, Carry.Same),
+        true  => be.propagate_error(node, r, want, tmp, ctx),
     })
 }
 
@@ -169,8 +169,8 @@ propagate_error = (
     ctx  : Ctx
 ) Res<(), AllocError> {
     r.error.eq(want.error).match({
-        true  => write_propagation(be, r, want, tmp, ctx, Carry.Same),
-        false => propagate_wider(be, node, r, want, tmp, ctx),
+        true  => be.write_propagation(r, want, tmp, ctx, Carry.Same),
+        false => be.propagate_wider(node, r, want, tmp, ctx),
     })
 }
 
@@ -187,9 +187,9 @@ propagate_wider = (
     tmp  : str,
     ctx  : Ctx
 ) Res<(), AllocError> {
-    same_set(be, r.error, want.error).match({
-        true  => write_propagation(be, r, want, tmp, ctx, Carry.Copy),
-        false => widen_or_report(be, node, r, want, tmp, ctx),
+    be.same_set(r.error, want.error).match({
+        true  => be.write_propagation(r, want, tmp, ctx, Carry.Copy),
+        false => be.widen_or_report(node, r, want, tmp, ctx),
     })
 }
 
@@ -206,8 +206,8 @@ widen_or_report = (
     ctx  : Ctx
 ) Res<(), AllocError> {
     be.check.types.at(want.error).match({
-        Union(_) => widen_into_set(be, node, r, want, tmp, ctx),
-        _        => widen_into_enum(be, node, r, want, tmp, ctx),
+        Union(_) => be.widen_into_set(node, r, want, tmp, ctx),
+        _        => be.widen_into_enum(node, r, want, tmp, ctx),
     })
 }
 
@@ -219,9 +219,9 @@ widen_into_enum = (
     tmp  : str,
     ctx  : Ctx
 ) Res<(), AllocError> {
-    carrier(be, want.error, r.error).match({
-        None  => retag_or_report(be, node, r, want, tmp, ctx),
-        Ok(v) => write_propagation(be, r, want, tmp, ctx, Carry.Variant(v)),
+    be.carrier(want.error, r.error).match({
+        None  => be.retag_or_report(node, r, want, tmp, ctx),
+        Ok(v) => be.write_propagation(r, want, tmp, ctx, Carry.Variant(v)),
     })
 }
 
@@ -239,15 +239,8 @@ widen_into_set = (
     ctx  : Ctx
 ) Res<(), AllocError> {
     be.check.types.set_has(want.error, r.error).match({
-        false => retag_or_report(be, node, r, want, tmp, ctx),
-        true  => write_propagation(
-            be,
-            r,
-            want,
-            tmp,
-            ctx,
-            Carry.Member(r.error)
-        ),
+        false => be.retag_or_report(node, r, want, tmp, ctx),
+        true  => be.write_propagation(r, want, tmp, ctx, Carry.Member(r.error)),
     })
 }
 
@@ -269,14 +262,14 @@ retag_or_report = (
     tmp  : str,
     ctx  : Ctx
 ) Res<(), AllocError> {
-    retaggable(be, r.error, want.error).match({
-        false => report_widening(be, node),
-        true  => write_propagation(be, r, want, tmp, ctx, Carry.Retag),
+    be.retaggable(r.error, want.error).match({
+        false => be.report_widening(node),
+        true  => be.write_propagation(r, want, tmp, ctx, Carry.Retag),
     })
 }
 
 retaggable = (be :: CBackend, from_set: TyId, to_set: TyId) bool {
-    within(be, from_set, to_set) && all_tagged(be, from_set, to_set)
+    be.within(from_set, to_set) && be.all_tagged(from_set, to_set)
 }
 
 // CONTAINMENT IS ASKED OF THE SETS, NOT OF THE SPELLINGS. `set_within`
@@ -294,7 +287,7 @@ all_tagged = (be :: CBackend, from_set: TyId, to_set: TyId) bool {
     canon = be.check.set_of(from_set);
     be.check.types.members_of(canon, members).match({
         Err(_) => false,
-        Ok(_)  => no_member_untagged(be, from_set, to_set, members),
+        Ok(_)  => be.no_member_untagged(from_set, to_set, members),
     })
 }
 
@@ -304,7 +297,7 @@ no_member_untagged = (
     to_set   : TyId,
     members  : Vec<TyId>
 ) bool {
-    untagged(be, from_set, to_set, members).match({
+    be.untagged(from_set, to_set, members).match({
         Ok(_) => false,
         None  => true,
     })
@@ -319,13 +312,13 @@ untagged = (
     Range(0, members.len).find((i) {
         members.get(i).match({
             None  => true,
-            Ok(m) => both_tagged(be, from_set, to_set, m) == false,
+            Ok(m) => be.both_tagged(from_set, to_set, m) == false,
         })
     })
 }
 
 both_tagged = (be :: CBackend, from_set: TyId, to_set: TyId, m: TyId) bool {
-    tagged(be, from_set, m) && tagged(be, to_set, m)
+    be.tagged(from_set, m) && be.tagged(to_set, m)
 }
 
 // A structural set composes a tag constant out of the two type codes and
@@ -339,12 +332,12 @@ both_tagged = (be :: CBackend, from_set: TyId, to_set: TyId, m: TyId) bool {
 tagged = (be :: CBackend, set: TyId, m: TyId) bool {
     be.check.types.at(set).match({
         Union(_) => true,
-        _        => named_tagged(be, set, m),
+        _        => be.named_tagged(set, m),
     })
 }
 
 named_tagged = (be :: CBackend, set: TyId, m: TyId) bool {
-    carrier(be, set, m).match({
+    be.carrier(set, m).match({
         None  => false,
         Ok(_) => true,
     })
@@ -365,13 +358,13 @@ carrier = (be :: CBackend, set: TyId, err: TyId) Res<str> {
 named_carrier = (be :: CBackend, n: TyNamed, err: TyId) Res<str> {
     decl_at(be.tree, n.decl).match({
         None  => None,
-        Ok(d) => decl_carrier(be, n, d, err),
+        Ok(d) => be.decl_carrier(n, d, err),
     })
 }
 
 decl_carrier = (be :: CBackend, n: TyNamed, d: Decl, err: TyId) Res<str> {
     d.kind.match({
-        Enum(e) => variant_carrying(be, n, e.variants, err),
+        Enum(e) => be.variant_carrying(n, e.variants, err),
         _       => None,
     })
 }
@@ -385,7 +378,7 @@ variant_carrying = (
     err      : TyId
 ) Res<str> {
     found ::= be.alloc.Vec<str>();
-    collect_carrier(be, n, variants, err, found).match({
+    be.collect_carrier(n, variants, err, found).match({
         Err(_) => None,
         Ok(_)  => found.get(0),
     })
@@ -398,13 +391,13 @@ collect_carrier = (
     err      : TyId,
     found    :: Vec<str>
 ) Res<(), AllocError> {
-    ctx  = decl_ctx(be, n);
-    inst = decl_inst(be, n).try();
-    mark = enter_struct_tparams(be, n.decl).try();
+    ctx  = be.decl_ctx(n);
+    inst = be.decl_inst(n).try();
+    mark = be.enter_struct_tparams(n.decl).try();
     variants.loop((h, v) {
-        keep_carrier(be, n, v, err, ctx, inst, found).try();
+        be.keep_carrier(n, v, err, ctx, inst, found).try();
     });
-    leave_tparams(be, mark).try();
+    be.leave_tparams(mark).try();
     Ok(());
 }
 
@@ -418,7 +411,7 @@ keep_carrier = (
     found :: Vec<str>
 )
                Res<(), AllocError> {
-    carries(be, n, v, err, ctx, inst).match({
+    be.carries(n, v, err, ctx, inst).match({
         false => Ok(()),
         true  => found.add(v.name.text),
     })
@@ -475,9 +468,9 @@ write_propagation = (
     into : Carry
 ) Res<(), AllocError> {
     into.match({
-        Copy  => write_copy(be, r, tmp, ctx),
-        Retag => write_retag(be, r, want, tmp, ctx),
-        _     => write_built(be, r, want, tmp, ctx, into),
+        Copy  => be.write_copy(r, tmp, ctx),
+        Retag => be.write_retag(r, want, tmp, ctx),
+        _     => be.write_built(r, want, tmp, ctx, into),
     })
 }
 
@@ -491,11 +484,11 @@ write_built = (
 ) Res<(), AllocError> {
     line ::= be.alloc.String().try();
     line.add_bytes("return (").try();
-    ctype(be, ctx.ret, line).try();
+    be.ctype(ctx.ret, line).try();
     line.add_bytes("){ .zg_tag = ").try();
-    failure_tag(be, r, line).try();
+    be.failure_tag(r, line).try();
     is_failure(r.form).then(() {
-        carry_error(be, want, tmp, into, line).try()
+        be.carry_error(want, tmp, into, line).try()
     });
     line.add_bytes(" };").try();
     be.writeln(line.view())
@@ -510,9 +503,9 @@ write_built = (
 write_copy = (be :: CBackend, r: TyRes, tmp: str, ctx: Ctx)
              Res<(), AllocError> {
     w ::= be.fresh_tmp("w").try();
-    write_carrier_decl(be, r, w.view(), ctx).try();
-    write_carrier_copy(be, w.view(), tmp).try();
-    write_return(be, w.view())
+    be.write_carrier_decl(r, w.view(), ctx).try();
+    be.write_carrier_copy(w.view(), tmp).try();
+    be.write_return(w.view())
 }
 
 // Statements and not an initializer, for `write_copy`'s reason and one
@@ -521,10 +514,10 @@ write_copy = (be :: CBackend, r: TyRes, tmp: str, ctx: Ctx)
 write_retag = (be :: CBackend, r: TyRes, want: TyRes, tmp: str, ctx: Ctx)
               Res<(), AllocError> {
     w ::= be.fresh_tmp("w").try();
-    write_carrier_decl(be, r, w.view(), ctx).try();
-    write_payload_copy(be, w.view(), tmp).try();
-    write_tag_map(be, r.error, want.error, w.view(), tmp).try();
-    write_return(be, w.view())
+    be.write_carrier_decl(r, w.view(), ctx).try();
+    be.write_payload_copy(w.view(), tmp).try();
+    be.write_tag_map(r.error, want.error, w.view(), tmp).try();
+    be.write_return(w.view())
 }
 
 write_return = (be :: CBackend, w: str) Res<(), AllocError> {
@@ -580,9 +573,9 @@ write_tag_map = (
     members ::= be.alloc.Vec<TyId>();
     canon = be.check.set_of(from_set);
     be.check.types.members_of(canon, members).try();
-    open_switch(be, tmp).try();
+    be.open_switch(tmp).try();
     members.loop((h, m) {
-        write_tag_case(be, from_set, to_set, m, w).try();
+        be.write_tag_case(from_set, to_set, m, w).try();
     });
     be.dedent();
     be.writeln("}").try();
@@ -605,9 +598,9 @@ write_tag_case = (
     w        : str
 ) Res<(), AllocError> {
     from ::= be.alloc.String().try();
-    write_member_tag(be, from_set, m, from).try();
+    be.write_member_tag(from_set, m, from).try();
     to ::= be.alloc.String().try();
-    write_member_tag(be, to_set, m, to).try();
+    be.write_member_tag(to_set, m, to).try();
     tag ::= be.alloc.String().try();
     read_tag(w, tag).try();
     be.fmt("case {}: {} = {}; break;\n", from.view(), tag.view(), to.view())
@@ -621,31 +614,31 @@ write_member_tag = (be :: CBackend, set: TyId, m: TyId, out :: String)
                    Res<(), AllocError> {
     be.check.types.at(set).match({
         Union(_) => sym_union_variant(out, be.types(), be.world(), set, m),
-        _        => write_variant_tag(be, set, m, out),
+        _        => be.write_variant_tag(set, m, out),
     })
 }
 
 write_variant_tag = (be :: CBackend, set: TyId, m: TyId, out :: String)
                     Res<(), AllocError> {
-    carrier(be, set, m).match({
+    be.carrier(set, m).match({
         None  => Ok(()),
-        Ok(v) => write_named_tag(be, set, v, out),
+        Ok(v) => be.write_named_tag(set, v, out),
     })
 }
 
 write_named_tag = (be :: CBackend, set: TyId, v: str, out :: String)
                   Res<(), AllocError> {
     qname ::= be.alloc.String().try();
-    set_qname(be, set, qname).try();
+    be.set_qname(set, qname).try();
     out.sym_variant(qname.view(), v)
 }
 
 write_carrier_decl = (be :: CBackend, r: TyRes, w: str, ctx: Ctx)
                      Res<(), AllocError> {
     cty ::= be.alloc.String().try();
-    ctype(be, ctx.ret, cty).try();
+    be.ctype(ctx.ret, cty).try();
     tag ::= be.alloc.String().try();
-    failure_tag(be, r, tag).try();
+    be.failure_tag(r, tag).try();
     be.fmt("{} {w} = { .zg_tag = {} };\n", cty.view(), tag.view())
 }
 
@@ -681,8 +674,8 @@ carry_error = (
     out.sym_member("Err").try();
     out.add_bytes(" = ").try();
     into.match({
-        Variant(v) => wrap_error(be, want.error, v, tmp, out),
-        Member(m)  => wrap_set_error(be, want.error, m, tmp, out),
+        Variant(v) => be.wrap_error(want.error, v, tmp, out),
+        Member(m)  => be.wrap_set_error(want.error, m, tmp, out),
         // `Same` carries the value across untouched. `Copy` and `Retag`
         // would too, and never arrive: `write_propagation` sends them to
         // `write_copy` and `write_retag` before anything is built,
@@ -711,9 +704,9 @@ wrap_error = (
     out     :: String
 ) Res<(), AllocError> {
     qname ::= be.alloc.String().try();
-    set_qname(be, set, qname).try();
+    be.set_qname(set, qname).try();
     cty ::= be.alloc.String().try();
-    ctype(be, set, cty).try();
+    be.ctype(set, cty).try();
     err ::= be.alloc.String().try();
     read_error(tmp, err).try();
     out.fmt("({}){ .zg_tag = ", cty.view()).try();
@@ -737,12 +730,12 @@ wrap_set_error = (
 ) Res<(), AllocError> {
     code ::= be.alloc.String().try();
     read_error(tmp, code).try();
-    write_set_value(be, code.view(), member, set, out)
+    be.write_set_value(code.view(), member, set, out)
 }
 
 set_qname = (be :: CBackend, set: TyId, out :: String) Res<(), AllocError> {
     be.check.types.at(set).match({
-        Named(n) => write_qname(be, out, n),
+        Named(n) => be.write_qname(out, n),
         _        => Ok(()),
     })
 }
@@ -752,9 +745,9 @@ set_qname = (be :: CBackend, set: TyId, out :: String) Res<(), AllocError> {
 // not a value C can hold.
 unwrap = (be :: CBackend, r: TyRes, tmp: str, dst: Dest)
          Res<(), AllocError> {
-    is_unit(be, r.value).match({
+    be.is_unit(r.value).match({
         true  => Ok(()),
-        false => write_unwrap(be, tmp, dst),
+        false => be.write_unwrap(tmp, dst),
     })
 }
 
@@ -762,5 +755,5 @@ write_unwrap = (be :: CBackend, tmp: str, dst: Dest) Res<(), AllocError> {
     place ::= be.alloc.String().try();
     place.fmt("{tmp}.zg_data.").try();
     sym_member(place, "Ok").try();
-    write_dest(be, dst, place.view())
+    be.write_dest(dst, place.view())
 }

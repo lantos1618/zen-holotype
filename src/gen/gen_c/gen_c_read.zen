@@ -78,9 +78,9 @@ lower_type_or_field = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    type_const(be, a, ctx).try().match({
-        None     => lower_recv_const_or_field(be, id, a, ctx, want, out),
-        Ok(pair) => lower_const_value(be, id, pair.k, pair.d, want, out),
+    be.type_const(a, ctx).try().match({
+        None     => be.lower_recv_const_or_field(id, a, ctx, want, out),
+        Ok(pair) => be.lower_const_value(id, pair.k, pair.d, want, out),
     })
 }
 
@@ -106,9 +106,9 @@ lower_recv_const_or_field = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    recv_const(be, a, ctx).try().match({
-        None     => write_field_access(be, id, a, ctx, out),
-        Ok(pair) => lower_const_value(be, id, pair.k, pair.d, want, out),
+    be.recv_const(a, ctx).try().match({
+        None     => be.write_field_access(id, a, ctx, out),
+        Ok(pair) => be.lower_const_value(id, pair.k, pair.d, want, out),
     })
 }
 
@@ -119,9 +119,9 @@ lower_recv_const_or_field = (
 recv_const = (be :: CBackend, a: Access, ctx: Ctx)
              Res<Res<TypeConst>, AllocError> {
     unknown = be.check.types.unknown().try();
-    rty     = ty_of(be, a.base, ctx, unknown).try();
+    rty     = be.ty_of(a.base, ctx, unknown).try();
     be.check.types.at(rty).match({
-        Named(n) => named_recv_const(be, n, a.name.text),
+        Named(n) => be.named_recv_const(n, a.name.text),
         _        => Ok(None),
     })
 }
@@ -133,7 +133,7 @@ named_recv_const = (be :: CBackend, n: TyNamed, name: str)
     hits ::= be.alloc.Vec<TypeConst>();
     found.loop((h, d) {
         same_decl(d, n).then(() {
-            collect_type_const(be, d, name, hits).try();
+            be.collect_type_const(d, name, hits).try();
         });
     });
     Ok(hits.get(0));
@@ -156,7 +156,7 @@ TypeConst* = {
 type_const* = (be :: CBackend, a: Access, ctx: Ctx)
              Res<Res<TypeConst>, AllocError> {
     be.tree.expr_at(a.base).kind.match({
-        Name(n) => named_type_const(be, n.text, a.name.text, ctx),
+        Name(n) => be.named_type_const(n.text, a.name.text, ctx),
         _       => Ok(None),
     })
 }
@@ -165,7 +165,7 @@ named_type_const = (be :: CBackend, base: str, name: str, ctx: Ctx)
                    Res<Res<TypeConst>, AllocError> {
     be.slot_of(base).match({
         Ok(_) => Ok(None),
-        None  => decl_const(be, base, name, ctx),
+        None  => be.decl_const(base, name, ctx),
     })
 }
 
@@ -174,7 +174,7 @@ decl_const = (be :: CBackend, base: str, name: str, ctx: Ctx)
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, base, found).try();
     hits ::= be.alloc.Vec<TypeConst>();
-    found.loop((h, d) { collect_type_const(be, d, name, hits).try() });
+    found.loop((h, d) { be.collect_type_const(d, name, hits).try() });
     Ok(hits.get(0));
 }
 
@@ -186,7 +186,7 @@ collect_type_const = (
 ) Res<(), AllocError> {
     decl_at(be.tree, d.id).match({
         None  => Ok(()),
-        Ok(x) => collect_decl_const(be, x, d, name, out),
+        Ok(x) => be.collect_decl_const(x, d, name, out),
     })
 }
 
@@ -233,7 +233,7 @@ keep_named_const = (k: Const, d: Def, name: str, out :: Vec<TypeConst>)
 // an enum declaration rather than to a local.
 base_decl* = (be :: CBackend, base: ExprId, ctx: Ctx) Res<TyId> {
     be.tree.expr_at(base).kind.match({
-        Name(n) => enum_named(be, n.text, ctx),
+        Name(n) => be.enum_named(n.text, ctx),
         _       => None,
     })
 }
@@ -241,7 +241,7 @@ base_decl* = (be :: CBackend, base: ExprId, ctx: Ctx) Res<TyId> {
 enum_named = (be :: CBackend, text: str, ctx: Ctx) Res<TyId> {
     be.slot_of(text).match({
         Ok(_) => None,
-        None  => enum_def_named(be, text, ctx),
+        None  => be.enum_def_named(text, ctx),
     })
 }
 
@@ -249,14 +249,14 @@ enum_def_named = (be :: CBackend, text: str, ctx: Ctx) Res<TyId> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, text, found).match({
         Err(_) => None,
-        Ok(_)  => first_enum(be, found),
+        Ok(_)  => be.first_enum(found),
     })
 }
 
 first_enum = (be :: CBackend, found: Vec<Def>) Res<TyId> {
     found.get(0).match({
         None  => None,
-        Ok(d) => enum_type_of(be, d),
+        Ok(d) => be.enum_type_of(d),
     })
 }
 
@@ -272,7 +272,7 @@ enum_type_of = (be :: CBackend, d: Def) Res<TyId> {
 }
 
 intern_named* = (be :: CBackend, d: Def) Res<TyId> {
-    constructed(be, d).match({
+    be.constructed(d).match({
         Err(_) => None,
         Ok(id) => Ok(id),
     })
@@ -289,9 +289,9 @@ write_variant_value* = (
     out     :: String
 ) Res<(), AllocError> {
     qname ::= be.alloc.String().try();
-    enum_qname(be, ty, qname).try();
+    be.enum_qname(ty, qname).try();
     cty ::= be.alloc.String().try();
-    ctype(be, ty, cty).try();
+    be.ctype(ty, cty).try();
     tag ::= be.alloc.String().try();
     tag.sym_variant(qname.view(), variant).try();
     out.fmt("({}){ .zg_tag = {} }", cty.view(), tag.view())
@@ -299,7 +299,7 @@ write_variant_value* = (
 
 enum_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
     be.check.types.at(ty).match({
-        Named(n) => write_qname(be, out, n),
+        Named(n) => be.write_qname(out, n),
         _        => Ok(()),
     })
 }
@@ -347,8 +347,8 @@ enum_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
 access_field_type* = (be :: CBackend, a: Access, ctx: Ctx, want: TyId)
                      Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
-    rty     = ty_of(be, a.base, ctx, unknown).try();
-    field_of(be, rty, a.name.text).try().match({
+    rty     = be.ty_of(a.base, ctx, unknown).try();
+    be.field_of(rty, a.name.text).try().match({
         Ok(t) => Ok(t),
         None  => Ok(want),
     })
@@ -362,13 +362,13 @@ write_field_access = (
     out :: String
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    rty     = ty_of(be, a.base, ctx, unknown).try();
+    rty     = be.ty_of(a.base, ctx, unknown).try();
     found ::= be.alloc.Vec<Computed>();
-    supplied_fields(be, rty, a.name.text, found).try();
+    be.supplied_fields(rty, a.name.text, found).try();
     found.len.match({
-        0 => write_stored_field(be, a, rty, ctx, out),
-        1 => write_computed_field(be, a, rty, found, ctx, out),
-        _ => write_selected_field(be, id, a, rty, found, ctx, out),
+        0 => be.write_stored_field(a, rty, ctx, out),
+        1 => be.write_computed_field(a, rty, found, ctx, out),
+        _ => be.write_selected_field(id, a, rty, found, ctx, out),
     })
 }
 
@@ -391,8 +391,8 @@ write_selected_field = (
         Ok(b) => keep_supplied_by(found, b, kept),
     }).try();
     kept.len.match({
-        1 => write_computed_field(be, a, rty, kept, ctx, out),
-        _ => unsupported(be, id, "a computed field two impls supply", out),
+        1 => be.write_computed_field(a, rty, kept, ctx, out),
+        _ => be.unsupported(id, "a computed field two impls supply", out),
     })
 }
 
@@ -444,7 +444,7 @@ supplied_fields = (
     out  :: Vec<Computed>
 ) Res<(), AllocError> {
     be.check.types.at(rty).match({
-        Named(n) => named_supplied(be, n, rty, name, out),
+        Named(n) => be.named_supplied(n, rty, name, out),
         _        => Ok(()),
     })
 }
@@ -456,9 +456,9 @@ named_supplied = (
     name : str,
     out  :: Vec<Computed>
 ) Res<(), AllocError> {
-    declares_own(be, n.decl, name).match({
+    be.declares_own(n.decl, name).match({
         true  => Ok(()),
-        false => impls_supplying(be, n, rty, name, out),
+        false => be.impls_supplying(n, rty, name, out),
     })
 }
 
@@ -486,7 +486,7 @@ impls_supplying = (
 ) Res<(), AllocError> {
     ids ::= be.alloc.Vec<ImplId>();
     be.check.world.impls_named(be.tree, n.name, ids).try();
-    ids.loop((h, i) { local_supplied(be, n, rty, i, name, out).try() });
+    ids.loop((h, i) { be.local_supplied(n, rty, i, name, out).try() });
     Ok(());
 }
 
@@ -500,7 +500,7 @@ local_supplied = (
 ) Res<(), AllocError> {
     (n.decl.module == i.decl.module).match({
         false => Ok(()),
-        true  => supplied_in_impl(be, n, rty, i, name, out),
+        true  => be.supplied_in_impl(n, rty, i, name, out),
     })
 }
 
@@ -513,7 +513,7 @@ supplied_in_impl = (
     out  :: Vec<Computed>
 ) Res<(), AllocError> {
     be.check.world.impl_at(be.tree, i).match({
-        Ok(im) => impl_supplied_value(be, n, rty, im, name, out),
+        Ok(im) => be.impl_supplied_value(n, rty, im, name, out),
         None   => Ok(()),
     })
 }
@@ -527,9 +527,9 @@ impl_supplied_value = (
     out  :: Vec<Computed>
 )
                       Res<(), AllocError> {
-    impl_field(be, im, name).try().match({
+    be.impl_field(im, name).try().match({
         None  => Ok(()),
-        Ok(v) => add_computed(be, n, rty, im, name, v, out),
+        Ok(v) => be.add_computed(n, rty, im, name, v, out),
     })
 }
 
@@ -564,7 +564,7 @@ write_computed_field = (
                        Res<(), AllocError> {
     found.get(0).match({
         None   => Ok(()),
-        Ok(cf) => write_supplied_value(be, a, rty, cf, ctx, out),
+        Ok(cf) => be.write_supplied_value(a, rty, cf, ctx, out),
     })
 }
 
@@ -586,17 +586,17 @@ write_supplied_value = (
         self_ty: rty,
         has_self: true
     );
-    inst = recv_inst(be, rty).try();
+    inst = be.recv_inst(rty).try();
     held = be.inst;
     be.enter_inst(inst);
-    mark  = enter_struct_tparams(be, cf.decl).try();
+    mark  = be.enter_struct_tparams(cf.decl).try();
     cmark = be.check.mark();
     lmark = be.mark();
-    bind_text(be, "self", rty, recv.view()).try();
+    be.bind_text("self", rty, recv.view()).try();
     expr(be, cf.value, ictx, cf.ty, out).try();
     be.release(lmark).try();
     be.check.release(cmark).try();
-    leave_tparams(be, mark).try();
+    be.leave_tparams(mark).try();
     be.enter_inst(held);
     Ok(());
 }
@@ -611,7 +611,7 @@ write_supplied_value = (
 // members.
 field_name = (be :: CBackend, rty: TyId, name: str, out :: String)
              Res<(), AllocError> {
-    is_str(be, rty).match({
+    be.is_str(rty).match({
         true  => out.add_bytes(name),
         false => out.sym_member(name),
     })

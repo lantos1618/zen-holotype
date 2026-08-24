@@ -195,9 +195,9 @@ local_answer = (be :: CBackend, id: ExprId) Res<Res<TyId>, AllocError> {
 }
 
 field_slot = (be :: CBackend, a: Access) Res<Res<TyId>, AllocError> {
-    local_answer(be, a.base).try().match({
+    be.local_answer(a.base).try().match({
         None  => Ok(None),
-        Ok(b) => known_field(be, b, a.name.text),
+        Ok(b) => be.known_field(b, a.name.text),
     })
 }
 
@@ -206,23 +206,23 @@ field_slot = (be :: CBackend, a: Access) Res<Res<TyId>, AllocError> {
 // same node, and `gen_c_read.zen` owns all three.
 known_field = (be :: CBackend, base: TyId, name: str)
               Res<Res<TyId>, AllocError> {
-    field_of(be, base, name).try().match({
+    be.field_of(base, name).try().match({
         None  => Ok(None),
-        Ok(t) => Ok(keep_known(be, t)),
+        Ok(t) => Ok(be.keep_known(t)),
     })
 }
 
 named_slot = (be :: CBackend, name: str) Res<TyId> {
     be.slot_of(name).match({
         None  => None,
-        Ok(s) => value_slot(be, s),
+        Ok(s) => be.value_slot(s),
     })
 }
 
 value_slot = (be :: CBackend, s: LocalSlot) Res<TyId> {
     ((s.handle == 0) && (s.closure == 0)).match({
         false => None,
-        true  => keep_known(be, s.ty),
+        true  => be.keep_known(s.ty),
     })
 }
 
@@ -246,7 +246,7 @@ keep_known = (be :: CBackend, ty: TyId) Res<TyId> {
 ptr_answer = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
              Res<Res<TyId>, AllocError> {
     be.tree.expr_at(id).kind.match({
-        Call(c) => ptr_call_answer(be, c, ctx, want),
+        Call(c) => be.ptr_call_answer(c, ctx, want),
         _       => Ok(None),
     })
 }
@@ -254,7 +254,7 @@ ptr_answer = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
 ptr_call_answer = (be :: CBackend, c: Call, ctx: Ctx, want: TyId)
                   Res<Res<TyId>, AllocError> {
     be.tree.expr_at(c.callee).kind.match({
-        Access(a) => ptr_dot_answer(be, c, a, ctx, want),
+        Access(a) => be.ptr_dot_answer(c, a, ctx, want),
         _         => Ok(None),
     })
 }
@@ -262,10 +262,10 @@ ptr_call_answer = (be :: CBackend, c: Call, ctx: Ctx, want: TyId)
 ptr_dot_answer = (be :: CBackend, c: Call, a: Access, ctx: Ctx, want: TyId)
                  Res<Res<TyId>, AllocError> {
     unknown = be.check.types.unknown().try();
-    rty     = ty_of(be, a.base, ctx, unknown).try();
-    is_ptr_member(be, rty, a.name.text).match({
-        false => create_type(be, c, a, rty, ctx),
-        true  => Ok(Ok(ptr_member_type(be, c, a, rty, ctx, want).try())),
+    rty     = be.ty_of(a.base, ctx, unknown).try();
+    be.is_ptr_member(rty, a.name.text).match({
+        false => be.create_type(c, a, rty, ctx),
+        true  => Ok(Ok(be.ptr_member_type(c, a, rty, ctx, want).try())),
     })
 }
 
@@ -278,8 +278,8 @@ ptr_dot_answer = (be :: CBackend, c: Call, a: Access, ctx: Ctx, want: TyId)
 settled_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                  Res<TyId, AllocError> {
     has_var(be.check, got).match({
-        false => opaque_answer(be, id, ctx, got),
-        true  => settle_open(be, id, ctx, got),
+        false => be.opaque_answer(id, ctx, got),
+        true  => be.settle_open(id, ctx, got),
     })
 }
 
@@ -311,10 +311,10 @@ opaque_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
 // filled by the lowering's.
 settle_open = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
               Res<TyId, AllocError> {
-    walked = loop_result_type(be, id, ctx, got).try();
+    walked = be.loop_result_type(id, ctx, got).try();
     has_var(be.check, walked).match({
         false => Ok(walked),
-        true  => settle_inlined(be, id, ctx, walked),
+        true  => be.settle_inlined(id, ctx, walked),
     })
 }
 
@@ -325,7 +325,7 @@ settle_open = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
 // arguments say which instantiation it is; `gen_c_call.zen` asks them.
 settle_inlined = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                  Res<TyId, AllocError> {
-    inlined = inline_result_type(be, id, ctx, got).try();
+    inlined = be.inline_result_type(id, ctx, got).try();
     has_var(be.check, inlined).match({
         false => Ok(inlined),
         true  => settle_call(be, id, ctx, inlined),
@@ -339,9 +339,9 @@ settle_inlined = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
 settle_call = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
               Res<TyId, AllocError> {
     be.tree.expr_at(id).kind.match({
-        Call(c)  => call_ret_type(be, id, c, ctx, got),
-        Try(t)   => try_value_type(be, t.operand, ctx, got),
-        Paren(p) => ty_of(be, p.inner, ctx, got),
+        Call(c)  => be.call_ret_type(id, c, ctx, got),
+        Try(t)   => be.try_value_type(t.operand, ctx, got),
+        Paren(p) => be.ty_of(p.inner, ctx, got),
         _        => Ok(got),
     })
 }
@@ -350,10 +350,10 @@ fallback_type = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
                 Res<TyId, AllocError> {
     be.tree.expr_at(id).kind.match({
         Call(c)   => call_type(be, c, ctx, want),
-        Paren(p)  => ty_of(be, p.inner, ctx, want),
-        Try(t)    => try_value_type(be, t.operand, ctx, want),
-        Index(x)  => index_type(be, x, ctx, want),
-        Access(a) => access_field_type(be, a, ctx, want),
+        Paren(p)  => be.ty_of(p.inner, ctx, want),
+        Try(t)    => be.try_value_type(t.operand, ctx, want),
+        Index(x)  => be.index_type(x, ctx, want),
+        Access(a) => be.access_field_type(a, ctx, want),
         Binary(b) => binary_type(be, b, ctx, want),
         _         => Ok(want),
     })
@@ -364,7 +364,7 @@ fallback_type = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
 call_type = (be :: CBackend, c: Call, ctx: Ctx, want: TyId)
             Res<TyId, AllocError> {
     be.tree.expr_at(c.callee).kind.match({
-        Name(n) => named_call_type(be, n.text, ctx, want),
+        Name(n) => be.named_call_type(n.text, ctx, want),
         _       => Ok(want),
     })
 }
@@ -373,7 +373,7 @@ named_call_type = (be :: CBackend, name: str, ctx: Ctx, want: TyId)
                   Res<TyId, AllocError> {
     is_res_ctor(name).match({
         true  => Ok(want),
-        false => declared_call_type(be, name, ctx, want),
+        false => be.declared_call_type(name, ctx, want),
     })
 }
 
@@ -382,8 +382,8 @@ declared_call_type = (be :: CBackend, name: str, ctx: Ctx, want: TyId)
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, name, found).try();
     found.len.match({
-        1 => def_call_type(be, found, want),
-        0 => sugar_call_type(be, name, want),
+        1 => be.def_call_type(found, want),
+        0 => be.sugar_call_type(name, want),
         _ => Ok(want),
     })
 }
@@ -415,15 +415,15 @@ def_call_type = (be :: CBackend, found: Vec<Def>, want: TyId)
                 Res<TyId, AllocError> {
     found.get(0).match({
         None  => Ok(want),
-        Ok(d) => def_result_type(be, d, want),
+        Ok(d) => be.def_result_type(d, want),
     })
 }
 
 def_result_type = (be :: CBackend, d: Def, want: TyId)
                   Res<TyId, AllocError> {
     d.kind.match({
-        FunctionDef => function_ret(be, d, want),
-        StructDef   => constructed(be, d),
+        FunctionDef => be.function_ret(d, want),
+        StructDef   => be.constructed(d),
         _           => Ok(want),
     })
 }
@@ -431,7 +431,7 @@ def_result_type = (be :: CBackend, d: Def, want: TyId)
 function_ret = (be :: CBackend, d: Def, want: TyId) Res<TyId, AllocError> {
     decl_at(be.tree, d.id).match({
         None  => Ok(want),
-        Ok(x) => decl_ret(be, d, x, want),
+        Ok(x) => be.decl_ret(d, x, want),
     })
 }
 
@@ -445,7 +445,7 @@ decl_ret = (be :: CBackend, d: Def, x: Decl, want: TyId)
         has_self: false
     );
     x.kind.match({
-        Function(f) => written_ret(be, f.ret, ctx, want),
+        Function(f) => be.written_ret(f.ret, ctx, want),
         _           => Ok(want),
     })
 }
@@ -462,7 +462,7 @@ written_ret = (be :: CBackend, ret: Res<TypeId>, ctx: Ctx, want: TyId)
 try_value_type = (be :: CBackend, operand: ExprId, ctx: Ctx, want: TyId)
                  Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
-    rt      = ty_of(be, operand, ctx, unknown).try();
+    rt      = be.ty_of(operand, ctx, unknown).try();
     be.check.types.at(rt).match({
         Res(r) => Ok(r.value),
         _      => Ok(want),
@@ -474,7 +474,7 @@ try_value_type = (be :: CBackend, operand: ExprId, ctx: Ctx, want: TyId)
 res_type_of* = (be :: CBackend, id: ExprId, ctx: Ctx)
                Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
-    ty_of(be, id, ctx, unknown)
+    be.ty_of(id, ctx, unknown)
 }
 
 // The header's spill rule, applied: `spill_temp` makes the temporary
@@ -495,12 +495,12 @@ res_type_of* = (be :: CBackend, id: ExprId, ctx: Ctx)
 //     `gen_c_hoist.zen`.
 expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, out :: String)
         Res<(), AllocError> {
-    door_of(be, id, ctx, want).try().match({
-        Set   => set_expr(be, id, ctx, want, out),
-        Hoist => hoist_expr(be, id, ctx, want, out),
-        Widen => widen_expr(be, id, ctx, want, out),
-        Fat   => fat_expr(be, id, ctx, want, out),
-        Plain => value_expr(be, id, ctx, want, out),
+    be.door_of(id, ctx, want).try().match({
+        Set   => be.set_expr(id, ctx, want, out),
+        Hoist => be.hoist_expr(id, ctx, want, out),
+        Widen => be.widen_expr(id, ctx, want, out),
+        Fat   => be.fat_expr(id, ctx, want, out),
+        Plain => be.value_expr(id, ctx, want, out),
     })
 }
 
@@ -517,13 +517,13 @@ Door = Set | Hoist | Widen | Fat | Plain
 
 door_of = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
           Res<Door, AllocError> {
-    needs_set(be, id, ctx, want).try().match({
+    be.needs_set(id, ctx, want).try().match({
         true  => Ok(Door.Set),
-        false => needs_hoist(be, id, ctx, want).try().match({
+        false => be.needs_hoist(id, ctx, want).try().match({
             true  => Ok(Door.Hoist),
-            false => needs_widen(be, id, ctx, want).try().match({
+            false => be.needs_widen(id, ctx, want).try().match({
                 true  => Ok(Door.Widen),
-                false => needs_fat(be, id, ctx, want).try().match({
+                false => be.needs_fat(id, ctx, want).try().match({
                     true  => Ok(Door.Fat),
                     false => Ok(Door.Plain),
                 }),
@@ -542,10 +542,10 @@ fat_expr = (
     out  :: String
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    cty     = ty_of(be, id, ctx, unknown).try();
+    cty     = be.ty_of(id, ctx, unknown).try();
     code ::= be.alloc.String().try();
-    value_expr(be, id, ctx, cty, code).try();
-    write_fat_value(be, code.view(), cty, want, out)
+    be.value_expr(id, ctx, cty, code).try();
+    be.write_fat_value(code.view(), cty, want, out)
 }
 
 value_expr* = (
@@ -555,9 +555,9 @@ value_expr* = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    spills(be, id).match({
-        true  => spill_temp(be, id, ctx, want, out),
-        false => write_expr(be, id, ctx, want, out),
+    be.spills(id).match({
+        true  => be.spill_temp(id, ctx, want, out),
+        false => be.write_expr(id, ctx, want, out),
     })
 }
 
@@ -568,16 +568,15 @@ spill_temp = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    ty = destination_type(be, id, ctx, want).try();
-    spill_of(be, ty).match({
-        Unsettled => unsupported(
-            be,
+    ty = be.destination_type(id, ctx, want).try();
+    be.spill_of(ty).match({
+        Unsettled => be.unsupported(
             id,
             "a spilling form whose type nothing settles",
             out
         ),
-        Effect    => spill_effect(be, id, ctx, ty, out),
-        Valued    => spill_valued(be, id, ctx, ty, out),
+        Effect    => be.spill_effect(id, ctx, ty, out),
+        Valued    => be.spill_valued(id, ctx, ty, out),
     })
 }
 
@@ -587,9 +586,9 @@ spill_temp = (
 Spill = Unsettled | Effect | Valued
 
 spill_of = (be :: CBackend, ty: TyId) Spill {
-    settled_place(be, ty).match({
+    be.settled_place(ty).match({
         false => Spill.Unsettled,
-        true  => is_unit(be, ty).match({
+        true  => be.is_unit(ty).match({
             true  => Spill.Effect,
             false => Spill.Valued,
         }),
@@ -605,7 +604,7 @@ spill_of = (be :: CBackend, ty: TyId) Spill {
 // storage.
 want_of* = (be :: CBackend, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
-    ty_of(be, id, ctx, unknown)
+    be.ty_of(id, ctx, unknown)
 }
 
 settled_place = (be :: CBackend, ty: TyId) bool {
@@ -623,7 +622,7 @@ spill_effect = (
     ty  : TyId,
     out :: String
 ) Res<(), AllocError> {
-    deliver(be, id, ctx, ty, Dest.Discard).try();
+    be.deliver(id, ctx, ty, Dest.Discard).try();
     out.add_bytes("0")
 }
 
@@ -634,13 +633,13 @@ spill_valued = (
     ty  : TyId,
     out :: String
 ) Res<(), AllocError> {
-    request_type(be, ty).try();
+    be.request_type(ty).try();
     tmp ::= be.alloc.String().try();
     sym_gen(tmp, "s", be.next_tmp()).try();
     line ::= be.alloc.String().try();
-    declarator(be, ty, tmp.view(), line).try();
+    be.declarator(ty, tmp.view(), line).try();
     be.fmt("{};\n", line.view()).try();
-    deliver(be, id, ctx, ty, Dest.Into(tmp.view())).try();
+    be.deliver(id, ctx, ty, Dest.Into(tmp.view())).try();
     out.add_bytes(tmp.view())
 }
 
@@ -653,20 +652,20 @@ write_expr = (
 ) Res<(), AllocError> {
     node = be.tree.expr_at(id);
     node.kind.match({
-        Literal(l)    => lower_literal(be, id, l, ctx, want, out),
-        Name(n)       => lower_name(be, id, n.text, ctx, want, out),
-        Paren(p)      => lower_paren(be, p.inner, ctx, want, out),
-        Unary(u)      => lower_unary(be, node, u, ctx, want, out),
-        Binary(b)     => lower_binary(be, node, b, ctx, want, out),
-        Access(a)     => lower_meta_or_access(be, id, a, ctx, want, out),
-        Call(c)       => lower_call(be, id, c, ctx, want, out),
-        Index(x)      => lower_index(be, id, x, ctx, out),
-        Array(a)      => lower_array_lit(be, id, a, ctx, want, out),
-        FixedArray(f) => lower_fixed_array(be, id, f, ctx, want, out),
+        Literal(l)    => be.lower_literal(id, l, ctx, want, out),
+        Name(n)       => be.lower_name(id, n.text, ctx, want, out),
+        Paren(p)      => be.lower_paren(p.inner, ctx, want, out),
+        Unary(u)      => be.lower_unary(node, u, ctx, want, out),
+        Binary(b)     => be.lower_binary(node, b, ctx, want, out),
+        Access(a)     => be.lower_meta_or_access(id, a, ctx, want, out),
+        Call(c)       => be.lower_call(id, c, ctx, want, out),
+        Index(x)      => be.lower_index(id, x, ctx, out),
+        Array(a)      => be.lower_array_lit(id, a, ctx, want, out),
+        FixedArray(f) => be.lower_fixed_array(id, f, ctx, want, out),
         Unit          => out.add_bytes("0"),
-        Scope         => lower_scope_ref(be, id, out),
-        Consume(x)    => lower_consume(be, x, ctx, want, out),
-        _             => unsupported(be, id, "this expression form", out),
+        Scope         => be.lower_scope_ref(id, out),
+        Consume(x)    => be.lower_consume(x, ctx, want, out),
+        _             => be.unsupported(id, "this expression form", out),
     }).try();
     Ok(());
 }
@@ -684,14 +683,14 @@ lower_consume = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    release_moved(be, x.operand).try();
+    be.release_moved(x.operand).try();
     expr(be, x.operand, ctx, want, out)
 }
 
 release_moved = (be :: CBackend, id: ExprId) Res<(), AllocError> {
     be.tree.expr_at(id).kind.match({
-        Name(n)  => release_binding(be, n.text),
-        Paren(p) => release_moved(be, p.inner),
+        Name(n)  => be.release_binding(n.text),
+        Paren(p) => be.release_moved(p.inner),
         _        => Ok(()),
     })
 }
@@ -723,7 +722,7 @@ lower_literal = (
     out  :: String
 ) Res<(), AllocError> {
     l.kind.match({
-        Str   => lower_str_literal(be, l, out),
+        Str   => be.lower_str_literal(l, out),
         Int   => lower_int_literal(l.text, out),
         Float => out.add_bytes(l.text),
         Char  => out.add_bytes(l.text),
@@ -825,8 +824,8 @@ lower_name = (
     out  :: String
 ) Res<(), AllocError> {
     be.slot_of(text).match({
-        Ok(slot) => write_local(be, text, slot, out),
-        None     => lower_global_name(be, id, text, ctx, want, out),
+        Ok(slot) => be.write_local(text, slot, out),
+        None     => be.lower_global_name(id, text, ctx, want, out),
     })
 }
 
@@ -870,7 +869,7 @@ write_local = (be :: CBackend, text: str, slot: LocalSlot, out :: String)
               Res<(), AllocError> {
     slot.by_ref.match({
         false => sym_local(out, text, slot.index),
-        true  => write_deref(be, text, slot, out),
+        true  => be.write_deref(text, slot, out),
     })
 }
 
@@ -891,7 +890,7 @@ lower_global_name = (
     out  :: String
 ) Res<(), AllocError> {
     text.eq("None").match({
-        true  => res_value(be, id, want, "None", out),
-        false => lower_global_value(be, id, text, ctx, want, out),
+        true  => be.res_value(id, want, "None", out),
+        false => be.lower_global_value(id, text, ctx, want, out),
     })
 }
