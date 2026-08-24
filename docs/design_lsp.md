@@ -38,7 +38,7 @@ Companion to `DESIGN.md`, `PLAN.md` and `TESTING.md`. Those say what the languag
 
 Five things, and only one of them is about the LSP.
 
-1. ~~**JSON.** Nothing in this tree speaks it.~~ **LANDED** — `src/lsp/lsp_json.zen` is the value, the arena and the writer, `src/lsp/lsp_json_read.zen` the reader, gated by `corpus/lsp/json_round_trips_and_rejects`. It stays in `src/lsp/` per the move note in §4.
+1. ~~**JSON.** Nothing in this tree speaks it.~~ **LANDED** — and since moved: `std.json` is the value, the arena, the writer and the reader (`src/std/json/`, moved out of `src/lsp/` by the second-caller rule the move note below predicted), still gated by `corpus/lsp/json_round_trips_and_rejects` plus `corpus/std/json_serves_a_second_caller`. §4's "it moves" is spent; only §3's framing note remains to land.
 2. ~~**Reading standard input.**~~ **LANDED.** `Env` now has `in: Stdin`, one byte-counted `read` with no line discipline, and its floor is `src/gen/gen_c/gen_c_stdin.zen`. §4 records what it cost and the one thing it turned out to require that this document did not anticipate.
 3. **Writing exact bytes to stdout.** `Console` has exactly one member, `println` (`src/std/env/env.zen:38`), which appends exactly one `\n` (`TESTING.md:76`). A JSON-RPC frame is CRLF-delimited and unterminated.
 4. **The position conversion.** §3. It is small, it is the classic bug, and it lives in one file.
@@ -275,7 +275,7 @@ Nothing in the tree parses or emits JSON. Concretely:
 - **One nominal error, not a union.** `PLAN.md:222` puts error unions outside the seed subset, so the reader carries a single `JsonFault`.
 - Estimate: **250–400 lines** for reader plus writer plus escapes, and a corpus test per `TESTING.md:27`.
 
-**Where it goes: `src/lsp/lsp_json.zen`, with a note that it moves.** `STYLE.md`'s stranger test says JSON belongs in `std` — "parses a JSON document" names no module. `STYLE.md`'s second-caller rule says it moves on its second caller. Against that stands `src/std/env/env.zen:83`'s rule about members the compiler must keep working forever, and **the compiler will never parse JSON.** So it starts in `src/lsp/` and the header carries the sentence that sends it to `std.json` the day anything else wants it.
+**Where it goes: `src/std/json/`, where the second-caller rule has since moved it.** `STYLE.md`'s stranger test said JSON belongs in `std` on sight — "parses a JSON document" names no module — and `src/lsp/lsp_json.zen` started life with a header note saying exactly that: it would stay in `src/lsp/` only until something that is not the LSP wanted it. That caller arrived, and the module moved to `std.json` whole: same streaming arena, same lexeme-carrying numbers, same zero allocations on the reply path. Against that stands `src/std/env/env.zen`'s rule about members the compiler must keep working forever — and the answer to it is what this module always was, a transport primitive and not a document model, which the compiler will never need to parse.
 
 ### Lifecycle
 
@@ -581,7 +581,7 @@ References (a reverse index) and locals with spans. Formatting was priced here a
 Listed rather than guessed, per `PLAN.md:5`.
 
 1. ~~**Does `Console.impl(Sink, ..)` compile today?**~~ **Moot for L1.** The `print` sugar already writes exact bytes, so L0 needed no new writer at all. The `Sink` impl remains worth doing and is no longer on anyone's critical path.
-2. **Where does JSON live?** `STYLE.md`'s stranger test says `std.json`; `src/std/env/env.zen:83`'s rule about members the compiler must keep working forever says not in `std`. This document picks `src/lsp/lsp_json.zen` with a note. Someone should overrule it or ratify it.
+2. ~~**Where does JSON live?**~~ **Overruled by events, in the direction the stranger test pointed.** It lives in `std.json` (`src/std/json/`) as of the second-caller move; the env.zen "keep working forever" concern was answered by what the module always was — a streaming arena with zero allocations on the reply path, not a document model.
 3. **Should `Pos` carry a byte offset?** `src/std/lex/lex_token.zen:26` has one and `src/std/ast/ast_span.zen:22` does not. Adding one to the AST's `Pos` makes the §3 conversion cheaper and slicing source off a span direct — and it is one more word on every position in the tree, which `src/AST_CONTRACT.md` was careful about for trivia. Not resolvable from the tree: it needs a measurement.
 4. **What is the server's compilation root when `rootUri` is a directory with no entry?** `DESIGN.md:430` gives `zen build <root> --entry <file>` for exactly this, and `src/zen/zen_path.zen:249` probes `main`, then the root's basename, then `zen`. An editor opening a single file outside any root has none of those. Is that an error, a diagnostic, or a degraded mode that lexes and does not check?
 5. **Is `zen lsp` allowed a second thread?** `Threads` exists (`src/std/env/env.zen:134`) but `PLAN.md` puts actors and threads at stage 5 and the compiler is written in the seed subset (`PLAN.md:222`), which excludes them. A single-threaded server cannot answer `shutdown` during a build. This document assumes single-threaded and says cancellation is honoured between requests; whether that is acceptable is a call nobody has made.

@@ -56,7 +56,7 @@ point: an unstated gap reads as coverage.
         bounded on Eq and no primitive implements Eq, which is a compile
         error and not a style opinion. Four runs in src/ are out of reach
         for that reason -- std/core/byte.zen, std/lex/lex_byte.zen,
-        lsp/lsp_json_read.zen, gen/gen_c/gen_c_fat.zen. Measured while
+        std/json/json_read.zen, gen/gen_c/gen_c_fat.zen. Measured while
         writing this: a `u8.impl(Eq, ..)` in std/core/num.zen satisfies the
         bound and leaves every `==` in the emitted C exactly as it was, so
         the block is a decision nobody has made rather than a hard one.

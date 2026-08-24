@@ -1,0 +1,126 @@
+// tests/corpus/std/json_serves_a_second_caller.zen
+// std.json exists because its first caller was not std's: the LSP kept
+// 865 lines of JSON under src/lsp/ until something else wanted it, and
+// STYLE.md's second-caller rule is what moved it. THIS FILE IS THE
+// SECOND CALLER — a program with no protocol, no server and no frames
+// in it, reaching JSON through `std.json` and nothing else.
+//
+// One row of each kind, not the LSP gate's tables:
+// `corpus/lsp/json_round_trips_and_rejects` owns the reader and the
+// writer byte for byte. What this file asserts is the MOVE — that the
+// module answers from beneath `lsp`, at full depth, for a caller that
+// never spells a protocol.
+//
+// THE SHAPE IS THE CALLER'S, NOT A DEMO: `read` faults with a
+// `JsonFault` a plain program has no reason to widen into, so it is
+// matched and not `.try()`-ed, exactly as `lsp_reply.zen` matches it;
+// and the field readers answer `None` for absent rather than failing,
+// so absence is named at every depth.
+
+str, String = std.text
+Alloc = std.mem
+Jsons, JsonFault, JsonId, write_text, obj, read = std.json
+
+// The streaming path a caller with no arena takes — `Nest` owns the
+// commas, the key quoting and the matching bracket, and nothing here
+// allocates but the buffer the bytes land in. A nested container opens
+// AFTER its `key`, the way every reply site does: `key` pays the comma
+// the parent owes, and `obj` writes nothing but the bracket.
+emit = (out :: String) Res<(), AllocError> {
+    top ::= obj(out).try();
+    top.key("name", out).try();
+    write_text("std.json", out).try();
+    top.text("kind", "streaming", out).try();
+    top.key("deep", out).try();
+    deep ::= obj(out).try();
+    deep.key("x", out).try();
+    out.add_bytes("null").try();
+    deep.close(out).try();
+    top.close(out)
+}
+
+// Parse, re-emit. A fault prints the byte it refused — every fault but
+// `NoMemory` carries one, and `NoMemory` answers 0, which no row here
+// reaches.
+trip = (a: Alloc, doc: str) Res<(), AllocError> {
+    tree ::= a.Jsons();
+    out  ::= a.String().try();
+    read(a, tree, doc).match({
+        Err(f) => println("rejected at byte {}", at_byte(f)),
+        Ok(id) => {
+            tree.write(id, out).try();
+            println("round trip: {}", out.view());
+        },
+    });
+    Ok(())
+}
+
+// A member read out of a parsed document, named rather than indexed —
+// the way a stranger reads a document they did not write.
+name_line = (tree: Jsons, id: JsonId) () {
+    tree.field(id, "name").match({
+        None      => println("field name -> absent"),
+        Ok(named) => tree.text(named).match({
+            Ok(s) => println("field name -> {}", s),
+            None  => println("field name -> not text"),
+        }),
+    });
+    ();
+}
+
+// Two levels down, then an element of THAT member's array — depth is
+// the point: the module serves a stranger's document, not just the
+// wire's fixed shapes.
+deep_line = (tree: Jsons, id: JsonId) () {
+    tree.field(id, "deep").match({
+        None        => println("deep[0] -> absent"),
+        Ok(deep_id) => tree.field(deep_id, "x").match({
+            None   => println("deep[0] -> absent"),
+            Ok(xs) => tree.item(xs, 0).match({
+                None     => println("deep[0] -> absent"),
+                Ok(head) => tree.whole(head).match({
+                    Ok(n) => println("deep[0] -> {}", n),
+                    None  => println("deep[0] -> not whole"),
+                }),
+            }),
+        }),
+    });
+    ();
+}
+
+// The byte a refusal names — every fault but `NoMemory` carries one.
+at_byte = (f: JsonFault) usize {
+    f.match({
+        Unexpected(i) => i,
+        Truncated(i)  => i,
+        BadEscape(i)  => i,
+        BadNumber(i)  => i,
+        TooDeep(i)    => i,
+        Trailing(i)   => i,
+        NoMemory      => 0,
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    doc ::= "{\"name\":\"std.json\",\"n\":7,\"deep\":{\"x\":[1,null]}}";
+
+    trip(a, doc).try();
+
+    wire ::= a.String().try();
+    emit(wire).try();
+    println("streamed: {}", wire.view());
+
+    parsed ::= a.Jsons();
+    read(a, parsed, doc).match({
+        Err(_) => println("the round trip above says this cannot happen"),
+        Ok(id) => {
+            name_line(parsed, id);
+            deep_line(parsed, id);
+        },
+    });
+
+    trip(a, "{\"a\":}").try();
+    Ok(0);
+}
