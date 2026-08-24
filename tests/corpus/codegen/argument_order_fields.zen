@@ -1,0 +1,67 @@
+// THE SECOND HALF OF THE ORDERING QUESTION. A call's arguments run LEFT
+// TO RIGHT — `argument_order.zen` pins that. A CONSTRUCTION's field
+// values run left to right too, and its lowering is the same trap: one
+// C compound literal, whose initialiser expressions C11 6.7.9p23 leaves
+// indeterminately sequenced, so `Pair(a: c.tick(), b: c.tick())` asked
+// the C compiler who reads first. Issue #739.
+//
+// Every case below puts TWO OR MORE ticks on ONE Counter, because a
+// designator pins a value to its field whatever order the values run
+// in — with one ticking field there is nothing to reorder against. Two
+// ticks read 0 then 1 left to right and 1 then 0 right to left, so a
+// wrong order is a wrong number and not merely a wrong print.
+
+Pair = {
+    a: i32,
+    b: i32,
+
+    hi = (self :: @Self) i32 { self.a * 10 + self.b }
+}
+
+Inner = {
+    x: i32,
+    y: i32,
+}
+
+Outer = {
+    inner: Inner,
+    z:     i32,
+}
+
+Counter = {
+    n :: i32,
+
+    tick = (self :: @Self) i32 {
+        was    = self.n;
+        self.n = self.n + 1;
+        was;
+    }
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    // both fields tick, by name: 0 then 1, hi 1 -- right to left says 10
+    c ::= Counter(n: 0);
+    p ::= Pair(a: c.tick(), b: c.tick());
+    println("named {}", p.hi());
+
+    // both fields tick, by position: the same list without designators
+    d ::= Counter(n: 0);
+    q ::= Pair(d.tick(), d.tick());
+    println("position {}", q.hi());
+
+    // ticks strung across two constructions: x then y then z reads
+    // 0, 1, 2 -- any other order moves the digits
+    e ::= Counter(n: 0);
+    o ::= Outer(inner: Inner(x: e.tick(), y: e.tick()), z: e.tick());
+    println("nested {}", o.inner.x * 100 + o.inner.y * 10 + o.z);
+
+    // THE FIELDS ARE EVALUATED IN THE ORDER THEY ARE WRITTEN, not the
+    // order the type declares them: b ticks before a, so b reads 0 and
+    // a reads 1. A lowering that leaves both calls inside one compound
+    // literal hands the question to the C compiler -- and gcc sequences
+    // initialiser expressions in MEMBER order, so it answers 1.
+    f ::= Counter(n: 0);
+    r ::= Pair(b: f.tick(), a: f.tick());
+    println("written {}", r.hi());
+    Ok(0);
+}

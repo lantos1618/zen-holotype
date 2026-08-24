@@ -32,6 +32,8 @@ unify, arg_type, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 ctype, field_type, request_type = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
 is_pure_value = gen.gen_c.gen_c_const
+holds, value_held = gen.gen_c.gen_c_expr
+Call = std.ast
 
 // -----------------------------------------------------------------
 // construction
@@ -289,7 +291,13 @@ write_initialisers = (
     // an argument that supplies no field writes none and a comma keyed
     // to `i` would then open or close the list on nothing.
     seen: usize ::= 0;
+    // THE FIELDS RUN LEFT TO RIGHT TOO. A construction emits ONE compound
+    // literal, and C11 6.7.9p23 leaves its initialiser expressions
+    // indeterminately sequenced — the same hand-away a call's argument
+    // list was, so the same question (`holds`, no receiver to count) and
+    // the same door (`value_held`) answer it here.
     c.args.loop((h, i, a) {
+        hold = be.holds(c, i, 0);
         seen = seen + be.supplied_initialiser(
             a,
             i,
@@ -298,6 +306,7 @@ write_initialisers = (
             dinst,
             dctx,
             ctx,
+            hold,
             seen,
             out
         ).try();
@@ -519,13 +528,14 @@ supplied_initialiser = (
     dinst : Inst,
     dctx  : Ctx,
     ctx   : Ctx,
+    hold  : bool,
     seen  : usize,
     out   :: String
 ) Res<usize, AllocError> {
     name = field_name(be, a, i, s, dinst, dctx).try();
     be.is_storage_named(s, name, dinst, dctx).match({
         false => Ok(0),
-        true  => be.designated(a, name, s, ty, dinst, dctx, ctx, seen, out),
+        true  => be.designated(a, name, s, ty, dinst, dctx, ctx, hold, seen, out),
     })
 }
 
@@ -538,12 +548,13 @@ designated = (
     dinst : Inst,
     dctx  : Ctx,
     ctx   : Ctx,
+    hold  : bool,
     seen  : usize,
     out   :: String
 )
              Res<usize, AllocError> {
     (seen > 0).then(() { out.add_bytes(", ").try() });
-    be.write_initialiser(a, name, s, ty, dinst, dctx, ctx, out).try();
+    be.write_initialiser(a, name, s, ty, dinst, dctx, ctx, hold, out).try();
     Ok(1);
 }
 
@@ -587,13 +598,14 @@ write_initialiser = (
     dinst : Inst,
     dctx  : Ctx,
     ctx   : Ctx,
+    hold  : bool,
     out   :: String
 ) Res<(), AllocError> {
     des ::= be.alloc.String().try();
     be.designator(ty, name, des).try();
     out.fmt(".{} = ", des.view()).try();
     want = be.storage_type(s, name, dinst, dctx);
-    expr(be, a.value, ctx, want, out)
+    be.value_held(a.value, ctx, want, hold, out)
 }
 
 // The field an argument supplies: the one it names, or the i-th
