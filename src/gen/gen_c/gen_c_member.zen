@@ -51,6 +51,7 @@ enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 ctype, is_unit = gen.gen_c.gen_c_type
 expr, ty_of, want_of = gen.gen_c.gen_c_expr
 has_call, holds = gen.gen_c.gen_c_expr
+unsettled = gen.gen_c.gen_c_mono
 lower_plain_call, write_arg, write_call_args = gen.gen_c.gen_c_call
 write_arg_at = gen.gen_c.gen_c_call
 handle_depth, lower_handle_call = gen.gen_c.gen_c_handle
@@ -117,6 +118,16 @@ lower_resolved_dot = (be :: CBackend, d: Dot, ctx: Ctx, out :: String)
 // call, not a second construction form, so this writes the compound
 // literal `gen_c_expr.zen` writes for a bare variant plus the payload.
 //
+// THE LITERAL IS SPELLED AT WHAT SEMA ANSWERED FOR THE CALL, and the
+// base type is only where the variant NAME is read. Sema types the call
+// at the enum instantiated by its argument (`sema_apply
+// .variant_call_type`); spelling from the bare base instead wrote the
+// compound literal — and with it the local it lands in — as the
+// unsubstituted enum, beside a callee monomorphised at `Opt<i32>`: C
+// that names two different structs for one value. A miss in the memo,
+// or an answer that still mentions a free parameter, keeps the old
+// reading: the layout is identical either way, so nothing else moves.
+//
 // A NAME THAT IS NOT A VARIANT IS `gen_c_assoc.zen`'S — a struct body
 // may bind a function too (`Duration.seconds(2)`) — and it answers
 // `false` when nothing of that name wants no receiver, so the refusal
@@ -138,13 +149,34 @@ lower_static_call = (be :: CBackend, d: Dot, ty: TyId, ctx: Ctx, out :: String)
     })
 }
 
+// WHAT TO SPELL THE COMPOUND LITERAL AS: what the CALL's own node says
+// sema answered — the enum at the instantiation its argument settled —
+// falling back to the bare `base` when the memo misses, when the answer
+// is not an application of a declaration, or when it still mentions a
+// free parameter. The layout is identical either way, so the fallback
+// moves nothing but the name.
+case_ty = (be :: CBackend, d: Dot, base: TyId, ctx: Ctx)
+          Res<TyId, AllocError> {
+    got = be.check.type_of(d.id, ctx).try();
+    be.check.types.at(got).match({
+        Named(_) => Ok(unsettled(be, got).match({
+            true  => base,
+            false => got,
+        })),
+        _        => Ok(base),
+    })
+}
+
 write_variant_call = (be :: CBackend, d: Dot, ty: TyId, ctx: Ctx, out :: String)
                      Res<(), AllocError> {
     cases ::= be.alloc.Vec<Case>();
     be.check.cases_of(ty, cases).try();
     find_case(cases, d.a.name.text).match({
         None   => unresolved(be, d.id, d.a.name.text, out),
-        Ok(cs) => be.write_case_value(d.c, ty, cs, ctx, out),
+        Ok(cs) => {
+            lit = be.case_ty(d, ty, ctx).try();
+            be.write_case_value(d.c, lit, cs, ctx, out)
+        },
     })
 }
 

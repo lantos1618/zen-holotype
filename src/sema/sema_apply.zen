@@ -41,6 +41,7 @@ Cand, TBound, Actual = sema.sema_call
 ty_at = sema.sema_cand
 impl_bound_type = sema.sema_supply
 type_from_ast, type_of = sema.sema_type
+case_payload, Case, cases_of, find_case = sema.sema_case
 check_ctor_fields = sema.sema_hoist
 check_ctor_shape = sema.sema_bound
 Found, members_of = sema.sema_member
@@ -151,6 +152,61 @@ unify_ctor_field = (
     found.get(0).match({
         None  => Ok(()),
         Ok(f) => unify(c, f.ty, c.settled_arg_ty(a, ctx).try(), inst),
+    })
+}
+
+// A VARIANT CALL IS A GENERIC-FUNCTION APPLICATION. `variant_ctor` hands
+// back `Fn([payload], enum)` with the payload still at the declaration's
+// own parameters, and `fn_ret` extracts `.ret` — so `Opt.Some(41)` typed
+// the let `Opt<Var>` and gen_c mangled a free parameter into the symbol.
+// The same inference every generic call already gets (`infer_targs`,
+// `instantiated_ret`): unify the payload against the settled argument,
+// then substitute over the answer. Nothing binds — a nullary variant's
+// `(..)` is unit against no parameter, an argument sema could not type
+// says nothing — and the answer stays the bare enum, which is exactly
+// what this path answered before; the refusal for what remains free is
+// the consumers' (`has_var`), as at any other call.
+//
+// The rebuilt type goes through `types.named` like `rebuilt_ctor_type`:
+// one interned id per answer, and `assignable`'s `same_applied` reads two
+// applications of one declaration structurally, so the fresh id agrees
+// with a parsed `Opt<i32>` wherever one is written.
+variant_call_type* = (
+    c    :: Checker,
+    call : Call,
+    ty   : TyId,
+    name : str,
+    ctx  : Ctx
+) Res<TyId, AllocError> {
+    inst  ::= c.alloc.Inst();
+    cases ::= c.alloc.Vec<Case>();
+    c.cases_of(ty, cases).try();
+    (find_case(cases, name).match({
+        None   => Ok(()),
+        Ok(cs) => c.payload_says(call, ty, cs, ctx, inst),
+    })).try();
+    c.subst(ty, inst)
+}
+
+// The payload against the first argument's settled type. A variant with
+// no argument written keeps the bare enum — the shape `variant_ctor`
+// answered before this existed — rather than inventing a unit binding.
+payload_says = (
+    c    :: Checker,
+    call : Call,
+    ty   : TyId,
+    cs   : Case,
+    ctx  : Ctx,
+    inst :: Inst
+) Res<(), AllocError> {
+    call.args.get(0).match({
+        None  => Ok(()),
+        Ok(a) => unify(
+            c,
+            c.case_payload(ty, cs.name).try(),
+            c.settled_arg_ty(a, ctx).try(),
+            inst
+        ),
     })
 }
 
