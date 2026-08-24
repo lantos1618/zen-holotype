@@ -88,8 +88,13 @@ def main() -> int:
             checked += 1
             path = Path(tmp) / f"design_{line}.zen"
             path.write_text(source, encoding="utf-8")
+            # -l/--lang-name pin THIS tree's zen.so -- the CLI otherwise
+            # resolves through ~/.cache/tree-sitter/lib/zen.so, a cache
+            # shared with every other checkout of this grammar on the box.
+            # See the `parse` target in the Makefile.
             run = subprocess.run(
-                ["npx", "tree-sitter", "parse", "--quiet", str(path)],
+                ["npx", "tree-sitter", "parse", "--quiet",
+                 "-l", str(GRAMMAR / "zen.so"), "--lang-name", "zen", str(path)],
                 cwd=GRAMMAR, capture_output=True, text=True,
             )
             if run.returncode != 0:

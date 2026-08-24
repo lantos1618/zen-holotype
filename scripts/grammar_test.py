@@ -66,9 +66,17 @@ TIMEOUT = 120
 def parse_batch(paths: list[Path]) -> subprocess.CompletedProcess:
     """tree-sitter parse over many files at once. Exit 1 if ANY has an error
     node -- which is exactly what --quiet hides, so the exit code is the whole
-    result here."""
+    result here.
+
+    -l/--lang-name pin THIS tree's zen.so: without them the CLI resolves
+    `zen` through ~/.cache/tree-sitter/lib/zen.so, a cache shared by every
+    checkout of this grammar on the box, and the gate would execute
+    whichever tree regenerated last rather than this one. See the `parse`
+    target in the Makefile."""
     return subprocess.run(
-        ["npx", "tree-sitter", "parse", "--quiet", *[str(p) for p in paths]],
+        ["npx", "tree-sitter", "parse", "--quiet",
+         "-l", str(GRAMMAR / "zen.so"), "--lang-name", "zen",
+         *[str(p) for p in paths]],
         cwd=GRAMMAR, capture_output=True, text=True, timeout=TIMEOUT,
     )
 
@@ -76,7 +84,8 @@ def parse_batch(paths: list[Path]) -> subprocess.CompletedProcess:
 def parse_one(path: Path) -> bool:
     """True if the file parses clean."""
     run = subprocess.run(
-        ["npx", "tree-sitter", "parse", "--quiet", str(path)],
+        ["npx", "tree-sitter", "parse", "--quiet",
+         "-l", str(GRAMMAR / "zen.so"), "--lang-name", "zen", str(path)],
         cwd=GRAMMAR, capture_output=True, text=True, timeout=TIMEOUT,
     )
     return run.returncode == 0

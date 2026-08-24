@@ -268,11 +268,20 @@ design: grammar
 ## with no work and exits 0, which is this repo's own recorded shape for
 ## a gate that cannot fail; one renamed directory would have retired
 ## this check in silence.
+##
+## `-l`/`--lang-name` ARE MANDATORY. The CLI otherwise resolves the
+## language through ~/.cache/tree-sitter/lib/<name>.so, a cache keyed by
+## language NAME and shared with every other checkout of this grammar on
+## the box -- so a parse gate could execute whichever tree regenerated
+## last rather than the one being gated (that divergence is exactly how
+## the #770 ruling was briefly "disproven"). `-l` names THIS tree's
+## zen.so and bypasses the cache; `--lang-name zen` tells the CLI which
+## symbol to load from it.
 parse: grammar
 	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tests/bench -name '*.zen' -print0); \
 	  test $${#files[@]} -gt 0 \
 	    || { echo "parse: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
-	  cd grammar && npx tree-sitter parse --quiet --stat "$${files[@]/#/../}"
+	  cd grammar && npx tree-sitter parse --quiet --stat -l "$$(pwd)/zen.so" --lang-name zen "$${files[@]/#/../}"
 
 ## lint: every test conforms to the format in docs/TESTING.md
 lint:
