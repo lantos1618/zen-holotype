@@ -42,12 +42,16 @@ string* = (lx :: Lexer) Res<(), AllocError> {
                 LexFault.StringSpansLine,
                 from
             ).try(); h.break(); },
-            // an escape that ran off the end has already reported the
-            // truncation; adding "and the string never closed" is a second
-            // diagnostic for the same missing bytes
+            // the guard asks what `escape` DID, not where the cursor stopped:
+            // "is the cursor done" is also true after a SUCCESSFUL escape that
+            // then hit end of file, and there the missing closing quote is a
+            // fault nobody has named yet. The two coincide only where the
+            // ESCAPE is what ran off the end -- there, and only there, "and
+            // the string never closed" would be a second diagnostic for the
+            // same missing bytes
             Ok('\\') => {
-                lx.escape().try();
-                lx.cur.is_done().then(() { h.break(); });
+                reported = lx.escape().try();
+                (lx.cur.is_done() && reported).then(() { h.break(); });
             },
             Ok('"')  => { lx.cur.bump(); lx.emit(
                 TokenKind.Str,
@@ -69,13 +73,18 @@ character* = (lx :: Lexer) Res<(), AllocError> {
         None     => lx.report(LexFault.UnterminatedChar, from),
         Ok('\n') => lx.report(LexFault.CharSpansLine, from),
         Ok('\'') => { lx.cur.bump(); lx.report(LexFault.EmptyChar, from) },
-        // as in `string` above: an escape that ran off the end has already
-        // reported the truncation, and "and the literal never closed" is a
-        // second diagnostic for the same missing bytes
-        Ok('\\') => { lx.escape().try(); lx.cur.is_done().match({
-            true  => Ok(()),
-            false => lx.close_char(from),
-        }) },
+        // as in `string` above: where the ESCAPE is what ran off the end it
+        // has already reported, and "and the literal never closed" would be a
+        // second diagnostic for the same missing bytes. A successful escape
+        // followed by end of file has said nothing, so the missing closing
+        // quote is still this file's only unnamed fault
+        Ok('\\') => {
+            reported = lx.escape().try();
+            (lx.cur.is_done() && reported).match({
+                true  => Ok(()),
+                false => lx.close_char(from),
+            })
+        },
         Ok(_)    => { lx.cur.bump(); lx.close_char(from) },
     });
 }
@@ -104,12 +113,14 @@ overlong_char = (lx :: Lexer, from: Pos) Res<(), AllocError> {
 // the cursor is on the backslash. The escape set is
 // `\n \t \r \v \f \0 \\ \' \"` and nothing else, and the span is the
 // backslash plus the byte it fails to escape — two bytes, which is exactly
-// what has to be changed
-escape* = (lx :: Lexer) Res<(), AllocError> {
+// what has to be changed. The answer says whether the escape itself was the
+// fault — a caller that needs one diagnostic per mistake asks it before
+// adding its own
+escape* = (lx :: Lexer) Res<bool, AllocError> {
     from = lx.cur.pos();
     lx.cur.bump();
     lx.cur.peek().match({
-        None     => lx.report(LexFault.UnterminatedEscape, from),
+        None     => { lx.report(LexFault.UnterminatedEscape, from); Ok(true) },
         // A NEWLINE IS NOT AN ESCAPABLE BYTE, and Zen has no line
         // continuation. Stepping over it here would carry the literal onto
         // the next line — the one thing DESIGN.md says a literal may not do —
@@ -128,16 +139,16 @@ escape* = (lx :: Lexer) Res<(), AllocError> {
         // declining to read the ending's first half as the byte it escaped.
         // A CR anywhere else is ordinary whitespace and falls through to the
         // arm below, where every unescapable byte lands
-        Ok('\n') => Ok(()),
+        Ok('\n') => Ok(false),
         Ok('\r') => lx.cur.at_byte(1, '\n').match({
-            true  => Ok(()),
-            false => { lx.cur.bump(); lx.report(LexFault.UnknownEscape, from) },
+            true  => Ok(false),
+            false => { lx.cur.bump(); lx.report(LexFault.UnknownEscape, from); Ok(true) },
         }),
         Ok(b)    => {
             lx.cur.bump();
             is_escape(b).match({
-                false => lx.report(LexFault.UnknownEscape, from),
-                true  => Ok(()),
+                false => { lx.report(LexFault.UnknownEscape, from); Ok(true) },
+                true  => Ok(false),
             })
         },
     });
