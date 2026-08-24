@@ -123,15 +123,30 @@ offer_def = (c: Checker, name: str, d: Def, found :: Vec<Action>)
     })
 }
 
-// A diag's span against the request's range, INCLUSIVE at both ends: a
-// client sends the squiggle's own range or an empty cursor range, and
-// both must select it.
+// A diag's span against the request's range, BOTH HALF-OPEN: `Span` is
+// `[start, end)` (`std/ast/ast_span.zen`) and an LSP `Range.end` is
+// exclusive too, so the test is strict at each edge — a caret sitting ON
+// a boundary selects nothing by itself. THE EMPTY RANGE is the one
+// allowance, and it is spelled: a zero-width cursor range has
+// from == upto, and it selects what the cursor is INSIDE. Inclusive ends
+// here would reach one column out on each side — `x := Foo(Bar)` with
+// both names undefined would offer `Import Foo` for a caret on the `(`,
+// and selecting exactly `Foo(` would offer `Import Bar`.
 covers = (span: Span, from: Pos, upto: Pos) bool {
-    !after(span.start, upto) && !after(from, span.end)
+    empty = from.line == upto.line && from.col == upto.col;
+    (empty).match({
+        true  => !after(span.start, from) && before(from, span.end),
+        false => before(span.start, upto) && before(from, span.end),
+    })
 }
 
 after = (a: Pos, b: Pos) bool {
     a.line > b.line || (a.line == b.line && a.col > b.col)
+}
+
+// The other edge, named for the same reason `after` is: `a < b`, strictly.
+before = (a: Pos, b: Pos) bool {
+    a.line < b.line || (a.line == b.line && a.col < b.col)
 }
 
 // WHERE THE LINE GOES: after the file's last import decl, read off the
