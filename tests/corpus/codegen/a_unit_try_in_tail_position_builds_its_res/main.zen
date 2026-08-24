@@ -1,0 +1,34 @@
+// A UNIT `.try()` IN TAIL POSITION OF A `Res`-RETURNING FUNCTION.
+//
+// `inner().try()` closing `Res<(), AllocError>` must build the function's
+// own `Res` exactly as `Ok(())` would. `gen_c_try.unwrap` asked
+// `is_unit(payload)` BEFORE the hoist question, so a unit payload wrote
+// nothing at all and the emitted C function ended after its Err guard
+// with no return statement on the Ok path — undefined behaviour, and
+// `-Wreturn-type` under any `-Wall`.
+//
+// WHY NOTHING CAUGHT IT: in the plain shape the missing return is silent
+// — control falls off the end with the operand's own Res still sitting
+// in the return register, so the caller receives the RIGHT answer by
+// accident, and the corpus (which compiles without -Wall and compares
+// only stdout) saw a passing program. This test makes the garbage
+// observable: the tail's body registers a defer, so the function's
+// epilogue runs AFTER the guard even on the Ok path, and the value the
+// caller receives is whatever the epilogue's last call left behind
+// instead of a built Res. The match below then answers neither arm and
+// traps in its unreachable one instead of printing ok.
+inner = () Res<(), AllocError> { Ok(()) }
+
+unitTail = () Res<(), AllocError> {
+    s = @scope;
+    s.defer(() { println("cleanup") });
+    inner().try()
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    unitTail().match({
+        Ok(_)  => println("ok"),
+        Err(_) => println("err"),
+    });
+    Ok(0);
+}
