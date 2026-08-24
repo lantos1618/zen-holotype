@@ -179,6 +179,72 @@ variant_named = (c :: Checker, decl: DeclId, name: str) bool {
     })
 }
 
+// Which MEMBER of a type declares a variant name, and the type that
+// member IS: `NotANumber` under the set `Trouble = AllocError |
+// ParseError` answers the `ParseError` id, and nothing anywhere else.
+// A miss is `None`, so a pattern naming no case of any member falls
+// through to the readings it always had.
+//
+// THE QUESTION SERVES BOTH HALVES. Sema's normaliser asks it to read
+// `Member.Leaf` / `Member(Leaf)` as the two-level case they are; gen_c's
+// match lowering asks it to test and bind those same arms. One function,
+// because sema checking one arm shape while the backend emits another is
+// this compiler's worst failure class.
+variant_member* = (c :: Checker, ty: TyId, variant: str) Res<TyId> {
+    c.types.at(ty).match({
+        Union(u) => union_variant_member(c, u, variant),
+        Named(n) => c.named_variant_member(ty, n, variant),
+        _        => Ok(None),
+    })
+}
+
+union_variant_member = (
+    c       :: Checker,
+    u       : TyUnion,
+    variant : str
+) Res<TyId> {
+    hit ::= None;
+    u.members.loop((h, i, m) {
+        c.member_declares(m, variant).try().match({
+            true  => { hit = Some(c.set_of(m)); },
+            false => {},
+        });
+    });
+    Ok(hit)
+}
+
+named_variant_member = (
+    c       :: Checker,
+    ty      : TyId,
+    n       : TyNamed,
+    variant : str
+) Res<TyId> {
+    c.union_reading(n.decl).match({
+        false => Ok(None),
+        true  => c.variant_member(ty, variant),
+    })
+}
+
+// Whether one declared member names this variant. The member is asked at
+// ITS OWN declaration — `decl_has_variant` walks the variants of what it
+// names — so an alias or a same-named type elsewhere cannot answer for
+// it.
+member_declares = (c :: Checker, m: TyId, variant: str) Res<bool, AllocError> {
+    c.types.at(m).match({
+        Named(n) => Ok(c.decl_has_variant(n.decl, variant)),
+        _        => Ok(false),
+    })
+}
+
+// The declared-variants walk `variant_named` uses, exported to the
+// backend through `Checker` for the same agreement rule.
+decl_has_variant* = (c :: Checker, decl: DeclId, name: str) bool {
+    decl_at(c.tree, decl).match({
+        None  => false,
+        Ok(d) => decl_names_variant(d, name),
+    })
+}
+
 decl_names_variant = (d: Decl, name: str) bool {
     d.kind.match({
         Enum(e) => enum_names_variant(e, name),
