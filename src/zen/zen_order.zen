@@ -29,17 +29,21 @@ str = std.text
 // `root_declares_main` asks module 0 for `main`) — only imported
 // modules move. WHICH modules load can't change either: the reachable
 // set is a closure, independent of computation order.
+// Early return over a chain, as in `lsp_reply.zen:request_of`: each guard
+// names the one mode it spells, the last break the identity for everything
+// else. The typed binding is load-bearing for the reason its own comment
+// states.
 walk_index* = (mode: str, n: usize, i: usize) usize {
-    mode.eq("reverse").match({
-        true  => n - 1 - i,
-        false => mode.eq("rotate").match({
-            true  => (i + 1) % n,
-            false => mode.eq("interleave").match({
-                true  => interleaved(n, i),
-                false => i,
-            }),
-        }),
-    })
+    found: Res<usize> = loop<usize>((h) {
+        mode.eq("reverse").then(() { h.break(n - 1 - i) });
+        mode.eq("rotate").then(() { h.break((i + 1) % n) });
+        mode.eq("interleave").then(() { h.break(interleaved(n, i)) });
+        h.break(i);
+    });
+    found.match({
+        Ok(one) => one,
+        None    => i,
+    });
 }
 
 // Odd indices first, then even ones — the one of the three a descending

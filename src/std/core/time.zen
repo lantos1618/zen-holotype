@@ -57,20 +57,21 @@ minutes_of* = (self: Duration) u64 { self.ns / NS_PER_MINUTE }
 Unit* = Nano | Micro | Milli | Second | Minute
 
 // Largest unit this span fills at least once: 1500ms is Second, 999ms
-// is Milli, 0 is Nano (nothing has no larger unit to claim).
+// is Milli, 0 is Nano (nothing has no larger unit to claim). Guarded
+// early answers over a match-of-matches: each rung names the one bound
+// it clears, first truth wins, the trailing break the answer to
+// everything smaller.
 unit_of* = (self: Duration) Unit {
-    (self.ns >= NS_PER_MINUTE).match({
-        true  => Unit.Minute,
-        false => (self.ns >= NS_PER_SECOND).match({
-            true  => Unit.Second,
-            false => (self.ns >= NS_PER_MILLI).match({
-                true  => Unit.Milli,
-                false => (self.ns >= NS_PER_MICRO).match({
-                    true  => Unit.Micro,
-                    false => Unit.Nano,
-                }),
-            }),
-        }),
+    found: Res<Unit> = loop<Unit>((h) {
+        (self.ns >= NS_PER_MINUTE).then(() { h.break(Unit.Minute) });
+        (self.ns >= NS_PER_SECOND).then(() { h.break(Unit.Second) });
+        (self.ns >= NS_PER_MILLI).then(() { h.break(Unit.Milli) });
+        (self.ns >= NS_PER_MICRO).then(() { h.break(Unit.Micro) });
+        h.break(Unit.Nano);
+    });
+    found.match({
+        Ok(one) => one,
+        None    => Unit.Nano,
     });
 }
 

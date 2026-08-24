@@ -66,16 +66,21 @@ digit_value* = (b: u8) Res<u8> {
     });
 }
 
+// Early return over a pyramid: the one-shot loop is a breakable block,
+// each `.then` a guard naming one spelling of a hex digit, the bare
+// last break the miss. The typed binding is load-bearing for the
+// reason `lsp_reply.request_of` states — a match on the loop call
+// itself leaves T unresolved.
 hex_value* = (b: u8) Res<u8> {
-    b.is_digit().match({
-        true  => Ok(b - DIGIT_ZERO),
-        false => (b >= LOWER_A && b <= LOWER_F).match({
-            true  => Ok(b - LOWER_A + 10),
-            false => (b >= UPPER_A && b <= UPPER_F).match({
-                true  => Ok(b - UPPER_A + 10),
-                false => None,
-            }),
-        }),
+    found: Res<u8> = loop<u8>((h) {
+        b.is_digit().then(() { h.break(b - DIGIT_ZERO) });
+        (b >= LOWER_A && b <= LOWER_F).then(() { h.break(b - LOWER_A + 10) });
+        (b >= UPPER_A && b <= UPPER_F).then(() { h.break(b - UPPER_A + 10) });
+        h.break();
+    });
+    found.match({
+        Ok(v) => Ok(v),
+        None  => None,
     });
 }
 

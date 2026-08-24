@@ -250,33 +250,26 @@ built = (root: str, out: str, entry: str, emit: bool, dbg: Debug) Cli {
 // is a root); the entry says where to start in it, knowledge the
 // caller has and the compiler can't recover (`std.env.Fs` has no
 // listing, on purpose).
+//
+// The two debug flags sit in the same flat list: they were split into
+// their own link only while this was a match pyramid, and the flat
+// form has no depth to manage. They take an argument like `-o`/
+// `--entry`, so a missing one leaves the default rather than
+// swallowing the next word.
 classify = (a: str) Arg {
-    a.eq("--emit-c").match({
-        true  => Arg.EmitC,
-        false => a.eq("-o").match({
-            true  => Arg.Out,
-            false => a.eq("--entry").match({
-                true  => Arg.Entry,
-                false => debug_arg(a),
-            }),
-        }),
-    })
-}
-
-// The two debug flags, split off so `classify` stops at four levels.
-// They take an argument like `-o`/`--entry`, so a missing one leaves
-// the default rather than swallowing the next word.
-debug_arg = (a: str) Arg {
-    a.eq("--repeat").match({
-        true  => Arg.Repeat,
-        false => a.eq("--permute").match({
-            true  => Arg.Permute,
-            false => is_flag(a).match({
-                true  => Arg.Flag,
-                false => Arg.Word,
-            }),
-        }),
-    })
+    found: Res<Arg> = loop<Arg>((h) {
+        a.eq("--emit-c").then(() { h.break(Arg.EmitC) });
+        a.eq("-o").then(() { h.break(Arg.Out) });
+        a.eq("--entry").then(() { h.break(Arg.Entry) });
+        a.eq("--repeat").then(() { h.break(Arg.Repeat) });
+        a.eq("--permute").then(() { h.break(Arg.Permute) });
+        is_flag(a).then(() { h.break(Arg.Flag) });
+        h.break(Arg.Word);
+    });
+    found.match({
+        Ok(one) => one,
+        None    => Arg.Word,
+    });
 }
 
 // A leading `-` is a flag whatever follows it, so an unknown one is

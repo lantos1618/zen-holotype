@@ -33,15 +33,17 @@ is_escape* = (b: u8) bool {
 }
 
 class_of* = (b: u8) ByteClass {
-    b.is_space().match({
-        true  => ByteClass.Space,
-        false => b.is_digit().match({
-            true  => ByteClass.Digit,
-            false => b.is_ident_start().match({
-                true  => ByteClass.Letter,
-                false => opener_class(b),
-            }),
-        }),
+    found: Res<ByteClass> = loop<ByteClass>((h) {
+        // GUARD ORDER IS PRIORITY: space beats digit beats ident-start,
+        // and what no predicate claims falls to the punct table.
+        b.is_space().then(() { h.break(ByteClass.Space) });
+        b.is_digit().then(() { h.break(ByteClass.Digit) });
+        b.is_ident_start().then(() { h.break(ByteClass.Letter) });
+        h.break(opener_class(b));
+    });
+    found.match({
+        Ok(one) => one,
+        None    => opener_class(b),
     });
 }
 

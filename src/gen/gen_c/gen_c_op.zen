@@ -275,23 +275,31 @@ OpKind = ShortCircuit | Infix | Helper(str) | Dispatched | Refused
 // same reason: there is nothing to dispatch to.
 // `corpus/gen_zen/reports_what_it_cannot_lower` gates it on a struct
 // with no impl.
+//
+// EARLY RETURN OVER A CHAIN — `lsp_reply.zen:request_of`'s idiom: the
+// one-shot loop is a breakable block, each rung one guard answering the
+// one kind it names, the last break the answer to everything else. A
+// rung is asked only after every rung above it said no, which is what
+// holds the boundaries where the nested matches had them — and `&&`
+// asks the right-hand question only when the left held, so
+// `spills_anywhere`, `scalar`, and `prim_name` are asked exactly when
+// they were before.
 op_kind = (be: CBackend, b: Binary, operand: TyId) OpKind {
-    is_logical(b.op).match({
-        true  => be.spills_anywhere(b.rhs).match({
-            true  => OpKind.ShortCircuit,
-            false => OpKind.Infix,
-        }),
-        false => is_comparison(b.op).match({
-            true  => be.scalar(operand).match({
-                true  => OpKind.Infix,
-                false => is_equality(b.op).match({
-                    true  => OpKind.Dispatched,
-                    false => OpKind.Refused,
-                }),
-            }),
-            false => arith_kind(be.check.prim_name(operand)),
-        }),
-    })
+    found: Res<OpKind> = loop<OpKind>((h) {
+        (is_logical(b.op) && be.spills_anywhere(b.rhs))
+            .then(() { h.break(OpKind.ShortCircuit) });
+        is_logical(b.op).then(() { h.break(OpKind.Infix) });
+        (is_comparison(b.op) && be.scalar(operand))
+            .then(() { h.break(OpKind.Infix) });
+        (is_comparison(b.op) && is_equality(b.op))
+            .then(() { h.break(OpKind.Dispatched) });
+        is_comparison(b.op).then(() { h.break(OpKind.Refused) });
+        h.break(arith_kind(be.check.prim_name(operand)));
+    });
+    found.match({
+        Ok(one) => one,
+        None    => arith_kind(be.check.prim_name(operand)),
+    });
 }
 
 // The header's first rule, at the site: an after-the-fact test is one

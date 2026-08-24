@@ -515,21 +515,27 @@ expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, out :: String)
 // `gen_c_widen.zen` says what is claimed.
 Door = Set | Hoist | Widen | Fat | Plain
 
+// Early return over a pyramid: the one-shot loop is a breakable block,
+// each `.then` a guard naming the one door it opens, the last break the
+// answer when every guard says no — `request_of` in `lsp_reply` and
+// `method_kind` in `gen_c_member` are the same idiom, and the typed
+// binding is load-bearing for the reason its own comment states.
+// The guards are still asked in the order the comment above states,
+// first yes wins, and a guard's `.try()` returns from THIS function
+// exactly as it did inside the old nesting.
 door_of = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
           Res<Door, AllocError> {
-    be.needs_set(id, ctx, want).try().match({
-        true  => Ok(Door.Set),
-        false => be.needs_hoist(id, ctx, want).try().match({
-            true  => Ok(Door.Hoist),
-            false => be.needs_widen(id, ctx, want).try().match({
-                true  => Ok(Door.Widen),
-                false => be.needs_fat(id, ctx, want).try().match({
-                    true  => Ok(Door.Fat),
-                    false => Ok(Door.Plain),
-                }),
-            }),
-        }),
-    })
+    found: Res<Door> = loop<Door>((h) {
+        be.needs_set(id, ctx, want).try().then(() { h.break(Door.Set) });
+        be.needs_hoist(id, ctx, want).try().then(() { h.break(Door.Hoist) });
+        be.needs_widen(id, ctx, want).try().then(() { h.break(Door.Widen) });
+        be.needs_fat(id, ctx, want).try().then(() { h.break(Door.Fat) });
+        h.break(Door.Plain);
+    });
+    Ok(found.match({
+        Ok(door) => door,
+        None     => Door.Plain,
+    }))
 }
 
 // The value AT ITS OWN TYPE, then the record over its address: lowering
