@@ -36,7 +36,7 @@
 // as an alias, and the diagnostic landed on the payload. So every index
 // this file looks a kind up at goes through `live_at`.
 
-TokenKind, same, is_trivia = std.parse.parse_token
+TokenKind, is_trivia = std.parse.parse_token
 Parser = std.parse.parser
 starts_type_kind = std.parse.parse_type
 
@@ -89,7 +89,7 @@ live_kind* = (p :: Parser, from: usize) TokenKind {
 // same one asked of a declaration's value — see `fn_value_after`.
 lambda_ahead* = (p :: Parser) bool {
     after = p.live_kind(p.group_end_at(p.at));
-    after.same(TokenKind.BraceOpen) || after.ret_start()
+    after == TokenKind.BraceOpen || after.ret_start()
 }
 
 // What may follow a parameter list's `)` and still be a return type.
@@ -107,8 +107,8 @@ lambda_ahead* = (p :: Parser) bool {
 // the expression and declaration readings genuinely disagree.
 ret_start* = (kind: TokenKind) bool {
     kind.starts_type_kind()
-        && !kind.same(TokenKind.Lt)
-        && !kind.same(TokenKind.ParenOpen)
+        && kind != TokenKind.Lt
+        && kind != TokenKind.ParenOpen
 }
 
 // The same question for a DECLARATION'S value, where a `(` after the
@@ -117,7 +117,7 @@ ret_start* = (kind: TokenKind) bool {
 // expression statements, so nothing is given up; an expression keeps
 // the other reading, above.
 fn_value_after* = (kind: TokenKind) bool {
-    kind.same(TokenKind.BraceOpen) || kind.same(TokenKind.ParenOpen) || kind.ret_start()
+    kind == TokenKind.BraceOpen || kind == TokenKind.ParenOpen || kind.ret_start()
 }
 
 // A `[` here opens a fixed array type applied to arguments if it holds
@@ -125,7 +125,7 @@ fn_value_after* = (kind: TokenKind) bool {
 // follows. Anything else is an array literal.
 fixed_array_ahead* = (p :: Parser) bool {
     j = p.group_end_at(p.at);
-    p.live_kind(j).same(TokenKind.ParenOpen) && p.group_items_at(p.at, j) == 2
+    p.live_kind(j) == TokenKind.ParenOpen && p.group_items_at(p.at, j) == 2
 }
 
 // A `<` here opens type arguments if its matching `>` is followed by
@@ -133,7 +133,7 @@ fixed_array_ahead* = (p :: Parser) bool {
 // the one a wrong guess breaks silently.
 targs_ahead* = (p :: Parser) bool {
     j = p.angles_end_at(p.at);
-    (j > p.at) && p.live_kind(j).same(TokenKind.ParenOpen)
+    (j > p.at) && p.live_kind(j) == TokenKind.ParenOpen
 }
 
 // The index one past the delimiter group the cursor is sitting on.
@@ -179,7 +179,9 @@ group_items_at = (p :: Parser, from: usize, to: usize) usize {
     empty  ::= true;
     Range(from + 1, to - 1).loop((h, k) {
         kind = p.token_kind_at(k);
-        (kind.same(TokenKind.Comma) && depth == 0).then(() { commas = commas + 1; });
+        (kind == TokenKind.Comma && depth == 0).then(
+            () { commas = commas + 1; }
+        );
         kind.is_trivia().match({
             true  => (),
             false => { empty = false; },
@@ -267,7 +269,7 @@ paren_shape = (p :: Parser) ValueShape {
 // `<T>(x: T) T` — the only value that begins with `<`.
 angle_shape = (p :: Parser) ValueShape {
     j = p.angles_end_at(p.at);
-    (j > p.at && p.live_kind(j).same(TokenKind.ParenOpen)).match({
+    (j > p.at && p.live_kind(j) == TokenKind.ParenOpen).match({
         true  => ValueShape.FnValue,
         false => ValueShape.ExprValue,
     });
@@ -292,23 +294,23 @@ ident_shape = (p :: Parser, module_level: bool) ValueShape {
 // which is R1's whole claim.
 variant_ahead = (p :: Parser) bool {
     j ::= p.live_at(p.at + 1);
-    p.token_kind_at(j).same(TokenKind.ParenOpen).match({
+    (p.token_kind_at(j) == TokenKind.ParenOpen).match({
         true  => { j = p.live_at(p.group_end_at(j)); },
         false => (),
     });
-    p.token_kind_at(j).same(TokenKind.Bar);
+    p.token_kind_at(j) == TokenKind.Bar;
 }
 
 path_or_alias = (p :: Parser) ValueShape {
     j       ::= p.live_at(p.at + 1);
     dotted  ::= false;
-    running ::= p.token_kind_at(j).same(TokenKind.Dot);
+    running ::= p.token_kind_at(j) == TokenKind.Dot;
     loop(() { running }, (h) {
         dotted  = true;
         j       = p.live_at(p.live_at(j + 1) + 1);
-        running = p.token_kind_at(j).same(TokenKind.Dot);
+        running = p.token_kind_at(j) == TokenKind.Dot;
     });
-    p.token_kind_at(j).same(TokenKind.Lt).match({
+    (p.token_kind_at(j) == TokenKind.Lt).match({
         true  => { j = p.live_at(p.angles_end_at(j)); },
         false => (),
     });
@@ -381,12 +383,12 @@ decl_head_ahead* = (p :: Parser, module_level: bool) bool {
 // type parameters, a binder.
 head_shape_ahead = (p :: Parser) bool {
     j ::= p.live_at(p.at + 1);
-    p.token_kind_at(j).same(TokenKind.Star).match({
+    (p.token_kind_at(j) == TokenKind.Star).match({
         true  => { j = p.live_at(j + 1); },
         false => (),
     });
     after = p.token_kind_at(j);
-    after.same(TokenKind.Lt).match({
+    (after == TokenKind.Lt).match({
         true  => p.generic_head_ahead(j),
         false => p.assign_head_ahead(after, j),
     });
@@ -405,7 +407,7 @@ assign_head_ahead = (p :: Parser, after: TokenKind, j: usize) bool {
 }
 
 assigns = (p: Parser, kind: TokenKind) bool {
-    kind.same(TokenKind.Eq) || kind.same(TokenKind.ColonColonEq)
+    kind == TokenKind.Eq || kind == TokenKind.ColonColonEq
 }
 
 // The same seven-way question as `value_shape`, asked one token
@@ -414,21 +416,23 @@ assigns = (p: Parser, kind: TokenKind) bool {
 // else in a body is a binding.
 declares_value = (p :: Parser, j: usize) bool {
     kind = p.token_kind_at(j);
-    kind.same(TokenKind.BraceOpen)
-        || kind.same(TokenKind.Bar)
+    kind == TokenKind.BraceOpen
+        || kind == TokenKind.Bar
         || p.declares_fn(j, kind)
         || p.declares_enum(j, kind)
 }
 
 declares_fn = (p :: Parser, j: usize, kind: TokenKind) bool {
-    kind.same(TokenKind.ParenOpen).match({
+    (kind == TokenKind.ParenOpen).match({
         true  => p.live_kind(p.group_end_at(j)).fn_value_after(),
-        false => kind.same(TokenKind.Lt) && p.live_kind(p.angles_end_at(j)).fn_value_after(),
+        false => kind == TokenKind.Lt && p.live_kind(p.angles_end_at(
+            j
+        )).fn_value_after(),
     });
 }
 
 declares_enum = (p :: Parser, j: usize, kind: TokenKind) bool {
-    kind.same(TokenKind.Ident).match({
+    (kind == TokenKind.Ident).match({
         false => false,
         true  => p.bar_after(j),
     });
@@ -436,11 +440,11 @@ declares_enum = (p :: Parser, j: usize, kind: TokenKind) bool {
 
 bar_after = (p :: Parser, j: usize) bool {
     k ::= p.live_at(j + 1);
-    p.token_kind_at(k).same(TokenKind.ParenOpen).match({
+    (p.token_kind_at(k) == TokenKind.ParenOpen).match({
         true  => { k = p.live_at(p.group_end_at(k)); },
         false => (),
     });
-    p.token_kind_at(k).same(TokenKind.Bar);
+    p.token_kind_at(k) == TokenKind.Bar;
 }
 
 // -------------------------------------------------------------------
@@ -480,11 +484,11 @@ member_head_ahead* = (p :: Parser) bool {
 
 binder_after_head = (p :: Parser) bool {
     j ::= p.live_at(p.at + 1);
-    p.token_kind_at(j).same(TokenKind.Star).match({
+    (p.token_kind_at(j) == TokenKind.Star).match({
         true  => { j = p.live_at(j + 1); },
         false => (),
     });
-    p.token_kind_at(j).same(TokenKind.Lt).match({
+    (p.token_kind_at(j) == TokenKind.Lt).match({
         true  => { j = p.live_at(p.angles_end_at(j)); },
         false => (),
     });
@@ -492,8 +496,8 @@ binder_after_head = (p :: Parser) bool {
 }
 
 binds = (kind: TokenKind) bool {
-    kind.same(TokenKind.Colon)
-        || kind.same(TokenKind.ColonColon)
-        || kind.same(TokenKind.Eq)
-        || kind.same(TokenKind.ColonColonEq)
+    kind == TokenKind.Colon
+        || kind == TokenKind.ColonColon
+        || kind == TokenKind.Eq
+        || kind == TokenKind.ColonColonEq
 }
