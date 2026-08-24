@@ -15,6 +15,7 @@ That claim was false for a year: `make cap` stood behind one rule of the nine an
 | a prefix names its own folder; a folder has its root file; a file name means something; std depends only on std; an impl goes with its type; no `get_*`/`do_*`; no `// helpers` section; a run of `||` on one subject is a membership test; abbreviations are words; a free function on the module's principal type is called on it | `make style` — `scripts/style.py` |
 | 500-line note, 800-line fail | `make cap` — `tools/gates/line_cap.zen` |
 | no free function shadowing a method | `make ufcs` — `scripts/ufcs_collisions.py` |
+| a commit touching `src/` outside its stated scope; a mechanical sweep that lands with company | `make scope` — `scripts/scope.py` |
 | a line is 80 columns; a list packed past it breaks one item per line; match arms align their `=>`; blank-line and comment placement | `make fmt` — the formatter owns the whole shape of a printed file, so it is the authority and this document does not restate its rules |
 | every fault has a raise site | `make faults` |
 
@@ -31,6 +32,52 @@ make test > /tmp/g.log 2>&1; echo "exit $?"; tail -5 /tmp/g.log
 `;` and not `&&`, so the `echo` runs on failure — which is the run you needed the number for. The same trap inside the build is closed at the top of the `Makefile`: recipes run under `bash -o pipefail`, because `/bin/sh` here is dash and dash has no `pipefail` to set. A gate whose file list arrives through a pipe — `find … | xargs ./zen fmt --check` — otherwise reports the status of `xargs`.
 
 **And a check that scanned nothing must not exit 0.** Every gate in the table prints its own site count and fails when that count is zero: `0 violations over 3210 sites` and `0 violations over nothing at all` are the same sentence with a different number in it, and the second one is what a moved directory or a changed file shape produces. `scripts/fixpoint.sh` says it in one line — *a setup error must not be able to impersonate a result* — and every script here now follows it, with exit **2** reserved for "the harness could not run" and never counted as a pass.
+
+---
+
+## A commit's subject is its scope
+
+`lex:`, `gen_c:`, `std.text, lsp:` — the prefix is not decoration. It states
+the area the commit claims, and `make scope` holds every commit to its own
+claim:
+
+**A commit touching `src/` outside its stated scope is rejected at review —
+and now also at `make test`.** Every file under `src/` a commit touches must
+resolve to an area named in the subject's prefix. The owner's rule from issue
+#765, made mechanical because the repo had already been writing scopes into
+subjects for its whole history.
+
+**Three ways an area covers a file**, each taken from the log rather than
+invented: a dotted name joins segments (`std.text` is exactly `src/std/text`);
+a bare name matches any one directory segment (`lex:` covered `src/std/lex/`
+in d6882f11; `gen_c:` covers `src/gen/gen_c/` but not `src/gen/gen.zen`); and
+a module's own stem carries its name (`zen_build.zen` sits under `zen:`).
+
+**A mechanical sweep (`style:`, `fmt:`, `ufcs:`) may rewrite `src/` anywhere,
+but it lands ALONE**: no new file under `src/` — a new file is a feature
+landing and gets its own commit and its own sentence (issue #765's third
+rule) — and no `.expected` or `.count` change anywhere, because those files
+are how this repo's corpus speaks, and a diff in them is a behaviour or
+diagnostic change. af2f9af7 failed both prongs at once: it declared `style:`
+and delivered `src/lsp/lsp_action.zen` plus sixteen rewritten expectations.
+That commit is why this gate exists.
+
+**A subject with no `<areas>:` prefix scopes nothing**, so any `src/` touch
+under it refuses. `wip:` and `fix-c06` were always throwaway tags; under this
+rule they cannot carry `src/` either. Merge commits are skipped — their
+parents state the scopes. `seed/zen.c` is exempt everywhere: it is emitted
+bytes that `make seed` regenerates and stages, and five commits in the recent
+log are nothing else.
+
+**What the gate deliberately does NOT read**, so nobody assumes it does:
+whether the fact after the colon is true of the diff — judgement, and review's
+half of the trade; and tests, docs, Makefile and ISSUES.md riding along,
+which is house style — 1aab00ca adds four corpus files under `gen_c:` — so
+only inside a declared sweep do expectation files count as contraband.
+
+The script keeps a fixture self-test (`scripts/scope.py --self-test`, run by
+`make scope` before the audit) so a parser that stops reading subjects fails
+even on a clean tree — a gate whose check rotted away must not keep exiting 0.
 
 ---
 
