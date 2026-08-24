@@ -21,6 +21,7 @@
 
 Module, Decl, Function, TParam, BlockId = std.ast
 Struct, Impl, Member, Enum = std.ast
+ExprId, TypeId, Const = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -33,12 +34,14 @@ check_overloads = sema.sema_call
 check_depth = sema.sema_depth
 check_varargs = sema.sema_vararg
 check_layout = sema.sema_layout
-type_from_ast, param_type, block_type, decl_as_type = sema.sema_type
+type_of, type_from_ast, param_type, block_type = sema.sema_type
+decl_as_type = sema.sema_type
 enter_struct_tvars = sema.sema_member
 variant_payload = sema.sema_case
 owner_of, push_tparams = sema.sema_inst
 settle_raised = sema.sema_raise
 check_return = sema.sema_hoist
+check_literal = sema.sema_trap
 check_own = sema.sema_own
 
 // Every declaration rule, for one module.
@@ -144,8 +147,50 @@ check_decl = (c :: Checker, d: Decl, m: Module, mi: usize)
         Struct(s)   => c.struct_bodies(s, m, mi),
         Enum(e)     => c.enum_payloads(e, mi),
         Impl(im)    => c.impl_bodies(im, m, mi),
+        Const(k)    => c.const_body(k, mi),
         _           => Ok(()),
     })
+}
+
+// A CONSTANT'S VALUE IS A TYPED POSITION, and until now it was nobody's:
+// `check_decl` matched the four declaration kinds that own bodies and a
+// `Const` fell through the wildcard — not typed in its declaring module,
+// and with no walk to ask whether the value fits the type written beside
+// it. `UMINUS: u32 = -1` compiled clean and printed 18446744073709551615,
+// while the same sentence as a local binding (`b: u32 = -1;`) was refused
+// at `sema_place.check_assign`.
+//
+// THE TWO CHECKS ARE THE LOCAL BINDING'S, in the order it runs them:
+// `coerce` for the family and then `check_literal` for the value, since
+// `assignable` grants every int literal every integer type and only
+// `literal_fits`'s other half knows -1 does not fit a `u32`. The value is
+// typed FIRST either way, so the memo holds an answer wherever the value
+// is read.
+//
+// NO RESOLUTION OF ITS OWN: a name in the value resolves through
+// `type_of`'s ordinary queries, already memoized where they memoize — so
+// constants naming constants are typed once each and a cycle stays
+// `sema_cycle.zen`'s answer, not this walk's recursion.
+const_body = (c :: Checker, k: Const, mi: usize) Res<(), AllocError> {
+    ctx = Ctx(mi, c.types.unknown().try());
+    got = c.type_of(k.value, ctx).try();
+    k.type.match({
+        Ok(t) => c.const_fits(k.value, t, got, ctx),
+        None  => Ok(()),
+    })
+}
+
+// The position's word is what was WRITTEN, and it owes the value the
+// same two answers a local binding's written type owes it — which is why
+// this asks nothing when no type was written: there, the value IS the
+// type, `const_decl_type` reads it back, and no position disagrees.
+const_fits = (c :: Checker, id: ExprId, t: TypeId, got: TyId, ctx: Ctx)
+             Res<(), AllocError> {
+    want = c.type_from_ast(t, ctx).try();
+    node = c.tree.expr_at(id);
+    c.coerce(node.span.file, node.span, got, want, "").try();
+    c.check_literal(id, want).try();
+    Ok(());
 }
 
 // A VARIANT'S PAYLOAD IS A WRITTEN TYPE, and until now the only thing
