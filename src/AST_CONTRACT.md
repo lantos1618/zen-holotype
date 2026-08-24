@@ -160,8 +160,24 @@ The parser decides this once; everything downstream just reads it.
 - **Trailing**: the run between a node's last token and the next newline, owned
   by the outermost node whose span ends before it on that line. `x: i32, // the x`
   belongs to the field.
+- **A closing delimiter**: what stands before a block's `}` — with nothing
+  after it but the brace itself, as in a bare block or a closure body holding
+  one comment — is `Block.trailing`, owned by the block the brace closes. A
+  statement ends at its `;` or its value and cannot own it; no next statement
+  begins there to claim it; and bumping the brace would otherwise drain the
+  pending run past it and leave it owned by nobody.
 - **End of file**: `Module.trailing`. It has nowhere else to go, and a formatter
   that drops it fails its own round trip.
+
+The closing-delimiter rule is the same argument end of file makes, one token
+earlier: nowhere else to go, and a formatter that drops it fails its own round
+trip. It is also the rule a formatter cannot be trusted to enforce by itself —
+`zen fmt` reads only each declaration's leading run and the module's trailing
+run and copies every declaration body verbatim (`fmt.zen`), so its round trip
+stays byte-identical even when a comment below declaration level is dropped.
+The gate for ownership is the walk over every run of every node checked against
+the arena, `tests/corpus/parse/trivia_every_comment_is_owned.zen`, which fails
+whenever any comment is named by exactly zero or more than one run.
 
 The protocol for building a run, and it is the whole of it:
 
