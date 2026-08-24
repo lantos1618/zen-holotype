@@ -699,6 +699,15 @@ read_error = (tmp: str, out :: String) Res<(), AllocError> {
     Ok(());
 }
 
+// The Ok twin of `read_error`: where a built literal finds the payload
+// it carries (`write_unwrap` spells the same place). A unit payload
+// never asks — there is no member to name.
+read_ok_payload = (tmp: str, out :: String) Res<(), AllocError> {
+    out.fmt("{tmp}.zg_data.").try();
+    out.sym_member("Ok").try();
+    Ok(());
+}
+
 // The caller's set, built around the callee's error: tagged with the
 // variant that names the callee's error TYPE, carrying the value
 // unchanged. The two `Res`es are two C structs with two different
@@ -750,20 +759,18 @@ set_qname = (be :: CBackend, set: TyId, out :: String) Res<(), AllocError> {
     })
 }
 
-// `.try()` evaluates to the Ok payload. A unit payload has no member
-// to read, so the destination gets nothing — which is right: `()` is
-// not a value C can hold.
-//
-// THE PAYLOAD IS NOT ALWAYS THE VALUE THE DESTINATION TAKES. In tail
-// position the destination is `Dest.Return`, and the function returns
-// its own `Res` — a bare payload there is the `return int32_t` cc
-// rejects. This is the lift DESIGN.md states and sema admits, so the
-// same predicate the literal tail answers (`gen_c_hoist.needs_hoist`)
-// is asked here too, and when it fires the Ok variant is BUILT the way
-// `gen_c_call.write_res_payload` builds a written `Ok(..)` — same tag,
-// same member, at the destination's type. The payload is READ out of
-// `tmp` rather than lowered again: the operand has already run once,
-// and running it twice is not a lift.
+// WHICH QUESTION COMES FIRST IS THE WHOLE RULE: the DESTINATION is
+// decided before the PAYLOAD. `unwrap` once asked `is_unit` first, so a
+// unit payload wrote nothing anywhere — and in tail position that wrote
+// no return statement at all, C that fell off the end of a non-void
+// function. So the hoist question (`gen_c_hoist.needs_hoist`,
+// DESIGN.md's lift, the same predicate the literal tail answers) is
+// asked FIRST, and a unit payload only decides whether the built
+// literal carries an `Ok` initialiser — `write_res_payload`'s rule,
+// since `()` is not a value C can hold. When no lift happens a unit
+// payload still writes nothing: `Dest.Into` of a unit has no member.
+// The payload is READ out of `tmp` rather than lowered again: the
+// operand has already run once, and running it twice is not a lift.
 unwrap = (
     be   :: CBackend,
     id   : ExprId,
@@ -773,12 +780,9 @@ unwrap = (
     ctx  : Ctx,
     dst  : Dest
 ) Res<(), AllocError> {
-    be.is_unit(r.value).match({
-        true  => Ok(()),
-        false => be.needs_hoist(id, ctx, want).try().match({
-            true  => be.write_hoisted_unwrap(want, tmp, dst),
-            false => be.write_unwrap(tmp, dst),
-        }),
+    be.needs_hoist(id, ctx, want).try().match({
+        true  => be.write_hoisted_unwrap(want, r.value, tmp, dst),
+        false => be.write_unwrap(tmp, dst),
     })
 }
 
@@ -792,11 +796,17 @@ write_unwrap = (be :: CBackend, tmp: str, dst: Dest) Res<(), AllocError> {
 // `(Want){ .zg_tag = OK, .zg_data.Ok = tmp.zg_data.Ok }`, handed to the
 // destination. Assembled by pieces, `write_built`'s way: the braces are
 // literals and belong to nobody's placeholder.
+//
+// A UNIT PAYLOAD CARRIES NO MEMBER: `()` is not a value C can hold and
+// the union has no `Ok` member to name (`write_res_payload`'s rule), so
+// the literal is the tag alone — the payload was already run once into
+// `tmp`, and there is nothing of it left to initialise with.
 write_hoisted_unwrap = (
-    be   :: CBackend,
-    want : TyId,
-    tmp  : str,
-    dst  : Dest
+    be      :: CBackend,
+    want    : TyId,
+    payload : TyId,
+    tmp     : str,
+    dst     : Dest
 ) Res<(), AllocError> {
     cty ::= be.alloc.String().try();
     be.ctype(want, cty).try();
@@ -805,11 +815,21 @@ write_hoisted_unwrap = (
     place.add_bytes(cty.view()).try();
     place.add_bytes("){ .zg_tag = ").try();
     sym_variant(place, RES_PATH, "Ok").try();
-    place.add_bytes(", .zg_data.").try();
-    sym_member(place, "Ok").try();
-    place.add_bytes(" = ").try();
-    place.fmt("{tmp}.zg_data.").try();
-    sym_member(place, "Ok").try();
+    be.is_unit(payload).match({
+        true  => Ok(()),
+        false => write_ok_init(tmp, place),
+    }).try();
     place.add_bytes(" }").try();
     be.write_dest(dst, place.view())
+}
+
+// `, .zg_data.Ok = tmp.zg_data.Ok` — the initialiser a built literal
+// carries when the payload has a member to fill (`write_res_payload`
+// sends its non-unit case to `write_payload_init` for the same reason).
+write_ok_init = (tmp: str, out :: String) Res<(), AllocError> {
+    out.add_bytes(", .zg_data.").try();
+    out.sym_member("Ok").try();
+    out.add_bytes(" = ").try();
+    read_ok_payload(tmp, out).try();
+    Ok(());
 }
