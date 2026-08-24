@@ -9,7 +9,7 @@ unsigned types fit no signed C type (a check typed `int`/`long` never
 fires).
 
 Every test follows the house shape from `traps/div_zero_i32.zen`: the
-divisor comes from `env.vars.get("ZEN_TRAP_NEVER_SET")` so no constant
+divisor comes from `env.var("ZEN_TRAP_NEVER_SET")` so no constant
 folder can turn the runtime trap into a compile error (DESIGN.md: a
 provable trap is a compile error), and every program prints real,
 hand-checked arithmetic BEFORE trapping -- stdout survives the abort,

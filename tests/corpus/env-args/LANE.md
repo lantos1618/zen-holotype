@@ -55,15 +55,19 @@ None that survived into an encoded expectation. Two things worth recording:
    (must-fail territory), not wrong stdout, and it belongs to whoever owns
    the loop-family lowering.
 
-2. **`env.vars` is zeroed** — `get("ANYTHING")` is None for every name,
-   including ones actually in the environment (checked directly:
-   `ZEN_TEST_MARKER=hello-42 ./prog` prints absent). The generated prologue
-   builds `(Env){ .zu_m4argv = zg_argv_vec(argc, argv) }` and leaves every
-   other field at zero; nothing calls `getenv`. Consistent with gen_c_main's
-   comment that argv is "the one field the C runtime actually hands us", so
-   probably a known stage boundary rather than a bug — but no corpus test in
-   tests/corpus/env/ pins vars either way, and the div-mod-traps suite
-   RELIES on vars.get returning None for a name never set, which passes for
-   the wrong reason if vars is simply always empty.
+2. **`env.vars` is zeroed** — FIXED, and the field is gone. This lane's
+   finding was right and is the one that landed: `get("ANYTHING")` was None
+   for every name, including ones actually exported (checked directly:
+   `ZEN_TEST_MARKER=hello-42 ./prog` printed absent), because the generated
+   prologue built `(Env){ .zu_m4argv = zg_argv_vec(argc, argv) }` and left
+   every other field at zero with nothing calling `getenv`. It could not be
+   filled in place either — `Map.set` allocates and the allocator door is
+   `env.mem.alloc()` INSIDE main, which the entry literal runs before. So
+   `Env.vars` was removed outright and replaced by the capability
+   `env.var(name) Res<str>`, floored on `getenv`; the lane's own worry —
+   that div-mod-traps passed for the wrong reason because vars was ALWAYS
+   empty — is what makes the removal, not a refusal, the right answer, and
+   those tests now read their never-set name through `env.var`.
+   `corpus/env/env_var_reads_the_environment` pins it on PATH.
 
 TESTS: 8
