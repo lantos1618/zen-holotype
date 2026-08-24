@@ -381,7 +381,7 @@ Build* = {
                         self.queue(path, seen).try();
                         self.folder_root(path, seen)
                     },
-                    None     => self.missing_import(q),
+                    None     => self.missing_import(q, flat, folder),
                 })
             },
         })
@@ -427,9 +427,23 @@ Build* = {
     // like it. "One mistake, one diagnostic, anchored where the fix
     // goes." Two imports of the same absent module are two diagnostics,
     // one per site — two places to fix.
-    missing_import = (self :: @Self, q: QualifiedName)
+    //
+    // ANCHORING IS NOT SILENCE ABOUT WHAT WAS SOUGHT. The bare sentence
+    // said "path" and named none; both candidates travel with it, in
+    // probe order, root-relative like every path a fault prints. Built
+    // HERE and not in `fs_message`: that helper's other callers already
+    // name their file (`fs_fault` prints it as the subject), so only a
+    // missing import has no path to say.
+    missing_import = (self :: @Self, q: QualifiedName, flat: str, folder: str)
                      Res<(), AllocError> {
-        self.report(diag(fs_message(FsError.NotFound), q.span))
+        why ::= self.alloc.String().try();
+        why.fmt(
+            "{}: tried `{}` and `{}`",
+            fs_message(FsError.NotFound),
+            relative_to(self.root, flat),
+            relative_to(self.root, folder)
+        ).try();
+        self.report(diag(why.view(), q.span))
     }
 
     // A NESTED MODULE TRAVELS WITH ITS FOLDER — the one place an
