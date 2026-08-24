@@ -60,6 +60,7 @@ is_null_ptr, lower_null_ptr = gen.gen_c.gen_c_ptr
 lower_closure_call = gen.gen_c.gen_c_inline
 construct = gen.gen_c.gen_c_build
 is_format_door, lower_format_door = gen.gen_c.gen_c_fmt
+address_of = gen.gen_c.gen_c_fat
 
 // -----------------------------------------------------------------
 // `Res` values
@@ -1203,8 +1204,10 @@ write_recv_expr = (
 
 // An argument to a `::` parameter is passed BY ADDRESS: `::` says the
 // callee writes the caller's own bytes, so there has to be an address
-// to write through. Every such argument is a binding or a place —
-// exactly what C's `&` takes.
+// to write through. The argument text is not assumed to be a place —
+// a call result is a temporary this frame owns but is an rvalue in C —
+// so `address_of` takes `&` of a place and spills anything else into a
+// temporary first.
 write_arg* = (
     be    :: CBackend,
     value : ExprId,
@@ -1227,8 +1230,8 @@ by_ref* = (f: Function, i: usize) bool {
 }
 
 // A `::` parameter is handed the ADDRESS of its argument, and that is
-// true of an inlined body's argument too — `gen_c_inline.zen` writes the
-// same `&(..)` for the same reason.
+// true of an inlined body's argument too — `gen_c_inline.zen` goes
+// through the same place-aware lowering for the same reason.
 write_address* = (
     be    :: CBackend,
     value : ExprId,
@@ -1236,8 +1239,8 @@ write_address* = (
     want  : TyId,
     out   :: String
 ) Res<(), AllocError> {
-    out.add_bytes("&(").try();
-    expr(be, value, ctx, want, out).try();
-    out.add_bytes(")").try();
+    code ::= be.alloc.String().try();
+    expr(be, value, ctx, want, code).try();
+    be.address_of(code.view(), want, out).try();
     Ok(());
 }
