@@ -29,10 +29,13 @@
 # is also a test that the split links into a working compiler.
 #
 # seed/zen.c == stage1.c additionally means the committed seed is current --
-# what zen-0 emits for today's src IS what is checked in. It is reported, not
-# asserted: regenerating the seed is `make seed`, and a stale seed is a chore,
-# not a compiler bug. NOT stage1 vs stage2: those are two compilers reading the
-# same src, so they agree whenever zen-0 is a fixed point, whatever src does.
+# what zen-0 emits for today's src IS what is checked in. This IS asserted,
+# and last: a stale seed is not a compiler bug -- stage2 == stage3 below has
+# already said the compiler is a fixed point -- but it is a lie the repo tells
+# about itself, and a122b99f shipped one to main under an OK banner. It exits
+# 1 and `make seed` repairs it. NOT stage1 vs stage2: those are two compilers
+# reading the same src, so they agree whenever zen-0 is a fixed point, whatever
+# src does.
 set -eu
 ROOT=${ROOT:-src}
 OUT=${OUT:-.fixpoint}
@@ -100,5 +103,8 @@ fi
 if cmp -s seed/zen.c "$OUT/stage1.c"; then
     echo "fixpoint: OK  (stage2 == stage3 over $units units and one file; seed is current)"
 else
-    echo "fixpoint: OK  (stage2 == stage3 over $units units and one file; seed/zen.c is stale — \`make seed\`)"
+    echo "fixpoint: FAILED — seed/zen.c is stale: what zen-0 emits is not what is checked in" >&2
+    echo "  The compiler itself is fine (stage2 == stage3 over $units units and one file)." >&2
+    echo "  Regenerate with \`make seed\`, then commit seed/zen.c." >&2
+    exit 1
 fi

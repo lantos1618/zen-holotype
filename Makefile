@@ -89,7 +89,10 @@ seed: build
 ## disease has been diagnosed here: tests/bench was run by no target in
 ## `all`, so `allocs_op: 0` -- cited in src/ as a thing that fails the
 ## build -- was a number nothing had ever computed.
-test: build wired lint parse design cap dupcomments faults lextile ufcs style scope grammar-test editors bench-allocs fleet
+## `fixpoint` joined on 2026-08-24 (issue #761). Its seed-staleness branch
+## printed OK and exited 0, so a122b99f shipped a stale seed to main and
+## nothing that can fail said so. It asserts now; this is where it runs.
+test: build wired lint parse design cap dupcomments faults lextile ufcs style scope grammar-test editors bench-allocs fleet fixpoint
 	$(PY) tests/run.py
 
 ## wired: every gate this repository owns is REACHED by `make all`.
