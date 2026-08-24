@@ -74,8 +74,25 @@ MAX_FUNCTIONS* : usize = 8192
 // The whole translation unit for the program rooted at module `mi`.
 emit_program* = (be :: CBackend, mi: usize, out :: Emit)
                 Res<(), AllocError> {
+    be.lower_program(mi).try();
+    be.emit_prelude(out).try();
+    be.emit_protos(out).try();
+    be.emit_bodies(out).try();
+    be.emit_main(mi, out).try();
+    Ok(());
+}
+
+// The lowering, with nothing assembled. Its own name because a
+// multi-file emission runs it once and then assembles many files off
+// the one result — the walk is over the whole program either way.
+lower_program* = (be :: CBackend, mi: usize) Res<(), AllocError> {
     be.seed(mi).try();
-    drain(be).try();
+    drain(be)
+}
+
+// Everything a translation unit needs above its first prototype. The
+// top of the single file, and the top of `zen.h` when there are many.
+emit_prelude = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     emit_banner(out).try();
     emit_floor(out).try();
     emit_scope_floor(be, out).try();
@@ -87,9 +104,6 @@ emit_program* = (be :: CBackend, mi: usize, out :: Emit)
     // AFTER the types, because a capture record names them, and before
     // the prototypes, because a `Scope` parameter is a `zg_scope *`.
     emit_scope(be, out).try();
-    be.emit_protos(out).try();
-    be.emit_bodies(out).try();
-    be.emit_main(mi, out).try();
     Ok(());
 }
 
@@ -545,6 +559,9 @@ lower_shape = (
 )
               Res<(), AllocError> {
     ret = be.return_type(f, sctx).try();
+    // BEFORE THE BODY, because lowering a body keeps thunks as well as
+    // the function itself and they belong in the same file.
+    be.enter_unit(mi);
     be.reset_frame().try();
     be.check.release(0).try();
     sig   ::= be.alloc.Vec<TyId>();
@@ -646,10 +663,10 @@ bind_param = (be :: CBackend, p: Param, ctx: Ctx, sig :: Vec<TyId>)
     Ok(());
 }
 
-// `static <ret> <symbol>(<params>)`. Static because a translation unit
-// is the whole program — separate compilation is not a thing this
-// language does — so nothing but C's own `main` needs external
-// linkage.
+// `<linkage><ret> <symbol>(<params>)`. Static when the translation unit
+// is the whole program, since then nothing but C's own `main` needs
+// external linkage. A multi-file emission drops it: `be.linkage()` is
+// the one place either answer is spelled.
 write_proto = (
     be    :: CBackend,
     qname : str,
@@ -662,7 +679,7 @@ write_proto = (
 )
               Res<(), AllocError> {
     be.check_spellable(name, span, ret, sig).try();
-    out.add_bytes("static ").try();
+    out.add_bytes(be.linkage()).try();
     be.ctype(ret, out).try();
     out.add_bytes(" ").try();
     sym_fn(out, be.check.types, be.check.world, qname, sig, be.inst).try();
@@ -825,4 +842,66 @@ write_body_at = (be :: CBackend, out :: Emit, i: usize)
     out.say("}").try();
     out.line().try();
     Ok(());
+}
+
+// -----------------------------------------------------------------
+// the same program, in one file per module
+//
+// ONE TRANSLATION UNIT IS 110,451 LINES AND 4,641 FUNCTIONS, and `cc
+// -O2` is superlinear in a unit's size: the same code split into
+// per-module files and compiled with `-j16` measured 8.4x faster, and
+// only then can a compiler cache skip a module nothing changed.
+//
+// NOTHING HERE RE-LOWERS. `lower_program` has already run; a unit is a
+// selection from the one sorted list of functions, so the bytes of a
+// body do not depend on which file it lands in. `emit_program` above
+// stays the whole interface for the single-file mode the committed
+// seed is built by.
+// -----------------------------------------------------------------
+
+// The one header, included by every unit: the prelude, and a prototype
+// for every function in the program. A prototype above every body is
+// what already lets the bodies be sorted by name rather than by
+// dependency, so this file is the single-file top with the bodies cut
+// off it.
+emit_header* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    out.say("#ifndef ZEN_H").try();
+    out.say("#define ZEN_H").try();
+    out.line().try();
+    be.emit_prelude(out).try();
+    be.emit_protos(out).try();
+    out.say("#endif").try();
+    Ok(());
+}
+
+// One unit: every function whose body was lowered while module `u` was
+// the one being lowered, and `main` when `u` is the root.
+emit_unit* = (be :: CBackend, root: usize, u: usize, out :: Emit)
+             Res<(), AllocError> {
+    out.say("#include \"zen.h\"").try();
+    out.line().try();
+    seq = order(be.alloc, be.fn_names).try();
+    seq.loop((h, i) {
+        // `.match` and not `.then`: a loop binding read inside a nested
+        // closure does not resolve, and `i` is one.
+        (be.unit_of(i) == u).match({
+            false => Ok(()),
+            true  => be.write_body_at(out, i),
+        }).try();
+    });
+    (u == root).match({
+        false => Ok(()),
+        true  => be.emit_main(root, out),
+    }).try();
+    Ok(());
+}
+
+// Whether module `u` owns any body at all. A module every one of whose
+// functions is generic, inlined, or unreached contributes no file —
+// and an empty `.c` would still cost a compiler process.
+unit_used* = (be: CBackend, u: usize) bool {
+    Range(0, be.fn_units.len).find((i) { be.unit_of(i) == u }).match({
+        Ok(_) => true,
+        None  => false,
+    })
 }

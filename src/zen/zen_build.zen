@@ -62,6 +62,7 @@ PRELUDE, last_segment = sema.sema
 check_module_graph = sema.sema
 Def = sema.sema
 Emit, CBackend, emit_program = gen.gen
+lower_program, emit_header, emit_unit, unit_used = gen.gen
 
 Job = zen.zen_cli
 
@@ -680,7 +681,19 @@ Build* = {
         })
     }
 
+    // TWO SHAPES OF THE SAME PROGRAM. `-o <file.c>` is one translation
+    // unit and stays the whole of what the committed seed is built by;
+    // `--emit-c-dir <dir>` is one file per module beside a `zen.h`,
+    // which a C compiler builds in parallel and a compiler cache can
+    // skip a module of. Neither changes what is lowered.
     emit_c = (self :: @Self, c :: Checker, job: Job) Res<(), AllocError> {
+        job.dir.is_empty().match({
+            true  => self.emit_one(c, job),
+            false => self.emit_many(c, job),
+        })
+    }
+
+    emit_one = (self :: @Self, c :: Checker, job: Job) Res<(), AllocError> {
         be  ::= self.alloc.CBackend(self.tree, c).try();
         out ::= self.alloc.Emit().try();
         emit_program(be, 0, out).try();
@@ -690,6 +703,84 @@ Build* = {
         self.faults = self.faults + n;
         (n > 0).then(() { println("{}", report.view()); });
         (n == 0).then(() { self.deliver(job, out).try(); });
+        Ok(());
+    }
+
+    // THE DIAGNOSTICS ARE READ BEFORE ONE BYTE IS WRITTEN, exactly as
+    // above: the header is assembled first because assembling it is
+    // what emits the type definitions, and everything a unit adds after
+    // that is bytes already lowered.
+    emit_many = (self :: @Self, c :: Checker, job: Job) Res<(), AllocError> {
+        be ::= self.alloc.CBackend(self.tree, c).try();
+        be.use_externs();
+        lower_program(be, 0).try();
+        hdr ::= self.alloc.Emit().try();
+        emit_header(be, hdr).try();
+        report ::= self.alloc.String("").try();
+        be.render_diags(report).try();
+        n           = be.diag_count();
+        self.faults = self.faults + n;
+        (n > 0).then(() { println("{}", report.view()); });
+        (n == 0).then(() { self.write_units(be, job, hdr).try(); });
+        Ok(());
+    }
+
+    write_units = (self :: @Self, be :: CBackend, job: Job, hdr: Emit)
+                  Res<(), AllocError> {
+        self.write_at(job.dir, "zen.h", hdr.view()).try();
+        Range(0, self.tree.module_count()).loop((h, u) {
+            self.write_unit(be, job, u).try();
+        });
+        Ok(());
+    }
+
+    // MODULE 0 IS WRITTEN WHATEVER IT HOLDS: it is the root, and `main`
+    // is emitted into it. Every other module with no body of its own
+    // contributes no file, because an empty one still costs a process.
+    write_unit = (self :: @Self, be :: CBackend, job: Job, u: usize)
+                 Res<(), AllocError> {
+        ((u == 0) || unit_used(be, u)).match({
+            false => Ok(()),
+            true  => self.write_unit_at(be, job, u),
+        })
+    }
+
+    write_unit_at = (self :: @Self, be :: CBackend, job: Job, u: usize)
+                    Res<(), AllocError> {
+        out ::= self.alloc.Emit().try();
+        emit_unit(be, 0, u, out).try();
+        name ::= self.alloc.String().try();
+        self.unit_file(be, u, name).try();
+        self.write_at(job.dir, name.view(), out.view())
+    }
+
+    // THE FILE IS NAMED FOR THE MODULE, dots and all, because the
+    // module path is already the one name no two modules share — a
+    // counter would renumber every file when one module was added, and
+    // a renamed file is a compiler-cache miss.
+    unit_file = (self :: @Self, be :: CBackend, u: usize, out :: String)
+                Res<(), AllocError> {
+        self.tree.module_at(u).match({
+            None  => out.add_bytes("zg_unit"),
+            Ok(m) => out.add_bytes(m.name),
+        }).try();
+        out.add_bytes(".c")
+    }
+
+    write_at = (self :: @Self, dir: str, name: str, bytes: str)
+               Res<(), AllocError> {
+        path ::= self.alloc.String().try();
+        path.fmt("{dir}/{name}").try();
+        self.env.fs.write(path.view(), bytes).match({
+            Ok(_)  => Ok(()),
+            Err(e) => self.unit_write_failed(path.view(), e),
+        })
+    }
+
+    unit_write_failed = (self :: @Self, path: str, e: FsError)
+                        Res<(), AllocError> {
+        self.faults = self.faults + 1;
+        println("--emit-c-dir {}: {}", path, fs_message(e));
         Ok(());
     }
 

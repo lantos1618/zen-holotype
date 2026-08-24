@@ -47,6 +47,12 @@ Cli* = Build(Job)
 Job* = {
     root*: str,      // the compilation root: a DIRECTORY, always
     out*: str,       // where the C goes; empty when `-o` was not given
+    // WHERE THE C GOES WHEN IT IS MANY FILES: one `.c` per module and a
+    // `zen.h` beside them, written into this DIRECTORY, which must
+    // already exist (`std.env.Fs` writes files, and nothing else).
+    // Empty means one file — the shape the committed seed is built by,
+    // and the only shape `scripts/fixpoint.sh` names.
+    dir* :: str = "",
     // where to START inside the root, relative to it. THE DEFAULT IS
     // WRITTEN DOWN NOW: "empty means the driver probes" was true and
     // rode on C zero-init, which is a value nobody wrote and which the
@@ -102,11 +108,11 @@ FmtJob* = {
 // of the two scans that read it would silently start on the command.
 ARGS*: usize = 2
 
-USAGE*: str = "usage: zen build <root> [--entry <file>] --emit-c -o <file.c>\n       zen fmt [--check] <file.zen>..."
+USAGE*: str = "usage: zen build <root> [--entry <file>] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
 
 // What one argument is. A classifier, not a chain of matches at the
 // scan site — the scan stays readable while it carries the cursor.
-Arg = EmitC | Out | Entry | Repeat | Permute | Flag | Word
+Arg = EmitC | EmitDir | Out | Entry | Repeat | Permute | Flag | Word
 
 cli* = (argv: Vec<str>) Cli {
     argv.get(1).match({
@@ -189,6 +195,7 @@ is_word = (word: str) bool { !word.is_empty() && !is_flag(word) }
 job_of = (argv: Vec<str>) Cli {
     root  ::= "";
     out   ::= "";
+    dir   ::= "";
     entry ::= "";
     runs  ::= 1;
     perm  ::= "";
@@ -200,6 +207,11 @@ job_of = (argv: Vec<str>) Cli {
         i   = i + 1;
         classify(arg).match({
             EmitC   => { emit = true; },
+            EmitDir => {
+                emit = true;
+                dir  = arg_at(argv, i);
+                i    = i + 1;
+            },
             Out     => { out = arg_at(argv, i); i = i + 1; },
             Entry   => { entry = arg_at(argv, i); i = i + 1; },
             Repeat  => { runs = arg_at(argv, i).runs_of(); i = i + 1; },
@@ -211,16 +223,29 @@ job_of = (argv: Vec<str>) Cli {
             }),
         });
     });
-    verdict(root, out, entry, emit, bad, Debug(repeat: runs, permute: perm));
+    verdict(
+        Where(root: root, out: out, dir: dir, entry: entry),
+        emit,
+        bad,
+        Debug(repeat: runs, permute: perm)
+    );
 }
 
-verdict = (root: str, out: str, entry: str, emit: bool, bad: str, dbg: Debug)
-          Cli {
+// The three paths one scan produced, bundled so `verdict` and `built`
+// keep their shape as the scan grows a flag.
+Where = {
+    root*: str,
+    out*: str,
+    dir*: str,
+    entry*: str,
+}
+
+verdict = (w: Where, emit: bool, bad: str, dbg: Debug) Cli {
     bad.is_empty().match({
         false => Cli.Usage(bad),
-        true  => root.is_empty().match({
+        true  => w.root.is_empty().match({
             true  => Cli.Usage(""),
-            false => built(root, out, entry, emit, dbg),
+            false => built(w, emit, dbg),
         }),
     })
 }
@@ -232,13 +257,14 @@ verdict = (root: str, out: str, entry: str, emit: bool, bad: str, dbg: Debug)
 // held long enough that `make build` produced no binary — taking
 // `test`, `fmt` and `determinism` down with it, since a target that
 // can't run can't go red either.
-built = (root: str, out: str, entry: str, emit: bool, dbg: Debug) Cli {
+built = (w: Where, emit: bool, dbg: Debug) Cli {
     emit.match({
         false => Cli.Missing("--emit-c"),
         true  => Cli.Build(Job(
-            root: root,
-            out: out,
-            entry: entry,
+            root: w.root,
+            out: w.out,
+            dir: w.dir,
+            entry: w.entry,
             emit_c: emit,
             debug: dbg
         )),
@@ -259,6 +285,7 @@ built = (root: str, out: str, entry: str, emit: bool, dbg: Debug) Cli {
 classify = (a: str) Arg {
     found: Res<Arg> = loop<Arg>((h) {
         a.eq("--emit-c").then(() { h.break(Arg.EmitC) });
+        a.eq("--emit-c-dir").then(() { h.break(Arg.EmitDir) });
         a.eq("-o").then(() { h.break(Arg.Out) });
         a.eq("--entry").then(() { h.break(Arg.Entry) });
         a.eq("--repeat").then(() { h.break(Arg.Repeat) });

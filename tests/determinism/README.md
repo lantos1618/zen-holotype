@@ -138,13 +138,22 @@ not a pass.
 
 ## What the compiler must provide
 
-Two things, both small, both worth having anyway. They are stated here as a
+Four things, all small, all worth having anyway. They are stated here as a
 contract because `check.sh` is written against them and `PLAN.md` does not
-mention either.
+mention any of them.
 
 **`--emit-c -o <path>`** — write the generated C to `<path>` and stop. It is
 the artifact the fixpoint test compares, so it must be reachable without
 invoking a C compiler.
+
+**`--emit-c-dir <dir>`** — write the same program as one `.c` per module,
+beside the one `zen.h` they all include, into a directory that already
+exists. It is what `make build` compiles, because `cc -O2` is superlinear in
+a translation unit's size and 152 units built with `-j` beat one unit of
+110,451 lines by 8.4x. Check 6 is written against it, and it is a SECOND
+axis of nondeterminism and not the same one: the single file is a sort by
+mangled name, while which unit a function lands in is the module whose body
+was being lowered when it was kept.
 
 **`--repeat N`** — run the entire pipeline `N` times in one process, writing
 run 1 to `<path>` and run *i* to `<path>.<i>`. Without it, check 1 cannot be

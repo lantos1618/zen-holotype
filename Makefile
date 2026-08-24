@@ -16,6 +16,22 @@ CFLAGS  ?= -O2 -std=c99
 PY      ?= python3
 ROOT    ?= src
 
+# HOW MANY C COMPILERS AT ONCE. `cc -O2` is superlinear in a translation
+# unit's size, and the backend's own output is the extreme case: the
+# 110,451-line single unit took 70.4s where the SAME code, emitted one
+# file per module and compiled with -j16, took 8.4s. That ratio is why
+# `--emit-c-dir` exists. Lower it on a small box.
+J       ?= $(shell nproc 2>/dev/null || echo 4)
+
+# ccache WHEN IT IS INSTALLED, and nothing to install or configure when
+# it is not. It only ever helps a `-c` compile: a command that compiles
+# AND LINKS is uncacheable, which is why no recipe below spells both on
+# one line -- that single fact is what made ccache report
+# "Uncacheable calls: 4/4" for every build this project ever ran.
+# `make CACHE=` turns it off.
+CACHE   ?= $(shell command -v ccache 2>/dev/null)
+ZCC      = $(CACHE) $(CC)
+
 # `editors` IS IN THIS LIST BECAUSE `editors/` IS ALSO A DIRECTORY. Without
 # it make finds the directory, calls the target up to date, and runs the
 # script never — a gate that cannot fail because it cannot run.
@@ -26,15 +42,27 @@ all: test
 ## build: what a newcomer runs. needs only a C compiler.
 ##
 ## TWO steps and not one, because the compiler emits C and does not link:
-## `zen build <root> --emit-c -o <file.c>` is the whole interface (see
+## `zen build <root> --emit-c-dir <dir>` is the whole interface (see
 ## src/zen/zen_cli.zen). This target used to say `-o zen-new` with no
 ## --emit-c, which the driver accepts, writes nothing for, and exits 0
 ## on -- so `build` produced no binary and every target standing on it
 ## (test, fmt, determinism) could not run at all.
+##
+## ONE FILE PER MODULE, NOT ONE PER PROGRAM. `--emit-c-dir` writes
+## build/c/<module>.c beside a build/c/zen.h; `-j` then compiles 152
+## units at once instead of one of 110,451 lines, and each unit is a
+## `-c` compile a cache can skip. THE SEED IS STILL ONE FILE: `make
+## seed` writes seed/zen.c with `--emit-c -o`, and the line below
+## compiles it as one unit, because a newcomer must be able to build
+## this compiler out of exactly one committed C file.
 build: seed/zen.c
-	$(CC) $(CFLAGS) seed/zen.c -o zen
-	./zen build $(ROOT) --emit-c -o zen-new.c
-	$(CC) $(CFLAGS) zen-new.c -o zen-new && mv zen-new zen && rm -f zen-new.c
+	@mkdir -p build/obj
+	$(ZCC) $(CFLAGS) -c seed/zen.c -o build/obj/seed.o
+	$(CC) build/obj/seed.o -o zen
+	rm -rf build/c && mkdir -p build/c
+	./zen build $(ROOT) --emit-c-dir build/c
+	ls build/c/*.c | xargs -P $(J) -I{} $(ZCC) $(CFLAGS) -c {} -o {}.o
+	$(CC) build/c/*.o -o zen-new && mv zen-new zen
 
 ## seed: regenerate AND stage, in one target. never two commands —
 ## commit-then-regenerate ships a seed one change stale, and only a

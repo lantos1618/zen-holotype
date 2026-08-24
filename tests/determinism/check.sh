@@ -345,6 +345,75 @@ scan_for_re '(19|20)[0-9]{2}-[01][0-9]-[0-3][0-9]' 'a date'
 
 [ "$scan_hits" -eq 0 ] && ok "5. no timestamp, path, or pointer in the emitted C"
 
+# ------------------------------------- 6. the split, one file per module
+
+# `--emit-c-dir` IS WHAT `make build` COMPILES, so its determinism is the
+# same requirement as `--emit-c`'s and not a lesser one. Two things have to
+# hold and either alone is passable by a compiler that is wrong: the SET of
+# files, and every file's bytes.
+#
+# WHICH FILE A FUNCTION LANDS IN IS THE NEW WAY TO BE NONDETERMINISTIC, and
+# it does not show up in check 3 at all -- the single file is a sort by
+# mangled name, while a unit is the module whose body was being lowered
+# when the function was kept. A thunk is the case that could have gone
+# either way: it is kept in the unit of the FIRST body that needed one, and
+# this check is what says "first" is a property of the program.
+split_dir() {
+    rm -rf "$1" && mkdir -p "$1" || die "cannot create $1"
+    if [ -n "$2" ]; then
+        "$ZEN" build "$tree" --emit-c-dir "$1" --permute "$2"
+    else
+        "$ZEN" build "$tree" --emit-c-dir "$1"
+    fi
+}
+
+split_failed=0
+if ! split_dir "$work/split" "" >"$work/split.log" 2>&1; then
+    bad "6. one file per module: the compile failed"
+    sed 's/^/     /' <"$work/split.log" >&2
+    split_failed=1
+    setup_error=1
+else
+    if [ ! -f "$work/split/zen.h" ]; then
+        bad "6. one file per module: no zen.h, so no unit could compile"
+        split_failed=1
+        setup_error=1
+    fi
+    nunits=$(find "$work/split" -name '*.c' | wc -l | tr -d ' ')
+    # A `diff -r` over two empty directories is silent. The floor is the
+    # fixture's own module count, which the walk in 3a already proved is
+    # at least four.
+    if [ "$nunits" -lt "$nfiles" ]; then
+        bad "6. one file per module: $nunits unit(s) for $nfiles fixture module(s)"
+        note "a comparison over no files is not a comparison"
+        split_failed=1
+        setup_error=1
+    else
+        note "split: $nunits units beside zen.h"
+    fi
+fi
+
+if [ "$split_failed" -eq 0 ]; then
+    for mode in reverse rotate interleave; do
+        if ! split_dir "$work/split-$mode" "$mode" >"$work/split-$mode.log" 2>&1; then
+            bad "6. one file per module ($mode): compile failed"
+            sed 's/^/     /' <"$work/split-$mode.log" >&2
+            split_failed=1
+            setup_error=1
+            continue
+        fi
+        if ! diff -r "$work/split" "$work/split-$mode" >"$work/split-$mode.diff" 2>&1; then
+            bad "6. one file per module ($mode): the split differs"
+            note "which file a function lands in, or what is in it, moved with"
+            note "the order the modules were walked. It must not: a renamed or"
+            note "reshuffled unit is a rebuild of the whole program."
+            note "$(head -n 1 "$work/split-$mode.diff")"
+            split_failed=1
+        fi
+    done
+fi
+[ "$split_failed" -eq 0 ] && ok "6. one file per module, over a permuted walk"
+
 # ---------------------------------------------------------------- verdict
 
 printf '%s: %s passed, %s failed\n' "$progname" "$passed" "$failed"
