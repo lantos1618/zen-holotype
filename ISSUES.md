@@ -51,6 +51,18 @@ for stale bootstrapper framings: gen_c_expr.zen:118-119 (`ty_of`'s fallback
 justified by "the bootstrapper's backend") and gen_c_type.zen:52
 (`MAX_TYPE_PASSES` = "what the bootstrapper allows").
 
+**Two exported `write_label*` on `CBackend`, in the same folder.**
+`gen_c_loop.zen:762` takes `(be, stem: str, n: usize)` and
+`gen_c_sink.zen:921` takes `(be, done: usize)`. Zen has no function
+overloading and the C namespace is flat, so this is a name that resolves by
+luck. The UFCS rule DECLINES to recommend `be.write_label(..)` for either --
+"exactly one free function in the tree declares that name" is the condition
+that saved it -- so the gate silently routes around a collision instead of
+reporting one. `block` is the same shape but benign: `parse_stmt.zen:31` on
+`Parser` and `gen_c_stmt.zen:51` on `CBackend` are different receivers.
+Nothing gates duplicate free-function names; `ufcs_collisions.py` only checks
+a free function shadowing a METHOD.
+
 <!-- paste snippets here. -->
 
 ---
