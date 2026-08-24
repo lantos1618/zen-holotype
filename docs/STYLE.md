@@ -53,8 +53,8 @@ a bare name matches any one directory segment (`lex:` covered `src/std/lex/`
 in d6882f11; `gen_c:` covers `src/gen/gen_c/` but not `src/gen/gen.zen`); and
 a module's own stem carries its name (`zen_build.zen` sits under `zen:`).
 
-**A mechanical sweep (`style:`, `fmt:`, `ufcs:`) may rewrite `src/` anywhere,
-but it lands ALONE**: no new file under `src/` — a new file is a feature
+**A mechanical sweep (`style:`, `fmt:`, `ufcs:` -- or a bare `src:`, which
+claims the whole tree) may rewrite `src/` anywhere, but it lands ALONE**: no new file under `src/` — a new file is a feature
 landing and gets its own commit and its own sentence (issue #765's third
 rule) — and no `.expected` or `.count` change anywhere, because those files
 are how this repo's corpus speaks, and a diff in them is a behaviour or

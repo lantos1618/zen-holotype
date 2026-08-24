@@ -91,7 +91,15 @@ EXEMPT_PREFIXES = ("seed/",)
 # THE MECHANICAL-SWEEP TAGS, as used in this repo's log. A commit under one
 # of these prefixes DECLARES itself a sweep and gets rule 2 instead of rule
 # 1: src/ may be rewritten anywhere, but the landing must be alone.
-SWEEP_TAGS = {"style", "fmt", "format", "ufcs"}
+#
+# `src` BELONGS HERE because a bare `src:` subject claims the WHOLE tree --
+# 2b9aeae8 is one -- and a whole-tree claim is a sweep claim. Leaving `src`
+# out would make it match no path at all (nothing under src/ is named src),
+# flagging honest commits; putting it in the ordinary matcher instead would
+# make `anything, src:` a universal pass card for smuggling features. Sweep
+# discipline is the honest middle: declare the whole tree and you may touch
+# all of it, but you land alone.
+SWEEP_TAGS = {"style", "fmt", "format", "ufcs", "src"}
 
 # What a sweep may not bring with it: new code (rule 3 gives a new src/ file
 # its own sentence) and expectation diffs (a diagnostic or behaviour change).
@@ -229,6 +237,15 @@ CASES = [
      {"src/gen/gen_c/gen_c_call.zen": "M", "src/lsp/lsp_fmt.zen": "M",
       "src/fmt/fmt_src.zen": "M"}, True,
      "named areas hold, fmt is outside them"),
+    ("src: eight match ladders written as flat guards",
+     {f"src/{d}/f.zen": "M" for d in
+      ("gen/gen_c", "std/core", "std/lex", "std/parse", "zen")}, False,
+     "the real 2b9aeae8: `src:` claims the whole tree -- a SWEEP claim --"
+     " and this one landed alone (modifies only, adds nothing)"),
+    ("src: sweep that grows a module",
+     {"src/gen/gen_c/gen_c_expr.zen": "M",
+      "src/sema/sema_fresh_module.zen": "A"}, True,
+     "whole-tree reach still buys no company: a new file is a feature"),
     ("wip: half the tree reordered", {"src/sema/sema_type.zen": "M"}, True,
      "`wip:` states no scope, so any src/ touch is outside it"),
     # --- grammar edges ----------------------------------------------------
