@@ -722,9 +722,14 @@ or impl body" (`DESIGN.md:223`).
         false => "nonzero",
     })
 ```
-`DESIGN.md:1257-1260`. `.match` is a method taking one brace-delimited argument;
+`DESIGN.md:152`. `.match` is a method taking one brace-delimited argument;
 arms are `pattern => expr`, comma-separated, **trailing comma present**, no leading
-`|` (`DESIGN.md:152`). Note: **no `;` after the closing `)`**.
+`|` (`DESIGN.md:152`). Note: **no `;` after the closing `)`**. The comma between
+two arms is nevertheless OPTIONAL, as between struct members (D6): issue #770
+was grammar/match_block demanding what the compiler's arm parser -- which eats
+each arm's separator with `p.eat` -- never did, so a block-bodied arm followed
+by another arm parses with or without it, and tests/corpus/parse/
+block_bodied_arm_needs_no_comma pins the comma-less spelling for both parsers.
 
 ### C088 — match in statement/tail position as a function's value
 ```groovy
