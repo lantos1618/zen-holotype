@@ -25,7 +25,7 @@
 // symbol is a pure function of the instantiation — the property the
 // fixpoint stands on.
 
-Decl, Struct, TParam, ExprId = std.ast
+Decl, Enum, Struct, TParam, ExprId = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -79,8 +79,20 @@ decl_vars = (c :: Checker, d: Def, out :: Vec<TyId>) Res<(), AllocError> {
 
 decl_vars_of = (c :: Checker, d: Def, x: Decl, out :: Vec<TyId>)
                Res<(), AllocError> {
+    decl_tparams_of(c, d, x, out)
+}
+
+// The type parameters a DECLARATION reads: struct or enum, in
+// declaration order. An enum's variants carry its parameters exactly as
+// a struct's fields do (`Opt<T> = Some(T)`), and a backend that read
+// only `Struct` mangled every instantiation of a generic enum into one
+// symbol — see `gen_c_impl.generic_enum`, whose refusal this branch is
+// what retires (issue 738).
+decl_tparams_of = (c :: Checker, d: Def, x: Decl, out :: Vec<TyId>)
+                  Res<(), AllocError> {
     x.kind.match({
         Struct(s) => c.tparam_vars(s.tparams, d.qname, out),
+        Enum(e)   => c.tparam_vars(e.tparams, d.qname, out),
         _         => Ok(()),
     })
 }
@@ -109,8 +121,17 @@ open_named_decl = (be :: CBackend, decl: DeclId, x: Decl)
                   Res<Res<TyId>, AllocError> {
     x.kind.match({
         Struct(s) => be.open_struct_named(decl, s),
+        Enum(e)   => be.open_enum_named(decl, e),
         _         => Ok(None),
     })
+}
+
+open_enum_named = (be :: CBackend, decl: DeclId, e: Enum)
+                  Res<Res<TyId>, AllocError> {
+    owner = owner_of(be.check, decl.module.to_usize(), e.name.text).try();
+    args ::= be.alloc.Vec<TyId>();
+    tparam_vars(be.check, e.tparams, owner, args).try();
+    Ok(Ok(named_at(be.check, decl, owner, e.name.text, args).try()));
 }
 
 open_struct_named = (be :: CBackend, decl: DeclId, s: Struct)
@@ -412,8 +433,16 @@ enter_decl_tparams = (be :: CBackend, decl: DeclId, d: Decl)
                      Res<(), AllocError> {
     d.kind.match({
         Struct(s) => be.enter_struct_of(decl, s),
+        Enum(e)   => be.enter_enum_of(decl, e),
         _         => Ok(()),
     })
+}
+
+enter_enum_of = (be :: CBackend, decl: DeclId, e: Enum)
+                Res<(), AllocError> {
+    owner = owner_of(be.check, decl.module.to_usize(), e.name.text).try();
+    e.tparams.loop((h, tp) { be.enter_one(tp, owner).try() });
+    Ok(());
 }
 
 enter_struct_of = (be :: CBackend, decl: DeclId, s: Struct)

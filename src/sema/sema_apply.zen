@@ -26,7 +26,7 @@
 // at some arguments, never a bare head. `construct` gives the two forms.
 
 ExprId, Call, Arg = std.ast
-Decl, Struct, TypeId, Impl = std.ast
+Decl, Enum, Struct, TypeId, Impl = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -248,14 +248,21 @@ decl_tparams = (c :: Checker, d: Def, out :: Vec<TyId>)
                Res<(), AllocError> {
     decl_at(c.tree, d.id).match({
         None    => Ok(()),
-        Ok(dec) => c.struct_tparams(d, dec, out),
+        Ok(dec) => c.decl_tparams_of(d, dec, out),
     })
 }
 
-struct_tparams = (c :: Checker, d: Def, dec: Decl, out :: Vec<TyId>)
-                 Res<(), AllocError> {
+// A GENERIC ENUM IS CONSTRUCTED TOO — `Opt.Some(41)` builds an `Opt<T>`
+// through its payload variant, exactly as `Box(held: 7)` builds a
+// `Box<T>` through its fields. Reading tparams off `Struct` alone left
+// the variant ctor holding a bare head: the let typed as unsubstituted
+// `Opt` while the callee monomorphised to `Opt<i32>`, and cc rejected
+// the call (issue 738).
+decl_tparams_of = (c :: Checker, d: Def, dec: Decl, out :: Vec<TyId>)
+                  Res<(), AllocError> {
     dec.kind.match({
         Struct(s) => c.tparam_vars(s.tparams, d.qname, out),
+        Enum(e)   => c.tparam_vars(e.tparams, d.qname, out),
         _         => Ok(()),
     })
 }
