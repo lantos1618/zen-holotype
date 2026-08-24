@@ -1,0 +1,83 @@
+// src/sema/sema_operand.zen
+// AN OPERAND ANSWERS TO ITS PAIR.
+//
+// `binary_type` (sema_type.zen) asks `arith_type` for the pair's type
+// and then checks what the OPERATOR can prove: `check_binary` folds,
+// which needs both sides constant, and `check_eq` asks whether the
+// type has an `Eq` to dispatch to. Neither asks the two OPERANDS to
+// agree with each other, and while nobody did, `n: i8 = 100; n / 200`
+// printed -1 — the 200 reached `zg_div_i8`'s int8_t parameter as -56
+// (issue #725) — and `n: i16 = -1; big: u64 = 3; n < big` printed
+// false, the backend's C conversion answering a question sema had
+// never asked (issue #731).
+//
+// One rule, read at whichever settlement the pair is at:
+//
+//   A LITERAL DECLINES BY FAMILY, so it is asked by VALUE. "A
+//   literal's type comes from its context", and an operand's context
+//   is the type its pair settles — so `n + 1` stays legal at whatever
+//   width `n` is, while `n / 200` beside an `i8` does not. The
+//   question is `check_literal`'s, the same one an annotated binding,
+//   a call argument and an array element are already held to
+//   (sema_trap.zen); this is the position that rule had never reached.
+//
+//   TWO SETTLED INTEGER TYPES MUST BE THE SAME ONE. Nothing here
+//   coerces the other side, because there is no cast keyword to undo
+//   it with: the author widens by writing the conversion. The answer
+//   goes through `coerce`, the one place "expected X, found Y" is
+//   raised, so poison and holes decline exactly where they always did.
+//
+// One diagnostic per operator: the literal question, or the settled
+// one, never both.
+
+Binary = std.ast
+AllocError = std.mem
+str = std.text
+TyId, is_integer = sema.sema_ty
+Checker = sema.sema_check
+check_literal = sema.sema_trap
+
+// Whichever half is not a literal is the type the pair settles —
+// `arith_type` hands back the same one — and the other half answers to
+// it.
+operands_agree* = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
+                  Res<(), AllocError> {
+    c.is_literal_ty(lhs).match({
+        true  => c.check_literal(b.lhs, rhs),
+        false => c.rhs_operand(b, lhs, rhs),
+    })
+}
+
+// The left half is settled, so it is the pair's type and the right
+// half is the one asked.
+rhs_operand = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
+              Res<(), AllocError> {
+    c.is_literal_ty(rhs).match({
+        true  => c.check_literal(b.rhs, lhs),
+        false => c.settled_agree(b, lhs, rhs),
+    })
+}
+
+// Neither half is a literal, so the two NAMES are asked and not the
+// two ids: a name that is no integer prim declines here — `prim_name`
+// answers "" off a Prim, so `str`, floats, enums, poison, a hole and a
+// generic's type variable all keep the latitude they had.
+settled_agree = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
+                Res<(), AllocError> {
+    left: str  = c.prim_name(lhs);
+    right: str = c.prim_name(rhs);
+    disagree   = is_integer(left) && is_integer(right)
+        && (left.eq(right) == false);
+    disagree.match({
+        true  => c.mixed_operands(b, lhs, rhs),
+        false => Ok(()),
+    })
+}
+
+// The position is the operand whose type is refused: the left half is
+// the pair's type, so the right is the half that has to change.
+mixed_operands = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
+                 Res<(), AllocError> {
+    at = c.tree.expr_at(b.rhs).span;
+    c.coerce(at.file, at, rhs, lhs, "")
+}
