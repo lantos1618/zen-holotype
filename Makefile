@@ -143,17 +143,28 @@ gate = ./zen build tools/gates --entry $(1).zen --emit-c -o build/gates/$(1).c \
 ## `tools/fleet/fleet.sh` is the other half: fork/exec, timeout and flock,
 ## which Zen has no way to say (#748, #749, #750, #751, #752).
 ##
-## IT IS IN `test` BECAUSE A PROGRAM NOTHING BUILDS ROTS. This is not a gate
-## and asserts nothing about the tree; it asserts that the tree's own
-## dogfood still compiles, which is the only thing standing behind it --
-## `tools/fleet` has no corpus test, for the same reason `example/` has
-## none: the interesting half is not runnable without an agent fleet.
-## ~0.4s, same trade as the four gates above.
+## IT COMPILES THE PROGRAM AND THEN RUNS IT. This target used to stop at
+## the compile, on the argument that "the interesting half is not runnable
+## without an agent fleet" -- and that argument was wrong twice over. It is
+## wrong because compiling proves a program types and nothing else, and it
+## is wrong because the interesting half IS runnable: a lane's only effect
+## on a verdict is the target's bytes, so a `printf` stands in for the
+## agent exactly. tools/fleet/tests/oracle.sh drives plan, judge and report
+## over a checked-in work list and diffs stdout AND every exit status.
+##
+## The cost of stopping at the compile was a real bug that shipped with the
+## program: `report` counted every unmarked job as a FAILED one, so a job
+## the runner had never looked at came back as a failure and the run exited
+## 1 -- the setup-error-is-not-a-verdict rule that fleet.zen argues thirty
+## lines above the code that broke it. The oracle was red on it the first
+## time it ran. What is still unexercised is written down in oracle.sh:
+## fleet.sh, the round loop, the lock, the clock and the fork/exec.
+## ~0.5s, same trade as the four gates above.
 fleet: build
 	@mkdir -p build/fleet
 	@./zen build tools/fleet --entry fleet.zen --emit-c -o build/fleet/fleet.c \
-	  && $(CC) $(CFLAGS) build/fleet/fleet.c -o build/fleet/fleet \
-	  && echo "fleet: built build/fleet/fleet"
+	  && $(CC) $(CFLAGS) build/fleet/fleet.c -o build/fleet/fleet
+	@tools/fleet/tests/oracle.sh
 
 ## cap: STYLE.md's line caps. Over 500 prints a note; over 800 fails,
 ## unless the path carries a written reason in tools/gates/line_cap.zen.
