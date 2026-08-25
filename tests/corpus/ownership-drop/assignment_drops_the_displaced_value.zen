@@ -1,0 +1,22 @@
+// A STORE IS THE OTHER HALF OF OWNERSHIP: `x = v` onto a binding that
+// holds a Drop value destroys what it displaces (issue 733). Before
+// the fix this printed `body` / `drop two` and leaked "one" -- exit 0,
+// plausible stdout, no diagnostic anywhere.
+//
+// PREDICTION: the displaced value dies BEFORE the RHS lands in the
+// slot (the RHS may read it -- `s = f(s)` must keep working), so the
+// order is `drop one`, then the body line, then scope exit drops
+// "two": `drop one` / `body` / `drop two`.
+
+Noisy = { env: Env, tag: str }
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.tag) }
+})
+
+main = (env: Env) Res<i32, IoError> {
+    x ::= Noisy(env: env, tag: "one");
+    x = Noisy(env: env, tag: "two");
+    println("body");
+    Ok(0);
+}

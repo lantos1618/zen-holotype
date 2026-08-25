@@ -37,7 +37,7 @@ lower_match = gen.gen_c.gen_c_flow
 lower_try = gen.gen_c.gen_c_try
 declarator, is_unit = gen.gen_c.gen_c_type
 expr, ty_of, spills = gen.gen_c.gen_c_expr
-enter_block, leave_block, note_drop = gen.gen_c.gen_c_own
+enter_block, leave_block, note_drop, displace = gen.gen_c.gen_c_own
 
 Dest* = Discard | Return | Into(str)
 
@@ -567,10 +567,56 @@ declare_local = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
     Ok(());
 }
 
+// `x = v;` -- THE STORE IS HALF OF OWNERSHIP TOO. A slot whose type has
+// a Drop impl OWNS whatever it holds, so a bare-name store onto one
+// destroys the value it displaces before the new value lands. The
+// target's own expression text is rendered first, then the RHS goes
+// into a temporary: COMPUTE (the RHS may read the very value being
+// retired -- `s = f(s)`), DROP (behind the entry's live flag, so a
+// moved-out slot emits nothing), RE-ARM (a store creates no binding;
+// the fresh entry is the slot's own), STORE.
+//
+// EVERY tracked-store RHS lands in the temporary, not only the forms
+// that must spill: rendering a call as text would put nothing in flight
+// and the call would execute at the store line, BELOW the drop, reading
+// a retired value. Only a BARE NAME names tracked storage -- a member
+// or index target writes a field nobody tracks here, which is why
+// lsp_built.zen drops its arena by hand above its reassignment and must
+// not see a second drop.
 assign_target = (be :: CBackend, b: Bind, ty: TyId, ctx: Ctx)
                 Res<(), AllocError> {
+    be.tree.expr_at(b.target).kind.match({
+        Name(n) => be.has_drop(ty).try().match({
+            false => be.store_plain(b, ty, ctx),
+            true  => be.store_displacing(n.text, b, ty, ctx),
+        }),
+        _       => be.store_plain(b, ty, ctx),
+    }).try();
+    Ok(());
+}
+
+store_plain = (be :: CBackend, b: Bind, ty: TyId, ctx: Ctx)
+              Res<(), AllocError> {
     place ::= be.alloc.String().try();
     expr(be, b.target, ctx, ty, place).try();
-    be.deliver(b.value, ctx, ty, Dest.Into(place.view())).try();
-    Ok(());
+    be.deliver(b.value, ctx, ty, Dest.Into(place.view())).try()
+}
+
+store_displacing = (
+    be    :: CBackend,
+    name  : str,
+    b     : Bind,
+    ty    : TyId,
+    ctx   : Ctx
+) Res<(), AllocError> {
+    place ::= be.alloc.String().try();
+    expr(be, b.target, ctx, ty, place).try();
+    tmp ::= be.alloc.String().try();
+    sym_gen(tmp, "s", be.next_tmp()).try();
+    decl ::= be.alloc.String().try();
+    be.declarator(ty, tmp.view(), decl).try();
+    be.fmt("{};\n", decl.view()).try();
+    be.deliver(b.value, ctx, ty, Dest.Into(tmp.view())).try();
+    be.displace(name).try();
+    be.write_dest(Dest.Into(place.view()), tmp.view())
 }

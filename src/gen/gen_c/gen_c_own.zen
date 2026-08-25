@@ -258,6 +258,53 @@ write_clear = (be :: CBackend, live: usize) Res<(), AllocError> {
     be.fmt("{} = 0;\n", name.view())
 }
 
+// THE STORE-SIDE MIRROR OF release_binding. `x = v` onto a binding that
+// holds a Drop value destroys what it displaces (issue 733): the store
+// used to overwrite the slot and walk away, so an arena, a file handle
+// or a lock held by the old value leaked -- exit 0, plausible stdout,
+// no diagnostic anywhere.
+//
+// A NAME NAMES ONE STORAGE: the nearest tracked entry, the same one
+// release_binding answers through, and the entry carries the index and
+// type its own registration used. An inner shadow's store must not
+// reach past its own binding, and a parameter -- never registered,
+// because passing a Drop value to it is a borrow -- finds no entry and
+// gains none: a store onto a borrow must not teach the frame to drop
+// somebody else's value at scope exit.
+//
+// The entry fires behind its own live flag, so a slot whose value a
+// `consume` already moved out emits nothing here; the flag is then
+// killed, because one retirement is all a generation gets -- without
+// that, the retired entry would fire again at scope exit, over the NEW
+// value. note_drop arms a fresh one for the value landing now: `a =
+// consume b` onto a moved-out binding is the legal face of sema's
+// `revive`, and the swap test's scope-exit drops hang on exactly this
+// re-arm.
+displace* = (be :: CBackend, name: str) Res<(), AllocError> {
+    n = be.drop_count();
+    Range(0, n).find((k) {
+        be.drop_at(n - k - 1).match({
+            Ok(e) => e.name.eq(name),
+            None  => false,
+        })
+    }).match({
+        None  => Ok(()),
+        Ok(k) => be.drop_at(n - k - 1).match({
+            None  => Ok(()),
+            Ok(e) => be.displace_one(e),
+        }),
+    }).try();
+    Ok(());
+}
+
+// Drop through the entry's own machinery -- write_drop already knows
+// the guarded shape -- kill the flag, and register the successor.
+displace_one = (be :: CBackend, e: DropEntry) Res<(), AllocError> {
+    be.write_drop(e).try();
+    be.write_clear(e.live).try();
+    be.note_drop(e.name, e.index, e.ty).try()
+}
+
 has_drop* = (be :: CBackend, ty: TyId) Res<bool, AllocError> {
     site_of(be, ty).try().match({
         None  => Ok(false),
