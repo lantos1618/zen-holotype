@@ -643,12 +643,30 @@ Checker* = {
         })
     }
 
+    // TWO APPLICATIONS AGREE WHEN THEIR ARGUMENTS DO. A DIFFERENT ARITY
+    // AGREES ONLY WHERE THE CONTEXT WROTE NO ARGUMENTS: an application of
+    // a generic declaration against a bare head (`Range(0, n)` against
+    // `Range`, whose constructor call never carried arguments) has
+    // nothing on the bare side to compare, so the head decides alone.
+    // THE REVERSE IS A LIE ABOUT WHAT IS IN THE VALUE: a nullary variant
+    // of a generic enum types as the bare head (`variant_value`,
+    // sema_static.zen) with no argument written anywhere, and agreeing
+    // here let `pick(x)` pass sema with `x` carrying `Opt` while `pick`
+    // was monomorphised at `Opt<i32>` — two different structs in C, and
+    // cc the only checker left (issue 738). A declaration that HAS type
+    // parameters wrote them for a reason; nothing agrees with its
+    // application by forgetting them.
     args_agree = (self: @Self, g: Vec<TyId>, w: Vec<TyId>) bool {
         (g.len == w.len).match({
-            false => true,
+            false => self.wrote_no_args(w),
             true  => self.every_arg_agrees(g, w),
         })
     }
+
+    // The context's expectation carries no arguments — a bare head, not
+    // an application nobody filled in. What the value side forgot is
+    // then nobody's lie: there was no answer written to contradict.
+    wrote_no_args = (self: @Self, w: Vec<TyId>) bool { w.len == 0 }
 
     every_arg_agrees = (self: @Self, g: Vec<TyId>, w: Vec<TyId>) bool {
         Range(0, g.len).find((i) { self.arg_disagrees(g, w, i) })
@@ -754,8 +772,8 @@ Checker* = {
         })
     }
 
-    mismatch = (self :: @Self, file: str, span: Span, got: TyId, want: TyId,
-                name: str) Res<(), AllocError> {
+    mismatch* = (self :: @Self, file: str, span: Span, got: TyId, want: TyId,
+                 name: str) Res<(), AllocError> {
         self.report(
             file,
             span,
@@ -765,6 +783,28 @@ Checker* = {
                 found: got
             ))
         )
+    }
+
+    // A NULLARY VARIANT OF A GENERIC ENUM SETTLES AT THE FIRST POSITION
+    // THAT WROTE ITS ARGUMENTS DOWN. `Opt.None` answers the bare head —
+    // `variant_value` hands it back by design, and a blanket refusal
+    // would take `x.match({ Some(v) => .., None => .. })` down with it —
+    // so nothing about the value names its arguments. When a position
+    // DOES name them (an annotation, a formal's parameter type), that is
+    // the answer nobody else was in a position to give: accept the bare
+    // head there and let the position's type stand.
+    //
+    // ONE DECLARATION, BOTH SIDES, and only where the context decided:
+    // this is not assignability — it is what makes an unannotated
+    // nullary usable at all — so it lives beside `coerce`, asked at the
+    // positions with a written answer (`check_assign`), never inside
+    // `assignable`. The call that consumed `x` wrote nothing; refusing
+    // there is the whole point (issue 738).
+    nullary_settles* = (self: @Self, got: TyId, want: TyId) bool {
+        self.types.at(got).match({
+            Named(g) => g.args.len == 0 && self.applied_to(g, want),
+            _        => false,
+        })
     }
 
     // `!` is logical negation — the method table has no `Not` to

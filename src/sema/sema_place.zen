@@ -235,7 +235,14 @@ settled_elem = (c :: Checker, ty: TyId, a: TyArray) Res<TyId, AllocError> {
 check_assign* = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
                Res<(), AllocError> {
     node = c.tree.expr_at(b.value);
-    c.coerce(node.span.file, node.span, got, want, "").try();
+    // A position with a WRITTEN answer settles a bare nullary head
+    // (`nullary_settles`); everywhere else the mismatch stands.
+    // Asked here rather than through `coerce`, which reports as it
+    // answers and would have fired before this position got its say.
+    (c.assignable(got, want) || c.nullary_settles(got, want)).match({
+        true  => Ok(()),
+        false => c.mismatch(node.span.file, node.span, got, want, ""),
+    }).try();
     // family agreeing != value fitting: `n: i32 = 2147483648` is an
     // `int` literal, and `literal_fits` says every one fits every
     // integer type, so `coerce` alone said nothing
