@@ -1,0 +1,41 @@
+// THE LEGAL SHAPE, pinned beside the three refusals: a loop handle
+// travels INWARD only -- `h.break(..)` out of the loop it names, at any
+// depth, and `h.next()` skipping one pass -- and the loop stays an
+// expression whose value is matched, not discarded. A refusal is not
+// an oracle for the positive direction; this program runs and prints
+// checked numbers proving the working shape still compiles.
+//
+// EXPECTED: break carries 411 out of a 100-pass walk; next skips
+// exactly one tail per pass (3 of 4 print); a nested body breaks the
+// INNER handle without disturbing the outer's count.
+
+main = (env: Env) Res<i32> {
+    // h.break(v): the loop evaluates to Ok(411)
+    Range(0, 100).loop((h, v) {
+        (v == 41).then(() { h.break(v * 10 + 1) });
+    }).match({
+        Ok(n) => println("broke {}", n),
+        None  => println("missed"),
+    });
+
+    // h.next(): skip one tail, keep the loop -- 1 2 4 print, 3 does not
+    Range(0, 5).loop((h, v) {
+        (v == 3).then(() { h.next() });
+        println("pass {}", v);
+    });
+
+    // nested bodies, two handles, each answering its own loop:
+    // inner 10 / inner 30 / outer 0 -- then the outer breaks with 21
+    Range(0, 3).loop((h, outer) {
+        [10, 20, 30].loop((h2, inner) {
+            (inner == 20).then(() { h2.break() });
+            println("inner {}", inner);
+        });
+        (outer == 1).then(() { h.break(outer * 20 + 1) });
+        println("outer {}", outer);
+    }).match({
+        Ok(n) => println("outer broke {}", n),
+        None  => println("none"),
+    });
+    Ok(0);
+}
