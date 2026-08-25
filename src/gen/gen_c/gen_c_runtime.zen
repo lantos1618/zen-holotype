@@ -145,13 +145,18 @@ emit_index = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// What `println` lowers into, and only for a program that prints.
+// What the console lowers into, and only for a program that prints.
 //
 // DESIGN.md routes `println(..)` through the `Env` in scope — sugar for
 // `<the Env in scope>.out.println(..)` — and `Console`'s members are
 // DECLARED WITHOUT A BODY for the same reason `Fs`'s are: there is
 // nothing underneath to write them in. So the sugar bottoms out here:
 // decimal with no separators, one newline per `println`.
+//
+// TWO FAMILIES, ONE STREAM EACH (env.zen): `zg_print_*` writes stdout,
+// `zg_eprint_*` writes stderr, and every member of one is the other's
+// with an `e`. A program that never prints to stderr carries none of
+// the second family, on the same rule as the first.
 //
 // `zg_print_str` takes a `zg_str` BY VALUE rather than a pointer and a
 // length, so printing a `str` needs no temporary and therefore no
@@ -184,6 +189,41 @@ write_print = (out :: Emit) Res<(), AllocError> {
         "static void zg_print_bool(bool v) { zg_print_bytes(v ? \"true\" : \"false\", v ? 4u : 5u); }"
     ).try();
     out.say("static void zg_print_nl(void) { fputc('\\n', stdout); }").try();
+    out.line().try();
+    Ok(());
+}
+
+// The second family, and only for a program that narrates. Every member
+// is the stdout one with an `e` and FILE: same formats, other stream —
+// which is the whole point, since a caller takes the answer from stdout
+// and throws stderr away with `2>/dev/null`.
+emit_stderr* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    be.uses_stderr().match({
+        false => Ok(()),
+        true  => write_stderr(out),
+    })
+}
+
+write_stderr = (out :: Emit) Res<(), AllocError> {
+    out.say(
+        "static void zg_eprint_bytes(const char *s, size_t n) { fwrite(s, 1, n, stderr); }"
+    ).try();
+    out.say(
+        "static void zg_eprint_str(zg_str s) { fwrite(s.data, 1, s.len, stderr); }"
+    ).try();
+    out.say(
+        "static void zg_eprint_i64(int64_t v) { fprintf(stderr, \"%lld\", (long long)v); }"
+    ).try();
+    out.say(
+        "static void zg_eprint_u64(uint64_t v) { fprintf(stderr, \"%llu\", (unsigned long long)v); }"
+    ).try();
+    out.say(
+        "static void zg_eprint_f64(double v) { fprintf(stderr, \"%g\", v); }"
+    ).try();
+    out.say(
+        "static void zg_eprint_bool(bool v) { zg_eprint_bytes(v ? \"true\" : \"false\", v ? 4u : 5u); }"
+    ).try();
+    out.say("static void zg_eprint_nl(void) { fputc('\\n', stderr); }").try();
     out.line().try();
     Ok(());
 }

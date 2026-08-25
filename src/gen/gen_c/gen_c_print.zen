@@ -1,5 +1,6 @@
 // src/gen/gen_c/gen_c_print.zen
-// `println`, the one name that resolves to nothing a module declares.
+// The console writes: the sugar `println`/`print`, and the bound
+// `env.out.println`/`env.out.errorln`.
 //
 // DESIGN.md bends exactly one law here and says so out loud:
 // "`println(...)` is sugar for `<the Env in scope>.out.println(...)`,
@@ -14,6 +15,15 @@
 // `bootstrap/gen_c.py` reached and the one the corpus already agrees
 // with: `{}` on an integer is decimal with no separators, and `println`
 // appends exactly one newline.
+//
+// THE CONSOLE HAS TWO MEMBERS, ONE STREAM EACH (env.zen): stdout for
+// the program's answer, stderr for the program talking about itself.
+// They share everything this file does — the format walk, the argument
+// types, the newline — and differ in the C family the bytes leave
+// through: `zg_print_*` writes stdout, `zg_eprint_*` writes stderr.
+// The families are parallel on purpose, and every place that picks
+// between them picks with `pair`, so the two names sit together and a
+// missing stderr twin is visible at a glance.
 //
 // THE `Env`-IN-SCOPE CLAUSE IS NOT ENFORCED HERE, and that is a refusal
 // rather than an oversight. "No Env in scope is a compile error" cannot
@@ -45,13 +55,42 @@ sym_variant, RES_PATH = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 is_c_integer, is_signed, ctype = gen.gen_c.gen_c_type
 expr, ty_of, named_hole = gen.gen_c.gen_c_expr
-console_display = gen.gen_c.gen_c_display
+console_display, stderr_console = gen.gen_c.gen_c_display
 
-// The two spellings, and the only two. `print` is `println` without the
-// newline; nothing else in the prelude reaches the console.
+// The sugar's two spellings, and the only two. `print` is `println`
+// without the newline; nothing else in the prelude reaches the console
+// unnamed.
 is_print* = (name: str) bool { name.eq("println") || name.eq("print") }
 
-wants_newline* = (name: str) bool { name.eq("println") }
+// The console's own two members, one per stream. Not the sugar's set:
+// bare `errorln(..)` resolves to nothing, by the same clause that makes
+// bare `println(..)` sugar — the sugar exists only where DESIGN.md
+// writes it.
+is_console_print* = (name: str) bool {
+    name.eq("println") || name.eq("errorln")
+}
+
+// The stream a console member writes into. Reached only with a name
+// `is_console_print` answered to: stdout is the program's answer,
+// stderr is the program talking about itself, and a caller redirects
+// them apart — `2>/dev/null` silences errorln and touches nothing
+// println wrote.
+stream_of = (name: str) str {
+    name.eq("println").match({
+        true  => "stdout",
+        false => "stderr",
+    })
+}
+
+// One name per stream, from a parallel pair. The two families are
+// identical but for the FILE and the `e` in the name, so every selector
+// below is this function with two literals side by side.
+pair = (stream: str, stdout: str, stderr: str) str {
+    stream.eq("stderr").match({
+        true  => stderr,
+        false => stdout,
+    })
+}
 
 // `println("a {} b", x)` — the pieces of the format and the values
 // between them, one write each. A print is a STATEMENT SEQUENCE whose
@@ -59,12 +98,12 @@ wants_newline* = (name: str) bool { name.eq("println") }
 // caller's expression buffer.
 lower_print* = (be :: CBackend, c: Call, name: str, ctx: Ctx, out :: String)
                Res<(), AllocError> {
-    write_pieces(be, c, name, ctx).try();
+    write_pieces(be, c, name, "stdout", ctx).try();
     out.add_bytes("0")
 }
 
-// `env.out.println(..)` — THE SAME FLOOR, REACHED THROUGH THE RECORD
-// INSTEAD OF THROUGH THE SUGAR.
+// `env.out.println(..)` / `env.out.errorln(..)` — THE SAME FLOOR,
+// REACHED THROUGH THE RECORD INSTEAD OF THROUGH THE SUGAR.
 //
 // The two spellings name ONE call — the header's DESIGN.md quote — and
 // must bottom out in one place. Writing the bound form as a call
@@ -91,7 +130,8 @@ lower_console_print* = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    write_pieces(be, c, name, ctx).try();
+    stream = stream_of(name);
+    write_pieces(be, c, name, stream, ctx).try();
     cty ::= be.alloc.String().try();
     be.ctype(ret, cty).try();
     out.fmt("(({}){ .zg_tag = ", cty.view()).try();
@@ -99,29 +139,47 @@ lower_console_print* = (
     out.add_bytes(" })")
 }
 
-write_pieces = (be :: CBackend, c: Call, name: str, ctx: Ctx)
-               Res<(), AllocError> {
-    be.need_print();
-    write_args(be, c, ctx).try();
-    wants_newline(name).then(() { be.writeln("zg_print_nl();").try() });
+write_pieces = (
+    be     :: CBackend,
+    c      : Call,
+    name   : str,
+    stream : str,
+    ctx    : Ctx
+) Res<(), AllocError> {
+    stream.eq("stdout").then(() { be.need_print(); });
+    stream.eq("stderr").then(() { be.need_stderr(); });
+    write_args(be, c, stream, ctx).try();
+    is_console_print(name).then(() {
+        be.writeln(pair(stream, "zg_print_nl();", "zg_eprint_nl();")).try()
+    });
     Ok(());
 }
 
-write_args = (be :: CBackend, c: Call, ctx: Ctx) Res<(), AllocError> {
+write_args = (
+    be     :: CBackend,
+    c      : Call,
+    stream : str,
+    ctx    : Ctx
+) Res<(), AllocError> {
     c.args.get(0).match({
         None  => Ok(()),
-        Ok(a) => write_from(be, c, a, ctx),
+        Ok(a) => write_from(be, c, a, stream, ctx),
     })
 }
 
 // A leading string literal is a FORMAT and the rest are its values.
 // Anything else is just a value, and so is everything after it:
 // `println(s)` prints `s`.
-write_from = (be :: CBackend, c: Call, first: Arg, ctx: Ctx)
-             Res<(), AllocError> {
+write_from = (
+    be     :: CBackend,
+    c      : Call,
+    first  : Arg,
+    stream : str,
+    ctx    : Ctx
+) Res<(), AllocError> {
     format_of(be, first.value).match({
-        Ok(raw) => write_format(be, c, first.value, raw, ctx),
-        None    => write_values(be, c, 0, ctx),
+        Ok(raw) => write_format(be, c, first.value, raw, stream, ctx),
+        None    => write_values(be, c, 0, stream, ctx),
     })
 }
 
@@ -143,19 +201,29 @@ literal_format = (l: Literal) Res<str> {
 
 // Every value argument from `from` on, in order, with nothing between
 // them.
-write_values = (be :: CBackend, c: Call, from: usize, ctx: Ctx)
-               Res<(), AllocError> {
+write_values = (
+    be     :: CBackend,
+    c      : Call,
+    from   : usize,
+    stream : str,
+    ctx    : Ctx
+) Res<(), AllocError> {
     Range(from, c.args.len).loop((h, i) {
-        write_value_at(be, c, i, ctx).try();
+        write_value_at(be, c, i, stream, ctx).try();
     });
     Ok(());
 }
 
-write_value_at = (be :: CBackend, c: Call, i: usize, ctx: Ctx)
-                 Res<(), AllocError> {
+write_value_at = (
+    be     :: CBackend,
+    c      : Call,
+    i      : usize,
+    stream : str,
+    ctx    : Ctx
+) Res<(), AllocError> {
     c.args.get(i).match({
         None  => Ok(()),
-        Ok(a) => write_value(be, a.value, ctx),
+        Ok(a) => write_value(be, a.value, stream, ctx),
     })
 }
 
@@ -176,8 +244,14 @@ write_value_at = (be :: CBackend, c: Call, i: usize, ctx: Ctx)
 // it holds one. No decoded copy, no second escape table.
 // -----------------------------------------------------------------
 
-write_format = (be :: CBackend, c: Call, id: ExprId, raw: str, ctx: Ctx)
-               Res<(), AllocError> {
+write_format = (
+    be     :: CBackend,
+    c      : Call,
+    id     : ExprId,
+    raw    : str,
+    stream : str,
+    ctx    : Ctx
+) Res<(), AllocError> {
     end = body_end(raw);
     start ::= 1;
     used  ::= 1;
@@ -185,30 +259,31 @@ write_format = (be :: CBackend, c: Call, id: ExprId, raw: str, ctx: Ctx)
     loop(() { i < end }, (h) {
         at = fmt_at(raw, i, end);
         at.ends_run().then(() {
-            write_piece(be, raw, start, at.keep).try();
-            write_what(be, c, id, at, used, ctx).try();
+            write_piece(be, raw, start, at.keep, stream).try();
+            write_what(be, c, id, at, used, stream, ctx).try();
             used  = used + at.what.arguments_taken();
             start = at.next;
         });
         i = at.next;
     });
-    write_piece(be, raw, start, end).try();
-    write_values(be, c, used, ctx).try();
+    write_piece(be, raw, start, end, stream).try();
+    write_values(be, c, used, stream, ctx).try();
     Ok(());
 }
 
 // What one position turned out to be, written into the console.
 write_what = (
-    be   :: CBackend,
-    c    : Call,
-    id   : ExprId,
-    at   : FmtAt,
-    used : usize,
-    ctx  : Ctx
+    be     :: CBackend,
+    c      : Call,
+    id     : ExprId,
+    at     : FmtAt,
+    used   : usize,
+    stream : str,
+    ctx    : Ctx
 ) Res<(), AllocError> {
     at.what.match({
-        Hole     => write_hole(be, c, used, ctx),
-        Named(n) => write_named(be, id, at, n),
+        Hole     => write_hole(be, c, used, stream, ctx),
+        Named(n) => write_named(be, id, at, n, stream),
         NoName   => report_in_format(
             be,
             id,
@@ -222,12 +297,17 @@ write_what = (
 // `{name}`, written into the console through the printer its type picks —
 // the same choice a positional hole makes, because the two spellings
 // differ in where the value came FROM and in nothing after that.
-write_named = (be :: CBackend, id: ExprId, at: FmtAt, name: str)
-              Res<(), AllocError> {
+write_named = (
+    be     :: CBackend,
+    id     : ExprId,
+    at     : FmtAt,
+    name   : str,
+    stream : str
+) Res<(), AllocError> {
     text ::= be.alloc.String().try();
     be.named_hole(name, text).try().match({
         None  => report_in_format(be, id, at, GenFault.Unresolved(name)),
-        Ok(t) => write_typed(be, id, t, be.check.prim_name(t), text.view()),
+        Ok(t) => write_typed(be, id, t, be.check.prim_name(t), text.view(), stream),
     })
 }
 
@@ -329,10 +409,10 @@ opens_name = (raw: str, i: usize, end: usize) bool {
         && raw.index(i + 1).is_ident_start()
 }
 
-// One past the last identifier byte at or after `from`. THE IDENTIFIER
-// GRAMMAR IS `std.core.byte`'S and is not restated: a name in a format
-// hole is a name, and two spellings of "what a name is" is exactly the
-// drift this file avoids everywhere else.
+// The index one past the last identifier byte at or after `from`. THE
+// IDENTIFIER GRAMMAR IS `std.core.byte`'S and is not restated: a name in
+// a format hole is a name, and two spellings of "what a name is" is
+// exactly the drift this file avoids everywhere else.
 ident_end = (raw: str, from: usize, end: usize) usize {
     j ::= from;
     loop(() { (j < end) && raw.index(j).is_ident_cont() }, (h) {
@@ -385,28 +465,43 @@ step_of = (raw: str, i: usize) usize {
 // A hole with no argument left prints itself, which is what the
 // bootstrapper does and what makes a stray `{}` visible rather than
 // silently swallowed.
-write_hole = (be :: CBackend, c: Call, used: usize, ctx: Ctx)
-             Res<(), AllocError> {
+write_hole = (
+    be     :: CBackend,
+    c      : Call,
+    used   : usize,
+    stream : str,
+    ctx    : Ctx
+) Res<(), AllocError> {
     c.args.get(used).match({
-        None  => be.writeln("zg_print_bytes(\"{}\", 2);"),
-        Ok(a) => write_value(be, a.value, ctx),
+        None  => be.writeln(pair(
+                    stream,
+                    "zg_print_bytes(\"{}\", 2);",
+                    "zg_eprint_bytes(\"{}\", 2);"
+                )),
+        Ok(a) => write_value(be, a.value, stream, ctx),
     })
 }
 
 // One literal chunk, and nothing at all when the chunk is empty —
 // `println("{}", x)` emits one write and not three.
-write_piece = (be :: CBackend, raw: str, start: usize, stop: usize)
-              Res<(), AllocError> {
+write_piece = (
+    be     :: CBackend,
+    raw    : str,
+    start  : usize,
+    stop   : usize,
+    stream : str
+) Res<(), AllocError> {
     (stop > start).match({
         false => Ok(()),
-        true  => write_chunk(be, raw.slice(start, stop)),
+        true  => write_chunk(be, raw.slice(start, stop), stream),
     })
 }
 
-write_chunk = (be :: CBackend, piece: str) Res<(), AllocError> {
+write_chunk = (be :: CBackend, piece: str, stream: str) Res<(), AllocError> {
     n ::= be.alloc.String().try();
     write_usize(n, decoded_bytes(piece)).try();
-    be.fmt("zg_print_bytes(\"{piece}\", {}u);\n", n.view())
+    be.fmt("{}(\"{piece}\", {}u);\n",
+           pair(stream, "zg_print_bytes", "zg_eprint_bytes"), n.view())
 }
 
 // How many bytes a raw piece denotes: each escape counts once.
@@ -428,56 +523,71 @@ decoded_bytes* = (piece: str) usize {
 // nothing else to read.
 // -----------------------------------------------------------------
 
-write_value = (be :: CBackend, arg: ExprId, ctx: Ctx) Res<(), AllocError> {
+write_value = (
+    be     :: CBackend,
+    arg    : ExprId,
+    stream : str,
+    ctx    : Ctx
+) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     ty      = be.ty_of(arg, ctx, unknown).try();
     prim    = be.check.prim_name(ty);
     text ::= be.alloc.String().try();
     expr(be, arg, ctx, ty, text).try();
-    write_typed(be, arg, ty, prim, text.view())
+    write_typed(be, arg, ty, prim, text.view(), stream)
 }
 
-write_typed = (be :: CBackend, arg: ExprId, ty: TyId, prim: str, text: str)
-              Res<(), AllocError> {
-    fn = printer(prim);
+write_typed = (
+    be     :: CBackend,
+    arg    : ExprId,
+    ty     : TyId,
+    prim   : str,
+    text   : str,
+    stream : str
+) Res<(), AllocError> {
+    fn = printer(prim, stream);
     fn.is_empty().match({
-        true  => write_display(be, arg, ty, text),
+        true  => write_display(be, arg, ty, text, stream),
         false => write_write(be, fn, cast_of(prim), text),
     })
 }
 
-// The runtime helper a primitive prints through. Empty means there is
-// none, and `write_display` below is where such a value goes.
-printer* = (prim: str) str {
+// The runtime helper a primitive prints through, into the stream the
+// call was made against. Empty means there is none, and `write_display`
+// below is where such a value goes.
+printer* = (prim: str, stream: str) str {
     prim.eq("str").match({
-        true  => "zg_print_str",
-        false => scalar_printer(prim),
+        true  => pair(stream, "zg_print_str", "zg_eprint_str"),
+        false => scalar_printer(prim, stream),
     })
 }
 
-scalar_printer = (prim: str) str {
+scalar_printer = (prim: str, stream: str) str {
     prim.eq("bool").match({
-        true  => "zg_print_bool",
-        false => number_printer(prim),
+        true  => pair(stream, "zg_print_bool", "zg_eprint_bool"),
+        false => number_printer(prim, stream),
     })
 }
 
-number_printer = (prim: str) str {
+number_printer = (prim: str, stream: str) str {
     is_float(prim).match({
-        true  => "zg_print_f64",
-        false => integer_printer(prim),
+        true  => pair(stream, "zg_print_f64", "zg_eprint_f64"),
+        false => integer_printer(prim, stream),
     })
 }
 
-integer_printer = (prim: str) str {
+integer_printer = (prim: str, stream: str) str {
     is_c_integer(prim).match({
         false => "",
-        true  => signed_printer(prim),
+        true  => signed_printer(prim, stream),
     })
 }
 
-signed_printer = (prim: str) str {
-    is_signed(prim).match({ true => "zg_print_i64", false => "zg_print_u64" })
+signed_printer = (prim: str, stream: str) str {
+    is_signed(prim).match({
+        true  => pair(stream, "zg_print_i64", "zg_eprint_i64"),
+        false => pair(stream, "zg_print_u64", "zg_eprint_u64"),
+    })
 }
 
 // The C cast an argument takes on the way in. A `str` and a `bool` are
@@ -513,12 +623,20 @@ write_write = (be :: CBackend, fn: str, cast: str, text: str)
 }
 
 // A value this backend has no primitive write for prints through its
-// own `toString`, into the console — `gen_c_display.zen` holds that
-// path and the record it hands over. A type that supplies none is where
-// the diagnostic finally is.
-write_display = (be :: CBackend, arg: ExprId, ty: TyId, text: str)
-                Res<(), AllocError> {
-    be.console_display(ty, text).try().match({
+// own `toString`, into the console the call was made against —
+// `gen_c_display.zen` holds that path and the record it hands over. A
+// type that supplies none is where the diagnostic finally is.
+write_display = (
+    be     :: CBackend,
+    arg    : ExprId,
+    ty     : TyId,
+    text   : str,
+    stream : str
+) Res<(), AllocError> {
+    stream.eq("stderr").match({
+        true  => be.stderr_console(ty, text),
+        false => be.console_display(ty, text),
+    }).try().match({
         true  => Ok(()),
         false => print_fault(be, arg),
     })

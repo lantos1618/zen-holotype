@@ -95,6 +95,10 @@ CBackend* = {
     // program computes on.
     print_used :: bool,
 
+    // stderr's family, its own flag and not `print_used`: a program that
+    // only narrates must not carry stdout's helpers either.
+    stderr_used :: bool,
+
     // The two POSIX headers the FS floor needs are the one place the
     // emitted C leaves C99, so a program that never opens a file must not
     // pay for them.
@@ -310,6 +314,19 @@ CBackend* = {
     need_print* = (self :: @Self) () { self.print_used = true; }
 
     uses_print* = (self: @Self) bool { self.print_used }
+
+    // -----------------------------------------------------------------
+    // the stderr floor
+    //
+    // A SECOND FLAG, NOT THE FIRST REUSED. `emit_print` writes stdout's
+    // family, `emit_stderr` stderr's; sharing one bit would make a
+    // program that only narrates carry every stdout helper it never
+    // calls.
+    // -----------------------------------------------------------------
+
+    need_stderr* = (self :: @Self) () { self.stderr_used = true; }
+
+    uses_stderr* = (self: @Self) bool { self.stderr_used }
 
     // -----------------------------------------------------------------
     // the filesystem floor
@@ -837,6 +854,7 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         type_done: a.Vec<bool>(),
         helper_types: a.Vec<String>(),
         print_used: false,
+        stderr_used: false,
         fs_used: false,
         stdin_used: false,
         env_used: false,

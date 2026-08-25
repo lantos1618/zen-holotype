@@ -43,7 +43,7 @@ lower_probe, lower_write, lower_read, lower_remove = gen.gen_c.gen_c_fs
 close_else, close_brace, open_null_test = gen.gen_c.gen_c_fs
 lower_stdin_read = gen.gen_c.gen_c_stdin
 lower_env_var = gen.gen_c.gen_c_env
-lower_console_print = gen.gen_c.gen_c_print
+lower_console_print, is_console_print = gen.gen_c.gen_c_print
 is_defer, lower_defer = gen.gen_c.gen_c_scope
 
 // -----------------------------------------------------------------
@@ -84,20 +84,21 @@ is_env_capability = (be :: CBackend, rty: TyId, name: str) bool {
     be.is_env_var(rty, name) || be.is_console_capability(rty, name)
 }
 
-// `Console.println` IS ONE OF THESE: floor is `fwrite`, bodiless for
-// the same reason `Fs.read` is, and `gen_c_print.zen` writes it. Reaches
-// this file only when the receiver was WRITTEN (`env.out.println(..)`)
-// — the sugar names no function and is recognised one level up.
-// Without this it fell through to `lower_fat_call`: `args: ...` has no
-// C spelling, so the slot's parameter came out as `ctype`'s `int`
-// fallback and `cc` rejected every argument handed to it.
+// `Console.println` AND `Console.errorln` ARE OF THESE: floor is
+// `fwrite`, bodiless for the same reason `Fs.read` is, and
+// `gen_c_print.zen` writes them — one stream each. Reaches this file
+// only when the receiver was WRITTEN (`env.out.println(..)`) — the
+// sugar names no function and is recognised one level up. Without this
+// it fell through to `lower_fat_call`: `args: ...` has no C spelling,
+// so the slot's parameter came out as `ctype`'s `int` fallback and
+// `cc` rejected every argument handed to it.
 //
 // `Scope.defer` IS THE LAST LINK, NOT A PEER of the ones above — a
 // capability by the same test, but its receiver is a value the program
 // made rather than one `Env` handed it, so owner alone can't recognise
 // it and `is_defer` asks its own question.
 is_console_capability = (be :: CBackend, rty: TyId, name: str) bool {
-    (owner_of(be, rty).eq("Console") && name.eq("println"))
+    (owner_of(be, rty).eq("Console") && is_console_print(name))
         || be.is_stdin_read(rty, name)
         || be.is_defer(rty, name)
 }
@@ -236,7 +237,7 @@ console_verb = (
     out :: String
 )
                Res<(), AllocError> {
-    a.name.text.eq("println").match({
+    is_console_print(a.name.text).match({
         true  => lower_console_print(be, c, a.name.text, ret, ctx, out),
         false => be.verb_1(id, c, a, rty, ret, aty, ctx, out),
     })
