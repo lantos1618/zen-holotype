@@ -1134,7 +1134,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     p.add_argument("--zen", default="zen", help="path to the zen binary")
     p.add_argument("--cc", default=os.environ.get("CC", "cc"), help="C compiler")
-    p.add_argument("--cc-flags", default=os.environ.get("CFLAGS", "-std=c11 -O0 -g"),
+    p.add_argument("--cc-flags",
+                   default=os.environ.get("CFLAGS", "-std=c11 -O0 -g -Werror=return-type"),
                    help="flags passed to the C compiler")
     p.add_argument("--tests", default=str(TESTS_DIR), help="the tests/ directory")
     p.add_argument("--filter", action="append", default=[], metavar="GLOB",
