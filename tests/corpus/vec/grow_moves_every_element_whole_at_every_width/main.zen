@@ -24,11 +24,13 @@ main = (env: Env) Res<i32, AllocError> {
     alloc ::= env.mem.alloc();
 
     // i16: 2-byte elements. Values straddle zero, so a sign-extension bug
-    // and a truncation bug read differently.
+    // and a truncation bug read differently. The walk is named <i16>: the
+    // values are picked from the pass count, and usize -> i16 is not
+    // spellable (num.zen offers usize only to_u64), so the row computes
+    // in its own storage width -- every intermediate fits i16.
     narrow ::= alloc.Vec<i16>();
-    Range(0, 33).loop((h, n) {
-        m: i32 = n;
-        v: i32 = (n % 2).match({ true => 0 - (m * 500 + 7), false => m * 500 + 7 });
+    Range<i16>(0, 33).loop((h, n) {
+        v: i16 = ((n % 2) == 1).match({ true => 0 - (n * 500 + 7), false => n * 500 + 7 });
         narrow.add(v).try();
     });
     n0  = narrow.get(0).ok_or(AllocError.OutOfMemory).try();
@@ -39,12 +41,11 @@ main = (env: Env) Res<i32, AllocError> {
     n32 = narrow.get(32).ok_or(AllocError.OutOfMemory).try();
     println("i16 {} {} {} {} {} {}", n0, n1, n15, n16, n31, n32);
 
-    // i32: 4-byte elements, negative extremes included. The loop's `n` is a
-    // usize, so every arithmetic step below is typed through the i32 binding.
+    // i32: 4-byte elements, negative extremes included. Same repair as
+    // the i16 row: the walk is named <i32> and parity is a bool match.
     mid ::= alloc.Vec<i32>();
-    Range(0, 33).loop((h, n) {
-        m: i32 = n;
-        v: i32 = (n % 2).match({ true => 0 - (2000000000 - m), false => 2000000000 - m });
+    Range<i32>(0, 33).loop((h, n) {
+        v: i32 = ((n % 2) == 1).match({ true => 0 - (2000000000 - n), false => 2000000000 - n });
         mid.add(v).try();
     });
     m0  = mid.get(0).ok_or(AllocError.OutOfMemory).try();
