@@ -347,14 +347,32 @@ written_literal = (c: Checker, node: Expr) Res<str, AllocError> {
     })
 }
 
-// Unlike `const_int`, walks only literal, paren and unary-minus forms —
-// recursion bounded by the parser's own nesting limit.
+// Unlike `const_int`, walks only forms whose value is written here:
+// literals, parens, unary minus — and arithmetic ON those, since a
+// module constant's value is one number however many operators wrote
+// it (#769). A binding stays out of bounds: the trap corpus routes
+// values like `i32.MAX` through one on purpose.
 literal_int = (c: Checker, node: Expr) Res<i64> {
     node.kind.match({
         Literal(l) => const_literal(l),
         Paren(p)   => c.literal_int(c.tree.expr_at(p.inner)),
         Unary(u)   => c.literal_neg(u),
+        Binary(b)  => c.literal_binary(b),
         _          => None,
+    })
+}
+
+literal_binary = (c: Checker, b: Binary) Res<i64> {
+    c.literal_int(c.tree.expr_at(b.lhs)).match({
+        None  => None,
+        Ok(x) => c.literal_rhs(b, x),
+    })
+}
+
+literal_rhs = (c: Checker, b: Binary, x: i64) Res<i64> {
+    c.literal_int(c.tree.expr_at(b.rhs)).match({
+        None  => None,
+        Ok(y) => fold(b.op, x, y),
     })
 }
 
