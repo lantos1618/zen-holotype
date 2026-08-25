@@ -312,6 +312,25 @@ decl_call = (
     cands ::= c.alloc.Vec<Cand>();
     c.cands_of(ctx.module, name, cands).try();
     c.travelled_cands(name, recv, cands).try();
+    // THE FREE FORM OF A UFCS NAME REACHES THE SAME FUNCTION THE DOT
+    // DOES (#771). `x.f(a)` arrives as `ufcs_call`, which prepends the
+    // receiver and hands `decl_call` a real `recv` — so the travelled
+    // pool above answers it. But UFCS says those are ONE call surface,
+    // and `f(x)` arrives HERE, where `recv` is `None`: the pool was
+    // never asked, sema answered silence, and CODEGEN refused with
+    // `cannot resolve` — right line, wrong pass. When there is no
+    // receiver the receiver IS argument zero, so ask the SAME pool the
+    // dot asks, through its type. The pool's own gates still hold: only
+    // an exported function whose FIRST parameter takes that type joins,
+    // already-present candidates are not added twice, and `<T>` swallows
+    // nothing it did not swallow at the dot.
+    recv.match({
+        Ok(_) => Ok(()),
+        None  => actuals.get(0).match({
+            None  => Ok(()),
+            Ok(a) => c.travelled_cands(name, Ok(a.ty), cands),
+        }),
+    }).try();
     kept ::= c.alloc.Vec<Cand>();
     c.keep_matching(cands, actuals, kept).try();
     (kept.len > 0).match({
