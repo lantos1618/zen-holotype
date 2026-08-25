@@ -87,9 +87,23 @@ check_min_numerator = (c :: Checker, b: Binary, ty: TyId)
 numerator_is_min = (c :: Checker, b: Binary, ty: TyId, n: i64)
                    Res<(), AllocError> {
     name = c.prim_name(ty);
-    (is_integer(name) && (n == min_of(name))).match({
-        true  => c.overflow(b, name),
+    // `min_of` REFUSES a name its table does not hold (#817), and a
+    // refusal here is not "not the minimum" — it is nothing proved, so
+    // nothing reported.
+    (is_integer(name)).match({
         false => Ok(()),
+        true  => c.numerator_matches_min(b, ty, n, name),
+    })
+}
+
+numerator_matches_min = (c :: Checker, b: Binary, ty: TyId, n: i64, name: str)
+                        Res<(), AllocError> {
+    min_of(name).match({
+        None  => Ok(()),
+        Ok(lo) => (n == lo).match({
+            true  => c.overflow(b, name),
+            false => Ok(()),
+        }),
     })
 }
 
@@ -115,14 +129,25 @@ with_both = (c :: Checker, b: Binary, ty: TyId, x: i64, y: i64)
     })
 }
 
-// `200` fits an i32 but not a u8 — overflow traps for unsigned types
-// too, same bug at 256 as at 128 for an i8.
+// `fits` REFUSES a name its table does not hold (#817), and a refusal is
+// not "it fits" — it is nothing proved, so nothing reported. The
+// `is_integer` guard above stays: it is what keeps floats and every
+// non-primitive out of the question at all.
 check_fits = (c :: Checker, b: Binary, ty: TyId, v: i64)
              Res<(), AllocError> {
     name = c.prim_name(ty);
-    (is_integer(name) && (fits(v, name) == false)).match({
-        true  => c.overflow(b, name),
+    (is_integer(name)).match({
         false => Ok(()),
+        true  => c.fits_or_say(b, ty, v, name),
+    })
+}
+
+fits_or_say = (c :: Checker, b: Binary, ty: TyId, v: i64, name: str)
+              Res<(), AllocError> {
+    fits(v, name).match({
+        None   => Ok(()),
+        Ok(false) => c.overflow(b, name),
+        Ok(true)  => Ok(()),
     })
 }
 
@@ -306,9 +331,14 @@ literal_kind_within = (c :: Checker, id: ExprId, l: Literal, want: TyId)
 
 value_within = (c :: Checker, id: ExprId, want: TyId, v: i64)
                Res<(), AllocError> {
+    // A REFUSAL IS NOT "IN RANGE" (#817): `fits` declines a name its
+    // table does not hold, and declining to report is the answer for
+    // what nothing was proved about — never a judgment from a guessed
+    // bound.
     fits(v, c.prim_name(want)).match({
-        true  => Ok(()),
-        false => c.out_of_range(id, want),
+        None      => Ok(()),
+        Ok(false) => c.out_of_range(id, want),
+        Ok(true)  => Ok(()),
     })
 }
 
@@ -348,7 +378,17 @@ literal_overflows* = (c: Checker, id: ExprId, want: TyId) bool {
 int_literal_overflows = (c: Checker, id: ExprId, name: str) bool {
     c.literal_int(c.tree.expr_at(id)).match({
         None  => false,
-        Ok(v) => fits(v, name) == false,
+        Ok(v) => c.fits_says(v, name),
+    })
+}
+
+// A REFUSAL IS NOT "IT FITS" (#817): the backend's one range question
+// reports only what was PROVED not to fit.
+fits_says = (c: Checker, v: i64, name: str) bool {
+    fits(v, name).match({
+        None      => false,
+        Ok(false) => true,
+        Ok(true)  => false,
     })
 }
 

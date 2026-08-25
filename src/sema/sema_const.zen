@@ -282,14 +282,14 @@ float_bits = (type_name: str, member: str) Res<i64> {
 
 named_const = (type_name: str, member: str) Res<i64> {
     member.eq("MAX").match({
-        true  => Ok(max_of(type_name)),
+        true  => max_of(type_name),
         false => min_or_bits(type_name, member),
     })
 }
 
 min_or_bits = (type_name: str, member: str) Res<i64> {
     member.eq("MIN").match({
-        true  => Ok(min_of(type_name)),
+        true  => min_of(type_name),
         false => bits_const(type_name, member),
     })
 }
@@ -389,25 +389,49 @@ digit_value = (b: u8) i64 {
 // "there are no bitwise operators".
 // ---------------------------------------------------------------------
 
-fits* = (v: i64, name: str) bool {
-    (v >= min_of(name)) && (v <= max_of(name))
+// WHAT FITS WHAT, AND THE NAME THE QUESTION WAS ASKED OF (#817). The
+// chains below are tables keyed by name, and a table that answered
+// i64's bounds for every name it does not hold was deciding diagnostics
+// with a bound it invented — `usize.MAX` folded as an i64-exact
+// constant and minted `[u8, 9223372036854775807]`, blaming the
+// initialiser that did not fit the type nobody wrote. So the last arm is
+// a REFUSAL, `None`, the same shape #811 gave `bits_of`: a name this
+// table does not hold has no bounds here. Every caller guards with
+// `is_integer` FIRST (sema_trap.zen:90, :123, :313), so a refusal only
+// ever reaches one through a bug in that guard's shared premise — and
+// DECLINING TO REPORT there is this file's own discipline for a prover,
+// never a judgment from a guessed bound.
+//
+// usize KEEPS ITS ROW: it is held by the table (`min_of` answers 0,
+// `max_of` answers I64_MAX), not walked off the end of anything. That
+// row stays honest about what it is — u64/usize hold more than an i64
+// can name, so MAX is the folder's own ceiling and not the type's, and
+// such values are never folded anyway.
+fits* = (v: i64, name: str) Res<bool> {
+    min_of(name).match({
+        None  => None,
+        Ok(lo) => max_of(name).match({
+            None  => None,
+            Ok(hi) => Ok((v >= lo) && (v <= hi)),
+        }),
+    })
 }
 
 signed_of = (name: str) bool {
     name.is_in(["i8", "i16", "i32", "i64"])
 }
 
-max_of* = (name: str) i64 {
+max_of* = (name: str) Res<i64> {
     signed_of(name).match({
         true  => signed_max(name),
         false => unsigned_max(name),
     })
 }
 
-min_of* = (name: str) i64 {
+min_of* = (name: str) Res<i64> {
     signed_of(name).match({
         true  => signed_min(name),
-        false => 0,
+        false => unsigned_min(name),
     })
 }
 
@@ -420,7 +444,7 @@ signed_max_16 = (name: str) i64 {
 }
 
 signed_max_32 = (name: str) i64 {
-    name.eq("i32").match({ true => 2147483647, false => I64_MAX })
+    name.eq("i32").match({ true => 2147483647, false => bits_of_i64_max(name) })
 }
 
 signed_min = (name: str) i64 {
@@ -434,22 +458,54 @@ signed_min_16 = (name: str) i64 {
 signed_min_32 = (name: str) i64 {
     name.eq("i32").match({
         true  => 0 - 2147483648,
-        false => I64_MIN,
+        false => bits_of_i64_min(name),
     })
 }
 
-// u64/usize hold more than an i64 can name, so this ceiling is the
+// u64/usize hold more than an i64 can name, so these ceilings are the
 // folder's own, not the type's — such values are never folded anyway.
-unsigned_max = (name: str) i64 {
-    name.eq("u8").match({ true => 255, false => unsigned_max_16(name) })
+unsigned_min = (name: str) Res<i64> {
+    name.is_in(["u8", "u16", "u32", "u64", "usize"]).match({
+        true  => Ok(0),
+        false => None,
+    })
 }
 
-unsigned_max_16 = (name: str) i64 {
-    name.eq("u16").match({ true => 65535, false => unsigned_max_32(name) })
+unsigned_max = (name: str) Res<i64> {
+    name.eq("u8").match({
+        true  => Ok(255),
+        false => unsigned_max_16(name),
+    })
 }
 
-unsigned_max_32 = (name: str) i64 {
-    name.eq("u32").match({ true => 4294967295, false => I64_MAX })
+unsigned_max_16 = (name: str) Res<i64> {
+    name.eq("u16").match({
+        true  => Ok(65535),
+        false => unsigned_max_32(name),
+    })
+}
+
+unsigned_max_32 = (name: str) Res<i64> {
+    name.eq("u32").match({
+        true  => Ok(4294967295),
+        false => bits_of_i64_max(name),
+    })
+}
+
+// The i64 row, named for what it is: the row `bits_of` holds for the
+// same reason (#811), reached only after every narrower width said no.
+bits_of_i64_max* = (name: str) Res<i64> {
+    (name.eq("i64") || name.eq("u64") || name.eq("usize")).match({
+        true  => Ok(I64_MAX),
+        false => None,
+    })
+}
+
+bits_of_i64_min* = (name: str) Res<i64> {
+    name.eq("i64").match({
+        true  => Ok(I64_MIN),
+        false => None,
+    })
 }
 
 // A TABLE KEYED BY NAME, WITH NO GUESS AT THE END (#811). The last arm
