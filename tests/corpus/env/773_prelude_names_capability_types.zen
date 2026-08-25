@@ -24,6 +24,16 @@ slurp = (fs: Fs, alloc :: Alloc) Res<String, FsError> {
     fs.read(alloc, "773_prelude_round_trip.txt")
 }
 
+// Stdin is Env's field `in`, and its type is a prelude name like the
+// rest: a reader announces it in its own signature, imported from
+// nothing. The CALLER makes the buffer's room, so this body holds no
+// allocation and its only error is the one `read` itself answers.
+// Read answers EXACTLY n bytes; the harness feeds an empty stream,
+// so the answer printed below is ZERO — end of input, not a failure.
+peek = (inp: Stdin, held :: Vec<u8>) Res<usize, IoError> {
+    inp.read(held, 4)
+}
+
 // sort travels with Vec, so its bound must travel too: Word orders by
 // n, strictly-before, so ties keep their input order (the sort below
 // is stable).
@@ -40,6 +50,11 @@ main = (env: Env) Res<i32, Fail> {
     alloc ::= env.mem.alloc();
 
     banner(env.out, "hi").try();
+
+    // stdin is the named Stdin capability; an empty stream answers 0
+    room ::= alloc.Vec<u8>();
+    room.reserve(4).try();
+    println("{}", peek(env.in, room).try());
 
     // bytes written by the named Fs, read back through it
     head = slurp(env.fs, alloc).try();
