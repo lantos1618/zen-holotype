@@ -129,15 +129,29 @@ def is_sweep(subject: str) -> bool:
     return areas is not None and len(areas) == 1 and areas[0] in SWEEP_TAGS
 
 
+def stem_of(name: str) -> str:
+    """A file name as an area names it: no extension, case-insensitive.
+
+    `parse_areas` lowercases every area it reads, so a comparison against a
+    path has to fold too or an upper-case name can never be scoped -- and
+    `[:-len(".zen")]` chopped four characters off whatever it was given, so
+    `AST_CONTRACT.md` became `AST_CONTRAC`, a stem no subject would ever
+    write. src/AST_CONTRACT.md is the one file in the tree this locked out:
+    NO subject could scope it, so every commit touching it was refused with
+    no legal spelling to offer. `Path(...).stem` takes the real extension.
+    """
+    return Path(name).stem.casefold()
+
+
 def area_matches(area: str, rel: str) -> bool:
     """Does one declared area cover one src/-relative path? See module doc."""
-    parts = rel.split("/")
+    parts = [p.casefold() for p in rel.split("/")]
     dotted = area.split(".")
     if parts[: len(dotted)] == dotted and len(parts) > len(dotted):
         return True
     if area in parts[:-1]:  # any single directory segment
         return True
-    return parts[-1][: -len(".zen")] == area  # the module's own stem
+    return stem_of(parts[-1]) == area  # the module's own stem
 
 
 def scoped_out(subject: str, changes: dict[str, str]) -> list[str]:
@@ -248,6 +262,16 @@ CASES = [
      "whole-tree reach still buys no company: a new file is a feature"),
     ("wip: half the tree reordered", {"src/sema/sema_type.zen": "M"}, True,
      "`wip:` states no scope, so any src/ touch is outside it"),
+    # --- a name with capitals in it ---------------------------------------
+    ("ast_contract: the contract says what a node may hold",
+     {"src/AST_CONTRACT.md": "M"}, False,
+     "src/AST_CONTRACT.md is the only file in the tree sitting directly under"
+     " src/ with capitals in its name, and until stem_of folded case NO"
+     " subject could scope it: areas arrive lowercased, the stem did not fold,"
+     " and the four-character chop spelled it `AST_CONTRAC`. A file no legal"
+     " subject can name is a file the gate refuses forever"),
+    ("sema: tighten the checker", {"src/AST_CONTRACT.md": "M"}, True,
+     "folding case is no blanket pass: an unrelated area still misses it"),
     # --- grammar edges ----------------------------------------------------
     ("no colon anywhere in this one", {"src/std/core/display.zen": "M"}, True,
      "no `<areas>:` prefix -> nothing scoped -> src/ refuses"),
