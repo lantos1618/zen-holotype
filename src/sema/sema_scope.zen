@@ -128,15 +128,13 @@ check_scope_captured* = (c :: Checker, o :: Own, span: Span, text: str)
 // what lets the tail refuse `s`, `Ok(s)` and `h.s` one step past the
 // keyword itself.
 //
-// WHAT IT DOES NOT COVER, named rather than hidden. Only bindings are
-// tainted, never an expression: `() Scope { { @scope } }` needs no walk
-// because the nested block's tail is refused by `check_scope_stored`
-// when the outer body's own tail hands it on. A taint is not chased
-// through a re-binding (`t = s`) nor out of a callee, and a parameter of
-// type `Scope` is not recorded at all (`own_params` sets `scoped:
-// false`). All of it is the same fail-open direction this file already
-// takes: a false rejection makes a correct program uncompilable, a
-// missing check only misses.
+// WHAT IT DOES NOT COVER, named rather than hidden. Bindings are
+// tainted by the keyword or by naming a tainted binding — one written
+// step, `t = s`; a taint is not chased through a field path (`h.s`)
+// nor out of a callee, and a parameter of type `Scope` is not recorded
+// at all (`own_params` sets `scoped: false`). All of it is the same
+// fail-open direction this file already takes: a false rejection makes
+// a correct program uncompilable, a missing check only misses.
 // ---------------------------------------------------------------------
 
 // The innermost node whose value names this frame's block, or none —
@@ -185,6 +183,19 @@ scope_escape_in_args = (c :: Checker, o :: Own, k: Call) Res<ExprId> {
 
 scope_escapes = (c :: Checker, o :: Own, id: ExprId) bool {
     c.scope_escape(o, id).match({ Ok(_) => true, None => false })
+}
+
+// A binding that merely NAMES one tainted (`t = s`) is tainted itself —
+// the flag propagates one written step at declaration time, so the tail
+// walk needs no second kind of answer.
+scope_alias* = (c :: Checker, o :: Own, id: ExprId) bool {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Scope    => true,
+        Paren(p) => c.scope_alias(o, p.inner),
+        Name(n)  => scoped_var(o, n.text),
+        _        => false,
+    })
 }
 
 refuse_scope_returned = (
