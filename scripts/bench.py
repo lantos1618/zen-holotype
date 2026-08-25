@@ -576,6 +576,29 @@ def main(argv: Sequence[str]) -> int:
             over.append(f"allocs_op {bench.allocs_op:g} > {bench.budget.allocs_op}")
         if bench.bytes_op > bench.budget.bytes_op:
             over.append(f"bytes_op {bench.bytes_op:g} > {bench.budget.bytes_op}")
+        # A BUDGET IS A CEILING, AND A CEILING PASSES A MEASUREMENT OF
+        # NOTHING. Every check above is `measured > budget`, so a driver
+        # whose work stopped reaching the allocator at all -- the loop
+        # elided, the binary not actually re-linked at 2N, `--wrap=malloc`
+        # silently not applied -- reads as 0 and prints `ok`. The three
+        # benches budgeted at zero are saved from that by an accident in
+        # the drivers rather than by anything here: their bodies return
+        # `Ok(1)` when the accumulator is zero, so an elided loop exits
+        # non-zero and `count_allocs` raises. `vec_add` has no such escape
+        # -- it returns `Ok(0)` unconditionally -- and it is the one bench
+        # whose whole subject IS that a Vec reaches malloc.
+        #
+        # So a NON-ZERO budget carries a floor with it: it is this file
+        # asserting the operation allocates, and measuring that it does not
+        # is a broken harness, not a fast one. No new number to maintain --
+        # the floor is read off the budget already in bench_budgets.zen.
+        if bench.budget.allocs_op > 0 and bench.allocs_op == 0:
+            over.append(
+                f"allocs_op 0, and the budget says this operation allocates"
+                f" ({bench.budget.allocs_op}). A ceiling passes a measurement"
+                f" of nothing: the loop was elided, the driver was not rebuilt"
+                f" at 2N, or --wrap=malloc did not apply"
+            )
         if over:
             failed = True
         print(f"{bench.name:<22} {bench.allocs_op:>12.6g} "
