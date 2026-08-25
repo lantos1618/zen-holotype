@@ -16,6 +16,8 @@
 // Fail-open on an unknown type, for `sema_own.zen`'s reason.
 
 Expr, Bind, Impl, Span = std.ast
+Call, Record = std.ast.ast_node
+ExprId = std.ast.ast_id
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -30,8 +32,83 @@ check_drop_copy* = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
     node = c.tree.expr_at(b.value);
     node.kind.match({
         Name(n) => c.drop_copy_of_name(o, node, n.text),
+        // A construction or array literal copies each element's bytes, so
+        // a Drop place smuggled inside one makes two live owners — the
+        // same defect as `g = f`, one node deeper. `own_expr` has already
+        // read every payload (a moved-out place is refused there); what
+        // is left standing is live, and only `consume` may hand it over.
+        Record(r) => c.drop_copy_of_record(o, r),
+        Array(a)  => c.drop_copy_of_elems(o, a.elems),
+        _         => Ok(()),
+    })
+}
+
+// Every field value of a brace literal is copied into the new value.
+drop_copy_of_record* = (c :: Checker, o :: Own, r: Record)
+                        Res<(), AllocError> {
+    ids ::= c.alloc.Vec<ExprId>();
+    r.entries.loop((h, m) {
+        m.kind.match({
+            Field(f) => f.value.match({
+                Ok(v) => ids.add(v),
+                None  => Ok(()),
+            }),
+            Const(_)    => Ok(()),
+            Function(_) => Ok(()),
+        }).try()
+    });
+    c.drop_copy_of_elems(o, ids)
+}
+
+// Every element of an array literal is copied into the new array.
+drop_copy_of_elems* = (c :: Checker, o :: Own, elems: Vec<ExprId>)
+                       Res<(), AllocError> {
+    elems.loop((h, e) { c.drop_copy_of_elem(o, e).try() });
+    Ok(())
+}
+
+drop_copy_of_elem = (c :: Checker, o :: Own, id: ExprId)
+                     Res<(), AllocError> {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Name(n) => c.refuse_if_drop(node.span, var_type(o, n.text), n.text),
         _       => Ok(()),
     })
+}
+
+// A CONSTRUCTION CALL copies every argument's bytes into the new value,
+// so a live Drop place in one of them is `g = f` one node deeper.
+// ONLY a construction: `Keeper(n: v)`, `Ok(v)` / `Err(e)`, and a payload
+// variant (`Slot.Big(cell)`). A plain call's parameters BORROW per
+// DESIGN.md, so `sink(w)` on a Drop value stays legal — the receiver
+// rides outside `k.args`, and the callee's frame never owns a borrow.
+drop_copy_of_ctor* = (c :: Checker, o :: Own, id: ExprId, k: Call)
+                      Res<(), AllocError> {
+    c.tree.expr_at(k.callee).kind.match({
+        Name(n) => {
+            is_res = n.text.eq("Ok") || n.text.eq("Err");
+            ((is_res || c.is_construction(id)) == false).match({
+                true  => Ok(()),
+                false => c.drop_copy_of_args(o, k),
+            })
+        },
+        Access(a) => {
+            ty = c.place_type(o, a.base);
+            drops = c.is_drop_type(ty).try();
+            drops.match({
+                false => Ok(()),
+                true  => c.drop_copy_of_args(o, k),
+            })
+        },
+        _ => Ok(()),
+    })
+}
+
+drop_copy_of_args = (c :: Checker, o :: Own, k: Call)
+                     Res<(), AllocError> {
+    ids ::= c.alloc.Vec<ExprId>();
+    k.args.loop((h, a) { ids.add(a.value).try() });
+    c.drop_copy_of_elems(o, ids)
 }
 
 // A name this frame does not bind is a global or a constant, and it is
