@@ -19,24 +19,36 @@
 // escape" and gets a narrow answer; what it doesn't cover is written
 // above `call_escapes` rather than left to be discovered.
 
-ExprId, BlockId, Call, Struct = std.ast
+ExprId, BlockId, Block, Call, Struct = std.ast
 Paren, Access, Member, Function, Param, Span, TypeId = std.ast
+Try, Name = std.ast
 AllocError = std.mem
 str = std.text
 Range = std.core
 DeclId = sema.sema_id
 decl_at = sema.sema_def
 Checker = sema.sema_check
+tail_expr = sema.sema_hoist
 SemaFault, NameFault = sema.sema_diag
 refuse, Own, place_type, captures_scope = sema.sema_own
+arena_var, UNTYPED = sema.sema_own
+TyId, TyRes = sema.sema_ty
 own_member = sema.sema_recv
 
 // RETURNED. The block is gone by the time the caller has the value, so
 // every defer on it would run against a dead frame. Only the FUNCTION
 // BODY's value is asked — a nested block's `@scope` value hands it to
 // an enclosing block that's still open.
+//
+// `tail_expr` and not `Block.value`: a body's last expression is the
+// value it returns whether or not the author wrote the closing `;`, and
+// the AST records only which was written. Reading `Block.value` alone
+// let `here = () Scope { @scope; }` through — the same program the
+// must-fail test asserts, one semicolon apart, and nearly every body in
+// this tree is written with the semicolon.
 check_scope_returned* = (c :: Checker, body: BlockId) Res<(), AllocError> {
-    c.tree.block_at(body).value.match({
+    blk = c.tree.block_at(body);
+    tail_expr(c, blk).match({
         None  => Ok(()),
         Ok(v) => c.refuse_if_scope(v),
     })
@@ -176,3 +188,168 @@ type_is_alloc = (c :: Checker, tid: TypeId) bool {
         _        => false,
     })
 }
+
+// ---------------------------------------------------------------------
+// AN ARENA-BACKED VIEW MAY NOT OUTLIVE THE ARENA
+//
+// `alloc ::= env.mem.alloc()` makes an ordinary scope-local value, so
+// `Arena.drop` frees its pages at the end of the body that made it. A
+// `str` from `buf.view()` points INTO those pages, so returning it
+// hands the caller freed memory — issue #788, where two calls to the
+// same helper print `a=  b=XY` with exit 0.
+//
+// PROVENANCE, NOT SYNTAX, which is what makes this different from the
+// three `@scope` rules above: the walk taints a BINDING when its
+// initialiser makes an arena, or names a binding already tainted, and
+// the tail of the function body is refused when it names one. Recorded
+// on `OwnVar.arena` because only `sema_own.zen`'s walk knows what a
+// name meant where it was written.
+//
+// A BINDING IS THE WHOLE TRIGGER, deliberately. `Built(arena:
+// env.mem.alloc(), cur: None)` (`src/lsp/lsp_built.zen:215`) makes an
+// arena inline and MOVES it into the value it returns — the struct now
+// owns it, nothing is dropped at the end of the body, and no name is
+// mentioned, so this rule never sees it. The same for an arena that
+// arrived as a parameter: the caller's frame outlives this one, and
+// `own_params` records `arena: false`.
+//
+// WHAT IT DOES NOT COVER, named rather than hidden. The FUNCTION BODY's
+// tail only, matching `check_scope_returned` — a value that leaves
+// through a struct field stored in an out-parameter, or through a
+// closure, is not asked. The walk does not enter `Match`, so a body
+// whose tail is a match returning an arena-backed view from one arm is
+// missed. A taint is not chased through an assignment to a binding
+// declared before the arena, nor out of a callee. All of that is the
+// same fail-open direction the file already takes: a false rejection
+// makes a correct program uncompilable, a missing check only misses.
+// ---------------------------------------------------------------------
+
+check_arena_returned* = (c :: Checker, o :: Own, id: BlockId, b: Block)
+                        Res<(), AllocError> {
+    (id.index == o.body.index).match({
+        false => Ok(()),
+        true  => tail_expr(c, b).match({
+            None  => Ok(()),
+            Ok(v) => c.refuse_if_arena(o, v),
+        }),
+    })
+}
+
+refuse_if_arena = (c :: Checker, o :: Own, id: ExprId) Res<(), AllocError> {
+    c.arena_name(o, id).match({
+        None  => Ok(()),
+        Ok(n) => c.refuse(
+            c.tree.expr_at(id).span,
+            SemaFault.ArenaEscapes(NameFault(name: n))
+        ),
+    })
+}
+
+// A binding's initialiser: the arena itself (`env.mem.alloc()`, typed
+// `Arena`) or anything drawn from one already tainted.
+is_arena_backed* = (c :: Checker, o :: Own, id: ExprId) bool {
+    c.holds_pointer(o, id) &&
+        (c.is_arena_ty(c.place_type(o, id)) || c.draws_on_arena(o, id))
+}
+
+is_arena_ty = (c :: Checker, ty: TyId) bool {
+    c.types.at(ty).match({
+        Named(n) => n.name.eq("Arena"),
+        _        => false,
+    })
+}
+
+draws_on_arena = (c :: Checker, o :: Own, id: ExprId) bool {
+    c.arena_name(o, id).match({ Ok(_) => true, None => false })
+}
+
+// WHICH tainted binding this expression draws on, or none. The name is
+// carried rather than a bool so the diagnostic can say which allocator
+// the value is standing on.
+//
+// The pointer guard is what keeps the walk from over-tainting: `buf.len`
+// and `buf.view().eq(x)` are a `usize` and a `bool`, copies that carry
+// no address into the pages, so the taint stops at them. Only `str` and
+// the types this file cannot see through are followed.
+arena_name = (c :: Checker, o :: Own, id: ExprId) Res<str> {
+    c.holds_pointer(o, id).match({
+        false => None,
+        true  => c.arena_name_of(o, id),
+    })
+}
+
+arena_name_of = (c :: Checker, o :: Own, id: ExprId) Res<str> {
+    c.tree.expr_at(id).kind.match({
+        Name(n)   => named_arena(o, n.text),
+        Paren(p)  => c.arena_name(o, p.inner),
+        Try(t)    => c.arena_name(o, t.operand),
+        Access(a) => c.arena_name(o, a.base),
+        Call(k)   => c.arena_name_in_call(o, k),
+        _         => None,
+    })
+}
+
+named_arena = (o: Own, text: str) Res<str> {
+    arena_var(o, text).match({ true => Ok(text), false => None })
+}
+
+// `Ok(buf.view())` and `Tag(name: buf.view())` are both a `Call` whose
+// ARGUMENT is the escaping value; `buf.view()` is one whose RECEIVER is.
+// All three spellings reach a return today, so all three are asked.
+arena_name_in_call = (c :: Checker, o :: Own, k: Call) Res<str> {
+    c.arena_name_of_callee(o, k.callee).match({
+        Ok(n) => Ok(n),
+        None  => c.arena_name_in_args(o, k),
+    })
+}
+
+arena_name_of_callee = (c :: Checker, o :: Own, id: ExprId) Res<str> {
+    c.tree.expr_at(id).kind.match({
+        Access(a) => c.arena_name(o, a.base),
+        _         => None,
+    })
+}
+
+arena_name_in_args = (c :: Checker, o :: Own, k: Call) Res<str> {
+    Range(0, k.args.len).find((i) {
+        c.arg_draws_on_arena(o, k, i)
+    }).match({
+        None  => None,
+        Ok(i) => k.args.get(i).match({
+            None  => None,
+            Ok(a) => c.arena_name(o, a.value),
+        }),
+    })
+}
+
+arg_draws_on_arena = (c :: Checker, o :: Own, k: Call, i: usize) bool {
+    k.args.get(i).match({
+        None  => false,
+        Ok(a) => c.draws_on_arena(o, a.value),
+    })
+}
+
+// Whether a value of this type could hold an address into the arena's
+// pages. A number, a `bool` or `()` is a copy and ends the chase; `str`
+// is the view this whole rule is about; anything not a primitive is not
+// something this file can rule out, so it is followed.
+holds_pointer = (c :: Checker, o :: Own, id: ExprId) bool {
+    c.carries_address(c.place_type(o, id))
+}
+
+// A `Res` is asked about its VALUE: `write_items(items, body)` in
+// `src/lsp/lsp_serve.zen:723` names an arena-backed `Vec` and returns
+// `Res<(), AllocError>`, so nothing of the arena leaves with it. Reading
+// the wrapper instead of the payload made that a false rejection, which
+// is the shape of mistake this rule cannot afford.
+carries_address = (c :: Checker, ty: TyId) bool {
+    ty.eq(UNTYPED).match({
+        true  => true,
+        false => c.types.at(ty).match({
+            Res(r) => c.carries_address(r.value),
+            _      => is_pointerish(c.prim_name(ty)),
+        }),
+    })
+}
+
+is_pointerish = (name: str) bool { name.len == 0 || name.eq("str") }

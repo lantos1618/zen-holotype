@@ -183,6 +183,7 @@ SemaFault* =
     | ConsumeThroughHandle(NameFault)  // move only what this frame owns
     | CopyOfDropValue(NameFault)       // `g = f` would drop twice
     | ScopeEscapes(NameFault)          // `@scope` left its block
+    | ArenaEscapes(NameFault)          // a view outlived the arena behind it
     | ConsumedByCapture(CaptureFault)  // a capture outlives the consume
 
 // Where the mistake is, and which one it is.
@@ -255,6 +256,7 @@ message* = (fault: SemaFault) str {
         ConsumeThroughHandle(_)   => "cannot consume through a handle: you may only move what this frame owns, and a bitwise copy of a handle would be left pointing at a dead value",
         CopyOfDropValue(_)        => "cannot copy a Drop value: drop runs exactly once, so two live names for one value would drop it twice — construct a second one, or write `consume`",
         ScopeEscapes(_)           => "@scope may not escape: it names the enclosing block, so it may be passed inward but never stored in a struct, returned, or captured by an escaping closure",
+        ArenaEscapes(_)           => "a value backed by an arena this body made may not be returned: the arena is dropped at the end of this body, so the caller would read freed pages — take the arena as a parameter, or move it into the value you return",
         ConsumedByCapture(_)      => "consume after capture:",
     });
 }
@@ -309,6 +311,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         ConsumeThroughHandle(f)   => out.write_name(f),
         CopyOfDropValue(f)        => out.write_name(f),
         ScopeEscapes(f)           => out.write_name(f),
+        ArenaEscapes(f)           => out.write_name(f),
 
         ConsumedUse(f)            => write_place(
             out,

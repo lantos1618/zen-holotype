@@ -43,6 +43,7 @@ SemaFault, NameFault = sema.sema_diag
 check_receiver, check_write_place = sema.sema_recv
 check_scope_returned, check_scope_stored = sema.sema_scope
 check_scope_captured, is_scope_value, call_escapes = sema.sema_scope
+check_arena_returned, is_arena_backed = sema.sema_scope
 Pin, pin_captured, refuse_pinned, refuse_pinned_at = sema.sema_pin
 check_drop_copy = sema.sema_drop
 
@@ -51,12 +52,17 @@ check_drop_copy = sema.sema_drop
 // p.left` from `consume env.argv` — local vs. borrowed. `ty` is
 // recorded rather than asked for (see header). `scoped` marks a binding
 // that names a block, so capturing it is a capture of the block.
+// `arena` marks a binding whose value is, or is backed by, an arena
+// this frame made — the provenance half of `sema_scope.zen`'s escape
+// rule, recorded here because only the walk knows what a name meant
+// where it was written.
 OwnVar* = {
     name*: str,
     ty*: TyId,
     mutable*: bool,
     owned*: bool,
     scoped*: bool,
+    arena*: bool,
     span*: Span,
 }
 
@@ -84,6 +90,7 @@ Own* = {
     pinned* :: Vec<Pin>,
     escaped* :: usize,
     method* :: str,
+    body* :: BlockId,
     alloc*: Alloc,
 }
 
@@ -94,6 +101,7 @@ Own* = (a: Alloc) Res<Own, AllocError> {
         pinned: a.Vec<Pin>(),
         escaped: 0,
         method: "",
+        body: BlockId(index: 0),
         alloc: a
     ));
 }
@@ -109,6 +117,7 @@ check_own* = (c :: Checker, f: Function, body: BlockId, ctx: Ctx)
              Res<(), AllocError> {
     o ::= c.alloc.Own().try();
     o.method = receiver_method(f, ctx);
+    o.body   = body;
     c.own_params(o, f).try();
     c.own_block(o, body, ctx).try();
     c.check_scope_returned(body).try();
@@ -150,6 +159,7 @@ own_param = (c :: Checker, o :: Own, p: Param) Res<(), AllocError> {
         mutable: p.mutable,
         owned: false,
         scoped: false,
+        arena: false,
         span: p.name.span
     ))
 }
@@ -167,6 +177,7 @@ own_block = (c :: Checker, o :: Own, id: BlockId, ctx: Ctx)
         Ok(v) => c.own_expr(o, v, ctx),
         None  => Ok(()),
     }).try();
+    c.check_arena_returned(o, id, b).try();
     c.check_partial_moves(o, mark).try();
     own_release(o, mark).try();
     Ok(());
@@ -238,6 +249,7 @@ declare_var = (
         mutable: b.mutable,
         owned: true,
         scoped: c.is_scope_value(b.value),
+        arena: c.is_arena_backed(o, b.value),
         span: span
     ))
 }
@@ -658,6 +670,15 @@ captures_scope* = (o: Own, text: str) bool {
     find_var(o, text).match({
         None  => false,
         Ok(i) => (i < o.escaped) && scoped_at(o, i),
+    })
+}
+
+// Whether this name is, or views into, an arena this frame made — read
+// by `sema_scope.zen`'s escape rule, which owns the walk that sets it.
+arena_var* = (o: Own, text: str) bool {
+    find_var(o, text).match({
+        None  => false,
+        Ok(i) => o.vars.get(i).match({ Ok(v) => v.arena, None => false }),
     })
 }
 
