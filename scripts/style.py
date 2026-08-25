@@ -572,6 +572,11 @@ def with_body(module):
                     yield entry, decl.target
 
 
+# HOW MANY MODULES THE `ufcs` RULE IS ALLOWED NOT TO COVER. See the check in
+# main() for what an exemption is and why this is a ceiling.
+UFCS_EXEMPT_CEILING = 63
+
+
 def ufcs_world(files):
     """What a dot can find: free functions, methods, and each module's subject.
 
@@ -707,6 +712,13 @@ def rule_ufcs(files):
     """
     free, methods, principal = ufcs_world(files)
     checked, hits = 0, []
+    # HOW MUCH OF THE TREE THIS RULE CANNOT SEE. `principal.get(home) != recv`
+    # below is a `continue`, so a module with no principal type is exempt from
+    # this rule ENTIRELY and contributes nothing to say so. Today that is 63
+    # of the 159 modules with free functions -- 40% -- and the number was
+    # nowhere in the output. Returned so main() can hold it to a ceiling.
+    homes = {home for cands in free.values() for home, _, _ in cands}
+    exempt = len(homes - set(principal))
 
     for rel, _, module in files:
         mod = module_path(rel)
@@ -762,7 +774,7 @@ def rule_ufcs(files):
                              f"`{called}({recv}, ..)` is `{recv}.{called}(..)`"
                              f" — the receiver column is what makes the"
                              f" order-critical sequence visible"))
-    return checked, hits
+    return checked, hits, exempt
 
 
 def debt(hits, ledger, label):
@@ -815,7 +827,7 @@ def main() -> int:
     parser = cst.parser()
 
     abbrev_n, abbrev_bad, abbrev_seen = rule_abbrev(files, parser)
-    ufcs_n, ufcs_hits = rule_ufcs(files)
+    ufcs_n, ufcs_hits, ufcs_exempt = rule_ufcs(files)
     import_n, import_hits = rule_import(files, parser)
     results = [
         ("prefix   ", "a prefix names its own folder", *rule_prefix(files), 0),
@@ -871,6 +883,34 @@ def main() -> int:
     # ordinary commit. Zero is the line that cannot be crossed by honest
     # work, and it is the same line `cap`, `parse`, `fmt`, `lextile`,
     # `faults` and `dupcomments` draw at their file lists.
+    # A MODULE WITH NO PRINCIPAL TYPE IS EXEMPT FROM `ufcs` ENTIRELY, and
+    # nothing said so. `principal` is a strict-majority vote over each
+    # module's free-function first parameters; a module that has no majority
+    # has no subject, every candidate call in it is skipped, and `checked`
+    # keeps counting the call sites anyway -- so the rule can quietly stop
+    # covering a file while its number goes UP.
+    #
+    # Five modules currently sit one function away from losing their vote
+    # (sema.sema_pin, std.ast.ast_node, std.core.bool, std.core.result,
+    # std.lex.lex_diag), so this is not a theoretical drift: one added helper
+    # whose first parameter is not the subject retires the rule for that whole
+    # file, permanently and silently.
+    #
+    # A CEILING, not a floor, and it ratchets the way every other ledger here
+    # does: 63 is what the tree had when this was written, going down is free,
+    # and going up is a deliberate line in a commit. Modules are added rarely
+    # enough that this is not a number anyone re-baselines by habit.
+    if ufcs_exempt > UFCS_EXEMPT_CEILING:
+        print(f"style: {ufcs_exempt} module(s) have no principal type and are"
+              f" exempt from the `ufcs` rule, up from {UFCS_EXEMPT_CEILING}."
+              " A module loses its subject when no single type is the first"
+              " parameter of a strict majority of its free functions, and"
+              " every call in it then goes unchecked while `ufcs N checked`"
+              " keeps rising. Give the new module a subject, or raise"
+              f" UFCS_EXEMPT_CEILING in {Path(__file__).name} and say which"
+              " module and why.", file=sys.stderr)
+        return 1
+
     silent = [name.strip() for name, _, checked, _, _ in results if not checked]
     if silent:
         print(f"style: {', '.join(silent)} checked 0 sites. A rule that finds"
@@ -886,7 +926,9 @@ def main() -> int:
     sites = sum(checked for _, _, checked, _, _ in results)
     owed = sum(owed for _, _, _, _, owed in results)
     print(f"style: {len(results)} rules, {sites} sites, 0 violations,"
-          f" {owed} written down")
+          f" {owed} written down;"
+          f" {ufcs_exempt} module(s) have no principal type for `ufcs` to"
+          f" check against (ceiling {UFCS_EXEMPT_CEILING})")
     return 0
 
 
