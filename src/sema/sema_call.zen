@@ -1014,7 +1014,50 @@ sig_ret = (
     ctx  : Ctx
 ) Res<TyId, AllocError> {
     c.sig_lambdas(call, ty, off, ctx).try();
+    c.sig_args_handle_check(node, call, ty, off, ctx).try();
     c.fn_ret(node, ty)
+}
+
+// THE SAME SEAT AS `chosen_ret`, ONE SURFACE OVER. `keep.add(h)` on a
+// `Vec<LoopHandle>` resolves here, not through `decl_call` — and the
+// refusal that #782 hung on the candidate path never ran, so zen said
+// yes and cc read `zu_l1h` undeclared out of the monomorphised `add`.
+// The signature is already a type, so its parameters ARE the settled
+// formals; the same skip-the-lambda rule applies, and the receiver
+// (`off`) is not an argument and is not asked.
+//
+// THE ONE SKIP THAT IS NOT A LAMBDA ARGUMENT: a callee whose NAME is a
+// local binding holds a body, not a declaration — `body(h, k, v)`
+// inside `map`, `pairs` — and the call is SPLICED
+// (`gen_c_inline.lower_closure_call`), the same legal inward path a
+// lambda argument takes. A member (`keep.add`) or a declaration
+// (`take`) compiles for real and is asked. Fail-open on purpose: a
+// local could only hold a real function through fn pointers, which the
+// backend does not lower.
+sig_args_handle_check = (
+    c    :: Checker,
+    node : Expr,
+    call : Call,
+    ty   : TyId,
+    off  : usize,
+    ctx  : Ctx
+) Res<(), AllocError> {
+    spliced = c.tree.expr_at(call.callee).kind.match({
+        Name(n) => c.lookup(n.text).match({
+            Ok(_)  => true,
+            None   => false,
+        }),
+        _       => false,
+    });
+    spliced.match({
+        true  => Ok(()),
+        false => {
+            params ::= c.alloc.Vec<TyId>();
+            c.fn_params(ty, params).try();
+            c.args_handle_check(call.args, params, off, ctx).try();
+            Ok(());
+        },
+    })
 }
 
 // The walk on its own, for the one caller that does not want `fn_ret`'s

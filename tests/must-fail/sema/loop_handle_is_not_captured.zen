@@ -1,0 +1,37 @@
+// THE CAPTURE FACE (#807's third sibling): a loop handle captured by an
+// ESCAPING closure. Its siblings pin the BINDING
+// (`loop_handle_is_not_a_value`), the ARGUMENT
+// (`loop_handle_is_not_an_argument`), the TAIL
+// (`loop_handle_is_not_a_tail_stmt`) and the FIELD
+// (`loop_handle_is_not_a_field`). This pins the capture: a thread body
+// outlives the loop frame it was born in, and gen_c lowers a captured
+// handle as a plain read of a name that declares no storage.
+//
+// `sema_own.use_name`/`use_access` now ask the same escape-mark
+// question `check_scope_captured` answers for @scope, of the handle:
+// refused where the capture is written, not left for cc.
+//
+// position: `h`, inside the escaping body.
+//
+// NOTE: `Range(..).map(..)` does NOT reach this rule -- its callee is
+// a free function and `call_escapes` reads members only, so a map body
+// is (wrongly, but deliberately fail-open) non-escaping today. The one
+// door proven to escape is `env.threads.spawn`, whose Alloc parameter
+// `member_takes_alloc` sees.
+
+Error = AllocError | ThreadError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    Range(0, 1).loop((h, x) {
+        t = env.threads.spawn(alloc, () Res<i32, ThreadError> {
+            h.next();
+            Ok(x);
+        }).try();
+        t.join().match({
+            Ok(v)  => println("joined {}", v),
+            Err(e) => println("failed {}", e),
+        });
+    });
+    Ok(0);
+}
