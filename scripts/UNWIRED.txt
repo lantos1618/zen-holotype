@@ -1,0 +1,27 @@
+# scripts/UNWIRED.txt -- the gates a plain `make` does NOT run, and why.
+#
+# Read by scripts/gates_wired.py (`make wired`). One entry per line:
+#
+#     <path relative to the repo root>   <the reason, in a sentence>
+#
+# `#` is a comment; a blank line is ignored.
+#
+# THIS LEDGER RATCHETS BOTH WAYS. A driver that `make all` does not reach
+# and is not named here is an error -- that is scripts/scope.py's failure,
+# a gate on main for a month that nothing invoked. And a driver named here
+# that BECOMES reachable is an error too, so a debt somebody paid cannot
+# sit in this file pretending to still be owed. Neither direction can rot
+# quietly, which is the only property that makes a ledger worth keeping.
+#
+# A reason is a REASON. "slow" on its own is not one -- say what the cost
+# is and when a person should run the thing instead.
+
+scripts/asan_corpus.sh   the corpus under ASan+UBSan. 87s against 71s is cheap, but ASan's shadow map wants ~20x the address space and several of these at once on one box start getting things killed. Run it before landing anything that touches std.mem, gen_c's runtime, or ownership.
+scripts/fixpoint.sh      the strongest oracle -- zen-1 and zen-2 must emit byte-identical C -- and it takes a full self-compile twice. It is also the one thing in the tree that holds a box-wide lock, so it belongs at landing rather than in every `make`.
+scripts/emit-runs.awk    a LEDGER, not a rule: `make emit-runs` fails only if a file EXCEEDS its recorded backlog. That is a ratchet for a conversion lane to turn down, not a property of a healthy tree, and putting it in `all` would make every unrelated change wait on an unrelated backlog.
+scripts/profile.sh       a profiler. `make profile` self-compiles under `perf record -g`; it produces a report, never a verdict, and it exits 0 on any tree.
+scripts/signatures.py    not a gate: it prints all of src/'s declared surface (~5,800 lines) so another reader can review the whole tree at once. There is nothing for it to fail.
+tests/bench/asan.sh      `make asan` builds the COMPILER under ASan+LSan and runs one representative compile -- a different question from scripts/asan_corpus.sh, which sanitizes the programs the compiler emits. A sanitized self-compile is minutes, not seconds.
+tests/bench/leak.sh      `make leak` is valgrind's answer to `make asan`'s question, and valgrind is ~50x slower than the program it watches.
+tests/determinism/check.sh  `make determinism` compiles the tree five times to prove gen_c is a pure function of its input. Five self-compiles is a landing check, not a per-edit one.
+tools/fleet/fleet.sh     the fork/exec, timeout and flock half of the agent-fleet runner -- things Zen cannot say (#748-#752). It is driven by an agent fleet, not by make; the POLICY half it pairs with IS gated, at `make fleet`, against tools/fleet/tests/oracle.sh.

@@ -35,7 +35,7 @@ ZCC      = $(CACHE) $(CC)
 # `editors` IS IN THIS LIST BECAUSE `editors/` IS ALSO A DIRECTORY. Without
 # it make finds the directory, calls the target up to date, and runs the
 # script never — a gate that cannot fail because it cannot run.
-.PHONY: all build seed test lint parse design cap dupcomments fleet faults lextile ufcs style editors fixpoint determinism grammar grammar-test fmt bench bench-allocs emit-runs asan asan-corpus leak profile clean help
+.PHONY: all build seed test lint parse design cap dupcomments fleet faults lextile ufcs style scope wired editors fixpoint determinism grammar grammar-test fmt bench bench-allocs emit-runs asan asan-corpus leak profile clean help
 
 all: test
 
@@ -89,8 +89,34 @@ seed: build
 ## disease has been diagnosed here: tests/bench was run by no target in
 ## `all`, so `allocs_op: 0` -- cited in src/ as a thing that fails the
 ## build -- was a number nothing had ever computed.
-test: build parse design cap dupcomments faults lextile ufcs style scope grammar-test editors bench-allocs fleet
+test: build wired lint parse design cap dupcomments faults lextile ufcs style scope grammar-test editors bench-allocs fleet
 	$(PY) tests/run.py
+
+## wired: every gate this repository owns is REACHED by `make all`.
+##
+## THE ONE CHECK NO GATE CAN DO ABOUT ITSELF. Four of this tree's recorded
+## failures are not a bug in a gate, they are a gate NOBODY CALLS:
+## scripts/scope.py sat on main for a month with nothing invoking it while
+## STYLE.md said the rule was enforced at `make test`; `grammar-test` was
+## `npx tree-sitter test` over a directory that does not exist ("Total
+## parses: 0", exit 0); tests/parse/errors and tests/bench were run by no
+## target, so `allocs_op: 0` was a number nothing had ever computed; and
+## `editors` is a target whose name is also a DIRECTORY, which make calls
+## up to date and never runs -- the reason `editors` is in .PHONY above.
+##
+## So this asks from outside: for every driver under scripts/,
+## tools/gates/ and tests/, is there a recipe that runs it, and does a
+## chain of prerequisites lead from `all` to that recipe? Being INVOKED is
+## not enough -- `make lint` was real, green and orphaned. Anything `all`
+## deliberately does not reach goes in scripts/UNWIRED.txt with its
+## reason, and that ledger ratchets both ways: an unreached driver that is
+## not written down fails, and a written-down driver that BECOMES reached
+## fails too, so the list cannot rot in either direction.
+##
+## It also re-checks the `editors` trap for every target in the chain: not
+## .PHONY and not a real file is a target waiting to go silent.
+wired:
+	$(PY) scripts/gates_wired.py
 
 ## faults: every fault the compiler declares must have a site that raises
 ## it. Green here does NOT mean every diagnostic works — it means none is
@@ -309,7 +335,14 @@ parse: grammar
 	    || { echo "parse: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
 	  cd grammar && npx tree-sitter parse --quiet --stat -l "$$(pwd)/zen.so" --lang-name zen "$${files[@]/#/../}"
 
-## lint: every test conforms to the format in docs/TESTING.md
+## lint: every test conforms to the format in docs/TESTING.md.
+##
+## IN `test` SINCE THE `wired` GATE FOUND IT ORPHANED. It had a target and
+## a recipe and nothing led to it from `all`, which is the quieter half of
+## the disease `wired` exists for -- and it was RED while nobody looked:
+## tests/must-fail/modules/orphan_impl.count sat beside the directory form
+## of that test, where the runner never reads it, asserting a diagnostic
+## count nothing had ever checked. Pure python over the test tree, ~1s.
 lint:
 	$(PY) tests/lint.py
 

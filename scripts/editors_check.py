@@ -203,11 +203,30 @@ def main() -> int:
                            f"carries `comment`, `string` or `regex` as a word")
 
     # The language configuration is what declares brackets in the first place.
+    #
+    # AND ITS ABSENCE IS NOT "NOTHING TO CHECK". This used to be a bare
+    # `if cfg_rel:` with no else, so a package.json that simply stopped
+    # naming a `configuration` skipped every bracket check below --
+    # auto-closing pairs, the three-list agreement, the lot -- and the
+    # script exited 0 printing `0 auto-closing pair(s), all held out of
+    # strings and comments`, a sentence that is true and means nothing.
+    # Proved by mutation: delete `notIn` from the `(` pair and this gate
+    # goes red; then delete the `configuration` key as well and the SAME
+    # violation goes green. A language with no configuration contributes
+    # no brackets at all, which is not the healthy case -- it is a
+    # sharper version of the bug this whole script is about.
     cfg_rel = next((e.get("configuration") for e in
                     contributes.get("languages", []) if e.get("configuration")),
                    None)
     closing = brackets = surrounding = set()
-    if cfg_rel:
+    if not cfg_rel:
+        bad.append(
+            "no contributed language names a `configuration` — with no "
+            "language-configuration.json VS Code has no brackets, no "
+            "auto-closing pairs and no comment toggles for .zen, and every "
+            "bracket check below has nothing to read"
+        )
+    else:
         cfg = VSCODE / cfg_rel.lstrip("./")
         if not cfg.is_file():
             bad.append(f"language configuration {cfg_rel} does not exist")
@@ -265,6 +284,28 @@ def main() -> int:
 
     n = sum(len(scopes_in(json.loads((VSCODE / e['path'].lstrip('./')).read_text())))
             for e in grammars)
+
+    # EVERY NUMBER THE GREEN LINE PRINTS HAS TO BE ONE THIS SCRIPT ACTUALLY
+    # COUNTED. Each of the loops above is `for x in <a list read out of
+    # JSON>`, and a list that came up empty runs the loop zero times, adds
+    # nothing to `bad`, and reports as a clean pass -- which is how the
+    # `configuration` hole above stayed open. So the summary is asserted
+    # before it is printed rather than after: a count of zero here is the
+    # gate saying it checked nothing, and that is exit 2, not exit 0.
+    # Deliberately `> 0` and not a floor number: the floors would go stale,
+    # and every one of these is structurally non-empty in any editors/ that
+    # works at all.
+    empty = [name for name, count in (
+        ("grammar", len(grammars)),
+        ("scope", n),
+        ("bracket pair", len(brackets)),
+        ("auto-closing pair", len(closing)),
+        ("contributed path", len(list(filter(None, shipped)))),
+    ) if count == 0]
+    if empty:
+        print(f"editors: counted zero {', zero '.join(empty)} — this gate is "
+              f"checking nothing", file=sys.stderr)
+        return 2
     print(f"editors: {len(grammars)} grammar(s), {n} scope(s), "
           f"{len(REQUIRED_SCOPES)}/{len(REQUIRED_SCOPES)} bracket-excluding "
           f"scopes present; {len(closing)} auto-closing pair(s), all held out "
