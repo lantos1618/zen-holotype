@@ -274,6 +274,7 @@ scope:
 	  else \
 	    $(PY) scripts/scope.py $$revs; \
 	  fi
+	bash tests/scope/regression.sh
 
 ## design: every complete example in DESIGN.md must parse. PLAN.md 0.1 asks
 ## for this; nothing was checking it, and the document had drifted from the
