@@ -874,6 +874,9 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
     # premise ("the variable IS set") is false and the test would pass for
     # the wrong reason. Keyed by tid like the clock rewrite above: any other
     # test's environment is untouched.
+    # None is "inherit this process's environment", which is what every other
+    # test wants and what `run_process` passes straight to subprocess.
+    prog_env = None
     if test.tid == "corpus/env/env_var_resolves_a_name_of_any_length":
         prog_env = dict(os.environ)
         prog_env["V" * 5039] = "hello"
