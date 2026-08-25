@@ -100,8 +100,14 @@ zen/
 │       ├── collections/collections.zen   #  collections_vec, collections_map
 │       ├── test/test.zen            #       Tester, Bencher, BenchStats
 │       ├── build/build.zen          #       Builder, Package, Budget
-│       ├── actor/actor.zen          #       (5) Actor, Context, Ref — NOT WRITTEN
-│       └── thread/thread.zen        #       (5) Threads, Thread — NOT WRITTEN
+│       ├── actor/actor.zen          #       Actor, Context, Ref, ActorError —
+│       │                            #       the SURFACE only. Env.spawn has no
+│       │                            #       floor and a Ref enqueues nothing;
+│       │                            #       the runtime behind them is (5)
+│       └── thread/thread.zen        #       Threads, Thread, ThreadError live in
+│                                    #       env.zen — a thread is authority, so
+│                                    #       it hangs off Env. No file here, and
+│                                    #       none owed; the runtime under it is (5)
 │
 └── tests/
     ├── parse/                       # (0.1) every DESIGN.md construct, transcribed
