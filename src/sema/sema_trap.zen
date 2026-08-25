@@ -290,11 +290,12 @@ value_within = (c :: Checker, id: ExprId, want: TyId, v: i64)
 out_of_range = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
     node  = c.tree.expr_at(id);
     found = c.types.prim("int").try();
+    name  = c.written_literal(node).try();
     c.report(
         node.span.file,
         node.span,
         SemaFault.LiteralOutOfRange(TypeFault(
-            name: c.written_literal(node),
+            name: name,
             expected: want,
             found: found
         ))
@@ -324,14 +325,25 @@ int_literal_overflows = (c: Checker, id: ExprId, name: str) bool {
     })
 }
 
-// The literal as written, empty if not written as one (same as
-// `written_index`). Parens don't change a literal; minus does, so
-// `-1` stops here, not `1`.
-written_literal = (c: Checker, node: Expr) str {
+// The literal as written, empty if not written as one (same pattern as
+// `written_index`, and the same shape `literal_int` walks). Parens
+// don't change a literal and neither does a leading minus — the minus
+// is part of how it was written — so `-1` reads back as `-1`, not as
+// `1`. The negated form is composed rather than sliced, which is why
+// this allocates and says so; `dotted` in sema_def.zen is the
+// precedent, and every other arm hands back a slice the tree owns.
+written_literal = (c: Checker, node: Expr) Res<str, AllocError> {
     node.kind.match({
-        Literal(l) => l.text,
+        Literal(l) => Ok(l.text),
         Paren(p)   => c.written_literal(c.tree.expr_at(p.inner)),
-        _          => "",
+        Unary(u)   => {
+            digits ::= c.written_literal(c.tree.expr_at(u.operand)).try();
+            out ::= c.alloc.String().try();
+            out.add_bytes("-").try();
+            out.add_bytes(digits).try();
+            Ok(out.view())
+        },
+        _          => Ok(""),
     })
 }
 
