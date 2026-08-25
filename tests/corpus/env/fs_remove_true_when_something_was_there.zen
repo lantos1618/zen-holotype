@@ -1,0 +1,36 @@
+// `remove` is the answer to "make sure this is gone" — the one question
+// `Fs` could not ask, which left every program able to CREATE state and
+// unable to retire it: `write` was the only way to change what is on
+// disk, and once a path existed nothing could make it not exist.
+//
+// The bool is the member's point, and NotFound is not a failure: a
+// caller whose question was "make sure this is gone" got YES when the
+// path is already nothing. So `Ok(true)` says THIS call emptied the
+// name, `Ok(false)` says there was nothing to do, and `Err` is reserved
+// for a path that is there and refuses to leave.
+
+FsError = std.env
+
+main = (env: Env) Res<i32, FsError> {
+    // something there, then not: true, and the name is empty after
+    env.fs.write("gone.txt", "state\n").try();
+    env.fs.remove("gone.txt").match({
+        Err(_)  => println("removing a file that is there failed"),
+        Ok(yes) => println("first remove {}", yes),
+    });
+    println("still there {}", env.fs.exists("gone.txt"));
+
+    // asking twice is answered by the TYPE, not the kernel: the second
+    // remove is Ok(false), because gone is what the caller wanted
+    env.fs.remove("gone.txt").match({
+        Err(_)  => println("removing nothing failed"),
+        Ok(yes) => println("second remove {}", yes),
+    });
+
+    // a path that was never written is the same answer, not an error
+    env.fs.remove("never.txt").match({
+        Err(_)  => println("removing a stranger failed"),
+        Ok(yes) => println("stranger {}", yes),
+    });
+    Ok(0);
+}

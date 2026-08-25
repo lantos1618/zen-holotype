@@ -39,7 +39,7 @@ ctype, field_type, request_type, declared_ret = gen.gen_c.gen_c_type
 decl_ctx, decl_inst = gen.gen_c.gen_c_type
 expr = gen.gen_c.gen_c_expr
 declare_temp, enum_path, payload_type, is_variant = gen.gen_c.gen_c_flow
-lower_probe, lower_write, lower_read = gen.gen_c.gen_c_fs
+lower_probe, lower_write, lower_read, lower_remove = gen.gen_c.gen_c_fs
 close_else, close_brace, open_null_test = gen.gen_c.gen_c_fs
 lower_stdin_read = gen.gen_c.gen_c_stdin
 lower_env_var = gen.gen_c.gen_c_env
@@ -123,9 +123,10 @@ mem_verb = (name: str) bool {
 
 // `read` is in the set so that it reaches `gen_c_fs.lower_read`, which
 // allocates its buffer through the `Alloc` it was handed, rather than
-// `gen_c_member.zen`'s refusal for a member with no body.
+// `gen_c_member.zen`'s refusal for a member with no body. `remove` is
+// there for the same reason: its lowering lives in `gen_c_fs` too.
 fs_verb = (name: str) bool {
-    name.is_in(["exists", "is_dir", "write", "read"])
+    name.is_in(["exists", "is_dir", "write", "read", "remove"])
 }
 
 // -----------------------------------------------------------------
@@ -325,6 +326,21 @@ verb_5 = (
 ) Res<(), AllocError> {
     a.name.text.eq("read").match({
         true  => be.lower_read(id, c, ret, aty, ctx, out),
+        false => verb_6(be, id, c, a, ret, ctx, out),
+    })
+}
+
+verb_6 = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    a.name.text.eq("remove").match({
+        true  => be.lower_remove(id, c, ret, ctx, out),
         false => be.lower_probe(c, a.name.text, ctx, out),
     })
 }

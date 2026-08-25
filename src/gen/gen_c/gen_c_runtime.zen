@@ -379,6 +379,7 @@ write_fs = (out :: Emit) Res<(), AllocError> {
     write_fs_kind(out).try();
     write_fs_size(out).try();
     write_fs_write(out).try();
+    write_fs_remove(out).try();
     write_fs_read(out).try();
     Ok(());
 }
@@ -467,6 +468,40 @@ write_fs_write = (out :: Emit) Res<(), AllocError> {
     ).try();
     out.say("if (fclose(fh) != 0) return ZG_FS_FAILED;").try();
     out.say("return ZG_FS_OK;").try();
+    out.dedent();
+    out.say("}").try();
+    out.line().try();
+    Ok(());
+}
+
+// `remove` (#757): the status answers "did the call succeed" and the
+// bool IS the caller's answer -- true when THIS call emptied the name,
+// false when there was nothing at it, because "make sure this is gone"
+// is answered YES by a path that holds nothing. Absence is therefore an
+// Ok and never ZG_FS_NOT_FOUND here: the only ordinals this returns are
+// the three refusals, which is why the gen-side chain starts at 2. The
+// stat first keeps a directory away from remove(), which would happily
+// rmdir an empty one -- a directory is a separate question and stays
+// IsDir. ENOENT from the removal itself is still Ok(false): between the
+// probe and the delete the name may have gone, and gone is what the
+// caller wanted.
+write_fs_remove = (out :: Emit) Res<(), AllocError> {
+    out.say(
+        "static int zg_fs_remove(const unsigned char *p, size_t n, bool *gone) {"
+    ).try();
+    out.indent();
+    out.say("char buf[ZG_PATH_MAX];").try();
+    out.say("struct stat st;").try();
+    out.say("*gone = false;").try();
+    out.say("if (!zg_fs_path(buf, p, n)) return ZG_FS_FAILED;").try();
+    out.say("if (stat(buf, &st) != 0) {").try();
+    out.say("    if (errno == EACCES) return ZG_FS_DENIED;").try();
+    out.say("    return ZG_FS_OK;").try();
+    out.say("}").try();
+    out.say("if (S_ISDIR(st.st_mode)) return ZG_FS_IS_DIR;").try();
+    out.say("if (remove(buf) == 0) { *gone = true; return ZG_FS_OK; }").try();
+    out.say("if (errno == ENOENT) return ZG_FS_OK;").try();
+    out.say("return errno == EACCES ? ZG_FS_DENIED : ZG_FS_FAILED;").try();
     out.dedent();
     out.say("}").try();
     out.line().try();

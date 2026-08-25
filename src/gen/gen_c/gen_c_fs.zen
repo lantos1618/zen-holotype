@@ -99,6 +99,48 @@ write_fs_call = (be :: CBackend, rc: str, fn: str, first: str, second: str)
     be.fmt("{rc} = {fn}{first}, {second});\n")
 }
 
+// `remove`: the answer to "make sure this is gone" (#757). The status
+// answers "did the call succeed" and the BOOL is the caller's answer,
+// through a pointer — the same split `zg_fs_size` makes, because a
+// value that may legitimately be 1 cannot double as the error flag.
+// Absence is an Ok here and never NOT_FOUND: the only ordinals this
+// returns are the three refusals, so the gen-side chain starts at 2.
+lower_remove* = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.need_fs();
+    i32_ty  = be.check.types.prim("i32").try();
+    bool_ty = be.check.types.prim("bool").try();
+    path ::= be.alloc.String().try();
+    be.path_args(c, 0, ctx, path).try();
+    rc ::= be.alloc.String().try();
+    sym_gen(rc, "t", be.next_tmp()).try();
+    yes ::= be.alloc.String().try();
+    sym_gen(yes, "t", be.next_tmp()).try();
+    dst ::= be.alloc.String().try();
+    sym_gen(dst, "t", be.next_tmp()).try();
+    be.declare_temp(i32_ty, rc.view()).try();
+    be.declare_temp(bool_ty, yes.view()).try();
+    be.declare_temp(ret, dst.view()).try();
+    be.write_remove_call(rc.view(), yes.view(), path.view()).try();
+    be.open_rc_test(rc.view()).try();
+    be.fs_chain(ret, rc.view(), dst.view(), 2).try();
+    be.close_else().try();
+    be.write_assign_ok(ret, yes.view(), dst.view()).try();
+    be.close_brace().try();
+    out.add_bytes(dst.view())
+}
+
+write_remove_call = (be :: CBackend, rc: str, yes: str, path: str)
+                   Res<(), AllocError> {
+    be.fmt("{rc} = zg_fs_remove({path}, &{yes});\n")
+}
+
 // `(const unsigned char *)<tmp>.data, <tmp>.len` — the two halves of a
 // `str`, spilled once. `str` is the one type whose C representation is
 // the runtime floor's rather than its declaration's, so its fields are

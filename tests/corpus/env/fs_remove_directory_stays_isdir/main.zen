@@ -1,0 +1,37 @@
+// tests/corpus/env/fs_remove_directory_stays_isdir/main.zen
+// `remove` answers "make sure this is gone" (#757), and its floor stats
+// BEFORE deleting for two reasons this test pins at once: a directory is
+// a separate question and must arrive as IsDir -- never Deleted -- because
+// glibc's remove() on a directory SUCCEEDS when the directory is empty,
+// which would let a program retire a whole source tree by accident; and
+// the tree must still be standing afterwards, so a floor that fell through
+// to plain remove() cannot pass by luck on an answer alone.
+//
+// `src` names the staged tree itself, so the target provably exists when
+// the program runs (the harness stages src/std beside the entry), and
+// `writable.txt` written FIRST proves the capability worked a moment
+// earlier -- without it a floor refusing every remove would still print
+// matching lines.
+//
+// Red without #757 ("no `remove` on `Fs`", one diagnostic per call site),
+// green with it.
+
+FsError = std.env
+
+main = (env: Env) Res<i32, FsError> {
+    env.fs.write("writable.txt", "ok").try();
+    println("plain write ok");
+
+    env.fs.remove("src").match({
+        Ok(yes)          => println("removed the tree?! {}", yes),
+        Err(NotFound)    => println("not found"),
+        Err(Denied)      => println("denied"),
+        Err(IsDir)       => println("directory refused"),
+        Err(Failed)      => println("failed"),
+        Err(OutOfMemory) => println("oom"),
+    });
+
+    // the point of stat-first: the refusal left the tree untouched
+    println("tree still there {}", env.fs.exists("src"));
+    Ok(0);
+}
