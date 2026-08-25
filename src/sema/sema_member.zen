@@ -328,9 +328,9 @@ settled = (c :: Checker, id: ExprId, ty: TyId, f: Found)
     from = c.is_unknown(f.bound).match({ true => ty, false => f.bound });
     c.supply_memo.set(id, from).try();
     c.types.at(f.ty).match({
-        Fn(_) => c.access_at(id).match({
-            Ok(ac)  => c.method_not_value(ac, f.ty),
-            None    => Ok(f.ty),
+        Fn(_) => c.callee_access.get(id).match({
+            Ok(true)  => Ok(f.ty),
+            _         => c.method_not_value(id, f.ty),
         }),
         _     => Ok(f.ty),
     })
@@ -390,14 +390,22 @@ span_of = (found: Vec<Found>, i: usize) Span {
 // gen_c emitted C reading a struct member that does not exist. A method
 // is read only through its call, so `pick` refuses the access here —
 // naming the method and the call it is missing.
-method_not_value = (c :: Checker, ac: Access, fn_ty: TyId)
+//
+// THE NAME COMES OFF THE NODE BY ID, not off a carried value: every memo
+// this checker keeps is keyed by `ExprId`, and `settled` is reached from
+// several callers that hold exactly that.
+method_not_value = (c :: Checker, id: ExprId, fn_ty: TyId)
                    Res<TyId, AllocError> {
     poison = c.types.unknown().try();
+    node = c.tree.expr_at(id);
+    ac   = c.access_at(id);
+    span = ac.match({ Ok(a) => a.name.span, None => node.span });
+    text = ac.match({ Ok(a) => a.name.text, None => "" });
     c.report(
-        ac.name.span.file,
-        ac.name.span,
+        span.file,
+        span,
         SemaFault.MethodNotValue(TypeFault(
-            name: ac.name.text,
+            name: text,
             expected: poison,
             found: fn_ty
         ))

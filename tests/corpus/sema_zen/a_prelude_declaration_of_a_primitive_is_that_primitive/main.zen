@@ -31,7 +31,7 @@ Checker, Ctx = sema.sema_check
 Types, TyId = sema.sema_ty
 PRELUDE = sema.sema_def
 Ast = std.ast.ast_arena
-Expr, ExprKind, Access, Name, Literal, LiteralKind = std.ast.ast_node
+Expr, ExprKind, Access, Name, Literal, LiteralKind, Call, Arg = std.ast.ast_node
 Decl, DeclKind, Struct, Import, ImportName, Module = std.ast.ast_node
 Member, MemberKind, Field, Function, Form, Param, TParam = std.ast.ast_node
 Type, TypeKind, Named = std.ast.ast_node
@@ -68,6 +68,22 @@ expr = (tree :: Ast, kind: ExprKind) Res<ExprId, AllocError> {
 
 dot = (tree :: Ast, base: ExprId, name: str) Res<ExprId, AllocError> {
     tree.expr(ExprKind.Access(Access(base: base, name: id_of(name))))
+}
+
+// `s.name()` — the call form. #772's remedy makes a BARE method access
+// (`s.is_empty`, no call) a refusal at the dot, so what a member's
+// REACHABILITY is asked through is the call written beside it; the
+// bare form is still probed below, as the refusal it now is.
+call_dot = (tree :: Ast, base: ExprId, name: str, a: Alloc)
+           Res<ExprId, AllocError> {
+    callee = tree.dot(base, name).try();
+    args   = a.Vec<Arg>();
+    tree.expr(ExprKind.Call(Call(
+        callee: callee,
+        targs: a.Vec<TypeId>(),
+        args: args,
+        args_span: at()
+    )))
 }
 
 // `len*: usize` — storage, and starred so a byte count is readable
@@ -222,7 +238,8 @@ main = (env: Env) Res<i32, AllocError> {
 
     s       = tree.expr(ExprKind.Name(Name(text: "s"))).try();
     s_len   = tree.dot(s, "len").try();
-    s_empty = tree.dot(s, "is_empty").try();
+    s_empty = tree.call_dot(s, "is_empty", alloc).try();
+    s_bare  = tree.dot(s, "is_empty").try();
     s_nope  = tree.dot(s, "nope").try();
     literal = tree.expr(ExprKind.Literal(Literal(
         kind: LiteralKind.Str,
@@ -238,13 +255,19 @@ main = (env: Env) Res<i32, AllocError> {
     str_ty = c.types.str_ty().try();
     c.bind("s", str_ty, false, false).try();
 
-    // a member the prelude declares on `str` is reachable on one
+    // a member the prelude declares on `str` is reachable on one — the
+    // field read bare, the method through the call #772's remedy requires
     reaches(c, alloc, "s.len", s_len, ctx).try();
-    reaches(c, alloc, "s.is_empty", s_empty, ctx).try();
+    reaches(c, alloc, "s.is_empty()", s_empty, ctx).try();
 
     // and a member it does not declare is still a mistake: the rule
     // makes the declaration reachable, it does not make the type opaque
     reaches(c, alloc, "s.nope", s_nope, ctx).try();
+
+    // THE BARE FORM OF A METHOD IS NOT ITS VALUE. Since #772, asking for
+    // `s.is_empty` without the call is refused at the dot with the
+    // method's signature in hand — one diagnostic, unknown type.
+    reaches(c, alloc, "s.is_empty (bare)", s_bare, ctx).try();
 
     // THE IDENTITY. A literal's type and the declared `str` are one
     // interned id, so nothing downstream can disagree about which was
