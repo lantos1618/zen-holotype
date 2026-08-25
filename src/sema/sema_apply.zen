@@ -179,28 +179,65 @@ variant_call_type* = (
     name : str,
     ctx  : Ctx
 ) Res<TyId, AllocError> {
-    // TEMP-DEBUG: report the call's name, ty id, payload id, answer id
-    dbg ::= c.alloc.String("").try();
-    dbg.fmt("DBG vct name=`{}` ty={} ", name, ty.index).try();
-    cases0 ::= c.alloc.Vec<Case>();
-    c.cases_of(ty, cases0).try();
-    find_case(cases0, name).match({
-        None  => dbg.add_bytes("payload=? ").try(),
-        Ok(cs) => dbg.fmt("payload={} hasp={} ", cs.payload.index, cs.has_payload).try(),
-    });
-    inst0 ::= c.alloc.Inst();
-    cases1 ::= c.alloc.Vec<Case>();
-    c.cases_of(ty, cases1).try();
-    (find_case(cases1, name).match({
+    inst  ::= c.alloc.Inst();
+    cases ::= c.alloc.Vec<Case>();
+    c.cases_of(ty, cases).try();
+    (find_case(cases, name).match({
         None   => Ok(()),
-        Ok(cs) => c.payload_says(call, ty, cs, ctx, inst0),
+        Ok(cs) => c.payload_says(call, ty, cs, ctx, inst),
     })).try();
-    dbg.fmt("inst_len={} ", inst0.len()).try();
-    ans = c.subst(ty, inst0).try();
-    dbg.fmt("ans={}", ans.index).try();
-    c.report(call.args_span.file, call.args_span,
-        SemaFault.UndefinedName(NameFault(name: dbg.view()))).try();
-    ans
+    c.subst_over_decl(ty, inst)
+}
+
+// THE SUBSTITUTION RUNS OVER THE APPLIED HEAD, not over the base the
+// access was read from — and this is where the first cut of this rule
+// was dead on arrival. `variant_ctor` builds its `.ret` by interning
+// the enum AT ITS OWN PARAMETERS: a fresh `Named(decl, [Var(T)])`, whose
+// args are exactly what a substitution must reach. `ty` is the bare head
+// the caller resolved (`Opt` with NO arguments), so `subst(ty, inst)`
+// walked a type that never mentions `T` and answered it unchanged —
+// instrumented, `inst_len=1 ans=<the input id>`: the binding made and
+// thrown away in the same breath. A non-generic enum has no application
+// to rebuild and falls out as the base itself.
+subst_over_decl = (
+    c    :: Checker,
+    ty   : TyId,
+    inst :: Inst
+) Res<TyId, AllocError> {
+    c.types.at(ty).match({
+        Named(n) => c.rebuilt_applied(n, inst),
+        _        => Ok(ty),
+    })
+}
+
+// One interned id per answer: the declaration's parameter vars, each
+// replaced by what the instance bound (an unbound one keeps its var,
+// which is `rebuilt_ctor_type`'s rule too; what remains free is refused
+// by the consumers' `has_var`, as at any other call).
+//
+// The vars are read off the DECLARATION — struct or enum, in declaration
+// order, through `decl_tparams_of` — and rebuilt against the owner string
+// that minted them (`owner_of`: module plus own name, the identity
+// `Ty.Var` interns on), so the vars found here ARE the ones `unify`
+// wrote bindings for. `types.named` re-interns, and `assignable`'s
+// `same_applied` reads two applications of one declaration structurally,
+// so the fresh id agrees with a parsed `Opt<i32>` wherever one is
+// written.
+rebuilt_applied = (
+    c    :: Checker,
+    n    : TyNamed,
+    inst :: Inst
+) Res<TyId, AllocError> {
+    decl_at(c.tree, n.decl).match({
+        None  => Ok(()),
+        Ok(d) => {
+            vars ::= c.alloc.Vec<TyId>();
+            c.decl_tparams_of(d, d, vars).try();
+            args ::= c.alloc.Vec<TyId>();
+            vars.loop((h, v) { args.add(arg_for(v, inst)).try() });
+            c.types.named(n.decl, d.qname, n.name, args)
+        },
+    })
 }
 
 // The payload against the first argument's settled type. A variant with
