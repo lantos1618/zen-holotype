@@ -47,6 +47,7 @@ variant_type = sema.sema_static
 call_type = sema.sema_call
 meta_type = sema.sema_meta
 bind_stmt = sema.sema_place
+is_handle_ty, refuse_handle_at = sema.sema_place
 check_binary, check_index, check_literal = sema.sema_trap
 element_agrees = sema.sema_trap
 check_arms, check_arms_agree = sema.sema_hoist
@@ -462,6 +463,49 @@ no_address* = (c :: Checker, node: Expr, a: Access, inner: TyId)
 // AST records only what was written, and this is where that's decided.
 // -----------------------------------------------------------------
 
+// A LOOP HANDLE IS NOT A VALUE, so no block EVALUATES to one. The
+// question lives here and not at `check_return` because the loop body
+// has no return-type slot to fail against: `check_return` only ever
+// sees a function body, so `{ h }` as the tail of `.loop((h, x) {..})`
+// passed sema in silence and gen_c emitted `(void)(zu_l1h);`, refused
+// by cc alone. Asked once, where every block's value is decided.
+//
+// BOTH SPELLINGS ARE ASKED, because they compile to the same C: the
+// written value, and the `;`-terminated last statement a block falls
+// out through. `sema_hoist.tail_expr` reads only the first, which is
+// why the fallback lives beside the reader of `Block.value`.
+refuse_handle_tail* = (c :: Checker, block: Block, got: TyId)
+                      Res<(), AllocError> {
+    tail_node(block).match({
+        None   => Ok(()),
+        Ok(id) => c.is_handle_ty(got).match({
+            false => Ok(()),
+            true  => c.refuse_handle_at(id),
+        }),
+    })
+}
+
+tail_node = (block: Block) Res<ExprId> {
+    block.value.match({
+        Ok(v) => Ok(v),
+        None  => last_stmt_expr(block),
+    })
+}
+
+last_stmt_expr = (block: Block) Res<ExprId> {
+    n = block.stmts.len;
+    (n > 0).match({
+        false => None,
+        true  => block.stmts.get(n - 1).match({
+            None  => None,
+            Ok(s) => s.kind.match({
+                Expr(e) => Ok(e.expr),
+                _       => None,
+            }),
+        }),
+    })
+}
+
 block_type* = (c :: Checker, id: BlockId, ctx: Ctx)
               Res<TyId, AllocError> {
     mark  = c.mark();
@@ -472,6 +516,7 @@ block_type* = (c :: Checker, id: BlockId, ctx: Ctx)
         Ok(e) => c.type_of(e, ctx),
         None  => Ok(tail),
     }).try();
+    c.refuse_handle_tail(block, got).try();
     c.leave_block(outer);
     c.release(mark).try();
     Ok(got);
