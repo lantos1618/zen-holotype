@@ -89,12 +89,19 @@ value_stmt_index = (blk: Block) usize {
     })
 }
 
+// A NESTED BLOCK IS A VALUE TOO, and sema has always said so:
+// `stmt_type` types a `Block` statement with `block_type`, so
+// `f = () i32 { { 11 } }` is an `i32` to the checker. Reading only
+// `Expr` here made it nothing to the backend — `(void)(11)` and a bare
+// `return;` — which is sema and gen disagreeing about a body's value
+// with gen winning silently (#764).
 last_expr_index = (blk: Block) usize {
     blk.stmts.get(blk.stmts.len - 1).match({
         None  => blk.stmts.len,
         Ok(s) => s.kind.match({
-            Expr(_) => blk.stmts.len - 1,
-            _       => blk.stmts.len,
+            Expr(_)  => blk.stmts.len - 1,
+            Block(_) => blk.stmts.len - 1,
+            _        => blk.stmts.len,
         }),
     })
 }
@@ -245,11 +252,20 @@ stmt_at_name = (be :: CBackend, blk: Block, tail: usize) str {
     })
 }
 
+// A nested block hands out whatever IT hands out, so the name travels
+// one frame up with the value: the outer block must spare the same
+// binding, or it frees what it just gave away.
 stmt_value_name = (be :: CBackend, s: Stmt) str {
     s.kind.match({
-        Expr(e) => be.bare_name(e.expr),
-        _       => "",
+        Expr(e)  => be.bare_name(e.expr),
+        Block(k) => be.nested_keep_name(k),
+        _        => "",
     })
+}
+
+nested_keep_name = (be :: CBackend, id: BlockId) str {
+    blk = be.tree.block_at(id);
+    be.keep_name(blk, tail_index(blk, Dest.Return))
 }
 
 // A bare name, through as many `Paren`s as it is written inside.
@@ -311,8 +327,9 @@ deliver_expr_stmt = (
     dst  : Dest
 ) Res<(), AllocError> {
     s.kind.match({
-        Expr(e) => be.deliver(e.expr, ctx, want, dst),
-        _       => Ok(()),
+        Expr(e)  => be.deliver(e.expr, ctx, want, dst),
+        Block(k) => block(be, k, ctx, want, dst),
+        _        => Ok(()),
     })
 }
 

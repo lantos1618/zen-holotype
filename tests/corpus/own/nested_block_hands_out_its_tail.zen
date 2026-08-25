@@ -1,0 +1,58 @@
+// A NESTED BLOCK HANDS ITS VALUE ONE FRAME UP, AND THE NAME TRAVELS
+// WITH IT. `gen_c_stmt.keep_name` decides which local a block's own
+// drops must spare, and it read only the `Expr` statement at the tail —
+// so once a nested block became a tail at all (#764 case 3), the outer
+// block destroyed the binding it had just handed to its caller. With a
+// printing `Drop` that is a DOUBLE DROP; the arena spelling of the same
+// mistake is a heap-use-after-free (#793 site B).
+//
+// `handed` is the face: `n` belongs to the OUTER block and is handed
+// out through the inner braces, so neither block may destroy it — the
+// caller's `kept` owns it, and its one drop is at the end of `main`.
+//
+// `owned` is the control on the other side: a binding the INNER block
+// makes and hands out is not the inner block's to destroy either, and
+// its drop belongs to whoever receives it.
+//
+// `scoped` must NOT change: a nested block in statement position is
+// asked for no value, so what it makes dies at the inner brace.
+
+Noisy = {
+    env: Env,
+    id: i32,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.id) }
+})
+
+handed = (env: Env) Noisy {
+    n = Noisy(env: env, id: 1);
+    println("made {}", n.id);
+    { n }
+}
+
+owned = (env: Env) Noisy {
+    {
+        n = Noisy(env: env, id: 2);
+        println("made {}", n.id);
+        n
+    }
+}
+
+main = (env: Env) Res<i32, IoError> {
+    kept = handed(env);
+    println("holding {}", kept.id);
+
+    also = owned(env);
+    println("holding {}", also.id);
+
+    {
+        scoped = Noisy(env: env, id: 3);
+        println("made {}", scoped.id);
+        scoped;
+    }
+    println("after the inner block");
+
+    Ok(0);
+}

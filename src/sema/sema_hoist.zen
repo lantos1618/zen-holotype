@@ -295,7 +295,7 @@ hoist_at = (c :: Checker, id: ExprId, got: TyId, want: TyId)
 tail_expr* = (c: Checker, blk: Block) Res<ExprId> {
     blk.value.match({
         Ok(e) => Ok(e),
-        None  => last_stmt_expr(blk),
+        None  => c.last_stmt_expr(blk),
     })
 }
 
@@ -303,17 +303,29 @@ tail_expr* = (c: Checker, blk: Block) Res<ExprId> {
 // underflows, which this compiler traps on — `f = () () { }` used to
 // crash the compiler with `trap: integer overflow` here instead of
 // compiling to nothing.
-last_stmt_expr = (blk: Block) Res<ExprId> {
+last_stmt_expr = (c: Checker, blk: Block) Res<ExprId> {
     (blk.stmts.len > 0).match({
         false => None,
-        true  => last_stmt_of(blk.stmts),
+        true  => c.last_stmt_of(blk.stmts),
     })
 }
 
-last_stmt_of = (stmts: Vec<Stmt>) Res<ExprId> {
+// A NESTED BLOCK ENDS ON ITS OWN TAIL, and `stmt_type` has always typed
+// a `Block` statement with `block_type` — so `{ { 11 } }` is an `i32`
+// to the checker and was nothing at all to every reader that asked
+// here. Descending gives one answer to both (#764).
+last_stmt_of = (c: Checker, stmts: Vec<Stmt>) Res<ExprId> {
     stmts.get(stmts.len - 1).match({
         None  => None,
-        Ok(s) => s.kind.match({ Expr(e) => Ok(e.expr), _ => None }),
+        Ok(s) => c.stmt_tail_expr(s),
+    })
+}
+
+stmt_tail_expr = (c: Checker, s: Stmt) Res<ExprId> {
+    s.kind.match({
+        Expr(e)  => Ok(e.expr),
+        Block(b) => c.tail_expr(c.tree.block_at(b)),
+        _        => None,
     })
 }
 
