@@ -246,9 +246,26 @@ def main() -> int:
     for target in sorted(live):
         if target in phony:
             continue
-        if (ROOT / target).exists():
-            continue
         if not recipes.get(target) and target not in prereqs:
+            continue
+        # A FILE THE BUILD PRODUCES is not the `editors` case, and asking
+        # whether that path EXISTS answers a different question: a build
+        # product does not exist until something builds it. This check was
+        # written with `(ROOT / target).exists()` here, and it made the
+        # gate's verdict move with a build artifact instead of with the
+        # Makefile -- green on a worktree holding a stale `grammar/zen.so`,
+        # red on a clean checkout of the very same commit. A gate that
+        # answers differently on two identical trees is not a gate.
+        #
+        # What actually separates the two cases is the RECIPE. A file
+        # target's recipe WRITES a file of that name -- `grammar/zen.so`'s
+        # is `$(CC) -shared -fPIC -o grammar/zen.so ...`, so the target
+        # appears in it as a whole word (or as `$@`). The `editors` target's
+        # recipe was `$(PY) scripts/editors_check.py`, which writes nothing
+        # called `editors`; the substring is there, the WORD is not, which
+        # is why this splits before it looks.
+        recipe = recipes.get(target, "")
+        if target in recipe.split() or "$@" in recipe:
             continue
         bad.append(
             f"{target}: reached from `{ROOT_TARGET}` but neither declared"
