@@ -1,0 +1,53 @@
+// `env.clock` is the authority the time.zen header points at: reading
+// the clock lives on Env, describing a duration is arithmetic. Two
+// members, because they are two authorities:
+//
+//   since_start is MONOTONIC — a span since an unspecified epoch, for
+//   measuring. Never compared across processes, never told as a date.
+//
+//   unix is the wall clock — the one that names a moment in the world.
+//
+// The expectations are inequalities, not values: a clock's honest
+// answer depends on when the test ran. What this test pins is that the
+// reads WORK and are ordered the way their authorities are. HARNESS_
+// EPOCH below is rewritten by the run to the epoch second just before
+// it executed, so "near" has a number to be near.
+Res = std.core
+
+HARNESS_EPOCH* : u64 = 0
+
+elapsed = (from: Duration, to: Duration) Res<Duration> {
+    to.sub(from)
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    d1 = env.clock.since_start();
+    d2 = env.clock.since_start();
+    u1 = env.clock.unix();
+
+    // monotonic: two spans of the same clock compare by their ns — a
+    // later read is never smaller than an earlier one, so the span
+    // between two reads always answers, and it fits inside d1's own
+    // count: the process has not been up longer than its first read
+    println("monotonic advances: {}", elapsed(d1, d2).match({
+        Ok(span) => span.ns < d1.ns,
+        None     => false,
+    }));
+    println("same read twice: {}", elapsed(d2, d2).match({
+        Ok(span) => span.ns == 0,
+        None     => false,
+    }));
+
+    // wall time: within half a day either side of the harness's own
+    // epoch seconds — a WINDOW, not a lower bound, because NTP is
+    // allowed to step the wall clock backward between staging and
+    // running, and "near" has to survive that. A day of slack still
+    // refuses every answer that is not the real world's time.
+    secs = u1.seconds_of();
+    println(
+        "unix near harness: {}",
+        (secs > HARNESS_EPOCH - 43200) && (secs < HARNESS_EPOCH + 43200)
+    );
+
+    Ok(0);
+}
