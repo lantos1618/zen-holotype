@@ -31,12 +31,66 @@ check_arms, check_arms_agree = sema.sema_hoist
 type_of = sema.sema_type
 type_from_ast = sema.sema_denote
 
-// `LoopHandle` by its module path, not its spelling: `h` is bound at the
-// nominal type `std.core.loop.loop_handle.LoopHandle`, and two programs
-// may spell any name differently. The path is written here once for the
-// same reason `gen_name.RES_PATH` is — `Res` is structural in the type
-// language but answers to a library name, and this check asks that name.
-HANDLE_PATH* : str = "std.core.loop.loop_handle.LoopHandle"
+// `LoopHandle` by WHERE IT IS DECLARED, not by who names it: a program
+// may call its own struct `LoopHandle` and bind that freely — the
+// refusal answers the library type alone. Written here once for the
+// same reason `gen_name.RES_PATH` is: the type is structural in the
+// language but answers to a library name, and this check asks that
+// name. An unknown module reads as NOT the handle — fail-open, since a
+// missed check only misses while a false one refuses a legal program.
+HANDLE_MODULE* : str = "std.core.loop.loop_handle"
+HANDLE_NAME* : str = "LoopHandle"
+
+// A LOOP HANDLE IS NOT A VALUE, so binding it is refused outright.
+//
+// `h` arrives in the body as the loop it came from — `gen_c_loop
+// .bind_handle` gives the name no storage and lowers `h.break` at the
+// NAME — but the signature `(h: LoopHandle, ..)` types it as an
+// ordinary nominal, and `kept ::= h;` passed sema in silence and
+// emitted C reading an undeclared variable. Reported at the VALUE, the
+// one byte that names what cannot be kept; the bind itself runs on, so
+// one mistake stays one diagnostic and nothing downstream re-asks.
+refuse_handle_value* = (c :: Checker, id: ExprId, got: TyId)
+                        Res<(), AllocError> {
+    c.is_handle_ty(got).match({
+        false => Ok(()),
+        true  => c.refuse_handle_at(id),
+    })
+}
+
+is_handle_ty = (c :: Checker, ty: TyId) bool {
+    c.types.at(ty).match({
+        Named(n) => c.is_handle_decl(n.decl.module.to_usize(), n.name),
+        _        => false,
+    })
+}
+
+is_handle_decl = (c :: Checker, mi: usize, name: str) bool {
+    c.world.table_at(mi).match({
+        None  => false,
+        Ok(t) => t.name.eq(HANDLE_MODULE) && name.eq(HANDLE_NAME),
+    })
+}
+
+refuse_handle_at = (c :: Checker, id: ExprId) Res<(), AllocError> {
+    node = c.tree.expr_at(id);
+    c.report(
+        node.span.file,
+        node.span,
+        SemaFault.HandleNotAValue(NameFault(name: handle_spelling(c, id))),
+    )
+}
+
+// The handle as WRITTEN, parens unwrapped, for the diagnostic to say
+// what stood in the value position — `h` nine times out of ten, never
+// assumed.
+handle_spelling = (c :: Checker, id: ExprId) str {
+    c.tree.expr_at(id).kind.match({
+        Name(n)  => n.text,
+        Paren(p) => handle_spelling(c, p.inner),
+        _        => "",
+    })
+}
 
 // `x = e;`, `x: T ::= e;`.
 //
@@ -44,8 +98,8 @@ HANDLE_PATH* : str = "std.core.loop.loop_handle.LoopHandle"
 // the value's own type is never contrasted against a binding the
 // statement was not allowed to make.
 bind_stmt* = (c :: Checker, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
-    got  = c.type_of(b.value, ctx).try();
-    c.refuse_handle_value(b.value, got, ctx).try();
+    got = c.type_of(b.value, ctx).try();
+    c.refuse_handle_value(b.value, got).try();
     want = c.check_rebound(b).try().match({
         true  => c.types.unknown(),
         false => c.bind_want(b, got, ctx),

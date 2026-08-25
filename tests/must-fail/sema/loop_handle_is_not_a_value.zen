@@ -1,0 +1,22 @@
+// A LOOP HANDLE IS NOT A VALUE, so it cannot be bound to a name. `h`
+// arrives in the body as the loop it came from — the backend gives the
+// name no storage and lowers `h.break` at the NAME (`gen_c_loop
+// .bind_handle`) — but the signature `(h: LoopHandle, ..)` typed it as
+// an ordinary nominal, so `kept ::= h;` passed sema in silence and
+// emitted C reading an undeclared variable: `zu_l4kept = zu_l1h;`, with
+// `zu_l1h` declared nowhere in the file, refused by cc alone.
+//
+// `sema_place.refuse_handle_value` now refuses the binding outright,
+// naming the handle where it stood. The one supported use —
+// `h.break(..)` / `h.next()` inside its own body — is untouched
+// (`corpus/gen_zen/lowers_the_loop_intrinsic` walks it).
+//
+// position: the VALUE, the one byte that names what cannot be kept.
+
+main = (env: Env) Res<i32, IoError> {
+    Range(0, 1).loop((h, x) {
+        kept ::= h;
+        println("{}", x);
+    });
+    Ok(0);
+}
