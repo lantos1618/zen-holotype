@@ -390,6 +390,9 @@ fixpoint:
 	# requires the rejection. A green fixpoint alone proves neither half.
 	sh tests/fixpoint_asserts.sh check
 	sh tests/fixpoint_asserts.sh mutant
+	# And the WIRING must hold (#761, half 2): this target stays a
+	# prerequisite of `make test`, or a stale seed ships green again.
+	sh tests/fixpoint_wired_into_test.sh
 
 ## determinism: five checks that gen_c is a pure function of input
 determinism: build
