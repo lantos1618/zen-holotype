@@ -26,17 +26,30 @@ Tag = {
     eq* = (self: @Self, other: @Self) bool { self.name.eq(other.name) }
 }
 
-word = (env: Env, letters: str) Res<Tag, AllocError> {
-    alloc ::= env.mem.alloc();
-    buf   ::= alloc.String().try();
+// THE ARENA IS `main`'S, AND THAT IS LOAD-BEARING. This test used to
+// spell `alloc ::= env.mem.alloc()` inside `word`, which makes an arena
+// that is dropped when `word` returns -- so every `str` it handed back
+// pointed into freed pages and the three answers below were read out of
+// reclaimed memory. It printed `same true / diff true / swap true`
+// anyway, because on glibc the freed 64KB block happens to still hold
+// the bytes; ASan calls the same program heap-use-after-free (#788).
+// A test may not assert the output of an undefined program, whatever
+// that output happens to be, so the allocator now outlives every view
+// taken from it. The property under test is untouched: three separate
+// runtime allocations, three distinct addresses, no literal pooling.
+
+word = (a: Alloc, letters: str) Res<Tag, AllocError> {
+    buf ::= a.String().try();
     buf.add_bytes(letters).try();
     Ok(Tag(name: buf.view()));
 }
 
 main = (env: Env) Res<i32, AllocError> {
-    ab1 = word(env, "ab").try();
-    ab2 = word(env, "ab").try();
-    ac  = word(env, "ac").try();
+    alloc ::= env.mem.alloc();
+
+    ab1 = word(alloc, "ab").try();
+    ab2 = word(alloc, "ab").try();
+    ac  = word(alloc, "ac").try();
 
     println("same {}", ab1 == ab2);
     println("diff {}", ab1 != ac);

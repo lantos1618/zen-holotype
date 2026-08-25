@@ -162,6 +162,15 @@ emit_index = (out :: Emit) Res<(), AllocError> {
 // length, so printing a `str` needs no temporary and therefore no
 // statement of its own — which is what lets an argument be lowered as a
 // pure C expression.
+//
+// `if (n)` AND `if (s.len)` ARE NOT AN OPTIMISATION. An empty `str` has
+// a NULL `data` — that is what `Vec` holds before its first grow — and
+// `fwrite(NULL, 1, 0, stdout)` is undefined by C99 7.1.4 however many
+// bytes it moves. UBSan calls it "null pointer passed as argument 1,
+// which is declared to never be null", and printing an empty string is
+// common enough that it reached the corpus. The `fs_write` floor below
+// already spells the same guard (`if (len && fwrite(...))`); these four
+// are the rest of the family. Same class as #789 in `Arena.realloc`.
 emit_print* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.uses_print().match({
         false => Ok(()),
@@ -171,10 +180,10 @@ emit_print* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
 
 write_print = (out :: Emit) Res<(), AllocError> {
     out.say(
-        "static void zg_print_bytes(const char *s, size_t n) { fwrite(s, 1, n, stdout); }"
+        "static void zg_print_bytes(const char *s, size_t n) { if (n) fwrite(s, 1, n, stdout); }"
     ).try();
     out.say(
-        "static void zg_print_str(zg_str s) { fwrite(s.data, 1, s.len, stdout); }"
+        "static void zg_print_str(zg_str s) { if (s.len) fwrite(s.data, 1, s.len, stdout); }"
     ).try();
     out.say(
         "static void zg_print_i64(int64_t v) { fprintf(stdout, \"%lld\", (long long)v); }"
@@ -206,10 +215,10 @@ emit_stderr* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
 
 write_stderr = (out :: Emit) Res<(), AllocError> {
     out.say(
-        "static void zg_eprint_bytes(const char *s, size_t n) { fwrite(s, 1, n, stderr); }"
+        "static void zg_eprint_bytes(const char *s, size_t n) { if (n) fwrite(s, 1, n, stderr); }"
     ).try();
     out.say(
-        "static void zg_eprint_str(zg_str s) { fwrite(s.data, 1, s.len, stderr); }"
+        "static void zg_eprint_str(zg_str s) { if (s.len) fwrite(s.data, 1, s.len, stderr); }"
     ).try();
     out.say(
         "static void zg_eprint_i64(int64_t v) { fprintf(stderr, \"%lld\", (long long)v); }"

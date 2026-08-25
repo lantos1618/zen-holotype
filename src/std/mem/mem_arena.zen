@@ -115,7 +115,16 @@ Arena.impl(Alloc, {
     // an arena never shrinks or reuses: hands out a fresh run, copies
     // the old one in, old run stays until the whole arena drops. A
     // null p is a fresh allocation with nothing to copy — an empty Vec
-    // grows through this same call
+    // grows through this same call, and that is the COMMON case, not a
+    // corner: every Vec and every String reaches here with `src` null
+    // the first time it grows. `keep` is already 0 then, so the copy
+    // would move no bytes — but it still lowers to `memcpy(dst, NULL,
+    // 0)`, which C99 7.1.4 leaves undefined however many bytes it
+    // moves, and which UBSan reported in 191 of the 698 corpus
+    // programs. Guarded HERE and not inside `Ptr.copy_from`, because
+    // this is the only caller in the tree and it is the one that
+    // already knows the source is null — a guard in the lowering would
+    // put a branch in front of every copy the backend ever emits.
     realloc = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
         src  = p.to<u8>();
         want = p.bytes(count);
@@ -128,7 +137,10 @@ Arena.impl(Alloc, {
             false => old,
         });
         dst  = self.raw(want, ALIGN_MAX).try();
-        dst.copy_from(src, keep);
+        (keep > 0).match({
+            true  => dst.copy_from(src, keep),
+            false => (),
+        });
         Ok(dst.to<T>())
     }
 
