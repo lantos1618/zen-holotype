@@ -43,7 +43,7 @@ Vec = std.collections
 str = std.text
 Range = std.core
 TyId, TyNamed, TyRes, TyUnion = sema.sema_ty
-union_reading, union_member, variant_member = sema.sema_union
+union_reading, union_member, member_of = sema.sema_union
 SemaFault, NameFault = sema.sema_diag
 Checker, Ctx, UNRESOLVED = sema.sema_check
 Case, cases_of, case_payload, case_arity = sema.sema_case
@@ -198,7 +198,7 @@ norm_destructure = (
     ctx  : Ctx
 ) Res<usize, AllocError> {
     text = last_segment(d.name);
-    variant_member(c, ty, text).match({
+    member_of(c, ty, text).match({
         Ok(t)  => norm_set_ctor(c, ps, node, d, text, t, ctx),
         None   => plain_ctor(c, ps, node, d, ty, text, ctx),
     })
@@ -286,7 +286,26 @@ norm_name = (
     text = last_segment(pn.name);
     c.is_case(ty, text).try().match({
         true  => ps.add(ctor_pat(text, node.span)),
-        false => c.norm_qualified(ps, node, pn, ty, text, ctx),
+        false => c.norm_set_name(ps, node, pn, ty, text, ctx),
+    })
+}
+
+// A bare name that is no case of the set: when a MEMBER declares it the
+// name is that leaf written flat — `NotANumber` under
+// `Trouble = AllocError | ParseError` — and normalises exactly as its
+// two-level spelling does. Anything else falls through to a binder.
+norm_set_name = (
+    c    :: Checker,
+    ps   :: Pats,
+    node : Pattern,
+    pn   : PatName,
+    ty   : TyId,
+    text : str,
+    ctx  : Ctx
+) Res<usize, AllocError> {
+    member_of(c, ty, text).match({
+        None    => c.norm_qualified(ps, node, pn, ty, text, ctx),
+        Ok(mty) => member_leaf(c, ps, mty, text, node.span),
     })
 }
 
@@ -318,11 +337,11 @@ norm_member_dot = (
     ctx  : Ctx
 ) Res<usize, AllocError> {
     member = segment_at(pn.name, 0);
-    variant_member(c, ty, member).match({
-        None  => c.norm_binder(ps, node, leaf, ctx),
+    member_of(c, ty, member).match({
+        None  => c.norm_binder(ps, node, member, ctx),
         Ok(mty) => c.is_case(mty, leaf).try().match({
-            true  => ps.add(dot_pat(member, leaf, node.span)),
-            false => c.norm_binder(ps, node, leaf, ctx),
+            true  => c.dot_pat(ps, member, leaf, node.span),
+            false => c.norm_binder(ps, node, member, ctx),
         }),
     })
 }
@@ -1035,18 +1054,67 @@ sub_pat = (name: str, sub: usize, span: Span) Pat {
 }
 
 // `Member.Leaf` against a set: one case of the MEMBER, written flat.
-// The leaf is carried where only the backend reads it, exactly as
-// `sub_pat` carries a parenthesised one — sema's usefulness sees the
-// two-level case either way.
-dot_pat* = (member: str, leaf: str, span: Span) Pat {
-    Pat(
-        kind: PatKind.CtorPat,
-        name: member,
-        binder: leaf,
-        sub: 0,
-        has_sub: false,
-        span: span
-    )
+// The leaf rides as the SUB-pattern, exactly as `Member(Leaf)` spells
+// itself — same usefulness columns, same bindings, same backend — so
+// two arms under one member stay distinguishable and a later arm is
+// never swallowed by an earlier one.
+dot_pat* = (c :: Checker, ps :: Pats, member: str, leaf: str, span: Span)
+           Res<usize, AllocError> {
+    hole = c.leaf_hole(ps, leaf, span).try();
+    ps.add(sub_pat(member, hole, span))
+}
+
+// The sub-pattern a leaf narrows with: the case itself when the member
+// declares it, a wildcard otherwise. A miss is not input — the caller
+// only reaches here with a member in hand — so the reading invents
+// nothing.
+leaf_hole = (c :: Checker, ps :: Pats, leaf: str, span: Span)
+            Res<usize, AllocError> {
+    (leaf.len > 0).match({
+        true  => ps.add(ctor_pat(leaf, span)),
+        false => ps.wild(span),
+    })
+}
+
+// `Leaf` written bare under a set whose MEMBER declares it — and the
+// same shape when the bare name IS a member (`AllocError => ..`). One
+// ctor on the set with the leaf as its sub-pattern, exactly what the
+// qualified spellings normalise to; the backend answers the same
+// question in `name_cond`, so the two halves cannot drift.
+member_leaf = (c :: Checker, ps :: Pats, mty: TyId, text: str, span: Span)
+              Res<usize, AllocError> {
+    name = member_name(c, mty);
+    hole = c.is_case(mty, text).try().match({
+        true  => ps.add(ctor_pat(text, span)),
+        false => ps.wild(span),
+    }).try();
+    ps.add(sub_pat(name, hole, span))
+}
+
+// The NAME a set's member is spelled by — the ctor a pattern for that
+// member carries. `sym_union_member` spells the same thing in C.
+member_name = (c :: Checker, mty: TyId) str {
+    c.types.at(mty).match({
+        Named(n) => last_segment_str(n.name),
+        _        => "",
+    })
+}
+
+last_segment_str = (qname: str) str {
+    qname.slice(qname.len - last_len(qname), qname.len)
+}
+
+last_len = (qname: str) usize {
+    dot ::= 0;
+    i: usize ::= 0;
+    loop(() { i < qname.len && dot == 0 }, (h) {
+        (qname.index(i) == '.').match({
+            true  => { dot = i + 1; },
+            false => {},
+        });
+        i = i + 1;
+    });
+    qname.len - dot
 }
 
 lit_pat = (text: str, span: Span) Pat {

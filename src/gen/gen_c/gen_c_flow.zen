@@ -471,7 +471,9 @@ unsupported_cond = (be :: CBackend, pat: Pattern, out :: String)
 // A bare name is a nullary VARIANT when the scrutinee's type has one
 // by that name, and a BINDER otherwise. "They are the same tokens, and
 // which one it is depends on what is in scope" — here, on what the
-// scrutinee is.
+// scrutinee is. Against a SET there is one more reading before the
+// binder: a member or a leaf of a member, spelled flat — the same arm
+// `member_ctor_cond` tests when it is written qualified.
 name_cond = (
     be    :: CBackend,
     q     : QualifiedName,
@@ -481,7 +483,60 @@ name_cond = (
 ) Res<(), AllocError> {
     be.is_variant(st, last_segment(q)).match({
         true  => be.tag_cond(q, st, scrut, out),
-        false => out.add_bytes("1"),
+        false => set_name_cond(be, st, last_segment(q), scrut, out),
+    })
+}
+
+set_name_cond = (
+    be    :: CBackend,
+    st    : TyId,
+    text  : str,
+    scrut : str,
+    out   :: String
+) Res<(), AllocError> {
+    member_of(be.check, st, text).match({
+        None  => out.add_bytes("1"),
+        Ok(mty) => set_name_arm(be, st, mty, scrut, out),
+    })
+}
+
+// The bare arm's test: the member's tag, then the leaf's — which for a
+// bare MEMBER name adds no second test (`leaf_cond` sees a wildcard).
+set_name_arm = (
+    be    :: CBackend,
+    st    : TyId,
+    mty   : TyId,
+    scrut : str,
+    out   :: String
+) Res<(), AllocError> {
+    leaf ::= leaf_name_of(mty).try();
+    be.tag_name(st, leaf, scrut, out).try();
+    place ::= be.alloc.String().try();
+    set_member_place(be, mty, scrut, place).try();
+    leaf_cond(be, mty, mty, place.view(), out)
+}
+
+// The bare name a MEMBER of a set is spelled by — the tag test's second
+// half and `sema_match.member_leaf`'s ctor read the same declaration.
+leaf_name_of = (be :: CBackend, mty: TyId) Res<str, AllocError> {
+    qname ::= be.alloc.String().try();
+    enum_path(be, mty, qname).try();
+    Ok(last_segment_str(qname))
+}
+
+last_segment_str = (qname: String) str {
+    dot ::= 0;
+    i: usize ::= 0;
+    loop(() { i < qname.len() && dot == 0 }, (h) {
+        (qname.view().index(i) == '.').match({
+            true  => { dot = i + 1; },
+            false => {},
+        });
+        i = i + 1;
+    });
+    (dot > 0).match({
+        true  => qname.view().slice(dot, qname.len()),
+        false => qname.view().slice(0, qname.len()),
     })
 }
 
