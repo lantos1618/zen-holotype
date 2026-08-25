@@ -1,0 +1,31 @@
+// A STORE FIRES THE NEAREST ENTRY FOR THE NAME, AND ONLY THAT ONE: an
+// inner shadow's `x = ..` destroys what the INNER binding holds and
+// leaves the outer one alone (issue 733). A store is not a binding, so
+// it also RE-ARMS the entry it fired -- the fresh value owns now, and
+// the inner frame's exit drop runs over it.
+//
+// PREDICTION: the inner store prints `drop 2` only (the outer x's
+// entry is further down the stack than the inner binding's); at the
+// inner brace the re-armed binding drops its new value (`drop 4`);
+// the untouched outer x drops last (`drop 1`). A store reaching past
+// its own binding would open with `drop 1`; a missing re-arm would
+// lose `drop 4`.
+
+Noisy = {
+    env: Env,
+    id: i32,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.id) }
+})
+
+main = (env: Env) Res<i32, IoError> {
+    x ::= Noisy(env: env, id: 1);
+    {
+        x ::= Noisy(env: env, id: 2);
+        x = Noisy(env: env, id: 4);
+    }
+    println("mid");
+    Ok(0);
+}
