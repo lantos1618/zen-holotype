@@ -8,9 +8,14 @@ THE FAILURE THIS EXISTS FOR, which has happened at least four times here:
     and its prose said the rule was enforced "and now also at `make test`".
   - `make grammar-test` was `npx tree-sitter test` over a directory that does
     not exist: "Total parses: 0", exit 0.
-  - `tests/parse/errors/` (26 must-not-parse fixtures) and `tests/bench/` were
-    run by no target at all, so `allocs_op: 0` -- cited in src/ as a number
-    that fails the build -- was a number nothing had ever computed.
+  - `tests/parse/errors/` (the must-not-parse fixtures) and `tests/bench/`
+    were run by no target at all, so `allocs_op: 0` -- cited in src/ as a
+    number that fails the build -- was a number nothing had ever computed.
+    Both are wired now: `grammar-test` and `bench-allocs`. The count is
+    deliberately not written down here; scripts/grammar_test.py counts the
+    directory and prints the number, and a second copy of it in prose is a
+    number that goes stale the next time a fixture lands (this line said 26
+    while the directory held 23).
   - `editors` was a target whose name is also a DIRECTORY, so make found the
     directory, called the target up to date, and ran the script never.
 
