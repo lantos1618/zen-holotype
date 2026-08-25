@@ -60,10 +60,18 @@ hole and every literal run still go straight through the floor and still carry
 their own `Err`, and the emitted C for an existing floor-door site is unchanged
 byte for byte.
 
-Why it was the keystone: **nothing in `src/` implements `Display`** (0 types),
-because every writer there appends into a `String` it was handed — 591 sites —
-which is exactly this door. `out.fmt("Res<{}, {}>", v, e)` did not lower, so 378
-hand-rolled `add_bytes` runs stand where one format would.
+Why it WAS the keystone — closed 2026-08-25 (#755, fixed by d9c02c14d): the
+refusal used to be why nothing in `src/` implemented `Display`. Measured
+2026-08-25: `src/` held 0 impls and repo-wide 25 (tests/corpus mostly), with
+402 hand-rolled `add_bytes` runs in `src/`, 375 sites taking an
+`out :: String` param, and only 7 real `:: Sink` params. The door is open:
+the first impl under `src/` is `Pos.impl(Display, ..)` in
+`src/std/ast/ast_span.zen`, whose seven hand-rolled renderings across sema,
+gen, parse and the driver are `{}` holes now. What remains of the ~400 runs
+is a campaign to finish one type family at a time, not a blockade; the
+pattern is the Pos impl and its call sites, and the recount above is the
+number to beat when quoting debt — do not re-quote this paragraph's old
+0 / 591 / 378 figures as today's.
 
 ---
 
