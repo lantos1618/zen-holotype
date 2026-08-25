@@ -195,9 +195,30 @@ emit_index = (out :: Emit) Res<(), AllocError> {
 // are the rest of the family. Same class as #789 in `Arena.realloc`.
 emit_print* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.uses_print().match({
-        false => Ok(()),
-        true  => write_print(out),
+        false => be.uses_fbuf().match({
+            false => Ok(()),
+            true  => write_float_scratch(out),
+        }),
+        true  => {
+            write_print(out).try();
+            write_float_scratch(out).try();
+            Ok(())
+        },
     })
+}
+
+// The scratch the buffer door's float writer renders into (#809), kept
+// with the print family because the two spellings of a number belong in
+// one file -- and gated by its own flag, because a program that formats
+// into a buffer never calls any of the helpers above it. File-scope
+// like `zg_print_f64` beside which it sits; safe shared because a
+// render's bytes are copied by the sink write that follows it before
+// any later render starts. 40 bytes is C's own minimum for any %g of a
+// double plus its sign and NUL.
+write_float_scratch = (out :: Emit) Res<(), AllocError> {
+    out.say("static char zg_f64_scratch[40];").try();
+    out.line().try();
+    Ok(());
 }
 
 write_print = (out :: Emit) Res<(), AllocError> {

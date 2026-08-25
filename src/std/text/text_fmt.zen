@@ -228,6 +228,26 @@ add_bool* = (out :: Sink, v: bool) Res<(), WriteError> {
     });
 }
 
+// THE BUFFER DOOR MATCHES THE TERMINAL DOOR, ON PURPOSE (#809).
+// `println("{}", x)` has rendered a float with C's `%g` since the
+// terminal door first lowered one, so a buffer door saying anything
+// else would make one language two: `println(buf.view())` would
+// disagree with `println("{}", x)` about the same number, and the
+// disagreement -- not either spelling alone -- is the bug. `%g` drops
+// trailing zeros, goes exponent past six significant digits, and
+// spells non-finite values as C does; what it costs is digits beyond
+// six, and the hole that asks for more (`{e}`, a width, a precision)
+// does not exist yet to carry them.
+//
+// BODILESS, LIKE `to_f64`: a float's digits cannot be reached from Zen
+// yet -- no float-to-int primitive to loop over (`std.core.num`
+// declares lossless widening only) and no libc bridge to call -- so
+// the body this declaration promises is the BACKEND's, which renders
+// `%g` into scratch and hands the bytes to the sink's own `write`. A
+// second renderer anywhere else would be a second answer to what a
+// float looks like, and the corpus pins exactly one.
+add_f64* = (out :: Sink, v: f64) Res<(), WriteError>
+
 // the digit table, twice — once per integer domain, since a u64 past
 // i64.MAX can't widen into one. `'0' + d` would be shorter, but
 // DESIGN.md specifies no u64-to-u8 conversion and this file won't

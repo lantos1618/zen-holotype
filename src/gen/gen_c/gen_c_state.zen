@@ -99,6 +99,11 @@ CBackend* = {
     // only narrates must not carry stdout's helpers either.
     stderr_used :: bool,
 
+    // The float scratch the buffer door's intrinsic writer renders into,
+    // its own flag and not `print_used`: a program that formats a float
+    // into a buffer never touches the console family (#809).
+    fbuf_used :: bool,
+
     // The two POSIX headers the FS floor needs are the one place the
     // emitted C leaves C99, so a program that never opens a file must not
     // pay for them.
@@ -338,6 +343,19 @@ CBackend* = {
     need_stderr* = (self :: @Self) () { self.stderr_used = true; }
 
     uses_stderr* = (self: @Self) bool { self.stderr_used }
+
+    // -----------------------------------------------------------------
+    // the buffer float's scratch (#809)
+    //
+    // A THIRD FLAG, for the same reason the second exists: a program
+    // that formats a float into a String never calls the console, and
+    // the scratch is emitted beside that family only because the two
+    // spellings of a number belong in one file.
+    // -----------------------------------------------------------------
+
+    need_fbuf* = (self :: @Self) () { self.fbuf_used = true; }
+
+    uses_fbuf* = (self: @Self) bool { self.fbuf_used }
 
     // -----------------------------------------------------------------
     // the filesystem floor
@@ -882,6 +900,7 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         helper_types: a.Vec<String>(),
         print_used: false,
         stderr_used: false,
+        fbuf_used: false,
         fs_used: false,
         stdin_used: false,
         env_used: false,

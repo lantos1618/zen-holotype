@@ -24,7 +24,9 @@
 // `add_i64`/`add_u64`/`add_bool` are FOUND, not written here — ordinary
 // Zen functions in the door's own module. A second C-side integer
 // printer would be a second set of rules about what a number looks
-// like, and the corpus pins exactly one.
+// like, and the corpus pins exactly one. `add_f64` is found too, but
+// only its DECLARATION lives in Zen: the digits are this backend's,
+// which `write_intrinsic_call` below says why.
 
 ExprId, Decl, Function, Param, Call = std.ast
 Literal, TypeId = std.ast
@@ -906,8 +908,8 @@ write_through_sink = (
     call ::= be.alloc.String().try();
     // `hole_fault(q)` AND NOT `hole_fault(p)`: by here the receiver IS a
     // Sink and the door is open, so a hole this far in fails for the
-    // sink door's reason — no writer for the type, which is what a float
-    // hits — and saying "not a str" would name the wrong thing.
+    // sink door's reason — no writer for the type — and saying "not a
+    // str" would name the wrong thing.
     be.value_call(q, ty, text, call).try().match({
         false => be.unsupported_piece(a, hole_fault(q)),
         true  => be.wider_guarded(call.view(), wtmp.view(), p),
@@ -956,14 +958,26 @@ scalar_call = (
 }
 
 // Which of `text_fmt.zen`'s writers a primitive reaches. Empty means
-// none does, and the value goes through its own `toString` instead —
-// a float lands there and is reported, no writer for one being declared.
+// none does, and the value goes through its own `toString` instead.
 writer_of = (prim: str) str {
     prim.eq("bool").match({
         true  => "add_bool",
+        false => number_writer(prim),
+    })
+}
+
+// A float's writer is the one whose body is this backend's: the
+// declaration exists so `module_fn` can find it, the bytes come from
+// `write_intrinsic_call` below. Both widths land on f64 -- a `double`
+// holds an f32 exactly, which is more than any second writer could
+// promise the two widths would agree about.
+number_writer = (prim: str) str {
+    is_float(prim).match({
+        true  => "add_f64",
         false => integer_writer(prim),
     })
 }
+
 
 integer_writer = (prim: str) str {
     is_c_integer(prim).match({
@@ -1018,10 +1032,51 @@ writer_call = (
     text : str,
     out  :: String
 ) Res<bool, AllocError> {
-    be.module_fn(p.module, name).try().match({
+    be.module_decl(p.module, name).try().match({
         None  => Ok(false),
-        Ok(w) => be.write_writer_call(w, p, cast, text, out),
+        Ok(w) => be.door_fn(w).match({
+            None  => Ok(false),
+            Ok(g) => bodyless(g).match({
+                true  => be.write_intrinsic_call(p, cast, text, out),
+                false => be.write_writer_call(w, p, cast, text, out),
+            }),
+        }),
     })
+}
+
+// A WRITER THE BACKEND IS THE BODY OF lowers as the bytes it would
+// have written: one `%g` render into the runtime floor's scratch and
+// the sink's own `write` over them -- the exact shape a bodied writer
+// computing digits and calling `out.write` would compile to. Going
+// through `sink_write` keeps every receiver kind (a String buffer, a
+// Sink record, a floor door's byte writer) and the guarded failure
+// the other writers answer with.
+//
+// THE SCRATCH IS THE FLOOR'S, file-scope like `zg_print_f64` beside
+// which it sits, and safe shared because a render's bytes are copied
+// by the very call that follows it before any later render starts --
+// the expansion is sequential statements and nothing reorders them.
+write_intrinsic_call = (
+    be   :: CBackend,
+    p    : Piece,
+    cast : str,
+    text : str,
+    out  :: String
+) Res<bool, AllocError> {
+    be.need_fbuf();
+    // ASSEMBLED, NOT FORMATTED: the emitted text carries `{ ... }` C
+    // braces and `%g`, and this file is compiled BY THE PREVIOUS
+    // GENERATION of itself -- a float hole here would be refused by a
+    // seed whose `writer_of` does not know `add_f64` yet. Every piece
+    // goes through `add_bytes`, which reads no format meaning.
+    value ::= be.alloc.String().try();
+    value.fmt("{cast}({text})", cast, text).try();
+    bytes ::= be.alloc.String().try();
+    bytes.add_bytes("(zg_str){ (unsigned char *)zg_f64_scratch, (size_t)snprintf(zg_f64_scratch, sizeof zg_f64_scratch, \"%g\", ").try();
+    bytes.add_bytes(value.view()).try();
+    bytes.add_bytes(") }").try();
+    call ::= be.alloc.String().try();
+    be.sink_write(p, bytes.view(), call).try()
 }
 
 write_writer_call = (
@@ -1038,7 +1093,13 @@ write_writer_call = (
     Ok(true);
 }
 
-// A bodied function a module declares under `name`.
+// A bodied function a module declares under `name`. The ONE CALLER
+// (`writer_call`) wants a writer it can queue for emission, so
+// bodiless declarations are kept out here rather than at the call --
+// except that the float writer is bodyless ON PURPOSE, its body being
+// the backend's, so `module_decl` beside this one answers ANY function
+// under the name and lets the door's expansion split on `bodyless`
+// itself.
 module_fn = (be :: CBackend, mi: usize, name: str)
             Res<Res<Def>, AllocError> {
     found ::= be.alloc.Vec<Def>();
@@ -1046,6 +1107,36 @@ module_fn = (be :: CBackend, mi: usize, name: str)
     kept ::= be.alloc.Vec<Def>();
     found.loop((h, x) { be.keep_bodied(x, kept).try() });
     Ok(kept.get(0));
+}
+
+// The same walk WITHOUT the bodied filter, for a writer whose body is
+// deliberately nobody's but the backend's (`add_f64`, #809): the
+// declaration is wanted so the expansion can read where it lives, not
+// so anything can be queued from it -- queueing one is impossible by
+// construction and `lower_function` says why that is safe.
+module_decl = (be :: CBackend, mi: usize, name: str)
+              Res<Res<Def>, AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.defs_of(mi, name, found).try();
+    kept ::= be.alloc.Vec<Def>();
+    found.loop((h, x) { be.keep_fn(x, kept).try() });
+    Ok(kept.get(0));
+}
+
+keep_fn = (be :: CBackend, x: Def, out :: Vec<Def>)
+          Res<(), AllocError> {
+    decl_at(be.tree, x.id).match({
+        None    => Ok(()),
+        Ok(dec) => keep_fn_decl(dec, x, out),
+    })
+}
+
+keep_fn_decl = (dec: Decl, x: Def, out :: Vec<Def>)
+               Res<(), AllocError> {
+    dec.kind.match({
+        Function(_) => out.add(x),
+        _           => Ok(()),
+    })
 }
 
 keep_bodied = (be :: CBackend, x: Def, out :: Vec<Def>)
