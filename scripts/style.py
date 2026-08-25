@@ -856,6 +856,30 @@ def main() -> int:
     if stale(ABBREV_OWED, abbrev_seen, "ABBREV_OWED"):
         return 1
 
+    # EACH RULE'S OWN COUNT, not just the file list's. The guard above asks
+    # whether there are files; it does not ask whether any rule still finds
+    # anything IN them, and ten of these eleven could fall to zero with the
+    # eleventh keeping `files` non-empty. Every `checked` below is a loop
+    # counter, and a loop that runs zero times adds no violation and reports
+    # as a clean pass -- so `layer 0 checked, 0 violations — std depends only
+    # on std` is a sentence this gate would print, in full, over a rule that
+    # had stopped reading imports altogether. That rule is the one the notes
+    # record as caught by nothing else in the tree.
+    #
+    # Zero and not a floor per rule: a floor for eleven rules is eleven
+    # numbers to keep, and `checked` here counts SITES, which move with every
+    # ordinary commit. Zero is the line that cannot be crossed by honest
+    # work, and it is the same line `cap`, `parse`, `fmt`, `lextile`,
+    # `faults` and `dupcomments` draw at their file lists.
+    silent = [name.strip() for name, _, checked, _, _ in results if not checked]
+    if silent:
+        print(f"style: {', '.join(silent)} checked 0 sites. A rule that finds"
+              " nothing reports no violations and reads exactly like a clean"
+              " tree. src/ moved, the parse stopped yielding declarations, or"
+              " the rule broke -- fix it, do not read this as green.",
+              file=sys.stderr)
+        return 2
+
     for name, rule, checked, _, owed in results:
         note = f", {owed} written down" if owed else ""
         print(f"  {name}  {checked:5} checked, 0 violations{note}  — {rule}")
