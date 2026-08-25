@@ -42,6 +42,7 @@ ty_at = sema.sema_cand
 impl_bound_type = sema.sema_supply
 type_of = sema.sema_type
 type_from_ast = sema.sema_denote
+array_range_shape = sema.sema_bound
 case_payload, Case, cases_of, find_case = sema.sema_case
 check_ctor_fields = sema.sema_hoist
 check_ctor_shape = sema.sema_bound
@@ -568,11 +569,45 @@ named_args = (c :: Checker, ty: TyId, out :: Vec<TyId>)
 // arguments the bound's argument is. The impl writes `Vec`'s `T`;
 // putting it through the receiver's own instantiation is what turns it
 // into `i32`.
+//
+// A FIXED ARRAY IMPLS IT INTRINSICALLY, the inference half of what
+// `sema_bound.array_satisfies` proves at a call site: `[T, N]` is a type
+// constructor with no declaration to hang an impl on, so there is no
+// written answer to look up and the element IS the bound's argument.
+// Without this arm an array receiver settled no `T`, which loop and find
+// hid (the backend derives their pass type off the array itself) and
+// filter and map exposed -- both refused as "a generic call whose type
+// arguments nothing settles", because their `T` has to ride inside the
+// returned `Res<Vec<U>>`. The bound is recognised by its SHAPE here,
+// exactly as `array_satisfies` recognises it there; one rule, two files,
+// because neither file can see the other's subject.
 infer_impl_bound = (c :: Checker, bound: TyId, g: TyId, inst :: Inst)
                    Res<(), AllocError> {
     c.types.at(g).match({
         Named(n) => c.infer_named_impl(bound, n, inst),
+        Array(a) => c.infer_array_bound(bound, a.elem, inst),
         _        => Ok(()),
+    })
+}
+
+infer_array_bound = (c :: Checker, bound: TyId, elem: TyId, inst :: Inst)
+                    Res<(), AllocError> {
+    c.array_range_shape(bound).match({
+        false => Ok(()),
+        true  => c.unify_array_elem(bound, elem, inst),
+    })
+}
+
+// The one argument the walk's element fills. A range bound carries
+// exactly one -- `Range<T>` -- and a shape that reaches here with none
+// binds nothing rather than something wrong.
+unify_array_elem = (c :: Checker, bound: TyId, elem: TyId, inst :: Inst)
+                   Res<(), AllocError> {
+    bs ::= c.alloc.Vec<TyId>();
+    c.named_args(bound, bs).try();
+    bs.get(0).match({
+        None  => Ok(()),
+        Ok(b) => unify(c, b, elem, inst),
     })
 }
 
