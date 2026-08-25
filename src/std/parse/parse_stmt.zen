@@ -73,6 +73,14 @@ block_here = (p :: Parser) Res<BlockId, AllocError> {
             false => (),
         });
     });
+    // Claim what stands before the closing brace BEFORE the brace is
+    // bumped. Bumping drains the trivia PAST the brace and overwrites
+    // `pending` with the run beyond it — a claim made after `expect_close`
+    // captures an empty run (or, worse, the NEXT node's leading trivia),
+    // which is exactly how issue #740's first patch silently kept the
+    // bug while looking fixed. Same precondition as `claim_leading`:
+    // claim at ENTRY to the delimiter, before consuming anything.
+    close  = p.claim_close();
     p.expect_close(
         TokenKind.BraceClose,
         "unclosed `{`: this block is never closed",
@@ -83,7 +91,7 @@ block_here = (p :: Parser) Res<BlockId, AllocError> {
         value: value,
         span: p.span_from(m.start),
         leading: m.leading,
-        trailing: p.claim_close(),
+        trailing: close,
     ));
 }
 
@@ -296,6 +304,13 @@ no_value = (p: Parser) Res<ExprId> { None }
 // cursor's position and no contents, so a walk over the tree
 // terminates and the diagnostic already said why it is empty.
 //
+// `trailing` stays `no_trivia()` here — deliberately. This block
+// consumes no closing brace of its own (`expect_close` was never
+// reached), so there is nothing standing before ITS brace to claim:
+// claiming here would take the pending run standing before whatever
+// token comes next, stealing another node's trivia. Only a block that
+// actually closes itself claims its close.
+//
 // A block has no `add_` half — statements land in a caller's `Vec` via
 // `push` above and only the finished block enters the arena — so this
 // is half of the fourth poison_/add_ pair; parse_expr.zen's, above
@@ -306,6 +321,6 @@ poison_block* = (p :: Parser) Res<BlockId, AllocError> {
         value: None,
         span: p.empty_span(),
         leading: no_trivia(),
-        trailing: p.claim_close(),
+        trailing: no_trivia(),
     ))
 }
