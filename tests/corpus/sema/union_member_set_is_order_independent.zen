@@ -1,0 +1,40 @@
+// A UNION WHOSE MEMBER IS ITSELF A UNION, asked before anything else has
+// asked what that member means. `std/core/io.zen` declares
+// `WriteError = IoError | AllocError`, so `Error = AllocError | WriteError`
+// is a set of three names spelling two types, and `sema_union.zen` flattens
+// a member only as far as `set_of` can already answer.
+//
+// It could not answer. `member_type` asked in ONE expression --
+// `set_of(union_member(..))` -- and the receiver was read before the lookup
+// beside it recorded the member's set, so `Error` froze with the bare name
+// `WriteError` in it while `WriteError` itself later expanded to
+// `IoError | AllocError`. `.try()` then asked whether `IoError` was a member
+// of a set spelled {WriteError, AllocError} and was told no:
+//
+//     no implicit error conversion: ... expected Error, found WriteError
+//
+// on a program whose declared set NAMES WriteError.
+//
+// ORDER IS THE WHOLE TEST, twice over. `bump` is a METHOD: a free function
+// with the same signature above `main` made the same program compile,
+// because its return annotation recorded the set first. And `also` is
+// declared BELOW `main` on purpose -- it is checked after the set was
+// already frozen. Moving either one above `main` would make this file pass
+// against the bug it exists to catch, so neither may move.
+
+Error = AllocError | WriteError
+
+Box = {
+    n: i32,
+
+    bump* = (self: @Self) Res<i32, WriteError> { Ok(self.n + 1) },
+}
+
+main = (env: Env) Res<i32, Error> {
+    b = Box(n: 41);
+    println("{}", b.bump().try());
+    println("{}", also(b).try());
+    Ok(0);
+}
+
+also = (b: Box) Res<i32, Error> { Ok(b.bump().try() + 1) }

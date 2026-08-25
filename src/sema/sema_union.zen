@@ -130,8 +130,19 @@ member_named = (c :: Checker, d: Def) Res<TyId, AllocError> {
     c.named_or_union(d, empty)
 }
 
+// THE LOOKUP IS NAMED BEFORE IT IS ASKED ABOUT. Written as one expression
+// -- `set_of(union_member(..))` -- the receiver is read before the call
+// beside it records the member's set, so the flattening answered from a
+// checker that had not seen it yet: `Error = AllocError | WriteError` froze
+// with the bare name `WriteError` in it, while `WriteError` on its own
+// expanded to `IoError | AllocError` as it should. Containment then asked
+// whether `IoError` was a member of {WriteError, AllocError} and said no,
+// on a program whose declared set names WriteError. Only declaration order
+// decided it: any earlier function returning `Res<_, WriteError>` recorded
+// the set first and the same program compiled.
 member_type = (c :: Checker, decl: DeclId, name: str) Res<TyId, AllocError> {
-    Ok(c.set_of(c.union_member(decl, name).try()));
+    id = c.union_member(decl, name).try();
+    Ok(c.set_of(id));
 }
 
 // The value `Type.NAME` leaves unwritten: what a union's member carries,
