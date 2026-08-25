@@ -666,7 +666,7 @@ Scope* = {
 ArgError* = Missing(str)   // required field absent; names the field
           | Parse(str)     // value present but not the field's type
 
-// the disk. Four members, and each earns its place: a compiler
+// the disk. Three members, and each earns its place: a compiler
 // reads a whole file at once, never streams and never seeks, so
 // there is no handle and no `open`. A module tree is
 // <folder>/<folder>.zen and is COMPUTED rather than discovered, so
@@ -686,21 +686,6 @@ Fs* = {
     write*  = (self: @Self, path: str, bytes: str) Res<(), FsError>
     exists* = (self: @Self, path: str) bool
     is_dir* = (self: @Self, path: str) bool
-
-    // the one exception to "no open handle": lock the path, get a
-    // Lock whose Drop releases it. Exists IS the lock working --
-    // someone else holds it. flock(2), so a crashed holder's fd
-    // dies with it and nothing is left on disk to clean up.
-    lock*   = (self: @Self, path: str) Res<Lock, FsError>
-}
-
-// An exclusive lock; released when it leaves scope or by unlock().
-// NOT copyable -- each copy closing the same fd would unlock a
-// neighbour mid-section. The only way in is fs.lock; there is no
-// way to read the fd out, so no way to build one by hand.
-Lock* = {
-    fd: i32,
-    unlock* = (self :: @Self) ()
 }
 
 // OutOfMemory is a member of FsError only because the seed subset has
