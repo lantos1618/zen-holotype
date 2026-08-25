@@ -1,0 +1,56 @@
+// A BLOCK HANDS OUT THE SAME BINDING WITH THE `;` AND WITHOUT IT, so it
+// must not destroy it either way. Issue #793: `gen_c_stmt.keep_name`
+// read `Block.value` — the tail written WITHOUT a `;` — to decide which
+// local the block's own drops must spare, so `n;` exempted nothing and
+// the arm dropped the value it had just handed to `kept`. With a
+// printing `Drop` that is a DOUBLE DROP; with an arena it is a
+// heap-use-after-free, which is how the issue found it.
+//
+// `bare` is the control: the same arm written the other way, whose
+// output this file's first three lines already were.
+//
+// `used` is the other half of the rule and must NOT change. A block in
+// STATEMENT position is asked for no value at all — `tail_index` lowers
+// its last statement as a statement — so the name it ends on is still
+// that block's to destroy, and its drop belongs at the inner brace
+// rather than at the end of `main`. Sparing it there would leak.
+
+Noisy = {
+    env: Env,
+    id: i32,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.id) }
+})
+
+main = (env: Env) Res<i32, IoError> {
+    semi = true.match({
+        true  => {
+            n = Noisy(env: env, id: 1);
+            println("made {}", n.id);
+            n;
+        },
+        false => Noisy(env: env, id: 9),
+    });
+    println("holding {}", semi.id);
+
+    bare = true.match({
+        true  => {
+            n = Noisy(env: env, id: 2);
+            println("made {}", n.id);
+            n
+        },
+        false => Noisy(env: env, id: 9),
+    });
+    println("holding {}", bare.id);
+
+    {
+        used = Noisy(env: env, id: 3);
+        println("made {}", used.id);
+        used;
+    }
+    println("after the inner block");
+
+    Ok(0);
+}
