@@ -1,0 +1,29 @@
+// A WRITE TO A MODULE-LEVEL BINDING IS REFUSED, NOT DISCARDED.
+//
+// `C` names a module constant; `C = C + 1` reaches past every local and
+// lands on it. Nothing refused this, so the read folded to the
+// initializer, the write landed in a fresh frame local that died at
+// return, and the counter printed 1 twice and counted 0 -- exit 0, no
+// diagnostic anywhere (issue #783). The same write to a LOCAL binding
+// was already refused ("a name is bound once per block"); the rule just
+// did not reach past the frame. It refuses here now, where
+// `ImmutableWrite` was already spelled for it.
+//
+// corpus/constants/local_shadows_constant_and_leaves_it is the boundary
+// this stops at: `c: i64 = 7` under a constant of the same name still
+// declares a local. A written type or `::=` declares; only a bare `=`
+// asks what it landed on.
+//
+// position: the target name, which is the link that refuses -- the same
+// choice `p.n = 2` makes in own/write_through_immutable_field.
+
+C*: i32 = 0
+
+bump = () i32 { C = C + 1; C }
+
+main = (env: Env) Res<i32> {
+    println("{}", bump());
+    println("{}", bump());
+    println("count={}", C);
+    Ok(0);
+}

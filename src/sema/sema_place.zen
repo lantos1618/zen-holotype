@@ -28,6 +28,7 @@ Checker, Ctx, Binding = sema.sema_check
 SemaFault, NameFault, PairFault = sema.sema_diag
 computed_member, writable_member = sema.sema_member
 check_literal = sema.sema_trap
+const_def = sema.sema_const
 check_arms, check_arms_agree = sema.sema_hoist
 type_of = sema.sema_type
 type_from_ast = sema.sema_denote
@@ -367,7 +368,7 @@ bind_target* = (c :: Checker, b: Bind, ty: TyId, ctx: Ctx)
               Res<(), AllocError> {
     target = c.tree.expr_at(b.target);
     target.kind.match({
-        Name(n)   => c.bind_name(b, n.text, target, ty),
+        Name(n)   => c.bind_name(b, n.text, target, ty, ctx),
         Access(a) => c.assign_access(target, a, ctx),
         _         => Ok(()),
     }).try();
@@ -378,11 +379,57 @@ bind_target* = (c :: Checker, b: Bind, ty: TyId, ctx: Ctx)
 // two rows on the scope stack for one C slot, and the second row's type
 // is what every later read would answer with — which is how `n = 3.5`
 // came to read back as an `f64` from an `int64_t`.
-bind_name = (c :: Checker, b: Bind, name: str, target: Expr, ty: TyId)
-            Res<(), AllocError> {
+//
+// AND NOTHING AT MODULE LEVEL EITHER: when the lookup misses, the name
+// may still be bound one scope out, which `fresh_or_refused` decides.
+bind_name = (
+    c      :: Checker,
+    b      : Bind,
+    name   : str,
+    target : Expr,
+    ty     : TyId,
+    ctx    : Ctx
+)
+           Res<(), AllocError> {
     c.assign_binding(b).match({
         Ok(_) => Ok(()),
-        None  => c.bind_at(name, ty, b.mutable, false, target.span),
+        None  => c.fresh_or_refused(b, name, target, ty, ctx),
+    })
+}
+
+// A MODULE-LEVEL BINDING PARSES AS A CONSTANT WHICHEVER MARKER IT
+// CARRIES (`parse_decl.const_decl`), so a bare `=` reaching past the
+// frame lands on a constant: the write would be discarded, the reads
+// folded to the initializer, and the counter would never count
+// (issue #783). Refused with the fault already spelled for an immutable
+// target, at the target name.
+//
+// ONLY WHERE THE STATEMENT COULD BE A WRITE. A written type makes the
+// sentence a declaration — "whatever else is in scope", like `::=` — so
+// `C: i32 = 5` under a constant `C` still declares, ordinary shadowing;
+// `const_def` itself resolves frame first for the same reason
+// (`corpus/constants/local_shadows_constant_and_leaves_it`). A bare `=`
+// is the one spelling that asks what it landed on, and it asks only
+// after the frame said no.
+fresh_or_refused = (
+    c      :: Checker,
+    b      : Bind,
+    name   : str,
+    target : Expr,
+    ty     : TyId,
+    ctx    : Ctx
+)
+                   Res<(), AllocError> {
+    plain_write(b).match({
+        false => c.bind_at(name, ty, b.mutable, false, target.span),
+        true  => c.const_def(name, ctx).try().match({
+            Ok(_) => c.report(
+                target.span.file,
+                target.span,
+                SemaFault.ImmutableWrite(NameFault(name: name))
+            ),
+            None  => c.bind_at(name, ty, b.mutable, false, target.span),
+        }),
     })
 }
 
