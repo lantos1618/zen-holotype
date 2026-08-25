@@ -1,0 +1,29 @@
+// FILTER AND MAP WALK A FIXED ARRAY, AND SETTLE ITS ELEMENT TYPE.
+//
+// The sibling over in tests/corpus/vec pins the same two words on a Vec.
+// This one pins them on a fixed array literal, which is where they used
+// to be refused: `filter` and `map` answer `Res<Vec<T>>`, so their `T`
+// has to travel from the receiver INTO the returned Vec -- and sema's
+// bound inference knew an impl supplies `Range<T>` for a named receiver
+// but went silent for an intrinsic one, leaving a `T` nothing settled
+// for gen_c to refuse ("a generic call whose type arguments nothing
+// settles"). `loop` and `find` never saw it because the backend derives
+// their pass type off the array itself, not off `T`.
+//
+// Kept values print IN SEQUENCE with the element beside its index, so
+// order and pairing land on separate numbers: filter keeps every value
+// equal to 1 (positions 1 and 3), map adds 100 per position.
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    xs = [3, 1, 4, 1, 5];
+
+    kept = xs.filter(alloc, (x) { x == 1 }).ok_or(AllocError.OutOfMemory).try();
+    println("kept {}", kept.len);
+    kept.loop((h, x) { println("k {}", x) });
+
+    shifted = xs.map(alloc, (h, i, v) { v + i * 100 }).ok_or(AllocError.OutOfMemory).try();
+    println("map len {}", shifted.len);
+    shifted.loop((h2, i, v) { println("m {} {}", i, v) });
+    Ok(0);
+}
