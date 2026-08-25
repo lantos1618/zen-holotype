@@ -41,7 +41,7 @@ Match, QualifiedName, Lambda = std.ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str = std.text
-Range = std.core
+Range, is_upper = std.core
 TyId = sema.sema_ty
 SemaFault, NameFault = sema.sema_diag
 Checker, Ctx, UNRESOLVED = sema.sema_check
@@ -203,7 +203,7 @@ norm_name = (
     text = last_segment(pn.name);
     c.is_case(ty, text).try().match({
         true  => ps.add(ctor_pat(text, node.span)),
-        false => c.norm_binder(ps, node, text, ctx),
+        false => c.norm_binder(ps, node, text, ty, ctx),
     })
 }
 
@@ -223,8 +223,26 @@ norm_name = (
 // A LOCAL WINS FIRST, exactly as `name_type` resolves a bare name: a
 // binder shadowing a local is ordinary shadowing, and the constant is
 // not what that name means there.
-norm_binder = (c :: Checker, ps :: Pats, node: Pattern, text: str, ctx: Ctx)
-              Res<usize, AllocError> {
+//
+// AN UPPER-CASE NAME WITH NO OWNER AT ALL IS REFUSED. An arm spelling a
+// name that is no case of the scrutinee, no constant, nothing — binds
+// everything all the same: the match answers that arm for every value
+// and reads as exhaustive because a binder covers every value (issue
+// 798; `FsError.Exists` answered "is already locked" for every
+// filesystem error until its sites were patched). The shape decides it,
+// not scope: binders are lower-case everywhere else, so an upper-case
+// first byte here is a variant somebody mistyped or forgot to declare,
+// never a binder asking to be born. The arm still normalises as a
+// binder so one mistake makes one diagnostic and no cascade; the
+// reported fault alone refuses the build.
+norm_binder = (
+    c    :: Checker,
+    ps   :: Pats,
+    node : Pattern,
+    text : str,
+    ty   : TyId,
+    ctx  : Ctx
+) Res<usize, AllocError> {
     c.names_const(text, ctx).try().then(() {
         c.report(
             node.span.file,
@@ -232,7 +250,29 @@ norm_binder = (c :: Checker, ps :: Pats, node: Pattern, text: str, ctx: Ctx)
             SemaFault.ConstPattern(NameFault(name: text))
         ).try();
     });
-    ps.add(binder_pat(text, node.span));
+    c.not_a_case(ty, text).try().then(() {
+        c.report(
+            node.span.file,
+            node.span,
+            SemaFault.NotACase(NameFault(name: text))
+        ).try();
+    });
+    ps.add(binder_pat(text, node.span)).try()
+}
+
+// Is this name ownerless? Only an UPPER-CASE name can be: a lower-case
+// one is a binder by shape, in any type, with or without cases. Asked
+// only where a case list exists — poison, a hole and an unsubstituted
+// type parameter have none to consult, and inventing a diagnostic out of
+// that absence is the mistake this file's header records (§8).
+not_a_case = (c :: Checker, ty: TyId, text: str) Res<bool, AllocError> {
+    c.checkable(ty).match({
+        false => Ok(false),
+        true  => text.get(0).match({
+            None  => Ok(false),
+            Ok(b) => Ok(b.is_upper()),
+        }),
+    })
 }
 
 names_const = (c :: Checker, text: str, ctx: Ctx) Res<bool, AllocError> {
