@@ -43,116 +43,18 @@ type_from_ast = sema.sema_denote
 HANDLE_MODULE* : str = "std.core.loop.loop_handle"
 HANDLE_NAME* : str = "LoopHandle"
 
-// A LOOP HANDLE IS NOT A VALUE, so binding it is refused outright.
-//
-// `h` arrives in the body as the loop it came from — `gen_c_loop
-// .bind_handle` gives the name no storage and lowers `h.break` at the
-// NAME — but the signature `(h: LoopHandle, ..)` types it as an
-// ordinary nominal, and `kept ::= h;` passed sema in silence and
-// emitted C reading an undeclared variable. Reported at the VALUE, the
-// one byte that names what cannot be kept; the bind itself runs on, so
-// one mistake stays one diagnostic and nothing downstream re-asks.
-refuse_handle_value* = (c :: Checker, id: ExprId, got: TyId)
-                        Res<(), AllocError> {
-    c.is_handle_ty(got).match({
-        false => Ok(()),
-        true  => c.refuse_handle_at(id),
-    })
-}
+// THE HANDLE LAW LIVES IN `sema_handle.zen` now, one file for every
+// seat that can give the handle C storage — bind, call argument, block
+// tail, construction field. The names below re-export it so existing
+// imports keep working; new callers import `sema.sema_handle` direct.
 
-is_handle_ty* = (c :: Checker, ty: TyId) bool {
-    c.types.at(ty).match({
-        Named(n) => c.is_handle_decl(n.decl.module.to_usize(), n.name),
-        _        => false,
-    })
-}
+is_handle_ty, refuse_handle_at = sema.sema_handle
 
-is_handle_decl = (c :: Checker, mi: usize, name: str) bool {
-    c.world.table_at(mi).match({
-        None  => false,
-        Ok(t) => t.name.eq(HANDLE_MODULE) && name.eq(HANDLE_NAME),
-    })
-}
+refuse_handle_value = sema.sema_handle
 
-refuse_handle_at* = (c :: Checker, id: ExprId) Res<(), AllocError> {
-    node = c.tree.expr_at(id);
-    c.report(
-        node.span.file,
-        node.span,
-        SemaFault.HandleNotAValue(NameFault(name: c.handle_spelling(id))),
-    )
-}
+refuse_handle_argument, formal_takes_handle = sema.sema_handle
 
-// THE SAME RULE ONE CALL OVER. `f(h)` reads like handing the loop on,
-// but a real callee's formal is C storage — `keep = (g: LoopHandle) ()
-// { .. }` emitted `keep(zu_l1h)` with `zu_l1h` declared nowhere, cc
-// alone objecting. The one legal inward path is the spliced body: a
-// lambda's parameters are bound by the frame it is inlined into, and
-// `gen_c_inline.lower_arg_value` rewrites a handle argument to the
-// depth of the loop it names. So the argument position refuses unless
-// the settled formal itself receives handles inward — `(g: LoopHandle)
-// ()`, or a body type carrying one — which is what every `loop`-family
-// declaration writes and nothing else can mean.
-//
-// Lambda arguments are not here: their bodies are typed through
-// `arg_lambdas` after resolution and never pass through this seat.
-// Asked AFTER the candidate is chosen, so the diagnostic names the
-// handle rather than inventing an overload failure.
-refuse_handle_argument* = (c :: Checker, a: Arg, want: TyId, ctx: Ctx)
-                         Res<(), AllocError> {
-    c.type_of(a.value, ctx).match({
-        Err(_) => Ok(()),
-        Ok(ty) => c.is_handle_ty(ty).match({
-            false => Ok(()),
-            true  => c.refuse_unless_inward(a, want),
-        }),
-    })
-}
-
-refuse_unless_inward = (c :: Checker, a: Arg, want: TyId)
-                       Res<(), AllocError> {
-    inward = c.formal_takes_handle(want).try();
-    inward.match({
-        true  => Ok(()),
-        false => c.refuse_handle_at(a.value),
-    })
-}
-
-// A FORMAL RECEIVES HANDLES INWARD when its type mentions LoopHandle:
-// `(g: LoopHandle) ()` holds the handle itself; `(i: usize, g:
-// LoopHandle) bool` threads it beside other arguments. Nothing else
-// can: a handle stored in a struct would make it escapable, which
-// `loop_handle.zen` rules out ("never stored, returned, or captured").
-formal_takes_handle = (c :: Checker, ty: TyId) Res<bool, AllocError> {
-    c.types.at(ty).match({
-        Fn(f) => c.fn_param_has_handle(f.params),
-        _     => Ok(false),
-    })
-}
-
-fn_param_has_handle = (c :: Checker, ps: Vec<TyId>) Res<bool, AllocError> {
-    at = Range(0, ps.len).find((i) {
-        ps.get(i).match({
-            Ok(p) => c.is_handle_ty(p),
-            None  => false,
-        })
-    });
-    at.match({
-        Ok(_) => Ok(true),
-        None  => Ok(false),
-    })
-}
-
-// The handle as WRITTEN, parens unwrapped, for the diagnostic to say
-// what stood in the value position — `h` nine times out of ten, never
-// assumed.
-handle_spelling = (c :: Checker, id: ExprId) str {
-    c.tree.expr_at(id).kind.match({
-        Name(n)  => n.text,
-        Paren(p) => c.handle_spelling(p.inner),
-        _        => "",
-    })
-}
+handle_spelling = sema.sema_handle
 
 // `x = e;`, `x: T ::= e;`.
 //

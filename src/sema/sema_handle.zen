@@ -1,0 +1,138 @@
+// src/sema/sema_handle.zen
+// THE LOOP-HANDLE LAW, in one file: a LoopHandle is not a value.
+//
+// `h` arrives in a loop body as the loop it came from — `gen_c_loop
+// .bind_handle` gives the name no storage and lowers `h.break` at the
+// NAME — but the signature `(h: LoopHandle, ..)` types it as an
+// ordinary nominal. Every position that would give it C storage is
+// refused here, at the span that names the handle, because zen said
+// yes while cc alone objected (`zu_l1h` undeclared): the BIND (#782),
+// the CALL ARGUMENT (#782), the BLOCK TAIL (#807), and the
+// construction FIELD this file's callers reach through `field_fits`.
+//
+// The one legal inward path is the spliced body: a lambda's parameters
+// are bound by the frame it is inlined into, and `gen_c_inline
+// .lower_arg_value` rewrites a handle argument to the depth of the
+// loop it names. So `(g: LoopHandle) ()`, a body type carrying one,
+// and `h.break(..)` / `h.next()` inside the body itself stay legal.
+//
+// ITS OWN LEAF so every seat can ask the same question without a
+// cycle: the predicates lived in `sema_place.zen`, whose other
+// imports made `sema_hoist -> sema_place` a cycle — the shape that
+// stopped the backend emitting whole instantiations once before
+// (`sema_hoist.zen`, the `sema_bound` note). This file imports only
+// leaves, and everything imports it.
+//
+// `LoopHandle` by WHERE IT IS DECLARED, not by who names it: a program
+// may call its own struct `LoopHandle` and bind that freely — the
+// refusal answers the library type alone. An unknown module reads as
+// NOT the handle — fail-open, since a missed check only misses while a
+// false one refuses a legal program.
+
+Arg, Expr, ExprId, Span = std.ast
+AllocError = std.mem
+str = std.text
+Vec = std.collections
+Range = std.core
+TyId = sema.sema_ty
+Checker, Ctx = sema.sema_check
+SemaFault, NameFault, PairFault = sema.sema_diag
+
+HANDLE_MODULE* : str = "std.core.loop.loop_handle"
+HANDLE_NAME* : str = "LoopHandle"
+
+is_handle_ty* = (c :: Checker, ty: TyId) bool {
+    c.types.at(ty).match({
+        Named(n) => c.is_handle_decl(n.decl.module.to_usize(), n.name),
+        _        => false,
+    })
+}
+
+is_handle_decl* = (c :: Checker, mi: usize, name: str) bool {
+    c.world.table_at(mi).match({
+        None  => false,
+        Ok(t) => t.name.eq(HANDLE_MODULE) && name.eq(HANDLE_NAME),
+    })
+}
+
+// The handle AS WRITTEN, parens unwrapped, for the diagnostic to say
+// what stood in the value position — `h` nine times out of ten, never
+// assumed.
+handle_spelling* = (c :: Checker, id: ExprId) str {
+    c.tree.expr_at(id).kind.match({
+        Name(n)  => n.text,
+        Paren(p) => c.handle_spelling(p.inner),
+        _        => "",
+    })
+}
+
+refuse_handle_at* = (c :: Checker, id: ExprId) Res<(), AllocError> {
+    node = c.tree.expr_at(id);
+    c.report(
+        node.span.file,
+        node.span,
+        SemaFault.HandleNotAValue(NameFault(name: c.handle_spelling(id))),
+    )
+}
+
+// A LOOP HANDLE IS NOT A VALUE, so binding it is refused outright.
+//
+// Reported at the VALUE, the one byte that names what cannot be kept;
+// the bind itself runs on, so one mistake stays one diagnostic and
+// nothing downstream re-asks. (`sema_place.bind_stmt`, the BIND seat.)
+refuse_handle_value* = (c :: Checker, id: ExprId, got: TyId)
+                        Res<(), AllocError> {
+    c.is_handle_ty(got).match({
+        false => Ok(()),
+        true  => c.refuse_handle_at(id),
+    })
+}
+
+// THE SAME RULE ONE CALL OVER. `f(h)` reads like handing the loop on,
+// but a real callee's formal is C storage. Asked AFTER the candidate
+// is chosen (`sema_call.args_handle_check`), so the diagnostic names
+// the handle rather than inventing an overload failure.
+refuse_handle_argument* = (c :: Checker, a: Arg, want: TyId, ctx: Ctx)
+                          Res<(), AllocError> {
+    c.type_of(a.value, ctx).match({
+        Err(_) => Ok(()),
+        Ok(ty) => c.is_handle_ty(ty).match({
+            false => Ok(()),
+            true  => c.refuse_unless_inward(a, want),
+        }),
+    })
+}
+
+refuse_unless_inward* = (c :: Checker, a: Arg, want: TyId)
+                        Res<(), AllocError> {
+    inward = c.formal_takes_handle(want).try();
+    inward.match({
+        true  => Ok(()),
+        false => c.refuse_handle_at(a.value),
+    })
+}
+
+// A FORMAL RECEIVES HANDLES INWARD when its type mentions LoopHandle:
+// `(g: LoopHandle) ()` holds the handle itself; `(i: usize, g:
+// LoopHandle) bool` threads it beside other arguments. Nothing else
+// can: a handle stored in a struct would make it escapable, which
+// `loop_handle.zen` rules out ("never stored, returned, or captured").
+formal_takes_handle* = (c :: Checker, ty: TyId) Res<bool, AllocError> {
+    c.types.at(ty).match({
+        Fn(f) => c.fn_param_has_handle(f.params),
+        _     => Ok(false),
+    })
+}
+
+fn_param_has_handle* = (c :: Checker, ps: Vec<TyId>) Res<bool, AllocError> {
+    at = Range(0, ps.len).find((i) {
+        ps.get(i).match({
+            Ok(p) => c.is_handle_ty(p),
+            None  => false,
+        })
+    });
+    at.match({
+        Ok(_) => Ok(true),
+        None  => Ok(false),
+    })
+}
