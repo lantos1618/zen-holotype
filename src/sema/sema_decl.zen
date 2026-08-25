@@ -21,7 +21,7 @@
 
 Module, Decl, Function, TParam, BlockId = std.ast
 Struct, Impl, Member, Enum = std.ast
-ExprId, TypeId, Const = std.ast
+ExprId, TypeId, Const, Ident, Variant = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -29,6 +29,7 @@ Range = std.core
 TyId = sema.sema_ty
 Def, DefKind, ModuleTable, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
+SemaFault, NameFault = sema.sema_diag
 check_impl = sema.sema_bound
 check_overloads = sema.sema_call
 check_depth = sema.sema_depth
@@ -146,7 +147,10 @@ check_decl = (c :: Checker, d: Decl, m: Module, mi: usize)
     d.kind.match({
         Function(f) => c.check_function(f, m, mi),
         Struct(s)   => c.struct_bodies(s, m, mi),
-        Enum(e)     => c.enum_payloads(e, mi),
+        Enum(e)     => {
+            c.enum_payloads(e, mi).try();
+            c.check_members(e, mi)
+        },
         Impl(im)    => c.impl_bodies(im, m, mi),
         Const(k)    => c.const_body(k, mi),
         _           => Ok(()),
@@ -212,6 +216,113 @@ enum_payloads = (c :: Checker, e: Enum, mi: usize) Res<(), AllocError> {
     ctx = Ctx(mi, c.types.unknown().try());
     e.variants.loop((h, v) { c.variant_payload(v, ctx).try() });
     c.release_tvars(tmark)
+}
+
+// A UNION MEMBER THAT BINDS NOTHING IS THE DECLARATION'S OWN MISTAKE,
+// not a reading question. `Error = AllocError | NoSuchErrorAnywhere`
+// parses as an enum (grammar R1a has no lookahead; the bar is all that
+// separates it from `Alias = Shape`), so nothing resolves its members
+// as written types -- `union_reading` decides enum-vs-union by asking
+// whether EVERY bare variant names a type, and a name binding nothing
+// answers no without a word: the alias silently becomes the union of
+// the members that did resolve, and the mistake resurfaces elsewhere
+// as "no implicit error conversion" naming a member the reader can see
+// on the line (issue #780). So the walk that owns rules nobody would
+// ever query for asks the one here.
+//
+// WHICH BARE MEMBERS COUNT AS THE MISTAKE. One name failing while
+// every other bare name denotes a type is a misspelled member: the
+// declaration satisfies the union contract but for that one name, and
+// it is reported at its own position with the ordinary undefined-name
+// fault. Anything else stays silent, on purpose:
+//
+//   - `Color = Red | Green | Blue` -- no bare name denotes a type, so
+//     there is no union reading to fail; this is how the grammar spells
+//     a nominal enum of bare tags.
+//   - `TokenKind = Ident | Int(u64) | .. | Eq | ..` -- one bare name
+//     (`Eq`) shadows a prelude type beside tags that bind nothing. Each
+//     tag has a non-type sibling, so no tag is "the one name standing
+//     between"; refusing them would refuse src/std/lex. The payload
+//     variants already settled this declaration as nominal anyway.
+//   - a second name that binds nothing (`A | T1 | T2`) leaves every
+//     miss with a miss for a sibling -- indistinguishable from tag
+//     soup, and silent exactly as the tree has always been.
+//
+// A bare name that DOES bind a value -- a function, constant, module
+// or module alias -- is defined, so it is nobody's undefined name; its
+// presence marks the declaration as not-a-union-in-progress and quiets
+// the whole rule.
+check_members = (c :: Checker, e: Enum, mi: usize)
+                Res<(), AllocError> {
+    miss_at   ::= e.variants.len;   // sentinel: no bare member missed
+    miss_count ::= 0;
+    types     ::= 0;
+    values    ::= 0;
+    Range(0, e.variants.len).loop((h, i) {
+        v = e.variants.get(i).ok_or(AllocError.OutOfMemory).try();
+        v.payload.match({
+            // a written payload is a variant, never a member name
+            Ok(_)  => (),
+            None   => c.binds_nothing(mi, v.name.text).try().match({
+                true  => {
+                    miss_count = miss_count + 1;
+                    (miss_count == 1).match({
+                        true  => { miss_at = i; },
+                        false => (),
+                    });
+                },
+                false => c.binds_a_type(mi, v.name.text).try().match({
+                    true  => { types = types + 1; },
+                    false => { values = values + 1; },
+                }),
+            }),
+        });
+    });
+    ((miss_count == 1) && (types > 0) && (values == 0)).match({
+        false => Ok(()),
+        true  => c.report_member_miss(e, miss_at),
+    })
+}
+
+// The one name standing between the declaration and its union reading,
+// told so at its own position -- the same fault, words and span a
+// signature position emits for the same text.
+report_member_miss = (c :: Checker, e: Enum, at: usize)
+                     Res<(), AllocError> {
+    name = e.variants.get(at).ok_or(AllocError.OutOfMemory).try().name;
+    c.report(
+        name.span.file,
+        name.span,
+        SemaFault.UndefinedName(NameFault(name: name.text))
+    )
+}
+
+// Whether the name binds nothing at all in the declaring module --
+// the exact miss `sema_denote.lookup_named` reports in a signature.
+binds_nothing = (c :: Checker, mi: usize, name: str) Res<bool, AllocError> {
+    found ::= c.alloc.Vec<Def>();
+    c.world.defs_of(mi, name, found).try();
+    Ok(found.get(0).match({
+        None  => true,
+        Ok(_) => false,
+    }))
+}
+
+// Whether the name denotes a TYPE: a struct, an enum, or an alias that
+// is not a module alias. A parameterised alias is a type constructor,
+// and `Vec` in member position reads as one, so it counts.
+binds_a_type = (c :: Checker, mi: usize, name: str) Res<bool, AllocError> {
+    found ::= c.alloc.Vec<Def>();
+    c.world.defs_of(mi, name, found).try();
+    Ok(found.get(0).match({
+        None  => false,
+        Ok(d) => d.kind.match({
+            StructDef => true,
+            EnumDef   => true,
+            AliasDef  => c.alias_module(d.id).match({ Ok(_) => false, None => true }),
+            _         => false,
+        }),
+    }))
 }
 
 // A MEMBER'S BODY IS A BODY. It runs the queries, because a query's
