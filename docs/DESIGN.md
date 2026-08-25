@@ -679,7 +679,7 @@ ArgError* = Missing(str)   // required field absent; names the field
 // missing file is a caller's problem and not a bug, and is `:`
 // because a handle's methods are `:` -- a bitwise copy of an Fs sees
 // the same filesystem.
-FsError* = NotFound | Denied | IsDir | Exists | Failed | OutOfMemory
+FsError* = NotFound | Denied | IsDir | Failed | OutOfMemory
 
 Fs* = {
     read*   = (self: @Self, a: Alloc, path: str) Res<String, FsError>
