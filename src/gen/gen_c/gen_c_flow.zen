@@ -496,24 +496,45 @@ set_name_cond = (
 ) Res<(), AllocError> {
     member_of(be.check, st, text).match({
         None  => out.add_bytes("1"),
-        Ok(mty) => set_name_arm(be, st, mty, scrut, out),
+        Ok(mty) => set_name_arm(be, st, mty, text, scrut, out),
     })
 }
 
-// The bare arm's test: the member's tag, then the leaf's — which for a
-// bare MEMBER name adds no second test (`leaf_cond` sees a wildcard).
+// The bare arm's test: the member's tag, then — only when the written
+// name is a CASE of that member — the leaf's. A bare MEMBER name adds
+// no second test, exactly as `Member(pe)` adds none one level in.
 set_name_arm = (
     be    :: CBackend,
     st    : TyId,
     mty   : TyId,
+    text  : str,
     scrut : str,
     out   :: String
 ) Res<(), AllocError> {
-    leaf ::= leaf_name_of(mty).try();
+    leaf ::= leaf_name_of(be, mty).try();
     be.tag_name(st, leaf, scrut, out).try();
     place ::= be.alloc.String().try();
     set_member_place(be, mty, scrut, place).try();
-    leaf_cond(be, mty, mty, place.view(), out)
+    be.check.is_case(mty, text).try().match({
+        false => Ok(()),
+        true  => leaf_case_cond(be, mty, text, place.view(), out),
+    })
+}
+
+// One leaf tag test from a bare CASE name — `leaf_tag_cond` without a
+// pattern, because a flat spelling carries none.
+leaf_case_cond = (
+    be     :: CBackend,
+    mty    : TyId,
+    case   : str,
+    place  : str,
+    out    :: String
+) Res<(), AllocError> {
+    qname ::= be.alloc.String().try();
+    be.enum_path(mty, qname).try();
+    tag ::= be.alloc.String().try();
+    tag.sym_variant(qname.view(), case).try();
+    out.fmt(" && ({place}.zg_tag == {})", tag.view())
 }
 
 // The bare name a MEMBER of a set is spelled by — the tag test's second
