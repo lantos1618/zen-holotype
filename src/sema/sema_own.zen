@@ -119,8 +119,10 @@ check_own* = (c :: Checker, f: Function, body: BlockId, ctx: Ctx)
     o.method = receiver_method(f, ctx);
     o.body   = body;
     c.own_params(o, f).try();
+    // The RETURNED half of the scope rule is asked inside `own_block`,
+    // while this frame's bindings — a `scoped` binding among them — are
+    // still on the walk's stack.
     c.own_block(o, body, ctx).try();
-    c.check_scope_returned(body).try();
     Ok(());
 }
 
@@ -177,6 +179,11 @@ own_block = (c :: Checker, o :: Own, id: BlockId, ctx: Ctx)
         Ok(v) => c.own_expr(o, v, ctx),
         None  => Ok(()),
     }).try();
+    // While this frame's bindings are still on `o.vars` — a binding of
+    // `@scope` records `scoped` only where it was declared, and
+    // `own_release` below drops it. The body's own tail is the one value
+    // that leaves the frame; nested blocks hand theirs to one still open.
+    c.check_scope_returned(o, id, b).try();
     c.check_arena_returned(o, id, b).try();
     c.check_partial_moves(o, mark).try();
     own_release(o, mark).try();
@@ -679,6 +686,16 @@ arena_var* = (o: Own, text: str) bool {
     find_var(o, text).match({
         None  => false,
         Ok(i) => o.vars.get(i).match({ Ok(v) => v.arena, None => false }),
+    })
+}
+
+// Whether naming this here is naming the block — the state half of
+// `sema_scope.zen`'s RETURNED rule, which reads it from inside
+// `own_block` while the row still exists.
+scoped_var* = (o: Own, text: str) bool {
+    find_var(o, text).match({
+        None  => false,
+        Ok(i) => o.vars.get(i).match({ Ok(v) => v.scoped, None => false }),
     })
 }
 

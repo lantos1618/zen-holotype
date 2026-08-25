@@ -21,7 +21,7 @@
 
 ExprId, BlockId, Block, Call, Struct = std.ast
 Paren, Access, Member, Function, Param, Span, TypeId = std.ast
-Try, Name = std.ast
+Try, Name, Expr = std.ast
 AllocError = std.mem
 str = std.text
 Range = std.core
@@ -31,38 +31,31 @@ Checker = sema.sema_check
 tail_expr = sema.sema_hoist
 SemaFault, NameFault = sema.sema_diag
 refuse, Own, place_type, captures_scope = sema.sema_own
-arena_var, UNTYPED = sema.sema_own
+arena_var, scoped_var, UNTYPED = sema.sema_own
 TyId = sema.sema_ty
 own_member = sema.sema_recv
 
 // RETURNED. The block is gone by the time the caller has the value, so
 // every defer on it would run against a dead frame. Only the FUNCTION
 // BODY's value is asked — a nested block's `@scope` value hands it to
-// an enclosing block that's still open.
+// an enclosing block that's still open — and asked from INSIDE
+// `own_block`, while this frame's bindings are still on `o.vars`: a
+// binding of `@scope` records `scoped` only where it was declared, and
+// `own_release` drops it before `check_own`'s caller would look.
 //
-// `tail_expr` and not `Block.value`: a body's last expression is the
-// value it returns whether or not the author wrote the closing `;`, and
-// the AST records only which was written. Reading `Block.value` alone
-// let `here = () Scope { @scope; }` through — the same program the
-// must-fail test asserts, one semicolon apart, and nearly every body in
-// this tree is written with the semicolon.
-check_scope_returned* = (c :: Checker, body: BlockId) Res<(), AllocError> {
-    block = c.tree.block_at(body);
-    c.tail_expr(block).match({
-        None  => Ok(()),
-        Ok(v) => c.refuse_if_scope(v),
-    })
-}
-
-refuse_if_scope* = (c :: Checker, id: ExprId) Res<(), AllocError> {
-    node = c.tree.expr_at(id);
-    node.kind.match({
-        Scope    => c.refuse(
-            node.span,
-            SemaFault.ScopeEscapes(NameFault(name: ""))
-        ),
-        Paren(p) => c.refuse_if_scope(p.inner),
-        _        => Ok(()),
+// PROVENANCE, not syntax, which is what makes this half different from
+// the two rules above it: `here = () Scope { s = @scope; s; }` leaves
+// through the NAME, one step past any syntactic match. `tail_expr` and
+// not `Block.value` — a body's last expression is the value it returns
+// whether or not the author wrote the closing `;`.
+check_scope_returned* = (c :: Checker, o :: Own, id: BlockId, b: Block)
+                         Res<(), AllocError> {
+    (id.index == o.body.index).match({
+        false => Ok(()),
+        true  => c.tail_expr(b).match({
+            None  => Ok(()),
+            Ok(v) => c.refuse_scope_returned(o, v),
+        }),
     })
 }
 
@@ -93,8 +86,23 @@ decl_is_struct = (c :: Checker, d: DeclId) bool {
 }
 
 refuse_scope_args = (c :: Checker, k: Call) Res<(), AllocError> {
-    k.args.loop((h, a) { c.refuse_if_scope(a.value).try() });
+    k.args.loop((h, a) { c.refuse_scope_expr(a.value).try() });
     Ok(());
+}
+
+// The keyword itself, wherever it was written — the syntactic half the
+// STORED rule reads on a construction's arguments. Provenance lives in
+// the RETURNED rule above; this stays a match on the AST kind.
+refuse_scope_expr = (c :: Checker, id: ExprId) Res<(), AllocError> {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Scope    => c.refuse(
+            node.span,
+            SemaFault.ScopeEscapes(NameFault(name: ""))
+        ),
+        Paren(p) => c.refuse_scope_expr(p.inner),
+        _        => Ok(()),
+    })
 }
 
 // CAPTURED. The block outlives every frame registered on it (what
@@ -107,6 +115,123 @@ check_scope_captured* = (c :: Checker, o :: Own, span: Span, text: str)
     captures_scope(o, text).match({
         false => Ok(()),
         true  => c.refuse(span, SemaFault.ScopeEscapes(NameFault(name: text))),
+    })
+}
+
+// ---------------------------------------------------------------------
+// WHICH BINDING NAMES A BLOCK, AND WHERE A TAIL DRAWS ON ONE
+//
+// The RETURNED rule reads the same state `sema_own.zen`'s walk keeps for
+// the capture rule — a binding whose initialiser names the block records
+// `OwnVar.scoped` where it was declared (`sema_own.zen`, `declare_var`)
+// — so the walk below is PROVENANCE over that flag, not syntax. It is
+// what lets the tail refuse `s`, `Ok(s)` and `h.s` one step past the
+// keyword itself.
+//
+// WHAT IT DOES NOT COVER, named rather than hidden. Only bindings are
+// tainted, never an expression: `() Scope { { @scope } }` needs no walk
+// because the nested block's tail is refused by `check_scope_stored`
+// when the outer body's own tail hands it on. A taint is not chased
+// through a re-binding (`t = s`) nor out of a callee, and a parameter of
+// type `Scope` is not recorded at all (`own_params` sets `scoped:
+// false`). All of it is the same fail-open direction this file already
+// takes: a false rejection makes a correct program uncompilable, a
+// missing check only misses.
+// ---------------------------------------------------------------------
+
+// The innermost node whose value names this frame's block, or none —
+// returned as a node so the refusal points at the value that leaves,
+// not at the wrapper that carries it.
+scope_escape = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
+    c.scope_carries(o, id).match({
+        false => None,
+        true  => c.scope_escape_of(o, id),
+    })
+}
+
+scope_escape_of = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
+    c.tree.expr_at(id).kind.match({
+        Scope     => Ok(id),
+        Name(n)   => c.named_scope(o, id, n.text),
+        Paren(p)  => c.scope_escape(o, p.inner),
+        Try(t)    => c.scope_escape(o, t.operand),
+        Access(a) => c.scope_escape(o, a.base),
+        Call(k)   => c.scope_escape_in_args(o, k),
+        _         => None,
+    })
+}
+
+named_scope = (c :: Checker, o :: Own, id: ExprId, text: str) Res<ExprId> {
+    scoped_var(o, text).match({ true => Ok(id), false => None })
+}
+
+// `Ok(s)` is a call whose ARGUMENT carries the block out; nothing else
+// about a callee can name this frame's block, so only the arguments are
+// asked, first offender wins.
+scope_escape_in_args = (c :: Checker, o :: Own, k: Call) Res<ExprId> {
+    Range(0, k.args.len).find((i) {
+        k.args.get(i).match({
+            None  => false,
+            Ok(a) => c.scope_escapes(o, a.value),
+        })
+    }).match({
+        None  => None,
+        Ok(i) => k.args.get(i).match({
+            None  => None,
+            Ok(a) => c.scope_escape(o, a.value),
+        }),
+    })
+}
+
+scope_escapes = (c :: Checker, o :: Own, id: ExprId) bool {
+    c.scope_escape(o, id).match({ Ok(_) => true, None => false })
+}
+
+refuse_scope_returned = (
+    c  :: Checker,
+    o  :: Own,
+    id : ExprId
+) Res<(), AllocError> {
+    c.scope_escape(o, id).match({
+        None   => Ok(()),
+        Ok(at) => c.refuse_scope_node(o, at),
+    })
+}
+
+refuse_scope_node = (c :: Checker, o :: Own, at: ExprId) Res<(), AllocError> {
+    node = c.tree.expr_at(at);
+    c.refuse(
+        node.span,
+        SemaFault.ScopeEscapes(NameFault(name: scope_fault_name(node)))
+    )
+}
+
+// A binding leaves with its name in the message, the keyword alone
+// without one — the same shape `check_scope_captured` prints.
+scope_fault_name = (node: Expr) str {
+    node.kind.match({
+        Name(n) => n.text,
+        _       => "",
+    })
+}
+
+// Whether a value of this type could BE a block, or carry one out. The
+// gate that keeps `wrap = (env: Env) () { register(@scope, env) }`
+// compiling — its tail is a call whose argument names the block INWARD,
+// legal — while refusing a wrapper whose payload does leave. A primitive
+// is a copy and ends the chase; anything not a primitive is not
+// something this file can rule out, so it is followed.
+scope_carries = (c :: Checker, o :: Own, id: ExprId) bool {
+    c.may_carry_scope(c.place_type(o, id))
+}
+
+may_carry_scope = (c: Checker, ty: TyId) bool {
+    ty.eq(UNTYPED).match({
+        true  => true,
+        false => c.types.at(ty).match({
+            Res(r) => c.may_carry_scope(r.value),
+            _      => c.prim_name(ty).len == 0,
+        }),
     })
 }
 
