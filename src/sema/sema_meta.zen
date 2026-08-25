@@ -5,21 +5,30 @@
 // `docs/design_meta.md` is the decomposition and its §7 the milestones.
 // M0 was the wall — every `@meta` refused by name, pinned by three
 // must-fail tests — and the refusal is still the answer for everything
-// but one shape. M2 is the skeleton below: an entry point, and a step
-// budget that REPORTS from the first commit, because a prover may
-// decline (`sema_const.zen`) and an evaluator may not. M3 is the one
-// rule the skeleton runs: `@meta(name: Type).name` folds at sema time
-// to the declared type's name as a `str`, recorded in
-// `Checker.meta_memo` under the ACCESS node's id — the backend reads
-// it back through `Checker.meta_str` and lowers an ordinary string
-// literal, having learned nothing new.
+// but one shape. M2 is the skeleton below: an entry point and nothing
+// else yet. Its step budget was REMOVED (issue #768): three spends on a
+// straight line cannot reach zero, so the counter read as coverage
+// while bounding nothing — not even the one callee that recurses,
+// `type_from_ast`. It returns with the first rule that can loop (M2,
+// or M4's nested-struct recursion), together with the must-fail test
+// §6.1 owes it; until then nothing pretends to bound evaluation.
+//
+// M3 is the one rule the skeleton runs: `@meta(name: Type).name` folds
+// at sema time to the WRITTEN type's declared name as a `str`,
+// recorded in `Checker.meta_memo` keyed on the written TYPE EXPRESSION
+// — the access node alone would make two instantiations of one generic
+// collide (`Box<i64>` answering for `Box<bool>`); the written type is
+// what distinguishes them, and it travels to the backend inside the
+// `Meta` node itself. The backend reads the fold back through
+// `Checker.meta_str` and lowers an ordinary string literal, having
+// learned nothing new.
 //
 // EVERYTHING ELSE IS STILL THE WALL. The value form `@meta(v)`, a
 // typed form asked for a member that is not `.name`, a type with no
 // declaration payload to read, and a `@meta` standing anywhere an
 // access target isn't all report `MetaNotImplemented` at the `@meta`
-// token and poison, exactly as M0 did — the refused set shrank by one
-// shape and the refusal tests pin the rest of it.
+// token and poison, exactly as M0 did — the refusal tests pin the
+// rest of it.
 //
 // THE ARGUMENT IS STILL NOT VISITED, with one exception that is the
 // rule itself: the typed form's `type` resolves through the ordinary
@@ -29,25 +38,14 @@
 // spend a second diagnostic on a program whose first sentence is
 // already written.
 
-Expr, ExprId, TypeId, Access, Meta, Decl = std.ast
+Expr, Type, TypeId, Access, Meta, Alias = std.ast
 AllocError = std.mem
 str = std.text
 TyId = sema.sema_ty
 Checker, Ctx = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
-decl_at = sema.sema_def
-type_from_ast = sema.sema_denote
-
-// THE FUEL. A spent budget FAILS THE BUILD — it never hangs and it
-// never answers by default. 4096 is a setting, not a measurement
-// (`design_meta.md` §8 keeps the number open): the one rule that
-// exists spends three steps and cannot loop, so anything past a
-// handful is equally right, and the day the evaluator CAN loop the
-// counter is already here. The count is per `@meta` evaluation rather
-// than per compilation, for the reason `DEPTH_BUDGET`
-// (`sema_depth.zen`) is per chain: a budget is a fact about one term,
-// not about the program that holds it.
-META_STEPS: usize = 4096
+Def, decl_at = sema.sema_def
+type_from_ast, alias_target_of = sema.sema_denote
 
 // A `@meta` standing anywhere an access target isn't: one diagnostic
 // at the `@meta` token, then poison, so nothing downstream invents a
@@ -59,19 +57,17 @@ meta_type* = (c :: Checker, node: Expr, ctx: Ctx) Res<TyId, AllocError> {
 }
 
 // The intercept `sema_member.access_type` makes when the access target
-// is a Meta node: the whole access is the evaluator's question. `id`
-// is the ACCESS node's own — the fold is recorded under it, because
-// the folded string is a fact about this expression, and the backend
-// asks for it by this id.
-meta_access* = (c :: Checker, id: ExprId, ac: Access, ctx: Ctx)
+// is a Meta node: the whole access is the evaluator's question. The
+// backend hands back this same access when it lowers the expression,
+// and reads the folded text through `meta_str(t)` on the access's own
+// `Meta` node; the MEMO is keyed finer, on the written type, so two
+// instantiations never share a row.
+meta_access* = (c :: Checker, ac: Access, ctx: Ctx)
                Res<TyId, AllocError> {
     target = c.tree.expr_at(ac.base);
-    c.spend(META_STEPS, target).try().match({
-        None     => c.types.unknown(),
-        Ok(left) => target.kind.match({
-            Meta(m) => c.meta_form(id, target, m, ac, left, ctx),
-            _       => c.types.unknown(),
-        }),
+    target.kind.match({
+        Meta(m) => c.meta_form(target, m, ac, ctx),
+        _       => c.types.unknown(),
     })
 }
 
@@ -79,11 +75,9 @@ meta_access* = (c :: Checker, id: ExprId, ac: Access, ctx: Ctx)
 // value — asked for its `name`. Every other shape is the wall.
 meta_form = (
     c      :: Checker,
-    id     : ExprId,
     target : Expr,
     m      : Meta,
     ac     : Access,
-    left   : usize,
     ctx    : Ctx
 ) Res<TyId, AllocError> {
     m.value.match({
@@ -92,7 +86,7 @@ meta_form = (
             false => c.meta_refused(target),
             true  => m.type.match({
                 None  => c.meta_refused(target),
-                Ok(t) => c.meta_fold(id, target, t, left, ctx),
+                Ok(t) => c.meta_fold(target, t, ctx),
             }),
         }),
     })
@@ -102,82 +96,134 @@ meta_form = (
 // enclosing type (`sema_denote.self_type`) and a name means what it
 // means at this site. The form's `name` binds nothing this rule reads
 // — it is the receiver the field walk will project through (M4).
+// Every helper below carries `t`, the written type expression's id:
+// it is the memo key, and threading it beats a second copy of every
+// signature or state on the checker.
 meta_fold = (
     c      :: Checker,
-    id     : ExprId,
     target : Expr,
     t      : TypeId,
-    left   : usize,
     ctx    : Ctx
 ) Res<TyId, AllocError> {
-    c.spend(left, target).try().match({
-        None     => c.types.unknown(),
-        Ok(left) => {
-            ty = c.type_from_ast(t, ctx).try();
-            c.meta_decl(id, target, ty, left)
-        },
-    })
+    ty = c.type_from_ast(t, ctx).try();
+    c.meta_decl(target, t, ty, ctx)
 }
 
-// The name lives on the declaration's payload node. A type with no
-// declaration behind it — a primitive, a parameter, a union, a
-// function — has no node to read and stays refused; a poisoned one was
-// reported on the way in and says nothing twice.
-meta_decl = (c :: Checker, id: ExprId, target: Expr, ty: TyId, left: usize)
-            Res<TyId, AllocError> {
+// The name lives on a declaration's payload node — the one the USER
+// WROTE (`P2 = Point` answers `P2`), reached through the written type
+// expression so two spellings of one type ask their own questions. A
+// poisoned or unknown resolution was reported on the way in and says
+// nothing twice.
+meta_decl = (
+    c      :: Checker,
+    target : Expr,
+    t      : TypeId,
+    ty     : TyId,
+    ctx    : Ctx
+) Res<TyId, AllocError> {
     c.is_unknown(ty).match({
         true  => c.types.unknown(),
-        false => c.types.at(ty).match({
-            Named(n) => decl_at(c.tree, n.decl).match({
-                None  => c.meta_refused(target),
-                Ok(d) => c.meta_name(id, target, d, left),
+        false => c.written_kind(c.tree.type_at(t), target, t, ty, ctx),
+    })
+}
+
+// The written type expression decides which declaration is asked. A
+// written name resolves one step short of the alias collapse; any
+// other spelling — `@Self`, a primitive — has no written declaration,
+// so the RESOLVED type answers, which is where `@Self` finds its
+// struct.
+written_kind = (
+    c      :: Checker,
+    node   : Type,
+    target : Expr,
+    t      : TypeId,
+    ty     : TyId,
+    ctx    : Ctx
+) Res<TyId, AllocError> {
+    node.kind.match({
+        Named(n) => c.written_decl(n.name.text, target, t, ty, ctx),
+        _        => c.resolved_decl(target, t, ty),
+    })
+}
+
+// The written name's own declaration decides. An alias is its own
+// answer — `P2`, never `Point` (#768) — and keeps the `Def` that owns
+// it, which the walk to the target's payload needs; anything else
+// records its payload's name under `t`.
+written_decl = (
+    c      :: Checker,
+    name   : str,
+    target : Expr,
+    t      : TypeId,
+    ty     : TyId,
+    ctx    : Ctx
+) Res<TyId, AllocError> {
+    found ::= c.alloc.Vec<Def>();
+    c.world.defs_of(ctx.module, name, found).try();
+    found.get(0).match({
+        None  => c.resolved_decl(target, t, ty),
+        Ok(d) => decl_at(c.tree, d.id).match({
+            None  => c.resolved_decl(target, t, ty),
+            Ok(x) => x.kind.match({
+                Struct(s) => c.meta_record(t, s.name.text),
+                Enum(e)   => c.meta_record(t, e.name.text),
+                Alias(a)  => c.written_alias(a, d, target, t),
+                _         => c.meta_refused(target),
             }),
-            _        => c.meta_refused(target),
         }),
     })
 }
 
-// `.name` is equally real on a struct, an enum and an alias — each
-// payload node carries it. The arms left over are declarations no type
-// resolves to here, and they are the wall anyway.
-meta_name = (c :: Checker, id: ExprId, target: Expr, d: Decl, left: usize)
-            Res<TyId, AllocError> {
-    c.spend(left, target).try().match({
-        None  => c.types.unknown(),
-        Ok(_) => d.kind.match({
-            Struct(s) => c.meta_record(id, s.name.text),
-            Enum(e)   => c.meta_record(id, e.name.text),
-            Alias(a)  => c.meta_record(id, a.name.text),
-            _         => c.meta_refused(target),
+// The alias answers the NAME THE USER WROTE — `P2 = Point` folds to
+// `P2` (#768) — reached one step short of where the ordinary path
+// collapses the alias away. The walk to the target's payload stays only
+// as VALIDATION: a target that lands on no struct or enum declaration
+// (`Count = i64`) has nothing behind the name and is refused rather
+// than guessed, but when the target does land, the recorded text is the
+// written alias's own `name.text`, never the target's — reading the
+// payload's name here is what made `P2` answer `Point` while its own
+// corpus test said `P2`.
+written_alias = (c :: Checker, al: Alias, owner: Def, target: Expr, t: TypeId)
+                Res<TyId, AllocError> {
+    ty = c.alias_target_of(al, owner).try();
+    c.types.at(ty).match({
+        Named(n) => decl_at(c.tree, n.decl).match({
+            None  => c.meta_refused(target),
+            Ok(d) => d.kind.match({
+                Struct(_) => c.meta_record(t, al.name.text),
+                Enum(_)   => c.meta_record(t, al.name.text),
+                _         => c.meta_refused(target),
+            }),
         }),
+        _        => c.meta_refused(target),
     })
 }
 
-// The fold lands: the text under the ACCESS id — `meta_str` reads it
-// back — and the type is `str`.
-meta_record = (c :: Checker, id: ExprId, name: str) Res<TyId, AllocError> {
-    c.meta_memo.set(id, name).try();
+// The fold lands: the text under `t`, the written type expression's id
+// — the backend reads it back through the access — and the type is
+// `str`.
+meta_record = (c :: Checker, key: TypeId, name: str) Res<TyId, AllocError> {
+    c.meta_memo.set(key, name).try();
     c.types.str_ty()
 }
 
-// One step of fuel. Running out is a sentence and poison, never a hang
-// and never a guess — and the counter exists from the first commit,
-// because adding it after the evaluator would be adding it after the
-// hang.
-spend = (c :: Checker, left: usize, node: Expr) Res<Res<usize>, AllocError> {
-    (left == 0).match({
-        true  => c.meta_out_of_steps(node),
-        false => Ok(Ok(left - 1)),
+// A written spelling that names no declaration of its own falls back
+// to the resolved type, whose own declaration carries the name. There
+// is no WRITTEN name on this path — `@Self` and friends have none — so
+// an alias here has nothing to answer and refuses rather than guess.
+resolved_decl = (c :: Checker, target: Expr, t: TypeId, ty: TyId)
+                Res<TyId, AllocError> {
+    c.types.at(ty).match({
+        Named(n) => decl_at(c.tree, n.decl).match({
+            None  => c.meta_refused(target),
+            Ok(d) => d.kind.match({
+                Struct(s) => c.meta_record(t, s.name.text),
+                Enum(e)   => c.meta_record(t, e.name.text),
+                _         => c.meta_refused(target),
+            }),
+        }),
+        _        => c.meta_refused(target),
     })
-}
-
-meta_out_of_steps = (c :: Checker, node: Expr) Res<Res<usize>, AllocError> {
-    c.report(
-        node.span.file,
-        node.span,
-        SemaFault.ComptimeBudget(NameFault(name: ""))
-    ).try();
-    Ok(None);
 }
 
 meta_refused = (c :: Checker, node: Expr) Res<TyId, AllocError> {

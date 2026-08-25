@@ -111,11 +111,16 @@ Checker* = {
     type_memo* :: Map<TypeId, TyId>,
 
     // WHAT `@meta(name: Type).name` FOLDED TO. The comptime evaluator's
-    // one answer (`sema_meta.zen`), keyed on the ACCESS node's id — the
-    // fold is a fact about that expression — and written only on
-    // success, so a miss means "not a fold", never "folded to nothing".
-    // The backend reads it back through `meta_str`.
-    meta_memo* :: Map<ExprId, str>,
+    // one answer (`sema_meta.zen`), keyed on the WRITTEN TYPE EXPRESSION,
+    // not on the access node: one syntactic access shape checked under
+    // two instantiations of one generic would otherwise share a row, and
+    // `Box<bool>` would read back `Box<i64>`'s name. Two spellings of one
+    // type are two rows even where their answers agree (`P2`, `Point`) —
+    // what the user WROTE is what folds. Written only on success, so a
+    // miss means "not a fold", never "folded to nothing". The backend
+    // reads it back through `meta_str`, handing over the `Meta` node's
+    // own type field.
+    meta_memo* :: Map<TypeId, str>,
 
     // WHICH TYPE SUPPLIED THIS FIELD READ — the bound that promised it,
     // or the receiver's own declaration. "The bound in scope selects
@@ -239,10 +244,10 @@ Checker* = {
         self.call_memo.set(id, d)
     }
 
-    // The text an `@meta(...).name` access folded to at this node, if
-    // it folded. A miss means the ordinary lowering applies.
-    meta_str* = (self: @Self, id: ExprId) Res<str> {
-        self.meta_memo.get(id)
+    // The text an `@meta(...).name` access folded to for this written
+    // type, if it folded. A miss means the ordinary lowering applies.
+    meta_str* = (self: @Self, t: TypeId) Res<str> {
+        self.meta_memo.get(t)
     }
 
     // What this call instantiated its callee's type parameters with.
@@ -838,7 +843,7 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         diags: a.Vec<Diag>(),
         expr_memo: a.Map<ExprId, TyId>(),
         type_memo: a.Map<TypeId, TyId>(),
-        meta_memo: a.Map<ExprId, str>(),
+        meta_memo: a.Map<TypeId, str>(),
         supply_memo: a.Map<ExprId, TyId>(),
         call_memo: a.Map<ExprId, DeclId>(),
         param_memo: a.Map<ExprId, bool>(),

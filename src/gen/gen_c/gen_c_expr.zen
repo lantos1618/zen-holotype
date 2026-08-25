@@ -965,8 +965,10 @@ decoded_len* = (raw: str) usize {
 // `@meta(self: @Self).name` FOLDED AT SEMA: `meta_str` remembers the
 // comptime string the access stands for, and the residue is an
 // ordinary literal — the backend lowers it having learned nothing new
-// (docs/design_meta.md, M3). `None` is every other dot, which takes
-// the field path.
+// (docs/design_meta.md, M3). The memo is keyed on the WRITTEN TYPE
+// (`sema_check.zen`), which this access's own `Meta` node carries, so
+// the read-back needs no state of its own; a miss is every other dot,
+// which takes the field path.
 lower_meta_or_access = (
     be   :: CBackend,
     id   : ExprId,
@@ -975,9 +977,16 @@ lower_meta_or_access = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    be.check.meta_str(id).match({
-        Ok(text) => lower_meta_name(text, out),
-        None     => be.lower_access(id, a, ctx, want, out),
+    base = be.check.tree.expr_at(a.base);
+    base.kind.match({
+        Meta(m) => m.type.match({
+            Ok(t) => be.check.meta_str(t).match({
+                Ok(text) => lower_meta_name(text, out),
+                None     => be.lower_access(id, a, ctx, want, out),
+            }),
+            None  => be.lower_access(id, a, ctx, want, out),
+        }),
+        _       => be.lower_access(id, a, ctx, want, out),
     })
 }
 
