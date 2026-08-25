@@ -4,16 +4,19 @@
 // `MemberKind.Field`, so a constant member (`k: i64 = 5`) and a method
 // do not count. The fold is a COMPTIME USIZE and answers as one
 // (`sema_check.meta_count_type`); no hidden usize-to-i64 conversion
-// exists (#756 family), so the reader method is spelled `usize`.
-// The backend lowers it as an ordinary integer literal, having learned
+// exists (#756 family), so the reader methods are spelled `usize`.
+// The backend lowers them as ordinary integer literals, having learned
 // nothing new.
 //
 // THE TWIN IS THE ORACLE (§6.3): `field_count_by_hand` writes each
 // count by hand and must print byte-identical stdout.
 //
-// THE FOUR ANSWERS, stated: Empty -> 0, One -> 1, Mixed -> 3,
-// Muddle -> 2. The last is the mutation-resistant case: Muddle has
-// four members and an implementation counting `members.len` prints 4.
+// ALL FOUR COUNTS GO THROUGH THE FOLD. One, Mixed and Muddle carry a
+// `fields` reader whose body is the chain over `@Self`; EMPTY CANNOT —
+// a reader on Empty would make it non-empty — so its count is asked
+// DIRECTLY, in expression position, through the same typed form
+// (`@meta(t: Empty).fields().len`); `t` is the receiver slot this rule
+// never reads. Two routes, one answer each.
 //
 // MUTATION RESISTANCE (§6.4): line one asserts all four counts out
 // loud; line two is an arithmetic witness with no zero term — a
@@ -26,12 +29,16 @@ Empty = { }
 
 One = {
     only: i64,
+
+    fields* = (self: @Self) usize { @meta(self: @Self).fields().len },
 }
 
 Mixed = {
     a: i64,
     b: bool,
     c: str,
+
+    fields* = (self: @Self) usize { @meta(self: @Self).fields().len },
 }
 
 Muddle = {
@@ -46,8 +53,14 @@ Muddle = {
 }
 
 main = (env: Env) Res<i32, AllocError> {
+    o      = One(only: 11);
+    x      = Mixed(a: 10, b: true, c: "s");
     m      = Muddle(p: 1, q: true);
-    println("counts {} {} {} {}", 0, 1, 3, m.fields());
-    println("witness {}", ((0 * 1) + (1 * 2) + (3 * 5) + (m.fields() * 7)) * 3);
+    println("counts {} {} {} {}",
+            @meta(t: Empty).fields().len,
+            o.fields(), x.fields(), m.fields());
+    println("witness {}",
+            ((@meta(t: Empty).fields().len * 1)
+             + (o.fields() * 2) + (x.fields() * 5) + (m.fields() * 7)) * 3);
     Ok(0);
 }
