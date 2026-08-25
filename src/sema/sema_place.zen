@@ -18,15 +18,14 @@
 // `sema_recv.zen` ask the remaining two questions, who owns the place
 // and who may write through it: types here, permission there.
 
-Expr, ExprId, Bind, Access, Arg, Lambda = std.ast
+Expr, ExprId, Bind, Access, Arg = std.ast
 AllocError = std.mem
 str = std.text
 Vec = std.collections
 Range = std.core
-TyId, TyArray, TyFn, literal_default = sema.sema_ty
+TyId, TyArray, literal_default = sema.sema_ty
 Checker, Ctx, Binding = sema.sema_check
 SemaFault, NameFault, PairFault = sema.sema_diag
-decl_at = sema.sema_def
 computed_member, writable_member = sema.sema_member
 check_literal = sema.sema_trap
 check_arms, check_arms_agree = sema.sema_hoist
@@ -79,7 +78,7 @@ refuse_handle_at = (c :: Checker, id: ExprId) Res<(), AllocError> {
     c.report(
         node.span.file,
         node.span,
-        SemaFault.HandleNotAValue(NameFault(name: handle_spelling(c, id))),
+        SemaFault.HandleNotAValue(NameFault(name: c.handle_spelling(id))),
     )
 }
 
@@ -104,7 +103,7 @@ refuse_handle_argument* = (c :: Checker, a: Arg, want: TyId, ctx: Ctx)
         Err(_) => Ok(()),
         Ok(ty) => c.is_handle_ty(ty).match({
             false => Ok(()),
-            true  => refuse_unless_inward(c, a, want),
+            true  => c.refuse_unless_inward(a, want),
         }),
     })
 }
@@ -125,7 +124,7 @@ refuse_unless_inward = (c :: Checker, a: Arg, want: TyId)
 // `loop_handle.zen` rules out ("never stored, returned, or captured").
 formal_takes_handle = (c :: Checker, ty: TyId) Res<bool, AllocError> {
     c.types.at(ty).match({
-        Fn(f) => fn_param_has_handle(c, f.params),
+        Fn(f) => c.fn_param_has_handle(f.params),
         _     => Ok(false),
     })
 }
@@ -149,7 +148,7 @@ fn_param_has_handle = (c :: Checker, ps: Vec<TyId>) Res<bool, AllocError> {
 handle_spelling = (c :: Checker, id: ExprId) str {
     c.tree.expr_at(id).kind.match({
         Name(n)  => n.text,
-        Paren(p) => handle_spelling(c, p.inner),
+        Paren(p) => c.handle_spelling(p.inner),
         _        => "",
     })
 }
