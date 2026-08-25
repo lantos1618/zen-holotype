@@ -20,9 +20,13 @@
 // no `Alloc` in its signature and therefore, by law 1, no memory.
 //
 // `getenv` needs a NUL and a `str` has none, so the name is copied into
-// a fixed buffer in the C floor — the same trick and the same reason as
-// `zg_fs_path`: a probe with no `Alloc` cannot make room for one.
-// `<stdlib.h>` is already unconditional in the banner.
+// a buffer sized FROM THE NAME (#814). It was a fixed 4096-byte buffer,
+// and a name at or past the cap returned the same zeroed `zg_str` the
+// unset path returns -- "name too long" and "variable not set" were one
+// answer, exit 0. Linux `getenv` has no name limit, so any cap here is
+// one Zen invents; there is none now. The VLA dies with the frame, so
+// the probe still allocates nothing it must free and keeps its no-Alloc
+// signature.
 
 Call = std.ast
 AllocError = std.mem
@@ -60,19 +64,14 @@ write_env = (out :: Emit) Res<(), AllocError> {
         out,
         "a borrowed str is not NUL-terminated and getenv wants a NUL"
     ).try();
-    out.say("#define ZG_ENV_MAX 4096").try();
-    out.line().try();
-    comment(out, "a NULL data is the variable that is not set").try();
-    out.say(
-        "static zg_str zg_env_var(const unsigned char *p, size_t n) {"
-    ).try();
+    out.say("zg_str zg_env_var(const unsigned char *p, size_t n) {").try();
     out.indent();
-    out.say("char buf[ZG_ENV_MAX];").try();
+    comment(out, "sized from the name: a cap here would make \"too long\" and \"not set\" one answer (#814)").try();
+    out.say("char buf[n + 1];").try();
     out.say("zg_str got;").try();
     out.say("char *v;").try();
     out.say("got.data = NULL;").try();
     out.say("got.len = 0;").try();
-    out.say("if (n >= (size_t)ZG_ENV_MAX) return got;").try();
     out.say("if (n) memcpy(buf, p, n);").try();
     out.say("buf[n] = '\\0';").try();
     out.say("v = getenv(buf);").try();
