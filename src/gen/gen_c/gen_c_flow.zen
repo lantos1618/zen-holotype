@@ -24,16 +24,15 @@ AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
-TyId, TyNamed, TyRes, Types = sema.sema_ty
-World = sema.sema_def
+TyId, TyNamed, TyRes = sema.sema_ty
 decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
-last_segment, segment_at = sema.sema_match
+last_segment = sema.sema_match
 write_usize = sema.sema_diag
 member_of = sema.sema_union
 sym_local, sym_variant, sym_gen = gen.gen_name
-sym_union_variant, sym_union_member = gen.gen_name
+sym_union_member = gen.gen_name
 RES_PATH, is_failure = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
@@ -219,8 +218,8 @@ member_ctor_cond = (
     member = last_segment(d.name);
     be.tag_name(st, member, scrut, out).try();
     place ::= be.alloc.String().try();
-    set_member_place(be, mty, scrut, place).try();
-    leaf_cond(be, d.binder, mty, place.view(), out)
+    be.set_member_place(mty, scrut, place).try();
+    be.leaf_cond(d.binder, mty, place.view(), out)
 }
 
 // The inner pattern's test against the member's type. A name that is a
@@ -240,7 +239,7 @@ leaf_cond = (
     });
     narrows.match({
         false => Ok(()),
-        true  => leaf_tag_cond(be, pat, mty, place, out),
+        true  => be.leaf_tag_cond(pat, mty, place, out),
     })
 }
 
@@ -483,7 +482,7 @@ name_cond = (
 ) Res<(), AllocError> {
     be.is_variant(st, last_segment(q)).match({
         true  => be.tag_cond(q, st, scrut, out),
-        false => set_name_cond(be, st, last_segment(q), scrut, out),
+        false => be.set_name_cond(st, last_segment(q), scrut, out),
     })
 }
 
@@ -496,7 +495,7 @@ set_name_cond = (
 ) Res<(), AllocError> {
     member_of(be.check, st, text).match({
         None    => out.add_bytes("1"),
-        Ok(mty) => set_name_arm(be, st, mty, text, scrut, out),
+        Ok(mty) => be.set_name_arm(st, mty, text, scrut, out),
     })
 }
 
@@ -511,13 +510,13 @@ set_name_arm = (
     scrut : str,
     out   :: String
 ) Res<(), AllocError> {
-    leaf ::= leaf_name_of(be, mty).try();
+    leaf ::= be.leaf_name_of(mty).try();
     be.tag_name(st, leaf, scrut, out).try();
     place ::= be.alloc.String().try();
-    set_member_place(be, mty, scrut, place).try();
+    be.set_member_place(mty, scrut, place).try();
     be.check.is_case(mty, text).try().match({
         false => Ok(()),
-        true  => leaf_case_cond(be, mty, text, place.view(), out),
+        true  => be.leaf_case_cond(mty, text, place.view(), out),
     })
 }
 
@@ -541,7 +540,7 @@ leaf_case_cond = (
 // half and `sema_match.member_leaf`'s ctor read the same declaration.
 leaf_name_of = (be :: CBackend, mty: TyId) Res<str, AllocError> {
     qname ::= be.alloc.String().try();
-    enum_path(be, mty, qname).try();
+    be.enum_path(mty, qname).try();
     Ok(last_segment_str(qname))
 }
 
@@ -632,7 +631,7 @@ bind_payload = (
     member = last_segment(d.name);
     member_of(be.check, st, member).match({
         None    => be.enum_bind_payload(d, st, scrut, ctx),
-        Ok(mty) => set_bind_payload(be, d, st, mty, scrut, ctx),
+        Ok(mty) => be.set_bind_payload(d, st, mty, scrut, ctx),
     })
 }
 
@@ -658,7 +657,7 @@ set_bind_payload = (
     ctx   : Ctx
 ) Res<(), AllocError> {
     place ::= be.alloc.String().try();
-    set_member_place(be, mty, scrut, place).try();
+    be.set_member_place(mty, scrut, place).try();
     be.arm_bind(d.binder, mty, place.view(), ctx)
 }
 

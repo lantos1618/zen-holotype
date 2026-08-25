@@ -42,8 +42,8 @@ Alloc, AllocError = std.mem
 Vec = std.collections
 str = std.text
 Range = std.core
-TyId, TyNamed, TyRes, TyUnion = sema.sema_ty
-union_reading, union_member, member_of = sema.sema_union
+TyId = sema.sema_ty
+member_of = sema.sema_union
 SemaFault, NameFault = sema.sema_diag
 Checker, Ctx, UNRESOLVED = sema.sema_check
 Case, cases_of, case_payload, case_arity = sema.sema_case
@@ -198,9 +198,9 @@ norm_destructure = (
     ctx  : Ctx
 ) Res<usize, AllocError> {
     text = last_segment(d.name);
-    member_of(c, ty, text).match({
-        Ok(t)  => norm_set_ctor(c, ps, node, d, text, t, ctx),
-        None   => plain_ctor(c, ps, node, d, ty, text, ctx),
+    c.member_of(ty, text).match({
+        Ok(t) => c.norm_set_ctor(ps, node, d, text, t, ctx),
+        None  => c.plain_ctor(ps, node, d, ty, text, ctx),
     })
 }
 
@@ -269,9 +269,9 @@ norm_set_name = (
     text : str,
     ctx  : Ctx
 ) Res<usize, AllocError> {
-    member_of(c, ty, text).match({
+    c.member_of(ty, text).match({
         None    => c.norm_qualified(ps, node, pn, ty, text, ctx),
-        Ok(mty) => member_leaf(c, ps, mty, text, node.span),
+        Ok(mty) => c.member_leaf(ps, mty, text, node.span),
     })
 }
 
@@ -303,8 +303,8 @@ norm_member_dot = (
     ctx  : Ctx
 ) Res<usize, AllocError> {
     member = segment_at(pn.name, 0);
-    member_of(c, ty, member).match({
-        None  => c.norm_binder(ps, node, member, ctx),
+    c.member_of(ty, member).match({
+        None    => c.norm_binder(ps, node, member, ctx),
         Ok(mty) => c.is_case(mty, leaf).try().match({
             true  => c.dot_pat(ps, member, leaf, node.span),
             false => c.norm_binder(ps, node, member, ctx),
@@ -1049,7 +1049,7 @@ leaf_hole = (c :: Checker, ps :: Pats, leaf: str, span: Span)
 // question in `name_cond`, so the two halves cannot drift.
 member_leaf = (c :: Checker, ps :: Pats, mty: TyId, text: str, span: Span)
               Res<usize, AllocError> {
-    name = member_name(c, mty);
+    name = c.member_name(mty);
     hole = c.is_case(mty, text).try().match({
         true  => ps.add(ctor_pat(text, span)),
         false => ps.wild(span),
@@ -1071,7 +1071,7 @@ last_segment_str = (qname: str) str {
 }
 
 last_len = (qname: str) usize {
-    dot ::= 0;
+    dot      ::= 0;
     i: usize ::= 0;
     loop(() { i < qname.len && dot == 0 }, (h) {
         (qname.index(i) == '.').match({
