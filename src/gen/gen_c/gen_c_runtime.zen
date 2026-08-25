@@ -80,7 +80,25 @@ emit_floor* = (out :: Emit) Res<(), AllocError> {
 }
 
 emit_trap = (out :: Emit) Res<(), AllocError> {
-    out.say("static void zg_trap(const char *file, unsigned long line,").try();
+    // BOTH HELPERS BELOW NEVER RETURN: `zg_trap` exits, `zg_unreachable`
+    // traps. Every `match` chain whose arms all return closes its final
+    // `else` with `zg_unreachable`, so unannotated, that `else` reads to
+    // cc as a path falling off the end of a non-void function -- visible
+    // only as `-Wreturn-type`, which nothing here greps for, and how
+    // #764's bare `return;` walked past the whole corpus printing 0
+    // instead of 11. Annotated, a missing return is a hard cc error.
+    // `_Noreturn` is C11 and this floor is C99 (`C_STANDARD`), so the
+    // spelling is capability-gated like `ZG_HAS_OVERFLOW_BUILTINS`
+    // above it.
+    out.say("#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L").try();
+    out.say("#define ZG_NORETURN _Noreturn").try();
+    out.say("#elif defined(__GNUC__)").try();
+    out.say("#define ZG_NORETURN __attribute__((noreturn))").try();
+    out.say("#else").try();
+    out.say("#define ZG_NORETURN").try();
+    out.say("#endif").try();
+    out.line().try();
+    out.say("static ZG_NORETURN void zg_trap(const char *file, unsigned long line,").try();
     out.say("                    unsigned long col, const char *what) {").try();
     out.indent();
     out.say("fflush(stdout);").try();
@@ -93,7 +111,7 @@ emit_trap = (out :: Emit) Res<(), AllocError> {
     out.say("}").try();
     out.line().try();
     out.say(
-        "static void zg_unreachable(const char *file, unsigned long line,"
+        "static ZG_NORETURN void zg_unreachable(const char *file, unsigned long line,"
     ).try();
     out.say("                           unsigned long col) {").try();
     out.indent();
