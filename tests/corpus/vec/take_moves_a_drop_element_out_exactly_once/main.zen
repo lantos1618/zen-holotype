@@ -1,0 +1,43 @@
+// take() MOVES A DROP ELEMENT OUT EXACTLY ONCE.
+//
+// `Ok(value)` at the end of take used to COPY the bytes into the
+// payload while leaving `value` registered for drop in take's own
+// frame: the element died inside take, then died again when the
+// caller's copy dropped — two drops for one value. sema cannot refuse
+// it (T is unknown in a generic body, where the copy rule fails open),
+// so the move is spelled with `consume` and THIS test is what goes red
+// if that consume ever disappears:
+//
+//   - deleting it re-registers `value`: an early "drop 22" appears
+//     between "len 3" and "took 22", and 22 drops twice overall
+//   - any second drop of 22 anywhere shows up as an extra line
+//
+// Nothing else may print: the remaining elements stay in the vec,
+// whose pages outlive the frame, and no other Drop value exists here.
+// (Reading elements BACK with get() would hand out fresh owned copies
+// — by-value reads — which is a different corner, not this one.)
+
+Noisy = {
+    env: Env,
+    id: i64,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { println("drop {}", self.id) }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    v ::= alloc.Vec<Noisy>();
+    n11 = Noisy(env: env, id: 11);
+    n22 = Noisy(env: env, id: 22);
+    n33 = Noisy(env: env, id: 33);
+    v.add(consume n11).try();
+    v.add(consume n22).try();
+    v.add(consume n33).try();
+    println("len {}", v.len);
+
+    took = v.take(1).ok_or(AllocError.OutOfMemory).try();
+    println("took {} len {}", took.id, v.len);
+    Ok(0);
+}

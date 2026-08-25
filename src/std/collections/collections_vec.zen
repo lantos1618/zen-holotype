@@ -59,13 +59,20 @@ Vec*<T> = {
 
     // moves an element OUT, leaving the vec one shorter — without this
     // a Vec<T> of Drop values can be filled and never emptied
+    //
+    // the return CONSUMES `value`: a plain `Ok(value)` would copy the
+    // bytes into the payload and leave `value` registered for drop in
+    // this frame, so a Drop T dies here before the caller ever sees it
+    // — twice, once the caller's copy drops too. sema cannot catch it
+    // (T is unknown here, and the rule fails open on generics), so the
+    // move has to be spelled.
     take* = (self :: @Self, i: usize) Res<T> {
         value = self.get(i).try();
         Range(i + 1, self.len).loop((h, j) {
             self.data.write(j - 1, self.data.read(j));
         });
         self.len = self.len - 1;
-        Ok(value);
+        Ok(consume value);
     }
 
     // room for `n` MORE elements, before anything writes them. Exists
