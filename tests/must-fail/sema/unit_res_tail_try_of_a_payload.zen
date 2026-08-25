@@ -1,0 +1,30 @@
+// THE ISSUE'S OWN SPELLING (#764, "second hole at the same site"). A
+// `.try()` unwraps `inner`'s `i32` and hands it to a function that
+// promised `Res<(), AllocError>`, so the payload does not fit. `zen
+// build` exited 0 on this and the failure arrived from `cc`:
+//
+//     error: incompatible types when returning type 'int32_t'
+//            but 'Res<(), AllocError>' was expected
+//     warning: control reaches end of non-void function [-Wreturn-type]
+//
+// It is the same rule as `res_tail_with_nowhere_to_lift` reached through
+// the tree's most common expression rather than a literal, and it is
+// here separately because that is the shape the issue reported and the
+// shape a real program is written in.
+//
+// position: the tail, which is the `.try()` whose value has nowhere to
+// go.
+
+AllocError = std.mem
+
+inner = () Res<i32, AllocError> { Ok(3) }
+
+hand = () Res<(), AllocError> { inner().try() }
+
+main = (env: Env) Res<i32, AllocError> {
+    hand().match({
+        Ok(_)  => println("ok"),
+        Err(_) => println("err"),
+    });
+    Ok(0);
+}

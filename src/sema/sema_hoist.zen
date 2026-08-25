@@ -238,8 +238,52 @@ res_return = (
 ) Res<(), AllocError> {
     c.types.at(got).match({
         Res(_) => c.wrong_return(blk, node, got, want),
-        _      => c.hoist_into_res(node.span.file, node.span, got, want, r),
+        _      => c.lift_or_refuse(blk, node, got, want, r),
     })
+}
+
+// AND A VALUE WITH NOWHERE TO LIFT IS THE TAIL'S OWN MISMATCH.
+// `hoist_into_res` is silent for it by design — at a constructor field
+// `check_ctor_shape` reports it — but at a `Res` return NOBODY did, so
+// `() Res<(), E> { inner().try() }` and `() Res<i32, E> { "x" }` were
+// accepted and `cc` was the type checker (#764). The refusal goes
+// through `wrong_return` so the two exemptions still hold: a `()`
+// return discards anything, and a `;`-terminated tail that yields
+// nothing still closes the function.
+lift_or_refuse = (
+    c    :: Checker,
+    blk  : Block,
+    node : Expr,
+    got  : TyId,
+    want : TyId,
+    r    : TyRes
+) Res<(), AllocError> {
+    c.hoist_into_res(node.span.file, node.span, got, want, r).try();
+    (c.lands_somewhere(got, r) || (was_written(node) == false)).match({
+        true  => Ok(()),
+        false => c.wrong_return(blk, node, got, want),
+    })
+}
+
+// A NODE THAT COVERS NO BYTES WAS NOT WRITTEN. The parser stands one
+// where a construct it could not read would have gone —
+// `parser.empty_span`, "it stands where the missing construct would
+// have stood and covers no bytes, so nothing downstream mistakes it
+// for source the author wrote" — and typing that poison is typing the
+// first diagnostic's wreckage. TESTING.md: one syntax error must not
+// cascade into fifty.
+was_written = (node: Expr) bool {
+    (node.span.start.line != node.span.end.line)
+        || (node.span.start.col != node.span.end.col)
+}
+
+// Either reading `hoist_into_res` recognises, so the two rules never
+// report the same tail twice: a value that fits the success payload
+// lifts, and one that reads as the failure already has its own
+// diagnostic. `assignable` is lenient about an unsettled payload, which
+// is what keeps `<T, E>() Res<T, E>` silent here.
+lands_somewhere = (c: Checker, got: TyId, r: TyRes) bool {
+    c.assignable(got, r.value) || c.carries_failure(got, r)
 }
 
 // The tail fits the return type — the whole rule, and general: a print's
