@@ -1,15 +1,17 @@
 // tests/corpus/std/error_set_member_variant_arms_discriminate.zen
 // A union-of-enums error set must DISCRIMINATE on the member's own
 // variants. Under `Trouble = AllocError | ParseError`, an arm spelling a
-// leaf — `ParseError.NotANumber`, bare `NotANumber`, or `ParseError(_)`
-// — names one variant of one member, so it COMPARES; before this was
+// leaf -- `ParseError.NotANumber`, bare `NotANumber`, or `ParseError(_)`
+// -- names one variant of one member, so it COMPARES; before this was
 // closed every such arm read as a binder, swallowed everything after
 // it, and the program did not compile ("unreachable match arm" against
 // arms that are plainly reachable). The same match on a plain enum has
 // always worked; this pins that sets answer identically.
 //
-// One run exercises all three spellings plus a bare member name and the
-// `_` catch-all, each printing its own line.
+// One run exercises every spelling: qualified Member.Leaf, bare leaf,
+// Member(_) with a wildcard leaf, and the bare member name. The middle
+// match keeps `_` because NotANumber | TooBig leaves AllocError open;
+// the outer matches need no `_` because their arms are exhaustive.
 
 Trouble = AllocError | ParseError
 
@@ -23,32 +25,37 @@ pick = (b: bool) Res<i32, Trouble> {
 }
 
 main = (env: Env) Res<i32, AllocError> {
-    // qualified `Member.Leaf`
+    // qualified `Member.Leaf`; AllocError spelled out makes it exhaustive
     pick(true).match({
         Ok(n)  => println("ok {}", n),
         Err(e) => e.match({
             ParseError.NotANumber => println("not a number"),
             ParseError.TooBig     => println("too big"),
             AllocError(_)         => println("out of memory"),
-            _                     => println("other"),
         }),
     });
-    // bare leaf
+    // bare leaf, `_` still live: the two leaves leave AllocError open
     pick(false).match({
         Ok(n)  => println("ok {}", n),
         Err(e) => e.match({
-            NotANumber => println("not a number"),
             TooBig     => println("too big"),
             _          => println("other"),
         }),
     });
-    // bare member
+    // wildcard leaf: any ParseError, AllocError spelled out after it
+    pick(true).match({
+        Ok(n)  => println("ok {}", n),
+        Err(e) => e.match({
+            ParseError(_) => println("parse trouble"),
+            AllocError(_) => println("out of memory"),
+        }),
+    });
+    // bare member names
     pick(false).match({
-        Ok(n)   => println("ok {}", n),
-        Err(e)  => e.match({
+        Ok(n)  => println("ok {}", n),
+        Err(e) => e.match({
             AllocError => println("out of memory"),
             ParseError => println("parse trouble"),
-            _          => println("other"),
         }),
     });
     Ok(0);
