@@ -341,7 +341,7 @@ ty_of* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
         ScopeRef   => be.scope_type(ctx),
         Frame(t)   => Ok(t),
         Backend(t) => Ok(t),
-        Sema(got)  => be.settled_answer(id, ctx, got),
+        Sema(got)  => be.settled_answer(id, ctx, got, want),
         Unanswered => be.fallback_type(id, ctx, want),
     })
 }
@@ -481,11 +481,11 @@ ptr_dot_answer = (be :: CBackend, c: Call, a: Access, ctx: Ctx, want: TyId)
 // a `Var`, and a binding declared at it would be the one C type every
 // loop shares. Only the loop family hits this; `gen_c_loop.zen` owns
 // the rule. Everything else is handed back untouched.
-settled_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
+settled_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId, want: TyId)
                  Res<TyId, AllocError> {
     has_var(be.check, got).match({
         false => be.opaque_answer(id, ctx, got),
-        true  => be.settle_open(id, ctx, got),
+        true  => be.settle_open(id, ctx, got, want),
     })
 }
 
@@ -515,9 +515,9 @@ opaque_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
 // could settle it" — and both have to answer BEFORE anything is written,
 // because a match scrutinee's temporary is declared at this answer and
 // filled by the lowering's.
-settle_open = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
+settle_open = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId, want: TyId)
               Res<TyId, AllocError> {
-    walked = be.loop_result_type(id, ctx, got).try();
+    walked = be.loop_result_type(id, ctx, got, want).try();
     has_var(be.check, walked).match({
         false => Ok(walked),
         true  => be.settle_inlined(id, ctx, walked),

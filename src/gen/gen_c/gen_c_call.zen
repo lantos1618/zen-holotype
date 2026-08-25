@@ -169,7 +169,7 @@ lower_call* = (
 ) Res<(), AllocError> {
     be.tree.expr_at(c.callee).kind.match({
         Name(n)   => be.lower_name_callee(id, c, n.text, ctx, want, out),
-        Access(a) => be.lower_dot_call(id, c, a, ctx, out),
+        Access(a) => be.lower_dot_call(id, c, a, ctx, want, out),
         _         => be.lower_indirect(id, c, ctx, out),
     })
 }
@@ -264,7 +264,7 @@ lower_named_call = (
 ) Res<(), AllocError> {
     is_res_ctor(name).match({
         true  => be.lower_res_ctor(id, c, name, ctx, want, out),
-        false => be.lower_sugar_or_plain(id, c, name, ctx, out),
+        false => be.lower_sugar_or_plain(id, c, name, ctx, want, out),
     })
 }
 
@@ -278,11 +278,12 @@ lower_sugar_or_plain = (
     c    : Call,
     name : str,
     ctx  : Ctx,
+    want : TyId,
     out  :: String
 ) Res<(), AllocError> {
     be.is_sugar(name, ctx).try().match({
         true  => lower_print(be, c, name, ctx, out),
-        false => be.lower_plain_call(id, c, name, None, ctx, out),
+        false => be.lower_plain_call(id, c, name, None, ctx, want, out),
     })
 }
 
@@ -352,6 +353,7 @@ lower_plain_call* = (
     name : str,
     recv : Res<ExprId>,
     ctx  : Ctx,
+    want : TyId,
     out  :: String
 )
                     Res<(), AllocError> {
@@ -359,8 +361,8 @@ lower_plain_call* = (
     be.check.world.defs_of(ctx.module, name, found).try();
     be.travelled_defs(name, c, recv, ctx, found).try();
     be.check.resolved_call(id).match({
-        Ok(d) => be.chosen_def(id, c, name, found, d, recv, ctx, out),
-        None  => be.sole_def(id, c, name, found, recv, ctx, out),
+        Ok(d) => be.chosen_def(id, c, name, found, d, recv, ctx, want, out),
+        None  => be.sole_def(id, c, name, found, recv, ctx, want, out),
     })
 }
 
@@ -472,11 +474,12 @@ chosen_def = (
     want  : DeclId,
     recv  : Res<ExprId>,
     ctx   : Ctx,
+    dest  : TyId,
     out   :: String
 ) Res<(), AllocError> {
     def_with_id(found, want).match({
-        Ok(d) => be.call_kind(id, c, d, recv, ctx, out),
-        None  => be.sole_def(id, c, name, found, recv, ctx, out),
+        Ok(d) => be.call_kind(id, c, d, recv, ctx, dest, out),
+        None  => be.sole_def(id, c, name, found, recv, ctx, dest, out),
     })
 }
 
@@ -503,12 +506,13 @@ sole_def = (
     found : Vec<Def>,
     recv  : Res<ExprId>,
     ctx   : Ctx,
+    dest  : TyId,
     out   :: String
 )
            Res<(), AllocError> {
     found.len.match({
         0 => unresolved(be, id, name, out),
-        1 => be.call_def(id, c, name, found, recv, ctx, out),
+        1 => be.call_kind(id, c, found.get(0).ok_or(AllocError.OutOfMemory).try(), recv, ctx, dest, out),
         _ => ambiguous(be, id, name, out),
     })
 }
@@ -521,12 +525,13 @@ call_def = (
     found : Vec<Def>,
     recv  : Res<ExprId>,
     ctx   : Ctx,
+    dest  : TyId,
     out   :: String
 )
            Res<(), AllocError> {
     found.get(0).match({
         None  => unresolved(be, id, name, out),
-        Ok(d) => be.call_kind(id, c, d, recv, ctx, out),
+        Ok(d) => be.call_kind(id, c, d, recv, ctx, dest, out),
     })
 }
 
@@ -537,10 +542,11 @@ call_kind = (
     d    : Def,
     recv : Res<ExprId>,
     ctx  : Ctx,
+    want : TyId,
     out  :: String
 ) Res<(), AllocError> {
     d.kind.match({
-        FunctionDef => be.call_resolved(id, c, d, recv, ctx, out),
+        FunctionDef => be.call_resolved(id, c, d, recv, ctx, want, out),
         StructDef   => construct(be, id, c, d, ctx, out),
         _           => be.unsupported(
             id,
@@ -561,6 +567,7 @@ call_resolved = (
     d    : Def,
     recv : Res<ExprId>,
     ctx  : Ctx,
+    want : TyId,
     out  :: String
 )
                 Res<(), AllocError> {
@@ -570,7 +577,7 @@ call_resolved = (
             "a call to something that is not a plain function",
             out
         ),
-        Ok(x) => be.call_decl(id, c, d, x, recv, ctx, out),
+        Ok(x) => be.call_decl(id, c, d, x, recv, ctx, want, out),
     })
 }
 
@@ -582,11 +589,12 @@ call_decl = (
     x    : Decl,
     recv : Res<ExprId>,
     ctx  : Ctx,
+    want : TyId,
     out  :: String
 )
             Res<(), AllocError> {
     x.kind.match({
-        Function(f) => be.call_fn(id, c, d, f, recv, ctx, out),
+        Function(f) => be.call_fn(id, c, d, f, recv, ctx, want, out),
         _           => be.unsupported(
             id,
             "a call to something that is not a plain function",
@@ -608,8 +616,20 @@ call_fn = (
     f    : Function,
     recv : Res<ExprId>,
     ctx  : Ctx,
+    dest : TyId,
     out  :: String
 ) Res<(), AllocError> {
+    // THE DESTINATION'S CONCRETE ANSWER OUTRANKS SEMA'S OPEN ONE. Sema
+    // leaves the loop's `T` undecided (`Res<q>`), and `want_of` asks it
+    // again with nothing to go on. A context that already named the type
+    // — `found: Res<usize> = loop(..)` — handed this call a decision,
+    // and dropping it here declared the result temporary at whatever the
+    // break arguments reconstructed instead (#784). The unknown falls
+    // through to `want_of`, the only speaker left.
+    decided = be.check.is_unknown(dest).match({
+        false => Ok(dest),
+        true  => be.want_of(id, ctx),
+    }).try();
     be.is_loop_shape(f).match({
         true  => be.lower_loop(
             id,
@@ -617,7 +637,7 @@ call_fn = (
             f,
             recv,
             ctx,
-            be.want_of(id, ctx).try(),
+            decided,
             out
         ),
         false => be.call_or_inline(id, c, d, f, recv, ctx, out),

@@ -34,6 +34,7 @@ str = std.text
 Range = std.core
 DeclId = sema.sema_id
 TyId = sema.sema_ty
+has_var = sema.sema_inst
 decl_at = sema.sema_def
 Ctx = sema.sema_check
 CBackend = gen.gen_c.gen_c_state
@@ -112,12 +113,20 @@ type_named = (be :: CBackend, tid: TypeId) str {
 // every loop in the program shares. The range the call was handed is
 // what settles it: one that supplies no `at` walks its own index space,
 // so its element is `usize`, and one whose `at` an impl supplies hands
-// out what `at` returns.
-loop_result_type* = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
-                    Res<TyId, AllocError> {
+// out what `at` returns. A shape with no range has no element to ask
+// for (`loop_element`) — there `want`, the type the context asked this
+// call to stand at, settles what it can, and the body's break sites
+// answer for what it leaves open (`broken_element_want`).
+loop_result_type* = (
+    be   :: CBackend,
+    id   : ExprId,
+    ctx  : Ctx,
+    got  : TyId,
+    want : TyId
+) Res<TyId, AllocError> {
     be.loop_fn_at(id).match({
         None  => Ok(got),
-        Ok(f) => be.settled_loop_type(id, ctx, got),
+        Ok(f) => be.settled_loop_type(id, ctx, got, want),
     })
 }
 
@@ -152,11 +161,32 @@ keep_loop = (be :: CBackend, f: Function) Res<Function> {
     })
 }
 
-settled_loop_type = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
-                    Res<TyId, AllocError> {
+// THE TYPE A LOOP CALL EVALUATES TO, when the call's own answer is
+// still open. `got` is what the lowering of the body produced; `want`
+// is the type the context asked this call to stand at — an annotated
+// binding's declared type, a parameter's, a return's. A binding
+// declared at the header's `Res<q>` would otherwise be a C type every
+// loop in the program shares.
+//
+// The element comes from the shape: one handed a range walks what its
+// `at` returns (its index space when there is no `at`), and a shape
+// with NO RANGE has nothing to ask (`loop_element` answers None) —
+// there `want` settles what it concretely can, and the body's break
+// sites answer for what it leaves open (`broken_element_want`). An
+// expectation is a decision already made and outranks a reconstruction.
+settled_loop_type = (
+    be   :: CBackend,
+    id   : ExprId,
+    ctx  : Ctx,
+    got  : TyId,
+    want : TyId
+) Res<TyId, AllocError> {
     elem = be.result_element(id, ctx).try();
     elem.match({
-        None  => be.settle_res(got, be.broken_element(id, ctx).try()).try(),
+        None  => be.settle_res(
+                     got,
+                     be.broken_element_want(id, ctx, want).try()
+                 ).try(),
         Ok(t) => be.settle_res(got, t).try(),
     })
 }
@@ -181,6 +211,31 @@ arg_element = (be :: CBackend, r: ExprId, ctx: Ctx, usize_ty: TyId)
     rty     = be.ty_of(r, ctx, unknown).try();
     got     = be.range_element_type(rty).try();
     Ok(got.match({ Ok(t) => Ok(t), None => Ok(usize_ty) }))
+}
+
+// WHAT THE CONTEXT DECLARES DECIDES, when it decides anything. A
+// no-range loop's `T` has two speakers: the context (`pick:
+// Res<usize> = loop(..)`) and the body's break sites. The context is
+// an annotation the author already wrote down, so it wins whenever it
+// names a CONCRETE element — the decided-`usize` programs stay typed
+// exactly as main compiled them. The break arguments decide only what
+// the context leaves open (`r = loop((h){ h.break(-7) })`, #784):
+// they are read off the body (`broken_element`) and a negative literal
+// keeps its sign because nothing re-reads its bits through an unsigned
+// slot. An open payload (`Res<q>`) counts as undecided, not decided —
+// it is the word for a T nobody named yet. `usize` stands when nobody
+// spoke at all, the answer every no-range loop without a typed break
+// compiled against before this question was asked.
+broken_element_want* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
+                       Res<TyId, AllocError> {
+    be.check.types.at(want).match({
+        Res(r) => (be.check.is_unknown(r.value) || has_var(be.check, r.value))
+                  .match({
+            true  => be.broken_element(id, ctx),
+            false => Ok(r.value),
+        }),
+        _      => be.broken_element(id, ctx),
+    })
 }
 
 // THE PAYLOAD OF THE TWO SHAPES THAT WALK NOTHING. `loop<T> = (body:

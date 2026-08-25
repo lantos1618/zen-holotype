@@ -86,27 +86,33 @@ Dot = {
 // A LOOP HANDLE IS ASKED ABOUT FIRST, for the reason `gen_c_handle.zen`
 // gives: `h` is not a value, so `h.break(v)` is recognised at the NAME
 // and never resolved through a receiver's type.
+// The context's `want` rides along: the one caller that needs it is the
+// loop intrinsic, whose own answer is open until something decides `T`
+// (`call_fn`, gen_c_call.zen) — a destination already typed is such a
+// decision, and dropping it here is how an annotated binding compiled
+// against a payload nothing agreed to (#784).
 lower_dot_call* = (
     be  :: CBackend,
     id  : ExprId,
     c   : Call,
     a   : Access,
     ctx : Ctx,
+    want: TyId,
     out :: String
 ) Res<(), AllocError> {
     depth = be.handle_depth(a.base);
     (depth > 0).match({
         true  => be.lower_handle_call(id, c, a, depth, ctx, out),
-        false => be.lower_resolved_dot(Dot(id: id, c: c, a: a), ctx, out),
+        false => be.lower_resolved_dot(Dot(id: id, c: c, a: a), ctx, want, out),
     })
 }
 
-lower_resolved_dot = (be :: CBackend, d: Dot, ctx: Ctx, out :: String)
+lower_resolved_dot = (be :: CBackend, d: Dot, ctx: Ctx, want: TyId, out :: String)
                      Res<(), AllocError> {
     b = be.check.base_of(d.a.base, ctx).try();
     b.is_type.match({
-        true  => be.lower_static_call(d, b.ty, ctx, out),
-        false => be.lower_receiver_call(d, ctx, out),
+        true  => be.lower_static_call(d, b.ty, ctx, want, out),
+        false => be.lower_receiver_call(d, ctx, want, out),
     })
 }
 
@@ -134,7 +140,7 @@ lower_resolved_dot = (be :: CBackend, d: Dot, ctx: Ctx, out :: String)
 // is reported here: one diagnostic for one mistake.
 // -----------------------------------------------------------------
 
-lower_static_call = (be :: CBackend, d: Dot, ty: TyId, ctx: Ctx, out :: String)
+lower_static_call = (be :: CBackend, d: Dot, ty: TyId, ctx: Ctx, want: TyId, out :: String)
                     Res<(), AllocError> {
     be.check.is_case(ty, d.a.name.text).try().match({
         true  => be.write_variant_call(d, ty, ctx, out),
@@ -227,33 +233,33 @@ write_payload_arg = (be :: CBackend, c: Call, cs: Case, ctx: Ctx, out :: String)
 // overload sets, resolved on types and not arity alone.
 // -----------------------------------------------------------------
 
-lower_receiver_call = (be :: CBackend, d: Dot, ctx: Ctx, out :: String)
+lower_receiver_call = (be :: CBackend, d: Dot, ctx: Ctx, want: TyId, out :: String)
                       Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     rty     = be.ty_of(d.a.base, ctx, unknown).try();
     site_of(be, rty).try().match({
-        None  => be.lower_ufcs(d, rty, ctx, out),
-        Ok(s) => be.with_site(d, s, ctx, out),
+        None  => be.lower_ufcs(d, rty, ctx, want, out),
+        Ok(s) => be.with_site(d, s, ctx, want, out),
     })
 }
 
-with_site = (be :: CBackend, d: Dot, s: Site, ctx: Ctx, out :: String)
+with_site = (be :: CBackend, d: Dot, s: Site, ctx: Ctx, want: TyId, out :: String)
             Res<(), AllocError> {
     own ::= be.alloc.Vec<Member>();
     member_at(be, s, d.a.name.text, own).try();
     be.pick_member(d.c, s, own, ctx).try().match({
         Ok(m) => be.declared_member(d, s, m, ctx, out),
-        None  => be.supplied_or_ufcs(d, s, ctx, out),
+        None  => be.supplied_or_ufcs(d, s, ctx, want, out),
     })
 }
 
-supplied_or_ufcs = (be :: CBackend, d: Dot, s: Site, ctx: Ctx, out :: String)
+supplied_or_ufcs = (be :: CBackend, d: Dot, s: Site, ctx: Ctx, want: TyId, out :: String)
                    Res<(), AllocError> {
     found ::= be.alloc.Vec<Member>();
     be.impl_member_at(s.decl, d.a.name.text, found).try();
     be.pick_member(d.c, s, found, ctx).try().match({
-        Ok(m) => be.supplied_or_refused(d, s, m, ctx, out),
-        None  => be.lower_ufcs(d, s.ty, ctx, out),
+        Ok(m) => be.supplied_or_refused(d, s, m, ctx, want, out),
+        None  => be.lower_ufcs(d, s.ty, ctx, want, out),
     })
 }
 
@@ -261,12 +267,13 @@ supplied_or_ufcs = (be :: CBackend, d: Dot, s: Site, ctx: Ctx, out :: String)
 // second question, and a generic enum target is the one target the mono
 // path cannot carry — see `gen_c_impl.generic_enum`.
 supplied_or_refused = (
-    be  :: CBackend,
-    d   : Dot,
-    s   : Site,
-    m   : Member,
-    ctx : Ctx,
-    out :: String
+    be   :: CBackend,
+    d    : Dot,
+    s    : Site,
+    m    : Member,
+    ctx  : Ctx,
+    want : TyId,
+    out  :: String
 ) Res<(), AllocError> {
     be.generic_enum(s.decl).match({
         true  => be.unsupported(
@@ -274,7 +281,7 @@ supplied_or_refused = (
             "a call to a member an impl supplies on a generic enum",
             out
         ),
-        false => supplied_member(be, d, s, m, ctx, out),
+        false => supplied_member(be, d, s, m, ctx, want, out),
     })
 }
 
@@ -302,16 +309,17 @@ declared_member = (
 // An impl cannot supply a field, so anything but a function here is a
 // name the dot reaches some other way.
 supplied_member = (
-    be  :: CBackend,
-    d   : Dot,
-    s   : Site,
-    m   : Member,
-    ctx : Ctx,
-    out :: String
+    be   :: CBackend,
+    d    : Dot,
+    s    : Site,
+    m    : Member,
+    ctx  : Ctx,
+    want : TyId,
+    out  :: String
 ) Res<(), AllocError> {
     m.kind.match({
         Function(f) => be.lower_method(d, s, f, ctx, out),
-        _           => be.lower_ufcs(d, s.ty, ctx, out),
+        _           => be.lower_ufcs(d, s.ty, ctx, want, out),
     })
 }
 
@@ -883,24 +891,25 @@ emit_eq = (
 // time this runs both the receiver's declaration and its impls have
 // been searched and missed — which lets a type declaring a `create` of
 // its own still win.
-lower_ufcs = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, out :: String)
+lower_ufcs = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, want: TyId, out :: String)
              Res<(), AllocError> {
     be.lower_create(d.id, d.c, d.a, rty, ctx, out).try().match({
         true  => Ok(()),
-        false => be.ufcs_or_impl(d, rty, ctx, out),
+        false => be.ufcs_or_impl(d, rty, ctx, want, out),
     })
 }
 
-ufcs_or_impl = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, out :: String)
+ufcs_or_impl = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, want: TyId, out :: String)
                Res<(), AllocError> {
     be.reaches(rty, d.a.name.text, d.c.args.len + 1).try().match({
-        true  => be.impl_alias(d, rty, ctx, out),
+        true  => be.impl_alias(d, rty, ctx, want, out),
         false => be.lower_plain_call(
             d.id,
             d.c,
             d.a.name.text,
             Ok(d.a.base),
             ctx,
+            want,
             out
         ),
     })
@@ -909,12 +918,12 @@ ufcs_or_impl = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, out :: String)
 // An impl member that IS another function — `widen_u32 = to_u32` in
 // std.core.num — lowers as the very call the alias names, so the two
 // spellings cannot disagree. Anything else meets the refusal.
-impl_alias = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, out :: String)
+impl_alias = (be :: CBackend, d: Dot, rty: TyId, ctx: Ctx, want: TyId, out :: String)
              Res<(), AllocError> {
     site_of(be, rty).try().match({
         None  => be.unsupported(d.id, "a call to an impl-supplied member", out),
         Ok(s) => be.alias_of(s.decl, d.a.name.text).try().match({
-            Ok(t) => be.lower_plain_call(d.id, d.c, t, Ok(d.a.base), ctx, out),
+            Ok(t) => be.lower_plain_call(d.id, d.c, t, Ok(d.a.base), ctx, want, out),
             None  => be.unsupported(
                 d.id,
                 "a call to an impl-supplied member",
