@@ -1,0 +1,45 @@
+// tests/corpus/std/map_len_counts_keys_and_pairs_walks_them.zen
+// len* and pairs* landed with issue #775 and nothing under tests/
+// called either one.
+//
+// FOUR PROPERTIES, each able to go red on its own:
+//   - len on a fresh map is 0
+//   - pairs over a fresh map runs the body ZERO times -- a walk that
+//     reached into the index instead of the rows would print here
+//   - an overwrite rewrites a row where it sits, so len counts KEYS
+//     and not sets: four sets over three keys is 3, not 4
+//   - the walk hands out each key WITH ITS OWN value. key and value
+//     are printed on one line, so a walk that yielded every key but
+//     paired it with the wrong row -- or with grace's pre-overwrite
+//     45 -- fails where a keys-only check would pass
+//
+// ORDER: asserted, because the Map promises it. collections_map.zen's
+// header commits to it in as many words ("ITERATION ORDER IS
+// INSERTION ORDER, defined not incidental"): set appends a new key
+// and overwrites in place, so no row ever moves and probe order never
+// reaches the surface. An overwrite therefore does NOT move grace to
+// the end -- which is the third line below, not the last.
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    m     ::= alloc.Map<str, i32>();
+
+    println("empty len {}", m.len());
+    m.pairs((h, k, v) {
+        println("empty walk reached {} {}", k, v);
+    });
+
+    m.set("ada", 36).try();
+    m.set("grace", 45).try();
+    m.set("alan", 41).try();
+    println("len {}", m.len());
+
+    // the same key a second time: rewritten, not appended
+    m.set("grace", 46).try();
+    println("len after overwrite {}", m.len());
+
+    m.pairs((h, k, v) {
+        println("{} {}", k, v);
+    });
+    Ok(0);
+}
