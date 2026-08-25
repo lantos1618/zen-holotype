@@ -24,11 +24,19 @@ str = std.text
 TyId, TyArray, literal_default = sema.sema_ty
 Checker, Ctx, Binding = sema.sema_check
 SemaFault, NameFault, PairFault = sema.sema_diag
+decl_at = sema.sema_def
 computed_member, writable_member = sema.sema_member
 check_literal = sema.sema_trap
 check_arms, check_arms_agree = sema.sema_hoist
 type_of = sema.sema_type
 type_from_ast = sema.sema_denote
+
+// `LoopHandle` by its module path, not its spelling: `h` is bound at the
+// nominal type `std.core.loop.loop_handle.LoopHandle`, and two programs
+// may spell any name differently. The path is written here once for the
+// same reason `gen_name.RES_PATH` is — `Res` is structural in the type
+// language but answers to a library name, and this check asks that name.
+HANDLE_PATH* : str = "std.core.loop.loop_handle.LoopHandle"
 
 // `x = e;`, `x: T ::= e;`.
 //
@@ -37,6 +45,7 @@ type_from_ast = sema.sema_denote
 // statement was not allowed to make.
 bind_stmt* = (c :: Checker, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
     got  = c.type_of(b.value, ctx).try();
+    c.refuse_handle_value(b.value, got, ctx).try();
     want = c.check_rebound(b).try().match({
         true  => c.types.unknown(),
         false => c.bind_want(b, got, ctx),
