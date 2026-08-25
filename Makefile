@@ -89,7 +89,7 @@ seed: build
 ## disease has been diagnosed here: tests/bench was run by no target in
 ## `all`, so `allocs_op: 0` -- cited in src/ as a thing that fails the
 ## build -- was a number nothing had ever computed.
-test: build parse design cap dupcomments faults lextile ufcs style grammar-test editors bench-allocs fleet
+test: build parse design cap dupcomments faults lextile ufcs style scope grammar-test editors bench-allocs fleet
 	$(PY) tests/run.py
 
 ## faults: every fault the compiler declares must have a site that raises
@@ -249,6 +249,31 @@ editors:
 ## and `make parse` is where they fail; this does not duplicate them.
 style: grammar
 	$(PY) scripts/style.py
+
+## scope: a commit's subject names its scope, and src/ obeys it (issue #765).
+## scripts/scope.py has been on main since #765 landed and NOTHING invoked it:
+## `grep -rn scope.py Makefile .github/` was empty while STYLE.md's table
+## promised `make scope` and its prose said the rule was enforced "and now also
+## at `make test`". A gate that exists and cannot fail is this repo's
+## most-repeated failure — three of them were found vacuous on 2026-07-25 — so
+## it is invoked here or it is deleted.
+##
+## THE AUDITED UNIT IS `origin/main..HEAD`, the commits this branch PROPOSES.
+## Every other prerequisite of `test` is a property of the TREE; scope is a
+## property of the HISTORY, and re-auditing history would gate today's work on
+## a rule nobody was held to yesterday. On main the range is empty and the
+## self-test is what keeps that from reading as coverage: `--self-test` runs
+## first, every time, so a parser that stops reading subjects fails this target
+## even when the range is empty. That is scope.py's own argument, in its
+## docstring, made into a recipe.
+scope:
+	$(PY) scripts/scope.py --self-test
+	@revs="$$(git rev-list origin/main..HEAD 2>/dev/null)"; \
+	  if [ -z "$$revs" ]; then \
+	    echo "scope: no commits over origin/main — nothing is being proposed"; \
+	  else \
+	    $(PY) scripts/scope.py $$revs; \
+	  fi
 
 ## design: every complete example in DESIGN.md must parse. PLAN.md 0.1 asks
 ## for this; nothing was checking it, and the document had drifted from the
