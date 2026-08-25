@@ -12,7 +12,12 @@ SHELL       := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
 CC      ?= cc
-CFLAGS  ?= -O2 -std=c99
+# A missing return in emitted C used to surface only as -Wreturn-type,
+# which nothing grepped for: #764's bare `return;` walked the whole
+# corpus printing 0 instead of 11 at exit 0. The runtime floor is now
+# ZG_NORETURN (#806), so every fall-through cc can still see is a REAL
+# one -- make it stop the build here, where the tree's own C compiles.
+CFLAGS  ?= -O2 -std=c99 -Werror=return-type
 PY      ?= python3
 ROOT    ?= src
 
