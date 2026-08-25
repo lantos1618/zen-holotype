@@ -47080,7 +47080,7 @@ static zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError zu_f3_4se
             } else if ((zg_s11.zg_tag == zu_e5_3std4core6result3Res4None)) {
                 zg_t9 = (zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res2Ok };
             } else {
-                zg_unreachable("sema/sema_drop.zen", 52, 33);
+                zg_unreachable("sema/sema_drop.zen", 52, 36);
             }
         } else if ((zg_s10.zg_tag == zu_e5_3std3ast8ast_node10MemberKind5Const)) {
             zg_t9 = (zu_t4_3std4core6result3ResI2_zt4_3std3mem9mem_alloc10AllocError){ .zg_tag = zu_e5_3std4core6result3Res2Ok };
