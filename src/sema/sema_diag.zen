@@ -106,6 +106,7 @@ SemaFault* =
     | ArmsDisagree(TypeFault)          // the arms of one match are not one type
     | DiscardedValue(TypeFault)        // a statement's value nothing reads
     | NotCallable(TypeFault)           // the callee is not a function
+    | MethodNotValue(TypeFault)        // the name is a method, and the call is missing
     | LiteralOutOfRange(TypeFault)     // the family fits, the value does not
 
     // overloading
@@ -215,6 +216,7 @@ message* = (fault: SemaFault) str {
         ArmsDisagree(_)           => "match arms disagree: every arm produces the match's value, and nothing here decides which type that is",
         DiscardedValue(_)         => "discarded value",
         NotCallable(_)            => "this is not a function, so it cannot be called",
+        MethodNotValue(_)         => "a method is a value only when the call is written: `s.len` names the function, `s.len()` reads it",
         LiteralOutOfRange(_)      => "out of range: a literal's type comes from its context, and the context here cannot hold it",
         NoOverload(_)             => "no overload matches: resolution is on declared parameter types and arity",
         DuplicateSignature(_)     => "duplicate signature: parameter names are documentation, not identity",
@@ -342,6 +344,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         TypeMismatch(f)           => write_types(out, types, f),
         ArmsDisagree(f)           => write_arms(out, types, f),
         NotCallable(f)            => write_types(out, types, f),
+        MethodNotValue(f)         => write_method_value(out, types, f),
         BoundNotSatisfied(f)      => write_types(out, types, f),
         TryOutsideRes(f)          => write_types(out, types, f),
         TryNeedsRes(f)            => write_types(out, types, f),
@@ -424,6 +427,23 @@ write_member = (out :: String, types: Types, f: TypeFault)
                Res<(), AllocError> {
     found ::= types.name_of(f.found).try();
     out.fmt(": no `{}` on `{}`", f.name, found.view()).try();
+    Ok(());
+}
+
+// THE METHOD AND ITS SIGNATURE, because the name is not the problem: the
+// reader wrote a member access that resolves, and what is missing is the
+// `()` that reads it. The found half carries the function type, so the
+// sentence can show what `s.len` actually named — `(String) usize` — and
+// the fix writes itself.
+write_method_value = (out :: String, types: Types, f: TypeFault)
+                     Res<(), AllocError> {
+    sig ::= types.name_of(f.found).try();
+    out.fmt(
+        " — `{}` is a method with signature `{}`: write the call, `{}()`",
+        f.name,
+        sig.view(),
+        f.name
+    ).try();
     Ok(());
 }
 

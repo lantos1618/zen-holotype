@@ -305,6 +305,13 @@ pick = (
 // The one place a member is settled, and so the one place the answer is
 // written down — monomorphisation replaces `T` with the concrete type,
 // and by then nothing says which impl was in view.
+//
+// A METHOD IS NOT THE VALUE ITS RETURN TYPE WOULD BE. `found.ty` of a
+// method is `Fn(..)`, and every position past this point — an argument
+// slot, an operand, a print hole — asks only whether that type fits, so
+// handing it on let `Range(0, s.len)` reach gen_c and emit C reading
+// `.len` off a struct that has no such member. The access is refused
+// here, at the dot where the missing call is.
 first_type = (c :: Checker, id: ExprId, ty: TyId, found: Vec<Found>)
              Res<TyId, AllocError> {
     found.get(0).match({
@@ -320,7 +327,13 @@ settled = (c :: Checker, id: ExprId, ty: TyId, f: Found)
           Res<TyId, AllocError> {
     from = c.is_unknown(f.bound).match({ true => ty, false => f.bound });
     c.supply_memo.set(id, from).try();
-    Ok(f.ty);
+    c.types.at(f.ty).match({
+        Fn(_) => c.access_at(id).match({
+            Ok(ac)  => c.method_not_value(ac, f.ty),
+            None    => Ok(f.ty),
+        }),
+        _     => Ok(f.ty),
+    })
 }
 
 // Two impls supply this name. The bound in scope selects; with none, it
@@ -368,6 +381,30 @@ span_of = (found: Vec<Found>, i: usize) Span {
 // type, callable as a method). So a name the type doesn't declare is
 // still reachable if a function of that name exists — resolution happens
 // at the CALL, where the argument list is known.
+//
+// A MEMBER THE TYPE DOES DECLARE IS NOT A VALUE WHEN IT IS A METHOD. The
+// lookup answers `Fn(..)` for one — `String.len` is `(String) usize` —
+// and that answer flowed into every position that asks nothing but "does
+// it fit": an argument slot (`Range(0, s.len)`) and an operator's
+// operands took a bare method as if it were the number it returns, and
+// gen_c emitted C reading a struct member that does not exist. A method
+// is read only through its call, so `pick` refuses the access here —
+// naming the method and the call it is missing.
+method_not_value = (c :: Checker, ac: Access, fn_ty: TyId)
+                   Res<TyId, AllocError> {
+    poison = c.types.unknown().try();
+    c.report(
+        ac.name.span.file,
+        ac.name.span,
+        SemaFault.MethodNotValue(TypeFault(
+            name: ac.name.text,
+            expected: poison,
+            found: fn_ty
+        ))
+    ).try();
+    poison;
+}
+
 ufcs_or_missing = (c :: Checker, node: Expr, ac: Access, ty: TyId, ctx: Ctx)
                   Res<TyId, AllocError> {
     defs ::= c.alloc.Vec<Def>();
