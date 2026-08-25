@@ -54,8 +54,14 @@ TyId, TyFn, TyNamed = sema.sema_ty
 Def = sema.sema_def
 SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
+<<<<<<< HEAD
 refuse_handle_argument = sema.sema_handle
 meta_call = sema.sema_meta
+||||||| parent of 9ed0784bd (sema, gen: the count chain is decided at its .len and answers usize — field-count twins green (M4 slice 1))
+meta_call = sema.sema_meta
+=======
+meta_refused = sema.sema_meta
+>>>>>>> 9ed0784bd (sema, gen: the count chain is decided at its .len and answers usize — field-count twins green (M4 slice 1))
 construct, instantiate, variant_call_type = sema.sema_apply
 subst_list = sema.sema_inst
 is_case = sema.sema_match
@@ -754,21 +760,27 @@ member_call = (
     // `settled` at all. Presence says "read through its call"; absence is
     // the #772 mistake, a method standing where its return value was wanted.
     c.callee_access.set(call.callee, true).try();
-    // A `@meta(..)` BASE IS THE EVALUATOR'S QUESTION BEFORE IT IS A CALL.
-    // Intercepted HERE, not left to `reachable_call`: a `.foo()` on any
-    // receiver resolves by ordinary UFCS and falls through to a free
-    // function when no member matches (`sema_call.reachable_call`), which
-    // would hunt for a free `fields` and answer a name error instead of
-    // the fold. The backend lowers this same call through
-    // `lower_meta_call`.
+    // A `@meta(..)` BASE IS THE EVALUATOR'S QUESTION BEFORE IT IS A CALL,
+    // and a CALL is all this function ever sees of it: the count's chain
+    // (`@meta(T).fields().len`) is decided one level up, at its `.len`
+    // (`sema_member.member_access` -> `sema_meta.meta_len_chain`), so
+    // whatever still arrives here — a bare `@meta(T).fields()`, or any
+    // other call written on a Meta — is the WALL. Refused by name rather
+    // than resolved: `.fields` binds nowhere, and letting it fall through
+    // would hunt for a free function by that name and answer a name error
+    // instead of the refusal the wall owes.
     c.tree.expr_at(ac.base).kind.match({
-        Meta(_) => c.meta_call(call, ctx),
-        _       => Ok(()),
-    }).try();
-    b = base_of(c, ac.base, ctx).try();
-    b.is_type.match({
-        true  => c.static_call(node, call, ac, b.ty, ctx),
-        false => c.receiver_call(id, node, call, ac, b, ctx),
+        Meta(_) => {
+            target = c.tree.expr_at(ac.base);
+            c.meta_refused(target)
+        },
+        _       => {
+            b = base_of(c, ac.base, ctx).try();
+            b.is_type.match({
+                true  => c.static_call(node, call, ac, b.ty, ctx),
+                false => c.receiver_call(id, node, call, ac, b, ctx),
+            })
+        },
     })
 }
 

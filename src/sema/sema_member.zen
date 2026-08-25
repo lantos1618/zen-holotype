@@ -43,7 +43,7 @@ type_of = sema.sema_type
 type_from_ast, param_type = sema.sema_denote
 global_name_type, def_type = sema.sema_type
 static_value = sema.sema_static
-meta_access = sema.sema_meta
+meta_access, meta_len_chain, is_count_chain = sema.sema_meta
 
 // One thing a dot could reach. `computed`: false means the type declares
 // it (has an address); true means an impl supplies it (does not).
@@ -91,10 +91,25 @@ access_type* = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
 
 member_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
                 Res<TyId, AllocError> {
-    b = base_of(c, ac.base, ctx).try();
-    b.is_type.match({
-        true  => c.static_value(id, node, ac, b.ty, ctx),
-        false => c.value_access(id, node, ac, b.ty, ctx),
+    // THE COUNT'S CHAIN, SEEN FROM ITS TOP: `.len` is an Access whose
+    // base is a Call whose callee is an Access whose base is a Meta —
+    // `@meta(T).fields().len`. Decided HERE and ANSWERED HERE, before
+    // anything types the call beneath it: the ordinary path would call
+    // `base_of` on the Call, whose Meta-based callee is the wall
+    // (`sema_call.member_call` refuses it), so the one shape this slice
+    // lifts out of the wall would meet its own refusal instead of its
+    // number. Every OTHER `.len` — on a Vec, a str, an array — misses
+    // the strict three-level shape and takes the ordinary path below,
+    // untouched.
+    c.is_count_chain(ac).match({
+        true  => c.meta_len_chain(ac, ctx),
+        false => {
+            b = base_of(c, ac.base, ctx).try();
+            b.is_type.match({
+                true  => c.static_value(id, node, ac, b.ty, ctx),
+                false => c.value_access(id, node, ac, b.ty, ctx),
+            })
+        },
     })
 }
 
@@ -186,12 +201,6 @@ is_type_def* = (k: DefKind) bool {
 // `value.name`
 // ---------------------------------------------------------------------
 
-// A `@meta(..)` BASE IS THE EVALUATOR'S QUESTION BEFORE IT IS A MEMBER
-// READ — the same intercept `access_type` makes, one level deeper: this
-// is the CALLEE of `.fields()`, whose own `.len` reads off the fold.
-// Without it the callee falls to `ufcs_or_missing`, which hunts for a
-// free function named `fields` and reports a name error at the dot
-// instead of answering the evaluator's question.
 value_access* = (
     c    :: Checker,
     id   : ExprId,
@@ -200,13 +209,6 @@ value_access* = (
     ty   : TyId,
     ctx  : Ctx
 ) Res<TyId, AllocError> {
-    c.tree.expr_at(ac.base).kind.match({
-        Meta(_) => {
-            c.meta_access(ac, ctx).try();
-            c.meta_count_type()
-        },
-        _       => Ok(()),
-    }).try();
     c.opaque(ty).match({
         true  => c.types.unknown(),
         false => c.known_access(id, node, ac, ty, ctx),

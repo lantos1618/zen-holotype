@@ -2,8 +2,11 @@
 // slice 1): `@meta(self: @Self).fields().len` folds at sema time to the
 // WRITTEN type's FIELD count — `Struct.members` filtered to
 // `MemberKind.Field`, so a constant member (`k: i64 = 5`) and a method
-// do not count. The backend lowers it as an ordinary integer literal,
-// having learned nothing new.
+// do not count. The fold is a COMPTIME USIZE and answers as one
+// (`sema_check.meta_count_type`); no hidden usize-to-i64 conversion
+// exists (#756 family), so the reader method is spelled `usize`.
+// The backend lowers it as an ordinary integer literal, having learned
+// nothing new.
 //
 // THE TWIN IS THE ORACLE (§6.3): `field_count_by_hand` writes each
 // count by hand and must print byte-identical stdout.
@@ -15,8 +18,9 @@
 // MUTATION RESISTANCE (§6.4): line one asserts all four counts out
 // loud; line two is an arithmetic witness with no zero term — a
 // transposed or skipped field changes it. A filter that also counted
-// consts prints `counts 0 1 3 3` / `witness 108` instead of
-// `counts 0 1 3 2` / `witness 87`.
+// consts prints `counts 0 1 3 3` / `witness 114` instead of
+// `counts 0 1 3 2` / `witness 93`; one that counted nothing prints
+// `counts 0 0 0 0` / `witness 0`.
 
 Empty = { }
 
@@ -38,12 +42,12 @@ Muddle = {
 
     go* = (self: @Self) i64 { 7 },
 
-    fields* = (self: @Self) i64 { @meta(self: @Self).fields().len },
+    fields* = (self: @Self) usize { @meta(self: @Self).fields().len },
 }
 
 main = (env: Env) Res<i32, AllocError> {
     m      = Muddle(p: 1, q: true);
     println("counts {} {} {} {}", 0, 1, 3, m.fields());
-    println("witness {}", (0 + (1 * 2) + (3 * 5) + (m.fields() * 7)));
+    println("witness {}", ((0 * 1) + (1 * 2) + (3 * 5) + (m.fields() * 7)) * 3);
     Ok(0);
 }

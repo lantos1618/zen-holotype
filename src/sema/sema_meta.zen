@@ -23,12 +23,25 @@
 // `Checker.meta_str` and lowers an ordinary string literal, having
 // learned nothing new.
 //
+// M4 slice 1 adds the second folding shape: `@meta(name:
+// Type).fields().len` folds to the type's field count —
+// `Struct.members` filtered to `MemberKind.Field` (`count_fields`
+// below), so a constant member and a method do not count. Its memo is
+// `Checker.meta_count_memo`, keyed on the same written type for the
+// same reason; the backend reads it back through `meta_count_of` and
+// lowers an ordinary integer literal. THE CHAIN IS INTERCEPTED AT ITS
+// TOP: `.len` is an Access whose base is a Call whose callee is an
+// Access whose base is a Meta, and the whole question is decided at
+// that `.len` (`sema_member.member_access` -> `meta_len_chain`), before
+// anything types the call beneath it. A bare `@meta(T).fields()` is NOT
+// the chain and stays the wall — refused in `member_call`.
+//
 // EVERYTHING ELSE IS STILL THE WALL. The value form `@meta(v)`, a
-// typed form asked for a member that is not `.name`, a type with no
-// declaration payload to read, and a `@meta` standing anywhere an
-// access target isn't all report `MetaNotImplemented` at the `@meta`
-// token and poison, exactly as M0 did — the refusal tests pin the
-// rest of it.
+// typed form asked for a member that is not `.name` or the count's
+// full chain, a type with no declaration payload to read, and a
+// `@meta` standing anywhere an access target isn't all report
+// `MetaNotImplemented` at the `@meta` token and poison, exactly as M0
+// did — the refusal tests pin the rest of it.
 //
 // THE ARGUMENT IS STILL NOT VISITED, with one exception that is the
 // rule itself: the typed form's `type` resolves through the ordinary
@@ -38,11 +51,10 @@
 // spend a second diagnostic on a program whose first sentence is
 // already written.
 
-Expr, Type, TypeId, Access, Meta, Alias, Call = std.ast
+Expr, Type, TypeId, Access, Meta, Alias, Call, Struct = std.ast
 ExprId, Ident, nowhere = std.ast
 AllocError = std.mem
 str = std.text
-Range = std.core
 TyId = sema.sema_ty
 Checker, Ctx = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
@@ -73,68 +85,69 @@ meta_access* = (c :: Checker, ac: Access, ctx: Ctx)
     })
 }
 
-// THE SECOND SHAPE THAT FOLDS: `@meta(name: Type).fields()` is a Call
-// whose callee is the access above, and `.len` reads off it. The chain
-// arrives here through `member_call`, which marks the callee and would
-// otherwise resolve `.fields` by ordinary UFCS and hunt for a free
-// function by that name; intercepted instead, and the whole question
-// handed to one rule.
+// THE COUNT'S CHAIN: `@meta(name: Type).fields().len`. The whole shape
+// is one evaluator question, decided where it is first asked —
+// `sema_member.member_access`, at the `.len` whose base is the Call —
+// and answered there: this entry point descends the chain itself
+// rather than typing the nodes beneath, because the ordinary paths are
+// exactly what the chain must not meet (`member_call` refuses every
+// call written on a Meta, and rightly so — the bare call is the wall).
+// `ac` is the top `.len`; `is_count_chain` has already vouched for the
+// three levels beneath it.
 //
 // THE ARGUMENT LIST MUST BE EMPTY. `fields()` takes nothing: an argument
 // written beside it is a different sentence about a shape this rule does
-// not mean, and is refused like any other wall rather than silently
-// ignored.
+// not mean. A callee access named anything but `fields` is not the chain
+// either (`@meta(T).name()` stays the wall) — refused before the count,
+// so a wrong spelling answers a refusal, never a plausible number.
 //
-// The backend lowers this same call through `lower_meta_call`
-// (`gen_c_expr.zen`), reading the folded count back off the Meta node
+// The backend lowers this same dot-call through `lower_dot_call`
+// (`gen_c_member.zen`), reading the folded count back off the Meta node
 // the callee carries.
-meta_call* = (c :: Checker, call: Call, ctx: Ctx)
-             Res<TyId, AllocError> {
-    empty = call.args.len == 0;
-    empty.match({
-        true  => c.meta_fields_len(call.callee, ctx),
-        false => {
-            target = c.tree.expr_at(call.callee);
-            c.meta_refused(target);
+meta_len_chain* = (c :: Checker, ac: Access, ctx: Ctx)
+                  Res<TyId, AllocError> {
+    c.tree.expr_at(ac.base).kind.match({
+        Call(call) => {
+            // bound first: `n == 0 .match(..)` would hand POSTFIX `.match`
+            // the literal, not the comparison
+            empty = call.args.len == 0;
+            empty.match({
+                false => c.meta_refused(c.tree.expr_at(call.callee)),
+                true  => c.chain_callee(call.callee, ctx),
+            })
         },
+        _          => c.types.unknown(),
     })
 }
 
 // One level down: the CALL's callee is the Access whose base is the
-// Meta. What folds is `.fields().len` — the ACCESS's own name decides;
-// anything else on the same base (`@meta(T).name()` as a call) stays
-// the wall.
-meta_fields_len = (c :: Checker, ac_id: ExprId, ctx: Ctx)
-                  Res<TyId, AllocError> {
-    node = c.tree.expr_at(ac_id);
+// Meta. The access's own name decides what the chain reads — `fields`;
+// anything else on the same base (`@meta(T).name()`) stays the wall.
+chain_callee* = (c :: Checker, callee_id: ExprId, ctx: Ctx)
+                Res<TyId, AllocError> {
+    node = c.tree.expr_at(callee_id);
     node.kind.match({
-        Access(a) => c.meta_len_read(a, ctx),
+        Access(a) => a.name.text.eq("fields").match({
+            false => c.meta_refused(node),
+            true  => c.counted_base(a.base, ctx),
+        }),
         _         => c.meta_refused(node),
     })
 }
 
-// The access's own name decides what the chain reads. `.len` folds;
-// anything else on the same base (`@meta(T).name()` as a call) stays
-// the wall. The Meta under the access carries the written type, the
-// memo key — handed over exactly as `.name`'s fold receives it.
-meta_len_read = (c :: Checker, ac: Access, ctx: Ctx)
-                Res<TyId, AllocError> {
-    is_len = ac.name.text.eq("len");
-    is_len.match({
-        false => c.meta_refused(c.tree.expr_at(ac.base)),
-        true  => {
-            target = c.tree.expr_at(ac.base);
-            target.kind.match({
-                Meta(m) => m.type.match({
-                    None  => c.meta_refused(target),
-                    Ok(t) => {
-                        c.meta_count_fold(target, t, ctx).try();
-                        c.meta_count_type()
-                    },
-                }),
-                _       => c.meta_refused(target),
-            })
-        },
+// The chain's root. The Meta carries the WRITTEN TYPE EXPRESSION — the
+// memo key — handed over exactly as `.name`'s fold receives it; a Meta
+// without one (the value form, or a malformed spelling) has no count
+// to give and refuses rather than guesses.
+counted_base = (c :: Checker, base: ExprId, ctx: Ctx)
+               Res<TyId, AllocError> {
+    target = c.tree.expr_at(base);
+    target.kind.match({
+        Meta(m) => m.type.match({
+            None  => c.meta_refused(target),
+            Ok(t) => c.meta_count_fold(target, t, ctx),
+        }),
+        _       => c.types.unknown(),
     })
 }
 
@@ -179,7 +192,9 @@ meta_fold = (
 // THE COUNT'S FOLD: the written TYPE EXPRESSION the Meta carries is the
 // memo key — the same discipline `.name` follows, for the same reason.
 // The count is a function of the type, so `TypeId` is its honest key;
-// the answer travels to the backend inside the same Meta node.
+// the answer travels to the backend inside the same Meta node. The
+// value is a comptime `usize`, and says so (`meta_count_type`) rather
+// than borrowing `.name`'s `str`.
 meta_count_fold = (c :: Checker, target: Expr, t: TypeId, ctx: Ctx)
                   Res<TyId, AllocError> {
     ty = c.type_from_ast(t, ctx).try();
@@ -231,7 +246,7 @@ counted_decl = (
         Ok(d) => decl_at(c.tree, d.id).match({
             None  => c.resolved_count(target, t, ty),
             Ok(x) => x.kind.match({
-                Struct(s) => c.meta_record(t, s.name.text),
+                Struct(s) => c.counted_record(t, s, target),
                 Enum(_)   => c.meta_refused(target),
                 Alias(a)  => c.counted_alias(a, d, target, t),
                 _         => c.meta_refused(target),
@@ -240,11 +255,47 @@ counted_decl = (
     })
 }
 
+// THE COUNT LANDS. The members are counted HERE, filtered to
+// `MemberKind.Field` — the view R2's `fields()` helper would allocate,
+// evaluated instead at the one site that asks: a count is a function of
+// the type, so it needs no storage beyond its memo row. The split is
+// syntactic (ast_node.zen): `k: i64 = 5` is a Const and `go* = ..` a
+// Function — only `p: i64` counts, which is what keeps Muddle at 2
+// against four members. ZERO fields fall through the filter zero times:
+// Empty answers 0 by never entering the arm.
+count_fields = (c :: Checker, s: Struct) Res<usize, AllocError> {
+    n ::= 0;
+    s.members.loop((h, m) {
+        m.kind.match({
+            Field(_) => { n = n + 1; },
+            _        => (),
+        });
+    });
+    Ok(n)
+}
+
+// The fold lands: the struct's field count recorded under the WRITTEN
+// TYPE EXPRESSION's id for the same reason `.name`'s row is — two
+// instantiations of one generic never share a row (`Box<i64>` cannot
+// answer for `Box<bool>`).
+counted_record = (
+    c      :: Checker,
+    key    : TypeId,
+    s      : Struct,
+    target : Expr
+) Res<TyId, AllocError> {
+    n = c.count_fields(s).try();
+    c.meta_count_memo.set(key, n).try();
+    c.meta_count_type()
+}
+
 // An alias folds to the count of WHAT THE USER WROTE — `@meta(x: P2)`
-// counts through P2's own row — reached one step short of the collapse,
-// with the target's payload as validation only: an alias naming no
-// struct (`Count = i64`) has no fields to count and refuses rather than
-// guess.
+// counts through P2's own row — reached one step short of the collapse.
+// Validation stays: an alias naming no struct (`Count = i64`) has no
+// fields to count and refuses rather than guess. The COUNT recorded is
+// the TARGET STRUCT'S — the written alias and the struct it names are
+// one type here, and the memo row is keyed on the written spelling
+// either way.
 counted_alias = (c :: Checker, al: Alias, owner: Def, target: Expr, t: TypeId)
                 Res<TyId, AllocError> {
     ty = c.alias_target_of(al, owner).try();
@@ -252,7 +303,7 @@ counted_alias = (c :: Checker, al: Alias, owner: Def, target: Expr, t: TypeId)
         Named(n) => decl_at(c.tree, n.decl).match({
             None  => c.meta_refused(target),
             Ok(d) => d.kind.match({
-                Struct(_) => c.meta_record(t, al.name.text),
+                Struct(s) => c.counted_record(t, s, target),
                 _         => c.meta_refused(target),
             }),
         }),
@@ -266,7 +317,7 @@ resolved_count = (c :: Checker, target: Expr, t: TypeId, ty: TyId)
         Named(n) => decl_at(c.tree, n.decl).match({
             None  => c.meta_refused(target),
             Ok(d) => d.kind.match({
-                Struct(s) => c.meta_record(t, s.name.text),
+                Struct(s) => c.counted_record(t, s, target),
                 _         => c.meta_refused(target),
             }),
         }),
@@ -364,35 +415,12 @@ written_alias = (c :: Checker, al: Alias, owner: Def, target: Expr, t: TypeId)
     })
 }
 
-// The fold lands. One memo, two row shapes, told apart by the second
-// component: `.name` records the text under the written type (`t`),
-// `.fields().len` records a leading `#` and the decimal count — a
-// string cannot start with `#`, so neither reader can mistake one row
-// for the other.
-//
-// THE FIELD COUNT IS THE MEMBERS FILTERED TO FIELDS (R2's view,
-// evaluated here rather than allocated): `k: i64 = 5` is a Const and
-// `go* = ..` a Function — only `MemberKind.Field` counts, which is
-// what keeps Muddle at 2 against four members.
+// The fold lands. One memo, one row shape: `.name` records the text
+// under the written type (`t`). A count never touches this memo — it
+// has its own (`meta_count_memo`), also keyed on the written type.
 meta_record = (c :: Checker, key: TypeId, name: str) Res<TyId, AllocError> {
-    is_count ::= name.len > 0;
-    is_count = is_count && (name.index(0) == '#');
-    is_count.match({
-        false => c.meta_memo.set(key, name),
-        true  => c.meta_record_count(key, name),
-    }).try();
+    c.meta_memo.set(key, name).try();
     c.types.str_ty()
-}
-
-// A count row: `#` plus decimal digits, decoded into the count memo.
-// The digits are the compiler's own writing — the arms of `count_text`
-// above — so the decode cannot meet anything but them.
-meta_record_count = (c :: Checker, key: TypeId, name: str) Res<(), AllocError> {
-    n ::= 0;
-    Range(1, name.len).loop((h, i) {
-        n = (n * 10) + (name.index(i) - '0');
-    });
-    c.meta_count_memo.set(key, n)
 }
 
 // A written spelling that names no declaration of its own falls back
@@ -414,11 +442,49 @@ resolved_decl = (c :: Checker, target: Expr, t: TypeId, ty: TyId)
     })
 }
 
-meta_refused = (c :: Checker, node: Expr) Res<TyId, AllocError> {
+meta_refused* = (c :: Checker, node: Expr) Res<TyId, AllocError> {
     c.report(
         node.span.file,
         node.span,
         SemaFault.MetaNotImplemented(NameFault(name: ""))
     ).try();
     c.types.unknown()
+}
+
+// WHETHER THIS DOT IS THE COUNT'S CHAIN, AND NOTHING ELSE. Strictly
+// syntactic, so it can never answer for a `.len` that means a length
+// somewhere else: the access must be named `len`, its base must BE a
+// Call whose callee is an Access named `fields` whose own base is a
+// Meta carrying a written type. A Vec's `.len`, a str's, an array's —
+// none of them is a call of fields over a meta, and every one of them
+// misses this and takes the ordinary member path untouched. The
+// predicate reads nodes only; the fold itself lives in
+// `sema_meta.meta_len_chain`, which re-walks what this vouched for.
+is_count_chain* = (c :: Checker, ac: Access) bool {
+    top = ac.name.text.eq("len");
+    top.match({
+        false => false,
+        true  => c.tree.expr_at(ac.base).kind.match({
+            Call(k) => {
+                empty = k.args.len == 0;
+                empty.match({
+                    true  => c.tree.expr_at(k.callee).kind.match({
+                        Access(f) => f.name.text.eq("fields").match({
+                            true  => c.tree.expr_at(f.base).kind.match({
+                                Meta(m) => m.type.match({
+                                    Ok(_) => true,
+                                    None  => false,
+                                }),
+                                _       => false,
+                            }),
+                            false => false,
+                        }),
+                        _         => false,
+                    }),
+                    false => false,
+                })
+            },
+            _       => false,
+        }),
+    })
 }

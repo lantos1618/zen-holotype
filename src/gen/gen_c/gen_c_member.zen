@@ -101,19 +101,23 @@ lower_dot_call* = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    // A `@meta(..)` BASE IS THE EVALUATOR'S FOLD (`sema_meta.meta_call`),
-    // never a member call: the residue is the folded count, an ordinary
-    // integer literal. Same intercept as the read side's
-    // `lower_meta_or_access`.
-    unknown = be.check.types.unknown().try();
+    // A `@meta(..)` BASE IS THE EVALUATOR'S QUESTION BEFORE IT IS A CALL,
+    // and a CALL is all this function ever sees of it: the count's chain
+    // (`@meta(T).fields().len`) is decided one level up, at its `.len`
+    // (`sema_member.member_access` -> `sema_meta.meta_len_chain`), so
+    // whatever still arrives here — a bare `@meta(T).fields()`, or any
+    // other call written on a Meta — is the WALL, already refused at
+    // sema (`sema_call.member_call`). Nothing lowers: the pipeline stops
+    // before emit on a refused program.
     be.tree.expr_at(a.base).kind.match({
-        Meta(_) => be.lower_meta_or_access(id, a, ctx, unknown, out),
-        _       => Ok(()),
-    }).try();
-    depth = be.handle_depth(a.base);
-    (depth > 0).match({
-        true  => be.lower_handle_call(id, c, a, depth, ctx, out),
-        false => be.lower_resolved_dot(Dot(id: id, c: c, a: a), ctx, want, out),
+        Meta(_) => Ok(()),
+        _       => {
+            depth = be.handle_depth(a.base);
+            (depth > 0).match({
+                true  => be.lower_handle_call(id, c, a, depth, ctx, out),
+                false => be.lower_resolved_dot(Dot(id: id, c: c, a: a), ctx, want, out),
+            })
+        },
     })
 }
 

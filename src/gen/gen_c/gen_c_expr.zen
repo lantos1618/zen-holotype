@@ -1038,6 +1038,15 @@ decoded_len* = (raw: str) usize {
 // (`sema_check.zen`), which this access's own `Meta` node carries, so
 // the read-back needs no state of its own; a miss is every other dot,
 // which takes the field path.
+//
+// THE COUNT'S CHAIN IS THE SIBLING, ONE SHAPE UP: `.len` over
+// `fields()` over a Meta. It is recognised BY THE SHAPE — the same
+// strict predicate sema answered with (`is_count_chain`, read through
+// the checker; no second definition of the chain) — and only then is
+// the count read off the memo. The shape test comes FIRST because both
+// memos key on the same written type: a bare `.name` on a type whose
+// count was folded elsewhere in the program must stay a string, which
+// a memo-ordering rule would get wrong.
 lower_meta_or_access* = (
     be   :: CBackend,
     id   : ExprId,
@@ -1049,32 +1058,36 @@ lower_meta_or_access* = (
     base = be.check.tree.expr_at(a.base);
     base.kind.match({
         Meta(m) => m.type.match({
-            Ok(t) => {
-                // `.fields().len` folded to a count row under this same
-                // written type; its access must lower as the integer,
-                // not fall through to a field read. A `str` cannot start
-                // with `#`, so the prefix tells the two rows apart.
-                is_count = be.check.meta_count_of(t);
-                is_count.match({
-                    Ok(_)  => lower_meta_count(be, t, out),
-                    None   => be.check.meta_str(t).match({
-                        Ok(text) => lower_meta_name(text, out),
-                        None     => be.lower_access(id, a, ctx, want, out),
-                    }),
-                });
-            },
+            Ok(t) => be.check.meta_str(t).match({
+                Ok(text) => lower_meta_name(text, out),
+                None     => be.lower_access(id, a, ctx, want, out),
+            }),
             None  => be.lower_access(id, a, ctx, want, out),
         }),
-        _       => be.lower_access(id, a, ctx, want, out),
+        _       => be.check.is_count_chain(a).match({
+            true  => be.chain_count(a.base, out),
+            false => be.lower_access(id, a, ctx, want, out),
+        }),
     })
 }
 
-// Whether a memo row is a plain name or a count's `#123` spelling.
-text_starts_hash = (s: str) bool {
-    empty = s.len == 0;
-    empty.match({
-        true  => false,
-        false => s.index(0) == '#',
+// The chain's root, from its top access: the Call's callee carries the
+// Meta with the WRITTEN TYPE EXPRESSION — the memo key. `is_count_chain`
+// has vouched for every level between; this reads the one row.
+chain_count = (be :: CBackend, call_id: ExprId, out :: String)
+              Res<(), AllocError> {
+    be.check.tree.expr_at(call_id).kind.match({
+        Call(k) => be.check.tree.expr_at(k.callee).kind.match({
+            Access(f) => be.check.tree.expr_at(f.base).kind.match({
+                Meta(m) => m.type.match({
+                    Ok(t) => be.lower_meta_count(t, out),
+                    None  => Ok(()),
+                }),
+                _       => Ok(()),
+            }),
+            _         => Ok(()),
+        }),
+        _       => Ok(()),
     })
 }
 
@@ -1095,7 +1108,7 @@ lower_meta_name = (text: str, out :: String) Res<(), AllocError> {
 // folded to the type's field count at sema time, and this lowers it as
 // an ordinary integer literal — the backend learned nothing new about
 // fields, it writes a number.
-lower_meta_count = (be :: CBackend, t: TypeId, out :: String) Res<(), AllocError> {
+lower_meta_count* = (be :: CBackend, t: TypeId, out :: String) Res<(), AllocError> {
     got = be.check.meta_count_of(t);
     got.match({
         Ok(n)  => {
