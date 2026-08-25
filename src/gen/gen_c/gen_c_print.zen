@@ -267,8 +267,31 @@ write_format = (
         i = at.next;
     });
     write_piece(be, raw, start, end, stream).try();
-    write_values(be, c, used, stream, ctx).try();
+    write_surplus(be, c, used, stream, ctx).try();
     Ok(());
+}
+
+// An argument with no hole left is a compile error at the call — the
+// walk has spent every hole and something is still queued. The two
+// values would be appended with no separator and read as one number,
+// which is the corrupting case the issue names.
+write_surplus = (
+    be     :: CBackend,
+    c      : Call,
+    used   : usize,
+    stream : str,
+    ctx    : Ctx
+) Res<(), AllocError> {
+    (used < c.args.len).match({
+        false => Ok(()),
+        true  => c.args.get(used).match({
+            None  => Ok(()),
+            Ok(a) => be.report_expr(
+                a.value,
+                GenFault.Unsupported(ARGUMENT_WITHOUT_HOLE)
+            ),
+        }),
+    })
 }
 
 // What one position turned out to be, written into the console.
@@ -282,7 +305,7 @@ write_what = (
     ctx    : Ctx
 ) Res<(), AllocError> {
     at.what.match({
-        Hole     => write_hole(be, c, used, stream, ctx),
+        Hole     => write_hole(be, c, id, at, used, stream, ctx),
         Named(n) => write_named(be, id, at, n, stream),
         NoName   => report_in_format(
             be,
@@ -432,6 +455,14 @@ ident_end = (raw: str, from: usize, end: usize) usize {
 // walks raise it and a must-fail expectation reads whichever compiler ran.
 NOT_A_HOLE* : str = "a format hole is {} or {name}, and this is neither"
 
+// The sentence a hole with no argument left gets, at the hole's own
+// position — the missing direction of the format/argument arity law.
+HOLE_WITHOUT_ARGUMENT* : str = "a format hole with no argument left"
+
+// The sentence an argument with no hole left gets, at the argument — the
+// surplus direction of the same law.
+ARGUMENT_WITHOUT_HOLE* : str = "an argument with no format hole left"
+
 // -----------------------------------------------------------------
 // a fault at the HOLE'S own position
 //
@@ -469,22 +500,28 @@ step_of = (raw: str, i: usize) usize {
     (raw.index(i) == '\\').match({ true => 2, false => 1 })
 }
 
-// A hole with no argument left prints itself, which is what the
-// bootstrapper does and what makes a stray `{}` visible rather than
-// silently swallowed.
+// A hole with no argument left is a compile error at the hole's own
+// position, which is the law `text_fmt.zen`'s header states: the two
+// brace bytes in user output are a plausible-looking corrupt answer, the
+// exact class this tree refuses everywhere else. The surplus direction —
+// an argument with no hole left — is refused beside it, after the walk,
+// by the same law.
 write_hole = (
     be     :: CBackend,
     c      : Call,
+    id     : ExprId,
+    at     : FmtAt,
     used   : usize,
     stream : str,
     ctx    : Ctx
 ) Res<(), AllocError> {
     c.args.get(used).match({
-        None  => be.writeln(pair(
-            stream,
-            "zg_print_bytes(\"{}\", 2);",
-            "zg_eprint_bytes(\"{}\", 2);"
-        )),
+        None  => report_in_format(
+            be,
+            id,
+            at,
+            GenFault.Unsupported(HOLE_WITHOUT_ARGUMENT)
+        ),
         Ok(a) => write_value(be, a.value, stream, ctx),
     })
 }

@@ -52,6 +52,7 @@ signature_of, recv_arg, arg_value, by_ref = gen.gen_c.gen_c_call
 body_end, decoded_bytes, cast_of = gen.gen_c.gen_c_print
 FmtAt, fmt_at, ends_run, arguments_taken = gen.gen_c.gen_c_print
 report_in_format, NOT_A_HOLE = gen.gen_c.gen_c_print
+HOLE_WITHOUT_ARGUMENT, ARGUMENT_WITHOUT_HOLE = gen.gen_c.gen_c_print
 slot_call = gen.gen_c.gen_c_bound
 fat_value = gen.gen_c.gen_c_fat
 sink_display = gen.gen_c.gen_c_display
@@ -582,7 +583,7 @@ walk_format = (
         i = at.next;
     });
     write_chunk(be, raw, start, end, p).try();
-    be.write_rest(c, used, p, ctx).try();
+    be.write_surplus(c, used, p, ctx).try();
     Ok(());
 }
 
@@ -600,7 +601,7 @@ write_what = (
     ctx  : Ctx
 ) Res<(), AllocError> {
     at.what.match({
-        Hole     => write_hole(be, c, used, p, ctx),
+        Hole     => write_hole(be, c, id, at, used, p, ctx),
         Named(n) => write_named(be, id, at, n, p),
         NoName   => report_in_format(
             be,
@@ -624,16 +625,50 @@ write_named = (be :: CBackend, id: ExprId, at: FmtAt, name: str, p: Piece)
     })
 }
 
-// A hole with no argument left writes itself, which is what `println`
-// does and what makes a stray `{}` visible rather than swallowed.
-write_hole = (be :: CBackend, c: Call, used: usize, p: Piece, ctx: Ctx)
-             Res<(), AllocError> {
+// A hole with no argument left is a compile error at the hole's own
+// position, the missing direction of the arity law `gen_c_print`'s
+// twin enforces on the console doors — the same law, so a format
+// mismatched on holes/arguments is refused through every door.
+write_hole = (
+    be   :: CBackend,
+    c    : Call,
+    id   : ExprId,
+    at   : FmtAt,
+    used : usize,
+    p    : Piece,
+    ctx  : Ctx
+) Res<(), AllocError> {
     arg_value(c, used).match({
-        None  => write_literal(be, "{}", p),
+        None  => report_in_format(
+            be,
+            id,
+            at,
+            GenFault.Unsupported(HOLE_WITHOUT_ARGUMENT)
+        ),
         Ok(a) => write_value(be, a, p, ctx),
     })
 }
 
+// An argument with no hole left, refused at the argument — the surplus
+// direction of the same law. Reached with the walk's final count by both
+// the console walk and this one; the no-format shape never gets here.
+write_surplus = (be :: CBackend, c: Call, used: usize, p: Piece, ctx: Ctx)
+                Res<(), AllocError> {
+    (used < c.args.len).match({
+        false => Ok(()),
+        true  => arg_value(c, used).match({
+            None   => Ok(()),
+            Ok(id) => be.report_expr(
+                id,
+                GenFault.Unsupported(ARGUMENT_WITHOUT_HOLE)
+            ),
+        }),
+    })
+}
+
+// Every argument from `used` on, written in order — the NO-FORMAT shape
+// only, where every argument is a value on purpose and there is no
+// arity to mismatch.
 write_rest = (be :: CBackend, c: Call, used: usize, p: Piece, ctx: Ctx)
              Res<(), AllocError> {
     Range(used, c.args.len).loop((h, i) {
