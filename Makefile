@@ -287,11 +287,17 @@ style: grammar
 ## THE AUDITED UNIT IS `origin/main..HEAD`, the commits this branch PROPOSES.
 ## Every other prerequisite of `test` is a property of the TREE; scope is a
 ## property of the HISTORY, and re-auditing history would gate today's work on
-## a rule nobody was held to yesterday. On main the range is empty and the
-## self-test is what keeps that from reading as coverage: `--self-test` runs
-## first, every time, so a parser that stops reading subjects fails this target
-## even when the range is empty. That is scope.py's own argument, in its
-## docstring, made into a recipe.
+## a rule nobody was held to yesterday. When that range is EMPTY -- a commit
+## made DIRECTLY on this ref, the way merge.sh --seed lands on main -- the
+## gate used to print "nothing is being proposed" and exit 0 about a commit
+## that had already landed (#791): legitimately empty and audited were
+## reported as the same thing, the vacuous-gate pattern five times over. Now
+## an empty range falls back to the tip itself, HEAD~1..HEAD (or the root
+## commit when there is no parent), so what just landed on this ref is what
+## gets measured, and the message names the unit that ran. `--self-test`
+## still runs first, every time, so a parser that stops reading subjects
+## fails this target regardless of the range. That is scope.py's own argument,
+## in its docstring, made into a recipe.
 ##
 ## `origin/main` IS ASSERTED TO EXIST BEFORE IT IS DIFFED AGAINST. This
 ## recipe used to be `git rev-list origin/main..HEAD 2>/dev/null` and then
@@ -310,11 +316,17 @@ scope:
 	           "audit half of this gate cannot run, and an empty range must" \
 	           "not read as a clean one. \`git fetch origin\`" >&2; exit 2; }
 	@revs="$$(git rev-list origin/main..HEAD)"; \
-	  if [ -z "$$revs" ]; then \
-	    echo "scope: no commits over origin/main — nothing is being proposed"; \
+	if [ -z "$$revs" ]; then \
+	  if git rev-parse --verify -q HEAD~1 >/dev/null; then \
+	    revs="$$(git rev-parse HEAD~1)..HEAD"; \
+	    echo "scope: no commits over origin/main — auditing the tip itself,"; \
+	    echo "scope: which is what a commit made directly on this ref gets"; \
 	  else \
-	    $(PY) scripts/scope.py $$revs; \
-	  fi
+	    revs="HEAD"; \
+	    echo "scope: no parent under the tip — auditing the root commit"; \
+	  fi; \
+	fi; \
+	$(PY) scripts/scope.py $$revs
 	bash tests/scope/regression.sh
 
 ## design: every complete example in DESIGN.md must parse. PLAN.md 0.1 asks

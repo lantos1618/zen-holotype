@@ -159,7 +159,12 @@ def scoped_out(subject: str, changes: dict[str, str]) -> list[str]:
     areas = parse_areas(subject)
     out = []
     for p, _status in sorted(changes.items()):
-        if not p.startswith("src/") or p.startswith(EXEMPT_PREFIXES):
+        # EXEMPT_PREFIXES is seed/ only, and a path under src/ cannot start
+        # with seed/ -- so rule 1 has no exemption term to consult. If the
+        # exemption ever widens to something under src/, this is where it
+        # must be honoured ON PURPOSE; `or p.startswith(EXEMPT_PREFIXES)`
+        # read as if it already were and could decide nothing (#791).
+        if not p.startswith("src/"):
             continue
         if areas is None or not any(area_matches(a, p[len("src/"):])
                                     for a in areas):
@@ -175,7 +180,11 @@ def sweep_contraband(changes: dict[str, str]) -> list[str]:
             continue
         if p.startswith("src/") and status == "A":
             bad.append(f"{p} (added inside a sweep)")
-        elif p.endswith(SWEEP_FORBIDDEN_SUFFIXES) and status in "AM":
+        elif p.endswith(SWEEP_FORBIDDEN_SUFFIXES) and status:
+            # ANY status on an expectation is contraband inside a sweep --
+            # there is no legitimate way to touch one here. `status in "AM"`
+            # was a substring test on a string, so a DELETED expectation
+            # (issue #791) walked through, and so would an empty one.
             bad.append(f"{p} (expectation changed inside a sweep)")
     return bad
 
@@ -260,6 +269,15 @@ CASES = [
      {"src/gen/gen_c/gen_c_expr.zen": "M",
       "src/sema/sema_fresh_module.zen": "A"}, True,
      "whole-tree reach still buys no company: a new file is a feature"),
+    ("fmt: sweep that deletes a stale expectation",
+     {"tests/corpus/lsp/a_missing_module_is_named/main.expected": "D"}, True,
+     "issue #791: deleting an expectation CHANGES it -- the strongest way"
+     " to -- and `status in \"AM\"` was a substring test that let D and R"
+     " slip through as if silence were innocence"),
+    ("ufcs: sweep that renames an expectation away",
+     {"tests/corpus/lex/backslash/main.expected": "R"}, True,
+     "issue #791: a renamed expectation is a changed expectation; the"
+     " rename's new name is what landed"),
     ("wip: half the tree reordered", {"src/sema/sema_type.zen": "M"}, True,
      "`wip:` states no scope, so any src/ touch is outside it"),
     # --- a name with capitals in it ---------------------------------------
