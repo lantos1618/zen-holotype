@@ -179,56 +179,79 @@ variant_named = (c :: Checker, decl: DeclId, name: str) bool {
     })
 }
 
-// Which MEMBER of a type declares a variant name, and the type that
-// member IS: `NotANumber` under the set `Trouble = AllocError |
-// ParseError` answers the `ParseError` id, and nothing anywhere else.
-// A miss is `None`, so a pattern naming no case of any member falls
-// through to the readings it always had.
+// Which MEMBER of a set spells this name, and the type that member IS:
+// `ParseError` under `Trouble = AllocError | ParseError` answers the
+// `ParseError` id, and so does `NotANumber`, because a leaf is spelled
+// through its member. A miss is `None`, so a pattern naming nothing the
+// set declares falls through to the readings it always had.
 //
 // THE QUESTION SERVES BOTH HALVES. Sema's normaliser asks it to read
 // `Member.Leaf` / `Member(Leaf)` as the two-level case they are; gen_c's
 // match lowering asks it to test and bind those same arms. One function,
 // because sema checking one arm shape while the backend emits another is
 // this compiler's worst failure class.
-variant_member* = (c :: Checker, ty: TyId, variant: str) Res<TyId> {
+member_of* = (c :: Checker, ty: TyId, name: str) Res<TyId> {
     c.types.at(ty).match({
-        Union(u) => c.union_variant_member(u, variant),
-        Named(n) => c.named_variant_member(ty, n, variant),
+        Union(u) => c.union_member_named(u, name),
+        Named(n) => c.named_member_of(ty, n, name),
         _        => None,
     })
 }
 
-// A set answers over its members in canonical order. Two members
-// declaring one leaf name would make `Member.Leaf` ambiguous; every
-// current declaration names distinct leaves, so the first hit stands
-// and ambiguity stays unrepresentable until a rule exists for it.
-//
-// The hit is `Ok(member)` — a set-of-one flattens to its member, so a
-// bare member id is the answer a match arm needs.
-union_variant_member = (c :: Checker, u: TyUnion, variant: str) Res<TyId> {
+// The set itself: first hit wins. A MEMBER spelling answers for itself;
+// a LEAF spelling answers for the member that declares it, which is
+// what makes `NotANumber` and `ParseError.NotANumber` one arm shape.
+union_member_named = (c :: Checker, u: TyUnion, name: str) Res<TyId> {
     u.members.loop((h, i, m) {
-        c.member_declares(m, variant).then(() { h.break(c.set_of(m)) });
+        (c.member_declares(m, name) || c.member_is(m, name)).then(
+            () { h.break(c.set_of(m)) });
     })
 }
 
-// A NAME read as a union answers for the set it stands for, so
-// `ParseError.NotANumber` works against `Trouble` however the scrutinee
-// was spelled. A nominal enum has no members and answers nothing.
-named_variant_member = (c :: Checker, ty: TyId, n: TyNamed, variant: str)
-                       Res<TyId> {
-    c.union_reading(n.decl).match({
-        false => None,
-        true  => c.variant_member(ty, variant),
+// A NAME standing for a set answers over that set — `set_of` turns the
+// id into its TyUnion. Asking this function again at the name would
+// recurse forever; the answer routes through the UNION, never back.
+named_member_of = (c :: Checker, ty: TyId, n: TyNamed, name: str)
+                  Res<TyId> {
+    wide = c.set_of(ty);
+    c.types.at(wide).match({
+        Union(u) => c.union_member_named(u, name),
+        _        => None,
     })
 }
 
-// Whether one declared member names this variant. The member is asked at
+// Whether one declared member NAMES this variant. The member is asked at
 // ITS OWN declaration — `decl_has_variant` walks the variants of what it
 // names — so an alias or a same-named type elsewhere cannot answer for
 // it.
 member_declares = (c :: Checker, m: TyId, variant: str) bool {
     c.types.at(m).match({
         Named(n) => c.decl_has_variant(n.decl, variant),
+        _        => false,
+    })
+}
+
+// Whether one member IS this type — the `Member.Leaf` outer half, whose
+// name is a type, not a variant of anything. Asked at the member's OWN
+// declaration, like `member_declares`.
+member_is = (c :: Checker, m: TyId, name: str) bool {
+    c.types.at(m).match({
+        Named(n) => c.decl_is_named(n.decl, name),
+        _        => false,
+    })
+}
+
+decl_is_named* = (c :: Checker, decl: DeclId, name: str) bool {
+    decl_at(c.tree, decl).match({
+        None  => false,
+        Ok(d) => decl_kind_names(d, name),
+    })
+}
+
+decl_kind_names = (d: Decl, name: str) bool {
+    d.kind.match({
+        Enum(e)  => e.name.text.eq(name),
+        Alias(x) => x.name.text.eq(name),
         _        => false,
     })
 }
