@@ -54,6 +54,7 @@ TyId, TyFn, TyNamed = sema.sema_ty
 Def = sema.sema_def
 SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
+refuse_handle_argument = sema.sema_place
 construct, instantiate, variant_call_type = sema.sema_apply
 subst_list = sema.sema_inst
 is_case = sema.sema_match
@@ -524,7 +525,28 @@ chosen_ret = (
     params ::= c.alloc.Vec<TyId>();
     c.settled_params(id, k, params).try();
     c.arg_lambdas(call.args, params, recv_off(call, actuals), ctx).try();
+    c.args_handle_check(call.args, params, recv_off(call, actuals), ctx).try();
     Ok(ret);
+}
+
+// ONE SEAT FOR THE HANDLE-AS-ARGUMENT REFUSAL. Lambda arguments are
+// skipped — their bodies are already typed through `arg_lambdas`, and a
+// lambda is the one legal inward path for a handle. Every other
+// argument whose settled formal cannot receive handles inward is the
+// bug #782 names: accepted here in silence, `zu_l1h` undeclared in cc.
+args_handle_check = (
+    c      :: Checker,
+    args   : Vec<Arg>,
+    params : Vec<TyId>,
+    off    : usize,
+    ctx    : Ctx
+) Res<(), AllocError> {
+    i ::= off;
+    args.loop((h, a) {
+        refuse_handle_argument(c, a, ty_at(params, i), ctx).try();
+        i = i + 1;
+    });
+    Ok(());
 }
 
 // `k.params` STILL NAMES THE CALLEE'S OWN `T`, and the caller's body is

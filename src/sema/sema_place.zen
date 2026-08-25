@@ -18,10 +18,12 @@
 // `sema_recv.zen` ask the remaining two questions, who owns the place
 // and who may write through it: types here, permission there.
 
-Expr, ExprId, Bind, Access = std.ast
+Expr, ExprId, Bind, Access, Arg, Lambda = std.ast
 AllocError = std.mem
 str = std.text
-TyId, TyArray, literal_default = sema.sema_ty
+Vec = std.collections
+Range = std.core
+TyId, TyArray, TyFn, literal_default = sema.sema_ty
 Checker, Ctx, Binding = sema.sema_check
 SemaFault, NameFault, PairFault = sema.sema_diag
 decl_at = sema.sema_def
@@ -79,6 +81,66 @@ refuse_handle_at = (c :: Checker, id: ExprId) Res<(), AllocError> {
         node.span,
         SemaFault.HandleNotAValue(NameFault(name: handle_spelling(c, id))),
     )
+}
+
+// THE SAME RULE ONE CALL OVER. `f(h)` reads like handing the loop on,
+// but a real callee's formal is C storage — `keep = (g: LoopHandle) ()
+// { .. }` emitted `keep(zu_l1h)` with `zu_l1h` declared nowhere, cc
+// alone objecting. The one legal inward path is the spliced body: a
+// lambda's parameters are bound by the frame it is inlined into, and
+// `gen_c_inline.lower_arg_value` rewrites a handle argument to the
+// depth of the loop it names. So the argument position refuses unless
+// the settled formal itself receives handles inward — `(g: LoopHandle)
+// ()`, or a body type carrying one — which is what every `loop`-family
+// declaration writes and nothing else can mean.
+//
+// Lambda arguments are not here: their bodies are typed through
+// `arg_lambdas` after resolution and never pass through this seat.
+// Asked AFTER the candidate is chosen, so the diagnostic names the
+// handle rather than inventing an overload failure.
+refuse_handle_argument* = (c :: Checker, a: Arg, want: TyId, ctx: Ctx)
+                         Res<(), AllocError> {
+    c.type_of(a.value, ctx).match({
+        Err(_) => Ok(()),
+        Ok(ty) => c.is_handle_ty(ty).match({
+            false => Ok(()),
+            true  => refuse_unless_inward(c, a, want),
+        }),
+    })
+}
+
+refuse_unless_inward = (c :: Checker, a: Arg, want: TyId)
+                       Res<(), AllocError> {
+    inward = c.formal_takes_handle(want).try();
+    inward.match({
+        true  => Ok(()),
+        false => c.refuse_handle_at(a.value),
+    })
+}
+
+// A FORMAL RECEIVES HANDLES INWARD when its type mentions LoopHandle:
+// `(g: LoopHandle) ()` holds the handle itself; `(i: usize, g:
+// LoopHandle) bool` threads it beside other arguments. Nothing else
+// can: a handle stored in a struct would make it escapable, which
+// `loop_handle.zen` rules out ("never stored, returned, or captured").
+formal_takes_handle = (c :: Checker, ty: TyId) Res<bool, AllocError> {
+    c.types.at(ty).match({
+        Fn(f) => fn_param_has_handle(c, f.params),
+        _     => Ok(false),
+    })
+}
+
+fn_param_has_handle = (c :: Checker, ps: Vec<TyId>) Res<bool, AllocError> {
+    at = Range(0, ps.len).find((i) {
+        ps.get(i).match({
+            Ok(p) => c.is_handle_ty(p),
+            None  => false,
+        })
+    });
+    at.match({
+        Ok(_) => Ok(true),
+        None  => Ok(false),
+    })
 }
 
 // The handle as WRITTEN, parens unwrapped, for the diagnostic to say
