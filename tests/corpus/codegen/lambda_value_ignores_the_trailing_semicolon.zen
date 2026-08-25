@@ -1,0 +1,51 @@
+// A LAMBDA'S VALUE IS THE SAME VALUE WITH THE `;` AND WITHOUT IT, and
+// this file is one program because the point is that the two spellings
+// AGREE. Issue #793: `gen_c_settle.lambda_value_type` read `Block.value`
+// — which the parser fills only for a tail written WITHOUT a `;` — so
+// `() { 42; }` typed as `()` in the backend while `sema_type.block_type`
+// typed it `i32`. Sema and the backend disagreed about what a body
+// returns and the backend won: the emitted C computed the 42, threw it
+// away as `(void)(42)`, and assigned a literal `0`.
+//
+// EVERY BINDING HERE IS ANNOTATED ON PURPOSE. `i32` is what makes sema
+// answer the call, so the program compiles and RUNS with the defect in
+// place — it printed `semi 0` and exited 0, with no diagnostic anywhere.
+// A wrong answer that looks plausible is the failure this tree has the
+// least defence against, so this test asserts the NUMBER, not the exit
+// status: unannotated, the old compiler merely refuses to print a `()`
+// and the red says nothing about the arithmetic.
+//
+// `bare` is the control that says the fix did not simply move the wrong
+// answer to the other spelling, and `tail` says a `;` tail sitting
+// behind other statements is still the one that counts.
+//
+// `nothing` is the other half of the rule and must NOT change: a body
+// whose last statement is a BINDING hands out no value, so `()` stays
+// the honest answer there. `tail_index` lowers exactly the last
+// EXPRESSION statement and nothing else, and this reader now agrees
+// with it rather than guessing.
+
+apply = <T>(f: () T) T { f() }
+
+run = (f: () ()) () { f() }
+
+main = (env: Env) Res<i32, IoError> {
+    bare: i32 = apply(() { 42 });
+    semi: i32 = apply(() { 42; });
+    tail: i32 = apply(() {
+        a = 20;
+        b = 22;
+        a + b;
+    });
+
+    println("bare {}", bare);
+    println("semi {}", semi);
+    println("tail {}", tail);
+
+    run(() {
+        held = 7;
+        println("nothing {}", held);
+    });
+
+    Ok(0);
+}

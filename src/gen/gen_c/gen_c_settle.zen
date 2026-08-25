@@ -36,6 +36,7 @@ Range = std.core
 TyId, TyRes = sema.sema_ty
 Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
+tail_expr = sema.sema_hoist
 Inst, has_var = sema.sema_inst
 param_type = sema.sema_denote
 CBackend = gen.gen_c.gen_c_state
@@ -396,18 +397,22 @@ declare_peek_slot = (be :: CBackend, name: str, ty: TyId)
     Ok(());
 }
 
-// WHAT A LAMBDA BODY EVALUATES TO. A block with no value node is a
-// sequence of statements and evaluates to `()` — "a statement ends with
-// `;`" said about a closure — and a value node is typed like any other
-// expression. Where sema has no answer for that expression the honest
-// one is still `()`: a body with nothing to give gives nothing, and
+// WHAT A LAMBDA BODY EVALUATES TO, WHICHEVER WAY THE TAIL WAS WRITTEN.
+// `Block.value` is only the tail written WITHOUT a `;`, so reading it
+// alone made `() { 42; }` evaluate to `()` while `sema_type.block_type`
+// carried the last statement's type out — sema said `i32`, this said
+// `()`, and the emitted C computed the 42, discarded it, and assigned a
+// literal 0. `sema_hoist.tail_expr` is the reconciliation and is what
+// `tail_index` below already lowers, so both halves read one expression.
+// Where sema has no answer for that expression the honest one is still
+// `()`: a body with nothing to give gives nothing, and
 // `write_res_payload` evaluates a unit payload for its effect rather
 // than dropping it, so nothing is lost by saying so.
 lambda_value_type = (be :: CBackend, l: Lambda, ctx: Ctx)
                     Res<TyId, AllocError> {
     unit = be.check.types.prim("()").try();
     blk  = be.tree.block_at(l.body);
-    blk.value.match({
+    be.check.tail_expr(blk).match({
         Ok(e) => be.value_or_unit(e, ctx, unit),
         None  => Ok(unit),
     })

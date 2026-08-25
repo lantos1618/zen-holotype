@@ -145,7 +145,7 @@ plain_close = (
     tail : usize
 ) Res<(), AllocError> {
     be.close_value(blk, ctx, want, dst, tail).try();
-    be.leave_block(be.keep_name(blk))
+    be.leave_block(be.keep_name(blk, tail))
 }
 
 // A `Discard` evaluates in place and an `Into` writes to storage the
@@ -207,7 +207,7 @@ spilled_return = (
     be.declarator(want, tmp.view(), decl).try();
     be.fmt("{};\n", decl.view()).try();
     be.close_value(blk, ctx, want, Dest.Into(tmp.view()), tail).try();
-    be.leave_block(be.keep_name(blk)).try();
+    be.leave_block(be.keep_name(blk, tail)).try();
     be.fmt("return {};\n", tmp.view())
 }
 
@@ -215,10 +215,40 @@ spilled_return = (
 // Dropping it here would free what the caller is about to read; a
 // larger expression has been COPIED into the destination by now, and a
 // binding it merely read is still this block's to destroy.
-keep_name = (be :: CBackend, blk: Block) str {
+//
+// IT IS THE EXPRESSION `close_value` DELIVERS, NOT THE ONE THE AUTHOR
+// PUNCTUATED. `Block.value` holds only a tail written without a `;`, so
+// reading it alone exempted the binding in the `a` spelling and nothing
+// at all in `a;` — the arena the block handed out was dropped by the
+// arm that produced it, and the next `Vec.add` bumped through freed
+// pages. `tail` is `tail_index`'s answer and says both things at once:
+// which statement is the value, and — when it is `stmts.len` — that a
+// `Discard` asked for none, so nothing is exempt.
+keep_name = (be :: CBackend, blk: Block, tail: usize) str {
     blk.value.match({
         Ok(e) => be.bare_name(e),
+        None  => be.tail_stmt_name(blk, tail),
+    })
+}
+
+tail_stmt_name = (be :: CBackend, blk: Block, tail: usize) str {
+    (tail == blk.stmts.len).match({
+        true  => "",
+        false => be.stmt_at_name(blk, tail),
+    })
+}
+
+stmt_at_name = (be :: CBackend, blk: Block, tail: usize) str {
+    blk.stmts.get(tail).match({
         None  => "",
+        Ok(s) => be.stmt_value_name(s),
+    })
+}
+
+stmt_value_name = (be :: CBackend, s: Stmt) str {
+    s.kind.match({
+        Expr(e) => be.bare_name(e.expr),
+        _       => "",
     })
 }
 
