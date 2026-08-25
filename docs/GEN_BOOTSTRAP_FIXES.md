@@ -681,7 +681,7 @@ context narrows at the call, and settling a literal's type from its context is
 bidirectional inference and sema's job. All true. What it does not say is that
 **the check which does exist runs in exactly one place.**
 
-`src/sema/sema_trap.zen:194` declares `check_literal`. `grep` finds one call
+`src/sema/sema_trap.zen:169` declares `check_literal`. `grep` finds one call
 site in the whole tree: `sema_type.zen:763`, inside `check_assign`, which
 `bind_stmt` calls. So the rule covers `x: i32 = <literal>` and nothing else.
 

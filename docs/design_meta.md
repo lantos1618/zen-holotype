@@ -49,10 +49,10 @@ Companion to `DESIGN.md`, `PLAN.md` and `TESTING.md`. Those say what the languag
 | **one AST, and it is already the target** | `src/std/ast/ast_arena.zen:56` — `Ast.add_expr` is exported and appends; a comptime-built node has an arena to live in |
 | **hygienic inlining of a lambda at a call site** | `src/gen/gen_c/gen_c_inline.zen` — `Closure` records both scope depths and `run_closure` rewinds to them. This is the field-walk's unroll, already written |
 | **one body per instantiation** | `src/gen/gen_c/gen_c_mono.zen`, reading `sema_inst.zen`'s answer back |
-| a step-budgeted expression folder, with the argument for the budget | `src/sema/sema_trap.zen:505` (`FOLD_DEPTH`), `:509` (`const_int`) |
+| a step-budgeted expression folder, with the argument for the budget | `src/sema/sema_const.zen:191` (`FOLD_DEPTH`), `:195` (`const_int`) |
 | the refusal | `src/sema/sema_meta.zen` — §3, M0 |
 
-`sema_trap.zen:498` is worth quoting because it draws the line this document has to cross:
+`sema_const.zen`'s `FOLD_DEPTH` is worth quoting because it draws the line this document has to cross:
 
 > A budget is right here (elsewhere a bound must REPORT) because this is a **prover**: declining to prove is already what this file does for values reached through a binding.
 
@@ -171,7 +171,7 @@ M0 is landed. Each of the rest names what it unblocks, its gate, and its risk. T
 §4. A decision and a `DESIGN.md` edit; no compiler code. **Decided:** the four table rows (R1–R4), A-META-ARG (R5), and the two forms (R6) — the rulings live in §4. **Unblocks:** every milestone below, all of which are written against these names. **Gate:** `make design`, plus §4's table at zero rows. **Risk:** it was a constitutional change and the wrong names would have been expensive to withdraw.
 
 ### M2 — the comptime evaluator
-The language minus io and actors (`DESIGN.md:472`), may allocate, may loop, **step-budgeted from the first commit, and the budget REPORTS** — `sema_trap.zen:498` explains why a prover may decline and an evaluator may not. Two value kinds, known and residual (§5). **Unblocks:** M3 onward. **Gate:** none of its own — see §7.2. **Risks:** (i) a hanging build is the failure mode that makes the feature unusable, so the budget is not deferrable; (ii) recursion in the evaluator over deeply-nested input is a segfault, not a diagnostic — `sema_trap.zen:495-496` records that this tree has already been bitten there; (iii) allocation at comptime needs an `Alloc`, and whose it is (the `Checker`'s? the `Ast`'s?) is a design question, not a lookup.
+The language minus io and actors (`DESIGN.md:472`), may allocate, may loop, **step-budgeted from the first commit, and the budget REPORTS** — `sema_const.zen`'s `FOLD_DEPTH` explains why a prover may decline and an evaluator may not. Two value kinds, known and residual (§5). **Unblocks:** M3 onward. **Gate:** none of its own — see §7.2. **Risks:** (i) a hanging build is the failure mode that makes the feature unusable, so the budget is not deferrable; (ii) recursion in the evaluator over deeply-nested input is a segfault, not a diagnostic — `sema_const.zen`'s `FOLD_DEPTH` records that this tree has already been bitten there; (iii) allocation at comptime needs an `Alloc`, and whose it is (the `Checker`'s? the `Ast`'s?) is a design question, not a lookup.
 
 **Skeleton landed under M3, as §7.2 said it would** — and the skeleton is what landed, not the evaluator. The budget exists from the first commit and REPORTS: `META_STEPS: usize = 4096` (`sema_meta.zen:50`), threaded as remaining fuel, raising `SemaFault.ComptimeBudget` (`sema_diag.zen:150`; the message names the budget and points here). The number is documented in code as a setting, not a measurement — the one rule that exists spends 3 steps and cannot loop. Still M2's, all of it: comptime loops, allocation, and the known/residual value domain — `.name` needed none of §5's machinery, and staging arrives with `self.at(field)` and `fields()` in M4.
 
@@ -212,7 +212,7 @@ b: [u8, SIZE] = [1, 2, 3, 4];   // reported: expected [u8, 0], found [int, 4]
 
 **Fixed 2026-08-17, on its own ticket, and NOT by an evaluator.** The split is what let the fix land inside the seed subset for nothing:
 
-- **A NAME IS A LOOKUP.** `sema_trap.counted_array` resolves the count's name to its `ConstDef` — the same `const_def` the const-pattern rule reads — and hands the constant's declared value back to the ordinary folder. `bootstrap.array_count` is the same three steps over `_const_decl`. **The bill above is the EVALUATOR's, and a lookup is not one**, so bootstrap paid a dozen lines and no design.
+- **A NAME IS A LOOKUP.** `sema_const.counted_array` resolves the count's name to its `ConstDef` — the same `const_def` the const-pattern rule reads — and hands the constant's declared value back to the ordinary folder. `bootstrap.array_count` is the same three steps over `_const_decl`. **The bill above is the EVALUATOR's, and a lookup is not one**, so bootstrap paid a dozen lines and no design.
 - **ANYTHING FURTHER IS REFUSED BY NAME.** `SIZE * 2` and `count()` are evaluator territory and say so at the count's own position — `SemaFault.CountNotComptime`, worded identically in both toolchains, pointing here. The refused count poisons the whole array type, so the two downstream lies cannot fire: `must-fail/sema/array_count_is_not_comptime` carries a `.count` of 1 to hold that closed.
 
 `corpus/sema/array_count_from_a_constant` is the other half, and it asserts what sema alone cannot: `[u8, SIZE]` and `[u8, 4]` must reach `cc` as ONE mangled struct.
