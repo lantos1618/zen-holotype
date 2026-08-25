@@ -35,7 +35,7 @@ ZCC      = $(CACHE) $(CC)
 # `editors` IS IN THIS LIST BECAUSE `editors/` IS ALSO A DIRECTORY. Without
 # it make finds the directory, calls the target up to date, and runs the
 # script never — a gate that cannot fail because it cannot run.
-.PHONY: all build seed test lint parse design cap dupcomments fleet faults lextile ufcs style editors fixpoint determinism grammar grammar-test fmt bench bench-allocs emit-runs asan leak profile clean help
+.PHONY: all build seed test lint parse design cap dupcomments fleet faults lextile ufcs style editors fixpoint determinism grammar grammar-test fmt bench bench-allocs emit-runs asan asan-corpus leak profile clean help
 
 all: test
 
@@ -222,7 +222,7 @@ dupcomments: build
 lextile: build
 	@mkdir -p build/gates
 	@$(call gate,lex_tiling)
-	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tests/bench tools/gates tools/fleet -name '*.zen' -print0 | LC_ALL=C sort -z); \
+	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tests/bench tests/asan-canary tools/gates tools/fleet -name '*.zen' -print0 | LC_ALL=C sort -z); \
 	  test $${#files[@]} -gt 0 \
 	    || { echo "lextile: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
 	  build/gates/lex_tiling "$${files[@]}"
@@ -304,7 +304,7 @@ design: grammar
 ## zen.so and bypasses the cache; `--lang-name zen` tells the CLI which
 ## symbol to load from it.
 parse: grammar
-	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tests/bench -name '*.zen' -print0); \
+	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tests/bench tests/asan-canary -name '*.zen' -print0); \
 	  test $${#files[@]} -gt 0 \
 	    || { echo "parse: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
 	  cd grammar && npx tree-sitter parse --quiet --stat -l "$$(pwd)/zen.so" --lang-name zen "$${files[@]/#/../}"
@@ -370,7 +370,7 @@ grammar-test: grammar
 ## which is an instruction to do nothing and succeed when the find comes
 ## up empty.
 fmt: build
-	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tools/gates tools/fleet -name '*.zen' \
+	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tests/asan-canary tools/gates tools/fleet -name '*.zen' \
 	    -not -path 'tests/corpus/lex/*' -print0); \
 	  test $${#files[@]} -gt 0 \
 	    || { echo "fmt: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
@@ -426,6 +426,32 @@ bench: build
 asan: seed/zen.c
 	$(CC) -std=c99 -O1 -g -fsanitize=address,leak seed/zen.c -o zen-asan
 	tests/bench/asan.sh ./zen-asan
+
+## asan-corpus: every corpus program run under ASan + UBSan, WITH A
+## POSITIVE CONTROL. The corpus asserts what a program PRINTS, which is
+## an oracle blind to a program that prints the right thing for the wrong
+## reason -- one of them read three answers out of freed memory for its
+## whole life and printed exactly what it was supposed to (#788).
+##
+## THE CANARY IS THE POINT. A sanitizer is a property of the BUILD, not of
+## the source, and the build can take the detector away without taking the
+## flag away: at -O2 the frame ASan would poison in tests/asan-canary/main.zen
+## is inlined out of existence and a known live stack-use-after-return
+## (#785) runs clean and prints the RIGHT answer. The first sweep of this
+## corpus was built that way and reported 698 programs spotless with that
+## bug inside it. So the script compiles the canary with the SAME flag
+## string it is about to hand the sweep and refuses -- exit 2, sweep not
+## run -- unless the report comes back. Prove it for yourself:
+##
+##     SAN_CFLAGS='-std=c11 -O2 -g -fsanitize=address' make asan-corpus
+##
+## NOT IN `make test`, and the reason is address space rather than time:
+## 87s against 71s for 699 programs at -j8, but ASan's shadow map wants
+## ~20x the address space and several of these at once on one box start
+## getting things killed. Run it before landing anything that touches
+## std.mem, gen_c's runtime, or ownership.
+asan-corpus: build
+	scripts/asan_corpus.sh
 
 ## leak: valgrind's answer to the same question. definite leaks only --
 ## still-reachable memory is where the deliberate argv rows land, and
