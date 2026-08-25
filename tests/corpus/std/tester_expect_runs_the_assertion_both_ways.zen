@@ -1,0 +1,38 @@
+// std.test's Tester.expect executes an assertion: a satisfied one yields
+// Ok so .try() passes through, an unsatisfied one yields
+// Err(TestError.Failed(reason)) that a caller can act on — Res, not a trap,
+// so the harness records it and runs the next test. The reason is one fixed
+// sentence: expect receives only a bool, so it names no specifics.
+//
+// Before expect had a body, both calls refused to lower:
+//   codegen does not lower this yet: `a call to a member with no body`
+//
+// PREDICTED stdout (why: true passes, false reports the fixed reason):
+//   ok=true
+//   err=expectation was false
+Tester, TestError = std.test
+
+one_is_one* = (t: Tester) Res<(), TestError> {
+    t.expect(1 == 1).try();
+    Ok(());
+}
+
+reason_of = (e: TestError) str {
+    e.match({
+        Failed(r) => r,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    t = Tester(env: env, alloc: env.mem.alloc());
+    one_is_one(t).match({
+        Ok(_)  => println("ok=true"),
+        Err(e) => println("err={}", reason_of(e)),
+    });
+    never_true = false;
+    t.expect(never_true).match({
+        Ok(_)  => println("ok=false-wrong"),
+        Err(e) => println("err={}", reason_of(e)),
+    });
+    Ok(0);
+}
