@@ -39,6 +39,7 @@ ctype, field_type, request_type, declared_ret = gen.gen_c.gen_c_type
 decl_ctx, decl_inst = gen.gen_c.gen_c_type
 expr = gen.gen_c.gen_c_expr
 declare_temp, enum_path, payload_type, is_variant = gen.gen_c.gen_c_flow
+lower_probe, lower_write, lower_read = gen.gen_c.gen_c_fs
 close_else, close_brace, open_null_test = gen.gen_c.gen_c_fs
 lower_stdin_read = gen.gen_c.gen_c_stdin
 lower_env_var = gen.gen_c.gen_c_env
@@ -236,11 +237,11 @@ console_verb = (
                Res<(), AllocError> {
     a.name.text.eq("println").match({
         true  => lower_console_print(be, c, a.name.text, ret, ctx, out),
-        false => be.mem_verb_1(id, c, a, rty, ret, aty, ctx, out),
+        false => be.verb_1(id, c, a, rty, ret, aty, ctx, out),
     })
 }
 
-mem_verb_1 = (
+verb_1 = (
     be  :: CBackend,
     id  : ExprId,
     c   : Call,
@@ -250,18 +251,15 @@ mem_verb_1 = (
     aty : TyId,
     ctx : Ctx,
     out :: String
-) Res<(), AllocError> {
+)
+         Res<(), AllocError> {
     a.name.text.eq("alloc").match({
         true  => be.lower_alloc(id, a, rty, ret, ctx, out),
-        false => be.mem_verb_2(id, c, a, rty, ret, aty, ctx, out),
+        false => verb_2(be, id, c, a, rty, ret, aty, ctx, out),
     })
 }
 
-// `Mem.page` AND `Mem.release` ARE THE LAST OF THE CHAIN. The Fs names
-// are answered one link above (`fs_verb_chain`), by the receiver type
-// that owns them — the same split `is_stdin_read` makes before any name
-// is read, because a name alone is shared and an owner is not.
-mem_verb_2 = (
+verb_2 = (
     be  :: CBackend,
     id  : ExprId,
     c   : Call,
@@ -271,10 +269,63 @@ mem_verb_2 = (
     aty : TyId,
     ctx : Ctx,
     out :: String
-) Res<(), AllocError> {
+)
+         Res<(), AllocError> {
     a.name.text.eq("page").match({
         true  => be.lower_page(id, c, ret, ctx, out),
-        false => be.lower_release(c, ctx, out),
+        false => verb_3(be, id, c, a, rty, ret, aty, ctx, out),
+    })
+}
+
+verb_3 = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    rty : TyId,
+    ret : TyId,
+    aty : TyId,
+    ctx : Ctx,
+    out :: String
+)
+         Res<(), AllocError> {
+    a.name.text.eq("release").match({
+        true  => be.lower_release(c, ctx, out),
+        false => verb_4(be, id, c, a, rty, ret, aty, ctx, out),
+    })
+}
+
+verb_4 = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    rty : TyId,
+    ret : TyId,
+    aty : TyId,
+    ctx : Ctx,
+    out :: String
+)
+         Res<(), AllocError> {
+    a.name.text.eq("write").match({
+        true  => be.lower_write(id, c, ret, ctx, out),
+        false => verb_5(be, id, c, a, ret, aty, ctx, out),
+    })
+}
+
+verb_5 = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    ret : TyId,
+    aty : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    a.name.text.eq("read").match({
+        true  => be.lower_read(id, c, ret, aty, ctx, out),
+        false => be.lower_probe(c, a.name.text, ctx, out),
     })
 }
 

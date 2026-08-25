@@ -337,11 +337,10 @@ write_defer_run = (out :: Emit) Res<(), AllocError> {
 //
 // `Fs`'s members have no Zen body for the same reason `Console`'s have
 // none, and this is what they bottom out in. `gen_c_cap.zen` lowers the
-// calls; these are the functions those calls name — four fs, and the
-// lock's take and give-back.
+// calls; these are the four functions those calls name.
 //
 // EMITTED ONLY FOR A PROGRAM THAT TOUCHES THE DISK, which is why the
-// three headers are here rather than at the top: this is the one place
+// two headers are here rather than at the top: this is the one place
 // the generated C leaves C99 for POSIX, and a hello-world should not
 // pay for it. C has no way to ask whether a path is a directory, and a
 // compiler walking a source tree has to know. `S_ISDIR` is the part of
@@ -363,8 +362,6 @@ emit_fs* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
 
 write_fs = (out :: Emit) Res<(), AllocError> {
     out.say("#include <sys/stat.h>").try();
-    out.say("#include <sys/file.h>").try();
-    out.say("#include <fcntl.h>").try();
     out.say("#include <errno.h>").try();
     out.line().try();
     out.say("#ifndef S_ISDIR").try();
@@ -383,8 +380,6 @@ write_fs = (out :: Emit) Res<(), AllocError> {
     write_fs_size(out).try();
     write_fs_write(out).try();
     write_fs_read(out).try();
-    write_fs_lock(out).try();
-    write_fs_unlock(out).try();
     Ok(());
 }
 
@@ -394,8 +389,7 @@ write_fs_ordinals = (out :: Emit) Res<(), AllocError> {
     out.say("#define ZG_FS_NOT_FOUND 1").try();
     out.say("#define ZG_FS_DENIED 2").try();
     out.say("#define ZG_FS_IS_DIR 3").try();
-    out.say("#define ZG_FS_EXISTS 4").try();
-    out.say("#define ZG_FS_FAILED 5").try();
+    out.say("#define ZG_FS_FAILED 4").try();
     out.line().try();
     Ok(());
 }
@@ -501,65 +495,6 @@ write_fs_read = (out :: Emit) Res<(), AllocError> {
     out.say("if (ferror(fh)) { fclose(fh); return ZG_FS_FAILED; }").try();
     out.say("fclose(fh);").try();
     out.say("return ZG_FS_OK;").try();
-    out.dedent();
-    out.say("}").try();
-    out.line().try();
-    Ok(());
-}
-
-// THE LOCK, AND ITS GIVE-BACK. `open(O_RDWR|O_CREAT|O_EXCL)` makes the
-// path exist for one instant and `flock` does the excluding, so a
-// crashed holder releases with its descriptors and nothing is left on
-// the disk to clean up. LOCK_EX | LOCK_NB: a caller that wanted to wait
-// has `Exists` in hand to retry around — blocking inside a generated
-// expression would be a hang nobody asked for.
-//
-// THE PATH NAMES WHAT IS SERIALISED, not a file that must be there:
-// O_CREAT on the LAST component only means an existing DIRECTORY under
-// that name still opens (flock takes it), which is why `.fixpoint/`
-// locks fine and a directory AT the path is refused as IsDir.
-write_fs_lock = (out :: Emit) Res<(), AllocError> {
-    comment(
-        out,
-        "the lock at p, or why not: Exists is someone else holding it"
-    ).try();
-    out.say("static int zg_fs_lock(const unsigned char *p, size_t n) {").try();
-    out.indent();
-    out.say("char buf[ZG_PATH_MAX];").try();
-    out.say("struct stat st;").try();
-    out.say("int fd;").try();
-    out.say("if (!zg_fs_path(buf, p, n)) return ZG_FS_FAILED;").try();
-    out.say("if (stat(buf, &st) == 0 && S_ISDIR(st.st_mode))").try();
-    out.say("    return ZG_FS_IS_DIR;").try();
-    out.say("fd = open(buf, O_RDWR | O_CREAT | O_EXCL, 0666);").try();
-    out.say("if (fd < 0 && errno == EEXIST)").try();
-    out.say("    fd = open(buf, O_RDWR);").try();
-    out.say("if (fd < 0) {").try();
-    out.say("    return errno == EACCES ? ZG_FS_DENIED : ZG_FS_NOT_FOUND;").try();
-    out.say("}").try();
-    out.say("if (flock(fd, LOCK_EX | LOCK_NB) != 0) {").try();
-    out.say("    close(fd);").try();
-    out.say("    return ZG_FS_EXISTS;").try();
-    out.say("}").try();
-    out.say("return fd;").try();
-    out.dedent();
-    out.say("}").try();
-    out.line().try();
-    Ok(());
-}
-
-// Dropping the last reference to a descriptor releases its flock and
-// closes it in one syscall, so the release is one line and cannot fail.
-// A spent Lock releases nothing twice: the descriptor is gone, and a
-// second close on it is the one error this floor refuses to risk.
-write_fs_unlock = (out :: Emit) Res<(), AllocError> {
-    comment(
-        out,
-        "the give-back: one close releases flock and fd together"
-    ).try();
-    out.say("static void zg_fs_unlock(int fd) {").try();
-    out.indent();
-    out.say("close(fd);").try();
     out.dedent();
     out.say("}").try();
     out.line().try();
