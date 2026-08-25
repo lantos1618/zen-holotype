@@ -63,6 +63,18 @@ construct* = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
     c.ctor_args(call, d, ctx, args).try();
     applied = c.types.named(d.id, d.qname, d.name, args).try();
     ty      = c.settled_ctor_type(call, d, ctx, args, applied).try();
+    // THE GATE THE TWO SWALLOW ARMS DOWNSTREAM DEPEND ON. Inference
+    // (`unify_ctor_field`) answers a member lookup's None with "nothing
+    // to see", and so does the shape check's `named_arg_fits` — whose Ok
+    // arm never asks `Found.constant` either. This call refuses every
+    // argument that could reach either swallow arm BEFORE they run, and
+    // the order is load-bearing: lift or reorder it and
+    // `Box(held: 1, m: 100)` compiles, runs, exits 0, and prints the
+    // declaration default of `n`. Pinned from the outside by
+    // must-fail/sema/construction_inference_names_no_member,
+    // construction_inference_names_a_constant and
+    // construction_shape_names_no_member, each red with this call
+    // commented out (verified 2026-08-25).
     c.check_ctor_fields(call, ty, ctx).try();
     c.check_ctor_shape(call, ty, c.tree.expr_at(id).span).try();
     Ok(ty);
