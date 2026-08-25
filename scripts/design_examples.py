@@ -56,6 +56,19 @@ GRAMMAR = ROOT / "grammar"
 
 FENCE = re.compile(r"^```groovy( fragment)?$")
 
+# HOW MANY COMPLETE EXAMPLES DOCS/DESIGN.MD MUST STILL CARRY. A ratchet, and
+# the docstring above names the exact way this gate would go quiet without
+# one: `fragment` is what REMOVES a fence from the check, so re-marking the
+# examples one at a time shrinks the gate to nothing while every run stays
+# green and the summary line keeps printing a number nobody compares against
+# anything. Eleven is what the document had when this floor was written.
+#
+# Adding examples never touches this. Removing one is a deliberate act and it
+# has to be spelled here, with the reason in the commit -- which is the whole
+# difference between a document that lost an example and a gate that lost a
+# check.
+FLOOR = 11
+
 
 def blocks(text: str):
     """(line number, is_fragment, source) for every groovy fence."""
@@ -114,6 +127,14 @@ def main() -> int:
               " check just stopped checking -- fix the script, do not delete it.",
               file=sys.stderr)
         return 2
+    if checked < FLOOR:
+        print(f"design_examples: only {checked} complete example(s), and this"
+              f" gate is set to expect at least {FLOOR}. Either fences were"
+              " re-marked ```groovy fragment, which takes them OUT of this"
+              " check, or examples left the document. Lower FLOOR in this"
+              " script deliberately and say why -- do not let the number"
+              " drift down on its own.", file=sys.stderr)
+        return 1
     return 1 if failures else 0
 
 

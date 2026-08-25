@@ -62,6 +62,21 @@ POSITIVE_DIRS = (ROOT / "tests" / "corpus", ROOT / "example")
 # batch is re-run file by file so the failure names its file.
 TIMEOUT = 120
 
+# HOW MANY MUST-NOT-PARSE FIXTURES tests/parse/errors/ must still carry.
+#
+# The docstring above already names the hazard -- "`23 negative(s) rejected`
+# dropping to a smaller number is how you find out the fixtures moved" -- and
+# then only PRINTS the number. A count nobody compares against anything is a
+# count that can walk down to 1 with every run green, which is the same shape
+# as the empty-set gate this whole script replaced: the check does not fail,
+# it just stops covering things. So the number is asserted.
+#
+# The floor is a RATCHET, not a census. Adding a negative fixture never
+# touches it. Removing one is deliberate -- three left this directory the day
+# this gate first ran, and the docstring above says by name where each went --
+# so lowering it is a line in a commit rather than a silent drift.
+NEGATIVE_FLOOR = 23
+
 
 def parse_batch(paths: list[Path]) -> subprocess.CompletedProcess:
     """tree-sitter parse over many files at once. Exit 1 if ANY has an error
@@ -153,6 +168,16 @@ def main() -> int:
                     " or the file did -- this file parsed the last time the"
                     " gate ran."
                 )
+
+    if len(negatives) < NEGATIVE_FLOOR:
+        failures.append(
+            f"tests/parse/errors/ holds {len(negatives)} fixture(s) and this"
+            f" gate expects at least {NEGATIVE_FLOOR}. A must-not-parse"
+            " fixture that leaves takes its rule out of the grammar's contract"
+            " with it. Lower NEGATIVE_FLOOR in this script deliberately and"
+            " say where the fixture went -- the three that left in 2026 are"
+            " named in this file's docstring."
+        )
 
     for line in failures:
         print(line)
