@@ -52,6 +52,33 @@ pinned_at* = (o: Own, root: usize) bool {
     }).match({ Ok(_) => true, None => false })
 }
 
+// A write-back hands the binding a NEW value, and the capture holds
+// the OLD one — copied at registration (`defer_captures_at_registration`)
+// — so the pin dies with the value it named, the way `own_release`
+// drops a pin whose block left. Without this, a revived binding stays
+// unconsumable forever and the sentence blames a capture that no longer
+// aliases anything.
+unpin* = (o :: Own, root: usize) Res<(), AllocError> {
+    kept ::= o.alloc.Vec<Pin>();
+    o.pinned.loop((h, p) { keep_other_pin(p, root, kept).try() });
+    take_pins(o).try();
+    kept.loop((h, p) { o.pinned.add(p).try() });
+    Ok(())
+}
+
+keep_other_pin = (p: Pin, root: usize, kept :: Vec<Pin>) Res<(), AllocError> {
+    ((p.root == root)).match({
+        true  => Ok(()),
+        false => kept.add(p),
+    })
+}
+
+take_pins = (o :: Own) Res<(), AllocError> {
+    n = o.pinned.len;
+    Range(0, n).loop((h, i) { o.pinned.take(o.pinned.len - 1) });
+    Ok(())
+}
+
 // The first capture wins: it is where the binding stopped being
 // movable, and every later one repeats it.
 first_pin* = (o: Own, root: usize) Res<Pin> {
