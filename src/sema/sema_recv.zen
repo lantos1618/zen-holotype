@@ -66,15 +66,25 @@ place_type, refuse, root_mutable = sema.sema_own
 // `path_root` answered: only a binding this frame declares can be
 // aliased, and only one marked writable is written by the call.
 
+// The walk only means something when THIS call's receiver was copied:
+// a `::` receiver is handed the address of the place itself, so an
+// argument's write through it is seen and there is nothing to refuse.
 check_receiver* = (c :: Checker, o :: Own, k: Call, ctx: Ctx)
                   Res<(), AllocError> {
     c.tree.expr_at(k.callee).kind.match({
         Access(a) => c.check_method_call(o, a, ctx),
         _         => Ok(()),
     }).try();
-    c.path_root(o, k.callee).match({
-        None  => Ok(()),
-        Ok(i) => c.check_snapshotted(o, k, i),
+    c.tree.expr_at(k.callee).kind.match({
+        Access(a) => c.wants_mutable(c.place_type(o, a.base), a.name.text)
+            .match({
+                true  => Ok(()),
+                false => c.path_root(o, a.base).match({
+                    None  => Ok(()),
+                    Ok(i) => c.check_snapshotted(o, k, i),
+                }),
+            }),
+        _         => Ok(()),
     })
 }
 
