@@ -1,0 +1,66 @@
+// THE RAW FLOOR IS UNCHECKED, AND A NEIGHBOUR'S BYTES COME BACK VERBATIM.
+//
+// Issue #787. DESIGN.md's failure model (the trap list) names only
+// checked doors: fixed-array indexing traps, `Vec.get` answers None.
+// `Ptr.read` is C's p[i] -- no bounds held anywhere, nothing traps --
+// and `Vec.ptr*` is the one export of a collection's private storage,
+// so an overread through it is that type's DOCUMENTED behaviour. The
+// issue asks for it to be written down (option 3) rather than closed;
+// this test pins what "written down" describes, in the program's own
+// voice:
+//
+//   - buf owns exactly 4 bytes; len reports 4 and get(4) is None --
+//     the checked doors keep behaving, nothing about them changed
+//   - p.read(4..63) answers anyway, exit 0, no trap: the raw floor
+//     does NOT bounds-check, and nothing at the call site marks it
+//   - the overread bytes are OTHER LIVE OBJECTS, not garbage: secret
+//     was allocated after buf in the same arena page, and its 16
+//     bytes of "SUPERSECRETKEY!!" come back verbatim at offsets
+//     32..47 -- because the arena never reuses a byte (mem_arena.zen),
+//     and never leaves its malloc block, so ASan would not flag this
+//     run. Offsets 16..23 show the same again for secret's ABANDONED
+//     first 8-byte run ("SUPERSEC"): a grow moved the bytes and the
+//     arena kept the old copy, which an overread sees too
+//
+// The exact window [32,48) is pinned byte-for-byte: if the allocator's
+// layout ever changes, this test must go red and be re-derived from
+// the new layout -- a silent move of neighbour data under a raw-floor
+// read is precisely the event nobody may miss.
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+
+    // 4 owned bytes, allocated first
+    buf ::= alloc.Vec<u8>();
+    buf.add('a').try();
+    buf.add('b').try();
+    buf.add('c').try();
+    buf.add('d').try();
+
+    // 16 more bytes, allocated after: same arena page, higher address
+    secret ::= alloc.Vec<u8>();
+    msg ::= "SUPERSECRETKEY!!";
+    Range(0, msg.len).loop((h, i) { secret.add(msg.index(i)).try() });
+
+    // the checked doors still answer: len is honest and get past the
+    // end is None, exactly as the failure model says
+    println("len={}", buf.len);
+    buf.get(4).match({
+        Ok(_) => println("get bad"),
+        None  => println("get none"),
+    });
+
+    // the raw floor does not check: 64 reads through ptr(), exit 0
+    p ::= buf.ptr();
+    print("reads");
+    Range(0, 64).loop((h, i) { print(" {}", p.read(i)) });
+    println("");
+
+    // and the neighbour's contents arrive verbatim: the 16 bytes at
+    // offsets 32..47 are secret's own storage (its live run after one
+    // grow: 8 -> 16)
+    print("window");
+    Range(32, 48).loop((h, i) { print(" {}", p.read(i)) });
+    println("");
+    Ok(0);
+}
