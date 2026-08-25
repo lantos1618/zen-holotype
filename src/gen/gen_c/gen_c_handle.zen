@@ -24,6 +24,7 @@ AllocError = std.mem
 str, String = std.text
 TyId = sema.sema_ty
 Ctx = sema.sema_check
+literal_overflows = sema.sema_trap
 sym_member, sym_variant = gen.gen_name
 RES_PATH = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
@@ -209,9 +210,38 @@ break_value_fits = (
     unknown = be.check.types.unknown().try();
     got     = be.ty_of(value, ctx, unknown).try();
     be.check.assignable(got, payload).match({
-        true  => Ok(()),
+        true  => be.break_literal_fits(value, payload),
         false => be.break_type_fault(id, got, payload),
     })
+}
+
+// AND A LITERAL FITS ITS FAMILY, NOT ITS TYPE. That leniency is what
+// keeps `Range(0, 5).loop(.. h.break(42) ..)` legal over a `usize`
+// walk, and it is also what let `h.break(300)` over a `[u8]` walk
+// truncate to 44 with exit 0 and no diagnostic — the break was the one
+// typed position in this language with no range check on it, while
+// `q: u8 = 300` has been refused all along. `cc` says `-Woverflow`
+// here and `zen` said nothing (#766).
+break_literal_fits = (be :: CBackend, value: ExprId, payload: TyId)
+                     Res<(), AllocError> {
+    be.check.literal_overflows(value, payload).match({
+        false => Ok(()),
+        true  => be.break_range_fault(value, payload),
+    })
+}
+
+// The position is the literal the author has to change, which is not
+// the `h.break` that carries it — `sema_trap.out_of_range` puts its
+// caret in the same place for the same reason.
+break_range_fault = (be :: CBackend, value: ExprId, payload: TyId)
+                    Res<(), AllocError> {
+    want ::= be.name_of_or(payload).try();
+    what ::= be.alloc.String(
+        "h.break(v) is not free to choose its type: the loop's own T is "
+    ).try();
+    what.add_bytes(want.view()).try();
+    what.add_bytes(", and this literal does not fit it").try();
+    be.report_expr(value, GenFault.Unsupported(what.view()))
 }
 
 // One sentence, both types named. `name_of` spells a type as the

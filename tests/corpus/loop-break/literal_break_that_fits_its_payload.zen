@@ -1,0 +1,37 @@
+// THE LENIENCY THE RANGE CHECK MUST NOT TAKE AWAY. "A literal's type
+// comes from its context" is what lets `h.break(42)` stand in a `usize`
+// slot and `h.break(200)` in a `u8` one without either being written
+// down — the loop's payload is a type the BACKEND works out, so there is
+// nowhere for an author to annotate it even if they wanted to.
+//
+// `sema_trap.literal_overflows` at the break position (#766) refuses the
+// literal that does NOT fit; this file is the other half of that rule
+// and the reason it is a range question rather than a type question. If
+// a future fix reaches for `assignable` here instead, these three go red
+// and say so.
+//
+// `edge` is the boundary itself: 255 is the largest `u8` and must pass,
+// which is what says the comparison is `<=` and not `<`.
+
+main = (env: Env) Res<i32, AllocError> {
+    Range(0, 5).loop((h, i) {
+        (i == 3).then(() { h.break(42); });
+    }).match({
+        Ok(n) => println("usize {}", n),
+        None  => println("usize none"),
+    });
+
+    bytes: [u8, 1] = [7];
+    bytes.loop((h, b) { h.break(200) }).match({
+        Ok(n) => println("u8 {}", n),
+        None  => println("u8 none"),
+    });
+
+    edge: [u8, 1] = [7];
+    edge.loop((h, b) { h.break(255) }).match({
+        Ok(n) => println("edge {}", n),
+        None  => println("edge none"),
+    });
+
+    Ok(0);
+}

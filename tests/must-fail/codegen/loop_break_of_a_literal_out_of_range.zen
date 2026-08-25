@@ -1,0 +1,33 @@
+// THE SAME MISTAKE SPELLED AS A LITERAL, which the width rule beside
+// this file did not catch. `loop_break_of_another_width` names a binding
+// — `wide: i64 = 300` — and `assignable` refuses it because an `i64` is
+// not a `u8`. `h.break(300)` hands over an int LITERAL, and a literal
+// fits its whole family, so it walked straight through the one gate the
+// break position has and truncated to 44 with exit 0 and no diagnostic
+// (#766). The only signal was `cc`'s `-Woverflow`, which nothing greps.
+//
+// EVERY OTHER TYPED POSITION IN THIS LANGUAGE ALREADY ASKED. `q: u8 =
+// 300` is refused, an array element is refused, a match arm is refused —
+// `sema_trap.check_literal` is the rule and it has eight call sites. The
+// break had none, because sema does not walk lambda bodies at all and
+// the loop's payload type is one the BACKEND works out. So the range
+// question lives in `sema_trap.literal_overflows` and `gen_c_handle`
+// asks it, which is the only pass that ever sees the pair.
+//
+// The leniency itself stays — it is load-bearing. `bool_break_payload_is
+// _a_bool` and `first_break_executed_supplies_the_loop_value` break with
+// literals that DO fit their loop's payload, and both still compile.
+//
+// position: the literal the author has to change, not the `h.break`
+// that carries it.
+
+main = (env: Env) Res<i32, AllocError> {
+    bytes: [u8, 1] = [7];
+    bytes.loop((h, b) {
+        h.break(300);
+    }).match({
+        Ok(n) => println("{}", n),
+        None  => println("none"),
+    });
+    Ok(0);
+}

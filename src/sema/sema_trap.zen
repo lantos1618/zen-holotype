@@ -301,6 +301,29 @@ out_of_range = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
     )
 }
 
+// THE RANGE QUESTION WITHOUT THE DIAGNOSTIC, for the one position sema
+// cannot reach. `h.break(300)` over a `[u8]` walk is a literal in a
+// typed slot like every other position this file guards, but it lives
+// inside a LAMBDA BODY and sema does not walk those — the backend is
+// the only pass that ever sees the pair. A `report` from there would
+// join a list already rendered, so the knowledge stays here with the
+// rest of the range rule and `gen_c_handle` asks for it in its own
+// voice (#766).
+literal_overflows* = (c: Checker, id: ExprId, want: TyId) bool {
+    name = c.prim_name(want);
+    is_integer(name).match({
+        false => false,
+        true  => c.int_literal_overflows(id, name),
+    })
+}
+
+int_literal_overflows = (c: Checker, id: ExprId, name: str) bool {
+    c.literal_int(c.tree.expr_at(id)).match({
+        None  => false,
+        Ok(v) => fits(v, name) == false,
+    })
+}
+
 // The literal as written, empty if not written as one (same as
 // `written_index`). Parens don't change a literal; minus does, so
 // `-1` stops here, not `1`.
