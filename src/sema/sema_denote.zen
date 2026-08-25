@@ -1,0 +1,327 @@
+// src/sema/sema_denote.zen
+// WHAT A WRITTEN TYPE NODE DENOTES. `ast.Type` is what the author
+// wrote; `type_from_ast(id)` is what it means. The memo makes the
+// two-way trip once per node, which matters because a signature's
+// parameter types are read at every call site (`sema_check.zen` holds
+// the `Map`, keyed on `TypeId` — what `ast_id.zen` made ids `Eq + Hash`
+// for).
+//
+// ITS OWN FILE BECAUSE IT IS ITS OWN QUESTION, in `sema_effect.zen`'s
+// phrase. `sema_type.zen` answers the other one — what an EXPRESSION
+// is — over a disjoint AST family with a memo of its own, and the two
+// meet at four names, listed on the import lines below and nowhere
+// else. `type_from_ast` walks `Type`, `Union`, `Fn`, `Array` and every
+// way a name reaches a declaration (an alias, a type parameter, a
+// generic instantiation); nothing here asks what a value is.
+//
+// EVERY FUNCTION HERE IS A FREE FUNCTION ON `Checker` — DESIGN.md: "the
+// two forms are the same function" — so `c.type_from_ast(id, ctx)`
+// still reads as a method.
+//
+// Module cycles are NOT a compile error, tested rather than assumed:
+// `AST_CONTRACT.md` — "an import cycle is not a problem a whole-program
+// compiler has". `alias_enum` asks `sema_type.def_type` and `sema_type`
+// asks back; that is the shape of the problem, not a smell.
+
+Type, TypeId, Ident, Alias, Enum = std.ast
+Param, ArrayType = std.ast
+AllocError = std.mem
+Vec = std.collections
+TyId, TyNamed, is_prim = sema.sema_ty
+Def, decl_at = sema.sema_def
+named_or_union = sema.sema_union
+SemaFault, NameFault = sema.sema_diag
+Checker, Ctx, UNRESOLVED = sema.sema_check
+alias_module = sema.sema_module
+counted_array = sema.sema_const
+def_type = sema.sema_type
+
+// `@Self` IS THE ONE WRITTEN TYPE WHOSE MEANING IS NOT IN ITS NODE, so a
+// signature that names it may not be memoized: `Vec<T>.get` is written
+// `(self: @Self, i: usize) Res<T>` ONCE, but a memo keyed on the node
+// would hand a `Vec<u8>` asker the `Vec<i32>` receiver from an earlier
+// ask. Nothing caught this until monomorphisation made the receiver
+// part of a SYMBOL, and `Vec<u8>.get` was emitted taking a `Vec<i32>` —
+// C that compiles and means something else, twice paid for.
+//
+// A type parameter is NOT in this class and stays memoized: `T` denotes
+// a `Ty.Var` nominal on its owner, the same type wherever it's read
+// from. Only the receiver travels in `ctx`.
+type_from_ast* = (c :: Checker, id: TypeId, ctx: Ctx)
+                 Res<TyId, AllocError> {
+    ctx.has_self.match({
+        true  => c.type_kind(c.tree.type_at(id), ctx),
+        false => c.memoized_type(id, ctx),
+    })
+}
+
+memoized_type* = (c :: Checker, id: TypeId, ctx: Ctx)
+                 Res<TyId, AllocError> {
+    c.type_memo.get(id).match({
+        None    => c.compute_type(id, ctx),
+        Ok(hit) => Ok(hit),
+    })
+}
+
+compute_type* = (c :: Checker, id: TypeId, ctx: Ctx)
+               Res<TyId, AllocError> {
+    // seed the memo with poison before recursing, so a type that
+    // mentions itself bottoms out instead of looping (`Node = { next:
+    // Ptr<Node> }` is real; the layout question is answered elsewhere).
+    poison = c.types.unknown().try();
+    c.type_memo.set(id, poison).try();
+    node = c.tree.type_at(id);
+    got  = c.type_kind(node, ctx).try();
+    c.type_memo.set(id, got).try();
+    Ok(got);
+}
+
+type_kind* = (c :: Checker, node: Type, ctx: Ctx) Res<TyId, AllocError> {
+    node.kind.match({
+        Unit     => c.types.prim("()"),
+        SelfType => c.self_type(ctx),
+        Infer    => c.types.infer(),
+        Variadic => c.types.prim("..."),
+        Named(n) => c.named_type(node, n.name, n.args, ctx),
+        Union(u) => c.union_type(u.members, ctx),
+        Fn(f)    => c.fn_type(f.params, f.ret, ctx),
+        Array(t) => c.array_type(t, ctx),
+    })
+}
+
+self_type* = (c :: Checker, ctx: Ctx) Res<TyId, AllocError> {
+    ctx.has_self.match({
+        false => c.types.unknown(),
+        true  => Ok(ctx.self_ty),
+    })
+}
+
+union_type* = (c :: Checker, members: Vec<TypeId>, ctx: Ctx)
+             Res<TyId, AllocError> {
+    parts ::= c.alloc.Vec<TyId>();
+    members.loop((h, m) {
+        parts.add(c.type_from_ast(m, ctx).try()).try();
+    });
+    c.types.union_ty(parts)
+}
+
+fn_type* = (c :: Checker, params: Vec<Param>, ret: TypeId, ctx: Ctx)
+          Res<TyId, AllocError> {
+    ptys ::= c.alloc.Vec<TyId>();
+    params.loop((h, p) {
+        ptys.add(c.param_type(p, ctx).try()).try();
+    });
+    rty = c.type_from_ast(ret, ctx).try();
+    c.types.fn_ty(ptys, rty)
+}
+
+param_type* = (c :: Checker, p: Param, ctx: Ctx) Res<TyId, AllocError> {
+    p.type.match({
+        None  => c.types.infer(),
+        Ok(t) => c.type_from_ast(t, ctx),
+    })
+}
+
+// `[u8, 64]`. BOTH HALVES ARE THE TYPE: the element is what an
+// assignment must agree about, the count what makes two lengths two
+// types (DESIGN.md:301, and `sema_ty.TyArray`).
+//
+// The count is comptime, so it is FOLDED OR REFUSED and never guessed —
+// `sema_const.counted_array` is that whole rule, poison included.
+array_type* = (c :: Checker, t: ArrayType, ctx: Ctx)
+             Res<TyId, AllocError> {
+    e = c.type_from_ast(t.elem, ctx).try();
+    c.counted_array(e, t.count, ctx)
+}
+
+// A written name, applied to its arguments.
+//
+// `Res` is recognised structurally rather than resolved — not a special
+// case for a favourite type: `Res<T>` and `Res<T, E>` are two arities
+// of one name, and sema asks "which form is this" at every `.try()`; a
+// nominal answer would make that a field read through a declaration.
+named_type* = (
+    c    :: Checker,
+    node : Type,
+    name : Ident,
+    args : Vec<TypeId>,
+    ctx  : Ctx
+) Res<TyId, AllocError> {
+    tys ::= c.alloc.Vec<TyId>();
+    args.loop((h, a) {
+        tys.add(c.type_from_ast(a, ctx).try()).try();
+    });
+    name.text.eq("Res").match({
+        true  => c.res_type(tys),
+        false => c.declared_type(node, name, tys, ctx),
+    })
+}
+
+res_type* = (c :: Checker, args: Vec<TyId>) Res<TyId, AllocError> {
+    value = args.get(0).match({ Ok(v) => v, None => UNRESOLVED });
+    args.len.match({
+        1 => c.types.res_absence(value),
+        2 => c.res_failure_of(args, value),
+        _ => c.types.unknown(),
+    })
+}
+
+res_failure_of* = (c :: Checker, args: Vec<TyId>, value: TyId)
+                 Res<TyId, AllocError> {
+    args.get(1).match({
+        None  => c.types.unknown(),
+        Ok(e) => c.types.res_failure(value, e),
+    })
+}
+
+// A primitive, or a declaration the module can see. The primitive
+// check comes first: no module declares `i32` in a way this layer can
+// reach, and a name that's both would be a language change, not a
+// lookup-order question.
+declared_type* = (
+    c    :: Checker,
+    node : Type,
+    name : Ident,
+    args : Vec<TyId>,
+    ctx  : Ctx
+) Res<TyId, AllocError> {
+    is_prim(name.text).match({
+        true  => c.types.prim(name.text),
+        false => c.tvar_or_declared(node, name, args, ctx),
+    })
+}
+
+// The `T` of an enclosing `<T>` shadows a declaration of the same name,
+// exactly as a local binding does. Without this, resolving a generic's
+// own signature reports its own type parameter as an undefined name.
+tvar_or_declared* = (
+    c    :: Checker,
+    node : Type,
+    name : Ident,
+    args : Vec<TyId>,
+    ctx  : Ctx
+) Res<TyId, AllocError> {
+    c.lookup_tvar(name.text).match({
+        None  => c.lookup_named(node, name, args, ctx),
+        Ok(b) => Ok(b.ty),
+    })
+}
+
+lookup_named* = (
+    c    :: Checker,
+    node : Type,
+    name : Ident,
+    args : Vec<TyId>,
+    ctx  : Ctx
+) Res<TyId, AllocError> {
+    found ::= c.alloc.Vec<Def>();
+    c.world.defs_of(ctx.module, name.text, found).try();
+    found.get(0).match({
+        None  => c.unresolved_type(node, name),
+        Ok(d) => c.declared_or_alias(d, args),
+    })
+}
+
+// "AN ALIAS IS THE TYPE, NOT A NAME THAT FORWARDS TO IT." `Alias = Shape`
+// binds `Alias` to `Shape` ITSELF, so `Alias.Circle` is `Shape.Circle`;
+// an alias RESOLVES THROUGH here — nothing downstream sees a second
+// type, and no backend has an arm for one (`ast_node.zen`).
+//
+// The alternative — a nominal of the alias's own name — has no members,
+// variants, or impls: `a: Alias = Alias.Circle` became "no such field
+// or method on this type `Circle`", naming neither the alias nor
+// anything the author wrote.
+declared_or_alias* = (c :: Checker, d: Def, args: Vec<TyId>)
+                    Res<TyId, AllocError> {
+    d.kind.match({
+        AliasDef => c.alias_type(d, args),
+        _        => c.named_or_union(d, args),
+    })
+}
+
+// TWO ALIASES DO NOT RESOLVE THROUGH, and both keep the nominal the rest
+// of the compiler already recognises them by.
+//
+// A MODULE ALIAS has no type to resolve TO: `zz = vec` is grammar R1a's
+// other reading of the same three tokens, and `module_named_by` finds
+// the module back through this nominal's decl (what makes `sh.reseat(3)`
+// work); the bare-name diagnostic is raised where the name is USED.
+//
+// A PARAMETERISED ALIAS is a type constructor: resolving its target
+// without substituting would answer with a type full of free
+// parameters, so it stays nominal until substitution can do it properly.
+alias_type* = (c :: Checker, d: Def, args: Vec<TyId>)
+             Res<TyId, AllocError> {
+    c.alias_module(d.id).match({
+        Ok(_) => c.named_or_union(d, args),
+        None  => c.alias_decl_type(d, args),
+    })
+}
+
+alias_decl_type* = (c :: Checker, d: Def, args: Vec<TyId>)
+                  Res<TyId, AllocError> {
+    decl_at(c.tree, d.id).match({
+        None  => c.named_or_union(d, args),
+        Ok(x) => x.kind.match({
+            Alias(al) => c.alias_written_type(al, d, args),
+            _         => c.named_or_union(d, args),
+        }),
+    })
+}
+
+// The target, read in the module that DECLARED the alias: a written type
+// is a name, and a name means what it means where it was written.
+alias_written_type* = (c :: Checker, al: Alias, d: Def, args: Vec<TyId>)
+                     Res<TyId, AllocError> {
+    (al.tparams.len == 0).match({
+        false => c.named_or_union(d, args),
+        true  => c.alias_target_of(al, d),
+    })
+}
+
+alias_target_of* = (c :: Checker, al: Alias, d: Def) Res<TyId, AllocError> {
+    poison = c.types.unknown().try();
+    ctx    = Ctx(d.id.module.to_usize(), poison);
+    c.type_from_ast(al.target, ctx)
+}
+
+// THE ENUM AN ALIAS NAMES, asked by the backend lowering `Alias.Circle`.
+// The backend used to look the base name up itself; an alias answered
+// `AliasDef` there, so `Alias` was reported as an unresolved value.
+// This asks SEMA instead of walking to the target a second time — two
+// walks that disagreed would write a tag from one enum into a value of
+// another, C that compiles and means something else. `None` when the
+// target is not an enum — a struct alias has no variants to reach.
+alias_enum* = (c :: Checker, d: Def) Res<TyId> {
+    c.def_type(d).match({
+        Err(_) => None,
+        Ok(ty) => c.enum_named_by(ty),
+    })
+}
+
+enum_named_by* = (c :: Checker, ty: TyId) Res<TyId> {
+    c.types.at(ty).match({
+        Named(n) => c.enum_decl_of(n, ty),
+        _        => None,
+    })
+}
+
+enum_decl_of* = (c :: Checker, n: TyNamed, ty: TyId) Res<TyId> {
+    decl_at(c.tree, n.decl).match({
+        None  => None,
+        Ok(x) => x.kind.match({
+            Enum(_) => Ok(ty),
+            _       => None,
+        }),
+    })
+}
+
+unresolved_type* = (c :: Checker, node: Type, name: Ident)
+                  Res<TyId, AllocError> {
+    c.report(
+        node.span.file,
+        name.span,
+        SemaFault.UndefinedName(NameFault(name: name.text))
+    ).try();
+    c.types.unknown()
+}

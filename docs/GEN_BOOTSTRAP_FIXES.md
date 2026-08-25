@@ -227,7 +227,7 @@ one of them was a claim and it is now false.
 
 - **`expr_kind` returns `Unknown` for `Call`, `Access`, `Lambda`, `Record`,
   `Index`, `FixedArray`, `Array`, `Scope`, `Meta`.** **No longer true.**
-  `sema_type.zen:387` has no `Unknown` arm left; every form is answered.
+  `sema_type.zen:81` has no `Unknown` arm left; every form is answered.
 - The `block_type`-then-read-back protocol, and "a backend must read
   `Checker.expr_memo` directly and never call `type_of`", still describes the
   code: `expr_memo` is the memo (`sema_check.zen:101`) and `sema_own.zen:691`
@@ -681,7 +681,7 @@ context narrows at the call, and settling a literal's type from its context is
 bidirectional inference and sema's job. All true. What it does not say is that
 **the check which does exist runs in exactly one place.**
 
-`src/sema/sema_trap.zen:194` declares `check_literal`. `grep` finds one call
+`src/sema/sema_trap.zen:169` declares `check_literal`. `grep` finds one call
 site in the whole tree: `sema_type.zen:763`, inside `check_assign`, which
 `bind_stmt` calls. So the rule covers `x: i32 = <literal>` and nothing else.
 

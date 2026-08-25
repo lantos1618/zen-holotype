@@ -476,7 +476,7 @@ This is `LEXER_BOOTSTRAP_FIXES.md` §7 again — global by-name method
 resolution — now producing a monomorphisation rather than a wrong
 diagnostic. The `Ok(..)` around the expression matters: the same `.get`
 as a trailing expression (`found.get(0).match({ .. })` returning `Res`)
-does not trip it, which is why `sema_type.zen`'s `lookup_named` has
+does not trip it, which is why `sema_denote.zen`'s `lookup_named` has
 always been fine.
 
 **Workaround:** a one-line helper whose parameter type is WRITTEN.

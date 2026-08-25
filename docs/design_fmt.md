@@ -303,7 +303,7 @@ sentence they got wrong is that a runtime-representable pack must be structural.
 
 **`...` is already a type syntactically.** `Variadic` is a `TypeKind` variant
 (`ast_node.zen:107`) and sema types it as `c.types.prim("...")`
-(`sema_type.zen:106`). But it is a **marker, not a description**: it says a
+(`sema_denote.zen:84`). But it is a **marker, not a description**: it says a
 parameter is variadic and carries nothing about the pack's element types or
 arity. Six uses in the whole tree.
 

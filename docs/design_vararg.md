@@ -33,7 +33,7 @@ That is the whole design, and everything cheap about this lane follows from it:
 | what | who does it | cost |
 |---|---|---|
 | parsing `vararg<T>` | `parse_type.named_type`, unchanged | **nothing** — it is a name applied to arguments |
-| resolving it | `sema_type.lookup_named`, unchanged | **nothing** — a nominal like `Vec<i32>` |
+| resolving it | `sema_denote.lookup_named`, unchanged | **nothing** — a nominal like `Vec<i32>` |
 | interning it | `Types.declared`, unchanged | **nothing** |
 | a C type for it | `gen_c_type.named_ctype`, unchanged | **nothing** — a monomorphised struct |
 | copying / forwarding it | C struct assignment | **nothing** |
