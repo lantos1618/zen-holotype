@@ -21,8 +21,8 @@ Companion to `DESIGN.md`, `PLAN.md` and `TESTING.md`. Those say what the languag
 | a cursor position finds its node | `src/std/ast/ast_find.zen:55` (`node_at`), `:106` (`expr_node_at`) |
 | every node carries a half-open span with a 1-based byte column | `src/std/ast/ast_span.zen:22` (`Pos`), `:30` (`Span`, carrying `file`) |
 | every **name** carries its own span | `src/std/ast/ast_span.zen:73` (`Ident`), `:82` (`QualifiedName`) |
-| the type of an expression, memoized | `src/sema/sema_type.zen:338` (`type_of`), memo at `src/sema/sema_check.zen:101` |
-| the type a written type node denotes | `src/sema/sema_type.zen:73` (`type_from_ast`), memo at `src/sema/sema_check.zen:102` |
+| the type of an expression, memoized | `src/sema/sema_type.zen:59` (`type_of`), memo at `src/sema/sema_check.zen:101` |
+| the type a written type node denotes | `src/sema/sema_denote.zen:50` (`type_from_ast`), memo at `src/sema/sema_check.zen:102` |
 | which declaration a call resolved to | `src/sema/sema_check.zen:124` (`call_memo`) |
 | what a name means in a module | `src/sema/sema_def.zen:180` (`defs_of`), `Def` with a `span` at `:64` |
 | what a dot reaches | `src/sema/sema_member.zen:413` (`members_of`), `Found` with a `span` at `:63` |
@@ -139,7 +139,7 @@ The gate is `tests/corpus/lsp/hover_answers_an_imported_name`, which ships the r
 
 **What still answers `null`, and why each is a fact about the compiler rather than about `src/lsp/`:**
 
-- **A struct's or enum's own name** (`Foo` in `Foo = { .. }`). `type_memo` is keyed on a written `TypeId` and a declaration site has none. A *use* of `Foo` hovers. Fixing it means building the type a declaration denotes, in `src/sema/sema_type.zen`.
+- **A struct's or enum's own name** (`Foo` in `Foo = { .. }`). `type_memo` is keyed on a written `TypeId` and a declaration site has none. A *use* of `Foo` hovers. Fixing it means building the type a declaration denotes, in `src/sema/sema_denote.zen`.
 - **A pattern binder** (`n` in `Ok(n) => ..`). There is no pattern memo, and `Binding` is released at scope exit — the same gap open question note above prices at L3 for go-to-definition, and the same fix closes both.
 - **A type parameter at its declaration** (`T` in `<T>`). Same shape as a struct name.
 - **An imported name, when there is no workspace.** With a `rootUri` this now answers, because the document is checked as part of a build (§5). Without one — a client that sends none, or the two-file form of `zen lsp` — the lone-module check is still what runs and an import still resolves to poison.

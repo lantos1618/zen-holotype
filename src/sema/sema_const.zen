@@ -1,0 +1,460 @@
+// src/sema/sema_const.zen
+// WHICH INTEGER IS THIS. One prover, one exception to it, and the
+// ranges an integer is measured against — everything `sema_trap.zen`
+// needs to prove a trap, and nothing about the traps themselves.
+//
+// `const_int` folds literals, unary minus, parentheses, `i32.MAX`-style
+// constants and arithmetic on those, then stops. It never folds through
+// a BINDING: the trap corpus routes values like `i32.MAX` through a
+// variable specifically so the compiler can't see them, and folding
+// through a binding would turn those runtime tests into compile errors.
+//
+// The folder may not trap itself: `+` traps on overflow, so every fold
+// below tests first rather than computing `x + y` to see if it
+// overflows (the same constraint DESIGN.md puts on `gen_c`).
+//
+// AND SO DOES THE COUNT ITSELF — `counted_array`, the folder's one
+// caller that may not decline, which is why it mints the type here
+// rather than handing a number back: it reads a name through to the
+// constant it denotes, which the prover above must never do, and both
+// live in one file so "which integer is this" has one implementation
+// with its one exception written down instead of two folders drifting
+// apart.
+
+Expr, ExprId, Binary, BinOp, Literal = std.ast
+Unary, Access, Paren, Name, Const = std.ast
+AllocError = std.mem
+Vec = std.collections
+str = std.text
+Range = std.core
+TyId, is_integer = sema.sema_ty
+SemaFault, NameFault = sema.sema_diag
+Def, decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+
+// The widest integer this compiler folds in; written as a subtraction
+// since `-9223372036854775808` is unary minus on a literal too big to
+// stand alone (the case the lexer corpus tests).
+I64_MAX* : i64 = 9223372036854775807
+I64_MIN* : i64 = -9223372036854775807 - 1
+
+// Largest magnitude whose square fits an i64 (two of these multiply to
+// under 4.7e18, well inside 9.2e18) — outside this window, not folded.
+FOLD_LIMIT* : i64 = 2147483647
+
+// AN ARRAY'S COUNT IS FOLDED OR REFUSED, NEVER GUESSED. `const_int`
+// below is a PROVER, and declining to prove costs it a diagnostic at
+// worst; a count is a REQUIREMENT — `[u8, 4]` and `[u8, 5]` are two
+// types — so absence here is a refusal by name, never a zero.
+//
+// IT TAKES THE ONE STEP THE PROVER DELIBERATELY WILL NOT: a name that
+// denotes a module-level constant is read through to the expression it
+// was declared with. The prover must not fold through a name — the
+// header says why, the trap corpus routes `i32.MAX` through a binding on
+// purpose — and a count must, because `SIZE: usize = 4` makes
+// `[u8, SIZE]` the same type, interned once, as `[u8, 4]`: one C struct
+// under one mangled name, not two.
+//
+// A LOOKUP, NOT AN EVALUATOR (`docs/design_meta.md` §7.2). The
+// constant's own value is handed back to the same prover and nothing
+// else happens: `SIZE` answers, `SIZE: usize = 8 * 8` answers, and
+// `SIZE * 2` or `count()` do not — evaluator territory, refused by name.
+// ONE HOP IS ALSO ALL THERE IS TO REACH: `WIDE: usize = SIZE` is not a
+// constant at all, it is an `Alias` (`parse_decl.zen:22` — "`Alias =
+// Shape` and an import are indistinguishable"), so a chain of constants
+// is unwritable and a recursion here would be dead code.
+//
+// ONE ENTRY POINT FOR THE WHOLE RULE — the fold, the refusal and the
+// poison, so no caller can take a count without its sentence or answer a
+// refused count with a type. That separation is exactly how 0 got out.
+// `std.core.num` carries only lossless conversions, so the folded digits
+// cross to a length through `len_of` rather than `to_usize`.
+counted_array* = (c :: Checker, elem: TyId, id: ExprId, ctx: Ctx)
+                Res<TyId, AllocError> {
+    c.count_int(id, ctx).try().match({
+        Ok(v) => c.types.array(elem, len_of(v)),
+        None  => c.count_refused(id),
+    })
+}
+
+// AT THE COUNT'S OWN POSITION, and the caller poisons the whole array
+// type rather than taking 0 — the same shape as `sema_meta`'s refusal and
+// for its reason. Zero was a plausible wrong answer that survived every
+// oracle and cost TWO lies for one mistake: "expected [u8, 0], found
+// [int, 4]" blamed a correct initialiser, then an index of 0 was called
+// provably out of bounds. `Ty.Unknown` agrees with everything and is not
+// a `TyArray`, so `check_index` above has nothing to measure and neither
+// sentence can fire.
+//
+// The name is quoted the way `written_index` quotes an index — a source
+// slice the tree already owns, so nothing outlives the diagnostic.
+count_refused = (c :: Checker, id: ExprId) Res<TyId, AllocError> {
+    node = c.tree.expr_at(id);
+    c.report(
+        node.span.file,
+        node.span,
+        SemaFault.CountNotComptime(NameFault(name: written_count(node)))
+    ).try();
+    c.types.unknown()
+}
+
+written_count = (node: Expr) str {
+    node.kind.match({
+        Name(n) => n.text,
+        _       => "",
+    })
+}
+
+count_int = (c :: Checker, id: ExprId, ctx: Ctx) Res<Res<i64>, AllocError> {
+    c.const_int(id).match({
+        Ok(v) => Ok(Ok(v)),
+        None  => c.count_through_name(id, ctx),
+    })
+}
+
+count_through_name = (c :: Checker, id: ExprId, ctx: Ctx)
+                     Res<Res<i64>, AllocError> {
+    c.tree.expr_at(id).kind.match({
+        Name(n) => c.count_of_const(n.text, ctx),
+        _       => Ok(None),
+    })
+}
+
+count_of_const = (c :: Checker, text: str, ctx: Ctx)
+                 Res<Res<i64>, AllocError> {
+    c.const_def(text, ctx).try().match({
+        None  => Ok(None),
+        Ok(d) => Ok(c.count_of_def(d)),
+    })
+}
+
+count_of_def = (c: Checker, d: Def) Res<i64> {
+    decl_at(c.tree, d.id).match({
+        None  => None,
+        Ok(x) => x.kind.match({
+            Const(k) => c.const_int(k.value),
+            _        => None,
+        }),
+    })
+}
+
+// THE ONE ANSWER TO "DOES THIS NAME DENOTE A CONSTANT". The const-pattern
+// rule asks it to report a binder wearing a constant's spelling
+// (`sema_match.norm_binder`); a count asks it to read the value through.
+// Two rules, one lookup, so a name cannot be a constant to one of them
+// and a binding to the other.
+//
+// A LOCAL WINS FIRST, exactly as `name_type` resolves a bare name: a
+// binding shadowing a constant is ordinary shadowing, and the constant is
+// not what that name means there.
+const_def* = (c :: Checker, text: str, ctx: Ctx) Res<Res<Def>, AllocError> {
+    found ::= c.alloc.Vec<Def>();
+    c.lookup(text).match({
+        Ok(_) => (),
+        None  => c.world.defs_of(ctx.module, text, found).try(),
+    });
+    Ok(found.get(0).match({
+        None  => None,
+        Ok(d) => d.kind.match({ ConstDef => Ok(d), _ => None }),
+    }));
+}
+
+// `i64` to `usize`, MSD first, ten passes at most. Floors negatives at
+// zero — not a length — so every caller tests the sign first.
+len_of* = (v: i64) usize {
+    (v <= 0).match({
+        true  => 0,
+        false => len_of(v / 10) * 10 + last_digit(v),
+    })
+}
+
+last_digit = (v: i64) usize {
+    (v % 10).match({
+        0 => 0, 1 => 1, 2 => 2, 3 => 3, 4 => 4,
+        5 => 5, 6 => 6, 7 => 7, 8 => 8, _ => 9,
+    })
+}
+
+// How far the folder walks before giving up. Operator chains are
+// left-nested and built with a loop, so `a + b + c + ..` is unbounded —
+// one line of `tests/corpus/lex/long_single_line.zen` hits ten thousand
+// terms — and folding by recursion would segfault on a long line (a
+// crash is not a diagnostic, docs/TESTING.md).
+//
+// A budget is right here (elsewhere a bound must REPORT) because this
+// is a prover: declining to prove is already what this file does for
+// values reached through a binding. Past the budget: "not provably
+// anything" — a lost diagnostic, never a mis-compile or a refusal.
+//
+// 256 is past anything written by hand; only a machine-length chain
+// reaches it.
+FOLD_DEPTH: usize = 256
+
+// What this expression is, when a literal integer the compiler can see.
+// Absence means "not provably anything" — the answer for every binding.
+const_int* = (c: Checker, id: ExprId) Res<i64> {
+    c.const_within(id, FOLD_DEPTH)
+}
+
+const_within = (c: Checker, id: ExprId, left: usize) Res<i64> {
+    (left == 0).match({
+        true  => None,
+        false => c.const_node(c.tree.expr_at(id), left - 1),
+    })
+}
+
+const_node = (c: Checker, node: Expr, left: usize) Res<i64> {
+    node.kind.match({
+        Literal(l) => const_literal(l),
+        Paren(p)   => c.const_within(p.inner, left),
+        Unary(u)   => c.const_unary(u, left),
+        Binary(b)  => c.const_binary(b, left),
+        Access(a)  => c.const_prim_const(a),
+        _          => None,
+    })
+}
+
+const_literal* = (l: Literal) Res<i64> {
+    l.kind.match({
+        Int => parse_i64(l.text),
+        _   => None,
+    })
+}
+
+const_unary = (c: Checker, u: Unary, left: usize) Res<i64> {
+    u.op.match({
+        Neg => negate(c, u.operand, left),
+        _   => None,
+    })
+}
+
+negate = (c: Checker, id: ExprId, left: usize) Res<i64> {
+    c.const_within(id, left).match({
+        None  => None,
+        Ok(v) => Ok(0 - v),
+    })
+}
+
+const_binary = (c: Checker, b: Binary, left: usize) Res<i64> {
+    c.const_within(b.lhs, left).match({
+        None  => None,
+        Ok(x) => c.const_rhs(b, x, left),
+    })
+}
+
+const_rhs = (c: Checker, b: Binary, x: i64, left: usize) Res<i64> {
+    c.const_within(b.rhs, left).match({
+        None  => None,
+        Ok(y) => fold(b.op, x, y),
+    })
+}
+
+// `i32.MAX/MIN/BITS` only: the base must be the primitive's own name,
+// not a binding of that type — else this folds through a binding.
+const_prim_const = (c: Checker, a: Access) Res<i64> {
+    base = c.tree.expr_at(a.base);
+    base.kind.match({
+        Name(n) => prim_const_value(n.text, a.name.text),
+        _       => None,
+    })
+}
+
+prim_const_value = (type_name: str, member: str) Res<i64> {
+    is_integer(type_name).match({
+        false => None,
+        true  => named_const(type_name, member),
+    })
+}
+
+named_const = (type_name: str, member: str) Res<i64> {
+    member.eq("MAX").match({
+        true  => Ok(max_of(type_name)),
+        false => min_or_bits(type_name, member),
+    })
+}
+
+min_or_bits = (type_name: str, member: str) Res<i64> {
+    member.eq("MIN").match({
+        true  => Ok(min_of(type_name)),
+        false => bits_const(type_name, member),
+    })
+}
+
+bits_const = (type_name: str, member: str) Res<i64> {
+    member.eq("BITS").match({
+        true  => Ok(bits_of(type_name)),
+        false => None,
+    })
+}
+
+// ---------------------------------------------------------------------
+// arithmetic that refuses to trap
+// ---------------------------------------------------------------------
+
+fold* = (op: BinOp, x: i64, y: i64) Res<i64> {
+    op.match({
+        Add => add_i64(x, y),
+        Sub => sub_i64(x, y),
+        Mul => mul_i64(x, y),
+        _   => None,
+    })
+}
+
+add_i64 = (x: i64, y: i64) Res<i64> {
+    safe = (y >= 0).match({
+        true  => x <= I64_MAX - y,
+        false => x >= I64_MIN - y,
+    });
+    safe.match({ true => Ok(x + y), false => None })
+}
+
+sub_i64 = (x: i64, y: i64) Res<i64> {
+    safe = (y >= 0).match({
+        true  => x >= I64_MIN + y,
+        false => x <= I64_MAX + y,
+    });
+    safe.match({ true => Ok(x - y), false => None })
+}
+
+// Only where a product can't overflow; outside it "not provably
+// anything" — computing to check would itself be the trap this catches.
+mul_i64 = (x: i64, y: i64) Res<i64> {
+    (small(x) && small(y)).match({
+        true  => Ok(x * y),
+        false => None,
+    })
+}
+
+small = (v: i64) bool { (v <= FOLD_LIMIT) && (v >= 0 - FOLD_LIMIT) }
+
+// ---------------------------------------------------------------------
+// reading a literal
+//
+// `std.core.num` carries no str-to-int conversion, only lossless
+// numeric ones, so the digits are read here. docs/SEMA_BOOTSTRAP_FIXES.md
+// tracks it as a std gap: `write_usize`'s inverse, belongs in
+// `std.text.text_fmt`.
+// ---------------------------------------------------------------------
+
+parse_i64* = (text: str) Res<i64> {
+    (text.len == 0).match({
+        true  => None,
+        false => digits_of(text),
+    })
+}
+
+digits_of = (text: str) Res<i64> {
+    v  ::= 0;
+    ok ::= true;
+    Range(0, text.len).loop((h, i) {
+        d    = digit_value(text[i]);
+        room = (d >= 0) && (v <= (I64_MAX - d) / 10);
+        v    = step(v, d, room);
+        ok   = ok && room;
+    });
+    ok.match({ true => Ok(v), false => None })
+}
+
+// The multiply happens only where it was already proved to fit — the
+// same discipline as the folds above, one level down.
+step = (v: i64, d: i64, room: bool) i64 {
+    room.match({ true => v * 10 + d, false => v })
+}
+
+digit_value = (b: u8) i64 {
+    ((b >= '0') && (b <= '9')).match({
+        true  => (b - '0').to_i64(),
+        false => 0 - 1,
+    })
+}
+
+// ---------------------------------------------------------------------
+// what fits what
+//
+// Written out rather than derived, because deriving it needs a shift and
+// "there are no bitwise operators".
+// ---------------------------------------------------------------------
+
+fits* = (v: i64, name: str) bool {
+    (v >= min_of(name)) && (v <= max_of(name))
+}
+
+signed_of = (name: str) bool {
+    name.is_in(["i8", "i16", "i32", "i64"])
+}
+
+max_of* = (name: str) i64 {
+    signed_of(name).match({
+        true  => signed_max(name),
+        false => unsigned_max(name),
+    })
+}
+
+min_of* = (name: str) i64 {
+    signed_of(name).match({
+        true  => signed_min(name),
+        false => 0,
+    })
+}
+
+signed_max = (name: str) i64 {
+    name.eq("i8").match({ true => 127, false => signed_max_16(name) })
+}
+
+signed_max_16 = (name: str) i64 {
+    name.eq("i16").match({ true => 32767, false => signed_max_32(name) })
+}
+
+signed_max_32 = (name: str) i64 {
+    name.eq("i32").match({ true => 2147483647, false => I64_MAX })
+}
+
+signed_min = (name: str) i64 {
+    name.eq("i8").match({ true => 0 - 128, false => signed_min_16(name) })
+}
+
+signed_min_16 = (name: str) i64 {
+    name.eq("i16").match({ true => 0 - 32768, false => signed_min_32(name) })
+}
+
+signed_min_32 = (name: str) i64 {
+    name.eq("i32").match({
+        true  => 0 - 2147483648,
+        false => I64_MIN,
+    })
+}
+
+// u64/usize hold more than an i64 can name, so this ceiling is the
+// folder's own, not the type's — such values are never folded anyway.
+unsigned_max = (name: str) i64 {
+    name.eq("u8").match({ true => 255, false => unsigned_max_16(name) })
+}
+
+unsigned_max_16 = (name: str) i64 {
+    name.eq("u16").match({ true => 65535, false => unsigned_max_32(name) })
+}
+
+unsigned_max_32 = (name: str) i64 {
+    name.eq("u32").match({ true => 4294967295, false => I64_MAX })
+}
+
+bits_of* = (name: str) i64 {
+    (name.eq("i8") || name.eq("u8")).match({
+        true  => 8,
+        false => bits_16(name),
+    })
+}
+
+bits_16 = (name: str) i64 {
+    (name.eq("i16") || name.eq("u16")).match({
+        true  => 16,
+        false => bits_32(name),
+    })
+}
+
+bits_32 = (name: str) i64 {
+    (name.eq("i32") || name.eq("u32")).match({
+        true  => 32,
+        false => 64,
+    })
+}
