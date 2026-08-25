@@ -531,6 +531,7 @@ def run_process(
     timeout: float,
     cwd: Path | None = None,
     feed: bytes | None = None,
+    env: dict[str, str] | None = None,
 ) -> Run:
     """`feed` is the bytes on the process's stdin; None is /dev/null.
 
@@ -547,6 +548,7 @@ def run_process(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
+            env=env,
         )
     except FileNotFoundError as exc:
         raise HarnessError(f"cannot execute {argv[0]!r}: {exc}") from exc
@@ -864,7 +866,21 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
 
     # Run in the work directory: a program that writes a file must not write it
     # into the test tree.
-    prog = run_process([str(binary)], args.run_timeout, cwd=work, feed=test.stdin_bytes)
+    # A LONG-NAME ENV TEST NEEDS NAMES .expected CANNOT HOLD AND NO SHELL
+    # EXPORTS (#814). `env_var_resolves_a_name_of_any_length` asks about a
+    # 5039-byte name and one at exactly 4096 -- past, and at, the cap the
+    # backend used to impose before answering "not set". The names are
+    # generated HERE and exported for THIS program alone; without them its
+    # premise ("the variable IS set") is false and the test would pass for
+    # the wrong reason. Keyed by tid like the clock rewrite above: any other
+    # test's environment is untouched.
+    if test.tid == "corpus/env/env_var_resolves_a_name_of_any_length":
+        prog_env = dict(os.environ)
+        prog_env["V" * 5039] = "hello"
+        prog_env["B" * 4096] = "hello"
+
+    prog = run_process([str(binary)], args.run_timeout, cwd=work,
+                       feed=test.stdin_bytes, env=prog_env)
     if prog.timed_out:
         return Result(test, False, [f"the program timed out after {args.run_timeout}s"])
 
