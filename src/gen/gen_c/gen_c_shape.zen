@@ -36,6 +36,7 @@ DeclId = sema.sema_id
 TyId = sema.sema_ty
 has_var = sema.sema_inst
 decl_at = sema.sema_def
+is_handle_ty = sema.sema_handle
 Ctx = sema.sema_check
 CBackend = gen.gen_c.gen_c_state
 
@@ -329,17 +330,31 @@ owned_elsewhere* = (
 }
 
 // What one site breaks with, or `None` for a bare `h.break()` — the
-// `None` exit says nothing about `T`.
+// `None` exit says nothing about `T`. A site is a dot call on a
+// handle-typed receiver, asked at sema's own memo: any other call in
+// the body — `println(fmt, ..)` first among them — has a first argument
+// that says something about ITS signature and nothing about the loop's.
+// Without this gate the first such call spoke for `T` and the real
+// break after it was refused as a type fault (`.hunt/m2`).
 break_arg_type* = (be :: CBackend, x: ExprId, ctx: Ctx)
                   Res<Res<TyId>, AllocError> {
     unknown = be.check.types.unknown().try();
     be.tree.expr_at(x).kind.match({
-        Call(c) => c.args.get(0).match({
-            None  => Ok(None),
-            Ok(a) => {
-                t = be.ty_of(a.value, ctx, unknown).try();
-                Ok(Ok(t));
+        Call(c) => be.tree.expr_at(c.callee).kind.match({
+            Access(a) => {
+                base = be.ty_of(a.base, ctx, unknown).try();
+                be.check.is_handle_ty(base).match({
+                    false => Ok(None),
+                    true  => c.args.get(0).match({
+                        None  => Ok(None),
+                        Ok(a) => {
+                            t = be.ty_of(a.value, ctx, unknown).try();
+                            Ok(Ok(t));
+                        },
+                    }),
+                })
             },
+            _         => Ok(None),
         }),
         _       => Ok(None),
     })
