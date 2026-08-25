@@ -40,6 +40,7 @@ is_c_integer = gen.gen_c.gen_c_type
 lower_eq_call = gen.gen_c.gen_c_member
 declare_temp = gen.gen_c.gen_c_flow
 expr, ty_of, spills_anywhere = gen.gen_c.gen_c_expr
+infix_operand_held, value_held = gen.gen_c.gen_c_expr
 needs_set = gen.gen_c.gen_c_widen
 needs_hoist = gen.gen_c.gen_c_hoist
 needs_fat = gen.gen_c.gen_c_fat
@@ -241,6 +242,17 @@ OpKind = ShortCircuit | Infix | Helper(str) | Dispatched | Refused
 // its own cannot be lowered as an infix operand: the statements would
 // run whether or not the left side held.
 //
+// THE SECOND CONDITION IS #737's GATE MEETING THIS ONE, and it took a
+// parity run to see why it must. Holding an operand HOISTS STATEMENTS
+// (`value_held` -> `spill_valued`); an `&&`/`||` written as plain C
+// infix runs its RIGHT side under C's own guard -- so a hoisted LEFT
+// lands BESIDE the guard, executing what Zen only promised conditionally.
+// `matched = matched && self.text.index(from + i) == ..` in a loop
+// trapped on out-of-range once the left `index` was hoisted above the
+// `&&` (three `corpus/lsp/*` red). When EITHER side holds, the pair is
+// written through the if-form instead: the left fills its temporary
+// ahead of the branch, the right's statements stay INSIDE it.
+//
 // THE QUESTION IS `spills_anywhere`, NOT `spills` — a wrong answer, not
 // just a refusal, hinges on it. `spills` asks whether the operand IS a
 // spilling form; `expr` now spills a nested one into a temporary, so
@@ -282,7 +294,8 @@ OpKind = ShortCircuit | Infix | Helper(str) | Dispatched | Refused
 // they were before.
 op_kind = (be: CBackend, b: Binary, operand: TyId) OpKind {
     found: Res<OpKind> = loop<OpKind>((h) {
-        (is_logical(b.op) && be.spills_anywhere(b.rhs))
+        (is_logical(b.op)
+            && (be.spills_anywhere(b.rhs) || be.infix_operand_held(b)))
             .then(() { h.break(OpKind.ShortCircuit) });
         is_logical(b.op).then(() { h.break(OpKind.Infix) });
         (is_comparison(b.op) && be.scalar(operand))
@@ -433,7 +446,7 @@ write_infix = (
     out     :: String
 ) Res<(), AllocError> {
     out.add_bytes("(").try();
-    be.lower_lhs(b.lhs, ctx, operand, out).try();
+    be.lower_lhs(b.lhs, be.infix_operand_held(b), ctx, operand, out).try();
     be.close_infix(b, op, ctx, operand, out)
 }
 
@@ -445,20 +458,41 @@ write_infix = (
 // costs depth other constructs need — measured, nested `.match` lost a
 // third of its headroom to exactly that. A non-operator operand takes
 // the path it always took.
+//
+// `held` IS THE OPERAND-ORDER GATE (#737): true lowers the left operand
+// into a temporary ahead of the operator's text — the transform an
+// argument takes through `value_held` — so it RUNS before the right one,
+// where C's own order for two operands of one expression is the C
+// compiler's to pick and gcc picks right to left. The right operand may
+// stay inline: nothing follows it.
 lower_lhs = (
     be   :: CBackend,
     id   : ExprId,
+    held : bool,
     ctx  : Ctx,
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    spine_ahead(be, id).match({
-        false => expr(be, id, ctx, want, out),
+    spine_ahead(be, id, held).match({
+        false => be.value_held(id, ctx, want, held, out),
         true  => be.spine_lhs(id, ctx, want, out),
     })
 }
 
-spine_ahead = (be :: CBackend, id: ExprId) bool {
+// A level folds only when its own left operand stays inline: the spine
+// writes the operator text first (`open_rung`) and the base last, which
+// would put a temporary AFTER the operator it must precede. Such a left
+// is handed back to `expr`, which spills it in place, and the levels
+// above still fold — recursion is bounded by the held operands, not the
+// chain's length.
+spine_ahead = (be: CBackend, id: ExprId, held: bool) bool {
+    held.match({
+        true  => false,
+        false => be.binary_ahead(id),
+    })
+}
+
+binary_ahead = (be: CBackend, id: ExprId) bool {
     be.tree.expr_at(id).kind.match({
         Binary(_) => true,
         _         => false,
@@ -520,7 +554,7 @@ call_helper = (
     out     :: String
 ) Res<(), AllocError> {
     open_helper(be, b, prim, out).try();
-    be.lower_lhs(b.lhs, ctx, operand, out).try();
+    be.lower_lhs(b.lhs, be.infix_operand_held(b), ctx, operand, out).try();
     close_helper(be, node, b, ctx, operand, out)
 }
 
@@ -581,14 +615,18 @@ write_trap_args = (be :: CBackend, node: Expr, b: Binary, out :: String)
 // instead of n nested calls. Operand type still travels DOWN the
 // spine, operands are still written left to right, and each one's
 // spilled statements land in the same order — so this emits the same
-// bytes the recursion did, which `scripts/fixpoint.sh` proves.
+// bytes the recursion did, which `scripts/fixpoint.sh` proves. One
+// addition since: a level whose left operand is HELD (#737) does not
+// fold (`spine_ahead`), so the temporary lands ahead of the operator's
+// text rather than after it.
 //
 // A LEVEL THAT DOES NOT FOLD ENDS THE WALK and is handed back to
 // `expr`: every door out of `expr` that isn't a plain value (a union
 // tag, a hoist, a fat record), plus the two operators not written as
 // open-operand-operand-close (a dispatching `==`, a `&&` whose right
-// side spills). Those nest only as deep as the parser let them, so
-// recursion is bounded there.
+// side spills), plus now a held left operand. Those nest only as deep
+// as the parser let them or the gate holds, so recursion is bounded
+// there.
 // -----------------------------------------------------------------
 
 // One level of the spine. `id` is the operator node and `operand` the

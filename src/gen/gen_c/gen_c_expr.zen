@@ -150,9 +150,9 @@ call_spills = (be: CBackend, c: Call) bool {
 //     already has.
 // On this tree that is a few hundred of 8,389 call sites.
 //
-// WHAT IS NOT COVERED, said out loud rather than left to be discovered:
-// the operands of `+` and of every other infix operator are unordered in
-// C for exactly the same reason and are not held here.
+// THE OPERANDS OF `+` AND OF EVERY OTHER INFIX OPERATOR were left out
+// deliberately — denser population, cost to be measured first — and are
+// now held under their own gate, `infix_operand_held` below: #737.
 // -----------------------------------------------------------------
 
 // Whether the position at signature index `pos` must be held. `first` is
@@ -203,6 +203,23 @@ later = (at: usize, i: usize, yes: bool) usize {
     yes.match({ true => i, false => at })
 }
 
+// The same rule for an OPERATOR'S LEFT OPERAND: it is held when EITHER
+// operand contains a call, and only then — the `any_arg_calls` question
+// asked of two positions instead of N. The right may always stay inline,
+// since nothing follows it.
+//
+// BOTH HALVES, because order is readable in both directions. A call on
+// the right of a read (`b.n + d.tick()`) is #737's own shape. A call on
+// the LEFT of a read (`d.tick() + b.n`) is the same coin flipped: Zen
+// runs the tick first and reads `b.n` after it, and an unheld pair lets
+// gcc load `b.n` before ever calling — `infix_order.zen`'s `mixed` line
+// answered 0 that way. Only when NOTHING runs on either side (`1 + 2`,
+// `b.n * 100`) is the freedom unobservable and both operands stay
+// inline, which keeps the gate off the common arithmetic.
+infix_operand_held* = (be: CBackend, b: Binary) bool {
+    be.has_call(b.lhs) || be.has_call(b.rhs)
+}
+
 // Whether a CALL hides anywhere inside. Not the spilling question and
 // not a weaker form of it: `d.tick()` spills nothing, and it is the
 // whole reason argument order is observable at all.
@@ -211,21 +228,73 @@ later = (at: usize, i: usize, yes: bool) usize {
 // one step on: wrong in this direction costs a temporary, wrong the
 // other way is a program running its effects in whatever order the C
 // compiler felt like.
+//
+// ITERATIVE, ON A WORKLIST, AND THE WORKLIST IS THE POINT. The first
+// #737 patch walked this recursively, and `corpus/lex/long_single_line`
+// -- one `+` chain ten thousand terms long -- overflowed the C stack
+// and took the compiler to SIGSEGV (exit 139), with three `corpus/lsp/*`
+// aborting beside it: the recursion is linear in OPERAND DEPTH, and
+// neither flat syntax nor the parser bounds that. The parity gate
+// caught it where `make build` could not. An EXPLICIT Vec costs one
+// page from the arena per question and cannot overflow.
+//
+// An `add` that cannot allocate also answers YES. It cannot honestly
+// answer NO -- "no" is the answer that lets gcc order effects -- so it
+// degrades toward holding, the direction this predicate already degrades
+// in.
 has_call* = (be: CBackend, id: ExprId) bool {
-    be.tree.expr_at(id).kind.match({
-        Literal(_) => false,
-        Name(_)    => false,
-        Unit       => false,
-        Scope      => false,
-        SelfType   => false,
-        Paren(p)   => be.has_call(p.inner),
-        Unary(u)   => be.has_call(u.operand),
-        Binary(b)  => be.has_call(b.lhs) || be.has_call(b.rhs),
-        Access(a)  => be.has_call(a.base),
-        Index(x)   => be.has_call(x.base) || be.has_call(x.index),
-        Consume(x) => be.has_call(x.operand),
-        _          => true,
+    be.has_call_walk(id).match({
+        Ok(found) => found,
+        Err(_)    => true,
     })
+}
+
+// THE WALK, which can fail only through the arena: `add` cannot find a
+// page and every step propagates. `has_call` turns that failure into
+// YES -- it cannot honestly answer NO, since "no" is the answer that
+// lets gcc order effects, so it degrades toward holding, the direction
+// this predicate already degrades in.
+has_call_walk = (be: CBackend, id: ExprId) Res<bool, AllocError> {
+    work ::= be.alloc.Vec<ExprId>();
+    work.add(id).try();
+    found ::= false;
+    loop(() { found == false && work.len > 0 }, (h) {
+        // not `.take(..).try()`: this Res's miss is `None`, and no rule
+        // widens that into `AllocError`. The miss is unreachable while
+        // the guard holds -- nothing else pops -- so it answers YES and
+        // stops, which also keeps the walk terminating under any input.
+        popped = work.take(work.len - 1);
+        popped.match({
+            Ok(at) => be.tree.expr_at(at).kind.match({
+                Literal(_) => Ok(()),
+                Name(_)    => Ok(()),
+                Unit       => Ok(()),
+                Scope      => Ok(()),
+                SelfType   => Ok(()),
+                Paren(p)   => work.add(p.inner),
+                Unary(u)   => work.add(u.operand),
+                Binary(b)  => has_call_push2(work, b.lhs, b.rhs),
+                Access(a)  => work.add(a.base),
+                Index(x)   => has_call_push2(work, x.base, x.index),
+                Consume(x) => work.add(x.operand),
+                _          => { found = true; Ok(()) },
+            }).try(),
+            None   => { found = true; },
+        });
+    });
+    Ok(found)
+}
+
+// Two children onto the worklist, one `Res` for the caller's match.
+// Order is irrelevant to the answer, so whichever pops first is fine.
+has_call_push2 = (
+    work :: Vec<ExprId>,
+    a    : ExprId,
+    b    : ExprId
+) Res<(), AllocError> {
+    work.add(a).try();
+    work.add(b).try();
+    Ok(())
 }
 
 // WHAT A TEMPORARY CAN HOLD WITHOUT CHANGING WHAT IT MEANS. A `Consume`

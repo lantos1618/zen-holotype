@@ -1,0 +1,41 @@
+// A HOIST MAY NOT ESCAPE A SHORT-CIRCUIT GUARD. `matched && a.index(i)
+// == b.index(j)` runs the LEFT index only while `matched` holds -- and
+// `str.index` TRAPS past the end, which is how the type says "bug". So
+// when the loop below walks one byte PAST `hay`'s length, the guard
+// must say no first, and nothing on its right may run.
+//
+// The first #737 patch held an operator's left operand whenever either
+// side contained a call. Holding HOISTS STATEMENTS (`value_held` ->
+// `spill_valued`), and an `&&` lowered as plain C infix runs its right
+// side under C's own `&&` but its LEFT beside the guard: the hoisted
+// left index executed on every pass, hit the out-of-range byte, and
+// trapped -- three `corpus/lsp/*` went red in parity while this file's
+// shape hid inside them. Now a logical operator whose operands hold is
+// written through the if-form instead, where the left fills its
+// temporary ahead of the branch (Zen runs it there too) and the right's
+// statements stay INSIDE it.
+//
+// THE WALK IS LSP'S OWN (`lsp_json_read.zen:word`, `matched = matched
+// && self.text.index(from + i) == spelling.index(i)`): a prefix test
+// over a range one LONGER than the needle, so on the last pass the
+// needle side is out of range and only the guard stands between the
+// program and a trap.
+//
+// MUST PRINT exactly:
+// matched false
+//
+// An unguarded hoist traps here with "trap: integer overflow" from
+// str.index's bound check; a backend that also broke the ORDER would
+// print true.
+
+str = std.text
+
+main = (env: Env) Res<i32, AllocError> {
+    hay     ::= "abcde";
+    matched ::= hay.index(0) == hay.index(1);
+    Range(0, 6).loop((h, i) {
+        matched = matched && hay.index(i) == hay.index(i + 1);
+    });
+    println("matched {}", matched);
+    Ok(0);
+}
