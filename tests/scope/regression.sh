@@ -83,32 +83,78 @@ fi
 
 # E. THE #791 PREDICTIONS. The gate's own fixtures pin its table; these call
 # the functions directly so a regression in the RULES (not just the table)
-# goes red here, and they exercise make scope's empty-range branch as run.
+# goes red here. The first three take the statuses diff-tree actually emits:
+# D and R were exactly the ones `status in "AM"` waved through, and '' is in
+# "AM" too, because that was a substring test on a string.
+#
+# E4 exercises make scope's empty-range branch AS THE ISSUE FOUND IT: on main
+# itself, where origin/main..HEAD is empty BY CONSTRUCTION. Running
+# `make scope` in THIS worktree can never reach that branch -- a lane proposes
+# commits over origin/main -- and would recurse besides, because make scope
+# runs this file and this file would run make scope. So the check clones this
+# repository SHARED (alternates: no object copies), detaches HEAD at
+# origin/main, and runs the real `make scope` there: same recipe, same
+# wiring, empty range by construction. SCOPE_791_EMPTY_RANGE_GUARD keeps the
+# clone's own copy of this file from spawning a second clone -- one nesting
+# level, no deeper.
 e() { python3 - "$@" <<'PYEOF'
-import importlib.util, subprocess, sys
+import importlib.util, os, shutil, subprocess, sys, tempfile
 spec = importlib.util.spec_from_file_location("scope", "scripts/scope.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 which = sys.argv[1]
-if which == "deleted-expected":
-    bad = m.sweep_contraband(
-        {"tests/corpus/x/main.expected": sys.argv[2]})
+if which == "expected-touched":
+    bad = m.sweep_contraband({"tests/corpus/x/main.expected": sys.argv[2]})
     print("yes" if bad else "no")
 elif which == "empty-status":
     bad = m.sweep_contraband({"tests/corpus/x/main.expected": ""})
     print("no" if not bad else "WRONG")
 elif which == "make-scope-empty-range":
-    out = subprocess.run(["make", "scope"], capture_output=True,
-                         text=True).stdout
-    print("audits" if "auditing the tip itself" in out
-          and "nothing is being proposed" not in out else "proposes-nothing")
+    rev = subprocess.run(["git", "rev-parse", "origin/main"],
+                         capture_output=True, text=True)
+    if rev.returncode != 0:
+        print("no-origin-main")
+        raise SystemExit(0)
+    tmp = tempfile.mkdtemp(prefix="scope791.")
+    try:
+        clone = os.path.join(tmp, "at-main")
+        made = subprocess.run(["git", "clone", "--shared", "--quiet",
+                               os.getcwd(), clone],
+                              capture_output=True, text=True)
+        if made.returncode != 0:
+            print("clone-failed")
+            raise SystemExit(0)
+        subprocess.run(["git", "-C", clone, "checkout", "--quiet",
+                        "--detach", rev.stdout.strip()],
+                       capture_output=True, check=True)
+        # HEAD detached at origin/main makes the audited range empty BY
+        # CONSTRUCTION; the GATE measured is still THIS tree's -- its
+        # Makefile and scripts/scope.py are overlaid, because origin/main's
+        # are the unfixed ones and a guard must fail on them, not pass.
+        shutil.copy("Makefile", os.path.join(clone, "Makefile"))
+        shutil.copy("scripts/scope.py",
+                    os.path.join(clone, "scripts/scope.py"))
+        tdir = os.path.join(tmp, "tmp")
+        os.makedirs(tdir)
+        env = dict(os.environ, TMPDIR=tdir, SCOPE_791_EMPTY_RANGE_GUARD="1")
+        out = subprocess.run(["make", "scope"], cwd=clone,
+                             capture_output=True, text=True, env=env).stdout
+        ok = ("auditing the tip itself" in out
+              and "nothing is being proposed" not in out)
+        print("audits" if ok else "proposes-nothing")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 PYEOF
 }
-check "E.deleted-expected-is-contraband(D)"  "yes" "$(e deleted-expected D)"
-check "E.renamed-expected-is-contraband(R)"  "yes" "$(e deleted-expected R)"
+check "E.deleted-expected-is-contraband(D)"  "yes" "$(e expected-touched D)"
+check "E.renamed-expected-is-contraband(R)"  "yes" "$(e expected-touched R)"
 check "E.empty-status-not-a-pass-card"       "no"  "$(e empty-status)"
-case "$(uname)" in MINGW*|MSYS*) ;; *) # the empty-range branch needs HEAD~1
-    check "E.empty-range-audits-the-tip"     "audits" "$(e make-scope-empty-range)"
+case "$(uname)" in MINGW*|MSYS*) ;; *)
+    if [ -n "${SCOPE_791_EMPTY_RANGE_GUARD:-}" ]; then
+        : # nested inside E4's clone -- stopping here is what bounds the descent
+    else
+        check "E.empty-range-audits-the-tip" "audits" "$(e make-scope-empty-range)"
+    fi
     ;;
 esac
 
