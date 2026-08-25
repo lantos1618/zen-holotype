@@ -1,0 +1,38 @@
+// tests/corpus/codegen/an_impl_member_return_types_from_the_impl.zen
+// A call to an impl-supplied member is typed at the BOUND while the
+// lowering emits the CONCRETE mangled symbol.
+//
+// Sema types an impl member's call in the bound's own scope
+// (`sema_supply.member_types`), so `Give<i32>.give` answered `T` — an
+// open parameter — while `supplied_or_ufcs → write_method_call →
+// method_sig` emitted the concrete symbol at the receiver's
+// instantiation. A scrutinee temporary declared at the open answer then
+// disagreed with the call beside it and cc refused the pair:
+//
+//     error: incompatible types when initializing type 'int' using
+//            type 'zu_t2_...Bag'
+//
+// gen_c_infer.impl_ret_type now answers with method_sig's OWN
+// computation of the return at the receiver's instantiation, so the
+// temp and the symbol can never disagree. This program pins that: the
+// call's result flows through `.try()` (a spilled scrutinee temp) into
+// println beside it, both halves typed from one rule.
+
+Give<T> = {
+    give* ::= (self: @Self) Res<T, AllocError>,
+}
+
+Bag = {
+    n :: i32,
+}
+
+Bag.impl(Give<i32>, {
+    give = (self: @Self) Res<i32, AllocError> { Ok(self.n) },
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    b ::= Bag(n: 5);
+    v ::= b.give().try();
+    println("v {}", v);
+    Ok(0);
+}

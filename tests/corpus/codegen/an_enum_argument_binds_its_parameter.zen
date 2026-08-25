@@ -1,0 +1,45 @@
+// tests/corpus/codegen/an_enum_argument_binds_its_parameter.zen
+// `Hold<Wide>` must answer `E : Wide` — an enum's own arguments bind its
+// parameters exactly as a struct's do.
+//
+// sema_inst.fill_from_struct matched only `Struct(s)` and fell through
+// `_ => Ok(())` for enums, so instantiating the WRITTEN type
+// `Hold<Wide>` recorded no binding for `E`. The enum's layout then wrote
+// variant A's payload as the BARE parameter — a one-letter C type —
+// while the match arm in `read` read that binder back as `Wide`, and cc
+// refused the pair:
+//
+//     error: request for member 'zu_m1a' in something not a structure
+//
+// `read` is deliberately never CALLED: no value of `Hold<Wide>` can be
+// constructed yet (a variant constructor does not bind `E` either, a
+// separate hole). The walk seeds every non-generic function of the
+// entry module (`gen_c_decl.seed_module`), so `read`'s body is still
+// emitted, and emitting it — not calling it — is what exercises the
+// binding. main runs real work so the program has output to pin.
+//
+// A wrong binding here otherwise compiles, emits C, and answers garbage
+// whenever the bare parameter's width covers the argument's: the sum
+// below would read whatever bytes sit in the payload slot. Both halves
+// matter — the arm must see `Wide`, and the printed sums must be the
+// values written.
+
+Hold<E> = A(E) | B
+
+Wide = {
+    a: i64,
+    b: i64,
+}
+
+read = (h: Hold<Wide>) i64 {
+    h.match({
+        A(v) => v.a + v.b,
+        B    => 0,
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    w ::= Wide(a: 40, b: 2);
+    println("sum {}", w.a + w.b);
+    Ok(0);
+}

@@ -1,0 +1,30 @@
+// tests/corpus/codegen/a_call_result_reaches_a_by_address_parameter.zen
+// A `::` argument was assumed to be a C place, and a call result is not.
+//
+// gen_c_call.write_address wrote `&(expr)` unconditionally; for an
+// argument that is a CALL RESULT that is `&(f(...))` — taking the
+// address of an rvalue — and cc refused the emitted C:
+//
+//     error: lvalue required as unary '&' operand
+//
+// write_address now routes through gen_c_fat.address_of, which takes
+// `&` of a place and spills anything else into a temporary first. This
+// program pins exactly that shape: `make(7)` is a call result handed to
+// `fill`'s `b :: Box`, and the whole point of `::` is that the callee
+// may write through it — so the spilled temporary is written into and
+// discarded, and the program's only observable is that it compiles,
+// runs, and exits cleanly.
+
+Box = {
+    v :: i32,
+}
+
+fill = (b :: Box, k: i32) () { b.v = k; }
+
+make = (n: i32) Box { Box(v: n) }
+
+main = (env: Env) Res<i32, AllocError> {
+    fill(make(7), 9);
+    println("done");
+    Ok(0);
+}
