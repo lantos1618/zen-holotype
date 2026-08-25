@@ -1,0 +1,60 @@
+// `i32.BITS` — the WIDTH of a primitive numeric type, the third of the
+// three constants `sema_static.has_prim_const` answers and the only one
+// no test read. MIN and MAX are of the type; BITS is a count, so a
+// usize, which is what makes it usable where a comptime value is.
+//
+// TWO ROUTES, AND THEY MUST AGREE. Read as a value it is the constant
+// `std.core.num` declares on the type. Read where a comptime number is
+// wanted it is folded instead, by `sema_const.bits_of` — a second table
+// of the same numbers, written out in `bits_16`/`bits_32` and never
+// compared against the first by anything. So the array below is counted
+// by the fold and handed to a function written with the DIGIT: the two
+// tables disagreeing is a call that has nothing to pass, and `count`
+// walking the array turns the folded count into a printed number rather
+// than a type nobody looks at.
+//
+// EVERY WIDTH, NOT ONE. A table keyed on a type name is wrong one row at
+// a time, and a fold that answered i32's 32 for everything would still
+// be right about i32, u32 and f32 — so i8/u8, i16/u16 and i64/u64/f64
+// are all printed, signed beside unsigned, because a width is a property
+// of the storage and not of the sign.
+//
+// usize is deliberately absent: `std.core.num` says its width is the
+// target's, not the language's, and "no corpus test may print a usize
+// extreme" for the same reason.
+
+BYTES: usize = i32.BITS / 8
+
+count = (xs: [u8, 16]) i32 {
+    n ::= 0;
+    xs.loop((h, v) { n = n + v.to_i32(); });
+    n;
+}
+
+byte_count = (xs: [u8, 8]) i32 {
+    n ::= 0;
+    xs.loop((h, v) { n = n + v.to_i32(); });
+    n;
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    // the fold: a count written as `i16.BITS` mints the same type
+    // `[u8, 16]` is written with, or this call does not compile
+    wide: [u8, i16.BITS] = [
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    ];
+    println("wide {}", count(wide));
+
+    // and a different width folds to a different count
+    narrow: [u8, u8.BITS] = [1, 1, 1, 1, 1, 1, 1, 1];
+    println("narrow {}", byte_count(narrow));
+
+    // BITS in ordinary arithmetic, which is where `mem_arena` uses it
+    println("bytes {}", BYTES);
+
+    // the value route, every width the prelude declares
+    println("signed {} {} {} {}", i8.BITS, i16.BITS, i32.BITS, i64.BITS);
+    println("unsigned {} {} {} {}", u8.BITS, u16.BITS, u32.BITS, u64.BITS);
+    println("float {} {}", f32.BITS, f64.BITS);
+    Ok(0);
+}
