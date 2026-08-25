@@ -292,9 +292,24 @@ style: grammar
 ## first, every time, so a parser that stops reading subjects fails this target
 ## even when the range is empty. That is scope.py's own argument, in its
 ## docstring, made into a recipe.
+##
+## `origin/main` IS ASSERTED TO EXIST BEFORE IT IS DIFFED AGAINST. This
+## recipe used to be `git rev-list origin/main..HEAD 2>/dev/null` and then
+## `if [ -z "$$revs" ]`, which reads a MISSING REF exactly like an empty
+## range: `git rev-list nonexistent..HEAD` exits 128 and prints nothing, the
+## 2>/dev/null eats the message, and the target prints "nothing is being
+## proposed" and goes green. A clone whose remote is not called `origin`, a
+## shallow CI checkout, a worktree with no fetched main -- each of those
+## retires the live half of this gate permanently and says the healthy
+## sentence while doing it. The status is checked instead of discarded, and
+## a ref that is not there is exit 2, not silence.
 scope:
 	$(PY) scripts/scope.py --self-test
-	@revs="$$(git rev-list origin/main..HEAD 2>/dev/null)"; \
+	@git rev-parse --verify --quiet origin/main >/dev/null \
+	  || { echo "scope: no origin/main to measure this branch against — the" \
+	           "audit half of this gate cannot run, and an empty range must" \
+	           "not read as a clean one. \`git fetch origin\`" >&2; exit 2; }
+	@revs="$$(git rev-list origin/main..HEAD)"; \
 	  if [ -z "$$revs" ]; then \
 	    echo "scope: no commits over origin/main — nothing is being proposed"; \
 	  else \
