@@ -17,6 +17,7 @@ One line per test: path -- the one-line compiler change that would redden it.
     byte_values_round_trip_through_the_buffer/ -- gen_c add_byte lowering: widen u8 to i32 at the call (signed char) and index reads print -55-style negatives; utf8 len prints 1 not 2
     recursion_appends_deepest_frame_first/ -- gen_c match-arm ordering: emit the append before the recursive call (straight-line lowering of arms) and "12345" becomes "54321"
     the_allocating_constructor_formats/ -- gen_c ufcs overload pick for String(fmt, ..): resolve to the 1-arg empty form and "{}-{}" prints verbatim with braces intact
+    a_float_fits_the_buffer/ -- gen_c_sink writer_of: drop the float arm back to sink_display and every float hole refuses `formatting a value of this type`; bypass %g in the intrinsic render and 100 prints 100.0
 
 ## Compiler bugs / suspicions found while probing
 

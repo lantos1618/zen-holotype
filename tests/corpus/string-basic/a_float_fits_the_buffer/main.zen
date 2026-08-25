@@ -1,0 +1,61 @@
+// tests/corpus/string-basic/a_float_fits_the_buffer/main.zen
+// Issue #809: a float could reach the console door (`zg_print_f64`, %g)
+// but refused at every Sink/String door — `writer_of` had no float arm,
+// so the hole fell to Display, which has no impls, and codegen said
+// `formatting a value of this type`. The fix routes both widths to one
+// bodyless `add_f64` whose body is the backend's own %g render into a
+// file-scope scratch, handed to the sink's `write`.
+//
+// What each row is FOR (the plausible wrong answer it reddens):
+//
+//   - `100` NOT `100.0`: a buffer renderer that ignores %g's
+//     trailing-zero rule prints `100.0` here while every existing test
+//     stays green — corpus/printing already pins `%g` only on the
+//     console side.
+//   - `-0.75`: sign kept; a u64-ish digit loop prints a positive lookalike.
+//   - three DIFFERENT values through ONE buffer back to back: the
+//     scratch is shared, so a render whose bytes are not copied by the
+//     very next sink write leaves all three rows showing the last value.
+//   - the named float hole: the intrinsic expansion once appended a
+//     named hole's argument twice and cc refused the result.
+//   - the f32 row: both widths land on f64; an unpromoted f32 prints
+//     garbage digits that still look numeric.
+//   - the i64 control: the bodied-writer path this patch split
+//     (module_decl/door_fn/bodyless) was never broken for ints.
+//
+// Lengths are printed beside every view: braces dropped or doubled
+// bytes shift the count while leaving most digits intact.
+
+Error = AllocError | WriteError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+
+    // three f64 values through one growing buffer, back to back
+    a: f64 = 2.5;
+    b: f64 = 100.0;
+    c: f64 = -0.75;
+    buf ::= alloc.String().try();
+    buf.add("{} {} {}", a, b, c).try();
+    println("f64 [{}] {}", buf.view(), buf.len());
+
+    // the allocating constructor door, f32 width
+    q: f32 = 3.5;
+    s = alloc.String("{}", q).try();
+    println("f32 [{}] {}", s.view(), s.len());
+
+    // a NAMED float hole reading the writing frame -- no argument: a
+    // named hole consumes none, and passing one appends the value twice
+    // (`[[0.25]0.25]`), which is what ints do identically on every tree
+    v: f64 = 0.25;
+    t = alloc.String("[{v}]").try();
+    println("named [{}] {}", t.view(), t.len());
+
+    // control: integers through the same doors were always fine
+    n: i64 = 0 - 9223372036854775807 - 1;
+    u ::= alloc.String().try();
+    u.add("{}", n).try();
+    println("i64 [{}] {}", u.view(), u.len());
+
+    Ok(0);
+}
