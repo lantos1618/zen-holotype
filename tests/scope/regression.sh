@@ -6,7 +6,7 @@
 # process flagged it. The guard is the gate in scripts/scope.py; what THIS
 # file guards is the gate itself, against the real offender out of the log.
 #
-# Runs FOUR predictions written down before the first run:
+# Runs FIVE predictions written down before the first run:
 #   A. scope.py flags af2f9af7 (exit 1), naming BOTH kinds of contraband --
 #      the src/ file added inside a declared sweep and the rewritten
 #      .expected files.
@@ -17,6 +17,10 @@
 #   D. the gate is WIRED IN -- `make test` runs it -- because a check
 #      outside make test goes stale unobserved (the Makefile's own
 #      grammar-test/bench-allocs story).
+#   E. the #791 rules: a DELETED or RENAMED .expected IS contraband inside
+#      a sweep (`status in "AM"` was a substring test that let D and R
+#      through), and make scope's empty-range branch audits the tip rather
+#      than announcing nothing is being proposed.
 # Without the gate this exits 2 (harness could not run -- never a pass); on a
 # mutated gate it exits 1 here and `make scope` goes red.
 #
@@ -76,6 +80,37 @@ else
     echo "FAIL D.make-test-runs-the-gate (predicted 'scope' on the test: prerequisites, got none)"
     failures=$((failures + 1))
 fi
+
+# E. THE #791 PREDICTIONS. The gate's own fixtures pin its table; these call
+# the functions directly so a regression in the RULES (not just the table)
+# goes red here, and they exercise make scope's empty-range branch as run.
+e() { python3 - "$@" <<'PYEOF'
+import importlib.util, subprocess, sys
+spec = importlib.util.spec_from_file_location("scope", "scripts/scope.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+which = sys.argv[1]
+if which == "deleted-expected":
+    bad = m.sweep_contraband(
+        {"tests/corpus/x/main.expected": sys.argv[2]})
+    print("yes" if bad else "no")
+elif which == "empty-status":
+    bad = m.sweep_contraband({"tests/corpus/x/main.expected": ""})
+    print("no" if not bad else "WRONG")
+elif which == "make-scope-empty-range":
+    out = subprocess.run(["make", "scope"], capture_output=True,
+                         text=True).stdout
+    print("audits" if "auditing the tip itself" in out
+          and "nothing is being proposed" not in out else "proposes-nothing")
+PYEOF
+}
+check "E.deleted-expected-is-contraband(D)"  "yes" "$(e deleted-expected D)"
+check "E.renamed-expected-is-contraband(R)"  "yes" "$(e deleted-expected R)"
+check "E.empty-status-not-a-pass-card"       "no"  "$(e empty-status)"
+case "$(uname)" in MINGW*|MSYS*) ;; *) # the empty-range branch needs HEAD~1
+    check "E.empty-range-audits-the-tip"     "audits" "$(e make-scope-empty-range)"
+    ;;
+esac
 
 if [ "$failures" -gt 0 ]; then
     echo "regression: $failures prediction(s) broken -- the #765 gate is not doing its job"
