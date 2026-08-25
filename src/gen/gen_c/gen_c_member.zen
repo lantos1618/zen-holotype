@@ -58,6 +58,7 @@ handle_depth, lower_handle_call = gen.gen_c.gen_c_handle
 inlines, inline_method = gen.gen_c.gen_c_inline
 is_ptr_member, lower_ptr_member = gen.gen_c.gen_c_ptr
 lower_create = gen.gen_c.gen_c_alloc
+lower_meta_or_access = gen.gen_c.gen_c_expr
 is_capability, lower_capability = gen.gen_c.gen_c_cap
 is_fat = gen.gen_c.gen_c_fat
 lower_fat_call = gen.gen_c.gen_c_bound
@@ -100,6 +101,15 @@ lower_dot_call* = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
+    // A `@meta(..)` BASE IS THE EVALUATOR'S FOLD (`sema_meta.meta_call`),
+    // never a member call: the residue is the folded count, an ordinary
+    // integer literal. Same intercept as the read side's
+    // `lower_meta_or_access`.
+    unknown = be.check.types.unknown().try();
+    be.tree.expr_at(a.base).kind.match({
+        Meta(_) => be.lower_meta_or_access(id, a, ctx, unknown, out),
+        _       => Ok(()),
+    }).try();
     depth = be.handle_depth(a.base);
     (depth > 0).match({
         true  => be.lower_handle_call(id, c, a, depth, ctx, out),

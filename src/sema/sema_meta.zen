@@ -38,9 +38,11 @@
 // spend a second diagnostic on a program whose first sentence is
 // already written.
 
-Expr, Type, TypeId, Access, Meta, Alias = std.ast
+Expr, Type, TypeId, Access, Meta, Alias, Call = std.ast
+ExprId, Ident, nowhere = std.ast
 AllocError = std.mem
 str = std.text
+Range = std.core
 TyId = sema.sema_ty
 Checker, Ctx = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
@@ -68,6 +70,68 @@ meta_access* = (c :: Checker, ac: Access, ctx: Ctx)
     target.kind.match({
         Meta(m) => c.meta_form(target, m, ac, ctx),
         _       => c.types.unknown(),
+    })
+}
+
+// THE SECOND SHAPE THAT FOLDS: `@meta(name: Type).fields()` is a Call
+// whose callee is the access above, and `.len` reads off it. The chain
+// arrives here through `member_call`, which marks the callee and would
+// otherwise resolve `.fields` by ordinary UFCS and hunt for a free
+// function by that name; intercepted instead, and the whole question
+// handed to one rule.
+//
+// THE ARGUMENT LIST MUST BE EMPTY. `fields()` takes nothing: an argument
+// written beside it is a different sentence about a shape this rule does
+// not mean, and is refused like any other wall rather than silently
+// ignored.
+//
+// The backend lowers this same call through `lower_meta_call`
+// (`gen_c_expr.zen`), reading the folded count back off the Meta node
+// the callee carries.
+meta_call* = (c :: Checker, call: Call, ctx: Ctx)
+             Res<TyId, AllocError> {
+    empty = call.args.len == 0;
+    empty.match({
+        true  => c.meta_fields_len(call.callee, ctx),
+        false => {
+            target = c.tree.expr_at(call.callee);
+            c.meta_refused(target);
+        },
+    })
+}
+
+// One level down: the CALL's callee is the Access whose base is the
+// Meta. What folds is `.fields().len` — the ACCESS's own name decides;
+// anything else on the same base (`@meta(T).name()` as a call) stays
+// the wall.
+meta_fields_len = (c :: Checker, ac_id: ExprId, ctx: Ctx)
+                  Res<TyId, AllocError> {
+    node = c.tree.expr_at(ac_id);
+    node.kind.match({
+        Access(a) => c.meta_len_read(a, ctx),
+        _         => c.meta_refused(node),
+    })
+}
+
+// The access's own name decides what the chain reads. `.len` folds;
+// anything else on the same base (`@meta(T).name()` as a call) stays
+// the wall. The Meta under the access carries the written type, the
+// memo key — handed over exactly as `.name`'s fold receives it.
+meta_len_read = (c :: Checker, ac: Access, ctx: Ctx)
+                Res<TyId, AllocError> {
+    is_len = ac.name.text.eq("len");
+    is_len.match({
+        false => c.meta_refused(c.tree.expr_at(ac.base)),
+        true  => {
+            target = c.tree.expr_at(ac.base);
+            target.kind.match({
+                Meta(m) => m.type.match({
+                    None  => c.meta_refused(target),
+                    Ok(t) => c.meta_count_fold(target, t, ctx),
+                }),
+                _       => c.meta_refused(target),
+            })
+        },
     })
 }
 
@@ -107,6 +171,104 @@ meta_fold = (
 ) Res<TyId, AllocError> {
     ty = c.type_from_ast(t, ctx).try();
     c.meta_decl(target, t, ty, ctx)
+}
+
+// THE COUNT'S FOLD: the written TYPE EXPRESSION the Meta carries is the
+// memo key — the same discipline `.name` follows, for the same reason.
+// The count is a function of the type, so `TypeId` is its honest key;
+// the answer travels to the backend inside the same Meta node.
+meta_count_fold = (c :: Checker, target: Expr, t: TypeId, ctx: Ctx)
+                  Res<TyId, AllocError> {
+    ty = c.type_from_ast(t, ctx).try();
+    c.meta_count(target, t, ty, ctx)
+}
+
+// Which declaration owns the count. The written spelling answers first
+// (`P2` counts Point's fields under P2's own row), everything else asks
+// the resolved type — the same split `.name` draws, for the same reason.
+meta_count = (
+    c      :: Checker,
+    target : Expr,
+    t      : TypeId,
+    ty     : TyId,
+    ctx    : Ctx
+) Res<TyId, AllocError> {
+    c.is_unknown(ty).match({
+        true  => c.types.unknown(),
+        false => c.written_count(c.tree.type_at(t), target, t, ty, ctx),
+    })
+}
+
+written_count = (
+    c      :: Checker,
+    node   : Type,
+    target : Expr,
+    t      : TypeId,
+    ty     : TyId,
+    ctx    : Ctx
+) Res<TyId, AllocError> {
+    node.kind.match({
+        Named(n) => c.counted_decl(n.name.text, target, t, ty, ctx),
+        _        => c.resolved_count(target, t, ty),
+    })
+}
+
+counted_decl = (
+    c      :: Checker,
+    name   : str,
+    target : Expr,
+    t      : TypeId,
+    ty     : TyId,
+    ctx    : Ctx
+) Res<TyId, AllocError> {
+    found ::= c.alloc.Vec<Def>();
+    c.world.defs_of(ctx.module, name, found).try();
+    found.get(0).match({
+        None  => c.resolved_count(target, t, ty),
+        Ok(d) => decl_at(c.tree, d.id).match({
+            None  => c.resolved_count(target, t, ty),
+            Ok(x) => x.kind.match({
+                Struct(s) => c.meta_record(t, s.name.text),
+                Enum(_)   => c.meta_refused(target),
+                Alias(a)  => c.counted_alias(a, d, target, t),
+                _         => c.meta_refused(target),
+            }),
+        }),
+    })
+}
+
+// An alias folds to the count of WHAT THE USER WROTE — `@meta(x: P2)`
+// counts through P2's own row — reached one step short of the collapse,
+// with the target's payload as validation only: an alias naming no
+// struct (`Count = i64`) has no fields to count and refuses rather than
+// guess.
+counted_alias = (c :: Checker, al: Alias, owner: Def, target: Expr, t: TypeId)
+                Res<TyId, AllocError> {
+    ty = c.alias_target_of(al, owner).try();
+    c.types.at(ty).match({
+        Named(n) => decl_at(c.tree, n.decl).match({
+            None  => c.meta_refused(target),
+            Ok(d) => d.kind.match({
+                Struct(_) => c.meta_record(t, al.name.text),
+                _         => c.meta_refused(target),
+            }),
+        }),
+        _        => c.meta_refused(target),
+    })
+}
+
+resolved_count = (c :: Checker, target: Expr, t: TypeId, ty: TyId)
+                 Res<TyId, AllocError> {
+    c.types.at(ty).match({
+        Named(n) => decl_at(c.tree, n.decl).match({
+            None  => c.meta_refused(target),
+            Ok(d) => d.kind.match({
+                Struct(s) => c.meta_record(t, s.name.text),
+                _         => c.meta_refused(target),
+            }),
+        }),
+        _        => c.meta_refused(target),
+    })
 }
 
 // The name lives on a declaration's payload node — the one the USER
@@ -199,12 +361,35 @@ written_alias = (c :: Checker, al: Alias, owner: Def, target: Expr, t: TypeId)
     })
 }
 
-// The fold lands: the text under `t`, the written type expression's id
-// — the backend reads it back through the access — and the type is
-// `str`.
+// The fold lands. One memo, two row shapes, told apart by the second
+// component: `.name` records the text under the written type (`t`),
+// `.fields().len` records a leading `#` and the decimal count — a
+// string cannot start with `#`, so neither reader can mistake one row
+// for the other.
+//
+// THE FIELD COUNT IS THE MEMBERS FILTERED TO FIELDS (R2's view,
+// evaluated here rather than allocated): `k: i64 = 5` is a Const and
+// `go* = ..` a Function — only `MemberKind.Field` counts, which is
+// what keeps Muddle at 2 against four members.
 meta_record = (c :: Checker, key: TypeId, name: str) Res<TyId, AllocError> {
-    c.meta_memo.set(key, name).try();
+    is_count ::= name.len > 0;
+    is_count = is_count && (name.index(0) == '#');
+    is_count.match({
+        false => c.meta_memo.set(key, name),
+        true  => c.meta_record_count(key, name),
+    }).try();
     c.types.str_ty()
+}
+
+// A count row: `#` plus decimal digits, decoded into the count memo.
+// The digits are the compiler's own writing — the arms of `count_text`
+// above — so the decode cannot meet anything but them.
+meta_record_count = (c :: Checker, key: TypeId, name: str) Res<(), AllocError> {
+    n ::= 0;
+    Range(1, name.len).loop((h, i) {
+        n = (n * 10) + (name.index(i) - '0');
+    });
+    c.meta_count_memo.set(key, n)
 }
 
 // A written spelling that names no declaration of its own falls back
