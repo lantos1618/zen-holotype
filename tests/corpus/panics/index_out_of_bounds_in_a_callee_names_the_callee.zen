@@ -1,0 +1,34 @@
+// THE OUT-OF-BOUNDS PANIC HAS A MESSAGE AND A PLACE, AND BOTH ARE THE
+// CALLEE'S. `trap_in_callee_names_the_callee` pins that story for the
+// DIVIDE-BY-ZERO kind only; every out-of-range subscript in
+// corpus/slice-bounds pins exit 134 and the stdout prefix and asserts
+// nothing at all about what was said or where -- so an index trap that
+// reported `divide by zero`, or that named `main` instead of `at`,
+// passes the whole tree today.
+//
+// The two halves are separable defects. The WHAT comes from
+// `zg_idx_u`'s call to `zg_trap` (gen_c_runtime.zen); the WHERE comes
+// from the `[` token's own span, threaded through `write_checked` in
+// gen_c_array.zen. A backend that stamps the call site on its checked
+// helpers still says `index out of bounds` -- correctly -- while
+// pointing a debugger at the wrong function.
+//
+// The index is hidden behind a call parameter so the literals-only
+// prover cannot answer it at compile time and the check has to reach
+// runtime; the in-range read on the line before proves the trap belongs
+// to the SECOND subscript and not to subscripting as such.
+
+// a trap never lifts into Res: it aborts the process
+Error = Overflow | DivideByZero | OutOfBounds
+
+at = (a: [i32, 4], i: usize) i32 {
+    a[i]
+}
+
+main = (env: Env) Res<i32, Error> {
+    primes = [i32, 4](2, 3, 5, 7);
+    println("{}", at(primes, 1));
+    println("{}", at(primes, 9));
+    println("unreachable");
+    Ok(0);
+}

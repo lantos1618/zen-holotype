@@ -1,0 +1,36 @@
+// A PANIC RAISED INSIDE A MATCH ARM NAMES THE ARM'S OWN OPERATOR. The
+// position `zg_trap` prints comes from `b.op_span` -- the operator
+// token's span, threaded by gen_c_op.zen -- and every other trap test
+// in this tree raises its trap from a plain statement, where the
+// statement's span and the operator's span sit on the same line and an
+// off-by-a-node is invisible.
+//
+// A match arm separates them. The `%` here is four lines and twenty
+// columns away from the `.match` that contains it, so a lowering that
+// stamped the enclosing expression's span -- the scrutinee, the match,
+// the assignment -- reports a real line in a real file that is not
+// where the fault is. The message stays right; only the place lies,
+// which is the failure nobody notices until they are debugging.
+//
+// The arm is chosen at runtime from the environment so neither the arm
+// selection nor the divisor is a compile-time question, and the trap
+// has to survive into the generated C.
+
+// a trap never lifts into Res: it aborts the process
+Error = Overflow | DivideByZero | OutOfBounds
+
+main = (env: Env) Res<i32, Error> {
+    zero: i32 = env.var("ZEN_TRAP_NEVER_SET").match({
+        Ok(_) => 1,
+        None  => 0,
+    });
+    println("start");
+    n = (zero == 0).match({
+        true  =>
+            100 % zero,
+        false =>
+            7,
+    });
+    println("n {}", n);
+    Ok(0);
+}

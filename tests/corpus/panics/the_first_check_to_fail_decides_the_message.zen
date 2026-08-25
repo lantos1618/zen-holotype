@@ -1,0 +1,35 @@
+// TWO CHECKS ON ONE SUBSCRIPT, AND THE INNER ONE OWNS THE PANIC.
+// `primes[10 / zero]` carries a checked division INSIDE a bounds-checked
+// index: the divide runs first, so the program must die saying
+// `divide by zero` at the `/`, never `index out of bounds` at the `[`.
+//
+// Nothing else in the tree asks this. Every trap test in corpus/traps
+// and corpus/slice-bounds has exactly one thing that can fail, so a
+// backend that hoisted the bounds check above the index expression --
+// or that reported the outermost checked operation rather than the one
+// that actually faulted -- still passes all of them while printing the
+// wrong cause for the wrong reason at the wrong column.
+//
+// It is also the strongest form of the div-by-zero test itself. A
+// checked divide that answered 0 instead of trapping would not merely
+// print a wrong number here: 0 is in range for a length of 4, so the
+// index succeeds and the program exits 0 having printed 2 -- a
+// completely plausible run.
+//
+// The divisor comes from the environment, so no constant folder can
+// turn any of this into a compile-time question.
+
+// a trap never lifts into Res: it aborts the process
+Error = Overflow | DivideByZero | OutOfBounds
+
+main = (env: Env) Res<i32, Error> {
+    primes      = [i32, 4](2, 3, 5, 7);
+    zero: usize = env.var("ZEN_TRAP_NEVER_SET").match({
+        Ok(_) => 1,
+        None  => 0,
+    });
+    println("start");
+    v = primes[10 / zero];
+    println("{}", v);
+    Ok(0);
+}

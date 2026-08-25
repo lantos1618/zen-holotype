@@ -1,0 +1,36 @@
+// THE THIRD PANIC KIND, TOLD THE SAME WAY. `integer overflow` is one of
+// the three whats `zg_trap` can print (gen_c_runtime.zen), and the only
+// files that pin its wording put the operator directly in `main`
+// (corpus/traps/mul_*.zen) -- so nothing in the tree asks whether an
+// overflow raised inside a HELPER names the helper.
+//
+// That is the interesting position because it is the one a checked
+// arithmetic lowering gets wrong for free: the guard is emitted inside
+// `zg_mul_i32`, whose file/line/col arrive as ARGUMENTS from the call
+// site of the operator, and a backend passing the enclosing call's span
+// instead prints a line inside `main` with a message that still reads
+// perfectly.
+//
+// The operand is hidden behind a parameter so the literals-only prover
+// cannot fold it -- a proven overflow is a compile error here, not a
+// trap. `scale(..) + 1` puts the call mid-expression so a helper wired
+// to hand back 0 on overflow does not abort: it prints 1 and exits 0,
+// which is the silent answer this file exists to make impossible.
+
+// a trap never lifts into Res: it aborts the process
+Error = Overflow | DivideByZero | OutOfBounds
+
+scale = (a: i32, b: i32) i32 {
+    a * b
+}
+
+main = (env: Env) Res<i32, Error> {
+    big: i32 = env.var("ZEN_TRAP_NEVER_SET").match({
+        Ok(_) => 1,
+        None  => 2000000000,
+    });
+    println("start");
+    v = scale(big, 3) + 1;
+    println("v {}", v);
+    Ok(0);
+}
