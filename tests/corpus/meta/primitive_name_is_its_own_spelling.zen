@@ -1,0 +1,43 @@
+// `@meta(x: T).name` WHERE T IS A PRIMITIVE, which the two existing
+// meta tests cannot reach: both ask about a declaration the user wrote
+// — a struct, an enum, an alias, a generic instantiation — and every
+// one of those answers out of `sema_meta.zen`'s `written_decl`, which
+// looks the written name up in the module's own definitions and reads
+// the `Struct`/`Enum`/`Alias` node it finds.
+//
+// A PRIMITIVE HAS NO SUCH NODE. `i64` is not declared anywhere in the
+// tree; the lookup finds nothing and the answer has to come from the
+// fallback path instead, off the resolved type itself. That is a
+// second, entirely separate route to the same member, and until this
+// file nothing walked it — a fallback that answered "" or "unknown"
+// for every primitive would have left all three meta tests green.
+//
+// THE WIDTHS ARE THE ORACLE. Every name is printed WITH ITS `.len`, as
+// `type_name_via_meta` established, and the four primitives here have
+// four different lengths (3, 4, 2, 5). So a fallback that answered
+// with the wrong prim, or with a family name — `int` for every signed
+// width, `uint` for every unsigned one — moves a length as well as a
+// spelling, and neither `i64 3` nor `usize 5` is a shape a default
+// produces. `str` and `bool` ride along because they are the two prims
+// that are not a number and so reach the fallback by a different arm
+// of the same match.
+//
+// THE LAST LINE IS THE CONTROL. `Wrap<Wrap<i64>>` folds to `Wrap`, so
+// a fold that had quietly started answering out of the resolved type
+// FOR EVERYTHING — the very failure #768 was — still prints `Wrap`
+// here and prints a primitive's name above, and the pair together says
+// the two routes are both live.
+
+Wrap<T> = {
+    v: T,
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{} {}", @meta(x: i64).name, @meta(x: i64).name.len);
+    println("{} {}", @meta(x: bool).name, @meta(x: bool).name.len);
+    println("{} {}", @meta(x: u8).name, @meta(x: u8).name.len);
+    println("{} {}", @meta(x: usize).name, @meta(x: usize).name.len);
+    println("{} {}", @meta(x: str).name, @meta(x: str).name.len);
+    println("{} {}", @meta(x: Wrap<Wrap<i64>>).name, @meta(x: Wrap<Wrap<i64>>).name.len);
+    Ok(0);
+}

@@ -1,0 +1,84 @@
+// STD'S `Sink` HAS EXACTLY ONE IMPLEMENTOR IN THE TREE: `String`
+// (`text_string.zen:77`). Every Display test writes into that one, or
+// into the Console the prelude hands `println`, and the only other
+// `impl(Sink, ..)` anywhere is `corpus/parse/fn_returning_unit_at_
+// module_level`, whose `Sink` is a struct of its own that happens to
+// share the name. So the claim io.zen makes — "a sink is anything
+// bytes can be written to" — was never once tested against ANYTHING.
+//
+// `Counter` is that anything: it stores no bytes at all, it counts
+// them. That is the point. A sink whose only observable is how it was
+// CALLED turns the format machinery's private decisions into stdout,
+// which is what makes this file mutation-visible where a String sink
+// is not — a String records the bytes and forgets the calls, so any
+// two decompositions of the same format string look identical through
+// it.
+//
+// WHAT THE NUMBERS MEAN, and why each is what it is:
+//
+//   `n={} ok={}` with -12 and true is 13 bytes: "n=" 2, "-12" 3,
+//   " ok=" 4, "true" 4. It is 6 calls, because the two literal runs
+//   and the two holes are four, and `add_i64` spells "-12" one byte at
+//   a time through `write_byte` — the member io.zen says exists
+//   precisely so a digit needs no `str` to point at, and the member no
+//   String-backed test can tell apart from `write`.
+//
+//   The Display hole is the second line: `Tag`'s `toString` is handed
+//   THIS sink, not a scratch one, so `[{}]` costs five more bytes and
+//   five more calls on the same counter — two literal runs outside,
+//   and `<`, the byte, `>` from inside — with no allocation anywhere.
+//   A format machinery that buffered a nested Display and handed the
+//   outer sink one finished string would print the same 18 bytes and
+//   `9`, not `11`.
+//
+//   The floor is read directly on the third line, so `write` and
+//   `write_byte` are each proved to reach the impl at all — a
+//   dispatch that fell back to String's impl would not move these
+//   counters.
+
+Tag = {
+    ch: u8,
+}
+
+Tag.impl(Display, {
+    toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
+        out.add("<").try();
+        out.write_byte(self.ch).try();
+        out.add(">")
+    }
+})
+
+Counter = {
+    bytes :: usize = 0,
+    calls :: usize = 0,
+}
+
+Counter.impl(Sink, {
+    write ::= (self :: @Self, bytes: str) Res<(), WriteError> {
+        self.bytes = self.bytes + bytes.len;
+        self.calls = self.calls + 1;
+        Ok(());
+    },
+
+    write_byte ::= (self :: @Self, b: u8) Res<(), WriteError> {
+        self.bytes = self.bytes + 1;
+        self.calls = self.calls + 1;
+        Ok(());
+    },
+})
+
+main = (env: Env) Res<i32, WriteError> {
+    c ::= Counter(bytes: 0, calls: 0);
+
+    c.add("n={} ok={}", -12, true).try();
+    println("{} {}", c.bytes, c.calls);
+
+    c.add("[{}]", Tag(ch: 'z')).try();
+    println("{} {}", c.bytes, c.calls);
+
+    c.write("abcd").try();
+    c.write_byte('!').try();
+    println("{} {}", c.bytes, c.calls);
+
+    Ok(0);
+}

@@ -1,0 +1,58 @@
+// `vararg_pack_forwards` reads one rule from four sides with SCALAR
+// elements — `i32` and `str`, both one machine word wide as far as the
+// pack's stride is concerned — and never asks the pack how long it is.
+// Two questions are left over, and they are the two a wrong stride
+// answers wrongly.
+//
+// 1. A STRUCT ELEMENT. `Pt` is two `i32`s, so `write_call_args` has to
+//    build a run of 8-byte elements and the callee has to walk it with
+//    the same stride. Get either half wrong and the loop reads halfway
+//    into a neighbour: `x` of the second point comes back as `y` of the
+//    first. The values are chosen so that misreading is visible —
+//    2*3 + 4*5 = 26, while a half-element shift gives 3*4 = 12 and a
+//    stride of one word gives 2*2 + 3*3 = 13. `edge` prints the last
+//    element's own two fields, so a stride that only drifts on the LAST
+//    step still moves a line.
+//
+// 2. `pack.len`. The pack is a borrowed run AND its length, and until
+//    now only `.loop` ever read the length — a loop that stops one
+//    early and a length that is one short are the same observation.
+//    Printing it separately splits them, and the empty pack pins the
+//    other end: a `.len` derived from the call's total arity rather
+//    than from the pack's own extent prints 1 where `count()` must
+//    print 0 and 2 where `tally("ab")` must print 0.
+//
+// FORWARDING A STRUCT PACK is the third line: `relay` passes its own
+// pack on from behind a fixed `str` prefix, which is where a wrong
+// offset shows, with an element type that is not a word.
+
+Pt = { x: i32, y: i32 }
+
+area = (ps: vararg<Pt>) i32 {
+    t ::= 0;
+    ps.loop((h, p) { t = t + p.x * p.y; });
+    t;
+}
+
+count = (ps: vararg<Pt>) usize { ps.len }
+
+edge = (ps: vararg<Pt>) i32 {
+    last ::= 0;
+    ps.loop((h, p) { last = p.x * 100 + p.y; });
+    last;
+}
+
+// a struct pack forwarded on, from behind a fixed prefix
+relay = (tag: str, ps: vararg<Pt>) i32 { area(ps) }
+
+// the prefix must not enter the pack's own length
+tally = (tag: str, ps: vararg<Pt>) usize { ps.len }
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{} {}", area(Pt(x: 2, y: 3), Pt(x: 4, y: 5)), count(Pt(x: 2, y: 3), Pt(x: 4, y: 5)));
+    println("{} {}", area(), count());
+    println("{}", edge(Pt(x: 2, y: 3), Pt(x: 4, y: 5), Pt(x: 6, y: 7)));
+    println("{} {}", relay("box", Pt(x: 2, y: 3), Pt(x: 4, y: 5)), tally("box", Pt(x: 2, y: 3)));
+    println("{}", tally("ab"));
+    Ok(0);
+}

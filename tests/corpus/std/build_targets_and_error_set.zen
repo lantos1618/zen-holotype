@@ -1,0 +1,124 @@
+// THE HALF OF std.build THAT `build_api_resolves` DOES NOT REACH.
+//
+// That file constructs Package, Budget, Dep and Exe and matches the
+// three enums. Four target types are declared and never built —
+// `Lib`, `Extern`, `Test`, `Bench` — and so is `Builder` itself, the
+// value a build file is actually handed. Same rot the other file was
+// written against: a name imported and never used is exactly how the
+// last rot stayed invisible, and a target type constructed nowhere is
+// the same thing one level down.
+//
+// TWO FACES IT ADDS, both chosen because a mutation moves the PRINTED
+// ANSWER and not merely whether the file compiles:
+//
+// 1. `Exe.out` GIVEN A VALUE. `build_api_resolves` reads the `None`
+//    that `out* :: Res<Path> = None` defaults to. Nobody had ever
+//    passed one. A defaulted field is emitted as a second designated
+//    initialiser at every construction site (`gen_c_build.zen`,
+//    `defaulted_initialisers`) and it is guarded by `!be.supplies(..)`
+//    — drop that guard and the default is written AFTER the caller's
+//    value, so C's last-one-wins silently discards it. Nothing in the
+//    tree would have said so. This line does: `out build/app` becomes
+//    `out absent`.
+//
+// 2. `BuildError` USED AS AN ERROR SET. Its header says why AllocError
+//    is in it — "a build allocates: without it a build file cannot
+//    `.try()` any of the three, which is what example/build.zen ran
+//    into". `plan` below `.try()`s two allocating calls and raises a
+//    `BuildFault` under the alias, so both members of the union travel
+//    through one signature. Take AllocError back out of `BuildError`
+//    and the `.try()` stops compiling.
+//
+// NOT REACHED HERE, KNOWINGLY: matching `BuildError` BY VARIANT.
+// `Err(NotFound)`, `Err(BuildFault.NotFound)` and `Err(e) =>
+// e.match({..})` all report every arm after the first as unreachable —
+// a named union error set cannot be taken apart today (the
+// `errors-widen` lane's territory). Ok-versus-Err is what a build file
+// can ask, so it is what this file asks.
+
+Builder, Lib, Extern, Test, Bench = std.build
+Budget, Dep, Exe, Function, Os, Arch = std.build
+BuildFault, BuildError = std.build
+Vec = std.collections
+
+// one signature carrying both members of the union: `.try()` merges
+// the allocator's failure in, and the build's own failure is raised
+// under the alias
+plan = (a: Alloc, want: usize) Res<usize, BuildError> {
+    libs ::= a.Vec<str>();
+    libs.add("m").try();
+    libs.add("pthread").try();
+    (want <= libs.len).match({
+        true  => Ok(libs.len),
+        false => Err(BuildFault.HashMismatch),
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    libs ::= a.Vec<str>();
+    libs.add("m").try();
+    libs.add("pthread").try();
+    paths ::= a.Vec<str>();
+    paths.add("/usr/lib").try();
+
+    // libs and paths are both Vec<str> and hold DIFFERENT contents, so
+    // a construction that filled them by position rather than by name
+    // prints `1 2 m` instead of `2 1 /usr/lib`
+    l = Lib(src: Path(text: "sys/m.zen"), libs: libs, paths: paths);
+    println(
+        "lib {} {} {} {}",
+        l.src.text,
+        l.libs.len,
+        l.paths.len,
+        l.paths.get(0).match({ Ok(p) => p, None => "?" })
+    );
+
+    // the same three questions, a separate type on purpose
+    x = Extern(src: Path(text: "c/shim.c"), libs: a.Vec<str>(), paths: a.Vec<str>());
+    println("extern {} {} {}", x.src.text, x.libs.len, x.paths.len);
+
+    // Test and Bench hold what the walk found; Function is the empty
+    // stand-in, so the lists are the only thing to read
+    t = Test(tests: a.Vec<Function>(), deps: a.Vec<Dep>());
+    println("test {} {}", t.tests.len, t.deps.len);
+
+    buds ::= a.Vec<Budget>();
+    buds.add(Budget(name: "lex", ns_op: 900, allocs_op: 0, bytes_op: 64)).try();
+    b = Bench(benches: a.Vec<Function>(), budgets: buds);
+    println(
+        "bench {} {} {}",
+        b.benches.len,
+        b.budgets.len,
+        b.budgets.get(0).match({ Ok(u) => u.name, None => "?" })
+    );
+
+    // the value a build file is handed: two enums and two capabilities
+    bl = Builder(os: Os.Linux, arch: Arch.Arm64, env: env, alloc: a);
+    bl.os.match({
+        Macos   => println("builder macos"),
+        Linux   => println("builder linux"),
+        Windows => println("builder windows"),
+    });
+    bl.arch.match({
+        X86_64 => println("builder x86_64"),
+        Arm64  => println("builder arm64"),
+    });
+
+    // the defaulted field, given a value
+    e = Exe(
+        src: Path(text: "app/main.zen"),
+        deps: a.Vec<Dep>(),
+        out: Ok(Path(text: "build/app"))
+    );
+    e.out.match({
+        Ok(o) => println("out {}", o.text),
+        None  => println("out absent"),
+    });
+
+    plan(a, 0).match({ Ok(n) => println("plan ok {}", n), Err(e2) => println("plan failed") });
+    plan(a, 9).match({ Ok(n) => println("plan ok {}", n), Err(e2) => println("plan failed") });
+
+    Ok(0);
+}
