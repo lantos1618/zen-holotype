@@ -796,13 +796,21 @@ Checker* = {
     //
     // ONE DECLARATION, BOTH SIDES, and only where the context decided:
     // this is not assignability — it is what makes an unannotated
-    // nullary usable at all — so it lives beside `coerce`, asked at the
-    // positions with a written answer (`check_assign`), never inside
+    // nullary usable at all — so it lives beside `assignable`, asked at
+    // the positions with a written answer (`check_assign`), never inside
     // `assignable`. The call that consumed `x` wrote nothing; refusing
     // there is the whole point (issue 738).
+    //
+    // The declaration is compared DIRECTLY, not through `applied_to`:
+    // that reads `args_agree`, whose arity rule this same issue
+    // tightened — routed through it, this question answers false for the
+    // very pair it exists to marry.
     nullary_settles* = (self: @Self, got: TyId, want: TyId) bool {
         self.types.at(got).match({
-            Named(g) => g.args.len == 0 && self.applied_to(g, want),
+            Named(g) => (g.args.len == 0) && self.types.at(want).match({
+                Named(w) => g.decl.eq(w.decl),
+                _        => false,
+            }),
             _        => false,
         })
     }
