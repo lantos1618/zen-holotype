@@ -36,7 +36,7 @@ unsupported = gen.gen_c.gen_c_report
 Shape = gen.gen_c.gen_c_shape
 Fold = gen.gen_c.gen_c_fold
 ctype, declarator, request_type, is_signed = gen.gen_c.gen_c_type
-expr, ty_of = gen.gen_c.gen_c_expr
+expr, ty_of, value_held, has_call = gen.gen_c.gen_c_expr
 write_position = gen.gen_c.gen_c_op
 open_result, close_pass, run_body = gen.gen_c.gen_c_loop
 declare_usize, settle_res, walk_temp = gen.gen_c.gen_c_loop
@@ -182,6 +182,43 @@ write_compound = (
     Ok(());
 }
 
+// THE ELEMENTS RUN LEFT TO RIGHT TOO. One literal is ONE C compound
+// literal, and C11 6.7.9p23 leaves its initialiser expressions
+// indeterminately sequenced — the same hand-away a call's argument
+// list was before 1aab00ca and a construction's fields were before
+// 37a3e62a1. So each element asks the question those two ask
+// (`holds`, `infix_operand_held`): it is held while a call is still to
+// its RIGHT, the rightmost calling element stays inline because by the
+// time it runs everything to its left already has, and nothing is
+// touched at all unless some element runs. A whole literal standing in
+// a position that holds IT (`two([t(), t()], t())`) is the caller's
+// `value_held` at work, one level up.
+//
+// The arity question is asked of the LITERAL, not through `be.holds`:
+// a literal has no receiver and no callee record, so `first` is 0 and
+// the positions are the elements themselves.
+// The arity question and the something-runs question are asked ONCE for
+// the whole list (`multi`, `last`), the rightmost-calling-element
+// question once per element — the split `holds` makes inside itself.
+elem_held = (be: CBackend, multi: bool, last: usize, i: usize,
+             e: ExprId) bool {
+    multi && ((i < last) || be.has_call(e))
+}
+
+// The index of the LAST element containing a call — after it nothing
+// is left to run. Same shape as `last_call_arg` in gen_c_expr.zen,
+// over a literal's elements instead of a call's arguments.
+last_caller = (be: CBackend, elems: Vec<ExprId>) usize {
+    at ::= 0;
+    elems.loop((h, i, e) {
+        be.has_call(e).match({
+            true  => { at = i; },
+            false => {},
+        });
+    });
+    at
+}
+
 write_elem_list = (
     be    :: CBackend,
     elems : Vec<ExprId>,
@@ -189,9 +226,12 @@ write_elem_list = (
     ctx   : Ctx,
     out   :: String
 ) Res<(), AllocError> {
+    multi ::= elems.len > 1;
+    last ::= last_caller(be, elems);
     elems.loop((h, i, e) {
         (i > 0).then(() { out.add_bytes(", ").try() });
-        expr(be, e, ctx, a.elem, out).try();
+        hold = elem_held(be, multi, last, i, e);
+        be.value_held(e, ctx, a.elem, hold, out).try();
     });
     Ok(());
 }
