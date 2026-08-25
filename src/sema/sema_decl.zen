@@ -21,12 +21,13 @@
 
 Module, Decl, Function, TParam, BlockId = std.ast
 Struct, Impl, Member, Enum = std.ast
-ExprId, TypeId, Const = std.ast
+ExprId, TypeId, Const, Field = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
 TyId = sema.sema_ty
+Ty, Fn = sema.sema_ty
 Def, DefKind, ModuleTable, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
@@ -36,6 +37,7 @@ check_depth = sema.sema_depth
 check_varargs = sema.sema_vararg
 check_layout = sema.sema_layout
 type_of, block_type = sema.sema_type
+bound_member_type = sema.sema
 type_from_ast, param_type = sema.sema_denote
 decl_as_type = sema.sema_type
 enter_struct_tvars = sema.sema_member
@@ -368,8 +370,55 @@ impl_bodies = (c :: Checker, im: Impl, m: Module, mi: usize)
     tmark   = c.tvar_mark();
     c.enter_target_tvars(name, mi).try();
     im.members.loop((h, mem) { c.member_body(mem, self_ty, m, mi).try() });
+    im.members.loop((h, mem) { c.field_value(mem, im, self_ty, mi).try() });
     c.release_tvars(tmark).try();
     Ok(());
+}
+
+// AN IMPL-SUPPLIED FIELD'S VALUE IS A TYPED POSITION. A computed field
+// (`width: self.side * 2`) writes no type of its own — its type is the
+// bound's declaration, read back through `bound_member_type` exactly as
+// `sema_supply.supplied` reads it at a use — so nothing refused a value
+// that does not fit it: a match inside the expression could disagree with
+// itself (i32 in one arm, bool in the other), the wrong arm stored, and
+// the program printed a 1 nobody wrote.
+//
+// THE TWO CHECKS ARE THE CONSTANT'S (`const_body` above), with
+// `bound_member_type` standing where the written type stands. The value is
+// typed first, so the memo holds an answer wherever it is later read; then
+// it is asked whether it fits.
+field_value = (
+    c       :: Checker,
+    mem     : Member,
+    im      : Impl,
+    self_ty : TyId,
+    mi      : usize
+) Res<(), AllocError> {
+    bound = c.impl_bound_type(im, mi).try();
+    mem.kind.match({
+        Field(f) => f.value.match({
+            Ok(v) => {
+                ctx  = c.self_ctx(mi, self_ty).try();
+                mark = c.mark();
+                c.bind("self", self_ty, false, true).try();
+                got = c.type_of(v, ctx).try();
+                c.release(mark).try();
+                want = c.bound_member_type(bound, mem.name().text, self_ty).try();
+                node = c.tree.expr_at(v);
+                // `widen_u16 = to_u16` SUPPLIES A METHOD: the value is a
+                // bare function reference the call machinery instantiates
+                // at its use, and its type is not the fn signature it
+                // stands for. Only a DATA position owes the coercion.
+                c.types.at(want).match({
+                    Fn(_) => Ok(()),
+                    _     => c.coerce(node.span.file, node.span, got, want, ""),
+                }).try();
+                Ok(())
+            },
+            None => Ok(()),
+        }),
+        _ => Ok(()),
+    })
 }
 
 // The named declaration's own type, with no arguments: `@Self` inside a
