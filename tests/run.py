@@ -965,7 +965,12 @@ def run_must_fail(test: Test, tool: Toolchain, work: Path, args: argparse.Namesp
             f"[{bound_src}]: one mistake must not cascade"
         )
 
-    return Result(test, not reasons, reasons, clip(text) if reasons else "")
+    # A pass keeps what the compiler said, too. Before issue #746 this was
+    # `clip(text) if reasons else ""`: a green test remembered nothing, which
+    # is how #741's surplus diagnostic hid inside a passing gate for weeks --
+    # nobody could ask later what a pass had cost. What is graded does not
+    # change; what is REMEMBERED does.
+    return Result(test, not reasons, reasons, clip(text))
 
 
 def stage_verdict(result: Result, current: int) -> tuple[Result, bool]:
@@ -1100,6 +1105,13 @@ def self_check(args: argparse.Namespace) -> int:
                     want_reason not in " ".join(result.reasons):
                 failures.append(f"{name}: no reason names {want_reason!r}: "
                                 f"{result.reasons}")
+            if result.ok and output.strip() and \
+                    output.strip().splitlines()[0] not in result.detail:
+                failures.append(
+                    f"{name}: a pass discarded what the compiler said "
+                    f"(kept {result.detail!r}); the surplus behind #741 hid "
+                    f"in exactly that throw"
+                )
         shutil.rmtree(workroot, ignore_errors=True)
     finally:
         os.environ.pop("STUB_DIAG", None)
@@ -1244,6 +1256,11 @@ def main(argv: Sequence[str]) -> int:
                 elif result.ok:
                     if args.verbose:
                         print(f"ok   {result.test.tid}")
+                        # What the compiler said beside the pass: the same
+                        # bytes a failure would carry, so a green tick is
+                        # never the whole story (#746).
+                        for line in result.detail.splitlines():
+                            print(f"     | {line}")
                 else:
                     print(f"FAIL {result.test.tid}: {result.reasons[0]}")
     finally:
