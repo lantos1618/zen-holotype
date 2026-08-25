@@ -1,0 +1,42 @@
+// A METHOD DECLARING TYPE PARAMETERS OF ITS OWN — `tag = <U>(self, u: U)`
+// — IS REFUSED AT THE CALL, and this is the file that says so out loud.
+// `gen_c_member.method_fault` states the rule: a generic RECEIVER is not
+// a refusal, because `Vec<GenDiag>.add` is `Vec.add` emitted at
+// `GenDiag` and the receiver's arguments say which; a member's OWN
+// parameters would need the receiver's arguments plus the call's, "and
+// nothing in this tree declares one".
+//
+// Which is exactly why it needs a test here rather than in the corpus.
+// The refusal is load-bearing and invisible: `src/` never writes the
+// shape, so the guard fires nowhere the build can see it, and a check
+// that fires nowhere reads the same as a check that was deleted. If the
+// day comes that generic methods lower, this file goes red and the
+// corpus test replacing it is the one to write.
+//
+// The guard is also the only thing keeping the report readable. Removed,
+// the program does not compile either — it fails further down as
+// "codegen cannot spell the type" at the two declarations, which names the
+// MEMBER and never the call that asked for it, and the three call sites
+// go unmentioned. That is the difference this file is holding: a
+// refusal that points at what the author wrote.
+//
+// THE DECLARATION IS NOT THE ERROR. Sema types the shape and says
+// nothing about it; `Box` below is constructed and read, and only the
+// CALLS are named. Three forms, three positions: the type argument
+// inferred from the argument, the type argument written, and the same
+// on a `::=` member, which reaches the refusal by the same door.
+
+Box = {
+    n :: i32,
+    tag = <U>(self: @Self, u: U) i32 { self.n; }
+    bump ::= <U>(self :: @Self, u: U) i32 { self.n = self.n + 1; self.n; }
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    b ::= Box(n: 4);
+    println("{}", b.n);
+    println("{}", b.tag(9));
+    println("{}", b.tag<i32>(9));
+    println("{}", b.bump(9));
+    Ok(0);
+}
