@@ -1,0 +1,113 @@
+// tests/corpus/parse/trivia_lone_comment_in_bare_block_and_closure_body.zen
+// Issue #740: a comment that is the ONLY content of a bare block, or of
+// a closure body, must be named by the containing block's `trailing` run.
+//
+// Before the fix, `block_here` built every `Block` with `trailing:
+// no_trivia()` unconditionally: the comment sat in `p.pending` while the
+// body was read, no node claimed it, and bumping the closing `}` drained
+// the pending run PAST it. The comment stayed in the arena but was named
+// by no run at all -- invisible to every consumer that only reads runs.
+//
+// This test is deliberately NOT the whole-tree audit beside it
+// (trivia_every_comment_is_owned): that one sums run lengths against
+// `Ast.trivia_count`, a method THIS fix adds, so on a pre-fix tree it
+// cannot even compile and its red means nothing. This file compiles on
+// both trees and asserts ownership directly: walk every run, count what
+// they name, and require exactly 3 -- the two comments plus the ONE
+// derived Blank between the declarations. On a pre-fix tree the two
+// comments are named by nobody, 2 pieces go missing, the last line reads
+// UNOWNED TRIVIA, and main exits 1.
+
+scan, Source = std.lex.lex
+Parser = std.parse.parser
+Ast = std.ast.ast_arena
+TriviaRun = std.ast.ast_span
+Decl, Block = std.ast.ast_node
+ExprId, TypeId, PatternId, BlockId = std.ast.ast_id
+
+SOURCE: str = "main = () () {\n    {\n        // lone in bare block\n    }\n}\n\nf = () () {\n    // lone in closure body\n}\n"
+
+Walk = {
+    tree*: Ast,
+    claimed* :: usize = 0,
+}
+
+add = (w :: Walk, run: TriviaRun) () {
+    w.claimed = w.claimed + run.len;
+}
+
+fn_body_of = (d: Decl) Res<BlockId> {
+    d.kind.match({
+        Function(f) => f.body,
+        _           => None,
+    })
+}
+
+walk_block = (w :: Walk, b: Block) () {
+    add(w, b.leading);
+    Range(0, b.stmts.len).loop((h, i) {
+        b.stmts.get(i).match({
+            Ok(s) => {
+                add(w, s.leading);
+                s.kind.match({
+                    Block(bid) => { walk_block(w, w.tree.block_at(bid)); },
+                    Decl(d)    => fn_body_of(d).match({
+                        Ok(bid) => { walk_block(w, w.tree.block_at(bid)); },
+                        None    => (),
+                    }),
+                    _          => (),
+                });
+                add(w, s.trailing);
+            },
+            None  => (),
+        });
+    });
+    add(w, b.trailing);
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    lexed = scan(alloc, Source(file: "t.zen", text: SOURCE)).try();
+    p ::= alloc.Parser(lexed);
+    m = p.module("t").try();
+
+    (lexed.diags.len + p.diags.len == 0).match({
+        true  => (),
+        false => println("unexpected diagnostics"),
+    });
+
+    w ::= Walk(tree: p.tree);
+    add(w, m.leading);
+    Range(0, m.decls.len).loop((h, i) {
+        m.decls.get(i).match({
+            Ok(d) => {
+                add(w, d.leading);
+                fn_body_of(d).match({
+                    Ok(bid) => walk_block(w, p.tree.block_at(bid)),
+                    None    => (),
+                });
+                add(w, d.trailing);
+            },
+            None  => (),
+        });
+    });
+    add(w, m.trailing);
+
+    // Exactly three pieces exist in SOURCE: two comments and one derived
+    // Blank. Ownership of all three is the property; the count is how it
+    // is asserted without naming an owner.
+    expected ::= 3;
+    ok ::= w.claimed == expected;
+    ok.match({
+        true  => println("every trivia piece owned: {} of {}", w.claimed, expected),
+        false => println(
+            "UNOWNED TRIVIA: {} of {} pieces named by no run",
+            expected - w.claimed,
+            expected
+        ),
+    });
+    ok.match({
+        true  => Ok(0),
+        false => Ok(1),
+    })
+}
