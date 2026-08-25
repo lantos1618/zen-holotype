@@ -127,6 +127,15 @@ elif which == "make-scope-empty-range":
         subprocess.run(["git", "-C", clone, "checkout", "--quiet",
                         "--detach", rev.stdout.strip()],
                        capture_output=True, check=True)
+        # PIN THE CLONE'S origin/main TO THE DETACHED SHA. The clone snapshots
+        # its remote-tracking ref at clone time, and main moves under the test
+        # on a busy box: if the snapshot lands one commit behind the sha we
+        # detached at, origin/main..HEAD is NON-empty inside the clone and the
+        # empty-range branch never fires -- a spurious proposes-nothing. Pinning
+        # makes the range empty BY CONSTRUCTION, not by timing (#791).
+        subprocess.run(["git", "-C", clone, "update-ref",
+                        "refs/remotes/origin/main", rev.stdout.strip()],
+                       capture_output=True, check=True)
         # HEAD detached at origin/main makes the audited range empty BY
         # CONSTRUCTION; the GATE measured is still THIS tree's -- its
         # Makefile and scripts/scope.py are overlaid, because origin/main's
