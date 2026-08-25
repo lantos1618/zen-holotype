@@ -58,26 +58,16 @@ cc -O0 -g "$CANARY/main.c" -o "$WORK/canary.bin" >"$WORK/canary.cc" 2>&1 || {
 }
 
 echo "leak.sh: canary -- tests/bench/leak_canary/main.c, same flags as the gate"
-if ! valgrind --leak-check=full --show-leak-kinds=definite \
+# It is the REPORT that is asserted and not the exit status: with
+# --error-exitcode=1 a healthy detection exits non-zero, and a neutered
+# detector exits zero -- so the status carries exactly backwards.
+set +e
+valgrind --leak-check=full --show-leak-kinds=definite \
         --errors-for-leak-kinds=definite --error-exitcode=1 \
         --suppressions="$ROOT/tests/bench/valgrind.supp" \
-        "$WORK/canary.bin" >"$WORK/canary.out" 2>"$WORK/canary.log"; then
-    # The suppression file may legitimately have been widened until the
-    # block no longer reports -- but then this gate's only remaining
-    # failure mode is "the detector says nothing", which is exactly what
-    # the canary exists to rule out. Refuse loudly rather than pass.
-    echo "" >&2
-    echo "leak.sh: THE CANARY IS QUIET. tests/bench/leak_canary/main.c is a known," >&2
-    echo "  live leak one frame below main and valgrind did not report it under" >&2
-    echo "  this script's own flags and suppressions." >&2
-    echo "" >&2
-    sed 's/^/  | /' "$WORK/canary.log" >&2 | tail -20
-    echo "" >&2
-    echo "  The usual cause is tests/bench/valgrind.supp being widened until it" >&2
-    echo "  swallows leaks whose caller is NOT generated main -- at which point" >&2
-    echo "  this gate cannot fail on anything and must say so instead of passing." >&2
-    exit 2
-fi
+        "$WORK/canary.bin" >"$WORK/canary.out" 2>"$WORK/canary.log"
+canary_code=$?
+set -e
 
 missing=0
 for want in "${WANT[@]}"; do
@@ -87,8 +77,19 @@ for want in "${WANT[@]}"; do
     fi
 done
 if [ "$missing" -ne 0 ]; then
-    echo "leak.sh: the canary ran but did not produce every expected substring;" >&2
-    echo "  whatever this gate would have said next, its detector is unproven." >&2
+    echo "" >&2
+    echo "leak.sh: THE CANARY IS QUIET. tests/bench/leak_canary/main.c is a known," >&2
+    echo "  live leak one frame below main and valgrind did not report it under" >&2
+    echo "  this script's own flags and suppressions." >&2
+    echo "" >&2
+    echo "  canary exit = $canary_code; its full log:" >&2
+    sed 's/^/  | /' "$WORK/canary.log" >&2 | tail -20
+    echo "" >&2
+    echo "  Usual causes: whatever provides \`valgrind\` on PATH is not running" >&2
+    echo "  the subject under Memcheck (a wrapper, a stale path), or" >&2
+    echo "  tests/bench/valgrind.supp widened until it swallows leaks whose" >&2
+    echo "  caller is NOT generated main -- either way this gate cannot fail on" >&2
+    echo "  anything and must say so instead of passing." >&2
     exit 2
 fi
 echo "leak.sh: canary reported ${#WANT[@]} expected finding(s) -- the detector is live"
