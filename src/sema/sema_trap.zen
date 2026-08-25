@@ -260,7 +260,7 @@ literal_within = (c :: Checker, id: ExprId, want: TyId)
     node = c.tree.expr_at(id);
     node.kind.match({
         Match(m) => c.arm_literals(m, want),
-        _        => c.folded_within(id, node, want),
+        _        => c.folded_within(id, want),
     })
 }
 
@@ -269,15 +269,16 @@ arm_literals = (c :: Checker, m: Match, want: TyId) Res<(), AllocError> {
     Ok(());
 }
 
-// A fold that declines is usually "not provably anything" -- a binding
-// in the way, an operator this prover does not answer -- and silence is
-// right for it. A BARE `Int` literal is the one form with no such
-// excuse: its digits reached the tree only by fitting a u64 accumulator
-// (`std/lex/lex_literal.zen`), so declining means they are past i64,
-// which every type but u64/usize cannot hold (#769).
-folded_within = (c :: Checker, id: ExprId, node: Expr, want: TyId)
-                Res<(), AllocError> {
-    c.literal_int(node).match({
+// The fold is `const_int`'s: one number however many operators wrote it,
+// under the depth budget that lets a ten-thousand-term chain decline
+// instead of segfaulting (sema_const). A decline is usually "not
+// provably anything" -- a binding in the way, a chain past the budget --
+// and silence is right for it. A BARE `Int` literal is the one form with
+// no such excuse: its digits reached the tree only by fitting a u64
+// accumulator (`std/lex/lex_literal.zen`), so declining means they are
+// past i64, which every type but u64/usize cannot hold (#769).
+folded_within = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
+    c.const_int(id).match({
         None  => c.unfoldable_within(id, want),
         Ok(v) => c.value_within(id, want, v),
     })
@@ -373,32 +374,16 @@ written_literal = (c: Checker, node: Expr) Res<str, AllocError> {
     })
 }
 
-// Unlike `const_int`, walks only forms whose value is written here:
-// literals, parens, unary minus — and arithmetic ON those, since a
-// module constant's value is one number however many operators wrote
-// it (#769). A binding stays out of bounds: the trap corpus routes
-// values like `i32.MAX` through one on purpose.
+// Unlike `const_int`, walks only literal, paren and unary-minus forms —
+// the tree's own nesting bounds the recursion. Arithmetic goes through
+// `const_int` at the caller (#769): a chain is left-nested and
+// unbounded, and folding it by recursion segfaulted on a long line.
 literal_int = (c: Checker, node: Expr) Res<i64> {
     node.kind.match({
         Literal(l) => const_literal(l),
         Paren(p)   => c.literal_int(c.tree.expr_at(p.inner)),
         Unary(u)   => c.literal_neg(u),
-        Binary(b)  => c.literal_binary(b),
         _          => None,
-    })
-}
-
-literal_binary = (c: Checker, b: Binary) Res<i64> {
-    c.literal_int(c.tree.expr_at(b.lhs)).match({
-        None  => None,
-        Ok(x) => c.literal_rhs(b, x),
-    })
-}
-
-literal_rhs = (c: Checker, b: Binary, x: i64) Res<i64> {
-    c.literal_int(c.tree.expr_at(b.rhs)).match({
-        None  => None,
-        Ok(y) => fold(b.op, x, y),
     })
 }
 
