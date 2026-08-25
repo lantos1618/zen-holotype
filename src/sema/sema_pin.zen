@@ -1,0 +1,94 @@
+// src/sema/sema_pin.zen
+// A capture by an escaping closure outlives the call.
+//
+// The thread body runs later, so its reads are not on any path the
+// walk in `sema_own.zen` takes — a consume written after the capture
+// moves a value the body still holds. Source order refuses only the
+// mirror image (consume-then-capture), which is why this rule exists:
+// the capture IS the use, so it pins what it read for the rest of the
+// enclosing scope, and the later move is refused where it is written,
+// naming the capture in the sentence.
+//
+// A non-escaping body joins through the call instead and pins nothing,
+// per the header on `own_args`. A binding this frame does not own — a
+// parameter, a borrow — cannot be moved by the enclosing scope at all,
+// so its capture pins nothing either. Unresolved lookups have no
+// opinion: fail-open, like every ownership rule.
+//
+// Which closures escape is `call_escapes`' question, answered in
+// `sema_scope.zen`; this file holds only what the answer sets in
+// motion. `escaped` and `pinned` live on `Own`.
+
+Expr, Span = std.ast
+Range = std.core
+Checker = sema.sema_check
+SemaFault, CaptureFault = sema.sema_diag
+find_var, owned_at, Own = sema.sema_own
+
+// A capture that forbids the moves after it: which binding, and where
+// the use that captured it was written.
+Pin* = {
+    root*: usize,
+    span*: Span,
+}
+
+pin_captured* = (c :: Checker, o :: Own, node: Expr, text: str)
+                Res<(), AllocError> {
+    find_var(o, text).match({
+        None  => Ok(()),
+        Ok(i) => ((i < o.escaped) && owned_at(o, i)).match({
+            false => Ok(()),
+            true  => o.pinned.add(Pin(root: i, span: node.span)),
+        }),
+    })
+}
+
+pinned_at* = (o: Own, root: usize) bool {
+    Range(0, o.pinned.len).find((i) {
+        o.pinned.get(i).match({
+            Ok(p) => p.root == root,
+            None  => false,
+        })
+    }).match({ Ok(_) => true, None => false })
+}
+
+// The first capture wins: it is where the binding stopped being
+// movable, and every later one repeats it.
+first_pin* = (o: Own, root: usize) Res<Pin> {
+    Range(0, o.pinned.len).find((i) {
+        o.pinned.get(i).match({
+            Ok(p) => p.root == root,
+            None  => false,
+        })
+    }).match({ None => None, Ok(i) => o.pinned.get(i) })
+}
+
+// The consume's sentence names the place; the capture is the second
+// position the reader cannot find without being told.
+refuse_pinned* = (c :: Checker, o :: Own, span: Span, text: str)
+                 Res<(), AllocError> {
+    find_var(o, text).match({
+        None  => Ok(()),
+        Ok(i) => c.refuse_pinned_at(o, span, i),
+    })
+}
+
+refuse_pinned_at* = (c :: Checker, o :: Own, span: Span, root: usize)
+                    Res<(), AllocError> {
+    pinned_at(o, root).match({
+        false => Ok(()),
+        true  => first_pin(o, root).match({
+            None    => Ok(()),
+            Ok(pin) => c.place_name(o, pin.root, "").match({
+                Err(_)    => Ok(()),
+                Ok(place) => c.refuse(
+                    span,
+                    SemaFault.ConsumedByCapture(CaptureFault(
+                        place: place,
+                        at: pin.span
+                    ))
+                ),
+            }),
+        }),
+    })
+}

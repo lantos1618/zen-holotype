@@ -22,6 +22,7 @@
 Alloc, AllocError = std.mem
 Range = std.core.range
 Vec = std.collections.collections_vec
+LoopHandle = std.core.loop.loop_handle
 
 // a hash is u64, a Vec indexes in usize — reducing one to a slot
 // changes type. `std.core.num` is lossless-only and this narrows
@@ -80,6 +81,37 @@ Map*<K: Eq + Hash, V> = {
         i = self.index_of(h, key).try();
         e = self.entries.get(i).try();
         Ok(e.value);
+    }
+
+    // how many rows the index holds — new keys only: an overwrite
+    // rewrites the row WHERE IT SITS and appends nothing, so len counts
+    // keys, not sets. The count IS `entries`, but entries stays sealed:
+    // what a Map is made of is not part of what a Map is.
+    len* = (self: @Self) usize { self.entries.len }
+
+    // the key/value walk. ITS OWN NAME, not a seventh `loop` overload:
+    // against the ranged-with-index form it is the same arg count and
+    // the same three-parameter body with a concrete first parameter
+    // where the overload is generic — exactly what DESIGN.md's
+    // overloading section rules out ("a generic parameter swallows a
+    // concrete one"; reported there as a doc bug). Same trade `map`
+    // took: a Map hands out TWO things per pass, a Range one — never
+    // one word, so the name says which you get.
+    //
+    // ORDINARY ZEN OVER THE PRIMITIVE, like find/filter/map
+    // (loop_find.zen): entries walks through Vec's Range impl, in
+    // insertion order — the order this file's header commits to, since
+    // set appends a new key and overwrites an existing one in place,
+    // so no row ever moves. Nothing here allocates and nothing here
+    // fails, so the walk is a bare (), not a Res.
+    pairs* = (self: @Self, body: (
+        h     : LoopHandle,
+        key   : K,
+        value : V
+    ) ()) () {
+        self.entries.loop((h, e) {
+            body(h, e.key, e.value);
+        });
     }
 
     // the settled slot says which case a set is: occupied means the

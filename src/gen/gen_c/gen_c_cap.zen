@@ -39,12 +39,13 @@ ctype, field_type, request_type, declared_ret = gen.gen_c.gen_c_type
 decl_ctx, decl_inst = gen.gen_c.gen_c_type
 expr = gen.gen_c.gen_c_expr
 declare_temp, enum_path, payload_type, is_variant = gen.gen_c.gen_c_flow
-lower_probe, lower_write, lower_read = gen.gen_c.gen_c_fs
+lower_probe, lower_write, lower_read, lower_remove = gen.gen_c.gen_c_fs
 close_else, close_brace, open_null_test = gen.gen_c.gen_c_fs
 lower_stdin_read = gen.gen_c.gen_c_stdin
 lower_env_var = gen.gen_c.gen_c_env
-lower_console_print = gen.gen_c.gen_c_print
+lower_console_print, is_console_print = gen.gen_c.gen_c_print
 is_defer, lower_defer = gen.gen_c.gen_c_scope
+lower_clock_read = gen.gen_c.gen_c_clock
 
 // -----------------------------------------------------------------
 // which members these are
@@ -54,10 +55,18 @@ is_defer, lower_defer = gen.gen_c.gen_c_scope
 // name together, not by "has no body" alone — that's `gen_c_member.zen`'s
 // question, and answering it again here would make any bodiless member
 // anywhere silently become one of these.
+// `Clock` IS IN THE CHAIN, second from the top: a bodiless member whose
+// receiver's owner is `Clock` is the backend's to lower, and anything
+// else falls through to the `Fs` question below. Leaving it out here --
+// as a first cut did -- makes its twin below DEAD
+// CODE: every `env.clock.*` site fell through to `FatSlot`, the vtable
+// slot of an `Env` field the entry never populates, and the first read
+// jumped through NULL. The program compiled, so only running it showed
+// the fault -- the exact reason the corpus runs its programs.
 is_capability* = (be :: CBackend, rty: TyId, name: str) bool {
     owner_of(be, rty).eq("Mem").match({
         true  => mem_verb(name),
-        false => be.is_fs_capability(rty, name),
+        false => be.is_clock_capability(rty, name),
     })
 }
 
@@ -84,6 +93,21 @@ is_env_capability = (be :: CBackend, rty: TyId, name: str) bool {
     be.is_env_var(rty, name) || be.is_console_capability(rty, name)
 }
 
+// `Console.println` AND `Console.errorln` ARE OF THESE: floor is
+// `fwrite`, bodiless for the same reason `Fs.read` is, and
+// `gen_c_print.zen` writes them — one stream each. Reaches this file
+// only when the receiver was WRITTEN (`env.out.println(..)`) — the
+// sugar names no function and is recognised one level up. Without this
+// it fell through to `lower_fat_call`: `args: ...` has no C spelling,
+// so the slot's parameter came out as `ctype`'s `int` fallback and
+// `cc` rejected every argument handed to it.
+is_clock_capability = (be :: CBackend, rty: TyId, name: str) bool {
+    owner_of(be, rty).eq("Clock").match({
+        true  => clock_verb(name),
+        false => be.is_fs_capability(rty, name),
+    })
+}
+
 // `Console.println` IS ONE OF THESE: floor is `fwrite`, bodiless for
 // the same reason `Fs.read` is, and `gen_c_print.zen` writes it. Reaches
 // this file only when the receiver was WRITTEN (`env.out.println(..)`)
@@ -97,7 +121,7 @@ is_env_capability = (be :: CBackend, rty: TyId, name: str) bool {
 // made rather than one `Env` handed it, so owner alone can't recognise
 // it and `is_defer` asks its own question.
 is_console_capability = (be :: CBackend, rty: TyId, name: str) bool {
-    (owner_of(be, rty).eq("Console") && name.eq("println"))
+    (owner_of(be, rty).eq("Console") && is_console_print(name))
         || be.is_stdin_read(rty, name)
         || be.is_defer(rty, name)
 }
@@ -123,9 +147,14 @@ mem_verb = (name: str) bool {
 
 // `read` is in the set so that it reaches `gen_c_fs.lower_read`, which
 // allocates its buffer through the `Alloc` it was handed, rather than
-// `gen_c_member.zen`'s refusal for a member with no body.
+// `gen_c_member.zen`'s refusal for a member with no body. `remove` is
+// there for the same reason: its lowering lives in `gen_c_fs` too.
 fs_verb = (name: str) bool {
-    name.is_in(["exists", "is_dir", "write", "read"])
+    name.is_in(["exists", "is_dir", "write", "read", "remove"])
+}
+
+clock_verb = (name: str) bool {
+    name.is_in(["since_start", "unix"])
 }
 
 // -----------------------------------------------------------------
@@ -219,6 +248,27 @@ env_verb = (
 ) Res<(), AllocError> {
     be.is_env_var(rty, a.name.text).match({
         true  => be.lower_env_var(c, ret, ctx, out),
+        false => be.clock_verb(id, c, a, rty, ret, aty, ctx, out),
+    })
+}
+
+// `Clock`'s two members take no argument and answer with a value the
+// floor builds — the shortest chain there is. `is_clock_capability` has
+// already answered for the receiver's type; this asks only which of the
+// two authorities was named.
+clock_verb = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    rty : TyId,
+    ret : TyId,
+    aty : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    owner_of(be, rty).eq("Clock").match({
+        true  => be.lower_clock_read(c, a.name.text, ret, ctx, out),
         false => be.console_verb(id, c, a, rty, ret, aty, ctx, out),
     })
 }
@@ -235,7 +285,7 @@ console_verb = (
     out :: String
 )
                Res<(), AllocError> {
-    a.name.text.eq("println").match({
+    is_console_print(a.name.text).match({
         true  => lower_console_print(be, c, a.name.text, ret, ctx, out),
         false => be.verb_1(id, c, a, rty, ret, aty, ctx, out),
     })
@@ -325,6 +375,21 @@ verb_5 = (
 ) Res<(), AllocError> {
     a.name.text.eq("read").match({
         true  => be.lower_read(id, c, ret, aty, ctx, out),
+        false => verb_6(be, id, c, a, ret, ctx, out),
+    })
+}
+
+verb_6 = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    a.name.text.eq("remove").match({
+        true  => be.lower_remove(id, c, ret, ctx, out),
         false => be.lower_probe(c, a.name.text, ctx, out),
     })
 }

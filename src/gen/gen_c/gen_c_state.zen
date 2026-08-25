@@ -95,6 +95,10 @@ CBackend* = {
     // program computes on.
     print_used :: bool,
 
+    // stderr's family, its own flag and not `print_used`: a program that
+    // only narrates must not carry stdout's helpers either.
+    stderr_used :: bool,
+
     // The two POSIX headers the FS floor needs are the one place the
     // emitted C leaves C99, so a program that never opens a file must not
     // pay for them.
@@ -109,6 +113,12 @@ CBackend* = {
     // never reads a variable must not be handed an uncalled function to
     // warn about.
     env_used :: bool,
+
+    // Its own flag and not `stdin_used`: the clock floor is POSIX too,
+    // but it owns `<time.h>` and its feature-macro terms, which no other
+    // floor shares — a program that measures itself must not pay for
+    // them.
+    clock_used :: bool,
 
     // the functions to lower, and the ones already lowered. A QUEUE
     // rather than a list of every declaration because the walk is
@@ -312,6 +322,19 @@ CBackend* = {
     uses_print* = (self: @Self) bool { self.print_used }
 
     // -----------------------------------------------------------------
+    // the stderr floor
+    //
+    // A SECOND FLAG, NOT THE FIRST REUSED. `emit_print` writes stdout's
+    // family, `emit_stderr` stderr's; sharing one bit would make a
+    // program that only narrates carry every stdout helper it never
+    // calls.
+    // -----------------------------------------------------------------
+
+    need_stderr* = (self :: @Self) () { self.stderr_used = true; }
+
+    uses_stderr* = (self: @Self) bool { self.stderr_used }
+
+    // -----------------------------------------------------------------
     // the filesystem floor
     // -----------------------------------------------------------------
 
@@ -334,6 +357,14 @@ CBackend* = {
     need_env* = (self :: @Self) () { self.env_used = true; }
 
     uses_env* = (self: @Self) bool { self.env_used }
+
+    // -----------------------------------------------------------------
+    // the clock floor
+    // -----------------------------------------------------------------
+
+    need_clock* = (self :: @Self) () { self.clock_used = true; }
+
+    uses_clock* = (self: @Self) bool { self.clock_used }
 
     // -----------------------------------------------------------------
     // the block stack, and what each block must destroy
@@ -837,9 +868,11 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         type_done: a.Vec<bool>(),
         helper_types: a.Vec<String>(),
         print_used: false,
+        stderr_used: false,
         fs_used: false,
         stdin_used: false,
         env_used: false,
+        clock_used: false,
         scope_used: false,
         defer_envs: a.Vec<String>(),
         defer_env_ids: a.Vec<usize>(),

@@ -703,7 +703,42 @@ call_or_convert = (
                   Res<(), AllocError> {
     convert_target(d, f).match({
         Ok(t) => be.lower_convert(c, d, t, recv, ctx, out),
-        None  => be.call_signature(id, c, d, f, recv, ctx, out),
+        None  => be.call_or_plain(id, c, d, f, recv, ctx, out),
+    })
+}
+
+// A BODILESS FREE FUNCTION NO FLOOR ANSWERED IS REFUSED AT THE CALL,
+// not queued and emitted: a bodyless declaration defines no symbol, so
+// the call this path would write is a reference to one nothing defines
+// — `cc`'s to catch, and only because C happens to notice. Every door
+// above diverted the bodiless declarations that HAVE floors (the loop
+// intrinsic, `null_ptr`, the two format doors, `to_<prim>`); what
+// reaches here is a signature a program wrote with nothing behind it.
+//
+// The refusal lives at the CALL and not at the DECLARATION on purpose:
+// the seed walk queues every non-generic free function in std before
+// any call is lowered (`gen_c_decl.seed_named`), and std declares
+// bodiless functions it has not grown floors for yet (`std/core/path`),
+// so a declaration-time check would refuse the compiler's own build.
+//
+// The cross-module path refuses the same shape by name
+// (`gen_c_assoc.refuse_module_fn`); members never reach here
+// (`gen_c_member.method_fault`). This is the last path left that could
+// name an undefined symbol.
+call_or_plain = (
+    be   :: CBackend,
+    id   : ExprId,
+    c    : Call,
+    d    : Def,
+    f    : Function,
+    recv : Res<ExprId>,
+    ctx  : Ctx,
+    out  :: String
+)
+                 Res<(), AllocError> {
+    bodyless(f).match({
+        true  => be.unsupported(id, "a call to a function with no body", out),
+        false => be.call_signature(id, c, d, f, recv, ctx, out),
     })
 }
 

@@ -35,6 +35,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -740,7 +741,32 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
 
     out_c = work / "out.c"
     root = stage(test, tool, work)
-    emit = run_process(tool.command(root, out_c, root, staged_entry(test)), args.timeout)
+    entry = staged_entry(test)
+
+    # A CLOCK TEST'S CONSTANT IS REWRITTEN HERE AND ONLY HERE, before the
+    # compiler runs. A wall-clock expectation depends on when the run
+    # happens, which `.expected` bytes cannot hold; the test's
+    # HARNESS_EPOCH is rewritten to the second this run starts, so "near"
+    # has a number to be near. The regex names one line and rewrites one
+    # number, and a file that no longer carries that line fails loudly --
+    # a silent no-op would leave a test asserting against epoch zero, red
+    # forever while reading as coverage.
+    if test.tid == "corpus/env/clock_reads_are_two_authorities":
+        try:
+            path = root / entry
+            text = path.read_text(encoding="utf-8")
+            patched, n = re.subn(
+                r"HARNESS_EPOCH\* : u64 = \d+",
+                f"HARNESS_EPOCH* : u64 = {int(time.time())}",
+                text,
+            )
+            if n != 1:
+                raise AssertionError(f"HARNESS_EPOCH lines rewritten: {n}, want 1")
+            path.write_text(patched, encoding="utf-8")
+        except (OSError, AssertionError) as e:
+            return Result(test, False, [f"the harness could not stage the clock epoch: {e}"])
+
+    emit = run_process(tool.command(root, out_c, root, entry), args.timeout)
     if emit.timed_out:
         return Result(test, False, [f"the compiler timed out after {args.timeout}s"])
     if emit.code != 0 or not out_c.is_file():

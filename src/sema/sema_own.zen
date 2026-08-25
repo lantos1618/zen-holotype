@@ -43,6 +43,7 @@ SemaFault, NameFault = sema.sema_diag
 check_receiver, check_write_place = sema.sema_recv
 check_scope_returned, check_scope_stored = sema.sema_scope
 check_scope_captured, is_scope_value, call_escapes = sema.sema_scope
+Pin, pin_captured, refuse_pinned, refuse_pinned_at = sema.sema_pin
 check_drop_copy = sema.sema_drop
 
 // One name this frame can see, and what the ownership rules know of it.
@@ -72,13 +73,16 @@ Place* = {
 
 // The walk's state: a stack with marks, like `Checker.locals`. `escaped`
 // is one more mark: how many bindings were visible outside the
-// innermost escaping closure body, zero when in none. `method` names
+// innermost escaping closure body, zero when in none. `pinned` holds
+// what an escaping closure captured — the rule is `sema_pin.zen`'s;
+// this file only carries its state. `method` names
 // the method this body belongs to, or is empty — a refusal at `self`
 // (whose `::` goes on the METHOD, not the binding) prints it instead.
 Own* = {
     vars :: Vec<OwnVar>,
     dead :: Vec<Place>,
-    escaped :: usize,
+    pinned* :: Vec<Pin>,
+    escaped* :: usize,
     method* :: str,
     alloc*: Alloc,
 }
@@ -87,6 +91,7 @@ Own* = (a: Alloc) Res<Own, AllocError> {
     Ok(Own(
         vars: a.Vec<OwnVar>(),
         dead: a.Vec<Place>(),
+        pinned: a.Vec<Pin>(),
         escaped: 0,
         method: "",
         alloc: a
@@ -310,6 +315,7 @@ opt_expr = (c :: Checker, o :: Own, e: Res<ExprId>, ctx: Ctx)
 use_name = (c :: Checker, o :: Own, node: Expr, text: str)
            Res<(), AllocError> {
     c.check_scope_captured(o, node.span, text).try();
+    c.pin_captured(o, node, text).try();
     find_var(o, text).match({
         None  => Ok(()),
         Ok(i) => c.report_if_dead(o, node.span, i, ""),
@@ -372,10 +378,13 @@ own_consume = (c :: Checker, o :: Own, x: Consume, ctx: Ctx)
 }
 
 // The move is a USE first: a second `consume` of one binding is just
-// another use of a dead name, and it reports where it is written.
+// another use of a dead name, and it reports where it is written. A
+// capture by an escaping body is the one use source order cannot see,
+// so it is asked here rather than left to `use_name`.
 consume_name = (c :: Checker, o :: Own, node: Expr, text: str)
                Res<(), AllocError> {
     c.use_name(o, node, text).try();
+    c.refuse_pinned(o, node.span, text).try();
     find_var(o, text).match({
         None  => Ok(()),
         Ok(i) => kill(o, i, "", node.span),
@@ -413,6 +422,7 @@ consume_field_of = (
 kill_field = (c :: Checker, o :: Own, node: Expr, a: Access, root: usize)
              Res<(), AllocError> {
     c.report_if_dead(o, node.span, root, a.name.text).try();
+    c.refuse_pinned_at(o, node.span, root).try();
     kill(o, root, a.name.text, node.span).try();
     Ok(());
 }
@@ -655,7 +665,7 @@ scoped_at = (o: Own, i: usize) bool {
     o.vars.get(i).match({ Ok(v) => v.scoped, None => false })
 }
 
-owned_at = (o: Own, root: usize) bool {
+owned_at* = (o: Own, root: usize) bool {
     o.vars.get(root).match({ Ok(v) => v.owned, None => false })
 }
 
@@ -700,11 +710,16 @@ take_all = (o :: Own) Res<(), AllocError> {
 // Leaving a scope drops its bindings and everything said about them: a
 // place whose root is gone is not a place any more, and leaving the row
 // behind would let a later binding inherit its index and its death.
+// A pin of the same shape: the capture died with the body that made it.
 own_release = (o :: Own, mark: usize) Res<(), AllocError> {
     kept ::= o.alloc.Vec<Place>();
     o.dead.loop((h, p) { keep_below(p, mark, kept).try() });
     take_all(o).try();
     kept.loop((h, p) { o.dead.add(p).try() });
+    kept_pins ::= o.alloc.Vec<Pin>();
+    o.pinned.loop((h, p) { keep_pin(p, mark, kept_pins).try() });
+    take_all_pins(o).try();
+    kept_pins.loop((h, p) { o.pinned.add(p).try() });
     extra = o.vars.len - mark;
     Range(0, extra).loop((h, i) { o.vars.take(o.vars.len - 1); });
     Ok(());
@@ -715,9 +730,19 @@ keep_below = (p: Place, mark: usize, kept :: Vec<Place>)
     (p.root < mark).match({ false => Ok(()), true => kept.add(p) })
 }
 
+keep_pin = (p: Pin, mark: usize, kept :: Vec<Pin>) Res<(), AllocError> {
+    (p.root < mark).match({ false => Ok(()), true => kept.add(p) })
+}
+
+take_all_pins = (o :: Own) Res<(), AllocError> {
+    n = o.pinned.len;
+    Range(0, n).loop((h, i) { o.pinned.take(o.pinned.len - 1); });
+    Ok(());
+}
+
 // `p.left`, joined, because that is the place the author wrote and the
 // only spelling that tells them which half of `p` is gone.
-place_name = (c :: Checker, o :: Own, root: usize, field: str)
+place_name* = (c :: Checker, o :: Own, root: usize, field: str)
              Res<str, AllocError> {
     base = o.vars.get(root).match({ Ok(v) => v.name, None => "" });
     (field.len == 0).match({

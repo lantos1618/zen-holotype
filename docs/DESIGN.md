@@ -439,7 +439,7 @@ Because both implementations agree, **the differential oracle is blind to this**
 
 *A clock is authority and a duration is not.* `Duration`, `Instant`, `Timestamp` and a broken-down civil time are values — no `Env`, constructible in a test, no capability. A `Clock` that reads one, and the timers it schedules, need `Ref` and `Context` and therefore the actor runtime. They do not belong in the same module: `std.core` sits below everything, and a `Clock` declared there would make the prelude's core depend on stage 5. It is also what makes "comptime has no clock" true by construction rather than by convention — comptime has no `Env`, and now no import path to one.
 
-**`zen build` takes an explicit entry, and `Fs` gets no directory listing.** The driver finds the entry by probing `main.zen` and the root's own name, which cannot find a single-file program named anything else — and the obvious fix, listing the directory, is the wrong one. `std.env.Fs` has four members and its header says why: "There is no open handle, no seek, no listing and no permission surface… Every member added here is a member the self-hosted compiler has to keep working forever." A listing is also authority to enumerate, which is a bigger capability than reading a path you were given.
+**`zen build` takes an explicit entry, and `Fs` gets no directory listing.** The driver finds the entry by probing `main.zen` and the root's own name, which cannot find a single-file program named anything else — and the obvious fix, listing the directory, is the wrong one. `std.env.Fs` has five members and its header says why: "There is no open handle, no seek, no listing and no permission surface… Every member added here is a member the self-hosted compiler has to keep working forever." A listing is also authority to enumerate, which is a bigger capability than reading a path you were given.
 
 The information already exists at the call site: whoever invokes the compiler knows which file is the entry. So `zen build <root> --entry <file>` is the answer, and the capability surface does not grow. A build is still a root — the entry names where to start inside it, and everything else follows imports as it always did.
 
@@ -666,14 +666,15 @@ Scope* = {
 ArgError* = Missing(str)   // required field absent; names the field
           | Parse(str)     // value present but not the field's type
 
-// the disk. Three members, and each earns its place: a compiler
-// reads a whole file at once, never streams and never seeks, so
-// there is no handle and no `open`. A module tree is
-// <folder>/<folder>.zen and is COMPUTED rather than discovered, so
-// nothing needs a listing -- but a walk still has to tell a folder
-// from a file before opening it, and ruling a candidate path out
-// should cost a stat rather than reading a megabyte to learn
-// nothing. Hence exactly is_dir and exists beside read.
+// the disk. Each member earns its place: a compiler reads a whole
+// file at once, never streams and never seeks, so there is no
+// handle and no `open`. A module tree is <folder>/<folder>.zen and
+// is COMPUTED rather than discovered, so nothing needs a listing --
+// but a walk still has to tell a folder from a file before opening
+// it, and ruling a candidate path out should cost a stat rather
+// than reading a megabyte to learn nothing. Hence exactly is_dir
+// and exists beside read. And write arrived with `-o`, remove with
+// #757: a program that can create state must be able to retire it.
 //
 // `read` takes an Alloc because it allocates, returns Res because a
 // missing file is a caller's problem and not a bug, and is `:`
@@ -684,6 +685,7 @@ FsError* = NotFound | Denied | IsDir | Failed | OutOfMemory
 Fs* = {
     read*   = (self: @Self, a: Alloc, path: str) Res<String, FsError>
     write*  = (self: @Self, path: str, bytes: str) Res<(), FsError>
+    remove* = (self: @Self, path: str) Res<bool, FsError>
     exists* = (self: @Self, path: str) bool
     is_dir* = (self: @Self, path: str) bool
 }

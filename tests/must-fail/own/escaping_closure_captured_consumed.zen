@@ -1,0 +1,34 @@
+// an ESCAPING closure -- the thread body, which is why it takes an
+// Alloc -- capturing a binding that is consumed AFTER it. The twin
+// file `escaping_closure_captures_consumed` covers consume-then-
+// capture; this is the order that actually bites, because the body
+// runs later, on another thread, and reads a binding the move killed.
+//
+// the capture IS the use, so it pins f for the rest of main's block:
+// the later consume is reported where it is written, naming the
+// closure that holds f alive.
+
+Buf = {
+    id: i32,
+}
+
+Buf.impl(Drop, {
+    drop = (self :: @Self) () { /* nothing to release: id is bytes */ }
+})
+
+Error = AllocError | IoError | ThreadError
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    f = Buf(id: 1);
+    t = env.threads.spawn(alloc, () Res<i32, ThreadError> {
+        Ok(f.id);
+    }).try();
+    g = consume f;
+    t.join().match({
+        Ok(v)  => println("{}", v),
+        Err(e) => println("thread failed: {}", e),
+    });
+    println("{}", g.id);
+    Ok(0);
+}

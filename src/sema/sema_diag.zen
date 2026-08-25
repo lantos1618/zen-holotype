@@ -56,6 +56,17 @@ NameFault* = { name*: str }
 // module happened to raise it.
 ExportFault* = { name*: str, module*: str }
 
+// A place, and the capture that keeps it alive. The consume's own
+// position names the crime; the capture is where the binding stopped
+// being movable, and that is a second place the sentence has to name —
+// a reader staring at the consume cannot find the closure without it.
+// Not a `PairFault`: one side here is a use site, which `PairFault`'s
+// two declaration positions are defined never to be.
+CaptureFault* = {
+    place*: str,
+    at*: Span,
+}
+
 // Two types that had to agree and did not. `expected` is what the
 // context demanded, `found` is what the expression is.
 TypeFault* = {
@@ -172,6 +183,7 @@ SemaFault* =
     | ConsumeThroughHandle(NameFault)  // move only what this frame owns
     | CopyOfDropValue(NameFault)       // `g = f` would drop twice
     | ScopeEscapes(NameFault)          // `@scope` left its block
+    | ConsumedByCapture(CaptureFault)  // a capture outlives the consume
 
 // Where the mistake is, and which one it is.
 //
@@ -243,6 +255,7 @@ message* = (fault: SemaFault) str {
         ConsumeThroughHandle(_)   => "cannot consume through a handle: you may only move what this frame owns, and a bitwise copy of a handle would be left pointing at a dead value",
         CopyOfDropValue(_)        => "cannot copy a Drop value: drop runs exactly once, so two live names for one value would drop it twice — construct a second one, or write `consume`",
         ScopeEscapes(_)           => "@scope may not escape: it names the enclosing block, so it may be passed inward but never stored in a struct, returned, or captured by an escaping closure",
+        ConsumedByCapture(_)      => "consume after capture:",
     });
 }
 
@@ -317,6 +330,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
             f,
             " is partially moved, so the drop has a hole: move the whole value or none of it"
         ),
+        ConsumedByCapture(f)      => write_capture(out, f),
 
         NoSuchField(f)            => write_member(out, types, f),
         MemberNeedsValue(f)       => write_needs_value(out, types, f),
@@ -470,6 +484,18 @@ write_discarded = (out :: String, types: Types, f: TypeFault)
 // here would print the rule twice and the place never.
 write_place = (out :: String, f: NameFault, tail: str) Res<(), AllocError> {
     out.fmt(" {}{}", f.name, tail).try();
+    Ok(());
+}
+
+// The place is unquoted like every ownership sentence; the capture is
+// the half a position cannot give — told only that f was consumed, an
+// author cannot find which closure holds it. Both positions travel in
+// one diagnostic, so the sentence carries its own evidence and the
+// reader walks from the move to the capture that forbids it.
+write_capture = (out :: String, f: CaptureFault) Res<(), AllocError> {
+    out.fmt(" {} was consumed by a closure that captured it", f.place).try();
+    out.add_bytes(" — the capture keeps it alive here: ").try();
+    write_at(out, f.at).try();
     Ok(());
 }
 
