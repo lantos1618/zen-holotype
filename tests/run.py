@@ -81,6 +81,15 @@ MUST_FAIL = "must-fail"
 # Whoever lands stage 5 will see the difference as a diff and is the one who
 # gets to rule on it -- and cannot delete the `.stage` without doing so,
 # because a deferred test that passes is a failure here (`stage_verdict`).
+#
+# AND TWO OF ITS LINES ARE BLOCKED BY SOMETHING THAT IS NOT STAGE 5.
+# `circle: 1` and `rect: 2 3` come from Shape's Display impl, which formats an
+# f64 -- and `{}` on an f64 is refused by gen_c ("codegen does not lower this
+# yet: `formatting a value of this type`", gen_c_sink.zen:895). So example/src
+# owes a codegen fix as well as a runtime, and example/src/main_test.zen's
+# `circle_prints_its_radius` cannot run for the same reason. ISSUES.md carries
+# it, along with the other thing running these turned up: main_test.zen is not
+# imported from main.zen, so nothing type-checks it either.
 EXAMPLE = "example"
 
 # A .zen under example/ that is NOT a program, with the reason. Ratchets both

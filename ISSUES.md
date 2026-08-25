@@ -12,6 +12,40 @@ how a gate that cannot fail happens to a list.
 
 ## INBOX — paste below this line
 
+**example/src/main_test.zen's four assertions, executed for the first time
+(2026-08-25).** Nothing ran them, and nothing could: `Tester.expect` and
+`Tester.expect_eq` are SIGNATURES with no bodies (src/std/test/test.zen:41,47
+— `expect_eq`'s own comment says "STAGE 5 for its BODY"), and there is no
+runner. Worse, main_test.zen was not even TYPE-CHECKED: nothing imports it
+from `main.zen`, the compiler follows imports, and appending
+
+    deliberate_error* = (t: Tester) Res<(), TestError> {
+        undefined_thing_xyz();
+        Ok(());
+    }
+
+to it produced ZERO diagnostics. `make parse` lexes it and that is all.
+
+Run by hand against the same values (Display impl, UFCS `area`, Vec) three of
+the four hold: `shape_prints` → `unit`, `area_is_ufcs` → true, `vec_grows` →
+20. The fourth cannot run at all:
+
+    circle_prints_its_radius  t.expect_eq(out.view(), "circle: 2")
+
+    main.zen:18:53: codegen does not lower this yet: `formatting a value of
+    this type`
+
+`{}` on an `f64` is refused by gen_c (gen_c_sink.zen:895), so `Shape`'s
+`Display` impl — `out.add("circle: {}", circle.radius)` — does not compile.
+That is a stage-4-shaped blocker inside a stage-5 file, and it is the reason
+two lines of `example/src/.expected` (`circle: 1`, `rect: 2 3`) are unreachable
+independently of actors and `pkg`. The assertion also PINS a formatting rule
+nobody has implemented: `2.0` must print as `2`, not `2.0`.
+
+Not edited to make it pass. `tests/bench/drivers/stored_field_read.zen` has
+been routing around the same hole for a while ("the self-hosted compiler
+cannot lower printing an f64 yet" — its escape is the exit code).
+
 **UFCS gate blind spots (2026-08-23 spot check; STYLE.md now documents them):**
 - `src/fmt/` is structurally invisible to `rule_ufcs` — no fmt module has a
   principal type (receivers split across `Alloc`/`Src`/`Out`). ~60 sites a
