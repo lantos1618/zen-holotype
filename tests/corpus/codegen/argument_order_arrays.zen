@@ -1,0 +1,57 @@
+// THE SIDE-EFFECTING ORDERING TEST for ARRAY LITERALS, the fourth
+// sibling. Zen evaluates an expression LIST left to right; a literal
+// emits ONE C compound literal whose initialiser expressions C11
+// 6.7.9p23 leaves indeterminately sequenced — the same hand-away a
+// call's arguments had (#717), construction fields (#739), infix
+// operands (#737) and a by-value receiver (#763). Issue #801.
+//
+// The same Counter as its siblings: tick ANSWERS a different value each
+// time, so a wrong order is a wrong number and not a wrong print order.
+//
+// On gcc the first two lines cannot see the bug — cc sequences
+// initialiser lists left to right — and they stay so a fix that only
+// reordered effects could not sneak past the common shape. The third
+// line is where the freedom is OBSERVABLE: the literal stands beside
+// another calling argument, gcc takes call arguments right to left
+// while an unheld literal's list runs after them left to right, and
+// the ticks interleave (`arg 235` was the pre-fix answer). The last
+// pins a plain value between calls: nothing may hoist across what it
+// reads.
+
+Counter = {
+    n :: i32,
+
+    tick = (self :: @Self) i32 {
+        was    = self.n;
+        self.n = self.n + 1;
+        was;
+    }
+}
+
+pick = (xs: [i32, 3], tail: i32) i32 {
+    xs[0] * 100 + xs[1] * 10 + xs[2] + tail;
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    // every element calls: left to right answers 0, 1, 2
+    c ::= Counter(n: 0);
+    a ::= [c.tick(), c.tick(), c.tick()];
+    println("plain {}.{}.{}", a[0], a[1], a[2]);
+
+    // one literal inside another: still one list per literal
+    e ::= Counter(n: 0);
+    g ::= [[e.tick(), e.tick()], [e.tick(), e.tick()]];
+    println("nested {}.{}.{}.{}", g[0][0], g[0][1], g[1][0], g[1][1]);
+
+    // a literal BESIDE a calling argument: the whole point of #801 --
+    // Zen says all three ticks into the literal, then the tail: 127.
+    // Right-to-left arguments with a left-to-right list answered 235.
+    b ::= Counter(n: 0);
+    println("arg {}", pick([b.tick(), b.tick(), b.tick()], b.tick()));
+
+    // a plain read between two calls keeps its place in the list
+    d ::= Counter(n: 0);
+    h ::= [d.n, d.tick(), d.n];
+    println("mixed {}.{}.{}", h[0], h[1], h[2]);
+    Ok(0);
+}
