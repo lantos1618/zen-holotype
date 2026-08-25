@@ -117,6 +117,8 @@ SemaFault* =
     // impls and bounds
     | ImplMissingField(NameFault)      // an impl supplies every field, or it is not one
     | CtorMissingField(NameFault)      // a required field the construction never named
+    | CtorNamesNoMember(TypeFault)     // an argument naming a member the type does not declare
+    | CtorNamesConstant(TypeFault)     // an argument naming a constant, which is not storage
     | OrphanImpl(ExportFault)          // only the target's own module is ever consulted
     | AmbiguousMember(PairFault)       // two impls, no bound in scope to choose
     | BoundNotSatisfied(TypeFault)     // no impl of the bound
@@ -225,6 +227,8 @@ message* = (fault: SemaFault) str {
         AmbiguousOverload(_)      => "ambiguous overload: a generic parameter swallows a concrete one, so these two can never be told apart at a call site",
         ImplMissingField(_)       => "impl is missing field",
         CtorMissingField(_)       => "construction is missing a required field",
+        CtorNamesNoMember(_)      => "construction names no member: every argument must name a field of the type, so a name it does not declare is not an argument to discard",
+        CtorNamesConstant(_)      => "construction names a constant: a construction names fields, and the constant keeps its one value per type",
         OrphanImpl(_)             => "an impl lives in the module that declares its target, so there are no orphan impls: one written anywhere else is never consulted",
         AmbiguousMember(_)        => "ambiguous: two impls supply this name and no bound in scope selects one",
         BoundNotSatisfied(_)      => "bound not satisfied: this type has no impl of the bound, so it has none of the fields the bound promises",
@@ -294,6 +298,8 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         NoOverload(f)             => out.write_name(f),
         ImplMissingField(f)       => write_missing(out, f),
         CtorMissingField(f)       => write_ctor_missing(out, f),
+        CtorNamesNoMember(f)      => write_member(out, types, f),
+        CtorNamesConstant(f)      => write_ctor_constant(out, types, f),
         OrphanImpl(f)             => write_orphan(out, f),
         Rebound(f)                => write_pair(out, f),
         ComputedFieldAssign(f)    => out.write_name(f),
@@ -386,6 +392,26 @@ write_ctor_missing = (out :: String, f: NameFault) Res<(), AllocError> {
     )
 }
 
+// The name the type does not declare, beside the type that was asked —
+// `write_member`'s sentence is exactly this one: "no `nosuch` on `A`".
+// A construction argument is a member lookup with nowhere else to be
+// reported, so it borrows that shape rather than minting its own.
+//
+// THE CONSTANT AND ITS TYPE, which is what the position cannot give:
+// told only that `y` may not be written here, an author reads the
+// declaration three lines up and sees an `i32` they supplied one of.
+// Naming it a constant of `A` is what turns the line back into one
+// mistake, and `::` is the spelling that makes the field supplyable.
+// The fault carries the constant's own type because that is what the
+// declaration wrote, and `write_member`'s "no `y` on `A`" is the wrong
+// sentence here — `y` exists; it is just not storage.
+write_ctor_constant = (out :: String, types: Types, f: TypeFault)
+                      Res<(), AllocError> {
+    found ::= types.name_of(f.found).try();
+    out.fmt(" `{}` is a constant of `{}`: write `{}.{}` to read it, or `{} :: {}` for the field a construction may supply", f.name, found.view(), found.view(), f.name, f.name, found.view()).try();
+    Ok(())
+}
+
 write_missing = (out :: String, f: NameFault) Res<(), AllocError> {
     quote(out, f.name).try();
     out.add_bytes(
@@ -429,8 +455,13 @@ write_orphan = (out :: String, f: ExportFault) Res<(), AllocError> {
 // the declaration that does exist. `write_types` was here before and
 // printed "expected <unknown>, found Box": there is no expectation in a
 // member lookup, and a poison id rendered as one said so twice.
-write_member = (out :: String, types: Types, f: TypeFault)
-               Res<(), AllocError> {
+//
+// EXPORTED because a construction argument naming nothing reaches this
+// same sentence — `CtorNamesNoMember` carries exactly this fault's shape,
+// and rendering it here keeps "how a fault reads" in the one file that
+// owns diagnostics.
+write_member* = (out :: String, types: Types, f: TypeFault)
+                Res<(), AllocError> {
     found ::= types.name_of(f.found).try();
     out.fmt(": no `{}` on `{}`", f.name, found.view()).try();
     Ok(());

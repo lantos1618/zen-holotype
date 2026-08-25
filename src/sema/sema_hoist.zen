@@ -534,18 +534,86 @@ check_ctor_field = (c :: Checker, a: Arg, ty: TyId, ctx: Ctx)
                    Res<(), AllocError> {
     a.name.match({
         None   => Ok(()),
-        Ok(nm) => c.check_named_field(a, nm.text, ty, ctx),
+        Ok(nm) => c.check_named_field(a, nm.span, nm.text, ty, ctx),
     })
 }
 
-check_named_field = (c :: Checker, a: Arg, name: str, ty: TyId, ctx: Ctx)
+check_named_field = (c :: Checker, a: Arg, at: Span, name: str, ty: TyId,
+                     ctx: Ctx)
                     Res<(), AllocError> {
     found ::= c.alloc.Vec<Found>();
     c.members_of(ty, name, found).try();
     found.get(0).match({
-        None  => Ok(()),
-        Ok(f) => c.field_fits(a, f.ty, ctx),
+        None  => c.ctor_no_member(a, name, ty),
+        Ok(f) => c.ctor_field_or_constant(a, f, name, at, ty, ctx),
     })
+}
+
+// THE REFUSAL THE SILENT DROP WAS. An argument naming no member of the
+// constructed type is not an argument anyone can store, so accepting it
+// wrote a zero nobody wrote — the leaving-out twin of
+// `check_ctor_shape`'s missing-required-field rule. The fault carries
+// the constructed TYPE because that is what the sentence is about:
+// "`nosuch` on `A`" names the lookup that failed, at the argument's
+// name, where the author wrote it.
+ctor_no_member = (c :: Checker, a: Arg, name: str, ty: TyId)
+                 Res<(), AllocError> {
+    poison = c.types.unknown().try();
+    c.report(
+        a.span.file,
+        a.span,
+        SemaFault.CtorNamesNoMember(TypeFault(
+            name: name,
+            expected: poison,
+            found: ty,
+        ))
+    )
+}
+
+// WHAT THE MEMBER IS DECIDES WHAT THE ARGUMENT MEANS. A field is
+// storage the construction supplies; a struct-body constant (R4:
+// `y: i32 = 20`) is one value per type, read as `A.y`, so a
+// construction naming one used to be type-checked against its type and
+// then dropped by gen_c — sema believed an i32 was being supplied while
+// nothing was stored. Refused here, at the same face as the two refusals
+// beside it, so no half of the compiler believes the value landed.
+//
+// `field_fits` keeps every question it asked of a field's value — lift,
+// literal range, arms — and asks them only where they have an answer:
+// of storage, never of a constant.
+ctor_field_or_constant = (
+    c   :: Checker,
+    a   : Arg,
+    f   : Found,
+    name: str,
+    at  : Span,
+    ty  : TyId,
+    ctx : Ctx
+) Res<(), AllocError> {
+    f.constant.match({
+        true  => c.ctor_names_constant(a, name, at, ty, ctx),
+        false => c.field_fits(a, f.ty, ctx),
+    })
+}
+
+// The fault carries the OWNING type, because that is what the sentence
+// is about — `y` is a constant of `A`, and naming the supplied value's
+// own type instead ("a constant of `int`") points the reader three
+// lines away from the declaration that explains the refusal. The
+// argument's NAME is where the mistake sits, so it is where the
+// diagnostic goes.
+ctor_names_constant = (c :: Checker, a: Arg, name: str, at: Span, ty: TyId,
+                       ctx: Ctx)
+                      Res<(), AllocError> {
+    c.report(
+        a.span.file,
+        at,
+        SemaFault.CtorNamesConstant(TypeFault(
+            name: name,
+            expected: c.type_of(a.value, ctx).try(),
+            found: ty,
+        ))
+    )
 }
 
 // A field is a typed slot: all of its questions get asked — what lifts
