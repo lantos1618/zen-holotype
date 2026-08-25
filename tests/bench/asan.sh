@@ -17,6 +17,20 @@
 # by name without silencing every real leak. Instead this script reads the
 # report and fails on any leak whose top application frame is NOT one of the
 # two known startup sites. Do not "fix" that by widening the allowlist.
+#
+# THE POSITIVE CONTROL. Hand this script ANY ordinary executable -- a
+# wrapper earlier on PATH, a stale path, a copy of the compiler built with
+# no sanitizer in it -- and the run is spotless, exit 0, indistinguishable
+# from a clean tree: silence cannot tell "the detector found nothing" from
+# "there was no detector". So a run with NO LeakSanitizer report at all is
+# refused (exit 2) rather than believed. The prologue's two deliberate
+# blocks make that safe to demand: an instrumented compiler ALWAYS has
+# something to say here (today the root arena block, classified against the
+# allowlist below), so a silent run means the detector was not running --
+# which is exactly the vacuity a positive control exists to rule out. If
+# the prologue ever stops leaking, this gate refuses loudly instead of
+# passing silently; retire the demand deliberately and write down what
+# replaced it, as tests/asan-canary/main.reports did for #785.
 set -euo pipefail
 
 ZEN_ASAN=${1:-./zen-asan}
@@ -27,7 +41,7 @@ if [ ! -x "$ZEN_ASAN" ]; then
     exit 2
 fi
 
-WORK=$(mktemp -d /tmp/zen-asan.XXXXXX)
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/zen-asan.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
 mkdir -p "$WORK/src"
@@ -45,12 +59,20 @@ set -e
 cat "$WORK/out.log"
 
 if [ "$code" -eq 0 ]; then
-    echo "asan.sh: clean -- no ASan/LSan report"
-    exit 0
+    echo "asan.sh: exited 0 with no LeakSanitizer report." >&2
+    echo "" >&2
+    echo "asan.sh: THE CANARY IS QUIET. A sanitizer-built compiler always has" >&2
+    echo "  something to report here -- the startup prologue leaks two blocks by" >&2
+    echo "  design, and this script exists to classify them. A spotless run means" >&2
+    echo "  whatever this binary is, NO DETECTOR WAS RUNNING over it: a wrapper," >&2
+    echo "  a stale path, or a build without -fsanitize=address,leak. Silence" >&2
+    echo "  cannot tell 'found nothing' from 'looked for nothing', so this gate" >&2
+    echo "  refuses instead of passing." >&2
+    exit 2
 fi
 
 # Non-zero with no LSan report is a compile error or an ASan memory error:
-# both fail as-is. A leak report gets its top frames checked.
+# both fail as-is -- they are findings, not vacuity.
 if ! grep -q "LeakSanitizer: detected memory leaks" "$WORK/out.log"; then
     echo "asan.sh: $ZEN_ASAN exited $code with no leak report; failing as-is" >&2
     exit 1
@@ -79,5 +101,6 @@ if [ -n "$bad" ]; then
     exit 1
 fi
 
-echo "asan.sh: only the known process-lifetime startup blocks leaked" \
+echo "asan.sh: the detector spoke (LeakSanitizer report present)" \
+    "and only the known process-lifetime startup blocks leaked" \
     "(argv rows, root arena state -- annotated above, deliberate)"

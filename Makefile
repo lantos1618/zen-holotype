@@ -137,9 +137,7 @@ wired:
 faults: build
 	@mkdir -p build/gates
 	@$(call gate,faults_reachable)
-	@mapfile -d '' files < <(find $(ROOT) -name '*.zen' -print0 | LC_ALL=C sort -z); \
-	  test $${#files[@]} -gt 0 \
-	    || { echo "faults: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
+	@$(call nonempty,faults,$(ROOT) -name '*.zen' -print0 | LC_ALL=C sort -z); \
 	  build/gates/faults_reachable "$${files[@]}"
 
 ## ufcs: no `x.f(..)` may have two answers. a method on T and a free
@@ -166,6 +164,23 @@ ufcs: grammar
 ## so they are rebuilt every run rather than carrying a staleness rule.
 gate = ./zen build tools/gates --entry $(1).zen --emit-c -o build/gates/$(1).c \
 	&& $(CC) $(CFLAGS) build/gates/$(1).c -o build/gates/$(1)
+
+# THE ONE DOOR FOR "a gate over a file set must have files". Six targets
+# carried hand-copies of this assertion and the copies drifted (#799): a
+# find that matches nothing hands a gate zero inputs and reads exit 0,
+# which is this repo's recorded shape for a check that cannot fail --
+# "checked everything, clean" and "checked nothing" may not be the same
+# answer. Expands to a shell fragment that fills `files` from the find(1)
+# spelled verbatim by the second argument (paths, predicates, an optional
+# `| LC_ALL=C sort -z`) and exits 2 naming the gate if it matched nothing.
+# Semicolon-join it to the consumer ON THE SAME LINE so `files` stays in
+# one shell:
+##
+##     @$(call nonempty,cap,$(ROOT) -name '*.zen' -print0 | LC_ALL=C sort -z); \
+##       build/gates/line_cap "$${files[@]}"
+define nonempty
+mapfile -d '' files < <(find $(2)) && test $${#files[@]} -gt 0 || { echo "$(1): found no .zen files — this gate is checking nothing" >&2; exit 2; };
+endef
 
 ## fleet: tools/fleet/fleet.zen, the policy half of an agent-fleet runner --
 ## the work list, the success PREDICATE, the retry counters and the report.
@@ -208,9 +223,7 @@ fleet: build
 cap: build
 	@mkdir -p build/gates
 	@$(call gate,line_cap)
-	@mapfile -d '' files < <(find $(ROOT) -name '*.zen' -print0 | LC_ALL=C sort -z); \
-	  test $${#files[@]} -gt 0 \
-	    || { echo "cap: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
+	@$(call nonempty,cap,$(ROOT) -name '*.zen' -print0 | LC_ALL=C sort -z); \
 	  build/gates/line_cap "$${files[@]}"
 
 ## dupcomments: no comment block may sit immediately above a copy of itself.
@@ -223,9 +236,7 @@ cap: build
 dupcomments: build
 	@mkdir -p build/gates
 	@$(call gate,dup_comments)
-	@mapfile -d '' files < <(find $(ROOT) -name '*.zen' -print0 | LC_ALL=C sort -z); \
-	  test $${#files[@]} -gt 0 \
-	    || { echo "dupcomments: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
+	@$(call nonempty,dupcomments,$(ROOT) -name '*.zen' -print0 | LC_ALL=C sort -z); \
 	  build/gates/dup_comments "$${files[@]}"
 
 ## lextile: the tokens tile the file, and every line:col in them is right.
@@ -251,9 +262,7 @@ dupcomments: build
 lextile: build
 	@mkdir -p build/gates
 	@$(call gate,lex_tiling)
-	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tests/bench tests/asan-canary tools/gates tools/fleet -name '*.zen' -print0 | LC_ALL=C sort -z); \
-	  test $${#files[@]} -gt 0 \
-	    || { echo "lextile: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
+	@$(call nonempty,lextile,$(ROOT) example tests/corpus tests/bench tests/asan-canary tools/gates tools/fleet -name '*.zen' -print0 | LC_ALL=C sort -z); \
 	  build/gates/lex_tiling "$${files[@]}"
 
 ## editors: the VS Code extension's contributions still resolve. EVERY
@@ -363,9 +372,7 @@ design: grammar
 ## zen.so and bypasses the cache; `--lang-name zen` tells the CLI which
 ## symbol to load from it.
 parse: grammar
-	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tests/bench tests/asan-canary -name '*.zen' -print0); \
-	  test $${#files[@]} -gt 0 \
-	    || { echo "parse: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
+	@$(call nonempty,parse,$(ROOT) example tests/corpus tests/bench tests/asan-canary -name '*.zen' -print0); \
 	  cd grammar && npx tree-sitter parse --quiet --stat -l "$$(pwd)/zen.so" --lang-name zen "$${files[@]/#/../}"
 
 ## lint: every test conforms to the format in docs/TESTING.md.
@@ -444,10 +451,8 @@ grammar-test: grammar
 ## which is an instruction to do nothing and succeed when the find comes
 ## up empty.
 fmt: build
-	@mapfile -d '' files < <(find $(ROOT) example tests/corpus tests/asan-canary tools/gates tools/fleet -name '*.zen' \
-	    -not -path 'tests/corpus/lex/*' -print0); \
-	  test $${#files[@]} -gt 0 \
-	    || { echo "fmt: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
+	@$(call nonempty,fmt,$(ROOT) example tests/corpus tests/asan-canary tools/gates tools/fleet -name '*.zen' \
+	  -not -path 'tests/corpus/lex/*' -print0); \
 	  ./zen fmt --check "$${files[@]}"
 
 ## emit-runs: consecutive writes into one buffer that a single `fmt` would

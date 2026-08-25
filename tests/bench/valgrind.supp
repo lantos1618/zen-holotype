@@ -4,16 +4,32 @@
 # generated main and never frees them, DELIBERATELY: the argv rows
 # (src/gen/gen_c/gen_c_main.zen:156) and the root arena state (the first
 # `env.mem.alloc()` in src/zen/zen.zen). Both live exactly as long as the
-# process and the OS reclaims them. At -O2 both sit inline in `main`, so
-# valgrind reports them as definite leaks two frames deep.
+# process and the OS reclaims them.
 #
-# The shape of this block is the honesty: only a malloc called DIRECTLY from
-# main is suppressed. Any leak one frame deeper -- parser, sema, gen_c --
+# TWO SHAPES, ONE PER STANZA. This file once assumed both sat inline in
+# `main` at -O2; the root arena's allocation now has the Env constructor
+# frame between malloc and main (observed live: `malloc <- Env <- main`,
+# which made `make leak` fail every run on a known-deliberate block), so
+# the arena gets its own stanza naming that frame. Each stanza suppresses
+# only its exact stack: anything one frame deeper -- parser, sema, gen_c --
 # still fails `make leak`.
+#
+# DO NOT WIDEN THESE. tests/bench/leak_canary/main.c is a deliberate leak
+# whose malloc sits one frame below main; if a stanza ever grows loose
+# enough to swallow it, tests/bench/leak.sh's positive control goes quiet
+# and the gate refuses to run instead of passing over everything.
 {
-   zen_startup_argv_rows_and_root_arena
+   zen_startup_argv_rows
    Memcheck:Leak
    match-leak-kinds: definite
    fun:malloc
+   fun:main
+}
+{
+   zen_startup_root_arena_env_ctor
+   Memcheck:Leak
+   match-leak-kinds: definite
+   fun:malloc
+   fun:zu_f3_3zen3zen4mainO1_t4_3std3env3env3Env
    fun:main
 }
