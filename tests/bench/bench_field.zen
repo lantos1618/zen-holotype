@@ -28,22 +28,34 @@ Circle.impl(Rect, {
     height: self.radius * 2.0,
 })
 
+// THE TWO MEASURED OPERATIONS, AND THE ONLY COPY OF EITHER.
+// drivers/stored_field_read.zen and drivers/computed_field_read.zen
+// import these; see bench_loop.zen's note on why a driver may not
+// restate a body. THE TYPES ARE IMPORTED TOO -- a driver that
+// redeclared `Rect` and `Circle` would still be timing its own
+// struct layout and its own impl, which is the same drift one level
+// down.
+
 // storage: the field is bytes in the struct
+stored_field_read_body* = (r: Rect) f64 { r.width }
+
+// computed: the same dot, supplied by an impl. same budget
+computed_field_read_body* = (c: Circle) f64 { c.width }
+
 stored_field_read* = (bn: Bencher) Res<(), TestError> {
     r = Rect(width: 3.0, height: 4.0);
     total ::= 0.0;
     bn.iter(() {
-        total = total + r.width;
+        total = total + stored_field_read_body(r);
     });
     Ok(());
 }
 
-// computed: the same dot, supplied by an impl. same budget
 computed_field_read* = (bn: Bencher) Res<(), TestError> {
     c = Circle(radius: 1.5);
     total ::= 0.0;
     bn.iter(() {
-        total = total + c.width;
+        total = total + computed_field_read_body(c);
     });
     Ok(());
 }

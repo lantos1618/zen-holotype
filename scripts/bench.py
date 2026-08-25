@@ -94,7 +94,22 @@ import run as runner  # tests/run.py -- staging and toolchain, reused  # noqa: E
 # One row per bench. The name is the budget's name in bench_budgets.zen; the
 # driver holds the loop count, parsed out of its `Range(0, N)` below so the
 # number lives in one place -- the file that runs it.
-BENCHES = ("vec_add", "stored_field_read", "computed_field_read", "fold_stack_array")
+#
+# The value is (bench module, the function holding the measured operation).
+# THERE IS ONE COPY OF EVERY BENCH BODY and the driver imports it. Until
+# 2026-08-25 each driver restated its bench's body by hand and nothing
+# compared the two, so a bench could silently drift into measuring a program
+# that no longer resembled the one it named -- and `allocs_op: 0` is cited in
+# four places in src/ as a thing that fails the build. Re-syncing the copies
+# would have been one more hand-maintained list; instead there is no copy,
+# and `verify_shared_body` below is what keeps it that way.
+BENCH_BODIES = {
+    "vec_add": ("bench_vec", "vec_add_body"),
+    "stored_field_read": ("bench_field", "stored_field_read_body"),
+    "computed_field_read": ("bench_field", "computed_field_read_body"),
+    "fold_stack_array": ("bench_loop", "fold_stack_array_body"),
+}
+BENCHES = tuple(BENCH_BODIES)
 
 # The budgets were written from the design, not from a measurement, so the
 # first real numbers get room: past the budget is a warning, past
@@ -234,6 +249,76 @@ def _read_budgets(path: Path) -> dict[str, Budget]:
     return found
 
 
+# A top-level definition of NAME: `name* = (` or `name = (`, at column 0.
+# Column 0 is what makes this a DEFINITION and not a call -- every call site
+# in these files is indented inside a function body.
+def _defines(name: str) -> re.Pattern:
+    return re.compile(rf"^{re.escape(name)}\s*\*?\s*=\s*(?:<[^>]*>)?\s*\(", re.M)
+
+
+# `alias = bench_loop`, the import that binds a module. The RHS is the whole
+# right-hand side, so `= bench_loop` matches and `= bench_looper` does not.
+def _imports(module: str) -> re.Pattern:
+    return re.compile(rf"^\w+\s*=\s*{re.escape(module)}\s*$", re.M)
+
+
+def verify_shared_body(name: str, module: str, body: str, driver: Path) -> None:
+    """The driver RUNS the bench's body; it does not restate it.
+
+    THE ANTI-PATTERN THIS FORBIDS, in as many words: a driver holding a
+    hand-mirrored copy of a bench body, with nothing comparing the two. That
+    is what tests/bench shipped until 2026-08-25 -- four bodies duplicated,
+    one of them (`fold_stack_array`) carrying `allocs_op: 0`, a number four
+    sites in src/ cite as load-bearing. A copy nothing compares is a
+    benchmark that can silently start measuring a different program, and
+    re-syncing it by hand is just a longer-lived version of the same bug.
+
+    So there is no copy, and these four assertions are what keeps it that
+    way. They are a HARNESS error (exit 2), never a verdict: a bench whose
+    body is not the body it claims has not measured anything, and reporting
+    `ok` for it is the failure mode this file exists to avoid.
+
+    Prove it goes red by pasting a bench body back into its driver.
+    """
+    bench_file = BENCH_DIR / f"{module}.zen"
+    if not bench_file.is_file():
+        raise HarnessError(
+            f"{name}: no bench file at {bench_file}. The driver imports"
+            f" `{module}`, so this gate cannot check what it measures."
+        )
+
+    # ONE DEFINITION, ACROSS THE WHOLE SUITE. Not "one in the bench file":
+    # a second definition anywhere under tests/bench is a copy again, whether
+    # it sits in the driver or in a third file nobody remembers.
+    definers = sorted(
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in BENCH_DIR.rglob("*.zen")
+        if _defines(body).search(_read(path))
+    )
+    want = bench_file.relative_to(REPO_ROOT).as_posix()
+    if definers != [want]:
+        raise HarnessError(
+            f"{name}: `{body}` must be defined exactly once, in {want}, and"
+            f" is defined in {definers or ['nothing']}. The measured body is"
+            " shared with the driver rather than mirrored into it -- a"
+            " second copy is the drift this check exists to prevent."
+        )
+
+    text = _read(driver)
+    if not _imports(module).search(text):
+        raise HarnessError(
+            f"{name}: {driver.relative_to(REPO_ROOT).as_posix()} does not"
+            f" import `{module}`, so whatever it times is not"
+            f" {want}'s body."
+        )
+    if f".{body}(" not in text:
+        raise HarnessError(
+            f"{name}: {driver.relative_to(REPO_ROOT).as_posix()} never calls"
+            f" `{body}`. A driver that does not run the bench's body is"
+            " measuring a program nobody wrote down."
+        )
+
+
 def make_toolchain(args: argparse.Namespace) -> runner.Toolchain:
     binary = Path(args.zen)
     if not binary.is_absolute():
@@ -246,10 +331,19 @@ def make_toolchain(args: argparse.Namespace) -> runner.Toolchain:
 def stage_driver(driver: Path, work: Path, source: str) -> Path:
     """Same shape as run.py's stage: a self-contained root holding std (the
     prelude) and the program as main.zen, so the compilation root is the
-    staging directory and never the filesystem."""
+    staging directory and never the filesystem.
+
+    THE BENCH FILES ARE STAGED TOO, because a driver imports the bench whose
+    body it runs (`loops = bench_loop`). Staging all of them is safe and
+    deliberately crude: the compiler follows imports, so a bench file no
+    driver names is copied and never compiled. bench_budgets.zen rides along
+    the same way -- it is read by a regex, not by a program.
+    """
     root = work / "src"
     root.mkdir(parents=True, exist_ok=True)
     shutil.copytree(REPO_ROOT / "src" / "std", root / "std", dirs_exist_ok=True)
+    for bench_src in sorted(BENCH_DIR.glob("*.zen")):
+        shutil.copy2(bench_src, root / bench_src.name)
     (root / "main.zen").write_text(source, encoding="utf-8")
     return root
 
@@ -495,10 +589,17 @@ def main(argv: Sequence[str]) -> int:
     benches: list[Bench] = []
     try:
         budgets = _read_budgets(BUDGETS_PATH)
+        if not BENCHES:
+            raise HarnessError(
+                "BENCH_BODIES is empty, so this gate would measure nothing"
+                " and report success"
+            )
         for name in (*BENCHES, "null"):
             driver = DRIVERS_DIR / f"{name}.zen"
             if not driver.is_file():
                 raise HarnessError(f"{driver}: missing driver")
+            if name in BENCH_BODIES:
+                verify_shared_body(name, *BENCH_BODIES[name], driver)
             # null has no loop to count; its wall time is the floor, undivided
             iters = 1 if name == "null" else _read_iters(driver)
             benches.append(Bench(name, driver, iters, budgets.get(name)))
