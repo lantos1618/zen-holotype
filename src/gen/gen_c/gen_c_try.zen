@@ -765,12 +765,16 @@ set_qname = (be :: CBackend, set: TyId, out :: String) Res<(), AllocError> {
 // no return statement at all, C that fell off the end of a non-void
 // function. So the hoist question (`gen_c_hoist.needs_hoist`,
 // DESIGN.md's lift, the same predicate the literal tail answers) is
-// asked FIRST, and a unit payload only decides whether the built
-// literal carries an `Ok` initialiser — `write_res_payload`'s rule,
-// since `()` is not a value C can hold. When no lift happens a unit
-// payload still writes nothing: `Dest.Into` of a unit has no member.
-// The payload is READ out of `tmp` rather than lowered again: the
-// operand has already run once, and running it twice is not a lift.
+// asked FIRST, and the unit answer only decides whether ANYTHING is
+// read out of `tmp`: `()` is not a value C can hold, so a unit payload
+// names no member anywhere. On the lift that means the built literal
+// carries its tag alone — `write_res_payload`'s rule. With NO lift it
+// means nothing at all: `write_unwrap` reads `.zg_data.Ok`, a member a
+// unit-payload Res union does not have, so a discarded unit `.try()`
+// once emitted the `'union <anonymous>' has no member named 'zu_m2Ok'`
+// that cc rejects. The payload is READ out of `tmp` rather than lowered
+// again: the operand has already run once, and running it twice is not
+// a lift.
 unwrap = (
     be   :: CBackend,
     id   : ExprId,
@@ -782,7 +786,10 @@ unwrap = (
 ) Res<(), AllocError> {
     be.needs_hoist(id, ctx, want).try().match({
         true  => be.write_hoisted_unwrap(want, r.value, tmp, dst),
-        false => be.write_unwrap(tmp, dst),
+        false => be.is_unit(r.value).match({
+            true  => Ok(()),
+            false => be.write_unwrap(tmp, dst),
+        }),
     })
 }
 
