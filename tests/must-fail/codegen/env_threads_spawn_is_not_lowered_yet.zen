@@ -1,17 +1,21 @@
-// `env.threads.spawn(..)` IS REFUSED AT THE CALL, and the third of the
-// three ways a bodiless capability can behave.
+// `env.threads.spawn(..)` IS REFUSED AT THE CALL, and now for the
+// reason that is actually true of it: `Threads.spawn` is declared with
+// no body and no impl of `Threads` anywhere supplies one, so the fat
+// slot the call would read is a slot nothing fills.
 //
-// `Threads` has two members and they do NOT agree with each other:
-// `sleep` compiles and faults (pinned by
-// `corpus/env/threads_sleep_crashes_issue_781`), `spawn` is refused
-// here. The difference is not design, it is arithmetic -- `spawn` is
-// generic in the body's result type and nothing settles `T`, so the
-// backend has a reason to stop before it reaches the missing symbol.
-// `sleep` is monomorphic and walks straight off the end.
+// IT USED TO BE REFUSED FOR A SECOND-ORDER REASON. `spawn` is generic
+// in the body's result type and nothing settles `T`, so the backend
+// stopped at the erased element size and said so -- `a call through a
+// bound whose type arguments nothing settles`. That sentence was true
+// but it was the symptom of the missing body, and it was the only
+// thing standing between this program and the crash its sibling
+// `sleep` used to take (issue 781): `sleep` is monomorphic, so it
+// walked straight past that check and off the end of a NULL slot.
 //
-// SO THIS FILE IS HALF OF A PAIR. Read alone it says "spawn is stage
-// 5, as declared". Read beside the sleep test it says the two members
-// of one capability fail differently, and only one of them says so.
+// #781 gave the backend the first-order question -- does ANYTHING
+// answer this member -- and `sleep` a real floor. `spawn` fails that
+// question, so it is refused here, once, before the arithmetic about
+// its type arguments is ever attempted.
 //
 // position: the call to `spawn`.
 

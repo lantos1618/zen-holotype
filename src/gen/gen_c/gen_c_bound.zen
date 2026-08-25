@@ -288,10 +288,34 @@ lower_fat_call* = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    has_body(f).match({
-        true  => Ok(()),
-        false => be.answer_or_refuse(id, rty, a.name.text, out),
-    }).try();
+    be.member_answered(f, rty, a.name.text).match({
+        false => be.unsupported(
+            id,
+            "a bodiless member of a bound used as a value",
+            out
+        ),
+        true  => be.lower_answered_call(id, c, a, rty, s, ctx, out),
+    })
+}
+
+// THE SLOT WALK, reached only once the member is known to be answered
+// somewhere. It is a function of its own so that the refusal above can
+// STOP. It used to report and then fall through to here, and for
+// `env.threads.spawn` -- bodiless AND generic in a parameter nothing
+// settles -- `settle_call` then refused the same call a second time at
+// the same position. `must-fail` counts diagnostics and allows one:
+// one mistake must not cascade, and the root cause is the missing
+// body, not the type argument that could not be read off it.
+lower_answered_call = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    rty : TyId,
+    s   : Site,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
     slots ::= be.alloc.Vec<Slot>();
     be.slots_of(rty, slots).try();
     pick_slot(slots, a.name.text, c.args.len).match({
@@ -304,22 +328,13 @@ lower_fat_call* = (
     })
 }
 
-// THE GATE'S TWO HALVES: does anything anywhere answer this member, and
-// if not, refuse here where the ExprId is.
-answer_or_refuse = (
-    be   :: CBackend,
-    id   : ExprId,
-    rty  : TyId,
-    name : str,
-    out  :: String
-) Res<(), AllocError> {
-    be.bound_answered(rty, name).match({
-        true  => Ok(()),
-        false => be.unsupported(
-            id,
-            "a bodiless member of a bound used as a value",
-            out
-        ),
+// THE GATE'S TWO HALVES: the member carries a body of its own, or some
+// impl of this bound supplies one. Neither answering is issue 781's
+// crash -- the slot stays NULL and the call reads it.
+member_answered = (be :: CBackend, f: Function, rty: TyId, name: str) bool {
+    has_body(f).match({
+        true  => true,
+        false => be.bound_answered(rty, name),
     })
 }
 
