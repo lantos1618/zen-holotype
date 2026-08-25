@@ -22,7 +22,7 @@
 // floor's own, written down in exactly one place at each end.
 
 ExprId = std.ast
-Call = std.ast
+Call, Access = std.ast
 AllocError = std.mem
 str, String = std.text
 TyId = sema.sema_ty
@@ -35,6 +35,8 @@ ctype, request_type = gen.gen_c.gen_c_type
 declare_temp, payload_type = gen.gen_c.gen_c_flow
 Slot = gen.gen_c.gen_c_fat
 slot_call = gen.gen_c.gen_c_bound
+address_of = gen.gen_c.gen_c_fat
+expr = gen.gen_c.gen_c_expr
 arg_text, field_of = gen.gen_c.gen_c_cap
 write_assign_ok, write_assign_ok_unit, write_assign_err = gen.gen_c.gen_c_cap
 
@@ -97,6 +99,191 @@ lower_write* = (
 write_fs_call = (be :: CBackend, rc: str, fn: str, first: str, second: str)
                 Res<(), AllocError> {
     be.fmt("{rc} = {fn}{first}, {second});\n")
+}
+
+// -----------------------------------------------------------------
+// `fs.lock(path)` — THE CAPABILITY THAT EXCLUDES
+//
+// One floor call answering an ordinal like every other fs verb, so the
+// failure chain is the SAME chain — `Exists` joins it as ordinal 4 and
+// `fs_name` grows one arm. The Ok payload is the Lock: one i32 field
+// holding the descriptor, written FIELD BY FIELD under the same
+// licence `read_string` writes a String's — the fd enters the program
+// here and nowhere else.
+//
+// NO ALLOC. A Lock is one word of state the kernel owns; there is
+// nothing here for an arena to hold.
+// -----------------------------------------------------------------
+
+lower_lock* = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.need_fs();
+    be.payload_type(ret, "Ok").match({
+        None    => be.unsupported(
+            id,
+            "Fs.lock must return a Res<Lock, FsError>",
+            out
+        ),
+        Ok(lty) => be.write_lock(id, c, ret, lty, ctx, out),
+    })
+}
+
+write_lock = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    ret : TyId,
+    lty : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.request_type(lty).try();
+    i32_ty = be.check.types.prim("i32").try();
+    path ::= be.alloc.String().try();
+    be.path_args(c, 0, ctx, path).try();
+    rc ::= be.alloc.String().try();
+    sym_gen(rc, "t", be.next_tmp()).try();
+    // THE DESCRIPTOR TEMP IS DECLARED HERE, not inside `write_lock_call`,
+    // because two spellings need it: the floor call takes its address and
+    // the Ok payload below copies it into the Lock. Born in the helper, it
+    // died with the helper's scope and the payload spelled the RC instead
+    // — every Lock came back holding ordinal 0, unlock() closed stdin,
+    // and a relock of a released path failed as Exists while the program
+    // printed success for the first lock.
+    fd ::= be.alloc.String().try();
+    sym_gen(fd, "t", be.next_tmp()).try();
+    dst ::= be.alloc.String().try();
+    sym_gen(dst, "t", be.next_tmp()).try();
+    be.declare_temp(i32_ty, rc.view()).try();
+    be.declare_temp(i32_ty, fd.view()).try();
+    be.declare_temp(ret, dst.view()).try();
+    be.write_lock_call(rc.view(), path.view(), fd.view()).try();
+    be.open_rc_test(rc.view()).try();
+    be.fs_chain(ret, rc.view(), dst.view(), 1).try();
+    be.close_else().try();
+    // The payload is the LOCK (lty), not the Res: `write_assign_ok`
+    // wraps it in the Res head, so what lands in `.zg_data.Ok` is the
+    // struct itself. Spelling `ret` here put a whole Res inside the
+    // payload slot and `cc` refused the C.
+    value ::= be.alloc.String().try();
+    value.add_bytes("(").try();
+    be.ctype(lty, value).try();
+    value.add_bytes("){ .").try();
+    sym_member(value, "fd").try();
+    value.add_bytes(" = ").try();
+    value.add_bytes(fd.view()).try();
+    value.add_bytes(" }").try();
+    be.write_assign_ok(ret, value.view(), dst.view()).try();
+    be.close_brace().try();
+    out.add_bytes(dst.view())
+}
+
+// the one-line formatters the fs lowerings call. A FORMAT DOOR'S HOLE
+// IS A `str` AND THESE ARGUMENTS ARE NOT (`gen_c_floor.zen`: a hole is
+// converted by nothing), which is why every floor call in this file
+// goes through a helper like this one instead of an inline `be.fmt` —
+// `write_fs_call` spells it for two arguments, this for none.
+// `<int> <rc> = zg_fs_lock(<path>, &<fd>);` — THE ANSWER IS AN
+// ORDINAL and the descriptor comes back through the pointer, because a
+// raw fd would collide with the error ordinals the rc test reads (a
+// successful lock on fd 4 would be reported as `Exists`). The fd temp
+// itself is DECLARED BY THE CALLER: the Ok payload in `write_lock`
+// copies the same temp into the Lock, so it must outlive this helper's
+// scope — born here, the payload spelled the rc and every Lock came
+// back holding 0.
+write_lock_call = (be :: CBackend, rc: str, path: str, fd: str)
+                  Res<(), AllocError> {
+    // spelled piecewise, not through a format door: a hole resolves to
+    // what a signature declares — `unlock_line` below is the same
+    // refusal, same shape.
+    line ::= be.alloc.String().try();
+    line.add_bytes(rc).try();
+    line.add_bytes(" = zg_fs_lock(").try();
+    line.add_bytes(path).try();
+    line.add_bytes(", &").try();
+    line.add_bytes(fd).try();
+    line.add_bytes(");\n").try();
+    be.write(line.view())
+}
+
+// -----------------------------------------------------------------
+// `lock.unlock()` — the release drop runs
+//
+// The receiver is handed over BY ADDRESS, the way every `::` parameter
+// travels: spelled out rather than borrowed from `path_args`, because
+// that helper lowers its argument AS A `str` and the thing being
+// unlocked is a Lock. `address_of` takes `&` of a place and spills a
+// non-place into a temporary first, so `spent.unlock()` and a receiver
+// with a call in it both reach the floor as an address. The answer is
+// the unit lowering's own — a bare 0, exactly what `lower_release`
+// answers.
+// -----------------------------------------------------------------
+
+lower_unlock* = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    rty : TyId,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.need_fs();
+    unknown = be.check.types.unknown().try();
+    recv ::= be.alloc.String().try();
+    expr(be, a.base, ctx, unknown, recv).try();
+    addr ::= be.alloc.String().try();
+    be.address_of(recv.view(), rty, addr).try();
+    // THE FLOOR TAKES THE FD, NOT THE LOCK: the receiver arrives as an
+    // address (every `::` receiver does), so the one field is read
+    // through it — `zg_fs_unlock(p->fd)`. Passing the address itself
+    // handed an int parameter a pointer, and the lock never released.
+    //
+    // THE ADDRESS IS ALREADY `&(...)` (`gen_c_fat.address_of`: a place
+    // gets `&(x)`, anything else spills to a temporary and answers
+    // `&t`). The arrow must hop THE ADDRESS ITSELF: spelled bare,
+    // `&x->fd` parses as `&(x->fd)` -- pointer-to-pointer where an int
+    // was declared -- because `->` binds tighter than unary `&`. One
+    // pair of parens moves the arrow outside: `(&(x))->fd`.
+    //
+    // THE PARENS GO INTO THEIR OWN BUFFER: appending them to `addr`
+    // while reading `addr.view()` grew the String under its own live
+    // borrow and the text came out DOUBLED -- cc read a Lock value being
+    // CALLED. A borrowed view must never watch its own String grow.
+    ptr ::= be.alloc.String().try();
+    ptr.add_bytes("(").try();
+    ptr.add_bytes(addr.view()).try();
+    ptr.add_bytes(")").try();
+    field ::= be.alloc.String().try();
+    be.arrow_field(ptr.view(), "fd", field).try();
+    be.unlock_line(field.view()).try();
+    out.add_bytes("0");
+    Ok(())
+}
+
+// `zg_fs_unlock(<field>);\n` — one statement, spelled here so no
+// format hole is asked to carry it. The fd is not a str and the floor
+// door converts nothing.
+unlock_line = (be :: CBackend, field: str) Res<(), AllocError> {
+    be.fmt("zg_fs_unlock(").try();
+    be.write(field).try();
+    be.write(");\n")
+}
+
+// `<addr>-><name>` — the fd through a Lock pointer, spelled with the
+// member mangler so the C name cannot drift from the type's own.
+arrow_field = (be :: CBackend, addr: str, name: str, out :: String)
+              Res<(), AllocError> {
+    out.add_bytes(addr).try();
+    out.add_bytes("->").try();
+    out.sym_member(name)
 }
 
 // `remove`: the answer to "make sure this is gone" (#757). The status
@@ -491,17 +678,25 @@ fs_name_2 = (n: usize) str {
 }
 
 fs_name_3 = (n: usize) str {
-    (n == 3).match({ true => "IsDir", false => "Failed" })
+    (n == 3).match({ true => "IsDir", false => fs_name_4(n) })
+}
+
+// Exists is ordinal 4, and `lock` is the only floor that answers with
+// it: a stat cannot find it and an open cannot create it.
+fs_name_4 = (n: usize) str {
+    (n == 4).match({ true => "Exists", false => "Failed" })
 }
 
 // `if (rc == 1) { .. } else { if (rc == 2) { .. } else { .. } }`. The
 // last arm is the plain `else`: the floor returns exactly these
-// ordinals, so a chain testing all four would end in a branch nothing
+// ordinals, so a chain testing all five would end in a branch nothing
 // can reach — and an unreachable arm naming a reason is how a wrong
-// reason gets reported later.
+// reason gets reported later. `remove` starts its own chain at 2: the
+// three refusals are all it can answer, and NOT_FOUND is not among
+// them (see `lower_remove`).
 fs_chain* = (be :: CBackend, ret: TyId, rc: str, dst: str, n: usize)
            Res<(), AllocError> {
-    (n > 3).match({
+    (n > 4).match({
         true  => be.write_assign_err(ret, fs_name(n), dst),
         false => be.fs_branch(ret, rc, dst, n),
     })

@@ -39,7 +39,7 @@ ctype, field_type, request_type, declared_ret = gen.gen_c.gen_c_type
 decl_ctx, decl_inst = gen.gen_c.gen_c_type
 expr = gen.gen_c.gen_c_expr
 declare_temp, enum_path, payload_type, is_variant = gen.gen_c.gen_c_flow
-lower_probe, lower_write, lower_read, lower_remove = gen.gen_c.gen_c_fs
+lower_probe, lower_write, lower_read, lower_remove, lower_lock, lower_unlock = gen.gen_c.gen_c_fs
 close_else, close_brace, open_null_test = gen.gen_c.gen_c_fs
 lower_stdin_read = gen.gen_c.gen_c_stdin
 lower_env_var = gen.gen_c.gen_c_env
@@ -74,6 +74,17 @@ is_capability* = (be :: CBackend, rty: TyId, name: str) bool {
 is_fs_capability = (be :: CBackend, rty: TyId, name: str) bool {
     owner_of(be, rty).eq("Fs").match({
         true  => fs_verb(name),
+        false => be.is_lock_unlock(rty, name),
+    })
+}
+
+// `Lock.unlock` IS THE LOCK'S OWN RELEASE, not a new capability root:
+// the fd belongs to the Lock, and so does the one door that closes it.
+// The receiver type is the whole of the test, exactly as `Stdin.read`
+// is told from `Fs.read` — a name two types answer to names neither.
+is_lock_unlock = (be :: CBackend, rty: TyId, name: str) bool {
+    owner_of(be, rty).eq("Lock").match({
+        true  => name.eq("unlock"),
         false => be.is_env_capability(rty, name),
     })
 }
@@ -165,8 +176,10 @@ mem_verb = (name: str) bool {
 // allocates its buffer through the `Alloc` it was handed, rather than
 // `gen_c_member.zen`'s refusal for a member with no body. `remove` is
 // there for the same reason: its lowering lives in `gen_c_fs` too.
+// `lock` joins them at its own floor: an exclusive-create is a
+// filesystem question, and the lock it answers belongs to `Fs`.
 fs_verb = (name: str) bool {
-    name.is_in(["exists", "is_dir", "write", "read", "remove"])
+    name.is_in(["exists", "is_dir", "write", "read", "remove", "lock"])
 }
 
 clock_verb = (name: str) bool {
@@ -234,7 +247,9 @@ cap_param = (be :: CBackend, rty: TyId, mi: usize, f: Function)
 
 // `Stdin.read` IS TESTED BEFORE THE NAME CHAIN and not inside it: the
 // chain below asks names only, and `read` is a name two capabilities
-// answer to.
+// answer to. `Lock.unlock` takes the same seat beside it — the chain
+// would fall off its end on `unlock` and answer a stat — so the
+// RECEIVER'S OWNER decides here, and only then does a name get read.
 verb = (
     be  :: CBackend,
     id  : ExprId,
@@ -248,6 +263,26 @@ verb = (
 ) Res<(), AllocError> {
     be.is_stdin_read(rty, a.name.text).match({
         true  => be.lower_stdin_read(id, c, ret, aty, ctx, out),
+        false => be.lock_verb(id, c, a, rty, ret, aty, ctx, out),
+    })
+}
+
+// `Lock.unlock` IS THE LOCK'S OWN RELEASE, tested by owner before any
+// name is read, for the reason `is_stdin_read` states above it. A Lock
+// has exactly one verb; everything else falls through to the chains.
+lock_verb = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    rty : TyId,
+    ret : TyId,
+    aty : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    owner_of(be, rty).eq("Lock").match({
+        true  => be.lower_unlock(id, c, a, rty, ret, ctx, out),
         false => be.env_verb(id, c, a, rty, ret, aty, ctx, out),
     })
 }
@@ -418,7 +453,26 @@ verb_5 = (
     })
 }
 
+// `lock` ANSWERS BEFORE THE PROBE FALLTHROUGH, and the fallthrough is
+// the reason this link exists: the chain ends in `lower_probe`, which
+// answers every remaining NAME as a stat question. Without this link
+// `env.fs.lock(p)` lowered as a probe — compiled clean, answered wrong.
 verb_6 = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    a.name.text.eq("lock").match({
+        true  => be.lower_lock(id, c, ret, ctx, out),
+        false => verb_7(be, id, c, a, ret, ctx, out),
+    })
+}
+
+verb_7 = (
     be  :: CBackend,
     id  : ExprId,
     c   : Call,

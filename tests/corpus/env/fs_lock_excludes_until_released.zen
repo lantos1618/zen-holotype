@@ -1,0 +1,52 @@
+// tests/corpus/env/fs_lock_excludes_until_released.zen
+// ISSUE 752: "no lock: two Zen programs cannot serialise anything
+// between them." `Fs` was read/write/exists/is_dir only -- no open
+// handle, so there was no primitive out of which mutual exclusion
+// could be built. `env.fs.lock(path)` is that primitive: flock(2)
+// under an O_EXCL create-or-open, Err(Exists) when someone else holds
+// the path, and a Lock whose descriptor closes on `.unlock()` or when
+// the Lock leaves scope.
+//
+// The second lock below is taken from the SAME process through a
+// SECOND open file description, and flock(2) still refuses it: the
+// loser gets ordinal 4, FsError.Exists. That is the line that proves
+// the lock excludes rather than silently succeeding -- a lock file
+// spelled with `write` alone would print "second lock ok" here.
+//
+// The last two lines prove the compiler-inserted Drop release runs at
+// scope exit: without it, the fifth lock comes back Exists.
+//
+// The lock files are bare names because the runner executes the
+// binary in its own scratch work directory, which starts empty; a
+// leftover FILE from an earlier run is harmless, since a flock dies
+// with the process that held it and the floor reopens and relocks.
+
+FsError = std.env
+
+main = (env: Env) Res<i32, FsError> {
+    first ::= env.fs.lock("repro.lock").try();
+    println("first lock ok");
+
+    env.fs.lock("repro.lock").match({
+        Ok(_)            => println("second lock ok"),
+        Err(Exists)      => println("second lock refused: exists"),
+        Err(NotFound)    => println("second lock: not found"),
+        Err(Denied)      => println("second lock: denied"),
+        Err(IsDir)       => println("second lock: is dir"),
+        Err(Failed)      => println("second lock: failed"),
+        Err(OutOfMemory) => println("second lock: oom"),
+    });
+
+    first.unlock();
+    third ::= env.fs.lock("repro.lock").try();
+    println("relock after unlock ok");
+
+    {
+        fourth ::= env.fs.lock("repro2.lock").try();
+        println("scope lock taken");
+    }
+
+    fifth ::= env.fs.lock("repro2.lock").try();
+    println("lock after scope drop ok");
+    Ok(0)
+}

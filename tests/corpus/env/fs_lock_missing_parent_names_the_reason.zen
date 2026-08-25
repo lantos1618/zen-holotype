@@ -1,0 +1,27 @@
+// ISSUE 752 follow-up: `Exists` joined FsError at ordinal 4, which pushed
+// `Failed` from 4 to 5 and made the generated if-chain one link deeper
+// (gen_c_fs.zen fs_chain / gen_c_runtime.zen ZG_FS_*). A chain off by one
+// does not fail loudly -- it reports the WRONG REASON quietly. This file
+// asks a question whose only honest answer is `NotFound`: locking a path
+// whose PARENT does not exist fails at open(2)/ENOENT before any locking
+// question is asked. If the chain misnames, this prints "wrong reason"
+// (most plausibly `Failed`, the chain's fallback arm) instead.
+//
+// Without fs.lock entirely (pre-752) this program is rejected: no member
+// `lock` on Fs -- which is the differential this test also guards.
+
+FsError = std.env
+
+main = (env: Env) Res<i32, FsError> {
+    got ::= env.fs.lock("no/such/dir/x.lock");
+    got.match({
+        Ok(_)            => println("missing parent: unexpected ok"),
+        Err(NotFound)    => println("missing parent: not-found"),
+        Err(Exists)      => println("missing parent: wrong reason"),
+        Err(Denied)      => println("missing parent: wrong reason"),
+        Err(IsDir)       => println("missing parent: wrong reason"),
+        Err(Failed)      => println("missing parent: wrong reason"),
+        Err(OutOfMemory) => println("missing parent: wrong reason"),
+    });
+    Ok(0);
+}
