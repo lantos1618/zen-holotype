@@ -46,6 +46,7 @@ owner_of, push_tparams = sema.sema_inst
 settle_raised = sema.sema_raise
 check_return = sema.sema_hoist
 check_literal = sema.sema_trap
+check_arms = sema.sema_hoist
 check_own = sema.sema_own
 
 // Every declaration rule, for one module.
@@ -405,19 +406,40 @@ field_value = (
                 c.release(mark).try();
                 want = c.bound_member_type(bound, mem.name().text, self_ty).try();
                 node = c.tree.expr_at(v);
-                // `widen_u16 = to_u16` SUPPLIES A METHOD: the value is a
-                // bare function reference the call machinery instantiates
-                // at its use, and its type is not the fn signature it
-                // stands for. Only a DATA position owes the coercion.
-                c.types.at(want).match({
-                    Fn(_) => Ok(()),
-                    _     => c.coerce(node.span.file, node.span, got, want, ""),
-                }).try();
+                // A BARE FUNCTION NAME SUPPLIES A METHOD: `widen_u64 =
+                // to_u64` hands over the function itself, and the call
+                // machinery instantiates it at each use — the value's
+                // type here is the name standing for the declaration,
+                // not the signature a data position would owe. Only a
+                // DATA position owes the coercion.
+                data = (supplies_fn(c, got).try() == false);
+                data.then(() {
+                    c.coerce(node.span.file, node.span, got, want, "").try();
+                    c.check_literal(v, want).try();
+                    c.check_arms(v, want).try();
+                });
                 Ok(())
             },
             None => Ok(()),
         }),
         _ => Ok(()),
+    })
+}
+
+// Whether a value's type is the bare NAME of a function declaration —
+// `decl_as_type`'s answer for `to_i64` reached by bare name — rather
+// than a data type. The one case a supplied field's value is not
+// obliged to fit the field it supplies.
+supplies_fn = (c :: Checker, ty: TyId) Res<bool, AllocError> {
+    c.types.at(ty).match({
+        Named(n) => decl_at(c.tree, n.decl).match({
+            Ok(d) => d.kind.match({
+                Function(_) => Ok(true),
+                _           => Ok(false),
+            }),
+            None  => Ok(false),
+        }),
+        _        => Ok(false),
     })
 }
 
