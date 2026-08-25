@@ -269,11 +269,37 @@ arm_literals = (c :: Checker, m: Match, want: TyId) Res<(), AllocError> {
     Ok(());
 }
 
+// A fold that declines is usually "not provably anything" -- a binding
+// in the way, an operator this prover does not answer -- and silence is
+// right for it. A BARE `Int` literal is the one form with no such
+// excuse: its digits reached the tree only by fitting a u64 accumulator
+// (`std/lex/lex_literal.zen`), so declining means they are past i64,
+// which every type but u64/usize cannot hold (#769).
 folded_within = (c :: Checker, id: ExprId, node: Expr, want: TyId)
                 Res<(), AllocError> {
     c.literal_int(node).match({
-        None  => Ok(()),
+        None  => c.unfoldable_within(id, want),
         Ok(v) => c.value_within(id, want, v),
+    })
+}
+
+unfoldable_within = (c: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
+    c.tree.expr_at(id).kind.match({
+        Literal(l) => c.literal_kind_within(id, l, want),
+        _          => Ok(()),
+    })
+}
+
+literal_kind_within = (c: Checker, id: ExprId, l: Literal, want: TyId)
+                      Res<(), AllocError> {
+    name   = c.prim_name(want);
+    widest = name.eq("u64") || name.eq("usize");
+    l.kind.match({
+        Int => widest.match({
+            true  => Ok(()),
+            false => c.out_of_range(id, want),
+        }),
+        _   => Ok(()),
     })
 }
 
