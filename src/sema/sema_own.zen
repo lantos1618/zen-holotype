@@ -501,11 +501,14 @@ own_call = (c :: Checker, o :: Own, id: ExprId, k: Call, ctx: Ctx)
     c.check_scope_stored(id, k).try();
     c.own_expr(o, k.callee, ctx).try();
     c.own_args(o, k, ctx).try();
-    // A construction call (`Keeper(n: v)`, `Ok(v)`, a payload variant)
-    // copies every argument into the new value, so a live Drop place in
-    // one of them is `g = f` one node deeper — refused here, after
-    // `own_args` has had its say (a moved-out place is its refusal).
-    c.drop_copy_of_ctor(o, id, k).try();
+    // THE CTOR NOTE. A construction call's arguments are NOT read as copies
+    // of a live Drop place. `Buf(.., alloc: alloc)` and `Builder(.., alloc: a)`
+    // hand a handle to the value being built; calling that a second owner
+    // refuses the idiom this tree is written in, and three suites that are
+    // green on main go red. The prior question -- does construction MOVE its
+    // argument or copy it -- is unanswered, and the checker should not answer
+    // it by accident. `id` stays in the signature because the answer will
+    // need it.
     Ok(());
 }
 
