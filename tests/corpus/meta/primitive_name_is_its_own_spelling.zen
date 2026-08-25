@@ -1,32 +1,39 @@
-// `@meta(x: T).name` WHERE T IS A PRIMITIVE, which the two existing
-// meta tests cannot reach: both ask about a declaration the user wrote
-// — a struct, an enum, an alias, a generic instantiation — and every
-// one of those answers out of `sema_meta.zen`'s `written_decl`, which
-// looks the written name up in the module's own definitions and reads
-// the `Struct`/`Enum`/`Alias` node it finds.
+// `@meta(x: T).name` WHERE T IS A PRIMITIVE, which the three existing
+// meta tests never ask. All three ask about a declaration the user
+// wrote in the file -- a struct, an enum, an alias, a generic
+// instantiation -- and a primitive is the one written type expression
+// that looks like it has no declaration to read a name off at all.
 //
-// A PRIMITIVE HAS NO SUCH NODE. `i64` is not declared anywhere in the
-// tree; the lookup finds nothing and the answer has to come from the
-// fallback path instead, off the resolved type itself. That is a
-// second, entirely separate route to the same member, and until this
-// file nothing walked it — a fallback that answered "" or "unknown"
-// for every primitive would have left all three meta tests green.
+// IT HAS ONE, AND THAT IS THE POINT. `sema_meta.zen`'s `written_kind`
+// sends EVERY `Named` spelling through `written_decl`, which looks the
+// name up in the module's definitions -- and `std/core/num.zen` really
+// does declare `i64* = { MIN*, MAX* }`, a companion struct that exists
+// to carry the constants. So `@meta(x: i64).name` answers `i64`
+// because a struct in num.zen happens to be spelled `i64`, and nothing
+// in the tree checked that the two agree. The comment over
+// `written_kind` says the opposite in as many words -- "any other
+// spelling, `@Self`, a primitive, has no written declaration, so the
+// RESOLVED type answers" -- and a change that made the code match its
+// own comment refuses every line below, because `resolved_decl`
+// refuses a type that is not `Named`.
 //
 // THE WIDTHS ARE THE ORACLE. Every name is printed WITH ITS `.len`, as
-// `type_name_via_meta` established, and the four primitives here have
-// four different lengths (3, 4, 2, 5). So a fallback that answered
-// with the wrong prim, or with a family name — `int` for every signed
-// width, `uint` for every unsigned one — moves a length as well as a
+// `type_name_via_meta` established, and the five primitives here have
+// four different lengths (3, 4, 2, 5). So a fold that answered with the
+// wrong prim, or with a family name -- `int` for every signed width,
+// `uint` for every unsigned one -- moves a length as well as a
 // spelling, and neither `i64 3` nor `usize 5` is a shape a default
-// produces. `str` and `bool` ride along because they are the two prims
-// that are not a number and so reach the fallback by a different arm
-// of the same match.
+// produces. Routing primitives to the empty string, which is the
+// plausible wrong answer design_meta.md 6.4 names, prints ` 0` five
+// times. `str` and `bool` ride along because their companions are
+// declared in other modules again (`std.text`, the prelude), so a
+// lookup that only ever reached `std.core.num` still moves two lines.
 //
-// THE LAST LINE IS THE CONTROL. `Wrap<Wrap<i64>>` folds to `Wrap`, so
-// a fold that had quietly started answering out of the resolved type
-// FOR EVERYTHING — the very failure #768 was — still prints `Wrap`
-// here and prints a primitive's name above, and the pair together says
-// the two routes are both live.
+// THE LAST LINE IS THE CONTROL, and it is what makes the five above
+// mean something: `Wrap<Wrap<i64>>` folds to `Wrap` through the
+// ordinary user-declaration route, so a mutation that breaks only the
+// primitives leaves it standing and the diff names the half that
+// moved.
 
 Wrap<T> = {
     v: T,
