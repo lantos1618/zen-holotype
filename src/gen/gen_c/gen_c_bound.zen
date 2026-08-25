@@ -20,8 +20,12 @@
 // layout.
 
 ExprId = std.ast
-Function, Param, Access, Call, Arg = std.ast
+Function, Param, Access, Call, Arg, Impl, Member, TypeId = std.ast
 AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Ast = std.ast
+ImplId = sema.sema_id
 Vec = std.collections
 str, String = std.text
 Range = std.core
@@ -43,6 +47,7 @@ write_set_value = gen.gen_c.gen_c_widen
 declare_temp = gen.gen_c.gen_c_flow
 Site, site_of, join = gen.gen_c.gen_c_member
 Slot, slots_of = gen.gen_c.gen_c_fat
+has_body = gen.gen_c.gen_c_impl
 
 // -----------------------------------------------------------------
 // rebuilding a value at another type
@@ -239,6 +244,39 @@ arm_head = (be :: CBackend, v: str, dst: TyId, out :: String)
 // called directly and monomorphised.
 // -----------------------------------------------------------------
 
+// A BODILESS MEMBER REACHING THE FAT BRANCH IS REFUSED HERE AND NOW,
+// before any C is written. A slot is a body an impl can answer; a member
+// with no body anywhere has no symbol to dispatch to, so its slot
+// initialises NULL -- and a call through it is issue 781's crash:
+// `env.threads.sleep(10)` passed sema, passed `cc`, and died calling
+// through the zeroed field. The refusal sits in THIS lowering and not in
+// `slots_of` because every reader of a bound's shape comes through that
+// walk -- layout, display, `slot_call` -- while std's capability structs
+// are behaviour-only with bodiless members BY DESIGN; refusing in the
+// walk fired fifty-five diagnostics at std's declaration spans for a
+// program that had done nothing.
+// A BODILESS MEMBER REACHING THE FAT BRANCH IS ANSWERED OR IT IS A
+// NULL SLOT. A slot is filled by an IMPL somewhere in the program; a
+// member with a body nowhere -- bound declaration AND every impl alike
+// -- has no symbol to dispatch to, so its slot initialises NULL and a
+// call through it is issue 781's crash: `env.threads.sleep(10)` passed
+// sema, passed `cc`, and died calling through the zeroed field.
+//
+// THE GATE IS NOT `has_body` ALONE. A bound's own declarations are
+// bodiless BY DESIGN -- `Alloc.realloc`, dispatched through `Vec`'s
+// `alloc: Alloc`, is exactly that shape with `Arena.impl(Alloc, ..)`
+// behind it -- so refusing every bodiless member reported eighty-nine
+// diagnostics inside std itself. The question here is the one the crash
+// turns on: does ANYTHING answer? `bound_answered` walks the whole
+// world's impls once per refused candidate; a call that reaches it is
+// already the rare path.
+//
+// The refusal sits in THIS lowering and not in `slots_of` because every
+// reader of a bound's shape comes through that walk -- layout, display,
+// `slot_call` -- while std's capability structs are behaviour-only with
+// bodiless members BY DESIGN; refusing in the walk fired fifty-five
+// diagnostics at std's declaration spans for a program that had done
+// nothing.
 lower_fat_call* = (
     be  :: CBackend,
     id  : ExprId,
@@ -250,6 +288,10 @@ lower_fat_call* = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
+    has_body(f).match({
+        true  => Ok(()),
+        false => be.answer_or_refuse(id, rty, a.name.text, out),
+    }).try();
     slots ::= be.alloc.Vec<Slot>();
     be.slots_of(rty, slots).try();
     pick_slot(slots, a.name.text, c.args.len).match({
@@ -259,6 +301,109 @@ lower_fat_call* = (
             out
         ),
         Ok(slot) => settle_call(be, id, c, a, rty, s, slot, ctx, out),
+    })
+}
+
+// THE GATE'S TWO HALVES: does anything anywhere answer this member, and
+// if not, refuse here where the ExprId is.
+answer_or_refuse = (
+    be   :: CBackend,
+    id   : ExprId,
+    rty  : TyId,
+    name : str,
+    out  :: String
+) Res<(), AllocError> {
+    be.bound_answered(rty, name).match({
+        true  => Ok(()),
+        false => be.unsupported(
+            id,
+            "a bodiless member of a bound used as a value",
+            out
+        ),
+    })
+}
+
+// TRUE when some impl OF THIS BOUND supplies the named member with a
+// body -- the slot can be filled, whatever the receiver turns out to
+// be. FALSE when nothing does, which is the crash: the C reads a vtable
+// slot no record ever populates. The bound is matched at the impl's
+// written form (`X.impl(Bound, ..)` carries the bound as a named type
+// node); there are no orphan impls, so a whole-world walk sees
+// everything that could ever fill the slot.
+bound_answered = (be :: CBackend, rty: TyId, name: str) bool {
+    b ::= owner_name(be, rty);
+    Range(0, be.check.world.count()).find((mi) {
+        table_answered(be, mi, b, name)
+    }).match({
+        None  => false,
+        Ok(_) => true,
+    })
+}
+
+table_answered = (be :: CBackend, mi: usize, bound: str, name: str) bool {
+    be.check.world.table_at(mi).match({
+        None  => false,
+        Ok(t) => impls_answered(be, t.impls, bound, name),
+    })
+}
+
+impls_answered = (be :: CBackend, ids: Vec<ImplId>, bound: str, name: str)
+                 bool {
+    Range(0, ids.len).find((i) {
+        ids.get(i).match({
+            None  => false,
+            Ok(id) => be.one_impl(id, bound, name),
+        })
+    }).match({
+        None  => false,
+        Ok(_) => true,
+    })
+}
+
+one_impl = (be :: CBackend, id: ImplId, bound: str, name: str) bool {
+    be.check.world.impl_at(be.tree, id).match({
+        None  => false,
+        Ok(im) => impl_supplies(be.tree, im, bound, name),
+    })
+}
+
+impl_supplies = (tree: Ast, im: Impl, bound: str, name: str) bool {
+    bound_of(tree, im.bound).eq(bound).match({
+        false => false,
+        true  => supplies_body(im.members, name),
+    })
+}
+
+// The bound's name AS WRITTEN at the impl site. An impl names its bound
+// bare (`X.impl(Alloc, ..)`); a parameterised bound would carry type
+// arguments this read ignores, which is right: the slot answers the
+// NAME, whatever the arguments settle to.
+bound_of = (tree: Ast, tid: TypeId) str {
+    tree.type_at(tid).kind.match({
+        Named(n) => n.name.text,
+        _        => "",
+    })
+}
+
+supplies_body = (members: Vec<Member>, name: str) bool {
+    Range(0, members.len).find((i) {
+        members.get(i).match({
+            None  => false,
+            Ok(m) => m.kind.match({
+                Function(f) => f.name.text.eq(name) && has_body(f),
+                _           => false,
+            }),
+        })
+    }).match({
+        None  => false,
+        Ok(_) => true,
+    })
+}
+
+owner_name = (be :: CBackend, rty: TyId) str {
+    be.check.types.at(rty).match({
+        Named(n) => n.name,
+        _        => "",
     })
 }
 

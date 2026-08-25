@@ -46,6 +46,7 @@ lower_env_var = gen.gen_c.gen_c_env
 lower_console_print, is_console_print = gen.gen_c.gen_c_print
 is_defer, lower_defer = gen.gen_c.gen_c_scope
 lower_clock_read = gen.gen_c.gen_c_clock
+lower_sleep = gen.gen_c.gen_c_threads
 
 // -----------------------------------------------------------------
 // which members these are
@@ -104,6 +105,21 @@ is_env_capability = (be :: CBackend, rty: TyId, name: str) bool {
 is_clock_capability = (be :: CBackend, rty: TyId, name: str) bool {
     owner_of(be, rty).eq("Clock").match({
         true  => clock_verb(name),
+        false => be.is_threads_capability(rty, name),
+    })
+}
+
+// `Threads.sleep` IS ONE MORE LINK, the same test one receiver down,
+// and `Fs` STAYS BETWEEN Threads and Env: a receiver that is neither
+// Clock nor Threads nor Console/Stdin/Scope must still reach the file
+// questions before `Env.var`. Dropping that Fs link -- as a first cut
+// did -- dropped every `env.fs.*` site out of the chain entirely.
+// Without the Threads link itself, `env.threads.sleep(10)` fell through
+// to the fat branch and emitted a vtable call on a record no lowering
+// constructs -- a NULL slot at run time.
+is_threads_capability = (be :: CBackend, rty: TyId, name: str) bool {
+    owner_of(be, rty).eq("Threads").match({
+        true  => threads_verb(name),
         false => be.is_fs_capability(rty, name),
     })
 }
@@ -155,6 +171,10 @@ fs_verb = (name: str) bool {
 
 clock_verb = (name: str) bool {
     name.is_in(["since_start", "unix"])
+}
+
+threads_verb = (name: str) bool {
+    name.eq("sleep")
 }
 
 // -----------------------------------------------------------------
@@ -269,6 +289,25 @@ clock_verb = (
 ) Res<(), AllocError> {
     owner_of(be, rty).eq("Clock").match({
         true  => be.lower_clock_read(c, a.name.text, ret, ctx, out),
+        false => be.threads_step(id, c, a, rty, ret, aty, ctx, out),
+    })
+}
+
+// `Threads.sleep` takes one argument and answers unit — the clock's
+// shape with nothing to rebuild.
+threads_step = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    rty : TyId,
+    ret : TyId,
+    aty : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    owner_of(be, rty).eq("Threads").match({
+        true  => be.lower_sleep(c, ret, ctx, out),
         false => be.console_verb(id, c, a, rty, ret, aty, ctx, out),
     })
 }
