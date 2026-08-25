@@ -47,6 +47,7 @@ check_arena_returned, is_arena_backed = sema.sema_scope
 scope_alias = sema.sema_scope
 Pin, pin_captured, refuse_pinned, refuse_pinned_at = sema.sema_pin
 check_drop_copy = sema.sema_drop
+is_handle_ty, refuse_handle_at = sema.sema_handle
 
 // One name this frame can see, and what the ownership rules know of it.
 // `owned` ("this frame constructed the value") separates `consume
@@ -276,8 +277,8 @@ own_expr = (c :: Checker, o :: Own, id: ExprId, ctx: Ctx)
            Res<(), AllocError> {
     node = c.tree.expr_at(id);
     node.kind.match({
-        Name(n)       => c.use_name(o, node, n.text),
-        Access(a)     => c.use_access(o, node, a, ctx),
+        Name(n)       => c.use_name(o, node, id, n.text),
+        Access(a)     => c.use_access(o, node, id, a, ctx),
         Consume(x)    => c.own_consume(o, x, ctx),
         Call(k)       => c.own_call(o, id, k, ctx),
         Match(m)      => c.own_match(o, m, ctx),
@@ -332,10 +333,11 @@ opt_expr = (c :: Checker, o :: Own, e: Res<ExprId>, ctx: Ctx)
 // RULE: a place that was moved out of is dead
 // ---------------------------------------------------------------------
 
-use_name = (c :: Checker, o :: Own, node: Expr, text: str)
+use_name = (c :: Checker, o :: Own, node: Expr, id: ExprId, text: str)
            Res<(), AllocError> {
     c.check_scope_captured(o, node.span, text).try();
     c.pin_captured(o, node, text).try();
+    c.refuse_handle_captured(o, node, id, text).try();
     find_var(o, text).match({
         None  => Ok(()),
         Ok(i) => c.report_if_dead(o, node.span, i, ""),
@@ -345,14 +347,29 @@ use_name = (c :: Checker, o :: Own, node: Expr, text: str)
 // `p.left` is a place of its own; `p.right` beside it is untouched, so
 // the field is checked before the base. Reaching the base too is what
 // makes `f.id` report `f` after `consume f`.
-use_access = (c :: Checker, o :: Own, node: Expr, a: Access, ctx: Ctx)
-             Res<(), AllocError> {
+use_access = (c :: Checker, o :: Own, node: Expr, id: ExprId, a: Access,
+              ctx: Ctx) Res<(), AllocError> {
+    c.refuse_handle_captured(o, node, id, access_base_text(c, a.base)).try();
     c.path_root(o, a.base).match({
         None  => Ok(()),
         Ok(i) => c.report_if_dead(o, node.span, i, a.name.text),
     }).try();
     c.own_expr(o, a.base, ctx).try();
     Ok(());
+}
+
+// The base as WRITTEN — the text an escaping body's capture names.
+// `outer_h.next()` captures `outer_h`; only the base is the capture, so
+// only its name is asked.
+access_base_text = (c :: Checker, base: ExprId) str {
+    c.tree.expr_at(base).kind.match({
+        Name(n)  => n.text,
+        Paren(p) => c.tree.expr_at(p.inner).kind.match({
+            Name(n) => n.text,
+            _       => "",
+        }),
+        _        => "",
+    })
 }
 
 report_if_dead = (
@@ -391,7 +408,7 @@ own_consume = (c :: Checker, o :: Own, x: Consume, ctx: Ctx)
             node.span,
             SemaFault.ConsumeNotAPlace(NameFault(name: ""))
         ),
-        Name(n)   => c.consume_name(o, node, n.text),
+        Name(n)   => c.consume_name(o, x.operand, n.text),
         Access(a) => c.consume_field(o, node, a, ctx),
         _         => c.own_expr(o, x.operand, ctx),
     })
@@ -401,9 +418,10 @@ own_consume = (c :: Checker, o :: Own, x: Consume, ctx: Ctx)
 // another use of a dead name, and it reports where it is written. A
 // capture by an escaping body is the one use source order cannot see,
 // so it is asked here rather than left to `use_name`.
-consume_name = (c :: Checker, o :: Own, node: Expr, text: str)
+consume_name = (c :: Checker, o :: Own, id: ExprId, text: str)
                Res<(), AllocError> {
-    c.use_name(o, node, text).try();
+    node = c.tree.expr_at(id);
+    c.use_name(o, node, id, text).try();
     c.refuse_pinned(o, node.span, text).try();
     find_var(o, text).match({
         None  => Ok(()),
@@ -686,6 +704,33 @@ captures_scope* = (o: Own, text: str) bool {
     find_var(o, text).match({
         None  => false,
         Ok(i) => (i < o.escaped) && scoped_at(o, i),
+    })
+}
+
+// THE SAME MARK, ASKED OF A LOOP HANDLE (#807). `h` captured by an
+// escaping body is storage the loop never gave anyone: gen_c lowers the
+// capture as a plain read of the handle's name, and the name declares
+// nothing — zen silent, cc alone refusing the undeclared variable. So a
+// use inside an escaping body that names a binding whose type IS the
+// handle is refused where it is written, by the same escape-mark
+// predicate `check_scope_captured` answers from and `refuse_handle_at`
+// for its sentence. The type is typing's own memo on the NAME node —
+// this walk computes none of its own — so a read with no memo fails
+// open to UNTYPED, which no rule reads as the handle.
+//
+// The inward path stays open: a NON-escaping body leaves `escaped` at
+// zero, and `h.break(..)` / `h.next()` reach their loop through member
+// calls (`use_access`) without ever passing through here.
+refuse_handle_captured* = (c :: Checker, o :: Own, node: Expr, id: ExprId,
+                           text: str) Res<(), AllocError> {
+    find_var(o, text).match({
+        None  => Ok(()),
+        Ok(i) => ((i < o.escaped)
+                    && c.is_handle_ty(c.memo_type(id)))
+                   .match({
+                       false => Ok(()),
+                       true  => c.refuse_handle_at(id),
+                   }),
     })
 }
 
