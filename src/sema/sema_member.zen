@@ -186,9 +186,12 @@ is_type_def* = (k: DefKind) bool {
 // `value.name`
 // ---------------------------------------------------------------------
 
-// Poison and a hole have no members and no missing ones — reporting on
-// them cascades one mistake into many. SEMA_BOOTSTRAP_FIXES.md §8 records
-// twenty-three of them from four missing names on one import line.
+// A `@meta(..)` BASE IS THE EVALUATOR'S QUESTION BEFORE IT IS A MEMBER
+// READ — the same intercept `access_type` makes, one level deeper: this
+// is the CALLEE of `.fields()`, whose own `.len` reads off the fold.
+// Without it the callee falls to `ufcs_or_missing`, which hunts for a
+// free function named `fields` and reports a name error at the dot
+// instead of answering the evaluator's question.
 value_access* = (
     c    :: Checker,
     id   : ExprId,
@@ -197,6 +200,13 @@ value_access* = (
     ty   : TyId,
     ctx  : Ctx
 ) Res<TyId, AllocError> {
+    c.tree.expr_at(ac.base).kind.match({
+        Meta(_) => {
+            c.meta_access(ac, ctx).try();
+            c.meta_count_type()
+        },
+        _       => Ok(()),
+    }).try();
     c.opaque(ty).match({
         true  => c.types.unknown(),
         false => c.known_access(id, node, ac, ty, ctx),
