@@ -517,6 +517,25 @@ differential: `./zen` compiles the reproducer and prints `true`, and
 `bootstrap/` still says `unresolved name done` and then emits C that will not
 compile (`'Ok' undeclared`). The self-hosted compiler is the one that is right.
 
+> MEASURED STALE, 2026-08-25 (worktree fix779-break-type, #779 lane): the
+> self-hosted compiler no longer takes this side. On today's tree the exact
+> reproducer below is REFUSED twice over --
+>
+>     main.zen:6:9:  h.break(v) is not free to choose its type: the loop's
+>                    own T is usize, broken with bool
+>     main.zen:11:26 printing a value of this type
+>
+> -- because gen_c_shape.zen `loop_element()` settles a NO-RANGE loop's T to
+> usize before anything looks at the break. The annotated form
+> (`w: Res<i64> = loop((h){ h.break(5000001234) })`) still reaches cc and dies
+> there (`ResI1_b3i64` from `ResI1_b5usize`) -- see
+> tests/corpus/loop-break/LANE.md, "Compiler bug". What DOES work today:
+> writing the type at the loop call (`loop<i64>((h){ ... })`), and ranged /
+> fold / array-walk shapes. Until break-driven settlement lands,
+> `loop<T>(..)` is the supported spelling for a bare loop broken with a value;
+> corpus/ownership-consume/consume_breaks_with_its_value carries the worked
+> example.
+
 Because the shipped compiler is correct, the pressure to fix `bootstrap/` is
 only that `make test` runs the corpus through it — so a corpus test using the
 inferred-break shape cannot be written until it is fixed. The original report
