@@ -388,9 +388,15 @@ lower_range_impl = (
 // reachable only through the closure, and a closure infers FROM a
 // signature rather than into one. Sema hands back `Res<q>` (the
 // mangler's word for an undecided type argument); emitting that as-is
-// is how `h.break(v)` in one loop and another become one C type. A
-// range that supplies no `at` walks its own index space, so its element
-// is `usize` and the loop is `Res<usize>`.
+// is how `h.break(v)` in one loop and another become one C type.
+//
+// WHERE THE ELEMENT COMES FROM IS THE SHAPE'S OWN ANSWER. A range that
+// supplies no `at` walks its own index space, so its element is
+// `usize`. A shape that takes NO RANGE has no index space and no item:
+// there the body's `h.break(v)` arguments are the only thing in the
+// program that says what `T` is, so they are the element
+// (`broken_element`, gen_c_shape.zen) — settling `usize` for them is
+// how a negative payload read back unsigned (#784).
 lower_settled = (
     be   :: CBackend,
     id   : ExprId,
@@ -403,7 +409,10 @@ lower_settled = (
     fold : Fold,
     out  :: String
 ) Res<(), AllocError> {
-    elem    = be.check.types.prim("usize").try();
+    elem = be.loop_element(id, ctx).try().match({
+        None  => be.broken_element(id, ctx).try(),
+        Ok(t) => t,
+    });
     settled = be.settle_res(want, elem).try();
     be.lower_bounded(id, sh, one, rty, lam, ctx, settled, fold, out)
 }

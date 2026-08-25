@@ -38,6 +38,7 @@ lower_walk, settle_res, bind_element = gen.gen_c.gen_c_loop
 Shape, shape_of, loop_element, loop_fn_at = gen.gen_c.gen_c_shape
 arg_value, recv_of = gen.gen_c.gen_c_shape
 has_var = sema.sema_inst
+literal_default = sema.sema_ty
 
 // The accumulator a fold threads, nothing for the five shapes that do
 // not — one automatic local, threaded by value; see the header.
@@ -180,7 +181,7 @@ acc_slot = (sh: Shape) usize {
 // place, so the type a temporary is declared at and the type the loop
 // assigns cannot disagree.
 result_element* = (be :: CBackend, id: ExprId, ctx: Ctx)
-                 Res<TyId, AllocError> {
+                 Res<Res<TyId>, AllocError> {
     be.seed_arg(id).match({
         None  => be.loop_element(id, ctx),
         Ok(s) => be.seed_element(s, ctx),
@@ -188,9 +189,19 @@ result_element* = (be :: CBackend, id: ExprId, ctx: Ctx)
 }
 
 seed_element = (be :: CBackend, seed: ExprId, ctx: Ctx)
-               Res<TyId, AllocError> {
+               Res<Res<TyId>, AllocError> {
     unknown = be.check.types.unknown().try();
-    be.ty_of(seed, ctx, unknown)
+    t       = be.ty_of(seed, ctx, unknown).try();
+    // A LITERAL SEED STANDS AT ITS FAMILY (`0` is `int`, `0.0` is
+    // `float`), and the family reaches every integer position without
+    // being one. Minted to its default here so the loop settles at a
+    // CONCRETE payload and the break gate has a real type to hold the
+    // body's sites against.
+    settled = be.check.is_literal_ty(t).match({
+        true  => be.check.types.prim(literal_default(be.check.prim_name(t))).try(),
+        false => t,
+    });
+    Ok(Ok(settled));
 }
 
 // The seed of the one shape that has one, read off the DECLARATION the

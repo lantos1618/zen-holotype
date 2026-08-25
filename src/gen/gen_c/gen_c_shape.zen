@@ -26,7 +26,8 @@
 
 ExprId = std.ast
 Decl, Function, Param, TypeId = std.ast
-Access, Call = std.ast
+Access, Call, Span = std.ast
+inside = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -154,27 +155,135 @@ keep_loop = (be :: CBackend, f: Function) Res<Function> {
 settled_loop_type = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                     Res<TyId, AllocError> {
     elem = be.result_element(id, ctx).try();
-    be.settle_res(got, elem)
+    elem.match({
+        None  => be.settle_res(got, be.broken_element(id, ctx).try()).try(),
+        Ok(t) => be.settle_res(got, t).try(),
+    })
 }
 
-// The element the loop walks. Three of the six shapes take no range at
-// all and count an index space, so `usize` is the answer whenever there
-// is no range to ask.
+// The element the loop walks: what the range hands out, or `None` for
+// the three shapes that take no range at all — the two that would
+// count an index space, and the one with no space to count. A range
+// that supplies no `at` walks its own index space, so `usize` is the
+// answer whenever there IS a range to ask.
 loop_element* = (be :: CBackend, id: ExprId, ctx: Ctx)
-               Res<TyId, AllocError> {
+               Res<Res<TyId>, AllocError> {
     usize_ty = be.check.types.prim("usize").try();
     be.range_arg(id).match({
-        None  => Ok(usize_ty),
+        None  => Ok(None),
         Ok(r) => be.arg_element(r, ctx, usize_ty),
     })
 }
 
 arg_element = (be :: CBackend, r: ExprId, ctx: Ctx, usize_ty: TyId)
-              Res<TyId, AllocError> {
+              Res<Res<TyId>, AllocError> {
     unknown = be.check.types.unknown().try();
     rty     = be.ty_of(r, ctx, unknown).try();
     got     = be.range_element_type(rty).try();
-    Ok(got.match({ Ok(t) => t, None => usize_ty }));
+    Ok(got.match({ Ok(t) => Ok(t), None => Ok(usize_ty) }))
+}
+
+// THE PAYLOAD OF THE TWO SHAPES THAT WALK NOTHING. `loop<T> = (body:
+// (h: LoopHandle) ()) Res<T>` and its `cond` sibling have no index
+// space and no item — the body's `h.break(v)` sites are the only thing
+// in the program that says what `T` is, so the answer is read off
+// them: the arguments' types, joined. Sema never walks a lambda body,
+// so an argument stands AS WRITTEN — `-7` at the family type `int`,
+// which reaches every integer payload the way it reaches every
+// parameter position (`literal_fits`) — and the join is `assignable`,
+// the one agreement a value passes anywhere else. Settling `usize`
+// here instead is how `h.break(-7)` read back 18446744073709551609
+// (#784): the bits survived, the sign did not, and annotating the
+// result could not rescue it because the expectation lost to this
+// same default.
+//
+// NOTHING BROKE WITH A VALUE, OR THE SITES DISAGREE: the first site's
+// type stands, and a site that will not fit it is refused by the break
+// gate at emission (`break_value_fits`, gen_c_handle.zen) — one
+// mistake, one diagnostic, at the value that does not fit. `usize` is
+// the answer when no site spoke, the one every no-range loop without
+// a typed break compiled against before this question was asked.
+broken_element* = (be :: CBackend, id: ExprId, ctx: Ctx)
+                  Res<TyId, AllocError> {
+    span = be.tree.expr_at(id).span;
+    spoke = be.join_break_args(span, ctx).try();
+    spoke.match({
+        None  => be.check.types.prim("usize").try(),
+        Ok(t) => Ok(t),
+    })
+}
+
+// The join over every `h.break(v)` ADDRESSED TO THIS LOOP, or `None`
+// when no site spoke. SCAN, NOT WALK (`ast_find.zen`): the arena is
+// flat, so the sites are a filter over one list and attribution is
+// span arithmetic, not traversal. Attribution HAS to be asked per
+// site: a nested loop's body sits inside this call's span too, and
+// the `h` written there names the nested loop. A site is OURS exactly
+// when no lambda INSIDE the call contains it — its innermost
+// containing lambda is then the body lambda, the one lambda holding
+// the call without being held by it (`owned_elsewhere`, below).
+join_break_args* = (be :: CBackend, span: Span, ctx: Ctx)
+                   Res<Res<TyId>, AllocError> {
+    unknown = be.check.types.unknown().try();
+    have ::= false;
+    got  ::= unknown;
+    be.tree.exprs_each((x, ex) {
+        ex.kind.match({
+            Call(_) => inside(ex.span, span).then(() {
+                be.owned_elsewhere(ex.span, span).try().match({
+                    true  => (),
+                    false => be.break_arg_type(x, ctx).match({
+                        Err(e) => Err(e),
+                        Ok(one) => one.match({
+                            None => (),
+                            Ok(t) => have.match({
+                                false => { have = true; got = t; },
+                                true  => (),
+                            }),
+                        }),
+                    }).try(),
+                });
+            }),
+            _       => (),
+        });
+    });
+    have.match({
+        true  => Ok(Ok(got)),
+        false => Ok(None),
+    })
+}
+
+// Whether a span sits in SOME NESTED LAMBDA'S body rather than the
+// loop's own: a lambda held by the loop's span and holding the site is
+// a loop between them, and a break written there addresses THAT loop.
+owned_elsewhere* = (be :: CBackend, site: Span, span: Span) Res<bool, AllocError> {
+    taken ::= false;
+    be.tree.exprs_each((x, ex) {
+        ex.kind.match({
+            Lambda(_) => (inside(site, ex.span) && inside(ex.span, span)).then(() {
+                taken = true;
+            }),
+            _         => (),
+        });
+    });
+    Ok(!taken)
+}
+
+// What one site breaks with, or `None` for a bare `h.break()` — the
+// `None` exit says nothing about `T`.
+break_arg_type* = (be :: CBackend, x: ExprId, ctx: Ctx)
+                  Res<Res<TyId>, AllocError> {
+    unknown = be.check.types.unknown().try();
+    be.tree.expr_at(x).kind.match({
+        Call(c) => c.args.get(0).match({
+            None  => Ok(None),
+            Ok(a) => {
+                t = be.ty_of(a.value, ctx, unknown).try();
+                Ok(Ok(t));
+            },
+        }),
+        _       => Ok(None),
+    })
 }
 
 // The range a loop call was handed: the receiver of `v.loop(body)`, or
