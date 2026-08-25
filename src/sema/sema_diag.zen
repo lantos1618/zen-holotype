@@ -182,6 +182,7 @@ SemaFault* =
     | ConsumedUse(NameFault)           // a place that was moved out of
     | NeedsMutableReceiver(NameFault)  // a `::` method reached through `:`
     | ImmutableWrite(NameFault)        // a write through a `:` link of the path
+    | SnapshottedReceiver(NameFault)   // a `::` argument call aliases a by-value receiver
     | PartiallyMoved(NameFault)        // a hole reaches the drop
     | ConsumeNotAPlace(NameFault)      // an element index is not a place
     | ConsumeThroughHandle(NameFault)  // move only what this frame owns
@@ -259,6 +260,7 @@ message* = (fault: SemaFault) str {
         ConsumedUse(_)            => "use after move:",
         NeedsMutableReceiver(_)   => "the receiver is immutable:",
         ImmutableWrite(_)         => "cannot write through an immutable binding:",
+        SnapshottedReceiver(_)    => "an argument call writes the place this call's by-value receiver was copied from:",
         Rebound(_)                => "a name is bound once per block: the first binding is still live here, and `=` on it is neither a fresh binding nor a write — declare it `::=` to assign to it, or give the second one its own name",
         PartiallyMoved(_)         => "a partial move reaches the drop:",
         ConsumeNotAPlace(_)       => "cannot consume an array element: the index is a runtime value, so which element is dead is not a fact the compiler holds",
@@ -341,6 +343,11 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
             out,
             f,
             " is declared `:`, so it is set at construction and never reassigned — `::` is what permits a write"
+        ),
+        SnapshottedReceiver(f)    => write_place(
+            out,
+            f,
+            " writes the same place through a `::` method, so the write lands in the copy — hoist this call to a local, or declare the receiver `::`"
         ),
         PartiallyMoved(f)         => write_place(
             out,

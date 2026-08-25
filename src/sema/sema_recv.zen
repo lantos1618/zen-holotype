@@ -50,7 +50,7 @@ decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
 Own, var_mutable, path_root = sema.sema_own
-place_type, refuse = sema.sema_own
+place_type, refuse, root_mutable = sema.sema_own
 
 // ---------------------------------------------------------------------
 // RULE: a `::` method needs a mutable receiver
@@ -62,11 +62,22 @@ place_type, refuse = sema.sema_own
 // mistake the program does not contain.
 // ---------------------------------------------------------------------
 
+// The receiver a `::` method would write through, asked of the INDEX
+// `path_root` answered: only a binding this frame declares can be
+// aliased, and only one marked writable is written by the call.
+receiver_is_mutable_root = (c :: Checker, o :: Own, root: usize) bool {
+    root_mutable(o, root)
+}
+
 check_receiver* = (c :: Checker, o :: Own, k: Call, ctx: Ctx)
                   Res<(), AllocError> {
     c.tree.expr_at(k.callee).kind.match({
         Access(a) => c.check_method_call(o, a, ctx),
         _         => Ok(()),
+    }).try();
+    c.path_root(o, k.callee).match({
+        None  => Ok(()),
+        Ok(i) => c.check_snapshotted(o, k, i),
     })
 }
 
@@ -97,6 +108,44 @@ require_mutable = (c :: Checker, o :: Own, a: Access) Res<(), AllocError> {
             SemaFault.NeedsMutableReceiver(NameFault(name: a.name.text))
         ),
     })
+}
+
+// A by-value receiver is spilled into a temporary BEFORE any argument's
+// call runs (gen_c_call.zen: "a receiver stands before every argument"),
+// so an argument call that writes that same place through `::` writes
+// the caller's bytes and the callee reads the copy — `b.read(b.bump())`
+// reads pre-bump. One walk over the argument list: a call whose own
+// receiver is rooted at the SAME binding this call's receiver is rooted
+// at, whose method is `::`, and which is not this very call. Anything
+// else — a different root, a call-result base, a name this frame does
+// not bind — is not aliased and stays out of it.
+snapshotted = (c :: Checker, o :: Own, a: Access, root: usize) bool {
+    c.tree.expr_at(a.base).kind.match({
+        Call(k) => c.path_root(o, k.callee).match({
+            None  => false,
+            Ok(i) => c.receiver_is_mutable_root(o, i)
+                && (i == root)
+                && c.wants_mutable(c.place_type(o, k.callee), a.name.text),
+        }),
+        _ => false,
+    })
+}
+
+check_snapshotted = (c :: Checker, o :: Own, k: Call, root: usize)
+                    Res<(), AllocError> {
+    k.args.loop((h, arg) {
+        c.tree.expr_at(arg.value).kind.match({
+            Access(a) => c.snapshotted(o, a, root).match({
+                true  => c.refuse(
+                    c.tree.expr_at(arg.value).span,
+                    SemaFault.SnapshottedReceiver(NameFault(name: a.name.text))
+                ),
+                false => Ok(()),
+            }),
+            _         => Ok(()),
+        }).try()
+    });
+    Ok(());
 }
 
 // Every link, from the binding out to the receiver. A link the lookup
