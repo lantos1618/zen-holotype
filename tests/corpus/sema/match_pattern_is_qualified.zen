@@ -1,0 +1,63 @@
+// `Shape.Circle(n) =>` — a match arm whose pattern names the ENUM as
+// well as the case. `sema_match.last_segment` is the whole feature:
+// "the last segment is the name, the rest is qualification a deeper
+// path has no meaning beyond". The corpus matched only with bare
+// patterns, so nothing read a path of more than one segment and the
+// qualifier could have been taken for the case with no test noticing.
+//
+// Sema is the loud half: reading the first segment instead of the last
+// demotes every qualified arm to a binder, and the arms after it go
+// unreachable, which is a diagnostic. The backend is the quiet half —
+// `tag_cond` writes the arm's tag comparison, and a backend that did not
+// understand a path and emitted `1` for it would turn each qualified arm
+// into a wildcard with nothing to say about it. So every arm answers a
+// DIFFERENT number and every constructor is fed through: an arm that
+// stopped narrowing shows up as a repeated answer, not as an error.
+//
+// The arms are qualified in the order Square, Dot, Circle — deliberately
+// not the declaration order — so a lowering that paired arm N with case
+// N would answer the right shape of row with the wrong numbers in it.
+// `both` mixes a qualified arm with a bare one in the SAME match, which
+// is the case a rule keyed on "this match is qualified" would get wrong,
+// and `nested` puts a qualified pattern under a qualified pattern, where
+// the inner path is read against the payload's type and not the outer's.
+
+Shape = Circle(i32) | Square(i32) | Dot
+
+Cell = Full(Shape) | Blank
+
+kind = (s: Shape) i32 {
+    s.match({
+        Shape.Square(n) => 200 + n,
+        Shape.Dot       => 300,
+        Shape.Circle(n) => 100 + n,
+    })
+}
+
+both = (s: Shape) i32 {
+    s.match({
+        Circle(n)       => 1000 + n,
+        Shape.Square(n) => 2000 + n,
+        Dot             => 3000,
+    })
+}
+
+nested = (c: Cell) i32 {
+    c.match({
+        Cell.Full(Shape.Dot)       => 7,
+        Cell.Full(Shape.Circle(n)) => 10 + n,
+        Cell.Full(Shape.Square(n)) => 20 + n,
+        Cell.Blank                 => 99,
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    println("kind {} {} {}", kind(Shape.Circle(1)), kind(Shape.Square(2)), kind(Shape.Dot));
+    println("both {} {} {}", both(Shape.Circle(3)), both(Shape.Square(4)), both(Shape.Dot));
+    println("nested {} {} {} {}",
+        nested(Cell.Full(Shape.Circle(5))),
+        nested(Cell.Full(Shape.Square(6))),
+        nested(Cell.Full(Shape.Dot)),
+        nested(Cell.Blank));
+    Ok(0);
+}
