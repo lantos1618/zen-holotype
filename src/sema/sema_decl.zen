@@ -512,7 +512,7 @@ member_fn_body = (
 ) Res<(), AllocError> {
     f.body.match({
         Ok(b) => c.check_body(f, b, Ok(self_ty), m, mi),
-        None  => Ok(()),
+        None  => c.check_signature(f, Ok(self_ty), m, mi),
     })
 }
 
@@ -522,8 +522,46 @@ check_function* = (c :: Checker, f: Function, m: Module, mi: usize)
                   Res<(), AllocError> {
     f.body.match({
         Ok(b) => c.check_body(f, b, None, m, mi),
-        None  => Ok(()),
+        None  => c.check_signature(f, None, m, mi),
     })
+}
+
+// A BODILESS SIGNATURE WAS RESOLVED BY NOBODY. `check_function` and
+// `member_fn_body` both stopped at `f.body.match` with `None`, and every
+// other reader of a signature resolves it only where the function is
+// USED — `decl_fn_type` at a call, the candidate walk at an overload —
+// so a hook nobody calls had no resolved name in it at all.
+// `Env.spawn*` named `Actor` and `Ref` in `std/env/env.zen` for the
+// life of the tree, and not one diagnostic ever reached either (#810).
+//
+// THE WALK IS `check_body`'S SCOPE DISCIPLINE MINUS THE BODY: the same
+// marks, the same `enter_generics` (which is what resolves the bounds),
+// the same `body_ctx` reading the written return through the ordinary
+// queries and their memos, and `bind_params` putting the parameters in
+// scope. The ORDER differs on purpose: `body_ctx` runs LAST, so a
+// signature's own parameter can type another's or the return —
+// `(d: Rect) Rect` — where a body's return was read first because a
+// statement can always see a parameter bound before it. Nothing a body
+// owes survives here: no `block_type` (no statements), no `check_return`
+// (nothing returned), no `check_own` (nothing moves), no `settle_raised`
+// (nothing is tried).
+check_signature = (
+    c       :: Checker,
+    f       : Function,
+    self_ty : Res<TyId>,
+    m       : Module,
+    mi      : usize
+) Res<(), AllocError> {
+    smark = c.mark();
+    tmark = c.tvar_mark();
+    bmark = c.bound_mark();
+    owner = c.qualified(m, f).try();
+    c.enter_generics(f, owner, mi).try();
+    bind_params(c, f, body_ctx(c, f, mi, self_ty).try()).try();
+    c.release_bounds(bmark).try();
+    c.release_tvars(tmark).try();
+    c.release(smark).try();
+    Ok(());
 }
 
 // The scope, the type parameters and the bounds all enter here and all
