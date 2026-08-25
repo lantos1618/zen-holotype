@@ -385,6 +385,11 @@ lint:
 ## neither the grammar nor ./zen.
 fixpoint:
 	./scripts/fixpoint.sh
+	# The gate above must ASSERT staleness, not report it (#761): check
+	# proves it accepts an honest tree, mutant plants a stale seed and
+	# requires the rejection. A green fixpoint alone proves neither half.
+	sh tests/fixpoint_asserts.sh check
+	sh tests/fixpoint_asserts.sh mutant
 
 ## determinism: five checks that gen_c is a pure function of input
 determinism: build
