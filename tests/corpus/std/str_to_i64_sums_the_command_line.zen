@@ -1,0 +1,44 @@
+// tests/corpus/std/str_to_i64_sums_the_command_line.zen
+// the program that opened the gap: read integers off argv rows and sum
+// them (issue #774). The runner passes no arguments, so the env.argv leg
+// contributes nothing and the pinned 12 comes from the three rows built
+// below as a real Vec<str> — the very type Env.argv is — iterated by
+// its own arity-3 loop, exactly the shape the issue wrote. Either leg
+// failing to parse would move the total off 12.
+//
+// No import: to_i64 rides the prelude beside is_digit and digit_value,
+// which is the whole point — the first CLI anybody writes compiles.
+
+main = (env: Env) Res<i32, AllocError> {
+    a    ::= env.mem.alloc();
+    rows ::= a.Vec<str>();
+    rows.add("3").try();
+    rows.add("4").try();
+    rows.add("5").try();
+
+    total: i64 = 0;
+
+    // every row past row 0 — row 0 is the program path, never a number
+    env.argv.loop((h, i, arg) {
+        (i > 0).match({
+            true  => {
+                arg.to_i64().match({
+                    Ok(n) => { total = total + n; },
+                    None  => {},
+                });
+            },
+            false => {},
+        });
+    });
+
+    // the same question over rows built in-program
+    rows.loop((h, i, row) {
+        row.to_i64().match({
+            Ok(n) => { total = total + n; },
+            None  => {},
+        });
+    });
+
+    println("{}", total);
+    Ok(0);
+}
