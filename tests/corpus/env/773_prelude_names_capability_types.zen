@@ -1,0 +1,62 @@
+// THE PRELUDE NAMES A SIGNATURE'S EVERY WORD. Law 2: "all authority
+// flows from the Env `main` receives", and a function that touches a
+// capability says so in its signature. That signature is written in
+// types the prelude must carry — Console and Fs are Env's own fields,
+// FsError is what env.fs.read answers, Ordered is the bound v.sort()
+// demands — and none of them was a prelude name: issue #773. This
+// file imports nothing; its signatures ARE the assertion. Drop the
+// prelude lines and this file stops compiling.
+
+// one failure set for main: allocation, printing, and files all land here
+Fail = AllocError | IoError | FsError
+
+// A helper that prints takes the capability it uses, spelled Console.
+banner = (out: Console, title: str) Res<(), IoError> {
+    out.println("== {} ==", title)
+}
+
+// A helper that reads files takes Fs and answers FsError — names from
+// nowhere, because they travel with Env in the prelude. Writes then
+// reads back its own bytes, so the test depends on no file outside
+// itself.
+slurp = (fs: Fs, alloc :: Alloc) Res<String, FsError> {
+    fs.write("773_prelude_round_trip.txt", "prelude names").try();
+    fs.read(alloc, "773_prelude_round_trip.txt")
+}
+
+// sort travels with Vec, so its bound must travel too: Word orders by
+// n, strictly-before, so ties keep their input order (the sort below
+// is stable).
+Word = {
+    n: i64,
+    tag: str,
+}
+
+Word.impl(Ordered, {
+    before = (self: @Self, other: @Self) bool { self.n < other.n }
+})
+
+main = (env: Env) Res<i32, Fail> {
+    alloc ::= env.mem.alloc();
+
+    banner(env.out, "hi").try();
+
+    // bytes written by the named Fs, read back through it
+    head = slurp(env.fs, alloc).try();
+    view ::= head.view();
+    println("{}", view.slice(0, 5));
+
+    // [two, one, uno] sorts to one, uno, two — the tie keeps its order
+    words ::= alloc.Vec<Word>();
+    words.add(Word(n: 2, tag: "two")).try();
+    words.add(Word(n: 1, tag: "one")).try();
+    words.add(Word(n: 1, tag: "uno")).try();
+    words.sort().try();
+    Range(0, words.len).loop((h, k) {
+        words.get(k).match({
+            None     => (),
+            Ok(w)    => println("{} {}", w.n, w.tag),
+        });
+    });
+    Ok(0);
+}
