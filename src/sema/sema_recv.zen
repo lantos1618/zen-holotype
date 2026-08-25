@@ -65,9 +65,6 @@ place_type, refuse, root_mutable = sema.sema_own
 // The receiver a `::` method would write through, asked of the INDEX
 // `path_root` answered: only a binding this frame declares can be
 // aliased, and only one marked writable is written by the call.
-receiver_is_mutable_root = (c :: Checker, o :: Own, root: usize) bool {
-    root_mutable(o, root)
-}
 
 check_receiver* = (c :: Checker, o :: Own, k: Call, ctx: Ctx)
                   Res<(), AllocError> {
@@ -114,35 +111,40 @@ require_mutable = (c :: Checker, o :: Own, a: Access) Res<(), AllocError> {
 // call runs (gen_c_call.zen: "a receiver stands before every argument"),
 // so an argument call that writes that same place through `::` writes
 // the caller's bytes and the callee reads the copy — `b.read(b.bump())`
-// reads pre-bump. One walk over the argument list: a call whose own
-// receiver is rooted at the SAME binding this call's receiver is rooted
-// at, whose method is `::`, and which is not this very call. Anything
+// reads pre-bump. One walk over the argument list: an argument that is
+// itself a method call on the SAME binding this call's receiver is
+// rooted at, whose method is `::` (`wants_mutable` answers). Anything
 // else — a different root, a call-result base, a name this frame does
 // not bind — is not aliased and stays out of it.
-snapshotted = (c :: Checker, o :: Own, a: Access, root: usize) bool {
-    c.tree.expr_at(a.base).kind.match({
-        Call(k) => c.path_root(o, k.callee).match({
-            None  => false,
-            Ok(i) => c.receiver_is_mutable_root(o, i)
-                && (i == root)
-                && c.wants_mutable(c.place_type(o, k.callee), a.name.text),
+snapshotted = (c :: Checker, o :: Own, arg: ExprId, root: usize) bool {
+    c.tree.expr_at(arg).kind.match({
+        Call(k) => c.tree.expr_at(k.callee).kind.match({
+            Access(a) => c.path_root(o, a.base).match({
+                None  => false,
+                Ok(i) => (i == root)
+                    && c.wants_mutable(c.place_type(o, a.base), a.name.text),
+            }),
+            _         => false,
         }),
-        _ => false,
+        _       => false,
     })
 }
 
 check_snapshotted = (c :: Checker, o :: Own, k: Call, root: usize)
                     Res<(), AllocError> {
     k.args.loop((h, arg) {
-        c.tree.expr_at(arg.value).kind.match({
-            Access(a) => c.snapshotted(o, a, root).match({
-                true  => c.refuse(
-                    c.tree.expr_at(arg.value).span,
-                    SemaFault.SnapshottedReceiver(NameFault(name: a.name.text))
-                ),
-                false => Ok(()),
+        c.snapshotted(o, arg.value, root).match({
+            true  => c.tree.expr_at(arg.value).kind.match({
+                Call(snap) => c.tree.expr_at(snap.callee).kind.match({
+                    Access(a) => c.refuse(
+                        c.tree.expr_at(arg.value).span,
+                        SemaFault.SnapshottedReceiver(NameFault(name: a.name.text))
+                    ),
+                    _         => Ok(()),
+                }),
+                _          => Ok(()),
             }),
-            _         => Ok(()),
+            false => Ok(()),
         }).try()
     });
     Ok(());

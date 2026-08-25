@@ -1,0 +1,32 @@
+// A BY-VALUE RECEIVER IS SNAPSHOTTED BEFORE AN ARGUMENT THAT MUTATES IT.
+//
+// gen_c spills `read`'s receiver into a temporary BEFORE any argument
+// with a call of its own runs ("a receiver stands before every
+// argument", gen_c_call.zen) — the argument-order law, and the right
+// codegen. So `b.bump()` writes the caller's bytes while `read` reads
+// the copy taken beforehand: the print would say 1 beside a final n of
+// 10. Nothing used to say so.
+//
+// The refusal points at the ARGUMENT whose call aliases the place,
+// which is where the fix lives either way — hoist it to a local, or
+// give `read`'s receiver `::`.
+
+Box = {
+    n :: i32,
+
+    bump = (self :: @Self) i32 {
+        self.n = self.n + 10;
+        1;
+    }
+
+    read = (self: @Self, k: i32) i32 {
+        self.n + k;
+    }
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    b ::= Box(n: 0);
+    println("nested {}", b.read(b.bump()));
+    println("final n {}", b.n);
+    Ok(0);
+}
