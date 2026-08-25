@@ -1,0 +1,55 @@
+// tests/corpus/std/error_set_member_variant_arms_discriminate.zen
+// A union-of-enums error set must DISCRIMINATE on the member's own
+// variants. Under `Trouble = AllocError | ParseError`, an arm spelling a
+// leaf — `ParseError.NotANumber`, bare `NotANumber`, or `ParseError(_)`
+// — names one variant of one member, so it COMPARES; before this was
+// closed every such arm read as a binder, swallowed everything after
+// it, and the program did not compile ("unreachable match arm" against
+// arms that are plainly reachable). The same match on a plain enum has
+// always worked; this pins that sets answer identically.
+//
+// One run exercises all three spellings plus a bare member name and the
+// `_` catch-all, each printing its own line.
+
+Trouble = AllocError | ParseError
+
+ParseError = | NotANumber | TooBig
+
+pick = (b: bool) Res<i32, Trouble> {
+    b.match({
+        true  => Err(ParseError.NotANumber),
+        false => Err(ParseError.TooBig),
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    // qualified `Member.Leaf`
+    pick(true).match({
+        Ok(n)  => println("ok {}", n),
+        Err(e) => e.match({
+            ParseError.NotANumber => println("not a number"),
+            ParseError.TooBig     => println("too big"),
+            AllocError(_)         => println("out of memory"),
+            _                     => println("other"),
+        }),
+    });
+    // bare leaf
+    pick(false).match({
+        Ok(n)  => println("ok {}", n),
+        Err(e) => e.match({
+            NotANumber => println("not a number"),
+            TooBig     => println("too big"),
+            _          => println("other"),
+        }),
+    });
+    // bare member
+    pick(false).match({
+        Ok(n)   => println("ok {}", n),
+        Err(e)  => e.match({
+            AllocError => println("out of memory"),
+            ParseError => println("parse trouble"),
+            _          => println("other"),
+        }),
+    });
+    Ok(0);
+}
