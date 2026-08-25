@@ -1068,15 +1068,30 @@ write_intrinsic_call = (
     // braces and `%g`, and this file is compiled BY THE PREVIOUS
     // GENERATION of itself -- a float hole here would be refused by a
     // seed whose `writer_of` does not know `add_f64` yet. Every piece
-    // goes through `add_bytes`, which reads no format meaning.
+    // goes through `add_bytes`, which reads no format meaning. The one
+    // `fmt` keeps EMPTY holes: a named one binds the enclosing LOCAL of
+    // that name and leaves its explicit argument to be appended again
+    // by `write_rest` -- which printed the value twice and cost cc a
+    // `expected expression`.
     value ::= be.alloc.String().try();
-    value.fmt("{cast}({text})", cast, text).try();
+    value.fmt("{}({})", cast, text).try();
     bytes ::= be.alloc.String().try();
     bytes.add_bytes("(zg_str){ (unsigned char *)zg_f64_scratch, (size_t)snprintf(zg_f64_scratch, sizeof zg_f64_scratch, \"%g\", ").try();
     bytes.add_bytes(value.view()).try();
     bytes.add_bytes(") }").try();
     call ::= be.alloc.String().try();
-    be.sink_write(p, bytes.view(), call).try()
+    // THE CALL TEXT IS THE ANSWER, not a side effect: `out` arrives
+    // empty and the caller guards whatever lands in it, so a render
+    // that forgets to hand the bytes over emits `t = ;` -- which cc
+    // refuses, and which this branch shipped once.
+    wrote ::= be.sink_write(p, bytes.view(), call).try();
+    wrote.match({
+        false => Ok(false),
+        true  => {
+            out.add_bytes(call.view()).try();
+            Ok(true)
+        },
+    })
 }
 
 write_writer_call = (
