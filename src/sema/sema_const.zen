@@ -259,10 +259,24 @@ const_prim_const = (c: Checker, a: Access) Res<i64> {
     })
 }
 
+// WHAT THE FOLDER ANSWERS ABOUT A PRIMITIVE'S CONSTANTS. Two doors, by
+// member: MIN/MAX fold for INTEGERS only — their values are i64-exact;
+// a float's are not (f64.MAX exceeds i64), and those stay the prelude's
+// own declarations read where a VALUE is wanted. BITS folds for every
+// numeric primitive, integer or float: `has_prim_const` accepts it on
+// any numeric_prim (sema_static.zen), so the two routes face the same
+// names and must give the same answers (#811).
 prim_const_value = (type_name: str, member: str) Res<i64> {
     is_integer(type_name).match({
-        false => None,
         true  => named_const(type_name, member),
+        false => float_bits(type_name, member),
+    })
+}
+
+float_bits = (type_name: str, member: str) Res<i64> {
+    member.eq("BITS").match({
+        true  => bits_of(type_name),
+        false => None,
     })
 }
 
@@ -282,7 +296,7 @@ min_or_bits = (type_name: str, member: str) Res<i64> {
 
 bits_const = (type_name: str, member: str) Res<i64> {
     member.eq("BITS").match({
-        true  => Ok(bits_of(type_name)),
+        true  => bits_of(type_name),
         false => None,
     })
 }
@@ -438,23 +452,55 @@ unsigned_max_32 = (name: str) i64 {
     name.eq("u32").match({ true => 4294967295, false => I64_MAX })
 }
 
-bits_of* = (name: str) i64 {
+// A TABLE KEYED BY NAME, WITH NO GUESS AT THE END (#811). The last arm
+// is a REFUSAL — None — not 64: the folder's one caller for BITS is the
+// count position, where "not provably anything" is already this file's
+// answer and a guess mints `[u8, 64]` for a name that means nothing
+// (a renamed or new primitive would silently take i64's width). Every
+// numeric primitive names its width EXACTLY ONCE here, integers and
+// floats alike, and each row must stay equal to the same name's
+// `BITS*: usize` in `src/std/core/num.zen`;
+// tests/corpus/sema/prim_const_bits counts an array by every row of
+// BOTH routes so a one-sided edit cannot land.
+bits_of* = (name: str) Res<i64> {
     (name.eq("i8") || name.eq("u8")).match({
-        true  => 8,
+        true  => Ok(8),
         false => bits_16(name),
     })
 }
 
-bits_16 = (name: str) i64 {
+bits_16 = (name: str) Res<i64> {
     (name.eq("i16") || name.eq("u16")).match({
-        true  => 16,
+        true  => Ok(16),
         false => bits_32(name),
     })
 }
 
-bits_32 = (name: str) i64 {
+bits_32 = (name: str) Res<i64> {
     (name.eq("i32") || name.eq("u32")).match({
-        true  => 32,
-        false => 64,
+        true  => Ok(32),
+        false => bits_64(name),
     })
+}
+
+bits_64 = (name: str) Res<i64> {
+    (name.eq("i64") || name.eq("u64") || name.eq("usize")).match({
+        true  => Ok(64),
+        false => bits_float(name),
+    })
+}
+
+// THE FLOAT ROWS (#811). `has_prim_const` accepts BITS on any
+// numeric_prim, so the fold must answer the names its static half
+// already types — declining them here is what made `f32.BITS` work as a
+// value and fail as a count.
+bits_float = (name: str) Res<i64> {
+    (name.eq("f32") || name.eq("f64")).match({
+        true  => Ok(bits_width(name)),
+        false => None,
+    })
+}
+
+bits_width = (name: str) i64 {
+    name.eq("f32").match({ true => 32, false => 64 })
 }

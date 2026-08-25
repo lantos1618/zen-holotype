@@ -15,9 +15,16 @@
 //
 // EVERY WIDTH, NOT ONE. A table keyed on a type name is wrong one row at
 // a time, and a fold that answered i32's 32 for everything would still
-// be right about i32, u32 and f32 — so i8/u8, i16/u16 and i64/u64/f64
-// are all printed, signed beside unsigned, because a width is a property
-// of the storage and not of the sign.
+// be right about i32, u32 and f32 — so every integer row of
+// `std.core.num` is counted AND printed, signed beside unsigned, because
+// a width is a property of the storage and not of the sign.
+//
+// THE FLOAT ROWS ON BOTH ROUTES (#811). `has_prim_const` accepts BITS on
+// any numeric_prim, so `f32.BITS` types everywhere; but the fold's
+// `prim_const_value` gated on `is_integer` alone and declined floats, so
+// the same spelling that worked as a value was refused as a count. An
+// array counted by `f32.BITS` below is the guard: the folder must answer
+// the prelude's 32, not decline and not guess.
 //
 // usize is deliberately absent: `std.core.num` says its width is the
 // target's, not the language's, and "no corpus test may print a usize
@@ -25,34 +32,89 @@
 
 BYTES: usize = i32.BITS / 8
 
-count = (xs: [u8, 16]) i32 {
+count8 = (xs: [u8, 8]) i32 {
     n ::= 0;
     xs.loop((h, v) { n = n + v.to_i32(); });
     n;
 }
 
-byte_count = (xs: [u8, 8]) i32 {
+count16 = (xs: [u8, 16]) i32 {
+    n ::= 0;
+    xs.loop((h, v) { n = n + v.to_i32(); });
+    n;
+}
+
+count32 = (xs: [u8, 32]) i32 {
+    n ::= 0;
+    xs.loop((h, v) { n = n + v.to_i32(); });
+    n;
+}
+
+count64 = (xs: [u8, 64]) i32 {
     n ::= 0;
     xs.loop((h, v) { n = n + v.to_i32(); });
     n;
 }
 
 main = (env: Env) Res<i32, AllocError> {
-    // the fold: a count written as `i16.BITS` mints the same type
-    // `[u8, 16]` is written with, or this call does not compile
-    wide: [u8, i16.BITS] = [
+    // THE FOLD ROUTE, EVERY WIDTH THE PRELUDE DECLARES. Each array's
+    // count is whatever `bits_of` answers for the name; the initialiser
+    // is written with the digit the prelude declares, so a row edited on
+    // either side alone is a compile error, and the printed sums prove
+    // the folded counts at runtime.
+    b8:   [u8, i8.BITS]  = [1, 1, 1, 1, 1, 1, 1, 1];
+    b16:  [u8, i16.BITS] = [
         1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
     ];
-    println("wide {}", count(wide));
+    b32:  [u8, i32.BITS] = [
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    ];
+    b64:  [u8, i64.BITS] = [
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    ];
+    println("fold signed {} {} {} {}",
+        count8(b8), count16(b16), count32(b32), count64(b64));
 
-    // and a different width folds to a different count
-    narrow: [u8, u8.BITS] = [1, 1, 1, 1, 1, 1, 1, 1];
-    println("narrow {}", byte_count(narrow));
+    ub8:   [u8, u8.BITS]  = [1, 1, 1, 1, 1, 1, 1, 1];
+    ub16:  [u8, u16.BITS] = [
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    ];
+    ub32:  [u8, u32.BITS] = [
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    ];
+    ub64:  [u8, u64.BITS] = [
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    ];
+    println("fold unsigned {} {} {} {}",
+        count8(ub8), count16(ub16), count32(ub32), count64(ub64));
+
+    // THE FLOAT ROWS OF THE FOLD (#811): the same spelling that types as
+    // a value must fold to the prelude's width where a count is wanted.
+    fb32: [u8, f32.BITS] = [
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    ];
+    fb64: [u8, f64.BITS] = [
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    ];
+    println("fold float {} {}", count32(fb32), count64(fb64));
 
     // BITS in ordinary arithmetic, which is where `mem_arena` uses it
     println("bytes {}", BYTES);
 
-    // the value route, every width the prelude declares
+    // THE VALUE ROUTE, every width the prelude declares: read through
+    // the prelude declaration, not the folder
     println("signed {} {} {} {}", i8.BITS, i16.BITS, i32.BITS, i64.BITS);
     println("unsigned {} {} {} {}", u8.BITS, u16.BITS, u32.BITS, u64.BITS);
     println("float {} {}", f32.BITS, f64.BITS);
