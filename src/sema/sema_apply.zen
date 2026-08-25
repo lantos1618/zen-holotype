@@ -162,11 +162,20 @@ unify_ctor_field = (
 // the let `Opt<Var>` and gen_c mangled a free parameter into the symbol.
 // The same inference every generic call already gets (`infer_targs`,
 // `instantiated_ret`): unify the payload against the settled argument,
-// then substitute over the answer. Nothing binds — a nullary variant's
-// `(..)` is unit against no parameter, an argument sema could not type
-// says nothing — and the answer stays the bare enum, which is exactly
-// what this path answered before; the refusal for what remains free is
-// the consumers' (`has_var`), as at any other call.
+// then substitute over the answer.
+//
+// THE SUBSTITUTION RUNS OVER AN APPLIED FORM OF THE ENUM, not over `ty`.
+// `ty` is the bare head the access resolved to (`decl_as_type` interns it
+// with NO arguments), so a substitution walked over it had no `Var` to
+// reach — instrumented, the binding was made (`inst_len=1`) and thrown
+// away in the same breath, because `subst_named` answers an argumentless
+// application unchanged. The applied form is rebuilt at the declaration's
+// OWN parameters (`enum_own_vars`, the vars `tparam_vars` mints), which
+// is exactly where unification wrote: the payload resolves in the enum's
+// declaring module against those same vars, so `T := i32` lands on the id
+// the rebuild looks up. What nothing bound stays free, and the refusal
+// for what remains free is the consumers' (`has_var`), as at any other
+// call.
 //
 // The rebuilt type goes through `types.named` like `rebuilt_ctor_type`:
 // one interned id per answer, and `assignable`'s `same_applied` reads two
@@ -186,7 +195,54 @@ variant_call_type* = (
         None   => Ok(()),
         Ok(cs) => c.payload_says(call, ty, cs, ctx, inst),
     })).try();
-    c.subst(ty, inst)
+    (inst.len() == 0).match({
+        true  => Ok(ty),
+        false => c.subst(c.applied_at_own_vars(ty).try(), inst),
+    })
+}
+
+// The bare head re-applied at its declaration's own parameters: `Opt`
+// becomes `Opt<T>`, the shape a substitution can walk. An application
+// that reached here already carries its arguments; a declaration read
+// back through `decl_at` supplies them. A non-nominal answer (poison)
+// falls out as itself.
+applied_at_own_vars = (c :: Checker, ty: TyId) Res<TyId, AllocError> {
+    c.types.at(ty).match({
+        Named(n) => c.rebuilt_at_decl_vars(ty, n),
+        _        => Ok(ty),
+    })
+}
+
+rebuilt_at_decl_vars = (c :: Checker, ty: TyId, n: TyNamed)
+                       Res<TyId, AllocError> {
+    (n.args.len > 0).match({
+        true  => Ok(ty),
+        false => c.named_with_decl_vars(ty, n),
+    })
+}
+
+named_with_decl_vars = (c :: Checker, ty: TyId, n: TyNamed)
+                       Res<TyId, AllocError> {
+    decl_at(c.tree, n.decl).match({
+        None  => Ok(ty),
+        Ok(d) => {
+            owner = c.owner_of(n.decl.module.to_usize(), n.name).try();
+            vars ::= c.alloc.Vec<TyId>();
+            c.enum_tparam_vars(d, owner, vars).try();
+            c.types.named(n.decl, owner, n.name, vars)
+        },
+    })
+}
+
+// The declaration's type parameters as `Ty.Var`s. Struct or enum, in
+// declaration order — `decl_tparams_of`'s walk, reached from a `Decl`.
+enum_tparam_vars = (c :: Checker, d: Decl, owner: str, out :: Vec<TyId>)
+                   Res<(), AllocError> {
+    d.kind.match({
+        Struct(s) => c.tparam_vars(s.tparams, owner, out),
+        Enum(e)   => c.tparam_vars(e.tparams, owner, out),
+        _         => Ok(()),
+    })
 }
 
 // The payload against the first argument's settled type. A variant with
