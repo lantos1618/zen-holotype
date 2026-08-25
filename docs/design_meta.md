@@ -199,7 +199,7 @@ The sketch was: evaluator, then `@meta` READ, then `@meta` BUILD, then the consu
 
 An evaluator with no caller is a gate that cannot fail, so the instinct is to give it a caller that is not `@meta`. The obvious candidate looks perfect and is a trap.
 
-`DESIGN.md:313` makes an array's count part of its type, and `sema_type.zen` says what that costs: "The count is an EXPRESSION because it's comptime, not literal: `[u8, i32.BITS]` folds like `i32.MAX + 1`." So the language already has a position that promises comptime evaluation and is not `@meta`. It was also genuinely broken, in this tree's favourite way — **silently**:
+`DESIGN.md:313` makes an array's count part of its type, and `sema_denote.zen` says what that costs: "The count is an EXPRESSION because it's comptime, not literal: `[u8, i32.BITS]` folds like `i32.MAX + 1`." So the language already has a position that promises comptime evaluation and is not `@meta`. It was also genuinely broken, in this tree's favourite way — **silently**:
 
 ```groovy
 SIZE: usize = 4
