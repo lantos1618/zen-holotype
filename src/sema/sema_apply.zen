@@ -35,6 +35,7 @@ ImplId = sema.sema_id
 TyId, TyNamed, literal_default = sema.sema_ty
 Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
+SemaFault, NameFault = sema.sema_diag
 Inst, InstEdge, subst, unify, tparam_vars, zip = sema.sema_inst
 has_var, inst_of_named = sema.sema_inst
 Cand, TBound, Actual = sema.sema_call
@@ -178,14 +179,28 @@ variant_call_type* = (
     name : str,
     ctx  : Ctx
 ) Res<TyId, AllocError> {
-    inst  ::= c.alloc.Inst();
-    cases ::= c.alloc.Vec<Case>();
-    c.cases_of(ty, cases).try();
-    (find_case(cases, name).match({
+    // TEMP-DEBUG: report the call's name, ty id, payload id, answer id
+    dbg ::= c.alloc.String("").try();
+    dbg.fmt("DBG vct name=`{}` ty={} ", name, ty.index).try();
+    cases0 ::= c.alloc.Vec<Case>();
+    c.cases_of(ty, cases0).try();
+    find_case(cases0, name).match({
+        None  => dbg.add_bytes("payload=? ").try(),
+        Ok(cs) => dbg.fmt("payload={} hasp={} ", cs.payload.index, cs.has_payload).try(),
+    });
+    inst0 ::= c.alloc.Inst();
+    cases1 ::= c.alloc.Vec<Case>();
+    c.cases_of(ty, cases1).try();
+    (find_case(cases1, name).match({
         None   => Ok(()),
-        Ok(cs) => c.payload_says(call, ty, cs, ctx, inst),
+        Ok(cs) => c.payload_says(call, ty, cs, ctx, inst0),
     })).try();
-    c.subst(ty, inst)
+    dbg.fmt("inst_len={} ", inst0.len()).try();
+    ans = c.subst(ty, inst0).try();
+    dbg.fmt("ans={}", ans.index).try();
+    c.report(call.args_span.file, call.args_span,
+        SemaFault.UndefinedName(NameFault(name: dbg.view()))).try();
+    ans
 }
 
 // The payload against the first argument's settled type. A variant with

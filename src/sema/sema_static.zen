@@ -14,7 +14,7 @@
 // second, so the rule can't live in the shared half: refusing in
 // `variant_type` would reject every legitimate construction.
 
-Expr, ExprId, Access = std.ast
+Expr, ExprId, Access, nowhere = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -25,6 +25,7 @@ str = std.text
 TyId = sema.sema_ty
 is_integer, is_float = sema.sema_ty
 SemaFault, TypeFault = sema.sema_diag
+NameFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 Case, cases_of, find_case = sema.sema_case
 is_case = sema.sema_match
@@ -120,13 +121,20 @@ type_access = (
 // A nullary variant IS a value of the enum; one carrying a payload is
 // the function that builds one — what makes `Slot.Left(cell)` an
 // ordinary call, not a second construction form.
+// TEMP-DEBUG
 variant_type* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
     cases ::= c.alloc.Vec<Case>();
     c.cases_of(ty, cases).try();
-    find_case(cases, name).match({
+    ans = find_case(cases, name).match({
         None   => c.types.unknown(),
         Ok(cs) => c.variant_value(ty, cs),
-    })
+    }).try();
+    dbg ::= c.alloc.String("").try();
+    dbg.fmt("DBG vt name=`{}` ty={} ans={}", name, ty.index, ans.index).try();
+    poison = c.types.unknown().try();
+    pstr = dbg.view();
+    c.report(pstr, nowhere(), SemaFault.UndefinedName(NameFault(name: pstr))).try();
+    Ok(ans)
 }
 
 variant_value = (c :: Checker, ty: TyId, cs: Case) Res<TyId, AllocError> {
