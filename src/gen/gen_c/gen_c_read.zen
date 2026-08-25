@@ -30,6 +30,7 @@ DeclId, ImplId = sema.sema_id
 TyId, TyNamed = sema.sema_ty
 Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
+has_var* = sema.sema_inst
 alias_enum = sema.sema_denote
 impl_bound_type, bound_member_type = sema.sema_supply
 sym_member, sym_variant = gen.gen_name
@@ -61,7 +62,7 @@ lower_access* = (
     out  :: String
 ) Res<(), AllocError> {
     be.base_decl(a.base, ctx).match({
-        Ok(ty) => be.write_variant_value(id, ty, a.name.text, out),
+        Ok(ty) => be.write_variant_value(id, ty, want, a.name.text, out),
         None   => be.lower_type_or_field(id, a, ctx, want, out),
     })
 }
@@ -281,20 +282,67 @@ intern_named* = (be :: CBackend, d: Def) Res<TyId> {
 // A nullary variant is a value of its enum: the tag, and no payload.
 // A variant WITH a payload written as a bare access is a value that
 // has not been constructed, and sema is the one that says so.
+//
+// THE LITERAL IS SPELLED AT WHAT THE CONTEXT EXPECTED, falling back to
+// what sema answered for the ACCESS node and then to the declaration's
+// own reading. `none: Opt<i32> = Opt.None;` declares its local at the
+// annotation — `gen_c_stmt.binding_type`, the destination's type wins —
+// but this path spelled the tag literal from the DECLARATION alone
+// (`constructed`: the enum at its own free parameters), so a generic
+// enum minted `Opt<Var>` (`_q` in the mangled name) beside the
+// `Opt<i32>` slot the assignment stores into: C that names two structs
+// for one value, refused by cc. The three readings spell the same layout
+// whenever they can differ only in name; the expected type is asked
+// FIRST because it is what the value must land as.
 write_variant_value* = (
     be      :: CBackend,
     id      : ExprId,
     ty      : TyId,
+    want    : TyId,
     variant : str,
     out     :: String
 ) Res<(), AllocError> {
+    lit = be.nullary_ty(ty, want);
     qname ::= be.alloc.String().try();
-    be.enum_qname(ty, qname).try();
+    be.enum_qname(lit, qname).try();
     cty ::= be.alloc.String().try();
-    be.ctype(ty, cty).try();
+    be.ctype(lit, cty).try();
     tag ::= be.alloc.String().try();
     tag.sym_variant(qname.view(), variant).try();
     out.fmt("({}){ .zg_tag = {} }", cty.view(), tag.view())
+}
+
+// WHICH ENUM THE NULLARY LITERAL NAMES: the context's expectation when
+// it settled to an application of the same declaration (an annotation,
+// or the position a return hands down), else what sema answered for this
+// very node when that answer has a C spelling, else the declaration
+// reading the caller resolved. The three spell the same layout whenever
+// they can differ only in name; the expected type is asked FIRST because
+// it is what the value must land as. An expectation naming a DIFFERENT
+// declaration is not this access's type — the mismatch, if it is one,
+// belongs to assignability.
+// WHICH ENUM THE NULLARY LITERAL NAMES: the context's expectation when
+// it settled to an application of the same declaration (an annotation,
+// or the position a return hands down), else what sema answered for this
+// very node when that answer has a C spelling, else the declaration
+// reading the caller resolved. The three spell the same layout whenever
+// they can differ only in name; the expected type is asked FIRST because
+// it is what the value must land as. An expectation naming a DIFFERENT
+// declaration is not this access's type — the mismatch, if it is one,
+// belongs to assignability.
+nullary_ty* = (be :: CBackend, ty: TyId, want: TyId) TyId {
+    be.expected_enum(ty, want).match({
+        None  => ty,
+        Ok(t) => t,
+    })
+}
+
+expected_enum = (be :: CBackend, ty: TyId, want: TyId) Res<TyId> {
+    same = be.check.same_type(ty, want);
+    (same && be.check.has_var(want) == false).match({
+        true  => Ok(want),
+        false => None,
+    })
 }
 
 enum_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
