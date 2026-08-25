@@ -1,0 +1,69 @@
+// tests/corpus/std/pos_display_both_format_doors_agree.zen
+// ORACLE 2 for the Pos Display lane: the diagnostic prefix `file:line:col:`
+// is now ONE definition per Pos twin (`Pos.toString` in ast_span.zen and
+// lex_token.zen) reached through two different code paths in gen_c_sink.zen
+// -- the allocating door `a.String("{}", pos)` and the appending door
+// `buf.fmt("{}", pos)` (#755's subject). The property is EQUALITY plus the
+// exact bytes, because "it compiles" is satisfied by a definition that
+// writes one space or one colon differently.
+//
+// Both twins are pinned. The AST one renders five of the seven migrated
+// sites; the lex one the two in `zen fmt`, and it carries a byte OFFSET
+// that must NOT print -- an offset slices, it never speaks -- so the lex
+// half drives the REAL lexer over a real stray byte.
+scan, Source, message = std.lex.lex
+Pos = std.ast.ast_span
+Console = std.env
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    // ---- the AST twin: line 3, byte column 7, as in a real diagnostic
+    p ::= Pos(line: 3, col: 7);
+
+    // door 1: allocating. makes its own buffer.
+    via_alloc ::= a.String("{}:{}", "src/sema/sema_def.zen", p).try();
+    println("alloc [{}]", via_alloc.view());
+
+    // door 2: appending. writes into a buffer the caller holds --
+    // prefix first, exactly the shape `sema_diag.render` uses.
+    buf ::= a.String().try();
+    buf.fmt("{}:", "src/sema/sema_def.zen").try();
+    buf.fmt("{}", p).try();
+    println("append [{}]", buf.view());
+
+    // the identity: two doors, one answer
+    same ::= buf.view().eq(via_alloc.view());
+    println("same {}", same);
+    same.match({
+        false => { env.out.errorln("the two format doors disagree"); Ok(1); },
+        true  => {
+            // and the whole diagnostic line, continued on the same buffer,
+            // pinned byte for byte
+            buf.add_bytes(": expected a type").try();
+            println("diag [{}]", buf.view());
+            say_lex(a, env.out).try();
+            Ok(0);
+        },
+    })
+}
+
+// ---- the lex twin: a stray `#` at byte offset 12 of line 1. The offset
+// rides on every lex Pos and must stay silent; the printed bytes are
+// `file:line:col` and nothing else, through BOTH doors.
+say_lex = (a: Alloc, out :: Console) Res<(), AllocError> {
+    lexed = scan(a, Source(file: "bad.zen", text: "n : i32 = 1 # 2;\n")).try();
+    lexed.diags.loop((h, d) {
+        one   ::= a.String("{}:{}", d.file, d.span.start).try();
+        two   ::= a.String().try();
+        two.fmt("{}:{}", d.file, d.span.start).try();
+        agree ::= one.view().eq(two.view());
+        println("lex [{}] doors-agree {}", one.view(), agree);
+        println("lex fault [{}]", message(d.fault));
+        agree.match({
+            false => out.errorln("LEX DOORS DISAGREE"),
+            true  => (),
+        });
+    });
+    Ok(())
+}
