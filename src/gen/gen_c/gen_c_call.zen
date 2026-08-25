@@ -357,7 +357,7 @@ lower_plain_call* = (
                     Res<(), AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, name, found).try();
-    be.travelled_defs(name, recv, ctx, found).try();
+    be.travelled_defs(name, c, recv, ctx, found).try();
     be.check.resolved_call(id).match({
         Ok(d) => be.chosen_def(id, c, name, found, d, recv, ctx, out),
         None  => be.sole_def(id, c, name, found, recv, ctx, out),
@@ -368,20 +368,30 @@ lower_plain_call* = (
 // SEMA RESOLVED AGAINST. `sema_call.travelled_cands` is the other half,
 // and `first_is` below says what a narrower pool costs.
 //
-// Only a dot asks (`recv` is `None` for `f(a)`), and only a function
-// whose FIRST PARAMETER is the receiver's own type answers. Without it
-// `to_usize` — on no prelude line, a method on every integer — resolves
-// to nothing.
+// A dot asks through the receiver. The FREE FORM asks through argument
+// zero (#771): UFCS says `f(x)` and `x.f()` are one call surface, so a
+// call sema resolved through the travelled pool must find that same
+// declaration HERE — when this pool held only the dot's half, `f(x)`
+// arrived with an empty `found` and `sole_def` refused with `cannot
+// resolve`: right line, wrong pass. The gates are unchanged: only an
+// exported function whose FIRST PARAMETER takes the type joins, a
+// declaration already in the list is not added twice, and `<T>` swallows
+// nothing it did not swallow at the dot (`first_is` reads the DECLARED
+// signature, uninstantiated).
 travelled_defs = (
     be    :: CBackend,
     name  : str,
+    c     : Call,
     recv  : Res<ExprId>,
     ctx   : Ctx,
     found :: Vec<Def>
 ) Res<(), AllocError> {
     recv.match({
         Ok(r) => be.travelled_for(name, r, ctx, found),
-        None  => Ok(()),
+        None  => c.args.get(0).match({
+            None  => Ok(()),
+            Ok(a) => be.travelled_for(name, a.value, ctx, found),
+        }),
     })
 }
 
