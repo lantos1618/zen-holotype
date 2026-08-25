@@ -3,23 +3,28 @@
 //
 // The array's element type settles Res<bool>, so the loop's result is a
 // real tagged union whose payload is one byte wide. The match reads the
-// payload AS a bool in every branch -- a backend that spilled it through
-// an int-sized slot prints a number here instead of true/false, and a
-// backend that conflated "payload false" with "nothing was carried"
-// prints the None fallback's 2. Both faces are pinned: the first element
-// exercises Ok(true) without breaking, then Ok(false) breaks.
+// payload AS a bool -- a backend that spilled it through an int-sized
+// slot prints a number here instead of true/false.
+//
+// TAG AND PAYLOAD ARE PRINTED SEPARATELY, and that is the whole point of
+// the two matches. `Ok(false)` and `None` are the two states a backend
+// that conflated "payload false" with "nothing was carried" would merge,
+// and a single `bool`-valued match cannot tell them apart: every arm it
+// can take is one of two values, so the two states collide on one byte
+// of output. The tag arm answers WHICH variant arrived, the payload arm
+// answers WHAT it carried, and only the pair separates them.
 //
 // breaks this: collapsing the break's payload into a numeric slot, or
-// the tag and the payload into one word.
+// the tag and the payload into one word, or never breaking at all --
+// each of the three moves the printed pair, and no two of them agree.
 
 main = (env: Env) Res<i32, AllocError> {
     fs: [bool, 3] = [true, true, false];
     w: Res<bool>  = fs.loop((h, b) {
         (!b).then(() { h.break(b) });
     });
-    println("{}", w.match({
-        Ok(b) => b,
-        None  => 2 == 0,
-    }));
+    tag: i32      = w.match({ Ok(_) => 1, None => 2 });
+    val: bool     = w.match({ Ok(b) => b, None => true });
+    println("{} {}", tag, val);
     Ok(0);
 }
