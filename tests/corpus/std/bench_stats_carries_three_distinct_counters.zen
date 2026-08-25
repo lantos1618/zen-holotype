@@ -1,0 +1,36 @@
+// THE ONLY EXECUTABLE THING IN `std.test` IS THE SHAPE OF ITS DATA, AND
+// NOTHING IN THE TREE READS IT. `src/std/test/test.zen` declares four
+// names -- TestError, Tester, Bencher, BenchStats -- and gives exactly
+// one of them a layout that carries values a program can get wrong:
+// BenchStats, whose three u64 counters are what `build.zen` is meant to
+// compare against a Budget.
+//
+// Two defects live in that declaration and neither has a reader today.
+// FIELD ORDER: the counters are built positionally at the site that
+// measures them, so `ns_op` and `allocs_op` swapped in the declaration
+// reports a nanosecond count as an allocation count -- a budget failing
+// or passing for the wrong reason, with every number still plausible.
+// FIELD WIDTH: a counter narrowed to u32 truncates silently, and
+// bytes_op is the one that overflows first, since a bench moving five
+// gigabytes is an afternoon rather than an error.
+//
+// So the value chosen for bytes_op is deliberately above UINT32_MAX and
+// its low 32 bits are NOT the whole number: 5000000037 wraps to 705032741,
+// which is what a narrowed field prints. All three differ from each
+// other so a swap cannot land on a matching value.
+//
+// This file is not a test of an assertion. Nothing in this tree can
+// call one -- see must-fail/std/the_frameworks_expect_does_not_lower
+// and its expect_eq sibling, which pin why.
+
+Error = | Boom
+
+BenchStats = std.test
+
+main = (env: Env) Res<i32, Error> {
+    s = BenchStats(37, 2, 5000000037);
+    println("ns {}", s.ns_op);
+    println("allocs {}", s.allocs_op);
+    println("bytes {}", s.bytes_op);
+    Ok(0);
+}

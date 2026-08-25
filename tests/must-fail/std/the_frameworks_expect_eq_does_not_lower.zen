@@ -1,0 +1,42 @@
+// THE SECOND DOOR, AND IT IS A DIFFERENT DOOR. `Tester.expect_eq` is
+// the assertion an actual test writes -- `t.expect_eq(v.len, 2)` is the
+// line DESIGN.md uses to show what a test looks like -- and it is
+// refused for a reason its plain sibling is not: it is generic.
+//
+// `expect_eq* = <T: Eq>(self: @Self, a: T, b: T) Res<(), TestError>`
+// reaches gen_c's "a generic method" refusal before the empty-body one
+// ever applies, so fixing the body-less call would not open this door;
+// the two failures are independent and both have to fall before an
+// equality assertion exists. That is why they are separate files rather
+// than two calls in one -- a single file would report only whichever
+// gen_c saw first, and the other would go quiet without being fixed.
+//
+// Its declaration in test.zen is also the one carrying the tree's
+// biggest promise: the comment there says the BODY is stage 5, dumping
+// both sides field-wise through Display.dump, and `docs/design_meta.md`
+// lists `Tester.expect_eq` as one of the five consumers waiting on
+// meta. This file is the reader that notices the day that arrives.
+
+Tester, TestError = std.test
+
+Error = | Boom
+
+main = (env: Env) Res<i32, Error> {
+    alloc ::= env.mem.alloc();
+    t = Tester(
+        env: env,
+        alloc: alloc,
+        expect: (self: Tester, cond: bool) Res<(), TestError> { Ok(()) },
+        expect_eq: <T: Eq>(self: Tester, a: T, b: T) Res<(), TestError> {
+            a.eq(b).match({
+                true  => Ok(()),
+                false => Err(TestError.Failed("expect_eq(2, 3) must fail")),
+            })
+        },
+    );
+    t.expect_eq(2, 3).match({
+        Ok(_)  => println("passed"),
+        Err(e) => e.match({ Failed(why) => println("failed: {}", why) }),
+    });
+    Ok(0);
+}

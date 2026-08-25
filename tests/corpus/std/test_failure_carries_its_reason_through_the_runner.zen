@@ -1,0 +1,63 @@
+// AN ASSERTION MUST BE ABLE TO FAIL, AND ITS FAILURE MUST STILL SAY WHY
+// AFTER THE RUNNER HAS WIDENED IT. `std.test`'s own header states the
+// law -- "a Tester reporting `Failed` with no reason would be a reason
+// invented" -- and TestError is the one type it declares that carries a
+// value: `| Failed(str)`.
+//
+// The framework cannot demonstrate the law itself (its `expect` and
+// `expect_eq` do not lower; the two must-fail/std files pin that), so
+// this program does what a runner would do around it: an assertion
+// shaped like `Tester.expect` -- a bool in, `Res<(), TestError>` out --
+// and a runner whose own error set is WIDER than a test's, reached with
+// `.try()`.
+//
+// That widening is where the reason is at risk. `Harness` is a set of
+// two, so `TestError` crosses it as a member of a payload union, copied
+// by the memcpy in gen_c_try.zen's write_payload_copy; a widening that
+// carried the tag and not the bytes still reports a failure, still
+// exits the same way, and prints a reason nobody wrote.
+//
+// BOTH DIRECTIONS ARE HERE, IN ORDER, AND THEY MUST DIFFER. An
+// assertion that reported `pass` for 2 and 3 is the worst defect this
+// file can have, and an assertion that reported `fail` for 2 and 2 is
+// the same defect wearing the other sign -- so the equal call runs
+// first and its line is part of the expectation.
+
+TestError = std.test
+
+// A runner has more than one way to stop; a test has one.
+Halted  = | OutOfTime
+Harness = TestError | Halted
+
+// Shaped like `Tester.expect`: the condition decides, and the reason
+// travels with the failure rather than being invented at the report.
+expect = (cond: bool, why: str) Res<(), TestError> {
+    cond.match({
+        true  => Ok(()),
+        false => Err(TestError.Failed(why)),
+    })
+}
+
+// The runner's frame: a test's error widens into the harness's set.
+run = (a: i32, b: i32) Res<(), Harness> {
+    expect(a == b, "the two operands disagree").try();
+    Ok(());
+}
+
+report = (r: Res<(), Harness>) () {
+    r.match({
+        Ok(_)  => println("pass"),
+        Err(e) => e.match({
+            TestError(t) => t.match({
+                Failed(why) => println("fail: {}", why),
+            }),
+            Halted(_)    => println("halted"),
+        }),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    report(run(2, 2));
+    report(run(2, 3));
+    Ok(0);
+}
