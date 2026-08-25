@@ -167,24 +167,15 @@ overflow = (c :: Checker, b: Binary, name: str) Res<(), AllocError> {
 // family, not the value, so `n: i32 = 2147483648` wrapped at codegen
 // (same bug as `i32.MAX + 1` one fold earlier).
 //
-// Walks every form the prover folds — literal, paren, unary minus,
-// `i32.MAX`-style constants, arithmetic on those (`const_int`, one
-// budgeted walk up) — because a value that wraps is a wrong answer
-// wherever the compiler can see it, not only where it is spelled with
-// digits: `SUM: i32 = 3000000000 + 234` types as `int`, so
-// `check_binary` had no integer type to judge, and the wrap was silent.
+// Walks only forms that wrap a literal without changing it — parens and
+// the unary minus that makes `-1` one literal — never a folded
+// expression: `x: u8 = 200 + 100` is already `ProvenOverflow` at the
+// operator, and reporting here too would double the diagnostic.
 //
-// Unfoldable is not rejected: `-9223372036854775808` exceeds the `i64`
-// this file folds in, so `parse_i64` abstains, keeping `i64.MIN` legal
-// per `corpus/lex/number_type_boundaries`; `value_beyond` below answers
-// the one question an abstention still can — what fits NOTHING but the
-// widest types.
-//
-// A CONCRETE LEAF DECLINES THE WALK. Where any leaf is typed wider than
-// a literal — `x + 1` on an `i32` — the expression is that type, so its
-// own operator already ran `check_binary` at it and judging the whole
-// against the context would double-report or mis-blame. Only a chain
-// that still types as `int` reaches the range question here.
+// Unfoldable is not rejected: `18446744073709551615` and
+// `-9223372036854775808` exceed the `i64` this file folds in, so
+// `parse_i64` abstains, keeping `u64.MAX`/`i64.MIN` legal per
+// `corpus/lex/number_type_boundaries`.
 //
 // Eight call sites reach this, not just `check_assign`: `sema_place`,
 // `sema_call`, `sema_hoist` (return/ctor field), `sema_type` (array
@@ -304,7 +295,7 @@ arm_literals = (c :: Checker, m: Match, want: TyId) Res<(), AllocError> {
 folded_within = (c :: Checker, id: ExprId, node: Expr, want: TyId)
                 Res<(), AllocError> {
     c.literal_int(node).match({
-        None  => c.value_beyond(id, node, want),
+        None  => Ok(()),
         Ok(v) => c.value_within(id, want, v),
     })
 }
@@ -314,48 +305,6 @@ value_within = (c :: Checker, id: ExprId, want: TyId, v: i64)
     fits(v, c.prim_name(want)).match({
         true  => Ok(()),
         false => c.out_of_range(id, want),
-    })
-}
-
-// What an abstention still answers. `literal_int` folds in i64 and says
-// nothing past it — that is how u64.MAX stays writable — but a value
-// the folder cannot see is also a value NO signed or narrow type can
-// hold, so against anything but the two widest names the answer was
-// already decided. `WIDE: i64 = 18446744073709551615` printed -1 with
-// no diagnostic; this is where it stops being silence.
-//
-// A leaf typed wider than a literal means the expression is not the
-// literal's own `int` any more — its operator already judged it — so
-// the question is only asked while every leaf folds. The report is
-// `out_of_range`'s own: the position is the whole expression, which is
-// what has to shrink, and nothing is quoted for the same reason `-1`
-// quotes nothing.
-value_beyond = (c :: Checker, id: ExprId, node: Expr, want: TyId)
-               Res<(), AllocError> {
-    (is_widest(c.prim_name(want)) || (c.concrete_leaf(node))).match({
-        true  => Ok(()),
-        false => c.out_of_range(id, want),
-    })
-}
-
-// The two types more values than i64 can name. usize rides along: same
-// width as u64 on every target this compiler emits for.
-is_widest = (name: str) bool {
-    name.eq("u64") || name.eq("usize")
-}
-
-// Whether any leaf of the expression is typed wider than a literal:
-// a name read through its binding, a call, anything `type_of` answers
-// with something other than the literal's own family. A memo hit at
-// every inner node — typing ran first, everywhere this reaches.
-concrete_leaf = (c :: Checker, node: Expr) bool {
-    node.kind.match({
-        Literal(_) => false,
-        Paren(p)   => c.concrete_leaf(c.tree.expr_at(p.inner)),
-        Binary(b)  => (c.concrete_leaf(c.tree.expr_at(b.lhs))) ||
-                      (c.concrete_leaf(c.tree.expr_at(b.rhs))),
-        Unary(u)   => c.concrete_leaf(c.tree.expr_at(u.operand)),
-        _          => true,
     })
 }
 
@@ -386,32 +335,14 @@ written_literal = (c: Checker, node: Expr) str {
     })
 }
 
-// Unlike `const_int`, stops at the literal's own forms when a leaf is
-// typed — `x + 1` is judged by its own operator, not by this context —
-// which is what `concrete_leaf` gates below. A chain of literals and
-// constants walks as far as the prover does.
+// Unlike `const_int`, walks only literal, paren and unary-minus forms —
+// recursion bounded by the parser's own nesting limit.
 literal_int = (c: Checker, node: Expr) Res<i64> {
     node.kind.match({
         Literal(l) => const_literal(l),
         Paren(p)   => c.literal_int(c.tree.expr_at(p.inner)),
         Unary(u)   => c.literal_neg(u),
-        Binary(b)  => c.literal_binary(b),
-        Access(a)  => c.const_prim_const(a),
         _          => None,
-    })
-}
-
-literal_binary = (c: Checker, b: Binary) Res<i64> {
-    c.literal_int(c.tree.expr_at(b.lhs)).match({
-        None  => None,
-        Ok(x) => c.literal_rhs(b, x),
-    })
-}
-
-literal_rhs = (c: Checker, b: Binary, x: i64) Res<i64> {
-    c.literal_int(c.tree.expr_at(b.rhs)).match({
-        None  => None,
-        Ok(y) => fold(b.op, x, y),
     })
 }
 
