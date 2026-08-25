@@ -1,0 +1,111 @@
+// tests/corpus/string-basic/str_search_members_edge_cases/main.zen
+// issue #776's members the CSV program does not reach. str_find_split_trim_
+// serve_a_csv walks find/split/trim/trim_start through a file; THIS test
+// pins the rest of the surface the issue names, each against an edge the
+// obvious call gets wrong:
+//
+//   find/rfind    leftmost vs rightmost 'n' in "banana" are DIFFERENT
+//                 indices (2 and 4) -- an rfind that walks forward answers
+//                 2, a find that walks backward answers 4, and either bug
+//                 flips a line below.
+//   miss          None is data, not a trap: no ',' in the haystack.
+//   contains      true for a byte that is there ('a'), false for one that
+//                 is not ('x') -- the question without caring where.
+//   starts_with   the length gate first: "nab" has the bytes but the
+//                 wrong ORDER, "banana" is longer than "ban" -- prefix,
+//                 not equality.
+//   ends_with     suffix symmetry: "ana" yes, "nan" no -- "nan" IS a
+//                 substring ending at index 4, so a contains-in-disguise
+//                 answers true here and is wrong.
+//   trim family   "  a b  ": trim keeps the INNER space (len 3, still
+//                 prefixed by a and suffixed by b); trim_start and
+//                 trim_end each take off only their own end (len 5);
+//                 all-space input answers None, not "".
+//   eq_ignore_case folds byte-by-byte with byte.to_lower: "MiXeD" ==
+//                 "mixed", while "abc"/"abcd" die on LENGTH before any
+//                 byte is read.
+//   split edges   "a\n\nb" over '\n' is THREE pieces with an EMPTY middle
+//                 one; "end" with no terminator is ONE piece -- a missing
+//                 separator is not a lost tail.
+//
+// Everything borrows literals; nothing allocates, matching law 1 for the
+// whole family.
+
+FsError = std.env
+
+main = (env: Env) Res<i32, FsError> {
+    hay ::= "banana";
+
+    hay.find('n').match({
+        Ok(i) => { println("find: Ok({})", i); },
+        None  => { println("find: None"); },
+    });
+    hay.rfind('n').match({
+        Ok(i) => { println("rfind: Ok({})", i); },
+        None  => { println("rfind: None"); },
+    });
+    hay.find(',').match({
+        Ok(i) => { println("miss: Ok({})", i); },
+        None  => { println("miss: None"); },
+    });
+
+    println("contains: {} {}", hay.contains('a'), hay.contains('x'));
+    println("starts: {} {}", hay.starts_with("ban"), hay.starts_with("nab"));
+    println("ends: {} {}", hay.ends_with("ana"), hay.ends_with("nan"));
+
+    pad ::= "  a b  ";
+    pad.trim().match({
+        Ok(t) => {
+            println(
+                "trim: len={} a={} b={}",
+                t.len,
+                t.starts_with("a"),
+                t.ends_with("b")
+            );
+        },
+        None  => { println("trim: None"); },
+    });
+    pad.trim_start().match({
+        Ok(t) => { println("trim_start: len={}", t.len); },
+        None  => { println("trim_start: None"); },
+    });
+    pad.trim_end().match({
+        Ok(t) => { println("trim_end: len={}", t.len); },
+        None  => { println("trim_end: None"); },
+    });
+
+    "   ".trim().match({
+        Ok(t) => { println("blank: len={}", t.len); },
+        None  => { println("blank: None"); },
+    });
+
+    println(
+        "eq_ic: {} {}",
+        "MiXeD".eq_ignore_case("mixed"),
+        "abc".eq_ignore_case("abcd")
+    );
+
+    rows ::= 0;
+    p0   ::= false;
+    p1   ::= false;
+    p2   ::= false;
+    "a\n\nb".split('\n').loop((h, i, piece) {
+        (i == 0).match({ true => { p0 = piece == "a"; },  false => {} });
+        (i == 1).match({ true => { p1 = piece == ""; },   false => {} });
+        (i == 2).match({ true => { p2 = piece == "b"; },  false => {} });
+        rows = rows + 1;
+    });
+    println("pieces: {}", rows);
+    println("p0/p1/p2: {} {} {}", p0, p1, p2);
+
+    tails       ::= 0;
+    last_is_end ::= false;
+    "end".split('\n').loop((h, i, piece) {
+        tails       = tails + 1;
+        last_is_end = piece == "end";
+    });
+    println("tail_pieces: {}", tails);
+    println("tail_p0_is_end: {}", last_is_end);
+
+    Ok(0);
+}

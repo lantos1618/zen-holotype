@@ -10,6 +10,7 @@
 
 Ptr = std.mem.mem
 Eq, Hash, Hasher = std.core.core
+Range, loop, to_lower = std.core.core
 
 str* = {
     data: Ptr<u8>,
@@ -43,11 +44,222 @@ str* = {
         tail = self.len - to;
         str(data: self.data.offset(from), len: self.len - from - tail);
     }
+
+    // the first byte equal to `needle`, left to right, answered as an
+    // index INTO self — the caller slices around it. A BYTE question over
+    // bytes: finding a codepoint is a walk over these (text_utf8's), not
+    // a second search. Res because not-there is input, not a bug; the
+    // typed binding is load-bearing — an untyped `None` leaves T to the
+    // assignments, and there may be none.
+    find* = (self: @Self, needle: u8) Res<usize> {
+        hit: Res<usize> = None;
+        Range(0, self.len).loop((h, i) {
+            (self.data.read(i) == needle).match({
+                true  => { hit = Ok(i); h.break(0); },
+                false => {},
+            });
+        });
+        hit;
+    }
+
+    // the LAST byte equal to needle, walked from the far end so the
+    // answer is the first one met — a suffix question ("extension",
+    // "last field") pays one walk, not a find plus a rescan. Same
+    // contract as find: an index into self, or None.
+    rfind* = (self: @Self, needle: u8) Res<usize> {
+        hit: Res<usize> = None;
+        at ::= self.len;
+        loop(() { at > 0 }, (h) {
+            at = at - 1;
+            (self.data.read(at) == needle).match({
+                true  => { hit = Ok(at); h.break(0); },
+                false => {},
+            });
+        });
+        hit;
+    }
 }
 
 // the only way to build a str outside this module: `data` carries no star,
 // so a raw pointer never reaches the surface. String.view borrows through it
 str_at* = (data: Ptr<u8>, len: usize) str { str(data: data, len: len) }
+
+// ---------------------------------------------------------------------
+// the questions that answer about the WHOLE self. Free functions beside
+// the type for the reason `before` is: UFCS makes them read as methods
+// (`"a,b".contains(',')`), and a type travels with the UFCS functions
+// whose first parameter it is, so every holder of a str has them.
+// Nothing here allocates and nothing takes an Alloc — law 1 puts them
+// all on str, where the issue asks for them.
+// ---------------------------------------------------------------------
+
+// does any byte of self equal needle. find's question without caring
+// where the answer is
+contains* = (self: str, needle: u8) bool {
+    self.find(needle).match({
+        Ok(_) => true,
+        None  => false,
+    });
+}
+
+// do other's bytes appear in self starting at `from`? The shared walk
+// under starts_with and ends_with — both are "compare at an offset",
+// and writing the offset twice is how the two drift. The lengths were
+// checked by the caller; this walk reads only what both sides have.
+matches_at = (self: str, from: usize, other: str) bool {
+    hit ::= true;
+    Range(0, other.len).loop((h, i) {
+        (self.data.read(from + i) != other.data.read(i)).match({
+            true  => { hit = false; h.break(); },
+            false => {},
+        });
+    });
+    hit;
+}
+
+// prefix and suffix. The LENGTH decides before any byte does, so an
+// empty needle is the prefix (and suffix) of everything — vacuously
+// true is the honest answer, and eq already agrees with it.
+starts_with* = (self: str, head: str) bool {
+    (self.len >= head.len).match({
+        false => false,
+        true  => self.matches_at(0, head),
+    });
+}
+
+ends_with* = (self: str, tail: str) bool {
+    (self.len >= tail.len).match({
+        false => false,
+        true  => self.matches_at(self.len - tail.len, tail),
+    });
+}
+
+// self without its leading and trailing whitespace, or None when
+// nothing is left. None rather than "" so a caller cannot forget to
+// look: a blank line and an absent row stay different answers, which is
+// the whole game in line-oriented reading.
+//
+// Whitespace is byte.is_space's set — the lexer's floor — not a second
+// list maintained here. ASCII-only by that set's own contract; a
+// codepoint-space question belongs to text_utf8.
+trim* = (self: str) Res<str> {
+    self.trim_start().match({
+        Ok(head) => head.trim_end(),
+        None     => None,
+    });
+}
+
+trim_start* = (self: str) Res<str> {
+    hit: Res<str> = None;
+    Range(0, self.len).loop((h, i) {
+        (self.data.read(i).is_space()).match({
+            false => { hit = Ok(self.slice(i, self.len)); h.break(0); },
+            true  => {},
+        });
+    });
+    hit;
+}
+
+// the backward twin: walk down from the end, stop above the last space.
+// An all-space self falls out of the walk with keep at 0 and answers
+// None, the same answer trim_start gives the mirror image
+trim_end* = (self: str) Res<str> {
+    hit: Res<str> = None;
+    keep ::= self.len;
+    loop(() { keep > 0 }, (h) {
+        keep = keep - 1;
+        (self.data.read(keep).is_space()).match({
+            false => { hit = Ok(self.slice(0, keep + 1)); h.break(0); },
+            true  => {},
+        });
+    });
+    hit;
+}
+
+// equality with the CASE taken off each byte, ASCII-only — to_lower is
+// byte.zen's floor, not a second fold table here. Length decides first,
+// for the reason eq's own impl gives: a prefix is not the whole.
+eq_ignore_case* = (self: str, other: str) bool {
+    (self.len == other.len).match({
+        false => false,
+        true  => self.same_folded(other),
+    });
+}
+
+same_folded = (self: str, other: str) bool {
+    hit ::= true;
+    Range(0, other.len).loop((h, i) {
+        (self.data.read(i).to_lower() != other.data.read(i).to_lower())
+            .match({
+                true  => { hit = false; h.break(); },
+                false => {},
+            });
+    });
+    hit;
+}
+
+// ---------------------------------------------------------------------
+// splitting. A str IS a walk of its '\n'-pieces — not a Vec of them, a
+// WALK: split hands back a Split cursor and the loop family walks it,
+// so a line-oriented reader never allocates to read lines (law 1: no
+// Alloc anywhere below). Pieces follow the separator, never NUL and
+// never a codepoint boundary: str is bytes.
+//
+// A missing terminator is not a lost tail: the walk closes the last
+// piece at the END of the bytes, so "cherry, 7" with no trailing
+// newline is still a row. A SEPARATOR with nothing after it does yield
+// a final empty piece — "a\n" is two pieces — and a blank line between
+// two separators is a piece of its own; what a caller does with an
+// empty piece is trim's None to answer, not this walk's business.
+// ---------------------------------------------------------------------
+
+Split* = {
+    bytes*: str,
+    sep*: u8,
+}
+
+// the k-th piece: walk the bytes once, count separators, and the piece
+// boundaries land where they land. `from` trails the count; the piece
+// closes at a separator OR at the end of the bytes, whichever comes
+// first. Past the last piece is None — the loop's own signal to stop.
+//
+// get, not index: the extra position i == len is the closer, and get
+// answers None there instead of trapping. That None is DATA here — the
+// one piece-end no separator announces.
+piece_at = (s: str, sep: u8, k: usize) Res<str> {
+    from ::= 0;
+    n    ::= 0;
+    answer: Res<str> = None;
+    Range(0, s.len + 1).loop((h, i) {
+        edge ::= false;
+        s.get(i).match({
+            None  => { edge = true; },
+            Ok(b) => (b == sep).match({
+                true  => { edge = true; },
+                false => {},
+            }),
+        });
+        edge.match({
+            true  => (n == k).match({
+                true  => { answer = Ok(s.slice(from, i)); h.break(0); },
+                false => { from = i + 1; n = n + 1; },
+            }),
+            false => {},
+        });
+    });
+    answer;
+}
+
+Split.impl(Range<str>, {
+    start: 0,
+    end: self.bytes.len,
+
+    at ::= (self: @Self, index: usize) Res<str> {
+        piece_at(self.bytes, self.sep, index)
+    }
+})
+
+split* = (self: str, sep: u8) Split { Split(bytes: self, sep: sep) }
 
 // FNV's basis and prime. Zen has no bitwise operators, so this is FNV-1a's
 // shape with a wrapping add where the xor would be
