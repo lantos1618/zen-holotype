@@ -73,7 +73,7 @@ seed: build
 	./zen build $(ROOT) --emit-c -o seed/zen.c
 	git add seed/zen.c
 
-## test: the corpus and must-fail suites, against the built ./zen.
+## test: the corpus, must-fail and example suites, against the built ./zen.
 ##
 ## It depends on `build` because there is no second implementation any more:
 ## the Python bootstrapper was deleted once `--toolchain zen` carried the whole
@@ -323,13 +323,16 @@ scope:
 design: grammar
 	$(PY) scripts/design_examples.py
 
-## parse: every .zen the tree claims is valid must parse. cheap, and it
-## is the only thing standing behind example/ and tests/bench -- nothing
-## else compiles either one. example/ is written against stage 5;
-## tests/bench holds the bench bodies, which no target builds (bench.py
-## builds the DRIVERS that mirror them) and bench_budgets.zen, which is
-## read by a regex. must-fail/ and tests/parse/errors are excluded on
-## purpose: those files exist to NOT parse, and grammar-test owns them.
+## parse: every .zen the tree claims is valid must parse. cheap, and for
+## most of this tree's life it was the ONLY thing standing behind
+## example/ and tests/bench -- nothing compiled either one. Both are
+## compiled now: `tests/run.py` collects example/src as its third suite
+## (deferred at stage 5, and red the day it stops being), and bench.py
+## compiles the bench files because each driver imports the body it
+## measures. bench_budgets.zen is still read by a regex and this is
+## still the only gate over it. must-fail/ and tests/parse/errors are
+## excluded on purpose: those files exist to NOT parse, and grammar-test
+## owns them.
 ##
 ## THE FILE COUNT IS ASSERTED. A find that matches nothing leaves xargs
 ## with no work and exits 0, which is this repo's own recorded shape for
@@ -457,10 +460,12 @@ bench-allocs: build
 	$(PY) scripts/bench.py --allocs-only
 
 ## bench: the same drivers with the wall clock as well, against the ns_op
-## budgets and the rolling median in tests/bench/baseline.json. Drivers
-## under tests/bench/drivers/ mirror the bench bodies (constructing a
-## Bencher needs trait dispatch gen_c does not have yet) and are timed
-## whole-process minus the null driver's floor. THE CLOCK IS WHAT KEEPS
+## budgets and the rolling median in tests/bench/baseline.json. A driver
+## exists at all because constructing a Bencher needs trait dispatch
+## gen_c does not have yet; it IMPORTS the bench body rather than
+## restating it (bench.py's `verify_shared_body`, which replaced four
+## hand-mirrored copies nothing compared) and is timed whole-process
+## minus the null driver's floor. THE CLOCK IS WHAT KEEPS
 ## THIS OUT OF `test`, not the drivers: wall clocks are slow and noisy,
 ## and a gate that reddens on a loaded machine teaches people to read
 ## past red. Over budget warns; only an absurd miss fails.

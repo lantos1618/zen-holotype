@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""tests/run.py -- the corpus and must-fail gate.
+"""tests/run.py -- the corpus, must-fail and example gate.
 
-Compiles every program under tests/corpus/ and tests/must-fail/ and checks it
-against its recorded expectations. The format is specified in docs/TESTING.md
-("The test file format"); this runner reads only that.
+Compiles every program under tests/corpus/, tests/must-fail/ and example/ and
+checks it against its recorded expectations. The format is specified in
+docs/TESTING.md ("The test file format"); this runner reads only that.
+
+example/ is the third suite and the newest: it is the tree's worked example,
+it lives at the repo root rather than under tests/, and until 2026-08-25 no
+gate ever handed it to the compiler. See EXAMPLE below.
 
     0   every selected test passed
     1   a test failed -- the compiler is wrong, or the test is
@@ -19,6 +23,7 @@ Usage:
     tests/run.py                          # everything, via ./zen
     tests/run.py --list                   # names only, no compiler needed
     tests/run.py --filter 'corpus/lex/*'  # a glob over the test id
+    tests/run.py --filter 'example/*'     # just the worked example
     tests/run.py --jobs 8
     tests/run.py --zen build/zen          # some other build of the compiler
 """
@@ -46,6 +51,47 @@ REPO_ROOT = TESTS_DIR.parent
 
 CORPUS = "corpus"
 MUST_FAIL = "must-fail"
+
+# THE THIRD SUITE, AND IT DOES NOT LIVE UNDER tests/. `example/` is the
+# tree's worked example -- DESIGN.md's own program, the one a newcomer reads
+# -- and until 2026-08-25 NOTHING COMPILED IT. Every gate that touched it was
+# lexical: `parse`, `grammar-test`, `lextile` and `fmt` read the bytes and
+# never handed them to the compiler, and there was not one `.expected` file
+# anywhere in the directory.
+#
+# That gap has already cost something real. Compiling example/ is how the
+# lambda-body hole was found: the same two statements produce two diagnostics
+# at statement level and ZERO inside a `.loop` or `.then` body, which means
+# `cc` was the type checker for lambda bodies. Nothing in this repository
+# compiled the file that showed it.
+#
+# It is collected exactly like a corpus test -- same directory shape, same
+# `.expected`, `.exit`, `.stage` sidecars, same compile/link/run/compare --
+# because a second mechanism for "run a program and check its output" is a
+# second mechanism to go stale. The only difference is where the root is.
+#
+# WHAT `example/src/.expected` IS, EXACTLY, because reading it wrong would
+# be worse than not having it: it is a SPECIFICATION written in advance, not
+# a recorded measurement. example/src is stage 5 -- it names `std.actor` and
+# `pkg.*`, neither of which exists -- so it does not compile today and its
+# `.stage` defers it. Everything in that file down to `sent all three` follows
+# from main.zen line by line; the lines BELOW it are the actor turns, and
+# main.zen's own comments say only that the prints "happen later, on foo's
+# turn, in send order", which does not pin their interleaving with main's.
+# Whoever lands stage 5 will see the difference as a diff and is the one who
+# gets to rule on it -- and cannot delete the `.stage` without doing so,
+# because a deferred test that passes is a failure here (`stage_verdict`).
+EXAMPLE = "example"
+
+# A .zen under example/ that is NOT a program, with the reason. Ratchets both
+# ways, like scripts/UNWIRED.txt: a name here that no longer exists is an
+# error, so the exemption cannot outlive the file it excuses.
+#
+# `build.zen` declares `build = (b :: Builder) Res<(), BuildError>` and has no
+# `main`. It is a build FILE -- there is nothing to link and nothing to run,
+# so there is no stdout for an `.expected` to hold. `make parse` and `make
+# fmt` are what stand behind it.
+EXAMPLE_NOT_PROGRAMS = {"build.zen": "a build file: it declares `build`, not `main`"}
 
 # `.expected` at a directory root is the spelling TESTING.md's multi-file
 # paragraph reads most naturally, and the one the modules suite used. The two
@@ -304,6 +350,14 @@ def collect(tests_dir: Path, into: Collection, kind: str) -> None:
             into.problems.append(f"{d}: unreadable ({exc})")
             return
         for child in children:
+            # A SYMLINK IS NOT A TEST. `example/std` points at src/std, which
+            # is the prelude every test already stands on -- descending it
+            # would report all ~200 std files as uncollected and stage the
+            # library twice. No suite has ever held a real symlinked test.
+            if child.is_symlink():
+                continue
+            if kind == EXAMPLE and child.name in EXAMPLE_NOT_PROGRAMS:
+                continue
             if child.is_dir():
                 entry = _dir_entry(child)
                 expected = _first_existing(child, DIR_EXPECTED_NAMES, child.name)
@@ -372,6 +426,18 @@ def discover(tests_dir: Path) -> Collection:
     found = Collection()
     collect(tests_dir, found, CORPUS)
     collect(tests_dir, found, MUST_FAIL)
+    # example/ hangs off the REPO root, not tests/, so it is passed the
+    # repository rather than `tests_dir`. Everything downstream of collection
+    # treats it as a corpus test.
+    collect(REPO_ROOT, found, EXAMPLE)
+    for name, reason in sorted(EXAMPLE_NOT_PROGRAMS.items()):
+        if not (REPO_ROOT / EXAMPLE / name).is_file():
+            found.problems.append(
+                f"example/{name} is exempted in EXAMPLE_NOT_PROGRAMS"
+                f" ({reason}) and does not exist. Delete the line -- an"
+                " exemption that outlives its file is an exemption nobody"
+                " re-read."
+            )
     found.tests.sort(key=lambda t: t.tid)
     found.uncollected.sort()
     return found
@@ -920,7 +986,7 @@ def stage_verdict(result: Result, current: int) -> tuple[Result, bool]:
 def run_one(test: Test, tool: Toolchain, workroot: Path, args: argparse.Namespace) -> Result:
     work = workroot / re.sub(r"[^A-Za-z0-9_.-]", "_", test.tid)
     work.mkdir(parents=True, exist_ok=True)
-    if test.kind == CORPUS:
+    if test.kind in (CORPUS, EXAMPLE):
         return run_corpus(test, tool, work, args)
     return run_must_fail(test, tool, work, args)
 
@@ -1088,6 +1154,24 @@ def main(argv: Sequence[str]) -> int:
     if found.problems:
         return 2
 
+    # THE FLOOR UNDER THE EXAMPLE SUITE. A gate that finds zero inputs and
+    # exits 0 has told you nothing, and that is the failure this tree keeps
+    # rediscovering -- `grammar-test` parsing a directory that did not exist
+    # and reporting "Total parses: 0, exit 0" is the same shape. example/ is
+    # ONE directory and one rename away from collecting nothing, and the rest
+    # of this runner would go green on the corpus and never mention it. So
+    # the suite asserts it is non-empty, and an empty one is exit 2 -- the
+    # harness could not run -- rather than a pass.
+    if not any(test.kind == EXAMPLE for test in found.tests):
+        print(
+            f"run.py: the {EXAMPLE}/ suite collected no programs. Either the"
+            " directory moved or its `.expected` sidecars did, and this gate"
+            " just stopped compiling the tree's worked example -- which is"
+            " the state it was written to end.",
+            file=sys.stderr,
+        )
+        return 2
+
     selected = select(found.tests, args.filter)
 
     if args.list:
@@ -1112,7 +1196,8 @@ def main(argv: Sequence[str]) -> int:
 
     try:
         tool = make_toolchain(args)
-        if any(t.kind == CORPUS for t in selected) and shutil.which(args.cc) is None:
+        if any(t.kind in (CORPUS, EXAMPLE) for t in selected) \
+                and shutil.which(args.cc) is None:
             raise HarnessError(f"no C compiler on PATH: {args.cc!r} (pass --cc)")
     except HarnessError as exc:
         print(f"run.py: {exc}", file=sys.stderr)
