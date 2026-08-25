@@ -82,12 +82,16 @@ point: an unstated gap reads as coverage.
   "smallest correct change"
         judgement, all of them.
 
-THREE RULES CARRY A LEDGER because the tree violates them today. Same shape as
+ONLY `ABBREV_OWED` CARRIES ENTRIES TODAY, seventeen of them. `UFCS_OWED` and
+`IMPORT_OWED` stand empty, and empty is where a count-keyed ledger ends up --
+its terminal state, not a switched-off gate: every violation anywhere fails
+this run, so reading an empty ledger as a hole and refilling it would weaken
+the gate. An entry is earned only by code whose fix would touch files other
+lanes hold open -- the seventeen abbreviation debts did, which is why they
+are written down here instead of renamed away. Same shape as
 `tools/gates/faults_reachable.zen` and `ufcs_collisions.py`: an entry is a debt, not an
 exemption, deleting a line is how one closes, and a stale entry is an error --
-so the debt can shrink and cannot quietly grow. Fixing the 147 abbreviation
-sites touches files three other lanes hold open, which is why they are written
-down here instead of renamed.
+so the debt can shrink and cannot quietly grow.
 
 `UFCS_OWED` AND `IMPORT_OWED` ARE KEYED BY FILE AND VALUED WITH A COUNT, which
 the abbreviation ledger is not, and the difference is deliberate. A file-keyed
@@ -149,12 +153,12 @@ ABBREV_OWED: dict[str, str] = {
 # still writes `f(be, ..)` where `be.f(..)` resolves to the same function.
 #
 # NOT an exemption list, and not a claim that these files are allowed to do
-# it: every entry is a mechanical edit nobody has made time for. The tree is
-# split cleanly in two here and the split is worth reading before touching
-# this. All of `src/std/` obeys the rule but for nine sites in `text_utf8.zen`
-# -- `Parser`, `Lexer`, `String` and `Cursor` are written on their receivers
-# throughout -- and `gen_c/` and `sema/` do not, which is two authoring eras
-# rather than two opinions. So this is a campaign, and not this lane's.
+# it: every entry is a mechanical edit nobody has made time for. The ledger
+# is EMPTY, and empty is its terminal state: `3a976841d` paid out 1153 sites
+# across 40 files and left nothing here, and `debt()` fails this run on the
+# first new site anywhere in src/. An entry goes back only with code whose
+# rewrite would collide with another lane's open files, and never as a
+# standing allowance.
 #
 # THE NUMBER IS THE POINT. A bare file list would exempt the file, and
 # `gen_c_expr.zen` could take a hundred more without a word. Bring the number
@@ -900,6 +904,20 @@ def main() -> int:
     # does: 63 is what the tree had when this was written, going down is free,
     # and going up is a deliberate line in a commit. Modules are added rarely
     # enough that this is not a number anyone re-baselines by habit.
+    #
+    # THE DECISION THIS LANE MADE, measured and not assumed. The 62 exempt
+    # modules split in two. Twenty-nine elect a type by strict majority but
+    # the majority is declared in another folder -- `lsp.lsp_names` votes
+    # `Alloc` 20 of 20, `gen.gen_name` votes `String` 30 of 38, every
+    # `lsp_*` votes a sema type. Granting any of them its vote through this
+    # rule's own machinery surfaces real conversions: 384 sites across those
+    # 29 (`lsp/` 159, `gen/` 135, `sema/` 73), which is the campaign
+    # UFCS_OWED's history records as finished at 1153 sites -- reopened, not
+    # a documentation gap. The other 33 have no majority to declare:
+    # `fmt.fmt_break` takes `Alloc` 19, `Src` 12 and `Vec` 5 as first
+    # parameters, and no single subject is true there to grant. So the
+    # ceiling holds where it is, and the way down runs through code --
+    # one file's conversions at a time -- not through this table.
     if ufcs_exempt > UFCS_EXEMPT_CEILING:
         print(f"style: {ufcs_exempt} module(s) have no principal type and are"
               f" exempt from the `ufcs` rule, up from {UFCS_EXEMPT_CEILING}."
