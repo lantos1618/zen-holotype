@@ -96573,7 +96573,7 @@ static bool zu_f4_3std4text8text_str6beforeO2_b3strb3str(zg_str zu_l4self, zg_st
     } else if (!zg_s1) {
         zu_l7shorter = zu_l5other.len;
     } else {
-        zg_unreachable("std/text/text_str.zen", 66, 38);
+        zg_unreachable("std/text/text_str.zen", 278, 38);
     }
     zu_t4_3std4core6result3ResI1_b5usize zg_s2;
     zu_t4_3std4core6result3ResI1_b5usize zg_n3;
@@ -96619,7 +96619,7 @@ static bool zu_f4_3std4text8text_str6beforeO2_b3strb3str(zg_str zu_l4self, zg_st
     } else if ((zg_s2.zg_tag == zu_e5_3std4core6result3Res4None)) {
         return (zu_l4self.len < zu_l5other.len);
     } else {
-        zg_unreachable("std/text/text_str.zen", 70, 69);
+        zg_unreachable("std/text/text_str.zen", 282, 69);
     }
 }
 
@@ -118556,10 +118556,10 @@ static bool zu_f5_3std4text8text_str3str2eqO2_b3strb3str(zg_str zu_l4self, zg_st
         } else if ((zg_s2.zg_tag == zu_e5_3std4core6result3Res4None)) {
             return true;
         } else {
-            zg_unreachable("std/text/text_str.zen", 85, 18);
+            zg_unreachable("std/text/text_str.zen", 297, 18);
         }
     } else {
-        zg_unreachable("std/text/text_str.zen", 81, 33);
+        zg_unreachable("std/text/text_str.zen", 293, 33);
     }
 }
 
@@ -118571,7 +118571,7 @@ static zu_t4_3std4core6result3ResI1_b2u8 zu_f5_3std4text8text_str3str3getO2_b3st
     } else if (!zg_s1) {
         return (zu_t4_3std4core6result3ResI1_b2u8){ .zg_tag = zu_e5_3std4core6result3Res4None };
     } else {
-        zg_unreachable("std/text/text_str.zen", 24, 24);
+        zg_unreachable("std/text/text_str.zen", 25, 24);
     }
 }
 
@@ -118598,14 +118598,14 @@ static uint64_t zu_f5_3std4text8text_str3str4hashO2_b3strt4_3std4core4hash6Hashe
 }
 
 static uint8_t zu_f5_3std4text8text_str3str5indexO2_b3strb5usize(zg_str zu_l4self, size_t zu_l1i) {
-    (void)(zg_sub_usize(zg_sub_usize(zu_l4self.len, zu_l1i, "std/text/text_str.zen", 35, 18), 1, "std/text/text_str.zen", 35, 22));
+    (void)(zg_sub_usize(zg_sub_usize(zu_l4self.len, zu_l1i, "std/text/text_str.zen", 36, 18), 1, "std/text/text_str.zen", 36, 22));
     return (zu_l4self.data)[zu_l1i];
 }
 
 static zg_str zu_f5_3std4text8text_str3str5sliceO3_b3strb5usizeb5usize(zg_str zu_l4self, size_t zu_l4from, size_t zu_l2to) {
     size_t zu_l4tail;
-    zu_l4tail = zg_sub_usize(zu_l4self.len, zu_l2to, "std/text/text_str.zen", 43, 25);
-    return (zg_str){ .data = ((zu_l4self.data) + (zu_l4from)), .len = zg_sub_usize(zg_sub_usize(zu_l4self.len, zu_l4from, "std/text/text_str.zen", 44, 57), zu_l4tail, "std/text/text_str.zen", 44, 64) };
+    zu_l4tail = zg_sub_usize(zu_l4self.len, zu_l2to, "std/text/text_str.zen", 44, 25);
+    return (zg_str){ .data = ((zu_l4self.data) + (zu_l4from)), .len = zg_sub_usize(zg_sub_usize(zu_l4self.len, zu_l4from, "std/text/text_str.zen", 45, 57), zu_l4tail, "std/text/text_str.zen", 45, 64) };
 }
 
 static bool zu_f5_3std4text8text_str3str8is_emptyO1_b3str(zg_str zu_l4self) {
