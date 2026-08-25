@@ -135,6 +135,14 @@ DUP_OWED: dict[str, int] = {
     # Same fold shape, different widths and answers: i64 with overflow guard
     # vs u64 into a Digits record.
     "digits_of(str)": 2,
+    # Different contracts wearing one name: sema_const's is the bootstrap
+    # LITERAL fold (unsigned digits only -- the parser owns the minus, and
+    # its overflow miss feeds const-fold diagnostics); std.text.text_num's
+    # is the library reader issue #774 owes (leading minus, Res to the
+    # caller). docs/SEMA_BOOTSTRAP_FIXES.md tracks the debt: the std side
+    # is the home, and paying it means retargeting sema_const's folding,
+    # not a rename.
+    "parse_i64(str)": 2,
     # Byte-identical (`types.at(t) => Res(_)`). Kept because the merge is
     # part of the wider settle-family cleanup across gen_c_decl/range.
     "is_res(CBackend)": 2,
