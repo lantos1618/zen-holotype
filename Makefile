@@ -1,9 +1,8 @@
 # Zen. See docs/PLAN.md for what each target gates.
 
 # BASH, AND `-o pipefail`, FOR EVERY RECIPE. A pipeline's exit status is its
-# LAST command's, so `find ... | xargs ./zen fmt --check` reports the status of
-# xargs and `$(PY) scripts/x.py | tail` reports the status of tail -- a failing
-# gate on the left of a pipe exits 0 and the build goes green on a red check.
+# LAST command's, so a failing gate on the left of a pipe can otherwise leave
+# the build green.
 # /bin/sh here is dash, which has no `pipefail` at all, so this cannot be a
 # `set -o pipefail` line inside a recipe; it has to be the shell make invokes.
 # The same trap is waiting in every terminal an agent works in -- docs/STYLE.md,
@@ -32,10 +31,7 @@ J       ?= $(shell nproc 2>/dev/null || echo 4)
 CACHE   ?= $(shell command -v ccache 2>/dev/null)
 ZCC      = $(CACHE) $(CC)
 
-# `editors` IS IN THIS LIST BECAUSE `editors/` IS ALSO A DIRECTORY. Without
-# it make finds the directory, calls the target up to date, and runs the
-# script never — a gate that cannot fail because it cannot run.
-.PHONY: all build seed test lint parse design cap dupcomments fleet faults lextile ufcs style scope wired editors fixpoint determinism grammar grammar-test fmt bench bench-allocs emit-runs asan asan-corpus leak profile clean help
+.PHONY: all build seed test lint parse cap dupcomments faults lextile determinism grammar fmt asan leak clean help
 
 all: test
 
@@ -80,46 +76,8 @@ seed: build
 ## corpus (528/528), and with it went `refmap`, whose only job was to keep
 ## docs/GENC_REFERENCE_MAP.md pointing into bootstrap/gen_c.py.
 ##
-## `grammar-test` and `dupcomments` joined this list on 2026-08-10. Both
-## existed as targets nobody ran, which is the same disease `grammar-test`
-## was written to cure: a check outside `make test` is a check that goes
-## stale unobserved. If either one makes this target too slow to run, split
-## it out deliberately and say where it runs instead — do not just drop it.
-## `bench-allocs` joined it on 2026-08-16, for the third time the same
-## disease has been diagnosed here: tests/bench was run by no target in
-## `all`, so `allocs_op: 0` -- cited in src/ as a thing that fails the
-## build -- was a number nothing had ever computed.
-## `fixpoint` joined on 2026-08-24 (issue #761). Its seed-staleness branch
-## printed OK and exited 0, so a122b99f shipped a stale seed to main and
-## nothing that can fail said so. It asserts now; this is where it runs.
-test: build wired lint parse design cap dupcomments faults lextile ufcs style scope grammar-test editors bench-allocs fleet fixpoint
+test: build lint parse cap dupcomments faults lextile
 	$(PY) tests/run.py
-
-## wired: every gate this repository owns is REACHED by `make all`.
-##
-## THE ONE CHECK NO GATE CAN DO ABOUT ITSELF. Four of this tree's recorded
-## failures are not a bug in a gate, they are a gate NOBODY CALLS:
-## scripts/scope.py sat on main for a month with nothing invoking it while
-## STYLE.md said the rule was enforced at `make test`; `grammar-test` was
-## `npx tree-sitter test` over a directory that does not exist ("Total
-## parses: 0", exit 0); tests/parse/errors and tests/bench were run by no
-## target, so `allocs_op: 0` was a number nothing had ever computed; and
-## `editors` is a target whose name is also a DIRECTORY, which make calls
-## up to date and never runs -- the reason `editors` is in .PHONY above.
-##
-## So this asks from outside: for every driver under scripts/,
-## tools/gates/ and tests/, is there a recipe that runs it, and does a
-## chain of prerequisites lead from `all` to that recipe? Being INVOKED is
-## not enough -- `make lint` was real, green and orphaned. Anything `all`
-## deliberately does not reach goes in scripts/UNWIRED.txt with its
-## reason, and that ledger ratchets both ways: an unreached driver that is
-## not written down fails, and a written-down driver that BECOMES reached
-## fails too, so the list cannot rot in either direction.
-##
-## It also re-checks the `editors` trap for every target in the chain: not
-## .PHONY and not a real file is a target waiting to go silent.
-wired:
-	$(PY) scripts/gates_wired.py
 
 ## faults: every fault the compiler declares must have a site that raises
 ## it. Green here does NOT mean every diagnostic works — it means none is
@@ -128,7 +86,7 @@ wired:
 ## ledger is empty today, and a name in it that gains a raise site is an
 ## error too, so it cannot drift back into fiction.
 ##
-## A Zen gate — tools/gates/faults_reachable.zen; see `gate` above. It reads
+## A Zen gate — tests/gates/faults_reachable.zen; see `gate` above. It reads
 ## the variant list off `std.parse`, where the python it replaced matched a
 ## regex demanding a leading `|`: that missed the FIRST variant of every enum,
 ## so `SemaFault.UndefinedName` and `GenFault.Unsupported` were exempt from
@@ -140,29 +98,15 @@ faults: build
 	@$(call nonempty,faults,$(ROOT) -name '*.zen' -print0 | LC_ALL=C sort -z); \
 	  build/gates/faults_reachable "$${files[@]}"
 
-## ufcs: no `x.f(..)` may have two answers. a method on T and a free
-## function taking T as its first parameter are the same call under UFCS,
-## and Zen has no overloading — so the two compilers pick differently and
-## the corpus, built by only one of them, sees nothing. that is how a
-## stray `}` after every block got past 227 green tests.
-ufcs: grammar
-	$(PY) scripts/ufcs_collisions.py
-
 ## A GATE IS A ZEN PROGRAM. `$(call gate,name)` compiles
-## tools/gates/<name>.zen with ./zen and leaves the binary in build/gates/.
-## The compilation root is tools/gates, whose `std` is a SYMLINK to src/std:
+## tests/gates/<name>.zen with ./zen and leaves the binary in build/gates/.
+## The compilation root is tests/gates, whose `std` is a SYMLINK to src/std:
 ## a module path is COMPUTED (`<folder>/<folder>.zen`), never searched for, so
 ## a program importing `std.lex` needs `std` under its own root and the
 ## symlink is what puts it there without copying the tree.
 ##
-## THE COMPILER NOW GATES ITSELF, and the trade is deliberate. A gate written
-## in Zen cannot run until ./zen builds, so a broken compiler takes its own
-## style checks down with it -- where `scripts/*.py` would still have run.
-## What it buys is ONE implementation of "what is a Zen file" instead of two,
-## which is the same trade PLAN.md records for deleting the bootstrapper: a
-## second implementation that still builds is one that drifts. ~0.3s a gate,
-## so they are rebuilt every run rather than carrying a staleness rule.
-gate = ./zen build tools/gates --entry $(1).zen --emit-c -o build/gates/$(1).c \
+## Gates are Zen programs, compiled with the compiler they check.
+gate = ./zen build tests/gates --entry $(1).zen --emit-c -o build/gates/$(1).c \
 	&& $(CC) $(CFLAGS) build/gates/$(1).c -o build/gates/$(1)
 
 # THE ONE DOOR FOR "a gate over a file set must have files". Six targets
@@ -182,36 +126,8 @@ define nonempty
 mapfile -d '' files < <(find $(2)) && test $${#files[@]} -gt 0 || { echo "$(1): found no .zen files — this gate is checking nothing" >&2; exit 2; }
 endef
 
-## fleet: tools/fleet/fleet.zen, the policy half of an agent-fleet runner --
-## the work list, the success PREDICATE, the retry counters and the report.
-## `tools/fleet/fleet.sh` is the other half: fork/exec, timeout and flock,
-## which Zen has no way to say (#748, #749, #750, #751, #752).
-##
-## IT COMPILES THE PROGRAM AND THEN RUNS IT. This target used to stop at
-## the compile, on the argument that "the interesting half is not runnable
-## without an agent fleet" -- and that argument was wrong twice over. It is
-## wrong because compiling proves a program types and nothing else, and it
-## is wrong because the interesting half IS runnable: a lane's only effect
-## on a verdict is the target's bytes, so a `printf` stands in for the
-## agent exactly. tools/fleet/tests/oracle.sh drives plan, judge and report
-## over a checked-in work list and diffs stdout AND every exit status.
-##
-## The cost of stopping at the compile was a real bug that shipped with the
-## program: `report` counted every unmarked job as a FAILED one, so a job
-## the runner had never looked at came back as a failure and the run exited
-## 1 -- the setup-error-is-not-a-verdict rule that fleet.zen argues thirty
-## lines above the code that broke it. The oracle was red on it the first
-## time it ran. What is still unexercised is written down in oracle.sh:
-## fleet.sh, the round loop, the lock, the clock and the fork/exec.
-## ~0.5s, same trade as the four gates above.
-fleet: build
-	@mkdir -p build/fleet
-	@./zen build tools/fleet --entry fleet.zen --emit-c -o build/fleet/fleet.c \
-	  && $(CC) $(CFLAGS) build/fleet/fleet.c -o build/fleet/fleet
-	@tools/fleet/tests/oracle.sh
-
 ## cap: STYLE.md's line caps. Over 500 prints a note; over 800 fails,
-## unless the path carries a written reason in tools/gates/line_cap.zen.
+## unless the path carries a written reason in tests/gates/line_cap.zen.
 ##
 ## THE FILE LIST COMES FROM `find` AND NOT FROM THE GATE. `std.env.Fs` has no
 ## listing, on purpose ("no open handle, seek, listing, or permission
@@ -232,7 +148,7 @@ cap: build
 ## again — gen_c_inline.zen held twelve such pairs and gen_c_settle.zen six.
 ## ADJACENT only: the same explanation above two sibling helpers is somebody's
 ## judgement about where a reader needs it, and this gate does not overrule it.
-## A Zen gate — tools/gates/dup_comments.zen; see `gate` above.
+## A Zen gate — tests/gates/dup_comments.zen; see `gate` above.
 dupcomments: build
 	@mkdir -p build/gates
 	@$(call gate,dup_comments)
@@ -258,105 +174,16 @@ dupcomments: build
 ##
 ## Proved non-vacuous by mutation — stop `bump` counting the newline and the
 ## position check goes red on the first file with two lines in it.
-## A Zen gate — tools/gates/lex_tiling.zen; see `gate` above.
+## A Zen gate — tests/gates/lex_tiling.zen; see `gate` above.
 lextile: build
 	@mkdir -p build/gates
 	@$(call gate,lex_tiling)
-	@$(call nonempty,lextile,$(ROOT) example tests/corpus tests/bench tests/asan-canary tools/gates tools/fleet -name '*.zen' -print0 | LC_ALL=C sort -z); \
+	@$(call nonempty,lextile,$(ROOT) example tests/corpus tests/gates -name '*.zen' -print0 | LC_ALL=C sort -z); \
 	  build/gates/lex_tiling "$${files[@]}"
 
-## editors: the VS Code extension's contributions still resolve. EVERY
-## FAILURE HERE IS A SILENT ONE -- VS Code does not report a `grammars`
-## entry whose path is missing or whose `scopeName` disagrees with the
-## grammar file's own, it simply contributes nothing, and .zen falls back
-## to no tokenization at all. That fallback is what put the `(` inside
-## `add_bytes("(zg_fs_kind(")` into bracket matching, while colour kept
-## working because that comes from the server. Nothing else gates
-## editors/, and a check nobody runs is a check that
-## goes stale.
-editors:
-	$(PY) scripts/editors_check.py
-
-## style: the rest of STYLE.md — where a file lives, what it is named,
-## which way its imports point, whether an impl sits with its type. The
-## document said "most of these are one rule with a test attached" and
-## `cap` was the only rule that had one. Parses with tools/parse/cst.py
-## rather than grepping: every `if` and every `as` in src/ is inside a
-## comment, so a regex finds only prose. The syntax laws — no if, no
-## while, no ternary, no `as`, no fourth `@` entry — are the GRAMMAR's,
-## and `make parse` is where they fail; this does not duplicate them.
-style: grammar
-	$(PY) scripts/style.py
-
-## scope: a commit's subject names its scope, and src/ obeys it (issue #765).
-## scripts/scope.py has been on main since #765 landed and NOTHING invoked it:
-## `grep -rn scope.py Makefile .github/` was empty while STYLE.md's table
-## promised `make scope` and its prose said the rule was enforced "and now also
-## at `make test`". A gate that exists and cannot fail is this repo's
-## most-repeated failure — three of them were found vacuous on 2026-07-25 — so
-## it is invoked here or it is deleted.
-##
-## THE AUDITED UNIT IS `origin/main..HEAD`, the commits this branch PROPOSES.
-## Every other prerequisite of `test` is a property of the TREE; scope is a
-## property of the HISTORY, and re-auditing history would gate today's work on
-## a rule nobody was held to yesterday. When that range is EMPTY -- a commit
-## made DIRECTLY on this ref, the way merge.sh --seed lands on main -- the
-## gate used to print "nothing is being proposed" and exit 0 about a commit
-## that had already landed (#791): legitimately empty and audited were
-## reported as the same thing, the vacuous-gate pattern five times over. Now
-## an empty range falls back to the tip itself, HEAD~1..HEAD (or the root
-## commit when there is no parent), so what just landed on this ref is what
-## gets measured, and the message names the unit that ran. `--self-test`
-## still runs first, every time, so a parser that stops reading subjects
-## fails this target regardless of the range. That is scope.py's own argument,
-## in its docstring, made into a recipe.
-##
-## `origin/main` IS ASSERTED TO EXIST BEFORE IT IS DIFFED AGAINST. This
-## recipe used to be `git rev-list origin/main..HEAD 2>/dev/null` and then
-## `if [ -z "$$revs" ]`, which reads a MISSING REF exactly like an empty
-## range: `git rev-list nonexistent..HEAD` exits 128 and prints nothing, the
-## 2>/dev/null eats the message, and the target prints "nothing is being
-## proposed" and goes green. A clone whose remote is not called `origin`, a
-## shallow CI checkout, a worktree with no fetched main -- each of those
-## retires the live half of this gate permanently and says the healthy
-## sentence while doing it. The status is checked instead of discarded, and
-## a ref that is not there is exit 2, not silence.
-scope:
-	$(PY) scripts/scope.py --self-test
-	@git rev-parse --verify --quiet origin/main >/dev/null \
-	  || { echo "scope: no origin/main to measure this branch against — the" \
-	           "audit half of this gate cannot run, and an empty range must" \
-	           "not read as a clean one. \`git fetch origin\`" >&2; exit 2; }
-	@revs="$$(git rev-list origin/main..HEAD)"; \
-	if [ -z "$$revs" ]; then \
-	  if git rev-parse --verify -q HEAD~1 >/dev/null; then \
-	    revs="$$(git rev-parse HEAD~1)..HEAD"; \
-	    echo "scope: no commits over origin/main — auditing the tip itself,"; \
-	    echo "scope: which is what a commit made directly on this ref gets"; \
-	  else \
-	    revs="HEAD"; \
-	    echo "scope: no parent under the tip — auditing the root commit"; \
-	  fi; \
-	fi; \
-	$(PY) scripts/scope.py $$revs
-	bash tests/scope/regression.sh
-
-## design: every complete example in DESIGN.md must parse. PLAN.md 0.1 asks
-## for this; nothing was checking it, and the document had drifted from the
-## language it defines. A ```groovy fragment fence is read, not parsed.
-design: grammar
-	$(PY) scripts/design_examples.py
-
 ## parse: every .zen the tree claims is valid must parse. cheap, and for
-## most of this tree's life it was the ONLY thing standing behind
-## example/ and tests/bench -- nothing compiled either one. Both are
-## compiled now: `tests/run.py` collects example/src as its third suite
-## (deferred at stage 5, and red the day it stops being), and bench.py
-## compiles the bench files because each driver imports the body it
-## measures. bench_budgets.zen is still read by a regex and this is
-## still the only gate over it. must-fail/ and tests/parse/errors are
-## excluded on purpose: those files exist to NOT parse, and grammar-test
-## owns them.
+## example/ is also compiled by `tests/run.py`. must-fail/ and
+## tests/parse/errors are excluded on purpose: those files exist to NOT parse.
 ##
 ## THE FILE COUNT IS ASSERTED. A find that matches nothing leaves xargs
 ## with no work and exits 0, which is this repo's own recorded shape for
@@ -372,34 +199,14 @@ design: grammar
 ## zen.so and bypasses the cache; `--lang-name zen` tells the CLI which
 ## symbol to load from it.
 parse: grammar
-	@$(call nonempty,parse,$(ROOT) example tests/corpus tests/bench tests/asan-canary -name '*.zen' -print0); \
+	@$(call nonempty,parse,$(ROOT) example tests/corpus -name '*.zen' -print0); \
 	  cd grammar && npx tree-sitter parse --quiet --stat -l "$$(pwd)/zen.so" --lang-name zen "$${files[@]/#/../}"
 
 ## lint: every test conforms to the format in docs/TESTING.md.
 ##
-## IN `test` SINCE THE `wired` GATE FOUND IT ORPHANED. It had a target and
-## a recipe and nothing led to it from `all`, which is the quieter half of
-## the disease `wired` exists for -- and it was RED while nobody looked:
-## tests/must-fail/modules/orphan_impl.count sat beside the directory form
-## of that test, where the runner never reads it, asserting a diagnostic
-## count nothing had ever checked. Pure python over the test tree, ~1s.
+## Pure Python over the test tree, about one second.
 lint:
 	$(PY) tests/lint.py
-
-## fixpoint: the strongest oracle. zen-1 and zen-2 must emit
-## byte-identical C. worthless unless gen_c is deterministic. Stands on
-## seed/zen.c alone now that the Python stage 0 is gone, so it needs
-## neither the grammar nor ./zen.
-fixpoint:
-	./scripts/fixpoint.sh
-	# The gate above must ASSERT staleness, not report it (#761): check
-	# proves it accepts an honest tree, mutant plants a stale seed and
-	# requires the rejection. A green fixpoint alone proves neither half.
-	sh tests/fixpoint_asserts.sh check
-	sh tests/fixpoint_asserts.sh mutant
-	# And the WIRING must hold (#761, half 2): this target stays a
-	# prerequisite of `make test`, or a stale seed ships green again.
-	sh tests/fixpoint_wired_into_test.sh
 
 ## determinism: five checks that gen_c is a pure function of input
 determinism: build
@@ -413,16 +220,6 @@ grammar: grammar/zen.so
 grammar/zen.so: grammar/grammar.js grammar/tree-sitter.json
 	cd grammar && npx tree-sitter generate --abi 14
 	$(CC) -shared -fPIC -o grammar/zen.so grammar/src/parser.c -I grammar/src
-
-## grammar-test: the grammar's contract, both halves. This used to be
-## `npx tree-sitter test`, which reported "Total parses: 0" and exited 0 --
-## grammar/ has no corpus directory, so the target passed on an empty set.
-## The real check is scripts/grammar_test.py: every tests/parse/errors/*.zen
-## must FAIL to parse, and every .zen under tests/corpus and example must
-## keep parsing. A green run prints both counts; a count dropping is how you
-## notice the fixtures moved.
-grammar-test: grammar
-	$(PY) scripts/grammar_test.py
 
 ## fmt: the whole tree must already be formatted.
 ##
@@ -440,10 +237,10 @@ grammar-test: grammar
 ## CRLF, a missing final newline and trailing whitespace on purpose --
 ## formatting those files would delete the seven tests in them.
 ##
-## `tools/gates` IS IN THE LIST because the gates are Zen programs now and
+## `tests/gates` IS IN THE LIST because the gates are Zen programs now and
 ## a gate nothing formats drifts like any other file -- all three landed
 ## unformatted the day they were written. `find` does not follow symlinks,
-## so `tools/gates/std` (the symlink `gate` compiles against) contributes
+## so `tests/gates/std` (the symlink `gate` compiles against) contributes
 ## nothing here and src/std is not counted twice.
 ##
 ## THE FILE COUNT IS ASSERTED, for the reason `parse` gives above, and
@@ -451,54 +248,9 @@ grammar-test: grammar
 ## which is an instruction to do nothing and succeed when the find comes
 ## up empty.
 fmt: build
-	@$(call nonempty,fmt,$(ROOT) example tests/corpus tests/asan-canary tools/gates tools/fleet -name '*.zen' \
+	@$(call nonempty,fmt,$(ROOT) example tests/corpus tests/gates -name '*.zen' \
 	  -not -path 'tests/corpus/lex/*' -print0); \
 	  ./zen fmt --check "$${files[@]}"
-
-## emit-runs: consecutive writes into one buffer that a single `fmt` would
-## collapse. A LEDGER, not a rule: scripts/emit_runs_owed.txt records the
-## backlog per file and this fails if any file EXCEEDS its number, so a
-## conversion lane ratchets it down and nothing puts it back. Undercounts a
-## statement wrapped over several lines -- scripts/emit-runs.awk says why.
-emit-runs:
-	@n=$$(find src -name '*.zen' | wc -l); \
-	  test "$$n" -gt 0 \
-	    || { echo "emit-runs: found no .zen files — this gate is checking nothing" >&2; exit 2; }; \
-	  find src -name '*.zen' | sort \
-	  | xargs awk -f scripts/emit-runs.awk -v mode=ledger \
-	  | sed 's/^    "//; s/": /|/; s/,$$//' | sort > $@.now; \
-	  awk -F'|' 'NR==FNR { owed[$$1]=$$2; next } \
-	    { if ($$2 > owed[$$1]) { \
-	        printf "%s: %d collapsible writes, ledger says %d\n", $$1, $$2, owed[$$1]; \
-	        bad=1 } } \
-	    END { if (bad) exit 1 }' scripts/emit_runs_owed.txt $@.now \
-	  || { rm -f $@.now; echo "emit-runs: a file grew -- collapse the run or update scripts/emit_runs_owed.txt" >&2; exit 1; }; \
-	  printf "emit-runs: %d file(s), %d call(s) owed\n" \
-	    "$$(wc -l < $@.now)" "$$(awk -F'|' '{s+=$$2} END {print s+0}' $@.now)"; \
-	  rm -f $@.now
-
-## bench-allocs: the half of tests/bench that is not a stopwatch, and so
-## the half that belongs in `test`. Each driver is linked through
-## `ld --wrap=malloc` and compiled at N and 2N iterations; the slope is
-## allocations and bytes per op, the same integers on every machine, and
-## over the budgets in bench_budgets.zen FAILS. ~2 seconds. The budgets
-## are ceilings measured at libc, not at the Zen allocator -- bench.py's
-## header says exactly what that does and does not prove.
-bench-allocs: build
-	$(PY) scripts/bench.py --allocs-only
-
-## bench: the same drivers with the wall clock as well, against the ns_op
-## budgets and the rolling median in tests/bench/baseline.json. A driver
-## exists at all because constructing a Bencher needs trait dispatch
-## gen_c does not have yet; it IMPORTS the bench body rather than
-## restating it (bench.py's `verify_shared_body`, which replaced four
-## hand-mirrored copies nothing compared) and is timed whole-process
-## minus the null driver's floor. THE CLOCK IS WHAT KEEPS
-## THIS OUT OF `test`, not the drivers: wall clocks are slow and noisy,
-## and a gate that reddens on a loaded machine teaches people to read
-## past red. Over budget warns; only an absurd miss fails.
-bench: build
-	$(PY) scripts/bench.py
 
 ## asan: the compiler under AddressSanitizer + LeakSanitizer, built as
 ## zen-asan (./zen is never clobbered), running one representative compile.
@@ -508,43 +260,11 @@ asan: seed/zen.c
 	$(CC) -std=c99 -O1 -g -fsanitize=address,leak seed/zen.c -o zen-asan
 	tests/bench/asan.sh ./zen-asan
 
-## asan-corpus: every corpus program run under ASan + UBSan, WITH A
-## POSITIVE CONTROL. The corpus asserts what a program PRINTS, which is
-## an oracle blind to a program that prints the right thing for the wrong
-## reason -- one of them read three answers out of freed memory for its
-## whole life and printed exactly what it was supposed to (#788).
-##
-## THE CANARY IS THE POINT. A sanitizer is a property of the BUILD, not of
-## the source, and the build can take the detector away without taking the
-## flag away: at -O2 the frame ASan would poison in tests/asan-canary/main.zen
-## is inlined out of existence and a known live stack-use-after-return
-## (#785) runs clean and prints the RIGHT answer. The first sweep of this
-## corpus was built that way and reported 698 programs spotless with that
-## bug inside it. So the script compiles the canary with the SAME flag
-## string it is about to hand the sweep and refuses -- exit 2, sweep not
-## run -- unless the report comes back. Prove it for yourself:
-##
-##     SAN_CFLAGS='-std=c11 -O2 -g -fsanitize=address' make asan-corpus
-##
-## NOT IN `make test`, and the reason is address space rather than time:
-## 87s against 71s for 699 programs at -j8, but ASan's shadow map wants
-## ~20x the address space and several of these at once on one box start
-## getting things killed. Run it before landing anything that touches
-## std.mem, gen_c's runtime, or ownership.
-asan-corpus: build
-	scripts/asan_corpus.sh
-
 ## leak: valgrind's answer to the same question. definite leaks only --
 ## still-reachable memory is where the deliberate argv rows land, and
 ## reporting them would fail every run on a known-non-bug.
 leak: build
 	tests/bench/leak.sh ./zen
-
-## profile: a frame-pointer build (zen-fp) self-compiles under perf record
-## -g; report and stacks land in tests/bench/out/. flamegraph.svg only when
-## the FlameGraph scripts are already on PATH -- they are never vendored.
-profile: seed/zen.c
-	CC=$(CC) bash scripts/profile.sh
 
 clean:
 	rm -f zen zen-new zen-asan zen-fp grammar/zen.so

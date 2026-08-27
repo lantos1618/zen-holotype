@@ -1,20 +1,17 @@
 // src/gen/gen_c/gen_c_call.zen
 // What a call is in C, and what a type a call names becomes.
-//
 // `Point(x: 3, y: 4)` and `area(p)` are the same AST node. Which one it
 // is depends on what the callee NAMES — a struct is constructed, a
 // function is called — a question about the declaration, not the call.
 // THE QUESTION IS ASKED HERE; construction is `gen_c_build.zen`'s. The
 // third thing a callee can name IS here — `Ok`/`Err`, not functions at
 // all, built from the expected type.
-//
 // `Res` IS STRUCTURAL, so its constructors are built here from the
 // EXPECTED type, not resolved. This follows sema: `TyRes` carries no
 // declaration, because `Res<T>` and `Res<T, E>` are two arities of one
 // name that sema disambiguates at every `.try()`. It's also why an
 // expectation is needed — `Ok(0)` alone doesn't say `Res<i32>` or
 // `Res<i32, E>`, and DESIGN.md's hoisting rule turns on exactly that.
-//
 // OVERLOAD RESOLUTION IS SEMA'S, READ BACK RATHER THAN REDONE. `Cand`
 // carries the `DeclId` it came from, and `chosen` writes it into
 // `Checker.call_memo` under the call's node id, so `loop`'s six
@@ -47,7 +44,7 @@ unsupported, unresolved, untyped, ambiguous = gen.gen_c.gen_c_report
 sub_with, any_open, inst_at = gen.gen_c.gen_c_mono
 settled_inst, inst_open, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 complete_inst = gen.gen_c.gen_c_infer
-ctype, is_unit, c_prim = gen.gen_c.gen_c_type
+ctype, is_unit, has_storage, c_prim, spellable, declared_ret = gen.gen_c.gen_c_type
 c_prim_known = gen.gen_c.gen_c_type
 expr, ty_of, want_of = gen.gen_c.gen_c_expr
 value_held, holds = gen.gen_c.gen_c_expr
@@ -63,9 +60,7 @@ construct = gen.gen_c.gen_c_build
 is_format_door, lower_format_door = gen.gen_c.gen_c_fmt
 address_of = gen.gen_c.gen_c_fat
 
-// -----------------------------------------------------------------
 // `Res` values
-// -----------------------------------------------------------------
 
 res_value* = (
     be      :: CBackend,
@@ -92,11 +87,9 @@ write_res_tagged = (be :: CBackend, want: TyId, variant: str, out :: String)
 // `Ok(x)` / `Err(e)`: the tag, and the payload under the member the
 // variant names. A unit payload takes no member — `Ok(())` carries
 // nothing and a void member is illegal C.
-//
 // A UNIT PAYLOAD IS STILL EVALUATED: `Ok(f())` on a unit-returning `f`
 // carries nothing but DOES something, and writing only the tag would
 // drop the call. The literal `()` is the one case with nothing to run.
-//
 // EXPORTED BECAUSE HOISTING BUILDS THE SAME VALUE: `7;` closing a
 // `Res<i32, E>` is `Ok(7)`, the same tag over the same payload —
 // `gen_c_hoist.zen` writing its own copy would be two places holding
@@ -369,7 +362,6 @@ lower_plain_call* = (
 // THE FUNCTIONS THAT TRAVELLED WITH THE RECEIVER'S TYPE — THE SAME POOL
 // SEMA RESOLVED AGAINST. `sema_call.travelled_cands` is the other half,
 // and `first_is` below says what a narrower pool costs.
-//
 // A dot asks through the receiver. The FREE FORM asks through argument
 // zero (#771): UFCS says `f(x)` and `x.f()` are one call surface, so a
 // call sema resolved through the travelled pool must find that same
@@ -710,12 +702,10 @@ call_or_format = (
 // says why: "conversions are methods, never a cast keyword", and a cast
 // can't be written in terms of anything below it, so the backend is the
 // body.
-//
 // EMITTING THE CALL INSTEAD IS A LINKER ERROR, not a wrong answer: a
 // bodyless declaration defines no symbol. That's how this was found —
 // closing `to_usize`'s RESOLUTION without closing its BODY moved the
 // fault rather than fixing it.
-//
 // ONLY LOSSLESS WIDENING IS DECLARED, so the cast is the whole of it,
 // nothing to check. A narrowing conversion "can fail, so it belongs in
 // a Res-returning function someone writes on purpose" — such a
@@ -744,13 +734,11 @@ call_or_convert = (
 // above diverted the bodiless declarations that HAVE floors (the loop
 // intrinsic, `null_ptr`, the two format doors, `to_<prim>`); what
 // reaches here is a signature a program wrote with nothing behind it.
-//
 // The refusal lives at the CALL and not at the DECLARATION on purpose:
 // the seed walk queues every non-generic free function in std before
 // any call is lowered (`gen_c_decl.seed_named`), and std declares
 // bodiless functions it has not grown floors for yet (`std/core/path`),
 // so a declaration-time check would refuse the compiler's own build.
-//
 // The cross-module path refuses the same shape by name
 // (`gen_c_assoc.refuse_module_fn`); members never reach here
 // (`gen_c_member.method_fault`). This is the last path left that could
@@ -767,9 +755,132 @@ call_or_plain = (
 )
                  Res<(), AllocError> {
     bodyless(f).match({
-        true  => be.unsupported(id, "a call to a function with no body", out),
+        true  => be.ffi.match({
+            true  => be.call_extern(id, c, d, f, recv, ctx, out),
+            false => be.unsupported(
+                id,
+                "a call to a function with no body",
+                out
+            ),
+        }),
         false => be.call_signature(id, c, d, f, recv, ctx, out),
     })
+}
+
+call_extern = (
+    be   :: CBackend,
+    id   : ExprId,
+    c    : Call,
+    d    : Def,
+    f    : Function,
+    recv : Res<ExprId>,
+    ctx  : Ctx,
+    out  :: String
+) Res<(), AllocError> {
+    plain(f).match({
+        false => be.unsupported(
+            id,
+            "a generic function has no single foreign symbol",
+            out
+        ),
+        true  => {
+            inst ::= be.alloc.Inst();
+            sig  ::= be.alloc.Vec<TyId>();
+            be.signature_of(d, inst, sig).try().match({
+                false => be.unsupported(
+                    id,
+                    "a foreign function whose parameters have no written type",
+                    out
+                ),
+                true  => be.write_extern(id, c, d, f, sig, recv, ctx, out),
+            })
+        },
+    })
+}
+
+write_extern* = (
+    be   :: CBackend,
+    id   : ExprId,
+    c    : Call,
+    d    : Def,
+    f    : Function,
+    sig  : Vec<TyId>,
+    recv : Res<ExprId>,
+    ctx  : Ctx,
+    out  :: String
+) Res<(), AllocError> {
+    ret = be.foreign_ret(d, f).try();
+    be.foreign_types_spellable(ret, sig).match({
+        false => be.unsupported(
+            id,
+            "a foreign function with a type C cannot spell",
+            out
+        ),
+        true  => {
+            proto ::= be.alloc.String().try();
+            be.foreign_proto(d.name, f, ret, sig, proto).try();
+            be.need_extern(d.name, proto).try().match({
+                false => be.unsupported(
+                    id,
+                    "one foreign symbol declared with more than one signature",
+                    out
+                ),
+                true  => be.write_call(c, d, f, sig, d.name, recv, ctx, out),
+            })
+        },
+    })
+}
+
+foreign_ret = (be :: CBackend, d: Def, f: Function)
+              Res<TyId, AllocError> {
+    be.declared_ret(
+        f,
+        Ctx(
+            module: d.id.module.to_usize(),
+            ret: TyId(index: 0),
+            has_ret: false,
+            self_ty: TyId(index: 0),
+            has_self: false
+        )
+    )
+}
+
+foreign_types_spellable = (be: CBackend, ret: TyId, sig: Vec<TyId>) bool {
+    be.spellable(ret) && Range(0, sig.len).find((i) {
+        sig.get(i).match({
+            Ok(t) => !be.spellable(t),
+            None  => true,
+        })
+    }).match({ Ok(_) => false, None => true })
+}
+
+foreign_proto = (
+    be   :: CBackend,
+    name : str,
+    f    : Function,
+    ret  : TyId,
+    sig  : Vec<TyId>,
+    out  :: String
+) Res<(), AllocError> {
+    out.add_bytes("extern ").try();
+    be.ctype(ret, out).try();
+    out.fmt(" {name}(").try();
+    (f.params.len == 0).match({
+        true  => out.add_bytes("void"),
+        false => be.foreign_params(f, sig, out),
+    }).try();
+    out.add_bytes(")")
+}
+
+foreign_params = (be :: CBackend, f: Function, sig: Vec<TyId>, out :: String)
+                 Res<(), AllocError> {
+    f.params.loop((h, i, p) {
+        (i > 0).then(() { out.add_bytes(", ").try() });
+        ty = sig.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
+        be.ctype(ty, out).try();
+        (p.mutable).then(() { out.add_bytes(" *").try() });
+    });
+    Ok(())
 }
 
 // The primitive a bodyless one-parameter `to_<prim>` names. Asked of
@@ -906,7 +1017,6 @@ call_settled = (
 // resolves queues the function it resolved to. Without it a translation
 // unit calls symbols nothing defines — `cc` catches it, but a compiler
 // shouldn't have emitted it.
-//
 // THE SYMBOL IS BUILT ONCE, USED TWICE — as the queue's identity and the
 // call's text — so "was this already emitted" and "what do I call" are
 // the same question. Two `Vec` instantiations are two entries exactly
@@ -947,7 +1057,6 @@ decl_fault = (x: Decl) str {
 // The declared parameter types of a function, in order, at this
 // instantiation. `false` when the declaration isn't a function or a
 // parameter has no written type to read.
-//
 // THE TYPE PARAMETERS GO BACK IN SCOPE around the read: `(v: T)` is a
 // written type and `T` means nothing unless bound — `gen_c_mono.zen`'s
 // `enter_tparams`, and its header says why.
@@ -1063,10 +1172,21 @@ write_written_args = (
     ctx   : Ctx,
     out   :: String
 ) Res<(), AllocError> {
+    written ::= first > 0;
+    unknown = be.check.types.unknown().try();
     c.args.loop((h, i, a) {
-        (i + first > 0).then(() { out.add_bytes(", ").try() });
-        hold = be.holds(c, i + first, first);
-        be.write_arg_at(a.value, i + first, hold, f, sig, ctx, out).try();
+        pos = i + first;
+        ty  = sig.get(pos).match({ Ok(t) => t, None => unknown });
+        be.has_storage(ty).match({
+            false => be.deliver(a.value, ctx, ty, Dest.Discard),
+            true  => {
+                written.then(() { out.add_bytes(", ").try() });
+                hold = be.holds(c, pos, first);
+                be.write_arg_at(a.value, pos, hold, f, sig, ctx, out).try();
+                written = true;
+                Ok(())
+            },
+        }).try();
     });
     Ok(());
 }
@@ -1074,7 +1194,6 @@ write_written_args = (
 // A `vararg<T>` PARAMETER TAKES ONE C ARGUMENT, NOT N. The fixed prefix
 // is written as it always was; everything from `slot` on becomes a single
 // pack value, built here.
-//
 // `slot` is a SIGNATURE index and so is `i + first`, which is what lets a
 // ufcs receiver occupy position zero without shifting the pack.
 write_to_pack = (
@@ -1104,7 +1223,6 @@ write_to_pack = (
 // automatic storage in the CALLING block, which is exactly long enough
 // for the call and no longer — so the pack borrows and never owns, and
 // `sema_vararg.zen` refuses every position it could outlive the call from.
-//
 // No allocation, so `make bench-allocs` is untouched by a vararg call.
 write_pack = (
     be    :: CBackend,
@@ -1125,7 +1243,6 @@ write_pack = (
 // straight through. This is the whole point of `vararg<T>` over `...` —
 // a marker carrying no element type has no C value to hand on — and it
 // is a struct copy, not a rebuild.
-//
 // The two readings of one slot cannot collide because `vararg` does not
 // nest: an argument of the pack's own type is never also one of its
 // elements.

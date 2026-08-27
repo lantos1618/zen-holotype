@@ -110,8 +110,8 @@ member_kind = (
     p.peek().kind.match({
         Colon        => p.after_colon(name, exported, tparams, typed, false),
         ColonColon   => p.after_colon(name, exported, tparams, typed, true),
-        Eq           => p.after_assign(name, exported, tparams, false),
-        ColonColonEq => p.after_assign(name, exported, tparams, true),
+        Eq           => p.after_assign(name, exported, tparams, false, typed),
+        ColonColonEq => p.after_assign(name, exported, tparams, true, typed),
         _            => {
             p.error(
                 "expected `:`, `::`, `=` or `::=` after a member's name"
@@ -216,13 +216,39 @@ after_assign = (
     name       : Ident,
     exported   : bool,
     tparams    : Vec<TParam>,
-    rebindable : bool
+    rebindable : bool,
+    typed      : bool
 ) Res<MemberKind, AllocError> {
     p.bump().try();
     p.fn_member_ahead().match({
         true  => p.fn_member(name, exported, tparams, rebindable),
-        false => p.supplied_member(name, exported, rebindable),
+        false => typed.match({
+            true  => p.no_type_member(name, exported, rebindable),
+            false => p.supplied_member(name, exported, rebindable),
+        }),
     });
+}
+
+// `x = value` belongs to records; every struct member writes a type.
+// Consume the value to keep recovery at the next member.
+no_type_member = (
+    p          :: Parser,
+    name       : Ident,
+    exported   : bool,
+    rebindable : bool
+) Res<MemberKind, AllocError> {
+    p.error_at(
+        "a member of a struct body writes its type: `x: i32`, or `x :: T = v` for a default",
+        name.span
+    ).try();
+    value = p.expr().try();
+    Ok(MemberKind.Field(Field(
+        name: name,
+        exported: exported,
+        mutable: rebindable,
+        type: None,
+        value: Ok(value),
+    )));
 }
 
 fn_member_ahead = (p :: Parser) bool {

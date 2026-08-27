@@ -107,20 +107,13 @@ Non-negotiable, in this order. A row is not done until all four are green.
    changed line to its enclosing C definition before concluding anything: the
    owners must all be symbols from your own file, plus pure insertions into
    the shared tag `enum {}` for any new enum you introduced.
-4. `make fmt` and `python3 scripts/style.py`.
+4. `make fmt`.
 
 **Do NOT gate on `make build`.** It is blind to every resolution-shaped
 defect this tree has ever had; a 1,195-name cull passed `make build` and then
 failed fixpoint with 5 diagnostics and the corpus with 16 more.
 
 **Do not regenerate the seed.** The integrator does that once, at the end.
-
-**`scripts/style.py` is the ONE file outside your lane you must touch.** It
-holds `UFCS_OWED[<your file>] = <count>`; removing chain links removes free
-function call sites, and `debt()` FAILS on a ledger that overstates, so the
-number must come down with the code. Every one of the 27 lanes edits this one
-dict — the integrator resolves the conflict by RE-MEASURING with
-`python3 scripts/style.py`, never by picking a side.
 
 **Do not edit your own row in this table.** 27 lanes editing one table is 27
 conflicts. Report `after` and the commit sha; the integrator fills it in.

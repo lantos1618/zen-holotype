@@ -1,17 +1,14 @@
 // src/gen/gen_c/gen_c_build.zen
 // `Point(x: 3, y: 4)` — what a callee that names a TYPE is.
-//
 // `gen_c_call.zen` owns the question — "`Point(x: 3, y: 4)` and
 // `area(p)` are the same AST node. Which one it is depends on what the
 // callee NAMES" — and this file is the answer when it names a type.
 // Two files because building a value and calling a function share
 // nothing past the node.
-//
 // A C COMPOUND LITERAL WITH ONE DESIGNATED INITIALISER PER ARGUMENT.
 // Designators, not positions: Zen's construction form is `name: value`
 // and the emitted field order is the declaration's, so positions would
 // tie the two together for no gain.
-//
 // WHAT IS BEING BUILT IS SEMA'S ANSWER FOR THIS NODE, and the
 // declaration alone is only the fallback — `construct_type` argues it.
 
@@ -29,15 +26,13 @@ CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 constructed, recv_inst, intern_named = gen.gen_c.gen_c_mono
 unify, arg_type, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
-ctype, field_type, request_type = gen.gen_c.gen_c_type
+ctype, field_type, request_type, has_storage = gen.gen_c.gen_c_type
 expr, ty_of = gen.gen_c.gen_c_expr
 is_pure_value = gen.gen_c.gen_c_const
 holds, value_held = gen.gen_c.gen_c_expr
 Call = std.ast
 
-// -----------------------------------------------------------------
 // construction
-// -----------------------------------------------------------------
 
 construct* = (
     be  :: CBackend,
@@ -115,7 +110,6 @@ construct_struct = (
 }
 
 // WHAT A CONSTRUCTION'S TYPE ARGUMENTS ARE, when nothing else said.
-//
 // `Entry(hash: h, key: key, value: value)` inside `Map<K, V>` builds an
 // `Entry<K, V>`, and only the ARGUMENTS say so: sema records a
 // construction's type under the node only inside a body it CHECKED, and
@@ -228,7 +222,6 @@ is_prim_ty = (be :: CBackend, ty: TyId) bool {
 // `Range(0, v.len)` is std's ordinary way to walk an index space. Asking
 // of the type's ARGUMENTS made these unwritable; asking of its STORAGE
 // asks about what's actually emitted.
-//
 // Two open `Range`s mangle alike (right here, wrong for `Box<T>`: `held:
 // T` is storage, so `Box` still refuses). THE STRUCT'S OWN PARAMETERS GO
 // BACK IN SCOPE FOR THE READ: `Entry<K, V>` and `Map<K, V>` spell
@@ -236,7 +229,7 @@ is_prim_ty = (be :: CBackend, ty: TyId) bool {
 // `K` to the enclosing declaration's `Var` — a different type of the
 // same name — so every `Map` in the language was refused.
 layout_open = (be :: CBackend, s: Struct, d: Def, ty: TyId)
-              Res<bool, AllocError> {
+    Res<bool, AllocError> {
     dctx  = be.decl_ctx_of(d);
     dinst = be.recv_inst(ty).try();
     mark  = be.enter_tparams(s.tparams, d.qname).try();
@@ -334,24 +327,19 @@ write_initialisers = (
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // defaults
-//
 // "`= default` makes a field optional at construction" — a field the
 // call omitted is not absent, it's the value its DECLARATION wrote.
 // Previously the list was built from arguments alone, left to C's
 // `{0}` — wrong for any default but zero, which is why it went unnoticed
 // (every default in std happened to already be zero).
-//
 // WRITTEN IN THE DECLARING MODULE'S CONTEXT, not the call's: the
 // expression names what that module can see; read at the call site, a
 // default like `Pos(line: 1, col: 1)` resolves against whatever `Pos`
 // the caller imported, or nothing at all.
-//
 // APPENDED AFTER THE ARGUMENTS, not merged into declaration order — C99
 // 6.7.8 lets designators come in any order, and appending keeps every
 // construction with no defaults emitting byte-identical C to before.
-// -----------------------------------------------------------------
 
 defaulted_initialisers = (
     be    :: CBackend,
@@ -402,7 +390,6 @@ default_initialiser = (
 // `is_pure_value` is the same gate a constant read is held to, and for
 // the same reason: this expression is emitted at every construction
 // site, so it may name no function and read no frame.
-//
 // A DEFAULT THAT FAILS IT IS REPORTED, NOT DROPPED. It used to be
 // dropped, on the claim that `Vec`'s `data :: Ptr<T> = null_ptr<T>()`
 // was the only shape reaching it and zeroing gave the same answer. That
@@ -521,7 +508,6 @@ arg_supplies = (
 // `Param` with no `value` came out as a C error naming a member the
 // author never wrote — or, for a bare `None`, as `codegen has no type
 // for None`, the field lookup having found nothing to type it by.
-//
 // A field that doesn't exist is a diagnostic SEMA owes and neither
 // implementation raises. Until one does, the two must at least agree,
 // and the bootstrapper agrees by walking DECLARED fields.
@@ -664,12 +650,14 @@ storage_name = (
 }
 
 is_storage = (be :: CBackend, m: Member, dinst: Inst, dctx: Ctx) bool {
-    be.field_type(m, dctx, dinst).match({ Ok(_) => true, None => false })
+    be.field_type(m, dctx, dinst).match({
+        Ok(t) => be.has_storage(t),
+        None  => false,
+    })
 }
 
 // The declared type of the field an argument supplies, so a literal
 // argument takes the field's width, not the widest one.
-//
 // Written as named helpers, not a closure chain: a `.then` whose body
 // captures several enclosing parameters is inlined wrongly, and this
 // shape once produced a `Map` instantiated at unresolved type arguments

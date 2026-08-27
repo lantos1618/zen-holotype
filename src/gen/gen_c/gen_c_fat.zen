@@ -1,38 +1,10 @@
 // src/gen/gen_c/gen_c_fat.zen
-// A bound used as a value, and the only place this backend dispatches
-// through a pointer.
-//
-// "A struct whose fields happen to be functions, used as a bound, is
-// what other languages call a trait" — recognised BY ITS SHAPE: it
-// declares behaviour and no storage. A value of one is the fat value
-// DESIGN.md specifies — a receiver pointer plus one function pointer
-// per method, built on the stack, copied by value, never boxed or
-// allocated. Deliberately Zig's `std.mem.Allocator` shape, which is why
-// the Alloc law is satisfied rather than side-stepped.
-//
-// The distinction this file exists to keep: "can this struct be a
-// bound" and "can it be a fat value" are TWO questions, and only the
-// second is about shape — DESIGN.md's own worked example impls `Rect`,
-// which is nothing but storage. Most call sites resolve statically:
-// the receiver's concrete type is known, so the impl's function is
-// called directly and monomorphised, no record involved. A fat value
-// is built ONLY where a value's STATIC type is the bound (`alloc:
-// Alloc` holding an `Arena`). Conflating the two makes every call
-// indirect and throws the monomorphisation away.
-//
-// Erasure is what lets one slot serve every instantiation: a record is
-// a function of the DECLARATION alone, so a generic member —
-// `realloc<T>(p: Ptr<T>, count: usize)` — takes one slot, compiled at
-// the byte type `Ptr<u8>`, with a `size_t` beside it carrying the
-// element size erasure dropped — the same trade `raw` states one level
-// down ("raw is bytes and nothing more"). The count reaching the slot
-// is therefore an ELEMENT count, and the multiplication lives in
-// exactly one place: the thunk.
-//
-// A thunk is a call and never a cast: slots are erased and the impl's
-// function is not, so casting the function pointer would be undefined
-// behaviour. One `void *`-receiving shim per (impl member, slot), named
-// after the function it calls so two requests for one shim are one.
+// Builds a bound used as a value: receiver pointer plus one function
+// pointer per method. Ordinary impl calls remain static; this record is
+// built only when the value's static type is the bound.
+// Generic slots erase pointer elements to bytes and carry element size.
+// A per-(impl member, slot) thunk converts and calls the real function;
+// casting the function pointer would be undefined C behavior.
 
 ExprId, Decl, Struct, Member = std.ast
 Function, Param, TParam = std.ast
@@ -55,14 +27,12 @@ enter_tparams, leave_tparams, enter_struct_tparams = gen.gen_c.gen_c_mono
 ctype, declarator, is_unit, request_type, declared_ret = gen.gen_c.gen_c_type
 is_ptr_named = gen.gen_c.gen_c_type
 ty_of = gen.gen_c.gen_c_expr
-declare_temp = gen.gen_c.gen_c_flow
+init_temp = gen.gen_c.gen_c_flow
 Site, site_of, member_at, join = gen.gen_c.gen_c_member
 impl_member, bodied_fn = gen.gen_c.gen_c_impl
 write_cast = gen.gen_c.gen_c_bound
 
-// -----------------------------------------------------------------
 // which structs these are
-// -----------------------------------------------------------------
 
 // One question about shape and nothing else: a struct that declares at
 // least one function member and NO storage. A storage field has no
@@ -121,12 +91,9 @@ is_storage = (m: Member) bool {
     m.kind.match({ Field(_) => true, _ => false })
 }
 
-// -----------------------------------------------------------------
 // the slots
-//
 // One slot per declared member, in declaration order: determinism, and
 // two programs' records compiled to the same shape.
-// -----------------------------------------------------------------
 
 Slot* = {
     name*: str,
@@ -314,12 +281,9 @@ same_named = (out: Vec<Slot>, name: str) usize {
     n
 }
 
-// -----------------------------------------------------------------
 // the record, as C
-// -----------------------------------------------------------------
 
 // `<ret> (*<slot>)(void *, <the member's own parameters>, size_t ..)`.
-//
 // The trailing `size_t`s are the element sizes the erasure dropped, one
 // per type parameter, and the receiver is `void *` because a record
 // serves every impl at once.
@@ -378,9 +342,7 @@ request_named_only = (be :: CBackend, t: TyId) Res<(), AllocError> {
     })
 }
 
-// -----------------------------------------------------------------
 // building one
-// -----------------------------------------------------------------
 
 // `((Alloc){ .zg_self = (void *)&a, .zu_mraw = zg_v.., .. })` — the
 // header's record, built on the stack. The receiver must outlive it,
@@ -416,9 +378,7 @@ slot_init = (be :: CBackend, s: Slot, cty: TyId, out :: String)
     })
 }
 
-// -----------------------------------------------------------------
 // the thunk
-// -----------------------------------------------------------------
 
 // The shim the header names, or nothing when the impl supplies no
 // answer.
@@ -676,9 +636,7 @@ cast_arg = (
     })
 }
 
-// -----------------------------------------------------------------
 // a concrete value reaching a slot whose type is the bound
-// -----------------------------------------------------------------
 
 // Only where the DESTINATION's static type is a bound and the value's
 // own type is not — at an argument, at a field, at a return, one rule
@@ -735,17 +693,13 @@ write_amp = (code: str, out :: String) Res<(), AllocError> {
 
 spill_address = (be :: CBackend, code: str, cty: TyId, out :: String)
                 Res<(), AllocError> {
-    tmp ::= be.alloc.String().try();
-    sym_gen(tmp, "t", be.next_tmp()).try();
-    be.declare_temp(cty, tmp.view()).try();
-    be.set_line(tmp.view(), code).try();
+    tmp ::= be.init_temp(cty, "t", code).try();
     out.fmt("&{}", tmp.view())
 }
 
 // A C place is a name, a field hop, a dereference or an index — never a
 // call, the one thing whose address may not be taken. A call is
 // recognised by an open paren following a name, which `(*p).x` is not.
-//
 // Conservative in the safe direction: unrecognised text gets a
 // temporary, correct at the cost of one copy.
 is_place = (code: str) bool {

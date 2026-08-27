@@ -1,0 +1,63 @@
+Alloc, AllocError = std.mem
+Range = std.core
+Vec = std.collections
+str = std.text
+Cli, cli = zen
+
+main = (env: Env) Res<i32, AllocError> {
+    a     ::= env.mem.alloc();
+    flags ::= a.Vec<str>();
+    flags.add("--entry").try();
+    flags.add("-o").try();
+    flags.add("--emit-c-dir").try();
+    flags.add("--repeat").try();
+    flags.add("--permute").try();
+
+    Range(0, flags.len).loop((h, i) {
+        next = (i == 0).match({ true => "--emit-c", false => "--ffi" });
+        flag = flags.get(i).match({ Ok(s) => s, None => "" });
+        show(missing(a, flag, next).try());
+    });
+    show(valid(a).try());
+    Ok(0);
+}
+
+missing = (a: Alloc, flag: str, next: str) Res<Vec<str>, AllocError> {
+    argv ::= a.Vec<str>();
+    argv.add("zen").try();
+    argv.add("build").try();
+    argv.add("src").try();
+    argv.add(flag).try();
+    argv.add(next).try();
+    Ok(argv);
+}
+
+valid = (a: Alloc) Res<Vec<str>, AllocError> {
+    argv ::= a.Vec<str>();
+    argv.add("zen").try();
+    argv.add("build").try();
+    argv.add("--ffi").try();
+    argv.add("--entry").try();
+    argv.add("main.zen").try();
+    argv.add("-o").try();
+    argv.add("out.c").try();
+    argv.add("src").try();
+    argv.add("--emit-c").try();
+    Ok(argv);
+}
+
+show = (argv: Vec<str>) () {
+    cli(argv).match({
+        Build(j)   => println(
+            "build root={} entry={} out={} ffi={}",
+            j.root,
+            j.entry,
+            j.out,
+            j.ffi
+        ),
+        Usage(w)   => println("usage `{}`", w),
+        Missing(f) => println("missing `{}`", f),
+        Fmt(_)     => println("fmt"),
+        Later(n)   => println("later {}", n),
+    });
+}

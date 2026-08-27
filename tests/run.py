@@ -93,8 +93,8 @@ MUST_FAIL = "must-fail"
 EXAMPLE = "example"
 
 # A .zen under example/ that is NOT a program, with the reason. Ratchets both
-# ways, like scripts/UNWIRED.txt: a name here that no longer exists is an
-# error, so the exemption cannot outlive the file it excuses.
+# ways: a name here that no longer exists is an error, so the exemption cannot
+# outlive the file it excuses.
 #
 # `build.zen` declares `build = (b :: Builder) Res<(), BuildError>` and has no
 # `main`. It is a build FILE -- there is nothing to link and nothing to run,
@@ -731,8 +731,8 @@ def stage(test: Test, tool: Toolchain, work: Path) -> Path:
         # `= std.parse`), so the second segment is scanned for directly. A
         # kept sublayer may name another (`std.parse` imports `std.lex`), so
         # the scan runs to a fixpoint; a pruned sublayer's own sources never
-        # vote. Plain std may not import the sublayer (scripts/style.py's
-        # layer rule), so nothing else can smuggle it in.
+        # vote. Plain std may not import the sublayer, so nothing else can
+        # smuggle it in.
         sublayer = root / "std"
         if sublayer.is_dir():
             def votes_in(path: Path) -> set[str]:
@@ -881,6 +881,12 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
         prog_env = dict(os.environ)
         prog_env["V" * 5039] = "hello"
         prog_env["B" * 4096] = "hello"
+
+    if test.tid == "corpus/file-io/symlink_loop_is_failed":
+        try:
+            (work / "loop").symlink_to("loop")
+        except OSError as e:
+            return Result(test, False, [f"the harness could not stage the symlink loop: {e}"])
 
     prog = run_process([str(binary)], args.run_timeout, cwd=work,
                        feed=test.stdin_bytes, env=prog_env)

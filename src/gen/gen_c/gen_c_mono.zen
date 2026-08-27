@@ -1,12 +1,10 @@
 // src/gen/gen_c/gen_c_mono.zen
 // Monomorphisation: what the backend does with a type parameter.
-//
 // C has no generics, so a generic function is emitted ONCE PER DISTINCT
 // SET OF TYPE ARGUMENTS, with the arguments in its mangled name.
 // `sema_inst.zen` already answers what each parameter became, at a call
 // site and a generic receiver both; this file is the three things a
 // BACKEND has to do that sema does not:
-//
 //   - READ THE ANSWER BACK. `inst_at` is `Checker.resolved_inst` with the
 //     empty instantiation for a miss, so a non-generic call and a generic
 //     one go down one path.
@@ -19,7 +17,6 @@
 //     letter, so two instantiations would become one symbol and `cc`
 //     would silently pick whichever body it saw last. `has_var` is asked
 //     before anything is emitted, and the fault names the function.
-//
 // Order is DECLARATION ORDER, nothing else: an `Inst` is two parallel
 // lists filled from `tparams`, never a `Map`, so the `I` section of a
 // symbol is a pure function of the instantiation — the property the
@@ -57,7 +54,6 @@ intern_res_open* = (c :: Checker, value: TyId) Res<TyId, AllocError> {
 }
 
 // THE TYPE A CONSTRUCTION BUILDS, at this emission's instantiation.
-//
 // `Vec(data: .., cap: 0)` inside `Vec<T>`'s own constructor builds a
 // `Vec<T>`, not a bare `Vec` — sema records exactly that, so the
 // backend must agree or intern two different types under one name.
@@ -99,7 +95,6 @@ decl_tparams_of = (c :: Checker, d: Def, x: Decl, out :: Vec<TyId>)
 
 // THE TYPE A DECLARATION NAMES AT ITS OWN PARAMETERS: `Vec<T>`, never
 // `Vec<i32>`.
-//
 // Sema memoises an expression's type under its node ID and nothing
 // else (`sema_inst.zen`: "a generic body is checked EXACTLY ONCE,
 // generically, with its parameters as `Var`s"), so an answer computed
@@ -107,7 +102,6 @@ decl_tparams_of = (c :: Checker, d: Def, x: Decl, out :: Vec<TyId>)
 // body lowered at a CONCRETE `@Self` that wrote that answer straight
 // into the memo once emitted `Vec<u8>.add` calling `Vec<Row>.grow` —
 // caught by `cc`, but wouldn't be for two types of one width.
-//
 // So a generic body is read GENERICALLY and `sub` turns every answer
 // into the one this emission is at.
 open_named* = (be :: CBackend, decl: DeclId) Res<Res<TyId>, AllocError> {
@@ -152,9 +146,7 @@ named_at = (
     c.types.named(decl, qname, name, args)
 }
 
-// ---------------------------------------------------------------------
 // reading the answer back
-// ---------------------------------------------------------------------
 
 // What this call instantiated its callee at — the header's first
 // bullet, at the site.
@@ -180,12 +172,9 @@ recv_inst* = (be :: CBackend, rty: TyId) Res<Inst, AllocError> {
 // method's. One declaring parameters of its own would need the two
 // concatenated; `gen_c_member.method_fault` refuses it instead.
 
-// ---------------------------------------------------------------------
 // substituting
-// ---------------------------------------------------------------------
 
 // A type read out of sema, in terms of the instantiation being lowered.
-//
 // EVERY TYPE THE BACKEND READS GOES THROUGH HERE: sema checks a generic
 // body exactly once, generically (`open_named` above), so the backend
 // is the one that knows this emission is the `i32` one.
@@ -202,7 +191,6 @@ sub_with* = (be :: CBackend, ty: TyId, inst: Inst) Res<TyId, AllocError> {
 
 // "IS THIS TYPE STILL OPEN", ASKED OF EVERY EMPTY SLOT AND NOT ONLY OF
 // A FREE PARAMETER.
-//
 // `gen_name.tcode` writes ONE letter — `q` — for a `Var`, `Infer`, and
 // `Unknown` alike, since none of the three names a type C could be
 // handed. `has_var` asks about the first only, because it was written for
@@ -210,7 +198,6 @@ sub_with* = (be :: CBackend, ty: TyId, inst: Inst) Res<TyId, AllocError> {
 // be spelled". `Res<Ptr<Unknown>, E>` is the gap: no `Var` in it, so
 // `has_var` says settled, but a temporary declared at it is a C struct
 // with an unresolved element `cc` rejects.
-//
 // The walk is `sema_inst.has_var`'s, one variant wider; here and not
 // beside it because the reason is a BACKEND one — what has a C
 // spelling — and sema has no stake in it.
@@ -252,14 +239,12 @@ inst_open* = (be: CBackend, inst: Inst) bool {
 }
 
 // THE CALL'S INSTANTIATION, IN THE CALLER'S TERMS.
-//
 // Sema records what the CALLEE's parameters became, and inside a
 // generic body that's often the CALLER's parameter: `Vec<T>.add`
 // calling `alloc.realloc<T>(..)` instantiates `realloc` at `T`, concrete
 // only once the enclosing emission says which `T`. Each argument is put
 // through the instantiation being lowered, giving a list every reader
 // can mangle.
-//
 // Rebuilt rather than edited because an `Inst` is a value a memo holds:
 // sema's copy must not change because a backend read it. A parameter
 // the call left free is bound TO ITSELF, keeping the list's length — a
@@ -295,21 +280,17 @@ settle_bound = (be :: CBackend, v: TyId, t: TyId, out :: Inst)
     out.bind(v, arg)
 }
 
-// ---------------------------------------------------------------------
 // what the ARGUMENTS say a parameter became
-//
 // Sema records an instantiation at a call and a generic receiver, but
 // only inside a body it CHECKED — top-level declarations only. Calls
 // inside a member body arrive with nothing recorded (`Map<K, V>.set` is
 // made of them), so the arguments are asked instead.
-//
 // STRUCTURAL AND TOTAL: a declared type mentioning no parameter binds
 // nothing, and a shape that doesn't line up binds nothing rather than
 // guessing — the caller checks afterwards that every parameter came out
 // bound. FIRST BINDING WINS (`Inst.bind`'s own rule), so
 // `<T>(a: T, b: T)` against two different types is a mismatch someone
 // else reports, not a silent rebind.
-// ---------------------------------------------------------------------
 
 unify* = (be :: CBackend, declared: TyId, actual: TyId, out :: Inst)
          Res<(), AllocError> {
@@ -392,13 +373,10 @@ slot_ty = (be :: CBackend, name: str) Res<TyId> {
     })
 }
 
-// ---------------------------------------------------------------------
 // putting the parameters back in scope
-//
 // The header's second bullet, at the site: `type_from_ast` reads a
 // WRITTEN type, meaningless unless `T` is bound — so the pair goes
 // around the smallest span that reads one.
-// ---------------------------------------------------------------------
 
 enter_tparams* = (be :: CBackend, tparams: Vec<TParam>, owner: str)
                  Res<usize, AllocError> {

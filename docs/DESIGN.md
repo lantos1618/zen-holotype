@@ -27,7 +27,7 @@ src/std/...            // the stdlib specified below. ~34 modules.
 
 # How the compiler gets built
 
-The bootstrap was a throwaway: **Python + a tree-sitter grammar → the real compiler → `gen_c` → the generated C ships as stage 0.** It has done its job and is deleted; a user needs only a C compiler to build Zen, and a developer regenerating the seed needs the seed. The tree-sitter grammar outlived the bootstrap, as planned, as the editor and LSP grammar — and as the lint gates' parser (`tools/parse/`).
+The bootstrap was a throwaway: **Python + a tree-sitter grammar → the real compiler → `gen_c` → the generated C ships as stage 0.** It is deleted; a user needs only a C compiler, while the tree-sitter grammar remains for editors and LSP.
 
 **The grammar is written first, not extracted later.** It is the stage-0 artifact anyway, and writing the rules rather than more examples is what surfaces the ambiguities — the first one already found is that `Alias = Shape` is indistinguishable from a one-variant enum unless the grammar says which.
 

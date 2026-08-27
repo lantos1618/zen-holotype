@@ -38,6 +38,7 @@ TyId, TyRes = sema.sema_ty
 SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 Found, members_of = sema.sema_member
+storage_seat_name = sema.sema_supply
 check_literal = sema.sema_trap
 type_of = sema.sema_type
 
@@ -522,19 +523,31 @@ arms_disagree = (c :: Checker, node: Expr, got: TyId, want: TyId)
 // other place a value lands somewhere it didn't name, into the field's
 // declared type.
 //
-// Named arguments only — a positional argument to a constructor is a
-// different resolution, not this rule's to interpret.
 check_ctor_fields* = (c :: Checker, call: Call, ty: TyId, ctx: Ctx)
                      Res<(), AllocError> {
-    call.args.loop((h, a) { c.check_ctor_field(a, ty, ctx).try() });
+    call.args.loop((h, i, a) { c.check_ctor_field(a, i, ty, ctx).try() });
     Ok(());
 }
 
-check_ctor_field = (c :: Checker, a: Arg, ty: TyId, ctx: Ctx)
+check_ctor_field = (c :: Checker, a: Arg, i: usize, ty: TyId, ctx: Ctx)
                    Res<(), AllocError> {
     a.name.match({
-        None   => Ok(()),
+        None   => c.check_positional_field(a, i, ty, ctx),
         Ok(nm) => c.check_named_field(a, nm.span, nm.text, ty, ctx),
+    })
+}
+
+check_positional_field = (
+    c   :: Checker,
+    a   : Arg,
+    i   : usize,
+    ty  : TyId,
+    ctx : Ctx
+) Res<(), AllocError> {
+    name = c.storage_seat_name(ty, i).try();
+    name.eq("").match({
+        true  => Ok(()),
+        false => c.check_named_field(a, a.span, name, ty, ctx),
     })
 }
 

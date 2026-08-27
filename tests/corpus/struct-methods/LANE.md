@@ -56,6 +56,8 @@ path -- the one-line compiler change that breaks it.
   without binding each to its parameter type: `b.span()` answers P's body
   (34) instead of Box's (13); both types shaped alike so the wrong symbol
   still links.
+- paren_wrapped_lambda_keeps_its_arity/ -- punctuation cannot hide a
+  closure's arity from method overload filtering.
 
 ## A TEST WRITTEN, RUN, AND WITHDRAWN
 
@@ -70,9 +72,8 @@ body answers, because today's answer is the bug's answer.
 
 Same name + same arity + same receiver type, one method one free function:
 DESIGN.md says this cannot happen ("Zen has no overloading -- one name, one
-function, always"), and scripts/ufcs_collisions.py refuses the pair in
-src/ -- but the compiler accepts it silently and resolves every spelling to
-the METHOD:
+function, always"), but the compiler accepts it silently and resolves every
+spelling to the METHOD:
 
     W = {
         v: i32,
@@ -110,4 +111,4 @@ Also verified while probing (behaviour, not bugs):
   that path". Single-file runs pass, so runzen.sh stages multi-module roots
   differently than tests/run.py does. Not this lane's area; flagging it.
 
-TESTS: 16
+TESTS: 18

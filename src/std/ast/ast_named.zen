@@ -1,35 +1,8 @@
 // src/std/ast/ast_named.zen
-// A cursor position, and WHAT THE THING UNDER IT IS.
-//
-// `ast_find.zen` answers "which node is at this position", a different
-// question. Three of the places a user hovers most are not nodes in any
-// arena at all:
-//
-//     add = (a: i32, b: i32) i32 { s = a + b; s }
-//     ^^^     ^                    ^
-//     |       |                    the target of a Bind, an Expr the
-//     |       |                    checker BOUND rather than typed
-//     |       the name of a Param, an `Ident` held by value
-//     the name of a Function, an `Ident` held by value
-//
-// `Ident` is not an arena family (`ast_arena.zen`): a name closes no
-// cycle, so it is held by value in its parent with no id. `node_at`
-// cannot see one, so a hover built only on it answers `null` at every
-// BINDING SITE while answering at every use — 3 of 12 positions above.
-//
-// So this file scans for a NAME, the same shape as `ast_find.zen` — a
-// fold over what the arena already holds — and hands back a `Tell`: what
-// to say, and which span to underline.
-//
-// NOTHING HERE ALLOCATES and nothing here knows what a type is called. A
-// `Tell` names the AST node whose type is the answer; turning that into
-// text is the caller's half (`lsp_hover.zen` needs the checker's memos),
-// keeping "which name is under the cursor" testable without a `Checker`.
-//
-// MOVED HERE from `src/lsp/lsp_decl.zen` on its second caller —
-// `definition` beside hover — per STYLE.md's second-caller rule and
-// `design_lsp.md` §1: a missing query belongs in `src/std/ast/` or
-// `src/sema/`, never `src/lsp/`.
+// Finds the declaration name under a cursor. Unlike `ast_find.node_at`,
+// this sees by-value `Ident`s (function/parameter names) and bind targets,
+// which have no arena id. `Tell` retains the node whose checked type is
+// the answer; LSP owns presentation and allocation.
 
 str = std.text
 Range = std.core
@@ -37,6 +10,7 @@ Pos, Span = std.ast.ast_span
 ExprId, TypeId = std.ast.ast_id
 Ast = std.ast.ast_arena
 Decl, Function, Param, Member, Const, Bind, Stmt = std.ast.ast_node
+Ident, Import = std.ast
 node_at, in_span = std.ast.ast_find
 
 // The type the checker gave THIS node. `span` is the name's own span,
@@ -54,11 +28,13 @@ ValueAt* = {
     id*: ExprId,
 }
 
-// What to say about the cursor, in the form that says where the answer
-// comes from. `Nothing` is a real answer, returned far more often than
-// the others (whitespace, punctuation, a pattern binder), becoming
-// `null` on the wire — read as "not supported here", not a claim.
-Tell* = Nothing | Sig(Function) | OfType(TypeAt) | OfValue(ValueAt)
+// Imports carry their spelling because the binding has no expression or
+// type id; definition can resolve it while hover returns no answer.
+Tell* = Nothing
+    | Sig(Function)
+    | OfType(TypeAt)
+    | OfValue(ValueAt)
+    | Imported(Ident)
 
 // THE QUERY. A name first, a node second — containment, not preference:
 // an `Ident`'s span is the tightest span at a declaring position, while
@@ -97,10 +73,10 @@ pick = (have: Tell, cand: Tell) Tell {
 
 // --- names ------------------------------------------------------------
 
-// Every declared name in the compilation, module level and nested. TWO
-// SCANS: `Module.decls` for the top level, `Block.stmts` for a nested
-// one — not a recursion into the first, since every block is already
-// flat in the arena.
+// Every declared or imported name in the compilation, module level and
+// nested. TWO SCANS: `Module.decls` for the top level, `Block.stmts` for
+// a nested one — not a recursion into the first, since every block is
+// already flat in the arena.
 named_at = (tree: Ast, file: str, p: Pos) Tell {
     found ::= Tell.Nothing;
     Range(0, tree.module_count()).loop((h, i) {
@@ -142,7 +118,25 @@ decl_told = (d: Decl, file: str, p: Pos) Tell {
         Struct(st)  => members_told(st.members, file, p),
         Impl(im)    => members_told(im.members, file, p),
         Enum(_)     => Tell.Nothing,
-        Import(_)   => Tell.Nothing,
+        Import(im)  => import_told(im, file, p),
+    })
+}
+
+// Every binding on the left of `A, B = some.module` is its own name and
+// its own cursor target. The module graph owns what it means; this AST
+// query carries only the spelling and the exact span to that resolver.
+import_told = (im: Import, file: str, p: Pos) Tell {
+    found ::= Tell.Nothing;
+    im.names.loop((h, n) {
+        found = pick(found, imported_told(n.name, file, p));
+    });
+    found;
+}
+
+imported_told = (name: Ident, file: str, p: Pos) Tell {
+    in_span(name.span, file, p).match({
+        true  => Tell.Imported(name),
+        false => Tell.Nothing,
     })
 }
 

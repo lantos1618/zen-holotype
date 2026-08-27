@@ -17,6 +17,8 @@
 //   textDocument/formatting            lsp_fmt.zen
 //   textDocument/codeAction            lsp_action.zen
 //   didOpen / didChange        the overlay, Full sync only
+//   workspace/didChangeWatchedFiles
+//                              retire a build whose disk inputs changed
 //   initialized / exit / didClose / $/cancelRequest
 //                              notifications, no reply and nothing to do
 //   everything else            -32601, with the method named
@@ -223,15 +225,34 @@ Server* = {
     }
 
     // `initialized`, `exit`, `didClose` and `$/cancelRequest` all mean
-    // "nothing to do here" and fall through the same `false` arm, named
-    // here rather than as four empty branches that would hide a fifth.
+    // "nothing to do here" and fall through the final arm.
     notified = (self :: @Self, tree: Jsons, req: JsonId, method: str)
                Res<(), AllocError> {
-        method.eq("textDocument/didOpen").match({
-            true  => self.opened(tree, req),
-            false => method.eq("textDocument/didChange").match({
-                true  => self.changed(tree, req),
-                false => written(),
+        handled: Res<Res<(), AllocError>> = loop<Res<(), AllocError>>((h) {
+            method.eq("textDocument/didOpen").then(() {
+                h.break(self.opened(tree, req))
+            });
+            method.eq("textDocument/didChange").then(() {
+                h.break(self.changed(tree, req))
+            });
+            method.eq("workspace/didChangeWatchedFiles").then(() {
+                h.break(self.watched())
+            });
+            h.break(written());
+        });
+        handled.match({ Ok(done) => done, None => written() })
+    }
+
+    // The VS Code client watches only `**/*.zen`, so the notification's
+    // paths need no second filter. Rebuild from the newest open document:
+    // walking from the changed dependency itself cannot discover modules
+    // that import it.
+    watched = (self :: @Self) Res<(), AllocError> {
+        (self.open.len == 0).match({
+            true  => written(),
+            false => self.open.get(self.open.len - 1).match({
+                None      => written(),
+                Ok(entry) => { self.notes.stales(entry); Ok(()) },
             }),
         })
     }

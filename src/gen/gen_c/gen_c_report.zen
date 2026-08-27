@@ -2,17 +2,33 @@
 // Four fault shapes, one per `GenFault` the lowerings raise. Each writes
 // `0` into the caller's buffer so the emitted C still parses around the
 // diagnostic — "A DIAGNOSTIC IS A VALUE, NOT A RAISE" (gen_diag.zen).
-//
 // Own file, not gen_c_state.zen's tail: callers span ~20 places, not
 // the few a shared tail would imply.
 
 // `ast.ast_id`, not `ast`: a lone `ExprId = ast` reads as a type alias
 // named `ast` rather than an import.
 ExprId = std.ast.ast_id
+Span = std.ast.ast_span
 str, String = std.text
 AllocError = std.mem
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
+LocalSlot = gen.gen_c.gen_c_frame
+
+closure_storage* = (
+    be   :: CBackend,
+    span : Span,
+    slot : LocalSlot,
+    what : str
+) Res<bool, AllocError> {
+    (slot.closure == 0).match({
+        true  => Ok(true),
+        false => {
+            be.report(span.file, span, GenFault.Unsupported(what)).try();
+            Ok(false)
+        },
+    })
+}
 
 unsupported* = (be :: CBackend, id: ExprId, what: str, out :: String)
                Res<(), AllocError> {

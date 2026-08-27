@@ -24,7 +24,7 @@
 // asks back; that is the shape of the problem, not a smell.
 
 Type, TypeId, Ident, Alias, Enum = std.ast
-Param, ArrayType = std.ast
+Param, ArrayType, FnType = std.ast
 AllocError = std.mem
 Vec = std.collections
 TyId, TyNamed, is_prim = sema.sema_ty
@@ -35,6 +35,7 @@ Checker, Ctx, UNRESOLVED = sema.sema_check
 alias_module = sema.sema_module
 counted_array = sema.sema_const
 def_type = sema.sema_type
+push_tparams, module_name = sema.sema_inst
 
 // `@Self` IS THE ONE WRITTEN TYPE WHOSE MEANING IS NOT IN ITS NODE, so a
 // signature that names it may not be memoized: `Vec<T>.get` is written
@@ -84,7 +85,7 @@ type_kind* = (c :: Checker, node: Type, ctx: Ctx) Res<TyId, AllocError> {
         Variadic => c.types.prim("..."),
         Named(n) => c.named_type(node, n.name, n.args, ctx),
         Union(u) => c.union_type(u.members, ctx),
-        Fn(f)    => c.fn_type(f.params, f.ret, ctx),
+        Fn(f)    => c.fn_type(f, ctx),
         Array(t) => c.array_type(t, ctx),
     })
 }
@@ -105,14 +106,18 @@ union_type* = (c :: Checker, members: Vec<TypeId>, ctx: Ctx)
     c.types.union_ty(parts)
 }
 
-fn_type* = (c :: Checker, params: Vec<Param>, ret: TypeId, ctx: Ctx)
-          Res<TyId, AllocError> {
+// A generic function type binds its own parameters while reading its shape.
+fn_type* = (c :: Checker, f: FnType, ctx: Ctx) Res<TyId, AllocError> {
+    tmark = c.tvar_mark();
+    c.push_tparams(f.tparams, module_name(c, ctx.module)).try();
     ptys ::= c.alloc.Vec<TyId>();
-    params.loop((h, p) {
+    f.params.loop((h, p) {
         ptys.add(c.param_type(p, ctx).try()).try();
     });
-    rty = c.type_from_ast(ret, ctx).try();
-    c.types.fn_ty(ptys, rty)
+    rty = c.type_from_ast(f.ret, ctx).try();
+    got = c.types.fn_ty(ptys, rty).try();
+    c.release_tvars(tmark).try();
+    Ok(got);
 }
 
 param_type* = (c :: Checker, p: Param, ctx: Ctx) Res<TyId, AllocError> {
@@ -151,9 +156,24 @@ named_type* = (
     args.loop((h, a) {
         tys.add(c.type_from_ast(a, ctx).try()).try();
     });
-    name.text.eq("Res").match({
+    c.res_sugar(name.text, ctx.module).try().match({
         true  => c.res_type(tys),
         false => c.declared_type(node, name, tys, ctx),
+    })
+}
+
+res_sugar* = (c :: Checker, name: str, mi: usize)
+             Res<bool, AllocError> {
+    name.eq("Res").match({
+        false => Ok(false),
+        true  => {
+            visible ::= c.alloc.Vec<Def>();
+            c.world.defs_of(mi, name, visible).try();
+            visible.get(0).match({
+                None      => Ok(true),
+                Ok(found) => c.world.is_prelude_decl(found.id, name),
+            })
+        },
     })
 }
 

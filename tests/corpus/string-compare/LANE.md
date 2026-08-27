@@ -9,10 +9,6 @@ eq_compares_bytes_not_addresses/main.zen
      of walking bytes: view-vs-literal rows flip, false rows stay green,
      so only this file catches it from one side.
 
-empty_string_equals_only_itself/main.zen
-  -- clamp the byte walk to min(len) / drop the length gate: "" == "x"
-     turns true (0 bytes compared = "no difference found").
-
 nul_byte_is_data_not_terminator/main.zen
   -- lower str == to strcmp(a.data, b.data) == 0: "a\0b" vs "a\0c" and
      "a" vs "a\0" both turn true; memcmp over min(len) flips "a" vs "a\0"
@@ -37,4 +33,4 @@ bug: `\u0000` is not in Zen's escape set by design (lex_literal.zen:98 --
 `\n \t \r \v \f \0 \\ \' \"` and nothing else); the rejection is correct, the
 NUL tests use `\0`.
 
-TESTS: 6
+TESTS: 5

@@ -1,11 +1,9 @@
 // src/gen/gen_c/gen_c_expr.zen
 // What an expression is in C.
-//
 // Every lowering here has one shape: statements go to the backend's
 // buffer, and the C EXPRESSION naming the result goes to the caller's
 // buffer. `gen_c_stmt.zen` owns where that result ends up; `gen_c_flow.zen`
 // owns the two forms that cannot be C expressions at all.
-//
 // A spilling form where C wants a value is put in a temporary — the one
 // non-shape-for-shape thing this file does: `deliver` hands a spill
 // straight to its destination (already a place), but an argument is
@@ -13,21 +11,18 @@
 // spill (`deliver`'s question); `spills_anywhere` asks whether one hides
 // inside it, which short-circuiting needs since a hoisted `.try()` runs
 // regardless of the left side — `gen_c_op.zen` owns that rule.
-//
 // This file also answers WHICH ARGUMENTS RUN WHEN: Zen orders a call's
 // arguments left to right and C does not, so `holds` names the positions
 // that have to be put in a temporary to keep that promise, and
 // `value_held` puts them there. The `argument order` block below is the
 // whole rule.
-//
 // Operators are `gen_c_op.zen`'s subject.
-//
 // Sema is the only source of a type: where `type_of` answers, its
 // answer is used; where it does not (call, match, record), the
 // context's expected type is used; with neither, an `Untyped` fault is
 // raised rather than a guess.
 
-ExprId, Block = std.ast
+ExprId, Block, Span = std.ast
 Decl, Consume = std.ast
 Literal, Binary, Unary, Match = std.ast
 Access, Call = std.ast
@@ -42,14 +37,14 @@ Ctx = sema.sema_check
 type_of = sema.sema_type
 type_from_ast = sema.sema_denote
 write_usize = sema.sema_diag
-sym_local, sym_gen = gen.gen_name
+sym_local = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 LocalSlot = gen.gen_c.gen_c_frame
 sub, constructed, unsettled = gen.gen_c.gen_c_mono
 has_var = sema.sema_inst
 loop_result_type = gen.gen_c.gen_c_shape
-unsupported = gen.gen_c.gen_c_report
-declarator, is_unit = gen.gen_c.gen_c_type
+unsupported, closure_storage = gen.gen_c.gen_c_report
+declarator, is_unit, has_storage = gen.gen_c.gen_c_type
 lower_access = gen.gen_c.gen_c_read
 access_field_type = gen.gen_c.gen_c_read
 lower_array_lit, lower_fixed_array = gen.gen_c.gen_c_array
@@ -71,9 +66,7 @@ release_binding = gen.gen_c.gen_c_own
 lower_scope_ref, is_scope_ref, scope_type = gen.gen_c.gen_c_scope
 lower_global_value = gen.gen_c.gen_c_const
 
-// -----------------------------------------------------------------
 // expressions
-// -----------------------------------------------------------------
 
 // A spilling form may not appear where C wants a pure expression — the
 // right operand of `&&`/`||` and an argument ask this first.
@@ -91,7 +84,6 @@ spills* = (be: CBackend, id: ExprId) bool {
 // header's distinction short-circuiting needs: a `.try()` three parens
 // deep still lowers to an `if`/`return` that `expr` hoists out to where
 // the operand was written.
-//
 // An unrecognised form answers YES: wrong in this direction is a
 // refusal with a position, wrong the other way is a program computing
 // the wrong thing — the one outcome a backend may not produce.
@@ -124,19 +116,15 @@ call_spills = (be: CBackend, c: Call) bool {
     got
 }
 
-// -----------------------------------------------------------------
 // argument order
-//
 // ZEN EVALUATES ARGUMENTS LEFT TO RIGHT. C LEAVES THE ORDER OF A CALL'S
 // ARGUMENTS UNSPECIFIED, so every argument written straight into one C
 // call expression hands the decision to the C compiler — and gcc takes
 // it right to left. `three(d.tick(), d.tick(), d.tick())` answered 210.
-//
 // THE FIX IS A TEMPORARY, NOT A REWRITE. A HELD argument is written as a
 // declaration and an assignment ahead of the call and appears in the call
 // as its own name — the transform `spill_temp` already performs for a
 // `.try()` in argument position, through the same door.
-//
 // IT IS NOT DONE EVERYWHERE. Spilling every argument of every call costs
 // a sixth of the emitted C and `make build` pays for that twice. Three
 // questions narrow it to the shapes where the difference can be seen:
@@ -149,11 +137,9 @@ call_spills = (be: CBackend, c: Call) bool {
 //     rightmost may stay inline: by the time it runs everything else
 //     already has.
 // On this tree that is a few hundred of 8,389 call sites.
-//
 // THE OPERANDS OF `+` AND OF EVERY OTHER INFIX OPERATOR were left out
 // deliberately — denser population, cost to be measured first — and are
 // now held under their own gate, `infix_operand_held` below: #737.
-// -----------------------------------------------------------------
 
 // Whether the position at signature index `pos` must be held. `first` is
 // how many positions the receiver took, so an argument at argument-index
@@ -189,7 +175,6 @@ any_arg_calls = (be: CBackend, c: Call) bool {
 
 // The index of the LAST argument containing a call — the position after
 // which nothing is left to run.
-//
 // `later` is a named helper and not a `.then` in the loop body: a loop
 // binding read inside a nested closure does not resolve,
 // docs/SEMA_BOOTSTRAP_FIXES.md §10.
@@ -207,7 +192,6 @@ later = (at: usize, i: usize, yes: bool) usize {
 // operand contains a call, and only then — the `any_arg_calls` question
 // asked of two positions instead of N. The right may always stay inline,
 // since nothing follows it.
-//
 // BOTH HALVES, because order is readable in both directions. A call on
 // the right of a read (`b.n + d.tick()`) is #737's own shape. A call on
 // the LEFT of a read (`d.tick() + b.n`) is the same coin flipped: Zen
@@ -223,12 +207,10 @@ infix_operand_held* = (be: CBackend, b: Binary) bool {
 // Whether a CALL hides anywhere inside. Not the spilling question and
 // not a weaker form of it: `d.tick()` spills nothing, and it is the
 // whole reason argument order is observable at all.
-//
 // An unrecognised form answers YES, for `spills_anywhere`'s reason read
 // one step on: wrong in this direction costs a temporary, wrong the
 // other way is a program running its effects in whatever order the C
 // compiler felt like.
-//
 // ITERATIVE, ON A WORKLIST, AND THE WORKLIST IS THE POINT. The first
 // #737 patch walked this recursively, and `corpus/lex/long_single_line`
 // -- one `+` chain ten thousand terms long -- overflowed the C stack
@@ -237,7 +219,6 @@ infix_operand_held* = (be: CBackend, b: Binary) bool {
 // neither flat syntax nor the parser bounds that. The parity gate
 // caught it where `make build` could not. An EXPLICIT Vec costs one
 // page from the arena per question and cannot overflow.
-//
 // An `add` that cannot allocate also answers YES. It cannot honestly
 // answer NO -- "no" is the answer that lets gcc order effects -- so it
 // degrades toward holding, the direction this predicate already degrades
@@ -318,17 +299,14 @@ holdable* = (be: CBackend, id: ExprId) bool {
 }
 
 // The type of an expression.
-//
 // Sema first, always: where `type_of` answers, that answer is used.
 // Where its answer is `Unknown`, the callee's own declaration is read
 // instead — the same "degrade to your own resolution when absent" the
 // bootstrapper's backend documents.
-//
 // The instantiation is applied HERE, once, so no lowering rule has to
 // remember to: sema types a generic body once, generically, so every
 // answer inside `Vec<T>.add` is about `T` until this substitutes the
 // real `i32`.
-//
 // `@scope` is answered here, not by sema, for the same reason a local's
 // type is: the FRAME is the authority. A block is not a value sema
 // mints, but a `Scope` can be written as a parameter of the ordinary
@@ -381,11 +359,9 @@ sema_source = (be :: CBackend, id: ExprId, ctx: Ctx)
 // while lowering `Vec<Diag>.get` was read back for `Vec<TyId>.get`,
 // emitting a call to the first symbol with the second's receiver. `cc`
 // caught it; two types of one width would have hidden it.
-//
 // A handle and a closure are not values and have no type to give: `h`
 // is a pair of labels, a lambda is a body to inline — both left to the
 // paths that know what they are.
-//
 // A field read from one is the same rule one node up: `e.key` inside
 // `Map<K, V>.confirms` derives from `e`'s type and the declaration, both
 // held by the frame, so the memo has only a poisoned entry to give.
@@ -446,7 +422,6 @@ keep_known = (be :: CBackend, ty: TyId) Res<TyId> {
 // `src.back(8)` moved back thirty-two bytes, `realloc` read a length
 // nobody wrote, and every row before the last grow was silently
 // dropped. It compiled; the differential oracle caught it.
-//
 // So the backend answers first for exactly these members, the same
 // authority it already has over lowering them.
 ptr_answer = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
@@ -497,7 +472,6 @@ settled_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId, want: TyId)
 // type `open` calls settled and `gen_name.tcode` writes `q` for. A
 // `.try()` on it declared its temporary at that spelling instead of the
 // real `Res<Ptr<u8>, AllocError>`.
-//
 // Straight to the call, not through the loop/inline steps above: those
 // settle a `Var` the closure or callee's instantiation was going to
 // bind, and there's no parameter here for either. What's missing is
@@ -599,14 +573,12 @@ declared_call_type = (be :: CBackend, name: str, ctx: Ctx, want: TyId)
 // Its value IS unit: `gen_c_print.lower_print` writes the console calls
 // as statements and hands back `0` as a placeholder, correct only where
 // the value is discarded.
-//
 // Answering `()` makes that placeholder unreachable. `Unknown` agrees
 // with everything, so `gen_c_hoist.needs_hoist` used to read a
 // `println` reaching `Res<(), E>` as "already fits" and emit `return
 // 0;` from a function returning a struct — exactly what that file
 // exists to stop. With unit as the answer the lift fires instead, and
 // `write_res_payload` runs the print for effect before building `Ok`.
-//
 // Under the zero-def arm rather than in front of the walk, because a
 // module declaring its own `println` means its own (`gen_c_call.is_sugar`).
 sugar_call_type = (be :: CBackend, name: str, want: TyId)
@@ -687,7 +659,6 @@ res_type_of* = (be :: CBackend, id: ExprId, ctx: Ctx)
 // here, declared and filled BEFORE the statement being built — the same
 // place every other spill lands, since `deliver_simple` builds the
 // expression text first and writes the line after.
-//
 // Four conversions funnel through this same three-door path (argument,
 // field, return), each owned by whichever file builds it:
 //   - a concrete value reaching a BOUND-typed slot becomes a fat value
@@ -713,7 +684,6 @@ expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, out :: String)
 // WHICH DOOR A VALUE GOES THROUGH on its way to `want`, and the order
 // they are asked in. The order is load-bearing and this list is the
 // only statement of it.
-//
 // A `Res` reaching a `Res` with a wider error set arrives through the
 // same three doors as the other conversions. It is asked AFTER hoist
 // (the two are disjoint by construction — a lifted value is not already
@@ -846,8 +816,7 @@ spill_valued = (
     out :: String
 ) Res<(), AllocError> {
     be.request_type(ty).try();
-    tmp ::= be.alloc.String().try();
-    sym_gen(tmp, "s", be.next_tmp()).try();
+    tmp  ::= be.fresh_name("s").try();
     line ::= be.alloc.String().try();
     be.declarator(ty, tmp.view(), line).try();
     be.fmt("{};\n", line.view()).try();
@@ -860,7 +829,6 @@ spill_valued = (
 // the argument it was written into. The `argument order` block above owns
 // which arguments ask for this; the temporary itself is `spill_valued`'s,
 // the same one a `.try()` in argument position already gets.
-//
 // A type nothing settles, and a `()` with no storage to hold it, stay
 // inline: a refusal here would turn a working program into an error over
 // an order nothing could observe. That is the one direction this degrades
@@ -1018,7 +986,6 @@ lower_str_literal = (be :: CBackend, l: Literal, out :: String)
 
 // The byte length a string literal denotes: its raw slice without the
 // quotes, with each escape counting once.
-//
 // `esc` is "the previous byte opened an escape", so the byte that
 // closes one is not counted and the backslash that opened it is.
 decoded_len* = (raw: str) usize {
@@ -1038,7 +1005,6 @@ decoded_len* = (raw: str) usize {
 // (`sema_check.zen`), which this access's own `Meta` node carries, so
 // the read-back needs no state of its own; a miss is every other dot,
 // which takes the field path.
-//
 // THE COUNT'S CHAIN IS THE SIBLING, ONE SHAPE UP: `.len` over
 // `fields()` over a Meta. It is recognised BY THE SHAPE — the same
 // strict predicate sema answered with (`is_count_chain`, read through
@@ -1135,25 +1101,43 @@ lower_name = (
     out  :: String
 ) Res<(), AllocError> {
     be.slot_of(text).match({
-        Ok(slot) => be.write_local(text, slot, out),
+        Ok(slot) => be.write_name_slot(
+            text,
+            be.tree.expr_at(id).span,
+            slot,
+            out
+        ),
         None     => be.lower_global_name(id, text, ctx, want, out),
+    })
+}
+
+write_name_slot* = (
+    be   :: CBackend,
+    name : str,
+    span : Span,
+    slot : LocalSlot,
+    out  :: String
+) Res<(), AllocError> {
+    be.closure_storage(span, slot, "a lambda read as a value").try().match({
+        true  => be.has_storage(slot.ty).match({
+            true  => be.write_local(name, slot, out),
+            false => out.add_bytes("0"),
+        }),
+        false => sym_local(out, name, 1),
     })
 }
 
 // `{name}` in a format string: the C text of the binding that name has
 // WHERE THE HOLE IS WRITTEN, and its type.
-//
 // ONE ANSWER FOR BOTH FORMAT WALKS. `println("{n}")` and `out.add("{n}")`
 // must resolve `n` to the same binding, and the reason it is here rather
 // than in either walk is that resolving a bare identifier is already
 // this file's job — `lower_name` below is the same lookup, reached from a
 // node instead of from a name.
-//
 // THIS IS WHAT MAKES `{name}` A COMPILE-TIME FEATURE: the frame being
 // lowered is asked, the type comes off the slot, and the write emitted is
 // the one a positional hole would emit. No runtime format state and no
 // allocation, which is the property `make bench-allocs` gates.
-//
 // `None` is every way a name can fail to be a value here — no binding, a
 // loop handle, a closure, a type not yet known — because a hole has one
 // thing to say about all four and `value_slot` already draws the line.

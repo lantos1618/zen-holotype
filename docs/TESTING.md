@@ -199,38 +199,18 @@ The third is the one everyone skips and the one that decays fastest. A correct d
 
 ---
 
-## Performance is a test
+## Performance is measured deliberately
 
-**`make bench` runs the benches now — as drivers, not as `Bencher` calls.** `tests/bench/drivers/` holds one small program per bench, running the bench body in a plain loop, because constructing a `Bencher` in user code needs trait dispatch gen_c does not have yet ("`Bencher.iter` is supplied by an impl; gen_c has no trait dispatch yet") and std has no clock. The clock lives outside the process: `scripts/bench.py` times whole runs, subtracts the `null.zen` driver's floor (same staging, same spawn, no loop), and divides by the loop count. The day `zen build` can execute a build file, the drivers retire and `b.bench(..)` takes over.
+The old per-operation benchmark drivers and their Python harness were removed:
+they duplicated program bodies, produced machine-specific budgets, and added more
+maintenance than signal. Performance work now starts from a reproducible compiler
+workload and records wall time, peak RSS, emitted-byte hashes, and a `perf` profile.
+A change is accepted only when output is byte-identical and the same workload gets
+faster.
 
-**A driver does not restate its bench's body, and that is enforced.** Until 2026-08-25 each driver held a *hand-mirrored copy* of the body it claimed to measure — four of them, compared to the originals by nothing, one carrying the `allocs_op: 0` three files in `src/` cite as load-bearing; `computed_field_read`'s driver went further and redeclared `Rect`, `Circle` and the `Circle.impl(Rect, ..)` that supplies the computed dot. A copy nothing compares is a benchmark free to drift into measuring a different program. There is no copy now: each bench file exports the measured operation as a starred function, the bench wraps it in `bn.iter` and the driver imports the module and calls that same function. `scripts/bench.py`'s `verify_shared_body` holds it there — the body must be defined *exactly once* across `tests/bench`, in the bench file, and the driver must import that module and call it — and a miss is a harness error (exit 2), never a verdict, because a bench whose body is not the body it names has measured nothing. Watched fail four ways before being believed: the driver restating the body, the driver dropping the import, the bench renaming its body, and the shared body being made to allocate (which reddens `make test`, exit 1).
-
-First numbers, on this machine, and the first time the budgets below met a measurement: `vec_add` 40 ns/op against a budget of 40; `stored_field_read` and `computed_field_read` 0.8 ns/op each against 2 — they **agree**, which is the load-bearing claim, measured instead of believed; `fold_stack_array` 4.4 ns/op against 20. Budgets warn when exceeded and fail only past 10×, because they were written from the design and one slow machine must not redden the gate. What actually gates over time is the rolling median in `tests/bench/baseline.json`: `make bench` compares against it when present (warn past 1.5×, fail past 4×), and `scripts/bench.py --update-baseline` appends the run and trims to the last 20 samples. The same run also times one `make fmt` pass over the tree.
-
-**`allocs_op` and `bytes_op` are measured now, and `make test` fails on them.** `make bench-allocs` — a prerequisite of `make test` since 2026-08-16 — links each driver against an interposer through `ld --wrap=malloc`, compiles it at its loop count *and* at twice it, and takes the slope: `(allocs at 2N − allocs at N) / N`. A slope cancels every fixed cost of that driver exactly, which a subtraction of `null.zen`'s floor does not, and that is what makes `0` a number a driver can actually be held to. It takes about two seconds and no wall clock, so unlike `make bench` it has no excuse to sit outside `make test`.
-
-**What that does and does not prove.** The boundary is libc, not the `Alloc` trait. `env.mem.alloc()` is an arena serving many Zen allocations out of one 64 KiB page, so a measured figure is a **lower bound** on allocator calls and each budget is checked as a **ceiling** — `vec_add` measuring 0.0007 allocs/op under a budget of 1 is not a claim that the design's one-alloc count was met. Zero is the exception and the one that mattered: an operation that never reaches the heap has a slope of exactly `0`, on every machine. So the claim that loops never allocate — cited by `src/std/core/loop/loop_iter.zen:14`, `src/std/core/range.zen:19`, and `src/gen/gen_c/gen_c_inline.zen:16` — no longer rests on argument alone: `fold_stack_array` measures `0`, and making its body allocate turns `make test` red. Counting at the `Alloc` trait itself, which would also settle the non-zero budgets, still needs instrumentation nobody has written.
-
-`scripts/bench.py`'s header carries the full statement of what is measured. Two guards keep it from becoming another gate that cannot fail: a probe program allocating a known odd number of bytes must be seen by the interposer before any driver is believed (an unwrapped link would otherwise report every bench as allocation-free), and a budget row that stops parsing out of `bench_budgets.zen` is a harness error rather than a missing budget that reads as `ok`.
-
-Two budgets from `DESIGN.md` remain the load-bearing claims about the language:
-
-```groovy
-Budget(name: "stored_field_read",   ns_op: 2, allocs_op: 0),
-Budget(name: "computed_field_read", ns_op: 2, allocs_op: 0),
-```
-
-If those diverge, uniform access is not free and the design needs to know. Same shape for the claim that loops never allocate: a fold over a stack array must bench at `allocs_op: 0`, and if it ever doesn't, an inliner regressed. That second one is now the half `make test` enforces.
-
-**The memory and profile gates beside it, all slow, none in `make test`** (unlike `bench-allocs` above, which is in it)**:**
-
-- `make asan` builds the compiler as `zen-asan` (`-fsanitize=address,leak`, never clobbering `./zen`) and runs one representative compile through it. Two startup-prologue blocks leak *deliberately* — the argv rows (`src/gen/gen_c/gen_c_main.zen:156`) and the root arena state — both process-lifetime, both reclaimed by the OS. The first is suppressed by name in `tests/bench/lsan.supp`; the second cannot be (LSan matches any frame, and every frame is under `main`), so `tests/bench/asan.sh` allowlists it by *top* frame and fails on anything deeper.
-- `make leak` answers the same question with valgrind, definite leaks only, same two blocks suppressed by shape in `tests/bench/valgrind.supp`: only a `malloc` called directly from generated `main` qualifies, so a real leak one frame deeper still fails.
-- `make profile` builds a frame-pointer `zen-fp`, self-compiles under `perf record -g`, and leaves `report.txt` and `stacks.txt` in `tests/bench/out/` — plus `flamegraph.svg` when the FlameGraph scripts are already on PATH (never vendored). perf needs kernel permission; on refusal the script prints the `perf_event_paranoid` setting and exits 2, because a harness that cannot run is not a failed profile.
-
-**Race detection is N/A, plainly.** The toolchain is single-threaded by design; threads are stage 5 and unimplemented. There is nothing for TSan to observe, and adding it anyway would be theater — a gate that cannot fail guarding a property nothing can violate. When threads land, this paragraph becomes the shopping list.
-
----
+`make asan` and `make leak` remain explicit slow diagnostics for compiler memory
+safety. They are not part of `make test`; a machine without their platform tools
+must not turn an ordinary correctness run into a harness failure.
 
 ## Fuzzing, once the grammar is stable
 

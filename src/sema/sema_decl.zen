@@ -19,7 +19,7 @@
 // state of its own: everything it computes is memoized where the queries
 // already memoize it.
 
-Module, Decl, Function, TParam, BlockId = std.ast
+Module, Decl, Function, TParam, BlockId, Ident = std.ast
 Struct, Impl, Member, Enum = std.ast
 ExprId, TypeId, Const, Field = std.ast
 AllocError = std.mem
@@ -29,7 +29,7 @@ Range = std.core
 TyId = sema.sema_ty
 Def, DefKind, ModuleTable, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
-SemaFault, NameFault = sema.sema_diag
+SemaFault, NameFault, PairFault = sema.sema_diag
 check_impl = sema.sema_bound
 check_overloads = sema.sema_call
 check_depth = sema.sema_depth
@@ -345,12 +345,48 @@ binds_a_type = (c :: Checker, mi: usize, name: str) Res<bool, AllocError> {
 // signature promised an `i32` compiled clean — even when it was called.
 struct_bodies = (c :: Checker, s: Struct, m: Module, mi: usize)
                 Res<(), AllocError> {
+    c.check_fields(s).try();
     self_ty = c.named_self(s.name.text, mi).try();
     tmark   = c.tvar_mark();
     c.enter_struct_tvars(s, mi).try();
     s.members.loop((h, mem) { c.member_body(mem, self_ty, m, mi).try() });
     c.release_tvars(tmark).try();
     Ok(());
+}
+
+check_fields = (c :: Checker, s: Struct) Res<(), AllocError> {
+    seen ::= c.alloc.Vec<Ident>();
+    s.members.loop((h, mem) {
+        mem.kind.match({
+            Field(f) => c.unique_field(f.name, seen),
+            _        => Ok(()),
+        }).try();
+    });
+    Ok(())
+}
+
+unique_field = (c :: Checker, name: Ident, seen :: Vec<Ident>)
+               Res<(), AllocError> {
+    Range(0, seen.len).find((i) {
+        seen.get(i).match({
+            Ok(first) => first.text.eq(name.text),
+            None      => false,
+        })
+    }).match({
+        None    => seen.add(name),
+        Ok(pos) => {
+            first = seen.get(pos).ok_or(AllocError.OutOfMemory).try();
+            c.report(
+                name.span.file,
+                name.span,
+                SemaFault.DuplicateField(PairFault(
+                    name: name.text,
+                    first: first.span,
+                    second: name.span,
+                ))
+            )
+        },
+    })
 }
 
 // AN IMPL BODY GOT NO WALK AT ALL. `check_decl` matched `Function` and

@@ -1,13 +1,10 @@
 // src/gen/gen_c/gen_c_state.zen
 // What the C backend holds while it works.
-//
 // The split is `sema_check.zen`'s and for its reason: STATE here,
 // BEHAVIOUR in the files beside it, so the dependency points one way
 // and a lowering rule never has to import the thing lowering it.
-//
 // FIVE THINGS, and each one exists to keep the output a pure function
 // of the input:
-//
 //   - THE TYPE WORKLIST is two parallel `Vec`s and not a `Map`, because
 //     it is EMITTED. A `Map` cannot be walked in an order that survives
 //     a different insertion sequence, and `gen_emit.order` sorts these
@@ -28,7 +25,6 @@
 //     lowering is what discovers which types and which helpers the
 //     program needs; the translation unit is assembled afterwards, in
 //     the order C requires.
-//
 // THE CHECKER IS TAKEN, NOT BORROWED. `Checker` owns `Vec`s and `Map`s,
 // so a copy diverges from the original the first time either grows —
 // the same reason `Parser` holds the `Ast` rather than handing it back.
@@ -47,11 +43,11 @@ Checker = sema.sema_check
 Inst = sema.sema_inst
 Emit = gen.gen_emit
 GenDiag, GenFault, render_gen = gen.gen_diag
+sym_gen = gen.gen_name
 LocalSlot, Closure, LoopFrame, DropEntry, BlockFrame = gen.gen_c.gen_c_frame
 
 // One member function reached through a dot, and the receiver it was
 // reached at.
-//
 // A `Def` cannot carry it: a member is not a top-level declaration and
 // `World` never mints one for it. So the identity is written out —
 // `qname` is the TYPE's qualified name plus the member's, which is what
@@ -170,6 +166,20 @@ CBackend* = {
     // the whole program. `true`: a function is visible to the units
     // beside it, which is the one thing splitting the program costs.
     externs :: bool,
+
+    // THE FFI ESCAPE HATCH (`zen build --ffi`). When true, a call to a
+    // bodyless non-generic free function is lowered as a call to the C
+    // symbol of the SAME name, with an `extern` prototype emitted rather
+    // than the call refused. Off by default, so a bodyless declaration
+    // with no floor stays a diagnostic — the compiler's own build passes
+    // no `--ffi`, keeps this false, and emits byte-identical C.
+    ffi* :: bool,
+    // The raw C symbols an FFI call referenced, and the `extern <ret>
+    // name(params)` prototype for each, deduplicated by symbol. Emitted
+    // in the prototype section above the bodies; never a definition,
+    // because a foreign symbol is defined by the C library, not here.
+    extern_names* :: Vec<String>,
+    extern_protos* :: Vec<String>,
 
     // per function
     locals :: Vec<LocalSlot>,
@@ -554,6 +564,32 @@ CBackend* = {
         }).match({ Ok(_) => true, None => false })
     }
 
+    // Turn the FFI escape hatch on for this emission. Called by the
+    // driver when `--ffi` was passed, once, before lowering.
+    enable_ffi* = (self :: @Self) () { self.ffi = true; }
+
+    need_extern* = (self :: @Self, name: str, proto: String)
+                   Res<bool, AllocError> {
+        Range(0, self.extern_names.len).find((i) {
+            self.extern_names.get(i).match({
+                Ok(s) => s.view().eq(name),
+                None  => false,
+            })
+        }).match({
+            Ok(i) => self.extern_protos.get(i).match({
+                Ok(p) => Ok(p.view().eq(proto.view())),
+                None  => Ok(false),
+            }),
+            None  => {
+                owned ::= self.alloc.String().try();
+                owned.add_bytes(name).try();
+                self.extern_names.add(owned).try();
+                self.extern_protos.add(proto).try();
+                Ok(true)
+            },
+        })
+    }
+
     // Queue a member function for lowering, once. The same `fn_seen`
     // set as a free function's, because the same rule applies and the
     // two name spaces cannot collide: a method's qualified name has a
@@ -883,6 +919,12 @@ CBackend* = {
         self.tmp = self.tmp + 1;
         self.tmp
     }
+
+    fresh_name* = (self :: @Self, stem: str) Res<String, AllocError> {
+        name ::= self.alloc.String().try();
+        sym_gen(name, stem, self.next_tmp()).try();
+        Ok(name)
+    }
 }
 
 // `alloc.CBackend(tree, check)` — a ufcs function whose first parameter
@@ -922,6 +964,9 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         fn_units: a.Vec<usize>(),
         unit: 0,
         externs: false,
+        ffi: false,
+        extern_names: a.Vec<String>(),
+        extern_protos: a.Vec<String>(),
         locals: a.Vec<LocalSlot>(),
         declared: a.Vec<String>(),
         loops: a.Vec<LoopFrame>(),

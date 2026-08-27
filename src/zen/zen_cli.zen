@@ -1,8 +1,7 @@
 // src/zen/zen_cli.zen
 // The command line, and nothing else.
 //
-// THE INVOCATION IS FIXED BY AN ORACLE, not by taste:
-// `scripts/fixpoint.sh` builds `zen-1` out of `stage1.c` and runs it as
+// THE INVOCATION IS FIXED BY THE SELF-HOST BUILD, not by taste:
 //
 //     zen build <root> --emit-c -o <file.c>
 //
@@ -51,7 +50,7 @@ Job* = {
     // `zen.h` beside them, written into this DIRECTORY, which must
     // already exist (`std.env.Fs` writes files, and nothing else).
     // Empty means one file — the shape the committed seed is built by,
-    // and the only shape `scripts/fixpoint.sh` names.
+    // and the shape `make seed` writes.
     dir* :: str = "",
     // where to START inside the root, relative to it. THE DEFAULT IS
     // WRITTEN DOWN NOW: "empty means the driver probes" was true and
@@ -59,6 +58,15 @@ Job* = {
     // checker refuses since it started asking for required fields.
     entry* :: str = "",
     emit_c*: bool,
+    // FFI ESCAPE HATCH, OPT-IN (`zen build ... --ffi`). When set, a call
+    // to a bodyless non-generic free function is lowered as a call to
+    // the C symbol of the same name, with an `extern` prototype emitted
+    // above the bodies, rather than refused. Off by default, so a
+    // bodyless declaration with no floor stays the diagnostic
+    // `must-fail/codegen/a_call_to_a_function_with_no_body` pins — and
+    // so the compiler's own build, which passes no `--ffi`, emits
+    // byte-identical C and the fixpoint holds.
+    ffi* :: bool = false,
     debug*: Debug,
 }
 
@@ -108,11 +116,11 @@ FmtJob* = {
 // of the two scans that read it would silently start on the command.
 ARGS*: usize = 2
 
-USAGE*: str = "usage: zen build <root> [--entry <file>] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
+USAGE*: str = "usage: zen build <root> [--entry <file>] [--ffi] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] [--ffi] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
 
 // What one argument is. A classifier, not a chain of matches at the
 // scan site — the scan stays readable while it carries the cursor.
-Arg = EmitC | EmitDir | Out | Entry | Repeat | Permute | Flag | Word
+Arg = EmitC | EmitDir | Out | Entry | Repeat | Permute | Ffi | Flag | Word
 
 cli* = (argv: Vec<str>) Cli {
     argv.get(1).match({
@@ -200,26 +208,32 @@ job_of = (argv: Vec<str>) Cli {
     runs  ::= 1;
     perm  ::= "";
     emit  ::= false;
+    ffi   ::= false;
     bad   ::= "";
     i     ::= ARGS;
     loop(() { i < argv.len && bad.is_empty() }, (h) {
-        arg = arg_at(argv, i);
-        i   = i + 1;
-        classify(arg).match({
-            EmitC   => { emit = true; },
-            EmitDir => {
-                emit = true;
-                dir  = arg_at(argv, i);
-                i    = i + 1;
-            },
-            Out     => { out = arg_at(argv, i); i = i + 1; },
-            Entry   => { entry = arg_at(argv, i); i = i + 1; },
-            Repeat  => { runs = arg_at(argv, i).runs_of(); i = i + 1; },
-            Permute => { perm = arg_at(argv, i); i = i + 1; },
-            Flag    => { bad = arg; },
-            Word    => root.is_empty().match({
-                true  => { root = arg; },
-                false => { bad = arg; },
+        arg  = arg_at(argv, i);
+        i    = i + 1;
+        kind = classify(arg);
+        (takes_value(kind) && !is_word(arg_at(argv, i))).match({
+            true  => { bad = arg; },
+            false => kind.match({
+                EmitC   => { emit = true; },
+                EmitDir => {
+                    emit = true;
+                    dir  = arg_at(argv, i);
+                    i    = i + 1;
+                },
+                Out     => { out = arg_at(argv, i); i = i + 1; },
+                Entry   => { entry = arg_at(argv, i); i = i + 1; },
+                Repeat  => { runs = arg_at(argv, i).runs_of(); i = i + 1; },
+                Permute => { perm = arg_at(argv, i); i = i + 1; },
+                Ffi     => { ffi = true; },
+                Flag    => { bad = arg; },
+                Word    => root.is_empty().match({
+                    true  => { root = arg; },
+                    false => { bad = arg; },
+                }),
             }),
         });
     });
@@ -227,7 +241,8 @@ job_of = (argv: Vec<str>) Cli {
         Where(root: root, out: out, dir: dir, entry: entry),
         emit,
         bad,
-        Debug(repeat: runs, permute: perm)
+        Debug(repeat: runs, permute: perm),
+        ffi
     );
 }
 
@@ -240,12 +255,12 @@ Where = {
     entry*: str,
 }
 
-verdict = (w: Where, emit: bool, bad: str, dbg: Debug) Cli {
+verdict = (w: Where, emit: bool, bad: str, dbg: Debug, ffi: bool) Cli {
     bad.is_empty().match({
         false => Cli.Usage(bad),
         true  => w.root.is_empty().match({
             true  => Cli.Usage(""),
-            false => built(w, emit, dbg),
+            false => built(w, emit, dbg, ffi),
         }),
     })
 }
@@ -257,7 +272,7 @@ verdict = (w: Where, emit: bool, bad: str, dbg: Debug) Cli {
 // held long enough that `make build` produced no binary — taking
 // `test`, `fmt` and `determinism` down with it, since a target that
 // can't run can't go red either.
-built = (w: Where, emit: bool, dbg: Debug) Cli {
+built = (w: Where, emit: bool, dbg: Debug, ffi: bool) Cli {
     emit.match({
         false => Cli.Missing("--emit-c"),
         true  => Cli.Build(Job(
@@ -266,6 +281,7 @@ built = (w: Where, emit: bool, dbg: Debug) Cli {
             dir: w.dir,
             entry: w.entry,
             emit_c: emit,
+            ffi: ffi,
             debug: dbg
         )),
     })
@@ -290,6 +306,7 @@ classify = (a: str) Arg {
         a.eq("--entry").then(() { h.break(Arg.Entry) });
         a.eq("--repeat").then(() { h.break(Arg.Repeat) });
         a.eq("--permute").then(() { h.break(Arg.Permute) });
+        a.eq("--ffi").then(() { h.break(Arg.Ffi) });
         is_flag(a).then(() { h.break(Arg.Flag) });
         h.break(Arg.Word);
     });
@@ -297,6 +314,17 @@ classify = (a: str) Arg {
         Ok(one) => one,
         None    => Arg.Word,
     });
+}
+
+takes_value = (a: Arg) bool {
+    a.match({
+        EmitDir => true,
+        Out     => true,
+        Entry   => true,
+        Repeat  => true,
+        Permute => true,
+        _       => false,
+    })
 }
 
 // A leading `-` is a flag whatever follows it, so an unknown one is
@@ -309,9 +337,8 @@ is_flag = (a: str) bool {
     })
 }
 
-// An argument past the end is the empty string, which every caller
-// already handles: `-o` with nothing after leaves `out` empty, reported
-// where `out` is used, not here.
+// An argument past the end is the empty string. The build scan also
+// refuses it, or another flag, where a value-taking flag needs a word.
 arg_at = (argv: Vec<str>, i: usize) str {
     argv.get(i).match({
         Ok(s) => s,

@@ -26,13 +26,9 @@ One line per test: path -- the one-line compiler change that breaks it.
   hidden pointer to callee stack / static slot: second() reads stale or
   first()-derived numbers; also breaks if the return type ignores the
   written `[i64, 3]` signature.
-- an_array_copy_carries_every_element/ -- copy the wrapper at i32 width
-  (4 bytes/elem): every value truncates to its low half; copying only a
-  prefix leaves the reversed read-back printing zeros in the tail.
 - a_copy_walks_on_its_own/ -- alias instead of copy (`ys ::= xs` shares
-  xs's buffer): today indistinguishable until a write, but any later
-  copy-elision that reuses xs's stack slot after main writes through ys
-  makes the walk print xs-uninitialised values instead of these four.
+  xs's buffer), copy at i32 width, or copy only a prefix: the indexed walk
+  and reverse read-back expose aliasing, truncation, and missing tail slots.
 - an_array_argument_is_a_private_copy/ -- lower array arguments (or
   `consume`) as reference rename: the callee answers from main's buffer;
   combined with first-touch lowering the walk lines come out wrong.

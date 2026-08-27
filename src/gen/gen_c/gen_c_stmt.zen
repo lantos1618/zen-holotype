@@ -1,6 +1,5 @@
 // src/gen/gen_c/gen_c_stmt.zen
 // What a statement is in C, and where a value goes.
-//
 // C HAS STATEMENTS AND EXPRESSIONS AND ZEN DOES NOT: every Zen block
 // is a value, and every Zen conditional is one too. So this file owns
 // the bridge — `Dest`, which says where a value is going, and
@@ -9,12 +8,10 @@
 // STRAIGHT to its destination rather than through a temporary, which
 // is what keeps a `.match` in return position from declaring a
 // variable per arm.
-//
 // THE DESTINATION'S TYPE WINS. A value being written somewhere takes
 // the type of the place it is written to. That is "a literal's type
 // comes from its context" one level up, and it is what makes a match
 // in return position build the enclosing function's own `Res`.
-//
 // SEMA IS ASKED FIRST FOR EVERY STATEMENT, and that is not politeness:
 // `stmt_type` is what binds a statement's locals into the checker and
 // memoizes its types, so the emission below reads answers rather than
@@ -30,20 +27,18 @@ Ctx = sema.sema_check
 stmt_type = sema.sema_type
 type_from_ast = sema.sema_denote
 settled_array = sema.sema_place
-sym_local, sym_gen = gen.gen_name
+sym_local = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 lower_match = gen.gen_c.gen_c_flow
 lower_try = gen.gen_c.gen_c_try
-declarator, is_unit = gen.gen_c.gen_c_type
+declarator, is_unit, has_storage = gen.gen_c.gen_c_type
 expr, ty_of, spills = gen.gen_c.gen_c_expr
 enter_block, leave_block, note_drop, displace = gen.gen_c.gen_c_own
 
 Dest* = Discard | Return | Into(str)
 
-// -----------------------------------------------------------------
 // blocks and statements
-// -----------------------------------------------------------------
 
 // "A block is a value too." Its value is the trailing expression
 // written without a `;`; DESIGN.md also lets a `;`-terminated tail be
@@ -208,8 +203,7 @@ spilled_return = (
     want : TyId,
     tail : usize
 ) Res<(), AllocError> {
-    tmp ::= be.alloc.String().try();
-    sym_gen(tmp, "k", be.next_tmp()).try();
+    tmp  ::= be.fresh_name("k").try();
     decl ::= be.alloc.String().try();
     be.declarator(want, tmp.view(), decl).try();
     be.fmt("{};\n", decl.view()).try();
@@ -222,7 +216,6 @@ spilled_return = (
 // Dropping it here would free what the caller is about to read; a
 // larger expression has been COPIED into the destination by now, and a
 // binding it merely read is still this block's to destroy.
-//
 // IT IS THE EXPRESSION `close_value` DELIVERS, NOT THE ONE THE AUTHOR
 // PUNCTUATED. `Block.value` holds only a tail written without a `;`, so
 // reading it alone exempted the binding in the `a` spelling and nothing
@@ -468,7 +461,6 @@ lower_bind = (be :: CBackend, s: Stmt, b: Bind, ctx: Ctx)
 // ZEN WRITES A DECLARATION AND A STORE THE SAME WAY, so which one this
 // is depends on what is already in scope: a second `x = ..` on a name
 // already bound, with no written type and no `::=`, is an ASSIGNMENT.
-//
 // Declaring it instead is not a cosmetic difference. `i ::= 0; loop(()
 // { i < 3 }, (h) { i = i + 1; })` emitted a fresh `zu_l1i_2` per pass
 // and the condition kept reading the original — a loop that never ends,
@@ -541,10 +533,8 @@ named_slot_type = (be :: CBackend, target: ExprId) Res<TyId> {
 // match arm's binder, which names part of a value somebody else still
 // owns. This is the one place a binding is introduced with storage of
 // its own, so it is the one place that registers one.
-//
 // AFTER the value has landed, because the drop list is walked backwards
 // and a binding built from an earlier one has to die first.
-//
 // AND THE NAME COMES INTO SCOPE AFTER THE VALUE TOO, which is why this
 // reserves the C name and publishes the slot separately instead of
 // calling `declare`. `k: i32 ::= k + 1` shadowing an outer `k` had the
@@ -558,10 +548,15 @@ declare_local = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
     n = be.reserve(name).try();
     cname ::= be.alloc.String().try();
     sym_local(cname, name, n).try();
-    decl ::= be.alloc.String().try();
-    be.declarator(ty, cname.view(), decl).try();
-    be.fmt("{};\n", decl.view()).try();
-    be.deliver(b.value, ctx, ty, Dest.Into(cname.view())).try();
+    be.has_storage(ty).match({
+        false => be.deliver(b.value, ctx, ty, Dest.Discard),
+        true  => {
+            decl ::= be.alloc.String().try();
+            be.declarator(ty, cname.view(), decl).try();
+            be.fmt("{};\n", decl.view()).try();
+            be.deliver(b.value, ctx, ty, Dest.Into(cname.view()))
+        },
+    }).try();
     be.publish(name, n, ty, false).try();
     be.note_drop(name, n, ty).try();
     Ok(());
@@ -575,7 +570,6 @@ declare_local = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
 // retired -- `s = f(s)`), DROP (behind the entry's live flag, so a
 // moved-out slot emits nothing), RE-ARM (a store creates no binding;
 // the fresh entry is the slot's own), STORE.
-//
 // EVERY tracked-store RHS lands in the temporary, not only the forms
 // that must spill: rendering a call as text would put nothing in flight
 // and the call would execute at the store line, BELOW the drop, reading
@@ -611,8 +605,7 @@ store_displacing = (
 ) Res<(), AllocError> {
     place ::= be.alloc.String().try();
     expr(be, b.target, ctx, ty, place).try();
-    tmp ::= be.alloc.String().try();
-    sym_gen(tmp, "s", be.next_tmp()).try();
+    tmp  ::= be.fresh_name("s").try();
     decl ::= be.alloc.String().try();
     be.declarator(ty, tmp.view(), decl).try();
     be.fmt("{};\n", decl.view()).try();

@@ -1,46 +1,15 @@
 // src/gen/gen_name.zen
-// The name a Zen declaration has in a flat namespace.
-//
-// C has one namespace; Zen lets two modules declare the same top-level
-// name. PLAN.md 0.4 makes five decisions for encoding a path into a C
-// identifier; this file is all five, so a second backend inherits them.
-// Lives here, not `gen_c.zen`, because the encoding names no C.
-//
-// 1. LENGTH-PREFIXED SCHEME. Joining components with `_` is provably
-//    ambiguous — STYLE.md's own sibling-prefix convention triggers it:
-//    `parse`+`expr_kind` and `parse_expr`+`kind` join to one string. A
-//    component is its byte length then its bytes; a list is a count, an
-//    underscore, then the components. A Zen identifier never starts
-//    with a digit, so the length (maximal digit run) parses back
-//    uniquely:
-//        alpha + beta_gamma  ->  2_5alpha10beta_gamma
-//        alpha_beta + gamma  ->  2_10alpha_beta5gamma
-//
-// 2. TWO PREFIXES, every emitted identifier under one. `zu_` from a
-//    user name, `zg_` invented by the compiler. Neither starts with an
-//    underscore, so neither is C11 7.1.3-reserved; `zu_` cannot produce
-//    `zg_`, so `zg_trap` written by a user can't reach the runtime.
-//    Every user identifier is mangled, so no C keyword or header macro
-//    is ever emitted — decision 4 handled as an identifier CLASS, not a
-//    hand-kept keyword list, which also covers every future `_Atomic`.
-//
-// 3. THE SITES. Types, functions, enum constants, struct members,
-//    locals/parameters, and module values each carry a letter, so two
-//    kinds of thing can share a Zen name without sharing a C one.
-//    Struct members are the site everyone forgets, and the one that
-//    breaks against `<errno.h>`.
-//
-// 5. A TYPE ARGUMENT RENDERS AS A PURE FUNCTION OF THE TYPE (`tcode`
-//    below) — never instantiation order, a counter, or asking order.
-//    Determinism dies here or nowhere.
-//
-// C STANDARD TARGETED IS C99, stated once as `gen_c_runtime.C_STANDARD`;
-// this file only needs C11 7.1.3's identifier rules, which C99 shares.
+// Stable C identifiers for Zen's flat emitted namespace. Components
+// are length-prefixed (underscore joining is ambiguous); site letters
+// separate types/functions/members/locals; `zu_` is user-derived and
+// `zg_` compiler-invented, both outside C's reserved identifier class.
+// Type codes depend only on canonical type structure, never discovery
+// order, so mangling remains deterministic.
 
 str, String = std.text
 Vec = std.collections
-AllocError = std.mem
-Range = std.core
+Alloc, AllocError = std.mem
+Hasher, Range = std.core
 hex_digit = std.core.byte
 write_usize = sema.sema_diag
 TyId, Types, TyNamed, TyRes, TyArray, ResForm = sema.sema_ty
@@ -158,16 +127,53 @@ write_segments = (out :: String, qname: str) Res<(), AllocError> {
 // the sites
 // -----------------------------------------------------------------
 
-// The C name of a type: `zu_t4_3std4core6result3ResI1_b3i32`.
-//
-// `zu_` for a user declaration or the library `Res`; `zg_` when the
-// compiler composed it from nothing a user wrote (anonymous union,
-// fixed array). Both are still `tcode` — a pure function of the type.
-sym_type* = (out :: String, types: Types, world: World, id: TyId)
+// A readable leaf plus a fingerprint of the canonical type code. The
+// full code still defines identity, but no longer bloats every C use.
+sym_type* = (out :: String, a: Alloc, types: Types, world: World, id: TyId)
             Res<(), AllocError> {
+    code ::= a.String().try();
+    tcode(code, types, world, id).try();
     out.add_bytes(prefix_of(types, id)).try();
-    tcode(out, types, world, id).try();
+    out.add_bytes("t").try();
+    type_stem(out, types, id).try();
+    out.add_bytes("_").try();
+    write_hash(out, code.view().hash(Hasher())).try();
     Ok(());
+}
+
+write_hash = (out :: String, value: u64) Res<(), AllocError> {
+    place: u64 ::= 1152921504606846976;
+    Range(0, 16).loop((h, i) {
+        out.add_byte(hex_u64((value / place) % 16)).try();
+        place = place / 16;
+    });
+    Ok(());
+}
+
+hex_u64 = (n: u64) u8 {
+    n.match({
+        0 => '0', 1 => '1', 2 => '2', 3 => '3',
+        4 => '4', 5 => '5', 6 => '6', 7 => '7',
+        8 => '8', 9 => '9', 10 => 'a', 11 => 'b',
+        12 => 'c', 13 => 'd', 14 => 'e', _ => 'f',
+    })
+}
+
+type_stem = (out :: String, types: Types, id: TyId) Res<(), AllocError> {
+    types.at(id).match({
+        Prim(p)  => p.name.eq("()").match({
+            true  => out.add_bytes("Unit"),
+            false => out.add_bytes(p.name),
+        }),
+        Named(n) => out.add_bytes(n.name),
+        Res(_)   => out.add_bytes("Res"),
+        Fn(_)    => out.add_bytes("Fn"),
+        Union(_) => out.add_bytes("Union"),
+        Array(_) => out.add_bytes("Array"),
+        Var(_)   => out.add_bytes("Var"),
+        Infer    => out.add_bytes("Infer"),
+        Unknown  => out.add_bytes("Unknown"),
+    })
 }
 
 prefix_of = (types: Types, id: TyId) str {

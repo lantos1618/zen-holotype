@@ -87,8 +87,8 @@ emit_units, fs_message = zen.zen_write
 walk_index = zen.zen_order
 
 // One build. It holds the authority the phases need and the tally of
-// what went wrong, because the exit code is that tally and both
-// `tests/run.py` and `scripts/fixpoint.sh` read it.
+// what went wrong, because the exit code is that tally and the corpus
+// and self-host build both read it.
 Build* = {
     env*: Env,
     alloc*: Alloc,
@@ -96,6 +96,10 @@ Build* = {
 
     faults* :: usize = 0,
     units* :: usize = 0,
+
+    ffi :: bool = false,
+
+    enable_ffi* = (self :: @Self) () { self.ffi = true; }
 
     // EVERY LEX AND PARSE DIAGNOSTIC THIS BUILD FOUND, in order found;
     // `faults` is only the count. `publishDiagnostics` needs the span,
@@ -127,7 +131,7 @@ Build* = {
     // EMPTY IN EVERY BUILD A COMMAND LINE ASKS FOR — a constraint, not
     // a hope: `run_once` never touches it, so `zen build` misses on the
     // first lookup and reads the disk exactly as before
-    // (scripts/fixpoint.sh says so).
+    // (the self-host build says so).
     overlay* :: Map<str, str>,
 
     // WHETHER A DIAGNOSTIC IS SAID OUT LOUD as found. True for a
@@ -711,7 +715,8 @@ Build* = {
     }
 
     emit_one = (self :: @Self, c :: Checker, job: Job) Res<(), AllocError> {
-        be  ::= self.alloc.CBackend(self.tree, c).try();
+        be ::= self.alloc.CBackend(self.tree, c).try();
+        (self.ffi).then(() { be.enable_ffi(); });
         out ::= self.alloc.Emit().try();
         emit_program(be, 0, out).try();
         report ::= self.alloc.String("").try();
@@ -733,7 +738,8 @@ Build* = {
             self.env,
             self.tree,
             c,
-            job.dir
+            job.dir,
+            self.ffi
         ).try();
         self.faults = self.faults + n;
         Ok(());
@@ -743,8 +749,7 @@ Build* = {
     // to stdout (what `-o -` would mean anyway).
     //
     // A write that fails is a fault, not a trap: a full disk or
-    // unwritable path is a thing the caller acts on, and
-    // `scripts/fixpoint.sh` compares files that have to exist.
+    // unwritable path is a thing the caller acts on.
     deliver = (self :: @Self, job: Job, out: Emit) Res<(), AllocError> {
         job.out.is_empty().match({
             true  => { println("{}", out.view()); Ok(()) },
@@ -784,8 +789,8 @@ Build* = {
     diag_at* = (self: @Self, i: usize) Res<Diag> { self.diags.get(i) }
 
     // 0 when clean, 1 when anything went wrong. One code, not one per
-    // phase: a caller acts on "did this produce a program", and
-    // `tests/run.py`/`scripts/fixpoint.sh` both read exactly that.
+    // phase: a caller acts on "did this produce a program", and the
+    // corpus and self-host build both read exactly that.
     code* = (self: @Self) i32 {
         (self.faults == 0).match({
             true  => 0,

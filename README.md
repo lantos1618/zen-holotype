@@ -59,12 +59,10 @@ Read them in this order. They are the specification, not commentary on it.
 
 ```
 grammar/     tree-sitter grammar. written before any other code.
-tools/parse/ what is left of the throwaway Python bootstrapper: a
-             tree-sitter reader, for the lint gates only.
 seed/        the checked-in generated C. regenerate, THEN commit.
 src/         the real compiler and the standard library, in Zen
 example/     a project that uses the language
-tests/       ~1130 files, written before the compiler that must pass them
+tests/       corpus, must-fail cases, and Zen gate programs
 ```
 
 ## Status

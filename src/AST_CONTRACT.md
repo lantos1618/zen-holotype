@@ -7,9 +7,8 @@ returning these exact node types is what makes stage 5 free rather than a
 parallel universe.
 
 **Nothing here is Zen's design.** `docs/DESIGN.md` is the law. Where they
-disagree, the design wins and this file is the bug. `tools/parse/CONTRACT.md` is
-what is left of the deleted Python bootstrapper's AST — prior art, not a spec,
-and the deliberate divergences from it are listed at the end.
+disagree, the design wins and this file is the bug. The deleted Python
+bootstrapper's AST survives only in git history and is not a second contract.
 
 ---
 
@@ -447,7 +446,7 @@ discovery — "change the filter, change what a test is".
 
 ---
 
-## Divergences from `tools/parse/CONTRACT.md`
+## Historical bootstrapper divergences
 
 `gen_c` eventually consumes both, so each of these is deliberate and named.
 

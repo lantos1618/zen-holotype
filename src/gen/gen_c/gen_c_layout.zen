@@ -1,19 +1,16 @@
 // src/gen/gen_c/gen_c_layout.zen
 // What a Zen type's C DEFINITION is: the bytes behind the spelling.
-//
 // Three shapes, no more. A struct is its storage fields. An enum is a
 // tag and a union of the payloads that have one — omitted entirely
 // when no variant carries anything, so `Signal = Start | Stop` is one
 // `int32_t`, not a struct wrapping an empty union. A `Res` is the same
 // shape, built from two type ids rather than a declaration.
-//
 // EVERY DEFINITION IS EMITTED ONCE, IN DETERMINISTIC ORDER: sorted by
 // mangled name (`tcode`, a pure function of the type). A definition is
 // preceded by the definitions it contains BY VALUE, since C needs a
 // complete type for a field and a forward `typedef` isn't one; a
 // pointer needs no complete type, so the dependency walk looks at
 // fields, not every mention.
-//
 // A TAG IS A FUNCTION OF THE DECLARATION, NEVER AN INSTANTIATION:
 // `Res<i32, E>` and `Res<i32, F>` share `Ok`, so emitting the constant
 // per instance is a C redefinition. Two enumerators may share a value —
@@ -33,7 +30,7 @@ sym_type, sym_variant, sym_member = gen.gen_name
 is_failure, RES_PATH = gen.gen_name
 sym_union_variant, sym_union_member = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
-declarator, is_unit = gen.gen_c.gen_c_type
+declarator, is_unit, has_storage = gen.gen_c.gen_c_type
 field_type, variant_type, decl_ctx, close_types = gen.gen_c.gen_c_type
 decl_inst = gen.gen_c.gen_c_type
 Inst = sema.sema_inst
@@ -41,9 +38,7 @@ any_open, enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 Slot, is_fat, slots_of, slot_field = gen.gen_c.gen_c_fat
 write_array_def = gen.gen_c.gen_c_array
 
-// -----------------------------------------------------------------
 // emission
-// -----------------------------------------------------------------
 
 // Forward typedefs, then tag constants, then definitions — three
 // passes because C wants that order: a tag is a plain `enum` constant,
@@ -68,10 +63,8 @@ emit_typedef = (be :: CBackend, out :: Emit, i: usize) Res<(), AllocError> {
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // tags — a function of the DECLARATION, never an instantiation (see
 // file header)
-// -----------------------------------------------------------------
 
 emit_tags = (be :: CBackend, out :: Emit, seq: Vec<usize>)
             Res<(), AllocError> {
@@ -196,12 +189,10 @@ collect_decl_tags = (
 // numbering by declaration would give one type two numberings, making
 // `.try()` between the two spellings a runtime re-tagging switch for a
 // difference the type system says doesn't exist.
-//
 // The order isn't reinvented: `set_of` hands back the union interned
 // and sorted, the same order `collect_union_tags` writes — asking sema
 // keeps the two from drifting, and sema/gen_c drift is this compiler's
 // worst failure class.
-//
 // A nominal enum is unaffected: `Signal = Start | Stop` names no types,
 // `set_of` returns the given id, `variant_ranks` adds nothing, and
 // declaration order stands.
@@ -364,13 +355,10 @@ write_dotted = (out :: String, name: str) Res<(), AllocError> {
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // definitions
-//
 // Dependency-first, for the reason the header gives. The marker is set
 // before the children are walked, so a by-value cycle terminates — it
 // is a sema error and is reported there, and this only has to not hang.
-// -----------------------------------------------------------------
 
 define_type = (be :: CBackend, out :: Emit, i: usize) Res<(), AllocError> {
     be.is_done(i).match({
@@ -401,7 +389,7 @@ define_deps = (be :: CBackend, out :: Emit, i: usize) Res<(), AllocError> {
 
 define_dep = (be :: CBackend, out :: Emit, id: TyId) Res<(), AllocError> {
     name ::= be.alloc.String().try();
-    sym_type(name, be.types(), be.world(), id).try();
+    sym_type(name, be.alloc, be.types(), be.world(), id).try();
     be.type_index(name.view()).match({
         None  => Ok(()),
         Ok(j) => be.define_type(out, j),
@@ -518,7 +506,6 @@ write_definition = (be :: CBackend, out :: Emit, name: str, id: TyId)
 // enum, not a new kind of type" — a second representation would invent
 // the kind the design says it isn't, and need a runtime conversion
 // between two spellings of one set where the language promises none.
-//
 // A member carries a value OF the type it names: `WriteError.IoError`
 // records WHICH IoError, where tag-only would record only that there
 // was one.
@@ -682,7 +669,6 @@ write_slot_line = (be :: CBackend, out :: Emit, s: Slot)
 // A GENERIC STRUCT IS LAID OUT AT ITS ARGUMENTS: `Vec<u8>` holds a
 // `Ptr<u8>` — one C definition per instantiation is what
 // monomorphisation IS.
-//
 // Still opaque: a type whose arguments nothing settled — `Vec<T>`
 // itself, which no program has a value of and whose fields would spell
 // a `T` with no C type. An opaque body keeps the translation unit
@@ -703,9 +689,7 @@ write_struct_def = (
     })
 }
 
-// The declared type of every STORAGE member, in declaration order —
-// collected once so the openness check and field lines share one list
-// rather than risk disagreeing about which members are storage.
+// Stored member types after generic substitution, in declaration order.
 storage_types = (
     be   :: CBackend,
     s    : Struct,
@@ -716,7 +700,10 @@ storage_types = (
     s.members.loop((h, m) {
         be.field_type(m, ctx, inst).match({
             None  => Ok(()),
-            Ok(t) => out.add(t),
+            Ok(t) => be.has_storage(t).match({
+                true  => out.add(t),
+                false => Ok(()),
+            }),
         }).try();
     });
     Ok(());
@@ -736,7 +723,10 @@ write_fields_def = (
     s.members.loop((h, m) {
         be.field_type(m, ctx, inst).match({
             None  => Ok(()),
-            Ok(t) => be.write_field(out, m, t),
+            Ok(t) => be.has_storage(t).match({
+                true  => be.write_field(out, m, t),
+                false => Ok(()),
+            }),
         }).try();
     });
     // C11 6.7.2.1p1 wants a member; one byte, in one place, so a bare

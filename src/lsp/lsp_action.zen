@@ -27,8 +27,8 @@
 //
 // THE LINE IS THE SPELLING THIS TREE WRITES. A folder root that
 // re-exports the name under its short spelling is offered as that short
-// form — `Name = std.text`, the line `scripts/style.py`'s `rule_layer`
-// lets a plain consumer write — and never the declaring file's long
+// form — `Name = std.text`, the spelling the layer rule lets a plain
+// consumer write — and never the declaring file's long
 // path, which builds and then fails the style gate on the next run.
 // Identical lines are one offer, however many modules hold the name.
 // The span test below is HALF-OPEN at both edges with one allowance,
@@ -137,8 +137,7 @@ offer_name = (c: Checker, t: Alloc, name: str, found :: Vec<Action>)
 // which is the folder rule applied to the declaring file itself. A root
 // that EXPORTS the name under its short spelling is written by every
 // plain consumer as that short form — `str = std.text`, never
-// `str = std.text.text_str`, which `scripts/style.py`'s `rule_layer`
-// reads as a compiler-sublayer path and refuses. So when the def is
+// `str = std.text.text_str`, which the layer rule refuses. So when the def is
 // visible from the folder's root table under the same dotted tail, the
 // offer spells the root; when it is not (or the module IS its own root,
 // where the two spellings are one table), it keeps the long form.
@@ -170,10 +169,9 @@ offer_at = (
 ) Res<(), AllocError> {
     spoken = module_display(table.name);
     // THE FOLDER ROOT, ASKED NOT ASSUMED: the short spelling is offered
-    // only when the root really hands out this name — its own table has
-    // it and every copy there is starred, so the unstarred line the fix
-    // writes actually binds. A def that travels only under the long
-    // path keeps it. `spoken != table.name` is the test for a collapse
+    // only when the root really hands out this name. `exports_of` follows
+    // starred imports too. A def that travels only under the long path
+    // keeps it. `spoken != table.name` is the test for a collapse
     // having happened at all; when the module IS its own root the two
     // spellings are one table and there is nothing to ask.
     //
@@ -182,23 +180,18 @@ offer_at = (
     // checker — every arm of an expression match must agree, which is
     // why `offer` above spells its refusals the same way.
     at_root ::= t.Vec<Def>();
-    offered ::= spoken;
+    visited ::= t.Vec<usize>();
+    offered ::= table.name;
     (spoken.eq(table.name)).match({
         false => c.world.index_of(spoken).match({
             None  => written(),
             Ok(r) => (r == mi).match({
                 true  => written(),
-                false => c.world.table_at(r).match({
-                    None  => written(),
-                    Ok(_) => {
-                        c.world.own_defs(r, name, at_root).try();
-                        ((at_root.len > 0)
-                            && all_exported(at_root)).then(() {
-                                offered = spoken;
-                            });
-                        written()
-                    },
-                }).try(),
+                false => {
+                    c.world.exports_of(r, name, at_root, visited).try();
+                    (at_root.len > 0).then(() { offered = spoken; });
+                    written()
+                },
             }).try(),
         }).try(),
         true  => written(),
@@ -215,18 +208,6 @@ offer_at = (
         },
     });
     Ok(())
-}
-
-// Whether every def in `defs` crosses a boundary — the star that makes
-// an unstarred IMPORT of it work. A root re-exports what it imports;
-// one unstarred binding among them and the short line binds nothing,
-// so the offer stays on the long path.
-all_exported = (defs :: Vec<Def>) bool {
-    (defs.len == 0).match({
-        true  => false,
-        false => defs.find((d) { d.exported == false })
-                      .match({ Ok(_) => false, None => true }),
-    })
 }
 
 // A diag's span against the request's range, BOTH HALF-OPEN: `Span` is

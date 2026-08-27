@@ -26,6 +26,8 @@
 //                                  and for a primitive what the prelude
 //                                  declares about it (doc line, members)
 //   OfValue  an expression      -> what `type_of` gave it
+//   Imported an import binding   -> `null`; it has a definition, not a
+//                                   separately memoized value or type
 //   Nothing  everything else    -> `null`, and see below
 //
 // A WRONG ANSWER IS WORSE THAN NO ANSWER — the rule every arm is written
@@ -175,7 +177,7 @@ hover_in* = (
 // the reply and dies with the request, while the tree and the memos it
 // reads live in the slot and are only READ.
 hover_with* = (
-    c         :: Checker,
+    c         : Checker,
     a         : Alloc,
     rel       : str,
     text      : str,
@@ -199,23 +201,24 @@ no_type* = () Hover {
 
 // The `Tell`, said — one `String`, thrown away unread if the arm could
 // not finish it.
-said = (c :: Checker, a: Alloc, text: str, t: Tell) Res<Hover, AllocError> {
+said = (c : Checker, a: Alloc, text: str, t: Tell) Res<Hover, AllocError> {
     out ::= a.String().try();
     t.match({
-        Nothing    => nothing_found(),
-        Sig(f)     => wired(
+        Nothing     => nothing_found(),
+        Sig(f)      => wired(
             text,
             f.name.span,
             write_decl_sig(c, f, out).try(),
             out
         ),
-        OfType(ta) => wired(
+        OfType(ta)  => wired(
             text,
             ta.span,
             write_written_ty(c, ta.id, out).try(),
             out
         ),
-        OfValue(v) => wired(text, v.span, write_val(c, v.id, out).try(), out),
+        OfValue(v)  => wired(text, v.span, write_val(c, v.id, out).try(), out),
+        Imported(_) => nothing_found(),
     })
 }
 
@@ -249,7 +252,7 @@ wired = (text: str, span: Span, known: bool, out :: String)
 // the bare name, through `write_ty` below: a reprinted parameter list
 // is no place for a doc comment.
 write_written_ty = (
-    c   :: Checker,
+    c   : Checker,
     id  : TypeId,
     out :: String
 ) Res<bool, AllocError> {
@@ -259,7 +262,7 @@ write_written_ty = (
     })
 }
 
-write_ty = (c :: Checker, id: TypeId, out :: String) Res<bool, AllocError> {
+write_ty = (c : Checker, id: TypeId, out :: String) Res<bool, AllocError> {
     c.type_memo.get(id).match({
         None     => no_answer(),
         Ok(memo) => write_ty_id(c, memo, out),
@@ -269,7 +272,7 @@ write_ty = (c :: Checker, id: TypeId, out :: String) Res<bool, AllocError> {
 // The OfType answer for a resolved type: the prim's prelude note when
 // there is one, the declared type's shape when it has one, the plain
 // name otherwise.
-write_ty_named = (c :: Checker, id: TyId, out :: String) Res<bool, AllocError> {
+write_ty_named = (c : Checker, id: TyId, out :: String) Res<bool, AllocError> {
     poison_free(c, id).match({
         false => no_answer(),
         true  => c.types.at(id).match({
@@ -286,7 +289,7 @@ write_ty_named = (c :: Checker, id: TyId, out :: String) Res<bool, AllocError> {
 // question, and hovering `s` to be told about MIN and MAX is noise on
 // the most common hover there is. A declared type expands either way:
 // "what is in this" is the same question whichever position asked it.
-write_ty_value = (c :: Checker, id: TyId, out :: String) Res<bool, AllocError> {
+write_ty_value = (c : Checker, id: TyId, out :: String) Res<bool, AllocError> {
     poison_free(c, id).match({
         false => no_answer(),
         true  => c.types.at(id).match({
@@ -306,7 +309,7 @@ write_ty_value = (c :: Checker, id: TyId, out :: String) Res<bool, AllocError> {
 // THE NAME IS WRITTEN FIRST AND KEPT WHATEVER FOLLOWS. A declaration
 // that cannot be reached is not a reason to answer `null` — the type
 // resolved, which is what the hover was asked.
-write_named = (c :: Checker, id: TyId, n: TyNamed, out :: String)
+write_named = (c : Checker, id: TyId, n: TyNamed, out :: String)
               Res<bool, AllocError> {
     c.types.write_name(id, out).try();
     decl_at(c.tree, n.decl).match({
@@ -324,7 +327,7 @@ write_named = (c :: Checker, id: TyId, n: TyNamed, out :: String)
 // to add — then the declaration's note. A miss is not a lookup failure
 // worth hiding the name over: `bool` answered exactly "bool" for
 // years, and lone-module hover still does.
-write_prim = (c :: Checker, id: TyId, p: Prim, out :: String)
+write_prim = (c : Checker, id: TyId, p: Prim, out :: String)
              Res<bool, AllocError> {
     c.types.write_name(id, out).try();
     defs ::= c.alloc.Vec<Def>();
@@ -342,7 +345,7 @@ write_prim = (c :: Checker, id: TyId, p: Prim, out :: String)
 // exported members — the starred ones, the surface a reader of the
 // hovered module can actually reach (`str`'s `data` is deliberately
 // absent). An unstarred member is the module's own business.
-write_prelude_note = (c :: Checker, d: Def, out :: String) Res<(), AllocError> {
+write_prelude_note = (c : Checker, d: Def, out :: String) Res<(), AllocError> {
     decl_at(c.tree, d.id).match({
         None   => Ok(()),
         Ok(dd) => write_decl_note(c, dd, EXPORTED_ONLY, out),
@@ -352,7 +355,7 @@ write_prelude_note = (c :: Checker, d: Def, out :: String) Res<(), AllocError> {
 // THE NOTE ITSELF, shared by the two ways in — a prelude primitive's
 // declaration and a named type's own. Reached from a `Decl` rather than
 // from a `Def` because that is the half both have.
-write_decl_note = (c :: Checker, dd: Decl, all: bool, out :: String)
+write_decl_note = (c : Checker, dd: Decl, all: bool, out :: String)
                   Res<(), AllocError> {
     doc = doc_block(c.alloc, c.tree, dd.leading).try();
     (doc.len > 0).then(() {
@@ -393,7 +396,7 @@ joiner = (doc: str) str {
     })
 }
 
-write_members = (c :: Checker, dd: Decl, shown: Shown, out :: String)
+write_members = (c : Checker, dd: Decl, shown: Shown, out :: String)
                 Res<(), AllocError> {
     body ::= c.alloc.String().try();
     dd.kind.match({
@@ -423,7 +426,7 @@ MEMBERS: str = "members: "
 // the signature means. A note is decoration: dropping the hover because
 // one member of nine is poisoned would answer `null` at a position that
 // resolved fine.
-write_member_run = (c :: Checker, ms: Vec<Member>, all: bool, body :: String)
+write_member_run = (c : Checker, ms: Vec<Member>, all: bool, body :: String)
                    Res<(), AllocError> {
     list ::= c.alloc.String().try();
     ms.loop((h, m) { write_one_member(c, m, all, list).try(); });
@@ -434,7 +437,7 @@ write_member_run = (c :: Checker, ms: Vec<Member>, all: bool, body :: String)
     Ok(());
 }
 
-write_one_member = (c :: Checker, m: Member, all: bool, body :: String)
+write_one_member = (c : Checker, m: Member, all: bool, body :: String)
                    Res<(), AllocError> {
     m.kind.match({
         Field(f)    => write_typed(
@@ -456,7 +459,7 @@ write_one_member = (c :: Checker, m: Member, all: bool, body :: String)
 }
 
 write_typed = (
-    c    :: Checker,
+    c    : Checker,
     show : bool,
     name : str,
     ty   : Res<TypeId>,
@@ -474,7 +477,7 @@ write_typed = (
 
 // `: i32` when the type resolves, nothing when it does not — written
 // into a scratch first so a half-written suffix never reaches the note.
-write_type_suffix = (c :: Checker, ty: Res<TypeId>, body :: String)
+write_type_suffix = (c : Checker, ty: Res<TypeId>, body :: String)
                     Res<(), AllocError> {
     ty.match({
         None   => Ok(()),
@@ -500,7 +503,7 @@ write_type_suffix = (c :: Checker, ty: Res<TypeId>, body :: String)
 // and `slice` — a note that says less than the four-word one it
 // replaced. The name alone is not a guess about a type; it is the
 // member, which is what the list is of.
-write_fn_member = (c :: Checker, f: Function, all: bool, body :: String)
+write_fn_member = (c : Checker, f: Function, all: bool, body :: String)
                   Res<(), AllocError> {
     (all || f.exported).match({
         false => Ok(()),
@@ -520,7 +523,7 @@ write_fn_member = (c :: Checker, f: Function, all: bool, body :: String)
 // listing: `Fast | Slow` is the answer to "what can this be".
 // Unexported is not a question an enum has — a variant carries the
 // declaration's own visibility.
-write_variant_run = (c :: Checker, vs: Vec<Variant>, body :: String)
+write_variant_run = (c : Checker, vs: Vec<Variant>, body :: String)
                     Res<(), AllocError> {
     vs.loop((h, i, v) {
         (i > 0).then(() { body.add_bytes(" | ").try() });
@@ -530,7 +533,7 @@ write_variant_run = (c :: Checker, vs: Vec<Variant>, body :: String)
     Ok(());
 }
 
-write_payload = (c :: Checker, payload: Res<TypeId>, body :: String)
+write_payload = (c : Checker, payload: Res<TypeId>, body :: String)
                 Res<(), AllocError> {
     payload.match({
         None   => Ok(()),
@@ -639,7 +642,7 @@ comment_text = (text: str) str {
 // A MISS IS ANSWERED AS "NOTHING", not a made-up type: `design_lsp.md`'s
 // open question 6 leaves unverified whether `expr_memo` covers every
 // expression after `check_all`.
-write_val = (c :: Checker, e: ExprId, out :: String) Res<bool, AllocError> {
+write_val = (c : Checker, e: ExprId, out :: String) Res<bool, AllocError> {
     c.expr_memo.get(e).match({
         None     => no_answer(),
         Ok(memo) => write_ty_value(c, memo, out),
@@ -654,7 +657,7 @@ write_val = (c :: Checker, e: ExprId, out :: String) Res<bool, AllocError> {
 // common case before `hover_in`: every imported name resolved to
 // poison, measured at 4/12 answers on a file that imports something vs
 // 10/12 on one that does not, and still applies with no workspace.
-write_ty_id = (c :: Checker, id: TyId, out :: String) Res<bool, AllocError> {
+write_ty_id = (c : Checker, id: TyId, out :: String) Res<bool, AllocError> {
     poison_free(c, id).match({
         false => no_answer(),
         true  => { c.types.write_name(id, out).try(); an_answer() },
@@ -666,7 +669,7 @@ write_ty_id = (c :: Checker, id: TyId, out :: String) Res<bool, AllocError> {
 // of sema's marker here. `Ty` is a closed nine-variant enum, so the walk
 // is total. `Infer` is NOT poison: `_` in `Res<Cfg, _>` is a hole law 6
 // permits, honest to show a user who wrote one.
-poison_free = (c :: Checker, id: TyId) bool {
+poison_free = (c : Checker, id: TyId) bool {
     c.types.at(id).match({
         Unknown   => false,
         Res(r)    => poison_free(c, r.value) && poison_free(c, r.error),
@@ -678,7 +681,7 @@ poison_free = (c :: Checker, id: TyId) bool {
     })
 }
 
-all_poison_free = (c :: Checker, ids: Vec<TyId>) bool {
+all_poison_free = (c : Checker, ids: Vec<TyId>) bool {
     every ::= true;
     ids.loop((h, id) { every = every && poison_free(c, id); });
     every;
@@ -696,7 +699,7 @@ all_poison_free = (c :: Checker, ids: Vec<TyId>) bool {
 // would double the length of the common case) — said here so a reader
 // does not assume `T` is unbounded.
 write_decl_sig = (
-    c   :: Checker,
+    c   : Checker,
     f   : Function,
     out :: String
 ) Res<bool, AllocError> {
@@ -740,7 +743,7 @@ binder = (mutable: bool) str {
 // A TYPE THAT WAS NOT WRITTEN IS NOT GUESSED. `Param.type` is absent in
 // a closure and `Function.ret` in a lambda; the whole signature is
 // discarded rather than printing `()` and being silently wrong.
-write_opt_ty = (c :: Checker, t: Res<TypeId>, out :: String)
+write_opt_ty = (c : Checker, t: Res<TypeId>, out :: String)
                Res<bool, AllocError> {
     t.match({
         None   => no_answer(),
@@ -769,5 +772,6 @@ no_answer = () Res<bool, AllocError> { Ok(false) }
 //     a struct name; `T` used as a type hovers.
 //   - AN IMPORTED NAME, WHEN THERE IS NO WORKSPACE: `hover_in` answers
 //     it; without one `Vec` in `Vec = std.collections` has no type, and
-//     the import DECLARATION is `Nothing` either way.
+//     the import declaration's `Imported` result deliberately remains a
+//     definition-only answer either way.
 //   - A CLOSURE'S PARAMETER: `Param.type` is absent by construction.

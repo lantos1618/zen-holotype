@@ -106,12 +106,17 @@ Built* = {
 
     // The key is CONTENT, not versions: equal bytes are the same state
     // however a client numbers them.
+    stale :: bool = false,
+
     matches* = (self: @Self, root: str, entry: str, uris: Vec<str>,
                 docs: Map<str, str>) bool {
-        self.cur.match({
-            None  => false,
-            Ok(i) => i.root.eq(root) && i.entry.eq(entry)
-                      && same_overlay(i, uris, docs),
+        self.stale.match({
+            true  => false,
+            false => self.cur.match({
+                None  => false,
+                Ok(i) => i.root.eq(root) && i.entry.eq(entry)
+                          && same_overlay(i, uris, docs),
+            }),
         })
     }
 
@@ -126,6 +131,11 @@ Built* = {
             false => self.rebuild(env, root, entry, uris, docs),
         })
     }
+
+    // Disk inputs are not copied into the key, so a client file-watch event
+    // marks the held build stale. `rebuild` remains the only owner that drops
+    // and replaces its arena.
+    invalidate* = (self :: @Self) () { self.stale = true; }
 
     rebuild = (self :: @Self, env: Env, root: str, entry: str,
                uris: Vec<str>, docs: Map<str, str>) Res<(), AllocError> {
@@ -175,7 +185,7 @@ Built* = {
             false => written(),
         }).try();
 
-        self.cur = Ok(Inner(
+        self.cur   = Ok(Inner(
             root: kept_root,
             entry: kept_entry,
             paths: paths,
@@ -185,6 +195,7 @@ Built* = {
             spots: spots,
             classed: classed
         ));
+        self.stale = false;
         Ok(());
     }
 
@@ -280,7 +291,7 @@ add_parse = (
 // `write_detail` rather than `render`, since `render` opens with
 // `file:line:col:` and a position already travelling beside a `range`
 // would be the same fact said twice, once in a form no client can click.
-from_check = (c :: Checker, a: Alloc, root: str, spots :: Vec<Spot>)
+from_check = (c : Checker, a: Alloc, root: str, spots :: Vec<Spot>)
              Res<(), AllocError> {
     Range(0, c.diag_count()).loop((h, i) {
         c.diag_at(i).match({
@@ -292,7 +303,7 @@ from_check = (c :: Checker, a: Alloc, root: str, spots :: Vec<Spot>)
 }
 
 add_sema = (
-    c     :: Checker,
+    c     : Checker,
     a     : Alloc,
     root  : str,
     file  : str,

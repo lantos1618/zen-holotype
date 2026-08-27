@@ -50,7 +50,8 @@ parse_i64* = (self: str) Res<i64> {
         (self.len == 0).then(() { h.break() });
 
         // one leading minus; digits start after it
-        first ::= (self[0] == '-').match({
+        negative ::= self[0] == '-';
+        first    ::= negative.match({
             true  => 1,
             false => 0,
         });
@@ -70,10 +71,9 @@ parse_i64* = (self: str) Res<i64> {
         // least one of them — "3x" stops early, "-" never starts
         (count == 0 || stop != self.len).then(() { h.break() });
 
-        // fold, checked BEFORE each multiply: acc > edge means even the
-        // fairest next digit cannot fit; MIN sits one BELOW -MAX, so
-        // the second bound folds both halves of the range
+        // Check quotient and sign-specific final digit before multiplying.
         edge ::= i64.MAX / 10;
+        limit : u8     = negative.match({ true => 8, false => 7 });
         acc     : i64  = 0;
         overrun : bool = false;
         Range(first, self.len).loop((hh, i) {
@@ -81,7 +81,7 @@ parse_i64* = (self: str) Res<i64> {
             // this is '0'..'9' arithmetic and not a second question —
             // and no binder rides an arm payload where gen_c cannot see it
             d ::= self[i] - DIGIT_ZERO;
-            (acc > edge || acc < 0 - (edge + 1)).then(() {
+            (acc < 0 - edge || (acc == 0 - edge && d > limit)).then(() {
                 overrun = true;
                 hh.break();
             });
@@ -92,13 +92,13 @@ parse_i64* = (self: str) Res<i64> {
         overrun.then(() { h.break() });
 
         // without a sign, a magnitude of exactly MIN is one past MAX
-        (self[0] == '-').match({
+        negative.match({
             false => { (acc == i64.MIN).then(() { h.break() }); },
             true  => {},
         });
 
         // neg carries the sign; acc is already negative under it
-        h.break((self[0] == '-').match({
+        h.break(negative.match({
             true  => acc,
             false => 0 - acc,
         }));

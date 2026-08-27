@@ -21,13 +21,14 @@
 
 Alloc, AllocError = std.mem
 str, String = std.text
+Vec = std.collections
 Range = std.core
 FsError = std.env
 
 Ast = std.ast.ast_arena
 
 Checker = sema.sema
-Emit, CBackend = gen.gen
+Emit, CBackend, order = gen.gen
 lower_program, emit_header, emit_unit, unit_used = gen.gen
 
 // One `.c` per module beside the one `zen.h` they all include, written
@@ -39,9 +40,10 @@ lower_program, emit_header, emit_unit, unit_used = gen.gen
 // single-file path does it: the header is assembled first because
 // assembling it is what emits the type definitions, and everything a
 // unit adds after that is bytes already lowered.
-emit_units* = (a: Alloc, env: Env, tree: Ast, c :: Checker, dir: str)
+emit_units* = (a: Alloc, env: Env, tree: Ast, c :: Checker, dir: str, ffi: bool)
               Res<usize, AllocError> {
     be ::= a.CBackend(tree, c).try();
+    (ffi).then(() { be.enable_ffi(); });
     be.use_externs();
     lower_program(be, 0).try();
     hdr ::= a.Emit().try();
@@ -65,8 +67,9 @@ write_units = (
     hdr  : Emit
 ) Res<usize, AllocError> {
     bad ::= write_at(a, env, dir, "zen.h", hdr.view()).try();
+    seq = order(a, be.fn_names).try();
     Range(0, tree.module_count()).loop((h, u) {
-        bad = bad + write_unit(a, env, tree, be, dir, u).try();
+        bad = bad + write_unit(a, env, tree, be, dir, seq, u).try();
     });
     Ok(bad);
 }
@@ -80,11 +83,12 @@ write_unit = (
     tree : Ast,
     be   :: CBackend,
     dir  : str,
+    seq  : Vec<usize>,
     u    : usize
 ) Res<usize, AllocError> {
     ((u == 0) || unit_used(be, u)).match({
         false => Ok(0),
-        true  => write_unit_at(a, env, tree, be, dir, u),
+        true  => write_unit_at(a, env, tree, be, dir, seq, u),
     })
 }
 
@@ -94,10 +98,11 @@ write_unit_at = (
     tree : Ast,
     be   :: CBackend,
     dir  : str,
+    seq  : Vec<usize>,
     u    : usize
 ) Res<usize, AllocError> {
     out ::= a.Emit().try();
-    emit_unit(be, 0, u, out).try();
+    emit_unit(be, 0, u, seq, out).try();
     name ::= a.String().try();
     unit_file(tree, u, name).try();
     write_at(a, env, dir, name.view(), out.view())

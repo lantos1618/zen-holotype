@@ -38,8 +38,10 @@ SemaFault, NameFault, TypeFault, ExportFault = sema.sema_diag
 Checker = sema.sema_check
 opaque, Found, members_of = sema.sema_member
 bound_members, has_member, impl_span, impl_bound_type = sema.sema_supply
+storage_seat_name = sema.sema_supply
 Cand, TBound, Actual = sema.sema_call
 ty_at, is_tvar = sema.sema_cand
+res_sugar = sema.sema_denote
 
 // TWO THINGS ARE WRONG WITH AN IMPL, and they are asked in that order:
 // where it is written, and what it supplies.
@@ -184,15 +186,57 @@ missing = (c :: Checker, span: Span, name: str) Res<(), AllocError> {
 //     writes no default and needs none: absence IS `None`, which is
 //     DESIGN.md's sentence and not an inference from it.
 //
-// AND ONE REFUSAL: a construction with an unnamed argument is left
-// alone. `check_ctor_fields` says why — a positional argument is a
-// different resolution, and this rule reads names.
 check_ctor_shape* = (c :: Checker, call: Call, ty: TyId, span: Span)
                     Res<(), AllocError> {
-    call.args.loop((h, a) { c.arg_fits_field(a, ty).try() });
-    all_named(call).match({
-        false => Ok(()),
-        true  => c.absent_fields(call, ty, span),
+    c.refuse_surplus_arg(call, ty).try().match({
+        true  => Ok(()),
+        false => c.check_ctor_seats(call, ty, span),
+    })
+}
+
+check_ctor_seats = (c :: Checker, call: Call, ty: TyId, span: Span)
+                   Res<(), AllocError> {
+    call.args.loop((h, i, a) { c.arg_fits_field(a, i, ty).try() });
+    c.absent_fields(call, ty, span)
+}
+
+// A positional argument past the final storage field would be evaluated
+// and discarded by codegen. Report the first one and suppress cascades.
+refuse_surplus_arg = (c :: Checker, call: Call, ty: TyId)
+                     Res<bool, AllocError> {
+    refused ::= false;
+    call.args.loop((h, i, a) {
+        (refused == false).then(() {
+            c.refuse_surplus_one(a, i, ty).try().then(() {
+                refused = true;
+            });
+        });
+    });
+    Ok(refused)
+}
+
+refuse_surplus_one = (c :: Checker, a: Arg, i: usize, ty: TyId)
+                     Res<bool, AllocError> {
+    a.name.match({
+        Ok(_) => Ok(false),
+        None  => {
+            name = c.storage_seat_name(ty, i).try();
+            name.eq("").match({
+                false => Ok(false),
+                true  => {
+                    c.report(
+                        a.span.file,
+                        a.span,
+                        SemaFault.CtorSurplusArgument(TypeFault(
+                            name: "",
+                            expected: c.types.unknown().try(),
+                            found: ty,
+                        ))
+                    ).try();
+                    Ok(true)
+                },
+            })
+        },
     })
 }
 
@@ -204,10 +248,20 @@ check_ctor_shape* = (c :: Checker, call: Call, ty: TyId, span: Span)
 // says why it is not there: the escape below needs `satisfies_bound`,
 // and importing this file into that one closes a cycle through
 // `sema_call`.
-arg_fits_field = (c :: Checker, a: Arg, ty: TyId) Res<(), AllocError> {
+arg_fits_field = (c :: Checker, a: Arg, i: usize, ty: TyId)
+                 Res<(), AllocError> {
     a.name.match({
-        None   => Ok(()),
+        None   => c.positional_arg_fits(a, i, ty),
         Ok(nm) => c.named_arg_fits(a, nm.text, ty),
+    })
+}
+
+positional_arg_fits = (c :: Checker, a: Arg, i: usize, ty: TyId)
+                      Res<(), AllocError> {
+    name = c.storage_seat_name(ty, i).try();
+    name.eq("").match({
+        true  => Ok(()),
+        false => c.named_arg_fits(a, name, ty),
     })
 }
 
@@ -270,14 +324,6 @@ refuse_unless_bound = (c :: Checker, span: Span, got: TyId, want: TyId)
     })
 }
 
-all_named = (call: Call) bool {
-    named ::= true;
-    call.args.loop((h, a) {
-        a.name.match({ Ok(_) => (), None => { named = false; } });
-    });
-    named;
-}
-
 absent_fields = (c :: Checker, call: Call, ty: TyId, span: Span)
                 Res<(), AllocError> {
     members ::= c.alloc.Vec<Member>();
@@ -303,17 +349,36 @@ Owed = {
 
 absent_field = (c :: Checker, call: Call, ty: TyId, at: Owed)
                Res<(), AllocError> {
-    name = at.m.name().text;
-    (c.ctor_required(at.m) && (named_arg(call, name) == false)).match({
+    name     = at.m.name().text;
+    supplied = c.seat_written(call, ty, name).try();
+    (c.ctor_required(at.m, ty).try() && (supplied == false)).match({
         true  => c.ctor_missing(at.span, name),
         false => Ok(()),
     })
 }
 
-ctor_required = (c :: Checker, m: Member) bool {
+seat_written = (c :: Checker, call: Call, ty: TyId, name: str)
+               Res<bool, AllocError> {
+    hit ::= false;
+    call.args.loop((h, i, a) {
+        c.arg_writes_seat(a, i, ty, name).try().then(() { hit = true; });
+    });
+    Ok(hit)
+}
+
+arg_writes_seat = (c :: Checker, a: Arg, i: usize, ty: TyId, name: str)
+                  Res<bool, AllocError> {
+    a.name.match({
+        Ok(nm) => Ok(nm.text.eq(name)),
+        None   => Ok(c.storage_seat_name(ty, i).try().eq(name)),
+    })
+}
+
+ctor_required = (c :: Checker, m: Member, ty: TyId)
+                Res<bool, AllocError> {
     m.kind.match({
-        Field(f) => required(m) && (c.written_res(f.type) == false),
-        _        => false,
+        Field(f) => Ok(required(m) && !c.written_res(f.type, ty).try()),
+        _        => Ok(false),
     })
 }
 
@@ -330,25 +395,18 @@ ctor_required = (c :: Checker, m: Member) bool {
 // gives the failure model one spelling and `sema_ty.zen` interns it from
 // exactly this name. Reading the AST costs nothing and moves nothing,
 // which is the whole requirement here.
-written_res = (c :: Checker, t: Res<TypeId>) bool {
+written_res = (c :: Checker, t: Res<TypeId>, owner: TyId)
+              Res<bool, AllocError> {
     t.match({
-        None   => false,
+        None   => Ok(false),
         Ok(id) => c.tree.type_at(id).kind.match({
-            Named(n) => n.name.text.eq("Res"),
-            _        => false,
+            Named(n) => c.types.at(owner).match({
+                Named(o) => c.res_sugar(n.name.text, o.decl.module.to_usize()),
+                _        => Ok(false),
+            }),
+            _        => Ok(false),
         }),
     })
-}
-
-named_arg = (call: Call, name: str) bool {
-    hit ::= false;
-    call.args.loop((h, a) {
-        a.name.match({
-            Ok(nm) => nm.text.eq(name).then(() { hit = true; }),
-            None   => (),
-        });
-    });
-    hit;
 }
 
 ctor_missing = (c :: Checker, span: Span, name: str) Res<(), AllocError> {

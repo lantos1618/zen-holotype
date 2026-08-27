@@ -1,23 +1,19 @@
 // src/gen/gen_c/gen_c_assoc.zen
 // `Type.name(..)` — a member called with NO receiver.
-//
 // "A struct body may bind a name to a value, read as `Type.NAME`", and a
 // function is a value: `Duration.seconds(2)` is a member read through
 // its type, not a method with the type shoved into the receiver slot —
 // which is what this backend used to do, emitting an undeclared `D2`
 // that no Zen diagnostic named and only `cc` caught.
-//
 // A CONSTRUCTOR IS WHY THE FORM HAS TO EXIST: `seconds = (n: u64)
 // Duration` takes a number and returns the type, so filing it under its
 // first parameter would put `.seconds()` on every integer.
-//
 // THE FIRST PARAMETER IS THE WHOLE TEST, asked of the RESOLVED type, not
 // the written spelling: a parameter that is the receiver's own type is a
 // method ("a UFCS function whose first parameter happens to be named
 // `self`"), whether written `@Self` or spelled out. Anything else,
 // including no parameter, is an associated function; a method reached
 // this way has no spelling in the language and stays a refusal.
-//
 // EVERYTHING ELSE IS `gen_c_member.zen`'S METHOD CALL WITH THE RECEIVER
 // DROPPED: same qualified name, signature, queue entry — the two cannot
 // disagree about which function they mean, and `gen_c_decl.zen` lowers
@@ -40,7 +36,7 @@ CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 any_open, recv_inst, inst_open = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
-write_arg_at, signature_of, plain = gen.gen_c.gen_c_call
+write_arg_at, signature_of, plain, write_extern = gen.gen_c.gen_c_call
 holds = gen.gen_c.gen_c_expr
 construct = gen.gen_c.gen_c_build
 Site, site_of, member_at, method_sig = gen.gen_c.gen_c_member
@@ -83,13 +79,10 @@ lower_type_assoc = (
     })
 }
 
-// ---------------------------------------------------------------------
 // `module.name(..)`
-//
 // `sh = shape` then `sh.reseat(3)`. The base is not a type at all, so
 // none of the machinery above applies: there is no site, no receiver and
 // no member table, only a module and a name.
-// ---------------------------------------------------------------------
 
 // THE MODULE IS HALF THE QUESTION: two modules may declare one
 // top-level name, so lookup goes through the module the alias names and
@@ -176,9 +169,18 @@ module_fn_decl = (
     inst ::= be.alloc.Inst();
     sig  ::= be.alloc.Vec<TyId>();
     read = be.signature_of(d, inst, sig).try();
-    (read && plain(f) && has_body(f)).match({
+    (read && plain(f)).match({
         false => be.refuse_module_fn(id, out),
-        true  => be.write_module_call(c, d, f, sig, inst, ctx, out),
+        true  => has_body(f).match({
+            true  => be.write_module_call(c, d, f, sig, inst, ctx, out),
+            false => be.ffi.match({
+                false => be.refuse_module_fn(id, out),
+                true  => {
+                    be.write_extern(id, c, d, f, sig, None, ctx, out).try();
+                    Ok(true)
+                },
+            }),
+        }),
     })
 }
 

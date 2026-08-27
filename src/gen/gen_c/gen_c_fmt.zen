@@ -1,17 +1,14 @@
 // src/gen/gen_c/gen_c_fmt.zen
 // `alloc.String("{}/{}.zen", root, name)` — the allocating format door.
-//
 // `text_string.zen` declares it with no body: "the call is expanded
 // where it is written, into this module's empty form followed by the
 // same expansion `add` gets". Why a door has no body at all — the
 // variadic parameter, and `{}` resolving by the argument's type — is
 // `gen_c_sink.zen`'s head.
-//
 // Emitting the call instead is a LINKER error, not a wrong answer: a
 // bodyless declaration defines no symbol. `cc` reported seven of them
 // against stage 2, all in `zen_build.zen`'s module-path resolution — a
 // compiler that skipped this door could not find its own source files.
-//
 // What is left here is the buffer, not the format: this door is the
 // empty form followed by exactly the pieces `out.add(fmt, args)`
 // writes; the walk, writers and record over the buffer are
@@ -19,7 +16,6 @@
 // that one wrote a `str` and reported every other hole, so
 // `alloc.String("point {}", p)` was a diagnostic while `out.add("point
 // {}", p)` wrote the point.
-//
 // What the two doors genuinely do not share is the ERROR, which is why
 // they are still two files: a write answers `Res<(), WriteError>`, this
 // answers `Res<String, AllocError>`, with no conversion between them —
@@ -33,7 +29,7 @@ TyId, TyRes = sema.sema_ty
 Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
-sym_gen, sym_member = gen.gen_name
+sym_member = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
@@ -45,9 +41,7 @@ is_sink_door, lower_sink_door, bodyless = gen.gen_c.gen_c_sink
 last_is_variadic, call_symbol, lower_pieces_into = gen.gen_c.gen_c_sink
 write_jump_unless_ok, write_goto, write_done = gen.gen_c.gen_c_sink
 
-// -----------------------------------------------------------------
 // recognising the door
-// -----------------------------------------------------------------
 
 // THE TWO FORMAT DOORS, asked as one question because `gen_c_call.zen`
 // asks it once: `alloc.String(fmt, args)` is this file's, `out.add(fmt,
@@ -65,9 +59,7 @@ is_alloc_door = (be: CBackend, d: Def, f: Function) bool {
         && be.last_is_variadic(f)
 }
 
-// -----------------------------------------------------------------
 // the expansion
-// -----------------------------------------------------------------
 
 lower_format_door* = (
     be   :: CBackend,
@@ -191,8 +183,7 @@ write_door = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    tmp ::= be.alloc.String().try();
-    sym_gen(tmp, "t", be.next_tmp()).try();
+    tmp ::= be.fresh_name("t").try();
     be.declare_temp(ret, tmp.view()).try();
     done = be.next_tmp();
     be.write_empty_call(e, ret, c, recv, ctx, tmp.view()).try();
@@ -234,14 +225,11 @@ write_alloc = (be :: CBackend, e: Def, a: ExprId, ctx: Ctx, out :: String)
     expr(be, a, ctx, want, out)
 }
 
-// -----------------------------------------------------------------
 // the pieces
-//
 // Not walked here: `gen_c_sink.zen` walks the format and picks the
 // writer for every hole, and this door's buffer IS a Sink — so the
 // pieces are that door's, with a different sink under them (see the
 // file header for the drift this once caused).
-// -----------------------------------------------------------------
 
 write_buffer_pieces = (
     be   :: CBackend,
@@ -285,18 +273,15 @@ ok_payload = (be :: CBackend, tmp: str, out :: String)
 }
 
 // `goto done; fail: ; zg_tN = Err(OutOfMemory);`
-//
 // The two error sets the header names meet here and nowhere else, with
 // no conversion between them. So the reason is NAMED rather than
 // carried: the only thing that can go wrong writing into a String this
 // door just made is that it couldn't GROW, which is exactly
 // `OutOfMemory` — `AllocError`'s one variant. The bootstrapper names it
 // the same way at `full_of`.
-//
 // Widening the door's declared error is not the alternative: 112
 // corpus mains return `Res<i32, AllocError>` and call this, so a door
 // answering `WriteError` would need a narrowing at every one of them.
-//
 // The conversion sits on the failing path only — a succeeding walk
 // jumps over it, so nothing tests an already-`Ok` value.
 write_failure_arm = (

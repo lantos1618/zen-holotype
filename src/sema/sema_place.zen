@@ -30,6 +30,7 @@ const_def = sema.sema_const
 check_arms, check_arms_agree = sema.sema_hoist
 type_of = sema.sema_type
 type_from_ast = sema.sema_denote
+settle_variant_at = sema.sema_apply
 
 // `LoopHandle` by WHERE IT IS DECLARED, not by who names it: a program
 // may call its own struct `LoopHandle` and bind that freely — the
@@ -56,11 +57,12 @@ refuse_handle_value = sema.sema_handle
 bind_stmt* = (c :: Checker, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
     got = c.type_of(b.value, ctx).try();
     c.refuse_handle_value(b.value, got).try();
-    want = c.check_rebound(b).try().match({
+    want    = c.check_rebound(b).try().match({
         true  => c.types.unknown(),
         false => c.bind_want(b, got, ctx),
     }).try();
-    c.check_assign(b, got, want, ctx).try();
+    settled = c.settle_variant_at(b.value, got, want, ctx).try();
+    c.check_assign(b, settled, want, ctx).try();
     c.bind_target(b, want, ctx).try();
     c.types.prim("()")
 }

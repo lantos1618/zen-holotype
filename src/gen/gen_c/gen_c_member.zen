@@ -1,6 +1,5 @@
 // src/gen/gen_c/gen_c_member.zen
 // What a call through a DOT is.
-//
 // `gen_c_call.zen` owns `f(a)`; this file owns `x.f(a)`, which DESIGN.md
 // makes three readings of one rule — "a method is a UFCS function whose
 // first parameter happens to be named `self`". `Shape.Circle(c)` is a
@@ -8,7 +7,6 @@
 // `s.is_empty()` a MEMBER the receiver's type declares, `v.push(x)` a
 // FREE FUNCTION whose first parameter is the receiver's type —
 // "importing a type pulls its world along ... exported ufcs functions".
-//
 // SEMA ALREADY DECIDES BETWEEN THEM and this file asks — `base_of`,
 // `members_of` — rather than re-deciding. The one answer it cannot read
 // back is WHICH DECLARATION a call resolved to (`Cand` carries a
@@ -18,7 +16,6 @@
 // about the rule. Closing it means `call_memo` keying a `MemberId`
 // (`sema_id.zen` already names one) rather than a `DeclId`, which
 // cannot name a member.
-//
 // A MEMBER FUNCTION IS AN ORDINARY FUNCTION with the receiver as its
 // first parameter, and its symbol is `sym_fn`'s rule with the type's
 // qualified name as one more segment — what makes two types' `get` two
@@ -58,7 +55,7 @@ handle_depth, lower_handle_call = gen.gen_c.gen_c_handle
 inlines, inline_method = gen.gen_c.gen_c_inline
 is_ptr_member, lower_ptr_member = gen.gen_c.gen_c_ptr
 lower_create = gen.gen_c.gen_c_alloc
-is_capability, lower_capability = gen.gen_c.gen_c_cap
+CapabilityKind, capability_kind, lower_capability = gen.gen_c.gen_c_cap
 is_fat = gen.gen_c.gen_c_fat
 lower_fat_call = gen.gen_c.gen_c_bound
 lower_assoc_call = gen.gen_c.gen_c_assoc
@@ -70,9 +67,7 @@ impl_member_at = gen.gen_c.gen_c_impl
 alias_of = gen.gen_c.gen_c_impl
 generic_enum = gen.gen_c.gen_c_impl
 
-// -----------------------------------------------------------------
 // the entry point
-// -----------------------------------------------------------------
 
 // THE CALL SITE, as one value: `id`, `c` and `a` are produced together
 // by the parser, wanted by every lowering below and changed by none, so
@@ -140,14 +135,11 @@ lower_resolved_dot = (
     })
 }
 
-// -----------------------------------------------------------------
 // `Shape.Circle(c)` — a variant that carries a payload
-//
 // "A nullary variant IS a value of the enum; one carrying a payload is
 // the function that builds one" — `Slot.Left(cell)` is an ordinary
 // call, not a second construction form, so this writes the compound
 // literal `gen_c_expr.zen` writes for a bare variant plus the payload.
-//
 // THE LITERAL IS SPELLED AT WHAT SEMA ANSWERED FOR THE CALL, and the
 // base type is only where the variant NAME is read. Sema types the call
 // at the enum instantiated by its argument (`sema_apply
@@ -157,12 +149,10 @@ lower_resolved_dot = (
 // that names two different structs for one value. A miss in the memo,
 // or an answer that still mentions a free parameter, keeps the old
 // reading: the layout is identical either way, so nothing else moves.
-//
 // A NAME THAT IS NOT A VARIANT IS `gen_c_assoc.zen`'S — a struct body
 // may bind a function too (`Duration.seconds(2)`) — and it answers
 // `false` when nothing of that name wants no receiver, so the refusal
 // is reported here: one diagnostic for one mistake.
-// -----------------------------------------------------------------
 
 lower_static_call = (
     be   :: CBackend,
@@ -256,13 +246,10 @@ write_payload_arg = (be :: CBackend, c: Call, cs: Case, ctx: Ctx, out :: String)
     })
 }
 
-// -----------------------------------------------------------------
 // `x.f(a)` — a value receiver
-//
 // The receiver's OWN declaration first, then what an impl supplies,
 // then a free function reached through the dot. The first two are
 // overload sets, resolved on types and not arity alone.
-// -----------------------------------------------------------------
 
 lower_receiver_call = (
     be   :: CBackend,
@@ -374,9 +361,7 @@ supplied_member = (
     })
 }
 
-// -----------------------------------------------------------------
 // which of two members of one name
-//
 // "Resolution is on declared parameter types AND arity" (DESIGN.md,
 // Overloading) — a backend reading only arity answers whichever the
 // member table listed first. `Display` declares a `toString` taking a
@@ -385,10 +370,8 @@ supplied_member = (
 // allocator passed as a `Sink` of NULL function pointers. `cc` caught
 // it only because the two return types differ — two overloads agreeing
 // on return type would have been silent.
-//
 // ONE CANDIDATE IS NOT A CHOICE, so the common call pays only the arity
 // test; the header says why the predicate here is the checker's own.
-// -----------------------------------------------------------------
 
 pick_member = (be :: CBackend, c: Call, s: Site, found: Vec<Member>, ctx: Ctx)
               Res<Res<Member>, AllocError> {
@@ -464,15 +447,15 @@ call_actuals = (be :: CBackend, c: Call, ctx: Ctx, out :: Vec<Actual>)
 // the part a call site sees without inferring anything.
 arg_actual = (be :: CBackend, x: Arg, ctx: Ctx) Res<Actual, AllocError> {
     unknown = be.check.types.unknown().try();
-    be.tree.expr_at(x.value).kind.match({
-        Lambda(l) => Ok(Actual(
+    be.spelled_lambda(x.value).match({
+        Ok(l) => Ok(Actual(
             ty: unknown,
             is_lambda: true,
             arity: l.params.len,
             named: false,
             span: x.span
         )),
-        _         => Ok(Actual(
+        None  => Ok(Actual(
             ty: be.ty_of(x.value, ctx, unknown).try(),
             is_lambda: false,
             arity: 0,
@@ -482,20 +465,16 @@ arg_actual = (be :: CBackend, x: Arg, ctx: Ctx) Res<Actual, AllocError> {
     })
 }
 
-// -----------------------------------------------------------------
 // the declaring site
-//
 // Which declaration owns a type's members, and under what qualified
 // name a symbol built from it is written. A `Prim` has one too — "a
 // prelude declaration of a primitive's name IS that primitive" — so
 // `str`'s members are `std.text.text_str.str`'s and the receiver stays
 // the primitive.
-//
 // THE RECEIVER'S TYPE IS A FIELD OF THE SITE, not a parameter beside it.
 // `site_of` is handed that type to find the site at all, so a caller
 // threading both carried one value twice — and a pair threaded apart is
 // a pair that can be threaded wrong.
-// -----------------------------------------------------------------
 
 Site* = {
     ty*: TyId,
@@ -580,16 +559,14 @@ keep_named = (st: Struct, name: str, out :: Vec<Member>) Res<(), AllocError> {
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // a member the type declares
-// -----------------------------------------------------------------
 
 // WHICH OF SEVEN KINDS A METHOD CALL IS, decided once. A variant carries
 // what deciding it computed, so that value is built in the branch that
 // needs it and threaded nowhere else.
 MethodKind = Inlined
     | PtrMember(TyId)
-    | Capability(usize)
+    | Cap(CapabilityKind)
     | SinkDoor
     | FloorDoor
     | FatSlot
@@ -598,7 +575,6 @@ MethodKind = Inlined
 // THE PRECEDENCE, WHICH IS LOAD-BEARING: a kind is asked about only
 // once every kind above it has said no. It was six lowerings deep and
 // readable only by following the chain; here it is a list.
-//
 //   Inlined     A MEMBER HANDED A LAMBDA IS INLINED, exactly as a free
 //               function is: a `(b: u8) bool` parameter has no C
 //               spelling and nothing to pass.
@@ -631,8 +607,10 @@ method_kind = (be :: CBackend, d: Dot, s: Site, f: Function, ctx: Ctx)
         be.is_ptr_member(s.ty, name).then(() {
             h.break(MethodKind.PtrMember(be.want_of(d.id, ctx).try()))
         });
-        be.is_capability(s.ty, name).then(() {
-            h.break(MethodKind.Capability(s.decl.module.to_usize()))
+        kind = be.capability_kind(s.ty, name);
+        kind.match({
+            NotCapability => (),
+            _             => h.break(MethodKind.Cap(kind)),
         });
         be.is_member_door(d.a, f).then(() { h.break(MethodKind.SinkDoor) });
         be.is_floor_door(name, f).then(() { h.break(MethodKind.FloorDoor) });
@@ -663,7 +641,7 @@ lower_method = (
 )
                Res<(), AllocError> {
     be.method_kind(d, s, f, ctx).try().match({
-        Inlined       => be.inline_method(
+        Inlined      => be.inline_method(
             d.id,
             d.c,
             d.a,
@@ -673,29 +651,20 @@ lower_method = (
             ctx,
             out
         ),
-        PtrMember(w)  => be.lower_ptr_member(d.id, d.c, d.a, s.ty, ctx, w, out),
-        Capability(m) => be.lower_capability(
+        PtrMember(w) => be.lower_ptr_member(d.id, d.c, d.a, s.ty, ctx, w, out),
+        Cap(kind)    => be.lower_capability(
+            kind,
             d.id,
             d.c,
             d.a,
             s.ty,
-            m,
+            s.decl.module.to_usize(),
             f,
             ctx,
             out
         ),
-        SinkDoor      => be.lower_member_door(d.id, d.c, d.a.base, ctx, out),
-        FloorDoor     => be.lower_floor_door(
-            d.id,
-            d.c,
-            d.a,
-            s.ty,
-            s,
-            f,
-            ctx,
-            out
-        ),
-        FatSlot       => be.lower_fat_call(
+        SinkDoor     => be.lower_member_door(d.id, d.c, d.a.base, ctx, out),
+        FloorDoor    => be.lower_floor_door(
             d.id,
             d.c,
             d.a,
@@ -705,7 +674,8 @@ lower_method = (
             ctx,
             out
         ),
-        Ordinary      => be.lower_ordinary_method(d, s, f, ctx, out),
+        FatSlot      => be.lower_fat_call(d.id, d.c, d.a, s.ty, s, f, ctx, out),
+        Ordinary     => be.lower_ordinary_method(d, s, f, ctx, out),
     })
 }
 
@@ -849,19 +819,15 @@ add_method_param = (
     sig.add(be.sub_with(declared, inst).try())
 }
 
-// -----------------------------------------------------------------
 // a member call the source did not write
-//
 // "`==` through `Eq` is the only operator that dispatches to an impl."
 // `a == b` on a type C cannot compare is a call to that type's `eq`,
 // taking THIS file's path rather than a second one: the symbol,
 // instantiation and queue entry are the ones `a.eq(b)` would produce,
 // so the two cannot disagree about which function they mean.
-//
 // STATICALLY RESOLVED, like every impl-supplied member here — operand
 // types are known, so no function-pointer record takes part. A type
 // impl'ing no `Eq` is the caller's refusal to report.
-// -----------------------------------------------------------------
 
 lower_eq_call* = (
     be  :: CBackend,
@@ -929,13 +895,10 @@ emit_eq = (
     Ok(true);
 }
 
-// -----------------------------------------------------------------
 // ufcs
-//
 // "A free function whose first param is the type is callable as a
 // method." The receiver becomes argument zero and there is no second
 // mechanism — which is why `lower_plain_call` takes a receiver at all.
-// -----------------------------------------------------------------
 
 // `alloc.create<T>()` IS ASKED ABOUT FIRST, and only here at the end:
 // declared on `Alloc` with no body and supplied by no impl, so by the

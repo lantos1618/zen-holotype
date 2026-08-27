@@ -1,19 +1,16 @@
 // src/gen/gen_c/gen_c_decl.zen
 // What a declaration is in C, and what a translation unit is.
-//
 // THE WALK IS REACHABILITY-DRIVEN. A compilation stages the whole of
 // `std` beside the program, so lowering every declaration in every
 // module would emit a translation unit nobody asked for. `emit_program`
 // seeds ONE module's functions and follows the calls that resolve —
 // one merged graph, walked from a root, each thing emitted once.
-//
 // BODIES ARE LOWERED FIRST, EMITTED LAST. Lowering discovers which
 // types need definitions and which checked-arithmetic helpers the
 // runtime carries, and C wants both above the first use. Each body is
 // lowered into its own buffer, and the translation unit assembled
 // afterwards in the order C requires — banner, runtime, helpers,
 // typedefs, tags, type definitions, prototypes, bodies, `main`.
-//
 // EVERY LIST IS SORTED BY MANGLED NAME, making output independent of
 // module discovery order — the property the determinism gate and
 // fixpoint oracle stand on. A prototype above every body is what lets
@@ -37,11 +34,14 @@ Emit, order = gen.gen_emit
 sym_fn, sym_local = gen.gen_name
 GenFault = gen.gen_diag
 CBackend, MethodRef = gen.gen_c.gen_c_state
+LocalSlot = gen.gen_c.gen_c_frame
 sub, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 open_named = gen.gen_c.gen_c_mono
 enter_struct_tparams = gen.gen_c.gen_c_mono
 signature_of = gen.gen_c.gen_c_call
-ctype, declarator, spellable, is_unit, declared_ret = gen.gen_c.gen_c_type
+ctype, declarator, spellable, is_unit, has_storage = gen.gen_c.gen_c_type
+declared_ret = gen.gen_c.gen_c_type
+closure_storage = gen.gen_c.gen_c_report
 emit_types = gen.gen_c.gen_c_layout
 Dest, block = gen.gen_c.gen_c_stmt
 takes_closure = gen.gen_c.gen_c_inline
@@ -57,14 +57,12 @@ emit_threads = gen.gen_c.gen_c_threads
 
 // A bound on the reachable set, and a diagnostic at it rather than a
 // walk that does not terminate.
-//
 // IT COUNTS FUNCTIONS LOWERED — same unit as `bootstrap/gen_c.py`'s
 // `MAX_FUNCTIONS`, same number, so the two implementations agree on
 // which programs they accept rather than differing by an undocumented
 // factor. The number this replaced was 4096 and bounded LOOP TURNS,
 // each lowering one free function AND one member function — a bound of
 // 4096 on each, so neither 4096 nor 8192.
-//
 // WHAT SETS THE NUMBER: the largest program this backend compiles is
 // itself — `zen build src` lowers 3167 free + 902 member functions
 // (4069 total); `corpus/cli/build_walks_a_root_it_is_given`, staging the
@@ -151,7 +149,6 @@ seed_function = (be :: CBackend, m: Module, mi: usize, d: Decl)
 // The declaration is found through `defs_of` rather than by index, so
 // the `Def` a seed carries is the same value a call site would resolve
 // to — one identity for a function, not two.
-//
 // A GENERIC FUNCTION IS NOT A ROOT. There is no `Vec<T>` in C, only
 // `Vec<i32>` for each `T` a program asked for, and only a call site says
 // which — so a generic declaration is skipped here, reached through
@@ -199,12 +196,10 @@ is_function = (d: Def) bool {
 
 // Lower everything queued, including whatever lowering queues, under
 // `MAX_FUNCTIONS`.
-//
 // TWO QUEUES, INTERLEAVED. Lowering a free function discovers member
 // functions and vice versa, so draining one to exhaustion then the
 // other doesn't converge — each cursor advances one step per turn,
 // reaching a fixpoint in one bounded walk.
-//
 // THE LOOP RUNS WHILE THERE IS WORK, not a fixed number of turns: a
 // fixed count cannot tell a finished walk from a cut-off one.
 drain = (be :: CBackend) Res<(), AllocError> {
@@ -323,9 +318,7 @@ lower_decl = (be :: CBackend, d: Def, x: Decl) Res<(), AllocError> {
     })
 }
 
-// -----------------------------------------------------------------
 // one function
-// -----------------------------------------------------------------
 
 // A declaration with no body — `Required` or `Hook` — has nothing to
 // lower and is not a fault.
@@ -351,13 +344,10 @@ lower_body = (be :: CBackend, d: Def, x: Decl, f: Function, blk: BlockId)
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // one member function
-//
 // "A method is a UFCS function whose first parameter happens to be
 // named `self`" — so it goes through the same shape, with `@Self` bound
 // and a qualified name carrying the TYPE rather than the module.
-// -----------------------------------------------------------------
 
 lower_method_ref = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
     decl_at(be.tree, m.decl).match({
@@ -407,14 +397,12 @@ supplied_member = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
 }
 
 // WHICH MEMBER THE CALL SITE MEANT, not merely one of that arity.
-//
 // The entry carries the signature `sym_fn` mangled into the symbol this
 // body is about to be written under, so the member to lower is the one
 // whose declared parameters ARE that signature. Asking arity alone once
 // picked the first of `Display`'s two `toString`s for both queue
 // entries: the sink body was emitted twice, and every call to the
 // second ran the first.
-//
 // ONE CANDIDATE IS NOT A CHOICE: with one member the arity test is the
 // whole answer, and `method_sig` resolves a whole signature.
 by_sig = (be :: CBackend, m: MethodRef, found: Vec<Member>)
@@ -545,13 +533,10 @@ open_self = (be :: CBackend, m: MethodRef) Res<TyId, AllocError> {
     })
 }
 
-// -----------------------------------------------------------------
 // the shape both go through
-//
 // `sctx` is the context a SIGNATURE is read in — a free function's has
 // no `@Self` and a member's binds it to the receiver — and everything
 // else is the same question asked of the same nodes.
-// -----------------------------------------------------------------
 
 lower_shape = (
     be      :: CBackend,
@@ -653,7 +638,6 @@ bind_params = (be :: CBackend, f: Function, ctx: Ctx, sig :: Vec<TyId>)
 // Through `param_type`, not `type_from_ast`: `self :: @Self` has a
 // written type meaning the receiver, and only the query that knows
 // `@Self` can answer it.
-//
 // TWO TYPES, AND THE DIFFERENCE IS THE WHOLE POINT. The C declaration
 // takes THIS EMISSION's type, since that's what the prototype prints.
 // Sema takes the DECLARED one, still in its own parameters, because
@@ -710,10 +694,17 @@ write_param_list = (
     sig : Vec<TyId>,
     out :: String
 ) Res<(), AllocError> {
+    written ::= false;
+    unknown = be.check.types.unknown().try();
     f.params.loop((h, i, p) {
-        (i > 0).then(() { out.add_bytes(", ").try() });
-        be.write_param(p, i, sig, out).try();
+        ty = sig.get(i).match({ Ok(t) => t, None => unknown });
+        be.has_storage(ty).then(() {
+            written.then(() { out.add_bytes(", ").try() });
+            be.write_param(p, i, sig, out).try();
+            written = true;
+        });
     });
+    (written == false).then(() { out.add_bytes("void").try() });
     Ok(());
 }
 
@@ -727,7 +718,7 @@ write_param = (
 ) Res<(), AllocError> {
     ty = sig.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
     name ::= be.alloc.String().try();
-    be.slot_index(p.name.text, name).try();
+    be.slot_index(p.name.text, p.name.span, name).try();
     p.mutable.match({
         false => be.declarator(ty, name.view(), out),
         true  => be.ref_declarator(ty, name.view(), out),
@@ -743,10 +734,25 @@ ref_declarator* = (be :: CBackend, ty: TyId, name: str, out :: String)
     out.fmt(" *{name}")
 }
 
-slot_index = (be :: CBackend, name: str, out :: String)
+slot_index = (be :: CBackend, name: str, span: Span, out :: String)
              Res<(), AllocError> {
-    n = be.slot_of(name).match({ Ok(s) => s.index, None => 1 });
-    sym_local(out, name, n)
+    be.slot_of(name).match({
+        Ok(s) => be.write_param_slot(name, span, s, out),
+        None  => sym_local(out, name, 1),
+    })
+}
+
+write_param_slot* = (
+    be   :: CBackend,
+    name : str,
+    span : Span,
+    s    : LocalSlot,
+    out  :: String
+) Res<(), AllocError> {
+    be.closure_storage(span, s, "a lambda-holding parameter").try().match({
+        true  => sym_local(out, name, s.index),
+        false => sym_local(out, name, 1),
+    })
 }
 
 // A type with no C spelling is reported once, at the signature, rather
@@ -805,11 +811,16 @@ keep = (be :: CBackend, qname: str, sig: Vec<TyId>, proto: String)
     be.add_function(name, proto, text)
 }
 
-// -----------------------------------------------------------------
 // assembly
-// -----------------------------------------------------------------
 
 emit_protos = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    externs = order(be.alloc, be.extern_names).try();
+    externs.loop((h, i) {
+        be.extern_protos.get(i).match({
+            None  => Ok(()),
+            Ok(p) => write_proto_line(out, p),
+        }).try();
+    });
     seq = order(be.alloc, be.fn_names).try();
     seq.loop((h, i) {
         be.fn_protos.get(i).match({
@@ -851,20 +862,16 @@ write_body_at = (be :: CBackend, out :: Emit, i: usize)
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // the same program, in one file per module
-//
 // ONE TRANSLATION UNIT IS 110,451 LINES AND 4,641 FUNCTIONS, and `cc
 // -O2` is superlinear in a unit's size: the same code split into
 // per-module files and compiled with `-j16` measured 8.4x faster, and
 // only then can a compiler cache skip a module nothing changed.
-//
 // NOTHING HERE RE-LOWERS. `lower_program` has already run; a unit is a
 // selection from the one sorted list of functions, so the bytes of a
 // body do not depend on which file it lands in. `emit_program` above
 // stays the whole interface for the single-file mode the committed
 // seed is built by.
-// -----------------------------------------------------------------
 
 // The one header, included by every unit: the prelude, and a prototype
 // for every function in the program. A prototype above every body is
@@ -883,11 +890,16 @@ emit_header* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
 
 // One unit: every function whose body was lowered while module `u` was
 // the one being lowered, and `main` when `u` is the root.
-emit_unit* = (be :: CBackend, root: usize, u: usize, out :: Emit)
+emit_unit* = (
+    be   :: CBackend,
+    root : usize,
+    u    : usize,
+    seq  : Vec<usize>,
+    out  :: Emit
+)
              Res<(), AllocError> {
     out.say("#include \"zen.h\"").try();
     out.line().try();
-    seq = order(be.alloc, be.fn_names).try();
     seq.loop((h, i) {
         // `.match` and not `.then`: a loop binding read inside a nested
         // closure does not resolve, and `i` is one.

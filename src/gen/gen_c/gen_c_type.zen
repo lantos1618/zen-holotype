@@ -1,25 +1,21 @@
 // src/gen/gen_c/gen_c_type.zen
 // What a Zen type is in C: how it is SPELLED, and which types a
 // program needs at all.
-//
 // `gen_c_layout.zen` is the other half — what the spelling refers to.
 // The two are separated because a backend needs the spelling at every
 // parameter and the definition exactly once per type, which is why the
 // worklist between them exists.
-//
 // THE WORKLIST IS TWO PARALLEL `Vec`s KEYED BY MANGLED NAME, and the
 // name IS the identity: `tcode` is injective, so two types share a name
 // exactly when they are one type. It is closed to a fixpoint before
 // anything is emitted, because resolving a struct's fields discovers
 // more types.
-//
 // `Res` IS STRUCTURAL HERE, and that follows sema rather than
 // diverging from it: `TyRes(value, error, form)` carries no
 // declaration, because "`Res<T>` and `Res<T, E>` are two arities of one
 // name and sema asks which form it has at every `.try()`". It still
 // answers to the library's name — `std.core.result.Res` — so a
 // structural `Res` and a declared one are one C type.
-//
 // A UNION IS STRUCTURAL FOR THE SAME REASON AND NEEDS THE SAME
 // TREATMENT. `A | B` written inline, or a set sema inferred, has no
 // declaration to carry a layout — where a NAMED error set is already
@@ -47,21 +43,11 @@ sub_with, enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 intern_named = gen.gen_c.gen_c_mono
 request_slots = gen.gen_c.gen_c_fat
 
-// Closing the worklist is a fixpoint: defining a type discovers the
-// types of its fields, which may discover more. Eight passes is what
-// the bootstrapper allows and no real program has ever needed two —
-// a bound rather than a loop, because a backend that does not
-// terminate is worse than one that reports.
-MAX_TYPE_PASSES* : usize = 8
-
-// -----------------------------------------------------------------
 // spelling
-// -----------------------------------------------------------------
 
 // The C spelling of a type, written into `out`. Requests the type as a
 // side effect, because anything spelled is something that needs a
 // definition.
-//
 // It never reports: a spelling is wanted at a dozen sites, each with a
 // better position than this one. `spellable` is asked first, and `int`
 // is what an unspellable type becomes so the C still parses around the
@@ -84,7 +70,6 @@ ctype* = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
 // std.mem may see the representation. Emitting the declaration's struct
 // instead would make `str`'s own `data` field a struct where the runtime
 // floor has a pointer, and the two spellings of `str` would disagree.
-//
 // This is where the asterisk goes, and it is the one place: `declarator`
 // writes the spelling, a space and the name, which is `uint8_t *p` — a
 // legal C declarator with the `*` bound to the name.
@@ -133,7 +118,7 @@ elem_ctype = (be :: CBackend, t: TyId, out :: String) Res<(), AllocError> {
 
 named_ctype = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
     be.request_type(id).try();
-    sym_type(out, be.types(), be.world(), id)
+    sym_type(out, be.alloc, be.types(), be.world(), id)
 }
 
 // A declarator: the spelling, a space, the name. A pointer type's
@@ -158,9 +143,10 @@ spellable* = (be: CBackend, id: TyId) bool {
     })
 }
 
-// A type with no bytes. `()` is `void` in a return position and is
-// illegal as a member, so `Ok(())` carries nothing and a unit field is
-// not emitted at all.
+// Whether a resolved type occupies a C declaration, argument or field seat.
+has_storage* = (be: CBackend, id: TyId) bool { be.is_unit(id) == false }
+
+// A type with no bytes. `()` is `void` only in a return position.
 is_unit* = (be: CBackend, id: TyId) bool {
     be.types().at(id).match({
         Prim(p) => p.name.eq("()"),
@@ -169,7 +155,6 @@ is_unit* = (be: CBackend, id: TyId) bool {
 }
 
 // The C scalar behind a Zen primitive.
-//
 // `int` and `float` are sema's LITERAL types — "an integer literal is
 // its own type until a context settles it". Reaching here means nothing
 // settled it, which is legal (`x = 5;` with no written type), so the
@@ -215,9 +200,7 @@ is_signed* = (name: str) bool {
     name.is_in(["i8", "i16", "i32", "i64", "int"])
 }
 
-// -----------------------------------------------------------------
 // the worklist
-// -----------------------------------------------------------------
 
 // Register a type for definition, keyed by the mangled name that is
 // its identity (see the header).
@@ -266,18 +249,18 @@ named_element = (n: TyNamed) Res<TyId> {
 
 queue_definition = (be :: CBackend, id: TyId) Res<(), AllocError> {
     name ::= be.alloc.String().try();
-    sym_type(name, be.types(), be.world(), id).try();
+    sym_type(name, be.alloc, be.types(), be.world(), id).try();
     be.type_index(name.view()).match({
         None  => be.queue_type(name, id),
         Ok(_) => Ok(()),
     })
 }
 
-// Walk every queued type's children until nothing new appears.
 close_types* = (be :: CBackend) Res<(), AllocError> {
-    Range(0, MAX_TYPE_PASSES).loop((h, pass) {
-        n = be.type_names.len;
-        Range(0, n).loop((hh, i) { be.request_children(i).try() });
+    cursor ::= 0;
+    loop(() { cursor < be.type_names.len }, (h) {
+        be.request_children(cursor).try();
+        cursor = cursor + 1;
     });
     Ok(());
 }
@@ -455,7 +438,6 @@ field_type* = (be :: CBackend, m: Member, ctx: Ctx, inst: Inst)
 }
 
 // A variant's payload type.
-//
 // Two readings, and DESIGN.md decides between them by what the names
 // MEAN: `Shape = Circle(Circle) | Unit` is nominal and a payload is
 // written, while `Error = AllocError | IoError` is "a union of existing
@@ -478,7 +460,6 @@ variant_type* = (
 // The type a bare variant name denotes, when it denotes one. Nothing
 // when the name is not a type in the declaring module, which is the
 // nominal reading and the common one.
-//
 // THE QUESTION IS ABOUT THE DECLARATION AND NOT ABOUT ONE VARIANT.
 // DESIGN.md: `A | B` is a union of existing types when EVERY variant
 // names a type in scope, and a nominal enum otherwise. Asked one
@@ -488,7 +469,6 @@ variant_type* = (
 // prelude export, and that one silently took `std.core.eq.Eq` as its
 // payload: three dead words in every token the compiler lexes, and a
 // union member no code path ever reads or writes.
-//
 // DESIGN.md names this collision and says it "must be reported, not
 // silently reinterpreted". Two modules had already worked around it by
 // renaming — `ast_node.zen` writes `Equal`, `sema_def.zen` suffixes

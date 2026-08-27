@@ -1,6 +1,5 @@
 // src/gen/gen_c/gen_c_impl.zen
 // Which function an IMPL supplies for a name, and at what arity.
-//
 // Split out of `gen_c_member.zen` at 796 lines against an 800-line hard
 // cap, and the subject really is a second one: `gen_c_member.zen`
 // answers "what does a dot reach on this receiver", needing a `Site`
@@ -9,7 +8,6 @@
 // DECLARATION it targets, so every entry point below takes a `DeclId`.
 // This file imports nothing from `gen_c_member.zen`, so the dependency
 // runs one way with no cycle to arrange around.
-//
 // `by_arity` lives here for the same reason it's used here: an impl is
 // where two members of one name actually turn up, since a bound and a
 // type may each supply one.
@@ -30,12 +28,10 @@ last_is_variadic = gen.gen_c.gen_c_sink
 // `Cursor.peek(n)` are two functions — taking the first one emitted a
 // call to the wrong symbol with the right arguments, a bug `cc` caught
 // but two same-arity overloads would have hidden.
-//
 // Arity is the half a backend can answer without redoing sema's rule.
 // The other half is `gen_c_member.zen`'s `pick_member`, which asks the
 // ARGUMENTS where arity cannot separate the candidates — `Display`
 // declares two `toString`s and both take two parameters.
-//
 // A member of the wrong arity is the wrong member, and this once
 // answered with one: `found.get(0)` was the fallback for every miss, so
 // `Box`'s own `grow(self)` answered `b.grow(10)`, emitting a call to a
@@ -83,12 +79,10 @@ member_takes = (be: CBackend, m: Member, arity: usize) bool {
 // fmt: str, args: ...)` is the one member both `sb.add(" and ")` and
 // `sb.add("{} is {}", x, y)` reach; counting `...` as a parameter made
 // it unreachable from either.
-//
 // An associated function declares no parameters at all, and asking
 // whether its last one is variadic used to trap on `0 - 1` (a `usize`
 // underflow inside `last_is_variadic`). That guard now lives where the
 // arithmetic is.
-//
 // A `vararg<T>` TAIL IS THE SAME MINIMUM, asked separately because
 // `last_is_variadic` is the FORMAT DOOR's shape and must stay exactly
 // `...`: widening it would let a bodyless three-parameter `add` with a
@@ -122,20 +116,16 @@ is_function = (m: Member) bool {
     m.kind.match({ Function(_) => true, _ => false })
 }
 
-// -----------------------------------------------------------------
 // a member an IMPL supplies
-//
 // `str` does not declare `eq`; `std.text` impls `Eq` on it. DESIGN.md's
 // rule — "you satisfy requirements, you never impl storage" — means the
 // member is an ordinary function of the receiver, living beside the
 // type, reached under the TARGET's qualified name.
-//
 // And it is called statically: every call here has a receiver whose
 // CONCRETE type is known, so the impl's function is called directly
 // and monomorphised. A fat value — a record of function pointers — is
 // wanted only where a value's STATIC type is the bound, which nothing
 // in this tree writes.
-// -----------------------------------------------------------------
 
 impl_member* = (be :: CBackend, decl: DeclId, name: str)
                Res<Res<Function>, AllocError> {
@@ -200,7 +190,6 @@ add_written_value = (fl: Field, out :: Vec<ExprId>) Res<(), AllocError> {
 }
 
 // Every member an impl on `decl` supplies under `name`, with a BODY.
-//
 // "An impl lives with the type, not with the trait", so the search is
 // over impls declared in the TARGET's own module — a same-named type
 // elsewhere is never confused for this one. A required member — `at
@@ -243,7 +232,6 @@ type_name = (d: Decl) str {
 // other kind — so an enum's `T` would bind to nothing and every
 // instantiation would mangle to one symbol. That is the plausible-wrong
 // -answer shape, so the backend says so instead of emitting it.
-//
 // Nothing reaches this today for a second reason: a generic enum's
 // variant cannot be constructed at all (`codegen cannot resolve
 // `Full``), so no value exists to call a member on. The refusal is here
@@ -289,7 +277,6 @@ impl_fn_at = (be :: CBackend, i: ImplId, name: str, out :: Vec<Member>)
 // every field `B` declares — so a bodied member on `B` is a field the
 // bound ALREADY has a value for. `area` comes along free because it
 // "only ever needed a width and a height".
-//
 // Both, not either/or. This once ran the bound only when the impl
 // block supplied nothing of that name — reading a NAME as the unit
 // when `sema_supply.zen` says the unit is an overload SET: `Display`
@@ -298,7 +285,6 @@ impl_fn_at = (be :: CBackend, i: ImplId, name: str, out :: Vec<Member>)
 // candidate. So `p.toString(alloc)` lowered to the sink symbol with an
 // `Alloc` passed as a `Sink` — a record of NULL function pointers —
 // for a call sema had resolved correctly.
-//
 // The order is the answer to an override: an impl entry restating a
 // default comes first and wins every tie below, which is what "the
 // impl supplies it" means.
@@ -358,16 +344,13 @@ has_body* = (f: Function) bool {
     f.body.match({ Ok(_) => true, None => false })
 }
 
-// -----------------------------------------------------------------
 // a member that IS another function
-//
 // `widen_u32 = to_u32` supplies the member as an ALIAS, not a body —
 // std.core.num's widening bounds are declared this way because the
 // conversion is a backend intrinsic and there is nothing to write a
 // body in. The answer here is the aliased function's name; the caller
 // (gen_c_member.zen) lowers the call as that function with the
 // receiver at argument zero, so the two spellings cannot disagree.
-// -----------------------------------------------------------------
 
 // The function an impl on the type aliases `name` to, when one does —
 // over the target's own module, the same search `impl_member_at` makes

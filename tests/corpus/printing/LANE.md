@@ -10,11 +10,13 @@ One line per test: path -- the one-line compiler change that would break it.
 - tests/corpus/printing/the_print_grammar_escapes_and_refuses/main.zen -- asking doubled-brace before hole at a shared position (`fmt_at`'s test order swapped) pairs `{}}` backwards and prints bare `1` instead of `1}`; rescanning after an escape turns `{{n}}` into a named-hole read printing 9; handing `\t` to the C string unstepped prints backslash-t inside the sentence; resolving `{n}` in one global frame prints 9 on the callee line instead of its own parameter.
 - tests/corpus/printing/each_display_hole_picks_the_right_impl/main.zen -- resolving the toString symbol by NAME alone across impls (`member_symbol` keyed without the receiver type) lets one impl serve every hole: `S<12x-34>`-style crossings built out of the wrong record, same shape right punctuation. The nesting rows additionally catch the console record rebuilt per call instead of handed down (inner fragments lost/transposed), and Line's u64 tag typed as i64 flips #2^63 negative mid-sentence.
 - tests/corpus/printing/what_printing_refuses/main.zen -- losing any single entry of the writer chain (`str`/bool/integers/floats/Display/generic instantiation) turns one line below into `codegen does not lower this yet: printing a value of this type` at COMPILE time; the test pins that every printable family stays reachable, including Box<T> monomorphised per T ("text" vs 41 — one shared instantiation prints both boxes with the same field).
+- tests/corpus/printing/unit_values_print_the_unit_placeholder/main.zen -- sending `()` through the Display fallback refuses it; the dedicated unit arm prints `()` through both a format hole and the value-only form.
 
 ## Compiler bugs found
 
-None encoded. Two refusals met while probing are DESIGN, not bugs, and are
-recorded here because this lane is where they surface:
+`unit_values_print_the_unit_placeholder` encodes #1174: unit is storage-less,
+but its printable spelling is `()`. Two other refusals met while probing are
+DESIGN, not bugs, and are recorded here because this lane is where they surface:
 
 1. Printing a `Res<..>`, a plain struct with no Display impl, an enum tag
    value, a String, or a Vec is refused at compile time
@@ -27,4 +29,4 @@ recorded here because this lane is where they surface:
    annotates every hole for exactly this reason, and keeps passing whichever
    way the literal settles later.
 
-TESTS: 8
+TESTS: 9

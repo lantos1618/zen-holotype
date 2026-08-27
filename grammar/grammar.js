@@ -16,11 +16,11 @@
 // and no unnecessary ones — every entry in `conflicts` below was named by the
 // generator, and every entry it called unnecessary is gone. The parser was
 // then built and driven over tests/, tests/parse/errors/ and every Zen block
-// in DESIGN.md. tools/parse/cst.py keeps every node name it depends on in ONE
+// in DESIGN.md. the deleted bootstrapper reader keeps every node name it depends on in ONE
 // table at the top of the file, so a rename is a one-file, one-table edit.
 //
 // ---------------------------------------------------------------------------
-// THE FOUR DECISIONS (settled after the first draft; tools/parse/CONTRACT.md
+// THE FOUR DECISIONS (settled after the first draft; the historical bootstrapper contract
 // carries the same list, and it is binding)
 // ---------------------------------------------------------------------------
 //
@@ -42,7 +42,7 @@
 //     and is deleted.
 //
 //     R1a. What is left of `Name = <thing>` is decided by the SHAPE of
-//     <thing>, in tools/parse/cst.py, not by more grammar:
+//     <thing>, in the deleted bootstrapper reader, not by more grammar:
 //       `{ .. }`            struct
 //       variants with `|`   enum
 //       `(..) T { .. }`     function, with a body
@@ -140,19 +140,19 @@
 // D12. A function with a body and a function signature are two rules,
 //      `function` and `function_signature`, because R2 makes the body the
 //      thing that decides whether a `;` may follow. They still collapse to ONE
-//      ast node with an optional body (tools/parse/CONTRACT.md `Function.form`),
+//      ast node with an optional body (the historical bootstrapper contract `Function.form`),
 //      which is DESIGN.md's method table — `= sig` vs `= sig {..}` differ only
 //      by the body. Per R3 there is no capability syntax on either.
 //
 // D13. Parameter types are OPTIONAL in the grammar, because a closure infers
 //      them from the call (DESIGN.md:254) and `(h, field)` must parse. A
 //      DECLARATION and a function TYPE must still write every type
-//      (DESIGN.md:223, 329); that is checked in tools/parse/cst.py, which is
+//      (DESIGN.md:223, 329); that is checked in the deleted bootstrapper reader, which is
 //      where the position is known, and it is a diagnostic rather than a parse
 //      error. Fixtures for that rule therefore belong in tests/must-fail/,
 //      where the compiler's diagnostic is asserted, and NOT in
-//      tests/parse/errors/, which `make grammar-test` reads as "this
-//      grammar must reject it". They lived in the wrong place until
+//      tests/parse/errors/, which contain programs the grammar must reject.
+//      They lived in the wrong place until
 //      2026-08-10; `bare_self_param` and `match_arm_paren_form` moved to
 //      tests/must-fail/ and `fn_type_unnamed_params` was dropped as a
 //      duplicate of the must-fail/parse test that already gated it. (A-CLO)
@@ -163,7 +163,7 @@
 //      open, this grammar accepts both.
 //
 // D15. An enum variant carries AT MOST ONE payload type, per
-//      tools/parse/CONTRACT.md `Variant(name, payload)`. DESIGN.md never writes
+//      the historical bootstrapper contract `Variant(name, payload)`. DESIGN.md never writes
 //      two.
 //
 // D15a. A signature ALWAYS writes its return type; only a function WITH a
@@ -268,7 +268,7 @@ module.exports = grammar({
     // declarations
     //
     // ONE rule for every module-level declaration. What it declares is read
-    // off the shape of the value (R1a) in tools/parse/cst.py, which is the
+    // off the shape of the value (R1a) in the deleted bootstrapper reader, which is the
     // only place that knowledge lives:
     //
     //   Vec*<T> = { .. }                     struct
@@ -345,7 +345,7 @@ module.exports = grammar({
           ),
           seq(
             field('operator', choice('=', '::=')),
-            field('value', choice($.function_signature, $._expression)),
+            field('value', choice($.function_signature, $.function)),
           ),
         ),
       ),

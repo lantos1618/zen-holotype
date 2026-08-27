@@ -1,10 +1,8 @@
 // src/gen/gen_c/gen_c_read.zen
 // WHAT A DOT READS.
-//
 // `gen_c_member.zen` owns `x.f(a)`; this owns `x.f`, and they are not
 // the same question. One node, `Access`, and three readings of it that
 // DESIGN.md separates by what the base NAMES:
-//
 //   Shape.Unit    a NULLARY VARIANT: the base names an enum, and the
 //                 variant IS a value of it — the tag and no payload
 //   usize.BITS    a CONSTANT ON A TYPE: the base names a declaration,
@@ -14,10 +12,8 @@
 //                 members are `std.core.num.usize`'s
 //   p.x           a FIELD: the base is a value, and this is the only
 //                 one of the three that reads a receiver
-//
 // The order is the order the questions can be answered in, and each one
 // is asked of the DECLARATION rather than of the spelling.
-//
 // `str` IS THE ONE TYPE WHOSE C REPRESENTATION IS THE RUNTIME FLOOR'S,
 // which is why the field rule is here rather than in the mangler.
 
@@ -38,7 +34,7 @@ CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 constructed, recv_inst = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
-ctype, struct_decl = gen.gen_c.gen_c_type
+ctype, struct_decl, has_storage = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
 bind_text = gen.gen_c.gen_c_range
 impl_field = gen.gen_c.gen_c_impl
@@ -46,9 +42,7 @@ expr, ty_of = gen.gen_c.gen_c_expr
 field_of = gen.gen_c.gen_c_cap
 lower_const_value = gen.gen_c.gen_c_const
 
-// -----------------------------------------------------------------
 // access and calls
-// -----------------------------------------------------------------
 
 // `p.x` on a struct, and `Shape.Unit` on an enum: one node, and the
 // difference is whether the base is a value or a declaration — "that
@@ -86,7 +80,6 @@ lower_type_or_field = (
 }
 
 // `j.WIDTH`, WHERE `WIDTH` IS A CONSTANT AND `j` IS A VALUE.
-//
 // A constant is one value per type and there is nothing in a receiver
 // to read it out of — so which side of the dot the TYPE arrives on
 // cannot change the answer. `Limits.WIDTH` folded and `j.WIDTH` fell
@@ -94,7 +87,6 @@ lower_type_or_field = (
 // that declares no such member: the diagnostic came from `cc` and named
 // a symbol the author never wrote. The bootstrapper already folded it,
 // so this was also the two implementations disagreeing.
-//
 // ASKED AFTER `type_const` AND BEFORE THE FIELD PATH. A name that is
 // both is not possible — grammar R4 makes `NAME: T = value` a constant
 // and `name :: T = value` a field, one member each way — and a constant
@@ -282,7 +274,6 @@ intern_named* = (be :: CBackend, d: Def) Res<TyId> {
 // A nullary variant is a value of its enum: the tag, and no payload.
 // A variant WITH a payload written as a bare access is a value that
 // has not been constructed, and sema is the one that says so.
-//
 // THE LITERAL IS SPELLED AT WHAT THE CONTEXT EXPECTED, falling back to
 // what sema answered for the ACCESS node and then to the declaration's
 // own reading. `none: Opt<i32> = Opt.None;` declares its local at the
@@ -321,7 +312,6 @@ write_variant_value* = (
 // it is what the value must land as. An expectation naming a DIFFERENT
 // declaration is not this access's type — the mismatch, if it is one,
 // belongs to assignability.
-//
 // A BARE HEAD SETTLES AT THE POSITION THAT WROTE ITS ARGUMENTS: sema's
 // `nullary_settles` accepted `none: Opt<i32> = Opt.None` by the same
 // question, and the C has to answer with the struct the slot carries —
@@ -353,20 +343,16 @@ enum_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
     })
 }
 
-// -----------------------------------------------------------------
 // a field the type declares, and a field an IMPL supplies
-//
 // "You satisfy requirements, you never impl storage." A field the
 // DECLARATION writes is storage and is read out of the receiver's
 // bytes. A field an IMPL supplies is COMPUTED: there is nothing in the
 // receiver to read, so what is emitted is the impl's own expression
 // with `self` bound to the receiver — re-evaluated on every read, which
 // is the whole of "it can never go stale".
-//
 // THE TYPE'S OWN MEMBER WINS OUTRIGHT, the order `sema_supply.zen`
 // states and for its reason: layout is fixed at declaration and cannot
 // depend on which impls are linked.
-//
 // TWO IMPLS SUPPLYING ONE NAME IS SEMA'S ANSWER READ BACK, NOT GUESSED.
 // "The bound in scope selects which is in view — never file order", and
 // nothing pushes bounds during lowering: monomorphisation has already
@@ -376,17 +362,14 @@ enum_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
 // no diagnostic, which is why a bound stack HERE would be a second,
 // worse copy of a rule `sema_member.zen` already applies. It records
 // what it chose under the access's `ExprId`; this asks.
-// -----------------------------------------------------------------
 
 // WHAT A FIELD READ EVALUATES TO, when the frame cannot say.
-//
 // `gen_c_expr.zen` walks a dot chain through the FRAME — the frame is
 // the authority on a binding's type — and that walk stops at the first
 // node that is not a name or a field. `p.read(0).value` has a CALL
 // under the dot, so the walk gives up one node short, and sema has
 // nothing either: `alloc.create<T>()` is a bodyless generic member, so
 // the whole chain hanging off `p` is unknown to it.
-//
 // The answer is the same two facts `write_field_access` below already
 // reads — the receiver's type, and the field on its declaration — asked
 // as a question instead of written as C. Without it the chain types as
@@ -466,10 +449,22 @@ write_stored_field = (
     out :: String
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    expr(be, a.base, ctx, unknown, out).try();
-    out.add_bytes(".").try();
-    field_name(be, rty, a.name.text, out).try();
-    Ok(());
+    fty     = be.field_of(rty, a.name.text).try().match({
+        Ok(t) => t,
+        None  => unknown,
+    });
+    be.has_storage(fty).match({
+        false => {
+            out.add_bytes("(").try();
+            expr(be, a.base, ctx, unknown, out).try();
+            out.add_bytes(", 0)")
+        },
+        true  => {
+            expr(be, a.base, ctx, unknown, out).try();
+            out.add_bytes(".").try();
+            field_name(be, rty, a.name.text, out)
+        },
+    })
 }
 
 // What an impl wrote for a field, and the four things reading it back

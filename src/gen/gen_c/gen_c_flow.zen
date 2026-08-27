@@ -1,21 +1,8 @@
 // src/gen/gen_c/gen_c_flow.zen
-// What control flow is in C.
-//
-// Zen has exactly one conditional — `.match`, always exhaustive, in
-// every position — and it is not a C expression, so it emits STATEMENTS
-// and hands a destination its value. Everything in `gen_c_expr.zen`
-// that spills spills into this or into `.try()`.
-//
-// `gen_c_try.zen` is the other non-local form: a match decides WHICH
-// value, `.try()` decides whether there is one at all — two subjects,
-// two files.
-//
-// A match becomes an `if` chain, not a `switch`: a pattern is not
-// always a constant (a binder matches everything, a literal pattern on
-// a non-integer is a comparison), so `switch` would serve only the enum
-// case. The chain closes with `zg_unreachable`, which makes the C
-// total — exhaustiveness is sema's to check, and a value matching no
-// arm traps there instead of falling out with an uninitialised result.
+// Lowers exhaustive `.match` values as statement-level `if` chains.
+// Patterns are not always C constants, so `switch` is insufficient; a
+// final `zg_unreachable` prevents an uninitialised fallthrough if sema's
+// exhaustiveness invariant is ever broken.
 
 Expr, Match, Arm, Pattern, PatternId = std.ast
 Literal, Decl, Enum, Variant = std.ast
@@ -31,7 +18,7 @@ Inst = sema.sema_inst
 last_segment = sema.sema_match
 write_usize = sema.sema_diag
 member_of = sema.sema_union
-sym_local, sym_variant, sym_gen = gen.gen_name
+sym_local, sym_variant = gen.gen_name
 sym_union_member = gen.gen_name
 RES_PATH, is_failure = gen.gen_name
 GenFault = gen.gen_diag
@@ -45,9 +32,7 @@ res_type_of, decoded_len = gen.gen_c.gen_c_expr
 is_str = gen.gen_c.gen_c_read
 write_position = gen.gen_c.gen_c_op
 
-// -----------------------------------------------------------------
 // match
-// -----------------------------------------------------------------
 
 lower_match* = (
     be   :: CBackend,
@@ -58,8 +43,7 @@ lower_match* = (
     dst  : Dest
 ) Res<(), AllocError> {
     st = be.res_type_of(m.scrutinee, ctx).try();
-    scrut ::= be.alloc.String().try();
-    sym_gen(scrut, "s", be.next_tmp()).try();
+    scrut ::= be.fresh_name("s").try();
     be.declare_temp(st, scrut.view()).try();
     be.deliver(m.scrutinee, ctx, st, Dest.Into(scrut.view())).try();
     // Each arm's pattern bindings live only while the arm's body is
@@ -81,6 +65,19 @@ declare_temp* = (be :: CBackend, ty: TyId, name: str) Res<(), AllocError> {
     decl ::= be.alloc.String().try();
     be.declarator(ty, name, decl).try();
     be.fmt("{};\n", decl.view())
+}
+
+temp* = (be :: CBackend, ty: TyId, stem: str) Res<String, AllocError> {
+    name ::= be.fresh_name(stem).try();
+    be.declare_temp(ty, name.view()).try();
+    Ok(name)
+}
+
+init_temp* = (be :: CBackend, ty: TyId, stem: str, value: str)
+             Res<String, AllocError> {
+    name = be.temp(ty, stem).try();
+    be.set_line(name.view(), value).try();
+    Ok(name)
 }
 
 // `if (..) {` for the first arm, `} else if (..) {` for the rest. The
@@ -144,9 +141,7 @@ write_unreachable = (be :: CBackend, node: Expr, m: Match)
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // patterns
-// -----------------------------------------------------------------
 
 arm_cond = (
     be    :: CBackend,
@@ -170,7 +165,6 @@ arm_cond = (
 // compile to the same (valid) condition, the first swallowing every
 // `Ok`. So the tag and the payload's own test (`literal_cond`, one
 // level down) are written together.
-//
 // AGAINST A SET there is one reading before that: when the ctor's name
 // is a MEMBER whose own enum declares what the binder spells, the arm
 // is two tag tests — the set's for `Member`, then the member struct's
@@ -412,7 +406,6 @@ equality = (scrut: str, text: str, out :: String) Res<(), AllocError> {
 // way `str.impl(Eq)` does: LENGTH first, then bytes. Length first is
 // correctness, not optimisation — comparing over the shorter length is
 // the classic bug, and a prefix is not the whole.
-//
 // `.data` and `.len` are spelled the runtime floor's way, not the
 // mangler's: `zg_str` is the floor's struct.
 str_cond = (
@@ -544,20 +537,20 @@ leaf_name_of = (be :: CBackend, mty: TyId) Res<str, AllocError> {
     Ok(last_segment_str(qname))
 }
 
+// THE LAST dot, not the first: the leaf name follows the final
+// separator, as `sema_def.last_segment` spells it. A first-dot stop
+// answered `core.io.IoError` for a two-module path.
 last_segment_str = (qname: String) str {
     dot      ::= 0;
     i: usize ::= 0;
-    loop(() { i < qname.len() && dot == 0 }, (h) {
+    loop(() { i < qname.len() }, (h) {
         (qname.view().index(i) == '.').match({
             true  => { dot = i + 1; },
             false => {},
         });
         i = i + 1;
     });
-    (dot > 0).match({
-        true  => qname.view().slice(dot, qname.len()),
-        false => qname.view().slice(0, qname.len()),
-    })
+    qname.view().slice(dot, qname.len())
 }
 
 tag_cond = (
@@ -616,7 +609,6 @@ bind_name = (
 // `arm_bind` again — a nested binder the walk never reached is a name
 // the arm body cannot resolve. A literal or wildcard payload binds
 // nothing; `arm_cond` has already turned it into a test.
-//
 // `Member(..)` against a SET binds from the set's own payload struct:
 // the place is spelled by `sym_union_member` at the set, and the inner
 // pattern binds at the member's type. `Member(pe)` declares `pe` there,
@@ -681,13 +673,10 @@ bind_local = (be :: CBackend, name: str, ty: TyId, init: str)
     be.fmt("{} = {init};\n", decl.view())
 }
 
-// -----------------------------------------------------------------
 // what an enum's variants are
-//
 // Two shapes and one question. `Res` carries no declaration — it is
 // structural in sema's type language — so its variants are read off
 // its form; everything else reads them off the declaration.
-// -----------------------------------------------------------------
 
 is_variant* = (be :: CBackend, st: TyId, name: str) bool {
     be.check.types.at(st).match({

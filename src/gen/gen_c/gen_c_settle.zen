@@ -1,27 +1,22 @@
 // src/gen/gen_c/gen_c_settle.zen
 // What a call handed a lambda EVALUATES TO.
-//
 // `gen_c_inline.zen` puts a body where a call was; this answers the one
 // question that has to be settled BEFORE it does. `then<T>(b: bool, f:
 // () T)` reaches `T` only through the closure, and a closure infers FROM
 // a signature rather than into one — so sema hands back `Res<T>` with
 // nothing bound, and a temporary declared at that answer and filled by
 // the lowering's would be C that does not compile.
-//
 // TWO SOURCES SETTLE A TYPE PARAMETER HERE, and the second is why this
 // file exists at all:
-//
 //   - an ORDINARY argument settles a parameter written as that
 //     parameter — `find(range: R, ..)` handed a `Range` says `R`
 //   - a LAMBDA argument settles the parameter its declared RETURN type
 //     names — `then(f: () T)` says `T`, and nothing else can
-//
 // AND ONE MORE, WHICH IS A BOUND RATHER THAN AN ARGUMENT. `find<R:
 // Range<T>, T>` names `T` only inside another parameter's bound.
 // `gen_c_loop.zen` already answers that shape for a loop — "a range that
 // stores its own start and end walks its own index space, so its element
 // is usize" — and `range_element` is the same rule said about a call.
-//
 // ONE IMPLEMENTATION AND TWO CALLERS. `inline_result_type` is the query
 // `ty_of` asks and `inline_free` is the lowering, and both go through
 // `inline_ret` — because the two have to agree by construction rather
@@ -38,7 +33,7 @@ Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
 tail_expr = sema.sema_hoist
 Inst, has_var = sema.sema_inst
-param_type = sema.sema_denote
+param_type, type_from_ast = sema.sema_denote
 CBackend = gen.gen_c.gen_c_state
 sub_with, inst_at, settled_inst = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
@@ -88,9 +83,7 @@ add_param_type = (
     ptys.add(be.sub_with(declared, inst).try())
 }
 
-// -----------------------------------------------------------------
 // what the call evaluates to
-// -----------------------------------------------------------------
 
 inline_ret* = (
     be    :: CBackend,
@@ -150,9 +143,9 @@ settle_from_arg = (
     extra :: Inst
 )
                   Res<(), AllocError> {
-    be.tree.expr_at(value).kind.match({
-        Lambda(l) => be.settle_from_body(l, i, ptys, ctx, extra),
-        _         => be.settle_from_value(value, i, ptys, ctx, extra),
+    be.spelled_lambda(value).match({
+        Ok(l) => be.settle_from_body(l, i, ptys, ctx, extra),
+        None  => be.settle_from_value(value, i, ptys, ctx, extra),
     })
 }
 
@@ -281,9 +274,23 @@ settle_from_body = (
     ctx   : Ctx,
     extra :: Inst
 ) Res<(), AllocError> {
-    be.ret_var(i, ptys).match({
-        Ok(v) => be.bind_body_type(l, v, i, ptys, ctx, extra),
-        None  => Ok(()),
+    be.lambda_ret_is_open(l, ctx).try().match({
+        true  => Ok(()),
+        false => be.ret_var(i, ptys).match({
+            Ok(v) => be.bind_body_type(l, v, i, ptys, ctx, extra),
+            None  => Ok(()),
+        }),
+    })
+}
+
+lambda_ret_is_open = (be :: CBackend, l: Lambda, ctx: Ctx)
+                     Res<bool, AllocError> {
+    l.ret.match({
+        None    => Ok(false),
+        Ok(ret) => Ok(has_var(
+            be.check,
+            be.check.type_from_ast(ret, ctx).try()
+        )),
     })
 }
 
@@ -318,7 +325,6 @@ keep_var = (be :: CBackend, t: TyId) Res<TyId> {
 // types `value` as nothing, answers `()`, and `U` becomes a Vec of
 // nothing rather than a Vec of what the body made — which is a wrong
 // answer with no diagnostic until something tries to print an element.
-//
 // The bindings are TYPES ONLY and are rewound immediately: nothing is
 // emitted, and the same parameters are declared again with C storage
 // when the body is actually lowered.
@@ -486,18 +492,13 @@ usize_bound = (
     be.sub_with(got, extra)
 }
 
-// -----------------------------------------------------------------
 // the body, in the caller's frame
-// -----------------------------------------------------------------
 
-// -----------------------------------------------------------------
 // what an inlined call evaluates to, asked BEFORE it is lowered
-//
 // `ty_of` has to answer for a match scrutinee before the scrutinee is
 // written, and sema's answer for `Range(0, n).find(p)` is the open
 // `Res<T>` the header names. This is `inline_free`'s own computation
 // asked as a query, for the reason the header gives.
-// -----------------------------------------------------------------
 
 inline_result_type* = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                       Res<TyId, AllocError> {

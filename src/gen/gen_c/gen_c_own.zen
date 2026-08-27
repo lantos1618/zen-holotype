@@ -1,40 +1,33 @@
 // src/gen/gen_c/gen_c_own.zen
 // EVERY EXIT IS A SCOPE EXIT.
-//
 // A block ends four ways: `.try()` returns through it, `h.break()` and
 // `h.next()` jump over it, or it falls off the end. All four must run
 // the same cleanup in the same order, so exactly one function says
 // what leaving a block does (`run_frame`); the four sites call it
 // rather than each remembering.
-//
 // Order is DESIGN.md's: defers run LIFO, ALL of a block's defers run
 // before ANY of its drops (defer is registered ON THE BLOCK, drop
 // belongs TO THE VALUE — two stacks, not one interleaved one), and
 // drops then run in REVERSE DECLARATION ORDER (a binding may name what
 // an earlier one built; destroying the foundation first is a
 // use-after-free).
-//
 // `@scope` IS THE BLOCK, AS A VALUE — `gen_c_scope.zen` says why the
 // enclosing block's record is the one storage certainly still alive
 // when the closure runs. This is not escaping-closure support and must
 // not grow into it.
-//
 // ⚠ A LIFTED DEFER THUNK NEEDS NO NAME REMAPPING. The obvious design
 // gives the capture record fields of its own and rewrites every free
 // name in the closure body to `(*env).c0` — a second spelling for a
 // local, plus a `lower_name` hook. Instead, the record's fields carry
 // THE SAME MANGLED C NAMES the enclosing frame uses, and the thunk's
 // prologue re-declares those names as locals copied out of the record:
-//
 //     static void zg_d1(void *zg_p) {
 //         zg_env1 *zg_e = (zg_env1 *)zg_p;
 //         int32_t zu_l1i = zg_e->zu_l1i;      /* the prologue */
 //         ...                                 /* the body, unchanged */
 //     }
-//
 // so the closure body lowers through the ordinary `lower_name` path
 // with ordinary `LocalSlot`s. No remapping layer exists on purpose.
-//
 // NOT DONE HERE: dropping a struct's fields, or a `Vec`'s elements.
 // Drop is not recursive — DESIGN.md gives `Vec.take` as how a
 // `Vec<T>` of Drop values is emptied.
@@ -55,9 +48,7 @@ DropEntry, BlockFrame = gen.gen_c.gen_c_frame
 recv_inst = gen.gen_c.gen_c_mono
 Site, site_of, method_sig, member_symbol = gen.gen_c.gen_c_member
 
-// -----------------------------------------------------------------
 // entering and leaving a block
-// -----------------------------------------------------------------
 
 // A block opening. Its defer record is declared HERE, before its first
 // statement, so a closure registered by that statement has somewhere
@@ -74,10 +65,7 @@ enter_block* = (be :: CBackend, id: BlockId) Res<(), AllocError> {
 // `Ok` literal against `Res<usize, AllocError>` — and the self-hosted
 // compiler and `bootstrap/` disagree about that join: bootstrap types
 // the match as the first arm then assigns the second in, emitting C
-// `cc` rejects. `scripts/fixpoint.sh` builds stage 1 with bootstrap, so
-// this stopped the fixpoint oracle from running at all, rather than
-// just failing a corpus test.
-//
+// `cc` rejects. This once stopped self-hosting before the corpus ran.
 // Giving the match a function body removes the join: each arm checks
 // against a declared return type instead of its sibling.
 block_record = (be :: CBackend, id: BlockId) Res<usize, AllocError> {
@@ -108,7 +96,6 @@ leave_block* = (be :: CBackend, keep: str) Res<(), AllocError> {
 
 // Every block from the innermost out to `depth`: what a NON-LOCAL exit
 // leaves behind, written before the jump that skips the closing braces.
-//
 // Frames are NOT popped: lowering still stands inside those blocks with
 // statements left to write, and the `}` will run this again for the
 // path that falls through to it.
@@ -190,12 +177,9 @@ drop_unless_kept = (be :: CBackend, e: DropEntry, keep: str)
     })
 }
 
-// -----------------------------------------------------------------
 // what a drop is
-// -----------------------------------------------------------------
 
 // Register a binding for scope exit, if its type impls Drop.
-//
 // ONLY A BINDING, never a temporary, never a parameter — "passing a
 // Drop value to a parameter is a borrow, not a move" — and never a
 // match arm's payload binder, which names part of a value somebody
@@ -215,7 +199,6 @@ own_binding = (be :: CBackend, name: str, index: usize, ty: TyId)
 }
 
 // The `int` that says whether this binding still owns its value.
-//
 // EVERY tracked binding gets one, even if this program never moves it:
 // "is this name consumed anywhere" can't be answered per function (a
 // body reaches the backend inlined into its caller's frame), so the
@@ -263,7 +246,6 @@ write_clear = (be :: CBackend, live: usize) Res<(), AllocError> {
 // used to overwrite the slot and walk away, so an arena, a file handle
 // or a lock held by the old value leaked -- exit 0, plausible stdout,
 // no diagnostic anywhere.
-//
 // A NAME NAMES ONE STORAGE: the nearest tracked entry, the same one
 // release_binding answers through, and the entry carries the index and
 // type its own registration used. An inner shadow's store must not
@@ -271,7 +253,6 @@ write_clear = (be :: CBackend, live: usize) Res<(), AllocError> {
 // because passing a Drop value to it is a borrow -- finds no entry and
 // gains none: a store onto a borrow must not teach the frame to drop
 // somebody else's value at scope exit.
-//
 // The entry fires behind its own live flag, so a slot whose value a
 // `consume` already moved out emits nothing here; the flag is then
 // killed, because one retirement is all a generation gets -- without
@@ -389,7 +370,6 @@ ampersand = (addr: bool) str {
 }
 
 // The `drop` a `T.impl(Drop, { .. })` supplies, or nothing.
-//
 // The trait is part of the question, not decoration: a type may
 // declare its own method named `drop` (`Emit` could), and running that
 // at scope exit would call something the program never asked for. Only
@@ -474,13 +454,10 @@ add_if_bodied = (f: Function, found :: Vec<Function>)
     })
 }
 
-// -----------------------------------------------------------------
 // a block that writes `@scope`
-//
 // A nested block and a lambda body are blocks of their own, so the
 // search stops at each — why DESIGN.md's own example runs its inner
 // defers at the inner brace.
-// -----------------------------------------------------------------
 
 writes_scope* = (be :: CBackend, id: BlockId) bool {
     blk = be.tree.block_at(id);

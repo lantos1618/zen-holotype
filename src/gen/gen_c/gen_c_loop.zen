@@ -1,6 +1,5 @@
 // src/gen/gen_c/gen_c_loop.zen
 // The one construct that has no Zen definition anywhere.
-//
 // `src/std/core/loop/loop_iter.zen` declares six signatures with no
 // bodies: "a loop is the one thing that cannot be written in a
 // language whose only control flow is `.match`, `.loop` and
@@ -8,26 +7,21 @@
 // recursion makes "compiles to a plain C for-loop" depend on a
 // tail-call optimisation nobody gates. So the backend IS the body of
 // all six.
-//
 // THE OVERLOAD IS READ OFF THE DECLARATION'S OWN PARAMETER NAMES, never
 // the lambda at the call site: `loop_iter.zen` writes the body's
 // parameter list — `(h: LoopHandle, index: usize, value: T)` — and
 // which of `index`, `value`, `acc` appear is the whole difference
 // between the six. `(h, i)` binds to `value` on the two-parameter form
 // and to `index` on the counted one; only the declaration knows which.
-//
 // `h.break(v)` AND `h.next()` ARE `goto`s, NOT C's `break`/`continue`
 // — `gen_c_handle.zen` argues why, and owns both verbs.
-//
 // WHAT IS BEING WALKED IS `gen_c_range.zen`'S SUBJECT, NOT THIS ONE:
 // whether a range stores its bounds or an impl supplies them, and what
 // one pass hands out, are RANGE questions; this file only asks for the
 // answers.
-//
 // WHAT THIS FILE DOES NOT LOWER, IT REFUSES BY NAME — a fold, a body
 // written somewhere other than the call site, a range whose element
 // nothing settles.
-//
 // LOOPS NEVER ALLOCATE — the signature, not a promise: no declaration
 // in `loop_iter.zen` takes an `Alloc`, and `index`, `value`, `acc` are
 // plain automatic storage.
@@ -58,9 +52,7 @@ bind_text, is_res = gen.gen_c.gen_c_range
 lower_supplied = gen.gen_c.gen_c_range
 array_of, lower_array_walk = gen.gen_c.gen_c_array
 
-// -----------------------------------------------------------------
 // the lowering
-// -----------------------------------------------------------------
 
 // `args` is the call's arguments with the receiver, if there was one,
 // already at the front: `range.loop(body)` and `loop(range, body)` are
@@ -109,10 +101,7 @@ lower_with_body = (
 }
 
 lambda_at* = (be :: CBackend, id: ExprId) Res<Lambda> {
-    be.tree.expr_at(id).kind.match({
-        Lambda(l) => Ok(l),
-        _         => None,
-    })
+    be.spelled_lambda(id)
 }
 
 lower_shaped = (
@@ -144,7 +133,6 @@ lower_shaped = (
 
 // THE FOUR NON-FOLD SHAPES, and the branch between them is what the
 // arguments before the body are:
-//
 //   nothing        while true
 //   a `() bool`    while cond, tested BEFORE each pass
 //   anything else  a Range, walked half-open
@@ -227,9 +215,7 @@ is_cond = (be :: CBackend, one: ExprId) bool {
     })
 }
 
-// -----------------------------------------------------------------
 // while true, and while cond
-// -----------------------------------------------------------------
 
 lower_forever = (
     be   :: CBackend,
@@ -284,8 +270,7 @@ write_cond_guard = (be :: CBackend, one: ExprId, brk: usize, ctx: Ctx)
 write_cond_body = (be :: CBackend, lam: Lambda, brk: usize, ctx: Ctx)
                   Res<(), AllocError> {
     bool_ty = be.check.types.prim("bool").try();
-    tmp ::= be.alloc.String().try();
-    sym_gen(tmp, "c", be.next_tmp()).try();
+    tmp  ::= be.fresh_name("c").try();
     decl ::= be.alloc.String().try();
     be.declarator(bool_ty, tmp.view(), decl).try();
     be.fmt("{};\n", decl.view()).try();
@@ -294,21 +279,18 @@ write_cond_body = (be :: CBackend, lam: Lambda, brk: usize, ctx: Ctx)
     block(be, lam.body, ctx, bool_ty, Dest.Into(tmp.view())).try();
     be.release(lmark).try();
     be.check.release(cmark).try();
-    be.fmt("if (!{}) { goto \n", tmp.view()).try();
+    be.fmt("if (!{}) { goto ", tmp.view()).try();
     be.write_label("brk", brk).try();
     be.writeln("; }").try();
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // a range
-//
 // HALF-OPEN, and the counter is the index space. `Range(0, 5)` is five
 // passes; `index` counts PASSES and `value` is what the range holds, so
 // over `Range(10, 13)` they are 0,1,2 and 10,11,12 — one name for both
 // would make the two indistinguishable exactly when the range does not
 // start at zero.
-// -----------------------------------------------------------------
 
 lower_range = (
     be   :: CBackend,
@@ -389,7 +371,6 @@ lower_range_impl = (
 // signature rather than into one. Sema hands back `Res<q>` (the
 // mangler's word for an undecided type argument); emitting that as-is
 // is how `h.break(v)` in one loop and another become one C type.
-//
 // WHERE THE ELEMENT COMES FROM IS THE SHAPE'S OWN ANSWER. A range that
 // supplies no `at` walks its own index space, so its element is
 // `usize`. A shape that takes NO RANGE has no index space and no item:
@@ -444,14 +425,11 @@ lower_bounded = (
 
     st       = be.open_result(want, out).try();
     usize_ty = be.check.types.prim("usize").try();
-    counter ::= be.alloc.String().try();
-    sym_gen(counter, "i", be.next_tmp()).try();
-    base ::= be.alloc.String().try();
-    sym_gen(base, "b", be.next_tmp()).try();
+    counter ::= be.fresh_name("i").try();
+    base    ::= be.fresh_name("b").try();
     be.declare_usize(counter.view()).try();
     be.declare_usize(base.view()).try();
-    limit ::= be.alloc.String().try();
-    sym_gen(limit, "n", be.next_tmp()).try();
+    limit ::= be.fresh_name("n").try();
     be.declare_usize(limit.view()).try();
     be.assign_member(counter.view(), rng.view(), "start").try();
     be.assign_member(limit.view(), rng.view(), "end").try();
@@ -480,8 +458,7 @@ lower_bounded = (
 // range all open the same way.
 walk_temp* = (be :: CBackend, one: ExprId, rty: TyId, ctx: Ctx)
              Res<String, AllocError> {
-    rng ::= be.alloc.String().try();
-    sym_gen(rng, "r", be.next_tmp()).try();
+    rng  ::= be.fresh_name("r").try();
     decl ::= be.alloc.String().try();
     be.declarator(rty, rng.view(), decl).try();
     init ::= be.alloc.String().try();
@@ -504,12 +481,9 @@ assign_member = (be :: CBackend, target: str, base: str, member: str)
     be.fmt("{target} = {base}.{};\n", sym.view())
 }
 
-// -----------------------------------------------------------------
 // the parts every shape shares
-// -----------------------------------------------------------------
 
 // The loop's own value, and the frame `h.break` reads.
-//
 // "The loop evaluates to the final acc — or to `h.break(value)`, which
 // is what makes the two forms one thing rather than two." A loop
 // nothing broke out of evaluates to `None`; the temporary is

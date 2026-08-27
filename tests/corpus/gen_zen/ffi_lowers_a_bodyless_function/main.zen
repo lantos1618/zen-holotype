@@ -1,0 +1,71 @@
+Alloc, AllocError = std.mem
+FsError = std.env
+str, String = std.text
+Range = std.core
+Vec = std.collections
+Source, scan = std.lex
+Parser = std.parse.parser
+module = std.parse.parse_decl
+Checker = sema.sema_check
+Emit = gen.gen_emit
+CBackend, emit_program = gen.gen_c
+Cli, cli = zen
+Build, Debug, Job = zen
+entry_of = zen.zen_path
+
+PROGRAM : str = "getpid = () i32\nmain = (env: i32) i32 { a = getpid(); b = getpid(); a + b }\n"
+PROTO : str = "extern int32_t getpid(void);"
+
+occurrences = (text: str, needle: str) usize {
+    n ::= 0;
+    Range(0, text.len).loop((h, i) {
+        fits = i + needle.len <= text.len;
+        (fits && text.slice(i, i + needle.len).eq(needle)).then(() {
+            n = n + 1;
+        });
+    });
+    n
+}
+
+main = (env: Env) Res<i32, AllocError | FsError> {
+    a    ::= env.mem.alloc();
+    argv ::= a.Vec<str>();
+    argv.add("zen").try();
+    argv.add("build").try();
+    argv.add("src").try();
+    argv.add("--emit-c").try();
+    argv.add("--ffi").try();
+    cli(argv).match({
+        Build(job) => println("cli enables ffi: {}", job.ffi),
+        _          => println("cli enables ffi: false"),
+    });
+    lexed = scan(a, Source(file: "main.zen", text: PROGRAM)).try();
+    p ::= a.Parser(lexed);
+    m = p.module("main").try();
+    p.tree.add_module(m).try();
+    chk ::= a.Checker(p.tree).try();
+    be  ::= a.CBackend(p.tree, chk).try();
+    be.enable_ffi();
+    out ::= a.Emit().try();
+    be.emit_program(0, out).try();
+    faults ::= a.String().try();
+    be.render_diags(faults).try();
+    c = out.view();
+    println("no lowering fault: {}", faults.is_empty());
+    println("one extern prototype: {}", occurrences(c, PROTO) == 1);
+    println("raw calls: {}", occurrences(c, "getpid()") == 2);
+    b ::= a.Build(env, "src");
+    b.enable_ffi();
+    entry = entry_of(env, a, "src", "probe/probe.zen").try();
+    b.walk(entry).try();
+    b.back_end(Job(
+        root: "src",
+        out: "ffi.c",
+        emit_c: true,
+        ffi: false,
+        debug: Debug(repeat: 1, permute: "")
+    )).try();
+    built = env.fs.read(a, "ffi.c").try();
+    println("build api enables ffi: {}", occurrences(built.view(), PROTO) == 1);
+    Ok(0)
+}

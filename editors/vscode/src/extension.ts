@@ -32,6 +32,7 @@ import {
 
 let client: LanguageClient | undefined;
 let output: vscode.OutputChannel;
+let sourceEvents: vscode.FileSystemWatcher;
 
 // The one thing this extension knows how to explain. It is written once,
 // here, because it is the answer to every startup failure this extension
@@ -80,6 +81,8 @@ const STARTUP_FAILED =
 export async function activate(context: vscode.ExtensionContext) {
   output = vscode.window.createOutputChannel("Zen");
   context.subscriptions.push(output);
+  sourceEvents = vscode.workspace.createFileSystemWatcher("**/*.zen");
+  context.subscriptions.push(sourceEvents);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("zen.restartServer", () => restartServer()),
@@ -154,9 +157,10 @@ async function startClient(): Promise<void> {
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ language: "zen" }],
     outputChannel: output,
-    // The server neither watches files nor reads a configuration section,
-    // so nothing is synchronised to it. Adding either would be advertising
-    // a capability it does not have.
+    // Builds read imported modules from disk as well as open overlays. Tell
+    // the server when one of those disk inputs changes so it can retire a
+    // cached whole-program build instead of keeping stale exports/types.
+    synchronize: { fileEvents: sourceEvents },
     errorHandler: {
       error: (error, _message, count) => {
         output.appendLine(`zen: transport error (${count}): ${error.message}`);

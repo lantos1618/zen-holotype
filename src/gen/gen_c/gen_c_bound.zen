@@ -1,23 +1,9 @@
 // src/gen/gen_c/gen_c_bound.zen
-// THE CALL THROUGH A BOUND'S RECORD, and the erasure round-trip it
-// needs at both ends.
-//
-// `gen_c_fat.zen` is the other half: what a bound's record IS and how
-// one is built. This is what happens when a value of one is CALLED —
-// the only dynamic dispatch in the language, the one place a concrete
-// type is unknown at the call site.
-//
-// TWO CONVERSIONS AND ONE MULTIPLICATION. Slots are erased to the byte
-// type: an argument goes DOWN to the slot's type, the answer comes BACK
-// UP to the caller's, and the element count erasure dropped travels
-// beside the pointer. The multiplication lives only in the thunk
-// (`gen_c_fat.zen` says why); this file does the two conversions and the
-// `sizeof` feeding them.
-//
-// A CONVERSION REBUILDS, NEVER REINTERPRETS: a pointer is cast, a `Res`
-// is rebuilt variant by variant — nothing here may assume two pointer
-// types share a representation or two `Res` instantiations share a
-// layout.
+// Calls through a bound's fat record, the language's only dynamic
+// dispatch. Slots erase pointer elements to bytes; arguments convert
+// down and results rebuild upward (including `Res` variant-by-variant).
+// Element size travels beside erased pointers; multiplication belongs
+// only in the thunk built by `gen_c_fat`.
 
 ExprId = std.ast
 Function, Param, Access, Call, Arg, Impl, Member, TypeId = std.ast
@@ -26,15 +12,13 @@ Vec = std.collections
 str, String = std.text
 Ast = std.ast
 ImplId = sema.sema_id
-Vec = std.collections
-str, String = std.text
 Range = std.core
 TyId, TyNamed, TyRes = sema.sema_ty
 Ctx = sema.sema_check
 Inst, has_var = sema.sema_inst
 self_ctx = sema.sema_member
 param_type = sema.sema_denote
-sym_member, sym_gen, sym_variant = gen.gen_name
+sym_member, sym_variant = gen.gen_name
 RES_PATH, is_failure = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
@@ -44,17 +28,14 @@ enter_struct_tparams = gen.gen_c.gen_c_mono
 ctype, is_unit, request_type, is_ptr_named, declared_ret = gen.gen_c.gen_c_type
 expr, ty_of, value_held, holds = gen.gen_c.gen_c_expr
 write_set_value = gen.gen_c.gen_c_widen
-declare_temp = gen.gen_c.gen_c_flow
+init_temp = gen.gen_c.gen_c_flow
 Site, site_of, join = gen.gen_c.gen_c_member
 Slot, slots_of = gen.gen_c.gen_c_fat
 has_body = gen.gen_c.gen_c_impl
 
-// -----------------------------------------------------------------
 // rebuilding a value at another type
-//
 // Erasure is what lets one slot serve every instantiation; this is the
 // way back, under the header's rule that a conversion rebuilds.
-// -----------------------------------------------------------------
 
 convert* = (be :: CBackend, code: str, src: TyId, dst: TyId, out :: String)
            Res<(), AllocError> {
@@ -85,7 +66,6 @@ convert_kind = (
 // one side and the set on the other — two different C structs, so a bare
 // copy is a program `cc` refuses. Built by the same
 // `gen_c_widen.write_set_value` that builds the written form.
-//
 // A SET REACHING A WIDER SET IS LEFT ALONE: its tags are numbered over
 // its OWN members, so copying one across means a different member on
 // the other side — a wrong error variant at runtime, from C that
@@ -157,10 +137,7 @@ rebuild_res = (
     out  :: String
 ) Res<(), AllocError> {
     be.request_type(dst).try();
-    tmp ::= be.alloc.String().try();
-    sym_gen(tmp, "t", be.next_tmp()).try();
-    be.declare_temp(src, tmp.view()).try();
-    be.set_line(tmp.view(), code).try();
+    tmp ::= be.init_temp(src, "t", code).try();
     out.fmt("({}.zg_tag == ", tmp.view()).try();
     out.sym_variant(RES_PATH, "Ok").try();
     ok ::= be.alloc.String().try();
@@ -235,14 +212,11 @@ arm_head = (be :: CBackend, v: str, dst: TyId, out :: String)
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // the call through the record
-//
 // The value IS the bound, so which function runs is decided by the
 // impl behind the receiver and nothing static can say which. Every
 // other call — a concrete-type receiver — is the impl's own function,
 // called directly and monomorphised.
-// -----------------------------------------------------------------
 
 // A BODILESS MEMBER REACHING THE FAT BRANCH IS REFUSED HERE AND NOW,
 // before any C is written. A slot is a body an impl can answer; a member
@@ -261,7 +235,6 @@ arm_head = (be :: CBackend, v: str, dst: TyId, out :: String)
 // -- has no symbol to dispatch to, so its slot initialises NULL and a
 // call through it is issue 781's crash: `env.threads.sleep(10)` passed
 // sema, passed `cc`, and died calling through the zeroed field.
-//
 // THE GATE IS NOT `has_body` ALONE. A bound's own declarations are
 // bodiless BY DESIGN -- `Alloc.realloc`, dispatched through `Vec`'s
 // `alloc: Alloc`, is exactly that shape with `Arena.impl(Alloc, ..)`
@@ -270,7 +243,6 @@ arm_head = (be :: CBackend, v: str, dst: TyId, out :: String)
 // turns on: does ANYTHING answer? `bound_answered` walks the whole
 // world's impls once per refused candidate; a call that reaches it is
 // already the rare path.
-//
 // The refusal sits in THIS lowering and not in `slots_of` because every
 // reader of a bound's shape comes through that walk -- layout, display,
 // `slot_call` -- while std's capability structs are behaviour-only with
@@ -428,7 +400,6 @@ owner_name = (be :: CBackend, rty: TyId) str {
 // allocating through its `Alloc`, `Sink.write` through its writer. The
 // slot comes back too, since the caller needs a temporary at the type
 // it answers with.
-//
 // Arguments arrive as text, each already comma-prefixed — only the
 // caller knows what they are. A member with its own type parameters
 // isn't reachable this way and doesn't need to be: `raw` is bytes and
@@ -546,7 +517,6 @@ read_slot = (
 
 // WHAT A CALL THROUGH A RECORD IS WORTH, for a caller that has to name
 // the type before the call is written.
-//
 // A BOUND'S MEMBER IS NOT A DECLARATION THE WORLD HOLDS: `realloc` is
 // declared inside `Alloc`, so `gen_c_infer`'s walk over `defs_of` finds
 // nothing and hands back the caller's own guess — for a generic member,
@@ -555,7 +525,6 @@ read_slot = (
 // declared its temporary at `Res<Ptr<q>, AllocError>` and assigned the
 // slot's `Res<Ptr<u8>, AllocError>` into it — `cc` rejected a program
 // sema had admitted.
-//
 // The answer is `sub_with(ret, targs)`, the same value `fat_result`
 // converts the erased answer BACK to, read off the same `read_slot` —
 // two derivations of one type would be two chances to disagree.
@@ -677,7 +646,6 @@ all_closed = (be: CBackend, targs: Inst) bool {
 }
 
 // `<r> = <the receiver>; <r>.<slot>(<r>.zg_self, <args>, sizeof(T)..)`
-//
 // The receiver lands in a temporary: it is read twice — the slot and
 // the `void *` behind it — and read twice is evaluated twice.
 emit_fat_call = (
@@ -694,10 +662,7 @@ emit_fat_call = (
 ) Res<(), AllocError> {
     recv ::= be.alloc.String().try();
     expr(be, a.base, ctx, rty, recv).try();
-    r ::= be.alloc.String().try();
-    sym_gen(r, "t", be.next_tmp()).try();
-    be.declare_temp(rty, r.view()).try();
-    be.set_line(r.view(), recv.view()).try();
+    r    ::= be.init_temp(rty, "t", recv.view()).try();
     call ::= be.alloc.String().try();
     call.fmt("{}.{}({}.zg_self", r.view(), slot.sym.view(), r.view()).try();
     be.fat_args(c, slot, declared, targs, ctx, call).try();
@@ -807,9 +772,6 @@ fat_value_back = (
 ) Res<(), AllocError> {
     be.request_type(slot.ret).try();
     be.request_type(real).try();
-    tmp ::= be.alloc.String().try();
-    sym_gen(tmp, "t", be.next_tmp()).try();
-    be.declare_temp(slot.ret, tmp.view()).try();
-    be.set_line(tmp.view(), call).try();
+    tmp ::= be.init_temp(slot.ret, "t", call).try();
     be.convert(tmp.view(), slot.ret, real, out)
 }

@@ -1,22 +1,18 @@
 // src/gen/gen_c/gen_c_runtime.zen
 // The C every emitted program stands on: the floor, same for every program;
 // the only thing that varies is WHICH checked-arithmetic helpers it needs.
-//
 // THE FAILURE MODEL IS ENFORCED HERE. DESIGN.md: "signed overflow is
 // undefined behaviour in C, so `gen_c` may not emit `a + b` and inspect the
 // result afterwards — the optimizer is entitled to delete that check." So
 // nothing below performs the operation first; every helper tests, then
 // operates.
-//
 // A trap prints `file:line:col: trap: <what>` to stderr and exits 134. The
 // three whats are `integer overflow`, `divide by zero` and `index out of
 // bounds`; the position is the OPERATOR token, which is why `Binary` and
 // `Unary` carry an `op_span` at all.
-//
 // `i32.MIN / -1` traps as an OVERFLOW, not a division by zero — it faults
 // identically on x86; TESTING.md records that DESIGN.md names only the zero
 // divisor.
-//
 // THE BUILTINS ARE A FAST PATH, NEVER A REQUIREMENT. Every checked helper is
 // emitted twice: `__builtin_*_overflow` where the compiler has it, a
 // hand-written PRE-operation range test where it does not — PLAN.md's
@@ -168,23 +164,19 @@ emit_index = (out :: Emit) Res<(), AllocError> {
 }
 
 // What the console lowers into, and only for a program that prints.
-//
 // DESIGN.md routes `println(..)` through the `Env` in scope — sugar for
 // `<the Env in scope>.out.println(..)` — and `Console`'s members are
 // DECLARED WITHOUT A BODY for the same reason `Fs`'s are: there is
 // nothing underneath to write them in. So the sugar bottoms out here:
 // decimal with no separators, one newline per `println`.
-//
 // TWO FAMILIES, ONE STREAM EACH (env.zen): `zg_print_*` writes stdout,
 // `zg_eprint_*` writes stderr, and every member of one is the other's
 // with an `e`. A program that never prints to stderr carries none of
 // the second family, on the same rule as the first.
-//
 // `zg_print_str` takes a `zg_str` BY VALUE rather than a pointer and a
 // length, so printing a `str` needs no temporary and therefore no
 // statement of its own — which is what lets an argument be lowered as a
 // pure C expression.
-//
 // `if (n)` AND `if (s.len)` ARE NOT AN OPTIMISATION. An empty `str` has
 // a NULL `data` — that is what `Vec` holds before its first grow — and
 // `fwrite(NULL, 1, 0, stdout)` is undefined by C99 7.1.4 however many
@@ -280,13 +272,10 @@ write_stderr = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // `@scope` — the block's own defer stack
-//
 // A `Scope` is a POINTER to the enclosing block's record, which holds
 // the deferred closures AND their captures — `gen_c_scope.zen`'s header
 // argues why that is the one storage certainly still alive.
-//
 // A SLOT'S ENV IS A UNION OVER EVERY CAPTURE RECORD IN THE PROGRAM, so
 // it is exactly as large and as aligned as the largest one: no guessed
 // byte count, and nothing to overflow. HOW MANY closures one block may
@@ -294,12 +283,10 @@ write_stderr = (out :: Emit) Res<(), AllocError> {
 // `defer` in a loop is unbounded — so that bound is a constant, and
 // exceeding it traps at the registration rather than corrupting the
 // frame.
-//
 // EMITTED AFTER THE TYPES because a capture record names them, and
 // before the prototypes because a `Scope` parameter is spelled
 // `zg_scope *`. The forward declaration in the floor is what lets that
 // spelling appear anywhere at all.
-// -----------------------------------------------------------------
 
 // The name alone, before anything can spell `zg_scope *`. It is its own
 // emission and not part of `emit_floor` because the floor is what EVERY
@@ -424,13 +411,10 @@ write_defer_run = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // the filesystem floor
-//
 // `Fs`'s members have no Zen body for the same reason `Console`'s have
 // none, and this is what they bottom out in. `gen_c_cap.zen` lowers the
 // calls; these are the four functions those calls name.
-//
 // EMITTED ONLY FOR A PROGRAM THAT TOUCHES THE DISK, which is why the
 // two headers are here rather than at the top: this is the one place
 // the generated C leaves C99 for POSIX, and a hello-world should not
@@ -438,12 +422,10 @@ write_defer_run = (out :: Emit) Res<(), AllocError> {
 // compiler walking a source tree has to know. `S_ISDIR` is the part of
 // that a hosted implementation may leave out, so it is defined when the
 // header did not.
-//
 // THE ORDINALS ARE A CONTRACT WITH `gen_c_cap.zen` AND WITH NOTHING
 // ELSE: the number never leaves the generated C, because the lowering
 // turns it back into a variant BY NAME, so `env.zen` may rename or
 // reorder its own error set without either side agreeing to it.
-// -----------------------------------------------------------------
 
 emit_fs* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.uses_fs().match({
@@ -470,6 +452,7 @@ write_fs = (out :: Emit) Res<(), AllocError> {
     out.say("#define ZG_PATH_MAX 4096").try();
     out.line().try();
     write_fs_ordinals(out).try();
+    write_fs_error(out).try();
     write_fs_path(out).try();
     write_fs_kind(out).try();
     write_fs_size(out).try();
@@ -479,6 +462,20 @@ write_fs = (out :: Emit) Res<(), AllocError> {
     write_fs_lock(out).try();
     write_fs_unlock(out).try();
     Ok(());
+}
+
+write_fs_error = (out :: Emit) Res<(), AllocError> {
+    out.say("static int zg_fs_error(int error) {").try();
+    out.indent();
+    out.say("switch (error) {").try();
+    out.say("case ENOENT: case ENOTDIR: return ZG_FS_NOT_FOUND;").try();
+    out.say("case EACCES: case EPERM: return ZG_FS_DENIED;").try();
+    out.say("default: return ZG_FS_FAILED;").try();
+    out.say("}").try();
+    out.dedent();
+    out.say("}").try();
+    out.line().try();
+    Ok(())
 }
 
 write_fs_ordinals = (out :: Emit) Res<(), AllocError> {
@@ -538,7 +535,7 @@ write_fs_size = (out :: Emit) Res<(), AllocError> {
     out.say("struct stat st;").try();
     out.say("if (!zg_fs_path(buf, p, n)) return ZG_FS_FAILED;").try();
     out.say("if (stat(buf, &st) != 0)").try();
-    out.say("    return errno == EACCES ? ZG_FS_DENIED : ZG_FS_NOT_FOUND;").try();
+    out.say("    return zg_fs_error(errno);").try();
     out.say("if (S_ISDIR(st.st_mode)) return ZG_FS_IS_DIR;").try();
     out.say("if (st.st_size < 0) return ZG_FS_FAILED;").try();
     out.say("*out = (size_t)st.st_size;").try();
@@ -559,7 +556,7 @@ write_fs_write = (out :: Emit) Res<(), AllocError> {
     out.say("fh = fopen(buf, \"wb\");").try();
     out.say("if (fh == NULL) {").try();
     out.say("    if (errno == EISDIR) return ZG_FS_IS_DIR;").try();
-    out.say("    return errno == EACCES ? ZG_FS_DENIED : ZG_FS_NOT_FOUND;").try();
+    out.say("    return zg_fs_error(errno);").try();
     out.say("}").try();
     out.say(
         "if (len && fwrite(src, 1, len, fh) != len) { fclose(fh); return ZG_FS_FAILED; }"
@@ -593,13 +590,14 @@ write_fs_remove = (out :: Emit) Res<(), AllocError> {
     out.say("*gone = false;").try();
     out.say("if (!zg_fs_path(buf, p, n)) return ZG_FS_FAILED;").try();
     out.say("if (stat(buf, &st) != 0) {").try();
-    out.say("    if (errno == EACCES) return ZG_FS_DENIED;").try();
-    out.say("    return ZG_FS_OK;").try();
+    out.say("    int error = zg_fs_error(errno);").try();
+    out.say("    return error == ZG_FS_NOT_FOUND ? ZG_FS_OK : error;").try();
     out.say("}").try();
     out.say("if (S_ISDIR(st.st_mode)) return ZG_FS_IS_DIR;").try();
     out.say("if (remove(buf) == 0) { *gone = true; return ZG_FS_OK; }").try();
-    out.say("if (errno == ENOENT) return ZG_FS_OK;").try();
-    out.say("return errno == EACCES ? ZG_FS_DENIED : ZG_FS_FAILED;").try();
+    out.say("if (errno == ENOENT || errno == ENOTDIR) return ZG_FS_OK;").try();
+    out.say("if (errno == EISDIR) return ZG_FS_IS_DIR;").try();
+    out.say("return zg_fs_error(errno);").try();
     out.dedent();
     out.say("}").try();
     out.line().try();
@@ -622,7 +620,7 @@ write_fs_read = (out :: Emit) Res<(), AllocError> {
     out.say("fh = fopen(buf, \"rb\");").try();
     out.say("if (fh == NULL) {").try();
     out.say("    if (errno == EISDIR) return ZG_FS_IS_DIR;").try();
-    out.say("    return errno == EACCES ? ZG_FS_DENIED : ZG_FS_NOT_FOUND;").try();
+    out.say("    return zg_fs_error(errno);").try();
     out.say("}").try();
     out.say("if (want) *got = fread(dst, 1, want, fh);").try();
     out.say("if (ferror(fh)) { fclose(fh); return ZG_FS_FAILED; }").try();
@@ -640,7 +638,6 @@ write_fs_read = (out :: Emit) Res<(), AllocError> {
 // the disk to clean up. LOCK_EX | LOCK_NB: a caller that wanted to wait
 // has `Exists` in hand to retry around — blocking inside a generated
 // expression would be a hang nobody asked for.
-//
 // THE PATH NAMES WHAT IS SERIALISED, not a file that must be there:
 // O_CREAT on the LAST component only means an existing DIRECTORY under
 // that name still opens (flock takes it), which is why `.fixpoint/`
@@ -659,17 +656,21 @@ write_fs_lock = (out :: Emit) Res<(), AllocError> {
     out.say("int fd;").try();
     out.say("*fd_out = -1;").try();
     out.say("if (!zg_fs_path(buf, p, n)) return ZG_FS_FAILED;").try();
-    out.say("if (stat(buf, &st) == 0 && S_ISDIR(st.st_mode))").try();
-    out.say("    return ZG_FS_IS_DIR;").try();
+    out.say("if (stat(buf, &st) == 0) {").try();
+    out.say("    if (S_ISDIR(st.st_mode)) return ZG_FS_IS_DIR;").try();
+    out.say("} else if (errno != ENOENT) return zg_fs_error(errno);").try();
     out.say("fd = open(buf, O_RDWR | O_CREAT | O_EXCL, 0666);").try();
     out.say("if (fd < 0 && errno == EEXIST)").try();
     out.say("    fd = open(buf, O_RDWR);").try();
     out.say("if (fd < 0) {").try();
-    out.say("    return errno == EACCES ? ZG_FS_DENIED : ZG_FS_NOT_FOUND;").try();
+    out.say("    return zg_fs_error(errno);").try();
     out.say("}").try();
     out.say("if (flock(fd, LOCK_EX | LOCK_NB) != 0) {").try();
+    out.say("    int error = errno;").try();
     out.say("    close(fd);").try();
-    out.say("    return ZG_FS_EXISTS;").try();
+    out.say("    if (error == EWOULDBLOCK || error == EAGAIN)").try();
+    out.say("        return ZG_FS_EXISTS;").try();
+    out.say("    return zg_fs_error(error);").try();
     out.say("}").try();
     out.say("*fd_out = fd;").try();
     out.say("return ZG_FS_OK;").try();

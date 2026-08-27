@@ -3,10 +3,8 @@
 // function, built from that function's own Res type and never converted
 // — propagation merges sets by containment, and there is no From.
 // (`.match`, the other half of control flow, is `gen_c_flow.zen`'s.)
-//
 // A WIDENING IS A CONSTRUCTION, and which construction depends on the
 // two sets — `Carry` below is the answers:
-//
 //   - SAME SET, TWO SPELLINGS is a COPY. Canonical numbering ("a union's
 //     tags are numbered by a canonical order over its members, never by
 //     declaration order") makes `AllocError | IoError` and
@@ -20,7 +18,6 @@
 //     differ, so the tag is mapped member by member while the payload
 //     crosses untouched — a member's field is named after its own type
 //     on both sides.
-//
 // STILL NOT LOWERED: a widening whose destination cannot NAME a member
 // (`Error = WriteError | FsError` flattens to four members no variant
 // names). `gen_c_layout.variant_ranks` refuses the same shape; refusing
@@ -36,7 +33,7 @@ TyId, TyNamed, TyRes, ResForm = sema.sema_ty
 decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
-sym_member, sym_variant, sym_gen = gen.gen_name
+sym_member, sym_variant = gen.gen_name
 RES_PATH, is_failure = gen.gen_name
 sym_union_variant = gen.gen_name
 GenFault = gen.gen_diag
@@ -81,18 +78,12 @@ lower_try_res = (
     want    : TyId,
     dst     : Dest
 ) Res<(), AllocError> {
-    tmp ::= be.fresh_tmp("t").try();
+    tmp ::= be.fresh_name("t").try();
     be.declare_temp(rt, tmp.view()).try();
     be.deliver(operand, ctx, rt, Dest.Into(tmp.view())).try();
     be.write_guard(node, r, tmp.view(), ctx).try();
     be.unwrap(id, r, want, tmp.view(), ctx, dst).try();
     Ok(());
-}
-
-fresh_tmp = (be :: CBackend, prefix: str) Res<String, AllocError> {
-    s ::= be.alloc.String().try();
-    sym_gen(s, prefix, be.next_tmp()).try();
-    Ok(s);
 }
 
 write_guard = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
@@ -254,7 +245,6 @@ widen_into_set = (
 // shifts every rank after it, so the tag is mapped member by member.
 // Only the TAG — a member's payload field is named after its own type
 // on both sides, so the payload crosses untouched.
-//
 // The map is all-or-nothing, decided before a byte is written: a
 // half-built map leaves some tag unmapped, and an unmapped tag is a
 // wrong ERROR VARIANT at runtime with no diagnostic and no C that fails
@@ -349,7 +339,6 @@ named_tagged = (be :: CBackend, set: TyId, m: TyId) bool {
 }
 
 // Which variant of the caller's set carries `err`.
-//
 // Compared by TYPE and not by name: two modules may each declare an
 // `AllocError` and they are two types, so a name match would tag the
 // wrong variant and the payload would be read as the wrong struct.
@@ -458,7 +447,6 @@ report_widening = (be :: CBackend, node: Expr) Res<(), AllocError> {
 // widens into a STRUCTURAL set, whose member type is its own name;
 // `Retag` maps the tag of a strictly larger set and carries nothing,
 // the two sets already in hand.
-//
 // Five cases and not a `Res<str>` with a convention: a variant name and
 // a member type are two different things, and the C written for each is
 // different too.
@@ -507,7 +495,7 @@ write_built = (
 // admitted this — the sets are equal, so both fields are one size.
 write_copy = (be :: CBackend, r: TyRes, tmp: str, ctx: Ctx)
              Res<(), AllocError> {
-    w ::= be.fresh_tmp("w").try();
+    w ::= be.fresh_name("w").try();
     be.write_carrier_decl(r, w.view(), ctx).try();
     be.write_carrier_copy(w.view(), tmp).try();
     be.write_return(w.view())
@@ -518,7 +506,7 @@ write_copy = (be :: CBackend, r: TyRes, tmp: str, ctx: Ctx)
 // the value arrived carrying.
 write_retag = (be :: CBackend, r: TyRes, want: TyRes, tmp: str, ctx: Ctx)
               Res<(), AllocError> {
-    w ::= be.fresh_tmp("w").try();
+    w ::= be.fresh_name("w").try();
     be.write_carrier_decl(r, w.view(), ctx).try();
     be.write_payload_copy(w.view(), tmp).try();
     be.write_tag_map(r.error, want.error, w.view(), tmp).try();
@@ -712,7 +700,6 @@ read_ok_payload = (tmp: str, out :: String) Res<(), AllocError> {
 // variant that names the callee's error TYPE, carrying the value
 // unchanged. The two `Res`es are two C structs with two different
 // payload members, so there was never a copy that could have worked.
-//
 // THE PAYLOAD ARRIVES AS AN EXPRESSION, not as the temporary it is read
 // off: `.try()` hands `{tmp}.zg_data.Err`, and the direct widen (#736)
 // hands the member value itself, which has no Res around it to read
@@ -803,7 +790,6 @@ write_unwrap = (be :: CBackend, tmp: str, dst: Dest) Res<(), AllocError> {
 // `(Want){ .zg_tag = OK, .zg_data.Ok = tmp.zg_data.Ok }`, handed to the
 // destination. Assembled by pieces, `write_built`'s way: the braces are
 // literals and belong to nobody's placeholder.
-//
 // A UNIT PAYLOAD CARRIES NO MEMBER: `()` is not a value C can hold and
 // the union has no `Ok` member to name (`write_res_payload`'s rule), so
 // the literal is the tag alone — the payload was already run once into

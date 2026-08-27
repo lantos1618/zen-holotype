@@ -1,31 +1,26 @@
 // src/gen/gen_c/gen_c_range.zen
 // What a RANGE is, and what one pass of it hands out.
-//
 // `gen_c_loop.zen` owns the loop — which of the six overloads a call
 // is, where `h.break` lands, and what the body's parameters are bound
 // to. This file owns the other half of the same construct: the thing
 // being walked. They split there because `range.zen` does: "Range" is
 // one name wearing two readings, and BOTH are here —
-//
 //   CONCRETE. `Range(0, 5)` STORES its start and end, so a pass is a
 //   `usize` counter and the walk is a plain C for-loop.
 //   A BOUND. `Vec.impl(Range<T>, { start: 0, end: self.len, at ::= ..
 //   })` SUPPLIES them, so `start` and `end` are expressions read in the
 //   impl's own scope with `self` bound to the range, and a pass is
 //   whatever `at` returns.
-//
 // A `None` FROM `at` ENDS THE WALK, and that is specified rather than
 // defensive: "a container whose length moved under the loop stops
 // rather than reading past itself." It leaves through `h.break`'s own
 // label, so it lands after the closing brace rather than inside
 // whatever construct the body opened.
-//
 // THE BOUND IS RECOGNISED BY ITS SHAPE, never by its name. "A bound is
 // just which struct's shape do I need", so an impl satisfies `Range`
 // exactly when the struct it names declares `start` and `end` — the
 // same question `supplies_bounds` asks of a concrete range, asked of
 // the bound instead. Nothing here matches on the string "Range".
-//
 // AND `at` IS INLINED RATHER THAN CALLED. There is no call node in the
 // source to resolve — the loop wrote it — so the impl's body is run
 // directly with its parameters bound to C text this backend already
@@ -43,7 +38,7 @@ TyId, TyNamed, TyArray = sema.sema_ty
 Ctx = sema.sema_check
 self_ctx = sema.sema_member
 impl_bound_type = sema.sema_supply
-sym_local, sym_member, sym_gen, sym_variant = gen.gen_name
+sym_local, sym_member, sym_variant = gen.gen_name
 RES_PATH = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
@@ -58,9 +53,7 @@ no_fold = gen.gen_c.gen_c_fold
 array_of = gen.gen_c.gen_c_array
 impl_field = gen.gen_c.gen_c_impl
 
-// -----------------------------------------------------------------
 // a range that STORES its bounds
-// -----------------------------------------------------------------
 
 // Whether the range's own declaration STORES `start` and `end` rather
 // than supplying them through an impl. `Range(0, n)` does; a `Vec` does
@@ -99,15 +92,12 @@ struct_has_field = (s: Struct, name: str) bool {
     got
 }
 
-// -----------------------------------------------------------------
 // a range whose bounds an IMPL supplies
-//
 // The header's second reading, at the site. What the impl supplies is
 // COMPUTED FIELDS — `start` and `end` are expressions read in its own
 // scope with `self` bound to the range, not members to read off a
 // struct — plus `at`, the one thing the trait asks for: "walking is
 // at(start), at(start + 1), .. and a None ends the walk early".
-// -----------------------------------------------------------------
 
 RangeImpl* = {
     decl*: DeclId,      // the RECEIVER's declaration, whose parameters
@@ -242,13 +232,10 @@ add_if_bodied = (f: Function, out :: Vec<Function>) Res<(), AllocError> {
     f.body.match({ Ok(_) => out.add(f), None => Ok(()) })
 }
 
-// -----------------------------------------------------------------
 // what a range hands out
-//
 // One query, three callers — the loop's own type, the lowering, and
 // `gen_c_settle.zen`'s `find<R: Range<T>, T>` — because a `T` three
 // places disagree about is a C type mismatch nothing reports.
-// -----------------------------------------------------------------
 
 // The `Res<T>` a pass of this range produces: a `usize` that cannot
 // miss for a range walking its own index space, and whatever `at`
@@ -414,12 +401,10 @@ lower_impl_range = (
 }
 
 // THE SHAPE, AND WHY IT IS NOT `lower_bounded` WITH TWO READS SWAPPED.
-//
 // `start` and `end` are EXPRESSIONS in the impl's own scope, so each of
 // them may need statements of its own before it, which is why `self` is
 // bound to the range temporary once and both are delivered into a
 // declared `usize` rather than written into a C loop head.
-//
 // `at`'s `Res<T>` is the pass, and a tag that is not `Ok` leaves the
 // walk through the same `brk` label `h.break` uses — the header's
 // `None` from `at` ending the walk.
@@ -443,12 +428,9 @@ lower_impl_walk = (
     rng = be.walk_temp(one, rty, ctx).try();
 
     st = be.open_result(settled, out).try();
-    counter ::= be.alloc.String().try();
-    sym_gen(counter, "i", be.next_tmp()).try();
-    base ::= be.alloc.String().try();
-    sym_gen(base, "b", be.next_tmp()).try();
-    limit ::= be.alloc.String().try();
-    sym_gen(limit, "n", be.next_tmp()).try();
+    counter ::= be.fresh_name("i").try();
+    base    ::= be.fresh_name("b").try();
+    limit   ::= be.fresh_name("n").try();
     be.declare_usize(counter.view()).try();
     be.declare_usize(base.view()).try();
     be.declare_usize(limit.view()).try();
@@ -482,16 +464,12 @@ lower_impl_walk = (
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // walking a range whose bounds an impl supplies
-//
 // The emission, as against the recognition above. `gen_c_loop.zen`
 // calls these in the order a pass runs them.
-// -----------------------------------------------------------------
 // The impl's `self`, bound to the range temporary. An ordinary local
 // holding a copy: the walk reads the range and never writes it, so
 // there is nothing to write through and no address to take.
-//
 // BOUND AROUND THE IMPL'S OWN EXPRESSIONS AND NOTHING WIDER. The
 // receiver's name is very often `self`, and the loop is very often
 // written inside a method that has one — so a binding held across the
@@ -573,7 +551,6 @@ impl_ctx = (be :: CBackend, ri: RangeImpl, ret: TyId, self_ty: TyId) Ctx {
 }
 
 // ONE PASS: `at(i)`, and the tag that ends the walk.
-//
 // `value` is left holding the C text of the `Ok` payload, which is what
 // `run_body` binds the body's second parameter to. A range with no `at`
 // hands out its own index, and then the counter IS the payload.
@@ -606,8 +583,7 @@ run_at = (
     value   :: String
 )
          Res<(), AllocError> {
-    tmp ::= be.alloc.String().try();
-    sym_gen(tmp, "a", be.next_tmp()).try();
+    tmp  ::= be.fresh_name("a").try();
     decl ::= be.alloc.String().try();
     be.declarator(pass, tmp.view(), decl).try();
     be.fmt("{};\n", decl.view()).try();

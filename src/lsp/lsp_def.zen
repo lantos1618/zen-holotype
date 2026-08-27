@@ -8,6 +8,7 @@
 //
 //   a call site        -> `call_memo` (which declaration the call meant)
 //   a module-level name -> `defs_of` (what the name means here)
+//   an import binding   -> `defs_of` (the same visibility answer)
 //   a member after a dot -> `expr_memo` on the base, then `members_of`
 //   a written type     -> `type_memo`, then the `Named` type's decl
 //                         (`Res<T>` routes through `defs_of` instead —
@@ -35,11 +36,12 @@ Alloc, AllocError = std.mem
 Range = std.core
 scan, Source = std.lex
 Parser = std.parse
-Ast, ExprId, TypeId, Span, Pos, Access, Function, in_span, nowhere = std.ast
+Ast, ExprId, TypeId, Span, Pos, Access, Function, QualifiedName = std.ast
+in_span, nowhere = std.ast
 Checker = sema.sema_check
 check_all = sema.sema_decl
 TyId = sema.sema_ty
-Def, decl_at = sema.sema_def
+Def, decl_at, dotted = sema.sema_def
 def_type = sema.sema_type
 DeclId = sema.sema_id
 Found, members_of, first_found = sema.sema_member
@@ -134,7 +136,7 @@ definition_in* = (
 // `definition_in`'s second half.
 definition_with* = (
     env       : Env,
-    c         :: Checker,
+    c         : Checker,
     a         : Alloc,
     root      : str,
     uri       : str,
@@ -213,12 +215,53 @@ disk_text = (env: Env, a: Alloc, path: str) str {
 // table in `design_lsp.md` §2 lists the spans in. Each arm answers from
 // ONE source and a miss falls through to the next.
 
-sought = (c :: Checker, a: Alloc, file: str, p: Pos) Res<Defn, AllocError> {
-    told_at(c.tree, file, p).match({
-        Nothing    => no_defn(),
-        Sig(f)     => defn_of(f.name.span),
-        OfType(ta) => type_defn(c, a, ta.id, file),
-        OfValue(v) => value_defn(c, a, v.id, file, p),
+sought = (c : Checker, a: Alloc, file: str, p: Pos) Res<Defn, AllocError> {
+    module = import_module_defn(c, a, file, p).try();
+    module.found.match({
+        true  => Ok(module),
+        false => told_at(c.tree, file, p).match({
+            Nothing     => no_defn(),
+            Sig(f)      => defn_of(f.name.span),
+            OfType(ta)  => type_defn(c, a, ta.id, file),
+            OfValue(v)  => value_defn(c, a, v.id, file, p),
+            Imported(n) => global_defn(c, a, n.text, file),
+        }),
+    })
+}
+
+import_module_defn = (c : Checker, a: Alloc, file: str, p: Pos)
+                     Res<Defn, AllocError> {
+    found ::= no_defn().try();
+    module_index(c, file).match({
+        None     => (),
+        Ok(from) => c.tree.module_at(from).match({
+            None    => (),
+            Ok(src) => src.decls.loop((h, d) {
+                d.kind.match({
+                    Import(im) => in_span(im.module.span, file, p).then(() {
+                        found = module_defn(c, a, im.module).try();
+                    }),
+                    _          => (),
+                });
+            }),
+        }),
+    });
+    Ok(found)
+}
+
+module_defn = (c : Checker, a: Alloc, q: QualifiedName)
+              Res<Defn, AllocError> {
+    name = dotted(a, q).try();
+    c.world.index_of(name).match({
+        None     => no_defn(),
+        Ok(into) => c.tree.module_at(into).match({
+            None    => no_defn(),
+            Ok(dst) => defn_of(Span(
+                file: dst.span.file,
+                start: dst.span.start,
+                end: dst.span.start
+            )),
+        }),
     })
 }
 
@@ -229,7 +272,7 @@ sought = (c :: Checker, a: Alloc, file: str, p: Pos) Res<Defn, AllocError> {
 // elsewhere). Anything else — a primitive like `i32`, a poisoned name —
 // is `null`: a builtin has no declaration to jump to and an unresolved
 // name has none worth inventing.
-type_defn = (c :: Checker, a: Alloc, id: TypeId, file: str)
+type_defn = (c : Checker, a: Alloc, id: TypeId, file: str)
             Res<Defn, AllocError> {
     c.type_memo.get(id).match({
         None     => no_defn(),
@@ -241,7 +284,7 @@ type_defn = (c :: Checker, a: Alloc, id: TypeId, file: str)
     })
 }
 
-value_defn = (c :: Checker, a: Alloc, id: ExprId, file: str, p: Pos)
+value_defn = (c : Checker, a: Alloc, id: ExprId, file: str, p: Pos)
              Res<Defn, AllocError> {
     e = c.tree.expr_at(id);
     // `told_at` answers a BIND TARGET with the VALUE's node (the span is
@@ -263,7 +306,7 @@ value_defn = (c :: Checker, a: Alloc, id: ExprId, file: str, p: Pos)
 // declaration — asking `defs_of` again would re-run overload resolution
 // badly), then an ordinary module-level name. A name neither answers is
 // a local or a builtin: `null`.
-name_defn = (c :: Checker, a: Alloc, id: ExprId, text: str, file: str)
+name_defn = (c : Checker, a: Alloc, id: ExprId, text: str, file: str)
             Res<Defn, AllocError> {
     called_decl(c, id).match({
         Ok(did) => decl_defn(c, did),
@@ -273,7 +316,7 @@ name_defn = (c :: Checker, a: Alloc, id: ExprId, text: str, file: str)
 
 // A MODULE-LEVEL NAME, resolved by the one query that owns visibility —
 // own declarations, then starred imports hop by hop, then the prelude.
-global_defn = (c :: Checker, a: Alloc, text: str, file: str)
+global_defn = (c : Checker, a: Alloc, text: str, file: str)
               Res<Defn, AllocError> {
     module_index(c, file).match({
         None   => no_defn(),
@@ -293,7 +336,7 @@ global_defn = (c :: Checker, a: Alloc, text: str, file: str)
 // (`x.f(..)`) resolved its member already; a bare read asks
 // `members_of` about the base's memoized type.
 access_defn = (
-    c    :: Checker,
+    c    : Checker,
     a    : Alloc,
     id   : ExprId,
     ac   : Access,
@@ -309,7 +352,7 @@ access_defn = (
     })
 }
 
-member_defn = (c :: Checker, a: Alloc, ac: Access, file: str)
+member_defn = (c : Checker, a: Alloc, ac: Access, file: str)
               Res<Defn, AllocError> {
     c.expr_memo.get(ac.base).match({
         Ok(ty) => found_defn(c, a, ty, ac.name.text),
@@ -321,7 +364,7 @@ member_defn = (c :: Checker, a: Alloc, ac: Access, file: str)
 // `expr_memo` entry exists for it (`sema_member.base_of` records value
 // bases only). A variant's span comes off the enum's declaration; a
 // static member goes through `members_of` like any other.
-static_defn = (c :: Checker, a: Alloc, ac: Access, file: str)
+static_defn = (c : Checker, a: Alloc, ac: Access, file: str)
               Res<Defn, AllocError> {
     c.tree.expr_at(ac.base).kind.match({
         Name(n) => typed_base_defn(c, a, n.text, ac.name.text, file),
@@ -329,7 +372,7 @@ static_defn = (c :: Checker, a: Alloc, ac: Access, file: str)
     })
 }
 
-typed_base_defn = (c :: Checker, a: Alloc, base: str, name: str, file: str)
+typed_base_defn = (c : Checker, a: Alloc, base: str, name: str, file: str)
                   Res<Defn, AllocError> {
     module_index(c, file).match({
         None   => no_defn(),
@@ -344,7 +387,7 @@ typed_base_defn = (c :: Checker, a: Alloc, base: str, name: str, file: str)
     })
 }
 
-variant_or_member = (c :: Checker, a: Alloc, d: Def, name: str)
+variant_or_member = (c : Checker, a: Alloc, d: Def, name: str)
                     Res<Defn, AllocError> {
     variant_defn(c, d, name).match({
         Ok(span) => defn_of(span),
@@ -359,7 +402,7 @@ variant_or_member = (c :: Checker, a: Alloc, d: Def, name: str)
 // what a value of the type can BE but carries no spans, so the AST is
 // the source here. Not a second resolution rule: which NAME denotes the
 // type is still `defs_of`'s answer above.
-variant_defn = (c :: Checker, d: Def, name: str) Res<Span> {
+variant_defn = (c : Checker, d: Def, name: str) Res<Span> {
     decl_at(c.tree, d.id).match({
         None   => None,
         Ok(dd) => dd.kind.match({
@@ -383,7 +426,7 @@ variant_defn = (c :: Checker, d: Def, name: str) Res<Span> {
 // Every member of `ty` called `name`, first one wins — the set is what
 // resolution saw, and a hidden one is still where the jump goes (the
 // access site is where THAT mistake is reported, not here).
-found_defn = (c :: Checker, a: Alloc, ty: TyId, name: str)
+found_defn = (c : Checker, a: Alloc, ty: TyId, name: str)
              Res<Defn, AllocError> {
     found ::= a.Vec<Found>();
     c.members_of(ty, name, found).try();
@@ -396,7 +439,7 @@ found_defn = (c :: Checker, a: Alloc, ty: TyId, name: str)
 // THE CALL THIS NAME OR ACCESS WAS THE CALLEE OF, if any. `call_memo` is
 // keyed on the CALL and nothing links a child upward, so this is one
 // scan of the arena — the same fold `lsp_names.zen` makes for colour.
-called_decl = (c :: Checker, id: ExprId) Res<DeclId> {
+called_decl = (c : Checker, id: ExprId) Res<DeclId> {
     eid ::= ExprId(index: 0);
     hit ::= false;
     did ::= DeclId(module: 0, decl: 0);
@@ -411,7 +454,7 @@ called_decl = (c :: Checker, id: ExprId) Res<DeclId> {
 }
 
 // This expression, when it is a resolved call through `id`.
-callee_of = (c :: Checker, eid: ExprId, id: ExprId) Res<DeclId> {
+callee_of = (c : Checker, eid: ExprId, id: ExprId) Res<DeclId> {
     c.tree.expr_at(eid).kind.match({
         Call(k) => (k.callee.index == id.index).match({
             true  => c.call_memo.get(eid),
@@ -424,7 +467,7 @@ callee_of = (c :: Checker, eid: ExprId, id: ExprId) Res<DeclId> {
 // The declaration, pointed at its NAME rather than its whole span: an
 // editor underlines the identifier, and every kind that binds one has
 // it in the same place. Impls and imports bind no name of their own.
-decl_defn = (c :: Checker, id: DeclId) Res<Defn, AllocError> {
+decl_defn = (c : Checker, id: DeclId) Res<Defn, AllocError> {
     decl_at(c.tree, id).match({
         None  => no_defn(),
         Ok(d) => d.kind.match({
@@ -440,7 +483,7 @@ decl_defn = (c :: Checker, id: DeclId) Res<Defn, AllocError> {
 
 // Which module the cursor is in, as a `World` index — the arena scan
 // lives in `ast_named.zen` (`module_index_of`), shared with completion.
-module_index = (c :: Checker, file: str) Res<usize> {
+module_index = (c : Checker, file: str) Res<usize> {
     module_index_of(c.tree, file)
 }
 

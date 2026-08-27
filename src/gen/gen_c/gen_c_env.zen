@@ -2,7 +2,6 @@
 // The environment capability in C — lowering and floor in one file, the
 // shape `gen_c_stdin.zen` set, so the call site and the C it names
 // cannot drift apart.
-//
 // `Env.var` is bodiless in `std/env/env.zen`: the authority itself, and
 // its floor is `getenv`. WHY IT IS A CALL AND NOT A FIELD: the `Env`
 // handed to `main` is a C compound literal written by `gen_c_main.zen`
@@ -13,12 +12,10 @@
 // and the only allocator door is `env.mem.alloc()` INSIDE `main`;
 // `emit_main` runs after `emit_bodies`, so the backend cannot even ask
 // for the `Map<str, str>.set` instantiation the call would name.
-//
 // The bytes are BORROWED, process-lifetime, exactly like an `argv` row:
 // `getenv` hands back a pointer into the environment block, nothing is
 // copied and nothing is freed. That is what lets this capability have
 // no `Alloc` in its signature and therefore, by law 1, no memory.
-//
 // `getenv` needs a NUL and a `str` has none, so the name is copied into
 // a buffer sized FROM THE NAME (#814). It was a fixed 4096-byte buffer,
 // and a name at or past the cap returned the same zeroed `zg_str` the
@@ -33,7 +30,6 @@ AllocError = std.mem
 str, String = std.text
 TyId = sema.sema_ty
 Ctx = sema.sema_check
-sym_gen = gen.gen_name
 Emit = gen.gen_emit
 CBackend = gen.gen_c.gen_c_state
 declare_temp = gen.gen_c.gen_c_flow
@@ -41,16 +37,13 @@ comment = gen.gen_c.gen_c_runtime
 close_else, close_brace, path_args = gen.gen_c.gen_c_fs
 write_assign_ok, write_assign_none = gen.gen_c.gen_c_cap
 
-// -----------------------------------------------------------------
 // THE FLOOR: `getenv`, emitted only for a program that asks — an
 // uncalled `static` is a warning.
-//
 // ABSENCE IS A NULL `data`, not a second return value: a variable that
 // is set to the empty string is present, and `len == 0` alone cannot
 // tell the two apart. The `zg_str` this answers with is the same one
 // every other borrowed run in the program is, so the lowering has
 // nothing left to build.
-// -----------------------------------------------------------------
 
 emit_env* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.uses_env().match({
@@ -64,7 +57,9 @@ write_env = (out :: Emit) Res<(), AllocError> {
         out,
         "a borrowed str is not NUL-terminated and getenv wants a NUL"
     ).try();
-    out.say("zg_str zg_env_var(const unsigned char *p, size_t n) {").try();
+    out.say(
+        "static zg_str zg_env_var(const unsigned char *p, size_t n) {"
+    ).try();
     out.indent();
     comment(
         out,
@@ -91,13 +86,10 @@ write_env = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // THE LOWERING: `env.var("HOME")`
-//
 // The name is spilled into a temporary first, by the same `path_args`
 // the filesystem probes use: a `str` is a pointer and a count, both
 // read, so an argument that is a call would otherwise be made twice.
-// -----------------------------------------------------------------
 
 lower_env_var* = (
     be  :: CBackend,
@@ -110,10 +102,8 @@ lower_env_var* = (
     sty = be.check.types.prim("str").try();
     name ::= be.alloc.String().try();
     be.path_args(c, 0, ctx, name).try();
-    got ::= be.alloc.String().try();
-    sym_gen(got, "t", be.next_tmp()).try();
-    dst ::= be.alloc.String().try();
-    sym_gen(dst, "t", be.next_tmp()).try();
+    got ::= be.fresh_name("t").try();
+    dst ::= be.fresh_name("t").try();
     be.declare_temp(sty, got.view()).try();
     be.declare_temp(ret, dst.view()).try();
     be.write_getenv_call(got.view(), name.view()).try();

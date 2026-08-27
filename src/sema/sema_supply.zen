@@ -24,7 +24,7 @@
 // diagnostic there.
 
 Span = std.ast
-Decl, Struct, Impl, Member = std.ast
+Decl, Struct, Impl, Member, Field = std.ast
 Function = std.ast
 AllocError = std.mem
 Vec = std.collections
@@ -294,6 +294,30 @@ bound_members* = (c :: Checker, bound: TyId, out :: Vec<Member>)
         _        => Ok(()),
     }).try();
     Ok(());
+}
+
+// The i-th field a positional constructor argument supplies. Methods
+// and struct constants have no per-value storage and take no seat.
+storage_seat_name* = (c :: Checker, ty: TyId, i: usize)
+                     Res<str, AllocError> {
+    name    ::= "";
+    seen    ::= 0;
+    members ::= c.alloc.Vec<Member>();
+    c.bound_members(ty, members).try();
+    members.loop((h, m) {
+        storage_member(m).then(() {
+            (seen == i).then(() { name = m.name().text; });
+            seen = seen + 1;
+        });
+    });
+    Ok(name);
+}
+
+storage_member = (m: Member) bool {
+    m.kind.match({
+        Field(f) => f.type.match({ Ok(_) => true, None => false }),
+        _        => false,
+    })
 }
 
 bound_decl_members = (c :: Checker, n: TyNamed, out :: Vec<Member>)

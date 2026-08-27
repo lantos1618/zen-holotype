@@ -118,7 +118,9 @@ SemaFault* =
     | ImplMissingField(NameFault)      // an impl supplies every field, or it is not one
     | CtorMissingField(NameFault)      // a required field the construction never named
     | CtorNamesNoMember(TypeFault)     // an argument naming a member the type does not declare
+    | CtorSurplusArgument(TypeFault)   // a positional argument with no storage seat
     | CtorNamesConstant(TypeFault)     // an argument naming a constant, which is not storage
+    | DuplicateField(PairFault)        // a struct declares one storage name twice
     | OrphanImpl(ExportFault)          // only the target's own module is ever consulted
     | AmbiguousMember(PairFault)       // two impls, no bound in scope to choose
     | BoundNotSatisfied(TypeFault)     // no impl of the bound
@@ -159,8 +161,7 @@ SemaFault* =
     // THE PAYLOAD IS EMPTY AND STILL A `NameFault`: there is no second
     // name to contrast and nothing in the program to quote — the form
     // itself is what is refused — but a payload-less variant is
-    // invisible to `scripts/faults_reachable.py`, whose pattern reads a
-    // variant only where one follows. So the shape carries the check.
+    // checked structurally by `tests/gates/faults_reachable.zen`.
     | MetaNotImplemented(NameFault)    // `.name` folds (M3); every other form is still the wall
     | CountNotComptime(NameFault)      // an array's count folds, or it is refused
     | ComptimeBudget(NameFault)        // the evaluator's fuel ran out — the build fails, it never hangs
@@ -229,7 +230,9 @@ message* = (fault: SemaFault) str {
         ImplMissingField(_)       => "impl is missing field",
         CtorMissingField(_)       => "construction is missing a required field",
         CtorNamesNoMember(_)      => "construction names no member: every argument must name a field of the type, so a name it does not declare is not an argument to discard",
+        CtorSurplusArgument(_)    => "construction has a surplus positional argument",
         CtorNamesConstant(_)      => "construction names a constant: a construction names fields, and the constant keeps its one value per type",
+        DuplicateField(_)         => "duplicate field declaration: a struct has one storage slot per name",
         OrphanImpl(_)             => "an impl lives in the module that declares its target, so there are no orphan impls: one written anywhere else is never consulted",
         AmbiguousMember(_)        => "ambiguous: two impls supply this name and no bound in scope selects one",
         BoundNotSatisfied(_)      => "bound not satisfied: this type has no impl of the bound, so it has none of the fields the bound promises",
@@ -299,6 +302,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         ImplMissingField(f)       => write_missing(out, f),
         CtorMissingField(f)       => write_ctor_missing(out, f),
         CtorNamesNoMember(f)      => write_member(out, types, f),
+        CtorSurplusArgument(f)    => write_ctor_surplus(out, types, f),
         CtorNamesConstant(f)      => write_ctor_constant(out, types, f),
         OrphanImpl(f)             => write_orphan(out, f),
         Rebound(f)                => write_pair(out, f),
@@ -371,6 +375,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         LiteralOutOfRange(f)      => write_literal(out, types, f),
 
         DuplicateSignature(f)     => write_pair(out, f),
+        DuplicateField(f)         => write_pair(out, f),
         AmbiguousOverload(f)      => write_pair(out, f),
         AmbiguousMember(f)        => write_pair(out, f),
     }).try();
@@ -478,6 +483,13 @@ write_member* = (out :: String, types: Types, f: TypeFault)
     found ::= types.name_of(f.found).try();
     out.fmt(": no `{}` on `{}`", f.name, found.view()).try();
     Ok(());
+}
+
+write_ctor_surplus = (out :: String, types: Types, f: TypeFault)
+                      Res<(), AllocError> {
+    found ::= types.name_of(f.found).try();
+    out.fmt(": `{}` has no storage seat left", found.view()).try();
+    Ok(())
 }
 
 // THE METHOD AND ITS SIGNATURE, because the name is not the problem: the

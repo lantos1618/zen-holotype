@@ -28,11 +28,6 @@ zen/
 │   ├── package.json                 #       which here is the Zen compiler.
 │   └── src/parser.c                 #       generated; second generated file in the tree
 │
-├── tools/parse/                     # (0) what is LEFT of the python bootstrapper:
-│   ├── cst.py                       #     tree-sitter parse -> ast nodes, for the
-│   ├── ast.py                       #     lint gates only. its back half — modules,
-│   └── lex.py                       #     sema, gen_c, the cli — is deleted.
-│
 ├── seed/
 │   └── zen.c                        # (1) the committed generated c. THE artifact.
 │                                    #     regenerate, THEN commit. never the reverse.
@@ -130,7 +125,7 @@ zen/
 Three things about this tree that are decisions, not layout:
 
 - **`src/std/core/` is written before `src/std/lex/`.** The compiler is a Zen program; it needs `Vec`, `Map`, `String`, `Res`, and `Alloc` to exist before its first line. This is stage 0.6 below, and it is the piece most likely to be underestimated.
-- **`bootstrap/` and `src/` never shared code.** Two implementations of the same language, deliberately, with the fixpoint test as the referee — until `src` carried the whole corpus alone and the second one was deleted (below, "Retiring the bootstrapper"). `tools/parse/` is what stayed, and it compiles nothing.
+- **`bootstrap/` and `src/` never shared code.** The bootstrapper was deleted after self-hosting; its remaining Python parser was later deleted with the script cleanup.
 - **Two generated files, both with a gate.** `seed/zen.c` is proven fresh by the fixpoint; `grammar/src/parser.c` by `tree-sitter test`. If a third ever appears, ask what proves it fresh — an ungated generated file is a fork nobody is reading.
 
 File naming and the 500/800-line split rule are in `STYLE.md`. The short version, visible above: a folder's root file is its public surface and is nothing but starred re-exports; siblings repeat the folder as a prefix (`std/parse/parse_expr.zen`), so every filename is unique tree-wide and every editor tab says something.
@@ -149,7 +144,7 @@ File naming and the 500/800-line split rule are in `STYLE.md`. The short version
 
 **Goal:** a throwaway Python program that compiles one Zen program (the real compiler) to C. It is a developer dependency, never shipped, and it is deleted after stage 1 is self-sustaining.
 
-**Done, and deleted.** Everything below is the record of a stage that is over. Only `tools/parse/{cst,ast,lex}.py` survives, as the lint gates' parser. **Every `bootstrap/*.py` citation still standing in this tree resolves in git history** — `git show 4d05320a:bootstrap/gen_c.py` — and none of them can be re-verified by any gate, so read one as evidence about what a second implementation once did, never as a coordinate.
+**Done, and deleted.** Everything below records a completed stage. Old bootstrap coordinates resolve only through git history and are not live tooling.
 
 ### 0.1 The grammar
 
@@ -263,57 +258,19 @@ Two traps to expect here, both consequences of laws in `DESIGN.md`:
 
 ## Stage 1 — self-host
 
-**Goal:** the Zen compiler, written in Zen's seed subset, compiling itself.
+**Goal:** the Zen compiler compiles itself from the committed C seed.
 
-Layout, per `DESIGN.md`:
+`make build` compiles `seed/zen.c`, emits one C file per module, compiles those
+units in parallel, and replaces `./zen` only after the link succeeds. `make
+determinism` checks that repeated and permuted emission is byte-identical.
 
-```
-src/zen/zen.zen      // thin CLI: build / fmt / test / lsp
-src/zen/zen_build.zen // the build logic
-src/std/ast/ast.zen  // THE ast — @meta, DumpAst and gen_c all consume these nodes
-src/std/lex/lex.zen
-src/std/parse/parse.zen
-src/sema/sema.zen
-src/gen/gen.zen
-src/gen/gen_c/gen_c.zen
-```
+`make seed` regenerates and stages `seed/zen.c` in one target. Regenerate after
+source changes, never before them; a stale seed can still build a compiler and
+therefore needs the corpus, not only a byte comparison, to expose it.
 
-`src/std/ast/ast.zen` is the keystone. One AST with three consumers — the compiler, `@meta`, and `gen_c` — and `@meta` returning these exact node types is what makes stage 5's metaprogramming free rather than a parallel universe.
-
-Order: lexer → parser → sema → gen_c, each with its own tests, in one pass. Do not build a second frontend to "get started faster."
-
-**The gate, and it is the strongest one in this plan:**
-
-```
-bootstrap.py  src/*.zen  ->  stage1.c  ->  cc  ->  zen-1
-zen-1         src/*.zen  ->  stage2.c  ->  cc  ->  zen-2
-zen-2         src/*.zen  ->  stage3.c
-
-assert stage2.c == stage3.c        # byte-identical: the fixpoint
-```
-
-A compiler that reproduces its own output byte-for-byte is almost certainly correct about an enormous surface. This costs one script and catches more than any test suite you would write by hand.
-
-**Then: commit `stage2.c` as the seed.** Regenerate first, commit second — and make that impossible to get backwards by putting it in one target:
-
-```make
-seed:                    # regenerate THEN stage; never two separate commands
-	./zen build src/ -o seed/zen.c
-	git add seed/zen.c
-
-build:                   # what a newcomer runs. only needs a c compiler.
-	cc -O2 seed/zen.c -o zen
-	./zen build src/ -o zen-new && mv zen-new zen
-
-fixpoint:                # the gate
-	./scripts/fixpoint.sh
-```
-
-Commit-then-regenerate ships a seed one change stale, and only a full feature test catches it — never `cmp`. This is a mistake that gets made twice if the two steps are ever two commands.
-
-**Retiring the bootstrapper: done.** The instinct was to delete it the moment the fixpoint went green, and that would have been one stage too early — until stage 2's format gate was running and seed regeneration was routine, the Python implementation was the only thing that could rebuild the world if the seed went bad. Both are true now: `make fmt` checks the whole tree and `make seed` is one target. `tests/run.py --toolchain zen` carried the corpus at 528/528, so the toolchain switch stopped being a switch, and the back half went out of the tree with no job keeping it alive.
-
-**What that cost, stated plainly.** The chain no longer starts from a second implementation. `scripts/fixpoint.sh` roots at `seed/zen.c` instead, so a bug `src` and the seed share is now invisible to it, and if the seed ever goes bad the rebuild path is git history rather than a program in the tree. What is bought back is that every rule is written once. A second implementation that still builds is a second implementation that drifts — and this one had: it accepted a union match `src` rejects with a diagnostic, accepted `() == ()` with no `Eq`, and its stage-1 output miscompiled `src`'s own range check and healed at stage 2.
+The retired Python bootstrapper is deliberately absent. Git history is the
+recovery path if the committed seed becomes unusable; keeping a second frontend
+alive would duplicate every language rule and let the implementations drift.
 
 ---
 
@@ -397,10 +354,6 @@ Only after this does the compiler start using `@meta` on itself — and until th
 | fixpoint | `stage2.c != stage3.c` |
 | `zen fmt --check` | any file is unformatted |
 | `must-fail/` | anything that should be rejected compiles |
-| `allocs_op` / `bytes_op` budgets | **hard fail** — deterministic, so a regression is real. `make bench-allocs`, inside `make test` |
-| `ns_op`, build wall clock | sustained shift past a rolling median — reported, not flaky-fatal. `make bench`, outside it |
-
-Benches take a `Bencher` and are discovered by `build.zen` walking the parsed module tree, the same way tests are. Because all allocation goes through `Alloc`, alloc counting is free — that is the end state. Until `build.zen` exists, `tests/bench/drivers/` mirrors each bench body as a plain program and `scripts/bench.py` counts at the libc boundary instead, through `ld --wrap`; the budgets are ceilings there rather than exact counts, and `docs/TESTING.md` says what the difference costs.
 
 ---
 

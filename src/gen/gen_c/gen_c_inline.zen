@@ -1,6 +1,5 @@
 // src/gen/gen_c/gen_c_inline.zen
 // A callee that was handed a lambda, and the lambda when it is called.
-//
 // `loop_iter.zen` states the claim this file keeps: "a body is a
 // non-escaping stack closure, inlined at the call site, so there is no
 // closure record to box". `gen_c_loop.zen` keeps it for the six loop
@@ -8,13 +7,11 @@
 // else — `bool.then`, `find`, `Cursor.bump_while` — where the callee
 // DOES have a body and the lambda reaches it through an ordinary
 // function-typed parameter.
-//
 // SO A LAMBDA IS NEVER A VALUE HERE. Passing one INLINES THE CALLEE,
 // and calling the parameter it was bound to INLINES THE LAMBDA. There is
 // no function pointer, no closure record and no C spelling for a `()
 // bool` parameter — the same sentence as the `allocs_op: 0` budget
 // `tests/bench/bench_loop.zen` declares.
-//
 // A CLOSURE'S FREE NAMES MEAN WHAT THEY MEANT WHERE IT WAS WRITTEN, and
 // this is the half that is easy to get wrong. Inlining puts the body
 // inside the callee's frame, so `find`'s own `range.loop((h, value) {
@@ -22,23 +19,20 @@
 // rather than with an error. `Closure` carries the depth of BOTH scope
 // stacks at the point the lambda was written and `run_closure` rewinds
 // to them, which is what makes the capture hygienic.
-//
 // AND IT CARRIES THE CALLER'S `Ctx`, so a `.try()` inside a lambda body
 // returns from the function the lambda was WRITTEN in. That is what
 // `d.exported.then(() { out.add(d).try() })` means, and reading it any
 // other way would return the wrong error type from the wrong frame.
-//
 // WHAT IS REFUSED, BY NAME: a return type nothing settles — `then<T>`
 // reaches `T` only through the closure, which is `gen_c_settle.zen`'s
 // argument. Where the lambda's own body does not settle it, the call is
 // reported rather than emitted at a guess.
-//
 // WHAT A CALL EVALUATES TO IS `gen_c_settle.zen`'s SUBJECT, not this
 // one: a question about types, asked before anything is written and
 // again by `ty_of` for a match scrutinee. This is a question about
 // statements. The two meet at `inline_ret`.
 
-ExprId, BlockId, Lambda, Param, TypeId = std.ast
+ExprId, BlockId, Lambda, Param, TypeId, Paren = std.ast
 Function, Access, Call = std.ast
 AllocError = std.mem
 Vec = std.collections
@@ -56,7 +50,7 @@ LocalSlot, Closure = gen.gen_c.gen_c_frame
 unsupported, unresolved = gen.gen_c.gen_c_report
 has_body = gen.gen_c.gen_c_impl
 handle_depth = gen.gen_c.gen_c_handle
-inst_at, settled_inst, recv_inst = gen.gen_c.gen_c_mono
+inst_at, settled_inst, recv_inst, sub, sub_with = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams, enter_struct_tparams = gen.gen_c.gen_c_mono
 declarator, is_unit = gen.gen_c.gen_c_type
 expr = gen.gen_c.gen_c_expr
@@ -71,9 +65,15 @@ compose, settle_params, settled = gen.gen_c.gen_c_settle
 // would otherwise unfold forever.
 INLINE_DEPTH* : usize = 12
 
-// -----------------------------------------------------------------
 // recognising
-// -----------------------------------------------------------------
+
+spelled_lambda* = (be: CBackend, id: ExprId) Res<Lambda> {
+    be.tree.expr_at(id).kind.match({
+        Lambda(l) => Ok(l),
+        Paren(p)  => be.spelled_lambda(p.inner),
+        _         => None,
+    })
+}
 
 // A body to inline, and a lambda written at the call site to inline it
 // for.
@@ -90,7 +90,7 @@ takes_lambda* = (be: CBackend, c: Call) bool {
 }
 
 is_lambda* = (be: CBackend, id: ExprId) bool {
-    be.tree.expr_at(id).kind.match({ Lambda(_) => true, _ => false })
+    be.spelled_lambda(id).match({ Ok(_) => true, None => false })
 }
 
 // A function that takes a body is NEVER emitted: a `(v: T) bool`
@@ -123,9 +123,7 @@ keep_closure = (s: LocalSlot) Res<LocalSlot> {
     (s.closure > 0).match({ true => Ok(s), false => None })
 }
 
-// -----------------------------------------------------------------
 // inlining a callee: a free function, or one reached through ufcs
-// -----------------------------------------------------------------
 
 inline_call* = (
     be   :: CBackend,
@@ -176,13 +174,10 @@ inline_free = (
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // inlining a member
-//
 // A method is an ordinary function whose first parameter is the
 // receiver, so this is the same shape with `@Self` bound and the TYPE's
 // parameters in scope rather than the function's own.
-// -----------------------------------------------------------------
 
 inline_method* = (
     be   :: CBackend,
@@ -234,9 +229,7 @@ inline_member = (
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // the body, in the caller's frame
-// -----------------------------------------------------------------
 
 // The CALLED body -- a function lowered into the frame of the call that
 // invoked it. gen_c_loop.zen's run_body runs a LOOP body's lambda
@@ -409,9 +402,9 @@ bind_one = (
     chome : usize,
     ctx   : Ctx
 ) Res<(), AllocError> {
-    be.tree.expr_at(value).kind.match({
-        Lambda(l) => be.bind_closure(p, l, pty, home, chome, ctx),
-        _         => be.bind_value(p, value, pty, ctx),
+    be.spelled_lambda(value).match({
+        Ok(l) => be.bind_closure(value, p, l, pty, home, chome, ctx),
+        None  => be.bind_value(p, value, pty, ctx),
     })
 }
 
@@ -419,6 +412,7 @@ bind_one = (
 // a body, and the frame it was written in.
 bind_closure = (
     be    :: CBackend,
+    id    : ExprId,
     p     : Param,
     l     : Lambda,
     pty   : TyId,
@@ -427,7 +421,9 @@ bind_closure = (
     ctx   : Ctx
 ) Res<(), AllocError> {
     ptys ::= be.alloc.Vec<TyId>();
-    ret = be.fn_parts(pty, ptys).try();
+    ret      = be.fn_parts(pty, ptys).try();
+    raw      = be.inst_at(id).try();
+    captured = be.compose(raw, be.inst).try();
     be.declare_closure(
         p.name.text,
         Closure(
@@ -437,7 +433,7 @@ bind_closure = (
             home: home,
             check_home: chome,
             floor: be.floor,
-            inst: be.inst,
+            inst: captured,
             ctx: ctx
         )
     )
@@ -478,13 +474,10 @@ bind_value = (be :: CBackend, p: Param, value: ExprId, pty: TyId, ctx: Ctx)
     be.fmt("{} = {};\n", line.view(), text.view())
 }
 
-// -----------------------------------------------------------------
 // calling a closure
-//
 // The other half: a name bound to a lambda, called. The arguments are
 // written WHERE THE CALL IS, so they are lowered before the frame moves
 // and both scope stacks rewind (the hygiene the header argues for).
-// -----------------------------------------------------------------
 
 lower_closure_call* = (
     be   :: CBackend,
@@ -513,23 +506,27 @@ run_closure = (
 ) Res<(), AllocError> {
     (be.depth > INLINE_DEPTH).match({
         true  => be.unsupported(id, "an inlining that does not terminate", out),
-        false => be.run_lambda(c, cl, ctx, want, out),
+        false => be.run_lambda(id, c, cl, ctx, want, out),
     })
 }
 
 run_lambda = (
     be   :: CBackend,
+    id   : ExprId,
     c    : Call,
     cl   : Closure,
     ctx  : Ctx,
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
+    inst  = be.inst_at(id).try();
+    full  = be.compose(cl.inst, inst).try();
+    ready = be.instantiate_closure(cl, full).try();
     argt ::= be.alloc.Vec<String>();
     hnd  ::= be.alloc.Vec<usize>();
-    be.lower_args(c, cl, ctx, argt, hnd).try();
+    be.lower_args(c, ready, ctx, argt, hnd).try();
 
-    ret = be.closure_ret(cl, want).try();
+    ret = be.closure_ret(ready, want).try();
     result ::= be.alloc.String().try();
     keeps = wants_value(be, ret);
     keeps.match({
@@ -538,22 +535,28 @@ run_lambda = (
     }).try();
 
     saved ::= be.alloc.Vec<LocalSlot>();
-    be.detach(cl.home, saved).try();
+    be.detach(ready.home, saved).try();
     csaved ::= be.alloc.Vec<Binding>();
-    be.check.detach_locals(cl.check_home, csaved).try();
+    be.check.detach_locals(ready.check_home, csaved).try();
     held = be.inst;
-    be.enter_inst(cl.inst);
+    be.enter_inst(ready.inst);
 
     lmark = be.mark();
     cmark = be.check.mark();
-    be.bind_lambda_params(cl, argt, hnd).try();
+    be.bind_lambda_params(ready, argt, hnd).try();
     // BACK TO THE FRAME THE LAMBDA WAS WRITTEN IN, floor included: a
     // lambda's `x = ..` on a name its own writer had already bound is
     // that writer's store, exactly as it reads on the page.
     floor = be.floor;
-    be.enter_frame(cl.floor);
+    be.enter_frame(ready.floor);
     be.enter_call();
-    block(be, cl.lam.body, cl.ctx, ret, dest_of(keeps, result.view())).try();
+    block(
+        be,
+        ready.lam.body,
+        ready.ctx,
+        ret,
+        dest_of(keeps, result.view())
+    ).try();
     be.leave_call();
     be.enter_frame(floor);
     be.release(lmark).try();
@@ -563,6 +566,26 @@ run_lambda = (
     be.check.reattach_locals(csaved).try();
     be.reattach(saved).try();
     be.write_result(keeps, result.view(), out)
+}
+
+instantiate_closure = (be :: CBackend, cl: Closure, inst: Inst)
+                      Res<Closure, AllocError> {
+    ptys ::= be.alloc.Vec<TyId>();
+    cl.ptys.loop((h, ty) {
+        done = be.sub(be.sub_with(ty, inst).try()).try();
+        ptys.add(done).try();
+    });
+    ret = be.sub(be.sub_with(cl.ret, inst).try()).try();
+    Ok(Closure(
+        lam: cl.lam,
+        ptys: ptys,
+        ret: ret,
+        home: cl.home,
+        check_home: cl.check_home,
+        floor: cl.floor,
+        inst: inst,
+        ctx: cl.ctx,
+    ))
 }
 
 // The closure's declared return type, or the expectation at the call

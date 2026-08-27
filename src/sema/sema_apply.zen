@@ -25,7 +25,7 @@
 // A CONSTRUCTION IS APPLIED TOO, and for the same reason: a nominal type
 // at some arguments, never a bare head. `construct` gives the two forms.
 
-ExprId, Call, Arg = std.ast
+Expr, ExprId, Call, Arg = std.ast
 Decl, Enum, Struct, TypeId, Impl = std.ast
 AllocError = std.mem
 Vec = std.collections
@@ -42,6 +42,7 @@ ty_at = sema.sema_cand
 impl_bound_type = sema.sema_supply
 type_of = sema.sema_type
 type_from_ast = sema.sema_denote
+check_literal = sema.sema_trap
 array_range_shape = sema.sema_bound
 case_payload, Case, cases_of, find_case = sema.sema_case
 check_ctor_fields = sema.sema_hoist
@@ -202,36 +203,113 @@ variant_call_type* = (
     name : str,
     ctx  : Ctx
 ) Res<TyId, AllocError> {
-    inst  ::= c.alloc.Inst();
+    inst ::= c.alloc.Inst();
+    own = c.applied_at_own_vars(ty).try();
+    c.types.at(own).match({
+        Named(n) => {
+            args ::= c.alloc.Vec<TyId>();
+            c.written_ctor_args(call.targs, ctx, args).try();
+            c.zip(n.args, args, inst).try();
+            c.types.at(ty).match({
+                Named(r) => c.zip(n.args, r.args, inst),
+                _        => Ok(()),
+            })
+        },
+        _        => Ok(()),
+    }).try();
     cases ::= c.alloc.Vec<Case>();
     c.cases_of(ty, cases).try();
     (find_case(cases, name).match({
         None   => Ok(()),
         Ok(cs) => c.payload_says(call, ty, cs, ctx, inst),
     })).try();
+    c.variant_has_type(call, ty).match({
+        true  => c.variant_literal(call, ty, name, inst),
+        false => Ok(()),
+    }).try();
     (inst.len() == 0).match({
         true  => Ok(ty),
-        false => c.subst(c.applied_at_own_vars(ty).try(), inst),
+        false => c.subst(own, inst),
     })
 }
 
-// The bare head re-applied at its declaration's own parameters: `Opt`
-// becomes `Opt<T>`, the shape a substitution can walk. An application
-// that reached here already carries its arguments; a declaration read
-// back through `decl_at` supplies them. A non-nominal answer (poison)
-// falls out as itself.
+variant_has_type = (c: Checker, call: Call, ty: TyId) bool {
+    (call.targs.len > 0) || c.types.at(ty).match({
+        Named(n) => n.args.len > 0,
+        _        => false,
+    })
+}
+
+variant_literal = (
+    c    :: Checker,
+    call : Call,
+    ty   : TyId,
+    name : str,
+    inst : Inst
+) Res<(), AllocError> {
+    call.args.get(0).match({
+        None    => Ok(()),
+        Ok(arg) => {
+            payload = c.case_payload(ty, name).try();
+            want    = c.subst(payload, inst).try();
+            c.check_literal(arg.value, want)
+        },
+    })
+}
+
+// A written binding supplies the same enum application that an explicit
+// call argument would. Retype only a variant call of that declaration.
+settle_variant_at* = (
+    c    :: Checker,
+    id   : ExprId,
+    got  : TyId,
+    want : TyId,
+    ctx  : Ctx
+) Res<TyId, AllocError> {
+    same = c.types.at(got).match({
+        Named(g) => c.types.at(want).match({
+            Named(w) => g.decl.eq(w.decl),
+            _        => false,
+        }),
+        _        => false,
+    });
+    (same == false).match({
+        true  => Ok(got),
+        false => c.tree.expr_at(id).kind.match({
+            Call(call) => (call.targs.len > 0).match({
+                true  => Ok(got),
+                false => c.tree.expr_at(call.callee).kind.match({
+                    Access(a) => {
+                        cases ::= c.alloc.Vec<Case>();
+                        c.cases_of(want, cases).try();
+                        find_case(cases, a.name.text).match({
+                            None  => Ok(got),
+                            Ok(_) => {
+                                settled = c.variant_call_type(
+                                    call,
+                                    want,
+                                    a.name.text,
+                                    ctx
+                                ).try();
+                                c.expr_memo.set(id, settled).try();
+                                Ok(settled)
+                            },
+                        })
+                    },
+                    _         => Ok(got),
+                }),
+            }),
+            _          => Ok(got),
+        }),
+    })
+}
+
+// Re-apply the declaration at its own variables so every explicit or
+// inferred argument binds the same `T` before substitution.
 applied_at_own_vars = (c :: Checker, ty: TyId) Res<TyId, AllocError> {
     c.types.at(ty).match({
-        Named(n) => c.rebuilt_at_decl_vars(ty, n),
+        Named(n) => c.named_with_decl_vars(ty, n),
         _        => Ok(ty),
-    })
-}
-
-rebuilt_at_decl_vars = (c :: Checker, ty: TyId, n: TyNamed)
-                       Res<TyId, AllocError> {
-    (n.args.len > 0).match({
-        true  => Ok(ty),
-        false => c.named_with_decl_vars(ty, n),
     })
 }
 

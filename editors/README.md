@@ -133,8 +133,8 @@ and refuses everything else:**
   things — line and block comments, strings, and character literals —
   and nothing else. Keywords, numbers, types, functions and parameters
   are deliberately absent; the server colours those and it knows what
-  they mean. `make editors` fails if that file stops resolving, because
-  VS Code ignores a broken `grammars` entry silently.
+  they mean. Keep that path aligned with `package.json`; VS Code ignores a
+  broken `grammars` entry silently.
 
   The extension used to turn `editor.bracketPairColorization.enabled`
   and `editor.guides.bracketPairs` off for `[zen]`, and that is gone:
@@ -429,7 +429,7 @@ The one subsystem that is token-aware only if asked is **auto-closing**.
 true` and nothing but a `notIn` turns it off, so all five pairs in
 `language-configuration.json` carry `"notIn": ["string", "comment"]` —
 the three brackets used to carry none, and typing `(` inside a string
-closed it for you. `make editors` fails on a pair that loses one.
+closed it for you.
 
 `colorizedBracketPairs` is deliberately **not** declared. Left out, VS
 Code takes `brackets` minus a `<` … `>` pair

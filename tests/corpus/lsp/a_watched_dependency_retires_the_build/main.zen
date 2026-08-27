@@ -1,0 +1,67 @@
+// A cached build includes modules read from disk. A watched-file event must
+// retire it even when every open buffer is byte-identical.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, frame_at = lsp.lsp_frame
+write_text = std.json
+
+DOC*: str = "Point = app.shape\n\norigin = () Point { Point(x: 0) }\n"
+URI*: str = "file://src/app/app.zen"
+ROOT_URI*: str = "file://."
+BROKEN*: str = "Point* = {\n"
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    s ::= a.Server(env);
+
+    first ::= a.String().try();
+    initialize(a, first).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        first
+    ).try();
+    open_doc(a, first).try();
+    ignored ::= a.String().try();
+    serve(s, first.view(), ignored).try();
+
+    env.fs.write("src/app/shape.zen", BROKEN).match({
+        Err(_) => println("write failed"),
+        Ok(_)  => (),
+    });
+    changed ::= a.String().try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"workspace/didChangeWatchedFiles\",\"params\":{\"changes\":[{\"uri\":\"file://src/app/shape.zen\",\"type\":2}]}}",
+        changed
+    ).try();
+    out ::= a.String().try();
+    serve(s, changed.view(), out).try();
+    frame_at(out.view(), 0).match({
+        Err(_)  => println("no diagnostic"),
+        Ok(one) => println("{}", one.body),
+    });
+    Ok(0);
+}
+
+initialize = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":"
+    ).try();
+    write_text(ROOT_URI, body).try();
+    body.add_bytes("}}").try();
+    write_frame(body.view(), into)
+}
+
+open_doc = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(URI, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(DOC, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}

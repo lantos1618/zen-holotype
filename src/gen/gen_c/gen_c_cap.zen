@@ -1,19 +1,16 @@
 // src/gen/gen_c/gen_c_cap.zen
 // The members whose BODY IS THE BACKEND.
-//
 // `Mem.alloc`, `Mem.page`, `Mem.release` and the four `Fs` declares are
 // written in std with a signature and no body — env.zen says why: they
 // are the authority itself. "A capability's floor is the target
 // language's", and for C that floor is `malloc`, `free`, `stat`,
 // `fopen`. `gen_c_print.zen` says the same about `Console.println`;
 // this file writes the memory three, `gen_c_fs.zen` the other four.
-//
 // NOT A SPECIAL CASE BOLTED ONTO MEMBER DISPATCH — the SAME rule
 // `println` obeys, one level lower: a bodiless member is either a
 // capability whose floor this file writes, or a refusal
 // `gen_c_member.zen` reports by name. Nothing else can be true of it —
 // a symbol for a bodiless declaration is a symbol nothing defines.
-//
 // WHY THE BACKEND MAY WRITE AN ArenaState'S FIELDS. `mem_arena.zen`
 // keeps `ArenaState` unexported ("what an arena is made of is not part
 // of what an arena is"), yet this file writes three of its fields
@@ -38,7 +35,7 @@ enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 ctype, field_type, request_type, declared_ret = gen.gen_c.gen_c_type
 decl_ctx, decl_inst = gen.gen_c.gen_c_type
 expr = gen.gen_c.gen_c_expr
-declare_temp, enum_path, payload_type, is_variant = gen.gen_c.gen_c_flow
+temp, enum_path, payload_type, is_variant = gen.gen_c.gen_c_flow
 lower_probe, lower_write, lower_read, lower_remove, lower_lock, lower_unlock = gen.gen_c.gen_c_fs
 close_else, close_brace, open_null_test = gen.gen_c.gen_c_fs
 lower_stdin_read = gen.gen_c.gen_c_stdin
@@ -48,183 +45,123 @@ is_defer, lower_defer = gen.gen_c.gen_c_scope
 lower_clock_read = gen.gen_c.gen_c_clock
 lower_sleep = gen.gen_c.gen_c_threads
 
-// -----------------------------------------------------------------
-// which members these are
-// -----------------------------------------------------------------
+// Classification is closed and travels with MethodKind into lowering,
+// so receiver ownership and an overloaded name such as `read` are
+// decided once rather than reconstructed by a second boolean chain.
+CapabilityKind* = NotCapability
+    | MemAlloc
+    | MemPage
+    | MemRelease
+    | FsWrite
+    | FsRead
+    | FsLock
+    | FsRemove
+    | FsProbe
+    | LockUnlock
+    | EnvVar
+    | ClockRead
+    | ThreadsSleep
+    | ConsolePrint
+    | StdinRead
+    | ScopeDefer
 
-// A capability is recognised by the RECEIVER'S TYPE and the member's
-// name together, not by "has no body" alone — that's `gen_c_member.zen`'s
-// question, and answering it again here would make any bodiless member
-// anywhere silently become one of these.
-// `Clock` IS IN THE CHAIN, second from the top: a bodiless member whose
-// receiver's owner is `Clock` is the backend's to lower, and anything
-// else falls through to the `Fs` question below. Leaving it out here --
-// as a first cut did -- makes its twin below DEAD
-// CODE: every `env.clock.*` site fell through to `FatSlot`, the vtable
-// slot of an `Env` field the entry never populates, and the first read
-// jumped through NULL. The program compiled, so only running it showed
-// the fault -- the exact reason the corpus runs its programs.
-is_capability* = (be :: CBackend, rty: TyId, name: str) bool {
-    owner_of(be, rty).eq("Mem").match({
-        true  => mem_verb(name),
-        false => be.is_clock_capability(rty, name),
+capability_kind* = (be :: CBackend, rty: TyId, name: str) CapabilityKind {
+    owner                      = owner_of(be, rty);
+    found: Res<CapabilityKind> = loop<CapabilityKind>((h) {
+        (owner.eq("Mem") && name.eq("alloc")).then(() { h.break(MemAlloc) });
+        (owner.eq("Mem") && name.eq("page")).then(() { h.break(MemPage) });
+        (owner.eq("Mem") && name.eq("release")).then(() { h.break(MemRelease) });
+        (owner.eq("Fs") && name.eq("write")).then(() { h.break(FsWrite) });
+        (owner.eq("Fs") && name.eq("read")).then(() { h.break(FsRead) });
+        (owner.eq("Fs") && name.eq("lock")).then(() { h.break(FsLock) });
+        (owner.eq("Fs") && name.eq("remove")).then(() { h.break(FsRemove) });
+        (owner.eq("Fs") && name.is_in(["exists", "is_dir"])).then(() {
+            h.break(FsProbe)
+        });
+        (owner.eq("Lock") && name.eq("unlock")).then(() { h.break(LockUnlock) });
+        (owner.eq("Env") && name.eq("var")).then(() { h.break(EnvVar) });
+        (owner.eq("Clock") && name.is_in(["since_start", "unix"])).then(() {
+            h.break(ClockRead)
+        });
+        (owner.eq("Threads") && name.eq("sleep")).then(() {
+            h.break(ThreadsSleep)
+        });
+        (owner.eq("Console") && is_console_print(name)).then(() {
+            h.break(ConsolePrint)
+        });
+        (owner.eq("Stdin") && name.eq("read")).then(() { h.break(StdinRead) });
+        be.is_defer(rty, name).then(() { h.break(ScopeDefer) });
+        h.break(NotCapability);
+    });
+    found.match({
+        Ok(kind) => kind,
+        None     => NotCapability,
     })
-}
-
-is_fs_capability = (be :: CBackend, rty: TyId, name: str) bool {
-    owner_of(be, rty).eq("Fs").match({
-        true  => fs_verb(name),
-        false => be.is_lock_unlock(rty, name),
-    })
-}
-
-// `Lock.unlock` IS THE LOCK'S OWN RELEASE, not a new capability root:
-// the fd belongs to the Lock, and so does the one door that closes it.
-// The receiver type is the whole of the test, exactly as `Stdin.read`
-// is told from `Fs.read` — a name two types answer to names neither.
-is_lock_unlock = (be :: CBackend, rty: TyId, name: str) bool {
-    owner_of(be, rty).eq("Lock").match({
-        true  => name.eq("unlock"),
-        false => be.is_env_capability(rty, name),
-    })
-}
-
-// `Env.var`, and the NAME is half the test: `Env` declares `args` and
-// `spawn` bodiless too, and those are stage-5 signatures with no floor
-// — claiming the owner alone would turn a "not implemented yet" into a
-// call to C that does not exist.
-is_env_var = (be :: CBackend, rty: TyId, name: str) bool {
-    owner_of(be, rty).eq("Env") && name.eq("var")
-}
-
-// AND THE CHAIN CONTINUES: `Console.println`, `Stdin.read` and
-// `Scope.defer` are capabilities too, so a receiver that is not `Env`
-// must still be offered to them. Answering `is_env_var` alone here
-// dropped all three out of `MethodKind.Capability`.
-is_env_capability = (be :: CBackend, rty: TyId, name: str) bool {
-    be.is_env_var(rty, name) || be.is_console_capability(rty, name)
-}
-
-// `Console.println` AND `Console.errorln` ARE OF THESE: floor is
-// `fwrite`, bodiless for the same reason `Fs.read` is, and
-// `gen_c_print.zen` writes them — one stream each. Reaches this file
-// only when the receiver was WRITTEN (`env.out.println(..)`) — the
-// sugar names no function and is recognised one level up. Without this
-// it fell through to `lower_fat_call`: `args: ...` has no C spelling,
-// so the slot's parameter came out as `ctype`'s `int` fallback and
-// `cc` rejected every argument handed to it.
-is_clock_capability = (be :: CBackend, rty: TyId, name: str) bool {
-    owner_of(be, rty).eq("Clock").match({
-        true  => clock_verb(name),
-        false => be.is_threads_capability(rty, name),
-    })
-}
-
-// `Threads.sleep` IS ONE MORE LINK, the same test one receiver down,
-// and `Fs` STAYS BETWEEN Threads and Env: a receiver that is neither
-// Clock nor Threads nor Console/Stdin/Scope must still reach the file
-// questions before `Env.var`. Dropping that Fs link -- as a first cut
-// did -- dropped every `env.fs.*` site out of the chain entirely.
-// Without the Threads link itself, `env.threads.sleep(10)` fell through
-// to the fat branch and emitted a vtable call on a record no lowering
-// constructs -- a NULL slot at run time.
-is_threads_capability = (be :: CBackend, rty: TyId, name: str) bool {
-    owner_of(be, rty).eq("Threads").match({
-        true  => threads_verb(name),
-        false => be.is_fs_capability(rty, name),
-    })
-}
-
-// `Console.println` IS ONE OF THESE: floor is `fwrite`, bodiless for
-// the same reason `Fs.read` is, and `gen_c_print.zen` writes it. Reaches
-// this file only when the receiver was WRITTEN (`env.out.println(..)`)
-// — the sugar names no function and is recognised one level up.
-// Without this it fell through to `lower_fat_call`: `args: ...` has no
-// C spelling, so the slot's parameter came out as `ctype`'s `int`
-// fallback and `cc` rejected every argument handed to it.
-//
-// `Scope.defer` IS THE LAST LINK, NOT A PEER of the ones above — a
-// capability by the same test, but its receiver is a value the program
-// made rather than one `Env` handed it, so owner alone can't recognise
-// it and `is_defer` asks its own question.
-is_console_capability = (be :: CBackend, rty: TyId, name: str) bool {
-    (owner_of(be, rty).eq("Console") && is_console_print(name))
-        || be.is_stdin_read(rty, name)
-        || be.is_defer(rty, name)
-}
-
-// `Stdin.read`, and the owner is the whole of the test: `Fs` declares a
-// `read` too, and the two are different lowerings over different floors.
-// Asking the name alone would send `env.in.read(..)` into the one that
-// wants a path.
-is_stdin_read = (be :: CBackend, rty: TyId, name: str) bool {
-    owner_of(be, rty).eq("Stdin") && name.eq("read")
 }
 
 owner_of = (be :: CBackend, rty: TyId) str {
     be.check.types.at(rty).match({
-        Named(n) => n.name,
+        Named(n) => capability_owner(be, n),
         _        => "",
     })
 }
 
-mem_verb = (name: str) bool {
-    name.is_in(["alloc", "page", "release"])
+capability_owner = (be :: CBackend, n: TyNamed) str {
+    be.check.world.table_at(n.decl.module.to_usize()).match({
+        None  => "",
+        Ok(t) => (
+            (n.name.eq("Mem") && t.name.eq("std.mem.mem_arena"))
+            || (n.name.is_in(["Fs", "Lock", "Env", "Clock", "Threads", "Console", "Stdin"]) && t.name.eq("std.env.env"))
+        ).match({ true => n.name, false => "" }),
+    })
 }
 
-// `read` is in the set so that it reaches `gen_c_fs.lower_read`, which
-// allocates its buffer through the `Alloc` it was handed, rather than
-// `gen_c_member.zen`'s refusal for a member with no body. `remove` is
-// there for the same reason: its lowering lives in `gen_c_fs` too.
-// `lock` joins them at its own floor: an exclusive-create is a
-// filesystem question, and the lock it answers belongs to `Fs`.
-fs_verb = (name: str) bool {
-    name.is_in(["exists", "is_dir", "write", "read", "remove", "lock"])
-}
-
-clock_verb = (name: str) bool {
-    name.is_in(["since_start", "unix"])
-}
-
-threads_verb = (name: str) bool {
-    name.eq("sleep")
-}
-
-// -----------------------------------------------------------------
 // the entry point
-// -----------------------------------------------------------------
 
 // `Scope.defer` takes the short path because its whole lowering is
 // about the CLOSURE it was handed — the declared types the four below
 // need say nothing about that. `scope.zen` declares it `= sig` with no
 // body: "the compiler supplies the block".
 lower_capability* = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    mi  : usize,
-    f   : Function,
-    ctx : Ctx,
-    out :: String
+    be   :: CBackend,
+    kind : CapabilityKind,
+    id   : ExprId,
+    c    : Call,
+    a    : Access,
+    rty  : TyId,
+    mi   : usize,
+    f    : Function,
+    ctx  : Ctx,
+    out  :: String
 ) Res<(), AllocError> {
-    be.is_defer(rty, a.name.text).match({
-        true  => be.lower_defer(id, c, a, ctx, out),
-        false => be.lower_env_capability(id, c, a, rty, mi, f, ctx, out),
+    kind.match({
+        ScopeDefer    => be.lower_defer(id, c, a, ctx, out),
+        NotCapability => be.unsupported(id, "an unclassified capability", out),
+        _             => be.lower_typed_capability(
+            kind,
+            id,
+            c,
+            a,
+            rty,
+            mi,
+            f,
+            ctx,
+            out
+        ),
     })
 }
 
-lower_env_capability = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    mi  : usize,
-    f   : Function,
-    ctx : Ctx,
-    out :: String
+lower_typed_capability = (
+    be   :: CBackend,
+    kind : CapabilityKind,
+    id   : ExprId,
+    c    : Call,
+    a    : Access,
+    rty  : TyId,
+    mi   : usize,
+    f    : Function,
+    ctx  : Ctx,
+    out  :: String
 ) Res<(), AllocError> {
     ret = be.cap_ret(rty, mi, f).try();
     be.request_type(ret).try();
@@ -233,7 +170,7 @@ lower_env_capability = (
     // at its own type would hand the buffer's owner an arena where the
     // two-word handle belongs. Law 7: the declaration decides.
     aty = be.cap_param(rty, mi, f).try();
-    verb(be, id, c, a, rty, ret, aty, ctx, out)
+    be.lower_capability_kind(kind, id, c, a, rty, ret, aty, ctx, out)
 }
 
 cap_param = (be :: CBackend, rty: TyId, mi: usize, f: Function)
@@ -245,245 +182,38 @@ cap_param = (be :: CBackend, rty: TyId, mi: usize, f: Function)
     })
 }
 
-// `Stdin.read` IS TESTED BEFORE THE NAME CHAIN and not inside it: the
-// chain below asks names only, and `read` is a name two capabilities
-// answer to. `Lock.unlock` takes the same seat beside it — the chain
-// would fall off its end on `unlock` and answer a stat — so the
-// RECEIVER'S OWNER decides here, and only then does a name get read.
-verb = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    ret : TyId,
-    aty : TyId,
-    ctx : Ctx,
-    out :: String
+lower_capability_kind = (
+    be   :: CBackend,
+    kind : CapabilityKind,
+    id   : ExprId,
+    c    : Call,
+    a    : Access,
+    rty  : TyId,
+    ret  : TyId,
+    aty  : TyId,
+    ctx  : Ctx,
+    out  :: String
 ) Res<(), AllocError> {
-    be.is_stdin_read(rty, a.name.text).match({
-        true  => be.lower_stdin_read(id, c, ret, aty, ctx, out),
-        false => be.lock_verb(id, c, a, rty, ret, aty, ctx, out),
-    })
-}
-
-// `Lock.unlock` IS THE LOCK'S OWN RELEASE, tested by owner before any
-// name is read, for the reason `is_stdin_read` states above it. A Lock
-// has exactly one verb; everything else falls through to the chains.
-lock_verb = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    ret : TyId,
-    aty : TyId,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError> {
-    owner_of(be, rty).eq("Lock").match({
-        true  => be.lower_unlock(id, c, a, rty, ret, ctx, out),
-        false => be.env_verb(id, c, a, rty, ret, aty, ctx, out),
-    })
-}
-
-// `Env.var` IS TESTED BY OWNER AND NAME TOGETHER, beside `Stdin.read`
-// and for the same reason: the chain below asks names only, and `var`
-// on anything else is not this.
-env_verb = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    ret : TyId,
-    aty : TyId,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError> {
-    be.is_env_var(rty, a.name.text).match({
-        true  => be.lower_env_var(c, ret, ctx, out),
-        false => be.clock_verb(id, c, a, rty, ret, aty, ctx, out),
-    })
-}
-
-// `Clock`'s two members take no argument and answer with a value the
-// floor builds — the shortest chain there is. `is_clock_capability` has
-// already answered for the receiver's type; this asks only which of the
-// two authorities was named.
-clock_verb = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    ret : TyId,
-    aty : TyId,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError> {
-    owner_of(be, rty).eq("Clock").match({
-        true  => be.lower_clock_read(c, a.name.text, ret, ctx, out),
-        false => be.threads_step(id, c, a, rty, ret, aty, ctx, out),
-    })
-}
-
-// `Threads.sleep` takes one argument and answers unit — the clock's
-// shape with nothing to rebuild.
-threads_step = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    ret : TyId,
-    aty : TyId,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError> {
-    owner_of(be, rty).eq("Threads").match({
-        true  => be.lower_sleep(c, ret, ctx, out),
-        false => be.console_verb(id, c, a, rty, ret, aty, ctx, out),
-    })
-}
-
-console_verb = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    ret : TyId,
-    aty : TyId,
-    ctx : Ctx,
-    out :: String
-)
-               Res<(), AllocError> {
-    is_console_print(a.name.text).match({
-        true  => lower_console_print(be, c, a.name.text, ret, ctx, out),
-        false => be.verb_1(id, c, a, rty, ret, aty, ctx, out),
-    })
-}
-
-verb_1 = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    ret : TyId,
-    aty : TyId,
-    ctx : Ctx,
-    out :: String
-)
-         Res<(), AllocError> {
-    a.name.text.eq("alloc").match({
-        true  => be.lower_alloc(id, a, rty, ret, ctx, out),
-        false => verb_2(be, id, c, a, rty, ret, aty, ctx, out),
-    })
-}
-
-verb_2 = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    ret : TyId,
-    aty : TyId,
-    ctx : Ctx,
-    out :: String
-)
-         Res<(), AllocError> {
-    a.name.text.eq("page").match({
-        true  => be.lower_page(id, c, ret, ctx, out),
-        false => verb_3(be, id, c, a, rty, ret, aty, ctx, out),
-    })
-}
-
-verb_3 = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    ret : TyId,
-    aty : TyId,
-    ctx : Ctx,
-    out :: String
-)
-         Res<(), AllocError> {
-    a.name.text.eq("release").match({
-        true  => be.lower_release(c, ctx, out),
-        false => verb_4(be, id, c, a, rty, ret, aty, ctx, out),
-    })
-}
-
-verb_4 = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    ret : TyId,
-    aty : TyId,
-    ctx : Ctx,
-    out :: String
-)
-         Res<(), AllocError> {
-    a.name.text.eq("write").match({
-        true  => be.lower_write(id, c, ret, ctx, out),
-        false => verb_5(be, id, c, a, ret, aty, ctx, out),
-    })
-}
-
-verb_5 = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    ret : TyId,
-    aty : TyId,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError> {
-    a.name.text.eq("read").match({
-        true  => be.lower_read(id, c, ret, aty, ctx, out),
-        false => verb_6(be, id, c, a, ret, ctx, out),
-    })
-}
-
-// `lock` ANSWERS BEFORE THE PROBE FALLTHROUGH, and the fallthrough is
-// the reason this link exists: the chain ends in `lower_probe`, which
-// answers every remaining NAME as a stat question. Without this link
-// `env.fs.lock(p)` lowered as a probe — compiled clean, answered wrong.
-verb_6 = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    ret : TyId,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError> {
-    a.name.text.eq("lock").match({
-        true  => be.lower_lock(id, c, ret, ctx, out),
-        false => verb_7(be, id, c, a, ret, ctx, out),
-    })
-}
-
-verb_7 = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    ret : TyId,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError> {
-    a.name.text.eq("remove").match({
-        true  => be.lower_remove(id, c, ret, ctx, out),
-        false => be.lower_probe(c, a.name.text, ctx, out),
+    kind.match({
+        MemAlloc     => be.lower_alloc(id, a, rty, ret, ctx, out),
+        MemPage      => be.lower_page(id, c, ret, ctx, out),
+        MemRelease   => be.lower_release(c, ctx, out),
+        FsWrite      => be.lower_write(id, c, ret, ctx, out),
+        FsRead       => be.lower_read(id, c, ret, aty, ctx, out),
+        FsLock       => be.lower_lock(id, c, ret, ctx, out),
+        FsRemove     => be.lower_remove(id, c, ret, ctx, out),
+        FsProbe      => be.lower_probe(c, a.name.text, ctx, out),
+        LockUnlock   => be.lower_unlock(id, c, a, rty, ret, ctx, out),
+        EnvVar       => be.lower_env_var(c, ret, ctx, out),
+        ClockRead    => be.lower_clock_read(c, a.name.text, ret, ctx, out),
+        ThreadsSleep => be.lower_sleep(c, ret, ctx, out),
+        ConsolePrint => lower_console_print(be, c, a.name.text, ret, ctx, out),
+        StdinRead    => be.lower_stdin_read(id, c, ret, aty, ctx, out),
+        _            => be.unsupported(
+            id,
+            "an unlowerable capability kind",
+            out
+        ),
     })
 }
 
@@ -498,14 +228,11 @@ cap_ret = (be :: CBackend, rty: TyId, mi: usize, f: Function)
     sub(be, declared)
 }
 
-// -----------------------------------------------------------------
 // `env.mem.alloc()` — where an arena comes from
-//
 // An `ArenaState` on the C heap, an `Arena` holding its address. State
 // is one `malloc`, never freed: `Arena.drop` releases the PAGES, and
 // the state is the handle every copy of the arena shares — freeing it
 // would invalidate a value that copies freely by design.
-// -----------------------------------------------------------------
 
 lower_alloc = (
     be  :: CBackend,
@@ -593,14 +320,11 @@ write_arrow_set = (be :: CBackend, tmp: str, name: str, value: str)
     be.fmt("{tmp}->{} = {value};\n", sym.view())
 }
 
-// -----------------------------------------------------------------
 // `mem.page(size, prev)` — where a page comes from
-//
 // One run of `sizeof(Page) + size` bytes, with the `Page` header
 // written into its own first bytes. The header costs no second
 // allocation, which is what lets an arena describe a page without
 // owning memory it has not been given yet.
-// -----------------------------------------------------------------
 
 lower_page = (
     be  :: CBackend,
@@ -652,15 +376,11 @@ write_page = (
     be.arg_text(c, 0, usize_ty, ctx, size).try();
     prev ::= be.alloc.String().try();
     be.prev_text(c, ctx, prev).try();
-    szt ::= be.alloc.String().try();
-    sym_gen(szt, "t", be.next_tmp()).try();
+    szt = be.temp(usize_ty, "t").try();
     raw ::= be.alloc.String().try();
     sym_gen(raw, "t", be.next_tmp()).try();
-    dst ::= be.alloc.String().try();
-    sym_gen(dst, "t", be.next_tmp()).try();
-    be.declare_temp(usize_ty, szt.view()).try();
     be.fmt("unsigned char *{};\n", raw.view()).try();
-    be.declare_temp(ret, dst.view()).try();
+    dst = be.temp(ret, "t").try();
     be.set_line(szt.view(), size.view()).try();
     be.write_page_malloc(raw.view(), cell, szt.view()).try();
     be.open_null_test(raw.view()).try();
@@ -732,9 +452,7 @@ prev_text = (be :: CBackend, c: Call, ctx: Ctx, out :: String)
     })
 }
 
-// -----------------------------------------------------------------
 // the values these lowerings assign
-// -----------------------------------------------------------------
 
 // `None` — the absence half of a `Res<T>`, which has no payload to
 // write and no reason to name. `Err` is the other enum's word and
@@ -811,9 +529,7 @@ write_res_head = (be :: CBackend, ret: TyId, variant: str, out :: String)
     out.sym_variant(RES_PATH, variant)
 }
 
-// -----------------------------------------------------------------
 // reading the shapes these lowerings write
-// -----------------------------------------------------------------
 
 // The declared type of a STORAGE field, read at the type's own
 // arguments — `Vec<u8>`'s `data` is a `Ptr<u8>` and not a `Ptr<T>` —

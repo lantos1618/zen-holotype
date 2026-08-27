@@ -51,6 +51,7 @@ find_case = sema.sema_case
 type_of, lambda_type = sema.sema_type
 join = sema.sema_join
 const_def = sema.sema_const
+push_tparams, module_name = sema.sema_inst
 
 // A pattern, normalised: the three shapes the algorithm knows.
 //
@@ -974,15 +975,26 @@ arm_body_type = (c :: Checker, mt: Match, i: usize, ctx: Ctx)
 arm_value_type = (c :: Checker, id: ExprId, ctx: Ctx)
                  Res<TyId, AllocError> {
     c.tree.expr_at(id).kind.match({
-        Lambda(l) => c.arm_closure_type(id, l),
+        Lambda(l) => c.arm_closure_type(id, l, ctx),
+        Paren(p)  => c.arm_paren_type(id, p.inner, ctx),
         _         => c.type_of(id, ctx),
     })
 }
 
-arm_closure_type = (c :: Checker, id: ExprId, l: Lambda)
+arm_paren_type = (c :: Checker, id: ExprId, inner: ExprId, ctx: Ctx)
+                 Res<TyId, AllocError> {
+    got = c.arm_value_type(inner, ctx).try();
+    c.expr_memo.set(id, got).try();
+    Ok(got)
+}
+
+arm_closure_type = (c :: Checker, id: ExprId, l: Lambda, ctx: Ctx)
                    Res<TyId, AllocError> {
+    tmark = c.tvar_mark();
+    c.push_tparams(l.tparams, module_name(c, ctx.module)).try();
     got = c.lambda_type(l).try();
     c.expr_memo.set(id, got).try();
+    c.release_tvars(tmark).try();
     Ok(got);
 }
 

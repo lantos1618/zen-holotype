@@ -572,7 +572,10 @@ References (a reverse index) and locals with spans. Formatting was priced here a
 
 ~~Semantic tokens with RESOLUTION — the lexical form is L2 and done; what is L4 is telling a type from a function from a parameter, which no lexer can~~ — **the first of the three LANDED** (§2's colour section and table row): `type`, `function` and `parameter` joined the legend, the answers come off the diagnostics' build, and a file with errors keeps its lexical colours. What remains here is signature help and rename.
 
-**Gate for rename, and it is the only interesting one:** a rename applied to a copy of `src/` must leave the tree **compiling and byte-identical at the fixpoint after the inverse rename**. That is `make fixpoint` used as a rename oracle, it costs almost nothing because the script exists (`scripts/fixpoint.sh`), and it is the only test that can catch the two hazards in §2 — a UFCS call site that never named the function, and a variant name that changed what an unrelated declaration means.
+**Gate for rename:** apply it to a copy of `src/`, apply the inverse, then run
+the build and determinism gate. The emitted bytes must be unchanged. This
+catches the two hazards in §2: a UFCS call site that never named the function,
+and a variant name that changed what an unrelated declaration means.
 
 ---
 

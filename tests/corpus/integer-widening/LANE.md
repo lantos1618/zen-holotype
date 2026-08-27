@@ -5,7 +5,6 @@ unsigned_high_bits_zero_extend/main.zen — the same swap in the other direction
 literal_widens_by_position_variable_does_not/main.zen — deleting `is_literal_ty`'s guard in `assignable` (sema_check.zen) lets any variable of the same family fill any integer slot; `b: i8 = -5; w: i64 = b;` then compiles and C accepts it silently.
 overload_picked_by_receiver_width/main.zen — resolving `.to_i32()` by name alone instead of by receiver width (drop the receiver from sema_call's overload key) makes `a.to_i64() * 3` on an i8 holding -100 compute from 156 and print 468.
 widened_value_computes_at_target_width/main.zen — writing the operand of a conversion at the target's width instead of the declared parameter's (`write_convert`, gen_c_call.zen "the operand takes the DECLARED parameter's type") re-types -100 before the cast; the multiply rows also break if conversion is hoisted past arithmetic (u32 wrap prints 410065408 / 3410065408 instead of 12000000000).
-wide_literal_settles_in_every_position/main.zen — folding wide literals to i32 before consulting their position (settled_arg_ty / check_literal path) wraps every value mod 2^32; the false arm row additionally catches typing match arms against the FIRST arm's width instead of the position's (-5000000000 reads as 705032704 or negative-garbage depending on fold order).
 widened_value_crosses_closure_and_accumulates/main.zen — materialising loop variables at element width inside the closure body, or widening the accumulator only after .loop returns, sums [200,250,5] as 199 (mod 256); the usize equality row catches a signed intermediate on u32->usize (eq prints 0).
 
 COMPILER BUGS FOUND (probes under /tmp/zw/, not encoded as tests):
@@ -40,4 +39,4 @@ COMPILER BUGS FOUND (probes under /tmp/zw/, not encoded as tests):
    says nothing poisons expected-file generation. Watch for it if a corpus
    test ever fails with an empty diff.
 
-TESTS: 7
+TESTS: 6

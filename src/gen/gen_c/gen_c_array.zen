@@ -1,21 +1,17 @@
 // src/gen/gen_c/gen_c_array.zen
 // What a FIXED ARRAY is in C: its layout, its two literal forms, its
 // bounds-checked index, and the walk that makes it a Range.
-//
 // ONE FILE, ONE SUBJECT: the layout decides the member name, the
 // literals write through it, the index reads through it, the walk reads
 // through it once per pass. Splitting by caller would put one C
 // spelling in four files with four chances to drift.
-//
 // A `[T, N]` IS A STRUCT AROUND A C ARRAY, not a bare `T[N]`: C arrays
 // don't assign, pass by value, or return, but a Zen fixed array does all
 // three ("lives on the stack, no alloc") — wrapping gives it C's own
 // value semantics.
-//
 // THE COUNT COMES FROM THE TYPE, NEVER THE EXPRESSION — `TyArray.count`,
 // interned, so the bounds check needs no length stored beside the
 // bytes, and a `Res`-carried array has the length that was written.
-//
 // A FIXED ARRAY SATISFIES `Range` INTRINSICALLY (`std/core/range.zen`:
 // "`[T, N]` is a type constructor, not a name, so there is no `[T,
 // N].impl(..)` to write"). Start is 0, end is the comptime count, `at`
@@ -30,7 +26,7 @@ TyId, TyArray = sema.sema_ty
 Ctx = sema.sema_check
 write_usize = sema.sema_diag
 Emit = gen.gen_emit
-sym_gen, GEN = gen.gen_name
+GEN = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 Shape = gen.gen_c.gen_c_shape
@@ -54,12 +50,9 @@ array_of* = (be :: CBackend, id: TyId) Res<TyArray> {
     })
 }
 
-// -----------------------------------------------------------------
 // the layout
-// -----------------------------------------------------------------
 
 // `struct zg_a4_bi32 { int32_t zg_elems[4]; };`
-//
 // A COUNT OF ZERO STILL TAKES ONE ELEMENT: C99 6.7.5.2 forbids a
 // zero-length array member, and `[T, 0]` is reachable — written, or an
 // empty literal, and no longer from a count that failed to fold
@@ -88,14 +81,11 @@ storage_count = (a: TyArray) usize {
     (a.count == 0).match({ true => 1, false => a.count })
 }
 
-// -----------------------------------------------------------------
 // the two literal forms
-//
 // `[0, 1, 2]` and `[i32, 4](2, 3, 5, 7)` are one C expression: a
 // compound literal holding the initialiser for the single member.
 // They differ only in where the element type comes from, so they meet
 // as soon as that is answered.
-// -----------------------------------------------------------------
 
 lower_array_lit* = (
     be   :: CBackend,
@@ -138,7 +128,6 @@ lower_fixed_array* = (
 
 // `((struct zg_a4_bi32){ { 2, 3, 5, 7 } })` — inner braces are the
 // member, outer ones the struct.
-//
 // A literal whose type isn't an array is refused with a position rather
 // than emitted at a guess: `[0, 1, 2]` at an unknown element type would
 // compile and hold the wrong number of bytes.
@@ -193,7 +182,6 @@ write_compound = (
 // touched at all unless some element runs. A whole literal standing in
 // a position that holds IT (`two([t(), t()], t())`) is the caller's
 // `value_held` at work, one level up.
-//
 // The question is asked of the LITERAL, not through `be.holds`: a
 // literal has no receiver and no callee record to ask with. The arity
 // question and the something-runs question are asked ONCE for the
@@ -240,13 +228,10 @@ write_elem_list = (
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // the index
-// -----------------------------------------------------------------
 
 // `buf[i]` on a fixed array is BOUNDS-CHECKED AND TRAPS, against the
 // type's count.
-//
 // TWO HELPERS, the index's own type picks one. A signed index needs a
 // negativity test too — an unsigned comparison alone lets `-1` wrap into
 // a huge index that passes, reading one element past the end with no
@@ -303,15 +288,12 @@ helper_of = (be :: CBackend, ity: TyId) str {
     })
 }
 
-// -----------------------------------------------------------------
 // the walk
-//
 // `lower_bounded` in `gen_c_loop.zen` is the same shape with two reads
 // swapped: a concrete `Range` takes bounds off `start`/`end`, an
 // array's are 0 and a type-known constant. What it can't share is the
 // value handed to the body — an element, not the counter — an array's
 // intrinsic `at`.
-// -----------------------------------------------------------------
 
 lower_array_walk* = (
     be   :: CBackend,
@@ -330,8 +312,7 @@ lower_array_walk* = (
     rng = be.walk_temp(one, rty, ctx).try();
 
     st = be.open_result(settled, out).try();
-    counter ::= be.alloc.String().try();
-    sym_gen(counter, "i", be.next_tmp()).try();
+    counter ::= be.fresh_name("i").try();
     be.declare_usize(counter.view()).try();
     be.fmt("{} = 0;\n", counter.view()).try();
 

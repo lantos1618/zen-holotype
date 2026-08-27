@@ -1,7 +1,6 @@
 // src/gen/gen_c/gen_c_clock.zen
 // The clock capability in C — lowering and floor in one file, so the
 // call site and the C it names cannot drift apart.
-//
 // `Clock`'s two members are bodiless in `std/env/env.zen`: the authority
 // itself, reached only as `env.clock`, and their floor is
 // `clock_gettime`. That floor is POSIX and not C99 — unlike the stdin
@@ -10,7 +9,6 @@
 // and `_POSIX_C_SOURCE` is defined BEFORE `<time.h>`: a late definition
 // after any standard header has included `<time.h>` leaves
 // `clock_gettime` unprototyped, which strict C rejects.
-//
 // NO FAILURE MODE, AND SO NO ORDINALS. `Fs`'s floor answers by ordinal
 // because a path can miss; a clock read on Linux cannot fail in a way a
 // caller acts on, which is why the Zen signature answers a bare
@@ -28,22 +26,17 @@ CBackend = gen.gen_c.gen_c_state
 ctype = gen.gen_c.gen_c_type
 comment = gen.gen_c.gen_c_runtime
 
-// -----------------------------------------------------------------
 // THE FLOOR: `clock_gettime`, emitted only for a program that reads one
 // clock — an uncalled `static` is a warning. One helper per authority:
-//
 //   since_start -> CLOCK_MONOTONIC, for measuring. A span since an
 //   unspecified epoch, never compared across processes.
-//
 //   unix        -> CLOCK_REALTIME, the wall clock, separately, because
 //   the two are different authorities and conflating them is how a leap
 //   second breaks a timer.
-//
 // Both answer the same shape — whole seconds into a u64 run, nanoseconds
 // into another — and the caller adds them at its own width. The seconds
 // multiply out through u64 arithmetic, where `unix`'s 1e9 * seconds
 // fits with room to spare; there is no overflow path to report.
-// -----------------------------------------------------------------
 emit_clock* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.uses_clock().match({
         false => Ok(()),
@@ -69,14 +62,19 @@ write_clock = (be :: CBackend, out :: Emit) Res<(), AllocError> {
         out,
         "the clock floor is POSIX, not C99 - hence the macro above"
     ).try();
-    // features.h IS RE-READ, guard off: the __USE_* answers were already
-    // computed from the old _POSIX_C_SOURCE when the banner's includes
-    // pulled it in first, and a redefinition alone changes nothing.
-    // Dropping the guard makes glibc recompute them; <time.h> then
-    // declares clock_gettime on its second read. Verified against
-    // `-std=c11 -Wall -Werror` with and without each line.
+    // GLIBC ONLY RE-READS: the __USE_* answers were computed from the
+    // old _POSIX_C_SOURCE when the banner's includes pulled features.h
+    // in first, and a redefinition alone changes nothing; dropping the
+    // include guard makes glibc recompute them so <time.h> declares
+    // clock_gettime on its second read. Elsewhere there is no
+    // features.h and plain _POSIX_C_SOURCE + <time.h> is the whole
+    // recipe. __GLIBC__ is already defined here on glibc — features.h
+    // ran during the banner. Verified against `-std=c11 -Wall -Werror`
+    // with and without each line.
+    out.say("#if defined(__GLIBC__)").try();
     out.say("#undef _FEATURES_H").try();
     out.say("#include <features.h>").try();
+    out.say("#endif").try();
     out.say("#include <time.h>").try();
     out.line().try();
     be.write_read(out, "zg_clock_monotonic_ns", "CLOCK_MONOTONIC").try();
@@ -102,19 +100,15 @@ write_read = (be :: CBackend, out :: Emit, fn: str, which: str)
     Ok(());
 }
 
-// -----------------------------------------------------------------
 // THE LOWERING: `env.clock.since_start()` / `env.clock.unix()`
-//
 // THE RECEIVER IS NOT LOWERED, exactly as `env.out.println` never lowers
 // the Env it resolved through: `env.clock` is a field read of a record
 // whose slots this path does not call, so evaluating it would emit a
 // value nothing reads.
-//
 // The value is built AS A COMPOUND LITERAL, not spilled into a
 // temporary: the call stands wherever it was written, and an argument
 // stays a pure C expression — the property `zg_print_str` buys printing
 // and `lower_probe` buys `exists`.
-// -----------------------------------------------------------------
 lower_clock_read* = (
     be   :: CBackend,
     c    : Call,

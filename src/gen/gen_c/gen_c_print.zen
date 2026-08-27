@@ -1,7 +1,6 @@
 // src/gen/gen_c/gen_c_print.zen
 // The console writes: the sugar `println`/`print`, and the bound
 // `env.out.println`/`env.out.errorln`.
-//
 // DESIGN.md bends exactly one law here and says so out loud:
 // "`println(...)` is sugar for `<the Env in scope>.out.println(...)`,
 // resolved BY TYPE, not by the name of the binding." So the sugar names
@@ -10,12 +9,10 @@
 // same reason `Fs.read` is: there is nothing underneath to write it in.
 // A capability's floor is the target language's, and for C that floor is
 // `fwrite` and `fprintf`.
-//
 // SO THE SUGAR BOTTOMS OUT IN WRITES, which is the answer
 // `bootstrap/gen_c.py` reached and the one the corpus already agrees
 // with: `{}` on an integer is decimal with no separators, and `println`
 // appends exactly one newline.
-//
 // THE CONSOLE HAS TWO MEMBERS, ONE STREAM EACH (env.zen): stdout for
 // the program's answer, stderr for the program talking about itself.
 // They share everything this file does — the format walk, the argument
@@ -24,7 +21,6 @@
 // The families are parallel on purpose, and every place that picks
 // between them picks with `pair`, so the two names sit together and a
 // missing stderr twin is visible at a glance.
-//
 // THE `Env`-IN-SCOPE CLAUSE IS NOT ENFORCED HERE, and that is a refusal
 // rather than an oversight. "No Env in scope is a compile error" cannot
 // be applied by this file without rejecting the corpus that pins its
@@ -35,7 +31,6 @@
 // RESOLUTION rule and belongs in `src/sema/`, the only place that could
 // say which `Env` a nested frame is entitled to. A backend raising it
 // would be a second, worse copy of a rule sema has not written.
-//
 // NOTHING HERE ALLOCATES ON THE EMITTED SIDE. `toString` takes a `Sink`
 // precisely so printing a value needs no buffer, and a `str` prints
 // through `zg_print_str`, which takes the fat value itself — no
@@ -104,7 +99,6 @@ lower_print* = (be :: CBackend, c: Call, name: str, ctx: Ctx, out :: String)
 
 // `env.out.println(..)` / `env.out.errorln(..)` — THE SAME FLOOR,
 // REACHED THROUGH THE RECORD INSTEAD OF THROUGH THE SUGAR.
-//
 // The two spellings name ONE call — the header's DESIGN.md quote — and
 // must bottom out in one place. Writing the bound form as a call
 // through `Console`'s slot is not a second implementation of it, it is
@@ -112,12 +106,10 @@ lower_print* = (be :: CBackend, c: Call, name: str, ctx: Ctx, out :: String)
 // back to `int`, and `cc` rejects the `zg_str` handed to it. A variadic
 // parameter cannot be lowered as a parameter, so it is expanded here,
 // where the argument types are still known, for both spellings.
-//
 // AND IT ANSWERS `Ok`. The sugar's value is unit and this one's is the
 // declared `Res<(), IoError>`, because a program may write `.try()` on
 // it. `zg_print_bytes` has no failure to report, so `Ok` is the honest
 // answer — a tag and nothing else, since a `()` payload is no storage.
-//
 // THE RECEIVER IS NOT LOWERED, exactly as the sugar never lowers the
 // `Env` it resolved through: `env.out` is a field read of a record whose
 // slots this path does not call, so evaluating it would emit a value
@@ -227,9 +219,7 @@ write_value_at = (
     })
 }
 
-// -----------------------------------------------------------------
 // the format
-//
 // The literal's RAW slice is walked, never a decoded copy: Zen's escape
 // set is `\n \t \r \0 \\ \' \"` and every one of those is a C escape
 // with the same meaning, so a piece travels into the emitted C unchanged
@@ -237,12 +227,10 @@ write_value_at = (
 // `lower_str_literal` makes, for the same reason — and it is why a `\\`
 // is stepped over two bytes at a time here: a backslash that escapes a
 // brace must not open a hole.
-//
 // A DOUBLED BRACE IS THE ONE PLACE A CHUNK IS NOT THE RAW SLICE, and it
 // still is: `{{` ends the run ON THE FIRST BRACE and resumes past the
 // second, so the emitted C carries one `{` because the slice handed to
 // it holds one. No decoded copy, no second escape table.
-// -----------------------------------------------------------------
 
 write_format = (
     be     :: CBackend,
@@ -341,16 +329,13 @@ write_named = (
     })
 }
 
-// -----------------------------------------------------------------
 // one position in a format string, classified
-//
 // FOUR THINGS CAN BE AT A `{` and ONE function decides which, so that
 // `println` and every sink door cannot drift apart on the answer. The
 // arithmetic is here too: `keep` is where the run BEFORE this position
 // ends and `next` is where the walk resumes. They differ only for a
 // doubled brace, whose run ends inside the pair — the one case that was
 // easy to get wrong once per walk.
-// -----------------------------------------------------------------
 
 FmtWhat* = Byte           // an ordinary byte: the literal run goes on
          | Hole           // `{}`, filled by the next argument
@@ -463,20 +448,16 @@ HOLE_WITHOUT_ARGUMENT* : str = "a format hole with no argument left"
 // surplus direction of the same law.
 ARGUMENT_WITHOUT_HOLE* : str = "an argument with no format hole left"
 
-// -----------------------------------------------------------------
 // a fault at the HOLE'S own position
-//
 // Not at the format string's, which is where every other backend fault
 // about a format lands — and for a hole that is not good enough: a
 // diagnostic pointing at the opening quote of a forty-byte format leaves
 // the reader to count bytes.
-//
 // A STRING LITERAL CANNOT SPAN SOURCE LINES — a raw newline inside one is
 // `LexFault.UnterminatedString` — so a byte offset into the raw slice IS
 // a column offset, exactly, and the line never moves. The raw slice
 // counts the opening quote as byte 0 and `span.start.col` is that quote's
 // column, so the two indexes already agree.
-// -----------------------------------------------------------------
 
 report_in_format* = (
     be    :: CBackend,
@@ -562,13 +543,10 @@ decoded_bytes* = (piece: str) usize {
     n
 }
 
-// -----------------------------------------------------------------
 // one value
-//
 // The write a `{}` becomes is chosen by the ARGUMENT'S TYPE and by
 // nothing else: DESIGN.md's `{}` carries no format spec, so there is
 // nothing else to read.
-// -----------------------------------------------------------------
 
 write_value = (
     be     :: CBackend,
@@ -592,10 +570,15 @@ write_typed = (
     text   : str,
     stream : str
 ) Res<(), AllocError> {
-    fn = printer(prim, stream);
-    fn.is_empty().match({
-        true  => write_display(be, arg, ty, text, stream),
-        false => write_write(be, fn, cast_of(prim), text),
+    prim.eq("()").match({
+        true  => write_chunk(be, "()", stream),
+        false => {
+            fn = printer(prim, stream);
+            fn.is_empty().match({
+                true  => write_display(be, arg, ty, text, stream),
+                false => write_write(be, fn, cast_of(prim), text),
+            })
+        },
     })
 }
 

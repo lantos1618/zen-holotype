@@ -2,26 +2,20 @@
 
 How to write Zen, and how to write about Zen. `DESIGN.md` says what the language is; this says what good code in it looks like.
 
-Most of these are one rule with a test attached. A convention you cannot test is a preference, and preferences lose arguments.
+The grammar, formatter, compiler tests, and line-cap gate enforce the
+mechanical rules. The remaining conventions are review guidance.
 
 ---
 
 ## What checks what
 
-That claim was false for a year: `make cap` stood behind one rule of the nine and nothing read the rest, so this document could drift from the tree and nothing said so. Here is the whole map, and it is the only place the map is written.
-
 | rule | gate |
 |---|---|
-| a prefix names its own folder; a folder has its root file; a file name means something; std depends only on std; an impl goes with its type; no `get_*`/`do_*`; no `// helpers` section; a run of `||` on one subject is a membership test; abbreviations are words; a free function on the module's principal type is called on it | `make style` — `scripts/style.py` |
-| 500-line note, 800-line fail | `make cap` — `tools/gates/line_cap.zen` |
-| no free function shadowing a method | `make ufcs` — `scripts/ufcs_collisions.py` |
-| a commit touching `src/` outside its stated scope; a mechanical sweep that lands with company | `make scope` — `scripts/scope.py` |
+| 500-line note, 800-line fail | `make cap` — `tests/gates/line_cap.zen` |
 | a line is 80 columns; a list packed past it breaks one item per line; match arms align their `=>`; blank-line and comment placement | `make fmt` — the formatter owns the whole shape of a printed file, so it is the authority and this document does not restate its rules |
 | every fault has a raise site | `make faults` |
 
 **The syntax laws are the grammar's, not this document's.** No `if`, no ternary, no `?`, no `as` cast, no `while` — `loop(cond, body)` is the while form — no fourth `@` entry, no adjacent-string concatenation, and every parameter named *and* typed. `DESIGN.md` states them (control flow, line 235; the loop overloads, line 965) and `grammar/grammar.js` cannot express a violation, so `make parse` is where they fail. Each was checked against the real grammar: every one is a parse error. Nothing here repeats them, because two copies of a fact is one stale fact waiting to happen.
-
-**Which is also the argument for parsing over grepping.** `if` occurs 101 times in `src/`, `as` 605 times, `?` 94 times — and the count in *code* is zero for all three. They are in comments and, for 52 of the `if`s, inside string literals: a grep would report the compiler's own diagnostic messages as style violations. `scripts/style.py` parses with `tools/parse/cst.py`, the real grammar, for the same reason `ufcs_collisions.py` does.
 
 **A pipeline reports the wrong exit status.** `make test 2>&1 | tail -40` exits with `tail`'s status, which is 0 whether the build passed or died on the first target — and the error it died on scrolled off the top of the window you kept. This is the cheapest way in the repo to manufacture a green gate, and it costs nothing to avoid: redirect, then read.
 
@@ -31,53 +25,8 @@ make test > /tmp/g.log 2>&1; echo "exit $?"; tail -5 /tmp/g.log
 
 `;` and not `&&`, so the `echo` runs on failure — which is the run you needed the number for. The same trap inside the build is closed at the top of the `Makefile`: recipes run under `bash -o pipefail`, because `/bin/sh` here is dash and dash has no `pipefail` to set. A gate whose file list arrives through a pipe — `find … | xargs ./zen fmt --check` — otherwise reports the status of `xargs`.
 
-**And a check that scanned nothing must not exit 0.** Every gate in the table prints its own site count and fails when that count is zero: `0 violations over 3210 sites` and `0 violations over nothing at all` are the same sentence with a different number in it, and the second one is what a moved directory or a changed file shape produces. `scripts/fixpoint.sh` says it in one line — *a setup error must not be able to impersonate a result* — and every script here now follows it, with exit **2** reserved for "the harness could not run" and never counted as a pass.
-
----
-
-## A commit's subject is its scope
-
-`lex:`, `gen_c:`, `std.text, lsp:` — the prefix is not decoration. It states
-the area the commit claims, and `make scope` holds every commit to its own
-claim:
-
-**A commit touching `src/` outside its stated scope is rejected at review —
-and now also at `make test`.** Every file under `src/` a commit touches must
-resolve to an area named in the subject's prefix. The owner's rule from issue
-#765, made mechanical because the repo had already been writing scopes into
-subjects for its whole history.
-
-**Three ways an area covers a file**, each taken from the log rather than
-invented: a dotted name joins segments (`std.text` is exactly `src/std/text`);
-a bare name matches any one directory segment (`lex:` covered `src/std/lex/`
-in d6882f11; `gen_c:` covers `src/gen/gen_c/` but not `src/gen/gen.zen`); and
-a module's own stem carries its name (`zen_build.zen` sits under `zen:`).
-
-**A mechanical sweep (`style:`, `fmt:`, `ufcs:` -- or a bare `src:`, which
-claims the whole tree) may rewrite `src/` anywhere, but it lands ALONE**: no new file under `src/` — a new file is a feature
-landing and gets its own commit and its own sentence (issue #765's third
-rule) — and no `.expected` or `.count` change anywhere, because those files
-are how this repo's corpus speaks, and a diff in them is a behaviour or
-diagnostic change. af2f9af7 failed both prongs at once: it declared `style:`
-and delivered `src/lsp/lsp_action.zen` plus sixteen rewritten expectations.
-That commit is why this gate exists.
-
-**A subject with no `<areas>:` prefix scopes nothing**, so any `src/` touch
-under it refuses. `wip:` and `fix-c06` were always throwaway tags; under this
-rule they cannot carry `src/` either. Merge commits are skipped — their
-parents state the scopes. `seed/zen.c` is exempt everywhere: it is emitted
-bytes that `make seed` regenerates and stages, and five commits in the recent
-log are nothing else.
-
-**What the gate deliberately does NOT read**, so nobody assumes it does:
-whether the fact after the colon is true of the diff — judgement, and review's
-half of the trade; and tests, docs, Makefile and ISSUES.md riding along,
-which is house style — 1aab00ca adds four corpus files under `gen_c:` — so
-only inside a declared sweep do expectation files count as contraband.
-
-The script keeps a fixture self-test (`scripts/scope.py --self-test`, run by
-`make scope` before the audit) so a parser that stops reading subjects fails
-even on a clean tree — a gate whose check rotted away must not keep exiting 0.
+**And a check that scanned nothing must not exit 0.** A moved directory or
+empty input set is a harness failure, not a clean result.
 
 ---
 
@@ -106,7 +55,7 @@ Three tests, in order of how often you will need them:
 
 **Flat namespaces are what makes this cheap.** Modules are `<folder>/<folder>.zen`, names are qualified by path, and two modules may define the same top-level name without colliding. So moving a function between modules costs an import line, and nothing else. There is no reason to hoard.
 
-**An import line is a claim about what the file depends on, so every name on it is used.** `A, B, C = some.module.path` binds three names; a name the file never writes again is a dependency it does not have, and the three tests above are read off exactly these lines. A file importing nine names and using two is not a small untidiness — it is eight false edges in the module graph, and the direction test cannot be applied to a graph that overstates. A `*` name is exported onward, which is a use: that is what a folder root is. `import` in `scripts/style.py` gates this, and reads identifier tokens rather than grepping, because a name surviving only in a comment or a diagnostic string is precisely the case.
+**An import line is a claim about what the file depends on, so every name on it is used.** `A, B, C = some.module.path` binds three names; a name the file never writes again is a dependency it does not have, and the three tests above are read off exactly these lines. A file importing nine names and using two is not a small untidiness — it is eight false edges in the module graph, and the direction test cannot be applied to a graph that overstates. A `*` name is exported onward, which is a use: that is what a folder root is.
 
 ---
 
@@ -115,7 +64,7 @@ Three tests, in order of how often you will need them:
 **A file is too big when it has two subjects. The line count is how you find out.**
 
 - **Over 500 lines: justify or split.** Not a failure, a prompt — read it and name its subjects out loud. Usually there are two.
-- **Over 800 lines: fails the build** — `make cap`, and it is part of `make test`. An exception is a path listed in `tools/gates/line_cap.zen` **with a written reason**; the sentence is the point, because an exception you have to type one for is an exception someone will read, and a silent one is a file that grows forever. (This said `build.zen` for a long time and no such file existed, so nothing enforced it and a file crossed the cap unnoticed. One fact, one place — and the place has to be real.)
+- **Over 800 lines: fails the build** — `make cap`, and it is part of `make test`. An exception is a path listed in `tests/gates/line_cap.zen` **with a written reason**; the sentence is the point, because an exception you have to type one for is an exception someone will read, and a silent one is a file that grows forever. (This said `build.zen` for a long time and no such file existed, so nothing enforced it and a file crossed the cap unnoticed. One fact, one place — and the place has to be real.)
 - Generated files (`seed/zen.c`) and test corpora are exempt. They are not read.
 
 The cap is a trigger, never the rule. **You always split by subject, never by size.** `gen.zen` and `gen_c.zen` are backend-shared plumbing and the C backend — two subjects. `parse1.zen` and `parse2.zen` are one subject cut in half, which is worse than the file you started with, because now neither name means anything.
@@ -276,7 +225,10 @@ Two exclusions, and both are why the rule says *equality against literals* and n
 - **A range is not a list.** `(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'` (`gen_name.zen`) written out is fifty-three characters, which is worse than what it replaced.
 - **Different questions about one subject are not a membership test.** `is_stdin_read(be, rty, name) || is_defer(be, rty, name)` (`gen_c_cap.zen`) shares a subject and asks two things about it.
 
-And one the rule cannot reach yet: **a primitive cannot be the subject.** `is_in` is bounded on `Eq`, no primitive implements `Eq`, so `b == ' ' || b == '\t' || b == '\n'` has no `is_in` form to be rewritten into. A `u8.impl(Eq, ..)` in `std/core/num.zen` gives it one and changes no emitted C — both measured — but whether primitives carry trait impls is a design decision and not a formatting one. Until it is made, `scripts/style.py` reads `.eq` and not `==`, so the gate cannot ask for a rewrite nobody can write.
+And one the rule cannot reach yet: **a primitive cannot be the subject.**
+`is_in` is bounded on `Eq`, no primitive implements `Eq`, so
+`b == ' ' || b == '\t' || b == '\n'` has no writable `is_in` form. Whether
+primitives carry trait impls is a language decision, not a formatting rule.
 
 **A trailing comma says "this grouping is mine."** The formatter fills an array literal greedily to 80 columns, so a list of short names lands on one line and the order is the only thing left of what the author meant by it. When the items fall into groups the formatter cannot derive, a comma after the last item pins the layout exactly as written:
 
@@ -367,7 +319,7 @@ Before proposing one, answer: what ordinary binding would have to exist for this
 
 Measured, once, against all 162 files of `src/`. Every rule above was counted rather than assumed — the interesting result is how few were being broken, which is worth writing down because it is what makes the gate cheap to keep.
 
-**A free function called on its receiver — 1153 sites written down, 40 files, and the tree is split in two.** By a long way the largest debt on this page, and the least like a judgement: every site is a mechanical edit. `src/std/` obeys the rule outright now — `Parser`, `Lexer`, `String` and `Cursor` are written on their receivers throughout, and `text_utf8.zen`'s nine, the last std file owing anything, are paid. `gen_c/` owes 806, `sema/` 337 and `lsp/` 10, which is two authoring eras rather than two opinions. 427 of the 613 reach a free function *private to its own module*, and that is the fact worth keeping: a dot finds the calling module's own names whether they are exported or not (`sema_call.zen:271`), so the rewrite is available for helpers that never leave the file. `UFCS_OWED` in `scripts/style.py` carries it, keyed by file and valued with a **count** rather than a bare name — a file list would exempt the file and let `gen_c_expr.zen` take a hundred more in silence, where a count cannot grow anywhere and shrinks in the diff. Unlike a line number it does not go stale on an unrelated edit; it moves only when someone adds or removes a site, which is when it should.
+**A free function called on its receiver — 1153 sites measured in 40 files.** By a long way the largest debt on this page, and the least like a judgement: every site is a mechanical edit. `src/std/` obeys the rule outright now. `gen_c/`, `sema/`, and `lsp/` still reflect older authoring styles; clean them up by subject, with compiler tests proving the change.
 
 **The count is a floor, not a census.** The rule fires only on a module's *principal type* — the strict-majority first-parameter type declared in the same folder — so three classes of site escape it, all found by the 2026-08-23 spot check: a folder with no principal type at all (`src/fmt/` splits its receivers across `Alloc`/`Src`/`Out`, so the gate can never fire there no matter how the calls are written — some sixty sites a reader would flag); a second receiver in a principal type's shadow (`sema_own.zen`'s nine free functions on `o :: Own`, called function-style nineteen times; `sema_match.zen`'s on `ps :: Pats`, six more); and calls from a module the type is not principal in (`FrameFault`'s facts, from `lsp_stdio.zen`). The ledger cannot record these — `debt()` fails an entry that overstates what the rule finds — so closing them means either widening the rule or applying the dividing rule instead: `find_var`/`kill`/`revive` are facts intrinsic to `Own` and want struct-body methods, which retires the sites rather than re-spelling them.
 
@@ -375,7 +327,7 @@ Measured, once, against all 162 files of `src/`. Every rule above was counted ra
 
 **The residue was 13 names, and it is zero.** All 13 were one defect, and it belonged to the Python bootstrapper: **it resolved a method reached through a FIELD by the field's type NAME as the importing file spells it — but only when that method name had a competitor reachable in the same compilation.** `c.types.at(..)` needed nothing; `c.types.write_name(..)` needed `Types`, because `sema_diag.zen:336` declares a *free function* of that name and the bootstrapper picked it. `make build` was blind to every one of them — the self-hosted compiler resolved them all correctly — so the only gates that could see it were the two that compiled `src/` *with* `bootstrap/`, and both are gone. The 13 imports were deleted and the result measured rather than assumed: `make test` 529/0/4, `make fixpoint` green. **`IMPORT_OWED` is now an empty ledger, which is a stricter gate than a stocked one** — the next unused import anywhere in `src/` is a build failure with no allowance to hide behind.
 
-**Abbreviations — 147 sites, 18 files.** `blk` (103), `tp` (34), `tps` (10). `nd` is already at zero. This is the only rule with a standing debt, so it is the only one carrying a ledger: `ABBREV_OWED` in `scripts/style.py`, keyed by file, valued with the word each should be. Deleting a line is how one closes, and a line that no longer describes a violation fails the build — the debt can shrink and cannot quietly grow. They live in `gen_c/`, `sema/`, `std/parse/` and `std/ast/`; renaming them is an ordinary edit that nobody has made time for, not a design question.
+**Abbreviations — 147 sites were measured in 18 files.** `blk`, `tp`, and `tps` remain ordinary naming debt in `gen_c/`, `sema/`, `std/parse/`, and `std/ast/`.
 
 **`.then` inside a `.loop` — 29 of the 141 `.then` calls.** "Usually a missing loop word", and *usually* is load-bearing, which is why this is a list to read and not a gate. Two of the 29 prove why: `std/core/loop/loop_find.zen:45` **is** the definition of `find` and cannot be written any other way, and `lsp/lsp_pos.zen:80` carries a comment arguing the case — "a break would buy a shorter walk and cost the one thing worth having here — a body with a single exit." A gate that reports a decision its author already defended is the gate people switch off. The two clearest genuine finds: `gen_c/gen_c_const.zen:181`, where `pure_args` hand-rolls `.all(..)` with an `every ::=` accumulator, and `sema/sema_def.zen:729`, where `keep_exported` hand-rolls `.filter(..)`.
 
@@ -387,4 +339,4 @@ Measured, once, against all 162 files of `src/`. Every rule above was counted ra
 
 Reading `==` as well as `.eq` finds four more, and all four compare BYTES: `std/core/byte.zen:49`, `std/lex/lex_byte.zen:33`, `std/json/json_read.zen`, and the punctuation tail of `gen/gen_c/gen_c_fat.zen:797`. They are blocked on `Eq` for primitives, not on anyone's time — which is why the number to watch is 10 and not 14.
 
-**Rules that cannot be checked, and are left to review.** The stranger test, the second-caller rule, and the direction test in general all ask what a function is *about* — only the std boundary is mechanical. "Method chains over nested calls" needs to know the natural receiver, which in general nothing in the source states — the one case where something does is the free function whose first parameter is its module's principal type, and that case is gated rather than left here. "No `Alloc` parameter, no allocation" needs a call graph: a crude version flags 2306 of 3628 functions, nearly all of them methods reaching an allocator through `self`. Comment density, "a name that needs a comment is the wrong name", "one behaviour per test", `::` versus `:` being the right marker, and "smallest correct change" are judgement, all of them. `scripts/style.py`'s header says the same thing in the same words, because a reader who opens the script deserves to find out there what it does not do.
+**Rules that cannot be checked are left to review.** The stranger test, the second-caller rule, the direction test, natural receivers, comment density, one behavior per test, and the smallest correct change all require judgement.
