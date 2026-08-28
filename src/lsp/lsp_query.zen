@@ -1,0 +1,46 @@
+// The checked program state a position query reads. A standalone query sees
+// one buffer; a workspace query sees that buffer as an overlay on its build.
+
+str = std.text
+Map = std.collections
+Alloc, AllocError = std.mem
+scan, Source = std.lex
+Parser = std.parse
+Ast = std.ast
+Checker = sema.sema_check
+check_all = sema.sema_decl
+Build = zen.zen_build
+root_for, relative_to = zen.zen_path
+
+parse_standalone = (a: Alloc, name: str, text: str) Res<Parser, AllocError> {
+    tree ::= a.Ast();
+    lexed = scan(a, Source(file: name, text: text)).try();
+    Ok(a.Parser(lexed, tree));
+}
+
+check_standalone* = (a: Alloc, name: str, text: str)
+                    Res<Checker, AllocError> {
+    p ::= parse_standalone(a, name, text).try();
+    m = p.module("doc").try();
+    p.tree.add_module(m).try();
+    c ::= a.Checker(p.tree).try();
+    check_all(c).try();
+    Ok(c);
+}
+
+CheckedBuild* = {
+    root*: str,
+    rel*: str,
+    c*: Checker,
+}
+
+check_build* = (env: Env, a: Alloc, workspace: str, path: str, text: str)
+               Res<CheckedBuild, AllocError> {
+    root = root_for(env, a, workspace, path);
+    rel  = relative_to(root, path);
+    docs ::= a.Map<str, str>();
+    docs.set(path, text).try();
+    b ::= a.Build(env, root);
+    c = b.whole(rel, docs).try();
+    Ok(CheckedBuild(root: root, rel: rel, c: c));
+}

@@ -96,7 +96,7 @@ add = (a: i32, b: i32) i32 {
 
 against the shipped binary over a real pipe, **3 of 12 positions answered**: `a` and `b` where they are used in `a + b`, and `s` where it is used on the last line. The function's own name, both parameters at their declarations, the local at its declaration and all three `i32` returned `null`. The rule was "an identifier in expression position resolves; a binding site or a type name does not" — and a user hovers a declaration to ask what something IS at least as often as a use.
 
-It is now **10 of 12** on that program, the two remaining being a space and a brace, which must stay `null`. The widening cost no new sema. It cost one new query — *which name is the cursor inside* — because a name is not a node (the finder lived in `src/lsp/lsp_decl.zen` and moved to `src/std/ast/ast_named.zen` when `definition` became its second caller):
+It is now **10 of 12** on that program, the two remaining being a space and a brace, which must stay `null`. The widening cost no new sema. It cost one new query — *which name is the cursor inside* — because a name is not a node (`src/std/ast/ast_named.zen` owns the finder shared by hover and definition):
 
 | what a user hovers | where the answer comes from |
 |---|---|

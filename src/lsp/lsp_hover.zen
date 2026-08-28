@@ -1,24 +1,11 @@
 // src/lsp/lsp_hover.zen
-// The one query, and the reason this stage was worth starting.
-//
-// A hover is a position, the thing under it, and what the checker
-// already concluded about that thing:
+// The type the checker already settled for the name under a position:
 //
 //     position -> to_pos -> told_at -> a memo -> Types.name_of
 //
-// (`tests/corpus/sema_zen/a_cursor_position_finds_its_node` is the same
-// round trip WITHOUT a server). Nothing here is a query; everything is a
-// call into `src/std/ast/` and `src/sema/` — `DESIGN.md:45`'s "a thin server
-// over compiler internals" meant literally. Memos are READ and not
-// recomputed (`DESIGN.md` decision 3): `check_all` has already typed
-// every node, so this file never calls `type_of`.
-//
-// FOUR ANSWERS, AND NOT ONE. An earlier version read `expr_memo` alone
-// and so answered only an identifier in EXPRESSION position — 3 of 12
-// probed positions in a five-line program, missing every declaration site
-// and every written type (`design_lsp.md` §2 keeps that measurement and
-// what widening it cost). The finder that made the rest reachable is
-// `ast_named.zen`; this file says each as:
+// `ast_named.told_at` covers declarations, written types and expressions;
+// this file only reads the corresponding sema memo. A missing part rejects
+// the whole compound answer, because a partial type is worse than `null`.
 //
 //   Sig      a function's name  -> its declaration, reprinted from the
 //                                  AST's names and the checker's types
@@ -29,41 +16,19 @@
 //   Imported an import binding   -> `null`; it has a definition, not a
 //                                   separately memoized value or type
 //   Nothing  everything else    -> `null`, and see below
-//
-// A WRONG ANSWER IS WORSE THAN NO ANSWER — the rule every arm is written
-// against. A miss anywhere in a compound answer (one parameter
-// unresolved, no return type) discards the whole answer rather than
-// shipping a partial one — costs listed at the bottom.
-//
-// THREE WAYS IN, AND THE WORKSPACE DECIDES — the shape every query in
-// this folder takes, spelled out here once and pointed at from the rest.
-// `hover_with` asks a build ALREADY MADE: the shared slot's checker
-// (`lsp_built.zen`), which the settle and every query against one
-// document state hold in common, so a hover after a settle builds
-// nothing. `hover_in` builds one of its own — the slot's `None`
-// fallback. `hover_at` checks the document AS ONE MODULE standing alone,
-// for when there is no root (no `rootUri`, or the two-file form of `zen
-// lsp`); there an import resolves to nothing and hover answers `null`
-// rather than guessing. Both rebuilds' pages die with the request's arena.
 
 str, String = std.text
-Vec, Map = std.collections
+Vec = std.collections
 Range = std.core
 Alloc, AllocError = std.mem
-scan, Source = std.lex
-Parser = std.parse
 Ast, Decl, ExprId, Member, TypeId, Span, Function, TriviaRun = std.ast
 Variant = std.ast
 Checker = sema.sema_check
-check_all = sema.sema_decl
-// THE DRIVER, REACHED FROM THE SERVER (`design_lsp.md` §5): the
-// alternative is a private copy of `walk` in this folder.
-Build = zen.zen_build
-root_for, relative_to = zen.zen_path
 TyId, TyNamed, Prim = sema.sema_ty
 Def, decl_at = sema.sema_def
 to_pos, to_wire, WirePos = lsp.lsp_pos
-Tell, told_at = lsp.lsp_decl
+Tell, told_at = std.ast.ast_named
+check_standalone, check_build = lsp.lsp_query
 
 // What a hover found. `found` is false both for a position covered by
 // nothing and for one whose type the checker never wrote down. `shown`
@@ -76,82 +41,18 @@ Hover* = {
     end*: WirePos,
 }
 
-// --- the two harnesses every way in shares ------------------------------
-
-// THE STANDALONE PARSE: the buffer scanned and parsed as one module,
-// never added to an arena unless the caller goes on to check it
-// (`symbols_at` does not — an outline is an AST fact). Every caller
-// names the module "doc"; `name` is what the spans carry as their file.
-parse_standalone* = (a: Alloc, name: str, text: str) Res<Parser, AllocError> {
-    tree ::= a.Ast();
-    lexed = scan(a, Source(file: name, text: text)).try();
-    Ok(a.Parser(lexed, tree));
-}
-
-// THE STANDALONE CHECK: the parse above, added to the arena and checked
-// whole — what every no-workspace query (`complete_at`, `definition_at`
-// and `hover_at` below) opens with.
-check_standalone* = (a: Alloc, name: str, text: str) Res<Checker, AllocError> {
-    p ::= parse_standalone(a, name, text).try();
-    m = p.module("doc").try();
-    p.tree.add_module(m).try();
-    c ::= a.Checker(p.tree).try();
-    check_all(c).try();
-    Ok(c);
-}
-
-// What `check_build` hands back: the root it computed (a cross-file
-// span converts against it), the document's name relative to it, and
-// the checker the walk filled.
-CheckedBuild* = {
-    root*: str,
-    rel*: str,
-    c*: Checker,
-}
-
-// THE BUILD-BACKED HARNESS the `*_in` queries share: the compilation
-// root COMPUTED and not the workspace (`root_for` accounts for an
-// editor opening at the repository while this tree builds as
-// `zen build src`), the open document as the entry — a file being
-// edited is usually not reachable from `main` — and the buffer in the
-// overlay, so the answer is about the text the editor shows.
-check_build* = (env: Env, a: Alloc, workspace: str, path: str, text: str)
-               Res<CheckedBuild, AllocError> {
-    root = root_for(env, a, workspace, path);
-    rel  = relative_to(root, path);
-    docs ::= a.Map<str, str>();
-    docs.set(path, text).try();
-    b ::= a.Build(env, root);
-    c = b.whole(rel, docs).try();
-    Ok(CheckedBuild(root: root, rel: rel, c: c));
-}
-
 // The type under a wire position in `text`, and the span to underline.
-// `name` is the CLIENT'S URI, verbatim, never a filesystem path: handed
-// to both `Source` and `told_at`, so no `file://` conversion is needed.
+// `name` is the client's URI, used verbatim as the standalone file name.
 hover_at* = (a: Alloc, name: str, text: str, line: usize, character: usize)
             Res<Hover, AllocError> {
     c ::= check_standalone(a, name, text).try();
 
-    // THE CONVERSION HAPPENS EXACTLY HERE AND NOWHERE ELSE ON THE WAY
-    // IN. Below this line every position is a Zen position.
     pos = to_pos(text, line, character);
     said(c, a, text, told_at(c.tree, name, pos))
 }
 
-// THE SAME QUESTION, ASKED OF A BUILD — the only way an IMPORTED name
-// has ever had a type. `hover_at` checks the document alone, so `Vec`,
-// `str` and any real import resolve to nothing and sema interns poison;
-// `write_ty_id` correctly answers `null`.
-//
-// THE ROOT, THE ENTRY AND THE OVERLAY are `check_build`'s three
-// choices, made here inline — walking from the open document reaches
-// what it IMPORTS (`folder_root` pulls the sibling modules that
-// complete a UFCS pool).
-//
-// `rel` AND NOT THE URI IS WHAT SPANS CARRY: a build names a module by
-// its path relative to the root, so `told_at` gets the same string
-// `Source` was given.
+// Imported names need a workspace build. Its relative module name is what
+// source spans carry, so the lookup uses `checked.rel`, not the URI.
 hover_in* = (
     env       : Env,
     a         : Alloc,
@@ -161,21 +62,12 @@ hover_in* = (
     line      : usize,
     character : usize
 ) Res<Hover, AllocError> {
-    root = root_for(env, a, workspace, path);
-    docs ::= a.Map<str, str>();
-    docs.set(path, text).try();
-    b ::= a.Build(env, root);
-    c   = b.whole(relative_to(root, path), docs).try();
-    pos = to_pos(text, line, character);
-    said(c, a, text, told_at(c.tree, relative_to(root, path), pos))
+    checked = check_build(env, a, workspace, path, text).try();
+    pos     = to_pos(text, line, character);
+    said(checked.c, a, text, told_at(checked.c.tree, checked.rel, pos))
 }
 
-// THE SAME QUESTION, ASKED OF A BUILD ALREADY MADE — the shared slot's
-// checker (`lsp_built.zen`), the way `definition_with` asks it. The work
-// is exactly `hover_in`'s second half; the build above it is what the
-// slot replaces. `a` is the REQUEST's arena: the answer is written into
-// the reply and dies with the request, while the tree and the memos it
-// reads live in the slot and are only READ.
+// The shared slot already owns the checker; this reads it without rebuilding.
 hover_with* = (
     c         : Checker,
     a         : Alloc,

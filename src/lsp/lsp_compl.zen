@@ -1,43 +1,14 @@
 // src/lsp/lsp_compl.zen
 // `textDocument/completion` — the candidate set at a position.
 //
-// THE INCOMPLETE-INPUT PROBLEM, and this file's answer to it
-// (`design_lsp.md` §2): `x.` is not a parse, and this tree's parser
-// reports and does not recover — so completion NEVER asks the parser
-// about the incomplete part. The cursor's word and the trigger before
-// it come from a BACKWARD SCAN over the buffer's bytes, a lexical
-// heuristic living entirely in this folder. Then:
+// `x.` does not parse, so a backward byte scan replaces the incomplete word
+// with `DUMMY`. The checker can then settle the base of that access. After a
+// dot, declarations supply names and sema confirms visibility and type
+// substitution. Without a dot, world names are filtered through `defs_of`.
 //
-//   - AFTER A DOT: the partial word is replaced by a DUMMY identifier,
-//     which makes `q.` a parseable access again, and the base — which
-//     does parse — is found in the arena by the dummy's name. The base's
-//     type is what `base_of` memoized for it (a value), or what
-//     `defs_of` + `def_type` say (a type, as in `Shape.`). The offers
-//     are the type's cases (`cases_of`) and its members (`members_of`)
-//     — names COLLECTED from the declarations, each CONFIRMED through
-//     `members_of`, so visibility and substitution stay sema's and this
-//     file holds no second rule for what a dot reaches.
-//   - OTHERWISE: every name the world's tables mention, filtered to the
-//     ones `defs_of` settles as visible in the cursor's module, plus the
-//     language's three reserved words. `defs_of` takes an exact name and
-//     has no prefix form — collecting candidate STRINGS and letting
-//     `defs_of` judge each is the prefix form, without reimplementing
-//     the `*` gate.
-//
-// IT WILL BE WRONG SOMETIMES, and that is the design doc's sentence, not
-// an apology: a base the checker never memoized, a buffer too broken to
-// parse around the cursor, a dummy that collides with a user's own
-// `zen_wip` — each answers with an empty list, never a guess.
-//
-// WHAT IS NOT OFFERED: locals and parameters (their bindings leave no
-// spans or tables behind — the L3 gap `design_lsp.md` prices), UFCS
-// functions a dot could call (a third candidate source, `sema_cand`'s,
-// not yet read here), and a type parameter's bound members.
-//
-// THREE WAYS IN, decided by the workspace like every query in this folder
-// — `lsp_hover.zen`'s header spells the shape out: `complete_shared` asks
-// the slot's build, `complete_in` a BUILD of its own, `complete_at` a
-// lone module, where imports resolve to nothing.
+// A missing memo, broken surrounding buffer or dummy collision yields an
+// empty list. Locals, parameters, UFCS candidates and bound members are not
+// yet candidate sources.
 //
 // OVER 500 LINES, per STYLE.md's justification: the subject is one
 // request — the trigger scan, the two answers (members after a dot,
@@ -47,24 +18,20 @@
 // the patched buffer is exactly what joins them.
 
 str, String = std.text
-Vec, Map, Ordered = std.collections
+Vec, Ordered = std.collections
 Alloc, AllocError = std.mem
 Range = std.core
-scan, Source = std.lex
-Parser = std.parse
-Ast, ExprId, Access, Member, Impl, Ident, nowhere = std.ast
+ExprId, Access, Member, Impl, Ident, nowhere = std.ast
 module_index_of = std.ast.ast_named
 Checker = sema.sema_check
-check_all = sema.sema_decl
 TyId, TyNamed = sema.sema_ty
 Def, DefKind, decl_at = sema.sema_def
 Found, members_of, first_hidden = sema.sema_member
 Case, cases_of = sema.sema_case
 def_type = sema.sema_type
 ImplId = sema.sema_id
-Build = zen.zen_build
-root_for, relative_to = zen.zen_path
 to_pos, run_of = lsp.lsp_pos
+check_standalone, check_build = lsp.lsp_query
 obj, arr, Nest, written = std.json
 write_decimal = lsp.lsp_frame
 
@@ -104,8 +71,7 @@ Trigger* = {
     dot*: bool,
 }
 
-// THE LONE-MODULE QUESTION: no workspace, no disk, the buffer itself is
-// the whole program. The same four lines `hover_at` opens with.
+// A lone buffer has no workspace imports.
 complete_at* = (
     a         : Alloc,
     text      : str,
@@ -114,18 +80,11 @@ complete_at* = (
     out       :: Vec<Item>
 ) Res<(), AllocError> {
     trig = trigger_at(a, text, line, character).try();
-    tree ::= a.Ast();
-    lexed = scan(a, Source(file: "doc", text: trig.text)).try();
-    p ::= a.Parser(lexed, tree);
-    m = p.module("doc").try();
-    p.tree.add_module(m).try();
-    c ::= a.Checker(p.tree).try();
-    check_all(c).try();
+    c ::= check_standalone(a, "doc", trig.text).try();
     items_from(c, a, "doc", trig, out)
 }
 
-// THE BUILD-BACKED QUESTION. `hover_in`'s three choices, with the
-// (possibly patched) buffer as the overlay.
+// The workspace build sees the possibly patched buffer as its overlay.
 complete_in* = (
     env       : Env,
     a         : Alloc,
@@ -137,14 +96,9 @@ complete_in* = (
     out       :: Vec<Item>
 )
                Res<(), AllocError> {
-    root = root_for(env, a, workspace, path);
-    rel  = relative_to(root, path);
-    trig = trigger_at(a, text, line, character).try();
-    docs ::= a.Map<str, str>();
-    docs.set(path, trig.text).try();
-    b ::= a.Build(env, root);
-    c = b.whole(rel, docs).try();
-    items_from(c, a, rel, trig, out)
+    trig    = trigger_at(a, text, line, character).try();
+    checked = check_build(env, a, workspace, path, trig.text).try();
+    items_from(checked.c, a, checked.rel, trig, out)
 }
 
 // THE SHARED-BUILD QUESTION. A trigger that is not after a dot leaves

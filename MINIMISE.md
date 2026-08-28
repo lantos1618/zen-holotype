@@ -1190,13 +1190,7 @@ outside `file_of`: `src/zen/zen_build.zen:377,378`, imported at `:74`. And
 `last_of*` is called from `joined:318`. **Only `file_of` is dead.** The
 cascade shrinks from 29 lines to 12.
 
-**b. `src/lsp/lsp_hover.zen:104,116` — `CheckedBuild*` and `check_build*`,
-~25 lines including comments.** Every occurrence of both names is inside this
-one block plus two prose mentions. The comment claims *"THE BUILD-BACKED
-HARNESS the `*_in` queries share"* — they do not: `hover_in*` at `:153` inlines
-the same six lines itself at `:162-168`.
-
-**c. Three one-line accessors, 3 lines:**
+**b. Three one-line accessors, 3 lines:**
 - `src/gen/gen_c/gen_c_state.zen:428` `newline*` — zero call sites (its
   siblings `fmt*`/`indent*`/`dedent*` are all called)
 - `src/sema/sema_check.zen:230` `type_store*` — one occurrence, its own

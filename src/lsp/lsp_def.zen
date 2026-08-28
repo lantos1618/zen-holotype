@@ -1,10 +1,8 @@
 // src/lsp/lsp_def.zen
-// `textDocument/definition` — where the name under the cursor was
-// declared.
+// `textDocument/definition` — where the name under the cursor was declared.
 //
-// THE SAME SHAPE AS HOVER, because it is the same question asked of a
-// different memo: `ast_named.told_at` finds the name, and what the
-// checker already settled about it carries the declaration's span:
+// `ast_named.told_at` finds the name; the checker's settled memos carry its
+// declaration span:
 //
 //   a call site        -> `call_memo` (which declaration the call meant)
 //   a module-level name -> `defs_of` (what the name means here)
@@ -14,43 +12,25 @@
 //                         (`Res<T>` routes through `defs_of` instead —
 //                         it interns as its own variant, not `Named`)
 //
-// NOTHING IS RESOLVED HERE — every arm reads a table `check_all` filled
-// or asks a query `src/sema/` owns (`design_lsp.md` §1: a second
-// resolution rule living in this folder would be a second, wrong
-// specification of the language). A miss anywhere is `null`, never a
-// guess.
-//
-// THREE WAYS IN, AND THE WORKSPACE DECIDES, exactly as `lsp_hover.zen`'s
-// header spells out: `definition_with` off the shared slot,
-// `definition_in` building one of its own, `definition_at` on ONE module
-// standing alone — where an import resolves to nothing and so does this.
-//
-// LOCALS AND PATTERN BINDERS ANSWER `null` ON PURPOSE: a `Binding`
-// carries no span and is released at scope exit (`sema_check.zen`), so
-// nothing survives `check_all` to point at. `design_lsp.md` §2 prices
-// the fix — a span on `Binding` — at L3, in `src/sema/`, not here.
+// Resolution remains in sema. A miss is `null`, never a guess. Locals and
+// pattern binders also return `null` until sema retains their binding spans.
 
 str, String = std.text
-Vec, Map = std.collections
+Vec = std.collections
 Alloc, AllocError = std.mem
 Range = std.core
-scan, Source = std.lex
-Parser = std.parse
-Ast, ExprId, TypeId, Span, Pos, Access, Function, QualifiedName = std.ast
+ExprId, TypeId, Span, Pos, Access, Function, QualifiedName = std.ast
 in_span, nowhere = std.ast
 Checker = sema.sema_check
-check_all = sema.sema_decl
 TyId = sema.sema_ty
 Def, decl_at, dotted = sema.sema_def
 def_type = sema.sema_type
 DeclId = sema.sema_id
 Found, members_of, first_found = sema.sema_member
-Build = zen.zen_build
-root_for, relative_to = zen.zen_path
 to_pos, to_wire, WirePos, write_wire = lsp.lsp_pos
 path_of, uri_at = lsp.lsp_uri
-told_at = lsp.lsp_decl
-module_index_of = std.ast.ast_named
+told_at, module_index_of = std.ast.ast_named
+check_standalone, check_build = lsp.lsp_query
 obj = std.json
 
 // A definition, ready for the wire. `found` is false both for a position
@@ -72,9 +52,7 @@ Defn* = {
     span*: Span,
 }
 
-// The name at a wire position in a LONE module — no workspace, no disk.
-// `uri` is handed to `Source` verbatim, so every span in the tree names
-// it as its file (the convention `lsp_hover.zen`'s `hover_at` set).
+// A lone buffer has no workspace imports; its URI is its span's file name.
 definition_at* = (
     a         : Alloc,
     uri       : str,
@@ -82,17 +60,9 @@ definition_at* = (
     line      : usize,
     character : usize
 ) Res<Target, AllocError> {
-    tree ::= a.Ast();
-    lexed = scan(a, Source(file: uri, text: text)).try();
-    p ::= a.Parser(lexed, tree);
-    m = p.module("doc").try();
-    p.tree.add_module(m).try();
-    c ::= a.Checker(p.tree).try();
-    check_all(c).try();
+    c ::= check_standalone(a, uri, text).try();
     pos = to_pos(text, line, character);
     d   = sought(c, a, uri, pos).try();
-    // ONE MODULE, so the answer — when there is one — is always in the
-    // open buffer itself, and the client's own URI names it.
     Ok(Target(
         found: d.found,
         uri: uri,
@@ -101,13 +71,8 @@ definition_at* = (
     ));
 }
 
-// THE SAME QUESTION, ASKED OF A BUILD. Shaped after `hover_in`: the open
-// document is the entry, the root is computed rather than assumed, and
-// the overlay carries the unsaved buffer so the jump lands in the text
-// the editor shows. THE TARGET MAY BE ANOTHER MODULE: its URI is built
-// from the root and its range is converted against ITS bytes, read from
-// the disk — a span converted against the wrong file's text is the wrong
-// underline in the right file (`lsp_pos.zen`'s rule).
+// A workspace build overlays the unsaved buffer. A cross-module target is
+// converted against the target file's bytes, not the open document's.
 definition_in* = (
     env       : Env,
     a         : Alloc,
@@ -119,21 +84,13 @@ definition_in* = (
     character : usize
 )
                  Res<Target, AllocError> {
-    root = root_for(env, a, workspace, path);
-    rel  = relative_to(root, path);
-    docs ::= a.Map<str, str>();
-    docs.set(path, text).try();
-    b ::= a.Build(env, root);
-    c   = b.whole(rel, docs).try();
-    pos = to_pos(text, line, character);
-    d   = sought(c, a, rel, pos).try();
-    placed(env, a, root, uri, text, rel, d)
+    checked = check_build(env, a, workspace, path, text).try();
+    pos     = to_pos(text, line, character);
+    d       = sought(checked.c, a, checked.rel, pos).try();
+    placed(env, a, checked.root, uri, text, checked.rel, d)
 }
 
-// THE SAME QUESTION, ASKED OF A BUILD ALREADY MADE — the shared slot's
-// checker (`lsp_built.zen`), the way `hover_with` asks it, `a` being the
-// REQUEST's arena on the same terms. The work below is exactly
-// `definition_in`'s second half.
+// The shared slot already owns the checker; this reads it without rebuilding.
 definition_with* = (
     env       : Env,
     c         : Checker,
