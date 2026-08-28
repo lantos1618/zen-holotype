@@ -1,28 +1,10 @@
 // src/gen/gen_c/gen_c_sink.zen
-// `out.add("{}:{}", self.x, self.y)` — the format door on ANY Sink, and
-// the door every idiomatic `toString` is written through.
-// `text_fmt.zen` declares it with no body: a variadic parameter has no
-// C spelling and `{}` is resolved BY THE ARGUMENT'S TYPE, so the call
-// must be expanded where it is WRITTEN — the compiler is the body, the
-// same bargain `alloc.String("{}", x)` strikes in `gen_c_fmt.zen`.
-// Found via a LINKER ERROR, not a diagnostic: a bodyless declaration
-// defines no symbol, so every `toString` written the way DESIGN.md
-// writes them emitted a call to `..text_fmt3add..` that nothing
-// defines. `cc` reported it as an implicit declaration returning `int`
-// rather than pointing at the missing lowering.
-// THIS DOOR AND THE ALLOCATING ONE ARE SEPARATE FILES because they
-// share the format walk (`lower_pieces_into` below is the allocating
-// door writing these pieces into the buffer it just made) but NOT the
-// error type: every write reachable from a `{}` answers with exactly
-// `Res<(), WriteError>`, this door's own declared return, so a failing
-// write is COPIED and nothing converted. The allocating door returns
-// `Res<String, AllocError>` instead; `gen_c_fmt.zen` holds that half.
-// `add_i64`/`add_u64`/`add_bool` are FOUND, not written here — ordinary
-// Zen functions in the door's own module. A second C-side integer
-// printer would be a second set of rules about what a number looks
-// like, and the corpus pins exactly one. `add_f64` is found too, but
-// only its DECLARATION lives in Zen: the digits are this backend's,
-// which `write_intrinsic_call` below says why.
+// Lowers the bodyless, type-directed format door on any Sink. The call is
+// expanded at its source because a variadic parameter has no C spelling.
+// This shares the format walk with `gen_c_fmt`; it remains separate because
+// sink writes preserve `WriteError` while allocation answers `AllocError`.
+// Primitive writers are resolved in the door's module. Only `add_f64` is a
+// backend intrinsic; integer and boolean spelling remains library-owned.
 
 ExprId, Decl, Function, Param, Call = std.ast
 Literal, TypeId = std.ast
@@ -34,7 +16,6 @@ TyId = sema.sema_ty
 Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
-write_usize = sema.sema_diag
 param_type = sema.sema_denote
 satisfies_bound = sema.sema_bound
 sym_fn, sym_gen, sym_variant, RES_PATH = gen.gen_name
@@ -57,11 +38,8 @@ sink_display = gen.gen_c.gen_c_display
 
 // recognising the door
 
-// The bodyless `add(out :: Sink, fmt: str, args: ...)` and nothing
-// else, asked of the DECLARATION rather than the name — a module's own
-// bodied three-parameter `add` is an ordinary function.
-// THE RECEIVER MUST BE `::`: a sink is written into, so it is taken by
-// address; a first argument taken by value is not this door.
+// The bodyless `add(out :: Sink, fmt: str, args: ...)`; `::` distinguishes
+// the writable sink from ordinary three-parameter functions.
 is_sink_door* = (be: CBackend, d: Def, f: Function) bool {
     d.name.eq("add") && be.sink_door_shape(f)
 }
@@ -79,11 +57,7 @@ bodyless* = (f: Function) bool {
     f.body.match({ Ok(_) => false, None => true })
 }
 
-// A FUNCTION WITH NO PARAMETERS HAS NO LAST ONE, and `len - 1` on a
-// `usize` traps rather than answering that question. The first caller
-// was shielded by a `params.len == 3` test in front of it, so the
-// underflow waited for a second caller (`associated_functions`, exit
-// 134) before it was found. The guard belongs where the arithmetic is.
+// Guard the unsigned subtraction here, not only at a particular caller.
 last_is_variadic* = (be: CBackend, f: Function) bool {
     (f.params.len == 0).match({
         true  => false,
@@ -109,23 +83,9 @@ variadic_type = (be: CBackend, t: TypeId) bool {
     be.tree.type_at(t).kind.match({ Variadic => true, _ => false })
 }
 
-// the same door, reached through a receiver
-// `String.add(self :: @Self, fmt: str, args: ...)` is NOT a second
-// door. It is the door's exact shape declared a second time, bodyless
-// for the same reason, because a String IS a Sink and `s.add("{}", x)`
-// has to mean what `add(s, "{}", x)` means. Declaring it on the type is
-// what makes the idiomatic spelling reachable at all; lowering it is
-// finding the one declaration and expanding it with the receiver as the
-// sink.
-// THE FREE DECLARATION IS WHAT IS LOWERED, NOT THE MEMBER'S OWN, and
-// that is load-bearing rather than a shortcut. Everything the expansion
-// reads comes out of the DOOR'S module: `Sink`, whose `write` slot
-// every literal run travels through, and `add_i64`/`add_u64`/`add_bool`,
-// the writers a scalar hole reaches. `text_string.zen` imports `Sink`
-// but declares no writer, and its own first parameter is `@Self` — a
-// String, where the bytes END UP rather than the thing a write goes
-// through. Reading the member's declaration would resolve the sink to
-// the wrong type and find no writers at all.
+// `String.add` reaches the same free door through UFCS. Lower the free
+// declaration so writer lookup stays in the door's module; the member's
+// `@Self` describes where bytes land, not the Sink used to dispatch them.
 
 lower_member_door* = (
     be   :: CBackend,
@@ -156,13 +116,8 @@ lower_at_decl = (
     })
 }
 
-// The free door, found BY SHAPE across the program rather than by module
-// path. Nothing at the call site names `text_fmt`: `text_string.zen`
-// does not import it, it is not the prelude, and the caller wrote a dot
-// on a String. What identifies the door is that it is the one exported
-// `add` carrying the door's shape — `::` sink, three parameters, a
-// variadic tail, no body — and this tree's only other top-level `add`
-// takes two Durations by value.
+// A member call names no `text_fmt` path, so find the exported door by
+// its unique shape: writable receiver, format, variadic tail, no body.
 door_decl = (be :: CBackend) Res<Res<Def>, AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.exported_named("add", found).try();
@@ -199,20 +154,9 @@ decl_fn = (dec: Decl) Res<Function> {
     dec.kind.match({ Function(g) => Ok(g), _ => None })
 }
 
-// the same door, into a buffer the caller already made
-// `gen_c_fmt.zen`'s allocating door is `alloc.String()` followed by
-// EXACTLY these pieces, so it reaches them here instead of keeping a
-// second walk. It used to keep one, and the two drifted the way two
-// copies do: this one grew integers, bools and Displays and that one
-// stayed at `str`, so `alloc.String("point {}", p)` was a diagnostic
-// while `out.add("point {}", p)` wrote the point.
-// A STRING IS A SINK, which is the whole reason this works: the buffer
-// becomes the door's own record through `fat_value` — ONE call, not a
-// second copy of the rule.
-// A FAILING WRITE JUMPS TO A LABEL THE CALLER OWNS rather than leaving
-// an answer to inspect. The two doors declare different errors, so the
-// caller has to build its own; giving it a place to do that is one
-// `usize` and no test emitted on the succeeding path.
+// Reuse the sink walk for an existing String buffer. `fat_value` presents
+// that buffer as the door's Sink; failures jump to the allocating caller's
+// label because the two doors expose different error types.
 
 lower_pieces_into* = (
     be   :: CBackend,
@@ -304,29 +248,18 @@ buffer_sink = (
 }
 
 // what one piece needs
-// Six values travel together through every write, and they are one
-// thing — WHERE THE BYTES GO AND WHERE A FAILURE GOES — so they are
-// one record rather than a signature per helper.
+// Where bytes and failures go, kept together across every piece.
 
 Piece* = {
     sink: str,        // the C name of the Sink record, a place
     sty: TyId,        // Sink itself, for its slots
-    // THE RECEIVER'S OWN BYTE WRITER, mangled, or "" when the writes go
-    // through the Sink record above. A floor answers exactly what the
-    // door answers, so `sink` is then the receiver ARGUMENT — address
-    // included — and `sty` is not read at all. `gen_c_floor.zen` says
-    // why that is a second door and not this one narrowed.
+    // Receiver byte writer, or empty when dispatch goes through `sty`.
     floor: str,
     tmp*: str,        // the temporary the door answers with
     done*: usize,     // the label a failing write jumps to
     id: ExprId,       // the door call, for a diagnostic with a position
     module: usize,    // the door's own module: where the writers live
-    // THE DOOR'S OWN DECLARED ANSWER, and the RECEIVER'S OWN TYPE. Read
-    // only where a floor door meets a hole its floor cannot take: the
-    // receiver's type is what a `Sink` record is built over, and the
-    // answer is what the `Err` a failing wider write leaves is spelled
-    // in. A sink door reads neither -- its writes already answer what it
-    // answers -- so `rty` there is the sink type again.
+    // Receiver and return type used when a floor widens through a Sink.
     rty: TyId,
     ret: TyId,
 }
@@ -393,11 +326,7 @@ door_ctx = (d: Def) Ctx {
     )
 }
 
-// The sink lands in a temporary of its own and every write names it.
-// A `String` argument becomes the record here, ONCE — `expr` at the
-// bound's type is what builds one — and a caller that already holds a
-// `Sink` copies two words. Either way what the writes see is a plain C
-// name, which is a place, so `&` on it is an address and not a spill.
+// Spill once so every write has a stable place whose address C can take.
 write_sink_temp = (
     be   :: CBackend,
     c    : Call,
@@ -472,9 +401,7 @@ write_ok* = (be :: CBackend, ret: TyId, tmp: str) Res<(), AllocError> {
     be.ctype(ret, cty).try();
     tag ::= be.alloc.String().try();
     sym_variant(tag, RES_PATH, "Ok").try();
-    value ::= be.alloc.String().try();
-    value.fmt("({}){ .zg_tag = {} }", cty.view(), tag.view()).try();
-    be.set_line(tmp, value.view())
+    be.fmt("{tmp} = ({}){{ .zg_tag = {} }};\n", cty.view(), tag.view())
 }
 
 fmt_arg = (c: Call, recv: Res<ExprId>) Res<ExprId> {
@@ -485,11 +412,8 @@ fmt_index = (recv: Res<ExprId>) usize {
     recv.match({ Ok(_) => 0, None => 1 })
 }
 
-// the pieces
-// `gen_c_print.zen`'s walk over the raw literal, with the writes going
-// to a sink instead of straight to the console. One implementation of
-// "where are the holes", because `println("{}", x)` and
-// `out.add("{}", x)` differ only in where the bytes end up.
+// `gen_c_print` owns format classification; this file only changes the
+// destination from the console to a Sink.
 
 write_pieces* = (
     be    :: CBackend,
@@ -675,10 +599,10 @@ write_chunk = (
 // counted — `gen_c_print.zen` says why that is sound.
 write_literal = (be :: CBackend, piece: str, p: Piece)
                 Res<(), AllocError> {
-    text ::= be.alloc.String().try();
-    text.fmt("(zg_str){ (unsigned char *)\"{piece}\", ").try();
-    write_usize(text, decoded_bytes(piece)).try();
-    text.add_bytes("u }").try();
+    text ::= be.alloc.String(
+        "(zg_str){{ (unsigned char *)\"{piece}\", {}u }}",
+        decoded_bytes(piece)
+    ).try();
     call ::= be.alloc.String().try();
     be.sink_write(p, text.view(), call).try().match({
         false => be.unsupported_piece(p.id, "a sink with no write"),
@@ -724,11 +648,8 @@ value_call = (be :: CBackend, p: Piece, ty: TyId, text: str, out :: String)
     })
 }
 
-// A FLOOR DOOR'S OWN WRITER TAKES A `str` AND NOTHING ELSE, so a wider
-// hole is not this call — `sink_write`'s floor arm is a direct call to
-// `add_bytes`, and there is no `add_bytes` for a number. It is not a
-// refusal either: `write_wider` below opens the sink the value's writer
-// wants, over the same receiver.
+// A floor writes only `str`; wider values must reopen the same receiver
+// through its Sink implementation.
 wider_call = (
     be   :: CBackend,
     p    : Piece,
@@ -743,36 +664,11 @@ wider_call = (
     })
 }
 
-// a hole the floor cannot take
-// `two.fmt("n={}", n)` and `a.String("n={}", n)` are ONE format string
-// through two doors, and they used to give two answers: the allocating
-// door wrote the number and this one reported `a format hole on this
-// door that is not a str` (#755).
-// THAT GAP CLOSED 2026-08-25: #755, fixed by d9c02c14d, lands the wider
-// hole through a Sink record over the same receiver (below). The comment
-// here used to go on from the old refusal to a standing excuse — that
-// the gap was why nothing in `src/` implements `Display`, with 591
-// String-appending sites and 378 hand-rolled `add_bytes` runs standing
-// where one format would. That was a true description of the day it was
-// written and is no longer a description of the tree: the door opens,
-// the first `Type.impl(Display, ..)` under `src/` is `Pos.impl(Display,
-// ..)` in `src/std/ast/ast_span.zen`, and its former hand-rolled call
-// sites are `{}` holes. The remainder of the ~400 runs is a campaign to
-// be finished one family at a time, not a blockade — recount and pattern
-// in `docs/design_fmt.md` §1.
-// THE RECEIVER IS A SINK, which is what makes the second answer
-// reachable at all: the writers a wider hole needs take a `Sink`, and a
-// String is one. So the value's write goes through a record over THE
-// SAME RECEIVER the floor writes to, picked by `value_call` — the same
-// function, one line up — rather than through a second set of writers.
-// WHAT THAT COSTS IS THE ERROR, and it is the allocating door's bargain
-// and not a new one: a Sink write answers `WriteError`, this door
-// answers its floor's, and the two do not convert. So a failing wider
-// write leaves `OutOfMemory` — `docs/design_fmt.md` §6 holds the open
-// fork, which this widens from one door to two and does not settle.
-// NOTHING ELSE MOVES: a `str` hole and every literal run still go
-// straight through the floor and still carry their own `Err`, so what a
-// floor door already compiled emits the same bytes it emitted before.
+// A non-str floor hole uses a Sink record over the same receiver (#755).
+// The receiver must implement Sink and the floor's error set must contain
+// `OutOfMemory`; otherwise lowering refuses it. Str holes and literal runs
+// remain direct floor writes. See `docs/design_fmt.md` §6 for the error
+// conversion contract.
 write_wider = (be :: CBackend, a: ExprId, ty: TyId, text: str, p: Piece)
               Res<(), AllocError> {
     p.floor.is_empty().match({
@@ -820,13 +716,7 @@ sink_over_receiver = (
     })
 }
 
-// TWO THINGS MUST HOLD, and a hole is refused by name exactly as before
-// when either does not. The receiver must BE a Sink: `fat_value` writes
-// NULL for a slot no impl answers, so a record over a type that never
-// promised `write` is a null call where the diagnostic used to be. And
-// the door's own error set must name `OutOfMemory`, because that is what
-// a failing wider write is reported as — a set with no such variant
-// would get a bare `Err` carrying nothing.
+// Refuse a null Sink slot or an error set unable to carry OutOfMemory.
 wider_is_sound = (be :: CBackend, p: Piece, sty: TyId) Res<bool, AllocError> {
     be.check.satisfies_bound(p.rty, sty).try().match({
         false => Ok(false),
@@ -871,21 +761,15 @@ write_through_sink = (
         ret: wret
     );
     call ::= be.alloc.String().try();
-    // `hole_fault(q)` AND NOT `hole_fault(p)`: by here the receiver IS a
-    // Sink and the door is open, so a hole this far in fails for the
-    // sink door's reason — no writer for the type — and saying "not a
-    // str" would name the wrong thing.
+    // Diagnose against the reopened Sink door, not the original floor.
     be.value_call(q, ty, text, call).try().match({
         false => be.unsupported_piece(a, hole_fault(q)),
         true  => be.wider_guarded(call.view(), wtmp.view(), p),
     })
 }
 
-// `zg_tW = <the write>; if (zg_tW.zg_tag != Ok) { <answer> = Err(OutOfMemory); goto done; }`
-// `write_guarded`'s guard with the two error sets named where they meet.
-// It is one `if` and no label of its own, because the answer is BUILT
-// here rather than carried: there is nothing to jump past, so a wider
-// hole costs a floor door nothing it was not already paying.
+// Guard the reopened write, converting its failure to the floor's
+// OutOfMemory before joining the existing done label.
 wider_guarded = (be :: CBackend, call: str, wtmp: str, p: Piece)
                 Res<(), AllocError> {
     be.set_line(wtmp, call).try();
@@ -930,11 +814,8 @@ writer_of = (prim: str) str {
     })
 }
 
-// A float's writer is the one whose body is this backend's: the
-// declaration exists so `module_fn` can find it, the bytes come from
-// `write_intrinsic_call` below. Both widths land on f64 -- a `double`
-// holds an f32 exactly, which is more than any second writer could
-// promise the two widths would agree about.
+// Both float widths use the backend-owned f64 writer; double represents
+// every f32 exactly.
 number_writer = (prim: str) str {
     is_float(prim).match({
         true  => "add_f64",
@@ -975,8 +856,7 @@ floor_write = (p: Piece, text: str, out :: String) Res<bool, AllocError> {
 // point is that the writer does not know which one it holds.
 slot_write = (be :: CBackend, p: Piece, text: str, out :: String)
              Res<bool, AllocError> {
-    args ::= be.alloc.String().try();
-    args.fmt(", {text}").try();
+    args ::= be.alloc.String(", {text}").try();
     be.slot_call(p.sink, p.sty, "write", args.view(), 1, out).try().match({
         None  => Ok(false),
         Ok(_) => Ok(true),
@@ -1007,17 +887,8 @@ writer_call = (
     })
 }
 
-// A WRITER THE BACKEND IS THE BODY OF lowers as the bytes it would
-// have written: one `%g` render into the runtime floor's scratch and
-// the sink's own `write` over them -- the exact shape a bodied writer
-// computing digits and calling `out.write` would compile to. Going
-// through `sink_write` keeps every receiver kind (a String buffer, a
-// Sink record, a floor door's byte writer) and the guarded failure
-// the other writers answer with.
-// THE SCRATCH IS THE FLOOR'S, file-scope like `zg_print_f64` beside
-// which it sits, and safe shared because a render's bytes are copied
-// by the very call that follows it before any later render starts --
-// the expansion is sequential statements and nothing reorders them.
+// The backend-owned float writer renders with `%g`, then immediately
+// copies the shared scratch through the receiver's normal byte path.
 write_intrinsic_call = (
     be   :: CBackend,
     p    : Piece,
@@ -1026,36 +897,14 @@ write_intrinsic_call = (
     out  :: String
 ) Res<bool, AllocError> {
     be.need_fbuf();
-    // ASSEMBLED, NOT FORMATTED: the emitted text carries `{ ... }` C
-    // braces and `%g`, and this file is compiled BY THE PREVIOUS
-    // GENERATION of itself -- a float hole here would be refused by a
-    // seed whose `writer_of` does not know `add_f64` yet. Every piece
-    // goes through `add_bytes`, which reads no format meaning. The one
-    // `fmt` keeps EMPTY holes: a named one binds the enclosing LOCAL of
-    // that name and leaves its explicit argument to be appended again
-    // by `write_rest` -- which printed the value twice and cost cc a
-    // `expected expression`.
-    value ::= be.alloc.String().try();
-    value.fmt("{}({})", cast, text).try();
-    bytes ::= be.alloc.String().try();
-    bytes.add_bytes(
-        "(zg_str){ (unsigned char *)zg_f64_scratch, (size_t)snprintf(zg_f64_scratch, sizeof zg_f64_scratch, \"%g\", "
+    // Doubled braces are literal C braces. `cast` and `text` stay
+    // positional: emitted expressions must never be read as format syntax.
+    bytes ::= be.alloc.String(
+        "(zg_str){{ (unsigned char *)zg_f64_scratch, (size_t)snprintf(zg_f64_scratch, sizeof zg_f64_scratch, \"%g\", {}({})) }}",
+        cast,
+        text
     ).try();
-    bytes.add_bytes(value.view()).try();
-    bytes.add_bytes(") }").try();
-    call ::= be.alloc.String().try();
-    // THE CALL TEXT IS THE ANSWER, not a side effect: `out` arrives
-    // empty and the caller guards whatever lands in it, so a render
-    // that forgets to hand the bytes over emits `t = ;` -- which cc
-    // refuses, and which this branch shipped once.
-    wrote ::= be.sink_write(p, bytes.view(), call).try();
-    wrote.match({
-        false => Ok(false),
-        true  => {
-            out.add_bytes(call.view()).try();
-            Ok(true)
-        },
-    })
+    be.sink_write(p, bytes.view(), out)
 }
 
 write_writer_call = (
@@ -1072,13 +921,7 @@ write_writer_call = (
     Ok(true);
 }
 
-// A bodied function a module declares under `name`. The ONE CALLER
-// (`writer_call`) wants a writer it can queue for emission, so
-// bodiless declarations are kept out here rather than at the call --
-// except that the float writer is bodyless ON PURPOSE, its body being
-// the backend's, so `module_decl` beside this one answers ANY function
-// under the name and lets the door's expansion split on `bodyless`
-// itself.
+// A bodied writer that can be queued for emission.
 module_fn = (be :: CBackend, mi: usize, name: str)
             Res<Res<Def>, AllocError> {
     found ::= be.alloc.Vec<Def>();
@@ -1088,11 +931,7 @@ module_fn = (be :: CBackend, mi: usize, name: str)
     Ok(kept.get(0));
 }
 
-// The same walk WITHOUT the bodied filter, for a writer whose body is
-// deliberately nobody's but the backend's (`add_f64`, #809): the
-// declaration is wanted so the expansion can read where it lives, not
-// so anything can be queued from it -- queueing one is impossible by
-// construction and `lower_function` says why that is safe.
+// Includes bodyless backend intrinsics such as `add_f64`.
 module_decl = (be :: CBackend, mi: usize, name: str)
               Res<Res<Def>, AllocError> {
     found ::= be.alloc.Vec<Def>();
@@ -1158,11 +997,8 @@ call_symbol* = (be :: CBackend, d: Def, out :: String)
     out.add_bytes(sym.view())
 }
 
-// `zg_tN = <the write>; if (zg_tN.zg_tag != Ok) { goto done; }`
-// THE ANSWER AND THE GUARD ARE ONE TEMPORARY, because of the one error
-// type the header names: a failing write leaves its own `Err` where the
-// door's answer goes, and carrying it is the jump and nothing else — no
-// rebuild, no re-tag, and no error set to widen.
+// The write and guard share a temporary because the sink door preserves
+// the writer's error type unchanged.
 write_guarded = (be :: CBackend, call: str, p: Piece) Res<(), AllocError> {
     be.set_line(p.tmp, call).try();
     be.write_jump_unless_ok(p.tmp, p.done)
@@ -1190,11 +1026,8 @@ write_jump_unless_ok* = (be :: CBackend, tmp: str, done: usize)
 }
 
 write_goto* = (be :: CBackend, done: usize) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    line.add_bytes("goto ").try();
-    sym_gen(line, "f", done).try();
-    line.add_bytes(";").try();
-    be.writeln(line.view())
+    name = be.done_name(done).try();
+    be.fmt("goto {};\n", name.view())
 }
 
 // THE DONE LABEL of a Res cleanup, beside the goto that jumps to it --
@@ -1202,8 +1035,12 @@ write_goto* = (be :: CBackend, done: usize) Res<(), AllocError> {
 // number (`gen_c_loop.zen`'s write_label); this one has exactly one name,
 // which is why it is not that function.
 write_done* = (be :: CBackend, done: usize) Res<(), AllocError> {
-    line ::= be.alloc.String().try();
-    sym_gen(line, "f", done).try();
-    line.add_bytes(": ;").try();
-    be.writeln(line.view())
+    name = be.done_name(done).try();
+    be.fmt("{}: ;\n", name.view())
+}
+
+done_name = (be :: CBackend, done: usize) Res<String, AllocError> {
+    name ::= be.alloc.String().try();
+    sym_gen(name, "f", done).try();
+    Ok(name)
 }
