@@ -1,19 +1,9 @@
 // src/gen/gen_c/gen_c_infer.zen
-// Infers what sema didn't record.
-// Sema records a call's instantiation and value type only inside bodies
-// it checked (top-level decls). Calls inside MEMBER bodies get nothing
-// recorded, so `Map<K, V>`'s `put(self.entries, .., entry)` (really
-// `put<Entry<K, V>>`) must be inferred from the arguments alone.
-// `complete_inst` (callee instantiation) and `call_ret_type` (call's
-// value type) deliberately share the instantiation, so a temporary's
-// declared type and the call's symbol can never disagree.
-// Runs only where sema's answer left a parameter free; a call sema
-// already settled is left untouched — re-deriving it would just be a
-// worse copy of sema's own rule.
+// Completes generic call facts sema cannot record inside member bodies.
+// Calls already settled by sema pass through unchanged.
 
 ExprId, Decl, Function, Param = std.ast
-Access, Call = std.ast
-Member = std.ast
+Access, Call, Member = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -34,6 +24,94 @@ site_of, method_sig = gen.gen_c.gen_c_member
 Site = gen.gen_c.gen_c_member
 recv_inst = gen.gen_c.gen_c_mono
 
+// Stable call facts are receiver state; the backend and accumulating answer
+// remain explicit mutable borrows.
+InferCall = {
+    call: Call,
+    recv: Res<ExprId>,
+    ctx: Ctx,
+
+    complete = (self: @Self, be :: CBackend, d: Def, f: Function,
+                settled: Inst) Res<Inst, AllocError> {
+        be.inst_open(settled).match({
+            false => Ok(settled),
+            true  => self.infer(be, d, f),
+        })
+    }
+
+    infer = (self: @Self, be :: CBackend, d: Def, f: Function)
+            Res<Inst, AllocError> {
+        dctx = decl_ctx(d);
+        mark = be.enter_tparams(f.tparams, d.qname).try();
+        declared ::= be.alloc.Vec<TyId>();
+        f.params.loop((h, p) { written_param(be, p, dctx, declared).try() });
+        found ::= be.alloc.Inst();
+        at = UnifyCall(declared: declared, ctx: self.ctx);
+        at.receiver(be, self.recv, found).try();
+        first = self.recv.match({ Ok(_) => 1, None => 0 });
+        self.call.args.loop((h, i, a) {
+            at.arg(be, a.value, i + first, found).try();
+        });
+        be.leave_tparams(mark).try();
+        be.settled_inst(f.tparams, d.qname, found)
+    }
+}
+
+// The declared vector and caller context are read-only for the whole walk.
+UnifyCall = {
+    declared: Vec<TyId>,
+    ctx: Ctx,
+
+    receiver = (self: @Self, be :: CBackend, recv: Res<ExprId>, out :: Inst)
+               Res<(), AllocError> {
+        recv.match({ None => Ok(()), Ok(base) => self.arg(be, base, 0, out) })
+    }
+
+    arg = (self: @Self, be :: CBackend, value: ExprId, i: usize,
+           out :: Inst) Res<(), AllocError> {
+        pack_slot(be.types(), self.declared).match({
+            None     => self.declared_arg(be, value, i, out),
+            Ok(slot) => self.packed_arg(be, value, i, slot, out),
+        })
+    }
+
+    declared_arg = (self: @Self, be :: CBackend, value: ExprId, i: usize,
+                    out :: Inst) Res<(), AllocError> {
+        self.declared.get(i).match({
+            None  => Ok(()),
+            Ok(d) => self.against(be, value, d, out),
+        })
+    }
+
+    // Swallowed arguments use the pack element. Forwarded packs structurally
+    // unify with the pack itself.
+    packed_arg = (self: @Self, be :: CBackend, value: ExprId, i: usize,
+                  slot: usize, out :: Inst) Res<(), AllocError> {
+        (i < slot).match({
+            true  => self.declared_arg(be, value, i, out),
+            false => self.swallowed(be, value, slot, out),
+        })
+    }
+
+    swallowed = (self: @Self, be :: CBackend, value: ExprId, slot: usize,
+                  out :: Inst) Res<(), AllocError> {
+        pack    = self.declared.get(slot).match({
+            Ok(t) => t,
+            None  => TyId(index: 0),
+        });
+        unknown = be.check.types.unknown().try();
+        actual  = be.arg_type(value, self.ctx, unknown).try();
+        unify(be, against_pack(be, pack, actual), actual, out)
+    }
+
+    against = (self: @Self, be :: CBackend, value: ExprId, d: TyId,
+               out :: Inst) Res<(), AllocError> {
+        unknown = be.check.types.unknown().try();
+        actual  = be.arg_type(value, self.ctx, unknown).try();
+        unify(be, d, actual, out)
+    }
+}
+
 complete_inst* = (
     be      :: CBackend,
     c       : Call,
@@ -43,53 +121,21 @@ complete_inst* = (
     recv    : Res<ExprId>,
     ctx     : Ctx
 )
-                Res<Inst, AllocError> {
-    be.inst_open(settled).match({
-        false => Ok(settled),
-        true  => be.inferred_inst(c, d, f, recv, ctx),
-    })
+                  Res<Inst, AllocError> {
+    InferCall(call: c, recv: recv, ctx: ctx).complete(be, d, f, settled)
 }
 
-inferred_inst = (
-    be   :: CBackend,
-    c    : Call,
-    d    : Def,
-    f    : Function,
-    recv : Res<ExprId>,
-    ctx  : Ctx
-) Res<Inst, AllocError> {
-    dctx = Ctx(
+decl_ctx = (d: Def) Ctx {
+    Ctx(
         module: d.id.module.to_usize(),
         ret: TyId(index: 0),
         has_ret: false,
         self_ty: TyId(index: 0),
         has_self: false
-    );
-    mark = be.enter_tparams(f.tparams, d.qname).try();
-    declared ::= be.alloc.Vec<TyId>();
-    be.written_params(f, dctx, declared).try();
-    found ::= be.alloc.Inst();
-    be.unify_receiver(recv, declared, ctx, found).try();
-    first = recv.match({ Ok(_) => 1, None => 0 });
-    c.args.loop((h, i, a) {
-        be.unify_arg(a.value, i + first, declared, ctx, found).try();
-    });
-    be.leave_tparams(mark).try();
-    be.settled_inst(f.tparams, d.qname, found)
+    )
 }
 
-// Parameter types AS WRITTEN, not substituted — unification needs
-// `Vec<T>`, not what some other call made of it.
-written_params = (
-    be   :: CBackend,
-    f    : Function,
-    dctx : Ctx,
-    out  :: Vec<TyId>
-) Res<(), AllocError> {
-    f.params.loop((h, p) { be.written_param(p, dctx, out).try() });
-    Ok(());
-}
-
+// Parameter types stay as written: unification needs `Vec<T>`.
 written_param = (be :: CBackend, p: Param, dctx: Ctx, out :: Vec<TyId>)
                 Res<(), AllocError> {
     p.type.match({
@@ -98,114 +144,155 @@ written_param = (be :: CBackend, p: Param, dctx: Ctx, out :: Vec<TyId>)
     })
 }
 
-// A ufcs receiver is argument zero, which is the same rule the call
-// itself obeys one function down.
-unify_receiver = (
-    be       :: CBackend,
-    recv     : Res<ExprId>,
-    declared : Vec<TyId>,
-    ctx      : Ctx,
-    out      :: Inst
-) Res<(), AllocError> {
-    recv.match({
-        None     => Ok(()),
-        Ok(base) => be.unify_arg(base, 0, declared, ctx, out),
-    })
-}
-
-unify_arg = (
-    be       :: CBackend,
-    value    : ExprId,
-    i        : usize,
-    declared : Vec<TyId>,
-    ctx      : Ctx,
-    out      :: Inst
-) Res<(), AllocError> {
-    pack_slot(be.types(), declared).match({
-        None     => be.unify_declared(value, i, declared, ctx, out),
-        Ok(slot) => be.unify_packed(value, i, slot, declared, ctx, out),
-    })
-}
-
-unify_declared = (
-    be       :: CBackend,
-    value    : ExprId,
-    i        : usize,
-    declared : Vec<TyId>,
-    ctx      : Ctx,
-    out      :: Inst
-) Res<(), AllocError> {
-    declared.get(i).match({
-        None  => Ok(()),
-        Ok(d) => be.unify_against(value, d, ctx, out),
-    })
-}
-
-// AN ARGUMENT THE PACK SWALLOWS IS UNIFIED AGAINST THE PACK'S ELEMENT,
-// which is what lets `count = <T>(v: vararg<T>)` learn `T` from
-// `count(1, 2, 3)`. Without it every swallowed argument is past the end
-// of the declared list, nothing solves `T`, and the call is refused as
-// "a generic call whose type arguments nothing settles".
-// A FORWARDED pack is unified against the pack ITSELF, and `unify`
-// already reads that structurally: `vararg<T>` against `vararg<i32>`
-// solves `T` with no case of its own here.
-unify_packed = (
-    be       :: CBackend,
-    value    : ExprId,
-    i        : usize,
-    slot     : usize,
-    declared : Vec<TyId>,
-    ctx      : Ctx,
-    out      :: Inst
-) Res<(), AllocError> {
-    (i < slot).match({
-        true  => be.unify_declared(value, i, declared, ctx, out),
-        false => be.unify_swallowed(value, slot, declared, ctx, out),
-    })
-}
-
-unify_swallowed = (
-    be       :: CBackend,
-    value    : ExprId,
-    slot     : usize,
-    declared : Vec<TyId>,
-    ctx      : Ctx,
-    out      :: Inst
-) Res<(), AllocError> {
-    pack    = declared.get(slot).match({ Ok(t) => t, None => TyId(index: 0) });
-    unknown = be.check.types.unknown().try();
-    actual  = be.arg_type(value, ctx, unknown).try();
-    unify(be, be.against_pack(pack, actual), actual, out)
-}
-
 against_pack = (be: CBackend, pack: TyId, actual: TyId) TyId {
     pack_elem(be.types(), actual).match({
         Ok(_) => pack,
-        None  => pack_elem(be.types(), pack).match({
-            Ok(e) => e,
-            None  => pack,
-        }),
+        None  => pack_elem(
+            be.types(),
+            pack
+        ).match({ Ok(e) => e, None => pack }),
     })
 }
 
-unify_against = (
-    be    :: CBackend,
-    value : ExprId,
-    d     : TyId,
-    ctx   : Ctx,
-    out   :: Inst
-) Res<(), AllocError> {
-    unknown = be.check.types.unknown().try();
-    actual  = be.arg_type(value, ctx, unknown).try();
-    unify(be, d, actual, out)
+// Keeps `(id, call, receiver, context, fallback)` out of every step in the
+// name -> definition -> declaration -> function walk.
+ReturnCall = {
+    id: ExprId,
+    call: Call,
+    recv: Res<ExprId>,
+    ctx: Ctx,
+    want: TyId,
+
+    resolve = (self: @Self, be :: CBackend) Res<TyId, AllocError> {
+        be.tree.expr_at(self.call.callee).kind.match({
+            Name(n)   => self.named(be, n.text),
+            Access(a) => self.accessed(be, a),
+            _         => Ok(self.want),
+        })
+    }
+
+    // Bound members have no `Def`; their dedicated rule runs first.
+    accessed = (self: @Self, be :: CBackend, a: Access)
+               Res<TyId, AllocError> {
+        be.fat_ret_type(self.call, a, self.ctx).try().match({
+            Ok(t) => Ok(t),
+            None  => ImplAccess(access: a, ctx: self.ctx).resolve(be).try().match({
+                Ok(t) => Ok(t),
+                None  => self.with_recv(Ok(a.base)).named(be, a.name.text),
+            }),
+        })
+    }
+
+    with_recv = (self: @Self, recv: Res<ExprId>) ReturnCall {
+        ReturnCall(
+            id: self.id,
+            call: self.call,
+            recv: recv,
+            ctx: self.ctx,
+            want: self.want
+        )
+    }
+
+    // One candidate or nothing; overload resolution remains sema's rule.
+    named = (self: @Self, be :: CBackend, name: str)
+            Res<TyId, AllocError> {
+        found ::= be.alloc.Vec<Def>();
+        be.check.world.defs_of(self.ctx.module, name, found).try();
+        found.len.match({
+            1 => found.get(0).match({
+                None  => Ok(self.want),
+                Ok(d) => self.definition(be, d),
+            }),
+            _ => Ok(self.want),
+        })
+    }
+
+    definition = (self: @Self, be :: CBackend, d: Def)
+                 Res<TyId, AllocError> {
+        decl_at(be.tree, d.id).match({
+            None    => Ok(self.want),
+            Ok(dec) => dec.kind.match({
+                Function(f) => self.function(be, d, f),
+                _           => Ok(self.want),
+            }),
+        })
+    }
+
+    function = (self: @Self, be :: CBackend, d: Def, f: Function)
+               Res<TyId, AllocError> {
+        raw      = be.inst_at(self.id).try();
+        settled  = be.settled_inst(f.tparams, d.qname, raw).try();
+        inst     = InferCall(call: self.call, recv: self.recv, ctx: self.ctx)
+            .complete(be, d, f, settled).try();
+        mark     = be.enter_tparams(f.tparams, d.qname).try();
+        declared = be.declared_ret(f, decl_ctx(d)).try();
+        be.leave_tparams(mark).try();
+        be.sub_with(declared, inst)
+    }
 }
 
-// What a call evaluates to, at the arguments' settled instantiation.
-// Sema types a generic call as its declared return (`Res<T, E>`); inside
-// a member body there's no recorded instantiation to close it, so a
-// temporary declared at that type is a C struct with an unresolved
-// element (`Res<q, AllocError>`), which `cc` rejects. The callee is
-// resolved the way lowering does, through `complete_inst`.
+// Impl-supplied member return at the receiver's concrete instantiation.
+MemberReturn = {
+    site: Site,
+    receiver: TyId,
+
+    supplied = (self: @Self, be :: CBackend, name: str)
+               Res<Res<TyId>, AllocError> {
+        found ::= be.alloc.Vec<Member>();
+        be.impl_member_at(self.site.decl, name, found).try();
+        bodied_fn(found).match({
+            None  => Ok(None),
+            Ok(f) => self.settled(be, f),
+        })
+    }
+
+    settled = (self: @Self, be :: CBackend, f: Function)
+              Res<Res<TyId>, AllocError> {
+        inst = be.recv_inst(self.receiver).try();
+        sig ::= be.alloc.Vec<TyId>();
+        be.method_sig(
+            self.receiver,
+            self.site.decl,
+            f,
+            self.site.decl.module.to_usize(),
+            inst,
+            sig
+        ).try();
+        (be.inst_open(inst) || be.any_open(sig)).match({
+            true  => Ok(None),
+            false => Ok(Ok(self.declared(be, f, inst).try())),
+        })
+    }
+
+    declared = (self: @Self, be :: CBackend, f: Function, inst: Inst)
+               Res<TyId, AllocError> {
+        sctx = be.check.self_ctx(
+            self.site.decl.module.to_usize(),
+            self.site.ty
+        ).try();
+        mark = be.enter_struct_tparams(self.site.decl).try();
+        ret  = be.declared_ret(f, sctx).try();
+        be.leave_tparams(mark).try();
+        be.sub_with(ret, inst)
+    }
+}
+
+ImplAccess = {
+    access: Access,
+    ctx: Ctx,
+
+    resolve = (self: @Self, be :: CBackend) Res<Res<TyId>, AllocError> {
+        unknown = be.check.types.unknown().try();
+        rty     = be.ty_of(self.access.base, self.ctx, unknown).try();
+        be.site_of(rty).try().match({
+            None     => Ok(None),
+            Ok(site) => MemberReturn(site: site, receiver: rty)
+                .supplied(be, self.access.name.text),
+        })
+    }
+}
+
+// What a call evaluates to at the arguments' settled instantiation.
 call_ret_type* = (
     be   :: CBackend,
     id   : ExprId,
@@ -213,199 +300,5 @@ call_ret_type* = (
     ctx  : Ctx,
     want : TyId
 ) Res<TyId, AllocError> {
-    be.tree.expr_at(c.callee).kind.match({
-        Name(n)   => be.named_ret_type(id, c, n.text, None, ctx, want),
-        Access(a) => be.access_ret_type(id, c, a, ctx, want),
-        _         => Ok(want),
-    })
-}
-
-// A bound's member isn't a declaration the World holds, so the walk
-// below finds nothing for `alloc.realloc(..)` and falls back to the
-// caller's own (unsettled) guess. `gen_c_bound.fat_ret_type` is tried
-// first since it only answers when the receiver's static type is a
-// bound with a matching member; a concrete receiver falls straight
-// through.
-access_ret_type = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    a    : Access,
-    ctx  : Ctx,
-    want : TyId
-) Res<TyId, AllocError> {
-    be.fat_ret_type(c, a, ctx).try().match({
-        Ok(t) => Ok(t),
-        None  => be.impl_ret_type(a, ctx).try().match({
-            Ok(t) => Ok(t),
-            None  => be.named_ret_type(
-                id,
-                c,
-                a.name.text,
-                Ok(a.base),
-                ctx,
-                want
-            ),
-        }),
-    })
-}
-
-// THE IMPL-SUPPLIED MEMBER SEMA LEFT OPEN. Sema types an impl member's
-// call in the BOUND's scope (`sema_supply.zen`'s `member_types`), so
-// `Vec<i32>.at(0)` is typed `Res<Var>` while the very line's lowering —
-// `supplied_or_ufcs` → `write_method_call` → `method_sig` — emits the
-// concrete symbol; a scrutinee temp declared at the open answer then
-// disagrees with the symbol beside it and `cc` refuses the pair. The
-// answer here is `method_sig`'s OWN computation of that return, at the
-// receiver's instantiation: one rule for what this call evaluates to,
-// so a temp declared from it cannot disagree with the emitted call.
-// `None` falls through — a name no impl supplies was never this case.
-impl_ret_type = (
-    be  :: CBackend,
-    a   : Access,
-    ctx : Ctx
-) Res<Res<TyId>, AllocError> {
-    unknown = be.check.types.unknown().try();
-    rty     = be.ty_of(a.base, ctx, unknown).try();
-    be.site_of(rty).try().match({
-        None  => Ok(None),
-        Ok(s) => be.supplied_ret_type(a.name.text, s, rty),
-    })
-}
-
-supplied_ret_type = (
-    be   :: CBackend,
-    name : str,
-    s    : Site,
-    rty  : TyId
-) Res<Res<TyId>, AllocError> {
-    found ::= be.alloc.Vec<Member>();
-    be.impl_member_at(s.decl, name, found).try();
-    bodied_fn(found).match({
-        None  => Ok(None),
-        Ok(f) => be.settled_member_ret(f, s, rty),
-    })
-}
-
-// The declared return with the type's parameters in scope, substituted
-// by the RECEIVER'S instantiation — the same enter/read/substitute
-// `write_method_call` runs before it mangles the symbol.
-settled_member_ret = (
-    be  :: CBackend,
-    f   : Function,
-    s   : Site,
-    rty : TyId
-) Res<Res<TyId>, AllocError> {
-    inst = be.recv_inst(rty).try();
-    sig ::= be.alloc.Vec<TyId>();
-    be.method_sig(rty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
-    (be.inst_open(inst) || be.any_open(sig)).match({
-        true  => Ok(None),
-        false => Ok(Ok(be.member_ret(f, s, inst).try())),
-    })
-}
-
-member_ret = (be :: CBackend, f: Function, s: Site, inst: Inst)
-             Res<TyId, AllocError> {
-    sctx = be.check.self_ctx(s.decl.module.to_usize(), s.ty).try();
-    mark = be.enter_struct_tparams(s.decl).try();
-    ret  = be.declared_ret(f, sctx).try();
-    be.leave_tparams(mark).try();
-    be.sub_with(ret, inst)
-}
-
-// One candidate or nothing — overload resolution is sema's rule, and
-// duplicating it here would be the worse copy the header refuses.
-named_ret_type = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
-    want : TyId
-)
-                 Res<TyId, AllocError> {
-    found ::= be.alloc.Vec<Def>();
-    be.check.world.defs_of(ctx.module, name, found).try();
-    found.len.match({
-        1 => be.sole_ret_type(id, c, found, recv, ctx, want),
-        _ => Ok(want),
-    })
-}
-
-sole_ret_type = (
-    be    :: CBackend,
-    id    : ExprId,
-    c     : Call,
-    found : Vec<Def>,
-    recv  : Res<ExprId>,
-    ctx   : Ctx,
-    want  : TyId
-)
-                Res<TyId, AllocError> {
-    found.get(0).match({
-        None  => Ok(want),
-        Ok(d) => be.def_ret_type(id, c, d, recv, ctx, want),
-    })
-}
-
-def_ret_type = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
-    want : TyId
-)
-               Res<TyId, AllocError> {
-    decl_at(be.tree, d.id).match({
-        None  => Ok(want),
-        Ok(x) => be.decl_ret_type(id, c, d, x, recv, ctx, want),
-    })
-}
-
-decl_ret_type = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
-    x    : Decl,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
-    want : TyId
-)
-                Res<TyId, AllocError> {
-    x.kind.match({
-        Function(f) => be.fn_ret_type(id, c, d, f, recv, ctx, want),
-        _           => Ok(want),
-    })
-}
-
-fn_ret_type = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
-    f    : Function,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
-    want : TyId
-)
-              Res<TyId, AllocError> {
-    raw      = be.inst_at(id).try();
-    settled  = be.settled_inst(f.tparams, d.qname, raw).try();
-    inst     = be.complete_inst(c, d, f, settled, recv, ctx).try();
-    dctx     = Ctx(
-        module: d.id.module.to_usize(),
-        ret: TyId(index: 0),
-        has_ret: false,
-        self_ty: TyId(index: 0),
-        has_self: false
-    );
-    mark     = be.enter_tparams(f.tparams, d.qname).try();
-    declared = be.declared_ret(f, dctx).try();
-    be.leave_tparams(mark).try();
-    be.sub_with(declared, inst)
+    ReturnCall(id: id, call: c, recv: None, ctx: ctx, want: want).resolve(be)
 }
