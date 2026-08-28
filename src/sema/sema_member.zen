@@ -44,6 +44,7 @@ type_from_ast, param_type = sema.sema_denote
 global_name_type, def_type = sema.sema_type
 static_value = sema.sema_static
 meta_access, meta_len_chain, is_count_chain = sema.sema_meta
+meta_name_fold, meta_refused, walk_name, WalkName = sema.sema_meta
 
 // One thing a dot could reach. `computed`: false means the type declares
 // it (has an address); true means an impl supplies it (does not).
@@ -85,6 +86,16 @@ access_type* = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
                Res<TyId, AllocError> {
     c.tree.expr_at(ac.base).kind.match({
         Meta(_) => c.meta_access(ac, ctx),
+        // A WALK BINDER AS THE BASE (`sema_meta.zen`): `field.name` is
+        // the walk's one folding access, and every other reading of
+        // either binder — `field.len`, `h.break` standing as a value —
+        // is the comptime term asked for a member it does not have.
+        // A name that is nobody's binder takes the ordinary path.
+        Name(n) => c.walk_name(n.text).match({
+            WalkNone   => c.member_access(id, node, ac, ctx),
+            WalkHandle => c.meta_refused(node),
+            WalkField  => c.meta_name_fold(id, node, ac),
+        }),
         _       => c.member_access(id, node, ac, ctx),
     })
 }

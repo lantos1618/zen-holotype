@@ -46,6 +46,8 @@ access_type, computed_member = sema.sema_member
 variant_type = sema.sema_static
 call_type = sema.sema_call
 meta_type = sema.sema_meta
+meta_refused, walk_name, walk_projection_type = sema.sema_meta
+WalkName = sema.sema_meta
 bind_stmt = sema.sema_place
 is_handle_ty, refuse_handle_at = sema.sema_handle
 check_binary, check_index, check_literal = sema.sema_trap
@@ -58,9 +60,22 @@ seed_left_spine, spine_ahead = sema.sema_spine
 type_from_ast, self_type, declared_or_alias = sema.sema_denote
 
 type_of* = (c :: Checker, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
-    c.expr_memo.get(id).match({
-        None    => c.compute_expr(id, ctx),
-        Ok(hit) => Ok(hit),
+    // A WALK'S PROJECTION IS ASKED AGAIN PER PASS (`sema_meta.zen`):
+    // while the backend lowers one pass, a marked `recv.at(field)` is
+    // the CURRENT field's type, not the memo's last one. A miss is this
+    // function's ordinary question, below.
+    c.walk_projection_type(id, ctx).try().match({
+        Ok(ty) => Ok(ty),
+        None   => c.rechecking().match({
+            // inside a walk's per-field check the memo's READ is
+            // bypassed — the body is typed again BECAUSE the answer
+            // changes per field; the write in `compute_expr` stands.
+            true  => c.compute_expr(id, ctx),
+            false => c.expr_memo.get(id).match({
+                None    => c.compute_expr(id, ctx),
+                Ok(hit) => Ok(hit),
+            }),
+        }),
     })
 }
 
@@ -208,11 +223,19 @@ literal_type* = (c :: Checker, l: Literal) Res<TyId, AllocError> {
 // A bare identifier. A local shadows everything, then the module's
 // own declarations, then what it imported — and the `*` gate is
 // inside `defs_of`, not repeated here.
+//
+// A WALK'S TWO BINDERS ARE ASKED ABOUT FIRST (`sema_meta.walk_name`):
+// their legal readings — `field.name`, `recv.at(field)`, `h.break()`,
+// `h.next()` — never reach here, so a name that still does is the
+// comptime term standing as a VALUE, and the wall answers.
 name_type* = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
             Res<TyId, AllocError> {
-    c.lookup(text).match({
-        None  => c.unbound_name_type(node, text, ctx),
-        Ok(b) => c.bound_name_type(id, b),
+    c.walk_name(text).match({
+        WalkNone => c.lookup(text).match({
+            None  => c.unbound_name_type(node, text, ctx),
+            Ok(b) => c.bound_name_type(id, b),
+        }),
+        _        => c.meta_refused(node),
     })
 }
 

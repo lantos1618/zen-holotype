@@ -59,6 +59,7 @@ CapabilityKind, capability_kind, lower_capability = gen.gen_c.gen_c_cap
 is_fat = gen.gen_c.gen_c_fat
 lower_fat_call = gen.gen_c.gen_c_bound
 lower_assoc_call = gen.gen_c.gen_c_assoc
+lower_meta_walk, lower_meta_proj = gen.gen_c.gen_c_meta
 sink_door_shape, lower_member_door = gen.gen_c.gen_c_sink
 is_floor_door, lower_floor_door = gen.gen_c.gen_c_floor
 by_arity, bodied_fn, impl_member, kept_or_arity = gen.gen_c.gen_c_impl
@@ -87,6 +88,29 @@ Dot = {
 // decision, and dropping it here is how an annotated binding compiled
 // against a payload nothing agreed to (#784).
 lower_dot_call* = (
+    be   :: CBackend,
+    id   : ExprId,
+    c    : Call,
+    a    : Access,
+    ctx  : Ctx,
+    want : TyId,
+    out  :: String
+) Res<(), AllocError> {
+    // THE FIELD WALK AND ITS PROJECTION ARE ASKED ABOUT FIRST
+    // (`gen_c_meta.zen`): sema marked both — `meta_walks` carries the
+    // names to unroll over, `meta_projs` marks a `recv.at(field)` —
+    // and neither has an ordinary dot-call reading to fall into. Every
+    // other call takes the path it always has.
+    be.check.meta_walk_of(id).match({
+        Ok(names) => be.lower_meta_walk(id, c, names, ctx, out),
+        None      => be.check.meta_proj(id).match({
+            true  => be.lower_meta_proj(id, a, ctx, want, out),
+            false => be.lower_marked_dot(id, c, a, ctx, want, out),
+        }),
+    })
+}
+
+lower_marked_dot = (
     be   :: CBackend,
     id   : ExprId,
     c    : Call,

@@ -1,0 +1,33 @@
+// M4 SLICE 2'S HYGIENE GATE (`docs/design_meta.md` §7, M4 slice 2):
+// the walk's binders are recognised BY THEIR DECLARATION, not their
+// spelling — `sema_meta.walk_name` compares the resolved binding's span
+// against the parameters' own, so a body that rebinds `field` or a
+// nested loop that rebinds `h` shadows the walk's meaning instead of
+// inheriting it. Inside the nested block `field` is an ordinary `i64`
+// local (a comptime term would refuse to print); inside the inner loop
+// `h` is the RANGE's handle; after both, the walk's own readings fold
+// again.
+//
+// The oracle pins the order: each pass runs the shadow, the inner loop
+// and the fold in turn, so a binder that leaked either way — the local
+// folding, or the fold reading the local — moves text.
+
+Row = {
+    n: i64,
+    tag: str,
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    r = Row(n: 5, tag: "t");
+    @meta(row: Row).fields().loop((h, field) {
+        {
+            field ::= 41;
+            println("shadow {}", field);
+        }
+        Range(0, 2).loop((h, i) {
+            println("inner {}", i);
+        });
+        println("outer {}={}", field.name, r.at(field));
+    });
+    Ok(0);
+}

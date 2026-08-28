@@ -1078,9 +1078,24 @@ lower_meta_or_access* = (
             }),
             None  => be.lower_access(id, a, ctx, want, out),
         }),
-        _       => be.check.is_count_chain(a).match({
-            true  => be.chain_count(a.base, out),
-            false => be.lower_access(id, a, ctx, want, out),
+        _       => be.check.meta_name_read(id).match({
+            // A WALK'S `field.name` (`gen_c_meta.zen`): sema marked the
+            // access, and the text it folds to is the CURRENT pass's
+            // field — `walk_now`'s top — lowered as the ordinary string
+            // literal `lower_meta_name` already writes. A marker with no
+            // walk being lowered is a bug in the dispatch, said so.
+            true  => be.check.walk_field_now().match({
+                Ok(text) => lower_meta_name(text, out),
+                None     => be.unsupported(
+                    id,
+                    "a field-name fold with no walk on the lowering stack",
+                    out
+                ),
+            }),
+            false => be.check.is_count_chain(a).match({
+                true  => be.chain_count(a.base, out),
+                false => be.lower_access(id, a, ctx, want, out),
+            }),
         }),
     })
 }

@@ -80,6 +80,23 @@ Binding* = {
     span*: Span,
 }
 
+// THE ACTIVE FIELD WALK'S TWO BINDERS. M4's `@meta(name: T).fields()
+// .loop((h, field) { .. })` checks its body once per field, and while it
+// does, this row is what a use of `h` or `field` is judged against:
+// `field.name` folds, `recv.at(field)` projects, `h.break()`/`h.next()`
+// are the loop's own verbs, and every other reading is refused
+// (`sema_meta.zen`). The spans are the parameters' OWN, so a body that
+// rebinds either name shadows the row rather than matching it —
+// `lookup` finds the new binding and its span answers for it.
+// `field` is the CURRENT field's name: the comptime half of the row.
+WalkBind* = {
+    h_name*: str,
+    h_span*: Span,
+    f_name*: str,
+    f_span*: Span,
+    field*: str,
+}
+
 // What a query needs to know that its key does not carry.
 //
 // A node id names a node; it does not say which module the node is in,
@@ -128,6 +145,51 @@ Checker* = {
     // The backend reads it back through `meta_count_of`, handing over
     // the `Meta` node's own type field.
     meta_count_memo* :: Map<TypeId, usize>,
+
+    // WHICH CALLS ARE THE FIELD WALK, AND THE NAMES THEY UNROLL OVER.
+    // `@meta(name: T).fields().loop((h, field) { .. })` is checked ONCE
+    // PER FIELD at sema time (`sema_meta.meta_walk_chain`) and lowered
+    // as one unrolled block per name — this row is what carries the
+    // name list from the one phase to the other. Keyed on the CALL's
+    // own node: the walk is a fact about a site, not about a type, so
+    // no written-type keying is owed. A miss means "not a walk".
+    meta_walks* :: Map<ExprId, Vec<str>>,
+
+    // WHICH ACCESSES ARE A WALK'S `field.name` READ. The fold itself is
+    // not recorded — the name it folds to changes with every pass, and
+    // the backend reads the CURRENT one off `walk_now` while it lowers
+    // that pass. Presence IS the answer; a miss means the ordinary
+    // member path.
+    meta_name_reads* :: Map<ExprId, bool>,
+
+    // WHICH CALLS ARE A WALK'S INSTANCE PROJECTION `recv.at(field)`.
+    // Same discipline as `meta_name_reads`: the marker is recorded at
+    // sema, the per-pass field type and the field's spelling are
+    // recomputed or read fresh at lowering, from `walk_now`.
+    meta_projs* :: Map<ExprId, bool>,
+
+    // THE ACTIVE WALK'S BINDER ROW, while sema checks a pass. A stack
+    // of one by construction — a nested walk is REFUSED rather than
+    // pushed (no recursion into the evaluator, so no step budget is
+    // owed; `docs/design_meta.md` §8) — kept a Vec so the refusal has
+    // something to ask.
+    walk_stack :: Vec<WalkBind>,
+
+    // THE FIELD THE BACKEND IS LOWERING A PASS FOR. Sema never pushes
+    // here; gen_c does, once per unrolled block, and the two read-back
+    // questions that change answer per pass — the projection's type
+    // (`walk_projection_type`) and the `field.name` fold — read the
+    // top. A stack because a walk body may contain an ordinary loop,
+    // which contains no push of its own: the top stays the walk's.
+    walk_now :: Vec<str>,
+
+    // RE-CHECK DEPTH. While a walk's body is being checked once per
+    // field, `type_of` must not answer from the memo — the body's nodes
+    // are typed again BECAUSE the answer changes per field — so a
+    // nonzero depth bypasses the memo READ. The write stands
+    // (`compute_expr` is untouched), which is what leaves the last
+    // pass's rows for the backend to start from.
+    meta_recheck :: usize,
 
     // WHICH TYPE SUPPLIED THIS FIELD READ — the bound that promised it,
     // or the receiver's own declaration. "The bound in scope selects
@@ -271,6 +333,73 @@ Checker* = {
     meta_count_of* = (self: @Self, t: TypeId) Res<usize> {
         self.meta_count_memo.get(t)
     }
+
+    // The field names an `@meta(..).fields().loop(..)` walk unrolls
+    // over, in declaration order, if the call is one. A miss means the
+    // ordinary lowering applies.
+    meta_walk_of* = (self: @Self, id: ExprId) Res<Vec<str>> {
+        self.meta_walks.get(id)
+    }
+
+    // Whether this access is a walk's `field.name` fold. Presence IS
+    // the answer; a miss means the ordinary member path.
+    meta_name_read* = (self: @Self, id: ExprId) bool {
+        self.meta_name_reads.get(id).match({ Ok(_) => true, None => false })
+    }
+
+    // Whether this call is a walk's `recv.at(field)` projection.
+    meta_proj* = (self: @Self, id: ExprId) bool {
+        self.meta_projs.get(id).match({ Ok(_) => true, None => false })
+    }
+
+    // The active walk's binder row, while sema checks a pass. A miss
+    // means no walk is being checked — the ordinary answer for every
+    // name the program was written with.
+    walk_row* = (self: @Self) Res<WalkBind> {
+        self.walk_stack.len.match({
+            0 => None,
+            n => self.walk_stack.get(n - 1),
+        })
+    }
+
+    push_walk* = (self :: @Self, b: WalkBind) Res<(), AllocError> {
+        self.walk_stack.add(b)
+    }
+
+    pop_walk* = (self :: @Self) () {
+        self.walk_stack.take(self.walk_stack.len - 1);
+    }
+
+    // The field the backend is lowering a pass for, pushed once per
+    // unrolled block. A miss means no walk is being lowered.
+    push_walk_now* = (self :: @Self, name: str) Res<(), AllocError> {
+        self.walk_now.add(name)
+    }
+
+    pop_walk_now* = (self :: @Self) () {
+        self.walk_now.take(self.walk_now.len - 1);
+    }
+
+    walk_field_now* = (self: @Self) Res<str> {
+        self.walk_now.len.match({
+            0 => None,
+            n => self.walk_now.get(n - 1),
+        })
+    }
+
+    // The re-check depth, as a predicate: true while a walk's body is
+    // being checked once per field, which is when `type_of` must not
+    // answer from the memo.
+    rechecking* = (self: @Self) bool { self.meta_recheck > 0 }
+
+    enter_recheck* = (self :: @Self) () {
+        self.meta_recheck = self.meta_recheck + 1;
+    }
+
+    leave_recheck* = (self :: @Self) () {
+        self.meta_recheck = self.meta_recheck - 1;
+    }
+
 
     // THE FOLD'S TYPE, OUT LOUD. The count is a comptime `usize` at its
     // own site — not a literal waiting for context — so a print hole or
@@ -936,6 +1065,12 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         type_memo: a.Map<TypeId, TyId>(),
         meta_memo: a.Map<TypeId, str>(),
         meta_count_memo: a.Map<TypeId, usize>(),
+        meta_walks: a.Map<ExprId, Vec<str>>(),
+        meta_name_reads: a.Map<ExprId, bool>(),
+        meta_projs: a.Map<ExprId, bool>(),
+        walk_stack: a.Vec<WalkBind>(),
+        walk_now: a.Vec<str>(),
+        meta_recheck: 0,
         supply_memo: a.Map<ExprId, TyId>(),
         call_memo: a.Map<ExprId, DeclId>(),
         param_memo: a.Map<ExprId, bool>(),
