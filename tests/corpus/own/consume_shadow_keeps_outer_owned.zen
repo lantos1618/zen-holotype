@@ -1,0 +1,26 @@
+// `consume x` retires the NEAREST x, and no other. an inner shadow's
+// move used to clear the live flag of every tracked binding with the
+// name, so the outer one's value was nobody's at scope exit and its
+// drop never ran.
+//
+// the shadow needs `::=`: a bare `x = ..` on a bound name is a store
+// into the outer slot, not a new binding (gen_c_stmt.zen's is_store).
+
+Noisy = {
+    env: Env,
+    tag: str,
+}
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.tag) }
+})
+
+main = (env: Env) Res<i32, IoError> {
+    x = Noisy(env: env, tag: "outer");
+    {
+        x ::= Noisy(env: env, tag: "inner");
+        y = consume x;
+    }
+    println("after block");
+    Ok(0);
+}

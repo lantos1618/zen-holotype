@@ -215,15 +215,23 @@ open_live_flag = (be :: CBackend) Res<usize, AllocError> {
 
 // `consume x` — x is somebody else's now, so this frame must not drop
 // it. The nearest tracked binding of that name wins, which is the same
-// one `slot_of` would have found.
+// one `slot_of` would have found — and ONLY that one: clearing every
+// entry with the name disarms the drop of an outer binding the inner
+// shadow stood in front of, and that value leaks at scope exit.
 release_binding* = (be :: CBackend, name: str) Res<(), AllocError> {
     n = be.drop_count();
-    Range(0, n).loop((h, k) {
-        be.drop_at(n - 1 - k).match({
+    Range(0, n).find((k) {
+        be.drop_at(n - k - 1).match({
+            Ok(e) => e.name.eq(name),
+            None  => false,
+        })
+    }).match({
+        None  => Ok(()),
+        Ok(k) => be.drop_at(n - k - 1).match({
             None  => Ok(()),
             Ok(e) => be.clear_if_named(e, name),
-        }).try();
-    });
+        }),
+    }).try();
     Ok(());
 }
 
