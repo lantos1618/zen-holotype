@@ -79,6 +79,74 @@ elem_of = (be :: CBackend, rty: TyId) Res<TyId, AllocError> {
 // `src.back(8)` moves back thirty-two bytes. The answers are the same
 // ones the lowerings below write, read off the same two facts: the
 // receiver's element type, and the written type argument.
+PtrTypeSite = {
+    c: Call,
+    name: str,
+    rty: TyId,
+    ctx: Ctx,
+    want: TyId,
+
+    resolve = (self: @Self, be :: CBackend) Res<TyId, AllocError> {
+        et = be.elem_of(self.rty).try();
+        self.name.eq("read").match({
+            true  => Ok(et),
+            false => self.after_read(be),
+        })
+    }
+
+    after_read = (self: @Self, be :: CBackend) Res<TyId, AllocError> {
+        (self.name.eq("offset") || self.name.eq("back")).match({
+            true  => Ok(self.rty),
+            false => self.after_shift(be),
+        })
+    }
+
+    after_shift = (self: @Self, be :: CBackend) Res<TyId, AllocError> {
+        self.name.eq("bytes").match({
+            true  => be.check.types.prim("usize"),
+            false => self.after_bytes(be),
+        })
+    }
+
+    after_bytes = (self: @Self, be :: CBackend) Res<TyId, AllocError> {
+        self.name.eq("is_null").match({
+            true  => be.check.types.prim("bool"),
+            false => self.after_null(be),
+        })
+    }
+
+    after_null = (self: @Self, be :: CBackend) Res<TyId, AllocError> {
+        self.name.eq("to").match({
+            false => be.check.types.prim("()"),
+            true  => self.target_type(be),
+        })
+    }
+
+    target_type = (self: @Self, be :: CBackend) Res<TyId, AllocError> {
+        self.target_ptr(be).try().match({
+            Ok(pt) => Ok(pt),
+            None   => Ok(self.want),
+        })
+    }
+
+    target_ptr = (self: @Self, be :: CBackend)
+                 Res<Res<TyId>, AllocError> {
+        self.c.targs.get(0).match({
+            Ok(t) => self.ptr_of_written(be, t),
+            None  => Ok(be.keep_ptr(self.want)),
+        })
+    }
+
+    ptr_of_written = (self: @Self, be :: CBackend, t: TypeId)
+                     Res<Res<TyId>, AllocError> {
+        u = sub(be, be.check.type_from_ast(t, self.ctx).try()).try();
+        be.check.types.at(self.rty).match({
+            Named(n) => Ok(Ok(be.ptr_at(n, u).try())),
+            _        => Ok(None),
+        })
+    }
+}
+
 ptr_member_type* = (
     be   :: CBackend,
     c    : Call,
@@ -87,85 +155,167 @@ ptr_member_type* = (
     ctx  : Ctx,
     want : TyId
 ) Res<TyId, AllocError> {
-    et = be.elem_of(rty).try();
-    a.name.text.eq("read").match({
-        true  => Ok(et),
-        false => be.ptr_type_2(c, a, rty, ctx, want),
-    })
-}
-
-// `offset` and `back` answer with the pointer itself; `write` and
-// `copy_from` answer with nothing at all.
-ptr_type_2 = (
-    be   :: CBackend,
-    c    : Call,
-    a    : Access,
-    rty  : TyId,
-    ctx  : Ctx,
-    want : TyId
-) Res<TyId, AllocError> {
-    (a.name.text.eq("offset") || a.name.text.eq("back")).match({
-        true  => Ok(rty),
-        false => be.ptr_type_3(c, a, rty, ctx, want),
-    })
-}
-
-ptr_type_3 = (
-    be   :: CBackend,
-    c    : Call,
-    a    : Access,
-    rty  : TyId,
-    ctx  : Ctx,
-    want : TyId
-) Res<TyId, AllocError> {
-    a.name.text.eq("bytes").match({
-        true  => be.check.types.prim("usize"),
-        false => be.ptr_type_4(c, a, rty, ctx, want),
-    })
-}
-
-ptr_type_4 = (
-    be   :: CBackend,
-    c    : Call,
-    a    : Access,
-    rty  : TyId,
-    ctx  : Ctx,
-    want : TyId
-) Res<TyId, AllocError> {
-    a.name.text.eq("is_null").match({
-        true  => be.check.types.prim("bool"),
-        false => be.ptr_type_5(c, a, rty, ctx, want),
-    })
-}
-
-ptr_type_5 = (
-    be   :: CBackend,
-    c    : Call,
-    a    : Access,
-    rty  : TyId,
-    ctx  : Ctx,
-    want : TyId
-) Res<TyId, AllocError> {
-    a.name.text.eq("to").match({
-        false => be.check.types.prim("()"),
-        true  => be.ptr_target_type(c, rty, ctx, want),
-    })
-}
-
-ptr_target_type = (
-    be   :: CBackend,
-    c    : Call,
-    rty  : TyId,
-    ctx  : Ctx,
-    want : TyId
-) Res<TyId, AllocError> {
-    be.target_ptr(c, rty, ctx, want).try().match({
-        Ok(pt) => Ok(pt),
-        None   => Ok(want),
-    })
+    PtrTypeSite(c: c, name: a.name.text, rty: rty, ctx: ctx, want: want)
+        .resolve(be)
 }
 
 // the nine
+
+// Stable facts for one pointer member call. The backend and destination
+// remain borrowed because both are mutated during emission.
+PtrCall = {
+    id: ExprId,
+    site: PtrTypeSite,
+    et: TyId,
+    base: str,
+
+    lower = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError> {
+        self.site.name.eq("read").match({
+            true  => self.read(be, out),
+            false => self.after_read(be, out),
+        })
+    }
+
+    after_read = (self: @Self, be :: CBackend, out :: String)
+                 Res<(), AllocError> {
+        self.site.name.eq("write").match({
+            true  => self.write(be, out),
+            false => self.after_write(be, out),
+        })
+    }
+
+    after_write = (self: @Self, be :: CBackend, out :: String)
+                  Res<(), AllocError> {
+        self.site.name.eq("offset").match({
+            true  => self.shift(be, " + ", out),
+            false => self.after_offset(be, out),
+        })
+    }
+
+    after_offset = (self: @Self, be :: CBackend, out :: String)
+                   Res<(), AllocError> {
+        self.site.name.eq("back").match({
+            true  => self.shift(be, " - ", out),
+            false => self.after_back(be, out),
+        })
+    }
+
+    after_back = (self: @Self, be :: CBackend, out :: String)
+                 Res<(), AllocError> {
+        self.site.name.eq("bytes").match({
+            true  => self.byte_size(be, out),
+            false => self.after_bytes(be, out),
+        })
+    }
+
+    after_bytes = (self: @Self, be :: CBackend, out :: String)
+                  Res<(), AllocError> {
+        self.site.name.eq("copy_from").match({
+            true  => self.copy_from(be, out),
+            false => self.after_copy(be, out),
+        })
+    }
+
+    after_copy = (self: @Self, be :: CBackend, out :: String)
+                 Res<(), AllocError> {
+        self.site.name.eq("is_null").match({
+            true  => out.fmt("({} == NULL)", self.base),
+            false => self.reinterpret(be, out),
+        })
+    }
+
+    read = (self: @Self, be :: CBackend, out :: String)
+           Res<(), AllocError> {
+        self.run(be, out).try();
+        out.add_bytes("[").try();
+        self.index_arg(be, 0, out).try();
+        out.add_bytes("]").try();
+        Ok(())
+    }
+
+    write = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError> {
+        ptr ::= be.alloc.String().try();
+        self.run(be, ptr).try();
+        idx ::= be.alloc.String().try();
+        self.index_arg(be, 0, idx).try();
+        val ::= be.alloc.String().try();
+        self.value_arg(be, 1, self.et, val).try();
+        be.fmt("{}[{}] = {};\n", ptr.view(), idx.view(), val.view()).try();
+        out.add_bytes("0")
+    }
+
+    run = (self: @Self, be :: CBackend, out :: String)
+          Res<(), AllocError> {
+        be.request_type(self.et).try();
+        out.add_bytes(self.base).try();
+        Ok(())
+    }
+
+    shift = (self: @Self, be :: CBackend, op: str, out :: String)
+            Res<(), AllocError> {
+        count ::= be.alloc.String().try();
+        self.index_arg(be, 0, count).try();
+        out.fmt("({}{}({}))", self.base, op, count.view())
+    }
+
+    byte_size = (self: @Self, be :: CBackend, out :: String)
+                Res<(), AllocError> {
+        be.request_type(self.et).try();
+        count ::= be.alloc.String().try();
+        self.index_arg(be, 0, count).try();
+        cty ::= be.alloc.String().try();
+        be.ctype(self.et, cty).try();
+        out.fmt("(({}) * sizeof({}))", count.view(), cty.view())
+    }
+
+    copy_from = (self: @Self, be :: CBackend, out :: String)
+                Res<(), AllocError> {
+        from ::= be.alloc.String().try();
+        self.value_arg(be, 0, self.site.rty, from).try();
+        n ::= be.alloc.String().try();
+        self.count_bytes(be, n).try();
+        be.fmt(
+            "memcpy((void *){}, (const void *)({}), {});\n",
+            self.base,
+            from.view(),
+            n.view()
+        ).try();
+        out.add_bytes("0")
+    }
+
+    count_bytes = (self: @Self, be :: CBackend, out :: String)
+                  Res<(), AllocError> {
+        count ::= be.alloc.String().try();
+        self.index_arg(be, 1, count).try();
+        cty ::= be.alloc.String().try();
+        be.ctype(self.et, cty).try();
+        out.fmt("(({}) * sizeof({}))", count.view(), cty.view())
+    }
+
+    reinterpret = (self: @Self, be :: CBackend, out :: String)
+                  Res<(), AllocError> {
+        self.site.target_ptr(be).try().match({
+            Ok(pt) => be.write_reinterpret(pt, self.base, out),
+            None   => be.untyped(self.id, "to", out),
+        })
+    }
+
+    index_arg = (self: @Self, be :: CBackend, i: usize, out :: String)
+                Res<(), AllocError> {
+        usize_ty = be.check.types.prim("usize").try();
+        self.value_arg(be, i, usize_ty, out)
+    }
+
+    value_arg = (self: @Self, be :: CBackend, i: usize, want: TyId,
+                 out :: String) Res<(), AllocError> {
+        self.site.c.args.get(i).match({
+            Ok(a) => expr(be, a.value, self.site.ctx, want, out),
+            None  => out.add_bytes("0"),
+        })
+    }
+}
 
 lower_ptr_member* = (
     be   :: CBackend,
@@ -181,140 +331,8 @@ lower_ptr_member* = (
     et = be.elem_of(rty).try();
     base ::= be.alloc.String().try();
     be.address(a.base, rty, ctx, base).try();
-    verb(be, id, c, a.name.text, rty, et, base.view(), ctx, want, out)
-}
-
-verb = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    rty  : TyId,
-    et   : TyId,
-    base : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-)
-       Res<(), AllocError> {
-    name.eq("read").match({
-        true  => be.read_at(c, et, base, ctx, out),
-        false => be.verb_2(id, c, name, rty, et, base, ctx, want, out),
-    })
-}
-
-verb_2 = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    rty  : TyId,
-    et   : TyId,
-    base : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-)
-         Res<(), AllocError> {
-    name.eq("write").match({
-        true  => write_at(be, c, et, base, ctx, out),
-        false => be.verb_3(id, c, name, rty, et, base, ctx, want, out),
-    })
-}
-
-verb_3 = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    rty  : TyId,
-    et   : TyId,
-    base : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-)
-         Res<(), AllocError> {
-    name.eq("offset").match({
-        true  => be.shift(c, rty, et, base, " + ", ctx, out),
-        false => be.verb_4(id, c, name, rty, et, base, ctx, want, out),
-    })
-}
-
-verb_4 = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    rty  : TyId,
-    et   : TyId,
-    base : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-)
-         Res<(), AllocError> {
-    name.eq("back").match({
-        true  => be.shift(c, rty, et, base, " - ", ctx, out),
-        false => be.verb_5(id, c, name, rty, et, base, ctx, want, out),
-    })
-}
-
-verb_5 = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    rty  : TyId,
-    et   : TyId,
-    base : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-)
-         Res<(), AllocError> {
-    name.eq("bytes").match({
-        true  => be.byte_size(c, et, ctx, out),
-        false => be.verb_6(id, c, name, rty, et, base, ctx, want, out),
-    })
-}
-
-verb_6 = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    rty  : TyId,
-    et   : TyId,
-    base : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-)
-         Res<(), AllocError> {
-    name.eq("copy_from").match({
-        true  => be.copy_run(c, rty, et, base, ctx, out),
-        false => be.verb_7(id, c, name, rty, et, base, ctx, want, out),
-    })
-}
-
-verb_7 = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    rty  : TyId,
-    et   : TyId,
-    base : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-)
-         Res<(), AllocError> {
-    name.eq("is_null").match({
-        true  => null_test(base, out),
-        false => be.reinterpret(id, c, rty, base, ctx, want, out),
-    })
+    site = PtrTypeSite(c: c, name: a.name.text, rty: rty, ctx: ctx, want: want);
+    PtrCall(id: id, site: site, et: et, base: base.view()).lower(be, out)
 }
 
 // The pointer itself. Parenthesised because the receiver is an
@@ -332,162 +350,11 @@ address = (
     Ok(());
 }
 
-// `p.read(i)` is C's `p[i]`, with the scaling the cast supplies.
-read_at = (
-    be   :: CBackend,
-    c    : Call,
-    et   : TyId,
-    base : str,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError> {
-    be.run(et, base, out).try();
-    out.add_bytes("[").try();
-    be.index_arg(c, 0, ctx, out).try();
-    out.add_bytes("]").try();
-    Ok(());
-}
-
-// A STORE IS A STATEMENT and the call it came from is an expression, so
-// the assignment goes to the buffer and a `0` goes where the value would
-// have been — the same shape `h.break` uses, and nothing reads that `0`
-// because `write` answers `()`.
-write_at = (
-    be   :: CBackend,
-    c    : Call,
-    et   : TyId,
-    base : str,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError> {
-    ptr ::= be.alloc.String().try();
-    be.run(et, base, ptr).try();
-    idx ::= be.alloc.String().try();
-    be.index_arg(c, 0, ctx, idx).try();
-    val ::= be.alloc.String().try();
-    be.value_arg(c, 1, et, ctx, val).try();
-    be.fmt("{}[{}] = {};\n", ptr.view(), idx.view(), val.view()).try();
-    out.add_bytes("0")
-}
-
-// The run, ready to index. Already a `T *`, so there is nothing to cast.
-run = (be :: CBackend, et: TyId, base: str, out :: String)
-      Res<(), AllocError> {
-    be.request_type(et).try();
-    out.add_bytes(base).try();
-    Ok(());
-}
-
-// `offset` and `back`: a new `Ptr<T>` `count` ELEMENTS along. The
-// arithmetic is on the byte address, which is why the element size is
-// spelled — a `usize` has no negative, so `back` is a separate word and
-// not a sign.
-shift = (
-    be   :: CBackend,
-    c    : Call,
-    rty  : TyId,
-    et   : TyId,
-    base : str,
-    op   : str,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError> {
-    count ::= be.alloc.String().try();
-    be.index_arg(c, 0, ctx, count).try();
-    out.fmt("({base}{op}({}))", count.view())
-}
-
-// `count` elements, in bytes — the header's `sizeof` rule.
-byte_size = (be :: CBackend, c: Call, et: TyId, ctx: Ctx, out :: String)
-            Res<(), AllocError> {
-    be.request_type(et).try();
-    count ::= be.alloc.String().try();
-    be.index_arg(c, 0, ctx, count).try();
-    cty ::= be.alloc.String().try();
-    be.ctype(et, cty).try();
-    out.fmt("(({}) * sizeof({}))", count.view(), cty.view())
-}
-
-// The runs may not overlap — "an allocator growing a run always has a
-// fresh destination, and that is the only caller in std" — so this is
-// `memcpy` and not `memmove`.
-copy_run = (
-    be   :: CBackend,
-    c    : Call,
-    rty  : TyId,
-    et   : TyId,
-    base : str,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError> {
-    from ::= be.alloc.String().try();
-    be.value_arg(c, 0, rty, ctx, from).try();
-    n ::= be.alloc.String().try();
-    be.count_bytes(c, et, ctx, n).try();
-    be.fmt(
-        "memcpy((void *){base}, (const void *)({}), {});\n",
-        from.view(),
-        n.view()
-    ).try();
-    out.add_bytes("0")
-}
-
-count_bytes = (be :: CBackend, c: Call, et: TyId, ctx: Ctx, out :: String)
-              Res<(), AllocError> {
-    count ::= be.alloc.String().try();
-    be.index_arg(c, 1, ctx, count).try();
-    cty ::= be.alloc.String().try();
-    be.ctype(et, cty).try();
-    out.fmt("(({}) * sizeof({}))", count.view(), cty.view())
-}
-
-null_test = (base: str, out :: String) Res<(), AllocError> {
-    out.fmt("({base} == NULL)")
-}
-
-// `to<U>()`: the same address, a different element type. The WRITTEN
-// type argument decides, which is the whole of the fix recorded at the
-// top of this file.
-reinterpret = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    rty  : TyId,
-    base : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    be.target_ptr(c, rty, ctx, want).try().match({
-        Ok(pt) => be.write_reinterpret(pt, base, out),
-        None   => be.untyped(id, "to", out),
-    })
-}
-
-// `Ptr<U>`, interned the way every other named type is: the receiver's
-// own declaration applied to the written argument.
-target_ptr = (be :: CBackend, c: Call, rty: TyId, ctx: Ctx, want: TyId)
-             Res<Res<TyId>, AllocError> {
-    c.targs.get(0).match({
-        Ok(t) => be.ptr_of_written(t, rty, ctx),
-        None  => Ok(be.keep_ptr(want)),
-    })
-}
-
 // A `to<U>` with no written argument can only mean the expectation, and
 // only when that expectation is a `Ptr` — anything else is a type the
 // backend would be inventing.
 keep_ptr = (be :: CBackend, want: TyId) Res<TyId> {
     be.named_ptr(want).match({ true => Ok(want), false => None })
-}
-
-ptr_of_written = (be :: CBackend, t: TypeId, rty: TyId, ctx: Ctx)
-                 Res<Res<TyId>, AllocError> {
-    u = sub(be, be.check.type_from_ast(t, ctx).try()).try();
-    be.check.types.at(rty).match({
-        Named(n) => Ok(Ok(be.ptr_at(n, u).try())),
-        _        => Ok(None),
-    })
 }
 
 // THE SAME `Ptr` DECLARATION AT ANOTHER ELEMENT TYPE. `to<U>` builds one
@@ -514,28 +381,6 @@ write_reinterpret = (be :: CBackend, pt: TyId, base: str, out :: String)
     cty ::= be.alloc.String().try();
     be.ctype(pt, cty).try();
     out.fmt("(({}){base})", cty.view())
-}
-
-// arguments
-
-index_arg = (be :: CBackend, c: Call, i: usize, ctx: Ctx, out :: String)
-            Res<(), AllocError> {
-    usize_ty = be.check.types.prim("usize").try();
-    be.value_arg(c, i, usize_ty, ctx, out)
-}
-
-value_arg = (
-    be   :: CBackend,
-    c    : Call,
-    i    : usize,
-    want : TyId,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError> {
-    c.args.get(i).match({
-        Ok(a) => expr(be, a.value, ctx, want, out),
-        None  => out.add_bytes("0"),
-    })
 }
 
 // `null_ptr<T>()`
