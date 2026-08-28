@@ -1,0 +1,53 @@
+translate_ast = zen.zen_c_translate
+
+good_ast = (a: Alloc) Res<String, AllocError> {
+    out ::= a.String().try();
+    out.add_bytes("{\"inner\":[").try();
+    out.add_bytes(
+        "{\"kind\":\"FunctionDecl\",\"loc\":{},\"name\":\"zen_add\",\"type\":{\"qualType\":\"int (int, unsigned long)\"},\"inner\":["
+    ).try();
+    out.add_bytes(
+        "{\"kind\":\"ParmVarDecl\",\"name\":\"lhs\",\"type\":{\"qualType\":\"int\"}},"
+    ).try();
+    out.add_bytes(
+        "{\"kind\":\"ParmVarDecl\",\"name\":\"rhs\",\"type\":{\"qualType\":\"unsigned long\"}}]},"
+    ).try();
+    out.add_bytes(
+        "{\"kind\":\"FunctionDecl\",\"loc\":{},\"name\":\"zen_alloc\",\"type\":{\"qualType\":\"void *(unsigned long)\"},\"inner\":["
+    ).try();
+    out.add_bytes(
+        "{\"kind\":\"ParmVarDecl\",\"name\":\"n\",\"type\":{\"qualType\":\"unsigned long\"}}]},"
+    ).try();
+    out.add_bytes(
+        "{\"kind\":\"FunctionDecl\",\"loc\":{\"includedFrom\":{}},\"name\":\"transitive\",\"type\":{\"qualType\":\"int (void)\"}}]} "
+    ).try();
+    Ok(out)
+}
+
+bad_ast = (a: Alloc) Res<String, AllocError> {
+    out ::= a.String().try();
+    out.add_bytes(
+        "{\"inner\":[{\"kind\":\"FunctionDecl\",\"loc\":{},\"name\":\"callback\",\"type\":{\"qualType\":\"int (void (*)(int))\"},\"inner\":[{\"kind\":\"ParmVarDecl\",\"name\":\"cb\",\"type\":{\"qualType\":\"void (*)(int)\"}}]}]}"
+    ).try();
+    Ok(out)
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    good_json = good_ast(a).try();
+    good      = translate_ast(a, good_json.view()).match({
+        Ok(module) => {
+            println("declarations={}", module.declarations);
+            println("{}", module.source.view());
+            true
+        },
+        Err(e)     => false,
+    });
+    bad_json  = bad_ast(a).try();
+    refused   = translate_ast(a, bad_json.view()).match({
+        Err(UnsupportedType(name)) => name.eq("void (*)(int)"),
+        _                          => false,
+    });
+    println("good={} precise-refusal={}", good, refused);
+    Ok(0)
+}

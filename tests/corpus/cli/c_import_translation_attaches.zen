@@ -1,0 +1,111 @@
+CImport, Target, Os, Arch, Abi = std.build
+Ast, ModuleOrigin = std.ast
+CImportRequest, request = zen.zen_c_import
+CModule, CTranslation, CAttachedTranslation, attach, translate_ast = zen.zen_c_translate
+
+spec = (a: Alloc) Res<CImport, AllocError> {
+    headers ::= a.Vec<str>();
+    headers.add("demo.h").try();
+    Ok(CImport(
+        headers: headers,
+        include_paths: a.Vec<str>(),
+        defines: a.Vec<str>(),
+        libraries: a.Vec<str>(),
+        target: Target(os: Os.Linux, arch: Arch.X86_64, abi: Abi.Gnu)
+    ))
+}
+
+translation = (a: Alloc, req: CImportRequest)
+              Res<CTranslation, AllocError> {
+    json   = "{\"inner\":[{\"kind\":\"FunctionDecl\",\"loc\":{},\"name\":\"demo_read\",\"type\":{\"qualType\":\"int (void *)\"},\"inner\":[{\"kind\":\"ParmVarDecl\",\"name\":\"data\",\"type\":{\"qualType\":\"void *\"}}]}]}";
+    module = translate_ast(a, json).match({
+        Ok(value) => value,
+        Err(e)    => CModule(source: a.String().try(), declarations: 0),
+    });
+    Ok(CTranslation(module: module, identity: req.identity))
+}
+
+bad_translation = (a: Alloc, req: CImportRequest)
+                  Res<CTranslation, AllocError> {
+    source = a.String("broken = (").try();
+    Ok(CTranslation(
+        module: CModule(source: source, declarations: 1),
+        identity: req.identity
+    ))
+}
+
+show = (result: CAttachedTranslation, tree: Ast, req: CImportRequest) () {
+    binding = tree.module_origin_at(result.attached.module).match({
+        Ok(ModuleOrigin.CBinding(id)) => tree.c_binding_at(id).match({
+            Ok(value) => value.headers.len,
+            None      => 0,
+        }),
+        _                             => 0,
+    });
+    println(
+        "module={} binding={} declarations={} headers={}",
+        result.attached.module,
+        result.attached.binding.index,
+        result.declarations,
+        binding
+    );
+    println(
+        "identity={} source-owned={}",
+        result.identity.view().eq(req.identity.view()),
+        result.source.view().starts_with("// Generated")
+    );
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    req = request(a, spec(a).try()).try();
+    tree ::= a.Ast();
+    attach(a, "ffi.demo", req, translation(a, req).try(), tree).match({
+        Ok(result) => show(result, tree, req),
+        Err(e)     => println("translation did not attach"),
+    });
+
+    broken_req = request(a, spec(a).try()).try();
+    broken_tree ::= a.Ast();
+    refused       = attach(
+        a,
+        "ffi.broken",
+        broken_req,
+        bad_translation(a, broken_req).try(),
+        broken_tree
+    ).match({
+        Err(GeneratedParse(count)) => count == 1,
+        _                          => false,
+    });
+    recovered_req = request(a, spec(a).try()).try();
+    reusable      = attach(
+        a,
+        "ffi.recovered",
+        recovered_req,
+        translation(a, recovered_req).try(),
+        broken_tree
+    ).match({
+        Ok(result) => result.attached.module == 0,
+        Err(_)     => false,
+    });
+    println("parse-refused={} tree-reusable={}", refused, reusable);
+
+    mismatch_req = request(a, spec(a).try()).try();
+    mismatch_tree ::= a.Ast();
+    mismatch         = CTranslation(
+        module: CModule(source: a.String("value = ()").try(), declarations: 0),
+        identity: a.String("another request").try()
+    );
+    identity_refused = attach(
+        a,
+        "ffi.mismatch",
+        mismatch_req,
+        mismatch,
+        mismatch_tree
+    ).match({
+        Err(IdentityMismatch) => true,
+        _                     => false,
+    });
+    println("identity-refused={}", identity_refused);
+    Ok(0)
+}
