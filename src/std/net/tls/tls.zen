@@ -1,0 +1,138 @@
+// src/std/net/tls/tls.zen
+// Safe OpenSSL stream over the native floor.
+
+Alloc, AllocError, Ptr, null_ptr = std.mem
+str = std.text
+Res, ok_or = std.core
+Drop = std.core
+Vec = std.collections
+Socket = std.net.socket
+
+zg_tls_wrap = (raw: usize, host: str) Ptr<u8>
+
+// Connect while offering only the HTTP/2 ALPN.
+zg_tls_wrap_h2 = (raw: usize, host: str) Ptr<u8>
+
+zg_tls_alpn = (ctx: Ptr<u8>, buf: Ptr<u8>, cap: usize) usize
+
+zg_tls_write = (ctx: Ptr<u8>, bytes: str) i32
+
+zg_tls_read = (ctx: Ptr<u8>, buf: Ptr<u8>, n: usize) usize
+
+zg_tls_close = (ctx: Ptr<u8>) ()
+
+TlsError* = ConnectFailed | TlsFailed | WriteFailed | ReadFailed | Closed
+
+tls_error = (rc: i32) TlsError {
+    rc.match({
+        1 => ConnectFailed,
+        2 => TlsFailed,
+        3 => WriteFailed,
+        4 => ReadFailed,
+        _ => Closed,
+    })
+}
+
+unit_or = (r: Res<(), AllocError>, fallback: TlsError) Res<(), TlsError> {
+    r.match({
+        Ok(_)  => Ok(()),
+        Err(_) => Err(fallback),
+    });
+}
+
+tls_dial = (a: Alloc, host: str, port: u16, h2: bool) Res<TlsStream, TlsError> {
+    Socket.tcp_connect(host, port).match({
+        Ok(socket) => wrap_socket(consume socket, host, h2),
+        Err(_)     => Err(TlsError.ConnectFailed),
+    })
+}
+
+wrap_socket = (socket :: Socket, host: str, h2: bool) Res<TlsStream, TlsError> {
+    ctx = h2.match({
+        true  => zg_tls_wrap_h2(socket.handle(), host),
+        false => zg_tls_wrap(socket.handle(), host),
+    });
+    ctx.is_null().match({
+        true  => Err(TlsError.TlsFailed),
+        false => Ok(TlsStream(socket: consume socket, ctx: ctx)),
+    });
+}
+
+TlsStream* = {
+    socket :: Socket,
+    ctx:      Ptr<u8>,
+    open ::   bool = true,
+
+    connect* = (a: Alloc, host: str, port: u16) Res<TlsStream, TlsError> {
+        tls_dial(a, host, port, false)
+    }
+
+    connect_h2* = (a: Alloc, host: str, port: u16) Res<TlsStream, TlsError> {
+        tls_dial(a, host, port, true)
+    }
+
+    alpn* = (self: @Self, a: Alloc, buf :: Vec<u8>) Res<usize, TlsError> {
+        self.open.match({
+            true  => Ok(()),
+            false => Err(TlsError.Closed),
+        }).try();
+        unit_or(buf.reserve(16), TlsError.ReadFailed).try();
+
+        n = zg_tls_alpn(self.ctx, buf.ptr(), 16);
+        (n == usize.MAX).match({
+            false => {
+                Range(0, n).loop((h, i) {
+                    b = buf.ptr().read(i);
+                    buf.add(b).match({ Ok(_) => {}, Err(_) => h.break() });
+                });
+                Ok(n)
+            },
+            true  => Err(TlsError.ReadFailed),
+        });
+    }
+
+    write* = (self: @Self, bytes: str) Res<(), TlsError> {
+        self.open.match({
+            true  => Ok(()),
+            false => Err(TlsError.Closed),
+        }).try();
+        rc = zg_tls_write(self.ctx, bytes);
+        (rc == 0).match({
+            true  => Ok(()),
+            false => Err(tls_error(rc)),
+        });
+    }
+
+    read* = (self: @Self, a: Alloc, buf :: Vec<u8>, n: usize) Res<usize, TlsError> {
+        self.open.match({
+            true  => Ok(()),
+            false => Err(TlsError.Closed),
+        }).try();
+        unit_or(buf.reserve(n), TlsError.ReadFailed).try();
+
+        got = zg_tls_read(self.ctx, buf.ptr(), n);
+        (got == usize.MAX).match({
+            true  => Err(TlsError.ReadFailed),
+            false => (got == usize.MAX - 1).match({
+                true  => Err(TlsError.Closed),
+                false => Ok(got),
+            }),
+        })
+    }
+
+    close* = (self :: @Self) () {
+        self.open.match({
+            false => {},
+            true  => {
+                self.open = false;
+                zg_tls_close(self.ctx);
+                self.socket.close();
+            },
+        })
+    }
+}
+
+// Owned streams close the fd and SSL context at scope exit.
+TlsStream.impl(Drop, {
+    drop = (self :: @Self) () { self.close() }
+})

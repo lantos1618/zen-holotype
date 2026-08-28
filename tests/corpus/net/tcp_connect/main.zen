@@ -1,0 +1,70 @@
+// Connect, partial reads, full writes and idempotent close over loopback.
+
+TcpStream, TcpError = std.net.tcp
+
+// tests/run.py replaces this after binding its private IPv4 listener.
+HARNESS_PORT* : u16 = 0
+
+is_pong = (buf: Vec<u8>, n: usize) bool {
+    (n == 3).match({
+        false => false,
+        true  => {
+            first  = buf.ptr().read(0);
+            middle = buf.ptr().read(1);
+            last   = buf.ptr().read(2);
+            first == 'o' && middle == 'n' && last == 'g'
+        },
+    })
+}
+
+is_p = (buf: Vec<u8>, n: usize) bool {
+    (n == 1).match({
+        false => false,
+        true  => buf.ptr().read(0) == 'p',
+    })
+}
+
+main = (env: Env) Res<(), AllocError> {
+    alloc ::= env.mem.alloc();
+    TcpStream.connect(alloc, "127.0.0.1", HARNESS_PORT).match({
+        Ok(s)  => {
+            s.write("ping").match({
+                Ok(_)  => {
+                    first ::= alloc.Vec<u8>();
+                    s.read(alloc, first, 1).match({
+                        Ok(n)  => is_p(first, n).match({
+                            true  => s.write("ack").match({
+                                Ok(_)  => {
+                                    rest ::= alloc.Vec<u8>();
+                                    s.read(alloc, rest, 3).match({
+                                        Ok(m)  => is_pong(rest, m).match({
+                                                true  => println("pong"),
+                                                false => println("wrong reply"),
+                                            }),
+                                        Err(_) => println("read failed"),
+                                    });
+                                },
+                                Err(_) => println("write failed"),
+                            }),
+                            false => println("wrong first byte"),
+                        }),
+                        Err(_) => println("read failed"),
+                    });
+                },
+                Err(_) => println("write failed"),
+            });
+            s.close();
+            s.close();
+            println("closed");
+        },
+        Err(e) => {
+            e.match({
+                ConnectFailed => println("connect failed"),
+                WriteFailed   => println("write failed"),
+                ReadFailed    => println("read failed"),
+                Closed        => println("closed"),
+            });
+        },
+    });
+    Ok(())
+}

@@ -1,0 +1,82 @@
+// src/std/net/socket/socket.zen
+// Owns one portable native socket handle. Protocol modules decide how the
+// handle is opened and interpret its errors; this module owns IO and close.
+
+AllocError, Ptr = std.mem
+str = std.text
+Res = std.core
+Drop = std.core
+Vec = std.collections
+
+zg_socket_tcp_connect = (host: str, port: u16) usize
+zg_socket_write = (raw: usize, bytes: str) i32
+zg_socket_read = (raw: usize, buf: Ptr<u8>, n: usize) usize
+zg_socket_close = (raw: usize) ()
+
+SocketFault* = ConnectFault | WriteFault | ReadFault | PeerClosed
+
+unit_or = (r: Res<(), AllocError>, fault: SocketFault)
+          Res<(), SocketFault> {
+    r.match({ Ok(_) => Ok(()), Err(_) => Err(fault) })
+}
+
+Socket* = {
+    raw: usize,
+    open :: bool = true,
+
+    tcp_connect* = (host: str, port: u16) Res<Socket, SocketFault> {
+        raw = zg_socket_tcp_connect(host, port);
+        (raw == usize.MAX).match({
+            true  => Err(SocketFault.ConnectFault),
+            false => Ok(Socket(raw: raw)),
+        })
+    }
+
+    // Borrow the native handle without transferring close ownership.
+    handle* = (self: @Self) usize { self.raw }
+
+    write* = (self: @Self, bytes: str) Res<(), SocketFault> {
+        self.open.match({
+            false => Err(SocketFault.PeerClosed),
+            true  => zg_socket_write(self.raw, bytes).match({
+                0 => Ok(()),
+                4 => Err(SocketFault.PeerClosed),
+                _ => Err(SocketFault.WriteFault),
+            }),
+        })
+    }
+
+    read* = (self: @Self, buf :: Vec<u8>, n: usize)
+            Res<usize, SocketFault> {
+        self.open.match({
+            false => Err(SocketFault.PeerClosed),
+            true  => {
+                unit_or(buf.reserve(n), SocketFault.ReadFault).try();
+                got = zg_socket_read(self.raw, buf.ptr(), n);
+                (got == usize.MAX).match({
+                    true  => Err(SocketFault.ReadFault),
+                    false => (got == usize.MAX - 1).match({
+                        true  => Err(SocketFault.PeerClosed),
+                        false => Ok(got),
+                    }),
+                })
+            },
+        })
+    }
+
+    // Clear ownership before the native call. An explicit close followed by
+    // scope Drop is therefore harmless, including if the OS reuses the handle.
+    close* = (self :: @Self) () {
+        self.open.match({
+            false => {},
+            true  => {
+                self.open = false;
+                zg_socket_close(self.raw);
+            },
+        })
+    }
+}
+
+Socket.impl(Drop, {
+    drop = (self :: @Self) () { self.close() }
+})

@@ -1,0 +1,76 @@
+// Resolve loopback, then fail the first post-resolve allocation.
+
+DnsAddr, DnsError, resolve = std.net.dns
+
+FailAlloc = {
+    base: Alloc,
+    remaining: Ptr<usize>,
+    refused: Ptr<bool>,
+
+    take = (self: @Self) bool {
+        left = self.remaining.read(0);
+        (left == 0).match({
+            true  => {
+                self.refused.write(0, true);
+                false
+            },
+            false => {
+                self.remaining.write(0, left - 1);
+                true
+            },
+        })
+    }
+}
+
+FailAlloc.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize)
+          Res<Ptr<u8>, AllocError> {
+        self.take().match({
+            true  => self.base.raw(size, align),
+            false => Err(AllocError.OutOfMemory),
+        })
+    }
+
+    realloc = <T>(self: @Self, p: Ptr<T>, count: usize)
+                Res<Ptr<T>, AllocError> {
+        self.take().match({
+            true  => self.base.realloc(p, count),
+            false => Err(AllocError.OutOfMemory),
+        })
+    }
+})
+
+main = (env: Env) Res<(), AllocError> {
+    alloc ::= env.mem.alloc();
+    resolve(alloc, "localhost").match({
+        Ok(a)  => {
+            // Print the IP to stderr so the exact-match expected stays stable.
+            env.out.errorln("{}", a.ip.view());
+            println("local");
+        },
+        Err(e) => {
+            e.match({
+                NotFound => println("not found"),
+                Failed   => println("failed"),
+            });
+        },
+    });
+
+    remaining ::= alloc.Vec<usize>();
+    remaining.add(3).try();
+    refused ::= alloc.Vec<bool>();
+    refused.add(false).try();
+    failing = FailAlloc(
+        base: alloc,
+        remaining: remaining.ptr(),
+        refused: refused.ptr(),
+    );
+    resolve(failing, "localhost").match({
+        Ok(_)  => println("allocation unexpectedly succeeded"),
+        Err(_) => refused.ptr().read(0).match({
+            true  => println("allocation failed"),
+            false => println("resolution failed before allocation"),
+        }),
+    });
+    Ok(())
+}

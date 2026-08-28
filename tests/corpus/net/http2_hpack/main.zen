@@ -1,0 +1,70 @@
+// Offline exercise of the HTTP/2 HPACK decoder. The live exchange is
+// covered separately (h2c against python-h2, TLS against a public h2
+// server); this test keeps the gate deterministic by decoding hardcoded
+// header blocks: the RFC 7541 C.4.1 Huffman example, an indexed
+// :status, a literal :status, and a block with no :status that must be
+// refused.
+
+H2Error, huf_decode, hpack_status = std.net.http2
+
+main = (env: Env) Res<(), AllocError> {
+    a = env.mem.alloc();
+
+    // RFC 7541 C.4.1: "www.example.com" Huffman-coded
+    hw ::= a.Vec<u8>();
+    hw.add(241).try(); hw.add(227).try(); hw.add(194).try(); hw.add(229).try();
+    hw.add(242).try(); hw.add(58).try();  hw.add(107).try(); hw.add(160).try();
+    hw.add(171).try(); hw.add(144).try(); hw.add(244).try(); hw.add(255).try();
+    huf_decode(a, hw, 0, 12).match({
+        Ok(s)  => {
+            s.view().eq("www.example.com").match({
+                true  => println("huffman ok"),
+                false => println("huffman mismatch"),
+            });
+        },
+        Err(_) => println("huffman failed"),
+    });
+
+    // indexed :status 200 (0x88)
+    b1 ::= a.Vec<u8>();
+    b1.add(136).try();
+    hpack_status(a, b1, 0, 1).match({
+        Ok(s)  => {
+            (s == 200).match({
+                true  => println("indexed ok"),
+                false => println("indexed mismatch"),
+            });
+        },
+        Err(_) => println("indexed failed"),
+    });
+
+    // literal-without-indexing :status "404": name idx 8, len 3, "404"
+    b2 ::= a.Vec<u8>();
+    b2.add(8).try(); b2.add(3).try();
+    b2.add('4').try(); b2.add('0').try(); b2.add('4').try();
+    hpack_status(a, b2, 0, 5).match({
+        Ok(s)  => {
+            (s == 404).match({
+                true  => println("literal ok"),
+                false => println("literal mismatch"),
+            });
+        },
+        Err(_) => println("literal failed"),
+    });
+
+    // a block with no :status is a DecodeFailed, not a zero
+    b3 ::= a.Vec<u8>();
+    b3.add(64).try(); b3.add(3).try();
+    b3.add('x').try(); b3.add('-').try(); b3.add('a').try();
+    b3.add(1).try();  b3.add('b').try();
+    hpack_status(a, b3, 0, 7).match({
+        Ok(_)  => println("no-status accepted"),
+        Err(e) => {
+            e.match({
+                DecodeFailed => println("no-status refused"),
+                _            => println("wrong error"),
+            });
+        },
+    });
+    Ok(())
+}

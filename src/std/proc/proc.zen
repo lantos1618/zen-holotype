@@ -1,0 +1,110 @@
+// src/std/proc/proc.zen
+// Safe process execution over the native floor.
+
+Alloc, AllocError, Ptr, null_ptr = std.mem
+str, String, str_at = std.text
+Res, ok_or = std.core
+
+zg_proc_run = (
+    cwd      : str,
+    cmd      : str,
+    code_out : Ptr<i32>,
+    out_buf  : Ptr<Ptr<u8>>,
+    out_len  : Ptr<usize>,
+    err_buf  : Ptr<Ptr<u8>>,
+    err_len  : Ptr<usize>
+) i32
+
+free = (p: Ptr<()>) ()
+
+ProcError* = SpawnFailed | WaitFailed | ReadFailed
+
+ProcOutput* = {
+    code*: i32,
+    out*:  String,
+    err*:  String,
+}
+
+proc_error = (rc: i32) ProcError {
+    rc.match({
+        1 => SpawnFailed,
+        2 => WaitFailed,
+        _ => ReadFailed,
+    })
+}
+
+unit_or_read_failed = (r: Res<(), AllocError>) Res<(), ProcError> {
+    r.match({
+        Ok(_)  => Ok(()),
+        Err(_) => Err(ProcError.ReadFailed),
+    });
+}
+
+string_or_read_failed = (r: Res<String, AllocError>) Res<String, ProcError> {
+    r.match({
+        Ok(s)  => Ok(s),
+        Err(_) => Err(ProcError.ReadFailed),
+    });
+}
+
+string_from_c = (a: Alloc, p: Ptr<u8>, n: usize) Res<String, ProcError> {
+    @scope.defer(() { free(p.to<()>()) });
+    s ::= string_or_read_failed(a.String()).try();
+    view = str_at(p, n);
+    unit_or_read_failed(s.add_bytes(view)).try();
+    Ok(s);
+}
+
+Process* = {
+    run* = (self: @Self, a: Alloc, cwd: str, cmd: str) Res<ProcOutput, ProcError> {
+        // One-element Vecs provide writable slots until Zen has `&`.
+        code_vec ::= a.Vec<i32>();
+        unit_or_read_failed(code_vec.add(0)).try();
+
+        out_p_vec ::= a.Vec<Ptr<u8>>();
+        unit_or_read_failed(out_p_vec.add(null_ptr<u8>())).try();
+        out_n_vec ::= a.Vec<usize>();
+        unit_or_read_failed(out_n_vec.add(0)).try();
+
+        err_p_vec ::= a.Vec<Ptr<u8>>();
+        unit_or_read_failed(err_p_vec.add(null_ptr<u8>())).try();
+        err_n_vec ::= a.Vec<usize>();
+        unit_or_read_failed(err_n_vec.add(0)).try();
+
+        rc = zg_proc_run(
+            cwd,
+            cmd,
+            code_vec.ptr(),
+            out_p_vec.ptr(),
+            out_n_vec.ptr(),
+            err_p_vec.ptr(),
+            err_n_vec.ptr()
+        );
+
+        (rc == 0).match({
+            false => Err(proc_error(rc)),
+            true  => {
+                code  = code_vec.get(0).ok_or(ProcError.ReadFailed).try();
+                out_p = out_p_vec.get(0).ok_or(ProcError.ReadFailed).try();
+                out_n = out_n_vec.get(0).ok_or(ProcError.ReadFailed).try();
+                err_p = err_p_vec.get(0).ok_or(ProcError.ReadFailed).try();
+                err_n = err_n_vec.get(0).ok_or(ProcError.ReadFailed).try();
+
+                string_from_c(a, out_p, out_n).match({
+                    Err(e)    => {
+                        free(err_p.to<()>());
+                        Err(e)
+                    },
+                    Ok(out_s) => string_from_c(a, err_p, err_n).match({
+                        Err(e)    => Err(e),
+                        Ok(err_s) => Ok(ProcOutput(
+                            code: code,
+                            out:  out_s,
+                            err:  err_s
+                        )),
+                    }),
+                });
+            },
+        })
+    }
+}

@@ -1,0 +1,32 @@
+// env.proc.run must drain stdout and stderr concurrently: a child that
+// fills the stderr pipe while stdout is still being read deadlocks a
+// sequential reader. Both streams are larger than the 64KB pipe buffer,
+// and the two seqs run concurrently so neither pipe is drained in order.
+
+AllocError = std.mem
+
+main = (env: Env) Res<i32, AllocError> {
+    out = env.proc.run(
+        env.mem.alloc(),
+        "",
+        "seq 1 200000 & seq 1 200000 >&2 & wait"
+    ).match({
+        Ok(r)  => {
+            println("code={}", r.code);
+            println("out_len={}", r.out.len());
+            println("err_len={}", r.err.len());
+            println("out_tail={}", r.out.view().ends_with("200000\n"));
+            println("err_tail={}", r.err.view().ends_with("200000\n"));
+            0
+        },
+        Err(e) => {
+            e.match({
+                SpawnFailed => println("spawn failed"),
+                WaitFailed  => println("wait failed"),
+                ReadFailed  => println("read failed"),
+            });
+            1
+        },
+    });
+    Ok(out)
+}

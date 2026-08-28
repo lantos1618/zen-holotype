@@ -36,10 +36,13 @@ import os
 import re
 import shlex
 import shutil
+import socket
+import ssl
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -143,6 +146,18 @@ CRASH_MARKERS = (
     "AssertionError",
     "RecursionError",
     "Segmentation fault",
+)
+
+# Link only native floors named by generated C; keep libraries after sources.
+SOCKET_LIBRARIES = ("-lws2_32",) if os.name == "nt" else ()
+NATIVE_FLOORS: tuple[tuple[bytes, tuple[Path, ...], tuple[str, ...]], ...] = (
+    (b"zg_dns_", (REPO_ROOT / "src/std/net/socket/socket.c",), SOCKET_LIBRARIES),
+    (b"zg_socket_", (REPO_ROOT / "src/std/net/socket/socket.c",), SOCKET_LIBRARIES),
+    (b"zg_tls_", (
+        REPO_ROOT / "src/std/net/tls/tls.c",
+        REPO_ROOT / "src/std/net/socket/socket.c",
+    ), ("-lssl", "-lcrypto", *SOCKET_LIBRARIES)),
+    (b"zg_proc_", (REPO_ROOT / "src/std/proc/proc.c",), ()),
 )
 
 
@@ -563,6 +578,146 @@ def run_process(
     return Run(argv, code, proc.stdout, proc.stderr, False, signalled)
 
 
+class LoopbackPeer:
+    """One deterministic IPv4 peer for the TCP corpus test."""
+
+    def __init__(self) -> None:
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(1)
+        self.port = self.listener.getsockname()[1]
+        self.problem = ""
+        self.thread: threading.Thread | None = None
+
+    @staticmethod
+    def _read(conn: socket.socket, count: int) -> bytes:
+        out = bytearray()
+        while len(out) < count:
+            chunk = conn.recv(count - len(out))
+            if not chunk:
+                break
+            out.extend(chunk)
+        return bytes(out)
+
+    def _serve(self, timeout: float) -> None:
+        try:
+            self.listener.settimeout(timeout)
+            conn, _ = self.listener.accept()
+            with conn:
+                conn.settimeout(timeout)
+                first = self._read(conn, 4)
+                if first != b"ping":
+                    raise RuntimeError(f"peer received {first!r}, wanted b'ping'")
+                conn.sendall(b"p")
+                second = self._read(conn, 3)
+                if second != b"ack":
+                    raise RuntimeError(f"peer received {second!r}, wanted b'ack'")
+                conn.sendall(b"ong")
+        except (OSError, RuntimeError) as exc:
+            self.problem = str(exc)
+
+    def start(self, timeout: float) -> None:
+        self.thread = threading.Thread(
+            target=self._serve, args=(timeout,), daemon=True
+        )
+        self.thread.start()
+
+    def finish(self, timeout: float) -> str:
+        self.listener.close()
+        if self.thread is not None:
+            self.thread.join(min(timeout, 2.0))
+            if self.thread.is_alive() and not self.problem:
+                self.problem = "loopback peer did not finish"
+        return self.problem
+
+    def close(self) -> None:
+        self.listener.close()
+
+
+class TlsLoopbackPeer(LoopbackPeer):
+    """Two TLS handshakes: one trusted hostname and one rejected mismatch."""
+
+    def __init__(self, work: Path, timeout: float) -> None:
+        super().__init__()
+        self.listener.listen(2)
+        self.cert = work / "loopback-cert.pem"
+        key = work / "loopback-key.pem"
+        openssl = shutil.which("openssl")
+        if openssl is None:
+            self.close()
+            raise HarnessError("TLS corpus needs the OpenSSL command")
+        made = run_process([
+            openssl, "req", "-x509", "-newkey", "ec",
+            "-pkeyopt", "ec_paramgen_curve:P-256", "-sha256", "-nodes",
+            "-keyout", str(key), "-out", str(self.cert), "-days", "1",
+            "-subj", "/CN=localhost",
+            "-addext", "subjectAltName=DNS:localhost",
+            "-addext", "basicConstraints=critical,CA:TRUE",
+            "-addext", "keyUsage=critical,digitalSignature,keyCertSign",
+            "-addext", "extendedKeyUsage=serverAuth",
+        ], timeout)
+        if made.timed_out or made.code != 0:
+            self.close()
+            raise HarnessError(
+                "could not mint the loopback TLS certificate: "
+                + clip(diagnostics(made))
+            )
+        try:
+            self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            self.context.load_cert_chain(self.cert, key)
+        except (OSError, ssl.SSLError):
+            self.close()
+            raise
+
+    def _serve(self, timeout: float) -> None:
+        try:
+            self.listener.settimeout(timeout)
+            for attempt in range(2):
+                conn, _ = self.listener.accept()
+                with conn:
+                    conn.settimeout(timeout)
+                    try:
+                        tls = self.context.wrap_socket(conn, server_side=True)
+                    except ssl.SSLError:
+                        if attempt == 0:
+                            raise
+                        continue
+                    with tls:
+                        if attempt == 1:
+                            raise RuntimeError("the mismatched hostname was accepted")
+                        if tls.recv(1) != b"":
+                            raise RuntimeError("the verified TLS stream did not close")
+        except (OSError, RuntimeError, ssl.SSLError) as exc:
+            self.problem = str(exc)
+
+
+def native_link_args(out_c: Path) -> list[str]:
+    """Native sources and libraries referenced by one generated C program."""
+    try:
+        generated = out_c.read_bytes()
+    except OSError as exc:
+        raise HarnessError(f"cannot inspect generated C {out_c}: {exc}") from exc
+
+    sources: list[str] = []
+    libraries: list[str] = []
+    for symbol, needed_sources, needed_libraries in NATIVE_FLOORS:
+        if symbol not in generated:
+            continue
+        for source in needed_sources:
+            if not source.is_file():
+                raise HarnessError(
+                    f"generated C references {symbol.decode()} but its native "
+                    f"floor does not exist: {source}"
+                )
+            spelling = str(source)
+            if spelling not in sources:
+                sources.append(spelling)
+        for library in needed_libraries:
+            if library not in libraries:
+                libraries.append(library)
+    return [*sources, *libraries]
+
+
 def diagnostics(run: Run) -> str:
     return (run.stderr + run.stdout).decode("utf-8", "replace")
 
@@ -819,6 +974,7 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
     out_c = work / "out.c"
     root = stage(test, tool, work)
     entry = staged_entry(test)
+    loopback: LoopbackPeer | None = None
 
     # A CLOCK TEST'S CONSTANT IS REWRITTEN HERE AND ONLY HERE, before the
     # compiler runs. A wall-clock expectation depends on when the run
@@ -843,10 +999,50 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
         except (OSError, AssertionError) as e:
             return Result(test, False, [f"the harness could not stage the clock epoch: {e}"])
 
+    if test.tid == "corpus/net/tcp_connect":
+        try:
+            loopback = LoopbackPeer()
+            path = root / entry
+            text = path.read_text(encoding="utf-8")
+            patched, n = re.subn(
+                r"HARNESS_PORT\* : u16 = \d+",
+                f"HARNESS_PORT* : u16 = {loopback.port}",
+                text,
+            )
+            if n != 1:
+                raise AssertionError(f"HARNESS_PORT lines rewritten: {n}, want 1")
+            path.write_text(patched, encoding="utf-8")
+        except (OSError, AssertionError) as e:
+            if loopback is not None:
+                loopback.close()
+            return Result(test, False, [f"the harness could not stage loopback TCP: {e}"])
+
+    if test.tid == "corpus/net/tls_connect":
+        try:
+            loopback = TlsLoopbackPeer(work, args.timeout)
+            path = root / entry
+            text = path.read_text(encoding="utf-8")
+            patched, n = re.subn(
+                r"HARNESS_PORT\* : u16 = \d+",
+                f"HARNESS_PORT* : u16 = {loopback.port}",
+                text,
+            )
+            if n != 1:
+                raise AssertionError(f"HARNESS_PORT lines rewritten: {n}, want 1")
+            path.write_text(patched, encoding="utf-8")
+        except (HarnessError, OSError, AssertionError, ssl.SSLError) as e:
+            if loopback is not None:
+                loopback.close()
+            return Result(test, False, [f"the harness could not stage loopback TLS: {e}"])
+
     emit = run_process(tool.command(root, out_c, root, entry), args.timeout)
     if emit.timed_out:
+        if loopback is not None:
+            loopback.close()
         return Result(test, False, [f"the compiler timed out after {args.timeout}s"])
     if emit.code != 0 or not out_c.is_file():
+        if loopback is not None:
+            loopback.close()
         return Result(
             test,
             False,
@@ -855,9 +1051,18 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
         )
 
     binary = work / "prog"
-    cc = run_process([args.cc, *shlex.split(args.cc_flags), str(out_c), "-o", str(binary)],
+    try:
+        native = native_link_args(out_c)
+    except HarnessError:
+        if loopback is not None:
+            loopback.close()
+        raise
+    cc = run_process([args.cc, *shlex.split(args.cc_flags), str(out_c), *native,
+                      "-o", str(binary)],
                      args.timeout)
     if cc.timed_out or cc.code != 0:
+        if loopback is not None:
+            loopback.close()
         # A rejected translation unit is a codegen bug, not harness noise.
         note = clip(diagnostics(cc))
         if args.keep:
@@ -881,6 +1086,9 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
         prog_env = dict(os.environ)
         prog_env["V" * 5039] = "hello"
         prog_env["B" * 4096] = "hello"
+    if isinstance(loopback, TlsLoopbackPeer):
+        prog_env = dict(os.environ)
+        prog_env["SSL_CERT_FILE"] = str(loopback.cert)
 
     if test.tid == "corpus/file-io/symlink_loop_is_failed":
         try:
@@ -888,10 +1096,16 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
         except OSError as e:
             return Result(test, False, [f"the harness could not stage the symlink loop: {e}"])
 
+    if loopback is not None:
+        loopback.start(args.run_timeout)
     prog = run_process([str(binary)], args.run_timeout, cwd=work,
                        feed=test.stdin_bytes, env=prog_env)
+    peer_problem = loopback.finish(args.run_timeout) if loopback is not None else ""
     if prog.timed_out:
         return Result(test, False, [f"the program timed out after {args.run_timeout}s"])
+
+    if peer_problem:
+        reasons.append(f"loopback peer failed: {peer_problem}")
 
     if prog.stdout != test.expected:
         reasons.append("stdout does not match .expected")
@@ -1080,6 +1294,41 @@ SELF_CHECK_CASES: list[tuple[str, str, str, int | None, bool, str]] = [
 ]
 
 
+NATIVE_LINK_CASES: list[tuple[str, bytes, tuple[str, ...]]] = [
+    (
+        "hello-world-has-no-native-or-openssl-dependency",
+        b"int main(void) { return 0; }\n",
+        (),
+    ),
+    (
+        "dns-reference-selects-socket-floor",
+        b"extern void zg_dns_resolve(void); void f(void) { zg_dns_resolve(); }\n",
+        (str(REPO_ROOT / "src/std/net/socket/socket.c"), *SOCKET_LIBRARIES),
+    ),
+    (
+        "tcp-reference-selects-only-socket",
+        b"extern void zg_socket_tcp_connect(void); void f(void) { zg_socket_tcp_connect(); }\n",
+        (str(REPO_ROOT / "src/std/net/socket/socket.c"), *SOCKET_LIBRARIES),
+    ),
+    (
+        "proc-reference-selects-only-proc",
+        b"extern void zg_proc_run(void); void f(void) { zg_proc_run(); }\n",
+        (str(REPO_ROOT / "src/std/proc/proc.c"),),
+    ),
+    (
+        "tls-reference-selects-only-tls-and-openssl",
+        b"extern void zg_tls_connect(void); void f(void) { zg_tls_connect(); }\n",
+        (
+            str(REPO_ROOT / "src/std/net/tls/tls.c"),
+            str(REPO_ROOT / "src/std/net/socket/socket.c"),
+            "-lssl",
+            "-lcrypto",
+            *SOCKET_LIBRARIES,
+        ),
+    ),
+]
+
+
 def _self_check_toolchain(work: Path) -> Toolchain:
     """A stub compiler: prints a scripted diagnostic and exits 1.
 
@@ -1137,6 +1386,14 @@ def self_check(args: argparse.Namespace) -> int:
                     f"(kept {result.detail!r}); the surplus behind #741 hid "
                     f"in exactly that throw"
                 )
+        for name, generated, expected in NATIVE_LINK_CASES:
+            out_c = workroot / f"{name}.c"
+            out_c.write_bytes(generated)
+            got = tuple(native_link_args(out_c))
+            if got != expected:
+                failures.append(
+                    f"{name}: native link args {got!r}, wanted {expected!r}"
+                )
         shutil.rmtree(workroot, ignore_errors=True)
     finally:
         os.environ.pop("STUB_DIAG", None)
@@ -1144,7 +1401,8 @@ def self_check(args: argparse.Namespace) -> int:
         for line in failures:
             print(f"self-check FAIL {line}", file=sys.stderr)
         return 1
-    print(f"self-check: {len(SELF_CHECK_CASES)} assertion(s) about the "
+    checks = len(SELF_CHECK_CASES) + len(NATIVE_LINK_CASES)
+    print(f"self-check: {checks} assertion(s) about the "
           "harness itself hold")
     return 0
 

@@ -1,0 +1,130 @@
+// Offline proof of both HTTP response surfaces: the streaming door writes
+// into an arbitrary Sink and preserves backpressure errors; the allocating
+// parser remains a wrapper over that door.
+
+HttpClient, HttpResponse, HttpError = std.net.http
+parse_response, parse_response_into = std.net.http
+IoError, WriteError, Sink = std.core
+
+FullSink = {}
+
+FullSink.impl(Sink, {
+    write ::= (self :: @Self, bytes: str) Res<(), WriteError> {
+        Err(WriteError.IoError(IoError.Full))
+    },
+
+    write_byte ::= (self :: @Self, b: u8) Res<(), WriteError> {
+        Err(WriteError.IoError(IoError.Full))
+    },
+})
+
+body_is_empty = (a: Alloc, raw: str) Res<bool, AllocError> {
+    out ::= a.String().try();
+    parse_response_into(raw, out).match({
+        Ok(_)  => Ok(out.view().len == 0),
+        Err(_) => Ok(false),
+    })
+}
+
+main = (env: Env) Res<(), AllocError> {
+    raw = "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nhello world\n";
+    streamed ::= env.mem.alloc().String().try();
+    parse_response_into(raw, streamed).match({
+        Ok(meta) => {
+            (meta.status == 200 && meta.has_content_length
+                && meta.content_length == 12
+                && streamed.view().eq("hello world\n")).match({
+                true  => println("stream ok"),
+                false => println("stream mismatch"),
+            });
+        },
+        Err(_)   => println("stream failed"),
+    });
+
+    // Compile the live client door without making this offline test perform
+    // network I/O. This instantiates post_into with String's Sink impl.
+    false.match({
+        true  => {
+            headers = env.mem.alloc().Vec<str>();
+            HttpClient().post_into(
+                env.mem.alloc(),
+                "http://127.0.0.1/",
+                headers,
+                "",
+                streamed
+            ).match({ Ok(_) => {}, Err(_) => {} });
+        },
+        false => {},
+    });
+
+    chunk_raw = "HTTP/1.1 201 Created\r\nTransfer-Encoding: gzip, chunked\r\n\r\n4;name=value\r\nWiki\r\n5\r\npedia\r\n0\r\nX-Trace: yes\r\n\r\nNEXT";
+    chunk_body ::= env.mem.alloc().String().try();
+    parse_response_into(chunk_raw, chunk_body).match({
+        Ok(meta) => {
+            (meta.status == 201 && meta.chunked
+                && chunk_body.view().eq("Wikipedia")).match({
+                true  => println("chunked ok"),
+                false => println("chunked mismatch"),
+            });
+        },
+        Err(_)   => println("chunked failed"),
+    });
+
+    close_raw = "HTTP/1.0 200 OK\r\nX-Test: yes\r\n\r\nclose body";
+    close_body ::= env.mem.alloc().String().try();
+    parse_response_into(close_raw, close_body).match({
+        Ok(meta) => {
+            (!meta.chunked && !meta.has_content_length
+                && close_body.view().eq("close body")).match({
+                true  => println("close ok"),
+                false => println("close mismatch"),
+            });
+        },
+        Err(_)   => println("close failed"),
+    });
+
+    no_bodies = body_is_empty(env.mem.alloc(), "HTTP/1.1 103 Early Hints\r\n\r\nignored").try() && body_is_empty(env.mem.alloc(), "HTTP/1.1 204 No Content\r\nContent-Length: 7\r\n\r\nignored").try() && body_is_empty(env.mem.alloc(), "HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nignored\r\n0\r\n\r\n").try();
+    no_bodies.match({
+        true  => println("no-body ok"),
+        false => println("no-body mismatch"),
+    });
+
+    truncated = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabc";
+    bad_body ::= env.mem.alloc().String().try();
+    parse_response_into(truncated, bad_body).match({
+        Ok(_)  => println("truncated accepted"),
+        Err(_) => println("truncated refused"),
+    });
+
+    blocked ::= FullSink();
+    parse_response_into(raw, blocked).match({
+        Ok(_)  => println("full accepted"),
+        Err(e) => e.match({
+            BodyWriteFailed(w) => w.match({
+                IoError(io) => io.match({
+                    Full => println("sink full"),
+                    _    => println("wrong io error"),
+                }),
+                _           => println("wrong write error"),
+            }),
+            _                  => println("wrong http error"),
+        }),
+    });
+
+    parse_response(env.mem.alloc(), raw).match({
+        Ok(resp) => {
+            (resp.status == 200).match({
+                true  => {
+                    body_ok = resp.body.view().eq("hello world\n");
+                    body_ok.match({
+                        true  => println("buffered ok"),
+                        false => println("body mismatch"),
+                    });
+                },
+                false => println("bad status"),
+            });
+        },
+        Err(_)   => println("parse failed"),
+    });
+    Ok(())
+}

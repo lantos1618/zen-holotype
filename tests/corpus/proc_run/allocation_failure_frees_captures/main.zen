@@ -1,0 +1,52 @@
+// Fail the first allocation after the five native result slots are ready.
+
+FailAfter = {
+    base: Alloc,
+    left: Ptr<usize>,
+
+    take = (self: @Self) bool {
+        n = self.left.read(0);
+        (n == 0).match({
+            true  => false,
+            false => {
+                self.left.write(0, n - 1);
+                true
+            },
+        })
+    }
+}
+
+FailAfter.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize)
+          Res<Ptr<u8>, AllocError> {
+        self.take().match({
+            true  => self.base.raw(size, align),
+            false => Err(AllocError.OutOfMemory),
+        })
+    }
+
+    realloc = <T>(self: @Self, p: Ptr<T>, count: usize)
+                Res<Ptr<T>, AllocError> {
+        self.take().match({
+            true  => self.base.realloc(p, count),
+            false => Err(AllocError.OutOfMemory),
+        })
+    }
+})
+
+main = (env: Env) Res<(), AllocError> {
+    alloc ::= env.mem.alloc();
+    left  ::= alloc.Vec<usize>();
+    left.add(5).try();
+    failing = FailAfter(base: alloc, left: left.ptr());
+
+    env.proc.run(failing, "", "printf out; printf err >&2").match({
+        Ok(_)  => println("allocation unexpectedly succeeded"),
+        Err(e) => e.match({
+            ReadFailed  => println("allocation failed"),
+            SpawnFailed => println("spawn failed"),
+            WaitFailed  => println("wait failed"),
+        }),
+    });
+    Ok(())
+}

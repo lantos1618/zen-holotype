@@ -227,6 +227,31 @@ same_folded = (self: str, other: str) bool {
 Split* = {
     bytes*: str,
     sep*: u8,
+
+    // Cursor for sequential iteration; private to keep it on a boundary.
+    from :: usize = 0,
+    done :: bool = false,
+
+    // Sequential iteration is O(total bytes); `at(k)` rescans for random access.
+    next* = (self :: @Self) Res<str> {
+        self.done.match({
+            true  => None,
+            false => self.bytes.slice(self.from, self.bytes.len)
+                .find(self.sep)
+                .match({
+                    Ok(i) => {
+                        piece     = self.bytes.slice(self.from, self.from + i);
+                        self.from = self.from + i + 1;
+                        Ok(piece);
+                    },
+                    // The tail is a piece, including the empty tail in "a\n".
+                    None  => {
+                        self.done = true;
+                        Ok(self.bytes.slice(self.from, self.bytes.len));
+                    },
+                }),
+        });
+    }
 }
 
 // the k-th piece: walk the bytes once, count separators, and the piece
@@ -262,8 +287,9 @@ piece_at = (s: str, sep: u8, k: usize) Res<str> {
 }
 
 Split.impl(Range<str>, {
+    // Every separator adds a piece, so ";;" has three.
     start: 0,
-    end: self.bytes.len,
+    end: self.bytes.len + 1,
 
     at ::= (self: @Self, index: usize) Res<str> {
         piece_at(self.bytes, self.sep, index)
