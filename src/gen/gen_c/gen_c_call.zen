@@ -60,6 +60,16 @@ construct = gen.gen_c.gen_c_build
 is_format_door, lower_format_door = gen.gen_c.gen_c_fmt
 address_of = gen.gen_c.gen_c_fat
 
+// One source call, carried unchanged through resolution and emission.
+// Keeping these together makes the private lowering chain say what it
+// accepts instead of repeating four independent parameters at each hop.
+CallSite = {
+    id: ExprId,
+    c: Call,
+    recv: Res<ExprId>,
+    ctx: Ctx,
+}
+
 // `Res` values
 
 res_value* = (
@@ -145,7 +155,7 @@ write_payload_init = (
     out.add_bytes(", .zg_data.").try();
     out.sym_member(variant).try();
     out.add_bytes(" = ").try();
-    expr(be, value, ctx, payload, out).try();
+    be.expr(value, ctx, payload, out).try();
     Ok(());
 }
 
@@ -219,7 +229,7 @@ write_indirect = (
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     out.add_bytes("(").try();
-    expr(be, c.callee, ctx, unknown, out).try();
+    be.expr(c.callee, ctx, unknown, out).try();
     out.add_bytes(")(").try();
     c.args.loop((h, i, a) {
         (i > 0).then(() { out.add_bytes(", ").try() });
@@ -275,7 +285,7 @@ lower_sugar_or_plain = (
     out  :: String
 ) Res<(), AllocError> {
     be.is_sugar(name, ctx).try().match({
-        true  => lower_print(be, c, name, ctx, out),
+        true  => be.lower_print(c, name, ctx, out),
         false => be.lower_plain_call(id, c, name, None, ctx, want, out),
     })
 }
@@ -350,12 +360,13 @@ lower_plain_call* = (
     out  :: String
 )
                     Res<(), AllocError> {
+    s = CallSite(id: id, c: c, recv: recv, ctx: ctx);
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(ctx.module, name, found).try();
-    be.travelled_defs(name, c, recv, ctx, found).try();
+    be.travelled_defs(name, s, found).try();
     be.check.resolved_call(id).match({
-        Ok(d) => be.chosen_def(id, c, name, found, d, recv, ctx, want, out),
-        None  => be.sole_def(id, c, name, found, recv, ctx, want, out),
+        Ok(d) => be.chosen_def(s, name, found, d, want, out),
+        None  => be.sole_def(s, name, found, want, out),
     })
 }
 
@@ -375,16 +386,14 @@ lower_plain_call* = (
 travelled_defs = (
     be    :: CBackend,
     name  : str,
-    c     : Call,
-    recv  : Res<ExprId>,
-    ctx   : Ctx,
+    s     : CallSite,
     found :: Vec<Def>
 ) Res<(), AllocError> {
-    recv.match({
-        Ok(r) => be.travelled_for(name, r, ctx, found),
-        None  => c.args.get(0).match({
+    s.recv.match({
+        Ok(r) => be.travelled_for(name, r, s.ctx, found),
+        None  => s.c.args.get(0).match({
             None  => Ok(()),
-            Ok(a) => be.travelled_for(name, a.value, ctx, found),
+            Ok(a) => be.travelled_for(name, a.value, s.ctx, found),
         }),
     })
 }
@@ -400,7 +409,7 @@ travelled_for = (
     rty     = be.ty_of(r, ctx, unknown).try();
     defs ::= be.alloc.Vec<Def>();
     be.check.world.exported_named(name, defs).try();
-    defs.loop((h, d) { keep_travelled(be, d, rty, found).try() });
+    defs.loop((h, d) { be.keep_travelled(d, rty, found).try() });
     Ok(());
 }
 
@@ -459,19 +468,16 @@ has_def = (found: Vec<Def>, id: DeclId) bool {
 // declaration overload resolution picked, keyed on this node.
 chosen_def = (
     be    :: CBackend,
-    id    : ExprId,
-    c     : Call,
+    s     : CallSite,
     name  : str,
     found : Vec<Def>,
     want  : DeclId,
-    recv  : Res<ExprId>,
-    ctx   : Ctx,
     dest  : TyId,
     out   :: String
 ) Res<(), AllocError> {
     def_with_id(found, want).match({
-        Ok(d) => be.call_kind(id, c, d, recv, ctx, dest, out),
-        None  => be.sole_def(id, c, name, found, recv, ctx, dest, out),
+        Ok(d) => be.call_kind(s, d, dest, out),
+        None  => be.sole_def(s, name, found, dest, out),
     })
 }
 
@@ -492,64 +498,37 @@ def_with_id* = (found: Vec<Def>, want: DeclId) Res<Def> {
 // between candidates here is the guess the whole seam exists to avoid.
 sole_def = (
     be    :: CBackend,
-    id    : ExprId,
-    c     : Call,
+    s     : CallSite,
     name  : str,
     found : Vec<Def>,
-    recv  : Res<ExprId>,
-    ctx   : Ctx,
     dest  : TyId,
     out   :: String
 )
            Res<(), AllocError> {
     found.len.match({
-        0 => unresolved(be, id, name, out),
+        0 => be.unresolved(s.id, name, out),
         1 => be.call_kind(
-            id,
-            c,
+            s,
             found.get(0).ok_or(AllocError.OutOfMemory).try(),
-            recv,
-            ctx,
             dest,
             out
         ),
-        _ => ambiguous(be, id, name, out),
-    })
-}
-
-call_def = (
-    be    :: CBackend,
-    id    : ExprId,
-    c     : Call,
-    name  : str,
-    found : Vec<Def>,
-    recv  : Res<ExprId>,
-    ctx   : Ctx,
-    dest  : TyId,
-    out   :: String
-)
-           Res<(), AllocError> {
-    found.get(0).match({
-        None  => unresolved(be, id, name, out),
-        Ok(d) => be.call_kind(id, c, d, recv, ctx, dest, out),
+        _ => be.ambiguous(s.id, name, out),
     })
 }
 
 call_kind = (
     be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
+    s    : CallSite,
     d    : Def,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
     d.kind.match({
-        FunctionDef => be.call_resolved(id, c, d, recv, ctx, want, out),
-        StructDef   => construct(be, id, c, d, ctx, out),
+        FunctionDef => be.call_resolved(s, d, want, out),
+        StructDef   => be.construct(s.id, s.c, d, s.ctx, out),
         _           => be.unsupported(
-            id,
+            s.id,
             "a call to something that is not a function",
             out
         ),
@@ -562,41 +541,35 @@ call_kind = (
 // closes when it does.
 call_resolved = (
     be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
+    s    : CallSite,
     d    : Def,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
     want : TyId,
     out  :: String
 )
                 Res<(), AllocError> {
     decl_at(be.tree, d.id).match({
         None  => be.unsupported(
-            id,
+            s.id,
             "a call to something that is not a plain function",
             out
         ),
-        Ok(x) => be.call_decl(id, c, d, x, recv, ctx, want, out),
+        Ok(x) => be.call_decl(s, d, x, want, out),
     })
 }
 
 call_decl = (
     be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
+    s    : CallSite,
     d    : Def,
     x    : Decl,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
     want : TyId,
     out  :: String
 )
             Res<(), AllocError> {
     x.kind.match({
-        Function(f) => be.call_fn(id, c, d, f, recv, ctx, want, out),
+        Function(f) => be.call_fn(s, d, f, want, out),
         _           => be.unsupported(
-            id,
+            s.id,
             "a call to something that is not a plain function",
             out
         ),
@@ -610,12 +583,9 @@ call_decl = (
 // an inference failure — it's the construct whose body this backend is.
 call_fn = (
     be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
+    s    : CallSite,
     d    : Def,
     f    : Function,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
     dest : TyId,
     out  :: String
 ) Res<(), AllocError> {
@@ -628,11 +598,11 @@ call_fn = (
     // through to `want_of`, the only speaker left.
     decided = be.check.is_unknown(dest).match({
         false => Ok(dest),
-        true  => be.want_of(id, ctx),
+        true  => be.want_of(s.id, s.ctx),
     }).try();
     be.is_loop_shape(f).match({
-        true  => be.lower_loop(id, c, f, recv, ctx, decided, out),
-        false => be.call_or_inline(id, c, d, f, recv, ctx, out),
+        true  => be.lower_loop(s.id, s.c, f, s.recv, s.ctx, decided, out),
+        false => be.call_or_inline(s, d, f, out),
     })
 }
 
@@ -641,19 +611,16 @@ call_fn = (
 // symbol to emit and nothing to pass. `gen_c_inline.zen` is the general
 // case the loop intrinsic is the special one of.
 call_or_inline = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
-    f    : Function,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
-    out  :: String
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    out :: String
 )
                  Res<(), AllocError> {
-    be.inlines(c, f).match({
-        true  => be.inline_call(id, c, d, f, recv, ctx, out),
-        false => be.call_or_floor(id, c, d, f, recv, ctx, out),
+    be.inlines(s.c, f).match({
+        true  => be.inline_call(s.id, s.c, d, f, s.recv, s.ctx, out),
+        false => be.call_or_floor(s, d, f, out),
     })
 }
 
@@ -661,19 +628,16 @@ call_or_inline = (
 // its body — the same bargain `mem_ptr.zen`'s nine members strike, the
 // one place a Ptr is made rather than used.
 call_or_floor = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
-    f    : Function,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
-    out  :: String
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    out :: String
 )
                 Res<(), AllocError> {
     is_null_ptr(d.name).match({
-        true  => be.lower_null_ptr(id, be.want_of(id, ctx).try(), out),
-        false => be.call_or_format(id, c, d, f, recv, ctx, out),
+        true  => be.lower_null_ptr(s.id, be.want_of(s.id, s.ctx).try(), out),
+        false => be.call_or_format(s, d, f, out),
     })
 }
 
@@ -682,19 +646,16 @@ call_or_floor = (
 // C spelling and `{}` resolves by the argument's type, so there's
 // nothing one body could have been.
 call_or_format = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
-    f    : Function,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
-    out  :: String
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    out :: String
 )
                  Res<(), AllocError> {
     be.is_format_door(d, f).match({
-        true  => be.lower_format_door(id, c, d, f, recv, ctx, out),
-        false => be.call_or_convert(id, c, d, f, recv, ctx, out),
+        true  => be.lower_format_door(s.id, s.c, d, f, s.recv, s.ctx, out),
+        false => be.call_or_convert(s, d, f, out),
     })
 }
 
@@ -711,19 +672,16 @@ call_or_format = (
 // a Res-returning function someone writes on purpose" — such a
 // function has a body and never reaches here.
 call_or_convert = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
-    f    : Function,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
-    out  :: String
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    out :: String
 )
                   Res<(), AllocError> {
     convert_target(d, f).match({
-        Ok(t) => be.lower_convert(c, d, t, recv, ctx, out),
-        None  => be.call_or_plain(id, c, d, f, recv, ctx, out),
+        Ok(t) => be.lower_convert(s.c, d, t, s.recv, s.ctx, out),
+        None  => be.call_or_plain(s, d, f, out),
     })
 }
 
@@ -744,42 +702,36 @@ call_or_convert = (
 // (`gen_c_member.method_fault`). This is the last path left that could
 // name an undefined symbol.
 call_or_plain = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
-    f    : Function,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
-    out  :: String
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    out :: String
 )
                  Res<(), AllocError> {
     bodyless(f).match({
         true  => be.ffi.match({
-            true  => be.call_extern(id, c, d, f, recv, ctx, out),
+            true  => be.call_extern(s, d, f, out),
             false => be.unsupported(
-                id,
+                s.id,
                 "a call to a function with no body",
                 out
             ),
         }),
-        false => be.call_signature(id, c, d, f, recv, ctx, out),
+        false => be.call_signature(s, d, f, out),
     })
 }
 
 call_extern = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
-    f    : Function,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
-    out  :: String
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    out :: String
 ) Res<(), AllocError> {
     plain(f).match({
         false => be.unsupported(
-            id,
+            s.id,
             "a generic function has no single foreign symbol",
             out
         ),
@@ -788,11 +740,11 @@ call_extern = (
             sig  ::= be.alloc.Vec<TyId>();
             be.signature_of(d, inst, sig).try().match({
                 false => be.unsupported(
-                    id,
+                    s.id,
                     "a foreign function whose parameters have no written type",
                     out
                 ),
-                true  => be.write_extern(id, c, d, f, sig, recv, ctx, out),
+                true  => be.write_extern_at(s, d, f, sig, out),
             })
         },
     })
@@ -809,10 +761,22 @@ write_extern* = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
+    s = CallSite(id: id, c: c, recv: recv, ctx: ctx);
+    be.write_extern_at(s, d, f, sig, out)
+}
+
+write_extern_at = (
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    sig : Vec<TyId>,
+    out :: String
+) Res<(), AllocError> {
     ret = be.foreign_ret(d, f).try();
     be.foreign_types_spellable(ret, sig).match({
         false => be.unsupported(
-            id,
+            s.id,
             "a foreign function with a type C cannot spell",
             out
         ),
@@ -821,11 +785,11 @@ write_extern* = (
             be.foreign_proto(d.name, f, ret, sig, proto).try();
             be.need_extern(d.name, proto).try().match({
                 false => be.unsupported(
-                    id,
+                    s.id,
                     "one foreign symbol declared with more than one signature",
                     out
                 ),
-                true  => be.write_call(c, d, f, sig, d.name, recv, ctx, out),
+                true  => be.write_call(s, d, f, sig, d.name, out),
             })
         },
     })
@@ -962,29 +926,26 @@ write_convert = (
     unknown = be.check.types.unknown().try();
     src     = sig.get(0).match({ Ok(t) => t, None => unknown });
     out.fmt("({})(", c_prim(target)).try();
-    expr(be, v, ctx, src, out).try();
+    be.expr(v, ctx, src, out).try();
     out.add_bytes(")")
 }
 
 call_signature = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
-    f    : Function,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
-    out  :: String
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    out :: String
 )
                  Res<(), AllocError> {
-    raw     = be.inst_at(id).try();
+    raw     = be.inst_at(s.id).try();
     settled = be.settled_inst(f.tparams, d.qname, raw).try();
-    inst    = be.complete_inst(c, d, f, settled, recv, ctx).try();
+    inst    = be.complete_inst(s.c, d, f, settled, s.recv, s.ctx).try();
     sig ::= be.alloc.Vec<TyId>();
     ok = be.signature_of(d, inst, sig).try();
     ok.match({
-        false => be.unsupported(id, be.plain_fault(d), out),
-        true  => be.call_settled(id, c, d, f, sig, inst, recv, ctx, out),
+        false => be.unsupported(s.id, be.plain_fault(d), out),
+        true  => be.call_settled(s, d, f, sig, inst, out),
     })
 }
 
@@ -993,23 +954,20 @@ call_signature = (
 // one letter, so every instantiation would be one C symbol.
 call_settled = (
     be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
+    s    : CallSite,
     d    : Def,
     f    : Function,
     sig  : Vec<TyId>,
     inst : Inst,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
     (be.inst_open(inst) || be.any_open(sig)).match({
         true  => be.unsupported(
-            id,
+            s.id,
             "a generic call whose type arguments nothing settles",
             out
         ),
-        false => be.call_reachable(id, c, d, f, sig, inst, recv, ctx, out),
+        false => be.call_reachable(s, d, f, sig, inst, out),
     })
 }
 
@@ -1023,20 +981,17 @@ call_settled = (
 // when they're two symbols.
 call_reachable = (
     be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
+    s    : CallSite,
     d    : Def,
     f    : Function,
     sig  : Vec<TyId>,
     inst : Inst,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
     sym ::= be.alloc.String().try();
     sym_fn(sym, be.check.types, be.check.world, d.qname, sig, inst).try();
     be.need_function(d, inst, sym.view()).try();
-    be.write_call(c, d, f, sig, sym.view(), recv, ctx, out)
+    be.write_call(s, d, f, sig, sym.view(), out)
 }
 
 // Which of the things a callee can be that this backend does not lower.
@@ -1125,20 +1080,18 @@ add_param = (
 }
 
 write_call = (
-    be   :: CBackend,
-    c    : Call,
-    d    : Def,
-    f    : Function,
-    sig  : Vec<TyId>,
-    sym  : str,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
-    out  :: String
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    sig : Vec<TyId>,
+    sym : str,
+    out :: String
 )
              Res<(), AllocError> {
     out.fmt("{sym}(").try();
-    first = be.write_receiver(recv, c, f, sig, ctx, out).try();
-    be.write_call_args(c, first, f, sig, ctx, out).try();
+    first = be.write_receiver(s.recv, s.c, f, sig, s.ctx, out).try();
+    be.write_call_args(s.c, first, f, sig, s.ctx, out).try();
     out.add_bytes(")").try();
     Ok(());
 }
@@ -1291,7 +1244,7 @@ write_forwarded = (
 ) Res<(), AllocError> {
     arg_value(c, slot - first).match({
         None  => Ok(()),
-        Ok(v) => expr(be, v, ctx, pack, out),
+        Ok(v) => be.expr(v, ctx, pack, out),
     })
 }
 
@@ -1453,7 +1406,7 @@ write_address* = (
     out   :: String
 ) Res<(), AllocError> {
     code ::= be.alloc.String().try();
-    expr(be, value, ctx, want, code).try();
+    be.expr(value, ctx, want, code).try();
     be.address_of(code.view(), want, out).try();
     Ok(());
 }
