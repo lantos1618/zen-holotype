@@ -538,7 +538,10 @@ write_fs_size = (out :: Emit) Res<(), AllocError> {
     out.say("    return zg_fs_error(errno);").try();
     out.say("if (S_ISDIR(st.st_mode)) return ZG_FS_IS_DIR;").try();
     out.say("if (st.st_size < 0) return ZG_FS_FAILED;").try();
-    out.say("*out = (size_t)st.st_size;").try();
+    // /proc and other special files report st_size 0 but have content.
+    // Hand back a bounded read window so fs.read allocates and fread
+    // consumes until EOF; an actually-empty file just reads 0 bytes.
+    out.say("*out = st.st_size == 0 ? 65536 : (size_t)st.st_size;").try();
     out.say("return ZG_FS_OK;").try();
     out.dedent();
     out.say("}").try();
