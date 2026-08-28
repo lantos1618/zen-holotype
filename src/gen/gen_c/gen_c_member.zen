@@ -303,7 +303,7 @@ with_site = (
     own ::= be.alloc.Vec<Member>();
     member_at(be, s, d.a.name.text, own).try();
     be.pick_member(d.c, s, own, ctx).try().match({
-        Ok(m) => be.declared_member(d, s, m, ctx, out),
+        Ok(m) => be.declared_member(d, s, m, ctx, want, out),
         None  => be.supplied_or_ufcs(d, s, ctx, want, out),
     })
 }
@@ -351,15 +351,16 @@ supplied_or_refused = (
 // a fat value's slot is. Calling through it is the general form — lower
 // the callee, then call it — and is not written yet.
 declared_member = (
-    be  :: CBackend,
-    d   : Dot,
-    s   : Site,
-    m   : Member,
-    ctx : Ctx,
-    out :: String
+    be   :: CBackend,
+    d    : Dot,
+    s    : Site,
+    m    : Member,
+    ctx  : Ctx,
+    want : TyId,
+    out  :: String
 ) Res<(), AllocError> {
     m.kind.match({
-        Function(f) => be.lower_method(d, s, f, ctx, out),
+        Function(f) => be.lower_method(d, s, f, ctx, want, out),
         _           => be.unsupported(
             d.id,
             "a call through a function-valued field",
@@ -380,7 +381,7 @@ supplied_member = (
     out  :: String
 ) Res<(), AllocError> {
     m.kind.match({
-        Function(f) => be.lower_method(d, s, f, ctx, out),
+        Function(f) => be.lower_method(d, s, f, ctx, want, out),
         _           => be.lower_ufcs(d, s.ty, ctx, want, out),
     })
 }
@@ -656,12 +657,13 @@ is_fat_slot = (be: CBackend, rty: TyId, f: Function) bool {
 }
 
 lower_method = (
-    be  :: CBackend,
-    d   : Dot,
-    s   : Site,
-    f   : Function,
-    ctx : Ctx,
-    out :: String
+    be   :: CBackend,
+    d    : Dot,
+    s    : Site,
+    f    : Function,
+    ctx  : Ctx,
+    want : TyId,
+    out  :: String
 )
                Res<(), AllocError> {
     be.method_kind(d, s, f, ctx).try().match({
@@ -685,6 +687,7 @@ lower_method = (
             s.decl.module.to_usize(),
             f,
             ctx,
+            want,
             out
         ),
         SinkDoor     => be.lower_member_door(d.id, d.c, d.a.base, ctx, out),

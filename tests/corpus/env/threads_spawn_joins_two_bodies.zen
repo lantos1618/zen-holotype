@@ -1,0 +1,23 @@
+// `env.threads.spawn` HAS a floor now (pthreads): two bodies run on
+// their own threads and answer, and the joins hand the answers back.
+// The first body captures `x`, so the capture record's heap crossing is
+// pinned too. All printing is main's, after both joins, so the output
+// order is pinned -- the two threads' own order is deliberately not
+// observed. This is the positive half of the retired must-fail
+// `codegen/env_threads_spawn_is_not_lowered_yet`.
+main = (env: Env) Res<i32, ThreadError> {
+    a                         = env.mem.alloc();
+    x: u64                    = 7;
+    t1                        = env.threads.spawn(a, () Res<u64, ThreadError> {
+        Ok(11 + x);
+    }).try();
+    t2                        = env.threads.spawn(a, () Res<u64, ThreadError> {
+        Ok(22);
+    }).try();
+    r1: Res<u64, ThreadError> = t1.join();
+    r2: Res<u64, ThreadError> = t2.join();
+    v1                        = r1.try();
+    v2                        = r2.try();
+    println("joined {} {}", v1, v2);
+    Ok(0);
+}

@@ -39,7 +39,7 @@ lower_env_var = gen.gen_c.gen_c_env
 lower_console_print, is_console_print = gen.gen_c.gen_c_print
 is_defer, lower_defer = gen.gen_c.gen_c_scope
 lower_clock_read = gen.gen_c.gen_c_clock
-lower_sleep = gen.gen_c.gen_c_threads
+lower_sleep, lower_spawn, lower_join = gen.gen_c.gen_c_threads
 
 // Classification is closed and travels with MethodKind into lowering,
 // so receiver ownership and an overloaded name such as `read` are
@@ -57,6 +57,8 @@ CapabilityKind* = NotCapability
     | EnvVar
     | ClockRead
     | ThreadsSleep
+    | ThreadsSpawn
+    | ThreadsJoin
     | ConsolePrint
     | StdinRead
     | ScopeDefer
@@ -81,6 +83,12 @@ capability_kind* = (be :: CBackend, rty: TyId, name: str) CapabilityKind {
         });
         (owner.eq("Threads") && name.eq("sleep")).then(() {
             h.break(ThreadsSleep)
+        });
+        (owner.eq("Threads") && name.eq("spawn")).then(() {
+            h.break(ThreadsSpawn)
+        });
+        (owner.eq("Thread") && name.eq("join")).then(() {
+            h.break(ThreadsJoin)
         });
         (owner.eq("Console") && is_console_print(name)).then(() {
             h.break(ConsolePrint)
@@ -107,7 +115,7 @@ capability_owner = (be :: CBackend, n: TyNamed) str {
         None  => "",
         Ok(t) => (
             (n.name.eq("Mem") && t.name.eq("std.mem.mem_arena"))
-            || (n.name.is_in(["Fs", "Lock", "Env", "Clock", "Threads", "Console", "Stdin"]) && t.name.eq("std.env.env"))
+            || (n.name.is_in(["Fs", "Lock", "Env", "Clock", "Threads", "Thread", "Console", "Stdin"]) && t.name.eq("std.env.env"))
         ).match({ true => n.name, false => "" }),
     })
 }
@@ -128,10 +136,17 @@ lower_capability* = (
     mi   : usize,
     f    : Function,
     ctx  : Ctx,
+    want : TyId,
     out  :: String
 ) Res<(), AllocError> {
     kind.match({
         ScopeDefer    => be.lower_defer(id, c, a, ctx, out),
+        // `join` is generic in a parameter NOTHING settles — its `T`
+        // lives only in the return type — so the typed path's
+        // `cap_ret` would request a type with a free variable in it.
+        // Its lowering reads the type off the call site's expectation
+        // instead, which is what `want` carries here.
+        ThreadsJoin   => be.lower_join(id, c, a, rty, want, ctx, out),
         NotCapability => be.unsupported(id, "an unclassified capability", out),
         _             => be.lower_typed_capability(
             kind,
@@ -203,6 +218,7 @@ lower_capability_kind = (
         EnvVar       => be.lower_env_var(c, ret, ctx, out),
         ClockRead    => be.lower_clock_read(c, a.name.text, ret, ctx, out),
         ThreadsSleep => be.lower_sleep(c, ret, ctx, out),
+        ThreadsSpawn => be.lower_spawn(id, c, ret, ctx, out),
         ConsolePrint => lower_console_print(be, c, a.name.text, ret, ctx, out),
         StdinRead    => be.lower_stdin_read(id, c, ret, aty, ctx, out),
         _            => be.unsupported(

@@ -67,6 +67,17 @@ MethodRef* = {
     name*: str,
     sig*: Vec<TyId>, // declared parameter types, RECEIVER INCLUDED
     qname*: str,
+
+}
+
+// The caller's open blocks and pending drops, set aside while a lifted
+// closure body lowers. A spawned closure becomes a function of its own,
+// and a `.try()` inside it unwinds to depth 0 — which must be the
+// THUNK's depth 0, not main's, or the early return runs the caller's
+// drops in a function that has no such locals.
+Cleanup* = {
+    blocks*: Vec<BlockFrame>,
+    drops*: Vec<DropEntry>,
 }
 
 CBackend* = {
@@ -125,6 +136,15 @@ CBackend* = {
     // but a program that sleeps without measuring must not be handed an
     // uncalled static to warn about.
     threads_used :: bool,
+
+    // Its own flag and not `threads_used`: the spawn floor is pthreads,
+    // and a program that only sleeps must not be handed `<pthread.h>`
+    // for it. The records are one capture record per spawned closure
+    // that has captures, heap-owned because the thread outlives the
+    // frame that spawned it; the count is what names them.
+    spawn_used :: bool,
+    spawn_envs :: Vec<String>,
+    spawn_sites :: usize,
 
     // the functions to lower, and the ones already lowered. A QUEUE
     // rather than a list of every declaration because the walk is
@@ -409,6 +429,25 @@ CBackend* = {
 
     uses_threads* = (self: @Self) bool { self.threads_used }
 
+    need_spawn* = (self :: @Self) () { self.spawn_used = true; }
+
+    uses_spawn* = (self: @Self) bool { self.spawn_used }
+
+    next_spawn* = (self :: @Self) usize {
+        self.spawn_sites = self.spawn_sites + 1;
+        self.spawn_sites
+    }
+
+    add_spawn_env* = (self :: @Self, text: String) Res<(), AllocError> {
+        self.spawn_envs.add(text)
+    }
+
+    spawn_env_count* = (self: @Self) usize { self.spawn_envs.len }
+
+    spawn_env_at* = (self: @Self, i: usize) Res<String> {
+        self.spawn_envs.get(i)
+    }
+
     // -----------------------------------------------------------------
     // the block stack, and what each block must destroy
     //
@@ -466,6 +505,22 @@ CBackend* = {
     block_depth* = (self: @Self) usize { self.blocks.len }
 
     block_at* = (self: @Self, i: usize) Res<BlockFrame> { self.blocks.get(i) }
+
+    // The thunk door's save/restore, for the reason the `Cleanup`
+    // declaration gives. The LOCALS stack is not part of it: the body's
+    // captures resolve through the caller's frame, so the caller's
+    // bindings stay readable while its cleanup is set aside.
+    hold_cleanup* = (self :: @Self) Res<Cleanup, AllocError> {
+        held        = Cleanup(blocks: self.blocks, drops: self.drops);
+        self.blocks = self.alloc.Vec<BlockFrame>();
+        self.drops  = self.alloc.Vec<DropEntry>();
+        Ok(held)
+    }
+
+    restore_cleanup* = (self :: @Self, held: Cleanup) () {
+        self.blocks = held.blocks;
+        self.drops  = held.drops;
+    }
 
     drop_count* = (self: @Self) usize { self.drops.len }
 
@@ -983,6 +1038,9 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         env_used: false,
         clock_used: false,
         threads_used: false,
+        spawn_used: false,
+        spawn_envs: a.Vec<String>(),
+        spawn_sites: 0,
         scope_used: false,
         defer_envs: a.Vec<String>(),
         defer_env_ids: a.Vec<usize>(),

@@ -4,34 +4,59 @@
 // cannot drift apart.
 // `Threads.sleep` is bodiless in `std/env/env.zen`: the authority
 // itself, reached only as `env.threads`, and its floor is `nanosleep`.
-// The floor is POSIX, not C99, so the feature-macro block is the clock's
-// (`need_clock`); the emission of the static itself is this floor's own
-// flag, because a program that sleeps must not be handed an uncalled
-// function to warn about.
-// NO FAILURE MODE A CALLER ACTS ON. `nanosleep` answers EINTR when a
-// signal lands mid-sleep; a Zen program has no signal handling to
+// `Threads.spawn` and `Thread.join` are the same kind of member, and
+// their floor is pthreads.
+// The floors are POSIX, not C99, so the feature-macro block is the
+// clock's; the emission of each static is its own flag, because a
+// program that sleeps must not be handed an uncalled function to warn
+// about, and one that only sleeps must not be handed `<pthread.h>`.
+// NO FAILURE MODE A CALLER ACTS ON in `sleep`. `nanosleep` answers EINTR
+// when a signal lands mid-sleep; a Zen program has no signal handling to
 // interrupt, so the retry loop is all there is and the signature
-// answers unit, not Res.
+// answers unit, not Res. `spawn` and `join` DO have failure modes —
+// `SpawnFailed` and `Panicked` are what `ThreadError` is for.
 // THE RECEIVER IS NOT LOWERED, exactly as `env.clock` never lowers the
 // Env it resolved through: `env.threads` is a field read of a record
 // whose slots this path does not call.
 
-Call = std.ast
+ExprId, Call, Arg, Lambda, Access, TypeId = std.ast
 AllocError = std.mem
-String = std.text
+Vec = std.collections
+str, String = std.text
+Range = std.core
 TyId = sema.sema_ty
 Ctx = sema.sema_check
+type_from_ast = sema.sema_denote
 Emit = gen.gen_emit
+sym_member, sym_gen, sym_local = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
+LocalSlot = gen.gen_c.gen_c_frame
 comment = gen.gen_c.gen_c_runtime
 arg_text = gen.gen_c.gen_c_arg
+unsupported = gen.gen_c.gen_c_report
+spelled_lambda = gen.gen_c.gen_c_inline
+captures = gen.gen_c.gen_c_scope
+expr, want_of = gen.gen_c.gen_c_expr
+ctype, declarator = gen.gen_c.gen_c_type
+temp, payload_type = gen.gen_c.gen_c_flow
+Dest, block = gen.gen_c.gen_c_stmt
+write_assign_ok, write_assign_err = gen.gen_c.gen_c_flow
+settled = gen.gen_c.gen_c_settle
 
-// THE FLOOR: `nanosleep`, emitted only for a program that sleeps — an
-// uncalled `static` is a warning.
+// ---------------------------------------------------------------------
+// the floors
+// ---------------------------------------------------------------------
+
+// THE SLEEP FLOOR: `nanosleep`, emitted only for a program that sleeps —
+// an uncalled `static` is a warning.
 emit_threads* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.uses_threads().match({
         false => Ok(()),
         true  => be.write_sleep(out),
+    }).try();
+    be.uses_spawn().match({
+        false => Ok(()),
+        true  => emit_spawn_floor(out),
     })
 }
 
@@ -52,7 +77,45 @@ write_sleep = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     out.line().try();
 }
 
+// THE SPAWN FLOOR: pthreads, and nothing else. The create and join calls
+// are written at the call sites themselves; all a program that spawns
+// needs here is the header, with the clock's feature-macro dance in
+// front of it (`gen_c_clock.zen` says why the `#undef` is load-bearing).
+emit_spawn_floor = (out :: Emit) Res<(), AllocError> {
+    out.say("#undef _POSIX_C_SOURCE").try();
+    out.say("#define _POSIX_C_SOURCE 200809L").try();
+    comment(
+        out,
+        "the spawn floor is POSIX pthreads, not C99 - hence the macro above"
+    ).try();
+    out.say("#if defined(__GLIBC__)").try();
+    out.say("#undef _FEATURES_H").try();
+    out.say("#include <features.h>").try();
+    out.say("#endif").try();
+    out.say("#include <pthread.h>").try();
+    out.line().try();
+    Ok(());
+}
+
+// THE CAPTURE RECORDS, emitted where `emit_scope` emits the defer ones:
+// AFTER the types, because a record field names them. Unlike a deferred
+// closure's record — storage the block owns — a spawned closure's record
+// is heap memory: the thread outlives the frame that wrote the captures,
+// so the frame cannot be the storage (law 1 is why the signature takes
+// an Alloc at all).
+emit_spawn_envs* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    Range(0, be.spawn_env_count()).loop((h, i) {
+        be.spawn_env_at(i).match({
+            None  => Ok(()),
+            Ok(t) => out.say(t.view()),
+        }).try();
+    });
+    Ok(());
+}
+
+// ---------------------------------------------------------------------
 // THE LOWERING: `env.threads.sleep(ms)`
+// ---------------------------------------------------------------------
 // Sleep answers unit, but the lowering stands where an expression was,
 // so the statement is written and `0` is left where the value goes —
 // unit is zero-width in C and nothing reads it.
@@ -71,4 +134,527 @@ lower_sleep* = (
     be.arg_text(c, 0, usize_ty, ctx, ms).try();
     be.fmt("zg_threads_sleep({});\n", ms.view()).try();
     out.add_bytes("0")
+}
+
+// ---------------------------------------------------------------------
+// THE LOWERING: `env.threads.spawn(a, body)`
+// ---------------------------------------------------------------------
+// A SPAWNED CLOSURE IS THE SECOND closure in the language that becomes a
+// real C function — `gen_c_scope.zen`'s deferred closure is the first,
+// and this file walks exactly its path: capture walk, record, lifted
+// body, one trampoline. The differences are the floor's own:
+//   - the record is MALLOC'D, not block storage — the thread outlives
+//     the frame, so the frame cannot hold the captures;
+//   - the body ANSWERS, so the lifted function returns the body's
+//     `Res<T, ThreadError>` and the trampoline heap-copies that answer
+//     for `pthread_join` to hand back — which is also why `Thread`
+//     carries only `id`: the result travels through the join, not
+//     through the handle;
+//   - `T` is settled by the closure's DECLARED return type, which is
+//     why a spawn body must write one — sema never walks a lambda body,
+//     and the floor needs the type to size the copy.
+// THE Alloc ARGUMENT IS NOT LOWERED. It is the authority the signature
+// demands (law 2: an escaping closure needs its own memory, so the
+// caller must be holding an allocator to say `spawn`), and the floor's
+// mechanism is `malloc` — wiring the arena's pages into the thread's
+// record is the non-minimal version of this floor.
+lower_spawn* = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.need_spawn();
+    be.request_type(ret).try();
+    c.args.get(1).match({
+        None  => be.unsupported(id, "`spawn` with no closure", out),
+        Ok(g) => be.spawn_arg(id, g, ret, ctx, out),
+    })
+}
+
+// `defer`'s rule, said about `spawn`: the closure is written AT THE CALL
+// SITE. A function-typed name handed over would have no captures to copy
+// and no body to lift, so it is refused by name rather than lowered into
+// something that looks like it worked.
+spawn_arg = (
+    be  :: CBackend,
+    id  : ExprId,
+    g   : Arg,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.spelled_lambda(g.value).match({
+        Ok(l) => be.spawn_lambda(id, l, ret, ctx, out),
+        None  => be.unsupported(
+            id,
+            "`spawn` given something other than a closure written at the call site",
+            out
+        ),
+    })
+}
+
+spawn_lambda = (
+    be  :: CBackend,
+    id  : ExprId,
+    l   : Lambda,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    (l.params.len > 0).match({
+        true  => be.unsupported(
+            id,
+            "a spawned closure that takes parameters",
+            out
+        ),
+        false => be.spawn_ret(id, l, ret, ctx, out),
+    })
+}
+
+spawn_ret = (
+    be  :: CBackend,
+    id  : ExprId,
+    l   : Lambda,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    l.ret.match({
+        None   => be.unsupported(
+            id,
+            "a spawned closure that declares no return type",
+            out
+        ),
+        Ok(rt) => be.spawn_typed(id, l, rt, ret, ctx, out),
+    })
+}
+
+spawn_typed = (
+    be  :: CBackend,
+    id  : ExprId,
+    l   : Lambda,
+    rt  : TypeId,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    rty = be.check.type_from_ast(rt, ctx).try();
+    be.check.types.at(rty).match({
+        Res(_) => be.spawn_res(id, l, rty, ret, ctx, out),
+        _      => be.unsupported(
+            id,
+            "a spawned closure whose return is not a Res",
+            out
+        ),
+    })
+}
+
+spawn_res = (
+    be  :: CBackend,
+    id  : ExprId,
+    l   : Lambda,
+    rty : TyId,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.request_type(rty).try();
+    caps ::= be.alloc.Vec<LocalSlot>();
+    be.captures(l.body, caps).try();
+    n = be.next_spawn();
+    be.write_spawn_env(n, caps).try();
+    write_spawn_fn(be, n, l, caps, rty, ctx).try();
+    write_spawn_tramp(be, n, rty).try();
+    be.write_spawn_call(n, caps, ret, out)
+}
+
+// the capture record
+
+spawn_env_name = (be :: CBackend, n: usize, out :: String)
+                 Res<(), AllocError> {
+    sym_gen(out, "sp", n)
+}
+
+write_spawn_env = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
+                  Res<(), AllocError> {
+    (caps.len == 0).match({
+        true  => Ok(()),
+        false => be.write_spawn_struct(n, caps),
+    })
+}
+
+// The record's field names ARE the frame's own mangled local names — the
+// same rule `gen_c_scope.zen`'s capture record obeys, because the
+// prologue's remap depends on it.
+write_spawn_struct = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
+                     Res<(), AllocError> {
+    env ::= be.alloc.String().try();
+    be.spawn_env_name(n, env).try();
+    text ::= be.alloc.String().try();
+    text.fmt("typedef struct {} {{\n", env.view()).try();
+    caps.loop((h, s) { be.write_spawn_field(s, text).try() });
+    text.fmt("}} {};\n", env.view()).try();
+    be.add_spawn_env(text)
+}
+
+write_spawn_field = (be :: CBackend, s: LocalSlot, text :: String)
+                    Res<(), AllocError> {
+    text.add_bytes("    ").try();
+    cname ::= be.alloc.String().try();
+    sym_local(cname, s.name, s.index).try();
+    s.by_ref.match({
+        false => be.declarator(s.ty, cname.view(), text),
+        true  => be.spawn_ref_field(s.ty, cname.view(), text),
+    }).try();
+    text.add_bytes(";\n")
+}
+
+// A `::` binding IS an address everywhere else, so what the record
+// copies is the address — one word, and the thread reads the storage it
+// points at. Whether that storage outlives the frame is the program's
+// question, not this floor's: the own pass has already refused the
+// captures that provably dangle.
+spawn_ref_field = (be :: CBackend, ty: TyId, name: str, text :: String)
+                  Res<(), AllocError> {
+    be.ctype(ty, text).try();
+    text.fmt(" *{name}")
+}
+
+// the lifted body
+
+// THE BODY FUNCTION. `static <Res<T, ThreadError>> zg_sbN(zg_spN *)` —
+// an ordinary function at the body's own type, so a `.try()` inside the
+// body returns out of IT (the ctx below is the body's own, with `ret`
+// rebound; the caller's would return the caller's type from this
+// function, which is C that does not compile).
+write_spawn_fn = (
+    be   :: CBackend,
+    n    : usize,
+    l    : Lambda,
+    caps : Vec<LocalSlot>,
+    rty  : TyId,
+    ctx  : Ctx
+) Res<(), AllocError> {
+    proto ::= be.alloc.String().try();
+    be.spawn_fn_proto(n, rty, caps, proto).try();
+    held = be.take_buf().try();
+    // The caller's cleanup is set aside with its buffer: a `.try()` in
+    // the body unwinds to depth 0, and depth 0 is the thunk's own frame.
+    clean = be.hold_cleanup().try();
+    be.indent();
+    be.write_spawn_prologue(n, caps).try();
+    tctx = Ctx(
+        module: ctx.module,
+        ret: rty,
+        has_ret: true,
+        self_ty: ctx.self_ty,
+        has_self: ctx.has_self
+    );
+    block(be, l.body, tctx, rty, Dest.Return).try();
+    text ::= be.alloc.String().try();
+    text.add_bytes(be.text()).try();
+    be.restore_cleanup(clean);
+    be.put_buf(held);
+    name ::= be.alloc.String().try();
+    sym_gen(name, "sb", n).try();
+    be.add_function(name, proto, text)
+}
+
+spawn_fn_proto = (
+    be   :: CBackend,
+    n    : usize,
+    rty  : TyId,
+    caps : Vec<LocalSlot>,
+    out  :: String
+) Res<(), AllocError> {
+    out.add_bytes(be.linkage()).try();
+    be.ctype(rty, out).try();
+    out.add_bytes(" ").try();
+    sym_gen(out, "sb", n).try();
+    (caps.len == 0).match({
+        true  => out.add_bytes("(void *zg_p)"),
+        false => be.spawn_fn_params(n, out),
+    })
+}
+
+spawn_fn_params = (be :: CBackend, n: usize, out :: String)
+                  Res<(), AllocError> {
+    env ::= be.alloc.String().try();
+    be.spawn_env_name(n, env).try();
+    out.fmt("({} *zg_e)", env.view())
+}
+
+// The prologue is the whole of the remapping, as it is for `defer`:
+// every captured name is re-declared here, with the SAME C name it had
+// in the enclosing frame, initialised from the record. The body below it
+// then lowers unchanged.
+write_spawn_prologue = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
+                       Res<(), AllocError> {
+    (caps.len == 0).match({
+        true  => be.writeln("(void)zg_p;"),
+        false => be.write_spawn_unpack(caps),
+    })
+}
+
+write_spawn_unpack = (be :: CBackend, caps: Vec<LocalSlot>)
+                     Res<(), AllocError> {
+    caps.loop((h, s) { be.write_spawn_unpack_one(s).try() });
+    Ok(())
+}
+
+write_spawn_unpack_one = (be :: CBackend, s: LocalSlot)
+                         Res<(), AllocError> {
+    line  ::= be.alloc.String().try();
+    cname ::= be.alloc.String().try();
+    sym_local(cname, s.name, s.index).try();
+    s.by_ref.match({
+        false => be.declarator(s.ty, cname.view(), line),
+        true  => be.spawn_ref_field(s.ty, cname.view(), line),
+    }).try();
+    be.fmt("{} = zg_e->{};\n", line.view(), cname.view())
+}
+
+// the trampoline
+
+// `void *zg_sN(void *)`, the function `pthread_create` is handed. The
+// body's answer is COPIED onto the heap and the copy is the thread's
+// return value: `pthread_join` hands back exactly that pointer, which is
+// how a `Res<T, ThreadError>` crosses the thread boundary without
+// `Thread` carrying a type. A NULL answer is malloc's failure, which
+// `join` reads as `Panicked`; the record itself is released here, its
+// fields already unpacked by the body.
+write_spawn_tramp = (be :: CBackend, n: usize, rty: TyId)
+                    Res<(), AllocError> {
+    name ::= be.alloc.String().try();
+    sym_gen(name, "s", n).try();
+    proto ::= be.alloc.String().try();
+    proto.add_bytes(be.linkage()).try();
+    proto.add_bytes("void *").try();
+    proto.add_bytes(name.view()).try();
+    proto.add_bytes("(void *zg_p)").try();
+    rct ::= be.alloc.String().try();
+    be.ctype(rty, rct).try();
+    fname ::= be.alloc.String().try();
+    sym_gen(fname, "sb", n).try();
+    body ::= be.alloc.String().try();
+    body.fmt("    {} zg_r = {}(zg_p);\n", rct.view(), fname.view()).try();
+    body.fmt(
+        "    {} *zg_out = ({} *)malloc(sizeof({}));\n",
+        rct.view(),
+        rct.view(),
+        rct.view()
+    ).try();
+    body.add_bytes("    if (zg_out) *zg_out = zg_r;\n").try();
+    body.add_bytes("    free(zg_p);\n").try();
+    body.add_bytes("    return (void *)zg_out;\n").try();
+    be.add_function(name, proto, body)
+}
+
+// the call site
+
+// `<record> *h = malloc(..); <copies>; pthread_create(..) or
+// Err(SpawnFailed)`. The Alloc argument is not read (the header says
+// why); the record's malloc failure and pthread_create's refusal are the
+// one `SpawnFailed` a caller acts on.
+write_spawn_call = (
+    be   :: CBackend,
+    n    : usize,
+    caps : Vec<LocalSlot>,
+    ret  : TyId,
+    out  :: String
+) Res<(), AllocError> {
+    dst = be.temp(ret, "t").try();
+    rec ::= be.alloc.String().try();
+    (caps.len == 0).match({
+        true  => Ok(()),
+        false => be.malloc_spawn_env(n, caps, rec),
+    }).try();
+    pt ::= be.alloc.String().try();
+    sym_gen(pt, "t", be.next_tmp()).try();
+    be.fmt("pthread_t {};\n", pt.view()).try();
+    tramp ::= be.alloc.String().try();
+    sym_gen(tramp, "s", n).try();
+    cond ::= be.alloc.String().try();
+    (rec.view().len == 0).match({
+        true  => cond.fmt(
+            "pthread_create(&{}, 0, {}, 0) != 0",
+            pt.view(),
+            tramp.view()
+        ),
+        false => cond.fmt(
+            "({} == 0) || pthread_create(&{}, 0, {}, {}) != 0",
+            rec.view(),
+            pt.view(),
+            tramp.view(),
+            rec.view()
+        ),
+    }).try();
+    be.fmt("if ({}) {{\n", cond.view()).try();
+    be.indent();
+    (rec.view().len == 0).match({
+        true  => Ok(()),
+        false => be.fmt("free({});\n", rec.view()),
+    }).try();
+    be.write_assign_err(ret, "SpawnFailed", dst.view()).try();
+    be.dedent();
+    be.writeln("} else {").try();
+    be.indent();
+    be.write_spawn_ok(ret, pt.view(), dst.view()).try();
+    be.dedent();
+    be.writeln("}").try();
+    out.add_bytes(dst.view())
+}
+
+malloc_spawn_env = (
+    be   :: CBackend,
+    n    : usize,
+    caps : Vec<LocalSlot>,
+    rec  :: String
+) Res<(), AllocError> {
+    env ::= be.alloc.String().try();
+    be.spawn_env_name(n, env).try();
+    sym_gen(rec, "h", be.next_tmp()).try();
+    be.fmt(
+        "{} *{} = ({} *)malloc(sizeof({}));\n",
+        env.view(),
+        rec.view(),
+        env.view(),
+        env.view()
+    ).try();
+    caps.loop((h, s) { be.copy_spawn_capture(s, rec.view()).try() });
+    Ok(())
+}
+
+// THE CAPTURES ARE COPIED HERE, AT SPAWN — the rule
+// `defer_captures_at_registration` pins, and the reason is the same:
+// the values are read where they are still alive.
+copy_spawn_capture = (be :: CBackend, s: LocalSlot, cell: str)
+                     Res<(), AllocError> {
+    cname ::= be.alloc.String().try();
+    sym_local(cname, s.name, s.index).try();
+    be.fmt("{cell}->{} = {};\n", cname.view(), cname.view())
+}
+
+write_spawn_ok = (be :: CBackend, ret: TyId, pt: str, dst: str)
+                 Res<(), AllocError> {
+    be.payload_type(ret, "Ok").match({
+        None    => be.write_assign_ok(ret, "0", dst),
+        Ok(tty) => be.write_spawn_thread(ret, tty, pt, dst),
+    })
+}
+
+write_spawn_thread = (be :: CBackend, ret: TyId, tty: TyId, pt: str, dst: str)
+                     Res<(), AllocError> {
+    cty ::= be.alloc.String().try();
+    be.ctype(tty, cty).try();
+    idsym ::= be.alloc.String().try();
+    idsym.sym_member("id").try();
+    value ::= be.alloc.String().try();
+    value.fmt(
+        "(({}){{ .{} = (uint64_t){} }})",
+        cty.view(),
+        idsym.view(),
+        pt
+    ).try();
+    be.write_assign_ok(ret, value.view(), dst)
+}
+
+// ---------------------------------------------------------------------
+// THE LOWERING: `t.join()`
+// ---------------------------------------------------------------------
+// `pthread_join` on the handle's `id`, and the thread's answer read out
+// of the pointer it returns — the copy the trampoline made. THE TYPE IS
+// THE CALL SITE'S: `Thread` carries no type across the boundary, so the
+// payload is read at the type this call is expected at, and a join
+// annotated with the wrong type is a wrong read, exactly as a cast is.
+// Where nothing settles that type — neither the expectation the call
+// was lowered under nor sema's memo of the node — the call is refused
+// rather than read at a width nothing chose.
+lower_join* = (
+    be   :: CBackend,
+    id   : ExprId,
+    c    : Call,
+    a    : Access,
+    rty  : TyId,
+    want : TyId,
+    ctx  : Ctx,
+    out  :: String
+) Res<(), AllocError> {
+    be.need_spawn();
+    be.join_want(id, want, ctx).try().match({
+        None   => be.unsupported(
+            id,
+            "a `join` whose result type nothing settles",
+            out
+        ),
+        Ok(wt) => be.join_settled(a, rty, wt, ctx, out),
+    })
+}
+
+// The threaded expectation first, sema's memo of the call node second:
+// `r: Res<u64, ThreadError> = t.join()` arrives as the former,
+// `t.join().match(..)` may only leave the latter.
+join_want = (be :: CBackend, id: ExprId, want: TyId, ctx: Ctx)
+            Res<Res<TyId>, AllocError> {
+    be.join_res_ok(want).match({
+        true  => Ok(Ok(want)),
+        false => be.join_memo(id, ctx),
+    })
+}
+
+join_memo = (be :: CBackend, id: ExprId, ctx: Ctx)
+            Res<Res<TyId>, AllocError> {
+    memo = be.want_of(id, ctx).try();
+    be.join_res_ok(memo).match({
+        true  => Ok(Ok(memo)),
+        false => Ok(None),
+    })
+}
+
+join_res_ok = (be :: CBackend, t: TyId) bool {
+    be.check.types.at(t).match({
+        Res(r) => settled(be, r.value) && settled(be, r.error),
+        _      => false,
+    })
+}
+
+join_settled = (
+    be   :: CBackend,
+    a    : Access,
+    rty  : TyId,
+    want : TyId,
+    ctx  : Ctx,
+    out  :: String
+) Res<(), AllocError> {
+    be.request_type(want).try();
+    recv ::= be.alloc.String().try();
+    expr(be, a.base, ctx, rty, recv).try();
+    dst = be.temp(want, "t").try();
+    jp ::= be.alloc.String().try();
+    sym_gen(jp, "j", be.next_tmp()).try();
+    be.fmt("void *{};\n", jp.view()).try();
+    idsym ::= be.alloc.String().try();
+    idsym.sym_member("id").try();
+    be.fmt(
+        "if (pthread_join((pthread_t)({}.{}), &{}) != 0 || {} == 0) {{\n",
+        recv.view(),
+        idsym.view(),
+        jp.view(),
+        jp.view()
+    ).try();
+    be.indent();
+    be.write_assign_err(want, "Panicked", dst.view()).try();
+    be.dedent();
+    be.writeln("} else {").try();
+    be.indent();
+    wct ::= be.alloc.String().try();
+    be.ctype(want, wct).try();
+    be.fmt("{} = *({} *){};\n", dst.view(), wct.view(), jp.view()).try();
+    be.fmt("free({});\n", jp.view()).try();
+    be.dedent();
+    be.writeln("}").try();
+    out.add_bytes(dst.view())
 }
