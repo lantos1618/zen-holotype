@@ -18,6 +18,35 @@ Measured 2026-08-28:
 concentrations are `call` (23), `loop` (12), `build` (11), `ptr` (10) and
 `inline` (10).
 
+## Per-file problem register
+
+The folder total hides small, dense relay files. This register ranks concrete
+cleanup work; update a row when its phase conversion lands.
+
+| file | evidence | primary problem | state |
+|---|---|---|---|
+| `loop` | 747 LOC, 205 signature slots, 12 high-arity functions, 4 mutual peers | loop/shape state relayed across helpers | next clean lane |
+| `inline` | 743 LOC, 217 slots, 10 high-arity, 3 mutual peers | call, closure and destination state travel separately | pending |
+| `build` | 686 LOC, 201 slots, 11 high-arity | cohesive construction state has no phase owner | pending |
+| `ptr` | 564 LOC, 218 slots, 10 high-arity; seven identical 10-slot relays | numbered verb dispatch chain | completed: 409 LOC, 120 slots, 1 high-arity |
+| `call` | 1,412 LOC, 407 slots, 6 high-arity, 4 mutual peers | mixed resolution/emission hub | active WIP; reconcile first |
+| `member` | 1,012 LOC, 241 slots, 6 mutual peers | lookup, selection and emission share one hub | active WIP |
+| `expr` | 1,191 LOC, 15 mutual peers, 351 comment-only lines | dependency hub plus history-heavy commentary | active WIP |
+| `bound` | 777 LOC, 247 slots, 6 high-arity, 3 mutual peers | bound-call relay and cycles | pending |
+| `assoc` | 396 LOC, 128 slots, 6 high-arity; 18/20 functions carry output | dense associated-call relay | active WIP |
+| `range` | 662 LOC, 159 slots, 6 high-arity, 2 mutual peers | range/walk state split across helpers | coordinate with loop/fold |
+| `cap` | 459 LOC, 124 slots, 5 high-arity | dispatcher relay and temporary strings | active WIP |
+| `floor` | 275 LOC, 73 slots; core helpers take 10/12 parameters | format-floor call site has no owner | pending |
+| `fold` | 268 LOC, 65 slots, 3 high-arity, 2 mutual peers | fold site repeated across recursion | coordinate with loop/range |
+| `sink` | 1,046 LOC, 310 slots, 6 high-arity | formatting walk and error routing relayed separately | completed: 874 LOC, 279 slots, 2 exported high-arity APIs |
+| `fs` | 667 LOC, 176 slots, 6 high-arity | read/result operation tuples repeated | completed: 559 LOC, 155 slots, 1 exported high-arity API |
+| `flow` | 910 LOC, 289 slots | pattern type/place repeated through two walks | completed: 764 LOC, 264 slots |
+| `infer` | 411 LOC, 122 slots, 2 high-arity | return and unification tuples repeated | completed: 304 LOC, 88 slots, no high-arity |
+
+Safe order is `loop` then `build`, coordinated `fold/range`, `inline`, `floor`
+and `bound`. Files marked active WIP land only after their semantic changes are
+committed, so a structural cherry-pick cannot overwrite them.
+
 ## Desired shape
 
 ```text
