@@ -115,9 +115,10 @@ includes the declaration and concrete arguments. Unions and error sets are
 flattened, sorted and deduplicated.
 
 Zen has no trait declaration form. A nominal struct used as a bound is the
-trait shape; `Target.impl(Bound, {...})` supplies it. The target or bound owner
-must own the impl. Impl-supplied fields are computed, read-only and absent from
-layout. Own members win over impl members; an active bound disambiguates
+trait shape; `Target.impl(Bound, {...})` supplies it. The target's module owns
+the impl; orphan impls are rejected. Impl-supplied fields are computed,
+read-only and absent from layout. Own members win over impl members; an active
+bound disambiguates
 otherwise competing impl members.
 
 Generic bodies are checked once. Calls infer an `Inst`, substitute canonical
