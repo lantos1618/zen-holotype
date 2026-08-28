@@ -181,9 +181,10 @@ lextile: build
 	@$(call nonempty,lextile,$(ROOT) example tests/corpus tests/gates -name '*.zen' -print0 | LC_ALL=C sort -z); \
 	  build/gates/lex_tiling "$${files[@]}"
 
-## parse: every .zen the tree claims is valid must parse. cheap, and for
-## example/ is also compiled by `tests/run.py`. must-fail/ and
-## tests/parse/errors are excluded on purpose: those files exist to NOT parse.
+## parse: every .zen the tree claims is valid must parse, and every
+## tests/parse/errors fixture must fail to parse. cheap, and example/ is also
+## compiled by `tests/run.py`. must-fail/ is excluded because the compiler's
+## rejection -- not tree-sitter's -- is what those tests assert.
 ##
 ## THE FILE COUNT IS ASSERTED. A find that matches nothing leaves xargs
 ## with no work and exits 0, which is this repo's own recorded shape for
@@ -201,6 +202,12 @@ lextile: build
 parse: grammar
 	@$(call nonempty,parse,$(ROOT) example tests/corpus -name '*.zen' -print0); \
 	  cd grammar && npx tree-sitter parse --quiet --stat -l "$$(pwd)/zen.so" --lang-name zen "$${files[@]/#/../}"
+	@$(call nonempty,parse-errors,tests/parse/errors -name '*.zen' -print0); \
+	  cd grammar; \
+	  set +e; report="$$(npx tree-sitter parse --quiet --stat -l "$$(pwd)/zen.so" --lang-name zen "$${files[@]/#/../}" 2>&1)"; rc=$$?; set -e; \
+	  printf '%s\n' "$$report"; \
+	  test $$rc -eq 1; \
+	  grep -Fq "Total parses: $${#files[@]}; successful parses: 0; failed parses: $${#files[@]};" <<<"$$report"
 
 ## lint: every test conforms to the format in docs/TESTING.md.
 ##
