@@ -38,6 +38,7 @@ lower_stdin_read = gen.gen_c.gen_c_stdin
 lower_env_var = gen.gen_c.gen_c_env
 lower_console_print, is_console_print = gen.gen_c.gen_c_print
 is_defer, lower_defer = gen.gen_c.gen_c_scope
+write_position = gen.gen_c.gen_c_op
 lower_clock_read = gen.gen_c.gen_c_clock
 lower_sleep, lower_spawn, lower_join = gen.gen_c.gen_c_threads
 
@@ -297,6 +298,7 @@ write_arena = (
     sym_gen(tmp, "t", be.next_tmp()).try();
     be.declare_temp(pty, tmp.view()).try();
     be.write_malloc(tmp.view(), cell, "").try();
+    be.write_oom_guard(a, tmp.view()).try();
     be.set_field(tmp.view(), cell, "mem", recv.view()).try();
     be.set_field(tmp.view(), cell, "head", "NULL").try();
     be.set_field(tmp.view(), cell, "next", "0").try();
@@ -312,6 +314,14 @@ write_malloc = (be :: CBackend, tmp: str, cell: TyId, extra: str)
     cty ::= be.alloc.String().try();
     be.ctype(cell, cty).try();
     be.fmt("{tmp} = ({} *)malloc(sizeof({}){extra});\n", cty.view(), cty.view())
+}
+
+// Arena creation has no error channel, so allocation failure traps.
+write_oom_guard = (be :: CBackend, a: Access, tmp: str)
+                  Res<(), AllocError> {
+    pos ::= be.alloc.String().try();
+    be.write_position(a.name.span.file, a.name.span, pos).try();
+    be.fmt("if (!{tmp}) zg_trap({}, \"out of memory\");\n", pos.view())
 }
 
 // One field of the freshly-made state, and nothing at all when the
@@ -384,6 +394,8 @@ write_page = (
     out  :: String
 ) Res<(), AllocError> {
     usize_ty = be.check.types.prim("usize").try();
+    cty ::= be.alloc.String().try();
+    be.ctype(cell, cty).try();
     size ::= be.alloc.String().try();
     be.arg_text(c, 0, usize_ty, ctx, size).try();
     prev ::= be.alloc.String().try();
@@ -394,21 +406,25 @@ write_page = (
     be.fmt("unsigned char *{};\n", raw.view()).try();
     dst = be.temp(ret, "t").try();
     be.set_line(szt.view(), size.view()).try();
-    be.write_page_malloc(raw.view(), cell, szt.view()).try();
+    be.write_page_malloc(raw.view(), cty.view(), szt.view()).try();
     be.open_null_test(raw.view()).try();
     be.write_assign_err(ret, "OutOfMemory", dst.view()).try();
     be.close_else().try();
-    be.write_page_header(raw.view(), cell, szt.view(), prev.view()).try();
-    be.write_page_ok(ret, cell, raw.view(), dst.view()).try();
+    be.write_page_header(
+        raw.view(),
+        cty.view(),
+        cell,
+        szt.view(),
+        prev.view()
+    ).try();
+    be.write_page_ok(ret, cty.view(), raw.view(), dst.view()).try();
     be.close_brace().try();
     out.add_bytes(dst.view())
 }
 
-write_page_malloc = (be :: CBackend, raw: str, cell: TyId, szt: str)
+write_page_malloc = (be :: CBackend, raw: str, cty: str, szt: str)
                     Res<(), AllocError> {
-    cty ::= be.alloc.String().try();
-    be.ctype(cell, cty).try();
-    be.fmt("{raw} = (unsigned char *)malloc(sizeof({}) + {szt});\n", cty.view())
+    be.fmt("{raw} = (unsigned char *)malloc(sizeof({cty}) + {szt});\n")
 }
 
 // The three fields of the header, written THROUGH the raw pointer:
@@ -417,28 +433,25 @@ write_page_malloc = (be :: CBackend, raw: str, cell: TyId, szt: str)
 write_page_header = (
     be   :: CBackend,
     raw  : str,
+    cty  : str,
     cell : TyId,
     szt  : str,
     prev : str
 ) Res<(), AllocError> {
-    cty ::= be.alloc.String().try();
-    be.ctype(cell, cty).try();
     cast ::= be.alloc.String().try();
-    cast.fmt("(({} *){raw})", cty.view()).try();
+    cast.fmt("(({cty} *){raw})").try();
     base ::= be.alloc.String().try();
-    base.fmt("({raw} + sizeof({}))", cty.view()).try();
+    base.fmt("({raw} + sizeof({cty}))").try();
     be.set_field(cast.view(), cell, "prev", prev).try();
     be.set_field(cast.view(), cell, "base", base.view()).try();
     be.set_field(cast.view(), cell, "size", szt).try();
     Ok(());
 }
 
-write_page_ok = (be :: CBackend, ret: TyId, cell: TyId, raw: str, dst: str)
+write_page_ok = (be :: CBackend, ret: TyId, cty: str, raw: str, dst: str)
                 Res<(), AllocError> {
     value ::= be.alloc.String().try();
-    value.add_bytes("(").try();
-    be.ctype(cell, value).try();
-    value.fmt(" *){raw}").try();
+    value.fmt("({cty} *){raw}").try();
     be.write_assign_ok(ret, value.view(), dst).try();
     Ok(());
 }
