@@ -10,9 +10,10 @@
 // `--entry` is added BESIDE that line, never into it: the fixpoint
 // passes no entry and must keep finding one.
 //
-// THIS FILE TOUCHES NO CAPABILITY: it takes a `Vec<str>` and returns
-// what was asked for, the one part of the CLI a corpus test can drive
-// (`tests/corpus/cli/` hands it argv it will never see for real).
+// This file reads one capability, `env.var("ZEN_STD")`, for the
+// external stdlib path; everything else is a `Vec<str>` so corpus
+// tests can still drive the parser with argument vectors they build
+// by hand (`tests/corpus/cli/` hands it argv it will never see for real).
 //
 // `--repeat N` / `--permute <mode>` EXIST FOR A GATE, NOT A USER —
 // deliberately absent from `USAGE` (tests/determinism/README.md
@@ -28,6 +29,7 @@ Alloc, AllocError = std.mem
 str = std.text
 Vec = std.collections
 Range = std.core
+Env = std.env
 
 // What the command line asked for.
 //
@@ -57,15 +59,16 @@ Job* = {
     // rode on C zero-init, which is a value nobody wrote and which the
     // checker refuses since it started asking for required fields.
     entry* :: str = "",
+    // directory that CONTAINS the `std/` package tree. When empty,
+    // `std.*` resolves under the compilation root, preserving the old
+    // behaviour. Set by `--std <path>` or the `ZEN_STD` environment
+    // variable; the flag wins when both are present.
+    std_root* :: str = "",
     emit_c*: bool,
-    // FFI ESCAPE HATCH, OPT-IN (`zen build ... --ffi`). When set, a call
-    // to a bodyless non-generic free function is lowered as a call to
-    // the C symbol of the same name, with an `extern` prototype emitted
-    // above the bodies, rather than refused. Off by default, so a
-    // bodyless declaration with no floor stays the diagnostic
-    // `must-fail/codegen/a_call_to_a_function_with_no_body` pins — and
-    // so the compiler's own build, which passes no `--ffi`, emits
-    // byte-identical C and the fixpoint holds.
+    // KEPT FOR BACKWARD COMPATIBILITY. Bodyless non-generic free
+    // functions are now always lowered as foreign C symbols, so this flag
+    // no longer gates emission. `--ffi` is still parsed and reflected in
+    // `job.ffi` for callers that read it; it is not an error.
     ffi* :: bool = false,
     debug*: Debug,
 }
@@ -116,22 +119,22 @@ FmtJob* = {
 // of the two scans that read it would silently start on the command.
 ARGS*: usize = 2
 
-USAGE*: str = "usage: zen build <root> [--entry <file>] [--ffi] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] [--ffi] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
+USAGE*: str = "usage: zen build <root> [--entry <file>] [--std <path>] [--ffi] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
 
 // What one argument is. A classifier, not a chain of matches at the
 // scan site — the scan stays readable while it carries the cursor.
-Arg = EmitC | EmitDir | Out | Entry | Repeat | Permute | Ffi | Flag | Word
+Arg = EmitC | EmitDir | Out | Entry | Std | Repeat | Permute | Ffi | Flag | Word
 
-cli* = (argv: Vec<str>) Cli {
+cli* = (env: Env, argv: Vec<str>) Cli {
     argv.get(1).match({
         None     => Cli.Usage(""),
-        Ok(name) => command(argv, name),
+        Ok(name) => command(env, argv, name),
     })
 }
 
-command = (argv: Vec<str>, name: str) Cli {
+command = (env: Env, argv: Vec<str>, name: str) Cli {
     name.eq("build").match({
-        true  => job_of(argv),
+        true  => job_of(env, argv),
         false => not_build(argv, name),
     })
 }
@@ -200,17 +203,18 @@ is_word = (word: str) bool { !word.is_empty() && !is_flag(word) }
 
 // The scan. One pass, one cursor, a `bad` that stops it: the first
 // argument that makes no sense is worth naming; a fifth would bury it.
-job_of = (argv: Vec<str>) Cli {
-    root  ::= "";
-    out   ::= "";
-    dir   ::= "";
-    entry ::= "";
-    runs  ::= 1;
-    perm  ::= "";
-    emit  ::= false;
-    ffi   ::= false;
-    bad   ::= "";
-    i     ::= ARGS;
+job_of = (env: Env, argv: Vec<str>) Cli {
+    root     ::= "";
+    out      ::= "";
+    dir      ::= "";
+    entry    ::= "";
+    std_root ::= env.var("ZEN_STD").match({ Ok(p) => p, None => "" });
+    runs     ::= 1;
+    perm     ::= "";
+    emit     ::= false;
+    ffi      ::= false;
+    bad      ::= "";
+    i        ::= ARGS;
     loop(() { i < argv.len && bad.is_empty() }, (h) {
         arg  = arg_at(argv, i);
         i    = i + 1;
@@ -226,6 +230,7 @@ job_of = (argv: Vec<str>) Cli {
                 },
                 Out     => { out = arg_at(argv, i); i = i + 1; },
                 Entry   => { entry = arg_at(argv, i); i = i + 1; },
+                Std     => { std_root = arg_at(argv, i); i = i + 1; },
                 Repeat  => { runs = arg_at(argv, i).runs_of(); i = i + 1; },
                 Permute => { perm = arg_at(argv, i); i = i + 1; },
                 Ffi     => { ffi = true; },
@@ -238,7 +243,7 @@ job_of = (argv: Vec<str>) Cli {
         });
     });
     verdict(
-        Where(root: root, out: out, dir: dir, entry: entry),
+        Where(root: root, out: out, dir: dir, entry: entry, std_root: std_root),
         emit,
         bad,
         Debug(repeat: runs, permute: perm),
@@ -253,6 +258,7 @@ Where = {
     out*: str,
     dir*: str,
     entry*: str,
+    std_root*: str,
 }
 
 verdict = (w: Where, emit: bool, bad: str, dbg: Debug, ffi: bool) Cli {
@@ -280,6 +286,7 @@ built = (w: Where, emit: bool, dbg: Debug, ffi: bool) Cli {
             out: w.out,
             dir: w.dir,
             entry: w.entry,
+            std_root: w.std_root,
             emit_c: emit,
             ffi: ffi,
             debug: dbg
@@ -304,6 +311,7 @@ classify = (a: str) Arg {
         a.eq("--emit-c-dir").then(() { h.break(Arg.EmitDir) });
         a.eq("-o").then(() { h.break(Arg.Out) });
         a.eq("--entry").then(() { h.break(Arg.Entry) });
+        a.eq("--std").then(() { h.break(Arg.Std) });
         a.eq("--repeat").then(() { h.break(Arg.Repeat) });
         a.eq("--permute").then(() { h.break(Arg.Permute) });
         a.eq("--ffi").then(() { h.break(Arg.Ffi) });
@@ -321,6 +329,7 @@ takes_value = (a: Arg) bool {
         EmitDir => true,
         Out     => true,
         Entry   => true,
+        Std     => true,
         Repeat  => true,
         Permute => true,
         _       => false,
