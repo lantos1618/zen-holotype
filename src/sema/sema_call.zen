@@ -45,6 +45,7 @@
 // inside every closure in the language was checked by nothing.
 
 Expr, ExprId, Call, Arg, Access, Lambda, Param, Span, Paren, nowhere = std.ast
+Ast = std.ast.ast_arena
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -130,13 +131,26 @@ Actual* = {
 // QUERY: the type of a call
 // ---------------------------------------------------------------------
 
+// Parentheses change a callee's spelling, not the place it names.
+call_callee* = (tree: Ast, call: Call) Expr {
+    call_callee_at(tree, call.callee)
+}
+
+call_callee_at = (tree: Ast, id: ExprId) Expr {
+    node = tree.expr_at(id);
+    node.kind.match({
+        Paren(p) => call_callee_at(tree, p.inner),
+        _        => node,
+    })
+}
+
 // `id` is the CALL's own node id, and it is threaded rather than
 // derived: an `Expr` is a value and carries no id, so the only place
 // that knows which node this is, is the query that was asked about it.
 // It is the key `chosen` writes the resolution under.
 call_type* = (c :: Checker, id: ExprId, node: Expr, call: Call, ctx: Ctx)
              Res<TyId, AllocError> {
-    callee = c.tree.expr_at(call.callee);
+    callee = call_callee(c.tree, call);
     callee.kind.match({
         Access(a) => c.member_call(id, node, call, a, ctx),
         Name(n)   => c.named_call(id, node, call, n.text, ctx),
