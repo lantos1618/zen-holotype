@@ -181,6 +181,7 @@ lextile: build
 	@mkdir -p build/gates
 	@$(call gate,lex_tiling)
 	@$(call nonempty,lextile,$(ROOT) example tests/corpus tests/gates -name '*.zen' -print0 | LC_ALL=C sort -z); \
+	  files+=(build.zen); \
 	  build/gates/lex_tiling "$${files[@]}"
 
 ## parse: every .zen the tree claims is valid must parse, and every
@@ -203,6 +204,7 @@ lextile: build
 ## symbol to load from it.
 parse: grammar
 	@$(call nonempty,parse,$(ROOT) example tests/corpus -name '*.zen' -print0); \
+	  files+=(build.zen); \
 	  cd grammar && npx tree-sitter parse --quiet --stat -l "$$(pwd)/zen.so" --lang-name zen "$${files[@]/#/../}"
 	@$(call nonempty,parse-errors,tests/parse/errors -name '*.zen' -print0); \
 	  cd grammar; \
@@ -259,6 +261,7 @@ grammar/zen.so: grammar/grammar.js grammar/tree-sitter.json
 fmt: build
 	@$(call nonempty,fmt,$(ROOT) example tests/corpus tests/gates -name '*.zen' \
 	  -not -path 'tests/corpus/lex/*' -print0); \
+	  files+=(build.zen); \
 	  ./zen fmt --check "$${files[@]}"
 
 ## asan: the compiler under AddressSanitizer + LeakSanitizer, built as
