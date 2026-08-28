@@ -1,21 +1,7 @@
 // src/gen/gen_c/gen_c_fs.zen
-// THE FILESYSTEM CAPABILITY, in C.
-// `gen_c_cap.zen` is the other half — the members whose body IS the
-// backend, and the memory ones. This file covers the four `Fs`
-// declares: three are a `stat`/`fopen`, the fourth ALLOCATES.
-// A path arrives as a `str` — borrowed bytes, NOT NUL-terminated — but
-// the kernel wants a NUL; the copy happens in the C floor, not here:
-// `exists` has no `Alloc` in its signature, so by law 1 it may not have
-// any memory either.
-// `read` is the one that allocates, and does it THROUGH A BOUND: the
-// value handed to its `Alloc` parameter is a fat value and the buffer
-// comes out of a call through that record, with no call node in the
-// source to lower — `gen_c_bound.slot_call`, whose only other user is
-// `gen_c_sink.sink_write`.
-// The C floor answers with an ORDINAL, turned back into a variant BY
-// NAME here, so `env.zen` may rename or reorder its own error set
-// without the backend agreeing to it in secret. The ordinals are the
-// floor's own, written down in exactly one place at each end.
+// Filesystem capability lowering. Paths stay borrowed `str` values; the C
+// floor supplies NUL termination. Only `read` allocates, through its `Alloc`
+// bound. Floor error ordinals are converted back to variants by name here.
 
 ExprId = std.ast
 Call, Access = std.ast
@@ -37,10 +23,239 @@ address_of = gen.gen_c.gen_c_fat
 expr = gen.gen_c.gen_c_expr
 arg_text, str_arg = gen.gen_c.gen_c_arg
 
-// the filesystem
-// Every path is spilled into a temporary first: a `str` is a pointer
-// and a count, both read, so an argument that is a call would
-// otherwise be made twice.
+// One filesystem result being assembled. The return type and the two C
+// temporaries stay fixed while its ordinal chain is written.
+FsResult = {
+    ret: TyId,
+    rc: str,
+    dst: str,
+
+    chain = (self: @Self, be :: CBackend, n: usize)
+            Res<(), AllocError> {
+        (n > 4).match({
+            true  => be.write_assign_err(self.ret, fs_name(n), self.dst),
+            false => self.branch(be, n),
+        })
+    }
+
+    branch = (self: @Self, be :: CBackend, n: usize)
+             Res<(), AllocError> {
+        be.open_ordinal_test(self.rc, n).try();
+        be.write_assign_err(self.ret, fs_name(n), self.dst).try();
+        be.close_else().try();
+        self.chain(be, n + 1).try();
+        be.close_brace().try();
+        Ok(())
+    }
+}
+
+// Stable source facts for one filesystem operation. Backend state and the
+// caller's output remain borrowed method parameters; the call identity,
+// types and checking context move as one value through validation.
+FsSite = {
+    id: ExprId,
+    c: Call,
+    ret: TyId,
+    ctx: Ctx,
+
+    path = (self: @Self, be :: CBackend, i: usize, out :: String)
+           Res<(), AllocError> {
+        be.str_arg(self.c, i, self.ctx, out)
+    }
+
+    reject = (self: @Self, be :: CBackend, what: str, out :: String)
+             Res<(), AllocError> {
+        be.unsupported(self.id, what, out)
+    }
+
+    lock = (self: @Self, be :: CBackend, out :: String)
+           Res<(), AllocError> {
+        be.need_fs();
+        be.payload_type(self.ret, "Ok").match({
+            None    => self.reject(
+                be,
+                "Fs.lock must return a Res<Lock, FsError>",
+                out
+            ),
+            Ok(lty) => self.lock_value(be, lty, out),
+        })
+    }
+
+    lock_value = (self: @Self, be :: CBackend, lty: TyId, out :: String)
+                 Res<(), AllocError> {
+        be.request_type(lty).try();
+        i32_ty = be.check.types.prim("i32").try();
+        path ::= be.alloc.String().try();
+        self.path(be, 0, path).try();
+        rc  ::= be.fresh_name("t").try();
+        fd  ::= be.fresh_name("t").try();
+        dst ::= be.fresh_name("t").try();
+        be.declare_temp(i32_ty, rc.view()).try();
+        be.declare_temp(i32_ty, fd.view()).try();
+        be.declare_temp(self.ret, dst.view()).try();
+        be.write_lock_call(rc.view(), path.view(), fd.view()).try();
+        be.open_rc_test(rc.view()).try();
+        be.fs_chain(self.ret, rc.view(), dst.view(), 1).try();
+        be.close_else().try();
+        value ::= be.alloc.String().try();
+        value.add_bytes("(").try();
+        be.ctype(lty, value).try();
+        value.add_bytes("){ .").try();
+        sym_member(value, "fd").try();
+        value.fmt(" = {} }", fd.view()).try();
+        be.write_assign_ok(self.ret, value.view(), dst.view()).try();
+        be.close_brace().try();
+        out.add_bytes(dst.view())
+    }
+
+    read = (self: @Self, be :: CBackend, aty: TyId, out :: String)
+           Res<(), AllocError> {
+        be.need_fs();
+        be.payload_type(self.ret, "Ok").match({
+            None    => self.reject(
+                be,
+                "Fs.read must return a Res<String, FsError>",
+                out
+            ),
+            Ok(sty) => self.read_string(be, sty, aty, out),
+        })
+    }
+
+    read_string = (self: @Self, be :: CBackend, sty: TyId, aty: TyId,
+                   out :: String) Res<(), AllocError> {
+        be.field_of(sty, "data").try().match({
+            None    => self.reject(
+                be,
+                "Fs.read must return a Res<String, FsError>",
+                out
+            ),
+            Ok(vty) => self.read_run(be, sty, vty, aty, out),
+        })
+    }
+
+    read_run = (self: @Self, be :: CBackend, sty: TyId, vty: TyId,
+                aty: TyId, out :: String) Res<(), AllocError> {
+        usize_ty = be.check.types.prim("usize").try();
+        i32_ty   = be.check.types.prim("i32").try();
+        be.request_type(sty).try();
+        be.request_type(vty).try();
+        path ::= be.alloc.String().try();
+        self.path(be, 1, path).try();
+        al ::= be.alloc.String().try();
+        be.hold_alloc(self.c, aty, self.ctx, al).try();
+        want ::= be.fresh_name("t").try();
+        got  ::= be.fresh_name("t").try();
+        rc   ::= be.fresh_name("t").try();
+        dst  ::= be.fresh_name("t").try();
+        be.declare_temp(usize_ty, want.view()).try();
+        be.declare_temp(usize_ty, got.view()).try();
+        be.declare_temp(i32_ty, rc.view()).try();
+        be.declare_temp(self.ret, dst.view()).try();
+        be.set_line(want.view(), "0").try();
+        be.set_line(got.view(), "0").try();
+        be.write_size_call(rc.view(), path.view(), want.view()).try();
+        be.open_rc_test(rc.view()).try();
+        be.fs_chain(self.ret, rc.view(), dst.view(), 1).try();
+        be.close_else().try();
+        run = FsRead(
+            id: self.id,
+            ret: self.ret,
+            sty: sty,
+            vty: vty,
+            aty: aty,
+            al: al.view(),
+            path: path.view(),
+            want: want.view(),
+            got: got.view(),
+            rc: rc.view(),
+            dst: dst.view(),
+        );
+        run.body(be).try();
+        be.close_brace().try();
+        out.add_bytes(dst.view())
+    }
+}
+
+// The C names and settled types created by the first half of `Fs.read`.
+// Allocation, the floor call and result construction all consume this one
+// immutable snapshot instead of relaying eleven independent parameters.
+FsRead = {
+    id: ExprId,
+    ret: TyId,
+    sty: TyId,
+    vty: TyId,
+    aty: TyId,
+    al: str,
+    path: str,
+    want: str,
+    got: str,
+    rc: str,
+    dst: str,
+
+    body = (self: @Self, be :: CBackend) Res<(), AllocError> {
+        call ::= be.alloc.String().try();
+        args ::= be.alloc.String().try();
+        args.fmt(", {}, 16", self.want).try();
+        be.slot_call(self.al, self.aty, "raw", args.view(), 2, call)
+            .try().match({
+                None     => be.unsupported_line(self.id, "Fs.read needs an Alloc"),
+                Ok(slot) => self.run(be, slot, call.view()),
+            })
+    }
+
+    run = (self: @Self, be :: CBackend, slot: Slot, call: str)
+          Res<(), AllocError> {
+        run ::= be.init_temp(slot.ret, "t", call).try();
+        be.open_not_ok(run.view()).try();
+        be.write_assign_err(self.ret, "OutOfMemory", self.dst).try();
+        be.close_else().try();
+        buf ::= be.fresh_name("t").try();
+        be.declare_ptr(buf.view()).try();
+        be.read_ok_payload(run.view(), buf.view()).try();
+        be.write_read_call(
+            self.rc,
+            self.path,
+            buf.view(),
+            self.want,
+            self.got
+        ).try();
+        be.open_rc_test(self.rc).try();
+        be.fs_chain(self.ret, self.rc, self.dst, 1).try();
+        be.close_else().try();
+        self.write_ok(be, buf.view()).try();
+        be.close_brace().try();
+        be.close_brace().try();
+        Ok(())
+    }
+
+    write_ok = (self: @Self, be :: CBackend, buf: str)
+               Res<(), AllocError> {
+        value ::= be.alloc.String().try();
+        value.add_bytes("(").try();
+        be.ctype(self.sty, value).try();
+        value.add_bytes("){ .").try();
+        sym_member(value, "data").try();
+        value.add_bytes(" = ").try();
+        self.write_vec(be, buf, value).try();
+        value.add_bytes(" }").try();
+        be.write_assign_ok(self.ret, value.view(), self.dst)
+    }
+
+    write_vec = (self: @Self, be :: CBackend, buf: str, out :: String)
+                Res<(), AllocError> {
+        out.add_bytes("(").try();
+        be.ctype(self.vty, out).try();
+        out.add_bytes("){ ").try();
+        be.write_vec_field(self.vty, "data", buf, out, true).try();
+        be.write_vec_field(self.vty, "len", self.got, out, false).try();
+        be.write_vec_field(self.vty, "capacity", self.want, out, false).try();
+        be.write_vec_field(self.vty, "alloc", self.al, out, false).try();
+        out.add_bytes(" }").try();
+        Ok(())
+    }
+}
+
+// Paths are spilled once because a `str` reads both pointer and count.
 
 // `exists` and `is_dir`: one `stat`, and no failure a caller acts on.
 // A path that cannot be stat'd is, for the purpose of "should I try to
@@ -93,15 +308,7 @@ write_fs_call = (be :: CBackend, rc: str, fn: str, first: str, second: str)
     be.fmt("{rc} = {fn}{first}, {second});\n")
 }
 
-// `fs.lock(path)` — THE CAPABILITY THAT EXCLUDES
-// One floor call answering an ordinal like every other fs verb, so the
-// failure chain is the SAME chain — `Exists` joins it as ordinal 4 and
-// `fs_name` grows one arm. The Ok payload is the Lock: one i32 field
-// holding the descriptor, written FIELD BY FIELD under the same
-// licence `read_string` writes a String's — the fd enters the program
-// here and nowhere else.
-// NO ALLOC. A Lock is one word of state the kernel owns; there is
-// nothing here for an arena to hold.
+// `fs.lock(path)` returns one kernel-owned descriptor; it allocates nothing.
 
 lower_lock* = (
     be  :: CBackend,
@@ -111,82 +318,13 @@ lower_lock* = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    be.need_fs();
-    be.payload_type(ret, "Ok").match({
-        None    => be.unsupported(
-            id,
-            "Fs.lock must return a Res<Lock, FsError>",
-            out
-        ),
-        Ok(lty) => be.write_lock(id, c, ret, lty, ctx, out),
-    })
+    FsSite(id: id, c: c, ret: ret, ctx: ctx).lock(be, out)
 }
 
-write_lock = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    ret : TyId,
-    lty : TyId,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError> {
-    be.request_type(lty).try();
-    i32_ty = be.check.types.prim("i32").try();
-    path ::= be.alloc.String().try();
-    be.str_arg(c, 0, ctx, path).try();
-    rc ::= be.fresh_name("t").try();
-    // THE DESCRIPTOR TEMP IS DECLARED HERE, not inside `write_lock_call`,
-    // because two spellings need it: the floor call takes its address and
-    // the Ok payload below copies it into the Lock. Born in the helper, it
-    // died with the helper's scope and the payload spelled the RC instead
-    // — every Lock came back holding ordinal 0, unlock() closed stdin,
-    // and a relock of a released path failed as Exists while the program
-    // printed success for the first lock.
-    fd  ::= be.fresh_name("t").try();
-    dst ::= be.fresh_name("t").try();
-    be.declare_temp(i32_ty, rc.view()).try();
-    be.declare_temp(i32_ty, fd.view()).try();
-    be.declare_temp(ret, dst.view()).try();
-    be.write_lock_call(rc.view(), path.view(), fd.view()).try();
-    be.open_rc_test(rc.view()).try();
-    be.fs_chain(ret, rc.view(), dst.view(), 1).try();
-    be.close_else().try();
-    // The payload is the LOCK (lty), not the Res: `write_assign_ok`
-    // wraps it in the Res head, so what lands in `.zg_data.Ok` is the
-    // struct itself. Spelling `ret` here put a whole Res inside the
-    // payload slot and `cc` refused the C.
-    value ::= be.alloc.String().try();
-    value.add_bytes("(").try();
-    be.ctype(lty, value).try();
-    value.add_bytes("){ .").try();
-    sym_member(value, "fd").try();
-    value.add_bytes(" = ").try();
-    value.add_bytes(fd.view()).try();
-    value.add_bytes(" }").try();
-    be.write_assign_ok(ret, value.view(), dst.view()).try();
-    be.close_brace().try();
-    out.add_bytes(dst.view())
-}
-
-// the one-line formatters the fs lowerings call. A FORMAT DOOR'S HOLE
-// IS A `str` AND THESE ARGUMENTS ARE NOT (`gen_c_floor.zen`: a hole is
-// converted by nothing), which is why every floor call in this file
-// goes through a helper like this one instead of an inline `be.fmt` —
-// `write_fs_call` spells it for two arguments, this for none.
-// `<int> <rc> = zg_fs_lock(<path>, &<fd>);` — THE ANSWER IS AN
-// ORDINAL and the descriptor comes back through the pointer, because a
-// raw fd would collide with the error ordinals the rc test reads (a
-// successful lock on fd 4 would be reported as `Exists`). The fd temp
-// itself is DECLARED BY THE CALLER: the Ok payload in `write_lock`
-// copies the same temp into the Lock, so it must outlive this helper's
-// scope — born here, the payload spelled the rc and every Lock came
-// back holding 0.
+// Status and descriptor are separate: a raw fd could collide with an error
+// ordinal. The caller owns `fd` because the Ok payload reads it afterward.
 write_lock_call = (be :: CBackend, rc: str, path: str, fd: str)
                   Res<(), AllocError> {
-    // spelled piecewise, not through a format door: a hole resolves to
-    // what a signature declares — `unlock_line` below is the same
-    // refusal, same shape.
     line ::= be.alloc.String().try();
     line.add_bytes(rc).try();
     line.add_bytes(" = zg_fs_lock(").try();
@@ -197,15 +335,8 @@ write_lock_call = (be :: CBackend, rc: str, path: str, fd: str)
     be.write(line.view())
 }
 
-// `lock.unlock()` — the release drop runs
-// The receiver is handed over BY ADDRESS, the way every `::` parameter
-// travels: spelled out rather than borrowed from `str_arg`, because
-// that helper lowers its argument AS A `str` and the thing being
-// unlocked is a Lock. `address_of` takes `&` of a place and spills a
-// non-place into a temporary first, so `spent.unlock()` and a receiver
-// with a call in it both reach the floor as an address. The answer is
-// the unit lowering's own — a bare 0, exactly what `lower_release`
-// answers.
+// `lock.unlock()` receives the Lock by address; `address_of` spills a
+// non-place receiver first. The unit answer is the bare value 0.
 
 lower_unlock* = (
     be  :: CBackend,
@@ -223,22 +354,8 @@ lower_unlock* = (
     expr(be, a.base, ctx, unknown, recv).try();
     addr ::= be.alloc.String().try();
     be.address_of(recv.view(), rty, addr).try();
-    // THE FLOOR TAKES THE FD, NOT THE LOCK: the receiver arrives as an
-    // address (every `::` receiver does), so the one field is read
-    // through it — `zg_fs_unlock(p->fd)`. Passing the address itself
-    // handed an int parameter a pointer, and the lock never released.
-    //
-    // THE ADDRESS IS ALREADY `&(...)` (`gen_c_fat.address_of`: a place
-    // gets `&(x)`, anything else spills to a temporary and answers
-    // `&t`). The arrow must hop THE ADDRESS ITSELF: spelled bare,
-    // `&x->fd` parses as `&(x->fd)` -- pointer-to-pointer where an int
-    // was declared -- because `->` binds tighter than unary `&`. One
-    // pair of parens moves the arrow outside: `(&(x))->fd`.
-    //
-    // THE PARENS GO INTO THEIR OWN BUFFER: appending them to `addr`
-    // while reading `addr.view()` grew the String under its own live
-    // borrow and the text came out DOUBLED -- cc read a Lock value being
-    // CALLED. A borrowed view must never watch its own String grow.
+    // Parenthesize the address before `->fd`; otherwise `&x->fd` parses as
+    // `&(x->fd)`. A separate buffer avoids growing a String through its view.
     ptr ::= be.alloc.String().try();
     ptr.add_bytes("(").try();
     ptr.add_bytes(addr.view()).try();
@@ -268,12 +385,8 @@ arrow_field = (be :: CBackend, addr: str, name: str, out :: String)
     out.sym_member(name)
 }
 
-// `remove`: the answer to "make sure this is gone" (#757). The status
-// answers "did the call succeed" and the BOOL is the caller's answer,
-// through a pointer — the same split `zg_fs_size` makes, because a
-// value that may legitimately be 1 cannot double as the error flag.
-// Absence is an Ok here and never NOT_FOUND: the only ordinals this
-// returns are the three refusals, so the gen-side chain starts at 2.
+// `remove` separates status from its bool answer. Absence is Ok(false), so
+// its error chain starts at Denied rather than NotFound.
 lower_remove* = (
     be  :: CBackend,
     id  : ExprId,
@@ -307,13 +420,7 @@ write_remove_call = (be :: CBackend, rc: str, yes: str, path: str)
     be.fmt("{rc} = zg_fs_remove({path}, &{yes});\n")
 }
 
-// `fs.read(alloc, path)` — THE CAPABILITY THAT ALLOCATES
-// The `String` is written FIELD BY FIELD, the same licence `lower_alloc`
-// takes with an `ArenaState`: memory enters the program here, so the
-// one place that knows the shape is the place the value is born. `len`
-// is what ARRIVED and `capacity` is what was asked for — a short read
-// must not leave a String claiming bytes nobody ever wrote, and the
-// run really is `want` wide, which a later grow may reuse.
+// `fs.read(alloc, path)`: length is bytes received; capacity is bytes asked.
 
 lower_read* = (
     be  :: CBackend,
@@ -324,91 +431,10 @@ lower_read* = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    be.need_fs();
-    be.payload_type(ret, "Ok").match({
-        None    => be.unsupported(
-            id,
-            "Fs.read must return a Res<String, FsError>",
-            out
-        ),
-        Ok(sty) => be.read_string(id, c, ret, sty, aty, ctx, out),
-    })
+    FsSite(id: id, c: c, ret: ret, ctx: ctx).read(be, aty, out)
 }
 
-read_string = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    ret : TyId,
-    sty : TyId,
-    aty : TyId,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError> {
-    be.field_of(sty, "data").try().match({
-        None    => be.unsupported(
-            id,
-            "Fs.read must return a Res<String, FsError>",
-            out
-        ),
-        Ok(vty) => be.read_run(id, c, ret, sty, vty, aty, ctx, out),
-    })
-}
-
-read_run = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    ret : TyId,
-    sty : TyId,
-    vty : TyId,
-    aty : TyId,
-    ctx : Ctx,
-    out :: String
-)
-           Res<(), AllocError> {
-    usize_ty = be.check.types.prim("usize").try();
-    i32_ty   = be.check.types.prim("i32").try();
-    be.request_type(sty).try();
-    be.request_type(vty).try();
-    path ::= be.alloc.String().try();
-    be.str_arg(c, 1, ctx, path).try();
-    al ::= be.alloc.String().try();
-    be.hold_alloc(c, aty, ctx, al).try();
-    want ::= be.fresh_name("t").try();
-    got  ::= be.fresh_name("t").try();
-    rc   ::= be.fresh_name("t").try();
-    dst  ::= be.fresh_name("t").try();
-    be.declare_temp(usize_ty, want.view()).try();
-    be.declare_temp(usize_ty, got.view()).try();
-    be.declare_temp(i32_ty, rc.view()).try();
-    be.declare_temp(ret, dst.view()).try();
-    be.set_line(want.view(), "0").try();
-    be.set_line(got.view(), "0").try();
-    be.write_size_call(rc.view(), path.view(), want.view()).try();
-    be.open_rc_test(rc.view()).try();
-    be.fs_chain(ret, rc.view(), dst.view(), 1).try();
-    be.close_else().try();
-    be.read_body(
-        id,
-        ret,
-        sty,
-        vty,
-        aty,
-        al.view(),
-        path.view(),
-        want.view(),
-        got.view(),
-        rc.view(),
-        dst.view()
-    ).try();
-    be.close_brace().try();
-    out.add_bytes(dst.view())
-}
-
-// The `Alloc` in a temporary of its own: the record is read twice — for
-// the slot and for the receiver behind it — and an argument read twice
-// is an argument evaluated twice.
+// Spill Alloc because its slot and receiver are both read.
 hold_alloc = (
     be  :: CBackend,
     c   : Call,
@@ -429,82 +455,10 @@ write_size_call = (be :: CBackend, rc: str, path: str, want: str)
     be.fmt("{rc} = zg_fs_size({path}, &{want});\n")
 }
 
-// ALIGN_MAX, exactly as `create` asks for: it is what the arena would
-// have given anyway, and it keeps the size header the arena writes
-// ahead of every run intact — so a String read off the disk still grows
-// through the ordinary `realloc`.
-read_body = (
-    be   :: CBackend,
-    id   : ExprId,
-    ret  : TyId,
-    sty  : TyId,
-    vty  : TyId,
-    aty  : TyId,
-    al   : str,
-    path : str,
-    want : str,
-    got  : str,
-    rc   : str,
-    dst  : str
-) Res<(), AllocError> {
-    call ::= be.alloc.String().try();
-    args ::= be.alloc.String().try();
-    args.fmt(", {want}, 16").try();
-    be.slot_call(al, aty, "raw", args.view(), 2, call).try().match({
-        None     => be.unsupported_line(id, "Fs.read needs an Alloc"),
-        Ok(slot) => be.run_and_read(
-            ret,
-            sty,
-            vty,
-            aty,
-            slot,
-            al,
-            path,
-            want,
-            got,
-            rc,
-            dst,
-            call.view()
-        ),
-    })
-}
-
 unsupported_line = (be :: CBackend, id: ExprId, what: str)
                    Res<(), AllocError> {
     sink ::= be.alloc.String().try();
     be.unsupported(id, what, sink)
-}
-
-run_and_read = (
-    be   :: CBackend,
-    ret  : TyId,
-    sty  : TyId,
-    vty  : TyId,
-    aty  : TyId,
-    slot : Slot,
-    al   : str,
-    path : str,
-    want : str,
-    got  : str,
-    rc   : str,
-    dst  : str,
-    call : str
-) Res<(), AllocError> {
-    run ::= be.init_temp(slot.ret, "t", call).try();
-    be.open_not_ok(run.view()).try();
-    be.write_assign_err(ret, "OutOfMemory", dst).try();
-    be.close_else().try();
-    buf ::= be.fresh_name("t").try();
-    be.declare_ptr(buf.view()).try();
-    be.read_ok_payload(run.view(), buf.view()).try();
-    be.write_read_call(rc, path, buf.view(), want, got).try();
-    be.open_rc_test(rc).try();
-    be.fs_chain(ret, rc, dst, 1).try();
-    be.close_else().try();
-    be.write_string_ok(ret, sty, vty, al, buf.view(), got, want, dst).try();
-    be.close_brace().try();
-    be.close_brace().try();
-    Ok(());
 }
 
 declare_ptr = (be :: CBackend, name: str) Res<(), AllocError> {
@@ -536,50 +490,6 @@ write_read_call = (
     got  : str
 ) Res<(), AllocError> {
     be.fmt("{rc} = zg_fs_read({path}, {buf}, {want}, &{got});\n")
-}
-
-write_string_ok = (
-    be   :: CBackend,
-    ret  : TyId,
-    sty  : TyId,
-    vty  : TyId,
-    al   : str,
-    buf  : str,
-    got  : str,
-    want : str,
-    dst  : str
-)
-                  Res<(), AllocError> {
-    value ::= be.alloc.String().try();
-    value.add_bytes("(").try();
-    be.ctype(sty, value).try();
-    value.add_bytes("){ .").try();
-    sym_member(value, "data").try();
-    value.add_bytes(" = ").try();
-    write_vec_literal(be, vty, al, buf, got, want, value).try();
-    value.add_bytes(" }").try();
-    be.write_assign_ok(ret, value.view(), dst)
-}
-
-write_vec_literal = (
-    be   :: CBackend,
-    vty  : TyId,
-    al   : str,
-    buf  : str,
-    got  : str,
-    want : str,
-    out  :: String
-)
-                    Res<(), AllocError> {
-    out.add_bytes("(").try();
-    be.ctype(vty, out).try();
-    out.add_bytes("){ ").try();
-    be.write_vec_field(vty, "data", buf, out, true).try();
-    be.write_vec_field(vty, "len", got, out, false).try();
-    be.write_vec_field(vty, "capacity", want, out, false).try();
-    be.write_vec_field(vty, "alloc", al, out, false).try();
-    out.add_bytes(" }").try();
-    Ok(());
 }
 
 // A field std drops is a line this stops writing rather than a
@@ -632,29 +542,11 @@ fs_name_4 = (n: usize) str {
     (n == 4).match({ true => "Exists", false => "Failed" })
 }
 
-// `if (rc == 1) { .. } else { if (rc == 2) { .. } else { .. } }`. The
-// last arm is the plain `else`: the floor returns exactly these
-// ordinals, so a chain testing all five would end in a branch nothing
-// can reach — and an unreachable arm naming a reason is how a wrong
-// reason gets reported later. `remove` starts its own chain at 2: the
-// three refusals are all it can answer, and NOT_FOUND is not among
-// them (see `lower_remove`).
+// The final ordinal is a plain else; `remove` enters at 2 because absence is
+// not an error for that operation.
 fs_chain* = (be :: CBackend, ret: TyId, rc: str, dst: str, n: usize)
            Res<(), AllocError> {
-    (n > 4).match({
-        true  => be.write_assign_err(ret, fs_name(n), dst),
-        false => be.fs_branch(ret, rc, dst, n),
-    })
-}
-
-fs_branch = (be :: CBackend, ret: TyId, rc: str, dst: str, n: usize)
-            Res<(), AllocError> {
-    be.open_ordinal_test(rc, n).try();
-    be.write_assign_err(ret, fs_name(n), dst).try();
-    be.close_else().try();
-    be.fs_chain(ret, rc, dst, n + 1).try();
-    be.close_brace().try();
-    Ok(());
+    FsResult(ret: ret, rc: rc, dst: dst).chain(be, n)
 }
 
 open_ordinal_test = (be :: CBackend, rc: str, n: usize)
