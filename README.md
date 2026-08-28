@@ -49,6 +49,7 @@ Read them in this order. They are the specification, not commentary on it.
 | | |
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | what the language is, and the law forcing each decision |
+| [docs/LANGUAGE_MAP.md](docs/LANGUAGE_MAP.md) | short map from syntax through sema, codegen, runtime, and tooling |
 | [docs/PLAN.md](docs/PLAN.md) | stages 0–5, each ending at a gate that can go red |
 | [docs/STYLE.md](docs/STYLE.md) | naming, code shape, and where a helper belongs |
 | [docs/TESTING.md](docs/TESTING.md) | the bug classes each phase reliably has, written first |
