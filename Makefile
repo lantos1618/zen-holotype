@@ -107,7 +107,8 @@ faults: build
 ##
 ## Gates are Zen programs, compiled with the compiler they check.
 gate = ./zen build tests/gates --entry $(1).zen --emit-c -o build/gates/$(1).c \
-	&& $(CC) $(CFLAGS) build/gates/$(1).c -o build/gates/$(1)
+	&& $(ZCC) $(CFLAGS) -c build/gates/$(1).c -o build/gates/$(1).o \
+	&& $(CC) build/gates/$(1).o -o build/gates/$(1)
 
 # THE ONE DOOR FOR "a gate over a file set must have files". Six targets
 # carried hand-copies of this assertion and the copies drifted (#799): a
@@ -230,7 +231,9 @@ grammar: grammar/zen.so
 
 grammar/zen.so: grammar/grammar.js grammar/tree-sitter.json
 	cd grammar && npx tree-sitter generate --abi 14
-	$(CC) -shared -fPIC -o grammar/zen.so grammar/src/parser.c -I grammar/src
+	@mkdir -p build/obj
+	$(ZCC) -fPIC -I grammar/src -c grammar/src/parser.c -o build/obj/grammar-parser.o
+	$(CC) -shared -o grammar/zen.so build/obj/grammar-parser.o
 
 ## fmt: the whole tree must already be formatted.
 ##
@@ -269,7 +272,9 @@ fmt: build
 ## The deliberate argv-rows allocation is suppressed BY NAME in
 ## tests/bench/lsan.supp -- widen that file and real leaks go quiet.
 asan: seed/zen.c
-	$(CC) -std=c99 -O1 -g -fsanitize=address,leak seed/zen.c -o zen-asan
+	@mkdir -p build/obj
+	$(ZCC) -std=c99 -O1 -g -fsanitize=address,leak -c seed/zen.c -o build/obj/seed-asan.o
+	$(CC) -fsanitize=address,leak build/obj/seed-asan.o -o zen-asan
 	tests/bench/asan.sh ./zen-asan
 
 ## leak: valgrind's answer to the same question. definite leaks only --
