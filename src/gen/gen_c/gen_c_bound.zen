@@ -730,14 +730,18 @@ fat_size = (be :: CBackend, targs: Inst, i: usize, out :: String)
     })
 }
 
-// THE SIZE IS `sizeof` AND NOT A NUMBER THIS COMPILER KNOWS: a layout
-// this backend never modelled cannot disagree with the one `cc` chose.
+// Let C size concrete layouts; unit has no C object type and occupies one byte.
 write_sizeof* = (be :: CBackend, t: TyId, out :: String)
                Res<(), AllocError> {
-    be.request_type(t).try();
-    cty ::= be.alloc.String().try();
-    be.ctype(t, cty).try();
-    out.fmt(", sizeof({})", cty.view())
+    be.is_unit(t).match({
+        true  => out.add_bytes(", 1"),
+        false => {
+            be.request_type(t).try();
+            cty ::= be.alloc.String().try();
+            be.ctype(t, cty).try();
+            out.fmt(", sizeof({})", cty.view())
+        },
+    })
 }
 
 // The slot answers at the ERASED type; the caller asked at its own. A
