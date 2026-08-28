@@ -58,9 +58,13 @@ String* = {
     is_empty* = (self: @Self) bool { self.data.len == 0 }
 
     // the floor `add` expands into, and the writer for a `{}` landing on a
-    // str: bytes, verbatim, no format meaning read
+    // str: bytes, verbatim, no format meaning read. One grow, one memcpy —
+    // the byte-at-a-time `add` loop this replaced paid a capacity branch
+    // per byte
     add_bytes* = (self :: @Self, s: str) Res<(), AllocError> {
-        Range(0, s.len).loop((h, i) { self.data.add(s[i]).try() });
+        at = self.data.len;
+        self.data.grow_by(s.len).try();
+        s.copy_into(self.data.ptr().offset(at));
         Ok(());
     }
 
