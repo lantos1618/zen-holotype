@@ -35,11 +35,12 @@ str, String = std.text
 TyId, TyNamed = sema.sema_ty
 Checker, Ctx = sema.sema_check
 CBackend = gen.gen_c.gen_c_state
-untyped = gen.gen_c.gen_c_report
+untyped, unsupported = gen.gen_c.gen_c_report
 sub = gen.gen_c.gen_c_mono
 ctype, request_type = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
 expr = gen.gen_c.gen_c_expr
+Dest, deliver = gen.gen_c.gen_c_stmt
 
 // recognising
 
@@ -161,6 +162,21 @@ ptr_member_type* = (
 
 // the nine
 
+PtrUnitPolicy = PtrLower | PtrRefuse | PtrZero
+
+ptr_unit_policy = (be: CBackend, et: TyId, name: str) PtrUnitPolicy {
+    be.is_unit(et).match({
+        false => PtrUnitPolicy.PtrLower,
+        true  => name.is_in(["read", "write", "offset", "back"]).match({
+            true  => PtrUnitPolicy.PtrRefuse,
+            false => name.is_in(["bytes", "copy_from"]).match({
+                true  => PtrUnitPolicy.PtrZero,
+                false => PtrUnitPolicy.PtrLower,
+            }),
+        }),
+    })
+}
+
 // Stable facts for one pointer member call. The backend and destination
 // remain borrowed because both are mutated during emission.
 PtrCall = {
@@ -262,12 +278,7 @@ PtrCall = {
 
     byte_size = (self: @Self, be :: CBackend, out :: String)
                 Res<(), AllocError> {
-        be.request_type(self.et).try();
-        count ::= be.alloc.String().try();
-        self.index_arg(be, 0, count).try();
-        cty ::= be.alloc.String().try();
-        be.ctype(self.et, cty).try();
-        out.fmt("(({}) * sizeof({}))", count.view(), cty.view())
+        self.scaled_bytes(be, 0, out)
     }
 
     copy_from = (self: @Self, be :: CBackend, out :: String)
@@ -287,8 +298,14 @@ PtrCall = {
 
     count_bytes = (self: @Self, be :: CBackend, out :: String)
                   Res<(), AllocError> {
+        self.scaled_bytes(be, 1, out)
+    }
+
+    scaled_bytes = (self: @Self, be :: CBackend, i: usize,
+                    out :: String) Res<(), AllocError> {
+        be.request_type(self.et).try();
         count ::= be.alloc.String().try();
-        self.index_arg(be, 1, count).try();
+        self.index_arg(be, i, count).try();
         cty ::= be.alloc.String().try();
         be.ctype(self.et, cty).try();
         out.fmt("(({}) * sizeof({}))", count.view(), cty.view())
@@ -329,10 +346,69 @@ lower_ptr_member* = (
 )
                     Res<(), AllocError> {
     et = be.elem_of(rty).try();
+    ptr_unit_policy(be, et, a.name.text).match({
+        PtrRefuse => be.unsupported(
+            id,
+            "reading, writing, or shifting a Ptr<()>",
+            out
+        ),
+        PtrZero   => be.lower_zero_run(c, a, rty, ctx, out),
+        PtrLower  => be.lower_ptr_call(id, c, a, rty, et, ctx, want, out),
+    })
+}
+
+lower_ptr_call = (
+    be   :: CBackend,
+    id   : ExprId,
+    c    : Call,
+    a    : Access,
+    rty  : TyId,
+    et   : TyId,
+    ctx  : Ctx,
+    want : TyId,
+    out  :: String
+) Res<(), AllocError> {
     base ::= be.alloc.String().try();
     be.address(a.base, rty, ctx, base).try();
     site = PtrTypeSite(c: c, name: a.name.text, rty: rty, ctx: ctx, want: want);
     PtrCall(id: id, site: site, et: et, base: base.view()).lower(be, out)
+}
+
+lower_zero_run = (
+    be  :: CBackend,
+    c   : Call,
+    a   : Access,
+    rty : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.deliver(a.base, ctx, rty, Dest.Discard).try();
+    a.name.text.eq("bytes").match({
+        true  => be.discard_ptr_arg(
+            c,
+            0,
+            be.check.types.prim("usize").try(),
+            ctx
+        ),
+        false => {
+            be.discard_ptr_arg(c, 0, rty, ctx).try();
+            be.discard_ptr_arg(c, 1, be.check.types.prim("usize").try(), ctx)
+        },
+    }).try();
+    out.add_bytes("0")
+}
+
+discard_ptr_arg = (
+    be   :: CBackend,
+    c    : Call,
+    i    : usize,
+    want : TyId,
+    ctx  : Ctx
+) Res<(), AllocError> {
+    c.args.get(i).match({
+        Ok(a) => be.deliver(a.value, ctx, want, Dest.Discard),
+        None  => Ok(()),
+    })
 }
 
 // The pointer itself. Parenthesised because the receiver is an

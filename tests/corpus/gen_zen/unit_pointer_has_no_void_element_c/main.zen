@@ -1,0 +1,44 @@
+Alloc, AllocError = std.mem
+str, String = std.text
+Range = std.core
+Source, scan = std.lex
+Parser = std.parse.parser
+module = std.parse.parse_decl
+Checker = sema.sema_check
+Emit = gen.gen_emit
+CBackend, emit_program = gen.gen_c
+
+PROGRAM : str = "Ptr*<T> = { to* = <U>(self: @Self) Ptr<U> bytes* = (self: @Self, count: usize) usize copy_from* = (self: @Self, src: Ptr<T>, count: usize) () is_null* = (self: @Self) bool }\nnull_ptr* = <T>() Ptr<T>\nfree = (p: Ptr<()>) ()\nhold = (p: Ptr<()>) Ptr<()> { p }\ncount = () usize { 3 }\nmain = (env: i32) i32 { p = hold(null_ptr<()>()); q = p.to<u8>().to<()>(); p.bytes(count()); q.copy_from(p, count()); free(q); p.is_null().match({ true => 0, false => 1 }) }\n"
+
+at_text = (text: str, needle: str) Res<usize> {
+    (needle.len > text.len).match({
+        true  => None,
+        false => Range(0, text.len - needle.len + 1).find((i) {
+            text.slice(i, i + needle.len).eq(needle)
+        }),
+    })
+}
+
+has = (text: str, needle: str) bool {
+    at_text(text, needle).match({ Ok(_) => true, None => false })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    lexed = scan(a, Source(file: "main.zen", text: PROGRAM)).try();
+    p ::= a.Parser(lexed);
+    m = p.module("main").try();
+    p.tree.add_module(m).try();
+    check ::= a.Checker(p.tree).try();
+    be    ::= a.CBackend(p.tree, check).try();
+    out   ::= a.Emit().try();
+    be.emit_program(0, out).try();
+    faults ::= a.String().try();
+    be.render_diags(faults).try();
+    c = out.view();
+    println("accepted={}", faults.is_empty());
+    println("sizeof-void={}", has(c, "sizeof(void)"));
+    println("memcpy={}", has(c, "memcpy("));
+    println("foreign-free={}", has(c, "extern void free(void *);"));
+    Ok(0)
+}
