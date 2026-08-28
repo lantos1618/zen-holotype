@@ -30,6 +30,7 @@ sym_type, sym_variant, sym_member = gen.gen_name
 is_failure, RES_PATH = gen.gen_name
 sym_union_variant, sym_union_member = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
+GenFault = gen.gen_diag
 declarator, is_unit, has_storage = gen.gen_c.gen_c_type
 field_type, variant_type, decl_ctx, close_types = gen.gen_c.gen_c_type
 decl_inst = gen.gen_c.gen_c_type
@@ -699,7 +700,7 @@ storage_types = (
 ) Res<(), AllocError> {
     s.members.loop((h, m) {
         be.field_type(m, ctx, inst).match({
-            None  => Ok(()),
+            None  => be.refuse_dropped_field(m),
             Ok(t) => be.has_storage(t).match({
                 true  => out.add(t),
                 false => Ok(()),
@@ -707,6 +708,18 @@ storage_types = (
         }).try();
     });
     Ok(());
+}
+
+// A method or constant has no storage. A Field whose type walk failed does.
+refuse_dropped_field = (be :: CBackend, m: Member) Res<(), AllocError> {
+    m.kind.match({
+        Field(_) => be.report(
+            m.span.file,
+            m.span,
+            GenFault.Unspellable(m.name().text)
+        ),
+        _ => Ok(()),
+    })
 }
 
 write_fields_def = (
