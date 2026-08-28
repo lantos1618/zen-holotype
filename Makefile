@@ -126,14 +126,16 @@ define nonempty
 mapfile -d '' files < <(find $(2)) && test $${#files[@]} -gt 0 || { echo "$(1): found no .zen files — this gate is checking nothing" >&2; exit 2; }
 endef
 
-## cap: STYLE.md's line caps. Over 500 prints a note; over 800 fails,
-## unless the path carries a written reason in tests/gates/line_cap.zen.
+## cap: a structural-review prompt. Long files print notes but do not fail:
+## line count finds candidates, while STYLE.md names the architectural smells
+## that decide whether a split is useful. No-input and read failures stay red,
+## because a review that inspected nothing is not a successful review.
 ##
 ## THE FILE LIST COMES FROM `find` AND NOT FROM THE GATE. `std.env.Fs` has no
 ## listing, on purpose ("no open handle, seek, listing, or permission
 ## surface"), so a gate over a file SET cannot compute its own inputs. Same
 ## shape as `fmt` and `parse` below, and the same assertion for the same
-## reason: an empty list must not read as "0 over 800". `LC_ALL=C` because the
+## reason: an empty list must not read as a clean report. `LC_ALL=C` because the
 ## report is ordered by path and a locale-dependent order is a diff nobody
 ## asked for.
 cap: build

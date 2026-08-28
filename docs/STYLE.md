@@ -2,8 +2,9 @@
 
 How to write Zen, and how to write about Zen. `DESIGN.md` says what the language is; this says what good code in it looks like.
 
-The grammar, formatter, compiler tests, and line-cap gate enforce the
-mechanical rules. The remaining conventions are review guidance.
+The grammar, formatter, and compiler tests enforce the mechanical rules. The
+structural-review gate finds candidates. The remaining conventions are review
+guidance.
 
 ---
 
@@ -11,7 +12,7 @@ mechanical rules. The remaining conventions are review guidance.
 
 | rule | gate |
 |---|---|
-| 500-line note, 800-line fail | `make cap` — `tests/gates/line_cap.zen` |
+| long-file review notes | `make cap` — `tests/gates/line_cap.zen` |
 | a line is 80 columns; a list packed past it breaks one item per line; match arms align their `=>`; blank-line and comment placement | `make fmt` — the formatter owns the whole shape of a printed file, so it is the authority and this document does not restate its rules |
 | every fault has a raise site | `make faults` |
 
@@ -61,13 +62,25 @@ Three tests, in order of how often you will need them:
 
 ## How files are named and split
 
-**A file is too big when it has two subjects. The line count is how you find out.**
+**A file is too big when it has two subjects. Line count only finds candidates.**
 
-- **Over 500 lines: justify or split.** Not a failure, a prompt — read it and name its subjects out loud. Usually there are two.
-- **Over 800 lines: fails the build** — `make cap`, and it is part of `make test`. An exception is a path listed in `tests/gates/line_cap.zen` **with a written reason**; the sentence is the point, because an exception you have to type one for is an exception someone will read, and a silent one is a file that grows forever. (This said `build.zen` for a long time and no such file existed, so nothing enforced it and a file crossed the cap unnoticed. One fact, one place — and the place has to be real.)
-- Generated files (`seed/zen.c`) and test corpora are exempt. They are not read.
+`make cap` prints review notes above 500 and 800 lines. Neither threshold fails
+the build: formatter layout, cohesive dispatch tables, and real algorithms can
+all cross them without gaining a second subject. The gate still fails on an
+empty input set or an unreadable file, because then it did not perform a review.
+Generated files and test corpora are not inputs.
 
-The cap is a trigger, never the rule. **You always split by subject, never by size.** `gen.zen` and `gen_c.zen` are backend-shared plumbing and the C backend — two subjects. `parse1.zen` and `parse2.zen` are one subject cut in half, which is worse than the file you started with, because now neither name means anything.
+Review structure before LOC. In particular, look for:
+
+- sibling modules that import and re-export one another;
+- the same same-folder definitions imported repeatedly across a family;
+- functions whose many parameters are one unnamed context or plan;
+- free functions whose natural receiver is the module's principal type.
+
+Those are dependency and ownership costs. Splitting solely to satisfy a line
+target makes them worse by adding module edges and forwarding parameters. Split
+by subject: `gen.zen` and `gen_c.zen` are backend plumbing and a C backend, while
+`parse1.zen` and `parse2.zen` are one subject cut into meaningless halves.
 
 **Siblings repeat the folder name as a prefix:**
 
