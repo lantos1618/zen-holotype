@@ -1,322 +1,156 @@
-# `gen/` shape — the parameter-threading campaign
+# Compiler structure migration
 
-A ledger, not an essay. Every row is one file, one agent, one commit.
+This is the execution map for reducing compiler plumbing without changing the
+language or generated C. Line count is a result, not the design constraint.
 
----
+## Baseline
 
-## The measurement that started it
+Measured 2026-08-28:
 
-`src/gen` is 18,625 code lines — the largest subsystem in the tree, and
-larger than TinyCC's entire C compiler while emitting *C text* rather than
-machine code. Three hypotheses were tested, two were wrong:
+| area | files | lines | alias/import lines | same-folder aliases | functions with 8+ parameters |
+|---|---:|---:|---:|---:|---:|
+| `gen_c` | 52 | 28,800 | 1,044 | 495 | 125 |
+| `sema` | 42 | 20,659 | 545 | 345 | 8 |
+| `lsp` | 18 | 5,862 | 206 | 70 | 4 |
+| `fmt` | 5 | 2,067 | 46 | 8 | 1 |
 
-| hypothesis | measured | verdict |
-|---|---|---|
-| comments are exploding | 5,541 comment lines, header essays 7.3% of code | **no** |
-| it is hard-coded emitted C | only **6%** of lines contain a string literal at all | **no** |
-| parameters are threaded by hand | **3,649 lines — 20% of all code — are one parameter on its own line** | **yes** |
+`gen_c` also has 46 mutual sibling-import pairs. Its worst 8+ parameter
+concentrations are `call` (23), `loop` (12), `build` (11), `ptr` (10) and
+`inline` (10).
 
-Twelve names are **64%** of those parameter lines (2,325 lines, one in every
-eight in `gen/`): `be`(556) `out`(384) `ctx`(374) `id`(211) `c`(189)
-`want`(118) `rty`(99) `a`(87) `f`(87) `s`(82) `name`(70) `d`(68).
+## Desired shape
 
-The same measure elsewhere: `sema/` 11.0%, `fmt/` 10.5%, `lsp/` 7.1%,
-`std/` 6.5%. **`gen/` is triple the stdlib.** This is not the language.
+```text
+AST + Checker memos
+        |
+        v
+  CallSite / InlineSite / FsReadPlan       immutable phase inputs
+        |
+        v
+  CBackend receiver methods               sequencing and owned state
+        |
+        v
+  focused emitters                         C text only
+        |
+        v
+  lazy native floors                       requested only when reachable
+```
 
-**And the parameters are not independent values.** `rty` is derived from
-`a.base`; `s = site_of(be, rty)`; `f`/`m` come from `s` + `a.name`. The list
-GROWS as you descend a chain, because each link computes one more derived
-value and hands the whole accumulated pile to the next. `lower_dot_call`
-starts at 7 parameters and `lower_method` ends at 9.
+Rules:
 
-**109 functions have a signature longer than their body** — 850 lines of
-signature carrying 399 lines of body.
+- A record bundles values created together and never mutated independently.
+- Derived data travels with its source; do not pass both separately.
+- The principal type is the receiver: `be.write(...)`, `c.type_of(...)`.
+- A classifier returns one enum and is matched once; it is not a call chain.
+- Traits describe substitutability. They are not a way to split one concrete
+  type across files.
+- Keep a file boundary only when it names a distinct decision or data owner.
 
----
+## What stays split
 
-## The two moves
+- `gen_c_member` / `gen_c_impl`: member lookup versus impl selection.
+- `gen_c_expr` / `gen_c_call`: expression dispatch versus call lowering.
+- `gen_c_shape`: shared by loop, range and array lowering.
+- `lsp_serve` / `lsp_reply`: session lifecycle versus JSON-RPC shapes.
+- `sema_type` / `sema_try`: general typing versus failure propagation.
+- `sema_member` / `sema_static`: value access versus `Type.NAME`.
 
-Rust, OCaml and Pony all answer this the same two ways, and neither is "a
-struct with nine fields".
+Combining these would conceal dependencies rather than remove them.
 
-### Move 2 — classify, then dispatch  ← **DO THIS FIRST**
+## Phase 1 — remove false boundaries
 
-A chain of predicates is one classifier returning a sum type, matched once.
-`gen_c_member.zen` has a six-link chain — `lower_method` →
-`lower_written_method` → `lower_declared_method` → `lower_bound_or_method` →
-`lower_floor_or_fat`/`lower_fat_or_method` → `lower_ordinary_method` —
-**66 lines of signature carrying 43 lines of body**, every link forwarding
-the identical nine values. It becomes one `MethodKind` enum whose variants
-carry the derived values, computed once, and one `.match`.
+1. Make the 500/800 line counts review notes, never a reason to split one
+   subject. Replace the hard failure with direct structural measurements.
+2. Delete forwarding-only modules such as `lsp_decl.zen`.
+3. Consolidate the repeated LSP root/overlay/build/query setup.
+4. Move generic result and block-emission helpers out of capability floors,
+   breaking `cap` cycles with FS, env, stdin and threads.
 
-**It goes first because every link is PRIVATE.** 52 of the 59 functions in
-`gen_c_member.zen` are unexported. No signature crosses a file boundary, so
-this parallelises one-agent-per-file with no merge coupling.
+Exit criteria:
 
-**It is a correctness change, not only a size one.** The precedence order of
-the kinds — ptr before capability before door before floor before fat before
-ordinary — exists today ONLY as the order of the call chain, explained in
-scattered header comments. As one enum it is a readable list, and a new kind
-cannot silently land in the wrong slot.
+- no forwarding-only module remains in LSP;
+- at least five `gen_c` mutual imports are gone;
+- targeted LSP and capability tests are unchanged.
 
-### Move 1 — receiver, not parameter  ← **AFTER Move 2, SERIALISED**
+## Phase 2 — stop forwarding call state
 
-`be`/`ctx`/`out` become one `Lower` receiver: 1,251 parameter lines gone.
-`CBackend` already holds `buf :: Emit` ("where a body is lowered") and
-`check :: Checker` as fields, and already has `self :: @Self` methods — the
-receiver exists, the lowering layer just does not use it. 622 call sites
-forward literally `out`, unchanged, so this is safe; leaf emitters that write
-into a temp (`ctype(be, v, cty)`, `write_vec_literal`) keep an explicit sink.
+Introduce records one pipeline at a time:
 
-**This one changes exported signatures, so it is cross-file and must be one
-agent at a time through the fixpoint.** `make build` is blind to
-resolution-shaped changes; only fixpoint and the corpus see them.
+```zen
+CallSite = {
+    id: ExprId,
+    call: Call,
+    ctx: Ctx,
+    want: TyId,
+}
 
----
+InlineSite = {
+    call: CallSite,
+    inst: Inst,
+    ret: TyId,
+}
+```
 
-## The gates every row must pass
+`FsReadPlan` similarly owns the types, generated names and result destination
+currently threaded through `read_body` and `run_and_read`.
 
-Non-negotiable, in this order. A row is not done until all four are green.
+Landing order:
 
-1. `make test` — **529 passed, 0 failed, 4 deferred**. Any other number is a red.
-2. `make fixpoint` — `stage2.c == stage3.c`.
-3. **THE FROZEN DIFFERENTIAL — two compilers, one frozen input.** This is
-   the gate that makes the campaign safe: a pure reshaping must be a
-   byte-identical translator.
-   ```sh
-   S=/tmp/purity; mkdir -p $S/frozen
-   #   ./zen built from the PRE-change tree, copied aside as $S/zen-old
-   #   ./zen built from your CHANGED tree,   copied aside as $S/zen-new
-   git archive HEAD | tar -x -C $S/frozen        # ONE input both compilers read
-   $S/zen-old build $S/frozen/src --emit-c -o $S/old.c
-   $S/zen-new build $S/frozen/src --emit-c -o $S/new.c
-   cmp $S/old.c $S/new.c        # MUST be byte-identical
-   ```
-   No `sed`, no erasing of position triples: byte-exact, all 108,020 lines.
+1. `gen_c_call`
+2. `gen_c_inline`
+3. `gen_c_bound`
+4. `gen_c_fs`
+5. remaining files with 8+ parameters
 
-   ⚠ **THE OBVIOUS VERSION OF THIS GATE IS ILL-POSED AND THIS DOCUMENT
-   SHIPPED IT WRONG.** `./zen build src --emit-c` compiles `src` AS ITS
-   INPUT, so reshaping a `src` file necessarily moves the C emitted for that
-   file's own functions — before/after over a moving input is not a purity
-   test. Lanes 1 and 3 both hit the false red (215 and 409 diff lines) and
-   both independently ran the frozen version above and got byte-identical.
-   The repo already recorded this lesson under "byte-identical C needs two
-   compilers"; it was set up wrong here anyway. **That is the third time.**
+Each commit changes one pipeline and must reduce its high-arity count.
 
-   If you see a diff from the ill-posed form, it is expected. Attribute each
-   changed line to its enclosing C definition before concluding anything: the
-   owners must all be symbols from your own file, plus pure insertions into
-   the shared tag `enum {}` for any new enum you introduced.
-4. `make fmt`.
+## Phase 3 — receivers and local methods
 
-**Do NOT gate on `make build`.** It is blind to every resolution-shaped
-defect this tree has ever had; a 1,195-name cull passed `make build` and then
-failed fixpoint with 5 diagnostics and the corpus with 16 more.
+- Convert `foo(be, ...)` to `be.foo(...)` and `foo(c, ...)` to `c.foo(...)`.
+- Move behavior already colocated with `Own` and `Pats` into their structs.
+- Delete imports made unnecessary by receiver resolution.
+- Do not create one trait per file: that duplicates every signature.
 
-**Do not regenerate the seed.** The integrator does that once, at the end.
+True distributed methods need a later, sealed language feature:
 
-**Do not edit your own row in this table.** 27 lanes editing one table is 27
-conflicts. Report `after` and the commit sha; the integrator fills it in.
+```zen
+extend CBackend {
+    expr = (...) { ... }
+}
+```
 
----
+An extension is valid only in the target's folder and cannot add an orphan
+implementation. Design and test that feature separately from this cleanup.
 
-## Phase A — chain collapse, file by file
+## Phase 4 — comments and public surface
 
-`before` is the file's total line count at campaign start. `chain fns` is the
-count of private functions with ≥5 parameters and a body of ≤6 lines — the
-shape being collapsed. `their lines` is what those functions occupy today.
+- Keep invariants, ownership, ordering and non-obvious failure reasons.
+- Delete chronology, issue narratives, repeated examples and comments that
+  restate the next statement.
+- Export a helper only when a different subject consumes it.
+- Recount folder-root re-exports after every consolidation.
 
-| ☐ | file | before | code | param-lines | chain fns | their lines | after | commit |
-|---|---|---:|---:|---:|---:|---:|---:|---|
-| ☑ | `gen_c_member.zen` | 1110 | 787 | 87 | 6 | 77 | **964** | `1d732fc7` +B |
-| ☑ | `gen_c_op.zen` | 816 | 567 | 131 | 7 | 171 | **767** | `9a3c3838` |
-| ☑ | `gen_c_expr.zen` | 878 | 597 | 84 | 6 | 118 | **865** | `1f147841` |
-| ☐ | `gen_c_call.zen` | 1250 | 869 | 106 | 12+ | ~130 | | |
-| ☐ | `gen_c_stmt.zen` | 519 | 378 | 66 | 10 | 112 | | |
-| ☐ | `gen_c_flow.zen` | 619 | 475 | 85 | 9 | 100 | | |
-| ☐ | `gen_c_try.zen` | 838 | 570 | 104 | 8 | 94 | | |
-| ☐ | `gen_c_bound.zen` | 655 | 506 | 78 | 7 | 82 | | |
-| ☐ | `gen_c_cap.zen` | 720 | 558 | 65 | 6 | 77 | | |
-| ☐ | `gen_c_fat.zen` | 770 | 567 | 57 | 6 | 64 | | |
-| ☐ | `gen_c_const.zen` | 261 | 184 | 41 | 5 | 61 | | |
-| ☐ | `gen_c_ptr.zen` | 579 | 440 | 43 | 5 | 59 | | |
-| ☐ | `gen_c_index.zen` | 248 | 199 | 39 | 4 | 52 | | |
-| ☐ | `gen_c_impl.zen` | 395 | 237 | 31 | 4 | 43 | | |
-| ☐ | `gen_c_alloc.zen` | 305 | 204 | 38 | 3 | 45 | | |
-| ☐ | `gen_c_floor.zen` | 281 | 194 | 49 | 3 | 37 | | |
-| ☐ | `gen_c_read.zen` | 627 | 452 | 48 | 3 | 35 | | |
-| ☐ | `gen_c_display.zen` | 352 | 259 | 29 | 3 | 35 | | |
-| ☐ | `gen_c_layout.zen` | 862 | 689 | 29 | 2 | 27 | | |
-| ☐ | `gen_name.zen` | 507 | 301 | 33 | 2 | 22 | | |
-| ☐ | `gen_c_mono.zen` | 425 | 247 | 14 | 2 | 20 | | |
-| ☐ | `gen_c_fmt.zen` | 315 | 219 | 42 | 1 | 14 | | |
-| ☐ | `gen_c_build.zen` | 683 | 504 | 22 | 1 | 14 | | |
-| ☐ | `gen_c_sink.zen` | 938 | 659 | 21 | 1 | 13 | | |
-| ☐ | `gen_c_range.zen` | 689 | 500 | 53 | 1 | 12 | | |
-| ☐ | `gen_c_array.zen` | 325 | 217 | 50 | 1 | 12 | | |
-| ☐ | `gen_c_settle.zen` | 622 | 463 | 17 | 1 | 9 | | |
+## Targets
 
-**`gen_c_member.zen` and `gen_c_call.zen` carry `+` because the counter that
-built this table miscounts them** — it balances braces and a `{` inside a
-string literal (`be.fmt("if (..) {\n")`) throws it off. Their chains were
-read by hand instead. Trust the file, not the number.
-
-**Phase A total: ~113 functions, ~1,328 lines, over 27 files.**
-
-### What the first two rows actually yielded, and the correction it forces
-
-`gen_c_member.zen` 1110 → 1083 (**−27**, −2.4%). `gen_c_expr.zen` 878 → 865
-(**−13**, −1.5%), with its parameter lines 84 → 63.
-
-`gen_c_op.zen` 816 → 767 (**−49**, −6.0%), parameter lines 131 → 95.
-
-**That is far less than the 2,000–2,500 lines this campaign was pitched at,
-and the pitch was wrong, not the work.** The enum, the classifier and the
-preserved reasoning cost most of what the deleted signatures save. Extrapolated
-over 27 files, Phase A is worth **roughly 500 lines, not 2,000.**
-
-**So Phase A's value is not size — it is that the precedence becomes
-readable.** `gen_c_member.zen`'s six method kinds, whose order was previously
-recoverable only by following a call chain through six files' worth of header
-comments, are now one commented list above one enum. `gen_c_expr.zen` did the
-same for four conversion doors and for the type-authority precedence. That is
-worth having; it is not a line-count win, and this document should not have
-claimed otherwise.
-
-**The lines are in Phase B.** `be`/`ctx`/`out` are 1,251 parameter lines and
-they do not come back as anything.
-
-### What the chains were HIDING, which is the better argument for Phase A
-
-`gen_c_op.zen`'s lane found three things that a line count does not show and
-that were invisible for as long as the chain existed:
-
-- **Two parameters threaded and never read.** `node: Expr` into
-  `lower_logical` and `prim: str` into `lower_compare` — each computed by a
-  caller and carried one or two frames to nothing. The threading habit does
-  not only cost verbosity, it costs dead work, and a chain hides it because
-  no single link looks wrong.
-- **The same precedence written a THIRD time.** `infix_shaped` and
-  `helper_shaped` in the spine walk restated the operator precedence the
-  chain already encoded. Proven equivalent case by case, `helper_shaped`
-  deleted; the list now exists once in the tree. A duplicated rule is a rule
-  that can drift, and nothing was comparing the two copies.
-- **A predicate that already existed.** `literal_or` was
-  `is_literal_ty(lhs)==false && is_unknown(lhs)==false`, which is exactly the
-  neighbouring `usable(be, lhs)`.
-
-So Phase A's real return is: the precedence stated once, in one readable
-list, with the dead parameters and duplicate predicates that were hiding
-behind it removed. Budget it as a correctness pass that happens to shrink
-files, never as a line-count campaign.
-
-### A better shape than the one the first lanes produced
-
-Both lanes turned the chain into a NESTED `.match` staircase — seven deep in
-`gen_c_member.zen`, four in `gen_c_expr.zen`. That is fewer lines than the
-chain but it is still a pyramid, and `STYLE.md` already names the fix:
-
-> **Early return over a pyramid.** [..] When the early exit carries a value
-> rather than a failure, a one-shot `loop` is the breakable block: each guard
-> is a `.then` whose closure calls `h.break(v)`, and the fall-through
-> `h.break` is the default. Bind the loop to a typed variable before matching
-> on it.
-
-A classifier written that way is a FLAT list of guards, one line each, in
-precedence order — which is exactly what a classifier should look like. The
-idiom is live in the tree (`parser.zen`, `parse_lookahead.zen`,
-`collections_map.zen`, `zen_cli.zen`, `fmt.zen`). **Later lanes should write
-the classifier as a breakable block, and the first two rows are owed a
-follow-up pass.**
-
----
-
-## The follow-up pass on `gen_c_member.zen`, and the two levers it found
-
-The row above was re-done as the ledger's own note asked — classifier as a
-breakable block, not a nested staircase — and then kept going. **1083 → 964
-(−119), code 772 → 681 (−11.8%), and the parameter lines 250 → 115 (−54%).**
-That is four times what Phase A's first three rows yielded per file, and none
-of it came from the move Phase A is about.
-
-| | before | after |
+| measure | baseline | first target |
 |---|---:|---:|
-| total lines | 1081 | 964 |
-| code lines | 772 | 681 |
-| **parameter lines** | **250 (32% of code)** | **115 (17%)** |
-| functions | 56 | 52 |
-| comment lines | 241 | 219 |
+| `gen_c` same-folder aliases | 495 | below 300 |
+| `gen_c` mutual sibling imports | 46 | below 20 |
+| `gen_c` functions with 8+ parameters | 125 | below 50 |
+| principal-receiver free calls | 1,153 | 0 |
+| compiler/LSP handwritten lines | 57,388 | reduce 10–20% |
 
-### Lever 1 — the CALL SITE is one value, not three
+## Verification
 
-`id: ExprId`, `c: Call` and `a: Access` are produced together by the parser,
-read by every lowering in the file, and written by none. They were three
-parameters on twenty signatures. As one `Dot` they are one, and the whole
-receiver path drops from nine parameters to six.
+For every structural commit:
 
-**This is not the struct-with-nine-fields Phase A rejected.** The rejected
-shape bundles the accumulated pile — inputs, derived values and the output
-sink together — and hides what a function actually reads. `Dot` bundles
-exactly the values that are *the identity of the call being lowered*, all
-three immutable, and it is FILE-PRIVATE: `lower_dot_call*` still takes them
-apart, so no other file changed. That property is what makes this
-parallelisable the way Phase A is, and Phase B is not.
+1. focused tests for the touched pipeline;
+2. `make lint`, formatter check and structural metrics;
+3. build the self-hosted compiler;
+4. fixpoint for cross-module signature changes;
+5. compare old and new compilers on one frozen source tree when the change
+   claims to be behavior-preserving.
 
-The same shape is waiting in `gen_c_call.zen`, `gen_c_try.zen` and
-`gen_c_flow.zen`, all of which thread the identical triple.
-
-### Lever 2 — a derived value threaded beside the thing it was derived from
-
-`Site` is found by `site_of(be, rty)` — and then almost every function took
-`(rty, s)` as two parameters. Putting `ty` in `Site` deleted a parameter from
-fifteen signatures. **A pair that can be threaded apart is a pair that can be
-threaded wrong**; this one could not disagree because the two values had a
-single source, but nothing said so.
-
-### And the defect the two levers uncovered: DEAD PARAMETERS
-
-Phase A found two in `gen_c_op.zen`. A mechanical scan finds **92 in `src/`,
-59 of them in `src/gen`** — a parameter declared, threaded through a call
-chain, and never read in the body. `gen_c_member.zen` had eight, including
-`want` on the file's own EXPORTED entry point, computed by `gen_c_call.zen`
-and carried two frames to nothing.
-
-They are invisible for exactly the reason the ledger already names: no single
-link in a chain looks wrong. Worth its own sweep, and worth a `style.py` rule
-beside the Phase C one — the scan is ~30 lines and has no false positives on
-this tree.
-
-### One duplicated predicate, and the dead answer behind it
-
-`refuse_method` and `method_fault` asked the same two questions — one for the
-verdict, one for the wording. The third wording, "a call to a member this
-backend does not lower", **could not be reached from the predicate guarding
-it**. One function returning `Res<str>` states the rule once and the dead
-string is gone.
-
-### What was NOT done, and why
-
-An outside review of this file proposed recording a `MemberId` in sema so the
-backend stops re-deriving overload resolution, and costed it at ~180 lines.
-The direction is right and the file's own header has said so for months. The
-number is not: the resolution block is ~60 code lines, and the change is a
-cross-file sema change, not a `gen` one. It also deletes the property that
-makes the current code safe — `pick_member` calls `recv_sig_fits`, the
-checker's own predicate, so the two cannot disagree about the rule. Do it
-deliberately, in sema, with the seam closed in one commit; do not do it as
-part of a shape campaign.
-
----
-
-## Phase B — the `Lower` receiver
-
-Not started. Blocked on Phase A landing, because the two moves touch the same
-signatures and doing them together makes every conflict a three-way one.
-
----
-
-## Phase C — the rule that stops it coming back
-
-A `style.py` rule: a signature with **≥6 parameters** is a violation,
-ledgered by file with a count like `UFCS_OWED`, so it can shrink and cannot
-grow. Without this the campaign is a one-off and the shape returns.
+Do not compare compilers on different source trees: source positions make
+that differential meaningless. Do not regenerate the seed per lane; do it
+once after the integrated series is green.
