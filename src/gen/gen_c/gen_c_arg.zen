@@ -1,0 +1,41 @@
+// Argument rendering shared by capability floors. A Zen `str` is a borrowed
+// pointer and length, so native calls spill it once and pass both halves.
+
+Call = std.ast
+AllocError = std.mem
+String = std.text
+TyId = sema.sema_ty
+Ctx = sema.sema_check
+CBackend = gen.gen_c.gen_c_state
+expr = gen.gen_c.gen_c_expr
+declare_temp = gen.gen_c.gen_c_flow
+
+arg_text* = (
+    be   :: CBackend,
+    c    : Call,
+    i    : usize,
+    want : TyId,
+    ctx  : Ctx,
+    out  :: String
+) Res<(), AllocError> {
+    c.args.get(i).match({
+        None  => out.add_bytes("0"),
+        Ok(a) => expr(be, a.value, ctx, want, out),
+    })
+}
+
+str_arg* = (be :: CBackend, c: Call, i: usize, ctx: Ctx, out :: String)
+          Res<(), AllocError> {
+    sty = be.check.types.prim("str").try();
+    tmp ::= be.fresh_name("t").try();
+    be.declare_temp(sty, tmp.view()).try();
+    value ::= be.alloc.String().try();
+    be.arg_text(c, i, sty, ctx, value).try();
+    be.set_line(tmp.view(), value.view()).try();
+    out.fmt(
+        "(const unsigned char *){}.data, {}.len",
+        tmp.view(),
+        tmp.view()
+    ).try();
+    Ok(())
+}

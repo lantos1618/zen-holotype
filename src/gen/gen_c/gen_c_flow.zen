@@ -18,7 +18,7 @@ Inst = sema.sema_inst
 last_segment = sema.sema_match
 write_usize = sema.sema_diag
 member_of = sema.sema_union
-sym_local, sym_variant = gen.gen_name
+sym_local, sym_member, sym_variant = gen.gen_name
 sym_union_member = gen.gen_name
 RES_PATH, is_failure = gen.gen_name
 GenFault = gen.gen_diag
@@ -842,4 +842,100 @@ first_payload = (be :: CBackend, found: Vec<TyId>) Res<TyId> {
         None  => None,
         Ok(t) => be.non_unit(t),
     })
+}
+
+// Result construction belongs to expression flow, not to any capability.
+// Floors choose a variant and payload; these helpers own its C shape.
+write_assign_none* = (be :: CBackend, ret: TyId, dst: str)
+                    Res<(), AllocError> {
+    value ::= be.alloc.String().try();
+    be.write_res_head(ret, "None", value).try();
+    value.add_bytes(" })").try();
+    be.set_line(dst, value.view())
+}
+
+write_assign_ok_unit* = (be :: CBackend, ret: TyId, dst: str)
+                       Res<(), AllocError> {
+    value ::= be.alloc.String().try();
+    be.write_res_head(ret, "Ok", value).try();
+    value.add_bytes(" })").try();
+    be.set_line(dst, value.view())
+}
+
+write_assign_ok* = (be :: CBackend, ret: TyId, payload: str, dst: str)
+                  Res<(), AllocError> {
+    value ::= be.alloc.String().try();
+    be.write_res_head(ret, "Ok", value).try();
+    value.add_bytes(", .zg_data.").try();
+    sym_member(value, "Ok").try();
+    value.fmt(" = {payload} })").try();
+    be.set_line(dst, value.view())
+}
+
+write_assign_err* = (be :: CBackend, ret: TyId, name: str, dst: str)
+                   Res<(), AllocError> {
+    value ::= be.alloc.String().try();
+    be.write_res_head(ret, "Err", value).try();
+    be.payload_type(ret, "Err").match({
+        None    => Ok(()),
+        Ok(ety) => be.write_err_payload(ety, name, value),
+    }).try();
+    value.add_bytes(" })").try();
+    be.set_line(dst, value.view())
+}
+
+write_err_payload = (be :: CBackend, ety: TyId, name: str, out :: String)
+                    Res<(), AllocError> {
+    be.is_variant(ety, name).match({
+        false => Ok(()),
+        true  => be.write_err_variant(ety, name, out),
+    })
+}
+
+write_err_variant = (be :: CBackend, ety: TyId, name: str, out :: String)
+                    Res<(), AllocError> {
+    path ::= be.alloc.String().try();
+    be.enum_path(ety, path).try();
+    out.add_bytes(", .zg_data.").try();
+    out.sym_member("Err").try();
+    out.add_bytes(" = ((").try();
+    be.ctype(ety, out).try();
+    out.add_bytes("){ .zg_tag = ").try();
+    out.sym_variant(path.view(), name).try();
+    out.add_bytes(" })").try();
+    Ok(());
+}
+
+write_res_head = (be :: CBackend, ret: TyId, variant: str, out :: String)
+                 Res<(), AllocError> {
+    cty ::= be.alloc.String().try();
+    be.ctype(ret, cty).try();
+    out.fmt("(({}){ .zg_tag = ", cty.view()).try();
+    out.sym_variant(RES_PATH, variant)
+}
+
+// Small C block transitions shared by capability floors.
+open_rc_test* = (be :: CBackend, rc: str) Res<(), AllocError> {
+    be.fmt("if ({rc} != 0) {\n").try();
+    be.indent();
+    Ok(())
+}
+
+open_null_test* = (be :: CBackend, raw: str) Res<(), AllocError> {
+    be.fmt("if ({raw} == NULL) {\n").try();
+    be.indent();
+    Ok(())
+}
+
+close_else* = (be :: CBackend) Res<(), AllocError> {
+    be.dedent();
+    be.writeln("} else {").try();
+    be.indent();
+    Ok(())
+}
+
+close_brace* = (be :: CBackend) Res<(), AllocError> {
+    be.dedent();
+    be.writeln("}").try();
+    Ok(())
 }

@@ -519,3 +519,82 @@ substituted = (be :: CBackend, id: TyId, inst: Inst) Res<TyId> {
         Ok(t)  => Ok(t),
     })
 }
+
+// The declared type of a storage field, read at the named type's own
+// arguments. This is a type query, independent of expression lowering.
+field_of* = (be :: CBackend, ty: TyId, name: str)
+            Res<Res<TyId>, AllocError> {
+    be.check.types.at(ty).match({
+        Named(n) => be.named_field_of(n, name),
+        _        => Ok(None),
+    })
+}
+
+named_field_of = (be :: CBackend, n: TyNamed, name: str)
+                 Res<Res<TyId>, AllocError> {
+    inst = be.decl_inst(n).try();
+    ctx  = be.decl_ctx(n);
+    mark = be.enter_struct_tparams(n.decl).try();
+    found ::= be.alloc.Vec<TyId>();
+    decl_at(be.tree, n.decl).match({
+        None  => Ok(()),
+        Ok(d) => be.collect_field(d, name, ctx, inst, found),
+    }).try();
+    be.leave_tparams(mark).try();
+    Ok(found.get(0));
+}
+
+collect_field = (
+    be   :: CBackend,
+    d    : Decl,
+    name : str,
+    ctx  : Ctx,
+    inst : Inst,
+    out  :: Vec<TyId>
+) Res<(), AllocError> {
+    d.kind.match({
+        Struct(s) => be.keep_fields(s, name, ctx, inst, out),
+        _         => Ok(()),
+    })
+}
+
+keep_fields = (
+    be   :: CBackend,
+    s    : Struct,
+    name : str,
+    ctx  : Ctx,
+    inst : Inst,
+    out  :: Vec<TyId>
+) Res<(), AllocError> {
+    s.members.loop((h, m) {
+        be.keep_named_field(m, name, ctx, inst, out).try();
+    });
+    Ok(());
+}
+
+keep_named_field = (
+    be   :: CBackend,
+    m    : Member,
+    name : str,
+    ctx  : Ctx,
+    inst : Inst,
+    out  :: Vec<TyId>
+) Res<(), AllocError> {
+    m.named(name).match({
+        false => Ok(()),
+        true  => be.add_field_type(m, ctx, inst, out),
+    })
+}
+
+add_field_type = (
+    be   :: CBackend,
+    m    : Member,
+    ctx  : Ctx,
+    inst : Inst,
+    out  :: Vec<TyId>
+) Res<(), AllocError> {
+    be.field_type(m, ctx, inst).match({
+        None  => Ok(()),
+        Ok(t) => out.add(t),
+    })
+}

@@ -27,14 +27,15 @@ write_usize = sema.sema_diag
 sym_member, sym_variant, sym_gen, RES_PATH = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
-ctype, request_type = gen.gen_c.gen_c_type
+ctype, request_type, field_of = gen.gen_c.gen_c_type
 declare_temp, init_temp, payload_type = gen.gen_c.gen_c_flow
+write_assign_ok, write_assign_ok_unit, write_assign_err = gen.gen_c.gen_c_flow
+close_else, close_brace, open_rc_test = gen.gen_c.gen_c_flow
 Slot = gen.gen_c.gen_c_fat
 slot_call = gen.gen_c.gen_c_bound
 address_of = gen.gen_c.gen_c_fat
 expr = gen.gen_c.gen_c_expr
-arg_text, field_of = gen.gen_c.gen_c_cap
-write_assign_ok, write_assign_ok_unit, write_assign_err = gen.gen_c.gen_c_cap
+arg_text, str_arg = gen.gen_c.gen_c_arg
 
 // the filesystem
 // Every path is spilled into a temporary first: a `str` is a pointer
@@ -48,7 +49,7 @@ lower_probe* = (be :: CBackend, c: Call, name: str, ctx: Ctx, out :: String)
               Res<(), AllocError> {
     be.need_fs();
     path ::= be.alloc.String().try();
-    be.path_args(c, 0, ctx, path).try();
+    be.str_arg(c, 0, ctx, path).try();
     out.fmt("(zg_fs_kind({}){})", path.view(), probe_test(name)).try();
     Ok(());
 }
@@ -71,9 +72,9 @@ lower_write* = (
     be.need_fs();
     i32_ty = be.check.types.prim("i32").try();
     path ::= be.alloc.String().try();
-    be.path_args(c, 0, ctx, path).try();
+    be.str_arg(c, 0, ctx, path).try();
     data ::= be.alloc.String().try();
-    be.path_args(c, 1, ctx, data).try();
+    be.str_arg(c, 1, ctx, data).try();
     rc  ::= be.fresh_name("t").try();
     dst ::= be.fresh_name("t").try();
     be.declare_temp(i32_ty, rc.view()).try();
@@ -133,7 +134,7 @@ write_lock = (
     be.request_type(lty).try();
     i32_ty = be.check.types.prim("i32").try();
     path ::= be.alloc.String().try();
-    be.path_args(c, 0, ctx, path).try();
+    be.str_arg(c, 0, ctx, path).try();
     rc ::= be.fresh_name("t").try();
     // THE DESCRIPTOR TEMP IS DECLARED HERE, not inside `write_lock_call`,
     // because two spellings need it: the floor call takes its address and
@@ -198,7 +199,7 @@ write_lock_call = (be :: CBackend, rc: str, path: str, fd: str)
 
 // `lock.unlock()` — the release drop runs
 // The receiver is handed over BY ADDRESS, the way every `::` parameter
-// travels: spelled out rather than borrowed from `path_args`, because
+// travels: spelled out rather than borrowed from `str_arg`, because
 // that helper lowers its argument AS A `str` and the thing being
 // unlocked is a Lock. `address_of` takes `&` of a place and spills a
 // non-place into a temporary first, so `spent.unlock()` and a receiver
@@ -285,7 +286,7 @@ lower_remove* = (
     i32_ty  = be.check.types.prim("i32").try();
     bool_ty = be.check.types.prim("bool").try();
     path ::= be.alloc.String().try();
-    be.path_args(c, 0, ctx, path).try();
+    be.str_arg(c, 0, ctx, path).try();
     rc  ::= be.fresh_name("t").try();
     yes ::= be.fresh_name("t").try();
     dst ::= be.fresh_name("t").try();
@@ -304,26 +305,6 @@ lower_remove* = (
 write_remove_call = (be :: CBackend, rc: str, yes: str, path: str)
                    Res<(), AllocError> {
     be.fmt("{rc} = zg_fs_remove({path}, &{yes});\n")
-}
-
-// `(const unsigned char *)<tmp>.data, <tmp>.len` — the two halves of a
-// `str`, spilled once. `str` is the one type whose C representation is
-// the runtime floor's rather than its declaration's, so its fields are
-// spelled the floor's way and not the mangler's.
-path_args* = (be :: CBackend, c: Call, i: usize, ctx: Ctx, out :: String)
-            Res<(), AllocError> {
-    sty = be.check.types.prim("str").try();
-    tmp ::= be.fresh_name("t").try();
-    be.declare_temp(sty, tmp.view()).try();
-    value ::= be.alloc.String().try();
-    be.arg_text(c, i, sty, ctx, value).try();
-    be.set_line(tmp.view(), value.view()).try();
-    out.fmt(
-        "(const unsigned char *){}.data, {}.len",
-        tmp.view(),
-        tmp.view()
-    ).try();
-    Ok(());
 }
 
 // `fs.read(alloc, path)` — THE CAPABILITY THAT ALLOCATES
@@ -391,7 +372,7 @@ read_run = (
     be.request_type(sty).try();
     be.request_type(vty).try();
     path ::= be.alloc.String().try();
-    be.path_args(c, 1, ctx, path).try();
+    be.str_arg(c, 1, ctx, path).try();
     al ::= be.alloc.String().try();
     be.hold_alloc(c, aty, ctx, al).try();
     want ::= be.fresh_name("t").try();
@@ -682,32 +663,5 @@ open_ordinal_test = (be :: CBackend, rc: str, n: usize)
     write_usize(ord, n).try();
     be.fmt("if ({rc} == {}) {\n", ord.view()).try();
     be.indent();
-    Ok(());
-}
-
-open_rc_test* = (be :: CBackend, rc: str) Res<(), AllocError> {
-    be.fmt("if ({rc} != 0) {\n").try();
-    be.indent();
-    Ok(());
-}
-
-// The one failure any C call answering with a pointer has, whether it
-// opened a file or asked for a page.
-open_null_test* = (be :: CBackend, raw: str) Res<(), AllocError> {
-    be.fmt("if ({raw} == NULL) {\n").try();
-    be.indent();
-    Ok(());
-}
-
-close_else* = (be :: CBackend) Res<(), AllocError> {
-    be.dedent();
-    be.writeln("} else {").try();
-    be.indent();
-    Ok(());
-}
-
-close_brace* = (be :: CBackend) Res<(), AllocError> {
-    be.dedent();
-    be.writeln("}").try();
     Ok(());
 }

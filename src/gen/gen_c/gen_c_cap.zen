@@ -18,26 +18,22 @@
 // `Mem.alloc` is the only door; the alternative is a second, hidden,
 // hand-written C arena std would have to agree with.
 
-ExprId, Decl, Struct, Member = std.ast
-Function, Access, Call = std.ast
+ExprId, Function, Access, Call = std.ast
 AllocError = std.mem
-Vec = std.collections
 str, String = std.text
 TyId, TyNamed = sema.sema_ty
-decl_at = sema.sema_def
 Ctx = sema.sema_check
-Inst = sema.sema_inst
-sym_member, sym_variant, sym_gen, RES_PATH = gen.gen_name
+sym_member, sym_gen = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 sub = gen.gen_c.gen_c_mono
-enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
-ctype, field_type, request_type, declared_ret = gen.gen_c.gen_c_type
-decl_ctx, decl_inst = gen.gen_c.gen_c_type
+ctype, request_type, declared_ret, field_of = gen.gen_c.gen_c_type
 expr = gen.gen_c.gen_c_expr
-temp, enum_path, payload_type, is_variant = gen.gen_c.gen_c_flow
+arg_text = gen.gen_c.gen_c_arg
+temp, payload_type = gen.gen_c.gen_c_flow
+write_assign_ok, write_assign_err = gen.gen_c.gen_c_flow
+close_else, close_brace, open_null_test = gen.gen_c.gen_c_flow
 lower_probe, lower_write, lower_read, lower_remove, lower_lock, lower_unlock = gen.gen_c.gen_c_fs
-close_else, close_brace, open_null_test = gen.gen_c.gen_c_fs
 lower_stdin_read = gen.gen_c.gen_c_stdin
 lower_env_var = gen.gen_c.gen_c_env
 lower_console_print, is_console_print = gen.gen_c.gen_c_print
@@ -452,165 +448,6 @@ prev_text = (be :: CBackend, c: Call, ctx: Ctx, out :: String)
     })
 }
 
-// the values these lowerings assign
-
-// `None` — the absence half of a `Res<T>`, which has no payload to
-// write and no reason to name. `Err` is the other enum's word and
-// `write_assign_err` is where it is spelled.
-write_assign_none* = (be :: CBackend, ret: TyId, dst: str)
-                    Res<(), AllocError> {
-    value ::= be.alloc.String().try();
-    be.write_res_head(ret, "None", value).try();
-    value.add_bytes(" })").try();
-    be.set_line(dst, value.view())
-}
-
-write_assign_ok_unit* = (be :: CBackend, ret: TyId, dst: str)
-                       Res<(), AllocError> {
-    value ::= be.alloc.String().try();
-    be.write_res_head(ret, "Ok", value).try();
-    value.add_bytes(" })").try();
-    be.set_line(dst, value.view())
-}
-
-write_assign_ok* = (be :: CBackend, ret: TyId, payload: str, dst: str)
-                  Res<(), AllocError> {
-    value ::= be.alloc.String().try();
-    be.write_res_head(ret, "Ok", value).try();
-    value.add_bytes(", .zg_data.").try();
-    sym_member(value, "Ok").try();
-    value.fmt(" = {payload} })").try();
-    be.set_line(dst, value.view())
-}
-
-// `Err(<the variant this ordinal names>)`, read out of the RETURN
-// type's own error enum. A set with no such variant gets a bare `Err`,
-// which is wrong only for a std that has already changed underneath
-// this file.
-write_assign_err* = (be :: CBackend, ret: TyId, name: str, dst: str)
-                   Res<(), AllocError> {
-    value ::= be.alloc.String().try();
-    be.write_res_head(ret, "Err", value).try();
-    be.payload_type(ret, "Err").match({
-        None    => Ok(()),
-        Ok(ety) => be.write_err_payload(ety, name, value),
-    }).try();
-    value.add_bytes(" })").try();
-    be.set_line(dst, value.view())
-}
-
-write_err_payload = (be :: CBackend, ety: TyId, name: str, out :: String)
-                    Res<(), AllocError> {
-    be.is_variant(ety, name).match({
-        false => Ok(()),
-        true  => be.write_err_variant(ety, name, out),
-    })
-}
-
-write_err_variant = (be :: CBackend, ety: TyId, name: str, out :: String)
-                    Res<(), AllocError> {
-    path ::= be.alloc.String().try();
-    be.enum_path(ety, path).try();
-    out.add_bytes(", .zg_data.").try();
-    out.sym_member("Err").try();
-    out.add_bytes(" = ((").try();
-    be.ctype(ety, out).try();
-    out.add_bytes("){ .zg_tag = ").try();
-    out.sym_variant(path.view(), name).try();
-    out.add_bytes(" })").try();
-    Ok(());
-}
-
-write_res_head = (be :: CBackend, ret: TyId, variant: str, out :: String)
-                 Res<(), AllocError> {
-    cty ::= be.alloc.String().try();
-    be.ctype(ret, cty).try();
-    out.fmt("(({}){ .zg_tag = ", cty.view()).try();
-    out.sym_variant(RES_PATH, variant)
-}
-
-// reading the shapes these lowerings write
-
-// The declared type of a STORAGE field, read at the type's own
-// arguments — `Vec<u8>`'s `data` is a `Ptr<u8>` and not a `Ptr<T>` —
-// and nothing when the type declares no such field.
-field_of* = (be :: CBackend, ty: TyId, name: str)
-            Res<Res<TyId>, AllocError> {
-    be.check.types.at(ty).match({
-        Named(n) => be.named_field_of(n, name),
-        _        => Ok(None),
-    })
-}
-
-named_field_of = (be :: CBackend, n: TyNamed, name: str)
-                 Res<Res<TyId>, AllocError> {
-    inst = be.decl_inst(n).try();
-    ctx  = be.decl_ctx(n);
-    mark = be.enter_struct_tparams(n.decl).try();
-    found ::= be.alloc.Vec<TyId>();
-    decl_at(be.tree, n.decl).match({
-        None  => Ok(()),
-        Ok(d) => be.collect_field(d, name, ctx, inst, found),
-    }).try();
-    be.leave_tparams(mark).try();
-    Ok(found.get(0));
-}
-
-collect_field = (
-    be   :: CBackend,
-    d    : Decl,
-    name : str,
-    ctx  : Ctx,
-    inst : Inst,
-    out  :: Vec<TyId>
-) Res<(), AllocError> {
-    d.kind.match({
-        Struct(s) => be.keep_fields(s, name, ctx, inst, out),
-        _         => Ok(()),
-    })
-}
-
-keep_fields = (
-    be   :: CBackend,
-    s    : Struct,
-    name : str,
-    ctx  : Ctx,
-    inst : Inst,
-    out  :: Vec<TyId>
-) Res<(), AllocError> {
-    s.members.loop((h, m) {
-        be.keep_named_field(m, name, ctx, inst, out).try();
-    });
-    Ok(());
-}
-
-keep_named_field = (
-    be   :: CBackend,
-    m    : Member,
-    name : str,
-    ctx  : Ctx,
-    inst : Inst,
-    out  :: Vec<TyId>
-) Res<(), AllocError> {
-    m.named(name).match({
-        false => Ok(()),
-        true  => be.add_field_type(m, ctx, inst, out),
-    })
-}
-
-add_field_type = (
-    be   :: CBackend,
-    m    : Member,
-    ctx  : Ctx,
-    inst : Inst,
-    out  :: Vec<TyId>
-) Res<(), AllocError> {
-    be.field_type(m, ctx, inst).match({
-        None  => Ok(()),
-        Ok(t) => out.add(t),
-    })
-}
-
 // What a `Ptr<T>` points AT. Sema has no pointer kind — a `Ptr<T>`
 // arrives as an ordinary `Named` — so this is its first type argument
 // and nothing more.
@@ -618,20 +455,5 @@ pointee = (be :: CBackend, ty: TyId) Res<TyId> {
     be.check.types.at(ty).match({
         Named(n) => n.args.get(0),
         _        => None,
-    })
-}
-
-// One written argument, at the type the signature declares for it.
-arg_text* = (
-    be   :: CBackend,
-    c    : Call,
-    i    : usize,
-    want : TyId,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError> {
-    c.args.get(i).match({
-        None  => out.add_bytes("0"),
-        Ok(a) => expr(be, a.value, ctx, want, out),
     })
 }
