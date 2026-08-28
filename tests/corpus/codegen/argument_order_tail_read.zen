@@ -1,0 +1,64 @@
+// THE SIDE-EFFECTING ORDERING TEST for the half of #717 its fix missed.
+// `holds` kept a position inline whenever no CALL stood to its right —
+// but a position that RUNS with anything at all to its right is C's to
+// order against what follows it, and gcc ran the read first:
+// `two(bump(d, 100), d.n)` answered 1000 against clang's left-to-right
+// 1100. `gen_c_array.zen`'s `elem_held` already asks both halves for a
+// literal's elements — a call to the right, or a call of its own with
+// anything after it — and `holds` now asks the same two of a call's
+// positions. Only the rightmost POSITION may stay inline with a call
+// inside: by the time it runs everything else already has.
+//
+// `bump` writes through a `::` parameter, so the call on the left and
+// the read on the right are the SAME storage: any order but Zen's is a
+// wrong number, not a wrong print order.
+
+Counter = {
+    n :: i32,
+
+    tick = (self :: @Self) i32 {
+        was    = self.n;
+        self.n = self.n + 1;
+        was;
+    }
+
+    show = (self :: @Self, a: i32, b: i32) i32 { self.n * 100 + a * 10 + b; }
+}
+
+two = (a: i32, b: i32) i32 { a * 10 + b; }
+
+three = (a: i32, b: i32, c: i32) i32 { a * 100 + b * 10 + c; }
+
+bump = (c :: Counter, k: i32) i32 { c.n = c.n + k; c.n; }
+
+make = (n: i32) Counter { Counter(n: n) }
+
+main = (env: Env) Res<i32, AllocError> {
+    // a mutating call on the LEFT, an aliased read on the RIGHT:
+    // bump lands first, so the read answers 100 — two(100, 100)
+    a ::= Counter(n: 0);
+    println("write-read {}", two(bump(a, 100), a.n));
+
+    // the same pair one position wider: the middle read sees the bump,
+    // the rightmost position stays inline with nothing after it
+    b ::= Counter(n: 0);
+    println("wide {}", three(bump(b, 100), b.n, 7));
+
+    // a method's own effect read back beside it: tick answers 0 and
+    // leaves 1, so the read is 1 — two(0, 1)
+    c ::= Counter(n: 0);
+    println("tick-read {}", two(c.tick(), c.n));
+
+    // a call nested in an ACCESS on the left still runs: make answers a
+    // Counter over the first tick, and the read after it answers 1
+    d ::= Counter(n: 0);
+    println("nest-read {}", two(make(d.tick()).n, d.n));
+
+    // a RECEIVER that runs, beside two aliased reads and no calling
+    // argument at all: the first tick builds the receiver, so both
+    // reads answer 1 — 0 * 100 + 1 * 10 + 1
+    e ::= Counter(n: 0);
+    println("recv-runs {}", make(e.tick()).show(e.n, e.n));
+
+    Ok(0);
+}

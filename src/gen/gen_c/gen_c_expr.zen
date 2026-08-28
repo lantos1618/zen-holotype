@@ -131,11 +131,16 @@ call_spills = (be: CBackend, c: Call) bool {
 //   - the call must have TWO OR MORE argument positions, a receiver
 //     counting as one: with a single position there is nothing to
 //     reorder against;
-//   - some argument must CONTAIN A CALL, because nothing else in an
-//     argument runs;
-//   - a position is held only while a call is still to its RIGHT. The
-//     rightmost may stay inline: by the time it runs everything else
-//     already has.
+//   - some position must CONTAIN A CALL, because nothing else in an
+//     argument runs — and a receiver is a position too, so the question
+//     is asked of it as well;
+//   - a position is held while a call is still to its RIGHT, and a
+//     position that RUNS is held while anything at all is: an inline
+//     call's effects and an inline read after it are C's to order, and
+//     gcc ran `two(bump(d, 100), d.n)`'s read first — 1000 against the
+//     left-to-right 1100. Only the rightmost POSITION may stay inline:
+//     by the time it runs everything else already has, and nothing
+//     follows it.
 // On this tree that is a few hundred of 8,389 call sites.
 // THE OPERANDS OF `+` AND OF EVERY OTHER INFIX OPERATOR were left out
 // deliberately — denser population, cost to be measured first — and are
@@ -144,14 +149,33 @@ call_spills = (be: CBackend, c: Call) bool {
 // Whether the position at signature index `pos` must be held. `first` is
 // how many positions the receiver took, so an argument at argument-index
 // `i` asks with `i + first`, and a receiver asks with `0` and `1`.
+// The split is `gen_c_array.zen`'s `elem_held` asked of a call's
+// positions: held while a call is still to the RIGHT (`pos` before the
+// last calling position), and held when the position ITSELF runs while
+// anything at all follows it — the half #717's fix missed, and the one
+// `two(bump(d, 100), d.n)` shows: the rightmost CALLING argument stayed
+// inline beside the read, and gcc took the read first. The rightmost
+// POSITION alone may stay inline with a call inside: nothing follows it.
 holds* = (be: CBackend, c: Call, pos: usize, first: usize) bool {
-    be.reorderable(c, first) && (pos < (be.last_call_arg(c) + first))
+    be.reorderable(c, first) && (
+        (pos < (be.last_call_arg(c) + first)) || (
+            (pos < ((c.args.len + first) - 1)) && be.position_calls(
+                c,
+                pos,
+                first
+            )
+        )
+    )
 }
 
 // The arity question and the something-runs question together: the only
-// shape where C's freedom over the order is observable.
+// shape where C's freedom over the order is observable. A receiver is a
+// position too, so something running in IT — `make(d.tick()).show(d.n,
+// d.n)` — answers the second question as surely as an argument does.
 reorderable* = (be: CBackend, c: Call, first: usize) bool {
-    ((c.args.len + first) > 1) && be.any_arg_calls(c)
+    ((c.args.len + first) > 1) && (
+        be.any_arg_calls(c) || ((first > 0) && be.recv_calls(c))
+    )
 }
 
 // `first` is not known until a call has been lowered, so the question a
@@ -165,6 +189,30 @@ may_reorder* = (be: CBackend, c: Call) bool {
 
 recv_slots = (be: CBackend, c: Call) usize {
     be.tree.expr_at(c.callee).kind.match({ Access(_) => 1, _ => 0 })
+}
+
+// Whether something runs in the RECEIVER — the base a `.`-callee stands
+// on. A callee that is not an `Access` has no receiver, which is the
+// answer `recv_slots` already gives.
+recv_calls = (be: CBackend, c: Call) bool {
+    be.tree.expr_at(c.callee).kind.match({
+        Access(a) => be.has_call(a.base),
+        _         => false,
+    })
+}
+
+// Whether something runs at ONE position: the receiver's base for the
+// positions `first` took, the argument's own value past them. A miss
+// answers YES, for `has_call`'s reason: wrong in this direction costs a
+// temporary, wrong the other way lets C order effects.
+position_calls = (be: CBackend, c: Call, pos: usize, first: usize) bool {
+    (pos < first).match({
+        true  => be.recv_calls(c),
+        false => c.args.get(pos - first).match({
+            Ok(a) => be.has_call(a.value),
+            None  => true,
+        }),
+    })
 }
 
 any_arg_calls = (be: CBackend, c: Call) bool {
