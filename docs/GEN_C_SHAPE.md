@@ -104,23 +104,24 @@ Landing order:
 
 Each commit changes one pipeline and must reduce its high-arity count.
 
-## Phase 3 — receivers and local methods
+## Phase 3 — receivers and owned impls
 
 - Convert `foo(be, ...)` to `be.foo(...)` and `foo(c, ...)` to `c.foo(...)`.
 - Move behavior already colocated with `Own` and `Pats` into their structs.
 - Delete imports made unnecessary by receiver resolution.
-- Do not create one trait per file: that duplicates every signature.
-
-True distributed methods need a later, sealed language feature:
+- Do not add an out-of-line extension form. Zen already has `impl`, and an
+  impl stays in the module that owns its target.
+- Use `impl` only for a real reusable bound. If a lowering phase needs that
+  shape, give the phase its own type in the same module:
 
 ```zen
-extend CBackend {
-    expr = (...) { ... }
-}
+CallLower.impl(LowerPhase, { lower = (...) { ... } })
 ```
 
-An extension is valid only in the target's folder and cannot add an orphan
-implementation. Design and test that feature separately from this cleanup.
+Do not create one trait per file merely to distribute `CBackend`: that repeats
+every signature. A universal `CBackend` fact lives with `CBackend`; an
+operation owned by one lowering module remains a UFCS receiver call; a true
+phase contract uses a phase type plus `impl`.
 
 ## Phase 4 — comments and public surface
 
