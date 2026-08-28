@@ -32,6 +32,230 @@ res_type_of, decoded_len = gen.gen_c.gen_c_expr
 is_str = gen.gen_c.gen_c_read
 write_position = gen.gen_c.gen_c_op
 
+// One point in the pattern walk. Conditions and bindings traverse the
+// same type at the same C place; carrying that pair on the receiver keeps
+// recursive lowering from relaying it through every helper.
+PatternSite = {
+    ty: TyId,
+    place: str,
+
+    at = (self: @Self, ty: TyId, place: str) PatternSite {
+        PatternSite(ty: ty, place: place)
+    }
+
+    open = (self: @Self, be :: CBackend, arm: Arm, i: usize)
+           Res<(), AllocError> {
+        cond ::= be.alloc.String().try();
+        self.cond(be, arm.pattern, cond).try();
+        (i > 0).match({
+            true  => be.chain_arm(cond.view()),
+            false => be.first_arm(cond.view()),
+        }).try();
+        self.bind(be, arm.pattern)
+    }
+
+    cond = (self: @Self, be :: CBackend, pid: PatternId, out :: String)
+           Res<(), AllocError> {
+        pat = be.tree.pattern_at(pid);
+        pat.kind.match({
+            Wild           => out.add_bytes("1"),
+            Literal(l)     => self.literal_cond(be, pat, l, out),
+            Name(p)        => self.name_cond(be, p.name, out),
+            Destructure(d) => self.destructure_cond(be, d, out),
+        }).try();
+        Ok(())
+    }
+
+    destructure_cond = (
+        self: @Self,
+        be   :: CBackend,
+        d    : Destructure,
+        out  :: String
+    ) Res<(), AllocError> {
+        member = last_segment(d.name);
+        member_of(be.check, self.ty, member).match({
+            None  => self.plain_ctor_cond(be, d, out),
+            Ok(t) => self.member_ctor_cond(be, d, t, out),
+        })
+    }
+
+    plain_ctor_cond = (self: @Self, be :: CBackend, d: Destructure,
+                       out :: String) Res<(), AllocError> {
+        self.tag_name(be, last_segment(d.name), out).try();
+        self.payload_cond(be, d, out)
+    }
+
+    member_ctor_cond = (self: @Self, be :: CBackend, d: Destructure,
+                        mty: TyId, out :: String) Res<(), AllocError> {
+        member = last_segment(d.name);
+        self.tag_name(be, member, out).try();
+        place ::= be.alloc.String().try();
+        be.set_member_place(mty, self.place, place).try();
+        self.at(mty, place.view()).leaf_cond(be, d.binder, out)
+    }
+
+    leaf_cond = (self: @Self, be :: CBackend, pid: PatternId,
+                 out :: String) Res<(), AllocError> {
+        pat     = be.tree.pattern_at(pid);
+        narrows = pat.kind.match({
+            Name(p) => be.is_variant(self.ty, last_segment(p.name)),
+            _       => false,
+        });
+        narrows.match({
+            false => Ok(()),
+            true  => self.leaf_tag_cond(be, pat, out),
+        })
+    }
+
+    leaf_tag_cond = (self: @Self, be :: CBackend, pat: Pattern,
+                     out :: String) Res<(), AllocError> {
+        self.leaf_case_cond(be, leaf_of(pat), out)
+    }
+
+    payload_cond = (self: @Self, be :: CBackend, d: Destructure,
+                    out :: String) Res<(), AllocError> {
+        be.payload_type(self.ty, last_segment(d.name)).match({
+            None  => be.bare_payload(d),
+            Ok(t) => self.nested_cond(be, d, t, out),
+        })
+    }
+
+    nested_cond = (self: @Self, be :: CBackend, d: Destructure,
+                   ty: TyId, out :: String) Res<(), AllocError> {
+        be.narrows(d.binder, ty).match({
+            false => Ok(()),
+            true  => self.write_nested_cond(be, d, ty, out),
+        })
+    }
+
+    write_nested_cond = (self: @Self, be :: CBackend, d: Destructure,
+                         ty: TyId, out :: String) Res<(), AllocError> {
+        place ::= be.alloc.String().try();
+        be.payload_place(last_segment(d.name), self.place, place).try();
+        out.add_bytes(" && ").try();
+        self.at(ty, place.view()).cond(be, d.binder, out)
+    }
+
+    literal_cond = (self: @Self, be :: CBackend, pat: Pattern,
+                    l: Literal, out :: String) Res<(), AllocError> {
+        l.kind.match({
+            Bool  => bool_cond(l.text, self.place, out),
+            Int   => equality(self.place, l.text, out),
+            Char  => equality(self.place, l.text, out),
+            Float => equality(self.place, l.text, out),
+            Str   => self.str_cond(be, pat, l, out),
+        })
+    }
+
+    str_cond = (self: @Self, be :: CBackend, pat: Pattern, l: Literal,
+                out :: String) Res<(), AllocError> {
+        be.is_str(self.ty).match({
+            false => be.unsupported_cond(pat, out),
+            true  => write_str_cond(l, self.place, out),
+        })
+    }
+
+    name_cond = (self: @Self, be :: CBackend, q: QualifiedName,
+                 out :: String) Res<(), AllocError> {
+        be.is_variant(self.ty, last_segment(q)).match({
+            true  => self.tag_cond(be, q, out),
+            false => self.set_name_cond(be, last_segment(q), out),
+        })
+    }
+
+    set_name_cond = (self: @Self, be :: CBackend, text: str,
+                     out :: String) Res<(), AllocError> {
+        member_of(be.check, self.ty, text).match({
+            None    => out.add_bytes("1"),
+            Ok(mty) => self.set_name_arm(be, mty, text, out),
+        })
+    }
+
+    set_name_arm = (self: @Self, be :: CBackend, mty: TyId, text: str,
+                    out :: String) Res<(), AllocError> {
+        leaf ::= be.leaf_name_of(mty).try();
+        self.tag_name(be, leaf, out).try();
+        place ::= be.alloc.String().try();
+        be.set_member_place(mty, self.place, place).try();
+        be.check.is_case(mty, text).try().match({
+            false => Ok(()),
+            true  => self.at(mty, place.view()).leaf_case_cond(be, text, out),
+        })
+    }
+
+    leaf_case_cond = (self: @Self, be :: CBackend, case: str,
+                      out :: String) Res<(), AllocError> {
+        qname ::= be.alloc.String().try();
+        be.enum_path(self.ty, qname).try();
+        out.fmt(" && ({}.zg_tag == ", self.place).try();
+        out.sym_variant(qname.view(), case).try();
+        out.add_bytes(")")
+    }
+
+    tag_cond = (self: @Self, be :: CBackend, q: QualifiedName,
+                out :: String) Res<(), AllocError> {
+        self.tag_name(be, last_segment(q), out)
+    }
+
+    tag_name = (self: @Self, be :: CBackend, name: str, out :: String)
+               Res<(), AllocError> {
+        qname ::= be.alloc.String().try();
+        be.enum_path(self.ty, qname).try();
+        out.fmt("({}.zg_tag == ", self.place).try();
+        out.sym_variant(qname.view(), name).try();
+        out.add_bytes(")")
+    }
+
+    bind = (self: @Self, be :: CBackend, pid: PatternId)
+           Res<(), AllocError> {
+        be.tree.pattern_at(pid).kind.match({
+            Name(p)        => self.bind_name(be, p.name),
+            Destructure(d) => self.bind_payload(be, d),
+            _              => Ok(()),
+        })
+    }
+
+    bind_name = (self: @Self, be :: CBackend, q: QualifiedName)
+                Res<(), AllocError> {
+        name = last_segment(q);
+        be.is_variant(self.ty, name).match({
+            true  => Ok(()),
+            false => be.bind_local(name, self.ty, self.place),
+        })
+    }
+
+    bind_payload = (self: @Self, be :: CBackend, d: Destructure)
+                   Res<(), AllocError> {
+        member = last_segment(d.name);
+        member_of(be.check, self.ty, member).match({
+            None    => self.enum_bind_payload(be, d),
+            Ok(mty) => self.set_bind_payload(be, d, mty),
+        })
+    }
+
+    enum_bind_payload = (self: @Self, be :: CBackend, d: Destructure)
+                        Res<(), AllocError> {
+        be.payload_type(self.ty, last_segment(d.name)).match({
+            None  => Ok(()),
+            Ok(t) => self.bind_inner(be, d, t),
+        })
+    }
+
+    set_bind_payload = (self: @Self, be :: CBackend, d: Destructure,
+                        mty: TyId) Res<(), AllocError> {
+        place ::= be.alloc.String().try();
+        be.set_member_place(mty, self.place, place).try();
+        self.at(mty, place.view()).bind(be, d.binder)
+    }
+
+    bind_inner = (self: @Self, be :: CBackend, d: Destructure, ty: TyId)
+                 Res<(), AllocError> {
+        place ::= be.alloc.String().try();
+        be.payload_place(last_segment(d.name), self.place, place).try();
+        self.at(ty, place.view()).bind(be, d.binder)
+    }
+}
+
 // match
 
 lower_match* = (
@@ -50,7 +274,8 @@ lower_match* = (
     // can leave its closed-branch slot on top of the binding stack.
     m.arms.loop((h, i, arm) {
         lmark = be.mark();
-        be.open_arm(arm, i, st, scrut.view(), ctx).try();
+        site = PatternSite(ty: st, place: scrut.view());
+        site.open(be, arm, i).try();
         be.deliver(arm.body, ctx, ty, dst).try();
         be.release(lmark).try();
     });
@@ -75,27 +300,6 @@ init_temp* = (be :: CBackend, ty: TyId, stem: str, value: str)
     name = be.temp(ty, stem).try();
     be.set_line(name.view(), value).try();
     Ok(name)
-}
-
-// `if (..) {` for the first arm, `} else if (..) {` for the rest. The
-// bindings a pattern introduces are declared INSIDE the branch, which
-// is what makes `Ok(n)` legal in one arm and unknown in the next.
-open_arm = (
-    be    :: CBackend,
-    arm   : Arm,
-    i     : usize,
-    st    : TyId,
-    scrut : str,
-    ctx   : Ctx
-) Res<(), AllocError> {
-    cond ::= be.alloc.String().try();
-    be.arm_cond(arm.pattern, st, scrut, cond).try();
-    (i > 0).match({
-        true  => be.chain_arm(cond.view()),
-        false => be.first_arm(cond.view()),
-    }).try();
-    be.arm_bind(arm.pattern, st, scrut, ctx).try();
-    Ok(());
 }
 
 first_arm = (be :: CBackend, cond: str) Res<(), AllocError> {
@@ -140,122 +344,11 @@ write_unreachable = (be :: CBackend, node: Expr, m: Match)
 
 // patterns
 
-arm_cond = (
-    be    :: CBackend,
-    pid   : PatternId,
-    st    : TyId,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    pat = be.tree.pattern_at(pid);
-    pat.kind.match({
-        Wild           => out.add_bytes("1"),
-        Literal(l)     => be.literal_cond(pat, l, st, scrut, out),
-        Name(p)        => be.name_cond(p.name, st, scrut, out),
-        Destructure(d) => be.destructure_cond(d, st, scrut, out),
-    }).try();
-    Ok(());
-}
-
-// A payload pattern that is a literal narrows the arm; testing only the
-// tag would be the worst kind of wrong: `Ok('\n')` and `Ok('\\')` would
-// compile to the same (valid) condition, the first swallowing every
-// `Ok`. So the tag and the payload's own test (`literal_cond`, one
-// level down) are written together.
-// AGAINST A SET there is one reading before that: when the ctor's name
-// is a MEMBER whose own enum declares what the binder spells, the arm
-// is two tag tests — the set's for `Member`, then the member struct's
-// for the leaf. Sema normalised this arm to `Member(wild)`; this
-// function is why the spelling still narrows anyway (issue #735).
-destructure_cond = (
-    be    :: CBackend,
-    d     : Destructure,
-    st    : TyId,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    member = last_segment(d.name);
-    member_of(be.check, st, member).match({
-        None  => be.plain_ctor_cond(d, st, scrut, out),
-        Ok(t) => be.member_ctor_cond(d, t, st, scrut, out),
-    })
-}
-
-// A plain ctor tests its own tag, then its payload one level down.
-plain_ctor_cond = (
-    be    :: CBackend,
-    d     : Destructure,
-    st    : TyId,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    be.tag_name(st, last_segment(d.name), scrut, out).try();
-    be.payload_cond(d, st, scrut, out)
-}
-
-// A set member tests the set tag before testing inside its payload.
-member_ctor_cond = (
-    be    :: CBackend,
-    d     : Destructure,
-    mty   : TyId,
-    st    : TyId,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    member = last_segment(d.name);
-    be.tag_name(st, member, scrut, out).try();
-    place ::= be.alloc.String().try();
-    be.set_member_place(mty, scrut, place).try();
-    be.leaf_cond(d.binder, mty, place.view(), out)
-}
-
-// A case name narrows the member; a binder or wildcard does not.
-leaf_cond = (
-    be    :: CBackend,
-    pid   : PatternId,
-    mty   : TyId,
-    place : str,
-    out   :: String
-) Res<(), AllocError> {
-    pat     = be.tree.pattern_at(pid);
-    narrows = pat.kind.match({
-        Name(p) => be.is_variant(mty, last_segment(p.name)),
-        _       => false,
-    });
-    narrows.match({
-        false => Ok(()),
-        true  => be.leaf_tag_cond(pat, mty, place, out),
-    })
-}
-
-// The constant is spelled at the member's type, matching its enum tags.
-leaf_tag_cond = (
-    be    :: CBackend,
-    pat   : Pattern,
-    mty   : TyId,
-    place : str,
-    out   :: String
-) Res<(), AllocError> {
-    be.leaf_case_cond(mty, leaf_of(pat), place, out)
-}
-
 // Only a narrowing Name reaches here, so its last segment is the case.
 leaf_of = (pat: Pattern) str {
     pat.kind.match({
         Name(p) => last_segment(p.name),
         _       => "",
-    })
-}
-payload_cond = (
-    be    :: CBackend,
-    d     : Destructure,
-    st    : TyId,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    be.payload_type(st, last_segment(d.name)).match({
-        None  => be.bare_payload(d),
-        Ok(t) => be.nested_cond(d, t, scrut, out),
     })
 }
 
@@ -269,32 +362,6 @@ bare_payload = (be :: CBackend, d: Destructure) Res<(), AllocError> {
         Literal(_) => be.report_nested(inner),
         _          => Ok(()),
     })
-}
-
-nested_cond = (
-    be    :: CBackend,
-    d     : Destructure,
-    t     : TyId,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    be.narrows(d.binder, t).match({
-        false => Ok(()),
-        true  => be.write_nested_cond(d, t, scrut, out),
-    })
-}
-
-write_nested_cond = (
-    be    :: CBackend,
-    d     : Destructure,
-    t     : TyId,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    place ::= be.alloc.String().try();
-    be.payload_place(last_segment(d.name), scrut, place).try();
-    out.add_bytes(" && ").try();
-    be.arm_cond(d.binder, t, place.view(), out)
 }
 
 // Whether a pattern tests anything at all. A wildcard and a binder match
@@ -343,26 +410,6 @@ report_nested = (be :: CBackend, inner: Pattern) Res<(), AllocError> {
     )
 }
 
-// `true =>` is the scrutinee, `false =>` is its negation, and an
-// integer or character pattern is an equality. A string is the one
-// pattern that is not a scalar, so it is not an operator.
-literal_cond = (
-    be    :: CBackend,
-    pat   : Pattern,
-    l     : Literal,
-    st    : TyId,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    l.kind.match({
-        Bool  => bool_cond(l.text, scrut, out),
-        Int   => equality(scrut, l.text, out),
-        Char  => equality(scrut, l.text, out),
-        Float => equality(scrut, l.text, out),
-        Str   => be.str_cond(pat, l, st, scrut, out),
-    })
-}
-
 bool_cond = (text: str, scrut: str, out :: String) Res<(), AllocError> {
     text.eq("true").match({
         true  => out.add_bytes(scrut),
@@ -376,27 +423,6 @@ negate = (scrut: str, out :: String) Res<(), AllocError> {
 
 equality = (scrut: str, text: str, out :: String) Res<(), AllocError> {
     out.fmt("({scrut} == {text})")
-}
-
-// A `str` is a pointer and a length, so `==` would compare a STRUCT
-// against a `char *` — invalid C, once emitted silently. Compared the
-// way `str.impl(Eq)` does: LENGTH first, then bytes. Length first is
-// correctness, not optimisation — comparing over the shorter length is
-// the classic bug, and a prefix is not the whole.
-// `.data` and `.len` are spelled the runtime floor's way, not the
-// mangler's: `zg_str` is the floor's struct.
-str_cond = (
-    be    :: CBackend,
-    pat   : Pattern,
-    l     : Literal,
-    st    : TyId,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    be.is_str(st).match({
-        false => be.unsupported_cond(pat, out),
-        true  => write_str_cond(l, scrut, out),
-    })
 }
 
 write_str_cond = (l: Literal, scrut: str, out :: String)
@@ -437,72 +463,6 @@ unsupported_cond = (be :: CBackend, pat: Pattern, out :: String)
     out.add_bytes("0")
 }
 
-// A bare name is a nullary VARIANT when the scrutinee's type has one
-// by that name, and a BINDER otherwise. "They are the same tokens, and
-// which one it is depends on what is in scope" — here, on what the
-// scrutinee is. Against a SET there is one more reading before the
-// binder: a member or a leaf of a member, spelled flat — the same arm
-// `member_ctor_cond` tests when it is written qualified.
-name_cond = (
-    be    :: CBackend,
-    q     : QualifiedName,
-    st    : TyId,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    be.is_variant(st, last_segment(q)).match({
-        true  => be.tag_cond(q, st, scrut, out),
-        false => be.set_name_cond(st, last_segment(q), scrut, out),
-    })
-}
-
-set_name_cond = (
-    be    :: CBackend,
-    st    : TyId,
-    text  : str,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    member_of(be.check, st, text).match({
-        None    => out.add_bytes("1"),
-        Ok(mty) => be.set_name_arm(st, mty, text, scrut, out),
-    })
-}
-
-// A bare member tests its outer tag; a case also tests the inner tag.
-set_name_arm = (
-    be    :: CBackend,
-    st    : TyId,
-    mty   : TyId,
-    text  : str,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    leaf ::= be.leaf_name_of(mty).try();
-    be.tag_name(st, leaf, scrut, out).try();
-    place ::= be.alloc.String().try();
-    be.set_member_place(mty, scrut, place).try();
-    be.check.is_case(mty, text).try().match({
-        false => Ok(()),
-        true  => be.leaf_case_cond(mty, text, place.view(), out),
-    })
-}
-
-// One inner tag test from a flat case spelling.
-leaf_case_cond = (
-    be    :: CBackend,
-    mty   : TyId,
-    case  : str,
-    place : str,
-    out   :: String
-) Res<(), AllocError> {
-    qname ::= be.alloc.String().try();
-    be.enum_path(mty, qname).try();
-    out.fmt(" && ({place}.zg_tag == ").try();
-    out.sym_variant(qname.view(), case).try();
-    out.add_bytes(")")
-}
-
 // The tag test and sema read a set member's name from the same declaration.
 leaf_name_of = (be :: CBackend, mty: TyId) Res<str, AllocError> {
     qname ::= be.alloc.String().try();
@@ -522,112 +482,6 @@ last_segment_str = (qname: String) str {
         i = i + 1;
     });
     qname.view().slice(dot, qname.len())
-}
-
-tag_cond = (
-    be    :: CBackend,
-    q     : QualifiedName,
-    st    : TyId,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    be.tag_name(st, last_segment(q), scrut, out)
-}
-
-// A bare case name has no qualified pattern to provide its tag spelling.
-tag_name = (
-    be    :: CBackend,
-    st    : TyId,
-    name  : str,
-    scrut : str,
-    out   :: String
-) Res<(), AllocError> {
-    qname ::= be.alloc.String().try();
-    be.enum_path(st, qname).try();
-    out.fmt("({scrut}.zg_tag == ").try();
-    out.sym_variant(qname.view(), name).try();
-    out.add_bytes(")")
-}
-
-// The bindings a pattern introduces, declared inside the branch that
-// tested it.
-arm_bind = (be :: CBackend, pid: PatternId, st: TyId, scrut: str, ctx: Ctx)
-           Res<(), AllocError> {
-    be.tree.pattern_at(pid).kind.match({
-        Name(p)        => bind_name(be, p.name, st, scrut, ctx),
-        Destructure(d) => bind_payload(be, d, st, scrut, ctx),
-        _              => Ok(()),
-    })
-}
-
-bind_name = (
-    be    :: CBackend,
-    q     : QualifiedName,
-    st    : TyId,
-    scrut : str,
-    ctx   : Ctx
-) Res<(), AllocError> {
-    name = last_segment(q);
-    be.is_variant(st, name).match({
-        true  => Ok(()),
-        false => be.bind_local(name, st, scrut),
-    })
-}
-
-// `Ok(n)` binds `n` to the payload under the variant's member;
-// `Left(Full(n))` binds `n` one level further down, walked by
-// `arm_bind` again — a nested binder the walk never reached is a name
-// the arm body cannot resolve. A literal or wildcard payload binds
-// nothing; `arm_cond` has already turned it into a test.
-// `Member(..)` against a SET binds from the set's own payload struct:
-// the place is spelled by `sym_union_member` at the set, and the inner
-// pattern binds at the member's type. `Member(pe)` declares `pe` there,
-// which is how the working two-level spelling has always bound.
-bind_payload = (
-    be    :: CBackend,
-    d     : Destructure,
-    st    : TyId,
-    scrut : str,
-    ctx   : Ctx
-) Res<(), AllocError> {
-    member = last_segment(d.name);
-    member_of(be.check, st, member).match({
-        None    => be.enum_bind_payload(d, st, scrut, ctx),
-        Ok(mty) => be.set_bind_payload(d, st, mty, scrut, ctx),
-    })
-}
-
-enum_bind_payload = (
-    be    :: CBackend,
-    d     : Destructure,
-    st    : TyId,
-    scrut : str,
-    ctx   : Ctx
-) Res<(), AllocError> {
-    be.payload_type(st, last_segment(d.name)).match({
-        None  => Ok(()),
-        Ok(t) => be.bind_inner(d, t, scrut, ctx),
-    })
-}
-
-set_bind_payload = (
-    be    :: CBackend,
-    d     : Destructure,
-    st    : TyId,
-    mty   : TyId,
-    scrut : str,
-    ctx   : Ctx
-) Res<(), AllocError> {
-    place ::= be.alloc.String().try();
-    be.set_member_place(mty, scrut, place).try();
-    be.arm_bind(d.binder, mty, place.view(), ctx)
-}
-
-bind_inner = (be :: CBackend, d: Destructure, t: TyId, scrut: str, ctx: Ctx)
-             Res<(), AllocError> {
-    place ::= be.alloc.String().try();
-    be.payload_place(last_segment(d.name), scrut, place).try();
-    be.arm_bind(d.binder, t, place.view(), ctx)
 }
 
 // A C declaration for a pattern binding, plus the same binding in
