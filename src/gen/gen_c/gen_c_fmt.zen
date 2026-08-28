@@ -1,31 +1,13 @@
 // src/gen/gen_c/gen_c_fmt.zen
-// `alloc.String("{}/{}.zen", root, name)` — the allocating format door.
-// `text_string.zen` declares it with no body: "the call is expanded
-// where it is written, into this module's empty form followed by the
-// same expansion `add` gets". Why a door has no body at all — the
-// variadic parameter, and `{}` resolving by the argument's type — is
-// `gen_c_sink.zen`'s head.
-// Emitting the call instead is a LINKER error, not a wrong answer: a
-// bodyless declaration defines no symbol. `cc` reported seven of them
-// against stage 2, all in `zen_build.zen`'s module-path resolution — a
-// compiler that skipped this door could not find its own source files.
-// What is left here is the buffer, not the format: this door is the
-// empty form followed by exactly the pieces `out.add(fmt, args)`
-// writes; the walk, writers and record over the buffer are
-// `gen_c_sink.zen`'s. It held a second walk once, and the two drifted —
-// that one wrote a `str` and reported every other hole, so
-// `alloc.String("point {}", p)` was a diagnostic while `out.add("point
-// {}", p)` wrote the point.
-// What the two doors genuinely do not share is the ERROR, which is why
-// they are still two files: a write answers `Res<(), WriteError>`, this
-// answers `Res<String, AllocError>`, with no conversion between them —
-// see `write_failure_arm`, the one point where the sets meet.
+// Lowers `alloc.String(fmt, args...)`: make the empty String, then use
+// the shared sink-door walk to fill it. The walk remains in gen_c_sink;
+// only its WriteError-to-AllocError failure arm belongs here.
 
-ExprId, Decl, Function, Call = std.ast
+ExprId, Function, Call = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
-TyId, TyRes = sema.sema_ty
+TyId = sema.sema_ty
 Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
@@ -41,25 +23,26 @@ is_sink_door, lower_sink_door, bodyless = gen.gen_c.gen_c_sink
 last_is_variadic, call_symbol, lower_pieces_into = gen.gen_c.gen_c_sink
 write_jump_unless_ok, write_goto, write_done = gen.gen_c.gen_c_sink
 
-// recognising the door
+// Values that remain unchanged while one allocating door is lowered.
+// Keeping them together prevents the private lowering chain from
+// repeating six independent parameters.
+FormatCall = {
+    id: ExprId,
+    c: Call,
+    d: Def,
+    f: Function,
+    recv: Res<ExprId>,
+    ctx: Ctx,
+}
 
-// THE TWO FORMAT DOORS, asked as one question because `gen_c_call.zen`
-// asks it once: `alloc.String(fmt, args)` is this file's, `out.add(fmt,
-// args)` is `gen_c_sink.zen`'s.
 is_format_door* = (be: CBackend, d: Def, f: Function) bool {
     be.is_alloc_door(d, f) || be.is_sink_door(d, f)
 }
 
-// The bodyless `String(a: Alloc, fmt: str, args: ...)` and nothing
-// else. Asked of the DECLARATION rather than of the name: a module's
-// own three-parameter `String` with a body is an ordinary function and
-// is called like one.
 is_alloc_door = (be: CBackend, d: Def, f: Function) bool {
     d.name.eq("String") && bodyless(f) && (f.params.len == 3)
         && be.last_is_variadic(f)
 }
-
-// the expansion
 
 lower_format_door* = (
     be   :: CBackend,
@@ -71,36 +54,29 @@ lower_format_door* = (
     ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
+    site = FormatCall(id: id, c: c, d: d, f: f, recv: recv, ctx: ctx);
     be.is_sink_door(d, f).match({
         true  => be.lower_sink_door(id, c, d, f, recv, ctx, out),
-        false => be.lower_alloc_door(id, c, d, f, recv, ctx, out),
+        false => be.lower_alloc_door(site, out),
     })
 }
 
-// A temporary at the call's own return type, filled by the empty form
-// and then written into, and a label every failing write jumps to. The
-// temporary IS the answer: `add_bytes` writes the `Ok` payload in
-// place, so there is no second buffer to copy out of.
 lower_alloc_door = (
     be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
-    f    : Function,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
+    site : FormatCall,
     out  :: String
 ) Res<(), AllocError> {
-    be.empty_form(d).try().match({
-        None  => be.unsupported(id, "a format door with no empty form", out),
-        Ok(e) => be.lower_with_empty(id, c, d, f, e, recv, ctx, out),
+    be.empty_form(site.d).try().match({
+        None  => be.unsupported(
+            site.id,
+            "a format door with no empty form",
+            out
+        ),
+        Ok(e) => be.lower_with_empty(site, e, out),
     })
 }
 
-// The one-parameter `String` beside the door, in the door's OWN module.
-// Reached by declaration, not the caller's imports: the expansion is
-// the backend's, and a caller writing `alloc.String("{}", x)` never
-// named the empty form and must not have to import it.
+// Find the one-parameter String constructor in the door's own module.
 empty_form = (be :: CBackend, d: Def) Res<Res<Def>, AllocError> {
     found ::= be.alloc.Vec<Def>();
     be.check.world.defs_of(d.id.module.to_usize(), "String", found).try();
@@ -113,50 +89,35 @@ keep_empty = (be :: CBackend, x: Def, out :: Vec<Def>)
              Res<(), AllocError> {
     decl_at(be.tree, x.id).match({
         None    => Ok(()),
-        Ok(dec) => keep_empty_decl(dec, x, out),
-    })
-}
-
-keep_empty_decl = (dec: Decl, x: Def, out :: Vec<Def>)
-                  Res<(), AllocError> {
-    dec.kind.match({
-        Function(fn) => keep_one_param(fn, x, out),
-        _            => Ok(()),
-    })
-}
-
-keep_one_param = (fn: Function, x: Def, out :: Vec<Def>)
-                 Res<(), AllocError> {
-    ((fn.params.len == 1) && (bodyless(fn) == false)).match({
-        false => Ok(()),
-        true  => out.add(x),
+        Ok(dec) => dec.kind.match({
+            Function(fn) => (
+                (fn.params.len == 1) && (bodyless(fn) == false)
+            ).match({
+                false => Ok(()),
+                true  => out.add(x),
+            }),
+            _            => Ok(()),
+        }),
     })
 }
 
 lower_with_empty = (
     be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
-    f    : Function,
+    site : FormatCall,
     e    : Def,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
-    ret = be.door_return(d, f).try();
+    ret = be.door_return(site.d, site.f).try();
     be.check.types.at(ret).match({
-        Res(r) => write_door(be, id, c, d, e, r, ret, recv, ctx, out),
+        Res(r) => be.write_door(site, e, r.value, ret, out),
         _      => be.unsupported(
-            id,
+            site.id,
             "a format door that does not return a Res",
             out
         ),
     })
 }
 
-// The door's declared return type, read in its own module. It names no
-// type parameter, so there is nothing to substitute.
 door_return = (be :: CBackend, d: Def, f: Function) Res<TyId, AllocError> {
     dctx = Ctx(
         module: d.id.module.to_usize(),
@@ -173,44 +134,35 @@ door_return = (be :: CBackend, d: Def, f: Function) Res<TyId, AllocError> {
 
 write_door = (
     be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
+    site : FormatCall,
     e    : Def,
-    r    : TyRes,
+    buf  : TyId,
     ret  : TyId,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
     out  :: String
 ) Res<(), AllocError> {
     tmp ::= be.fresh_name("t").try();
     be.declare_temp(ret, tmp.view()).try();
     done = be.next_tmp();
-    be.write_empty_call(e, ret, c, recv, ctx, tmp.view()).try();
+    be.write_empty_call(site, e, ret, tmp.view()).try();
     be.write_jump_unless_ok(tmp.view(), done).try();
-    be.write_buffer_pieces(id, c, r, ret, tmp.view(), done, recv, ctx).try();
+    be.write_buffer_pieces(site, buf, ret, tmp.view(), done).try();
     be.write_done(done).try();
     out.add_bytes(tmp.view())
 }
 
-// `zg_tN = <empty>(<alloc>);`
 write_empty_call = (
     be   :: CBackend,
+    site : FormatCall,
     e    : Def,
     ret  : TyId,
-    c    : Call,
-    recv : Res<ExprId>,
-    ctx  : Ctx,
     tmp  : str
-)
-                   Res<(), AllocError> {
-    sym ::= be.alloc.String().try();
-    be.call_symbol(e, sym).try();
-    line ::= be.alloc.String().try();
-    line.fmt("{tmp} = {}(", sym.view()).try();
-    recv_arg(c, recv).match({
+) Res<(), AllocError> {
+    line ::= be.alloc.String("{tmp} = ").try();
+    be.call_symbol(e, line).try();
+    line.fmt("(").try();
+    recv_arg(site.c, site.recv).match({
         None  => Ok(()),
-        Ok(a) => be.write_alloc(e, a, ctx, line),
+        Ok(a) => be.write_alloc(e, a, site.ctx, line),
     }).try();
     be.fmt("{});\n", line.view())
 }
@@ -225,65 +177,38 @@ write_alloc = (be :: CBackend, e: Def, a: ExprId, ctx: Ctx, out :: String)
     expr(be, a, ctx, want, out)
 }
 
-// the pieces
-// Not walked here: `gen_c_sink.zen` walks the format and picks the
-// writer for every hole, and this door's buffer IS a Sink — so the
-// pieces are that door's, with a different sink under them (see the
-// file header for the drift this once caused).
-
 write_buffer_pieces = (
     be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    r    : TyRes,
+    site : FormatCall,
+    buf  : TyId,
     ret  : TyId,
     tmp  : str,
-    done : usize,
-    recv : Res<ExprId>,
-    ctx  : Ctx
+    done : usize
 ) Res<(), AllocError> {
-    addr ::= be.alloc.String().try();
-    ok_payload(be, tmp, addr).try();
+    addr ::= be.alloc.String("&({tmp}.zg_data.").try();
+    addr.sym_member("Ok").try();
+    addr.fmt(")").try();
     fail  = be.next_tmp();
     wrote = be.lower_pieces_into(
-        id,
-        c,
+        site.id,
+        site.c,
         addr.view(),
-        r.value,
+        buf,
         fail,
-        recv,
-        ctx
+        site.recv,
+        site.ctx
     ).try();
     wrote.match({
         false => be.report_expr(
-            id,
+            site.id,
             GenFault.Unsupported("a format door with no sink")
         ),
         true  => be.write_failure_arm(ret, tmp, fail, done),
     })
 }
 
-// `&zg_tN.zg_data.<Ok>` — the String the writes go into, taken by
-// address because a sink record holds a pointer to its receiver.
-ok_payload = (be :: CBackend, tmp: str, out :: String)
-             Res<(), AllocError> {
-    ok ::= be.alloc.String().try();
-    ok.sym_member("Ok").try();
-    out.fmt("&({tmp}.zg_data.{})", ok.view())
-}
-
-// `goto done; fail: ; zg_tN = Err(OutOfMemory);`
-// The two error sets the header names meet here and nowhere else, with
-// no conversion between them. So the reason is NAMED rather than
-// carried: the only thing that can go wrong writing into a String this
-// door just made is that it couldn't GROW, which is exactly
-// `OutOfMemory` — `AllocError`'s one variant. The bootstrapper names it
-// the same way at `full_of`.
-// Widening the door's declared error is not the alternative: 112
-// corpus mains return `Res<i32, AllocError>` and call this, so a door
-// answering `WriteError` would need a narrowing at every one of them.
-// The conversion sits on the failing path only — a succeeding walk
-// jumps over it, so nothing tests an already-`Ok` value.
+// String writes can fail here only by growing, so the sink door's
+// failure becomes AllocError.OutOfMemory on the failing path.
 write_failure_arm = (
     be   :: CBackend,
     ret  : TyId,
