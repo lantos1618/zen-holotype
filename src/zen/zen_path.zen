@@ -84,14 +84,11 @@ parent_of* = (path: str) str {
 // regardless of disk, so a home directory named after a file inside it
 // cannot walk a build out of the project.
 //
-// A directory holding a `build.zen` is ALSO root evidence, and the
-// second rule climbs where the first stopped short: `example/src` holds
-// no `src.zen`, so a file opened there roots at `example/src` while the
-// tree carrying `std` sits at `example` — the prelude never seeds and
-// every imported name comes back undefined. The editors already mark a
-// project this way (`editors/nvim/zen.lua`'s `root_markers`), so the
-// compiler reads the same marker or the two disagree about one fact.
-// Toward the floor, never past it; when no `build.zen` answers, the
+// A `build.zen` marks the project. Its conventional `src/` child marks
+// the compilation root when the open file is below that child; otherwise
+// the project itself is the root. This distinction matters in this tree:
+// resolving `std.text` from `<repo>/src/...` against `<repo>` probes one
+// directory too high. Toward the floor, never past it; with no marker the
 // first rule's answer stands.
 root_for* = (env: Env, a: Alloc, floor: str, path: str) str {
     dir ::= parent_of(path);
@@ -106,9 +103,22 @@ root_for* = (env: Env, a: Alloc, floor: str, path: str) str {
     );
     (marked.len >= floor.len && !marked.is_empty()
      && holds_build_zen(env, a, marked)).match({
-        true  => marked,
+        true  => source_root(a, marked, path),
         false => settled,
     });
+}
+
+// A marker describes the project, not necessarily its module namespace.
+// Keep the convention here beside the rest of the path rules so every LSP
+// query makes the same choice.
+source_root = (a: Alloc, project: str, path: str) str {
+    a.String("{}/src", project).match({
+        Err(_)  => project,
+        Ok(src) => under(src.view(), path).match({
+            true  => src.view(),
+            false => project,
+        }),
+    })
 }
 
 // `<dir>/<basename>.zen` — the folder-root spelling, asked of the disk.
@@ -144,13 +154,16 @@ holds_build_zen = (env: Env, a: Alloc, dir: str) bool {
 // "qualifies". The separator test is what keeps `/a/bc/d.zen` from
 // passing as under `/a/b`.
 relative_to* = (root: str, path: str) str {
-    under = path.len > root.len + 1
-        && path.slice(0, root.len).eq(root)
-        && path.index(root.len) == '/';
-    under.match({
+    under(root, path).match({
         true  => path.slice(root.len + 1, path.len),
         false => path,
     });
+}
+
+under = (root: str, path: str) bool {
+    path.len > root.len + 1
+        && path.slice(0, root.len).eq(root)
+        && path.index(root.len) == '/'
 }
 
 // `.zen`, written here since `module_name` is the one place that takes
@@ -221,7 +234,8 @@ unit_at* = (a: Alloc, root: str, path: str) Res<Unit, AllocError> {
 // diagnostic should carry.
 candidate* = (env: Env, a: Alloc, root: str, name: str) Res<Unit, AllocError> {
     flat ::= a.String("{}/{}.zen", root, name).try();
-    nest ::= a.String("{}/{}/{}.zen", root, name, name).try();
+    last = name.slice(name.after_last_slash(), name.len);
+    nest ::= a.String("{}/{}/{}.zen", root, name, last).try();
     take_flat = env.fs.exists(flat.view()) || !env.fs.exists(nest.view());
     take_flat.match({
         true  => unit_at(a, root, flat.view()),
