@@ -16,7 +16,7 @@
 // Fail-open on an unknown type, for `sema_own.zen`'s reason.
 
 Expr, Bind, Impl, Span = std.ast
-Call, Record = std.ast.ast_node
+Record = std.ast.ast_node
 ExprId = std.ast.ast_id
 AllocError = std.mem
 Vec = std.collections
@@ -74,41 +74,6 @@ drop_copy_of_elem = (c :: Checker, o :: Own, id: ExprId)
         Name(n) => c.refuse_if_drop(node.span, var_type(o, n.text), n.text),
         _       => Ok(()),
     })
-}
-
-// A CONSTRUCTION CALL copies every argument's bytes into the new value,
-// so a live Drop place in one of them is `g = f` one node deeper.
-// ONLY a construction: `Keeper(n: v)`, `Ok(v)` / `Err(e)`, and a payload
-// variant (`Slot.Big(cell)`). A plain call's parameters BORROW per
-// DESIGN.md, so `sink(w)` on a Drop value stays legal — the receiver
-// rides outside `k.args`, and the callee's frame never owns a borrow.
-drop_copy_of_ctor* = (c :: Checker, o :: Own, id: ExprId, k: Call)
-                      Res<(), AllocError> {
-    c.tree.expr_at(k.callee).kind.match({
-        Name(n)   => {
-            is_res = n.text.eq("Ok") || n.text.eq("Err");
-            ((is_res || c.is_construction(id)) == false).match({
-                true  => Ok(()),
-                false => c.drop_copy_of_args(o, k),
-            })
-        },
-        Access(a) => {
-            ty    = c.place_type(o, a.base);
-            drops = c.is_drop_type(ty).try();
-            drops.match({
-                false => Ok(()),
-                true  => c.drop_copy_of_args(o, k),
-            })
-        },
-        _         => Ok(()),
-    })
-}
-
-drop_copy_of_args = (c :: Checker, o :: Own, k: Call)
-                     Res<(), AllocError> {
-    ids ::= c.alloc.Vec<ExprId>();
-    k.args.loop((h, a) { ids.add(a.value).try() });
-    c.drop_copy_of_elems(o, ids)
 }
 
 // A name this frame does not bind is a global or a constant, and it is
