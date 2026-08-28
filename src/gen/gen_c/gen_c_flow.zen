@@ -46,11 +46,8 @@ lower_match* = (
     scrut ::= be.fresh_name("s").try();
     be.declare_temp(st, scrut.view()).try();
     be.deliver(m.scrutinee, ctx, st, Dest.Into(scrut.view())).try();
-    // Each arm's pattern bindings live only while the arm's body is
-    // lowered: the C declarations sit inside the branch's braces, so the
-    // scope must not outlive them either — or a binder shadowing an
-    // outer local keeps its renamed slot on top of the stack and every
-    // later use of the name reads a variable declared in a closed block.
+    // Pattern bindings share the C branch's lifetime; otherwise a shadow
+    // can leave its closed-branch slot on top of the binding stack.
     m.arms.loop((h, i, arm) {
         lmark = be.mark();
         be.open_arm(arm, i, st, scrut.view(), ctx).try();
@@ -184,8 +181,7 @@ destructure_cond = (
     })
 }
 
-// The ordinary reading: the ctor names a case of the scrutinee's own
-// type. One tag test, then the payload's test one level down.
+// A plain ctor tests its own tag, then its payload one level down.
 plain_ctor_cond = (
     be    :: CBackend,
     d     : Destructure,
@@ -197,10 +193,7 @@ plain_ctor_cond = (
     be.payload_cond(d, st, scrut, out)
 }
 
-// `Member(leaf)` against a set: the set's tag test, then — where the
-// payload would be read — the member struct's own tag test.
-// `Member(pe)` lands here too and its binder arm adds no test of its
-// own, so the two spellings lower alike.
+// A set member tests the set tag before testing inside its payload.
 member_ctor_cond = (
     be    :: CBackend,
     d     : Destructure,
@@ -216,9 +209,7 @@ member_ctor_cond = (
     be.leaf_cond(d.binder, mty, place.view(), out)
 }
 
-// The inner pattern's test against the member's type. A name that is a
-// case of it appends the member's tag test; anything else (`pe`, `_`)
-// narrows nothing — the binding side decides what those mean.
+// A case name narrows the member; a binder or wildcard does not.
 leaf_cond = (
     be    :: CBackend,
     pid   : PatternId,
@@ -237,10 +228,7 @@ leaf_cond = (
     })
 }
 
-// The member's own tag test: `place.zg_tag == <member's enum>.<Leaf>`.
-// The constant is spelled at the MEMBER's type — the same spelling
-// `sym_variant` produces for a plain match on that member — so it is
-// exactly what `write_enum_tags` emitted.
+// The constant is spelled at the member's type, matching its enum tags.
 leaf_tag_cond = (
     be    :: CBackend,
     pat   : Pattern,
@@ -248,20 +236,10 @@ leaf_tag_cond = (
     place : str,
     out   :: String
 ) Res<(), AllocError> {
-    qname ::= be.alloc.String().try();
-    be.enum_path(mty, qname).try();
-    tag ::= be.alloc.String().try();
-    tag.sym_variant(qname.view(), leaf_of(pat)).try();
-    out.fmt(" && ({place}.zg_tag == {})", tag.view())
+    be.leaf_case_cond(mty, leaf_of(pat), place, out)
 }
 
-// The payload's test is `arm_cond` again, one level down, against the
-// payload's place and type. Depth is not a special form: `Left(Full(n))`
-// is two tag tests for the same reason `Ok(3)` is a tag test and a
-// comparison.
-
-// What a narrowing inner name spells. Only a Name pattern reaches
-// `leaf_cond` with `narrows` true, so the last segment IS the case.
+// Only a narrowing Name reaches here, so its last segment is the case.
 leaf_of = (pat: Pattern) str {
     pat.kind.match({
         Name(p) => last_segment(p.name),
@@ -352,8 +330,7 @@ set_member_place = (
     scrut  : str,
     out    :: String
 ) Res<(), AllocError> {
-    out.add_bytes(scrut).try();
-    out.add_bytes(".zg_data.").try();
+    out.fmt("{scrut}.zg_data.").try();
     sym_union_member(out, be.types(), be.world(), member).try();
     Ok(())
 }
@@ -492,9 +469,7 @@ set_name_cond = (
     })
 }
 
-// The bare arm's test: the member's tag, then — only when the written
-// name is a CASE of that member — the leaf's. A bare MEMBER name adds
-// no second test, exactly as `Member(pe)` adds none one level in.
+// A bare member tests its outer tag; a case also tests the inner tag.
 set_name_arm = (
     be    :: CBackend,
     st    : TyId,
@@ -513,8 +488,7 @@ set_name_arm = (
     })
 }
 
-// One leaf tag test from a bare CASE name — `leaf_tag_cond` without a
-// pattern, because a flat spelling carries none.
+// One inner tag test from a flat case spelling.
 leaf_case_cond = (
     be    :: CBackend,
     mty   : TyId,
@@ -524,22 +498,19 @@ leaf_case_cond = (
 ) Res<(), AllocError> {
     qname ::= be.alloc.String().try();
     be.enum_path(mty, qname).try();
-    tag ::= be.alloc.String().try();
-    tag.sym_variant(qname.view(), case).try();
-    out.fmt(" && ({place}.zg_tag == {})", tag.view())
+    out.fmt(" && ({place}.zg_tag == ").try();
+    out.sym_variant(qname.view(), case).try();
+    out.add_bytes(")")
 }
 
-// The bare name a MEMBER of a set is spelled by — the tag test's second
-// half and `sema_match.member_leaf`'s ctor read the same declaration.
+// The tag test and sema read a set member's name from the same declaration.
 leaf_name_of = (be :: CBackend, mty: TyId) Res<str, AllocError> {
     qname ::= be.alloc.String().try();
     be.enum_path(mty, qname).try();
     Ok(last_segment_str(qname))
 }
 
-// THE LAST dot, not the first: the leaf name follows the final
-// separator, as `sema_def.last_segment` spells it. A first-dot stop
-// answered `core.io.IoError` for a two-module path.
+// Use the last dot: a first-dot stop answered `core.io.IoError`.
 last_segment_str = (qname: String) str {
     dot      ::= 0;
     i: usize ::= 0;
@@ -563,8 +534,7 @@ tag_cond = (
     be.tag_name(st, last_segment(q), scrut, out)
 }
 
-// The tag test from a bare case NAME — `Member.Leaf`'s outer half has a
-// member name and no qualified pattern to spell it with.
+// A bare case name has no qualified pattern to provide its tag spelling.
 tag_name = (
     be    :: CBackend,
     st    : TyId,
@@ -574,9 +544,9 @@ tag_name = (
 ) Res<(), AllocError> {
     qname ::= be.alloc.String().try();
     be.enum_path(st, qname).try();
-    tag ::= be.alloc.String().try();
-    tag.sym_variant(qname.view(), name).try();
-    out.fmt("({scrut}.zg_tag == {})", tag.view())
+    out.fmt("({scrut}.zg_tag == ").try();
+    out.sym_variant(qname.view(), name).try();
+    out.add_bytes(")")
 }
 
 // The bindings a pattern introduces, declared inside the branch that
@@ -666,10 +636,10 @@ bind_local = (be :: CBackend, name: str, ty: TyId, init: str)
              Res<(), AllocError> {
     n = be.declare(name, ty, false).try();
     be.check.bind(name, ty, false, false).try();
-    cname ::= be.alloc.String().try();
-    sym_local(cname, name, n).try();
     decl ::= be.alloc.String().try();
-    be.declarator(ty, cname.view(), decl).try();
+    be.ctype(ty, decl).try();
+    decl.add_bytes(" ").try();
+    sym_local(decl, name, n).try();
     be.fmt("{} = {init};\n", decl.view())
 }
 
@@ -844,44 +814,36 @@ first_payload = (be :: CBackend, found: Vec<TyId>) Res<TyId> {
     })
 }
 
-// Result construction belongs to expression flow, not to any capability.
-// Floors choose a variant and payload; these helpers own its C shape.
+// Floors choose a result variant and payload; flow owns its C shape.
 write_assign_none* = (be :: CBackend, ret: TyId, dst: str)
                     Res<(), AllocError> {
-    value ::= be.alloc.String().try();
-    be.write_res_head(ret, "None", value).try();
-    value.add_bytes(" })").try();
-    be.set_line(dst, value.view())
+    value ::= be.res_head(ret, "None").try();
+    be.finish_res(value, dst)
 }
 
 write_assign_ok_unit* = (be :: CBackend, ret: TyId, dst: str)
                        Res<(), AllocError> {
-    value ::= be.alloc.String().try();
-    be.write_res_head(ret, "Ok", value).try();
-    value.add_bytes(" })").try();
-    be.set_line(dst, value.view())
+    value ::= be.res_head(ret, "Ok").try();
+    be.finish_res(value, dst)
 }
 
 write_assign_ok* = (be :: CBackend, ret: TyId, payload: str, dst: str)
                   Res<(), AllocError> {
-    value ::= be.alloc.String().try();
-    be.write_res_head(ret, "Ok", value).try();
+    value ::= be.res_head(ret, "Ok").try();
     value.add_bytes(", .zg_data.").try();
     sym_member(value, "Ok").try();
-    value.fmt(" = {payload} })").try();
-    be.set_line(dst, value.view())
+    value.fmt(" = {payload}").try();
+    be.finish_res(value, dst)
 }
 
 write_assign_err* = (be :: CBackend, ret: TyId, name: str, dst: str)
                    Res<(), AllocError> {
-    value ::= be.alloc.String().try();
-    be.write_res_head(ret, "Err", value).try();
+    value ::= be.res_head(ret, "Err").try();
     be.payload_type(ret, "Err").match({
         None    => Ok(()),
         Ok(ety) => be.write_err_payload(ety, name, value),
     }).try();
-    value.add_bytes(" })").try();
-    be.set_line(dst, value.view())
+    be.finish_res(value, dst)
 }
 
 write_err_payload = (be :: CBackend, ety: TyId, name: str, out :: String)
@@ -906,12 +868,19 @@ write_err_variant = (be :: CBackend, ety: TyId, name: str, out :: String)
     Ok(());
 }
 
-write_res_head = (be :: CBackend, ret: TyId, variant: str, out :: String)
-                 Res<(), AllocError> {
-    cty ::= be.alloc.String().try();
-    be.ctype(ret, cty).try();
-    out.fmt("(({}){ .zg_tag = ", cty.view()).try();
-    out.sym_variant(RES_PATH, variant)
+res_head = (be :: CBackend, ret: TyId, variant: str)
+           Res<String, AllocError> {
+    out ::= be.alloc.String("((").try();
+    be.ctype(ret, out).try();
+    out.add_bytes("){ .zg_tag = ").try();
+    out.sym_variant(RES_PATH, variant).try();
+    Ok(out)
+}
+
+finish_res = (be :: CBackend, value :: String, dst: str)
+             Res<(), AllocError> {
+    value.add_bytes(" })").try();
+    be.set_line(dst, value.view())
 }
 
 // Small C block transitions shared by capability floors.
