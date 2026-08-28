@@ -1,0 +1,46 @@
+Alloc, AllocError = std.mem
+str, String = std.text
+Vec = std.collections
+Source, scan = std.lex
+Parser = std.parse.parser
+module = std.parse.parse_decl
+Ast, CHeader, COpaque, CTypeBinding, CBinding = std.ast
+Checker = sema.sema_check
+Emit = gen.gen_emit
+CBackend, emit_program = gen.gen_c
+
+RAW : str = "Ptr*<T> = {}\nSSL_CTX* = {}\nEVIL* = {}\nby_value* = () SSL_CTX\nunsafe_name* = () Ptr<EVIL>\n"
+
+PROGRAM : str = "by_value, unsafe_name = openssl.bad\nmain = (env: i32) i32 { by_value(); unsafe_name(); 0 }\n"
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    raw_lexed = scan(alloc, Source(file: "bad.zen", text: RAW)).try();
+    raw_p ::= alloc.Parser(raw_lexed);
+    raw = raw_p.module("openssl.bad").try();
+    headers ::= alloc.Vec<CHeader>();
+    headers.add(CHeader(path: "openssl/ssl.h", system: true)).try();
+    types ::= alloc.Vec<CTypeBinding>();
+    types.add(CTypeBinding.Opaque(COpaque(decl: 1, spelling: "SSL_CTX"))).try();
+    types.add(CTypeBinding.Opaque(COpaque(
+        decl: 2,
+        spelling: "EVIL */ injected"
+    ))).try();
+    raw_p.tree.add_c_module(
+        raw,
+        CBinding(headers: headers, types: types)
+    ).try();
+
+    lexed = scan(alloc, Source(file: "main.zen", text: PROGRAM)).try();
+    p ::= alloc.Parser(lexed, raw_p.tree);
+    root = p.module("main").try();
+    p.tree.add_module(root).try();
+    check ::= alloc.Checker(p.tree).try();
+    be    ::= alloc.CBackend(p.tree, check).try();
+    out   ::= alloc.Emit().try();
+    be.emit_program(1, out).try();
+    faults ::= alloc.String().try();
+    be.render_diags(faults).try();
+    print("{}", faults.view());
+    Ok(0)
+}

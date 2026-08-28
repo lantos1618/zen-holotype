@@ -24,19 +24,19 @@
 // and gets the enum's shape: a tag and a union of its members.
 
 Decl, Struct, Enum, Variant, Member = std.ast
+COpaque, CTypeBinding = std.ast
 Function, TypeId = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
-TyId, TyNamed, TyRes = sema.sema_ty
+TyId, TyNamed, TyRes, c_integer = sema.sema_ty
 DeclId = sema.sema_id
 Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
 type_from_ast = sema.sema_denote
 union_reading = sema.sema_union
-sym_type = gen.gen_name
-is_failure = gen.gen_name
+sym_type, is_failure, is_c_identifier = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 Inst = sema.sema_inst
 sub_with, enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
@@ -91,7 +91,25 @@ maybe_scope = (be :: CBackend, id: TyId, n: TyNamed, out :: String)
               Res<(), AllocError> {
     is_scope_named(n).match({
         true  => out.add_bytes("zg_scope *"),
-        false => be.named_ctype(id, out),
+        false => be.maybe_named_ctype(id, n, out),
+    })
+}
+
+// A header-owned opaque only has a C representation behind `Ptr<T>`.
+// If an unsupported by-value use reaches here after its diagnostic, keep
+// the surrounding C parseable without inventing a struct definition.
+maybe_named_ctype = (be :: CBackend, id: TyId, n: TyNamed, out :: String)
+                    Res<(), AllocError> {
+    be.foreign_binding(n).match({
+        Ok(_) => out.add_bytes("int"),
+        None  => be.named_ctype(id, out),
+    })
+}
+
+foreign_binding = (be: CBackend, n: TyNamed) Res<COpaque> {
+    be.tree.c_type_at(n.decl.module, n.decl.decl).match({
+        Ok(binding) => binding.match({ Opaque(raw) => Ok(raw) }),
+        None        => None,
     })
 }
 
@@ -110,10 +128,29 @@ ptr_ctype = (be :: CBackend, n: TyNamed, out :: String)
 }
 
 elem_ctype = (be :: CBackend, t: TyId, out :: String) Res<(), AllocError> {
+    be.types().at(t).match({
+        Named(n) => be.foreign_binding(n).match({
+            Ok(raw) => be.write_opaque_ptr(raw, out),
+            None    => be.write_elem_ctype(t, out),
+        }),
+        _        => be.write_elem_ctype(t, out),
+    })
+}
+
+write_opaque_ptr = (be :: CBackend, raw: COpaque, out :: String)
+                   Res<(), AllocError> {
+    is_c_identifier(raw.spelling).match({
+        true  => out.add_bytes(raw.spelling),
+        false => out.add_bytes("int"),
+    }).try();
+    out.add_bytes(" *")
+}
+
+write_elem_ctype = (be :: CBackend, t: TyId, out :: String)
+                   Res<(), AllocError> {
     be.request_type(t).try();
     be.ctype(t, out).try();
-    out.add_bytes(" *").try();
-    Ok(());
+    out.add_bytes(" *")
 }
 
 named_ctype = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
@@ -135,11 +172,31 @@ declarator* = (be :: CBackend, id: TyId, name: str, out :: String)
 spellable* = (be: CBackend, id: TyId) bool {
     be.types().at(id).match({
         Prim(p)  => c_prim_known(p.name),
-        Named(_) => true,
+        Named(n) => be.named_spellable(n),
         Res(_)   => true,
         Union(_) => true,
         Array(_) => true,
         _        => false,
+    })
+}
+
+named_spellable = (be: CBackend, n: TyNamed) bool {
+    is_ptr_named(n).match({
+        true  => n.args.get(0).match({
+            Ok(t) => be.pointer_element_spellable(t),
+            None  => true,
+        }),
+        false => be.foreign_binding(n).match({ Ok(_) => false, None => true }),
+    })
+}
+
+pointer_element_spellable = (be: CBackend, id: TyId) bool {
+    be.types().at(id).match({
+        Named(n) => be.foreign_binding(n).match({
+            Ok(raw) => is_c_identifier(raw.spelling),
+            None    => be.spellable(id),
+        }),
+        _        => be.spellable(id),
     })
 }
 
@@ -162,23 +219,34 @@ is_unit* = (be: CBackend, id: TyId) bool {
 // time.
 c_prim* = (name: str) str {
     name.match({
-        "i8"    => "int8_t",
-        "i16"   => "int16_t",
-        "i32"   => "int32_t",
-        "i64"   => "int64_t",
-        "int"   => "int64_t",
-        "u8"    => "uint8_t",
-        "u16"   => "uint16_t",
-        "u32"   => "uint32_t",
-        "u64"   => "uint64_t",
-        "usize" => "size_t",
-        "f32"   => "float",
-        "f64"   => "double",
-        "float" => "double",
-        "bool"  => "bool",
-        "str"   => "zg_str",
-        "()"    => "void",
-        _       => "int",
+        "i8"          => "int8_t",
+        "i16"         => "int16_t",
+        "i32"         => "int32_t",
+        "i64"         => "int64_t",
+        "int"         => "int64_t",
+        "u8"          => "uint8_t",
+        "u16"         => "uint16_t",
+        "u32"         => "uint32_t",
+        "u64"         => "uint64_t",
+        "usize"       => "size_t",
+        "c_char"      => "char",
+        "c_schar"     => "signed char",
+        "c_uchar"     => "unsigned char",
+        "c_short"     => "short",
+        "c_ushort"    => "unsigned short",
+        "c_int"       => "int",
+        "c_uint"      => "unsigned int",
+        "c_long"      => "long",
+        "c_ulong"     => "unsigned long",
+        "c_longlong"  => "long long",
+        "c_ulonglong" => "unsigned long long",
+        "f32"         => "float",
+        "f64"         => "double",
+        "float"       => "double",
+        "bool"        => "bool",
+        "str"         => "zg_str",
+        "()"          => "void",
+        _             => "int",
     })
 }
 
@@ -186,7 +254,9 @@ c_prim* = (name: str) str {
 // cannot double as the answer for a Zen type that really is `int`.
 // The list is asked directly.
 c_prim_known* = (name: str) bool {
-    is_c_integer(name) || name.is_in(["f32", "f64", "float", "bool", "str", "()"])
+    is_c_integer(name)
+        || c_integer(name)
+        || name.is_in(["c_char", "f32", "f64", "float", "bool", "str", "()"])
 }
 
 // The integer types a trapping operation can be emitted for.
@@ -215,9 +285,18 @@ request_type* = (be :: CBackend, id: TyId) Res<(), AllocError> {
 // is the runtime's, and queueing the declaration would emit the `defer`
 // FIELD `maybe_scope` refuses to spell.
 request_defined = (be :: CBackend, id: TyId) Res<(), AllocError> {
-    be.is_scope_type(id).match({
+    (be.is_scope_type(id) || be.is_foreign_opaque(id)).match({
         true  => Ok(()),
         false => be.queue_definition(id),
+    })
+}
+
+is_foreign_opaque = (be: CBackend, id: TyId) bool {
+    be.types().at(id).match({
+        Named(n) => be.foreign_binding(
+            n
+        ).match({ Ok(_) => true, None => false }),
+        _        => false,
     })
 }
 

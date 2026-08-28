@@ -41,10 +41,10 @@ TyId.impl(Hash, {
     hash = (self: @Self, hasher :: Hasher) u64 { self.index.to_u64() }
 })
 
-// The scalars the language builds in: the integers, the floats, `bool`,
-// `str`, `()`. A separate kind from `Named`, not a declaration with no
-// body — a primitive has no `DeclId` to be nominal on, and inventing
-// one would put a fictional row in `Ast.modules`.
+// The scalars the language builds in: fixed-width numbers, C ABI
+// integers, `bool`, `str`, `()`. A separate kind from `Named`, not a
+// declaration with no body — a primitive has no `DeclId` to be nominal
+// on, and inventing one would put a fictional row in `Ast.modules`.
 Prim* = { name*: str }
 
 // A list rather than a lookup: the set is closed by the language, and a
@@ -54,11 +54,31 @@ Prim* = { name*: str }
 // store is the one place that can hold this fact without importing the
 // layer above.
 is_prim* = (name: str) bool {
-    is_integer(name) || is_float(name) || name.is_in(["bool", "str", "()"])
+    fixed_integer(name)
+        || c_integer(name)
+        || is_float(name)
+        || name.is_in(["c_char", "bool", "str", "()"])
 }
 
 is_integer* = (name: str) bool {
+    fixed_integer(name)
+}
+
+// Integers whose width is a Zen language property. C ABI integers are
+// intentionally absent: their width follows the selected C target.
+fixed_integer* = (name: str) bool {
     name.is_in(["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize"])
+}
+
+// C's signed and unsigned integer families. `c_char` is a primitive but
+// not in this family: plain `char` has target-defined signedness, so Zen
+// cannot safely grant it arithmetic until the target model records that
+// choice. It is still usable behind `Ptr` and in foreign signatures.
+c_integer* = (name: str) bool {
+    name.is_in([
+        "c_schar", "c_uchar", "c_short", "c_ushort", "c_int", "c_uint",
+        "c_long", "c_ulong", "c_longlong", "c_ulonglong"
+    ])
 }
 
 is_float* = (name: str) bool { name.eq("f32") || name.eq("f64") }

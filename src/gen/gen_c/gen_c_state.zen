@@ -167,12 +167,10 @@ CBackend* = {
     // beside it, which is the one thing splitting the program costs.
     externs :: bool,
 
-    // THE FFI ESCAPE HATCH (`zen build --ffi`). When true, a call to a
-    // bodyless non-generic free function is lowered as a call to the C
-    // symbol of the SAME name, with an `extern` prototype emitted rather
-    // than the call refused. Off by default, so a bodyless declaration
-    // with no floor stays a diagnostic — the compiler's own build passes
-    // no `--ffi`, keeps this false, and emits byte-identical C.
+    // KEPT FOR BACKWARD COMPATIBILITY. Bodyless non-generic free
+    // functions are now always lowered as foreign C symbols; `--ffi` is
+    // still parsed and this field is still set, but lowering no longer
+    // checks it.
     ffi* :: bool,
     // The raw C symbols an FFI call referenced, and the `extern <ret>
     // name(params)` prototype for each, deduplicated by symbol. Emitted
@@ -180,6 +178,10 @@ CBackend* = {
     // because a foreign symbol is defined by the C library, not here.
     extern_names* :: Vec<String>,
     extern_protos* :: Vec<String>,
+
+    // Headers owned by reachable loader-created C modules. Complete
+    // include lines preserve the binding's order and dedupe at first use.
+    c_headers* :: Vec<String>,
 
     // per function
     locals :: Vec<LocalSlot>,
@@ -590,6 +592,32 @@ CBackend* = {
         })
     }
 
+    need_c_header* = (self :: @Self, path: str, system: bool)
+                     Res<bool, AllocError> {
+        valid_c_header(path).match({
+            false => Ok(false),
+            true  => self.keep_c_header(path, system),
+        })
+    }
+
+    keep_c_header = (self :: @Self, path: str, system: bool)
+                    Res<bool, AllocError> {
+        line ::= self.alloc.String().try();
+        system.match({
+            true  => line.fmt("#include <{}>", path),
+            false => line.fmt("#include \"{}\"", path),
+        }).try();
+        Range(0, self.c_headers.len).find((i) {
+            self.c_headers.get(i).match({
+                Ok(h) => h.view().eq(line.view()),
+                None  => false,
+            })
+        }).match({
+            Ok(_) => Ok(true),
+            None  => { self.c_headers.add(line).try(); Ok(true) },
+        })
+    }
+
     // Queue a member function for lowering, once. The same `fn_seen`
     // set as a free function's, because the same rule applies and the
     // two name spaces cannot collide: a method's qualified name has a
@@ -927,6 +955,13 @@ CBackend* = {
     }
 }
 
+valid_c_header = (path: str) bool {
+    (path.len > 0) && Range(0, path.len).find((i) {
+        b = path.index(i);
+        !(b.is_alnum() || b.is_in(['/', '.', '_', '-', '+']))
+    }).match({ Ok(_) => false, None => true })
+}
+
 // `alloc.CBackend(tree, check)` — a ufcs function whose first parameter
 // is an Alloc, beside the type it builds, exactly as `Vec`, `Map`,
 // `Ast`, `Types` and `Checker` are.
@@ -967,6 +1002,7 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         ffi: false,
         extern_names: a.Vec<String>(),
         extern_protos: a.Vec<String>(),
+        c_headers: a.Vec<String>(),
         locals: a.Vec<LocalSlot>(),
         declared: a.Vec<String>(),
         loops: a.Vec<LoopFrame>(),

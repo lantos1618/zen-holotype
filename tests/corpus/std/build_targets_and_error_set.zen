@@ -36,8 +36,8 @@
 // `errors-widen` lane's territory). Ok-versus-Err is what a build file
 // can ask, so it is what this file asks.
 
-Builder, Lib, Extern, Test, Bench = std.build
-Budget, Dep, Exe, Function, Os, Arch = std.build
+Builder, Lib, Extern, CImport, Test, Bench = std.build
+Budget, Dep, Exe, Function, Os, Arch, Abi, Target = std.build
 BuildFault, BuildError = std.build
 Vec = std.collections
 
@@ -82,6 +82,35 @@ main = (env: Env) Res<i32, AllocError> {
         paths: a.Vec<str>()
     );
     println("extern {} {} {}", x.src.text, x.libs.len, x.paths.len);
+
+    headers ::= a.Vec<str>();
+    headers.add("openssl/ssl.h").try();
+    includes ::= a.Vec<str>();
+    includes.add("/usr/include").try();
+    defines ::= a.Vec<str>();
+    defines.add("OPENSSL_API_COMPAT=30000").try();
+    foreign_libs ::= a.Vec<str>();
+    foreign_libs.add("ssl").try();
+    ci = CImport(
+        headers: headers,
+        include_paths: includes,
+        defines: defines,
+        libraries: foreign_libs,
+        target: Target(os: Os.Linux, arch: Arch.X86_64, abi: Abi.Gnu)
+    );
+    println(
+        "cimport {} {} {} {}",
+        ci.headers.len,
+        ci.include_paths.len,
+        ci.defines.len,
+        ci.libraries.len
+    );
+    ci.target.abi.match({
+        Gnu    => println("cimport gnu"),
+        Musl   => println("cimport musl"),
+        Msvc   => println("cimport msvc"),
+        Darwin => println("cimport darwin"),
+    });
 
     // Test and Bench hold what the walk found; Function is the empty
     // stand-in, so the lists are the only thing to read

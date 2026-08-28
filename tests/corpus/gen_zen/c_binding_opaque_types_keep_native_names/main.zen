@@ -1,0 +1,71 @@
+Alloc, AllocError = std.mem
+str, String = std.text
+Vec = std.collections
+Source, scan = std.lex
+Parser = std.parse.parser
+module = std.parse.parse_decl
+Ast, CHeader, COpaque, CTypeBinding, CBinding = std.ast
+Checker = sema.sema_check
+Emit = gen.gen_emit
+CBackend, emit_program = gen.gen_c
+
+RAW : str = "Ptr*<T> = {}\nSSL_CTX* = {}\nSSL* = {}\nSSL_CTX_new* = () Ptr<SSL_CTX>\nSSL_new* = (ctx: Ptr<SSL_CTX>) Ptr<SSL>\nSSL_free* = (ssl: Ptr<SSL>) ()\n"
+
+PROGRAM : str = "SSL_CTX_new, SSL_new, SSL_free = openssl.ssl\nmain = (env: i32) i32 { ctx = SSL_CTX_new(); ssl = SSL_new(ctx); SSL_free(ssl); 0 }\n"
+
+at_text = (hay: str, needle: str) Res<usize> {
+    (needle.len > hay.len).match({
+        true  => None,
+        false => Range(0, hay.len - needle.len + 1).find((i) {
+            hay.slice(i, i + needle.len).eq(needle)
+        }),
+    })
+}
+
+has = (hay: str, needle: str) bool {
+    at_text(hay, needle).match({ Ok(_) => true, None => false })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    raw_lexed = scan(alloc, Source(file: "ssl.zen", text: RAW)).try();
+    raw_p ::= alloc.Parser(raw_lexed);
+    raw = raw_p.module("openssl.ssl").try();
+    headers ::= alloc.Vec<CHeader>();
+    headers.add(CHeader(path: "openssl/ssl.h", system: true)).try();
+    types ::= alloc.Vec<CTypeBinding>();
+    types.add(CTypeBinding.Opaque(COpaque(decl: 1, spelling: "SSL_CTX"))).try();
+    types.add(CTypeBinding.Opaque(COpaque(decl: 2, spelling: "SSL"))).try();
+    raw_p.tree.add_c_module(
+        raw,
+        CBinding(headers: headers, types: types)
+    ).try();
+
+    lexed = scan(alloc, Source(file: "main.zen", text: PROGRAM)).try();
+    p ::= alloc.Parser(lexed, raw_p.tree);
+    root = p.module("main").try();
+    p.tree.add_module(root).try();
+    check ::= alloc.Checker(p.tree).try();
+    be    ::= alloc.CBackend(p.tree, check).try();
+    out   ::= alloc.Emit().try();
+    be.emit_program(1, out).try();
+    text = out.view();
+
+    println(
+        "header={} externs={} layouts={}",
+        has(text, "#include <openssl/ssl.h>"),
+        be.extern_names.len,
+        be.type_names.len
+    );
+    println(
+        "ctx-pointer={} ssl-pointer={}",
+        has(text, "SSL_CTX *"),
+        has(text, "SSL *")
+    );
+    println(
+        "calls={} synthesized={}",
+        has(text, "SSL_CTX_new(") && has(text, "SSL_new(") && has(text, "SSL_free("),
+        has(text, "extern SSL_CTX *")
+    );
+    Ok(0)
+}

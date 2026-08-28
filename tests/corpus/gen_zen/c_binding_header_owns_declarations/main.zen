@@ -1,0 +1,90 @@
+Alloc, AllocError = std.mem
+str, String = std.text
+Vec = std.collections
+Source, scan = std.lex
+Parser = std.parse.parser
+module = std.parse.parse_decl
+Ast, CHeader, CTypeBinding, CBinding, ModuleOrigin = std.ast
+Checker = sema.sema_check
+Emit = gen.gen_emit
+CBackend, emit_program = gen.gen_c
+
+RAW : str = "rand* = () c_int\n"
+PROGRAM : str = "rand = raw.raw\nmain = (env: i32) i32 { rand(); 0 }\n"
+
+at_text = (hay: str, needle: str) Res<usize> {
+    (needle.len > hay.len).match({
+        true  => None,
+        false => Range(0, hay.len - needle.len + 1).find((i) {
+            hay.slice(i, i + needle.len).eq(needle)
+        }),
+    })
+}
+
+before = (hay: str, first: str, second: str) bool {
+    at_text(hay, first).match({
+        None    => false,
+        Ok(one) => at_text(hay, second).match({
+            None      => false,
+            Ok(other) => one < other,
+        }),
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    raw_lexed = scan(alloc, Source(file: "raw.zen", text: RAW)).try();
+    raw_p ::= alloc.Parser(raw_lexed);
+    raw = raw_p.module("raw.raw").try();
+    headers ::= alloc.Vec<CHeader>();
+    headers.add(CHeader(path: "winsock2.h", system: true)).try();
+    headers.add(CHeader(path: "windows.h", system: true)).try();
+    headers.add(CHeader(path: "winsock2.h", system: true)).try();
+    headers.add(CHeader(path: "stdlib.h", system: true)).try();
+    types ::= alloc.Vec<CTypeBinding>();
+    raw_p.tree.add_c_module(
+        raw,
+        CBinding(headers: headers, types: types)
+    ).try();
+    lexed = scan(alloc, Source(file: "main.zen", text: PROGRAM)).try();
+    p ::= alloc.Parser(lexed, raw_p.tree);
+    root = p.module("main").try();
+    p.tree.add_module(root).try();
+    aligned = p.tree.module_origin_at(0).match({
+        Ok(ModuleOrigin.CBinding(id)) => p.tree.c_binding_at(id).match({
+            Ok(binding) => binding.headers.len == 4,
+            None        => false,
+        }),
+        _                             => false,
+    }) && p.tree.module_origin_at(1).match({
+        Ok(ModuleOrigin.Source) => true,
+        _                       => false,
+    });
+    check ::= alloc.Checker(p.tree).try();
+    be    ::= alloc.CBackend(p.tree, check).try();
+    out   ::= alloc.Emit().try();
+    be.emit_program(1, out).try();
+    text = out.view();
+    println(
+        "aligned={} headers={} externs={}",
+        aligned,
+        be.c_headers.len,
+        be.extern_names.len
+    );
+    println(
+        "winsock-before-windows={}",
+        before(text, "#include <winsock2.h>", "#include <windows.h>")
+    );
+    println(
+        "before-runtime={}",
+        before(text, "#include <stdlib.h>", "#include <stdbool.h>")
+    );
+    println("synthesized-prototype={}", at_text(
+        text,
+        "extern int rand(void)"
+    ).match({
+        Ok(_) => true,
+        None  => false,
+    }));
+    Ok(0)
+}

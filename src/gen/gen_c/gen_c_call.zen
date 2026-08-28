@@ -24,6 +24,7 @@ ExprId = std.ast
 Decl, Function = std.ast
 Access, Call, Arg = std.ast
 Param, TypeId = std.ast
+ModuleOrigin, CBinding, CBindingId = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -685,22 +686,8 @@ call_or_convert = (
     })
 }
 
-// A BODILESS FREE FUNCTION NO FLOOR ANSWERED IS REFUSED AT THE CALL,
-// not queued and emitted: a bodyless declaration defines no symbol, so
-// the call this path would write is a reference to one nothing defines
-// — `cc`'s to catch, and only because C happens to notice. Every door
-// above diverted the bodiless declarations that HAVE floors (the loop
-// intrinsic, `null_ptr`, the two format doors, `to_<prim>`); what
-// reaches here is a signature a program wrote with nothing behind it.
-// The refusal lives at the CALL and not at the DECLARATION on purpose:
-// the seed walk queues every non-generic free function in std before
-// any call is lowered (`gen_c_decl.seed_named`), and std declares
-// bodiless functions it has not grown floors for yet (`std/core/path`),
-// so a declaration-time check would refuse the compiler's own build.
-// The cross-module path refuses the same shape by name
-// (`gen_c_assoc.refuse_module_fn`); members never reach here
-// (`gen_c_member.method_fault`). This is the last path left that could
-// name an undefined symbol.
+// A bodyless free function is a foreign C symbol, emitted only when called.
+// Compiler-owned floors have already diverted above this point.
 call_or_plain = (
     be  :: CBackend,
     s   : CallSite,
@@ -710,14 +697,7 @@ call_or_plain = (
 )
                  Res<(), AllocError> {
     bodyless(f).match({
-        true  => be.ffi.match({
-            true  => be.call_extern(s, d, f, out),
-            false => be.unsupported(
-                s.id,
-                "a call to a function with no body",
-                out
-            ),
-        }),
+        true  => be.call_extern(s, d, f, out),
         false => be.call_signature(s, d, f, out),
     })
 }
@@ -780,19 +760,127 @@ write_extern_at = (
             "a foreign function with a type C cannot spell",
             out
         ),
-        true  => {
-            proto ::= be.alloc.String().try();
-            be.foreign_proto(d.name, f, ret, sig, proto).try();
-            be.need_extern(d.name, proto).try().match({
-                false => be.unsupported(
-                    s.id,
-                    "one foreign symbol declared with more than one signature",
-                    out
-                ),
-                true  => be.write_call(s, d, f, sig, d.name, out),
-            })
-        },
+        true  => be.foreign_origin_call(s, d, f, ret, sig, out),
     })
+}
+
+foreign_origin_call = (
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    ret : TyId,
+    sig : Vec<TyId>,
+    out :: String
+) Res<(), AllocError> {
+    be.tree.module_origin_at(d.id.module.to_usize()).match({
+        Ok(ModuleOrigin.CBinding(id)) => be.header_owned_call(
+            s,
+            d,
+            f,
+            sig,
+            id,
+            out
+        ),
+        _                             => be.raw_foreign_call(
+            s,
+            d,
+            f,
+            ret,
+            sig,
+            out
+        ),
+    })
+}
+
+raw_foreign_call = (
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    ret : TyId,
+    sig : Vec<TyId>,
+    out :: String
+) Res<(), AllocError> {
+    proto ::= be.alloc.String().try();
+    be.foreign_proto(d.name, f, ret, sig, proto).try();
+    be.need_extern(d.name, proto).try().match({
+        false => be.unsupported(
+            s.id,
+            "one foreign symbol declared with more than one signature",
+            out
+        ),
+        true  => be.write_call(s, d, f, sig, d.name, out),
+    })
+}
+
+header_owned_call = (
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    sig : Vec<TyId>,
+    id  : CBindingId,
+    out :: String
+) Res<(), AllocError> {
+    be.tree.c_binding_at(id).match({
+        None    => be.bad_c_binding(
+            s.id,
+            "a C binding module has no binding metadata",
+            out
+        ),
+        Ok(raw) => be.use_c_binding(s, d, f, sig, raw, out),
+    })
+}
+
+use_c_binding = (
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    sig : Vec<TyId>,
+    raw : CBinding,
+    out :: String
+) Res<(), AllocError> {
+    (raw.headers.len == 0).match({
+        true  => be.bad_c_binding(
+            s.id,
+            "a C binding module has no headers",
+            out
+        ),
+        false => be.use_c_headers(s, d, f, sig, raw, out),
+    })
+}
+
+use_c_headers = (
+    be  :: CBackend,
+    s   : CallSite,
+    d   : Def,
+    f   : Function,
+    sig : Vec<TyId>,
+    raw : CBinding,
+    out :: String
+) Res<(), AllocError> {
+    valid ::= true;
+    raw.headers.loop((h, header) {
+        be.need_c_header(header.path, header.system).try().match({
+            true  => (),
+            false => { valid = false; },
+        });
+    });
+    valid.match({
+        true  => be.write_call(s, d, f, sig, d.name, out),
+        false => be.bad_c_binding(
+            s.id,
+            "a C binding header path contains a byte that cannot appear in an include name",
+            out
+        ),
+    })
+}
+
+bad_c_binding = (be :: CBackend, id: ExprId, why: str, out :: String)
+                Res<(), AllocError> {
+    be.unsupported(id, why, out)
 }
 
 foreign_ret = (be :: CBackend, d: Def, f: Function)

@@ -1,0 +1,80 @@
+CImport, Target, Os, Arch, Abi = std.build
+Ast, CHeader, ModuleOrigin = std.ast
+Source, scan = std.lex
+Parser = std.parse
+request = zen.zen_c_import
+
+spec = (a: Alloc, headers: Vec<str>) Res<CImport, AllocError> {
+    includes ::= a.Vec<str>();
+    includes.add("/z").try();
+    includes.add("/a").try();
+    defines ::= a.Vec<str>();
+    defines.add("Z=1").try();
+    defines.add("A=2").try();
+    libraries ::= a.Vec<str>();
+    libraries.add("ssl").try();
+    libraries.add("crypto").try();
+    Ok(CImport(
+        headers: headers,
+        include_paths: includes,
+        defines: defines,
+        libraries: libraries,
+        target: Target(os: Os.Linux, arch: Arch.X86_64, abi: Abi.Gnu)
+    ))
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a    ::= env.mem.alloc();
+    left ::= a.Vec<str>();
+    left.add("ab").try();
+    left.add("c").try();
+    right ::= a.Vec<str>();
+    right.add("a").try();
+    right.add("bc").try();
+    reverse ::= a.Vec<str>();
+    reverse.add("c").try();
+    reverse.add("ab").try();
+
+    one   = request(a, spec(a, left).try()).try();
+    again = request(a, spec(a, left).try()).try();
+    other = request(a, spec(a, right).try()).try();
+    back  = request(a, spec(a, reverse).try()).try();
+    println("stable {}", one.identity.view().eq(again.identity.view()));
+    println("distinct {}", !one.identity.view().eq(other.identity.view()));
+    println("ordered {}", !one.identity.view().eq(back.identity.view()));
+    println("{}", one.identity.view());
+
+    tree ::= a.Ast();
+    bytes = "native = (value: i32) i32;";
+    lexed = scan(a, Source(file: "raw.zen", text: bytes)).try();
+    p ::= a.Parser(lexed, tree);
+    raw    = p.module("sys.raw").try();
+    linked = one.attach_module(a, raw, p.tree).try();
+    println("module {} binding {}", linked.module, linked.binding.index);
+    p.tree.module_origin_at(linked.module).match({
+        Ok(ModuleOrigin.CBinding(id)) => p.tree.c_binding_at(id).match({
+            Ok(binding) => {
+                first  = binding.headers.get(0).match({
+                    Ok(header) => header,
+                    None       => CHeader(path: "?", system: false),
+                });
+                second = binding.headers.get(1).match({
+                    Ok(header) => header,
+                    None       => CHeader(path: "?", system: false),
+                });
+                println(
+                    "headers {} {} {} {} {}",
+                    binding.headers.len,
+                    first.path,
+                    first.system,
+                    second.path,
+                    second.system
+                );
+            },
+            None        => println("missing binding"),
+        }),
+        Ok(ModuleOrigin.Source)       => println("source module"),
+        None                          => println("missing module"),
+    });
+    Ok(0)
+}

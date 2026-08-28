@@ -1,0 +1,30 @@
+Alloc, AllocError = std.mem
+str, String = std.text
+Source, scan = std.lex
+Parser = std.parse.parser
+module = std.parse.parse_decl
+Ast, CHeader, CTypeBinding, CBinding = std.ast
+Checker = sema.sema_check
+Emit = gen.gen_emit
+CBackend, emit_program = gen.gen_c
+
+PROGRAM : str = "rand = () c_int\nmain = (env: i32) i32 { rand(); 0 }\n"
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    lexed = scan(alloc, Source(file: "binding.zen", text: PROGRAM)).try();
+    p ::= alloc.Parser(lexed);
+    m = p.module("binding").try();
+    headers ::= alloc.Vec<CHeader>();
+    headers.add(CHeader(path: "bad\nheader", system: true)).try();
+    types ::= alloc.Vec<CTypeBinding>();
+    p.tree.add_c_module(m, CBinding(headers: headers, types: types)).try();
+    check ::= alloc.Checker(p.tree).try();
+    be    ::= alloc.CBackend(p.tree, check).try();
+    out   ::= alloc.Emit().try();
+    be.emit_program(0, out).try();
+    faults ::= alloc.String().try();
+    be.render_diags(faults).try();
+    print("{}", faults.view());
+    Ok(0)
+}
