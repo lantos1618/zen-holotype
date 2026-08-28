@@ -31,7 +31,7 @@ Def, DefKind, ModuleTable, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 SemaFault, NameFault, PairFault = sema.sema_diag
 check_impl = sema.sema_bound
-check_overloads = sema.sema_call
+check_overloads, same_fn_signature = sema.sema_call
 check_depth = sema.sema_depth
 check_varargs = sema.sema_vararg
 check_layout = sema.sema_layout
@@ -39,7 +39,7 @@ type_of, block_type = sema.sema_type
 bound_member_type = sema.sema
 type_from_ast, param_type = sema.sema_denote
 decl_as_type = sema.sema_type
-enter_struct_tvars = sema.sema_member
+enter_struct_tvars, member_type = sema.sema_member
 variant_payload = sema.sema_case
 owner_of, push_tparams = sema.sema_inst
 settle_raised = sema.sema_raise
@@ -349,9 +349,55 @@ struct_bodies = (c :: Checker, s: Struct, m: Module, mi: usize)
     self_ty = c.named_self(s.name.text, mi).try();
     tmark   = c.tvar_mark();
     c.enter_struct_tvars(s, mi).try();
+    c.check_member_overloads(s, self_ty, mi).try();
     s.members.loop((h, mem) { c.member_body(mem, self_ty, m, mi).try() });
     c.release_tvars(tmark).try();
     Ok(());
+}
+
+check_member_overloads = (c :: Checker, s: Struct, self_ty: TyId, mi: usize)
+                         Res<(), AllocError> {
+    seen ::= c.alloc.Vec<Member>();
+    s.members.loop((h, m) {
+        m.kind.match({
+            Function(_) => {
+                seen.loop((h2, first) {
+                    c.compare_member_signatures(first, m, self_ty, mi).try();
+                });
+                seen.add(m)
+            },
+            _ => Ok(()),
+        }).try();
+    });
+    Ok(())
+}
+
+compare_member_signatures = (
+    c       :: Checker,
+    a       : Member,
+    b       : Member,
+    self_ty : TyId,
+    mi      : usize
+) Res<(), AllocError> {
+    a.name().text.eq(b.name().text).match({
+        false => Ok(()),
+        true  => {
+            aty = member_type(c, a, mi, self_ty).try();
+            bty = member_type(c, b, mi, self_ty).try();
+            c.same_fn_signature(aty, bty).match({
+                false => Ok(()),
+                true  => c.report(
+                    a.span.file,
+                    a.span,
+                    SemaFault.DuplicateSignature(PairFault(
+                        name: a.name().text,
+                        first: a.span,
+                        second: b.span,
+                    ))
+                ),
+            })
+        },
+    })
 }
 
 check_fields = (c :: Checker, s: Struct) Res<(), AllocError> {

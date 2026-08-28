@@ -1243,8 +1243,24 @@ compare_same_arity = (c :: Checker, name: str, a: Cand, b: Cand)
 // in the same position are one type for this purpose: `<T>(a: T)` and
 // `<U>(a: U)` differ in nothing a call site can see.
 same_signature* = (c: Checker, a: Cand, b: Cand) bool {
-    Range(0, a.params.len).find((i) {
-        c.same_param(ty_at(a.params, i), ty_at(b.params, i)) == false
+    c.same_params(a.params, b.params)
+}
+
+// Members do not become `Cand`s, but overload identity is still their
+// parameter list; a return type cannot distinguish a call.
+same_fn_signature* = (c: Checker, a: TyId, b: TyId) bool {
+    c.types.at(a).match({
+        Fn(x) => c.types.at(b).match({
+            Fn(y) => c.same_params(x.params, y.params),
+            _     => false,
+        }),
+        _ => false,
+    })
+}
+
+same_params = (c: Checker, a: Vec<TyId>, b: Vec<TyId>) bool {
+    (a.len == b.len) && Range(0, a.len).find((i) {
+        c.same_param(ty_at(a, i), ty_at(b, i)) == false
     }).match({ Ok(_) => false, None => true })
 }
 
