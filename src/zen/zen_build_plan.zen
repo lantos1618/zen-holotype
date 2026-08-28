@@ -1,0 +1,560 @@
+// A deliberately closed executor for the dependency-graph part of build.zen.
+// It consumes a checked AST, so overload and member resolution remain sema's
+// job. This is not a second Zen interpreter: unsupported expression shapes are
+// refused at their source span instead of being assigned approximate meaning.
+
+Alloc, AllocError = std.mem
+str = std.text
+Vec = std.collections
+Path = std.core
+
+Ast, ExprId, Expr, Call, Access, Record, Block, Function, Span = std.ast
+nowhere = std.ast
+Stmt, Bind, Member, Field = std.ast
+Checker = sema.sema
+CImport, Lib, Exe, Dep, Target = std.build
+
+PlanFault* = MissingBuild(str)
+    | CheckedFaults
+    | MissingField(Span)
+    | UnknownName(Span)
+    | DuplicateTarget(str)
+    | Unsupported(Span)
+
+PlanError* = OutOfMemory | Refused(PlanFault)
+
+CImportNode* = {
+    name*: str,
+    spec*: CImport,
+    dep*: Dep,
+}
+
+LibNode* = {
+    name*: str,
+    spec*: Lib,
+    dep*: Dep,
+}
+
+ExeNode* = {
+    name*: str,
+    spec*: Exe,
+}
+
+BuildPlan* = {
+    target*: Target,
+    imports* :: Vec<CImportNode>,
+    libs* :: Vec<LibNode>,
+    exes* :: Vec<ExeNode>,
+}
+
+Value = UnitValue
+    | TextValue(str)
+    | PathValue(Path)
+    | TargetValue(Target)
+    | DepValue(Dep)
+    | EmptyList
+    | TextList(Vec<str>)
+    | DepList(Vec<Dep>)
+    | PathOption(Res<Path>)
+
+Local = {
+    name: str,
+    value: Value,
+}
+
+Executor = {
+    alloc: Alloc,
+    tree: Ast,
+    builder: str,
+    locals :: Vec<Local>,
+    plan :: BuildPlan,
+
+    block = (self :: @Self, body: Block) Res<(), PlanError> {
+        body.stmts.loop((h, stmt) {
+            stmt.kind.match({
+                Bind(b) => self.bind(b).try(),
+                Expr(s) => { self.eval(s.expr).try(); },
+                _       => Err(PlanError.Refused(PlanFault.Unsupported(
+                    stmt.span
+                ))).try(),
+            });
+        });
+        body.value.match({
+            None      => Ok(()),
+            Ok(value) => { self.eval(value).try(); Ok(()) },
+        })
+    }
+
+    bind = (self :: @Self, b: Bind) Res<(), PlanError> {
+        target = self.tree.expr_at(b.target);
+        target.kind.match({
+            Name(n) => {
+                self.has_local(n.text).match({
+                    true  => Err(PlanError.Refused(PlanFault.Unsupported(
+                        target.span
+                    ))),
+                    false => {
+                        value = self.eval(b.value).try();
+                        allocated(self.locals.add(Local(
+                            name: n.text,
+                            value: value
+                        ))).try();
+                        Ok(())
+                    },
+                })
+            },
+            _       => Err(PlanError.Refused(PlanFault.Unsupported(
+                target.span
+            ))),
+        })
+    }
+
+    eval = (self :: @Self, id: ExprId) Res<Value, PlanError> {
+        node = self.tree.expr_at(id);
+        node.kind.match({
+            Unit       => Ok(Value.UnitValue),
+            Name(n)    => self.local(n.text, node.span),
+            Literal(l) => l.kind.match({
+                Str => self.text(l.text, node.span),
+                _   => Err(PlanError.Refused(PlanFault.Unsupported(node.span))),
+            }),
+            Paren(p)   => self.eval(p.inner),
+            Array(a)   => self.array(a.elems, node.span),
+            Try(t)     => self.eval(t.operand),
+            Call(c)    => self.call(id, c, node.span),
+            _          => Err(PlanError.Refused(PlanFault.Unsupported(
+                node.span
+            ))),
+        })
+    }
+
+    text = (self: @Self, raw: str, at: Span) Res<Value, PlanError> {
+        escaped ::= false;
+        Range(1, raw.len - 1).loop((h, i) {
+            (raw.index(i) == '\\').then(() { escaped = true; h.break(); });
+        });
+        escaped.match({
+            true  => Err(PlanError.Refused(PlanFault.Unsupported(at))),
+            false => Ok(Value.TextValue(raw.slice(1, raw.len - 1))),
+        })
+    }
+
+    array = (self :: @Self, ids: Vec<ExprId>, at: Span)
+            Res<Value, PlanError> {
+        (ids.len == 0).match({
+            true  => Ok(Value.EmptyList),
+            false => self.array_nonempty(ids, at),
+        })
+    }
+
+    array_nonempty = (self :: @Self, ids: Vec<ExprId>, at: Span)
+                     Res<Value, PlanError> {
+        first_id = ids.get(0).match({ Ok(id) => id, None => ExprId(index: 0) });
+        first    = self.eval(first_id).try();
+        first.match({
+            TextValue(text) => {
+                out ::= self.alloc.Vec<str>();
+                allocated(out.add(text)).try();
+                Range(1, ids.len).loop((h, i) {
+                    id = ids.get(i).match({ Ok(v) => v, None => first_id });
+                    self.eval(id).try().match({
+                        TextValue(value) => allocated(out.add(value)).try(),
+                        _                => Err(PlanError.Refused(PlanFault.Unsupported(
+                            at
+                        ))).try(),
+                    });
+                });
+                Ok(Value.TextList(out))
+            },
+            DepValue(dep)   => {
+                out ::= self.alloc.Vec<Dep>();
+                allocated(out.add(dep)).try();
+                Range(1, ids.len).loop((h, i) {
+                    id = ids.get(i).match({ Ok(v) => v, None => first_id });
+                    self.eval(id).try().match({
+                        DepValue(value) => allocated(out.add(value)).try(),
+                        _               => Err(PlanError.Refused(PlanFault.Unsupported(
+                            at
+                        ))).try(),
+                    });
+                });
+                Ok(Value.DepList(out))
+            },
+            _               => Err(PlanError.Refused(PlanFault.Unsupported(
+                at
+            ))),
+        })
+    }
+
+    call = (self :: @Self, id: ExprId, c: Call, at: Span)
+           Res<Value, PlanError> {
+        callee = self.tree.expr_at(c.callee);
+        callee.kind.match({
+            Name(n)   => self.free_call(n.text, c, at),
+            Access(a) => self.access_call(id, c, a, at),
+            _         => Err(PlanError.Refused(PlanFault.Unsupported(at))),
+        })
+    }
+
+    free_call = (self :: @Self, name: str, c: Call, at: Span)
+                Res<Value, PlanError> {
+        name.match({
+            "Path" => self.one_arg(c, at).match({
+                Err(e) => Err(e),
+                Ok(id) => self.eval(id).try().match({
+                    TextValue(text) => Ok(Value.PathValue(Path(text: text))),
+                    _               => Err(PlanError.Refused(PlanFault.Unsupported(
+                        at
+                    ))),
+                }),
+            }),
+            "Ok"   => self.one_arg(c, at).match({
+                Err(e) => Err(e),
+                Ok(id) => self.eval(id).try().match({
+                    PathValue(path) => Ok(Value.PathOption(Ok(path))),
+                    value           => Ok(value),
+                }),
+            }),
+            _      => failed_value(PlanFault.Unsupported(at)),
+        })
+    }
+
+    access_call = (self :: @Self, id: ExprId, c: Call, a: Access, at: Span)
+                  Res<Value, PlanError> {
+        self.builder_access(a).match({
+            false => (a.name.text.eq("Vec") && c.args.len == 0).match({
+                true  => Ok(Value.EmptyList),
+                false => failed_value(PlanFault.Unsupported(at)),
+            }),
+            // The whole module has already passed sema. Member-call memos are
+            // not populated for required Builder members because no body is
+            // selected; the checked receiver type is the proof available.
+            true  => self.builder_call(a.name.text, c, at),
+        })
+    }
+
+    builder_access = (self: @Self, a: Access) bool {
+        self.tree.expr_at(a.base).kind.match({
+            Name(n) => n.text.eq(self.builder),
+            _       => false,
+        })
+    }
+
+    builder_call = (self :: @Self, name: str, c: Call, at: Span)
+                   Res<Value, PlanError> {
+        name.match({
+            "target"   => (c.args.len == 0).match({
+                true  => Ok(Value.TargetValue(self.plan.target)),
+                false => failed_value(PlanFault.Unsupported(at)),
+            }),
+            "c_import" => self.add_import(c, at),
+            "lib"      => self.add_lib(c, at),
+            "exe"      => self.add_exe(c, at),
+            _          => failed_value(PlanFault.Unsupported(at)),
+        })
+    }
+
+    add_import = (self :: @Self, c: Call, at: Span)
+                 Res<Value, PlanError> {
+        name = self.name_arg(c, at).try();
+        self.unique(name).try();
+        record_id = self.arg(c, 1, at).try();
+        r         = self.record(record_id).try();
+        spec      = CImport(
+            headers: self.texts_field(r, "headers").try(),
+            include_paths: self.texts_field(r, "include_paths").try(),
+            defines: self.texts_field(r, "defines").try(),
+            libraries: self.texts_field(r, "libraries").try(),
+            target: self.target_field(r, "target").try()
+        );
+        dep       = Dep(name: name);
+        allocated(self.plan.imports.add(CImportNode(
+            name: name,
+            spec: spec,
+            dep: dep
+        ))).try();
+        Ok(Value.DepValue(dep))
+    }
+
+    add_lib = (self :: @Self, c: Call, at: Span) Res<Value, PlanError> {
+        name = self.name_arg(c, at).try();
+        self.unique(name).try();
+        r    = self.record(self.arg(c, 1, at).try()).try();
+        spec = Lib(
+            src: self.path_field(r, "src").try(),
+            libs: self.texts_field(r, "libs").try(),
+            paths: self.texts_field(r, "paths").try()
+        );
+        dep  = Dep(name: name);
+        allocated(self.plan.libs.add(LibNode(
+            name: name,
+            spec: spec,
+            dep: dep
+        ))).try();
+        Ok(Value.DepValue(dep))
+    }
+
+    add_exe = (self :: @Self, c: Call, at: Span) Res<Value, PlanError> {
+        name = self.name_arg(c, at).try();
+        self.unique(name).try();
+        r    = self.record(self.arg(c, 1, at).try()).try();
+        spec = Exe(
+            src: self.path_field(r, "src").try(),
+            deps: self.deps_field(r, "deps").try(),
+            out: self.optional_path_field(r, "out")
+        );
+        allocated(self.plan.exes.add(ExeNode(name: name, spec: spec))).try();
+        Ok(Value.UnitValue)
+    }
+
+    unique = (self: @Self, name: str) Res<(), PlanError> {
+        duplicate = self.plan.imports.find((n) { n.name.eq(name) }).match({
+                Ok(_) => true, None => false,
+            })
+            || self.plan.libs.find((n) { n.name.eq(name) }).match({
+                Ok(_) => true, None => false,
+            })
+            || self.plan.exes.find((n) { n.name.eq(name) }).match({
+                Ok(_) => true, None => false,
+            });
+        duplicate.match({
+            true  => Err(PlanError.Refused(PlanFault.DuplicateTarget(name))),
+            false => Ok(()),
+        })
+    }
+
+    name_arg = (self :: @Self, c: Call, at: Span) Res<str, PlanError> {
+        self.eval(self.arg(c, 0, at).try()).try().match({
+            TextValue(name) => Ok(name),
+            _               => Err(PlanError.Refused(PlanFault.Unsupported(
+                at
+            ))),
+        })
+    }
+
+    arg = (self: @Self, c: Call, i: usize, at: Span)
+          Res<ExprId, PlanError> {
+        c.args.get(i).match({
+            Ok(a) => Ok(a.value),
+            None  => Err(PlanError.Refused(PlanFault.Unsupported(at))),
+        })
+    }
+
+    one_arg = (self: @Self, c: Call, at: Span) Res<ExprId, PlanError> {
+        (c.args.len == 1).match({
+            true  => self.arg(c, 0, at),
+            false => Err(PlanError.Refused(PlanFault.Unsupported(at))),
+        })
+    }
+
+    record = (self: @Self, id: ExprId) Res<Record, PlanError> {
+        node = self.tree.expr_at(id);
+        node.kind.match({
+            Record(r) => Ok(r),
+            _         => Err(PlanError.Refused(PlanFault.Unsupported(
+                node.span
+            ))),
+        })
+    }
+
+    field = (self: @Self, r: Record, name: str) Res<ExprId, PlanError> {
+        r.entries.find((m) { m.named(name) }).match({
+            None  => Err(PlanError.Refused(PlanFault.MissingField(r.entries.get(
+                0
+            ).match({
+                Ok(m) => m.span,
+                None  => nowhere(),
+            })))),
+            Ok(m) => m.kind.match({
+                Field(f) => f.value.match({
+                    Ok(id) => Ok(id),
+                    None   => Err(PlanError.Refused(PlanFault.MissingField(
+                        m.span
+                    ))),
+                }),
+                _        => Err(PlanError.Refused(PlanFault.Unsupported(
+                    m.span
+                ))),
+            }),
+        })
+    }
+
+    texts_field = (self :: @Self, r: Record, name: str)
+                  Res<Vec<str>, PlanError> {
+        id = self.field(r, name).try();
+        self.eval(id).try().match({
+            TextList(values) => Ok(values),
+            EmptyList        => Ok(self.alloc.Vec<str>()),
+            _                => Err(PlanError.Refused(PlanFault.Unsupported(
+                self.tree.expr_at(id).span
+            ))),
+        })
+    }
+
+    deps_field = (self :: @Self, r: Record, name: str)
+                 Res<Vec<Dep>, PlanError> {
+        id = self.field(r, name).try();
+        self.eval(id).try().match({
+            DepList(values) => Ok(values),
+            EmptyList       => Ok(self.alloc.Vec<Dep>()),
+            _               => Err(PlanError.Refused(PlanFault.Unsupported(
+                self.tree.expr_at(id).span
+            ))),
+        })
+    }
+
+    path_field = (self :: @Self, r: Record, name: str)
+                 Res<Path, PlanError> {
+        id = self.field(r, name).try();
+        self.eval(id).try().match({
+            PathValue(value) => Ok(value),
+            _                => Err(PlanError.Refused(PlanFault.Unsupported(
+                self.tree.expr_at(id).span
+            ))),
+        })
+    }
+
+    target_field = (self :: @Self, r: Record, name: str)
+                   Res<Target, PlanError> {
+        id = self.field(r, name).try();
+        self.eval(id).try().match({
+            TargetValue(value) => Ok(value),
+            _                  => Err(PlanError.Refused(PlanFault.Unsupported(
+                self.tree.expr_at(id).span
+            ))),
+        })
+    }
+
+    optional_path_field = (self :: @Self, r: Record, name: str) Res<Path> {
+        r.entries.find((m) { m.named(name) }).match({
+            None  => None,
+            Ok(m) => m.kind.match({
+                Field(f) => f.value.match({
+                    None   => None,
+                    Ok(id) => self.eval(id).match({
+                        Ok(PathOption(value)) => value,
+                        Ok(PathValue(value))  => Ok(value),
+                        _                     => None,
+                    }),
+                }),
+                _        => None,
+            }),
+        })
+    }
+
+    local = (self: @Self, name: str, at: Span) Res<Value, PlanError> {
+        self.locals.find((l) { l.name.eq(name) }).match({
+            Ok(l) => Ok(l.value),
+            None  => Err(PlanError.Refused(PlanFault.UnknownName(at))),
+        })
+    }
+
+    has_local = (self: @Self, name: str) bool {
+        self.locals.find((l) { l.name.eq(name) }).match({
+            Ok(_) => true,
+            None  => false,
+        })
+    }
+}
+
+plan* = (a: Alloc, tree: Ast, check: Checker, target: Target)
+        Res<BuildPlan, PlanError> {
+    (check.diag_count() > 0).match({
+        true  => Err(PlanError.Refused(PlanFault.CheckedFaults)),
+        false => build_function(tree).match({
+            Err(e) => Err(e),
+            Ok(f)  => plan_function(a, tree, target, f),
+        }),
+    })
+}
+
+plan_function = (
+    a      : Alloc,
+    tree   : Ast,
+    target : Target,
+    f      : Function
+) Res<BuildPlan, PlanError> {
+    f.body.match({
+        None     => Err(PlanError.Refused(PlanFault.MissingBuild("body"))),
+        Ok(body) => f.params.get(0).match({
+            None  => Err(PlanError.Refused(PlanFault.MissingBuild(
+                "builder parameter"
+            ))),
+            Ok(p) => execute_function(
+                a,
+                tree,
+                target,
+                p.name.text,
+                tree.block_at(body)
+            ),
+        }),
+    })
+}
+
+execute_function = (
+    a       : Alloc,
+    tree    : Ast,
+    target  : Target,
+    builder : str,
+    body    : Block
+) Res<BuildPlan, PlanError> {
+    ex ::= Executor(
+        alloc: a,
+        tree: tree,
+        builder: builder,
+        locals: a.Vec<Local>(),
+        plan: BuildPlan(
+            target: target,
+            imports: a.Vec<CImportNode>(),
+            libs: a.Vec<LibNode>(),
+            exes: a.Vec<ExeNode>()
+        )
+    );
+    ex.block(body).try();
+    Ok(ex.plan)
+}
+
+failed_value = (fault: PlanFault) Res<Value, PlanError> {
+    Err(PlanError.Refused(fault))
+}
+
+build_function = (tree: Ast) Res<Function, PlanError> {
+    Range(0, tree.module_count()).find((i) {
+        tree.module_at(i).match({
+            None  => false,
+            Ok(m) => m.decls.find((d) {
+                d.kind.match({
+                    Function(f) => f.name.text.eq("build"),
+                    _           => false,
+                })
+            }).match({ Ok(_) => true, None => false }),
+        })
+    }).match({
+        None  => Err(PlanError.Refused(PlanFault.MissingBuild("function"))),
+        Ok(i) => function_in(tree, i),
+    })
+}
+
+function_in = (tree: Ast, module: usize) Res<Function, PlanError> {
+    tree.module_at(module).match({
+        None  => Err(PlanError.Refused(PlanFault.MissingBuild("module"))),
+        Ok(m) => m.decls.find((d) {
+            d.kind.match({ Function(f) => f.name.text.eq("build"), _ => false })
+        }).match({
+            None  => Err(PlanError.Refused(PlanFault.MissingBuild("function"))),
+            Ok(d) => d.kind.match({
+                Function(f) => Ok(f),
+                _           => Err(PlanError.Refused(PlanFault.MissingBuild(
+                    "declaration"
+                ))),
+            }),
+        }),
+    })
+}
+
+allocated = (r: Res<(), AllocError>) Res<(), PlanError> {
+    r.match({
+        Ok(_)  => Ok(()),
+        Err(_) => Err(PlanError.OutOfMemory),
+    })
+}
