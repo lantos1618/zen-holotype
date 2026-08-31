@@ -71,7 +71,7 @@ write_units = (
     bad ::= write_at(a, env, dir, "zen.h", hdr.view()).try();
     seq = order(a, be.fn_names).try();
     Range(0, tree.module_count()).loop((h, u) {
-        bad = bad + write_unit(a, env, tree, be, dir, seq, u).try();
+        bad = bad + write_unit(env, tree, be, dir, seq, u).try();
     });
     (bad == 0).match({
         false => Ok(bad),
@@ -101,7 +101,6 @@ write_symbol_map_at = (a: Alloc, env: Env, be :: CBackend, path: str)
 // emitted into it. Every other module with no body of its own
 // contributes no file, because an empty one still costs a process.
 write_unit = (
-    a    : Alloc,
     env  : Env,
     tree : Ast,
     be   :: CBackend,
@@ -111,12 +110,11 @@ write_unit = (
 ) Res<usize, AllocError> {
     ((u == 0) || unit_used(be, u)).match({
         false => Ok(0),
-        true  => write_unit_at(a, env, tree, be, dir, seq, u),
+        true  => write_unit_at(env, tree, be, dir, seq, u),
     })
 }
 
 write_unit_at = (
-    a    : Alloc,
     env  : Env,
     tree : Ast,
     be   :: CBackend,
@@ -124,11 +122,12 @@ write_unit_at = (
     seq  : Vec<usize>,
     u    : usize
 ) Res<usize, AllocError> {
-    out ::= a.Emit().try();
+    scratch ::= env.mem.alloc();
+    out     ::= scratch.Emit().try();
     emit_unit(be, 0, u, seq, out).try();
-    name ::= a.String().try();
+    name ::= scratch.String().try();
     unit_file(tree, u, name).try();
-    write_at(a, env, dir, name.view(), out.view())
+    write_at(scratch, env, dir, name.view(), out.view())
 }
 
 // THE FILE IS NAMED FOR THE MODULE, dots and all, because the module

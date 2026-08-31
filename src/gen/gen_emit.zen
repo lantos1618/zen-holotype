@@ -140,6 +140,11 @@ Emit* = {
     view* = (self: @Self) str { self.text.view() }
 
     len* = (self: @Self) usize { self.text.len() }
+
+    // Transfer the finished buffer to a longer-lived owner. The Emit is not
+    // written again after this; returning its String header avoids copying
+    // every byte of a completed function body into a second arena buffer.
+    into_string* = (self: @Self) String { self.text }
 }
 
 // `alloc.Emit()` — ufcs constructor beside the type it builds, like
@@ -156,45 +161,98 @@ Emit* = (a: Alloc) Res<Emit, AllocError> {
 // keys belong to (a declaration, a type, a function) without this file
 // needing to know what that is.
 //
-// Insertion sort, STABLE: equal keys keep input order, so a duplicate
-// name (a backend should report that, not silently reorder it) doesn't
-// move under shuffled input. Hundreds of top-level names per unit, never
-// millions — the simplest-to-verify version is the right one.
+// Bottom-up merge sort, STABLE: equal keys keep input order, so a duplicate
+// name (a backend should report that, not silently reorder it) doesn't move
+// under shuffled input. The compiler has thousands of long mangled keys;
+// insertion sort made ordering quadratic in both comparisons and bytes.
 order* = (a: Alloc, keys: Vec<String>) Res<Vec<usize>, AllocError> {
     out ::= a.Vec<usize>();
+    tmp ::= a.Vec<usize>();
     Range(0, keys.len).loop((h, i) {
-        insert_ordered(out, keys, i).try();
+        out.add(i).try();
+        tmp.add(i).try();
     });
+    width         ::= 1;
+    source_is_out ::= true;
+    loop(() { width < out.len }, (h) {
+        source_is_out.match({
+            true  => merge_pass(out, tmp, keys, width),
+            false => merge_pass(tmp, out, keys, width),
+        }).try();
+        source_is_out = !source_is_out;
+        (width > out.len / 2).match({
+            true  => h.break(),
+            false => { width = width * 2; },
+        });
+    });
+    (!source_is_out).then(() { copy_order(tmp, out).try() });
     Ok(out);
 }
 
-// THE WALK STOPS WHERE THE ELEMENT LANDS, and that is not a micro
-// optimisation. Without the break this ran all n-1 comparisons on every
-// insertion, settled or not — Theta(n^2) unconditionally rather than
-// adaptively — and the keys being compared are mangled symbols over 100
-// characters long. Measured self-compiling `src/`: 10,032 insertions
-// drove 20,727,600 full `str.before` compares and 787 of the build's 860
-// million `str.index` calls, 29.63% of self time at -O2.
-//
-// The header above says why nobody looked: "hundreds of top-level names
-// per unit, never millions". It is ten thousand.
-insert_ordered = (out :: Vec<usize>, keys: Vec<String>, i: usize)
-                 Res<(), AllocError> {
-    out.add(i).try();
-    n = out.len;
-    Range(1, n).loop((h, k) {
-        j    = n - k;
-        prev = index_at(out, j - 1);
-        cur  = index_at(out, j);
-        earlier(keys, cur, prev).match({
-            false => h.break(),
-            true  => {
-                put(out, j - 1, cur).try();
-                put(out, j, prev).try();
-            },
+merge_pass = (
+    src   : Vec<usize>,
+    dst   :: Vec<usize>,
+    keys  : Vec<String>,
+    width : usize
+)
+             Res<(), AllocError> {
+    start ::= 0;
+    loop(() { start < src.len }, (h) {
+        left  = smaller(width, src.len - start);
+        mid   = start + left;
+        right = smaller(width, src.len - mid);
+        merge_run(src, dst, keys, start, mid, mid + right).try();
+        start = mid + right;
+    });
+    Ok(())
+}
+
+smaller = (a: usize, b: usize) usize {
+    (a < b).match({ true => a, false => b })
+}
+
+merge_run = (
+    src   : Vec<usize>,
+    dst   :: Vec<usize>,
+    keys  : Vec<String>,
+    start : usize,
+    mid   : usize,
+    end   : usize
+) Res<(), AllocError> {
+    left  ::= start;
+    right ::= mid;
+    Range(start, end).loop((h, at) {
+        take_right = right_first(src, keys, left, mid, right, end);
+        from       = take_right.match({ true => right, false => left });
+        put(dst, at, index_at(src, from)).try();
+        take_right.match({
+            true  => { right = right + 1; },
+            false => { left = left + 1; },
         });
     });
-    Ok(());
+    Ok(())
+}
+
+right_first = (
+    src   : Vec<usize>,
+    keys  : Vec<String>,
+    left  : usize,
+    mid   : usize,
+    right : usize,
+    end   : usize
+) bool {
+    (left == mid).match({
+        true  => true,
+        false => (right == end).match({
+            true  => false,
+            false => earlier(keys, index_at(src, right), index_at(src, left)),
+        }),
+    })
+}
+
+copy_order = (src: Vec<usize>, dst :: Vec<usize>) Res<(), AllocError> {
+    Range(0, src.len).loop((h, i) { put(dst, i, index_at(src, i)).try(); });
+    Ok(())
 }
 
 // `keys[i]` strictly before `keys[j]` — strict, so equal keys never
