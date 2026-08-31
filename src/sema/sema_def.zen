@@ -687,28 +687,39 @@ World* = (a: Alloc, tree: Ast) Res<World, AllocError> {
         folders: a.Map<str, usize>(),
         alloc: a,
     );
+    // IDs step beside usize positions; no unchecked narrowing.
+    module_id: u32 ::= 0;
     Range(0, tree.module_count()).loop((h, i) {
         tree.module_at(i).match({
-            Ok(m) => add_module(w, a, m, i),
+            Ok(m) => add_module(w, a, m, i, module_id),
             None  => Ok(()),
         }).try();
+        module_id = module_id + 1;
     });
     Ok(w);
 }
 
-add_module = (w :: World, a: Alloc, m: Module, i: usize) Res<(), AllocError> {
-    t ::= ModuleTable(
+add_module = (
+    w  :: World,
+    a  : Alloc,
+    m  : Module,
+    i  : usize,
+    mi : u32
+) Res<(), AllocError> {
+    t            ::= ModuleTable(
         name: m.name,
         index: 0,
         defs: a.Vec<Def>(),
         imports: a.Vec<ImportBinding>(),
         impls: a.Vec<ImplId>(),
     );
+    decl_id: u32 ::= 0;
     Range(0, m.decls.len).loop((h, di) {
         m.decls.get(di).match({
-            Ok(d) => index_decl(t, a, m, d, i, di),
+            Ok(d) => index_decl(t, a, m, d, mi, decl_id),
             None  => Ok(()),
         }).try();
+        decl_id = decl_id + 1;
     });
     w.tables.add(t).try();
     set_first(w.exact, m.name, i).try();
@@ -738,10 +749,10 @@ index_decl = (
     a  : Alloc,
     m  : Module,
     d  : Decl,
-    mi : usize,
-    di : usize
+    mi : u32,
+    di : u32
 ) Res<(), AllocError> {
-    id = decl_id(mi, di);
+    id = DeclId(module: mi, decl: di);
     d.kind.match({
         Struct(s)   => add_def(
             t,
@@ -864,28 +875,6 @@ last_segment* = (name: str) str {
         (name.index(i) == '.').then(() { cut = i + 1; });
     });
     name.slice(cut, name.len)
-}
-
-// The coordinate of a declaration. Both indices are positions in a
-// `Vec`, so they are `usize`, and `DeclId` holds `u32` for the reason
-// `ast_id.zen` gives. This is the one narrowing in the file and it is
-// done by counting rather than converting.
-decl_id* = (mi: usize, di: usize) DeclId {
-    DeclId(module: index_u32(mi), decl: index_u32(di))
-}
-
-// `usize` to `u32` by counting up, because `std.core.num` carries only
-// LOSSLESS conversions — a narrowing one can fail, so it is not there to
-// call. Counting is honest about that: a tree with four billion modules
-// saturates rather than wrapping, and four billion is not a number this
-// compiler reaches.
-//
-// This belongs in `std.core.num` as a `Res`-returning `to_u32`, and
-// `docs/SEMA_BOOTSTRAP_FIXES.md` records it as a std gap.
-index_u32* = (v: usize) u32 {
-    n ::= 0;
-    Range(0, v).loop((h, i) { n = n + 1; });
-    n
 }
 
 decl_at* = (tree: Ast, id: DeclId) Res<Decl> {

@@ -28,7 +28,7 @@ FsError = std.env
 Ast = std.ast.ast_arena
 
 Checker = sema.sema
-Emit, CBackend, order = gen.gen
+Emit, CBackend, order, render_symbol_map = gen.gen
 lower_program, emit_header, emit_unit, unit_used = gen.gen
 
 // One `.c` per module beside the one `zen.h` they all include, written
@@ -40,7 +40,8 @@ lower_program, emit_header, emit_unit, unit_used = gen.gen
 // single-file path does it: the header is assembled first because
 // assembling it is what emits the type definitions, and everything a
 // unit adds after that is bytes already lowered.
-emit_units* = (a: Alloc, env: Env, tree: Ast, c :: Checker, dir: str, ffi: bool)
+emit_units* = (a: Alloc, env: Env, tree: Ast, c :: Checker, dir: str,
+               ffi: bool, symbol_map: str)
               Res<usize, AllocError> {
     be ::= a.CBackend(tree, c).try();
     (ffi).then(() { be.enable_ffi(); });
@@ -54,24 +55,46 @@ emit_units* = (a: Alloc, env: Env, tree: Ast, c :: Checker, dir: str, ffi: bool)
     (n > 0).then(() { println("{}", report.view()); });
     (n == 0).match({
         false => Ok(n),
-        true  => write_units(a, env, tree, be, dir, hdr),
+        true  => write_units(a, env, tree, be, dir, hdr, symbol_map),
     })
 }
 
 write_units = (
-    a    : Alloc,
-    env  : Env,
-    tree : Ast,
-    be   :: CBackend,
-    dir  : str,
-    hdr  : Emit
+    a          : Alloc,
+    env        : Env,
+    tree       : Ast,
+    be         :: CBackend,
+    dir        : str,
+    hdr        : Emit,
+    symbol_map : str
 ) Res<usize, AllocError> {
     bad ::= write_at(a, env, dir, "zen.h", hdr.view()).try();
     seq = order(a, be.fn_names).try();
     Range(0, tree.module_count()).loop((h, u) {
         bad = bad + write_unit(a, env, tree, be, dir, seq, u).try();
     });
-    Ok(bad);
+    (bad == 0).match({
+        false => Ok(bad),
+        true  => Ok(bad + write_symbol_map(a, env, be, symbol_map).try()),
+    });
+}
+
+write_symbol_map* = (a: Alloc, env: Env, be :: CBackend, path: str)
+                    Res<usize, AllocError> {
+    path.is_empty().match({
+        true  => Ok(0),
+        false => write_symbol_map_at(a, env, be, path),
+    })
+}
+
+write_symbol_map_at = (a: Alloc, env: Env, be :: CBackend, path: str)
+                      Res<usize, AllocError> {
+    out ::= a.String().try();
+    render_symbol_map(be, out).try();
+    env.fs.write(path, out.view()).match({
+        Ok(_)  => Ok(0),
+        Err(e) => { println("--symbol-map {}: {}", path, fs_message(e)); Ok(1) },
+    })
 }
 
 // MODULE 0 IS WRITTEN WHATEVER IT HOLDS: it is the root, and `main` is

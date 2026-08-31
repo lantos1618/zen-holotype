@@ -64,6 +64,7 @@ Job* = {
     // behaviour. Set by `--std <path>` or the `ZEN_STD` environment
     // variable; the flag wins when both are present.
     std_root* :: str = "",
+    symbol_map* :: str = "",
     emit_c*: bool,
     // KEPT FOR BACKWARD COMPATIBILITY. Bodyless non-generic free
     // functions are now always lowered as foreign C symbols, so this flag
@@ -119,11 +120,11 @@ FmtJob* = {
 // of the two scans that read it would silently start on the command.
 ARGS*: usize = 2
 
-USAGE*: str = "usage: zen build <root> [--entry <file>] [--std <path>] [--ffi] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
+USAGE*: str = "usage: zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
 
 // What one argument is. A classifier, not a chain of matches at the
 // scan site — the scan stays readable while it carries the cursor.
-Arg = EmitC | EmitDir | Out | Entry | Std | Repeat | Permute | Ffi | Flag | Word
+Arg = EmitC | EmitDir | Out | Entry | Std | SymbolMap | Repeat | Permute | Ffi | Flag | Word
 
 cli* = (env: Env, argv: Vec<str>) Cli {
     argv.get(1).match({
@@ -204,17 +205,18 @@ is_word = (word: str) bool { !word.is_empty() && !is_flag(word) }
 // The scan. One pass, one cursor, a `bad` that stops it: the first
 // argument that makes no sense is worth naming; a fifth would bury it.
 job_of = (env: Env, argv: Vec<str>) Cli {
-    root     ::= "";
-    out      ::= "";
-    dir      ::= "";
-    entry    ::= "";
-    std_root ::= env.var("ZEN_STD").match({ Ok(p) => p, None => "" });
-    runs     ::= 1;
-    perm     ::= "";
-    emit     ::= false;
-    ffi      ::= false;
-    bad      ::= "";
-    i        ::= ARGS;
+    root       ::= "";
+    out        ::= "";
+    dir        ::= "";
+    entry      ::= "";
+    std_root   ::= env.var("ZEN_STD").match({ Ok(p) => p, None => "" });
+    symbol_map ::= "";
+    runs       ::= 1;
+    perm       ::= "";
+    emit       ::= false;
+    ffi        ::= false;
+    bad        ::= "";
+    i          ::= ARGS;
     loop(() { i < argv.len && bad.is_empty() }, (h) {
         arg  = arg_at(argv, i);
         i    = i + 1;
@@ -231,6 +233,7 @@ job_of = (env: Env, argv: Vec<str>) Cli {
                 Out     => { out = arg_at(argv, i); i = i + 1; },
                 Entry   => { entry = arg_at(argv, i); i = i + 1; },
                 Std     => { std_root = arg_at(argv, i); i = i + 1; },
+                SymbolMap => { symbol_map = arg_at(argv, i); i = i + 1; },
                 Repeat  => { runs = arg_at(argv, i).runs_of(); i = i + 1; },
                 Permute => { perm = arg_at(argv, i); i = i + 1; },
                 Ffi     => { ffi = true; },
@@ -243,7 +246,14 @@ job_of = (env: Env, argv: Vec<str>) Cli {
         });
     });
     verdict(
-        Where(root: root, out: out, dir: dir, entry: entry, std_root: std_root),
+        Where(
+            root: root,
+            out: out,
+            dir: dir,
+            entry: entry,
+            std_root: std_root,
+            symbol_map: symbol_map
+        ),
         emit,
         bad,
         Debug(repeat: runs, permute: perm),
@@ -251,14 +261,14 @@ job_of = (env: Env, argv: Vec<str>) Cli {
     );
 }
 
-// The three paths one scan produced, bundled so `verdict` and `built`
-// keep their shape as the scan grows a flag.
+// The paths one scan produced, bundled so `verdict` and `built` stay flat.
 Where = {
     root*: str,
     out*: str,
     dir*: str,
     entry*: str,
     std_root*: str,
+    symbol_map*: str,
 }
 
 verdict = (w: Where, emit: bool, bad: str, dbg: Debug, ffi: bool) Cli {
@@ -287,6 +297,7 @@ built = (w: Where, emit: bool, dbg: Debug, ffi: bool) Cli {
             dir: w.dir,
             entry: w.entry,
             std_root: w.std_root,
+            symbol_map: w.symbol_map,
             emit_c: emit,
             ffi: ffi,
             debug: dbg
@@ -312,6 +323,7 @@ classify = (a: str) Arg {
         a.eq("-o").then(() { h.break(Arg.Out) });
         a.eq("--entry").then(() { h.break(Arg.Entry) });
         a.eq("--std").then(() { h.break(Arg.Std) });
+        a.eq("--symbol-map").then(() { h.break(Arg.SymbolMap) });
         a.eq("--repeat").then(() { h.break(Arg.Repeat) });
         a.eq("--permute").then(() { h.break(Arg.Permute) });
         a.eq("--ffi").then(() { h.break(Arg.Ffi) });
@@ -330,6 +342,7 @@ takes_value = (a: Arg) bool {
         Out     => true,
         Entry   => true,
         Std     => true,
+        SymbolMap => true,
         Repeat  => true,
         Permute => true,
         _       => false,

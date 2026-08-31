@@ -18,6 +18,7 @@
 // one-way edge.
 
 Alloc, AllocError = std.mem
+String = std.text
 Range = std.core
 
 Job = zen.zen_cli
@@ -87,24 +88,33 @@ at_least_one = (n: usize) usize {
 // No `-o` means the C goes to stdout, where a run number has nothing
 // to attach to, so the job passes through unchanged and every run prints.
 job_for = (a: Alloc, job: Job, i: usize) Res<Job, AllocError> {
-    (i == 0 || job.out.is_empty()).match({
+    (i == 0 || (job.out.is_empty() && job.symbol_map.is_empty())).match({
         true  => Ok(job),
         false => numbered(a, job, i),
     })
 }
 
 numbered = (a: Alloc, job: Job, i: usize) Res<Job, AllocError> {
-    out ::= a.String("{}.{}", job.out, i + 1).try();
+    out = numbered_path(a, job.out, i).try();
+    symbols = numbered_path(a, job.symbol_map, i).try();
     Ok(Job(
         root: job.root,
         out: out.view(),
         dir: job.dir,
         entry: job.entry,
         std_root: job.std_root,
+        symbol_map: symbols.view(),
         emit_c: job.emit_c,
         ffi: job.ffi,
         debug: job.debug
     ));
+}
+
+numbered_path = (a: Alloc, path: str, i: usize) Res<String, AllocError> {
+    path.is_empty().match({
+        true  => a.String(),
+        false => a.String("{}.{}", path, i + 1),
+    })
 }
 
 // The worse of two exit codes: a run that found something outranks one

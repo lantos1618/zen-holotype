@@ -1,0 +1,68 @@
+Alloc, AllocError = std.mem
+str, String = std.text
+Source, scan = std.lex
+Parser = std.parse.parser
+module = std.parse.parse_decl
+Span, Pos = std.ast
+Checker = sema.sema_check
+Emit = gen.gen_emit
+CBackend, emit_program, render_symbol_map = gen.gen_c
+
+PROGRAM : str = "helper = () i32 { 7 }\nmain = (env: i32) i32 { helper() }\n"
+
+has = (text: str, needle: str) bool {
+    text.find(needle).match({ Ok(_) => true, None => false })
+}
+
+before = (text: str, left: str, right: str) bool {
+    text.find(left).match({
+        None    => false,
+        Ok(one) => text.find(right).match({ Ok(two) => one < two, None => false }),
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    file = "odd\\path\trow\nmain.zen";
+    lexed = scan(a, Source(file: file, text: PROGRAM)).try();
+    p ::= a.Parser(lexed);
+    m = p.module("main").try();
+    p.tree.add_module(m).try();
+    check ::= a.Checker(p.tree).try();
+    be ::= a.CBackend(p.tree, check).try();
+    c ::= a.Emit().try();
+    be.emit_program(0, c).try();
+
+    span = Span(
+        file: file,
+        start: Pos(line: 9, col: 4),
+        end: Pos(line: 9, col: 5)
+    );
+    be.add_source_function(
+        a.String("zz_source").try(),
+        a.String("static void zz_source(void)").try(),
+        a.String().try(),
+        span
+    ).try();
+    be.add_function(
+        a.String("mm_generated").try(),
+        a.String("static void mm_generated(void)").try(),
+        a.String().try()
+    ).try();
+    be.add_source_function(
+        a.String("aa_source").try(),
+        a.String("static void aa_source(void)").try(),
+        a.String().try(),
+        span
+    ).try();
+
+    map ::= a.String().try();
+    render_symbol_map(be, map).try();
+    again ::= a.String().try();
+    render_symbol_map(be, again).try();
+    println("stable={}", map.view().eq(again.view()));
+    println("ordered={}", before(map.view(), "aa_source", "zz_source"));
+    println("generated-absent={}", !has(map.view(), "mm_generated"));
+    println("path-escaped={}", has(map.view(), "odd\\\\path\\trow\\nmain.zen\t9\t4"));
+    Ok(0)
+}

@@ -33,7 +33,7 @@ ty_at = sema.sema_cand
 Emit, order = gen.gen_emit
 sym_fn, sym_local = gen.gen_name
 GenFault = gen.gen_diag
-CBackend, MethodRef = gen.gen_c.gen_c_state
+CBackend, MethodRef, FnOrigin = gen.gen_c.gen_c_state
 LocalSlot = gen.gen_c.gen_c_frame
 sub, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 open_named = gen.gen_c.gen_c_mono
@@ -577,7 +577,7 @@ lower_shape = (
     be.write_proto(qname, name, span, f, ret, sig, proto).try();
     be.open_buf().try();
     be.write_body(blk, mi, ret, self_ty, sctx.has_self).try();
-    be.keep(qname, sig, proto).try();
+    be.keep(qname, sig, proto, span).try();
     Ok(());
 }
 
@@ -817,16 +817,61 @@ destination = (be :: CBackend, ret: TyId) Dest {
     })
 }
 
-keep = (be :: CBackend, qname: str, sig: Vec<TyId>, proto: String)
+keep = (be :: CBackend, qname: str, sig: Vec<TyId>, proto: String, span: Span)
        Res<(), AllocError> {
     name ::= be.alloc.String().try();
     sym_fn(name, be.check.types, be.check.world, qname, sig, be.inst).try();
     text ::= be.alloc.String().try();
     text.add_bytes(be.text()).try();
-    be.add_function(name, proto, text)
+    be.add_source_function(name, proto, text, span)
 }
 
 // assembly
+
+// Paths are root-relative like diagnostics; escaping keeps one record per row.
+render_symbol_map* = (be :: CBackend, out :: String) Res<(), AllocError> {
+    out.add_bytes("zen-symbol-map-v1\n").try();
+    out.add_bytes("symbol\tfile\tline\tcolumn\n").try();
+    seq = order(be.alloc, be.fn_names).try();
+    seq.loop((h, i) { be.write_symbol_at(i, out).try() });
+    Ok(());
+}
+
+write_symbol_at = (be :: CBackend, i: usize, out :: String)
+                  Res<(), AllocError> {
+    be.origin_of(i).match({
+        Generated    => Ok(()),
+        Source(span) => be.fn_names.get(i).match({
+            None       => Ok(()),
+            Ok(symbol) => write_symbol_row(symbol.view(), span, out),
+        }),
+    })
+}
+
+write_symbol_row = (symbol: str, span: Span, out :: String)
+                   Res<(), AllocError> {
+    write_map_field(symbol, out).try();
+    out.add_byte('\t').try();
+    write_map_field(span.file, out).try();
+    out.add_byte('\t').try();
+    out.write_usize(span.start.line).try();
+    out.add_byte('\t').try();
+    out.write_usize(span.start.col).try();
+    out.add_byte('\n')
+}
+
+write_map_field = (text: str, out :: String) Res<(), AllocError> {
+    Range(0, text.len).loop((h, i) {
+        text.index(i).match({
+            '\\' => out.add_bytes("\\\\"),
+            '\t' => out.add_bytes("\\t"),
+            '\n' => out.add_bytes("\\n"),
+            '\r' => out.add_bytes("\\r"),
+            b    => out.add_byte(b),
+        }).try();
+    });
+    Ok(());
+}
 
 emit_protos = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     externs = order(be.alloc, be.extern_names).try();

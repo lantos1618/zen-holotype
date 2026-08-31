@@ -19,7 +19,7 @@
 
 str, String = std.text
 Vec, Map, Ordered = std.collections
-Alloc, AllocError = std.mem
+Alloc, AllocError, Arena = std.mem
 Range = std.core
 ExprId, Access, Member, Impl, Ident, nowhere = std.ast
 module_index_of = std.ast.ast_named
@@ -69,6 +69,141 @@ Trigger* = {
     text*: str,
     prefix*: str,
     dot*: bool,
+}
+
+// `x.`, `x.f` and `x.foo` have the same DUMMY-patched text. Cache their
+// prefix-free checked candidates, not the whole temporary Checker.
+MemberAnswer = {
+    workspace : str,
+    path      : str,
+    patched   : str,
+    items     : Vec<Item>,
+}
+
+MemberCache* = {
+    arena :: Arena,
+    cur   :: Res<MemberAnswer>,
+    stale :: bool = false,
+    builds* :: usize = 0,
+
+    invalidate* = (self :: @Self) () { self.stale = true; }
+
+    complete* = (
+        self      :: @Self,
+        env       : Env,
+        a         : Alloc,
+        workspace : str,
+        path      : str,
+        text      : str,
+        line      : usize,
+        character : usize,
+        out       :: Vec<Item>
+    ) Res<bool, AllocError> {
+        trig = trigger_at(a, text, line, character).try();
+        trig.dot.match({
+            false => Ok(false),
+            true  => {
+                self.matches(workspace, path, trig.text).match({
+                    true  => written(),
+                    false => self.refill(env, workspace, path, trig.text),
+                }).try();
+                self.filtered(trig.prefix, out).try();
+                Ok(true)
+            },
+        })
+    }
+
+    matches = (self: @Self, workspace: str, path: str, patched: str) bool {
+        self.stale.match({
+            true  => false,
+            false => self.cur.match({
+                None     => false,
+                Ok(have) => have.workspace.eq(workspace)
+                    && have.path.eq(path)
+                    && have.patched.eq(patched),
+            }),
+        })
+    }
+
+    refill = (self :: @Self, env: Env, workspace: str, path: str,
+              patched: str) Res<(), AllocError> {
+        // Copy the answer, then let the temporary whole build die.
+        qa    ::= env.mem.alloc();
+        found ::= qa.Vec<Item>();
+        workspace.is_empty().match({
+            true  => {
+                c ::= check_standalone(qa, "doc", patched).try();
+                items_from(
+                    c,
+                    qa,
+                    "doc",
+                    Trigger(text: patched, prefix: "", dot: true),
+                    found
+                )
+            },
+            false => {
+                checked = check_build(env, qa, workspace, path, patched).try();
+                items_from(
+                    checked.c,
+                    qa,
+                    checked.rel,
+                    Trigger(text: patched, prefix: "", dot: true),
+                    found
+                )
+            },
+        }).try();
+
+        fresh_arena ::= env.mem.alloc();
+        kept_items  ::= fresh_arena.Vec<Item>();
+        found.loop((h, item) {
+            kept_items.add(Item(
+                label: cache_str(fresh_arena, item.label).try(),
+                kind: item.kind
+            )).try();
+        });
+        fresh = MemberAnswer(
+            workspace: cache_str(fresh_arena, workspace).try(),
+            path: cache_str(fresh_arena, path).try(),
+            patched: cache_str(fresh_arena, patched).try(),
+            items: kept_items
+        );
+
+        self.arena.drop();
+        self.arena  = consume fresh_arena;
+        self.cur    = Ok(fresh);
+        self.stale  = false;
+        self.builds = self.builds + 1;
+        Ok(())
+    }
+
+    filtered = (self: @Self, prefix: str, out :: Vec<Item>)
+               Res<(), AllocError> {
+        self.cur.match({
+            None       => written(),
+            Ok(answer) => {
+                answer.items.loop((h, item) {
+                    has_prefix(item.label, prefix).then(() {
+                        out.add(item).try();
+                    });
+                });
+                Ok(())
+            },
+        })
+    }
+}
+
+MemberCache.impl(Drop, {
+    drop = (self :: @Self) () { self.arena.drop(); }
+})
+
+MemberCache* = (env: Env) MemberCache {
+    MemberCache(arena: env.mem.alloc(), cur: None)
+}
+
+cache_str = (a: Alloc, text: str) Res<str, AllocError> {
+    kept ::= a.String().try();
+    kept.add_bytes(text).try();
+    Ok(kept.view())
 }
 
 // A lone buffer has no workspace imports.

@@ -12,6 +12,7 @@ SHELL       := /bin/bash
 
 CC      ?= cc
 CFLAGS  ?= -O2 -std=c99
+PROFILE_CFLAGS ?= -O2 -std=c99 -g -fno-omit-frame-pointer
 PY      ?= python3
 ROOT    ?= src
 
@@ -31,7 +32,7 @@ J       ?= $(shell nproc 2>/dev/null || echo 4)
 CACHE   ?= $(shell command -v ccache 2>/dev/null)
 ZCC      = $(CACHE) $(CC)
 
-.PHONY: all build seed test lint parse cap dupcomments faults lextile determinism grammar fmt asan leak clean help
+.PHONY: all build seed test lint parse cap dupcomments faults lextile determinism grammar fmt asan leak profile clean help
 
 all: test
 
@@ -282,6 +283,12 @@ asan: seed/zen.c
 ## reporting them would fail every run on a known-non-bug.
 leak: build
 	tests/bench/leak.sh ./zen
+
+## profile: -O2 keeps samples representative; -g and frame pointers make them
+## readable and walkable. Separate objects leave ordinary ./zen untouched.
+profile: build
+	ls build/c/*.c | xargs -P $(J) -I{} $(ZCC) $(PROFILE_CFLAGS) -c {} -o {}.profile.o
+	$(CC) build/c/*.c.profile.o -o zen-fp
 
 clean:
 	rm -f zen zen-new zen-asan zen-fp grammar/zen.so

@@ -52,7 +52,7 @@ Hover, hover_at, hover_in, hover_with = lsp.lsp_hover
 definition_at, definition_in, definition_with = lsp.lsp_def
 Sym, symbols_at, write_symbols = lsp.lsp_symbol
 write_edits = lsp.lsp_fmt
-Item, complete_at, complete_in, complete_shared = lsp.lsp_compl
+Item, MemberCache, complete_at, complete_shared = lsp.lsp_compl
 sort_items, write_items = lsp.lsp_compl
 // The colours, and the legend `initialize` advertises them under — one
 // file, for the reason `lsp_reply.zen` gives at its own import.
@@ -109,6 +109,10 @@ Server* = {
     // policy lives in `lsp_diag.zen`; this file only marks and settles.
     notes :: Diagnostics,
 
+    // The prefix-free candidate set for the last canonical dot completion.
+    // Its temporary Checker dies after a miss; only labels stay cached.
+    members :: MemberCache,
+
     ready :: bool,        // `initialize` has been answered
     stopping :: bool,     // `shutdown` has been answered
 
@@ -116,6 +120,9 @@ Server* = {
     // nothing outside this file may decide when the server stops
     // accepting work.
     stopped* = (self: @Self) bool { self.stopping }
+
+    // Observable for the corpus performance invariant.
+    completion_builds* = (self: @Self) usize { self.members.builds }
 
     // One message: read it, route it, frame whatever it produced.
     //
@@ -206,6 +213,7 @@ Server* = {
     // first.
     initialized = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                    rid: JsonId, msg :: String) Res<(), AllocError> {
+        self.members.invalidate();
         self.ready     = true;
         self.workspace = own_str(
             self.a,
@@ -279,7 +287,11 @@ Server* = {
             false => written(),
             true  => self.open.get(self.open.len - 1).match({
                 None      => written(),
-                Ok(entry) => { self.notes.stales(entry); Ok(()) },
+                Ok(entry) => {
+                    self.members.invalidate();
+                    self.notes.stales(entry);
+                    Ok(())
+                },
             }),
         })
     }
@@ -317,6 +329,7 @@ Server* = {
 
     forget = (self :: @Self, uri: str) Res<(), AllocError> {
         stable = own_str(self.a, uri).try();
+        self.members.invalidate();
         self.replace_docs(uri, None).try();
         Range(0, self.open.len).find((i) {
             self.open.get(i).match({ None => false, Ok(u) => u.eq(uri) })
@@ -722,13 +735,8 @@ Server* = {
         })
     }
 
-    // COMPLETION IN THREE PARTS, by where the build comes from. No
-    // workspace: the lone module, in the request's own arena. A workspace
-    // and a trigger that is not after a dot: the buffer parses as it
-    // stands, so the SHARED build's checker answers. After a dot the
-    // buffer does not parse — `complete_in` patches in a dummy identifier
-    // and builds THAT, a state the slot never holds by definition, so
-    // the patched build is the request's own and dies with `qa`.
+    // Plain completion reads the shared (or lone-module) checker. A dot
+    // needs DUMMY-patched text; `members` caches its prefix-free candidates.
     completed = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                  rid: JsonId, msg :: String) Res<(), AllocError> {
         uri       = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -743,7 +751,19 @@ Server* = {
                     true  => {
                         qa    ::= self.env.mem.alloc();
                         items ::= qa.Vec<Item>();
-                        complete_at(qa, text, line, character, items).try();
+                        cached = self.members.complete(
+                            self.env,
+                            qa,
+                            self.workspace,
+                            path_of(uri),
+                            text,
+                            line,
+                            character,
+                            items
+                        ).try();
+                        (!cached).then(() {
+                            complete_at(qa, text, line, character, items).try();
+                        });
                         sort_items(items).try();
                         write_items(items, body)
                     },
@@ -783,7 +803,14 @@ Server* = {
         });
         done.match({
             true  => written(),
-            false => self.patched_completion(path, text, line, character, body),
+            false => self.patched_completion(
+                t,
+                path,
+                text,
+                line,
+                character,
+                body
+            ),
         })
     }
 
@@ -810,14 +837,13 @@ Server* = {
         Ok(done);
     }
 
-    patched_completion = (self :: @Self, path: str, text: str, line: usize,
-                          character: usize, body :: String)
+    patched_completion = (self :: @Self, t: Alloc, path: str, text: str,
+                          line: usize, character: usize, body :: String)
                          Res<(), AllocError> {
-        qa    ::= self.env.mem.alloc();
-        items ::= qa.Vec<Item>();
-        complete_in(
+        items ::= t.Vec<Item>();
+        self.members.complete(
             self.env,
-            qa,
+            t,
             self.workspace,
             path,
             text,
@@ -832,6 +858,7 @@ Server* = {
 
 Server.impl(Drop, {
     drop = (self :: @Self) () {
+        self.members.drop();
         self.notes.drop();
         self.docs_arena.drop();
     }
@@ -851,6 +878,7 @@ server_with_docs = (a: Alloc, env: Env, docs_arena :: Arena) Server {
         docs: docs,
         open: a.Vec<str>(),
         notes: a.Diagnostics(env),
+        members: env.MemberCache(),
         ready: false,
         stopping: false
     )

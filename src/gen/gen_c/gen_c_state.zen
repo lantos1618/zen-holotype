@@ -70,6 +70,10 @@ MethodRef* = {
 
 }
 
+// Real declarations have source positions; generated adapters do not. Keep
+// that distinction rather than guessing an origin from a mangled name.
+FnOrigin* = Generated | Source(Span)
+
 // The caller's open blocks and pending drops, set aside while a lifted
 // closure body lowers. A spawned closure becomes a function of its own,
 // and a `.try()` inside it unwinds to depth 0 — which must be the
@@ -169,6 +173,7 @@ CBackend* = {
     fn_names* :: Vec<String>,
     fn_protos* :: Vec<String>,
     fn_bodies* :: Vec<String>,
+    fn_origins :: Vec<FnOrigin>,
     // WHICH TRANSLATION UNIT EACH LOWERED FUNCTION BELONGS TO, parallel
     // to the three above and holding the MODULE INDEX of the body being
     // lowered when the function was kept. One file per module is 185
@@ -738,16 +743,33 @@ CBackend* = {
     // substitution at all.
     enter_inst* = (self :: @Self, inst: Inst) () { self.inst = inst; }
 
-    // One lowered function: its C name, its prototype and its body,
-    // held apart so the three can be emitted in the order C wants and
-    // sorted by the one key that is a pure function of the function.
+    // One lowered function, held apart for C ordering and tagged as source or
+    // generated for the optional symbol map.
     add_function* = (self :: @Self, name: String, proto: String,
                      body: String) Res<(), AllocError> {
+        self.keep_function(name, proto, body, FnOrigin.Generated)
+    }
+
+    add_source_function* = (self :: @Self, name: String, proto: String,
+                            body: String, span: Span) Res<(), AllocError> {
+        self.keep_function(name, proto, body, FnOrigin.Source(span))
+    }
+
+    keep_function = (self :: @Self, name: String, proto: String,
+                     body: String, origin: FnOrigin) Res<(), AllocError> {
         self.fn_names.add(name).try();
         self.fn_protos.add(proto).try();
         self.fn_bodies.add(body).try();
+        self.fn_origins.add(origin).try();
         self.fn_units.add(self.unit).try();
         Ok(());
+    }
+
+    origin_of* = (self: @Self, i: usize) FnOrigin {
+        self.fn_origins.get(i).match({
+            Ok(origin) => origin,
+            None       => FnOrigin.Generated,
+        })
     }
 
     // The unit every function kept from here on belongs to. Set once
@@ -1054,6 +1076,7 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         fn_names: a.Vec<String>(),
         fn_protos: a.Vec<String>(),
         fn_bodies: a.Vec<String>(),
+        fn_origins: a.Vec<FnOrigin>(),
         fn_units: a.Vec<usize>(),
         unit: 0,
         externs: false,

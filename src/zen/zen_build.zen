@@ -81,7 +81,7 @@ ENTRY, entry_of = zen.zen_path
 Unit* = zen.zen_path
 
 // where the bytes go, and why one would not
-emit_units, fs_message = zen.zen_write
+emit_units, write_symbol_map, fs_message = zen.zen_write
 
 // What order the walk reaches modules in: arithmetic on an index.
 walk_index = zen.zen_order
@@ -765,7 +765,18 @@ Build* = {
         n           = be.diag_count();
         self.faults = self.faults + n;
         (n > 0).then(() { println("{}", report.view()); });
-        (n == 0).then(() { self.deliver(job, out).try(); });
+        (n == 0).then(() {
+            before = self.faults;
+            self.deliver(job, out).try();
+            (self.faults == before).then(() {
+                self.faults = self.faults + write_symbol_map(
+                    self.alloc,
+                    self.env,
+                    be,
+                    job.symbol_map
+                ).try();
+            });
+        });
         Ok(());
     }
 
@@ -780,7 +791,8 @@ Build* = {
             self.tree,
             c,
             job.dir,
-            self.ffi
+            self.ffi,
+            job.symbol_map
         ).try();
         self.faults = self.faults + n;
         Ok(());
