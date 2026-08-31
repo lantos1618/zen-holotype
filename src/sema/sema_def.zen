@@ -15,8 +15,8 @@
 // of starred bindings, so the chain is routinely two or three hops deep
 // and `std.core` reaches `std.core.result` through exactly this walk.
 //
-// Module names are indexed once. Name queries stay over each module's
-// source-ordered definitions because an overload set preserves that order.
+// Module and whole-program names are indexed once. Bucket insertion keeps
+// source order because overload and impl resolution observe it.
 //
 // OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
 // is "what a name means", and every query below is that one question
@@ -25,9 +25,9 @@
 // denotes, which bindings the `*` gate refused. They all read `tables`;
 // a split would put the store in one file and its readers in another.
 
-Ast, Module, Decl, Ident, Span, QualifiedName = std.ast
+Ast, Module, Decl, Ident, Span, QualifiedName, Member = std.ast
 Import, Impl, Enum = std.ast
-Alloc, AllocError = std.mem
+Alloc, AllocError, Ptr = std.mem
 Vec, Map = std.collections
 str, String = std.text
 Range = std.core
@@ -83,6 +83,12 @@ ModuleTable* = {
     impls* :: Vec<ImplId>,
 }
 
+WorldIndex = {
+    exported :: Map<str, Vec<Def>>,
+    impls :: Map<str, Vec<ImplId>>,
+    members :: Map<DeclId, Map<str, Vec<usize>>>,
+}
+
 // The one module every other module imports without saying so.
 // `bootstrap/modules.py` names the same string, and it has to be the
 // same string: the two compilers must agree about which module is
@@ -105,6 +111,7 @@ World* = {
     tables :: Vec<ModuleTable>,
     exact :: Map<str, usize>,
     folders :: Map<str, usize>,
+    index: Ptr<WorldIndex>,
     alloc: Alloc,
 
     count* = (self: @Self) usize { self.tables.len }
@@ -127,6 +134,13 @@ World* = {
         self.exact.get(name).match({
             Ok(i) => Ok(i),
             None  => self.folders.get(name),
+        })
+    }
+
+    member_rows* = (self: @Self, id: DeclId, name: str) Res<Vec<usize>> {
+        self.index.read(0).members.get(id).match({
+            None        => None,
+            Ok(by_name) => by_name.get(name),
         })
     }
 
@@ -395,12 +409,10 @@ World* = {
     // `defs_of` and still cannot see a module it did not import.
     exported_named* = (self: @Self, name: str, out :: Vec<Def>)
                       Res<(), AllocError> {
-        Range(0, self.tables.len).loop((h, mi) {
-            self.tables.get(mi).match({
-                Ok(t) => collect_exported(t.defs, name, out),
-                None  => Ok(()),
-            }).try();
-        });
+        self.index.read(0).exported.get(name).match({
+            Ok(defs) => copy_defs(defs, out),
+            None     => Ok(()),
+        }).try();
         Ok(());
     }
 
@@ -504,23 +516,10 @@ World* = {
     // importers.
     impls_named* = (self: @Self, tree: Ast, target: str, out :: Vec<ImplId>)
                    Res<(), AllocError> {
-        Range(0, self.tables.len).loop((h, mi) {
-            self.tables.get(mi).match({
-                Ok(t) => self.impls_in(tree, t, target, out),
-                None  => Ok(()),
-            }).try();
-        });
-        Ok(());
-    }
-
-    impls_in = (self: @Self, tree: Ast, t: ModuleTable, target: str,
-                out :: Vec<ImplId>) Res<(), AllocError> {
-        t.impls.loop((h, id) {
-            self.impl_at(tree, id).match({
-                Ok(im) => keep_if_target(im, target, id, out),
-                None   => Ok(()),
-            }).try();
-        });
+        self.index.read(0).impls.get(target).match({
+            Ok(ids) => copy_impls(ids, out),
+            None    => Ok(()),
+        }).try();
         Ok(());
     }
 
@@ -681,30 +680,42 @@ World* = {
 // and every declaration in it, in source order, so the indices this
 // hands out are a pure function of the input.
 World* = (a: Alloc, tree: Ast) Res<World, AllocError> {
+    index  ::= WorldIndex(
+        exported: a.Map<str, Vec<Def>>(),
+        impls: a.Map<str, Vec<ImplId>>(),
+        members: a.Map<DeclId, Map<str, Vec<usize>>>(),
+    );
+    holder ::= a.Vec<WorldIndex>();
+    holder.add(index).try();
+    slot = holder.ptr();
     w ::= World(
         tables: a.Vec<ModuleTable>(),
         exact: a.Map<str, usize>(),
         folders: a.Map<str, usize>(),
+        index: slot,
         alloc: a,
     );
     // IDs step beside usize positions; no unchecked narrowing.
     module_id: u32 ::= 0;
     Range(0, tree.module_count()).loop((h, i) {
         tree.module_at(i).match({
-            Ok(m) => add_module(w, a, m, i, module_id),
+            Ok(m) => add_module(w, index, a, tree, m, i, module_id),
             None  => Ok(()),
         }).try();
         module_id = module_id + 1;
     });
+    slot.write(0, index);
     Ok(w);
 }
 
 add_module = (
-    w  :: World,
-    a  : Alloc,
-    m  : Module,
-    i  : usize,
-    mi : u32
+    w     :: World,
+    index :: WorldIndex,
+    a     : Alloc,
+    tree  : Ast,
+    m     : Module,
+    i     : usize,
+    mi    : u32
 ) Res<(), AllocError> {
     t            ::= ModuleTable(
         name: m.name,
@@ -721,6 +732,7 @@ add_module = (
         }).try();
         decl_id = decl_id + 1;
     });
+    index_table(index, a, tree, t).try();
     w.tables.add(t).try();
     set_first(w.exact, m.name, i).try();
     alias = module_display(m.name);
@@ -728,6 +740,82 @@ add_module = (
         set_first(w.folders, alias, i).try();
     });
     Ok(());
+}
+
+index_table = (index :: WorldIndex, a: Alloc, tree: Ast, t: ModuleTable)
+              Res<(), AllocError> {
+    t.defs.loop((h, d) {
+        d.exported.then(() { index_export(index.exported, a, d).try() });
+        d.kind.match({
+            StructDef => decl_at(tree, d.id).match({
+                Ok(decl) => decl.kind.match({
+                    Struct(s) => index_members(
+                        index.members,
+                        a,
+                        d.id,
+                        s.members
+                    ),
+                    _         => Ok(()),
+                }),
+                None     => Ok(()),
+            }),
+            _         => Ok(()),
+        }).try();
+    });
+    t.impls.loop((h, id) {
+        decl_at(tree, id.decl).match({
+            Ok(d) => d.kind.match({
+                Impl(im) => index_impl(index.impls, a, im.target.text, id),
+                _        => Ok(()),
+            }),
+            None  => Ok(()),
+        }).try();
+    });
+    Ok(())
+}
+
+index_export = (index :: Map<str, Vec<Def>>, a: Alloc, d: Def)
+               Res<(), AllocError> {
+    defs ::= index.get(d.name).match({
+        Ok(found) => found,
+        None      => a.Vec<Def>(),
+    });
+    defs.add(d).try();
+    index.set(d.name, defs)
+}
+
+index_impl = (index :: Map<str, Vec<ImplId>>, a: Alloc, target: str, id: ImplId)
+             Res<(), AllocError> {
+    ids ::= index.get(target).match({
+        Ok(found) => found,
+        None      => a.Vec<ImplId>(),
+    });
+    ids.add(id).try();
+    index.set(target, ids)
+}
+
+index_members = (
+    index   :: Map<DeclId, Map<str, Vec<usize>>>,
+    a       : Alloc,
+    id      : DeclId,
+    members : Vec<Member>
+) Res<(), AllocError> {
+    by_name ::= a.Map<str, Vec<usize>>();
+    Range(0, members.len).loop((h, i) {
+        members.get(i).match({
+            None  => Ok(()),
+            Ok(m) => {
+                name = m.name().text;
+                rows ::= by_name.get(name).match({
+                    Ok(found) => found,
+                    None      => a.Vec<usize>(),
+                });
+                rows.add(i).try();
+                by_name.set(name, rows)
+            },
+        }).try();
+    });
+    index.set(id, by_name)
 }
 
 set_first = (index :: Map<str, usize>, name: str, at: usize)
@@ -884,10 +972,14 @@ decl_at* = (tree: Ast, id: DeclId) Res<Decl> {
     })
 }
 
-keep_if_target = (im: Impl, target: str, id: ImplId, out :: Vec<ImplId>)
-                 Res<(), AllocError> {
-    im.target.text.eq(target).then(() { out.add(id).try() });
+copy_defs = (src: Vec<Def>, out :: Vec<Def>) Res<(), AllocError> {
+    src.loop((h, d) { out.add(d).try() });
     Ok(());
+}
+
+copy_impls = (src: Vec<ImplId>, out :: Vec<ImplId>) Res<(), AllocError> {
+    src.loop((h, id) { out.add(id).try() });
+    Ok(())
 }
 
 collect_named = (defs: Vec<Def>, name: str, out :: Vec<Def>)
@@ -903,7 +995,7 @@ collect_exported = (defs: Vec<Def>, name: str, out :: Vec<Def>)
     defs.loop((h, d) {
         (d.exported && d.name.eq(name)).then(() { out.add(d).try() });
     });
-    Ok(());
+    Ok(())
 }
 
 imports_name = (t: ModuleTable, name: str) bool {

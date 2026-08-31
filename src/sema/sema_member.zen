@@ -655,19 +655,24 @@ struct_members = (
     name : str,
     out  :: Vec<Found>
 ) Res<(), AllocError> {
-    mi     = n.decl.module.to_usize();
-    poison = c.types.unknown().try();
-    inst   = c.inst_of_named(n).try();
-    tmark  = c.tvar_mark();
-    c.enter_struct_tvars(s, mi).try();
-    s.members.loop((h, m) {
-        m.named(name).match({
-            false => Ok(()),
-            true  => c.add_own(m, name, mi, ty, poison, inst, out),
-        }).try();
-    });
-    c.release_tvars(tmark).try();
-    Ok(());
+    c.world.member_rows(n.decl, name).match({
+        None     => Ok(()),
+        Ok(rows) => {
+            mi     = n.decl.module.to_usize();
+            poison = c.types.unknown().try();
+            inst   = c.inst_of_named(n).try();
+            tmark  = c.tvar_mark();
+            c.enter_struct_tvars(s, mi).try();
+            rows.loop((h, i) {
+                s.members.get(i).match({
+                    None  => Ok(()),
+                    Ok(m) => c.add_own(m, name, mi, ty, poison, inst, out),
+                }).try();
+            });
+            c.release_tvars(tmark).try();
+            Ok(())
+        },
+    })
 }
 
 // The `T` of `Vec<T>`, in scope in the members `Vec` declares — the same

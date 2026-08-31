@@ -39,12 +39,10 @@
 // already told from values.
 
 Expr, ExprId = std.ast
-Decl, Struct, Member, Function = std.ast
+Struct, Member, Function = std.ast
 Call, Access, Index, Name, Paren, Field, Const = std.ast
 AllocError = std.mem
-Vec = std.collections
 str = std.text
-Range = std.core
 TyId, TyNamed = sema.sema_ty
 decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
@@ -330,27 +328,17 @@ own_member* = (c: Checker, ty: TyId, name: str) Res<Member> {
 }
 
 named_member = (c: Checker, n: TyNamed, name: str) Res<Member> {
-    decl_at(c.tree, n.decl).match({
-        None  => None,
-        Ok(d) => decl_member(d, name),
-    })
-}
-
-decl_member = (d: Decl, name: str) Res<Member> {
-    d.kind.match({
-        Struct(st) => find_member(st.members, name),
-        _          => None,
-    })
-}
-
-find_member = (members: Vec<Member>, name: str) Res<Member> {
-    Range(0, members.len).find((i) {
-        members.get(i).match({
-            Ok(m) => m.named(name),
-            None  => false,
-        })
-    }).match({
-        None  => None,
-        Ok(i) => members.get(i),
+    c.world.member_rows(n.decl, name).match({
+        None     => None,
+        Ok(rows) => decl_at(c.tree, n.decl).match({
+            None  => None,
+            Ok(d) => d.kind.match({
+                Struct(st) => rows.get(0).match({
+                    None  => None,
+                    Ok(i) => st.members.get(i),
+                }),
+                _          => None,
+            }),
+        }),
     })
 }
