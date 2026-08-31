@@ -13,6 +13,7 @@ SHELL       := /bin/bash
 CC      ?= cc
 CFLAGS  ?= -O2 -std=c99
 PROFILE_CFLAGS ?= -O2 -std=c99 -g -fno-omit-frame-pointer
+SYMBOL_MAP ?=
 PY      ?= python3
 ROOT    ?= src
 
@@ -57,7 +58,7 @@ build: seed/zen.c
 	$(ZCC) $(CFLAGS) -c seed/zen.c -o build/obj/seed.o
 	$(CC) build/obj/seed.o -o zen
 	rm -rf build/c && mkdir -p build/c
-	./zen build $(ROOT) --emit-c-dir build/c
+	./zen build $(ROOT) --emit-c-dir build/c $(if $(strip $(SYMBOL_MAP)),--symbol-map $(SYMBOL_MAP))
 	ls build/c/*.c | xargs -P $(J) -I{} $(ZCC) $(CFLAGS) -c {} -o {}.o
 	$(CC) build/c/*.o -o zen-new && mv zen-new zen
 
@@ -281,11 +282,13 @@ asan: seed/zen.c
 ## leak: valgrind's answer to the same question. definite leaks only --
 ## still-reachable memory is where the deliberate argv rows land, and
 ## reporting them would fail every run on a known-non-bug.
-leak: build
-	tests/bench/leak.sh ./zen
+leak: profile
+	tests/bench/leak.sh ./zen-fp
 
 ## profile: -O2 keeps samples representative; -g and frame pointers make them
-## readable and walkable. Separate objects leave ordinary ./zen untouched.
+## readable and walkable. The symbol map names the Zen source behind each
+## mangled native frame. Separate objects leave ordinary ./zen untouched.
+profile: SYMBOL_MAP := build/zen.symbols.tsv
 profile: build
 	ls build/c/*.c | xargs -P $(J) -I{} $(ZCC) $(PROFILE_CFLAGS) -c {} -o {}.profile.o
 	$(CC) build/c/*.c.profile.o -o zen-fp

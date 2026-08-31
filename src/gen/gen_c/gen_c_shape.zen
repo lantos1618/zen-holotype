@@ -276,7 +276,7 @@ join_break_args* = (be :: CBackend, span: Span, ctx: Ctx)
     got  ::= unknown;
     be.tree.exprs_each((x, ex) {
         ex.kind.match({
-            Call(_) => inside(ex.span, span).then(() {
+            Call(_) => (inside(ex.span, span) && be.break_value_site(x)).then(() {
                 be.owned_elsewhere(ex.span, span).try().match({
                     true  => (),
                     false => be.break_arg_type(x, ctx).match({
@@ -297,6 +297,16 @@ join_break_args* = (be :: CBackend, span: Span, ctx: Ctx)
     have.match({
         true  => Ok(Ok(got)),
         false => Ok(None),
+    })
+}
+
+break_value_site = (be: CBackend, x: ExprId) bool {
+    be.tree.expr_at(x).kind.match({
+        Call(c) => (c.args.len > 0) && be.tree.expr_at(c.callee).kind.match({
+            Access(a) => a.name.text.eq("break"),
+            _         => false,
+        }),
+        _       => false,
     })
 }
 
