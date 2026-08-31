@@ -298,7 +298,7 @@ declaring both is an error at the declaration site.
 | `Lambda(Lambda)` | `tparams, params, params_span, ret, body` | |
 | `Call(Call)` | `callee, targs, args, args_span` | |
 | `Match(Match)` | `scrutinee, name_span, arms, arms_span` | |
-| `Try(Try)` | `operand, name_span` | `.try()` |
+| `Try(Try)` | `operand, name_span, error` | `.try()`, `.try(error)`, `.try((e) { mapped })` |
 | `Record(Record)` | `entries` | `{ src: Path(..), deps: [..] }` |
 | `Access(Access)` | `base, name` | `p.x`, `Shape.Unit`, `i32.MAX` |
 | `Index(Index)` | `base, index, op_span` | `buf[i]` |

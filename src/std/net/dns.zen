@@ -1,71 +1,24 @@
 // src/std/net/dns.zen
-// Safe DNS resolution over the shared socket floor.
+// DNS policy over the same raw POSIX address lookup used by Socket.
 
-Alloc, AllocError, Ptr, null_ptr = std.mem
-str, String, str_at = std.text
+Alloc = std.mem
 Res = std.core
-Vec = std.collections
-
-zg_dns_resolve = (
-    host      : str,
-    ip_out    : Ptr<Ptr<u8>>,
-    ip_len    : Ptr<usize>,
-    is_v6_out : Ptr<i32>
-) i32
-
-free = (p: Ptr<()>) ()
+ResolvedAddr, SocketFault, resolve_addr = std.net.socket
 
 DnsError* = NotFound | Failed
 
-dns_error = (rc: i32) DnsError {
-    rc.match({
-        1 => NotFound,
-        _ => Failed,
-    })
-}
-
-unit_or = (r: Res<(), AllocError>, fallback: DnsError) Res<(), DnsError> {
-    r.match({
-        Ok(_)  => Ok(()),
-        Err(_) => Err(fallback),
-    });
-}
-
-string_or_failed = (r: Res<String, AllocError>) Res<String, DnsError> {
-    r.match({
-        Ok(s)  => Ok(s),
-        Err(_) => Err(DnsError.Failed),
-    });
-}
-
 DnsAddr* = {
-    ip*:   String,
+    ip*: String,
     is_v6*: bool,
 }
 
 resolve* = (a: Alloc, host: str) Res<DnsAddr, DnsError> {
-    p_vec ::= a.Vec<Ptr<u8>>();
-    unit_or(p_vec.add(null_ptr<u8>()), DnsError.Failed).try();
-
-    n_vec ::= a.Vec<usize>();
-    unit_or(n_vec.add(0), DnsError.Failed).try();
-
-    v_vec ::= a.Vec<i32>();
-    unit_or(v_vec.add(0), DnsError.Failed).try();
-
-    rc = zg_dns_resolve(host, p_vec.ptr(), n_vec.ptr(), v_vec.ptr());
-    (rc == 0).match({
-        true  => {
-            p = p_vec.ptr().read(0);
-            @scope.defer(() { free(p.to<()>()) });
-            n = n_vec.ptr().read(0);
-            v = v_vec.ptr().read(0);
-
-            s ::= string_or_failed(a.String()).try();
-            unit_or(s.add_bytes(str_at(p, n)), DnsError.Failed).try();
-
-            Ok(DnsAddr(ip: s, is_v6: v != 0))
+    resolve_addr(a, host).match({
+        Ok(found)         => {
+            is_v6 = found.is_v6;
+            Ok(DnsAddr(ip: consume found.ip, is_v6: is_v6))
         },
-        false => Err(dns_error(rc)),
+        Err(ConnectFault) => Err(DnsError.NotFound),
+        Err(_)            => Err(DnsError.Failed),
     })
 }

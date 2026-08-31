@@ -236,9 +236,28 @@ PatternSite = {
     enum_bind_payload = (self: @Self, be :: CBackend, d: Destructure)
                         Res<(), AllocError> {
         be.payload_type(self.ty, last_segment(d.name)).match({
-            None  => Ok(()),
+            // A written unit payload still introduces a Zen binding even
+            // though it has no C field. Publishing the storage-free slot is
+            // what lets a generic `Ok(value)` body instantiate at `T = ()`.
+            None  => self.bind_unit_payload(be, d.binder),
             Ok(t) => self.bind_inner(be, d, t),
         })
+    }
+
+    bind_unit_payload = (self: @Self, be :: CBackend, pid: PatternId)
+                        Res<(), AllocError> {
+        be.tree.pattern_at(pid).kind.match({
+            Name(p) => self.bind_unit_name(be, last_segment(p.name)),
+            _       => Ok(()),
+        })
+    }
+
+    bind_unit_name = (self: @Self, be :: CBackend, name: str)
+                     Res<(), AllocError> {
+        unit = be.check.types.prim("()").try();
+        n    = be.reserve(name).try();
+        be.publish(name, n, unit, false).try();
+        be.check.bind(name, unit, false, false)
     }
 
     set_bind_payload = (self: @Self, be :: CBackend, d: Destructure,
@@ -274,7 +293,7 @@ lower_match* = (
     // can leave its closed-branch slot on top of the binding stack.
     m.arms.loop((h, i, arm) {
         lmark = be.mark();
-        site = PatternSite(ty: st, place: scrut.view());
+        site  = PatternSite(ty: st, place: scrut.view());
         site.open(be, arm, i).try();
         be.deliver(arm.body, ctx, ty, dst).try();
         be.release(lmark).try();
@@ -474,11 +493,8 @@ leaf_name_of = (be :: CBackend, mty: TyId) Res<str, AllocError> {
 last_segment_str = (qname: String) str {
     dot      ::= 0;
     i: usize ::= 0;
-    loop(() { i < qname.len() }, (h) {
-        (qname.view().index(i) == '.').match({
-            true  => { dot = i + 1; },
-            false => {},
-        });
+    loop(i < qname.len(), (h) {
+        (qname.view().index(i) == '.').then(() { dot = i + 1; });
         i = i + 1;
     });
     qname.view().slice(dot, qname.len())

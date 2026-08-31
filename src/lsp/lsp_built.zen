@@ -21,17 +21,10 @@
 //     would leak exactly as the session arena did.
 //
 //   - ONE BUILD PER DOCUMENT STATE, SINGLE-FLIGHT. The settle and every
-//     query against the SAME state share this one build. The key is the
-//     state a build reads: the compilation root, the entry module, and
-//     every open buffer's bytes (`paths`/`texts`, the overlay, in open
-//     order). `ensure` builds only when the key disagrees — a change
-//     moves the bytes, so a stale slot cannot answer for a state it did
-//     not see, and a query arriving after a `didChange` builds once for
-//     the NEW state with the settle at batch end reusing it. This is
-//     the stale-state stamp `design_lsp.md` §5 asks for, as a CONTENT
-//     comparison rather than a version counter — a client that resends
-//     the same bytes has changed nothing, which `lsp_serve.zen`'s
-//     `stored` already relies on.
+//     query against the SAME state share this one build. Real overlay
+//     changes invalidate it before replacing their bytes; byte-identical
+//     changes are discarded by `lsp_serve.stored`. `ensure` can therefore
+//     compare root and entry only, without re-hashing every open buffer.
 //
 // WHAT A QUERY TAKES FROM THE SLOT is the `Checker` BY VALUE — a header
 // copy (`zen_build.zen`'s `checked` hands it back the same way), read
@@ -42,7 +35,7 @@
 // the next `ensure`: eviction frees the pages. The answers are written
 // into a caller's arena within the request (that is what makes eviction
 // safe), `lsp_diag.zen` copies the URIs it keeps into the session arena,
-// and `classed` is re-derived per request by `classes_for`.
+// and colour rows are cached only after their URI is requested.
 //
 // THE ENTRY IS PART OF THE KEY because the walk starts there: hovering
 // a document that was not the settled one reaches modules the settle's
@@ -66,6 +59,7 @@ uri_at, path_of = lsp.lsp_uri
 // The one arena string-copy, exported (`lsp_reply.zen`).
 own_str = lsp.lsp_reply
 written = std.json
+std_root_for, relative_to = zen.zen_path
 
 // ONE DIAGNOSTIC, ALREADY BELONGING TO A FILE. `uri` is resolved at
 // gather time, not write time: a build knows its compilation root, a
@@ -86,12 +80,11 @@ Spot* = {
 Inner = {
     root: str,          // the compilation root, copied into the arena
     entry: str,         // the open document, relative to the root
-    paths: Vec<str>,    // the overlay the build saw: paths[i] held texts[i]
-    texts: Vec<str>,
     b: Build,           // lex/parse's tally and diags
     c: Checker,         // sema's memos — what every query reads
     spots: Vec<Spot>,   // every diagnostic, grouped at publish time
-    classed: Vec<Classed>,  // colour's semantic half; empty unless clean
+    // Semantic names, populated lazily per requested build-relative file.
+    classed :: Map<str, Vec<Classed>>,
 }
 
 Built* = {
@@ -104,18 +97,15 @@ Built* = {
     // flag beside loose fields: no build and no key arrive together.
     cur :: Res<Inner>,
 
-    // The key is CONTENT, not versions: equal bytes are the same state
-    // however a client numbers them.
+    // Overlay and watched-file changes set this before their bytes move.
     stale :: bool = false,
 
-    matches* = (self: @Self, root: str, entry: str, uris: Vec<str>,
-                docs: Map<str, str>) bool {
+    matches* = (self: @Self, root: str, entry: str) bool {
         self.stale.match({
             true  => false,
             false => self.cur.match({
                 None  => false,
-                Ok(i) => i.root.eq(root) && i.entry.eq(entry)
-                          && same_overlay(i, uris, docs),
+                Ok(i) => i.root.eq(root) && i.entry.eq(entry),
             }),
         })
     }
@@ -126,7 +116,7 @@ Built* = {
     // many requests ask.
     ensure* = (self :: @Self, env: Env, root: str, entry: str,
                uris: Vec<str>, docs: Map<str, str>) Res<(), AllocError> {
-        self.matches(root, entry, uris, docs).match({
+        self.matches(root, entry).match({
             true  => written(),
             false => self.rebuild(env, root, entry, uris, docs),
         })
@@ -150,20 +140,15 @@ Built* = {
         kept_root  = own_str(self.arena, root).try();
         kept_entry = own_str(self.arena, entry).try();
 
-        // THE OVERLAY, snapshotted as the key and handed to the build:
+        // THE OVERLAY handed to the build:
         // every open buffer, keyed on the path `Build.read` looks up.
-        // The texts themselves are NOT copied — the document store holds
-        // them for the session (`lsp_serve.zen`), so the snapshot is a
-        // Vec of references and the comparison is `eq` on bytes.
-        paths ::= self.arena.Vec<str>();
-        texts ::= self.arena.Vec<str>();
-        over  ::= self.arena.Map<str, str>();
+        // Texts are not copied into this arena; the replaceable document
+        // arena outlives the build until invalidation.
+        over ::= self.arena.Map<str, str>();
         uris.loop((h, u) {
             docs.get(u).match({
                 None     => written(),
                 Ok(text) => {
-                    paths.add(path_of(u)).try();
-                    texts.add(text).try();
                     over.set(path_of(u), text).try();
                     Ok(())
                 },
@@ -171,31 +156,18 @@ Built* = {
         });
 
         b ::= self.arena.Build(env, kept_root);
-        env.var("ZEN_STD").match({
-            Ok(s) => s.is_empty().match({ false => b.set_std_root(
-                s
-            ), true => {} }),
-            None  => {},
-        });
+        b.set_std_root(std_root_for(env, self.arena));
         c = b.whole(kept_entry, over).try();
         spots ::= self.arena.Vec<Spot>();
         from_build(b, self.arena, kept_root, spots).try();
         from_check(c, self.arena, kept_root, spots).try();
-        // COLOUR'S HALF, off the same `Checker`, only when the build
-        // found nothing wrong — with faults outstanding the memos hold
-        // poison, and an empty `classed` is the lexical fallback's
-        // trigger (`lsp_names.zen`'s doctrine).
-        classed ::= self.arena.Vec<Classed>();
-        (b.diag_count() == 0 && c.diag_count() == 0).match({
-            true  => classify(self.arena, c, kept_root, classed),
-            false => written(),
-        }).try();
+        // Colour is derived lazily for requested files. A clean build may
+        // therefore retain no semantic rows at all.
+        classed ::= self.arena.Map<str, Vec<Classed>>();
 
         self.cur   = Ok(Inner(
             root: kept_root,
             entry: kept_entry,
-            paths: paths,
-            texts: texts,
             b: b,
             c: c,
             spots: spots,
@@ -220,42 +192,39 @@ Built* = {
         self.cur.match({ None => None, Ok(i) => Ok(i.spots) })
     }
 
-    classed* = (self: @Self) Res<Vec<Classed>> {
-        self.cur.match({ None => None, Ok(i) => Ok(i.classed) })
+    classed_for* = (self :: @Self, a: Alloc, uri: str)
+                   Res<Vec<Classed>, AllocError> {
+        self.cur.match({
+            None  => Ok(a.Vec<Classed>()),
+            Ok(i) => (i.b.diag_count() == 0 && i.c.diag_count() == 0).match({
+                false => Ok(a.Vec<Classed>()),
+                true  => {
+                    file = relative_to(i.root, path_of(uri));
+                    i.classed.get(file).match({
+                        Ok(rows) => Ok(rows),
+                        None     => {
+                            rows = classify(self.arena, i.c, file).try();
+                            key  = own_str(self.arena, file).try();
+                            i.classed.set(key, rows).try();
+                            self.cur = Ok(i);
+                            Ok(rows)
+                        },
+                    })
+                },
+            }),
+        })
     }
 }
+
+Built.impl(Drop, {
+    drop = (self :: @Self) () { self.arena.drop(); }
+})
 
 // An empty slot: an arena owning no pages (the first `raw` chains one)
 // and no build. `env.mem.alloc()` is a TEMPORARY on purpose — a binding
 // would be dropped at scope exit under the field it was just moved into.
 Built* = (env: Env) Built {
     Built(arena: env.mem.alloc(), cur: None)
-}
-
-// The held overlay reads exactly what the documents hold now: same
-// count, same order (`open` is insertion-ordered), same bytes. NOTHING
-// HERE ALLOCATES — a comparison, not a build — so no arm is a `Res`.
-same_overlay = (i: Inner, uris: Vec<str>, docs: Map<str, str>) bool {
-    same ::= true;
-    at   ::= 0;
-    uris.loop((h, u) {
-        docs.get(u).match({
-            None     => (),
-            Ok(text) => {
-                row  = i.paths.get(at).match({
-                    None  => false,
-                    Ok(p) => p.eq(path_of(u))
-                              && i.texts.get(at).match({
-                                     None  => false,
-                                     Ok(t) => t.eq(text),
-                                 }),
-                });
-                same = same && row;
-                at   = at + 1;
-            },
-        });
-    });
-    same && (at == i.paths.len);
 }
 
 // --- what a build found -------------------------------------------------

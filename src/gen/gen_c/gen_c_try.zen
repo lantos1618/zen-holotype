@@ -24,7 +24,7 @@
 // in both places keeps the tags written here equal to the tags emitted
 // there. It reports.
 
-Expr, ExprId, Decl, Enum, Variant = std.ast
+Expr, ExprId, Decl, Enum, Variant, Lambda, Param, Paren = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -33,15 +33,15 @@ TyId, TyNamed, TyRes, ResForm = sema.sema_ty
 decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
-sym_member, sym_variant = gen.gen_name
+sym_member, sym_variant, sym_local = gen.gen_name
 RES_PATH, is_failure = gen.gen_name
 sym_union_variant = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
-ctype, is_unit, variant_type, decl_ctx, decl_inst = gen.gen_c.gen_c_type
+ctype, declarator, is_unit, variant_type, decl_ctx, decl_inst = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
-Dest, write_dest, deliver = gen.gen_c.gen_c_stmt
+Dest, write_dest, deliver, block = gen.gen_c.gen_c_stmt
 res_type_of = gen.gen_c.gen_c_expr
 needs_hoist = gen.gen_c.gen_c_hoist
 write_set_value = gen.gen_c.gen_c_widen
@@ -53,13 +53,24 @@ lower_try* = (
     id      : ExprId,
     node    : Expr,
     operand : ExprId,
+    error   : Res<ExprId>,
     ctx     : Ctx,
     want    : TyId,
     dst     : Dest
 ) Res<(), AllocError> {
     rt = be.res_type_of(operand, ctx).try();
     be.check.types.at(rt).match({
-        Res(r) => be.lower_try_res(id, node, operand, r, rt, ctx, want, dst),
+        Res(r) => be.lower_try_res(
+            id,
+            node,
+            operand,
+            error,
+            r,
+            rt,
+            ctx,
+            want,
+            dst
+        ),
         _      => be.report_expr(
             operand,
             GenFault.Untyped("the operand of .try()")
@@ -72,6 +83,7 @@ lower_try_res = (
     id      : ExprId,
     node    : Expr,
     operand : ExprId,
+    error   : Res<ExprId>,
     r       : TyRes,
     rt      : TyId,
     ctx     : Ctx,
@@ -81,12 +93,19 @@ lower_try_res = (
     tmp ::= be.fresh_name("t").try();
     be.declare_temp(rt, tmp.view()).try();
     be.deliver(operand, ctx, rt, Dest.Into(tmp.view())).try();
-    be.write_guard(node, r, tmp.view(), ctx).try();
+    be.write_guard(node, error, r, tmp.view(), ctx).try();
     be.unwrap(id, r, want, tmp.view(), ctx, dst).try();
     Ok(());
 }
 
-write_guard = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
+write_guard = (
+    be    :: CBackend,
+    node  : Expr,
+    error : Res<ExprId>,
+    r     : TyRes,
+    tmp   : str,
+    ctx   : Ctx
+)
               Res<(), AllocError> {
     tag ::= be.alloc.String().try();
     sym_variant(tag, RES_PATH, "Ok").try();
@@ -98,11 +117,146 @@ write_guard = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
     // first. Depth 0 is the whole frame. The error is carried in `tmp`,
     // which is a temporary and is never tracked, so there is nothing
     // here the returned value could be aliasing.
-    be.unwind_to(0, "").try();
-    be.propagate(node, r, tmp, ctx).try();
+    error.match({
+        None    => {
+            be.unwind_to(0, "").try();
+            be.propagate(node, r, tmp, ctx).try();
+        },
+        Ok(map) => { be.map_and_propagate(node, map, r, tmp, ctx).try(); },
+    });
     be.dedent();
     be.writeln("}").try();
     Ok(());
+}
+
+// Map while locals are live, park the result, then unwind and return it.
+map_and_propagate = (
+    be   :: CBackend,
+    node : Expr,
+    map  : ExprId,
+    r    : TyRes,
+    tmp  : str,
+    ctx  : Ctx
+) Res<(), AllocError> {
+    be.check.types.at(ctx.ret).match({
+        Res(want) => be.map_error(node, map, r, want, tmp, ctx),
+        _         => be.report(
+            node.span.file,
+            node.span,
+            GenFault.Unsupported(".try(error) outside a Res function")
+        ),
+    })
+}
+
+map_error = (
+    be   :: CBackend,
+    node : Expr,
+    map  : ExprId,
+    r    : TyRes,
+    want : TyRes,
+    tmp  : str,
+    ctx  : Ctx
+) Res<(), AllocError> {
+    mapped ::= be.fresh_name("e").try();
+    unit = be.is_unit(want.error);
+    unit.match({
+        true  => Ok(()),
+        false => be.declare_temp(want.error, mapped.view()),
+    }).try();
+    be.try_lambda(map).match({
+        Ok(l) => be.lower_try_mapper(
+            l,
+            r.error,
+            want.error,
+            tmp,
+            mapped.view(),
+            unit,
+            ctx
+        ),
+        None  => be.deliver(
+            map,
+            ctx,
+            want.error,
+            unit.match({ true => Dest.Discard, false => Dest.Into(
+                mapped.view()
+            ) })
+        ),
+    }).try();
+    be.unwind_to(0, "").try();
+    be.write_mapped_return(want, mapped.view(), unit, ctx)
+}
+
+try_lambda = (be: CBackend, id: ExprId) Res<Lambda> {
+    be.tree.expr_at(id).kind.match({
+        Lambda(l) => Ok(l),
+        Paren(p)  => be.try_lambda(p.inner),
+        _         => None,
+    })
+}
+
+lower_try_mapper = (
+    be     :: CBackend,
+    l      : Lambda,
+    from   : TyId,
+    into   : TyId,
+    tmp    : str,
+    mapped : str,
+    unit   : bool,
+    ctx    : Ctx
+) Res<(), AllocError> {
+    mark  = be.mark();
+    cmark = be.check.mark();
+    l.params.get(0).match({
+        Ok(p) => be.bind_try_error(p, from, tmp),
+        None  => Ok(()),
+    }).try();
+    block(
+        be,
+        l.body,
+        ctx,
+        into,
+        unit.match({ true => Dest.Discard, false => Dest.Into(mapped) })
+    ).try();
+    be.release(mark).try();
+    be.check.release(cmark).try();
+    Ok(())
+}
+
+bind_try_error = (be :: CBackend, p: Param, ty: TyId, tmp: str)
+                 Res<(), AllocError> {
+    n = be.declare(p.name.text, ty, false).try();
+    be.check.bind(p.name.text, ty, false, true).try();
+    cname ::= be.alloc.String().try();
+    sym_local(cname, p.name.text, n).try();
+    decl ::= be.alloc.String().try();
+    be.declarator(ty, cname.view(), decl).try();
+    value ::= be.alloc.String().try();
+    read_error(tmp, value).try();
+    be.fmt("{} = {};\n", decl.view(), value.view())
+}
+
+write_mapped_return = (
+    be     :: CBackend,
+    want   : TyRes,
+    mapped : str,
+    unit   : bool,
+    ctx    : Ctx
+) Res<(), AllocError> {
+    line ::= be.alloc.String().try();
+    line.add_bytes("return (").try();
+    be.ctype(ctx.ret, line).try();
+    line.add_bytes("){ .zg_tag = ").try();
+    line.sym_variant(RES_PATH, "Err").try();
+    unit.match({
+        true  => {},
+        false => {
+            line.add_bytes(", .zg_data.").try();
+            line.sym_member("Err").try();
+            line.fmt(" = {mapped}").try();
+        },
+    });
+    line.add_bytes(" };").try();
+    be.writeln(line.view())
 }
 
 // The value the enclosing function returns. It is built from the

@@ -149,14 +149,8 @@ CRASH_MARKERS = (
 )
 
 # Link only native floors named by generated C; keep libraries after sources.
-SOCKET_LIBRARIES = ("-lws2_32",) if os.name == "nt" else ()
 NATIVE_FLOORS: tuple[tuple[bytes, tuple[Path, ...], tuple[str, ...]], ...] = (
-    (b"zg_dns_", (REPO_ROOT / "src/std/net/socket/socket.c",), SOCKET_LIBRARIES),
-    (b"zg_socket_", (REPO_ROOT / "src/std/net/socket/socket.c",), SOCKET_LIBRARIES),
-    (b"zg_tls_", (
-        REPO_ROOT / "src/std/net/tls/tls.c",
-        REPO_ROOT / "src/std/net/socket/socket.c",
-    ), ("-lssl", "-lcrypto", *SOCKET_LIBRARIES)),
+    (b"SSL_CTX_new", (), ("-lssl", "-lcrypto")),
     (b"zg_proc_", (REPO_ROOT / "src/std/proc/proc.c",), ()),
 )
 
@@ -1301,30 +1295,19 @@ NATIVE_LINK_CASES: list[tuple[str, bytes, tuple[str, ...]]] = [
         (),
     ),
     (
-        "dns-reference-selects-socket-floor",
-        b"extern void zg_dns_resolve(void); void f(void) { zg_dns_resolve(); }\n",
-        (str(REPO_ROOT / "src/std/net/socket/socket.c"), *SOCKET_LIBRARIES),
+        "libc-network-reference-needs-no-extra-link-argument",
+        b"extern int getaddrinfo(void); void f(void) { getaddrinfo(); }\n",
+        (),
     ),
     (
-        "tcp-reference-selects-only-socket",
-        b"extern void zg_socket_tcp_connect(void); void f(void) { zg_socket_tcp_connect(); }\n",
-        (str(REPO_ROOT / "src/std/net/socket/socket.c"), *SOCKET_LIBRARIES),
+        "openssl-reference-selects-only-system-libraries",
+        b"extern void SSL_CTX_new(void); void f(void) { SSL_CTX_new(); }\n",
+        ("-lssl", "-lcrypto"),
     ),
     (
         "proc-reference-selects-only-proc",
         b"extern void zg_proc_run(void); void f(void) { zg_proc_run(); }\n",
         (str(REPO_ROOT / "src/std/proc/proc.c"),),
-    ),
-    (
-        "tls-reference-selects-only-tls-and-openssl",
-        b"extern void zg_tls_connect(void); void f(void) { zg_tls_connect(); }\n",
-        (
-            str(REPO_ROOT / "src/std/net/tls/tls.c"),
-            str(REPO_ROOT / "src/std/net/socket/socket.c"),
-            "-lssl",
-            "-lcrypto",
-            *SOCKET_LIBRARIES,
-        ),
     ),
 ]
 

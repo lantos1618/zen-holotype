@@ -1,6 +1,6 @@
 // src/gen/gen_c/gen_c_ptr.zen
 // The raw floor: what a `Ptr<T>` member is in C.
-// `mem_ptr.zen` writes nine signatures and no bodies, and says why:
+// `mem_ptr.zen` writes ten signatures and no bodies, and says why:
 // "the bodies belong to the backend: gen_c lowers a Ptr<T> to a `T*`
 // and these members to dereference, indexed store, pointer arithmetic
 // and memcpy. They are written as signatures because there is nothing
@@ -60,7 +60,8 @@ named_ptr = (be :: CBackend, rty: TyId) bool {
 
 ptr_verb = (name: str) bool {
     name.is_in([
-        "read", "write", "offset", "back", "bytes", "copy_from", "to", "is_null"
+        "read", "write", "offset", "back", "bytes", "copy_from", "to",
+        "is_null", "same"
     ])
 }
 
@@ -110,7 +111,7 @@ PtrTypeSite = {
     }
 
     after_bytes = (self: @Self, be :: CBackend) Res<TyId, AllocError> {
-        self.name.eq("is_null").match({
+        (self.name.eq("is_null") || self.name.eq("same")).match({
             true  => be.check.types.prim("bool"),
             false => self.after_null(be),
         })
@@ -235,10 +236,25 @@ PtrCall = {
 
     after_copy = (self: @Self, be :: CBackend, out :: String)
                  Res<(), AllocError> {
+        self.site.name.eq("same").match({
+            true  => self.same(be, out),
+            false => self.after_same(be, out),
+        })
+    }
+
+    after_same = (self: @Self, be :: CBackend, out :: String)
+                 Res<(), AllocError> {
         self.site.name.eq("is_null").match({
             true  => out.fmt("({} == NULL)", self.base),
             false => self.reinterpret(be, out),
         })
+    }
+
+    same = (self: @Self, be :: CBackend, out :: String)
+           Res<(), AllocError> {
+        other ::= be.alloc.String().try();
+        self.value_arg(be, 0, self.site.rty, other).try();
+        out.fmt("({} == ({}))", self.base, other.view())
     }
 
     read = (self: @Self, be :: CBackend, out :: String)

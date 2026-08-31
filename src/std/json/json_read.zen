@@ -99,7 +99,7 @@ Reader* = {
             false => Err(JsonFault.Unexpected(from)),
             true  => {
                 self.at = from + spelling.len;
-                faulted(tree.add(v))
+                tree.add(v).replace_err(JsonFault.NoMemory)
             },
         })
     }
@@ -118,7 +118,7 @@ Reader* = {
         self.integer_part().try();
         self.fraction_part().try();
         self.exponent_part().try();
-        faulted(tree.add(Json.Num(self.text.slice(from, self.at))));
+        tree.add(Json.Num(self.text.slice(from, self.at))).replace_err(JsonFault.NoMemory);
     }
 
     // A leading zero stands alone: `0` is a number and `01` is two.
@@ -162,7 +162,7 @@ Reader* = {
     }
 
     digits = (self :: @Self) () {
-        loop(() { self.digit_here() }, (h) { self.at = self.at + 1; });
+        loop(self.digit_here(), (h) { self.at = self.at + 1; });
         ();
     }
 
@@ -183,16 +183,16 @@ Reader* = {
         // THE DOCUMENT — nowhere near the mistake, and this was every
         // message (every LSP message ends `"params":{}}`).
         more ::= !self.here(']');
-        loop(() { more }, (h) {
-            faulted_ok(kids.add(self.value(tree).try())).try();
+        more.loop((h) {
+            kids.add(self.value(tree).try()).try(JsonFault.NoMemory);
             self.spaces();
             more = self.byte_if(',');
             more.then(() { self.spaces(); });
         });
         self.close(']').try();
         self.up();
-        run = faulted(tree.add_items(kids)).try();
-        faulted(tree.add(Json.Arr(run)));
+        run = tree.add_items(kids).try(JsonFault.NoMemory);
+        tree.add(Json.Arr(run)).replace_err(JsonFault.NoMemory);
     }
 
     object = (self :: @Self, tree :: Jsons) Res<JsonId, JsonFault> {
@@ -201,16 +201,16 @@ Reader* = {
         kids ::= self.a.Vec<Pair>();
         self.spaces();
         more ::= !self.here('}');
-        loop(() { more }, (h) {
-            faulted_ok(kids.add(self.member(tree).try())).try();
+        more.loop((h) {
+            kids.add(self.member(tree).try()).try(JsonFault.NoMemory);
             self.spaces();
             more = self.byte_if(',');
             more.then(() { self.spaces(); });
         });
         self.close('}').try();
         self.up();
-        run = faulted(tree.add_pairs(kids)).try();
-        faulted(tree.add(Json.Obj(run)));
+        run = tree.add_pairs(kids).try(JsonFault.NoMemory);
+        tree.add(Json.Obj(run)).replace_err(JsonFault.NoMemory);
     }
 
     member = (self :: @Self, tree :: Jsons) Res<Pair, JsonFault> {
@@ -238,7 +238,7 @@ Reader* = {
 
     string = (self :: @Self, tree :: Jsons) Res<JsonId, JsonFault> {
         s = self.text_at().try();
-        faulted(tree.add(Json.Text(s)));
+        tree.add(Json.Text(s)).replace_err(JsonFault.NoMemory);
     }
 
     // The decoded bytes of the string at the cursor. NO ESCAPE MEANS NO
@@ -256,7 +256,7 @@ Reader* = {
         from = self.at;
         plain ::= true;
         done  ::= false;
-        loop(() { !done }, (h) {
+        loop(!done, (h) {
             b = self.peek().try();
             (b == '"').then(() { done = true; });
             (b == '\\').then(() { plain = false; done = true; });
@@ -274,10 +274,10 @@ Reader* = {
     // The slow path: copy what has been scanned, then keep going a
     // chunk at a time. `self.at` is on the first backslash.
     decoded = (self :: @Self, from: usize) Res<str, JsonFault> {
-        out ::= faulted(self.a.String()).try();
-        faulted_ok(out.add_bytes(self.text.slice(from, self.at))).try();
+        out ::= self.a.String().try(JsonFault.NoMemory);
+        out.add_bytes(self.text.slice(from, self.at)).try(JsonFault.NoMemory);
         done ::= false;
-        loop(() { !done }, (h) {
+        loop(!done, (h) {
             b       = self.peek().try();
             self.at = self.at + 1;
             (b == '"').match({
@@ -293,7 +293,7 @@ Reader* = {
     copy_one = (self :: @Self, b: u8, out :: String) Res<(), JsonFault> {
         (b == '\\').match({
             true  => self.escape(out),
-            false => faulted_ok(out.add_byte(b)),
+            false => out.add_byte(b).replace_err(JsonFault.NoMemory),
         })
     }
 
@@ -303,7 +303,7 @@ Reader* = {
         b       = self.peek().try();
         self.at = self.at + 1;
         simple(b).match({
-            Ok(x) => faulted_ok(out.add_byte(x)),
+            Ok(x) => out.add_byte(x).replace_err(JsonFault.NoMemory),
             None  => (b == 'u').match({
                 true  => self.unicode(out),
                 false => Err(JsonFault.BadEscape(self.at - 1)),
@@ -324,7 +324,7 @@ Reader* = {
         (hi >= SURROGATE_HI_MIN && hi <= SURROGATE_HI_MAX).match({
             false => (hi >= SURROGATE_LO_MIN && hi <= SURROGATE_LO_MAX).match({
                 true  => Err(JsonFault.BadEscape(self.at - 4)),
-                false => faulted_ok(push_utf8(hi, out)),
+                false => push_utf8(hi, out).replace_err(JsonFault.NoMemory),
             }),
             true  => self.low_half(hi, out),
         })
@@ -337,11 +337,11 @@ Reader* = {
                 lo = self.four_hex().try();
                 (lo >= SURROGATE_LO_MIN && lo <= SURROGATE_LO_MAX).match({
                     false => Err(JsonFault.BadEscape(self.at - 4)),
-                    true  => faulted_ok(push_utf8(
+                    true  => push_utf8(
                         ASTRAL_BASE
                             + (hi - SURROGATE_HI_MIN) * SURROGATE_SPAN
                             + (lo - SURROGATE_LO_MIN),
-                        out)),
+                        out).replace_err(JsonFault.NoMemory),
                 })
             },
         })
@@ -393,7 +393,7 @@ Reader* = {
     // JSON's whitespace is exactly these four — not `is_space`, this
     // language's set, which includes a vertical tab JSON does not allow.
     spaces = (self :: @Self) () {
-        loop(() { self.space_here() }, (h) { self.at = self.at + 1; });
+        loop(self.space_here(), (h) { self.at = self.at + 1; });
         ();
     }
 
@@ -454,26 +454,6 @@ simple = (b: u8) Res<u8> {
 // whose sibling is `Res<(), JsonFault>` infers the one-parameter `Res`
 // instead, and the two do not join.
 fine* = () Res<(), JsonFault> { Ok(()) }
-
-// A `Res` that failed to allocate, as a `JsonFault`. No `From` in the
-// seed subset (`PLAN.md:200`), so this is written out. TWO FUNCTIONS AND
-// NOT ONE, pinning down a backend gap: the unit-case version,
-//
-//     faulted_ok = (r: Res<(), AllocError>) Res<(), JsonFault> {
-//         r.match({ Ok(value) => Ok(value), .. })
-//     }
-//
-// type-checks and then fails in the backend with "codegen cannot resolve
-// `value`" — `JsonId`, `Run`, `String` all lower; only `()` does not.
-// `Ok(_) => fine()` sidesteps it by never naming the value. A `src/gen/`
-// bug, not fixed here.
-faulted* = <T>(r: Res<T, AllocError>) Res<T, JsonFault> {
-    r.match({ Ok(value) => Ok(value), Err(why) => Err(JsonFault.NoMemory) });
-}
-
-faulted_ok* = (r: Res<(), AllocError>) Res<(), JsonFault> {
-    r.match({ Ok(_) => fine(), Err(why) => Err(JsonFault.NoMemory) });
-}
 
 BACKSPACE*: u8 = 8
 FORM_FEED*: u8 = 12

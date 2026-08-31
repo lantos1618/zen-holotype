@@ -474,16 +474,17 @@ loop*<T> = (body: (h: LoopHandle) ()) Res<T>
 `DESIGN.md:717`. CONTRADICTION with C055/C056: both `name*<T> = (...)` and
 `name* = <T>(...)` occur for functions. See A-GEN.
 
-### C058 — overload set: one name, six declarations
+### C058 — overload set: one name, seven declarations
 ```groovy
 loop*<T> = (body: (h: LoopHandle) ()) Res<T>
 loop*<T> = (body: (h: LoopHandle, index: usize) ()) Res<T>
 loop*<T> = (cond: () bool, body: (h: LoopHandle) ()) Res<T>
+loop*<T> = (cond: bool, body: (h: LoopHandle) ()) Res<T>
 loop*<T> = (range: Range, body: (h: LoopHandle, index: usize, value: T) ()) Res<T>
 loop*<T> = (range: Range, body: (h: LoopHandle, value: T) ()) Res<T>
 loop*<T, A> = (range: Range, init: A, body: (h: LoopHandle, index: usize, value: T, acc: A) A) Res<A>
 ```
-`DESIGN.md:717-731` (interleaved with comments). Six top-level bindings of the same
+`DESIGN.md:717-731` (interleaved with comments). Seven top-level bindings of the same
 name, distinguished by parameter types and arity, including differing counts of
 generic parameters.
 

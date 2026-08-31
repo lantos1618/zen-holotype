@@ -19,6 +19,7 @@
 // part of the prelude, and the impls at the foot of it need the name.
 // std.core.eq imports nothing, so the graph still points down.
 Eq = std.core.eq
+Res, Ok, None = std.core.result
 
 // Negative extremes are plain literals: unary minus on a positive
 // that doesn't fit the type alone (classic; pinned by
@@ -142,6 +143,32 @@ to_i64* = (self: u32) i64
 
 to_f64* = (self: i32) f64
 to_f64* = (self: f32) f64
+
+// Checked narrowing; the bounded loop is the portable floor until the C
+// backend owns this conversion directly.
+to_u8* = (self: usize) Res<u8> {
+    (self <= u8.MAX.to_usize()).match({
+        false => None,
+        true  => {
+            value: u8 ::= 0;
+            (value.to_usize() < self).loop((h) { value = value + 1; });
+            Ok(value)
+        },
+    })
+}
+
+to_u8* = (self: u32) Res<u8> { self.to_usize().to_u8() }
+
+// 2^self; ordinary usize overflow traps.
+pow2* = (self: usize) usize {
+    power ::= 1;
+    i     ::= 0;
+    (i < self).loop((h) {
+        power = power * 2;
+        i     = i + 1;
+    });
+    power;
+}
 
 // The same matrix as BOUNDS, so generic code can name "widens to u32":
 // one behavior per target, each impl supplying the intrinsic declared

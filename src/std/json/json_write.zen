@@ -150,7 +150,7 @@ Jsons* = {
     // answering 1 for `1e10` is a quiet wrong.
     whole* = (self: @Self, id: JsonId) Res<usize> {
         self.at(id).match({
-            Num(lex) => whole_of(lex),
+            Num(lex) => lex.parse_usize(),
             _        => None,
         })
     }
@@ -332,43 +332,3 @@ hex_escape = (b: u8, out :: String) Res<(), AllocError> {
 
 SPACE*: u8 = 32
 NIBBLE_BASE*: u8 = 16
-
-// A lexeme read as a usize, or `None` if not exactly digits. Overflow
-// answers `None` and never wraps — worse to answer with low bits than
-// to refuse.
-whole_of* = (lex: str) Res<usize> {
-    n  ::= 0;
-    ok ::= !lex.is_empty();
-    Range(0, lex.len).loop((h, i) {
-        stepped(n, lex.index(i)).match({
-            Ok(next) => { n = next; },
-            None     => { ok = false; },
-        });
-    });
-    ok.match({ true => Ok(n), false => None })
-}
-
-// One more digit on the end of `n`.
-//
-// A FREE FUNCTION AND NOT A NESTED CLOSURE — a bootstrapper limit: a
-// `.then(() { .. })` closure inside the loop body reading the loop's `b`
-// gets `bootstrap/` to resolve that capture to the wrong binding
-// (reports "no method `to_u32` on `bool`" against the loop's `ok`). The
-// self-hosted compiler gets it right, so the two must agree.
-stepped = (n: usize, b: u8) Res<usize> {
-    (b >= '0' && b <= '9').match({
-        false => None,
-        true  => fits(n, (b - '0').to_u32().to_usize()),
-    })
-}
-
-// The guard runs BEFORE the multiply — an overflowing `*` TRAPS, and a
-// trap is not a refusal.
-fits = (n: usize, d: usize) Res<usize> {
-    (n > (USIZE_MAX - d) / 10).match({
-        true  => None,
-        false => Ok(n * 10 + d),
-    })
-}
-
-USIZE_MAX*: usize = 18446744073709551615

@@ -195,7 +195,7 @@ Build* = {
         seen.add(entry).try();
         self.seed_prelude(seen).try();
         i ::= 0;
-        loop(() { i < seen.len }, (h) {
+        loop(i < seen.len, (h) {
             u = seen.get(i).match({ Ok(v) => v, None => entry });
             i = i + 1;
             self.front(u, seen).try();
@@ -328,7 +328,11 @@ Build* = {
     // would only be a second diagnostic for one mistake.
     lex_it = (self :: @Self, u: Unit, text: str, seen :: Vec<Unit>)
              Res<(), AllocError> {
-        lexed = scan(self.alloc, Source(file: u.rel, text: text)).try();
+        // Tokens live only through this parse. Keeping their geometric
+        // growth in the whole-build arena retained every old run through
+        // sema and emission; this arena returns all of them after the module.
+        scratch ::= self.env.mem.alloc();
+        lexed = scan(scratch, Source(file: u.rel, text: text)).try();
         lexed.is_clean().match({
             false => self.lex_faults(lexed),
             true  => self.parse_it(u, lexed, seen),
@@ -405,7 +409,7 @@ Build* = {
         q.segments.find((s) { s.text.is_empty() }).match({
             Ok(_) => Ok(()),
             None  => {
-                base = self.import_root(q);
+                base   = self.import_root(q);
                 flat   = joined(self.alloc, base, q, false).try();
                 folder = joined(self.alloc, base, q, true).try();
                 self.import_path(flat, folder).match({

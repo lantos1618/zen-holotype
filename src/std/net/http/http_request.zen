@@ -1,0 +1,39 @@
+// HTTP/1 URL validation and request assembly.
+
+Alloc = std.mem
+str, String = std.text
+Res = std.core
+Vec = std.collections
+ParsedUrl, parse_url = std.net.url
+HttpError = std.net.http.http_types
+
+http_url* = (url: str) Res<ParsedUrl, HttpError> {
+    url.parse_url().replace_err(HttpError.DecodeFailed)
+}
+
+build_request* = (
+    parsed  : ParsedUrl,
+    a       : Alloc,
+    headers : Vec<str>,
+    body    : str
+) Res<String, HttpError> {
+    sb ::= a.String().try(HttpError.SendFailed);
+
+    sb.add_bytes("POST ").try(HttpError.SendFailed);
+    sb.add_bytes(parsed.path).try(HttpError.SendFailed);
+    sb.add_bytes(" HTTP/1.1\r\nHost: ").try(HttpError.SendFailed);
+    sb.add_bytes(parsed.host).try(HttpError.SendFailed);
+    sb.add_bytes("\r\n").try(HttpError.SendFailed);
+
+    headers.loop((h, header) {
+        sb.add_bytes(header).try(HttpError.SendFailed);
+        sb.add_bytes("\r\n").try(HttpError.SendFailed);
+    });
+
+    sb.add_bytes("Content-Length: ").try(HttpError.SendFailed);
+    sb.fmt("{}", body.len).try(HttpError.SendFailed);
+    sb.add_bytes("\r\n\r\n").try(HttpError.SendFailed);
+    sb.add_bytes(body).try(HttpError.SendFailed);
+
+    Ok(sb);
+}

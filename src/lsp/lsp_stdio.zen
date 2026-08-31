@@ -16,14 +16,9 @@
 // frame may not have one — the missing piece `design_lsp.md` section 4
 // named. `print` is the same write without the newline.
 //
-// TWO ARENAS, TWO LIFETIMES. `held` and the server's documents live in
-// the session arena `a` — `held` only grows (a `Vec` has no shrink, and
-// a grow abandons the old pages without touching them, so a borrow of a
-// frame stays valid for the session). Everything a message PRODUCES —
-// its JSON tree, its reply, the diagnostics a settle publishes — lives
-// in `batch`, an arena created per loop iteration and dropped at the
-// iteration's end, after the bytes have been printed. A session's RSS
-// no longer carries every reply it ever wrote.
+// The server, incoming frame and reply scratch have separate arenas.
+// Once a complete frame is answered, the input Vec retains its capacity
+// but forgets the bytes; neither requests nor replies accumulate.
 
 str, String, str_at = std.text
 Vec = std.collections
@@ -46,24 +41,42 @@ Drain* = {
 // EACH READ ASKS FOR EXACTLY WHAT THE ENVELOPE SAYS IS MISSING —
 // `short_by`; see `lsp_frame.zen` for why it cannot be a fixed chunk.
 serve_stdio* = (env: Env, a: Alloc) Res<i32, AllocError> {
-    server ::= a.Server(env);
-    held   ::= a.Vec<u8>();
-    at     ::= 0;
-    open   ::= true;
-    framed ::= true;
+    server      ::= a.Server(env);
+    input_arena ::= env.mem.alloc();
+    held        ::= input_arena.Vec<u8>();
+    at          ::= 0;
+    open        ::= true;
+    framed      ::= true;
     loop(() { open && framed && !server.stopped() }, (h) {
-        seen = str_at(held.ptr(), held.len);
-        open = arrived(env, held, short_by(seen, at)).try();
-        // The batch's scratch arena: a binding inside the loop body, so
-        // its drop runs at the iteration's end — replies, trees and
-        // settle scratch all go back at once (`mem_arena.zen`'s drop).
-        batch ::= env.mem.alloc();
-        d      = drain(server, batch, str_at(held.ptr(), held.len), at).try();
-        at     = d.at;
-        framed = d.framed;
-        after_drain(server, batch).try();
+        seen  = str_at(held.ptr(), held.len);
+        open  = arrived(env, held, short_by(seen, at)).try();
+        bytes = str_at(held.ptr(), held.len);
+        frame_at(bytes, at).match({
+            Err(f) => {
+                framed = partial(f);
+                fault_line(f, framed);
+            },
+            Ok(_)  => {
+                batch ::= env.mem.alloc();
+                d      = drain(server, batch, bytes, at).try();
+                at     = d.at;
+                framed = d.framed;
+                after_drain(server, batch).try();
+                // Persistent server fields copy anything they retain.
+                (at == held.len).then(() {
+                    clear(held);
+                    at = 0;
+                });
+            },
+        });
     });
     Ok(exit_code(server.stopped(), framed));
+}
+
+// Keep the allocation and move only the logical end. `take` from the end
+// shifts nothing, so clearing is linear in the frame size.
+clear = (held :: Vec<u8>) () {
+    loop(held.len > 0, (h) { held.take(held.len - 1); });
 }
 
 // THE SETTLE POINT OVER A PIPE: everything that had arrived has been
@@ -127,12 +140,8 @@ drain = (server :: Server, t: Alloc, held: str, at: usize)
     Ok(Drain(at: from, framed: framed));
 }
 
-// One message in, its reply out. THE BODY IS NOT COPIED: it borrows
-// `held`, whose bytes the header's two-arenas rule says are never
-// reused, so the borrow outlives the message. What the server KEEPS from
-// a body (the open documents, the workspace) it copies itself, in
-// `lsp_serve.zen`'s `changed_to` — once per real change, not once per
-// message.
+// One message in, its reply out. The body borrows the current input
+// arena; persistent server fields copy what they retain.
 answered = (server :: Server, t: Alloc, body: str) Res<(), AllocError> {
     out ::= t.String().try();
     server.one(t, body, out).try();

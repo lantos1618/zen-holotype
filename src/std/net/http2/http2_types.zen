@@ -1,0 +1,94 @@
+// src/std/net/http2/http2_types.zen
+// Shared HTTP/2 errors, response values, and wire types.
+
+str, String = std.text
+WriteError = std.core
+
+H2Error* = ConnectFailed
+    | TlsFailed
+    | SendFailed
+    | RecvFailed
+    | DecodeFailed
+    | ProtocolFailed
+    | Closed
+    | Status(i32)
+
+// Transport/protocol failures and the caller's own response sink failure stay
+// distinct. A streaming caller can decide whether Full/Interrupted is
+// retryable for its sink; the HTTP client must not turn it into RecvFailed.
+H2StreamError* = H2Error | WriteError
+
+H2Response* = {
+    status*: i32,
+    body*:   String,
+}
+
+// RFC 7540 §6 frame kinds. Zen enums intentionally do not promise a wire
+// layout, so conversion is explicit at the frame boundary.
+FrameType* = Data
+    | Headers
+    | Priority
+    | Reset
+    | Settings
+    | Push
+    | Ping
+    | GoAway
+    | WindowUpdate
+    | Continuation
+    | Unknown(u8)
+
+frame_type* = (raw: u8) FrameType {
+    raw.match({
+        0 => FrameType.Data,
+        1 => FrameType.Headers,
+        2 => FrameType.Priority,
+        3 => FrameType.Reset,
+        4 => FrameType.Settings,
+        5 => FrameType.Push,
+        6 => FrameType.Ping,
+        7 => FrameType.GoAway,
+        8 => FrameType.WindowUpdate,
+        9 => FrameType.Continuation,
+        _ => FrameType.Unknown(raw),
+    });
+}
+
+wire* = (kind: FrameType) u8 {
+    kind.match({
+        Data         => 0,
+        Headers      => 1,
+        Priority     => 2,
+        Reset        => 3,
+        Settings     => 4,
+        Push         => 5,
+        Ping         => 6,
+        GoAway       => 7,
+        WindowUpdate => 8,
+        Continuation => 9,
+        Unknown(raw) => raw,
+    });
+}
+
+// flags
+FLAG_END_STREAM*:  u8 = 1   // DATA, HEADERS
+FLAG_ACK*:         u8 = 1   // SETTINGS, PING
+FLAG_END_HEADERS*: u8 = 4   // HEADERS
+FLAG_PADDED*:      u8 = 8   // DATA, HEADERS
+FLAG_PRIORITY*:    u8 = 32  // HEADERS
+
+SET_HEADER_TABLE*:   usize = 1
+SET_INITIAL_WINDOW*: usize = 4
+
+// the frame size every peer must accept; we never send larger
+MAX_SEND*: usize = 16384
+
+// the receive window we advertise, per stream and once on the connection
+WINDOW*: usize = 16777216
+
+// HTTP/2 flow-control windows are signed in effect but capped here.
+MAX_WINDOW*: usize = 2147483647
+
+// sanity bound on any inbound frame payload
+MAX_RECV*: usize = 1048576
+
+PREFACE*: str = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"

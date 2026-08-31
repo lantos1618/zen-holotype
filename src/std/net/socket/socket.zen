@@ -1,79 +1,271 @@
 // src/std/net/socket/socket.zen
-// Owns one portable native socket handle. Protocol modules decide how the
-// handle is opened and interpret its errors; this module owns IO and close.
+// Owns one POSIX socket. The foreign boundary names libc itself; build.zen
+// owns target selection and link requirements, so no C shim sits in between.
 
-AllocError, Ptr = std.mem
-str = std.text
+Alloc, AllocError, Ptr, null_ptr = std.mem
+str, String, str_at = std.text
 Res = std.core
 Drop = std.core
 Vec = std.collections
 
-zg_socket_tcp_connect = (host: str, port: u16) usize
-zg_socket_write = (raw: usize, bytes: str) i32
-zg_socket_read = (raw: usize, buf: Ptr<u8>, n: usize) usize
-zg_socket_close = (raw: usize) ()
+AF_UNSPEC: i32 = 0
+AF_INET6: i32 = 10
+SOCK_STREAM: i32 = 1
+IPPROTO_TCP: i32 = 6
+MSG_NOSIGNAL: i32 = 16384
+NI_MAXHOST: usize = 1025
+NI_NUMERICHOST: i32 = 1
+
+// Linux/POSIX addrinfo layout. The generated C type deliberately has a Zen
+// name; only its ABI crosses getaddrinfo, connect and getnameinfo.
+AddrInfo = {
+    flags: i32,
+    family: i32,
+    socktype: i32,
+    protocol: i32,
+    address_len: u32,
+    address: Ptr<u8>,
+    canonical_name: Ptr<u8>,
+    next: Ptr<AddrInfo>,
+}
+
+socket = (domain: i32, kind: i32, protocol: i32) i32
+connect = (fd: i32, address: Ptr<u8>, address_len: u32) i32
+send = (fd: i32, bytes: Ptr<u8>, len: usize, flags: i32) usize
+recv = (fd: i32, bytes: Ptr<u8>, len: usize, flags: i32) usize
+close = (fd: i32) i32
+getaddrinfo = (
+    host    : Ptr<u8>,
+    service : Ptr<u8>,
+    hints   : Ptr<AddrInfo>,
+    answer  : Ptr<Ptr<AddrInfo>>
+) i32
+freeaddrinfo = (answer: Ptr<AddrInfo>) ()
+getnameinfo = (
+    address     : Ptr<u8>,
+    address_len : u32,
+    host        : Ptr<u8>,
+    host_len    : u32,
+    service     : Ptr<u8>,
+    service_len : u32,
+    flags       : i32
+) i32
 
 SocketFault* = ConnectFault | WriteFault | ReadFault | PeerClosed
 
-unit_or = (r: Res<(), AllocError>, fault: SocketFault)
-          Res<(), SocketFault> {
-    r.match({ Ok(_) => Ok(()), Err(_) => Err(fault) })
+ResolvedAddr* = {
+    ip*: String,
+    is_v6*: bool,
+}
+
+// A borrowed descriptor, not an owner. Socket alone closes it; this type
+// gives raw IO a nominal receiver so socket operations do not attach to every
+// i32 through UFCS.
+SocketFd* = {
+    raw: i32,
+
+    raw_handle* = (self: @Self) i32 { self.raw }
+
+    // One OS send. The overload below repeats until the whole str is sent.
+    send* = (
+        self  : @Self,
+        bytes : Ptr<u8>,
+        len   : usize,
+        flags : i32
+    ) Res<usize, SocketFault> {
+        n = send(self.raw, bytes, len, flags);
+        (n == usize.MAX).match({
+            true  => Err(SocketFault.WriteFault),
+            false => Ok(n),
+        })
+    }
+
+    send* = (self: @Self, bytes: str) Res<(), SocketFault> {
+        sent ::= 0;
+        loop(sent < bytes.len, (h) {
+            n = self.send(
+                bytes.ptr().offset(sent),
+                bytes.len - sent,
+                MSG_NOSIGNAL
+            ).try();
+            (n == 0).match({
+                true  => Err(SocketFault.PeerClosed).try(),
+                false => { sent = sent + n; },
+            });
+        });
+        Ok(())
+    }
+
+    // One OS receive, with either explicit or default flags.
+    recv* = (
+        self  : @Self,
+        bytes : Ptr<u8>,
+        len   : usize,
+        flags : i32
+    ) Res<usize, SocketFault> {
+        n = recv(self.raw, bytes, len, flags);
+        (n == usize.MAX).match({
+            true  => Err(SocketFault.ReadFault),
+            false => Ok(n),
+        })
+    }
+
+    recv* = (self: @Self, bytes: Ptr<u8>, len: usize)
+            Res<usize, SocketFault> {
+        self.recv(bytes, len, 0)
+    }
+}
+
+c_text = (a: Alloc, text: str, fault: SocketFault)
+         Res<Vec<u8>, SocketFault> {
+    out ::= a.Vec<u8>();
+    out.reserve(text.len + 1).try(fault);
+    Range(0, text.len).loop((h, i) {
+        out.add(text.index(i)).try(fault);
+    });
+    out.add(0).try(fault);
+    Ok(out)
+}
+
+hints = (a: Alloc, fault: SocketFault) Res<Vec<AddrInfo>, SocketFault> {
+    out ::= a.Vec<AddrInfo>();
+    out.add(AddrInfo(
+        flags: 0,
+        family: AF_UNSPEC,
+        socktype: SOCK_STREAM,
+        protocol: IPPROTO_TCP,
+        address_len: 0,
+        address: null_ptr<u8>(),
+        canonical_name: null_ptr<u8>(),
+        next: null_ptr<AddrInfo>()
+    )).try(fault);
+    Ok(out)
+}
+
+addresses = (
+    a            : Alloc,
+    host         : Ptr<u8>,
+    service      : Ptr<u8>,
+    alloc_fault  : SocketFault,
+    lookup_fault : SocketFault
+)
+            Res<Vec<Ptr<AddrInfo>>, SocketFault> {
+    spec   ::= hints(a, alloc_fault).try();
+    answer ::= a.Vec<Ptr<AddrInfo>>();
+    answer.add(null_ptr<AddrInfo>()).try(alloc_fault);
+    (getaddrinfo(host, service, spec.ptr(), answer.ptr()) == 0).match({
+        false => Err(lookup_fault),
+        true  => answer.ptr().read(0).is_null().match({
+            true  => Err(lookup_fault),
+            false => Ok(answer),
+        }),
+    })
+}
+
+resolve_addr* = (a: Alloc, host: str) Res<ResolvedAddr, SocketFault> {
+    host_c ::= c_text(a, host, SocketFault.ReadFault).try();
+    run    ::= addresses(
+        a,
+        host_c.ptr(),
+        null_ptr<u8>(),
+        SocketFault.ReadFault,
+        SocketFault.ConnectFault
+    ).try();
+    head = run.ptr().read(0);
+    @scope.defer(() { freeaddrinfo(head) });
+
+    info = head.read(0);
+    bytes ::= a.Vec<u8>();
+    bytes.reserve(NI_MAXHOST).try(SocketFault.ReadFault);
+    rc = getnameinfo(
+        info.address,
+        info.address_len,
+        bytes.ptr(),
+        1025,
+        null_ptr<u8>(),
+        0,
+        NI_NUMERICHOST
+    );
+    (rc == 0).match({
+        false => Err(SocketFault.ReadFault),
+        true  => {
+            n ::= 0;
+            loop(() { n < NI_MAXHOST && bytes.ptr().read(n) != 0 }, (h) {
+                n = n + 1;
+            });
+            ip ::= a.String().try(SocketFault.ReadFault);
+            ip.add_bytes(str_at(bytes.ptr(), n)).try(SocketFault.ReadFault);
+            Ok(ResolvedAddr(ip: ip, is_v6: info.family == AF_INET6))
+        },
+    })
 }
 
 Socket* = {
-    raw: usize,
+    raw: i32,
     open :: bool = true,
 
-    tcp_connect* = (host: str, port: u16) Res<Socket, SocketFault> {
-        raw = zg_socket_tcp_connect(host, port);
-        (raw == usize.MAX).match({
+    tcp_connect* = (a: Alloc, host: str, port: u16)
+                   Res<Socket, SocketFault> {
+        host_c ::= c_text(a, host, SocketFault.ConnectFault).try();
+        port_text = a.String("{}", port).try(SocketFault.ConnectFault);
+        port_c ::= c_text(a, port_text.view(), SocketFault.ConnectFault).try();
+        run    ::= addresses(
+            a,
+            host_c.ptr(),
+            port_c.ptr(),
+            SocketFault.ConnectFault,
+            SocketFault.ConnectFault
+        ).try();
+        head = run.ptr().read(0);
+        @scope.defer(() { freeaddrinfo(head) });
+
+        raw ::= -1;
+        at  ::= head;
+        loop(() { !at.is_null() && raw < 0 }, (h) {
+            info      = at.read(0);
+            candidate = socket(info.family, info.socktype, info.protocol);
+            (candidate >= 0).then(() {
+                (connect(
+                    candidate,
+                    info.address,
+                    info.address_len
+                ) == 0).match({
+                    true  => { raw = candidate; },
+                    false => { close(candidate); },
+                });
+            });
+            at = info.next;
+        });
+        (raw < 0).match({
             true  => Err(SocketFault.ConnectFault),
             false => Ok(Socket(raw: raw)),
         })
     }
 
-    // Borrow the native handle without transferring close ownership.
-    handle* = (self: @Self) usize { self.raw }
+    // Borrow the descriptor without transferring close ownership.
+    handle* = (self: @Self) SocketFd { SocketFd(raw: self.raw) }
 
     write* = (self: @Self, bytes: str) Res<(), SocketFault> {
-        self.open.match({
-            false => Err(SocketFault.PeerClosed),
-            true  => zg_socket_write(self.raw, bytes).match({
-                0 => Ok(()),
-                4 => Err(SocketFault.PeerClosed),
-                _ => Err(SocketFault.WriteFault),
-            }),
-        })
+        self.open.ensure(SocketFault.PeerClosed).try();
+        self.handle().send(bytes)
     }
 
     read* = (self: @Self, buf :: Vec<u8>, n: usize)
             Res<usize, SocketFault> {
-        self.open.match({
-            false => Err(SocketFault.PeerClosed),
-            true  => {
-                unit_or(buf.reserve(n), SocketFault.ReadFault).try();
-                got = zg_socket_read(self.raw, buf.ptr(), n);
-                (got == usize.MAX).match({
-                    true  => Err(SocketFault.ReadFault),
-                    false => (got == usize.MAX - 1).match({
-                        true  => Err(SocketFault.PeerClosed),
-                        false => Ok(got),
-                    }),
-                })
-            },
+        self.open.ensure(SocketFault.PeerClosed).try();
+        buf.reserve(n).try(SocketFault.ReadFault);
+        got = self.handle().recv(buf.ptr(), n).try();
+        (got == 0).match({
+            true  => Err(SocketFault.PeerClosed),
+            false => Ok(got),
         })
     }
 
-    // Clear ownership before the native call. An explicit close followed by
-    // scope Drop is therefore harmless, including if the OS reuses the handle.
     close* = (self :: @Self) () {
-        self.open.match({
-            false => {},
-            true  => {
-                self.open = false;
-                zg_socket_close(self.raw);
-            },
-        })
+        self.open.then(() {
+            self.open = false;
+            close(self.raw);
+        });
     }
 }
 

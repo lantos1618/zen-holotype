@@ -15,11 +15,10 @@
 // HEADER NAMES ARE COMPARED CASE-INSENSITIVELY, per protocol; every
 // other header (e.g. optional `Content-Type`) is skipped, not rejected.
 
-str, String = std.text
+str, String, parse_usize = std.text
 Range = std.core
 AllocError = std.mem
 to_lower = std.core.byte
-whole_of = std.json
 
 // One message, and where the next one starts. `next` rather than a
 // consumed cursor, so the caller can walk a buffer of frames without this
@@ -115,19 +114,14 @@ missing = (bytes: str, end: usize) usize {
     })
 }
 
-// The offset of the `\r\n\r\n` that ends the header block, found by
-// scanning for the four bytes directly rather than walking lines.
 blank_at = (bytes: str, at: usize) Res<usize, FrameFault> {
-    Range(at, bytes.len).find((i) { four_at(bytes, i) }).match({
-        Ok(i) => Ok(i),
-        None  => Err(FrameFault.NoBlank(at)),
+    (at <= bytes.len).match({
+        false => Err(FrameFault.NoBlank(at)),
+        true  => bytes.slice(at, bytes.len).find(BLANK).match({
+            Ok(i) => Ok(at + i),
+            None  => Err(FrameFault.NoBlank(at)),
+        }),
     })
-}
-
-four_at = (bytes: str, i: usize) bool {
-    (i + BLANK_LEN <= bytes.len)
-        && bytes.index(i) == '\r' && bytes.index(i + 1) == '\n'
-        && bytes.index(i + 2) == '\r' && bytes.index(i + 3) == '\n'
 }
 
 // The `Content-Length` value in the header block spanning `at..blank`.
@@ -142,7 +136,7 @@ length_in = (bytes: str, at: usize, blank: usize) Res<usize, FrameFault> {
         stop = line_end(bytes, from, blank);
         is_length(bytes, from, stop).then(() {
             found = true;
-            whole_of(trimmed(bytes, from + NAME_LEN, stop)).match({
+            parse_usize(trimmed(bytes, from + NAME_LEN, stop)).match({
                 Ok(n) => { value = n; },
                 None  => { bad = true; found = false; },
             });
@@ -216,6 +210,7 @@ write_decimal* = (n: usize, out :: String) Res<(), AllocError> {
 
 DIGITS*: str = "0123456789"
 NAME*: str = "content-length:"
+BLANK*: str = "\r\n\r\n"
 NAME_LEN*: usize = 15
 BLANK_LEN*: usize = 4
 CRLF_LEN*: usize = 2

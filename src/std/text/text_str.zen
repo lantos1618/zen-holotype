@@ -18,6 +18,11 @@ str* = {
 
     is_empty* = (self: @Self) bool { self.len == 0 }
 
+    // Borrow the first byte for raw external calls. The same lifetime rule as
+    // String.view applies: the owner must not move or grow the backing run
+    // while the foreign call is using it.
+    ptr* = (self: @Self) Ptr<u8> { self.data }
+
     // the lookup-can-legitimately-miss form (Vec.get's shape). text_utf8
     // reads through this: a sequence running off the end is bad input,
     // not a bug
@@ -65,12 +70,25 @@ str* = {
     find* = (self: @Self, needle: u8) Res<usize> {
         hit: Res<usize> = None;
         Range(0, self.len).loop((h, i) {
-            (self.data.read(i) == needle).match({
-                true  => { hit = Ok(i); h.break(0); },
-                false => {},
+            (self.data.read(i) == needle).then(() {
+                hit = Ok(i);
+                h.break(0);
             });
         });
         hit;
+    }
+
+    // The substring overload. Empty text starts at zero; a longer needle
+    // cannot fit, so subtraction happens only after the length gate.
+    find* = (self: @Self, needle: str) Res<usize> {
+        needle.len.match({
+            0 => Ok(0),
+            _ => (self.len < needle.len).match({
+                true  => None,
+                false => Range(0, self.len - needle.len + 1)
+                    .find((i) { self.matches_at(i, needle) }),
+            }),
+        })
     }
 
     // the LAST byte equal to needle, walked from the far end so the
@@ -80,11 +98,11 @@ str* = {
     rfind* = (self: @Self, needle: u8) Res<usize> {
         hit: Res<usize> = None;
         at ::= self.len;
-        loop(() { at > 0 }, (h) {
+        loop(at > 0, (h) {
             at = at - 1;
-            (self.data.read(at) == needle).match({
-                true  => { hit = Ok(at); h.break(0); },
-                false => {},
+            (self.data.read(at) == needle).then(() {
+                hit = Ok(at);
+                h.break(0);
             });
         });
         hit;
@@ -113,6 +131,10 @@ contains* = (self: str, needle: u8) bool {
     });
 }
 
+contains* = (self: str, needle: str) bool {
+    self.find(needle).match({ Ok(_) => true, None => false })
+}
+
 // do other's bytes appear in self starting at `from`? The shared walk
 // under starts_with and ends_with — both are "compare at an offset",
 // and writing the offset twice is how the two drift. The lengths were
@@ -120,9 +142,9 @@ contains* = (self: str, needle: u8) bool {
 matches_at = (self: str, from: usize, other: str) bool {
     hit ::= true;
     Range(0, other.len).loop((h, i) {
-        (self.data.read(from + i) != other.data.read(i)).match({
-            true  => { hit = false; h.break(); },
-            false => {},
+        (self.data.read(from + i) != other.data.read(i)).then(() {
+            hit = false;
+            h.break();
         });
     });
     hit;
@@ -163,9 +185,9 @@ trim* = (self: str) Res<str> {
 trim_start* = (self: str) Res<str> {
     hit: Res<str> = None;
     Range(0, self.len).loop((h, i) {
-        (self.data.read(i).is_space()).match({
-            false => { hit = Ok(self.slice(i, self.len)); h.break(0); },
-            true  => {},
+        (!self.data.read(i).is_space()).then(() {
+            hit = Ok(self.slice(i, self.len));
+            h.break(0);
         });
     });
     hit;
@@ -177,11 +199,11 @@ trim_start* = (self: str) Res<str> {
 trim_end* = (self: str) Res<str> {
     hit: Res<str> = None;
     keep ::= self.len;
-    loop(() { keep > 0 }, (h) {
+    loop(keep > 0, (h) {
         keep = keep - 1;
-        (self.data.read(keep).is_space()).match({
-            false => { hit = Ok(self.slice(0, keep + 1)); h.break(0); },
-            true  => {},
+        (!self.data.read(keep).is_space()).then(() {
+            hit = Ok(self.slice(0, keep + 1));
+            h.break(0);
         });
     });
     hit;
@@ -201,10 +223,7 @@ same_folded = (self: str, other: str) bool {
     hit ::= true;
     Range(0, other.len).loop((h, i) {
         (self.data.read(i).to_lower() != other.data.read(i).to_lower())
-            .match({
-                true  => { hit = false; h.break(); },
-                false => {},
-            });
+            .then(() { hit = false; h.break(); });
     });
     hit;
 }
@@ -270,17 +289,13 @@ piece_at = (s: str, sep: u8, k: usize) Res<str> {
         edge ::= false;
         s.get(i).match({
             None  => { edge = true; },
-            Ok(b) => (b == sep).match({
-                true  => { edge = true; },
-                false => {},
-            }),
+            Ok(b) => { (b == sep).then(() { edge = true; }); },
         });
-        edge.match({
-            true  => (n == k).match({
+        edge.then(() {
+            (n == k).match({
                 true  => { answer = Ok(s.slice(from, i)); h.break(0); },
                 false => { from = i + 1; n = n + 1; },
-            }),
-            false => {},
+            });
         });
     });
     answer;

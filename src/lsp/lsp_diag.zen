@@ -59,7 +59,7 @@ Built, Spot* = lsp.lsp_built
 // name, gathered by `lsp_names.zen` off the SAME `Checker` the
 // diagnostics come from — a second build per keystroke is the cost
 // `design_lsp.md` §5 prices, and it is paid nowhere twice.
-Classed, sort_classes = lsp.lsp_colour
+Classed = lsp.lsp_colour
 
 // What a query borrows from the held build: the checker (a header copy,
 // read-only — `lsp_built.zen`'s header is the doctrine) and the root it
@@ -89,6 +89,11 @@ Diagnostics* = {
     // not.
     showing :: Vec<str>,
 
+    // Closed documents whose diagnostics must be cleared at the next
+    // settle. A Vec, not one slot: a client may close a whole window in
+    // one buffered batch.
+    closing :: Vec<str>,
+
     // THE ONE BUILD, shared with every query. See `lsp_built.zen`.
     built :: Built,
 
@@ -107,6 +112,7 @@ Diagnostics* = {
     // freshness goes with the change; the slot's own key notices the new
     // bytes at the next `ensure`.
     owes* = (self :: @Self, uri: str) () {
+        self.built.invalidate();
         self.owed  = uri;
         self.fresh = false;
     }
@@ -120,40 +126,31 @@ Diagnostics* = {
         self.owed.is_empty().then(() { self.owed = uri; });
     }
 
+    // A closed buffer no longer belongs to the overlay. Retire the build
+    // that borrowed that overlay, clear anything published for the closed
+    // URI, and rebuild from another open entry when one remains.
+    closed* = (self :: @Self, uri: str, next: str)
+              Res<(), AllocError> {
+        self.built.invalidate();
+        self.fresh = false;
+        self.owed  = next;
+        self.closing.find((u) { u.eq(uri) }).match({
+            Ok(_) => written(),
+            None  => self.closing.add(uri),
+        })
+    }
+
     // The names the last settle classified in `uri`, sorted for
     // `lsp_colour.zen`'s search. AN EMPTY VEC IS THE WHOLE FALLBACK:
     // no workspace, no build yet, a change not yet settled and a build
     // with faults all look alike here, and all mean "lexical colours".
-    // Rows are COPIED OUT (`t`, the request's arena): the slot's pages
-    // are freed by the next build, so nothing may hold a row past it.
+    // The returned Vec borrows a lazy per-file cache in the held build.
     classes_for* = (self :: @Self, t: Alloc, uri: str)
                    Res<Vec<Classed>, AllocError> {
-        found ::= t.Vec<Classed>();
         self.fresh.match({
-            false => written(),
-            true  => self.gather(uri, found),
-        }).try();
-        sort_classes(found).try();
-        Ok(found);
-    }
-
-    gather = (self :: @Self, uri: str, found :: Vec<Classed>)
-             Res<(), AllocError> {
-        self.built.classed().match({
-            None        => written(),
-            Ok(classed) => self.each_of(classed, uri, found),
+            false => Ok(t.Vec<Classed>()),
+            true  => self.built.classed_for(t, uri),
         })
-    }
-
-    each_of = (self :: @Self, classed: Vec<Classed>, uri: str,
-               found :: Vec<Classed>) Res<(), AllocError> {
-        classed.loop((h, cl) {
-            cl.uri.eq(uri).match({
-                true  => found.add(cl),
-                false => Ok(()),
-            }).try();
-        });
-        Ok(());
     }
 
     // WHAT A QUERY SHARES, with the caller having ruled out the
@@ -180,10 +177,30 @@ Diagnostics* = {
     settled* = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
                 docs: Map<str, str>, t: Alloc, out :: String)
                Res<(), AllocError> {
+        self.clear_closed(env, t, uris, docs, out).try();
         self.owed.is_empty().match({
             true  => written(),
             false => self.build_owed(env, workspace, uris, docs, t, out),
         })
+    }
+
+    clear_closed = (self :: @Self, env: Env, t: Alloc, uris: Vec<str>,
+                    docs: Map<str, str>, out :: String)
+                   Res<(), AllocError> {
+        empty ::= t.Vec<Spot>();
+        self.closing.loop((h, uri) {
+            self.say_one(env, t, uri, uris, docs, empty, out).try();
+        });
+        kept ::= self.a.Vec<str>();
+        self.showing.loop((h, uri) {
+            self.closing.find((u) { u.eq(uri) }).match({
+                Ok(_) => written(),
+                None  => kept.add(uri),
+            }).try();
+        });
+        self.showing = kept;
+        self.closing = self.a.Vec<str>();
+        Ok(())
     }
 
     // NO WORKSPACE, NO DIAGNOSTICS — a refusal, not a gap. Without a
@@ -305,10 +322,15 @@ Diagnostics* = {
     }
 }
 
+Diagnostics.impl(Drop, {
+    drop = (self :: @Self) () { self.built.drop(); }
+})
+
 Diagnostics* = (a: Alloc, env: Env) Diagnostics {
     Diagnostics(
         a: a,
         showing: a.Vec<str>(),
+        closing: a.Vec<str>(),
         built: env.Built(),
         said: a.Map<str, str>()
     )

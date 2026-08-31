@@ -22,30 +22,22 @@ tcp_error = (fault: SocketFault) TcpError {
 TcpStream* = {
     socket :: Socket,
 
-    // Alloc stays in the public boundary for HTTP compatibility; connecting
-    // itself no longer allocates a one-element output Vec.
     connect* = (a: Alloc, host: str, port: u16) Res<TcpStream, TcpError> {
-        Socket.tcp_connect(host, port).match({
+        Socket.tcp_connect(a, host, port).match({
             Ok(socket) => Ok(TcpStream(socket: consume socket)),
             Err(e)     => Err(tcp_error(e)),
         })
     }
 
     write* = (self: @Self, bytes: str) Res<(), TcpError> {
-        self.socket.write(bytes).match({
-            Ok(_)  => Ok(()),
-            Err(e) => Err(tcp_error(e)),
-        })
+        self.socket.write(bytes).map_err((e) { tcp_error(e) })
     }
 
     // Alloc remains temporarily for source compatibility. Vec already owns
     // the allocator used by reserve, so no per-read output allocation remains.
     read* = (self: @Self, a: Alloc, buf :: Vec<u8>, n: usize)
             Res<usize, TcpError> {
-        self.socket.read(buf, n).match({
-            Ok(got) => Ok(got),
-            Err(e)  => Err(tcp_error(e)),
-        })
+        self.socket.read(buf, n).map_err((e) { tcp_error(e) })
     }
 
     close* = (self :: @Self) () { self.socket.close() }

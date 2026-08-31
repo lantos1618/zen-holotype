@@ -71,10 +71,24 @@ travelled_of = (c :: Checker, name: str, rty: TyId, out :: Vec<Cand>)
                Res<(), AllocError> {
     defs ::= c.alloc.Vec<Def>();
     c.world.exported_named(name, defs).try();
-    pool ::= c.alloc.Vec<Cand>();
-    defs.loop((h, d) { c.cand_of(d, pool).try() });
-    pool.loop((h, k) { keep_travelled(c, k, rty, out).try() });
+    defs.loop((h, d) { c.travelled_def(d, rty, out).try() });
     Ok(());
+}
+
+travelled_def = (c :: Checker, d: Def, rty: TyId, out :: Vec<Cand>)
+                Res<(), AllocError> {
+    decl_at(c.tree, d.id).match({
+        None    => Ok(()),
+        Ok(dec) => dec.kind.match({
+            Function(f) => c.keep_travelled(
+                c.make_cand(d, dec, f).try(),
+                rty,
+                out
+            ),
+            _           => Ok(()),
+        }),
+    }).try();
+    Ok(())
 }
 
 // A declaration already in the list is not added twice: a module that
@@ -151,6 +165,11 @@ cand_from_decl = (c :: Checker, d: Def, dec: Decl, out :: Vec<Cand>)
 // A signature is resolved in the declaring module, as the header says.
 add_cand = (c :: Checker, d: Def, dec: Decl, f: Function, out :: Vec<Cand>)
            Res<(), AllocError> {
+    out.add(c.make_cand(d, dec, f).try())
+}
+
+make_cand = (c :: Checker, d: Def, dec: Decl, f: Function)
+            Res<Cand, AllocError> {
     mark   = c.tvar_mark();
     poison = c.types.unknown().try();
     ctx    = Ctx(d.id.module.to_usize(), poison);
@@ -166,7 +185,7 @@ add_cand = (c :: Checker, d: Def, dec: Decl, f: Function, out :: Vec<Cand>)
     tbs ::= c.alloc.Vec<TBound>();
     c.collect_bounds(f, ctx, tbs).try();
     c.release_tvars(mark).try();
-    out.add(Cand(
+    Ok(Cand(
         id: d.id,
         name: d.name,
         owner: d.qname,

@@ -1,54 +1,38 @@
 // src/lsp/lsp_uri.zen
-// A document URI, as a path the compiler can open.
-//
-// The protocol names a document by URI; `std.env.Fs` opens a PATH. A
-// build reads the disk, so this is where the conversion starts. A file
-// of its own, not a pair of lines in `lsp_serve.zen`: `design_lsp.md` §6
-// warns a `vscode-remote://` URI must convert correctly in ONE place, or
-// a second copy is how a remote workspace silently hovers `null`.
-//
-// WHAT IT DOES NOT DO: PERCENT-ESCAPES ARE NOT DECODED (`%20` reaches
-// `Fs.read` unchanged, so a path with a space fails as a diagnostic, not
-// a wrong answer — decoding needs an allocator and a hex grammar); NO
-// SCHEME BUT `file:` IS UNDERSTOOD (`design_lsp.md` §6: a remote VS Code
-// workspace sends `vscode-remote://<host>/…`, whose authority is not
-// part of the path — such a URI comes back unchanged and fails at the
-// read rather than opening the wrong file).
+// The protocol names documents by URI; Fs opens paths. Keep that
+// conversion here so every LSP feature agrees about the same document.
 
 str, String = std.text
 Alloc, AllocError = std.mem
 
-// `file://` — seven bytes; the authority is empty, so the path's own
-// leading slash is the third: `file:///a/b.zen` is `/a/b.zen`.
 FILE_SCHEME*: str = "file://"
+REMOTE_SCHEME: str = "vscode-remote://"
 
-// The path a URI names, or the URI itself when this file cannot say.
-//
-// A URI THAT IS ALREADY A PATH IS LEFT ALONE, which is what makes the
-// two-file form of `zen lsp` testable: `tests/corpus/lsp/` drives the
-// same server with paths relative to the work directory.
+// This borrowed form handles conversions that need no new bytes. Paths
+// and unknown schemes stay unchanged rather than risking a wrong file.
+// Percent decoding needs owned output, which this interface cannot make.
 path_of* = (uri: str) str {
-    scheme_at(uri).match({
-        false => uri,
+    uri.starts_with(FILE_SCHEME).match({
         true  => uri.slice(FILE_SCHEME.len, uri.len),
+        false => uri.starts_with(REMOTE_SCHEME).match({
+            true  => remote_path(uri),
+            false => uri,
+        }),
     })
 }
 
-scheme_at = (uri: str) bool {
-    (uri.len < FILE_SCHEME.len).match({
-        true  => false,
-        false => uri.slice(0, FILE_SCHEME.len).eq(FILE_SCHEME),
+// VS Code Remote runs the server on the remote host. Its URI authority
+// selects that host; only the absolute path is meaningful to its Fs.
+remote_path = (uri: str) str {
+    tail = uri.slice(REMOTE_SCHEME.len, uri.len);
+    tail.find('/').match({
+        Ok(at) => tail.slice(at, tail.len),
+        None   => uri,
     })
 }
 
-// THE WAY BACK. `publishDiagnostics` names a module by its path relative
-// to the compilation root, so the notification needs a URI — the exact
-// inverse of `path_of`, for the one scheme it understands. Built by
-// BYTES to match what the client opened the document with; a mismatch
-// would publish a second, identical-looking file whose errors nothing
-// ever clears. `file://` + `/a/b.zen` is `file:///a/b.zen`, and
-// `file://` + `src/b.zen` is `file://src/b.zen` — the two forms
-// `path_of` produces. A URI of another scheme never reaches this.
+// URI output currently targets local file clients. A remote URI base
+// must be retained by Server before this can reproduce its authority.
 uri_at* = (a: Alloc, root: str, rel: str) Res<str, AllocError> {
     out ::= a.String("{}{}/{}", FILE_SCHEME, root, rel).try();
     Ok(out.view());

@@ -1,138 +1,277 @@
 // src/std/net/tls/tls.zen
-// Safe OpenSSL stream over the native floor.
+// Safe TLS stream over raw OpenSSL symbols. build.zen supplies ssl and crypto;
+// the Zen module owns verification, ALPN, IO and native lifetime directly.
 
 Alloc, AllocError, Ptr, null_ptr = std.mem
 str = std.text
-Res, ok_or = std.core
+Res = std.core
 Drop = std.core
 Vec = std.collections
 Socket = std.net.socket
 
-zg_tls_wrap = (raw: usize, host: str) Ptr<u8>
+SSL_VERIFY_PEER: i32 = 1
+SSL_CTRL_SET_TLSEXT_HOSTNAME: i32 = 55
+X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS: u32 = 4
+SSL_ERROR_WANT_READ: i32 = 2
+SSL_ERROR_WANT_WRITE: i32 = 3
+SSL_ERROR_ZERO_RETURN: i32 = 6
 
-// Connect while offering only the HTTP/2 ALPN.
-zg_tls_wrap_h2 = (raw: usize, host: str) Ptr<u8>
-
-zg_tls_alpn = (ctx: Ptr<u8>, buf: Ptr<u8>, cap: usize) usize
-
-zg_tls_write = (ctx: Ptr<u8>, bytes: str) i32
-
-zg_tls_read = (ctx: Ptr<u8>, buf: Ptr<u8>, n: usize) usize
-
-zg_tls_close = (ctx: Ptr<u8>) ()
+TLS_client_method = () Ptr<u8>
+SSL_CTX_new = (method: Ptr<u8>) Ptr<u8>
+SSL_CTX_free = (ctx: Ptr<u8>) ()
+SSL_CTX_set_default_verify_paths = (ctx: Ptr<u8>) i32
+SSL_CTX_set_verify = (ctx: Ptr<u8>, mode: i32, callback: Ptr<()>) ()
+SSL_CTX_set_alpn_protos = (
+    ctx           : Ptr<u8>,
+    protocols     : Ptr<u8>,
+    protocols_len : u32
+) i32
+SSL_new = (ctx: Ptr<u8>) Ptr<u8>
+SSL_free = (ssl: Ptr<u8>) ()
+SSL_set_fd = (ssl: Ptr<u8>, fd: i32) i32
+SSL_ctrl = (ssl: Ptr<u8>, command: i32, larg: i64, parg: Ptr<()>) i64
+SSL_set_hostflags = (ssl: Ptr<u8>, flags: u32) ()
+SSL_set1_host = (ssl: Ptr<u8>, host: Ptr<u8>) i32
+SSL_connect = (ssl: Ptr<u8>) i32
+SSL_get_verify_result = (ssl: Ptr<u8>) i64
+SSL_get0_alpn_selected = (
+    ssl          : Ptr<u8>,
+    selected     : Ptr<Ptr<u8>>,
+    selected_len : Ptr<u32>
+) ()
+SSL_write_ex = (
+    ssl     : Ptr<u8>,
+    bytes   : Ptr<u8>,
+    len     : usize,
+    written : Ptr<usize>
+) i32
+SSL_read_ex = (
+    ssl   : Ptr<u8>,
+    bytes : Ptr<u8>,
+    len   : usize,
+    read  : Ptr<usize>
+) i32
+SSL_get_error = (ssl: Ptr<u8>, rc: i32) i32
+SSL_shutdown = (ssl: Ptr<u8>) i32
 
 TlsError* = ConnectFailed | TlsFailed | WriteFailed | ReadFailed | Closed
 
-tls_error = (rc: i32) TlsError {
-    rc.match({
-        1 => ConnectFailed,
-        2 => TlsFailed,
-        3 => WriteFailed,
-        4 => ReadFailed,
-        _ => Closed,
-    })
-}
-
-unit_or = (r: Res<(), AllocError>, fallback: TlsError) Res<(), TlsError> {
-    r.match({
-        Ok(_)  => Ok(()),
-        Err(_) => Err(fallback),
+c_text = (a: Alloc, text: str) Res<Vec<u8>, TlsError> {
+    out ::= a.Vec<u8>();
+    out.reserve(text.len + 1).try(TlsError.TlsFailed);
+    Range(0, text.len).loop((h, i) {
+        out.add(text.index(i)).try(TlsError.TlsFailed);
     });
+    out.add(0).try(TlsError.TlsFailed);
+    Ok(out)
 }
 
-tls_dial = (a: Alloc, host: str, port: u16, h2: bool) Res<TlsStream, TlsError> {
-    Socket.tcp_connect(host, port).match({
-        Ok(socket) => wrap_socket(consume socket, host, h2),
-        Err(_)     => Err(TlsError.ConnectFailed),
-    })
+alpn_h2 = (a: Alloc) Res<Vec<u8>, TlsError> {
+    out ::= a.Vec<u8>();
+    out.add(2).try(TlsError.TlsFailed);
+    out.add('h').try(TlsError.TlsFailed);
+    out.add('2').try(TlsError.TlsFailed);
+    Ok(out)
 }
 
-wrap_socket = (socket :: Socket, host: str, h2: bool) Res<TlsStream, TlsError> {
-    ctx = h2.match({
-        true  => zg_tls_wrap_h2(socket.handle(), host),
-        false => zg_tls_wrap(socket.handle(), host),
-    });
+tls_dial = (a: Alloc, host: str, port: u16, h2: bool)
+           Res<TlsStream, TlsError> {
+    socket ::= Socket.tcp_connect(a, host, port)
+        .try(TlsError.ConnectFailed);
+    wrap_socket(a, consume socket, host, h2)
+}
+
+wrap_socket = (a: Alloc, socket :: Socket, host: str, h2: bool)
+              Res<TlsStream, TlsError> {
+    host_c ::= c_text(a, host).try();
+    method = TLS_client_method();
+    ctx    = SSL_CTX_new(method);
     ctx.is_null().match({
         true  => Err(TlsError.TlsFailed),
-        false => Ok(TlsStream(socket: consume socket, ctx: ctx)),
+        false => wrap_ctx(a, consume socket, host_c, h2, ctx),
+    })
+}
+
+wrap_ctx = (
+    a      : Alloc,
+    socket :: Socket,
+    host_c : Vec<u8>,
+    h2     : bool,
+    ctx    : Ptr<u8>
+) Res<TlsStream, TlsError> {
+    configured ::= SSL_CTX_set_default_verify_paths(ctx) == 1;
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, null_ptr<()>());
+    h2.then(() {
+        protocols ::= alpn_h2(a).try();
+        (SSL_CTX_set_alpn_protos(ctx, protocols.ptr(), 3) != 0).then(() {
+            configured = false;
+        });
     });
+    configured.match({
+        false => {
+            SSL_CTX_free(ctx);
+            Err(TlsError.TlsFailed)
+        },
+        true  => wrap_ssl(a, consume socket, host_c, ctx),
+    })
+}
+
+wrap_ssl = (a: Alloc, socket :: Socket, host_c: Vec<u8>, ctx: Ptr<u8>)
+           Res<TlsStream, TlsError> {
+    ssl = SSL_new(ctx);
+    ssl.is_null().match({
+        true  => {
+            SSL_CTX_free(ctx);
+            Err(TlsError.TlsFailed)
+        },
+        false => {
+            SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+            configured = SSL_set_fd(ssl, socket.handle().raw_handle()) == 1
+                && SSL_ctrl(
+                    ssl,
+                    SSL_CTRL_SET_TLSEXT_HOSTNAME,
+                    0,
+                    host_c.ptr().to<()>()
+                ) == 1
+                && SSL_set1_host(ssl, host_c.ptr()) == 1;
+            connected  = configured
+                && SSL_connect(ssl) == 1
+                && SSL_get_verify_result(ssl) == 0;
+            connected.match({
+                true  => Ok(TlsStream(
+                    socket: consume socket,
+                    alloc: a,
+                    ssl: ssl,
+                    ctx: ctx
+                )),
+                false => {
+                    SSL_free(ssl);
+                    SSL_CTX_free(ctx);
+                    Err(TlsError.TlsFailed)
+                },
+            })
+        },
+    })
 }
 
 TlsStream* = {
     socket :: Socket,
-    ctx:      Ptr<u8>,
-    open ::   bool = true,
+    alloc: Alloc,
+    ssl: Ptr<u8>,
+    ctx: Ptr<u8>,
+    open :: bool = true,
 
     connect* = (a: Alloc, host: str, port: u16) Res<TlsStream, TlsError> {
         tls_dial(a, host, port, false)
     }
 
-    connect_h2* = (a: Alloc, host: str, port: u16) Res<TlsStream, TlsError> {
+    connect_h2* = (a: Alloc, host: str, port: u16)
+                  Res<TlsStream, TlsError> {
         tls_dial(a, host, port, true)
     }
 
-    alpn* = (self: @Self, a: Alloc, buf :: Vec<u8>) Res<usize, TlsError> {
-        self.open.match({
-            true  => Ok(()),
-            false => Err(TlsError.Closed),
-        }).try();
-        unit_or(buf.reserve(16), TlsError.ReadFailed).try();
-
-        n = zg_tls_alpn(self.ctx, buf.ptr(), 16);
-        (n == usize.MAX).match({
-            false => {
-                Range(0, n).loop((h, i) {
-                    b = buf.ptr().read(i);
-                    buf.add(b).match({ Ok(_) => {}, Err(_) => h.break() });
-                });
-                Ok(n)
-            },
-            true  => Err(TlsError.ReadFailed),
+    alpn* = (self: @Self, a: Alloc, buf :: Vec<u8>)
+            Res<usize, TlsError> {
+        self.open.ensure(TlsError.Closed).try();
+        selected ::= a.Vec<Ptr<u8>>();
+        selected.add(null_ptr<u8>()).try(TlsError.ReadFailed);
+        selected_len ::= a.Vec<u32>();
+        selected_len.add(0).try(TlsError.ReadFailed);
+        SSL_get0_alpn_selected(self.ssl, selected.ptr(), selected_len.ptr());
+        n = selected_len.ptr().read(0).to_usize();
+        buf.reserve(n).try(TlsError.ReadFailed);
+        Range(0, n).loop((h, i) {
+            buf.add(selected.ptr().read(0).read(i)).try(TlsError.ReadFailed);
         });
+        Ok(n)
     }
 
     write* = (self: @Self, bytes: str) Res<(), TlsError> {
-        self.open.match({
-            true  => Ok(()),
-            false => Err(TlsError.Closed),
-        }).try();
-        rc = zg_tls_write(self.ctx, bytes);
-        (rc == 0).match({
-            true  => Ok(()),
-            false => Err(tls_error(rc)),
+        self.open.ensure(TlsError.Closed).try();
+        sent    ::= 0;
+        written ::= self.alloc.Vec<usize>();
+        written.add(0).try(TlsError.WriteFailed);
+        failed ::= false;
+        loop(() { sent < bytes.len && !failed }, (h) {
+            written.ptr().write(0, 0);
+            rc = SSL_write_ex(
+                self.ssl,
+                bytes.ptr().offset(sent),
+                bytes.len - sent,
+                written.ptr()
+            );
+            (rc == 1).match({
+                true  => (written.ptr().read(0) == 0).match({
+                    true  => { failed = true; },
+                    false => { sent = sent + written.ptr().read(0); },
+                }),
+                false => {
+                    error = SSL_get_error(self.ssl, rc);
+                    (!(error == SSL_ERROR_WANT_READ
+                        || error == SSL_ERROR_WANT_WRITE)).then(() {
+                        failed = true;
+                    });
+                },
+            });
         });
+        failed.match({
+            true  => Err(TlsError.WriteFailed),
+            false => Ok(()),
+        })
     }
 
-    read* = (self: @Self, a: Alloc, buf :: Vec<u8>, n: usize) Res<usize, TlsError> {
-        self.open.match({
-            true  => Ok(()),
-            false => Err(TlsError.Closed),
-        }).try();
-        unit_or(buf.reserve(n), TlsError.ReadFailed).try();
-
-        got = zg_tls_read(self.ctx, buf.ptr(), n);
-        (got == usize.MAX).match({
-            true  => Err(TlsError.ReadFailed),
-            false => (got == usize.MAX - 1).match({
-                true  => Err(TlsError.Closed),
-                false => Ok(got),
-            }),
+    read* = (self: @Self, a: Alloc, buf :: Vec<u8>, n: usize)
+            Res<usize, TlsError> {
+        self.open.ensure(TlsError.Closed).try();
+        (n == 0).match({
+            true  => Ok(0),
+            false => self.read_nonempty(a, buf, n),
         })
+    }
+
+    read_nonempty = (self: @Self, a: Alloc, buf :: Vec<u8>, n: usize)
+                    Res<usize, TlsError> {
+        buf.reserve(n).try(TlsError.ReadFailed);
+        got ::= a.Vec<usize>();
+        got.add(0).try(TlsError.ReadFailed);
+        answer: Res<usize, TlsError> = Err(TlsError.ReadFailed);
+        waiting ::= true;
+        waiting.loop((h) {
+            rc = SSL_read_ex(self.ssl, buf.ptr(), n, got.ptr());
+            (rc == 1).match({
+                true  => {
+                    answer  = Ok(got.ptr().read(0));
+                    waiting = false;
+                },
+                false => {
+                    error = SSL_get_error(self.ssl, rc);
+                    (!(error == SSL_ERROR_WANT_READ
+                        || error == SSL_ERROR_WANT_WRITE)).then(() {
+                        (error == SSL_ERROR_ZERO_RETURN).match({
+                            false => { waiting = false; },
+                            true  => {
+                                answer  = Err(TlsError.Closed);
+                                waiting = false;
+                            },
+                        });
+                    });
+                },
+            });
+        });
+        answer
     }
 
     close* = (self :: @Self) () {
-        self.open.match({
-            false => {},
-            true  => {
-                self.open = false;
-                zg_tls_close(self.ctx);
-                self.socket.close();
-            },
-        })
+        self.open.then(() {
+            self.open = false;
+            SSL_shutdown(self.ssl);
+            SSL_free(self.ssl);
+            SSL_CTX_free(self.ctx);
+            self.socket.close();
+        });
     }
 }
 
-// Owned streams close the fd and SSL context at scope exit.
 TlsStream.impl(Drop, {
     drop = (self :: @Self) () { self.close() }
 })

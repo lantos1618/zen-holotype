@@ -33,6 +33,7 @@ import {
 let client: LanguageClient | undefined;
 let output: vscode.OutputChannel;
 let sourceEvents: vscode.FileSystemWatcher;
+let restarts: Promise<void> = Promise.resolve();
 
 // The one thing this extension knows how to explain. It is written once,
 // here, because it is the answer to every startup failure this extension
@@ -85,7 +86,17 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(sourceEvents);
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("zen.restartServer", () => restartServer()),
+    vscode.commands.registerCommand("zen.restartServer", () =>
+      restartServer("restart requested"),
+    ),
+    vscode.workspace.onDidChangeConfiguration((change) => {
+      if (
+        change.affectsConfiguration("zen.server.path") ||
+        change.affectsConfiguration("zen.server.args")
+      ) {
+        void restartServer("server configuration changed");
+      }
+    }),
   );
 
   await startClient();
@@ -96,10 +107,18 @@ export async function activate(context: vscode.ExtensionContext) {
 // This command is the reload without the window: stop what is left, then go
 // through the whole lookup again, because the two reasons to reach for it
 // are "I rebuilt the binary" and "I changed the setting".
-async function restartServer(): Promise<void> {
-  output.appendLine("zen: restart requested.");
-  await stopClient();
-  await startClient();
+function restartServer(reason: string): Promise<void> {
+  const next = restarts.then(async () => {
+    output.appendLine(`zen: ${reason}.`);
+    await stopClient();
+    await startClient();
+  });
+  // Keep one failed launch from poisoning every later restart while still
+  // returning that failure to the command which requested it.
+  restarts = next.catch((err) => {
+    output.appendLine(`zen: restart failed: ${String(err)}`);
+  });
+  return next;
 }
 
 async function stopClient(): Promise<void> {
@@ -143,11 +162,18 @@ async function startClient(): Promise<void> {
     return;
   }
 
+  const serverEnv = { ...process.env };
+  const stdRoot = await standardLibraryRoot(command);
+  if (stdRoot) {
+    serverEnv.ZEN_STD = stdRoot;
+    output.appendLine(`zen: standard library root: ${stdRoot}`);
+  }
+
   const serverOptions: ServerOptions = {
     command,
     args,
     transport: TransportKind.stdio,
-    options: { cwd: workspaceRoot() },
+    options: { cwd: workspaceRoot(), env: serverEnv },
   };
 
   // `documentSelector` carries no `scheme`. Over a remote connection a
@@ -336,6 +362,27 @@ async function findOnPath(name: string): Promise<string | undefined> {
     }
   }
   return undefined;
+}
+
+// Integrated-terminal environment settings do not reach the extension host.
+// Preserve a real process-level override; otherwise a compiler checkout has a
+// self-describing layout, and its std marker is stronger evidence than a
+// workspace-relative guess. The compiler has the same fallback so non-VS Code
+// clients behave identically; doing it here also makes the selected root
+// visible in the Zen output channel.
+async function standardLibraryRoot(command: string): Promise<string | undefined> {
+  const inherited = process.env.ZEN_STD;
+  if (inherited) return inherited;
+
+  const executable =
+    command.includes(path.sep) || command.includes("/")
+      ? command
+      : await findOnPath(command);
+  if (!executable) return undefined;
+
+  const root = path.join(path.dirname(executable), "src");
+  const marker = path.join(root, "std", "std.zen");
+  return (await exists(marker)) ? root : undefined;
 }
 
 // A relative `zen.server.path` — and the default `./zen` is one, because

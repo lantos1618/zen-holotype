@@ -16,6 +16,7 @@
 Alloc, AllocError = std.mem
 str, String = std.text
 Range = std.core
+join_path = std.core.path
 
 QualifiedName = std.ast.ast_span
 
@@ -66,6 +67,50 @@ parent_of* = (path: str) str {
     })
 }
 
+// THE STANDARD LIBRARY AN EMBEDDED DRIVER USES. Command-line builds get an
+// explicit `Job.std_root`; the LSP has no command-line job, and an editor
+// extension does not inherit variables configured only for integrated
+// terminals. Prefer the same `ZEN_STD` override as the CLI, then fall back to
+// the compiler checkout/install layout: `<zen binary dir>/src/std`.
+//
+// argv[0] is deliberately only a fallback. A bare `zen` found through PATH
+// has no directory to resolve here and returns empty, preserving the old
+// root-relative lookup. An absolute configured server path — the normal
+// VS Code shape — is enough, and the marker check prevents a coincidental
+// sibling named `src` from becoming language input.
+std_root_for* = (env: Env, a: Alloc) str {
+    env.var("ZEN_STD").match({
+        Ok(path) => path.is_empty().match({
+            true  => std_root_beside_program(env, a),
+            false => path,
+        }),
+        None     => std_root_beside_program(env, a),
+    })
+}
+
+std_root_beside_program = (env: Env, a: Alloc) str {
+    found: Res<str> = loop<str>((h) {
+        program = env.argv.get(0).match({
+            None     => { h.break(""); "" },
+            Ok(path) => path,
+        });
+        dir     = parent_of(program);
+        dir.is_empty().then(() { h.break(""); });
+
+        root   = join_path(a, dir, "src").match({
+            Err(_)    => { h.break(""); "" },
+            Ok(value) => value.view(),
+        });
+        marker = join_path(a, root, "std/std.zen").match({
+            Err(_)    => { h.break(""); "" },
+            Ok(value) => value.view(),
+        });
+        (!env.fs.exists(marker)).then(() { h.break(""); });
+        h.break(root);
+    });
+    found.match({ Ok(root) => root, None => "" })
+}
+
 // WHICH ROOT A FILE WAS MEANT TO BE COMPILED AGAINST.
 //
 // An editor knows one directory (the workspace, from `initialize`'s
@@ -112,7 +157,7 @@ root_for* = (env: Env, a: Alloc, floor: str, path: str) str {
 // Keep the convention here beside the rest of the path rules so every LSP
 // query makes the same choice.
 source_root = (a: Alloc, project: str, path: str) str {
-    a.String("{}/src", project).match({
+    join_path(a, project, "src").match({
         Err(_)  => project,
         Ok(src) => under(src.view(), path).match({
             true  => src.view(),
@@ -136,7 +181,7 @@ holds_its_own_name = (env: Env, a: Alloc, dir: str) bool {
 // asked of the disk. The same allocation-failure contract as
 // `holds_its_own_name` above, and for the same reason.
 holds_build_zen = (env: Env, a: Alloc, dir: str) bool {
-    a.String("{}/build.zen", dir).match({
+    join_path(a, dir, "build.zen").match({
         Err(_) => false,
         Ok(f)  => env.fs.exists(f.view()),
     })

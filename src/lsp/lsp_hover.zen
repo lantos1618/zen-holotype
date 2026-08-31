@@ -320,8 +320,9 @@ MEMBERS: str = "members: "
 // resolved fine.
 write_member_run = (c : Checker, ms: Vec<Member>, all: bool, body :: String)
                    Res<(), AllocError> {
-    list ::= c.alloc.String().try();
-    ms.loop((h, m) { write_one_member(c, m, all, list).try(); });
+    list  ::= c.alloc.String().try();
+    names ::= c.alloc.Vec<str>();
+    ms.loop((h, m) { write_one_member(c, m, all, names, list).try(); });
     (list.len() > 0).then(() {
         body.add_bytes(MEMBERS).try();
         body.add_bytes(list.view()).try();
@@ -329,8 +330,13 @@ write_member_run = (c : Checker, ms: Vec<Member>, all: bool, body :: String)
     Ok(());
 }
 
-write_one_member = (c : Checker, m: Member, all: bool, body :: String)
-                   Res<(), AllocError> {
+write_one_member = (
+    c     : Checker,
+    m     : Member,
+    all   : bool,
+    names :: Vec<str>,
+    body  :: String
+) Res<(), AllocError> {
     m.kind.match({
         Field(f)    => write_typed(
             c,
@@ -346,7 +352,7 @@ write_one_member = (c : Checker, m: Member, all: bool, body :: String)
             k.type,
             body
         ),
-        Function(f) => write_fn_member(c, f, all, body),
+        Function(f) => write_fn_member(c, f, all, names, body),
     })
 }
 
@@ -395,11 +401,19 @@ write_type_suffix = (c : Checker, ty: Res<TypeId>, body :: String)
 // and `slice` — a note that says less than the four-word one it
 // replaced. The name alone is not a guess about a type; it is the
 // member, which is what the list is of.
-write_fn_member = (c : Checker, f: Function, all: bool, body :: String)
-                  Res<(), AllocError> {
+write_fn_member = (
+    c     : Checker,
+    f     : Function,
+    all   : bool,
+    names :: Vec<str>,
+    body  :: String
+) Res<(), AllocError> {
     (all || f.exported).match({
         false => Ok(()),
-        true  => {
+        true  => names.find((name) { name.eq(f.name.text) }).match({
+            Ok(_) => Ok(()),
+            None  => {
+                names.add(f.name.text).try();
             scratch ::= c.alloc.String().try();
             whole = write_decl_sig(c, f, scratch).try();
             separate(body).try();
@@ -407,7 +421,8 @@ write_fn_member = (c : Checker, f: Function, all: bool, body :: String)
                 true  => body.add_bytes(scratch.view()),
                 false => body.add_bytes(f.name.text),
             })
-        },
+            },
+        }),
     })
 }
 

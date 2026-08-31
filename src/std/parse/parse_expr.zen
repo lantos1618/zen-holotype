@@ -144,7 +144,7 @@ binary_op = (kind: TokenKind) BinOp {
 binary_from = (p :: Parser, m: Mark, min: usize) Res<ExprId, AllocError> {
     lhs     ::= p.unary_at(m).try();
     running ::= true;
-    loop(() { running }, (h) {
+    running.loop((h) {
         prec    = p.peek().kind.precedence();
         running = prec > 0 && prec >= min;
         running.match({
@@ -242,7 +242,7 @@ postfix = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     base    ::= p.primary(m).try();
     links   ::= 0;
     running ::= true;
-    loop(() { running }, (h) {
+    running.loop((h) {
         running = !p.too_deep && p.postfix_continues();
         running.match({
             true  => {
@@ -375,9 +375,10 @@ match_expr = (
     )), m.bare());
 }
 
-// `.try()` — the non-local-exit intrinsic. `name_span` is kept for the
-// same reason `.match`'s is: the diagnostics are about the intrinsic,
-// and the node's own span starts at the operand.
+// `.try()`, `.try(error)`, `.try((error) { mapped })` — the
+// non-local-exit intrinsic. `name_span` is kept for the same reason
+// `.match`'s is: the diagnostics are about the intrinsic, and the node's
+// own span starts at the operand.
 try_expr = (
     p         :: Parser,
     m         : Mark,
@@ -386,13 +387,29 @@ try_expr = (
 ) Res<ExprId, AllocError> {
     open = p.here_span();
     p.bump().try();
+    error = p.at_kind(TokenKind.ParenClose).match({
+        true  => None,
+        false => Ok(p.expr().try()),
+    });
+    p.at_kind(TokenKind.Comma).then(() {
+        p.error_at("`.try` accepts at most one error expression", open).try();
+        running ::= true;
+        running.loop((h) {
+            p.eat(TokenKind.Comma).try();
+            (p.at_kind(TokenKind.ParenClose) || p.at_eof()).match({
+                true  => { running = false; },
+                false => { p.expr().try(); },
+            });
+            running = running && p.at_kind(TokenKind.Comma);
+        });
+    });
     p.expect_close(
         TokenKind.ParenClose,
-        "`.try()` takes no arguments",
+        "unclosed `(`: this `.try` is never closed",
         open
     ).try();
     p.add_expr(
-        ExprKind.Try(Try(operand: operand, name_span: name_span)),
+        ExprKind.Try(Try(operand: operand, name_span: name_span, error: error)),
         m.bare()
     );
 }
@@ -436,7 +453,7 @@ args* = (p :: Parser, out :: Vec<Arg>) Res<Span, AllocError> {
     open  = p.here_span();
     p.bump().try();
     running ::= p.starts_expr();
-    loop(() { running }, (h) {
+    running.loop((h) {
         before = p.at;
         out.add(p.one_arg().try()).try();
         running = p.starts_expr() && !p.at_eof() && p.at > before;
@@ -684,7 +701,7 @@ elem_list = (
     open  = p.here_span();
     p.bump().try();
     running ::= !p.at_kind(close) && !p.at_eof();
-    loop(() { running }, (h) {
+    running.loop((h) {
         before = p.at;
         out.add(p.expr().try()).try();
         p.eat(TokenKind.Comma).try();

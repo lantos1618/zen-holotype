@@ -1,0 +1,138 @@
+// src/std/net/http2/http2_frame.zen
+// HTTP/2 frame encoding, decoding, flags, and payload helpers.
+
+Alloc = std.mem
+str, String = std.text
+Res = std.core
+Vec = std.collections
+H2Error, FrameType, frame_type, wire, FLAG_PADDED, FLAG_PRIORITY, MAX_RECV = std.net.http2.http2_types
+Stream, stream_write, read_n = std.net.http2.http2_transport
+
+Frame* = {
+    ftype*:   FrameType,
+    flags*:   u8,
+    sid*:     u32,
+    payload*: Vec<u8>,
+}
+
+has_flag* = (f: Frame, flag: u8) bool {
+    (f.flags / flag) % 2 == 1;
+}
+
+read_frame* = (s: Stream, a: Alloc) Res<Frame, H2Error> {
+    hdr ::= a.Vec<u8>();
+    s.read_n(a, hdr, 9).try();
+
+    b0  = hdr.get(0).ok_or(H2Error.RecvFailed).try();
+    b1  = hdr.get(1).ok_or(H2Error.RecvFailed).try();
+    b2  = hdr.get(2).ok_or(H2Error.RecvFailed).try();
+    len = b0.to_usize() * 65536 + b1.to_usize() * 256 + b2.to_usize();
+    (len > MAX_RECV).match({
+        true  => Err(H2Error.ProtocolFailed),
+        false => Ok(()),
+    }).try();
+
+    b5  = hdr.get(5).ok_or(H2Error.RecvFailed).try();
+    b6  = hdr.get(6).ok_or(H2Error.RecvFailed).try();
+    b7  = hdr.get(7).ok_or(H2Error.RecvFailed).try();
+    b8  = hdr.get(8).ok_or(H2Error.RecvFailed).try();
+    sid = (b5.to_u32() % 128) * 16777216 + b6.to_u32() * 65536 + b7.to_u32() * 256 + b8.to_u32();
+
+    payload ::= a.Vec<u8>();
+    s.read_n(a, payload, len).try();
+
+    Ok(Frame(
+        ftype:   hdr.get(3).ok_or(H2Error.RecvFailed).try().frame_type(),
+        flags:   hdr.get(4).ok_or(H2Error.RecvFailed).try(),
+        sid:     sid,
+        payload: payload,
+    ));
+}
+
+add_wire_byte = (out :: String, value: usize) Res<(), H2Error> {
+    byte = value.to_u8().ok_or(H2Error.ProtocolFailed).try();
+    out.add_byte(byte).try(H2Error.SendFailed);
+    Ok(())
+}
+
+write_frame* = (
+    s       : Stream,
+    a       : Alloc,
+    ftype   : FrameType,
+    flags   : u8,
+    sid     : u32,
+    payload : str
+) Res<(), H2Error> {
+    len = payload.len;
+    (len > 16777215).match({
+        true  => Err(H2Error.ProtocolFailed),
+        false => Ok(()),
+    }).try();
+
+    hdr ::= a.String().try(H2Error.SendFailed);
+    hdr.add_wire_byte(len / 65536).try();
+    hdr.add_wire_byte((len / 256) % 256).try();
+    hdr.add_wire_byte(len % 256).try();
+    hdr.add_byte(ftype.wire()).try(H2Error.SendFailed);
+    hdr.add_byte(flags).try(H2Error.SendFailed);
+    hdr.add_wire_byte((sid / 16777216).to_usize() % 128).try();
+    hdr.add_wire_byte((sid / 65536).to_usize() % 256).try();
+    hdr.add_wire_byte((sid / 256).to_usize() % 256).try();
+    hdr.add_wire_byte((sid % 256).to_usize()).try();
+    s.stream_write(hdr.view()).try();
+    (len > 0).match({
+        true  => s.stream_write(payload),
+        false => Ok(()),
+    });
+}
+
+// append one SETTINGS entry: 2-byte id, 4-byte value
+settings_add* = (blk :: String, id: usize, val: usize) Res<(), H2Error> {
+    blk.add_wire_byte(id / 256).try();
+    blk.add_wire_byte(id % 256).try();
+    blk.add_wire_byte((val / 16777216) % 256).try();
+    blk.add_wire_byte((val / 65536) % 256).try();
+    blk.add_wire_byte((val / 256) % 256).try();
+    blk.add_wire_byte(val % 256).try();
+    Ok(());
+}
+
+// append a 4-byte big-endian u32 ( WINDOW_UPDATE / GOAWAY payloads )
+u32_add* = (blk :: String, val: usize) Res<(), H2Error> {
+    blk.add_wire_byte((val / 16777216) % 256).try();
+    blk.add_wire_byte((val / 65536) % 256).try();
+    blk.add_wire_byte((val / 256) % 256).try();
+    blk.add_wire_byte(val % 256).try();
+    Ok(());
+}
+
+// a 31-bit big-endian value from a frame payload
+u31_of* = (payload: Vec<u8>, at: usize) Res<usize, H2Error> {
+    b0 = payload.get(at).ok_or(H2Error.DecodeFailed).try();
+    b1 = payload.get(at + 1).ok_or(H2Error.DecodeFailed).try();
+    b2 = payload.get(at + 2).ok_or(H2Error.DecodeFailed).try();
+    b3 = payload.get(at + 3).ok_or(H2Error.DecodeFailed).try();
+    Ok((b0.to_usize() % 128) * 16777216 + b1.to_usize() * 65536
+        + b2.to_usize() * 256 + b3.to_usize());
+}
+
+H2Range* = { from*: usize, len*: usize }
+
+// content window of a DATA/HEADERS payload after PADDED/PRIORITY fields
+content_range* = (f: Frame) Res<H2Range, H2Error> {
+    from: usize ::= 0;
+    pad: usize  ::= 0;
+    f.has_flag(FLAG_PADDED).then(() {
+        p    = f.payload.get(0).ok_or(H2Error.DecodeFailed).try();
+        pad  = p.to_usize();
+        from = 1;
+    });
+    f.ftype.match({
+        Headers => f.has_flag(FLAG_PRIORITY).then(() { from = from + 5; }),
+        _       => None,
+    });
+    (from + pad > f.payload.len).match({
+        true  => Err(H2Error.DecodeFailed),
+        false => Ok(H2Range(from: from, len: f.payload.len - from - pad)),
+    });
+}

@@ -15,7 +15,7 @@
 // longest-lived thing the compiler builds, so dropping its arena frees
 // the whole tree at once — the trade an arena exists to make.
 
-Alloc, AllocError = std.mem
+Alloc, AllocError, Ptr, null_ptr = std.mem
 str = std.text
 Range = std.core
 Trivia, TriviaRun = std.ast.ast_span
@@ -24,14 +24,45 @@ Expr, Type, Pattern, Block, Module = std.ast.ast_node
 ModuleOrigin, CBinding = std.ast.ast_node
 CTypeBinding = std.ast.ast_node
 
+NODE_PAGE: usize = 256
+
+// Append-only storage for id-addressed nodes. A Vec copies its entire old
+// capacity whenever it grows; an AST never needs that contiguous layout.
+NodeArena<T> = {
+    pages :: Vec<Ptr<T>>,
+    len :: usize = 0,
+    alloc: Alloc,
+
+    add = (self :: @Self, value: T) Res<(), AllocError> {
+        slot = self.len % NODE_PAGE;
+        (slot == 0).then(() {
+            page = self.alloc.realloc(null_ptr<T>(), NODE_PAGE).try();
+            self.pages.add(page).try();
+        });
+        page = self.pages.get(self.len / NODE_PAGE)
+            .ok_or(AllocError.OutOfMemory).try();
+        page.write(slot, value);
+        self.len = self.len + 1;
+        Ok(())
+    }
+
+    at = (self: @Self, i: usize) T {
+        self.pages.ptr().read(i / NODE_PAGE).read(i % NODE_PAGE)
+    }
+}
+
+NodeArena = <T>(a: Alloc) NodeArena<T> {
+    NodeArena(pages: a.Vec<Ptr<T>>(), alloc: a)
+}
+
 Ast* = {
     modules :: Vec<Module>,
     module_origins :: Vec<ModuleOrigin>,
     c_bindings :: Vec<CBinding>,
-    exprs :: Vec<Expr>,
-    types :: Vec<Type>,
-    patterns :: Vec<Pattern>,
-    blocks :: Vec<Block>,
+    exprs :: NodeArena<Expr>,
+    types :: NodeArena<Type>,
+    patterns :: NodeArena<Pattern>,
+    blocks :: NodeArena<Block>,
 
     // every comment and blank in the compilation, in source order. A
     // node names a contiguous run of it rather than owning a list, and
@@ -131,7 +162,7 @@ Ast* = {
             true  => (),
             false => stale("expression", i, self.exprs.len),
         });
-        self.exprs.ptr().read(i);
+        self.exprs.at(i);
     }
 
     type_at* = (self: @Self, id: TypeId) Type {
@@ -140,7 +171,7 @@ Ast* = {
             true  => (),
             false => stale("type", i, self.types.len),
         });
-        self.types.ptr().read(i);
+        self.types.at(i);
     }
 
     pattern_at* = (self: @Self, id: PatternId) Pattern {
@@ -149,7 +180,7 @@ Ast* = {
             true  => (),
             false => stale("pattern", i, self.patterns.len),
         });
-        self.patterns.ptr().read(i);
+        self.patterns.at(i);
     }
 
     block_at* = (self: @Self, id: BlockId) Block {
@@ -158,7 +189,7 @@ Ast* = {
             true  => (),
             false => stale("block", i, self.blocks.len),
         });
-        self.blocks.ptr().read(i);
+        self.blocks.at(i);
     }
 
     module_count* = (self: @Self) usize { self.modules.len }
@@ -343,10 +374,10 @@ Ast* = (a: Alloc) Ast {
         modules: a.Vec<Module>(),
         module_origins: a.Vec<ModuleOrigin>(),
         c_bindings: a.Vec<CBinding>(),
-        exprs: a.Vec<Expr>(),
-        types: a.Vec<Type>(),
-        patterns: a.Vec<Pattern>(),
-        blocks: a.Vec<Block>(),
+        exprs: a.NodeArena<Expr>(),
+        types: a.NodeArena<Type>(),
+        patterns: a.NodeArena<Pattern>(),
+        blocks: a.NodeArena<Block>(),
         trivia: a.Vec<Trivia>(),
         alloc: a,
     )

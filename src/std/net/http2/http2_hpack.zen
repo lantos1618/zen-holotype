@@ -1,0 +1,417 @@
+// src/std/net/http2/http2_hpack.zen
+// RFC 7541 static-table HPACK encoder and decoder.
+
+Alloc = std.mem
+str, String, str_at = std.text
+Res = std.core
+Vec = std.collections
+H2Error = std.net.http2.http2_types
+
+static_name = (idx: usize) str {
+    NAMES: [str, 62] = [
+        "", ":authority", ":method", ":method", ":path", ":path",
+        ":scheme", ":scheme", ":status", ":status", ":status", ":status",
+        ":status", ":status", ":status", "accept-charset", "accept-encoding", "accept-language",
+        "accept-ranges", "accept", "access-control-allow-origin", "age", "allow", "authorization",
+        "cache-control", "content-disposition", "content-encoding", "content-language", "content-length", "content-location",
+        "content-range", "content-type", "cookie", "date", "etag", "expect",
+        "expires", "from", "host", "if-match", "if-modified-since", "if-none-match",
+        "if-range", "if-unmodified-since", "last-modified", "link", "location", "max-forwards",
+        "proxy-authenticate", "proxy-authorization", "range", "referer", "refresh", "retry-after",
+        "server", "set-cookie", "strict-transport-security", "transfer-encoding", "user-agent", "vary",
+        "via", "www-authenticate",
+    ];
+    NAMES[idx];
+}
+
+static_value = (idx: usize) str {
+    idx.match({
+        2 => "GET", 3 => "POST", 4 => "/", 5 => "/index.html",
+        6 => "http", 7 => "https", 8 => "200", 9 => "204",
+        10 => "206", 11 => "304", 12 => "400", 13 => "404",
+        14 => "500", 16 => "gzip, deflate", _ => "",
+    });
+}
+
+// exact (name, value) match -> table index, 0 when absent
+static_find = (name: str, value: str) usize {
+    found: usize ::= 0;
+    Range(1, 62).loop((h, i) {
+        (i.static_name().eq(name) && i.static_value().eq(value)).then(() {
+            found = i;
+            h.break();
+        });
+    });
+    found;
+}
+
+// name-only match -> table index, 0 when absent
+static_find_name = (name: str) usize {
+    found: usize ::= 0;
+    Range(1, 62).loop((h, i) {
+        i.static_name().eq(name).then(() {
+            found = i;
+            h.break();
+        });
+    });
+    found;
+}
+
+// ------------------------------------------------------------------
+// HPACK integer codec (RFC 7541 §5.1).
+// ------------------------------------------------------------------
+
+H2Int = { val: usize, pos: usize }
+
+read_int = (buf: Vec<u8>, pos: usize, prefix: usize) Res<H2Int, H2Error> {
+    maxv = prefix.pow2() - 1;
+    b    = buf.get(pos).ok_or(H2Error.DecodeFailed).try();
+    // the low `prefix` bits: a remainder by 2^prefix, not by 2^prefix - 1
+    val ::= b.to_usize() % (maxv + 1);
+    p   ::= pos + 1;
+    (val >= maxv).then(() {
+        mult: usize ::= 1;
+        done        ::= false;
+        steps       ::= 0;
+        loop((h) {
+            (done || steps > 8).then(() { h.break(); });
+            cb  = buf.get(p).ok_or(H2Error.DecodeFailed).try();
+            val = val + (cb.to_usize() % 128) * mult;
+            (cb < 128).then(() { done = true; });
+            mult  = mult * 128;
+            p     = p + 1;
+            steps = steps + 1;
+        });
+        done.ensure(H2Error.DecodeFailed).try();
+    });
+    Ok(H2Int(val: val, pos: p));
+}
+
+// append an integer with the given prefix width and high-bit flags
+block_add_int* = (
+    blk    :: String,
+    flags  : u8,
+    prefix : usize,
+    val    : usize
+) Res<(), H2Error> {
+    max = prefix.pow2() - 1;
+    (val < max).match({
+        true  => blk.add_byte(flags + val.to_u8()
+            .ok_or(H2Error.ProtocolFailed).try()).try(H2Error.SendFailed),
+        false => {
+            blk.add_byte(flags + max.to_u8()
+                .ok_or(H2Error.ProtocolFailed).try()).try(H2Error.SendFailed);
+            rest ::= val - max;
+            loop((h) {
+                (rest < 128).then(() { h.break(); });
+                byte = (rest % 128 + 128).to_u8()
+                    .ok_or(H2Error.ProtocolFailed).try();
+                blk.add_byte(byte).try(H2Error.SendFailed);
+                rest = rest / 128;
+            });
+            blk.add_byte(rest.to_u8()
+                .ok_or(H2Error.ProtocolFailed).try()).try(H2Error.SendFailed);
+        },
+    });
+    Ok(());
+}
+
+// append a raw (never Huffman) string literal
+block_add_str* = (blk :: String, s: str) Res<(), H2Error> {
+    blk.block_add_int(0, 7, s.len).try();
+    blk.add_bytes(s).replace_err(H2Error.SendFailed);
+}
+
+// ------------------------------------------------------------------
+// HPACK Huffman decode (RFC 7541 §5.2, Appendix B). The table is
+// canonical: symbols sorted by (bit-length, code) sit in HUF_SYMTAB,
+// and per length L the codes are consecutive from HUF_FIRST_CODE[L],
+// so decoding is a bit walk with one range check per bit. The tables
+// are function locals because module-level array constants are not
+// lowered by gen_c yet.
+// ------------------------------------------------------------------
+
+huf_decode* = (
+    buf  : Vec<u8>,
+    a    : Alloc,
+    from : usize,
+    len  : usize
+) Res<String, H2Error> {
+    SYMTAB: [u8, 257]     = [
+        48, 49, 50, 97, 99, 101, 105, 111, 115, 116, 32, 37, 45, 46, 47, 51,
+        52, 53, 54, 55, 56, 57, 61, 65, 95, 98, 100, 102, 103, 104, 108, 109,
+        110, 112, 114, 117, 58, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76,
+        77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 89, 106, 107, 113, 118,
+        119, 120, 121, 122, 38, 42, 44, 59, 88, 90, 33, 34, 40, 41, 63, 39,
+        43, 124, 35, 62, 0, 36, 64, 91, 93, 126, 94, 125, 60, 96, 123, 92,
+        195, 208, 128, 130, 131, 162, 184, 194, 224, 226, 153, 161, 167, 172, 176, 177,
+        179, 209, 216, 217, 227, 229, 230, 129, 132, 133, 134, 136, 146, 154, 156, 160,
+        163, 164, 169, 170, 173, 178, 181, 185, 186, 187, 189, 190, 196, 198, 228, 232,
+        233, 1, 135, 137, 138, 139, 140, 141, 143, 147, 149, 150, 151, 152, 155, 157,
+        158, 165, 166, 168, 174, 175, 180, 182, 183, 188, 191, 197, 231, 239, 9, 142,
+        144, 145, 148, 159, 171, 206, 215, 225, 236, 237, 199, 207, 234, 235, 192, 193,
+        200, 201, 202, 205, 210, 213, 218, 219, 238, 240, 242, 243, 255, 203, 204, 211,
+        212, 214, 221, 222, 223, 241, 244, 245, 246, 247, 248, 250, 251, 252, 253, 254,
+        2, 3, 4, 5, 6, 7, 8, 11, 12, 14, 15, 16, 17, 18, 19, 20,
+        21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 127, 220, 249, 10, 13, 22,
+        0,
+    ];
+    FIRST_CODE: [u32, 31] = [
+        0, 0, 0, 0, 0, 0, 20, 92, 248, 0, 1016, 2042, 4090, 8184, 16380, 32764, 0, 0, 0, 524272, 1048550, 2097116, 4194258, 8388568, 16777194, 33554412, 67108832, 134217694, 268435426, 0, 1073741820,
+    ];
+    COUNT: [u32, 31]      = [
+        0, 0, 0, 0, 0, 10, 26, 32, 6, 0, 5, 3, 2, 6, 2, 3, 0, 0, 0, 3, 8, 13, 26, 29, 12, 4, 15, 19, 29, 0, 4,
+    ];
+    FIRST_IDX: [u32, 31]  = [
+        0, 0, 0, 0, 0, 0, 10, 36, 68, 0, 74, 79, 82, 84, 90, 92, 0, 0, 0, 95, 98, 106, 119, 145, 174, 186, 190, 205, 224, 0, 253,
+    ];
+    out          ::= a.String().try(H2Error.DecodeFailed);
+    code: u32    ::= 0;
+    nbits: usize ::= 0;
+    bad          ::= false;
+
+    Range(from, from + len).loop((h, i) {
+        bad.then(() { h.break(); });
+        byte = buf.get(i).ok_or(H2Error.DecodeFailed).try();
+        k: u32 ::= 128;
+        Range(0, 8).loop((h2, j) {
+            (bad || nbits > 30).then(() { bad = true; h2.break(); });
+            bit   = (byte.to_u32() / k) % 2;
+            k     = k / 2;
+            code  = code * 2 + bit;
+            nbits = nbits + 1;
+            ready = nbits <= 30 && COUNT[nbits] > 0
+                && code >= FIRST_CODE[nbits]
+                && code - FIRST_CODE[nbits] < COUNT[nbits];
+            ready.then(() {
+                idx = (FIRST_IDX[nbits]
+                    + (code - FIRST_CODE[nbits])).to_usize();
+                (idx == 256).match({
+                    true  => { bad = true; },
+                    false => out.add_byte(SYMTAB[idx])
+                        .try(H2Error.DecodeFailed),
+                });
+                code  = 0;
+                nbits = 0;
+            });
+        });
+    });
+
+    // padding: fewer than 8 bits left, and all of them 1 (an EOS prefix)
+    (nbits >= 8).then(() { bad = true; });
+    padding = (nbits.pow2() - 1).to_u8()
+        .ok_or(H2Error.DecodeFailed).try().to_u32();
+    (nbits > 0 && code != padding).then(() { bad = true; });
+
+    bad.match({
+        true  => Err(H2Error.DecodeFailed),
+        false => Ok(out),
+    });
+}
+
+// ------------------------------------------------------------------
+// HPACK header-block decode. We need only :status out of a response,
+// but every field must still be walked to find the next one. Dynamic
+// table inserts are tolerated and dropped: our advertised table size
+// is 0, so no valid peer can reference them later.
+// ------------------------------------------------------------------
+
+H2Str = { value: String, pos: usize }
+
+read_string = (buf: Vec<u8>, a: Alloc, pos: usize) Res<H2Str, H2Error> {
+    b0 = buf.get(pos).ok_or(H2Error.DecodeFailed).try();
+    r  = buf.read_int(pos, 7).try();
+    (r.pos + r.val > buf.len).match({
+        true  => Err(H2Error.DecodeFailed),
+        false => Ok(()),
+    }).try();
+
+    s ::= (b0 >= 128).match({
+        true  => buf.huf_decode(a, r.pos, r.val).try(),
+        false => {
+            raw ::= a.String().try(H2Error.DecodeFailed);
+            raw.add_bytes(str_at(buf.ptr().offset(r.pos), r.val))
+                .try(H2Error.DecodeFailed);
+            raw;
+        },
+    });
+    Ok(H2Str(value: s, pos: r.pos + r.val));
+}
+
+// decode a response header block and answer its :status
+hpack_status* = (
+    buf  : Vec<u8>,
+    a    : Alloc,
+    from : usize,
+    len  : usize
+) Res<i32, H2Error> {
+    (from + len > buf.len).match({
+        true  => Err(H2Error.DecodeFailed),
+        false => Ok(()),
+    }).try();
+    pos: usize  ::= from;
+    status: i32 ::= 0;
+
+    loop((h) {
+        (pos >= from + len).then(() { h.break(); });
+        b = buf.get(pos).ok_or(H2Error.DecodeFailed).try();
+
+        (b >= 128).match({
+            true  => {
+                // indexed field — static only, the dynamic table is empty
+                r = buf.read_int(pos, 7).try();
+                (r.val < 1 || r.val > 61).match({
+                    true  => Err(H2Error.DecodeFailed),
+                    false => Ok(()),
+                }).try();
+                r.val.static_name().eq(":status").then(() {
+                    status = r.val.static_value().parse_i32()
+                        .ok_or(H2Error.DecodeFailed).try();
+                });
+                pos = r.pos;
+            },
+            false => (b >= 64).match({
+                true  => {
+                    // literal with incremental indexing
+                    r = buf.read_int(pos, 6).try();
+                    p = buf.read_name_value(a, r.pos, r.val).try();
+                    p.name.view().eq(":status").then(() {
+                        status = p.value.view().parse_i32()
+                            .ok_or(H2Error.DecodeFailed).try();
+                    });
+                    pos = p.pos;
+                },
+                false => (b >= 32).match({
+                    true  => {
+                        // dynamic table size update
+                        r = buf.read_int(pos, 5).try();
+                        (r.val > 4096).match({
+                            true  => Err(H2Error.DecodeFailed),
+                            false => Ok(()),
+                        }).try();
+                        pos = r.pos;
+                    },
+                    false => {
+                        // literal without indexing / never indexed
+                        r = buf.read_int(pos, 4).try();
+                        p = buf.read_name_value(a, r.pos, r.val).try();
+                        p.name.view().eq(":status").then(() {
+                            status = p.value.view().parse_i32()
+                                .ok_or(H2Error.DecodeFailed).try();
+                        });
+                        pos = p.pos;
+                    },
+                }),
+            }),
+        });
+    });
+
+    (status == 0).match({
+        true  => Err(H2Error.DecodeFailed),
+        false => Ok(status),
+    });
+}
+
+H2Field = { name: String, value: String, pos: usize }
+
+read_name_value = (
+    buf      : Vec<u8>,
+    a        : Alloc,
+    pos      : usize,
+    name_idx : usize
+) Res<H2Field, H2Error> {
+    name ::= a.String().try(H2Error.DecodeFailed);
+    p    ::= pos;
+    (name_idx > 0).match({
+        true  => {
+            (name_idx > 61).match({
+                true  => Err(H2Error.DecodeFailed),
+                false => Ok(()),
+            }).try();
+            name.add_bytes(name_idx.static_name()).try(H2Error.DecodeFailed);
+        },
+        false => {
+            ns   = buf.read_string(a, p).try();
+            name = ns.value;
+            p    = ns.pos;
+        },
+    });
+    vs = buf.read_string(a, p).try();
+    Ok(H2Field(name: name, value: vs.value, pos: vs.pos));
+}
+
+// ------------------------------------------------------------------
+// Header block encode: literal-without-indexing, static names where
+// they exist, never Huffman, never the dynamic table.
+// ------------------------------------------------------------------
+
+block_add_header* = (blk :: String, name: str, value: str) Res<(), H2Error> {
+    idx = name.static_find(value);
+    (idx > 0).match({
+        true  => blk.block_add_int(128, 7, idx).try(),
+        false => {
+            nidx = name.static_find_name();
+            (nidx > 0).match({
+                true  => blk.block_add_int(0, 4, nidx).try(),
+                false => {
+                    blk.block_add_int(0, 4, 0).try();
+                    blk.block_add_str(name).try();
+                },
+            });
+            blk.block_add_str(value).try();
+        },
+    });
+    Ok(());
+}
+
+// append `s` lowercased (header names are lowercase on the wire)
+block_add_lower = (blk :: String, s: str) Res<(), H2Error> {
+    blk.block_add_int(0, 7, s.len).try();
+    Range(0, s.len).loop((h, i) {
+        blk.add_byte(s[i].to_lower()).try(H2Error.SendFailed);
+    });
+    Ok(());
+}
+
+// connection headers HTTP/2 forbids, plus the two we set ourselves
+header_skipped = (name: str) bool {
+    name.is_in([
+        "host", "content-length", "connection", "keep-alive",
+        "proxy-connection", "transfer-encoding", "upgrade", "te",
+    ]);
+}
+
+// add one "Name: value" user header, lowercasing the name
+block_add_user_header* = (blk :: String, line: str) Res<(), H2Error> {
+    colon    = line.find(':').ok_or(H2Error.DecodeFailed).try();
+    raw_name = line.slice(0, colon).trim().ok_or(H2Error.DecodeFailed).try();
+    value    = line.slice(colon + 1, line.len).trim().ok_or(H2Error.DecodeFailed).try();
+
+    header_skipped(raw_name).match({
+        true  => Ok(()),
+        false => {
+            nidx = raw_name.static_find_name_folded();
+            (nidx > 0).match({
+                true  => blk.block_add_int(0, 4, nidx).try(),
+                false => {
+                    blk.block_add_int(0, 4, 0).try();
+                    blk.block_add_lower(raw_name).try();
+                },
+            });
+            blk.block_add_str(value).try();
+            Ok(())
+        },
+    });
+}
+
+// name match against the static table, case-insensitive on input
+static_find_name_folded = (name: str) usize {
+    found: usize ::= 0;
+    Range(1, 62).loop((h, i) {
+        i.static_name().eq_ignore_case(name).then(() {
+            found = i;
+            h.break();
+        });
+    });
+    found;
+}

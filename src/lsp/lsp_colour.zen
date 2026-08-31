@@ -57,7 +57,7 @@ write_decimal = lsp.lsp_frame
 // `written()` is `Ok(())` with the writer's error type already on it, so
 // a match arm that writes nothing sits beside one that writes something.
 write_text, written, obj, arr, Nest = std.json
-wire_at, units_of = lsp.lsp_pos
+step_at, units_of = lsp.lsp_pos
 
 // The legend, in order. A `tokenType` on the wire is a position in this
 // list, so the ORDER BELOW IS THE WIRE FORMAT. `Text` is the legend's
@@ -219,6 +219,12 @@ Painter = {
     line :: usize,
     character :: usize,
 
+    // A forward-only UTF-16 cursor through the source. Tokens arrive in
+    // lexical order, so rescanning from byte zero for each token made a
+    // full semantic-token answer quadratic in the document size.
+    source_at :: usize,
+    source_units :: usize,
+
     // One run, as five integers. `length` is already in UTF-16 units and
     // `colour` is already an index — both conversions happen before this
     // method, so nothing here converts twice. The comma before all but
@@ -257,12 +263,8 @@ Painter = {
         stop = token.span.end.offset;
         from      ::= token.span.start.offset;
         line      ::= zero_based(token.span.start.line);
-        character ::= wire_at(
-            text,
-            token.span.start.line,
-            token.span.start.col
-        ).character;
-        loop(() { from < stop }, (h) {
+        character ::= self.character_at(text, from);
+        loop(from < stop, (h) {
             upto = break_in(text, from, stop);
             self.run(text, line, character, from, upto, colour, runs, out)
                 .try();
@@ -273,6 +275,26 @@ Painter = {
             character = 0;
         });
         Ok(());
+    }
+
+    // UTF-16 column at `upto`, advancing over each source byte at most
+    // once across the whole token stream. A newline starts a new column;
+    // malformed UTF-8 follows `lsp_pos.step_at`'s one-byte rule.
+    character_at = (self :: @Self, text: str, upto: usize) usize {
+        loop(self.source_at < upto, (h) {
+            (text.index(self.source_at) == '\n').match({
+                true  => {
+                    self.source_at    = self.source_at + 1;
+                    self.source_units = 0;
+                },
+                false => {
+                    step              = step_at(text, self.source_at);
+                    self.source_at    = self.source_at + step.bytes;
+                    self.source_units = self.source_units + step.units;
+                },
+            });
+        });
+        self.source_units
     }
 
     // One line's worth, unless empty — a blank line inside a block
@@ -307,14 +329,10 @@ break_in = (text: str, from: usize, stop: usize) usize {
 
 // --- the semantic half -------------------------------------------------
 
-// ONE NAME SEMA SETTLED, and the colour it settled to. `uri` is resolved
-// where the row is gathered (`lsp_names.zen`), since a build knows its
-// compilation root and a painter does not. `line`/`col` are the name's
-// own start, 1-based with a BYTE column — the coordinates both the AST
-// and the lexer speak, so the wire conversion happens once, in the
-// painter, as item 2 demands.
+// ONE NAME SEMA SETTLED, and the colour it settled to. File ownership
+// lives in `lsp_built`'s per-file map rather than being repeated on every
+// row. `line`/`col` are the name's own start, 1-based with a BYTE column.
 Classed* = {
-    uri*: str,
     line*: usize,
     col*: usize,
     colour*: Colour,
@@ -336,7 +354,7 @@ Classed.impl(Ordered, {
 classed_at = (names: Vec<Classed>, line: usize, col: usize) Res<Classed> {
     lo ::= 0;
     hi ::= names.len;
-    loop(() { lo < hi }, (h) {
+    loop(lo < hi, (h) {
         mid = (lo + hi) / 2;
         names.get(mid).match({
             None   => (),
@@ -392,7 +410,7 @@ write_tokens* = (
     out   :: String
 ) Res<(), AllocError> {
     lexed = scan(a, Source(file: name, text: text)).try();
-    painter ::= Painter(line: 0, character: 0);
+    painter ::= Painter(line: 0, character: 0, source_at: 0, source_units: 0);
     answer  ::= obj(out).try();
     answer.key("data", out).try();
     data ::= arr(out).try();

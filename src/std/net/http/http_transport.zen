@@ -1,0 +1,102 @@
+// HTTP/1 transport wrapper: one shape for plain TCP and TLS.
+
+Alloc = std.mem
+str = std.text
+Res, Drop = std.core
+Vec = std.collections
+TcpStream, TcpError = std.net.tcp
+TlsStream, TlsError = std.net.tls
+ParsedUrl = std.net.url
+HttpError = std.net.http.http_types
+
+Stream* = Tcp(TcpStream) | Tls(TlsStream)
+
+http_from_tcp_err* = (e: TcpError) HttpError {
+    e.match({
+        ConnectFailed => HttpError.ConnectFailed,
+        WriteFailed   => HttpError.SendFailed,
+        ReadFailed    => HttpError.RecvFailed,
+        Closed        => HttpError.RecvFailed,
+    });
+}
+
+http_from_tls_err* = (e: TlsError) HttpError {
+    e.match({
+        ConnectFailed => HttpError.ConnectFailed,
+        TlsFailed     => HttpError.TlsFailed,
+        WriteFailed   => HttpError.SendFailed,
+        ReadFailed    => HttpError.RecvFailed,
+        Closed        => HttpError.RecvFailed,
+    });
+}
+
+connect_stream* = (parsed: ParsedUrl, a: Alloc) Res<Stream, HttpError> {
+    parsed.scheme.eq_ignore_case("https").match({
+        true  => TlsStream.connect(a, parsed.host, parsed.port).match({
+            Ok(s)  => Ok(Stream.Tls(s)),
+            Err(e) => Err(e.http_from_tls_err()),
+        }),
+        false => parsed.scheme.eq_ignore_case("http").match({
+            true  => TcpStream.connect(a, parsed.host, parsed.port).match({
+                Ok(s)  => Ok(Stream.Tcp(s)),
+                Err(e) => Err(e.http_from_tcp_err()),
+            }),
+            false => Err(HttpError.DecodeFailed),
+        }),
+    });
+}
+
+write* = (self: Stream, bytes: str) Res<(), HttpError> {
+    self.match({
+        Tcp(t) => t.write(bytes).map_err((e) { e.http_from_tcp_err() }),
+        Tls(t) => t.write(bytes).map_err((e) { e.http_from_tls_err() }),
+    });
+}
+
+read* = (
+    self : Stream,
+    a    : Alloc,
+    buf  :: Vec<u8>,
+    n    : usize
+) Res<usize, HttpError> {
+    self.match({
+        Tcp(t) => t.read(a, buf, n).map_err((e) { e.http_from_tcp_err() }),
+        Tls(t) => t.read(a, buf, n).map_err((e) { e.http_from_tls_err() }),
+    });
+}
+
+// Only a close-delimited body treats orderly transport close as its framing.
+// Every other read path needs Closed to remain a premature RecvFailed.
+read_eof* = (self: Stream, a: Alloc, buf :: Vec<u8>, n: usize)
+            Res<usize, HttpError> {
+    self.match({
+        Tcp(t) => t.read(a, buf, n).match({
+            Ok(g)  => Ok(g),
+            Err(e) => e.match({
+                Closed => Ok(0),
+                _      => Err(e.http_from_tcp_err()),
+            }),
+        }),
+        Tls(t) => t.read(a, buf, n).match({
+            Ok(g)  => Ok(g),
+            Err(e) => e.match({
+                Closed => Ok(0),
+                _      => Err(e.http_from_tls_err()),
+            }),
+        }),
+    })
+}
+
+close* = (self: Stream) () {
+    self.match({
+        Tcp(t) => t.close(),
+        Tls(t) => t.close(),
+    });
+}
+
+// The union owns the transport it wraps: a client error path between connect
+// and close leaves scope through drop. Moving it into close disarms this drop,
+// so the fd and SSL context are released exactly once.
+Stream.impl(Drop, {
+    drop = (self :: @Self) () { self.close() }
+})

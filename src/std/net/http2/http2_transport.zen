@@ -1,0 +1,105 @@
+// src/std/net/http2/http2_transport.zen
+// TCP/TLS transport adaptation for HTTP/2.
+
+Alloc = std.mem
+str, str_at = std.text
+Res = std.core
+Vec = std.collections
+TcpStream, TcpError = std.net.tcp
+TlsStream, TlsError = std.net.tls
+ParsedUrl, parse_url = std.net.url
+H2Error = std.net.http2.http2_types
+
+http_url* = (url: str) Res<ParsedUrl, H2Error> {
+    parse_url(url).replace_err(H2Error.DecodeFailed)
+}
+
+Stream* = Tcp(TcpStream) | Tls(TlsStream)
+
+from_tcp_err = (e: TcpError) H2Error {
+    e.match({
+        ConnectFailed => H2Error.ConnectFailed,
+        WriteFailed   => H2Error.SendFailed,
+        ReadFailed    => H2Error.RecvFailed,
+        Closed        => H2Error.RecvFailed,
+    });
+}
+
+from_tls_err = (e: TlsError) H2Error {
+    e.match({
+        ConnectFailed => H2Error.ConnectFailed,
+        TlsFailed     => H2Error.TlsFailed,
+        WriteFailed   => H2Error.SendFailed,
+        ReadFailed    => H2Error.RecvFailed,
+        Closed        => H2Error.RecvFailed,
+    });
+}
+
+stream_write* = (s: Stream, bytes: str) Res<(), H2Error> {
+    s.match({
+        Tcp(t) => t.write(bytes).map_err((e) { from_tcp_err(e) }),
+        Tls(t) => t.write(bytes).map_err((e) { from_tls_err(e) }),
+    });
+}
+
+stream_read* = (
+    s   : Stream,
+    a   : Alloc,
+    buf :: Vec<u8>,
+    n   : usize
+) Res<usize, H2Error> {
+    s.match({
+        Tcp(t) => t.read(a, buf, n).map_err((e) { from_tcp_err(e) }),
+        Tls(t) => t.read(a, buf, n).map_err((e) { from_tls_err(e) }),
+    });
+}
+
+stream_close* = (s: Stream) () {
+    s.match({
+        Tcp(t) => t.close(),
+        Tls(t) => t.close(),
+    });
+}
+
+// read exactly n bytes, appended to buf
+read_n* = (s: Stream, a: Alloc, buf :: Vec<u8>, n: usize) Res<(), H2Error> {
+    left ::= n;
+    (left > 0).loop((h) {
+        chunk ::= a.Vec<u8>();
+        got = s.stream_read(a, chunk, left).try();
+        (got > 0).ensure(H2Error.RecvFailed).try();
+        at = buf.len;
+        buf.grow_by(got).try(H2Error.RecvFailed);
+        buf.ptr().offset(at).copy_from(chunk.ptr(), got);
+        left = left - got;
+    });
+    Ok(());
+}
+
+dial* = (parsed: ParsedUrl, a: Alloc) Res<Stream, H2Error> {
+    parsed.scheme.eq_ignore_case("https").match({
+        true  => TlsStream.connect_h2(a, parsed.host, parsed.port).match({
+            Ok(v)  => Ok(Stream.Tls(v)),
+            Err(e) => Err(from_tls_err(e)),
+        }),
+        false => TcpStream.connect(a, parsed.host, parsed.port).match({
+            Ok(v)  => Ok(Stream.Tcp(v)),
+            Err(e) => Err(from_tcp_err(e)),
+        }),
+    });
+}
+
+// a TLS peer must have answered ALPN "h2"
+alpn_check* = (s: Stream, a: Alloc) Res<(), H2Error> {
+    s.match({
+        Tcp(_) => Ok(()),
+        Tls(t) => {
+            buf ::= a.Vec<u8>();
+            n = t.alpn(a, buf).try((e) { from_tls_err(e) });
+            str_at(buf.ptr(), n).eq("h2").match({
+                true  => Ok(()),
+                false => Err(H2Error.ProtocolFailed),
+            });
+        },
+    });
+}

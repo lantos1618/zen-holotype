@@ -574,6 +574,7 @@ module.exports = grammar({
         $.array_literal,
         $.fixed_array_expression,
         $.function,
+        $.try_expression,
         $.call_expression,
         $.member_expression,
         $.index_expression,
@@ -622,6 +623,24 @@ module.exports = grammar({
       prec.dynamic(
         1,
         seq(field('type', $.array_type), field('arguments', $.arguments)),
+      ),
+
+    // The compiler AST gives this intrinsic its own node. It accepts no
+    // mapping, one replacement value, or one mapper lambda.
+    try_expression: ($) =>
+      prec.dynamic(
+        2,
+        prec(
+          PREC.call,
+          seq(
+            field('operand', $._expression),
+            '.',
+            field('operator', alias('try', $.identifier)),
+            '(',
+            optional(field('error', $._expression)),
+            ')',
+          ),
+        ),
       ),
 
     // `f(a, b)`, `alloc.Vec<i32>()`, `env.args<Opts>().try()`,

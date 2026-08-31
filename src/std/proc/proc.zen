@@ -33,25 +33,11 @@ proc_error = (rc: i32) ProcError {
     })
 }
 
-unit_or_read_failed = (r: Res<(), AllocError>) Res<(), ProcError> {
-    r.match({
-        Ok(_)  => Ok(()),
-        Err(_) => Err(ProcError.ReadFailed),
-    });
-}
-
-string_or_read_failed = (r: Res<String, AllocError>) Res<String, ProcError> {
-    r.match({
-        Ok(s)  => Ok(s),
-        Err(_) => Err(ProcError.ReadFailed),
-    });
-}
-
 string_from_c = (a: Alloc, p: Ptr<u8>, n: usize) Res<String, ProcError> {
     @scope.defer(() { free(p.to<()>()) });
-    s ::= string_or_read_failed(a.String()).try();
+    s ::= a.String().try(ProcError.ReadFailed);
     view = str_at(p, n);
-    unit_or_read_failed(s.add_bytes(view)).try();
+    s.add_bytes(view).try(ProcError.ReadFailed);
     Ok(s);
 }
 
@@ -59,17 +45,17 @@ Process* = {
     run* = (self: @Self, a: Alloc, cwd: str, cmd: str) Res<ProcOutput, ProcError> {
         // One-element Vecs provide writable slots until Zen has `&`.
         code_vec ::= a.Vec<i32>();
-        unit_or_read_failed(code_vec.add(0)).try();
+        code_vec.add(0).try(ProcError.ReadFailed);
 
         out_p_vec ::= a.Vec<Ptr<u8>>();
-        unit_or_read_failed(out_p_vec.add(null_ptr<u8>())).try();
+        out_p_vec.add(null_ptr<u8>()).try(ProcError.ReadFailed);
         out_n_vec ::= a.Vec<usize>();
-        unit_or_read_failed(out_n_vec.add(0)).try();
+        out_n_vec.add(0).try(ProcError.ReadFailed);
 
         err_p_vec ::= a.Vec<Ptr<u8>>();
-        unit_or_read_failed(err_p_vec.add(null_ptr<u8>())).try();
+        err_p_vec.add(null_ptr<u8>()).try(ProcError.ReadFailed);
         err_n_vec ::= a.Vec<usize>();
-        unit_or_read_failed(err_n_vec.add(0)).try();
+        err_n_vec.add(0).try(ProcError.ReadFailed);
 
         rc = zg_proc_run(
             cwd,

@@ -19,7 +19,8 @@
 //   didOpen / didChange        the overlay, Full sync only
 //   workspace/didChangeWatchedFiles
 //                              retire a build whose disk inputs changed
-//   initialized / exit / didClose / $/cancelRequest
+//   didClose                   remove the buffer from the overlay
+//   initialized / exit / $/cancelRequest
 //                              notifications, no reply and nothing to do
 //   everything else            -32601, with the method named
 //
@@ -42,7 +43,8 @@
 
 str, String = std.text
 Vec, Map = std.collections
-Alloc, AllocError = std.mem
+Range = std.core
+Alloc, AllocError, Arena = std.mem
 Checker = sema.sema_check
 Jsons, JsonId, written, read = std.json
 FrameFault, frame_at, write_frame, write_decimal = lsp.lsp_frame
@@ -74,16 +76,19 @@ path_of = lsp.lsp_uri
 
 // The whole of the server's state.
 //
-// `docs` maps a URI to the open buffer's text — SESSION-ARENA COPIES,
-// not borrows, for the reason `lsp_reply.zen`'s `own_str` states:
-// neither the message's arena nor the request's bytes outlive the
-// message. The copies happen in `changed_to`, once per real change.
+// `docs` maps a URI to the open buffer's text in `docs_arena`: owned,
+// not borrowed from a request, but replaceable as one unit so full-sync
+// edits do not retain every old version for the session.
 Server* = {
     a: Alloc,
 
     // THE AUTHORITY A QUERY NEEDS. Hover is a build now and reads the
     // disk, so the server holds the same `Env` the driver does.
     env: Env,
+
+    // Full-sync edits replace whole buffers. Their bytes live in this
+    // replaceable arena so old versions do not accumulate for the session.
+    docs_arena :: Arena,
 
     // THE WORKSPACE, from `initialize`'s `rootUri`, as a path. Empty
     // until `initialize` arrives or the client sends none — load-bearing
@@ -224,8 +229,8 @@ Server* = {
         failed(tree, rid, RpcFault.MethodNotFound, why.view(), msg)
     }
 
-    // `initialized`, `exit`, `didClose` and `$/cancelRequest` all mean
-    // "nothing to do here" and fall through the final arm.
+    // `initialized`, `exit` and `$/cancelRequest` mean "nothing to do
+    // here" and fall through the final arm.
     notified = (self :: @Self, tree: Jsons, req: JsonId, method: str)
                Res<(), AllocError> {
         handled: Res<Res<(), AllocError>> = loop<Res<(), AllocError>>((h) {
@@ -235,22 +240,44 @@ Server* = {
             method.eq("textDocument/didChange").then(() {
                 h.break(self.changed(tree, req))
             });
+            method.eq("textDocument/didClose").then(() {
+                h.break(self.closed(tree, req))
+            });
             method.eq("workspace/didChangeWatchedFiles").then(() {
-                h.break(self.watched())
+                h.break(self.watched(tree, req))
             });
             h.break(written());
         });
         handled.match({ Ok(done) => done, None => written() })
     }
 
-    // The VS Code client watches only `**/*.zen`, so the notification's
-    // paths need no second filter. Rebuild from the newest open document:
-    // walking from the changed dependency itself cannot discover modules
-    // that import it.
-    watched = (self :: @Self) Res<(), AllocError> {
-        (self.open.len == 0).match({
-            true  => written(),
-            false => self.open.get(self.open.len - 1).match({
+    // OPEN DOCUMENTS COME FROM THE OVERLAY, not disk. VS Code emits a file
+    // watcher notification when one is saved as well as the didChange that
+    // supplied its bytes; invalidating for that second event rebuilt the
+    // same whole program twice. Only a CLOSED dependency can change an input
+    // the build read from disk.
+    watched = (self :: @Self, tree: Jsons, req: JsonId)
+              Res<(), AllocError> {
+        changes = param(tree, req, "changes");
+        i     ::= 0;
+        stale ::= false;
+        more  ::= true;
+        loop(more, (h) {
+            tree.item(changes, i).match({
+                None       => { more = false; },
+                Ok(change) => {
+                    uri = string_at(tree, change, "uri");
+                    self.docs.get(uri).match({
+                        None  => { stale = true; },
+                        Ok(_) => (),
+                    });
+                    i = i + 1;
+                },
+            });
+        });
+        (stale && self.open.len > 0).match({
+            false => written(),
+            true  => self.open.get(self.open.len - 1).match({
                 None      => written(),
                 Ok(entry) => { self.notes.stales(entry); Ok(()) },
             }),
@@ -275,6 +302,37 @@ Server* = {
         self.remember(uri, text)
     }
 
+    // Closing retires the overlay so subsequent builds read this file
+    // from disk. Map has no removal, so replace the small document store;
+    // the open-order Vec loses the same row.
+    closed = (self :: @Self, tree: Jsons, req: JsonId)
+             Res<(), AllocError> {
+        doc = param(tree, req, "textDocument");
+        uri = string_at(tree, doc, "uri");
+        self.docs.get(uri).match({
+            None  => written(),
+            Ok(_) => self.forget(uri),
+        })
+    }
+
+    forget = (self :: @Self, uri: str) Res<(), AllocError> {
+        stable = own_str(self.a, uri).try();
+        self.replace_docs(uri, None).try();
+        Range(0, self.open.len).find((i) {
+            self.open.get(i).match({ None => false, Ok(u) => u.eq(uri) })
+        }).match({
+            None   => (),
+            Ok(at) => { self.open.take(at); },
+        });
+        next = (self.open.len == 0).match({
+            true  => "",
+            false => self.open.get(self.open.len - 1).match({
+                None => "", Ok(u) => u
+            }),
+        });
+        self.notes.closed(stable, next)
+    }
+
     // A URI with no text is not stored — an empty document and an
     // absent one are different states.
     remember = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
@@ -284,9 +342,7 @@ Server* = {
         })
     }
 
-    // UNCHANGED BYTES ARE NOT A CHANGE — the only mitigation this server
-    // can perform for the per-keystroke build cost (`lsp_diag.zen`'s
-    // header says why a timed debounce cannot be).
+    // Unchanged bytes preserve both the document arena and cached build.
     stored = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
         self.docs.get(uri).match({
             None     => self.changed_to(uri, text),
@@ -298,19 +354,47 @@ Server* = {
     }
 
     changed_to = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
-        kept_uri  = own_str(self.a, uri).try();
-        kept_text = own_str(self.a, text).try();
-        self.docs.set(kept_uri, kept_text).try();
-        self.listed(kept_uri).try();
-        self.notes.owes(kept_uri);
+        stable = self.listed(uri).try();
+        self.replace_docs(uri, Ok(text)).try();
+        self.notes.owes(stable);
         Ok(());
     }
 
-    listed = (self :: @Self, uri: str) Res<(), AllocError> {
+    listed = (self :: @Self, uri: str) Res<str, AllocError> {
         self.open.find((u) { u.eq(uri) }).match({
-            Ok(_) => written(),
-            None  => self.open.add(uri),
+            Ok(found) => Ok(found),
+            None      => {
+                kept = own_str(self.a, uri).try();
+                self.open.add(kept).try();
+                Ok(kept)
+            },
         })
+    }
+
+    replace_docs = (self :: @Self, uri: str, text: Res<str>)
+                   Res<(), AllocError> {
+        fresh_arena ::= self.env.mem.alloc();
+        fresh       ::= fresh_arena.Map<str, str>();
+        self.docs.pairs((h, key, value) {
+            key.eq(uri).match({
+                true  => written(),
+                false => fresh.set(
+                    own_str(fresh_arena, key).try(),
+                    own_str(fresh_arena, value).try()
+                ),
+            }).try();
+        });
+        text.match({
+            None        => written(),
+            Ok(replace) => fresh.set(
+                own_str(fresh_arena, uri).try(),
+                own_str(fresh_arena, replace).try()
+            ),
+        }).try();
+        self.docs_arena.drop();
+        self.docs_arena = consume fresh_arena;
+        self.docs       = fresh;
+        Ok(())
     }
 
     // THE SETTLE POINT: every message the transport was holding has been
@@ -536,6 +620,7 @@ Server* = {
                     c,
                     t,
                     sh.root,
+                    self.docs,
                     uri,
                     text,
                     relative_to(sh.root, path),
@@ -745,11 +830,25 @@ Server* = {
     }
 }
 
+Server.impl(Drop, {
+    drop = (self :: @Self) () {
+        self.notes.drop();
+        self.docs_arena.drop();
+    }
+})
+
 Server* = (a: Alloc, env: Env) Server {
+    docs_arena ::= env.mem.alloc();
+    server_with_docs(a, env, consume docs_arena)
+}
+
+server_with_docs = (a: Alloc, env: Env, docs_arena :: Arena) Server {
+    docs = docs_arena.Map<str, str>();
     Server(
         a: a,
         env: env,
-        docs: a.Map<str, str>(),
+        docs_arena: consume docs_arena,
+        docs: docs,
         open: a.Vec<str>(),
         notes: a.Diagnostics(env),
         ready: false,

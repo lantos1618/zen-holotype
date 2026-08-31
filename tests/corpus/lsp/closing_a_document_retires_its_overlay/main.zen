@@ -1,0 +1,65 @@
+// didClose removes an unsaved buffer from the build overlay. The next build
+// reads the file from disk and the diagnostic previously published for the
+// buffer is explicitly cleared.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, frame_at = lsp.lsp_frame
+write_text = std.json
+
+APP_URI*: str = "file://src/app/app.zen"
+SHAPE_URI*: str = "file://src/app/shape.zen"
+APP*: str = "Point = app.shape\n\norigin = () Point { Point(x: 0) }\n"
+BROKEN*: str = "Point* = { x*: Missing }\n"
+
+main = (env: Env) Res<i32, AllocError> {
+    a      ::= env.mem.alloc();
+    s      ::= a.Server(env);
+    opened ::= a.String().try();
+    initialize(opened).try();
+    open_doc(a, SHAPE_URI, BROKEN, opened).try();
+    open_doc(a, APP_URI, APP, opened).try();
+    ignored ::= a.String().try();
+    serve(s, opened.view(), ignored).try();
+
+    closed ::= a.String().try();
+    close_doc(a, SHAPE_URI, closed).try();
+    out ::= a.String().try();
+    serve(s, closed.view(), out).try();
+    frame_at(out.view(), 0).match({
+        Err(_)  => println("no clear"),
+        Ok(one) => println("{}", one.body),
+    });
+    Ok(0)
+}
+
+initialize = (into :: String) Res<(), AllocError> {
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file://.\"}}",
+        into
+    )
+}
+
+open_doc = (a: Alloc, uri: str, text: str, into :: String)
+           Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(uri, body).try();
+    body.add_bytes(",\"text\":").try();
+    write_text(text, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}
+
+close_doc = (a: Alloc, uri: str, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add_bytes(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didClose\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(uri, body).try();
+    body.add_bytes("}}}").try();
+    write_frame(body.view(), into)
+}

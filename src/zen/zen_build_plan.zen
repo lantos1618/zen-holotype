@@ -8,7 +8,7 @@ str = std.text
 Vec = std.collections
 Path = std.core
 
-Ast, ExprId, Expr, Call, Access, Record, Block, Function, Span = std.ast
+Ast, ExprId, Expr, Call, Access, Record, Block, Function, Span, Try = std.ast
 nowhere = std.ast
 Stmt, Bind, Member, Field = std.ast
 Checker = sema.sema
@@ -95,10 +95,10 @@ Executor = {
                     ))),
                     false => {
                         value = self.eval(b.value).try();
-                        allocated(self.locals.add(Local(
+                        self.locals.add(Local(
                             name: n.text,
                             value: value
-                        ))).try();
+                        )).try(PlanError.OutOfMemory);
                         Ok(())
                     },
                 })
@@ -120,11 +120,19 @@ Executor = {
             }),
             Paren(p)   => self.eval(p.inner),
             Array(a)   => self.array(a.elems, node.span),
-            Try(t)     => self.eval(t.operand),
+            Try(t)     => self.eval_try(t),
             Call(c)    => self.call(id, c, node.span),
             _          => Err(PlanError.Refused(PlanFault.Unsupported(
                 node.span
             ))),
+        })
+    }
+
+    // Checked build calls take their Ok path; mapping belongs to Err.
+    eval_try = (self :: @Self, t: Try) Res<Value, PlanError> {
+        t.error.match({
+            Ok(_) => self.eval(t.operand),
+            None  => self.eval(t.operand),
         })
     }
 
@@ -154,11 +162,13 @@ Executor = {
         first.match({
             TextValue(text) => {
                 out ::= self.alloc.Vec<str>();
-                allocated(out.add(text)).try();
+                out.add(text).try(PlanError.OutOfMemory);
                 Range(1, ids.len).loop((h, i) {
                     id = ids.get(i).match({ Ok(v) => v, None => first_id });
                     self.eval(id).try().match({
-                        TextValue(value) => allocated(out.add(value)).try(),
+                        TextValue(value) => out.add(
+                            value
+                        ).try(PlanError.OutOfMemory),
                         _                => Err(PlanError.Refused(PlanFault.Unsupported(
                             at
                         ))).try(),
@@ -168,11 +178,13 @@ Executor = {
             },
             DepValue(dep)   => {
                 out ::= self.alloc.Vec<Dep>();
-                allocated(out.add(dep)).try();
+                out.add(dep).try(PlanError.OutOfMemory);
                 Range(1, ids.len).loop((h, i) {
                     id = ids.get(i).match({ Ok(v) => v, None => first_id });
                     self.eval(id).try().match({
-                        DepValue(value) => allocated(out.add(value)).try(),
+                        DepValue(value) => out.add(
+                            value
+                        ).try(PlanError.OutOfMemory),
                         _               => Err(PlanError.Refused(PlanFault.Unsupported(
                             at
                         ))).try(),
@@ -268,11 +280,11 @@ Executor = {
             target: self.target_field(r, "target").try()
         );
         dep       = Dep(name: name);
-        allocated(self.plan.imports.add(CImportNode(
+        self.plan.imports.add(CImportNode(
             name: name,
             spec: spec,
             dep: dep
-        ))).try();
+        )).try(PlanError.OutOfMemory);
         Ok(Value.DepValue(dep))
     }
 
@@ -286,11 +298,11 @@ Executor = {
             paths: self.texts_field(r, "paths").try()
         );
         dep  = Dep(name: name);
-        allocated(self.plan.libs.add(LibNode(
+        self.plan.libs.add(LibNode(
             name: name,
             spec: spec,
             dep: dep
-        ))).try();
+        )).try(PlanError.OutOfMemory);
         Ok(Value.DepValue(dep))
     }
 
@@ -303,7 +315,10 @@ Executor = {
             deps: self.deps_field(r, "deps").try(),
             out: self.optional_path_field(r, "out")
         );
-        allocated(self.plan.exes.add(ExeNode(name: name, spec: spec))).try();
+        self.plan.exes.add(ExeNode(
+            name: name,
+            spec: spec
+        )).try(PlanError.OutOfMemory);
         Ok(Value.UnitValue)
     }
 
@@ -549,12 +564,5 @@ function_in = (tree: Ast, module: usize) Res<Function, PlanError> {
                 ))),
             }),
         }),
-    })
-}
-
-allocated = (r: Res<(), AllocError>) Res<(), PlanError> {
-    r.match({
-        Ok(_)  => Ok(()),
-        Err(_) => Err(PlanError.OutOfMemory),
     })
 }

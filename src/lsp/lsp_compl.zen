@@ -18,7 +18,7 @@
 // the patched buffer is exactly what joins them.
 
 str, String = std.text
-Vec, Ordered = std.collections
+Vec, Map, Ordered = std.collections
 Alloc, AllocError = std.mem
 Range = std.core
 ExprId, Access, Member, Impl, Ident, nowhere = std.ast
@@ -291,13 +291,17 @@ known_type_items = (
     prefix : str,
     out    :: Vec<Item>
 ) Res<(), AllocError> {
+    seen ::= a.Map<str, bool>();
+    out.loop((h, item) { seen.set(item.label, true).try(); });
     cases ::= a.Vec<Case>();
     c.cases_of(ty, cases).try();
-    cases.loop((h, cs) { offer(out, cs.name, ENUM_MEMBER, prefix).try() });
+    cases.loop((h, cs) {
+        offer(seen, out, cs.name, ENUM_MEMBER, prefix).try();
+    });
     cands ::= a.Vec<Item>();
     collect_members(c, a, ty, cands).try();
     cands.loop((h, cand) {
-        offer_member(c, a, ty, file, cand, prefix, out).try();
+        offer_member(c, a, ty, file, cand, prefix, seen, out).try();
     });
     Ok(());
 }
@@ -312,12 +316,13 @@ offer_member = (
     file   : str,
     cand   : Item,
     prefix : str,
+    seen   :: Map<str, bool>,
     out    :: Vec<Item>
 ) Res<(), AllocError> {
     ok = visible(c, a, ty, cand.label, file).try();
     ok.match({
         false => written(),
-        true  => offer(out, cand.label, cand.kind, prefix),
+        true  => offer(seen, out, cand.label, cand.kind, prefix),
     })
 }
 
@@ -429,16 +434,18 @@ scope_items = (
     prefix : str,
     out    :: Vec<Item>
 ) Res<(), AllocError> {
+    seen ::= a.Map<str, bool>();
+    out.loop((h, item) { seen.set(item.label, true).try(); });
     module_index_of(c.tree, file).match({
         None   => written(),
         Ok(mi) => {
             Range(0, c.world.count()).loop((h, t) {
-                table_names(c, a, mi, t, prefix, out).try();
+                table_names(c, a, mi, t, prefix, seen, out).try();
             });
             Ok(())
         },
     }).try();
-    keyword_items(prefix, out)
+    keyword_items(prefix, seen, out)
 }
 
 // Every name a module table MENTIONS — its own declarations and its
@@ -451,16 +458,21 @@ table_names = (
     mi     : usize,
     t      : usize,
     prefix : str,
+    seen   :: Map<str, bool>,
     out    :: Vec<Item>
 ) Res<(), AllocError> {
     c.world.table_at(t).match({
         None   => written(),
         Ok(tb) => {
             tb.defs.loop(
-                (h, d) { offer_global(c, a, mi, d.name, prefix, out).try() }
+                (h, d) {
+                    offer_global(c, a, mi, d.name, prefix, seen, out).try()
+                }
             );
             tb.imports.loop(
-                (h, b) { offer_global(c, a, mi, b.name, prefix, out).try() }
+                (h, b) {
+                    offer_global(c, a, mi, b.name, prefix, seen, out).try()
+                }
             );
             Ok(())
         },
@@ -473,16 +485,21 @@ offer_global = (
     mi     : usize,
     name   : str,
     prefix : str,
+    seen   :: Map<str, bool>,
     out    :: Vec<Item>
 ) Res<(), AllocError> {
-    (has_prefix(name, prefix) && !listed(out, name)).match({
+    (has_prefix(name, prefix) && !known(seen, name)).match({
         false => written(),
         true  => {
             defs ::= a.Vec<Def>();
             c.world.defs_of(mi, name, defs).try();
             defs.get(0).match({
                 None  => written(),
-                Ok(d) => out.add(Item(label: name, kind: global_kind(d.kind))),
+                Ok(d) => remember(
+                    seen,
+                    out,
+                    Item(label: name, kind: global_kind(d.kind))
+                ),
             })
         },
     })
@@ -500,10 +517,14 @@ global_kind = (k: DefKind) usize {
 
 // `true`, `false`, `consume` — the language's whole reserved-word list
 // (`lex_scan.zen`'s `word_kind`), offered as keywords.
-keyword_items = (prefix: str, out :: Vec<Item>) Res<(), AllocError> {
-    offer(out, "consume", KEYWORD, prefix).try();
-    offer(out, "false", KEYWORD, prefix).try();
-    offer(out, "true", KEYWORD, prefix).try();
+keyword_items = (
+    prefix : str,
+    seen   :: Map<str, bool>,
+    out    :: Vec<Item>
+) Res<(), AllocError> {
+    offer(seen, out, "consume", KEYWORD, prefix).try();
+    offer(seen, out, "false", KEYWORD, prefix).try();
+    offer(seen, out, "true", KEYWORD, prefix).try();
     Ok(())
 }
 
@@ -511,19 +532,28 @@ keyword_items = (prefix: str, out :: Vec<Item>) Res<(), AllocError> {
 
 // Add, unless the prefix excludes it or it is already there. One offer
 // per name: a candidate reachable through two tables is one item.
-offer = (out :: Vec<Item>, label: str, kind: usize, prefix: str)
+offer = (
+    seen   :: Map<str, bool>,
+    out    :: Vec<Item>,
+    label  : str,
+    kind   : usize,
+    prefix : str
+)
         Res<(), AllocError> {
-    (has_prefix(label, prefix) && !listed(out, label)).match({
-        true  => out.add(Item(label: label, kind: kind)),
+    (has_prefix(label, prefix) && !known(seen, label)).match({
+        true  => remember(seen, out, Item(label: label, kind: kind)),
         false => Ok(()),
     })
 }
 
-listed = (out: Vec<Item>, label: str) bool {
-    out.find((it) { it.label.eq(label) }).match({
-        Ok(_) => true,
-        None  => false,
-    })
+remember = (seen :: Map<str, bool>, out :: Vec<Item>, item: Item)
+           Res<(), AllocError> {
+    out.add(item).try();
+    seen.set(item.label, true)
+}
+
+known = (seen: Map<str, bool>, label: str) bool {
+    seen.get(label).match({ Ok(_) => true, None => false })
 }
 
 // Sorted by label: the collection order is the world's table order, an

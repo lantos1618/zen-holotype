@@ -34,7 +34,7 @@
 
 Expr, ExprId, BlockId, Block, Stmt, Bind = std.ast
 Decl, Member, Function = std.ast
-Impl, Call, Access, Match, Binary = std.ast
+Impl, Call, Access, Match, Binary, Try = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -495,13 +495,21 @@ expr_writes_scope = (be :: CBackend, id: ExprId) bool {
         Access(a)     => be.expr_writes_scope(a.base),
         Index(x)      => be.expr_writes_scope(x.base)
                              || be.expr_writes_scope(x.index),
-        Try(t)        => be.expr_writes_scope(t.operand),
+        Try(t)        => be.expr_writes_scope(t.operand)
+                             || be.opt_writes_scope(t.error),
         Consume(x)    => be.expr_writes_scope(x.operand),
         Call(c)       => be.call_writes_scope(c),
         Match(m)      => be.match_writes_scope(m),
         Array(a)      => be.elems_write_scope(a.elems),
         FixedArray(a) => be.elems_write_scope(a.elems),
         _             => false,
+    })
+}
+
+opt_writes_scope = (be :: CBackend, id: Res<ExprId>) bool {
+    id.match({
+        Ok(e) => be.expr_writes_scope(e),
+        None  => false,
     })
 }
 
@@ -513,7 +521,7 @@ binary_writes_scope = (be :: CBackend, b: Binary) bool {
     got   ::= false;
     down  ::= b;
     going ::= true;
-    loop(() { going }, (h) {
+    going.loop((h) {
         got   = got || be.expr_writes_scope(down.rhs);
         next  = be.binary_below(down.lhs);
         going = next.match({ None => false, Ok(_) => true });

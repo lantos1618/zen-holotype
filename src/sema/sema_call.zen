@@ -8,7 +8,7 @@
 // `toString` overloads on a buffer versus an allocator."
 //
 // So a closure argument is matched on its PARAMETER COUNT and not waved
-// through. That single line is why `loop` can be one name with six
+// through. That single line is why `loop` can be one name with seven
 // declarations, and a resolver that treated every closure as
 // interchangeable would make five of them unreachable.
 //
@@ -83,7 +83,7 @@ ty_at, is_tvar, recv_sig_fits = sema.sema_cand
 // as its name, so `T` of one candidate is never `T` of another.
 //
 // `id` is WHICH DECLARATION this candidate came from, and it is what a
-// resolution is. Without it the answer to "which of the six `loop`s did
+// resolution is. Without it the answer to "which of the seven `loop`s did
 // this call mean" exists only for as long as `chosen` runs, and every
 // later consumer has to re-derive it from the name — which is how a
 // backend ends up reporting an ambiguity that sema had settled.
@@ -393,33 +393,27 @@ decl_call = (
             Ok(a) => c.travelled_cands(name, Ok(a.ty), cands),
         }),
     }).try();
-    kept ::= c.alloc.Vec<Cand>();
-    c.keep_matching(cands, actuals, kept).try();
-    (kept.len > 0).match({
-        true  => c.chosen(id, node, call, kept, actuals, ctx),
-        false => c.construct_or_fail(id, node, call, name, recv, cands, ctx),
+    c.first_matching(cands, actuals).try().match({
+        Ok(k) => c.chosen_ret(id, node, call, k, actuals, ctx),
+        None  => c.construct_or_fail(id, node, call, name, recv, cands, ctx),
     })
 }
 
-keep_matching = (
+first_matching = (
     c       :: Checker,
     cands   : Vec<Cand>,
-    actuals : Vec<Actual>,
-    kept    :: Vec<Cand>
-) Res<(), AllocError> {
-    cands.loop((h, k) { c.keep_one(k, actuals, kept).try() });
-    Ok(());
-}
-
-// A named helper rather than a `.then` inside the loop body:
-// docs/SEMA_BOOTSTRAP_FIXES.md §10, which now records that gap CLOSED,
-// to be re-tested before removal.
-keep_one = (c :: Checker, k: Cand, actuals: Vec<Actual>, kept :: Vec<Cand>)
-           Res<(), AllocError> {
-    c.matches(k, actuals).try().match({
-        true  => kept.add(k),
-        false => Ok(()),
-    })
+    actuals : Vec<Actual>
+) Res<Res<Cand>, AllocError> {
+    hit: Res<Cand> = None;
+    cands.loop((h, k) {
+        c.matches(k, actuals).try().then(() {
+            hit.match({
+                None  => { hit = Ok(k); },
+                Ok(_) => {},
+            });
+        });
+    });
+    Ok(hit)
 }
 
 construct_or_fail = (
@@ -549,25 +543,6 @@ no_overload = (c :: Checker, node: Expr, name: str, cands: Vec<Cand>)
         ).try();
     });
     c.types.unknown()
-}
-
-// The first candidate that matched, and THE PLACE THE ANSWER IS WRITTEN
-// DOWN. Everything after resolution — the backend most of all — reads
-// `call_memo` rather than asking the name again, because the name is
-// exactly what could not answer.
-chosen = (
-    c       :: Checker,
-    id      : ExprId,
-    node    : Expr,
-    call    : Call,
-    kept    : Vec<Cand>,
-    actuals : Vec<Actual>,
-    ctx     : Ctx
-) Res<TyId, AllocError> {
-    kept.get(0).match({
-        None  => c.types.unknown(),
-        Ok(k) => c.chosen_ret(id, node, call, k, actuals, ctx),
-    })
 }
 
 chosen_ret = (
@@ -1028,24 +1003,26 @@ by_arity_ret = (
 // site the two are indistinguishable and there is nothing to report.
 pick_fitting = (c :: Checker, found: Vec<Found>, actuals: Vec<Actual>)
                Res<Res<Found>, AllocError> {
-    kept ::= c.alloc.Vec<Found>();
-    found.loop((h, f) { c.keep_fitting(f, actuals, kept).try() });
-    Ok(first_found(kept));
+    hit: Res<Found> = None;
+    found.loop((h, f) {
+        c.found_fits(f, actuals).try().then(() {
+            hit.match({
+                None  => { hit = Ok(f); },
+                Ok(_) => {},
+            });
+        });
+    });
+    Ok(hit)
 }
 
-// A named helper, as `keep_one`: docs/SEMA_BOOTSTRAP_FIXES.md §10.
-keep_fitting = (
+found_fits = (
     c       :: Checker,
     f       : Found,
-    actuals : Vec<Actual>,
-    kept    :: Vec<Found>
-) Res<(), AllocError> {
+    actuals : Vec<Actual>
+) Res<bool, AllocError> {
     params ::= c.alloc.Vec<TyId>();
     c.fn_params(f.ty, params).try();
-    c.recv_sig_fits(params, actuals).try().match({
-        true  => kept.add(f),
-        false => Ok(()),
-    })
+    c.recv_sig_fits(params, actuals)
 }
 
 // A member that is not a function has no parameters and fits no call.

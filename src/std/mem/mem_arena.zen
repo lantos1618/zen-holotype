@@ -98,6 +98,31 @@ Arena* = {
         self.state.write(0, ArenaState(mem: s.mem, head: page, next: 0));
         self.raw(size, align)
     }
+
+    // Grow the newest run by advancing the same bump pointer. Vec growth
+    // commonly happens before anything else allocates, so this avoids
+    // retaining each abandoned geometric capacity until arena drop.
+    extend_latest = (self: @Self, src: Ptr<u8>, old: usize, want: usize) bool {
+        (old > 0 && want > old).match({
+            true  => self.extend_nonempty(src, old, want),
+            false => false,
+        })
+    }
+
+    extend_nonempty = (self: @Self, src: Ptr<u8>, old: usize, want: usize) bool {
+        s      = self.state.read(0);
+        page   = s.head.read(0);
+        latest = src.offset(old).same(page.base.offset(s.next));
+        fits   = s.next + (want - old) <= page.size;
+        (latest && fits).then(() {
+            src.back(HEADER_BYTES).to<usize>().write(0, want);
+            self.state.write(
+                0,
+                ArenaState(mem: s.mem, head: s.head, next: s.next + want - old)
+            );
+        });
+        latest && fits
+    }
 }
 
 // `self: @Self` on every one of these, deliberately: allocating
@@ -132,16 +157,18 @@ Arena.impl(Alloc, {
             true  => 0,
             false => src.back(HEADER_BYTES).to<usize>().read(0),
         });
-        keep = (old > want).match({
-            true  => want,
-            false => old,
-        });
-        dst  = self.raw(want, ALIGN_MAX).try();
-        (keep > 0).match({
-            true  => dst.copy_from(src, keep),
-            false => (),
-        });
-        Ok(dst.to<T>())
+        self.extend_latest(src, old, want).match({
+            true  => Ok(p),
+            false => {
+                keep = (old > want).match({ true => want, false => old });
+                dst  = self.raw(want, ALIGN_MAX).try();
+                (keep > 0).match({
+                    true  => dst.copy_from(src, keep),
+                    false => (),
+                });
+                Ok(dst.to<T>())
+            },
+        })
     }
 
     // an arena frees nothing per allocation — every page goes back at
@@ -156,13 +183,14 @@ Arena.impl(Drop, {
     drop = (self :: @Self) () {
         s = self.state.read(0);
         page ::= s.head;
-        loop(() { !page.is_null() }, (h) {
+        loop(!page.is_null(), (h) {
             // read the link BEFORE releasing: the header lives in the
             // region about to go away
             prev = page.read(0).prev;
             s.mem.release(page);
             page = prev;
         });
+        s.mem.release(self.state);
     }
 })
 
@@ -183,7 +211,7 @@ Mem* = {
     // the only caller — no second door
     page* = (self: @Self, size: usize, prev: Ptr<Page>) Res<Ptr<Page>, AllocError>
 
-    // hand a region back. Arena.drop calls this once per page, nothing
-    // else calls it
-    release* = (self: @Self, page: Ptr<Page>) ()
+    // hand a region back. Arena.drop calls this once per page and once
+    // for the state cell allocated by `alloc`
+    release* = <T>(self: @Self, region: Ptr<T>) ()
 }

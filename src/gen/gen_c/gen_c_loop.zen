@@ -1,6 +1,6 @@
 // src/gen/gen_c/gen_c_loop.zen
 // The one construct that has no Zen definition anywhere.
-// `src/std/core/loop/loop_iter.zen` declares six signatures with no
+// `src/std/core/loop/loop_iter.zen` declares seven signatures with no
 // bodies: "a loop is the one thing that cannot be written in a
 // language whose only control flow is `.match`, `.loop` and
 // recursion" — writing `loop` in terms of `loop` is circular, and by
@@ -134,7 +134,8 @@ lower_shaped = (
 // THE FOUR NON-FOLD SHAPES, and the branch between them is what the
 // arguments before the body are:
 //   nothing        while true
-//   a `() bool`    while cond, tested BEFORE each pass
+//   a `() bool` or bool expression
+//                  while cond, tested BEFORE each pass
 //   anything else  a Range, walked half-open
 lower_walk* = (
     be   :: CBackend,
@@ -174,7 +175,7 @@ lower_led = (
     out  :: String
 )
             Res<(), AllocError> {
-    be.is_cond(one).match({
+    be.is_cond(one, ctx).try().match({
         true  => be.lower_forever(id, sh, Ok(one), lam, ctx, want, fold, out),
         false => be.lower_range(id, sh, one, lam, ctx, want, fold, out),
     })
@@ -206,12 +207,18 @@ lower_impl_walk = (
     })
 }
 
-// The condition form's first argument is `() bool` — a lambda taking no
-// parameters. A range never is.
-is_cond = (be :: CBackend, one: ExprId) bool {
+// A condition is either the original zero-argument closure or the bool
+// overload. The latter is emitted at the top of every pass, so a mutable
+// name is observed after the body changes it rather than copied at entry.
+is_cond = (be :: CBackend, one: ExprId, ctx: Ctx)
+          Res<bool, AllocError> {
     be.lambda_at(one).match({
-        None    => false,
-        Ok(lam) => lam.params.len == 0,
+        Ok(lam) => Ok(lam.params.len == 0),
+        None    => {
+            want = be.check.types.prim("bool").try();
+            got  = be.ty_of(one, ctx, want).try();
+            Ok(got.index == want.index)
+        },
     })
 }
 
@@ -255,16 +262,26 @@ lower_forever = (
     Ok(());
 }
 
-// `while cond` is tested BEFORE each pass, "so a cond that is false to
-// begin with runs the body zero times". The condition is a closure like
-// the body is, so it is inlined the same way — into the top of the
-// loop, where a `for (;;)` puts what a `while` would have in its head.
+// `while cond` is tested BEFORE each pass, so a false initial condition
+// runs the body zero times. A closure is inlined and a bool expression is
+// re-emitted at the same point: the top of the generated `for (;;)`.
 write_cond_guard = (be :: CBackend, one: ExprId, brk: usize, ctx: Ctx)
                    Res<(), AllocError> {
     be.lambda_at(one).match({
-        None    => Ok(()),
+        None    => be.write_cond_value(one, brk, ctx),
         Ok(lam) => be.write_cond_body(lam, brk, ctx),
     })
+}
+
+write_cond_value = (be :: CBackend, one: ExprId, brk: usize, ctx: Ctx)
+                   Res<(), AllocError> {
+    bool_ty = be.check.types.prim("bool").try();
+    value ::= be.alloc.String().try();
+    be.expr(one, ctx, bool_ty, value).try();
+    be.fmt("if (!{}) { goto ", value.view()).try();
+    be.write_label("brk", brk).try();
+    be.writeln("; }").try();
+    Ok(())
 }
 
 write_cond_body = (be :: CBackend, lam: Lambda, brk: usize, ctx: Ctx)

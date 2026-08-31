@@ -1014,6 +1014,7 @@ loop*<T> = (body: (h: LoopHandle, index: usize) ()) Res<T>
 
 // while cond
 loop*<T> = (cond: () bool, body: (h: LoopHandle) ()) Res<T>
+loop*<T> = (cond: bool, body: (h: LoopHandle) ()) Res<T>
 
 // ranged / collection iteration, with and without index
 loop*<T> = (range: Range, body: (h: LoopHandle, index: usize, value: T) ()) Res<T>

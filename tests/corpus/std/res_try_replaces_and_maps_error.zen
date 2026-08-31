@@ -1,0 +1,84 @@
+SourceError = | Bad(i32)
+
+TargetError = Replaced | Mapped(i32)
+
+OtherError = | Other
+
+WideError = TargetError | OtherError
+
+raise = (n: i32) Res<i32, SourceError> {
+    (n < 0).match({
+        true  => Err(SourceError.Bad(n)),
+        false => Ok(n),
+    });
+}
+
+replace = (n: i32) Res<i32, TargetError> {
+    value = raise(n).try(TargetError.Replaced);
+    Ok(value + 10);
+}
+
+map = (n: i32) Res<i32, TargetError> {
+    value = raise(n).try((error) {
+        error.match({
+            Bad(code) => TargetError.Mapped(0 - code),
+        })
+    });
+    Ok(value + 20);
+}
+
+replace_wide = () Res<i32, WideError> {
+    raise(-1).try(TargetError.Replaced)
+}
+
+map_wide = () Res<i32, WideError> {
+    raise(-9).try((error) {
+        error.match({ Bad(code) => TargetError.Mapped(0 - code) })
+    })
+}
+
+main = (env: Env) Res<i32, TargetError> {
+    replace(2).match({
+        Ok(value) => println("replace ok {}", value),
+        Err(_)    => println("unexpected"),
+    });
+    replace(-3).match({
+        Ok(_)  => println("unexpected"),
+        Err(e) => e.match({
+            Replaced  => println("replaced"),
+            Mapped(_) => println("unexpected"),
+        }),
+    });
+    map(2).match({
+        Ok(value) => println("map ok {}", value),
+        Err(_)    => println("unexpected"),
+    });
+    map(-7).match({
+        Ok(_)  => println("unexpected"),
+        Err(e) => e.match({
+            Replaced     => println("unexpected"),
+            Mapped(code) => println("mapped {}", code),
+        }),
+    });
+    replace_wide().match({
+        Ok(_)  => println("unexpected"),
+        Err(e) => e.match({
+            TargetError(t) => t.match({
+                Replaced  => println("wide replaced"),
+                Mapped(_) => println("unexpected"),
+            }),
+            OtherError(_)  => println("unexpected"),
+        }),
+    });
+    map_wide().match({
+        Ok(_)  => println("unexpected"),
+        Err(e) => e.match({
+            TargetError(t) => t.match({
+                Replaced     => println("unexpected"),
+                Mapped(code) => println("wide mapped {}", code),
+            }),
+            OtherError(_)  => println("unexpected"),
+        }),
+    });
+    Ok(0);
+}

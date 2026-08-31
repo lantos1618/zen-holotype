@@ -35,9 +35,9 @@ to_usize = (self: u64) usize
 // that position, already encoded.
 SLOT_EMPTY: usize = 0
 
-// GROWTH. index starts at 8 slots, DOUBLES, grows before an entry
-// would fill more than three quarters — geometric like Vec, for
-// amortised O(1) and a bounded rehash count.
+// GROWTH. Up to six dense rows need no index. The seventh starts at 16
+// slots; from there the index doubles before an entry would fill more
+// than three quarters — geometric like Vec, for amortised O(1).
 //
 // The quarter left empty is not slack: a probe stops at the first
 // empty slot, so a full table would walk every slot on a miss — the
@@ -45,6 +45,7 @@ SLOT_EMPTY: usize = 0
 SLOTS_MIN: usize = 8
 LOAD_NUM: usize = 3
 LOAD_DEN: usize = 4
+SMALL_MAX: usize = 6
 
 // internal: no *, not visible outside std.collections
 Entry<K, V> = {
@@ -67,13 +68,12 @@ Map*<K: Eq + Hash, V> = {
     alloc: Alloc,
 
     set* = (self :: @Self, key: K, value: V) Res<(), AllocError> {
-        self.reserve().try();
-        h = key.hash(Hasher());
-        // reserve leaves a quarter empty, so this None is unreachable
-        // — written not assumed, since an unhandled full index is how
-        // a table overwrites a live row
-        s = self.settle(h, key).ok_or(AllocError.OutOfMemory).try();
-        self.place(s, Entry(hash: h, key: key, value: value));
+        h     = key.hash(Hasher());
+        entry = Entry(hash: h, key: key, value: value);
+        self.index_of(h, key).match({
+            Ok(i) => put(self.entries, i, entry),
+            None  => self.insert(entry),
+        })
     }
 
     get* = (self: @Self, key: K) Res<V> {
@@ -132,14 +132,35 @@ Map*<K: Eq + Hash, V> = {
         put(self.slots, s, self.entries.len);
     }
 
+    insert = (self :: @Self, entry: Entry<K, V>) Res<(), AllocError> {
+        self.reserve().try();
+        (self.slots.len == 0).match({
+            true  => self.entries.add(entry),
+            false => {
+                // reserve leaves a quarter empty, so this None is
+                // unreachable; handle it rather than overwrite a row
+                s = self.settle(entry.hash, entry.key)
+                    .ok_or(AllocError.OutOfMemory).try();
+                self.place(s, entry);
+            },
+        })
+    }
+
     // the position in `entries` of this key, or None
     index_of = (self: @Self, h: u64, key: K) Res<usize> {
-        s    = self.settle(h, key).try();
-        held = self.slots.get(s).try();
-        // an EMPTY settled slot means the path ended without the key
-        (held > SLOT_EMPTY).match({
-            true  => Ok(held - 1),
-            false => None,
+        (self.slots.len == 0).match({
+            true  => Range(0, self.entries.len).find((i) {
+                self.confirms(i, h, key)
+            }),
+            false => {
+                s    = self.settle(h, key).try();
+                held = self.slots.get(s).try();
+                // an EMPTY settled slot ends the path without the key
+                (held > SLOT_EMPTY).match({
+                    true  => Ok(held - 1),
+                    false => None,
+                })
+            },
         });
     }
 
@@ -184,12 +205,21 @@ Map*<K: Eq + Hash, V> = {
         });
     }
 
-    // grow BEFORE the entry that would fill the index: one more must
-    // still leave a quarter of the slots empty
+    // Small maps need no second allocation: scanning at most six dense
+    // entries is cheaper than owning an index. The seventh entry starts
+    // directly at 16 slots, skipping an 8-slot index already too small.
+    // Once indexed, grow before the new row exceeds the load limit.
     reserve = (self :: @Self) Res<(), AllocError> {
-        ((self.entries.len + 1) * LOAD_DEN > self.slots.len * LOAD_NUM).match({
-            true  => self.rehash(),
-            false => Ok(()),
+        want = self.entries.len + 1;
+        (self.slots.len == 0).match({
+            true  => (want > SMALL_MAX).match({
+                true  => self.rehash(),
+                false => Ok(()),
+            }),
+            false => (want * LOAD_DEN > self.slots.len * LOAD_NUM).match({
+                true  => self.rehash(),
+                false => Ok(()),
+            }),
         });
     }
 
@@ -198,7 +228,7 @@ Map*<K: Eq + Hash, V> = {
     // zero times and moves zero rows
     rehash = (self :: @Self) Res<(), AllocError> {
         n          = (self.slots.len == 0).match({
-            true  => SLOTS_MIN,
+            true  => SLOTS_MIN * 2,
             false => self.slots.len * 2,
         });
         self.slots = empty_slots(self.alloc, n).try();

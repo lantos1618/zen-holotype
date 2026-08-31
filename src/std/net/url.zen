@@ -1,0 +1,43 @@
+// Shared HTTP URL decomposition. It borrows slices from the input and
+// allocates nothing; protocols map Invalid into their own error set.
+
+str = std.text
+Res, ok_or = std.core
+
+UrlError* = | Invalid
+
+ParsedUrl* = {
+    scheme*: str,
+    host*:   str,
+    port*:   u16,
+    path*:   str,
+}
+
+parse_url* = (url: str) Res<ParsedUrl, UrlError> {
+    colon = url.find(':').ok_or(UrlError.Invalid).try();
+    (colon + 2 < url.len).ensure(UrlError.Invalid).try();
+    (url[colon + 1] == '/' && url[colon + 2] == '/')
+        .ensure(UrlError.Invalid).try();
+
+    scheme    = url.slice(0, colon);
+    rest      = url.slice(colon + 3, url.len);
+    slash     = rest.find('/').match({ Ok(i) => i, None => rest.len });
+    host_port = rest.slice(0, slash);
+    path      = (slash == rest.len).match({
+        true => "/", false => rest.slice(slash, rest.len)
+    });
+    secure    = scheme.eq_ignore_case("https");
+    (secure || scheme.eq_ignore_case("http")).ensure(UrlError.Invalid).try();
+
+    host ::= host_port;
+    port ::= secure.match({ true => 443, false => 80 });
+    host_port.find(':').match({
+        None      => (),
+        Ok(colon) => {
+            host = host_port.slice(0, colon);
+            port = host_port.slice(colon + 1, host_port.len)
+                .parse_u16().ok_or(UrlError.Invalid).try();
+        },
+    });
+    Ok(ParsedUrl(scheme: scheme, host: host, port: port, path: path))
+}

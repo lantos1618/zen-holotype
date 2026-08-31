@@ -22,7 +22,7 @@
 // `gen_c_own.zen` for the whole of it.
 
 Expr, ExprId, BlockId, Block, Stmt, Bind, Span = std.ast
-Decl, Lambda, Call, Arg, Access, Match = std.ast
+Decl, Lambda, Call, Arg, Access, Match, Try = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -482,7 +482,7 @@ expr_captures = (be :: CBackend, id: ExprId, out :: Vec<LocalSlot>)
         Binary(b)     => be.pair_captures(b.lhs, b.rhs, out),
         Access(a)     => be.expr_captures(a.base, out),
         Index(x)      => be.pair_captures(x.base, x.index, out),
-        Try(t)        => be.expr_captures(t.operand, out),
+        Try(t)        => be.try_captures(t, out),
         Consume(x)    => be.expr_captures(x.operand, out),
         Block(k)      => be.captures(k, out),
         Lambda(l)     => be.captures(l.body, out),
@@ -491,6 +491,15 @@ expr_captures = (be :: CBackend, id: ExprId, out :: Vec<LocalSlot>)
         Array(a)      => be.elem_captures(a.elems, out),
         FixedArray(a) => be.elem_captures(a.elems, out),
         _             => Ok(()),
+    })
+}
+
+try_captures = (be :: CBackend, t: Try, out :: Vec<LocalSlot>)
+               Res<(), AllocError> {
+    be.expr_captures(t.operand, out).try();
+    t.error.match({
+        Ok(e) => be.expr_captures(e, out),
+        None  => Ok(()),
     })
 }
 

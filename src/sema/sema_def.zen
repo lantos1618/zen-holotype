@@ -15,12 +15,8 @@
 // of starred bindings, so the chain is routinely two or three hops deep
 // and `std.core` reaches `std.core.result` through exactly this walk.
 //
-// A MODULE TABLE IS A `Vec`, NOT A `Map`, and that is measured rather
-// than lazy: `Map.get` in this stdlib is `index_of`, a `find` over every
-// entry — a linear scan already. A `Map<str, Vec<Def>>` would buy the
-// same complexity for a nested generic and a second allocation per name.
-// The memo tables that DO key on an id use `Map`, because there the key
-// is a `u32` and the point is identity, not lookup speed.
+// Module names are indexed once. Name queries stay over each module's
+// source-ordered definitions because an overload set preserves that order.
 //
 // OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
 // is "what a name means", and every query below is that one question
@@ -32,7 +28,7 @@
 Ast, Module, Decl, Ident, Span, QualifiedName = std.ast
 Import, Impl, Enum = std.ast
 Alloc, AllocError = std.mem
-Vec = std.collections
+Vec, Map = std.collections
 str, String = std.text
 Range = std.core
 DeclId, ImplId = sema.sema_id
@@ -107,6 +103,8 @@ PRELUDE_FILE*: str = "std.core.core"
 // `Res<_, AllocError>`.
 World* = {
     tables :: Vec<ModuleTable>,
+    exact :: Map<str, usize>,
+    folders :: Map<str, usize>,
     alloc: Alloc,
 
     count* = (self: @Self) usize { self.tables.len }
@@ -126,28 +124,9 @@ World* = {
     // `dotted` and its `_module_index` aliases. Tried second, so an
     // `a.b` that is a module of its own always wins over `a.b.b`.
     index_of* = (self: @Self, name: str) Res<usize> {
-        self.exact_index(name).match({
+        self.exact.get(name).match({
             Ok(i) => Ok(i),
-            None  => self.folder_index(name),
-        })
-    }
-
-    exact_index = (self: @Self, name: str) Res<usize> {
-        Range(0, self.tables.len).find((i) {
-            self.tables.get(i).match({
-                Ok(t) => t.name.eq(name),
-                None  => false,
-            })
-        })
-    }
-
-    // `std.core` -> `std.core.core`: the folder's name with its own
-    // last segment repeated, which is the file a folder keeps its root
-    // in and the one path `<folder>/<folder>.zen` builds.
-    folder_index = (self: @Self, name: str) Res<usize> {
-        self.alloc.String("{}.{}", name, last_segment(name)).match({
-            Err(_) => None,
-            Ok(s)  => self.exact_index(s.view()),
+            None  => self.folders.get(name),
         })
     }
 
@@ -178,6 +157,141 @@ World* = {
         (out.len == 0 && (self.binds_name(mi, name) == false))
             .then(() { self.prelude_defs(mi, name, out).try() });
         Ok(());
+    }
+
+    first_def_of* = (self: @Self, mi: usize, name: str)
+                    Res<Res<Def>, AllocError> {
+        self.first_own(mi, name).match({
+            Ok(d) => Ok(Ok(d)),
+            None  => self.first_after_own(mi, name),
+        })
+    }
+
+    first_after_own = (self: @Self, mi: usize, name: str)
+                      Res<Res<Def>, AllocError> {
+        imported = self.first_imported(mi, name).try();
+        imported.match({
+            Ok(d) => Ok(Ok(d)),
+            None  => (self.binds_name(mi, name)).match({
+                true  => Ok(None),
+                false => self.first_prelude_for(mi, name),
+            }),
+        })
+    }
+
+    first_own* = (self: @Self, mi: usize, name: str) Res<Def> {
+        self.tables.get(mi).match({
+            None  => None,
+            Ok(t) => Range(0, t.defs.len).find((i) {
+                t.defs.get(i).match({
+                    Ok(d) => d.name.eq(name),
+                    None  => false,
+                })
+            }).match({
+                Ok(i) => t.defs.get(i),
+                None  => None,
+            }),
+        })
+    }
+
+    first_prelude_of* = (self: @Self, name: str)
+                        Res<Res<Def>, AllocError> {
+        self.prelude_index().match({
+            None    => Ok(None),
+            Ok(pre) => self.first_exported(pre, name),
+        })
+    }
+
+    first_prelude_for = (self: @Self, mi: usize, name: str)
+                        Res<Res<Def>, AllocError> {
+        self.prelude_index().match({
+            None    => Ok(None),
+            Ok(pre) => (pre == mi).match({
+                true  => Ok(None),
+                false => self.first_exported(pre, name),
+            }),
+        })
+    }
+
+    first_imported = (self: @Self, mi: usize, name: str)
+                     Res<Res<Def>, AllocError> {
+        seen ::= self.alloc.Vec<usize>();
+        self.first_follow(mi, name, seen, false)
+    }
+
+    first_exported = (self: @Self, mi: usize, name: str)
+                     Res<Res<Def>, AllocError> {
+        seen ::= self.alloc.Vec<usize>();
+        self.first_exports(mi, name, seen)
+    }
+
+    first_exports = (self: @Self, mi: usize, name: str, seen :: Vec<usize>)
+                    Res<Res<Def>, AllocError> {
+        self.first_exported_own(mi, name).match({
+            Ok(d) => Ok(Ok(d)),
+            None  => self.first_follow(mi, name, seen, true),
+        })
+    }
+
+    first_exported_own = (self: @Self, mi: usize, name: str) Res<Def> {
+        self.tables.get(mi).match({
+            None  => None,
+            Ok(t) => Range(0, t.defs.len).find((i) {
+                t.defs.get(i).match({
+                    Ok(d) => d.exported && d.name.eq(name),
+                    None  => false,
+                })
+            }).match({
+                Ok(i) => t.defs.get(i),
+                None  => None,
+            }),
+        })
+    }
+
+    first_follow = (self: @Self, mi: usize, name: str,
+                    seen :: Vec<usize>, reexport: bool)
+                   Res<Res<Def>, AllocError> {
+        visited(seen, mi).match({
+            true  => Ok(None),
+            false => self.first_follow_fresh(mi, name, seen, reexport),
+        })
+    }
+
+    first_follow_fresh = (self: @Self, mi: usize, name: str,
+                          seen :: Vec<usize>, reexport: bool)
+                         Res<Res<Def>, AllocError> {
+        seen.add(mi).try();
+        self.tables.get(mi).match({
+            None  => Ok(None),
+            Ok(t) => self.first_follow_imports(t, name, seen, reexport),
+        })
+    }
+
+    first_follow_imports = (self: @Self, t: ModuleTable, name: str,
+                            seen :: Vec<usize>, reexport: bool)
+                           Res<Res<Def>, AllocError> {
+        hit: Res<Def> = None;
+        t.imports.loop((h, binding) {
+            crosses = binding.exported || (reexport == false);
+            open    = hit.match({ None => true, Ok(_) => false });
+            (open && crosses && binding.name.eq(name)).then(() {
+                self.index_of(binding.module).match({
+                    None      => (),
+                    Ok(other) => self.first_exports(
+                        other,
+                        name,
+                        seen
+                    ).try().match({
+                        None    => (),
+                        Ok(def) => {
+                            hit = Ok(def);
+                            h.break();
+                        },
+                    }),
+                });
+            });
+        });
+        Ok(hit)
     }
 
     // Whether `mi` wrote an import binding this name, starred or not: a
@@ -319,9 +433,10 @@ World* = {
     // asks of the next.
     exports_of* = (self: @Self, mi: usize, name: str, out :: Vec<Def>,
                    seen :: Vec<usize>) Res<(), AllocError> {
-        starred ::= self.alloc.Vec<Def>();
-        self.own_defs(mi, name, starred).try();
-        keep_exported(starred, out).try();
+        self.tables.get(mi).match({
+            Ok(t) => collect_exported(t.defs, name, out),
+            None  => Ok(()),
+        }).try();
         // a folder root declares nothing and re-exports everything, so
         // an empty answer here is the normal case and not a miss
         (out.len == 0).then(
@@ -566,7 +681,12 @@ World* = {
 // and every declaration in it, in source order, so the indices this
 // hands out are a pure function of the input.
 World* = (a: Alloc, tree: Ast) Res<World, AllocError> {
-    w ::= World(tables: a.Vec<ModuleTable>(), alloc: a);
+    w ::= World(
+        tables: a.Vec<ModuleTable>(),
+        exact: a.Map<str, usize>(),
+        folders: a.Map<str, usize>(),
+        alloc: a,
+    );
     Range(0, tree.module_count()).loop((h, i) {
         tree.module_at(i).match({
             Ok(m) => add_module(w, a, m, i),
@@ -591,7 +711,20 @@ add_module = (w :: World, a: Alloc, m: Module, i: usize) Res<(), AllocError> {
         }).try();
     });
     w.tables.add(t).try();
+    set_first(w.exact, m.name, i).try();
+    alias = module_display(m.name);
+    (alias.eq(m.name) == false).then(() {
+        set_first(w.folders, alias, i).try();
+    });
     Ok(());
+}
+
+set_first = (index :: Map<str, usize>, name: str, at: usize)
+            Res<(), AllocError> {
+    index.get(name).match({
+        Ok(_) => Ok(()),
+        None  => index.set(name, at),
+    })
 }
 
 // One declaration, filed under the name it binds.
@@ -780,13 +913,6 @@ collect_exported = (defs: Vec<Def>, name: str, out :: Vec<Def>)
                    Res<(), AllocError> {
     defs.loop((h, d) {
         (d.exported && d.name.eq(name)).then(() { out.add(d).try() });
-    });
-    Ok(());
-}
-
-keep_exported = (defs: Vec<Def>, out :: Vec<Def>) Res<(), AllocError> {
-    defs.loop((h, d) {
-        d.exported.then(() { out.add(d).try() });
     });
     Ok(());
 }
