@@ -54,23 +54,16 @@ ref_of_actor, lower_actor_send = gen.gen_c.gen_c_actor
 
 // the entry point
 
-// THE CALL SITE, as one value: `id`, `c` and `a` are produced together
-// by the parser, wanted by every lowering below and changed by none, so
-// three parameters on twenty signatures said what one says.
+// One parsed dot call. Its syntax stays fixed while receiver and member
+// resolution add facts around it.
 Dot = {
     id: ExprId,
     c: Call,
     a: Access,
 }
 
-// A LOOP HANDLE IS ASKED ABOUT FIRST, for the reason `gen_c_handle.zen`
-// gives: `h` is not a value, so `h.break(v)` is recognised at the NAME
-// and never resolved through a receiver's type.
-// The context's `want` rides along: the one caller that needs it is the
-// loop intrinsic, whose own answer is open until something decides `T`
-// (`call_fn`, gen_c_call.zen) — a destination already typed is such a
-// decision, and dropping it here is how an annotated binding compiled
-// against a payload nothing agreed to (#784).
+// Loop handles are recognised by name before receiver resolution because a
+// handle is control flow, not a value. `want` can settle the handle payload.
 lower_dot_call* = (
     be   :: CBackend,
     id   : ExprId,
@@ -80,11 +73,8 @@ lower_dot_call* = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    // THE FIELD WALK AND ITS PROJECTION ARE ASKED ABOUT FIRST
-    // (`gen_c_meta.zen`): sema marked both — `meta_walks` carries the
-    // names to unroll over, `meta_projs` marks a `recv.at(field)` —
-    // and neither has an ordinary dot-call reading to fall into. Every
-    // other call takes the path it always has.
+    // Meta walks and projections are sema-marked compile-time operations;
+    // neither may fall through to ordinary dot-call resolution.
     be.check.meta_walk_of(id).match({
         Ok(names) => be.lower_meta_walk(id, c, names, ctx, out),
         None      => be.check.meta_proj(id).match({
@@ -254,10 +244,8 @@ write_payload_arg = (be :: CBackend, c: Call, cs: Case, ctx: Ctx, out :: String)
     })
 }
 
-// `x.f(a)` — a value receiver
-// The receiver's OWN declaration first, then what an impl supplies,
-// then a free function reached through the dot. The first two are
-// overload sets, resolved on types and not arity alone.
+// `x.f(a)` — the receiver's declaration first, then an impl, then UFCS.
+// The first two are overload sets resolved on types and arity.
 
 lower_receiver_call = (
     be   :: CBackend,
@@ -434,8 +422,8 @@ keep_fits = (
     })
 }
 
-// `method_sig` and not the member's written types — the signature this
-// builds is the one `emit_method_call` mangles into the symbol.
+// Use the resolved method signature here because the same signature later
+// determines the emitted symbol.
 keep_if_fits = (
     be      :: CBackend,
     m       : Member,
@@ -447,10 +435,9 @@ keep_if_fits = (
     inst ::= be.recv_inst(s.ty).try();
     sig  ::= be.alloc.Vec<TyId>();
     be.method_sig(s.ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
-    be.check.recv_sig_fits(sig, actuals).try().match({
-        true  => kept.add(m),
-        false => Ok(()),
-    })
+    be.check.recv_sig_fits(sig, actuals).try()
+        .then(() { kept.add(m).try() });
+    Ok(())
 }
 
 call_actuals = (be :: CBackend, c: Call, ctx: Ctx, out :: Vec<Actual>)
@@ -571,6 +558,63 @@ keep_named = (st: Struct, name: str, out :: Vec<Member>) Res<(), AllocError> {
 }
 
 // a member the type declares
+
+// An ordinary method after candidate selection and generic inference have
+// settled one immutable set of facts. Backend services and the output buffer
+// remain borrowed by emission; they are not call-site state.
+MethodCallSite = {
+    dot: Dot,
+    site: Site,
+    function: Function,
+    inst: Inst,
+    sig: Vec<TyId>,
+    ctx: Ctx,
+
+    emit = (self: @Self, be :: CBackend, out :: String)
+           Res<(), AllocError> {
+        (be.inst_open(self.inst) || be.any_open(self.sig)).match({
+            true  => be.unsupported(
+                self.dot.id,
+                "a method on a receiver whose type arguments nothing settles",
+                out
+            ),
+            false => self.write(be, out),
+        })
+    }
+
+    // The receiver is argument zero; written arguments start at one and use
+    // the shared free-call packer so variadic methods have one packing rule.
+    write = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError> {
+        sym = be.member_symbol(
+            self.site.ty,
+            self.site,
+            self.dot.a.name.text,
+            self.sig,
+            self.inst
+        ).try();
+        args ::= be.alloc.String().try();
+        hold = be.holds(self.dot.c, 0, 1);
+        be.write_arg_at(
+            self.dot.a.base,
+            0,
+            hold,
+            self.function,
+            self.sig,
+            self.ctx,
+            args
+        ).try();
+        be.write_call_args(
+            self.dot.c,
+            1,
+            self.function,
+            self.sig,
+            self.ctx,
+            args
+        ).try();
+        out.fmt("{}({})", sym.view(), args.view())
+    }
+}
 
 // WHICH OF SEVEN KINDS A METHOD CALL IS, decided once. A variant carries
 // what deciding it computed, so that value is built in the branch that
@@ -695,46 +739,37 @@ lower_method = (
             out
         ),
         FatSlot      => be.lower_fat_call(d.id, d.c, d.a, s.ty, s, f, ctx, out),
-        Ordinary     => be.lower_ordinary_method(d, s, f, ctx, out),
+        Ordinary     => has_body(f).match({
+            false => be.unsupported(
+                d.id,
+                "a call to a member with no body",
+                out
+            ),
+            true  => be.settle_method_call(d, s, f, ctx).try().emit(be, out),
+        }),
     })
 }
 
-lower_ordinary_method = (
+// Instantiation and signature are born together once an ordinary method
+// candidate has won. Intrinsics settle through their specialised lowerers.
+settle_method_call = (
     be  :: CBackend,
     d   : Dot,
     s   : Site,
     f   : Function,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError> {
-    has_body(f).match({
-        false => be.unsupported(d.id, "a call to a member with no body", out),
-        true  => be.write_method_call(d, s, f, ctx, out),
-    })
-}
-
-// The call itself: the receiver as argument zero, then the written
-// arguments. The symbol is the header's — over the full signature, the
-// receiver included, because the receiver IS the first parameter.
-write_method_call = (
-    be  :: CBackend,
-    d   : Dot,
-    s   : Site,
-    f   : Function,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError> {
+    ctx : Ctx
+) Res<MethodCallSite, AllocError> {
     inst = be.method_inst(d, s, f, ctx).try();
     sig ::= be.alloc.Vec<TyId>();
     be.method_call_sig(s, f, inst, sig).try();
-    (be.inst_open(inst) || be.any_open(sig)).match({
-        true  => be.unsupported(
-            d.id,
-            "a method on a receiver whose type arguments nothing settles",
-            out
-        ),
-        false => be.emit_method_call(d, s, f, sig, inst, ctx, out),
-    })
+    Ok(MethodCallSite(
+        dot: d,
+        site: s,
+        function: f,
+        inst: inst,
+        sig: sig,
+        ctx: ctx
+    ))
 }
 
 // A generic member's written parameter types are meaningful only while its
@@ -813,35 +848,10 @@ method_inst = (be :: CBackend, d: Dot, s: Site, f: Function, ctx: Ctx)
     });
     f.tparams.loop((h, tp) {
         v = intern_var(be.check, tp.name.text, owner).try();
-        inst.bound(v).match({
-            true  => (),
-            false => { inst.bind(v, v).try(); },
-        });
+        (!inst.bound(v)).then(() { inst.bind(v, v).try() });
     });
     be.leave_tparams(mark).try();
     Ok(inst)
-}
-
-// THE RECEIVER IS ALREADY WRITTEN, so the rest is the free-function path
-// at offset one — `write_call_args` and not a second loop, because a
-// member may end in a `vararg<T>` and a pack built two ways is a pack
-// built one way wrongly.
-emit_method_call = (
-    be   :: CBackend,
-    d    : Dot,
-    s    : Site,
-    f    : Function,
-    sig  : Vec<TyId>,
-    inst : Inst,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError> {
-    sym = be.member_symbol(s.ty, s, d.a.name.text, sig, inst).try();
-    args ::= be.alloc.String().try();
-    hold = be.holds(d.c, 0, 1);
-    be.write_arg_at(d.a.base, 0, hold, f, sig, ctx, args).try();
-    be.write_call_args(d.c, 1, f, sig, ctx, args).try();
-    out.fmt("{}({})", sym.view(), args.view())
 }
 
 // THE SYMBOL AND THE QUEUE ENTRY ARE WRITTEN TOGETHER. Seven lowerings
