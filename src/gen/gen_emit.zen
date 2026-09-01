@@ -1,17 +1,6 @@
-// src/gen/gen_emit.zen
-// Where the bytes go, and the one rule that makes them reproducible.
-//
-// Determinism comes from routing output through `Emit` and ordering
-// collections with `order`, whose key is a pure function of each item.
-//
-// `Emit` deliberately does NOT wrap lines, know what C is, or place
-// braces — it's a buffer, a depth, and a newline rule; output shape
-// belongs to the backend.
-//
-// THE BUFFER IS READ BACK OFF THE `Emit`, never returned beside it — a
-// `String` owns a `Vec`, so a copy diverges from the original on first
-// growth (same reason `Parser` holds the `Ast` rather than handing it
-// back).
+// Deterministic output buffering and stable collection ordering.
+// `Emit` owns its `String`; callers read or transfer the completed buffer
+// From the emitter so later growth cannot diverge from a copied header.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -32,11 +21,9 @@ Emit* = {
     // stays blank — nothing on it, no indent.
     fresh :: bool,
 
-    // -----------------------------------------------------------------
     // writing
-    // -----------------------------------------------------------------
 
-    // A `\n` ENDS A LINE WHEREVER IT ARRIVES. `fresh` was set in `line`
+    // A `\n` ends a line wherever it arrives. `fresh` was set in `line`
     // alone, so a run carrying its own newline left everything after it
     // hard against the margin — nothing in the tree wrote one until a
     // format door began handing whole multi-line runs through here.
@@ -111,9 +98,7 @@ Emit* = {
         Ok(());
     }
 
-    // -----------------------------------------------------------------
     // depth
-    // -----------------------------------------------------------------
 
     indent* = (self :: @Self) () { self.depth = self.depth + 1; }
 
@@ -123,9 +108,7 @@ Emit* = {
         (self.depth > 0).then(() { self.depth = self.depth - 1; });
     }
 
-    // -----------------------------------------------------------------
     // reading back
-    // -----------------------------------------------------------------
 
     view* = (self: @Self) str { self.text.view() }
 
@@ -143,7 +126,7 @@ Emit* = (a: Alloc) Res<Emit, AllocError> {
     Ok(Emit(text: a.String().try(), depth: 0, fresh: true));
 }
 
-// THE ONE ORDERING PRIMITIVE. The positions of `keys`, rearranged so
+// The one ordering primitive. The positions of `keys`, rearranged so
 // reading them in the returned order reads `keys` in lexicographic byte
 // order.
 //
@@ -151,7 +134,7 @@ Emit* = (a: Alloc) Res<Emit, AllocError> {
 // keys belong to (a declaration, a type, a function) without this file
 // needing to know what that is.
 //
-// Bottom-up merge sort, STABLE: equal keys keep input order, so a duplicate
+// Bottom-up merge sort, stable: equal keys keep input order, so a duplicate
 // name (a backend should report that, not silently reorder it) doesn't move
 // under shuffled input. The compiler has thousands of long mangled keys;
 // insertion sort made ordering quadratic in both comparisons and bytes.

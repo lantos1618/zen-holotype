@@ -17,17 +17,9 @@ intern_named, write_variant_value = gen.gen_c.gen_c_read
 plain_ctx = gen.gen_c.gen_c_decl
 is_null_ptr = gen.gen_c.gen_c_ptr
 
-// A module-level constant, WRITTEN OUT AT EACH USE rather than emitted
-// as a C object. DESIGN.md's `name: T = value` is immutable with no
-// address a program can take, so a use IS its value — a `str` constant
-// emitted as a C object would need a static initialiser, a second
-// spelling of the same literal for no gain.
-// `I64_MIN` is `-9223372036854775807 - 1`, `UNRESOLVED` is
-// `TyId(index: 0)`: evaluating either twice can't be observed, costing
-// only a compound literal or arithmetic the C compiler folds before
-// emitting anything.
-// Anything else is reported: a constant whose value calls
-// something would run that call once per use and stop being a constant.
+// Module constants are inlined at each use and therefore admit only C constant
+// Expressions. Calls are rejected because they would run once per use rather
+// Than once for the declaration.
 lower_global_value* = (
     be   :: CBackend,
     id   : ExprId,
@@ -44,22 +36,22 @@ lower_global_value* = (
     })
 }
 
-// A BARE VARIANT: `Once` where a visible enum declares it.
-// The enum comes from the SAME walk sema used to type the node, asked
+// A bare variant: `Once` where a visible enum declares it.
+// The enum comes from the same walk sema used to type the node, asked
 // in the same order — a declaration first, the variant only when
 // nothing else answered. Two walks that disagreed would emit a tag from
 // one enum into a value of another, which C accepts and nothing catches.
-// A BARE NULLARY VARIANT NAME (`None` where a visible enum declares it)
-// IS TYPED AT THE DECLARATION'S OWN READING, and that is the one thing
+// A bare nullary variant name (`None` where a visible enum declares it)
+// Is typed at the declaration's own reading, and that is the one thing
 // this path cannot spell for a generic enum: `constructed` interns
 // `Opt<Var>`, whose C name mangles the free parameter. The context's
-// expectation is asked FIRST, through `nullary_ty`'s rule — an
+// expectation is asked first, through `nullary_ty`'s rule — an
 // annotation, a call argument's settled parameter, or a return position
 // all arrive here as `want` — and only a miss falls back to the bare
 // reading, whose layout is identical whenever it is spelled at all.
 // The type AST of `Opt<i32>` written anywhere in the program is asked
 // afresh (never memoized against another position's answer): its
-// arguments resolve in THIS module, so the id it interns is exactly the
+// arguments resolve in this module, so the id it interns is exactly the
 // one every other `Opt<i32>` in the program already carries.
 lower_variant_value = (
     be   :: CBackend,
@@ -134,7 +126,7 @@ lower_const_decl = (
     })
 }
 
-// The constant's DECLARED type wins over the context's: `USAGE: str` is
+// The constant's declared type wins over the context's: `USAGE: str` is
 // a `str` wherever it is read, and a literal takes its width from the
 // declaration that named it.
 lower_const_value* = (
@@ -161,10 +153,10 @@ lower_const_value* = (
 }
 
 // Written twice without anyone being able to tell: a literal can; so
-// can an operator over things that can, and so can a CONSTRUCTION of
+// can an operator over things that can, and so can a construction of
 // them — a compound literal names no function and reads nothing. A
 // call to anything else cannot.
-// A NAME is asked exactly what `lower_name` asks, in the order it asks
+// A name is asked exactly what `lower_name` asks, in the order it asks
 // it: a frame slot first (refused — the use site this default is
 // emitted at is not in that frame), then `None` (admitted — `Res` is
 // structural and its constructors answer to no declaration walk), then
@@ -226,8 +218,8 @@ variant_is_pure_name = (be :: CBackend, text: str, ctx: Ctx) bool {
     })
 }
 
-// A NULLARY VARIANT AND A CONSTANT ON A TYPE are both values of a
-// DECLARATION: neither names a function and neither reads a frame, so
+// A nullary variant and a constant on a type are both values of a
+// Declaration: neither names a function and neither reads a frame, so
 // both can be written wherever they are read. A field access cannot —
 // it reads a receiver.
 is_pure_access = (be :: CBackend, a: Access, ctx: Ctx) bool {
@@ -252,15 +244,15 @@ is_pure_pair = (be :: CBackend, b: Binary, ctx: Ctx) bool {
     be.is_pure_value(b.lhs, ctx) && be.is_pure_value(b.rhs, ctx)
 }
 
-// A call is pure only when its callee NAMES A TYPE: `TyId(index: 0)` is
+// A call is pure only when its callee names a type: `TyId(index: 0)` is
 // a compound literal, `first_of(v)` is a function this use site would
 // run. The question is asked of the declaration and not of the spelling,
 // which is the same question `gen_c_call.zen` asks to decide between the
 // two readings of one node.
 // `null_ptr<T>()` is the one call that is not one. It has no body —
-// `gen_c_ptr.zen` IS its body, and what that body writes is `((T *)NULL)`,
+// `gen_c_ptr.zen` is its body, and what that body writes is `((T *)NULL)`,
 // a constant naming nothing. So the licence is `is_null_ptr` asked of the
-// SAME resolved declaration `gen_c_call.call_or_floor` asks it of: one
+// Same resolved declaration `gen_c_call.call_or_floor` asks it of: one
 // spelling of "this call is a null pointer literal", so the gate and the
 // lowering cannot drift into disagreeing about which calls are constants.
 is_pure_call = (be :: CBackend, c: Call, ctx: Ctx) bool {

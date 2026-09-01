@@ -82,7 +82,7 @@ emit_prelude = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     emit_stderr(be, out).try();
     emit_helpers(be, out).try();
     be.emit_types(out).try();
-    // AFTER the types, because a capture record names them, and before
+    // After the types, because a capture record names them, and before
     // the prototypes, because a `Scope` parameter is a `zg_scope *`.
     // The spawned closure's heap record obeys the same ordering for the
     // same reason.
@@ -137,16 +137,9 @@ seed_function = (be :: CBackend, m: Module, mi: usize, d: Decl)
     })
 }
 
-// The declaration is found through `defs_of` rather than by index, so
-// the `Def` a seed carries is the same value a call site would resolve
-// to — one identity for a function, not two.
-// A GENERIC FUNCTION IS NOT A ROOT. There is no `Vec<T>` in C, only
-// `Vec<i32>` for each `T` a program asked for, and only a call site says
-// which — so a generic declaration is skipped here, reached through
-// `call_reachable`. A FUNCTION THAT TAKES A BODY IS NOT A ROOT EITHER,
-// for a stronger reason: a `(v: T) bool` parameter has no C spelling at
-// all, so such a declaration is never emitted — it exists only inlined
-// at its call sites, like the seven loop declarations.
+// Seeds concrete top-level functions using the same `Def` identity as call
+// Resolution. Generic functions are reached through concrete calls; functions
+// With body parameters are inlined and never emitted as C roots.
 seed_named = (be :: CBackend, m: Module, mi: usize, f: Function)
              Res<(), AllocError> {
     ((f.tparams.len > 0) || be.takes_closure(f)).match({
@@ -170,7 +163,7 @@ seed_def = (be :: CBackend, d: Def) Res<(), AllocError> {
 }
 
 // The symbol is built the same way a call site builds it, because the
-// queue's identity IS the symbol: a root queued under one name and
+// queue's identity is the symbol: a root queued under one name and
 // called under another would be emitted twice.
 seed_root = (be :: CBackend, d: Def) Res<(), AllocError> {
     inst ::= be.alloc.Inst();
@@ -185,14 +178,9 @@ is_function = (d: Def) bool {
     d.kind.match({ FunctionDef => true, _ => false })
 }
 
-// Lower everything queued, including whatever lowering queues, under
-// `MAX_FUNCTIONS`.
-// TWO QUEUES, INTERLEAVED. Lowering a free function discovers member
-// functions and vice versa, so draining one to exhaustion then the
-// other doesn't converge — each cursor advances one step per turn,
-// reaching a fixpoint in one bounded walk.
-// THE LOOP RUNS WHILE THERE IS WORK, not a fixed number of turns: a
-// fixed count cannot tell a finished walk from a cut-off one.
+// Interleaves free-function and member queues until both reach a fixpoint.
+// `MAX_FUNCTIONS` bounds the reachable set and turns exhaustion into a
+// Diagnostic rather than incomplete output.
 drain = (be :: CBackend) Res<(), AllocError> {
     fi ::= 0;
     mi ::= 0;
@@ -225,7 +213,7 @@ report_overrun = (be :: CBackend, fi: usize, mi: usize) Res<(), AllocError> {
     Ok(());
 }
 
-// Reported at the first thing that was NOT lowered, which is the only
+// Reported at the first thing that was not lowered, which is the only
 // position that tells a reader anything: it is where the walk stopped.
 overrun_at_fn = (be :: CBackend, fi: usize) Res<(), AllocError> {
     be.fn_queue.get(fi).match({
@@ -261,7 +249,7 @@ overrun_at_decl = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
     Ok(());
 }
 
-// THE INSTANTIATION IS ENTERED BEFORE THE BODY AND NOT INSIDE IT. Every
+// The instantiation is entered before the body and not inside it. Every
 // type the lowering reads is substituted through `be.inst`, so the one
 // place that knows which emission this is has to be the one that sets
 // it — and a queue entry carries the instantiation precisely so the
@@ -317,9 +305,9 @@ lower_function = (be :: CBackend, d: Def, x: Decl, f: Function)
     })
 }
 
-// THE TYPE PARAMETERS ARE IN SCOPE FOR THE WHOLE BODY, not just the
+// The type parameters are in scope for the whole body, not just the
 // signature: a local written `v: T` is a written type like any other,
-// and `T` means nothing unless bound. What each one BECAME is
+// and `T` means nothing unless bound. What each one became is
 // `be.inst`, set by the queue entry.
 lower_body = (be :: CBackend, d: Def, x: Decl, f: Function, blk: BlockId)
              Res<(), AllocError> {
@@ -334,7 +322,7 @@ lower_body = (be :: CBackend, d: Def, x: Decl, f: Function, blk: BlockId)
 // one member function
 // "A method is a UFCS function whose first parameter happens to be
 // named `self`" — so it goes through the same shape, with `@Self` bound
-// and a qualified name carrying the TYPE rather than the module.
+// and a qualified name carrying the type rather than the module.
 
 lower_method_ref = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
     decl_at(be.tree, m.decl).match({
@@ -344,8 +332,8 @@ lower_method_ref = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
 }
 
 // An enum carries members the way a struct does — `Color.impl(Coloured,
-// { rgb = (self: @Self) RGB<u8> { .. } })` is the encoding for values on
-// variants — but it DECLARES none of its own (a variant is not a
+// { rgb = (self: @Self) rgb<u8> { .. } })` is the encoding for values on
+// variants — but it declares none of its own (a variant is not a
 // member), so everything it answers is what an impl supplies.
 method_in_decl = (be :: CBackend, m: MethodRef, x: Decl)
                  Res<(), AllocError> {
@@ -356,10 +344,10 @@ method_in_decl = (be :: CBackend, m: MethodRef, x: Decl)
     })
 }
 
-// THE TYPE'S OWN MEMBERS FIRST, THEN WHAT AN IMPL SUPPLIES — same order
+// The type's own members first, then what an impl supplies — same order
 // `sema_supply.zen` states: a member the declaration writes is never
 // contested, one an impl supplies is reached only when the declaration
-// has none. AND AT THE SIGNATURE THE CALL SITE RESOLVED — same rule
+// has none. and at the signature the call site resolved — same rule
 // `pick_member` reads a receiver's members by: a name naming two members
 // names neither on its own.
 method_member = (be :: CBackend, m: MethodRef, s: Struct)
@@ -383,15 +371,8 @@ supplied_member = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
     })
 }
 
-// WHICH MEMBER THE CALL SITE MEANT, not merely one of that arity.
-// The entry carries the signature `sym_fn` mangled into the symbol this
-// body is about to be written under, so the member to lower is the one
-// whose declared parameters ARE that signature. Asking arity alone once
-// picked the first of `Display`'s two `toString`s for both queue
-// entries: the sink body was emitted twice, and every call to the
-// second ran the first.
-// ONE CANDIDATE IS NOT A CHOICE: with one member the arity test is the
-// whole answer, and `method_sig` resolves a whole signature.
+// Selects the member whose declared signature matches the queued symbol.
+// Arity is sufficient only when the name has one candidate.
 by_sig = (be :: CBackend, m: MethodRef, found: Vec<Member>)
          Res<Res<Member>, AllocError> {
     (found.len < 2).match({
@@ -400,7 +381,7 @@ by_sig = (be :: CBackend, m: MethodRef, found: Vec<Member>)
     })
 }
 
-// ARITY WHEN NO SIGNATURE MATCHES, because not every queue entry's
+// Arity when no signature matches, because not every queue entry's
 // signature was built by `method_sig`: `gen_c_fat.zen` erases a slot's
 // type parameters before mangling, so a thunk's entry names types this
 // comparison cannot reproduce. Falling back leaves every entry that
@@ -491,7 +472,7 @@ method_fn = (be :: CBackend, m: MethodRef, mem: Member, f: Function)
     })
 }
 
-// The TYPE's parameters and not the member's: "a method of `Vec<T>` is
+// The type's parameters and not the member's: "a method of `Vec<T>` is
 // generic in `T` whether or not it declares any of its own", so what a
 // member body names is the declaration it lives in.
 method_shape = (
@@ -505,7 +486,7 @@ method_shape = (
     self_ty = be.method_self(m).try();
     ctx     = be.check.self_ctx(mi, self_ty).try();
     mark    = be.enter_struct_tparams(m.decl).try();
-    // AND THE MEMBER'S OWN, under the member's qualified name: an impl
+    // And the member's own, under the member's qualified name: an impl
     // reached through a bound's erased slot is emitted at the byte type,
     // and `T` in its body means nothing unless the same owner that bound
     // it in the queue entry binds it again here.
@@ -531,11 +512,11 @@ method_tparam_owner = (be :: CBackend, f: Function, mi: usize, queued: str)
     })
 }
 
-// `@Self` FOR A GENERIC RECEIVER IS THE DECLARATION'S OWN TYPE; for
+// `@Self` for a generic receiver is the declaration's own type; for
 // every other receiver it's the one the call site reached. The
 // distinction is exactly where the memo can be wrong: a receiver with
 // no arguments has one emission and nothing to confuse, and `str`'s
-// receiver is a PRIMITIVE no declaration's name interns to.
+// receiver is a primitive no declaration's name interns to.
 method_self = (be :: CBackend, m: MethodRef) Res<TyId, AllocError> {
     be.generic_recv(m.self_ty).match({
         false => Ok(m.self_ty),
@@ -555,7 +536,7 @@ open_self = (be :: CBackend, m: MethodRef) Res<TyId, AllocError> {
 }
 
 // the shape both go through
-// `sctx` is the context a SIGNATURE is read in — a free function's has
+// `sctx` is the context a signature is read in — a free function's has
 // no `@Self` and a member's binds it to the receiver — and everything
 // else is the same question asked of the same nodes.
 
@@ -572,7 +553,7 @@ lower_shape = (
 )
               Res<(), AllocError> {
     ret = be.return_type(f, sctx).try();
-    // BEFORE THE BODY, because lowering a body keeps thunks as well as
+    // Before the body, because lowering a body keeps thunks as well as
     // the function itself and they belong in the same file.
     be.enter_unit(mi);
     be.reset_frame().try();
@@ -608,7 +589,7 @@ plain_ctx* = (be :: CBackend, mi: usize) Ctx {
     )
 }
 
-// The context a BODY is lowered in. `ret` and `has_ret` are what
+// The context a body is lowered in. `ret` and `has_ret` are what
 // `.try()` answers to: "the enclosing function must return a
 // compatible Res".
 body_ctx* = (be :: CBackend, mi: usize, ret: TyId) Ctx {
@@ -640,7 +621,7 @@ self_body_ctx* = (
     )
 }
 
-// Parameters are declared in the backend's scope AND in sema's, in
+// Parameters are declared in the backend's scope and in sema's, in
 // that order, because the C name a parameter gets is the one the
 // prototype has to print and the type it has is the one `type_of` must
 // answer with.
@@ -652,15 +633,9 @@ bind_params = (be :: CBackend, f: Function, ctx: Ctx, sig :: Vec<TyId>)
     Ok(());
 }
 
-// Through `param_type`, not `type_from_ast`: `self :: @Self` has a
-// written type meaning the receiver, and only the query that knows
-// `@Self` can answer it.
-// TWO TYPES, AND THE DIFFERENCE IS THE WHOLE POINT. The C declaration
-// takes THIS EMISSION's type, since that's what the prototype prints.
-// Sema takes the DECLARED one, still in its own parameters, because
-// sema's memo is keyed by node id alone — a concrete answer written
-// there is the answer every other instantiation reads back. `ty_of`
-// puts `be.inst` through every read instead.
+// `param_type` resolves `@Self`. C declarations use the current concrete
+// Instantiation, while sema keeps the generic declared type in its node memo;
+// Backend reads apply `be.inst` through `ty_of`.
 bind_param = (be :: CBackend, p: Param, ctx: Ctx, sig :: Vec<TyId>)
              Res<(), AllocError> {
     declared = be.check.param_type(p, ctx).try();
@@ -725,7 +700,7 @@ write_param_list = (
     Ok(());
 }
 
-// A `::` parameter is declared as a POINTER — see `ref_declarator`.
+// A `::` parameter is declared as a pointer — see `ref_declarator`.
 write_param = (
     be  :: CBackend,
     p   : Param,
@@ -742,7 +717,7 @@ write_param = (
     })
 }
 
-// A `::` parameter holds the ADDRESS of its argument, inlined or not:
+// A `::` parameter holds the address of its argument, inlined or not:
 // the body writes the caller's own bytes and every read of the name is
 // a dereference, which is what `LocalSlot.by_ref` records.
 ref_declarator* = (be :: CBackend, ty: TyId, name: str, out :: String)

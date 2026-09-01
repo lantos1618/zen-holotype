@@ -1,17 +1,6 @@
-// src/gen/gen_c/gen_c_handle.zen
-// `h.break(v)` and `h.next()` — leaving a loop, and leaving a pass.
-// Loop construction lives in gen_c_loop; this module owns exits from the
-// loop frame and their cleanup.
-// Both are `goto`s, neither is C's `break`/`continue`: the body is
-// inlined into whatever the lowering of a `.match` produced (an `if`
-// chain today), and a C `break` there would leave that construct rather
-// than the loop. A label cannot be captured that way, the whole reason
-// `LoopFrame` carries two of them.
-// A handle is not a value: `h` has no C storage and no type sema can
-// name — the binding holds the DEPTH of the loop it came from, so
-// `h.break` is recognised at the NAME rather than resolved through a
-// receiver's type. That's why `handle_depth` is asked before anything
-// else in `lower_dot_call`.
+// Lowers `h.break` and `h.next` as jumps to loop-frame labels, including the
+// Cleanup for every exited block. Handles have no C storage; their bindings
+// Record loop depth and are resolved by name.
 
 ExprId, Access, Call = std.ast
 AllocError = std.mem
@@ -86,7 +75,7 @@ handle_verb = (
 }
 
 // `h.next()` leaves this iteration's block. Every exit is a scope exit,
-// and a `goto` jumps OVER the closing brace the cleanup would run at —
+// and a `goto` jumps over the closing brace the cleanup would run at —
 // so this iteration's defers and drops run here instead. Nothing is
 // handed out of a pass that ends this way, so there is nothing to keep.
 leave_pass = (be :: CBackend, fr: LoopFrame, out :: String)
@@ -152,7 +141,7 @@ write_break = (
     be.jump_to("brk", fr.brk, out)
 }
 
-// A binding handed OUT of the loop by `h.break(x)` is not this pass's
+// A binding handed out of the loop by `h.break(x)` is not this pass's
 // to destroy. Only a bare name can be one — anything larger has been
 // copied into the result by now.
 break_keep = (be :: CBackend, c: Call) str {
@@ -225,7 +214,7 @@ break_range_fault = (be :: CBackend, value: ExprId, payload: TyId)
 
 // One sentence, both types named. `name_of` spells a type as the
 // program wrote it; the sentence goes out through `Unsupported` because
-// that fault IS "this position cannot hold what was handed to it" —
+// that fault is "this position cannot hold what was handed to it" —
 // there is deliberately no second copy of sema's TypeMismatch here.
 break_type_fault = (
     be      :: CBackend,
@@ -248,10 +237,6 @@ break_type_fault = (
 // the diagnostic still has to say something stood where the payload
 // belongs.
 name_of_or = (be :: CBackend, ty: TyId) Res<String, AllocError> {
-    // `None` was never an arm here — `name_of` is `Res<String,
-    // AllocError>`, whose cases are `Ok` and `Err` — but the arm bound
-    // silently anyway and answered `?` for every failure until issue 798
-    // made an ownerless upper-case arm name a diagnostic.
     be.check.types.name_of(ty).match({
         Ok(n) => Ok(n),
         _     => be.alloc.String("?"),
@@ -311,7 +296,7 @@ ok_payload = (be :: CBackend, ty: TyId) Res<TyId, AllocError> {
     })
 }
 
-// A jump is a STATEMENT and the call it came from is an expression, so
+// A jump is a statement and the call it came from is an expression, so
 // the `goto` goes to the buffer and a `0` goes where the value would
 // have been. Nothing reads that `0`: control has already left.
 jump_to = (be :: CBackend, stem: str, n: usize, out :: String)

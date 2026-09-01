@@ -1,12 +1,6 @@
-// src/gen/gen_c/gen_c_stdin.zen
-// The stdin capability in C — lowering and floor in one file, so the
-// call site and the C it names cannot drift apart.
-// `Stdin.read` is bodiless in `std/env/env.zen`: the authority itself,
-// reached only as `env.in`, and its floor is `fread` on `stdin`. That
-// floor is plain C99, unlike the filesystem one, so its `needs` flag is
-// its own and no POSIX header is emitted for it. The ZG_IO_* ordinals
-// never leave the generated C: the lowering maps them back to `IoError`
-// variants by NAME, so `std/core/io.zen` may reorder its set freely.
+// C lowering and runtime floor for the `env.in` stdin capability.
+// Runtime error ordinals are mapped to `IoError` by variant name, so the
+// Source declaration may reorder its variants safely.
 
 ExprId = std.ast
 Call = std.ast
@@ -24,9 +18,9 @@ close_else, close_brace, open_rc_test = gen.gen_c.gen_c_flow
 arg_text = gen.gen_c.gen_c_arg
 write_assign_ok, write_assign_err = gen.gen_c.gen_c_flow
 
-// THE FLOOR: `fread` on `stdin`, emitted only when a program reads one —
+// The floor: `fread` on `stdin`, emitted only when a program reads one —
 // an uncalled `static` is a warning.
-// It allocates NOTHING (`Stdin.read` has no `Alloc`): it fills spare
+// It allocates nothing (`Stdin.read` has no `Alloc`): it fills spare
 // capacity the caller reserved, asking for more than the room is `Full`,
 // and it reads exactly `n` bytes because C cannot ask a stream its
 // length. `fread` answers 0 for both end of input and error, so
@@ -71,12 +65,12 @@ write_stdin = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// THE LOWERING: `env.in.read(buf, n)`
-// THE BUFFER ARRIVES BY ADDRESS: the parameter is written `::` — the
+// The lowering: `env.in.read(buf, n)`
+// The buffer arrives by address: the parameter is written `::` — the
 // callee writes the caller's own bytes — and here the callee is the C
 // floor, so this file takes the address itself. It also writes a
 // `Vec`'s fields, the same licence `lower_alloc` takes with an
-// `ArenaState`: the bytes ENTER THE PROGRAM here, so the one place
+// `ArenaState`: the bytes enter the program here, so the one place
 // that knows the shape is the place they are born. `len` is the one
 // field written back; nothing is allocated, as the floor says why.
 
@@ -117,7 +111,7 @@ lower_stdin_read* = (
 }
 
 // `<ctype> *<name>;` — a temporary the ordinary declarer cannot write,
-// because a POINTER to a Zen type is not itself a Zen type here.
+// because a pointer to a Zen type is not itself a Zen type here.
 declare_pointer = (be :: CBackend, ty: TyId, name: str)
                   Res<(), AllocError> {
     cty ::= be.alloc.String().try();
@@ -172,7 +166,7 @@ arrow = (ptr: str, name: str, out :: String) Res<(), AllocError> {
 }
 
 // The two failures a byte-counted read has, and no more: the room was
-// too small, or the stream broke. END OF INPUT IS NEITHER — it is `Ok(0)`
+// too small, or the stream broke. end of input is neither — it is `Ok(0)`
 // — so there is no third arm and nothing here reports it. The names are
 // `IoError`'s and the test is on the runtime's own macro.
 io_chain = (be :: CBackend, ret: TyId, rc: str, dst: str)

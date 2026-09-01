@@ -1,20 +1,7 @@
-// src/gen/gen_c/gen_c_layout.zen
-// What a Zen type's C DEFINITION is: the bytes behind the spelling.
-// Three shapes, no more. A struct is its storage fields. An enum is a
-// tag and a union of the payloads that have one — omitted entirely
-// when no variant carries anything, so `Signal = Start | Stop` is one
-// `int32_t`, not a struct wrapping an empty union. A `Res` is the same
-// shape, built from two type ids rather than a declaration.
-// EVERY DEFINITION IS EMITTED ONCE, IN DETERMINISTIC ORDER: sorted by
-// mangled name (`tcode`, a pure function of the type). A definition is
-// preceded by the definitions it contains BY VALUE, since C needs a
-// complete type for a field and a forward `typedef` isn't one; a
-// pointer needs no complete type, so the dependency walk looks at
-// fields, not every mention.
-// A TAG IS A FUNCTION OF THE DECLARATION, NEVER AN INSTANTIATION:
-// `Res<i32, E>` and `Res<i32, F>` share `Ok`, so emitting the constant
-// per instance is a C redefinition. Two enumerators may share a value —
-// `Res<T>.None` and `Res<T, E>.Err` are both 1 — which is legal C.
+// Emits C storage definitions for structs, enums, and `Res`. Definitions are
+// Ordered by mangled name after their by-value dependencies. Enum tags belong
+// To declarations rather than generic instantiations, preventing duplicate C
+// Enumerators for different applications of the same type.
 
 Decl, Struct, Enum, Variant, Member = std.ast
 AllocError = std.mem
@@ -63,7 +50,7 @@ emit_typedef = (be :: CBackend, out :: Emit, i: usize) Res<(), AllocError> {
     Ok(());
 }
 
-// tags — a function of the DECLARATION, never an instantiation (see
+// tags — a function of the declaration, never an instantiation (see
 // file header)
 
 emit_tags = (be :: CBackend, out :: Emit, seq: Vec<usize>)
@@ -110,10 +97,10 @@ collect_tags_of = (be :: CBackend, id: TyId, seen :: Vec<String>)
     })
 }
 
-// A structural set numbers its members by the CANONICAL order — the
+// A structural set numbers its members by the canonical order — the
 // intern store's sort, a function of the set alone (`A | B` and `B | A`
 // are one type, one numbering). Not declaration order: a structural set
-// has none. A declared enum READ AS A UNION numbers the same way
+// has none. A declared enum read as a union numbers the same way
 // (`write_enum_tags` below), so `Error = AllocError | IoError` and the
 // structural `AllocError | IoError` agree tag for tag.
 collect_union_tags = (
@@ -182,20 +169,9 @@ collect_decl_tags = (
     })
 }
 
-// A UNION'S TAGS ARE NUMBERED BY A CANONICAL ORDER OVER ITS MEMBERS,
-// NEVER DECLARATION ORDER. DESIGN.md: "A union is its members. Order
-// and spelling are not part of its identity" — `WriteError = IoError |
-// AllocError` and `Error = AllocError | IoError` are ONE type, so
-// numbering by declaration would give one type two numberings, making
-// `.try()` between the two spellings a runtime re-tagging switch for a
-// difference the type system says doesn't exist.
-// The order isn't reinvented: `set_of` hands back the union interned
-// and sorted, the same order `collect_union_tags` writes — asking sema
-// keeps the two from drifting, and sema/gen_c drift is this compiler's
-// worst failure class.
-// A nominal enum is unaffected: `Signal = Start | Stop` names no types,
-// `set_of` returns the given id, `variant_ranks` adds nothing, and
-// declaration order stands.
+// Union tags follow canonical member type-code order, never declaration order.
+// Aliases with the same members therefore share tag numbers and payload names.
+// Nominal enums without member types retain declaration order.
 write_enum_tags = (
     be    :: CBackend,
     id    : TyId,
@@ -213,7 +189,7 @@ write_enum_tags = (
 }
 
 // All-or-nothing via the length check above: a rank is added only for
-// a variant that HAS one, so one miss leaves the vec short and the
+// a variant that has one, so one miss leaves the vec short and the
 // whole declaration falls back to declaration order (a mix would give
 // two variants one tag). The concrete miss: a variant whose own type is
 // a set — `Error = WriteError | FsError`, where `union_ty` flattened
@@ -232,7 +208,7 @@ variant_ranks = (
     })
 }
 
-// The members of the set this NAME stands for. Nothing when the name is
+// The members of the set this name stands for. Nothing when the name is
 // not a union, which is the nominal reading and the common one.
 canonical_members = (be :: CBackend, id: TyId) Res<Vec<TyId>> {
     be.types().at(be.check.set_of(id)).match({
@@ -405,7 +381,7 @@ by_value_deps = (be :: CBackend, id: TyId, deps :: Vec<TyId>)
     })
 }
 
-// Every member is held BY VALUE in the payload union, so every member
+// Every member is held by value in the payload union, so every member
 // needs a complete type above it.
 union_deps = (be :: CBackend, members: Vec<TyId>, deps :: Vec<TyId>)
              Res<(), AllocError> {
@@ -498,14 +474,8 @@ write_definition = (be :: CBackend, out :: Emit, name: str, id: TyId)
     })
 }
 
-// A STRUCTURAL SET GETS THE SHAPE A DECLARED ONE ALREADY HAS: a tag and
-// a union of the member types. DESIGN.md calls `A | B` "a structural
-// enum, not a new kind of type" — a second representation would invent
-// the kind the design says it isn't, and need a runtime conversion
-// between two spellings of one set where the language promises none.
-// A member carries a value OF the type it names: `WriteError.IoError`
-// records WHICH IoError, where tag-only would record only that there
-// was one.
+// A structural set uses the same tag-and-payload representation as a declared
+// Set. Payloads preserve the concrete member value, not only its tag.
 write_union_def = (be :: CBackend, out :: Emit, name: str, u: TyUnion)
                   Res<(), AllocError> {
     open_struct(out, name).try();
@@ -620,11 +590,8 @@ write_decl_def = (
     Ok(());
 }
 
-// A BOUND USED AS A VALUE IS A RECORD, and this is the fork DESIGN.md
-// draws: "a trait value is a receiver pointer plus one function pointer
-// per method, built on the stack, copied by value, no allocation". A
-// struct that declares behaviour and no storage has no fields to lay
-// out and is not empty either — it is the record.
+// A bound value is a stack-allocated record containing a receiver pointer and
+// One function pointer per method.
 write_struct_or_fat = (
     be   :: CBackend,
     out  :: Emit,
@@ -663,9 +630,9 @@ write_slot_line = (be :: CBackend, out :: Emit, s: Slot)
     out.say(line.view())
 }
 
-// A GENERIC STRUCT IS LAID OUT AT ITS ARGUMENTS: `Vec<u8>` holds a
+// A generic struct is laid out at its arguments: `Vec<u8>` holds a
 // `Ptr<u8>` — one C definition per instantiation is what
-// monomorphisation IS.
+// monomorphisation is.
 // Still opaque: a type whose arguments nothing settled — `Vec<T>`
 // itself, which no program has a value of and whose fields would spell
 // a `T` with no C type. An opaque body keeps the translation unit

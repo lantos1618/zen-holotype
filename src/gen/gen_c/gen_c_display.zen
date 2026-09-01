@@ -1,16 +1,6 @@
-// src/gen/gen_c/gen_c_display.zen
-// A value that prints itself, and the console it prints into.
-// `toString` writes into a SINK, not a `String`: a `String` needs an
-// `Alloc` to grow and `println` has no `Alloc`, so a buffer-returning
-// `toString` would either allocate behind the caller's back (law 1) or
-// make hello-world take an arena. A console is a sink already, so
-// printing never allocates.
-// The console is the one fat value the print path constructs — see
-// `gen_c_fat.zen` for the record layout and for the rule that only a
-// destination whose static type is the bound gets one; this file fills
-// the slots with `gen_c_runtime.zen`'s writes. The `toString` call
-// itself is resolved statically, like `==` through `Eq`. `zg_self` is
-// NULL: stdout is not a value the program owns.
+// Lowers display through a `Sink`, allowing console output without allocating
+// A temporary `String`. The console record has runtime write slots and a null
+// Receiver because stdout is not a Zen-owned value.
 
 Member, Function = std.ast
 AllocError = std.mem
@@ -131,7 +121,7 @@ with_console = (
 }
 
 // The result is discarded here: `zg_print_bytes` cannot fail and a
-// console cannot fail to grow, so `println`'s value is unit. A BUFFER
+// console cannot fail to grow, so `println`'s value is unit. A buffer
 // sink needs the answer instead — see `sink_display` below.
 emit_display = (
     be   :: CBackend,
@@ -147,7 +137,7 @@ emit_display = (
     Ok(true);
 }
 
-// `<value>.toString(<sink>)` as an EXPRESSION: `gen_c_sink.zen`'s `{}`
+// `<value>.toString(<sink>)` as an expression: `gen_c_sink.zen`'s `{}`
 // on a Display is this call with the door's buffer standing in for the
 // console. `false` when the type has no `toString`.
 sink_display* = (
@@ -226,7 +216,7 @@ display_call = (
     out.add(")")
 }
 
-// `out :: Sink` takes the record BY ADDRESS, and a C compound literal is
+// `out :: Sink` takes the record by address, and a C compound literal is
 // an lvalue holding the enclosing block's storage — so the console
 // outlives the call it is written into and nothing is copied.
 write_sink_arg = (f: Function, sink: str, out :: String)
@@ -237,10 +227,10 @@ write_sink_arg = (f: Function, sink: str, out :: String)
 }
 
 // the console, as a Sink
-// The slots are written HERE, not found: `Console.println` has no body
-// because the runtime IS the implementation. A capability's floor is
+// The slots are written here, not found: `Console.println` has no body
+// because the runtime is the implementation. A capability's floor is
 // the target language's; for C, that's `fwrite`.
-// THE STREAM IS PART OF THE RECORD. `println` hands toString a stdout
+// The stream is part of the record. `println` hands toString a stdout
 // console and `errorln` a stderr one; the two records share the same
 // type but fill their slots from different families, so a Display value
 // narrated to stderr never lands a byte on stdout.
@@ -358,7 +348,7 @@ console_body = (member: str, stream: ConsoleStream) str {
     })
 }
 
-// A BYTE HAS NO `str` TO POINT AT — `io.zen` says why the floor is two
+// A byte has no `str` to point at — `io.zen` says why the floor is two
 // calls wide — so it is written from the parameter's own storage. One
 // byte, no copy and no buffer.
 byte_body = (member: str, stream: ConsoleStream) str {
@@ -383,7 +373,7 @@ need_console_fn = (be :: CBackend, s: Slot, name: str, stream: ConsoleStream)
 // the honest answer is `Ok` — a tag, no `()` payload storage. Head and
 // body carry no punctuation of their own, the shape `emit_thunk`
 // explains.
-// THE STREAM IS A PARAMETER and the body is read through a selector on
+// The stream is a parameter and the body is read through a selector on
 // it: the stdout and stderr records differ only in which family fills
 // their slots, so the emission stays one function and the bodies stay
 // beside their own records.

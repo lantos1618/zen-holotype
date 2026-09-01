@@ -1,4 +1,4 @@
-// What a call through a DOT is.
+// What a call through a dot is.
 // gen_c_call owns f(a); this file owns variants, declared members, and exported
 // UFCS functions reached as x.f(a). Sema supplies type/member facts and this
 // lowering reuses the checker's signature-fit predicate when selecting a
@@ -93,14 +93,8 @@ lower_marked_dot = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    // A `@meta(..)` BASE IS THE EVALUATOR'S QUESTION BEFORE IT IS A CALL,
-    // and a CALL is all this function ever sees of it: the count's chain
-    // (`@meta(T).fields().len`) is decided one level up, at its `.len`
-    // (`sema_member.member_access` -> `sema_meta.meta_len_chain`), so
-    // whatever still arrives here — a bare `@meta(T).fields()`, or any
-    // other call written on a Meta — is the WALL, already refused at
-    // sema (`sema_call.member_call`). Nothing lowers: the pipeline stops
-    // before emit on a refused program.
+    // Valid meta calls are folded by sema. Any remaining meta receiver is an
+    // Invalid form and has no runtime lowering.
     be.tree.expr_at(a.base).kind.match({
         Meta(_) => Ok(()),
         _       => {
@@ -133,24 +127,10 @@ lower_resolved_dot = (
     })
 }
 
-// `Shape.Circle(c)` — a variant that carries a payload
-// "A nullary variant IS a value of the enum; one carrying a payload is
-// the function that builds one" — `Slot.Left(cell)` is an ordinary
-// call, not a second construction form, so this writes the compound
-// literal `gen_c_expr.zen` writes for a bare variant plus the payload.
-// THE LITERAL IS SPELLED AT WHAT SEMA ANSWERED FOR THE CALL, and the
-// base type is only where the variant NAME is read. Sema types the call
-// at the enum instantiated by its argument (`sema_apply
-// .variant_call_type`); spelling from the bare base instead wrote the
-// compound literal — and with it the local it lands in — as the
-// unsubstituted enum, beside a callee monomorphised at `Opt<i32>`: C
-// that names two different structs for one value. A miss in the memo,
-// or an answer that still mentions a free parameter, keeps the old
-// reading: the layout is identical either way, so nothing else moves.
-// A NAME THAT IS NOT A VARIANT IS `gen_c_assoc.zen`'S — a struct body
-// may bind a function too (`Duration.seconds(2)`) — and it answers
-// `false` when nothing of that name wants no receiver, so the refusal
-// is reported here: one diagnostic for one mistake.
+// Lowers a payload variant such as `Shape.Circle(c)` as a compound literal.
+// The call's settled type supplies generic arguments; the base declaration
+// Supplies the variant name. Non-variant associated calls are handled by
+// `gen_c_assoc`.
 
 lower_static_call = (
     be   :: CBackend,
@@ -174,7 +154,7 @@ lower_static_call = (
     })
 }
 
-// WHAT TO SPELL THE COMPOUND LITERAL AS: what the CALL's own node says
+// What to spell the compound literal as: what the call's own node says
 // sema answered — the enum at the instantiation its argument settled —
 // falling back to the bare `base` when the memo misses, when the answer
 // is not an application of a declaration, or when it still mentions a
@@ -316,7 +296,7 @@ supplied_or_ufcs = (
     })
 }
 
-// The member is there and resolved; whether it can be EMITTED is a
+// The member is there and resolved; whether it can be emitted is a
 // second question, and a generic enum target is the one target the mono
 // path cannot carry — see `gen_c_impl.generic_enum`.
 supplied_or_refused = (
@@ -338,7 +318,7 @@ supplied_or_refused = (
     })
 }
 
-// A DECLARED MEMBER THAT IS NOT A FUNCTION IS A FIELD HOLDING ONE, what
+// A declared member that is not a function is a field holding one, what
 // a fat value's slot is. Calling through it is the general form — lower
 // the callee, then call it — and is not written yet.
 declared_member = (
@@ -388,9 +368,9 @@ pick_member = (be :: CBackend, c: Call, s: Site, found: Vec<Member>, ctx: Ctx)
     })
 }
 
-// THE FIRST THAT FITS, and arity when none does — both halves the
+// The first that fits, and arity when none does — both halves the
 // checker's. `pick_fitting` takes the first because "two members
-// accepting the same call is an error AT THE DECLARATION"; `by_arity_ret`
+// accepting the same call is an error at the declaration"; `by_arity_ret`
 // falls back where `fits` cannot answer, on an unsettled receiver or a
 // variadic signature.
 member_that_fits = (
@@ -447,9 +427,9 @@ call_actuals = (be :: CBackend, c: Call, ctx: Ctx, out :: Vec<Actual>)
     Ok(());
 }
 
-// WHAT RESOLUTION READS OFF AN ARGUMENT, and no more. A lambda has no
+// What resolution reads off an argument, and no more. A lambda has no
 // type until a signature settles it — "a closure's type is its full
-// signature" — so a candidate is tested against its PARAMETER COUNT,
+// signature" — so a candidate is tested against its parameter count,
 // the part a call site sees without inferring anything.
 arg_actual = (be :: CBackend, x: Arg, ctx: Ctx) Res<Actual, AllocError> {
     unknown = be.check.types.unknown().try();
@@ -471,16 +451,8 @@ arg_actual = (be :: CBackend, x: Arg, ctx: Ctx) Res<Actual, AllocError> {
     })
 }
 
-// the declaring site
-// Which declaration owns a type's members, and under what qualified
-// name a symbol built from it is written. A `Prim` has one too — "a
-// prelude declaration of a primitive's name IS that primitive" — so
-// `str`'s members are `std.text.text_str.str`'s and the receiver stays
-// the primitive.
-// THE RECEIVER'S TYPE IS A FIELD OF THE SITE, not a parameter beside it.
-// `site_of` is handed that type to find the site at all, so a caller
-// threading both carried one value twice — and a pair threaded apart is
-// a pair that can be threaded wrong.
+// Identifies the declaration and qualified symbol path that own a receiver's
+// Members. Primitive receivers use their prelude declaration as the site.
 
 Site* = {
     ty*: TyId,
@@ -617,7 +589,7 @@ MethodCallSite = {
     }
 }
 
-// WHICH OF SEVEN KINDS A METHOD CALL IS, decided once. A variant carries
+// Which of seven kinds a method call is, decided once. A variant carries
 // what deciding it computed, so that value is built in the branch that
 // needs it and threaded nowhere else.
 MethodKind = Inlined
@@ -628,29 +600,9 @@ MethodKind = Inlined
     | FatSlot
     | Ordinary
 
-// THE PRECEDENCE, WHICH IS LOAD-BEARING: a kind is asked about only
-// once every kind above it has said no. It was six lowerings deep and
-// readable only by following the chain; here it is a list.
-//   Inlined     A MEMBER HANDED A LAMBDA IS INLINED, exactly as a free
-//               function is: a `(b: u8) bool` parameter has no C
-//               spelling and nothing to pass.
-//   PtrMember   `gen_c_ptr.zen` writes the run primitives.
-//   Capability  a member whose floor is the target language's;
-//               `gen_c_cap.zen` claims it before anything below can
-//               refuse it as bodyless.
-//   FloorDoor   the same door on the receiver's OWN byte writer,
-//               `be.fmt("{};\n", name)`, answering what that writer
-//               answers. A free `fmt(out :: Sink, ..)` reaches the sink
-//               lowering through ordinary UFCS; only a receiver's declared
-//               `fmt` arrives here. `gen_c_floor.zen` holds the contract.
-//   FatSlot     A MEMBER WITH NO BODY ON A VALUE WHOSE STATIC TYPE IS
-//               THE BOUND is the one call not resolvable statically:
-//               which function runs is decided by the impl behind the
-//               receiver, a `void *` in a record. `gen_c_fat.zen`.
-//   Ordinary    EVERYTHING ELSE STILL RESOLVES STATICALLY and builds no
-//               record: a bodied member is the bound's own default
-//               specialised here, a concrete receiver the impl's
-//               function monomorphised.
+// Classifies method calls in precedence order: inlined bodies, pointer
+// Primitives, capability floors, format doors, dynamic bound slots, then
+// Ordinary statically resolved members.
 method_kind = (be :: CBackend, d: Dot, s: Site, f: Function, ctx: Ctx)
               Res<MethodKind, AllocError> {
     name                   = d.a.name.text;
@@ -855,7 +807,7 @@ method_inst = (be :: CBackend, d: Dot, s: Site, f: Function, ctx: Ctx)
     Ok(inst)
 }
 
-// THE SYMBOL AND THE QUEUE ENTRY ARE WRITTEN TOGETHER. Seven lowerings
+// The symbol and the queue entry are written together. Seven lowerings
 // reach a member by name, and an entry built differently from the symbol
 // written beside it is a call to a function nothing defines.
 member_symbol* = (
@@ -887,9 +839,9 @@ member_symbol* = (
 // The declared parameter types of a member function, resolved in the
 // module that declares it with `@Self` bound to the receiver, so
 // `(self: @Self, i: usize)` reads as a function of the receiver rather
-// than a name nothing binds. WITH THE TYPE'S PARAMETERS BOUND, then
+// than a name nothing binds. with the type's parameters bound, then
 // substituted: `Vec<T>.add` declares `(self :: @Self, v: T)` and `T`
-// BECOMES the receiver's own argument in that position.
+// Becomes the receiver's own argument in that position.
 method_sig* = (
     be   :: CBackend,
     rty  : TyId,
@@ -939,15 +891,8 @@ add_method_param = (
     sig.add(be.sub_with(declared, inst).try())
 }
 
-// a member call the source did not write
-// "`==` through `Eq` is the only operator that dispatches to an impl."
-// `a == b` on a type C cannot compare is a call to that type's `eq`,
-// taking THIS file's path rather than a second one: the symbol,
-// instantiation and queue entry are the ones `a.eq(b)` would produce,
-// so the two cannot disagree about which function they mean.
-// STATICALLY RESOLVED, like every impl-supplied member here — operand
-// types are known, so no function-pointer record takes part. A type
-// impl'ing no `Eq` is the caller's refusal to report.
+// Lowers compiler-generated member calls through the same static resolution
+// Path as source calls. Equality uses this path to dispatch through `Eq`.
 
 lower_eq_call* = (
     be  :: CBackend,
@@ -1020,7 +965,7 @@ emit_eq = (
 // method." The receiver becomes argument zero and there is no second
 // mechanism — which is why `lower_plain_call` takes a receiver at all.
 
-// `alloc.create<T>()` IS ASKED ABOUT FIRST, and only here at the end:
+// `alloc.create<T>()` is asked about first, and only here at the end:
 // declared on `Alloc` with no body and supplied by no impl, so by the
 // time this runs both the receiver's declaration and its impls have
 // been searched and missed — which lets a type declaring a `create` of
@@ -1063,7 +1008,7 @@ ufcs_or_impl = (
     })
 }
 
-// An impl member that IS another function — `widen_u32 = to_u32` in
+// An impl member that is another function — `widen_u32 = to_u32` in
 // std.core.num — lowers as the very call the alias names, so the two
 // spellings cannot disagree. Anything else meets the refusal.
 impl_alias = (
@@ -1096,7 +1041,7 @@ impl_alias = (
     });
 }
 
-// AT THIS CALL'S ARITY, and not the name alone: `Box` declares
+// At this call's arity, and not the name alone: `Box` declares
 // `grow(self)` while a free `grow(b, by)` travels with the type, and
 // matching on the name refused `b.grow(10)` as unimplemented.
 reaches = (be :: CBackend, rty: TyId, name: str, arity: usize)

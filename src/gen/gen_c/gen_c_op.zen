@@ -1,6 +1,5 @@
-// src/gen/gen_c/gen_c_op.zen
 // Type-directed operator lowering. Integer arithmetic uses checked
-// helpers because signed C overflow is UB; wrapping operators stay
+// helpers because signed C overflow is ub; wrapping operators stay
 // plain C. Equality may statically dispatch through `Eq`. Short-circuit
 // operands keep spills inside their branch so evaluation stays lazy.
 
@@ -56,10 +55,10 @@ wrap_unary = (
     Ok(());
 }
 
-// WHAT A `-` WRITES, in the order `negate_kind` asks for them.
+// What a `-` writes, in the order `negate_kind` asks for them.
 NegKind = Float | Folded(str) | Checked
 
-// Negation on an integer is `0 - x`, and it TRAPS: `-i32.MIN` is an
+// Negation on an integer is `0 - x`, and it traps: `-i32.MIN` is an
 // overflow like any other. On a float it is the C operator, which
 // cannot overflow.
 lower_negate = (
@@ -93,7 +92,7 @@ negate_kind = (be: CBackend, u: Unary, prim: str) NegKind {
     })
 }
 
-// The digits of an integer literal, when the operand IS one. Written
+// The digits of an integer literal, when the operand is one. Written
 // without unwrapping parens: `-(1)` is a negation of a parenthesised
 // expression and stays one, which keeps the fold to the form the
 // grammar makes a constant.
@@ -108,8 +107,8 @@ literal_digits = (l: Literal) Res<str> {
     l.kind.match({ Int => Ok(l.text), _ => None })
 }
 
-// THERE IS NO NEGATIVE LITERAL IN C. `-<digits>` is unary minus over a
-// POSITIVE constant, and `i64.MIN`'s magnitude is `i64.MAX + 1` — no
+// There is no negative literal in C. `-<digits>` is unary minus over a
+// Positive constant, and `i64.MIN`'s magnitude is `i64.MAX + 1` — no
 // signed C type holds it, so the negation would happen unsigned and
 // reach `int64_t` by conversion. <stdint.h> spells INT64_MIN as a
 // difference for the same reason, and so does this. Every narrower
@@ -168,10 +167,10 @@ lower_binary* = (
     })
 }
 
-// WHAT AN OPERATOR EVALUATES TO, when sema could not say.
+// What an operator evaluates to, when sema could not say.
 // `&&`, `||`, and every comparison are `bool` whatever they were given;
 // everything else is the operands' own type (`operand_type` below).
-// What reaches here is an operand sema could NOT type — e.g. a field
+// What reaches here is an operand sema could not type — e.g. a field
 // hanging off `alloc.create<T>()`, whose chain is the backend's answer,
 // not the memo's. `println("{}", a.n + b.n)` is where it shows: no
 // expectation to fall back on, so an unanswered `+` is a refusal by
@@ -249,7 +248,7 @@ arith_kind = (prim: str) OpKind {
 //     zg_tN = <a>;
 //     if (zg_tN) { <b's statements> zg_tN = <b>; }
 // and `a || b` the same with the test negated. The left is lowered
-// FIRST and into a temporary of its own, because `<a>` may itself have
+// First and into a temporary of its own, because `<a>` may itself have
 // statements and they must land ahead of the branch rather than inside
 // it.
 write_short_circuit = (
@@ -271,7 +270,7 @@ write_short_circuit = (
     out.add(tmp.view())
 }
 
-// `&&` runs its right operand when the left HELD; `||` when it did not.
+// `&&` runs its right operand when the left held; `||` when it did not.
 open_guard = (be :: CBackend, op: BinOp, tmp: str) Res<(), AllocError> {
     be.fmt("if ({}{tmp}) {\n", negation(op)).try();
     be.indent();
@@ -309,9 +308,8 @@ usable = (be :: CBackend, id: TyId) bool {
     })
 }
 
-// `!=` is the same call negated. There is no `ne` to write — DESIGN.md
-// names `Eq` and one method — so the negation is the operator's and
-// never the impl's.
+// `!=` negates the result of `Eq.eq`; implementations provide no separate
+// Inequality member.
 lower_eq_op = (
     be      :: CBackend,
     b       : Binary,
@@ -522,7 +520,7 @@ spine_lhs = (
     down  ::= id;
     hint  ::= want;
     going ::= true;
-    // The rung that does NOT fold is pushed too, and is what leaves
+    // The rung that does not fold is pushed too, and is what leaves
     // `down` and `hint` naming the base and the type it is wanted at.
     going.loop((h) {
         rung = be.rung_at(down, ctx, hint).try();
@@ -579,7 +577,7 @@ operand_rung = (be :: CBackend, id: ExprId, b: Binary, ctx: Ctx, want: TyId)
     })
 }
 
-// What `lower_binary` will lower this level's OPERANDS at: `bool` for
+// What `lower_binary` will lower this level's operands at: `bool` for
 // the two short-circuiting operators, which take their type from the
 // operator and not from what they were given; a comparison's operands'
 // own reading (`comparison_level` below); everything else the operands'
@@ -600,21 +598,21 @@ plain_level = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
     })
 }
 
-// A COMPARISON'S OPERANDS LOWER AT THEIR OWN TYPES, never at `want`.
-// Up here a comparison's `want` is the bool the comparison PRODUCES --
+// A comparison's operands lower at their own types, never at `want`.
+// Up here a comparison's `want` is the bool the comparison produces --
 // the print sugar's argument type, a binding's slot type -- and an
 // operand handed it declared its spill temporary at `bool`. So
 // `true.match({ true => 300, false => 102 }) > 299` stored both arms
 // into one byte, read 1 back, and answered 1 > 299 (issue #724): exit
 // 0, a plausible false, every branch such a comparison picks chosen
-// wrongly. Arithmetic never met this because its result type IS its
+// wrongly. Arithmetic never met this because its result type is its
 // operand type; a comparison's is not.
 // Sema has already agreed the whole program by the time gen_c runs, so
 // an operand's own reading wins -- taken verbatim, literal spelling
 // included: two unsuffixed literals are `int` (`c_prim` spells it
 // int64_t), the same answer `sema_join.arith_type` gives the pair when
 // nothing settles it, and C's usual conversions settle the rest at the
-// operator itself. Only when SEMA ANSWERED NOTHING (`Unknown`, a call
+// operator itself. Only when sema answered nothing (`Unknown`, a call
 // result through std) is `want` still the hint -- and a spilling form
 // standing there is refused as unsettled rather than lowered at it, so
 // this fallback cannot pick a wrong width silently.
@@ -710,7 +708,7 @@ close_op = (
 }
 
 // `"file", line, col` — the three arguments every trap takes. The
-// position is the OPERATOR token, and the file is relative to the
+// position is the operator token, and the file is relative to the
 // compilation root, which is what makes two checkouts of one tree emit
 // the same bytes.
 write_position* = (be :: CBackend, file: str, span: Span, out :: String)

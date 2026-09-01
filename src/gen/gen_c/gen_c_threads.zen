@@ -1,12 +1,6 @@
-// src/gen/gen_c/gen_c_threads.zen
-// C floor and lowering for Threads.sleep, Threads.spawn, and Thread.join.
-// `Threads.sleep` is bodiless in `std/env/env.zen`: the authority
-// itself, reached only as `env.threads`, and its floor is `nanosleep`.
-// `Threads.spawn` and `Thread.join` are the same kind of member, and
-// their floor is pthreads.
-// POSIX helpers are emitted only when used. Sleep retries EINTR and returns
-// unit; spawn and join report ThreadError. Capability receivers carry
-// authority only and emit no C value.
+// C lowering for `Threads.sleep`, `Threads.spawn`, and `Thread.join`.
+// POSIX helpers are emitted on demand. Capability receivers carry authority
+// Only and produce no C value.
 
 ExprId, Call, Arg, Lambda, Access, TypeId = std.ast
 AllocError = std.mem
@@ -32,9 +26,7 @@ Dest, block = gen.gen_c.gen_c_stmt
 write_assign_ok, write_assign_err = gen.gen_c.gen_c_flow
 settled = gen.gen_c.gen_c_settle
 
-// ---------------------------------------------------------------------
 // the floors
-// ---------------------------------------------------------------------
 
 // `nanosleep`, emitted only for a program that sleeps.
 emit_threads* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
@@ -101,9 +93,7 @@ emit_spawn_envs* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// ---------------------------------------------------------------------
 // Lowering `env.threads.sleep(ms)`.
-// ---------------------------------------------------------------------
 // Sleep answers unit, but the lowering stands where an expression was,
 // so the statement is written and `0` is left where the value goes —
 // unit is zero-width in C and nothing reads it.
@@ -124,14 +114,12 @@ lower_sleep* = (
     out.add("0")
 }
 
-// ---------------------------------------------------------------------
 // Lowering `env.threads.spawn(a, body)`.
-// ---------------------------------------------------------------------
 // A spawned closure becomes a capture record, lifted body, and pthread
 // trampoline. Unlike a deferred closure:
-//   - the record is MALLOC'D, not block storage — the thread outlives
+//   - the record is malloc'D, not block storage — the thread outlives
 //     the frame, so the frame cannot hold the captures;
-//   - the body ANSWERS, so the lifted function returns the body's
+//   - the body answers, so the lifted function returns the body's
 //     `Res<T, ThreadError>` and the trampoline heap-copies that answer
 //     for `pthread_join` to hand back — which is also why `Thread`
 //     carries only `id`: the result travels through the join, not
@@ -159,8 +147,8 @@ lower_spawn* = (
     })
 }
 
-// `defer`'s rule, said about `spawn`: the closure is written AT THE CALL
-// SITE. A function-typed name handed over would have no captures to copy
+// `defer`'s rule, said about `spawn`: the closure is written at the call
+// Site. A function-typed name handed over would have no captures to copy
 // and no body to lift, so it is refused by name rather than lowered into
 // something that looks like it worked.
 spawn_arg = (
@@ -271,7 +259,7 @@ write_spawn_env = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
     })
 }
 
-// The record's field names ARE the frame's own mangled local names — the
+// The record's field names are the frame's own mangled local names — the
 // same rule `gen_c_scope.zen`'s capture record obeys, because the
 // prologue's remap depends on it.
 write_spawn_struct = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
@@ -297,7 +285,7 @@ write_spawn_field = (be :: CBackend, s: LocalSlot, text :: String)
     text.add(";\n")
 }
 
-// A `::` binding IS an address everywhere else, so what the record
+// A `::` binding is an address everywhere else, so what the record
 // copies is the address — one word, and the thread reads the storage it
 // points at. Whether that storage outlives the frame is the program's
 // question, not this floor's: the own pass has already refused the
@@ -310,9 +298,9 @@ spawn_ref_field = (be :: CBackend, ty: TyId, name: str, text :: String)
 
 // the lifted body
 
-// THE BODY FUNCTION. `static <Res<T, ThreadError>> zg_sbN(zg_spN *)` —
+// The body function. `static <Res<T, ThreadError>> zg_sbN(zg_spN *)` —
 // an ordinary function at the body's own type, so a `.try()` inside the
-// body returns out of IT (the ctx below is the body's own, with `ret`
+// body returns out of it (the ctx below is the body's own, with `ret`
 // rebound; the caller's would return the caller's type from this
 // function, which is C that does not compile).
 write_spawn_fn = (
@@ -373,7 +361,7 @@ spawn_fn_params = (be :: CBackend, n: usize, out :: String)
 }
 
 // The prologue is the whole of the remapping, as it is for `defer`:
-// every captured name is re-declared here, with the SAME C name it had
+// every captured name is re-declared here, with the same C name it had
 // in the enclosing frame, initialised from the record. The body below it
 // then lowers unchanged.
 write_spawn_prologue = (be :: CBackend, n: usize, caps: Vec<LocalSlot>)
@@ -405,7 +393,7 @@ write_spawn_unpack_one = (be :: CBackend, s: LocalSlot)
 // the trampoline
 
 // `void *zg_sN(void *)`, the function `pthread_create` is handed. The
-// body's answer is COPIED onto the heap and the copy is the thread's
+// body's answer is copied onto the heap and the copy is the thread's
 // return value: `pthread_join` hands back exactly that pointer, which is
 // how a `Res<T, ThreadError>` crosses the thread boundary without
 // `Thread` carrying a type. A NULL answer is malloc's failure, which
@@ -513,7 +501,7 @@ malloc_spawn_env = (
     Ok(())
 }
 
-// THE CAPTURES ARE COPIED HERE, AT SPAWN — the rule
+// The captures are copied here, at spawn — the rule
 // `defer_captures_at_registration` pins, and the reason is the same:
 // the values are read where they are still alive.
 copy_spawn_capture = (be :: CBackend, s: LocalSlot, cell: str)
@@ -547,12 +535,10 @@ write_spawn_thread = (be :: CBackend, ret: TyId, tty: TyId, pt: str, dst: str)
     be.write_assign_ok(ret, value.view(), dst)
 }
 
-// ---------------------------------------------------------------------
 // Lowering `t.join()`.
-// ---------------------------------------------------------------------
 // `pthread_join` on the handle's `id`, and the thread's answer read out
-// of the pointer it returns — the copy the trampoline made. THE TYPE IS
-// THE CALL SITE'S: `Thread` carries no type across the boundary, so the
+// of the pointer it returns — the copy the trampoline made. the type is
+// The call site's: `Thread` carries no type across the boundary, so the
 // payload is read at the type this call is expected at, and a join
 // annotated with the wrong type is a wrong read, exactly as a cast is.
 // Where nothing settles that type — neither the expectation the call

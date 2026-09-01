@@ -1,14 +1,6 @@
-// src/gen/gen_c/gen_c_frame.zen
-// The rows one FRAME is made of.
-// `gen_c_state.zen` holds the backend; these are the five kinds of row
-// its per-function stacks are made of, kept here because they change
-// together. A frame is what the backend knows while inside a body:
-// bound names, written closures, open loops, open blocks, and what each
-// block must destroy on the way out. All five are forgotten between
-// functions; nothing else in `CBackend` is.
-// The queues are NOT a frame and stay with the backend: `MethodRef` is
-// a worklist entry that outlives every frame — the identity of a
-// function still to be lowered — so it is not one of these.
+// Per-function lowering state: bindings, closures, loops, blocks, and owned
+// Values. These rows are discarded between functions; backend work queues are
+// Deliberately not part of the frame.
 
 str = std.text
 Vec = std.collections
@@ -24,10 +16,10 @@ LocalSlot* = {
     index*: usize,
     ty*: TyId,
 
-    // The C name is a POINTER to the value rather than the value.
-    // "`::` means the method writes the receiver's OWN BYTES", so a
+    // The C name is a pointer to the value rather than the value.
+    // "`::` means the method writes the receiver's own bytes", so a
     // `::` parameter is passed by address and every read of it goes
-    // through a dereference. A `::=` LOCAL is not by reference: it is
+    // through a dereference. A `::=` local is not by reference: it is
     // the frame's own storage and there is nothing to alias.
     by_ref*: bool,
 
@@ -62,13 +54,13 @@ LocalSlot* = {
 // A lambda bound to a function-typed parameter, and everything the
 // inliner needs to put its body back where it was written.
 // The frame is the half that is easy to get wrong: a closure's free
-// names mean what they meant WHERE IT WAS WRITTEN, and inlining puts
+// names mean what they meant where it was written, and inlining puts
 // the body inside the callee's frame — where `find`'s own
 // `range.loop((h, value) { .. })` would otherwise silently capture a
 // caller's `h` with a different value, rather than erroring. So `home`
 // and `check_home` are the two scope stacks' depths when the lambda
 // was written, and the inliner rewinds both.
-// `ctx` is the CALLER's, which is what makes a `.try()` inside a lambda
+// `ctx` is the caller's, which is what makes a `.try()` inside a lambda
 // body return from the real function it was written in, not the callee
 // it was inlined into.
 Closure* = {
@@ -80,8 +72,8 @@ Closure* = {
     ret*: TyId,
     home*: usize,
     check_home*: usize,
-    // Where the writing function's own frame begins — NOT `home`:
-    // `home` is where the lambda was written, this is where the BODY it
+    // Where the writing function's own frame begins — not `home`:
+    // `home` is where the lambda was written, this is where the body it
     // was written in started. The difference (every binding the writing
     // function had made by then) decides whether `x = ..` inside the
     // lambda declares an `x` or stores into the one already there.
@@ -111,7 +103,7 @@ LoopFrame* = {
 }
 
 // One binding a block must destroy when it leaves.
-// The C name is REBUILT from these two rather than stored: a `str`
+// The C name is rebuilt from these two rather than stored: a `str`
 // field would own its bytes, and `sym_local` already turns the pair
 // back into the same name `declare_local` wrote.
 // `live` is the number of the `int` saying whether this binding still

@@ -65,13 +65,9 @@ spills* = (be: CBackend, id: ExprId) bool {
     })
 }
 
-// Whether a spill hides ANYWHERE inside, which is the half of the
-// header's distinction short-circuiting needs: a `.try()` three parens
-// deep still lowers to an `if`/`return` that `expr` hoists out to where
-// the operand was written.
-// An unrecognised form answers YES: wrong in this direction is a
-// refusal with a position, wrong the other way is a program computing
-// the wrong thing — the one outcome a backend may not produce.
+// Reports spills in the entire subtree so short-circuit operands keep nested
+// `.try()` and other effects under their guard. Unknown forms conservatively
+// Report a spill.
 spills_anywhere* = (be: CBackend, id: ExprId) bool {
     be.tree.expr_at(id).kind.match({
         Literal(_) => false,
@@ -89,7 +85,7 @@ spills_anywhere* = (be: CBackend, id: ExprId) bool {
     })
 }
 
-// A call whose arguments will be HELD spills too, and this is where
+// A call whose arguments will be held spills too, and this is where
 // short-circuiting learns it: `gen_c_op.zen` refuses to lower a `&&`
 // whose right operand spills as C's own `&&`, and a held argument is a
 // statement written in front of the operand exactly as a hoisted
@@ -124,7 +120,7 @@ holds* = (be: CBackend, c: Call, pos: usize, first: usize) bool {
 
 // The arity question and the something-runs question together: the only
 // shape where C's freedom over the order is observable. A receiver is a
-// position too, so something running in IT — `make(d.tick()).show(d.n,
+// position too, so something running in it — `make(d.tick()).show(d.n,
 // d.n)` — answers the second question as surely as an argument does.
 reorderable* = (be: CBackend, c: Call, first: usize) bool {
     ((c.args.len + first) > 1) && (
@@ -133,8 +129,8 @@ reorderable* = (be: CBackend, c: Call, first: usize) bool {
 }
 
 // `first` is not known until a call has been lowered, so the question a
-// `&&` asks about its right operand is asked at the arity the CALLEE'S
-// SPELLING implies: a call written through a `.` may put a receiver in
+// `&&` asks about its right operand is asked at the arity the callee's
+// Spelling implies: a call written through a `.` may put a receiver in
 // front of its arguments. Wrong this way costs a lowering shape; wrong
 // the other way is a `&&` that stopped short-circuiting.
 may_reorder* = (be: CBackend, c: Call) bool {
@@ -145,7 +141,7 @@ recv_slots = (be: CBackend, c: Call) usize {
     call_callee(be.tree, c).kind.match({ Access(_) => 1, _ => 0 })
 }
 
-// Whether something runs in the RECEIVER — the base a `.`-callee stands
+// Whether something runs in the receiver — the base a `.`-callee stands
 // on. A callee that is not an `Access` has no receiver, which is the
 // answer `recv_slots` already gives.
 recv_calls = (be: CBackend, c: Call) bool {
@@ -155,9 +151,9 @@ recv_calls = (be: CBackend, c: Call) bool {
     })
 }
 
-// Whether something runs at ONE position: the receiver's base for the
+// Whether something runs at one position: the receiver's base for the
 // positions `first` took, the argument's own value past them. A miss
-// answers YES, for `has_call`'s reason: wrong in this direction costs a
+// answers yes, for `has_call`'s reason: wrong in this direction costs a
 // temporary, wrong the other way lets C order effects.
 position_calls = (be: CBackend, c: Call, pos: usize, first: usize) bool {
     (pos < first).match({
@@ -246,13 +242,9 @@ has_call_push2 = (
     Ok(())
 }
 
-// WHAT A TEMPORARY CAN HOLD WITHOUT CHANGING WHAT IT MEANS. A `Consume`
-// moves and a `Lambda` is inlined into the call it was written for, so
-// neither survives being copied into one; an array literal's storage is
-// the frame's. A `Literal` runs nothing, so its value cannot move under
-// it. A `Name` also runs nothing, but its VALUE is observable: a call to
-// its right can change it through a `::` parameter, so it is held
-// whenever one is still to run — the caller of `holdable` asks that.
+// Whether a value may be copied to a temporary without changing move,
+// Lifetime, or inline-lambda semantics. Names are held when a later call could
+// Mutate their storage through a `::` parameter.
 holdable* = (be: CBackend, id: ExprId) bool {
     be.tree.expr_at(id).kind.match({
         Call(_)   => true,
@@ -266,21 +258,9 @@ holdable* = (be: CBackend, id: ExprId) bool {
     })
 }
 
-// The type of an expression.
-// Sema first, always: where `type_of` answers, that answer is used.
-// Where its answer is `Unknown`, the callee's own declaration is read
-// instead — the same "degrade to your own resolution when absent" the
-// bootstrapper's backend documents.
-// The instantiation is applied HERE, once, so no lowering rule has to
-// remember to: sema types a generic body once, generically, so every
-// answer inside `Vec<T>.add` is about `T` until this substitutes the
-// real `i32`.
-// `@scope` is answered here, not by sema, for the same reason a local's
-// type is: the FRAME is the authority. A block is not a value sema
-// mints, but a `Scope` can be written as a parameter of the ordinary
-// named type `std/core/scope.zen` declares — matched here. Without
-// this, `inner = @scope;` binds a local of unknown type and every later
-// use of `inner` is a name with no receiver.
+// Returns sema's type after applying the current instantiation. If sema has no
+// Answer, call declarations provide a fallback. Frame state is authoritative
+// For locals and `@scope`.
 ty_of* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
          Res<TyId, AllocError> {
     be.ty_source(id, ctx, want).try().match({
@@ -292,7 +272,7 @@ ty_of* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
     })
 }
 
-// WHICH AUTHORITY ANSWERED, and the order they are asked in. The order
+// Which authority answered, and the order they are asked in. The order
 // is the whole rule, and this list is the only statement of it: the
 // frame before the backend, the backend before sema, sema before the
 // context's expectation. Each variant carries the type its own source
@@ -343,7 +323,7 @@ field_slot = (be :: CBackend, a: Access) Res<Res<TyId>, AllocError> {
     })
 }
 
-// A member that is not STORAGE has no answer here — a nullary variant,
+// A member that is not storage has no answer here — a nullary variant,
 // a constant on a type and a method are three other readings of the
 // same node, and `gen_c_read.zen` owns all three.
 known_field = (be :: CBackend, base: TyId, name: str)
@@ -406,7 +386,7 @@ ptr_dot_answer = (be :: CBackend, c: Call, a: Access, ctx: Ctx, want: TyId)
 
 // An open type is not an answer. Sema types `range.loop(body)` as
 // `Res<T>` because only the closure could settle `T`, and a closure
-// infers FROM a signature rather than into one — so the answer carries
+// infers from a signature rather than into one — so the answer carries
 // a `Var`, and a binding declared at it would be the one C type every
 // loop shares. Only the loop family hits this; `gen_c_loop.zen` owns
 // the rule. Everything else is handed back untouched.
@@ -418,18 +398,9 @@ settled_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId, want: TyId)
     })
 }
 
-// A type spelled with a hole in it is not an answer either. `open`
-// asks about a free PARAMETER, but a BOUND's member leaves something
-// else: `Alloc.realloc<T>` has no body to check, so
-// `self.alloc.realloc(self.data, cap)` comes back `Res<Ptr<?>,
-// AllocError>` with the element neither substituted nor a `Var` — a
-// type `open` calls settled and `gen_name.tcode` writes `q` for. A
-// `.try()` on it declared its temporary at that spelling instead of the
-// real `Res<Ptr<u8>, AllocError>`.
-// Straight to the call, not through the loop/inline steps above: those
-// settle a `Var` the closure or callee's instantiation was going to
-// bind, and there's no parameter here for either. What's missing is
-// what the ARGUMENTS say — `settle_call`'s question.
+// A partially unknown call result is settled from its arguments before it is
+// Used to declare C storage. This also handles holes that are not represented
+// As ordinary free type parameters.
 opaque_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
                 Res<TyId, AllocError> {
     unsettled(be, got).match({
@@ -440,7 +411,7 @@ opaque_answer = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
 
 // The loop family first, then a callee that is inlined. Both answer the
 // same shape of question — "sema left this open because only the closure
-// could settle it" — and both have to answer BEFORE anything is written,
+// could settle it" — and both have to answer before anything is written,
 // because a match scrutinee's temporary is declared at this answer and
 // filled by the lowering's.
 settle_open = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId, want: TyId)
@@ -452,7 +423,7 @@ settle_open = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId, want: TyId)
     })
 }
 
-// AND THEN THE CALL ITSELF. Sema types a generic call as its DECLARED
+// And then the call itself. Sema types a generic call as its declared
 // return, and inside a member body nothing recorded an instantiation to
 // close it — so a `.try()` on one lands in a temporary declared at
 // `Res<q, E>`, which is a C struct with an unresolved element. The
@@ -466,7 +437,7 @@ settle_inlined = (be :: CBackend, id: ExprId, ctx: Ctx, got: TyId)
     })
 }
 
-// A `.try()` ON ONE IS THE SAME QUESTION ONE NODE UP. Sema types
+// A `.try()` on one is the same question one node up. Sema types
 // `f().try()` as the callee's declared `Ok` payload, which is the
 // parameter itself when the callee is generic — so the operand is
 // re-asked and the payload read off the answer.
@@ -599,21 +570,9 @@ res_type_of* = (be :: CBackend, id: ExprId, ctx: Ctx)
     be.ty_of(id, ctx, unknown)
 }
 
-// The header's spill rule, applied: `spill_temp` makes the temporary
-// here, declared and filled BEFORE the statement being built — the same
-// place every other spill lands, since `deliver_simple` builds the
-// expression text first and writes the line after.
-// Four conversions funnel through this same three-door path (argument,
-// field, return), each owned by whichever file builds it:
-//   - a concrete value reaching a BOUND-typed slot becomes a fat value
-//     (e.g. an `Arena` passed where `Alloc` is wanted), built here once
-//     rather than at each of the three sites;
-//   - a member reaching a structural-set slot, and a `Res` reaching a
-//     wider-error `Res`, are the same shape — "the destination admits
-//     more than the source has" — owned by `gen_c_widen.zen`;
-//   - a bare success reaching a `Res` slot is the fourth: `7;` closing
-//     `Res<i32, E>` is `Ok(7)` written shorter, built by
-//     `gen_c_hoist.zen`.
+// Delivers a value through the conversions shared by arguments, fields, and
+// Returns: result hoisting, error-set widening, and construction of a bound
+// Value. Required temporaries are emitted before the consuming statement.
 expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, out :: String)
         Res<(), AllocError> {
     be.door_of(id, ctx, want).try().match({
@@ -625,24 +584,9 @@ expr* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, out :: String)
     })
 }
 
-// WHICH DOOR A VALUE GOES THROUGH on its way to `want`, and the order
-// they are asked in. The order is load-bearing and this list is the
-// only statement of it.
-// A `Res` reaching a `Res` with a wider error set arrives through the
-// same three doors as the other conversions. It is asked AFTER hoist
-// (the two are disjoint by construction — a lifted value is not already
-// a `Res`) and BEFORE the fat reading (a `Res` is never a bound).
-// `gen_c_widen.zen` says what is claimed.
+// Conversion precedence is hoist, widen, then bound-value construction.
 Door = Set | Hoist | Widen | Fat | Plain
 
-// Early return over a pyramid: the one-shot loop is a breakable block,
-// each `.then` a guard naming the one door it opens, the last break the
-// answer when every guard says no — `request_of` in `lsp_reply` and
-// `method_kind` in `gen_c_member` are the same idiom, and the typed
-// binding is load-bearing for the reason its own comment states.
-// The guards are still asked in the order the comment above states,
-// first yes wins, and a guard's `.try()` returns from THIS function
-// exactly as it did inside the old nesting.
 door_of = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
           Res<Door, AllocError> {
     found: Res<Door> = loop<Door>((h) {
@@ -658,7 +602,7 @@ door_of = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
     }))
 }
 
-// The value AT ITS OWN TYPE, then the record over its address: lowering
+// The value at its own type, then the record over its address: lowering
 // it at the bound would ask for a record that does not exist yet.
 fat_expr = (
     be   :: CBackend,
@@ -706,7 +650,7 @@ spill_temp = (
     })
 }
 
-// WHAT A SPILLED VALUE CAN BE HELD IN, in the order asked: a type
+// What a spilled value can be held in, in the order asked: a type
 // nothing settled has no C declaration to make, and a `()` has no
 // storage to make one in.
 Spill = Unsettled | Effect | Valued
@@ -721,13 +665,9 @@ spill_of = (be :: CBackend, ty: TyId) Spill {
     })
 }
 
-// NOTHING WROTE AN EXPECTATION, so the node answers for itself. A
-// lowering that reaches for a `want` it was never handed — `to<U>` on a
-// member call, a null pointer, a loop's value — asks here rather than
-// each inventing the unknown to ask `ty_of` with. The answer may still
-// be the unknown, and that is information: a discarded loop still HAS a
-// value, and `open_result` reads this to decide whether to give it
-// storage.
+// Returns the node's own type when no contextual expectation exists. An
+// Unknown result is preserved because callers use it to decide whether the
+// Expression needs storage.
 want_of* = (be :: CBackend, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
     be.ty_of(id, ctx, unknown)
@@ -738,7 +678,7 @@ settled_place = (be :: CBackend, ty: TyId) bool {
 }
 
 // A spilling form whose value is `()` has nothing to hold — a void
-// temporary is illegal C — and it still RUNS: dropping it would drop
+// temporary is illegal C — and it still runs: dropping it would drop
 // the `.try()` that was the reason for writing it. `0` goes where the
 // expression went, which is what the four report helpers write.
 spill_effect = (
@@ -768,15 +708,9 @@ spill_valued = (
     out.add(tmp.view())
 }
 
-// A value put in a temporary WHERE IT WAS WRITTEN, so that what it does
-// happens there rather than wherever the C compiler decides to evaluate
-// the argument it was written into. The `argument order` block above owns
-// which arguments ask for this; the temporary itself is `spill_valued`'s,
-// the same one a `.try()` in argument position already gets.
-// A type nothing settles, and a `()` with no storage to hold it, stay
-// inline: a refusal here would turn a working program into an error over
-// an order nothing could observe. That is the one direction this degrades
-// in and it is the safe one.
+// Holds a value at its source position to preserve Zen evaluation order.
+// Unknown and unit values remain inline because neither provides usable C
+// storage.
 value_held* = (
     be   :: CBackend,
     id   : ExprId,
@@ -833,9 +767,9 @@ write_expr = (
     Ok(());
 }
 
-// `consume x` MOVES, and in C the bytes are simply copied — so the
+// `consume x` moves, and in C the bytes are simply copied — so the
 // value here is the operand's own spelling and nothing more. What the
-// move costs is the RECORD of it: this frame handed the value away, so
+// move costs is the record of it: this frame handed the value away, so
 // it must not also destroy it, and the binding's live flag is cleared
 // on the way past. Without that both the source and the destination
 // drop, which is the double free `consume` exists to prevent.
@@ -871,7 +805,7 @@ lower_paren = (
     Ok(());
 }
 
-// A literal is its RAW source slice, and that is deliberate: Zen's
+// A literal is its raw source slice, and that is deliberate: Zen's
 // escape set is `\n \t \r \0 \\ \' \"` and every one of those is a C
 // escape with the same meaning, so the bytes travel unchanged. A `str`
 // is not a `char *` though — it is a pointer and a length — so a
@@ -887,12 +821,9 @@ lower_literal = (l: Literal, out :: String) Res<(), AllocError> {
     Ok(());
 }
 
-// A DECIMAL CONSTANT WITH NO SUFFIX HAS NO UNSIGNED TYPE IN C99, so one
-// too large for `long long` is a constraint violation — `cc` picks
-// `unsigned long long` anyway and warns, on every build, about `u64.MAX`
-// and about FNV's basis. The suffix is read off the DIGITS and not off
-// the settled type: a value `i64` can hold needs nothing, and one it
-// cannot hold cannot be signed.
+// C99 requires an unsigned suffix for decimal constants larger than `i64.MAX`.
+// The digits decide the suffix because their representable range is independent
+// Of the expression's settled type.
 lower_int_literal = (text: str, out :: String) Res<(), AllocError> {
     out.add(text).try();
     over_i64(text).match({
@@ -934,21 +865,9 @@ decoded_len* = (raw: str) usize {
     n
 }
 
-// `@meta(self: @Self).name` FOLDED AT SEMA: `meta_str` remembers the
-// comptime string the access stands for, and the residue is an
-// ordinary literal — the backend lowers it having learned nothing new
-// (docs/design_meta.md, M3). The memo is keyed on the WRITTEN TYPE
-// (`sema_check.zen`), which this access's own `Meta` node carries, so
-// the read-back needs no state of its own; a miss is every other dot,
-// which takes the field path.
-// THE COUNT'S CHAIN IS THE SIBLING, ONE SHAPE UP: `.len` over
-// `fields()` over a Meta. It is recognised BY THE SHAPE — the same
-// strict predicate sema answered with (`is_count_chain`, read through
-// the checker; no second definition of the chain) — and only then is
-// the count read off the memo. The shape test comes FIRST because both
-// memos key on the same written type: a bare `.name` on a type whose
-// count was folded elsewhere in the program must stay a string, which
-// a memo-ordering rule would get wrong.
+// Reads sema's folded `@meta(T).name` and `@meta(T).fields().len` values.
+// The count chain is identified by shape before consulting its memo because
+// Name and count facts share the same written-type key.
 lower_meta_or_access* = (
     be   :: CBackend,
     id   : ExprId,
@@ -967,8 +886,8 @@ lower_meta_or_access* = (
             None  => be.lower_access(id, a, ctx, want, out),
         }),
         _       => be.check.meta_name_read(id).match({
-            // A WALK'S `field.name` (`gen_c_meta.zen`): sema marked the
-            // access, and the text it folds to is the CURRENT pass's
+            // A walk's `field.name` (`gen_c_meta.zen`): sema marked the
+            // access, and the text it folds to is the current pass's
             // field — `walk_now`'s top — lowered as the ordinary string
             // literal `lower_meta_name` already writes. A marker with no
             // walk being lowered is a bug in the dispatch, said so.
@@ -989,7 +908,7 @@ lower_meta_or_access* = (
 }
 
 // The chain's root, from its top access: the Call's callee carries the
-// Meta with the WRITTEN TYPE EXPRESSION — the memo key. `is_count_chain`
+// Meta with the written type expression — the memo key. `is_count_chain`
 // has vouched for every level between; this reads the one row.
 chain_count = (be :: CBackend, call_id: ExprId, out :: String)
               Res<(), AllocError> {
@@ -1008,7 +927,7 @@ chain_count = (be :: CBackend, call_id: ExprId, out :: String)
     })
 }
 
-// The folded text is a type's DECLARED NAME — identifier bytes, which
+// The folded text is a type's declared name — identifier bytes, which
 // no escaping can be needed for: Zen's escapes are introduced by `\`
 // and a literal is closed by `"`, and neither byte can appear in an
 // identifier the lexer accepted. So the quotes are added around the
@@ -1021,7 +940,7 @@ lower_meta_name = (text: str, out :: String) Res<(), AllocError> {
     Ok(());
 }
 
-// THE COUNT'S SIBLING (`sema_check.meta_count_of`): `.fields().len`
+// The count's sibling (`sema_check.meta_count_of`): `.fields().len`
 // folded to the type's field count at sema time, and this lowers it as
 // an ordinary integer literal — the backend learned nothing new about
 // fields, it writes a number.
@@ -1078,20 +997,9 @@ write_name_slot* = (
     })
 }
 
-// `{name}` in a format string: the C text of the binding that name has
-// WHERE THE HOLE IS WRITTEN, and its type.
-// ONE ANSWER FOR BOTH FORMAT WALKS. `println("{n}")` and `out.add("{n}")`
-// must resolve `n` to the same binding, and the reason it is here rather
-// than in either walk is that resolving a bare identifier is already
-// this file's job — `lower_name` below is the same lookup, reached from a
-// node instead of from a name.
-// THIS IS WHAT MAKES `{name}` A COMPILE-TIME FEATURE: the frame being
-// lowered is asked, the type comes off the slot, and the write emitted is
-// the one a positional hole would emit. No runtime format state and no
-// allocation, which is the property `make bench-allocs` gates.
-// `None` is every way a name can fail to be a value here — no binding, a
-// loop handle, a closure, a type not yet known — because a hole has one
-// thing to say about all four and `value_slot` already draws the line.
+// Resolves a named format hole to the C binding and type visible where the
+// Format string is written. Both console and sink formatting use this lookup,
+// So named holes remain a compile-time feature with no runtime state.
 named_hole* = (be :: CBackend, name: str, out :: String)
               Res<Res<TyId>, AllocError> {
     be.slot_of(name).match({
@@ -1108,7 +1016,7 @@ hole_text = (be :: CBackend, name: str, s: LocalSlot, out :: String)
     })
 }
 
-// A `::` parameter holds the ADDRESS of its argument, so reading it is
+// A `::` parameter holds the address of its argument, so reading it is
 // a dereference. Parenthesised, because every use of it is a use of the
 // value: `(*p).x` and `*p.x` are different C.
 write_local = (be :: CBackend, text: str, slot: LocalSlot, out :: String)
