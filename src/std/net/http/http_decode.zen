@@ -2,7 +2,7 @@
 
 Alloc = std.mem
 str, String, str_at = std.text
-Res, ok_or = std.core
+Res, Range, ok_or = std.core
 Sink = std.core.io
 Vec = std.collections
 HttpError, HttpResponseMeta, HttpResponse = std.net.http.http_types
@@ -11,51 +11,152 @@ Stream, read, read_eof = std.net.http.http_transport
 HEADER_END: str = "\r\n\r\n"
 HTTP_HEAD_MAX: usize = 65536
 
+BodyFraming = BodyNone | BodyChunked | BodyLength(usize) | BodyClose
+
+ParsedHead = {
+    meta: HttpResponseMeta,
+    framing: BodyFraming,
+}
+
+ResponseParts = {
+    head: ParsedHead,
+    body: str,
+}
+
 parse_status_line = (line: str) Res<i32, HttpError> {
-    first  = line.find(' ').ok_or(HttpError.DecodeFailed).try();
+    first   = line.find(' ').ok_or(HttpError.DecodeFailed).try();
+    version = line.slice(0, first);
+    (version.eq("HTTP/1.0") || version.eq("HTTP/1.1"))
+        .ensure(HttpError.DecodeFailed).try();
+
     after  = line.slice(first + 1, line.len);
-    second = after.find(' ').match({ Ok(i) => i, None => after.len });
+    second = after.find(' ').ok_or(HttpError.DecodeFailed).try();
     code   = after.slice(0, second);
-    code.parse_i32().ok_or(HttpError.DecodeFailed).try();
+    (code.len == 3 && code[0].is_digit()
+        && code[1].is_digit() && code[2].is_digit())
+        .ensure(HttpError.DecodeFailed).try();
+    code.parse_i32().ok_or(HttpError.DecodeFailed)
 }
 
-final_coding_is_chunked = (value: str) Res<bool, HttpError> {
-    parts   ::= value.split(',');
-    found   ::= false;
-    chunked ::= false;
-    loop((h) {
-        parts.next().match({
-            None    => h.break(),
-            Ok(raw) => {
-                coding = raw.trim().ok_or(HttpError.DecodeFailed).try();
-                (coding.len > 0).match({
-                    true  => Ok(()),
-                    false => Err(HttpError.DecodeFailed),
-                }).try();
-                found   = true;
-                chunked = coding.eq_ignore_case("chunked");
-            },
+field_name_byte = (b: u8) bool {
+    b.is_alnum() || b.is_in([
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|',
+        '~'
+    ])
+}
+
+field_name = (name: str) bool {
+    (name.len > 0) && Range(0, name.len).find((i) {
+        !field_name_byte(name[i])
+    }).match({ Ok(_) => false, None => true })
+}
+
+HeaderDecoder = {
+    status :: i32,
+    content_length :: usize,
+    found_length :: bool,
+    transfer_seen :: bool,
+    final_chunked :: bool,
+
+    length = (self :: @Self, value: str) Res<(), HttpError> {
+        parts ::= value.split(',');
+        found ::= false;
+        loop((h) {
+            parts.next().match({
+                None    => h.break(),
+                Ok(raw) => {
+                    item = raw.trim().ok_or(HttpError.DecodeFailed).try();
+                    (item.len > 0).ensure(HttpError.DecodeFailed).try();
+                    n = item.parse_usize().ok_or(HttpError.DecodeFailed).try();
+                    self.found_length.then(() {
+                        (self.content_length == n)
+                            .ensure(HttpError.DecodeFailed).try();
+                    });
+                    self.content_length = n;
+                    self.found_length   = true;
+                    found               = true;
+                },
+            });
         });
-    });
-    found.match({
-        true  => Ok(chunked),
-        false => Err(HttpError.DecodeFailed),
-    })
+        found.ensure(HttpError.DecodeFailed)
+    }
+
+    transfer = (self :: @Self, value: str) Res<(), HttpError> {
+        parts ::= value.split(',');
+        found ::= false;
+        loop((h) {
+            parts.next().match({
+                None    => h.break(),
+                Ok(raw) => {
+                    coding = raw.trim().ok_or(HttpError.DecodeFailed).try();
+                    (coding.len > 0).ensure(HttpError.DecodeFailed).try();
+                    (!self.final_chunked).ensure(HttpError.DecodeFailed).try();
+                    self.transfer_seen = true;
+                    self.final_chunked = coding.eq_ignore_case("chunked");
+                    found              = true;
+                },
+            });
+        });
+        found.ensure(HttpError.DecodeFailed)
+    }
+
+    field = (self :: @Self, line: str) Res<(), HttpError> {
+        colon = line.find(':').ok_or(HttpError.DecodeFailed).try();
+        name  = line.slice(0, colon);
+        field_name(name).ensure(HttpError.DecodeFailed).try();
+        value = line.slice(colon + 1, line.len)
+            .trim().ok_or(HttpError.DecodeFailed).try();
+
+        name.eq_ignore_case("content-length").then(() {
+            self.length(value).try();
+        });
+        name.eq_ignore_case("transfer-encoding").then(() {
+            self.transfer(value).try();
+        });
+        Ok(())
+    }
+
+    finish = (self: @Self) Res<ParsedHead, HttpError> {
+        (!(self.transfer_seen && self.found_length))
+            .ensure(HttpError.DecodeFailed).try();
+        no_body = (self.status >= 100 && self.status < 200)
+            || self.status == 204 || self.status == 304;
+        framing = no_body.match({
+            true  => BodyFraming.BodyNone,
+            false => self.transfer_seen.match({
+                true  => self.final_chunked.match({
+                    true  => BodyFraming.BodyChunked,
+                    false => BodyFraming.BodyClose,
+                }),
+                false => self.found_length.match({
+                    true  => BodyFraming.BodyLength(self.content_length),
+                    false => BodyFraming.BodyClose,
+                }),
+            }),
+        });
+        Ok(ParsedHead(
+            meta: HttpResponseMeta(
+                status: self.status,
+                content_length: self.content_length,
+                has_content_length: self.found_length,
+                chunked: self.transfer_seen && self.final_chunked
+            ),
+            framing: framing
+        ))
+    }
 }
 
-parse_headers = (block: str) Res<HttpResponseMeta, HttpError> {
-    (block.len <= HTTP_HEAD_MAX).match({
-        true  => Ok(()),
-        false => Err(HttpError.DecodeFailed),
-    }).try();
-    // Walk from the previous cursor so an n-byte block parses in O(n).
+parse_headers = (block: str) Res<ParsedHead, HttpError> {
     lines ::= block.split('\n');
     status_line = lines.next().ok_or(HttpError.DecodeFailed).try();
     status      = status_line.parse_status_line().try();
-
-    content_length ::= 0;
-    found_length   ::= false;
-    chunked        ::= false;
+    decoder ::= HeaderDecoder(
+        status: status,
+        content_length: 0,
+        found_length: false,
+        transfer_seen: false,
+        final_chunked: false
+    );
 
     loop((h) {
         lines.next().match({
@@ -63,39 +164,37 @@ parse_headers = (block: str) Res<HttpResponseMeta, HttpError> {
             Ok(raw) => {
                 line = raw.trim_end().ok_or(HttpError.DecodeFailed).try();
                 (line.len == 0).then(() { h.break(); });
-
-                colon = line.find(':').ok_or(HttpError.DecodeFailed).try();
-                name  = line.slice(0, colon);
-                value = line.slice(colon + 1, line.len).trim().ok_or(HttpError.DecodeFailed).try();
-
-                name.eq_ignore_case("content-length").then(() {
-                    content_length = value.parse_usize()
-                        .ok_or(HttpError.DecodeFailed).try();
-                    found_length   = true;
-                });
-                name.eq_ignore_case("transfer-encoding").then(() {
-                    chunked = value.final_coding_is_chunked().try();
-                });
+                decoder.field(line).try();
             },
         });
     });
-
-    Ok(HttpResponseMeta(
-        status: status,
-        content_length: content_length,
-        has_content_length: found_length,
-        chunked: chunked
-    ));
+    decoder.finish()
 }
 
-sink_write = (out :: Sink, bytes: str) Res<(), HttpError> {
-    (bytes.len == 0).match({
-        true  => Ok(()),
-        false => out.write(bytes).match({
+parts_at = (raw: str, end: usize) Res<ResponseParts, HttpError> {
+    (end + HEADER_END.len <= HTTP_HEAD_MAX)
+        .ensure(HttpError.DecodeFailed).try();
+    block = raw.slice(0, end);
+    head  = block.parse_headers().try();
+    Ok(ResponseParts(
+        head: head,
+        body: raw.slice(end + HEADER_END.len, raw.len)
+    ))
+}
+
+response_parts = (raw: str) Res<ResponseParts, HttpError> {
+    end = raw.find(HEADER_END).ok_or(HttpError.DecodeFailed).try();
+    parts_at(raw, end)
+}
+
+write_body = (out :: Sink, bytes: str) Res<(), HttpError> {
+    (bytes.len > 0).then(() {
+        out.write(bytes).match({
             Ok(_)  => Ok(()),
             Err(e) => Err(HttpError.BodyWriteFailed(e)),
-        }),
-    })
+        }).try();
+    });
+    Ok(())
 }
 
 ChunkPhase = Size
@@ -113,11 +212,12 @@ ChunkPhase = Size
 // only Data slices reach the sink, while sizes, extensions and trailers are
 // consumed here. The same decoder serves socket reads and offline parsing.
 ChunkDecoder = {
-    phase ::             ChunkPhase,
-    size ::              usize,
-    digits ::            usize,
-    left ::              usize,
-    trailer_has_bytes :: bool,
+    phase ::             ChunkPhase = ChunkPhase.Size,
+    size ::              usize = 0,
+    digits ::            usize = 0,
+    left ::              usize = 0,
+    trailer_has_bytes :: bool = false,
+    trailer_has_colon :: bool = false,
 
     done = (self: @Self) bool {
         self.phase.match({ Done => true, _ => false })
@@ -145,7 +245,7 @@ ChunkDecoder = {
         take      = (self.left < available).match({
             true => self.left, false => available
         });
-        out.sink_write(bytes.slice(at, at + take)).try();
+        write_body(out, bytes.slice(at, at + take)).try();
         self.left = self.left - take;
         (self.left == 0).then(() { self.phase = ChunkPhase.DataCr; });
         Ok(at + take)
@@ -175,14 +275,14 @@ ChunkDecoder = {
                 self.digits = self.digits + 1;
                 Ok(())
             },
-            None  => (self.digits > 0).match({
-                false => Err(HttpError.DecodeFailed),
-                true  => b.match({
-                    ';'  => self.to(ChunkPhase.Extension),
-                    '\r' => self.to(ChunkPhase.SizeLf),
+            None  => {
+                (self.digits > 0).ensure(HttpError.DecodeFailed).try();
+                b.match({
+                    ';'  => { self.phase = ChunkPhase.Extension; Ok(()) },
+                    '\r' => { self.phase = ChunkPhase.SizeLf; Ok(()) },
                     _    => Err(HttpError.DecodeFailed),
-                }),
-            }),
+                })
+            },
         })
     }
 
@@ -195,7 +295,7 @@ ChunkDecoder = {
     size_lf = (self :: @Self, b: u8) Res<(), HttpError> {
         (b == '\n').ensure(HttpError.DecodeFailed).try();
         (self.size == 0).match({
-            true  => self.to(ChunkPhase.Trailer),
+            true  => { self.phase = ChunkPhase.Trailer; Ok(()) },
             false => {
                 self.left  = self.size;
                 self.phase = ChunkPhase.Data;
@@ -208,17 +308,40 @@ ChunkDecoder = {
         (b == '\n').ensure(HttpError.DecodeFailed).try();
         self.size   = 0;
         self.digits = 0;
-        self.to(ChunkPhase.Size)
+        self.phase  = ChunkPhase.Size;
+        Ok(())
     }
 
     trailer_byte = (self :: @Self, b: u8) Res<(), HttpError> {
         (b != '\n').ensure(HttpError.DecodeFailed).try();
         (b == '\r').match({
             true  => self.trailer_has_bytes.match({
-                true  => self.to(ChunkPhase.TrailerLf),
-                false => self.to(ChunkPhase.TrailerEndLf),
+                true  => {
+                    self.trailer_has_colon.ensure(HttpError.DecodeFailed)
+                        .try();
+                    self.phase = ChunkPhase.TrailerLf;
+                    Ok(())
+                },
+                false => {
+                    self.phase = ChunkPhase.TrailerEndLf;
+                    Ok(())
+                },
             }),
             false => {
+                self.trailer_has_colon.match({
+                    true  => (b == '\t' || (b >= ' ' && b != 127))
+                        .ensure(HttpError.DecodeFailed),
+                    false => (b == ':').match({
+                        true  => {
+                            self.trailer_has_bytes
+                                .ensure(HttpError.DecodeFailed).try();
+                            self.trailer_has_colon = true;
+                            Ok(())
+                        },
+                        false => field_name_byte(b)
+                            .ensure(HttpError.DecodeFailed),
+                    }),
+                }).try();
                 self.trailer_has_bytes = true;
                 Ok(())
             },
@@ -228,16 +351,14 @@ ChunkDecoder = {
     trailer_lf = (self :: @Self, b: u8) Res<(), HttpError> {
         (b == '\n').ensure(HttpError.DecodeFailed).try();
         self.trailer_has_bytes = false;
-        self.to(ChunkPhase.Trailer)
+        self.trailer_has_colon = false;
+        self.phase             = ChunkPhase.Trailer;
+        Ok(())
     }
 
     expect = (self :: @Self, got: u8, want: u8, next: ChunkPhase)
              Res<(), HttpError> {
         (got == want).ensure(HttpError.DecodeFailed).try();
-        self.to(next)
-    }
-
-    to = (self :: @Self, next: ChunkPhase) Res<(), HttpError> {
         self.phase = next;
         Ok(())
     }
@@ -247,67 +368,45 @@ ChunkDecoder = {
     }
 }
 
-chunk_decoder = () ChunkDecoder {
-    ChunkDecoder(
-        phase: ChunkPhase.Size,
-        size: 0,
-        digits: 0,
-        left: 0,
-        trailer_has_bytes: false
-    )
-}
-
-body_forbidden = (self: HttpResponseMeta) bool {
-    (self.status >= 100 && self.status < 200)
-        || self.status == 204 || self.status == 304
-}
-
 // One response body after its headers have been decoded. A sink write
 // completes before the next socket read: a slow sink applies backpressure,
 // and any WriteError stops the receive loop without consuming more bytes.
 ResponseBody = {
     a:          Alloc,
-    meta:       HttpResponseMeta,
+    framing:    BodyFraming,
     prefetched: str,
 
     into = (self: @Self, s: Stream, out :: Sink) Res<(), HttpError> {
-        self.meta.body_forbidden().match({
-            true  => Ok(()),
-            false => self.meta.chunked.match({
-                true  => self.chunked(s, out),
-                false => self.meta.has_content_length.match({
-                    true  => self.known_length(s, out),
-                    false => self.until_eof(s, out),
-                }),
-            }),
+        self.framing.match({
+            BodyNone      => Ok(()),
+            BodyChunked   => self.chunked(s, out),
+            BodyLength(n) => self.known_length(s, n, out),
+            BodyClose     => self.until_eof(s, out),
         })
     }
 
     chunked = (self: @Self, s: Stream, out :: Sink)
               Res<(), HttpError> {
-        dec ::= chunk_decoder();
+        dec ::= ChunkDecoder();
         dec.feed(self.prefetched, out).try();
         chunk ::= self.a.Vec<u8>();
         loop((h) {
             dec.done().then(() { h.break(); });
             got = s.read(chunk, 4096).try();
-            (got > 0).match({
-                true  => Ok(()),
-                false => Err(HttpError.RecvFailed),
-            }).try();
+            (got > 0).ensure(HttpError.RecvFailed).try();
             dec.feed(str_at(chunk.ptr(), got), out).try();
         });
         dec.finish()
     }
 
-    known_length = (self: @Self, s: Stream, out :: Sink)
+    known_length = (self: @Self, s: Stream, n: usize, out :: Sink)
                    Res<(), HttpError> {
-        take = (self.meta.content_length < self.prefetched.len).match({
-            true  => self.meta.content_length,
+        take = (n < self.prefetched.len).match({
+            true  => n,
             false => self.prefetched.len,
         });
-        out.sink_write(self.prefetched.slice(0, take)).try();
-        self.read_exact(s, self.meta.content_length - take, out)
+        write_body(out, self.prefetched.slice(0, take)).try();
+        self.read_exact(s, n - take, out)
     }
 
     read_exact = (self: @Self, s: Stream, n: usize, out :: Sink)
@@ -318,11 +417,8 @@ ResponseBody = {
             (left == 0).then(() { h.break(); });
             ask = (left < 4096).match({ true => left, false => 4096 });
             got = s.read(chunk, ask).try();
-            (got > 0).match({
-                true  => Ok(()),
-                false => Err(HttpError.RecvFailed),
-            }).try();
-            out.sink_write(str_at(chunk.ptr(), got)).try();
+            (got > 0).ensure(HttpError.RecvFailed).try();
+            write_body(out, str_at(chunk.ptr(), got)).try();
             left = left - got;
         });
         Ok(())
@@ -330,12 +426,12 @@ ResponseBody = {
 
     until_eof = (self: @Self, s: Stream, out :: Sink)
                 Res<(), HttpError> {
-        out.sink_write(self.prefetched).try();
+        write_body(out, self.prefetched).try();
         chunk ::= self.a.Vec<u8>();
         loop((h) {
             got = s.read_eof(chunk, 4096).try();
             (got == 0).then(() { h.break(); });
-            out.sink_write(str_at(chunk.ptr(), got)).try();
+            write_body(out, str_at(chunk.ptr(), got)).try();
         });
         Ok(())
     }
@@ -348,68 +444,49 @@ read_response_into* = (s: Stream, a: Alloc, out :: Sink)
                       Res<HttpResponseMeta, HttpError> {
     head ::= a.String().try(HttpError.RecvFailed);
 
-    found_end ::= false;
-    chunk     ::= a.Vec<u8>();
+    end: Res<usize> ::= None;
+    chunk           ::= a.Vec<u8>();
     loop((h) {
-        found_end.then(() { h.break(); });
+        end.match({ Ok(_) => h.break(), None => () });
         got = s.read(chunk, 4096).try();
-        (got == 0).match({
-            true  => h.break(),
-            false => {
-                head.add(str_at(chunk.ptr(), got))
-                    .try(HttpError.RecvFailed);
-                head.view().find(HEADER_END).match({
-                    Ok(end) => (end + HEADER_END.len <= HTTP_HEAD_MAX).match({
-                        true  => { found_end = true; },
-                        false => Err(HttpError.DecodeFailed).try(),
-                    }),
-                    None    => {
-                        (head.view().len > HTTP_HEAD_MAX).then(() {
-                            Err(HttpError.DecodeFailed).try();
-                        });
-                    },
-                });
+        (got > 0).ensure(HttpError.RecvFailed).try();
+        head.add(str_at(chunk.ptr(), got)).try(HttpError.RecvFailed);
+        head.view().find(HEADER_END).match({
+            Ok(at) => {
+                (at + HEADER_END.len <= HTTP_HEAD_MAX)
+                    .ensure(HttpError.DecodeFailed).try();
+                end = Ok(at);
             },
+            None   => (head.view().len <= HTTP_HEAD_MAX)
+                .ensure(HttpError.DecodeFailed).try(),
         });
     });
 
-    end          = head.view().find(HEADER_END)
-        .ok_or(HttpError.DecodeFailed).try();
-    header_block = head.view().slice(0, end);
-    info         = header_block.parse_headers().try();
-
-    head_body = head.view().slice(end + HEADER_END.len, head.view().len);
-    ResponseBody(a: a, meta: info, prefetched: head_body).into(s, out).try();
-    Ok(info)
+    at    = end.ok_or(HttpError.DecodeFailed).try();
+    parts = parts_at(head.view(), at).try();
+    ResponseBody(a: a, framing: parts.head.framing, prefetched: parts.body).into(s, out).try();
+    Ok(parts.head.meta)
 }
 
 // Offline twin of the network path: metadata plus the same Sink/error
 // contract, without allocating a second body buffer.
 parse_response_into* = (raw: str, out :: Sink)
                        Res<HttpResponseMeta, HttpError> {
-    end          = raw.find(HEADER_END).ok_or(HttpError.DecodeFailed).try();
-    header_block = raw.slice(0, end);
-    body_bytes   = raw.slice(end + HEADER_END.len, raw.len);
-    meta         = header_block.parse_headers().try();
-
-    (!meta.body_forbidden()).then(() {
-        meta.chunked.match({
-            true  => {
-                dec ::= chunk_decoder();
-                dec.feed(body_bytes, out).try();
-                dec.finish().try();
-            },
-            false => {
-                take = (meta.has_content_length
-                        && meta.content_length < body_bytes.len).match({
-                    true  => meta.content_length,
-                    false => body_bytes.len,
-                });
-                out.sink_write(body_bytes.slice(0, take)).try();
-            },
-        });
-    });
-    Ok(meta)
+    parts = response_parts(raw).try();
+    parts.head.framing.match({
+        BodyNone      => Ok(()),
+        BodyChunked   => {
+            dec ::= ChunkDecoder();
+            dec.feed(parts.body, out).try();
+            dec.finish()
+        },
+        BodyLength(n) => {
+            (parts.body.len >= n).ensure(HttpError.DecodeFailed).try();
+            write_body(out, parts.body.slice(0, n))
+        },
+        BodyClose     => write_body(out, parts.body),
+    }).try();
+    Ok(parts.head.meta)
 }
 
 // Buffered response parser over the streaming sink API.

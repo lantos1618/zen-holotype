@@ -26,6 +26,22 @@ body_is_empty = (a: Alloc, raw: str) Res<bool, AllocError> {
     })
 }
 
+refused = (a: Alloc, raw: str) Res<bool, AllocError> {
+    out ::= a.String().try();
+    raw.parse_response_into(out).match({
+        Ok(_)  => Ok(false),
+        Err(_) => Ok(true),
+    })
+}
+
+body_is = (a: Alloc, raw: str, want: str) Res<bool, AllocError> {
+    out ::= a.String().try();
+    raw.parse_response_into(out).match({
+        Ok(_)  => Ok(out.view().eq(want)),
+        Err(_) => Ok(false),
+    })
+}
+
 main = (env: Env) Res<(), AllocError> {
     raw = "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nhello world\n";
     streamed ::= env.mem.alloc().String().try();
@@ -125,6 +141,65 @@ main = (env: Env) Res<(), AllocError> {
             });
         },
         Err(_)   => println("parse failed"),
+    });
+
+    bad_framing = refused(env.mem.alloc(), "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc").try() && refused(env.mem.alloc(), "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n").try() && refused(env.mem.alloc(), "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabcd").try();
+    bad_framing.match({
+        true  => println("framing rejects"),
+        false => println("framing accepted"),
+    });
+
+    duplicate_length = body_is(
+        env.mem.alloc(),
+        "HTTP/1.1 200 OK\r\nContent-Length: 3, 3\r\nContent-Length: 3\r\n\r\nabc",
+        "abc"
+    ).try();
+    duplicate_length.match({
+        true  => println("length duplicates ok"),
+        false => println("length duplicates failed"),
+    });
+
+    split_transfer = body_is(env.mem.alloc(), "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n", "abc").try() && refused(env.mem.alloc(), "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n\r\nabc").try();
+    split_transfer.match({
+        true  => println("transfer fields ok"),
+        false => println("transfer fields failed"),
+    });
+
+    bad_status = refused(env.mem.alloc(), "HTTX/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").try() && refused(env.mem.alloc(), "HTTP/1.1 20 Nope\r\nContent-Length: 0\r\n\r\n").try() && refused(env.mem.alloc(), "HTTP/2 200 Nope\r\nContent-Length: 0\r\n\r\n").try();
+    bad_status.match({
+        true  => println("status rejects"),
+        false => println("status accepted"),
+    });
+
+    bad_trailer = refused(
+        env.mem.alloc(),
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nnot-a-field\r\n\r\n"
+    ).try();
+    bad_trailer.match({
+        true  => println("trailer rejects"),
+        false => println("trailer accepted"),
+    });
+
+    chunk_raw.parse_response_into(blocked).match({
+        Err(BodyWriteFailed(_)) => println("chunk sink full"),
+        _                       => println("chunk sink mismatch"),
+    });
+
+    head_limit ::= env.mem.alloc().String("HTTP/1.1 200 OK\r\nX: ").try();
+    Range(head_limit.view().len, 65536 - 4).loop((h, i) {
+        head_limit.add('a').try();
+    });
+    head_limit.add("\r\n\r\n").try();
+    at_limit = body_is(env.mem.alloc(), head_limit.view(), "").try();
+    over_limit ::= env.mem.alloc().String("HTTP/1.1 200 OK\r\nX: ").try();
+    Range(over_limit.view().len, 65536 - 3).loop((h, i) {
+        over_limit.add('a').try();
+    });
+    over_limit.add("\r\n\r\n").try();
+    limit_ok = at_limit && refused(env.mem.alloc(), over_limit.view()).try();
+    limit_ok.match({
+        true  => println("head limit ok"),
+        false => println("head limit failed"),
     });
     Ok(())
 }
