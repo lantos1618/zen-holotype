@@ -1,22 +1,14 @@
-// Represented enums retain their written integer type and each variant's
-// external discriminant. The leading bar still distinguishes a one-variant
-// enum from an alias.
+// Represented enums retain each variant's external discriminant. The final
+// payload supplies the integer domain, and the leading bar still distinguishes
+// a one-variant enum from an alias.
 
 scan, Source = std.lex
 Parser, module = std.parse
-Ast, Decl, EnumDiscriminant = std.ast
-TypeId, ExprId = std.ast
+Ast, Decl, ExprId = std.ast
 
-GrammarProbe: u8 = Zero = 0 | Other = 7 | Raw(u8) = _
+GrammarProbe = | Zero = 0 | Other = 7 | Raw(u8)
 
-SOURCE: str = "FrameType*: u8 = Data = 0 | Headers = (1 + 1) | Unknown(u8) = _\nSolo: u16 = | Only = 7\nholder = () () { Local: u8 = Low = 3 | High = 4 }\n"
-
-repr_name = (tree: Ast, id: TypeId) str {
-    tree.type_at(id).kind.match({
-        Named(n) => n.name.text,
-        _        => "not-named",
-    })
-}
+SOURCE: str = "FrameType* = | Data = 0 | Headers = (1 + 1) | Unknown(u8)\nSolo = | Only = 7\nholder = () () { Local = | Low = 3 | High = 4 }\n"
 
 exact_text = (tree: Ast, id: ExprId) str {
     tree.expr_at(id).kind.match({
@@ -26,30 +18,18 @@ exact_text = (tree: Ast, id: ExprId) str {
     })
 }
 
-discriminant = (tree: Ast, d: EnumDiscriminant) str {
-    d.match({
-        Exact(id)   => exact_text(tree, id),
-        CatchAll(_) => "_",
-    })
-}
-
 show = (tree: Ast, d: Decl) () {
     d.kind.match({
         Enum(e)     => {
-            repr = e.repr.match({
-                Ok(t) => repr_name(tree, t),
-                None  => "none",
-            });
             println(
-                "enum {} repr {} variants {} leading {}",
+                "enum {} variants {} leading {}",
                 e.name.text,
-                repr,
                 e.variants.len,
                 e.leading_bar.match({ Ok(_) => true, None => false })
             );
             e.variants.loop((h, v) {
                 value = v.discriminant.match({
-                    Ok(x) => discriminant(tree, x),
+                    Ok(x) => exact_text(tree, x),
                     None  => "none",
                 });
                 println(

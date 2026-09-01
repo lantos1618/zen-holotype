@@ -359,7 +359,7 @@ module.exports = grammar({
       ),
 
     // Payloads are types. A represented enum writes its external integer
-    // discriminant separately: `FrameType: u8 = Data = 0 | Unknown(u8) = _`.
+    // discriminant separately: `FrameType = | Data = 0 | Unknown(u8)`.
     // D15 still permits one payload type, never a list.
     // prec.right: a `(` after a variant name is that variant's payload, never
     // the start of the next statement. This is the ONE residue of R2 — a

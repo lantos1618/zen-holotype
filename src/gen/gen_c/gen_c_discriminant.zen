@@ -2,13 +2,14 @@
 // translated at the call site; the enum's internal dense tag never becomes an
 // ABI promise.
 
-ExprId, Access, Call, Enum, Variant, EnumDiscriminant = std.ast
+ExprId, Access, Call, Enum, Variant = std.ast
 AllocError = std.mem
 str, String = std.text
 TyId, TyNamed = sema.sema_ty
 Ctx = sema.sema_check
 DiscriminantCall, RepresentedEnum = sema.sema_discriminant
 represented_enum, has_catch_all = sema.sema_discriminant
+is_discriminant_catch_all = sema.sema_discriminant
 const_int = sema.sema_const
 type_of = sema.sema_type
 sym_variant, sym_member, RES_PATH = gen.gen_name
@@ -50,22 +51,24 @@ lower_discriminant_encode = (
     be.indent();
     shape.value.variants.loop((h, v) {
         v.discriminant.match({
-            None             => Ok(()),
-            Ok(Exact(value)) => be.write_encode_case(
+            None      => is_discriminant_catch_all(v).match({
+                true  => be.write_encode_case(
+                    held.view(),
+                    dst.view(),
+                    qname.view(),
+                    v,
+                    ac.base,
+                    true
+                ),
+                false => Ok(()),
+            }),
+            Ok(value) => be.write_encode_case(
                 held.view(),
                 dst.view(),
                 qname.view(),
                 v,
                 value,
                 false
-            ),
-            Ok(CatchAll(_))  => be.write_encode_case(
-                held.view(),
-                dst.view(),
-                qname.view(),
-                v,
-                ac.base,
-                true
             ),
         }).try();
     });
@@ -126,7 +129,7 @@ lower_discriminant_decode = (
     open ::= true;
     shape.value.variants.loop((h, v) {
         v.discriminant.match({
-            Ok(Exact(value)) => be.write_decode_exact(
+            Ok(value) => be.write_decode_exact(
                 shape,
                 ret,
                 raw.view(),
@@ -136,9 +139,9 @@ lower_discriminant_decode = (
                 value,
                 open
             ),
-            _                => Ok(()),
+            None      => Ok(()),
         }).try();
-        v.discriminant.match({ Ok(Exact(_)) => { open = false; }, _ => () });
+        v.discriminant.match({ Ok(_) => { open = false; }, None => () });
     });
     be.write_decode_fallback(shape, ret, raw.view(), dst.view(), qname.view())
         .try();
@@ -246,9 +249,7 @@ unknown_enum_value = (
 }
 
 catch_all_variant = (be: CBackend, e: Enum) Res<Variant> {
-    e.variants.find((v) {
-        v.discriminant.match({ Ok(CatchAll(_)) => true, _ => false })
-    }).match({
+    e.variants.find((v) { is_discriminant_catch_all(v) }).match({
         None  => None,
         Ok(v) => Ok(v),
     })

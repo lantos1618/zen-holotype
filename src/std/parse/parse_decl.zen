@@ -13,9 +13,9 @@
 
 AllocError = std.mem
 Span, Pos, Ident, no_trivia = std.ast.ast_span
-TypeId, BlockId = std.ast.ast_id
+ExprId, TypeId, BlockId = std.ast.ast_id
 Decl, DeclKind, Struct, Enum, Alias, Function, Impl, Import, Const = std.ast.ast_node
-Member, Variant, EnumDiscriminant, ImportName, Param, TParam, Form, Module = std.ast.ast_node
+Member, Variant, ImportName, Param, TParam, Form, Module = std.ast.ast_node
 TokenKind = std.parse.parse_token
 Parser, Mark = std.parse.parser
 expr = std.parse.parse_expr
@@ -231,6 +231,13 @@ enum_decl = (
     tparams : Vec<TParam>,
     repr    : Res<TypeId>
 ) Res<Decl, AllocError> {
+    repr.match({
+        Ok(_) => p.error_at(
+            "an enum's integer domain comes from its final payload catch-all; remove the type after its name",
+            head.name.span
+        ),
+        None  => Ok(()),
+    }).try();
     bar = p.at_kind(TokenKind.Bar).match({
         true  => p.bar_span(),
         false => Ok(None),
@@ -256,7 +263,6 @@ enum_decl = (
         name: head.name,
         exported: head.exported,
         tparams: tparams,
-        repr: repr,
         variants: variants,
         leading_bar: bar,
     )), m);
@@ -277,7 +283,7 @@ one_variant = (p :: Parser) Res<Variant, AllocError> {
         false => Ok(None),
     }).try();
     discriminant = p.eat(TokenKind.Eq).try().match({
-        true  => p.enum_discriminant(),
+        true  => p.variant_discriminant(),
         false => Ok(None),
     }).try();
     end          = p.prev_end;
@@ -291,16 +297,9 @@ one_variant = (p :: Parser) Res<Variant, AllocError> {
     ));
 }
 
-enum_discriminant = (p :: Parser)
-                    Res<Res<EnumDiscriminant>, AllocError> {
-    p.at_text("_").match({
-        true  => {
-            span = p.here_span();
-            p.bump().try();
-            Ok(Ok(EnumDiscriminant.CatchAll(span)))
-        },
-        false => Ok(Ok(EnumDiscriminant.Exact(p.expr().try()))),
-    })
+variant_discriminant = (p :: Parser) Res<Res<ExprId>, AllocError> {
+    value = p.expr().try();
+    Ok(Ok(value));
 }
 
 variant_payload = (p :: Parser) Res<Res<TypeId>, AllocError> {
