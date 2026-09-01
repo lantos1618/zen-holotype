@@ -1,9 +1,5 @@
-// Recursive-descent JSON reader into the shared `Jsons` arena. Syntax faults
-// carry the byte offset at which parsing failed. Allocation is represented by
-// `NoMemory` because this API exposes one nominal error type.
-//
-// Parsing stops at the first fault; consumers must not attempt to resume at an
-// unknown boundary in the remaining bytes.
+// Reads into the caller's `Jsons` arena. Syntax faults carry the failing byte
+// offset; allocation failures are JsonFault.NoMemory.
 
 str, String, push_utf8 = std.text
 Vec = std.collections
@@ -11,8 +7,6 @@ Alloc = std.mem
 Range = std.core
 Jsons, Json, JsonId, Pair = std.json.json_write
 
-// Why a document was refused, and where. The offset is the byte the
-// reader was looking at, which is the byte a client should be shown.
 JsonFault* = Unexpected(usize)   // a byte that cannot begin what is expected here
            | Truncated(usize)    // the document ended inside a value
            | BadEscape(usize)    // a backslash sequence that is not one
@@ -32,8 +26,6 @@ Reader* = {
     at :: usize,
     depth :: usize,
 
-    // --- the grammar ------------------------------------------------
-
     value* = (self :: @Self, tree :: Jsons) Res<JsonId, JsonFault> {
         self.spaces();
         b = self.peek().try();
@@ -49,8 +41,6 @@ Reader* = {
         })
     }
 
-    // `true`, `false`, `null`, or a number. Grouped because each is
-    // decided by its first byte and none of them recurses.
     atom = (self :: @Self, tree :: Jsons, b: u8) Res<JsonId, JsonFault> {
         (b == 't').match({
             true  => self.word(tree, "true", Json.Bool(true)),
@@ -198,9 +188,7 @@ Reader* = {
         })
     }
 
-    // An unterminated container reports the END of the input, not the
-    // byte after the last element — a plausible-looking comma would send
-    // the reader to the wrong place.
+    // A container missing its close at EOF reports Truncated(text.len).
     close = (self :: @Self, b: u8) Res<(), JsonFault> {
         self.byte_if(b).match({
             true  => Ok(()),
@@ -244,8 +232,7 @@ Reader* = {
         })
     }
 
-    // The slow path: copy what has been scanned, then keep going a
-    // chunk at a time. `self.at` is on the first backslash.
+    // `self.at` points to the first backslash.
     decoded = (self :: @Self, from: usize) Res<str, JsonFault> {
         out ::= self.a.String().try(JsonFault.NoMemory);
         out.add(self.text.slice(from, self.at)).try(JsonFault.NoMemory);
@@ -327,8 +314,6 @@ Reader* = {
         })
     }
 
-    // --- the cursor -------------------------------------------------
-
     // The byte under the cursor. `Truncated` and not `Unexpected`: a
     // client can act on the difference between running out and a wrong
     // byte.
@@ -339,13 +324,10 @@ Reader* = {
         })
     }
 
-    // Nothing moves — separate from `byte_if` because deciding
-    // emptiness must NOT eat the closing byte.
     here = (self: @Self, b: u8) bool {
         self.text.get(self.at).match({ Ok(x) => x == b, None => false })
     }
 
-    // Consume `b` if it is there, and say whether it was.
     byte_if = (self :: @Self, b: u8) bool {
         found = self.here(b);
         found.then(() { self.at = self.at + 1; });
@@ -388,8 +370,6 @@ read* = (a: Alloc, tree :: Jsons, text: str) Res<JsonId, JsonFault> {
     })
 }
 
-// Owning token results used by the incremental decoder. Validation remains on
-// Reader, so DOM and streaming entry points accept the same grammar.
 decode_text_token* = (a: Alloc, raw: str) Res<String, JsonFault> {
     r ::= Reader(text: raw, a: a, at: 0, depth: 0);
     value = r.text_at().try();
@@ -416,7 +396,6 @@ number_token* = (a: Alloc, raw: str) Res<String, JsonFault> {
     })
 }
 
-// JSON's single-byte escapes. Unicode escapes are decoded separately.
 simple* = (b: u8) Res<u8> {
     b.match({
         '"'  => Ok('"'),
@@ -431,8 +410,6 @@ simple* = (b: u8) Res<u8> {
     })
 }
 
-// Structural bytes inside a quoted token. Both readers use this classifier so
-// an unescaped control byte cannot be accepted by only one of them.
 TextByte* = TextEnd | TextEscape | TextPlain
 
 text_byte* = (b: u8, at: usize) Res<TextByte, JsonFault> {
@@ -463,7 +440,6 @@ FORM_FEED*: u8 = 12
 ZERO_U32*: u32 = 0
 HEX_BASE_U32*: u32 = 16
 
-// UTF-16 surrogate bounds used while decoding `\u` pairs.
 SURROGATE_HI_MIN*: u32 = 55296     // D800
 SURROGATE_HI_MAX*: u32 = 56319     // DBFF
 SURROGATE_LO_MIN*: u32 = 56320     // DC00

@@ -40,14 +40,12 @@ opens_name = (f: str, i: usize) bool {
     f[i] == '{' && (i + 1) < f.len && f[i + 1].is_ident_start()
 }
 
-// First format construct at or after `from`.
 break_at = (f: str, from: usize) Res<usize> {
     Range(from, f.len).find((i) {
         f.opens_hole(i) || f.opens_pair(i) || f.opens_name(i)
     })
 }
 
-// One past the last identifier byte at or after `from`.
 ident_end = (f: str, from: usize) usize {
     Range(from, f.len).find((i) { f[i].is_ident_cont() == false }).match({
         Ok(j) => j,
@@ -76,7 +74,6 @@ step_at = (f: str, from: usize, i: usize) FmtStep {
     });
 }
 
-// A doubled brace contributes one brace to the literal run.
 step_not_hole = (f: str, from: usize, i: usize) FmtStep {
     f.opens_pair(i).match({
         true  => FmtStep(
@@ -90,7 +87,6 @@ step_not_hole = (f: str, from: usize, i: usize) FmtStep {
     });
 }
 
-// Parse `{name}`; an identifier not followed by `}` marks the step invalid.
 step_named = (f: str, from: usize, i: usize, j: usize) FmtStep {
     ((j < f.len) && f[j] == '}').match({
         true  => FmtStep(
@@ -120,8 +116,7 @@ rest_step = (f: str, from: usize) FmtStep {
     )
 }
 
-// Format into any Sink. Arguments are type-directed and expanded at the call
-// site. String exposes the same operation as a method.
+// Arguments are type-directed and expanded at the call site.
 fmt* = (out :: Sink, fmt: str, args: ...) Res<(), WriteError>
 
 // Decimal without separators.
@@ -136,7 +131,6 @@ add_i64* = (out :: Sink, v: i64) Res<(), WriteError> {
     out.add_digits((v < 0).match({ true => v, false => 0 - v }));
 }
 
-// Digits of a non-positive value, most significant first.
 add_digits = (out :: Sink, v: i64) Res<(), WriteError> {
     (v <= -10).then(() { out.add_digits(v / 10).try() });
     out.write_byte(digit(0 - (v % 10)));
@@ -149,13 +143,6 @@ add_bool* = (out :: Sink, v: bool) Res<(), WriteError> {
     });
 }
 
-// Buffer and terminal formatting use the same C `%g` float representation. It drops
-// trailing zeros, goes exponent past six significant digits, and
-// spells non-finite values as C does; what it costs is digits beyond
-// six, and the hole that asks for more (`{e}`, a width, a precision)
-// does not exist yet to carry them.
-//
-// This is bodiless because the backend renders
-// `%g` into scratch and hands the bytes to the sink's own `write`. A
-// second renderer would create a conflicting representation.
+// Uses C `%g`: six significant digits, exponent notation when selected by
+// `%g`, and the C spellings for non-finite values.
 add_f64* = (out :: Sink, v: f64) Res<(), WriteError>

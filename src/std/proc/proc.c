@@ -1,5 +1,3 @@
-/* Native process execution and capture floor for std.proc. */
-
 #define _GNU_SOURCE
 #include <errno.h>
 #include <poll.h>
@@ -179,8 +177,7 @@ exit_code(int status)
     return 127;
 }
 
-/* Spawn one process and capture both output streams without risking a pipe
-   deadlock. cwd is NULL when the child should inherit the current directory. */
+/* A NULL cwd inherits the current directory. */
 static int32_t
 run_captured(const char *cwd, const char *file, char *const argv[],
              int32_t *code_out,
@@ -277,7 +274,6 @@ zg_proc_run(zg_str cwd, zg_str cmd,
     return ret;
 }
 
-/* Execute an explicit argv and capture stdout and stderr. No shell is used. */
 int32_t
 zg_proc_run_argv(zg_str cwd, zg_str *args, size_t argc,
                  int32_t *code_out,
@@ -305,7 +301,6 @@ done:
     return ret;
 }
 
-/* Execute an explicit argv with the parent's stdin, stdout, and stderr. */
 int32_t
 zg_proc_run_argv_inherit(zg_str cwd, zg_str *args, size_t argc,
                          int32_t *code_out)

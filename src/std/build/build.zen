@@ -9,25 +9,20 @@ str = std.text
 Range = std.core
 Options, options = std.cli
 
-// Project metadata exposed to build programs.
 Module* = {
     functions* = (self: @Self, a: Alloc) Res<Vec<Function>, AllocError>
 }
 
 Function* = {}
 
-// Allocation is part of the public error set because graph construction,
-// discovery, and output-path formatting allocate.
 BuildFault* = NotFound | FetchFailed | VersionConflict | HashMismatch
 
 BuildError* = BuildFault | AllocError
 
-// Build files select targets with ordinary matches, not cfg directives.
 Os* = Macos | Linux | Windows
 
 Arch* = X86_64 | Arm64
 
-// ABI belongs to target identity because it controls foreign layouts.
 Abi* = Gnu | Musl | Msvc | Darwin
 
 StableName* = {
@@ -99,7 +94,6 @@ Package* = {
     hash*: str,
 }
 
-// A resolved graph node. Dependencies are wired per target.
 Dep* = {
     name*: str,
 }
@@ -108,7 +102,6 @@ Exe* = {
     src*: Path,
     deps*: Vec<Dep>,
 
-    // Semantic build choices; the driver translates them for its toolchain.
     optimize* :: str = "speed",
     strip* :: bool = false,
 
@@ -116,21 +109,19 @@ Exe* = {
     out* :: Res<Path> = None,
 }
 
-// A Zen binding for system libraries.
 Lib* = {
     src*: Path,
     libs*: Vec<str>,
     paths*: Vec<str>,
 }
 
-// C sources compiled alongside the Zen tree.
 Extern* = {
     src*: Path,
     libs*: Vec<str>,
     paths*: Vec<str>,
 }
 
-// A target-specific C translation; defines use NAME or NAME=value.
+// Defines use NAME or NAME=value.
 CImport* = {
     headers*: Vec<str>,
     include_paths*: Vec<str>,
@@ -139,13 +130,11 @@ CImport* = {
     target*: Target,
 }
 
-// Parsed functions selected for `zen test` and their dependencies.
 Test* = {
     tests*: Vec<Function>,
     deps*: Vec<Dep>,
 }
 
-// Parsed benchmark functions and their regression budgets.
 Bench* = {
     benches*: Vec<Function>,
     budgets*: Vec<Budget>,
@@ -159,13 +148,9 @@ Budget* = {
     bytes_op*: u64,
 }
 
-// A validated compiler build invocation. Emission is a sum rather than three
-// fields whose combinations every caller must interpret. `Check` is the
-// programmatic, no-output mode; the CLI rejects a command that never selected
-// one of the C modes.
+// Check emits nothing; CLI build requests must select a C output mode.
 Emission* = Check | CStdout | CFile(str) | CDir(str)
 
-// Deterministic module-walk variations used to verify order independence.
 Permutation* = Natural | Reverse | Rotate | Interleave
 
 Permutation.impl(StableName, {
@@ -234,8 +219,6 @@ ProjectArgs* = {
     args_at* :: usize = 0,
 }
 
-// Raw build-option record. `finish` validates emission combinations and
-// constructs BuildArgs.
 BuildFlags* = {
     root* :: str = "",
     out* :: str = "",
@@ -330,8 +313,6 @@ BuildFlags* = {
 
 BuildArgFault* = MissingRoot | MissingEmit
 
-// The build option vocabulary lives with BuildArgs. Frontends provide argv
-// mechanics; this module owns the spelling and meaning of every build flag.
 BuildFlag* = EmitC
     | EmitDir
     | Out
@@ -379,28 +360,21 @@ repeat_count = (text: str) usize {
     (digits && n > 0).match({ true => n, false => 1 })
 }
 
-// The driver supplies these bodiless methods. `::` receivers mutate the
-// graph; `:` receivers only inspect parsed state or target identity.
+// The compiler driver supplies these methods.
 Builder* = {
     os*: Os,
     arch*: Arch,
     env*: Env,
-    alloc*: Alloc,   // build-time arena
-    // The same invocation record the CLI and compiler driver consume. The
-    // closed graph executor does not materialize Builder field reads yet, so
-    // it leaves this default in place until it receives an invocation too.
+    alloc*: Alloc,
     args*: BuildArgs = BuildArgs(root: ""),
 
-    // Inspect parsed declarations without executing project code.
     module* = (self: @Self, path: Path) Module
 
-    // Includes ABI so foreign header layouts are unambiguous.
     target* = (self: @Self) Target
 
     add* ::= (self :: @Self, name: str, pkg: Package) Res<Dep, BuildError>
     remove* ::= (self :: @Self, name: str) Res<(), BuildError>
 
-    // Reusable targets return a Dep; executable/test runners do not.
     exe* = (self :: @Self, name: str, target: Exe) Res<(), BuildError>
     lib* = (self :: @Self, name: str, target: Lib) Res<Dep, BuildError>
     extern* = (self :: @Self, name: str, target: Extern) Res<Dep, BuildError>
@@ -409,6 +383,5 @@ Builder* = {
     test* = (self :: @Self, name: str, target: Test) Res<(), BuildError>
     bench* = (self :: @Self, name: str, target: Bench) Res<(), BuildError>
 
-    // Gate total and per-target compile time by rolling median.
     budget* = (self :: @Self, d: Duration) ()
 }

@@ -8,14 +8,11 @@ is_ident_start, is_ident_cont = std.core.core
 
 str* = {
     data: Ptr<u8>,
-    len*: usize,      // * so a byte count is readable outside this module
+    len*: usize,
 
     is_empty* = (self: @Self) bool { self.len == 0 }
 
-    // The ASCII identifier shape shared by Zen source and portable C:
-    // `[A-Za-z_][A-Za-z0-9_]*`. Keywords are deliberately a caller's
-    // question; different languages reserve different words over this one
-    // byte grammar.
+    // Accepts `[A-Za-z_][A-Za-z0-9_]*`; keywords are not rejected.
     is_identifier* = (self: @Self) bool {
         (self.len > 0) && self.index(0).is_ident_start()
             && Range(1, self.len).find((i) {
@@ -28,9 +25,6 @@ str* = {
     // while the foreign call is using it.
     ptr* = (self: @Self) Ptr<u8> { self.data }
 
-    // the lookup-can-legitimately-miss form (Vec.get's shape). text_utf8
-    // reads through this: a sequence running off the end is bad input,
-    // not a bug
     get* = (self: @Self, i: usize) Res<u8> {
         (i < self.len).match({
             true  => Ok(self.data.read(i)),
@@ -44,18 +38,13 @@ str* = {
         self.data.read(i);
     }
 
-    // a view into a view: same bytes, no copy, no alloc. Out of range
-    // traps the same way `index` does — the two subtractions ARE the
-    // bounds check
+    // Borrows without copying or allocating; invalid bounds trap.
     slice* = (self: @Self, from: usize, to: usize) str {
         tail = self.len - to;
         str(data: self.data.offset(from), len: self.len - from - tail);
     }
 
-    // one memcpy of the whole self into dst — String.add' batch
-    // door, so `data` keeps its star-less privacy while a buffer append
-    // stops paying a capacity branch per byte. dst must hold self.len
-    // bytes: the caller's promise, same as every Ptr.write.
+    // `dst` must have room for `self.len` bytes.
     copy_into* = (self: @Self, dst: Ptr<u8>) () {
         (self.len > 0).match({
             true  => dst.copy_from(self.data, self.len),
@@ -63,12 +52,7 @@ str* = {
         });
     }
 
-    // the first byte equal to `needle`, left to right, answered as an
-    // index INTO self — the caller slices around it. A BYTE question over
-    // bytes: finding a codepoint is a walk over these (text_utf8's), not
-    // a second search. Res because not-there is input, not a bug; the
-    // typed binding is load-bearing — an untyped `None` leaves T to the
-    // assignments, and there may be none.
+    // Returns the first matching byte index, or None.
     find* = (self: @Self, needle: u8) Res<usize> {
         hit: Res<usize> = None;
         Range(0, self.len).loop((h, i) {
@@ -80,8 +64,7 @@ str* = {
         hit;
     }
 
-    // The substring overload. Empty text starts at zero; a longer needle
-    // cannot fit, so subtraction happens only after the length gate.
+    // An empty needle matches at zero.
     find* = (self: @Self, needle: str) Res<usize> {
         needle.len.match({
             0 => Ok(0),
@@ -93,10 +76,7 @@ str* = {
         })
     }
 
-    // the LAST byte equal to needle, walked from the far end so the
-    // answer is the first one met — a suffix question ("extension",
-    // "last field") pays one walk, not a find plus a rescan. Same
-    // contract as find: an index into self, or None.
+    // Returns the last matching byte index, or None.
     rfind* = (self: @Self, needle: u8) Res<usize> {
         hit: Res<usize> = None;
         at ::= self.len;
@@ -110,10 +90,8 @@ str* = {
         hit;
     }
 
-    // The bytes after the LAST delimiter. A missing delimiter leaves the
-    // whole string; a trailing delimiter leaves an empty suffix. This is the
-    // generic dotted-name/path-component operation — domain code should not
-    // grow another forward scan whose stopping rule can drift to FIRST.
+    // A missing delimiter returns the whole string; a trailing delimiter
+    // returns an empty suffix.
     after_last* = (self: @Self, delimiter: u8) str {
         self.rfind(delimiter).match({
             Ok(i) => self.slice(i + 1, self.len),
@@ -122,15 +100,9 @@ str* = {
     }
 }
 
-// the only way to build a str outside this module: `data` carries no star,
-// so a raw pointer never reaches the surface. String.view borrows through it
+// Borrows `len` bytes from `data`; the owner must keep them alive and stable.
 str_at* = (data: Ptr<u8>, len: usize) str { str(data: data, len: len) }
 
-// Whole-view questions are free functions so UFCS exposes them as str methods.
-// None allocate.
-
-// does any byte of self equal needle. find's question without caring
-// where the answer is
 contains* = (self: str, needle: u8) bool {
     self.find(needle).match({
         Ok(_) => true,
@@ -158,10 +130,6 @@ count* = (self: str, needle: str) usize {
     n
 }
 
-// do other's bytes appear in self starting at `from`? The shared walk
-// under starts_with and ends_with — both are "compare at an offset",
-// and writing the offset twice is how the two drift. The lengths were
-// checked by the caller; this walk reads only what both sides have.
 matches_at = (self: str, from: usize, other: str) bool {
     hit ::= true;
     Range(0, other.len).loop((h, i) {
@@ -173,9 +141,7 @@ matches_at = (self: str, from: usize, other: str) bool {
     hit;
 }
 
-// prefix and suffix. The LENGTH decides before any byte does, so an
-// empty needle is the prefix (and suffix) of everything — vacuously
-// true is the honest answer, and eq already agrees with it.
+// An empty string is both a prefix and suffix of every string.
 starts_with* = (self: str, head: str) bool {
     (self.len >= head.len).match({
         false => false,
@@ -190,14 +156,8 @@ ends_with* = (self: str, tail: str) bool {
     });
 }
 
-// self without its leading and trailing whitespace, or None when
-// nothing is left. None rather than "" so a caller cannot forget to
-// look: a blank line and an absent row stay different answers, which is
-// the whole game in line-oriented reading.
-//
-// Whitespace is byte.is_space's set — the lexer's floor — not a second
-// list maintained here. ASCII-only by that set's own contract; a
-// codepoint-space question belongs to text_utf8.
+// Returns None when no non-whitespace byte remains. Whitespace is the ASCII
+// set recognized by byte.is_space.
 trim* = (self: str) Res<str> {
     self.trim_start().match({
         Ok(head) => head.trim_end(),
@@ -216,9 +176,6 @@ trim_start* = (self: str) Res<str> {
     hit;
 }
 
-// the backward twin: walk down from the end, stop above the last space.
-// An all-space self falls out of the walk with keep at 0 and answers
-// None, the same answer trim_start gives the mirror image
 trim_end* = (self: str) Res<str> {
     hit: Res<str> = None;
     keep ::= self.len;
@@ -232,9 +189,7 @@ trim_end* = (self: str) Res<str> {
     hit;
 }
 
-// equality with the CASE taken off each byte, ASCII-only — to_lower is
-// byte.zen's floor, not a second fold table here. Length decides first,
-// for the reason eq's own impl gives: a prefix is not the whole.
+// ASCII-only case-insensitive equality.
 eq_ignore_case* = (self: str, other: str) bool {
     (self.len == other.len).match({
         false => false,
@@ -251,23 +206,13 @@ same_folded = (self: str, other: str) bool {
     hit;
 }
 
-// Splitting returns a cursor over borrowed byte slices and does not allocate.
-// Pieces follow the separator; str does not recognize NUL or codepoint
-// boundaries.
-//
-// A missing terminator is not a lost tail: the walk closes the last
-// piece at the END of the bytes, so "cherry, 7" with no trailing
-// newline is still a row. A SEPARATOR with nothing after it does yield
-// a final empty piece — "a\n" is two pieces — and a blank line between
-// two separators is a piece of its own; what a caller does with an
-// empty piece is trim's None to answer, not this walk's business.
-// ---------------------------------------------------------------------
+// Iterates borrowed byte slices without allocating. A trailing separator
+// yields a final empty piece; adjacent separators preserve empty pieces.
 
 Split* = {
     bytes*: str,
     sep*: u8,
 
-    // Cursor for sequential iteration; private to keep it on a boundary.
     from :: usize = 0,
     done :: bool = false,
 
@@ -283,7 +228,6 @@ Split* = {
                         self.from = self.from + i + 1;
                         Ok(piece);
                     },
-                    // The tail is a piece, including the empty tail in "a\n".
                     None  => {
                         self.done = true;
                         Ok(self.bytes.slice(self.from, self.bytes.len));
@@ -293,14 +237,6 @@ Split* = {
     }
 }
 
-// the k-th piece: walk the bytes once, count separators, and the piece
-// boundaries land where they land. `from` trails the count; the piece
-// closes at a separator OR at the end of the bytes, whichever comes
-// first. Past the last piece is None — the loop's own signal to stop.
-//
-// get, not index: the extra position i == len is the closer, and get
-// answers None there instead of trapping. That None is DATA here — the
-// one piece-end no separator announces.
 piece_at = (s: str, sep: u8, k: usize) Res<str> {
     from ::= 0;
     n    ::= 0;
@@ -322,7 +258,6 @@ piece_at = (s: str, sep: u8, k: usize) Res<str> {
 }
 
 Split.impl(Range<str>, {
-    // Every separator adds a piece, so ";;" has three.
     start: 0,
     end: self.bytes.len + 1,
 
@@ -333,19 +268,12 @@ Split.impl(Range<str>, {
 
 split* = (self: str, sep: u8) Split { Split(bytes: self, sep: sep) }
 
-// FNV's basis and prime. Zen has no bitwise operators, so this is FNV-1a's
-// shape with a wrapping add where the xor would be
+// FNV basis and prime, with wrapping addition in place of xor.
 STR_HASH_SEED*: u64 = 14695981039346656037
 STR_HASH_MULT*: u64 = 1099511628211
 
-// lexicographic byte order: first differing byte decides, shorter wins a
-// prefix tie. Bytes not collation — "Z" precedes "a" (0x5A < 0x61); a
-// language-aware ordering needs std.text.text_utf8 and a codepoint.
-//
-// Lives here (no module name fits "orders two byte strings" better) since
-// THREE components had each written their own — sema's type-key ordering,
-// the backend's section sort, deterministic emit — and gen_c must be a pure
-// function of its input, so all three need the SAME six lines.
+// Lexicographic byte order; the shorter string wins a prefix tie. This is not
+// language-aware collation.
 before* = (self: str, other: str) bool {
     shorter = (self.len < other.len).match({
         true  => self.len,
@@ -364,8 +292,6 @@ before* = (self: str, other: str) bool {
 }
 
 str.impl(Eq, {
-    // bytewise, and the LENGTH is part of it: a prefix isn't the whole.
-    // Length is part of bytewise equality; a prefix is not the whole value.
     eq ::= (self: @Self, other: @Self) bool {
         (self.len == other.len).match({
             false => false,
@@ -380,9 +306,7 @@ str.impl(Eq, {
 })
 
 str.impl(Hash, {
-    // over the BYTES, never the pointer — matches `==`. A field-wise
-    // default would hash `data` (an address) and Map<str, V> would miss
-    // every lookup. `*%`/`+%` wrap: overflowing past u64 is the intent.
+    // Hashes bytes, matching bytewise equality; arithmetic wraps intentionally.
     hash ::= (self: @Self, hasher :: Hasher) u64 {
         acc ::= STR_HASH_SEED;
         Range(0, self.len).loop((h, i) {
@@ -392,9 +316,6 @@ str.impl(Hash, {
     }
 })
 
-// Borrowed text is also a byte range. Generic decoders can therefore accept
-// a str, a fixed packet, or another byte owner without first copying it into
-// one privileged buffer type.
 str.impl(Range<u8>, {
     start: 0,
     end: self.len,
