@@ -5,7 +5,7 @@
 // Both paths use the same qualified symbols and queued definitions.
 
 ExprId, Member = std.ast
-Function, Param, Access, Call, Arg = std.ast
+Function, Param, Access, Call = std.ast
 AllocError = std.mem
 Vec = std.collections
 String = std.text
@@ -29,10 +29,8 @@ Site, site_of, member_at, method_sig = gen.gen_c.gen_c_member
 member_symbol = gen.gen_c.gen_c_member
 by_arity, has_body = gen.gen_c.gen_c_impl
 
-// The base named a type and the name is not one of its variants. A
-// member it declares that wants no receiver is this; anything else is
-// the caller's refusal to report, so the answer is `false` and not a
-// diagnostic of its own.
+// Lower a call whose base was resolved as a type or module. `false` leaves
+// non-associated members to the caller without producing a second diagnostic.
 lower_assoc_call* = (
     be  :: CBackend,
     id  : ExprId,
@@ -61,18 +59,17 @@ lower_type_assoc = (
                    Res<bool, AllocError> {
     site_of(be, ty).try().match({
         None  => Ok(false),
-        Ok(s) => be.assoc_at_site(id, c, a, ty, s, ctx, out),
+        Ok(s) => AssocSite(
+            id: id,
+            call: c,
+            access: a,
+            site: s,
+            ctx: ctx,
+        ).lower(be, out),
     })
 }
 
-// `module.name(..)`
-// `sh = shape` then `sh.reseat(3)`. The base is not a type at all, so
-// none of the machinery above applies: there is no site, no receiver and
-// no member table, only a module and a name.
-
-// THE MODULE IS HALF THE QUESTION: two modules may declare one
-// top-level name, so lookup goes through the module the alias names and
-// the `*` gate — the same query sema typed the node with.
+// Module-qualified lookup uses only exports from the module named by the base.
 lower_module_call = (
     be  :: CBackend,
     id  : ExprId,
@@ -135,14 +132,8 @@ lower_module_fn = (
     })
 }
 
-// A NARROW PATH THAT REFUSES RATHER THAN GUESSES. `gen_c_call.zen` owns
-// the general call (loop intrinsic, lambda-param inlining, bodiless
-// floor), and every door into it looks the name up from the CALLER's
-// module — not where this declaration lives. Rebuilding that chain here
-// would be a second answer to a question that has one, so only the
-// plain case is emitted; the rest is reported. Arguments are still
-// written in the CALLER's `ctx`: a name means what it means where
-// written, not where the callee was declared.
+// Module qualification changes lookup, not argument scope. Only plain calls
+// are emitted here; the general free-call pipeline depends on caller lookup.
 module_fn_decl = (
     be  :: CBackend,
     id  : ExprId,
@@ -177,8 +168,6 @@ refuse_module_fn = (be :: CBackend, id: ExprId, out :: String)
     Ok(true);
 }
 
-// The same symbol `gen_c_call.zen` writes for a plain call and the same
-// queue entry, so the definition this links to is the one lowered for it.
 write_module_call = (
     be   :: CBackend,
     c    : Call,
@@ -195,183 +184,140 @@ write_module_call = (
     be.need_function(d, inst, sym.view()).try();
     out.fmt("{}(", sym.view()).try();
     c.args.loop((h, i, arg) {
-        be.write_assoc_arg(arg, i, be.holds(c, i, 0), f, sig, ctx, out).try();
+        (i > 0).then(() { out.add(", ").try() });
+        be.write_arg_at(
+            arg.value,
+            i,
+            be.holds(c, i, 0),
+            f,
+            sig,
+            ctx,
+            out
+        ).try();
     });
     out.add(")").try();
     Ok(true);
 }
 
-assoc_at_site = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    ty  : TyId,
-    s   : Site,
-    ctx : Ctx,
-    out :: String
-) Res<bool, AllocError> {
-    found ::= be.alloc.Vec<Member>();
-    member_at(be, s, a.name.text, found).try();
-    kept ::= be.alloc.Vec<Member>();
-    be.keep_assoc(found, ty, s, kept).try();
-    // AT THE ARITY WRITTEN — the rule a method call reads two members
-    // of one name by, minus the receiver: every argument is one of the
-    // declaration's own.
-    by_arity(be, kept, c.args.len).match({
-        None  => Ok(false),
-        Ok(m) => be.assoc_member(id, c, a, ty, s, m, ctx, out),
-    })
-}
+// One resolved type-associated call, from member lookup through emission.
+// `Site` already owns the receiver type; carrying a second `TyId` here would
+// allow lookup and symbol emission to disagree about the receiver.
+AssocSite = {
+    id: ExprId,
+    call: Call,
+    access: Access,
+    site: Site,
+    ctx: Ctx,
 
-assoc_member = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    ty  : TyId,
-    s   : Site,
-    m   : Member,
-    ctx : Ctx,
-    out :: String
-)
-               Res<bool, AllocError> {
-    m.kind.match({
-        Function(f) => be.write_assoc_call(id, c, a, ty, s, f, ctx, out),
-        _           => Ok(false),
-    })
-}
+    lower = (self: @Self, be :: CBackend, out :: String)
+            Res<bool, AllocError> {
+        found ::= be.alloc.Vec<Member>();
+        member_at(be, self.site, self.access.name.text, found).try();
+        kept ::= be.alloc.Vec<Member>();
+        found.loop((h, member) { self.keep(be, member, kept).try() });
+        by_arity(be, kept, self.call.args.len).match({
+            None       => Ok(false),
+            Ok(member) => self.lower_member(be, member, out),
+        })
+    }
 
-keep_assoc = (
-    be    :: CBackend,
-    found : Vec<Member>,
-    ty    : TyId,
-    s     : Site,
-    out   :: Vec<Member>
-) Res<(), AllocError> {
-    found.loop((h, m) { be.keep_if_assoc(m, ty, s, out).try() });
-    Ok(());
-}
+    keep = (self: @Self, be :: CBackend, member: Member,
+            out :: Vec<Member>) Res<(), AllocError> {
+        member.kind.match({
+            Function(f) => self.keep_function(be, member, f, out),
+            _           => Ok(()),
+        })
+    }
 
-keep_if_assoc = (
-    be  :: CBackend,
-    m   : Member,
-    ty  : TyId,
-    s   : Site,
-    out :: Vec<Member>
-) Res<(), AllocError> {
-    m.kind.match({
-        Function(f) => be.keep_receiverless(m, f, ty, s, out),
-        _           => Ok(()),
-    })
-}
+    keep_function = (self: @Self, be :: CBackend, member: Member,
+                     f: Function, out :: Vec<Member>) Res<(), AllocError> {
+        self.takes_receiver(be, f).try().match({
+            true  => Ok(()),
+            false => out.add(member),
+        })
+    }
 
-keep_receiverless = (
-    be  :: CBackend,
-    m   : Member,
-    f   : Function,
-    ty  : TyId,
-    s   : Site,
-    out :: Vec<Member>
-) Res<(), AllocError> {
-    takes_receiver(be, f, ty, s).try().match({
-        true  => Ok(()),
-        false => out.add(m),
-    })
-}
+    // Resolve the first parameter with `@Self` bound to this receiver.
+    takes_receiver = (self: @Self, be :: CBackend, f: Function)
+                     Res<bool, AllocError> {
+        f.params.get(0).match({
+            None      => Ok(false),
+            Ok(param) => self.first_is_receiver(be, param),
+        })
+    }
 
-// The first parameter, resolved with `@Self` bound to the receiver, so
-// `(self: @Self)` and `(self: Duration)` are one answer.
-takes_receiver = (be :: CBackend, f: Function, ty: TyId, s: Site)
-                 Res<bool, AllocError> {
-    f.params.get(0).match({
-        None  => Ok(false),
-        Ok(p) => be.first_is_self(p, ty, s),
-    })
-}
+    first_is_receiver = (self: @Self, be :: CBackend, param: Param)
+                        Res<bool, AllocError> {
+        sctx     = be.check.self_ctx(
+            self.site.decl.module.to_usize(),
+            self.site.ty
+        ).try();
+        mark     = be.enter_struct_tparams(self.site.decl).try();
+        declared = be.check.param_type(param, sctx);
+        be.leave_tparams(mark).try();
+        Ok(declared.try().eq(self.site.ty))
+    }
 
-first_is_self = (be :: CBackend, p: Param, ty: TyId, s: Site)
-                Res<bool, AllocError> {
-    sctx     = be.check.self_ctx(s.decl.module.to_usize(), ty).try();
-    mark     = be.enter_struct_tparams(s.decl).try();
-    declared = be.check.param_type(p, sctx).try();
-    be.leave_tparams(mark).try();
-    Ok(declared.eq(ty));
-}
+    lower_member = (self: @Self, be :: CBackend, member: Member,
+                    out :: String) Res<bool, AllocError> {
+        member.kind.match({
+            Function(f) => self.write(be, f, out),
+            _           => Ok(false),
+        })
+    }
 
-// The symbol is the TYPE's qualified name plus the member's, over the
-// declared signature — `gen_c_member.zen`'s rule, and the reason two
-// types' `zero` are two symbols without a counter.
-write_assoc_call = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    ty  : TyId,
-    s   : Site,
-    f   : Function,
-    ctx : Ctx,
-    out :: String
-)
-                   Res<bool, AllocError> {
-    inst = be.recv_inst(ty).try();
-    sig ::= be.alloc.Vec<TyId>();
-    be.method_sig(ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
-    (be.inst_open(inst) || be.any_open(sig)).match({
-        true  => be.refuse_open(id, out),
-        false => be.emit_assoc_call(c, a, ty, s, f, sig, inst, ctx, out),
-    })
-}
+    write = (self: @Self, be :: CBackend, f: Function, out :: String)
+            Res<bool, AllocError> {
+        inst = be.recv_inst(self.site.ty).try();
+        sig ::= be.alloc.Vec<TyId>();
+        be.method_sig(
+            self.site.ty,
+            self.site.decl,
+            f,
+            self.site.decl.module.to_usize(),
+            inst,
+            sig
+        ).try();
+        (be.inst_open(inst) || be.any_open(sig)).match({
+            true  => self.refuse_open(be, out),
+            false => self.emit(be, f, sig, inst, out),
+        })
+    }
 
-// With no receiver the type's arguments have nowhere to come from, so
-// saying so is the point: monomorphising at unknown would compile, and
-// would be a different function.
-refuse_open = (be :: CBackend, id: ExprId, out :: String)
-              Res<bool, AllocError> {
-    be.unsupported(
-        id,
-        "an associated function whose type arguments nothing settles",
-        out
-    ).try();
-    Ok(true);
-}
+    // A receiverless call cannot infer type arguments from a receiver.
+    refuse_open = (self: @Self, be :: CBackend, out :: String)
+                  Res<bool, AllocError> {
+        be.unsupported(
+            self.id,
+            "an associated function whose type arguments nothing settles",
+            out
+        ).try();
+        Ok(true)
+    }
 
-emit_assoc_call = (
-    be   :: CBackend,
-    c    : Call,
-    a    : Access,
-    ty   : TyId,
-    s    : Site,
-    f    : Function,
-    sig  : Vec<TyId>,
-    inst : Inst,
-    ctx  : Ctx,
-    out  :: String
-) Res<bool, AllocError> {
-    sym = be.member_symbol(ty, s, a.name.text, sig, inst).try();
-    out.fmt("{}(", sym.view()).try();
-    c.args.loop((h, i, arg) {
-        be.write_assoc_arg(arg, i, be.holds(c, i, 0), f, sig, ctx, out).try();
-    });
-    out.add(")").try();
-    Ok(true);
-}
-
-// Named helper used by the argument loop.
-write_assoc_arg = (
-    be   :: CBackend,
-    arg  : Arg,
-    i    : usize,
-    hold : bool,
-    f    : Function,
-    sig  : Vec<TyId>,
-    ctx  : Ctx,
-    out  :: String
-)
-                   Res<(), AllocError> {
-    (i > 0).match({
-        true  => out.add(", "),
-        false => Ok(()),
-    }).try();
-    be.write_arg_at(arg.value, i, hold, f, sig, ctx, out)
+    emit = (self: @Self, be :: CBackend, f: Function, sig: Vec<TyId>,
+            inst: Inst, out :: String) Res<bool, AllocError> {
+        sym = be.member_symbol(
+            self.site.ty,
+            self.site,
+            self.access.name.text,
+            sig,
+            inst
+        ).try();
+        out.fmt("{}(", sym.view()).try();
+        self.call.args.loop((h, i, arg) {
+            (i > 0).then(() { out.add(", ").try() });
+            be.write_arg_at(
+                arg.value,
+                i,
+                be.holds(self.call, i, 0),
+                f,
+                sig,
+                self.ctx,
+                out
+            ).try();
+        });
+        out.add(")").try();
+        Ok(true)
+    }
 }
